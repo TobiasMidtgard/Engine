@@ -73,6 +73,54 @@ pub(crate) fn register(app: &mut App) {
         },
     )
     .register_api(
+        "script.test",
+        "Run the script tests (*.test.luau: describe / it / expect) in the live game, one at a \
+         time as tasks. \"files\" (default: every test file), \"file\" with \"line\" (the test \
+         or describe on that line), \"filter\" (titles containing it); \"stop\": true stops a \
+         run. Poll script.tests for the results.",
+        r#"{"files": ["examples/lamp.test.luau"], "filter": "goes out"}"#,
+        |world, args| {
+            let stop = args["stop"].as_bool() == Some(true);
+            let mut files: Vec<String> = match &args["files"] {
+                Value::Array(list) => list
+                    .iter()
+                    .filter_map(|v| v.as_str())
+                    .map(safe_path)
+                    .collect::<Result<_, _>>()?,
+                Value::String(one) => vec![safe_path(one)?],
+                _ => Vec::new(),
+            };
+            let file = match args["file"].as_str() {
+                Some(f) => Some(safe_path(f)?),
+                None => None,
+            };
+            if let Some(f) = &file
+                && files.is_empty()
+            {
+                files.push(f.clone());
+            }
+            let line = args["line"].as_u64().map(|l| l as u32);
+            let filter = args["filter"]
+                .as_str()
+                .filter(|f| !f.trim().is_empty())
+                .map(str::to_string);
+            with_runtime(world, |world, rt, settings| {
+                if stop {
+                    rt.stop_tests();
+                    return Ok(rt.tests());
+                }
+                rt.start_tests(world, files, (file, line, filter), settings)
+            })?
+        },
+    )
+    .register_api(
+        "script.tests",
+        "The current or last script test run: state (idle, running, done), passed, failed, \
+         skipped, and each test's file, title, line, status, message and the line it failed on.",
+        "{}",
+        |world, _| with_runtime(world, |_, rt, _| rt.tests()),
+    )
+    .register_api(
         "script.reload",
         "Reload a script file now (\"path\"), or every loaded file when no path is given.",
         r#"{"path": "showcase/courtyard.luau"}"#,

@@ -834,6 +834,192 @@ fn graphs_bind_emit_and_take_wired_signals() {
     );
 }
 
+/// Steps `app` until the script test run is over (at most `frames`); returns `script.tests`.
+fn finish_tests(app: &mut App, frames: usize) -> Value {
+    for _ in 0..frames {
+        let state = call_api(&mut app.world, "script.tests", json!({})).unwrap();
+        if state["state"] != "running" {
+            return state;
+        }
+        app.update();
+    }
+    panic!(
+        "the tests are still running: {}",
+        call_api(&mut app.world, "script.tests", json!({})).unwrap()
+    );
+}
+
+const DOOR: &str = r#"
+local Door = {}
+Door.signals = { opened = "by: Entity" }
+function Door:start() self.open = false end
+function Door:on_interact(by)
+	self.open = not self.open
+	if self.open then self:emit("opened", by) end
+end
+return Door
+"#;
+
+#[test]
+fn script_tests_run_in_the_game_and_report_each_test() {
+    let folder = Folder::new();
+    folder.write("door.luau", DOOR);
+    folder.write(
+        "door.test.luau",
+        r#"local SPEC = { name = "Test door", components = { Transform = {}, Script = { path = "door.luau" } } }
+local order = {}
+describe("Door", function()
+	before_each(function(t) table.insert(order, "before " .. t.name) end)
+	it("opens when pressed", function(t)
+		local door = t:spawn(SPEC)
+		expect(door.script.open).to_be(false)
+		t:press(door)
+		expect(door.script.open).to_be(true)
+	end)
+	it("tells listeners who opened it", function(t)
+		local door = t:spawn(SPEC)
+		local heard = t:listen(door, "opened")
+		t:press(door, t:find("Player"))
+		t:frames(2)
+		expect(heard.count).to_be(1)
+		expect(heard.last[1]).to_be(t:find("Player"))
+	end)
+	it("waits world time", function(t)
+		local before = world.time()
+		t:wait(1)
+		expect(world.time() - before).to_be_near(1, 0.05)
+		expect({ 1, { a = vec3(1, 2, 3) } }).to_equal({ 1, { a = vec3(1, 2, 3) } })
+		expect("lamp").never.to_contain("x")
+		expect(function() error("boom") end).to_throw("boom")
+	end)
+	it("fails on the line of the expect", function(t)
+		local n = 1 + 1
+		expect(n).to_be(3)
+	end)
+	it("reports an error", function(t)
+		local nothing: any = nil
+		nothing.field = 1
+	end)
+	it("stops at its time limit", function(t)
+		t:wait(5)
+	end, 0.5)
+	it.skip("is skipped", function(t) end)
+	describe("after a test", function()
+		it("left nothing behind", function(t)
+			expect(world.find("Test door")).to_be_nil()
+			expect(#order).to_be(7)
+		end)
+	end)
+end)
+"#,
+    );
+    folder.write(
+        "broken.test.luau",
+        "describe('x', function()\n\tit('y', function(t)\nend)\n",
+    );
+    let mut app = app_in(&folder.0);
+    app.add_message::<engine_world::Interact>();
+    app.world.spawn(Name::new("Player"));
+    let started = call_api(&mut app.world, "script.test", json!({})).unwrap();
+    assert_eq!(started["files"], json!(2), "{started}");
+    assert_eq!(
+        started["broken"][0]["file"], "broken.test.luau",
+        "{started}"
+    );
+    let done = finish_tests(&mut app, 30 * 10);
+    let results = done["results"].as_array().unwrap();
+    let status = |title: &str| {
+        results
+            .iter()
+            .find(|r| r["title"] == title)
+            .unwrap_or_else(|| panic!("no {title} in {done}"))
+    };
+    for passing in [
+        "Door › opens when pressed",
+        "Door › tells listeners who opened it",
+        "Door › waits world time",
+        "Door › after a test › left nothing behind",
+    ] {
+        assert_eq!(status(passing)["status"], "passed", "{}", status(passing));
+    }
+    let failed = status("Door › fails on the line of the expect");
+    assert_eq!(failed["status"], "failed");
+    assert_eq!(failed["message"], "expected 3, got 2");
+    assert_eq!(failed["failed_at"], json!(29), "{failed}");
+    assert_eq!(failed["line"], json!(27), "{failed}");
+    let error = status("Door › reports an error");
+    assert_eq!(error["status"], "failed");
+    assert!(
+        error["message"]
+            .as_str()
+            .unwrap()
+            .contains("attempt to index nil"),
+        "{error}"
+    );
+    assert_eq!(error["failed_at"], json!(33), "{error}");
+    let slow = status("Door › stops at its time limit");
+    assert_eq!(slow["status"], "failed");
+    assert!(
+        slow["message"]
+            .as_str()
+            .unwrap()
+            .starts_with("didn't finish within 0.5 s"),
+        "{slow}"
+    );
+    assert_eq!(status("Door › is skipped")["status"], "skipped");
+    assert_eq!(done["passed"], json!(4), "{done}");
+    // Three tests and the broken file.
+    assert_eq!(done["failed"], json!(4), "{done}");
+    assert_eq!(done["skipped"], json!(1), "{done}");
+
+    // One test, by the line of its `it`; `only` picks too.
+    call_api(
+        &mut app.world,
+        "script.test",
+        json!({"file": "door.test.luau", "line": 5}),
+    )
+    .unwrap();
+    let one = finish_tests(&mut app, 30 * 5);
+    assert_eq!(one["results"].as_array().unwrap().len(), 1, "{one}");
+    assert_eq!(one["passed"], json!(1), "{one}");
+    folder.write(
+        "focus.test.luau",
+        "it('a', function(t) end)\nit.only('b', function(t) end)\n",
+    );
+    call_api(
+        &mut app.world,
+        "script.test",
+        json!({"files": ["focus.test.luau"]}),
+    )
+    .unwrap();
+    let focus = finish_tests(&mut app, 30);
+    assert_eq!(focus["passed"], json!(1), "{focus}");
+    assert_eq!(focus["skipped"], json!(1), "{focus}");
+}
+
+/// The test files that ship with the engine pass, in a world with lights and materials.
+#[test]
+fn the_shipped_script_tests_pass() {
+    use engine_assets::Assets;
+    use engine_render::{MeshRenderer, PointLight, StandardMaterial};
+
+    let shipped = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/scripts");
+    let files = crate::testing::test_files(&shipped);
+    assert!(files.len() >= 2, "{files:?}");
+    let mut app = app_in(&shipped);
+    app.world.resource_mut::<ScriptSettings>().hot_reload = false;
+    app.insert_resource(Assets::<StandardMaterial>::default());
+    app.register_component::<MeshRenderer>("A mesh.")
+        .register_component::<PointLight>("A light.")
+        .add_message::<engine_world::Interact>();
+    app.world.spawn(Name::new("Player"));
+    call_api(&mut app.world, "script.test", json!({})).unwrap();
+    let done = finish_tests(&mut app, 30 * 60);
+    assert_eq!(done["failed"], json!(0), "{done:#}");
+    assert!(done["passed"].as_u64().unwrap() >= 8, "{done:#}");
+    assert!(errors(&mut app).is_empty(), "{:?}", errors(&mut app));
+}
+
 #[test]
 fn errors_name_the_file_and_line_and_dont_repeat() {
     let folder = Folder::new();

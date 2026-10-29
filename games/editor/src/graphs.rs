@@ -177,6 +177,8 @@ pub struct GraphDoc {
     /// What Luau's type checker found in the Luau it compiles to, on the nodes the lines came
     /// from (`scripts::graph_types`).
     types: Vec<Problem>,
+    /// Sidebar sections folded to their title ("Props", "Signals", ...).
+    pub folded: BTreeSet<&'static str>,
 }
 
 impl GraphDoc {
@@ -343,6 +345,7 @@ pub fn open(world: &World, tab: &mut GraphsTab, path: &str) {
         breakpoints: BTreeSet::new(),
         applied: None,
         types: Vec::new(),
+        folded: BTreeSet::new(),
     });
     tab.current = tab.docs.len() - 1;
 }
@@ -749,17 +752,46 @@ fn focus_node(doc: &mut GraphDoc, id: u32) {
     }
 }
 
+/// A sidebar section's title: click it to fold the section to this line (with its count).
+fn section_title(
+    ui: &mut egui::Ui,
+    folded: &mut BTreeSet<&'static str>,
+    title: &'static str,
+    count: usize,
+) -> egui::Response {
+    let shut = folded.contains(title);
+    let text = if shut {
+        format!("⏵ {title}  ({count})")
+    } else {
+        format!("⏷ {title}")
+    };
+    let r = ui.add(egui::Label::new(RichText::new(text).strong()).sense(Sense::click()));
+    if r.clicked() {
+        if shut {
+            folded.remove(title);
+        } else {
+            folded.insert(title);
+        }
+    }
+    r
+}
+
 /// The graph's variables and props: add, rename, retype, set their starting values, and put
 /// a Get or Set node on the canvas.
 fn variables(ui: &mut egui::Ui, doc: &mut GraphDoc, center: Pos2) {
     for props in [false, true] {
+        let title = if props { "Props" } else { "Variables" };
+        let count = if props {
+            doc.graph.props.len()
+        } else {
+            doc.graph.vars.len()
+        };
         ui.horizontal(|ui| {
-            ui.label(RichText::new(if props { "Props" } else { "Variables" }).strong())
-                .on_hover_text(if props {
-                    "Settings per entity: a Script component's props override them"
-                } else {
-                    "This script's own state (self.name), set when it starts"
-                });
+            section_title(ui, &mut doc.folded, title, count).on_hover_text(if props {
+                "Settings per entity: a Script component's props override them"
+            } else {
+                "This script's own state (self.name), set when it starts"
+            });
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.small_button("+").clicked() {
                     let map = if props {
@@ -776,6 +808,9 @@ fn variables(ui: &mut egui::Ui, doc: &mut GraphDoc, center: Pos2) {
                 }
             });
         });
+        if doc.folded.contains(title) {
+            continue;
+        }
         let names: Vec<String> = if props {
             doc.graph.props.keys().cloned().collect()
         } else {
@@ -945,7 +980,12 @@ fn signals_and_events(ui: &mut egui::Ui, doc: &mut GraphDoc, center: Pos2) {
                      runs it.",
                 )
             };
-            ui.label(RichText::new(title).strong()).on_hover_text(tip);
+            let count = if signals {
+                doc.graph.signals.len()
+            } else {
+                doc.graph.events.len()
+            };
+            section_title(ui, &mut doc.folded, title, count).on_hover_text(tip);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.small_button("+").clicked() {
                     let map = if signals {
@@ -964,6 +1004,12 @@ fn signals_and_events(ui: &mut egui::Ui, doc: &mut GraphDoc, center: Pos2) {
                 }
             });
         });
+        if doc
+            .folded
+            .contains(if signals { "Signals" } else { "Events" })
+        {
+            continue;
+        }
         let names: Vec<String> = if signals {
             doc.graph.signals.keys().cloned().collect()
         } else {
@@ -3390,6 +3436,8 @@ pub fn signals_shots(dir: String) -> ShotScript {
                 .take(1)
                 .collect();
             zoom_to(doc, kinds, zoom);
+            // Signals and Events in view in the sidebar.
+            doc.folded.extend(["Variables", "Props"]);
             save(world, &mut tab, 0.0);
             tab.toast = None;
         });
@@ -3541,8 +3589,15 @@ pub fn signals_shots(dir: String) -> ShotScript {
             json!([3]),
         ))),
         Step::Select("Stone"),
+        // Details the height of the window, so the stone's Signals section is in view.
+        Step::Do(Box::new(|world: &mut World, _: &mut Editor| {
+            world.resource_mut::<EditorDock>().0 = details_layout();
+        })),
         Step::Wait(40),
         Step::Shot("gsig_03_details_wires_rose"),
+        Step::Do(Box::new(|world: &mut World, _: &mut Editor| {
+            world.resource_mut::<EditorDock>().0 = shot_layout();
+        })),
         // `flash` retyped to take text: the Call node still gives it a number, and the type
         // checker marks it on the node.
         Step::Do(Box::new(move |world: &mut World, _: &mut Editor| {
@@ -3596,6 +3651,8 @@ fn zoom_to(doc: &mut GraphDoc, kinds: &[&str], zoom: f32) {
     }
     if r.is_positive() {
         doc.zoom_on = Some((r.center(), zoom));
+        // Or a graph not shown yet frames all of itself first.
+        doc.frame_all = false;
     }
 }
 
@@ -3606,6 +3663,15 @@ fn shot_layout() -> DockState<Tab> {
     let surface = dock.main_surface_mut();
     let [_graphs, below] = surface.split_below(NodeIndex::root(), 0.6, vec![Tab::Viewport]);
     let [_view, _details] = surface.split_right(below, 0.62, vec![Tab::Inspector]);
+    dock
+}
+
+/// The Graphs tab and the scene view on the left, Details the window's height on the right.
+fn details_layout() -> DockState<Tab> {
+    let mut dock = DockState::new(vec![Tab::Graphs]);
+    let surface = dock.main_surface_mut();
+    let [left, _details] = surface.split_right(NodeIndex::root(), 0.64, vec![Tab::Inspector]);
+    let [_graphs, _view] = surface.split_below(left, 0.62, vec![Tab::Viewport]);
     dock
 }
 
@@ -3656,6 +3722,7 @@ mod tests {
             breakpoints: BTreeSet::new(),
             applied: None,
             types: Vec::new(),
+            folded: BTreeSet::new(),
         }
     }
 

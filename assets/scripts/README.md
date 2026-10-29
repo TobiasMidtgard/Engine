@@ -182,6 +182,44 @@ The file is JSON text with one node or wire per line, so changes diff and merge 
 code. Every engine function is a node (`fire.ignite`, `weather.set`, ...), and every
 component has Get and Set nodes.
 
+## Tests (`*.test.luau`)
+
+A test file says what your scripts should do, and the engine checks it in the running game. It
+reads like Jest (or Roblox's Jest Lua and TestEZ): `describe` groups tests, `it` is one test,
+`expect` checks a value.
+
+```lua
+describe("Lamp", function()
+	it("goes out when pressed", function(t)
+		local lamp = t:spawn({ name = "Test lamp", components = {
+			Transform = {}, PointLight = {}, MeshRenderer = {},
+			Script = { path = "examples/lamp.luau" } } })
+		t:press(lamp)                         -- E, as the player
+		expect(lamp.script.lit).to_be(false)  -- its script's own state
+	end)
+end)
+```
+
+- Each test runs as a task in the game, one after another, so it can wait like gameplay does:
+  `t:wait(seconds)`, `t:frames(n)`, `t:wait_until(check)`, `t:wait_for(entity, "signal")`.
+- `t:spawn(spec)` makes an entity for this test only (with a Script component it waits until
+  the script runs); it is gone after the test. `t:find(name)` finds one in the scene,
+  `t:press(entity)` presses E on it, `t:listen(entity, "signal")` counts its signals.
+- Checks: `to_be`, `to_equal` (tables all the way down), `to_be_near(x, within)` (numbers and
+  vectors), `to_be_greater_than`, `to_be_less_than`, `to_be_at_least`, `to_be_at_most`,
+  `to_be_truthy`, `to_be_falsy`, `to_be_nil`, `to_be_a("number")`, `to_contain`,
+  `to_have_length`, `to_throw`; `expect(x).never.to_be_nil()` turns any of them around.
+- `before_each` and `after_each` run around each test of their group; `it.skip` and
+  `describe.skip` leave tests out, `it.only` runs only those. A test longer than 10 seconds of
+  game time fails (`it(name, function(t) ... end, 30)` gives it longer).
+- In the editor's Scripts tab, the **Tests** panel (beside Output and Problems) runs them all
+  or the open file, presses Play for the run and Stop after, and lists every test with its
+  time; a failed one says why and on which line (click it). In a test file, the mark left of
+  each `it` and `describe` runs just that one, then shows ✔ or ✖.
+- `script.test {}` runs them from the console or the AI bridge (`{"files": [...]}`, `{"file":
+  ..., "line": 12}`, `{"filter": "lamp"}`, `{"stop": true}`); `script.tests` returns the
+  results. The examples' tests also run in the engine's own test suite.
+
 ## VS Code setup (autocomplete and type checking)
 
 1. Install the **Luau Language Server** extension (`JohnnyMorganz.luau-lsp`) in VS Code.
@@ -258,6 +296,8 @@ have them.
 - `examples/float.luau`: a stone that floats and turns, with a curve from a module
   (`examples/lib/wave.luau`).
 - `examples/pulse.graph`, `examples/hover.graph`: the same lamp and stone as visual scripts.
+- `examples/lamp.test.luau`, `examples/beacon.test.luau`, `examples/float.test.luau`: tests of
+  the examples (and of the `wave` module), run in the game.
 - `showcase/crystal.graph`: the courtyard's graph crystal (spins, changes color every 1.5 s,
   flares when used or when its `flare` event runs, then fires `flared`), drawn live on the
   board beside it; the lever's `pulled` signal is wired to its `flare`.

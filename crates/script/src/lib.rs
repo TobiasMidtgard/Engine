@@ -182,6 +182,13 @@
 //! Errors are marked where they happen: a code board shows the line an error came from in red,
 //! with the message and how often it repeated, until the file is fixed.
 //!
+//! ## Tests
+//!
+//! `*.test.luau` files are gameplay tests in Jest's shape (`describe`, `it`, `expect`), run one
+//! by one as tasks in the live game: a test spawns what it needs, waits, presses E, listens to
+//! signals and checks what the scripts did ([`testing`]). `script.test` starts a run and
+//! `script.tests` reports it, with the line each failure stopped on.
+//!
 //! ## Rust hot patching
 //!
 //! With the `hotpatch` cargo feature, [`hotpatch::HotPatchPlugin`] (added by [`ScriptPlugin`])
@@ -204,7 +211,8 @@
 //! (start the debugger), `script.break {path, lines}` (breakpoints and stepping without a
 //! client), `script.logpoint {path, line, message}`, `script.profile {seconds}`,
 //! `script.marks {path}` (a file's errors, logpoint values and heat by line) and
-//! `script.check {source}` (compile without running). An editor holds scripts still with
+//! `script.check {source}` (compile without running), `script.test {files, file, line,
+//! filter}` (run the script tests) and `script.tests` (their results). An editor holds scripts still with
 //! [`ScriptsHeld`] while a scene is edited ([`editing`]).
 //!
 //! ## Showcase
@@ -241,6 +249,7 @@ mod math;
 mod profiler;
 pub mod props;
 mod runtime;
+pub mod testing;
 mod types;
 
 use std::path::PathBuf;

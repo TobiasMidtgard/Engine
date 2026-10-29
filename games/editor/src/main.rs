@@ -160,6 +160,7 @@ fn main() {
             Some("props") => scripts::props_shots(dir),
             Some("types") => scripts::types_shots(dir),
             Some("signals") => scripts::signals_shots(dir),
+            Some("tests") => scripts::tests_shots(dir),
             Some("graphs") => graphs::shots(dir),
             Some("graph_signals") => graphs::signals_shots(dir),
             _ => shots::gallery(dir),

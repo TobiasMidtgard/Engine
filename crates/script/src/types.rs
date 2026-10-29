@@ -107,7 +107,11 @@ end
 --- A listener of a signal: c.disconnect() stops it.
 export type Connection = { disconnect: () -> (), connected: () -> boolean }
 
-type EntitySpec = { name: string?, components: { [string]: any }?, children: { any }? }
+-- What to spawn: { name = "Crate", components = { Transform = {}, ... }, children = { ... } },
+-- and for world.spawn `parent` (an entity). Any table: component names and fields are checked
+-- when it spawns, and Luau's checker would refuse a spec built ahead (in a local, or returned
+-- by a helper) against a table type.
+type EntitySpec = any
 
 declare extern type WorldShift with
 	translation: Vec3
@@ -140,7 +144,7 @@ declare world: {
 	find_all: (name_contains: string) -> { Entity },
 	entity: (id: number) -> Entity,
 	--- Spawns an entity: { name = "Crate", components = { ... }, parent = e }.
-	spawn: (spec: EntitySpec & { parent: Entity? }) -> Entity,
+	spawn: (spec: EntitySpec) -> Entity,
 	--- World seconds since the game started (slow motion aware).
 	time: () -> number,
 }
@@ -176,6 +180,79 @@ declare ease: {
 declare function api(name: string, args: any?): any
 --- Prints to the script log as a warning (yellow in the Output).
 declare function warn(...: any): ()
+
+-- Script tests: these exist in *.test.luau files (script.test runs them in the live game).
+
+--- A group of tests (and of before_each / after_each hooks); groups nest.
+declare describe: ((name: string, body: () -> ()) -> ()) & {
+	--- Skips every test in the group.
+	skip: (name: string, body: () -> ()) -> (),
+	--- Runs only this group (and other only's) in its run.
+	only: (name: string, body: () -> ()) -> (),
+}
+--- A test: runs as a task in the live game, so it can wait; fails at the first expect that
+--- doesn't hold. Timeout in world seconds (10 when nil).
+declare it: ((name: string, body: (t: Test) -> (), timeout: number?) -> ()) & {
+	skip: (name: string, body: (t: Test) -> (), timeout: number?) -> (),
+	only: (name: string, body: (t: Test) -> (), timeout: number?) -> (),
+}
+--- Runs before each test of this group (and the groups in it), in the test's task.
+declare function before_each(f: (t: Test) -> ()): ()
+--- Runs after each test of this group, even one that failed.
+declare function after_each(f: (t: Test) -> ()): ()
+--- Checks a value: expect(lamp.script.lit).to_be(false).
+declare function expect(value: any): Expect
+
+export type Expect = {
+	--- The same value (==).
+	to_be: (expected: any) -> (),
+	--- Equal all the way down (tables key by key).
+	to_equal: (expected: any) -> (),
+	--- A number or Vec3 within `within` (0.001 when nil).
+	to_be_near: (expected: any, within: number?) -> (),
+	to_be_greater_than: (limit: number) -> (),
+	to_be_less_than: (limit: number) -> (),
+	to_be_at_least: (limit: number) -> (),
+	to_be_at_most: (limit: number) -> (),
+	to_be_truthy: () -> (),
+	to_be_falsy: () -> (),
+	to_be_nil: () -> (),
+	--- typeof(value) is this ("number", "table", "Vec3", ...).
+	to_be_a: (kind: string) -> (),
+	--- A string with this text in it, or a table with this value in it.
+	to_contain: (item: any) -> (),
+	to_have_length: (n: number) -> (),
+	--- The value is a function that fails (with this text in its error) when called.
+	to_throw: (text: string?) -> (),
+	--- Each check turned around: expect(x).never.to_be_nil().
+	never: Expect,
+}
+
+--- A test's helpers. What it spawns goes away after it, and its listeners stop.
+export type Test = {
+	--- "Group › test".
+	name: string,
+	--- Spawns an entity for this test; with a Script component, waits until its script runs.
+	spawn: (self: Test, spec: EntitySpec) -> Entity,
+	--- The entity with this name; fails the test when there is none.
+	find: (self: Test, name: string) -> Entity,
+	--- Waits world seconds (a frame when nil); returns the time waited.
+	wait: (self: Test, seconds: number?) -> number,
+	--- Waits this many frames (1 when nil).
+	frames: (self: Test, n: number?) -> (),
+	--- Waits until check() is true; fails after timeout seconds (5 when nil).
+	wait_until: (self: Test, check: () -> boolean, timeout: number?) -> (),
+	--- Waits until the entity's script emits the signal and returns its values; fails after
+	--- timeout seconds (5 when nil).
+	wait_for: (self: Test, entity: Entity, signal: string, timeout: number?) -> ...any,
+	--- Presses E on the entity (as the player, or `by`); its on_interact has run when this
+	--- returns.
+	press: (self: Test, entity: Entity, by: Entity?) -> (),
+	--- Counts the signal's emits from now: count, each call's values, the last ones.
+	listen: (self: Test, entity: Entity, signal: string) -> Heard,
+}
+
+export type Heard = { count: number, calls: { { any } }, last: { any }? }
 
 -- What the engine gives every script's `self`, besides the class's own (the editor's checker
 -- types `self` as this, the class and the fields its methods set).

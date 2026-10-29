@@ -31,6 +31,11 @@
 //! one being typed lit; F12 or Ctrl+click goes to where a name is declared. The Problems list
 //! under the code has every script's type errors and warnings.
 //!
+//! Tests, as Unity's Test Runner: the Tests panel beside the Output runs the script tests
+//! (`*.test.luau`) in the game, pressing Play for the run and Stop after, and lists each test
+//! with its result; in a test file the gutter mark beside each test runs it and then shows how
+//! it did, and a failed test's message sits on the line it stopped at.
+//!
 //! Scripts run only while playing ([`ScriptsHeld`] in edit mode) and Stop drops their VMs, so
 //! every Play starts them afresh, as it does the scene.
 
@@ -177,6 +182,8 @@ pub struct ScriptsTab {
     pub props: PropsPanel,
     /// Luau's type checker and what it found.
     pub types: Types,
+    /// The script tests' runs.
+    pub tests: TestsPanel,
     /// Screenshot runs: put the pointer over this (0-based line, char column) of the code.
     pub point_at: Option<(u32, u32)>,
     /// Where the pointer was last put for `point_at` (moved once: egui waits for a still
@@ -341,6 +348,7 @@ pub fn panel(ui: &mut egui::Ui, world: &mut World, editor: &mut Editor) {
         tab.vocab = Some(Vocab::new(world));
     }
     poll(world, editor, &mut tab, now);
+    tests_poll(world, editor, &mut tab, now);
     types_poll(world, &mut tab, now);
     if let Some((path, line, col)) = tab.types.goto.take() {
         open(world, &mut tab, &path, Some(line + 1));
@@ -765,7 +773,8 @@ fn sidebar(
                 let row_ui = |ui: &mut egui::Ui| {
                     for f in rows {
                         let errors = tab.types.reports.get(&f.path).map_or(0, |r| r.errors());
-                        if file_row(ui, f, current == Some(f.path.as_str()), errors) {
+                        let tests = tab.tests.counts(&f.path);
+                        if file_row(ui, f, current == Some(f.path.as_str()), errors, tests) {
                             open_path = Some(f.path.clone());
                         }
                     }
@@ -846,7 +855,13 @@ fn class_name(path: &str) -> String {
 
 /// One file in the list: a dot for its state, its name, how many scripts run it. True when
 /// clicked.
-fn file_row(ui: &mut egui::Ui, f: &FileRow, current: bool, type_errors: usize) -> bool {
+fn file_row(
+    ui: &mut egui::Ui,
+    f: &FileRow,
+    current: bool,
+    type_errors: usize,
+    tests: Option<(usize, usize)>,
+) -> bool {
     let m = &f.marks;
     let failed = m.error.is_some() || m.fault.is_some();
     let (dot, state) = if failed {
@@ -876,6 +891,19 @@ fn file_row(ui: &mut egui::Ui, f: &FileRow, current: bool, type_errors: usize) -
             &format!("  ✖{type_errors}"),
             0.0,
             TextFormat::simple(FontId::proportional(11.0), ERROR),
+        );
+    }
+    // A test file's last run.
+    if let Some((passed, failed)) = tests {
+        let (label, color) = if failed > 0 {
+            (format!("  ✖ {failed} failing"), ERROR)
+        } else {
+            (format!("  ✔ {passed}"), theme::PLAY)
+        };
+        text.append(
+            &label,
+            0.0,
+            TextFormat::simple(FontId::proportional(11.0), color),
         );
     }
     let r = ui
@@ -915,6 +943,31 @@ fn functions(text: &str) -> Vec<Function> {
     let mut out = Vec::new();
     for (i, line) in text.lines().enumerate() {
         let t = line.trim_start();
+        // A test file's groups and tests, indented as they nest.
+        let test = [
+            "describe(",
+            "describe.skip(",
+            "describe.only(",
+            "it(",
+            "it.skip(",
+            "it.only(",
+        ]
+        .into_iter()
+        .find(|p| t.starts_with(p));
+        if let Some(p) = test {
+            let rest = &t[p.len()..];
+            let Some(quote) = rest.chars().next().filter(|c| *c == '"' || *c == '\'') else {
+                continue;
+            };
+            let name = rest[1..].split(quote).next().unwrap_or("");
+            let depth = line.len() - t.len();
+            out.push(Function {
+                line: i,
+                label: format!("{}{} {name}", "  ".repeat(depth), &p[..p.len() - 1]),
+                hook: false,
+            });
+            continue;
+        }
         let (rest, local) = if let Some(r) = t.strip_prefix("local function ") {
             (r, true)
         } else if let Some(r) = t.strip_prefix("function ") {
@@ -1292,6 +1345,21 @@ fn code_view(ui: &mut egui::Ui, world: &mut World, tab: &mut ScriptsTab, now: f6
     } else {
         HashSet::new()
     };
+    // A test file's describe and it lines, with how they did in the last run.
+    let test_marks: Vec<(TestLine, Option<String>)> =
+        if engine_script::testing::is_test_file(&doc.path) {
+            test_lines(&doc.text)
+                .into_iter()
+                .map(|t| {
+                    let status = line_status(&tab.tests, &doc.path, &t);
+                    (t, status)
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+    let test_notes = test_notes(&tab.tests, &doc.path);
+    let mut run_test = None;
     let mut layouter = |ui: &egui::Ui, buf: &dyn egui::TextBuffer, _wrap: f32| {
         let job = highlight(buf.as_str(), &font, &vocab, find.as_deref());
         ui.fonts_mut(|f| f.layout_job(job))
@@ -1364,9 +1432,25 @@ fn code_view(ui: &mut egui::Ui, world: &mut World, tab: &mut ScriptsTab, now: f6
                 row_h,
                 &mut tab.drawn_at,
             );
+            paint_test_marks(ui, &out.response.rect, &lines, &test_marks, row_h);
+            for (t, _) in &test_marks {
+                if let Some(r) = lines.get(t.line as usize - 1) {
+                    let key = format!("test {}", t.line);
+                    tab.drawn_at.insert(key, r.with_max_x(r.left()));
+                }
+            }
             let lints = lints(&doc.text, &vocab);
             let shown = shown_problems(doc, types, &lints);
-            paint_notes(ui, &lines, doc, &lints, &shown, &font, stop.as_ref());
+            paint_notes(
+                ui,
+                &lines,
+                doc,
+                &lints,
+                &shown,
+                &test_notes,
+                &font,
+                stop.as_ref(),
+            );
             paint_type_marks(ui, &out.galley, out.galley_pos, &doc.text, &shown);
             // Stopped: a name's value under the pointer, as Visual Studio's data tips.
             if let Some(st) = &stop
@@ -1448,7 +1532,29 @@ fn code_view(ui: &mut egui::Ui, world: &mut World, tab: &mut ScriptsTab, now: f6
                     ),
                 );
                 let click = ui.interact(gutter, id.with("gutter"), egui::Sense::click());
+                let line_at = |pos: Pos2| {
+                    lines
+                        .iter()
+                        .position(|r| r.top() <= pos.y && pos.y < r.bottom())
+                };
+                let test_at = |pos: Option<Pos2>| {
+                    let line = pos.and_then(line_at)? as u32 + 1;
+                    test_marks.iter().find(|(t, _)| t.line == line)
+                };
                 let click = match heard_tip(&heard, &tab.drawn_at, click.hover_pos()) {
+                    _ if test_at(click.hover_pos()).is_some() => {
+                        let (t, status) = test_at(click.hover_pos()).expect("just found");
+                        let what = if t.describe {
+                            "these tests"
+                        } else {
+                            "this test"
+                        };
+                        click.on_hover_text(match status.as_deref() {
+                            Some("passed") => format!("Passed. Click: run {what} again"),
+                            Some("failed") => format!("Failed. Click: run {what} again"),
+                            _ => format!("Click: run {what} in the game"),
+                        })
+                    }
                     Some(from) => click.on_hover_ui(|ui| {
                         ui.label(RichText::new("Called by signals").strong());
                         for f in from {
@@ -1460,14 +1566,11 @@ fn code_view(ui: &mut egui::Ui, world: &mut World, tab: &mut ScriptsTab, now: f6
                          values, live. Right-click: a breakpoint with a condition.",
                     ),
                 };
-                let line_at = |pos: Pos2| {
-                    lines
-                        .iter()
-                        .position(|r| r.top() <= pos.y && pos.y < r.bottom())
-                };
                 if let Some(line) = click.interact_pointer_pos().and_then(line_at) {
                     if click.clicked() {
-                        if ui.input(|i| i.modifiers.shift) {
+                        if let Some((t, _)) = test_at(click.interact_pointer_pos()) {
+                            run_test = Some(t.line);
+                        } else if ui.input(|i| i.modifiers.shift) {
                             toggle_logpoint(world, doc, line);
                         } else {
                             toggle_breakpoint(doc, dbg, line as u32 + 1);
@@ -1495,6 +1598,9 @@ fn code_view(ui: &mut egui::Ui, world: &mut World, tab: &mut ScriptsTab, now: f6
                 out.galley.clone(),
             ));
         });
+    if let Some(line) = run_test {
+        tab.tests.run(json!({"file": doc.path, "line": line}));
+    }
     let Some((changed, caret, galley_pos, galley)) = output else {
         tab.vocab = Some(vocab);
         return;
@@ -1969,12 +2075,19 @@ fn paint_notes(
     doc: &Doc,
     lints: &[Lint],
     types: &[&Problem],
+    tests: &[(u32, String, Color32)],
     font: &FontId,
     stop: Option<&FileStop>,
 ) {
     let painter = ui.painter();
     let small = FontId::monospace(font.size * 0.92);
     let mut notes: BTreeMap<usize, Vec<(String, Color32)>> = BTreeMap::new();
+    for (line, text, color) in tests {
+        notes
+            .entry((*line).max(1) as usize - 1)
+            .or_default()
+            .push((text.clone(), *color));
+    }
     if let Some((line, message)) = &doc.syntax {
         notes
             .entry((*line).max(1) as usize - 1)
@@ -3510,16 +3623,476 @@ fn problems_list(ui: &mut egui::Ui, world: &mut World, tab: &mut ScriptsTab) {
     }
 }
 
+// ----------------------------------------------------------------------------- tests
+
+/// The Tests panel, as Unity's Test Runner and VS Code's test explorer: runs of the script
+/// tests (`*.test.luau`, [`engine_script::testing`]) and what they found. A run needs the game
+/// running, so Run in edit mode presses Play first and Stop after, as Unity's play mode tests
+/// do.
+#[derive(Default)]
+pub struct TestsPanel {
+    /// The bottom panel shows the tests (not the output or the problems).
+    pub shown: bool,
+    /// A run to start (`script.test`'s arguments) once the scripts run.
+    pub pending: Option<Value>,
+    /// Play was pressed for this run: Stop when it is over.
+    started_play: bool,
+    /// Frames the pending run has waited for the game to start.
+    waited: u32,
+    /// A run is going: ask how it does every frame.
+    pub running: bool,
+    /// The last `script.tests` answer (kept after Stop drops the VM that ran it).
+    pub last: Value,
+}
+
+impl TestsPanel {
+    /// The last run's results for `file`.
+    fn results<'a>(&'a self, file: &'a str) -> impl Iterator<Item = &'a Value> + 'a {
+        self.last["results"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(move |r| r["file"] == file)
+    }
+
+    /// (passed, failed) in `file`'s last run, when it ran.
+    fn counts(&self, file: &str) -> Option<(usize, usize)> {
+        let mut any = false;
+        let (mut passed, mut failed) = (0, 0);
+        for r in self.results(file) {
+            any = true;
+            match r["status"].as_str() {
+                Some("passed") => passed += 1,
+                Some("failed") => failed += 1,
+                _ => {}
+            }
+        }
+        let broken = self.last["broken"]
+            .as_array()
+            .is_some_and(|b| b.iter().any(|b| b["file"] == file));
+        (any || broken).then_some((passed, failed + usize::from(broken)))
+    }
+
+    /// Asks for a run (it starts once the game runs).
+    pub fn run(&mut self, args: Value) {
+        self.pending = Some(args);
+        self.waited = 0;
+        self.shown = true;
+    }
+}
+
+/// A `describe(` or `it(` line of a test file.
+#[derive(Debug, Clone, PartialEq)]
+struct TestLine {
+    /// 1-based.
+    line: u32,
+    describe: bool,
+    /// For a describe, its `end)` line: the tests between are in it.
+    end: u32,
+}
+
+/// The test file's `describe` and `it` lines (`.skip` and `.only` too).
+fn test_lines(text: &str) -> Vec<TestLine> {
+    let lines: Vec<&str> = text.lines().collect();
+    let indent = |l: &str| l.len() - l.trim_start().len();
+    let mut out = Vec::new();
+    for (i, l) in lines.iter().enumerate() {
+        let code = l.trim_start();
+        let describe = ["describe(", "describe.skip(", "describe.only("]
+            .iter()
+            .any(|p| code.starts_with(p));
+        let it = ["it(", "it.skip(", "it.only("]
+            .iter()
+            .any(|p| code.starts_with(p));
+        if !describe && !it {
+            continue;
+        }
+        let end = if describe {
+            lines[i + 1..]
+                .iter()
+                .position(|e| indent(e) == indent(l) && e.trim_start().starts_with("end"))
+                .map_or(lines.len(), |k| i + 1 + k)
+        } else {
+            i
+        };
+        out.push(TestLine {
+            line: i as u32 + 1,
+            describe,
+            end: end as u32 + 1,
+        });
+    }
+    out
+}
+
+/// What a test line's mark shows: its test's status, or for a describe the worst of its tests'.
+fn line_status(tests: &TestsPanel, file: &str, t: &TestLine) -> Option<String> {
+    let statuses: Vec<&str> = tests
+        .results(file)
+        .filter(|r| {
+            let line = r["line"].as_u64().unwrap_or(0) as u32;
+            if t.describe {
+                line > t.line && line < t.end
+            } else {
+                line == t.line
+            }
+        })
+        .filter_map(|r| r["status"].as_str())
+        .collect();
+    [
+        "running", "failed", "queued", "stopped", "passed", "skipped",
+    ]
+    .into_iter()
+    .find(|s| statuses.contains(s))
+    .map(str::to_string)
+}
+
+/// Starts a waiting run once the game runs (pressing Play for it in edit mode), follows the run
+/// while it goes, and stops the game after it if it pressed Play.
+fn tests_poll(world: &mut World, editor: &mut Editor, tab: &mut ScriptsTab, now: f64) {
+    if let Some(args) = tab.tests.pending.clone() {
+        if editor.mode != Mode::Play {
+            // Saved first: the run reads the files.
+            for i in 0..tab.docs.len() {
+                if tab.docs[i].dirty() {
+                    let current = std::mem::replace(&mut tab.current, i);
+                    save(world, tab, now);
+                    tab.current = current;
+                }
+            }
+            tab.tests.started_play |= editor.mode == Mode::Edit;
+            editor::play(world, editor);
+            tab.tests.waited = 0;
+            return;
+        }
+        tab.tests.waited += 1;
+        // A couple of frames for the scene's scripts to start.
+        if tab.tests.waited < 3 {
+            return;
+        }
+        tab.tests.pending = None;
+        match call_api(world, "script.test", args) {
+            Ok(_) => {
+                tab.tests.running = true;
+                tab.tests.shown = true;
+                tab.types.show_problems = false;
+            }
+            Err(e) => {
+                tab.toast = Some((e, now + 5.0, true));
+                if std::mem::take(&mut tab.tests.started_play) {
+                    editor::stop(world, editor);
+                }
+            }
+        }
+    }
+    if !tab.tests.running {
+        return;
+    }
+    let Ok(v) = call_api(world, "script.tests", json!({})) else {
+        return;
+    };
+    if v["run"] == 0 {
+        // The game stopped under it (a new VM never ran it): keep what it got to.
+        tab.tests.running = false;
+        if let Some(results) = tab.tests.last["results"].as_array_mut() {
+            for r in results {
+                if r["status"] == "running" || r["status"] == "queued" {
+                    r["status"] = json!("stopped");
+                }
+            }
+        }
+        tab.tests.last["state"] = json!("done");
+        return;
+    }
+    let done = v["state"] != "running";
+    tab.tests.last = v;
+    if done {
+        tab.tests.running = false;
+        let l = &tab.tests.last;
+        let (passed, failed) = (
+            l["passed"].as_u64().unwrap_or(0),
+            l["failed"].as_u64().unwrap_or(0),
+        );
+        let summary = format!(
+            "Tests: {passed} passed, {failed} failed ({:.1} s of game time)",
+            l["secs"].as_f64().unwrap_or(0.0)
+        );
+        let kind = if failed > 0 {
+            OutKind::Error
+        } else {
+            OutKind::Note
+        };
+        push(tab, kind, summary, None);
+        if std::mem::take(&mut tab.tests.started_play) {
+            editor::stop(world, editor);
+        }
+    }
+}
+
+/// The Tests panel: Run all, the file's tests, Stop; each test with its status and time, and
+/// under a failed one why, with the line (click to open it).
+fn tests_list(ui: &mut egui::Ui, world: &mut World, tab: &mut ScriptsTab) {
+    let busy = tab.tests.running || tab.tests.pending.is_some();
+    let current = tab
+        .docs
+        .get(tab.current)
+        .map(|d| d.path.clone())
+        .filter(|p| engine_script::testing::is_test_file(p));
+    ui.horizontal(|ui| {
+        if ui
+            .add_enabled(!busy, egui::Button::new("▶ Run all"))
+            .on_hover_text(
+                "Run every test file (*.test.luau) in the game; in edit mode this presses Play \
+                 for the run and Stop after it",
+            )
+            .clicked()
+        {
+            tab.tests.run(json!({}));
+        }
+        if let Some(path) = &current
+            && ui
+                .add_enabled(!busy, egui::Button::new("▶ This file"))
+                .on_hover_text(format!("Run {path}"))
+                .clicked()
+        {
+            tab.tests.run(json!({"files": [path]}));
+        }
+        if ui
+            .add_enabled(tab.tests.running, egui::Button::new("⏹ Stop"))
+            .clicked()
+        {
+            let _ = call_api(world, "script.test", json!({"stop": true}));
+        }
+        let l = &tab.tests.last;
+        if !l.is_null() {
+            let n = |k: &str| l[k].as_u64().unwrap_or(0);
+            let state = if tab.tests.running {
+                format!("running… {:.1} s", l["secs"].as_f64().unwrap_or(0.0))
+            } else {
+                format!("{:.1} s of game time", l["secs"].as_f64().unwrap_or(0.0))
+            };
+            ui.add_space(10.0);
+            ui.label(RichText::new(format!("✔ {} passed", n("passed"))).color(theme::PLAY));
+            let failed = n("failed");
+            ui.label(
+                RichText::new(format!("✖ {failed} failed")).color(if failed > 0 {
+                    ERROR
+                } else {
+                    theme::TEXT_DIM
+                }),
+            );
+            if n("skipped") > 0 {
+                ui.label(theme::dim(format!("{} skipped", n("skipped"))));
+            }
+            ui.label(theme::dim(&state));
+        }
+    });
+    let mut open_at = None;
+    egui::ScrollArea::vertical()
+        .id_salt("script tests")
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            ui.spacing_mut().item_spacing.y = 1.0;
+            let l = &tab.tests.last;
+            if l.is_null() {
+                ui.label(theme::dim(
+                    "Tests are Luau files named name.test.luau: describe groups, it tests, \
+                     expect checks (examples/lamp.test.luau). Each test runs in the game, so it \
+                     can spawn things, wait, press E and check what the scripts did. Run all \
+                     runs them; the ▶ beside a test in its file runs that one.",
+                ));
+                return;
+            }
+            let mono = FontId::monospace(12.0);
+            for b in l["broken"].as_array().into_iter().flatten() {
+                let file = b["file"].as_str().unwrap_or("");
+                let line = b["line"].as_u64().map(|n| n as u32);
+                let r = ui.add(
+                    egui::Label::new(
+                        RichText::new(format!(
+                            "✖ {file} didn't load: {}",
+                            b["message"].as_str().unwrap_or("")
+                        ))
+                        .color(ERROR),
+                    )
+                    .truncate()
+                    .sense(egui::Sense::click()),
+                );
+                if r.clicked() {
+                    open_at = Some((file.to_string(), line.unwrap_or(1)));
+                }
+            }
+            let mut file = "";
+            for r in l["results"].as_array().into_iter().flatten() {
+                let this = r["file"].as_str().unwrap_or("");
+                if this != file {
+                    file = this;
+                    ui.add_space(3.0);
+                    ui.label(RichText::new(file).small().strong().color(theme::TEXT_DIM));
+                }
+                let status = r["status"].as_str().unwrap_or("");
+                let (icon, color) = match status {
+                    "passed" => ("✔", theme::PLAY),
+                    "failed" => ("✖", ERROR),
+                    "running" => ("⏳", VALUE),
+                    "skipped" => ("○", LINE_NO),
+                    "stopped" => ("⏹", LINT),
+                    _ => ("○", theme::TEXT_DIM),
+                };
+                let mut job = LayoutJob::default();
+                job.append(
+                    &format!("  {icon}  "),
+                    0.0,
+                    TextFormat::simple(FontId::proportional(13.0), color),
+                );
+                job.append(
+                    r["title"].as_str().unwrap_or(""),
+                    0.0,
+                    TextFormat::simple(
+                        FontId::proportional(13.0),
+                        if status == "skipped" {
+                            theme::TEXT_DIM
+                        } else {
+                            theme::TEXT
+                        },
+                    ),
+                );
+                if matches!(status, "passed" | "failed") {
+                    job.append(
+                        &format!("   {:.2} s", r["secs"].as_f64().unwrap_or(0.0)),
+                        0.0,
+                        TextFormat::simple(mono.clone(), LINE_NO),
+                    );
+                }
+                let line = r["line"].as_u64().unwrap_or(1) as u32;
+                let row = ui
+                    .add(egui::Label::new(job).truncate().sense(egui::Sense::click()))
+                    .on_hover_text(format!("{file}:{line}"));
+                if row.clicked() {
+                    open_at = Some((file.to_string(), line));
+                }
+                if let Some(message) = r["message"].as_str() {
+                    let at = r["failed_at"].as_u64().map(|n| n as u32).unwrap_or(line);
+                    let text = format!("        {message}   ({}:{at})", file);
+                    let why = ui
+                        .add(
+                            egui::Label::new(RichText::new(text).font(mono.clone()).color(ERROR))
+                                .truncate()
+                                .sense(egui::Sense::click()),
+                        )
+                        .on_hover_text(message);
+                    if why.clicked() {
+                        open_at = Some((file.to_string(), at));
+                    }
+                }
+            }
+        });
+    if let Some((path, line)) = open_at {
+        open(world, tab, &path, Some(line));
+    }
+}
+
+/// The marks beside a test file's `describe` and `it` lines: ▶ to run it, or how it did.
+fn paint_test_marks(
+    ui: &egui::Ui,
+    area: &Rect,
+    lines: &[Rect],
+    marks: &[(TestLine, Option<String>)],
+    row_h: f32,
+) {
+    let painter = ui.painter();
+    for (t, status) in marks {
+        let Some(r) = lines.get(t.line as usize - 1) else {
+            continue;
+        };
+        if r.bottom() < ui.clip_rect().top() || r.top() > ui.clip_rect().bottom() {
+            continue;
+        }
+        let c = Pos2::new(area.left() + 24.0, r.center().y);
+        let s = row_h * 0.3;
+        match status.as_deref() {
+            Some("passed") => {
+                painter.circle_filled(c, s + 1.5, theme::PLAY.gamma_multiply(0.25));
+                painter.line_segment(
+                    [
+                        c + Vec2::new(-s * 0.55, 0.0),
+                        c + Vec2::new(-s * 0.1, s * 0.5),
+                    ],
+                    Stroke::new(2.0, theme::PLAY),
+                );
+                painter.line_segment(
+                    [
+                        c + Vec2::new(-s * 0.1, s * 0.5),
+                        c + Vec2::new(s * 0.65, -s * 0.5),
+                    ],
+                    Stroke::new(2.0, theme::PLAY),
+                );
+            }
+            Some("failed") => {
+                painter.circle_filled(c, s + 1.5, ERROR);
+                let w = s * 0.45;
+                let stroke = Stroke::new(1.8, Color32::WHITE);
+                painter.line_segment([c + Vec2::new(-w, -w), c + Vec2::new(w, w)], stroke);
+                painter.line_segment([c + Vec2::new(-w, w), c + Vec2::new(w, -w)], stroke);
+            }
+            Some("running") | Some("queued") => {
+                painter.circle_stroke(c, s, Stroke::new(2.0, VALUE));
+            }
+            _ => {
+                // Not run: a play triangle.
+                painter.add(egui::Shape::convex_polygon(
+                    vec![
+                        c + Vec2::new(-s * 0.6, -s * 0.8),
+                        c + Vec2::new(s * 0.8, 0.0),
+                        c + Vec2::new(-s * 0.6, s * 0.8),
+                    ],
+                    if status.is_some() {
+                        LINE_NO
+                    } else {
+                        theme::PLAY.gamma_multiply(0.75)
+                    },
+                    Stroke::NONE,
+                ));
+            }
+        }
+    }
+}
+
+/// Notes for a test file's lines after a run: each test's result on its `it` line, and why a
+/// failed one failed on the line it stopped at.
+fn test_notes(tests: &TestsPanel, file: &str) -> Vec<(u32, String, Color32)> {
+    let mut out = Vec::new();
+    for r in tests.results(file) {
+        let line = r["line"].as_u64().unwrap_or(0) as u32;
+        let secs = r["secs"].as_f64().unwrap_or(0.0);
+        match r["status"].as_str() {
+            Some("passed") => out.push((line, format!("✔ passed  {secs:.2} s"), theme::PLAY)),
+            Some("failed") => {
+                let at = r["failed_at"].as_u64().map(|n| n as u32).unwrap_or(line);
+                let message = r["message"].as_str().unwrap_or("failed");
+                if at != line {
+                    out.push((line, format!("✖ failed at line {at}"), ERROR));
+                }
+                out.push((at, format!("✖ {message}"), ERROR));
+            }
+            Some("running") => out.push((line, "⏳ running".into(), VALUE)),
+            _ => {}
+        }
+    }
+    out
+}
+
 // ----------------------------------------------------------------------------- output
 
 fn output(ui: &mut egui::Ui, world: &mut World, tab: &mut ScriptsTab) {
     ui.horizontal(|ui| {
         let head = |text: &str, color: Color32| RichText::new(text).small().strong().color(color);
+        let output_shown = !tab.types.show_problems && !tab.tests.shown;
         if ui
-            .selectable_label(!tab.types.show_problems, head("OUTPUT", theme::TEXT_DIM))
+            .selectable_label(output_shown, head("OUTPUT", theme::TEXT_DIM))
             .clicked()
         {
             tab.types.show_problems = false;
+            tab.tests.shown = false;
         }
         let errors = tab
             .output
@@ -3540,15 +4113,38 @@ fn output(ui: &mut egui::Ui, world: &mut World, tab: &mut ScriptsTab) {
         };
         if ui
             .selectable_label(
-                tab.types.show_problems,
+                tab.types.show_problems && !tab.tests.shown,
                 head(&format!("PROBLEMS   ✖ {e}   ⚠ {w}"), color),
             )
             .on_hover_text("Luau's type checker on every script: type errors and warnings")
             .clicked()
         {
             tab.types.show_problems = true;
+            tab.tests.shown = false;
         }
-        if !tab.types.show_problems {
+        ui.add_space(8.0);
+        let last = &tab.tests.last;
+        let (passed, failed) = (
+            last["passed"].as_u64().unwrap_or(0),
+            last["failed"].as_u64().unwrap_or(0),
+        );
+        let (text, color) = if tab.tests.running || tab.tests.pending.is_some() {
+            ("TESTS   ⏳".to_string(), VALUE)
+        } else if last.is_null() {
+            ("TESTS".to_string(), theme::TEXT_DIM)
+        } else if failed > 0 {
+            (format!("TESTS   ✔ {passed}   ✖ {failed}"), ERROR)
+        } else {
+            (format!("TESTS   ✔ {passed}"), theme::PLAY)
+        };
+        if ui
+            .selectable_label(tab.tests.shown, head(&text, color))
+            .on_hover_text("The script tests (*.test.luau), run in the game")
+            .clicked()
+        {
+            tab.tests.shown = true;
+        }
+        if output_shown {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.small_button("Clear").clicked() {
                     tab.output.clear();
@@ -3556,6 +4152,10 @@ fn output(ui: &mut egui::Ui, world: &mut World, tab: &mut ScriptsTab) {
             });
         }
     });
+    if tab.tests.shown {
+        tests_list(ui, world, tab);
+        return;
+    }
     if tab.types.show_problems {
         problems_list(ui, world, tab);
         return;
@@ -6226,6 +6826,96 @@ pub fn signals_shots(dir: String) -> ShotScript {
     ShotScript::new(dir, steps)
 }
 
+/// Screenshots of the script tests: a test file with a ▶ beside each test, a run in the game
+/// (Run all presses Play, each test spawns its own lamp or beacon, Stop after), every test
+/// passed, then a bug put into the lamp script caught by its test, on the line that checks it.
+pub fn tests_shots(dir: String) -> ShotScript {
+    let _ = std::fs::create_dir_all(&dir);
+    let root = std::fs::canonicalize(&dir)
+        .unwrap_or_else(|_| std::env::current_dir().unwrap_or_default().join(&dir))
+        .join("scripts");
+    let setup = move |world: &mut World, editor: &mut Editor| {
+        editor.icons = false;
+        dusk_sky(world);
+        let from = engine_script::scripts_root(world).join(EXAMPLES);
+        copy_dir(&from, &root.join(EXAMPLES));
+        world.resource_mut::<ScriptSettings>().folder = root.to_string_lossy().to_string();
+        world.remove_resource::<ScriptRuntime>();
+        world.resource_mut::<EditorDock>().0 = tests_layout();
+        let mut tab = world.resource_mut::<ScriptsTab>();
+        tab.tests.shown = true;
+        tab.files_next = 0.0;
+    };
+    let open_file = |path: &'static str, line: u32| {
+        move |world: &mut World, _: &mut Editor| {
+            world.resource_scope(|world, mut tab: Mut<ScriptsTab>| {
+                open(world, &mut tab, path, Some(line));
+            });
+        }
+    };
+    let steps = vec![
+        Step::Do(Box::new(setup)),
+        Step::Tool(crate::editor::Tool::Select),
+        Step::Camera(DVec3::new(0.4, 2.4, 10.5), DVec3::new(0.0, 1.3, 4.0)),
+        Step::Tab(Tab::Scripts),
+        Step::Do(Box::new(open_file("examples/lamp.test.luau", 1))),
+        Step::Wait(40),
+        Step::Shot("tests_01_test_file"),
+        // Run all: Play, then each test in turn with a lamp or beacon of its own.
+        Step::Do(Box::new(|world: &mut World, _: &mut Editor| {
+            world.resource_mut::<ScriptsTab>().tests.run(json!({}));
+        })),
+        Step::Wait(8),
+        Step::Do(Box::new(|world: &mut World, _: &mut Editor| {
+            dusk_sky(world)
+        })),
+        Step::Wait(22),
+        Step::Shot("tests_02_running_in_the_game"),
+        Step::Wait(400),
+        Step::Shot("tests_03_all_passed"),
+        // A bug in the lamp: pressing E no longer puts it out. Its test catches it.
+        Step::Do(Box::new(|world: &mut World, _: &mut Editor| {
+            world.resource_scope(|world, mut tab: Mut<ScriptsTab>| {
+                open(world, &mut tab, "examples/lamp.luau", Some(44));
+                let i = tab.current;
+                let doc = &mut tab.docs[i];
+                doc.text = doc
+                    .saved
+                    .replace("self.lit = not self.lit", "self.lit = self.lit or true");
+                open(world, &mut tab, "examples/lamp.test.luau", Some(1));
+                tab.tests.run(json!({"files": ["examples/lamp.test.luau"]}));
+            });
+        })),
+        Step::Wait(8),
+        Step::Do(Box::new(|world: &mut World, _: &mut Editor| {
+            dusk_sky(world)
+        })),
+        Step::Wait(300),
+        Step::Shot("tests_04_caught_a_bug"),
+    ];
+    ShotScript::new(dir, steps)
+}
+
+/// The evening sky, held (Play starts the sky from the scene's time).
+fn dusk_sky(world: &mut World) {
+    let sky = world
+        .resource::<TypeRegistry>()
+        .resource("Sky")
+        .map(|r| r.patch);
+    if let Some(patch) = sky {
+        let _ = patch(world, json!({"hour": 19.6, "hours_per_second": 0.0}));
+    }
+}
+
+/// The tests shots' layout: the Scripts tab wide, the game beside it, Details under that.
+fn tests_layout() -> DockState<Tab> {
+    let mut dock = DockState::new(vec![Tab::Scripts]);
+    let surface = dock.main_surface_mut();
+    let [_scripts, right] = surface.split_right(NodeIndex::root(), 0.62, vec![Tab::Viewport]);
+    let [_view, _details] = surface.split_below(right, 0.62, vec![Tab::Inspector]);
+    dock
+}
+
 /// The props shots' layout: the viewport, and the Details panel beside it at full height.
 fn props_layout() -> DockState<Tab> {
     let mut dock = DockState::new(vec![Tab::Viewport, Tab::Scripts]);
@@ -6262,6 +6952,52 @@ fn copy_dir(from: &Path, to: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_files_mark_their_groups_and_tests() {
+        let text = "local x = 1\ndescribe(\"Lamp\", function()\n\tit(\"lights\", function(t)\n\
+                    \tend)\n\tit.skip('later', function(t) end)\nend)\nit(\"alone\", function() end)\n";
+        let lines = test_lines(text);
+        let at: Vec<(u32, bool, u32)> = lines.iter().map(|t| (t.line, t.describe, t.end)).collect();
+        assert_eq!(
+            at,
+            vec![(2, true, 6), (3, false, 3), (5, false, 5), (7, false, 7)]
+        );
+        let tests = TestsPanel {
+            last: json!({"results": [
+                {"file": "a.test.luau", "line": 3, "status": "passed", "secs": 0.1},
+                {"file": "a.test.luau", "line": 5, "status": "failed", "failed_at": 4,
+                 "message": "expected 1, got 2", "secs": 0.2},
+            ]}),
+            ..Default::default()
+        };
+        let status = |n: usize| line_status(&tests, "a.test.luau", &lines[n]);
+        assert_eq!(
+            status(0).as_deref(),
+            Some("failed"),
+            "a group shows its worst"
+        );
+        assert_eq!(status(1).as_deref(), Some("passed"));
+        assert_eq!(status(3), None, "not run");
+        assert_eq!(tests.counts("a.test.luau"), Some((1, 1)));
+        let notes = test_notes(&tests, "a.test.luau");
+        assert!(
+            notes
+                .iter()
+                .any(|(l, t, _)| *l == 4 && t == "✖ expected 1, got 2"),
+            "{notes:?}"
+        );
+        let listed: Vec<String> = functions(text).into_iter().map(|f| f.label).collect();
+        assert_eq!(
+            listed,
+            [
+                "describe Lamp",
+                "  it lights",
+                "  it.skip later",
+                "it alone"
+            ]
+        );
+    }
 
     fn vocab() -> Vocab {
         let mut world = World::new();

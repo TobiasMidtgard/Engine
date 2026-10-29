@@ -308,6 +308,7 @@ impl ScriptRuntime {
         let lua = Lua::new();
         lua.set_memory_limit(settings.memory_limit_mb as usize * 1024 * 1024)?;
         lua.set_app_data(Shared::default());
+        lua.set_app_data(crate::testing::TestRun::default());
         lua.set_app_data(Files {
             root,
             map: BTreeMap::new(),
@@ -2179,6 +2180,165 @@ impl ScriptRuntime {
         };
         self.adopt_new_tasks();
         out
+    }
+
+    /// `script.test`: loads test files (all of them when `files` is empty) into a new run and
+    /// starts it as a console task, stopping the last run if it still goes. `file`, `line` and
+    /// `filter` pick which of their tests run (the test or `describe` on that line; titles
+    /// containing the text).
+    pub(crate) fn start_tests(
+        &mut self,
+        world: &mut World,
+        files: Vec<String>,
+        pick: (Option<String>, Option<u32>, Option<String>),
+        settings: &ScriptSettings,
+    ) -> Result<serde_json::Value, String> {
+        use crate::testing::{BrokenFile, session, test_files, test_run};
+        self.stop_tests();
+        let root = self.root();
+        let files = if files.is_empty() {
+            test_files(&root)
+        } else {
+            files
+        };
+        if files.is_empty() {
+            return Err(
+                "there are no test files: write one as <name>.test.luau in the scripts \
+                        folder (examples/lamp.test.luau is one)"
+                    .into(),
+            );
+        }
+        let world_ptr: *mut World = world;
+        let _lent = lend_world(&self.lua, world_ptr);
+        let now = shared(&self.lua).world_secs;
+        {
+            let mut run = test_run(&self.lua);
+            run.id += 1;
+            run.running = true;
+            run.files = files.clone();
+            run.results.clear();
+            run.broken.clear();
+            run.started = now;
+            run.took = 0.0;
+        }
+        let err = |e: mlua::Error| e.to_string();
+        let session = session(&self.lua, script_env(&self.lua).map_err(err)?).map_err(err)?;
+        let globals: Function = session.get("globals").map_err(err)?;
+        // Each file's describe bodies run now, collecting its tests.
+        for path in &files {
+            let loaded = std::fs::read_to_string(root.join(path))
+                .map_err(|e| mlua::Error::runtime(format!("{path}: {e}")))
+                .and_then(|source| {
+                    let env = script_env(&self.lua)?;
+                    for pair in globals
+                        .call::<Table>(path.as_str())?
+                        .pairs::<Value, Value>()
+                    {
+                        let (k, v) = pair?;
+                        env.raw_set(k, v)?;
+                    }
+                    let chunk = self
+                        .lua
+                        .load(&source)
+                        .set_name(format!("@{path}"))
+                        .set_environment(env)
+                        .into_function()?;
+                    shared(&self.lua).loading.push(path.clone());
+                    self.watchdog.arm(settings.call_limit_ms.max(1000.0));
+                    let result = chunk.call::<()>(());
+                    self.watchdog.disarm();
+                    shared(&self.lua).loading.pop();
+                    result
+                });
+            if let Err(e) = loaded {
+                let message = e.to_string();
+                let line = error_location(&message)
+                    .filter(|(p, _)| p == path)
+                    .map(|(_, l)| l);
+                test_run(&self.lua).broken.push(BrokenFile {
+                    file: path.clone(),
+                    message,
+                    line,
+                });
+            }
+        }
+        let pick_table = self.lua.create_table().map_err(err)?;
+        let (file, line, filter) = pick;
+        pick_table.raw_set("file", file).map_err(err)?;
+        pick_table.raw_set("line", line).map_err(err)?;
+        pick_table.raw_set("filter", filter).map_err(err)?;
+        let run: Function = session.get("run").map_err(err)?;
+        let thread = self.lua.create_thread(run).map_err(err)?;
+        self.profiler.phase(Phase::Console);
+        self.watchdog.arm(settings.call_limit_ms);
+        let result = thread.resume::<MultiValue>(pick_table);
+        self.watchdog.disarm();
+        self.profiler.settle(&self.lua);
+        match result {
+            Ok(values) if thread.is_resumable() => {
+                let wait = wait_secs(&values);
+                test_run(&self.lua).runner = Some(thread.clone());
+                self.tasks.push(Task {
+                    thread,
+                    owner: None,
+                    wake_at: now + wait,
+                    since: now,
+                    fresh: false,
+                });
+            }
+            Ok(_) => {}
+            Err(e) => {
+                let mut run = test_run(&self.lua);
+                run.running = false;
+                run.broken.push(BrokenFile {
+                    file: "engine/testing.luau".into(),
+                    message: e.to_string(),
+                    line: None,
+                });
+            }
+        }
+        self.adopt_new_tasks();
+        let run = test_run(&self.lua);
+        Ok(serde_json::json!({
+            "run": run.id,
+            "files": run.files.len(),
+            "tests": run.results.len(),
+            "broken": run.broken,
+        }))
+    }
+
+    /// Stops the test run if one goes (its tests stay as far as they got).
+    pub(crate) fn stop_tests(&mut self) {
+        let (runner, worker) = {
+            let mut run = crate::testing::test_run(&self.lua);
+            if !run.running {
+                return;
+            }
+            run.running = false;
+            run.took = shared(&self.lua).world_secs - run.started;
+            for r in run.results.iter_mut().filter(|r| r.status == "running") {
+                r.status = "stopped".into();
+            }
+            (run.runner.take(), run.worker.take())
+        };
+        let gone: Vec<Thread> = runner.into_iter().chain(worker).collect();
+        self.tasks.retain(|t| !gone.contains(&t.thread));
+        shared(&self.lua).cancelled.extend(gone);
+    }
+
+    /// `script.tests`: the current or last test run.
+    pub(crate) fn tests(&self) -> serde_json::Value {
+        let now = shared(&self.lua).world_secs;
+        let mut run = crate::testing::test_run(&self.lua);
+        if run.running && run.runner.as_ref().is_some_and(|t| !t.is_resumable()) {
+            // The runner itself failed (its error is in the log).
+            run.running = false;
+            run.took = now - run.started;
+            for r in run.results.iter_mut().filter(|r| r.status == "running") {
+                r.status = "stopped".into();
+            }
+        }
+        run.describe(now)
     }
 
     /// The JSON summary `script.list` returns.
