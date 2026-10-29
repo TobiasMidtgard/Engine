@@ -506,12 +506,15 @@ impl GrowthMaterials {
         };
         let mut stems = white(0.7).with_wind_sway(0.02).with_detail(0.3, 0.004);
         stems.double_sided = false;
-        let leaves = white(0.5)
-            .with_subsurface(0.45)
+        // Matte, and reflecting less than the default dielectric, as the trees' leaves: at 0.5
+        // a low sun behind the bed turned every leaf facing it white.
+        let mut leaves = white(0.8)
+            .with_subsurface(0.5)
             .with_wind_sway(0.05)
             .with_base_color_texture(images.add(leaf.albedo))
             .with_normal_texture(images.add(leaf.normal));
-        let petals = white(0.45).with_subsurface(0.6).with_wind_sway(0.04);
+        leaves.reflectance = 0.35;
+        let petals = white(0.6).with_subsurface(0.6).with_wind_sway(0.04);
         let fruit = white(0.28).with_subsurface(0.3).with_wind_sway(0.02);
         Self {
             stems: materials.add(stems),
