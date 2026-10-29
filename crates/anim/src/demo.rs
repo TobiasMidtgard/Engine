@@ -381,13 +381,17 @@ impl DemoStep {
     }
 }
 
-/// How long the boxer's and sparring partner's routine takes, s: a body shot that folds the
-/// partner onto a knee, a combo that knocks them back, then one that knocks them down.
-const SPARRING_PERIOD: f32 = 20.0;
+/// How long the boxer's and sparring partner's routine takes, s: a combo the partner slips
+/// and counters, a body shot that folds the partner onto a knee, a combo that knocks them
+/// back, then one that knocks them down.
+const SPARRING_PERIOD: f32 = 26.0;
 
-/// When the boxer's and sparring partner's routine gets to the combos, s (the body shot comes
+/// When the boxer's and sparring partner's routine gets to the body shot, s (the slips come
 /// first).
-pub const SPARRING_COMBOS: f32 = 7.0;
+pub const SPARRING_BODY: f32 = 6.0;
+
+/// When the boxer's and sparring partner's routine gets to the combos, s.
+pub const SPARRING_COMBOS: f32 = SPARRING_BODY + 7.0;
 
 /// How fast a [`DemoStep::home`] walk back comes (time constant, s): slower than a blow, so
 /// the feet shuffle.
@@ -1488,7 +1492,15 @@ pub const VIEWS: &[DemoView] = &[
         eye: [-3.3, 1.3, 2.2],
         target: [-6.0, 0.8, 1.3],
         hour: 15.0,
-        at: 2.0,
+        at: SPARRING_BODY + 2.0,
+    },
+    DemoView {
+        key: "paddock_slip",
+        name: "The sparring partner slips the jab and cross, rolls under the hook and counters",
+        eye: [-3.2, 1.45, 1.6],
+        target: [-6.0, 1.2, 1.5],
+        hour: 15.0,
+        at: 1.1,
     },
     DemoView {
         key: "paddock_sprint_start",
@@ -1939,8 +1951,9 @@ fn build_paddock(world: &mut World, origin: DVec3) -> DemoEntities {
         },
     ));
 
-    // Sparring partner: in a boxer's guard. A hook to the liver gets under it and a beat later
-    // folds them onto a knee; up again, the guard blocks the first punches of the boxer's
+    // Sparring partner: in a boxer's guard. First they slip the boxer's jab and cross and roll
+    // under the hook, coming up with a cross that snaps the boxer's head back. Then a hook to
+    // the liver gets under the guard and a beat later folds them onto a knee; up again, the guard blocks the first punches of the boxer's
     // combo, they are struck in turn on the side of the head and the chin, the stomach and
     // the back of a shoulder, flinching away from each blow; the last combo ends in a heavy
     // uppercut that knocks them down, and they get up and come back to their mark.
@@ -1953,7 +1966,7 @@ fn build_paddock(world: &mut World, origin: DVec3) -> DemoEntities {
         RigidBody::fixed(),
         Collider::cuboid(Vec3::new(4.0, 0.25, 4.0)),
     ));
-    let c = SPARRING_COMBOS;
+    let (b, c) = (SPARRING_BODY, SPARRING_COMBOS);
     let sparring = spawn_humanoid(
         world,
         humanoid::Outfit::Shirt,
@@ -1966,10 +1979,15 @@ fn build_paddock(world: &mut World, origin: DVec3) -> DemoEntities {
             period: SPARRING_PERIOD,
             steps: vec![
                 DemoStep::param(0.05, "guarding", 1.0),
-                // The guard takes the jab; the body hook (about 1 s) goes under it to the
+                // Slipping, rolling and countering (crate::combat::Evader), then back to the
+                // mark.
+                DemoStep::param(0.05, "evasive", 1.0),
+                DemoStep::param(2.8, "evasive", 0.0),
+                DemoStep::home(3.2),
+                // The guard takes the jab; the body hook (about 1 s in) goes under it to the
                 // liver, and half a second later the partner goes down on a knee and gets up
                 // (crate::hurt). Back to the mark.
-                DemoStep::home(5.8),
+                DemoStep::home(b + 5.8),
                 // The boxer's combo comes in between 0.6 and 2 s in (see below): the guard
                 // takes the jab and the cross, then drops, so the hook and the uppercut land on
                 // the head and knock the partner back; back to the mark, guard up.
@@ -2017,10 +2035,15 @@ fn build_paddock(world: &mut World, origin: DVec3) -> DemoEntities {
             period: SPARRING_PERIOD,
             steps: vec![
                 DemoStep::param(0.05, "guarding", 1.0),
-                // A jab to the guard, then a heavy press: a hook to the body.
+                // Jab, cross, hook, all slipped or rolled under; the counter lands.
                 DemoStep::trigger(0.45, "attack_light"),
-                DemoStep::trigger(0.72, "attack_heavy"),
-                DemoStep::home(2.6),
+                DemoStep::trigger(0.72, "attack_light"),
+                DemoStep::trigger(1.15, "attack_light"),
+                DemoStep::home(3.0),
+                // A jab to the guard, then a heavy press: a hook to the body.
+                DemoStep::trigger(b + 0.45, "attack_light"),
+                DemoStep::trigger(b + 0.72, "attack_heavy"),
+                DemoStep::home(b + 2.6),
                 DemoStep::trigger(c + 0.45, "attack_light"),
                 DemoStep::trigger(c + 0.72, "attack_light"),
                 DemoStep::trigger(c + 1.15, "attack_light"),
@@ -2037,6 +2060,12 @@ fn build_paddock(world: &mut World, origin: DVec3) -> DemoEntities {
             time: 0.0,
             home: None,
         },
+    ));
+
+    // The partner reads the boxer's punches and counters (while `evasive`).
+    world.entity_mut(sparring).insert((
+        crate::combat::Evader::new(1.0),
+        crate::combat::Attacker::new("boxing", Some(boxer)),
     ));
 
     // --- Shuttle lane: sprint down it, dig in to stop, run back backwards, turn and run

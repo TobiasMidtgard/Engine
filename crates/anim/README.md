@@ -192,6 +192,21 @@ compresses and stretches.
   onto its knee, the right hand clutching the side and the left forearm on the left knee,
   head down, then pushes up off the left leg. A rocked, winded or kneeling body doesn't
   block (`Hurt::guard_down`) and attackers hold off while it kneels (`Hurt::is_down`).
+- **Slips, rolls and counters.** Good fighters move their heads instead of only raising a
+  guard. A thrown punch goes where the head *was*: an `Attacker`'s aim follows the target
+  until 0.2 s before the move's first hit window, then holds, and the hit still has to come
+  within `reach` of the target's current head or chest (`Attacker::missed` counts the
+  ones that didn't). Each move names the evasion that beats it (`AttackMove::evaded_by`):
+  in `boxing` the jab is beaten by `slip_right` (outside it), the cross by `slip_left`, the
+  hook by `roll` (a U-shaped dip under it) and the uppercuts by `pull_back`; a body hook
+  can't be slipped. The clips are generated from the boxer's stance: knees bent and hips
+  under the body rather than a bend at the waist, trunk and head turning with the slip, the
+  head moving about 25 cm. An `Evader` (`skill` 0..1, `read_secs` 0.18, like an action
+  game's perfect-dodge window) reads a strike aimed at it that close to its hit and plays the
+  evasion as an overlay with probability `skill` (deterministic per strike); the
+  `AnimationParams` "evasive", when set, switches it. After a roll or pull-back an evader
+  with its own `Attacker` presses `attack_heavy` halfway through, coming up with a counter.
+  A fighter in the middle of their own strike or evasion doesn't block.
 - **Getting up.** A person whose weight returns to 0 while lying flat gets up rather than
   blending straight to standing: `get_up_back` (sits up, tucks a leg, plants a hand and a
   knee, steps up) or `get_up_front` (palms down, pushes up to all fours, kneels, steps up),
@@ -370,6 +385,9 @@ blow only staggers, and two 55 N·s blows close together knock down where one do
 presses at a downed target are dropped, and that a body hook lands under a raised guard
 (the jab before it blocked) and presses wait while the target kneels, and at 8 frames a
 second the body hook still lands.
+Against a skilled `Evader` the jab, cross and hook all miss (`missed` 3, no hits or
+blocks), slipped right, slipped left and rolled under, and the counter cross lands on the
+attacker; with "evasive" off the combo lands.
 `tests/hurt.rs` lands three quick blows on the chin: rocked, the hips sway more than 5 cm
 from side to side and dip, the body lurches, and it wears off; a blow to the stomach folds
 the chest forward with both hands within 20 cm of the stomach, and the wind comes back; a

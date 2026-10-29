@@ -1992,6 +1992,156 @@ fn punch(s: &Skeleton, kind: Punch) -> AnimationClip {
     )
 }
 
+/// Head movement that makes a punch miss ([`crate::combat::Evader`]), all from and back to
+/// the boxer's stance with the guard up and the eyes on the attacker.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Evasion {
+    /// Head to the left, outside a right hand: knees bent, hips and shoulders turning with it.
+    SlipLeft,
+    /// Head to the right, outside a jab.
+    SlipRight,
+    /// A U-shaped dip from left to right under a hook.
+    Roll,
+    /// Weight onto the rear foot and the trunk back, away from an uppercut.
+    PullBack,
+}
+
+impl Evasion {
+    pub const ALL: [Evasion; 4] = [
+        Evasion::SlipLeft,
+        Evasion::SlipRight,
+        Evasion::Roll,
+        Evasion::PullBack,
+    ];
+
+    pub fn clip_name(self) -> &'static str {
+        match self {
+            Evasion::SlipLeft => "slip_left",
+            Evasion::SlipRight => "slip_right",
+            Evasion::Roll => "roll",
+            Evasion::PullBack => "pull_back",
+        }
+    }
+
+    /// Length, s.
+    pub fn secs(self) -> f32 {
+        match self {
+            Evasion::Roll => 0.75,
+            _ => 0.55,
+        }
+    }
+}
+
+/// An evasion: out of the line fast (most of the way by 0.3 of the clip), held, and back to
+/// the stance. `effort` rises with it.
+fn evasion(s: &Skeleton, kind: Evasion) -> AnimationClip {
+    let secs = kind.secs();
+    let keys = 31;
+    // How far out of the line: fast in, a hold, eased back.
+    let out = [(0.0, 0.0), (0.3, 1.0), (0.55, 1.0), (1.0, 0.0)];
+    AnimationClip::from_fn(kind.clip_name(), secs, keys, false, move |ph| {
+        let mut p = PoseBuilder::new(s);
+        let e = keyed(ph, &out);
+        // Sideways (+ to its own right), down and back (m) for the hips; trunk roll (+ to
+        // its left), pitch (− forward) and yaw (+ turns left), degrees; extra knee bend.
+        let (side, down, back, roll, pitch, yaw, knees) = match kind {
+            Evasion::SlipLeft => (
+                -0.07 * e,
+                0.05 * e,
+                0.0,
+                22.0 * e,
+                -4.0 * e,
+                12.0 * e,
+                14.0 * e,
+            ),
+            Evasion::SlipRight => (
+                0.07 * e,
+                0.05 * e,
+                0.0,
+                -22.0 * e,
+                -4.0 * e,
+                -12.0 * e,
+                14.0 * e,
+            ),
+            Evasion::Roll => {
+                // Down through the bottom of the U as it crosses from left to right.
+                let u = ((ph - 0.04) / 0.56).clamp(0.0, 1.0);
+                let dip = (u * std::f32::consts::PI).sin();
+                // Leaning left first, from and back to the middle.
+                let start = (ph / 0.12).clamp(0.0, 1.0);
+                let across = -(u * std::f32::consts::PI).cos() * start * (1.0 - smooth_end(ph));
+                // Down with the legs, not by bending into the punch.
+                (
+                    0.07 * across,
+                    0.2 * dip,
+                    0.0,
+                    -14.0 * across,
+                    -10.0 * dip,
+                    -8.0 * across,
+                    50.0 * dip,
+                )
+            }
+            Evasion::PullBack => (0.0, 0.02 * e, 0.07 * e, 0.0, 16.0 * e, -6.0 * e, 6.0 * e),
+        };
+        p.rot_move(
+            "hips",
+            Vec3::new(side, -0.045 - down, back),
+            2.0 + pitch * 0.2,
+            -24.0 + yaw * 0.4,
+            roll * 0.25,
+        );
+        // The trunk carries the head; the neck and head stay nearly level, eyes forward.
+        spine(
+            &mut p,
+            [
+                -2.0 + pitch * 0.45,
+                -3.0 + pitch * 0.45,
+                2.0 - pitch * 0.2,
+                -8.0 - pitch * 0.2,
+            ],
+            [yaw * 0.3, yaw * 0.4, -yaw * 0.3, -yaw * 0.2],
+            [roll * 0.4, roll * 0.4, -roll * 0.25, -roll * 0.1],
+        );
+        for (side, guard) in GUARD_ARMS.into_iter().enumerate() {
+            arm(&mut p, side, guard);
+        }
+        // Stance: the weight goes to the leg on the side the head goes.
+        let (lead, rear) = match kind {
+            Evasion::SlipLeft => (knees * 1.2, knees * 0.6),
+            Evasion::SlipRight => (knees * 0.6, knees * 1.2),
+            Evasion::PullBack => (knees * 0.4, knees * 1.6),
+            Evasion::Roll => (knees, knees),
+        };
+        leg(
+            &mut p,
+            0,
+            20.0 + lead * 0.5,
+            4.0,
+            26.0 + lead,
+            8.0 + lead * 0.4,
+            0.0,
+        );
+        leg(
+            &mut p,
+            1,
+            -6.0 + rear * 0.5,
+            6.0,
+            20.0 + rear,
+            -6.0 + rear * 0.4,
+            8.0,
+        );
+        p.take()
+    })
+    .with_curve("effort", keys, move |ph| 0.15 + 0.35 * keyed(ph, &out))
+    .with_curve("fist", 2, |_| 0.9)
+}
+
+/// 0 until the last fifth of a clip, then easing to 1 (back to the middle at the end).
+fn smooth_end(ph: f32) -> f32 {
+    let t = ((ph - 0.75) / 0.25).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
 /// The right hand of the hammer block: the handle held across in front of the face,
 /// pointing left, the forearm up.
 const BLOCK_ARM: Arm = Arm {
@@ -3294,6 +3444,10 @@ pub fn clips(s: &Skeleton) -> Vec<AnimationClip> {
         punch(s, Punch::Uppercut),
         punch(s, Punch::BodyHook),
         kneel_hurt(s),
+        evasion(s, Evasion::SlipLeft),
+        evasion(s, Evasion::SlipRight),
+        evasion(s, Evasion::Roll),
+        evasion(s, Evasion::PullBack),
     ]
 }
 

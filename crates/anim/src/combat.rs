@@ -38,7 +38,7 @@ use engine_world::{DamageEvent, DamageKind};
 
 use crate::Animator;
 use crate::animator::{AnimationLibrary, AnimatorSettings};
-use crate::build::humanoid::Punch;
+use crate::build::humanoid::{Evasion, Punch};
 use crate::hit::HitReaction;
 use crate::hurt::Hurt;
 use crate::ik::{to_model, two_bone};
@@ -112,6 +112,9 @@ pub struct AttackMove {
     pub windows: Vec<Window>,
     #[serde(default)]
     pub links: Vec<Link>,
+    /// The evasion clip that makes it miss, for an [`Evader`] to play.
+    #[serde(default)]
+    pub evaded_by: Option<String>,
 }
 
 fn default_fade_in() -> f32 {
@@ -251,6 +254,16 @@ impl AttackSet {
                         to: to.clip_name().into(),
                     })
                     .collect(),
+                // Slip a straight punch to the outside, roll under a hook, pull back from an
+                // uppercut; a body shot can't be slipped.
+                evaded_by: match p {
+                    Punch::Jab => Some(Evasion::SlipRight),
+                    Punch::Cross => Some(Evasion::SlipLeft),
+                    Punch::Hook => Some(Evasion::Roll),
+                    Punch::Uppercut => Some(Evasion::PullBack),
+                    Punch::BodyHook => None,
+                }
+                .map(|e| e.clip_name().to_string()),
             }
         };
         AttackSet {
@@ -357,12 +370,22 @@ pub struct Attacker {
     pub hits: u32,
     /// Strikes of the current move that landed on a guard.
     pub blocked: u32,
+    /// Strikes of the current move whose hit window passed without landing (out of reach,
+    /// or the target's head moved).
+    pub missed: u32,
     /// The newest press waiting, and how long it has waited.
     #[serde(skip)]
     pub buffered: Option<(String, f32)>,
     /// Hit windows of the current move that have landed.
     #[serde(skip)]
     landed: Vec<usize>,
+    /// Hit windows of the current move that passed without landing.
+    #[serde(skip)]
+    whiffed: Vec<usize>,
+    /// Where the strike was committed to (world), from shortly before its hit window: a
+    /// thrown fist doesn't follow the head.
+    #[serde(skip)]
+    committed: Option<DVec3>,
     /// The striking bone and the world point it reaches for this frame (on the target's
     /// face or chest), while a move with a hit window plays at a target.
     #[serde(skip)]
@@ -384,8 +407,11 @@ impl Default for Attacker {
             warp_delta: Vec3::ZERO,
             hits: 0,
             blocked: 0,
+            missed: 0,
             buffered: None,
             landed: Vec::new(),
+            whiffed: Vec::new(),
+            committed: None,
             aim: None,
         }
     }
@@ -403,6 +429,9 @@ impl Attacker {
 
 /// How far the middle of the face is above the head bone (the top of the neck), meters.
 const FACE_ABOVE_HEAD: f64 = 0.07;
+
+/// How long before its hit window a strike's aim stops following the target, s.
+const COMMIT_SECS: f32 = 0.2;
 
 /// How far to its own right of the spine a target's liver is, meters.
 const LIVER_SIDE: f64 = 0.1;
@@ -565,6 +594,8 @@ pub(crate) fn run_attacks(
             Option<&AnimationParams>,
             Option<&Knockdown>,
             Option<&Hurt>,
+            Option<&Attacker>,
+            Option<&Evader>,
         )>,
         Query<(&mut Animator, Option<&mut HitReaction>)>,
     )>,
@@ -581,7 +612,7 @@ pub(crate) fn run_attacks(
         let attackers: Vec<Entity> = set.p0().iter().filter_map(|(_, a, ..)| a.target).collect();
         let q = set.p1();
         for t in attackers {
-            let Ok((gt, animator, params, down, hurt)) = q.get(t) else {
+            let Ok((gt, animator, params, down, hurt, striking, evader)) = q.get(t) else {
                 continue;
             };
             // Knocked down or on a knee: nothing to strike until it is up again.
@@ -594,9 +625,13 @@ pub(crate) fn run_attacks(
                     .and_then(|a| a.skeleton.index_of(bone).map(|b| a.bone_world(gt, b).0))
                     .unwrap_or_else(|| gt.translation() + DVec3::Y * up)
             };
-            // Too hurt to keep the hands up, it doesn't block.
+            // Too hurt to keep the hands up, or throwing a punch of its own (the opening a
+            // counter-puncher waits for), it doesn't block.
             let guarding = params.is_some_and(|p| p.get("guarding") > 0.5)
-                && !hurt.is_some_and(Hurt::guard_down);
+                && !hurt.is_some_and(Hurt::guard_down)
+                && !striking.is_some_and(|a| a.current.is_some())
+                // Moving its head out of the way instead.
+                && !evader.is_some_and(|e| e.evading.is_some());
             let guard = animator.filter(|_| guarding).and_then(|a| {
                 let glove = |hand: &str| Some(fist_of(a, gt, a.skeleton.index_of(hand)?));
                 Some(Guard {
@@ -697,7 +732,10 @@ pub(crate) fn run_attacks(
             attacker.time = 0.0;
             attacker.hits = 0;
             attacker.blocked = 0;
+            attacker.missed = 0;
             attacker.landed.clear();
+            attacker.whiffed.clear();
+            attacker.committed = None;
             attacker.buffered = None;
         }
         // Windows.
@@ -753,11 +791,16 @@ pub(crate) fn run_attacks(
             blocked_at = high
                 .then(|| tg.blocking_glove(gt.translation(), fist, moves.block.cone_deg))
                 .flatten();
-            let aim = match blocked_at {
+            let mut aim = match blocked_at {
                 // The front of the glove.
                 Some(glove) => glove + back * 0.04,
                 None => mid + back * AIM_SHORT,
             };
+            // Shortly before the hit the strike is committed: from then on the fist goes where
+            // the target was, so a head that slips away is missed.
+            if t >= first_hit - COMMIT_SECS {
+                aim = *attacker.committed.get_or_insert(aim);
+            }
             attacker.aim = Some((bone.clone(), aim));
         }
         for (k, w) in m.windows.iter().enumerate() {
@@ -868,6 +911,19 @@ pub(crate) fn run_attacks(
                 }
             }
         }
+        // Strikes at a target whose window has passed without landing missed.
+        if target.is_some() {
+            for (k, w) in m.windows.iter().enumerate() {
+                if matches!(w.kind, WindowKind::Hit { .. })
+                    && w.end < t
+                    && !attacker.landed.contains(&k)
+                    && !attacker.whiffed.contains(&k)
+                {
+                    attacker.whiffed.push(k);
+                    attacker.missed += 1;
+                }
+            }
+        }
     }
     // Hitstop: both fighters hold still for a few frames; a blocked attacker is pushed
     // back (stepping, where it has a hit reaction).
@@ -883,6 +939,176 @@ pub(crate) fn run_attacks(
                     r.knock(l.pushback, 0.12);
                 }
             }
+        }
+    }
+}
+
+/// Moves its head out of the way of strikes aimed at it (slips, rolls, pull-backs): when a
+/// move at it is within [`Evader::read_secs`] of its first hit window, it evades with chance
+/// [`Evader::skill`] by playing the move's [`AttackMove::evaded_by`] clip over its graph.
+/// The strike's aim has committed by then, so the fist goes where the head was. While its
+/// `AnimationParams` have `evasive`, it evades only when that is above 0.5. Out of the
+/// evasions in [`Evader::counter_after`], one with its own [`Attacker`] throws
+/// `attack_heavy` back at the attacker halfway through.
+#[derive(Component, Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Evader {
+    /// Chance of evading each strike it reads (0..1).
+    pub skill: f32,
+    /// How long before a strike's hit window it moves, s: later and the fist lands first.
+    pub read_secs: f32,
+    /// Evasions it counters out of.
+    pub counter_after: Vec<String>,
+    /// The evasion playing (clip, seconds in, its length, who it is evading, countered yet).
+    #[serde(skip)]
+    pub evading: Option<(String, f32, f32, Entity, bool)>,
+    /// The strike last seen from each attacker (its move, and how far into it), so each is
+    /// read once.
+    #[serde(skip)]
+    read: Vec<(Entity, String, f32)>,
+    /// Strikes read in total (varies the dice).
+    #[serde(skip)]
+    count: u32,
+}
+
+impl Default for Evader {
+    fn default() -> Self {
+        Self {
+            skill: 0.8,
+            read_secs: 0.18,
+            counter_after: vec![
+                Evasion::Roll.clip_name().into(),
+                Evasion::PullBack.clip_name().into(),
+            ],
+            evading: None,
+            read: Vec::new(),
+            count: 0,
+        }
+    }
+}
+
+impl Evader {
+    pub fn new(skill: f32) -> Self {
+        Self {
+            skill,
+            ..Default::default()
+        }
+    }
+}
+
+/// Evaders read strikes coming at them and move their heads (in `AnimSet::Setup`, after the
+/// attacks have run).
+#[allow(clippy::type_complexity)]
+pub(crate) fn evade_strikes(
+    time: Res<Time>,
+    sets: Option<Res<AttackSets>>,
+    library: Res<AnimationLibrary>,
+    mut set: ParamSet<(
+        Query<(Entity, &Attacker)>,
+        Query<(
+            Entity,
+            &mut Evader,
+            &mut Animator,
+            Option<&mut Attacker>,
+            Option<&AnimationParams>,
+            Option<&LocalTimeScale>,
+        )>,
+    )>,
+) {
+    let Some(sets) = sets else {
+        return;
+    };
+    // Strikes on their way: (attacker, target, move, seconds into it, seconds to its hit
+    // window).
+    let coming: Vec<(Entity, Entity, String, f32, f32)> = set
+        .p0()
+        .iter()
+        .filter_map(|(e, a)| {
+            let target = a.target?;
+            let name = a.current.clone()?;
+            let m = sets.0.get(&a.set)?.get(&name)?;
+            let hit = m
+                .windows
+                .iter()
+                .filter(|w| matches!(w.kind, WindowKind::Hit { .. }))
+                .map(|w| w.start)
+                .fold(f32::INFINITY, f32::min);
+            (hit.is_finite() && a.time < hit && a.missed == 0 && a.hits == 0).then_some((
+                e,
+                target,
+                name,
+                a.time,
+                hit - a.time,
+            ))
+        })
+        .collect();
+    for (me, mut evader, mut animator, mut attacker, params, local) in &mut set.p1() {
+        let evader = &mut *evader;
+        let dt = if animator.frozen() > 0.0 {
+            0.0
+        } else {
+            time.delta_for(local)
+        };
+        // The evasion under way, and a counter out of it.
+        if let Some((clip, t, secs, from, countered)) = &mut evader.evading {
+            *t += dt;
+            if !*countered && *t >= *secs * 0.5 && evader.counter_after.contains(clip) {
+                *countered = true;
+                if let Some(a) = attacker.as_mut()
+                    && a.current.is_none()
+                {
+                    a.target.get_or_insert(*from);
+                    a.buffered = Some(("attack_heavy".into(), 0.0));
+                }
+            }
+            if *t >= *secs {
+                evader.evading = None;
+            }
+        }
+        // A new strike can be read mid-evasion: slip, then slip back the other way.
+        let gate = params
+            .is_none_or(|p| !p.values.contains_key("evasive") || p.get("evasive") > 0.5)
+            && attacker.as_ref().is_none_or(|a| a.current.is_none());
+        for (from, target, name, at, left) in &coming {
+            if *target != me || *left > evader.read_secs {
+                continue;
+            }
+            // Read already, unless the attacker has started a move since (the same one again
+            // starts over from 0).
+            let seen = evader
+                .read
+                .iter()
+                .any(|r| r.0 == *from && r.1 == *name && r.2 <= *at);
+            evader.read.retain(|r| r.0 != *from);
+            evader.read.push((*from, name.clone(), *at));
+            if seen {
+                continue;
+            }
+            evader.count += 1;
+            // The same dice every run: spread by who it is and how many it has read.
+            let roll = ((me.to_bits() as u32)
+                .wrapping_mul(2_654_435_761)
+                .wrapping_add(evader.count.wrapping_mul(40_503))
+                >> 8)
+                % 1000;
+            if !gate || roll as f32 >= evader.skill * 1000.0 {
+                continue;
+            }
+            let Some(m) = sets
+                .0
+                .values()
+                .find_map(|s| s.get(name))
+                .and_then(|m| m.evaded_by.clone())
+            else {
+                continue;
+            };
+            let Some(clip) = library.clip(&m) else {
+                continue;
+            };
+            let secs = clip.duration;
+            animator.play_over(clip, 0.05, 0.15);
+            evader.evading = Some((m, 0.0, secs, *from, false));
+            break;
         }
     }
 }

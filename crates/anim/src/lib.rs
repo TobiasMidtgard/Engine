@@ -132,6 +132,7 @@ impl Plugin for AnimationPlugin {
                     animator::build_animators,
                     animator::queue_triggers,
                     combat::run_attacks,
+                    combat::evade_strikes,
                     (model::spawn_rig_models, model::despawn_orphan_parts),
                     body::drive_bodies,
                     body::hide_drawn_bodies,
@@ -203,6 +204,12 @@ fn register_types(app: &mut App) {
     app.register_component::<AnimatorSettings>(
         "Animated character: skeleton and graph names from the AnimationLibrary, playback \
          speed, pause, root motion, LOD distance (m).",
+    )
+    .register_component::<combat::Evader>(
+        "Moves its head out of the way of strikes at it: read_secs before a move's hit window \
+         it plays the move's evaded_by clip (slips, roll, pull_back) with chance skill (only \
+         while AnimationParams evasive > 0.5, where set); out of the evasions in \
+         counter_after its own Attacker throws attack_heavy back.",
     )
     .register_component::<combat::Attacker>(
         "Attacks with a named AttackSet: takes attack_light/attack_heavy presses (buffered \

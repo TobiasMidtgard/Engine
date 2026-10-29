@@ -1,9 +1,9 @@
 //! Combat moves: presses buffered and linked into a combo in cancel windows, the attacker
 //! stepping in to range, blows landing on the target with hitstop, a raised guard blocking
-//! them on the gloves (but not a hook to the body), and mashing that doesn't queue a whole
-//! combo.
+//! them on the gloves (but not a hook to the body), a skilled target slipping and rolling
+//! under them and countering, and mashing that doesn't queue a whole combo.
 
-use engine_anim::combat::{AttackPhase, Attacker};
+use engine_anim::combat::{AttackPhase, Attacker, Evader};
 use engine_anim::demo::spawn_humanoid;
 use engine_anim::{
     AnimationPlugin, Animator, HitReaction, Hurt, Knockdown, build::humanoid::Outfit,
@@ -347,4 +347,78 @@ fn at_eight_frames_a_second_short_hit_windows_still_land() {
     assert_eq!(hook_hits, 1, "the body hook missed");
     let hurt = app.world.get::<Hurt>(partner).expect("hurt");
     assert!(hurt.liver.is_some() || hurt.is_down(), "not on the liver");
+}
+
+/// The combo at a partner who evades every strike it reads (when `evasive`), and counters:
+/// the boxer's moves, its hits and misses, the evasions played, and the partner's moves and
+/// hits.
+fn at_an_evader(evasive: bool) -> (Vec<String>, u32, u32, Vec<String>, Vec<String>, u32) {
+    let (mut app, boxer, partner) = ring(true, false);
+    app.world
+        .entity_mut(partner)
+        .insert((Evader::new(1.0), Attacker::new("boxing", Some(boxer))));
+    if let Some(mut p) = app.world.get_mut::<AnimationParams>(partner) {
+        p.set("evasive", if evasive { 1.0 } else { 0.0 });
+    }
+    let (mut moves, mut evasions, mut counters) = (Vec::new(), Vec::new(), Vec::new());
+    let (mut hits, mut missed, mut countered) = (0, 0, 0);
+    let (mut last_hits, mut last_missed, mut last_countered) = (0, 0, 0);
+    let mut t = 0.0;
+    while t < 2.6 {
+        for at in [0.1, 0.35, 0.8] {
+            if (at..at + DT).contains(&t) {
+                press(&mut app, boxer, "attack_light");
+            }
+        }
+        app.update();
+        let a = app.world.get::<Attacker>(boxer).unwrap().clone();
+        if a.current.as_ref().is_some_and(|c| moves.last() != Some(c)) {
+            moves.push(a.current.clone().unwrap());
+            (last_hits, last_missed) = (0, 0);
+        }
+        hits += a.hits.saturating_sub(last_hits);
+        missed += a.missed.saturating_sub(last_missed);
+        (last_hits, last_missed) = (a.hits, a.missed);
+        let e = app.world.get::<Evader>(partner).unwrap();
+        if let Some((clip, ..)) = &e.evading
+            && evasions.last() != Some(clip)
+        {
+            evasions.push(clip.clone());
+        }
+        let p = app.world.get::<Attacker>(partner).unwrap().clone();
+        if p.current
+            .as_ref()
+            .is_some_and(|c| counters.last() != Some(c))
+        {
+            counters.push(p.current.clone().unwrap());
+            last_countered = 0;
+        }
+        countered += p.hits.saturating_sub(last_countered);
+        last_countered = p.hits;
+        t += DT;
+    }
+    (moves, hits, missed, evasions, counters, countered)
+}
+
+#[test]
+fn a_skilled_target_slips_rolls_under_the_combo_and_counters() {
+    let (moves, hits, missed, evasions, counters, countered) = at_an_evader(true);
+    assert_eq!(moves, ["jab", "cross", "hook"]);
+    assert_eq!(
+        (hits, missed),
+        (0, 3),
+        "{hits} landed, {missed} missed; {evasions:?} {counters:?}"
+    );
+    assert_eq!(evasions, ["slip_right", "slip_left", "roll"]);
+    // Out of the roll, a cross back at the boxer, mid-hook and so not guarding.
+    assert_eq!(counters, ["cross"]);
+    assert_eq!(countered, 1, "the counter missed");
+}
+
+#[test]
+fn with_evasive_off_the_combo_lands() {
+    let (moves, hits, missed, evasions, counters, _) = at_an_evader(false);
+    assert_eq!(moves, ["jab", "cross", "hook"]);
+    assert_eq!((hits, missed), (3, 0), "{hits} landed, {missed} missed");
+    assert!(evasions.is_empty() && counters.is_empty());
 }
