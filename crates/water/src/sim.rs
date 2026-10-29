@@ -53,6 +53,7 @@ pub fn sync_bodies_system(
         Option<&ChildOf>,
         &WaterBody,
     )>,
+    beaches: Query<(Entity, &GlobalTransform, &crate::swash::BeachGround)>,
     mut book: ResMut<SimBook>,
 ) {
     let dt = time.delta_secs();
@@ -119,6 +120,15 @@ pub fn sync_bodies_system(
         seen.push(entity);
     }
     state.bodies.retain(|b| seen.contains(&b.entity));
+    state.beaches.clear();
+    for (entity, gt, beach) in &beaches {
+        let at = gt.translation();
+        entity.hash(&mut hasher);
+        for v in [at.x, at.y, at.z] {
+            v.to_bits().hash(&mut hasher);
+        }
+        state.beaches.push((at, beach.clone()));
+    }
     let layout = hasher.finish();
     if layout != book.layout {
         book.layout = layout;
@@ -406,6 +416,7 @@ pub fn ripple_system(
     mut flight: ResMut<RipplesInFlight>,
     mut still: Local<StillDepths>,
     mut coarse: Local<CoarseStill>,
+    mut swash: Local<crate::swash::SwashReader>,
 ) {
     let dt = time.delta_secs();
     let mut state = shared.0.write();
@@ -425,7 +436,8 @@ pub fn ripple_system(
     let rebuild = state.ripples.would_recenter(center)
         || book.since_rebuild > 2.0
         || still.unread > 0
-        || coarse.depths.unread > 0;
+        || coarse.depths.unread > 0
+        || swash.unread() > 0;
     if !rebuild && !state.ripples.needs_step() {
         // Calm water: nothing to step, copy or upload.
         state.ripples.pending.clear();
@@ -459,6 +471,7 @@ pub fn ripple_system(
             .cloned()
             .collect();
         let ground = state.ground.clone();
+        let beaches = state.beaches.clone();
         drop(state);
         still.read(at, &bodies, &ground, f.y, DVec2::new(f.x, f.z));
         coarse.read(
@@ -497,6 +510,19 @@ pub fn ripple_system(
             let g = ((p - origin) / cell as f64 - DVec2::splat(0.5)).round();
             (g.y as usize * n + g.x as usize).min(n * n - 1)
         };
+        // The beaches under the grid, for the swash (none over streams: they run their own).
+        if let Some(bed) = swash.read(
+            origin,
+            field.size(),
+            book.layout,
+            &bodies,
+            &beaches,
+            &ground,
+            f,
+            &|p| !stream[index(p)].0.is_nan(),
+        ) {
+            field.swash = bed.any().then_some(bed);
+        }
         // Lakes and streams: footsteps, cloth and swimmers ring both.
         let still = &*still;
         field.rebuild_speeds(settings.ripple_speed, |p| {

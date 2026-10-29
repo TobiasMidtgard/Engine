@@ -96,6 +96,9 @@ pub struct WaterState {
     /// under itself drives its wake but isn't what it floats on: a boat would settle into its
     /// own trough, so the ripples are left out of [`WaterState::sample`] under each one.
     pub hulls: Vec<Hull>,
+    /// Ground drawn by meshes the world's ground query doesn't know (`swash::BeachGround`),
+    /// at their places.
+    pub beaches: Vec<(DVec3, crate::swash::BeachGround)>,
 }
 
 /// A moving interactor's own dip ([`WaterState::hulls`]): round, or a capsule along a long
@@ -120,6 +123,7 @@ impl WaterState {
             time: 0.0,
             shifts: 0,
             hulls: Vec::new(),
+            beaches: Vec::new(),
         }
     }
 

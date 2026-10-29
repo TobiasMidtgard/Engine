@@ -209,6 +209,9 @@ pub struct RippleField {
     /// The water under the surface's coarse level, centered on this grid ([`CoarseBed`]);
     /// `None` until read, and for grids the surface doesn't run on.
     pub coarse: Option<Arc<CoarseBed>>,
+    /// The beaches under this grid for the swash ([`crate::swash`]); `None` where no shore
+    /// lies under it.
+    pub swash: Option<Arc<crate::swash::SwashBed>>,
 }
 
 /// Bilinear sample of one velocity component, `g` in that component's own grid coordinates
@@ -713,6 +716,7 @@ impl RippleField {
             drift_foam: vec![0.0; n * n],
             surface: Arc::default(),
             coarse: None,
+            swash: None,
         }
     }
 
@@ -917,6 +921,7 @@ impl RippleField {
         }
         self.surface = other.surface.clone();
         self.coarse.clone_from(&other.coarse);
+        self.swash.clone_from(&other.swash);
     }
 
     /// Derive what the step needs from `speed2`: the open faces' depths, the wet mask and the

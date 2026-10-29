@@ -76,6 +76,14 @@ const FLOW_CELLS: u32 = 104;
 const FLOW_CELL: f32 = 0.5;
 /// Jetty direction from the lake center, radians.
 const JETTY_ANGLE: f32 = 1.31;
+/// The sandy beach on the near shore, across from the crag: its direction from the lake
+/// center (radians), and its half width there.
+const BEACH_ANGLE: f32 = 1.85;
+const BEACH_HALF: f32 = 0.42;
+/// The beach's slope, meters down per meter out (a lake beach of fine sand, 1:12), and how far
+/// out it runs (to half a meter deep) before the bowl drops away.
+const BEACH_SLOPE: f32 = 1.0 / 12.0;
+const BEACH_SHELF_M: f32 = 9.0;
 /// Height of the wader's hips above its soles: where the entity rides.
 const WADER_HIP: f64 = 0.9;
 
@@ -86,6 +94,12 @@ fn smooth(e0: f32, e1: f32, x: f32) -> f32 {
 
 fn mix(a: f32, b: f32, t: f32) -> f32 {
     a + (b - a) * t
+}
+
+/// How much of the beach's gentle shelf the shore has at angle `theta` (0..1).
+fn beach_weight(theta: f32) -> f32 {
+    let off = (theta - BEACH_ANGLE + PI).rem_euclid(TAU) - PI;
+    1.0 - smooth(BEACH_HALF - 0.2, BEACH_HALF, off.abs())
 }
 
 /// Shoreline radius of the tarn at angle `theta` (it wanders between ~26 and ~30 m).
@@ -159,6 +173,16 @@ pub fn tarn_height(x: f32, z: f32) -> f32 {
     let base = LAKE_LEVEL + 0.25 + (RIM - LAKE_LEVEL - 0.25) * smooth(rs, rs + 4.0, r);
     let hill = base * (1.0 - smooth(rs + 4.0, 60.0, r)).powf(1.3)
         + n * 1.4 * smooth(rs + 2.0, rs + 8.0, r) * (1.0 - smooth(46.0, 60.0, r));
+    // The beach: a long, even shelf where waves run up the sand.
+    let beach = beach_weight(theta);
+    let lake = if beach > 0.0 && r < rs {
+        let d = rs - r;
+        let bowl = LAKE_LEVEL + 0.25 - (LAKE_DEPTH + 0.25) * smooth(0.0, SHORE_WIDTH, d);
+        let shelf = LAKE_LEVEL + 0.25 - d * BEACH_SLOPE - 0.7 * (d - BEACH_SHELF_M).max(0.0);
+        mix(lake, bowl.max(shelf), beach)
+    } else {
+        lake
+    };
     let mut h = if r < rs { lake } else { hill };
 
     let along = x * OUTLET.x + z * OUTLET.y;
@@ -581,6 +605,16 @@ pub const VIEWS: &[DemoView] = &[
         warmup_secs: 3.0,
         quick_warmup: false,
     },
+    // Long enough for the motorboat's wake to reach the beach.
+    DemoView {
+        key: "water_beach",
+        name: "Tarn beach: the motorboat's wake running up the sand",
+        eye: [-1.0, 6.9, 28.0],
+        target: [-14.0, 5.3, 18.0],
+        hour: 16.5,
+        warmup_secs: 12.0,
+        quick_warmup: false,
+    },
     DemoView {
         key: "water_falls",
         name: "Water spilling from the tarn over the falls",
@@ -899,6 +933,18 @@ pub fn spawn_demo_with(commands: &mut Commands, origin: DVec3, options: DemoOpti
                 ]
             },
         );
+    }
+
+    // The swash runs up the drawn beach, which the world's ground doesn't know.
+    if options.ground_mesh {
+        commands.spawn((
+            Name::new("Tarn beach"),
+            Transform::from_translation(origin),
+            crate::swash::BeachGround {
+                half_size: AREA_HALF_SIZE,
+                height: std::sync::Arc::new(tarn_height),
+            },
+        ));
     }
 
     // The tarn.

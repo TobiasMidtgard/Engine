@@ -50,6 +50,8 @@ struct Globals {
     mirror: vec4<f32>,   // its exposure / ours, near plane (m), mips, body slot (-1 none)
     mirror2: vec4<f32>,  // the mirrored eye rel camera xyz, the plane's y rel camera
     shelter: vec4<f32>,  // wind exposure mask (crate::shelter): corner rel camera x, z, size (m), body slot (-1 none)
+    swash: vec4<f32>,    // the swash (render/swash.rs): corner rel camera x, z, size (m), on (1/0)
+    swash2: vec4<f32>,   // its datum rel camera y, cell (m), unused, unused
 };
 
 struct WaterUniform {
@@ -69,9 +71,14 @@ struct WaterUniform {
 @group(1) @binding(9) var mirror_tex: texture_2d<f32>;      // the lake mirror's picture: pre-exposed HDR, mip chain
 @group(1) @binding(10) var mirror_depth: texture_depth_2d;  // its depth (reverse-Z, near / view depth)
 @group(1) @binding(11) var shelter_tex: texture_2d<f32>;    // wind exposure over the nearest lake: 0 lee .. 1 open
+@group(1) @binding(12) var swash_a: texture_2d<f32>;        // the swash: level drawn (m over its datum; below -1e3 none), depth (m), strip weight, foam
+@group(1) @binding(13) var swash_b: texture_2d<f32>;        // what its sand remembers: sheen, damp, mark, bed (m over the datum)
 
 // The body being shaded reflects through the lake mirror (set by fs_body).
 var<private> use_mirror: bool = false;
+// How much the bed seen through the water darkens: the swash's sand is soaked, though the scene
+// colour the water refracts was drawn dry (the sand decal goes on after it is copied).
+var<private> wet_bed: f32 = 1.0;
 
 struct FlowGpu {
     origin: vec4<f32>,  // corner rel camera x, base y, z, cell (m)
@@ -386,6 +393,66 @@ fn ripple_at(rel_xz: vec2<f32>) -> vec4<f32> {
     return r * fade + long;
 }
 
+// ---------------------------------------------------------------- swash
+// The swash over the beaches (`crate::swash`), at a camera-relative x/z: (level rel camera y,
+// depth m, how much of it runs free 0..1, foam), bilinear over the cells that hold water
+// (cells outside the band hold none). w = 0 where there is no swash.
+struct Swash {
+    level: f32,
+    depth: f32,
+    w: f32,
+    foam: f32,
+};
+
+fn swash_at(rel_xz: vec2<f32>) -> Swash {
+    var out = Swash(0.0, 0.0, 0.0, 0.0);
+    if (water.g.swash.w < 0.5) { return out; }
+    let n = i32(textureDimensions(swash_a).x);
+    let g = (rel_xz - water.g.swash.xy) / water.g.swash2.y - vec2<f32>(0.5);
+    if (any(g < vec2<f32>(0.0)) || any(g > vec2<f32>(f32(n) - 1.0))) { return out; }
+    let i = min(vec2<i32>(floor(g)), vec2<i32>(n - 2));
+    let f = g - vec2<f32>(i);
+    var sum = vec4<f32>(0.0);
+    var weight = 0.0;
+    for (var c = 0; c < 4; c++) {
+        let o = vec2<i32>(c & 1, c >> 1);
+        let t = textureLoad(swash_a, i + o, 0);
+        if (t.x < -1e3) { continue; }
+        let wo = mix(1.0 - f.x, f.x, f32(o.x)) * mix(1.0 - f.y, f.y, f32(o.y));
+        sum += t * wo;
+        weight += wo;
+    }
+    if (weight < 1e-4) { return out; }
+    let t = sum / weight;
+    // Faded out at the window's edge, as the ripple grids are.
+    let fade = grid_fade((g + 0.5) / f32(n)) * saturate(weight * 2.0);
+    out.level = water.g.swash2.x + t.x;
+    out.depth = t.y;
+    out.w = saturate(1.0 - t.z) * fade;
+    out.foam = t.w;
+    return out;
+}
+
+// What the sand remembers at a camera-relative x/z: (sheen, damp, mark, ground rel camera y).
+fn swash_sand(rel_xz: vec2<f32>) -> vec4<f32> {
+    if (water.g.swash.w < 0.5) { return vec4<f32>(0.0, 0.0, 0.0, -1e9); }
+    let uv = (rel_xz - water.g.swash.xy) / water.g.swash.z;
+    if (any(uv <= vec2<f32>(0.0)) || any(uv >= vec2<f32>(1.0))) { return vec4<f32>(0.0, 0.0, 0.0, -1e9); }
+    let t = textureSampleLevel(swash_b, linear_clamp, uv, 0.0);
+    return vec4<f32>(t.xyz * grid_fade(uv), water.g.swash2.x + t.w);
+}
+
+// The swash's slope at a camera-relative x/z (d level/dx, d level/dz).
+fn swash_slope(rel_xz: vec2<f32>) -> vec2<f32> {
+    let e = water.g.swash2.y;
+    let xp = swash_at(rel_xz + vec2<f32>(e, 0.0));
+    let xm = swash_at(rel_xz - vec2<f32>(e, 0.0));
+    let zp = swash_at(rel_xz + vec2<f32>(0.0, e));
+    let zm = swash_at(rel_xz - vec2<f32>(0.0, e));
+    if (xp.w * xm.w * zp.w * zm.w <= 0.0) { return vec2<f32>(0.0); }
+    return vec2<f32>(xp.level - xm.level, zp.level - zm.level) / (2.0 * e);
+}
+
 // Currents stirred into the ripple grid at a camera-relative x/z: (x, z m/s, 0, bubbles 0..1),
 // faded at the edge.
 fn current_at(rel_xz: vec2<f32>) -> vec4<f32> {
@@ -693,6 +760,8 @@ fn streak_foam(wp: vec2<f32>, vel: vec2<f32>) -> f32 {
 
 // Water this deep (m) over whatever lies right behind it froths against it (`contact`).
 const CONTACT_M: f32 = 0.12;
+// Wet sand against dry, the albedo it keeps (Lagarde: soaked sand about 0.6 of dry).
+const WET_SAND: f32 = 0.58;
 
 // Full water surface shading seen from above. `n` world normal, `foam` 0..1, `crest` 0..1 how
 // high on a wave this point is, `wind` m/s. Returns pre-exposed radiance with fog applied.
@@ -745,7 +814,7 @@ fn shade_water(rel: vec3<f32>, n_in: vec3<f32>, look: WaterLook, foam_in: f32, c
         uv = uv0;
         z_bottom = z0;
     }
-    let behind = textureSampleLevel(scene_color, linear_clamp, uv, 0.0).rgb;
+    let behind = textureSampleLevel(scene_color, linear_clamp, uv, 0.0).rgb * wet_bed;
     let ratio = z_bottom / z_frag;
     let thick = dist * max(ratio - 1.0, 0.0);
     let bottom_rel = rel * ratio;
@@ -858,7 +927,7 @@ fn shade_water(rel: vec3<f32>, n_in: vec3<f32>, look: WaterLook, foam_in: f32, c
         let foam_col = pre_expose(0.85 * (sun * shadow * max(dot(n, l) * 0.6 + 0.4, 0.0) + up) * INV_PI);
         color = mix(color, foam_col, cover * 0.95);
     }
-    let ground = textureSampleLevel(scene_color, linear_clamp, uv0, 0.0).rgb;
+    let ground = textureSampleLevel(scene_color, linear_clamp, uv0, 0.0).rgb * wet_bed;
     // The last centimeters at the waterline are a film over the sand: no water color to speak
     // of, but it darkens the grains a little more and mirrors the sky and the sun like the
     // water does (a swash film's sheen), before the mesh's edge gives way to the ground.
@@ -919,12 +988,19 @@ fn vs_body(@builtin(vertex_index) vid: u32, @builtin(instance_index) bi: u32) ->
     let p0 = rest - water.bodies[bi].origin.xz;
     let w = eval_waves(bi, p0, depth, spacing * 2.5);
     var y = water.bodies[bi].origin.y + w.offset.y;
-    if (water.bodies[bi].look.w > 0.5) { y += ripple_at(rest).x; }
+    var free = 0.0;
+    if (water.bodies[bi].look.w > 0.5) {
+        y += ripple_at(rest).x;
+        // Up the beach the swash carries the water (and dives under the sand where it's dry).
+        let sw = swash_at(rest);
+        free = sw.w;
+        y = mix(y, sw.level, free);
+    }
     var out: BodyOut;
     out.rel = vec3<f32>(rest.x + w.offset.x, y, rest.y + w.offset.z);
     // The fine waves near the camera, where the grid is fine enough to hold them.
     let bd = water.bodies[bi].detail;
-    out.rel.y += detail_height(tiling_pos(out.rel).xz, bd.x, bd.yz, spacing);
+    out.rel.y += detail_height(tiling_pos(out.rel).xz, bd.x, bd.yz, spacing) * (1.0 - free);
     out.clip = frame.view_proj * vec4<f32>(out.rel, 1.0);
     out.p0 = p0;
     out.rest = rest;
@@ -938,8 +1014,13 @@ fn vs_body(@builtin(vertex_index) vid: u32, @builtin(instance_index) bi: u32) ->
 fn fs_body(in: BodyOut) -> @location(0) vec4<f32> {
     let bi = in.body;
     // Under a lake mirror's plane, in its view (`clip_plane_distance` is 0 elsewhere).
-    if (body_inset(bi, body_local(bi, in.rest)) < 0.0 || clip_plane_distance(in.rel) < 0.0) { discard; }
+    // Past the lake's edge only where the swash has run up the beach.
+    var sw = Swash(0.0, 0.0, 0.0, 0.0);
+    if (water.bodies[bi].look.w > 0.5) { sw = swash_at(in.rest); }
+    let up_the_beach = sw.w > 0.5 && sw.depth > 5e-4;
+    if ((body_inset(bi, body_local(bi, in.rest)) < 0.0 && !up_the_beach) || clip_plane_distance(in.rel) < 0.0) { discard; }
     use_mirror = i32(bi) == i32(water.g.mirror.w);
+    wet_bed = mix(1.0, WET_SAND, sw.w);
     let look = body_look(bi);
     let dist = length(in.rel);
     // Size of a pixel here, meters: drop detail finer than that.
@@ -1020,12 +1101,21 @@ fn fs_body(in: BodyOut) -> @location(0) vec4<f32> {
     g += boil.yz;
     vel += plunge_flow(in.rel);
     n = normalize(n + vec3<f32>(-g.x, 0.0, -g.y));
+    // The swash: its own slope where it runs free (the lake's waves have become it), and the
+    // foam its bores and run-up tips make.
+    if (sw.w > 0.0) {
+        let ss = swash_slope(in.rest);
+        let n_swash = normalize(vec3<f32>(-ss.x - g.x * 0.3, 1.0, -ss.y - g.y * 0.3));
+        n = normalize(mix(n, n_swash, sw.w));
+        foam += sw.foam * sw.w * 1.4;
+    }
     var color: vec3<f32>;
     // Seen from below when the camera is under the water.
     if (water.g.rain.z >= 0.0) {
         color = shade_underside(in.rel, n, look, in.clip);
     } else {
-        color = shade_water(in.rel, n, look, foam, in.crest, in.clip, wind, 0.05, 0.3, vel, slope_var, bubbles);
+        // Where the swash runs, the shore's procedural lapping gives way to it.
+        color = shade_water(in.rel, n, look, foam, in.crest, in.clip, wind, 0.05, 0.3 * (1.0 - sw.w), vel, slope_var, bubbles);
     }
     return vec4<f32>(color, 1.0);
 }
@@ -1560,6 +1650,65 @@ fn fs_puddle(in: PuddleOut) -> @location(0) vec4<f32> {
     let under = ground * 0.6;
     let color = under * (1.0 - fresnel) + refl * fresnel + sun;
     return vec4<f32>(mix(ground, color, mask), 1.0);
+}
+
+// ---------------------------------------------------------------- wet sand
+// Over the scene, where the swash has been: sand darkened while the water is in it (light is
+// trapped in the water between the grains, Lekner & Dorf 1988), a glassy sheen while a film is
+// on it, and the foam the run left at its top. Blended as dst · a + rgb.
+@fragment
+fn fs_sand(in: FullscreenOut) -> @location(0) vec4<f32> {
+    let pix = vec2<i32>(in.position.xy);
+    let d = textureLoad(scene_depth, pix, 0);
+    if (d <= 1e-7) { discard; }
+    let ndc = vec2<f32>(in.uv.x * 2.0 - 1.0, 1.0 - in.uv.y * 2.0);
+    let p = frame.inv_view_proj * vec4<f32>(ndc, d, 1.0);
+    let rel = p.xyz / p.w;
+    let sand = swash_sand(rel.xz);
+    if (water.g.swash2.z > 0.5) {
+        // Debug (ENGINE_WATER_SWASH_DEBUG): depth red, damp green, sheen blue, ground step white.
+        if (sand.w < -1e8) { discard; }
+        let sw = swash_at(rel.xz);
+        let off = select(0.0, 1.0, abs(rel.y - sand.w) > 0.25);
+        return vec4<f32>(vec3<f32>(saturate(sw.depth * 20.0), sand.y, sand.x) * 0.8 + off * 0.2, 0.0);
+    }
+    // Only the ground itself (not a post or a boat standing in it).
+    if (abs(rel.y - sand.w) > 0.25 || sand.y + sand.z < 0.01) { discard; }
+    let wp = tiling_pos(rel).xz;
+    // Dries unevenly: the grains' own pattern breaks up the edge.
+    let grain = value_noise2(wp * 7.0) * 0.5 + value_noise2(wp * 23.0) * 0.5;
+    let damp = saturate(sand.y * (0.85 + 0.3 * grain));
+    let dark = mix(1.0, WET_SAND, damp);
+    let dist = length(rel);
+    let v = -rel / max(dist, 1e-4);
+    let n = vec3<f32>(0.0, 1.0, 0.0);
+    let n_dot_v = max(dot(n, v), 1e-3);
+    let fresnel = 0.02 + 0.98 * pow(1.0 - n_dot_v, 5.0);
+    let sky_vis = sky_visibility(rel, n);
+    let fill = frame.ambient.rgb;
+    let refl = pre_expose((sample_env(reflect(-v, n)) - fill) * sky_vis + fill);
+    let l = frame.sun_dir.xyz;
+    let h = normalize(l + v);
+    let a = 0.06 * 0.06;
+    let spec = d_ggx(saturate(dot(n, h)), a) * v_smith_ggx_correlated(n_dot_v, max(dot(n, l), 1e-3), a)
+        * f_schlick(vec3<f32>(0.02), saturate(dot(l, h))) * saturate(dot(n, l));
+    let shadow = shadow_factor(rel, n);
+    let sun = water_sun(rel);
+    let sheen = saturate(sand.x * (0.7 + 0.6 * grain));
+    var add = (refl * fresnel + pre_expose(spec * sun * shadow)) * sheen;
+    // The swash mark: lace of stranded foam, torn as it pops.
+    var keep = dark;
+    if (sand.z > 0.01) {
+        let pattern = fbm2(wp * 3.1, 4);
+        let theta = 1.0 - sand.z * 0.9;
+        let cover = smoothstep(theta, theta + 0.12, pattern) * 0.9;
+        let up = sky_ambient(n) * sky_vis * PI;
+        let foam_col = pre_expose(0.85 * (sun * shadow * max(dot(n, l) * 0.6 + 0.4, 0.0) + up) * INV_PI);
+        add = mix(add, foam_col, cover);
+        keep *= 1.0 - cover;
+    }
+    let fog = surface_fog(rel);
+    return vec4<f32>(add * fog.transmittance, keep);
 }
 
 // ---------------------------------------------------------------- underwater

@@ -301,6 +301,19 @@ impl SurfaceGpu {
         &self.levels[1].view
     }
 
+    /// Level `i`'s (h, φ) buffer (0 fine, 1 coarse), for the swash to read.
+    pub fn level_buffer(&self, i: usize) -> &wgpu::Buffer {
+        &self.levels[i].surface
+    }
+
+    /// Where level `i` lies this frame (world x/z of its corner, its cell size), while the GPU
+    /// steps it.
+    pub fn level_at(&self, i: usize) -> Option<(DVec2, f32)> {
+        let l = &self.levels[i];
+        l.at.filter(|_| l.active)
+            .map(|(origin, cell, _)| (origin, cell))
+    }
+
     /// Follow the ripple grid this frame: take its pushes, its currents and wet cells, hand
     /// back heights read since the last frame, and set the step. `shifts` counts the world
     /// shifts followed so far, `dt` the frame's step, `damping` the waves' (1/s).

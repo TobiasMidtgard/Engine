@@ -25,6 +25,7 @@ use crate::waves::MAX_WAVES;
 
 mod detail;
 mod surface;
+mod swash;
 
 /// The water shader (composed after the renderer's `lib_types` and `lib_frame`).
 pub const SHADER: &str = include_str!("water.wgsl");
@@ -320,6 +321,10 @@ struct Globals {
     /// The wind exposure mask (`crate::shelter`): corner rel camera x, z, size (m), body slot
     /// or -1 (-2: shelter and slicks off).
     shelter: [f32; 4],
+    /// The swash (`render/swash.rs`): corner rel camera x, z, size (m), on (1/0); its datum rel
+    /// camera y, cell (m), false colour on (`ENGINE_WATER_SWASH_DEBUG`), unused.
+    swash: [f32; 4],
+    swash2: [f32; 4],
 }
 
 #[repr(C)]
@@ -430,6 +435,7 @@ struct Gpu {
     body: wgpu::RenderPipeline,
     flow: wgpu::RenderPipeline,
     puddle: wgpu::RenderPipeline,
+    sand: wgpu::RenderPipeline,
     under: wgpu::RenderPipeline,
     group1_layout: wgpu::BindGroupLayout,
     group2_layout: wgpu::BindGroupLayout,
@@ -471,6 +477,8 @@ struct Gpu {
     detail: detail::DetailGpu,
     /// The dispersive ripples over the ripple grid.
     surface: surface::SurfaceGpu,
+    /// The swash over the beaches under it.
+    swash: swash::SwashGpu,
 }
 
 /// What the puddle window holds.
@@ -670,6 +678,18 @@ fn ring_at(r: f64, s0: f64, alpha: f64) -> f64 {
     (1.0 + r.max(0.0) * alpha / s0).ln() / alpha
 }
 
+/// `ENGINE_WATER_PLAIN_SHORE` set: shores as before round 29 (no swash), for before shots.
+fn plain_shore() -> bool {
+    static PLAIN: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *PLAIN.get_or_init(|| std::env::var_os("ENGINE_WATER_PLAIN_SHORE").is_some())
+}
+
+/// `ENGINE_WATER_SWASH_DEBUG` set: the sand in false colour (depth red, damp green, sheen blue).
+fn swash_debug() -> bool {
+    static DEBUG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *DEBUG.get_or_init(|| std::env::var_os("ENGINE_WATER_SWASH_DEBUG").is_some())
+}
+
 /// Nearest and farthest horizontal distance from `p` to the body's water, meters.
 fn extent_range(b: &BodyState, p: DVec2) -> (f64, f64) {
     let c = DVec2::new(b.center.x, b.center.z);
@@ -743,6 +763,8 @@ impl WaterFeature {
                 tex(9, wgpu::TextureSampleType::Float { filterable: true }),
                 tex(10, wgpu::TextureSampleType::Depth),
                 tex(11, wgpu::TextureSampleType::Float { filterable: true }),
+                tex(12, wgpu::TextureSampleType::Float { filterable: true }),
+                tex(13, wgpu::TextureSampleType::Float { filterable: true }),
             ],
         });
         let group2_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -826,7 +848,51 @@ impl WaterFeature {
             "fs_puddle",
             gpu.depth_state(false),
         );
-        let under = pipeline("underwater", &layout1, "vs_under", "fs_under", always);
+        let under = pipeline(
+            "underwater",
+            &layout1,
+            "vs_under",
+            "fs_under",
+            always.clone(),
+        );
+        // Wet sand where the swash has been: darkens what is there and adds its sheen
+        // (dst · a + rgb).
+        let sand = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("water wet sand"),
+            layout: Some(&layout1),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_under"),
+                compilation_options: Default::default(),
+                buffers: &[],
+            },
+            primitive: Default::default(),
+            depth_stencil: Some(always.clone()),
+            multisample: Default::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_sand"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: gpu.formats.hdr,
+                    blend: Some(wgpu::BlendState {
+                        color: wgpu::BlendComponent {
+                            src_factor: wgpu::BlendFactor::One,
+                            dst_factor: wgpu::BlendFactor::SrcAlpha,
+                            operation: wgpu::BlendOperation::Add,
+                        },
+                        alpha: wgpu::BlendComponent {
+                            src_factor: wgpu::BlendFactor::Zero,
+                            dst_factor: wgpu::BlendFactor::One,
+                            operation: wgpu::BlendOperation::Add,
+                        },
+                    }),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
         // Falling curtains: aerated water blended over everything (premultiplied alpha).
         let falls = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("water falls"),
@@ -907,6 +973,7 @@ impl WaterFeature {
         );
         let detail = detail::DetailGpu::new(gpu);
         let surface = surface::SurfaceGpu::new(gpu);
+        let swash = swash::SwashGpu::new(gpu);
         let no_mirror = (
             create_texture(device, "no mirror", 1, 1, gpu.formats.hdr)
                 .create_view(&Default::default()),
@@ -931,6 +998,7 @@ impl WaterFeature {
             body,
             flow,
             puddle,
+            sand,
             under,
             group1_layout,
             group2_layout,
@@ -964,6 +1032,7 @@ impl WaterFeature {
             fall_count: 0,
             detail,
             surface,
+            swash,
         }
     }
 
@@ -1726,6 +1795,46 @@ impl RenderFeature for WaterFeature {
                 surface_damping,
             );
         }
+        // The swash over the beaches, driven by the surface's waves (before shots:
+        // `ENGINE_WATER_PLAIN_SHORE=1`).
+        if !view.extra_view {
+            let foam_life = world
+                .get_resource::<crate::body::WaterSettings>()
+                .map_or(6.0, |s| s.foam_life_s);
+            let ripple_view = gpu.ripple.create_view(&Default::default());
+            let current_view = gpu.currents.create_view(&Default::default());
+            let bed = state.ripples.swash.as_ref().filter(|_| !plain_shore());
+            // The lake whose waves reach the beaches: the one nearest the grid's middle.
+            let lake = bed.and_then(|bed| {
+                let mid = bed.origin + DVec2::splat((bed.cell * bed.n as f32) as f64 * 0.5);
+                state
+                    .bodies
+                    .iter()
+                    .min_by(|a, b| {
+                        let d = |b: &crate::state::BodyState| {
+                            (DVec2::new(b.center.x, b.center.z) - mid).length_squared()
+                        };
+                        d(a).total_cmp(&d(b))
+                    })
+                    .map(|b| (DVec2::new(b.center.x, b.center.z), &b.waves.waves[..]))
+            });
+            gpu.swash.update(
+                shared,
+                bed,
+                &gpu.surface,
+                (r.origin, r.cell, r.n),
+                (&ripple_view, &current_view),
+                lake,
+                view.delta,
+                foam_life,
+            );
+        }
+        if let Some(f) = gpu.swash.frame() {
+            let rel = view.relative(DVec3::new(f.origin.x, f.datum, f.origin.y));
+            g.swash = [rel.x, rel.z, f.size, 1.0];
+            let debug = if swash_debug() { 1.0 } else { 0.0 };
+            g.swash2 = [rel.y, f.size / crate::swash::N as f32, debug, 0.0];
+        }
         // The ripples' heights come from the dispersive surface while it runs.
         g.detail[3] = if gpu.surface.drawn() { 1.0 } else { 0.0 };
         if let Some((corner, size)) = gpu.surface.coarse_drawn() {
@@ -1816,6 +1925,7 @@ impl RenderFeature for WaterFeature {
         if !self.extra_view {
             gpu.detail.dispatch(encoder);
             gpu.surface.dispatch(encoder);
+            gpu.swash.dispatch(encoder);
         }
         // Built again only when what it binds is made anew: the scene copies on resize and per
         // view, the mirror's picture, the ripple textures when the grid changes size (which
@@ -1890,6 +2000,14 @@ impl RenderFeature for WaterFeature {
                         binding: 11,
                         resource: wgpu::BindingResource::TextureView(&shelter),
                     },
+                    wgpu::BindGroupEntry {
+                        binding: 12,
+                        resource: wgpu::BindingResource::TextureView(gpu.swash.view_a()),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 13,
+                        resource: wgpu::BindingResource::TextureView(gpu.swash.view_b()),
+                    },
                 ],
             });
         // A few views at most (the main one, a mirror's, a portal's): drop the oldest.
@@ -1913,6 +2031,10 @@ impl RenderFeature for WaterFeature {
         pass.set_bind_group(1, group1, &[]);
         if self.underwater {
             pass.set_pipeline(&gpu.under);
+            pass.draw(0..3, 0..1);
+        }
+        if gpu.swash.frame().is_some() && !self.underwater {
+            pass.set_pipeline(&gpu.sand);
             pass.draw(0..3, 0..1);
         }
         if self.puddles.wet {
@@ -1950,10 +2072,9 @@ impl RenderFeature for WaterFeature {
     fn needs_scene_copy(&self) -> bool {
         !self.bodies.is_empty()
             || self.puddles.wet
-            || self
-                .gpu
-                .as_ref()
-                .is_some_and(|g| g.fall_count > 0 || g.flows.iter().any(|f| f.drawn))
+            || self.gpu.as_ref().is_some_and(|g| {
+                g.fall_count > 0 || g.flows.iter().any(|f| f.drawn) || g.swash.frame().is_some()
+            })
     }
 
     fn stats(&self) -> FeatureStats {
@@ -1985,10 +2106,10 @@ mod tests {
     #[test]
     fn uniform_layout_matches_the_shader() {
         // WGSL: Globals 10 vec4 + 4 showers + 8 plunges + the mirror's matrix and 2 vec4 +
-        // the shelter mask's; GpuBody 11 vec4 + 24 waves of 2 vec4.
+        // the shelter mask's + the swash's 2; GpuBody 11 vec4 + 24 waves of 2 vec4.
         assert_eq!(
             std::mem::size_of::<Globals>(),
-            (10 + 4 + 8 + 4 + 2 + 1) * 16
+            (10 + 4 + 8 + 4 + 2 + 1 + 2) * 16
         );
         assert_eq!(std::mem::size_of::<GpuBody>(), (11 + MAX_WAVES * 2) * 16);
         assert_eq!(

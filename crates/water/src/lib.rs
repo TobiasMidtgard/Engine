@@ -20,6 +20,7 @@ pub mod sim;
 pub mod spill;
 pub mod state;
 pub mod surface;
+pub mod swash;
 pub mod waves;
 
 pub use boat::{Boat, HullCut, Interior, hull_collider};
