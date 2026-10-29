@@ -149,7 +149,8 @@ pub fn desired_parts(
                     None => (leafy(v.foliage, &v.foliage_thin, amount), leaves),
                 };
                 [
-                    pair(&v.base, vis.bark_rigid),
+                    pair(&v.base, vis.bark_rigid)
+                        .or_else(|| pair(&v.foliage_dead_lod, vis.dead_leaves)),
                     pair(&or(&v.wood_lod, &v.wood), vis.bark),
                     pair(&crown, leaves),
                 ]
@@ -173,7 +174,9 @@ pub fn desired_parts(
                     _ => pair(&leafy(v.foliage, &v.foliage_thin, amount), leaves),
                 };
                 [
-                    pair(&v.base, vis.bark_rigid),
+                    // Plants without a stump (ferns) draw their withered leaves in its place.
+                    pair(&v.base, vis.bark_rigid)
+                        .or_else(|| pair(&v.foliage_dead, vis.dead_leaves)),
                     pair(&v.wood, vis.bark),
                     crown,
                 ]
@@ -214,7 +217,12 @@ pub fn desired_parts(
                     },
                 ]
             } else {
-                [None, None, pair(&v.foliage, vis.dead_leaves)]
+                // The whole plant withered: its fronds and last year's alike.
+                [
+                    pair(&v.foliage_dead, vis.dead_leaves),
+                    None,
+                    pair(&v.foliage, vis.dead_leaves),
+                ]
             }
         }
         PlantStage::Burnt { .. } => {
@@ -824,5 +832,81 @@ mod tests {
         let up = slope_tilt(normal) * Vec3::Y;
         let lean = up.angle_between(Vec3::Y).to_degrees();
         assert!(up.x > 0.0 && (15.0..25.0).contains(&lean), "{up} {lean}");
+    }
+
+    /// A fern up close draws its withered frond (where it has one) with the dead-leaf
+    /// material, beside its living fronds.
+    #[test]
+    fn ferns_draw_their_dead_frond_with_the_dead_leaves() {
+        use engine_assets::Assets;
+        use engine_render::{Camera, MeshRef};
+        let mut app = App::new();
+        app.add_plugins(engine_world::WorldPlugin);
+        app.init_resource::<Assets<Mesh>>()
+            .init_resource::<Assets<StandardMaterial>>()
+            .init_resource::<Assets<engine_render::Image>>()
+            .add_plugins(crate::FoliagePlugin);
+        app.world.insert_resource(crate::FoliageLoading::in_frame());
+        app.world.resource_mut::<EcologySettings>().paused = true;
+        // The camera comes from afar, as a player walks up.
+        let cam = app
+            .world
+            .spawn((
+                Camera::default(),
+                Transform::from_translation(DVec3::new(0.0, 1.7, 300.0)),
+            ))
+            .id();
+        let ferns: Vec<Entity> = (0..VARIANTS as u32)
+            .map(|v| {
+                let mut genes = crate::plant::Genes::random(&mut Rng::new(v as u64));
+                genes.variant = v as u8;
+                crate::api::spawn_plant(
+                    &mut app.world,
+                    "fern",
+                    DVec3::new(v as f64 * 0.8 - 2.0, 0.0, 2.5),
+                    0.9,
+                    Some(genes),
+                )
+                .unwrap()
+            })
+            .collect();
+        app.update_n(4);
+        for z in (0..30).rev() {
+            app.world.get_mut::<Transform>(cam).unwrap().translation =
+                DVec3::new(0.0, 1.7, z as f64 * 3.0);
+            app.update();
+        }
+        app.update_n(60);
+        let library = app.world.resource::<PlantLibrary>().clone();
+        let visuals = app.world.resource::<FoliageVisuals>();
+        let vis = visuals
+            .get(library.id("fern").unwrap())
+            .expect("fern visuals");
+        let dead_leaves = vis.dead_leaves;
+        let dead: Vec<_> = (0..VARIANTS)
+            .map(|v| vis.variants[v].foliage_dead)
+            .collect();
+        assert!(
+            dead.iter().any(Option::is_some),
+            "no variant has a dead frond"
+        );
+        for (v, e) in ferns.into_iter().enumerate() {
+            let Some(mesh) = dead[v] else { continue };
+            let parts = app.world.get::<PlantVisual>(e).expect("fern parts").parts;
+            let r = app.world.get::<MeshRenderer>(parts[0]).unwrap();
+            assert!(r.visible, "variant {v}: dead frond hidden");
+            assert!(
+                app.world
+                    .get::<engine_render::DitherFade>(parts[0])
+                    .is_none_or(|d| d.0 == 0.0),
+                "variant {v}: dead frond dithered out"
+            );
+            assert_eq!(r.mesh, MeshRef::Handle(mesh), "variant {v}");
+            assert_eq!(
+                r.material,
+                engine_render::MaterialRef::Handle(dead_leaves),
+                "variant {v}"
+            );
+        }
     }
 }

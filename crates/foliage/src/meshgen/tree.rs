@@ -26,6 +26,9 @@ use super::textures::{CLUSTER_CELL, LeafKind, atlas_cell, kind_of};
 use super::{MeshBuilder, rgb};
 use crate::species::{BarkStyle, LeafStyle, PlantForm, PlantSpecies};
 
+/// The color of dead leaves (sRGB), what `foliage_dead`'s vertex colors are relative to.
+pub const DEAD_LEAF_SRGB: u32 = 0x8a6a3c;
+
 /// Meshes for one plant variant. Parts a form doesn't have are `None`.
 #[derive(Default)]
 pub struct PlantMeshes {
@@ -39,6 +42,12 @@ pub struct PlantMeshes {
     pub foliage: Option<engine_render::Mesh>,
     pub wood_lod: Option<engine_render::Mesh>,
     pub foliage_lod: Option<engine_render::Mesh>,
+    /// Withered leaves among the living ones (a fern's last-year frond), near and far: drawn
+    /// with the dead-leaf material, so the season's tint of the living leaves (vertex colors
+    /// are relative to it) doesn't turn them red in autumn. Vertex colors relative to
+    /// [`DEAD_LEAF_SRGB`].
+    pub foliage_dead: Option<engine_render::Mesh>,
+    pub foliage_dead_lod: Option<engine_render::Mesh>,
     /// The middle level, for trees a few tens of meters off: every crown card of the near
     /// level, flat (a quad each rather than a folded 3×3 grid), and the near trunk with its
     /// limbs but no twigs. About a fifth of the near level's triangles with the same crown
@@ -586,11 +595,14 @@ impl PlantMeshes {
                 &self.foliage_mid,
                 &self.wood_lod,
                 &self.foliage_lod,
+                &self.foliage_dead,
+                &self.foliage_dead_lod,
             ]
             .into_iter()
             .flatten(),
         );
-        // Thinned crowns lie within the full one, and must sway with it.
+        // Thinned crowns lie within the full one, and must sway with it. Withered leaves lying
+        // low barely sway (on bounds of their own, a frond lying flat swung as wildly as a tip).
         widen(
             [
                 &mut self.wood,
@@ -600,6 +612,8 @@ impl PlantMeshes {
                 &mut self.foliage_mid,
                 &mut self.wood_lod,
                 &mut self.foliage_lod,
+                &mut self.foliage_dead,
+                &mut self.foliage_dead_lod,
             ]
             .into_iter()
             .flatten()

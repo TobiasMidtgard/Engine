@@ -365,6 +365,28 @@ fn main() {
         LOD_PATCH + DVec3::new(0.0, 0.3, 0.0),
     );
     set_fov(&mut app.world, 50.0);
+    // Every fern variant in a row, seen from above: last year's dead fronds lie brown among
+    // the living ones.
+    let row = DVec3::new(-60.0, 0.0, 0.0);
+    for v in 0..engine_foliage::assets::VARIANTS as u8 {
+        let mut genes = engine_foliage::Genes::random(&mut Rng::new(v as u64 + 7));
+        genes.variant = v;
+        spawn_plant(
+            &mut app.world,
+            "fern",
+            row + DVec3::new(v as f64 * 1.6 - 2.4, 0.0, 0.0),
+            1.0,
+            Some(genes),
+        )
+        .expect("fern");
+    }
+    app.update();
+    shot(
+        &mut app,
+        &file("8_dead_fronds"),
+        row + DVec3::new(0.0, 3.2, 2.6),
+        row + DVec3::new(0.0, 0.0, -0.2),
+    );
     set_sun(&mut app.world, sun, 0.0);
     shot(
         &mut app,

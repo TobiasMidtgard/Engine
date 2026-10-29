@@ -25,7 +25,7 @@ use engine_core::math::{Quat, Rng, TAU, Vec2, Vec3, Vec4, hash01, smoothstep};
 
 use super::MeshBuilder;
 use super::small_textures::{Cell, cap_uv, fern_stem_uv, gill_uv, pinna_uv, stem_uv};
-use super::tree::PlantMeshes;
+use super::tree::{DEAD_LEAF_SRGB, PlantMeshes};
 use crate::species::{PlantForm, PlantSpecies, srgb};
 
 const UP: Vec3 = Vec3::Y;
@@ -621,7 +621,8 @@ fn fern(sp: &PlantSpecies, seed: u64) -> PlantMeshes {
     let leaf = Vec3::from(sp.leaf_color).max(Vec3::splat(0.01));
     let young = rel(sp.accent_color, leaf);
     let stipe = rel(sp.bark_color, leaf);
-    let brown = Vec3::new(0.30, 0.17, 0.065) / leaf;
+    let brown_color = Vec3::new(0.30, 0.17, 0.065);
+    let brown = brown_color / leaf;
     let (steep, flat) = (
         sh.angle_high_deg.to_radians(),
         sh.angle_low_deg.to_radians(),
@@ -643,20 +644,27 @@ fn fern(sp: &PlantSpecies, seed: u64) -> PlantMeshes {
         };
         frond(&mut b, &mut lod, &f, h, &mut rng);
     }
-    // Last year's frond, brown and lying low.
+    // Last year's frond, brown and lying low: its own mesh, drawn with the dead-leaf material
+    // (relative to the living leaves' color, the autumn tint turned it signal red).
+    let (mut dead, mut dead_lod) = (MeshBuilder::new(), MeshBuilder::new());
     if rng.chance(0.65) {
+        let withered = brown_color / Vec3::from(srgb(DEAD_LEAF_SRGB));
         let f = Frond {
             az: rng.range(0.0, TAU),
             tilt: rng.range(1.25, 1.45),
             length: sp.crown_radius_m * rng.range(0.9, 1.2),
             droop: 0.35,
             roll: rng.range(-0.5, 0.5),
-            tint: brown * rng.range(0.8, 1.2),
-            stipe: brown * 0.8,
+            tint: withered * rng.range(0.8, 1.2),
+            stipe: withered * 0.8,
             dead: true,
         };
-        frond(&mut b, &mut lod, &f, h, &mut rng);
+        frond(&mut dead, &mut dead_lod, &f, h, &mut rng);
     }
+    let some = |b: MeshBuilder| {
+        let m = b.finish();
+        (m.triangle_count() > 0).then_some(m)
+    };
     // Fiddleheads unrolling from the crown.
     for _ in 0..rng.range_i32(0, 4) {
         let az = rng.range(0.0, TAU);
@@ -670,13 +678,17 @@ fn fern(sp: &PlantSpecies, seed: u64) -> PlantMeshes {
             height,
             height * rng.range(0.13, 0.2),
             young * 1.15,
-            brown,
+            // Brown scales, muted: relative to the leaf color, full brown would turn red with
+            // the autumn tint.
+            brown.min(Vec3::splat(2.0)),
             &mut rng,
         );
     }
     PlantMeshes {
         foliage: Some(b.finish()),
         foliage_lod: Some(lod.finish()),
+        foliage_dead: some(dead),
+        foliage_dead_lod: some(dead_lod),
         ..Default::default()
     }
 }
@@ -2067,6 +2079,41 @@ mod tests {
                 assert!(tris <= budget, "{name} variant {seed}: {tris} triangles");
             }
         }
+    }
+
+    /// A fern's withered frond is its own mesh, brown against the dead-leaf material, so the
+    /// living fronds' autumn tint can't redden it; the living fronds keep no brown in them.
+    #[test]
+    fn a_ferns_dead_frond_is_brown_whatever_the_season() {
+        let lib = PlantLibrary::default();
+        let sp = lib.get(lib.id("fern").unwrap());
+        let dead = Vec3::from(srgb(DEAD_LEAF_SRGB));
+        let mut with_dead = 0;
+        for seed in 0..40u64 {
+            let m = small(sp, seed * 0x9e37_79b9 + 11);
+            let Some(d) = &m.foliage_dead else { continue };
+            with_dead += 1;
+            assert!(m.foliage_dead_lod.is_some());
+            for v in &d.vertices {
+                let c = Vec3::from_slice(&v.color[..3]) * dead;
+                // Brown: red over green over blue, nothing like signal red.
+                assert!(
+                    c.x > c.y && c.y > c.z && c.x < c.y * 2.6 && c.x < 0.5,
+                    "variant {seed}: {c}"
+                );
+            }
+            // The living fronds' colors stay near the leaf color they are relative to.
+            let live = m.foliage.as_ref().unwrap();
+            let fronds = live.vertices.iter().filter(|v| v.color[0] > 3.5).count();
+            assert!(
+                fronds * 50 < live.vertices.len(),
+                "variant {seed}: {fronds} brown vertices among the living fronds"
+            );
+        }
+        assert!(
+            with_dead > 3,
+            "{with_dead} of 40 variants have a dead frond"
+        );
     }
 
     /// Far meshes (shown beyond `small_plant_lod_distance_m`) cost under a fifth of the near

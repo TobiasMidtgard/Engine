@@ -55,6 +55,10 @@ pub struct VariantMeshes {
     pub foliage_mid: Option<Handle<Mesh>>,
     pub wood_lod: Option<Handle<Mesh>>,
     pub foliage_lod: Option<Handle<Mesh>>,
+    /// Withered leaves among the living ones, near and far (`tree::PlantMeshes::foliage_dead`),
+    /// drawn with `SpeciesVisual::dead_leaves`.
+    pub foliage_dead: Option<Handle<Mesh>>,
+    pub foliage_dead_lod: Option<Handle<Mesh>>,
     /// The cheapest level, hundreds of meters off (trees and shrubs): the whole trunk (no
     /// base with it) and a few big crown cards.
     pub wood_distant: Option<Handle<Mesh>>,
@@ -109,9 +113,6 @@ pub struct SpeciesVisual {
     pub leaves_far: [Handle<StandardMaterial>; TINTS],
     /// The summer color of each tint of `leaves` (linear RGB); the season recolors from it.
     pub leaf_colors: [[f32; 3]; TINTS],
-    /// How much light the summer `leaves` let through (`subsurface`); turning leaves dry out
-    /// and let less through ([`crate::season::apply_season_colors`]).
-    pub leaf_subsurface: f32,
     pub dead_leaves: Handle<StandardMaterial>,
     /// Leaves that don't sway (falling trees and logs: their mesh lies on its side).
     pub leaves_still: [Handle<StandardMaterial>; TINTS],
@@ -648,6 +649,8 @@ fn build_species(
             foliage_mid: add(full.foliage_mid),
             wood_lod: add(full.wood_lod),
             foliage_lod: add(full.foliage_lod),
+            foliage_dead: add(full.foliage_dead),
+            foliage_dead_lod: add(full.foliage_dead_lod),
             wood_distant: add(full.wood_distant),
             foliage_distant: add(full.foliage_distant),
             sapling_wood,
@@ -766,12 +769,10 @@ fn build_species(
         let [r, g, b, _] = leaf_material(c).base_color;
         [r, g, b]
     });
-    let leaf_subsurface = leaf_material(tint_colors[0]).subsurface;
     // Dead leaves have dried out: light scatters inside rather than passing through, so they
-    // don't glow against the sun (with a living leaf's translucency a brown frond lit from
-    // behind shone signal red).
+    // don't glow against the sun.
     let dead = || {
-        let mut m = leaf_material(srgb(0x8a6a3c));
+        let mut m = leaf_material(srgb(crate::meshgen::tree::DEAD_LEAF_SRGB));
         m.subsurface = 0.1;
         m
     };
@@ -833,7 +834,6 @@ fn build_species(
         leaves_hero,
         leaves_far,
         leaf_colors,
-        leaf_subsurface,
         dead_leaves,
         leaves_still,
         dead_leaves_still,
