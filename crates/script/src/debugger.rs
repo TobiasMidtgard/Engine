@@ -1068,7 +1068,7 @@ impl Session {
                 json!({
                     "name": name,
                     "value": display(&v, true),
-                    "type": v.type_name(),
+                    "type": crate::math::type_name(&v),
                     "variablesReference": reference,
                 })
             })
@@ -1474,7 +1474,7 @@ fn frame_env(lua: &Lua, l: *mut ffi::lua_State, level: c_int) -> mlua::Result<Ta
 }
 
 fn expandable(v: &Value) -> bool {
-    matches!(v, Value::Table(_))
+    matches!(v, Value::Table(t) if crate::math::kind(t).is_none())
 }
 
 /// A table's entries (array part first, then the rest by name), and its class.
@@ -1526,6 +1526,18 @@ fn display(v: &Value, quoted: bool) -> String {
             let s = s.to_string_lossy();
             let s: String = s.chars().take(300).collect();
             if quoted { format!("{s:?}") } else { s }
+        }
+        // As they're written: vec3(1, 2.5, -3).
+        Value::Table(t) if crate::math::kind(t).is_some() => {
+            let (name, keys): (&str, &[&str]) = match crate::math::kind(t) {
+                Some(crate::math::Kind::Quat) => ("quat", &["x", "y", "z", "w"]),
+                _ => ("vec3", &["x", "y", "z"]),
+            };
+            let parts: Vec<String> = keys
+                .iter()
+                .map(|k| number(t.raw_get::<f64>(*k).unwrap_or(f64::NAN)))
+                .collect();
+            format!("{name}({})", parts.join(", "))
         }
         Value::Table(t) => {
             let mut parts = Vec::new();

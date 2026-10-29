@@ -12,10 +12,22 @@
 //! ```
 //!
 //! Functions that take a `vec3` also take a table `{x, y, z}` or `{x = .., y = .., z = ..}`.
+//!
+//! Both are written in Luau (`math.luau`) as frozen tables with a shared metatable, the way
+//! Luau's performance guide shapes objects: fields in the table, methods behind a table
+//! `__index`. Reading `v.x` is then a plain table read the VM caches, and `a + b` runs a Luau
+//! function, where Rust userdata paid a trip through mlua for every field and operator.
+//! Measured in release (`math_speed`, ns each, userdata then tables): `p.x` 197 / 17,
+//! `p + q` 787 / 367, `vec3(x, y, z)` 695 / 257, `q * v` 789 / 572. What is left is mostly making
+//! the new table; Luau's own `vector` (f32, no allocation) does `p + q` in 11. Rust makes and
+//! reads the same tables ([`Vec3`] and [`Quat`] convert both ways).
 
-use engine_core::math::{DVec3, EulerRot, Quat as GQuat, Vec3 as GVec3};
+use std::ffi::c_int;
+
+use engine_core::math::{DVec3, Quat as GQuat, Vec3 as GVec3};
 use mlua::{
-    FromLua, Lua, MetaMethod, Table, UserData, UserDataFields, UserDataMethods, Value, Variadic,
+    FromLua, Function, IntoLua, Lua, MetaMethod, Table, UserData, UserDataFields, UserDataMethods,
+    Value, ffi,
 };
 
 /// A 3D vector with `f64` components (meters for positions).
@@ -32,6 +44,29 @@ impl Vec3 {
     }
 }
 
+/// The metatables of a VM's `vec3` and `quat` values (from `math.luau`).
+struct Types {
+    vec3: Table,
+    quat: Table,
+}
+
+/// Which of the two a table is, if either.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Kind {
+    Vec3,
+    Quat,
+}
+
+/// Whether `t` is a `vec3` or `quat` value (by its metatable's `__name`).
+pub(crate) fn kind(t: &Table) -> Option<Kind> {
+    let name: Option<mlua::LuaString> = t.metatable()?.raw_get("__name").ok()?;
+    match name?.as_bytes().as_ref() {
+        b"vec3" => Some(Kind::Vec3),
+        b"quat" => Some(Kind::Quat),
+        _ => None,
+    }
+}
+
 fn number(v: &Value) -> Option<f64> {
     match v {
         Value::Integer(i) => Some(*i as f64),
@@ -40,15 +75,43 @@ fn number(v: &Value) -> Option<f64> {
     }
 }
 
+/// A frozen table with `fields` and the metatable `which` picks.
+fn make(lua: &Lua, fields: &[(&str, f64)], which: fn(&Types) -> &Table) -> mlua::Result<Value> {
+    let types = lua
+        .app_data_ref::<Types>()
+        .ok_or_else(|| mlua::Error::runtime("vec3 and quat aren't installed in this VM"))?;
+    let t = lua.create_table_with_capacity(0, fields.len())?;
+    for (k, v) in fields {
+        t.raw_set(*k, *v)?;
+    }
+    t.set_metatable(Some(which(&types).clone()))?;
+    t.set_readonly(true);
+    Ok(Value::Table(t))
+}
+
+impl IntoLua for Vec3 {
+    fn into_lua(self, lua: &Lua) -> mlua::Result<Value> {
+        let v = self.0;
+        make(lua, &[("x", v.x), ("y", v.y), ("z", v.z)], |t| &t.vec3)
+    }
+}
+
+impl IntoLua for Quat {
+    fn into_lua(self, lua: &Lua) -> mlua::Result<Value> {
+        let q = self.0;
+        let f = |c: f32| c as f64;
+        make(
+            lua,
+            &[("x", f(q.x)), ("y", f(q.y)), ("z", f(q.z)), ("w", f(q.w))],
+            |t| &t.quat,
+        )
+    }
+}
+
 impl FromLua for Vec3 {
     fn from_lua(value: Value, _: &Lua) -> mlua::Result<Self> {
         match &value {
-            Value::UserData(ud) => {
-                if let Ok(v) = ud.borrow::<Vec3>() {
-                    return Ok(*v);
-                }
-            }
-            Value::Table(t) => {
+            Value::Table(t) if kind(t) != Some(Kind::Quat) => {
                 let get = |k1: &str, k2: usize| -> mlua::Result<f64> {
                     let v: Value = t.raw_get(k1)?;
                     let v = if v.is_nil() { t.raw_get(k2)? } else { v };
@@ -63,137 +126,56 @@ impl FromLua for Vec3 {
         }
         Err(mlua::Error::runtime(format!(
             "expected a vec3 (or a table {{x, y, z}}), got {}",
-            value.type_name()
+            type_name(&value)
         )))
     }
 }
 
 impl FromLua for Quat {
     fn from_lua(value: Value, _: &Lua) -> mlua::Result<Self> {
-        match &value {
-            Value::UserData(ud) => {
-                if let Ok(q) = ud.borrow::<Quat>() {
-                    return Ok(*q);
+        if let Value::Table(t) = &value {
+            match kind(t) {
+                Some(Kind::Quat) => {
+                    let get = |k: &str| -> mlua::Result<f32> {
+                        Ok(number(&t.raw_get(k)?).unwrap_or(0.0) as f32)
+                    };
+                    return Ok(Quat(GQuat::from_xyzw(
+                        get("x")?,
+                        get("y")?,
+                        get("z")?,
+                        get("w")?,
+                    )));
                 }
+                None => {
+                    let get = |k1: &str, k2: usize| -> mlua::Result<f32> {
+                        let v: Value = t.raw_get(k1)?;
+                        let v = if v.is_nil() { t.raw_get(k2)? } else { v };
+                        Ok(number(&v).unwrap_or(0.0) as f32)
+                    };
+                    let q =
+                        GQuat::from_xyzw(get("x", 1)?, get("y", 2)?, get("z", 3)?, get("w", 4)?);
+                    let ok = q.length_squared() > 0.0 && q.is_finite();
+                    return Ok(Quat(if ok { q.normalize() } else { GQuat::IDENTITY }));
+                }
+                Some(Kind::Vec3) => {}
             }
-            Value::Table(t) => {
-                let get = |i: usize| -> mlua::Result<f32> {
-                    Ok(number(&t.raw_get(i)?).unwrap_or(0.0) as f32)
-                };
-                return Ok(Quat(
-                    GQuat::from_xyzw(get(1)?, get(2)?, get(3)?, get(4)?).normalize(),
-                ));
-            }
-            _ => {}
         }
         Err(mlua::Error::runtime(format!(
             "expected a quat, got {}",
-            value.type_name()
+            type_name(&value)
         )))
     }
 }
 
-impl UserData for Vec3 {
-    fn add_fields<F: UserDataFields<Self>>(fields: &mut F) {
-        fields.add_field_method_get("x", |_, v| Ok(v.0.x));
-        fields.add_field_method_get("y", |_, v| Ok(v.0.y));
-        fields.add_field_method_get("z", |_, v| Ok(v.0.z));
-    }
-
-    fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
-        methods.add_method("length", |_, v, ()| Ok(v.0.length()));
-        methods.add_method("length_squared", |_, v, ()| Ok(v.0.length_squared()));
-        methods.add_method("unit", |_, v, ()| Ok(Vec3(v.0.normalize_or_zero())));
-        methods.add_method("dot", |_, v, b: Vec3| Ok(v.0.dot(b.0)));
-        methods.add_method("cross", |_, v, b: Vec3| Ok(Vec3(v.0.cross(b.0))));
-        methods.add_method("distance", |_, v, b: Vec3| Ok(v.0.distance(b.0)));
-        methods.add_method("lerp", |_, v, (b, t): (Vec3, f64)| {
-            Ok(Vec3(v.0.lerp(b.0, t)))
-        });
-        methods.add_method("abs", |_, v, ()| Ok(Vec3(v.0.abs())));
-        methods.add_method("min", |_, v, b: Vec3| Ok(Vec3(v.0.min(b.0))));
-        methods.add_method("max", |_, v, b: Vec3| Ok(Vec3(v.0.max(b.0))));
-        methods.add_method("flat", |_, v, ()| Ok(Vec3(DVec3::new(v.0.x, 0.0, v.0.z))));
-        methods.add_method("with_x", |_, v, x: f64| {
-            Ok(Vec3(DVec3::new(x, v.0.y, v.0.z)))
-        });
-        methods.add_method("with_y", |_, v, y: f64| {
-            Ok(Vec3(DVec3::new(v.0.x, y, v.0.z)))
-        });
-        methods.add_method("with_z", |_, v, z: f64| {
-            Ok(Vec3(DVec3::new(v.0.x, v.0.y, z)))
-        });
-        methods.add_method("rotate_y", |_, v, angle: f64| {
-            let (s, c) = angle.sin_cos();
-            Ok(Vec3(DVec3::new(
-                v.0.x * c + v.0.z * s,
-                v.0.y,
-                -v.0.x * s + v.0.z * c,
-            )))
-        });
-        methods.add_method("unpack", |_, v, ()| Ok((v.0.x, v.0.y, v.0.z)));
-
-        methods.add_meta_function(MetaMethod::Add, |_, (a, b): (Vec3, Vec3)| {
-            Ok(Vec3(a.0 + b.0))
-        });
-        methods.add_meta_function(MetaMethod::Sub, |_, (a, b): (Vec3, Vec3)| {
-            Ok(Vec3(a.0 - b.0))
-        });
-        methods.add_meta_function(MetaMethod::Mul, |lua, (a, b): (Value, Value)| {
-            match (number(&a), number(&b)) {
-                (Some(s), _) => Ok(Vec3(Vec3::from_lua(b, lua)?.0 * s)),
-                (_, Some(s)) => Ok(Vec3(Vec3::from_lua(a, lua)?.0 * s)),
-                _ => Ok(Vec3(Vec3::from_lua(a, lua)?.0 * Vec3::from_lua(b, lua)?.0)),
-            }
-        });
-        methods.add_meta_function(
-            MetaMethod::Div,
-            |lua, (a, b): (Value, Value)| match number(&b) {
-                Some(s) => Ok(Vec3(Vec3::from_lua(a, lua)?.0 / s)),
-                None => Ok(Vec3(Vec3::from_lua(a, lua)?.0 / Vec3::from_lua(b, lua)?.0)),
-            },
-        );
-        methods.add_meta_method(MetaMethod::Unm, |_, v, ()| Ok(Vec3(-v.0)));
-        methods.add_meta_function(MetaMethod::Eq, |_, (a, b): (Vec3, Vec3)| Ok(a.0 == b.0));
-        methods.add_meta_method(MetaMethod::ToString, |_, v, ()| {
-            Ok(format!("vec3({}, {}, {})", v.0.x, v.0.y, v.0.z))
-        });
-    }
-}
-
-impl UserData for Quat {
-    fn add_fields<F: UserDataFields<Self>>(fields: &mut F) {
-        fields.add_field_method_get("x", |_, q| Ok(q.0.x));
-        fields.add_field_method_get("y", |_, q| Ok(q.0.y));
-        fields.add_field_method_get("z", |_, q| Ok(q.0.z));
-        fields.add_field_method_get("w", |_, q| Ok(q.0.w));
-    }
-
-    fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
-        methods.add_method("inverse", |_, q, ()| Ok(Quat(q.0.inverse())));
-        methods.add_method("slerp", |_, q, (b, t): (Quat, f32)| {
-            Ok(Quat(q.0.slerp(b.0, t)))
-        });
-        methods.add_method("rotate", |_, q, v: Vec3| {
-            Ok(Vec3((q.0 * v.f32()).as_dvec3()))
-        });
-        methods.add_method("euler", |_, q, ()| Ok(q.0.to_euler(EulerRot::YXZ)));
-        methods.add_method("angle_to", |_, q, b: Quat| Ok(q.0.angle_between(b.0)));
-        methods.add_meta_function(MetaMethod::Mul, |lua, (a, b): (Quat, Value)| match &b {
-            Value::UserData(ud) if ud.is::<Quat>() => Ok(Value::UserData(
-                lua.create_userdata(Quat(a.0 * ud.borrow::<Quat>()?.0))?,
-            )),
-            _ => {
-                let v = Vec3::from_lua(b, lua)?;
-                Ok(Value::UserData(
-                    lua.create_userdata(Vec3((a.0 * v.f32()).as_dvec3()))?,
-                ))
-            }
-        });
-        methods.add_meta_function(MetaMethod::Eq, |_, (a, b): (Quat, Quat)| Ok(a.0 == b.0));
-        methods.add_meta_method(MetaMethod::ToString, |_, q, ()| {
-            Ok(format!("quat({}, {}, {}, {})", q.0.x, q.0.y, q.0.z, q.0.w))
-        });
+/// `value`'s type as scripts would name it (`vec3` and `quat` rather than `table`).
+pub(crate) fn type_name(value: &Value) -> &'static str {
+    match value {
+        Value::Table(t) => match kind(t) {
+            Some(Kind::Vec3) => "vec3",
+            Some(Kind::Quat) => "quat",
+            None => "table",
+        },
+        other => other.type_name(),
     }
 }
 
@@ -222,99 +204,37 @@ impl UserData for Shift {
     }
 }
 
-/// Adds the `vec3` and `quat` globals (callable tables with constants and constructors).
+/// Adds the `vec3` and `quat` globals (callable tables with constants and constructors) from
+/// `math.luau`, and keeps their metatables for [`Vec3`] and [`Quat`] conversions.
 pub fn install(lua: &Lua) -> mlua::Result<()> {
+    // SAFETY: `seal_table` checks its argument and touches nothing else.
+    let seal: Function = unsafe { lua.create_c_function(seal_table)? };
+    let (vec3, quat, vec3_meta, quat_meta): (Table, Table, Table, Table) = lua
+        .load(include_str!("math.luau"))
+        .set_name("@engine/math.luau")
+        .call(seal)?;
     let g = lua.globals();
-
-    let vec3 = lua.create_table()?;
-    let constants = [
-        ("zero", DVec3::ZERO),
-        ("one", DVec3::ONE),
-        ("up", DVec3::Y),
-        ("down", DVec3::NEG_Y),
-        ("right", DVec3::X),
-        ("left", DVec3::NEG_X),
-        // Cameras and lights look along -Z (AGENTS.md, "Units and coordinates").
-        ("forward", DVec3::NEG_Z),
-        ("back", DVec3::Z),
-    ];
-    for (name, v) in constants {
-        vec3.set(name, Vec3(v))?;
-    }
-    vec3.set(
-        "lerp",
-        lua.create_function(|_, (a, b, t): (Vec3, Vec3, f64)| Ok(Vec3(a.0.lerp(b.0, t))))?,
-    )?;
-    vec3.set(
-        "from_angle",
-        lua.create_function(|_, (angle, radius): (f64, Option<f64>)| {
-            let r = radius.unwrap_or(1.0);
-            Ok(Vec3(DVec3::new(angle.cos() * r, 0.0, angle.sin() * r)))
-        })?,
-    )?;
-    let vec3_meta = lua.create_table()?;
-    vec3_meta.set(
-        "__call",
-        lua.create_function(|lua, (_, args): (Table, Variadic<Value>)| {
-            if args.len() == 1 && !matches!(args[0], Value::Integer(_) | Value::Number(_)) {
-                return Vec3::from_lua(args[0].clone(), lua);
-            }
-            let f = |i: usize| args.get(i).and_then(number).unwrap_or(0.0);
-            Ok(Vec3(DVec3::new(f(0), f(1), f(2))))
-        })?,
-    )?;
-    vec3.set_metatable(Some(vec3_meta))?;
     g.set("vec3", vec3)?;
-
-    let quat = lua.create_table()?;
-    quat.set("identity", Quat(GQuat::IDENTITY))?;
-    quat.set(
-        "axis_angle",
-        lua.create_function(|_, (axis, angle): (Vec3, f32)| {
-            Ok(Quat(GQuat::from_axis_angle(
-                axis.f32().normalize_or(GVec3::Y),
-                angle,
-            )))
-        })?,
-    )?;
-    quat.set(
-        "euler",
-        lua.create_function(|_, (yaw, pitch, roll): (f32, Option<f32>, Option<f32>)| {
-            Ok(Quat(GQuat::from_euler(
-                EulerRot::YXZ,
-                yaw,
-                pitch.unwrap_or(0.0),
-                roll.unwrap_or(0.0),
-            )))
-        })?,
-    )?;
-    quat.set(
-        "look",
-        lua.create_function(|_, (dir, up): (Vec3, Option<Vec3>)| {
-            let up = up.map(|u| u.f32()).unwrap_or(GVec3::Y);
-            let f = dir.f32().normalize_or(GVec3::NEG_Z);
-            Ok(Quat(look_rotation(f, up)))
-        })?,
-    )?;
-    quat.set(
-        "between",
-        lua.create_function(|_, (a, b): (Vec3, Vec3)| {
-            Ok(Quat(GQuat::from_rotation_arc(
-                a.f32().normalize_or(GVec3::Y),
-                b.f32().normalize_or(GVec3::Y),
-            )))
-        })?,
-    )?;
-    let quat_meta = lua.create_table()?;
-    quat_meta.set(
-        "__call",
-        lua.create_function(|_, (_, x, y, z, w): (Table, f32, f32, f32, f32)| {
-            Ok(Quat(GQuat::from_xyzw(x, y, z, w).normalize()))
-        })?,
-    )?;
-    quat.set_metatable(Some(quat_meta))?;
     g.set("quat", quat)?;
+    lua.set_app_data(Types {
+        vec3: vec3_meta,
+        quat: quat_meta,
+    });
     Ok(())
+}
+
+/// `seal(t)` for `math.luau`: makes `t` read-only and returns it. `table.freeze` does the same
+/// but first checks the table isn't frozen and has no `__metatable` (by name, every call),
+/// which costs more than making the table.
+unsafe extern "C-unwind" fn seal_table(l: *mut ffi::lua_State) -> c_int {
+    // SAFETY: reads and changes only the value in slot 1, and only when it is a table.
+    unsafe {
+        ffi::lua_settop(l, 1);
+        if ffi::lua_type(l, 1) == ffi::LUA_TTABLE {
+            ffi::lua_setreadonly(l, 1, 1);
+        }
+    }
+    1
 }
 
 /// The rotation that turns -Z to `forward` with Y as close to `up` as it can.
@@ -372,5 +292,233 @@ mod tests {
             .eval()
             .unwrap();
         assert!((fwd - 1.0).abs() < 1e-5);
+    }
+
+    /// A fixed stream of numbers in [-1, 1) (no rand dependency; the same every run).
+    struct Numbers(u64);
+
+    impl Numbers {
+        fn next(&mut self) -> f64 {
+            self.0 = self
+                .0
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (self.0 >> 11) as f64 / (1u64 << 52) as f64 - 1.0
+        }
+        fn vec(&mut self, scale: f64) -> DVec3 {
+            DVec3::new(self.next(), self.next(), self.next()) * scale
+        }
+    }
+
+    fn close(a: DVec3, b: DVec3, tol: f64) -> bool {
+        (a - b).length() <= tol * (1.0 + b.length())
+    }
+
+    fn vec_of(values: (f64, f64, f64)) -> DVec3 {
+        DVec3::new(values.0, values.1, values.2)
+    }
+
+    /// The Luau math gives what glam (the engine's math) gives, over a few hundred random
+    /// rotations and vectors.
+    #[test]
+    fn luau_math_matches_glam() {
+        use engine_core::math::{DQuat, EulerRot};
+        let lua = lua();
+        let f: mlua::Function = lua
+            .load(
+                "return function(what, a, b, c, d, e, f, g)
+                    if what == 'rotate' then
+                        return (quat.axis_angle(vec3(a, b, c), d) * vec3(e, f, g)):unpack()
+                    elseif what == 'euler' then
+                        local q = quat.euler(a, b, c)
+                        local x, y, z = (q * vec3(d, e, f)):unpack()
+                        local yaw, pitch, roll = q:euler()
+                        return x, y, z, yaw, pitch, roll
+                    elseif what == 'compose' then
+                        local q = quat.axis_angle(vec3(a, b, 0.3), c) * quat.euler(d, e)
+                        return (q * vec3(f, g, 1)):unpack()
+                    elseif what == 'look' then
+                        local q = quat.look(vec3(a, b, c), vec3(d, e, f))
+                        local x, y, z = (q * vec3.forward):unpack()
+                        local ux, uy, uz = (q * vec3.up):unpack()
+                        return x, y, z, ux, uy, uz
+                    elseif what == 'between' then
+                        return (quat.between(vec3(a, b, c), vec3(d, e, f)) * vec3(a, b, c):unit()):unpack()
+                    elseif what == 'slerp' then
+                        local p, q = quat.euler(a, b, c), quat.euler(d, e, f)
+                        local x, y, z = (p:slerp(q, g) * vec3(1, 2, 3)):unpack()
+                        return x, y, z, p:angle_to(q), (p:inverse() * (p * vec3(g, 1, 2))):unpack()
+                    end
+                end",
+            )
+            .eval()
+            .unwrap();
+        let mut n = Numbers(7);
+        let pi = std::f64::consts::PI;
+        for _ in 0..300 {
+            let (axis, angle, v) = (n.vec(1.0), n.next() * pi * 2.0, n.vec(50.0));
+            let got: (f64, f64, f64) = f
+                .call(("rotate", axis.x, axis.y, axis.z, angle, v.x, v.y, v.z))
+                .unwrap();
+            let want = if axis.length() > 0.0 {
+                DQuat::from_axis_angle(axis.normalize(), angle) * v
+            } else {
+                v
+            };
+            assert!(close(vec_of(got), want, 1e-9), "rotate {got:?} {want}");
+
+            let (yaw, pitch, roll) = (n.next() * pi, n.next() * 1.4, n.next() * pi);
+            let got: (f64, f64, f64, f64, f64, f64) =
+                f.call(("euler", yaw, pitch, roll, v.x, v.y, v.z)).unwrap();
+            let q = DQuat::from_euler(EulerRot::YXZ, yaw, pitch, roll);
+            assert!(
+                close(DVec3::new(got.0, got.1, got.2), q * v, 1e-9),
+                "euler {got:?} {}",
+                q * v
+            );
+            let back = (got.3, got.4, got.5);
+            assert!(
+                (back.0 - yaw).abs() < 1e-9
+                    && (back.1 - pitch).abs() < 1e-9
+                    && (back.2 - roll).abs() < 1e-9,
+                "q:euler() {back:?} for {yaw} {pitch} {roll}"
+            );
+
+            let got: (f64, f64, f64) = f
+                .call(("compose", axis.x, axis.y, angle, yaw, pitch, v.x, v.y))
+                .unwrap();
+            let q = DQuat::from_axis_angle(DVec3::new(axis.x, axis.y, 0.3).normalize(), angle)
+                * DQuat::from_euler(EulerRot::YXZ, yaw, pitch, 0.0);
+            assert!(
+                close(vec_of(got), q * DVec3::new(v.x, v.y, 1.0), 1e-9),
+                "compose"
+            );
+
+            let (dir, up) = (n.vec(3.0), n.vec(1.0));
+            if dir.length() > 1e-3
+                && up.length() > 1e-3
+                && dir.normalize().cross(up.normalize()).length() > 1e-2
+            {
+                let got: (f64, f64, f64, f64, f64, f64) = f
+                    .call(("look", dir.x, dir.y, dir.z, up.x, up.y, up.z))
+                    .unwrap();
+                let forward = DVec3::new(got.0, got.1, got.2);
+                assert!(
+                    close(forward, dir.normalize(), 1e-9),
+                    "look {forward} {dir}"
+                );
+                let top = DVec3::new(got.3, got.4, got.5);
+                assert!(
+                    top.dot(up) > 0.0 && top.dot(dir).abs() < 1e-9,
+                    "look up {top} {up}"
+                );
+                let glam = look_rotation(dir.normalize().as_vec3(), up.as_vec3()).as_dquat();
+                let (gf, gu) = (glam * DVec3::NEG_Z, glam * DVec3::Y);
+                assert!(
+                    close(gf, forward, 1e-5) && close(gu, top, 1e-5),
+                    "look vs glam: {forward} {top} | {gf} {gu} for {dir} {up}"
+                );
+            }
+
+            let (a, b) = (n.vec(2.0), n.vec(2.0));
+            let got: (f64, f64, f64) = f.call(("between", a.x, a.y, a.z, b.x, b.y, b.z)).unwrap();
+            assert!(
+                close(vec_of(got), b.normalize(), 1e-9),
+                "between {got:?} {b}"
+            );
+
+            let (p, q) = (
+                DQuat::from_euler(EulerRot::YXZ, yaw, pitch, roll),
+                DQuat::from_euler(EulerRot::YXZ, roll, -pitch * 0.5, yaw),
+            );
+            let t = n.next() * 0.5 + 0.5;
+            let got: (f64, f64, f64, f64, f64, f64, f64) = f
+                .call(("slerp", yaw, pitch, roll, roll, -pitch * 0.5, yaw, t))
+                .unwrap();
+            let want = p.slerp(q, t) * DVec3::new(1.0, 2.0, 3.0);
+            assert!(
+                close(DVec3::new(got.0, got.1, got.2), want, 1e-7),
+                "slerp {got:?} {want}"
+            );
+            assert!(
+                (got.3 - p.angle_between(q)).abs() < 1e-7,
+                "angle_to {} {}",
+                got.3,
+                p.angle_between(q)
+            );
+            assert!(
+                close(
+                    DVec3::new(got.4, got.5, got.6),
+                    DVec3::new(t, 1.0, 2.0),
+                    1e-9
+                ),
+                "inverse"
+            );
+        }
+        // Half turns and straight on, where the formulas have their edge cases.
+        let flip: (f64, f64, f64) = f.call(("between", 0.0, 1.0, 0.0, 0.0, -2.0, 0.0)).unwrap();
+        assert!(close(vec_of(flip), DVec3::NEG_Y, 1e-12), "{flip:?}");
+        let same: (f64, f64, f64) = f.call(("between", 1.0, 0.0, 0.0, 3.0, 0.0, 0.0)).unwrap();
+        assert!(close(vec_of(same), DVec3::X, 1e-12), "{same:?}");
+    }
+
+    /// Values are frozen, mix with plain tables, and say clearly what went wrong where.
+    #[test]
+    fn values_are_immutable_and_errors_name_the_line() {
+        let lua = lua();
+        let err = |code: &str| {
+            lua.load(code)
+                .set_name("@test.luau")
+                .exec()
+                .unwrap_err()
+                .to_string()
+        };
+        assert!(err("local v = vec3(1, 2, 3)\nv.x = 5").contains("readonly"));
+        assert!(err("local v = vec3(1, 2, 3)\nsetmetatable(v, nil)").contains("readonly"));
+        assert!(err("getmetatable(vec3.zero).__add = print").contains("readonly"));
+        assert!(err("getmetatable(vec3).__call = print").contains("readonly"));
+        let e = err("local v = vec3(1, 2, 3)\nlocal w = v + 5");
+        assert!(
+            e.contains("test.luau:2:")
+                && e.contains("vec3 + vec3: expected a vec3")
+                && e.contains("got number"),
+            "{e}"
+        );
+        let e = err("local w = vec3.up * quat.identity");
+        assert!(e.contains("test.luau:1:") && e.contains("got quat"), "{e}");
+        let e = err("local w = quat.identity * 2");
+        assert!(e.contains("quat * vec3") && e.contains("got number"), "{e}");
+        let ok: bool = lua
+            .load(
+                "local v = vec3(1, 2, 3)
+                 return v + {1, 1, 1} == vec3(2, 3, 4) and v:dot({x = 1}) == 1
+                    and vec3.is(v) and not vec3.is({1, 2, 3}) and quat.is(quat.identity)
+                    and tostring(v) == 'vec3(1, 2, 3)' and v ~= vec3(1, 2, 3.5)
+                    and vec3(vector.create(1, 2, 3)) == v and #tostring(quat.identity) > 0
+                    and vec3.zero:unit() == vec3.zero and vec3(3, 0, 4):length() == 5",
+            )
+            .eval()
+            .unwrap();
+        assert!(ok);
+        // Rust makes the same values and reads them back.
+        let v: Value = Vec3(DVec3::new(1.0, 2.5, -3.0)).into_lua(&lua).unwrap();
+        let t = v.as_table().unwrap();
+        assert_eq!(kind(t), Some(Kind::Vec3));
+        assert_eq!(t.raw_get::<f64>("y").unwrap(), 2.5);
+        lua.globals().set("from_rust", v.clone()).unwrap();
+        let s: String = lua.load("return tostring(from_rust * 2)").eval().unwrap();
+        assert_eq!(s, "vec3(2, 5, -6)");
+        assert_eq!(
+            Vec3::from_lua(v, &lua).unwrap().0,
+            DVec3::new(1.0, 2.5, -3.0)
+        );
+        let q: Value = lua.load("return quat.euler(1, 0.5)").eval().unwrap();
+        assert!(
+            Vec3::from_lua(q.clone(), &lua).is_err(),
+            "a quat isn't a vec3"
+        );
+        let back = Quat::from_lua(q, &lua).unwrap().0;
+        let want = GQuat::from_euler(engine_core::math::EulerRot::YXZ, 1.0, 0.5, 0.0);
+        assert!(back.abs_diff_eq(want, 1e-6), "{back} {want}");
     }
 }

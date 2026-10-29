@@ -25,8 +25,9 @@ function Wisp:parallel_update(dt: number)
 	local p = self.props
 	self.angle += self.rate * dt
 	self.t += dt
-	local r = p.radius + 0.7 * math.sin(self.t * 0.6 + p.seed) - 2.2 * self.rise
-	local h = p.height + 0.5 * math.sin(self.t * 1.1 + p.seed * 0.3) + 7 * self.rise
+	-- The ritual (rise 0 to 1) draws the swarm in round the beam and up it.
+	local r = (p.radius + 0.5 * math.sin(self.t * 0.6 + p.seed)) * (1 - 0.55 * self.rise)
+	local h = p.height + 0.4 * math.sin(self.t * 1.1 + p.seed * 0.3) + 6 * self.rise
 	local target = vec3(math.cos(self.angle) * r, h, math.sin(self.angle) * r)
 	local at = self.entity.position
 	-- A spring toward the orbit with some drag: wisps lag and overshoot like moths at a lamp.

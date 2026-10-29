@@ -3,11 +3,11 @@
 //! id, integral numbers as integers (so they fill `u32` fields), sequences as arrays and every
 //! other table as an object.
 
-use mlua::{Lua, Table, Value};
+use mlua::{IntoLua, Lua, Table, Value};
 use serde_json::{Map, Number, Value as Json};
 
 use crate::entity::EntityRef;
-use crate::math::{Quat, Vec3};
+use crate::math::{Kind, Quat, Vec3, kind};
 
 /// Nested tables deeper than this are refused (a table that contains itself, most likely).
 const MAX_DEPTH: u32 = 64;
@@ -42,19 +42,20 @@ fn to_json_at(value: &Value, depth: u32) -> mlua::Result<Json> {
         Value::Integer(i) => Json::Number((*i).into()),
         Value::Number(n) => number(*n),
         Value::String(s) => Json::String(s.to_str()?.to_string()),
-        Value::Table(t) => table_to_json(t, depth)?,
+        Value::Table(t) => match kind(t) {
+            // As arrays, the way components store them.
+            Some(Kind::Vec3) => {
+                let get = |k: &str| t.raw_get::<f64>(k).map(number);
+                Json::Array(vec![get("x")?, get("y")?, get("z")?])
+            }
+            Some(Kind::Quat) => {
+                let get = |k: &str| t.raw_get::<f64>(k).map(number);
+                Json::Array(vec![get("x")?, get("y")?, get("z")?, get("w")?])
+            }
+            None => table_to_json(t, depth)?,
+        },
         Value::UserData(ud) => {
-            if let Ok(v) = ud.borrow::<Vec3>() {
-                Json::Array(vec![number(v.0.x), number(v.0.y), number(v.0.z)])
-            } else if let Ok(q) = ud.borrow::<Quat>() {
-                let q = q.0;
-                Json::Array(vec![
-                    number(q.x as f64),
-                    number(q.y as f64),
-                    number(q.z as f64),
-                    number(q.w as f64),
-                ])
-            } else if let Ok(e) = ud.borrow::<EntityRef>() {
+            if let Ok(e) = ud.borrow::<EntityRef>() {
                 Json::Number(e.0.to_bits().into())
             } else {
                 return Err(mlua::Error::runtime(
@@ -164,17 +165,14 @@ pub fn to_lua(lua: &Lua, json: &Json) -> mlua::Result<Value> {
 /// in a scene arrives as a `vec3` when the script's default is one.
 pub fn to_lua_like(lua: &Lua, json: &Json, like: &Value) -> mlua::Result<Value> {
     match (json, like) {
-        (Json::Array(a), Value::UserData(ud)) if a.len() == 3 && ud.is::<Vec3>() => {
+        (Json::Array(a), Value::Table(t)) if a.len() == 3 && kind(t) == Some(Kind::Vec3) => {
             let f = |i: usize| a[i].as_f64().unwrap_or(0.0);
-            lua.create_userdata(Vec3(engine_core::math::DVec3::new(f(0), f(1), f(2))))
-                .map(Value::UserData)
+            Vec3(engine_core::math::DVec3::new(f(0), f(1), f(2))).into_lua(lua)
         }
-        (Json::Array(a), Value::UserData(ud)) if a.len() == 4 && ud.is::<Quat>() => {
+        (Json::Array(a), Value::Table(t)) if a.len() == 4 && kind(t) == Some(Kind::Quat) => {
             let f = |i: usize| a[i].as_f64().unwrap_or(0.0) as f32;
-            lua.create_userdata(Quat(
-                engine_core::math::Quat::from_xyzw(f(0), f(1), f(2), f(3)).normalize(),
-            ))
-            .map(Value::UserData)
+            Quat(engine_core::math::Quat::from_xyzw(f(0), f(1), f(2), f(3)).normalize())
+                .into_lua(lua)
         }
         (Json::Object(map), Value::Table(defaults)) => {
             let t = lua.create_table()?;
@@ -191,6 +189,7 @@ pub fn to_lua_like(lua: &Lua, json: &Json, like: &Value) -> mlua::Result<Value> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mlua::FromLua;
     use serde_json::json;
 
     #[test]
@@ -232,8 +231,9 @@ mod tests {
             .unwrap();
         let v = to_lua_like(&lua, &json!({"color": [0, 0.5, 1], "speed": 3}), &defaults).unwrap();
         let t = v.as_table().unwrap();
-        let c: mlua::AnyUserData = t.get("color").unwrap();
-        assert_eq!(c.borrow::<Vec3>().unwrap().0.y, 0.5);
+        let c: Value = t.get("color").unwrap();
+        assert_eq!(kind(c.as_table().unwrap()), Some(Kind::Vec3));
+        assert_eq!(Vec3::from_lua(c, &lua).unwrap().0.y, 0.5);
         assert_eq!(t.get::<f64>("speed").unwrap(), 3.0);
     }
 }

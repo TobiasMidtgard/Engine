@@ -246,6 +246,9 @@ pub(crate) fn display(v: &Value) -> String {
             }
         }
         Value::String(s) => s.to_string_lossy(),
+        Value::Table(t) if crate::math::kind(t).is_some() => {
+            v.to_string().unwrap_or_else(|_| "table".into())
+        }
         Value::Table(_) => match to_json(v) {
             Ok(j) => j.to_string(),
             Err(_) => "table".into(),

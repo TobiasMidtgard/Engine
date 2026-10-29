@@ -54,6 +54,8 @@ declare class Quat
 	function rotate(self, v: Vec3): Vec3
 	function euler(self): (number, number, number)
 	function angle_to(self, other: Quat): number
+	function dot(self, other: Quat): number
+	function unpack(self): (number, number, number, number)
 	function __mul(self, other: Quat | Vec3): any
 end
 
@@ -101,6 +103,7 @@ declare vec3: ((x: number?, y: number?, z: number?) -> Vec3) & {
 	zero: Vec3, one: Vec3, up: Vec3, down: Vec3, right: Vec3, left: Vec3, forward: Vec3, back: Vec3,
 	lerp: (a: Vec3, b: Vec3, t: number) -> Vec3,
 	from_angle: (angle: number, radius: number?) -> Vec3,
+	is: (value: any) -> boolean,
 }
 
 declare quat: ((x: number, y: number, z: number, w: number) -> Quat) & {
@@ -109,6 +112,7 @@ declare quat: ((x: number, y: number, z: number, w: number) -> Quat) & {
 	euler: (yaw: number, pitch: number?, roll: number?) -> Quat,
 	look: (direction: Vec3, up: Vec3?) -> Quat,
 	between: (from: Vec3, to: Vec3) -> Quat,
+	is: (value: any) -> boolean,
 }
 
 declare world: {

@@ -1781,6 +1781,18 @@ fn math_speed() {
             "local p = vec3(1, 2, 3) local q = p for i = 1, 1000000 do q = p * 2 end return q.x",
         ),
         (
+            "1M vec3(x, y, z)",
+            "local q for i = 1, 1000000 do q = vec3(i, 2, 3) end return q.x",
+        ),
+        (
+            "1M v:length()",
+            "local p = vec3(1, 2, 3) local s = 0 for i = 1, 1000000 do s += p:length() end return s",
+        ),
+        (
+            "1M q * v",
+            "local q = quat.axis_angle(vec3.up, 0.5) local v = vec3(1, 2, 3) local r for i = 1, 1000000 do r = q * v end return r.x",
+        ),
+        (
             "1M vector.x",
             "local p = vector.create(1, 2, 3) local s = 0 for i = 1, 1000000 do s += p.x end return s",
         ),

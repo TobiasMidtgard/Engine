@@ -9,7 +9,7 @@ Courtyard.props = {
 	lanterns = 12, -- round the ring
 	radius = 11.5, -- meters from the middle
 	color = vec3(1.0, 0.56, 0.22), -- the lanterns' light, linear RGB
-	glow = 2600, -- lumens at the crest of the wave
+	glow = 1800, -- lumens at the crest of the wave
 	wave_speed = 0.11, -- turns of the wave per second
 	spin = 0.05, -- the orrery's turns per second
 	wisps = 320, -- in the swarm round the orrery (wisp.luau, run on every core)
@@ -28,7 +28,7 @@ function Courtyard:update(dt: number)
 	for i, lamp in self.lanterns do
 		local phase = (i - 1) / #self.lanterns - self.t * p.wave_speed
 		local crest = (0.5 + 0.5 * math.cos(phase * 2 * math.pi)) ^ 6
-		local glow = lamp.dim * (0.45 + 0.55 * crest + self.flare)
+		local glow = lamp.dim * (0.5 + 0.5 * crest + self.flare)
 		lamp.bulb:material({ emissive = p.color, emissive_strength = 10 * glow })
 		lamp.light:set("PointLight", { color = p.color, intensity_lm = p.glow * glow })
 	end
@@ -198,18 +198,18 @@ local WISP_GLOW = { { 1, 0.62, 0.3 }, { 1, 0.82, 0.5 }, { 0.55, 0.75, 1 } }
 local function wisp(i: number): any
 	local u = (i * 0.618034) % 1 -- spread evenly in radius and height
 	local v = (i * 0.754878) % 1
-	local radius, height = 3.2 + 6.3 * u, 1.3 + 4.2 * v
+	local radius, height = 2.0 + 4.2 * u, 1.5 + 3.4 * v
 	local angle = i * 2.399963
 	return {
 		name = `Wisp {i}`,
 		components = {
 			Transform = { translation = vec3(math.cos(angle) * radius, height, math.sin(angle) * radius) },
 			MeshRenderer = {
-				mesh = { shape = { Sphere = { radius = 0.075, segments = 10 } } },
+				mesh = { shape = { Sphere = { radius = 0.045, segments = 10 } } },
 				material = { inline = {
 					base_color = { 0, 0, 0, 1 },
 					emissive = WISP_GLOW[i % 3 + 1],
-					emissive_strength = 90,
+					emissive_strength = 16, -- a little brighter than the lantern bulbs
 				} },
 			},
 			Script = { path = "showcase/wisp.luau", props = { seed = i, radius = radius, height = height } },

@@ -319,6 +319,11 @@ impl ScriptRuntime {
         ] {
             g.raw_set(internal, Value::Nil)?;
         }
+        // As in Roblox (loadstring is off there by default): these let one script reach into
+        // another's globals and switch off Luau's fast paths for the whole file.
+        for unsafe_global in ["getfenv", "setfenv", "loadstring"] {
+            g.raw_set(unsafe_global, Value::Nil)?;
+        }
         // Read-only libraries and globals; each script gets its own global table (below).
         lua.sandbox(true)?;
         Ok(Self {
@@ -2003,10 +2008,11 @@ fn swap_in(
     Ok(hooks)
 }
 
-/// A copy of a props default, so instances don't share one table.
+/// A copy of a props default, so instances don't share one table. Frozen tables (`vec3`,
+/// `quat`, `table.freeze`) can't change, so they are shared as they are.
 fn deep_copy(lua: &Lua, v: &Value) -> mlua::Result<Value> {
     match v {
-        Value::Table(t) => {
+        Value::Table(t) if !t.is_readonly() => {
             let c = lua.create_table()?;
             for pair in t.pairs::<Value, Value>() {
                 let (k, v) = pair?;

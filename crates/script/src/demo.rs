@@ -42,6 +42,10 @@ pub const LEVER_SCRIPT: &str = "showcase/lever.luau";
 
 /// Radius of the cobbled floor, meters.
 pub const FLOOR_RADIUS: f64 = 14.0;
+/// How far the courtyard stands above its pad: a low plinth, since the terrain's coarser
+/// patches rise a few centimeters above a flat pad between their vertices and showed through
+/// a floor laid flush with it. Everything here is built this much higher.
+pub const LIFT: f64 = 0.3;
 /// Where the code board stands (meters from the middle, facing the middle).
 pub const BOARD: [f64; 3] = [0.0, 2.05, -9.0];
 /// Where the profile board stands, and its turn about Y (it faces the middle).
@@ -144,7 +148,7 @@ const TIDY: &[(&str, &str)] = &[
 
 /// The courtyard's overview, from above the lanterns in the south-east, looking down enough
 /// that the floor fills the frame (the moonlit grass outside it outshone the lanterns).
-const OVERVIEW: ([f64; 3], [f64; 3]) = ([7.0, 11.0, 11.0], [0.0, 0.0, -1.0]);
+const OVERVIEW: ([f64; 3], [f64; 3]) = ([7.0, 11.0 + LIFT, 11.0], [0.0, LIFT, -1.0]);
 
 /// Suggested viewpoints (camera bookmarks and screenshot-tour stops). The first two are a
 /// before and after pair: the same view, then again once the tour has edited the lanterns'
@@ -173,8 +177,8 @@ pub const VIEWS: &[DemoView] = &[
     DemoView {
         key: "script_board",
         name: "The code board: the director script's live source, the edited line lit",
-        eye: [0.5, 2.2, -5.9],
-        target: [0.0, 2.05, -9.0],
+        eye: [0.5, 2.2 + LIFT, -5.9],
+        target: [0.0, 2.05 + LIFT, -9.0],
         hour: 18.9,
         warmup_secs: 0.5,
         on_arrive: &[],
@@ -184,8 +188,8 @@ pub const VIEWS: &[DemoView] = &[
         key: "script_live_values",
         name: "Live values: logpoints print what update() computes beside each line, without \
                stopping the game",
-        eye: [0.5, 2.2, -5.9],
-        target: [0.0, 2.05, -9.0],
+        eye: [0.5, 2.2 + LIFT, -5.9],
+        target: [0.0, 2.05 + LIFT, -9.0],
         hour: 18.9,
         warmup_secs: 1.0,
         on_arrive: LIVE_VALUES_ON,
@@ -195,8 +199,9 @@ pub const VIEWS: &[DemoView] = &[
         key: "script_swarm",
         name: "Parallel scripts: 320 wisps, each its own Luau script, run side by side on every \
                core round the orrery",
-        eye: [-7.5, 1.7, 8.6],
-        target: [0.0, 3.4, 0.0],
+        // From the south, between the braziers, the boards behind the swarm.
+        eye: [-1.2, 1.4 + LIFT, 10.4],
+        target: [0.3, 3.0 + LIFT, 0.0],
         hour: 18.9,
         warmup_secs: 2.0,
         on_arrive: TIDY,
@@ -205,8 +210,8 @@ pub const VIEWS: &[DemoView] = &[
     DemoView {
         key: "script_ritual",
         name: "The lever ritual: braziers, flaring lanterns and the orrery's beam",
-        eye: [9.5, 3.2, 12.5],
-        target: [0.0, 2.6, 0.0],
+        eye: [9.5, 3.2 + LIFT, 12.5],
+        target: [0.0, 2.6 + LIFT, 0.0],
         hour: 18.9,
         // The ritual peaks 5.6 s after it starts (courtyard.luau, Courtyard:ritual).
         warmup_secs: 5.5,
@@ -220,8 +225,8 @@ pub const VIEWS: &[DemoView] = &[
         key: "script_profiler",
         name: "The script profiler: a flame graph of where the courtyard's scripts spend their \
                time, engine calls included, and the hottest lines",
-        eye: [2.86, 2.2, -5.46],
-        target: [4.3, 2.05, -8.2],
+        eye: [2.86, 2.2 + LIFT, -5.46],
+        target: [4.3, 2.05 + LIFT, -8.2],
         hour: 18.9,
         warmup_secs: 1.0,
         on_arrive: &[PROFILE_STOP],
@@ -231,8 +236,8 @@ pub const VIEWS: &[DemoView] = &[
         key: "script_heat",
         name: "Profile heat on the code board: each line of update() with its share of the \
                script time",
-        eye: [0.5, 2.2, -5.9],
-        target: [0.0, 2.05, -9.0],
+        eye: [0.5, 2.2 + LIFT, -5.9],
+        target: [0.0, 2.05 + LIFT, -9.0],
         hour: 18.9,
         warmup_secs: 0.5,
         on_arrive: &[BOARD_AT_UPDATE],
@@ -242,8 +247,8 @@ pub const VIEWS: &[DemoView] = &[
         key: "script_error",
         name: "A typo while the game runs: the board marks the failing line with the error and \
                how often it repeated; the rest of the courtyard keeps running",
-        eye: [0.5, 2.2, -5.9],
-        target: [0.0, 2.05, -9.0],
+        eye: [0.5, 2.2 + LIFT, -5.9],
+        target: [0.0, 2.05 + LIFT, -9.0],
         hour: 18.9,
         warmup_secs: 1.0,
         on_arrive: &[("script.edit", TYPO), BOARD_AT_UPDATE],
@@ -258,7 +263,8 @@ fn mesh(shape: Shape, material: StandardMaterial) -> MeshRenderer {
 /// Spawns the courtyard's stone, braziers, lever, code board and director around `origin`
 /// (on the ground there).
 pub fn spawn_demo(commands: &mut Commands, origin: DVec3) {
-    let at = |x: f64, y: f64, z: f64| Transform::from_translation(origin + DVec3::new(x, y, z));
+    let at =
+        |x: f64, y: f64, z: f64| Transform::from_translation(origin + DVec3::new(x, y + LIFT, z));
     let cobbles = StandardMaterial::preset(MaterialPreset::Cobblestone).with_triplanar_world();
     let marble = StandardMaterial::preset(MaterialPreset::Marble);
     let granite = StandardMaterial::preset(MaterialPreset::Rock).with_tint(0.62, 0.6, 0.58);
@@ -271,14 +277,14 @@ pub fn spawn_demo(commands: &mut Commands, origin: DVec3) {
     let walnut = StandardMaterial::preset(MaterialPreset::WoodPlanks).with_tint(0.38, 0.27, 0.2);
 
     // The floor: cobbles in a ring of marble curb stones, a dark polished disc in the middle
-    // with a brass inlay where the orrery stands.
+    // with a brass inlay where the orrery stands. Floor and curbs reach down to the pad.
     commands.spawn((
         Name::new("Courtyard floor"),
-        at(0.0, -0.13, 0.0),
+        at(0.0, -0.13 - LIFT / 2.0, 0.0),
         mesh(
             Shape::Cylinder {
                 radius: FLOOR_RADIUS as f32,
-                height: 0.3,
+                height: (0.3 + LIFT) as f32,
                 segments: 96,
             },
             cobbles,
@@ -291,12 +297,12 @@ pub fn spawn_demo(commands: &mut Commands, origin: DVec3) {
         let a = i as f64 / curb_stones as f64 * std::f64::consts::TAU;
         commands.spawn((
             Name::new(format!("Curb stone {}", i + 1)),
-            at(a.cos() * curb_r, 0.06, a.sin() * curb_r).with_rotation(Quat::from_rotation_y(
-                -(a as f32) + std::f32::consts::FRAC_PI_2,
-            )),
+            at(a.cos() * curb_r, 0.06 - LIFT / 2.0, a.sin() * curb_r).with_rotation(
+                Quat::from_rotation_y(-(a as f32) + std::f32::consts::FRAC_PI_2),
+            ),
             mesh(
                 Shape::RoundedCuboid {
-                    size: [curb_len, 0.24, 0.5],
+                    size: [curb_len, (0.24 + LIFT) as f32, 0.5],
                     radius: 0.04,
                     segments: 0,
                 },

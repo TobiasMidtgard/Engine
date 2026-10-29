@@ -100,6 +100,16 @@ marks the line the last error came from, with the message, until the file is fix
 `e:set` or `fire.ignite` as entries of their own. Code boards show each line's share beside it,
 and a `ProfileBoard` draws the flame graph (the Script courtyard has one recording live).
 
+What things cost (release build, one core; `math_speed` in the crate's tests): a `vec3` field
+read is a plain table read and `a + b` a short Luau function, so vector math stays in the VM.
+Engine calls (`e:set`, `world.find`, `e.position`) cross into Rust and cost more: read
+`self.entity.position` once into a local, not once per use. For heavy number crunching on
+directions or colors where `f32` is enough, Luau's own `vector` is faster still
+(`vector.create(x, y, z)`, `vector.magnitude(v)`); `vec3(v)` turns one into a `vec3`. The
+built-in libraries (`math`, `string`, `table`, `vector`) take Luau's fast path; `getfenv`,
+`setfenv` and `loadstring` would switch it off (and reach into other scripts), so scripts don't
+have them.
+
 ## In this folder
 
 - `showcase/courtyard.luau`: the Script courtyard's director (lanterns, orrery, the ritual).
