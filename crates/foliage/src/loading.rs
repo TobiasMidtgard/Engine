@@ -25,6 +25,8 @@ pub struct FoliageLoading {
     /// New plants or scenery trees left without their parts last frame (out of time).
     pub(crate) plants_waiting: bool,
     pub(crate) trees_waiting: bool,
+    /// A region's grass and forest floor fields are still being mapped for the first time.
+    pub(crate) floors_waiting: bool,
     /// Ground covers being rebuilt or waiting for their regions.
     pub(crate) scenery_building: usize,
     /// How long the last frame took on the wall clock (ms), measured by [`measure_frames`].
@@ -41,6 +43,7 @@ impl Default for FoliageLoading {
             regions_building: 0,
             plants_waiting: false,
             trees_waiting: false,
+            floors_waiting: false,
             scenery_building: 0,
             last_frame_ms: 0.0,
         }
@@ -56,8 +59,8 @@ impl FoliageLoading {
         }
     }
 
-    /// No species visuals or regions still building, and every plant and scenery tree has
-    /// its parts. Regions are seen the frame after they are spawned (in `PreUpdate`), so wait
+    /// No species visuals or regions still building, every plant and scenery tree has its
+    /// parts, and every region its grass and floor fields. Regions are seen the frame after they are spawned (in `PreUpdate`), so wait
     /// a frame after spawning them before asking.
     pub fn is_ready(&self) -> bool {
         self.species_checked
@@ -65,6 +68,7 @@ impl FoliageLoading {
             && self.regions_building == 0
             && !self.plants_waiting
             && !self.trees_waiting
+            && !self.floors_waiting
             && self.scenery_building == 0
     }
 

@@ -175,6 +175,15 @@ pub struct GrassStyle {
     pub gloss: f32,
     /// Tint (× the blade's color) toward the tips: paler and yellower on most grasses.
     pub tip_tint: [f32; 3],
+    /// 0..1: grow leaves instead of blades: each a leaf on a stalk, ovate past it (`width` is
+    /// then the leaf's widest, `height` its length with the stalk). A tight clump of them is a
+    /// rosette ([`GrassStyle::forest_herbs`]).
+    pub leaf: f32,
+    /// Fraction of a leaf's length that is stalk (with `leaf`).
+    pub stalk: f32,
+    /// 0..1: leaves lie flat on the ground in their own direction, some curling up at the tip:
+    /// fallen leaves ([`GrassStyle::leaf_litter`]).
+    pub lying: f32,
 }
 
 impl Default for GrassStyle {
@@ -199,11 +208,71 @@ impl Default for GrassStyle {
             droop: 0.3,
             gloss: 0.35,
             tip_tint: [1.35, 1.2, 0.7],
+            leaf: 0.0,
+            stalk: 0.0,
+            lying: 0.0,
         }
     }
 }
 
 impl GrassStyle {
+    /// Low shade herbs of a forest floor (wood sorrel, clover, wild strawberry): rosettes of
+    /// leaves on stalks a hand high, swaying a little.
+    pub fn forest_herbs() -> Self {
+        Self {
+            blades_per_m2: 150.0,
+            height: 0.17,
+            height_variation: 0.35,
+            width: 0.055,
+            bend: 2.0,
+            lush_color: [0.05, 0.12, 0.022],
+            dry_color: [0.2, 0.16, 0.05],
+            dryness: 0.1,
+            wind_response: 0.35,
+            draw_distance: 28.0,
+            shadow_distance: 8.0,
+            clump_size: 0.36,
+            clump_pull: 0.95,
+            clump_fan: 1.0,
+            clump_height: 0.4,
+            clump_color: 0.1,
+            droop: 0.6,
+            gloss: 0.45,
+            tip_tint: [1.0, 1.0, 1.0],
+            leaf: 1.0,
+            stalk: 0.4,
+            lying: 0.0,
+        }
+    }
+
+    /// Fallen leaves lying on the ground: browns, with paler ochre ones where `dryness` is high.
+    pub fn leaf_litter() -> Self {
+        Self {
+            blades_per_m2: 320.0,
+            height: 0.09,
+            height_variation: 0.4,
+            width: 0.055,
+            bend: 0.0,
+            lush_color: [0.07, 0.04, 0.018],
+            dry_color: [0.17, 0.1, 0.04],
+            dryness: 0.4,
+            wind_response: 0.0,
+            draw_distance: 16.0,
+            shadow_distance: 0.0,
+            clump_size: 0.5,
+            clump_pull: 0.25,
+            clump_fan: 0.0,
+            clump_height: 0.2,
+            clump_color: 0.25,
+            droop: 0.0,
+            gloss: 0.12,
+            tip_tint: [0.92, 0.85, 0.8],
+            leaf: 1.0,
+            stalk: 0.08,
+            lying: 1.0,
+        }
+    }
+
     /// A temperate summer meadow: knee-high, fresh green, yellowing at the tips.
     pub fn meadow() -> Self {
         Self {
@@ -1060,7 +1129,7 @@ impl RenderFeature for GrassFeature {
                     style.lush_color[0],
                     style.lush_color[1],
                     style.lush_color[2],
-                    0.0,
+                    style.leaf.clamp(0.0, 1.0),
                 ],
                 dry: [
                     style.dry_color[0],
@@ -1068,7 +1137,7 @@ impl RenderFeature for GrassFeature {
                     style.dry_color[2],
                     style.wind_response.max(0.0),
                 ],
-                lod: [full, far, 0.0, 0.0],
+                lod: [full, far, style.lying.clamp(0.0, 1.0), 0.0],
                 clump: [
                     style.clump_size.max(0.0),
                     style.clump_pull.clamp(0.0, 0.95),
@@ -1085,7 +1154,7 @@ impl RenderFeature for GrassFeature {
                     style.tip_tint[0].max(0.0),
                     style.tip_tint[1].max(0.0),
                     style.tip_tint[2].max(0.0),
-                    0.0,
+                    style.stalk.clamp(0.0, 0.8),
                 ],
                 wear: map.wear_params(),
                 gust,

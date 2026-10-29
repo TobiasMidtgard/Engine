@@ -8,6 +8,8 @@ struct GrassOut {
     @location(3) along: f32,
     @location(4) across: f32,
     @location(5) gloss: f32,
+    @location(6) shade: f32,
+    @location(7) glow: f32,
 };
 
 // Snow depth (m) on the ground at camera-relative `rel` (for `grass_blade`).
@@ -32,6 +34,8 @@ fn vs_main(@builtin(instance_index) instance: u32, @builtin(vertex_index) vertex
     out.along = b.along;
     out.across = b.across;
     out.gloss = b.gloss;
+    out.shade = b.shade;
+    out.glow = b.glow;
     return out;
 }
 
@@ -40,11 +44,11 @@ fn grass_surface(in: GrassOut, front: bool) -> Surface {
     var n = normalize(in.normal);
     if (!front) { n = -n; }
     s.normal = n;
-    // Lower parts of a meadow sit in the shade of the blades around them. The midrib is a
-    // little paler and glossier than the edges.
+    // Lower parts of a meadow sit in the shade of the blades around them (`grass_blade`). The
+    // midrib is a little paler and glossier than the edges.
     let mid = 1.0 - abs(in.across);
-    s.albedo = in.albedo * mix(0.7, 1.0, in.along) * (0.94 + 0.1 * mid);
-    s.occlusion = mix(0.3, 1.0, sqrt(in.along));
+    s.albedo = in.albedo * (0.94 + 0.1 * mid);
+    s.occlusion = in.shade;
     s.roughness = mix(0.7, 0.36, in.gloss * mid);
     s.reflectance = 0.35;
     s.subsurface = 0.5;
@@ -66,19 +70,19 @@ fn fs_main(in: GrassOut, @builtin(front_facing) front: bool) -> @location(0) vec
         case 6u: { return vec4<f32>(pre_expose(screen_gi(in.rel)), 1.0); }
         default: {}
     }
-    let color = shade_surface(s, in.rel) + grass_translucency(s, in.rel, in.along);
+    let color = shade_surface(s, in.rel) + grass_translucency(s, in.rel, in.glow);
     return vec4<f32>(apply_fog(color, in.rel), 1.0);
 }
 
 // Sunlight through the blades. A blade is thin, so lit from behind it glows a deeper, yellower
 // green, strongest looking toward the sun and toward the tips (the lower parts sit in the
 // shade of the meadow).
-fn grass_translucency(s: Surface, rel: vec3<f32>, along: f32) -> vec3<f32> {
+fn grass_translucency(s: Surface, rel: vec3<f32>, glow: f32) -> vec3<f32> {
     let l = frame.sun_dir.xyz;
     let v = normalize(-rel);
     let through = saturate(-dot(s.normal, l));
     let toward_sun = pow(saturate(dot(v, -l)), 3.0);
-    let amount = (through * 0.35 + toward_sun * 0.9) * along * along;
+    let amount = (through * 0.35 + toward_sun * 0.9) * glow;
     if (amount <= 0.0) { return vec3<f32>(0.0); }
     let lit_side = select(s.normal, -s.normal, dot(s.normal, l) < 0.0);
     let sun = frame.sun_color.rgb * sun_transmittance(rel) * cloud_shadow(rel) * shadow_factor(rel, lit_side);

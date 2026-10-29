@@ -9,7 +9,8 @@
 //! through the blades), `savanna` (tall dry tussocks), `tundra` (short, dense, olive and
 //! russet), `marsh` (tall, upright, dark), `alien` (a low-gravity world's violet grass under a
 //! paler sky), `path` (a footpath worn through the meadow: `GrassWear`), `snow` (the meadow
-//! under 12 cm of fresh snow). Each biome is its own field 1 km from the others, on ground of
+//! under 12 cm of fresh snow), `herbs` and `litter` (a forest floor's shade herbs and fallen
+//! leaves on humus; `herbs_close` and `litter_close` from knee height). Each biome is its own field 1 km from the others, on ground of
 //! its own color.
 
 use engine_core::prelude::*;
@@ -40,6 +41,8 @@ fn biomes() -> Vec<Biome> {
     add("alien", GrassStyle::alien());
     add("path", GrassStyle::meadow());
     add("snow", GrassStyle::meadow());
+    add("herbs", GrassStyle::forest_herbs());
+    add("litter", GrassStyle::leaf_litter());
     out
 }
 
@@ -148,7 +151,12 @@ fn main() {
     let biomes = biomes();
     for b in &biomes {
         let at = DVec3::new(b.x, 0.0, 0.0);
-        let [r, g, bl] = b.style.ground_color();
+        let [r, g, bl] = if b.style.leaf > 0.0 {
+            // Humus.
+            [0.05, 0.035, 0.02]
+        } else {
+            b.style.ground_color()
+        };
         app.world.spawn((
             Transform::from_translation(at),
             MeshRenderer::new(
@@ -297,6 +305,18 @@ fn main() {
                 eye + DVec3::new(12.0, -1.5, -14.0),
                 sun,
             );
+            let close = format!("{}_close", b.name);
+            if b.style.leaf > 0.0 && wanted(&close) {
+                let eye = o + DVec3::new(-10.0, 0.6, 10.0);
+                shot(
+                    &mut app,
+                    &out,
+                    &close,
+                    eye,
+                    eye + DVec3::new(2.0, -0.5, -2.2),
+                    sun,
+                );
+            }
         }
     }
 }

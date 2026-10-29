@@ -17,6 +17,12 @@
 // slivers. Blades thin out with distance by their rank: blade `i` of a tile is drawn while i / blades < density x lod(distance), and
 // shrinks into the ground just before it goes, so thinning has no visible steps; the survivors
 // get wider to keep the cover. Instance index = tile << 16 | blade.
+//
+// A field can grow leaves instead of blades (`lush.w`, the leaf amount): each instance is then
+// a leaf on a stalk (`tip.w` of its length), narrow at the stalk and ovate past it, folded a
+// little along its midrib; a tight clump of them is a rosette (wood sorrel, clover, wild
+// strawberry). Leaves can also lie on the ground (`lod.z`, how flat): fallen leaves, curling up
+// a little at the tips.
 
 struct GrassTile {
     corner: vec2<f32>,  // the tile's -x -z corner in field-local meters
@@ -35,12 +41,12 @@ struct GrassField {
     axis_z: vec4<f32>,  // field z axis, w: unused
     grid: vec4<u32>,    // map points along x and z, unused, seed
     shape: vec4<f32>,   // blade height (m), height variation, root width (m), bend
-    lush: vec4<f32>,    // fresh albedo (linear), unused
+    lush: vec4<f32>,    // fresh albedo (linear), w: leaf amount (0 blades .. 1 leaves)
     dry: vec4<f32>,     // dry albedo (linear), wind response
-    lod: vec4<f32>,     // full-density distance (m), draw distance (m), unused, unused
+    lod: vec4<f32>,     // full-density distance (m), draw distance (m), lying flat (0..1), unused
     clump: vec4<f32>,   // clump size (m, 0 = none), pull to center, fan out, height spread
     look: vec4<f32>,    // clump color spread, droop, gloss, snow depth by the camera (m)
-    tip: vec4<f32>,     // tip tint (rgb, x the blade's color), unused
+    tip: vec4<f32>,     // tip tint (rgb, x the blade's color), w: a leaf's stalk (fraction of its length)
     wear: vec4<f32>,    // worn-ground map: first point (field-local m, xz), points per m, 1 = present
     gust: vec4<f32>,    // steady wind (m/s, xyz), w: the wind's run (m) less speed x time
 };
@@ -66,6 +72,8 @@ struct Blade {
     across: f32,        // -1 .. 1 from edge to edge
     albedo: vec3<f32>,
     gloss: f32,         // 0 matte .. 1 glossy along the blade's middle
+    shade: f32,         // how much light reaches this point under the meadow (0..1)
+    glow: f32,          // how much sun shines through here from behind (0..1)
     visible: bool,
 };
 
@@ -187,6 +195,8 @@ fn grass_blade(instance: u32, vertex: u32, t: f32, tiling: vec3<f32>) -> Blade {
     out.across = 0.0;
     out.albedo = vec3<f32>(0.0);
     out.gloss = 0.0;
+    out.shade = 1.0;
+    out.glow = 0.0;
     let tile = grass_tiles[instance >> GRASS_BLADE_BITS];
     let index = instance & ((1u << GRASS_BLADE_BITS) - 1u);
     let f = grass_fields[tile.field];
@@ -234,7 +244,10 @@ fn grass_blade(instance: u32, vertex: u32, t: f32, tiling: vec3<f32>) -> Blade {
     let height = grown - snow;
     if (height < 0.008) { return out; }
     let snowed = smoothstep(0.0, 0.06, snow);
-    let width = f.shape.z * (0.75 + 0.5 * r1.x) * clamp(inverseSqrt(max(lod, 1e-3)), 1.0, 3.0);
+    let leaf = f.lush.w;
+    let lying = f.lod.z;
+    // Thinned out, the survivors widen to keep the cover (leaves less: they'd turn into plates).
+    let width = f.shape.z * (0.75 + 0.5 * r1.x) * clamp(inverseSqrt(max(lod, 1e-3)), 1.0, mix(3.0, 1.5, leaf));
 
     // Blade frame: facing its own way, or fanning out from its clump's center; leaning over
     // toward it, the clump's outer blades the most.
@@ -273,10 +286,30 @@ fn grass_blade(instance: u32, vertex: u32, t: f32, tiling: vec3<f32>) -> Blade {
     // under its weight the further the blade leans.
     let over = tip_dir - up * dot(tip_dir, up);
     let leaning = length(over);
-    let p0 = root;
-    let p1 = root + up * (height * 0.38);
-    let p2 = root + up * (height * 0.74) + over * (height * 0.5);
-    let p3 = root + tip_dir * (height * (1.0 - 0.12 * leaning)) - up * (height * f.look.y * leaning * 0.8);
+    var p0 = root;
+    var p1 = root + up * (height * 0.38);
+    var p2 = root + up * (height * 0.74) + over * (height * 0.5);
+    var p3 = root + tip_dir * (height * (1.0 - 0.12 * leaning)) - up * (height * f.look.y * leaning * 0.8);
+    if (leaf > 0.0 && lying < 1.0) {
+        // A leaf on a stalk: the stalk rises, the blade spreads out flat from its top (leaning
+        // with the wind and away from benders) and droops a little at the tip.
+        let spread = normalize(facing + over * 0.8);
+        let rise = height * (0.25 + 0.25 * r1.z);
+        let reach = height * 0.75;
+        p1 = mix(p1, root + up * rise, leaf);
+        p2 = mix(p2, root + up * (rise * 1.15) + spread * (reach * 0.45), leaf);
+        p3 = mix(p3, root + up * (rise * (1.0 - 0.6 * f.look.y)) + spread * reach, leaf);
+    }
+    if (lying > 0.0) {
+        // Lying on the ground along its own direction, just above it, some curling up at the
+        // tip and a few cupped up along their length.
+        let base = root + up * 0.004;
+        let curl = height * (0.04 + 0.3 * r1.z * r1.z);
+        p0 = mix(p0, base, lying);
+        p1 = mix(p1, base + facing * (height * 0.33) + up * (curl * 0.35), lying);
+        p2 = mix(p2, base + facing * (height * 0.66) + up * (curl * 0.6), lying);
+        p3 = mix(p3, base + facing * (height * 0.97) + up * curl, lying);
+    }
 
     // Vertex: two per row, then the tip; rows closer together toward the tip, where it bends.
     let segments = max(tile.segments, 1u);
@@ -295,23 +328,36 @@ fn grass_blade(instance: u32, vertex: u32, t: f32, tiling: vec3<f32>) -> Blade {
     let wind_dir = select(facing, wind / max(speed, 1e-3), speed > 0.01);
     let ripple = sin(t * 2.6 + run * 0.2 + r0.w * TAU - u * 2.2) * u * u;
     pos += wind_dir * (ripple * height * (0.003 + 0.06 * min(speed / 8.0, 1.5)) * f.dry.w);
-    let half_width = 0.5 * width * pow(q, 0.6);
+    // A leaf: a thin stalk, then an ovate blade, widest a little before its middle.
+    let stalk = f.tip.w;
+    let x = saturate((u - stalk) / max(1.0 - stalk, 0.05));
+    let leaf_shape = select(0.1, max(pow(sin(PI * pow(x, 0.8)), 0.7), 0.1), u > stalk);
+    let half_width = 0.5 * width * mix(pow(q, 0.6), leaf_shape, leaf);
     // Seen edge-on a blade is widened across the view, so the field keeps its cover (from a
-    // few meters out: close up it would read as a broad ribbon).
+    // few meters out: close up it would read as a broad ribbon). Leaves aren't: they lie open.
     let v = normalize(-pos);
     let face_n = normalize(cross(side, tangent));
     let edge = 1.0 - abs(dot(face_n, v));
     var across_view = cross(tangent, v);
     across_view = select(side, normalize(across_view), dot(across_view, across_view) > 1e-8);
     across_view *= sign(dot(across_view, side) + 1e-6);
-    out.rel = pos + side * (s * half_width) + across_view * (s * half_width * edge * edge * 1.2 * smoothstep(1.5, 6.0, d));
-    // Rounded across the blade; far away, shaded like its clump (one rounded mound).
-    var n = normalize(face_n + side * (s * 0.45));
-    let clump_n = normalize(up + (f.axis_x.xyz * (clump.hash.x - 0.5) + f.axis_z.xyz * (clump.hash.y - 0.5)) * 0.5);
+    let widen = 1.2 * smoothstep(1.5, 6.0, d) * (1.0 - leaf);
+    out.rel = pos + side * (s * half_width) + across_view * (s * half_width * edge * edge * widen);
+    // Rounded across the blade (a leaf only folds a little along its midrib); far away, shaded
+    // like its clump (one rounded mound), on the leaf's own side.
+    var n = normalize(face_n + side * (s * mix(0.45, 0.2, leaf)));
+    var clump_n = normalize(up + (f.axis_x.xyz * (clump.hash.x - 0.5) + f.axis_z.xyz * (clump.hash.y - 0.5)) * 0.5);
+    clump_n = select(clump_n, -clump_n, leaf > 0.5 && dot(n, clump_n) < 0.0);
     n = normalize(mix(n, clump_n, smoothstep(0.15, 1.0, d / f.lod.y) * 0.7));
     out.normal = n;
     out.along = u;
     out.across = s;
+    // Lower parts of a meadow sit in the shade of the blades around them; a rosette's leaves
+    // less so, and fallen leaves only a little. Sun shines through toward the tips, but not
+    // through a leaf lying on the ground.
+    out.shade = mix(mix(0.3, 1.0, sqrt(u)), mix(0.55, 1.0, u), leaf);
+    out.shade = mix(out.shade, 0.85 + 0.15 * u, lying);
+    out.glow = u * u * (1.0 - lying);
 
     // Color: fresh to dry by the map, the clump and per blade; tips tinted.
     let cc = f.look.x;
@@ -324,7 +370,8 @@ fn grass_blade(instance: u32, vertex: u32, t: f32, tiling: vec3<f32>) -> Blade {
     albedo = mix(albedo, albedo * f.tip.rgb, u * u);
     // Snow caught on the blades, most on their arched upper parts.
     albedo = mix(albedo, vec3<f32>(0.82, 0.85, 0.88), snowed * (0.25 + 0.45 * u));
-    out.albedo = albedo;
+    // Darker low down, as the shade (`out.shade`) is darker there.
+    out.albedo = albedo * mix(mix(mix(0.7, 1.0, u), mix(0.8, 1.0, u), leaf), 0.95 + 0.05 * u, lying);
     // Glossy up close; far off the sheen would only sparkle.
     out.gloss = f.look.z * (1.0 - smoothstep(8.0, 35.0, d));
     out.visible = true;

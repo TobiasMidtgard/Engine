@@ -142,6 +142,16 @@ pub fn forest_viewpoints(center: DVec3) -> Vec<Viewpoint> {
         view(
             center,
             (
+                "forest_floor",
+                "Under the oaks: wood sorrel and last year's leaves on the forest floor",
+            ),
+            [6.0, 1.2, -24.0],
+            [1.0, 0.0, -28.5],
+            10.5,
+        ),
+        view(
+            center,
+            (
                 "forest_clearing",
                 "A clear-cut growing back; a tree falls every 25 s",
             ),
