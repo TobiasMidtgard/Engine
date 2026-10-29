@@ -145,7 +145,7 @@ cratered rock, lava worlds whose melt glows by its own light, Mars-like deserts 
 provinces, dunes and frost caps, ice shells crossed by lineae) and living ones with the Earth
 painter turned by a `Climate` (their share of sea, warmer or colder, plants colored by
 their star's light, and the "eyeball" of a world locked to its star). Views `proxima_b`,
-`acen_b_terra`, `eps_eri_ocean`, `acen_a_lava_night`, `proxima_ice` and others in
+`acen_b_frozen`, `eps_eri_ocean`, `acen_a_lava_night`, `proxima_ice` and others in
 `space_shots`. Planets farther than 2000 AU aren't enlarged into dots, nor baked until they
 cover a twentieth of a pixel.
 

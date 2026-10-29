@@ -101,7 +101,7 @@ fn views() -> Vec<View> {
             14.0,
         ),
         exo(
-            "acen_b_terra",
+            "acen_b_frozen",
             "Alpha Centauri B f",
             "Alpha Centauri B",
             40.0,
