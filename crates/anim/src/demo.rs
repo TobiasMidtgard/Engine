@@ -41,6 +41,7 @@ use crate::animator::{AnimationLibrary, Animator, AnimatorSettings};
 use crate::attach::{BoneAttachment, Hang};
 use crate::build::{car, dog, horse, humanoid, rock, spider};
 use crate::character::HumanModel;
+use crate::hit::HitReaction;
 use crate::horse_model::HorseModel;
 use crate::ik::{GroundProbe, IkShape, IkSurface, IkSurfaces, LookAt, Reach, ReachIk};
 use crate::muscle::{MorphWeights, MuscleRig};
@@ -328,6 +329,9 @@ pub struct DemoScript {
     pub period: f32,
     pub steps: Vec<DemoStep>,
     pub time: f32,
+    /// Where the entity stood when the script first ran (world), for [`DemoStep::home`].
+    #[serde(skip)]
+    pub home: Option<DVec3>,
 }
 
 /// One step of a [`DemoScript`]: a trigger, a parameter value and/or a blow at `at` seconds.
@@ -341,6 +345,8 @@ pub struct DemoStep {
     /// Strike the entity: a [`DamageEvent`] at this point with this push (N·s), both in its
     /// own frame (it faces −Z).
     pub hit: Option<(Vec3, Vec3)>,
+    /// Step back to where it stood when the script started (after blows knocked it away).
+    pub home: bool,
 }
 
 impl DemoStep {
@@ -366,7 +372,18 @@ impl DemoStep {
             ..Default::default()
         }
     }
+    pub fn home(at: f32) -> Self {
+        Self {
+            at,
+            home: true,
+            ..Default::default()
+        }
+    }
 }
+
+/// How fast a [`DemoStep::home`] walk back comes (time constant, s): slower than a blow, so
+/// the feet shuffle.
+const HOME_SECS: f32 = 0.45;
 
 pub(crate) fn register(app: &mut App) {
     {
@@ -1571,6 +1588,7 @@ fn build_paddock(world: &mut World, origin: DVec3) -> DemoEntities {
             DemoStep::trigger(7.6, "heavy_swing"),
         ],
         time: 0.0,
+        home: None,
     });
     dress(world, athlete, "athlete", SkinMaterial::default());
     spawn_hammer(world, athlete, at(ATHLETE.x, 1.0, ATHLETE.z));
@@ -1634,6 +1652,7 @@ fn build_paddock(world: &mut World, origin: DVec3) -> DemoEntities {
                     .chain((!watch).then(|| DemoStep::param(0.05, "arms_folded", 1.0)))
                     .collect(),
                     time: 0.0,
+                    home: None,
                 },
             ))
             .id();
@@ -1662,6 +1681,7 @@ fn build_paddock(world: &mut World, origin: DVec3) -> DemoEntities {
         period: 6.0,
         steps: vec![DemoStep::trigger(0.8, "flex")],
         time: 0.0,
+        home: None,
     });
     let reacher = spawn_humanoid(
         world,
@@ -1673,6 +1693,7 @@ fn build_paddock(world: &mut World, origin: DVec3) -> DemoEntities {
         period: 6.0,
         steps: vec![DemoStep::trigger(0.5, "reach")],
         time: 0.0,
+        home: None,
     });
     // A lantern hanging from a beam just out of reach: the reacher goes up on tiptoe and
     // takes hold of it, the palm on the glass from their right.
@@ -1909,10 +1930,14 @@ fn build_paddock(world: &mut World, origin: DVec3) -> DemoEntities {
             steps: vec![
                 DemoStep::param(0.05, "guarding", 1.0),
                 // The boxer's combo lands on the head between 0.6 and 2 s (see below).
+                // The combo's heavy punches knock the partner back: step back to the mark.
+                DemoStep::home(2.6),
                 DemoStep::hit(3.8, Vec3::new(0.02, 1.1, -0.15), Vec3::new(0.0, 0.0, 32.0)),
                 DemoStep::hit(5.0, Vec3::new(0.18, 1.42, 0.08), Vec3::new(0.0, 0.0, -24.0)),
+                DemoStep::home(5.4),
             ],
             time: 0.0,
+            home: None,
         },
     ));
 
@@ -1928,6 +1953,7 @@ fn build_paddock(world: &mut World, origin: DVec3) -> DemoEntities {
     world.entity_mut(boxer).insert((
         Name::new("Boxer"),
         crate::combat::Attacker::new("boxing", Some(sparring)),
+        HitReaction::default(),
         DemoScript {
             period: 6.0,
             steps: vec![
@@ -1936,8 +1962,11 @@ fn build_paddock(world: &mut World, origin: DVec3) -> DemoEntities {
                 DemoStep::trigger(0.72, "attack_light"),
                 DemoStep::trigger(1.15, "attack_light"),
                 DemoStep::trigger(1.62, "attack_light"),
+                // Back to the start line once the combo has carried it after the partner.
+                DemoStep::home(3.0),
             ],
             time: 0.0,
+            home: None,
         },
     ));
 
@@ -1988,6 +2017,7 @@ fn build_paddock(world: &mut World, origin: DVec3) -> DemoEntities {
             period: 1000.0,
             steps: vec![DemoStep::param(0.05, "arms_folded", 1.0)],
             time: 0.0,
+            home: None,
         },
         Watch {
             target: Some(runner),
@@ -2286,12 +2316,18 @@ fn demo_script_system(
         Option<&mut AnimationParams>,
         Option<&GlobalTransform>,
         Option<&LocalTimeScale>,
+        Option<&Transform>,
+        Option<&mut HitReaction>,
     )>,
 ) {
-    for (entity, mut script, mut animator, mut params, gt, local) in &mut q {
+    for (entity, mut script, mut animator, mut params, gt, local, transform, mut reaction) in &mut q
+    {
         let dt = time.delta_for(local);
         if script.period <= 0.0 || dt <= 0.0 {
             continue;
+        }
+        if script.home.is_none() {
+            script.home = transform.map(|t| t.translation);
         }
         let from = script.time;
         let to = from + dt;
@@ -2312,6 +2348,12 @@ fn demo_script_system(
                 && let Some(p) = params.as_mut()
             {
                 p.set(&step.param, step.value);
+            }
+            if step.home
+                && let (Some(home), Some(t), Some(r)) = (script.home, transform, reaction.as_mut())
+            {
+                let left = r.stagger.0.as_dvec3();
+                r.knock((home - t.translation - left).as_vec3(), HOME_SECS);
             }
             if let (Some((point, push)), Some(gt)) = (step.hit, gt) {
                 damage.write(DamageEvent {

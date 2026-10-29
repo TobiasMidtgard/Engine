@@ -4,7 +4,7 @@
 //! light blow only flinches. A stand-in backend here integrates forces on free bodies (no
 //! joints; the drives keep the parts together); runs with or without the fetched models.
 
-use engine_anim::{AnimationPlugin, PhysicalBlend, RagdollPart, RagdollRig};
+use engine_anim::{AnimationPlugin, HitReaction, PhysicalBlend, RagdollPart, RagdollRig};
 use engine_core::prelude::*;
 use engine_core::time::TimeSource;
 use engine_world::animation::{BodyRequest, SkeletonPose};
@@ -56,9 +56,14 @@ fn person(physics: bool) -> (App, Entity) {
     }
     app.world.resource_mut::<FixedTime>().set_hz(60.0);
     let t = Transform::default();
+    // Only the upper body's physics here: no knock-back step (tests/stagger.rs has that).
+    let reaction = HitReaction {
+        stagger_above: 0.0,
+        ..Default::default()
+    };
     let e = app
         .world
-        .spawn((t, GlobalTransform::from(t), BodyRequest::human(0)))
+        .spawn((t, GlobalTransform::from(t), BodyRequest::human(0), reaction))
         .id();
     app.update();
     engine_anim::character::finish_loading(&mut app.world);

@@ -26,6 +26,9 @@ const LOCK_OUT_SECS: f32 = 0.15;
 const STEP_TURN: f32 = 35.0;
 const STEP_SECS: f32 = 0.3;
 const STEP_HEIGHT: f32 = 0.07;
+/// While a stagger hurries the feet ([`FootIk::hurry`]) a held foot lets go once the body is
+/// this share of `lock_reach` away.
+const HURRY_REACH: f32 = 0.35;
 /// Feet step round only while the body moves slower than this (m/s); a walking foot the body
 /// leaves behind just lets go, as the walk lifts it anyway.
 const STEP_BELOW_SPEED: f32 = 0.4;
@@ -420,6 +423,15 @@ pub struct FootIk {
     pub last_body: Option<DVec3>,
     #[serde(skip)]
     pub body_speed: f32,
+    /// Seconds left of a stagger (a blow knocking the body back, see [`HitReaction`]): feet
+    /// step even while the body moves fast, as soon as it has moved a little from them.
+    ///
+    /// [`HitReaction`]: crate::hit::HitReaction
+    #[serde(skip)]
+    pub hurry: f32,
+    /// The leg that steps first while hurried.
+    #[serde(skip)]
+    pub lead: Option<usize>,
 }
 
 /// Where a planted foot is held (world space), and how strongly.
@@ -461,6 +473,8 @@ impl Default for FootIk {
             locks: Vec::new(),
             last_body: None,
             body_speed: 0.0,
+            hurry: 0.0,
+            lead: None,
         }
     }
 }
@@ -654,9 +668,14 @@ pub fn solve_feet(
         ik.body_speed += (moved / dt - ik.body_speed) * smoothing(dt, 0.1);
     }
     ik.last_body = Some(body);
-    // One foot steps at a time, and only while the body (nearly) stands.
+    // One foot steps at a time, and only while the body (nearly) stands or staggers.
     let body_speed = ik.body_speed;
-    let may_step = body_speed < STEP_BELOW_SPEED;
+    let hurried = ik.hurry > 0.0;
+    ik.hurry = (ik.hurry - dt).max(0.0);
+    if !hurried {
+        ik.lead = None;
+    }
+    let may_step = body_speed < STEP_BELOW_SPEED || hurried;
     let mut stepping = !may_step || ik.locks.iter().any(|l| !l.held && l.step && l.blend > 0.0);
     let mut hits = Vec::with_capacity(legs.len());
     let mut min_offset = f32::INFINITY;
@@ -683,7 +702,10 @@ pub fn solve_feet(
         // has moved so far that it must let go), then eased back to the animation.
         // A held foot the body turns or moves away from while it stands steps over to
         // where the animation has it.
-        let (lock_lift, reach) = (ik.lock_lift, (ik.lock_reach * scale) as f64);
+        let hurry = if hurried { HURRY_REACH } else { 1.0 };
+        let (lock_lift, reach) = (ik.lock_lift, (ik.lock_reach * hurry * scale) as f64);
+        // While hurried the lead foot goes first.
+        let waits = hurried && ik.lead.is_some_and(|lead| lead != n);
         let rot = gt.rotation() * animator.model[foot].r;
         let l = &mut ik.locks[n];
         let foot_speed = match (l.last, dt > 0.0) {
@@ -700,10 +722,15 @@ pub fn solve_feet(
             if !can_lock || lift > 2.0 * lock_lift {
                 l.held = false;
                 l.step = false;
-            } else if ((drift > reach || turned) && !stepping) || drift > 2.0 * reach {
+            } else if ((drift > reach || turned) && !stepping && !waits)
+                || drift > 2.0 * reach.max((ik.lock_reach * scale) as f64)
+            {
                 l.held = false;
                 l.step = may_step;
                 stepping = true;
+                if ik.lead == Some(n) {
+                    ik.lead = None;
+                }
             }
         } else if can_lock && lift < lock_lift && planted && !(l.step && l.blend > 0.0) {
             l.held = true;

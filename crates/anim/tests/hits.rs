@@ -37,7 +37,8 @@ fn head(app: &App, e: Entity) -> DVec3 {
         .index_of("head")
         .or_else(|| pose.index_of("Bip01 Head"))
         .unwrap();
-    pose.bone_world(gt, i).unwrap().0
+    // Relative to the body: a blow this hard also knocks it back a step (tests/stagger.rs).
+    pose.bone_world(gt, i).unwrap().0 - gt.translation()
 }
 
 #[test]

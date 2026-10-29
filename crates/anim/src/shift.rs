@@ -7,7 +7,7 @@
 use engine_core::prelude::*;
 use engine_world::WorldShift;
 
-use crate::demo::{DemoPath, Paddock};
+use crate::demo::{DemoPath, DemoScript, Paddock};
 use crate::ik::{FootIk, LookAt, ReachIk};
 use crate::muscle::MuscleRig;
 use crate::procedural::gait::LeggedGait;
@@ -32,6 +32,7 @@ pub(crate) fn follow_world_shifts(
     mut stunts: Query<&mut Stunt>,
     mut shuttles: Query<&mut ShuttleRun>,
     mut paddocks: Query<&mut Paddock>,
+    mut scripts: Query<&mut DemoScript>,
 ) {
     let Some(s) = shifts.read().copied().reduce(|acc, next| acc.then(&next)) else {
         return;
@@ -78,5 +79,10 @@ pub(crate) fn follow_world_shifts(
     }
     for mut p in &mut paddocks {
         p.origin = s.point(p.origin);
+    }
+    for mut d in &mut scripts {
+        if let Some(home) = d.home {
+            d.home = Some(s.point(home));
+        }
     }
 }
