@@ -34,6 +34,16 @@ pub struct PartFade {
     t: f32,
 }
 
+impl PartFade {
+    /// A part with nothing before it, dithering in from nothing.
+    pub(crate) fn appearing() -> Self {
+        Self {
+            ghost: None,
+            t: 0.0,
+        }
+    }
+}
+
 /// A part's old look, fading out beside it (despawned when the fade ends).
 #[derive(Component, Debug, Clone, Copy)]
 pub struct FadeGhost;

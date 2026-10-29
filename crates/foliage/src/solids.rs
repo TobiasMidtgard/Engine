@@ -139,10 +139,8 @@ pub fn stream_scenery_tree_solids(
         };
         match has {
             Some(h) if d > reach + SOLID_MARGIN_M => {
-                if let Ok(mut s) = commands.get_entity(h.0) {
-                    s.despawn();
-                }
-                commands.entity(e).remove::<HasSolid>();
+                commands.entity(h.0).try_despawn();
+                commands.entity(e).try_remove::<HasSolid>();
             }
             Some(h) if tree.is_changed() => {
                 let shape = plant_shape(&tree.plant(), &visuals, &library);
@@ -153,10 +151,8 @@ pub fn stream_scenery_tree_solids(
                         }
                     }
                     _ => {
-                        if let Ok(mut s) = commands.get_entity(h.0) {
-                            s.despawn();
-                        }
-                        commands.entity(e).remove::<HasSolid>();
+                        commands.entity(h.0).try_despawn();
+                        commands.entity(e).try_remove::<HasSolid>();
                     }
                 }
             }
@@ -172,7 +168,7 @@ pub fn stream_scenery_tree_solids(
                         TreeSolid,
                     ))
                     .id();
-                commands.entity(e).insert(HasSolid(solid));
+                commands.entity(e).try_insert(HasSolid(solid));
             }
             _ => {}
         }

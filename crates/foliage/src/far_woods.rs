@@ -357,12 +357,12 @@ pub struct CellFadeIn {
     ghost: Option<Entity>,
 }
 
-/// A cell on its way out: no longer streamed, drawn on while it dithers away (by itself when
-/// `alone`, else timed by the [`CellFadeIn`] of the cell replacing it), then dropped.
+/// A cell on its way out: no longer streamed, drawn on while it dithers away (by itself, or
+/// timed by the [`CellFadeIn`] of the cell replacing it, `by`), then dropped.
 #[derive(Component, Debug, Clone, Copy)]
 pub struct CellGhost {
     t: f32,
-    alone: bool,
+    by: Option<Entity>,
 }
 
 /// How long a far cell takes to dither in or out, seconds. Longer than a near part's fade: a
@@ -533,7 +533,7 @@ fn drop_cell(
             meshes.remove(h);
         }
     }
-    commands.entity(e).despawn();
+    commands.entity(e).try_despawn();
 }
 
 /// Take a cell out of the stream: dithering away by itself when `smooth`, else at once. A cell
@@ -550,10 +550,10 @@ fn retire(
         drop_cell(g, cells, commands, meshes);
     }
     if smooth {
-        commands.entity(e).remove::<CellFadeIn>().insert(CellGhost {
-            t: 0.0,
-            alone: true,
-        });
+        commands
+            .entity(e)
+            .try_remove::<CellFadeIn>()
+            .try_insert(CellGhost { t: 0.0, by: None });
     } else {
         drop_cell(e, cells, commands, meshes);
     }
@@ -580,10 +580,10 @@ pub fn fade_far_cells(
                     }
                 }
                 (Err(_), Some(d)) => {
-                    commands.entity(c).insert(d);
+                    commands.entity(c).try_insert(d);
                 }
                 (Ok(_), None) => {
-                    commands.entity(c).remove::<DitherFade>();
+                    commands.entity(c).try_remove::<DitherFade>();
                 }
                 (Err(_), None) => {}
             }
@@ -600,7 +600,7 @@ pub fn fade_far_cells(
             if let Some(g) = fade.ghost {
                 drop_cell(g, &cells, &mut commands, &mut meshes);
             }
-            commands.entity(e).remove::<CellFadeIn>();
+            commands.entity(e).try_remove::<CellFadeIn>();
         } else {
             set(&mut commands, children, Some(into));
             if let Some(children) = ghost {
@@ -609,8 +609,11 @@ pub fn fade_far_cells(
         }
     }
     for (e, mut ghost, children) in &mut ghosts {
-        if !ghost.alone {
-            continue;
+        match ghost.by {
+            Some(by) if incoming.contains(by) => continue,
+            // The cell replacing it went first (despawned by someone else): it goes alone.
+            Some(_) => ghost.by = None,
+            None => {}
         }
         ghost.t = (ghost.t + step).min(1.0);
         if ghost.t >= 1.0 {
@@ -841,6 +844,7 @@ pub fn stream_far_woods(
         if flat_distance(center(key)) + half_diag < settings.start_m {
             continue;
         }
+        let e = commands.spawn(Transform::from_translation(p.origin)).id();
         // The cell it replaces dithers out under it; with nothing to replace it comes in alone.
         let ghost = match state.cells.remove(&key) {
             Some(old) if smooth => {
@@ -849,10 +853,10 @@ pub fn stream_far_woods(
                 }
                 commands
                     .entity(old)
-                    .remove::<CellFadeIn>()
-                    .insert(CellGhost {
+                    .try_remove::<CellFadeIn>()
+                    .try_insert(CellGhost {
                         t: 0.0,
-                        alone: false,
+                        by: Some(e),
                     });
                 Some(old)
             }
@@ -862,7 +866,6 @@ pub fn stream_far_woods(
             }
             None => None,
         };
-        let e = commands.spawn(Transform::from_translation(p.origin)).id();
         let mut handles = Vec::new();
         for (tree, mesh) in parts {
             let Some(&material) = state.materials.get(&tree) else {
@@ -923,7 +926,7 @@ pub fn follow_world_shift(
                         meshes.remove(h);
                     }
                 }
-                commands.entity(e).despawn();
+                commands.entity(e).try_despawn();
             }
         }
     }
@@ -1162,10 +1165,27 @@ mod tests {
                 .filter(|c| c.ghost.is_some())
                 .count();
             let mut ghosts = app.world.query::<&CellGhost>();
-            alone += ghosts.iter(&app.world).filter(|g| g.alone).count();
+            alone += ghosts.iter(&app.world).filter(|g| g.by.is_none()).count();
         }
         assert!(crossed > 0, "no rebuilt cell cross-faded");
         assert!(alone > 0, "no cell faded out by itself");
+        // Something else despawns cells mid-fade (an editor's Stop clearing the scene): the
+        // woods carry on without them rather than failing on their commands.
+        let some: Vec<Entity> = app
+            .world
+            .query_filtered::<Entity, Or<(With<CellGhost>, With<CellFadeIn>)>>()
+            .iter(&app.world)
+            .take(6)
+            .collect();
+        assert!(!some.is_empty());
+        for e in some {
+            app.world.despawn(e);
+        }
+        for f in 61..=70 {
+            app.world.get_mut::<Transform>(cam).unwrap().translation =
+                DVec3::new(10.0 * f as f64, 0.0, 0.0);
+            app.update();
+        }
         // A second and a half later every fade is over: no ghosts, nothing dithered, and the
         // gone cells' meshes freed.
         app.update_n(90);

@@ -124,6 +124,35 @@ impl EnvSample for EnvView<'_> {
     }
 }
 
+/// The environment a region's history grows in: the land as it is (its ground, what holds
+/// water, where water stands) under a steady climate, not the weather of the moment it loads.
+/// The live weather, gusts, puddles and fires of the minute a region is built would otherwise
+/// grow a different forest on every run, and the same forest is what a player expects to find.
+pub struct ClimateEnv<'a, E: EnvSample>(pub &'a E);
+
+/// Sea-level air of the history's steady climate, °C, and how it cools with height, °C/m.
+const CLIMATE_SEA_LEVEL_C: f32 = 15.0;
+const CLIMATE_LAPSE_C_PER_M: f32 = 0.0065;
+
+impl<E: EnvSample> EnvSample for ClimateEnv<'_, E> {
+    fn temperature_c(&self, p: DVec3) -> f32 {
+        CLIMATE_SEA_LEVEL_C - CLIMATE_LAPSE_C_PER_M * p.y.max(0.0) as f32
+    }
+    fn wetness(&self, _p: DVec3) -> f32 {
+        0.0
+    }
+    fn wind(&self, _p: DVec3) -> Vec3 {
+        // The prevailing wind seeds drift on over the years.
+        crate::sim::FlatEnv::default().wind
+    }
+    fn ground(&self, p: DVec3) -> Option<(f64, f32)> {
+        self.0.ground(p)
+    }
+    fn submerged(&self, p: DVec3) -> bool {
+        self.0.submerged(p)
+    }
+}
+
 fn region_contains(region: &EcologyRegion, center: DVec3, p: DVec3) -> bool {
     (p.x - center.x).abs() <= region.half_extents[0] as f64
         && (p.z - center.z).abs() <= region.half_extents[1] as f64
@@ -236,10 +265,11 @@ fn build_region(
     env: &EnvView,
 ) -> BuiltRegion {
     let start = std::time::Instant::now();
-    let soil = Soil::build(region, center, sources, env);
+    let env = ClimateEnv(env);
+    let soil = Soil::build(region, center, sources, &env);
     let mut sim = RegionSim::new(soil, region.seed);
     let rain = rain_species(region, library);
-    let (plants, logs) = play_history(&mut sim, region, center, library, &rain, env);
+    let (plants, logs) = play_history(&mut sim, region, center, library, &rain, &env);
     BuiltRegion {
         state: RegionState {
             sim,
@@ -1026,6 +1056,13 @@ pub fn ecology_step(world: &mut World) {
         }
     }
 
+    // In a fixed order (not the order the ECS happens to store them in, which moves with
+    // whatever else was added to them), so the same forest grows the same way every run.
+    let key = |p: DVec3| (p.x.to_bits(), p.z.to_bits(), p.y.to_bits());
+    for (plants, logs) in groups.values_mut() {
+        plants.sort_by_key(|p| (key(p.pos), p.plant.species.0));
+        logs.sort_by_key(|l| key(l.pos));
+    }
     for (region_entity, years) in due {
         let Some(mut state) = world.entity_mut(region_entity).take::<RegionState>() else {
             continue;
@@ -1495,6 +1532,46 @@ mod tests {
         });
         assert!(in_frame.len() > 100, "{} plants", in_frame.len());
         assert_eq!(in_frame, background);
+    }
+
+    #[test]
+    fn a_forest_grows_the_same_whatever_the_weather_when_it_loads() {
+        let grow = |weather: Option<WeatherState>| {
+            let mut app = App::new();
+            app.add_plugins(engine_world::WorldPlugin);
+            app.add_plugins(crate::FoliagePlugin);
+            app.world.insert_resource(crate::FoliageLoading::in_frame());
+            app.world.resource_mut::<EcologySettings>().paused = true;
+            if let Some(w) = weather {
+                app.world.insert_resource(w);
+            }
+            let region = app.world.spawn((Transform::default(), forest())).id();
+            app.update_n(3);
+            assert!(app.world.get::<RegionState>(region).is_some());
+            let mut q = app.world.query::<(&Plant, &Transform)>();
+            let mut plants: Vec<(u16, [i64; 3])> = q
+                .iter(&app.world)
+                .map(|(p, t)| {
+                    (
+                        p.species.0,
+                        t.translation.to_array().map(|v| (v * 1e3) as i64),
+                    )
+                })
+                .collect();
+            plants.sort();
+            plants
+        };
+        let mild = grow(None);
+        // A hot, stormy afternoon: the history doesn't follow the weather of the moment.
+        let stormy = grow(Some(WeatherState {
+            temperature_c: 31.0,
+            wind: Vec3::new(-14.0, 0.0, 9.0),
+            precipitation_mm_h: 12.0,
+            precipitation_kind: engine_world::environment::PrecipitationKind::Rain,
+            ..Default::default()
+        }));
+        assert!(mild.len() > 100, "{} plants", mild.len());
+        assert_eq!(mild, stormy);
     }
 
     #[test]

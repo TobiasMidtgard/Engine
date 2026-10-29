@@ -421,6 +421,38 @@ mod tests {
     }
 
     #[test]
+    fn trees_planted_ahead_of_a_moving_camera_fade_in() {
+        let (mut app, cam) = app();
+        app.world.insert_resource(crate::FoliageLoading::in_frame());
+        app.world
+            .insert_resource(ForestCover(std::sync::Arc::new(Everywhere)));
+        app.update_n(COVER_SETTLE_FRAMES as usize + 20);
+        let dithering = |app: &mut App| {
+            app.world
+                .query_filtered::<(), (
+                    With<crate::visuals::PlantPart>,
+                    With<engine_render::DitherFade>,
+                )>()
+                .iter(&app.world)
+                .count()
+        };
+        // Planted at load: there at once.
+        assert_eq!(dithering(&mut app), 0);
+        assert!(!planted(&mut app).is_empty());
+        // Walking on at 15 m a frame: the cells coming into range plant trees that fade in.
+        let mut seen = 0;
+        for f in 1..=20 {
+            app.world.get_mut::<Transform>(cam).unwrap().translation =
+                DVec3::new(15.0 * f as f64, 0.0, 0.0);
+            app.update();
+            seen = seen.max(dithering(&mut app));
+        }
+        assert!(seen > 0, "new trees appeared at once");
+        app.update_n(60);
+        assert_eq!(dithering(&mut app), 0, "fades left running");
+    }
+
+    #[test]
     fn revisits_replant_without_leaving_cells_behind() {
         for background in [false, true] {
             let (mut app, cam) = app();

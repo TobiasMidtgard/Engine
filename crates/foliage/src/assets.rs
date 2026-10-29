@@ -763,13 +763,21 @@ fn build_species(
         let [r, g, b, _] = leaf_material(c).base_color;
         [r, g, b]
     });
-    let dead_leaves = materials.add(leaf_material(srgb(0x8a6a3c)));
+    // Dead leaves have dried out: light scatters inside rather than passing through, so they
+    // don't glow against the sun (with a living leaf's translucency a brown frond lit from
+    // behind shone signal red).
+    let dead = || {
+        let mut m = leaf_material(srgb(0x8a6a3c));
+        m.subsurface = 0.1;
+        m
+    };
+    let dead_leaves = materials.add(dead());
     let still = |mut m: StandardMaterial| {
         m.wind_sway = 0.0;
         m
     };
     let leaves_still = tint_colors.map(|c| materials.add(still(leaf_material(c))));
-    let dead_leaves_still = materials.add(still(leaf_material(srgb(0x8a6a3c))));
+    let dead_leaves_still = materials.add(still(dead()));
     let dead_bark = materials.add(dead_bark);
     let burnt = materials.add(burnt);
 

@@ -101,6 +101,7 @@ pub fn sync_scenery_trees(
         Ref<SceneryTree>,
         Ref<GlobalTransform>,
         Option<&mut SceneryTreeVisual>,
+        Has<crate::near_woods::NearWoodsTree>,
     )>,
     mut parts: Query<
         (
@@ -128,7 +129,10 @@ pub fn sync_scenery_trees(
     let mut started: Option<std::time::Instant> = None;
     let fresh_budget = loading.fresh_budget(screen.as_deref());
     let (mut fresh_seen, mut out_of_time, mut skipped) = (0u32, false, false);
-    for (entity, tree, global, visual) in &mut trees {
+    // Near woods trees planted while the camera moves on (a new cell coming into range) fade
+    // in rather than appear; after a cut they are part of the new view.
+    let fade_in = fades.settled();
+    for (entity, tree, global, visual, streamed) in &mut trees {
         let fresh = visual.is_none();
         if fresh {
             if out_of_time {
@@ -213,9 +217,15 @@ pub fn sync_scenery_trees(
                     );
                     apply(&mut r, want[i]);
                     r.cast_shadows = shadows;
-                    commands
-                        .spawn((pose, ChildOf(entity), r, PlantPart, CastsShadow(shadows)))
-                        .id()
+                    let mut part =
+                        commands.spawn((pose, ChildOf(entity), r, PlantPart, CastsShadow(shadows)));
+                    if streamed && fade_in && want[i].is_some() {
+                        part.insert((
+                            engine_render::DitherFade(-1.0),
+                            crate::lod_fade::PartFade::appearing(),
+                        ));
+                    }
+                    part.id()
                 });
                 commands.entity(entity).insert(SceneryTreeVisual {
                     parts,
