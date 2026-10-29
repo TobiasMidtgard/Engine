@@ -19,8 +19,12 @@ use crate::landscape::{Cover, LANDSCAPE_SEED, Landscape, LandscapeGround, PLANET
 use crate::places::Place;
 use engine::prelude::*;
 use engine_space::CelestialBody;
+use engine_space::look::{FarGround, GroundDrawn, GroundPoint};
 use engine_space::nearby::WorldClass;
-use engine_terrain::{FlatPad, OverlayPaint, PlanetTerrain, WorldKind, WorldRecipe};
+use engine_terrain::far_look::FAR_LOOK_WIDTH;
+use engine_terrain::{
+    FarLook, FarLookMap, FlatPad, OverlayPaint, PlanetTerrain, WorldKind, WorldRecipe,
+};
 use std::sync::Arc;
 
 /// The landscape replaces the planet's ground out to here from the plaza (m): the valley and
@@ -74,7 +78,14 @@ pub fn spawn(commands: &mut Commands, land: Arc<Landscape>, surfaces: Arc<Landsc
         .with_ground_surface(surfaces);
     commands
         .entity(bodies["Earth"])
-        .insert((Name::new("Earth"), earth.home_transform(pad), earth));
+        // The terrain draws Earth's ground at every distance: the far view keeps the cloud
+        // tops over it.
+        .insert((
+            Name::new("Earth"),
+            earth.home_transform(pad),
+            earth,
+            GroundDrawn,
+        ));
 
     // Ground and colliders on the Moon and Mars too: each answers the world's ground while
     // the focus is near it, so a pilot can walk, a ship land and a rock roll there.
@@ -101,22 +112,51 @@ pub fn spawn(commands: &mut Commands, land: Arc<Landscape>, surfaces: Arc<Landsc
 /// Planets of other stars get their ground when the camera comes within this many of their
 /// radii, and lose it again past twice as far.
 const GROUND_REACH_RADII: f64 = 40.0;
+/// Their look from afar is baked for the ground from this much farther out, so it is ready
+/// when the ground comes.
+const FAR_LOOK_LEAD: f64 = 1.5;
+
+/// What [`ground_near_planets`] reads of a planet.
+type PlanetGround = (
+    Entity,
+    &'static CelestialBody,
+    &'static Transform,
+    Has<PlanetTerrain>,
+    Option<&'static FarGround>,
+    Option<&'static mut BakingGround>,
+);
+
+/// A planet's far look being baked for its ground (on a thread of its own).
+#[derive(Component)]
+pub struct BakingGround(Option<std::thread::JoinHandle<FarLook>>);
 
 /// Give the planets of the nearby stars ground as a ship closes in: each carries a recipe of
 /// what its surface is (engine_space's `nearby` module), made into a terrain of that kind, so
 /// a pilot can land and walk there. Far behind, the terrain goes again.
+///
+/// The far view and the ground show one planet: an Earth-like world's far view paints the
+/// terrain's own continents ([`FarGround`]), the terrain wears the far view's colors and glow
+/// from high up ([`FarLook`]), and the cloud tops stay over the ground ([`GroundDrawn`]), so
+/// nothing changes where the ground takes over.
 pub fn ground_near_planets(
     mut commands: Commands,
     focus: Query<&Transform, With<engine::world::SimulationFocus>>,
-    bodies: Query<(Entity, &CelestialBody, &Transform, Has<PlanetTerrain>)>,
+    mut bodies: Query<PlanetGround>,
 ) {
     let Some(eye) = focus.iter().next().map(|t| t.translation) else {
         return;
     };
-    for (entity, body, transform, has) in &bodies {
+    for (entity, body, transform, has, ground, baking) in &mut bodies {
         let Some(surface) = body.surface else {
             continue;
         };
+        let recipe = world_recipe(body, &surface);
+        // The far view paints an Earth-like world from its terrain's ground from the start.
+        if ground.is_none() && body.look == engine_space::BodyLook::Earthlike {
+            commands
+                .entity(entity)
+                .insert(far_ground(&PlanetTerrain::world(&recipe)));
+        }
         let radii = (transform.translation - eye).length() / body.radius_m;
         // Under a cloud deck the ground is hidden from above: it comes only below the deck.
         let reach = if body.look.solid() {
@@ -124,13 +164,74 @@ pub fn ground_near_planets(
         } else {
             1.1
         };
-        if !has && radii < reach {
+        if !has && radii < reach * FAR_LOOK_LEAD {
+            match baking {
+                None => {
+                    let (body, ground) = (body.clone(), ground.cloned());
+                    let job = std::thread::Builder::new()
+                        .name(format!("far look {}", body.name))
+                        .spawn(move || far_look(&body, ground.as_ref()))
+                        .ok();
+                    commands.entity(entity).insert(BakingGround(job));
+                }
+                Some(mut job) if radii < reach => {
+                    if job.0.as_ref().is_some_and(|j| !j.is_finished()) {
+                        continue;
+                    }
+                    let mut e = commands.entity(entity);
+                    e.remove::<BakingGround>()
+                        .insert((PlanetTerrain::world(&recipe), GroundDrawn));
+                    if let Some(look) = job.0.take().and_then(|j| j.join().ok()) {
+                        e.insert(look);
+                    }
+                }
+                Some(_) => {}
+            }
+        } else if (has && radii > reach * 2.0)
+            || (!has && baking.is_some() && radii > reach * FAR_LOOK_LEAD * 1.2)
+        {
             commands
                 .entity(entity)
-                .insert(PlanetTerrain::world(&world_recipe(body, &surface)));
-        } else if has && radii > reach * 2.0 {
-            commands.entity(entity).remove::<PlanetTerrain>();
+                .remove::<(PlanetTerrain, FarLook, GroundDrawn, BakingGround)>();
         }
+    }
+}
+
+/// The far view's sampler of a terrain's ground: its heights, moisture and frost.
+pub fn far_ground(terrain: &PlanetTerrain) -> FarGround {
+    let shape = Arc::new(terrain.shape.clone());
+    let frost = terrain.palette.snow_below_c;
+    FarGround::new(move |d, texel_m| {
+        let s = shape.sample(d.as_dvec3(), (2.0 * texel_m as f64).max(1_000.0));
+        GroundPoint {
+            height_m: s.height as f32,
+            moisture: s.moisture,
+            above_frost_c: s.temperature_c - frost,
+        }
+    })
+}
+
+/// A planet's look from afar, for its terrain to wear from high up.
+pub fn far_look(body: &CelestialBody, ground: Option<&FarGround>) -> FarLook {
+    let maps = engine_space::look::bake_surface_on(body, ground, FAR_LOOK_WIDTH);
+    let rgba = maps
+        .albedo
+        .data
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .zip(maps.aux.data.as_chunks::<4>().0)
+        .flat_map(|(a, x)| [a[0], a[1], a[2], x[3]])
+        .collect();
+    FarLook {
+        map: Arc::new(FarLookMap::new(maps.albedo.width, maps.albedo.height, rgba)),
+        // Barren worlds' provinces, dunes and lineae are the far view's alone: they tint the
+        // ground all the way down. A living world's ground draws its own biomes.
+        near_tint: if body.look == engine_space::BodyLook::Earthlike {
+            0.2
+        } else {
+            0.8
+        },
     }
 }
 

@@ -6,6 +6,7 @@ pub mod cube;
 pub mod deform;
 pub mod demo;
 pub mod edits;
+pub mod far_look;
 pub mod forest;
 pub mod ground;
 pub mod landforms;
@@ -36,6 +37,7 @@ pub use chunk::{ChunkMesh, ChunkSource, TerrainVertex};
 pub use cube::{NodeKey, SurfaceMap, TerrainDomain, home_rotation};
 pub use deform::{DeformationMap, DeformationSettings};
 pub use edits::{EditLayer, LocalEdit, OverlayPaint, PAINT_NAMES, paint_index};
+pub use far_look::{FarLook, FarLookMap};
 pub use ground::GroundSurface;
 pub use palette::TerrainPalette;
 pub use shape::{

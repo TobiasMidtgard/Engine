@@ -17,10 +17,10 @@ use engine_render::{
 };
 use engine_world::{FarCloudLayer, WeatherState};
 
-use super::bake::{SurfaceMaps, bake_rings, bake_surface};
+use super::bake::{SurfaceMaps, bake_rings, bake_surface_on};
 use super::{
-    BodyImpostor, BodyLook, BodyRings, FULL_MAP_WIDTH, ImpostorPart, LookBakes, RING_MAP_WIDTH,
-    SMALL_MAP_WIDTH, spheroid_radii,
+    BodyImpostor, BodyLook, BodyRings, FULL_MAP_WIDTH, FarGround, GroundDrawn, ImpostorPart,
+    LookBakes, RING_MAP_WIDTH, SMALL_MAP_WIDTH, spheroid_radii,
 };
 use crate::{BodyKind, CelestialBody, SpaceClock, SpaceSettings, StarLight};
 
@@ -145,15 +145,18 @@ struct LookKey {
     look: BodyLook,
     color: [f32; 3],
     rings: Option<BodyRings>,
+    /// The ground painted from ([`FarGround::id`]; 0: the look's own).
+    ground: usize,
 }
 
 impl LookKey {
-    fn of(b: &CelestialBody) -> Self {
+    fn of(b: &CelestialBody, ground: Option<&FarGround>) -> Self {
         Self {
             name: b.name.clone(),
             look: b.look.clone(),
             color: b.color,
             rings: b.rings.clone(),
+            ground: ground.map_or(0, FarGround::id),
         }
     }
 }
@@ -308,13 +311,14 @@ impl BodiesFeature {
         gpu: &GpuShared,
         entity: Entity,
         body: &CelestialBody,
+        ground: Option<&FarGround>,
         radius_px: f32,
         bakes: &mut LookBakes,
     ) {
-        let key = LookKey::of(body);
+        let key = LookKey::of(body, ground);
         let stale = self.maps.get(&entity).is_none_or(|m| m.key != key);
         if stale {
-            let maps = bake_surface(body, SMALL_MAP_WIDTH);
+            let maps = bake_surface_on(body, ground, SMALL_MAP_WIDTH);
             let rings = body.rings.as_ref().map(|r| bake_rings(r, RING_MAP_WIDTH));
             bakes
                 .done
@@ -341,7 +345,7 @@ impl BodiesFeature {
         {
             let current = world
                 .get::<CelestialBody>(job.body)
-                .map(LookKey::of)
+                .map(|b| LookKey::of(b, world.get::<FarGround>(job.body)))
                 .is_some_and(|k| k == job.key);
             bakes
                 .done
@@ -358,11 +362,12 @@ impl BodiesFeature {
             && let Some(&(entity, _)) = self.wanted.first()
             && let Some(body) = world.get::<CelestialBody>(entity).cloned()
         {
-            let key = LookKey::of(&body);
+            let ground = world.get::<FarGround>(entity).cloned();
+            let key = LookKey::of(&body, ground.as_ref());
             let handle = std::thread::Builder::new()
                 .name(format!("bake {}", body.name))
                 .spawn(move || {
-                    let maps = bake_surface(&body, FULL_MAP_WIDTH);
+                    let maps = bake_surface_on(&body, ground.as_ref(), FULL_MAP_WIDTH);
                     let rings = body.rings.as_ref().map(|r| bake_rings(r, RING_MAP_WIDTH));
                     (maps, rings)
                 });
@@ -637,8 +642,11 @@ impl RenderFeature for BodiesFeature {
             // its cloud tops are still drawn, as a layer of their own.
             let altitude = (d - radius) / scale;
             let ground = body.look.solid() && d - radius < radius * 0.002;
+            // (Where another module draws the ground, it covers the disk from any distance: the
+            // layer carries the clouds over it from everywhere.)
+            let ground_drawn = world.get::<GroundDrawn>(entity).is_some();
             let shell_wanted = body.look.clouds()
-                && altitude < body.radius_m * SHELL_RANGE
+                && (altitude < body.radius_m * SHELL_RANGE || ground_drawn)
                 && altitude > SHELL_FADE_M.0;
             if ground && !shell_wanted {
                 continue;
@@ -649,7 +657,15 @@ impl RenderFeature for BodiesFeature {
             if radius_px < 0.05 {
                 continue;
             }
-            self.ensure_maps(gpu, entity, &body, radius_px, &mut bakes);
+            let far_ground = world.get::<FarGround>(entity).cloned();
+            self.ensure_maps(
+                gpu,
+                entity,
+                &body,
+                far_ground.as_ref(),
+                radius_px,
+                &mut bakes,
+            );
             let Some(maps) = self.maps.get(&entity) else {
                 continue;
             };

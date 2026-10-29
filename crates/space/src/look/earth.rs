@@ -22,6 +22,7 @@ use engine_core::math::{Rng, Vec3};
 use super::bake::{Paint, Painter, Texel};
 use super::color::{Rgb, mix, scale, srgb};
 use super::noise::{Grid, Noise, angle_between, dir, local_offset, smooth};
+use super::{FarGround, GroundPoint};
 
 const DEG: f32 = PI / 180.0;
 
@@ -105,6 +106,9 @@ pub(crate) struct Earth {
     /// Large cloud systems (unswirled): body, cirrus.
     sky: Grid<2>,
     storms: Vec<Storm>,
+    /// The ground a terrain builds for this planet, painted instead of the continent field
+    /// (see [`FarGround`]), and the size of a texel on it (m).
+    ground: Option<(FarGround, f32)>,
 }
 
 /// Land where Earth's continent field is above this.
@@ -228,7 +232,16 @@ impl Earth {
             climate,
             sky,
             storms,
+            ground: None,
         }
+    }
+
+    /// Paint `ground`'s continents, seas, heights, moisture and snow instead of the look's
+    /// own, for a planet `radius_m` in radius on maps `width` texels wide.
+    pub(crate) fn on(mut self, ground: Option<&FarGround>, radius_m: f64, width: u32) -> Self {
+        let texel_m = (std::f64::consts::TAU * radius_m / width.max(1) as f64) as f32;
+        self.ground = ground.map(|g| (g.clone(), texel_m));
+        self
     }
 
     /// Climate latitude, degrees (signed): the latitude, or on a locked planet half the angle
@@ -254,13 +267,22 @@ impl Earth {
         (low + 0.11 * fine, p)
     }
 
-    fn surface(&self, t: &Texel, c: f32, p: Vec3, climate: [f32; 3]) -> (Rgb, f32) {
+    fn surface(
+        &self,
+        t: &Texel,
+        c: f32,
+        p: Vec3,
+        climate: [f32; 3],
+        ground: Option<GroundPoint>,
+    ) -> (Rgb, f32) {
         let [wobble, ranges, ice_noise] = climate;
         let lat_deg = self.climate_lat(t);
         let lat = lat_deg.abs();
         let warm = self.climate_of.warmth();
         let earth = self.climate_of.earth_poles;
-        let coast = c - self.sea_level;
+        // A terrain's ground: its sea level, heights (the shelf at about 400 m deep, the deep
+        // sea past 800 m), and no sea ice (the terrain's sea stays open).
+        let coast = ground.map_or(c - self.sea_level, |g| g.height_m / 8000.0);
         if coast < 0.0 {
             // Ocean: deep navy, lighter shelves along the coasts, sea ice near the poles.
             let shelf = smooth(-0.05, 0.0, coast);
@@ -276,16 +298,26 @@ impl Earth {
                 66.0
             } + 4.0 * ice_noise
                 + 45.0 * warm;
-            let ice = smooth(edge - 1.5, edge + 1.5, lat);
+            let ice = if ground.is_some() {
+                0.0
+            } else {
+                smooth(edge - 1.5, edge + 1.5, lat)
+            };
             let leads = 0.85 + 0.15 * self.n2.at(t.d * 80.0);
             col = mix(col, scale(srgb!(0xdde4ea), leads), ice);
             return (col, 1.0 - ice);
         }
         // Land: elevation, temperature and moisture choose the biome.
         let ridge = self.n2.ridged(p * 3.5, 4);
-        let elev = (coast * 2.5).min(0.5) + ridge * ranges * 0.8;
+        // (A terrain's height, 1 at 4 km, and its temperature, 0 where snow lies, 1 at 30 °C
+        // above that.)
+        let elev = ground.map_or((coast * 2.5).min(0.5) + ridge * ranges * 0.8, |g| {
+            (g.height_m / 4000.0).max(0.0)
+        });
         // Northern summer: the tundra is bare, snow lies only on the high ranges.
-        let temp = 1.0 - smooth(0.0, 88.0, lat) - elev * 0.35 + warm;
+        let temp = ground.map_or(1.0 - smooth(0.0, 88.0, lat) - elev * 0.35 + warm, |g| {
+            g.above_frost_c / 30.0
+        });
         let band = if lat < 12.0 {
             0.85
         } else if lat < 35.0 {
@@ -294,7 +326,10 @@ impl Earth {
             0.6 - 0.25 * smooth(60.0, 75.0, lat)
         };
         let interior = smooth(0.02, 0.22, coast);
-        let moist = (band - 0.35 * interior + 0.3 * wobble).clamp(0.0, 1.0);
+        let moist = ground.map_or(
+            (band - 0.35 * interior + 0.3 * wobble).clamp(0.0, 1.0),
+            |g| g.moisture,
+        );
         let (forest, grass) = match self.climate_of.plants {
             None => (
                 if temp > 0.62 {
@@ -337,11 +372,17 @@ impl Earth {
         );
         // Bare rock and snow on the ranges.
         col = mix(col, srgb!(0x6c6253), smooth(0.45, 0.85, elev) * 0.7);
-        let snow = smooth(0.05, -0.05, temp + 0.06 * wobble)
-            + smooth(1.0, 1.2, elev) * smooth(0.45, 0.25, temp);
+        let snow = if ground.is_some() {
+            smooth(0.02, -0.02, temp)
+        } else {
+            smooth(0.05, -0.05, temp + 0.06 * wobble)
+                + smooth(1.0, 1.2, elev) * smooth(0.45, 0.25, temp)
+        };
         col = mix(col, srgb!(0xf0f2f4), snow.min(1.0));
         // Ice sheets: the polar continent, and the highest, coldest northern land.
-        let sheet = if !earth {
+        let sheet = if ground.is_some() {
+            0.0
+        } else if !earth {
             smooth(74.0, 79.0, lat - 45.0 * warm + 3.0 * wobble + 3.0 * elev)
         } else if lat_deg < 0.0 {
             smooth(58.0, 63.0, lat + 3.0 * wobble)
@@ -457,7 +498,11 @@ impl Painter for Earth {
     fn paint(&self, t: &Texel) -> Paint {
         let (c, p) = self.continent(t);
         let climate = self.climate.at(t.lat, t.lon);
-        let (color, water) = self.surface(t, c, p, climate);
+        let ground = self
+            .ground
+            .as_ref()
+            .map(|(g, texel_m)| (g.0)(t.d, *texel_m));
+        let (color, water) = self.surface(t, c, p, climate, ground);
         let lat = self.climate_lat(t).abs();
         let dry_band = if self.climate_of.locked {
             // Dry where the substellar rains have wrung the air out: the rim of the day side.
@@ -467,6 +512,8 @@ impl Painter for Earth {
         };
         let desert = if water > 0.5 {
             0.0
+        } else if let Some(g) = ground {
+            dry_band.max(smooth(0.3, 0.1, g.moisture))
         } else {
             dry_band * smooth(0.0, 0.08, c - self.sea_level)
         };

@@ -11,7 +11,7 @@ use std::sync::Mutex;
 use engine_core::math::Vec3;
 use engine_render::Image;
 
-use super::{BodyLook, BodyRings};
+use super::{BodyLook, BodyRings, FarGround};
 use crate::CelestialBody;
 
 /// Worker threads used for one bake.
@@ -91,7 +91,11 @@ pub(crate) trait Painter: Sync {
 }
 
 /// The painter for a body's look, set up for maps `width` texels wide.
-pub(crate) fn painter(body: &CelestialBody, width: u32) -> Box<dyn Painter> {
+pub(crate) fn painter(
+    body: &CelestialBody,
+    ground: Option<&FarGround>,
+    width: u32,
+) -> Box<dyn Painter> {
     use super::{earth, gas, rock, world};
     let seed = seed_of(&body.name);
     // Planets of other stars are painted from what their surface is.
@@ -114,7 +118,11 @@ pub(crate) fn painter(body: &CelestialBody, width: u32) -> Box<dyn Painter> {
                 earth_poles: false,
                 cloudiness: (r.cloud_cover - 0.55) * 0.6,
             };
-            return Box::new(earth::Earth::with(seed, width, climate));
+            return Box::new(earth::Earth::with(seed, width, climate).on(
+                ground,
+                body.radius_m,
+                width,
+            ));
         }
     }
     match &body.look {
@@ -122,7 +130,9 @@ pub(crate) fn painter(body: &CelestialBody, width: u32) -> Box<dyn Painter> {
         BodyLook::Moon => Box::new(rock::Moon::new(seed, width)),
         BodyLook::Mercury => Box::new(rock::Mercury::new(seed, width)),
         BodyLook::Mars => Box::new(rock::Mars::new(seed, width)),
-        BodyLook::Earthlike => Box::new(earth::Earth::new(seed, width)),
+        BodyLook::Earthlike => {
+            Box::new(earth::Earth::new(seed, width).on(ground, body.radius_m, width))
+        }
         BodyLook::Clouds => Box::new(gas::Venus::new(body.color, seed, width)),
         BodyLook::Banded {
             colors,
@@ -197,10 +207,19 @@ fn unorm(v: f32) -> u8 {
 
 /// Bake `body`'s maps at `width`×`width/2` texels (width is rounded up to a power of two).
 pub fn bake_surface(body: &CelestialBody, width: u32) -> SurfaceMaps {
+    bake_surface_on(body, None, width)
+}
+
+/// [`bake_surface`] over the ground another module builds for the body (see [`FarGround`]).
+pub fn bake_surface_on(
+    body: &CelestialBody,
+    ground: Option<&FarGround>,
+    width: u32,
+) -> SurfaceMaps {
     let started = std::time::Instant::now();
     let width = width.clamp(16, 8192).next_power_of_two();
     let height = width / 2;
-    let painter = painter(body, width);
+    let painter = painter(body, ground, width);
     let (relief, clouds) = (painter.relief(), painter.clouds());
 
     #[derive(Clone, Copy, Default)]
@@ -293,7 +312,7 @@ pub fn bake_surface(body: &CelestialBody, width: u32) -> SurfaceMaps {
 /// a few points (tests, tools), not per texel.
 pub fn surface_color(body: &CelestialBody, d: Vec3) -> [f32; 3] {
     const WIDTH: u32 = 1024;
-    let p = painter(body, WIDTH);
+    let p = painter(body, None, WIDTH);
     let d = d.normalize_or(Vec3::Y);
     let (lat, lon) = super::noise::lat_lon(d);
     let (u, v) = super::noise::uv(lat, lon);

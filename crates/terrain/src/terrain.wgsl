@@ -21,6 +21,8 @@ struct PlanetGpu {
     rays: array<vec4<f32>, 8>,      // rayed craters: center (planet-local unit direction), radius on the ground (m)
     young: array<vec4<f32>, 12>,    // young ground: middle (planet-local direction) × youth, angular radius
     params4: vec4<f32>,             // night lights (0..1), lamp page handoff distance (m), lava glow (cd/m²), melt latitude (rad)
+    far: vec4<f32>,                 // far look: map layer (−1 none), near tint, unused ×2
+    far_mean: vec4<f32>,            // far look: mean linear albedo, unused
 };
 
 // Must match `MapsGpu` in render.rs.
@@ -61,6 +63,8 @@ struct Print {
     info: vec4<f32>,  // grid depth at the center when pressed, contact kind, cell kind, unused
 };
 @group(1) @binding(12) var<storage, read> prints: array<Print>;
+// Planets' looks from afar (far_look.rs): sRGB albedo, glowing melt in alpha; a layer each.
+@group(1) @binding(13) var far_tex: texture_2d_array<f32>;
 
 // Must match `MaterialsGpu` in render.rs.
 struct Materials {
@@ -524,6 +528,26 @@ fn far_noise(p: PlanetGpu, rel: vec3<f32>, pixel: f32) -> vec2<f32> {
     // Pixels wider than the coarsest features (along the limb of a planet seen from afar)
     // keep none of them: there the noise settles to its middle rather than to zero.
     return mix(vec2<f32>(0.5), vec2<f32>(a, b) / max(norm, 1e-4), saturate(norm * 4.0));
+}
+
+// The planet's look from afar (far_look.rs) at planet-local direction `d`, filtered to the
+// pixel's footprint: linear albedo, and in alpha where molten rock glows.
+fn far_look(p: PlanetGpu, d: vec3<f32>, pixel: f32) -> vec4<f32> {
+    let lat = asin(clamp(d.y, -1.0, 1.0));
+    let lon = atan2(d.x, d.z);
+    let uv = vec2<f32>(lon / 6.2831853 + 0.5, 0.5 - lat / 3.1415927);
+    let size = vec2<f32>(textureDimensions(far_tex, 0));
+    // Texels along the ground (east-west ones shrink toward the poles).
+    let texel_m = 6.2831853 * p.center.w / size.x;
+    let lod = log2(max(pixel / texel_m, 1.0));
+    let v = clamp(uv.y, 0.5 / size.y, 1.0 - 0.5 / size.y);
+    return textureSampleLevel(far_tex, mat_sampler, vec2<f32>(uv.x, v), i32(p.far.x), lod);
+}
+
+// How much of the far look the ground shows outright (0..1): all of it where a pixel spans
+// kilometers, as from orbit, none below a few hundred meters.
+fn far_look_weight(pixel: f32) -> f32 {
+    return smoothstep(300.0, 3000.0, pixel);
 }
 
 // Where molten rock shows on a lava world (0..1): fissures between crust plates tens of meters
@@ -2478,11 +2502,27 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     if (own_sky > 0.0 && planet.params2.x > 0.5) {
         occlusion *= mix(1.0, smoothstep(-0.25, 0.05, dot(up, frame.sun_dir.xyz)), own_sky);
     }
-    // Lava worlds: the crust over open melt is darkest; the melt glows (below).
+    // The planet's look from afar: from high up the ground wears its colors (so the planet
+    // doesn't change as the ground takes over from the far view); nearer, they tint the
+    // ground's own at the scale of whole provinces.
+    var far_w = 0.0;
+    var far_glow = 0.0;
+    if (planet.far.x >= 0.0) {
+        let look = far_look(planet, transpose(planet_rot(planet)) * up, pixel);
+        far_w = far_look_weight(pixel);
+        let tint = clamp(look.rgb / max(planet.far_mean.rgb, vec3<f32>(1e-3)), vec3<f32>(0.4), vec3<f32>(2.5));
+        albedo = mix(albedo * mix(vec3<f32>(1.0), tint, planet.far.y), look.rgb, far_w);
+        far_glow = look.a * far_w;
+    }
+    // Lava worlds: the crust over open melt is darkest; the melt glows (below). From afar the
+    // far look's melt takes over.
     var melt = 0.0;
     if (planet.params4.z > 0.0) {
-        melt = lava_melt(planet, in.rel, tp, up, altitude, mare, pixel) * (1.0 - ocean);
+        if (far_w < 1.0) {
+            melt = lava_melt(planet, in.rel, tp, up, altitude, mare, pixel) * (1.0 - ocean) * (1.0 - far_w);
+        }
         albedo = mix(albedo, vec3<f32>(0.03, 0.02, 0.018), melt);
+        melt += far_glow;
     }
     var s = default_surface();
     s.albedo = saturate3(albedo);

@@ -33,7 +33,9 @@ use engine_render::prelude::*;
 
 use crate::{BodyKind, CelestialBody, SpaceSettings};
 
-pub use bake::{SLOPE_SCALE, SurfaceMaps, bake_rings, bake_surface, surface_color};
+pub use bake::{
+    SLOPE_SCALE, SurfaceMaps, bake_rings, bake_surface, bake_surface_on, surface_color,
+};
 /// Longitude (degrees east) where the far look puts Jupiter's Great Red Spot.
 pub use gas::GRS_LON_DEG;
 pub use render::{BodiesFeature, SHADER as BODIES_SHADER};
@@ -87,6 +89,52 @@ pub enum BodyLook {
     /// Neptune: deep blue, a dark spot and bright streaks of high cloud.
     Neptune,
 }
+
+/// What the ground is like at one point of a body, as whoever builds it up close sees it.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct GroundPoint {
+    /// Height above sea level, meters (negative under the sea).
+    pub height_m: f32,
+    /// 0 arid .. 1 lush.
+    pub moisture: f32,
+    /// Mean temperature above the one where snow and ice lie, °C (negative: white).
+    pub above_frost_c: f32,
+}
+
+/// The ground another module builds for a body up close (a terrain), for the far view to
+/// paint from: put it on the body's entity, and an Earth-like look draws that ground's
+/// continents, seas, mountains, deserts, woods and snow instead of its own. The planet then
+/// keeps its face as a ship closes in and the ground takes over (Kerbal Space Program exports
+/// its scaled-space maps from its terrain the same way).
+///
+/// `sample(direction, texel_m)` is called once per map texel, on background threads, with a
+/// body-local unit direction (+Y north, longitude 0 toward +Z, east toward +X) and the
+/// texel's size on the ground (the finest detail worth computing).
+#[derive(Component, Clone)]
+pub struct FarGround(pub std::sync::Arc<dyn Fn(Vec3, f32) -> GroundPoint + Send + Sync>);
+
+impl FarGround {
+    pub fn new(sample: impl Fn(Vec3, f32) -> GroundPoint + Send + Sync + 'static) -> Self {
+        Self(std::sync::Arc::new(sample))
+    }
+
+    /// Identity of the sampler (a new one rebakes the maps).
+    pub(crate) fn id(&self) -> usize {
+        std::sync::Arc::as_ptr(&self.0) as *const () as usize
+    }
+}
+
+impl std::fmt::Debug for FarGround {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("FarGround(..)")
+    }
+}
+
+/// Marks a body whose ground another module draws (a terrain covers the far view's disk at
+/// any distance). The far view then keeps the body's cloud tops as a layer of their own over
+/// that ground from every distance, not only from low orbit.
+#[derive(Component, Debug, Clone, Copy, Default)]
+pub struct GroundDrawn;
 
 /// How light falls on a body (see [`BodyLook::shading`]).
 #[derive(Debug, Clone, Copy, PartialEq)]

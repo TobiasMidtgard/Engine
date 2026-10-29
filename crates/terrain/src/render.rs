@@ -20,6 +20,7 @@ use engine_world::{Grid2, SurfaceCell, SurfaceLayers};
 use crate::chunk::{ChunkSource, TerrainVertex, VERTS_PER_CHUNK, build_chunk, chunk_indices};
 use crate::cube::NodeKey;
 use crate::deform::{DeformationMap, SLOTS};
+use crate::far_look::{FarLook, FarLookPages};
 use crate::lights::{CityLights, NO_PAGE, NightPages};
 use crate::lod::{Lod, SelectInput};
 use crate::materials::{self, BakedMaterials, MATERIAL_COUNT};
@@ -136,8 +137,13 @@ struct PlanetGpu {
     /// (xyz), angular radius (w, radians).
     young: [[f32; 4]; MAX_YOUNG],
     /// Night lights of towns and cities (0..1), the distance from which the world's own
-    /// lamps glow from their pages (m), unused ×2.
+    /// lamps glow from their pages (m), lava glow (cd/m²), melt latitude (rad).
     params4: [f32; 4],
+    /// The far look ([`FarLook`](crate::FarLook)): layer in the map array (−1: none), how
+    /// strongly it tints the ground up close, unused ×2.
+    far: [f32; 4],
+    /// The far look's mean linear albedo (rgb), unused.
+    far_mean: [f32; 4],
 }
 
 /// Rayed craters per planet the shader draws.
@@ -225,6 +231,8 @@ struct Gpu {
     mat_scanned: usize,
     /// City lights: the night glow of the world's own lamps.
     night: NightPages,
+    /// Planets' looks from afar (see [`FarLook`](crate::FarLook)).
+    far_looks: FarLookPages,
     group: Option<wgpu::BindGroup>,
 }
 
@@ -575,6 +583,10 @@ impl TerrainFeature {
                         wgpu::BindGroupEntry {
                             binding: 12,
                             resource: gpu.prints.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 13,
+                            resource: wgpu::BindingResource::TextureView(&gpu.far_looks.view),
                         },
                     ],
                 }),
@@ -1239,6 +1251,16 @@ impl RenderFeature for TerrainFeature {
                     },
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 13,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2Array,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
             ],
         });
         let buffers = [Some(TerrainVertex::layout()), Some(ChunkInstance::layout())];
@@ -1412,6 +1434,7 @@ impl RenderFeature for TerrainFeature {
             mat_key: None,
             mat_scanned: 0,
             night: NightPages::new(device),
+            far_looks: FarLookPages::new(device),
             group: None,
         });
     }
@@ -1477,7 +1500,13 @@ impl RenderFeature for TerrainFeature {
         entities.sort();
         let city = world.get_resource::<CityLights>();
 
+        // Looks from afar, uploaded to a layer of the map array as their planets are drawn.
+        let far_looks: HashMap<Entity, FarLook> = entities
+            .iter()
+            .filter_map(|e| world.get::<FarLook>(*e).map(|l| (*e, l.clone())))
+            .collect();
         if let Some(gpu) = self.gpu.as_mut() {
+            gpu.far_looks.begin_frame();
             gpu.night.begin_frame();
             gpu.night
                 .retain_planets(|e| terrains.entries.contains_key(e));
@@ -1736,6 +1765,17 @@ impl RenderFeature for TerrainFeature {
             let p = &t.config.palette;
             let col = |c: [f32; 3]| [c[0], c[1], c[2], 0.0];
             let center_rel = (pos - view.origin).as_vec3();
+            let (far, far_mean) = far_looks
+                .get(e)
+                .and_then(|look| {
+                    let gpu = self.gpu.as_mut()?;
+                    let (layer, mean) = gpu.far_looks.layer(&gpu_shared.queue, *e, look)?;
+                    Some((
+                        [layer as f32, look.near_tint, 0.0, 0.0],
+                        [mean[0], mean[1], mean[2], 0.0],
+                    ))
+                })
+                .unwrap_or(([-1.0, 0.0, 0.0, 0.0], [0.0; 4]));
             planet_gpu.push(PlanetGpu {
                 rot: [
                     rot_f.x_axis.extend(0.0).to_array(),
@@ -1791,6 +1831,8 @@ impl RenderFeature for TerrainFeature {
                     p.lava_glow,
                     melt_latitude(&t.config.shape.climate),
                 ],
+                far,
+                far_mean,
             });
         }
         self.built_last_frame = built_total;
@@ -2178,7 +2220,7 @@ mod tests {
     fn gpu_structs_match_shader_sizes() {
         assert_eq!(
             std::mem::size_of::<PlanetGpu>(),
-            16 * (3 + 1 + 10 + 5 + MAX_RAYED + MAX_YOUNG)
+            16 * (3 + 1 + 10 + 7 + MAX_RAYED + MAX_YOUNG)
         );
         assert_eq!(std::mem::size_of::<MapsGpu>(), 16 * 8);
         assert_eq!(std::mem::size_of::<TerrainVertex>(), 48);

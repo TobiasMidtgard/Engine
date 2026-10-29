@@ -554,6 +554,36 @@ fn earth_has_oceans_land_and_clouds() {
 }
 
 #[test]
+fn earthlike_far_view_paints_the_ground_it_is_given() {
+    let sys = system::solar_system();
+    let earth = sys.iter().find(|b| b.name == "Earth").unwrap();
+    // A ground with sea in the southern hemisphere, land (snowy beyond 60° N) in the north.
+    let ground = look::FarGround::new(|d: Vec3, texel_m| {
+        assert!(texel_m > 1_000.0);
+        look::GroundPoint {
+            height_m: if d.y > 0.0 { 800.0 } else { -3_000.0 },
+            moisture: 0.7,
+            above_frost_c: if d.y > 0.87 { -10.0 } else { 15.0 },
+        }
+    });
+    let maps = look::bake_surface_on(earth, Some(&ground), 128);
+    let at = |x: usize, y: usize| {
+        let i = (y * 128 + x) * 4;
+        &maps.albedo.data[i..i + 4]
+    };
+    // Sea texels carry the water flag, land ones don't; the far north is white.
+    for x in [5, 40, 90, 120] {
+        assert!(at(x, 20)[3] == 0, "land at {x}: {:?}", at(x, 20));
+        assert!(at(x, 50)[3] > 128, "sea at {x}: {:?}", at(x, 50));
+        let snow = at(x, 2);
+        assert!(snow[0] > 200 && snow[2] > 200, "snow at {x}: {snow:?}");
+    }
+    // Without it, the look keeps its own continents.
+    let own = look::bake_surface(earth, 128);
+    assert_ne!(own.albedo.data, maps.albedo.data);
+}
+
+#[test]
 fn rocky_maps_carry_relief_and_full_mips() {
     let sys = system::solar_system();
     let moon = sys.iter().find(|b| b.name == "Moon").unwrap();

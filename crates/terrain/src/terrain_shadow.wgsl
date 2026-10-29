@@ -20,6 +20,8 @@ struct PlanetGpu {
     rays: array<vec4<f32>, 8>,
     young: array<vec4<f32>, 12>,
     params4: vec4<f32>,
+    far: vec4<f32>,                 // far look: map layer (−1 none), near tint, unused ×2
+    far_mean: vec4<f32>,            // far look: mean linear albedo, unused
 };
 
 @group(0) @binding(0) var<uniform> shadow_view: ShadowView;

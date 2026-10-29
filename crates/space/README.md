@@ -162,16 +162,37 @@ weather's `cloud_cover` (back to its own map by three hole radii), so the two de
 same share of sky. Views `earth_leo` (400 km) and `earth_edge`
 (35 km) in `space_shots` show it, and `mars_low` and `mars_edge` the same heights over Mars.
 
+### One planet from afar to the ground
+
+A terrain covers the far view's disk wherever it draws (it stands in front of the impostor's
+depth sphere), so the two have to show one planet or a ship closing in sees it change face.
+Two components on the body's entity tie them together; a game that uses both crates adds
+them (the showcase in `games/showcase/src/planet.rs`, the `approach_shots` tool the same way):
+
+- `look::FarGround`: a sampler of the ground the terrain builds (height, moisture, degrees above
+  the frost line). An Earth-like look paints that ground's continents, seas, deserts, woods,
+  snow and heights instead of its own, so the far view and the ground share their coasts.
+  Kerbal Space Program does the same when it exports its scaled-space maps from its terrain.
+- `look::GroundDrawn`: another module draws this body's ground. The cloud tops are then drawn
+  as their own layer over that ground from any distance, not only from low orbit (before,
+  Earth lost its clouds beyond 0.4 radii up, where its terrain hid the disk that carried them).
+
+The terrain takes the far view's own maps the other way (`engine_terrain::FarLook`, baked
+with `look::bake_surface_on`): from high up its ground wears them, so lava cracks, dune seas
+and the ice's stained lineae don't vanish when the ground comes. Pictures of the handover:
+`cargo run --release -p approach_shots -- out 960x540 [views…]` shoots each view with the far
+view alone and with the ground, from the same place.
+
 ## Known limits (next rounds)
 
-- Planets of other stars: the far map's continents and the terrain's are drawn separately
-  (as for Earth); a locked world's terrain climate follows latitude, not the angle from its
-  star; their weather is the home weather.
+- Planets of other stars: a locked world's terrain climate follows latitude, not the angle
+  from its star; their weather is the home weather. Seen from afar the ground under air is
+  veiled by the sky's aerial perspective, a little more than the far view's own haze.
 
 - While the world is anchored elsewhere, what was left on a body is not simulated with it:
   it keeps the place the shift mapped it to (far out of view) until it is put back.
-- The far Earth's continents are its own; they don't match what `engine_terrain` builds up
-  close. A shared continent field (or terrain baking the far map) needs a contract.
+- The far Earth's continents are its own unless a `FarGround` is given (the showcase's Earth
+  terrain draws at every distance, so its disk only carries the haze and the cloud tops).
 - Full-size bakes cost 0.4-1.5 s of CPU per body; a few looks (Mars albedo regions, Moon
   maria outlines, Neptune's cloud streaks) still read as procedural up close.
 - The cloud layer's pattern from high up is the far look's own, not the weather's (they meet

@@ -235,6 +235,17 @@ everything else (streaming, LOD, colliders, ground queries, prints) follows the 
   where the ground shows forest. About 10 µs a lookup on open ground, 30 µs in woods (release).
   `FOREST_MASK=1 terrain_shots ...` writes the cover under each view to lay over the shot.
 
+- **Far looks.** A `FarLook` next to a `PlanetTerrain` hands the ground how its planet looks
+  from afar: an equirectangular map (sRGB albedo, glowing melt in alpha) painted by whatever
+  draws the planet far away (the space module's far view, `engine_space::look::bake_surface_on`).
+  Where a pixel spans more than a few kilometers the ground wears the map outright, so the
+  planet keeps its face as the ground takes over from the far view (the dark plains, dune
+  seas, lava cracks and the ice's stained lineae, which the ground alone lacks from orbit);
+  below a few hundred meters per pixel the map only tints the ground's own colors by
+  `near_tint`, at the scale of whole provinces. Up to four planets' maps are kept on the GPU
+  (1024×512 with mips, the least recently drawn replaced). `FarLookMap::resized` filters any
+  larger map down in linear light.
+
 ## Contracts
 
 Reads: `GroundContact`, `TerrainEdit`, `SurfaceLayers`, `Weather`, `FocusPoints`,

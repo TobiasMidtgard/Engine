@@ -872,6 +872,42 @@ fn views() -> Vec<View> {
             sun_ll: Some([20.0, 120.0]),
             ..BASE
         },
+        // The same worlds from two radii out, as a ship arriving sees their ground.
+        View {
+            name: "exo_terra_globe",
+            world: World3::Exo(WorldKind::Terra),
+            eye_ll: Some([20.0, 10.0, 12_000_000.0]),
+            sun_ll: Some([10.0, -20.0]),
+            fov: 55.0,
+            ..BASE
+        },
+        View {
+            name: "exo_lava_globe",
+            world: World3::Exo(WorldKind::Lava),
+            eye_ll: Some([10.0, 20.0, 12_000_000.0]),
+            sun_ll: Some([10.0, 60.0]),
+            fov: 55.0,
+            exposure: Exposure::Manual { ev100: 14.0 },
+            ..BASE
+        },
+        View {
+            name: "exo_desert_globe",
+            world: World3::Exo(WorldKind::Desert),
+            eye_ll: Some([20.0, 40.0, 12_000_000.0]),
+            sun_ll: Some([10.0, 20.0]),
+            fov: 55.0,
+            exposure: Exposure::Manual { ev100: 14.5 },
+            ..BASE
+        },
+        View {
+            name: "exo_ice_globe",
+            world: World3::Exo(WorldKind::Ice),
+            eye_ll: Some([20.0, 50.0, 12_000_000.0]),
+            sun_ll: Some([10.0, 30.0]),
+            fov: 55.0,
+            exposure: Exposure::Manual { ev100: 14.0 },
+            ..BASE
+        },
         View {
             name: "mars_orbit",
             world: World3::Mars,
