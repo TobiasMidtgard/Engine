@@ -36,8 +36,8 @@ use engine_assets::{Assets, Handle};
 use engine_core::math::{DQuat, Mat4, Vec2, Vec3, Vec4};
 use engine_core::prelude::*;
 use engine_render::{
-    DitherFade, Image, MaterialRef, MaxDrawDistance, Mesh, MeshRef, MeshRenderer, StandardMaterial,
-    Vertex,
+    DitherFade, Image, MaterialRef, MaxDrawDistance, Mesh, MeshRef, MeshRenderer, ShadowOnly,
+    StandardMaterial, Vertex,
 };
 use engine_world::physics::{BodyKind, RigidBody, Velocity};
 use engine_world::shift::{FollowsWorldShift, WorldShift};
@@ -734,12 +734,12 @@ impl Gather {
             ) else {
                 continue;
             };
-            // Hidden ones, and ones a game fades out itself, stay out.
+            // Hidden ones, ones a game fades out itself, and shadow-only stand-ins stay out.
             let faded = entity
                 .get::<DitherFade>()
                 .is_some_and(|d| d.hidden() >= 0.5)
                 && !entity.contains::<crate::stream::StreamFade>();
-            if !renderer.visible || faded {
+            if !renderer.visible || faded || entity.contains::<ShadowOnly>() {
                 continue;
             }
             let mesh_key = match &renderer.mesh {
@@ -1435,6 +1435,33 @@ mod tests {
         );
         let slot = &world.resource::<Proxies>().slots[0];
         assert_eq!(slot.frame.unwrap().translation, at);
+    }
+
+    #[test]
+    fn shadow_only_stand_ins_stay_out_of_proxies() {
+        let mut world = World::new();
+        world.init_resource::<Assets<Mesh>>();
+        world.init_resource::<Assets<StandardMaterial>>();
+        world.init_resource::<Assets<Image>>();
+        let cube = || {
+            MeshRenderer::new(
+                Shape::Cuboid {
+                    size: [1.0, 1.0, 1.0],
+                },
+                StandardMaterial::default(),
+            )
+        };
+        let t = Transform::default();
+        let tree = world
+            .spawn((t, GlobalTransform::from(t), cube()))
+            .with_children(|c| {
+                c.spawn((t, GlobalTransform::from(t), cube(), ShadowOnly));
+            })
+            .id();
+        let mut gather = Gather::new(vec![tree], Transform::default());
+        let far = Instant::now() + std::time::Duration::from_secs(10);
+        assert!(gather.step(&world, far));
+        assert_eq!(gather.instances.len(), 1);
     }
 
     #[test]
