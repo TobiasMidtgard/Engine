@@ -40,6 +40,7 @@ use crate::Animator;
 use crate::animator::{AnimationLibrary, AnimatorSettings};
 use crate::build::humanoid::Punch;
 use crate::hit::HitReaction;
+use crate::hurt::Hurt;
 use crate::ik::{to_model, two_bone};
 use crate::knockdown::Knockdown;
 
@@ -48,7 +49,7 @@ use crate::knockdown::Knockdown;
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum WindowKind {
     /// The `bone` lands on the target if it comes within `reach` meters of the target's
-    /// chest (or head, for `high`).
+    /// chest (or head, for `high`, or liver, for `liver`).
     Hit {
         bone: String,
         reach: f32,
@@ -59,6 +60,9 @@ pub enum WindowKind {
         hitstop: f32,
         #[serde(default)]
         high: bool,
+        /// Aimed at the target's liver (its own right side, under the ribs) instead.
+        #[serde(default)]
+        liver: bool,
     },
     /// A buffered input matching a link starts the linked move.
     Cancel,
@@ -75,6 +79,14 @@ pub struct Window {
     pub kind: WindowKind,
     pub start: f32,
     pub end: f32,
+}
+
+impl Window {
+    /// Whether it was open at any time in the frame of `dt` seconds that ended at `t`: a long
+    /// frame (a slow machine, a film at a few frames a second) can step over a short window.
+    pub fn overlaps(&self, t: f32, dt: f32) -> bool {
+        self.start <= t && self.end >= t - dt.max(0.0)
+    }
 }
 
 /// Pressing `input` in a cancel window plays `to` next.
@@ -154,9 +166,10 @@ impl AttackSet {
     }
 
     /// Boxing on the humanoid's punches: jab (light) or cross (heavy) from neutral; jab →
-    /// cross → hook → uppercut on light presses, a heavy press after a jab or cross goes
-    /// straight to the hook or the uppercut, and a heavy press after the hook throws
-    /// `uppercut_heavy`, a finisher hard enough to knock a person down. Each steps in to its
+    /// cross → hook → uppercut on light presses; a heavy press after a jab digs a hook to the
+    /// body (the liver, under a raised guard), which a light press follows up with the cross;
+    /// a heavy press after the cross goes straight to the uppercut, and one after the hook
+    /// throws `uppercut_heavy`, a finisher hard enough to knock a person down. Each steps in to its
     /// range (closer for hooks and uppercuts) and the uppercuts step back out to sparring
     /// distance.
     pub fn boxing() -> Self {
@@ -178,6 +191,7 @@ impl AttackSet {
                                 Punch::Cross => 0.74,
                                 Punch::Hook => 0.62,
                                 Punch::Uppercut => 0.58,
+                                Punch::BodyHook => 0.56,
                             },
                             max_speed: 2.5,
                         },
@@ -193,19 +207,22 @@ impl AttackSet {
                                 Punch::Cross => 10.0,
                                 Punch::Hook => 14.0,
                                 Punch::Uppercut => 16.0,
+                                Punch::BodyHook => 14.0,
                             },
                             impulse: match p {
                                 Punch::Jab => 18.0,
                                 Punch::Cross => 30.0,
                                 Punch::Hook => 38.0,
                                 Punch::Uppercut => 42.0,
+                                Punch::BodyHook => 40.0,
                             },
                             hitstop: match p {
                                 Punch::Jab => 0.04,
                                 Punch::Cross => 0.06,
-                                Punch::Hook | Punch::Uppercut => 0.09,
+                                Punch::Hook | Punch::Uppercut | Punch::BodyHook => 0.09,
                             },
-                            high: true,
+                            high: p != Punch::BodyHook,
+                            liver: p == Punch::BodyHook,
                         },
                         start: at - 0.06,
                         end: at + 0.05,
@@ -244,7 +261,7 @@ impl AttackSet {
                     Some("attack_light"),
                     &[
                         ("attack_light", Punch::Cross),
-                        ("attack_heavy", Punch::Hook),
+                        ("attack_heavy", Punch::BodyHook),
                     ],
                 ),
                 mv(
@@ -264,6 +281,8 @@ impl AttackSet {
                     hook
                 },
                 mv(Punch::Uppercut, None, &[]),
+                // Under the guard to the liver, then back up to the head.
+                mv(Punch::BodyHook, None, &[("attack_light", Punch::Cross)]),
                 // Everything behind it: the same punch, hard enough to put a person down
                 // (HitReaction::fall_beyond), freezing both for longer.
                 {
@@ -385,6 +404,9 @@ impl Attacker {
 /// How far the middle of the face is above the head bone (the top of the neck), meters.
 const FACE_ABOVE_HEAD: f64 = 0.07;
 
+/// How far to its own right of the spine a target's liver is, meters.
+const LIVER_SIDE: f64 = 0.1;
+
 /// How far short of the middle of the head or chest a strike aims, meters (about where the
 /// face or the front of the ribs is, less the fist).
 const AIM_SHORT: f64 = 0.1;
@@ -476,6 +498,8 @@ pub(crate) struct Landed {
 struct Target {
     chest: DVec3,
     head: DVec3,
+    /// Under the ribs on its own right.
+    liver: DVec3,
     guard: Option<Guard>,
 }
 
@@ -487,6 +511,17 @@ struct Guard {
 }
 
 impl Target {
+    /// The middle of what a strike aims at.
+    fn aim(&self, high: bool, liver: bool) -> DVec3 {
+        if liver {
+            self.liver
+        } else if high {
+            self.head
+        } else {
+            self.chest
+        }
+    }
+
     /// The glove a high strike from `from` (flat on the ground, the attacker's position)
     /// with the fist now at `fist` lands on, if the guard is up and faces it.
     fn blocking_glove(&self, from: DVec3, fist: DVec3, cone_deg: f32) -> Option<DVec3> {
@@ -529,6 +564,7 @@ pub(crate) fn run_attacks(
             Option<&Animator>,
             Option<&AnimationParams>,
             Option<&Knockdown>,
+            Option<&Hurt>,
         )>,
         Query<(&mut Animator, Option<&mut HitReaction>)>,
     )>,
@@ -545,11 +581,11 @@ pub(crate) fn run_attacks(
         let attackers: Vec<Entity> = set.p0().iter().filter_map(|(_, a, ..)| a.target).collect();
         let q = set.p1();
         for t in attackers {
-            let Ok((gt, animator, params, down)) = q.get(t) else {
+            let Ok((gt, animator, params, down, hurt)) = q.get(t) else {
                 continue;
             };
-            // Knocked down: nothing to strike until it is up again.
-            if down.is_some() {
+            // Knocked down or on a knee: nothing to strike until it is up again.
+            if down.is_some() || hurt.is_some_and(Hurt::is_down) {
                 downed.insert(t);
                 continue;
             }
@@ -558,7 +594,9 @@ pub(crate) fn run_attacks(
                     .and_then(|a| a.skeleton.index_of(bone).map(|b| a.bone_world(gt, b).0))
                     .unwrap_or_else(|| gt.translation() + DVec3::Y * up)
             };
-            let guarding = params.is_some_and(|p| p.get("guarding") > 0.5);
+            // Too hurt to keep the hands up, it doesn't block.
+            let guarding = params.is_some_and(|p| p.get("guarding") > 0.5)
+                && !hurt.is_some_and(Hurt::guard_down);
             let guard = animator.filter(|_| guarding).and_then(|a| {
                 let glove = |hand: &str| Some(fist_of(a, gt, a.skeleton.index_of(hand)?));
                 Some(Guard {
@@ -575,6 +613,7 @@ pub(crate) fn run_attacks(
                 Target {
                     chest: at("chest", 1.3),
                     head: at("head", 1.55) + DVec3::Y * FACE_ABOVE_HEAD,
+                    liver: at("spine", 1.07) + (gt.rotation() * Vec3::X).as_dvec3() * LIVER_SIDE,
                     guard,
                 },
             );
@@ -639,9 +678,10 @@ pub(crate) fn run_attacks(
                     .find(|m| m.starts_on.as_deref() == Some(input.as_str()))
                     .map(|m| m.name.clone()),
                 Some(m) => {
-                    let open = m.windows.iter().any(|w| {
-                        w.kind == WindowKind::Cancel && (w.start..=w.end).contains(&attacker.time)
-                    });
+                    let open = m
+                        .windows
+                        .iter()
+                        .any(|w| w.kind == WindowKind::Cancel && w.overlaps(attacker.time, dt));
                     open.then(|| m.links.iter().find(|l| &l.input == input))
                         .flatten()
                         .map(|l| l.to.clone())
@@ -694,13 +734,15 @@ pub(crate) fn run_attacks(
         // middle on the attacker's side, or the glove of a guard that blocks it.
         let mut blocked_at = None;
         if let Some((_, tg)) = target
-            && let Some(WindowKind::Hit { bone, high, .. }) = m
+            && let Some(WindowKind::Hit {
+                bone, high, liver, ..
+            }) = m
                 .windows
                 .iter()
                 .map(|w| &w.kind)
                 .find(|k| matches!(k, WindowKind::Hit { .. }))
         {
-            let mid = if *high { tg.head } else { tg.chest };
+            let mid = tg.aim(*high, *liver);
             let mut back = gt.translation() - mid;
             back.y = 0.0;
             let back = back.normalize_or_zero();
@@ -719,7 +761,11 @@ pub(crate) fn run_attacks(
             attacker.aim = Some((bone.clone(), aim));
         }
         for (k, w) in m.windows.iter().enumerate() {
-            if !(w.start..=w.end).contains(&t) {
+            // A hit window a long frame stepped right over still lands (the fist is still
+            // close, its aim fading out); the others act only while they are open.
+            let open = (w.start..=w.end).contains(&t);
+            let hit = matches!(w.kind, WindowKind::Hit { .. });
+            if !open && !(hit && w.overlaps(t, dt)) {
                 continue;
             }
             match &w.kind {
@@ -771,6 +817,7 @@ pub(crate) fn run_attacks(
                     impulse,
                     hitstop,
                     high,
+                    liver,
                 } => {
                     let Some((victim, tg)) = target else {
                         continue;
@@ -782,7 +829,7 @@ pub(crate) fn run_attacks(
                         continue;
                     };
                     let fist = fist_of(&animator, gt, b);
-                    let aim = blocked_at.unwrap_or(if *high { tg.head } else { tg.chest });
+                    let aim = blocked_at.unwrap_or(tg.aim(*high, *liver));
                     if fist.distance(aim) > *reach as f64 {
                         continue;
                     }

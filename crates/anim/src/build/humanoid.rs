@@ -1765,10 +1765,19 @@ pub enum Punch {
     Hook,
     /// Rear uppercut: dip, then drive up through the legs.
     Uppercut,
+    /// Lead hook to the body (the liver): knees bent deep and the trunk leaning over to the
+    /// left, the fist driving up under the ribs.
+    BodyHook,
 }
 
 impl Punch {
-    pub const ALL: [Punch; 4] = [Punch::Jab, Punch::Cross, Punch::Hook, Punch::Uppercut];
+    pub const ALL: [Punch; 5] = [
+        Punch::Jab,
+        Punch::Cross,
+        Punch::Hook,
+        Punch::Uppercut,
+        Punch::BodyHook,
+    ];
 
     pub fn clip_name(self) -> &'static str {
         match self {
@@ -1776,13 +1785,14 @@ impl Punch {
             Punch::Cross => "cross",
             Punch::Hook => "hook",
             Punch::Uppercut => "uppercut",
+            Punch::BodyHook => "body_hook",
         }
     }
 
     /// The punching side (0 left, 1 right).
     pub fn side(self) -> usize {
         match self {
-            Punch::Jab | Punch::Hook => 0,
+            Punch::Jab | Punch::Hook | Punch::BodyHook => 0,
             Punch::Cross | Punch::Uppercut => 1,
         }
     }
@@ -1794,6 +1804,7 @@ impl Punch {
             Punch::Cross => (0.62, 0.36),
             Punch::Hook => (0.72, 0.42),
             Punch::Uppercut => (0.75, 0.45),
+            Punch::BodyHook => (0.74, 0.43),
         }
     }
 }
@@ -1844,11 +1855,21 @@ fn punch(s: &Skeleton, kind: Punch) -> AnimationClip {
             protract: 14.0,
             elevate: 4.0,
         },
+        // Lower and shorter than the head hook, the forearm angled up under the ribs.
+        Punch::BodyHook => Arm {
+            flex: 40.0,
+            twist: 24.0,
+            abduct: 44.0,
+            elbow: 100.0,
+            wrist: 0.0,
+            protract: 16.0,
+            elevate: 2.0,
+        },
     };
     // The punching arm draws back a little on the load (a hook swings out first).
     let guard = GUARD_ARMS[side];
     let loaded = match kind {
-        Punch::Hook => Arm {
+        Punch::Hook | Punch::BodyHook => Arm {
             abduct: 35.0,
             elbow: 100.0,
             ..guard
@@ -1870,13 +1891,20 @@ fn punch(s: &Skeleton, kind: Punch) -> AnimationClip {
         Punch::Cross => 28.0,
         Punch::Hook => -34.0,
         Punch::Uppercut => 20.0,
+        Punch::BodyHook => -30.0,
     };
     let wind = match kind {
-        Punch::Hook => 10.0,
+        Punch::Hook | Punch::BodyHook => 10.0,
         Punch::Uppercut => -8.0,
         _ => -turn * 0.15,
     };
     let dip = if kind == Punch::Uppercut { 14.0 } else { 0.0 };
+    // A body shot is thrown from bent knees, the trunk leaning over the punching side.
+    let (body_sink, body_lean) = if kind == Punch::BodyHook {
+        (16.0, 14.0)
+    } else {
+        (0.0, 0.0)
+    };
     let effort = [
         (0.0, 0.1),
         (load, 0.4),
@@ -1906,8 +1934,15 @@ fn punch(s: &Skeleton, kind: Punch) -> AnimationClip {
         // Knees: the boxer's stance, sinking on the load (an uppercut dips and drives up).
         let sink = k(&[
             (0.0, 0.0),
-            (load, 3.0 + dip),
-            (land, if dip > 0.0 { -4.0 } else { 2.0 }),
+            (load, 3.0 + dip + body_sink),
+            (land, if dip > 0.0 { -4.0 } else { 2.0 + body_sink }),
+            (back, body_sink * 0.6),
+            (1.0, 0.0),
+        ]);
+        let lean = k(&[
+            (0.0, 0.0),
+            (load, body_lean * 0.6),
+            (land, body_lean),
             (1.0, 0.0),
         ]);
         p.rot_move(
@@ -1919,9 +1954,10 @@ fn punch(s: &Skeleton, kind: Punch) -> AnimationClip {
         );
         spine(
             &mut p,
-            [-2.0 + sink * 0.4, -3.0, 2.0, -8.0],
+            [-2.0 + sink * 0.4 - lean * 0.4, -3.0, 2.0, -8.0],
             [yaw * 0.25, yaw * 0.35, -yaw * 0.2, -yaw * 0.25],
-            [0.0, 0.0, 0.0, 0.0],
+            // Over to the left for a body hook (+ rolls the trunk to its left).
+            [lean * 0.5, lean * 0.4, -lean * 0.5, -lean * 0.3],
         );
         let punching = arm_keyed(
             ph,
@@ -2916,6 +2952,122 @@ fn get_up_back(s: &Skeleton) -> AnimationClip {
     get_up(s, "get_up_back", 2.4, &keys, 0.7)
 }
 
+/// A liver shot folding the body onto a knee ([`crate::hurt`]): the legs give and the trunk
+/// folds over the right hand clutching the side, the right foot slides back and the body goes
+/// down on the right knee, the left forearm on the left knee and the head down, breathing
+/// hard; then it pushes up off the left leg and stands. `floor` is 1 while the knee is down
+/// (foot IK lets go); `brace` screws up the face.
+fn kneel_hurt(s: &Skeleton) -> AnimationClip {
+    // The right hand pressed to the lower ribs, the elbow tucked in.
+    let clutch = Arm {
+        flex: -6.0,
+        twist: 55.0,
+        abduct: -16.0,
+        elbow: 108.0,
+        wrist: 12.0,
+        protract: 6.0,
+        elevate: 0.0,
+    };
+    let feet = [
+        Some(Vec3::new(-0.12, 0.08, -0.03)),
+        Some(Vec3::new(0.12, 0.08, 0.05)),
+    ];
+    let buckled = Key {
+        at: 0.1,
+        hips: Vec3::new(0.0, 0.8, 0.06),
+        pitch: -24.0,
+        yaw: 0.0,
+        roll: 0.0,
+        spine: [-16.0, -14.0, -4.0, -10.0],
+        arm: [
+            Arm {
+                flex: 30.0,
+                abduct: -8.0,
+                elbow: 30.0,
+                ..Arm::HANG
+            },
+            clutch,
+        ],
+        leg: [[34.0, 4.0, 56.0, 12.0], [26.0, 6.0, 58.0, 12.0]],
+        plant: [None, None, feet[0], feet[1]],
+        knee: [Vec3::NEG_Z; 2],
+        effort: 0.6,
+    };
+    // Left foot where it stood, right knee on the floor behind, the left forearm on the knee.
+    let down = Key {
+        at: 0.24,
+        hips: Vec3::new(0.0, 0.58, 0.4),
+        pitch: -20.0,
+        spine: [-18.0, -14.0, -6.0, -16.0],
+        arm: [
+            Arm {
+                flex: 52.0,
+                abduct: -6.0,
+                elbow: 84.0,
+                ..Arm::HANG
+            },
+            clutch,
+        ],
+        leg: [[96.0, 6.0, 92.0, 2.0], [-6.0, 4.0, 98.0, -40.0]],
+        plant: [None, None, feet[0], Some(Vec3::new(0.12, 0.13, 0.84))],
+        knee: [Vec3::NEG_Z, Vec3::new(0.0, -1.0, -0.4)],
+        effort: 0.5,
+        ..buckled
+    };
+    let held = Key {
+        at: 0.62,
+        spine: [-15.0, -12.0, -4.0, -12.0],
+        effort: 0.4,
+        ..down
+    };
+    let rising = Key {
+        at: 0.82,
+        hips: Vec3::new(0.0, 0.82, 0.12),
+        pitch: -10.0,
+        spine: [-10.0, -6.0, 2.0, -2.0],
+        arm: [
+            Arm {
+                flex: 18.0,
+                elbow: 40.0,
+                ..Arm::HANG
+            },
+            clutch,
+        ],
+        leg: [[52.0, 4.0, 62.0, 8.0], [46.0, 4.0, 86.0, 16.0]],
+        plant: [None, None, feet[0], None],
+        knee: [Vec3::NEG_Z; 2],
+        effort: 0.9,
+        ..held
+    };
+    let keys = [
+        Key {
+            at: 0.0,
+            ..Key::STAND
+        },
+        buckled,
+        down,
+        // Breathing hard on the knee.
+        Key {
+            at: 0.4,
+            spine: [-17.0, -13.0, -5.0, -14.0],
+            ..down
+        },
+        held,
+        rising,
+        Key::STAND,
+    ];
+    let duration = 4.0;
+    let samples = (duration * 30.0) as usize + 1;
+    let floor = [(0.0, 0.0), (0.06, 1.0), (0.84, 1.0), (0.94, 0.0)];
+    let brace = [(0.0, 0.3), (0.1, 1.0), (0.62, 0.8), (1.0, 0.0)];
+    AnimationClip::from_fn("kneel_hurt", duration, samples, false, |ph| {
+        Key::sample(s, &keys, ph).1
+    })
+    .with_curve("effort", samples, |ph| Key::sample(s, &keys, ph).0.effort)
+    .with_curve("floor", 25, move |ph| keyed(ph, &floor))
+    .with_curve("brace", 25, move |ph| keyed(ph, &brace))
+}
+
 /// Getting up from lying face down (head toward −Z): hands under the shoulders, push up onto
 /// hands and knees, bring the left foot forward, push up on the left leg.
 fn get_up_front(s: &Skeleton) -> AnimationClip {
@@ -3140,6 +3292,8 @@ pub fn clips(s: &Skeleton) -> Vec<AnimationClip> {
         punch(s, Punch::Cross),
         punch(s, Punch::Hook),
         punch(s, Punch::Uppercut),
+        punch(s, Punch::BodyHook),
+        kneel_hurt(s),
     ]
 }
 
@@ -3149,7 +3303,8 @@ pub fn clips(s: &Skeleton) -> Vec<AnimationClip> {
 /// guard while `guarding` > 0.5), `reach`, `flex` and `wince` actions, and getting up off the floor
 /// (`get_up_back`, `get_up_front`: triggered by the ragdoll when a limp body comes round), and
 /// `fall_brace` and `fall_back_brace` (bracing for a fall forward or backward, on their
-/// triggers from anywhere).
+/// triggers from anywhere), and `kneel_hurt` (folding onto a knee from a liver shot, on its
+/// trigger from anywhere).
 pub fn graph() -> AnimGraph {
     graph_with(GRAPH, &Locomotion::default())
 }
@@ -3375,6 +3530,7 @@ pub fn graph_with(name: &str, motion: &Locomotion) -> AnimGraph {
                 state("get_up_front", NodeDef::one_shot("get_up_front")),
                 state("fall_brace", NodeDef::one_shot("fall_brace")),
                 state("fall_back_brace", NodeDef::one_shot("fall_back_brace")),
+                state("kneel_hurt", NodeDef::one_shot("kneel_hurt")),
             ],
             transitions: vec![
                 TransitionDef::new(
@@ -3456,6 +3612,8 @@ pub fn graph_with(name: &str, motion: &Locomotion) -> AnimGraph {
                 ),
                 TransitionDef::new("fall_back_brace", "move", Condition::Finished, 0.4)
                     .inertialize(),
+                TransitionDef::new("*", "kneel_hurt", Condition::trigger("kneel_hurt"), 0.15),
+                TransitionDef::new("kneel_hurt", "move", Condition::Finished, 0.4).inertialize(),
             ],
             initial: Some("move".into()),
         },

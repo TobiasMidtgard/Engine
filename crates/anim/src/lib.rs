@@ -13,6 +13,7 @@ pub mod face;
 pub mod graph;
 pub mod hit;
 pub mod horse_model;
+pub mod hurt;
 pub mod ik;
 pub mod import;
 pub mod knockdown;
@@ -38,6 +39,7 @@ pub use face::{Face, FaceControls, FaceRig};
 pub use graph::{AnimGraph, NodeDef};
 pub use hit::HitReaction;
 pub use horse_model::{HorseModel, HorseModels};
+pub use hurt::{Hurt, HurtRegion};
 pub use ik::{FootIk, IkShape, IkSurface, LegIk, LookAt, Reach, ReachIk};
 pub use knockdown::{Knockdown, KnockdownPhase};
 pub use muscle::{MorphWeights, Muscle, MuscleDriver, MuscleRig};
@@ -151,9 +153,11 @@ impl Plugin for AnimationPlugin {
                     procedural::spring::spring_chain_system,
                     (
                         hit::take_hits,
+                        hurt::take_hurts,
                         knockdown::knockdown_system,
                         hit::stagger_system,
                         hit::flinch_system,
+                        hurt::hurt_system,
                     )
                         .chain(),
                 )
@@ -262,6 +266,13 @@ fn register_types(app: &mut App) {
          or two (with a CharacterController or stagger_move off: only publishes \
          stagger_velocity for the movement module); past fall_beyond m of knock-back the \
          body is knocked down instead and lies down_secs before getting up.",
+    )
+    .register_component::<Hurt>(
+        "What blows leave behind, by where they land: head blows fill daze (push over \
+         daze_per) and past rocked_at the legs go to rubber, swaying and lurching; body blows \
+         fill wind and past winded_at the body doubles over and the hands drop; a liver shot \
+         of liver_above N·s folds the body onto a knee after liver_delay s. Tracks drain over \
+         time; a rocked, winded or kneeling body can't block.",
     )
     .register_component::<Knockdown>(
         "A person knocked off their feet: limp and braced for the fall (phase Down), lying \

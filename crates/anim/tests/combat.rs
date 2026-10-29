@@ -1,10 +1,13 @@
 //! Combat moves: presses buffered and linked into a combo in cancel windows, the attacker
 //! stepping in to range, blows landing on the target with hitstop, a raised guard blocking
-//! them on the gloves, and mashing that doesn't queue a whole combo.
+//! them on the gloves (but not a hook to the body), and mashing that doesn't queue a whole
+//! combo.
 
 use engine_anim::combat::{AttackPhase, Attacker};
 use engine_anim::demo::spawn_humanoid;
-use engine_anim::{AnimationPlugin, Animator, HitReaction, Knockdown, build::humanoid::Outfit};
+use engine_anim::{
+    AnimationPlugin, Animator, HitReaction, Hurt, Knockdown, build::humanoid::Outfit,
+};
 use engine_core::prelude::*;
 use engine_core::time::TimeSource;
 use engine_world::WorldPlugin;
@@ -15,12 +18,17 @@ const DT: f32 = 1.0 / 60.0;
 /// A boxer 1.1 m in front of a partner who faces it, the boxer in a guard (and the partner
 /// with `guard`), settled.
 fn ring(target: bool, guard: bool) -> (App, Entity, Entity) {
+    ring_at(target, guard, DT)
+}
+
+/// [`ring`], stepping `step` seconds a frame.
+fn ring_at(target: bool, guard: bool, step: f32) -> (App, Entity, Entity) {
     let mut app = App::new();
     app.world.resource_mut::<EngineConfig>().headless = true;
     app.world
         .resource_mut::<Time>()
         .set_source(TimeSource::Manual {
-            step_secs: DT as f64,
+            step_secs: step as f64,
         });
     app.add_plugins((WorldPlugin, AnimationPlugin));
     let partner = spawn_humanoid(
@@ -255,4 +263,88 @@ fn a_heavy_press_after_the_hook_finishes_hard_and_a_downed_target_is_left_alone(
     app.world.entity_mut(partner).remove::<Knockdown>();
     let (moves, ..) = fight(&mut app, boxer, 1.0, &[(0.1, "attack_light")]);
     assert_eq!(moves, ["jab"]);
+}
+
+#[test]
+fn a_body_hook_gets_under_the_guard_and_a_kneeling_target_is_left_alone() {
+    let (mut app, boxer, partner) = ring(true, true);
+    let mut blocked = 0;
+    let mut last_blocked = 0;
+    let mut moves: Vec<String> = Vec::new();
+    let mut hits = 0;
+    let mut t = 0.0;
+    while t < 1.4 {
+        if (0.1..0.1 + DT).contains(&t) {
+            press(&mut app, boxer, "attack_light");
+        }
+        if (0.35..0.35 + DT).contains(&t) {
+            press(&mut app, boxer, "attack_heavy");
+        }
+        app.update();
+        let a = app.world.get::<Attacker>(boxer).unwrap().clone();
+        if a.current.as_ref().is_some_and(|c| moves.last() != Some(c)) {
+            moves.push(a.current.clone().unwrap());
+        }
+        if a.blocked > last_blocked {
+            blocked += a.blocked - last_blocked;
+        }
+        last_blocked = a.blocked;
+        if a.current.as_deref() == Some("body_hook") {
+            hits = a.hits;
+        }
+        t += DT;
+    }
+    assert_eq!(moves, ["jab", "body_hook"]);
+    assert_eq!((blocked, hits), (1, 1), "jab blocked, body hook landed");
+    // Landed on the liver: down on a knee a moment later, and left alone there.
+    let mut knelt = false;
+    let mut attacked = false;
+    for frame in 0..(1.0 / DT) as usize {
+        if frame == 30 {
+            press(&mut app, boxer, "attack_light");
+        }
+        app.update();
+        let hurt = app.world.get::<Hurt>(partner).expect("hurt");
+        knelt |= hurt.is_down();
+        attacked |= app.world.get::<Attacker>(boxer).unwrap().current.is_some() && knelt;
+    }
+    assert!(knelt, "the liver shot didn't take a knee");
+    assert!(!attacked, "attacked a kneeling target");
+    // Up again: back at it.
+    for _ in 0..(4.0 / DT) as usize {
+        app.update();
+    }
+    assert!(!app.world.get::<Hurt>(partner).unwrap().is_down());
+    let (moves, ..) = fight(&mut app, boxer, 1.0, &[(0.1, "attack_light")]);
+    assert_eq!(moves, ["jab"]);
+}
+
+#[test]
+fn at_eight_frames_a_second_short_hit_windows_still_land() {
+    // A frame of 0.125 s is longer than a hit window (0.11 s): the body hook's falls between
+    // two frames.
+    let step = 0.125;
+    let (mut app, boxer, partner) = ring_at(true, true, step);
+    let mut moves: Vec<String> = Vec::new();
+    let mut hook_hits = 0;
+    for frame in 0..14 {
+        if frame == 0 {
+            press(&mut app, boxer, "attack_light");
+        }
+        if frame == 2 {
+            press(&mut app, boxer, "attack_heavy");
+        }
+        app.update();
+        let a = app.world.get::<Attacker>(boxer).unwrap().clone();
+        if a.current.as_ref().is_some_and(|c| moves.last() != Some(c)) {
+            moves.push(a.current.clone().unwrap());
+        }
+        if a.current.as_deref() == Some("body_hook") {
+            hook_hits = a.hits;
+        }
+    }
+    assert_eq!(moves, ["jab", "body_hook"]);
+    assert_eq!(hook_hits, 1, "the body hook missed");
+    let hurt = app.world.get::<Hurt>(partner).expect("hurt");
+    assert!(hurt.liver.is_some() || hurt.is_down(), "not on the liver");
 }
