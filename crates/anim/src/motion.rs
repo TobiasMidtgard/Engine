@@ -649,8 +649,11 @@ const ACCEL_SECS: f32 = 0.3;
 /// Half-life of the pose difference after a jump, seconds.
 const BLEND_HALFLIFE: f32 = 0.1;
 /// Travel more than this far from straight ahead (radians) uses the fallback (strafes,
-/// backpedals: the database has forward motion only).
+/// backpedals: the database has forward motion only)…
 const FALLBACK_HEADING: f32 = 0.7;
+/// …or this much farther than the `warp_max` parameter, when something turns the lower body
+/// toward the travel (orientation warping, [`crate::warp::LocomotionWarp`]).
+const FALLBACK_PAST_WARP: f32 = 0.15;
 
 /// The playing state of one character's motion matching (inside the graph node).
 pub struct MotionPlayer {
@@ -678,6 +681,9 @@ pub struct MotionPlayer {
     last: Vec<Xf>,
     before: Vec<Xf>,
     last_dt: f32,
+    /// How fast the playing frames' feet cover the ground: root speed times the play rate,
+    /// m/s.
+    stride_speed: f32,
 }
 
 impl MotionPlayer {
@@ -708,6 +714,7 @@ impl MotionPlayer {
             last: Vec::new(),
             before: Vec::new(),
             last_dt: 0.0,
+            stride_speed: 0.0,
         })
     }
 
@@ -721,6 +728,7 @@ impl MotionPlayer {
         }
         self.last.clear();
         self.before.clear();
+        self.stride_speed = 0.0;
     }
 
     /// Something else is showing (the fallback): remember its pose, so that coming back
@@ -773,14 +781,28 @@ impl MotionPlayer {
 
     /// Whether the motion asked for is outside the database (strafing, backpedalling).
     pub fn wants_fallback(params: &AnimationParams) -> bool {
-        params.get("speed") > 0.4 && params.get("heading").abs() > FALLBACK_HEADING
+        let warp = params.get("warp_max").max(0.0);
+        let limit = if warp > 0.0 {
+            (warp + FALLBACK_PAST_WARP).max(FALLBACK_HEADING)
+        } else {
+            FALLBACK_HEADING
+        };
+        params.get("speed") > 0.4 && params.get("heading").abs() > limit
+    }
+
+    /// The travel direction the search looks for: within `warp_max` of straight ahead it is
+    /// straight ahead, since the lower body is turned toward the travel afterwards.
+    fn search_heading(params: &AnimationParams) -> f32 {
+        let heading = params.get("heading");
+        let warp = params.get("warp_max").max(0.0);
+        heading - heading.clamp(-warp, warp)
     }
 
     /// The root's path over the next second, from the motion parameters: travel at `speed`
     /// toward `heading`, turning at the `turn` rate, speeding up by `accel`.
     pub fn predict(params: &AnimationParams) -> [(Vec2, Vec2); 3] {
         let speed = params.get("speed").max(0.0);
-        let heading = params.get("heading");
+        let heading = Self::search_heading(params);
         let yaw_rate = params.get("turn") * 1.2;
         let accel = params.get("accel") * crate::body::FULL_LEAN_ACCEL;
         let mut out = [(Vec2::ZERO, Vec2::new(0.0, -1.0)); 3];
@@ -824,6 +846,7 @@ impl MotionPlayer {
             } else {
                 1.0
             };
+            self.stride_speed = clip_speed * rate;
             let next = *frame + dt * FPS * rate;
             for k in f + 1..=(next as usize) {
                 if k >= db.end_of(f) {
@@ -920,6 +943,12 @@ impl MotionPlayer {
             current
         };
         from.saturating_sub(SKIP_BACK).max(start)..current + 4
+    }
+
+    /// How fast the feet of the frames playing cover the ground (root speed times the play
+    /// rate), m/s: what stride warping compares the body's speed with.
+    pub fn stride_speed(&self) -> f32 {
+        self.stride_speed
     }
 
     /// Root velocity (m/s, root space) of the frame playing.

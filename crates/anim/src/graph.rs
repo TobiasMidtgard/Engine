@@ -27,15 +27,15 @@
 
 use std::sync::Arc;
 
-use engine_core::math::{Quat, Vec2, Vec3};
+use engine_core::math::{Vec2, Vec3};
 use engine_world::animation::AnimationParams;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::clip::{AnimationClip, ClipBinding};
-use crate::motion::{MotionDatabase, MotionPlayer};
+use crate::motion::{MotionDatabase, MotionPlayer, decay_spring, from_scaled_axis, to_scaled_axis};
 use crate::skeleton::{Skeleton, apply_additive, blend_masked};
-use crate::xform::{Xf, nlerp};
+use crate::xform::Xf;
 
 fn one() -> f32 {
     1.0
@@ -427,10 +427,38 @@ struct Fade {
     mode: BlendMode,
     elapsed: f32,
     duration: f32,
-    /// Crossfade: the frozen source pose. Inertialize: per-bone offsets (filled on the first
-    /// frame).
+    /// Crossfade: the frozen source pose. Inertialize: the source pose until the first frame,
+    /// when it becomes the per-bone offsets (translation; rotation in `offset_r`).
     pose: Vec<Xf>,
     offsets_ready: bool,
+    /// Inertialize: how fast the source pose was moving when it was left (translation and
+    /// rotation as a scaled axis, per second), then the offsets' velocities.
+    velocity: Vec<(Vec3, Vec3)>,
+    /// Inertialize: the rotation offsets (scaled axis).
+    offset_r: Vec<Vec3>,
+}
+
+/// Inertialized offsets decay on a spring with this share of the transition time as their
+/// half-life (0.35 s gives about 0.1 s, Holden's usual value)…
+const INERTIA_HALFLIFE: f32 = 0.3;
+/// …and fade out over the last part of the transition, from this share on, so nothing is left
+/// when it ends.
+const INERTIA_FADE_FROM: f32 = 0.6;
+
+/// Keep a decaying offset `x` with velocity `v` from overshooting: on a critically damped
+/// spring it crosses zero when it heads toward zero faster than the spring's rate (`y`)
+/// times its size, as Bollo's inertialization clamps its starting velocity.
+fn no_overshoot(x: Vec3, v: &mut Vec3, halflife: f32) {
+    let len = x.length();
+    if len < 1e-6 {
+        return;
+    }
+    let y = 2.0 * std::f32::consts::LN_2 / halflife.max(1e-4);
+    let dir = x / len;
+    let along = v.dot(dir);
+    if along < -y * len {
+        *v += dir * (-y * len - along);
+    }
 }
 
 struct StateMachineNode {
@@ -440,7 +468,11 @@ struct StateMachineNode {
     current: usize,
     state_time: f32,
     fade: Option<Fade>,
+    /// The last pose this state machine gave, the one before it, and the step between them
+    /// (for the velocity an inertialized transition carries on).
     last: Vec<Xf>,
+    before: Vec<Xf>,
+    last_dt: f32,
 }
 
 enum Node {
@@ -666,6 +698,8 @@ impl GraphInstance {
                     state_time: 0.0,
                     fade: None,
                     last: skeleton.rest.clone(),
+                    before: Vec::new(),
+                    last_dt: 0.0,
                 }))
             }
             NodeDef::MotionMatch { database, fallback } => {
@@ -954,12 +988,31 @@ impl GraphInstance {
                         Node::StateMachine(sm) => {
                             sm.current = to;
                             sm.state_time = 0.0;
+                            let velocity = if mode == BlendMode::Inertialize
+                                && sm.before.len() == sm.last.len()
+                                && sm.last_dt > 0.0
+                            {
+                                sm.last
+                                    .iter()
+                                    .zip(&sm.before)
+                                    .map(|(l, b)| {
+                                        (
+                                            (l.t - b.t) / sm.last_dt,
+                                            to_scaled_axis(l.r * b.r.conjugate()) / sm.last_dt,
+                                        )
+                                    })
+                                    .collect()
+                            } else {
+                                vec![(Vec3::ZERO, Vec3::ZERO); sm.last.len()]
+                            };
                             sm.fade = (duration > 0.0).then(|| Fade {
                                 mode,
                                 elapsed: 0.0,
                                 duration,
                                 pose: sm.last.clone(),
                                 offsets_ready: false,
+                                velocity,
+                                offset_r: Vec::new(),
                             });
                             sm.states[to].node
                         }
@@ -993,22 +1046,43 @@ impl GraphInstance {
                                 }
                             }
                             BlendMode::Inertialize => {
+                                // The new state shows at once; the difference from the old
+                                // pose, and the old pose's momentum, decay on a spring
+                                // (Bollo's inertialization in Holden's spring form).
+                                let halflife = INERTIA_HALFLIFE * fade.duration;
                                 if !fade.offsets_ready {
-                                    for (s, o) in fade.pose.iter_mut().zip(out.iter()) {
-                                        *s = Xf {
-                                            t: s.t - o.t,
-                                            r: (s.r * o.r.conjugate()).normalize(),
-                                            s: Vec3::ONE,
-                                        };
+                                    fade.velocity
+                                        .resize(fade.pose.len(), (Vec3::ZERO, Vec3::ZERO));
+                                    fade.offset_r.clear();
+                                    for ((s, o), v) in
+                                        fade.pose.iter_mut().zip(out.iter()).zip(&mut fade.velocity)
+                                    {
+                                        let r = to_scaled_axis(s.r * o.r.conjugate());
+                                        s.t -= o.t;
+                                        no_overshoot(s.t, &mut v.0, halflife);
+                                        no_overshoot(r, &mut v.1, halflife);
+                                        fade.offset_r.push(r);
                                     }
                                     fade.offsets_ready = true;
+                                } else {
+                                    for ((s, r), v) in fade
+                                        .pose
+                                        .iter_mut()
+                                        .zip(&mut fade.offset_r)
+                                        .zip(&mut fade.velocity)
+                                    {
+                                        decay_spring(&mut s.t, &mut v.0, halflife, ctx.dt);
+                                        decay_spring(r, &mut v.1, halflife, ctx.dt);
+                                    }
                                 }
-                                // Quintic ease-out of the offset (smooth start and end).
-                                let k = 1.0 - x;
-                                let decay = k * k * k * (6.0 * x * x + 3.0 * x + 1.0);
-                                for (o, off) in out.iter_mut().zip(&fade.pose) {
-                                    o.t += off.t * decay;
-                                    o.r = (nlerp(Quat::IDENTITY, off.r, decay) * o.r).normalize();
+                                let end = ((x - INERTIA_FADE_FROM) / (1.0 - INERTIA_FADE_FROM))
+                                    .clamp(0.0, 1.0);
+                                let keep = 1.0 - end * end * (3.0 - 2.0 * end);
+                                for ((o, off), r) in
+                                    out.iter_mut().zip(&fade.pose).zip(&fade.offset_r)
+                                {
+                                    o.t += off.t * keep;
+                                    o.r = (from_scaled_axis(*r * keep) * o.r).normalize();
                                 }
                             }
                         }
@@ -1019,8 +1093,10 @@ impl GraphInstance {
                     }
                 }
                 if args.sample {
+                    std::mem::swap(&mut sm.before, &mut sm.last);
                     sm.last.clear();
                     sm.last.extend_from_slice(out);
+                    sm.last_dt = ctx.dt;
                 }
             }
             Node::MotionMatch { player, fallback } => {
@@ -1153,6 +1229,24 @@ impl GraphInstance {
                 self.collect_states(*fallback, out)
             }
             _ => {}
+        }
+    }
+
+    /// The motion matching playing in the current states, if any (with its `fallback` share
+    /// of the pose).
+    pub fn motion(&self) -> Option<&MotionPlayer> {
+        self.find_motion(self.root)
+    }
+
+    fn find_motion(&self, i: usize) -> Option<&MotionPlayer> {
+        match &self.nodes[i] {
+            Node::StateMachine(sm) => self.find_motion(sm.states[sm.current].node),
+            Node::Blend1d(b) => b.points.iter().find_map(|p| self.find_motion(p.1)),
+            Node::Blend2d(b) => b.points.iter().find_map(|p| self.find_motion(p.1)),
+            Node::Additive { base, .. } => self.find_motion(*base),
+            Node::Layer { base, .. } => self.find_motion(*base),
+            Node::MotionMatch { player, .. } => Some(player.as_ref()),
+            _ => None,
         }
     }
 
@@ -1316,6 +1410,7 @@ mod tests {
     use super::*;
     use crate::clip::{BoneTrack, Track};
     use crate::skeleton::BoneDef;
+    use engine_core::math::Quat;
     use std::collections::HashMap;
 
     fn skel() -> Skeleton {
@@ -1488,6 +1583,64 @@ mod tests {
             }
         }
         assert!(last > 1.3, "inertialized start {last}");
+    }
+
+    #[test]
+    fn inertialization_carries_on_the_old_motion_and_settles() {
+        // A sweep raising the arm at 3 rad/s, cut off halfway back to standing (0) through a
+        // 0.4 s inertialized transition.
+        let mut sweep = AnimationClip::new("sweep", 0.5);
+        sweep.looping = false;
+        sweep.tracks.push(BoneTrack {
+            bone: "arm".into(),
+            rotation: Track::new(
+                vec![0.0, 0.5],
+                vec![Quat::IDENTITY, Quat::from_rotation_z(1.5)],
+            ),
+            ..Default::default()
+        });
+        let mut lib = library();
+        lib.insert("swing".into(), Arc::new(sweep));
+        let mut graph = locomotion();
+        if let NodeDef::StateMachine { transitions, .. } = &mut graph.root {
+            transitions[1] = TransitionDef::new("swing", "move", Condition::trigger("cancel"), 0.4)
+                .inertialize();
+        }
+        let s = skel();
+        let mut g = GraphInstance::compile(&graph, &s, &|n| lib.get(n).cloned()).unwrap();
+        let params = AnimationParams::default();
+        let mut trig = vec![("attack".to_string(), 0.3)];
+        let dt = 0.005;
+        let mut angles = Vec::new();
+        let mut switched = None;
+        for i in 0..400 {
+            if i == 50 {
+                trig.push(("cancel".to_string(), 0.3));
+            }
+            let (pose, _) = run(&mut g, &params, &mut trig, dt);
+            angles.push(arm_angle(&pose));
+            if switched.is_none() && i > 10 && g.in_state("move") {
+                switched = Some(i);
+            }
+        }
+        let k = switched.expect("never came back");
+        let before = (angles[k - 1] - angles[k - 2]) / dt;
+        let after = (angles[k + 1] - angles[k]) / dt;
+        assert!(before > 2.5, "the sweep moved at {before} rad/s");
+        // The arm keeps rising a moment (C1 at the switch) rather than stopping dead.
+        assert!(
+            (after - before).abs() < 0.25 * before,
+            "{before} rad/s before the switch, {after} after"
+        );
+        let top = angles[k..].iter().cloned().fold(0.0, f32::max);
+        assert!(
+            top > angles[k] + 0.02 && top < angles[k] + 0.3,
+            "rose to {top}"
+        );
+        // Settled on the new state by the end of the transition, without going past it.
+        let end = k + (0.4 / dt) as usize + 2;
+        assert!(angles[end].abs() < 1e-3, "{} at the end", angles[end]);
+        assert!(angles[k..].iter().all(|&a| a > -0.02), "overshot");
     }
 
     #[test]

@@ -12,8 +12,13 @@ compresses and stretches.
 
 - **Clips and graphs.** `AnimationClip` (keyed or generated from a function, with curves such
   as `effort` and events such as `footstep` or `impact`). `AnimGraph` nodes: clip, 1D blend
-  with sync and speed matching, additive, masked layers, and state machines with crossfades,
-  one-shot triggers and conditions on parameters. Graphs are serde data, so tools and AI
+  with sync and speed matching, additive, masked layers, and state machines with crossfades
+  or inertialized transitions, one-shot triggers and conditions on parameters. An
+  inertialized transition shows the new state at once and decays the difference from the old
+  pose on a spring together with the old pose's velocity (Bollo's Gears of War
+  inertialization in Holden's spring form; half-life 0.3 of the transition, clamped so it
+  can't overshoot, faded out by the end), so a cut-off swing carries on a moment instead of
+  stopping dead. Graphs are serde data, so tools and AI
   agents can add or edit them at runtime (`anim.add_graph`).
 - **Motion matching.** A `motion_match` graph node plays whichever moment of captured motion
   best continues the pose toward where the character is going (`motion::MotionDatabase`,
@@ -23,8 +28,19 @@ compresses and stretches.
   velocity. Takes keep their root motion (starts, stops, turns on the spot and into a walk,
   walk and run cycles at five paces), each also mirrored; loops play round, and a take's
   trajectory carries on past its end. Strafing and backpedalling hand over to the blend
-  tree. Fetched people move with 28 Rocketbox takes (`anim/moves/`); `examples/motion_db.rs`
+  tree. Diagonals up to 60° stay on the captured walk, turned (below). Fetched people move with 28 Rocketbox takes (`anim/moves/`); `examples/motion_db.rs`
   reports a database and which moves a scripted walk plays.
+- **Locomotion warping.** Before foot IK, `LocomotionWarp` (Unreal's Animation Warping, as
+  Lyra uses it) fits the captured walk to how the body actually moves. Orientation warping
+  turns the hips toward the travel, up to 60°, while the spine, chest, neck and head take the
+  turn back (35%, 70%, 90%, 100%), so the legs walk where the body goes and the eyes face
+  where it faces. Motion matching reads `warp_max` from the parameters, searches for a
+  forward walk within it and hands over to the blend tree only past it (+0.15 rad).
+  Stride warping scales each ankle's reach along the travel by the body's speed over the
+  speed the playing feet cover (`MotionPlayer::stride_speed`, after motion matching's own
+  0.8 to 1.25 play rate), within 0.75 to 1.35, and the hips drop just enough for the farther
+  foot to reach. Both ease in from 0.3 to 0.6 m/s, so starts, stops and turns on the spot
+  play as captured. People with `FootIk` get one; it acts only while motion matching plays.
 - **Combat.** `combat::AttackSet`s are serde data like graphs: each move plays a clip over
   the character's graph (`Animator::play_over`, an overlay slot with fades and crossfades)
   and carries timed windows (Unreal's montage notify states): `hit` (the striking hand
@@ -360,7 +376,13 @@ back.
 `tests/motion_matching.rs` builds a database from the humanoid's clips given root motion
 and checks paces and turns, that standing, walking, running and turning each play their
 move with every jump blended (no bone turns over 0.3 rad in a frame), that motion-matched
-walking fires footsteps, and that strafing hands over to the fallback and back.
+walking fires footsteps, and that strafing hands over to the fallback and back; a 45°
+diagonal hands over too unless `warp_max` is set, and then plays the forward walk.
+`tests/warp.rs` turns the humanoid's walk toward a 45° diagonal (hips 45°, head within 1°,
+the ankles' line swung with the hips), stretches a stride by 1.3 (each ankle reaches 30%
+farther, keeps its height and stays within reach, the hips drop under 8 cm), and changes
+nothing when standing or while the fallback shows. A unit test in `graph.rs` checks that an
+inertialized transition carries on the old motion's velocity and settles without overshoot.
 `tests/combat.rs` puts a boxer in front of a partner and checks that four presses link into
 jab, cross, hook and uppercut that step in and all land with a few frames of hitstop, that
 an early press waits in the buffer and a stale one is dropped, that mashing plays one move

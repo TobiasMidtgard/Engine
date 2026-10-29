@@ -28,6 +28,7 @@ pub mod shuttle;
 pub mod skeleton;
 pub mod skin;
 pub mod stunt;
+pub mod warp;
 pub mod xform;
 
 pub use animator::{AnimationLibrary, Animator, AnimatorSettings, PoseEdit};
@@ -51,6 +52,7 @@ pub use retarget::{HandGrip, HandRig, Retarget, RetargetMap, Retargeter};
 pub use skeleton::Skeleton;
 pub use skin::feature::SkinningFeature;
 pub use skin::{SkinMaterial, SkinPose, SkinnedMesh, SkinnedMeshRenderer};
+pub use warp::LocomotionWarp;
 
 use engine_assets::AssetAppExt;
 use engine_core::prelude::*;
@@ -165,6 +167,8 @@ impl Plugin for AnimationPlugin {
                     .chain()
                     .in_set(AnimSet::Procedural),
                 (
+                    warp::add_warps,
+                    warp::warp_system,
                     ik::foot_ik_system,
                     ik::look_at_system,
                     ik::reach_ik_system,
@@ -280,6 +284,14 @@ fn register_types(app: &mut App) {
          fill wind and past winded_at the body doubles over and the hands drop; a liver shot \
          of liver_above N·s folds the body onto a knee after liver_delay s. Tracks drain over \
          time; a rocked, winded or kneeling body can't block.",
+    )
+    .register_component::<LocomotionWarp>(
+        "Fits the captured walk to how the body moves, before foot IK: the hips turn toward \
+         the travel up to max_angle (radians) with the spine, chest, neck and head taking the \
+         turn back, and each ankle's reach along the travel scales by the body's speed over \
+         the speed the clip's feet cover (stride_min..stride_max), the hips dropping as \
+         needed. Motion matching reads warp_max from the animation parameters. Added to \
+         people with FootIk; acts only while motion matching plays, above min_speed m/s.",
     )
     .register_component::<Knockdown>(
         "A person knocked off their feet: limp and braced for the fall (phase Down), lying \
