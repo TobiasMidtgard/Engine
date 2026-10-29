@@ -55,6 +55,7 @@ use crate::hit::HitReaction;
 use crate::hurt::Hurt;
 use crate::ik::{to_model, two_bone};
 use crate::knockdown::Knockdown;
+use crate::paired::Riposted;
 
 /// What a window does.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -289,6 +290,51 @@ pub struct AttackMove {
     /// The evasion clip that makes it miss, for an [`Evader`] to play.
     #[serde(default)]
     pub evaded_by: Option<String>,
+    /// A paired move (a riposte) played with its victim: started instead of the set's other
+    /// moves on its input while the target is open.
+    #[serde(default)]
+    pub paired: Option<Pairing>,
+}
+
+/// How a target was opened up for a paired move.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Opening {
+    /// Its blade was deflected ([`Attacker::open`]).
+    Deflected,
+    /// Its guard was broken ([`Defense::broken`]).
+    GuardBroken,
+}
+
+/// The victim's side of a paired move and where it stands: the victim is moved onto its spot
+/// `distance` ahead of the attacker, facing it, over `align_secs`, then held there and plays
+/// `victim_clip` on the attacker's clock (both start the same frame). The move's hit windows
+/// land without a reach test and can't be blocked. It starts on its input (from neutral)
+/// instead of the set's other moves when the target is open in one of the ways in `after`,
+/// within `max_distance` meters and `max_angle` degrees of the attacker's front.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Pairing {
+    pub victim_clip: String,
+    pub distance: f32,
+    pub after: Vec<Opening>,
+    #[serde(default = "default_pair_reach")]
+    pub max_distance: f32,
+    #[serde(default = "default_pair_angle")]
+    pub max_angle: f32,
+    #[serde(default = "default_pair_align")]
+    pub align_secs: f32,
+}
+
+fn default_pair_reach() -> f32 {
+    2.4
+}
+
+fn default_pair_angle() -> f32 {
+    60.0
+}
+
+fn default_pair_align() -> f32 {
+    0.25
 }
 
 fn default_fade_in() -> f32 {
@@ -469,6 +515,7 @@ impl AttackSet {
                     Punch::BodyHook => None,
                 }
                 .map(|e| e.clip_name().to_string()),
+                paired: None,
             }
         };
         AttackSet {
@@ -606,6 +653,15 @@ impl AttackSet {
                     }),
                     Some(Striker::shield()),
                 ),
+                riposte(
+                    weapons::SWORD_RIPOSTE,
+                    weapons::SWORD_RIPOSTE_DISTANCE,
+                    &[Opening::Deflected, Opening::GuardBroken],
+                    // Three times the thrust (Elden Ring ripostes are 2.6 to 4.2 times a
+                    // normal hit).
+                    54.0,
+                    Striker::sword(DamageKind::Pierce),
+                ),
             ],
             block: Block::default(),
             approaches: Vec::new(),
@@ -664,6 +720,14 @@ impl AttackSet {
                     cut,
                 ),
                 overhead,
+                riposte(
+                    weapons::GREATSWORD_RIPOSTE,
+                    weapons::GREATSWORD_RIPOSTE_DISTANCE,
+                    &[Opening::Deflected, Opening::GuardBroken],
+                    // Under three times the sweep (great swords riposte for less, 2.75).
+                    60.0,
+                    Striker::greatsword(DamageKind::Pierce),
+                ),
             ],
             block: Block::default(),
             approaches: Vec::new(),
@@ -709,6 +773,7 @@ impl AttackSet {
                     },
                 ],
                 evaded_by: None,
+                paired: None,
             }
         };
         AttackSet {
@@ -818,6 +883,53 @@ fn weapon(
             })
             .collect(),
         evaded_by: None,
+        paired: None,
+    }
+}
+
+/// A riposte on a light press at an opened foe: `clip`, its victim `distance` ahead playing
+/// [`RIPOSTED`](crate::build::humanoid::RIPOSTED), the blade going in for `damage` as the
+/// clips meet at [`RIPOSTED_LANDS`](crate::build::humanoid::RIPOSTED_LANDS).
+fn riposte(
+    clip: &str,
+    distance: f32,
+    after: &[Opening],
+    damage: f32,
+    striker: Striker,
+) -> AttackMove {
+    use crate::build::humanoid::{RIPOSTED, RIPOSTED_LANDS};
+    AttackMove {
+        name: clip.into(),
+        clip: clip.into(),
+        starts_on: Some("attack_light".into()),
+        fade_in: 0.12,
+        fade_out: 0.3,
+        windows: vec![Window {
+            kind: WindowKind::Hit {
+                bone: "hand_r".into(),
+                reach: 0.3,
+                damage,
+                // It goes in rather than knocking the body away: the victim's clip carries it.
+                impulse: 0.0,
+                hitstop: 0.12,
+                high: false,
+                liver: false,
+                striker: Some(striker),
+                breaks_guard: false,
+            },
+            start: RIPOSTED_LANDS - 0.02,
+            end: RIPOSTED_LANDS + 0.04,
+        }],
+        links: Vec::new(),
+        evaded_by: None,
+        paired: Some(Pairing {
+            victim_clip: RIPOSTED.into(),
+            distance,
+            after: after.to_vec(),
+            max_distance: default_pair_reach(),
+            max_angle: default_pair_angle(),
+            align_secs: default_pair_align(),
+        }),
     }
 }
 
@@ -851,6 +963,7 @@ fn travel(kind: Travel, max_speed: f32) -> AttackMove {
         ],
         links: Vec::new(),
         evaded_by: None,
+        paired: None,
     }
 }
 
@@ -926,6 +1039,8 @@ pub struct Attacker {
     /// arc and the move ends with it; no new move starts until then (the defender's opening
     /// for a guard counter). A deflected strike leaves it open longer.
     pub recoil: f32,
+    /// Seconds it stays open to a riposte after its blade was deflected.
+    pub open: f32,
     /// The newest press waiting, and how long it has waited.
     #[serde(skip)]
     pub buffered: Option<(String, f32)>,
@@ -971,6 +1086,7 @@ impl Default for Attacker {
             broke: 0,
             missed: 0,
             recoil: 0.0,
+            open: 0.0,
             buffered: None,
             follow: None,
             landed: Vec::new(),
@@ -1184,6 +1300,10 @@ struct Target {
     guard: Option<Guard>,
     /// Its guard rose just now: a weapon's blow landing on it is deflected.
     deflects: bool,
+    /// Open to a paired move (a riposte), and how.
+    opening: Option<Opening>,
+    /// In a paired move with this one: nobody else's blows touch it.
+    pair_with: Option<Entity>,
 }
 
 /// A raised guard: which way the target faces (flat), its knuckles (world), and the middle
@@ -1268,6 +1388,7 @@ pub(crate) fn run_attacks(
             Option<&Shield>,
             Option<&mut Defense>,
             Option<&LocalTimeScale>,
+            Option<&Riposted>,
         )>,
         Query<(
             &mut Animator,
@@ -1277,6 +1398,7 @@ pub(crate) fn run_attacks(
     )>,
     mut damage: MessageWriter<DamageEvent>,
     mut landed: Local<Vec<Landed>>,
+    mut pairs: Local<Vec<(Entity, Entity, Pairing)>>,
     mut commands: Commands,
 ) {
     let Some(sets) = sets else {
@@ -1296,13 +1418,28 @@ pub(crate) fn run_attacks(
             .collect();
         let mut q = set.p1();
         for t in attackers {
-            let Ok((gt, animator, params, down, hurt, striking, evader, shield, defense, local)) =
-                q.get_mut(t)
+            let Ok((
+                gt,
+                animator,
+                params,
+                down,
+                hurt,
+                striking,
+                evader,
+                shield,
+                defense,
+                local,
+                riposted,
+            )) = q.get_mut(t)
             else {
                 continue;
             };
-            // Knocked down or on a knee: nothing to strike until it is up again.
-            if down.is_some() || hurt.is_some_and(Hurt::is_down) {
+            // Knocked down or on a knee, or getting up after a riposte: nothing to strike
+            // until it is up again.
+            if down.is_some()
+                || hurt.is_some_and(Hurt::is_down)
+                || riposted.is_some_and(|r| r.getting_up)
+            {
                 downed.insert(t);
                 continue;
             }
@@ -1315,16 +1452,24 @@ pub(crate) fn run_attacks(
             // counter-puncher waits for), it doesn't block.
             let guarding = params.is_some_and(|p| p.get("guarding") > 0.5 || p.get("shield_guard") > 0.5)
                 && !hurt.is_some_and(Hurt::guard_down)
+                // Run through.
+                && riposted.is_none()
                 && !striking.is_some_and(|a| a.current.is_some())
                 // Moving its head out of the way instead.
                 && !evader.is_some_and(|e| e.evading.is_some());
             // Keep time with the guard: how long it has been up, and whether it is broken.
             let mut deflects = false;
+            let mut opening = striking
+                .filter(|a| a.open > 0.0)
+                .map(|_| Opening::Deflected);
             let guarding = match defense {
                 Some(mut d) => {
                     let frozen = animator.is_some_and(|a| a.frozen() > 0.0);
                     d.tick(guarding, if frozen { 0.0 } else { time.delta_for(local) });
                     deflects = d.deflects_now();
+                    if d.broken > 0.0 {
+                        opening = Some(Opening::GuardBroken);
+                    }
                     guarding && d.broken <= 0.0
                 }
                 None => {
@@ -1357,11 +1502,19 @@ pub(crate) fn run_attacks(
                     liver: at("spine", 1.07) + (gt.rotation() * Vec3::X).as_dvec3() * LIVER_SIDE,
                     guard,
                     deflects,
+                    opening: opening.filter(|_| riposted.is_none()),
+                    // A victim, or an attacker in a paired move of its own.
+                    pair_with: riposted.map(|r| r.by).or_else(|| {
+                        let a = striking?;
+                        let m = sets.0.get(&a.set)?.get(a.current.as_deref()?)?;
+                        m.paired.as_ref().and(a.struck)
+                    }),
                 },
             );
         }
     }
     landed.clear();
+    pairs.clear();
     for (entity, mut attacker, mut animator, mut transform, gt, settings, local, defense) in
         &mut set.p0()
     {
@@ -1405,6 +1558,7 @@ pub(crate) fn run_attacks(
         let Some(moves) = sets.0.get(&attacker.set) else {
             continue;
         };
+        attacker.open = (attacker.open - dt).max(0.0);
         // Advance the move playing; at its end it is over (the overlay fades itself). A
         // rebounding move is over when the rebound is.
         if attacker.recoil > 0.0 {
@@ -1441,10 +1595,37 @@ pub(crate) fn run_attacks(
             moves
                 .moves
                 .iter()
-                .find(|m| m.starts_on.as_deref() == Some(input))
+                .find(|m| m.starts_on.as_deref() == Some(input) && m.paired.is_none())
                 .map(|m| m.name.clone())
         };
         let handed_over = attacker.target.is_some() && attacker.struck != attacker.target;
+        // A press at a target that is open (its blade deflected, its guard broken), in reach
+        // and in front, throws the set's riposte for it.
+        let riposte = |input: &str| {
+            let tg = targets.get(&attacker.target?)?;
+            let opening = tg.opening?;
+            let to = (tg.chest - gt.translation()).with_y(0.0);
+            let forward = (gt.rotation() * Vec3::NEG_Z)
+                .with_y(0.0)
+                .normalize_or_zero();
+            let off = (to.normalize_or_zero().as_vec3().dot(forward))
+                .clamp(-1.0, 1.0)
+                .acos()
+                .to_degrees();
+            moves
+                .moves
+                .iter()
+                .find(|m| {
+                    m.starts_on.as_deref() == Some(input)
+                        && m.paired.as_ref().is_some_and(|p| {
+                            p.after.contains(&opening)
+                                && to.length() as f32 <= p.max_distance
+                                && off <= p.max_angle
+                        })
+                })
+                .map(|m| m.name.clone())
+        };
+        let neutral = |input: &str| riposte(input).or_else(|| neutral(input));
         let pressed_next = attacker
             .buffered
             .as_ref()
@@ -1454,10 +1635,18 @@ pub(crate) fn run_attacks(
                 None => neutral(input),
                 Some(m) if moves.is_approach(&m.name) => None,
                 Some(m) => {
+                    // In a cancel window a riposte at an opened foe comes before the link
+                    // (the overhead that broke the guard runs straight into it).
                     let linked = cancel_open(m)
-                        .then(|| m.links.iter().find(|l| &l.input == input))
-                        .flatten()
-                        .map(|l| l.to.clone());
+                        .then(|| {
+                            riposte(input).or_else(|| {
+                                m.links
+                                    .iter()
+                                    .find(|l| &l.input == input)
+                                    .map(|l| l.to.clone())
+                            })
+                        })
+                        .flatten();
                     let blows_over = m
                         .windows
                         .iter()
@@ -1477,7 +1666,7 @@ pub(crate) fn run_attacks(
         let next = follow.or(pressed_next).map(|name| {
             let gap = (from_press && !moves.approaches.is_empty())
                 .then(|| {
-                    let m = moves.get(&name)?;
+                    let m = moves.get(&name).filter(|m| m.paired.is_none())?;
                     let range = strike_range(m, &animator.skeleton)?;
                     let chest = targets.get(&attacker.target?)?.chest;
                     let to = (chest - gt.translation()).with_y(0.0);
@@ -1511,6 +1700,14 @@ pub(crate) fn run_attacks(
             attacker.struck = attacker.target;
             if from_press {
                 attacker.buffered = None;
+            }
+            if let (Some(p), Some(victim)) = (&m.paired, attacker.target) {
+                pairs.push((entity, victim, p.clone()));
+                // Taken: nobody else pairs with it or touches it from now.
+                if let Some(tg) = targets.get_mut(&victim) {
+                    tg.opening = None;
+                    tg.pair_with = Some(entity);
+                }
             }
         }
         // Windows.
@@ -1568,7 +1765,10 @@ pub(crate) fn run_attacks(
                 .skeleton
                 .index_of(bone)
                 .map_or(mid, |b| fist_of(&animator, gt, b));
-            blocked_at = tg.blocking(gt.translation(), fist, *high, moves.block.cone_deg);
+            // A paired blow can't be blocked: the victim is open and held in place.
+            if m.paired.is_none() {
+                blocked_at = tg.blocking(gt.translation(), fist, *high, moves.block.cone_deg);
+            }
             let mut aim = match &blocked_at {
                 // The front of the glove or shield.
                 Some((guard, _)) => *guard + back * 0.04,
@@ -1655,7 +1855,10 @@ pub(crate) fn run_attacks(
                     let Some((victim, tg)) = target else {
                         continue;
                     };
-                    if attacker.landed.contains(&k) {
+                    // Nobody else's blows touch a pair while it plays.
+                    if attacker.landed.contains(&k)
+                        || tg.pair_with.is_some_and(|other| other != entity)
+                    {
                         continue;
                     }
                     let Some(b) = animator.skeleton.index_of(bone) else {
@@ -1694,7 +1897,8 @@ pub(crate) fn run_attacks(
                             (fist.distance(aim), point, to_target)
                         }
                     };
-                    if close > reach as f64 {
+                    // A paired blow lands on its keyed frame: the two are lined up for it.
+                    if close > reach as f64 && m.paired.is_none() {
                         continue;
                     }
                     attacker.landed.push(k);
@@ -1736,6 +1940,7 @@ pub(crate) fn run_attacks(
                             attacker.deflected += 1;
                             let (rate, secs, fade) = DEFLECT_REBOUND;
                             attacker.recoil = DEFLECT_RECOIL;
+                            attacker.open = DEFLECT_RECOIL;
                             animator.rebound(rate, secs, fade);
                             ((0.0, 0.0), block.hitstop, -push * DEFLECT_SHOVE)
                         }
@@ -1794,6 +1999,25 @@ pub(crate) fn run_attacks(
     // attacker shakes instead, and the defender's shield swats the blade aside. A blocking
     // defender slides back and is held in shield-stun; a broken guard is flung open.
     let mut animators = set.p2();
+    // A paired move starts its victim's clip on the same frame (the victim is lined up and
+    // held by `paired::hold_pairs`).
+    for (by, victim, p) in pairs.drain(..) {
+        if let Ok((mut a, reaction, _)) = animators.get_mut(victim)
+            && let Some(clip) = library.clip(&p.victim_clip)
+        {
+            a.play_over(clip, 0.1, crate::paired::GET_UP_LEAD);
+            if let Some(mut r) = reaction {
+                r.stagger.0 = Vec3::ZERO;
+            }
+            commands.entity(victim).try_insert(Riposted {
+                by,
+                clip: p.victim_clip,
+                distance: p.distance,
+                align_secs: p.align_secs,
+                ..Default::default()
+            });
+        }
+    }
     for l in landed.drain(..) {
         if let Ok((mut a, reaction, defense)) = animators.get_mut(l.target) {
             a.freeze_for(l.hitstop);

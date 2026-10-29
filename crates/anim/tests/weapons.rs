@@ -418,10 +418,11 @@ fn a_blocked_defender_slides_back_and_waits_out_shield_stun() {
     assert!(z0 - z_min > 0.05, "slid back {} m", z0 - z_min);
 }
 
-/// The great sword's overhead breaks a raised guard and the sweep after it cuts through,
-/// though the shield is still held up.
+/// The great sword's overhead breaks a raised guard, and a light press in its cancel window
+/// runs the opened foe through (the riposte comes before the link to the sweep), though the
+/// shield is still held up.
 #[test]
-fn a_great_sword_overhead_breaks_a_raised_guard_and_the_next_cut_gets_through() {
+fn a_great_sword_overhead_breaks_a_raised_guard_and_the_riposte_runs_it_through() {
     let (mut app, fighter, dummy) = duel("greatsword", 2.0, true);
     let mut flung = false;
     let mut moves: Vec<String> = Vec::new();
@@ -443,7 +444,7 @@ fn a_great_sword_overhead_breaks_a_raised_guard_and_the_next_cut_gets_through() 
             && moves.last() != Some(c)
         {
             moves.push(c.clone());
-            if c == "greatsword_sweep" {
+            if c == engine_anim::build::weapons::GREATSWORD_RIPOSTE {
                 // The overhead broke through.
                 assert!(app.world.get::<Defense>(dummy).unwrap().broken > 0.0);
             }
@@ -455,13 +456,19 @@ fn a_great_sword_overhead_breaks_a_raised_guard_and_the_next_cut_gets_through() 
             .overlay()
             .is_some_and(|o| o.clip.name == engine_anim::build::weapons::GUARD_BROKEN);
     }
-    assert_eq!(moves, ["greatsword_overhead", "greatsword_sweep"]);
+    assert_eq!(
+        moves,
+        [
+            "greatsword_overhead",
+            engine_anim::build::weapons::GREATSWORD_RIPOSTE
+        ]
+    );
     assert!(flung, "the guard was never flung open");
     let hits: Vec<f32> = landed(&app).iter().map(|h| h.amount).collect();
-    // A block's share of the overhead, then all of the sweep.
+    // A block's share of the overhead, then all of the riposte.
     assert_eq!(hits.len(), 2, "{hits:?}");
     assert!((hits[0] - 42.0 * 0.05).abs() < 1e-3, "{hits:?}");
-    assert!((hits[1] - 22.0).abs() < 1e-3, "{hits:?}");
+    assert!((hits[1] - 60.0).abs() < 1e-3, "{hits:?}");
     assert_eq!(app.world.get::<Defense>(dummy).unwrap().breaks, 1);
     assert_eq!(
         app.world
@@ -652,9 +659,9 @@ fn the_paddock_weapons_yard_plays_out() {
     let round_secs = |who: &str| match who {
         "greatsword" => 10.0,
         "archer" => 9.0,
-        _ => 13.0,
+        _ => 16.0,
     };
-    // What each played in its `n`th round (the duel's is 13 s, the great sword's 10, the
+    // What each played in its `n`th round (the duel's is 16 s, the great sword's 10, the
     // archer's 9).
     let in_round = |moves: &[(&str, String, f32, [u32; 5])], who: &str, n: u32| {
         let round = round_secs(who);
@@ -686,7 +693,8 @@ fn the_paddock_weapons_yard_plays_out() {
             ("sword_slash", hit),
             ("shield_bash", hit),
             ("sword_thrust", hit),
-            ("sword_slash", hit),
+            // The answer to the deflect runs the partner through.
+            (engine_anim::build::weapons::SWORD_RIPOSTE, hit),
         ])
     );
     // The partner cuts back while the swordsman's blade bounces off its shield; its own
@@ -700,7 +708,7 @@ fn the_paddock_weapons_yard_plays_out() {
         named(&[
             ("greatsword_sweep", blocked),
             ("greatsword_overhead", broke),
-            ("greatsword_sweep", hit),
+            (engine_anim::build::weapons::GREATSWORD_RIPOSTE, hit),
         ])
     );
     let shots: Vec<String> = played("archer").into_iter().map(|m| m.0).collect();
@@ -736,7 +744,7 @@ fn the_paddock_weapons_yard_plays_out() {
     play(
         &mut app,
         &mut moves,
-        (13.0 / DT) as usize + 1..=(26.0 / DT) as usize,
+        (13.0 / DT) as usize + 1..=(32.0 / DT) as usize,
     );
     for who in ["swordsman", "partner", "greatsword"] {
         assert_eq!(
