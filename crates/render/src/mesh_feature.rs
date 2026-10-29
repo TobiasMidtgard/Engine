@@ -505,7 +505,7 @@ fn run_jobs<'env, F: FnOnce() + Send + 'env>(jobs: impl Iterator<Item = F>) {
 /// Whether a slot may take the cluster path (virtual geometry). Not while it dithers out
 /// (`DitherFade`): the instanced path draws the dither.
 fn cluster_candidate(hot: &Hot, mesh: &MeshFrame, mat: &MaterialFrame) -> bool {
-    hot.flags & mesh_scene::INSTANCED_ONLY == 0
+    hot.flags & (mesh_scene::INSTANCED_ONLY | mesh_scene::SHADOW_ONLY) == 0
         && hot.dither == 0.0
         && mat.still_opaque
         && mesh.exists
@@ -558,7 +558,9 @@ impl Cull<'_> {
             .pixel_meters
             .map(|k| k * (distance - radius).max(self.p.view.near));
         let big_enough = meters_per_pixel.is_none_or(|m| 2.0 * radius >= self.p.min_pixels * m);
-        let visible = big_enough && self.p.view.frustum.intersects_sphere(center, radius);
+        let visible = big_enough
+            && hot.flags & mesh_scene::SHADOW_ONLY == 0
+            && self.p.view.frustum.intersects_sphere(center, radius);
         // Dithering out (`DitherFade`), it casts while at least half of it shows: one of a pair
         // swapping at a time (the one fading in takes over at the middle).
         let dither_casts = if hot.dither >= 0.0 {

@@ -130,6 +130,8 @@ pub struct FoliageVisuals {
     small_textures: HashMap<SmallKind, SmallMaps>,
     /// The moss cushions on old logs ([`moss_material`]), shared by every species.
     moss: Option<Handle<StandardMaterial>>,
+    /// What near meshes cast their shadows with ([`crate::shadow_standin`]).
+    pub(crate) standins: crate::shadow_standin::StandIns,
 }
 
 /// The images of one bark texture set ([`crate::meshgen::bark`]).
@@ -504,6 +506,7 @@ pub fn ensure_species_visuals(
                         &mut materials,
                         &mut images,
                     );
+                    visuals.standins.add(&visual);
                     visuals.species[i] = Some(visual);
                     loading.species_building = loading.species_building.saturating_sub(1);
                     tracing::debug!("foliage: built visuals for {}", sp.name);

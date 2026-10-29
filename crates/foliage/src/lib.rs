@@ -19,6 +19,7 @@ pub mod plant;
 pub mod scenery;
 pub mod scenery_tree;
 pub mod season;
+pub mod shadow_standin;
 pub mod shift;
 pub mod sim;
 pub mod species;
@@ -226,6 +227,7 @@ impl Plugin for FoliagePlugin {
                         far_woods::stream_far_woods,
                         near_woods::stream_near_woods,
                         visuals::sync_log_visuals,
+                        shadow_standin::sync_shadow_standins,
                         visuals::update_glow_lights,
                         visuals::pulse_glow,
                     )

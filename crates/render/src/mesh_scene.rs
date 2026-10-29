@@ -17,6 +17,7 @@ use engine_core::prelude::*;
 
 use crate::components::{
     DitherFade, MaxDrawDistance, MeshRenderer, NoMeshLod, NoVirtualGeometry, ResolvedMesh,
+    ShadowOnly,
 };
 use crate::mesh_feature::max_scale;
 use crate::virtual_geometry::Displacement;
@@ -33,6 +34,10 @@ pub(crate) const INSTANCED_ONLY: u8 = 8;
 pub(crate) const DISPLACED: u8 = 16;
 /// Has `NoMeshLod`: always drawn at full detail.
 pub(crate) const FULL_DETAIL: u8 = 32;
+/// Has `ShadowOnly`: drawn into shadow maps, never in a view.
+pub(crate) const SHADOW_ONLY: u8 = 64;
+/// The flags that come from marker components (the entity's archetype).
+const KINDS: u8 = INSTANCED_ONLY | DISPLACED | FULL_DETAIL | SHADOW_ONLY;
 
 /// What the cull reads of a slot.
 #[derive(Clone, Copy, Debug)]
@@ -115,6 +120,7 @@ type SceneQuery = (
     Has<NoVirtualGeometry>,
     Has<Displacement>,
     Has<NoMeshLod>,
+    Has<ShadowOnly>,
 );
 
 /// Entities' slots, by entity index (an array lookup instead of a hash).
@@ -197,6 +203,7 @@ impl MeshScene {
             instanced_only,
             displaced,
             full_detail,
+            shadow_only,
         ) in query.iter(world)
         {
             let index = entity.index_u32() as usize;
@@ -211,7 +218,8 @@ impl MeshScene {
             // Archetype flags: no per-entity reads.
             let kind = if instanced_only { INSTANCED_ONLY } else { 0 }
                 | if displaced { DISPLACED } else { 0 }
-                | if full_detail { FULL_DETAIL } else { 0 };
+                | if full_detail { FULL_DETAIL } else { 0 }
+                | if shadow_only { SHADOW_ONLY } else { 0 };
             let s = match existing {
                 Some(s) => {
                     self.seen[s] = frame;
@@ -221,7 +229,7 @@ impl MeshScene {
                         || transform.is_changed()
                         || renderer.is_changed()
                         || resolved.is_changed()
-                        || hot.flags & (INSTANCED_ONLY | DISPLACED | FULL_DETAIL) != kind
+                        || hot.flags & KINDS != kind
                         || match &max_distance {
                             Some(m) => m.is_changed(),
                             None => hot.max_distance != f32::MAX,
@@ -439,14 +447,18 @@ mod tests {
         scene.sync(&mut world, 4);
         assert_eq!(scene.dirty, 1);
         assert_eq!(scene.hot[slot(&scene, b)].flags & VISIBLE, 0);
-        world
-            .entity_mut(a)
-            .insert((NoVirtualGeometry, NoMeshLod, MaxDrawDistance(50.0)));
+        world.entity_mut(a).insert((
+            NoVirtualGeometry,
+            NoMeshLod,
+            ShadowOnly,
+            MaxDrawDistance(50.0),
+        ));
         scene.sync(&mut world, 5);
         let hot = scene.hot[slot(&scene, a)];
         assert_eq!((scene.dirty, hot.max_distance), (1, 50.0));
         assert_ne!(hot.flags & INSTANCED_ONLY, 0);
         assert_ne!(hot.flags & FULL_DETAIL, 0);
+        assert_ne!(hot.flags & SHADOW_ONLY, 0);
         world.entity_mut(a).remove::<MaxDrawDistance>();
         scene.sync(&mut world, 6);
         assert_eq!(scene.dirty, 1);

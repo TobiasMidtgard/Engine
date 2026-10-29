@@ -289,6 +289,15 @@ pub struct NoVirtualGeometry;
 #[derive(Component, Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
 pub struct NoMeshLod;
 
+/// Draws this entity's [`MeshRenderer`] into shadow maps only, never in a view: a cheap stand-in
+/// caster for a detailed mesh that casts no shadow of its own (`cast_shadows: false`), such as a
+/// tree's flat crown cards casting for its leaf-by-leaf crown. Unity's `ShadowCastingMode.
+/// ShadowsOnly`; Horizon Zero Dawn draws its vegetation's shadows from separate meshes. Always on
+/// the instanced path, and left out of probe GI and reflections. Its `MeshRenderer` needs
+/// `cast_shadows: true` (and `visible: true`), or it is never drawn at all.
+#[derive(Component, Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+pub struct ShadowOnly;
+
 /// Farthest distance from the camera, in meters, at which this entity's [`MeshRenderer`] is
 /// drawn (with its shadow): small props, clutter and details nobody sees from afar. Measured to
 /// the mesh's bounding sphere, so a large mesh disappears when all of it is farther. The default

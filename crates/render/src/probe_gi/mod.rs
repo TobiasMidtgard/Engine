@@ -231,8 +231,8 @@ type GatherQuery = (
     Ref<'static, crate::MeshRenderer>,
     Ref<'static, crate::ResolvedMesh>,
 );
-/// Skinned meshes are left out: the rays would see their bind pose.
-type GatherFilter = Without<crate::GpuSkin>;
+/// Skinned meshes are left out (the rays would see their bind pose), and shadow-only stand-ins.
+type GatherFilter = (Without<crate::GpuSkin>, Without<crate::ShadowOnly>);
 
 /// The probes' placement: `dims` probes `spacing` apart from world probe `origin` (probe `i` of
 /// the world lattice sits at `(i + 0.5) * spacing`).

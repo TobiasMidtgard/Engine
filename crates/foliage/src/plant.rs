@@ -325,7 +325,9 @@ pub struct EcologySettings {
     /// `tree_lod_distance_m` (30 m for a grown tree by default).
     pub tree_mid_distance_m: f32,
     /// Broadleaf trees and shrubs within this distance draw their crown leaf by leaf (in full
-    /// leaf), meters, scaled like `tree_lod_distance_m` (18 m for a grown tree by default).
+    /// leaf), meters, scaled like `tree_lod_distance_m` (12 m for a grown tree by default:
+    /// past that a leaf is under about 6 pixels at 1080p, where the near crown's cards show
+    /// the same leaves for a tenth of the triangles).
     pub tree_hero_distance_m: f32,
     /// Trees beyond this distance use their cheapest mesh (a trunk and a few big crown
     /// cards, a few hundred triangles), meters, scaled like `tree_lod_distance_m` (360 m for a
@@ -353,7 +355,7 @@ impl Default for EcologySettings {
             small_plant_lod_distance_m: 22.0,
             tree_lod_distance_m: 70.0,
             tree_mid_distance_m: 20.0,
-            tree_hero_distance_m: 12.0,
+            tree_hero_distance_m: 8.0,
             tree_distant_distance_m: 240.0,
             scenery_tree_draw_distance_m: 6000.0,
             collider_distance_m: 150.0,

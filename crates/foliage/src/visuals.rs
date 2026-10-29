@@ -450,7 +450,13 @@ fn spawn_part(commands: &mut Commands, parent: Entity, part: Part, shadows: bool
     r.cast_shadows = shadows;
     apply(&mut r, part);
     commands
-        .spawn((Transform::default(), ChildOf(parent), r, PlantPart))
+        .spawn((
+            Transform::default(),
+            ChildOf(parent),
+            r,
+            PlantPart,
+            crate::shadow_standin::CastsShadow(shadows),
+        ))
         .id()
 }
 

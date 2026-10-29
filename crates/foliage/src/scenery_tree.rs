@@ -16,6 +16,7 @@ use engine_render::{Camera, MeshRenderer};
 use crate::assets::FoliageVisuals;
 use crate::plant::{EcologySettings, Genes, Plant};
 use crate::season::FoliageSeason;
+use crate::shadow_standin::CastsShadow;
 use crate::species::{PlantLibrary, SpeciesId};
 use crate::visuals::{Part, PlantPart, apply, camera_position, desired_parts, plant_pose};
 
@@ -101,7 +102,15 @@ pub fn sync_scenery_trees(
         Ref<GlobalTransform>,
         Option<&mut SceneryTreeVisual>,
     )>,
-    mut parts: Query<(&mut MeshRenderer, &mut Transform, crate::lod_fade::Busy), With<PlantPart>>,
+    mut parts: Query<
+        (
+            &mut MeshRenderer,
+            &mut Transform,
+            &mut CastsShadow,
+            crate::lod_fade::Busy,
+        ),
+        With<PlantPart>,
+    >,
     mut fades: ResMut<crate::lod_fade::LodFades>,
 ) {
     *frame = frame.wrapping_add(1);
@@ -168,7 +177,7 @@ pub fn sync_scenery_trees(
                     continue;
                 }
                 for (i, &part) in visual.parts.iter().enumerate() {
-                    let Ok((mut r, mut t, busy)) = parts.get_mut(part) else {
+                    let Ok((mut r, mut t, mut casts, busy)) = parts.get_mut(part) else {
                         continue;
                     };
                     if visual.shown[i] != want[i] {
@@ -186,8 +195,8 @@ pub fn sync_scenery_trees(
                             busy,
                         );
                     }
-                    if r.cast_shadows != shadows {
-                        r.cast_shadows = shadows;
+                    if casts.0 != shadows {
+                        casts.0 = shadows;
                     }
                     if *t != pose {
                         *t = pose;
@@ -204,7 +213,9 @@ pub fn sync_scenery_trees(
                     );
                     apply(&mut r, want[i]);
                     r.cast_shadows = shadows;
-                    commands.spawn((pose, ChildOf(entity), r, PlantPart)).id()
+                    commands
+                        .spawn((pose, ChildOf(entity), r, PlantPart, CastsShadow(shadows)))
+                        .id()
                 });
                 commands.entity(entity).insert(SceneryTreeVisual {
                     parts,
@@ -289,16 +300,38 @@ mod tests {
         assert_eq!(distant, [None, v.wood_distant, v.foliage_distant]);
         assert!(v.foliage_distant.is_some());
         assert_eq!(gone, [None; 3]);
-        // Only trees within the shadow reach cast shadows.
-        let casts = |t: Entity| {
+        // Only trees within the shadow reach cast shadows: what each tree's wood casts with,
+        // itself or its stand-in.
+        let casts = |app: &App, t: Entity| {
             let p = app.world.get::<SceneryTreeVisual>(t).unwrap().parts[1];
-            app.world.get::<MeshRenderer>(p).unwrap().cast_shadows
+            let r = app.world.get::<MeshRenderer>(p).unwrap();
+            if r.cast_shadows {
+                return Some(r.mesh.clone());
+            }
+            let s = app.world.get::<crate::shadow_standin::StandIn>(p)?.0;
+            let s = app.world.get::<MeshRenderer>(s).unwrap();
+            (s.visible && s.cast_shadows).then(|| s.mesh.clone())
         };
-        assert!(casts(trees[0]) && casts(trees[1]) && casts(trees[2]) && !casts(trees[3]));
+        let handle = |m: Option<Handle<Mesh>>| Some(engine_render::MeshRef::Handle(m.unwrap()));
+        // The near tree casts its middle level's shadow, through a stand-in.
+        assert_eq!(casts(&app, trees[0]), handle(v.wood_mid));
+        let p = app.world.get::<SceneryTreeVisual>(trees[0]).unwrap().parts[1];
+        let s = app
+            .world
+            .get::<crate::shadow_standin::StandIn>(p)
+            .unwrap()
+            .0;
+        assert!(app.world.get::<engine_render::ShadowOnly>(s).is_some());
+        assert_eq!(casts(&app, trees[1]), handle(v.wood_mid));
+        assert_eq!(casts(&app, trees[2]), handle(v.wood_lod));
+        assert_eq!(casts(&app, trees[3]), None);
         // The camera walks up to the far tree: it draws in full detail within a few frames.
         app.world.get_mut::<Transform>(cam).unwrap().translation = DVec3::new(140.0, 0.0, 0.0);
         app.update_n(SLICES as usize + 1);
         assert_eq!(shown(&app, trees[2]), [v.base, v.wood, v.foliage]);
+        assert_eq!(casts(&app, trees[2]), handle(v.wood_mid));
+        // The stand-in of the tree left behind is hidden (it casts its far level itself).
+        assert_eq!(casts(&app, trees[0]), handle(v.wood_lod));
         // Not plants: nothing grows them, and the ecology never sees them.
         let mut plants = app.world.query::<&Plant>();
         assert_eq!(plants.iter(&app.world).count(), 0);
