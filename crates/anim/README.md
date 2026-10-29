@@ -35,11 +35,14 @@ compresses and stretches.
   the target, at a capped speed, like Unreal's Motion Warping) and `armor`. An `Attacker`
   takes the `attack_light` / `attack_heavy` triggers; only the newest press counts and it
   waits 0.2 s (For Honor's buffering), so an early press still links and mashing doesn't
-  queue a combo. While a strike plays, two-bone IK pulls the fist onto the target's face,
+  queue a combo. A hit window that a long frame steps right over (a slow machine, or a film
+  at 8 frames a second against a 0.11 s window) still lands. While a strike plays, two-bone IK pulls the fist onto the target's face,
   weighted by the clip's `strike` curve, so blows land where the target is rather than
   where the clip was authored. The built-in `boxing` set chains jab, cross, hook and
-  uppercut (or, on a heavy press after the hook, `uppercut_heavy`, a knockdown finisher) (generated punch clips with chest turn, a dip on the uppercut and a pivoting
-  rear foot); the struck person's flinch (`hit`) snaps the head away from each blow, and
+  uppercut (or, on a heavy press after the hook, `uppercut_heavy`, a knockdown finisher;
+  on a heavy press after the jab, `body_hook`, a lead hook to the liver thrown from bent
+  knees with the trunk leaning over, which a high guard doesn't block) (generated punch
+  clips with chest turn, a dip on the uppercut and a pivoting rear foot); the struck person's flinch (`hit`) snaps the head away from each blow, and
   the attacker's face sets as each punch lands (the `strike` curve feeds `Face` effort).
   A target holding up its guard (`guarding` > 0.5) blocks high strikes from within 70° of
   its front: the fist is aimed at and lands on the nearer glove, with the set's `Block`
@@ -174,6 +177,21 @@ compresses and stretches.
   stands. Blows while down only push the limp parts, a walk asked for (`knock`) waits until
   it is up, and an `Attacker` drops presses aimed at a downed target. The `boxing` set's
   `uppercut_heavy` (a heavy press after the hook: 95 N·s, 30 damage, 0.13 s hitstop) does it.
+- **Hurt.** Where a blow lands matters, and blows add up (`Hurt`, like EA UFC's separate
+  head, body and leg damage). Each blow is sorted by where it struck the skeleton: the head
+  (nearer the face than either hand), the trunk, the liver (the trunk on the person's own
+  right below the chest) or a glove or limb (nothing lasting). Head blows fill `daze`
+  (push over 120 N·s, draining 0.08/s): past `rocked_at` (0.6) the legs go to rubber, as
+  balance and gait go first after a concussive blow. The hips sway on two slow sines that
+  don't line up, the knees dip, the trunk and head loll against the sway, the hands drop,
+  and every second or so the body lurches and the feet step to catch it. Body blows fill
+  `wind` (over 60 N·s, draining 0.2/s): the trunk folds over the stomach, the knees give and
+  two-bone IK brings the hands down to cover it (from a guard or from hanging). A liver blow
+  of 30 N·s or more folds the body onto a knee 0.45 s later, as a liver shot's reaction is
+  delayed while the nerves respond: `kneel_hurt` (4 s, generated) slides the right foot back
+  onto its knee, the right hand clutching the side and the left forearm on the left knee,
+  head down, then pushes up off the left leg. A rocked, winded or kneeling body doesn't
+  block (`Hurt::guard_down`) and attackers hold off while it kneels (`Hurt::is_down`).
 - **Getting up.** A person whose weight returns to 0 while lying flat gets up rather than
   blending straight to standing: `get_up_back` (sits up, tucks a leg, plants a hand and a
   knee, steps up) or `get_up_front` (palms down, pushes up to all fours, kneels, steps up),
@@ -290,7 +308,7 @@ renderer's generated materials (planks, concrete, sand, rock), and the spider cl
 | Step course | A walker leans into a ramp, crosses a deck, walks down stairs watching the steps with feet planted by IK and arms a little out, then runs back leaning into the turns (`paddock_stairs`) |
 | Footwork drill | An athlete walks a square facing one way: ahead, sidestepping left, backpedalling, sidestepping right, blending through the corners, every planted foot still on the sand (`paddock_footwork`) |
 | Shuttle lane | An athlete sprints the lane flat out from a standing start (leaning into it, then at 7 m/s with the trunk forward, knees driven high, heels kicked up and arms pumping from hip to chin), digs in to stop, runs back backwards, turns on the spot and runs sideways to the start; a coach beside the lane, arms folded, turns where they stand to keep watching, the head first and the feet stepping round once the runner is well off to one side (`paddock_sprint_start`, `paddock_sprint_stop`) |
-| Sparring partner | A lifter in a boxer's guard (lead foot and fist forward, elbows tucked, bouncing lightly) blocks the jab and cross on the gloves, takes the hook and uppercut to the face (the head snaps back and the feet step back to catch the body), a blow to the stomach (folds over it) and a shove on the back of a shoulder, flinching away from each and stepping back to the mark (`paddock_flinch`); every second combo the guard drops early and a heavy uppercut knocks him down onto his back, braced (chin tucked, arms back), he lies a beat, gets up and comes back to the mark (`paddock_knockdown`) |
+| Sparring partner | A lifter in a boxer's guard (lead foot and fist forward, elbows tucked, bouncing lightly) blocks the boxer's jab, but a hook to the body gets under the guard to the liver and half a second later he folds onto his right knee, clutching his side, and gets up (`paddock_body_shot`); then he blocks the jab and cross on the gloves, takes the hook and uppercut to the face (the head snaps back and the feet step back to catch the body), a blow to the stomach (folds over it) and a shove on the back of a shoulder, flinching away from each and stepping back to the mark (`paddock_flinch`); in the last combo the guard drops early, the head shots leave his legs wobbling and a heavy uppercut knocks him down onto his back, braced (chin tucked, arms back), he lies a beat, gets up and comes back to the mark (`paddock_knockdown`) |
 | Boxer | An athlete squares up to the sparring partner and throws jab, cross, hook and uppercut, each press buffered until the last punch's cancel window opens; she steps in to range on the jab and closer for the hook and uppercut, each fist reaching the face, and both freeze for a beat as each lands (`paddock_combo`) |
 | Horse oval | A textured horse walks, trots, canters and gallops by speed; in the swing the knees fold, the hocks bend and the hooves curl back behind the fetlocks; haunches and shoulders flex with each stride; the mane rides the neck and the tail streams |
 | Dog run | A furred Labrador walks off, trots, canters out of a turn and gallops down the far straight, the spine flexing with each stride, ears and tail swinging; it pants as it goes (`paddock_dog_trot`, `paddock_dog`) |
@@ -349,7 +367,14 @@ toned, braced to fall back, the parts pushed by about the blow; laid on its back
 second still, gets up where it lies and the knockdown is over. Without a backend the same
 blow only staggers, and two 55 N·s blows close together knock down where one does not.
 `tests/combat.rs` also checks a heavy press after the hook throws `uppercut_heavy` and that
-presses at a downed target are dropped.
+presses at a downed target are dropped, and that a body hook lands under a raised guard
+(the jab before it blocked) and presses wait while the target kneels, and at 8 frames a
+second the body hook still lands.
+`tests/hurt.rs` lands three quick blows on the chin: rocked, the hips sway more than 5 cm
+from side to side and dip, the body lurches, and it wears off; a blow to the stomach folds
+the chest forward with both hands within 20 cm of the stomach, and the wind comes back; a
+liver blow takes the body down on a knee (hips under 0.72 of their height) only after the
+delay, and it stands again.
 `tests/stagger.rs` shoves a person in the chest: 40 N·s knocks them 0.1 to 0.5 m back, both
 feet lift and end in their places in the stance, 10 N·s moves nothing, and with
 `stagger_move` off only `stagger_velocity` says where to go.
