@@ -1915,8 +1915,9 @@ fn build_paddock(world: &mut World, origin: DVec3) -> DemoEntities {
         },
     ));
 
-    // Sparring partner: in a boxer's guard, struck in turn on the chin, the side of the head,
-    // the stomach and the back of a shoulder, flinching away from each blow.
+    // Sparring partner: in a boxer's guard that blocks the first punches of the boxer's combo,
+    // struck in turn on the side of the head and the chin, the stomach and the back of a
+    // shoulder, flinching away from each blow.
     let sparring = spawn_humanoid(
         world,
         humanoid::Outfit::Shirt,
@@ -1929,8 +1930,11 @@ fn build_paddock(world: &mut World, origin: DVec3) -> DemoEntities {
             period: 6.0,
             steps: vec![
                 DemoStep::param(0.05, "guarding", 1.0),
-                // The boxer's combo lands on the head between 0.6 and 2 s (see below).
-                // The combo's heavy punches knock the partner back: step back to the mark.
+                // The boxer's combo comes in between 0.6 and 2 s (see below): the guard takes
+                // the jab and the cross, then drops, so the hook and the uppercut land on the
+                // head and knock the partner back; back to the mark, guard up.
+                DemoStep::param(1.15, "guarding", 0.0),
+                DemoStep::param(2.3, "guarding", 1.0),
                 DemoStep::home(2.6),
                 DemoStep::hit(3.8, Vec3::new(0.02, 1.1, -0.15), Vec3::new(0.0, 0.0, 32.0)),
                 DemoStep::hit(5.0, Vec3::new(0.18, 1.42, 0.08), Vec3::new(0.0, 0.0, -24.0)),

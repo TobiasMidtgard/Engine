@@ -1,6 +1,6 @@
-//! The paddock's sparring partner holds a boxer's guard, snaps his head back from the boxer's
-//! jab and folds a little over a blow to the stomach, then comes back to the guard, without
-//! being shoved off his feet; the boxer's combo lands.
+//! The paddock's sparring partner holds a boxer's guard that blocks the boxer's jab and
+//! cross, snaps his head back when the hook gets through and folds a little over a blow to
+//! the stomach, then comes back to the guard, without being shoved off his feet.
 
 use engine_anim::combat::Attacker;
 use engine_anim::demo::{DemoEntities, spawn_demo_world};
@@ -44,18 +44,28 @@ fn sparring_partner_guards_and_flinches() {
     // How far the neck is ahead of the chest (m, − forward): in the guard, then most.
     let (mut lean, mut fold) = (0.0f32, 0.0f32);
     let (mut lowest_hips, mut farthest_hips) = (f32::MAX, 0.0f32);
-    // The boxer's combo lands on the head from about 0.6 s; the stomach is struck at 3.8 s
-    // and the back of a shoulder at 5 s.
+    // The boxer's combo comes in from about 0.6 s, the guard drops at 1.15 s; the stomach is
+    // struck at 3.8 s and the back of a shoulder at 5 s.
     let (mut hits, mut last, mut first_hit) = (0, 0, None::<f64>);
+    let (mut blocked, mut last_blocked, mut first_contact) = (0, 0, None::<f64>);
     for frame in 1..=(6.0 / STEP) as usize {
         app.update();
         let t = frame as f64 * STEP;
         let w = &app.world;
-        let landed = w.get::<Attacker>(d.boxer).unwrap().hits;
+        let boxer = w.get::<Attacker>(d.boxer).unwrap();
+        let (landed, guarded) = (boxer.hits, boxer.blocked);
+        if guarded != last_blocked {
+            if guarded > last_blocked {
+                blocked += guarded - last_blocked;
+                first_contact.get_or_insert(t);
+            }
+            last_blocked = guarded;
+        }
         if landed != last {
             if landed > last {
                 hits += landed - last;
                 first_hit.get_or_insert(t);
+                first_contact.get_or_insert(t);
             }
             last = landed;
         }
@@ -88,10 +98,13 @@ fn sparring_partner_guards_and_flinches() {
             fold = fold.min((local(w, e, "neck") - local(w, e, "chest")).z);
         }
     }
-    assert!(hits >= 4, "only {hits} of the combo's punches landed");
     assert!(
-        first_hit.is_some_and(|h| h < 0.8),
-        "the jab landed at {first_hit:?} s"
+        blocked >= 2 && hits >= 2,
+        "{blocked} punches blocked and {hits} landed"
+    );
+    assert!(
+        first_contact.is_some_and(|h| h < 0.8),
+        "the jab came in at {first_contact:?} s"
     );
     assert!(snap > 15.0, "the head snapped back only {snap:.1}°");
     assert!(
