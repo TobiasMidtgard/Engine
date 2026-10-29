@@ -644,6 +644,11 @@ impl RenderFeature for BodiesFeature {
                 continue;
             }
             let radius_px = view.projected_radius_px(r_eq as f32, d as f32);
+            // Far smaller than a pixel (planets of other stars seen from home): nothing to
+            // draw, and no maps to bake for it yet.
+            if radius_px < 0.05 {
+                continue;
+            }
             self.ensure_maps(gpu, entity, &body, radius_px, &mut bakes);
             let Some(maps) = self.maps.get(&entity) else {
                 continue;
@@ -731,7 +736,7 @@ impl RenderFeature for BodiesFeature {
                 haze2: [h.albedo[0], h.albedo[1], h.albedo[2], haze_h as f32],
                 haze3: [h.forward, 0.0, 0.0, 0.0],
                 rings: [inner, outer, 1.0, 0.0],
-                flags: [flags, 0, 0, 0],
+                flags: [flags, super::melt_nits(&body).to_bits(), 0, 0],
             };
             if !ground {
                 self.scratch.push((d, entity, gpu_body, false));

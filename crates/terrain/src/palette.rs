@@ -38,6 +38,9 @@ pub struct TerrainPalette {
     /// 0..1 how built-up the habitable land is: towns and cities light the night side (seen
     /// from a few kilometers off up to orbit). 0 on uninhabited worlds.
     pub night_lights: f32,
+    /// Luminance of molten rock where it shows through the crust, cd/m² (lava worlds; 0 =
+    /// none). Melt opens where the climate makes the ground hotter than about 1000 °C.
+    pub lava_glow: f32,
     /// Snow lies where the mean temperature is below this, °C.
     pub snow_below_c: f32,
     /// Steepness (1 − cos of the slope angle) where rock shows through. 0.3 ≈ 45°.
@@ -69,6 +72,7 @@ impl TerrainPalette {
             vegetation: true,
             regolith: 0.0,
             night_lights: 1.0,
+            lava_glow: 0.0,
             snow_below_c: -2.0,
             rock_slope: 0.22,
             ground_material: "grass".into(),
@@ -90,6 +94,7 @@ impl TerrainPalette {
             vegetation: false,
             regolith: 1.0,
             night_lights: 0.0,
+            lava_glow: 0.0,
             snow_below_c: -200.0,
             rock_slope: 0.35,
             ground_material: "regolith".into(),
@@ -111,6 +116,7 @@ impl TerrainPalette {
             vegetation: false,
             regolith: 0.3,
             night_lights: 0.0,
+            lava_glow: 0.0,
             snow_below_c: -95.0,
             rock_slope: 0.3,
             ground_material: "sand".into(),

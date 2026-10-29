@@ -19,7 +19,8 @@ use crate::landscape::{Cover, LANDSCAPE_SEED, Landscape, LandscapeGround, PLANET
 use crate::places::Place;
 use engine::prelude::*;
 use engine_space::CelestialBody;
-use engine_terrain::{FlatPad, OverlayPaint, PlanetTerrain};
+use engine_space::nearby::WorldClass;
+use engine_terrain::{FlatPad, OverlayPaint, PlanetTerrain, WorldKind, WorldRecipe};
 use std::sync::Arc;
 
 /// The landscape replaces the planet's ground out to here from the plaza (m): the valley and
@@ -95,6 +96,67 @@ pub fn spawn(commands: &mut Commands, land: Arc<Landscape>, surfaces: Arc<Landsc
             air.ground_color = GROUND_COLOR;
         }
     });
+}
+
+/// Planets of other stars get their ground when the camera comes within this many of their
+/// radii, and lose it again past twice as far.
+const GROUND_REACH_RADII: f64 = 40.0;
+
+/// Give the planets of the nearby stars ground as a ship closes in: each carries a recipe of
+/// what its surface is (engine_space's `nearby` module), made into a terrain of that kind, so
+/// a pilot can land and walk there. Far behind, the terrain goes again.
+pub fn ground_near_planets(
+    mut commands: Commands,
+    focus: Query<&Transform, With<engine::world::SimulationFocus>>,
+    bodies: Query<(Entity, &CelestialBody, &Transform, Has<PlanetTerrain>)>,
+) {
+    let Some(eye) = focus.iter().next().map(|t| t.translation) else {
+        return;
+    };
+    for (entity, body, transform, has) in &bodies {
+        let Some(surface) = body.surface else {
+            continue;
+        };
+        let radii = (transform.translation - eye).length() / body.radius_m;
+        // Under a cloud deck the ground is hidden from above: it comes only below the deck.
+        let reach = if body.look.solid() {
+            GROUND_REACH_RADII
+        } else {
+            1.1
+        };
+        if !has && radii < reach {
+            commands
+                .entity(entity)
+                .insert(PlanetTerrain::world(&world_recipe(body, &surface)));
+        } else if has && radii > reach * 2.0 {
+            commands.entity(entity).remove::<PlanetTerrain>();
+        }
+    }
+}
+
+/// The terrain recipe of a planet of another star.
+fn world_recipe(body: &CelestialBody, s: &engine_space::nearby::SurfaceRecipe) -> WorldRecipe {
+    WorldRecipe {
+        kind: match s.class {
+            WorldClass::Airless => WorldKind::Airless,
+            WorldClass::Lava => WorldKind::Lava,
+            WorldClass::Desert => WorldKind::Desert,
+            WorldClass::Terra => WorldKind::Terra,
+            WorldClass::Ocean => WorldKind::Ocean,
+            WorldClass::ColdDesert => WorldKind::ColdDesert,
+            WorldClass::Ice => WorldKind::Ice,
+            WorldClass::Hazy => WorldKind::Hazy,
+        },
+        seed: s.seed,
+        radius_m: body.radius_m,
+        sea_fraction: s.sea_fraction,
+        crater_density: s.crater_density,
+        pressure_bar: s.pressure_bar,
+        temperature_k: s.temperature_k,
+        star_kelvin: s.star_kelvin,
+        color: body.color,
+        lava_glow_nits: engine_space::look::melt_nits(body),
+    }
 }
 
 /// Where the Moon is now. It moves along its orbit and, while the world turns with Earth,

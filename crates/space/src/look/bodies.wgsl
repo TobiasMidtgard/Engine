@@ -18,7 +18,7 @@ struct Body {
     haze2: vec4<f32>,   // single-scattering albedo per channel, w: scale height (R)
     haze3: vec4<f32>,   // x: forward scattering g; cloud shell: y radius (R), z fade, w hole (R)
     rings: vec4<f32>,   // inner radius (R), outer radius (R), brightness; cloud shell: w local cover
-    flags: vec4<u32>,   // x: F_* bits
+    flags: vec4<u32>,   // x: F_* bits, y: luminance of glowing melt (f32 bits, cd/m²)
 };
 
 const F_RINGS: u32 = 1u;
@@ -244,7 +244,9 @@ fn fs_body(in: VsOut) -> FsOut {
         let k = b.shade.x;
         let minnaert = pow(max(mu0, 0.0), k) * pow(mu, k - 1.0);
         let lunar = 2.0 * max(mu0, 0.0) / (max(mu0, 0.0) + mu);
-        let f = mix(minnaert, lunar, b.shade.y);
+        // Relief tilts slopes toward the sun only near the terminator: past it the ground is
+        // in the body's own shadow, however steep.
+        let f = mix(minnaert, lunar, b.shade.y) * smoothstep(-0.12, 0.02, mu0_smooth);
         surf = albedo * light * INV_PI * f;
         // Sun glint on open water.
         if (b.shade.z > 0.0 && albedo_s.a > 0.0 && mu0 > 0.0) {
@@ -262,6 +264,11 @@ fn fs_body(in: VsOut) -> FsOut {
             let c_light = select(sun_e, sun_e * sun_transmittance(rel_hit), (flags & F_AIR) != 0u);
             let lit = 0.82 * c_light * INV_PI * (0.85 * cmu0 + 0.15 * pow(cmu0, 0.3) * step(0.0, mu0_smooth));
             surf = mix(surf, lit, cloud);
+        }
+        // Molten rock glows by its own light (a 1400 K black body's color, luma 1).
+        let glow = bitcast<f32>(b.flags.y);
+        if (glow > 0.0) {
+            surf += vec3<f32>(3.26, 0.43, 0.0) * glow * aux_s.a;
         }
     }
 

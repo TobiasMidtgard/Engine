@@ -20,7 +20,7 @@ struct PlanetGpu {
     params3: vec4<f32>,             // regolith scattering (0..1), rayed craters, young areas, smallest crater radius
     rays: array<vec4<f32>, 8>,      // rayed craters: center (planet-local unit direction), radius on the ground (m)
     young: array<vec4<f32>, 12>,    // young ground: middle (planet-local direction) × youth, angular radius
-    params4: vec4<f32>,             // night lights (0..1), lamp page handoff distance (m), unused ×2
+    params4: vec4<f32>,             // night lights (0..1), lamp page handoff distance (m), lava glow (cd/m²), melt latitude (rad)
 };
 
 // Must match `MapsGpu` in render.rs.
@@ -524,6 +524,28 @@ fn far_noise(p: PlanetGpu, rel: vec3<f32>, pixel: f32) -> vec2<f32> {
     // Pixels wider than the coarsest features (along the limb of a planet seen from afar)
     // keep none of them: there the noise settles to its middle rather than to zero.
     return mix(vec2<f32>(0.5), vec2<f32>(a, b) / max(norm, 1e-4), saturate(norm * 4.0));
+}
+
+// Where molten rock shows on a lava world (0..1): fissures between crust plates tens of meters
+// across, rifts kilometers long where the coarse field crosses its middle, and pools of melt
+// in the low ground and young plains. Hotter ground opens more of them. Where a pixel is
+// wider than a fissure it takes the share of melt such ground has.
+fn lava_melt(p: PlanetGpu, rel: vec3<f32>, tp: vec3<f32>, up: vec3<f32>, altitude: f32, mare: f32, pixel: f32) -> f32 {
+    // Hot enough up to the melt latitude (the vertices' temperatures stop at 60 °C).
+    let lat = asin(clamp((transpose(planet_rot(p)) * up).y, -1.0, 1.0));
+    let melt_lat = p.params4.w;
+    let heat = smoothstep(melt_lat + 0.08, melt_lat - 0.08, abs(lat));
+    if (heat <= 0.0) {
+        return 0.0;
+    }
+    let far = far_noise(p, rel, pixel);
+    let rift = smoothstep(0.018, 0.004, abs(far.x - 0.5));
+    let pool = smoothstep(0.72, 0.75, far.y + 0.06 * mare - altitude * 0.00005)
+        * smoothstep(melt_lat - 0.1, melt_lat - 0.35, abs(lat));
+    let plates = tile_fbm(tp, 1.0 / 32.0, 3);
+    let crack = smoothstep(0.03, 0.006, abs(plates - 0.5));
+    let cracks = mix(0.02, crack, 1.0 - smoothstep(1.0, 4.0, pixel));
+    return saturate(max(max(rift, pool), cracks) * heat);
 }
 
 // How young the ground in planet-local direction `up` is (0 old .. 1 fresh lava): matches
@@ -2456,6 +2478,12 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     if (own_sky > 0.0 && planet.params2.x > 0.5) {
         occlusion *= mix(1.0, smoothstep(-0.25, 0.05, dot(up, frame.sun_dir.xyz)), own_sky);
     }
+    // Lava worlds: the crust over open melt is darkest; the melt glows (below).
+    var melt = 0.0;
+    if (planet.params4.z > 0.0) {
+        melt = lava_melt(planet, in.rel, tp, up, altitude, mare, pixel) * (1.0 - ocean);
+        albedo = mix(albedo, vec3<f32>(0.03, 0.02, 0.018), melt);
+    }
     var s = default_surface();
     s.albedo = saturate3(albedo);
     s.roughness = clamp(roughness, 0.03, 1.0);
@@ -2497,6 +2525,10 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
         let level = in.lod.y;
         let tint = vec3<f32>(fract(level * 0.37), fract(level * 0.61 + 0.3), fract(level * 0.83 + 0.6));
         color *= mix(vec3(1.0), tint * 1.6 + 0.2, 0.6);
+    }
+    // Molten rock glows by its own light (a 1400 K black body's color, luma 1).
+    if (melt > 0.0) {
+        color += pre_expose(vec3<f32>(3.26, 0.43, 0.0) * planet.params4.z * melt);
     }
     // Towns and cities light the night side (from a few kilometers off; up close there are no
     // buildings to hold them). People live on mild, wet, low, gentle land, most by coasts and

@@ -13,6 +13,17 @@ world re-anchors on the next body.
 - **Bodies as data.** `CelestialBody` (mass, radius, orbit around its parent, spin, tilt,
   tidal locking, atmosphere, luminosity). `system::solar_system()` is the Sun, the eight
   planets and the Moon with J2000 elements and IAU radii; `demo::spawn_solar_system` spawns it.
+- **The nearby stars and their planets.** `system::nearby_stars()` places the stars nearest
+  the Sun at their true distances and directions, with Alpha Centauri B, Sirius B and Procyon B
+  on their measured orbits. `nearby::planets(false)` gives them planets: the real ones
+  surveys found (Proxima b and d, Barnard's Star b-e, Epsilon Eridani b; candidates only with
+  `true`, refuted ones never), then seeded, physically plausible ones from each star's name
+  (a compact inner chain spaced in mutual Hill radii, a habitable-zone planet for about half
+  the stars, a giant or ice world past the snow line, all inside binary stability limits and
+  below what radial-velocity surveys rule out). Rocky ones carry a `SurfaceRecipe` (class:
+  airless, lava, desert, terra, ocean, cold desert, ice, hazy; sea share, craters, pressure,
+  surface temperature with greenhouse, the star's temperature) that a game turns into terrain
+  when a ship comes close. Sources in the module docs and the research write-up.
 - **Orbits on rails.** `Orbit` solves Kepler's equation for position and velocity at any time
   (no drift), converts a position and velocity back to elements (for predicted ship orbits),
   and gives sphere-of-influence radii.
@@ -129,6 +140,15 @@ sampled where the flow brought them from, so jets shear them into streaks and vo
 them up. `cargo run --release -p engine_space --example space_shots -- --maps` saves every
 map and prints bake times.
 
+Planets of other stars are painted from their `SurfaceRecipe`: barren worlds (`look/world.rs`:
+cratered rock, lava worlds whose melt glows by its own light, Mars-like deserts with dark
+provinces, dunes and frost caps, ice shells crossed by lineae) and living ones with the Earth
+painter turned by a `Climate` (their share of sea, warmer or colder, plants colored by
+their star's light, and the "eyeball" of a world locked to its star). Views `proxima_b`,
+`acen_b_terra`, `eps_eri_ocean`, `acen_a_lava_night`, `proxima_ice` and others in
+`space_shots`. Planets farther than 2000 AU aren't enlarged into dots, nor baked until they
+cover a twentieth of a pixel.
+
 From high up (above 9 km, fading in by 25 km, out to 40 % of the radius), Earth's cloud tops
 are drawn as their own layer 5 km above the ground, over whatever terrain covers the body:
 the baked cloud map broken up with procedural detail down to a few hundred meters, so far
@@ -143,6 +163,10 @@ same share of sky. Views `earth_leo` (400 km) and `earth_edge`
 (35 km) in `space_shots` show it, and `mars_low` and `mars_edge` the same heights over Mars.
 
 ## Known limits (next rounds)
+
+- Planets of other stars: the far map's continents and the terrain's are drawn separately
+  (as for Earth); a locked world's terrain climate follows latitude, not the angle from its
+  star; their weather is the home weather.
 
 - While the world is anchored elsewhere, what was left on a body is not simulated with it:
   it keeps the place the shift mapped it to (far out of view) until it is put back.

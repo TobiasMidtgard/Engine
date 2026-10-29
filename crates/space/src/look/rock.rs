@@ -359,14 +359,14 @@ impl Region {
 /// A coverage interpolated from a coarse grid, its edge made ragged and sharper by fine noise
 /// (`fine` about −1..1) so outlines keep detail below the grid's cells.
 #[inline]
-fn ragged(cover: f32, fine: f32, amount: f32) -> f32 {
+pub(crate) fn ragged(cover: f32, fine: f32, amount: f32) -> f32 {
     let c = cover.clamp(0.0, 1.0);
     let edge = c * (1.0 - c) * 4.0;
     smooth(0.0, 1.0, c + amount * edge * fine)
 }
 
 /// Grid size for a painter's coarse fields at map `width`.
-fn grid_width(width: u32) -> usize {
+pub(crate) fn grid_width(width: u32) -> usize {
     (width as usize / 4).clamp(64, 512)
 }
 

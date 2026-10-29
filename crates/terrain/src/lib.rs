@@ -19,6 +19,7 @@ pub mod rivers;
 pub mod rocks;
 pub mod shape;
 pub mod wear;
+pub mod worlds;
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -42,6 +43,7 @@ pub use shape::{
     lat_lon_from_dir,
 };
 pub use wear::{PathWear, TrailWalk, WearSettings, WornGround};
+pub use worlds::{WorldKind, WorldRecipe};
 
 /// A procedural terrain: a whole planet (or a flat square) with level of detail from orbit
 /// down to half a meter, oceans, mountains, craters, flat building pads, painted materials and

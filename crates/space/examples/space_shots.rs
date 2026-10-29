@@ -30,6 +30,8 @@ struct View {
     fov: f32,
     /// Look out along the horizon, this many degrees below it, instead of at the body.
     horizon_deg: Option<f64>,
+    /// The star that lights it.
+    star: &'static str,
 }
 
 fn views() -> Vec<View> {
@@ -42,6 +44,12 @@ fn views() -> Vec<View> {
         ev100,
         fov: 40.0,
         horizon_deg: None,
+        star: "Sun",
+    };
+    // Planets of the nearby stars (seeded: the names are what the generator makes).
+    let exo = |name, body, star, phase_deg, ev100| View {
+        star,
+        ..v(name, body, 3.0, phase_deg, 15.0, ev100)
     };
     vec![
         v("jupiter", "Jupiter", 4.0, 35.0, 8.0, 11.0),
@@ -85,6 +93,63 @@ fn views() -> Vec<View> {
             fov: 60.0,
             ..v("alpha_centauri", "Alpha Centauri A", 2_000.0, 0.0, 0.0, 9.0)
         },
+        exo(
+            "proxima_b",
+            "Proxima Centauri b",
+            "Proxima Centauri",
+            40.0,
+            14.0,
+        ),
+        exo(
+            "acen_b_terra",
+            "Alpha Centauri B f",
+            "Alpha Centauri B",
+            40.0,
+            14.6,
+        ),
+        exo(
+            "eps_eri_ocean",
+            "Epsilon Eridani f",
+            "Epsilon Eridani",
+            40.0,
+            14.6,
+        ),
+        exo(
+            "acen_a_lava_night",
+            "Alpha Centauri A c",
+            "Alpha Centauri A",
+            120.0,
+            16.0,
+        ),
+        exo(
+            "acen_a_lava_day",
+            "Alpha Centauri A c",
+            "Alpha Centauri A",
+            30.0,
+            23.0,
+        ),
+        exo(
+            "proxima_ice",
+            "Proxima Centauri e",
+            "Proxima Centauri",
+            40.0,
+            13.6,
+        ),
+        exo(
+            "barnard_airless",
+            "Barnard's Star b",
+            "Barnard's Star",
+            40.0,
+            17.5,
+        ),
+        exo(
+            "acen_a_cold_desert",
+            "Alpha Centauri A g",
+            "Alpha Centauri A",
+            40.0,
+            14.0,
+        ),
+        exo("procyon_desert", "Procyon d", "Procyon", 40.0, 21.0),
     ]
 }
 
@@ -303,7 +368,7 @@ fn main() {
             let b = s.body(view.body).unwrap();
             (
                 b.world_position,
-                s.body("Sun").unwrap().world_position,
+                s.body(view.star).unwrap().world_position,
                 s.body("Earth").unwrap().world_position,
                 b.world_rotation * DVec3::Y,
             )

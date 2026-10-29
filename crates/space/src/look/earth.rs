@@ -5,6 +5,13 @@
 //! equator, clear subtropics, mid-latitude storm tracks whose cyclones wind clouds into commas
 //! with long trailing fronts, and a few tropical cyclones.
 //!
+//! The same painter draws Earth-like planets of other stars from a [`Climate`]: their own share
+//! of ocean, warmer or colder than Earth (ice reaching toward the equator or gone), plants of
+//! another color under another star's light (Kiang et al. 2007: redder under F stars, darker,
+//! nearly black, under M dwarfs), and the "eyeball" of a planet locked to its star: open water
+//! and a towering cloud mass under the star, ice toward the night side (Yang, Cowan & Abbot
+//! 2013; Pierrehumbert 2011).
+//!
 //! Smooth fields (continent shapes, climate noise, the large cloud systems) are computed on
 //! coarse grids; only the fine detail is evaluated per texel.
 
@@ -31,7 +38,62 @@ struct Storm {
     tropical: bool,
 }
 
+/// What sets an Earth-like world's face.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Climate {
+    /// Share of the surface under water (0..1); `None` keeps Earth's own sea level.
+    pub sea: Option<f32>,
+    /// Mean surface temperature, K (Earth 288): warmer worlds lose their ice, colder ones grow
+    /// it toward the equator.
+    pub kelvin: f32,
+    /// Shows one face to its star (longitude 0, the substellar point): the climate follows
+    /// the angle from that point instead of latitude, and there are no wandering storms.
+    pub locked: bool,
+    /// Forest color (linear); `None`: Earth's greens.
+    pub plants: Option<Rgb>,
+    /// Earth's own layout: an ice continent on the south pole, an ocean on the north.
+    pub earth_poles: bool,
+    /// Added to the cloud cover (about −0.3..0.3).
+    pub cloudiness: f32,
+}
+
+impl Climate {
+    pub(crate) const EARTH: Climate = Climate {
+        sea: None,
+        kelvin: 288.0,
+        locked: false,
+        plants: None,
+        earth_poles: true,
+        cloudiness: 0.0,
+    };
+
+    /// Shift of the temperature field (1 = equator to pole) from Earth's.
+    fn warmth(&self) -> f32 {
+        ((self.kelvin - 288.0) / 60.0).clamp(-1.2, 1.2)
+    }
+}
+
+/// Forest color (linear) under a star of `kelvin`: plants tune their pigments to the light
+/// that reaches the ground (Kiang et al. 2007): Earth's green under the Sun, yellower to
+/// orange under hotter F and A stars rich in blue, olive under K stars, and dark, nearly
+/// black, under M dwarfs whose light is mostly red and infrared.
+pub(crate) fn plants_under(kelvin: f32) -> Rgb {
+    super::color::ramp(
+        &[
+            (3000.0, srgb!(0x17141a)),
+            (3900.0, srgb!(0x1f2118)),
+            (5000.0, srgb!(0x2b3f1a)),
+            (5800.0, srgb!(0x22401b)),
+            (6600.0, srgb!(0x4c4519)),
+            (8000.0, srgb!(0x5e3a17)),
+        ],
+        kelvin,
+    )
+}
+
 pub(crate) struct Earth {
+    climate_of: Climate,
+    sea_level: f32,
     n: Noise,
     n2: Noise,
     nc: Noise,
@@ -45,11 +107,16 @@ pub(crate) struct Earth {
     storms: Vec<Storm>,
 }
 
-/// Land where the continent field is above this.
+/// Land where Earth's continent field is above this.
 const SEA_LEVEL: f32 = 0.1;
 
 impl Earth {
     pub(crate) fn new(seed: u64, width: u32) -> Self {
+        Self::with(seed, width, Climate::EARTH)
+    }
+
+    pub(crate) fn with(seed: u64, width: u32, climate_of: Climate) -> Self {
+        let poles = if climate_of.earth_poles { 1.0 } else { 0.0 };
         let n = Noise::new(seed);
         let n2 = Noise::new(seed ^ 0x2b);
         let nc = Noise::new(seed ^ 0xc1);
@@ -65,8 +132,9 @@ impl Earth {
             let p = d * 1.15 + w * 0.42;
             let lat_deg = lat / DEG;
             // A continent on the south pole, an ocean on the north pole, as on Earth.
-            let v = n.fbm(p, 4, 0.55) + 0.45 * smooth(-58.0, -72.0, lat_deg)
-                - 0.35 * smooth(70.0, 82.0, lat_deg);
+            let v = n.fbm(p, 4, 0.55)
+                + poles
+                    * (0.45 * smooth(-58.0, -72.0, lat_deg) - 0.35 * smooth(70.0, 82.0, lat_deg));
             [p.x, p.y, p.z, v]
         });
         let climate = Grid::bake(gw, gw / 2, |d| {
@@ -92,9 +160,30 @@ impl Earth {
                 ),
             ]
         });
+        // Sea level: the quantile of the continent field that floods the asked share.
+        let sea_level = match climate_of.sea {
+            None => SEA_LEVEL,
+            Some(sea) => {
+                const N: usize = 4096;
+                let golden = PI * (3.0 - 5f32.sqrt());
+                let mut v: Vec<f32> = (0..N)
+                    .map(|i| {
+                        let y = 1.0 - 2.0 * (i as f32 + 0.5) / N as f32;
+                        let r = (1.0 - y * y).sqrt();
+                        let a = golden * i as f32;
+                        land.at_dir(Vec3::new(r * a.cos(), y, r * a.sin()))[3]
+                    })
+                    .collect();
+                v.sort_by(f32::total_cmp);
+                v[((sea.clamp(0.0, 1.0) * (N - 1) as f32) as usize).min(N - 1)]
+            }
+        };
         let mut rng = Rng::new(seed ^ 0x57);
         let mut storms = Vec::new();
         for hemi in [1.0f32, -1.0] {
+            if climate_of.locked {
+                break;
+            }
             let count = 6;
             for k in 0..count {
                 let lat = rng.range(40.0, 60.0) * hemi;
@@ -111,7 +200,12 @@ impl Earth {
                 });
             }
         }
-        for (lat, lon) in [(16.0, -60.0), (-17.0, 75.0), (21.0, 140.0)] {
+        let tropical = if climate_of.locked {
+            &[][..]
+        } else {
+            &[(16.0, -60.0), (-17.0, 75.0), (21.0, 140.0)][..]
+        };
+        for &(lat, lon) in tropical {
             let lat = lat + rng.range(-3.0, 3.0);
             let radius = rng.range(6.0, 8.0) * DEG;
             storms.push(Storm {
@@ -124,6 +218,8 @@ impl Earth {
             });
         }
         Self {
+            climate_of,
+            sea_level,
             n,
             n2,
             nc,
@@ -135,7 +231,19 @@ impl Earth {
         }
     }
 
-    /// Continent field (land above `SEA_LEVEL`), with coastline detail down to the texel.
+    /// Climate latitude, degrees (signed): the latitude, or on a locked planet half the angle
+    /// from the substellar point ×¾ (0 under the star, 90 from 120° on).
+    #[inline]
+    fn climate_lat(&self, t: &Texel) -> f32 {
+        if self.climate_of.locked {
+            let sub = Vec3::new(0.0, 0.0, 1.0);
+            (angle_between(t.d, sub) / DEG * 0.75).min(90.0)
+        } else {
+            t.lat / DEG
+        }
+    }
+
+    /// Continent field (land above the sea level), with coastline detail down to the texel.
     #[inline]
     fn continent(&self, t: &Texel) -> (f32, Vec3) {
         let [x, y, z, low] = self.land.at(t.lat, t.lon);
@@ -148,9 +256,11 @@ impl Earth {
 
     fn surface(&self, t: &Texel, c: f32, p: Vec3, climate: [f32; 3]) -> (Rgb, f32) {
         let [wobble, ranges, ice_noise] = climate;
-        let lat_deg = t.lat / DEG;
+        let lat_deg = self.climate_lat(t);
         let lat = lat_deg.abs();
-        let coast = c - SEA_LEVEL;
+        let warm = self.climate_of.warmth();
+        let earth = self.climate_of.earth_poles;
+        let coast = c - self.sea_level;
         if coast < 0.0 {
             // Ocean: deep navy, lighter shelves along the coasts, sea ice near the poles.
             let shelf = smooth(-0.05, 0.0, coast);
@@ -158,7 +268,14 @@ impl Earth {
             let shallow = mix(srgb!(0x18476a), srgb!(0x226f84), tropical * 0.6);
             let deep = mix(srgb!(0x0b1f45), srgb!(0x091a3b), smooth(-0.1, -0.4, coast));
             let mut col = mix(deep, shallow, shelf * shelf * 0.8);
-            let edge = if lat_deg > 0.0 { 77.0 } else { 66.0 } + 4.0 * ice_noise;
+            let edge = if !earth {
+                72.0
+            } else if lat_deg > 0.0 {
+                77.0
+            } else {
+                66.0
+            } + 4.0 * ice_noise
+                + 45.0 * warm;
             let ice = smooth(edge - 1.5, edge + 1.5, lat);
             let leads = 0.85 + 0.15 * self.n2.at(t.d * 80.0);
             col = mix(col, scale(srgb!(0xdde4ea), leads), ice);
@@ -168,7 +285,7 @@ impl Earth {
         let ridge = self.n2.ridged(p * 3.5, 4);
         let elev = (coast * 2.5).min(0.5) + ridge * ranges * 0.8;
         // Northern summer: the tundra is bare, snow lies only on the high ranges.
-        let temp = 1.0 - smooth(0.0, 88.0, lat) - elev * 0.35;
+        let temp = 1.0 - smooth(0.0, 88.0, lat) - elev * 0.35 + warm;
         let band = if lat < 12.0 {
             0.85
         } else if lat < 35.0 {
@@ -178,14 +295,22 @@ impl Earth {
         };
         let interior = smooth(0.02, 0.22, coast);
         let moist = (band - 0.35 * interior + 0.3 * wobble).clamp(0.0, 1.0);
-        let forest = if temp > 0.62 {
-            srgb!(0x22401b)
-        } else if temp > 0.4 {
-            srgb!(0x30502a)
-        } else {
-            srgb!(0x283c2b)
+        let (forest, grass) = match self.climate_of.plants {
+            None => (
+                if temp > 0.62 {
+                    srgb!(0x22401b)
+                } else if temp > 0.4 {
+                    srgb!(0x30502a)
+                } else {
+                    srgb!(0x283c2b)
+                },
+                mix(srgb!(0x8a7f52), srgb!(0x6a7043), smooth(0.3, 0.6, temp)),
+            ),
+            Some(p) => (
+                scale(p, 0.85 + 0.25 * smooth(0.3, 0.7, temp)),
+                mix(srgb!(0x8a7f52), scale(p, 1.9), smooth(0.3, 0.6, temp) * 0.7),
+            ),
         };
-        let grass = mix(srgb!(0x8a7f52), srgb!(0x6a7043), smooth(0.3, 0.6, temp));
         // Texture down to the texel: dune seas, darker rock, dry valleys.
         let grain = self.n.fbm(t.d * 70.0, 3, 0.55);
         let tone = self.n.fbm(p * 6.0, 2, 0.5) + 0.35 * grain;
@@ -216,7 +341,9 @@ impl Earth {
             + smooth(1.0, 1.2, elev) * smooth(0.45, 0.25, temp);
         col = mix(col, srgb!(0xf0f2f4), snow.min(1.0));
         // Ice sheets: the polar continent, and the highest, coldest northern land.
-        let sheet = if lat_deg < 0.0 {
+        let sheet = if !earth {
+            smooth(74.0, 79.0, lat - 45.0 * warm + 3.0 * wobble + 3.0 * elev)
+        } else if lat_deg < 0.0 {
             smooth(58.0, 63.0, lat + 3.0 * wobble)
         } else {
             smooth(74.0, 79.0, lat + 3.0 * wobble + 3.0 * elev)
@@ -227,6 +354,9 @@ impl Earth {
     }
 
     fn cloud_cover(&self, t: &Texel, desert: f32) -> f32 {
+        if self.climate_of.locked {
+            return self.eyeball_cloud(t, desert);
+        }
         let lat_deg = t.lat / DEG;
         let a = lat_deg.abs();
         // Climatology: wet near the equator, clear subtropics, stormy mid-latitudes, the
@@ -238,6 +368,7 @@ impl Earth {
             - 0.25 * smooth(-66.0, -76.0, lat_deg)
             - 0.08 * smooth(72.0, 85.0, lat_deg);
         cover -= 0.3 * desert;
+        cover += self.climate_of.cloudiness;
         // Swirl the sampling point around storms (one after another where they overlap).
         let mut q = t.d;
         let mut swirled = false;
@@ -302,23 +433,49 @@ impl Earth {
     }
 }
 
+impl Earth {
+    /// Clouds of a planet locked to its star: a thick convective mass under the star thinning
+    /// toward the terminator (the cloud feedback that keeps such planets temperate; Yang,
+    /// Cowan & Abbot 2013), broken cloud streaming toward the night side.
+    fn eyeball_cloud(&self, t: &Texel, desert: f32) -> f32 {
+        let theta = angle_between(t.d, Vec3::new(0.0, 0.0, 1.0)) / DEG;
+        let cover = 0.15 + 0.6 * smooth(70.0, 10.0, theta) - 0.3 * desert
+            + self.climate_of.cloudiness
+            - 0.2 * smooth(100.0, 140.0, theta);
+        let [body, cirrus] = self.sky.at(t.lat, t.lon);
+        let fine = self.nc.fbm(t.d * 40.0 + Vec3::splat(1.7), 3, 0.6);
+        let puffs = 1.0 - self.nc2.at(t.d * 110.0).abs() * 1.6;
+        let field = body + 0.22 * fine + 0.12 * puffs * smooth(60.0, 20.0, theta);
+        let threshold = 0.62 - cover * 1.05;
+        let c = smooth(threshold, threshold + 0.38, field);
+        c.max(cirrus * 0.3 * smooth(40.0, 80.0, theta))
+            .clamp(0.0, 1.0)
+    }
+}
+
 impl Painter for Earth {
     fn paint(&self, t: &Texel) -> Paint {
         let (c, p) = self.continent(t);
         let climate = self.climate.at(t.lat, t.lon);
         let (color, water) = self.surface(t, c, p, climate);
-        let lat = t.lat.abs() / DEG;
-        let dry_band = smooth(14.0, 20.0, lat) * smooth(34.0, 26.0, lat);
+        let lat = self.climate_lat(t).abs();
+        let dry_band = if self.climate_of.locked {
+            // Dry where the substellar rains have wrung the air out: the rim of the day side.
+            smooth(25.0, 35.0, lat) * smooth(50.0, 42.0, lat)
+        } else {
+            smooth(14.0, 20.0, lat) * smooth(34.0, 26.0, lat)
+        };
         let desert = if water > 0.5 {
             0.0
         } else {
-            dry_band * smooth(0.0, 0.08, c - SEA_LEVEL)
+            dry_band * smooth(0.0, 0.08, c - self.sea_level)
         };
         Paint {
             color,
             water,
             height: 0.0,
             cloud: self.cloud_cover(t, desert),
+            glow: 0.0,
         }
     }
 

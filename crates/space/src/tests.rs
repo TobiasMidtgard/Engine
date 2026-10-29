@@ -471,7 +471,10 @@ fn far_bodies_get_spheres_rings_and_stay_visible() {
     assert_eq!(of("Sirius").len(), 1);
     assert_eq!(of("Jupiter").len(), 1);
     assert_eq!(of("Saturn").len(), 2);
-    assert_eq!(impostors.len(), 20);
+    // The Solar System's 20, Sirius B and Procyon B, and the nearby stars' planets.
+    let planets = crate::nearby::planets(false);
+    let rings = planets.iter().filter(|b| b.rings.is_some()).count();
+    assert_eq!(impostors.len(), 22 + planets.len() + rings);
     // Inside the body (under any terrain), and the Moon is big enough to be seen as it is.
     let moon = of("Moon")[0];
     assert!(moon.1.radius_m < 1_737_400.0 && moon.1.radius_m > 1_700_000.0);

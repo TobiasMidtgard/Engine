@@ -25,6 +25,7 @@ pub fn spawn_solar_system(commands: &mut Commands) -> HashMap<String, Entity> {
     for body in crate::system::solar_system()
         .into_iter()
         .chain(crate::system::nearby_stars())
+        .chain(crate::nearby::planets(false))
     {
         let name = body.name.clone();
         let id = commands.spawn((body, Transform::default())).id();

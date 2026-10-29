@@ -133,103 +133,14 @@ pub fn solar_system() -> Vec<CelestialBody> {
 
 /// One light year, meters.
 pub const LIGHT_YEAR: f64 = 9_460_730_472_580_800.0;
-/// The Sun's G·M (m³/s²), radius (m) and luminosity (W).
-const SUN_MU: f64 = 1.327_124_400_18e20;
-const SUN_RADIUS: f64 = 695_700_000.0;
-const SUN_LUMINOSITY: f64 = 3.828e26;
 /// Tilt of Earth's equator against the ecliptic at J2000, degrees.
-const OBLIQUITY_DEG: f64 = 23.439_281;
+pub(crate) const OBLIQUITY_DEG: f64 = 23.439_281;
 
-/// The stars nearest the Sun, at their true distances and directions (J2000 right ascension
-/// and declination; masses, radii, luminosities and temperatures from their RECONS / SIMBAD
-/// entries), to fly to. Each is placed on a circle around the Sun through its position that
-/// takes millions of years to go around: it stands still for any flight. Alpha Centauri B
-/// circles A on its real 80-year orbit.
+/// The stars nearest the Sun, at their true distances and directions, with their white-dwarf
+/// and binary companions on their real orbits (see [`crate::nearby`]). Their planets come
+/// from [`crate::nearby::planets`].
 pub fn nearby_stars() -> Vec<CelestialBody> {
-    // Name, then RA°, Dec°, light years, M☉, R☉, L☉, surface temperature K.
-    let list: [(&str, [f64; 7]); 8] = [
-        (
-            "Alpha Centauri A",
-            [219.902_1, -60.834_0, 4.344, 1.0788, 1.2175, 1.5059, 5790.0],
-        ),
-        (
-            "Proxima Centauri",
-            [
-                217.429_0, -62.679_5, 4.2465, 0.1221, 0.1542, 0.001_55, 3042.0,
-            ],
-        ),
-        (
-            "Barnard's Star",
-            [269.452_1, 4.693_4, 5.963, 0.144, 0.196, 0.0035, 3134.0],
-        ),
-        (
-            "Wolf 359",
-            [164.120_5, 7.014_7, 7.86, 0.11, 0.16, 0.0014, 2749.0],
-        ),
-        (
-            "Sirius",
-            [101.287_2, -16.716_1, 8.60, 2.063, 1.711, 25.4, 9940.0],
-        ),
-        (
-            "Epsilon Eridani",
-            [53.232_7, -9.458_3, 10.475, 0.82, 0.735, 0.34, 5084.0],
-        ),
-        (
-            "Procyon",
-            [114.825_5, 5.225_0, 11.46, 1.499, 2.048, 6.93, 6530.0],
-        ),
-        (
-            "Tau Ceti",
-            [26.017_0, -15.937_5, 11.912, 0.78, 0.793, 0.52, 5344.0],
-        ),
-    ];
-    let star = |name: &str, mass: f64, radius: f64, lum: f64, kelvin: f64| CelestialBody {
-        name: name.into(),
-        kind: BodyKind::Star,
-        mu: SUN_MU * mass,
-        radius_m: SUN_RADIUS * radius,
-        luminosity_w: SUN_LUMINOSITY * lum,
-        color: star_color(kelvin),
-        look: BodyLook::None,
-        ..Default::default()
-    };
-    let mut out: Vec<CelestialBody> = list
-        .iter()
-        .map(|&(name, [ra, dec, ly, mass, radius, lum, kelvin])| {
-            let (lon, lat) = ecliptic(ra, dec);
-            CelestialBody {
-                parent: Some("Sun".into()),
-                // A circle tipped upright (inclination 90°) through ecliptic longitude `lon`:
-                // the star sits `lat` along it from the node.
-                orbit: Orbit {
-                    semi_major_axis_m: ly * LIGHT_YEAR,
-                    eccentricity: 0.0,
-                    inclination_deg: 90.0,
-                    ascending_node_deg: lon,
-                    arg_periapsis_deg: 0.0,
-                    mean_anomaly_deg: lat.rem_euclid(360.0),
-                },
-                ..star(name, mass, radius, lum, kelvin)
-            }
-        })
-        .collect();
-    // Alpha Centauri B around A (Pourbaix & Boffin 2016 elements).
-    out.insert(
-        1,
-        CelestialBody {
-            parent: Some("Alpha Centauri A".into()),
-            orbit: Orbit {
-                semi_major_axis_m: 23.3 * AU,
-                eccentricity: 0.5179,
-                inclination_deg: 79.24,
-                ascending_node_deg: 205.0,
-                arg_periapsis_deg: 232.3,
-                mean_anomaly_deg: 0.0,
-            },
-            ..star("Alpha Centauri B", 0.9092, 0.8591, 0.4981, 5260.0)
-        },
-    );
-    out
+    crate::nearby::stars()
 }
 
 /// Ecliptic longitude and latitude (degrees) of a J2000 right ascension and declination.

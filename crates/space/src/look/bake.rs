@@ -1,6 +1,6 @@
 //! Baking body textures on the CPU: an equirectangular albedo map (sRGB, alpha = water for the
 //! sun glint) and an auxiliary map (linear: cloud cover for Earth, surface slopes for relief
-//! on rocky bodies), both with full mip chains, plus the radial profile of a ring system.
+//! on rocky bodies, glowing melt on lava worlds), both with full mip chains, plus the radial profile of a ring system.
 //!
 //! Maps follow planetary map conventions: longitude −180° at the left edge, 0° in the middle,
 //! east to the right; row 0 is the north pole. Longitude 0 points along the body's +Z, east
@@ -73,6 +73,8 @@ pub(crate) struct Paint {
     pub height: f32,
     /// Cloud cover 0..1 (a separate layer above the surface).
     pub cloud: f32,
+    /// Where molten rock shows, 0..1 (it glows by its own light).
+    pub glow: f32,
 }
 
 /// Paints one body's surface. Painters precompute what they need for a given map width.
@@ -90,8 +92,31 @@ pub(crate) trait Painter: Sync {
 
 /// The painter for a body's look, set up for maps `width` texels wide.
 pub(crate) fn painter(body: &CelestialBody, width: u32) -> Box<dyn Painter> {
-    use super::{earth, gas, rock};
+    use super::{earth, gas, rock, world};
     let seed = seed_of(&body.name);
+    // Planets of other stars are painted from what their surface is.
+    if let Some(r) = &body.surface {
+        if world::Barren::draws(r.class) && body.look == BodyLook::Rocky {
+            return Box::new(world::Barren::new(
+                r,
+                body.color,
+                body.tidally_locked,
+                seed,
+                width,
+            ));
+        }
+        if body.look == BodyLook::Earthlike {
+            let climate = earth::Climate {
+                sea: Some(r.sea_fraction as f32),
+                kelvin: r.temperature_k as f32,
+                locked: body.tidally_locked,
+                plants: Some(earth::plants_under(r.star_kelvin as f32)),
+                earth_poles: false,
+                cloudiness: (r.cloud_cover - 0.55) * 0.6,
+            };
+            return Box::new(earth::Earth::with(seed, width, climate));
+        }
+    }
     match &body.look {
         BodyLook::None | BodyLook::Rocky => Box::new(rock::Rocky::new(body.color, seed, width)),
         BodyLook::Moon => Box::new(rock::Moon::new(seed, width)),
@@ -130,7 +155,8 @@ pub(crate) fn seed_of(name: &str) -> u64 {
 pub struct SurfaceMaps {
     /// sRGB albedo; alpha is 255 over open water (sun glint), 0 elsewhere. With mips.
     pub albedo: Image,
-    /// Linear data: R = cloud cover, G/B = east/north surface slope (0.5 = flat), A unused.
+    /// Linear data: R = cloud cover, G/B = east/north surface slope (0.5 = flat), A = glowing
+    /// melt.
     /// With mips.
     pub aux: Image,
     /// The aux map holds clouds / relief.
@@ -181,6 +207,7 @@ pub fn bake_surface(body: &CelestialBody, width: u32) -> SurfaceMaps {
     struct Out {
         albedo: [u8; 4],
         cloud: u8,
+        glow: u8,
         height: f32,
     }
     let mut out = vec![Out::default(); (width * height) as usize];
@@ -213,11 +240,12 @@ pub fn bake_surface(body: &CelestialBody, width: u32) -> SurfaceMaps {
                 unorm(p.water),
             ];
             o.cloud = unorm(p.cloud);
+            o.glow = unorm(p.glow);
             o.height = p.height;
         }
     });
 
-    let mut aux = vec![[0u8, 128, 128, 255]; out.len()];
+    let mut aux = vec![[0u8, 128, 128, 0]; out.len()];
     let w = width as usize;
     let h = height as usize;
     par_rows(&mut aux, w, |y, row| {
@@ -228,6 +256,7 @@ pub fn bake_surface(body: &CelestialBody, width: u32) -> SurfaceMaps {
         for (x, a) in row.iter_mut().enumerate() {
             let i = y * w + x;
             a[0] = out[i].cloud;
+            a[3] = out[i].glow;
             if relief {
                 let left = out[y * w + (x + w - 1) % w].height;
                 let right = out[y * w + (x + 1) % w].height;

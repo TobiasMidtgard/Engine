@@ -1785,7 +1785,12 @@ impl RenderFeature for TerrainFeature {
                 ],
                 rays: state.rays,
                 young: state.young,
-                params4: [p.night_lights, lamp_handoff, 0.0, 0.0],
+                params4: [
+                    p.night_lights,
+                    lamp_handoff,
+                    p.lava_glow,
+                    melt_latitude(&t.config.shape.climate),
+                ],
             });
         }
         self.built_last_frame = built_total;
@@ -2070,6 +2075,22 @@ fn upload(
         },
     );
     true
+}
+
+/// Latitude (radians) up to which rock is hot enough to melt (about 1000 °C at the surface,
+/// by the climate's equator-to-pole profile); negative when it is nowhere. The vertices'
+/// temperatures stop at 60 °C, so the shader finds the melt from this instead.
+fn melt_latitude(c: &crate::shape::Climate) -> f32 {
+    const MELT_C: f32 = 1000.0;
+    if c.equator_c <= MELT_C {
+        return -1.0;
+    }
+    if c.pole_c >= MELT_C {
+        return 2.0;
+    }
+    // t = pole + (equator − pole) cos^1.6(lat), as `PlanetShape::sample` has it.
+    let k = (MELT_C - c.pole_c) / (c.equator_c - c.pole_c);
+    k.powf(1.0 / 1.6).acos()
 }
 
 #[cfg(test)]

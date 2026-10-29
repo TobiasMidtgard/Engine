@@ -112,7 +112,11 @@ fn main() {
             Update,
             (scenery::stream_wall_heroes, scenery::pilot_interacts),
         )
-        .add_systems(Update, report_assets);
+        .add_systems(Update, report_assets)
+        .add_systems(
+            Update,
+            planet::ground_near_planets.run_if(resource_exists::<planet::UsePlanet>),
+        );
     register_apis(&mut app);
 
     let args: Vec<String> = std::env::args().collect();

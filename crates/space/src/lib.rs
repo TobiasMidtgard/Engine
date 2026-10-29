@@ -3,6 +3,7 @@
 pub mod conic;
 pub mod demo;
 pub mod look;
+pub mod nearby;
 pub mod orbit;
 pub mod rails;
 pub mod sun;
@@ -194,6 +195,9 @@ pub struct CelestialBody {
     /// Polar flattening, (equatorial − polar) / equatorial radius (Saturn ≈ 0.098). The far
     /// view is drawn as this spheroid with `radius_m` as its mean radius.
     pub flattening: f64,
+    /// What the ground is like, for bodies whose terrain is made when a ship comes close
+    /// (the planets of the nearby stars). `None` for bodies that carry their own terrain.
+    pub surface: Option<nearby::SurfaceRecipe>,
 }
 
 impl Default for CelestialBody {
@@ -217,6 +221,7 @@ impl Default for CelestialBody {
             rings: None,
             haze: None,
             flattening: 0.0,
+            surface: None,
         }
     }
 }

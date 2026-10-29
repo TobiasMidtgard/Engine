@@ -272,6 +272,17 @@ commands.entity(bodies["Earth"]).insert(
 commands.entity(bodies["Moon"]).insert(PlanetTerrain::moon(7).with_radius(1_737_400.0));
 ```
 
+Made-up planets of every kind come from a short `WorldRecipe` (kind, seed, radius, sea share,
+craters, pressure, temperature, the star's temperature, the color seen from afar, the melt's
+glow): `PlanetTerrain::world(&recipe)` starts from the closest known world (the Moon for
+airless rock, Io-like black crust over glowing melt for lava worlds, Mars for hot and cold
+deserts, Earth for temperate land and sea worlds with plants colored by the star, ice plains,
+Titan's dark dunes and lakes) and tunes it. The showcase gives the space module's planets of
+other stars one as a ship comes within 40 radii. On lava worlds `TerrainPalette::lava_glow`
+lights fissures, rifts and pools of melt up to the latitude where the climate passes 1000 °C.
+Views `exo_lava`, `exo_lava_night`, `exo_airless`, `exo_desert`, `exo_terra`,
+`exo_ocean_red_dwarf`, `exo_cold_desert`, `exo_ice` and `exo_hazy` in `terrain_shots`.
+
 `examples/terrain_shots.rs` renders the test views headless (lab prints, rain, snow, painted
 ground and a patchwork of painted layers, a meadow tinted the way the showcase paints its
 valley and a natural one at eye height, snow at eye height and over the valley, woods from the air, the range, the range at dusk

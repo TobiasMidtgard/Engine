@@ -25,6 +25,7 @@ mod gas;
 pub mod noise;
 mod render;
 mod rock;
+mod world;
 
 use engine_core::math::Vec3;
 use engine_core::prelude::*;
@@ -358,7 +359,13 @@ pub(crate) fn spawn_impostors(
     }
 }
 
-/// Keep far bodies at least `min_apparent_radius_rad` wide as seen from the active camera.
+/// Planets and moons farther than this (m) are not enlarged into dots: they are drawn at
+/// their true, sub-pixel size, so a planet of another star doesn't shine beside its star the
+/// way Jupiter shines in our sky (at 2000 AU even Jupiter would be far too faint to see).
+pub const MAX_DOT_DISTANCE_M: f64 = 2_000.0 * crate::orbit::AU;
+
+/// Keep far bodies at least `min_apparent_radius_rad` wide as seen from the active camera
+/// (out to [`MAX_DOT_DISTANCE_M`]).
 pub(crate) fn scale_impostors(
     settings: Res<SpaceSettings>,
     cameras: Query<(&Camera, &GlobalTransform)>,
@@ -378,7 +385,11 @@ pub(crate) fn scale_impostors(
             continue;
         };
         let distance = (body.translation - eye).length();
-        let scale = (settings.min_apparent_radius_rad * distance / imp.radius_m).max(1.0) as f32;
+        let scale = if distance > MAX_DOT_DISTANCE_M {
+            1.0
+        } else {
+            (settings.min_apparent_radius_rad * distance / imp.radius_m).max(1.0) as f32
+        };
         if (tf.scale.x - scale).abs() > scale * 1e-3 {
             tf.scale = Vec3::splat(scale);
         }
@@ -395,4 +406,41 @@ pub fn spheroid_radii(radius_m: f64, flattening: f64) -> (f64, f64) {
 /// Unit direction of a latitude/longitude (degrees) in f32, for tests and tools.
 pub fn look_dir(lat_deg: f32, lon_deg: f32) -> Vec3 {
     noise::dir(lat_deg.to_radians(), lon_deg.to_radians())
+}
+
+/// Luminance (cd/m²) of a lava world's exposed melt, where its maps say melt shows: a black
+/// body at the melt's temperature (basalt at about 1400 K, hotter where the surface is: under
+/// the star on a locked world, √2 times the mean). 0 for every other body.
+pub fn melt_nits(body: &CelestialBody) -> f32 {
+    match &body.surface {
+        Some(r) if r.class == crate::nearby::WorldClass::Lava => {
+            let hottest = r.temperature_k
+                * if body.tidally_locked {
+                    2f64.sqrt()
+                } else {
+                    1.05
+                };
+            black_body_luminance(hottest.max(1400.0)) as f32
+        }
+        _ => 0.0,
+    }
+}
+
+/// Luminance (cd/m²) of a black body at `kelvin`: Planck's law weighted by the eye's photopic
+/// response (a Gaussian fit to CIE V(λ)), 683 lm/W at its peak.
+pub fn black_body_luminance(kelvin: f64) -> f64 {
+    const H: f64 = 6.626_070_15e-34;
+    const C: f64 = 2.997_924_58e8;
+    const K: f64 = 1.380_649e-23;
+    let mut sum = 0.0;
+    let step = 5e-9;
+    let mut l: f64 = 380e-9;
+    while l <= 780e-9 {
+        let planck = 2.0 * H * C * C / l.powi(5) / ((H * C / (l * K * kelvin)).exp() - 1.0);
+        let um = l * 1e6;
+        let v = 1.019 * (-285.4 * (um - 0.559) * (um - 0.559)).exp();
+        sum += planck * v * step;
+        l += step;
+    }
+    683.0 * sum
 }

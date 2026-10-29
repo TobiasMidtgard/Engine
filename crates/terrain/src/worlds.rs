@@ -1,0 +1,371 @@
+//! Terrains for made-up planets of every kind, from a short recipe: the space module's planets
+//! of other stars carry one, so a ship that comes close finds ground to land on that matches
+//! what it saw from afar.
+//!
+//! Each kind starts from the closest world we know and turns its knobs: airless rock from the
+//! Moon (craters, worn massifs, dark plains); lava worlds from Io and the predicted surfaces
+//! of hot rocky exoplanets (a black crust over molten rock that shows through fissures, rifts
+//! and pools where it is hot enough); hot and cold deserts from Mars (dust, dark rock, few
+//! fresh craters under air, polar frost); temperate worlds from Earth (their own share of
+//! ocean, plants colored by their star's light, no towns); frozen worlds as ice plains
+//! with scattered craters; hazy ones from Titan (dark dune fields, black hydrocarbon lakes).
+
+use serde::{Deserialize, Serialize};
+
+use crate::rocks::RockField;
+use crate::shape::{Climate, PlanetShape};
+use crate::{PlanetTerrain, TerrainPalette};
+
+/// The kind of world a [`WorldRecipe`] makes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+pub enum WorldKind {
+    #[default]
+    Airless,
+    Lava,
+    Desert,
+    Terra,
+    Ocean,
+    ColdDesert,
+    Ice,
+    Hazy,
+}
+
+/// What a world is like, for [`PlanetTerrain::world`].
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WorldRecipe {
+    pub kind: WorldKind,
+    pub seed: u64,
+    pub radius_m: f64,
+    /// Share of the surface under sea (or frozen sea), 0..1.
+    pub sea_fraction: f64,
+    /// 0..1 how crowded its craters are.
+    pub crater_density: f64,
+    /// Surface pressure, bar.
+    pub pressure_bar: f64,
+    /// Mean surface temperature, kelvin.
+    pub temperature_k: f64,
+    /// Surface temperature of its star, kelvin (plant colors).
+    pub star_kelvin: f64,
+    /// The world's color seen from afar (linear): the ground takes its hue.
+    pub color: [f32; 3],
+    /// Luminance of exposed melt, cd/m² (lava worlds; 0 = no glow).
+    pub lava_glow_nits: f32,
+}
+
+impl Default for WorldRecipe {
+    fn default() -> Self {
+        Self {
+            kind: WorldKind::Airless,
+            seed: 1,
+            radius_m: 6_371_000.0,
+            sea_fraction: 0.0,
+            crater_density: 0.8,
+            pressure_bar: 0.0,
+            temperature_k: 250.0,
+            star_kelvin: 5772.0,
+            color: [0.36, 0.34, 0.32],
+            lava_glow_nits: 0.0,
+        }
+    }
+}
+
+/// `palette` with every color pulled toward `color`'s hue by `amount` (0..1), keeping each
+/// color's own brightness.
+fn tinted(mut palette: TerrainPalette, color: [f32; 3], amount: f32) -> TerrainPalette {
+    let mean = (color[0] + color[1] + color[2]) / 3.0;
+    let hue = color.map(|c| c / mean.max(1e-4));
+    let tint = |c: [f32; 3]| {
+        let m = (c[0] + c[1] + c[2]) / 3.0;
+        [0, 1, 2].map(|i| c[i] + (m * hue[i] - c[i]) * amount)
+    };
+    for c in [
+        &mut palette.lush,
+        &mut palette.dry,
+        &mut palette.soil,
+        &mut palette.rock,
+        &mut palette.sand,
+        &mut palette.dark,
+        &mut palette.mud,
+    ] {
+        *c = tint(*c);
+    }
+    palette
+}
+
+/// Forest and grass colors (linear) under a star of `kelvin`: Earth's green under the Sun,
+/// olive under K stars, nearly black under M dwarfs, yellow to orange under F and A stars
+/// (Kiang et al. 2007). Matches the far view's plants.
+fn plants_under(kelvin: f64) -> ([f32; 3], [f32; 3]) {
+    let stops: [(f64, [f32; 3]); 6] = [
+        (3000.0, [0.026, 0.018, 0.026]),
+        (3900.0, [0.032, 0.034, 0.018]),
+        (5000.0, [0.060, 0.120, 0.022]),
+        (5800.0, [0.085, 0.160, 0.035]),
+        (6600.0, [0.150, 0.130, 0.020]),
+        (8000.0, [0.190, 0.090, 0.018]),
+    ];
+    let k = kelvin.clamp(stops[0].0, stops[5].0);
+    let i = stops.iter().rposition(|s| s.0 <= k).unwrap_or(0).min(4);
+    let t = ((k - stops[i].0) / (stops[i + 1].0 - stops[i].0)) as f32;
+    let lush = [0, 1, 2].map(|c| stops[i].1[c] + (stops[i + 1].1[c] - stops[i].1[c]) * t);
+    // Dry grass: paler, toward straw.
+    let dry = [0, 1, 2].map(|c| lush[c] * 0.5 + [0.16, 0.14, 0.07][c]);
+    (lush, dry)
+}
+
+impl PlanetTerrain {
+    /// A planet made from `r`: its kind picks the closest preset, the rest tunes it.
+    pub fn world(r: &WorldRecipe) -> Self {
+        let seed = r.seed;
+        let t_c = (r.temperature_k - 273.15) as f32;
+        let climate = |swing_up: f32, swing_down: f32, wetness: f32, circulation: f32| Climate {
+            equator_c: t_c + swing_up,
+            pole_c: t_c - swing_down,
+            lapse_c_per_m: if r.pressure_bar > 0.05 { 0.0065 } else { 0.0 },
+            wetness,
+            circulation,
+        };
+        let airless_shape = |crater_density: f64| PlanetShape {
+            crater_density,
+            ..PlanetShape::moon(seed)
+        };
+        let mut t = match r.kind {
+            WorldKind::Airless => Self {
+                shape: PlanetShape {
+                    maria: 0.15 + 0.3 * (seed % 7) as f64 / 6.0,
+                    climate: climate(40.0, 120.0, 0.0, 0.0),
+                    ..airless_shape(r.crater_density.clamp(0.3, 1.0))
+                },
+                palette: tinted(TerrainPalette::moon(), r.color, 0.8),
+                ..Self::moon(seed)
+            },
+            WorldKind::Lava => Self {
+                shape: PlanetShape {
+                    // Resurfaced: few craters, broad young lava plains, low massifs.
+                    maria: 0.6,
+                    lava_basins: 1.0,
+                    crater_density: 0.15,
+                    crater_max_radius_m: 20_000.0,
+                    mountain_height_m: 2_500.0,
+                    worn: 0.3,
+                    climate: climate(250.0, 400.0, 0.0, 0.0),
+                    ..airless_shape(0.15)
+                },
+                palette: TerrainPalette {
+                    lush: [0.045, 0.040, 0.037],
+                    dry: [0.055, 0.048, 0.042],
+                    soil: [0.04, 0.034, 0.03],
+                    rock: [0.06, 0.054, 0.05],
+                    sand: [0.05, 0.045, 0.04],
+                    // Sulfur frost on the coolest ground.
+                    snow: [0.55, 0.5, 0.22],
+                    dark: [0.025, 0.022, 0.02],
+                    mud: [0.03, 0.025, 0.022],
+                    regolith: 0.2,
+                    snow_below_c: -300.0,
+                    lava_glow: r.lava_glow_nits,
+                    ground_material: "rock".into(),
+                    bare_material: "rock".into(),
+                    ..TerrainPalette::moon()
+                },
+                rocks: RockField {
+                    color: [0.05, 0.045, 0.04],
+                    ..RockField::mars()
+                },
+                ..Self::moon(seed)
+            },
+            WorldKind::Desert | WorldKind::ColdDesert => {
+                let air = (r.pressure_bar / 0.5).clamp(0.0, 1.0);
+                Self {
+                    shape: PlanetShape {
+                        landforms: Default::default(),
+                        crater_density: r.crater_density.clamp(0.05, 0.8),
+                        crater_min_radius_m: 20.0 + 200.0 * air,
+                        erosion: 0.3 * air,
+                        worn: 0.6 + 0.3 * air,
+                        // Frost caps where it is cold enough (the palette's frost line).
+                        climate: if r.kind == WorldKind::Desert {
+                            climate(30.0, 50.0, 0.0, 0.0)
+                        } else {
+                            climate(25.0, 45.0, 0.02, 0.0)
+                        },
+                        ..PlanetShape::mars(seed)
+                    },
+                    palette: TerrainPalette {
+                        snow_below_c: if r.kind == WorldKind::Desert {
+                            -300.0
+                        } else {
+                            -60.0
+                        },
+                        ..tinted(TerrainPalette::mars(), r.color, 0.9)
+                    },
+                    ..Self::mars(seed)
+                }
+            }
+            WorldKind::Terra | WorldKind::Ocean => {
+                let (lush, dry) = plants_under(r.star_kelvin);
+                let ocean = r.kind == WorldKind::Ocean;
+                Self {
+                    shape: PlanetShape {
+                        ocean_fraction: r.sea_fraction.clamp(0.1, 0.97),
+                        // Ocean worlds: island chains rather than continents.
+                        continent_scale_m: if ocean { 1_400_000.0 } else { 3_200_000.0 },
+                        climate: climate(15.0, 37.0, if ocean { 0.75 } else { 0.58 }, 1.0),
+                        ..PlanetShape::earthlike(seed)
+                    },
+                    palette: TerrainPalette {
+                        lush,
+                        dry,
+                        night_lights: 0.0,
+                        ..TerrainPalette::earth()
+                    },
+                    ..Self::earthlike(seed)
+                }
+            }
+            WorldKind::Ice => Self {
+                shape: PlanetShape {
+                    // Ice plains: smooth, softly cratered, low ridged uplands.
+                    crater_density: 0.25,
+                    crater_max_radius_m: 30_000.0,
+                    maria: 0.0,
+                    lava_basins: 0.0,
+                    mountain_height_m: 1_200.0,
+                    plateau_height_m: 800.0,
+                    worn: 0.7,
+                    climate: climate(15.0, 40.0, 0.3, 0.0),
+                    ..airless_shape(0.25)
+                },
+                palette: TerrainPalette {
+                    lush: [0.78, 0.8, 0.84],
+                    dry: [0.72, 0.74, 0.78],
+                    soil: [0.55, 0.56, 0.6],
+                    rock: [0.32, 0.35, 0.4],
+                    sand: [0.7, 0.72, 0.76],
+                    snow: [0.86, 0.89, 0.93],
+                    dark: [0.42, 0.36, 0.33],
+                    mud: [0.5, 0.5, 0.52],
+                    regolith: 0.4,
+                    snow_below_c: -2.0,
+                    rock_slope: 0.35,
+                    ground_material: "snow".into(),
+                    bare_material: "ice".into(),
+                    ..TerrainPalette::moon()
+                },
+                rocks: RockField::default(),
+                ..Self::moon(seed)
+            },
+            WorldKind::Hazy => Self {
+                shape: PlanetShape {
+                    ocean_fraction: r.sea_fraction.clamp(0.03, 0.3),
+                    mountain_height_m: 800.0,
+                    plateau_height_m: 300.0,
+                    erosion: 0.6,
+                    climate: Climate {
+                        // Methane rain carves channels; the land stays below every frost line.
+                        equator_c: t_c + 2.0,
+                        pole_c: t_c - 4.0,
+                        lapse_c_per_m: 0.001,
+                        wetness: 0.2,
+                        circulation: 0.5,
+                    },
+                    rivers: true,
+                    ..PlanetShape::earthlike(seed)
+                },
+                palette: TerrainPalette {
+                    // Organic sand: the dunes are dark, the uplands paler orange-brown.
+                    lush: [0.16, 0.1, 0.05],
+                    dry: [0.2, 0.13, 0.06],
+                    soil: [0.12, 0.08, 0.045],
+                    rock: [0.22, 0.17, 0.12],
+                    sand: [0.07, 0.05, 0.035],
+                    snow: [0.6, 0.55, 0.45],
+                    dark: [0.05, 0.04, 0.03],
+                    ocean: [0.003, 0.003, 0.004],
+                    mud: [0.06, 0.04, 0.025],
+                    vegetation: false,
+                    regolith: 0.0,
+                    night_lights: 0.0,
+                    snow_below_c: -300.0,
+                    rock_slope: 0.3,
+                    ground_material: "sand".into(),
+                    bare_material: "dirt".into(),
+                    lava_glow: 0.0,
+                },
+                ..Self::earthlike(seed)
+            },
+        };
+        t.shape.radius_m = r.radius_m;
+        // Seas show from afar; up close the water module draws them where there is one.
+        t.ocean_surface = t.shape.ocean;
+        t
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use engine_core::math::DVec3;
+
+    #[test]
+    fn every_kind_makes_a_terrain_of_its_own_size() {
+        let kinds = [
+            WorldKind::Airless,
+            WorldKind::Lava,
+            WorldKind::Desert,
+            WorldKind::Terra,
+            WorldKind::Ocean,
+            WorldKind::ColdDesert,
+            WorldKind::Ice,
+            WorldKind::Hazy,
+        ];
+        for kind in kinds {
+            let r = WorldRecipe {
+                kind,
+                radius_m: 5_000_000.0,
+                sea_fraction: 0.7,
+                temperature_k: 290.0,
+                ..Default::default()
+            };
+            let t = PlanetTerrain::world(&r);
+            assert_eq!(t.shape.radius_m, 5_000_000.0, "{kind:?}");
+            let wet = matches!(kind, WorldKind::Terra | WorldKind::Ocean | WorldKind::Hazy);
+            assert_eq!(t.shape.ocean, wet, "{kind:?}");
+            assert_eq!(t.palette.night_lights, 0.0, "{kind:?}: nobody lives there");
+            // The ground is solid where it is sampled.
+            let s = t
+                .shape
+                .sample_with(DVec3::new(0.3, 0.5, 0.8).normalize(), 100.0, None);
+            assert!(s.height.is_finite(), "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn plants_darken_under_red_dwarfs() {
+        let (sun, _) = plants_under(5772.0);
+        let (red, _) = plants_under(3050.0);
+        assert!(
+            sun[1] > 0.15 && red.iter().all(|&c| c < 0.03),
+            "{sun:?} {red:?}"
+        );
+        let luma = |c: [f32; 3]| 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
+        assert!(luma(plants_under(6600.0).0) > luma(red));
+    }
+
+    #[test]
+    fn lava_glows_only_on_lava_worlds() {
+        let lava = PlanetTerrain::world(&WorldRecipe {
+            kind: WorldKind::Lava,
+            temperature_k: 1500.0,
+            lava_glow_nits: 5000.0,
+            ..Default::default()
+        });
+        assert_eq!(lava.palette.lava_glow, 5000.0);
+        let desert = PlanetTerrain::world(&WorldRecipe {
+            kind: WorldKind::Desert,
+            lava_glow_nits: 5000.0,
+            ..Default::default()
+        });
+        assert_eq!(desert.palette.lava_glow, 0.0);
+    }
+}

@@ -11,7 +11,8 @@ use engine_core::time::TimeSource;
 use engine_render::prelude::*;
 use engine_render::{RenderDisabled, capture_now};
 use engine_terrain::{
-    FlatPad, OverlayPaint, PathWear, PlanetTerrain, TerrainPlugin, WornGround, demo,
+    FlatPad, OverlayPaint, PathWear, PlanetTerrain, TerrainPlugin, WorldKind, WorldRecipe,
+    WornGround, demo,
 };
 use engine_world::{PrecipitationKind, SimulationFocus, SurfaceLayers, WeatherState};
 
@@ -20,6 +21,73 @@ enum World3 {
     Earth,
     Moon,
     Mars,
+    /// A planet of another star made from a recipe of this kind ([`exo_recipe`]).
+    Exo(WorldKind),
+}
+
+/// A planet of each kind, as the space module's planets of the nearby stars make them.
+fn exo_recipe(kind: WorldKind) -> WorldRecipe {
+    let r = WorldRecipe {
+        kind,
+        seed: 11,
+        radius_m: 6_000_000.0,
+        ..Default::default()
+    };
+    match kind {
+        WorldKind::Airless => WorldRecipe {
+            temperature_k: 330.0,
+            crater_density: 0.9,
+            ..r
+        },
+        WorldKind::Lava => WorldRecipe {
+            temperature_k: 1500.0,
+            color: [0.09, 0.075, 0.07],
+            // A 1575 K black body's luminance (engine_space::look::black_body_luminance).
+            lava_glow_nits: 12_000.0,
+            ..r
+        },
+        WorldKind::Desert => WorldRecipe {
+            temperature_k: 600.0,
+            pressure_bar: 0.05,
+            crater_density: 0.5,
+            color: [0.62, 0.42, 0.26],
+            ..r
+        },
+        WorldKind::Terra => WorldRecipe {
+            temperature_k: 290.0,
+            pressure_bar: 1.0,
+            sea_fraction: 0.5,
+            star_kelvin: 5260.0,
+            ..r
+        },
+        WorldKind::Ocean => WorldRecipe {
+            temperature_k: 295.0,
+            pressure_bar: 1.5,
+            sea_fraction: 0.85,
+            star_kelvin: 3050.0,
+            ..r
+        },
+        WorldKind::ColdDesert => WorldRecipe {
+            temperature_k: 220.0,
+            pressure_bar: 0.6,
+            crater_density: 0.1,
+            color: [0.58, 0.44, 0.36],
+            ..r
+        },
+        WorldKind::Ice => WorldRecipe {
+            temperature_k: 160.0,
+            pressure_bar: 0.0,
+            color: [0.84, 0.87, 0.92],
+            ..r
+        },
+        WorldKind::Hazy => WorldRecipe {
+            temperature_k: 95.0,
+            pressure_bar: 1.4,
+            sea_fraction: 0.15,
+            color: [0.78, 0.52, 0.24],
+            ..r
+        },
+    }
 }
 
 #[derive(Clone, Copy, Default)]
@@ -725,6 +793,85 @@ fn views() -> Vec<View> {
             fov: 50.0,
             ..BASE
         },
+        // Planets of other stars, one of each kind, from the ground.
+        View {
+            name: "exo_lava",
+            world: World3::Exo(WorldKind::Lava),
+            eye_ll: Some([4.0, 20.0, 40.0]),
+            target_ll: Some([4.6, 21.0, 0.0]),
+            sun_ll: Some([10.0, 40.0]),
+            exposure: Exposure::Manual { ev100: 14.0 },
+            ..BASE
+        },
+        View {
+            name: "exo_lava_night",
+            world: World3::Exo(WorldKind::Lava),
+            eye_ll: Some([4.0, 20.0, 400.0]),
+            target_ll: Some([4.8, 21.2, 0.0]),
+            sun_ll: Some([0.0, 200.0]),
+            exposure: Exposure::Manual { ev100: 13.0 },
+            ..BASE
+        },
+        View {
+            name: "exo_airless",
+            world: World3::Exo(WorldKind::Airless),
+            eye_ll: Some([10.0, 30.0, 25.0]),
+            target_ll: Some([10.3, 30.6, 0.0]),
+            sun_ll: Some([0.0, 75.0]),
+            exposure: Exposure::Manual { ev100: 14.0 },
+            ..BASE
+        },
+        View {
+            name: "exo_desert",
+            world: World3::Exo(WorldKind::Desert),
+            eye_ll: Some([12.0, 40.0, 30.0]),
+            target_ll: Some([12.3, 40.6, 0.0]),
+            sun_ll: Some([20.0, 80.0]),
+            exposure: Exposure::Manual { ev100: 14.5 },
+            ..BASE
+        },
+        View {
+            name: "exo_terra",
+            world: World3::Exo(WorldKind::Terra),
+            eye_ll: Some([45.0, 10.0, 300.0]),
+            target_ll: Some([45.3, 10.6, 0.0]),
+            sun_ll: Some([10.0, 50.0]),
+            ..BASE
+        },
+        View {
+            name: "exo_ocean_red_dwarf",
+            world: World3::Exo(WorldKind::Ocean),
+            eye_ll: Some([8.0, 60.0, 200.0]),
+            target_ll: Some([8.3, 60.6, 0.0]),
+            sun_ll: Some([5.0, 100.0]),
+            ..BASE
+        },
+        View {
+            name: "exo_cold_desert",
+            world: World3::Exo(WorldKind::ColdDesert),
+            eye_ll: Some([55.0, 0.0, 60.0]),
+            target_ll: Some([55.5, 1.0, 0.0]),
+            sun_ll: Some([20.0, 40.0]),
+            exposure: Exposure::Manual { ev100: 13.5 },
+            ..BASE
+        },
+        View {
+            name: "exo_ice",
+            world: World3::Exo(WorldKind::Ice),
+            eye_ll: Some([30.0, 50.0, 30.0]),
+            target_ll: Some([30.3, 50.6, 0.0]),
+            sun_ll: Some([10.0, 90.0]),
+            exposure: Exposure::Manual { ev100: 14.0 },
+            ..BASE
+        },
+        View {
+            name: "exo_hazy",
+            world: World3::Exo(WorldKind::Hazy),
+            eye_ll: Some([10.0, 80.0, 200.0]),
+            target_ll: Some([10.4, 80.8, 0.0]),
+            sun_ll: Some([20.0, 120.0]),
+            ..BASE
+        },
         View {
             name: "mars_orbit",
             world: World3::Mars,
@@ -801,7 +948,11 @@ fn views() -> Vec<View> {
 /// A point `above` meters over the ground at a latitude and longitude of the planet.
 fn on_ground(tf: &Transform, planet: &PlanetTerrain, [lat, lon, above]: [f64; 3]) -> DVec3 {
     let dir = engine_terrain::shape::dir_from_lat_lon(lat, lon);
-    tf.transform_point(dir * (planet.shape.radius_m + planet.shape.height(dir) + above))
+    let mut ground = planet.shape.height(dir);
+    if planet.shape.ocean {
+        ground = ground.max(0.0);
+    }
+    tf.transform_point(dir * (planet.shape.radius_m + ground + above))
 }
 
 fn painted_height(x: f64, z: f64) -> f64 {
@@ -974,6 +1125,7 @@ fn build(view: &View, size: (u32, u32)) -> App {
         World3::Earth => PlanetTerrain::earthlike(7),
         World3::Moon => PlanetTerrain::moon(3),
         World3::Mars => PlanetTerrain::mars(5),
+        World3::Exo(kind) => PlanetTerrain::world(&exo_recipe(kind)),
     }
     .with_pad(pad);
     // `NO_LIGHTS=1`: the night side without towns and cities, for a before picture.
@@ -1014,6 +1166,31 @@ fn build(view: &View, size: (u32, u32)) -> App {
                 };
             }
             World3::Moon => atmo.enabled = false,
+            // Roughly the skies the space module gives them (it isn't loaded here).
+            World3::Exo(kind) => {
+                let base = match kind {
+                    WorldKind::Terra | WorldKind::Ocean => Some(Atmosphere::earth()),
+                    WorldKind::Desert | WorldKind::ColdDesert => Some(Atmosphere {
+                        density_scale: 3.0,
+                        ..Atmosphere::mars()
+                    }),
+                    WorldKind::Hazy => Some(Atmosphere {
+                        density_scale: 6.0,
+                        ..Atmosphere::mars()
+                    }),
+                    _ => None,
+                };
+                match base {
+                    Some(a) => {
+                        *atmo = Atmosphere {
+                            planet_center: tf.translation,
+                            planet_radius: planet.shape.radius_m,
+                            ..a
+                        }
+                    }
+                    None => atmo.enabled = false,
+                }
+            }
         }
     }
     app.world.spawn((tf, planet));
@@ -1047,7 +1224,7 @@ fn build(view: &View, size: (u32, u32)) -> App {
             // is, so from a sunlit orbit it glows over the night side too.)
             World3::Earth if view.name.starts_with("earth_night") => 0.0,
             World3::Earth => 0.00002,
-            World3::Moon | World3::Mars => 0.0,
+            World3::Moon | World3::Mars | World3::Exo(_) => 0.0,
         };
     }
     match view.ground {
@@ -1143,15 +1320,36 @@ fn main() {
         let mut eye = place(from, view.above_ground);
         let mut target = place(toward, view.target_above_ground);
         let mut up = Vec3::Y;
-        if let Some(e) = view.eye_ll {
+        if let Some(mut e) = view.eye_ll {
             let mut q = app.world.query::<(&Transform, &PlanetTerrain)>();
             let (tf, planet) = q.iter(&app.world).next().expect("planet");
+            let mut t_ll = view.target_ll;
+            // A made-up world with seas: move the view to the nearest land.
+            if matches!(view.world, World3::Exo(_)) && planet.shape.ocean {
+                let land = |lat: f64, lon: f64| {
+                    planet
+                        .shape
+                        .height(engine_terrain::shape::dir_from_lat_lon(lat, lon))
+                        > 40.0
+                };
+                let shift = (0..40)
+                    .flat_map(|r| {
+                        (0..(8 * r).max(1)).map(move |k| {
+                            let a = k as f64 / (8 * r).max(1) as f64 * std::f64::consts::TAU;
+                            (r as f64 * 0.5 * a.cos(), r as f64 * 0.5 * a.sin())
+                        })
+                    })
+                    .find(|&(dl, dn)| land(e[0] + dl, e[1] + dn));
+                if let Some((dl, dn)) = shift {
+                    e[0] += dl;
+                    e[1] += dn;
+                    t_ll = t_ll.map(|t| [t[0] + dl, t[1] + dn, t[2]]);
+                }
+            }
             eye = on_ground(tf, planet, e);
-            target = view
-                .target_ll
-                .map_or(tf.translation, |t| on_ground(tf, planet, t));
+            target = t_ll.map_or(tf.translation, |t| on_ground(tf, planet, t));
             // Level with the ground below, or north up from orbit.
-            up = match view.target_ll {
+            up = match t_ll {
                 Some(_) => (eye - tf.translation).normalize().as_vec3(),
                 None => (tf.rotation.as_dquat() * DVec3::Y).as_vec3(),
             };
