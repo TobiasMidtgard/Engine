@@ -763,13 +763,20 @@ fn readouts(
             Some(c) => {
                 out.set("Speed", speed_text(c.speed));
                 out.set("Altitude", distance_text(c.altitude_m));
-                out.set(
-                    "Cruise",
-                    match c.target {
-                        Some(_) => "homing on the body ahead (J drops out)".to_string(),
-                        None => "aim at a planet or star to home on it (J drops out)".to_string(),
-                    },
-                );
+                match c.target {
+                    Some(_) => {
+                        let name = c.target_name.as_deref().unwrap_or("the body ahead");
+                        out.set(
+                            "Target",
+                            format!("{name}, {}", distance_text(c.target_distance_m)),
+                        );
+                        out.set("Cruise", "homing, slows by itself (J drops out)");
+                    }
+                    None => out.set(
+                        "Cruise",
+                        "aim at a planet or star to home on it (J drops out)",
+                    ),
+                }
                 out.set("Lever", format!("{:.0}%  W/S", d.lever * 100.0));
                 continue;
             }

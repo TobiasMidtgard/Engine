@@ -63,6 +63,12 @@ pub struct Cruise {
     pub heading: DVec3,
     /// The body it homes on (index in `Gravity::bodies`), if any.
     pub target: Option<usize>,
+    /// The target's name, from the `space.bodies` API when a space module runs.
+    pub target_name: Option<String>,
+    /// How far the arrival point over the target is, meters.
+    pub target_distance_m: f64,
+    /// Just picked a target: look up its name.
+    naming: bool,
     /// The arrival point from the target's center, meters.
     side: DVec3,
     /// The target's radius and where it was: `Gravity::bodies` is reordered as the frame
@@ -138,6 +144,9 @@ pub fn engage(world: &mut World, ship: Entity) -> Result<(), String> {
         altitude_m: h,
         heading,
         target: None,
+        target_name: None,
+        target_distance_m: 0.0,
+        naming: false,
         side: DVec3::X,
         target_radius: 0.0,
         target_at: DVec3::ZERO,
@@ -198,6 +207,7 @@ fn home(gravity: &Gravity, p: DVec3, forward: DVec3, cruise: &mut Cruise) -> (DV
         });
         if !keep {
             cruise.target = None;
+            cruise.target_name = None;
         }
     }
     if cruise.target.is_none() {
@@ -218,6 +228,8 @@ fn home(gravity: &Gravity, p: DVec3, forward: DVec3, cruise: &mut Cruise) -> (DV
         if let Some((i, _, to)) = pick {
             cruise.target = Some(i);
             cruise.target_radius = bodies[i].radius;
+            cruise.target_name = None;
+            cruise.naming = true;
             // Beside it on the side the nose points to (any side when dead on): where the
             // line from here touches the sphere `ARRIVE_ALTITUDE_M` over it, so the way in
             // skims that height and never dips below.
@@ -275,6 +287,10 @@ pub(crate) fn cruise_system(
         let forward = t.forward().as_dvec3();
         let (heading, to_aim) = home(&gravity, t.translation, forward, &mut cruise);
         cruise.heading = heading;
+        cruise.target_distance_m = to_aim.unwrap_or(0.0);
+        if std::mem::take(&mut cruise.naming) {
+            commands.queue(move |world: &mut World| name_target(world, e));
+        }
 
         // Speed: the gravity well's limit (homing on a target, the distance to the arrival
         // point: the way there skims past the body), eased toward, never past it.
@@ -331,6 +347,36 @@ pub(crate) fn cruise_system(
         if arrived || (h < DROP_ALTITUDE_M && velocity.dot(up) < 0.0) {
             commands.queue(move |world: &mut World| drop_out(world, e));
         }
+    }
+}
+
+/// Names the cruise target of `ship`: the body of the target's radius nearest where it was,
+/// from the space module's `space.bodies` API (no name without one).
+fn name_target(world: &mut World, ship: Entity) {
+    let Some((radius, at)) = world
+        .get::<Cruise>(ship)
+        .filter(|c| c.target.is_some())
+        .map(|c| (c.target_radius, c.target_at))
+    else {
+        return;
+    };
+    let Ok(out) = engine_core::registry::call_api(
+        world,
+        "space.bodies",
+        serde_json::json!({"from": at.to_array()}),
+    ) else {
+        return;
+    };
+    let name = out["bodies"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|b| b["radius_m"].as_f64() == Some(radius))
+        .filter_map(|b| Some((b["name"].as_str()?, b["distance_m"].as_f64()?)))
+        .min_by(|a, b| a.1.total_cmp(&b.1))
+        .map(|(n, _)| n.to_string());
+    if let Some(mut c) = world.get_mut::<Cruise>(ship) {
+        c.target_name = name;
     }
 }
 

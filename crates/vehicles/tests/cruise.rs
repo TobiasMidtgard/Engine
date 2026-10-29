@@ -184,3 +184,25 @@ fn comes_home_and_drops_out_over_the_ground() {
     let v = velocity(&app, ship).linear.length();
     assert!(v <= 1_500.5, "{v:.0} m/s");
 }
+
+/// The target is named on the gauges when a space module answers `space.bodies`.
+#[test]
+fn names_the_body_it_homes_on() {
+    let mut app = space_app();
+    app.register_api("space.bodies", "test stand-in", "{}", |_, _| {
+        Ok(serde_json::json!({"bodies": [
+            {"name": "Earth", "radius_m": EARTH_R, "distance_m": 1.0e7},
+            {"name": "Alpha Centauri A", "radius_m": STAR_R, "distance_m": 0.0},
+        ]}))
+    });
+    let ship = ship_at(&mut app, 20_000.0, 900.0);
+    cruise::engage(&mut app.world, ship).expect("engage");
+    run_for(&mut app, 0.5);
+    let c = app.world.get::<Cruise>(ship).expect("cruising");
+    assert_eq!(c.target_name.as_deref(), Some("Alpha Centauri A"));
+    assert!(
+        (c.target_distance_m - STAR_D).abs() < STAR_D * 0.01,
+        "{:.3e} m to go",
+        c.target_distance_m
+    );
+}
