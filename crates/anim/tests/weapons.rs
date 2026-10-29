@@ -195,6 +195,66 @@ fn a_raised_shield_takes_the_overhead() {
     );
 }
 
+/// A blade the shield takes bounces back up its arc after the hitstop instead of cutting on
+/// through the shield, and the move ends with the rebound; the shield-bearer shakes side to
+/// side through the hitstop.
+#[test]
+fn a_blocked_blade_bounces_back_and_the_struck_body_shakes() {
+    use engine_anim::build::weapons::{BLADE_AXIS, GRIP, SWORD_BLADE};
+    let (mut app, fighter, dummy) = duel("sword_shield", 1.3, true);
+    app.world
+        .get_mut::<Animator>(fighter)
+        .unwrap()
+        .trigger("attack_heavy");
+    let tip = |app: &App| {
+        let a = app.world.get::<Animator>(fighter).unwrap();
+        let gt = app.world.get::<GlobalTransform>(fighter).unwrap();
+        let hand = a.skeleton.index_of("hand_r").unwrap();
+        let p = a.model[hand].transform_point(GRIP + BLADE_AXIS * SWORD_BLADE[1]);
+        engine_anim::ik::to_world(gt, p).y
+    };
+    let (mut contact, mut at_contact, mut highest_after) = (None::<f32>, 0.0, f64::MIN);
+    let (mut recoiled, mut over) = (false, None::<f32>);
+    let mut hips_x: Vec<f32> = Vec::new();
+    for frame in 1..=(2.0 / DT) as usize {
+        app.update();
+        let t = frame as f32 * DT;
+        let a = app.world.get::<Attacker>(fighter).unwrap();
+        if contact.is_none() && a.blocked > 0 {
+            contact = Some(t);
+            at_contact = tip(&app);
+            recoiled = a.recoil > 0.0;
+        } else if contact.is_some_and(|c| t - c < 0.6) {
+            highest_after = highest_after.max(tip(&app));
+        }
+        if contact.is_some() && over.is_none() && a.current.is_none() {
+            over = Some(t);
+        }
+        let d = app.world.get::<Animator>(dummy).unwrap();
+        if contact.is_some() && d.frozen() > 0.0 {
+            hips_x.push(d.local[d.skeleton.index_of("hips").unwrap()].t.x);
+        }
+    }
+    let contact = contact.expect("the overhead never met the shield");
+    assert!(recoiled, "no rebound published at contact");
+    assert!(
+        highest_after > at_contact + 0.12,
+        "the blade went on down: tip {at_contact:.2} m at contact, at most {highest_after:.2} m after"
+    );
+    let over = over.expect("the move never ended") - contact;
+    assert!(
+        (0.45..0.8).contains(&over),
+        "ended {over:.2} s after contact"
+    );
+    let spread = hips_x.iter().cloned().fold(f32::MIN, f32::max)
+        - hips_x.iter().cloned().fold(f32::MAX, f32::min);
+    assert!(
+        hips_x.len() >= 3 && spread > 0.008,
+        "hips shook {spread} m over {} frames",
+        hips_x.len()
+    );
+}
+
 #[test]
 fn a_great_sword_sweeps_rises_and_lands_its_overhead_through_its_armor() {
     let (mut app, fighter, _) = duel("greatsword", 2.0, false);
@@ -319,8 +379,9 @@ fn a_bow_is_drawn_to_the_jaw_turned_on_the_target_and_loosed() {
 }
 
 /// The paddock's weapons yard plays its script: the swordsman's combo cuts twice and thrusts,
-/// its overhead lands on the partner's raised shield, the slash, bash and thrust land; the
-/// partner's own combo meets the swordsman's shield; the great sword's sweep, rising cut and
+/// its overhead bounces off the partner's raised shield and the partner cuts back while it
+/// recovers, then a slash, a bash and a thrust land; the partner's cut bounces off the
+/// swordsman's shield and the swordsman answers; the great sword's sweep, rising cut and
 /// overhead land; and the archer's arrows stick in the butt's face.
 #[test]
 fn the_paddock_weapons_yard_plays_out() {
@@ -392,18 +453,16 @@ fn the_paddock_weapons_yard_plays_out() {
             ("sword_backhand", hit),
             ("sword_thrust", hit),
             ("sword_overhead", blocked),
-            ("sword_slash", blocked),
-            ("shield_bash", blocked),
+            ("sword_slash", hit),
+            ("shield_bash", hit),
             ("sword_thrust", hit),
+            ("sword_slash", hit),
         ])
     );
+    // Each cuts back while the other's blade bounces off its shield.
     assert_eq!(
         played("partner"),
-        named(&[
-            ("sword_slash", blocked),
-            ("sword_backhand", blocked),
-            ("sword_overhead", blocked),
-        ])
+        named(&[("sword_slash", hit), ("sword_slash", blocked)])
     );
     assert_eq!(
         played("greatsword"),

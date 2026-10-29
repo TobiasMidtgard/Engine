@@ -823,6 +823,10 @@ pub struct Attacker {
     /// Strikes of the current move whose hit window passed without landing (out of reach,
     /// or the target's head moved).
     pub missed: u32,
+    /// Seconds left of a rebound: a weapon strike that landed on a guard bounces back up its
+    /// arc and the move ends with it; no new move starts until then (the defender's opening
+    /// for a guard counter).
+    pub recoil: f32,
     /// The newest press waiting, and how long it has waited.
     #[serde(skip)]
     pub buffered: Option<(String, f32)>,
@@ -865,6 +869,7 @@ impl Default for Attacker {
             hits: 0,
             blocked: 0,
             missed: 0,
+            recoil: 0.0,
             buffered: None,
             follow: None,
             landed: Vec::new(),
@@ -891,6 +896,17 @@ const FACE_ABOVE_HEAD: f64 = 0.07;
 
 /// How long before its hit window a strike's aim stops following the target, s.
 const COMMIT_SECS: f32 = 0.2;
+
+/// A blocked weapon's rebound: how fast the swing runs back (times its own speed), for how
+/// long (s), and the fade back to the stance after (s).
+const REBOUND_RATE: f32 = 1.4;
+const REBOUND_SECS: f32 = 0.22;
+const REBOUND_FADE: f32 = 0.3;
+
+/// How far the struck body shakes side to side in hitstop, per second of hitstop (m/s), and
+/// at most (m).
+const SHAKE_PER_HITSTOP: f32 = 0.12;
+const SHAKE_MAX: f32 = 0.025;
 
 /// How far to its own right of the spine a target's liver is, meters.
 const LIVER_SIDE: f64 = 0.1;
@@ -1217,8 +1233,15 @@ pub(crate) fn run_attacks(
         let Some(moves) = sets.0.get(&attacker.set) else {
             continue;
         };
-        // Advance the move playing; at its end it is over (the overlay fades itself).
-        if let Some(name) = attacker.current.clone() {
+        // Advance the move playing; at its end it is over (the overlay fades itself). A
+        // rebounding move is over when the rebound is.
+        if attacker.recoil > 0.0 {
+            attacker.recoil -= dt;
+            if attacker.recoil <= 0.0 {
+                attacker.recoil = 0.0;
+                attacker.current = None;
+            }
+        } else if let Some(name) = attacker.current.clone() {
             attacker.time += dt;
             let over = moves
                 .get(&name)
@@ -1253,6 +1276,7 @@ pub(crate) fn run_attacks(
         let pressed_next = attacker
             .buffered
             .as_ref()
+            .filter(|_| attacker.recoil <= 0.0)
             .and_then(|(input, _)| match playing {
                 None => neutral(input),
                 Some(m) if moves.is_approach(&m.name) => None,
@@ -1321,6 +1345,11 @@ pub(crate) fn run_attacks(
         let Some(m) = attacker.current.as_ref().and_then(|c| moves.get(c)) else {
             continue;
         };
+        if attacker.recoil > 0.0 {
+            attacker.phase = AttackPhase::Recovery;
+            attacker.swept = None;
+            continue;
+        }
         let t = attacker.time;
         let first_hit = m
             .windows
@@ -1501,6 +1530,12 @@ pub(crate) fn run_attacks(
                     };
                     let (share, stop, pushback) = if blocked_at.is_some() {
                         attacker.blocked += 1;
+                        // A weapon bounces off the guard: the swing runs back up its arc
+                        // after the hitstop, and the move ends with it.
+                        if striker.is_some() {
+                            attacker.recoil = REBOUND_SECS + REBOUND_FADE;
+                            animator.rebound(REBOUND_RATE, REBOUND_SECS, REBOUND_FADE);
+                        }
                         (
                             (block.damage, block.impulse),
                             block.hitstop,
@@ -1553,6 +1588,9 @@ pub(crate) fn run_attacks(
         for e in [l.attacker, l.target] {
             if let Ok((mut a, reaction)) = animators.get_mut(e) {
                 a.freeze_for(l.hitstop);
+                if e == l.target {
+                    a.shake_for((l.hitstop * SHAKE_PER_HITSTOP).min(SHAKE_MAX));
+                }
                 if e == l.attacker
                     && l.pushback != Vec3::ZERO
                     && let Some(mut r) = reaction

@@ -178,6 +178,10 @@ pub struct Animator {
     overlay: Option<Overlay>,
     /// Seconds the pose holds still (hitstop).
     freeze: f32,
+    /// Side-to-side shake through the freeze: amplitude (m) and the freeze it tapers over (s).
+    shake: (f32, f32),
+    /// Which side the shake is on this frame.
+    shake_side: bool,
 }
 
 /// A clip playing over an [`Animator`]'s graph, from [`Animator::play_over`].
@@ -192,6 +196,9 @@ pub struct Overlay {
     from: Option<Vec<Xf>>,
     /// Stopped early: (seconds since, fade length).
     stopping: Option<(f32, f32)>,
+    /// Playing backwards (a blade bouncing back off a shield): rate (clip seconds per
+    /// second) and seconds left, then it fades out.
+    rewind: Option<(f32, f32)>,
 }
 
 impl Animator {
@@ -221,6 +228,8 @@ impl Animator {
             fresh: false,
             overlay: None,
             freeze: 0.0,
+            shake: (0.0, 0.0),
+            shake_side: false,
         }
     }
 
@@ -312,7 +321,17 @@ impl Animator {
             fade_out: fade_out.max(0.0),
             from,
             stopping: None,
+            rewind: None,
         });
+    }
+
+    /// Play the overlay backwards from where it is, at `rate` times its speed for `secs`
+    /// seconds, then fade it out over `fade` (a blocked swing bouncing back up its arc).
+    pub fn rebound(&mut self, rate: f32, secs: f32, fade: f32) {
+        if let Some(o) = &mut self.overlay {
+            o.rewind = Some((rate.max(0.0), secs.max(0.0)));
+            o.fade_out = fade.max(1e-3);
+        }
     }
 
     /// Fade the overlay out over `fade` seconds from now.
@@ -335,6 +354,14 @@ impl Animator {
         self.freeze = self.freeze.max(secs);
     }
 
+    /// Shake the body side to side by `amplitude` meters through the freeze under way,
+    /// tapering to nothing as it ends (the struck one in hitstop).
+    pub fn shake_for(&mut self, amplitude: f32) {
+        if self.freeze > 0.0 {
+            self.shake = (amplitude.max(self.shake.0), self.freeze);
+        }
+    }
+
     /// Seconds of freeze left.
     pub fn frozen(&self) -> f32 {
         self.freeze
@@ -347,7 +374,16 @@ impl Animator {
         };
         let prev = o.time;
         let d = o.clip.duration.max(1e-4);
-        o.time = (o.time + dt).min(d);
+        match &mut o.rewind {
+            Some((rate, left)) if *left > 0.0 => {
+                o.time = (o.time - dt * *rate).max(0.0);
+                *left -= dt;
+                if *left <= 0.0 {
+                    o.stopping = Some((0.0, o.fade_out));
+                }
+            }
+            _ => o.time = (o.time + dt).min(d),
+        }
         if o.time > prev {
             for e in o.clip.events_between(prev, o.time) {
                 self.events.push(FiredEvent {
@@ -464,6 +500,18 @@ impl Animator {
         self.root_delta = Vec3::ZERO;
         if self.base.len() == self.local.len() {
             self.local.clone_from(&self.base);
+        }
+        // The struck body shakes side to side (Sakurai), less as the freeze runs out.
+        let (amplitude, length) = self.shake;
+        if amplitude > 0.0 {
+            if self.freeze <= 0.0 {
+                self.shake = (0.0, 0.0);
+            } else if let Some(hips) = self.skeleton.index_of("hips") {
+                self.shake_side = !self.shake_side;
+                let side = if self.shake_side { 1.0 } else { -1.0 };
+                let taper = (self.freeze / length.max(1e-3)).clamp(0.0, 1.0);
+                self.local[hips].t.x += amplitude * taper * side;
+            }
         }
     }
 }
