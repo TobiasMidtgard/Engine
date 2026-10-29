@@ -44,8 +44,10 @@ pub const N: usize = 256;
 /// Water depth the waves feel, meters: past a wavelength or so it hardly matters, and the
 /// ripple grid's waves are a few meters long at most.
 pub const DEPTH_M: f32 = 2.5;
-/// Damps the shortest waves the grid holds (two cells), m²/s: they'd ring on as noise.
-pub const VISCOSITY: f32 = 0.008;
+/// Damps the shortest waves the grid holds (two cells), m²/s: they'd ring on as noise. (Fades
+/// them as ν·k²: half a meter long in about 2 s, the meter-long waves of a wake in about 8 s.
+/// Water's own 10⁻⁶ would keep everything; 0.008 took a wake's short waves in 3 s.)
+pub const VISCOSITY: f32 = 0.003;
 /// Surface tension over density, m³/s².
 pub const TENSION: f32 = 7.4e-5;
 /// Longest step the surface takes at once, seconds (the evolution is exact for any step; the

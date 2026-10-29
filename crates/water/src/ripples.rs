@@ -42,6 +42,13 @@ const FOAM_STILL: f32 = 2e-3;
 /// on fresh water bursts in about 2.5 s, the bubble cloud under it lingers about four times
 /// as long (Callaghan, Deane and Stokes 2016; wake bubble plumes, Trevorrow et al. 1994).
 const BUBBLE_LIFE_S: f32 = 10.0;
+/// The dispersive surface's crests break white from this slope on, fully at `BREAK_FULL`
+/// (Stokes's steepest wave turns its crest at 30°, a slope of 0.58; real crests spill well
+/// before, and the grid's quarter-meter cells round the sharpest off: Barthelemy et al. 2018).
+const BREAK_SLOPE: f32 = 0.45;
+const BREAK_FULL: f32 = 0.7;
+/// Foam a fully breaking crest whips up per second.
+const BREAK_FOAM: f32 = 2.0;
 /// Bubbles under this are gone.
 const BUBBLE_STILL: f32 = 0.01;
 /// How fast the bubble cloud spreads sideways, m²/s: the wake's turbulence mixes it out, so
@@ -976,6 +983,7 @@ impl RippleField {
             return;
         }
         self.apply_pending();
+        self.break_crests(dt);
         // Step the tiles where something moves and their neighbors (waves run into them);
         // carry currents along and curl them only where there are some.
         let t = self.tiles();
@@ -1039,6 +1047,44 @@ impl RippleField {
         self.settle();
         self.age_bubbles(dt);
         self.version += 1;
+    }
+
+    /// Where the dispersive surface's waves got too steep (a hull's bow wave, the crests of
+    /// its wake close behind it), their crests break: foam on them, which the grid then
+    /// carries, fades and leaves bubbles under.
+    fn break_crests(&mut self, dt: f32) {
+        let Some(s) = self.surface.heights() else {
+            return;
+        };
+        if s.cell != self.cell || s.h.len() != s.n * s.n {
+            return;
+        }
+        let (n, t) = (self.n as i64, self.tiles());
+        let d = ((s.origin - self.origin) / self.cell as f64).round();
+        let (dx, dz, sn) = (d.x as i64, d.y as i64, s.n as i64);
+        let inv = 0.5 / self.cell;
+        for sj in 1..sn - 1 {
+            for si in 1..sn - 1 {
+                let k = (sj * sn + si) as usize;
+                let gx = (s.h[k + 1] - s.h[k - 1]) * inv;
+                let gz = (s.h[k + s.n] - s.h[k - s.n]) * inv;
+                let slope2 = gx * gx + gz * gz;
+                if slope2 < BREAK_SLOPE * BREAK_SLOPE {
+                    continue;
+                }
+                let (i, j) = (si + dx, sj + dz);
+                if i < 0 || j < 0 || i >= n || j >= n {
+                    continue;
+                }
+                let idx = (j * n + i) as usize;
+                if self.speed2[idx] <= 0.0 {
+                    continue;
+                }
+                let white = ((slope2.sqrt() - BREAK_SLOPE) / (BREAK_FULL - BREAK_SLOPE)).min(1.0);
+                self.foam[idx] = (self.foam[idx] + white * BREAK_FOAM * dt).min(1.0);
+                self.foamy[(j as usize / TILE) * t + i as usize / TILE] = true;
+            }
+        }
     }
 
     /// Bubbles fill in under the foam and outlast it, spreading out as they fade: each cell
@@ -1778,6 +1824,39 @@ mod tests {
         // Two seconds at about 1 m/s.
         let centroid = sum / w;
         assert!((centroid + 2.0).abs() < 0.6, "foam at x = {centroid}");
+    }
+
+    #[test]
+    fn the_surfaces_steep_crests_break_white() {
+        use crate::surface::{Runner, SurfaceHeights};
+        let mut f = pond();
+        f.surface.claim(Runner::Cpu);
+        // A wave 2 m long: 40 cm high on the left half (slope up to 0.63), 8 cm on the right.
+        let n = f.n;
+        let k = std::f32::consts::TAU / 2.0;
+        let h = (0..n * n)
+            .map(|c| {
+                let x = f.cell_center(c % n, c / n).x as f32;
+                let a = if x < 0.0 { 0.2 } else { 0.04 };
+                a * (k * x).sin()
+            })
+            .collect();
+        f.surface.publish(SurfaceHeights {
+            origin: f.origin,
+            n,
+            cell: f.cell,
+            h,
+            phi: Vec::new(),
+        });
+        f.step(1.0 / 60.0, 0.35, 3.0);
+        let foam_on = |x0: f64, x1: f64| {
+            (0..n * n)
+                .filter(|c| (x0..x1).contains(&f.cell_center(c % n, c / n).x))
+                .map(|c| f.foam[c])
+                .fold(0.0f32, f32::max)
+        };
+        assert!(foam_on(-10.0, -2.0) > 0.005, "{}", foam_on(-10.0, -2.0));
+        assert_eq!(foam_on(2.0, 10.0), 0.0);
     }
 
     #[test]
