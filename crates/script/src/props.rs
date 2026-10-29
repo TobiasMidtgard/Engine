@@ -25,6 +25,10 @@
 //! The defaults are what the class's `props` holds after its file runs, so `math.pi / 4` and
 //! `vec3.up * 2` work (Defold reads literals only). The editor reads them in a VM of its own,
 //! once per version of the file on disk.
+//!
+//! The same reading gives the class's `signals` (each a name, its parameters as text and the
+//! comment after it: `pulled = "by: Entity", -- the arm reached the end`) and its methods, for
+//! wiring signals in the Details panel ([`declared`]).
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -108,10 +112,41 @@ impl Prop {
 
 // ----------------------------------------------------------------------------- reading
 
+/// A signal a class declares: `Lever.signals = { pulled = "by: Entity", -- doc }`.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Signal {
+    pub name: String,
+    /// Its values as written: `"by: Entity"` (may be empty).
+    pub params: String,
+    pub doc: String,
+    /// 1-based line of its entry.
+    pub line: u32,
+}
+
+/// A method of a class (for the signal wiring's method lists).
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Method {
+    pub name: String,
+    /// Its parameters as written, without `self`.
+    pub params: String,
+    /// 1-based line of `function Class:name(`, when found.
+    pub line: u32,
+    /// A hook the engine calls itself (`update`, `on_interact`, ...).
+    pub hook: bool,
+}
+
+/// What a class declares for the editor.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Declared {
+    pub props: Vec<Prop>,
+    pub signals: Vec<Signal>,
+    pub methods: Vec<Method>,
+}
+
 /// Reads the classes' props for the editor, each file once per version on disk.
 #[derive(Resource, Default)]
 pub struct PropsReader {
-    read: HashMap<String, (Stamp, Result<Vec<Prop>, String>)>,
+    read: HashMap<String, (Stamp, Result<Declared, String>)>,
 }
 
 /// A file's modified time and length.
@@ -120,22 +155,27 @@ type Stamp = Option<(SystemTime, u64)>;
 /// The props `path`'s class declares, in the order its file lists them (those it builds in
 /// code after them, by name). An error says why the file didn't load.
 pub fn of(world: &mut World, path: &str) -> Result<Vec<Prop>, String> {
+    declared(world, path).map(|d| d.props)
+}
+
+/// Everything `path`'s class declares: props, signals and methods.
+pub fn declared(world: &mut World, path: &str) -> Result<Declared, String> {
     let path = normalize(path);
     let full = crate::scripts_root(world).join(&path);
     let stamp = file_stamp(&full);
-    if let Some((s, props)) = world
+    if let Some((s, declared)) = world
         .get_resource::<PropsReader>()
         .and_then(|r| r.read.get(&path))
         && *s == stamp
     {
-        return props.clone();
+        return declared.clone();
     }
-    let props = read(world, &path);
+    let declared = read(world, &path);
     world
         .get_resource_or_insert_with(PropsReader::default)
         .read
-        .insert(path, (stamp, props.clone()));
-    props
+        .insert(path, (stamp, declared.clone()));
+    declared
 }
 
 fn file_stamp(path: &Path) -> Stamp {
@@ -144,8 +184,8 @@ fn file_stamp(path: &Path) -> Stamp {
 }
 
 /// Runs the file in a VM of its own (its top level only, as `require` would) and reads its
-/// class's `props`.
-fn read(world: &mut World, path: &str) -> Result<Vec<Prop>, String> {
+/// class's `props`, `signals` and methods.
+fn read(world: &mut World, path: &str) -> Result<Declared, String> {
     let root = crate::scripts_root(world);
     let source =
         std::fs::read_to_string(root.join(path)).map_err(|e| format!("can't read {path}: {e}"))?;
@@ -163,12 +203,90 @@ fn read(world: &mut World, path: &str) -> Result<Vec<Prop>, String> {
     let class = rt
         .class(path)
         .ok_or_else(|| format!("{path} didn't load"))?;
-    let notes = notes(&source);
-    let defaults = match class.raw_get::<Value>("props") {
-        Ok(Value::Table(t)) => t,
-        _ => return Ok(Vec::new()),
+    let props = match class.raw_get::<Value>("props") {
+        Ok(Value::Table(t)) => props_from(&t, &notes(&source, "props")),
+        _ => Vec::new(),
     };
-    Ok(props_from(&defaults, &notes))
+    let signals = match class.raw_get::<Value>("signals") {
+        Ok(Value::Table(t)) => signals_from(&t, &notes(&source, "signals")),
+        _ => Vec::new(),
+    };
+    let mut methods: Vec<Method> = class
+        .pairs::<Value, Value>()
+        .filter_map(|p| p.ok())
+        .filter_map(|(k, v)| match (k, v) {
+            (Value::String(k), Value::Function(_)) => Some(k.to_string_lossy().to_string()),
+            _ => None,
+        })
+        .filter(|name| !name.starts_with("__"))
+        .map(|name| {
+            let (params, line) = method_params(&source, &name).unwrap_or_default();
+            Method {
+                hook: crate::editing::is_hook(&name),
+                name,
+                params,
+                line,
+            }
+        })
+        .collect();
+    methods.sort_by(|a, b| (a.hook, a.line, &a.name).cmp(&(b.hook, b.line, &b.name)));
+    Ok(Declared {
+        props,
+        signals,
+        methods,
+    })
+}
+
+/// The class's `signals`, in the file's order.
+fn signals_from(table: &Table, notes: &[Note]) -> Vec<Signal> {
+    let mut out: Vec<Signal> = table
+        .pairs::<Value, Value>()
+        .filter_map(|p| p.ok())
+        .filter_map(|(k, v)| {
+            let Value::String(k) = k else { return None };
+            let name = k.to_string_lossy().to_string();
+            let params = match v {
+                Value::String(s) => s.to_string_lossy().trim().to_string(),
+                _ => String::new(),
+            };
+            let note = notes.iter().find(|n| n.name == name);
+            Some(Signal {
+                params,
+                doc: note.map(|n| n.doc.clone()).unwrap_or_default(),
+                line: note.map_or(0, |n| n.line),
+                name,
+            })
+        })
+        .collect();
+    out.sort_by(|a, b| (a.line == 0, a.line, &a.name).cmp(&(b.line == 0, b.line, &b.name)));
+    out
+}
+
+/// `function Class:name(a, b)` or `function Class.name(self, a)` in the source: the
+/// parameters after `self`, and the 1-based line.
+fn method_params(source: &str, name: &str) -> Option<(String, u32)> {
+    for (k, line) in source.lines().enumerate() {
+        let t = line.trim_start();
+        let Some(rest) = t.strip_prefix("function ") else {
+            continue;
+        };
+        let Some(open) = rest.find('(') else { continue };
+        let head = &rest[..open];
+        let colon = head.ends_with(&format!(":{name}"));
+        if !colon && !head.ends_with(&format!(".{name}")) {
+            continue;
+        }
+        let close = rest[open..].find(')').map(|c| open + c)?;
+        let mut params = rest[open + 1..close].trim();
+        if !colon {
+            params = params
+                .strip_prefix("self")
+                .map(|p| p.trim_start_matches([',', ' ']))
+                .unwrap_or(params);
+        }
+        return Some((params.to_string(), k as u32 + 1));
+    }
+    None
 }
 
 /// The table's entries as props, in the order of `notes` (the rest after them, by name).
@@ -366,13 +484,13 @@ enum Tok {
     Comment(String, bool),
 }
 
-/// The notes on `X.props = { ... }`'s entries (the first such table in the file).
-fn notes(source: &str) -> Vec<Note> {
+/// The notes on `X.<field> = { ... }`'s entries (the first such table in the file).
+fn notes(source: &str, field: &str) -> Vec<Note> {
     let toks = lex(source);
     let start = toks.windows(5).position(|w| {
         matches!(
             (&w[0].0, &w[1].0, &w[2].0, &w[3].0, &w[4].0),
-            (Tok::Name(_), Tok::Sym('.'), Tok::Name(p), Tok::Sym('='), Tok::Sym('{')) if p == "props"
+            (Tok::Name(_), Tok::Sym('.'), Tok::Name(p), Tok::Sym('='), Tok::Sym('{')) if p == field
         )
     });
     match start {
@@ -616,7 +734,7 @@ string]], -- @hide
 function Lamp:start() end
 return Lamp
 "#;
-        let n = notes(source);
+        let n = notes(source, "props");
         let names: Vec<&str> = n.iter().map(|n| n.name.as_str()).collect();
         assert_eq!(
             names,
@@ -677,7 +795,7 @@ return C
 "#;
         let class: Table = lua.load(source).eval().unwrap();
         let defaults: Table = class.raw_get("props").unwrap();
-        let props = props_from(&defaults, &notes(source));
+        let props = props_from(&defaults, &notes(source, "props"));
         let get = |n: &str| props.iter().find(|p| p.name == n).unwrap();
         assert_eq!(
             props.last().unwrap().name,

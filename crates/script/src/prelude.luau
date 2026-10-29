@@ -1,7 +1,8 @@
 --!strict
 -- The Luau half of the script runtime: the task library's waiting functions, the helpers every
 -- script instance inherits, and easing curves. Runs once, before the VM is sandboxed.
--- `__task_spawn`, `__task_delay` and `__task_cancel` are the runtime's Rust functions.
+-- `__task_spawn`, `__task_delay`, `__task_cancel` and `__script_emit` are the runtime's Rust
+-- functions.
 
 local yield = coroutine.yield
 local spawn_task = __task_spawn
@@ -9,6 +10,7 @@ local delay_task = __task_delay
 local cancel_task = __task_cancel
 local stopped = __script_stopped
 local in_parallel = __script_parallel
+local emit_signal = __script_emit
 
 -- A script the time limit stopped stays stopped: catching the stop (pcall in a loop) would
 -- otherwise let an endless loop run on forever, so these pass it on.
@@ -96,6 +98,23 @@ function task.wait_until(check: () -> boolean, timeout: number?): boolean
 	return true
 end
 
+-- Waits until `entity`'s script emits `signal` (or `timeout` seconds pass), and returns the
+-- signal's values (nothing on timeout). Roblox's `Signal:Wait()`.
+function task.wait_for(entity: any, signal: string, timeout: number?): ...any
+	local got: { n: number, [number]: any }? = nil
+	local c = entity:once(signal, function(...)
+		got = table.pack(...)
+	end)
+	task.wait_until(function()
+		return got ~= nil
+	end, timeout)
+	c.disconnect()
+	if got then
+		return table.unpack(got, 1, got.n)
+	end
+	return
+end
+
 -- Easing curves for task.tween, alpha 0..1 in and out.
 ease = {}
 function ease.linear(t: number): number
@@ -149,6 +168,27 @@ function Base:after(seconds: number, method: any, ...: any): thread
 		local f = if type(method) == "string" then (self :: any)[method] else method
 		f(self, table.unpack(args, 1, args.n))
 	end)
+end
+
+-- Fires one of the class's `signals` with its values: every method wired to it in the
+-- editor's Details panel (the Script component's connections) and every `entity:on` listener
+-- runs, later this frame, each as a task of its own.
+function Base:emit(signal: string, ...: any)
+	local declared = (self :: any).signals
+	if type(declared) ~= "table" or declared[signal] == nil then
+		local names = {}
+		for name in (if type(declared) == "table" then declared else {}) :: any do
+			table.insert(names, name)
+		end
+		table.sort(names)
+		error(
+			if #names == 0
+				then `no signal "{signal}": the class declares no signals (a table named signals)`
+				else `no signal "{signal}" in signals ({table.concat(names, ", ")})`,
+			2
+		)
+	end
+	emit_signal((self :: any).entity, signal, table.pack(...))
 end
 
 -- Spawns an entity as a child of this script's entity (removed with it).

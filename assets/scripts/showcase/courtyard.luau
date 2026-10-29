@@ -46,7 +46,7 @@ function Courtyard:on_reload()
 	self.spin = p.spin
 end
 
--- Pulling the lever sends "ritual" (lever.luau). One task, read top to bottom.
+-- The lever's `pulled` signal is wired to this (lever.luau). One task, read top to bottom.
 function Courtyard:ritual()
 	if self.busy then
 		return

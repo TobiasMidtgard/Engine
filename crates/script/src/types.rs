@@ -98,7 +98,14 @@ declare extern type Entity with
 	--- Sends a message to its script: on_message(event, data), or its method named event.
 	--- Delivered next frame.
 	function send(self, event: string, data: any?): ()
+	--- Calls f with the values each time its script emits the signal (as a task of yours).
+	function on(self, signal: string, f: (...any) -> ()): Connection
+	--- Calls f the next time its script emits the signal.
+	function once(self, signal: string, f: (...any) -> ()): Connection
 end
+
+--- A listener of a signal: c.disconnect() stops it.
+export type Connection = { disconnect: () -> (), connected: () -> boolean }
 
 type EntitySpec = { name: string?, components: { [string]: any }?, children: { any }? }
 
@@ -151,6 +158,8 @@ declare task: {
 	cancel: (t: thread) -> (),
 	--- Calls step(alpha) every frame for seconds, alpha 0 to 1 through ease.
 	tween: (seconds: number, step: (alpha: number) -> (), ease: ((number) -> number)?) -> (),
+	--- Waits until the entity's script emits the signal; returns its values (none on timeout).
+	wait_for: (entity: Entity, signal: string, timeout: number?) -> ...any,
 	--- Waits until check() is true (or timeout seconds pass); false on timeout.
 	wait_until: (check: () -> boolean, timeout: number?) -> boolean,
 	-- In parallel_update: the rest of it runs after the parallel phase, with the whole world.
@@ -181,8 +190,12 @@ export type ScriptBase = {
 	spawn: (self: any, spec: EntitySpec) -> Entity,
 }
 
--- For annotating `self` by hand (luau-lsp): the engine's part and any props.
-export type ScriptSelf = ScriptBase & { props: any }
+-- For annotating `self` by hand (luau-lsp): the engine's part, any props and any signal.
+export type ScriptSelf = ScriptBase & {
+	props: any,
+	--- Fires one of the class's signals: the methods wired to it run, later this frame.
+	emit: (self: any, signal: string, ...any) -> (),
+}
 
 "#;
 

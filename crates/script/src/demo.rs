@@ -12,7 +12,8 @@
 //!   board shows the new text with the changed lines lit, the lanterns keep their place in the
 //!   wave (the script keeps its state), and a typo shows an error on the board while the old
 //!   code keeps running.
-//! - Pull the lever (E) and the ritual plays: the lanterns go out one by one, flare back in
+//! - Pull the lever (E) and the ritual plays (its `pulled` signal is wired to the director's
+//!   `ritual`): the lanterns go out one by one, flare back in
 //!   sequence, the braziers light, the orrery spins up and a beam goes up from its core, with a
 //!   moment of slow motion. It is one coroutine in the script, written with `task.wait`.
 //! - The profile board beside the code board shows where the scripts spend their time, as a
@@ -32,7 +33,6 @@ use engine_core::math::{DVec3, Quat};
 use engine_core::prelude::*;
 use engine_render::{MaterialPreset, MeshRenderer, PointLight, Shape, StandardMaterial};
 use engine_world::Interactable;
-use serde_json::json;
 
 use crate::Script;
 use crate::board::{CodeBoard, ProfileBoard};
@@ -623,7 +623,8 @@ pub fn spawn_demo(commands: &mut Commands, origin: DVec3) {
             });
     }
 
-    // The lever on its stone pedestal: pulling it sends "ritual" to the director.
+    // The lever on its stone pedestal: pulling it fires `pulled`, wired to the director's
+    // `ritual`.
     let [lx, _, lz] = LEVER;
     // Facing the middle (its -Z toward the orrery).
     let facing = Quat::from_rotation_y(lx.atan2(lz) as f32);
@@ -656,7 +657,8 @@ pub fn spawn_demo(commands: &mut Commands, origin: DVec3) {
                 reach_m: 2.5,
                 ..Default::default()
             },
-            Script::new(LEVER_SCRIPT).with_props(json!({ "target": DIRECTOR })),
+            // Its `pulled` signal wired to the director's ritual, as the Details panel does.
+            Script::new(LEVER_SCRIPT).connect("pulled", DIRECTOR, "ritual"),
         ))
         .with_children(|l| {
             l.spawn((

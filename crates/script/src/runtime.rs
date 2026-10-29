@@ -336,6 +336,7 @@ impl ScriptRuntime {
             "__task_cancel",
             "__script_stopped",
             "__script_parallel",
+            "__script_emit",
         ] {
             g.raw_set(internal, Value::Nil)?;
         }
@@ -641,6 +642,7 @@ impl ScriptRuntime {
         self.deliver_interactions(w(), settings);
         self.deliver_contacts(w(), settings);
         self.deliver_messages(settings);
+        self.deliver_signals(w(), settings);
 
         let updating: Vec<Entity> = self
             .instances
@@ -1243,6 +1245,19 @@ impl ScriptRuntime {
             self.call_hook(e, "on_destroy", (), settings);
         }
         self.tasks.retain(|t| t.owner != Some(e));
+        let dropped: Vec<RegistryKey> = {
+            let mut s = shared(&self.lua);
+            let (gone, kept) = std::mem::take(&mut s.listeners)
+                .into_iter()
+                .partition(|l| l.owner == Some(e));
+            s.listeners = kept;
+            gone.into_iter()
+                .map(|l: crate::access::Listener| l.func)
+                .collect()
+        };
+        for key in dropped {
+            let _ = self.lua.remove_registry_value(key);
+        }
         if let Some(i) = self.instances.remove(&e) {
             let _ = self.lua.remove_registry_value(i.this);
         }
@@ -1486,6 +1501,162 @@ impl ScriptRuntime {
                 }
             }
         }
+    }
+
+    /// Signals emitted since the last frame (`self:emit`), to the methods wired to them in the
+    /// emitter's Script component and to `entity:on` listeners. Each runs as a task of its
+    /// own, as Roblox's deferred events: an error in one stops neither the emitter nor the
+    /// others.
+    fn deliver_signals(&mut self, world: &mut World, settings: &ScriptSettings) {
+        // Methods may emit again: those wait for the next frame, so a loop of signals can't
+        // hang the game.
+        let emitted = std::mem::take(&mut shared(&self.lua).emitted);
+        for m in emitted {
+            let packed: Option<Table> = self.lua.registry_value(&m.args).ok();
+            let _ = self.lua.remove_registry_value(m.args);
+            let Some(packed) = packed else { continue };
+            let values = unpack(&packed);
+            let from_path = self.instances.get(&m.from).map(|i| i.path.clone());
+            let wired: Vec<(usize, crate::Connection)> = world
+                .get::<Script>(m.from)
+                .map(|s| {
+                    s.connections
+                        .iter()
+                        .cloned()
+                        .enumerate()
+                        .filter(|(_, c)| c.signal == m.signal)
+                        .collect()
+                })
+                .unwrap_or_default();
+            let mut spent = Vec::new();
+            for (k, c) in wired {
+                let target = if c.target.is_empty() {
+                    Some(m.from)
+                } else {
+                    self.named_instance(world, &c.target)
+                };
+                let problem = match target.and_then(|t| self.instances.get(&t).map(|i| (t, i))) {
+                    None => Some(format!(
+                        "signal {}: no scene object named \"{}\" runs a script",
+                        m.signal, c.target
+                    )),
+                    Some((t, i)) if !i.started => {
+                        let _ = t;
+                        None
+                    }
+                    Some((t, _)) if !self.has_method(t, &c.method) => Some(format!(
+                        "signal {}: {}'s script has no method {}",
+                        m.signal,
+                        if c.target.is_empty() {
+                            "this"
+                        } else {
+                            &c.target
+                        },
+                        c.method
+                    )),
+                    Some((t, _)) => {
+                        let args = if c.args.is_empty() {
+                            values.clone()
+                        } else {
+                            c.args
+                                .iter()
+                                .map(|v| to_lua(&self.lua, v).unwrap_or(Value::Nil))
+                                .collect()
+                        };
+                        self.spawn_hook(t, &c.method, args, settings);
+                        if c.once {
+                            spent.push(k);
+                        }
+                        None
+                    }
+                };
+                if let (Some(problem), Some(path)) = (problem, &from_path) {
+                    self.report(m.from, &path.clone(), &mlua::Error::runtime(problem));
+                }
+            }
+            if !spent.is_empty()
+                && let Some(mut s) = world.get_mut::<Script>(m.from)
+            {
+                let mut k = 0;
+                s.connections.retain(|_| {
+                    k += 1;
+                    !spent.contains(&(k - 1))
+                });
+            }
+            // Functions listening with `entity:on` / `entity:once`.
+            let heard: Vec<(Option<Entity>, Function)> = {
+                let s = shared(&self.lua);
+                s.listeners
+                    .iter()
+                    .filter(|l| l.from == m.from && l.signal == m.signal)
+                    .filter_map(|l| Some((l.owner, self.lua.registry_value(&l.func).ok()?)))
+                    .collect()
+            };
+            {
+                let mut s = shared(&self.lua);
+                let (spent, kept): (Vec<_>, Vec<_>) = std::mem::take(&mut s.listeners)
+                    .into_iter()
+                    .partition(|l| l.once && l.from == m.from && l.signal == m.signal);
+                s.listeners = kept;
+                drop(s);
+                for l in spent {
+                    let _ = self.lua.remove_registry_value(l.func);
+                }
+            }
+            for (owner, f) in heard {
+                if owner.is_some_and(|o| !self.instances.contains_key(&o)) {
+                    continue;
+                }
+                self.spawn_function(owner, f, values.clone(), settings);
+            }
+        }
+    }
+
+    /// The script instance on the scene object named `name` (the first, by entity).
+    fn named_instance(&self, world: &World, name: &str) -> Option<Entity> {
+        self.instances
+            .keys()
+            .copied()
+            .find(|e| world.get::<Name>(*e).is_some_and(|n| n.as_str() == name))
+    }
+
+    /// Whether `e`'s script has a method called `name`.
+    fn has_method(&self, e: Entity, name: &str) -> bool {
+        self.instances
+            .get(&e)
+            .and_then(|i| self.lua.registry_value::<Value>(&i.this).ok())
+            .and_then(|v| match v {
+                Value::Table(t) => t.get::<Value>(name).ok(),
+                _ => None,
+            })
+            .is_some_and(|v| matches!(v, Value::Function(_)))
+    }
+
+    /// Runs `f(args...)` as a task of `owner`'s script (a listener of a signal).
+    fn spawn_function(
+        &mut self,
+        owner: Option<Entity>,
+        f: Function,
+        args: MultiValue,
+        settings: &ScriptSettings,
+    ) {
+        let path = owner
+            .and_then(|o| self.instances.get(&o))
+            .map(|i| i.path.clone())
+            .unwrap_or_else(|| "console".to_string());
+        self.profiler.phase(Phase::Events);
+        match self
+            .lua
+            .create_thread(crate::debugger::catching(&self.lua, f))
+        {
+            Ok(thread) => self.resume(thread, owner, &path, args, settings),
+            Err(err) => {
+                if let Some(o) = owner {
+                    self.report(o, &path, &err);
+                }
+            }
+        }
+        self.adopt_new_tasks();
     }
 
     // ------------------------------------------------------------------------- tasks
@@ -2339,6 +2510,14 @@ impl TaskArgs for Thread {
     }
 }
 
+/// A `table.pack`ed table's values.
+fn unpack(packed: &Table) -> MultiValue {
+    let n: usize = packed.raw_get("n").unwrap_or(0);
+    (1..=n)
+        .map(|i| packed.raw_get(i).unwrap_or(Value::Nil))
+        .collect()
+}
+
 /// The packed arguments a delayed task was given, removed once taken.
 fn take_task_args(lua: &Lua, thread: &Thread) -> Option<MultiValue> {
     let table: Table = lua.named_registry_value(TASK_ARGS).ok()?;
@@ -2406,6 +2585,18 @@ fn install_tasks(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "__script_parallel",
         lua.create_function(|lua, ()| Ok(crate::access::in_parallel(lua)))?,
+    )?;
+    g.set(
+        "__script_emit",
+        lua.create_function(|lua, (from, signal, packed): (EntityRef, String, Table)| {
+            let args = lua.create_registry_value(packed)?;
+            shared(lua).emitted.push(crate::access::Emitted {
+                from: from.0,
+                signal,
+                args,
+            });
+            Ok(())
+        })?,
     )?;
     g.set(
         "__task_cancel",

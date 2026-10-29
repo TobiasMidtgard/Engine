@@ -1,8 +1,8 @@
 --!strict
--- A beacon: a light that pulses and turns its head, and sends a message to another entity
--- every few flashes. Put it on an entity with a PointLight. Each prop below is a field in the
--- editor's Details panel: the hints after @ give it a slider, a unit, a group or a picker
--- (see "Props in the Details panel" in the scripts README).
+-- A beacon: a light that pulses and turns its head, and fires a signal every few flashes. Put
+-- it on an entity with a PointLight. Each prop below is a field in the editor's Details panel:
+-- the hints after @ give it a slider, a unit, a group or a picker (see "Props in the Details
+-- panel" in the scripts README); each signal can be wired there to any object's script.
 local Beacon = {}
 Beacon.props = {
 	-- @group Light
@@ -19,9 +19,14 @@ Beacon.props = {
 	hover = vec3(0, 0.15, 0), -- how far it bobs, meters
 	-- @group Signal
 	mode = "pulse", -- how it shines @enum steady|pulse|blink
-	target = "Stone", -- who hears it flash @entity
-	every = 4, -- flashes between messages @int @min 1
+	every = 4, -- flashes between signals @int @min 1
 	announce = true, -- say so in the output too
+}
+
+-- What it tells the scene. Wire a signal to a method of any object's script in the Details
+-- panel (Signals), or listen in code: beacon:on("flashed", function(count) ... end).
+Beacon.signals = {
+	flashed = "count: number", -- every few flashes, with how many so far
 }
 
 function Beacon:start()
@@ -49,12 +54,9 @@ function Beacon:update(dt: number)
 	if wave > 0.97 and self.was <= 0.97 then
 		self.flashes += 1
 		if self.flashes % math.max(1, p.every) == 0 then
-			local target = world.find(p.target)
-			if target then
-				target:send("beacon", { flashes = self.flashes })
-			end
+			self:emit("flashed", self.flashes)
 			if p.announce then
-				print(`{self.entity.name} flashed {self.flashes} times; told {p.target}`)
+				print(`{self.entity.name} flashed {self.flashes} times`)
 			end
 		end
 	end

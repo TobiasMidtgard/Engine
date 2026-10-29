@@ -122,6 +122,37 @@ change reaches the running script at once (`on_props()` is called), the script's
 (`self.t`, ...) show live under its props, and **Keep after Stop** keeps what you tuned when
 Stop puts the scene back. `examples/beacon.luau` uses every kind of field.
 
+## Signals: wiring scripts together in the Details panel
+
+A script says what it tells the world in a `signals` table, and fires one with `self:emit`:
+
+```lua
+Lever.signals = {
+	pulled = "by: Entity", -- the arm went over; who pulled it
+	reset = "", -- it can be pulled again
+}
+
+function Lever:on_interact(by: Entity)
+	-- ... swing the arm ...
+	self:emit("pulled", by)
+end
+```
+
+Who hears it is set per object in the editor, like Godot's signal connections and Unity's
+events: select the lever, and under **Signals** in its Script component press **+ Connect**,
+pick a scene object and one of its script's methods (or **+ New method**, which writes
+`function Door:on_pulled(by)` into that script and opens it). A connection can pass fixed
+values instead of the signal's own (`2, "open"`) and fire only once. The object on the other
+end lists it under **Heard from**, and its script shows a bolt beside the method; hover it to
+see who calls it. One lever script then serves every lever: each one is wired to its own door.
+
+Code can listen too: `lever:on("pulled", function(by) ... end)` (every time) and
+`lever:once(...)` (the next time) return a connection with `disconnect()`, and
+`task.wait_for(lever, "pulled")` waits for one and returns its values. Listeners run later in
+the same frame, each as a task of its own, so they may wait and one that fails doesn't stop the
+others. Emitting a signal the class doesn't declare is an error, and the type checker knows each
+signal's values: `self:emit("pulled", 3)` is underlined as you type.
+
 ## Visual scripts (`.graph`)
 
 A `.graph` file is a script drawn as nodes and wires, for people who would rather not write

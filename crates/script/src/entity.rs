@@ -24,7 +24,9 @@ use bevy_ecs::prelude::*;
 use engine_assets::Assets;
 use engine_core::prelude::GlobalTransform;
 use engine_core::registry::{TypeRegistry, call_api};
-use mlua::{FromLua, Lua, MetaMethod, Table, UserData, UserDataFields, UserDataMethods, Value};
+use mlua::{
+    FromLua, Function, Lua, MetaMethod, Table, UserData, UserDataFields, UserDataMethods, Value,
+};
 use serde_json::json;
 
 use crate::access::{
@@ -376,6 +378,13 @@ impl UserData for EntityRef {
             });
             Ok(())
         });
+        // Roblox's `Connect` and `Once` on its script's signals: the function runs (as a task
+        // of the script that called this) each time, or the next time, the signal fires.
+        for (name, once) in [("on", false), ("once", true)] {
+            methods.add_method(name, move |lua, e, (signal, f): (String, Function)| {
+                listen(lua, e.0, signal, f, once)
+            });
+        }
         methods.add_meta_function(MetaMethod::Eq, |_, (a, b): (EntityRef, EntityRef)| {
             Ok(a == b)
         });
@@ -499,4 +508,39 @@ pub fn install(lua: &Lua) -> mlua::Result<()> {
     )?;
     lua.globals().set("world", world)?;
     Ok(())
+}
+
+/// Adds a listener to `from`'s `signal`; returns its connection (`connection:disconnect()`).
+fn listen(lua: &Lua, from: Entity, signal: String, f: Function, once: bool) -> mlua::Result<Table> {
+    let func = lua.create_registry_value(f)?;
+    let id = {
+        let mut s = shared(lua);
+        s.next_listener += 1;
+        let id = s.next_listener;
+        let owner = s.owner;
+        s.listeners.push(crate::access::Listener {
+            id,
+            from,
+            signal,
+            owner,
+            func,
+            once,
+        });
+        id
+    };
+    let connection = lua.create_table()?;
+    connection.raw_set(
+        "disconnect",
+        lua.create_function(move |lua, _: mlua::Variadic<Value>| {
+            shared(lua).listeners.retain(|l| l.id != id);
+            Ok(())
+        })?,
+    )?;
+    connection.raw_set(
+        "connected",
+        lua.create_function(move |lua, _: mlua::Variadic<Value>| {
+            Ok(shared(lua).listeners.iter().any(|l| l.id == id))
+        })?,
+    )?;
+    Ok(connection)
 }

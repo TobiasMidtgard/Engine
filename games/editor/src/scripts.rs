@@ -117,6 +117,7 @@ const ERROR: Color32 = Color32::from_rgb(0xff, 0x62, 0x5c);
 const ERROR_BG: Color32 = Color32::from_rgba_premultiplied(0x30, 0x0c, 0x0c, 0x30);
 const LINT: Color32 = Color32::from_rgb(0xf0, 0xb4, 0x3c);
 const VALUE: Color32 = Color32::from_rgb(0xff, 0xc9, 0x5c);
+const SIGNAL: Color32 = Color32::from_rgb(0xc8, 0x8c, 0xff);
 const VALUE_BG: Color32 = Color32::from_rgba_premultiplied(0x2c, 0x20, 0x08, 0x2c);
 const FIND_BG: Color32 = Color32::from_rgb(0x5a, 0x4a, 0x14);
 /// Breakpoints (Visual Studio's red), the stopped line (its yellow arrow and line), a caller's
@@ -178,6 +179,12 @@ pub struct ScriptsTab {
     pub types: Types,
     /// Screenshot runs: put the pointer over this (0-based line, char column) of the code.
     pub point_at: Option<(u32, u32)>,
+    /// Where the pointer was last put for `point_at` (moved once: egui waits for a still
+    /// pointer before it shows a tooltip).
+    point_sent: Option<Pos2>,
+    /// Where some widgets were last drawn, for screenshot runs to point at or click
+    /// ("signal method 0", "heard 12").
+    pub drawn_at: HashMap<String, Rect>,
 }
 
 /// An open file.
@@ -1196,6 +1203,7 @@ fn code_view(ui: &mut egui::Ui, world: &mut World, tab: &mut ScriptsTab, now: f6
     let vocab = tab.vocab.take().expect("built before drawing");
     let i = tab.current;
     let id = egui::Id::new(("script code", tab.docs[i].path.as_str()));
+    let heard = heard_marks(world, &tab.docs[i].path);
     let font = FontId::monospace(13.0);
     let row_h = ui.fonts_mut(|f| f.row_height(&font));
 
@@ -1318,10 +1326,13 @@ fn code_view(ui: &mut egui::Ui, world: &mut World, tab: &mut ScriptsTab, now: f6
                     .galley
                     .pos_from_cursor(CCursor::new(char_at(&doc.text, l, c)));
                 let p = out.galley_pos + at.center().to_vec2() + Vec2::new(3.0, 0.0);
-                world
-                    .resource_mut::<crate::egui_bridge::EguiInput>()
-                    .injected
-                    .push(egui::Event::PointerMoved(p));
+                if tab.point_sent != Some(p) {
+                    tab.point_sent = Some(p);
+                    world
+                        .resource_mut::<crate::egui_bridge::EguiInput>()
+                        .injected
+                        .push(egui::Event::PointerMoved(p));
+                }
             }
             let lines = line_rects(&out.galley, out.galley_pos);
             let current_line = line_of(&doc.text, caret);
@@ -1344,6 +1355,14 @@ fn code_view(ui: &mut egui::Ui, world: &mut World, tab: &mut ScriptsTab, now: f6
                 row_h,
                 stop.as_ref(),
                 &unbound,
+            );
+            paint_heard(
+                ui,
+                &out.response.rect,
+                &lines,
+                &heard,
+                row_h,
+                &mut tab.drawn_at,
             );
             let lints = lints(&doc.text, &vocab);
             let shown = shown_problems(doc, types, &lints);
@@ -1716,6 +1735,97 @@ fn heat_color(t: f32) -> Color32 {
         (HEAT[1], HEAT[2], t - 1.0)
     };
     a.lerp_to_gamma(b, k)
+}
+
+/// The methods of `path` that signals in the scene call: (1-based line, who calls it), for
+/// Godot's connection mark in the margin.
+fn heard_marks(world: &mut World, path: &str) -> Vec<(u32, Vec<String>)> {
+    let path = engine_script::normalize(path);
+    let objects = scripted_objects(world);
+    let mut calls: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let mut q = world.query_filtered::<(Entity, &Name, &Script), With<crate::scene_ops::InScene>>();
+    for (e, n, s) in q.iter(world) {
+        for c in &s.connections {
+            let runs = target_script(&objects, e, &c.target)
+                .is_some_and(|f| engine_script::normalize(&f) == path);
+            if runs && !c.method.is_empty() {
+                let to = if c.target.is_empty() {
+                    n.as_str()
+                } else {
+                    c.target.as_str()
+                };
+                calls.entry(c.method.clone()).or_default().push(format!(
+                    "{} ⚡{} (on {to})",
+                    n.as_str(),
+                    c.signal
+                ));
+            }
+        }
+    }
+    if calls.is_empty() {
+        return Vec::new();
+    }
+    let methods = engine_script::props::declared(world, &path)
+        .map(|d| d.methods)
+        .unwrap_or_default();
+    calls
+        .into_iter()
+        .filter_map(|(m, from)| {
+            let line = methods.iter().find(|x| x.name == m)?.line;
+            (line > 0).then_some((line, from))
+        })
+        .collect()
+}
+
+/// A small plug in the margin of each method a signal calls; hovering it says whose.
+fn paint_heard(
+    ui: &egui::Ui,
+    area: &Rect,
+    lines: &[Rect],
+    heard: &[(u32, Vec<String>)],
+    row_h: f32,
+    drawn_at: &mut HashMap<String, Rect>,
+) {
+    for (line, from) in heard {
+        let Some(r) = lines.get(*line as usize - 1) else {
+            continue;
+        };
+        if r.bottom() < ui.clip_rect().top() || r.top() > ui.clip_rect().bottom() {
+            continue;
+        }
+        let c = Pos2::new(area.left() + 10.0, r.center().y);
+        let h = row_h * 0.3;
+        let painter = ui.painter();
+        // A lightning bolt (Godot shows a connection icon there).
+        painter.add(egui::Shape::convex_polygon(
+            vec![
+                c + Vec2::new(h * 0.25, -h * 1.2),
+                c + Vec2::new(-h * 0.6, h * 0.15),
+                c + Vec2::new(-h * 0.05, h * 0.15),
+            ],
+            SIGNAL,
+            Stroke::NONE,
+        ));
+        painter.add(egui::Shape::convex_polygon(
+            vec![
+                c + Vec2::new(0.05, -h * 0.15),
+                c + Vec2::new(h * 0.6, -h * 0.15),
+                c + Vec2::new(-h * 0.25, h * 1.2),
+            ],
+            SIGNAL,
+            Stroke::NONE,
+        ));
+        let hot = Rect::from_center_size(c, Vec2::splat(row_h));
+        drawn_at.insert(format!("heard {line}"), hot);
+        let id = ui.id().with(("heard", *line));
+        let resp = ui.interact(hot, id, egui::Sense::hover());
+        resp.on_hover_ui(|ui| {
+            ui.label(RichText::new("Called by signals").strong());
+            for f in from {
+                ui.label(RichText::new(f).monospace());
+            }
+        });
+    }
 }
 
 /// Line numbers, the profiler's heat bars and the markers (breakpoint, error, logpoint), and
@@ -2744,86 +2854,85 @@ fn completion_popup(ui: &egui::Ui, c: &Completion, pos: Pos2) -> Option<usize> {
                     .inner_margin(egui::Margin::same(3))
                     .show(ui, |ui| {
                         ui.set_width(300.0);
-                        let first = c.selected.saturating_sub(8);
-                        for (n, it) in c.items.iter().enumerate().skip(first).take(10) {
-                            let (color, tag) = kind_color(it.kind);
-                            let mut job = LayoutJob::default();
-                            let mono = FontId::monospace(12.5);
-                            job.append(
-                                &format!("{tag:>2}  "),
-                                0.0,
-                                TextFormat::simple(
-                                    FontId::monospace(11.0),
-                                    color.gamma_multiply(0.8),
-                                ),
-                            );
-                            let typed = c.prefix.chars().count().min(it.label.chars().count());
-                            let (head, tail) = it.label.split_at(char_to_byte(&it.label, typed));
-                            let mut strong = TextFormat::simple(mono.clone(), Color32::WHITE);
-                            strong.underline = Stroke::new(1.0, theme::ACCENT);
-                            if it
-                                .label
-                                .to_lowercase()
-                                .starts_with(&c.prefix.to_lowercase())
-                            {
-                                job.append(head, 0.0, strong);
-                                job.append(
-                                    tail,
-                                    0.0,
-                                    TextFormat::simple(mono.clone(), theme::TEXT),
-                                );
-                            } else {
-                                job.append(
-                                    &it.label,
-                                    0.0,
-                                    TextFormat::simple(mono.clone(), theme::TEXT),
-                                );
-                            }
-                            if !it.detail.is_empty() && it.kind != WordKind::Function {
-                                let short: String = it.detail.chars().take(28).collect();
-                                job.append(
-                                    &format!("  {short}"),
-                                    0.0,
-                                    TextFormat::simple(FontId::monospace(11.0), theme::TEXT_DIM),
-                                );
-                            }
-                            let r = ui.add(
-                                egui::Button::selectable(n == c.selected, job)
-                                    .min_size(Vec2::new(294.0, 0.0)),
-                            );
-                            if r.clicked() {
-                                clicked = Some(n);
-                            }
-                        }
-                        if c.items.len() > 10 {
-                            ui.label(theme::dim(format!("{} more", c.items.len() - 10)).small());
-                        }
+                        ui.vertical(|ui| completion_rows(ui, c, &mut clicked));
                     });
                 if let Some(it) = c.items.get(c.selected) {
                     egui::Frame::popup(ui.style()).show(ui, |ui| {
                         ui.set_max_width(360.0);
-                        let sig = match it.kind {
-                            WordKind::Function | WordKind::Method | WordKind::Global
-                                if it.detail.starts_with('(') =>
-                            {
-                                format!("{}{}", it.full, it.detail)
-                            }
-                            WordKind::Function => format!("{} {}", it.full, it.detail),
-                            _ if !it.detail.is_empty() => format!("{}: {}", it.full, it.detail),
-                            _ => it.full.clone(),
-                        };
-                        ui.label(RichText::new(sig).monospace().color(CALL));
-                        if !it.doc.is_empty() {
-                            ui.add_space(2.0);
-                            ui.label(&it.doc);
-                        }
-                        ui.add_space(2.0);
-                        ui.label(theme::dim("Tab or Enter puts it in, Esc closes").small());
+                        ui.vertical(|ui| completion_doc(ui, it));
                     });
                 }
             });
         });
     clicked
+}
+
+/// The completion list's rows (ten around the chosen one).
+fn completion_rows(ui: &mut egui::Ui, c: &Completion, clicked: &mut Option<usize>) {
+    let first = c.selected.saturating_sub(8);
+    for (n, it) in c.items.iter().enumerate().skip(first).take(10) {
+        let (color, tag) = kind_color(it.kind);
+        let mut job = LayoutJob::default();
+        let mono = FontId::monospace(12.5);
+        job.append(
+            &format!("{tag:>2}  "),
+            0.0,
+            TextFormat::simple(FontId::monospace(11.0), color.gamma_multiply(0.8)),
+        );
+        let typed = c.prefix.chars().count().min(it.label.chars().count());
+        let (head, tail) = it.label.split_at(char_to_byte(&it.label, typed));
+        let mut strong = TextFormat::simple(mono.clone(), Color32::WHITE);
+        strong.underline = Stroke::new(1.0, theme::ACCENT);
+        if it
+            .label
+            .to_lowercase()
+            .starts_with(&c.prefix.to_lowercase())
+        {
+            job.append(head, 0.0, strong);
+            job.append(tail, 0.0, TextFormat::simple(mono.clone(), theme::TEXT));
+        } else {
+            job.append(
+                &it.label,
+                0.0,
+                TextFormat::simple(mono.clone(), theme::TEXT),
+            );
+        }
+        if !it.detail.is_empty() && it.kind != WordKind::Function {
+            let short: String = it.detail.chars().take(28).collect();
+            job.append(
+                &format!("  {short}"),
+                0.0,
+                TextFormat::simple(FontId::monospace(11.0), theme::TEXT_DIM),
+            );
+        }
+        let r =
+            ui.add(egui::Button::selectable(n == c.selected, job).min_size(Vec2::new(294.0, 0.0)));
+        if r.clicked() {
+            *clicked = Some(n);
+        }
+    }
+    if c.items.len() > 10 {
+        ui.label(theme::dim(format!("{} more", c.items.len() - 10)).small());
+    }
+}
+
+/// The chosen completion's signature and docs.
+fn completion_doc(ui: &mut egui::Ui, it: &Item) {
+    let sig = match it.kind {
+        WordKind::Function | WordKind::Method | WordKind::Global if it.detail.starts_with('(') => {
+            format!("{}{}", it.full, it.detail)
+        }
+        WordKind::Function => format!("{} {}", it.full, it.detail),
+        _ if !it.detail.is_empty() => format!("{}: {}", it.full, it.detail),
+        _ => it.full.clone(),
+    };
+    ui.label(RichText::new(sig).monospace().color(CALL));
+    if !it.doc.is_empty() {
+        ui.add_space(2.0);
+        ui.label(&it.doc);
+    }
+    ui.add_space(2.0);
+    ui.label(theme::dim("Tab or Enter puts it in, Esc closes").small());
 }
 
 // ----------------------------------------------------------------------------- types
@@ -4032,6 +4141,8 @@ pub struct PropsPanel {
     typing: HashMap<(Entity, String), String>,
     /// Each file's props as it last loaded, shown while it has a mistake.
     good: HashMap<String, Vec<Prop>>,
+    /// A file and line to show once the panel is drawn (a method just written for a signal).
+    open_after: Option<(String, u32)>,
 }
 
 /// What a prop's row asks for.
@@ -4225,6 +4336,17 @@ pub fn details(
         }
     }
 
+    // Its signals and who hears them (Godot's signal connections, Unity's events).
+    let signals = engine_script::props::declared(world, &path)
+        .map(|d| d.signals)
+        .unwrap_or_default();
+    if let Some(at) = signals_section(ui, world, entity, &signals, &mut after) {
+        open_at = Some(Some(at));
+    }
+    if let Some((file, line)) = heard_section(ui, world, entity) {
+        open_in_tab(world, &file, Some(line));
+    }
+
     if playing {
         live_values(ui, world, entity);
         keep_toggle(ui, world, entity);
@@ -4233,6 +4355,443 @@ pub fn details(
     if let Some(line) = open_at {
         open_in_tab(world, &path, line);
     }
+    if let Some((file, line)) = world
+        .get_resource_mut::<ScriptsTab>()
+        .and_then(|mut t| t.props.open_after.take())
+    {
+        open_in_tab(world, &file, Some(line));
+    }
+}
+
+/// The scene's objects that run a script: (name, entity, script path), by name.
+fn scripted_objects(world: &mut World) -> Vec<(String, Entity, String)> {
+    let mut q = world.query_filtered::<(Entity, &Name, &Script), With<crate::scene_ops::InScene>>();
+    let mut out: Vec<(String, Entity, String)> = q
+        .iter(world)
+        .filter(|(_, n, s)| !n.as_str().is_empty() && !s.path.is_empty())
+        .map(|(e, n, s)| (n.as_str().to_string(), e, s.path.clone()))
+        .collect();
+    out.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+    out
+}
+
+/// The script file the scene object named `target` runs (empty: `me`'s).
+fn target_script(objects: &[(String, Entity, String)], me: Entity, target: &str) -> Option<String> {
+    objects
+        .iter()
+        .find(|(n, e, _)| {
+            if target.is_empty() {
+                *e == me
+            } else {
+                n == target
+            }
+        })
+        .map(|o| o.2.clone())
+}
+
+/// What a connection row asks for.
+enum Wire {
+    Target(String),
+    Method(String),
+    Args(Vec<Value>),
+    Once(bool),
+    Remove,
+    /// Write `function Class:name(params) end` into the target's script and wire it.
+    NewMethod(String),
+}
+
+/// The "Signals" section: each signal the class declares, with its connections (target object,
+/// method, fixed values, once) and "+ Connect". Edits go into `after["connections"]`. Returns
+/// a line of this script to show (a signal's declaration).
+fn signals_section(
+    ui: &mut egui::Ui,
+    world: &mut World,
+    entity: Entity,
+    signals: &[engine_script::props::Signal],
+    after: &mut Value,
+) -> Option<u32> {
+    let wired: Vec<engine_script::Connection> =
+        serde_json::from_value(after["connections"].clone()).unwrap_or_default();
+    if signals.is_empty() && wired.is_empty() {
+        return None;
+    }
+    let objects = scripted_objects(world);
+    let mut open = None;
+    let mut edits: Vec<(usize, Wire)> = Vec::new();
+    let mut added: Vec<String> = Vec::new();
+    egui::CollapsingHeader::new(RichText::new("Signals").strong().color(theme::TEXT))
+        .id_salt(("script signals", entity))
+        .default_open(true)
+        .show(ui, |ui| {
+            ui.spacing_mut().item_spacing.y = 3.0;
+            let mut names: Vec<&str> = signals.iter().map(|s| s.name.as_str()).collect();
+            // Connections to a signal the class no longer declares still show (in red).
+            for c in &wired {
+                if !names.contains(&c.signal.as_str()) {
+                    names.push(c.signal.as_str());
+                }
+            }
+            for name in names {
+                let declared = signals.iter().find(|s| s.name == name);
+                let head = ui.horizontal(|ui| {
+                    let mut job = LayoutJob::default();
+                    let mono = FontId::monospace(12.5);
+                    let color = if declared.is_some() { SIGNAL } else { ERROR };
+                    job.append("⚡ ", 0.0, TextFormat::simple(mono.clone(), color));
+                    job.append(name, 0.0, TextFormat::simple(mono.clone(), Color32::WHITE));
+                    let params = declared.map(|s| s.params.as_str()).unwrap_or("");
+                    job.append(
+                        &format!("({params})"),
+                        0.0,
+                        TextFormat::simple(mono, theme::TEXT_DIM),
+                    );
+                    ui.add(egui::Label::new(job).sense(egui::Sense::click()))
+                });
+                let r = head.inner;
+                let r = match declared {
+                    Some(s) if !s.doc.is_empty() => r.on_hover_text(format!(
+                        "{}\n\nThe script fires it with self:emit(\"{}\", ...). Click to see where it \
+                         is declared.",
+                        s.doc, s.name
+                    )),
+                    Some(s) => r.on_hover_text(format!(
+                        "The script fires it with self:emit(\"{}\", ...).",
+                        s.name
+                    )),
+                    None => r.on_hover_text("The script no longer declares this signal"),
+                };
+                if r.clicked()
+                    && let Some(s) = declared
+                {
+                    open = Some(s.line);
+                }
+                let params = declared.map(|s| s.params.clone()).unwrap_or_default();
+                for (k, c) in wired.iter().enumerate().filter(|(_, c)| c.signal == name) {
+                    for w in connection_row(ui, world, entity, &objects, k, c, &params) {
+                        edits.push((k, w));
+                    }
+                }
+                let none = !wired.iter().any(|c| c.signal == name);
+                ui.horizontal(|ui| {
+                    ui.add_space(18.0);
+                    if ui
+                        .small_button("+ Connect")
+                        .on_hover_text("Call a method of a scene object's script when this fires")
+                        .clicked()
+                    {
+                        added.push(name.to_string());
+                    }
+                    if none {
+                        ui.label(theme::dim("no one listens yet").small());
+                    }
+                });
+            }
+        });
+    if edits.is_empty() && added.is_empty() {
+        return open;
+    }
+    let mut wired = wired;
+    for name in added {
+        // A new wire to the first other scripted object (Godot's dialog starts on one too).
+        let target = objects
+            .iter()
+            .find(|o| o.1 != entity)
+            .map(|o| o.0.clone())
+            .unwrap_or_default();
+        wired.push(engine_script::Connection {
+            signal: name,
+            target,
+            ..Default::default()
+        });
+    }
+    let mut removed = Vec::new();
+    for (k, w) in edits {
+        let Some(c) = wired.get_mut(k) else { continue };
+        match w {
+            Wire::Target(t) => {
+                c.target = t;
+                c.method.clear();
+            }
+            Wire::Method(m) => c.method = m,
+            Wire::Args(a) => c.args = a,
+            Wire::Once(o) => c.once = o,
+            Wire::Remove => removed.push(k),
+            Wire::NewMethod(m) => {
+                let params = signals
+                    .iter()
+                    .find(|s| s.name == c.signal)
+                    .map(|s| s.params.clone())
+                    .unwrap_or_default();
+                if let Some(file) = target_script(&objects, entity, &c.target)
+                    && let Some(line) = add_method(world, &file, &m, &params, &c.signal)
+                {
+                    c.method = m;
+                    if let Some(mut t) = world.get_resource_mut::<ScriptsTab>() {
+                        t.props.open_after = Some((file, line));
+                    }
+                }
+            }
+        }
+    }
+    let mut k = 0;
+    wired.retain(|_| {
+        k += 1;
+        !removed.contains(&(k - 1))
+    });
+    after["connections"] = serde_json::to_value(&wired).unwrap_or(Value::Null);
+    if wired.is_empty()
+        && let Some(map) = after.as_object_mut()
+    {
+        map.remove("connections");
+    }
+    open
+}
+
+/// One connection: `→ [object] · [method] [values] [once] ✖`, red where the object or the
+/// method is missing.
+fn connection_row(
+    ui: &mut egui::Ui,
+    world: &mut World,
+    entity: Entity,
+    objects: &[(String, Entity, String)],
+    k: usize,
+    c: &engine_script::Connection,
+    params: &str,
+) -> Vec<Wire> {
+    let mut out = Vec::new();
+    let file = target_script(objects, entity, &c.target);
+    let methods = file
+        .as_deref()
+        .and_then(|f| engine_script::props::declared(world, f).ok())
+        .map(|d| d.methods)
+        .unwrap_or_default();
+    let method = methods.iter().find(|m| m.name == c.method);
+    ui.horizontal(|ui| {
+        ui.add_space(18.0);
+        ui.label(RichText::new("➡").color(SIGNAL));
+        let target_text = if c.target.is_empty() {
+            "this object".to_string()
+        } else {
+            c.target.clone()
+        };
+        let target_color = if file.is_some() { theme::TEXT } else { ERROR };
+        egui::ComboBox::from_id_salt(("signal target", entity, k))
+            .selected_text(RichText::new(target_text).color(target_color))
+            .width(130.0)
+            .height(320.0)
+            .show_ui(ui, |ui| {
+                if ui
+                    .selectable_label(c.target.is_empty(), "this object")
+                    .clicked()
+                    && !c.target.is_empty()
+                {
+                    out.push(Wire::Target(String::new()));
+                }
+                for (name, e, path) in objects {
+                    if *e == entity {
+                        continue;
+                    }
+                    let r = ui.selectable_label(*name == c.target, name);
+                    if r.on_hover_text(path).clicked() && *name != c.target {
+                        out.push(Wire::Target(name.clone()));
+                    }
+                }
+            })
+            .response
+            .on_hover_text(match &file {
+                Some(f) => format!("Its script: {f}"),
+                None => format!("No scene object named \"{}\" runs a script", c.target),
+            });
+        ui.label(theme::dim("·"));
+        let method_text = match (c.method.is_empty(), method) {
+            (true, _) => RichText::new("pick a method").color(ERROR),
+            (false, Some(m)) => RichText::new(format!("{}({})", m.name, m.params)).monospace(),
+            (false, None) => RichText::new(format!("{}  (missing)", c.method))
+                .monospace()
+                .color(ERROR),
+        };
+        let fresh = format!("on_{}", c.signal);
+        let combo = egui::ComboBox::from_id_salt(("signal method", entity, k))
+            .selected_text(method_text)
+            .width(170.0)
+            .height(360.0)
+            .show_ui(ui, |ui| {
+                for m in &methods {
+                    let label = RichText::new(format!("{}({})", m.name, m.params)).monospace();
+                    let label = if m.hook {
+                        label.color(theme::TEXT_DIM)
+                    } else {
+                        label
+                    };
+                    if ui.selectable_label(m.name == c.method, label).clicked()
+                        && m.name != c.method
+                    {
+                        out.push(Wire::Method(m.name.clone()));
+                    }
+                }
+                if file.is_some() && !methods.iter().any(|m| m.name == fresh) {
+                    ui.separator();
+                    if ui
+                        .selectable_label(false, format!("+ New method {fresh}({params})"))
+                        .on_hover_text("Write it into the object's script and open it there")
+                        .clicked()
+                    {
+                        out.push(Wire::NewMethod(fresh.clone()));
+                    }
+                }
+            });
+        if let Some(mut tab) = world.get_resource_mut::<ScriptsTab>() {
+            tab.drawn_at
+                .insert(format!("signal method {k}"), combo.response.rect);
+        }
+        // Fixed values (Unity's static parameters): JSON, empty passes the signal's own.
+        let mut text = if c.args.is_empty() {
+            String::new()
+        } else {
+            c.args
+                .iter()
+                .map(|v| v.to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        let r = ui
+            .add(
+                egui::TextEdit::singleline(&mut text)
+                    .desired_width(70.0)
+                    .hint_text(if params.is_empty() { "values" } else { params }),
+            )
+            .on_hover_text(
+                "Values to call it with, as JSON (2, \"open\", true). Empty: the signal's own \
+                 values.",
+            );
+        if r.changed() {
+            let parsed: Option<Vec<Value>> = if text.trim().is_empty() {
+                Some(Vec::new())
+            } else {
+                serde_json::from_str::<Vec<Value>>(&format!("[{text}]")).ok()
+            };
+            if let Some(a) = parsed {
+                out.push(Wire::Args(a));
+            }
+        }
+        let mut once = c.once;
+        if ui
+            .checkbox(&mut once, "once")
+            .on_hover_text("Only the first time it fires each play (Godot's one shot)")
+            .changed()
+        {
+            out.push(Wire::Once(once));
+        }
+        if ui.small_button("✖").on_hover_text("Disconnect").clicked() {
+            out.push(Wire::Remove);
+        }
+    });
+    out
+}
+
+/// "Heard from": the scene's connections that call this object's script (the other end of
+/// the wires, as Godot marks connected methods). Returns a file and line to open.
+fn heard_section(ui: &mut egui::Ui, world: &mut World, entity: Entity) -> Option<(String, u32)> {
+    let me = world.get::<Name>(entity)?.as_str().to_string();
+    let mine = world.get::<Script>(entity)?.path.clone();
+    let mut q = world.query_filtered::<(Entity, &Name, &Script), With<crate::scene_ops::InScene>>();
+    let heard: Vec<(String, String, String)> = q
+        .iter(world)
+        .flat_map(|(e, n, s)| {
+            s.connections
+                .iter()
+                .filter(|c| {
+                    (c.target.is_empty() && e == entity) || (!me.is_empty() && c.target == me)
+                })
+                .map(|c| (n.as_str().to_string(), c.signal.clone(), c.method.clone()))
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    if heard.is_empty() {
+        return None;
+    }
+    let methods = engine_script::props::declared(world, &mine)
+        .map(|d| d.methods)
+        .unwrap_or_default();
+    let mut open = None;
+    egui::CollapsingHeader::new(RichText::new("Heard from").strong().color(theme::TEXT))
+        .id_salt(("script heard", entity))
+        .default_open(true)
+        .show(ui, |ui| {
+            for (from, signal, method) in &heard {
+                let line = methods.iter().find(|m| &m.name == method).map(|m| m.line);
+                let mut job = LayoutJob::default();
+                let mono = FontId::monospace(12.0);
+                job.append(from, 0.0, TextFormat::simple(mono.clone(), theme::TEXT));
+                job.append(" ⚡", 0.0, TextFormat::simple(mono.clone(), SIGNAL));
+                job.append(
+                    signal,
+                    0.0,
+                    TextFormat::simple(mono.clone(), Color32::WHITE),
+                );
+                job.append(
+                    "  ➡  ",
+                    0.0,
+                    TextFormat::simple(mono.clone(), theme::TEXT_DIM),
+                );
+                let color = if line.is_some() { CALL } else { ERROR };
+                job.append(method, 0.0, TextFormat::simple(mono, color));
+                let r = ui
+                    .add(egui::Label::new(job).sense(egui::Sense::click()))
+                    .on_hover_text(match line {
+                        Some(_) => "Open the method",
+                        None => "This script has no such method",
+                    });
+                if r.clicked()
+                    && let Some(l) = line
+                {
+                    open = Some((mine.clone(), l));
+                }
+            }
+        });
+    open
+}
+
+/// Writes `function Class:name(params)` (an empty body with a comment) into `file`, before
+/// its `return Class`, as Godot's connect dialog makes the receiving method. Returns the new
+/// method's first line (1-based).
+fn add_method(
+    world: &mut World,
+    file: &str,
+    name: &str,
+    params: &str,
+    signal: &str,
+) -> Option<u32> {
+    let full = engine_script::scripts_root(world).join(engine_script::normalize(file));
+    let text = std::fs::read_to_string(&full).ok()?;
+    let lines: Vec<&str> = text.lines().collect();
+    let ret = lines
+        .iter()
+        .rposition(|l| l.trim_start().starts_with("return "))?;
+    let class = lines[ret].trim_start().trim_start_matches("return ").trim();
+    if class.is_empty() || !class.chars().all(|c| c.is_alphanumeric() || c == '_') {
+        return None;
+    }
+    let names: Vec<&str> = params
+        .split(',')
+        .map(|p| p.split(':').next().unwrap_or("").trim())
+        .filter(|p| !p.is_empty())
+        .collect();
+    let method = format!(
+        "function {class}:{name}({})\n\t-- {signal} fired\nend\n",
+        names.join(", ")
+    );
+    let mut out = lines[..ret].join("\n");
+    if !out.ends_with("\n\n") {
+        out.push_str(if out.ends_with('\n') { "\n" } else { "\n\n" });
+    }
+    let line = out.lines().count() as u32 + 1;
+    out.push_str(&method);
+    out.push('\n');
+    out.push_str(&lines[ret..].join("\n"));
+    out.push('\n');
+    std::fs::write(&full, out).ok()?;
+    Some(line)
 }
 
 fn problem_free(marks: &FileMarks) -> bool {
@@ -5206,7 +5765,7 @@ pub fn props_shots(dir: String) -> ShotScript {
         Step::Do(Box::new(set(
             "Beacon",
             json!({"lumens": 5200, "color": [1.0, 0.45, 0.2], "mode": "blink",
-                   "target": "Lamp", "pulse": {"rate": 1.6, "depth": 0.6}}),
+                   "pulse": {"rate": 1.6, "depth": 0.6}}),
         ))),
         Step::Wait(20),
         Step::Shot("props_03_overrides"),
@@ -5301,8 +5860,8 @@ pub fn types_shots(dir: String) -> ShotScript {
         Step::Camera(DVec3::new(1.5, 1.3, 9.0), DVec3::new(-0.5, 1.0, 2.5)),
         Step::Tab(Tab::Scripts),
         Step::Wait(30),
-        // Three mistakes typed, not saved: a misspelt prop, a misspelt entity field and a number
-        // where a name goes. Each is underlined where it is; the Problems list has them all.
+        // Three mistakes typed, not saved: a misspelt prop, a misspelt entity field and text
+        // where the signal sends a number. Each is underlined where it is; Problems lists them.
         Step::Do(Box::new(with_tab(|_, tab| {
             let doc = &mut tab.docs[tab.current];
             doc.text = doc
@@ -5312,7 +5871,10 @@ pub fn types_shots(dir: String) -> ShotScript {
                     "self.entity.position = self.home",
                     "self.entity.positon = self.home",
                 )
-                .replace("world.find(p.target)", "world.find(p.every)");
+                .replace(
+                    "self:emit(\"flashed\", self.flashes)",
+                    "self:emit(\"flashed\", p.mode)",
+                );
             doc.jump = caret_after(&doc.text, "p.lumen");
             tab.types.show_problems = true;
         }))),
@@ -5366,6 +5928,223 @@ pub fn types_shots(dir: String) -> ShotScript {
             let doc = &mut tab.docs[tab.current];
             doc.text = doc.saved.clone();
         }))),
+        Step::Wait(5),
+    ];
+    ShotScript::new(dir, steps)
+}
+
+/// `editor --headless --size 1920x1080 --shots <dir> --script signals`: signals wired in the
+/// Details panel. The beacon's `flashed` signal wired to the lamp's `flare` (with a fixed
+/// value), the list of the lamp's methods with "+ New method", the lamp's side (Heard from,
+/// and the bolt by `Lamp:flare` in the code), playing (the lamp flares at each signal), and a
+/// misspelt signal caught by the type checker.
+pub fn signals_shots(dir: String) -> ShotScript {
+    let _ = std::fs::create_dir_all(&dir);
+    let root = std::fs::canonicalize(&dir)
+        .unwrap_or_else(|_| std::env::current_dir().unwrap_or_default().join(&dir))
+        .join("scripts");
+    let setup = move |world: &mut World, editor: &mut Editor| {
+        editor.icons = false;
+        let sky = world
+            .resource::<TypeRegistry>()
+            .resource("Sky")
+            .map(|r| r.patch);
+        if let Some(patch) = sky {
+            let _ = patch(world, json!({"hour": 19.6, "hours_per_second": 0.0}));
+        }
+        let from = engine_script::scripts_root(world).join(EXAMPLES);
+        copy_dir(&from, &root.join(EXAMPLES));
+        world.resource_mut::<ScriptSettings>().folder = root.to_string_lossy().to_string();
+        world.remove_resource::<ScriptRuntime>();
+        for (entity, path) in [
+            ("Lamp", "examples/lamp.luau"),
+            ("Stone", "examples/float.luau"),
+        ] {
+            if let Some(e) = crate::shots::find(world, entity) {
+                world.entity_mut(e).insert(Script::new(path));
+            }
+        }
+        let bulb = MeshRenderer::new(
+            Shape::Sphere {
+                radius: 0.14,
+                segments: 0,
+            },
+            StandardMaterial::hex(0xb8e0ff).with_emissive([0.35, 0.75, 1.0], 2000.0),
+        );
+        // The beacon flashes often here, so the lamp's flares show in a still.
+        let beacon = Script::new("examples/beacon.luau")
+            .with_props(json!({"every": 1, "pulse": {"rate": 1.4, "depth": 0.6}}));
+        editor::spawn_with(
+            world,
+            editor,
+            "Beacon".into(),
+            vec![
+                (
+                    "MeshRenderer",
+                    serde_json::to_value(bulb).unwrap_or_default(),
+                ),
+                (
+                    "PointLight",
+                    json!({"color": [0.35, 0.75, 1.0], "intensity_lm": 2400.0, "range": 10.0}),
+                ),
+                ("Script", serde_json::to_value(beacon).unwrap_or_default()),
+            ],
+            Transform::from_translation(DVec3::new(-0.9, 1.1, 5.2)),
+        );
+        world.resource_mut::<EditorDock>().0 = props_layout();
+    };
+    // Wires a signal as the Details panel does (one undo step).
+    let wire = |from: &'static str,
+                signal: &'static str,
+                to: &'static str,
+                method: &'static str,
+                args: Value| {
+        move |world: &mut World, ed: &mut Editor| {
+            let Some(e) = crate::shots::find(world, from) else {
+                return;
+            };
+            let Some(before) = world
+                .get::<Script>(e)
+                .and_then(|s| serde_json::to_value(s).ok())
+            else {
+                return;
+            };
+            let mut script: Script = serde_json::from_value(before.clone()).unwrap_or_default();
+            script.connections.push(engine_script::Connection {
+                signal: signal.into(),
+                target: to.into(),
+                method: method.into(),
+                args: args.as_array().cloned().unwrap_or_default(),
+                once: false,
+            });
+            editor::apply(
+                world,
+                ed,
+                Command::Component {
+                    entity: e,
+                    name: "Script".into(),
+                    before: Some(before),
+                    after: serde_json::to_value(script).ok(),
+                },
+            );
+        }
+    };
+    // A click on a widget the panel drew last frame (by its `drawn_at` name).
+    let press = |what: &'static str, pressed: bool| {
+        move |world: &mut World, _: &mut Editor| {
+            let Some(r) = world
+                .get_resource::<ScriptsTab>()
+                .and_then(|t| t.drawn_at.get(what).copied())
+            else {
+                return;
+            };
+            let input = &mut world
+                .resource_mut::<crate::egui_bridge::EguiInput>()
+                .injected;
+            input.push(egui::Event::PointerMoved(r.center()));
+            input.push(egui::Event::PointerButton {
+                pos: r.center(),
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: Modifiers::NONE,
+            });
+        }
+    };
+    let hover = |what: &'static str| {
+        move |world: &mut World, _: &mut Editor| {
+            let at = world.get_resource::<ScriptsTab>().and_then(|t| {
+                t.drawn_at
+                    .iter()
+                    .find(|(k, _)| k.starts_with(what))
+                    .map(|(_, r)| r.center())
+            });
+            if let Some(p) = at {
+                world
+                    .resource_mut::<crate::egui_bridge::EguiInput>()
+                    .injected
+                    .push(egui::Event::PointerMoved(p));
+            }
+        }
+    };
+    let steps = vec![
+        Step::Do(Box::new(setup)),
+        Step::Tool(crate::editor::Tool::Select),
+        Step::Camera(DVec3::new(1.2, 1.5, 9.2), DVec3::new(-0.6, 1.0, 3.0)),
+        Step::Select("Beacon"),
+        Step::Wait(30),
+        // Beacon ⚡ flashed → Lamp · flare(strength) with 2.5 as its value.
+        Step::Do(Box::new(wire(
+            "Beacon",
+            "flashed",
+            "Lamp",
+            "flare",
+            json!([2.5]),
+        ))),
+        Step::Wait(30),
+        Step::Shot("signals_01_wired"),
+        // The lamp's methods to choose from, and a new one to write.
+        Step::Do(Box::new(press("signal method 0", true))),
+        Step::Wait(1),
+        Step::Do(Box::new(press("signal method 0", false))),
+        Step::Wait(20),
+        Step::Shot("signals_02_methods"),
+        Step::Do(Box::new(|world: &mut World, _: &mut Editor| {
+            world
+                .resource_mut::<crate::egui_bridge::EguiInput>()
+                .injected
+                .push(egui::Event::Key {
+                    key: Key::Escape,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: Modifiers::NONE,
+                });
+        })),
+        // The other end: the lamp hears it (Details), and its code says so by `flare`.
+        Step::Select("Lamp"),
+        Step::Tab(Tab::Scripts),
+        Step::Do(Box::new(|world: &mut World, _: &mut Editor| {
+            world.resource_scope(|world, mut tab: Mut<ScriptsTab>| {
+                open(world, &mut tab, "examples/lamp.luau", Some(24));
+            });
+        })),
+        Step::Wait(40),
+        Step::Do(Box::new(hover("heard "))),
+        Step::Wait(20),
+        Step::Shot("signals_03_heard"),
+        // Playing: each flash of the beacon flares the lamp.
+        Step::Tab(Tab::Viewport),
+        Step::Select("Beacon"),
+        Step::Do(Box::new(|world: &mut World, ed: &mut Editor| {
+            editor::play(world, ed)
+        })),
+        Step::Wait(150),
+        Step::Shot("signals_04_playing"),
+        Step::Do(Box::new(|world: &mut World, ed: &mut Editor| {
+            editor::stop(world, ed)
+        })),
+        Step::Wait(10),
+        // A misspelt signal: the type checker knows the beacon's signals.
+        Step::Tab(Tab::Scripts),
+        Step::Do(Box::new(|world: &mut World, _: &mut Editor| {
+            world.resource_scope(|world, mut tab: Mut<ScriptsTab>| {
+                open(world, &mut tab, "examples/beacon.luau", Some(50));
+                let i = tab.current;
+                let doc = &mut tab.docs[i];
+                doc.text = doc
+                    .saved
+                    .replace("self:emit(\"flashed\"", "self:emit(\"flash\"");
+                tab.types.show_problems = true;
+            });
+        })),
+        Step::Wait(40),
+        Step::Shot("signals_05_misspelt"),
+        Step::Do(Box::new(|world: &mut World, _: &mut Editor| {
+            let mut tab = world.resource_mut::<ScriptsTab>();
+            let i = tab.current;
+            let doc = &mut tab.docs[i];
+            doc.text = doc.saved.clone();
+        })),
         Step::Wait(5),
     ];
     ShotScript::new(dir, steps)

@@ -209,6 +209,11 @@ pub struct Word {
     pub doc: String,
 }
 
+/// Whether `name` is a hook the engine calls on its own (`update`, `on_interact`, ...).
+pub fn is_hook(name: &str) -> bool {
+    HOOKS.iter().any(|h| h.0 == name)
+}
+
 const HOOKS: &[(&str, &str, &str)] = &[
     (
         "start",

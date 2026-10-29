@@ -612,6 +612,136 @@ return Door
     );
 }
 
+const BELL: &str = r#"
+local Bell = {}
+Bell.signals = {
+	rang = "times: number, by: Entity", -- each ring
+}
+function Bell:ring(by)
+	self.times = (self.times or 0) + 1
+	self:emit("rang", self.times, by)
+end
+function Bell:typo()
+	self:emit("rnag")
+end
+return Bell
+"#;
+
+const EAR: &str = r#"
+local Ear = {}
+function Ear:start()
+	self.heard = {}
+	self.fixed = {}
+	-- Code listeners: every ring, and only the next one; and a task that waits for one.
+	local bell = world.find("Bell")
+	bell:on("rang", function(times, by)
+		table.insert(self.heard, `{times} by {by.name}`)
+	end)
+	self.first = 0
+	bell:once("rang", function(times)
+		self.first += times
+	end)
+	task.spawn(function()
+		local times = task.wait_for(bell, "rang")
+		self.waited = times
+	end)
+end
+function Ear:hear(times, by)
+	self.wired = `{times} {by.name}`
+end
+function Ear:fixed_values(a, b)
+	table.insert(self.fixed, `{a} {b}`)
+end
+return Ear
+"#;
+
+/// Signals: `self:emit` reaches the methods wired in the emitter's Script component (with the
+/// signal's values or fixed ones, `once`), `entity:on` / `entity:once` listeners and
+/// `task.wait_for`; an undeclared signal and a wire to a missing method are errors that say so.
+#[test]
+fn signals_reach_wired_methods_and_listeners() {
+    let folder = Folder::new();
+    folder.write("bell.luau", BELL);
+    folder.write("ear.luau", EAR);
+    let mut app = app_in(&folder.0);
+    let bell = app
+        .world
+        .spawn((
+            Name::new("Bell"),
+            Transform::default(),
+            Script::new("bell")
+                .connect("rang", "Ear", "hear")
+                .connect("rang", "Ear", "missing"),
+        ))
+        .id();
+    {
+        let mut s = app.world.get_mut::<Script>(bell).unwrap();
+        s.connections.push(crate::Connection {
+            signal: "rang".into(),
+            target: "Ear".into(),
+            method: "fixed_values".into(),
+            args: vec![json!(2), json!("open")],
+            once: true,
+        });
+    }
+    spawn_script(&mut app, "Ear", "ear");
+    app.update_n(2);
+    assert!(errors(&mut app).is_empty(), "{:?}", errors(&mut app));
+    eval(
+        &mut app,
+        "world.find('Bell').script:ring(world.find('Ear'))",
+    );
+    app.update_n(2);
+    eval(
+        &mut app,
+        "world.find('Bell').script:ring(world.find('Bell'))",
+    );
+    app.update_n(2);
+    let ear = |app: &mut App, field: &str| eval(app, &format!("world.find('Ear').script.{field}"));
+    assert_eq!(ear(&mut app, "wired"), json!("2 Bell"));
+    assert_eq!(ear(&mut app, "heard"), json!(["1 by Ear", "2 by Bell"]));
+    assert_eq!(ear(&mut app, "first"), json!(1), "once hears one ring");
+    assert_eq!(ear(&mut app, "waited"), json!(1));
+    assert_eq!(
+        ear(&mut app, "fixed"),
+        json!(["2 open"]),
+        "fixed values, once"
+    );
+    let s = app.world.get::<Script>(bell).unwrap();
+    assert_eq!(s.connections.len(), 2, "the once wire is spent");
+    let errs = errors(&mut app);
+    assert!(
+        errs.iter().any(|e| e.contains("has no method missing")),
+        "{errs:?}"
+    );
+    // A signal the class doesn't declare: the error lists the ones it does.
+    let typo = call_api(
+        &mut app.world,
+        "script.eval",
+        json!({"code": "world.find('Bell').script:typo()"}),
+    )
+    .unwrap_err();
+    assert!(
+        typo.contains("no signal \"rnag\" in signals (rang)"),
+        "{typo}"
+    );
+    // The editor's reading: the signal with its values and comment, the methods.
+    let declared = crate::props::declared(&mut app.world, "ear.luau").unwrap();
+    let names: Vec<&str> = declared.methods.iter().map(|m| m.name.as_str()).collect();
+    assert_eq!(names, ["hear", "fixed_values", "start"], "hooks last");
+    assert_eq!(declared.methods[0].params, "times, by");
+    let declared = crate::props::declared(&mut app.world, "bell.luau").unwrap();
+    assert_eq!(
+        declared.signals,
+        [crate::props::Signal {
+            name: "rang".into(),
+            params: "times: number, by: Entity".into(),
+            doc: "each ring".into(),
+            line: 4,
+        }]
+    );
+}
+
 #[test]
 fn errors_name_the_file_and_line_and_dont_repeat() {
     let folder = Folder::new();

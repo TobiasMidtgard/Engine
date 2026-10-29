@@ -159,6 +159,7 @@ fn main() {
             Some("scripts") => scripts::shots(dir),
             Some("props") => scripts::props_shots(dir),
             Some("types") => scripts::types_shots(dir),
+            Some("signals") => scripts::signals_shots(dir),
             Some("graphs") => graphs::shots(dir),
             _ => shots::gallery(dir),
         };

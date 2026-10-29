@@ -292,6 +292,25 @@ pub(crate) struct Outgoing {
     pub data: serde_json::Value,
 }
 
+/// A signal a script emitted (`self:emit`), delivered later in the frame.
+pub(crate) struct Emitted {
+    pub from: Entity,
+    pub signal: String,
+    /// The values, packed (`table.pack`).
+    pub args: RegistryKey,
+}
+
+/// A function listening to an entity's signal (`entity:on`, `entity:once`).
+pub(crate) struct Listener {
+    pub id: u64,
+    pub from: Entity,
+    pub signal: String,
+    /// The script that listens (its tasks run the function); none from the console.
+    pub owner: Option<Entity>,
+    pub func: RegistryKey,
+    pub once: bool,
+}
+
 /// One script error, kept for `script.errors` and shown on screen.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ScriptError {
@@ -311,6 +330,9 @@ pub(crate) struct Shared {
     pub new_tasks: Vec<NewTask>,
     pub cancelled: Vec<Thread>,
     pub outbox: Vec<Outgoing>,
+    pub emitted: Vec<Emitted>,
+    pub listeners: Vec<Listener>,
+    pub next_listener: u64,
     pub errors: VecDeque<ScriptError>,
     pub log: VecDeque<String>,
     /// The script instance whose code runs now (tasks it starts belong to it).

@@ -60,6 +60,26 @@
 //! A value set there goes in `Script::props` (only what differs from the default), reaches a
 //! running script at once (`on_props`), and a table prop set in part keeps its other defaults.
 //!
+//! ## Signals
+//!
+//! A class declares what it tells the world, and fires it with `self:emit`:
+//!
+//! ```lua
+//! Lever.signals = {
+//!     pulled = "by: Entity", -- the arm went over; who pulled it
+//! }
+//! -- in a method:
+//! self:emit("pulled", by)
+//! ```
+//!
+//! Who hears it is wired per object, in the editor's Details panel (the Script component's
+//! [`Connection`]s: a scene object, a method of its script, optional fixed values, once), as
+//! Godot connects signals and Unity's inspector wires events; code listens with
+//! `entity:on(signal, f)`, `entity:once(signal, f)` (Roblox's `Connect` and `Once`, each
+//! returning a connection with `disconnect()`) or waits with `task.wait_for(entity, signal)`.
+//! Listeners run later in the same frame, each as a task of its own (Roblox's deferred
+//! events), so one that fails or waits holds up neither the emitter nor the others.
+//!
 //! ## Type checking
 //!
 //! [`analysis`] (feature `analysis`, on by default) runs Luau's own type checker on the scripts
@@ -74,11 +94,12 @@
 //!   at run time. Tables go in as JSON, results come back as tables.
 //! * Entities (`entity` module docs): `world.find(name)`, `world.spawn(spec)`, `self:spawn(spec)`,
 //!   `e.position`/`rotation`/`scale`, `e:get(component)`, `e:set(component, patch)`,
-//!   `e:send(event, data)`, `e:material(patch)` (its own material, edited in place, for glows
+//!   `e:send(event, data)`, `e:on(signal, f)` / `e:once(signal, f)`, `e:material(patch)` (its own material, edited in place, for glows
 //!   and fades), `e.script` (another entity's script `self`).
 //! * `vec3` (f64, for world positions) and `quat` (`math` module docs).
-//! * `task.wait/spawn/delay/defer/cancel/tween/wait_until`, `self:every(s, "method")`,
-//!   `self:after(s, "method")`, `ease.*` curves. Waits run on world time.
+//! * `task.wait/spawn/delay/defer/cancel/tween/wait_until/wait_for`, `self:every(s, "method")`,
+//!   `self:after(s, "method")`, `self:emit(signal, ...)`, `ease.*` curves. Waits run on world
+//!   time.
 //! * `input.pressed(action)`, `input.just_pressed`, `input.value`, `input.stick`.
 //! * `print`/`warn` (into the log and `script.log`), `require("lib/name")` for shared modules.
 //!
@@ -244,6 +265,10 @@ pub struct Script {
     pub props: serde_json::Value,
     /// While false, the script's hooks and tasks pause (its state stays).
     pub enabled: bool,
+    /// Who hears this script's signals: methods of scene objects' scripts, wired in the
+    /// editor's Details panel (Godot's signal connections, Unity's events).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub connections: Vec<Connection>,
 }
 
 impl Default for Script {
@@ -252,8 +277,29 @@ impl Default for Script {
             path: String::new(),
             props: serde_json::Value::Object(Default::default()),
             enabled: true,
+            connections: Vec::new(),
         }
     }
+}
+
+/// One listener of a script's signal: when the script runs `self:emit(signal, ...)`, the
+/// script on `target` gets `method` called with the signal's values (or with `args`, when
+/// set), later in the same frame, as a task of its own.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Connection {
+    /// The signal, one its class declares in `signals`.
+    pub signal: String,
+    /// The scene object whose script hears it, by name; empty: this one.
+    pub target: String,
+    /// The method of that script to call.
+    pub method: String,
+    /// Values to call it with instead of the signal's own (Unity's static parameters).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub args: Vec<serde_json::Value>,
+    /// Only the first time the signal fires (each play).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub once: bool,
 }
 
 impl Script {
@@ -268,6 +314,17 @@ impl Script {
     /// The same script with these props (a JSON object).
     pub fn with_props(mut self, props: serde_json::Value) -> Self {
         self.props = props;
+        self
+    }
+
+    /// The same script with `signal` wired to `method` on the scene object named `target`.
+    pub fn connect(mut self, signal: &str, target: &str, method: &str) -> Self {
+        self.connections.push(Connection {
+            signal: signal.into(),
+            target: target.into(),
+            method: method.into(),
+            ..Default::default()
+        });
         self
     }
 }

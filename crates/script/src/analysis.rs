@@ -181,6 +181,8 @@ struct ClassSyntax {
     dot_selfs: Vec<(u32, u32)>,
     /// Own fields set as `self.x = ...` anywhere in the file.
     fields: Vec<String>,
+    /// `Class.signals = { name = "params" }`: each signal and its values as written.
+    signals: Option<Vec<(String, String)>>,
 }
 
 fn name_of(local: &luau_syntax::ast::Local) -> String {
@@ -208,6 +210,7 @@ fn class_syntax(source: &str) -> Option<ClassSyntax> {
     let mut colon_methods = Vec::new();
     let mut dot_selfs = Vec::new();
     let mut has_members = false;
+    let mut signals = None;
     for s in statements {
         match s.view() {
             StatementView::Local(l) => {
@@ -263,6 +266,15 @@ fn class_syntax(source: &str) -> Option<ClassSyntax> {
                 }) =>
             {
                 has_members = true;
+                for (var, value) in a.vars.iter().zip(a.values.iter()) {
+                    if let ExpressionKind::IndexName { expr, index, .. } = var.kind()
+                        && matches!(expr.kind(), ExpressionKind::Local { local, .. } if name_of(local) == returned)
+                        && index.bytes() == b"signals"
+                        && let ExpressionKind::Table { items } = value.kind()
+                    {
+                        signals = Some(table_strings(items));
+                    }
+                }
             }
             _ => {}
         }
@@ -283,7 +295,59 @@ fn class_syntax(source: &str) -> Option<ClassSyntax> {
         colon_methods,
         dot_selfs,
         fields,
+        signals,
     })
+}
+
+/// A table literal's `name = "text"` entries (other values give empty text).
+fn table_strings(items: &[luau_syntax::ast::TableItem]) -> Vec<(String, String)> {
+    items
+        .iter()
+        .filter_map(|item| {
+            let luau_syntax::ast::TableItem::Record { key, value } = item else {
+                return None;
+            };
+            let ExpressionKind::String { value: k, .. } = key.kind() else {
+                return None;
+            };
+            let text = match value.kind() {
+                ExpressionKind::String { value: v, .. } => {
+                    String::from_utf8_lossy(v.as_bytes()).into_owned()
+                }
+                _ => String::new(),
+            };
+            Some((String::from_utf8_lossy(k.as_bytes()).into_owned(), text))
+        })
+        .collect()
+}
+
+/// `self:emit`'s type for a class's signals: one overload per signal, its name a string
+/// singleton and its values typed as declared (`by: Entity`; a bare name is `any`).
+fn emit_type(signals: Option<&[(String, String)]>) -> String {
+    let Some(signals) = signals.filter(|s| !s.is_empty()) else {
+        return "(self: any, signal: string, ...any) -> ()".into();
+    };
+    let overloads: Vec<String> = signals
+        .iter()
+        .map(|(name, params)| {
+            let mut args = vec!["self: any".to_string(), format!("signal: \"{name}\"")];
+            for p in split_top(params) {
+                let p = p.trim();
+                if p.is_empty() {
+                    continue;
+                }
+                match p.split_once(':') {
+                    Some((n, t)) if plain_name(n.trim()) => {
+                        args.push(format!("{}: {}", n.trim(), t.trim()));
+                    }
+                    _ if plain_name(p) => args.push(format!("{p}: any")),
+                    _ => args.push("_: any".to_string()),
+                }
+            }
+            format!("(({}) -> ())", args.join(", "))
+        })
+        .collect();
+    overloads.join(" & ")
 }
 
 /// Collects `self.x = ...` and `self.x += ...` targets (names, in order of first use), and with
@@ -471,6 +535,10 @@ fn shape(source: &str, types: Option<&BTreeMap<String, String>>) -> Shape {
             }
         })
         .collect();
+    let mut fields = fields;
+    if !class.fields.iter().any(|f| f == "emit") {
+        fields.push(format!("emit: {}", emit_type(class.signals.as_deref())));
+    }
     let alias = format!(
         "; type {SELF_TYPE} = {SCRIPT_BASE} & typeof({}) & {{ {} }}",
         class.name,
@@ -1629,7 +1697,7 @@ mod tests {
         let lines: Vec<&str> = s.text.split('\n').collect();
         assert_eq!(lines.len(), src.split('\n').count(), "no line moved");
         assert!(lines[0].starts_with("local Lamp = {}; type __Self = ScriptBase"));
-        assert!(lines[0].ends_with("{ t: any }"), "{}", lines[0]);
+        assert!(lines[0].contains("{ t: any, emit: "), "{}", lines[0]);
         assert_eq!(lines[1], "function Lamp.update(self: __Self, dt: number)");
         assert_eq!(lines[4], "function Lamp.start(self: __Self)");
         // `dt` (column 21 in the file) sits after the insert in the shaped text.
@@ -1684,6 +1752,20 @@ mod tests {
             errors[1].message
         );
         assert_eq!(errors[1].span.line, at(&typo, "positon", 0).0);
+        // `self:emit` knows the class's signals: a name it doesn't declare and a value of the
+        // wrong type are both caught where they are.
+        for (wrong, says) in [
+            ("self:emit(\"flashed\", p.mode)", "string"),
+            ("self:emit(\"flahsed\", self.flashes)", "flahsed"),
+        ] {
+            let typo = beacon().replace("self:emit(\"flashed\", self.flashes)", wrong);
+            a.set_text("examples/beacon.luau", Some(typo.clone()));
+            let r = a.check("examples/beacon.luau");
+            let errors: Vec<&Problem> = r.problems.iter().filter(|p| p.error).collect();
+            assert_eq!(errors.len(), 1, "{wrong}: {errors:#?}");
+            assert_eq!(errors[0].span.line, at(&typo, wrong, 0).0, "{wrong}");
+            assert!(errors[0].message.contains(says), "{}", errors[0].message);
+        }
         // Back to the file on disk.
         a.set_text("examples/beacon.luau", None);
         assert_eq!(a.check("examples/beacon.luau").errors(), 0);
@@ -1746,7 +1828,7 @@ mod tests {
             .into_iter()
             .map(|s| s.name)
             .collect();
-        for n in ["lumens", "color", "pulse", "target", "every"] {
+        for n in ["lumens", "color", "pulse", "mode", "every"] {
             assert!(names.contains(&n.to_string()), "{n} in {names:?}");
         }
         let (t, l, c) = typing("self.entity:");

@@ -12,6 +12,7 @@ Lamp.props = {
 function Lamp:start()
 	self.t = 0
 	self.jitter = 0
+	self.boost = 0
 	self.lit = true
 	print(`{self.entity.name} burns at {self.props.lumens} lm`)
 	self:every(0.08, "shake")
@@ -25,9 +26,15 @@ function Lamp:update(dt: number)
 	self.t += dt
 	local p = self.props
 	local breath = 0.5 + 0.5 * math.sin(self.t * 2 * math.pi / p.period)
-	local glow = if self.lit then 0.55 + 0.45 * breath + self.jitter else 0
+	self.boost = math.max(0, self.boost - dt * 2.5)
+	local glow = if self.lit then 0.55 + 0.45 * breath + self.jitter + self.boost else 0
 	self.entity:set("PointLight", { color = p.color, intensity_lm = p.lumens * glow })
 	self.entity:material({ emissive = p.color, emissive_strength = 2000 * glow })
+end
+
+-- A bright burst that fades: wire a signal to it (a beacon's flash, a lever's pull).
+function Lamp:flare(strength: number?)
+	self.boost = math.max(self.boost, strength or 1)
 end
 
 function Lamp:on_interact(by)
