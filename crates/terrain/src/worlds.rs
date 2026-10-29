@@ -12,6 +12,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::landmarks::LandmarkField;
 use crate::rocks::RockField;
 use crate::shape::{Climate, PlanetShape};
 use crate::{PlanetTerrain, TerrainPalette};
@@ -257,6 +258,7 @@ impl PlanetTerrain {
                         },
                         ..tinted(TerrainPalette::mars(), r.color, 0.9)
                     },
+                    landmarks: LandmarkField::mars().tinted(r.color, 0.7),
                     ..Self::mars(seed)
                 }
             }
@@ -292,6 +294,8 @@ impl PlanetTerrain {
                         color: [0.17, 0.155, 0.14],
                         ..RockField::mars()
                     },
+                    // Granite tors on the uplands, sandstone in the deserts.
+                    landmarks: LandmarkField::terra(),
                     ..Self::earthlike(seed)
                 }
             }
@@ -325,6 +329,7 @@ impl PlanetTerrain {
                     ..TerrainPalette::moon()
                 },
                 rocks: RockField::default(),
+                landmarks: LandmarkField::ice(),
                 ..Self::moon(seed)
             },
             WorldKind::Hazy => Self {
@@ -366,6 +371,7 @@ impl PlanetTerrain {
                     lava_glow: 0.0,
                     shore_mats: 0.0,
                 },
+                landmarks: LandmarkField::default(),
                 ..Self::earthlike(seed)
             },
         };

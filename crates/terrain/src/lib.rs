@@ -10,6 +10,7 @@ pub mod far_look;
 pub mod forest;
 pub mod ground;
 pub mod landforms;
+pub mod landmarks;
 pub mod lights;
 pub mod lod;
 pub mod materials;
@@ -39,6 +40,7 @@ pub use deform::{DeformationMap, DeformationSettings};
 pub use edits::{EditLayer, LocalEdit, OverlayPaint, PAINT_NAMES, paint_index};
 pub use far_look::{FarLook, FarLookMap};
 pub use ground::GroundSurface;
+pub use landmarks::{Landmark, LandmarkField, LandmarkKind, landmarks_near};
 pub use palette::TerrainPalette;
 pub use shape::{
     Climate, FlatPad, HeightOverlay, OverlayPaintFn, PlanetShape, ShapeSample, dir_from_lat_lon,
@@ -80,6 +82,8 @@ pub struct PlanetTerrain {
     pub colliders: bool,
     /// Stones and boulders strewn over the ground near the focus (none by default).
     pub rocks: rocks::RockField,
+    /// Arches, hoodoos, buttes, tors and ice spires standing on the ground (none by default).
+    pub landmarks: landmarks::LandmarkField,
 }
 
 impl Default for PlanetTerrain {
@@ -103,6 +107,7 @@ impl PlanetTerrain {
             ground_surface: None,
             colliders: true,
             rocks: rocks::RockField::default(),
+            landmarks: landmarks::LandmarkField::earth(),
         }
     }
 
@@ -113,6 +118,7 @@ impl PlanetTerrain {
             palette: TerrainPalette::moon(),
             ocean_surface: false,
             rocks: rocks::RockField::moon(),
+            landmarks: landmarks::LandmarkField::default(),
             ..Self::earthlike(seed)
         }
     }
@@ -124,6 +130,7 @@ impl PlanetTerrain {
             palette: TerrainPalette::mars(),
             ocean_surface: false,
             rocks: rocks::RockField::mars(),
+            landmarks: landmarks::LandmarkField::mars(),
             ..Self::earthlike(seed)
         }
     }
@@ -528,6 +535,7 @@ impl Plugin for TerrainPlugin {
             .init_resource::<WearProvider>()
             .init_resource::<collider::TerrainColliders>()
             .init_resource::<rocks::RockCells>()
+            .init_resource::<landmarks::LandmarkCells>()
             .init_resource::<RecoverClock>()
             .init_resource::<lights::CityLights>()
             .register_component::<PlanetTerrain>(
@@ -556,6 +564,7 @@ impl Plugin for TerrainPlugin {
                     apply_edits,
                     collider::update_colliders,
                     rocks::update_rocks,
+                    landmarks::update_landmarks,
                 )
                     .chain()
                     .in_set(UpdateSet::AfterPropagate),

@@ -266,13 +266,20 @@ pub fn update_rocks(
             for (tier_i, tier) in TIERS.iter().enumerate() {
                 let level = level_for(&t.source, tier.cell_m);
                 let size = t.source.map.node_size(level);
-                let n = (tier.reach_m / size).ceil() as i32 + 1;
+                // Half-cell steps: toward a cube face's edges cells are down to half the
+                // nominal size along the ground, and a full step would jump over some.
+                let step = size * 0.5;
+                let n = (tier.reach_m / step).ceil() as i32 + 2;
+                let mut seen = HashSet::new();
                 for dz in -n..=n {
                     for dx in -n..=n {
-                        let q = local + (side * dx as f64 + fwd * dz as f64) * size;
+                        let q = local + (side * dx as f64 + fwd * dz as f64) * step;
                         let Some(key) = t.source.map.node_at(q, level) else {
                             continue;
                         };
+                        if !seen.insert(key) {
+                            continue;
+                        }
                         let (lo, s) = key.face_rect();
                         let mid =
                             t.source

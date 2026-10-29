@@ -215,6 +215,18 @@ impl HeightOverlay {
         (t > 0.0).then_some((t, h))
     }
 
+    /// Whether planet-local direction `dir` (at sea level) lies within `margin_m` of the
+    /// overlay's blend edge.
+    fn near(&self, dir: DVec3, r: f64, margin_m: f64) -> bool {
+        let w = self.rotation * dir;
+        let reach = self.radius_m + self.blend_m + margin_m;
+        if self.flat {
+            return w.y > 0.0 && (w.x / w.y * r).hypot(w.z / w.y * r) < reach;
+        }
+        let p = self.translation + w * r;
+        w.y > 0.0 && p.x.hypot(p.z) < reach
+    }
+
     /// The paint of the ground at planet-local direction `dir`, `h` above sea level on a
     /// planet of radius `r`, faded out with the overlay's blend.
     pub(crate) fn paint_at(&self, dir: DVec3, r: f64, h: f64) -> Option<OverlayPaint> {
@@ -497,6 +509,19 @@ impl PlanetShape {
     pub fn with_pad(mut self, pad: FlatPad) -> Self {
         self.pads.push(pad);
         self
+    }
+
+    /// Whether planet-local direction `dir` lies within `margin_m` of a flat pad (with its
+    /// calmed surroundings) or of the hand-made overlay ground.
+    pub fn near_hand_made(&self, dir: DVec3, margin_m: f64) -> bool {
+        let r = self.radius_m;
+        self.pads
+            .iter()
+            .any(|p| great_circle(dir, p.direction(), r) < p.radius_m + p.blend_m * 3.0 + margin_m)
+            || self
+                .overlay
+                .as_ref()
+                .is_some_and(|o| o.near(dir, r, margin_m))
     }
 
     /// Sample at a planet-local unit direction. `min_wavelength_m` limits the finest detail

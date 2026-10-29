@@ -238,6 +238,24 @@ everything else (streaming, LOD, colliders, ground queries, prints) follows the 
   in 24 m cells out to 110 m, boulders in 96 m cells out to 450 m), one mesh per cell, built on
   worker threads from the cell's hash, so the same rocks are there when you come back; edits
   rebuild the cells they touch. Diagnostics `terrain.rock_cells` and `terrain.rock_builds`.
+- **Landmarks** (`landmarks.rs`). Rock formations standing on the heightfield, as Paris et al.
+  2019 ("Terrain Amplification with Implicit 3D Features") and Peytavie et al. 2009 ("Arches")
+  add 3D features to a terrain: sandstone arches (a fin with an opening worn through it, or a
+  free-standing span swept along a Bezier as in Dey et al. 2017), fields of ribbed, waisted
+  hoodoos under hard caps, layered buttes stepping up in ledges over a talus apron, granite
+  tors of stacked rounded blocks, and fields of ice spires leaning together
+  (`PlanetTerrain::landmarks`, a `LandmarkField`: Earth's deserts and dry uplands, Mars, dry
+  and living worlds of other stars, ice worlds; none on the Moon or lava worlds). Each is a
+  signed distance function meshed with naive surface nets on a worker thread (space far from
+  the surface skipped a block at a time, normals from the field's gradient). The rock is
+  bedded by height above sea level, the same beds all over the planet, so ribs and ledges
+  line up from one formation to the next; colors (soft and hard beds, caprock, talus, desert
+  varnish on the cliffs) go in vertex colors over the Rock material. Placed from the hash of
+  1 km quadtree cells, thickest in badlands regions tens of kilometers across, never in the
+  sea, a river, on steep ground or within `clearance_m` of a flat pad or the hand-made
+  overlay. Drawn out to 6 km around every focus point, with a static triangle-mesh collider
+  within 1.5 km. `landmarks_near` lists them; `approach_shots ... landmarks` photographs them.
+  Diagnostics `terrain.landmark_cells` and `terrain.landmark_builds`.
 - **Where the woods are.** Installs the `ForestCover` provider: canopy cover (0..1) and needle
   share at any point, by the same rules the shader paints its woods with (`forest.rs`; a
   test fails when the shader's rules change without it), so the foliage module plants trees
@@ -345,4 +363,5 @@ from `Ground` when they apply), so the lab works on uneven ground too.
   showcase map, or anywhere once the space module re-centers the world on the player).
 - River and lake water is drawn by the terrain and has no water query yet, so nothing floats
   or swims in it. A water module can draw and simulate it from `river_network().segments()`.
-- No caves or overhangs yet (voxel volumes are next).
+- No caves yet. Overhangs come only with the landmarks, which the far view, the ground query
+  (footstep surface, foliage placement) and crater edits don't know about; physics does.

@@ -5,6 +5,7 @@
 //! ```text
 //! cargo run --release -p approach_shots -- [out_dir] [WxH] [names…]
 //! cargo run --release -p approach_shots -- [out_dir] [WxH] flight [stops…]
+//! cargo run --release -p approach_shots -- [out_dir] [WxH] landmarks [stops…]
 //! ```
 //!
 //! Each view is shot twice, `<name>_far.png` with the far view alone and `<name>_ground.png`
@@ -15,7 +16,8 @@
 //!
 //! `flight` shoots one trip instead, stop by stop, with the showcase's adapting exposure: from
 //! a field on Earth to orbit, out past the Sun to Proxima Centauri and down onto Proxima b's
-//! ground (`<stop>.png` and all of them on `flight.jpg`).
+//! ground (`<stop>.png` and all of them on `flight.jpg`). `landmarks` stands before rock
+//! formations (arches, hoodoos, buttes, tors, ice spires) on several worlds (`landmarks.jpg`).
 
 use engine_core::prelude::*;
 use engine_core::time::TimeSource;
@@ -27,7 +29,9 @@ use engine_space::{
     CelestialBody, SpaceClock, SpacePlugin, SpaceState, StarLight, demo, travel_to,
 };
 use engine_terrain::far_look::FAR_LOOK_WIDTH;
-use engine_terrain::{FarLook, FarLookMap, PlanetTerrain, TerrainPlugin, WorldKind, WorldRecipe};
+use engine_terrain::{
+    FarLook, FarLookMap, LandmarkKind, PlanetTerrain, TerrainPlugin, WorldKind, WorldRecipe,
+};
 use engine_world::SimulationFocus;
 use std::sync::Arc;
 
@@ -238,6 +242,15 @@ fn build(size: (u32, u32)) -> App {
         .add_plugins(RenderPlugin)
         .add_plugins(SpacePlugin)
         .add_plugins(TerrainPlugin);
+    // Each shot builds the dense meshes (the rock formations) anew: keep their cluster builds
+    // off the disk.
+    if let Some(mut r) = app
+        .world
+        .get_resource_mut::<engine_render::RenderSettings>()
+    {
+        r.virtual_geometry_cache = false;
+        r.virtual_geometry = std::env::var_os("NO_VG").is_none();
+    }
     let mut commands = app.world.commands();
     demo::spawn_solar_system(&mut commands);
     app.world.flush();
@@ -274,6 +287,14 @@ enum Eye {
         sun_deg: f64,
         turn_deg: f64,
         down_deg: f64,
+    },
+    /// Standing on the ground before the nearest formation of `kind`, found where the star
+    /// stands about `sun_deg` high, lit from `turn_deg` off the line of sight (0 = from the
+    /// side, 90 = from behind the camera).
+    Landmark {
+        kind: LandmarkKind,
+        sun_deg: f64,
+        turn_deg: f64,
     },
     /// On the line from body `from` to body `to`, `from_m` out from `from`, looking on at
     /// `to` (or back at `from`).
@@ -390,6 +411,106 @@ fn flight() -> Vec<Stop> {
     ]
 }
 
+/// Rock formations on Mars, Earth's deserts, Proxima b's uplands and an ice world.
+fn landmarks() -> Vec<Stop> {
+    let stop = |name, body, star, kind, sun_deg, turn_deg| Stop {
+        name,
+        body,
+        star,
+        eye: Eye::Landmark {
+            kind,
+            sun_deg,
+            turn_deg,
+        },
+        fov: 60.0,
+    };
+    use LandmarkKind::*;
+    vec![
+        stop("mars_butte", "Mars", "Sun", Butte, 25.0, 40.0),
+        stop("mars_hoodoos", "Mars", "Sun", Hoodoos, 30.0, 35.0),
+        stop("mars_arch", "Mars", "Sun", Arch, 30.0, 30.0),
+        stop("earth_arch", "Earth", "Sun", Arch, 35.0, 30.0),
+        stop("earth_hoodoos", "Earth", "Sun", Hoodoos, 30.0, 35.0),
+        stop("earth_tor", "Earth", "Sun", Tor, 30.0, 40.0),
+        stop(
+            "proxima_b_tor",
+            "Proxima Centauri b",
+            "Proxima Centauri",
+            Tor,
+            35.0,
+            40.0,
+        ),
+        stop(
+            "ice_spires",
+            "Proxima Centauri e",
+            "Proxima Centauri",
+            IceSpires,
+            20.0,
+            30.0,
+        ),
+    ]
+}
+
+/// A camera's planet-local position and the point it looks at.
+type EyeAndTarget = (DVec3, DVec3);
+
+/// Where to stand to see the nearest formation of `kind` on `terrain` (planet-local eye and
+/// target), searching where the star (planet-local direction `star`) stands `sun_deg` high.
+fn landmark_view(
+    terrain: &PlanetTerrain,
+    star: DVec3,
+    kind: LandmarkKind,
+    sun_deg: f64,
+    turn_deg: f64,
+) -> Option<EyeAndTarget> {
+    let r = terrain.shape.radius_m;
+    let across = star.any_orthonormal_vector();
+    let found = [0.0, 8.0, -8.0, 16.0, -16.0, 24.0]
+        .iter()
+        .flat_map(|&off| {
+            (0..72).map(move |k| {
+                let around = DQuat::from_axis_angle(star, k as f64 * 5f64.to_radians());
+                DQuat::from_axis_angle(around * across, (90.0 - sun_deg + off).to_radians()) * star
+            })
+        })
+        .find_map(|d| {
+            engine_terrain::landmarks_near(terrain, d * r, 5_000.0)
+                .into_iter()
+                .find(|l| l.kind == kind)
+        })?;
+    let up = found.up;
+    let star_flat = (star - up * star.dot(up)).normalize();
+    // Stand off, so the light comes from `turn_deg` off the line of sight.
+    let (st, ct) = turn_deg.to_radians().sin_cos();
+    let mut toward = up.cross(star_flat) * ct + star_flat * st;
+    // An arch is seen across its opening, from the sunnier side.
+    if kind == LandmarkKind::Arch {
+        let front = found.front();
+        let front = (front - up * front.dot(up)).normalize();
+        toward = if front.dot(star_flat) < 0.0 {
+            front
+        } else {
+            -front
+        };
+    }
+    let back = (found.width_m * 0.75).max(found.height_m * 2.5) + 15.0;
+    let foot = found.position - toward * back;
+    let d = foot.normalize();
+    let ground = terrain.shape.sample(d, 0.0).height;
+    let ground = if terrain.shape.ocean {
+        ground.max(0.0)
+    } else {
+        ground
+    };
+    let eye = d * (r + ground + 1.8);
+    let target = found.position + up * found.height_m * 0.4;
+    eprintln!(
+        "{kind:?} {:.0} m tall, {:.0} m wide, seen from {back:.0} m",
+        found.height_m, found.width_m
+    );
+    Some((eye, target))
+}
+
 /// The far view's sampler of a terrain's ground (as the showcase makes it).
 fn far_ground(terrain: &PlanetTerrain) -> FarGround {
     let shape = Arc::new(terrain.shape.clone());
@@ -432,6 +553,7 @@ fn terrain_of(b: &CelestialBody) -> Option<PlanetTerrain> {
     match &b.surface {
         Some(s) => Some(PlanetTerrain::world(&world_recipe(b, s))),
         None if b.name == "Earth" => Some(PlanetTerrain::earthlike(1).with_radius(b.radius_m)),
+        None if b.name == "Mars" => Some(PlanetTerrain::mars(1).with_radius(b.radius_m)),
         None => None,
     }
 }
@@ -665,6 +787,31 @@ fn place(app: &mut App, stop: &Stop) -> (DVec3, DVec3, DVec3) {
             };
             (eye, if look_back { a } else { z }, up)
         }
+        Eye::Landmark {
+            kind,
+            sun_deg,
+            turn_deg,
+        } => {
+            static FOUND: std::sync::Mutex<Vec<(&str, Option<EyeAndTarget>)>> =
+                std::sync::Mutex::new(Vec::new());
+            let mut found = FOUND.lock().unwrap();
+            let view = match found.iter().find(|f| f.0 == stop.name) {
+                Some(f) => f.1,
+                None => {
+                    let terrain = app.world.get::<PlanetTerrain>(b.entity).cloned();
+                    let local_star = (rot.inverse() * (star - center)).normalize();
+                    let v = terrain
+                        .and_then(|t| landmark_view(&t, local_star, kind, sun_deg, turn_deg));
+                    if v.is_none() {
+                        eprintln!("{}: no {kind:?} found", stop.name);
+                    }
+                    found.push((stop.name, v));
+                    v
+                }
+            };
+            let (eye, at) = view.unwrap_or((DVec3::Y * (radius + 100.0), DVec3::ZERO));
+            (center + rot * eye, center + rot * at, rot * eye.normalize())
+        }
         Eye::Ground {
             altitude_m,
             sun_deg,
@@ -776,6 +923,24 @@ fn shoot_stop(stop: &Stop, size: (u32, u32), out: &std::path::Path) -> std::path
     app.update_n(2);
     aim(&mut app);
     settle(&mut app);
+    // Formations stream in a few at a time.
+    if matches!(stop.eye, Eye::Landmark { .. }) {
+        for _ in 0..3_000 {
+            let cells = app
+                .world
+                .resource::<engine_terrain::landmarks::LandmarkCells>();
+            if cells.is_settled() && cells.placed > 0 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            app.update();
+        }
+        app.update_n(4);
+        let cells = app
+            .world
+            .resource::<engine_terrain::landmarks::LandmarkCells>();
+        eprintln!("{}: {} cells of formations drawn", stop.name, cells.drawn());
+    }
     // Aim again: the world may have shifted its origin meanwhile.
     aim(&mut app);
     // Between stars the volumetric fog keeps the ground's fog in its history for a few hundred
@@ -798,8 +963,8 @@ fn shoot_stop(stop: &Stop, size: (u32, u32), out: &std::path::Path) -> std::path
     path
 }
 
-/// The flight's stops side by side, four to a row, in `<out>/flight.jpg`.
-fn contact_sheet(shots: &[std::path::PathBuf], out: &std::path::Path) {
+/// Stops side by side, four to a row, in `<out>/<name>.jpg`.
+fn contact_sheet(shots: &[std::path::PathBuf], out: &std::path::Path, name: &str) {
     let (w, h) = (480, 270);
     let rows = shots.len().div_ceil(4) as u32;
     let mut sheet = image::RgbImage::new(4 * w, rows * h);
@@ -809,8 +974,8 @@ fn contact_sheet(shots: &[std::path::PathBuf], out: &std::path::Path) {
         let (x, y) = ((i % 4) as i64 * w as i64, (i / 4) as i64 * h as i64);
         image::imageops::overlay(&mut sheet, &small, x, y);
     }
-    if let Err(e) = sheet.save(out.join("flight.jpg")) {
-        eprintln!("flight.jpg: {e}");
+    if let Err(e) = sheet.save(out.join(format!("{name}.jpg"))) {
+        eprintln!("{name}.jpg: {e}");
     }
 }
 
@@ -836,7 +1001,17 @@ fn main() {
             .filter(|s| only.len() == 1 || only[1..].contains(&s.name))
             .map(|s| shoot_stop(s, size, &out))
             .collect();
-        contact_sheet(&shots, &out);
+        contact_sheet(&shots, &out, "flight");
+        return;
+    }
+    // `landmarks [stops…]`: rock formations on several worlds, and a sheet of them.
+    if only.first() == Some(&"landmarks") {
+        let shots: Vec<_> = landmarks()
+            .iter()
+            .filter(|s| only.len() == 1 || only[1..].contains(&s.name))
+            .map(|s| shoot_stop(s, size, &out))
+            .collect();
+        contact_sheet(&shots, &out, "landmarks");
         return;
     }
     for view in views() {
