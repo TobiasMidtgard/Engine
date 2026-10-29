@@ -2127,6 +2127,53 @@ fn fall_brace(s: &Skeleton) -> AnimationClip {
     .with_curve("effort", 16, |ph| (ph / 0.2).clamp(0.0, 1.0) * 0.9)
 }
 
+/// Bracing for a fall backward (or to the side), as judo's back breakfall teaches: chin
+/// tucked to keep the head off the floor, back rounded, hips sitting down toward the heels
+/// and the arms going back and out at about 45° with the palms down to take the floor. A
+/// ragdoll with [`RagdollTone`](crate::ragdoll::RagdollTone) holds this shape until it lands.
+fn fall_back_brace(s: &Skeleton) -> AnimationClip {
+    AnimationClip::from_fn("fall_back_brace", 1.5, 16, false, |ph| {
+        let mut p = PoseBuilder::new(s);
+        // Into the shape over the first sixth: a startled, fast reaction.
+        let k = (ph / 0.16).clamp(0.0, 1.0);
+        let k = k * k * (3.0 - 2.0 * k);
+        p.rot("hips", 8.0 * k, 0.0, 0.0);
+        spine(
+            &mut p,
+            [-16.0 * k, -14.0 * k, -18.0 * k, -24.0 * k],
+            [0.0; 4],
+            [0.0; 4],
+        );
+        for side in 0..2 {
+            arm(
+                &mut p,
+                side,
+                Arm {
+                    flex: 4.0 - 38.0 * k,
+                    twist: -18.0 * k,
+                    abduct: -10.0 + 46.0 * k,
+                    elbow: 12.0 + 8.0 * k,
+                    wrist: 30.0 * k,
+                    protract: -6.0 * k,
+                    elevate: 6.0 * k,
+                },
+            );
+            leg(
+                &mut p,
+                side,
+                4.0 + [62.0, 50.0][side] * k,
+                6.0 * k,
+                [96.0, 80.0][side] * k,
+                22.0 * k,
+                0.0,
+            );
+        }
+        p.take()
+    })
+    .with_curve("brace", 2, |_| 1.0)
+    .with_curve("effort", 16, |ph| (ph / 0.16).clamp(0.0, 1.0) * 0.9)
+}
+
 /// Up on tiptoe to take hold of something overhead with the right hand (the paddock's
 /// lantern): a glance up and a small dip, the arm sweeping up past the face with the elbow
 /// leading while the heels rise, the hand closing at the top and holding while the body
@@ -3088,6 +3135,7 @@ pub fn clips(s: &Skeleton) -> Vec<AnimationClip> {
         get_up_back(s),
         get_up_front(s),
         fall_brace(s),
+        fall_back_brace(s),
         punch(s, Punch::Jab),
         punch(s, Punch::Cross),
         punch(s, Punch::Hook),
@@ -3100,7 +3148,8 @@ pub fn clips(s: &Skeleton) -> Vec<AnimationClip> {
 /// while it stays there), `hammer_block` (while `hammer_guard` > 0.5), `guard` (a boxer's
 /// guard while `guarding` > 0.5), `reach`, `flex` and `wince` actions, and getting up off the floor
 /// (`get_up_back`, `get_up_front`: triggered by the ragdoll when a limp body comes round), and
-/// `fall_brace` (bracing for a fall, on its trigger from anywhere).
+/// `fall_brace` and `fall_back_brace` (bracing for a fall forward or backward, on their
+/// triggers from anywhere).
 pub fn graph() -> AnimGraph {
     graph_with(GRAPH, &Locomotion::default())
 }
@@ -3325,6 +3374,7 @@ pub fn graph_with(name: &str, motion: &Locomotion) -> AnimGraph {
                 state("get_up_back", NodeDef::one_shot("get_up_back")),
                 state("get_up_front", NodeDef::one_shot("get_up_front")),
                 state("fall_brace", NodeDef::one_shot("fall_brace")),
+                state("fall_back_brace", NodeDef::one_shot("fall_back_brace")),
             ],
             transitions: vec![
                 TransitionDef::new(
@@ -3398,6 +3448,14 @@ pub fn graph_with(name: &str, motion: &Locomotion) -> AnimGraph {
                 TransitionDef::new("get_up_front", "move", Condition::Finished, 0.3).inertialize(),
                 TransitionDef::new("*", "fall_brace", Condition::trigger("fall_brace"), 0.15),
                 TransitionDef::new("fall_brace", "move", Condition::Finished, 0.4).inertialize(),
+                TransitionDef::new(
+                    "*",
+                    "fall_back_brace",
+                    Condition::trigger("fall_back_brace"),
+                    0.12,
+                ),
+                TransitionDef::new("fall_back_brace", "move", Condition::Finished, 0.4)
+                    .inertialize(),
             ],
             initial: Some("move".into()),
         },

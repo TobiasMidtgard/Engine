@@ -38,7 +38,7 @@ compresses and stretches.
   queue a combo. While a strike plays, two-bone IK pulls the fist onto the target's face,
   weighted by the clip's `strike` curve, so blows land where the target is rather than
   where the clip was authored. The built-in `boxing` set chains jab, cross, hook and
-  uppercut (generated punch clips with chest turn, a dip on the uppercut and a pivoting
+  uppercut (or, on a heavy press after the hook, `uppercut_heavy`, a knockdown finisher) (generated punch clips with chest turn, a dip on the uppercut and a pivoting
   rear foot); the struck person's flinch (`hit`) snaps the head away from each blow, and
   the attacker's face sets as each punch lands (the `strike` curve feeds `Face` effort).
   A target holding up its guard (`guarding` > 0.5) blocks high strikes from within 70° of
@@ -161,6 +161,19 @@ compresses and stretches.
   or with `stagger_move` off, only publishes `stagger_velocity` for its movement to apply. `HitReaction::knock` moves a body the same way for other reasons;
   the paddock's sparring partner and boxer step back to their marks with it
   (`DemoStep::home`).
+- **Knockdowns.** A blow that would carry the body farther than two steps can catch it
+  (`HitReaction::fall_beyond`, 0.55 m of knock-back still to come, counting what earlier
+  blows left: N-step capturability, Koolen, Pratt et al. 2012) knocks it down when a physics
+  backend can catch it (`Knockdown`); without one it staggers. The body goes limp with
+  `RagdollTone` holding a protective brace until it lands: `fall_brace` (arms forward and
+  down) when pushed from behind, else `fall_back_brace` (chin tucked, hips sitting down,
+  arms back and out at about 45°, palms down, as a judo back breakfall). The blow's push is
+  spread over the parts by mass, more to the parts higher up, so the body topples over its
+  feet. Once the hips have lain still for `down_secs` (1 s), the entity is stood where the
+  get-up starts and the body gets up off its back or front; `Knockdown` goes once it
+  stands. Blows while down only push the limp parts, a walk asked for (`knock`) waits until
+  it is up, and an `Attacker` drops presses aimed at a downed target. The `boxing` set's
+  `uppercut_heavy` (a heavy press after the hook: 95 N·s, 30 damage, 0.13 s hitstop) does it.
 - **Getting up.** A person whose weight returns to 0 while lying flat gets up rather than
   blending straight to standing: `get_up_back` (sits up, tucks a leg, plants a hand and a
   knee, steps up) or `get_up_front` (palms down, pushes up to all fours, kneels, steps up),
@@ -277,7 +290,7 @@ renderer's generated materials (planks, concrete, sand, rock), and the spider cl
 | Step course | A walker leans into a ramp, crosses a deck, walks down stairs watching the steps with feet planted by IK and arms a little out, then runs back leaning into the turns (`paddock_stairs`) |
 | Footwork drill | An athlete walks a square facing one way: ahead, sidestepping left, backpedalling, sidestepping right, blending through the corners, every planted foot still on the sand (`paddock_footwork`) |
 | Shuttle lane | An athlete sprints the lane flat out from a standing start (leaning into it, then at 7 m/s with the trunk forward, knees driven high, heels kicked up and arms pumping from hip to chin), digs in to stop, runs back backwards, turns on the spot and runs sideways to the start; a coach beside the lane, arms folded, turns where they stand to keep watching, the head first and the feet stepping round once the runner is well off to one side (`paddock_sprint_start`, `paddock_sprint_stop`) |
-| Sparring partner | A lifter in a boxer's guard (lead foot and fist forward, elbows tucked, bouncing lightly) takes the boxer's combo to the face (the head snaps back from each punch), a blow to the stomach (folds over it) and a shove on the back of a shoulder, flinching away from each and recovering to the guard without being shoved off his feet (`paddock_flinch`) |
+| Sparring partner | A lifter in a boxer's guard (lead foot and fist forward, elbows tucked, bouncing lightly) blocks the jab and cross on the gloves, takes the hook and uppercut to the face (the head snaps back and the feet step back to catch the body), a blow to the stomach (folds over it) and a shove on the back of a shoulder, flinching away from each and stepping back to the mark (`paddock_flinch`); every second combo the guard drops early and a heavy uppercut knocks him down onto his back, braced (chin tucked, arms back), he lies a beat, gets up and comes back to the mark (`paddock_knockdown`) |
 | Boxer | An athlete squares up to the sparring partner and throws jab, cross, hook and uppercut, each press buffered until the last punch's cancel window opens; she steps in to range on the jab and closer for the hook and uppercut, each fist reaching the face, and both freeze for a beat as each lands (`paddock_combo`) |
 | Horse oval | A textured horse walks, trots, canters and gallops by speed; in the swing the knees fold, the hocks bend and the hooves curl back behind the fetlocks; haunches and shoulders flex with each stride; the mane rides the neck and the tail streams |
 | Dog run | A furred Labrador walks off, trots, canters out of a turn and gallops down the far straight, the spine flexing with each stride, ears and tail swinging; it pants as it goes (`paddock_dog_trot`, `paddock_dog`) |
@@ -331,6 +344,12 @@ hard blow spawns bodies with kinematic legs, pushes the neck, moves the head bey
 flinch while the feet stay within 5 mm, and the bodies are gone and the pose is the
 animation's again a second later, and the neck and back bend less than 30° and 20° past
 the flinch; a light blow only flinches.
+`tests/knockdown.rs` (stand-in backend) knocks a person down with a 95 N·s blow: limp and
+toned, braced to fall back, the parts pushed by about the blow; laid on its back, it waits a
+second still, gets up where it lies and the knockdown is over. Without a backend the same
+blow only staggers, and two 55 N·s blows close together knock down where one does not.
+`tests/combat.rs` also checks a heavy press after the hook throws `uppercut_heavy` and that
+presses at a downed target are dropped.
 `tests/stagger.rs` shoves a person in the chest: 40 N·s knocks them 0.1 to 0.5 m back, both
 feet lift and end in their places in the stance, 10 N·s moves nothing, and with
 `stagger_move` off only `stagger_velocity` says where to go.

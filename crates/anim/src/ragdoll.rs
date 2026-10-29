@@ -541,6 +541,19 @@ impl RagdollDef {
     }
 
     /// Body pose (world) of part `i` for bone model transform `m`, on an entity at `gt`.
+    /// Where each part's body is (world) for the model pose `model` of an entity at `gt`,
+    /// and its mass, kg.
+    pub(crate) fn part_points(&self, model: &[Xf], gt: &GlobalTransform) -> Vec<(DVec3, f32)> {
+        let scale = gt.scale().max_element();
+        (0..self.parts.len())
+            .filter_map(|i| {
+                let m = model.get(self.bones[i])?;
+                let mass = self.parts[i].mass_kg * scale.powi(3);
+                Some((self.body_pose(i, m, gt).0, mass))
+            })
+            .collect()
+    }
+
     fn body_pose(&self, i: usize, m: &Xf, gt: &GlobalTransform) -> (DVec3, Quat) {
         let e = gt.rotation();
         let delta = m.r * self.rest[i].r.inverse();
