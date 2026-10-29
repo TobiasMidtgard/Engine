@@ -222,6 +222,9 @@ pub struct ScriptsTab {
     pub drawn_at: HashMap<String, Rect>,
     /// The prop handle being dragged in the scene view ([`handles`]).
     pub handle: Option<HandleDrag>,
+    /// The Tools menu's tool files, and one picked there to run this frame.
+    pub tools: ToolList,
+    pub pending_tool: Option<ToolEntry>,
 }
 
 /// An open file.
@@ -484,7 +487,11 @@ pub fn panel(ui: &mut egui::Ui, world: &mut World, editor: &mut Editor) {
             tab.toast = None;
         }
     }
+    let tool = tab.pending_tool.take();
     world.insert_resource(tab);
+    if let Some(t) = tool {
+        run_tool(world, editor, ToolCall::File { path: t.file }, &t.title);
+    }
 }
 
 /// Opens `path` (or shows it if open) and puts the caret on `line` (1-based) if given.
@@ -1194,9 +1201,10 @@ fn doc_tabs(ui: &mut egui::Ui, world: &mut World, tab: &mut ScriptsTab) {
     }
 }
 
-/// The tool bar's buttons, right to left: States, VS Code, Stop on errors, Break, Profile,
-/// Go to, Find, Revert, Save.
+/// The tool bar's buttons, right to left: Tools, States, VS Code, Stop on errors, Break,
+/// Profile, Go to, Find, Revert, Save.
 fn tool_buttons(ui: &mut egui::Ui, world: &mut World, tab: &mut ScriptsTab, now: f64) {
+    tools_menu(ui, world, tab, now);
     if tab.machine.has
         && ui
             .selectable_label(!tab.machine.hidden, "States")
@@ -5094,6 +5102,11 @@ pub fn details(
         }
     }
 
+    // Its tool buttons (`@button` methods), before Play too.
+    if loaded {
+        buttons_section(ui, world, editor, entity, &path);
+    }
+
     // Its signals and who hears them (Godot's signal connections, Unity's events).
     let signals = engine_script::props::declared(world, &path)
         .map(|d| d.signals)
@@ -6710,6 +6723,318 @@ fn keep_play_values(world: &mut World) {
             ),
         );
     });
+}
+
+// ----------------------------------------------------------------------------- tools
+
+/// The scene as a tool found it: each scene entity's registered components, name and parent,
+/// and every entity there was (to tell what the tool made).
+struct SceneBefore {
+    scene: HashMap<
+        Entity,
+        (
+            engine::core::scene::EntityDoc,
+            Option<Entity>,
+            Option<SceneOrder>,
+        ),
+    >,
+    all: HashSet<Entity>,
+}
+
+fn scene_before(world: &mut World) -> SceneBefore {
+    let scene: Vec<Entity> = {
+        let mut q = world.query_filtered::<Entity, With<crate::scene_ops::InScene>>();
+        q.iter(world).collect()
+    };
+    let scene = scene
+        .into_iter()
+        .map(|e| {
+            let doc = engine::core::scene::snapshot_entity(world, e, false);
+            let parent = world.get::<ChildOf>(e).map(|p| p.parent());
+            (e, (doc, parent, world.get::<SceneOrder>(e).copied()))
+        })
+        .collect();
+    let all = world.iter_entities().map(|e| e.id()).collect();
+    SceneBefore { scene, all }
+}
+
+/// What a tool made becomes part of the scene (saved, listed, undoable): new entities under
+/// scene entities, and new named roots. Parts a script's `construct` built stay its own.
+fn adopt_made(world: &mut World, before: &SceneBefore) {
+    let made: Vec<(Entity, Option<Entity>, bool)> = {
+        let mut q = world.query_filtered::<(Entity, Option<&ChildOf>, Has<Name>), (
+            Without<crate::scene_ops::InScene>,
+            Without<engine_script::Constructed>,
+            Without<crate::scene_ops::EditorOnly>,
+        )>();
+        q.iter(world)
+            .filter(|(e, _, _)| !before.all.contains(e))
+            .map(|(e, p, named)| (e, p.map(|p| p.parent()), named))
+            .collect()
+    };
+    // Parents first, so a child knows whether it hangs under the scene.
+    let mut pending = made;
+    loop {
+        let mut adopted = false;
+        pending.retain(|&(e, parent, named)| {
+            let under_scene =
+                parent.is_some_and(|p| world.get::<crate::scene_ops::InScene>(p).is_some());
+            if under_scene || (parent.is_none() && named) {
+                world
+                    .entity_mut(e)
+                    .insert((crate::scene_ops::InScene, SceneOrder::next()));
+                adopted = true;
+                false
+            } else {
+                true
+            }
+        });
+        if !adopted {
+            break;
+        }
+    }
+}
+
+/// The scene's changes since `before`, as undo commands: scene entities made (their
+/// subtrees), removed, renamed or with components set, added or taken off.
+fn scene_changes(world: &mut World, before: &SceneBefore) -> Vec<Command> {
+    use crate::scene_ops::{InScene, SavedEntity};
+    let now: Vec<Entity> = {
+        let mut q = world.query_filtered::<Entity, With<InScene>>();
+        q.iter(world).collect()
+    };
+    let mut commands = Vec::new();
+    // Removed: each removed subtree once, from its top, as it was.
+    let gone: HashSet<Entity> = before
+        .scene
+        .keys()
+        .copied()
+        .filter(|e| world.get::<InScene>(*e).is_none())
+        .collect();
+    fn saved_from(before: &SceneBefore, e: Entity) -> SavedEntity {
+        let (doc, _, order) = before.scene[&e].clone();
+        let mut kids: Vec<Entity> = before
+            .scene
+            .iter()
+            .filter(|(_, (_, p, _))| *p == Some(e))
+            .map(|(k, _)| *k)
+            .collect();
+        kids.sort_by_key(|k| before.scene[k].2.map_or(u64::MAX, |o| o.0));
+        SavedEntity {
+            old: e,
+            doc,
+            order,
+            children: kids.into_iter().map(|k| saved_from(before, k)).collect(),
+        }
+    }
+    for &e in &gone {
+        let parent = before.scene[&e].1;
+        if parent.is_some_and(|p| gone.contains(&p)) {
+            continue;
+        }
+        commands.push(Command::Despawned {
+            saved: saved_from(before, e),
+            parent,
+        });
+    }
+    for e in now {
+        let parent = world.get::<ChildOf>(e).map(|p| p.parent());
+        let Some((doc, _, _)) = before.scene.get(&e) else {
+            // Made: each made subtree once, from its top.
+            if parent.is_some_and(|p| {
+                !before.scene.contains_key(&p) && world.get::<InScene>(p).is_some()
+            }) {
+                continue;
+            }
+            commands.push(Command::Spawned {
+                saved: crate::scene_ops::save_entity(world, e),
+                parent,
+            });
+            continue;
+        };
+        let after = engine::core::scene::snapshot_entity(world, e, false);
+        if after.name != doc.name {
+            commands.push(Command::Rename {
+                entity: e,
+                before: doc.name.clone(),
+                after: after.name.clone(),
+            });
+        }
+        let mut names: Vec<&String> = doc
+            .components
+            .keys()
+            .chain(after.components.keys())
+            .collect();
+        names.sort();
+        names.dedup();
+        for name in names {
+            let (b, a) = (doc.components.get(name), after.components.get(name));
+            if b != a {
+                commands.push(Command::Component {
+                    entity: e,
+                    name: name.clone(),
+                    before: b.cloned(),
+                    after: a.cloned(),
+                });
+            }
+        }
+    }
+    commands
+}
+
+/// What a tool runs: a button's method on an entity, or a tool file on the selection.
+#[derive(Debug, Clone)]
+pub enum ToolCall {
+    Button { entity: Entity, method: String },
+    File { path: String },
+}
+
+/// Runs a tool and records what it changed in the scene as one undo step (Unity's
+/// `Undo.RecordObject` around a `[ContextMenu]` command; Godot's EditorUndoRedoManager).
+pub fn run_tool(world: &mut World, editor: &mut Editor, call: ToolCall, label: &str) {
+    let t = editor::now(world);
+    let before = scene_before(world);
+    let result = match &call {
+        ToolCall::Button { entity, method } => call_api(
+            world,
+            "script.tool",
+            json!({"entity": entity.to_bits(), "method": method}),
+        ),
+        ToolCall::File { path } => {
+            let selection: Vec<u64> = editor.selection.iter().map(|e| e.to_bits()).collect();
+            call_api(
+                world,
+                "script.tool",
+                json!({"file": path, "selection": selection}),
+            )
+        }
+    };
+    adopt_made(world, &before);
+    let commands = scene_changes(world, &before);
+    let changed = commands.len();
+    if !commands.is_empty() {
+        editor
+            .history
+            .record(world, Command::Group(label.to_string(), commands), t);
+    }
+    match result {
+        Ok(_) if changed == 0 => editor.info(t, format!("{label}: nothing in the scene changed")),
+        Ok(_) => editor.info(t, format!("{label} (Ctrl+Z undoes it)")),
+        Err(e) => editor.error(t, format!("{label}: {}", message_gist(&e))),
+    }
+}
+
+/// The Details panel's tool buttons for a script's `@button` methods.
+fn buttons_section(
+    ui: &mut egui::Ui,
+    world: &mut World,
+    editor: &mut Editor,
+    entity: Entity,
+    path: &str,
+) {
+    let methods: Vec<engine_script::props::Method> = engine_script::props::declared(world, path)
+        .map(|d| d.methods)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|m| m.button.is_some())
+        .collect();
+    if methods.is_empty() {
+        return;
+    }
+    let mut pressed = None;
+    ui.add_space(4.0);
+    ui.horizontal_wrapped(|ui| {
+        for m in &methods {
+            let label = m.button.clone().unwrap_or_default();
+            let tip = if m.doc.is_empty() {
+                format!("Runs {}() now, before Play too", m.name)
+            } else {
+                format!("{}\n\nRuns {}() now, before Play too", m.doc, m.name)
+            };
+            let r = ui
+                .add(egui::Button::new(
+                    RichText::new(format!("▶ {label}")).color(theme::TEXT),
+                ))
+                .on_hover_text(tip);
+            if let Some(mut t) = world.get_resource_mut::<ScriptsTab>() {
+                t.drawn_at.insert(format!("button {}", m.name), r.rect);
+            }
+            if r.clicked() {
+                pressed = Some((m.name.clone(), label));
+            }
+        }
+    });
+    if let Some((method, label)) = pressed {
+        let file = path.rsplit('/').next().unwrap_or(path);
+        run_tool(
+            world,
+            editor,
+            ToolCall::Button { entity, method },
+            &format!("{label} ({file})"),
+        );
+    }
+}
+
+/// The tool files the Tools menu offers, read again when the folder changes.
+#[derive(Default)]
+pub struct ToolList {
+    /// When it was last read (seconds of editor time), and what it said.
+    read_at: f64,
+    pub tools: Vec<ToolEntry>,
+}
+
+#[derive(Clone, Debug)]
+pub struct ToolEntry {
+    pub file: String,
+    pub title: String,
+    pub doc: String,
+    pub error: Option<String>,
+}
+
+/// The Tools menu: each tool file runs on the selection, as one undo step.
+fn tools_menu(ui: &mut egui::Ui, world: &mut World, tab: &mut ScriptsTab, now: f64) {
+    if now - tab.tools.read_at > 2.0 || tab.tools.read_at == 0.0 {
+        tab.tools.read_at = now.max(1e-6);
+        if let Ok(Value::Array(list)) = call_api(world, "script.tools", json!({})) {
+            tab.tools.tools = list
+                .iter()
+                .map(|t| ToolEntry {
+                    file: t["file"].as_str().unwrap_or_default().to_string(),
+                    title: t["title"].as_str().unwrap_or_default().to_string(),
+                    doc: t["doc"].as_str().unwrap_or_default().to_string(),
+                    error: t["error"].as_str().map(str::to_string),
+                })
+                .collect();
+        }
+    }
+    let mut run = None;
+    let menu = ui.menu_button("🛠 Tools", |ui| {
+        if tab.tools.tools.is_empty() {
+            ui.label(theme::dim(
+                "No tools yet: a file in scripts/tools/ with a run(selection) function",
+            ));
+        }
+        for t in &tab.tools.tools {
+            let r = ui.add_enabled(t.error.is_none(), egui::Button::new(&t.title));
+            let tip = match &t.error {
+                Some(e) => format!("{}: {}", t.file, message_gist(e)),
+                None => format!(
+                    "{}\n\n{} — on the selection; Ctrl+Z undoes it",
+                    t.doc, t.file
+                ),
+            };
+            if r.on_hover_text(tip).clicked() {
+                run = Some(t.clone());
+                ui.close();
+            }
+        }
+    });
+    tab.drawn_at.insert("tools menu".into(), menu.response.rect);
+    menu.response
+        .on_hover_text("Run a tool script on the selected objects (scripts/tools/)");
+    if let Some(t) = run {
+        tab.pending_tool = Some(t);
+    }
 }
 
 // ----------------------------------------------------------------------------- prop handles
@@ -8414,6 +8739,224 @@ pub fn gizmos_shots(dir: String) -> ShotScript {
     ShotScript::new(dir, steps)
 }
 
+const SCATTER_AT: DVec3 = DVec3::new(-2.6, 0.0, 1.8);
+const CRATES_AT: DVec3 = DVec3::new(2.2, 0.0, 3.6);
+
+/// `editor --headless --size 1920x1080 --shots <dir> --script tools`: tool buttons and tool
+/// scripts. A stone scatter tuned, reseeded and baked into scene objects by the buttons in its
+/// Details panel, a baked stone moved, both undone; then five crates lined up and varied by
+/// the Tools menu's tool files.
+pub fn tools_shots(dir: String) -> ShotScript {
+    let _ = std::fs::create_dir_all(&dir);
+    let root = std::fs::canonicalize(&dir)
+        .unwrap_or_else(|_| std::env::current_dir().unwrap_or_default().join(&dir))
+        .join("scripts");
+    let setup = move |world: &mut World, editor: &mut Editor| {
+        editor.icons = false;
+        dusk_sky(world);
+        let scripts = engine_script::scripts_root(world);
+        copy_dir(&scripts.join(EXAMPLES), &root.join(EXAMPLES));
+        copy_dir(
+            &scripts.join(engine_script::TOOLS),
+            &root.join(engine_script::TOOLS),
+        );
+        world.resource_mut::<ScriptSettings>().folder = root.to_string_lossy().to_string();
+        world.remove_resource::<ScriptRuntime>();
+        editor::spawn_with(
+            world,
+            editor,
+            "Stone scatter".into(),
+            vec![(
+                "Script",
+                serde_json::to_value(
+                    Script::new("examples/scatter.luau")
+                        .with_props(json!({"count": 22, "radius": 3.0})),
+                )
+                .unwrap_or_default(),
+            )],
+            Transform::from_translation(SCATTER_AT),
+        );
+        // Five crates set down anyhow.
+        let spots = [
+            (0.0, 0.3, 0.2),
+            (1.2, -0.5, -0.4),
+            (2.9, 0.6, 0.9),
+            (3.6, -0.2, -0.3),
+            (5.0, 0.4, 0.5),
+        ];
+        for (i, (x, z, yaw)) in spots.into_iter().enumerate() {
+            let crate_box = MeshRenderer::new(
+                Shape::Cuboid {
+                    size: [0.8, 0.8, 0.8],
+                },
+                StandardMaterial::hex(0x8a6a44),
+            );
+            editor::spawn_with(
+                world,
+                editor,
+                format!("Crate {}", i + 1),
+                vec![(
+                    "MeshRenderer",
+                    serde_json::to_value(crate_box).unwrap_or_default(),
+                )],
+                Transform::from_translation(CRATES_AT + DVec3::new(x, 0.4, z))
+                    .with_rotation(engine::core::math::Quat::from_rotation_y(yaw)),
+            );
+        }
+        world.resource_mut::<EditorDock>().0 = tools_layout();
+        world.resource_mut::<ScriptsTab>().files_next = 0.0;
+    };
+    // The pointer onto something the tab drew (a button, the Tools menu), still, so its
+    // tooltip shows; with `click`, pressed and let go there.
+    let pointer = |what: &'static str, click: bool| {
+        move |world: &mut World, _: &mut Editor| {
+            let Some(r) = world
+                .get_resource::<ScriptsTab>()
+                .and_then(|t| t.drawn_at.get(what).copied())
+            else {
+                return;
+            };
+            let input = &mut world
+                .resource_mut::<crate::egui_bridge::EguiInput>()
+                .injected;
+            input.push(egui::Event::PointerMoved(r.center()));
+            if click {
+                for pressed in [true, false] {
+                    input.push(egui::Event::PointerButton {
+                        pos: r.center(),
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: Modifiers::NONE,
+                    });
+                }
+            }
+        }
+    };
+    let button = |method: &'static str, label: &'static str| {
+        move |world: &mut World, ed: &mut Editor| {
+            if let Some(e) = crate::shots::find(world, "Stone scatter") {
+                run_tool(
+                    world,
+                    ed,
+                    ToolCall::Button {
+                        entity: e,
+                        method: method.into(),
+                    },
+                    &format!("{label} (scatter.luau)"),
+                );
+            }
+        }
+    };
+    let crates = |world: &mut World, ed: &mut Editor| {
+        ed.selection = (1..=5)
+            .filter_map(|i| crate::shots::find(world, &format!("Crate {i}")))
+            .collect();
+    };
+    let tool = |file: &'static str, title: &'static str| {
+        move |world: &mut World, ed: &mut Editor| {
+            run_tool(world, ed, ToolCall::File { path: file.into() }, title);
+        }
+    };
+    let steps = vec![
+        Step::Do(Box::new(setup)),
+        Step::Tool(crate::editor::Tool::Select),
+        Step::Select("Stone scatter"),
+        Step::Camera(
+            SCATTER_AT + DVec3::new(0.6, 5.2, 7.4),
+            SCATTER_AT + DVec3::new(0.0, 0.2, 0.2),
+        ),
+        Step::Wait(30),
+        // Its buttons, under its props; the pointer resting on Bake shows what it does.
+        Step::Do(Box::new(pointer("button bake", false))),
+        Step::Wait(3),
+        Step::Shot("tools_01_scatter_and_its_buttons"),
+        // Reseed: another scatter, before Play.
+        Step::Do(Box::new(button("reseed", "Reseed"))),
+        Step::Wait(4),
+        Step::Shot("tools_02_reseeded"),
+        // Bake: the stones are scene objects now, listed under it; one step in History.
+        Step::Do(Box::new(button("bake", "Bake"))),
+        Step::Wait(4),
+        Step::Select("Stone 7"),
+        Step::Wait(3),
+        Step::Shot("tools_03_baked_into_the_scene"),
+        // A baked stone is the scene's own: moved like any object.
+        Step::Do(Box::new(|world: &mut World, ed: &mut Editor| {
+            let Some(e) = crate::shots::find(world, "Stone 7") else {
+                return;
+            };
+            let Some(before) = world.get::<Transform>(e).copied() else {
+                return;
+            };
+            let mut after = before;
+            after.translation += DVec3::new(0.0, 0.9, 1.6);
+            editor::apply(
+                world,
+                ed,
+                Command::Component {
+                    entity: e,
+                    name: "Transform".into(),
+                    before: serde_json::to_value(before).ok(),
+                    after: serde_json::to_value(after).ok(),
+                },
+            );
+        })),
+        Step::Wait(3),
+        Step::Shot("tools_04_a_baked_stone_moved"),
+        // Ctrl+Z twice: the move, then the whole bake, undone.
+        Step::Do(Box::new(|world: &mut World, ed: &mut Editor| {
+            editor::undo(world, ed);
+            editor::undo(world, ed);
+        })),
+        Step::Select("Stone scatter"),
+        Step::Wait(4),
+        Step::Shot("tools_05_undone_back_to_the_scatter"),
+        // The Tools menu, with the crates selected.
+        Step::Do(Box::new(|world: &mut World, _: &mut Editor| {
+            world.resource_mut::<EditorDock>().0 = tests_layout();
+        })),
+        Step::Tab(Tab::Scripts),
+        Step::Do(Box::new(crates)),
+        Step::Camera(
+            CRATES_AT + DVec3::new(2.4, 4.6, 7.0),
+            CRATES_AT + DVec3::new(2.4, 0.3, 0.0),
+        ),
+        Step::Wait(4),
+        Step::Do(Box::new(pointer("tools menu", true))),
+        Step::Wait(3),
+        Step::Shot("tools_06_tools_menu"),
+        Step::Do(Box::new(|world: &mut World, _: &mut Editor| {
+            world
+                .resource_mut::<crate::egui_bridge::EguiInput>()
+                .injected
+                .push(egui::Event::Key {
+                    key: Key::Escape,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: Modifiers::NONE,
+                });
+        })),
+        Step::Do(Box::new(tool("tools/line_up.luau", "Line up"))),
+        Step::Wait(4),
+        Step::Shot("tools_07_crates_lined_up"),
+        Step::Do(Box::new(tool("tools/vary.luau", "Turn and size randomly"))),
+        Step::Wait(4),
+        Step::Shot("tools_08_turned_and_sized"),
+    ];
+    ShotScript::new(dir, steps)
+}
+
+/// The tools shots' layout: the Scene list and History on the left, the view, Details.
+fn tools_layout() -> DockState<Tab> {
+    let mut dock = DockState::new(vec![Tab::Viewport]);
+    let surface = dock.main_surface_mut();
+    let [view, _details] = surface.split_right(NodeIndex::root(), 0.7, vec![Tab::Inspector]);
+    let [_list, left] = surface.split_left(view, 0.22, vec![Tab::Outliner]);
+    let [_list, _history] = surface.split_below(left, 0.62, vec![Tab::History]);
+    dock
+}
+
 /// The evening sky, held (Play starts the sky from the scene's time).
 fn dusk_sky(world: &mut World) {
     let sky = world
@@ -8470,6 +9013,78 @@ fn copy_dir(from: &Path, to: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A tool's changes to the scene (an entity moved, one made under it and one at the root,
+    /// one removed) are adopted into the scene and undone and redone as one step; what a
+    /// script's `construct` built stays out of both.
+    #[test]
+    fn a_tools_changes_are_one_undo_step() {
+        use crate::scene_ops::InScene;
+        let mut app = App::new();
+        app.update();
+        let w = &mut app.world;
+        let named = |w: &mut World, name: &str| {
+            let mut q = w.query_filtered::<(Entity, &Name), With<InScene>>();
+            q.iter(w).find(|(_, n)| n.as_str() == name).map(|(e, _)| e)
+        };
+        let a = w
+            .spawn((
+                InScene,
+                SceneOrder::next(),
+                Name::new("A"),
+                Transform::default(),
+            ))
+            .id();
+        let gone = w
+            .spawn((
+                InScene,
+                SceneOrder::next(),
+                Name::new("Gone"),
+                Transform::from_xyz(0.0, 2.0, 0.0),
+            ))
+            .id();
+        let before = scene_before(w);
+        w.get_mut::<Transform>(a).unwrap().translation = DVec3::X;
+        let kid = w
+            .spawn((Name::new("Kid"), Transform::default(), ChildOf(a)))
+            .id();
+        w.entity_mut(gone).despawn();
+        let root = w.spawn((Name::new("New"), Transform::default())).id();
+        let part = w
+            .spawn((
+                Name::new("Part"),
+                Transform::default(),
+                ChildOf(a),
+                engine_script::Constructed { by: a },
+            ))
+            .id();
+        adopt_made(w, &before);
+        assert!(w.get::<InScene>(kid).is_some() && w.get::<InScene>(root).is_some());
+        assert!(
+            w.get::<InScene>(part).is_none(),
+            "built parts stay the script's"
+        );
+        let commands = scene_changes(w, &before);
+        assert_eq!(commands.len(), 4, "{commands:?}");
+        let mut history = crate::undo::History::default();
+        history.record(w, Command::Group("Tool".into(), commands), 0.0);
+
+        history.undo(w).unwrap();
+        assert_eq!(w.get::<Transform>(a).unwrap().translation, DVec3::ZERO);
+        assert!(w.get_entity(kid).is_err() && w.get_entity(root).is_err());
+        let back = named(w, "Gone").expect("put back");
+        assert_eq!(
+            w.get::<Transform>(back).unwrap().translation,
+            DVec3::new(0.0, 2.0, 0.0)
+        );
+
+        history.redo(w).unwrap();
+        assert_eq!(w.get::<Transform>(a).unwrap().translation, DVec3::X);
+        assert!(named(w, "Gone").is_none());
+        assert!(named(w, "New").is_some());
+        let kid = named(w, "Kid").expect("made again");
+        assert_eq!(w.get::<ChildOf>(kid).map(|p| p.parent()), Some(a));
+    }
 
     #[test]
     fn test_files_mark_their_groups_and_tests() {

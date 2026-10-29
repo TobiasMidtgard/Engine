@@ -30,7 +30,8 @@
 //!
 //! The same reading gives the class's `signals` (each a name, its parameters as text and the
 //! comment after it: `pulled = "by: Entity", -- the arm reached the end`) and its methods, for
-//! wiring signals in the Details panel ([`declared`]).
+//! wiring signals in the Details panel ([`declared`]). A method with `@button [Label]` in the
+//! comment above it is a tool button there ([`Method::button`]).
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -151,6 +152,12 @@ pub struct Method {
     pub line: u32,
     /// A hook the engine calls itself (`update`, `on_interact`, ...).
     pub hook: bool,
+    /// `@button [Label]` in the comment above it: a button in the Details panel that runs it,
+    /// in the editor too (Unity's `[ContextMenu]`, Unreal's Call In Editor). The label, or the
+    /// name in words.
+    pub button: Option<String>,
+    /// The comment above it, without hints (the button's tooltip).
+    pub doc: String,
 }
 
 /// What a class declares for the editor.
@@ -241,11 +248,14 @@ fn read(world: &mut World, path: &str) -> Result<Declared, String> {
         .filter(|name| !name.starts_with("__"))
         .map(|name| {
             let (params, line) = method_params(&source, &name).unwrap_or_default();
+            let (button, doc) = method_notes(&source, line, &name);
             Method {
                 hook: crate::editing::is_hook(&name),
                 name,
                 params,
                 line,
+                button,
+                doc,
             }
         })
         .collect();
@@ -318,6 +328,53 @@ fn method_params(source: &str, name: &str) -> Option<(String, u32)> {
         return Some((params.to_string(), k as u32 + 1));
     }
     None
+}
+
+/// The comment lines right above line `line` (1-based) of `source`: a `@button [Label]` hint
+/// in them, and the rest as text.
+fn method_notes(source: &str, line: u32, name: &str) -> (Option<String>, String) {
+    if line < 2 {
+        return (None, String::new());
+    }
+    let lines: Vec<&str> = source.lines().collect();
+    let mut above = Vec::new();
+    for l in lines[..(line as usize - 1).min(lines.len())].iter().rev() {
+        let Some(text) = l.trim().strip_prefix("--") else {
+            break;
+        };
+        above.push(text.trim());
+    }
+    above.reverse();
+    let mut button = None;
+    let mut doc = Vec::new();
+    for text in above {
+        match text.find("@button") {
+            Some(at) => {
+                let label = text[at + "@button".len()..].trim();
+                button = Some(if label.is_empty() {
+                    in_words(name)
+                } else {
+                    label.to_string()
+                });
+                let before = text[..at].trim();
+                if !before.is_empty() {
+                    doc.push(before);
+                }
+            }
+            None => doc.push(text),
+        }
+    }
+    (button, doc.join(" "))
+}
+
+/// `snap_to_ground` as "Snap to ground".
+pub fn in_words(name: &str) -> String {
+    let spaced = name.trim_matches('_').replace('_', " ");
+    let mut chars = spaced.chars();
+    match chars.next() {
+        Some(c) => c.to_uppercase().chain(chars).collect(),
+        None => String::new(),
+    }
 }
 
 /// The table's entries as props, in the order of `notes` (the rest after them, by name).

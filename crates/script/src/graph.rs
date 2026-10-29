@@ -623,6 +623,16 @@ pub fn builtins() -> Vec<NodeSpec> {
         )
         .then(),
         NodeSpec::new(
+            "event.button",
+            "Button",
+            "Events",
+            "A button with this label in the entity's Details panel: runs when it is pressed, \
+             in the editor before Play too (a tool: what it sets in props stays, what it spawns \
+             joins the scene, and Ctrl+Z undoes it).",
+        )
+        .setting("label", Text, json!("Do it"), &[])
+        .then(),
+        NodeSpec::new(
             "event.draw_gizmos_selected",
             "Draw gizmos (selected)",
             "Events",
@@ -2128,6 +2138,25 @@ impl<'a> Gen<'a> {
             self.indent -= 1;
             self.line("end", None);
         }
+        // Buttons: a method each, marked for the Details panel.
+        for button in events.iter().filter(|n| n.kind == "event.button") {
+            self.emitted.insert(button.id);
+            let label = button
+                .values
+                .get("label")
+                .and_then(Value::as_str)
+                .and_then(|l| l.lines().next())
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            self.line("", None);
+            self.line(format!("-- @button {label}"), None);
+            self.line(format!("function {c}:tool{}()", button.id), None);
+            self.indent += 1;
+            self.chain(button.id, "then", &mut vec![HashMap::new()]);
+            self.indent -= 1;
+            self.line("end", None);
+        }
         self.custom_events(&events);
         self.state_hooks(&events);
         // After a hot reload: new variables and gates start at their values, new Every timers
@@ -3490,6 +3519,26 @@ mod tests {
             c.luau
         );
         assert!(c.luau.contains("function X:construct()"), "{}", c.luau);
+    }
+
+    #[test]
+    fn button_events_become_marked_methods() {
+        let g = Graph {
+            nodes: vec![
+                node(1, "event.button", "", json!({"label": "Bake"})),
+                node(2, "debug.print", "", json!({"text": "baked"})),
+            ],
+            links: vec![link(1, "then", 2, "in")],
+            ..Default::default()
+        };
+        let c = compile(&g, "x.graph");
+        assert!(c.problems.is_empty(), "{:?}", c.problems);
+        assert!(
+            c.luau
+                .contains("-- @button Bake\nfunction X:tool1()\n\tprint(\"baked\")\nend"),
+            "{}",
+            c.luau
+        );
     }
 
     #[test]

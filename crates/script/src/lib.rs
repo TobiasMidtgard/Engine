@@ -55,6 +55,15 @@
 //! * A prop hinted `@handle` ([`props::Handle`]) is a handle the editor draws in the scene view
 //!   and drags: a point for a `vec3`, a ring for a radius, or a distance along an axis.
 //!
+//! ## Tools
+//!
+//! A method with `@button [Label]` in the comment above it is a button in the editor's Details
+//! panel (Unity's `[ContextMenu]`, Unreal's Call In Editor): `script.tool {entity, method}` runs
+//! it, before Play on the script's editor stand-in, and keeps what it set in `self.props` in the
+//! entity's `Script::props`. A module in `tools/` ([`TOOLS`]) with `run(selection)` is a tool for
+//! the editor's Tools menu (Godot's EditorScript): `script.tool {file, selection}`. The editor
+//! records each run's changes to the scene as one undo step.
+//!
 //! ## Props in the Details panel
 //!
 //! The editor shows each prop as a field of its kind ([`props`], after Unity's inspector,
@@ -429,6 +438,10 @@ impl Default for ScriptSettings {
         }
     }
 }
+
+/// The folder of tool files under the scripts folder: modules with `run(selection)` that the
+/// editor's Tools menu runs on the selection (`script.tool {file, selection}`).
+pub const TOOLS: &str = "tools";
 
 /// Marks what a script's `construct` built (Unreal's construction script, Unity's
 /// `[ExecuteAlways]` scripts): `by` is the scripted entity. In an editor's edit mode the parts

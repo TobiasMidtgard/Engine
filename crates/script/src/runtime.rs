@@ -1618,6 +1618,142 @@ impl ScriptRuntime {
         crate::draw::flush(w(), &self.lua);
     }
 
+    // ------------------------------------------------------------------------- tools
+
+    /// Runs a tool button: `method` of `e`'s script (marked `@button`; Unity's
+    /// `[ContextMenu]`, Unreal's Call In Editor, Godot's `@export_tool_button`). In the editor's
+    /// edit mode it runs on the script's stand-in (the one `construct` built from, or one made for
+    /// the call), while playing on the running script. Returns the props it changed in
+    /// `self.props`, for the caller to keep in `Script::props`. It must not wait: in edit mode
+    /// nothing runs later, so tasks, messages and listeners it starts are dropped.
+    pub(crate) fn call_tool(
+        &mut self,
+        world: &mut World,
+        e: Entity,
+        method: &str,
+        settings: &ScriptSettings,
+    ) -> Result<serde_json::Map<String, serde_json::Value>, String> {
+        let script = world
+            .get::<Script>(e)
+            .cloned()
+            .ok_or("that entity has no Script")?;
+        let path = normalize(&script.path);
+        let editing = world.contains_resource::<crate::ScriptsHeld>();
+        if !editing && self.actors.iter().any(|a| a.instances.contains_key(&e)) {
+            return Err(format!(
+                "{path} runs on several cores (parallel_update): use its buttons before Play"
+            ));
+        }
+        self.ensure_loaded(world, &path)?;
+        let world_ptr: *mut World = world;
+        let _lent = lend_world(&self.lua, world_ptr);
+        let lua_err = |e: mlua::Error| e.to_string();
+        let (this, fresh): (Table, bool) = if editing {
+            match self.previews.get(&e) {
+                Some(p) => (self.lua.registry_value(&p.this).map_err(lua_err)?, false),
+                None => {
+                    let key = self.make_self(e, &path, &script).map_err(lua_err)?;
+                    let this = self.lua.registry_value(&key).map_err(lua_err)?;
+                    let _ = self.lua.remove_registry_value(key);
+                    (this, true)
+                }
+            }
+        } else {
+            let i = self
+                .instances
+                .get(&e)
+                .filter(|i| i.started)
+                .ok_or_else(|| format!("{path} isn't running on it (an error, or not started)"))?;
+            (self.lua.registry_value(&i.this).map_err(lua_err)?, false)
+        };
+        let Ok(Value::Function(f)) = this.get::<Value>(method) else {
+            return Err(format!("{path} has no method {method}"));
+        };
+        let props_now = |this: &Table| {
+            this.raw_get::<Value>("props")
+                .ok()
+                .and_then(|p| crate::convert::to_json(&p).ok())
+                .unwrap_or_default()
+        };
+        let before = props_now(&this);
+        shared(&self.lua).owner = Some(e);
+        self.watchdog.arm(settings.call_limit_ms);
+        let result = f.call::<()>(this.clone());
+        self.watchdog.disarm();
+        self.profiler.settle(&self.lua);
+        shared(&self.lua).owner = None;
+        let after = props_now(&this);
+        if editing {
+            self.drop_listeners(e);
+            let mut s = shared(&self.lua);
+            s.new_tasks.clear();
+            s.outbox.clear();
+            s.emitted.clear();
+        }
+        if fresh && let Ok(selves) = self.lua.named_registry_value::<Table>(SELVES) {
+            let _ = selves.raw_set(e.to_bits() as f64, Value::Nil);
+        }
+        if let Err(err) = result {
+            let message = format!("{method}: {err}");
+            note_fault(&self.lua, &message);
+            push_error(&self.lua, Some(&path), Some(e), &message);
+            return Err(message);
+        }
+        let mut changed = serde_json::Map::new();
+        if let serde_json::Value::Object(after) = after {
+            for (k, v) in after {
+                if before.get(&k) != Some(&v) {
+                    changed.insert(k, v);
+                }
+            }
+        }
+        Ok(changed)
+    }
+
+    /// Runs a tool file's `run(selection)` (Godot's EditorScript `_run`, Unity's `[MenuItem]`):
+    /// a module in `tools/` that edits the scene, given the selected entities.
+    pub(crate) fn run_tool_file(
+        &mut self,
+        world: &mut World,
+        path: &str,
+        selection: &[Entity],
+        settings: &ScriptSettings,
+    ) -> Result<(), String> {
+        let path = normalize(path);
+        self.ensure_loaded(world, &path)?;
+        let tool = self
+            .class(&path)
+            .ok_or_else(|| format!("{path} didn't load"))?;
+        let Ok(Value::Function(run)) = tool.raw_get::<Value>("run") else {
+            return Err(format!(
+                "{path} has no run function: a tool returns a table with run(selection)"
+            ));
+        };
+        let editing = world.contains_resource::<crate::ScriptsHeld>();
+        let world_ptr: *mut World = world;
+        let _lent = lend_world(&self.lua, world_ptr);
+        let list = self
+            .lua
+            .create_sequence_from(selection.iter().map(|e| EntityRef(*e)))
+            .map_err(|e| e.to_string())?;
+        self.watchdog.arm(settings.call_limit_ms);
+        let result = run.call::<()>(list);
+        self.watchdog.disarm();
+        self.profiler.settle(&self.lua);
+        if editing {
+            let mut s = shared(&self.lua);
+            s.new_tasks.clear();
+            s.outbox.clear();
+            s.emitted.clear();
+        }
+        result.map_err(|err| {
+            let message = format!("run: {err}");
+            note_fault(&self.lua, &message);
+            push_error(&self.lua, Some(&path), None, &message);
+            message
+        })
+    }
+
     /// Calls `hook` on `e`'s stand-in, with the watchdog armed and errors reported once.
     fn call_preview(&mut self, e: Entity, hook: &str, settings: &ScriptSettings) {
         let Some(p) = self.previews.get(&e) else {

@@ -333,6 +333,41 @@ Options: `color`, `alpha`, `seconds` (up to 600, real time, so they count while 
 (paths) and `size` (points). `examples/patrol.luau` uses all three: its route is three
 `@handle` points, its drone is built by `construct`, and its gizmos draw the loop.
 
+## Tool buttons and tool scripts
+
+Scripts can also be tools for whoever builds the level, as Unity's `[ContextMenu]` and
+`[MenuItem]`, Unreal's Call In Editor functions and Godot's `@export_tool_button` and
+EditorScript are:
+
+```lua
+-- Makes the stones scene objects of their own, saved with the scene. @button Bake
+function Scatter:bake()
+	for i, stone in stones(self.props) do
+		self.entity:spawn(spec(i, stone))
+	end
+	self.props.baked = true
+end
+```
+
+- `@button [Label]` in the comment above a method puts a button for it in the entity's Details
+  panel (the rest of the comment is its tooltip; without a label the button is the method's
+  name in words). It works before Play: it runs on the script's editor copy, the one
+  `construct` builds from. What it sets in `self.props` is kept in the entity's props, and
+  what it spawns becomes part of the scene (saved with it, listed in the Scene panel); parts
+  `construct` builds stay the script's own. While playing, the button runs on the running
+  script.
+- A file in `tools/` that returns a table with `run(selection)` (and a `title`) is a tool: the
+  Scripts tab's **Tools** menu lists them and runs one on the selected objects (the comment at
+  the top of the file is its tooltip). `tools/line_up.luau` and `tools/vary.luau` are two.
+- Whatever a button or a tool changes in the scene (moved, made, removed, renamed, a
+  component set) is one step that Ctrl+Z undoes and Ctrl+Y redoes, with its name in History.
+- Buttons and tools run at once and must not wait: in the editor, timers, messages and
+  listeners they start are dropped. From code or the console: `script.tool {entity, method}`
+  or `script.tool {file, selection}`; `script.tools {}` lists the tool files.
+
+`examples/scatter.luau` scatters stones round its entity as you tune it, and its buttons
+bake the scatter into scene objects, reseed it or clear it.
+
 ## Visual scripts (`.graph`)
 
 A `.graph` file is a script drawn as nodes and wires, for people who would rather not write
@@ -362,7 +397,8 @@ work the same. Edit graphs in the editor's **Graphs** tab:
   as a Luau script's `states` table does, and lights up the same while playing.
 - **Construct**, **Draw gizmos** and **Draw gizmos (selected)** are events too (see "In the
   editor's view"), and the **Draw** nodes (line, arrow, sphere, circle, box) draw after them
-  or after Update.
+  or after Update. A **Button** event is a tool button in the Details panel with its label
+  (see "Tool buttons and tool scripts").
 - **To script** writes the graph's Luau as a `.luau` file, for when a graph outgrows nodes.
 
 The file is JSON text with one node or wire per line, so changes diff and merge in git like
@@ -495,6 +531,10 @@ have them.
   `@handle` props to drag in the scene view, `construct` builds the drone (so it shows in the
   editor) and its gizmos draw the route. `examples/patrol.test.luau` tests it. The turret's
   range and the seal's spread are handles too, and both draw gizmos.
+- `examples/scatter.luau`: stones scattered round an entity, built as you tune them, with Bake,
+  Reseed and Clear buttons in its Details panel. `examples/scatter.test.luau` tests it.
+- `tools/line_up.luau`, `tools/vary.luau`: tools for the Scripts tab's Tools menu (line the
+  selection up; give each a random turn and size).
 - `examples/pulse.graph`, `examples/hover.graph`: the same lamp and stone as visual scripts.
 - `examples/lamp.test.luau`, `examples/beacon.test.luau`, `examples/float.test.luau`: tests of
   the examples (and of the `wave` module), run in the game.

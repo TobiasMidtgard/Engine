@@ -4144,3 +4144,149 @@ fn gizmos_draw_in_the_entitys_space() {
     .unwrap_err();
     assert!(err.contains("no color named"), "{err}");
 }
+
+const TOOLED: &str = r#"
+local T = {}
+T.props = {
+	count = 2, -- parts @int
+	baked = false, -- @hide
+}
+function T:construct()
+	if self.props.baked then return end
+	for i = 1, self.props.count do
+		self.entity:spawn({ name = `Built {i}`, components = { Transform = {} } })
+	end
+end
+-- Makes the parts for good. @button
+function T:bake()
+	for i = 1, self.props.count do
+		self.entity:spawn({ name = `Kept {i}`, components = { Transform = {} } })
+	end
+	self.props.baked = true
+end
+-- One more. @button Add one
+function T:add_one()
+	self.props.count += 1
+end
+-- @button
+function T:oops()
+	error("no stones here")
+end
+function T:not_a_button() end
+return T
+"#;
+
+/// `@button` methods: listed with their labels, run in edit mode on the stand-in (what they
+/// set in `self.props` is kept in the Script, what they spawn stays), and while playing on the
+/// running script; an error comes back to the caller.
+#[test]
+fn tool_buttons_run_before_play_and_keep_their_props() {
+    let folder = Folder::new();
+    folder.write("tooled.luau", TOOLED);
+    let mut app = app_in(&folder.0);
+    app.insert_resource(crate::ScriptsHeld);
+    let e = spawn_script(&mut app, "Tooled", "tooled");
+    app.update_n(2);
+    let methods = crate::props::declared(&mut app.world, "tooled.luau")
+        .unwrap()
+        .methods;
+    let buttons: Vec<(String, String, String)> = methods
+        .iter()
+        .filter_map(|m| m.button.clone().map(|b| (m.name.clone(), b, m.doc.clone())))
+        .collect();
+    assert_eq!(
+        buttons,
+        [
+            (
+                "bake".into(),
+                "Bake".into(),
+                "Makes the parts for good.".into()
+            ),
+            ("add_one".into(), "Add one".into(), "One more.".into()),
+            ("oops".into(), "Oops".into(), String::new()),
+        ]
+    );
+    assert_eq!(parts_of(&mut app, e).len(), 2);
+
+    let tool = |app: &mut App, method: &str| {
+        call_api(
+            &mut app.world,
+            "script.tool",
+            json!({"entity": {"name": "Tooled"}, "method": method}),
+        )
+    };
+    let out = tool(&mut app, "add_one").unwrap();
+    assert_eq!(out["changed"], json!({"count": 3}));
+    app.update_n(2);
+    assert_eq!(parts_of(&mut app, e).len(), 3, "rebuilt with the new count");
+
+    tool(&mut app, "bake").unwrap();
+    app.update_n(2);
+    let script = app.world.get::<Script>(e).unwrap().clone();
+    assert_eq!(script.props["baked"], json!(true));
+    assert!(
+        parts_of(&mut app, e).is_empty(),
+        "baked: construct builds nothing"
+    );
+    let kept = eval(&mut app, "return #world.find('Tooled'):children()");
+    assert_eq!(kept, json!(3), "the baked parts stay");
+
+    let err = tool(&mut app, "oops").unwrap_err();
+    assert!(err.contains("no stones here"), "{err}");
+    assert!(
+        tool(&mut app, "missing")
+            .unwrap_err()
+            .contains("no method missing")
+    );
+
+    // Playing: on the running script.
+    app.world.remove_resource::<crate::ScriptsHeld>();
+    app.update_n(2);
+    let out = tool(&mut app, "add_one").unwrap();
+    assert_eq!(out["changed"], json!({"count": 4}));
+    assert_eq!(
+        eval(&mut app, "return world.find('Tooled').script.props.count"),
+        json!(4)
+    );
+}
+
+/// Tool files in `tools/` are listed with their titles and run on a selection.
+#[test]
+fn tool_files_run_on_the_selection() {
+    let folder = Folder::new();
+    folder.write(
+        "tools/shout.luau",
+        "--!strict\n-- Names the selection in capitals.\nlocal Tool = {}\nTool.title = \"Shout\"\n\
+         function Tool.run(selection: { Entity })\n\tfor _, e in selection do\n\t\t\
+         e.name = string.upper(e.name or \"\")\n\tend\nend\nreturn Tool\n",
+    );
+    folder.write("tools/quiet.luau", "return { run = function() end }\n");
+    let mut app = app_in(&folder.0);
+    app.insert_resource(crate::ScriptsHeld);
+    app.world.spawn((Name::new("crate"), Transform::default()));
+    app.world.spawn((Name::new("barrel"), Transform::default()));
+    app.update_n(1);
+    let list = call_api(&mut app.world, "script.tools", json!({})).unwrap();
+    assert_eq!(
+        list[0]["title"],
+        json!("Quiet"),
+        "titled from its name: {list}"
+    );
+    assert_eq!(list[1]["title"], json!("Shout"));
+    assert_eq!(list[1]["doc"], json!("Names the selection in capitals."));
+    call_api(
+        &mut app.world,
+        "script.tool",
+        json!({"file": "tools/shout.luau", "selection": ["crate", "barrel"]}),
+    )
+    .unwrap();
+    assert!(
+        call_api(
+            &mut app.world,
+            "script.eval",
+            json!({"code": "return world.find('CRATE') ~= nil and world.find('BARREL') ~= nil"})
+        )
+        .unwrap()
+            == json!(true)
+    );
+}

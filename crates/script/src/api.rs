@@ -185,6 +185,82 @@ pub(crate) fn register(app: &mut App) {
         },
     )
     .register_api(
+        "script.tool",
+        "Run a tool. {entity, method}: a script's @button method on that entity, before Play too \
+         (on the script's editor stand-in); what it sets in self.props stays in the entity's \
+         Script props. {file, selection}: a tool file's run(selection), with the entities (names \
+         or ids).",
+        r#"{"entity": {"name": "Stone scatter"}, "method": "bake"}"#,
+        |world, args| {
+            if let Some(file) = str_arg(&args, "file") {
+                let path = normalize(&safe_path(file)?);
+                let selection = match args["selection"].as_array() {
+                    Some(list) => list
+                        .iter()
+                        .map(|v| resolve_entity(world, v))
+                        .collect::<Result<Vec<_>, _>>()?,
+                    None => Vec::new(),
+                };
+                with_runtime(world, |world, rt, settings| {
+                    rt.run_tool_file(world, &path, &selection, settings)
+                })??;
+                return Ok(json!({"ran": path}));
+            }
+            let e = resolve_entity(world, args.get("entity").unwrap_or(&Value::Null))?;
+            let method = str_arg(&args, "method")
+                .ok_or("missing 'method': the script's method to run, e.g. \"bake\"")?
+                .to_string();
+            let changed = with_runtime(world, |world, rt, settings| {
+                rt.call_tool(world, e, &method, settings)
+            })??;
+            keep_props(world, e, &changed);
+            Ok(json!({"changed": changed}))
+        },
+    )
+    .register_api(
+        "script.tools",
+        "The tool files (scripts/tools/*.luau), each with its title and what it does (the \
+         comment at its top), for the editor's Tools menu.",
+        "{}",
+        |world, _| {
+            let root = scripts_root(world);
+            let mut files: Vec<String> = std::fs::read_dir(root.join(crate::TOOLS))
+                .map(|dir| {
+                    dir.filter_map(|f| f.ok())
+                        .map(|f| f.file_name().to_string_lossy().to_string())
+                        .filter(|f| f.ends_with(".luau") && !f.ends_with(".test.luau"))
+                        .map(|f| format!("{}/{f}", crate::TOOLS))
+                        .collect()
+                })
+                .unwrap_or_default();
+            files.sort();
+            let mut out = Vec::new();
+            for path in files {
+                let source = std::fs::read_to_string(root.join(&path)).unwrap_or_default();
+                let doc = header_comment(&source);
+                let loaded = with_runtime(world, |world, rt, _| {
+                    rt.ensure_loaded(world, &path)?;
+                    let title = rt
+                        .class(&path)
+                        .and_then(|t| t.raw_get::<String>("title").ok());
+                    Ok::<_, String>(title)
+                })?;
+                let (title, error) = match loaded {
+                    Ok(title) => (title, None),
+                    Err(e) => (None, Some(e)),
+                };
+                let name = path.rsplit('/').next().unwrap_or(&path).trim_end_matches(".luau");
+                out.push(json!({
+                    "file": path,
+                    "title": title.unwrap_or_else(|| crate::props::in_words(name)),
+                    "doc": doc,
+                    "error": error,
+                }));
+            }
+            Ok(Value::Array(out))
+        },
+    )
+    .register_api(
         "script.reload",
         "Reload a script file now (\"path\"), or every loaded file when no path is given.",
         r#"{"path": "showcase/courtyard.luau"}"#,
@@ -564,4 +640,62 @@ fn write_file(full: &Path, text: &str) -> Result<(), String> {
     let tmp = full.with_extension("luau.tmp");
     std::fs::write(&tmp, text).map_err(|e| format!("can't write {}: {e}", tmp.display()))?;
     std::fs::rename(&tmp, full).map_err(|e| format!("can't write {}: {e}", full.display()))
+}
+
+/// What a tool's button set in `self.props`, kept in the entity's `Script::props` (a value back
+/// at its default is no override, as the Details panel does it).
+fn keep_props(world: &mut World, e: Entity, changed: &serde_json::Map<String, Value>) {
+    if changed.is_empty() {
+        return;
+    }
+    let path = match world.get::<Script>(e) {
+        Some(s) => s.path.clone(),
+        None => return,
+    };
+    let defaults: Vec<(String, Value)> = crate::props::of(world, &path)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|p| (p.name, p.default))
+        .collect();
+    let Some(mut script) = world.get_mut::<Script>(e) else {
+        return;
+    };
+    if !script.props.is_object() {
+        script.props = json!({});
+    }
+    let Some(map) = script.props.as_object_mut() else {
+        return;
+    };
+    for (k, v) in changed {
+        if defaults.iter().any(|(name, d)| name == k && same(d, v)) {
+            map.remove(k);
+        } else {
+            map.insert(k.clone(), v.clone());
+        }
+    }
+}
+
+/// The comment at the top of a file (after `--!strict`), as one paragraph.
+fn header_comment(source: &str) -> String {
+    source
+        .lines()
+        .skip_while(|l| l.trim_start().starts_with("--!"))
+        .map_while(|l| l.trim_start().strip_prefix("--"))
+        .map(str::trim)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// JSON values alike, numbers by value (`2` and `2.0`).
+fn same(a: &Value, b: &Value) -> bool {
+    match (a, b) {
+        (Value::Number(x), Value::Number(y)) => x.as_f64() == y.as_f64(),
+        (Value::Array(x), Value::Array(y)) => {
+            x.len() == y.len() && x.iter().zip(y).all(|(a, b)| same(a, b))
+        }
+        (Value::Object(x), Value::Object(y)) => {
+            x.len() == y.len() && x.iter().all(|(k, v)| y.get(k).is_some_and(|w| same(v, w)))
+        }
+        _ => a == b,
+    }
 }
