@@ -49,6 +49,7 @@ mod scripts;
 mod shots;
 mod show;
 mod snap;
+mod states;
 mod theme;
 mod thumbs;
 mod ui;
@@ -161,6 +162,7 @@ fn main() {
             Some("types") => scripts::types_shots(dir),
             Some("signals") => scripts::signals_shots(dir),
             Some("tests") => scripts::tests_shots(dir),
+            Some("states") => scripts::states_shots(dir),
             Some("graphs") => graphs::shots(dir),
             Some("graph_signals") => graphs::signals_shots(dir),
             _ => shots::gallery(dir),

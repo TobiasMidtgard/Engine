@@ -34,7 +34,7 @@ use crate::profiler::Phase;
 use crate::{Script, ScriptActor, ScriptSettings};
 
 /// Registry name of the class every instance inherits helpers from (`every`, `after`, `spawn`).
-const BASE: &str = "engine_script.base";
+pub(crate) const BASE: &str = "engine_script.base";
 
 /// Hooks a script's class defines, looked up when it loads.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -52,6 +52,8 @@ pub(crate) struct Hooks {
     pub on_world_shift: bool,
     /// `reload = "restart"`: hot reload restarts instances instead of keeping their state.
     pub restart_on_reload: bool,
+    /// A `states` table: the engine runs the class's state machine (`states.luau`).
+    pub states: bool,
 }
 
 impl Hooks {
@@ -73,6 +75,7 @@ impl Hooks {
                 class.raw_get::<Value>("reload"),
                 Ok(Value::String(s)) if s.to_str().is_ok_and(|s| &*s == "restart")
             ),
+            states: matches!(class.raw_get::<Value>("states"), Ok(Value::Table(_))),
         }
     }
 }
@@ -328,11 +331,15 @@ impl ScriptRuntime {
         lua.load(include_str!("prelude.luau"))
             .set_name("@engine/prelude.luau")
             .exec()?;
+        lua.load(include_str!("states.luau"))
+            .set_name("@engine/states.luau")
+            .exec()?;
         let base: Table = g.get("__script_base")?;
         lua.set_named_registry_value(BASE, base)?;
         for internal in [
             "__script_base",
             "__task_spawn",
+            "__task_spawn_as",
             "__task_delay",
             "__task_cancel",
             "__script_stopped",
@@ -648,7 +655,7 @@ impl ScriptRuntime {
         let updating: Vec<Entity> = self
             .instances
             .iter()
-            .filter(|(_, i)| i.enabled && i.started && i.hooks.update)
+            .filter(|(_, i)| i.enabled && i.started && (i.hooks.update || i.hooks.states))
             .map(|(e, _)| *e)
             .collect();
         for e in updating {
@@ -661,7 +668,16 @@ impl ScriptRuntime {
                 w.resource::<Time>().delta_for(w.get::<LocalTimeScale>(e)) as f64
             };
             let t0 = Instant::now();
-            self.call_hook(e, "update", dt_e, settings);
+            let (update, states, clock) = self.instances.get(&e).map_or((false, false, 0.0), |i| {
+                (i.hooks.update, i.hooks.states, i.clock)
+            });
+            if update {
+                self.call_hook(e, "update", dt_e, settings);
+            }
+            if states {
+                // Its states' updates, timers and conditions, after `update`.
+                self.call_hook(e, "__states_tick", (dt_e, clock), settings);
+            }
             if let Some(i) = self.instances.get_mut(&e) {
                 let ms = t0.elapsed().as_secs_f32() * 1000.0;
                 i.ms = i.ms * 0.9 + ms * 0.1;
@@ -1212,8 +1228,13 @@ impl ScriptRuntime {
         };
         i.started = true;
         if !i.hooks.start {
+            if i.hooks.states {
+                let clock = i.clock;
+                self.call_hook(e, "__states_start", clock, settings);
+            }
             return;
         }
+        let states = i.hooks.states;
         let path = i.path.clone();
         let this: Value = match self.lua.registry_value(&i.this) {
             Ok(v) => v,
@@ -1236,6 +1257,10 @@ impl ScriptRuntime {
             Err(err) => push_error(&self.lua, Some(&path), Some(e), &err.to_string()),
         }
         self.adopt_new_tasks();
+        // The state machine starts once `start` has set things up (or reached its first wait).
+        if states && let Some(clock) = self.instances.get(&e).map(|i| i.clock) {
+            self.call_hook(e, "__states_start", clock, settings);
+        }
     }
 
     fn destroy_instance(&mut self, e: Entity, settings: &ScriptSettings) {
@@ -1422,12 +1447,24 @@ impl ScriptRuntime {
         let hits: Vec<(Entity, Entity)> =
             cursor.read(messages).map(|m| (m.target, m.actor)).collect();
         for (target, actor) in hits {
-            if self
+            let Some(hooks) = self
                 .instances
                 .get(&target)
-                .is_some_and(|i| i.started && i.enabled && i.hooks.on_interact)
-            {
+                .filter(|i| i.started && i.enabled)
+                .map(|i| i.hooks)
+            else {
+                continue;
+            };
+            if hooks.on_interact {
                 self.spawn_hook(target, "on_interact", EntityRef(actor), settings);
+            }
+            if hooks.states {
+                self.call_hook(
+                    target,
+                    "__states_event",
+                    ("interact", EntityRef(actor)),
+                    settings,
+                );
             }
         }
     }
@@ -1484,8 +1521,14 @@ impl ScriptRuntime {
                 continue;
             }
             let data = to_lua(&self.lua, &m.data).unwrap_or(Value::Nil);
+            let states = i.hooks.states;
             if i.hooks.on_message {
-                self.spawn_hook(m.to, "on_message", (m.event, data), settings);
+                self.spawn_hook(
+                    m.to,
+                    "on_message",
+                    (m.event.clone(), data.clone()),
+                    settings,
+                );
             } else {
                 // A message named after one of the class's methods calls it: `door:send("open")`.
                 let has_method = self
@@ -1498,8 +1541,12 @@ impl ScriptRuntime {
                     })
                     .is_some_and(|v| matches!(v, Value::Function(_)));
                 if has_method {
-                    self.spawn_hook(m.to, &m.event, data, settings);
+                    self.spawn_hook(m.to, &m.event, data.clone(), settings);
                 }
+            }
+            if states {
+                // The state machine hears it too: `door:send("open")` can be an `on` event.
+                self.call_hook(m.to, "__states_event", (m.event.as_str(), data), settings);
             }
         }
     }
@@ -1545,16 +1592,18 @@ impl ScriptRuntime {
                         let _ = t;
                         None
                     }
-                    Some((t, _)) if !self.has_method(t, &c.method) => Some(format!(
-                        "signal {}: {}'s script has no method {}",
-                        m.signal,
-                        if c.target.is_empty() {
-                            "this"
-                        } else {
-                            &c.target
-                        },
-                        c.method
-                    )),
+                    Some((t, _)) if !self.has_method(t, &c.method) && !self.hears(t, &c.method) => {
+                        Some(format!(
+                            "signal {}: {}'s script has no method or state event {}",
+                            m.signal,
+                            if c.target.is_empty() {
+                                "this"
+                            } else {
+                                &c.target
+                            },
+                            c.method
+                        ))
+                    }
                     Some((t, _)) => {
                         let args = if c.args.is_empty() {
                             values.clone()
@@ -1564,7 +1613,16 @@ impl ScriptRuntime {
                                 .map(|v| to_lua(&self.lua, v).unwrap_or(Value::Nil))
                                 .collect()
                         };
-                        self.spawn_hook(t, &c.method, args, settings);
+                        if self.has_method(t, &c.method) {
+                            self.spawn_hook(t, &c.method, args.clone(), settings);
+                        }
+                        if self.instances.get(&t).is_some_and(|i| i.hooks.states)
+                            && let Ok(event) = self.lua.create_string(&c.method)
+                        {
+                            let mut with_event = args;
+                            with_event.push_front(Value::String(event));
+                            self.call_hook(t, "__states_event", with_event, settings);
+                        }
                         if c.once {
                             spent.push(k);
                         }
@@ -1631,6 +1689,19 @@ impl ScriptRuntime {
                 _ => None,
             })
             .is_some_and(|v| matches!(v, Value::Function(_)))
+    }
+
+    /// Whether `e`'s script has a state machine with an `on` transition for `event`.
+    fn hears(&self, e: Entity, event: &str) -> bool {
+        let Some(i) = self.instances.get(&e).filter(|i| i.hooks.states) else {
+            return false;
+        };
+        let Ok(Value::Table(this)) = self.lua.registry_value::<Value>(&i.this) else {
+            return false;
+        };
+        this.get::<Function>("__states_hears")
+            .and_then(|f| f.call::<bool>((this, event)))
+            .unwrap_or(false)
     }
 
     /// Runs `f(args...)` as a task of `owner`'s script (a listener of a signal).
@@ -2026,6 +2097,12 @@ impl ScriptRuntime {
             }
             if hooks.on_reload {
                 self.call_hook(e, "on_reload", (), settings);
+            }
+            if hooks.states
+                && let Some(clock) = self.instances.get(&e).map(|i| i.clock)
+            {
+                // Its states as they were, where they still exist (or a start, for new states).
+                self.call_hook(e, "__states_reload", clock, settings);
             }
         }
     }
@@ -2716,6 +2793,37 @@ fn install_tasks(lua: &Lua) -> mlua::Result<()> {
                 Err(err) => {
                     let at = crate::bind::caller(lua);
                     push_error(lua, at.as_deref(), owner, &err.to_string());
+                }
+            }
+            Ok(thread)
+        })?,
+    )?;
+    // A task of `owner`'s script, whoever starts it: a state's enter task belongs to the
+    // script whose state it is (its clock, stopped with it) even when a test or another
+    // script changed the state.
+    g.set(
+        "__task_spawn_as",
+        lua.create_function(|lua, (owner, f): (EntityRef, Function)| {
+            let thread = lua.create_thread(crate::debugger::catching(lua, f))?;
+            let before = shared(lua).owner;
+            shared(lua).owner = Some(owner.0);
+            let result = thread.resume::<MultiValue>(());
+            shared(lua).owner = before;
+            match result {
+                Ok(values) => {
+                    if thread.is_resumable() {
+                        shared(lua).new_tasks.push(NewTask {
+                            thread: thread.clone(),
+                            owner: Some(owner.0),
+                            delay: None,
+                            yielded: Some(wait_secs(&values)),
+                            args: None,
+                        });
+                    }
+                }
+                Err(err) => {
+                    let at = crate::bind::caller(lua);
+                    push_error(lua, at.as_deref(), Some(owner.0), &err.to_string());
                 }
             }
             Ok(thread)

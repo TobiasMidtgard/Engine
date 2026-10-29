@@ -141,6 +141,8 @@ pub struct Declared {
     pub props: Vec<Prop>,
     pub signals: Vec<Signal>,
     pub methods: Vec<Method>,
+    /// Its `states` table, or why that doesn't run ([`crate::states`]).
+    pub machine: Option<Result<crate::states::Machine, crate::states::Problem>>,
 }
 
 /// Reads the classes' props for the editor, each file once per version on disk.
@@ -230,10 +232,21 @@ fn read(world: &mut World, path: &str) -> Result<Declared, String> {
         })
         .collect();
     methods.sort_by(|a, b| (a.hook, a.line, &a.name).cmp(&(b.hook, b.line, &b.name)));
+    let machine = crate::states::of_class(&rt.lua, &class).map(|m| match m {
+        Ok(mut m) => {
+            m.locate(&source);
+            Ok(m)
+        }
+        Err(mut p) => {
+            p.locate(&source);
+            Err(p)
+        }
+    });
     Ok(Declared {
         props,
         signals,
         methods,
+        machine,
     })
 }
 
@@ -417,14 +430,16 @@ pub fn state(world: &World, e: Entity) -> Option<Vec<crate::debug::Variable>> {
             .filter_map(|(k, v)| {
                 let Value::String(k) = k else { return None };
                 let name = k.to_string_lossy().to_string();
-                (name != "entity" && name != "props" && !matches!(v, Value::Function(_))).then(
-                    || crate::debug::Variable {
-                        name,
-                        value: crate::debugger::display(&v, true),
-                        kind: crate::math::type_name(&v).to_string(),
-                        reference: 0,
-                    },
-                )
+                (name != "entity"
+                    && name != "props"
+                    && !name.starts_with("__")
+                    && !matches!(v, Value::Function(_)))
+                .then(|| crate::debug::Variable {
+                    name,
+                    value: crate::debugger::display(&v, true),
+                    kind: crate::math::type_name(&v).to_string(),
+                    reference: 0,
+                })
             })
             .collect();
         out.sort_by(|a, b| a.name.cmp(&b.name));

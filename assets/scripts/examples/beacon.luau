@@ -32,14 +32,15 @@ Beacon.signals = {
 function Beacon:start()
 	self.t = 0
 	self.home = self.entity.position
+	self.phase = 0 -- pulses so far, and how far into this one
 	self.flashes = 0
-	self.was = 0
 end
 
 function Beacon:update(dt: number)
 	self.t += dt
 	local p = self.props
-	local wave = 0.5 + 0.5 * math.sin(self.t * 2 * math.pi * p.pulse.rate)
+	self.phase += dt * p.pulse.rate
+	local wave = 0.5 + 0.5 * math.sin(self.phase * 2 * math.pi)
 	local level = if p.mode == "steady"
 		then 1
 		elseif p.mode == "blink" then (if wave > 0.5 then 1 else 0.05)
@@ -50,8 +51,9 @@ function Beacon:update(dt: number)
 	self.entity.position = self.home + p.hover * math.sin(self.t * 1.3)
 	self.entity.rotation = quat.axis_angle(vec3.up, self.t * p.spin * 2 * math.pi)
 		* quat.axis_angle(vec3.right, p.tilt)
-	-- A flash: the wave's crest.
-	if wave > 0.97 and self.was <= 0.97 then
+	-- A flash: each crest of the wave passed (a quarter into each pulse), counted from the
+	-- phase so that a slow frame can't step over one.
+	while self.flashes < math.floor(self.phase + 0.75) do
 		self.flashes += 1
 		if self.flashes % math.max(1, p.every) == 0 then
 			self:emit("flashed", self.flashes)
@@ -60,7 +62,6 @@ function Beacon:update(dt: number)
 			end
 		end
 	end
-	self.was = wave
 end
 
 return Beacon

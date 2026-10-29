@@ -183,6 +183,8 @@ struct ClassSyntax {
     fields: Vec<String>,
     /// `Class.signals = { name = "params" }`: each signal and its values as written.
     signals: Option<Vec<(String, String)>>,
+    /// `Class.states = { states = { closed = {...}, ... } }`: every state's name, nested ones too.
+    states: Option<Vec<String>>,
 }
 
 fn name_of(local: &luau_syntax::ast::Local) -> String {
@@ -211,6 +213,7 @@ fn class_syntax(source: &str) -> Option<ClassSyntax> {
     let mut dot_selfs = Vec::new();
     let mut has_members = false;
     let mut signals = None;
+    let mut states = None;
     for s in statements {
         match s.view() {
             StatementView::Local(l) => {
@@ -274,6 +277,15 @@ fn class_syntax(source: &str) -> Option<ClassSyntax> {
                     {
                         signals = Some(table_strings(items));
                     }
+                    if let ExpressionKind::IndexName { expr, index, .. } = var.kind()
+                        && matches!(expr.kind(), ExpressionKind::Local { local, .. } if name_of(local) == returned)
+                        && index.bytes() == b"states"
+                        && let ExpressionKind::Table { items } = value.kind()
+                    {
+                        let mut names = Vec::new();
+                        state_names(items, &mut names);
+                        states = Some(names);
+                    }
                 }
             }
             _ => {}
@@ -296,7 +308,39 @@ fn class_syntax(source: &str) -> Option<ClassSyntax> {
         dot_selfs,
         fields,
         signals,
+        states,
     })
+}
+
+/// The names of the states in a `states` table literal: its `states` entries, nested.
+fn state_names(items: &[luau_syntax::ast::TableItem], out: &mut Vec<String>) {
+    use luau_syntax::ast::TableItem;
+    for item in items {
+        let TableItem::Record { key, value } = item else {
+            continue;
+        };
+        let ExpressionKind::String { value: k, .. } = key.kind() else {
+            continue;
+        };
+        if k.as_bytes() != b"states" {
+            continue;
+        }
+        let ExpressionKind::Table { items: kids } = value.kind() else {
+            continue;
+        };
+        for kid in kids.iter() {
+            let (TableItem::Record { key, value } | TableItem::General { key, value }) = kid else {
+                continue;
+            };
+            let ExpressionKind::String { value: name, .. } = key.kind() else {
+                continue;
+            };
+            out.push(String::from_utf8_lossy(name.as_bytes()).into_owned());
+            if let ExpressionKind::Table { items } = value.kind() {
+                state_names(items, out);
+            }
+        }
+    }
 }
 
 /// A table literal's `name = "text"` entries (other values give empty text).
@@ -538,6 +582,35 @@ fn shape(source: &str, types: Option<&BTreeMap<String, String>>) -> Shape {
     let mut fields = fields;
     if !class.fields.iter().any(|f| f == "emit") {
         fields.push(format!("emit: {}", emit_type(class.signals.as_deref())));
+    }
+    // A state machine: its state names are the only ones go and in_state take.
+    if let Some(names) = class.states.as_deref().filter(|n| !n.is_empty()) {
+        let union = names
+            .iter()
+            .map(|n| format!("\"{n}\""))
+            .collect::<Vec<_>>()
+            .join(" | ");
+        let members = [
+            ("state", union.clone()),
+            ("go", format!("(self: any, state: {union}) -> ()")),
+            (
+                "in_state",
+                format!("(self: any, state: {union}) -> boolean"),
+            ),
+            (
+                "trigger",
+                "(self: any, event: string, ...any) -> boolean".to_string(),
+            ),
+            (
+                "state_time",
+                format!("(self: any, state: ({union})?) -> number"),
+            ),
+        ];
+        for (name, ty) in members {
+            if !class.fields.iter().any(|f| f == name) {
+                fields.push(format!("{name}: {ty}"));
+            }
+        }
     }
     let alias = format!(
         "; type {SELF_TYPE} = {SCRIPT_BASE} & typeof({}) & {{ {} }}",
@@ -1769,6 +1842,28 @@ mod tests {
         // Back to the file on disk.
         a.set_text("examples/beacon.luau", None);
         assert_eq!(a.check("examples/beacon.luau").errors(), 0);
+    }
+
+    /// A class with a states table: `self:go` and `self:in_state` take only its states' names.
+    #[test]
+    fn state_names_are_checked() {
+        let mut a = analyzer();
+        let gate = std::fs::read_to_string(scripts().join("examples/gate.luau")).unwrap();
+        a.set_text("examples/gate.luau", Some(gate.clone()));
+        let r = a.check("examples/gate.luau");
+        assert_eq!(r.errors(), 0, "{:#?}", r.problems);
+        let typo = gate.replace("self:in_state(\"opening\")", "self:in_state(\"openning\")");
+        a.set_text("examples/gate.luau", Some(typo.clone()));
+        let r = a.check("examples/gate.luau");
+        let errors: Vec<&Problem> = r.problems.iter().filter(|p| p.error).collect();
+        assert_eq!(errors.len(), 1, "{errors:#?}");
+        assert_eq!(errors[0].span.line, at(&typo, "openning", 0).0);
+        assert!(
+            errors[0].message.contains("openning"),
+            "{}",
+            errors[0].message
+        );
+        a.set_text("examples/gate.luau", None);
     }
 
     /// A visual script's type errors land on the node their line came from: here a Call node

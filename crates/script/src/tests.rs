@@ -711,7 +711,8 @@ fn signals_reach_wired_methods_and_listeners() {
     assert_eq!(s.connections.len(), 2, "the once wire is spent");
     let errs = errors(&mut app);
     assert!(
-        errs.iter().any(|e| e.contains("has no method missing")),
+        errs.iter()
+            .any(|e| e.contains("has no method or state event missing")),
         "{errs:?}"
     );
     // A signal the class doesn't declare: the error lists the ones it does.
@@ -1011,6 +1012,7 @@ fn the_shipped_script_tests_pass() {
     app.insert_resource(Assets::<StandardMaterial>::default());
     app.register_component::<MeshRenderer>("A mesh.")
         .register_component::<PointLight>("A light.")
+        .register_component::<engine_world::Interactable>("Something the player can use.")
         .add_message::<engine_world::Interact>();
     app.world.spawn(Name::new("Player"));
     call_api(&mut app.world, "script.test", json!({})).unwrap();
@@ -3089,4 +3091,342 @@ fn script_break_debugs_from_the_api() {
     assert_eq!(done["stopped"], Value::Null);
     assert!(script_number(&mut app, "Lantern", "lit") > lit);
     assert_eq!(done["attached"], json!(false));
+}
+
+const LIFT: &str = r#"
+local Lift = {}
+Lift.props = { wait = 0.5 }
+Lift.states = {
+	initial = "on",
+	on = { reset = "on" },
+	states = {
+		on = {
+			initial = "down",
+			history = true,
+			on = { cut = "off" },
+			states = {
+				down = { on = { call = { to = "rising", guard = "allowed" } } },
+				rising = { done = "up" },
+				up = { after = { "wait", "falling" }, when = { ["not allowed"] = "falling" } },
+				falling = { done = "down" },
+			},
+		},
+		off = { on = { cut = "on" } },
+	},
+}
+function Lift:start()
+	self.allowed = true
+	self.trace = {}
+end
+function Lift:enter_rising()
+	table.insert(self.trace, "rise")
+	task.wait(0.2)
+	table.insert(self.trace, "risen")
+end
+function Lift:exit_rising()
+	table.insert(self.trace, "left rising")
+end
+function Lift:enter_falling()
+	task.wait(0.1)
+end
+function Lift:update_up(dt)
+	self.up_time = (self.up_time or 0) + dt
+end
+return Lift
+"#;
+
+fn lift_state(app: &mut App) -> String {
+    eval(app, "return world.find('Lift').script.state")
+        .as_str()
+        .unwrap_or_default()
+        .to_string()
+}
+
+/// Runs frames until the lift is in `want`; how many it took.
+fn until_state(app: &mut App, want: &str, max: usize) -> usize {
+    for k in 0..max {
+        if lift_state(app) == want {
+            return k;
+        }
+        app.update();
+    }
+    panic!(
+        "not {want} after {max} frames but {}: {:?}",
+        lift_state(app),
+        errors(app)
+    );
+}
+
+fn send(app: &mut App, to: &str, event: &str) {
+    call_api(
+        &mut app.world,
+        "script.send",
+        json!({"entity": {"name": to}, "event": event}),
+    )
+    .unwrap();
+}
+
+/// A class's `states` table runs as a hierarchical state machine: it starts in the first state
+/// of the first group, messages are events (with guards), `done` follows an enter task that
+/// waited, `after` counts a prop's seconds, `when` checks a condition every frame, a group with
+/// history comes back to where it was, and leaving a state stops its enter task.
+#[test]
+fn a_states_table_runs_as_a_state_machine() {
+    let folder = Folder::new();
+    folder.write("lift.luau", LIFT);
+    let mut app = app_in(&folder.0);
+    spawn_script(&mut app, "Lift", "lift");
+    app.update_n(2);
+    assert_eq!(lift_state(&mut app), "down");
+    assert_eq!(
+        eval(&mut app, "return world.find('Lift').script:in_state('on')"),
+        json!(true)
+    );
+
+    // A guard that doesn't hold: the event changes nothing.
+    eval(&mut app, "world.find('Lift').script.allowed = false");
+    send(&mut app, "Lift", "call");
+    app.update_n(2);
+    assert_eq!(lift_state(&mut app), "down");
+    eval(&mut app, "world.find('Lift').script.allowed = true");
+
+    // An event; `done` once the enter task has waited its 0.2 s (6 frames).
+    send(&mut app, "Lift", "call");
+    until_state(&mut app, "rising", 3);
+    let rising = until_state(&mut app, "up", 12);
+    assert!((5..=8).contains(&rising), "rising took {rising} frames");
+    assert_eq!(
+        eval(
+            &mut app,
+            "return table.concat(world.find('Lift').script.trace, ', ')"
+        ),
+        json!("rise, risen, left rising")
+    );
+    // `after` the `wait` prop's 0.5 s, falling, and down again when its wait is done.
+    let up = until_state(&mut app, "falling", 30);
+    assert!((14..=17).contains(&up), "up for {up} frames");
+    let up_time = eval(&mut app, "return world.find('Lift').script.up_time")
+        .as_f64()
+        .unwrap();
+    assert!((0.4..0.6).contains(&up_time), "update_up ran {up_time} s");
+    until_state(&mut app, "down", 6);
+
+    // History: cut the power while rising, back on goes on rising (its enter starts again);
+    // leaving rising stopped the first enter task before it finished.
+    eval(&mut app, "world.find('Lift').script.trace = {}");
+    send(&mut app, "Lift", "call");
+    until_state(&mut app, "rising", 3);
+    send(&mut app, "Lift", "cut");
+    until_state(&mut app, "off", 3);
+    app.update_n(10);
+    send(&mut app, "Lift", "cut");
+    until_state(&mut app, "rising", 3);
+    assert_eq!(
+        eval(
+            &mut app,
+            "return table.concat(world.find('Lift').script.trace, ', ')"
+        ),
+        json!("rise, left rising, rise")
+    );
+    until_state(&mut app, "up", 12);
+
+    // `when`: a condition that comes true moves it on the next frame.
+    eval(&mut app, "world.find('Lift').script.allowed = false");
+    app.update_n(1);
+    assert_eq!(lift_state(&mut app), "falling");
+
+    // The outer table's transitions work from any state; self:go and self:trigger from code.
+    eval(&mut app, "world.find('Lift').script:go('off')");
+    assert_eq!(lift_state(&mut app), "off");
+    assert_eq!(
+        eval(
+            &mut app,
+            "return world.find('Lift').script:trigger('nothing')"
+        ),
+        json!(false)
+    );
+    assert_eq!(
+        eval(
+            &mut app,
+            "return world.find('Lift').script:trigger('reset')"
+        ),
+        json!(true)
+    );
+    // History again: `on` resumes in the state it was in, falling.
+    assert_eq!(lift_state(&mut app), "falling");
+
+    // What the editor reads: states, transitions with their lines, the active path and the log.
+    let lift = app
+        .world
+        .query::<(Entity, &Name)>()
+        .iter(&app.world)
+        .find(|(_, n)| n.as_str() == "Lift")
+        .map(|(e, _)| e)
+        .unwrap();
+    let d = call_api(
+        &mut app.world,
+        "script.states",
+        json!({"entity": {"name": "Lift"}}),
+    )
+    .unwrap();
+    assert_eq!(d["active"], json!(["on", "falling"]), "{d:#}");
+    let names: Vec<&str> = d["states"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["off", "on", "down", "falling", "rising", "up"]);
+    let after = d["transitions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["trigger"] == "after wait (0.5 s)")
+        .unwrap_or_else(|| panic!("{d:#}"));
+    let line = LIFT.lines().position(|l| l.contains("after = {")).unwrap() as u64 + 1;
+    assert_eq!(after["line"], json!(line));
+    let live = crate::states::live(&app.world, lift).unwrap();
+    let whys: Vec<&str> = live.log.iter().map(|c| c.why.as_str()).collect();
+    assert!(whys.contains(&"call"), "{whys:?}");
+    assert!(whys.contains(&"done"), "{whys:?}");
+    assert!(whys.contains(&"after 0.5 s"), "{whys:?}");
+    assert!(whys.contains(&"when not allowed"), "{whys:?}");
+    assert_eq!(live.current(), Some("falling"));
+    // The Live values don't show the machine's own bookkeeping.
+    let values = crate::props::state(&app.world, lift).unwrap();
+    assert!(values.iter().any(|v| v.name == "state"));
+    assert!(values.iter().all(|v| !v.name.starts_with("__")));
+}
+
+/// Hot reload keeps the states that still exist (and their tasks); a state that went away
+/// starts its group again. Wired signals and interactions are events too.
+#[test]
+fn state_machines_reload_and_hear_signals_and_interactions() {
+    let folder = Folder::new();
+    folder.write("lift.luau", LIFT);
+    folder.write(
+        "button.luau",
+        r#"
+local Button = {}
+Button.signals = { pressed = "" }
+function Button:on_interact(by)
+	self:emit("pressed")
+end
+return Button
+"#,
+    );
+    let mut app = app_in(&folder.0);
+    app.add_message::<engine_world::Interact>();
+    let lift = spawn_script(&mut app, "Lift", "lift");
+    let button = app
+        .world
+        .spawn((
+            Name::new("Button"),
+            Transform::default(),
+            Script::new("button").connect("pressed", "Lift", "call"),
+        ))
+        .id();
+    let player = app.world.spawn(Name::new("Player")).id();
+    app.update_n(2);
+    app.world.write_message(engine_world::Interact {
+        actor: player,
+        target: button,
+        from: DVec3::ZERO,
+    });
+    app.update_n(3);
+    assert_eq!(lift_state(&mut app), "rising", "{:?}", errors(&mut app));
+    app.update_n(8);
+    assert_eq!(lift_state(&mut app), "up");
+
+    // An edit that keeps `up`: still up, the same time in it.
+    edit(
+        &folder,
+        "lift.luau",
+        &LIFT.replace("wait = 0.5", "wait = 5"),
+    );
+    app.update_n(2);
+    assert_eq!(lift_state(&mut app), "up");
+    // An edit that renames `up`: the group starts again from its first state.
+    let renamed = LIFT
+        .replace("wait = 0.5", "wait = 5")
+        .replace("done = \"up\"", "done = \"top\"")
+        .replace("\t\t\t\tup = {", "\t\t\t\ttop = {")
+        .replace("update_up", "update_top");
+    edit(&folder, "lift.luau", &renamed);
+    app.update_n(2);
+    assert_eq!(lift_state(&mut app), "down", "{:?}", errors(&mut app));
+    let live = crate::states::live(&app.world, lift).unwrap();
+    assert_eq!(live.log.last().unwrap().why, "reload");
+
+    // Interactions are the `interact` event.
+    edit(
+        &folder,
+        "lift.luau",
+        &renamed.replace(
+            "down = { on = { call =",
+            "down = { on = { interact = \"rising\", call =",
+        ),
+    );
+    app.update_n(2);
+    app.world.write_message(engine_world::Interact {
+        actor: player,
+        target: lift,
+        from: DVec3::ZERO,
+    });
+    app.update_n(2);
+    assert_eq!(lift_state(&mut app), "rising", "{:?}", errors(&mut app));
+    let live = crate::states::live(&app.world, lift).unwrap();
+    assert_eq!(live.log.last().unwrap().why, "interact by Player");
+}
+
+/// Mistakes in a states table are errors that name the state and what is wrong, and a loop of
+/// transitions that never waits is stopped.
+#[test]
+fn state_machine_mistakes_say_what_is_wrong() {
+    let folder = Folder::new();
+    folder.write(
+        "typo.luau",
+        r#"
+local Typo = {}
+Typo.states = {
+	initial = "a",
+	states = {
+		a = { on = { go = "bb" } },
+		b = {},
+	},
+}
+return Typo
+"#,
+    );
+    folder.write(
+        "spin.luau",
+        r#"
+local Spin = {}
+Spin.states = {
+	initial = "a",
+	states = { a = { done = "b" }, b = { done = "a" } },
+}
+return Spin
+"#,
+    );
+    let mut app = app_in(&folder.0);
+    spawn_script(&mut app, "Typo", "typo");
+    spawn_script(&mut app, "Spin", "spin");
+    app.update_n(2);
+    let errs = errors(&mut app);
+    assert!(
+        errs.iter().any(
+            |e| e.contains("states: state a: on go goes to \"bb\", which isn't a state (a, b)")
+        ),
+        "{errs:?}"
+    );
+    assert!(
+        errs.iter()
+            .any(|e| e.contains("more than 32 changes in one frame")),
+        "{errs:?}"
+    );
+    // The editor finds the line of the mistake.
+    let declared = crate::props::declared(&mut app.world, "typo.luau").unwrap();
+    let problem = declared.machine.unwrap().unwrap_err();
+    assert_eq!(problem.line, 6, "{problem:?}");
 }

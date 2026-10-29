@@ -41,11 +41,13 @@ use engine_script::editing::{self, FileMarks};
 use engine_script::graph::{
     self, Comment, Compiled, Graph, Link, Live, Node, NodeSpec, PinType, Problem, look,
 };
+use engine_script::states::{Machine, Transition, Trigger};
 use engine_script::{Script, ScriptRuntime, ScriptSettings};
 use serde_json::{Value, json};
 
 use crate::editor::{self, Editor, Mode, Tab};
 use crate::shots::{ShotScript, Step};
+use crate::states::{Diagram, Pick, Placed, View};
 use crate::theme;
 use crate::ui::EditorDock;
 
@@ -179,6 +181,8 @@ pub struct GraphDoc {
     types: Vec<Problem>,
     /// Sidebar sections folded to their title ("Props", "Signals", ...).
     pub folded: BTreeSet<&'static str>,
+    /// The States view.
+    pub states: StatesEdit,
 }
 
 impl GraphDoc {
@@ -346,6 +350,7 @@ pub fn open(world: &World, tab: &mut GraphsTab, path: &str) {
         applied: None,
         types: Vec::new(),
         folded: BTreeSet::new(),
+        states: StatesEdit::default(),
     });
     tab.current = tab.docs.len() - 1;
 }
@@ -651,6 +656,14 @@ fn sidebar(ui: &mut egui::Ui, world: &mut World, tab: &mut GraphsTab, now: f64) 
     if let Some(p) = open_path {
         open(world, tab, &p);
     }
+    let playing_in = tab
+        .docs
+        .get(tab.current)
+        .filter(|_| tab.playing)
+        .map(|d| d.path.clone())
+        .and_then(|p| graph_runner(world, &p))
+        .and_then(|e| engine_script::states::live(world, e))
+        .and_then(|l| l.current().map(str::to_string));
     let Some(doc) = tab.docs.get_mut(tab.current) else {
         return;
     };
@@ -662,6 +675,9 @@ fn sidebar(ui: &mut egui::Ui, world: &mut World, tab: &mut GraphsTab, now: f64) 
         .show(ui, |ui| {
             variables(ui, doc, center);
             signals_and_events(ui, doc, center);
+            if doc.states.on || doc.graph.states.is_object() {
+                states_section(ui, doc, playing_in.as_deref());
+            }
         });
     ui.separator();
     // Problems: click one to see its node.
@@ -719,6 +735,11 @@ fn node_title(n: &Node) -> String {
         "call.event" => return format!("Call {}", n.of),
         "signal.emit" => return format!("Emit {}", n.of),
         "signal.bind" => return format!("Bind signal to {}", n.of),
+        "event.state_enter" => return format!("Enter {}", n.of),
+        "event.state_update" => return format!("Update {}", n.of),
+        "event.state_exit" => return format!("Exit {}", n.of),
+        "state.go" => return format!("Go to {}", n.of),
+        "state.is_in" => return format!("In {}?", n.of),
         _ => {}
     }
     let base = graph::builtins();
@@ -1442,6 +1463,32 @@ fn tool_bar(ui: &mut egui::Ui, world: &mut World, editor: &Editor, tab: &mut Gra
                     }
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if let Some(doc) = tab.docs.get_mut(tab.current) {
+                        let n = graph::graph_states(&doc.graph).len();
+                        let label = if n > 0 {
+                            format!("States ({n})")
+                        } else {
+                            "States".to_string()
+                        };
+                        if ui
+                            .selectable_label(doc.states.on, label)
+                            .on_hover_text(
+                                "The graph's state machine: its states and the transitions \
+                                 between them (the nodes do each state's work)",
+                            )
+                            .clicked()
+                        {
+                            doc.states.on = true;
+                        }
+                        if ui
+                            .selectable_label(!doc.states.on, "Nodes")
+                            .on_hover_text("The nodes and wires")
+                            .clicked()
+                        {
+                            doc.states.on = false;
+                        }
+                        ui.separator();
+                    }
                     if ui
                         .selectable_label(tab.show_code, "Luau")
                         .on_hover_text("Show the code the graph runs as")
@@ -1588,6 +1635,9 @@ fn specs_for(tab: &GraphsTab, g: &Graph) -> Vec<NodeSpec> {
 }
 
 fn canvas(ui: &mut egui::Ui, world: &mut World, editor: &Editor, tab: &mut GraphsTab, now: f64) {
+    if tab.docs[tab.current].states.on {
+        return states_canvas(ui, world, editor, tab);
+    }
     let lib = specs_for(tab, &tab.docs[tab.current].graph);
     let stopped_node = stopped_node(world, &mut tab.docs[tab.current]);
     let playing = editor.mode != Mode::Edit;
@@ -3691,6 +3741,1093 @@ fn copy_dir(from: &Path, to: &Path) {
     }
 }
 
+/// The state machine shots' last steps (`scripts::states_shots`): the lamp's graph given
+/// states (steady, flare on E, fade after 1.5 s, back when done), shown in the States view
+/// while the lamp runs it, its `after` transition picked in the sidebar.
+pub fn states_steps() -> Vec<Step> {
+    fn lamp_states(g: &mut Graph) {
+        g.states = json!({
+            "initial": "steady",
+            "on": {"reset": "steady"},
+            "states": {
+                "steady": {"on": {"interact": "flare"}, "at": [0, 0]},
+                "flare": {"after": [1.5, "fade"], "on": {"interact": "steady"}, "at": [330, 0]},
+                "fade": {"done": "steady", "at": [165, 170]},
+            },
+        });
+        let id = g.next_id();
+        let (enter, print, fade, delay) = (id, id + 1, id + 2, id + 3);
+        let node = |id: u32, kind: &str, of: &str, at: [i32; 2], values: Value| Node {
+            id,
+            kind: kind.into(),
+            of: of.into(),
+            at,
+            values: serde_json::from_value(values).unwrap_or_default(),
+        };
+        g.nodes.extend([
+            node(enter, "event.state_enter", "flare", [-600, 1300], json!({})),
+            node(
+                print,
+                "debug.print",
+                "",
+                [-300, 1300],
+                json!({"text": "flare!"}),
+            ),
+            node(fade, "event.state_enter", "fade", [-600, 1480], json!({})),
+            node(
+                delay,
+                "flow.delay",
+                "",
+                [-300, 1480],
+                json!({"seconds": 0.8}),
+            ),
+        ]);
+        g.links.push(Link {
+            from: (enter, "then".into()),
+            to: (print, "in".into()),
+        });
+        g.links.push(Link {
+            from: (fade, "then".into()),
+            to: (delay, "in".into()),
+        });
+    }
+    let press_lamp = |world: &mut World, _: &mut Editor| {
+        let (Some(target), Some(actor)) = (
+            crate::shots::find(world, "Lamp"),
+            crate::shots::find(world, "Player"),
+        ) else {
+            return;
+        };
+        world.write_message(engine::world::Interact {
+            actor,
+            target,
+            from: DVec3::new(0.0, 1.0, 4.0),
+        });
+    };
+    vec![
+        Step::Do(Box::new(|world: &mut World, ed: &mut Editor| {
+            editor::stop(world, ed);
+            world.resource_mut::<EditorDock>().0 = shot_layout();
+        })),
+        Step::Tab(Tab::Graphs),
+        Step::Do(Box::new(|world: &mut World, _: &mut Editor| {
+            world.resource_scope(|world, mut tab: Mut<GraphsTab>| {
+                open(world, &mut tab, "examples/pulse.graph");
+                let i = tab.current;
+                let doc = &mut tab.docs[i];
+                let before = doc.graph.clone();
+                lamp_states(&mut doc.graph);
+                doc.push_undo(before);
+                doc.states.on = true;
+                doc.folded
+                    .extend(["Variables", "Props", "Signals", "Events"]);
+                save(world, &mut tab, 0.0);
+                tab.toast = None;
+            });
+        })),
+        Step::Wait(20),
+        Step::Do(Box::new(|world: &mut World, ed: &mut Editor| {
+            editor::play(world, ed)
+        })),
+        Step::Wait(30),
+        Step::Do(Box::new(press_lamp)),
+        Step::Wait(18),
+        Step::Do(Box::new(|world: &mut World, _: &mut Editor| {
+            let mut tab = world.resource_mut::<GraphsTab>();
+            let i = tab.current;
+            let doc = &mut tab.docs[i];
+            let (m, _) = graph_machine(&doc.graph);
+            doc.states.pick = m
+                .transitions
+                .iter()
+                .position(|t| matches!(t.trigger, Trigger::After { .. }))
+                .map(Pick::Transition);
+        })),
+        Step::Wait(3),
+        Step::Shot("states_08_graph_states_live"),
+    ]
+}
+
+// ----------------------------------------------------------------------------- the States view
+
+/// The States view: the graph's state machine drawn as states and transitions (`crate::states`
+/// draws it), edited by hand. Its enter, update and exit work are nodes in the graph.
+#[derive(Default)]
+pub struct StatesEdit {
+    /// Shown instead of the nodes.
+    pub on: bool,
+    pub pick: Option<Pick>,
+    hover: Option<Pick>,
+    /// A state being moved: its name and where it was grabbed (diagram units from its corner).
+    drag: Option<(String, Vec2)>,
+    /// A transition being drawn from this state.
+    link: Option<String>,
+    /// The view, held still while something is dragged.
+    view: Option<View>,
+    /// The picked state's name as it is being typed.
+    rename: Option<(String, String)>,
+    /// Where the states were drawn last frame (screenshot runs point at them).
+    pub drawn: BTreeMap<String, Rect>,
+}
+
+/// The graph's machine for drawing, with the hooks its nodes give its states, and what is
+/// wrong with it.
+pub fn graph_machine(g: &Graph) -> (Machine, Vec<String>) {
+    let (mut m, problems) = Machine::from_definition(&g.states);
+    for st in &mut m.states {
+        for hook in ["enter", "update", "exit"] {
+            let kind = format!("event.state_{hook}");
+            if g.nodes.iter().any(|n| n.kind == kind && n.of == st.name) {
+                st.hooks.push(hook.to_string());
+            }
+        }
+    }
+    (m, problems)
+}
+
+/// The places the file gives its states.
+fn state_places(g: &Graph) -> BTreeMap<String, Pos2> {
+    graph::graph_states(g)
+        .into_iter()
+        .filter_map(|(k, v)| {
+            let a = v.get("at")?.as_array()?;
+            Some((
+                k,
+                Pos2::new(a.first()?.as_f64()? as f32, a.get(1)?.as_f64()? as f32),
+            ))
+        })
+        .collect()
+}
+
+/// The table of the state named `name` (None: the outer one).
+fn state_def_mut<'a>(def: &'a mut Value, name: Option<&str>) -> Option<&'a mut Value> {
+    let Some(name) = name else {
+        return Some(def);
+    };
+    let kids = def.get_mut("states")?.as_object_mut()?;
+    if kids.contains_key(name) {
+        return kids.get_mut(name);
+    }
+    kids.values_mut().find_map(|k| state_def_mut(k, Some(name)))
+}
+
+/// Gives every state that isn't a group the place it has on screen now.
+fn pin_places(g: &mut Graph, m: &Machine, placed: &Placed) {
+    for st in m.states.iter().filter(|s| !m.is_group(&s.name)) {
+        if let (Some(r), Some(def)) = (
+            placed.rects.get(&st.name),
+            state_def_mut(&mut g.states, Some(&st.name)),
+        ) && def.get("at").is_none()
+            && let Some(o) = def.as_object_mut()
+        {
+            o.insert(
+                "at".into(),
+                json!([r.min.x.round() as i32, r.min.y.round() as i32]),
+            );
+        }
+    }
+}
+
+fn set_place(g: &mut Graph, name: &str, at: Pos2) {
+    if let Some(o) = state_def_mut(&mut g.states, Some(name)).and_then(Value::as_object_mut) {
+        let snap = |v: f32| ((v / 8.0).round() * 8.0) as i32;
+        o.insert("at".into(), json!([snap(at.x), snap(at.y)]));
+    }
+}
+
+/// A new state at `at` (diagram units), on the outer level. Returns its name.
+fn add_state(g: &mut Graph, at: Pos2) -> String {
+    if !g.states.is_object() {
+        g.states = json!({ "states": {} });
+    }
+    let taken: BTreeSet<String> = graph::graph_states(g).into_iter().map(|(k, _)| k).collect();
+    let name = (1..)
+        .map(|k| format!("state{k}"))
+        .find(|n| !taken.contains(n))
+        .expect("a free name");
+    let root = g.states.as_object_mut().expect("an object");
+    let kids = root.entry("states").or_insert_with(|| json!({}));
+    if let Some(kids) = kids.as_object_mut() {
+        kids.insert(
+            name.clone(),
+            json!({ "at": [at.x.round() as i32, at.y.round() as i32] }),
+        );
+    }
+    if root.get("initial").and_then(Value::as_str).is_none() {
+        root.insert("initial".into(), json!(name));
+    }
+    name
+}
+
+/// Every place a state's name is a target in `def` (and its states), renamed or (with None)
+/// dropped.
+fn retarget(def: &mut Value, from: &str, to: Option<&str>) {
+    let Some(o) = def.as_object_mut() else { return };
+    let fits = |v: &Value| v.as_str() == Some(from);
+    if let Some(on) = o.get_mut("on").and_then(Value::as_object_mut) {
+        let mut gone = Vec::new();
+        for (event, v) in on.iter_mut() {
+            match v {
+                Value::String(_) if fits(v) => match to {
+                    Some(t) => *v = json!(t),
+                    None => gone.push(event.clone()),
+                },
+                Value::Object(c) if c.get("to").is_some_and(fits) => match to {
+                    Some(t) => {
+                        c.insert("to".into(), json!(t));
+                    }
+                    None => gone.push(event.clone()),
+                },
+                Value::Array(list) => {
+                    list.retain_mut(|c| {
+                        let hit = fits(c) || c.get("to").is_some_and(fits);
+                        match (hit, to) {
+                            (false, _) => true,
+                            (true, None) => false,
+                            (true, Some(t)) => {
+                                if c.is_string() {
+                                    *c = json!(t);
+                                } else if let Some(c) = c.as_object_mut() {
+                                    c.insert("to".into(), json!(t));
+                                }
+                                true
+                            }
+                        }
+                    });
+                    if list.is_empty() {
+                        gone.push(event.clone());
+                    }
+                }
+                _ => {}
+            }
+        }
+        for e in gone {
+            on.remove(&e);
+        }
+    }
+    let mut drop_after = false;
+    if let Some(a) = o.get_mut("after").and_then(Value::as_array_mut)
+        && a.get(1).is_some_and(fits)
+    {
+        match to {
+            Some(t) => a[1] = json!(t),
+            None => drop_after = true,
+        }
+    }
+    if drop_after {
+        o.remove("after");
+    }
+    if o.get("done").is_some_and(fits) {
+        match to {
+            Some(t) => {
+                o.insert("done".into(), json!(t));
+            }
+            None => {
+                o.remove("done");
+            }
+        }
+    }
+    if let Some(w) = o.get_mut("when").and_then(Value::as_object_mut) {
+        let conds: Vec<String> = w
+            .iter()
+            .filter(|(_, v)| fits(v))
+            .map(|(k, _)| k.clone())
+            .collect();
+        for c in conds {
+            match to {
+                Some(t) => {
+                    w.insert(c, json!(t));
+                }
+                None => {
+                    w.remove(&c);
+                }
+            }
+        }
+    }
+    if o.get("initial").is_some_and(fits) {
+        match to {
+            Some(t) => {
+                o.insert("initial".into(), json!(t));
+            }
+            None => {
+                o.remove("initial");
+            }
+        }
+    }
+    if let Some(kids) = o.get_mut("states").and_then(Value::as_object_mut) {
+        for k in kids.values_mut() {
+            retarget(k, from, to);
+        }
+    }
+}
+
+/// Removes a state, the transitions into it and its nodes' claim on it (they show a problem).
+fn delete_state(g: &mut Graph, name: &str) {
+    fn remove(def: &mut Value, name: &str) -> bool {
+        let Some(kids) = def.get_mut("states").and_then(Value::as_object_mut) else {
+            return false;
+        };
+        if kids.remove(name).is_some() {
+            return true;
+        }
+        kids.values_mut().any(|k| remove(k, name))
+    }
+    remove(&mut g.states, name);
+    retarget(&mut g.states, name, None);
+    // A group (or the outer level) that lost its first state starts in another.
+    fn first(def: &mut Value) {
+        let Some(o) = def.as_object_mut() else { return };
+        let names: Vec<String> = o
+            .get("states")
+            .and_then(Value::as_object)
+            .map(|k| k.keys().cloned().collect())
+            .unwrap_or_default();
+        if !names.is_empty() && o.get("initial").and_then(Value::as_str).is_none() {
+            o.insert("initial".into(), json!(names[0]));
+        }
+        if let Some(kids) = o.get_mut("states").and_then(Value::as_object_mut) {
+            for k in kids.values_mut() {
+                first(k);
+            }
+        }
+    }
+    first(&mut g.states);
+}
+
+/// Renames a state everywhere: its entry, the transitions into it, its nodes.
+fn rename_state(g: &mut Graph, old: &str, new: &str) -> Result<(), String> {
+    if !graph::is_ident(new) {
+        return Err(format!("\"{new}\" isn't a name (letters, digits, _)"));
+    }
+    if graph::graph_states(g).iter().any(|(k, _)| k == new) || new == "root" {
+        return Err(format!("there is a state named {new} already"));
+    }
+    fn rekey(def: &mut Value, old: &str, new: &str) -> bool {
+        let Some(kids) = def.get_mut("states").and_then(Value::as_object_mut) else {
+            return false;
+        };
+        if let Some(v) = kids.remove(old) {
+            kids.insert(new.to_string(), v);
+            return true;
+        }
+        kids.values_mut().any(|k| rekey(k, old, new))
+    }
+    rekey(&mut g.states, old, new);
+    retarget(&mut g.states, old, Some(new));
+    for n in &mut g.nodes {
+        if (n.kind.starts_with("event.state_") || n.kind.starts_with("state.")) && n.of == old {
+            n.of = new.to_string();
+        }
+    }
+    Ok(())
+}
+
+/// Writes `t` into the machine (the outer table's when `from` is None).
+fn put_transition(g: &mut Graph, t: &Transition) {
+    let Some(o) = state_def_mut(&mut g.states, t.from.as_deref()).and_then(Value::as_object_mut)
+    else {
+        return;
+    };
+    match &t.trigger {
+        Trigger::On { event, guard } => {
+            let entry = match guard {
+                Some(g) => json!({ "to": t.to, "guard": g }),
+                None => json!(t.to),
+            };
+            let on = o.entry("on").or_insert_with(|| json!({}));
+            if let Some(on) = on.as_object_mut() {
+                on.insert(event.clone(), entry);
+            }
+        }
+        Trigger::After { secs, prop } => {
+            let first = match prop {
+                Some(p) => json!(p),
+                None => json!(secs),
+            };
+            o.insert("after".into(), json!([first, t.to]));
+        }
+        Trigger::Done => {
+            o.insert("done".into(), json!(t.to));
+        }
+        Trigger::When(cond) => {
+            let w = o.entry("when").or_insert_with(|| json!({}));
+            if let Some(w) = w.as_object_mut() {
+                w.insert(cond.clone(), json!(t.to));
+            }
+        }
+    }
+}
+
+/// Removes `t` from the machine.
+fn take_transition(g: &mut Graph, t: &Transition) {
+    let Some(o) = state_def_mut(&mut g.states, t.from.as_deref()).and_then(Value::as_object_mut)
+    else {
+        return;
+    };
+    let points = |v: &Value| {
+        v.as_str() == Some(t.to.as_str())
+            || v.get("to").and_then(Value::as_str) == Some(t.to.as_str())
+    };
+    match &t.trigger {
+        Trigger::On { event, .. } => {
+            let mut empty = false;
+            if let Some(on) = o.get_mut("on").and_then(Value::as_object_mut) {
+                match on.get_mut(event) {
+                    Some(Value::Array(list)) => {
+                        list.retain(|c| !points(c));
+                        if list.is_empty() {
+                            on.remove(event);
+                        }
+                    }
+                    Some(v) if points(v) => {
+                        on.remove(event);
+                    }
+                    _ => {}
+                }
+                empty = on.is_empty();
+            }
+            if empty {
+                o.remove("on");
+            }
+        }
+        Trigger::After { .. } => {
+            o.remove("after");
+        }
+        Trigger::Done => {
+            o.remove("done");
+        }
+        Trigger::When(cond) => {
+            let mut empty = false;
+            if let Some(w) = o.get_mut("when").and_then(Value::as_object_mut) {
+                w.remove(cond);
+                empty = w.is_empty();
+            }
+            if empty {
+                o.remove("when");
+            }
+        }
+    }
+}
+
+/// A transition from `from` to `to`, fired by an event: `interact` if the state takes no
+/// interaction yet. Returns it.
+fn add_transition(g: &mut Graph, from: &str, to: &str) -> Transition {
+    let (m, _) = Machine::from_definition(&g.states);
+    let taken: BTreeSet<String> = m
+        .transitions
+        .iter()
+        .filter(|t| t.from.as_deref() == Some(from))
+        .filter_map(|t| match &t.trigger {
+            Trigger::On { event, .. } => Some(event.clone()),
+            _ => None,
+        })
+        .collect();
+    let event = std::iter::once("interact".to_string())
+        .chain((1..).map(|k| format!("event{k}")))
+        .find(|e| !taken.contains(e))
+        .expect("a free event");
+    let t = Transition {
+        from: Some(from.to_string()),
+        to: to.to_string(),
+        trigger: Trigger::On { event, guard: None },
+        line: 0,
+    };
+    put_transition(g, &t);
+    t
+}
+
+/// The node for `state`'s `hook` (enter, update, exit), made below the others if there is
+/// none. Returns its id.
+fn hook_node(g: &mut Graph, state: &str, hook: &str) -> u32 {
+    let kind = format!("event.state_{hook}");
+    if let Some(n) = g.nodes.iter().find(|n| n.kind == kind && n.of == state) {
+        return n.id;
+    }
+    let id = g.next_id();
+    let y = g.nodes.iter().map(|n| n.at[1]).max().map_or(0, |y| y + 180);
+    g.nodes.push(Node {
+        id,
+        kind,
+        of: state.to_string(),
+        at: [0, y],
+        values: BTreeMap::new(),
+    });
+    id
+}
+
+/// The entity running `path` (the first).
+fn graph_runner(world: &mut World, path: &str) -> Option<Entity> {
+    let mut q = world.query::<(Entity, &Script)>();
+    q.iter(world)
+        .filter(|(_, s)| s.path == path && s.enabled)
+        .map(|(e, _)| e)
+        .min()
+}
+
+fn states_canvas(ui: &mut egui::Ui, world: &mut World, editor: &Editor, tab: &mut GraphsTab) {
+    let playing = editor.mode != Mode::Edit;
+    let path = tab.docs[tab.current].path.clone();
+    let live = if playing {
+        graph_runner(world, &path).and_then(|e| engine_script::states::live(world, e))
+    } else {
+        None
+    };
+    let doc = &mut tab.docs[tab.current];
+    let outer = ui.available_rect_before_wrap();
+    let resp = ui.allocate_rect(outer, Sense::click_and_drag());
+    let painter = ui.painter_at(outer);
+    painter.rect_filled(outer, 0.0, CANVAS_BG);
+    paint_grid(&painter, outer);
+    if !doc.graph.states.is_object() {
+        let mut make = false;
+        ui.scope_builder(
+            egui::UiBuilder::new().max_rect(Rect::from_center_size(
+                outer.center(),
+                Vec2::new(520.0, 160.0),
+            )),
+            |ui| {
+                ui.vertical_centered(|ui| {
+                    ui.label(theme::dim(
+                        "No state machine yet. A state machine keeps the script in one state at a \
+                         time (closed, opening, open...): each state runs its own nodes, and \
+                         events, timers and conditions move it to the next.",
+                    ));
+                    ui.add_space(8.0);
+                    make = ui.button("Make a state machine").clicked();
+                });
+            },
+        );
+        if make {
+            let before = doc.graph.clone();
+            add_state(&mut doc.graph, Pos2::ZERO);
+            doc.push_undo(before);
+        }
+        return;
+    }
+    let (machine, problems) = graph_machine(&doc.graph);
+    let places = state_places(&doc.graph);
+    let placed = crate::states::layout(&machine, &places);
+    let view = doc
+        .states
+        .view
+        .unwrap_or_else(|| View::fit(placed.bounds, outer.shrink2(Vec2::new(0.0, 30.0)), 1.0));
+    let diagram = Diagram {
+        machine: &machine,
+        placed: &placed,
+        live: live.as_ref(),
+        selected: doc.states.pick.as_ref(),
+        hovered: doc.states.hover.as_ref(),
+    };
+    let hits = crate::states::paint(&painter, &diagram, view);
+    doc.states.drawn = hits
+        .iter()
+        .map(|(p, r)| match p {
+            Pick::State(n) => (n.clone(), *r),
+            Pick::Transition(k) => (format!("transition {k}"), *r),
+        })
+        .collect();
+    let pointer = ui.ctx().pointer_latest_pos();
+    let over = pointer.filter(|p| outer.contains(*p));
+    doc.states.hover = over.and_then(|p| crate::states::hit(&hits, p));
+
+    // The + on a state: drag it onto another state for a transition.
+    let handle_of = |name: &str| {
+        placed.rects.get(name).map(|r| view.rect(*r)).map(|r| {
+            Rect::from_center_size(r.right_center() + Vec2::new(12.0, 0.0), Vec2::splat(18.0))
+        })
+    };
+    let handle_state = match (&doc.states.hover, &doc.states.pick) {
+        (Some(Pick::State(n)), _) | (_, Some(Pick::State(n))) => Some(n.clone()),
+        _ => None,
+    }
+    .filter(|n| !machine.is_group(n));
+    let handle = handle_state.as_deref().and_then(handle_of);
+    if let Some(h) = handle {
+        painter.circle_filled(h.center(), 8.0, theme::ACCENT);
+        painter.text(
+            h.center(),
+            Align2::CENTER_CENTER,
+            "+",
+            FontId::proportional(14.0),
+            Color32::WHITE,
+        );
+    }
+
+    if resp.drag_started()
+        && let Some(p) = resp.interact_pointer_pos()
+    {
+        if let (Some(h), Some(name)) = (handle, &handle_state)
+            && h.expand(4.0).contains(p)
+        {
+            doc.states.link = Some(name.clone());
+        } else if let Some(Pick::State(name)) = crate::states::hit(&hits, p)
+            && let Some(r) = placed.rects.get(&name)
+        {
+            let before = doc.graph.clone();
+            pin_places(&mut doc.graph, &machine, &placed);
+            doc.push_undo(before);
+            doc.states.drag = Some((name.clone(), view.back(p) - r.min));
+            doc.states.view = Some(view);
+            doc.states.pick = Some(Pick::State(name));
+        }
+    }
+    if resp.dragged()
+        && let Some(p) = resp.interact_pointer_pos()
+    {
+        if let Some((name, grab)) = doc.states.drag.clone()
+            && let Some(r) = placed.rects.get(&name)
+        {
+            let to = view.back(p) - grab;
+            if machine.is_group(&name) {
+                // A group carries its states.
+                let delta = to - r.min;
+                let inside: Vec<String> = machine
+                    .states
+                    .iter()
+                    .filter(|s| !machine.is_group(&s.name) && within(&machine, &s.name, &name))
+                    .map(|s| s.name.clone())
+                    .collect();
+                for s in inside {
+                    if let Some(q) = placed.rects.get(&s) {
+                        set_place(&mut doc.graph, &s, q.min + delta);
+                    }
+                }
+            } else {
+                set_place(&mut doc.graph, &name, to);
+            }
+        }
+        if let Some(from) = &doc.states.link
+            && let Some(r) = placed.rects.get(from).map(|r| view.rect(*r))
+        {
+            let a = r.right_center();
+            painter.line_segment([a, p], Stroke::new(2.0, theme::ACCENT));
+            painter.circle_filled(p, 4.0, theme::ACCENT);
+        }
+    }
+    if resp.drag_stopped() {
+        if let (Some(from), Some(p)) = (doc.states.link.take(), pointer)
+            && let Some(Pick::State(to)) = crate::states::hit(&hits, p)
+        {
+            let before = doc.graph.clone();
+            let t = add_transition(&mut doc.graph, &from, &to);
+            doc.push_undo(before);
+            let (m, _) = graph_machine(&doc.graph);
+            doc.states.pick = m
+                .transitions
+                .iter()
+                .position(|x| *x == t)
+                .map(Pick::Transition);
+        }
+        doc.states.drag = None;
+        doc.states.view = None;
+    }
+    if resp.clicked() {
+        doc.states.pick = doc.states.hover.clone();
+        doc.states.rename = None;
+    }
+    if resp.double_clicked() {
+        match doc.states.hover.clone() {
+            None => {
+                if let Some(p) = pointer {
+                    let before = doc.graph.clone();
+                    pin_places(&mut doc.graph, &machine, &placed);
+                    let at = view.back(p)
+                        - Vec2::new(crate::states::STATE_W, crate::states::STATE_H) / 2.0;
+                    let name = add_state(&mut doc.graph, at);
+                    doc.push_undo(before);
+                    doc.states.pick = Some(Pick::State(name));
+                }
+            }
+            Some(Pick::State(name)) if !machine.is_group(&name) => {
+                // Its work: the Enter node, in the nodes view.
+                let before = doc.graph.clone();
+                let id = hook_node(&mut doc.graph, &name, "enter");
+                if doc.graph != before {
+                    doc.push_undo(before);
+                }
+                doc.states.on = false;
+                doc.selected = BTreeSet::from([id]);
+                focus_node(doc, id);
+            }
+            _ => {}
+        }
+    }
+    let typing = ui.ctx().egui_wants_keyboard_input();
+    if !typing
+        && over.is_some()
+        && ui.input(|i| i.key_pressed(Key::Delete))
+        && let Some(pick) = doc.states.pick.take()
+    {
+        let before = doc.graph.clone();
+        match pick {
+            Pick::State(name) => delete_state(&mut doc.graph, &name),
+            Pick::Transition(k) => {
+                if let Some(t) = machine.transitions.get(k) {
+                    take_transition(&mut doc.graph, t);
+                }
+            }
+        }
+        doc.push_undo(before);
+    }
+    // What is wrong, and how to work it.
+    let mut y = outer.bottom() - 10.0;
+    painter.text(
+        Pos2::new(outer.left() + 12.0, y),
+        Align2::LEFT_BOTTOM,
+        "Double-click: a new state · drag a state's + onto another: a transition · double-click a \
+         state: its Enter nodes · Delete: the picked one",
+        FontId::proportional(12.0),
+        theme::TEXT_DIM,
+    );
+    for p in problems.iter().rev() {
+        y -= 18.0;
+        painter.text(
+            Pos2::new(outer.left() + 12.0, y),
+            Align2::LEFT_BOTTOM,
+            format!("✖ {p}"),
+            FontId::proportional(12.5),
+            ERROR,
+        );
+    }
+    if live.is_some() {
+        painter.text(
+            outer.right_bottom() + Vec2::new(-14.0, -10.0),
+            Align2::RIGHT_BOTTOM,
+            "LIVE",
+            FontId::proportional(26.0),
+            theme::PLAY.gamma_multiply(0.8),
+        );
+    }
+}
+
+/// Whether `inner` is `outer` or inside it.
+fn within(m: &Machine, inner: &str, outer: &str) -> bool {
+    let mut at = Some(inner.to_string());
+    while let Some(s) = at {
+        if s == outer {
+            return true;
+        }
+        at = m.state(&s).and_then(|s| s.parent.clone());
+    }
+    false
+}
+
+/// The sidebar's States section: the states, the picked one's or the picked transition's
+/// settings.
+fn states_section(ui: &mut egui::Ui, doc: &mut GraphDoc, playing_in: Option<&str>) {
+    let (machine, _) = graph_machine(&doc.graph);
+    let count = machine.states.len();
+    ui.horizontal(|ui| {
+        section_title(ui, &mut doc.folded, "States", count).on_hover_text(
+            "The state machine: one state at a time, each with its own Enter, Update and Exit \
+             nodes; events, timers and conditions change state",
+        );
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if ui.small_button("+").on_hover_text("A new state").clicked() {
+                let before = doc.graph.clone();
+                let placed = crate::states::layout(&machine, &state_places(&doc.graph));
+                pin_places(&mut doc.graph, &machine, &placed);
+                let at = Pos2::new(placed.bounds.right() + 60.0, placed.bounds.top().max(0.0));
+                let name = add_state(&mut doc.graph, at);
+                doc.push_undo(before);
+                doc.states.pick = Some(Pick::State(name));
+                doc.states.on = true;
+            }
+        });
+    });
+    if doc.folded.contains("States") {
+        return;
+    }
+    if machine.states.is_empty() {
+        ui.label(theme::dim(
+            "None: + makes the first (or the States view's button).",
+        ));
+        return;
+    }
+    for st in &machine.states {
+        let depth = {
+            let mut d = 0;
+            let mut at = st.parent.clone();
+            while let Some(p) = at {
+                d += 1;
+                at = machine.state(&p).and_then(|s| s.parent.clone());
+            }
+            d
+        };
+        let first = match &st.parent {
+            Some(p) => machine.state(p).and_then(|s| s.initial.as_deref()) == Some(&st.name),
+            None => machine.initial == st.name,
+        };
+        let live = playing_in == Some(st.name.as_str());
+        let label = format!(
+            "{}{}{}",
+            "    ".repeat(depth),
+            if first { "• " } else { "   " },
+            st.name
+        );
+        let mut text = RichText::new(label).monospace();
+        if live {
+            text = text.color(theme::PLAY);
+        }
+        let picked = doc.states.pick == Some(Pick::State(st.name.clone()));
+        if ui.add(egui::Button::selectable(picked, text)).clicked() {
+            doc.states.pick = Some(Pick::State(st.name.clone()));
+            doc.states.on = true;
+            doc.states.rename = None;
+        }
+    }
+    ui.add_space(4.0);
+    match doc.states.pick.clone() {
+        Some(Pick::State(name)) => state_settings(ui, doc, &machine, &name),
+        Some(Pick::Transition(k)) => {
+            if let Some(t) = machine.transitions.get(k).cloned() {
+                transition_settings(ui, doc, &machine, k, &t);
+            }
+        }
+        None => {
+            ui.label(theme::dim("Pick a state or a transition to set it up."));
+        }
+    }
+}
+
+fn state_settings(ui: &mut egui::Ui, doc: &mut GraphDoc, m: &Machine, name: &str) {
+    let Some(st) = m.state(name).cloned() else {
+        doc.states.pick = None;
+        return;
+    };
+    egui::Frame::new()
+        .fill(theme::WIDGET.gamma_multiply(0.5))
+        .corner_radius(4.0)
+        .inner_margin(egui::Margin::same(6))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(theme::dim("Name"));
+                let typed = match &mut doc.states.rename {
+                    Some((of, text)) if of == name => text,
+                    slot => {
+                        *slot = Some((name.to_string(), name.to_string()));
+                        &mut slot.as_mut().expect("just set").1
+                    }
+                };
+                let r = ui.add(egui::TextEdit::singleline(typed).desired_width(140.0));
+                if r.lost_focus() && typed.trim() != name {
+                    let new = typed.trim().to_string();
+                    let before = doc.graph.clone();
+                    match rename_state(&mut doc.graph, name, &new) {
+                        Ok(()) => {
+                            doc.push_undo(before);
+                            doc.states.pick = Some(Pick::State(new.clone()));
+                            doc.states.rename = Some((new.clone(), new));
+                        }
+                        Err(e) => {
+                            doc.states.rename = None;
+                            ui.label(RichText::new(e).color(ERROR));
+                        }
+                    }
+                }
+            });
+            let parent_first = match &st.parent {
+                Some(p) => m.state(p).and_then(|s| s.initial.clone()),
+                None => Some(m.initial.clone()),
+            };
+            let first = parent_first.as_deref() == Some(name);
+            ui.horizontal(|ui| {
+                if ui
+                    .add_enabled(!first, egui::Button::new(if first { "• First state" } else { "Make it the first" }))
+                    .on_hover_text("The state it starts in (in its group)")
+                    .clicked()
+                {
+                    let before = doc.graph.clone();
+                    if let Some(o) = state_def_mut(&mut doc.graph.states, st.parent.as_deref())
+                        .and_then(Value::as_object_mut)
+                    {
+                        o.insert("initial".into(), json!(name));
+                    }
+                    doc.push_undo(before);
+                }
+                if m.is_group(name) {
+                    let mut history = st.history;
+                    if ui
+                        .checkbox(&mut history, "History")
+                        .on_hover_text("Coming back, it goes on in the state it was last in")
+                        .changed()
+                    {
+                        let before = doc.graph.clone();
+                        if let Some(o) = state_def_mut(&mut doc.graph.states, Some(name))
+                            .and_then(Value::as_object_mut)
+                        {
+                            if history {
+                                o.insert("history".into(), json!(true));
+                            } else {
+                                o.remove("history");
+                            }
+                        }
+                        doc.push_undo(before);
+                    }
+                }
+            });
+            ui.horizontal(|ui| {
+                ui.label(theme::dim("Its work:"));
+                for hook in ["enter", "update", "exit"] {
+                    let has = st.hooks.iter().any(|h| h == hook);
+                    let label = if has {
+                        format!("{hook} ⏵")
+                    } else {
+                        format!("+ {hook}")
+                    };
+                    if ui
+                        .small_button(label)
+                        .on_hover_text(match hook {
+                            "enter" => "Nodes that run when the state starts (they may wait; a done transition follows when they finish)",
+                            "update" => "Nodes that run every frame while it is active",
+                            _ => "Nodes that run when it ends",
+                        })
+                        .clicked()
+                    {
+                        let before = doc.graph.clone();
+                        let id = hook_node(&mut doc.graph, name, hook);
+                        if doc.graph != before {
+                            doc.push_undo(before);
+                        }
+                        doc.states.on = false;
+                        doc.selected = BTreeSet::from([id]);
+                        focus_node(doc, id);
+                    }
+                }
+            });
+            if ui
+                .small_button("Delete state")
+                .on_hover_text("Removes it and the transitions into it")
+                .clicked()
+            {
+                let before = doc.graph.clone();
+                delete_state(&mut doc.graph, name);
+                doc.push_undo(before);
+                doc.states.pick = None;
+            }
+        });
+}
+
+fn transition_settings(
+    ui: &mut egui::Ui,
+    doc: &mut GraphDoc,
+    m: &Machine,
+    k: usize,
+    t: &Transition,
+) {
+    let events: Vec<String> = std::iter::once("interact".to_string())
+        .chain(doc.graph.events.keys().cloned())
+        .collect();
+    egui::Frame::new()
+        .fill(theme::WIDGET.gamma_multiply(0.5))
+        .corner_radius(4.0)
+        .inner_margin(egui::Margin::same(6))
+        .show(ui, |ui| {
+            ui.label(
+                RichText::new(format!(
+                    "{} ➡ {}",
+                    t.from.as_deref().unwrap_or("any state"),
+                    t.to
+                ))
+                .strong(),
+            );
+            let mut next = t.clone();
+            let kinds = [("on", "an event"), ("after", "after a time"), ("done", "when its enter is done"), ("when", "when a variable is true")];
+            egui::ComboBox::from_id_salt(("transition kind", k))
+                .selected_text(kinds.iter().find(|x| x.0 == t.kind()).map_or("", |x| x.1))
+                .show_ui(ui, |ui| {
+                    for (kind, text) in kinds {
+                        if ui.selectable_label(t.kind() == kind, text).clicked() && t.kind() != kind {
+                            next.trigger = match kind {
+                                "on" => Trigger::On { event: "interact".into(), guard: None },
+                                "after" => Trigger::After { secs: 2.0, prop: None },
+                                "done" => Trigger::Done,
+                                _ => Trigger::When(doc.graph.vars.keys().next().cloned().unwrap_or_else(|| "ready".into())),
+                            };
+                        }
+                    }
+                });
+            match &mut next.trigger {
+                Trigger::On { event, .. } => {
+                    ui.horizontal(|ui| {
+                        ui.label(theme::dim("Event"));
+                        egui::ComboBox::from_id_salt(("transition event", k))
+                            .selected_text(event.as_str())
+                            .show_ui(ui, |ui| {
+                                for e in &events {
+                                    ui.selectable_value(event, e.clone(), e);
+                                }
+                            });
+                        ui.add(egui::TextEdit::singleline(event).desired_width(90.0));
+                    });
+                }
+                Trigger::After { secs, prop } => {
+                    ui.horizontal(|ui| {
+                        ui.label(theme::dim("Seconds"));
+                        if prop.is_none() {
+                            ui.add(egui::DragValue::new(secs).speed(0.05).range(0.0..=3600.0));
+                        }
+                        let props: Vec<String> = doc
+                            .graph
+                            .props
+                            .iter()
+                            .filter(|(_, v)| v.is_number())
+                            .map(|(k, _)| k.clone())
+                            .collect();
+                        egui::ComboBox::from_id_salt(("after prop", k))
+                            .selected_text(prop.clone().unwrap_or_else(|| "a number".into()))
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(prop, None, "a number");
+                                for p in props {
+                                    ui.selectable_value(prop, Some(p.clone()), format!("prop {p}"));
+                                }
+                            });
+                    });
+                }
+                Trigger::Done => {
+                    ui.label(theme::dim("When the state's Enter nodes have finished (after their Delays and Tweens)."));
+                }
+                Trigger::When(cond) => {
+                    ui.horizontal(|ui| {
+                        ui.label(theme::dim("Variable"));
+                        egui::ComboBox::from_id_salt(("when var", k))
+                            .selected_text(cond.as_str())
+                            .show_ui(ui, |ui| {
+                                for v in doc.graph.vars.keys() {
+                                    ui.selectable_value(cond, v.clone(), v);
+                                    ui.selectable_value(cond, format!("not {v}"), format!("not {v}"));
+                                }
+                            });
+                    });
+                }
+            }
+            ui.horizontal(|ui| {
+                ui.label(theme::dim("To"));
+                egui::ComboBox::from_id_salt(("transition to", k))
+                    .selected_text(next.to.as_str())
+                    .show_ui(ui, |ui| {
+                        for s in &m.states {
+                            ui.selectable_value(&mut next.to, s.name.clone(), &s.name);
+                        }
+                    });
+            });
+            if next != *t {
+                let before = doc.graph.clone();
+                take_transition(&mut doc.graph, t);
+                put_transition(&mut doc.graph, &next);
+                doc.push_undo(before);
+                let (m2, _) = graph_machine(&doc.graph);
+                doc.states.pick = m2.transitions.iter().position(|x| *x == next).map(Pick::Transition);
+            }
+            if ui.small_button("Delete transition").clicked() {
+                let before = doc.graph.clone();
+                take_transition(&mut doc.graph, t);
+                doc.push_undo(before);
+                doc.states.pick = None;
+            }
+        });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3723,6 +4860,7 @@ mod tests {
             applied: None,
             types: Vec::new(),
             folded: BTreeSet::new(),
+            states: StatesEdit::default(),
         }
     }
 

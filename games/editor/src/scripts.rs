@@ -54,12 +54,14 @@ use engine_script::analysis::{
 use engine_script::debug::{self, FileStop, Go, StopView};
 use engine_script::editing::{self, FileMarks, OutputCursor, Word, WordKind};
 use engine_script::props::{Prop, PropKind};
+use engine_script::states::{Machine, Problem as MachineProblem};
 use engine_script::{Script, ScriptRuntime, ScriptSettings, ScriptsHeld};
 use serde_json::{Value, json};
 
 use crate::editor::{self, Editor, Mode, Tab};
 use crate::scene_ops::SceneOrder;
 use crate::shots::{ShotScript, Step};
+use crate::states::Pick;
 use crate::theme;
 use crate::ui::EditorDock;
 use crate::undo::Command;
@@ -184,6 +186,8 @@ pub struct ScriptsTab {
     pub types: Types,
     /// The script tests' runs.
     pub tests: TestsPanel,
+    /// The state machine beside the code.
+    pub machine: MachinePanel,
     /// Screenshot runs: put the pointer over this (0-based line, char column) of the code.
     pub point_at: Option<(u32, u32)>,
     /// Where the pointer was last put for `point_at` (moved once: egui waits for a still
@@ -379,6 +383,29 @@ pub fn panel(ui: &mut egui::Ui, world: &mut World, editor: &mut Editor) {
             ui.set_min_height(ui.available_height());
             output(ui, world, &mut tab)
         });
+    let machine = tab
+        .docs
+        .get(tab.current)
+        .filter(|d| d.path.ends_with(".luau"))
+        .map(|d| d.path.clone())
+        .and_then(|path| machine_of(world, &path));
+    tab.machine.has = machine.is_some();
+    if let Some(machine) = machine.filter(|_| stop.is_none() && !tab.machine.hidden) {
+        let selection = editor.selection.clone();
+        egui::Panel::right("script states")
+            .resizable(true)
+            .default_size(560.0)
+            .size_range(300.0..=1000.0)
+            .frame(
+                egui::Frame::new()
+                    .fill(CODE_BG)
+                    .inner_margin(egui::Margin::symmetric(8, 6)),
+            )
+            .show(ui, |ui| {
+                ui.set_min_height(ui.available_height());
+                states_panel(ui, world, &mut tab, machine, &selection)
+            });
+    }
     if let Some(stop) = &stop {
         egui::Panel::right("script debugger")
             .resizable(true)
@@ -1042,6 +1069,17 @@ fn tool_bar(ui: &mut egui::Ui, world: &mut World, tab: &mut ScriptsTab, now: f64
                     }
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if tab.machine.has
+                        && ui
+                            .selectable_label(!tab.machine.hidden, "States")
+                            .on_hover_text(
+                                "The script's state machine (its states table) beside the code, \
+                                 live while playing",
+                            )
+                            .clicked()
+                    {
+                        tab.machine.hidden = !tab.machine.hidden;
+                    }
                     if ui
                         .selectable_label(tab.vscode, "VS Code")
                         .on_hover_text(
@@ -5010,6 +5048,12 @@ pub fn details(
     if let Some((file, line)) = heard_section(ui, world, entity) {
         open_in_tab(world, &file, Some(line));
     }
+    if let Some(Ok(m)) = engine_script::props::declared(world, &path)
+        .ok()
+        .and_then(|d| d.machine)
+    {
+        machine_section(ui, world, entity, &m, playing);
+    }
 
     if playing {
         live_values(ui, world, entity);
@@ -5025,6 +5069,233 @@ pub fn details(
     {
         open_in_tab(world, &file, Some(line));
     }
+}
+
+// ----------------------------------------------------------------------------- state machines
+
+/// The state machine panel beside the code (`crate::states` draws the diagram).
+#[derive(Default)]
+pub struct MachinePanel {
+    /// Closed with its ✖ or the States button (it opens for every script with states).
+    pub hidden: bool,
+    /// The open script has a states table.
+    has: bool,
+    hovered: Option<Pick>,
+    pub selected: Option<Pick>,
+}
+
+/// The machine `path`'s class declares (None: no states table), or why it doesn't run.
+fn machine_of(world: &mut World, path: &str) -> Option<Result<Machine, MachineProblem>> {
+    engine_script::props::declared(world, path)
+        .ok()
+        .and_then(|d| d.machine)
+}
+
+/// The entity whose run of `path` to show: a selected one, else the first.
+fn running_entity(world: &mut World, path: &str, selection: &[Entity]) -> Option<Entity> {
+    let mut q = world.query::<(Entity, &Script)>();
+    let runs: Vec<Entity> = q
+        .iter(world)
+        .filter(|(_, s)| s.path == path && s.enabled)
+        .map(|(e, _)| e)
+        .collect();
+    selection
+        .iter()
+        .copied()
+        .find(|e| runs.contains(e))
+        .or_else(|| runs.iter().copied().min())
+}
+
+/// Beside the code: the script's states and transitions, live while playing, and the log of
+/// its changes. A click on a state or a transition goes to its line.
+fn states_panel(
+    ui: &mut egui::Ui,
+    world: &mut World,
+    tab: &mut ScriptsTab,
+    machine: Result<Machine, MachineProblem>,
+    selection: &[Entity],
+) {
+    let path = tab.docs[tab.current].path.clone();
+    let entity = running_entity(world, &path, selection);
+    let live = entity.and_then(|e| engine_script::states::live(world, e));
+    ui.horizontal(|ui| {
+        ui.label(RichText::new("STATES").strong().color(theme::TEXT));
+        match (&live, entity) {
+            (Some(l), Some(e)) => {
+                let name = world
+                    .get::<Name>(e)
+                    .map(|n| n.as_str().to_string())
+                    .unwrap_or_else(|| format!("{e}"));
+                ui.label(RichText::new(name).color(theme::TEXT));
+                if let Some(c) = l.current() {
+                    ui.label(theme::dim("in"));
+                    ui.label(RichText::new(c).color(theme::PLAY).strong());
+                }
+            }
+            _ if tab.playing => {
+                ui.label(theme::dim("no entity runs this file"));
+            }
+            _ => {
+                ui.label(theme::dim("Press Play to watch it run"));
+            }
+        }
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if ui
+                .small_button("✖")
+                .on_hover_text("Hide (the States button shows it again)")
+                .clicked()
+            {
+                tab.machine.hidden = true;
+            }
+        });
+    });
+    let m = match machine {
+        Err(p) => {
+            ui.add_space(8.0);
+            let r = ui.add(
+                egui::Label::new(
+                    RichText::new(format!("✖ line {}: {}", p.line, p.message)).color(ERROR),
+                )
+                .wrap()
+                .sense(egui::Sense::click()),
+            );
+            if r.on_hover_text("Open its line").clicked() {
+                open(world, tab, &path, Some(p.line));
+            }
+            return;
+        }
+        Ok(m) => m,
+    };
+    let log_h = if live.is_some() { 150.0 } else { 0.0 };
+    let h = (ui.available_height() - log_h - 8.0).max(140.0);
+    let (rect, resp) =
+        ui.allocate_exact_size(Vec2::new(ui.available_width(), h), egui::Sense::click());
+    let placed = crate::states::layout(&m, &BTreeMap::new());
+    let (hits, _) = crate::states::fitted(
+        ui,
+        rect,
+        &m,
+        &placed,
+        live.as_ref(),
+        tab.machine.selected.as_ref(),
+        tab.machine.hovered.as_ref(),
+    );
+    for (pick, r) in &hits {
+        if let Pick::State(name) = pick {
+            tab.drawn_at.insert(format!("state {name}"), *r);
+        }
+    }
+    tab.machine.hovered = resp.hover_pos().and_then(|p| crate::states::hit(&hits, p));
+    let line_of = |pick: &Pick| match pick {
+        Pick::State(name) => m.state(name).map_or(0, |s| s.line),
+        Pick::Transition(k) => m.transitions.get(*k).map_or(0, |t| t.line),
+    };
+    if let Some(pick) = tab.machine.hovered.clone() {
+        let tip = match &pick {
+            Pick::State(name) => {
+                let st = m.state(name);
+                let mut lines = vec![format!("state {name}")];
+                if let Some(st) = st {
+                    if !st.doc.is_empty() {
+                        lines.push(st.doc.clone());
+                    }
+                    if m.is_group(name) {
+                        lines.push(format!(
+                            "a group: starts in {}{}",
+                            st.initial.clone().unwrap_or_default(),
+                            if st.history {
+                                "; with history it goes back to where it was"
+                            } else {
+                                ""
+                            }
+                        ));
+                    }
+                    for h in &st.hooks {
+                        lines.push(format!("{h}_{name}"));
+                    }
+                }
+                if let Some(secs) = live.as_ref().and_then(|l| l.secs_in(name)) {
+                    lines.push(format!("active for {secs:.1} s"));
+                }
+                lines.join("\n")
+            }
+            Pick::Transition(k) => m
+                .transitions
+                .get(*k)
+                .map(|t| {
+                    format!(
+                        "{} ➡ {}: {}",
+                        t.from.as_deref().unwrap_or("any state"),
+                        t.to,
+                        t.label()
+                    )
+                })
+                .unwrap_or_default(),
+        };
+        let line = line_of(&pick);
+        resp.clone().on_hover_text(if line > 0 {
+            format!("{tip}\nline {line}: click to go there")
+        } else {
+            tip
+        });
+    }
+    if resp.clicked()
+        && let Some(pick) = tab.machine.hovered.clone()
+    {
+        let line = line_of(&pick);
+        tab.machine.selected = Some(pick);
+        if line > 0 {
+            open(world, tab, &path, Some(line));
+        }
+    }
+    if let Some(l) = &live {
+        ui.separator();
+        ui.label(RichText::new("CHANGES").small().color(theme::TEXT_DIM));
+        egui::ScrollArea::vertical()
+            .id_salt("state log")
+            .max_height(log_h - 30.0)
+            .show(ui, |ui| crate::states::log_rows(ui, l, 40));
+    }
+}
+
+/// The Details panel's state machine: the diagram, live while playing, and the last changes.
+fn machine_section(ui: &mut egui::Ui, world: &World, entity: Entity, m: &Machine, playing: bool) {
+    egui::CollapsingHeader::new(RichText::new("State machine").strong().color(theme::TEXT))
+        .id_salt(("script states", entity))
+        .default_open(true)
+        .show(ui, |ui| {
+            let live = playing
+                .then(|| engine_script::states::live(world, entity))
+                .flatten();
+            match live.as_ref().and_then(|l| l.current().map(|c| (c, l))) {
+                Some((c, l)) => {
+                    ui.horizontal(|ui| {
+                        ui.label(theme::dim("In"));
+                        ui.label(RichText::new(c).color(theme::PLAY).strong());
+                        if let Some(secs) = l.secs_in(c) {
+                            ui.label(theme::dim(format!("for {secs:.1} s")));
+                        }
+                    });
+                }
+                None => {
+                    ui.label(theme::dim(if playing {
+                        "Not running (an error stopped it?)"
+                    } else {
+                        "Press Play to watch it change state."
+                    }));
+                }
+            }
+            let placed = crate::states::layout(m, &BTreeMap::new());
+            let w = ui.available_width();
+            let h =
+                (w * placed.bounds.height() / placed.bounds.width().max(1.0)).clamp(140.0, 300.0);
+            let (rect, _) = ui.allocate_exact_size(Vec2::new(w, h), egui::Sense::hover());
+            ui.painter().rect_filled(rect, 6.0, CODE_BG);
+            crate::states::fitted(ui, rect, m, &placed, live.as_ref(), None, None);
+            if let Some(l) = &live {
+                crate::states::log_rows(ui, l, 4);
+            }
+        });
 }
 
 /// The scene's objects that run a script: (name, entity, script path), by name.
@@ -6893,6 +7164,219 @@ pub fn tests_shots(dir: String) -> ShotScript {
         Step::Wait(300),
         Step::Shot("tests_04_caught_a_bug"),
     ];
+    ShotScript::new(dir, steps)
+}
+
+/// Where the state machine shots' gate stands, and the camera on it.
+const GATE_AT: DVec3 = DVec3::new(-0.3, 0.0, -0.5);
+
+/// `editor --headless --size 1920x1080 --shots <dir> --script states`: a gate run by its
+/// `states` table (examples/gate.luau): the diagram beside its code, live while it opens, waits
+/// and goes back up for someone under it, in the Details panel, its mistakes, its tests, and a
+/// graph's States view.
+pub fn states_shots(dir: String) -> ShotScript {
+    let _ = std::fs::create_dir_all(&dir);
+    let root = std::fs::canonicalize(&dir)
+        .unwrap_or_else(|_| std::env::current_dir().unwrap_or_default().join(&dir))
+        .join("scripts");
+    let setup = move |world: &mut World, editor: &mut Editor| {
+        editor.icons = false;
+        dusk_sky(world);
+        let from = engine_script::scripts_root(world).join(EXAMPLES);
+        copy_dir(&from, &root.join(EXAMPLES));
+        world.resource_mut::<ScriptSettings>().folder = root.to_string_lossy().to_string();
+        world.remove_resource::<ScriptRuntime>();
+        if let Some(e) = crate::shots::find(world, "Lamp") {
+            world
+                .entity_mut(e)
+                .insert(Script::new("examples/pulse.graph"));
+        }
+        // The gate, made as a user would: an empty object that can be used, with the script.
+        editor::spawn_with(
+            world,
+            editor,
+            "Gate".into(),
+            vec![
+                (
+                    "Interactable",
+                    json!({"verb": "Raise", "reach_m": 3.0, "offset": [0.0, 1.2, 0.0]}),
+                ),
+                (
+                    "Script",
+                    serde_json::to_value(Script::new("examples/gate.luau")).unwrap_or_default(),
+                ),
+            ],
+            Transform::from_translation(GATE_AT),
+        );
+        // Someone to press E and to stand under it (the gate's `blocker` is "Player").
+        let body = MeshRenderer::new(
+            Shape::Capsule {
+                radius: 0.28,
+                height: 1.2,
+                segments: 0,
+            },
+            StandardMaterial::hex(0x3d6fb6),
+        );
+        editor::spawn_with(
+            world,
+            editor,
+            "Player".into(),
+            vec![(
+                "MeshRenderer",
+                serde_json::to_value(body).unwrap_or_default(),
+            )],
+            Transform::from_translation(GATE_AT + DVec3::new(0.9, 0.88, 3.0)),
+        );
+        world.resource_mut::<EditorDock>().0 = tests_layout();
+        let mut tab = world.resource_mut::<ScriptsTab>();
+        tab.files_next = 0.0;
+        tab.tests.shown = false;
+    };
+    let open_file = |path: &'static str, line: u32| {
+        move |world: &mut World, _: &mut Editor| {
+            world.resource_scope(|world, mut tab: Mut<ScriptsTab>| {
+                open(world, &mut tab, path, Some(line));
+            });
+        }
+    };
+    // E on `target`, by the player.
+    let press = |target: &'static str| {
+        move |world: &mut World, _: &mut Editor| {
+            let (Some(target), Some(actor)) = (
+                crate::shots::find(world, target),
+                crate::shots::find(world, "Player"),
+            ) else {
+                return;
+            };
+            let from = world
+                .get::<Transform>(actor)
+                .map_or(DVec3::ZERO, |t| t.translation);
+            world.write_message(engine::world::Interact {
+                actor,
+                target,
+                from,
+            });
+        }
+    };
+    let player_to = |at: DVec3| {
+        move |world: &mut World, _: &mut Editor| {
+            if let Some(e) = crate::shots::find(world, "Player")
+                && let Some(mut t) = world.get_mut::<Transform>(e)
+            {
+                t.translation = at;
+            }
+        }
+    };
+    let hover = |what: &'static str| {
+        move |world: &mut World, _: &mut Editor| {
+            let at = world
+                .get_resource::<ScriptsTab>()
+                .and_then(|t| t.drawn_at.get(what).map(|r| r.center()));
+            if let Some(p) = at {
+                world
+                    .resource_mut::<crate::egui_bridge::EguiInput>()
+                    .injected
+                    .push(egui::Event::PointerMoved(p));
+            }
+        }
+    };
+    let mut steps = vec![
+        Step::Do(Box::new(setup)),
+        Step::Tool(crate::editor::Tool::Select),
+        Step::Camera(DVec3::new(1.3, 2.1, 6.4), DVec3::new(-0.3, 1.45, -0.5)),
+        Step::Tab(Tab::Scripts),
+        Step::Do(Box::new(open_file("examples/gate.luau", 18))),
+        Step::Wait(40),
+        Step::Shot("states_01_gate_and_its_states"),
+        // Play, and E on the gate: it opens, the lamp blinking amber.
+        Step::Select("Gate"),
+        Step::Do(Box::new(|world: &mut World, ed: &mut Editor| {
+            editor::play(world, ed)
+        })),
+        Step::Wait(6),
+        Step::Do(Box::new(|world: &mut World, _: &mut Editor| {
+            dusk_sky(world)
+        })),
+        Step::Wait(20),
+        Step::Do(Box::new(press("Gate"))),
+        Step::Wait(9),
+        Step::Shot("states_02_opening_live"),
+        // Open: its `after hold` timer fills.
+        Step::Wait(30),
+        Step::Do(Box::new(hover("state open"))),
+        Step::Wait(2),
+        Step::Shot("states_03_open_waits_hold"),
+        // Closing, someone steps under it: `when blocked` sends it back up.
+        Step::Do(Box::new(|world: &mut World, _: &mut Editor| {
+            world
+                .resource_mut::<crate::egui_bridge::EguiInput>()
+                .injected
+                .push(egui::Event::PointerGone);
+        })),
+        Step::Wait(30),
+        Step::Do(Box::new(player_to(GATE_AT + DVec3::new(0.2, 0.88, 0.3)))),
+        Step::Wait(5),
+        Step::Shot("states_04_blocked_goes_back_up"),
+        // The selected gate's Details: the same machine, live.
+        Step::Do(Box::new(player_to(GATE_AT + DVec3::new(0.9, 0.88, 3.0)))),
+        Step::Do(Box::new(|world: &mut World, _: &mut Editor| {
+            world.resource_mut::<EditorDock>().0 = props_layout();
+        })),
+        Step::Wait(24),
+        Step::Shot("states_05_details_panel"),
+        // Stopped, two mistakes: a state name misspelt in code (the type checker underlines
+        // it) and a transition to a state that isn't there (saved: the panel says where).
+        Step::Do(Box::new(|world: &mut World, ed: &mut Editor| {
+            editor::stop(world, ed);
+            world.resource_mut::<EditorDock>().0 = tests_layout();
+        })),
+        Step::Tab(Tab::Scripts),
+        Step::Do(Box::new(|world: &mut World, _: &mut Editor| {
+            world.resource_scope(|world, mut tab: Mut<ScriptsTab>| {
+                open(world, &mut tab, "examples/gate.luau", Some(24));
+                let i = tab.current;
+                let doc = &mut tab.docs[i];
+                doc.text = doc.saved.replace(
+                    r#"closing = { done = "closed","#,
+                    r#"closing = { done = "closd","#,
+                );
+                save(world, &mut tab, 0.0);
+                let i = tab.current;
+                let doc = &mut tab.docs[i];
+                doc.text = doc.saved.replace(
+                    r#"self:in_state("opening") or"#,
+                    r#"self:in_state("openning") or"#,
+                );
+                tab.toast = None;
+            });
+        })),
+        Step::Wait(60),
+        Step::Do(Box::new(open_file("examples/gate.luau", 30))),
+        Step::Wait(10),
+        Step::Shot("states_06_mistakes"),
+        // Put right, and its tests run in the game.
+        Step::Do(Box::new(|world: &mut World, _: &mut Editor| {
+            world.resource_scope(|world, mut tab: Mut<ScriptsTab>| {
+                open(world, &mut tab, "examples/gate.luau", Some(1));
+                let i = tab.current;
+                let doc = &mut tab.docs[i];
+                doc.text = doc
+                    .saved
+                    .replace(r#"done = "closd","#, r#"done = "closed","#);
+                save(world, &mut tab, 0.0);
+                open(world, &mut tab, "examples/gate.test.luau", Some(1));
+                tab.tests.run(json!({"files": ["examples/gate.test.luau"]}));
+                tab.toast = None;
+            });
+        })),
+        Step::Wait(8),
+        Step::Do(Box::new(|world: &mut World, _: &mut Editor| {
+            dusk_sky(world)
+        })),
+        Step::Wait(400),
+        Step::Shot("states_07_gate_tests"),
+    ];
+    steps.extend(crate::graphs::states_steps());
     ShotScript::new(dir, steps)
 }
 

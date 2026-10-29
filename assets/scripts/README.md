@@ -153,6 +153,47 @@ the same frame, each as a task of its own, so they may wait and one that fails d
 others. Emitting a signal the class doesn't declare is an error, and the type checker knows each
 signal's values: `self:emit("pulled", 3)` is underlined as you type.
 
+## State machines: a `states` table
+
+Most gameplay objects are a few states: a gate is closed, opening, open or closing. Give the
+class a `states` table and the engine runs it; the state's own work goes in methods named after
+it:
+
+```lua
+Gate.states = {
+	initial = "closed",
+	states = {
+		closed = { on = { interact = "opening" } },             -- E on it
+		opening = { done = "open" },                            -- when enter_opening returns
+		open = { after = { "hold", "closing" } },               -- a prop: seconds
+		closing = { done = "closed", when = { blocked = "opening" } }, -- checked every frame
+	},
+}
+
+function Gate:enter_opening()
+	self:move_to(1) -- may wait (a tween): `done` follows when it returns
+end
+```
+
+- Per state: `on = { event = "target" }` (or `{ to = "target", guard = "method" }`, or a list
+  of those: the first whose guard holds), `after = { seconds or a prop's name, "target" }`,
+  `done = "target"` and `when = { method_or_field = "target" }` (`"not blocked"` too).
+  Transitions on the outer table fire from any state.
+- `enter_<state>()`, `update_<state>(dt)` and `exit_<state>()` run as it starts, every frame
+  and as it ends; leaving a state stops its enter work where it is. A state with `states` of
+  its own is a group: its `initial` starts first, its hooks and transitions hold for all of
+  them, and `history = true` resumes the child it was in.
+- Events come in by themselves: E on the object is `interact`, a message or a wired signal of
+  that name is that event. From code: `self:trigger("power")`, `self:go("open")`,
+  `self:in_state("powered")`, `self:state_time()` and `self.state` (the innermost state).
+- The type checker knows the names: `self:go("openning")` is underlined. A transition to a
+  state that isn't there is an error on its line; a loop of `done` or `when` changes stops
+  after 32 in a frame and says which. Hot reload keeps the state it is in.
+- In the editor the **States** button beside a script draws its machine: while playing the
+  current state is green with its time, `after` timers fill up, the transition just taken
+  glows, and the log below says each change and why ("interact by Player"). Click a state or
+  an arrow to go to its line. The Details panel shows the same for the selected object.
+
 ## Visual scripts (`.graph`)
 
 A `.graph` file is a script drawn as nodes and wires, for people who would rather not write
@@ -176,6 +217,10 @@ work the same. Edit graphs in the editor's **Graphs** tab:
   into a call, say) show on the node they come from.
 - While playing, the nodes that run light up, pulses run along their execution wires and every
   data wire shows its value. Ctrl+S hot reloads the graph in the running game.
+- **States** (in the toolbar) shows the graph's state machine instead of its nodes: add states,
+  drag an arrow from one to another, and set its event, timer or condition in the sidebar; each
+  state gets Enter, Update and Exit nodes, and **Go to** and **In?** nodes for the graph. It runs
+  as a Luau script's `states` table does, and lights up the same while playing.
 - **To script** writes the graph's Luau as a `.luau` file, for when a graph outgrows nodes.
 
 The file is JSON text with one node or wire per line, so changes diff and merge in git like
@@ -295,6 +340,9 @@ have them.
   show every kind of field in the Details panel.
 - `examples/float.luau`: a stone that floats and turns, with a curve from a module
   (`examples/lib/wave.luau`).
+- `examples/gate.luau`: a portcullis whose logic is all in its `states` table (E raises it, it
+  closes after `hold` seconds, goes back up if someone is under it, and stops on a power cut);
+  `examples/gate.test.luau` tests each of those.
 - `examples/pulse.graph`, `examples/hover.graph`: the same lamp and stone as visual scripts.
 - `examples/lamp.test.luau`, `examples/beacon.test.luau`, `examples/float.test.luau`: tests of
   the examples (and of the `wave` module), run in the game.

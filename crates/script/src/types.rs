@@ -272,6 +272,16 @@ export type ScriptSelf = ScriptBase & {
 	props: any,
 	--- Fires one of the class's signals: the methods wired to it run, later this frame.
 	emit: (self: any, signal: string, ...any) -> (),
+	--- With a states table: the current state's name.
+	state: string,
+	--- Goes to the named state now (exits and enters run).
+	go: (self: any, state: string) -> (),
+	--- Sends an event to the state machine; whether a state took it.
+	trigger: (self: any, event: string, ...any) -> boolean,
+	--- Whether the named state is active (the current one or a group around it).
+	in_state: (self: any, state: string) -> boolean,
+	--- Seconds since the current (or the named active) state started.
+	state_time: (self: any, state: string?) -> number,
 }
 
 "#;

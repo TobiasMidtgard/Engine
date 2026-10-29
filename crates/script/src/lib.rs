@@ -182,6 +182,15 @@
 //! Errors are marked where they happen: a code board shows the line an error came from in red,
 //! with the message and how often it repeated, until the file is fixed.
 //!
+//! ## State machines
+//!
+//! A class's `states` table (`initial`, nested `states`, `history`, and per state `on`, `after`,
+//! `done`, `when`) is a hierarchical state machine the runtime runs with the script: the state's
+//! work is `enter_<state>` (a task: `done` follows when it returns), `update_<state>(dt)` and
+//! `exit_<state>`; interactions, messages, wired signals and `self:trigger` are its events
+//! (`states.luau`). [`states`] reads a machine's shape and its live state for the editor, and
+//! `script.states {entity}` serves both.
+//!
 //! ## Tests
 //!
 //! `*.test.luau` files are gameplay tests in Jest's shape (`describe`, `it`, `expect`), run one
@@ -212,7 +221,8 @@
 //! client), `script.logpoint {path, line, message}`, `script.profile {seconds}`,
 //! `script.marks {path}` (a file's errors, logpoint values and heat by line) and
 //! `script.check {source}` (compile without running), `script.test {files, file, line,
-//! filter}` (run the script tests) and `script.tests` (their results). An editor holds scripts still with
+//! filter}` (run the script tests), `script.tests` (their results) and `script.states {entity}`
+//! (its state machine, live). An editor holds scripts still with
 //! [`ScriptsHeld`] while a scene is edited ([`editing`]).
 //!
 //! ## Showcase
@@ -249,6 +259,7 @@ mod math;
 mod profiler;
 pub mod props;
 mod runtime;
+pub mod states;
 pub mod testing;
 mod types;
 

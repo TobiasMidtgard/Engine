@@ -76,6 +76,10 @@ pub struct Graph {
     /// nodes, Call nodes and messages of their name run. Each one's values, as for signals.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub events: BTreeMap<String, String>,
+    /// A state machine (`Class.states`, crate docs "State machines"): the Luau table as JSON,
+    /// each state with `at`, where the States view draws it. Null: none.
+    #[serde(skip_serializing_if = "Value::is_null")]
+    pub states: Value,
     pub nodes: Vec<Node>,
     pub links: Vec<Link>,
     pub comments: Vec<Comment>,
@@ -92,6 +96,7 @@ impl Default for Graph {
             signals: BTreeMap::new(),
             signal_notes: BTreeMap::new(),
             events: BTreeMap::new(),
+            states: Value::Null,
             nodes: Vec::new(),
             links: Vec::new(),
             comments: Vec::new(),
@@ -174,6 +179,13 @@ impl Graph {
                 out.push_str(&format!("  \"{name}\": {},\n", json!(map)));
             }
         }
+        if !self.states.is_null() {
+            // One state per line, so a change to one is a one-line diff.
+            out.push_str(&format!(
+                "  \"states\": {},\n",
+                states_text(&self.states, 2)
+            ));
+        }
         let list = |out: &mut String, name: &str, items: Vec<String>, last: bool| {
             if items.is_empty() {
                 out.push_str(&format!("  \"{name}\": []"));
@@ -225,6 +237,85 @@ impl Graph {
     pub fn next_id(&self) -> u32 {
         self.nodes.iter().map(|n| n.id).max().unwrap_or(0) + 1
     }
+}
+
+/// A machine's JSON for `to_text`: a group's `states` one per line, the rest of each state on
+/// its line.
+fn states_text(v: &Value, indent: usize) -> String {
+    let Some(map) = v.as_object() else {
+        return v.to_string();
+    };
+    let Some(Value::Object(kids)) = map.get("states") else {
+        return v.to_string();
+    };
+    let pad = "  ".repeat(indent + 1);
+    let mut parts: Vec<String> = map
+        .iter()
+        .filter(|(k, _)| *k != "states")
+        .map(|(k, v)| format!("{pad}{}: {v}", json!(k)))
+        .collect();
+    let inner = "  ".repeat(indent + 2);
+    let kids: Vec<String> = kids
+        .iter()
+        .map(|(k, v)| format!("{inner}{}: {}", json!(k), states_text(v, indent + 2)))
+        .collect();
+    parts.push(format!(
+        "{pad}\"states\": {{\n{}\n{pad}}}",
+        kids.join(",\n")
+    ));
+    format!("{{\n{}\n{}}}", parts.join(",\n"), "  ".repeat(indent))
+}
+
+/// The machine's states by name, groups' too (with `at`, as the file has them).
+pub fn graph_states(g: &Graph) -> Vec<(String, Value)> {
+    fn walk(v: &Value, out: &mut Vec<(String, Value)>) {
+        if let Some(Value::Object(kids)) = v.get("states") {
+            for (k, s) in kids {
+                out.push((k.clone(), s.clone()));
+                walk(s, out);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(&g.states, &mut out);
+    out
+}
+
+/// The machine as Luau (`at` left out).
+fn states_luau(v: &Value, indent: usize, out: &mut Vec<String>, open: String) {
+    let pad = "\t".repeat(indent);
+    let Some(map) = v.as_object() else {
+        out.push(format!("{open}{},", literal(v)));
+        return;
+    };
+    out.push(format!("{open}{{"));
+    for (k, val) in map {
+        if k == "at" {
+            continue;
+        }
+        let key = if is_ident(k) {
+            k.clone()
+        } else {
+            format!("[{}]", text_literal(k))
+        };
+        if k == "states"
+            && let Value::Object(kids) = val
+        {
+            out.push(format!("{pad}\t{key} = {{"));
+            for (name, s) in kids {
+                let name = if is_ident(name) {
+                    name.clone()
+                } else {
+                    format!("[{}]", text_literal(name))
+                };
+                states_luau(s, indent + 2, out, format!("{pad}\t\t{name} = "));
+            }
+            out.push(format!("{pad}\t}},"));
+        } else {
+            out.push(format!("{pad}\t{key} = {},", literal(val)));
+        }
+    }
+    out.push(format!("{pad}}}{}", if indent == 0 { "" } else { "," }));
 }
 
 /// serde_json on one line, for `to_text`.
@@ -515,6 +606,33 @@ pub fn builtins() -> Vec<NodeSpec> {
             "The entity or its script is going away.",
         )
         .then(),
+        // A state machine's (the graph's States view).
+        NodeSpec::new(
+            "state.trigger",
+            "Trigger state event",
+            "States",
+            "Sends an event to this script's state machine, as an interaction or a message \
+             would: the innermost active state that takes it changes state.",
+        )
+        .run()
+        .input("event", Text, json!("interact"))
+        .then(),
+        NodeSpec::new(
+            "state.current",
+            "Current state",
+            "States",
+            "The name of the state the machine is in.",
+        )
+        .pure()
+        .output("value", Text),
+        NodeSpec::new(
+            "state.time",
+            "Time in state",
+            "States",
+            "World seconds since the current state started.",
+        )
+        .pure()
+        .output("value", Number),
         // Flow.
         NodeSpec::new(
             "flow.branch",
@@ -991,6 +1109,54 @@ pub fn own_specs(g: &Graph) -> Vec<NodeSpec> {
         emit.of = name.clone();
         out.push(emit);
     }
+    for (name, _) in graph_states(g) {
+        for (hook, title, doc) in [
+            (
+                "enter",
+                format!("Enter {name}"),
+                "When the state starts. It may wait (Delay, Tween): a done transition follows \
+                 when it has finished, and leaving the state stops it.",
+            ),
+            (
+                "update",
+                format!("Update {name}"),
+                "Every frame while the state is active (dt: the world seconds since the last).",
+            ),
+            (
+                "exit",
+                format!("Exit {name}"),
+                "When the state ends. It can't wait.",
+            ),
+        ] {
+            let mut ev =
+                NodeSpec::new(&format!("event.state_{hook}"), &title, "States", doc).then();
+            if hook == "update" {
+                ev = ev.output("dt", PinType::Number);
+            }
+            ev.of = name.clone();
+            out.push(ev);
+        }
+        let mut go = NodeSpec::new(
+            "state.go",
+            &format!("Go to {name}"),
+            "States",
+            "Changes state now: the states being left run their exits, then this one starts.",
+        )
+        .run()
+        .then();
+        go.of = name.clone();
+        out.push(go);
+        let mut is_in = NodeSpec::new(
+            "state.is_in",
+            &format!("In {name}?"),
+            "States",
+            "Whether this state is active (the current one, or a group around it).",
+        )
+        .pure()
+        .output("value", PinType::Bool);
+        is_in.of = name.clone();
+        out.push(is_in);
+    }
     for (name, v) in &g.vars {
         let ty = PinType::of_value(v);
         let mut get = NodeSpec::new("var.get", name, "Variables", "A variable of this script.")
@@ -1132,6 +1298,7 @@ pub mod look {
         match top {
             "Events" => [150, 32, 32],
             "Signals" => [124, 76, 190],
+            "States" => [30, 128, 116],
             "Flow" => [78, 80, 88],
             "Variables" | "Props" => [36, 112, 74],
             "Entity" => [38, 88, 156],
@@ -1767,6 +1934,13 @@ impl<'a> Gen<'a> {
             self.indent -= 1;
             self.line("}", None);
         }
+        if self.g.states.is_object() {
+            let mut lines = Vec::new();
+            states_luau(&self.g.states, 0, &mut lines, format!("{c}.states = "));
+            for l in lines {
+                self.line(l, None);
+            }
+        }
         for k in self.g.vars.keys() {
             if !is_ident(k) {
                 self.problem(
@@ -1874,6 +2048,7 @@ impl<'a> Gen<'a> {
             self.line("end", None);
         }
         self.custom_events(&events);
+        self.state_hooks(&events);
         // After a hot reload: new variables and gates start at their values, new Every timers
         // start and changed ones restart (the runtime stops the removed ones).
         let vars: Vec<(String, Value)> = self
@@ -2017,6 +2192,53 @@ impl<'a> Gen<'a> {
                 self.event_head(&c, &name, &params(&values));
                 self.line("end", None);
             }
+        }
+    }
+
+    /// A method per state hook node: `enter_<state>`, `update_<state>(dt)`, `exit_<state>`.
+    fn state_hooks(&mut self, events: &[&'a Node]) {
+        let c = self.class.clone();
+        let states: BTreeSet<String> = graph_states(self.g).into_iter().map(|(k, _)| k).collect();
+        let mut written = BTreeSet::new();
+        for e in events.iter().filter(|n| n.kind.starts_with("event.state_")) {
+            let hook = e.kind.trim_start_matches("event.state_");
+            if !states.contains(&e.of) {
+                self.problem(
+                    Some(e.id),
+                    None,
+                    format!("no state '{}' (add it in the States view)", e.of),
+                    true,
+                );
+                continue;
+            }
+            if !is_ident(&e.of) {
+                continue;
+            }
+            if !written.insert((hook.to_string(), e.of.clone())) {
+                self.problem(
+                    Some(e.id),
+                    None,
+                    format!(
+                        "a second {hook} node for state '{}': only the first runs",
+                        e.of
+                    ),
+                    true,
+                );
+                continue;
+            }
+            self.emitted.insert(e.id);
+            let mut scope: Scope = vec![HashMap::new()];
+            self.line("", None);
+            if hook == "update" {
+                scope[0].insert((e.id, "dt".into()), "dt".into());
+                self.line(format!("function {c}:update_{}(dt: number)", e.of), None);
+            } else {
+                self.line(format!("function {c}:{hook}_{}()", e.of), None);
+            }
+            self.indent += 1;
+            self.chain(e.id, "then", &mut scope);
+            self.indent -= 1;
+            self.line("end", None);
         }
     }
 
@@ -2251,6 +2473,9 @@ impl<'a> Gen<'a> {
                 format!("self.props.{}", n.of)
             }
             "entity.self" => "self.entity".into(),
+            "state.current" => "self.state".into(),
+            "state.time" => "self:state_time()".into(),
+            "state.is_in" => format!("self:in_state({})", text_literal(&n.of)),
             "entity.find" => format!("world.find({})", i(self, "name")),
             "entity.position" => {
                 let e = i(self, "entity");
@@ -2580,6 +2805,24 @@ impl<'a> Gen<'a> {
                 } else {
                     self.line(format!("self:{}({})", n.of, args.join(", ")), at);
                 }
+                self.chain(id, "then", scope);
+            }
+            "state.go" => {
+                if !graph_states(self.g).iter().any(|(k, _)| *k == n.of) {
+                    self.problem(
+                        Some(id),
+                        None,
+                        format!("no state '{}' (add it in the States view)", n.of),
+                        true,
+                    );
+                    return;
+                }
+                self.line(format!("self:go({})", text_literal(&n.of)), at);
+                self.chain(id, "then", scope);
+            }
+            "state.trigger" => {
+                let event = self.input(id, "event", scope);
+                self.line(format!("self:trigger({event})"), at);
                 self.chain(id, "then", scope);
             }
             "signal.bind" => {

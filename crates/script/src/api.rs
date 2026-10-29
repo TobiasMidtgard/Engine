@@ -121,6 +121,17 @@ pub(crate) fn register(app: &mut App) {
         |world, _| with_runtime(world, |_, rt, _| rt.tests()),
     )
     .register_api(
+        "script.states",
+        "The state machine of the script on an entity (its class's states table): its states \
+         and transitions with their lines, the active states (outermost first), seconds in the \
+         current one, and the last changes with what caused each.",
+        r#"{"entity": {"name": "Gate"}}"#,
+        |world, args| {
+            let e = resolve_entity(world, args.get("entity").unwrap_or(&args))?;
+            crate::states::describe(world, e)
+        },
+    )
+    .register_api(
         "script.reload",
         "Reload a script file now (\"path\"), or every loaded file when no path is given.",
         r#"{"path": "showcase/courtyard.luau"}"#,
