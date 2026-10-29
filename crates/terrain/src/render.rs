@@ -140,7 +140,8 @@ struct PlanetGpu {
     /// lamps glow from their pages (m), lava glow (cd/m²), melt latitude (rad).
     params4: [f32; 4],
     /// The far look ([`FarLook`](crate::FarLook)): layer in the map array (−1: none), how
-    /// strongly it tints the ground up close, unused ×2.
+    /// strongly it tints the ground up close; the climate goes by the angle from the star
+    /// (`Climate::substellar`, 0/1); unused.
     far: [f32; 4],
     /// The far look's mean linear albedo (rgb), unused.
     far_mean: [f32; 4],
@@ -1771,11 +1772,17 @@ impl RenderFeature for TerrainFeature {
                     let gpu = self.gpu.as_mut()?;
                     let (layer, mean) = gpu.far_looks.layer(&gpu_shared.queue, *e, look)?;
                     Some((
-                        [layer as f32, look.near_tint, 0.0, 0.0],
+                        [layer as f32, look.near_tint],
                         [mean[0], mean[1], mean[2], 0.0],
                     ))
                 })
-                .unwrap_or(([-1.0, 0.0, 0.0, 0.0], [0.0; 4]));
+                .unwrap_or(([-1.0, 0.0], [0.0; 4]));
+            let locked = if t.config.shape.climate.substellar {
+                1.0
+            } else {
+                0.0
+            };
+            let far = [far[0], far[1], locked, 0.0];
             planet_gpu.push(PlanetGpu {
                 rot: [
                     rot_f.x_axis.extend(0.0).to_array(),

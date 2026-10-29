@@ -51,6 +51,9 @@ pub struct WorldRecipe {
     pub color: [f32; 3],
     /// Luminance of exposed melt, cd/m² (lava worlds; 0 = no glow).
     pub lava_glow_nits: f32,
+    /// Locked to its star (the star over planet-local +Z): warm and wet under the star, the
+    /// night side frozen.
+    pub locked: bool,
 }
 
 impl Default for WorldRecipe {
@@ -66,6 +69,7 @@ impl Default for WorldRecipe {
             star_kelvin: 5772.0,
             color: [0.36, 0.34, 0.32],
             lava_glow_nits: 0.0,
+            locked: false,
         }
     }
 }
@@ -119,12 +123,28 @@ impl PlanetTerrain {
     pub fn world(r: &WorldRecipe) -> Self {
         let seed = r.seed;
         let t_c = (r.temperature_k - 273.15) as f32;
-        let climate = |swing_up: f32, swing_down: f32, wetness: f32, circulation: f32| Climate {
-            equator_c: t_c + swing_up,
-            pole_c: t_c - swing_down,
-            lapse_c_per_m: if r.pressure_bar > 0.05 { 0.0065 } else { 0.0 },
-            wetness,
-            circulation,
+        let air = r.pressure_bar > 0.05;
+        let climate = |swing_up: f32, swing_down: f32, wetness: f32, circulation: f32| {
+            let (equator_c, pole_c) = match (r.locked, air) {
+                // The air carries some of the day side's heat around, but the night side
+                // still freezes harder than a spinning world's poles.
+                (true, true) => (t_c + swing_up * 1.3, t_c - swing_down * 1.5),
+                // Bare rock keeps its heat where the star shines: √2 × the mean temperature
+                // straight under it, the night side near the cold of space (Koll & Abbot 2015).
+                (true, false) => (
+                    r.temperature_k as f32 * std::f32::consts::SQRT_2 - 273.15,
+                    (t_c - swing_down * 2.0).max(-230.0),
+                ),
+                (false, _) => (t_c + swing_up, t_c - swing_down),
+            };
+            Climate {
+                equator_c,
+                pole_c,
+                lapse_c_per_m: if air { 0.0065 } else { 0.0 },
+                wetness,
+                circulation,
+                substellar: r.locked,
+            }
         };
         let airless_shape = |crater_density: f64| PlanetShape {
             crater_density,
@@ -268,6 +288,7 @@ impl PlanetTerrain {
                         lapse_c_per_m: 0.001,
                         wetness: 0.2,
                         circulation: 0.5,
+                        substellar: r.locked,
                     },
                     rivers: true,
                     ..PlanetShape::earthlike(seed)
@@ -367,5 +388,35 @@ mod tests {
             ..Default::default()
         });
         assert_eq!(desert.palette.lava_glow, 0.0);
+    }
+
+    #[test]
+    fn a_locked_world_is_warm_under_its_star_and_frozen_behind() {
+        use engine_core::math::DVec3;
+        let world = |locked| {
+            PlanetTerrain::world(&WorldRecipe {
+                kind: WorldKind::Terra,
+                sea_fraction: 0.6,
+                pressure_bar: 1.0,
+                temperature_k: 285.0,
+                locked,
+                ..Default::default()
+            })
+        };
+        // Sea-level climate only: the lapse rate would mix in the heights.
+        let at = |t: &PlanetTerrain, d: DVec3| {
+            let s = t.shape.sample(d, 0.0);
+            s.temperature_c + t.shape.climate.lapse_c_per_m * s.height.max(0.0) as f32
+        };
+        let (under, behind, pole) = (DVec3::Z, -DVec3::Z, DVec3::Y);
+        let locked = world(true);
+        assert!(locked.shape.climate.substellar);
+        assert!(at(&locked, under) > 20.0, "{}", at(&locked, under));
+        assert!(at(&locked, behind) < -25.0, "{}", at(&locked, behind));
+        assert!(at(&locked, pole) < at(&locked, under) - 25.0);
+        // Spinning, the same world is as warm all round its equator (sea currents aside).
+        let spinning = world(false);
+        assert!((at(&spinning, under) - at(&spinning, behind)).abs() < 20.0);
+        assert!(at(&spinning, pole) < -10.0);
     }
 }

@@ -256,6 +256,10 @@ pub struct Climate {
     /// and the mid-latitude storm tracks, deserts under the subtropical highs (about 25°),
     /// dry continental interiors and dry land in the lee of mountain belts (Earth 1).
     pub circulation: f32,
+    /// Locked to its star, the star over planet-local +Z: warmth, ice and rain go by the
+    /// angle from the point under the star instead of the latitude (see
+    /// [`Climate::climate_latitude`]).
+    pub substellar: bool,
 }
 
 impl Default for Climate {
@@ -266,6 +270,23 @@ impl Default for Climate {
             lapse_c_per_m: 0.0065,
             wetness: 0.58,
             circulation: 1.0,
+            substellar: false,
+        }
+    }
+}
+
+impl Climate {
+    /// The latitude (radians, signed) whose climate planet-local direction `dir` has. On a
+    /// world locked to its star that is ¾ of the angle from the point under the star, so the
+    /// "equator" is a warm, wet eye under the star and the "poles" the whole night side from
+    /// 120° on (an eyeball world: Pierrehumbert 2011; Yang, Cowan & Abbot 2013). The far view
+    /// of `engine_space` paints locked worlds by the same angle.
+    pub fn climate_latitude(&self, dir: DVec3) -> f64 {
+        if self.substellar {
+            let theta = dir.z.clamp(-1.0, 1.0).acos();
+            (theta * 0.75).min(std::f64::consts::FRAC_PI_2)
+        } else {
+            dir.y.clamp(-1.0, 1.0).asin()
         }
     }
 }
@@ -416,6 +437,7 @@ impl PlanetShape {
                 lapse_c_per_m: 0.0,
                 wetness: 0.0,
                 circulation: 0.0,
+                substellar: false,
             },
             rivers: false,
             river_cache: RiverCache::default(),
@@ -462,6 +484,7 @@ impl PlanetShape {
                 lapse_c_per_m: 0.0025,
                 wetness: 0.02,
                 circulation: 0.0,
+                substellar: false,
             },
             rivers: false,
             river_cache: RiverCache::default(),
@@ -517,6 +540,7 @@ impl PlanetShape {
             self.climate.pole_c as f64,
             self.climate.wetness as f64,
             self.climate.circulation as f64,
+            self.climate.substellar as u8 as f64,
         ];
         for p in &self.pads {
             values.extend([
@@ -916,8 +940,8 @@ impl PlanetShape {
         }
 
         // Climate.
-        let lat = dir.y.clamp(-1.0, 1.0).asin();
         let c = &self.climate;
+        let lat = c.climate_latitude(dir);
         let t_lat = c.pole_c + (c.equator_c - c.pole_c) * (lat.cos() as f32).powf(1.6);
         let mut temperature_c = t_lat - c.lapse_c_per_m * h.max(0.0) as f32;
         if self.ocean && c.circulation > 0.0 && h < 0.0 {
@@ -965,12 +989,24 @@ impl PlanetShape {
     fn circulation(&self, p: DVec3, dir: DVec3, lat: f64, cont: f64) -> f64 {
         let lat_deg = lat.to_degrees().abs();
         let bell = |c: f64, w: f64| (-((lat_deg - c) / w).powi(2)).exp();
+        let inland = smooth(0.1, 0.5, cont);
+        if self.climate.substellar {
+            // Locked: rising air and heavy rain under the star, the air wrung dry in a ring
+            // around it (where the far view paints its deserts), a damper rim along the
+            // terminator and the night side's cold, dry air (Yang, Cowan & Abbot 2013).
+            let belts = 0.35 * bell(0.0, 16.0) - 0.55 * bell(37.0, 9.0) + 0.1 * bell(62.0, 8.0)
+                - 0.2 * smooth(70.0, 88.0, lat_deg);
+            return if self.ocean {
+                belts - 0.25 * inland
+            } else {
+                belts
+            };
+        }
         let belts = 0.3 * bell(0.0, 12.0) - 0.55 * bell(25.0, 8.0) + 0.12 * bell(55.0, 10.0)
             - 0.15 * smooth(65.0, 85.0, lat_deg);
         if !self.ocean {
             return belts;
         }
-        let inland = smooth(0.1, 0.5, cont);
         // Mountain belts upwind, 700 km away along the parallel.
         let reach = 700_000.0 / (self.radius_m * lat.cos().max(0.2));
         let easterly = 1.0 - smooth(25.0, 35.0, lat_deg);

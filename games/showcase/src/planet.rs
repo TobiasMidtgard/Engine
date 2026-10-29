@@ -207,6 +207,7 @@ pub fn far_ground(terrain: &PlanetTerrain) -> FarGround {
             height_m: s.height as f32,
             moisture: s.moisture,
             above_frost_c: s.temperature_c - frost,
+            temperature_c: s.temperature_c,
         }
     })
 }
@@ -257,6 +258,7 @@ fn world_recipe(body: &CelestialBody, s: &engine_space::nearby::SurfaceRecipe) -
         star_kelvin: s.star_kelvin,
         color: body.color,
         lava_glow_nits: engine_space::look::melt_nits(body),
+        locked: body.tidally_locked,
     }
 }
 

@@ -110,6 +110,14 @@ everything else (streaming, LOD, colliders, ground queries, prints) follows the 
   to 9 °C, so sea ice reaches further toward the equator in some places than others; the
   ice breaks into floes at its edge. Shallow shelf seas glow teal (more so in warm water),
   cold deep seas are greener, and deserts mix sand with dark stony plains.
+- **Worlds locked to their star.** With `Climate::substellar` (`WorldRecipe::locked`, the
+  star over planet-local +Z, as `engine_space` turns locked bodies) warmth, ice, rain and
+  lava melt go by the angle from the point under the star instead of the latitude
+  (`Climate::climate_latitude`: ¾ of that angle). An eyeball: an open, wet eye under the star,
+  a dry ring around it, ice from the terminator over the whole night side, melt only on the
+  day side of a lava world (Pierrehumbert 2011; Yang, Cowan & Abbot 2013; bare rock √2 × the
+  mean temperature under the star, Koll & Abbot 2015). The far view paints locked worlds by
+  the same angle, so they look the same from afar and from the ground.
 - **Rivers and lakes.** Water drains across the whole planet (a priority flood on a 40 km
   grid) and, finer, around the home pad (600 m cells, 240 km across): rivers start in wet
   high ground, join into networks and run downhill to the sea, widening as they gather
@@ -290,7 +298,7 @@ airless rock, Io-like black crust over glowing melt for lava worlds, Mars for ho
 deserts, Earth for temperate land and sea worlds with plants colored by the star, ice plains,
 Titan's dark dunes and lakes) and tunes it. The showcase gives the space module's planets of
 other stars one as a ship comes within 40 radii. On lava worlds `TerrainPalette::lava_glow`
-lights fissures, rifts and pools of melt up to the latitude where the climate passes 1000 °C.
+lights fissures, rifts and pools of melt up to the (climate) latitude where it passes 1000 °C.
 Views `exo_lava`, `exo_lava_night`, `exo_airless`, `exo_desert`, `exo_terra`,
 `exo_ocean_red_dwarf`, `exo_cold_desert`, `exo_ice` and `exo_hazy` in `terrain_shots`.
 

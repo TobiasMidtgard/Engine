@@ -10,7 +10,7 @@
 //! with the planet's terrain too, from the same place. Both are set up as the showcase sets
 //! them up (games/showcase/src/planet.rs): an Earth-like world's far view painted from its
 //! terrain's ground, the terrain wearing the far view's look from high up, the cloud tops kept
-//! over the ground.
+//! over the ground. With `MAPS=1` the far look the ground wears is written as a flat map too.
 
 use engine_core::prelude::*;
 use engine_core::time::TimeSource;
@@ -133,6 +133,23 @@ fn views() -> Vec<View> {
             40.0,
             14.0,
         ),
+        // Locked worlds from the side: the warm eye under the star, the frozen night side.
+        v(
+            "proxima_b_side_3r",
+            "Proxima Centauri b",
+            "Proxima Centauri",
+            3.0,
+            85.0,
+            14.0,
+        ),
+        v(
+            "lava_side_3r",
+            "Alpha Centauri A c",
+            "Alpha Centauri A",
+            3.0,
+            85.0,
+            23.0,
+        ),
         // Coming down: a few hundred and a hundred kilometers up, where the ground's own
         // detail takes over from the far look.
         View {
@@ -197,6 +214,7 @@ fn world_recipe(body: &CelestialBody, s: &SurfaceRecipe) -> WorldRecipe {
         star_kelvin: s.star_kelvin,
         color: body.color,
         lava_glow_nits: engine_space::look::melt_nits(body),
+        locked: body.tidally_locked,
     }
 }
 
@@ -245,6 +263,7 @@ fn far_ground(terrain: &PlanetTerrain) -> FarGround {
             height_m: s.height as f32,
             moisture: s.moisture,
             above_frost_c: s.temperature_c - frost,
+            temperature_c: s.temperature_c,
         }
     })
 }
@@ -294,6 +313,13 @@ fn add_ground(app: &mut App, body: &str, ground: bool) {
     let Some(terrain) = terrain_of(&b) else {
         return;
     };
+    // (`NO_AIR=1`: the planet without its air, to tell the air's part in a picture.)
+    if std::env::var_os("NO_AIR").is_some()
+        && let Some(mut body) = app.world.get_mut::<CelestialBody>(entity)
+    {
+        body.atmosphere = None;
+        body.haze = None;
+    }
     let sampler = (b.surface.is_some() && b.look == engine_space::BodyLook::Earthlike)
         .then(|| far_ground(&terrain));
     if let Some(s) = &sampler {
@@ -306,6 +332,26 @@ fn add_ground(app: &mut App, body: &str, ground: bool) {
         if b.surface.is_some() && std::env::var_os("NO_FAR_LOOK").is_none() {
             e.insert(far_look(&b, sampler.as_ref()));
         }
+    }
+}
+
+/// Write the far look of `view`'s body as an equirectangular map (north up, longitude −180°
+/// on the left, the point under a locked world's star in the middle), glow in red on top.
+fn save_map(app: &mut App, view: &View, out: &std::path::Path) {
+    let mut q = app.world.query::<(&CelestialBody, &FarLook)>();
+    let Some((_, look)) = q.iter(&app.world).find(|(b, _)| b.name == view.body) else {
+        return;
+    };
+    let (w, h) = (FAR_LOOK_WIDTH, FAR_LOOK_WIDTH / 2);
+    let rgb: Vec<u8> = look.map.levels()[0]
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .flat_map(|t| [t[0].max(t[3]), t[1], t[2]])
+        .collect();
+    let path = out.join(format!("{}_map.png", view.name));
+    if let Err(e) = image::save_buffer(&path, &rgb, w, h, image::ExtendedColorType::Rgb8) {
+        eprintln!("{}: {e}", path.display());
     }
 }
 
@@ -369,6 +415,10 @@ fn shoot(view: &View, ground: bool, size: (u32, u32), out: &std::path::Path) {
     )
     .expect("travel");
     add_ground(&mut app, view.body, ground);
+    // (`MAPS=1`: also the far look the ground wears, as a flat map: `<name>_map.png`.)
+    if ground && std::env::var_os("MAPS").is_some() {
+        save_map(&mut app, view, out);
+    }
     app.update_n(2);
     let (center, star, pole) = {
         let s = app.world.resource::<SpaceState>();

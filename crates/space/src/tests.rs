@@ -557,13 +557,16 @@ fn earth_has_oceans_land_and_clouds() {
 fn earthlike_far_view_paints_the_ground_it_is_given() {
     let sys = system::solar_system();
     let earth = sys.iter().find(|b| b.name == "Earth").unwrap();
-    // A ground with sea in the southern hemisphere, land (snowy beyond 60° N) in the north.
+    // A ground with sea in the southern hemisphere (frozen beyond 60° S), land (snowy beyond
+    // 60° N) in the north.
     let ground = look::FarGround::new(|d: Vec3, texel_m| {
         assert!(texel_m > 1_000.0);
+        let cold = d.y.abs() > 0.87;
         look::GroundPoint {
             height_m: if d.y > 0.0 { 800.0 } else { -3_000.0 },
             moisture: 0.7,
-            above_frost_c: if d.y > 0.87 { -10.0 } else { 15.0 },
+            above_frost_c: if cold { -10.0 } else { 15.0 },
+            temperature_c: if cold { -30.0 } else { 15.0 },
         }
     });
     let maps = look::bake_surface_on(earth, Some(&ground), 128);
@@ -577,6 +580,8 @@ fn earthlike_far_view_paints_the_ground_it_is_given() {
         assert!(at(x, 50)[3] > 128, "sea at {x}: {:?}", at(x, 50));
         let snow = at(x, 2);
         assert!(snow[0] > 200 && snow[2] > 200, "snow at {x}: {snow:?}");
+        let ice = at(x, 62);
+        assert!(ice[0] > 200 && ice[3] < 64, "sea ice at {x}: {ice:?}");
     }
     // Without it, the look keeps its own continents.
     let own = look::bake_surface(earth, 128);

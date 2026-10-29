@@ -281,7 +281,8 @@ impl Earth {
         let warm = self.climate_of.warmth();
         let earth = self.climate_of.earth_poles;
         // A terrain's ground: its sea level, heights (the shelf at about 400 m deep, the deep
-        // sea past 800 m), and no sea ice (the terrain's sea stays open).
+        // sea past 800 m), and its sea ice where it is colder than about −9 °C (as the
+        // terrain freezes its sea).
         let coast = ground.map_or(c - self.sea_level, |g| g.height_m / 8000.0);
         if coast < 0.0 {
             // Ocean: deep navy, lighter shelves along the coasts, sea ice near the poles.
@@ -298,8 +299,8 @@ impl Earth {
                 66.0
             } + 4.0 * ice_noise
                 + 45.0 * warm;
-            let ice = if ground.is_some() {
-                0.0
+            let ice = if let Some(g) = ground {
+                smooth(-7.0, -11.0, g.temperature_c + 3.0 * ice_noise)
             } else {
                 smooth(edge - 1.5, edge + 1.5, lat)
             };

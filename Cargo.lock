@@ -132,6 +132,7 @@ dependencies = [
  "engine_space",
  "engine_terrain",
  "engine_world",
+ "image",
 ]
 
 [[package]]

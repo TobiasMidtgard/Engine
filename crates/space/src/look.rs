@@ -99,6 +99,9 @@ pub struct GroundPoint {
     pub moisture: f32,
     /// Mean temperature above the one where snow and ice lie, °C (negative: white).
     pub above_frost_c: f32,
+    /// Mean temperature, °C: the sea freezes over below about −9 °C, as the terrain freezes
+    /// it.
+    pub temperature_c: f32,
 }
 
 /// The ground another module builds for a body up close (a terrain), for the far view to

@@ -21,7 +21,7 @@ struct PlanetGpu {
     rays: array<vec4<f32>, 8>,      // rayed craters: center (planet-local unit direction), radius on the ground (m)
     young: array<vec4<f32>, 12>,    // young ground: middle (planet-local direction) × youth, angular radius
     params4: vec4<f32>,             // night lights (0..1), lamp page handoff distance (m), lava glow (cd/m²), melt latitude (rad)
-    far: vec4<f32>,                 // far look: map layer (−1 none), near tint, unused ×2
+    far: vec4<f32>,                 // far look: map layer (−1 none), near tint; locked to its star (0/1); unused
     far_mean: vec4<f32>,            // far look: mean linear albedo, unused
 };
 
@@ -550,13 +550,22 @@ fn far_look_weight(pixel: f32) -> f32 {
     return smoothstep(300.0, 3000.0, pixel);
 }
 
+// The latitude whose climate planet-local direction `d` has: on a world locked to its star ¾
+// of the angle from the point under the star (+Z), as `Climate::climate_latitude` has it.
+fn climate_latitude(p: PlanetGpu, d: vec3<f32>) -> f32 {
+    if (p.far.z > 0.5) {
+        return min(acos(clamp(d.z, -1.0, 1.0)) * 0.75, 1.5707964);
+    }
+    return asin(clamp(d.y, -1.0, 1.0));
+}
+
 // Where molten rock shows on a lava world (0..1): fissures between crust plates tens of meters
 // across, rifts kilometers long where the coarse field crosses its middle, and pools of melt
 // in the low ground and young plains. Hotter ground opens more of them. Where a pixel is
 // wider than a fissure it takes the share of melt such ground has.
 fn lava_melt(p: PlanetGpu, rel: vec3<f32>, tp: vec3<f32>, up: vec3<f32>, altitude: f32, mare: f32, pixel: f32) -> f32 {
     // Hot enough up to the melt latitude (the vertices' temperatures stop at 60 °C).
-    let lat = asin(clamp((transpose(planet_rot(p)) * up).y, -1.0, 1.0));
+    let lat = climate_latitude(p, transpose(planet_rot(p)) * up);
     let melt_lat = p.params4.w;
     let heat = smoothstep(melt_lat + 0.08, melt_lat - 0.08, abs(lat));
     if (heat <= 0.0) {
