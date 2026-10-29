@@ -143,8 +143,18 @@ compresses and stretches.
   person rocked by a blow stay planted. A blow of at least `HitReaction::physical_above`
   (15 N·s) starts one from the spine up, peaking at about half the simulated pose and
   settling in half a second, and pushes the part nearest the hit with a share of the blow,
-  so each punch rocks the head and chest its own way on top of the flinch. The bodies exist
-  only while a pulse runs.
+  so each punch rocks the head and chest its own way on top of the flinch, without bending
+  the neck or back past what looks unbroken. The bodies exist only while a pulse runs.
+- **Stagger steps.** A blow pushing at least `HitReaction::stagger_above` (25 N·s) along the
+  ground knocks the body back to its capture point (inverted pendulum, Pratt et al. 2006):
+  `v·sqrt(h/g)` along the push for the speed `v` the blow gives 75 kg (scaled by size³),
+  times `stagger_scale`, at most `stagger_max`. The body glides there, fast at first and
+  easing out over `sqrt(h/g)` (0.3 s), and `FootIk::hurry` makes the feet step after it
+  even though it moves fast: the foot farthest along the push first, then the other.
+  A character with a `CharacterController` (its movement owns the transform and collides),
+  or with `stagger_move` off, only publishes `stagger_velocity` for its movement to apply. `HitReaction::knock` moves a body the same way for other reasons;
+  the paddock's sparring partner and boxer step back to their marks with it
+  (`DemoStep::home`).
 - **Getting up.** A person whose weight returns to 0 while lying flat gets up rather than
   blending straight to standing: `get_up_back` (sits up, tucks a leg, plants a hand and a
   knee, steps up) or `get_up_front` (palms down, pushes up to all fours, kneels, steps up),
@@ -312,7 +322,11 @@ requester's own parameters, rebuild on a changed request and go with a removed o
 `tests/hit_physics.rs` punches a person on a stand-in backend that integrates forces: a
 hard blow spawns bodies with kinematic legs, pushes the neck, moves the head beyond the
 flinch while the feet stay within 5 mm, and the bodies are gone and the pose is the
-animation's again a second later; a light blow only flinches.
+animation's again a second later, and the neck and back bend less than 30° and 20° past
+the flinch; a light blow only flinches.
+`tests/stagger.rs` shoves a person in the chest: 40 N·s knocks them 0.1 to 0.5 m back, both
+feet lift and end in their places in the stance, 10 N·s moves nothing, and with
+`stagger_move` off only `stagger_velocity` says where to go.
 `tests/ragdoll.rs` turns a walking person limp on a stand-in physics backend: fourteen
 jointed parts that start together, keep the walk's momentum and ignore each other and the
 owner's controller; the pose follows them, footsteps stop, half-limp parts are pulled

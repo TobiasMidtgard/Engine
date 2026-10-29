@@ -19,15 +19,26 @@
 //! animated and planted ([`PhysicalBlend`]). That gives each blow its own wobble on top of
 //! the flinch, as Unreal's physical-animation hit reactions and Euphoria do.
 //!
+//! A blow pushing hard along the ground (at least [`HitReaction::stagger_above`] N·s) also
+//! knocks the body back a step or two. Its center of mass sits on its feet like an inverted
+//! pendulum: moving at the speed the blow gives it, it stops if a foot lands at the capture
+//! point, `x + v·sqrt(h/g)` (Pratt et al. 2006). The body glides there, fast at first and
+//! easing out over about `sqrt(h/g)` (0.3 s), and the feet step to keep up: the one
+//! farthest along the push first, so the stance widens to catch the body ([`FootIk::hurry`]).
+//!
 //! People get a [`HitReaction`] when they are first hit; insert one to tune it.
+//!
+//! [`FootIk::hurry`]: crate::ik::FootIk::hurry
 //!
 //! [`Face`]: crate::face::Face
 
 use engine_core::prelude::*;
 use engine_world::DamageEvent;
+use engine_world::physics::CharacterController;
 
 use crate::animator::Animator;
-use crate::ik::to_model;
+use crate::build::humanoid::HIPS_HEIGHT;
+use crate::ik::{FootIk, to_model, to_world};
 use crate::ragdoll::{PhysicalBlend, PhysicalPulse, RagdollRig};
 
 /// Bones that flinch, and how much of the blow each can take.
@@ -65,6 +76,25 @@ pub struct HitReaction {
     pub physical_secs: f32,
     /// Share of the blow the physical parts take (the flinch shows the rest).
     pub physical_push: f32,
+    /// Blows pushing at least this hard along the ground (N·s) knock the body back a step or
+    /// two (0 = never).
+    pub stagger_above: f32,
+    /// Mass a blow knocks back, kg, for a person of the generated size (scaled by size³).
+    pub stagger_mass: f32,
+    /// How much farther than the blow alone would carry it the body goes (game feel).
+    pub stagger_scale: f32,
+    /// Farthest one blow knocks the body back, m.
+    pub stagger_max: f32,
+    /// Move its own `Transform` while knocked back. Characters with a `CharacterController`
+    /// never do (their movement owns the transform, and collides); for them, and with this
+    /// off, [`HitReaction::stagger_velocity`] says how fast the blow pushes them.
+    pub stagger_move: bool,
+    /// How fast the knock-back moves the body this frame (world, m/s; published).
+    #[serde(skip)]
+    pub stagger_velocity: Vec3,
+    /// Knock-back still to come (world, m) and how fast it comes (time constant, s).
+    #[serde(skip)]
+    pub stagger: (Vec3, f32),
     /// Each bone's turn (model space, radians, as an axis times an angle) and its rate.
     #[serde(skip)]
     pub state: Vec<(Vec3, Vec3)>,
@@ -86,6 +116,13 @@ impl Default for HitReaction {
             physical_peak: 0.6,
             physical_secs: 0.5,
             physical_push: 0.2,
+            stagger_above: 25.0,
+            stagger_mass: 75.0,
+            stagger_scale: 1.5,
+            stagger_max: 0.5,
+            stagger_move: true,
+            stagger_velocity: Vec3::ZERO,
+            stagger: (Vec3::ZERO, 0.3),
             state: Vec::new(),
             shove: (Vec3::ZERO, Vec3::ZERO),
         }
@@ -128,6 +165,28 @@ impl HitReaction {
             let share = take * (0.25 + 0.75 * near);
             *rate += axis * peak * share * std::f32::consts::E * omega * 0.5;
         }
+    }
+
+    /// Move the body `by` (world, along the ground, m) with stepping feet: most of the way
+    /// within `tau` seconds, fast at first and easing out. Adds to a knock-back under way.
+    pub fn knock(&mut self, by: Vec3, tau: f32) {
+        self.stagger = (self.stagger.0 + by.with_y(0.0), tau.max(0.05));
+    }
+
+    /// Knock the body back from a blow pushing `push` (world, N·s) on hips `hips` m high:
+    /// to its capture point, `v·sqrt(h/g)` along the push for the speed `v` the blow gives it.
+    fn knock_back(&mut self, push: Vec3, hips: f32) {
+        let flat = push.with_y(0.0);
+        if !self.enabled || self.stagger_above <= 0.0 || flat.length() < self.stagger_above {
+            return;
+        }
+        let size = (hips / HIPS_HEIGHT).clamp(0.2, 5.0);
+        let speed = flat / (self.stagger_mass * size.powi(3)).max(1.0);
+        let tau = (hips.max(0.05) / 9.81).sqrt();
+        let by = (speed * tau * self.stagger_scale).clamp_length_max(self.stagger_max);
+        self.knock(by, tau);
+        let left = self.stagger.0.clamp_length_max(self.stagger_max);
+        self.stagger.0 = left;
     }
 
     fn omega(&self) -> f32 {
@@ -198,14 +257,18 @@ pub(crate) fn take_hits(
             .iter()
             .map(|(name, _)| skeleton.index_of(name).map(|i| animator.model[i].t))
             .collect();
+        let world_push = gt.rotation() * push;
+        let hips = pelvis.y * gt.scale().y;
         let tuning = match reaction {
             Some(mut r) => {
                 r.strike(point, push, pelvis, &bones);
+                r.knock_back(world_push, hips);
                 r.clone()
             }
             None => {
                 let mut r = HitReaction::default();
                 r.strike(point, push, pelvis, &bones);
+                r.knock_back(world_push, hips);
                 commands.entity(hit.target).insert(r.clone());
                 r
             }
@@ -219,7 +282,7 @@ pub(crate) fn take_hits(
         {
             let peak = tuning.physical_peak * (strength / (3.0 * tuning.physical_above)).min(1.0);
             let pulse = PhysicalPulse::new("spine", peak, 0.05, tuning.physical_secs);
-            let impulse = gt.rotation() * push * tuning.physical_push;
+            let impulse = world_push * tuning.physical_push;
             match physical {
                 Some(mut p) => p.hit(pulse, hit.point, impulse),
                 None => {
@@ -228,6 +291,63 @@ pub(crate) fn take_hits(
                     commands.entity(hit.target).insert(p);
                 }
             }
+        }
+    }
+}
+
+/// Carry knocked-back bodies along, hurrying their feet to step after them.
+#[allow(clippy::type_complexity)]
+pub(crate) fn stagger_system(
+    time: Res<Time>,
+    mut q: Query<(
+        &mut HitReaction,
+        &mut Transform,
+        &Animator,
+        &GlobalTransform,
+        Option<&mut FootIk>,
+        Option<&LocalTimeScale>,
+        Option<&CharacterController>,
+    )>,
+) {
+    for (mut reaction, mut transform, animator, gt, ik, local, controller) in &mut q {
+        let (left, tau) = reaction.stagger;
+        if left == Vec3::ZERO {
+            if reaction.stagger_velocity != Vec3::ZERO {
+                reaction.stagger_velocity = Vec3::ZERO;
+            }
+            continue;
+        }
+        // Held still with the pose through hitstop.
+        let dt = if animator.frozen() > 0.0 {
+            0.0
+        } else {
+            time.delta_for(local)
+        };
+        if let Some(mut ik) = ik {
+            if ik.hurry <= 0.0 {
+                // The foot farthest along the push steps first.
+                let dir = left.normalize_or_zero();
+                ik.lead = (0..ik.legs.len())
+                    .filter_map(|n| {
+                        let foot = animator.skeleton.index_of(&ik.legs[n].foot)?;
+                        let at = to_world(gt, animator.model[foot].t) - gt.translation();
+                        Some((n, at.as_vec3().dot(dir)))
+                    })
+                    .max_by(|a, b| a.1.total_cmp(&b.1))
+                    .map(|(n, _)| n);
+            }
+            ik.hurry = ik.hurry.max(4.0 * tau);
+        }
+        let step = left * (1.0 - (-dt / tau).exp());
+        let rest = left - step;
+        reaction.stagger.0 = if rest.length() < 1e-3 {
+            Vec3::ZERO
+        } else {
+            rest
+        };
+        reaction.stagger_velocity = if dt > 0.0 { step / dt } else { Vec3::ZERO };
+        if reaction.stagger_move && controller.is_none() {
+            transform.translation += step.as_dvec3();
         }
     }
 }

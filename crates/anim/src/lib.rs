@@ -147,7 +147,7 @@ impl Plugin for AnimationPlugin {
                         procedural::vehicle::vehicle_rig_system,
                     ),
                     procedural::spring::spring_chain_system,
-                    (hit::take_hits, hit::flinch_system).chain(),
+                    (hit::take_hits, hit::stagger_system, hit::flinch_system).chain(),
                 )
                     .chain()
                     .in_set(AnimSet::Procedural),
@@ -249,7 +249,10 @@ fn register_types(app: &mut App) {
         "Hit flinch: a DamageEvent turns the spine, head and a struck arm away from the blow \
          (degrees_per_impulse per N·s, up to max_degrees), shoves the hips \
          (shove_per_impulse) and springs back over settle_secs; blows of at least \
-         physical_above N·s also rock the upper body with physics for physical_secs.",
+         physical_above N·s also rock the upper body with physics for physical_secs, and \
+         ones pushing at least stagger_above N·s along the ground knock the body back a step \
+         or two (with a CharacterController or stagger_move off: only publishes \
+         stagger_velocity for the movement module).",
     )
     .register_component::<PhysicalBlend>(
         "Parts of a body made physical for a moment: each pulse simulates the parts from its \
