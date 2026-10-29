@@ -1077,16 +1077,20 @@ fn weapons_yard(world: &mut World, origin: DVec3) -> Yard {
                 light(1.02),
                 light(1.42),
                 DemoStep::home(3.0),
-                // An overhead into the raised shield.
+                // An overhead into the raised shield: it bounces off, and the partner cuts
+                // back at once while the swordsman recovers.
                 heavy(4.0),
+                DemoStep::home(6.3),
                 // A slash, the shield rammed in, a thrust.
-                light(5.4),
-                heavy(5.82),
-                light(6.45),
-                DemoStep::home(8.0),
-                // Its own shield up for the partner's turn.
-                guard(8.4, true),
-                guard(11.6, false),
+                light(6.6),
+                heavy(7.0),
+                light(7.45),
+                DemoStep::home(8.6),
+                // Its own shield up for the partner's turn: the partner's cut bounces off
+                // and the swordsman answers.
+                guard(8.8, true),
+                guard(9.35, false),
+                light(9.4),
                 DemoStep::home(12.0),
             ],
         ),
@@ -1098,11 +1102,11 @@ fn weapons_yard(world: &mut World, origin: DVec3) -> Yard {
                 stance.clone(),
                 DemoStep::home(2.6),
                 guard(3.4, true),
-                guard(6.3, false),
-                DemoStep::home(8.0),
+                // The guard counter, as the swordsman's overhead bounces off.
+                guard(4.7, false),
+                light(4.75),
+                DemoStep::home(6.3),
                 light(9.0),
-                light(9.42),
-                heavy(9.86),
                 DemoStep::home(12.0),
             ],
         ),
@@ -1864,19 +1868,19 @@ pub const VIEWS: &[DemoView] = &[
     },
     DemoView {
         key: "paddock_shield",
-        name: "An overhead cut lands on a raised shield; the swordsman bounces off it",
+        name: "An overhead bounces off a raised shield; the partner cuts back at once",
         eye: [-22.4, 1.5, -13.8],
         target: [-23.9, 1.2, -16.0],
         hour: 15.0,
-        at: 4.6,
+        at: 4.75,
     },
     DemoView {
         key: "paddock_bash",
-        name: "A slash into the shield, then the swordsman's own shield rammed into it",
+        name: "A slash, the shield rammed in, and a thrust",
         eye: [-25.6, 1.4, -13.9],
         target: [-23.9, 1.1, -16.0],
         hour: 15.0,
-        at: 6.1,
+        at: 7.15,
     },
     DemoView {
         key: "paddock_greatsword",
