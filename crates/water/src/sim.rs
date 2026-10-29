@@ -435,6 +435,7 @@ pub fn ripple_system(
     }
     state.ripples.copy_view_from(&field);
     state.ripples.pending.clear();
+    let span = tracing::info_span!("water", name = "ripples: rebuild").entered();
     if rebuild {
         field.recenter(center);
         book.since_rebuild = 0.0;
@@ -498,6 +499,8 @@ pub fn ripple_system(
     } else {
         drop(state);
     }
+    drop(span);
+    let _span = tracing::info_span!("water", name = "ripples: step").entered();
     if field.needs_step() {
         field.current_damping = 1.1 / settings.current_life_s.max(0.1);
         field.swirl = settings.swirl.max(0.0);

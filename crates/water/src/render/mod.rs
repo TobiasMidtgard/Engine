@@ -19,6 +19,7 @@ use engine_render::{RenderSettings, ViewData};
 use engine_world::{Ground, SurfaceLayers, WeatherState};
 
 use crate::body::{RainShower, WaterBed, WaterExtent, WaterOptics};
+use crate::ripples::TILE;
 use crate::state::{BodyState, SharedWater, WaterState};
 use crate::waves::MAX_WAVES;
 
@@ -378,6 +379,15 @@ struct Gpu {
     currents: wgpu::Texture,
     ripple_n: u32,
     ripple_version: u64,
+    /// What the ripple textures hold (f16 texels), kept between uploads: tiles that were and
+    /// stay still water aren't written again.
+    ripple_data: Vec<u16>,
+    ripple_currents: Vec<u16>,
+    /// Per ripple tile, whether anything moved there at the last upload.
+    ripple_live: Vec<bool>,
+    /// Whether the last upload wrote the grid's own heights (only drawn while the dispersive
+    /// surface isn't).
+    ripple_heights: bool,
     puddle_tex: wgpu::Texture,
     group1: Option<wgpu::BindGroup>,
     flows: Vec<FlowGpu>,
@@ -827,6 +837,10 @@ impl WaterFeature {
             currents,
             ripple_n: 8,
             ripple_version: u64::MAX,
+            ripple_data: Vec::new(),
+            ripple_currents: Vec::new(),
+            ripple_live: Vec::new(),
+            ripple_heights: true,
             puddle_tex,
             group1: None,
             flows: Vec::new(),
@@ -986,7 +1000,9 @@ impl WaterFeature {
         ))
     }
 
-    fn upload_ripples(gpu: &mut Gpu, shared: &GpuShared, state: &WaterState) {
+    /// `heights`: write the grid's own heights and slopes too (the dispersive surface's
+    /// replace them while it is drawn; only the foam is read then).
+    fn upload_ripples(gpu: &mut Gpu, shared: &GpuShared, state: &WaterState, heights: bool) {
         let r = &state.ripples;
         let n = r.n as u32;
         if gpu.ripple_n != n {
@@ -1008,41 +1024,77 @@ impl WaterFeature {
             gpu.ripple_version = u64::MAX;
             gpu.group1 = None;
         }
+        if gpu.ripple_heights != heights {
+            gpu.ripple_heights = heights;
+            gpu.ripple_version = u64::MAX;
+            gpu.ripple_live.fill(true);
+        }
         if gpu.ripple_version == r.version {
             return;
         }
         gpu.ripple_version = r.version;
         let n = r.n;
         let inv = 0.5 / r.cell;
-        let mut data = vec![0u16; n * n * 4];
-        let mut currents = vec![0u16; n * n * 4];
-        for j in 0..n {
-            for i in 0..n {
-                let idx = j * n + i;
-                let h = |ii: usize, jj: usize| r.h[jj * n + ii];
-                let gx = (h((i + 1).min(n - 1), j) - h(i.saturating_sub(1), j)) * inv;
-                let gz = (h(i, (j + 1).min(n - 1)) - h(i, j.saturating_sub(1))) * inv;
-                let o = idx * 4;
-                data[o] = f32_to_f16(r.h[idx]);
-                data[o + 1] = f32_to_f16(r.foam[idx]);
-                data[o + 2] = f32_to_f16(gx);
-                data[o + 3] = f32_to_f16(gz);
-                let v = r.cell_current(i, j);
-                if v != Vec2::ZERO {
-                    currents[o] = f32_to_f16(v.x);
-                    currents[o + 1] = f32_to_f16(v.y);
-                    currents[o + 2] = f32_to_f16(r.vorticity(i, j));
+        let t = n.div_ceil(TILE);
+        if gpu.ripple_data.len() != n * n * 4 {
+            gpu.ripple_data = vec![0; n * n * 4];
+            gpu.ripple_currents = vec![0; n * n * 4];
+            gpu.ripple_live = vec![true; t * t];
+        }
+        // Tiles where anything moves now; with those that did at the last upload and their
+        // neighbors (slopes reach across a tile's edge), the only ones whose texels change.
+        let live: Vec<bool> = (0..t * t)
+            .map(|k| {
+                let (tx, ty) = (k % t, k / t);
+                (ty * TILE..((ty + 1) * TILE).min(n)).any(|j| {
+                    let row = j * n + tx * TILE..j * n + ((tx + 1) * TILE).min(n);
+                    r.h[row.clone()].iter().any(|v| *v != 0.0)
+                        || r.foam[row.clone()].iter().any(|v| *v != 0.0)
+                        || r.bubbles[row.clone()].iter().any(|v| *v != 0.0)
+                        || r.vel[row].iter().any(|v| *v != [0.0; 2])
+                })
+            })
+            .collect();
+        let near = |flags: &[bool], tx: usize, ty: usize| {
+            (ty.saturating_sub(1)..=(ty + 1).min(t - 1))
+                .any(|y| (tx.saturating_sub(1)..=(tx + 1).min(t - 1)).any(|x| flags[y * t + x]))
+        };
+        let (data, currents) = (&mut gpu.ripple_data, &mut gpu.ripple_currents);
+        for ty in 0..t {
+            for tx in 0..t {
+                if !near(&live, tx, ty) && !near(&gpu.ripple_live, tx, ty) {
+                    continue;
                 }
-                currents[o + 3] = f32_to_f16(r.bubbles[idx]);
+                for j in ty * TILE..((ty + 1) * TILE).min(n) {
+                    for i in tx * TILE..((tx + 1) * TILE).min(n) {
+                        let idx = j * n + i;
+                        let o = idx * 4;
+                        if heights {
+                            let h = |ii: usize, jj: usize| r.h[jj * n + ii];
+                            let gx = (h((i + 1).min(n - 1), j) - h(i.saturating_sub(1), j)) * inv;
+                            let gz = (h(i, (j + 1).min(n - 1)) - h(i, j.saturating_sub(1))) * inv;
+                            data[o] = f32_to_f16(r.h[idx]);
+                            data[o + 2] = f32_to_f16(gx);
+                            data[o + 3] = f32_to_f16(gz);
+                        }
+                        data[o + 1] = f32_to_f16(r.foam[idx]);
+                        let v = r.cell_current(i, j);
+                        currents[o] = f32_to_f16(v.x);
+                        currents[o + 1] = f32_to_f16(v.y);
+                        currents[o + 3] = f32_to_f16(r.bubbles[idx]);
+                    }
+                }
             }
         }
+        gpu.ripple_live = live;
+        let (data, currents) = (&gpu.ripple_data, &gpu.ripple_currents);
         write_texture(
             &shared.queue,
             &gpu.ripple,
             n as u32,
             n as u32,
             8,
-            bytemuck::cast_slice(&data),
+            bytemuck::cast_slice(data.as_slice()),
         );
         write_texture(
             &shared.queue,
@@ -1050,7 +1102,7 @@ impl WaterFeature {
             n as u32,
             n as u32,
             8,
-            bytemuck::cast_slice(&currents),
+            bytemuck::cast_slice(currents.as_slice()),
         );
     }
 
@@ -1358,7 +1410,9 @@ impl RenderFeature for WaterFeature {
             .get_resource::<WeatherState>()
             .filter(|w| w.is_raining())
             .map_or(0.0, |w| w.precipitation_mm_h);
+        let span = tracing::info_span!("water", name = "puddles").entered();
         let (puddle, puddle2, puddles_on) = self.upload_puddles(world, shared, view);
+        drop(span);
         let surface_damping = world
             .get_resource::<crate::body::WaterSettings>()
             .map_or(0.05, |s| s.surface_damping);
@@ -1464,6 +1518,7 @@ impl RenderFeature for WaterFeature {
         g.counts[3] = near.len().min(MAX_PLUNGES) as u32;
         let frame_wind = engine_core::math::Vec2::new(view.wind.x, view.wind.z);
         (g.detail, g.detail2) = gpu.detail.globals(frame_wind);
+        let span = tracing::info_span!("water", name = "surface").entered();
         gpu.surface.update(
             shared,
             &state.ripples,
@@ -1490,8 +1545,14 @@ impl RenderFeature for WaterFeature {
             .queue
             .write_buffer(&gpu.uniform, 0, bytemuck::bytes_of(&uniform));
 
-        Self::upload_ripples(gpu, shared, &state);
+        drop(span);
+        let span = tracing::info_span!("water", name = "ripple upload").entered();
+        let heights = !gpu.surface.drawn();
+        Self::upload_ripples(gpu, shared, &state, heights);
+        drop(span);
+        let span = tracing::info_span!("water", name = "flow upload").entered();
         Self::upload_flows(gpu, shared, &state, view);
+        drop(span);
         Self::upload_falls(gpu, shared, &state, view, &plunges);
 
         // Stats.

@@ -91,6 +91,11 @@ The showcase valley's own lake and the stream that falls over the cliff into it 
 from `demo::spawn_valley`: the lake as a body over the landscape's ground, and each stream as a
 flow region from its spring, prewarmed so it already runs into the lake.
 
+A game that will show either asks for their art early (`demo::art::WaterDemoArt::prefetch`):
+textures, ground, rocks, boats, the jetty, buoys, logs and the streams' beds are made on workers
+while it loads (`WaterLoading::is_ready` waits for them), so the spawn itself only places them
+(about 20 ms in a release build, from 100 ms).
+
 | Test case | Shows |
 | --- | --- |
 | Tarn with a sandy shore and a jetty | Wind waves, depth color, shallows, caustics, reflections |

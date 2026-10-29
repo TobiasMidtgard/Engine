@@ -1,19 +1,20 @@
 //! The demos' art, made on workers while the game loads.
 //!
 //! As Unreal's async loading thread and Unity's background loading do, the costly, world-free
-//! part (procedural textures, the tarn's ground, the crag, boulders, the swimmer and waders:
-//! a few seconds of one core) starts on the async compute pool once a game says it will
+//! part (procedural textures, the tarn's ground, the crag, boulders, the swimmer and waders,
+//! boats, the jetty, buoys, logs and the streams' beds: a few seconds of one core) starts on the async compute pool once a game says it will
 //! spawn a water demo ([`WaterDemoArt::prefetch`]), and the frame thread only puts the
 //! finished pieces in. [`WaterLoading`](crate::WaterLoading) counts
 //! the pieces still being made, so a loading screen can wait for them before it wakes the
 //! water zones. A demo spawned sooner takes each piece as soon as it is done (waiting for the
 //! rest), or makes it there and then when nothing started it (tests, tools).
 
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 
 use bevy_tasks::Task;
 use bevy_tasks::futures::check_ready;
 use engine_assets::Assets;
+use engine_core::math::Mat4;
 use engine_core::prelude::*;
 use engine_core::tasks::AsyncComputeTaskPool;
 use engine_render::{Image, Mesh};
@@ -21,7 +22,10 @@ use engine_world::physics::Collider;
 
 use super::materials::{Built, DemoMaterials, synthesize_all};
 use super::props::{self, Part};
+use super::scenery::{Piece, build_jetty};
+use super::{Boulder, crag, tarn_height};
 use crate::boat::{HullCut, Interior, hull_collider};
+use crate::flow::FlowRegion;
 use crate::sim::WaterLoading;
 
 static TARN: OnceLock<Mesh> = OnceLock::new();
@@ -31,6 +35,21 @@ static SWIMMER: OnceLock<Vec<Part>> = OnceLock::new();
 static WADER: OnceLock<Vec<Part>> = OnceLock::new();
 static ROWBOAT: OnceLock<(Vec<Part>, Collider, Interior)> = OnceLock::new();
 static MOTORBOAT: OnceLock<(Vec<Part>, Collider, Interior)> = OnceLock::new();
+static BOULDERS: OnceLock<Vec<Boulder>> = OnceLock::new();
+static CULVERT: OnceLock<Vec<Part>> = OnceLock::new();
+static BUOYS: OnceLock<Vec<Vec<Part>>> = OnceLock::new();
+static LOGS: OnceLock<Vec<Vec<Part>>> = OnceLock::new();
+static STREAM_BED: OnceLock<Vec<f32>> = OnceLock::new();
+static CASCADE: OnceLock<(Transform, FlowRegion)> = OnceLock::new();
+/// A jetty's plan ([`jetty_plan`](super::scenery::jetty_plan)).
+type Plan = Vec<(Piece, Mat4)>;
+/// Jetties made so far, by their plans (the test area's, the valley's).
+static JETTIES: Mutex<Vec<(Plan, Vec<Part>)>> = Mutex::new(Vec::new());
+
+/// Buoy seeds kept made ([`buoy`]): the test area's five, the valley's three.
+const BUOY_SEEDS: u64 = 5;
+/// Logs in the test area's stream ([`stream_log`]).
+const LOGS_IN_STREAM: u64 = 3;
 
 /// The test area's hill and tarn bed (0.5 m spacing).
 pub(crate) fn tarn() -> Mesh {
@@ -52,6 +71,68 @@ pub(crate) fn rocks() -> Vec<Vec<Part>> {
     // apps in one process), which would wait on the lock this thread holds forever.
     let built = super::rock_shapes(true);
     ROCKS.get_or_init(|| built).clone()
+}
+
+/// The test area's boulders, placed and stretched.
+pub(crate) fn boulders() -> Vec<Boulder> {
+    if let Some(b) = BOULDERS.get() {
+        return b.clone();
+    }
+    let built = super::boulder_layout(&rocks());
+    BOULDERS.get_or_init(|| built).clone()
+}
+
+pub(crate) fn culvert() -> Vec<Part> {
+    CULVERT.get_or_init(props::culvert).clone()
+}
+
+/// A mooring buoy's model.
+pub(crate) fn buoy(seed: u64) -> Vec<Part> {
+    if seed >= BUOY_SEEDS {
+        return props::buoy(seed);
+    }
+    BUOYS.get_or_init(|| (0..BUOY_SEEDS).map(props::buoy).collect())[seed as usize].clone()
+}
+
+/// Log `k` of those riding the test area's stream.
+pub(crate) fn stream_log(k: u64) -> Vec<Part> {
+    if k >= LOGS_IN_STREAM {
+        return props::log(1.7, 0.17, k);
+    }
+    LOGS.get_or_init(|| {
+        (0..LOGS_IN_STREAM)
+            .map(|k| props::log(1.7, 0.17, k))
+            .collect()
+    })[k as usize]
+        .clone()
+}
+
+/// The bed under the test area's outlet stream.
+pub(crate) fn stream_bed() -> Vec<f32> {
+    STREAM_BED.get_or_init(super::stream_bed_heights).clone()
+}
+
+/// The crag's cascade, for the test area centered at the origin.
+pub(crate) fn cascade() -> (Transform, FlowRegion) {
+    CASCADE
+        .get_or_init(|| crag::cascade(DVec3::ZERO, tarn_height))
+        .clone()
+}
+
+/// The jetty `plan` lays out: made once per plan.
+pub(crate) fn jetty(plan: Plan) -> Vec<Part> {
+    let made = JETTIES.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((_, parts)) = made.iter().find(|(p, _)| *p == plan) {
+        return parts.clone();
+    }
+    // Made outside the lock.
+    drop(made);
+    let parts = build_jetty(&plan);
+    let mut made = JETTIES.lock().unwrap_or_else(|e| e.into_inner());
+    if made.len() < 4 && !made.iter().any(|(p, _)| *p == plan) {
+        made.push((plan, parts.clone()));
+    }
+    parts
 }
 
 pub(crate) fn swimmer() -> Vec<Part> {
@@ -161,10 +242,11 @@ fn start_demo_art(world: &mut World) {
         meshes: Vec::new(),
     };
     // Longest first, so the pool's few threads finish together.
-    let jobs: [fn(); 7] = [
+    let jobs: [fn(); 8] = [
         // (One core: the compute pool's threads are the frame's.)
         || {
-            ROCKS.get_or_init(|| super::rock_shapes(false));
+            let rocks = ROCKS.get_or_init(|| super::rock_shapes(false));
+            BOULDERS.get_or_init(|| super::boulder_layout(rocks));
         },
         || {
             CRAG.get_or_init(|| super::crag_mesh(0.5));
@@ -183,6 +265,15 @@ fn start_demo_art(world: &mut World) {
         },
         || {
             MOTORBOAT.get_or_init(make_motorboat);
+        },
+        // The smaller props and the streams' beds.
+        || {
+            culvert();
+            buoy(0);
+            stream_log(0);
+            stream_bed();
+            cascade();
+            super::with_demo_jetty(DVec3::ZERO, |j| jetty(super::scenery::jetty_plan(j)));
         },
     ];
     for job in jobs {

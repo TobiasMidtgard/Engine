@@ -58,7 +58,7 @@ struct WaterUniform {
 @group(1) @binding(2) var scene_color: texture_2d<f32>;     // pre-exposed HDR, before transparents
 @group(1) @binding(3) var scene_depth: texture_depth_2d;    // reverse-Z
 @group(1) @binding(4) var puddle_tex: texture_2d<f32>;      // r depth (m), g ground y rel puddle2.x
-@group(1) @binding(5) var current_tex: texture_2d<f32>;     // ripple grid currents: x, z (m/s), turn (1/s), bubbles
+@group(1) @binding(5) var current_tex: texture_2d<f32>;     // ripple grid currents: x, z (m/s), unused, bubbles
 @group(1) @binding(6) var detail_tex: texture_2d_array<f32>; // fine waves, per tile: (dh/dx, dh/dz, h, Jacobian), (moments, foam)
 @group(1) @binding(7) var surface_tex: texture_2d<f32>;     // dispersive ripples on the ripple grid: height, dh/dx, dh/dz
 @group(1) @binding(8) var coarse_tex: texture_2d<f32>;      // their long waves, on a grid 4 times larger: the same
@@ -370,8 +370,8 @@ fn ripple_at(rel_xz: vec2<f32>) -> vec4<f32> {
     return r * fade + long;
 }
 
-// Currents stirred into the ripple grid at a camera-relative x/z: (x, z m/s, turn 1/s,
-// bubbles 0..1), faded at the edge.
+// Currents stirred into the ripple grid at a camera-relative x/z: (x, z m/s, 0, bubbles 0..1),
+// faded at the edge.
 fn current_at(rel_xz: vec2<f32>) -> vec4<f32> {
     if (water.g.ripple.w < 0.5) { return vec4<f32>(0.0); }
     let uv = (rel_xz - water.g.ripple.xy) / water.g.ripple.z;

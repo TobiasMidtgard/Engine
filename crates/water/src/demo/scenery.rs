@@ -124,20 +124,44 @@ const BAY: f32 = 2.2;
 /// Piles stand just outside the 2 m boards, either side of the middle line, meters.
 const POST_ACROSS: f32 = 1.12;
 
-/// Build `jetty`: deck slots, pile pairs to the bottom, cleats and a swim ladder at the end.
-pub fn spawn_jetty(commands: &mut Commands, jetty: &Jetty) -> Entity {
+/// One piece of a jetty, as [`jetty_plan`] lays it out.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum Piece {
+    Deck {
+        seed: u64,
+    },
+    Post {
+        height: f32,
+        waterline: f32,
+        seed: u64,
+    },
+    Cleat,
+    Ladder {
+        height: f32,
+    },
+}
+
+/// Millimeters: a plan made at another origin comes out the same, so it finds the parts
+/// made for it ([`art::jetty`](super::art::jetty)).
+fn mm(x: f64) -> f32 {
+    ((x * 1000.0).round() / 1000.0) as f32
+}
+
+/// The pieces of `jetty` and where they go in its own frame (+x out, +z to the right, y up
+/// from the deck top): deck slots, pile pairs to the bottom, cleats and a swim ladder at the
+/// end.
+pub(crate) fn jetty_plan(jetty: &Jetty) -> Vec<(Piece, Mat4)> {
     let origin = jetty.shore;
-    let rot = jetty.rotation();
-    // Everything is placed in the jetty's own frame: +x out, +z to the right, y up from
-    // the deck top.
     let local =
         |along: f32, y: f32, across: f32| Mat4::from_translation(Vec3::new(along, y, across));
-    let mut placed = Vec::new();
+    let mut plan = Vec::new();
     let slots = (jetty.length / SLOT).ceil() as u32;
     for k in 0..slots {
         let along = (k as f32 + 0.5) * SLOT;
-        placed.push((
-            props::deck_section(jetty.seed.wrapping_add(k as u64)),
+        plan.push((
+            Piece::Deck {
+                seed: jetty.seed.wrapping_add(k as u64),
+            },
             local(along, -0.035, 0.0),
         ));
     }
@@ -148,26 +172,54 @@ pub fn spawn_jetty(commands: &mut Commands, jetty: &Jetty) -> Entity {
             let p = jetty.point(along as f64, across as f64);
             let bottom = (jetty.bed)(p.x, p.z) - 0.4;
             let top = origin.y + 0.25;
-            let height = (top - bottom) as f32;
+            let height = mm(top - bottom);
             if height < 0.5 {
                 continue;
             }
-            let waterline = (jetty.water_level - bottom) as f32;
-            placed.push((
-                props::post(height, waterline, jetty.seed ^ (k as u64 * 2 + s)),
-                local(along, (bottom - origin.y) as f32, across),
+            plan.push((
+                Piece::Post {
+                    height,
+                    waterline: mm(jetty.water_level - bottom),
+                    seed: jetty.seed ^ (k as u64 * 2 + s),
+                },
+                local(along, mm(bottom - origin.y), across),
             ));
         }
     }
     for across in [-0.82f32, 0.82] {
-        placed.push((props::cleat(), local(jetty.length - 0.6, 0.0, across)));
+        plan.push((Piece::Cleat, local(jetty.length - 0.6, 0.0, across)));
     }
-    let ladder = (origin.y - jetty.water_level) as f32 + 0.9;
-    placed.push((props::ladder(ladder), local(jetty.length, 0.0, 0.45)));
+    let ladder = mm(origin.y - jetty.water_level + 0.9);
+    plan.push((
+        Piece::Ladder { height: ladder },
+        local(jetty.length, 0.0, 0.45),
+    ));
+    plan
+}
+
+/// The jetty `plan` describes, merged into a few parts.
+pub(crate) fn build_jetty(plan: &[(Piece, Mat4)]) -> Vec<Part> {
+    merged(plan.iter().map(|(piece, m)| {
+        let parts = match *piece {
+            Piece::Deck { seed } => props::deck_section(seed),
+            Piece::Post {
+                height,
+                waterline,
+                seed,
+            } => props::post(height, waterline, seed),
+            Piece::Cleat => props::cleat(),
+            Piece::Ladder { height } => props::ladder(height),
+        };
+        (parts, *m)
+    }))
+}
+
+/// Build `jetty`: deck slots, pile pairs to the bottom, cleats and a swim ladder at the end.
+pub fn spawn_jetty(commands: &mut Commands, jetty: &Jetty) -> Entity {
     let e = commands
         .spawn((
             Name::new("Jetty"),
-            Transform::from_translation(origin).with_rotation(rot),
+            Transform::from_translation(jetty.shore).with_rotation(jetty.rotation()),
             // The deck stands over the wet band at the shore: keep it out of the floor.
             crate::shore::ShoreCover {
                 min: [-0.3, -POST_ACROSS],
@@ -178,7 +230,7 @@ pub fn spawn_jetty(commands: &mut Commands, jetty: &Jetty) -> Entity {
             FitCollider::new(Fit::Mesh),
         ))
         .id();
-    add_parts(commands, e, merged(placed));
+    add_parts(commands, e, super::art::jetty(jetty_plan(jetty)));
     e
 }
 
@@ -274,6 +326,6 @@ pub fn spawn_buoy(commands: &mut Commands, at: DVec3, anchor: DVec3, seed: u64) 
             },
         ))
         .id();
-    add_parts(commands, e, props::buoy(seed));
+    add_parts(commands, e, super::art::buoy(seed));
     e
 }

@@ -367,7 +367,12 @@ fn main() {
             Transform::default().looking_at(-light.as_dvec3(), Vec3::Y);
         // A few frames for exposure, the environment map and the ripples to follow the camera.
         let started = std::time::Instant::now();
-        app.update_n(6);
+        // (`GALLERY_FRAMES=n`: draw n frames here instead, for `ENGINE_PROFILE=1`.)
+        let frames = std::env::var("GALLERY_FRAMES")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(6);
+        app.update_n(frames);
         if let Some(d) = app.world.get_resource::<RenderDisabled>() {
             eprintln!("no GPU: {}", d.0);
             return;

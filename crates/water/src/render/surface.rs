@@ -362,7 +362,7 @@ impl SurfaceGpu {
                 },
                 sponge: SPONGE,
                 depth: r.depth(),
-                version: r.version,
+                version: r.medium_version,
                 medium: &fine_medium,
                 handed: handed_fine,
             },

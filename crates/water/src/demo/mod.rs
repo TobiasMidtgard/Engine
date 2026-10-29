@@ -755,6 +755,101 @@ fn rock_shapes(wide: bool) -> Vec<Vec<Part>> {
     built.into_iter().flatten().collect()
 }
 
+/// The jetty's length, meters from the bank.
+const JETTY_LEN: f32 = 13.0;
+
+/// Run `f` with the test area's jetty, for the area centered at `origin`.
+fn with_demo_jetty<R>(origin: DVec3, f: impl FnOnce(&Jetty) -> R) -> R {
+    let jdir = Vec2::new(JETTY_ANGLE.cos(), JETTY_ANGLE.sin());
+    let land = jdir * (shore_radius(JETTY_ANGLE) + 1.0);
+    let bed = move |x: f64, z: f64| {
+        origin.y + tarn_height((x - origin.x) as f32, (z - origin.z) as f32) as f64
+    };
+    f(&Jetty {
+        shore: origin + DVec3::new(land.x as f64, (LAKE_LEVEL + 0.5) as f64, land.y as f64),
+        dir: -jdir.as_dvec2(),
+        length: JETTY_LEN,
+        water_level: origin.y + LAKE_LEVEL as f64,
+        bed: &bed,
+        seed: 0x1E77,
+    })
+}
+
+/// The bed under the outlet stream's flow grid, row by row.
+fn stream_bed_heights() -> Vec<f32> {
+    let mut bed = Vec::with_capacity((FLOW_CELLS * FLOW_CELLS) as usize);
+    for j in 0..FLOW_CELLS {
+        for i in 0..FLOW_CELLS {
+            let p = FLOW_CORNER + (Vec2::new(i as f32, j as f32) + 0.5) * FLOW_CELL;
+            bed.push(tarn_height(p.x, p.y));
+        }
+    }
+    bed
+}
+
+/// A boulder of the test area: where it sits (meters from the area's center), its turn and
+/// its stretched rock.
+#[derive(Clone)]
+pub(crate) struct Boulder {
+    pub at: Vec3,
+    pub yaw: f32,
+    pub parts: Vec<Part>,
+}
+
+/// The test area's boulders, from [`ROCKS`] (`rocks`): by the falls and down the ravine, on
+/// the rim, and in the shallows.
+fn boulder_layout(rocks: &[Vec<Part>]) -> Vec<Boulder> {
+    let polar = |angle: f32, r: f32| Vec2::new(angle.cos(), angle.sin()) * r;
+    let mut out = Vec::with_capacity(30);
+    let mut rng = Rng::new(0xB01D);
+    let side_of = Vec2::new(OUTLET.y, -OUTLET.x);
+    while out.len() < 30 {
+        let k = out.len();
+        let (p, size) = if k < 12 {
+            let s = FALLS_AT - 4.0 + rng.range(0.0, 18.0);
+            let side = if k % 2 == 0 { 1.0 } else { -1.0 };
+            let across = side * (channel_half_width(s) + rng.range(0.5, 3.5));
+            (OUTLET * s + side_of * across, rng.range(0.7, 2.2))
+        } else {
+            let a = rng.range(0.0, TAU);
+            let near = |b: f32| ((a - b + PI).rem_euclid(TAU) - PI).abs() < 0.22;
+            if near(JETTY_ANGLE) || near(PI * 0.25) {
+                continue;
+            }
+            if k < 22 {
+                (
+                    polar(a, shore_radius(a) + rng.range(0.5, 5.0)),
+                    rng.range(0.6, 1.9),
+                )
+            } else {
+                (
+                    polar(a, shore_radius(a) - rng.range(0.8, 3.0)),
+                    rng.range(0.5, 1.3),
+                )
+            }
+        };
+        // One of the shapes for its size class, stretched a little so no two look alike.
+        let (shape, built) = if size < 1.5 {
+            (k % SMALL_ROCKS, 1.0)
+        } else {
+            (SMALL_ROCKS + k % (ROCKS.len() - SMALL_ROCKS), 2.0)
+        };
+        let stretch = Vec3::new(
+            rng.range(0.85, 1.15),
+            rng.range(0.8, 1.1),
+            rng.range(0.85, 1.15),
+        ) * (size / built);
+        let parts = rocks[shape].clone();
+        out.push(Boulder {
+            // Half buried: the flat bed goes into the ground.
+            at: Vec3::new(p.x, tarn_height(p.x, p.y) - size * 0.05, p.y),
+            yaw: rng.range(0.0, TAU),
+            parts: merged([(parts, Mat4::from_scale(stretch))]),
+        });
+    }
+    out
+}
+
 /// [`spawn_demo`] with options.
 pub fn spawn_demo_with(commands: &mut Commands, origin: DVec3, options: DemoOptions) {
     let at = |x: f32, y: f32, z: f32| origin + DVec3::new(x as f64, y as f64, z as f64);
@@ -798,13 +893,7 @@ pub fn spawn_demo_with(commands: &mut Commands, origin: DVec3, options: DemoOpti
     pools::spawn_pools(commands, origin);
 
     // The outlet stream, falls and pond: fed by the tarn through the notch in its rim.
-    let mut bed = Vec::with_capacity((FLOW_CELLS * FLOW_CELLS) as usize);
-    for j in 0..FLOW_CELLS {
-        for i in 0..FLOW_CELLS {
-            let p = FLOW_CORNER + (Vec2::new(i as f32, j as f32) + 0.5) * FLOW_CELL;
-            bed.push(tarn_height(p.x, p.y));
-        }
-    }
+    let bed = art::stream_bed();
     let pond = OUTLET * POND_AT;
     commands.spawn((
         Name::new("Stream and pond"),
@@ -832,7 +921,8 @@ pub fn spawn_demo_with(commands: &mut Commands, origin: DVec3, options: DemoOpti
     ));
 
     // The crag's spring, cascading down its crevice into the cove.
-    let (place, region) = crag::cascade(origin, tarn_height);
+    let (mut place, region) = art::cascade();
+    place.translation += origin;
     commands.spawn((Name::new("Crag cascade"), place, region));
 
     // The culvert the pond's spill ditch drains into: its mouth faces back up the ditch and
@@ -844,66 +934,17 @@ pub fn spawn_demo_with(commands: &mut Commands, origin: DVec3, options: DemoOpti
         "Culvert",
         Transform::from_translation(at(culvert.x, invert + 0.38, culvert.y))
             .with_rotation(Quat::from_rotation_y(PI * 0.75)),
-        props::culvert(),
+        art::culvert(),
     );
 
     // Boulders: by the falls and down the ravine, on the rim, and in the shallows.
-    let rocks = art::rocks();
-    let mut rng = Rng::new(0xB01D);
-    let side_of = Vec2::new(OUTLET.y, -OUTLET.x);
-    let mut boulders = 0;
-    while boulders < 30 {
-        let k = boulders;
-        let (p, size) = if k < 12 {
-            let s = FALLS_AT - 4.0 + rng.range(0.0, 18.0);
-            let side = if k % 2 == 0 { 1.0 } else { -1.0 };
-            let across = side * (channel_half_width(s) + rng.range(0.5, 3.5));
-            (OUTLET * s + side_of * across, rng.range(0.7, 2.2))
-        } else {
-            let a = rng.range(0.0, TAU);
-            let near = |b: f32| ((a - b + PI).rem_euclid(TAU) - PI).abs() < 0.22;
-            if near(JETTY_ANGLE) || near(PI * 0.25) {
-                continue;
-            }
-            if k < 22 {
-                (
-                    polar(a, shore_radius(a) + rng.range(0.5, 5.0)),
-                    rng.range(0.6, 1.9),
-                )
-            } else {
-                (
-                    polar(a, shore_radius(a) - rng.range(0.8, 3.0)),
-                    rng.range(0.5, 1.3),
-                )
-            }
-        };
-        boulders += 1;
-        // One of the shapes for its size class, stretched a little so no two look alike.
-        let (shape, built) = if size < 1.5 {
-            (k % SMALL_ROCKS, 1.0)
-        } else {
-            (SMALL_ROCKS + k % (ROCKS.len() - SMALL_ROCKS), 2.0)
-        };
-        let stretch = Vec3::new(
-            rng.range(0.85, 1.15),
-            rng.range(0.8, 1.1),
-            rng.range(0.85, 1.15),
-        ) * (size / built);
-        let parts = rocks[shape]
-            .iter()
-            .map(|p| Part {
-                mesh: p.mesh.clone(),
-                surface: p.surface,
-                double_sided: p.double_sided,
-            })
-            .collect();
-        // Half buried: the flat bed goes into the ground.
+    for b in art::boulders() {
         spawn_prop(
             commands,
             "Boulder",
-            Transform::from_translation(at(p.x, tarn_height(p.x, p.y) - size * 0.05, p.y))
-                .with_rotation(Quat::from_rotation_y(rng.range(0.0, TAU))),
-            merged([(parts, Mat4::from_scale(stretch))]),
+            Transform::from_translation(origin + b.at.as_dvec3())
+                .with_rotation(Quat::from_rotation_y(b.yaw)),
+            b.parts,
         );
     }
 
@@ -912,22 +953,8 @@ pub fn spawn_demo_with(commands: &mut Commands, origin: DVec3, options: DemoOpti
     let jside = Vec2::new(-jdir.y, jdir.x);
     let shore = shore_radius(JETTY_ANGLE);
     let deck = LAKE_LEVEL + 0.5;
-    let jetty_len = 13.0;
-    let bed = move |x: f64, z: f64| {
-        origin.y + tarn_height((x - origin.x) as f32, (z - origin.z) as f32) as f64
-    };
-    let land = jdir * (shore + 1.0);
-    spawn_jetty(
-        commands,
-        &Jetty {
-            shore: at(land.x, deck, land.y),
-            dir: -jdir.as_dvec2(),
-            length: jetty_len,
-            water_level: origin.y + LAKE_LEVEL as f64,
-            bed: &bed,
-            seed: 0x1E77,
-        },
-    );
+    let jetty_len = JETTY_LEN;
+    with_demo_jetty(origin, |jetty| spawn_jetty(commands, jetty));
     let jetty_end = jdir * (shore + 1.0 - jetty_len);
 
     // A rowboat moored at the end of the jetty.
@@ -1075,7 +1102,7 @@ pub fn spawn_demo_with(commands: &mut Commands, origin: DVec3, options: DemoOpti
             "Log",
             Transform::from_translation(start)
                 .with_rotation(Quat::from_rotation_y(-PI * 0.25 + 0.3 * k as f32)),
-            props::log(1.7, 0.17, k as u64),
+            art::stream_log(k as u64),
         );
         commands.entity(e).insert((
             Buoyancy {

@@ -132,6 +132,9 @@ pub struct RippleField {
     pub pending: Vec<Disturbance>,
     /// Bumped whenever heights change (for GPU uploads).
     pub version: u64,
+    /// Bumped whenever the water under the grid changes: where it is wet, the streams on it,
+    /// or where the grid lies (what the dispersive surface reads, [`crate::surface::Medium`]).
+    pub medium_version: u64,
     /// Any wet cell in the grid.
     pub has_water: bool,
     /// How fast currents (and the swirls in them) die out, 1/s. Waves also lose what
@@ -667,6 +670,7 @@ impl RippleField {
             speed2: vec![0.0; n * n],
             pending: Vec::new(),
             version: 0,
+            medium_version: 0,
             has_water: false,
             current_damping: 0.12,
             swirl: 0.5,
@@ -786,6 +790,7 @@ impl RippleField {
         let shift = ((target - self.origin) / cell).round();
         let (sx, sz) = (shift.x as i64, shift.y as i64);
         self.origin = target;
+        self.medium_version += 1;
         let n = self.n as i64;
         if sx.abs() >= n || sz.abs() >= n {
             self.clear();
@@ -817,6 +822,7 @@ impl RippleField {
     pub fn rebuild_speeds(&mut self, speed: f32, depth_at: impl Fn(DVec2) -> Option<f32>) {
         let n = self.n;
         let mut any = false;
+        let mut changed = false;
         for j in 0..n {
             for i in 0..n {
                 let c2 = match depth_at(self.cell_center(i, j)) {
@@ -827,10 +833,14 @@ impl RippleField {
                     }
                     _ => 0.0,
                 };
+                changed |= self.speed2[j * n + i] != c2;
                 self.speed2[j * n + i] = c2;
             }
         }
         self.has_water = any;
+        if changed {
+            self.medium_version += 1;
+        }
         self.speeds_changed();
         if !any {
             self.clear();
@@ -841,6 +851,7 @@ impl RippleField {
     /// current carries rings and foam downstream.
     pub fn rebuild_drift(&mut self, drift_at: impl Fn(DVec2) -> Option<Vec2>) {
         let (n, t) = (self.n, self.tiles());
+        let mut changed = false;
         self.drifting.fill(false);
         for j in 0..n {
             for i in 0..n {
@@ -851,11 +862,18 @@ impl RippleField {
                     Vec2::ZERO
                 };
                 // (Clamped: a torrent's ripples are lost in its own churn anyway.)
-                self.drift[idx] = v.clamp_length_max(6.0);
+                let v = v.clamp_length_max(6.0);
+                if self.drift[idx] != v {
+                    self.drift[idx] = v;
+                    changed = true;
+                }
                 if v.length_squared() > 0.05 * 0.05 {
                     self.drifting[(j / TILE) * t + i / TILE] = true;
                 }
             }
+        }
+        if changed {
+            self.medium_version += 1;
         }
     }
 
@@ -866,6 +884,7 @@ impl RippleField {
         self.cell = other.cell;
         self.origin = other.origin;
         self.version = other.version;
+        self.medium_version = other.medium_version;
         self.has_water = other.has_water;
         self.h.clone_from(&other.h);
         self.vel.clone_from(&other.vel);
@@ -983,7 +1002,9 @@ impl RippleField {
             return;
         }
         self.apply_pending();
+        let span = tracing::info_span!("water", name = "ripples: crests").entered();
         self.break_crests(dt);
+        drop(span);
         // Step the tiles where something moves and their neighbors (waves run into them);
         // carry currents along and curl them only where there are some.
         let t = self.tiles();
@@ -1045,6 +1066,7 @@ impl RippleField {
             self.march(dt, 0.0, 0.0, false, Some(foam));
         }
         self.settle();
+        let _span = tracing::info_span!("water", name = "ripples: bubbles").entered();
         self.age_bubbles(dt);
         self.version += 1;
     }
@@ -1501,6 +1523,7 @@ impl RippleField {
             d.stir = d.stir.map(turned);
         }
         self.version += 1;
+        self.medium_version += 1;
         // The coarse level's water moves with the world (a turn reads it again).
         if s.is_translation_only() {
             if let Some(bed) = &mut self.coarse {
