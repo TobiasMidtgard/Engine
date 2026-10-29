@@ -81,7 +81,9 @@ world re-anchors on the next body.
   while the focus is in its sphere of influence (100 to 300 radii; beyond, its far view draws
   its air), else to no air at all (`density_scale` 0, over a stand-in planet far below, so
   the renderer's height fog never takes the world's y for an altitude out in space), and points every `DirectionalLight` marked `StarLight` at its star with the right
-  illuminance for the distance (≈127 000 lux at 1 AU). Each body's air carries its own
+  illuminance for the distance (≈127 000 lux at 1 AU). Another star's light takes half of its
+  tint against the Sun's, as an eye partly adapts (Proxima's daylight is warm, not deep
+  orange; its disc keeps the true color). Each body's air carries its own
   scattering (`BodyAtmosphere`, with the renderer's presets `earth()` and `mars()`): Earth's
   sky is blue with red sunsets, and on Mars the sky is butterscotch by day with a blue glow
   around the setting sun, its dust veils far cliffs and fills shadows with orange light, and
@@ -155,10 +157,15 @@ From high up (above 9 km, fading in by 25 km, out to 40 % of the radius), Earth'
 are drawn as their own layer 5 km above the ground, over whatever terrain covers the body:
 the baked cloud map broken up with procedural detail down to a few hundred meters, so far
 away it shows the weather systems and up close it breaks into crisp cumulus covering the
-same share of sky, with a thin veil under broken cloud. The tops are lit through the air and
+same share of sky, with a thin veil under broken cloud. The coarse detail is gradient noise
+(cloud fields) and the fine octaves Perlin-Worley billows (round cells with dark seams,
+Schneider 2015), hashed with pcg3d. The tops are a height field: one more detail look a step
+toward the sun gives their slope, so sunward sides brighten and lee sides and hollows shade,
+strongly at a low sun (bump mapping from afar). The tops are lit through the air and
 veiled by it, and cast their shadows on the ground between them, offset away from the sun
 (long at a low sun), so the terrain under the layer is shaded like the far globe. Within
-`SpaceSettings::cloud_hole_m` (60 km) of the camera the layer leaves
+`SpaceSettings::cloud_hole_m` (60 km; 0 where nothing draws weather clouds, as in
+`approach_shots`) of the camera the layer leaves
 the sky to the weather's own volumetric clouds, and near that hole the layer takes the
 weather's `cloud_cover` (back to its own map by three hole radii), so the two decks meet at the
 same share of sky. Views `earth_leo` (400 km) and `earth_edge`

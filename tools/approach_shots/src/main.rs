@@ -242,6 +242,10 @@ fn build(size: (u32, u32)) -> App {
     demo::spawn_solar_system(&mut commands);
     app.world.flush();
     app.world.resource_mut::<SpaceClock>().paused = true;
+    // No weather here to draw the clouds around the camera: the cloud layer covers it all.
+    app.world
+        .resource_mut::<engine_space::SpaceSettings>()
+        .cloud_hole_m = 0.0;
     app.world.spawn((
         Transform::default(),
         SimulationFocus::default(),
@@ -263,10 +267,12 @@ enum Eye {
     /// `distance_radii` from the body's center, `phase_deg` from the star (as [`View`]).
     Radii { distance_radii: f64, phase_deg: f64 },
     /// `altitude_m` above the ground where the star stands `sun_deg` high, looking along the
-    /// ground with the star to the side, `down_deg` below the horizon.
+    /// ground `turn_deg` from the star's side toward it (0 = the star to the side, 90 = facing
+    /// it), `down_deg` below the horizon (negative: above it).
     Ground {
         altitude_m: f64,
         sun_deg: f64,
+        turn_deg: f64,
         down_deg: f64,
     },
     /// On the line from body `from` to body `to`, `from_m` out from `from`, looking on at
@@ -300,6 +306,7 @@ fn flight() -> Vec<Stop> {
         eye: Eye::Ground {
             altitude_m,
             sun_deg,
+            turn_deg: 0.0,
             down_deg,
         },
         fov: 70.0,
@@ -360,8 +367,26 @@ fn flight() -> Vec<Stop> {
             fov: 60.0,
             ..radii("13_proxima_b_1.05r", b, proxima, 1.05, 40.0)
         },
-        ground("14_proxima_b_10km", b, proxima, 10_000.0, 30.0, 10.0),
-        ground("15_proxima_b_ground", b, proxima, 2.0, 30.0, 4.0),
+        // Inside the warm eye under the star, facing it.
+        Stop {
+            eye: Eye::Ground {
+                altitude_m: 10_000.0,
+                sun_deg: 40.0,
+                turn_deg: 60.0,
+                down_deg: 8.0,
+            },
+            ..ground("14_proxima_b_10km", b, proxima, 0.0, 0.0, 0.0)
+        },
+        Stop {
+            eye: Eye::Ground {
+                altitude_m: 2.0,
+                sun_deg: 58.0,
+                turn_deg: 80.0,
+                down_deg: -22.0,
+            },
+            fov: 80.0,
+            ..ground("15_proxima_b_ground", b, proxima, 0.0, 0.0, 0.0)
+        },
     ]
 }
 
@@ -643,6 +668,7 @@ fn place(app: &mut App, stop: &Stop) -> (DVec3, DVec3, DVec3) {
         Eye::Ground {
             altitude_m,
             sun_deg,
+            turn_deg,
             down_deg,
         } => {
             let terrain = app
@@ -671,7 +697,8 @@ fn place(app: &mut App, stop: &Stop) -> (DVec3, DVec3, DVec3) {
             let eye = center + up * (radius + spot.1.max(0.0) + altitude_m);
             let to_star = (star - eye).normalize();
             let star_flat = (to_star - up * to_star.dot(up)).normalize();
-            let ahead = up.cross(star_flat);
+            let (st, ct) = turn_deg.to_radians().sin_cos();
+            let ahead = up.cross(star_flat) * ct + star_flat * st;
             // Look below the horizon (which dips as the ground falls away).
             let dip = (radius / (radius + altitude_m)).acos();
             let pitch = dip + down_deg.to_radians();
@@ -741,7 +768,13 @@ fn shoot_stop(stop: &Stop, size: (u32, u32), out: &std::path::Path) -> std::path
     settle(&mut app);
     // Aim again: the world may have shifted its origin meanwhile.
     aim(&mut app);
-    app.update_n(12);
+    // Between stars the volumetric fog keeps the ground's fog in its history for a few hundred
+    // frames after the jump (the renderer sees no camera cut), so wait it out there.
+    app.update_n(if matches!(stop.eye, Eye::Between { .. }) {
+        300
+    } else {
+        12
+    });
     let path = out.join(format!("{}.png", stop.name));
     match capture_now(&mut app.world, &path) {
         Ok(_) => println!(

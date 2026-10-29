@@ -587,6 +587,11 @@ const STAR_REACH: f64 = 0.05;
 /// (it keeps the star's light, so a far sun is a small bright point; much narrower, the sky's
 /// f32 disc test can't hold it and the Sun vanishes).
 const MIN_STAR_DISC_DEG: f64 = 0.12;
+/// How much of another star's tint (against the Sun's) the eye adapts away in its daylight,
+/// 0..1: partly, as at low color temperatures (Harre & Heller 2021; SpaceEngine keeps part of
+/// the tint too, so not every world looks like Earth). See
+/// engine-design/exoplanet-surface-research.md in the project files.
+const STARLIGHT_ADAPTATION: f32 = 0.5;
 
 /// Orbits, spin, the world frame, gravity, atmosphere and starlight.
 pub struct SpacePlugin;
@@ -1358,7 +1363,13 @@ pub fn update_space(world: &mut World) {
             .zip(&states)
             .filter(|((_, b), _)| b.luminosity_w > 0.0)
             .map(|((_, b), s)| {
-                let rel: [f32; 3] = std::array::from_fn(|i| b.color[i] / root_color[i].max(1e-3));
+                // Eyes adapt to part of a star's tint, so its daylight looks warm or cool
+                // rather than deep orange or blue (the disc keeps its true color).
+                let rel: [f32; 3] = std::array::from_fn(|i| {
+                    (b.color[i] / root_color[i].max(1e-3))
+                        .max(1e-3)
+                        .powf(1.0 - STARLIGHT_ADAPTATION)
+                });
                 let luma = (0.2126 * rel[0] + 0.7152 * rel[1] + 0.0722 * rel[2]).max(1e-3);
                 (
                     b.name.clone(),

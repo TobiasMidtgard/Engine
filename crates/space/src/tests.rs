@@ -164,6 +164,47 @@ fn the_sky_has_no_air_far_from_every_planet() {
     assert!(sky.density_scale == 1.0 && (sky.planet_radius - 6.371e6).abs() < 1e4);
 }
 
+#[test]
+fn a_red_dwarfs_daylight_is_warm_not_deep_red() {
+    let mut app = app();
+    let ratio = |c: [f32; 3]| c[2] / c[0];
+    let sunlight = ratio(
+        app.world
+            .query::<&DirectionalLight>()
+            .single(&app.world)
+            .unwrap()
+            .color,
+    );
+    travel_to(&mut app.world, "Proxima Centauri b", 0.0, 0.0, 2.0).unwrap();
+    app.update();
+    let light = ratio(
+        app.world
+            .query::<&DirectionalLight>()
+            .single(&app.world)
+            .unwrap()
+            .color,
+    );
+    let s = state(&app);
+    let star = |name: &str| {
+        ratio(
+            app.world
+                .get::<CelestialBody>(s.body(name).unwrap().entity)
+                .unwrap()
+                .color,
+        )
+    };
+    // The star's own color against the Sun's, and the light's: the eye takes about half of
+    // the tint away, so the light is warmer than sunlight but far from the disc's orange.
+    let full = star("Proxima Centauri") / star("Sun");
+    let seen = light / sunlight;
+    assert!(full < 0.5, "{full}");
+    assert!(
+        (seen - full.sqrt()).abs() < 0.05,
+        "{seen} vs {}",
+        full.sqrt()
+    );
+}
+
 fn sample_air(app: &App, p: DVec3) -> engine_world::AirSample {
     let w = &app.world;
     w.resource::<Atmospheres>().sample(

@@ -385,22 +385,104 @@ fn fs_body(in: VsOut) -> FsOut {
 // veiled by the air in front of it. A hole around the camera's ground point leaves the local
 // weather's volumetric clouds to themselves.
 
+// How high the densest billows stand above the thinnest cloud tops (relief lighting), m.
+const SHELL_RELIEF_M: f32 = 1500.0;
+// The shortest step toward the sun the relief slope is taken over, m.
+const SHELL_STEP_M: f32 = 300.0;
+
 fn shell_hash(p: vec3<f32>) -> f32 {
     var q = fract(p * vec3<f32>(0.1031, 0.1030, 0.0973));
     q += dot(q, q.yxz + 33.33);
     return fract((q.x + q.y) * q.z);
 }
 
-// Value noise, 0..1, smooth (quintic) between lattice points.
-fn shell_noise(p: vec3<f32>) -> f32 {
+// Three independent values 0..1 per lattice point (Jarzynski & Olano 2020's pcg3d: the float
+// hash above gives correlated components, which flattens gradient noise).
+fn shell_hash3(p: vec3<f32>) -> vec3<f32> {
+    var v = bitcast<vec3<u32>>(vec3<i32>(p)) * 1664525u + 1013904223u;
+    v.x += v.y * v.z;
+    v.y += v.z * v.x;
+    v.z += v.x * v.y;
+    v ^= v >> vec3<u32>(16u);
+    v.x += v.y * v.z;
+    v.y += v.z * v.x;
+    v.z += v.x * v.y;
+    return vec3<f32>(v >> vec3<u32>(8u)) * (1.0 / 16777216.0);
+}
+
+// Gradient (Perlin) noise, about -0.6..0.6 with spread 0.19: no lattice squares, unlike value
+// noise.
+fn shell_perlin(p: vec3<f32>) -> f32 {
     let i = floor(p);
     let f = p - i;
     let u = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);
-    let a = mix(mix(shell_hash(i), shell_hash(i + vec3<f32>(1.0, 0.0, 0.0)), u.x),
-                mix(shell_hash(i + vec3<f32>(0.0, 1.0, 0.0)), shell_hash(i + vec3<f32>(1.0, 1.0, 0.0)), u.x), u.y);
-    let b = mix(mix(shell_hash(i + vec3<f32>(0.0, 0.0, 1.0)), shell_hash(i + vec3<f32>(1.0, 0.0, 1.0)), u.x),
-                mix(shell_hash(i + vec3<f32>(0.0, 1.0, 1.0)), shell_hash(i + vec3<f32>(1.0, 1.0, 1.0)), u.x), u.y);
+    var c: array<f32, 8>;
+    for (var k = 0u; k < 8u; k++) {
+        let o = vec3<f32>(f32(k & 1u), f32((k >> 1u) & 1u), f32((k >> 2u) & 1u));
+        let g = normalize(shell_hash3(i + o) * 2.0 - 1.0 + vec3<f32>(1e-4));
+        c[k] = dot(g, f - o);
+    }
+    let a = mix(mix(c[0], c[1], u.x), mix(c[2], c[3], u.x), u.y);
+    let b = mix(mix(c[4], c[5], u.x), mix(c[6], c[7], u.x), u.y);
     return mix(a, b, u.z);
+}
+
+// Inverted cellular (Worley F1) noise, 0..1, high at the round cells' middles: billows of
+// cumulus seen from above, with dark seams between them (Schneider 2015's Worley octaves).
+// The eight lattice points nearest `p`, each with a feature point well inside its cell.
+fn shell_worley(p: vec3<f32>) -> f32 {
+    let base = floor(p - 0.5);
+    var d2 = 9.0;
+    for (var k = 0u; k < 8u; k++) {
+        let c = base + vec3<f32>(f32(k & 1u), f32((k >> 1u) & 1u), f32((k >> 2u) & 1u));
+        let v = c + 0.15 + 0.7 * shell_hash3(c) - p;
+        d2 = min(d2, dot(v, v));
+    }
+    return 1.0 - clamp(sqrt(d2), 0.0, 1.0);
+}
+
+// The clouds' own detail at shell point `pn` (turned with their drift), with `foot` the size
+// of a pixel there (R): octaves from about the map's texel (20 km on Earth) down to a few
+// hundred meters, each faded out before it is smaller than a couple of pixels (octaves too
+// small to see count as their mean). The coarse ones shape the cloud fields, the fine ones are
+// billows. Returns the detail (spread about 0.19 when all are seen), the billows' light and
+// dark (cell middles and seams), and how much of the detail is resolved.
+fn shell_detail(pn: vec3<f32>, foot: f32, octaves: i32) -> vec3<f32> {
+    var detail = 0.0;
+    var billows = 0.0;
+    var seen = 0.0;
+    var total = 0.0;
+    var freq = 150.0;
+    var amp = 1.0;
+    for (var i = 0; i < octaves; i++) {
+        let w = clamp(1.0 / (freq * foot) * 0.5 - 0.5, 0.0, 1.0);
+        if (w > 0.0) {
+            let q = pn * freq + vec3<f32>(f32(i) * 17.1);
+            if (i < 3) {
+                detail += shell_perlin(q) * 1.05 * amp * w;
+            } else {
+                // Perlin-Worley: round cells, their outlines broken by gradient noise; the
+                // same spread as the gradient octaves, centered.
+                let v = (shell_worley(q) - 0.48) + shell_perlin(q * 1.7 + 5.3) * 0.53;
+                detail += v * amp * w;
+                billows += v * amp * w;
+            }
+        }
+        seen += amp * w;
+        total += amp;
+        freq *= 2.6;
+        amp *= 0.7;
+    }
+    return vec3<f32>(detail / total, billows / total, seen / total);
+}
+
+// Cloud density (the logistic threshold below) from the map's coverage and the detail, so
+// the share of sky the crisp clouds cover matches the map's coverage (the detail is about
+// normal with spread 0.19 when fully resolved; a logistic stands in for its inverse
+// distribution).
+fn shell_density(coverage: f32, d: vec3<f32>) -> f32 {
+    let c = clamp(coverage, 0.01, 0.99);
+    return 0.11 * d.z * log(c / (1.0 - c)) + (c - 0.5) * (1.0 - d.z) + d.x * 2.4;
 }
 
 // The cloud tops' cover at `apart` (R along the shell) from the camera's ground point. Around
@@ -415,6 +497,14 @@ fn shell_coverage(b: Body, map_cover: f32, apart: f32) -> f32 {
     return mix(b.rings.w, map_cover, smoothstep(b.haze3.w, b.haze3.w * 3.0, apart));
 }
 
+// Unit-shell point `p` turned back by the clouds' drift (the map's longitude offset).
+fn shell_turned(b: Body, p: vec3<f32>) -> vec3<f32> {
+    let turn = b.sun.w * 2.0 * PI;
+    let ct = cos(turn);
+    let st = sin(turn);
+    return vec3<f32>(p.x * ct + p.z * st, p.y, p.z * ct - p.x * st);
+}
+
 // How much of the sun the cloud tops over unit-shell point `p` block: the map's coverage
 // broken up by the coarse octaves of the shell's own detail (finer ones average out in a
 // shadow seen from this high), `foot` the size of a pixel on the shell (R), `apart` its
@@ -426,29 +516,9 @@ fn shell_shadow(b: Body, p: vec3<f32>, foot: f32, apart: f32) -> f32 {
     let texel = 2.0 * PI / f32(textureDimensions(aux_map).x);
     let map_cover = textureSampleLevel(aux_map, map_sampler, uv, max(log2(foot / texel), 0.0)).r;
     let coverage = shell_coverage(b, map_cover, apart);
-    let turn = b.sun.w * 2.0 * PI;
-    let ct = cos(turn);
-    let st = sin(turn);
-    let pn = vec3<f32>(p.x * ct + p.z * st, p.y, p.z * ct - p.x * st);
-    var detail = 0.0;
-    var seen = 0.0;
-    var total = 0.0;
-    var freq = 150.0;
-    var amp = 1.0;
-    for (var i = 0; i < 4; i++) {
-        let w = clamp(1.0 / (freq * foot) * 0.5 - 0.5, 0.0, 1.0);
-        detail += (shell_noise(pn * freq + vec3<f32>(f32(i) * 17.1)) - 0.5) * amp * w;
-        seen += amp * w;
-        total += amp;
-        freq *= 2.6;
-        amp *= 0.7;
-    }
-    detail /= total;
-    let resolved = seen / total;
-    let c = clamp(coverage, 0.01, 0.99);
-    let density = 0.11 * resolved * log(c / (1.0 - c)) + (c - 0.5) * (1.0 - resolved)
-        + detail * 2.4;
-    let edge = 0.12 + 0.4 * (1.0 - resolved);
+    let d = shell_detail(shell_turned(b, p), foot, 4);
+    let density = shell_density(coverage, d);
+    let edge = 0.12 + 0.4 * (1.0 - d.z);
     let thickness = 0.55 + 0.45 * smoothstep(0.2, 0.7, coverage);
     return smoothstep(-edge, edge * 1.6, density) * thickness;
 }
@@ -507,42 +577,35 @@ fn fs_shell(in: VsOut) -> FsOut {
     let n = normalize(vec3<f32>(ps.x, ps.y * e, ps.z));
     let mu_v = max(abs(dot(n, dl)), 0.08);
     let foot = pixel_angle() * t_hit / mu_v;  // R per pixel on the shell
-    let turn = b.sun.w * 2.0 * PI;
-    let ct = cos(turn);
-    let st = sin(turn);
-    let pn = vec3<f32>(ps.x * ct + ps.z * st, ps.y, ps.z * ct - ps.x * st);
-    // Octaves too small to see count as their mean, so far away the map's soft coverage
-    // shows as it is, and up close it breaks into crisp clouds covering the same share.
-    var detail = 0.0;
-    var texture = 0.0;
-    var seen = 0.0;
-    var total = 0.0;
-    // From about the map's texel (20 km on Earth) down to a few hundred meters.
-    var freq = 150.0;
-    var amp = 1.0;
-    for (var i = 0; i < 7; i++) {
-        let w = clamp(1.0 / (freq * foot) * 0.5 - 0.5, 0.0, 1.0);
-        let v = shell_noise(pn * freq + vec3<f32>(f32(i) * 17.1));
-        detail += (v - 0.5) * amp * w;
-        // Billows: rounded cells with darker seams between them.
-        if (i >= 3) { texture += (0.5 - abs(2.0 * v - 1.0)) * amp * w; }
-        seen += amp * w;
-        total += amp;
-        freq *= 2.6;
-        amp *= 0.7;
-    }
-    detail /= total;
-    texture /= total;
-    let resolved = seen / total;
+    let pn = shell_turned(b, ps);
+    // Up close the map's soft coverage breaks into crisp clouds covering the same share; far
+    // away it shows as it is.
+    let d = shell_detail(pn, foot, 7);
+    let texture = d.y;
+    let detail = d.x;
+    let resolved = d.z;
     let edge = 0.08 + 0.4 * (1.0 - resolved);
-    // Threshold the detail so the share of sky it covers matches the map's coverage (the
-    // detail is about normal with spread 0.19 when fully resolved; a logistic stands in for
-    // its inverse distribution), and keep thin cloud translucent.
-    let c = clamp(coverage, 0.01, 0.99);
-    let density = 0.11 * resolved * log(c / (1.0 - c)) + (c - 0.5) * (1.0 - resolved)
-        + detail * 2.4;
+    let density = shell_density(coverage, d);
     let thickness = 0.55 + 0.45 * smoothstep(0.2, 0.7, coverage);
     let puffs = smoothstep(-edge, edge * 1.6, density) * thickness;
+    // Relief: the tops are a height field (a dense spot stands higher, up to
+    // `SHELL_RELIEF_M`), lit as ground would be. One more look a short step toward the sun
+    // along the shell gives the slope there: sides facing the sun brighten, the far sides
+    // and the hollows between billows fall into shade, strongly at a low sun (bump mapping
+    // from afar, as Space Engine suggests for clouds seen from space).
+    let s_dir = normalize(b.sun.xyz);
+    let s_flat = s_dir - n * dot(s_dir, n);
+    let s_len = length(s_flat);
+    var slope = 0.0;
+    if (s_len > 1e-3 && resolved > 0.02) {
+        let step_r = max(foot * 1.5, SHELL_STEP_M / r_eq);
+        let toward = s_flat / s_len;
+        let d2 = shell_detail(shell_turned(b, normalize(ps + toward * step_r)), foot, 7);
+        // Height from the density itself, which keeps rising inside a closed deck (the
+        // detail's full spread, about ±0.45, spans the relief).
+        let rise = clamp(shell_density(coverage, d2) - density, -0.9, 0.9) / 0.9;
+        slope = rise * SHELL_RELIEF_M / (step_r * r_eq);
+    }
     // Under the broken clouds, a thin veil where the map is cloudy keeps the weather systems
     // reading from afar.
     let veil = 0.45 * smoothstep(0.08, 0.7, coverage) * clamp(0.75 + 6.0 * detail, 0.3, 1.0);
@@ -591,12 +654,16 @@ fn fs_shell(in: VsOut) -> FsOut {
     if ((flags & F_AIR) != 0u) {
         sun_e *= sun_transmittance(rel_hit);
     }
-    let cmu0 = max(mu0, 0.0);
+    // The relief tilts the tops toward or away from the sun (only where the sun is up: the
+    // night side stays dark).
+    let tilted = (mu0 - slope * s_len) / sqrt(1.0 + slope * slope);
+    let cmu0 = max(mix(mu0, tilted, smoothstep(-0.02, 0.1, mu0)), 0.0);
     let thin = 1.0 - smoothstep(0.0, 0.25, density);
     let forward = 1.0 + 0.8 * thin * phase_hg(dot(s, dl), 0.6) * step(0.0, mu0);
     // Cloud tops scatter light many times: brighter at a low sun than a matte surface.
     let shade = 0.6 * cmu0 + 0.4 * sqrt(cmu0);
-    var lit = 0.9 * sun_e * INV_PI * shade * forward * (0.85 + 4.0 * texture + 0.15 * (1.0 - thin));
+    var lit = 0.9 * sun_e * INV_PI * shade * forward
+        * max(0.85 + 3.0 * texture + 0.15 * (1.0 - thin), 0.3);
     if ((flags & F_AIR) != 0u) {
         let a = atmosphere(vec3<f32>(0.0), dir, t_hit * r_eq, 8);
         lit = lit * a.transmittance + a.radiance * frame.sun_color.rgb;
