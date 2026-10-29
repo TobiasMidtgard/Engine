@@ -60,7 +60,7 @@ pub fn spawn_valley(commands: &mut Commands, valley: &Valley) {
             .with_optics(WaterOptics::clear_lake()),
     ));
     for (k, stream) in valley.streams.iter().enumerate() {
-        if let Some((corner, region)) = stream_region(stream, valley.lake_center.y) {
+        if let Some((corner, region)) = stream_region(stream, valley.lake_center.y, valley.ground) {
             commands.spawn((
                 Name::new(format!("Valley stream {k}")),
                 Transform::from_translation(corner),
@@ -167,9 +167,41 @@ fn moor_boats(commands: &mut Commands, jetty: &Jetty, ground: &dyn Fn(f64, f64) 
     }
 }
 
-/// The flow region covering `stream`'s course: its corner (at height `base`) and settings.
-pub fn stream_region(stream: &ValleyStream, base: f64) -> Option<(DVec3, FlowRegion)> {
+/// The lowest ground (`ground` at world x/z) within `reach` m of `p`, nearer spots preferred:
+/// the bed of the channel the landscape carved there. The landscape lays its channel along a
+/// smoothed curve through the course's points, which runs several meters off the straight
+/// lines between them at the bends: springs and pools placed on those lines poured onto the
+/// meadow beside the stream and flooded its hollows (playtest 2026-10-29 item 14).
+fn in_channel(p: DVec2, reach: f64, ground: &dyn Fn(f64, f64) -> f64) -> DVec2 {
+    let step = STREAM_CELL as f64;
+    let n = (reach / step).ceil() as i64;
+    let mut best = (ground(p.x, p.y), p);
+    for j in -n..=n {
+        for i in -n..=n {
+            let q = p + DVec2::new(i as f64, j as f64) * step;
+            let d = (q - p).length();
+            if d > reach {
+                continue;
+            }
+            let score = ground(q.x, q.y) + 0.15 * d;
+            if score < best.0 {
+                best = (score, q);
+            }
+        }
+    }
+    best.1
+}
+
+/// The flow region covering `stream`'s course: its corner (at height `base`) and settings, its
+/// spring, priming springs and pools placed in the channel the landscape carved (`ground`).
+pub fn stream_region(
+    stream: &ValleyStream,
+    base: f64,
+    ground: &dyn Fn(f64, f64) -> f64,
+) -> Option<(DVec3, FlowRegion)> {
     let first = stream.path.first()?;
+    let reach = stream.width_m as f64 * 0.5 + 4.0;
+    let channel = |p: DVec2| in_channel(p, reach, ground);
     let margin = stream.width_m as f64 + 6.0;
     let (mut lo, mut hi) = (DVec2::from_array(*first), DVec2::from_array(*first));
     for p in stream.path {
@@ -185,7 +217,7 @@ pub fn stream_region(stream: &ValleyStream, base: f64) -> Option<(DVec3, FlowReg
         .windows(2)
         .map(|w| DVec2::from_array(w[0]).distance(DVec2::from_array(w[1])))
         .sum();
-    let spring = DVec2::from_array(*first) - lo;
+    let spring = channel(DVec2::from_array(*first)) - lo;
     // Pools along the course (a plunge pool, hollows in the bed) start full, as the running
     // stream leaves them; seeds that aren't in a hollow fill nothing.
     let mut fills = Vec::new();
@@ -193,7 +225,7 @@ pub fn stream_region(stream: &ValleyStream, base: f64) -> Option<(DVec3, FlowReg
         let (a, b) = (DVec2::from_array(w[0]), DVec2::from_array(w[1]));
         let steps = (a.distance(b) / 2.0).ceil().max(1.0) as usize;
         for k in 0..steps {
-            let p = a.lerp(b, k as f64 / steps as f64) - lo;
+            let p = channel(a.lerp(b, k as f64 / steps as f64)) - lo;
             fills.push(FlowFill::to_spill([p.x as f32, p.y as f32]));
         }
     }
@@ -205,7 +237,7 @@ pub fn stream_region(stream: &ValleyStream, base: f64) -> Option<(DVec3, FlowReg
         let len = a.distance(b);
         let mut next = (along / PRIMING_STEP).floor() * PRIMING_STEP + PRIMING_STEP;
         while next < along + len {
-            let p = a.lerp(b, (next - along) / len) - lo;
+            let p = channel(a.lerp(b, (next - along) / len)) - lo;
             priming.push(FlowSource {
                 at: [p.x as f32, p.y as f32],
                 radius_m: (stream.width_m * 0.4).max(STREAM_CELL),
@@ -228,8 +260,9 @@ pub fn stream_region(stream: &ValleyStream, base: f64) -> Option<(DVec3, FlowReg
             }],
             fills,
             priming,
-            // The banks keep the water in; the lake (a body over the region) takes it at the end.
-            open_edges: false,
+            // The banks keep the water in and the lake (a body over the region) takes it at the
+            // end; what still gets out runs off rather than standing against an unseen wall.
+            open_edges: true,
             friction: 0.35,
             // Long enough for the water to fill the course and run into the lake.
             prewarm_s: (length as f32 * 0.9).clamp(30.0, 400.0),
@@ -251,7 +284,20 @@ mod tests {
             width_m: 5.0,
             flow_m3_s: 0.4,
         };
-        let (corner, region) = stream_region(&s, 0.0).expect("region");
+        // A channel carved along the straight course, 1 m deep in flat ground.
+        let ground = |x: f64, z: f64| {
+            let p = DVec2::new(x, z);
+            let d = path
+                .windows(2)
+                .map(|w| {
+                    let (a, b) = (DVec2::from_array(w[0]), DVec2::from_array(w[1]));
+                    let t = ((p - a).dot(b - a) / (b - a).length_squared()).clamp(0.0, 1.0);
+                    (p - a.lerp(b, t)).length()
+                })
+                .fold(f64::MAX, f64::min);
+            if d < 2.5 { -1.0 } else { 0.0 }
+        };
+        let (corner, region) = stream_region(&s, 0.0, &ground).expect("region");
         let size = DVec2::new(
             region.cells[0] as f64 * region.cell_m as f64,
             region.cells[1] as f64 * region.cell_m as f64,
@@ -273,5 +319,30 @@ mod tests {
         // Hollows along the course start full.
         assert!(region.fills.iter().all(|f| f.to_spill));
         assert!(region.fills.len() > 100);
+    }
+
+    #[test]
+    fn springs_and_pools_go_in_the_channel_not_the_meadow_beside_it() {
+        // The landscape's channel runs 3 m east of the straight course (a smoothed bend).
+        let path = [[0.0, 0.0], [0.0, 100.0]];
+        let s = ValleyStream {
+            path: &path,
+            width_m: 5.0,
+            flow_m3_s: 0.4,
+        };
+        let ground = |x: f64, _z: f64| if (x - 3.0).abs() < 2.0 { -1.0 } else { 0.0 };
+        let (corner, region) = stream_region(&s, 0.0, &ground).expect("region");
+        let world = |at: [f32; 2]| (corner.x + at[0] as f64, corner.z + at[1] as f64);
+        let wet = |at: [f32; 2]| {
+            let (x, z) = world(at);
+            ground(x, z) < -0.5
+        };
+        assert!(
+            wet(region.sources[0].at),
+            "{:?}",
+            world(region.sources[0].at)
+        );
+        assert!(region.priming.iter().all(|p| wet(p.at)));
+        assert!(region.fills.iter().all(|f| wet(f.at)));
     }
 }
