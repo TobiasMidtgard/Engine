@@ -3,9 +3,11 @@
 //!
 //! Every vehicle carries an [`Interactable`] ("Drive", "Fly") whose reach covers the vehicle,
 //! enabled while it is nearly at rest. Getting in turns its autopilot off, hides the actor
-//! (the player's body, or the free camera when nobody walks) and keeps it where it got in,
-//! with its [`MoveIntent`] cleared every step so on-foot controls do nothing, and puts a chase
-//! camera above every other camera. The actor keeps [`Using`] the vehicle, so the next E gets
+//! (the player's body, or the free camera when nobody walks) and puts a chase camera above
+//! every other camera. A body rides along in the seat out of physics: its
+//! [`CharacterController`] is put away until it gets out, so nothing bumps into an unseen
+//! driver left standing where it got in and gravity can't pull it off when the ground there
+//! streams out; its [`MoveIntent`] is cleared every step so on-foot controls do nothing. The actor keeps [`Using`] the vehicle, so the next E gets
 //! out wherever it is: beside the vehicle, on the ground, once it has (nearly) stopped.
 //!
 //! Controls ([`Driven`] holds the state):
@@ -33,10 +35,12 @@ use engine_core::transform::{TransformInterpolation, look_rotation};
 use engine_core::window::{CursorMode, Window};
 use engine_input::{ActionState, ButtonInput, KeyCode, Mouse};
 use engine_render::{Camera, MeshRenderer, Projection};
-use engine_world::physics::{Collider, ColliderShape, PhysicsQueries, QueryFilter, Velocity};
+use engine_world::physics::{
+    CharacterController, Collider, ColliderShape, PhysicsQueries, QueryFilter, Velocity,
+};
 use engine_world::{
-    Gravity, Interact, Interactable, Interactor, MoveIntent, SimulationFocus, Using,
-    VehicleControls,
+    FollowsWorldShift, Gravity, Interact, Interactable, Interactor, MoveIntent, SimulationFocus,
+    Using, VehicleControls, WorldShift, WorldShiftAppExt,
 };
 
 use crate::aero::Aircraft;
@@ -109,6 +113,16 @@ pub struct Seated {
     pub camera: Entity,
     pub hidden: Vec<Entity>,
     pub cursor: CursorMode,
+    /// The body's character capsule, put back when it gets out.
+    pub controller: Option<CharacterController>,
+    /// Where it got in: a script's exit with `stay` puts a body back here.
+    pub boarded_at: DVec3,
+}
+
+impl FollowsWorldShift for Seated {
+    fn follow(&mut self, s: &WorldShift) {
+        self.boarded_at.follow(s);
+    }
 }
 
 /// The camera that follows a driven vehicle.
@@ -127,8 +141,12 @@ pub(crate) fn register(app: &mut App) {
     .add_systems(Update, chase_camera.in_set(UpdateSet::Camera))
     .add_systems(
         FixedUpdate,
-        hold_seated.after(SimSet::Input).before(SimSet::Gameplay),
+        (
+            hold_seated.after(SimSet::Input).before(SimSet::Gameplay),
+            carry_seated.after(SimSet::Physics),
+        ),
     )
+    .shift_components::<Seated>()
     .register_component::<Boardable>(
         "A vehicle you can get into (E): style (Car, Plane, Ship) and its local box (m).",
     );
@@ -259,7 +277,7 @@ fn board(world: &mut World, mut cursor: Local<bevy_ecs::message::MessageCursor<I
     }
     for (e, s) in orphans {
         restore(world, &s.hidden, s.camera, s.cursor);
-        world.entity_mut(e).remove::<(Seated, Using)>();
+        free(world, e);
     }
 }
 
@@ -330,12 +348,22 @@ pub(crate) fn get_in(world: &mut World, actor: Entity, vehicle: Entity, b: Board
     let lever = world
         .get::<VehicleTelemetry>(vehicle)
         .map_or(0.0, |t| t.throttle);
+    // A body leaves physics while it sits (see the module docs).
+    let controller = world.get::<CharacterController>(actor).copied();
+    if controller.is_some() {
+        world.entity_mut(actor).remove::<CharacterController>();
+    }
+    let boarded_at = world
+        .get::<Transform>(actor)
+        .map_or(DVec3::ZERO, |t| t.translation);
     world.entity_mut(actor).insert((
         Seated {
             vehicle,
             camera: cam,
             hidden: hidden.clone(),
             cursor,
+            controller,
+            boarded_at,
         },
         Using { target: vehicle },
     ));
@@ -397,15 +425,21 @@ pub(crate) fn get_out(world: &mut World, vehicle: Entity, force: bool, stay: boo
         if !force && speed(world, vehicle) > BOARD_SPEED {
             return;
         }
-        if !stay && let Some(feet) = b.and_then(|b| exit_point(world, vehicle, &b)) {
-            let up = world.resource::<Gravity>().up_at(feet);
-            // A body stands with its center about a meter up; a camera at eye height.
-            let lift = if world.get::<Camera>(driven.actor).is_some() {
-                1.7
-            } else {
-                0.95
-            };
-            let at = feet + (up * lift).as_dvec3();
+        let camera = world.get::<Camera>(driven.actor).is_some();
+        let at = if stay {
+            // A body rode along: back where it got in. A camera is where the script put it.
+            world
+                .get::<Seated>(driven.actor)
+                .filter(|_| !camera)
+                .map(|s| s.boarded_at)
+        } else {
+            b.and_then(|b| exit_point(world, vehicle, &b)).map(|feet| {
+                let up = world.resource::<Gravity>().up_at(feet);
+                // A body stands with its center about a meter up; a camera at eye height.
+                feet + (up * if camera { 1.7 } else { 0.95 }).as_dvec3()
+            })
+        };
+        if let Some(at) = at {
             if let Some(mut t) = world.get_mut::<Transform>(driven.actor) {
                 t.translation = at;
             }
@@ -413,7 +447,7 @@ pub(crate) fn get_out(world: &mut World, vehicle: Entity, force: bool, stay: boo
                 i.reset();
             }
         }
-        world.entity_mut(driven.actor).remove::<(Seated, Using)>();
+        free(world, driven.actor);
     }
     restore(world, &driven.hidden, driven.camera, driven.cursor);
     if world.get_entity(vehicle).is_err() {
@@ -438,6 +472,18 @@ pub(crate) fn get_out(world: &mut World, vehicle: Entity, force: bool, stay: boo
             Style::Plane | Style::Ship => "Fly",
         }
         .into();
+    }
+}
+
+/// Out of the seat: the body gets its character capsule back.
+fn free(world: &mut World, actor: Entity) {
+    let Some(seated) = world.get::<Seated>(actor).cloned() else {
+        return;
+    };
+    let mut e = world.entity_mut(actor);
+    e.remove::<(Seated, Using)>();
+    if let Some(c) = seated.controller {
+        e.insert(c);
     }
 }
 
@@ -484,6 +530,26 @@ fn prompts(mut q: Query<Prompt>) {
         }
         if i.enabled != enabled {
             i.enabled = enabled;
+        }
+    }
+}
+
+/// A seated body rides in the middle of the vehicle, so whatever looks for the player (NPCs,
+/// streaming, sound) finds it there and it gets out where the vehicle went. A free camera
+/// as the driver stays put.
+type Rider<'a> = (&'a Seated, &'a mut Transform);
+
+fn carry_seated(
+    mut riders: Query<Rider, Without<Camera>>,
+    vehicles: Query<(&Transform, &Boardable), Without<Seated>>,
+) {
+    for (seat, mut t) in &mut riders {
+        let Ok((v, b)) = vehicles.get(seat.vehicle) else {
+            continue;
+        };
+        let at = v.transform_point(((b.min + b.max) * 0.5).as_dvec3());
+        if t.translation != at {
+            t.translation = at;
         }
     }
 }

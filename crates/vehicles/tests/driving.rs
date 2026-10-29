@@ -250,3 +250,81 @@ fn boarding_right_after_a_place_looks_along_the_new_heading() {
         cam.translation
     );
 }
+
+/// A walking body rides along out of physics: no capsule left standing where it got in, out
+/// where the car went, its capsule back; a script's `stay` puts it back where it got in.
+#[test]
+fn the_driver_rides_along_out_of_physics() {
+    use engine_world::Interactor;
+    use engine_world::physics::CharacterController;
+    let mut app = app();
+    let t = Transform::from_translation(DVec3::Y * presets::ride_height("sports_car"))
+        .with_rotation(engine_vehicles::demo::facing(Vec3::NEG_Z));
+    let car = spawn_with(&mut app, |c| presets::sports_car(c, t, 0xe0a81c));
+    app.world.entity_mut(car).insert(Name::new("Ride car"));
+    let capsule = CharacterController {
+        height: 1.75,
+        ..Default::default()
+    };
+    let start = DVec3::new(-3.0, 0.9, 0.0);
+    let walker = app
+        .world
+        .spawn((Transform::from_translation(start), capsule, Interactor))
+        .id();
+    run_for(&mut app, 0.5);
+    press_e(&mut app, walker, car);
+    assert!(app.world.get::<Driven>(car).is_some(), "didn't get in");
+    assert!(
+        app.world.get::<CharacterController>(walker).is_none(),
+        "the capsule stayed in physics"
+    );
+    app.world
+        .resource_mut::<ActionState>()
+        .set_axis("move", Vec2::new(0.0, 1.0), None);
+    run_for(&mut app, 3.0);
+    let car_at = transform(&app, car).translation;
+    let rider = transform(&app, walker).translation;
+    assert!(
+        (rider - car_at).length() < 2.0,
+        "rider {:.1} m from the car",
+        (rider - car_at).length()
+    );
+
+    let mut actions = app.world.resource_mut::<ActionState>();
+    actions.release("move");
+    actions.press("jump");
+    run_until(&mut app, 15.0, |app| speed(app, car) < 0.5);
+    app.world.resource_mut::<ActionState>().release("jump");
+    press_e(&mut app, walker, car);
+    assert!(app.world.get::<Driven>(car).is_none(), "still in");
+    assert_eq!(app.world.get::<CharacterController>(walker), Some(&capsule));
+    let out = transform(&app, walker).translation;
+    let car_at = transform(&app, car).translation;
+    assert!(car_at.z < -10.0, "the car drove {:.1} m", -car_at.z);
+    let d = (out - car_at).with_y(0.0).length();
+    assert!(d > 1.0 && d < 4.0, "stepped out {d:.1} m from the car");
+
+    // In again, out by a script that moves on: back where it got in.
+    let boarded = out;
+    press_e(&mut app, walker, car);
+    assert!(
+        app.world.get::<Driven>(car).is_some(),
+        "didn't get in again"
+    );
+    let r = engine_core::registry::call_api(
+        &mut app.world,
+        "vehicles.place",
+        serde_json::json!({"vehicle": "Ride car", "at": [200.0, 0.0, 0.0], "velocity": [0.0, 0.0, 0.0]}),
+    );
+    assert!(r.is_ok(), "{r:?}");
+    run_for(&mut app, 0.5);
+    let r = engine_core::registry::call_api(
+        &mut app.world,
+        "vehicles.board",
+        serde_json::json!({"vehicle": "Ride car", "out": true, "stay": true}),
+    );
+    assert!(r.is_ok(), "{r:?}");
+    assert_eq!(app.world.get::<CharacterController>(walker), Some(&capsule));
+    let back = transform(&app, walker).translation;
+    assert!((back - boarded).length() < 0.01, "left at {back:?}");
+}
