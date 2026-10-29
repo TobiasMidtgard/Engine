@@ -118,6 +118,7 @@ module's **contract** in `engine_world`:
 | `WindOverride`: a tester's wind speed (the F3 panel's PageUp/PageDown) that `WindField::prevailing` blows at instead of the weather's | `engine_world` applies it; `engine_debug` sets it | everyone reading `WindField` |
 | `FarCloudLayer`: a far cloud layer (a planet's cloud tops seen from high up) and where the volumetric clouds hand over to it (`near_share`) | `engine_space` | weather |
 | `CloudCoverMap`: the cloud cover around the focus the volumetric clouds are carved from (world X/Z grid, drifting with the wind, `cover_at`), so a far layer puts its clouds in the same places | weather | `engine_space` |
+| `CloudCoverField`: the planet's large-scale cloud systems around the focus, same grid; the weather's cover hands over to it with distance from the player | `engine_space` | weather |
 | `Water`, `Gravity`, fields and world events (see the crate docs) | water, space, weather, … | everyone |
 
 Anything a module needs that isn't there is a missing contract: ask the core owner to add it

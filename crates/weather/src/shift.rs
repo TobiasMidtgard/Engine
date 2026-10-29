@@ -27,6 +27,14 @@ pub(crate) fn shift_system(
     for s in shifts.read() {
         shifted = true;
         sim.frame.follow(s);
+        // The cloud systems' field until its writer republishes it.
+        if s.is_translation_only() {
+            if let Some(field) = &mut sim.cover_field {
+                field.origin += DVec2::new(s.translation.x, s.translation.z);
+            }
+        } else {
+            sim.cover_field = None;
+        }
         let focus = s.point(DVec3::new(sim.focus.x, 0.0, sim.focus.y));
         sim.focus = DVec2::new(focus.x, focus.z);
         for bolt in &mut bolts.bolts {

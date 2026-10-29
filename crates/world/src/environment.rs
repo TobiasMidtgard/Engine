@@ -8,6 +8,7 @@
 //! | [`HeatField`]     | `engine_fire` (and explosions) | weather (convection), foliage, NPC AI, smoke |
 //! | [`FarCloudLayer`] | `engine_space` (cloud tops seen from high up) | weather (fades its volumetric clouds where the far layer takes over) |
 //! | [`CloudCoverMap`] | `engine_weather` (its cloud map's coverage) | space (the cloud shell's tops over the weather's window) |
+//! | [`CloudCoverField`] | `engine_space` (the planet's cloud systems around the focus) | weather (its clouds' cover away from the player) |
 //!
 //! Fields cover a window around the [`crate::FocusPoints`] (the player/camera) and
 //! re-center as it moves. Outside the window, sampling falls back to the global
@@ -412,6 +413,31 @@ impl CloudCoverMap {
         let a = at(x0, z0) + (at(x0 + 1.0, z0) - at(x0, z0)) * tx;
         let b = at(x0, z0 + 1.0) + (at(x0 + 1.0, z0 + 1.0) - at(x0, z0 + 1.0)) * tx;
         a + (b - a) * tz
+    }
+}
+
+/// The other direction from [`CloudCoverMap`]: the large-scale cloud systems around the focus
+/// (fronts, clear zones hundreds of kilometers across) as a module drawing the whole planet
+/// sees them, on the same kind of grid (coarser and wider, such as 512 km of 2 km cells).
+/// The weather keeps its own cover at the player (its preset and fronts) and lets the field
+/// take over with distance, so what you see from the ground out to the horizon is the system
+/// you saw from orbit.
+///
+/// The writer inserts it while a planet's cloud systems are drawn, re-centers it as the focus
+/// moves, and republishes it after world shifts; it removes it when there is no such planet.
+#[derive(Resource, Debug, Clone, PartialEq, Default)]
+pub struct CloudCoverField(pub CloudCoverMap);
+
+impl std::ops::Deref for CloudCoverField {
+    type Target = CloudCoverMap;
+    fn deref(&self) -> &CloudCoverMap {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for CloudCoverField {
+    fn deref_mut(&mut self) -> &mut CloudCoverMap {
+        &mut self.0
     }
 }
 

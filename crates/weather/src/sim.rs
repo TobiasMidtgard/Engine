@@ -239,6 +239,9 @@ pub struct WeatherSim {
     pub focus: DVec2,
     pub rng: Rng,
     pub seed: u64,
+    /// The planet's cloud systems around the focus (`engine_world::CloudCoverField`), when a
+    /// module draws them: the cover away from the player follows them.
+    pub cover_field: Option<engine_world::CloudCoverMap>,
     initialized: bool,
     /// The next step sets the air (temperature, humidity, pressure, cloud base) straight to
     /// the regime's instead of easing toward it: the weather was switched everywhere at once.
@@ -271,6 +274,7 @@ impl WeatherSim {
             focus: DVec2::ZERO,
             rng: Rng::new(weather.seed),
             seed: weather.seed,
+            cover_field: None,
             initialized: false,
             snap_air: false,
         }
@@ -304,7 +308,21 @@ impl WeatherSim {
     /// use).
     pub fn cell_at(&self, p: DVec2) -> CloudCell {
         let q = self.frame.to_pattern(p);
-        cloud_cell(&self.regime_at_pattern(q), q - self.cloud_drift, self.seed)
+        let mut regime = self.regime_at_pattern(q);
+        regime.cloud_cover = self.base_cover(regime.cloud_cover, p);
+        cloud_cell(&regime, q - self.cloud_drift, self.seed)
+    }
+
+    /// The cover the clouds at world X/Z `p` are built around: the regime's near the player;
+    /// with a [`Self::cover_field`], the field's systems take over with distance, keeping the
+    /// regime's difference from the field at the player so the weather there stays as set.
+    pub fn base_cover(&self, regime_cover: f32, p: DVec2) -> f32 {
+        let Some(field) = &self.cover_field else {
+            return regime_cover;
+        };
+        let near = 1.0 - smoothstep(FIELD_NEAR_M, FIELD_FAR_M, (p - self.focus).length() as f32);
+        let offset = regime_cover - field.cover_at(self.focus);
+        (field.cover_at(p) + offset * near).clamp(0.0, 1.0)
     }
 
     /// How much front `f` has taken over at world X/Z `p` (see [`Front::weight`]).
@@ -360,6 +378,11 @@ impl WeatherSim {
 
 /// Coverage, type and rain for one spot, given its regime and its position in the drifting
 /// cloud pattern. Shared by the CPU (rain at the player) and the cloud map (what you see).
+/// Ground distance from the player (m) where a [`WeatherSim::cover_field`] starts to take over
+/// the cover, and where it has: well inside the far cloud layer's handover ring.
+const FIELD_NEAR_M: f32 = 12_000.0;
+const FIELD_FAR_M: f32 = 40_000.0;
+
 pub fn cloud_cell(r: &Regime, drifted: DVec2, seed: u64) -> CloudCell {
     let c = r.cloud_cover.clamp(0.0, 1.0);
     // Large-scale structure: clusters of cloud and clear gaps, 15–30 km across.
@@ -711,7 +734,12 @@ pub(crate) fn weather_system(
     focus: Res<FocusPoints>,
     mut sim: ResMut<WeatherSim>,
     mut state: ResMut<WeatherState>,
+    field: Option<Res<engine_world::CloudCoverField>>,
 ) {
+    let field = field.map(|f| f.0.clone());
+    if sim.cover_field != field {
+        sim.cover_field = field;
+    }
     let (hour, day) = (state.time_of_day_h, state.day_of_year);
     // Only touch `Weather` when the step changed it (keeps change detection meaningful).
     let mut w = weather.clone();
@@ -740,6 +768,38 @@ mod tests {
         for _ in 0..steps {
             step(sim, weather, &climate, DVec3::ZERO, 14.0, 172.0, 1.0);
         }
+    }
+
+    #[test]
+    fn the_planets_cloud_systems_take_over_the_cover_away_from_the_player() {
+        let sim = WeatherSim::new(&Weather {
+            preset: WeatherPreset::Overcast,
+            ..Default::default()
+        });
+        let set = sim.base.cloud_cover;
+        assert_eq!(sim.base_cover(set, DVec2::new(90_000.0, 0.0)), set);
+        // A clear zone over the player, a front 60 km east: 4 cells of 40 km from -80 km.
+        let mut sim = sim;
+        sim.cover_field = Some(engine_world::CloudCoverMap {
+            origin: DVec2::splat(-80_000.0),
+            cell_m: 40_000.0,
+            size: 4,
+            coverage: std::sync::Arc::from([25u8, 25, 25, 255].repeat(4)),
+            background: 0.5,
+            revision: 1,
+            ..Default::default()
+        });
+        // The weather as set at the player, the field's systems far off.
+        assert!((sim.base_cover(set, DVec2::ZERO) - set).abs() < 1e-6);
+        let field = sim.cover_field.as_ref().unwrap();
+        for p in [DVec2::new(60_000.0, 0.0), DVec2::new(-60_000.0, 20_000.0)] {
+            let want = field.cover_at(p);
+            assert!((sim.base_cover(set, p) - want).abs() < 1e-6, "{p}");
+        }
+        assert!(sim.base_cover(set, DVec2::new(60_000.0, 0.0)) > 0.9);
+        // The clouds follow it: the far cells inherit the field's clear zone.
+        let far_clear = sim.cell_at(DVec2::new(-60_000.0, 0.0)).coverage;
+        assert!(far_clear < 0.5, "{far_clear}");
     }
 
     #[test]
