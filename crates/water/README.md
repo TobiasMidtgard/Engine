@@ -107,7 +107,7 @@ while it loads (`WaterLoading::is_ready` waits for them), so the spawn itself on
 | Depth charge every 11 s | A dome and ring waves from an underwater blast, boats thrown |
 | Logs over the falls | Floating things carried by flowing water |
 | Outlet, waterfall, rapids and stream | Shallow-water flow, white water, flow-mapped ripples |
-| Crag across the tarn: a spring cascading down a crevice into a cove | Falls in tiers: a free fall onto a ledge pool, rapids down a slab, a curtain sliding down a face, a last fall into the lake |
+| Crag across the tarn: a spring cascading down a crevice into a cove | Falls in tiers: a free fall onto a ledge pool, rapids down a slab, a curtain sliding down a face, a last fall into the lake that parts round a boss into two tongues |
 | Pond, spill ditch and culvert | Water pooling at the foot of the stream, a drain |
 | Two rain showers | Raindrop rings on water, puddles filling in hollows |
 

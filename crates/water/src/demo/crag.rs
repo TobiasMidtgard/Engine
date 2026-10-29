@@ -1,7 +1,8 @@
 //! The crag across the tarn from the outlet: a rock massif rising out of a cove, with a
 //! crevice cut down its face. A spring in a basin near the top spills down the crevice in
 //! tiers: a free fall onto a ledge pool, white rapids down a slab, a curtain that meets the
-//! face below its brink and slides down it, and a last free fall into the cove.
+//! face below its brink and slides down it, and a last free fall into the cove that parts
+//! round a boss of harder rock into two tongues.
 
 use std::f32::consts::{FRAC_1_SQRT_2, PI, TAU};
 
@@ -105,20 +106,25 @@ fn bed(u: f32) -> f32 {
 }
 
 /// The crevice's floor at `u` along it and `a` across: [`bed`], but no brink is a level weir.
-/// Each lip runs ragged and aslant across the crevice, and is worn down in the middle, so
-/// the water gathers into a tongue there. (Not the brink over the 55° face: water any faster
-/// over it would clear the face instead of sliding down it.)
+/// Each lip runs ragged and aslant across the crevice, and is worn down in a few gutters
+/// between bosses of harder rock, so the water parts into tongues over it, as a mountain
+/// cascade does over bedrock, with dry rock between them where the flow is low. (Not the
+/// brink over the 55° face: water any faster over it would clear the face instead of sliding
+/// down it.)
 fn floor(u: f32, a: f32) -> f32 {
     let shaped = 1.0 - smooth(3.3, 3.8, u) * (1.0 - smooth(6.0, 6.6, u));
     let ragged = 0.3 * noise::perlin2(a as f64 * 0.8, u as f64 * 0.21, 0xC4AC) + 0.08 * a;
     let worn = 0.2 * (1.0 - (a / half_width(u)).powi(2)).max(0.0);
-    bed(u + ragged * shaped) - worn * shaped
+    // Bosses a meter or two across, elongated down the crevice (the water wore round them).
+    let boss = noise::perlin2(a as f64 * 0.75, u as f64 * 0.3, 0xC4AD);
+    let bosses = 0.45 * smooth(0.05, 0.45, boss);
+    bed(u + ragged * shaped) - worn * shaped + bosses * shaped
 }
 
 /// Half the width of the crevice's floor: a bay at the cove, a wider basin round the spring.
 fn half_width(u: f32) -> f32 {
-    let course = 1.0 + 0.25 * (u * 0.8 + 0.5).sin() + 0.25 * smooth(11.5, 13.0, u);
-    mix(course, 3.2, smooth(1.4, -1.5, u))
+    let course = 2.0 + 0.4 * (u * 0.8 + 0.5).sin() + 0.4 * smooth(11.5, 13.0, u);
+    mix(course, 3.4, smooth(1.4, -1.5, u))
 }
 
 /// The massif's crest line at `u`: a cliff out of the cove, then up to the summit ridge.
@@ -353,6 +359,16 @@ mod tests {
             let (u, _) = frame(end.pos.x as f32, end.pos.z as f32);
             assert!((1.9..3.1).contains(&u), "lands {u} m up");
         }
+        // The last fall parts round a boss on its brink into tongues with dry rock between.
+        let mut across: Vec<f32> = lips
+            .iter()
+            .map(|l| frame(l.top.x as f32, l.top.z as f32))
+            .filter(|(u, _)| (1.2..2.0).contains(u))
+            .map(|(_, a)| a)
+            .collect();
+        across.sort_by(f32::total_cmp);
+        let gap = across.windows(2).map(|w| w[1] - w[0]).fold(0.0, f32::max);
+        assert!(gap > 1.0, "the last fall's lips across it: {across:?}");
         // The rapids between run fast.
         let rapids = point(8.3, 0.0);
         let (_, depth, v) = sim
