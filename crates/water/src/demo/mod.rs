@@ -106,6 +106,29 @@ fn channel_bed(s: f32) -> f32 {
     }
 }
 
+/// The outlet channel's bed at `s` along it and `side` across (signed, meters from its middle):
+/// [`channel_bed`], but at the falls the rock is broken as a natural brink is. The lip runs
+/// ragged across the channel; a boss of harder rock on it parts the stream into a broad sheet
+/// and a narrow tongue; and on the broad side a ledge halfway down the face catches the sheet,
+/// which spreads over it and pours on (a horsetail), while the tongue falls free.
+fn falls_bed(s: f32, side: f32) -> f32 {
+    let near = smooth(FALLS_AT - 2.5, FALLS_AT - 1.5, s)
+        * (1.0 - smooth(FALLS_AT + 1.4, FALLS_AT + 2.2, s));
+    if near <= 0.0 {
+        return channel_bed(s);
+    }
+    let ragged = 0.35 * noise::perlin2(side as f64 * 0.9, 0.5, 0xFA11) as f32;
+    let mut b = channel_bed(s + ragged * near);
+    // The boss, elongated along the flow, standing a little proud of the water.
+    let boss = Vec2::new((s - (FALLS_AT - 0.4)) / 1.1, (side - 0.6) / 0.45);
+    b += 0.5 * (1.0 - smooth(0.4, 1.0, boss.length())) * near;
+    // The ledge: a shelf about half a meter deep, halfway down the face, under the broad side.
+    let shelf = smooth(FALLS_AT + 0.3, FALLS_AT + 0.4, s)
+        * (1.0 - smooth(FALLS_AT + 0.9, FALLS_AT + 1.0, s));
+    let under = 1.0 - smooth(0.0, 0.4, side);
+    b.max(mix(b, 3.6, shelf * under))
+}
+
 /// Width of the outlet channel's floor (half), meters.
 fn channel_half_width(s: f32) -> f32 {
     1.1 + 0.6 * smooth(30.0, 50.0, s)
@@ -163,14 +186,15 @@ pub fn tarn_height(x: f32, z: f32) -> f32 {
     // The outlet: a notch in the rim, then a ravine with V-shaped walls down to the pond.
     if along > rs - 4.0 && along < POND_AT + 4.0 {
         let w = channel_half_width(along);
+        let bed = falls_bed(along, x * OUTLET.y - z * OUTLET.x);
         // Rounded where the floor meets the walls (a soft max), so the bank has no crease.
         let x = across - w;
-        let walls = channel_bed(along) + 0.5 * (x + (x * x + 0.6).sqrt()) * (0.85 + 0.25 * n);
+        let walls = bed + 0.5 * (x + (x * x + 0.6).sqrt()) * (0.85 + 0.25 * n);
         // Faded in at the notch and out into the pond, and rounded where the walls meet the
         // hillside: sharp folds catch hard shadow edges.
         let span =
             smooth(rs - 4.0, rs - 1.0, along) * (1.0 - smooth(POND_AT - 3.0, POND_AT + 4.0, along));
-        let rounded = smooth_min(h, walls, 1.5).max(h.min(channel_bed(along)));
+        let rounded = smooth_min(h, walls, 1.5).max(h.min(bed));
         h = mix(h, rounded, span);
     }
     // The pond's spill ditch to the culvert.
@@ -1434,6 +1458,28 @@ mod tests {
             last = b;
             s += 0.25;
         }
+    }
+
+    #[test]
+    fn a_boss_parts_the_falls_and_a_ledge_breaks_their_face() {
+        let across = Vec2::new(OUTLET.y, -OUTLET.x);
+        let at = |s: f32, side: f32| {
+            let p = OUTLET * s + across * side;
+            tarn_height(p.x, p.y)
+        };
+        // At the brink the boss stands proud of the floor to either side of it.
+        let s = FALLS_AT - 0.4;
+        let boss = at(s, 0.6);
+        for side in [-0.6, 1.25] {
+            assert!(
+                boss > at(s, side) + 0.25,
+                "boss {boss}, at {side}: {}",
+                at(s, side)
+            );
+        }
+        // Halfway down the face, the broad side has a shelf; the tongue's side falls on.
+        let (shelf, open) = (at(FALLS_AT + 0.85, -0.6), at(FALLS_AT + 0.85, 1.25));
+        assert!(shelf > open + 0.3, "shelf {shelf}, beside it {open}");
     }
 
     #[test]
