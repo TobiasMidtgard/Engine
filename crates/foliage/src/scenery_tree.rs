@@ -330,7 +330,7 @@ mod tests {
         app.update_n(SLICES as usize + 1);
         assert_eq!(shown(&app, trees[2]), [v.base, v.wood, v.foliage]);
         assert_eq!(casts(&app, trees[2]), handle(v.wood_mid));
-        // The stand-in of the tree left behind is hidden (it casts its far level itself).
+        // The tree left behind casts its far level itself, its stand-in gone.
         assert_eq!(casts(&app, trees[0]), handle(v.wood_lod));
         // Not plants: nothing grows them, and the ecology never sees them.
         let mut plants = app.world.query::<&Plant>();

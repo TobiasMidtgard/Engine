@@ -6,7 +6,10 @@
 //! ([`ShadowOnly`]) casts its middle-level mesh instead. Unity's `ShadowCastingMode.ShadowsOnly`
 //! stand-ins and Horizon Zero Dawn's separate vegetation shadow meshes (one fixed level per
 //! cascade) do the same. A side effect: the shadow no longer changes as a tree switches between
-//! leaf-by-leaf, near and middle levels. Research: engine-design/foliage-research.md, 4.1 and 4.4.
+//! leaf-by-leaf, near and middle levels. Middle-level trees casting their far level the same
+//! way cut the shadow maps' triangles by 40% more at the forest trail, but blurred the dappled
+//! light on the ground into blobs, so they cast themselves. Research:
+//! engine-design/foliage-research.md, 4.1 and 4.4.
 
 use std::collections::HashMap;
 
@@ -79,7 +82,7 @@ impl StandIns {
     }
 }
 
-/// Give parts showing a near or leaf-by-leaf mesh a shadow stand-in, and hide it again when they
+/// Give parts showing a near or leaf-by-leaf mesh a shadow stand-in, and drop it again when they
 /// switch to a level that casts itself.
 #[allow(clippy::type_complexity)]
 pub fn sync_shadow_standins(
@@ -138,11 +141,12 @@ pub fn sync_shadow_standins(
                 commands.entity(entity).insert(StandIn(s));
             }
             (None, Some(s)) => {
-                if let Ok(mut s) = standins.get_mut(s.0)
-                    && s.visible
-                {
-                    s.visible = false;
+                // Gone rather than hidden: most trees spend most of their time far off, and
+                // a hidden entity per tree part would still cost every frame's walk.
+                if let Ok(mut e) = commands.get_entity(s.0) {
+                    e.despawn();
                 }
+                commands.entity(entity).remove::<StandIn>();
             }
             (None, None) => {}
         }
