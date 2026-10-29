@@ -1269,8 +1269,18 @@ fn update_models(world: &mut World, block: bool) {
     }
 }
 
-pub(crate) fn load_human_models(world: &mut World) {
-    update_models(world, false);
+pub(crate) fn load_human_models(
+    mut commands: Commands,
+    q: Query<(&HumanModel, Option<&AppliedHumanModel>)>,
+) {
+    // A normal system that queues the world work only while a model is wanted, so once
+    // everyone wears theirs it runs beside everything else instead of draining the schedule
+    // as an exclusive system would every frame.
+    if q.iter()
+        .any(|(m, applied)| !m.path.is_empty() && applied.is_none_or(|a| a.0 != m.key()))
+    {
+        commands.queue(|world: &mut World| update_models(world, false));
+    }
 }
 
 /// Wait until every requested [`HumanModel`] (and [`HorseModel`](crate::HorseModel)) is

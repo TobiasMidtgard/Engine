@@ -11,6 +11,18 @@
 //! * `draw`/`draw_shadow` draw each instance from its slice of the shared output buffer, one
 //!   indexed draw per [`Submesh`](super::Submesh) with that submesh's surface.
 //!
+//! ## New meshes
+//!
+//! A mesh seen for the first time is appended to the static buffers, not rebuilt with every
+//! other mesh (which made each character's arrival re-upload them all: 75 to 79 ms frames on
+//! the PC while the paddock loaded). The buffers grow to the next power of two, copying what
+//! they hold on the GPU; new meshes ask the renderer's [`UploadBudget`] first, so a burst of
+//! arrivals spreads over frames (a mesh waiting for its turn isn't drawn yet). Space left by
+//! meshes nobody drew for `EVICT_AFTER_FRAMES` frames, or by an edited mesh's old version, is
+//! reclaimed by packing the live meshes again once it passes 16 MB and outgrows them (rare:
+//! zone unloads).
+//! After Unreal's skin cache, which allocates each skinned mesh's space as it streams in.
+//!
 //! ## Fur
 //!
 //! A character whose material has fur ([`SkinMaterial::fur_length`]) is drawn again as
@@ -89,6 +101,12 @@ const SURFACE_COLOR_SLOT: [bool; SURFACE_SLOTS] = [true, false, false];
 const DEFAULT_TEXELS: [[u8; 4]; SURFACE_SLOTS] = [[255; 4], [128, 128, 255, 255], [255; 4]];
 /// Surface bind groups unused for this many frames are released.
 const EVICT_AFTER_FRAMES: u64 = 600;
+/// Upload budget keys of skinned meshes (the standard meshes use `1 << 63`, images the low
+/// ones; see `UploadBudget::take`).
+const SKIN_UPLOAD_KEY: u64 = 1 << 62;
+/// The static buffers are packed again once the space left by meshes gone passes this and
+/// half of what they hold.
+const PACK_WASTE: u64 = 16 << 20;
 
 /// `GpuSurface::flags[0]` bits (`SURFACE_*` in the shaders).
 const SURFACE_BASE_COLOR: u32 = 1;
@@ -640,7 +658,12 @@ fn solid_texture(
 /// Where one mesh lives in the shared static buffers.
 #[derive(Debug, Clone, Copy)]
 struct MeshSlot {
+    handle: Handle<SkinnedMesh>,
     version: u64,
+    /// Frame it was last drawn (or cast a shadow), for eviction.
+    last_used: u64,
+    /// Bytes it takes in the static buffers.
+    bytes: u64,
     vertex_base: u32,
     vertex_count: u32,
     index_base: u32,
@@ -673,13 +696,45 @@ struct Part {
     masked: bool,
 }
 
+/// The shared static buffers (see the module docs, "New meshes").
 struct Statics {
-    rest: wgpu::Buffer,
-    attributes: wgpu::Buffer,
-    ranges: wgpu::Buffer,
-    morphs: wgpu::Buffer,
-    neighbors: wgpu::Buffer,
-    indices: wgpu::Buffer,
+    rest: Packed,
+    attributes: Packed,
+    ranges: Packed,
+    morphs: Packed,
+    neighbors: Packed,
+    indices: Packed,
+    /// Bytes of meshes no longer drawn (evicted, or an edited mesh's old version).
+    waste: u64,
+}
+
+impl Statics {
+    fn new(device: &wgpu::Device, live: [u64; 6]) -> Self {
+        let storage = wgpu::BufferUsages::STORAGE;
+        Self {
+            rest: Packed::new(device, "skin rest vertices", storage, live[0]),
+            attributes: Packed::new(
+                device,
+                "skin attributes",
+                wgpu::BufferUsages::VERTEX,
+                live[1],
+            ),
+            ranges: Packed::new(device, "skin ranges", storage, live[2]),
+            morphs: Packed::new(device, "skin morphs", storage, live[3]),
+            neighbors: Packed::new(device, "skin neighbors", storage, live[4]),
+            indices: Packed::new(device, "skin indices", wgpu::BufferUsages::INDEX, live[5]),
+            waste: 0,
+        }
+    }
+
+    fn used(&self) -> u64 {
+        self.rest.used
+            + self.attributes.used
+            + self.ranges.used
+            + self.morphs.used
+            + self.neighbors.used
+            + self.indices.used
+    }
 }
 
 struct Pipelines {
@@ -695,6 +750,92 @@ struct Pipelines {
     shadow_masked: wgpu::RenderPipeline,
     compute_layout: wgpu::BindGroupLayout,
     material_layout: wgpu::BindGroupLayout,
+}
+
+/// One of the static buffers: meshes appended at the end (`used` bytes so far), grown to the
+/// next power of two with what it holds copied on the GPU.
+struct Packed {
+    buffer: wgpu::Buffer,
+    capacity: u64,
+    used: u64,
+    usage: wgpu::BufferUsages,
+    label: &'static str,
+}
+
+impl Packed {
+    fn new(
+        device: &wgpu::Device,
+        label: &'static str,
+        usage: wgpu::BufferUsages,
+        bytes: u64,
+    ) -> Self {
+        let usage = usage | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC;
+        // (Storage bindings can't be empty.)
+        let capacity = bytes.max(256).next_power_of_two();
+        Self {
+            buffer: device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(label),
+                size: capacity,
+                usage,
+                mapped_at_creation: false,
+            }),
+            capacity,
+            used: 0,
+            usage,
+            label,
+        }
+    }
+
+    /// Append `data` and return its byte offset, growing first if it doesn't fit (the old
+    /// contents are copied on the GPU at the start of this frame's `compute`, through
+    /// `copies`). Returns whether the buffer was replaced.
+    fn append(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        copies: &mut Vec<Copy>,
+        data: &[u8],
+    ) -> (u64, bool) {
+        let offset = self.used;
+        let end = offset + data.len() as u64;
+        let mut grew = false;
+        if end > self.capacity {
+            let mut bigger = Packed::new(device, self.label, self.usage, end);
+            if self.used > 0 {
+                // (A copy queued earlier this frame into the old buffer still lands: the
+                // copies run in order.)
+                copies.push(Copy {
+                    from: self.buffer.clone(),
+                    to: bigger.buffer.clone(),
+                    bytes: self.used,
+                });
+            }
+            bigger.used = self.used;
+            *self = bigger;
+            grew = true;
+        }
+        if !data.is_empty() {
+            queue.write_buffer(&self.buffer, offset, data);
+        }
+        self.used = end;
+        (offset, grew)
+    }
+}
+
+/// A grown static buffer's old contents, copied into the new one on the GPU.
+struct Copy {
+    from: wgpu::Buffer,
+    to: wgpu::Buffer,
+    bytes: u64,
+}
+
+/// What one mesh puts in the static buffers, built off the buffers so it can be appended.
+#[derive(Default)]
+struct MeshData {
+    rest: Vec<GpuRest>,
+    attributes: Vec<GpuStatic>,
+    ranges: Vec<[u32; 4]>,
+    indices: Vec<u32>,
 }
 
 /// A storage buffer the GPU writes; grows to the next power of two.
@@ -762,6 +903,10 @@ pub struct SkinningFeature {
     /// data), so a new character arriving rebuilds the static buffers without working out
     /// every other mesh's again.
     derived: HashMap<u32, (u64, Arc<Derived>)>,
+    /// Reused while laying out a new mesh.
+    scratch: MeshData,
+    /// Grown static buffers' contents still to copy (at the start of `compute`).
+    copies: Vec<Copy>,
     query: Option<QueryState<SkinQuery>>,
     // Per frame.
     items: Vec<Instance>,
@@ -840,137 +985,245 @@ impl Derived {
 }
 
 impl SkinningFeature {
-    /// Rebuild the shared static buffers from every mesh in `meshes` (canonical index → mesh).
-    fn rebuild_statics(&mut self, device: &wgpu::Device, meshes: &[(u32, u64, &SkinnedMesh)]) {
-        let mut rest = Vec::new();
-        let mut attributes = Vec::new();
-        let mut ranges: Vec<[u32; 4]> = Vec::new();
-        let mut morphs = Vec::new();
-        let mut neighbors: Vec<[u32; 2]> = Vec::new();
-        let mut indices: Vec<u32> = Vec::new();
-        // Meshes no longer drawn give up their derived data.
-        self.derived
-            .retain(|index, _| meshes.iter().any(|(i, _, _)| i == index));
-        self.slots.clear();
-        self.submeshes.clear();
-        for &(index, version, mesh) in meshes {
-            let vertex_base = rest.len() as u32;
-            let index_base = indices.len() as u32;
-            let count = mesh.vertices.len() as u32;
-            for v in &mesh.vertices {
-                rest.push(GpuRest {
-                    position: v.position.extend(1.0).to_array(),
-                    normal: v.normal.extend(0.0).to_array(),
-                    weights: v.weights,
-                    joints: v.joints.map(u32::from),
-                });
-                attributes.push(GpuStatic {
-                    uv: v.uv.to_array(),
-                    _pad: [0.0; 2],
-                    color: v.color.to_array(),
-                    pattern: v.pattern.extend(v.fur).to_array(),
-                    axis: v.axis.extend(0.0).to_array(),
-                    mask: v.mask.to_array(),
-                });
+    /// Lay out one mesh for the static buffers (morph and neighbor ranges still relative to
+    /// the mesh; [`append_mesh`](Self::append_mesh) offsets them).
+    fn mesh_data(mesh: &SkinnedMesh, out: &mut MeshData) {
+        out.rest.clear();
+        out.attributes.clear();
+        out.ranges.clear();
+        out.indices.clear();
+        let count = mesh.vertices.len() as u32;
+        for v in &mesh.vertices {
+            out.rest.push(GpuRest {
+                position: v.position.extend(1.0).to_array(),
+                normal: v.normal.extend(0.0).to_array(),
+                weights: v.weights,
+                joints: v.joints.map(u32::from),
+            });
+            out.attributes.push(GpuStatic {
+                uv: v.uv.to_array(),
+                _pad: [0.0; 2],
+                color: v.color.to_array(),
+                pattern: v.pattern.extend(v.fur).to_array(),
+                axis: v.axis.extend(0.0).to_array(),
+                mask: v.mask.to_array(),
+            });
+        }
+        // Triangles with an out-of-range index become degenerate rather than dropped, so
+        // submesh index ranges stay valid.
+        if count > 0 {
+            for t in mesh.indices.as_chunks::<3>().0 {
+                if t.iter().all(|&i| i < count) {
+                    out.indices.extend_from_slice(t);
+                } else {
+                    out.indices.extend_from_slice(&[0; 3]);
+                }
             }
-            let derived = match self.derived.get(&index) {
+        }
+    }
+
+    /// Bytes a mesh will take in the static buffers, roughly (neighbors guessed at six a
+    /// vertex), for the upload budget.
+    fn mesh_bytes(mesh: &SkinnedMesh) -> u64 {
+        let n = mesh.vertices.len() as u64;
+        let morphs: u64 = mesh
+            .morph_targets
+            .iter()
+            .map(|t| t.deltas.len() as u64)
+            .sum();
+        n * (std::mem::size_of::<GpuRest>() + std::mem::size_of::<GpuStatic>() + 16 + 6 * 8) as u64
+            + morphs * std::mem::size_of::<GpuMorph>() as u64
+            + mesh.indices.len() as u64 * 4
+    }
+
+    /// Append one mesh to the static buffers (an edited mesh's old version becomes waste).
+    /// Returns whether a buffer was replaced (rebuild the compute group).
+    #[allow(clippy::too_many_arguments)]
+    fn append_mesh(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        copies: &mut Vec<Copy>,
+        scratch: &mut MeshData,
+        handle: Handle<SkinnedMesh>,
+        version: u64,
+        mesh: &SkinnedMesh,
+        frame: u64,
+    ) -> bool {
+        let Some(statics) = self.statics.as_mut() else {
+            return false;
+        };
+        let index = handle.index();
+        let derived = {
+            let _span = tracing::info_span!("skin: derive").entered();
+            match self.derived.get(&index) {
                 Some((v, d)) if *v == version => d.clone(),
                 _ => {
                     let d = Arc::new(Derived::of(mesh));
                     self.derived.insert(index, (version, d.clone()));
                     d
                 }
-            };
-            let (morph_base, neighbor_base) = (morphs.len() as u32, neighbors.len() as u32);
-            ranges.extend(
-                derived
-                    .ranges
-                    .iter()
-                    .map(|r| [r[0] + morph_base, r[1], r[2] + neighbor_base, r[3]]),
-            );
-            morphs.extend_from_slice(&derived.morphs);
-            neighbors.extend_from_slice(&derived.neighbors);
-            // Triangles with an out-of-range index become degenerate rather than dropped, so
-            // submesh index ranges stay valid.
-            if count > 0 {
-                for t in mesh.indices.as_chunks::<3>().0 {
-                    if t.iter().all(|&i| i < count) {
-                        indices.extend_from_slice(t);
-                    } else {
-                        indices.extend_from_slice(&[0; 3]);
-                    }
-                }
             }
-            let index_count = indices.len() as u32 - index_base;
-            let submesh_base = self.submeshes.len() as u32;
-            for sm in &mesh.submeshes {
-                let first = sm.first_index.min(index_count);
-                let end = sm
-                    .first_index
-                    .saturating_add(sm.index_count)
-                    .min(index_count);
-                if end > first {
-                    self.submeshes.push(SubmeshSlot {
-                        first: index_base + first,
-                        count: end - first,
-                        surface: u32::try_from(sm.surface).unwrap_or(u32::MAX),
-                    });
-                }
+        };
+        let _span = tracing::info_span!("skin: append").entered();
+        Self::mesh_data(mesh, scratch);
+        let rest_size = std::mem::size_of::<GpuRest>() as u64;
+        let morph_size = std::mem::size_of::<GpuMorph>() as u64;
+        let vertex_base = (statics.rest.used / rest_size) as u32;
+        let morph_base = (statics.morphs.used / morph_size) as u32;
+        let neighbor_base = (statics.neighbors.used / 8) as u32;
+        let index_base = (statics.indices.used / 4) as u32;
+        scratch.ranges.extend(
+            derived
+                .ranges
+                .iter()
+                .map(|r| [r[0] + morph_base, r[1], r[2] + neighbor_base, r[3]]),
+        );
+        let before = statics.used();
+        let mut grew = false;
+        grew |= statics
+            .rest
+            .append(device, queue, copies, bytemuck::cast_slice(&scratch.rest))
+            .1;
+        grew |= statics
+            .attributes
+            .append(
+                device,
+                queue,
+                copies,
+                bytemuck::cast_slice(&scratch.attributes),
+            )
+            .1;
+        grew |= statics
+            .ranges
+            .append(device, queue, copies, bytemuck::cast_slice(&scratch.ranges))
+            .1;
+        grew |= statics
+            .morphs
+            .append(device, queue, copies, bytemuck::cast_slice(&derived.morphs))
+            .1;
+        grew |= statics
+            .neighbors
+            .append(
+                device,
+                queue,
+                copies,
+                bytemuck::cast_slice(&derived.neighbors),
+            )
+            .1;
+        grew |= statics
+            .indices
+            .append(
+                device,
+                queue,
+                copies,
+                bytemuck::cast_slice(&scratch.indices),
+            )
+            .1;
+        let bytes = statics.used() - before;
+        let index_count = scratch.indices.len() as u32;
+        let submesh_base = self.submeshes.len() as u32;
+        for sm in &mesh.submeshes {
+            let first = sm.first_index.min(index_count);
+            let end = sm
+                .first_index
+                .saturating_add(sm.index_count)
+                .min(index_count);
+            if end > first {
+                self.submeshes.push(SubmeshSlot {
+                    first: index_base + first,
+                    count: end - first,
+                    surface: u32::try_from(sm.surface).unwrap_or(u32::MAX),
+                });
             }
-            let bounds = mesh.bounds();
-            self.slots.insert(
-                index,
-                MeshSlot {
-                    version,
-                    vertex_base,
-                    vertex_count: count,
-                    index_base,
-                    index_count,
-                    submesh_base,
-                    submesh_count: self.submeshes.len() as u32 - submesh_base,
-                    joints: mesh.joints.len() as u32,
-                    morphs: mesh.morph_targets.len() as u32,
-                    center: bounds.center(),
-                    radius: bounds.half_extents().length(),
-                },
-            );
         }
-        // Storage bindings can't be empty.
-        fn non_empty<T: Pod + Zeroable>(v: &mut Vec<T>) {
-            if v.is_empty() {
-                v.push(T::zeroed());
-            }
+        let bounds = mesh.bounds();
+        let old = self.slots.insert(
+            index,
+            MeshSlot {
+                handle,
+                version,
+                last_used: frame,
+                bytes,
+                vertex_base,
+                vertex_count: mesh.vertices.len() as u32,
+                index_base,
+                index_count,
+                submesh_base,
+                submesh_count: self.submeshes.len() as u32 - submesh_base,
+                joints: mesh.joints.len() as u32,
+                morphs: mesh.morph_targets.len() as u32,
+                center: bounds.center(),
+                radius: bounds.half_extents().length(),
+            },
+        );
+        if let Some(old) = old {
+            statics.waste += old.bytes;
         }
-        non_empty(&mut rest);
-        non_empty(&mut attributes);
-        non_empty(&mut ranges);
-        non_empty(&mut morphs);
-        non_empty(&mut neighbors);
-        non_empty(&mut indices);
-        let storage = |label: &str, bytes: &[u8]| {
-            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some(label),
-                contents: bytes,
-                usage: wgpu::BufferUsages::STORAGE,
+        if grew {
+            self.compute_group = None;
+        }
+        grew
+    }
+
+    /// Pack every live mesh into fresh static buffers (at start, and when the space left by
+    /// meshes gone outgrows the live ones).
+    fn pack(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        assets: Option<&Assets<SkinnedMesh>>,
+    ) {
+        let _span = tracing::info_span!("skin: pack").entered();
+        let mut live: Vec<MeshSlot> = self.slots.values().copied().collect();
+        live.sort_unstable_by_key(|s| s.vertex_base);
+        // Sized for what stays, so nothing grows while it is packed.
+        let total = live.iter().map(|s| s.bytes).sum::<u64>();
+        let share = |of: u64| -> u64 {
+            self.statics.as_ref().map_or(0, |st| {
+                let used = st.used().max(1);
+                (total as f64 * of as f64 / used as f64) as u64
             })
         };
-        self.statics = Some(Statics {
-            rest: storage("skin rest vertices", bytemuck::cast_slice(&rest)),
-            attributes: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("skin attributes"),
-                contents: bytemuck::cast_slice(&attributes),
-                usage: wgpu::BufferUsages::VERTEX,
-            }),
-            ranges: storage("skin ranges", bytemuck::cast_slice(&ranges)),
-            morphs: storage("skin morphs", bytemuck::cast_slice(&morphs)),
-            neighbors: storage("skin neighbors", bytemuck::cast_slice(&neighbors)),
-            indices: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("skin indices"),
-                contents: bytemuck::cast_slice(&indices),
-                usage: wgpu::BufferUsages::INDEX,
-            }),
+        let sizes = self.statics.as_ref().map_or([0; 6], |st| {
+            [
+                share(st.rest.used),
+                share(st.attributes.used),
+                share(st.ranges.used),
+                share(st.morphs.used),
+                share(st.neighbors.used),
+                share(st.indices.used),
+            ]
         });
+        self.statics = Some(Statics::new(device, sizes));
+        self.slots.clear();
+        self.submeshes.clear();
         self.compute_group = None;
+        self.derived
+            .retain(|index, _| live.iter().any(|s| s.handle.index() == *index));
+        let Some(assets) = assets else {
+            return;
+        };
+        let mut copies = Vec::new();
+        let mut scratch = MeshData::default();
+        for slot in live {
+            if let Some(mesh) = assets
+                .get(slot.handle)
+                .filter(|_| assets.version(slot.handle) == slot.version)
+            {
+                self.append_mesh(
+                    device,
+                    queue,
+                    &mut copies,
+                    &mut scratch,
+                    slot.handle,
+                    slot.version,
+                    mesh,
+                    slot.last_used,
+                );
+            }
+        }
+        self.copies.extend(copies);
     }
 
     fn rebuild_compute_group(&mut self, device: &wgpu::Device) {
@@ -1002,12 +1255,12 @@ impl SkinningFeature {
                         size: wgpu::BufferSize::new(std::mem::size_of::<GpuJob>() as u64),
                     }),
                 },
-                entry(1, &s.rest),
+                entry(1, &s.rest.buffer),
                 entry(2, &joints.buffer),
                 entry(3, &weights.buffer),
-                entry(4, &s.ranges),
-                entry(5, &s.morphs),
-                entry(6, &s.neighbors),
+                entry(4, &s.ranges.buffer),
+                entry(5, &s.morphs.buffer),
+                entry(6, &s.neighbors.buffer),
                 entry(7, &out.buffer),
             ],
         }));
@@ -1019,7 +1272,7 @@ impl SkinningFeature {
             return false;
         };
         pass.set_vertex_buffer(2, instances.buffer.slice(..));
-        pass.set_index_buffer(s.indices.slice(..), wgpu::IndexFormat::Uint32);
+        pass.set_index_buffer(s.indices.buffer.slice(..), wgpu::IndexFormat::Uint32);
         true
     }
 
@@ -1041,7 +1294,7 @@ impl SkinningFeature {
         let attr_start = slot.vertex_base as u64 * attr_size;
         let attr_end = attr_start + slot.vertex_count as u64 * attr_size;
         pass.set_vertex_buffer(0, out.buffer.slice(out_start..out_end));
-        pass.set_vertex_buffer(1, s.attributes.slice(attr_start..attr_end));
+        pass.set_vertex_buffer(1, s.attributes.buffer.slice(attr_start..attr_end));
         true
     }
 
@@ -1269,7 +1522,7 @@ impl RenderFeature for SkinningFeature {
             material_layout,
         });
         self.surfaces = Some(surfaces);
-        self.rebuild_statics(device, &[]);
+        self.pack(device, &gpu.queue, None);
     }
 
     fn prepare(
@@ -1307,28 +1560,71 @@ impl RenderFeature for SkinningFeature {
             return;
         };
 
-        // Which meshes are in use, and are they all uploaded?
-        let mut used: Vec<(Handle<SkinnedMesh>, u64)> = Vec::new();
+        // Which meshes are in use; new ones (or new versions) go into the static buffers as
+        // the upload budget allows.
+        let frame = self.surfaces.as_ref().map_or(0, |c| c.frame);
+        let mut new: Vec<(Handle<SkinnedMesh>, u64)> = Vec::new();
         for (_, renderer, _) in query.iter(world_ref) {
             let Some(handle) = renderer.mesh.filter(|_| renderer.visible) else {
                 continue;
             };
             let handle = assets.canonical(handle);
             let version = assets.version(handle);
-            if version > 0 && assets.contains(handle) && !used.iter().any(|u| u.0 == handle) {
-                used.push((handle, version));
+            if version == 0 || !assets.contains(handle) {
+                continue;
+            }
+            match self.slots.get_mut(&handle.index()) {
+                Some(slot) if slot.version == version => slot.last_used = frame,
+                _ => {
+                    if !new.iter().any(|n| n.0 == handle) {
+                        new.push((handle, version));
+                    }
+                }
             }
         }
-        let stale = used
-            .iter()
-            .any(|(h, v)| self.slots.get(&h.index()).is_none_or(|s| s.version != *v));
-        if stale {
-            used.sort_unstable_by_key(|u| u.0.index());
-            let meshes: Vec<(u32, u64, &SkinnedMesh)> = used
-                .iter()
-                .filter_map(|&(h, v)| assets.get(h).map(|m| (h.index(), v, m)))
-                .collect();
-            self.rebuild_statics(&gpu.device, &meshes);
+        // Meshes nobody drew for a while give up their space (reclaimed by packing).
+        if let Some(statics) = self.statics.as_mut() {
+            self.slots.retain(|_, slot| {
+                let keep = slot.last_used + EVICT_AFTER_FRAMES >= frame;
+                if !keep {
+                    statics.waste += slot.bytes;
+                }
+                keep
+            });
+            if statics.waste > PACK_WASTE && statics.waste > statics.used() / 2 {
+                self.pack(&gpu.device, &gpu.queue, Some(assets));
+            }
+        }
+        if !new.is_empty() {
+            let _span = tracing::info_span!("skin: new meshes").entered();
+            new.sort_unstable_by_key(|n| n.0.index());
+            let mut copies = Vec::new();
+            let mut scratch = std::mem::take(&mut self.scratch);
+            for (handle, version) in new {
+                let Some(mesh) = assets.get(handle) else {
+                    continue;
+                };
+                let update = self.slots.contains_key(&handle.index());
+                if !gpu.uploads.take(
+                    SKIN_UPLOAD_KEY | handle.index() as u64,
+                    Self::mesh_bytes(mesh),
+                    update,
+                ) {
+                    continue;
+                }
+                self.append_mesh(
+                    &gpu.device,
+                    &gpu.queue,
+                    &mut copies,
+                    &mut scratch,
+                    handle,
+                    version,
+                    mesh,
+                    frame,
+                );
+            }
+            self.scratch = scratch;
+            self.copies.extend(copies);
         }
 
         let images = world_ref.get_resource::<Assets<Image>>();
@@ -1566,6 +1862,11 @@ impl RenderFeature for SkinningFeature {
     }
 
     fn compute(&mut self, encoder: &mut wgpu::CommandEncoder, _ctx: &FrameContext) {
+        // Grown buffers first: in the frame's own commands (a submit of their own waited on
+        // the GPU, 100 to 180 ms a growth on lavapipe), before anything reads them.
+        for c in self.copies.drain(..) {
+            encoder.copy_buffer_to_buffer(&c.from, 0, &c.to, 0, c.bytes);
+        }
         let (Some(p), Some(group)) = (&self.pipelines, &self.compute_group) else {
             return;
         };
@@ -1735,6 +2036,8 @@ impl RenderFeature for SkinningFeature {
             "surfaces": self.surfaces.as_ref().map_or(0, |c| c.sets.iter().flatten().count()),
             "images": self.surfaces.as_ref().map_or(0, SurfaceCache::image_count),
             "skinned_vertices": self.job_list.iter().map(|(c, _)| *c as u64).sum::<u64>(),
+            "static_mb": self.statics.as_ref().map_or(0.0, |s| s.used() as f64 / 1048576.0),
+            "static_waste_mb": self.statics.as_ref().map_or(0.0, |s| s.waste as f64 / 1048576.0),
         })
     }
 }

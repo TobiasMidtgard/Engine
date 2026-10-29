@@ -144,6 +144,136 @@ fn skinned_character_renders_and_follows_the_pose() {
     );
 }
 
+/// Fraction of a box's pixels (fractions of the image) that differ by more than 40 in any
+/// channel between two pictures.
+fn changed(
+    a: &image::RgbaImage,
+    b: &image::RgbaImage,
+    (x0, x1, y0, y1): (f32, f32, f32, f32),
+) -> f32 {
+    let (w, h) = (a.width() as f32, a.height() as f32);
+    let (mut n, mut total) = (0, 0);
+    for y in (y0 * h) as u32..(y1 * h) as u32 {
+        for x in (x0 * w) as u32..(x1 * w) as u32 {
+            let (p, q) = (a.get_pixel(x, y), b.get_pixel(x, y));
+            total += 1;
+            if (0..3).any(|c| (p[c] as i32 - q[c] as i32).abs() > 40) {
+                n += 1;
+            }
+        }
+    }
+    n as f32 / total.max(1) as f32
+}
+
+#[test]
+fn characters_arriving_later_join_without_disturbing_the_drawn_ones() {
+    // New meshes are appended to the skin's static buffers (which grow, copying what they
+    // hold on the GPU), and a mesh edited over and over leaves space that is reclaimed by
+    // packing the live meshes again: through all of it every character keeps drawing.
+    let mut app = headless_app();
+    let w = &mut app.world;
+    w.spawn((
+        DirectionalLight {
+            illuminance: 80_000.0,
+            ..Default::default()
+        },
+        Transform::default().looking_at(DVec3::new(-0.3, -0.7, -0.6), Vec3::Y),
+    ));
+    w.spawn((
+        Transform::default(),
+        MeshRenderer::new(
+            Shape::Plane {
+                size: [40.0, 40.0],
+                subdivisions: 1,
+            },
+            StandardMaterial::hex(0x6b7b5a).with_roughness(0.95),
+        ),
+    ));
+    w.spawn((
+        Camera::perspective(40.0),
+        Transform::from_xyz(0.0, 1.15, 3.6).looking_at(DVec3::new(0.0, 1.05, 0.0), Vec3::Y),
+    ));
+    let facing = Quat::from_rotation_y(std::f32::consts::PI);
+    let athlete = spawn_humanoid(
+        w,
+        Outfit::Athlete,
+        Transform::from_xyz(-1.0, 0.0, 0.0).with_rotation(facing),
+    );
+    app.update_n(10);
+    if let Some(d) = app.world.get_resource::<RenderDisabled>() {
+        eprintln!("skipping: no GPU ({})", d.0);
+        return;
+    }
+    let left = (0.08, 0.34, 0.25, 0.55);
+    let red = |img: &image::RgbaImage| red_pixels(img, left.0, left.1, left.2, left.3);
+    let alone = capture(&mut app, "anim_arrive_alone.png");
+    let first = red(&alone);
+    assert!(first > 150, "the athlete isn't drawn ({first} red pixels)");
+
+    // Two more people, each with a mesh of its own, a few frames apart.
+    spawn_humanoid(
+        &mut app.world,
+        Outfit::Shirt,
+        Transform::from_xyz(0.0, 0.0, 0.0).with_rotation(facing),
+    );
+    app.update_n(3);
+    spawn_humanoid(
+        &mut app.world,
+        Outfit::Lifter,
+        Transform::from_xyz(1.0, 0.0, 0.0).with_rotation(facing),
+    );
+    app.update_n(10);
+    let all = capture(&mut app, "anim_arrive_all.png");
+    let still = red(&all);
+    assert!(
+        still * 10 >= first * 8,
+        "the athlete faded as the others arrived: {first} red pixels alone, {still} after"
+    );
+    let (middle, right) = ((0.38, 0.62, 0.2, 0.9), (0.66, 0.92, 0.2, 0.9));
+    for (name, area) in [("shirt", middle), ("lifter", right)] {
+        let drawn = changed(&alone, &all, area);
+        assert!(
+            drawn > 0.1,
+            "the {name} isn't drawn ({drawn:.2} of its box changed)"
+        );
+    }
+
+    // Edit the athlete's mesh again and again: each new version is appended and the old one
+    // left behind, until packing reclaims the space.
+    let handle = app
+        .world
+        .get::<SkinnedMeshRenderer>(athlete)
+        .and_then(|r| r.mesh)
+        .expect("athlete mesh");
+    let bytes = {
+        let meshes = app.world.resource::<Assets<SkinnedMesh>>();
+        let m = meshes.get(handle).expect("mesh");
+        m.vertices.len() * 200 + m.indices.len() * 4
+    };
+    let edits = (40 << 20) / bytes.max(1) + 2;
+    for _ in 0..edits {
+        let _ = app
+            .world
+            .resource_mut::<Assets<SkinnedMesh>>()
+            .get_mut(handle);
+        app.update();
+    }
+    app.update_n(3);
+    let packed = capture(&mut app, "anim_arrive_packed.png");
+    let after = red(&packed);
+    assert!(
+        after * 10 >= first * 8,
+        "the athlete faded after {edits} edits: {first} red pixels before, {after} after"
+    );
+    for (name, area) in [("shirt", middle), ("lifter", right)] {
+        let moved = changed(&all, &packed, area);
+        assert!(
+            moved < 0.15,
+            "the {name} changed after the athlete's edits ({moved:.2} of its box)"
+        );
+    }
+}
+
 /// Counts pixels in a box (fractions of the image) for which `pred(r, g, b)` holds; also
 /// returns the box's pixel count.
 fn count(
