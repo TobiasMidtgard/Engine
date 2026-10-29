@@ -222,10 +222,16 @@ pub fn engine_events_system(
     }
 }
 
+/// Mass a struck person is taken to have, kg (for the blow they take).
+const PERSON_KG: f32 = 80.0;
+
 /// Crashes: hard contacts become a `WorldImpulse` (dust, debris, nearby AI flinch) and a
-/// `DamageEvent` on the vehicle.
+/// `DamageEvent` on the vehicle. Running into a person (a `CharacterController`) is a blow to
+/// them instead: a kinematic character stops a car in a contact like a wall would, but no
+/// dust or rubble should fly off it (playtest 2026-10-27 #12).
 pub fn crash_events_system(
     vehicles: Query<(&Vehicle, &VehicleForces)>,
+    people: Query<(), With<engine_world::physics::CharacterController>>,
     mut contacts: MessageReader<ContactEvent>,
     mut impulses: MessageWriter<WorldImpulse>,
     mut damage: MessageWriter<DamageEvent>,
@@ -238,6 +244,23 @@ pub fn crash_events_system(
             let Ok((_, forces)) = vehicles.get(me) else {
                 continue;
             };
+            let other = if me == c.a { c.b } else { c.a };
+            if people.contains(other) {
+                let v = forces.frame.linear;
+                // The speed into them (along the contact normal, toward them).
+                let into = (v.dot(c.normal) * -sign).max(0.0);
+                if into > 2.0 {
+                    damage.write(DamageEvent {
+                        target: other,
+                        amount: 0.5 * PERSON_KG * into * into / 200.0,
+                        kind: DamageKind::Blunt,
+                        point: c.point,
+                        impulse: v.normalize_or_zero() * PERSON_KG * into,
+                        source: Some(me),
+                    });
+                }
+                continue;
+            }
             let dv = c.impulse / forces.frame.mass.max(1.0);
             // Below ~4 m/s change of speed it's a bump, not a crash.
             if dv < 4.0 {

@@ -558,3 +558,60 @@ fn laps_the_demo_oval_on_its_line() {
         assert!(flown > 0.8, "flew {flown:.1} s off the kicker in 30 s");
     }
 }
+
+/// Running into a person (playtest 2026-10-27 #12): a blow to them, no dust or rubble thrown
+/// as from a crash into a wall.
+#[test]
+fn hitting_a_person_hurts_them_and_throws_no_debris() {
+    use engine_world::physics::{CharacterController, ContactEvent, ContactPhase};
+    use engine_world::{DamageEvent, WorldImpulse};
+    let mut app = flat_app("concrete");
+    calm(&mut app);
+    let car = car_on(&mut app, DVec3::ZERO, Vec3::NEG_Z);
+    let person = app
+        .world
+        .spawn((
+            Transform::from_xyz(0.0, 0.9, -3.0),
+            CharacterController::default(),
+        ))
+        .id();
+    let wall = app.world.spawn(Transform::from_xyz(3.0, 0.5, 0.0)).id();
+    run_for(&mut app, 1.0);
+    set_velocity(&mut app, car, Vec3::NEG_Z * 12.0);
+    run_for(&mut app, 0.05);
+    for other in [person, wall] {
+        app.world.write_message(ContactEvent {
+            phase: ContactPhase::Started,
+            a: car,
+            b: other,
+            point: DVec3::new(0.0, 0.6, -2.2),
+            normal: Vec3::NEG_Z,
+            impulse: 1_500.0 * 10.0,
+            sensor: false,
+        });
+    }
+    let (mut impulses, mut damage) = (Vec::new(), Vec::new());
+    let mut on_impulse = app.world.resource::<Messages<WorldImpulse>>().get_cursor();
+    let mut on_damage = app.world.resource::<Messages<DamageEvent>>().get_cursor();
+    for _ in 0..3 {
+        app.update();
+        let m = app.world.resource::<Messages<WorldImpulse>>();
+        impulses.extend(on_impulse.read(m).copied());
+        let m = app.world.resource::<Messages<DamageEvent>>();
+        damage.extend(on_damage.read(m).cloned());
+    }
+    let hurt = damage
+        .iter()
+        .find(|d| d.target == person)
+        .expect("the person took no blow");
+    assert!(hurt.amount > 10.0 && hurt.impulse.z < 0.0, "{hurt:?}");
+    assert_eq!(
+        impulses.iter().filter(|i| i.source == Some(car)).count(),
+        1,
+        "{impulses:?}"
+    );
+    assert!(
+        damage.iter().filter(|d| d.target == car).count() == 1,
+        "only the wall hurts the car: {damage:?}"
+    );
+}
