@@ -296,9 +296,9 @@ pub(crate) fn get_in(world: &mut World, actor: Entity, vehicle: Entity, b: Board
     // looking where it points (a plane flies where the camera looks).
     let mut camera =
         engine_render::frame::active_camera(world).map_or_else(Camera::default, |(_, c, _)| c);
-    let pose = world
-        .get::<GlobalTransform>(vehicle)
-        .map_or_else(Transform::default, |g| g.to_transform());
+    // Its own Transform (vehicles are roots): just placed by a script, its GlobalTransform
+    // still holds the old pose until the frame's propagation.
+    let pose = world.get::<Transform>(vehicle).copied().unwrap_or_default();
     let up = world.resource::<Gravity>().up_at(pose.translation);
     let fwd = pose.forward();
     let flat = (fwd - up * fwd.dot(up)).normalize_or(fwd);
@@ -365,7 +365,7 @@ pub(crate) fn get_in(world: &mut World, actor: Entity, vehicle: Entity, b: Board
 
 /// Where to step out: beside the vehicle's left side, on whatever is below.
 fn exit_point(world: &World, vehicle: Entity, b: &Boardable) -> Option<DVec3> {
-    let t = world.get::<GlobalTransform>(vehicle)?.to_transform();
+    let t = *world.get::<Transform>(vehicle)?;
     let up = world.resource::<Gravity>().up_at(t.translation);
     let side = Vec3::new(b.min.x - 1.0, 0.0, (b.min.z + b.max.z) * 0.5);
     let beside = t.transform_point(side.as_dvec3());

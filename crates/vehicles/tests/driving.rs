@@ -216,3 +216,37 @@ fn mouse_aim_banks_into_turns_and_levels_the_wings_on_target() {
     let (_, yaw, _) = drive::mouse_aim(Quat::IDENTITY, Vec3::new(-0.1, 0.0, 1.0), up, false, 2.5);
     assert!(yaw <= -1.0 + 1e-6, "{yaw}");
 }
+
+/// Placed by a script and boarded in the same breath (the tour does this), the camera starts
+/// behind the vehicle where it now is, not where it was.
+#[test]
+fn boarding_right_after_a_place_looks_along_the_new_heading() {
+    let mut app = app();
+    let t = Transform::from_translation(DVec3::Y * presets::ride_height("sports_car"))
+        .with_rotation(engine_vehicles::demo::facing(Vec3::NEG_Z));
+    let car = spawn_with(&mut app, |c| presets::sports_car(c, t, 0xe0a81c));
+    app.world.entity_mut(car).insert(Name::new("Moved car"));
+    free_camera(&mut app, DVec3::new(-4.0, 1.7, 0.0));
+    run_for(&mut app, 0.5);
+    for (api, args) in [
+        (
+            "vehicles.place",
+            serde_json::json!({"vehicle": "Moved car", "at": [50.0, 0.0, 0.0], "yaw_deg": 90.0, "velocity": [0.0, 0.0, 0.0]}),
+        ),
+        (
+            "vehicles.board",
+            serde_json::json!({"vehicle": "Moved car"}),
+        ),
+    ] {
+        let r = engine_core::registry::call_api(&mut app.world, api, args);
+        assert!(r.is_ok(), "{api}: {r:?}");
+    }
+    let camera = app.world.get::<Driven>(car).expect("driven").camera;
+    let cam = transform(&app, camera);
+    assert!(cam.forward().x > 0.9, "looking {:?}", cam.forward());
+    assert!(
+        (cam.translation.x - 50.0).abs() < 20.0,
+        "camera at {:?}",
+        cam.translation
+    );
+}
