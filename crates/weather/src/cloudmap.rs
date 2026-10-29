@@ -128,13 +128,33 @@ impl Rebuild {
         map.texels = self.texels;
         let b = sim.base;
         map.background = Vec4::new(
-            b.cloud_cover,
+            background_cover(sim, self.origin, map.size as f64 * map.cell_m as f64),
             b.cloud_type,
             b.precipitation_mm_h / MAP_PRECIP_SCALE,
             b.cloud_density,
         );
         map.revision += 1;
     }
+}
+
+/// Cover beyond the map: the regime's, or with the planet's cloud systems
+/// (`WeatherSim::cover_field`) their mean in the ring just outside the map, so the clouds on the
+/// horizon are the systems out there and not a band of the weather overhead.
+fn background_cover(sim: &WeatherSim, origin: DVec2, span: f64) -> f32 {
+    if sim.cover_field.is_none() {
+        return sim.base.cloud_cover;
+    }
+    let center = origin + DVec2::splat(span * 0.5);
+    const RING: usize = 48;
+    let mut sum = 0.0;
+    for i in 0..RING {
+        let a = std::f64::consts::TAU * (i as f64 + 0.5) / RING as f64;
+        for r in [0.55, 0.75, 0.95] {
+            let p = center + DVec2::new(a.cos(), a.sin()) * span * r;
+            sum += sim.base_cover(sim.base.cloud_cover, p);
+        }
+    }
+    sum / (RING * 3) as f32
 }
 
 /// FixedUpdate: rebuild the map twice per second of weather time, or when the player has
@@ -219,6 +239,34 @@ mod tests {
             assert!(mean > lo && mean < hi, "{preset:?} coverage {mean}");
         }
         assert!(map.revision >= 2);
+    }
+
+    #[test]
+    fn beyond_the_map_the_clouds_are_the_planets_systems() {
+        engine_core::tasks::init_task_pools();
+        let mut sim = WeatherSim::new(&Weather {
+            preset: WeatherPreset::Overcast,
+            ..Default::default()
+        });
+        let mut map = CloudMap::default();
+        build(&mut map, &sim);
+        assert_eq!(map.background.x, sim.base.cloud_cover);
+        // Clear skies all around out there.
+        sim.cover_field = Some(engine_world::CloudCoverMap {
+            origin: DVec2::splat(-256_000.0),
+            cell_m: 2000.0,
+            size: 256,
+            coverage: std::sync::Arc::from(vec![13u8; 256 * 256]),
+            background: 0.05,
+            revision: 1,
+            ..Default::default()
+        });
+        build(&mut map, &sim);
+        assert!(
+            (map.background.x - 13.0 / 255.0).abs() < 1e-3,
+            "{}",
+            map.background.x
+        );
     }
 
     #[test]
