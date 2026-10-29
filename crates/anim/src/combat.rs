@@ -20,15 +20,26 @@
 //! blows land on the face in front of it rather than where the clip's author stood.
 //! This is Unreal's notify-state model (montage windows, Motion
 //! Warping) with For Honor's and Ghost of Tsushima's buffering.
+//!
+//! A target holding up its guard (the `guarding` parameter above 0.5) blocks high strikes
+//! thrown from in front of it: the strike lands on the nearer glove instead of the face,
+//! with [`Block`]'s share of the damage and push (the struck arm flinches back), a shorter
+//! hitstop (blockstun is shorter than hitstun in fighting games), and the attacker is
+//! pushed back a little ([`HitReaction::knock`]) as fighting games push a blocked attacker
+//! out of reach. [`Attacker::blocked`] counts them for the rules.
+//!
+//! [`HitReaction::knock`]: crate::hit::HitReaction::knock
 
 use std::collections::HashMap;
 
 use engine_core::prelude::*;
+use engine_world::animation::AnimationParams;
 use engine_world::{DamageEvent, DamageKind};
 
 use crate::Animator;
 use crate::animator::{AnimationLibrary, AnimatorSettings};
 use crate::build::humanoid::Punch;
+use crate::hit::HitReaction;
 use crate::ik::{to_model, two_bone};
 
 /// What a window does.
@@ -98,11 +109,42 @@ fn default_fade_out() -> f32 {
     0.2
 }
 
+/// What a block lets through, and what it does to the attacker.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Block {
+    /// Share of the damage that gets through.
+    pub damage: f32,
+    /// Share of the push the guard takes.
+    pub impulse: f32,
+    /// Share of the hitstop.
+    pub hitstop: f32,
+    /// How far the attacker is pushed back, m.
+    pub pushback: f32,
+    /// Widest angle off the target's front a strike is still blocked from, degrees.
+    pub cone_deg: f32,
+}
+
+impl Default for Block {
+    fn default() -> Self {
+        Self {
+            damage: 0.2,
+            impulse: 0.35,
+            hitstop: 0.6,
+            pushback: 0.12,
+            cone_deg: 70.0,
+        }
+    }
+}
+
 /// A fighter's moves.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AttackSet {
     pub name: String,
     pub moves: Vec<AttackMove>,
+    /// What a guarding target's block does to these moves.
+    #[serde(default)]
+    pub block: Block,
 }
 
 impl AttackSet {
@@ -213,6 +255,7 @@ impl AttackSet {
                 mv(Punch::Hook, None, &[("attack_light", Punch::Uppercut)]),
                 mv(Punch::Uppercut, None, &[]),
             ],
+            block: Block::default(),
         }
     }
 }
@@ -263,8 +306,10 @@ pub struct Attacker {
     pub armored: bool,
     /// World-space move the last warp step asked for, meters.
     pub warp_delta: Vec3,
-    /// Hits landed by the current move.
+    /// Hits landed by the current move (blocked ones not counted).
     pub hits: u32,
+    /// Strikes of the current move that landed on a guard.
+    pub blocked: u32,
     /// The newest press waiting, and how long it has waited.
     #[serde(skip)]
     pub buffered: Option<(String, f32)>,
@@ -291,6 +336,7 @@ impl Default for Attacker {
             armored: false,
             warp_delta: Vec3::ZERO,
             hits: 0,
+            blocked: 0,
             buffered: None,
             landed: Vec::new(),
             aim: None,
@@ -388,11 +434,43 @@ pub(crate) fn aim_strikes(mut q: Query<(&mut Animator, &Attacker, &GlobalTransfo
     }
 }
 
-/// A landed blow, applied after the attackers have moved: freeze both (hitstop).
+/// A landed blow, applied after the attackers have moved: freeze both (hitstop), and push
+/// a blocked attacker back (world, m).
 pub(crate) struct Landed {
     attacker: Entity,
     target: Entity,
     hitstop: f32,
+    pushback: Vec3,
+}
+
+/// Where a target can be struck (world): its chest and face, and its guard if it is up.
+#[derive(Clone, Copy)]
+struct Target {
+    chest: DVec3,
+    head: DVec3,
+    guard: Option<Guard>,
+}
+
+/// A raised guard: which way the target faces (flat) and its knuckles (world).
+#[derive(Clone, Copy)]
+struct Guard {
+    forward: DVec3,
+    gloves: [DVec3; 2],
+}
+
+impl Target {
+    /// The glove a high strike from `from` (flat on the ground, the attacker's position)
+    /// with the fist now at `fist` lands on, if the guard is up and faces it.
+    fn blocking_glove(&self, from: DVec3, fist: DVec3, cone_deg: f32) -> Option<DVec3> {
+        let g = self.guard?;
+        let to = (from - self.chest).with_y(0.0).normalize_or_zero();
+        if g.forward.dot(to) < (cone_deg as f64).to_radians().cos() {
+            return None;
+        }
+        g.gloves
+            .into_iter()
+            .min_by(|a, b| a.distance(fist).total_cmp(&b.distance(fist)))
+    }
 }
 
 type AttackerQuery<'w, 's> = Query<
@@ -418,8 +496,12 @@ pub(crate) fn run_attacks(
     library: Res<AnimationLibrary>,
     mut set: ParamSet<(
         AttackerQuery,
-        Query<(&GlobalTransform, Option<&Animator>)>,
-        Query<&mut Animator>,
+        Query<(
+            &GlobalTransform,
+            Option<&Animator>,
+            Option<&AnimationParams>,
+        )>,
+        Query<(&mut Animator, Option<&mut HitReaction>)>,
     )>,
     mut damage: MessageWriter<DamageEvent>,
     mut landed: Local<Vec<Landed>>,
@@ -427,13 +509,13 @@ pub(crate) fn run_attacks(
     let Some(sets) = sets else {
         return;
     };
-    // Where targets are: chest and head height, world space.
-    let mut targets: HashMap<Entity, (DVec3, DVec3)> = HashMap::new();
+    // Where targets are: chest and head height and the guard, world space.
+    let mut targets: HashMap<Entity, Target> = HashMap::new();
     {
         let attackers: Vec<Entity> = set.p0().iter().filter_map(|(_, a, ..)| a.target).collect();
         let q = set.p1();
         for t in attackers {
-            let Ok((gt, animator)) = q.get(t) else {
+            let Ok((gt, animator, params)) = q.get(t) else {
                 continue;
             };
             let at = |bone: &str, up: f64| -> DVec3 {
@@ -441,13 +523,25 @@ pub(crate) fn run_attacks(
                     .and_then(|a| a.skeleton.index_of(bone).map(|b| a.bone_world(gt, b).0))
                     .unwrap_or_else(|| gt.translation() + DVec3::Y * up)
             };
+            let guarding = params.is_some_and(|p| p.get("guarding") > 0.5);
+            let guard = animator.filter(|_| guarding).and_then(|a| {
+                let glove = |hand: &str| Some(fist_of(a, gt, a.skeleton.index_of(hand)?));
+                Some(Guard {
+                    forward: (gt.rotation() * Vec3::NEG_Z)
+                        .with_y(0.0)
+                        .normalize()
+                        .as_dvec3(),
+                    gloves: [glove("hand_l")?, glove("hand_r")?],
+                })
+            });
             // The head bone sits at the top of the neck: the face is a little above it.
             targets.insert(
                 t,
-                (
-                    at("chest", 1.3),
-                    at("head", 1.55) + DVec3::Y * FACE_ABOVE_HEAD,
-                ),
+                Target {
+                    chest: at("chest", 1.3),
+                    head: at("head", 1.55) + DVec3::Y * FACE_ABOVE_HEAD,
+                    guard,
+                },
             );
         }
     }
@@ -521,6 +615,7 @@ pub(crate) fn run_attacks(
             attacker.current = Some(name);
             attacker.time = 0.0;
             attacker.hits = 0;
+            attacker.blocked = 0;
             attacker.landed.clear();
             attacker.buffered = None;
         }
@@ -555,18 +650,32 @@ pub(crate) fn run_attacks(
             .target
             .and_then(|e| targets.get(&e).map(|p| (e, *p)));
         // Aim the strike: the front of the face (or chest), a fist's width short of its
-        // middle on the attacker's side.
-        if let Some((_, (chest, head))) = target
+        // middle on the attacker's side, or the glove of a guard that blocks it.
+        let mut blocked_at = None;
+        if let Some((_, tg)) = target
             && let Some(WindowKind::Hit { bone, high, .. }) = m
                 .windows
                 .iter()
                 .map(|w| &w.kind)
                 .find(|k| matches!(k, WindowKind::Hit { .. }))
         {
-            let mid = if *high { head } else { chest };
+            let mid = if *high { tg.head } else { tg.chest };
             let mut back = gt.translation() - mid;
             back.y = 0.0;
-            attacker.aim = Some((bone.clone(), mid + back.normalize_or_zero() * AIM_SHORT));
+            let back = back.normalize_or_zero();
+            let fist = animator
+                .skeleton
+                .index_of(bone)
+                .map_or(mid, |b| fist_of(&animator, gt, b));
+            blocked_at = high
+                .then(|| tg.blocking_glove(gt.translation(), fist, moves.block.cone_deg))
+                .flatten();
+            let aim = match blocked_at {
+                // The front of the glove.
+                Some(glove) => glove + back * 0.04,
+                None => mid + back * AIM_SHORT,
+            };
+            attacker.aim = Some((bone.clone(), aim));
         }
         for (k, w) in m.windows.iter().enumerate() {
             if !(w.start..=w.end).contains(&t) {
@@ -576,7 +685,7 @@ pub(crate) fn run_attacks(
                 WindowKind::Cancel => attacker.cancel_open = true,
                 WindowKind::Armor => attacker.armored = true,
                 WindowKind::Warp { range, max_speed } => {
-                    let Some((_, (chest, _))) = target else {
+                    let Some((_, Target { chest, .. })) = target else {
                         continue;
                     };
                     let here = gt.translation();
@@ -622,7 +731,7 @@ pub(crate) fn run_attacks(
                     hitstop,
                     high,
                 } => {
-                    let Some((victim, (chest, head))) = target else {
+                    let Some((victim, tg)) = target else {
                         continue;
                     };
                     if attacker.landed.contains(&k) {
@@ -632,38 +741,59 @@ pub(crate) fn run_attacks(
                         continue;
                     };
                     let fist = fist_of(&animator, gt, b);
-                    let aim = if *high { head } else { chest };
+                    let aim = blocked_at.unwrap_or(if *high { tg.head } else { tg.chest });
                     if fist.distance(aim) > *reach as f64 {
                         continue;
                     }
                     attacker.landed.push(k);
-                    attacker.hits += 1;
                     let mut push = (aim - gt.translation()).as_vec3();
                     push.y = 0.0;
+                    let push = push.normalize_or_zero();
+                    // A guard takes a share of it, and the attacker bounces off.
+                    let block = &moves.block;
+                    let (share, stop, pushback) = if blocked_at.is_some() {
+                        attacker.blocked += 1;
+                        (
+                            (block.damage, block.impulse),
+                            block.hitstop,
+                            -push * block.pushback,
+                        )
+                    } else {
+                        attacker.hits += 1;
+                        ((1.0, 1.0), 1.0, Vec3::ZERO)
+                    };
                     damage.write(DamageEvent {
                         target: victim,
-                        amount: *amount,
+                        amount: *amount * share.0,
                         kind: DamageKind::Blunt,
-                        // Where it lands on them: the front of the face or chest.
+                        // Where it lands on them: the front of the face, chest or glove.
                         point: attacker.aim.as_ref().map_or(fist, |a| a.1),
-                        impulse: push.normalize_or_zero() * *impulse,
+                        impulse: push * *impulse * share.1,
                         source: Some(entity),
                     });
                     landed.push(Landed {
                         attacker: entity,
                         target: victim,
-                        hitstop: *hitstop,
+                        hitstop: *hitstop * stop,
+                        pushback,
                     });
                 }
             }
         }
     }
-    // Hitstop: both fighters hold still for a few frames.
+    // Hitstop: both fighters hold still for a few frames; a blocked attacker is pushed
+    // back (stepping, where it has a hit reaction).
     let mut animators = set.p2();
     for l in landed.drain(..) {
         for e in [l.attacker, l.target] {
-            if let Ok(mut a) = animators.get_mut(e) {
+            if let Ok((mut a, reaction)) = animators.get_mut(e) {
                 a.freeze_for(l.hitstop);
+                if e == l.attacker
+                    && l.pushback != Vec3::ZERO
+                    && let Some(mut r) = reaction
+                {
+                    r.knock(l.pushback, 0.12);
+                }
             }
         }
     }
