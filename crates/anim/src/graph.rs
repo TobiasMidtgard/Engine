@@ -934,7 +934,8 @@ impl GraphInstance {
                         ..args
                     },
                 );
-                if args.sample {
+                // (A layer at no weight changes nothing.)
+                if args.sample && w > 0.0 {
                     if *additive {
                         let rest = std::mem::take(&mut self.rest);
                         apply_additive(out, &tmp, &rest, w, Some(mask));

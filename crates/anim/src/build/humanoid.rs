@@ -3583,6 +3583,9 @@ pub fn clips(s: &Skeleton) -> Vec<AnimationClip> {
         approach(s, Approach::Lunge),
         approach(s, Approach::Leap),
     ]
+    .into_iter()
+    .chain(super::weapons::clips(s))
+    .collect()
 }
 
 /// Locomotion (idle/walk/run by `speed`, leaning by `turn`), plus `heavy_swing` (also on
@@ -3592,7 +3595,9 @@ pub fn clips(s: &Skeleton) -> Vec<AnimationClip> {
 /// (`get_up_back`, `get_up_front`: triggered by the ragdoll when a limp body comes round), and
 /// `fall_brace` and `fall_back_brace` (bracing for a fall forward or backward, on their
 /// triggers from anywhere), and `kneel_hurt` (folding onto a knee from a liver shot, on its
-/// trigger from anywhere).
+/// trigger from anywhere), and the weapon stances and carries ([`super::weapons`]: `sword_stance`,
+/// `shield_guard`, `greatsword_stance` while their parameters are up, and arms-only layers
+/// weighted by `sword_carry`, `greatsword_carry` and `bow_carry`).
 pub fn graph() -> AnimGraph {
     graph_with(GRAPH, &Locomotion::default())
 }
@@ -3797,6 +3802,20 @@ pub fn graph_with(name: &str, motion: &Locomotion) -> AnimGraph {
         weight: Weight::param("arms_folded"),
         additive: false,
     };
+    // Carrying a weapon about (`sword_carry`, `greatsword_carry`, `bow_carry`, 0..1): the
+    // arms hold it while the legs walk.
+    let leaning = ["sword_carry", "greatsword_carry", "bow_carry"]
+        .into_iter()
+        .fold(leaning, |base, carry| NodeDef::Layer {
+            base: Box::new(base),
+            overlay: Box::new(NodeDef::clip(carry)),
+            mask: BoneMaskDef {
+                bones: UPPER_ARM.iter().map(|b| b.to_string()).collect(),
+                include_children: true,
+            },
+            weight: Weight::param(carry),
+            additive: false,
+        });
     let state = |name: &str, node: NodeDef| StateDef {
         name: name.into(),
         node,
@@ -3819,6 +3838,9 @@ pub fn graph_with(name: &str, motion: &Locomotion) -> AnimGraph {
                 state("fall_brace", NodeDef::one_shot("fall_brace")),
                 state("fall_back_brace", NodeDef::one_shot("fall_back_brace")),
                 state("kneel_hurt", NodeDef::one_shot("kneel_hurt")),
+                state("sword_stance", NodeDef::clip("sword_stance")),
+                state("shield_guard", NodeDef::clip("shield_guard")),
+                state("greatsword_stance", NodeDef::clip("greatsword_stance")),
             ],
             transitions: vec![
                 TransitionDef::new(
@@ -3876,6 +3898,55 @@ pub fn graph_with(name: &str, motion: &Locomotion) -> AnimGraph {
                     "guard",
                     "move",
                     Condition::param("guarding", Cmp::Lt, 0.5),
+                    0.4,
+                ),
+                // Weapon stances while their parameters are up: sword and shield ready
+                // (`sword_stance`), the shield raised over it (`shield_guard`, from either),
+                // both hands on a great sword (`greatsword_stance`).
+                TransitionDef::new(
+                    "move",
+                    "sword_stance",
+                    Condition::param("sword_stance", Cmp::Gt, 0.5),
+                    0.3,
+                )
+                .inertialize(),
+                TransitionDef::new(
+                    "sword_stance",
+                    "move",
+                    Condition::param("sword_stance", Cmp::Lt, 0.5),
+                    0.4,
+                ),
+                TransitionDef::new(
+                    "move",
+                    "shield_guard",
+                    Condition::param("shield_guard", Cmp::Gt, 0.5),
+                    0.15,
+                )
+                .inertialize(),
+                TransitionDef::new(
+                    "sword_stance",
+                    "shield_guard",
+                    Condition::param("shield_guard", Cmp::Gt, 0.5),
+                    0.15,
+                )
+                .inertialize(),
+                TransitionDef::new(
+                    "shield_guard",
+                    "sword_stance",
+                    Condition::param("shield_guard", Cmp::Lt, 0.5),
+                    0.25,
+                ),
+                TransitionDef::new(
+                    "move",
+                    "greatsword_stance",
+                    Condition::param("greatsword_stance", Cmp::Gt, 0.5),
+                    0.3,
+                )
+                .inertialize(),
+                TransitionDef::new(
+                    "greatsword_stance",
+                    "move",
+                    Condition::param("greatsword_stance", Cmp::Lt, 0.5),
                     0.4,
                 ),
                 TransitionDef::new("move", "reach", Condition::trigger("reach"), 0.25),

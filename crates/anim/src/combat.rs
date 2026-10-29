@@ -28,6 +28,14 @@
 //! pushed back a little ([`HitReaction::knock`]) as fighting games push a blocked attacker
 //! out of reach. [`Attacker::blocked`] counts them for the rules.
 //!
+//! Weapons ([`AttackSet::sword_shield`], [`AttackSet::greatsword`], [`AttackSet::bow`]): a
+//! hit window with a [`Striker`] lands when that segment (a blade from hilt to tip, a
+//! shield's face) swept from last frame's place to this frame's comes within reach of the
+//! target (a fast cut moves farther in a frame than its own width), pushes along the blade's
+//! motion and does the striker's kind of damage. A target with a [`Shield`] that is guarding
+//! (`guarding` or `shield_guard`) blocks at the shield: low strikes as well as high, from a
+//! wider cone, letting through what the shield's [`Block`] says.
+//!
 //! [`HitReaction::knock`]: crate::hit::HitReaction::knock
 
 use std::collections::{HashMap, HashSet};
@@ -39,6 +47,7 @@ use engine_world::{DamageEvent, DamageKind};
 use crate::Animator;
 use crate::animator::{AnimationLibrary, AnimatorSettings};
 use crate::build::humanoid::{Approach as Travel, Evasion, Punch};
+use crate::build::weapons::{self, WeaponMove};
 use crate::hit::HitReaction;
 use crate::hurt::Hurt;
 use crate::ik::{to_model, two_bone};
@@ -63,6 +72,9 @@ pub enum WindowKind {
         /// Aimed at the target's liver (its own right side, under the ribs) instead.
         #[serde(default)]
         liver: bool,
+        /// What strikes, when it isn't the fist: a blade or a shield's face on `bone`.
+        #[serde(default)]
+        striker: Option<Striker>,
     },
     /// A buffered input matching a link starts the linked move.
     Cancel,
@@ -77,6 +89,78 @@ pub enum WindowKind {
     },
     /// Hyper armor: a hit doesn't interrupt (for the rules to read).
     Armor,
+}
+
+/// A striking segment in a bone's frame (a sword from hilt to tip, a shield's face across
+/// its middle), and the kind of damage it does.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Striker {
+    pub from: Vec3,
+    pub to: Vec3,
+    #[serde(default)]
+    pub kind: DamageKind,
+}
+
+impl Striker {
+    /// A sword's blade in the right hand.
+    pub fn sword(kind: DamageKind) -> Self {
+        Self::blade(weapons::SWORD_BLADE, kind)
+    }
+
+    /// A great sword's blade in the right hand.
+    pub fn greatsword(kind: DamageKind) -> Self {
+        Self::blade(weapons::GREATSWORD_BLADE, kind)
+    }
+
+    fn blade([from, to]: [f32; 2], kind: DamageKind) -> Self {
+        Self {
+            from: weapons::GRIP + weapons::BLADE_AXIS * from,
+            to: weapons::GRIP + weapons::BLADE_AXIS * to,
+            kind,
+        }
+    }
+
+    /// A round shield's face in the left hand, across its middle along the handle.
+    pub fn shield() -> Self {
+        let across = weapons::HANDLE_AXIS * weapons::SHIELD_RADIUS * 0.8;
+        Self {
+            from: weapons::SHIELD_CENTER - across,
+            to: weapons::SHIELD_CENTER + across,
+            kind: DamageKind::Blunt,
+        }
+    }
+}
+
+/// A shield on a character's arm, for blocking: guarding, it blocks strikes at its face
+/// instead of on the gloves, low ones as well as high, letting through what its `block`
+/// says (the attacker's set decides for a block on the gloves).
+#[derive(Component, Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Shield {
+    /// The bone it is held by, and the middle of its face in that bone's frame.
+    pub bone: String,
+    pub center: Vec3,
+    pub radius: f32,
+    pub block: Block,
+}
+
+impl Default for Shield {
+    fn default() -> Self {
+        Self {
+            bone: "hand_l".into(),
+            center: weapons::SHIELD_CENTER,
+            radius: weapons::SHIELD_RADIUS,
+            // A shield takes nearly all of it and bounces the attacker off harder than a
+            // glove, from almost square on to the side.
+            block: Block {
+                damage: 0.05,
+                impulse: 0.3,
+                hitstop: 0.8,
+                pushback: 0.2,
+                cone_deg: 80.0,
+            },
+        }
+    }
 }
 
 /// A stretch of a move, seconds into its clip.
@@ -261,6 +345,7 @@ impl AttackSet {
                             },
                             high: p != Punch::BodyHook,
                             liver: p == Punch::BodyHook,
+                            striker: None,
                         },
                         start: at - 0.06,
                         end: at + 0.05,
@@ -368,6 +453,280 @@ impl AttackSet {
     }
 }
 
+impl AttackSet {
+    /// Sword and shield: a forehand slash (light) or a one-handed overhead (heavy) from
+    /// neutral; slash → backhand → thrust on light presses; a heavy press after the slash
+    /// rams the shield into the foe, after the backhand throws the overhead; after the bash
+    /// a light press thrusts and a heavy one throws the overhead. Each closes to its range in
+    /// its wind-up; the finishers step back out after.
+    pub fn sword_shield() -> Self {
+        use WeaponMove as W;
+        let cut = |kind| Some(Striker::sword(kind));
+        AttackSet {
+            name: "sword_shield".into(),
+            moves: vec![
+                weapon(
+                    W::SwordSlash,
+                    Some("attack_light"),
+                    &[
+                        ("attack_light", W::SwordBackhand),
+                        ("attack_heavy", W::ShieldBash),
+                    ],
+                    1.1,
+                    Some(Blow::new(12.0, 28.0, 0.07)),
+                    cut(DamageKind::Slash),
+                ),
+                weapon(
+                    W::SwordBackhand,
+                    None,
+                    &[
+                        ("attack_light", W::SwordThrust),
+                        ("attack_heavy", W::SwordOverhead),
+                    ],
+                    1.1,
+                    Some(Blow::new(12.0, 28.0, 0.07)),
+                    cut(DamageKind::Slash),
+                ),
+                weapon(
+                    W::SwordThrust,
+                    None,
+                    &[],
+                    1.2,
+                    Some(Blow::new(18.0, 40.0, 0.1)),
+                    cut(DamageKind::Pierce),
+                ),
+                weapon(
+                    W::SwordOverhead,
+                    Some("attack_heavy"),
+                    &[],
+                    1.05,
+                    Some(Blow {
+                        high: true,
+                        ..Blow::new(24.0, 55.0, 0.12)
+                    }),
+                    cut(DamageKind::Slash),
+                ),
+                weapon(
+                    W::ShieldBash,
+                    None,
+                    &[
+                        ("attack_light", W::SwordThrust),
+                        ("attack_heavy", W::SwordOverhead),
+                    ],
+                    0.85,
+                    // Little harm, a big shove: the foe staggers back open.
+                    Some(Blow::new(5.0, 75.0, 0.08)),
+                    Some(Striker::shield()),
+                ),
+            ],
+            block: Block::default(),
+            approaches: Vec::new(),
+        }
+    }
+
+    /// Great sword: a horizontal sweep (light) or an overhead from vom Tag (heavy) from
+    /// neutral; sweep and rising cut alternate on light presses, and a heavy press after
+    /// either throws the overhead, which can't be interrupted while it winds up (armor) and
+    /// lands hard enough to put a person down.
+    pub fn greatsword() -> Self {
+        use WeaponMove as W;
+        let cut = Some(Striker::greatsword(DamageKind::Slash));
+        let mut overhead = weapon(
+            W::GreatswordOverhead,
+            Some("attack_heavy"),
+            &[],
+            1.4,
+            Some(Blow {
+                high: true,
+                ..Blow::new(42.0, 120.0, 0.16)
+            }),
+            cut,
+        );
+        overhead.windows.push(Window {
+            kind: WindowKind::Armor,
+            start: 0.0,
+            end: W::GreatswordOverhead.timing().1[0],
+        });
+        AttackSet {
+            name: "greatsword".into(),
+            moves: vec![
+                weapon(
+                    W::GreatswordSweep,
+                    Some("attack_light"),
+                    &[
+                        ("attack_light", W::GreatswordRise),
+                        ("attack_heavy", W::GreatswordOverhead),
+                    ],
+                    1.45,
+                    Some(Blow::new(22.0, 60.0, 0.11)),
+                    cut,
+                ),
+                weapon(
+                    W::GreatswordRise,
+                    None,
+                    &[
+                        ("attack_light", W::GreatswordSweep),
+                        ("attack_heavy", W::GreatswordOverhead),
+                    ],
+                    1.4,
+                    Some(Blow::new(22.0, 60.0, 0.11)),
+                    cut,
+                ),
+                overhead,
+            ],
+            block: Block::default(),
+            approaches: Vec::new(),
+        }
+    }
+
+    /// Bow: a quick shot (light) or a long aimed one (heavy). Each turns to face the target
+    /// without stepping; the arrow is the game's to fly, on the clip's `release` event (the
+    /// `draw` curve says how far the string is back, `nocked` whether an arrow is on it).
+    pub fn bow() -> Self {
+        let shot = |m: WeaponMove, input: &str| {
+            let (secs, [release, follow]) = m.timing();
+            AttackMove {
+                name: m.clip_name().into(),
+                clip: m.clip_name().into(),
+                starts_on: Some(input.into()),
+                fade_in: 0.2,
+                fade_out: 0.3,
+                windows: vec![
+                    Window {
+                        kind: WindowKind::Warp {
+                            range: 0.0,
+                            max_speed: 0.0,
+                            ease: false,
+                        },
+                        start: 0.0,
+                        end: release,
+                    },
+                    Window {
+                        kind: WindowKind::Cancel,
+                        start: follow,
+                        end: secs * 0.9,
+                    },
+                ],
+                links: vec![
+                    Link {
+                        input: "attack_light".into(),
+                        to: WeaponMove::BowShot.clip_name().into(),
+                    },
+                    Link {
+                        input: "attack_heavy".into(),
+                        to: WeaponMove::BowShotFull.clip_name().into(),
+                    },
+                ],
+                evaded_by: None,
+            }
+        };
+        AttackSet {
+            name: "bow".into(),
+            moves: vec![
+                shot(WeaponMove::BowShot, "attack_light"),
+                shot(WeaponMove::BowShotFull, "attack_heavy"),
+            ],
+            block: Block::default(),
+            approaches: Vec::new(),
+        }
+    }
+}
+
+/// What a weapon blow does when it lands.
+#[derive(Clone, Copy)]
+struct Blow {
+    damage: f32,
+    impulse: f32,
+    hitstop: f32,
+    high: bool,
+}
+
+impl Blow {
+    fn new(damage: f32, impulse: f32, hitstop: f32) -> Self {
+        Self {
+            damage,
+            impulse,
+            hitstop,
+            high: false,
+        }
+    }
+}
+
+/// A weapon move from its clip ([`WeaponMove::timing`]): it closes to `range` of the target
+/// over its wind-up, lands `blow` with `striker` while the stroke passes in front (from a
+/// third of the way through it), and takes a linked press after the stroke. A finisher (no
+/// links) steps back out a little on the way back to the stance.
+fn weapon(
+    m: WeaponMove,
+    starts_on: Option<&str>,
+    links: &[(&str, WeaponMove)],
+    range: f32,
+    blow: Option<Blow>,
+    striker: Option<Striker>,
+) -> AttackMove {
+    let (secs, [a, b]) = m.timing();
+    let bone = if m.left_handed() { "hand_l" } else { "hand_r" };
+    let mut windows = vec![Window {
+        kind: WindowKind::Warp {
+            range,
+            max_speed: 2.5,
+            ease: false,
+        },
+        start: 0.0,
+        end: a + (b - a) * 0.3,
+    }];
+    if let Some(blow) = blow {
+        windows.push(Window {
+            kind: WindowKind::Hit {
+                bone: bone.into(),
+                // From the middle of the chest or face: a blade that comes this close has
+                // crossed the body (a torso is about 0.35 m across).
+                reach: 0.3,
+                damage: blow.damage,
+                impulse: blow.impulse,
+                hitstop: blow.hitstop,
+                high: blow.high,
+                liver: false,
+                striker,
+            },
+            start: a + (b - a) * 0.3,
+            end: b + 0.03,
+        });
+    }
+    windows.push(Window {
+        kind: WindowKind::Cancel,
+        start: b + 0.04,
+        end: secs * 0.9,
+    });
+    if links.is_empty() {
+        windows.push(Window {
+            kind: WindowKind::Warp {
+                range: range + 0.35,
+                max_speed: 1.4,
+                ease: false,
+            },
+            start: b + 0.1,
+            end: secs,
+        });
+    }
+    AttackMove {
+        name: m.clip_name().into(),
+        clip: m.clip_name().into(),
+        starts_on: starts_on.map(Into::into),
+        fade_in: 0.1,
+        fade_out: 0.25,
+        windows,
+        links: links
+            .iter()
+            .map(|(input, to)| Link {
+                input: (*input).into(),
+                to: to.clip_name().into(),
+            })
+            .collect(),
+        evaded_by: None,
+    }
+}
+
 /// An approach move on the humanoid's lunge or leap: the warp eases the body to just outside
 /// punching range over the clip's travel (at most `max_speed` m/s), and the punch follows on
 /// touch-down.
@@ -407,8 +766,13 @@ pub struct AttackSets(pub HashMap<String, AttackSet>);
 
 impl Default for AttackSets {
     fn default() -> Self {
-        let boxing = AttackSet::boxing();
-        Self(HashMap::from([(boxing.name.clone(), boxing)]))
+        let sets = [
+            AttackSet::boxing(),
+            AttackSet::sword_shield(),
+            AttackSet::greatsword(),
+            AttackSet::bow(),
+        ];
+        Self(sets.into_iter().map(|s| (s.name.clone(), s)).collect())
     }
 }
 
@@ -479,6 +843,9 @@ pub struct Attacker {
     /// face or chest), while a move with a hit window plays at a target.
     #[serde(skip)]
     pub aim: Option<(String, DVec3)>,
+    /// Where the striker of the hit window under way was last frame (world), to sweep from.
+    #[serde(skip)]
+    swept: Option<(DVec3, DVec3)>,
 }
 
 impl Default for Attacker {
@@ -504,6 +871,7 @@ impl Default for Attacker {
             whiffed: Vec::new(),
             committed: None,
             aim: None,
+            swept: None,
         }
     }
 }
@@ -651,7 +1019,7 @@ pub(crate) struct Landed {
 }
 
 /// Where a target can be struck (world): its chest and face, and its guard if it is up.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct Target {
     chest: DVec3,
     head: DVec3,
@@ -660,11 +1028,13 @@ struct Target {
     guard: Option<Guard>,
 }
 
-/// A raised guard: which way the target faces (flat) and its knuckles (world).
-#[derive(Clone, Copy)]
+/// A raised guard: which way the target faces (flat), its knuckles (world), and the middle
+/// of its shield's face with the shield's radius and block, if it has one.
+#[derive(Clone)]
 struct Guard {
     forward: DVec3,
     gloves: [DVec3; 2],
+    shield: Option<(DVec3, f32, Block)>,
 }
 
 impl Target {
@@ -679,17 +1049,29 @@ impl Target {
         }
     }
 
-    /// The glove a high strike from `from` (flat on the ground, the attacker's position)
-    /// with the fist now at `fist` lands on, if the guard is up and faces it.
-    fn blocking_glove(&self, from: DVec3, fist: DVec3, cone_deg: f32) -> Option<DVec3> {
-        let g = self.guard?;
+    /// Where a strike from `from` (flat on the ground, the attacker's position) with the
+    /// fist now at `fist` is blocked, if the guard is up and faces it: on a shield (high or
+    /// low, with the shield's block and radius), or for a high strike on the nearer glove.
+    fn blocking(
+        &self,
+        from: DVec3,
+        fist: DVec3,
+        high: bool,
+        cone_deg: f32,
+    ) -> Option<(DVec3, Option<(f32, Block)>)> {
+        let g = self.guard.as_ref()?;
         let to = (from - self.chest).with_y(0.0).normalize_or_zero();
-        if g.forward.dot(to) < (cone_deg as f64).to_radians().cos() {
+        let faces = |cone: f32| g.forward.dot(to) >= (cone as f64).to_radians().cos();
+        if let Some((center, radius, block)) = &g.shield {
+            return faces(block.cone_deg).then(|| (*center, Some((*radius, block.clone()))));
+        }
+        if !high || !faces(cone_deg) {
             return None;
         }
         g.gloves
             .into_iter()
             .min_by(|a, b| a.distance(fist).total_cmp(&b.distance(fist)))
+            .map(|glove| (glove, None))
     }
 }
 
@@ -724,6 +1106,7 @@ pub(crate) fn run_attacks(
             Option<&Hurt>,
             Option<&Attacker>,
             Option<&Evader>,
+            Option<&Shield>,
         )>,
         Query<(&mut Animator, Option<&mut HitReaction>)>,
     )>,
@@ -747,7 +1130,7 @@ pub(crate) fn run_attacks(
             .collect();
         let q = set.p1();
         for t in attackers {
-            let Ok((gt, animator, params, down, hurt, striking, evader)) = q.get(t) else {
+            let Ok((gt, animator, params, down, hurt, striking, evader, shield)) = q.get(t) else {
                 continue;
             };
             // Knocked down or on a knee: nothing to strike until it is up again.
@@ -762,7 +1145,7 @@ pub(crate) fn run_attacks(
             };
             // Too hurt to keep the hands up, or throwing a punch of its own (the opening a
             // counter-puncher waits for), it doesn't block.
-            let guarding = params.is_some_and(|p| p.get("guarding") > 0.5)
+            let guarding = params.is_some_and(|p| p.get("guarding") > 0.5 || p.get("shield_guard") > 0.5)
                 && !hurt.is_some_and(Hurt::guard_down)
                 && !striking.is_some_and(|a| a.current.is_some())
                 // Moving its head out of the way instead.
@@ -775,6 +1158,12 @@ pub(crate) fn run_attacks(
                         .normalize()
                         .as_dvec3(),
                     gloves: [glove("hand_l")?, glove("hand_r")?],
+                    shield: shield.and_then(|sh| {
+                        let b = a.skeleton.index_of(&sh.bone)?;
+                        let m = a.model[b];
+                        let center = crate::ik::to_world(gt, m.transform_point(sh.center));
+                        Some((center, sh.radius, sh.block.clone()))
+                    }),
                 })
             });
             // The head bone sits at the top of the neck: the face is a little above it.
@@ -919,6 +1308,7 @@ pub(crate) fn run_attacks(
             attacker.landed.clear();
             attacker.whiffed.clear();
             attacker.committed = None;
+            attacker.swept = None;
             attacker.struck = attacker.target;
             if from_press {
                 attacker.buffered = None;
@@ -953,7 +1343,7 @@ pub(crate) fn run_attacks(
         };
         let target = attacker
             .struck
-            .and_then(|e| targets.get(&e).map(|p| (e, *p)));
+            .and_then(|e| targets.get(&e).map(|p| (e, p)));
         // Aim the strike: the front of the face (or chest), a fist's width short of its
         // middle on the attacker's side, or the glove of a guard that blocks it.
         let mut blocked_at = None;
@@ -974,12 +1364,10 @@ pub(crate) fn run_attacks(
                 .skeleton
                 .index_of(bone)
                 .map_or(mid, |b| fist_of(&animator, gt, b));
-            blocked_at = high
-                .then(|| tg.blocking_glove(gt.translation(), fist, moves.block.cone_deg))
-                .flatten();
-            let mut aim = match blocked_at {
-                // The front of the glove.
-                Some(glove) => glove + back * 0.04,
+            blocked_at = tg.blocking(gt.translation(), fist, *high, moves.block.cone_deg);
+            let mut aim = match &blocked_at {
+                // The front of the glove or shield.
+                Some((guard, _)) => *guard + back * 0.04,
                 None => mid + back * AIM_SHORT,
             };
             // Shortly before the hit the strike is committed: from then on the fist goes where
@@ -989,6 +1377,7 @@ pub(crate) fn run_attacks(
             }
             attacker.aim = Some((bone.clone(), aim));
         }
+        let mut sweeping = false;
         for (k, w) in m.windows.iter().enumerate() {
             // A hit window a long frame stepped right over still lands (the fist is still
             // close, its aim fading out); the others act only while they are open.
@@ -1005,9 +1394,10 @@ pub(crate) fn run_attacks(
                     max_speed,
                     ease,
                 } => {
-                    let Some((_, Target { chest, .. })) = target else {
+                    let Some((_, tg)) = target else {
                         continue;
                     };
+                    let chest = tg.chest;
                     let here = gt.translation();
                     let mut to = chest - here;
                     to.y = 0.0;
@@ -1055,6 +1445,7 @@ pub(crate) fn run_attacks(
                     hitstop,
                     high,
                     liver,
+                    striker,
                 } => {
                     let Some((victim, tg)) = target else {
                         continue;
@@ -1065,17 +1456,49 @@ pub(crate) fn run_attacks(
                     let Some(b) = animator.skeleton.index_of(bone) else {
                         continue;
                     };
-                    let fist = fist_of(&animator, gt, b);
-                    let aim = blocked_at.unwrap_or(tg.aim(*high, *liver));
-                    if fist.distance(aim) > *reach as f64 {
+                    // A shield is struck anywhere on its face.
+                    let (aim, reach) = match &blocked_at {
+                        Some((guard, Some((radius, _)))) => (*guard, reach.max(radius * 0.8)),
+                        Some((guard, None)) => (*guard, *reach),
+                        None => (tg.aim(*high, *liver), *reach),
+                    };
+                    let to_target = (aim - gt.translation()).with_y(0.0).normalize_or_zero();
+                    // How close it came, where it lands on them and which way it pushes: a
+                    // striker swept over the frame pushes along its motion (and on into
+                    // them), a fist straight in.
+                    let (close, point, push) = match striker {
+                        Some(st) => {
+                            sweeping = true;
+                            let m = animator.model[b];
+                            let now = (
+                                crate::ik::to_world(gt, m.transform_point(st.from)),
+                                crate::ik::to_world(gt, m.transform_point(st.to)),
+                            );
+                            let was = attacker.swept.replace(now).unwrap_or(now);
+                            let (close, point) = sweep(was, now, aim);
+                            let motion = (now.1 - was.1).with_y(0.0).normalize_or_zero();
+                            (
+                                close,
+                                point,
+                                (motion + to_target * 0.6).normalize_or(to_target),
+                            )
+                        }
+                        None => {
+                            let fist = fist_of(&animator, gt, b);
+                            let point = attacker.aim.as_ref().map_or(fist, |a| a.1);
+                            (fist.distance(aim), point, to_target)
+                        }
+                    };
+                    if close > reach as f64 {
                         continue;
                     }
                     attacker.landed.push(k);
-                    let mut push = (aim - gt.translation()).as_vec3();
-                    push.y = 0.0;
-                    let push = push.normalize_or_zero();
+                    let push = push.as_vec3();
                     // A guard takes a share of it, and the attacker bounces off.
-                    let block = &moves.block;
+                    let block = match &blocked_at {
+                        Some((_, Some((_, shield)))) => shield,
+                        _ => &moves.block,
+                    };
                     let (share, stop, pushback) = if blocked_at.is_some() {
                         attacker.blocked += 1;
                         (
@@ -1090,9 +1513,10 @@ pub(crate) fn run_attacks(
                     damage.write(DamageEvent {
                         target: victim,
                         amount: *amount * share.0,
-                        kind: DamageKind::Blunt,
-                        // Where it lands on them: the front of the face, chest or glove.
-                        point: attacker.aim.as_ref().map_or(fist, |a| a.1),
+                        kind: striker.map_or(DamageKind::Blunt, |s| s.kind),
+                        // Where it lands on them: the front of the face, chest, glove or
+                        // shield, or where the blade crossed them.
+                        point,
                         impulse: push * *impulse * share.1,
                         source: Some(entity),
                     });
@@ -1104,6 +1528,9 @@ pub(crate) fn run_attacks(
                     });
                 }
             }
+        }
+        if !sweeping {
+            attacker.swept = None;
         }
         // Strikes at a target whose window has passed without landing missed.
         if target.is_some() {
@@ -1135,6 +1562,22 @@ pub(crate) fn run_attacks(
             }
         }
     }
+}
+
+/// The closest a segment swept from `was` to `now` comes to `p`, and the point on it.
+fn sweep(was: (DVec3, DVec3), now: (DVec3, DVec3), p: DVec3) -> (f64, DVec3) {
+    const STEPS: usize = 6;
+    (0..=STEPS)
+        .map(|k| {
+            let u = k as f64 / STEPS as f64;
+            let (a, b) = (was.0.lerp(now.0, u), was.1.lerp(now.1, u));
+            let ab = b - a;
+            let along = ((p - a).dot(ab) / ab.length_squared().max(1e-12)).clamp(0.0, 1.0);
+            let q = a + ab * along;
+            (q.distance(p), q)
+        })
+        .min_by(|x, y| x.0.total_cmp(&y.0))
+        .unwrap_or((f64::INFINITY, p))
 }
 
 /// Moves its head out of the way of strikes aimed at it (slips, rolls, pull-backs): when a

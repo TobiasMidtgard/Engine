@@ -24,7 +24,7 @@
 //! when they are first hit; insert one to tune it.
 
 use engine_core::prelude::*;
-use engine_world::DamageEvent;
+use engine_world::{DamageEvent, DamageKind};
 
 use crate::animator::Animator;
 use crate::hit::HitReaction;
@@ -216,7 +216,12 @@ pub(crate) fn take_hurts(
         if down.is_some() || !animator.posed() {
             continue;
         }
-        let region = region_of(animator, to_model(gt, hit.point));
+        let region = match region_of(animator, to_model(gt, hit.point)) {
+            // A blade under the ribs is a wound (gameplay's), not the blow to the liver that
+            // folds a body onto a knee.
+            HurtRegion::Liver if hit.kind != DamageKind::Blunt => HurtRegion::Body,
+            region => region,
+        };
         let push = if hit.impulse.length_squared() > 1e-6 {
             hit.impulse.length()
         } else {

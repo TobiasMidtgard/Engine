@@ -46,6 +46,7 @@ use crate::horse_model::HorseModel;
 use crate::ik::{GroundProbe, IkShape, IkSurface, IkSurfaces, LookAt, Reach, ReachIk};
 use crate::muscle::{MorphWeights, MuscleRig};
 use crate::procedural::spring::SpringChains;
+use crate::props;
 use crate::retarget::HandGrip;
 use crate::shuttle::{ShuttleLeg, ShuttleRun, Watch};
 use crate::skin::{SkinMaterial, SkinnedMesh, SkinnedMeshRenderer};
@@ -67,6 +68,18 @@ const LANE: DVec3 = DVec3::new(-23.0, 0.0, 7.0);
 /// course and the car loop, and how long its round takes, s.
 const FREEFLOW: DVec3 = DVec3::new(0.0, 0.0, -10.0);
 const FREEFLOW_PERIOD: f32 = 12.0;
+/// The weapons yard, south-west of the car loop (x, z from the paddock's center): the
+/// sword-and-shield pair, the great sword and its dummy south of them, the archer to the east
+/// shooting south at a butt.
+const DUEL: DVec3 = DVec3::new(-24.0, 0.0, -16.0);
+const DUEL_PERIOD: f32 = 13.0;
+const GREATSWORD: DVec3 = DVec3::new(-24.0, 0.0, -21.0);
+const GREATSWORD_PERIOD: f32 = 10.0;
+const ARCHER: DVec3 = DVec3::new(-18.0, 0.0, -12.0);
+const BUTT: DVec3 = DVec3::new(-18.0, 0.0, -24.0);
+/// How high the butt's gold is, m.
+const BUTT_GOLD: f64 = 1.3;
+const ARCHERY_PERIOD: f32 = 9.0;
 const LANE_LENGTH: f32 = 15.0;
 const DOG_PATH: [[f32; 3]; 10] = [
     [-12.0, 12.0, 1.1],
@@ -110,6 +123,15 @@ pub struct DemoEntities {
     pub stuntman: Entity,
     pub runner: Entity,
     pub coach: Entity,
+    /// Weapons yard: the sword-and-shield fighter who opens the exchange, and the one it
+    /// fights.
+    pub swordsman: Entity,
+    pub shield_partner: Entity,
+    /// Swings a great sword at `greatsword_dummy`.
+    pub greatsword: Entity,
+    pub greatsword_dummy: Entity,
+    /// Shoots at the butt.
+    pub archer: Entity,
 }
 
 /// Follows a closed, smooth path through `waypoints` (`[x, z, speed]`, meters and m/s,
@@ -432,6 +454,10 @@ pub(crate) fn register(app: &mut App) {
     app.register_component::<DemoPath>(
         "Demo mover: follows a closed path of [x, z, speed] waypoints (m, m/s) on the ground.",
     )
+    .register_component::<DemoArcher>(
+        "Demo archer: each release of its bow shot looses an arrow from the draw hand at a \
+         point (world).",
+    )
     .register_component::<DemoScript>(
         "Demo timeline: triggers and parameter values at times (s), repeating every period.",
     )
@@ -448,6 +474,7 @@ pub(crate) fn register(app: &mut App) {
         (
             demo_path_system,
             demo_script_system,
+            loose_arrows,
             stunt::stunt_system,
             crate::shuttle::shuttle_system,
             crate::shuttle::watch_system,
@@ -979,6 +1006,298 @@ const SPECTATOR_Z: f64 = 9.0;
 /// The spectators: x, seed, sex (0 female .. 1 male), age range, ancestry weights (african,
 /// asian, european), whether they watch the tire (or glance about), and when they wince (s
 /// into the athlete's round; the strike lands at 1.56 s).
+/// The weapons yard's people.
+struct Yard {
+    swordsman: Entity,
+    shield_partner: Entity,
+    greatsword: Entity,
+    dummy: Entity,
+    archer: Entity,
+}
+
+/// An archer in the paddock: on each `release` of its bow shot, an arrow flies from the draw
+/// hand to `at` (world), a hand's width apart shot to shot.
+#[derive(Component, Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DemoArcher {
+    pub at: DVec3,
+    pub shots: u32,
+}
+
+/// The weapons yard: a sword-and-shield exchange (a combo of two cuts and a thrust, an
+/// overhead the partner's raised shield takes, a slash into a shield bash and a thrust; then
+/// the partner attacks into the fighter's shield), a great sword against a dummy (a sweep, a
+/// rising cut and an overhead that knocks it down) and an archer shooting at a butt 12 m off
+/// (a quick shot, a full draw held on the anchor, another quick one).
+fn weapons_yard(world: &mut World, origin: DVec3) -> Yard {
+    let at = |p: DVec3, x: f64, z: f64| origin + p + DVec3::new(x, 0.0, z);
+    let facing = |yaw_deg: f32| Quat::from_rotation_y(yaw_deg.to_radians());
+    // A floor flush with the sand under the whole yard, for the knocked-down to land on.
+    let floor = Transform::from_translation(origin + DVec3::new(-21.5, -0.25, -18.0));
+    world.spawn((
+        floor,
+        GlobalTransform::from(floor),
+        RigidBody::fixed(),
+        Collider::cuboid(Vec3::new(6.5, 0.25, 7.5)),
+    ));
+
+    // --- Sword and shield: the swordsman on the west, facing east, the partner a step and a
+    // half away facing back.
+    let swordsman = spawn_humanoid(
+        world,
+        humanoid::Outfit::Athlete,
+        Transform::from_translation(at(DUEL, -0.7, 0.0)).with_rotation(facing(-90.0)),
+    );
+    dress(world, swordsman, "athlete", SkinMaterial::default());
+    let shield_partner = spawn_humanoid(
+        world,
+        humanoid::Outfit::Shirt,
+        Transform::from_translation(at(DUEL, 0.7, 0.0)).with_rotation(facing(90.0)),
+    );
+    dress(world, shield_partner, "lifter", shirt_detail());
+    let light = |at: f32| DemoStep::trigger(at, "attack_light");
+    let heavy = |at: f32| DemoStep::trigger(at, "attack_heavy");
+    let guard = |at: f32, on: bool| DemoStep::param(at, "shield_guard", if on { 1.0 } else { 0.0 });
+    let stance = DemoStep::param(0.02, "sword_stance", 1.0);
+    let duel = |steps: Vec<DemoStep>| DemoScript {
+        period: DUEL_PERIOD,
+        steps,
+        time: 0.0,
+        home: None,
+    };
+    for (person, foe, name, steps) in [
+        (
+            swordsman,
+            shield_partner,
+            "Swordsman",
+            vec![
+                stance.clone(),
+                // Slash, backhand, thrust.
+                light(0.6),
+                light(1.02),
+                light(1.42),
+                DemoStep::home(3.0),
+                // An overhead into the raised shield.
+                heavy(4.0),
+                // A slash, the shield rammed in, a thrust.
+                light(5.4),
+                heavy(5.82),
+                light(6.45),
+                DemoStep::home(8.0),
+                // Its own shield up for the partner's turn.
+                guard(8.4, true),
+                guard(11.6, false),
+                DemoStep::home(12.0),
+            ],
+        ),
+        (
+            shield_partner,
+            swordsman,
+            "Shield partner",
+            vec![
+                stance.clone(),
+                DemoStep::home(2.6),
+                guard(3.4, true),
+                guard(6.3, false),
+                DemoStep::home(8.0),
+                light(9.0),
+                light(9.42),
+                heavy(9.86),
+                DemoStep::home(12.0),
+            ],
+        ),
+    ] {
+        props::spawn_sword(world, person);
+        props::spawn_shield(world, person);
+        world.entity_mut(person).insert((
+            Name::new(name),
+            HitReaction::default(),
+            // Blows don't wind or daze them (a hurt fighter drops its guard): the exchange
+            // shows the moves, round after round.
+            {
+                let mut hurt = crate::hurt::Hurt::default();
+                hurt.enabled = false;
+                hurt
+            },
+            crate::combat::Attacker::new("sword_shield", Some(foe)),
+            duel(steps),
+        ));
+    }
+
+    // --- Great sword against a dummy whose legs give under the overhead.
+    let greatsword = spawn_humanoid(
+        world,
+        humanoid::Outfit::Athlete,
+        Transform::from_translation(at(GREATSWORD, -0.8, 0.0)).with_rotation(facing(-90.0)),
+    );
+    dress(world, greatsword, "athlete", SkinMaterial::default());
+    let dummy = spawn_humanoid(
+        world,
+        humanoid::Outfit::Shirt,
+        Transform::from_translation(at(GREATSWORD, 0.8, 0.0)).with_rotation(facing(90.0)),
+    );
+    dress(world, dummy, "walker", SkinMaterial::default());
+    world.entity_mut(dummy).insert((
+        Name::new("Great sword dummy"),
+        HitReaction {
+            // The light cuts knock it back a step; the overhead puts it down.
+            fall_beyond: 0.7,
+            down_secs: 3.0,
+            ..Default::default()
+        },
+        DemoScript {
+            period: GREATSWORD_PERIOD,
+            steps: vec![DemoStep::home(9.0)],
+            time: 0.0,
+            home: None,
+        },
+    ));
+    props::spawn_greatsword(world, greatsword);
+    world.entity_mut(greatsword).insert((
+        Name::new("Great sword"),
+        HitReaction::default(),
+        crate::combat::Attacker::new("greatsword", Some(dummy)),
+        DemoScript {
+            period: GREATSWORD_PERIOD,
+            steps: vec![
+                DemoStep::param(0.02, "greatsword_stance", 1.0),
+                light(0.8),
+                light(1.55),
+                heavy(2.25),
+                DemoStep::home(8.5),
+            ],
+            time: 0.0,
+            home: None,
+        },
+    ));
+
+    // --- Archery: a straw butt on a stand, its face to the archer, and the archer.
+    let gold = at(BUTT, 0.0, 0.0) + DVec3::Y * BUTT_GOLD;
+    let straw = StandardMaterial::hex(0xc8a868).with_roughness(0.95);
+    let stand = StandardMaterial::preset(MaterialPreset::WoodPlanks).with_tint(0.55, 0.47, 0.4);
+    // The face is a disc square to Z (a cylinder's axis is its Y).
+    let face = Quat::from_rotation_x(PI / 2.0);
+    let butt =
+        |world: &mut World, shape: MeshShape, material: StandardMaterial, p: DVec3, r: Quat| {
+            let t = Transform::from_translation(p).with_rotation(r);
+            world
+                .spawn((
+                    t,
+                    GlobalTransform::from(t),
+                    MeshRenderer::new(shape, material),
+                ))
+                .id()
+        };
+    let target = butt(
+        world,
+        MeshShape::Cylinder {
+            radius: 0.62,
+            height: 0.3,
+            segments: 32,
+        },
+        straw,
+        gold,
+        face,
+    );
+    world.entity_mut(target).insert(Name::new("Archery butt"));
+    // Rings on the face, outermost first, each a little proud of the one behind.
+    for (k, (radius, color)) in [
+        (0.5, 0xf2f0ea),
+        (0.4, 0x202226),
+        (0.3, 0x2e7fd0),
+        (0.2, 0xd23a2c),
+        (0.1, 0xf2c81e),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        butt(
+            world,
+            MeshShape::Cylinder {
+                radius,
+                height: 0.004,
+                segments: 32,
+            },
+            StandardMaterial::hex(color).with_roughness(0.7),
+            gold + DVec3::Z * (0.151 + 0.002 * k as f64),
+            face,
+        );
+    }
+    for x in [-0.42, 0.42] {
+        butt(
+            world,
+            MeshShape::Cuboid {
+                size: [0.08, 1.9, 0.08],
+            },
+            stand,
+            at(BUTT, x, -0.3) + DVec3::Y * 0.95,
+            Quat::from_rotation_x(-0.2),
+        );
+    }
+    let archer = spawn_humanoid(
+        world,
+        humanoid::Outfit::Shirt,
+        Transform::from_translation(at(ARCHER, 0.0, 0.0)),
+    );
+    dress(world, archer, "reacher", shirt_detail());
+    props::spawn_bow(world, archer);
+    world.entity_mut(archer).insert((
+        Name::new("Archer"),
+        crate::combat::Attacker::new("bow", Some(target)),
+        DemoArcher {
+            at: gold + DVec3::Z * 0.16,
+            shots: 0,
+        },
+        DemoScript {
+            period: ARCHERY_PERIOD,
+            steps: vec![
+                DemoStep::param(0.02, "bow_carry", 1.0),
+                light(1.0),
+                heavy(3.4),
+                light(6.6),
+            ],
+            time: 0.0,
+            home: None,
+        },
+    ));
+    Yard {
+        swordsman,
+        shield_partner,
+        greatsword,
+        dummy,
+        archer,
+    }
+}
+
+/// On a paddock archer's `release`, an arrow flies from the draw hand to the butt.
+fn loose_arrows(
+    mut commands: Commands,
+    mut events: MessageReader<engine_world::animation::AnimationEvent>,
+    mut archers: Query<(&mut DemoArcher, &Animator, &GlobalTransform)>,
+) {
+    for e in events.read() {
+        if e.name != "release" {
+            continue;
+        }
+        let Ok((mut archer, animator, gt)) = archers.get_mut(e.entity) else {
+            continue;
+        };
+        let Some(hand) = animator.skeleton.index_of("hand_r") else {
+            continue;
+        };
+        let from = animator.bone_world(gt, hand).0;
+        // A spiral of hits around the gold.
+        let k = archer.shots as f64;
+        archer.shots += 1;
+        let angle = k * 2.4;
+        let spread = 0.05 + 0.04 * (k % 4.0);
+        let to = archer.at + DVec3::new(angle.cos(), angle.sin(), 0.0) * spread;
+        commands.queue(move |world: &mut World| {
+            props::shoot_arrow(world, from, to, 55.0);
+        });
+    }
+}
+
 #[allow(clippy::type_complexity)]
 const SPECTATORS: [(f64, u64, f32, [f32; 2], [f32; 3], bool, f32); 3] = [
     (-1.5, 401, 0.0, [28.0, 34.0], [0.7, 0.1, 0.2], true, 1.5),
@@ -1529,6 +1848,46 @@ pub const VIEWS: &[DemoView] = &[
         target: [0.5, 0.9, -10.0],
         hour: 15.0,
         at: 4.0,
+    },
+    DemoView {
+        key: "paddock_sword",
+        name: "Sword and shield: a slash, a rising backhand and a thrust, the blade leading",
+        eye: [-24.3, 1.45, -13.4],
+        target: [-24.0, 1.1, -16.0],
+        hour: 15.0,
+        at: 1.2,
+    },
+    DemoView {
+        key: "paddock_shield",
+        name: "An overhead cut lands on a raised shield; the swordsman bounces off it",
+        eye: [-22.4, 1.5, -13.8],
+        target: [-23.9, 1.2, -16.0],
+        hour: 15.0,
+        at: 4.6,
+    },
+    DemoView {
+        key: "paddock_bash",
+        name: "A slash into the shield, then the swordsman's own shield rammed into it",
+        eye: [-25.6, 1.4, -13.9],
+        target: [-23.9, 1.1, -16.0],
+        hour: 15.0,
+        at: 6.1,
+    },
+    DemoView {
+        key: "paddock_greatsword",
+        name: "Great sword: a sweep, a rising cut, and an overhead from high guard",
+        eye: [-23.8, 1.5, -18.1],
+        target: [-24.0, 1.1, -21.0],
+        hour: 15.0,
+        at: 3.0,
+    },
+    DemoView {
+        key: "paddock_bow",
+        name: "Archer: drawn to an anchor under the jaw, loosed at the butt 12 m off",
+        eye: [-15.9, 1.55, -12.9],
+        target: [-18.0, 1.35, -12.2],
+        hour: 15.0,
+        at: 1.9,
     },
     DemoView {
         key: "paddock_sprint_start",
@@ -2408,6 +2767,8 @@ fn build_paddock(world: &mut World, origin: DVec3) -> DemoEntities {
     // --- Stunt yard: off a deck onto a crash mat, limp, and up again.
     let stuntman = stunt::spawn_yard(world, origin);
 
+    let yard = weapons_yard(world, origin);
+
     DemoEntities {
         spectators,
         athlete,
@@ -2424,6 +2785,11 @@ fn build_paddock(world: &mut World, origin: DVec3) -> DemoEntities {
         stuntman,
         runner,
         coach,
+        swordsman: yard.swordsman,
+        shield_partner: yard.shield_partner,
+        greatsword: yard.greatsword,
+        greatsword_dummy: yard.dummy,
+        archer: yard.archer,
     }
 }
 
