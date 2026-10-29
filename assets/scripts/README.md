@@ -165,9 +165,15 @@ work the same. Edit graphs in the editor's **Graphs** tab:
   by type.
 - Variables (the script's own state) and props (settings each entity can override) are listed
   on the left; Get and Set put their nodes on the canvas.
+- **Signals** and **Events** are listed there too, as Unreal's event dispatchers and custom
+  events. A signal (its values typed as `count: number, by: Entity`) is fired by an **Emit**
+  node and wired per object in the Details panel like a Luau script's. An event is a node of
+  its own with its values as outputs: what a wired signal, a **Bind signal to** node (another
+  object's signal, from now on or once), a **Call** node or a message of its name runs.
 - Mistakes show before you run: on the node, in Problems, and on the line of the Luau panel,
   which shows the code the graph runs as. A graph with mistakes doesn't load; the old one keeps
-  running.
+  running. Luau's type checker reads the code too, and its errors (a value of the wrong type
+  into a call, say) show on the node they come from.
 - While playing, the nodes that run light up, pulses run along their execution wires and every
   data wire shows its value. Ctrl+S hot reloads the graph in the running game.
 - **To script** writes the graph's Luau as a `.luau` file, for when a graph outgrows nodes.
@@ -253,4 +259,5 @@ have them.
   (`examples/lib/wave.luau`).
 - `examples/pulse.graph`, `examples/hover.graph`: the same lamp and stone as visual scripts.
 - `showcase/crystal.graph`: the courtyard's graph crystal (spins, changes color every 1.5 s,
-  flares when used), drawn live on the board beside it.
+  flares when used or when its `flare` event runs, then fires `flared`), drawn live on the
+  board beside it; the lever's `pulled` signal is wired to its `flare`.

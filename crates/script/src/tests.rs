@@ -742,6 +742,98 @@ fn signals_reach_wired_methods_and_listeners() {
     );
 }
 
+/// A visual script in the same conversation: its Bind node hears the bell's `rang` and runs
+/// its custom event `ring`, which emits the graph's own `chimed` (wired to a Luau method); the
+/// bell's `rang` is also wired straight to the graph's `hush`, which has no node yet.
+#[test]
+fn graphs_bind_emit_and_take_wired_signals() {
+    use crate::graph::{Graph, Link, Node};
+    let node = |id: u32, kind: &str, of: &str, values: Value| Node {
+        id,
+        kind: kind.into(),
+        of: of.into(),
+        at: [0, id as i32 * 100],
+        values: serde_json::from_value(values).unwrap(),
+    };
+    let link = |a: u32, ap: &str, b: u32, bp: &str| Link {
+        from: (a, ap.into()),
+        to: (b, bp.into()),
+    };
+    let chime = Graph {
+        signals: [("chimed".to_string(), "times: number".to_string())].into(),
+        events: [
+            ("ring".to_string(), "times: number, by: Entity".to_string()),
+            ("hush".to_string(), String::new()),
+        ]
+        .into(),
+        vars: [("last".to_string(), json!(0))].into(),
+        nodes: vec![
+            node(1, "event.start", "", json!({})),
+            node(
+                2,
+                "signal.bind",
+                "ring",
+                json!({"entity": "Bell", "signal": "rang"}),
+            ),
+            node(3, "event.custom", "ring", json!({})),
+            node(4, "var.set", "last", json!({})),
+            node(5, "signal.emit", "chimed", json!({})),
+        ],
+        links: vec![
+            link(1, "then", 2, "in"),
+            link(3, "then", 4, "in"),
+            link(3, "times", 4, "value"),
+            link(4, "then", 5, "in"),
+            link(3, "times", 5, "times"),
+        ],
+        ..Default::default()
+    };
+    let folder = Folder::new();
+    folder.write("bell.luau", BELL);
+    folder.write("chime.graph", &chime.to_text());
+    folder.write(
+        "listener.luau",
+        "local L = {}\nfunction L:start() self.got = {} end\n\
+         function L:chimed(times: number) table.insert(self.got, times) end\nreturn L\n",
+    );
+    let mut app = app_in(&folder.0);
+    app.world.spawn((
+        Name::new("Bell"),
+        Transform::default(),
+        Script::new("bell").connect("rang", "Chime", "hush"),
+    ));
+    app.world.spawn((
+        Name::new("Chime"),
+        Transform::default(),
+        Script::new("chime.graph").connect("chimed", "Listener", "chimed"),
+    ));
+    spawn_script(&mut app, "Listener", "listener");
+    app.update_n(2);
+    assert!(errors(&mut app).is_empty(), "{:?}", errors(&mut app));
+    for _ in 0..2 {
+        eval(
+            &mut app,
+            "world.find('Bell').script:ring(world.find('Listener'))",
+        );
+        app.update_n(3);
+    }
+    assert!(errors(&mut app).is_empty(), "{:?}", errors(&mut app));
+    assert_eq!(eval(&mut app, "world.find('Chime').script.last"), json!(2));
+    assert_eq!(
+        eval(&mut app, "world.find('Listener').script.got"),
+        json!([1, 2])
+    );
+    // The Details panel sees the graph's signal and its custom events as wire targets.
+    let declared = crate::props::declared(&mut app.world, "chime.graph").unwrap();
+    assert_eq!(declared.signals.len(), 1);
+    assert_eq!(declared.signals[0].params, "times: number");
+    let methods: Vec<&str> = declared.methods.iter().map(|m| m.name.as_str()).collect();
+    assert!(
+        methods.contains(&"ring") && methods.contains(&"hush"),
+        "{methods:?}"
+    );
+}
+
 #[test]
 fn errors_name_the_file_and_line_and_dont_repeat() {
     let folder = Folder::new();
@@ -966,6 +1058,11 @@ fn the_showcase_courtyard_builds_and_plays_its_ritual() {
     app.update_n(30 * 8);
     assert!(errors(&mut app).is_empty(), "{:?}", errors(&mut app));
     assert_eq!(eval(&mut app, &format!("{director}.busy")), json!(false));
+    // The pull is wired to the crystal graph's `flare` custom event too.
+    assert_eq!(
+        eval(&mut app, "world.find('Graph crystal').script.flares"),
+        json!(1)
+    );
     let profile = call_api(&mut app.world, "script.profile", json!({"stop": true})).unwrap();
     assert!(profile["samples"].as_u64().unwrap() > 10, "{profile}");
     let functions = profile["functions"].as_array().unwrap();
@@ -2261,7 +2358,7 @@ fn a_graph_runs_reloads_and_is_watched() {
         api["luau"]
             .as_str()
             .unwrap()
-            .contains("function Counter:update(dt)")
+            .contains("function Counter:update(dt: number)")
     );
     let nodes = call_api(&mut app.world, "script.graph_nodes", json!({})).unwrap();
     assert!(

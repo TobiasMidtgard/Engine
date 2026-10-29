@@ -23,8 +23,10 @@
 //!   the courtyard keeps running.
 //! - The crystal left of the code board is run by a visual script, `showcase/crystal.graph`
 //!   (nodes and wires, as Unreal's Blueprints): it spins and bobs, changes color every 1.5 s
-//!   and flares when used (E). The graph board on the easel behind it draws the graph live:
-//!   the nodes that run light up and every wire shows the value it carries.
+//!   and flares when used (E) or when its `flare` custom event runs (the lever's `pulled`
+//!   signal is wired to it too), then fires its own `flared` signal. The graph board on the
+//!   easel behind it draws the graph live: the nodes that run light up and every wire shows
+//!   the value it carries.
 //!
 //! `script.send {"entity": {"name": "Courtyard director"}, "event": "ritual"}` plays the ritual
 //! from the console or a tour stop; `script.edit` changes a script file like an editor would.
@@ -60,6 +62,8 @@ pub const PROFILE_BOARD_YAW: f32 = -0.483;
 pub const LEVER: [f64; 3] = [4.2, 0.0, 6.6];
 /// The crystal's visual script.
 pub const CRYSTAL_GRAPH: &str = "showcase/crystal.graph";
+/// The crystal's entity, which runs it.
+const CRYSTAL_NAME: &str = "Graph crystal";
 /// The graph board, on the code board's left (the profile board's mirror image).
 pub const GRAPH_BOARD: [f64; 3] = [-4.3, 2.05, -8.2];
 pub const GRAPH_BOARD_YAW: f32 = 0.483;
@@ -166,7 +170,7 @@ const PAUSE_AT_GLOW: (&str, &str) = (
 );
 const GO_ON: (&str, &str) = ("script.break", r#"{"detach": true}"#);
 
-/// Flares the crystal (its graph's Message event).
+/// Flares the crystal (a message runs its graph's custom event of that name).
 const FLARE: (&str, &str) = (
     "script.send",
     r#"{"entity": {"name": "Graph crystal"}, "event": "flare"}"#,
@@ -565,7 +569,7 @@ pub fn spawn_demo(commands: &mut Commands, origin: DVec3) {
         ),
     ));
     commands.spawn((
-        Name::new("Graph crystal"),
+        Name::new(CRYSTAL_NAME),
         at(cx, cy, cz).with_scale(Vec3::new(1.0, 1.9, 1.0)),
         mesh(
             Shape::Sphere {
@@ -657,8 +661,11 @@ pub fn spawn_demo(commands: &mut Commands, origin: DVec3) {
                 reach_m: 2.5,
                 ..Default::default()
             },
-            // Its `pulled` signal wired to the director's ritual, as the Details panel does.
-            Script::new(LEVER_SCRIPT).connect("pulled", DIRECTOR, "ritual"),
+            // Its `pulled` signal wired to the director's ritual and the crystal graph's `flare`
+            // custom event, as the Details panel does.
+            Script::new(LEVER_SCRIPT)
+                .connect("pulled", DIRECTOR, "ritual")
+                .connect("pulled", CRYSTAL_NAME, "flare"),
         ))
         .with_children(|l| {
             l.spawn((

@@ -1,8 +1,11 @@
 {
   "version": 1,
-  "doc": "The graph crystal: spins and bobs, changes color every 1.5 s, flares when used (E)\nor sent \"flare\". A visual script: edit it in the editor's Graphs tab.",
+  "doc": "The graph crystal: spins and bobs, changes color every 1.5 s, flares when used (E)\nor when its flare event runs (the lever's pulled signal is wired to it), and fires\nflared after each flare. A visual script: edit it in the editor's Graphs tab.",
   "props": {"bob":0.12,"color_a":[0.25,0.75,1.0],"color_b":[1.0,0.35,0.85],"spin":40},
   "vars": {"flares":0,"home":[0,0,0]},
+  "signals": {"flared":"count: number"},
+  "signal_notes": {"flared":"after each flare, with how many so far"},
+  "events": {"flare":""},
   "nodes": [
     {"id":1,"kind":"event.start","at":[0,0]},
     {"id":2,"kind":"var.set","of":"home","at":[260,0]},
@@ -29,7 +32,7 @@
     {"id":26,"kind":"comp.set","of":"PointLight","at":[2320,-20]},
     {"id":27,"kind":"comp.set","of":"PointLight","at":[2320,180]},
     {"id":30,"kind":"event.interact","at":[545,800]},
-    {"id":31,"kind":"event.message","at":[545,920],"values":{"name":"flare"}},
+    {"id":31,"kind":"event.custom","of":"flare","at":[545,920]},
     {"id":32,"kind":"flow.tween","at":[845,820],"values":{"ease":"out_quad","seconds":1.4}},
     {"id":33,"kind":"math.lerp","at":[845,1000],"values":{"a":60,"b":14}},
     {"id":34,"kind":"entity.material","at":[1185,820]},
@@ -37,7 +40,8 @@
     {"id":36,"kind":"math.multiply","at":[1185,1020],"values":{"b":110}},
     {"id":37,"kind":"var.set","of":"flares","at":[1505,1000]},
     {"id":38,"kind":"math.add","at":[1185,1140],"values":{"b":1}},
-    {"id":39,"kind":"var.get","of":"flares","at":[845,1140]}
+    {"id":39,"kind":"var.get","of":"flares","at":[845,1140]},
+    {"id":41,"kind":"signal.emit","of":"flared","at":[1505,1150]}
   ],
   "links": [
     {"from":[1,"then"],"to":[2,"in"]},
@@ -74,11 +78,13 @@
     {"from":[36,"value"],"to":[35,"intensity_lm"]},
     {"from":[32,"finished"],"to":[37,"in"]},
     {"from":[39,"value"],"to":[38,"a"]},
-    {"from":[38,"value"],"to":[37,"value"]}
+    {"from":[38,"value"],"to":[37,"value"]},
+    {"from":[37,"then"],"to":[41,"in"]},
+    {"from":[38,"value"],"to":[41,"count"]}
   ],
   "comments": [
     {"at":[-40,-60],"size":[1240,760],"text":"Spin and bob, every frame","color":[60,92,140]},
     {"at":[1340,-60],"size":[1220,440],"text":"Every 1.5 seconds: the other color","color":[120,70,140]},
-    {"at":[505,740],"size":[1300,540],"text":"Used (E) or sent \"flare\": flare up, then settle","color":[150,100,40]}
+    {"at":[505,740],"size":[1300,540],"text":"Used (E) or its flare event run: flare up, settle, fire flared","color":[150,100,40]}
   ]
 }

@@ -161,6 +161,7 @@ fn main() {
             Some("types") => scripts::types_shots(dir),
             Some("signals") => scripts::signals_shots(dir),
             Some("graphs") => graphs::shots(dir),
+            Some("graph_signals") => graphs::signals_shots(dir),
             _ => shots::gallery(dir),
         };
         app.insert_resource(script);

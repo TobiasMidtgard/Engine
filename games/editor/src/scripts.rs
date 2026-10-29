@@ -1447,12 +1447,19 @@ fn code_view(ui: &mut egui::Ui, world: &mut World, tab: &mut ScriptsTab, now: f6
                         out.response.rect.bottom(),
                     ),
                 );
-                let click = ui
-                    .interact(gutter, id.with("gutter"), egui::Sense::click())
-                    .on_hover_text(
+                let click = ui.interact(gutter, id.with("gutter"), egui::Sense::click());
+                let click = match heard_tip(&heard, &tab.drawn_at, click.hover_pos()) {
+                    Some(from) => click.on_hover_ui(|ui| {
+                        ui.label(RichText::new("Called by signals").strong());
+                        for f in from {
+                            ui.label(RichText::new(f).monospace());
+                        }
+                    }),
+                    None => click.on_hover_text(
                         "Click: a breakpoint (the game waits there). Shift+click: the line's \
                          values, live. Right-click: a breakpoint with a condition.",
-                    );
+                    ),
+                };
                 let line_at = |pos: Pos2| {
                     lines
                         .iter()
@@ -1786,7 +1793,7 @@ fn paint_heard(
     row_h: f32,
     drawn_at: &mut HashMap<String, Rect>,
 ) {
-    for (line, from) in heard {
+    for (line, _) in heard {
         let Some(r) = lines.get(*line as usize - 1) else {
             continue;
         };
@@ -1815,17 +1822,29 @@ fn paint_heard(
             SIGNAL,
             Stroke::NONE,
         ));
-        let hot = Rect::from_center_size(c, Vec2::splat(row_h));
-        drawn_at.insert(format!("heard {line}"), hot);
-        let id = ui.id().with(("heard", *line));
-        let resp = ui.interact(hot, id, egui::Sense::hover());
-        resp.on_hover_ui(|ui| {
-            ui.label(RichText::new("Called by signals").strong());
-            for f in from {
-                ui.label(RichText::new(f).monospace());
-            }
-        });
+        // Its tooltip comes with the gutter's (`heard_tip`), which is on top of it.
+        drawn_at.insert(
+            format!("heard {line}"),
+            Rect::from_center_size(c, Vec2::splat(row_h)),
+        );
     }
+}
+
+/// The heard plug under the pointer, if any: who calls that method.
+fn heard_tip<'h>(
+    heard: &'h [(u32, Vec<String>)],
+    drawn_at: &HashMap<String, Rect>,
+    pointer: Option<Pos2>,
+) -> Option<&'h [String]> {
+    let p = pointer?;
+    heard
+        .iter()
+        .find(|(line, _)| {
+            drawn_at
+                .get(&format!("heard {line}"))
+                .is_some_and(|r| r.contains(p))
+        })
+        .map(|(_, from)| from.as_slice())
 }
 
 /// Line numbers, the profiler's heat bars and the markers (breakpoint, error, logpoint), and
@@ -2971,6 +2990,8 @@ pub struct Types {
     goto: Option<(String, u32, u32)>,
     /// The bottom panel shows the problems instead of the output.
     pub show_problems: bool,
+    /// The Graphs tab's open graphs: the Luau each was last checked as.
+    graph_sent: HashMap<String, String>,
 }
 
 impl Types {
@@ -3051,6 +3072,49 @@ fn types_poll(world: &mut World, tab: &mut ScriptsTab, now: f64) {
             t.ask(&f.path, None, Ask::Check);
         }
     }
+    take_answers(t);
+}
+
+/// The Graphs tab's use of the checker: each open graph `(path, its file text, the Luau it
+/// compiles to)` is checked when its Luau changes (not on every drag); the answers are taken
+/// here too, as the Scripts tab may not be drawn. Returns `path`'s problems, each on the node
+/// its line came from.
+pub fn graph_types(
+    world: &mut World,
+    open: &[(String, String, String)],
+    path: &str,
+) -> Vec<Problem> {
+    if !world.contains_resource::<ScriptsTab>() {
+        return Vec::new();
+    }
+    world.resource_scope(|world, mut tab: Mut<ScriptsTab>| {
+        let t = &mut tab.types;
+        if t.checker.is_none() && t.failed.is_none() {
+            t.checker = Some(Checker::for_world(world));
+        }
+        for (p, text, luau) in open {
+            if t.graph_sent.get(p) != Some(luau) {
+                t.graph_sent.insert(p.clone(), luau.clone());
+                t.ask(p, Some(text.as_str()), Ask::Check);
+            }
+        }
+        let closed: Vec<String> = t
+            .graph_sent
+            .keys()
+            .filter(|p| !open.iter().any(|o| &o.0 == *p))
+            .cloned()
+            .collect();
+        for p in closed {
+            t.graph_sent.remove(&p);
+            t.ask(&p, None, Ask::Closed);
+        }
+        take_answers(t);
+        t.problems(path).to_vec()
+    })
+}
+
+/// The checker's answers since last frame.
+fn take_answers(t: &mut Types) {
     let answers = t.checker.as_ref().map(|c| c.answers()).unwrap_or_default();
     for a in answers {
         match a.reply {
@@ -5933,6 +5997,46 @@ pub fn types_shots(dir: String) -> ShotScript {
     ShotScript::new(dir, steps)
 }
 
+/// A screenshot step: wires `from`'s signal to `to`'s method as the Details panel does (one
+/// undo step), with fixed values when `args` holds some.
+pub(crate) fn wire_step(
+    from: &'static str,
+    signal: &'static str,
+    to: &'static str,
+    method: &'static str,
+    args: Value,
+) -> impl Fn(&mut World, &mut Editor) + Send + Sync + 'static {
+    move |world: &mut World, ed: &mut Editor| {
+        let Some(e) = crate::shots::find(world, from) else {
+            return;
+        };
+        let Some(before) = world
+            .get::<Script>(e)
+            .and_then(|s| serde_json::to_value(s).ok())
+        else {
+            return;
+        };
+        let mut script: Script = serde_json::from_value(before.clone()).unwrap_or_default();
+        script.connections.push(engine_script::Connection {
+            signal: signal.into(),
+            target: to.into(),
+            method: method.into(),
+            args: args.as_array().cloned().unwrap_or_default(),
+            once: false,
+        });
+        editor::apply(
+            world,
+            ed,
+            Command::Component {
+                entity: e,
+                name: "Script".into(),
+                before: Some(before),
+                after: serde_json::to_value(script).ok(),
+            },
+        );
+    }
+}
+
 /// `editor --headless --size 1920x1080 --shots <dir> --script signals`: signals wired in the
 /// Details panel. The beacon's `flashed` signal wired to the lamp's `flare` (with a fixed
 /// value), the list of the lamp's methods with "+ New method", the lamp's side (Heard from,
@@ -5993,42 +6097,7 @@ pub fn signals_shots(dir: String) -> ShotScript {
         );
         world.resource_mut::<EditorDock>().0 = props_layout();
     };
-    // Wires a signal as the Details panel does (one undo step).
-    let wire = |from: &'static str,
-                signal: &'static str,
-                to: &'static str,
-                method: &'static str,
-                args: Value| {
-        move |world: &mut World, ed: &mut Editor| {
-            let Some(e) = crate::shots::find(world, from) else {
-                return;
-            };
-            let Some(before) = world
-                .get::<Script>(e)
-                .and_then(|s| serde_json::to_value(s).ok())
-            else {
-                return;
-            };
-            let mut script: Script = serde_json::from_value(before.clone()).unwrap_or_default();
-            script.connections.push(engine_script::Connection {
-                signal: signal.into(),
-                target: to.into(),
-                method: method.into(),
-                args: args.as_array().cloned().unwrap_or_default(),
-                once: false,
-            });
-            editor::apply(
-                world,
-                ed,
-                Command::Component {
-                    entity: e,
-                    name: "Script".into(),
-                    before: Some(before),
-                    after: serde_json::to_value(script).ok(),
-                },
-            );
-        }
-    };
+    let wire = wire_step;
     // A click on a widget the panel drew last frame (by its `drawn_at` name).
     let press = |what: &'static str, pressed: bool| {
         move |world: &mut World, _: &mut Editor| {
@@ -6112,18 +6181,6 @@ pub fn signals_shots(dir: String) -> ShotScript {
         Step::Do(Box::new(hover("heard "))),
         Step::Wait(20),
         Step::Shot("signals_03_heard"),
-        // Playing: each flash of the beacon flares the lamp.
-        Step::Tab(Tab::Viewport),
-        Step::Select("Beacon"),
-        Step::Do(Box::new(|world: &mut World, ed: &mut Editor| {
-            editor::play(world, ed)
-        })),
-        Step::Wait(150),
-        Step::Shot("signals_04_playing"),
-        Step::Do(Box::new(|world: &mut World, ed: &mut Editor| {
-            editor::stop(world, ed)
-        })),
-        Step::Wait(10),
         // A misspelt signal: the type checker knows the beacon's signals.
         Step::Tab(Tab::Scripts),
         Step::Do(Box::new(|world: &mut World, _: &mut Editor| {
@@ -6146,6 +6203,25 @@ pub fn signals_shots(dir: String) -> ShotScript {
             doc.text = doc.saved.clone();
         })),
         Step::Wait(5),
+        // Playing: each flash of the beacon flares the lamp.
+        Step::Tab(Tab::Viewport),
+        Step::Select("Beacon"),
+        Step::Do(Box::new(|world: &mut World, ed: &mut Editor| {
+            editor::play(world, ed)
+        })),
+        Step::Wait(10),
+        // Play starts the sky from the scene's time; back to the evening.
+        Step::Do(Box::new(|world: &mut World, _: &mut Editor| {
+            let sky = world
+                .resource::<TypeRegistry>()
+                .resource("Sky")
+                .map(|r| r.patch);
+            if let Some(patch) = sky {
+                let _ = patch(world, json!({"hour": 19.6, "hours_per_second": 0.0}));
+            }
+        })),
+        Step::Wait(140),
+        Step::Shot("signals_04_playing"),
     ];
     ShotScript::new(dir, steps)
 }

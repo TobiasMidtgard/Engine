@@ -1640,7 +1640,7 @@ mod tests {
     use super::*;
     use bevy_ecs::world::World;
     use engine_core::registry::ApiRegistry;
-    use serde_json::Value;
+    use serde_json::{Value, json};
 
     fn scripts() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/scripts")
@@ -1769,6 +1769,59 @@ mod tests {
         // Back to the file on disk.
         a.set_text("examples/beacon.luau", None);
         assert_eq!(a.check("examples/beacon.luau").errors(), 0);
+    }
+
+    /// A visual script's type errors land on the node their line came from: here a Call node
+    /// left with a number after its custom event's value became a string.
+    #[test]
+    fn graph_problems_land_on_their_nodes() {
+        use crate::graph::{Graph, Link, Node};
+        let node = |id: u32, kind: &str, of: &str, values: Value| Node {
+            id,
+            kind: kind.into(),
+            of: of.into(),
+            at: [0, id as i32 * 100],
+            values: serde_json::from_value(values).unwrap(),
+        };
+        let mut g = Graph {
+            events: [("flash".to_string(), "strength: number".to_string())].into(),
+            nodes: vec![
+                node(1, "event.start", "", json!({})),
+                node(2, "call.event", "flash", json!({"strength": 1})),
+                node(3, "event.custom", "flash", json!({})),
+                node(4, "debug.print", "", json!({})),
+            ],
+            links: vec![
+                Link {
+                    from: (1, "then".into()),
+                    to: (2, "in".into()),
+                },
+                Link {
+                    from: (3, "then".into()),
+                    to: (4, "in".into()),
+                },
+                Link {
+                    from: (3, "strength".into()),
+                    to: (4, "text".into()),
+                },
+            ],
+            ..Default::default()
+        };
+        let mut a = analyzer();
+        a.set_text("examples/flash.graph", Some(g.to_text()));
+        let r = a.check("examples/flash.graph");
+        assert_eq!(r.errors(), 0, "{:#?}", r.problems);
+        g.events.insert("flash".into(), "strength: string".into());
+        a.set_text("examples/flash.graph", Some(g.to_text()));
+        let r = a.check("examples/flash.graph");
+        let errors: Vec<&Problem> = r.problems.iter().filter(|p| p.error).collect();
+        assert_eq!(errors.len(), 1, "{errors:#?}");
+        assert_eq!(errors[0].node, Some(2), "{errors:#?}");
+        assert!(
+            errors[0].message.contains("string"),
+            "{}",
+            errors[0].message
+        );
     }
 
     #[test]

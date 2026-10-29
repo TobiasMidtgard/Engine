@@ -174,6 +174,9 @@ pub struct GraphDoc {
     /// Nodes with a breakpoint, and the lines last set for them in the running scripts.
     pub breakpoints: BTreeSet<u32>,
     applied: Option<Vec<u32>>,
+    /// What Luau's type checker found in the Luau it compiles to, on the nodes the lines came
+    /// from (`scripts::graph_types`).
+    types: Vec<Problem>,
 }
 
 impl GraphDoc {
@@ -243,6 +246,7 @@ pub fn panel(ui: &mut egui::Ui, world: &mut World, editor: &mut Editor) {
     let mut tab = world.remove_resource::<GraphsTab>().unwrap_or_default();
     let now = editor::now(world);
     poll(world, editor, &mut tab, now);
+    type_check(world, &mut tab);
     if tab.library.is_none() {
         tab.library = Some(graph::library(world, None));
     }
@@ -338,8 +342,42 @@ pub fn open(world: &World, tab: &mut GraphsTab, path: &str) {
         editing_comment: None,
         breakpoints: BTreeSet::new(),
         applied: None,
+        types: Vec::new(),
     });
     tab.current = tab.docs.len() - 1;
+}
+
+/// The open graphs through Luau's type checker (as the Scripts tab's files are): a wrong value
+/// into an engine function, a field an entity doesn't have, a signal emitted with the wrong
+/// values. Only errors: warnings on generated code aren't the graph's to fix.
+fn type_check(world: &mut World, tab: &mut GraphsTab) {
+    let open: Vec<(String, String, String)> = tab
+        .docs
+        .iter_mut()
+        .map(|d| {
+            let luau = d.compiled().luau.clone();
+            (d.path.clone(), d.graph.to_text(), luau)
+        })
+        .collect();
+    let Some(doc) = tab.docs.get_mut(tab.current) else {
+        crate::scripts::graph_types(world, &open, "");
+        return;
+    };
+    let found = crate::scripts::graph_types(world, &open, &doc.path);
+    doc.types = if doc.compiled().errors().next().is_some() {
+        Vec::new()
+    } else {
+        found
+            .into_iter()
+            .filter(|p| p.error)
+            .map(|p| Problem {
+                node: p.node,
+                pin: None,
+                message: p.message,
+                error: true,
+            })
+            .collect()
+    };
 }
 
 fn modified(path: &Path) -> Option<std::time::SystemTime> {
@@ -618,10 +656,14 @@ fn sidebar(ui: &mut egui::Ui, world: &mut World, tab: &mut GraphsTab, now: f64) 
     egui::ScrollArea::vertical()
         .id_salt("graph variables")
         .max_height((ui.available_height() * 0.62).max(100.0))
-        .show(ui, |ui| variables(ui, doc, center));
+        .show(ui, |ui| {
+            variables(ui, doc, center);
+            signals_and_events(ui, doc, center);
+        });
     ui.separator();
     // Problems: click one to see its node.
-    let problems: Vec<Problem> = doc.compiled().problems.clone();
+    let mut problems: Vec<Problem> = doc.compiled().problems.clone();
+    problems.extend(doc.types.iter().cloned());
     let fault = doc.marks.fault.clone();
     ui.label(RichText::new("Problems").strong());
     egui::ScrollArea::vertical()
@@ -669,6 +711,13 @@ fn sidebar(ui: &mut egui::Ui, world: &mut World, tab: &mut GraphsTab, now: f64) 
 }
 
 fn node_title(n: &Node) -> String {
+    match n.kind.as_str() {
+        "event.custom" => return format!("Event {}", n.of),
+        "call.event" => return format!("Call {}", n.of),
+        "signal.emit" => return format!("Emit {}", n.of),
+        "signal.bind" => return format!("Bind signal to {}", n.of),
+        _ => {}
+    }
     let base = graph::builtins();
     base.iter()
         .find(|s| s.kind == n.kind)
@@ -873,6 +922,266 @@ fn variables(ui: &mut egui::Ui, doc: &mut GraphDoc, center: Pos2) {
             doc.selected = BTreeSet::from([id]);
         }
     }
+}
+
+/// The graph's signals (what it tells the scene: Emit nodes fire them, the Details panel wires
+/// them per object) and custom events (methods signals, Bind and Call nodes and messages run),
+/// as Unreal's My Blueprint panel lists event dispatchers.
+fn signals_and_events(ui: &mut egui::Ui, doc: &mut GraphDoc, center: Pos2) {
+    for signals in [true, false] {
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            let (title, tip) = if signals {
+                (
+                    "Signals",
+                    "What this script tells the scene. Emit nodes fire them; each object's \
+                     Details panel wires them to methods of other objects' scripts.",
+                )
+            } else {
+                (
+                    "Events",
+                    "Custom events: what other scripts can make this one do. A signal wired to \
+                     one (Details panel, or a Bind node), a Call node or a message of its name \
+                     runs it.",
+                )
+            };
+            ui.label(RichText::new(title).strong()).on_hover_text(tip);
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.small_button("+").clicked() {
+                    let map = if signals {
+                        &mut doc.graph.signals
+                    } else {
+                        &mut doc.graph.events
+                    };
+                    let base = if signals { "happened" } else { "react" };
+                    let mut name = base.to_string();
+                    let mut i = 2;
+                    while map.contains_key(&name) {
+                        name = format!("{base}{i}");
+                        i += 1;
+                    }
+                    map.insert(name, String::new());
+                }
+            });
+        });
+        let names: Vec<String> = if signals {
+            doc.graph.signals.keys().cloned().collect()
+        } else {
+            doc.graph.events.keys().cloned().collect()
+        };
+        if names.is_empty() {
+            ui.label(theme::dim(if signals {
+                "None yet: + adds one"
+            } else {
+                "None yet: + adds one, then Bind or wire to it"
+            }));
+        }
+        let mut add: Option<(&str, String)> = None;
+        let mut remove = None;
+        let mut rename: Option<(String, String)> = None;
+        for name in names {
+            let id = ui.make_persistent_id(("graph signal", signals, &name));
+            let event_node = (!signals)
+                .then(|| {
+                    doc.graph
+                        .nodes
+                        .iter()
+                        .find(|n| n.kind == "event.custom" && n.of == name)
+                        .map(|n| n.id)
+                })
+                .flatten();
+            ui.horizontal(|ui| {
+                let (r, p) = ui.allocate_painter(Vec2::new(10.0, 16.0), Sense::hover());
+                let color = rgb(look::category_color(if signals {
+                    "Signals"
+                } else {
+                    "Events"
+                }));
+                p.circle_filled(r.rect.center(), 4.0, lerp_color(color, Color32::WHITE, 0.3));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.small_button("✖").on_hover_text("Remove").clicked() {
+                        remove = Some(name.clone());
+                    }
+                    if signals {
+                        if ui
+                            .small_button("Emit")
+                            .on_hover_text("Add an Emit node: fires it")
+                            .clicked()
+                        {
+                            add = Some(("signal.emit", name.clone()));
+                        }
+                    } else {
+                        if ui
+                            .small_button("Bind")
+                            .on_hover_text(
+                                "Add a Bind node: runs this event when another object's script \
+                                 fires a signal",
+                            )
+                            .clicked()
+                        {
+                            add = Some(("signal.bind", name.clone()));
+                        }
+                        if ui
+                            .small_button("Call")
+                            .on_hover_text("Add a Call node: runs it now")
+                            .clicked()
+                        {
+                            add = Some(("call.event", name.clone()));
+                        }
+                        let (label, tip) = if event_node.is_some() {
+                            ("Go", "Show its event node")
+                        } else {
+                            ("Add", "Add its event node: what runs when it is called")
+                        };
+                        if ui.small_button(label).on_hover_text(tip).clicked() {
+                            match event_node {
+                                Some(n) => {
+                                    doc.selected = BTreeSet::from([n]);
+                                    focus_node(doc, n);
+                                }
+                                None => add = Some(("event.custom", name.clone())),
+                            }
+                        }
+                    }
+                    let mut text = ui
+                        .data_mut(|d| d.get_temp::<String>(id))
+                        .unwrap_or_else(|| name.clone());
+                    let r = ui.add(
+                        egui::TextEdit::singleline(&mut text)
+                            .font(egui::TextStyle::Monospace)
+                            .desired_width(ui.available_width()),
+                    );
+                    if r.changed() {
+                        ui.data_mut(|d| d.insert_temp(id, text.clone()));
+                    }
+                    if r.lost_focus() {
+                        ui.data_mut(|d| d.remove::<String>(id));
+                        if text != name && graph::is_ident(&text) {
+                            rename = Some((name.clone(), text.clone()));
+                        }
+                    }
+                });
+            });
+            // Its values (`count: number, by: Entity`): the pins of its Emit, event, Call nodes.
+            let map = if signals {
+                &mut doc.graph.signals
+            } else {
+                &mut doc.graph.events
+            };
+            if let Some(values) = map.get_mut(&name) {
+                let parts = values.split(',').filter(|p| !p.trim().is_empty()).count();
+                let ok = graph::params(values).len() == parts;
+                ui.horizontal(|ui| {
+                    ui.add_space(14.0);
+                    let mut edit = egui::TextEdit::singleline(values)
+                        .font(egui::TextStyle::Small)
+                        .hint_text("values: count: number, by: Entity")
+                        .desired_width(ui.available_width() - 4.0);
+                    if !ok {
+                        edit = edit.text_color(ERROR);
+                    }
+                    ui.add(edit).on_hover_text(
+                        "Its values, comma separated, each a name and a type: number, boolean, \
+                         string, Vec3, Entity (no type: any)",
+                    );
+                });
+            }
+            if signals {
+                let mut note = doc
+                    .graph
+                    .signal_notes
+                    .get(&name)
+                    .cloned()
+                    .unwrap_or_default();
+                ui.horizontal(|ui| {
+                    ui.add_space(14.0);
+                    let r = ui.add(
+                        egui::TextEdit::singleline(&mut note)
+                            .font(egui::TextStyle::Small)
+                            .hint_text("what it means (shown where it's wired)")
+                            .desired_width(ui.available_width() - 4.0),
+                    );
+                    if r.changed() {
+                        if note.trim().is_empty() {
+                            doc.graph.signal_notes.remove(&name);
+                        } else {
+                            doc.graph.signal_notes.insert(name.clone(), note.clone());
+                        }
+                    }
+                });
+            }
+            ui.add_space(2.0);
+        }
+        let kinds: &[&str] = if signals {
+            &["signal.emit"]
+        } else {
+            &["event.custom", "call.event", "signal.bind"]
+        };
+        let map = if signals {
+            &mut doc.graph.signals
+        } else {
+            &mut doc.graph.events
+        };
+        if let Some(name) = remove {
+            map.remove(&name);
+            if signals {
+                doc.graph.signal_notes.remove(&name);
+            }
+        }
+        if let Some((old, new)) = rename.filter(|(_, new)| !map.contains_key(new)) {
+            if let Some(v) = map.remove(&old) {
+                map.insert(new.clone(), v);
+            }
+            if signals && let Some(note) = doc.graph.signal_notes.remove(&old) {
+                doc.graph.signal_notes.insert(new.clone(), note);
+            }
+            for n in &mut doc.graph.nodes {
+                if kinds.contains(&n.kind.as_str()) && n.of == old {
+                    n.of = new.clone();
+                }
+            }
+        }
+        if let Some((kind, of)) = add {
+            let id = doc.graph.next_id();
+            doc.graph.nodes.push(Node {
+                id,
+                kind: kind.into(),
+                of,
+                at: [center.x as i32 - 60, center.y as i32 - 20],
+                values: BTreeMap::new(),
+            });
+            doc.selected = BTreeSet::from([id]);
+        }
+    }
+}
+
+/// A Bind node's signal choices: the signals the script on its entity declares (the named
+/// object's, or this graph's own when the entity is left as self), and the one already typed.
+/// None (a text field) when the object or its script isn't known yet.
+fn bind_choices(world: &mut World, g: &Graph, n: &Node) -> Vec<String> {
+    let mut out: Vec<String> = match n
+        .values
+        .get("entity")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+    {
+        None => g.signals.keys().cloned().collect(),
+        Some(name) => {
+            let path = world
+                .query::<(&Name, &Script)>()
+                .iter(world)
+                .find(|(n, _)| n.as_str() == name)
+                .map(|(_, s)| s.path.clone());
+            path.and_then(|p| engine_script::props::declared(world, &p).ok())
+                .map(|d| d.signals.into_iter().map(|s| s.name).collect())
+                .unwrap_or_default()
+        }
+    };
+    let typed = n.values.get("signal").and_then(Value::as_str).unwrap_or("");
+    if !out.is_empty() && !typed.is_empty() && !out.iter().any(|s| s == typed) {
+        out.push(typed.to_string());
+    }
+    out
 }
 
 fn type_name(t: PinType) -> &'static str {
@@ -1163,6 +1472,19 @@ fn status_line(ui: &mut egui::Ui, editor: &Editor, tab: &mut GraphsTab) {
         } else if warnings > 0 {
             ui.label(RichText::new(format!("{warnings} to look at")).color(WARN));
         }
+        let types = doc.types.len();
+        if types > 0 {
+            ui.label(
+                RichText::new(format!(
+                    "✖ {types} type error{} (it runs, but fails there)",
+                    if types == 1 { "" } else { "s" }
+                ))
+                .color(ERROR),
+            )
+            .on_hover_text("Luau's type checker on the code the graph compiles to");
+        } else if errors == 0 {
+            ui.label(theme::dim("✔ types"));
+        }
         if let Some(e) = &doc.marks.error {
             ui.label(RichText::new(format!("didn't load: {}", e.message)).color(ERROR));
         }
@@ -1227,7 +1549,8 @@ fn canvas(ui: &mut egui::Ui, world: &mut World, editor: &Editor, tab: &mut Graph
     let clipboard = tab.clipboard.clone();
     let doc = &mut tab.docs[tab.current];
     let before = doc.graph.clone();
-    let compiled = doc.compiled().clone();
+    let mut compiled = doc.compiled().clone();
+    compiled.problems.extend(doc.types.iter().cloned());
     let fault_node = doc
         .marks
         .fault
@@ -1239,16 +1562,18 @@ fn canvas(ui: &mut egui::Ui, world: &mut World, editor: &Editor, tab: &mut Graph
     let wired_in: BTreeSet<(u32, String)> = doc.graph.links.iter().map(|l| l.to.clone()).collect();
     let wired_out: BTreeSet<(u32, String)> =
         doc.graph.links.iter().map(|l| l.from.clone()).collect();
-    let shapes: BTreeMap<u32, (NodeSpec, look::Shape)> = doc
-        .graph
-        .nodes
-        .iter()
-        .map(|n| {
-            let spec = graph::spec_for(&lib, n, &doc.graph);
-            let shape = look::shape(&spec, n, &|p| wired_in.contains(&(n.id, p.to_string())));
-            (n.id, (spec, shape))
-        })
-        .collect();
+    let mut shapes: BTreeMap<u32, (NodeSpec, look::Shape)> = BTreeMap::new();
+    for n in &doc.graph.nodes {
+        let mut spec = graph::spec_for(&lib, n, &doc.graph);
+        if n.kind == "signal.bind" && !wired_in.contains(&(n.id, "entity".to_string())) {
+            let choices = bind_choices(world, &doc.graph, n);
+            if let Some(p) = spec.inputs.iter_mut().find(|p| p.name == "signal") {
+                p.choices = choices;
+            }
+        }
+        let shape = look::shape(&spec, n, &|p| wired_in.contains(&(n.id, p.to_string())));
+        shapes.insert(n.id, (spec, shape));
+    }
     let outer = ui.available_rect_before_wrap();
     ui.painter().rect_filled(outer, 0.0, CANVAS_BG);
     doc.canvas = outer;
@@ -2756,6 +3081,7 @@ fn category_rank(c: &str) -> usize {
     let top = c.split(':').next().unwrap_or(c);
     [
         "Events",
+        "Signals",
         "Flow",
         "Variables",
         "Props",
@@ -3007,6 +3333,256 @@ fn dusk(world: &mut World) {
 }
 
 /// Centers `doc`'s view on its nodes of these kinds, at `zoom`.
+/// `editor --headless --size 1920x1080 --shots <dir> --script graph_signals`: visual scripts
+/// talking to each other. The stone's graph declares a `rose` signal and fires it every 2 s;
+/// the lamp's graph has a custom event `flash` and, at start, binds the stone's `rose` to it;
+/// the stone's Details panel wires `rose` to the lamp's `flash` too (with a fixed 3); playing,
+/// the event runs from both; then the event's value retyped, and the Call node left with a
+/// number shows the type checker's error. Edits copies of the examples (`<dir>/scripts`).
+pub fn signals_shots(dir: String) -> ShotScript {
+    let _ = std::fs::create_dir_all(&dir);
+    let root = std::fs::canonicalize(&dir)
+        .unwrap_or_else(|_| std::env::current_dir().unwrap_or_default().join(&dir))
+        .join("scripts");
+    let setup = move |world: &mut World, editor: &mut Editor| {
+        editor.icons = false;
+        dusk(world);
+        let from = engine_script::scripts_root(world).join(EXAMPLES);
+        copy_dir(&from, &root.join(EXAMPLES));
+        world.resource_mut::<ScriptSettings>().folder = root.to_string_lossy().to_string();
+        world.remove_resource::<ScriptRuntime>();
+        for (entity, path) in [
+            ("Lamp", "examples/pulse.graph"),
+            ("Stone", "examples/hover.graph"),
+        ] {
+            if let Some(e) = crate::shots::find(world, entity) {
+                world.entity_mut(e).insert(Script::new(path));
+            }
+        }
+        world.resource_mut::<EditorDock>().0 = shot_layout();
+        let mut tab = world.resource_mut::<GraphsTab>();
+        tab.files_next = 0.0;
+        tab.library = None;
+    };
+    /// Edits the open graph `path` (as typing in the tab would), saves it, picks `pick` and
+    /// zooms to `kinds`.
+    fn edit(
+        world: &mut World,
+        path: &str,
+        change: fn(&mut Graph),
+        pick: &str,
+        kinds: &[&str],
+        zoom: f32,
+    ) {
+        world.resource_scope(|world, mut tab: Mut<GraphsTab>| {
+            open(world, &mut tab, path);
+            let i = tab.current;
+            let doc = &mut tab.docs[i];
+            let before = doc.graph.clone();
+            change(&mut doc.graph);
+            doc.push_undo(before);
+            doc.selected = doc
+                .graph
+                .nodes
+                .iter()
+                .filter(|n| n.kind == pick)
+                .map(|n| n.id)
+                .take(1)
+                .collect();
+            zoom_to(doc, kinds, zoom);
+            save(world, &mut tab, 0.0);
+            tab.toast = None;
+        });
+    }
+    /// The stone fires `rose` with its height after it says how high it floats.
+    fn stone_signal(g: &mut Graph) {
+        g.signals.insert("rose".into(), "height: number".into());
+        g.signal_notes.insert(
+            "rose".into(),
+            "every 2 seconds, with how high it floats".into(),
+        );
+        let (print, height) = (21, 23);
+        let emit = g.next_id();
+        g.nodes.push(Node {
+            id: emit,
+            kind: "signal.emit".into(),
+            of: "rose".into(),
+            at: [180, 980],
+            values: BTreeMap::new(),
+        });
+        g.links.push(Link {
+            from: (print, "then".into()),
+            to: (emit, "in".into()),
+        });
+        g.links.push(Link {
+            from: (height, "y".into()),
+            to: (emit, "height".into()),
+        });
+        if let Some(c) = g
+            .comments
+            .iter_mut()
+            .find(|c| c.text.starts_with("Every 2"))
+        {
+            c.size[0] += 340;
+            c.text = "Every 2 seconds: say how high, then fire rose".into();
+        }
+    }
+    /// The lamp's custom event `flash` says what it got; at start it binds the stone's `rose`
+    /// to it and calls it once itself.
+    fn lamp_event(g: &mut Graph) {
+        g.events.insert("flash".into(), "strength: number".into());
+        let id = g.next_id();
+        let (start, bind, call, flash, join, print) = (id, id + 1, id + 2, id + 3, id + 4, id + 5);
+        let node = |id: u32, kind: &str, of: &str, at: [i32; 2], values: Value| Node {
+            id,
+            kind: kind.into(),
+            of: of.into(),
+            at,
+            values: serde_json::from_value(values).unwrap_or_default(),
+        };
+        g.nodes.extend([
+            node(start, "event.start", "", [-600, 820], json!({})),
+            node(
+                bind,
+                "signal.bind",
+                "flash",
+                [-330, 820],
+                json!({"entity": "Stone", "signal": "rose"}),
+            ),
+            node(
+                call,
+                "call.event",
+                "flash",
+                [60, 820],
+                json!({"strength": 1}),
+            ),
+            node(flash, "event.custom", "flash", [-600, 1080], json!({})),
+            node(join, "text.join", "", [-330, 1160], json!({"a": "flash "})),
+            node(print, "debug.print", "", [-60, 1080], json!({})),
+        ]);
+        let link = |a: u32, ap: &str, b: u32, bp: &str| Link {
+            from: (a, ap.into()),
+            to: (b, bp.into()),
+        };
+        g.links.extend([
+            link(start, "then", bind, "in"),
+            link(bind, "then", call, "in"),
+            link(flash, "then", print, "in"),
+            link(flash, "strength", join, "b"),
+            link(join, "text", print, "text"),
+        ]);
+        g.comments.extend([
+            Comment {
+                at: [-640, 760],
+                size: [940, 230],
+                text: "At start: listen to the stone's rose, and flash once".into(),
+                color: [124, 76, 190],
+            },
+            Comment {
+                at: [-640, 1020],
+                size: [940, 280],
+                text: "flash: a custom event other scripts can run".into(),
+                color: [150, 32, 32],
+            },
+        ]);
+    }
+    let new_kinds: &'static [&'static str] = &[
+        "event.start",
+        "signal.bind",
+        "call.event",
+        "event.custom",
+        "debug.print",
+    ];
+    let steps = vec![
+        Step::Do(Box::new(setup)),
+        Step::Select("Stone"),
+        Step::Tool(crate::editor::Tool::Select),
+        Step::Camera(DVec3::new(-2.0, 2.1, 7.5), DVec3::new(1.6, 1.5, 1.6)),
+        Step::Do(Box::new(|world: &mut World, _: &mut Editor| {
+            world.resource_scope(|world, mut tab: Mut<GraphsTab>| {
+                open(world, &mut tab, "examples/pulse.graph");
+                open(world, &mut tab, "examples/hover.graph");
+            });
+        })),
+        Step::Tab(Tab::Graphs),
+        Step::Wait(30),
+        // The stone's graph: Signals lists `rose`; its Emit node runs after the Print.
+        Step::Do(Box::new(|world: &mut World, _: &mut Editor| {
+            edit(
+                world,
+                "examples/hover.graph",
+                stone_signal,
+                "signal.emit",
+                &["event.every", "debug.print", "signal.emit", "vec3.break"],
+                0.85,
+            );
+        })),
+        Step::Wait(40),
+        Step::Shot("gsig_01_stone_fires_rose"),
+        // The lamp's graph: the custom event `flash`, bound to the stone's `rose` at start.
+        Step::Do(Box::new(move |world: &mut World, _: &mut Editor| {
+            edit(
+                world,
+                "examples/pulse.graph",
+                lamp_event,
+                "event.custom",
+                new_kinds,
+                0.85,
+            );
+        })),
+        Step::Wait(40),
+        Step::Shot("gsig_02_lamp_event_and_bind"),
+        // The stone's Details panel: `rose` wired to the lamp graph's `flash`, with a fixed 3.
+        Step::Do(Box::new(crate::scripts::wire_step(
+            "Stone",
+            "rose",
+            "Lamp",
+            "flash",
+            json!([3]),
+        ))),
+        Step::Select("Stone"),
+        Step::Wait(40),
+        Step::Shot("gsig_03_details_wires_rose"),
+        // `flash` retyped to take text: the Call node still gives it a number, and the type
+        // checker marks it on the node.
+        Step::Do(Box::new(move |world: &mut World, _: &mut Editor| {
+            world.resource_scope(|_, mut tab: Mut<GraphsTab>| {
+                let i = tab.current;
+                let doc = &mut tab.docs[i];
+                let before = doc.graph.clone();
+                doc.graph
+                    .events
+                    .insert("flash".into(), "strength: string".into());
+                doc.push_undo(before);
+                doc.selected.clear();
+                zoom_to(doc, new_kinds, 0.85);
+            });
+        })),
+        Step::Wait(60),
+        Step::Shot("gsig_05_type_error_on_node"),
+        // Back to number (undo), saved as it was, for Play.
+        Step::Do(Box::new(|world: &mut World, _: &mut Editor| {
+            let mut tab = world.resource_mut::<GraphsTab>();
+            let i = tab.current;
+            let doc = &mut tab.docs[i];
+            if let Some(before) = doc.undo.pop() {
+                doc.graph = before;
+            }
+        })),
+        Step::Wait(10),
+        // Playing: `flash` runs from the Bind (the height) and the wire (3); the values ride
+        // the wires into the Print.
+        Step::Do(Box::new(|world: &mut World, ed: &mut Editor| {
+            editor::play(world, ed)
+        })),
+        Step::Wait(10),
+        Step::Do(Box::new(|world: &mut World, _: &mut Editor| dusk(world))),
+        Step::Wait(200),
+        Step::Shot("gsig_04_playing_live"),
+    ];
+    ShotScript::new(dir, steps)
+}
+
 fn zoom_to(doc: &mut GraphDoc, kinds: &[&str], zoom: f32) {
     let mut r = Rect::NOTHING;
     for n in doc
@@ -3079,6 +3655,7 @@ mod tests {
             editing_comment: None,
             breakpoints: BTreeSet::new(),
             applied: None,
+            types: Vec::new(),
         }
     }
 

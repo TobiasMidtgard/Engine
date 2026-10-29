@@ -65,6 +65,17 @@ pub struct Graph {
     pub prop_notes: BTreeMap<String, String>,
     /// The script's own state (`self.<name>`), set to these values when it starts.
     pub vars: BTreeMap<String, Value>,
+    /// What the script tells the scene (`Class.signals`; Emit nodes fire them): each signal's
+    /// values, `count: number, by: Entity`. Wired per object in the Details panel.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub signals: BTreeMap<String, String>,
+    /// What each signal is for (the Details panel shows it).
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub signal_notes: BTreeMap<String, String>,
+    /// Custom events: methods of the script that signals wired in the Details panel, Bind
+    /// nodes, Call nodes and messages of their name run. Each one's values, as for signals.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub events: BTreeMap<String, String>,
     pub nodes: Vec<Node>,
     pub links: Vec<Link>,
     pub comments: Vec<Comment>,
@@ -78,6 +89,9 @@ impl Default for Graph {
             props: BTreeMap::new(),
             prop_notes: BTreeMap::new(),
             vars: BTreeMap::new(),
+            signals: BTreeMap::new(),
+            signal_notes: BTreeMap::new(),
+            events: BTreeMap::new(),
             nodes: Vec::new(),
             links: Vec::new(),
             comments: Vec::new(),
@@ -151,6 +165,15 @@ impl Graph {
             out.push_str(&format!("  \"prop_notes\": {},\n", json!(self.prop_notes)));
         }
         out.push_str(&format!("  \"vars\": {},\n", json!(self.vars)));
+        for (name, map) in [
+            ("signals", &self.signals),
+            ("signal_notes", &self.signal_notes),
+            ("events", &self.events),
+        ] {
+            if !map.is_empty() {
+                out.push_str(&format!("  \"{name}\": {},\n", json!(map)));
+            }
+        }
         let list = |out: &mut String, name: &str, items: Vec<String>, last: bool| {
             if items.is_empty() {
                 out.push_str(&format!("  \"{name}\": []"));
@@ -243,6 +266,44 @@ impl PinType {
             // Anything prints.
             (_, PinType::Text) => true,
             (a, b) => a == b,
+        }
+    }
+
+    /// The pin type for a Luau type written in a signal's or event's values (`number`,
+    /// `Entity?`, ...).
+    pub fn of_luau(ty: &str) -> PinType {
+        match ty.trim().trim_end_matches('?') {
+            "number" => PinType::Number,
+            "boolean" => PinType::Bool,
+            "string" => PinType::Text,
+            "Vec3" => PinType::Vec3,
+            "Entity" => PinType::Entity,
+            t if t.starts_with('{') => PinType::Table,
+            _ => PinType::Any,
+        }
+    }
+
+    /// This type as Luau writes it.
+    pub fn luau(self) -> &'static str {
+        match self {
+            PinType::Number => "number",
+            PinType::Bool => "boolean",
+            PinType::Text => "string",
+            PinType::Vec3 => "Vec3",
+            PinType::Entity => "Entity",
+            PinType::Table => "{ [any]: any }",
+            PinType::Exec | PinType::Any => "any",
+        }
+    }
+
+    /// An unwired input's value of this type.
+    pub fn zero(self) -> Value {
+        match self {
+            PinType::Number => json!(0),
+            PinType::Bool => json!(false),
+            PinType::Text => json!(""),
+            PinType::Vec3 => json!([0, 0, 0]),
+            _ => Value::Null,
         }
     }
 
@@ -854,9 +915,82 @@ pub fn library(world: &bevy_ecs::world::World, graph: Option<&Graph>) -> Vec<Nod
     out
 }
 
-/// The variable and prop nodes of `g` (a Get and a Set per variable, a Prop per prop).
+/// A signal's or custom event's values, from `count: number, by: Entity`: (name, pin type).
+/// A value without a type is Any; what isn't a name is left out.
+pub fn params(text: &str) -> Vec<(String, PinType)> {
+    text.split(',')
+        .filter_map(|p| {
+            let (name, ty) = p.split_once(':').unwrap_or((p, ""));
+            let name = name.trim();
+            is_ident(name).then(|| (name.to_string(), PinType::of_luau(ty)))
+        })
+        .collect()
+}
+
+/// The variable, prop, custom event and signal nodes of `g`: a Get and a Set per variable, a
+/// Prop per prop; per custom event its event node, a Call and a Bind; an Emit per signal.
 pub fn own_specs(g: &Graph) -> Vec<NodeSpec> {
     let mut out = Vec::new();
+    for (name, values) in &g.events {
+        let values = params(values);
+        let mut ev = NodeSpec::new(
+            "event.custom",
+            name,
+            "Events",
+            "A custom event: runs when a signal wired to it fires (the Details panel's \
+             Signals, or a Bind node), a Call node calls it, or a message of its name arrives.",
+        )
+        .then();
+        let mut call = NodeSpec::new(
+            "call.event",
+            &format!("Call {name}"),
+            "Events",
+            "Runs this script's custom event now, then goes on.",
+        )
+        .run();
+        for (p, ty) in &values {
+            ev = ev.output(p, *ty);
+            call = call.input(p, *ty, ty.zero());
+        }
+        ev.of = name.clone();
+        out.push(ev);
+        call = call.then();
+        call.of = name.clone();
+        out.push(call);
+        let mut bind = NodeSpec::new(
+            "signal.bind",
+            &format!("Bind signal to {name}"),
+            "Signals",
+            "From now on, when the entity's script fires the signal, this script's custom \
+             event runs with the signal's values (once: only the next time).",
+        )
+        .run()
+        .input("entity", PinType::Entity, Value::Null)
+        .setting("signal", PinType::Text, json!(""), &[])
+        .setting("once", PinType::Bool, json!(false), &[])
+        .then();
+        bind.of = name.clone();
+        out.push(bind);
+    }
+    for (name, values) in &g.signals {
+        let doc = g
+            .signal_notes
+            .get(name)
+            .filter(|n| !n.trim().is_empty())
+            .cloned()
+            .unwrap_or_else(|| {
+                "Fires this script's signal: every method wired to it in the Details panel and \
+                 every Bind on it runs, this frame."
+                    .into()
+            });
+        let mut emit = NodeSpec::new("signal.emit", &format!("Emit {name}"), "Signals", &doc).run();
+        for (p, ty) in params(values) {
+            emit = emit.input(&p, ty, ty.zero());
+        }
+        emit = emit.then();
+        emit.of = name.clone();
+        out.push(emit);
+    }
     for (name, v) in &g.vars {
         let ty = PinType::of_value(v);
         let mut get = NodeSpec::new("var.get", name, "Variables", "A variable of this script.")
@@ -997,6 +1131,7 @@ pub mod look {
         let top = category.split(':').next().unwrap_or(category);
         match top {
             "Events" => [150, 32, 32],
+            "Signals" => [124, 76, 190],
             "Flow" => [78, 80, 88],
             "Variables" | "Props" => [36, 112, 74],
             "Entity" => [38, 88, 156],
@@ -1358,6 +1493,16 @@ const HOOKS: &[(&str, &str, &[&str])] = &[
     ("event.destroy", "on_destroy", &[]),
 ];
 
+/// A hook parameter's Luau type (strict code needs them to do arithmetic on `dt`).
+fn hook_param_type(name: &str) -> &'static str {
+    match name {
+        "dt" => "number",
+        "by" | "other" => "Entity",
+        "event" => "string",
+        _ => "any",
+    }
+}
+
 /// Compiles a graph file's text (`path`, relative to the scripts folder, names the class and
 /// the header).
 pub fn compile_text(text: &str, path: &str) -> Result<Compiled, String> {
@@ -1539,6 +1684,8 @@ impl<'a> Gen<'a> {
 
     fn run(&mut self) {
         let c = self.class.clone();
+        // Strict, so Luau's type checker (the editor's) checks the values it passes around.
+        self.line("--!strict", None);
         self.line(
             format!(
                 "-- Generated from {} by the engine's graph compiler: edit the graph, not this.",
@@ -1583,6 +1730,43 @@ impl<'a> Gen<'a> {
             self.indent -= 1;
             self.line("}", None);
         }
+        if !self.g.signals.is_empty() {
+            self.line(format!("{c}.signals = {{"), None);
+            self.indent += 1;
+            let signals: Vec<(String, String)> = self
+                .g
+                .signals
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+            for (k, v) in signals {
+                if !is_ident(&k) {
+                    self.problem(
+                        None,
+                        None,
+                        format!("signal '{k}' isn't a name (letters, digits, _)"),
+                        true,
+                    );
+                    continue;
+                }
+                let note = self
+                    .g
+                    .signal_notes
+                    .get(&k)
+                    .map(|n| n.split_whitespace().collect::<Vec<_>>().join(" "))
+                    .filter(|n| !n.is_empty())
+                    .map(|n| format!(" -- {n}"))
+                    .unwrap_or_default();
+                let values = params(&v)
+                    .iter()
+                    .map(|(p, ty)| format!("{p}: {}", ty.luau()))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                self.line(format!("{k} = {},{note}", text_literal(&values)), None);
+            }
+            self.indent -= 1;
+            self.line("}", None);
+        }
         for k in self.g.vars.keys() {
             if !is_ident(k) {
                 self.problem(
@@ -1622,7 +1806,11 @@ impl<'a> Gen<'a> {
                 continue;
             }
             self.line("", None);
-            self.line(format!("function {c}:{hook}({})", params.join(", ")), None);
+            let typed: Vec<String> = params
+                .iter()
+                .map(|p| format!("{p}: {}", hook_param_type(p)))
+                .collect();
+            self.line(format!("function {c}:{hook}({})", typed.join(", ")), None);
             self.indent += 1;
             if start {
                 let vars: Vec<(String, Value)> = self
@@ -1685,6 +1873,7 @@ impl<'a> Gen<'a> {
             self.indent -= 1;
             self.line("end", None);
         }
+        self.custom_events(&events);
         // After a hot reload: new variables and gates start at their values, new Every timers
         // start and changed ones restart (the runtime stops the removed ones).
         let vars: Vec<(String, Value)> = self
@@ -1770,6 +1959,89 @@ impl<'a> Gen<'a> {
                 false,
             );
         }
+    }
+
+    /// A method per custom event: its node's chain, or nothing yet (one with no node can
+    /// still be wired, bound and called).
+    fn custom_events(&mut self, events: &[&'a Node]) {
+        let c = self.class.clone();
+        let mut written = BTreeSet::new();
+        for e in events.iter().filter(|n| n.kind == "event.custom") {
+            let name = e.of.clone();
+            if !self.g.events.contains_key(&name) {
+                self.problem(
+                    Some(e.id),
+                    None,
+                    format!("no custom event '{name}' (add it under Events)"),
+                    true,
+                );
+                continue;
+            }
+            if !self.event_name_ok(&name) {
+                continue;
+            }
+            if !written.insert(name.clone()) {
+                self.problem(
+                    Some(e.id),
+                    None,
+                    format!("a second node for custom event '{name}': only the first runs"),
+                    true,
+                );
+                continue;
+            }
+            self.emitted.insert(e.id);
+            let values = params(&self.g.events[&name]);
+            let mut scope: Scope = vec![HashMap::new()];
+            for (p, _) in &values {
+                scope[0].insert((e.id, p.clone()), p.clone());
+            }
+            self.event_head(&c, &name, &values);
+            self.indent += 1;
+            self.chain(e.id, "then", &mut scope);
+            self.indent -= 1;
+            self.line("end", None);
+        }
+        let rest: Vec<(String, String)> = self
+            .g
+            .events
+            .iter()
+            .filter(|(k, _)| {
+                !events
+                    .iter()
+                    .any(|n| n.kind == "event.custom" && &n.of == *k)
+            })
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        for (name, values) in rest {
+            if self.event_name_ok(&name) {
+                self.event_head(&c, &name, &params(&values));
+                self.line("end", None);
+            }
+        }
+    }
+
+    fn event_name_ok(&mut self, name: &str) -> bool {
+        let hook = HOOKS.iter().any(|(_, h, _)| *h == name)
+            || matches!(name, "on_reload" | "props" | "signals" | "emit" | "entity");
+        if !is_ident(name) || name.starts_with("__") || hook {
+            self.problem(
+                None,
+                None,
+                format!("custom event '{name}': a hook's or the script's own name, or not a name"),
+                true,
+            );
+            return false;
+        }
+        true
+    }
+
+    fn event_head(&mut self, c: &str, name: &str, values: &[(String, PinType)]) {
+        let typed: Vec<String> = values
+            .iter()
+            .map(|(p, ty)| format!("{p}: {}", ty.luau()))
+            .collect();
+        self.line("", None);
+        self.line(format!("function {c}:{name}({})", typed.join(", ")), None);
     }
 
     fn finish(self) -> Compiled {
@@ -1908,7 +2180,8 @@ impl<'a> Gen<'a> {
         if ty == PinType::Entity
             && let Some(name) = value.as_str()
         {
-            return format!("world.find({})", text_literal(name));
+            // A missing object is an error where it is used; the checker needn't ask for nil.
+            return format!("(world.find({}) :: Entity)", text_literal(name));
         }
         literal(&value)
     }
@@ -2280,6 +2553,69 @@ impl<'a> Gen<'a> {
                 );
                 self.chain(id, "then", scope);
             }
+            "call.event" | "signal.emit" => {
+                let emit = n.kind == "signal.emit";
+                let (declared, what) = if emit {
+                    (self.g.signals.get(&n.of), "signal")
+                } else {
+                    (self.g.events.get(&n.of), "custom event")
+                };
+                let Some(values) = declared.map(|v| params(v)) else {
+                    let under = if emit { "Signals" } else { "Events" };
+                    self.problem(
+                        Some(id),
+                        None,
+                        format!("no {what} '{}' (add it under {under})", n.of),
+                        true,
+                    );
+                    return;
+                };
+                let mut args: Vec<String> = values
+                    .iter()
+                    .map(|(p, _)| self.input(id, p, scope))
+                    .collect();
+                if emit {
+                    args.insert(0, text_literal(&n.of));
+                    self.line(format!("self:emit({})", args.join(", ")), at);
+                } else {
+                    self.line(format!("self:{}({})", n.of, args.join(", ")), at);
+                }
+                self.chain(id, "then", scope);
+            }
+            "signal.bind" => {
+                if !self.g.events.contains_key(&n.of) {
+                    self.problem(
+                        Some(id),
+                        None,
+                        format!("no custom event '{}' to bind (add it under Events)", n.of),
+                        true,
+                    );
+                    return;
+                }
+                let signal = n.values.get("signal").and_then(Value::as_str).unwrap_or("");
+                if !is_ident(signal) {
+                    self.problem(
+                        Some(id),
+                        Some("signal"),
+                        "which signal? Type its name (the entity's script declares it)".into(),
+                        true,
+                    );
+                    return;
+                }
+                let once = n.values.get("once").and_then(Value::as_bool) == Some(true);
+                let e = self.input(id, "entity", scope);
+                self.line(
+                    format!(
+                        "{}:{}({}, function(...) self:{}(...) end)",
+                        paren(&e),
+                        if once { "once" } else { "on" },
+                        text_literal(signal),
+                        n.of
+                    ),
+                    at,
+                );
+                self.chain(id, "then", scope);
+            }
             "api.call" => {
                 let call = n.of.clone();
                 let valid = !call.is_empty() && call.split('.').all(is_ident) && call.contains('.');
@@ -2539,7 +2875,11 @@ mod tests {
         assert!(c.problems.is_empty(), "{:?}", c.problems);
         assert!(c.luau.contains("local Spinner = {}"), "{}", c.luau);
         assert!(c.luau.contains("speed = 25,"), "{}", c.luau);
-        assert!(c.luau.contains("function Spinner:update(dt)"), "{}", c.luau);
+        assert!(
+            c.luau.contains("function Spinner:update(dt: number)"),
+            "{}",
+            c.luau
+        );
         assert!(
             c.luau
                 .contains("self.entity:rotate_y(math.rad((dt * self.props.speed)))"),
@@ -2571,6 +2911,85 @@ mod tests {
             c.luau
         );
         assert_eq!(Graph::parse(&g.to_text()).unwrap().prop_notes, g.prop_notes);
+    }
+
+    /// Blueprint-style talk between scripts: a custom event, a Bind to another object's
+    /// signal, a Call, and an Emit of the graph's own signal.
+    #[test]
+    fn custom_events_and_signals_compile() {
+        let g = Graph {
+            signals: BTreeMap::from([("rang".into(), "times: number".into())]),
+            signal_notes: BTreeMap::from([("rang".into(), "each ring".into())]),
+            events: BTreeMap::from([
+                ("ring".into(), "times: number, by: Entity".into()),
+                ("hush".into(), String::new()),
+            ]),
+            nodes: vec![
+                node(1, "event.custom", "ring", json!({})),
+                node(2, "signal.emit", "rang", json!({})),
+                node(3, "event.start", "", json!({})),
+                node(
+                    4,
+                    "signal.bind",
+                    "ring",
+                    json!({"signal": "pulled", "entity": "Lever"}),
+                ),
+                node(5, "call.event", "hush", json!({})),
+            ],
+            links: vec![
+                link(1, "then", 2, "in"),
+                link(1, "times", 2, "times"),
+                link(3, "then", 4, "in"),
+                link(4, "then", 5, "in"),
+            ],
+            ..Default::default()
+        };
+        let c = compile(&g, "examples/bell.graph");
+        assert!(c.problems.is_empty(), "{:?}\n{}", c.problems, c.luau);
+        for want in [
+            "Bell.signals = {",
+            "rang = \"times: number\", -- each ring",
+            "function Bell:ring(times: number, by: Entity)",
+            "self:emit(\"rang\", times)",
+            ":on(\"pulled\", function(...) self:ring(...) end)",
+            "self:hush()",
+            "function Bell:hush()",
+        ] {
+            assert!(c.luau.contains(want), "{want} in\n{}", c.luau);
+        }
+        assert!(crate::editing::check(&c.luau).is_none(), "{}", c.luau);
+        assert_eq!(Graph::parse(&g.to_text()).unwrap(), g);
+        // An Emit of a signal the graph doesn't declare, a custom event named like a hook and a
+        // Bind with no signal name are errors on their nodes.
+        let mut bad = g.clone();
+        bad.nodes.push(node(6, "signal.emit", "rnag", json!({})));
+        bad.links.push(link(5, "then", 6, "in"));
+        bad.events.insert("update".into(), String::new());
+        bad.nodes[3].values.remove("signal");
+        let c = compile(&bad, "examples/bell.graph");
+        let errors: Vec<(Option<u32>, &str)> =
+            c.errors().map(|p| (p.node, p.message.as_str())).collect();
+        assert!(
+            errors.contains(&(
+                Some(4),
+                "which signal? Type its name (the entity's script declares it)"
+            )),
+            "{errors:?}"
+        );
+        assert!(
+            errors.iter().any(|e| e.1.contains("custom event 'update'")),
+            "{errors:?}"
+        );
+        // Node 6 hangs off the Bind, which no longer compiles; on its own it says why.
+        bad.nodes[3].values.insert("signal".into(), json!("pulled"));
+        let c = compile(&bad, "examples/bell.graph");
+        assert!(
+            c.errors()
+                .any(|p| p.node == Some(6) && p.message.contains("no signal 'rnag'")),
+            "{:?}",
+            c.problems
+        );
+        assert_eq!(params("a: number, b, 3x: string, c: Entity?").len(), 3);
     }
 
     #[test]
@@ -2636,7 +3055,7 @@ mod tests {
         let c = compile(&g, "examples/torch.graph");
         assert!(c.errors().next().is_none(), "{:?}\n{}", c.problems, c.luau);
         for want in [
-            "function Torch:on_interact(by)",
+            "function Torch:on_interact(by: Entity)",
             "if not self.__once2 then",
             "self.__flip3 = not self.__flip3",
             "self.lit = true",
