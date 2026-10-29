@@ -51,13 +51,16 @@ pub struct TerrainVertex {
     /// River and lake water, the lake's part of it and nearness to river banks (unorm8; see
     /// [`ShapeSample::water`](crate::ShapeSample)), then a spare byte.
     pub river: [u8; 4],
+    /// The parent patch's normal here (octahedral snorm16), which the shader blends toward as
+    /// the vertex morphs.
+    pub parent_normal: [i16; 2],
 }
 
 impl TerrainVertex {
     pub fn layout() -> wgpu::VertexBufferLayout<'static> {
-        const ATTRS: [wgpu::VertexAttribute; 9] = wgpu::vertex_attr_array![
+        const ATTRS: [wgpu::VertexAttribute; 10] = wgpu::vertex_attr_array![
             0 => Float32x3, 1 => Snorm16x4, 2 => Float32, 3 => Unorm8x4, 4 => Unorm8x4,
-            9 => Unorm8x4, 10 => Unorm8x4, 8 => Unorm8x4, 11 => Unorm8x4
+            9 => Unorm8x4, 10 => Unorm8x4, 8 => Unorm8x4, 11 => Unorm8x4, 13 => Snorm16x2
         ];
         wgpu::VertexBufferLayout {
             array_stride: std::mem::size_of::<TerrainVertex>() as u64,
@@ -290,6 +293,21 @@ fn encode_tint(t: [f32; 4]) -> [u8; 4] {
     [q(t[0].sqrt()), q(t[1].sqrt()), q(t[2].sqrt()), q(t[3])]
 }
 
+/// A unit vector folded onto the octahedron (Cigolle et al. 2014), snorm16.
+fn encode_octahedral(n: DVec3) -> [i16; 2] {
+    let n = n / (n.x.abs() + n.y.abs() + n.z.abs()).max(1e-12);
+    let (x, z) = if n.y >= 0.0 {
+        (n.x, n.z)
+    } else {
+        (
+            (1.0 - n.z.abs()) * n.x.signum(),
+            (1.0 - n.x.abs()) * n.z.signum(),
+        )
+    };
+    let q = |v: f64| (v.clamp(-1.0, 1.0) * 32767.0).round() as i16;
+    [q(x), q(z)]
+}
+
 fn encode_normal(n: DVec3) -> [i16; 4] {
     let q = |v: f64| (v.clamp(-1.0, 1.0) * 32767.0).round() as i16;
     [q(n.x), q(n.y), q(n.z), 0]
@@ -343,31 +361,65 @@ pub fn build_chunk(src: &ChunkSource, key: NodeKey) -> ChunkMesh {
     // detail on the even vertices, on the parent's triangles in between). The shader slides
     // vertices there as the patch nears the distance where it merges into its parent, so
     // detail fades in instead of popping.
+    // The parent's normals come along (Losasso and Hoppe 2004 blend a level's shading into the
+    // coarser one's with the geometry's own weight), so the light doesn't jump when the
+    // parent takes over.
     let mut morph = vec![0.0f64; GRID * GRID];
+    let mut parent_normals = vec![None; GRID * GRID];
     if key.level > 0 {
+        // The parent's vertices, with a ring beyond the patch for their normals.
         const HALF: usize = GRID / 2 + 1;
-        let mut parent = vec![DVec3::ZERO; HALF * HALF];
-        for pj in 0..HALF {
-            for pi in 0..HALF {
-                let idx = (pj * 2 + 1) * S + pi * 2 + 1;
-                let (base, up, dir) = (bases[idx], ups[idx], dirs[idx]);
+        const PS: usize = HALF + 2;
+        let mut parent = vec![DVec3::ZERO; PS * PS];
+        let mut parent_up = vec![DVec3::ZERO; PS * PS];
+        for pj in 0..PS {
+            for pi in 0..PS {
+                let (fi, fj) = (pi * 2, pj * 2);
+                let (base, up, dir) = if (1..=HALF).contains(&pi) && (1..=HALF).contains(&pj) {
+                    let idx = (fj - 1) * S + fi - 1;
+                    (bases[idx], ups[idx], dirs[idx])
+                } else {
+                    let a = lo.x + (fi as f64 - 2.0) * step;
+                    let b = lo.y + (fj as f64 - 2.0) * step;
+                    map.base(key.face, a, b)
+                };
                 let h = src.sample(base, up, dir, min_wavelength * 2.0).height;
-                parent[pj * HALF + pi] = base + up * shown(src, h);
+                parent[pj * PS + pi] = base + up * shown(src, h);
+                parent_up[pj * PS + pi] = up;
             }
         }
-        let p = |i: usize, j: usize| parent[(j / 2) * HALF + i / 2];
+        let mut parent_n = vec![DVec3::ZERO; HALF * HALF];
+        for pj in 0..HALF {
+            for pi in 0..HALF {
+                let at = |di: usize, dj: usize| parent[(pj + dj) * PS + pi + di];
+                let up = parent_up[(pj + 1) * PS + pi + 1];
+                let mut n = (at(2, 1) - at(0, 1))
+                    .cross(at(1, 2) - at(1, 0))
+                    .normalize_or(up);
+                if n.dot(up) < 0.0 {
+                    n = -n;
+                }
+                parent_n[pj * HALF + pi] = n;
+            }
+        }
+        let p = |i: usize, j: usize| parent[(j / 2 + 1) * PS + i / 2 + 1];
+        let pn = |i: usize, j: usize| parent_n[(j / 2) * HALF + i / 2];
         for j in 0..GRID {
             for i in 0..GRID {
-                let target = match (i % 2, j % 2) {
-                    (0, 0) => p(i, j),
-                    (1, 0) => (p(i - 1, j) + p(i + 1, j)) * 0.5,
-                    (0, 1) => (p(i, j - 1) + p(i, j + 1)) * 0.5,
-                    // The parent quad's diagonal (see `chunk_indices`).
-                    _ if (i / 2 + j / 2) % 2 == 0 => (p(i - 1, j - 1) + p(i + 1, j + 1)) * 0.5,
-                    _ => (p(i + 1, j - 1) + p(i - 1, j + 1)) * 0.5,
+                // On the parent's triangles: its vertex, an edge's middle or the diagonal's
+                // (see `chunk_indices`).
+                let (a, b) = match (i % 2, j % 2) {
+                    (0, 0) => ((i, j), (i, j)),
+                    (1, 0) => ((i - 1, j), (i + 1, j)),
+                    (0, 1) => ((i, j - 1), (i, j + 1)),
+                    _ if (i / 2 + j / 2) % 2 == 0 => ((i - 1, j - 1), (i + 1, j + 1)),
+                    _ => ((i + 1, j - 1), (i - 1, j + 1)),
                 };
+                let target = (p(a.0, a.1) + p(b.0, b.1)) * 0.5;
                 let idx = (j + 1) * S + i + 1;
                 morph[j * GRID + i] = (target - pos[idx]).dot(ups[idx]);
+                parent_normals[j * GRID + i] =
+                    Some((pn(a.0, a.1) + pn(b.0, b.1)).normalize_or(ups[idx]));
             }
         }
     }
@@ -440,9 +492,15 @@ pub fn build_chunk(src: &ChunkSource, key: NodeKey) -> ChunkMesh {
             };
             let mut normal = encode_normal(n);
             normal[3] = encode_morph(m, spacing);
+            let parent_n = if ocean {
+                up
+            } else {
+                parent_normals[(j - 1) * GRID + i - 1].unwrap_or(n)
+            };
             vertices.push(TerrainVertex {
                 position: (p - origin).as_vec3().to_array(),
                 normal,
+                parent_normal: encode_octahedral(parent_n),
                 altitude: s.height as f32,
                 climate: [
                     (s.moisture.clamp(0.0, 1.0) * 255.0) as u8,
@@ -671,6 +729,42 @@ mod tests {
             }
         }
         assert!(peaks > 0);
+    }
+
+    #[test]
+    fn morphed_vertices_take_the_parents_normals() {
+        let src = source();
+        let parent = NodeKey {
+            face: 4,
+            level: 9,
+            x: 200,
+            y: 154,
+        };
+        let child = parent.children()[0];
+        let (cp, cc) = (build_chunk(&src, parent), build_chunk(&src, child));
+        let decode = |e: [i16; 2]| {
+            let (x, z) = (e[0] as f64 / 32767.0, e[1] as f64 / 32767.0);
+            let mut n = DVec3::new(x, 1.0 - x.abs() - z.abs(), z);
+            let t = (-n.y).max(0.0);
+            n.x -= t * n.x.signum();
+            n.z -= t * n.z.signum();
+            n.normalize()
+        };
+        let normal = |v: &TerrainVertex| {
+            DVec3::new(v.normal[0] as f64, v.normal[1] as f64, v.normal[2] as f64).normalize()
+        };
+        let mut bent = 0;
+        for j in 0..=QUADS / 2 {
+            for i in 0..=QUADS / 2 {
+                let theirs = normal(&cp.vertices[j * GRID + i]);
+                let v = &cc.vertices[(j * 2) * GRID + i * 2];
+                let ours = decode(v.parent_normal);
+                assert!(ours.dot(theirs) > 0.9999, "({i}, {j}): {ours} vs {theirs}");
+                bent += (normal(v).dot(theirs) < 0.9999) as u32;
+            }
+        }
+        // The child's own normals carry finer detail than its parent's.
+        assert!(bent > 0);
     }
 
     #[test]

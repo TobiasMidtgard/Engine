@@ -45,6 +45,13 @@ const MAX_UPLOADS_PER_FRAME: usize = 64;
 /// them again only past this many times that, so the detail doesn't flicker back and forth
 /// at the boundary (or a patch budget easing up and down).
 const MERGE_HYSTERESIS: f64 = 1.15;
+/// A moving camera's patches are built this many seconds ahead along its path, so a fast
+/// flight doesn't outrun them (a coarse parent stands in until its children are built).
+const LOOK_AHEAD_S: f64 = 1.5;
+/// But no farther ahead than this, meters.
+const LOOK_AHEAD_MAX_M: f64 = 3_000.0;
+/// Faster than this the camera jumped (a teleport, a tour stop), meters per second.
+const JUMP_SPEED: f64 = 5_000.0;
 
 /// Per-draw data (instance vertex buffer).
 #[repr(C)]
@@ -409,6 +416,9 @@ struct PlanetState {
     young_count: usize,
     /// Detail multiplier from [`TerrainSettings::patch_budget`] (1 = none).
     boost: f64,
+    /// Terrain-local camera position last frame and when, and its smoothed velocity.
+    last_camera: Option<(DVec3, std::time::Instant)>,
+    camera_velocity: DVec3,
 }
 
 impl PlanetState {
@@ -444,6 +454,8 @@ impl PlanetState {
             young,
             young_count,
             boost: 1.0,
+            last_camera: None,
+            camera_velocity: DVec3::ZERO,
         }
     }
 }
@@ -1804,6 +1816,41 @@ impl RenderFeature for TerrainFeature {
                 }
             }
             missing_total += sel.missing.len();
+            // Then what the camera will need where it is heading.
+            if !mirror {
+                let now = std::time::Instant::now();
+                if let Some((last, at)) = state.last_camera {
+                    let dt = now.duration_since(at).as_secs_f64();
+                    if dt > 1e-4 {
+                        let v = (cam_local - last) / dt;
+                        state.camera_velocity = if v.length() > JUMP_SPEED {
+                            DVec3::ZERO
+                        } else {
+                            state.camera_velocity.lerp(v, (dt * 4.0).min(1.0))
+                        };
+                    }
+                }
+                state.last_camera = Some((cam_local, now));
+                let ahead =
+                    (state.camera_velocity * LOOK_AHEAD_S).clamp_length_max(LOOK_AHEAD_MAX_M);
+                if !catch_up && ahead.length() > 10.0 {
+                    let soon = state.lod.walk(&SelectInput {
+                        camera: cam_local + ahead,
+                        split_factor: split,
+                        merge_factor: None,
+                        visible: &visible,
+                        min_size: 0.0,
+                    });
+                    for &(_, k) in &soon.missing {
+                        if state.building.len() >= in_flight {
+                            break;
+                        }
+                        if state.building.insert(k) {
+                            workers.build(*e, state.version, &src, k);
+                        }
+                    }
+                }
+            }
             // Then edited patches, kept drawn meanwhile (one being built waits for that build
             // before the next: the edit may have come after it started).
             let mut i = 0;
@@ -2425,6 +2472,6 @@ mod tests {
             16 * (3 + 1 + 10 + 7 + MAX_RAYED + MAX_YOUNG)
         );
         assert_eq!(std::mem::size_of::<MapsGpu>(), 16 * 12);
-        assert_eq!(std::mem::size_of::<TerrainVertex>(), 48);
+        assert_eq!(std::mem::size_of::<TerrainVertex>(), 52);
     }
 }

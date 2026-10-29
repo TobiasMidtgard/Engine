@@ -114,6 +114,7 @@ struct VertexIn {
     @location(8) tint: vec4<f32>,      // hand-made ground tint: sqrt(color), amount
     @location(11) river: vec4<f32>,    // river and lake water (0..1), lake share, river banks, spare
     @location(12) night: vec4<f32>,    // night glow page: face corner a, b, edge, layer·8 + face (−1 none)
+    @location(13) parent_normal: vec2<f32>,  // the parent patch's normal here, octahedral
 };
 
 // `@invariant` keeps the prepass and the scene pass depths bit-identical.
@@ -125,7 +126,9 @@ struct VertexOut {
     @location(3) climate: vec4<f32>,      // moisture, temperature °C, mare, altitude (m)
     @location(4) ocean_paint: vec4<f32>,  // ocean flag, paint weight, regional variety, local patches (0..1)
     @location(5) @interpolate(flat) planet: u32,
-    @location(6) lod: vec4<f32>,          // vertex spacing (m), level, convexity (-1 gully .. +1 crest)
+    // Vertex spacing (m) and level, both continuous (morphing toward the parent's as the
+    // geometry does), convexity (-1 gully .. +1 crest), morph 0..1.
+    @location(6) lod: vec4<f32>,
     @location(7) tint: vec4<f32>,         // linear color, amount
     // Painted layer weights (see `VertexIn`), interpolated: painted areas meet smoothly
     // instead of in triangle steps.
@@ -1086,6 +1089,29 @@ fn crater_rays(p: PlanetGpu, rel: vec3<f32>, pixel: f32) -> f32 {
     return ray;
 }
 
+// How far a vertex has morphed toward its parent patch, 0..1: it nears the distance where the
+// parent takes over.
+fn morph_of(in: VertexIn, rel: vec3<f32>) -> f32 {
+    if (in.lod.w > 0.0) {
+        return smoothstep(in.lod.z, in.lod.w, length(rel));
+    }
+    return 0.0;
+}
+
+fn octahedral(e: vec2<f32>) -> vec3<f32> {
+    var n = vec3<f32>(e.x, 1.0 - abs(e.x) - abs(e.y), e.y);
+    let t = saturate(-n.y);
+    n.x += select(t, -t, n.x >= 0.0);
+    n.z += select(t, -t, n.z >= 0.0);
+    return normalize(n);
+}
+
+// The vertex's normal (planet frame), blended toward its parent patch's as it morphs.
+fn morphed_normal(in: VertexIn, planet: PlanetGpu) -> vec3<f32> {
+    let k = morph_of(in, in.origin + planet_rot(planet) * in.position);
+    return mix(normalize(in.normal.xyz), octahedral(in.parent_normal), k);
+}
+
 // Camera-relative position of a vertex: geomorphed toward its parent patch and lowered by
 // prints. Shared by the scene pass and the prepass so both rasterize the same depth.
 fn place_vertex(in: VertexIn, planet: PlanetGpu) -> vec3<f32> {
@@ -1093,8 +1119,7 @@ fn place_vertex(in: VertexIn, planet: PlanetGpu) -> vec3<f32> {
     let up = planet_up(planet, rel);
     // Geomorph toward the parent patch's shape as it nears the distance where it takes over.
     if (in.lod.w > 0.0) {
-        let k = smoothstep(in.lod.z, in.lod.w, length(rel));
-        rel += up * (in.normal.w * in.lod.x * MORPH_RANGE * k);
+        rel += up * (in.normal.w * in.lod.x * MORPH_RANGE * morph_of(in, rel));
     }
     let flags = u32(round(in.climate.w * 255.0));
     // Prints and tracks lower fine patches a little (shading carries the detail).
@@ -1127,7 +1152,10 @@ fn vs_main(in: VertexIn) -> VertexOut {
 
     var out: VertexOut;
     out.rel = rel;
-    out.normal = normalize(rot * in.normal.xyz);
+    // The light, the spacing and the level morph with the shape, so nothing jumps where the
+    // parent takes over (Losasso and Hoppe 2004 blend textures with the geometry's weight).
+    let k = morph_of(in, in.origin + rot * in.position);
+    out.normal = normalize(rot * morphed_normal(in, planet));
     out.up = up;
     out.climate = vec4<f32>(in.climate.x, in.climate.y * 190.0 - 130.0, in.climate.z, in.altitude);
     let painted = dot(in.paint_a, vec4(1.0)) + dot(in.paint_b, vec4(1.0)) + in.paint_c.x + in.paint_c.y;
@@ -1136,7 +1164,7 @@ fn vs_main(in: VertexIn) -> VertexOut {
     out.paint_a = in.paint_a;
     out.paint_b = in.paint_b;
     out.paint_c = in.paint_c.xy;
-    out.lod = vec4<f32>(in.lod.xy, convex, 0.0);
+    out.lod = vec4<f32>(in.lod.x * (1.0 + k), in.lod.y - k, convex, k);
     out.water = in.river.xyz;
     out.night = in.night;
     out.tint = vec4<f32>(in.tint.rgb * in.tint.rgb, in.tint.a);
@@ -1168,7 +1196,7 @@ fn vs_prepass(in: VertexIn) -> PrepassOut {
     let flags = u32(round(in.climate.w * 255.0));
     var out: PrepassOut;
     out.clip = frame.view_proj * vec4<f32>(rel, 1.0);
-    out.normal = normalize(planet_rot(planet) * in.normal.xyz);
+    out.normal = normalize(planet_rot(planet) * morphed_normal(in, planet));
     out.up = planet_up(planet, rel);
     out.rel = rel;
     out.motion_now = motion_clip(rel);
@@ -2664,7 +2692,7 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
         color += pre_expose(frame.sun_color.rgb * sun_transmittance(in.rel) * shadow_factor(in.rel, n) * planet_lit * flash);
     }
     if (maps.flags.z > 0.5) {
-        let level = in.lod.y;
+        let level = ceil(in.lod.y - 1e-3);
         let tint = vec3<f32>(fract(level * 0.37), fract(level * 0.61 + 0.3), fract(level * 0.83 + 0.6));
         color *= mix(vec3(1.0), tint * 1.6 + 0.2, 0.6);
     }
