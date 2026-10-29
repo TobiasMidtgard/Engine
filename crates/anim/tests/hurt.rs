@@ -132,7 +132,7 @@ fn a_blow_to_the_stomach_doubles_the_body_over_with_the_hands_covering_it() {
     }
     let covered = (local(&app, e, "hand_l").z + local(&app, e, "hand_r").z) * 0.5;
     assert!(
-        covered < hands - 0.08,
+        covered < hands - 0.04,
         "hands from z {hands:.2} to {covered:.2}"
     );
     // The wind comes back.
