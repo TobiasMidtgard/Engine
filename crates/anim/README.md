@@ -39,9 +39,15 @@ compresses and stretches.
   weighted by the clip's `strike` curve, so blows land where the target is rather than
   where the clip was authored. The built-in `boxing` set chains jab, cross, hook and
   uppercut (generated punch clips with chest turn, a dip on the uppercut and a pivoting
-  rear foot); the struck person's flinch (`hit`) snaps the head away from each blow.
-  Damage numbers and who may hit whom stay with the combat module, which reads the
-  published phase, cancel and armor flags.
+  rear foot); the struck person's flinch (`hit`) snaps the head away from each blow, and
+  the attacker's face sets as each punch lands (the `strike` curve feeds `Face` effort).
+  A target holding up its guard (`guarding` > 0.5) blocks high strikes from within 70° of
+  its front: the fist is aimed at and lands on the nearer glove, with the set's `Block`
+  share of damage (0.2) and push (0.35) so the guarding arm flinches back, 0.6 of the
+  hitstop (blockstun is shorter than hitstun in fighting games), and the attacker is pushed
+  back 0.12 m (`HitReaction::knock`), as fighting games push a blocked attacker out of
+  reach; `Attacker::blocked` counts them. Damage numbers and who may hit whom stay with the
+  combat module, which reads the published phase, cancel and armor flags.
 - **IK.** `FootIk` plants feet on uneven ground (pelvis drop, two-bone legs, foot tilt, toes
   stay flat at toe-off) and locks them: a foot that comes down still is held where it
   landed until it lifts, however the clip's stride matches the body's speed, and a body
@@ -312,9 +318,10 @@ walking fires footsteps, and that strafing hands over to the fallback and back.
 `tests/combat.rs` puts a boxer in front of a partner and checks that four presses link into
 jab, cross, hook and uppercut that step in and all land with a few frames of hitstop, that
 an early press waits in the buffer and a stale one is dropped, that mashing plays one move
-at a time, and that blows out of reach miss (with the warp it would have taken published).
-`tests/sparring.rs` checks the paddock's boxer lands the combo and the partner's head snaps
-back from the jab.
+at a time, that blows out of reach miss (with the warp it would have taken published), and
+that a raised guard blocks all four on the gloves and pushes the boxer back.
+`tests/sparring.rs` checks the paddock partner's guard blocks the boxer's jab and cross,
+the hook and uppercut land once it drops, and the head snaps back from the first one.
 `tests/hits.rs` punches a person and checks the head snaps back and recovers.
 `tests/body_request.rs` asks for a hiker, a horse, a 40 cm dog and an unknown kind on
 entities the test moves itself: the bodies walk, run and gallop from that motion, step on the ground, keep the

@@ -5,9 +5,9 @@
 //! A [`Face`] blinks on its own (seeded per entity, so a crowd never blinks together), looks
 //! where its [`LookAt`] or [`Face::look_at`] points (the eyes lead the head and stop at their
 //! sockets' limits), glances about when it has nothing to look at, and shows what the body
-//! is doing: the `effort`, `brace` and `flex` curves and the `move_effort` parameter squint
-//! the eyes, lower and knit the brows and pull the mouth into a grimace, and a body gone limp
-//! (`Ragdoll` weight) lets its lids droop and its jaw hang.
+//! is doing: the `effort`, `brace`, `flex` and `strike` curves and the `move_effort`
+//! parameter squint the eyes, lower and knit the brows and pull the mouth into a grimace, and
+//! a body gone limp (`Ragdoll` weight) lets its lids droop and its jaw hang.
 //!
 //! It runs after retargeting, on the imported skeleton's pose: [`FaceRig`] finds the face
 //! joints and reads their axes from the rest pose (left from eye to eye, ahead from the head
@@ -554,6 +554,8 @@ fn effort(animator: &Animator, params: Option<&AnimationParams>) -> f32 {
         .curve("effort")
         .max(0.8 * animator.curve("brace"))
         .max(0.8 * animator.curve("flex"))
+        // A punch thrown: the jaw sets and the eyes narrow as it lands.
+        .max(0.7 * animator.curve("strike"))
         .max(0.5 * params.map_or(0.0, |p| p.get("move_effort")))
 }
 

@@ -1,10 +1,10 @@
 //! Combat moves: presses buffered and linked into a combo in cancel windows, the attacker
-//! stepping in to range, blows landing on the target with hitstop, and mashing that doesn't
-//! queue a whole combo.
+//! stepping in to range, blows landing on the target with hitstop, a raised guard blocking
+//! them on the gloves, and mashing that doesn't queue a whole combo.
 
 use engine_anim::combat::{AttackPhase, Attacker};
 use engine_anim::demo::spawn_humanoid;
-use engine_anim::{AnimationPlugin, Animator, build::humanoid::Outfit};
+use engine_anim::{AnimationPlugin, Animator, HitReaction, build::humanoid::Outfit};
 use engine_core::prelude::*;
 use engine_core::time::TimeSource;
 use engine_world::WorldPlugin;
@@ -12,8 +12,9 @@ use engine_world::animation::AnimationParams;
 
 const DT: f32 = 1.0 / 60.0;
 
-/// A boxer 1.1 m in front of a partner who faces it, both in a guard, settled.
-fn ring(target: bool) -> (App, Entity, Entity) {
+/// A boxer 1.1 m in front of a partner who faces it, the boxer in a guard (and the partner
+/// with `guard`), settled.
+fn ring(target: bool, guard: bool) -> (App, Entity, Entity) {
     let mut app = App::new();
     app.world.resource_mut::<EngineConfig>().headless = true;
     app.world
@@ -35,8 +36,8 @@ fn ring(target: bool) -> (App, Entity, Entity) {
     app.world
         .entity_mut(boxer)
         .insert(Attacker::new("boxing", target.then_some(partner)));
-    for e in [boxer, partner] {
-        if let Some(mut p) = app.world.get_mut::<AnimationParams>(e) {
+    for (e, up) in [(boxer, true), (partner, guard)] {
+        if up && let Some(mut p) = app.world.get_mut::<AnimationParams>(e) {
             p.set("guarding", 1.0);
         }
     }
@@ -90,7 +91,7 @@ fn fight(
 
 #[test]
 fn presses_link_into_a_combo_that_steps_in_and_lands() {
-    let (mut app, boxer, partner) = ring(true);
+    let (mut app, boxer, partner) = ring(true, false);
     let (moves, hits, frozen) = fight(
         &mut app,
         boxer,
@@ -127,7 +128,7 @@ fn presses_link_into_a_combo_that_steps_in_and_lands() {
 
 #[test]
 fn an_early_press_waits_in_the_buffer_and_a_stale_one_is_dropped() {
-    let (mut app, boxer, _) = ring(true);
+    let (mut app, boxer, _) = ring(true, false);
     // The jab's cancel window opens about 0.2 s in: a press at 0.1 s is held until then.
     let (moves, ..) = fight(
         &mut app,
@@ -136,7 +137,7 @@ fn an_early_press_waits_in_the_buffer_and_a_stale_one_is_dropped() {
         &[(0.0, "attack_light"), (0.1, "attack_light")],
     );
     assert_eq!(moves, ["jab", "cross"]);
-    let (mut app, boxer, _) = ring(true);
+    let (mut app, boxer, _) = ring(true, false);
     // The cross's window opens about 0.26 s in: a press at 0.02 s has waited too long by
     // then and is dropped.
     let (moves, ..) = fight(
@@ -150,7 +151,7 @@ fn an_early_press_waits_in_the_buffer_and_a_stale_one_is_dropped() {
 
 #[test]
 fn mashing_plays_one_move_at_a_time_and_misses_without_a_target() {
-    let (mut app, boxer, _) = ring(false);
+    let (mut app, boxer, _) = ring(false, false);
     let presses: Vec<(f32, &str)> = (0..12).map(|k| (k as f32 * DT, "attack_light")).collect();
     let (moves, hits, frozen) = fight(&mut app, boxer, 1.0, &presses);
     // Twelve presses in 0.2 s: the first starts the jab, the newest waits for its cancel
@@ -161,7 +162,7 @@ fn mashing_plays_one_move_at_a_time_and_misses_without_a_target() {
 
 #[test]
 fn out_of_reach_without_warping_the_blows_miss() {
-    let (mut app, boxer, partner) = ring(true);
+    let (mut app, boxer, partner) = ring(true, false);
     // Too far to reach and not allowed to step in: the arm reaches out and falls short.
     app.world.get_mut::<Attacker>(boxer).unwrap().warp = false;
     app.world.get_mut::<Transform>(boxer).unwrap().translation.z = 1.6;
@@ -175,4 +176,57 @@ fn out_of_reach_without_warping_the_blows_miss() {
     let z = app.world.get::<Transform>(boxer).unwrap().translation.z;
     assert_eq!(z, 1.6, "it moved itself");
     let _ = partner;
+}
+
+#[test]
+fn a_raised_guard_blocks_the_combo_on_the_gloves() {
+    let (mut app, boxer, partner) = ring(true, true);
+    app.world.entity_mut(boxer).insert(HitReaction::default());
+    let presses = [
+        (0.1, "attack_light"),
+        (0.35, "attack_light"),
+        (0.8, "attack_light"),
+        (1.3, "attack_light"),
+    ];
+    let (mut blocked, mut last) = (0, 0);
+    let (mut on_glove, mut aimed, mut bounced) = (0, 0, false);
+    let mut t = 0.0;
+    while t < 3.5 {
+        for &(at, input) in &presses {
+            if at >= t && at < t + DT {
+                press(&mut app, boxer, input);
+            }
+        }
+        app.update();
+        let a = app.world.get::<Attacker>(boxer).unwrap().clone();
+        if a.blocked != last {
+            blocked += a.blocked.saturating_sub(last);
+            last = a.blocked;
+        }
+        assert_eq!(a.hits, 0, "a punch got through the guard");
+        // Strikes aim at the partner's gloves, not the face.
+        if let Some((_, aim)) = a.aim {
+            let p = app.world.get::<Animator>(partner).unwrap();
+            let gt = app.world.get::<GlobalTransform>(partner).unwrap();
+            let glove = ["hand_l", "hand_r"]
+                .iter()
+                .map(|h| p.bone_world(gt, p.skeleton.bone(h)).0.distance(aim))
+                .fold(f64::INFINITY, f64::min);
+            aimed += 1;
+            if glove < 0.15 {
+                on_glove += 1;
+            }
+        }
+        // The boxer bounces back off the guard (it faces -Z, so back is +Z).
+        bounced |= app.world.get::<HitReaction>(boxer).unwrap().stagger.0.z > 0.0;
+        t += DT;
+    }
+    assert_eq!(blocked, 4, "{blocked} of 4 punches blocked");
+    assert!(
+        on_glove * 10 >= aimed * 9,
+        "{on_glove} of {aimed} aims on a glove"
+    );
+    assert!(bounced, "the boxer wasn't pushed back");
+    // The partner's struck arm flinched.
+    assert!(app.world.get::<HitReaction>(partner).is_some());
 }
