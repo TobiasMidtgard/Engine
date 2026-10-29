@@ -1111,7 +1111,12 @@ fn weapons_yard(world: &mut World, origin: DVec3) -> Yard {
         props::spawn_shield(world, person);
         world.entity_mut(person).insert((
             Name::new(name),
-            HitReaction::default(),
+            // Knocked back a step by what gets through, never off their feet: the exchange
+            // keeps its rhythm (the great sword's dummy shows the knockdown).
+            HitReaction {
+                fall_beyond: 0.0,
+                ..Default::default()
+            },
             // Blows don't wind or daze them (a hurt fighter drops its guard): the exchange
             // shows the moves, round after round.
             {
@@ -1888,6 +1893,14 @@ pub const VIEWS: &[DemoView] = &[
         target: [-18.0, 1.35, -12.2],
         hour: 15.0,
         at: 1.9,
+    },
+    DemoView {
+        key: "paddock_butt",
+        name: "The archer's arrows thud into the butt round the gold and stay",
+        eye: [-16.9, 1.55, -21.6],
+        target: [-18.0, 1.3, -24.0],
+        hour: 15.0,
+        at: 7.8,
     },
     DemoView {
         key: "paddock_sprint_start",
