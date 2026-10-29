@@ -109,6 +109,9 @@ pub struct SpeciesVisual {
     pub leaves_far: [Handle<StandardMaterial>; TINTS],
     /// The summer color of each tint of `leaves` (linear RGB); the season recolors from it.
     pub leaf_colors: [[f32; 3]; TINTS],
+    /// How much light the summer `leaves` let through (`subsurface`); turning leaves dry out
+    /// and let less through ([`crate::season::apply_season_colors`]).
+    pub leaf_subsurface: f32,
     pub dead_leaves: Handle<StandardMaterial>,
     /// Leaves that don't sway (falling trees and logs: their mesh lies on its side).
     pub leaves_still: [Handle<StandardMaterial>; TINTS],
@@ -763,6 +766,7 @@ fn build_species(
         let [r, g, b, _] = leaf_material(c).base_color;
         [r, g, b]
     });
+    let leaf_subsurface = leaf_material(tint_colors[0]).subsurface;
     // Dead leaves have dried out: light scatters inside rather than passing through, so they
     // don't glow against the sun (with a living leaf's translucency a brown frond lit from
     // behind shone signal red).
@@ -829,6 +833,7 @@ fn build_species(
         leaves_hero,
         leaves_far,
         leaf_colors,
+        leaf_subsurface,
         dead_leaves,
         leaves_still,
         dead_leaves_still,

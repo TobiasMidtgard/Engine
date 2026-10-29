@@ -1084,4 +1084,71 @@ mod tests {
             alive.len()
         );
     }
+
+    /// The showcase loads a zone, leaves it and comes back: each visit's cave is built anew.
+    /// Nothing from the last one may stay behind (plants, their drawn parts, fades), even when
+    /// the player leaves before every plant has its parts.
+    #[test]
+    fn the_cave_loaded_again_leaves_nothing_behind() {
+        use crate::visuals::PlantPart;
+        use engine_assets::Assets;
+        use engine_render::{Camera, Mesh};
+        let mut app = App::new();
+        app.add_plugins(engine_world::WorldPlugin);
+        app.init_resource::<Assets<Mesh>>()
+            .init_resource::<Assets<engine_render::StandardMaterial>>()
+            .init_resource::<Assets<engine_render::Image>>()
+            .add_plugins(crate::FoliagePlugin);
+        app.world.insert_resource(crate::FoliageLoading::in_frame());
+        app.world.spawn((
+            Camera::default(),
+            Transform::from_translation(DVec3::Y * 1.7),
+        ));
+        let parts = |app: &mut App| {
+            app.world
+                .query_filtered::<(), With<PlantPart>>()
+                .iter(&app.world)
+                .count()
+        };
+        let mut empty = None;
+        // The first visit builds everything; later ones leave while parts are still coming.
+        for (visit, stay) in [60, 2, 5, 9, 60].into_iter().enumerate() {
+            if visit == 1 {
+                app.world.resource_mut::<crate::FoliageLoading>().budget_ms = 0.01;
+            }
+            let before: Vec<Entity> = app.world.iter_entities().map(|e| e.id()).collect();
+            {
+                let mut commands = app.world.commands();
+                spawn_cave_demo(&mut commands, DVec3::ZERO);
+            }
+            app.world.flush();
+            let zone: Vec<Entity> = app
+                .world
+                .iter_entities()
+                .map(|e| e.id())
+                .filter(|e| !before.contains(e))
+                .collect();
+            app.update_n(stay);
+            let drawn = parts(&mut app);
+            if visit == 0 {
+                assert!(drawn > 50, "{drawn} parts drawn in the cave");
+            }
+            for e in zone {
+                if let Ok(e) = app.world.get_entity_mut(e) {
+                    e.despawn();
+                }
+            }
+            app.update_n(5);
+            let left = (parts(&mut app), app.world.entities().len());
+            assert_eq!(
+                left.0, 0,
+                "visit {visit} ({drawn} parts drawn) left parts behind"
+            );
+            assert_eq!(
+                left,
+                *empty.get_or_insert(left),
+                "visit {visit} left entities behind"
+            );
+        }
+    }
 }

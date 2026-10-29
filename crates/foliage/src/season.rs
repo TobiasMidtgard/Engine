@@ -199,6 +199,9 @@ pub fn follow_weather_calendar(
     }
 }
 
+/// The share of their translucency fully turned leaves lose.
+const DRY_TURNED: f32 = 0.7;
+
 /// Recolor every deciduous species' leaves for the day.
 pub fn apply_season_colors(
     season: Res<FoliageSeason>,
@@ -215,19 +218,26 @@ pub fn apply_season_colors(
         for (tint, &shift) in TINT_SHIFT_DAYS.iter().enumerate() {
             let l = seasons.leafing(season.day_of_year, shift);
             let [r, g, b] = seasons.color(vis.leaf_colors[tint], l, tint);
-            let hero = vis.leaves_hero.map(|h| h[tint]);
-            for handle in [
-                vis.leaves[tint],
-                vis.leaves_far[tint],
-                vis.leaves_still[tint],
+            // Turned leaves are drying: less light passes through them (a rust frond lit from
+            // behind with a summer leaf's translucency shone signal red).
+            let through = vis.leaf_subsurface * (1.0 - DRY_TURNED * l.turn);
+            let hero = vis.leaves_hero.map(|h| (h[tint], through));
+            // The far crowns' mass atlas is many leaves deep: half as much gets through.
+            let far = (vis.leaves_far[tint] != vis.leaves[tint])
+                .then_some((vis.leaves_far[tint], through * 0.5));
+            for (handle, subsurface) in [
+                (vis.leaves[tint], through),
+                (vis.leaves_still[tint], through),
             ]
             .into_iter()
+            .chain(far)
             .chain(hero)
             {
                 if let Some(m) = materials.get_mut(handle)
-                    && m.base_color[..3] != [r, g, b]
+                    && (m.base_color[..3] != [r, g, b] || m.subsurface != subsurface)
                 {
                     m.base_color = [r, g, b, m.base_color[3]];
+                    m.subsurface = subsurface;
                 }
             }
         }
