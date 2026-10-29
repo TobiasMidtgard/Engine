@@ -1,8 +1,9 @@
 //! The paddock's sparring partner holds a boxer's guard that blocks the boxer's jab and
 //! cross, snaps his head back when the hook gets through and folds a little over a blow to
-//! the stomach, then comes back to the guard, without being shoved off his feet.
+//! the stomach, then comes back to the guard, without being shoved off his feet; before that,
+//! he slips the first combo, rolls under its hook and counters.
 
-use engine_anim::combat::Attacker;
+use engine_anim::combat::{Attacker, Evader};
 use engine_anim::demo::{DemoEntities, SPARRING_COMBOS, spawn_demo_world};
 use engine_anim::{AnimationPlugin, Animator};
 use engine_core::prelude::*;
@@ -121,4 +122,41 @@ fn sparring_partner_guards_and_flinches() {
     // The hips give a little, but he stays on his feet.
     assert!(lowest_hips > 0.75, "hips sank to {lowest_hips:.2} m");
     assert!(farthest_hips < 0.12, "hips shoved {farthest_hips:.2} m");
+}
+
+#[test]
+fn sparring_partner_slips_and_rolls_under_the_first_combo_and_counters() {
+    let (mut app, d) = app();
+    let (mut missed, mut landed, mut blocked) = (0, 0, 0);
+    let (mut last_missed, mut last_landed, mut last_blocked) = (0, 0, 0);
+    let mut evasions: Vec<String> = Vec::new();
+    let (mut countered, mut last_countered) = (0, 0);
+    for _ in 1..=(3.0 / STEP) as usize {
+        app.update();
+        let w = &app.world;
+        let boxer = w.get::<Attacker>(d.boxer).unwrap();
+        for (now, last, total) in [
+            (boxer.missed, &mut last_missed, &mut missed),
+            (boxer.hits, &mut last_landed, &mut landed),
+            (boxer.blocked, &mut last_blocked, &mut blocked),
+        ] {
+            *total += now.saturating_sub(*last);
+            *last = now;
+        }
+        if let Some((clip, ..)) = &w.get::<Evader>(d.sparring).unwrap().evading
+            && evasions.last() != Some(clip)
+        {
+            evasions.push(clip.clone());
+        }
+        let partner = w.get::<Attacker>(d.sparring).unwrap();
+        countered += partner.hits.saturating_sub(last_countered);
+        last_countered = partner.hits;
+    }
+    assert_eq!(evasions, ["slip_right", "slip_left", "roll"]);
+    assert_eq!(
+        (missed, landed, blocked),
+        (3, 0, 0),
+        "missed, landed and blocked"
+    );
+    assert_eq!(countered, 1, "the counter didn't land on the boxer");
 }
