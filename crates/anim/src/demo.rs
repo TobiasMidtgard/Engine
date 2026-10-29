@@ -1086,11 +1086,11 @@ fn weapons_yard(world: &mut World, origin: DVec3) -> Yard {
                 heavy(7.0),
                 light(7.45),
                 DemoStep::home(8.6),
-                // Its own shield up for the partner's turn: the partner's cut bounces off
-                // and the swordsman answers.
-                guard(8.8, true),
-                guard(9.35, false),
-                light(9.4),
+                // Its shield comes up just as the partner's cut arrives: a deflect, the
+                // partner staggers open and the swordsman answers.
+                guard(9.15, true),
+                guard(9.4, false),
+                light(9.42),
                 DemoStep::home(12.0),
             ],
         ),
@@ -1133,7 +1133,9 @@ fn weapons_yard(world: &mut World, origin: DVec3) -> Yard {
         ));
     }
 
-    // --- Great sword against a dummy whose legs give under the overhead.
+    // --- Great sword against a dummy with a shield up: the sweep bounces off it, the
+    // overhead breaks the guard, a sweep gets through the opening and a second overhead
+    // knocks the dummy down.
     let greatsword = spawn_humanoid(
         world,
         humanoid::Outfit::Athlete,
@@ -1146,6 +1148,7 @@ fn weapons_yard(world: &mut World, origin: DVec3) -> Yard {
         Transform::from_translation(at(GREATSWORD, 0.8, 0.0)).with_rotation(facing(90.0)),
     );
     dress(world, dummy, "walker", SkinMaterial::default());
+    props::spawn_shield(world, dummy);
     world.entity_mut(dummy).insert((
         Name::new("Great sword dummy"),
         HitReaction {
@@ -1156,7 +1159,12 @@ fn weapons_yard(world: &mut World, origin: DVec3) -> Yard {
         },
         DemoScript {
             period: GREATSWORD_PERIOD,
-            steps: vec![DemoStep::home(9.0)],
+            steps: vec![
+                guard(0.3, true),
+                // Its guard broken, it doesn't get it back up in time.
+                guard(3.6, false),
+                DemoStep::home(9.0),
+            ],
             time: 0.0,
             home: None,
         },
@@ -1170,9 +1178,13 @@ fn weapons_yard(world: &mut World, origin: DVec3) -> Yard {
             period: GREATSWORD_PERIOD,
             steps: vec![
                 DemoStep::param(0.02, "greatsword_stance", 1.0),
+                // The sweep bounces off the shield.
                 light(0.8),
-                light(1.55),
+                // The overhead breaks the guard, the sweep goes through the opening, and a
+                // second overhead puts the dummy down.
                 heavy(2.25),
+                light(3.4),
+                heavy(4.25),
                 DemoStep::home(8.5),
             ],
             time: 0.0,
@@ -1883,12 +1895,20 @@ pub const VIEWS: &[DemoView] = &[
         at: 7.15,
     },
     DemoView {
+        key: "paddock_deflect",
+        name: "A shield raised just as the cut lands swats it aside; the attacker staggers open",
+        eye: [-25.7, 1.5, -14.2],
+        target: [-24.0, 1.2, -16.0],
+        hour: 15.0,
+        at: 9.3,
+    },
+    DemoView {
         key: "paddock_greatsword",
-        name: "Great sword: a sweep, a rising cut, and an overhead from high guard",
+        name: "Great sword: the overhead from high guard breaks the dummy's raised shield",
         eye: [-23.8, 1.5, -18.1],
         target: [-24.0, 1.1, -21.0],
         hour: 15.0,
-        at: 3.0,
+        at: 3.15,
     },
     DemoView {
         key: "paddock_bow",

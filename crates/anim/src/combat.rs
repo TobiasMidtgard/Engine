@@ -34,7 +34,10 @@
 //! target (a fast cut moves farther in a frame than its own width), pushes along the blade's
 //! motion and does the striker's kind of damage. A target with a [`Shield`] that is guarding
 //! (`guarding` or `shield_guard`) blocks at the shield: low strikes as well as high, from a
-//! wider cone, letting through what the shield's [`Block`] says.
+//! wider cone, letting through what the shield's [`Block`] says. A weapon that lands on a
+//! guard bounces back up its arc and the move ends ([`Attacker::recoil`]); a guard raised
+//! just before it lands deflects it instead, and a blow that `breaks_guard` flings the guard
+//! open ([`Defense`]).
 //!
 //! [`HitReaction::knock`]: crate::hit::HitReaction::knock
 
@@ -75,6 +78,9 @@ pub enum WindowKind {
         /// What strikes, when it isn't the fist: a blade or a shield's face on `bone`.
         #[serde(default)]
         striker: Option<Striker>,
+        /// Heavy enough to break a guard it lands on (see [`Defense::broken`]).
+        #[serde(default)]
+        breaks_guard: bool,
     },
     /// A buffered input matching a link starts the linked move.
     Cancel,
@@ -160,6 +166,83 @@ impl Default for Shield {
                 cone_deg: 80.0,
             },
         }
+    }
+}
+
+/// What a target's guard is doing, for the rules and for its own moves (published; put on
+/// anything an [`Attacker`] goes for). A guard raised just before a weapon's blow lands
+/// deflects it (Sekiro, Elden Ring's parry): no damage, and the attacker staggers open. A
+/// guard that came down only a moment before gets a much shorter window, so mashing it
+/// doesn't deflect everything. A blocked blow leaves the defender in shield-stun, unable to
+/// start a move, and a blow that breaks guards (a great sword's overhead, a shield bash)
+/// knocks the guard aside for [`Defense::broken`] seconds, whatever its parameters say.
+#[derive(Component, Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Defense {
+    /// Seconds the guard has been up (0 while it is down).
+    pub up_secs: f32,
+    /// Seconds since it last came down.
+    pub down_secs: f32,
+    /// How soon after rising a blow had to land to be deflected, s (set as it rises).
+    pub deflect_window: f32,
+    /// Seconds of shield-stun left: no new move until it is over.
+    pub stun: f32,
+    /// Seconds left with the guard broken: it doesn't block.
+    pub broken: f32,
+    /// Blows taken on the guard, deflected, and that broke it.
+    pub blocks: u32,
+    pub deflects: u32,
+    pub breaks: u32,
+}
+
+impl Default for Defense {
+    fn default() -> Self {
+        Self {
+            up_secs: 0.0,
+            // Never raised yet: as if it had been down a long while.
+            down_secs: 10.0,
+            deflect_window: DEFLECT_SECS,
+            stun: 0.0,
+            broken: 0.0,
+            blocks: 0,
+            deflects: 0,
+            breaks: 0,
+        }
+    }
+}
+
+impl Defense {
+    /// Whether it can start a move (not in shield-stun or staggering from a broken guard).
+    pub fn ready(&self) -> bool {
+        self.stun <= 0.0 && self.broken <= 0.0
+    }
+
+    /// Keep time with the guard (`up`: its parameters hold it up and nothing stops it).
+    fn tick(&mut self, up: bool, dt: f32) {
+        self.stun = (self.stun - dt).max(0.0);
+        self.broken = (self.broken - dt).max(0.0);
+        let up = up && self.broken <= 0.0;
+        if up {
+            if self.up_secs <= 0.0 {
+                self.deflect_window = if self.down_secs < SPAM_SECS {
+                    DEFLECT_SPAM_SECS
+                } else {
+                    DEFLECT_SECS
+                };
+            }
+            self.up_secs += dt.max(1e-4);
+        } else {
+            if self.up_secs > 0.0 {
+                self.down_secs = 0.0;
+            }
+            self.up_secs = 0.0;
+            self.down_secs += dt;
+        }
+    }
+
+    /// Whether a blow landing now is deflected.
+    fn deflects_now(&self) -> bool {
+        self.up_secs > 0.0 && self.up_secs <= self.deflect_window
     }
 }
 
@@ -346,6 +429,7 @@ impl AttackSet {
                             high: p != Punch::BodyHook,
                             liver: p == Punch::BodyHook,
                             striker: None,
+                            breaks_guard: false,
                         },
                         start: at - 0.06,
                         end: at + 0.05,
@@ -514,8 +598,12 @@ impl AttackSet {
                         ("attack_heavy", W::SwordOverhead),
                     ],
                     0.85,
-                    // Little harm, a big shove: the foe staggers back open.
-                    Some(Blow::new(5.0, 75.0, 0.08)),
+                    // Little harm, a big shove: the foe staggers back open, and a raised
+                    // guard is knocked aside.
+                    Some(Blow {
+                        breaks_guard: true,
+                        ..Blow::new(5.0, 75.0, 0.08)
+                    }),
                     Some(Striker::shield()),
                 ),
             ],
@@ -526,18 +614,21 @@ impl AttackSet {
 
     /// Great sword: a horizontal sweep (light) or an overhead from vom Tag (heavy) from
     /// neutral; sweep and rising cut alternate on light presses, and a heavy press after
-    /// either throws the overhead, which can't be interrupted while it winds up (armor) and
-    /// lands hard enough to put a person down.
+    /// either throws the overhead, which can't be interrupted while it winds up (armor),
+    /// lands hard enough to put a person down, breaks a guard it lands on and sweeps on into
+    /// the opening on a light press.
     pub fn greatsword() -> Self {
         use WeaponMove as W;
         let cut = Some(Striker::greatsword(DamageKind::Slash));
+        // It breaks a guard it lands on, and a light press after it sweeps into the opening.
         let mut overhead = weapon(
             W::GreatswordOverhead,
             Some("attack_heavy"),
-            &[],
+            &[("attack_light", W::GreatswordSweep)],
             1.4,
             Some(Blow {
                 high: true,
+                breaks_guard: true,
                 ..Blow::new(42.0, 120.0, 0.16)
             }),
             cut,
@@ -639,6 +730,7 @@ struct Blow {
     impulse: f32,
     hitstop: f32,
     high: bool,
+    breaks_guard: bool,
 }
 
 impl Blow {
@@ -648,6 +740,7 @@ impl Blow {
             impulse,
             hitstop,
             high: false,
+            breaks_guard: false,
         }
     }
 }
@@ -688,6 +781,7 @@ fn weapon(
                 high: blow.high,
                 liver: false,
                 striker,
+                breaks_guard: blow.breaks_guard,
             },
             start: a + (b - a) * 0.3,
             end: b + 0.03,
@@ -818,14 +912,19 @@ pub struct Attacker {
     pub warp_delta: Vec3,
     /// Hits landed by the current move (blocked ones not counted).
     pub hits: u32,
-    /// Strikes of the current move that landed on a guard.
+    /// Strikes of the current move that landed on a guard (and bounced, or broke through it:
+    /// see `broke`).
     pub blocked: u32,
+    /// Strikes of the current move that a guard deflected.
+    pub deflected: u32,
+    /// Strikes of the current move that broke the guard they landed on.
+    pub broke: u32,
     /// Strikes of the current move whose hit window passed without landing (out of reach,
     /// or the target's head moved).
     pub missed: u32,
     /// Seconds left of a rebound: a weapon strike that landed on a guard bounces back up its
     /// arc and the move ends with it; no new move starts until then (the defender's opening
-    /// for a guard counter).
+    /// for a guard counter). A deflected strike leaves it open longer.
     pub recoil: f32,
     /// The newest press waiting, and how long it has waited.
     #[serde(skip)]
@@ -868,6 +967,8 @@ impl Default for Attacker {
             warp_delta: Vec3::ZERO,
             hits: 0,
             blocked: 0,
+            deflected: 0,
+            broke: 0,
             missed: 0,
             recoil: 0.0,
             buffered: None,
@@ -907,6 +1008,30 @@ const REBOUND_FADE: f32 = 0.3;
 /// at most (m).
 const SHAKE_PER_HITSTOP: f32 = 0.12;
 const SHAKE_MAX: f32 = 0.025;
+
+/// A deflect: how soon after the guard rises a blow must land (Elden Ring's parries are
+/// active 3 to 6 frames at 30 fps), and how soon when the guard came down less than
+/// `SPAM_SECS` before it rose (Sekiro shrinks its window to 7 frames at 60 fps then), s.
+const DEFLECT_SECS: f32 = 0.2;
+const DEFLECT_SPAM_SECS: f32 = 0.07;
+const SPAM_SECS: f32 = 0.4;
+
+/// A deflected weapon's rebound (rate, seconds, fade), longer and harder than a block's, and
+/// how long the attacker stays open after it (its recoil in all), s.
+const DEFLECT_REBOUND: (f32, f32, f32) = (1.8, 0.3, 0.35);
+const DEFLECT_RECOIL: f32 = 0.9;
+
+/// How far a deflected attacker is shoved back, m, and its shake.
+const DEFLECT_SHOVE: f32 = 0.3;
+const DEFLECT_SHAKE: f32 = 0.02;
+
+/// Shield-stun after the hitstop of a blocked blow, s.
+const SHIELD_STUN: f32 = 0.15;
+
+/// How long a broken guard stays down (For Honor leaves 800 ms), s, and how far the blow
+/// shoves its owner back, m.
+const GUARD_BROKEN_SECS: f32 = 1.0;
+const GUARD_BROKEN_SHOVE: f32 = 0.3;
 
 /// How far to its own right of the spine a target's liver is, meters.
 const LIVER_SIDE: f64 = 0.1;
@@ -1032,6 +1157,21 @@ pub(crate) struct Landed {
     target: Entity,
     hitstop: f32,
     pushback: Vec3,
+    outcome: Outcome,
+    /// Which way the blow pushed (flat, world), and how far a block shoves the defender, m.
+    push: Vec3,
+    shove: f32,
+    /// It met a shield (rather than gloves or the body).
+    shield: bool,
+}
+
+/// What became of a blow that reached its target.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Outcome {
+    Hit,
+    Blocked,
+    Deflected,
+    BrokeGuard,
 }
 
 /// Where a target can be struck (world): its chest and face, and its guard if it is up.
@@ -1042,6 +1182,8 @@ struct Target {
     /// Under the ribs on its own right.
     liver: DVec3,
     guard: Option<Guard>,
+    /// Its guard rose just now: a weapon's blow landing on it is deflected.
+    deflects: bool,
 }
 
 /// A raised guard: which way the target faces (flat), its knuckles (world), and the middle
@@ -1102,6 +1244,7 @@ type AttackerQuery<'w, 's> = Query<
         &'static GlobalTransform,
         Option<&'static AnimatorSettings>,
         Option<&'static LocalTimeScale>,
+        Option<&'static Defense>,
     ),
 >;
 
@@ -1123,11 +1266,18 @@ pub(crate) fn run_attacks(
             Option<&Attacker>,
             Option<&Evader>,
             Option<&Shield>,
+            Option<&mut Defense>,
+            Option<&LocalTimeScale>,
         )>,
-        Query<(&mut Animator, Option<&mut HitReaction>)>,
+        Query<(
+            &mut Animator,
+            Option<&mut HitReaction>,
+            Option<&mut Defense>,
+        )>,
     )>,
     mut damage: MessageWriter<DamageEvent>,
     mut landed: Local<Vec<Landed>>,
+    mut commands: Commands,
 ) {
     let Some(sets) = sets else {
         return;
@@ -1144,9 +1294,11 @@ pub(crate) fn run_attacks(
             .collect::<HashSet<_>>()
             .into_iter()
             .collect();
-        let q = set.p1();
+        let mut q = set.p1();
         for t in attackers {
-            let Ok((gt, animator, params, down, hurt, striking, evader, shield)) = q.get(t) else {
+            let Ok((gt, animator, params, down, hurt, striking, evader, shield, defense, local)) =
+                q.get_mut(t)
+            else {
                 continue;
             };
             // Knocked down or on a knee: nothing to strike until it is up again.
@@ -1166,6 +1318,20 @@ pub(crate) fn run_attacks(
                 && !striking.is_some_and(|a| a.current.is_some())
                 // Moving its head out of the way instead.
                 && !evader.is_some_and(|e| e.evading.is_some());
+            // Keep time with the guard: how long it has been up, and whether it is broken.
+            let mut deflects = false;
+            let guarding = match defense {
+                Some(mut d) => {
+                    let frozen = animator.is_some_and(|a| a.frozen() > 0.0);
+                    d.tick(guarding, if frozen { 0.0 } else { time.delta_for(local) });
+                    deflects = d.deflects_now();
+                    guarding && d.broken <= 0.0
+                }
+                None => {
+                    commands.entity(t).try_insert(Defense::default());
+                    guarding
+                }
+            };
             let guard = animator.filter(|_| guarding).and_then(|a| {
                 let glove = |hand: &str| Some(fist_of(a, gt, a.skeleton.index_of(hand)?));
                 Some(Guard {
@@ -1190,12 +1356,15 @@ pub(crate) fn run_attacks(
                     head: at("head", 1.55) + DVec3::Y * FACE_ABOVE_HEAD,
                     liver: at("spine", 1.07) + (gt.rotation() * Vec3::X).as_dvec3() * LIVER_SIDE,
                     guard,
+                    deflects,
                 },
             );
         }
     }
     landed.clear();
-    for (entity, mut attacker, mut animator, mut transform, gt, settings, local) in &mut set.p0() {
+    for (entity, mut attacker, mut animator, mut transform, gt, settings, local, defense) in
+        &mut set.p0()
+    {
         let speed = settings.map_or(1.0, |s| if s.paused { 0.0 } else { s.speed });
         let dt = if animator.frozen() > 0.0 {
             0.0
@@ -1216,8 +1385,11 @@ pub(crate) fn run_attacks(
             }
         });
         // An older press ages first, so a new one always gets this frame to start in, however
-        // long the frame (at 4 fps a frame outlasts the buffer).
-        if let Some(b) = &mut attacker.buffered {
+        // long the frame (at 4 fps a frame outlasts the buffer). It doesn't age while the
+        // fighter can't act (rebounding, in shield-stun or with its guard broken): a counter
+        // pressed then comes the moment it can.
+        let can_act = attacker.recoil <= 0.0 && defense.is_none_or(Defense::ready);
+        if let Some(b) = attacker.buffered.as_mut().filter(|_| can_act) {
             b.1 += dt;
             if b.1 > attacker.buffer_secs {
                 attacker.buffered = None;
@@ -1276,7 +1448,8 @@ pub(crate) fn run_attacks(
         let pressed_next = attacker
             .buffered
             .as_ref()
-            .filter(|_| attacker.recoil <= 0.0)
+            // Not while rebounding, in shield-stun or with its guard broken.
+            .filter(|_| can_act)
             .and_then(|(input, _)| match playing {
                 None => neutral(input),
                 Some(m) if moves.is_approach(&m.name) => None,
@@ -1328,6 +1501,8 @@ pub(crate) fn run_attacks(
             attacker.time = 0.0;
             attacker.hits = 0;
             attacker.blocked = 0;
+            attacker.deflected = 0;
+            attacker.broke = 0;
             attacker.missed = 0;
             attacker.landed.clear();
             attacker.whiffed.clear();
@@ -1475,6 +1650,7 @@ pub(crate) fn run_attacks(
                     high,
                     liver,
                     striker,
+                    breaks_guard,
                 } => {
                     let Some((victim, tg)) = target else {
                         continue;
@@ -1523,43 +1699,75 @@ pub(crate) fn run_attacks(
                     }
                     attacker.landed.push(k);
                     let push = push.as_vec3();
-                    // A guard takes a share of it, and the attacker bounces off.
+                    // A guard takes a share of it, and the attacker bounces off; a guard
+                    // raised just now turns a weapon aside, and a heavy blow breaks it.
                     let block = match &blocked_at {
                         Some((_, Some((_, shield)))) => shield,
                         _ => &moves.block,
                     };
-                    let (share, stop, pushback) = if blocked_at.is_some() {
-                        attacker.blocked += 1;
-                        // A weapon bounces off the guard: the swing runs back up its arc
-                        // after the hitstop, and the move ends with it.
-                        if striker.is_some() {
-                            attacker.recoil = REBOUND_SECS + REBOUND_FADE;
-                            animator.rebound(REBOUND_RATE, REBOUND_SECS, REBOUND_FADE);
-                        }
-                        (
-                            (block.damage, block.impulse),
-                            block.hitstop,
-                            -push * block.pushback,
-                        )
-                    } else {
-                        attacker.hits += 1;
-                        ((1.0, 1.0), 1.0, Vec3::ZERO)
+                    let outcome = match &blocked_at {
+                        None => Outcome::Hit,
+                        Some(_) if striker.is_some() && tg.deflects => Outcome::Deflected,
+                        Some(_) if *breaks_guard => Outcome::BrokeGuard,
+                        Some(_) => Outcome::Blocked,
                     };
-                    damage.write(DamageEvent {
-                        target: victim,
-                        amount: *amount * share.0,
-                        kind: striker.map_or(DamageKind::Blunt, |s| s.kind),
-                        // Where it lands on them: the front of the face, chest, glove or
-                        // shield, or where the blade crossed them.
-                        point,
-                        impulse: push * *impulse * share.1,
-                        source: Some(entity),
-                    });
+                    let (share, stop, pushback) = match outcome {
+                        Outcome::Hit => {
+                            attacker.hits += 1;
+                            ((1.0, 1.0), 1.0, Vec3::ZERO)
+                        }
+                        Outcome::Blocked => {
+                            attacker.blocked += 1;
+                            // A weapon bounces off the guard: the swing runs back up its arc
+                            // after the hitstop, and the move ends with it.
+                            if striker.is_some() {
+                                attacker.recoil = REBOUND_SECS + REBOUND_FADE;
+                                animator.rebound(REBOUND_RATE, REBOUND_SECS, REBOUND_FADE);
+                            }
+                            (
+                                (block.damage, block.impulse),
+                                block.hitstop,
+                                -push * block.pushback,
+                            )
+                        }
+                        Outcome::Deflected => {
+                            // Turned aside: nothing gets through, the blade flies back
+                            // harder and the attacker is left open.
+                            attacker.deflected += 1;
+                            let (rate, secs, fade) = DEFLECT_REBOUND;
+                            attacker.recoil = DEFLECT_RECOIL;
+                            animator.rebound(rate, secs, fade);
+                            ((0.0, 0.0), block.hitstop, -push * DEFLECT_SHOVE)
+                        }
+                        Outcome::BrokeGuard => {
+                            // Through the guard: a block's share gets through and the blow
+                            // carries on.
+                            attacker.blocked += 1;
+                            attacker.broke += 1;
+                            ((block.damage, block.impulse), 1.0, Vec3::ZERO)
+                        }
+                    };
+                    if outcome != Outcome::Deflected {
+                        damage.write(DamageEvent {
+                            target: victim,
+                            amount: *amount * share.0,
+                            kind: striker.map_or(DamageKind::Blunt, |s| s.kind),
+                            // Where it lands on them: the front of the face, chest, glove or
+                            // shield, or where the blade crossed them.
+                            point,
+                            impulse: push * *impulse * share.1,
+                            source: Some(entity),
+                        });
+                    }
                     landed.push(Landed {
                         attacker: entity,
                         target: victim,
                         hitstop: *hitstop * stop,
                         pushback,
+                        outcome,
+                        push: push.with_y(0.0).normalize_or_zero(),
+                        shove: block.pushback,
+                        shield: matches!(blocked_at, Some((_, Some(_)))),
                     });
                 }
             }
@@ -1582,21 +1790,66 @@ pub(crate) fn run_attacks(
         }
     }
     // Hitstop: both fighters hold still for a few frames; a blocked attacker is pushed
-    // back (stepping, where it has a hit reaction).
+    // back (stepping, where it has a hit reaction). The struck body shakes; a deflected
+    // attacker shakes instead, and the defender's shield swats the blade aside. A blocking
+    // defender slides back and is held in shield-stun; a broken guard is flung open.
     let mut animators = set.p2();
     for l in landed.drain(..) {
-        for e in [l.attacker, l.target] {
-            if let Ok((mut a, reaction)) = animators.get_mut(e) {
-                a.freeze_for(l.hitstop);
-                if e == l.target {
+        if let Ok((mut a, reaction, defense)) = animators.get_mut(l.target) {
+            a.freeze_for(l.hitstop);
+            let mut shove = 0.0;
+            let mut clip = None;
+            match l.outcome {
+                Outcome::Hit => a.shake_for((l.hitstop * SHAKE_PER_HITSTOP).min(SHAKE_MAX)),
+                Outcome::Blocked => {
                     a.shake_for((l.hitstop * SHAKE_PER_HITSTOP).min(SHAKE_MAX));
+                    // A blow on a shield drives the whole body back; one on the gloves only
+                    // the struck arm (its hit reaction).
+                    if l.shield {
+                        shove = l.shove;
+                    }
                 }
-                if e == l.attacker
-                    && l.pushback != Vec3::ZERO
-                    && let Some(mut r) = reaction
-                {
-                    r.knock(l.pushback, 0.12);
+                Outcome::Deflected => clip = Some(weapons::SHIELD_DEFLECT),
+                Outcome::BrokeGuard => {
+                    a.shake_for((l.hitstop * SHAKE_PER_HITSTOP).min(SHAKE_MAX));
+                    shove = GUARD_BROKEN_SHOVE;
+                    clip = Some(weapons::GUARD_BROKEN);
                 }
+            }
+            if l.shield
+                && let Some(c) = clip.and_then(|c| library.clip(c))
+            {
+                a.play_over(c, 0.04, 0.2);
+            }
+            if shove > 0.0
+                && let Some(mut r) = reaction
+            {
+                r.knock(l.push * shove, 0.12);
+            }
+            if let Some(mut d) = defense {
+                match l.outcome {
+                    Outcome::Hit => {}
+                    Outcome::Blocked => {
+                        d.blocks += 1;
+                        d.stun = d.stun.max(l.hitstop + SHIELD_STUN);
+                    }
+                    Outcome::Deflected => d.deflects += 1,
+                    Outcome::BrokeGuard => {
+                        d.breaks += 1;
+                        d.broken = GUARD_BROKEN_SECS;
+                    }
+                }
+            }
+        }
+        if let Ok((mut a, reaction, _)) = animators.get_mut(l.attacker) {
+            a.freeze_for(l.hitstop);
+            if l.outcome == Outcome::Deflected {
+                a.shake_for(DEFLECT_SHAKE);
+            }
+            if l.pushback != Vec3::ZERO
+                && let Some(mut r) = reaction
+            {
+                r.knock(l.pushback, 0.12);
             }
         }
     }
