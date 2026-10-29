@@ -10,6 +10,7 @@ pub mod combat;
 pub mod demo;
 pub mod events;
 pub mod face;
+pub mod freeflow;
 pub mod graph;
 pub mod hit;
 pub mod horse_model;
@@ -37,6 +38,7 @@ pub use body::{Body, BodyKind, BodyMotion};
 pub use character::{HumanModel, HumanModels};
 pub use clip::AnimationClip;
 pub use face::{Face, FaceControls, FaceRig};
+pub use freeflow::Freeflow;
 pub use graph::{AnimGraph, NodeDef};
 pub use hit::HitReaction;
 pub use horse_model::{HorseModel, HorseModels};
@@ -133,6 +135,7 @@ impl Plugin for AnimationPlugin {
                     horse_model::load_horse_models,
                     animator::build_animators,
                     animator::queue_triggers,
+                    freeflow::pick_targets,
                     combat::run_attacks,
                     combat::evade_strikes,
                     (model::spawn_rig_models, model::despawn_orphan_parts),
@@ -219,6 +222,13 @@ fn register_types(app: &mut App) {
         "Attacks with a named AttackSet: takes attack_light/attack_heavy presses (buffered \
          0.2 s), links combos in cancel windows, closes in on its target, lands DamageEvents \
          with hitstop; publishes the move, phase and cancel/armor flags.",
+    )
+    .register_component::<Freeflow>(
+        "Freeflow targeting for an Attacker: each press goes at the foe nearest the way the \
+         stick points (stick, or the stick_x/stick_z parameters; within cone_deg and reach \
+         m, which grows with the combo), keeping the current target unless the stick points \
+         clearly elsewhere; a downed target is handed over at once, keeping the press. foes \
+         lists whom it may pick (empty: anyone with a HitReaction). Publishes combo.",
     )
     .register_component::<FootIk>(
         "Plants feet on uneven ground: pelvis drop, two-bone legs, foot tilt (meters, degrees).",

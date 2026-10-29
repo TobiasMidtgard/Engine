@@ -2142,6 +2142,138 @@ fn smooth_end(ph: f32) -> f32 {
     t * t * (3.0 - 2.0 * t)
 }
 
+/// Travel that closes a long gap before a strike ([`crate::combat::Approach`]), from and back
+/// to the boxer's stance with the guard up. The attacker's warp moves the body; these give
+/// it the legs and the lean for it, so it reads as a push-off and a landing rather than a
+/// slide.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Approach {
+    /// A step-in lunge: sink, drive off the rear foot with the lead knee up, both feet off the
+    /// ground for a moment, land back in the stance.
+    Lunge,
+    /// A bounding leap: a deep load, the legs tucked in flight, a landing that sinks.
+    Leap,
+}
+
+impl Approach {
+    pub const ALL: [Approach; 2] = [Approach::Lunge, Approach::Leap];
+
+    pub fn clip_name(self) -> &'static str {
+        match self {
+            Approach::Lunge => "lunge",
+            Approach::Leap => "leap",
+        }
+    }
+
+    /// Length, s.
+    pub fn secs(self) -> f32 {
+        match self {
+            Approach::Lunge => 0.45,
+            Approach::Leap => 0.75,
+        }
+    }
+
+    /// The share of the clip over which the body travels (push-off to touch-down).
+    pub fn travel(self) -> (f32, f32) {
+        match self {
+            Approach::Lunge => (0.1, 0.78),
+            Approach::Leap => (0.15, 0.8),
+        }
+    }
+}
+
+/// An approach: the legs and lean of a lunge or a leap (the warp carries the body).
+fn approach(s: &Skeleton, kind: Approach) -> AnimationClip {
+    let keys = 31;
+    // Per phase: hips up (m, from the stance), trunk pitch (− forward), how square the hips
+    // turn to the front (0 the stance's -24°, 1 square), lead leg hip/knee/ankle, rear leg
+    // hip/knee/ankle (degrees).
+    type K = (f32, [f32; 9]);
+    let stance: [f32; 9] = [0.0, 0.0, 0.0, 20.0, 26.0, 8.0, -6.0, 20.0, -6.0];
+    let frames: Vec<K> = match kind {
+        Approach::Lunge => vec![
+            (0.0, stance),
+            // Load: sink onto both knees, lean in, square up.
+            (0.2, [-0.04, -10.0, 0.6, 26.0, 40.0, 12.0, -2.0, 32.0, 2.0]),
+            // Drive: the rear leg straightens behind, the lead knee comes up; off the ground.
+            (0.5, [0.03, -14.0, 0.8, 48.0, 55.0, 10.0, -22.0, 8.0, -24.0]),
+            // Touch-down on the lead foot, the rear foot coming under.
+            (0.78, [-0.035, -8.0, 0.5, 24.0, 36.0, 10.0, 4.0, 34.0, -2.0]),
+            (1.0, stance),
+        ],
+        Approach::Leap => vec![
+            (0.0, stance),
+            // A deep load.
+            (
+                0.18,
+                [-0.11, -18.0, 0.7, 40.0, 70.0, 26.0, 18.0, 66.0, 22.0],
+            ),
+            // Take-off: legs driving straight.
+            (
+                0.32,
+                [0.02, -20.0, 0.9, 20.0, 8.0, -14.0, -18.0, 6.0, -28.0],
+            ),
+            // Flight: knees tucked.
+            (0.5, [0.16, -12.0, 1.0, 58.0, 88.0, 0.0, 30.0, 92.0, -10.0]),
+            // Reaching for the ground.
+            (0.68, [0.06, -10.0, 0.8, 40.0, 30.0, 6.0, 12.0, 40.0, -4.0]),
+            // Landing: sink into it.
+            (0.8, [-0.1, -14.0, 0.5, 38.0, 64.0, 24.0, 16.0, 60.0, 18.0]),
+            (1.0, stance),
+        ],
+    };
+    let (go, land) = kind.travel();
+    AnimationClip::from_fn(kind.clip_name(), kind.secs(), keys, false, move |ph| {
+        let mut p = PoseBuilder::new(s);
+        let v = |i: usize| {
+            let k: Vec<(f32, f32)> = frames.iter().map(|(t, f)| (*t, f[i])).collect();
+            keyed(ph, &k)
+        };
+        let (up, pitch, square) = (v(0), v(1), v(2));
+        let yaw = -24.0 * (1.0 - square);
+        p.rot_move(
+            "hips",
+            Vec3::new(0.0, -0.045 + up, 0.0),
+            2.0 + pitch * 0.3,
+            yaw,
+            0.0,
+        );
+        // The trunk turns back toward the stance's facing as the hips square, so the chest
+        // and eyes stay on the target.
+        let turn = yaw + 24.0;
+        spine(
+            &mut p,
+            [
+                -2.0 + pitch * 0.4,
+                -3.0 + pitch * 0.4,
+                2.0 - pitch * 0.3,
+                -8.0 - pitch * 0.4,
+            ],
+            [-turn * 0.2, -turn * 0.3, 0.0, 0.0],
+            [0.0; 4],
+        );
+        // The guard stays up, a little tighter in flight.
+        let tight = (up.max(0.0) / 0.16).min(1.0);
+        for (side, guard) in GUARD_ARMS.into_iter().enumerate() {
+            arm(
+                &mut p,
+                side,
+                Arm {
+                    elbow: guard.elbow + 10.0 * tight,
+                    ..guard
+                },
+            );
+        }
+        leg(&mut p, 0, v(3), 4.0, v(4), v(5), 0.0);
+        leg(&mut p, 1, v(6), 6.0, v(7), v(8), 8.0);
+        p.take()
+    })
+    .with_curve("effort", keys, move |ph| {
+        keyed(ph, &[(0.0, 0.2), (go, 0.8), (land, 0.6), (1.0, 0.2)])
+    })
+    .with_curve("fist", 2, |_| 0.9)
+}
+
 /// The right hand of the hammer block: the handle held across in front of the face,
 /// pointing left, the forearm up.
 const BLOCK_ARM: Arm = Arm {
@@ -3448,6 +3580,8 @@ pub fn clips(s: &Skeleton) -> Vec<AnimationClip> {
         evasion(s, Evasion::SlipRight),
         evasion(s, Evasion::Roll),
         evasion(s, Evasion::PullBack),
+        approach(s, Approach::Lunge),
+        approach(s, Approach::Leap),
     ]
 }
 

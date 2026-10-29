@@ -38,7 +38,7 @@ use engine_world::{DamageEvent, DamageKind};
 
 use crate::Animator;
 use crate::animator::{AnimationLibrary, AnimatorSettings};
-use crate::build::humanoid::{Evasion, Punch};
+use crate::build::humanoid::{Approach as Travel, Evasion, Punch};
 use crate::hit::HitReaction;
 use crate::hurt::Hurt;
 use crate::ik::{to_model, two_bone};
@@ -67,7 +67,14 @@ pub enum WindowKind {
     /// A buffered input matching a link starts the linked move.
     Cancel,
     /// Close to `range` meters of the target and face it, moving at most `max_speed` m/s.
-    Warp { range: f32, max_speed: f32 },
+    /// With `ease` (an approach's travel), the body speeds up and slows down over the window
+    /// instead of spreading the gap evenly, and has turned to face the target by 40% of it.
+    Warp {
+        range: f32,
+        max_speed: f32,
+        #[serde(default)]
+        ease: bool,
+    },
     /// Hyper armor: a hit doesn't interrupt (for the rules to read).
     Armor,
 }
@@ -153,6 +160,16 @@ impl Default for Block {
     }
 }
 
+/// A travel move that closes a long gap before a strike (a lunge, a leap): a strike pressed
+/// at a target more than `beyond` meters past its range starts this move instead (of those
+/// that fit, the one for the longest gap), and the strike follows it in its cancel window.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Approach {
+    /// The move (in the same set).
+    pub name: String,
+    pub beyond: f32,
+}
+
 /// A fighter's moves.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AttackSet {
@@ -161,11 +178,27 @@ pub struct AttackSet {
     /// What a guarding target's block does to these moves.
     #[serde(default)]
     pub block: Block,
+    /// Moves that close long gaps before a strike.
+    #[serde(default)]
+    pub approaches: Vec<Approach>,
 }
 
 impl AttackSet {
     pub fn get(&self, name: &str) -> Option<&AttackMove> {
         self.moves.iter().find(|m| m.name == name)
+    }
+
+    /// Whether `name` is one of the set's approaches.
+    pub fn is_approach(&self, name: &str) -> bool {
+        self.approaches.iter().any(|a| a.name == name)
+    }
+
+    /// The approach for a target `gap` meters past a strike's range, if it needs one.
+    pub fn approach_for(&self, gap: f32) -> Option<&Approach> {
+        self.approaches
+            .iter()
+            .filter(|a| gap > a.beyond)
+            .max_by(|a, b| a.beyond.total_cmp(&b.beyond))
     }
 
     /// Boxing on the humanoid's punches: jab (light) or cross (heavy) from neutral; jab →
@@ -174,7 +207,8 @@ impl AttackSet {
     /// a heavy press after the cross goes straight to the uppercut, and one after the hook
     /// throws `uppercut_heavy`, a finisher hard enough to knock a person down. Each steps in to its
     /// range (closer for hooks and uppercuts) and the uppercuts step back out to sparring
-    /// distance.
+    /// distance. A target more than a meter past a punch's range is closed on first with a
+    /// `lunge`, and one more than 2.6 m past it with a `leap`.
     pub fn boxing() -> Self {
         let mv = |p: Punch, starts_on: Option<&str>, links: &[(&str, Punch)]| {
             let (secs, land) = p.timing();
@@ -197,6 +231,7 @@ impl AttackSet {
                                 Punch::BodyHook => 0.56,
                             },
                             max_speed: 2.5,
+                            ease: false,
                         },
                         start: 0.0,
                         end: at,
@@ -242,6 +277,7 @@ impl AttackSet {
                     kind: WindowKind::Warp {
                         range: 1.0,
                         max_speed: 1.6,
+                        ease: false,
                     },
                     start: at + 0.12,
                     end: secs,
@@ -314,9 +350,54 @@ impl AttackSet {
                     }
                     heavy
                 },
+                travel(Travel::Lunge, 12.0),
+                travel(Travel::Leap, 18.0),
             ],
             block: Block::default(),
+            approaches: vec![
+                Approach {
+                    name: Travel::Lunge.clip_name().into(),
+                    beyond: 1.0,
+                },
+                Approach {
+                    name: Travel::Leap.clip_name().into(),
+                    beyond: 2.6,
+                },
+            ],
         }
+    }
+}
+
+/// An approach move on the humanoid's lunge or leap: the warp eases the body to just outside
+/// punching range over the clip's travel (at most `max_speed` m/s), and the punch follows on
+/// touch-down.
+fn travel(kind: Travel, max_speed: f32) -> AttackMove {
+    let secs = kind.secs();
+    let (go, land) = kind.travel();
+    AttackMove {
+        name: kind.clip_name().into(),
+        clip: kind.clip_name().into(),
+        starts_on: None,
+        fade_in: 0.06,
+        fade_out: 0.12,
+        windows: vec![
+            Window {
+                kind: WindowKind::Warp {
+                    range: 0.8,
+                    max_speed,
+                    ease: true,
+                },
+                start: go * secs,
+                end: land * secs,
+            },
+            Window {
+                kind: WindowKind::Cancel,
+                start: land * secs,
+                end: secs,
+            },
+        ],
+        links: Vec::new(),
+        evaded_by: None,
     }
 }
 
@@ -349,9 +430,14 @@ pub enum AttackPhase {
 #[serde(default)]
 pub struct Attacker {
     pub set: String,
-    /// Who its hits land on and warps close to.
+    /// Who its hits land on and warps close to (a [`Freeflow`](crate::freeflow::Freeflow)
+    /// picks it again on each press).
     #[serde(skip)]
     pub target: Option<Entity>,
+    /// Who the current move is aimed at: its target when it started. A move goes on at the
+    /// one it started on, so a target picked mid-move (the last one went down) gets the next.
+    #[serde(skip)]
+    pub struck: Option<Entity>,
     /// How long a press waits for a move to take it, seconds.
     pub buffer_secs: f32,
     /// Move its own `Transform` in warp windows. Off for characters whose movement module
@@ -376,6 +462,9 @@ pub struct Attacker {
     /// The newest press waiting, and how long it has waited.
     #[serde(skip)]
     pub buffered: Option<(String, f32)>,
+    /// The strike an approach under way leads into.
+    #[serde(skip)]
+    pub follow: Option<String>,
     /// Hit windows of the current move that have landed.
     #[serde(skip)]
     landed: Vec<usize>,
@@ -397,6 +486,7 @@ impl Default for Attacker {
         Self {
             set: "boxing".into(),
             target: None,
+            struck: None,
             buffer_secs: 0.2,
             warp: true,
             current: None,
@@ -409,6 +499,7 @@ impl Default for Attacker {
             blocked: 0,
             missed: 0,
             buffered: None,
+            follow: None,
             landed: Vec::new(),
             whiffed: Vec::new(),
             committed: None,
@@ -456,6 +547,43 @@ fn arm_length(skeleton: &crate::skeleton::Skeleton, hand: usize) -> f32 {
             (at(lower) - at(upper)).length() + (at(hand) - at(lower)).length() + FIST_LEN
         }
         _ => REFERENCE_ARM,
+    }
+}
+
+/// How much farther than its data says move `m` reaches: warp ranges are for an arm of
+/// REFERENCE_ARM, and longer or shorter arms strike from farther or closer.
+fn arm_scale(m: &AttackMove, skeleton: &crate::skeleton::Skeleton) -> f32 {
+    m.windows
+        .iter()
+        .find_map(|w| match &w.kind {
+            WindowKind::Hit { bone, .. } => skeleton.index_of(bone),
+            _ => None,
+        })
+        .map_or(1.0, |hand| arm_length(skeleton, hand) / REFERENCE_ARM)
+}
+
+/// The range move `m` strikes from (its first warp window's), for the arm it strikes with.
+fn strike_range(m: &AttackMove, skeleton: &crate::skeleton::Skeleton) -> Option<f32> {
+    let range = m.windows.iter().find_map(|w| match &w.kind {
+        WindowKind::Warp { range, .. } => Some(*range),
+        _ => None,
+    })?;
+    Some(range * arm_scale(m, skeleton))
+}
+
+/// How far along an eased travel the body is at `u` (0..1) of it: speeding up over the first
+/// quarter, steady, slowing over the last (a trapezoid of speed, peaking at 4/3 of the
+/// average).
+fn ease_travel(u: f32) -> f32 {
+    const A: f32 = 0.25;
+    let u = u.clamp(0.0, 1.0);
+    let k = 2.0 * A * (1.0 - A);
+    if u < A {
+        u * u / k
+    } else if u > 1.0 - A {
+        1.0 - (1.0 - u) * (1.0 - u) / k
+    } else {
+        (u - A * 0.5) / (1.0 - A)
     }
 }
 
@@ -609,7 +737,14 @@ pub(crate) fn run_attacks(
     let mut targets: HashMap<Entity, Target> = HashMap::new();
     let mut downed: HashSet<Entity> = HashSet::new();
     {
-        let attackers: Vec<Entity> = set.p0().iter().filter_map(|(_, a, ..)| a.target).collect();
+        let attackers: Vec<Entity> = set
+            .p0()
+            .iter()
+            .flat_map(|(_, a, ..)| [a.target, a.struck])
+            .flatten()
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect();
         let q = set.p1();
         for t in attackers {
             let Ok((gt, animator, params, down, hurt, striking, evader)) = q.get(t) else {
@@ -704,23 +839,71 @@ pub(crate) fn run_attacks(
                 attacker.current = None;
             }
         }
-        // A press starts a move from neutral, or a linked one in a cancel window.
-        let next = attacker.buffered.as_ref().and_then(|(input, _)| {
-            match attacker.current.as_ref().and_then(|c| moves.get(c)) {
-                None => moves
-                    .moves
-                    .iter()
-                    .find(|m| m.starts_on.as_deref() == Some(input.as_str()))
-                    .map(|m| m.name.clone()),
+        // An approach lands in its cancel window and throws the strike it was for.
+        let playing = attacker.current.as_ref().and_then(|c| moves.get(c));
+        let now = attacker.time;
+        let cancel_open = |m: &AttackMove| {
+            m.windows
+                .iter()
+                .any(|w| w.kind == WindowKind::Cancel && w.overlaps(now, dt))
+        };
+        let follow = playing
+            .filter(|m| moves.is_approach(&m.name) && cancel_open(m))
+            .and_then(|_| attacker.follow.take());
+        // A press starts a move from neutral, or a linked one in a cancel window. Once the
+        // move's blows are over, a target picked since it started (the last one went down)
+        // gets the next press at once: the rest of the recovery gives way.
+        let neutral = |input: &str| {
+            moves
+                .moves
+                .iter()
+                .find(|m| m.starts_on.as_deref() == Some(input))
+                .map(|m| m.name.clone())
+        };
+        let handed_over = attacker.target.is_some() && attacker.struck != attacker.target;
+        let pressed_next = attacker
+            .buffered
+            .as_ref()
+            .and_then(|(input, _)| match playing {
+                None => neutral(input),
+                Some(m) if moves.is_approach(&m.name) => None,
                 Some(m) => {
-                    let open = m
+                    let linked = cancel_open(m)
+                        .then(|| m.links.iter().find(|l| &l.input == input))
+                        .flatten()
+                        .map(|l| l.to.clone());
+                    let blows_over = m
                         .windows
                         .iter()
-                        .any(|w| w.kind == WindowKind::Cancel && w.overlaps(attacker.time, dt));
-                    open.then(|| m.links.iter().find(|l| &l.input == input))
-                        .flatten()
-                        .map(|l| l.to.clone())
+                        .filter(|w| matches!(w.kind, WindowKind::Hit { .. }))
+                        .all(|w| w.end < now);
+                    // At a new target the combo starts over from the top.
+                    if handed_over {
+                        blows_over.then(|| neutral(input)).flatten()
+                    } else {
+                        linked
+                    }
                 }
+            });
+        let from_press = follow.is_none() && pressed_next.is_some();
+        // A strike at a target well past its range is thrown after an approach that closes
+        // the gap.
+        let next = follow.or(pressed_next).map(|name| {
+            let gap = (from_press && !moves.approaches.is_empty())
+                .then(|| {
+                    let m = moves.get(&name)?;
+                    let range = strike_range(m, &animator.skeleton)?;
+                    let chest = targets.get(&attacker.target?)?.chest;
+                    let to = (chest - gt.translation()).with_y(0.0);
+                    Some(to.length() as f32 - range)
+                })
+                .flatten();
+            match gap.and_then(|g| moves.approach_for(g)) {
+                Some(a) => {
+                    attacker.follow = Some(name);
+                    a.name.clone()
+                }
+                None => name,
             }
         });
         if let Some(name) = next
@@ -736,7 +919,10 @@ pub(crate) fn run_attacks(
             attacker.landed.clear();
             attacker.whiffed.clear();
             attacker.committed = None;
-            attacker.buffered = None;
+            attacker.struck = attacker.target;
+            if from_press {
+                attacker.buffered = None;
+            }
         }
         // Windows.
         attacker.cancel_open = false;
@@ -766,7 +952,7 @@ pub(crate) fn run_attacks(
             AttackPhase::Recovery
         };
         let target = attacker
-            .target
+            .struck
             .and_then(|e| targets.get(&e).map(|p| (e, *p)));
         // Aim the strike: the front of the face (or chest), a fist's width short of its
         // middle on the attacker's side, or the glove of a guard that blocks it.
@@ -814,7 +1000,11 @@ pub(crate) fn run_attacks(
             match &w.kind {
                 WindowKind::Cancel => attacker.cancel_open = true,
                 WindowKind::Armor => attacker.armored = true,
-                WindowKind::Warp { range, max_speed } => {
+                WindowKind::Warp {
+                    range,
+                    max_speed,
+                    ease,
+                } => {
                     let Some((_, Target { chest, .. })) = target else {
                         continue;
                     };
@@ -826,23 +1016,27 @@ pub(crate) fn run_attacks(
                         continue;
                     }
                     let dir = to / dist;
-                    // Ranges are for an arm of REFERENCE_ARM: longer or shorter arms strike
-                    // from farther or closer.
-                    let range = m
-                        .windows
-                        .iter()
-                        .find_map(|w| match &w.kind {
-                            WindowKind::Hit { bone, .. } => animator.skeleton.index_of(bone),
-                            _ => None,
-                        })
-                        .map_or(*range, |hand| {
-                            *range * (arm_length(&animator.skeleton, hand) / REFERENCE_ARM)
-                        });
-                    let range = &range;
-                    // Spread what's left of the gap over what's left of the window.
+                    let range = *range * arm_scale(m, &animator.skeleton);
                     let left = (w.end - t).max(dt).max(1e-3);
-                    let share = (dt / left).min(1.0) as f64;
-                    let step = ((dist - *range as f64) * share)
+                    let (share, turn) = if *ease {
+                        // The share of the gap still to go falls along the eased travel, and
+                        // the turn to face it is over by 40% of the window.
+                        let span = (w.end - w.start).max(1e-3);
+                        let u = |t: f32| (t - w.start) / span;
+                        let (before, now) = (1.0 - ease_travel(u(t - dt)), 1.0 - ease_travel(u(t)));
+                        let share = if before > 1e-4 {
+                            1.0 - now / before
+                        } else {
+                            1.0
+                        };
+                        let facing = (w.start + 0.4 * span - t).max(dt).max(1e-3);
+                        (share as f64, (dt / facing).min(1.0))
+                    } else {
+                        // Spread what's left of the gap over what's left of the window.
+                        let share = (dt / left).min(1.0);
+                        (share as f64, share)
+                    };
+                    let step = ((dist - range as f64) * share)
                         .clamp(-(*max_speed * dt) as f64, (*max_speed * dt) as f64);
                     let delta = dir * step;
                     attacker.warp_delta = delta.as_vec3();
@@ -850,7 +1044,7 @@ pub(crate) fn run_attacks(
                         transform.translation += delta;
                         // Face it (the rig faces −Z).
                         let want = Quat::from_rotation_y((-dir.x).atan2(-dir.z) as f32);
-                        transform.rotation = transform.rotation.slerp(want, share as f32);
+                        transform.rotation = transform.rotation.slerp(want, turn);
                     }
                 }
                 WindowKind::Hit {
@@ -1024,7 +1218,7 @@ pub(crate) fn evade_strikes(
         .p0()
         .iter()
         .filter_map(|(e, a)| {
-            let target = a.target?;
+            let target = a.struck?;
             let name = a.current.clone()?;
             let m = sets.0.get(&a.set)?.get(&name)?;
             let hit = m

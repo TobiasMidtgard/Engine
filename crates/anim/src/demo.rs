@@ -63,6 +63,10 @@ const TIRE_AHEAD: f64 = 1.3;
 /// Start of the shuttle lane (x, z from the paddock's center; it runs towards −Z) and its
 /// length, m.
 const LANE: DVec3 = DVec3::new(-23.0, 0.0, 7.0);
+/// Where the freeflow brawler stands (x, z from the paddock's center), between the step
+/// course and the car loop, and how long its round takes, s.
+const FREEFLOW: DVec3 = DVec3::new(0.0, 0.0, -10.0);
+const FREEFLOW_PERIOD: f32 = 12.0;
 const LANE_LENGTH: f32 = 15.0;
 const DOG_PATH: [[f32; 3]; 10] = [
     [-12.0, 12.0, 1.1],
@@ -1367,6 +1371,22 @@ pub const VIEWS: &[DemoView] = &[
         at: 9.97,
     },
     DemoView {
+        key: "paddock_feet_ramp",
+        name: "Feet on the ramp, side-on at foot level",
+        eye: [-6.8, 0.42, -4.6],
+        target: [-10.0, 0.55, -4.6],
+        hour: 15.0,
+        at: 4.6,
+    },
+    DemoView {
+        key: "paddock_feet_stairs",
+        name: "Feet on the stairs, side-on at foot level",
+        eye: [-13.0, 0.5, -4.9],
+        target: [-13.0, 0.55, -8.0],
+        hour: 15.0,
+        at: 10.2,
+    },
+    DemoView {
         key: "paddock_gallop",
         name: "Horse at a gallop, haunches working",
         eye: [22.87, 1.52, -2.65],
@@ -1501,6 +1521,14 @@ pub const VIEWS: &[DemoView] = &[
         target: [-6.0, 1.2, 1.5],
         hour: 15.0,
         at: 1.1,
+    },
+    DemoView {
+        key: "paddock_freeflow",
+        name: "Chaining: a dummy drops and the brawler leaps straight at the next one",
+        eye: [0.9, 2.2, -3.4],
+        target: [0.6, 0.9, -10.0],
+        hour: 15.0,
+        at: 4.0,
     },
     DemoView {
         key: "paddock_sprint_start",
@@ -2067,6 +2095,99 @@ fn build_paddock(world: &mut World, origin: DVec3) -> DemoEntities {
     world.entity_mut(sparring).insert((
         crate::combat::Evader::new(1.0),
         crate::combat::Attacker::new("boxing", Some(boxer)),
+    ));
+
+    // --- Freeflow ring: a brawler and three dummies around it, ahead at 1.2 m, to the left at
+    // 3 m and to the right at 4.3 m. Tapping the light attack, the stick on one dummy after
+    // another (crate::freeflow::Freeflow), it drops each with a jab, a cross and a hook and
+    // goes straight at the next: a lunge to the left one, a leap to the right one. The
+    // dummies' legs are weak (a low `fall_beyond`): the cross and the hook together put one
+    // down. They get up, walk back to their marks, and it starts over.
+    let ring = |x: f64, z: f64| at(FREEFLOW.x + x, 0.0, FREEFLOW.z + z);
+    let dummies: Vec<Entity> = [
+        (0.0, -1.2, 180.0, "walker"),
+        (-3.0, -0.3, -90.0, "reacher"),
+        (4.2, 0.6, 90.0, "lifter"),
+    ]
+    .into_iter()
+    .map(|(x, z, yaw, character)| {
+        let d = spawn_humanoid(
+            world,
+            humanoid::Outfit::Shirt,
+            Transform::from_translation(ring(x, z)).with_rotation(facing(yaw)),
+        );
+        dress(world, d, character, SkinMaterial::default());
+        world.entity_mut(d).insert((
+            Name::new("Freeflow dummy"),
+            HitReaction {
+                fall_beyond: 0.28,
+                down_secs: 2.5,
+                ..Default::default()
+            },
+            DemoScript {
+                period: FREEFLOW_PERIOD,
+                steps: vec![DemoStep::home(10.0)],
+                time: 0.0,
+                home: None,
+            },
+        ));
+        d
+    })
+    .collect();
+    let brawler = spawn_humanoid(
+        world,
+        humanoid::Outfit::Athlete,
+        Transform::from_translation(ring(0.0, 0.0)),
+    );
+    dress(world, brawler, "athlete", SkinMaterial::default());
+    // Taps at a steady pace while each dummy is up; the stick swings to the next dummy as the
+    // one before goes down (each falls about 1.5 s after the first tap at it).
+    let stick = |at: f32, x: f32, z: f32| {
+        [
+            DemoStep::param(at, "stick_x", x),
+            DemoStep::param(at, "stick_z", z),
+        ]
+    };
+    let taps = |from: f32| {
+        [0.0, 0.27, 0.7]
+            .map(|t| DemoStep::trigger(from + t, "attack_light"))
+            .to_vec()
+    };
+    let mut steps = vec![DemoStep::param(0.05, "guarding", 1.0)];
+    steps.extend(stick(0.05, 0.0, -1.0));
+    steps.extend(taps(0.5));
+    steps.extend(stick(1.6, -1.0, 0.0));
+    steps.extend(taps(1.7).into_iter().map(|mut s| {
+        // The lunge takes a beat before the jab.
+        if s.at > 1.75 {
+            s.at += 0.35;
+        }
+        s
+    }));
+    steps.extend(stick(3.3, 1.0, 0.1));
+    steps.extend(taps(3.4).into_iter().map(|mut s| {
+        // The leap takes longer.
+        if s.at > 3.45 {
+            s.at += 0.6;
+        }
+        s
+    }));
+    steps.extend(stick(5.6, 0.0, 0.0));
+    steps.push(DemoStep::home(6.5));
+    world.entity_mut(brawler).insert((
+        Name::new("Freeflow brawler"),
+        crate::combat::Attacker::new("boxing", None),
+        crate::freeflow::Freeflow {
+            foes: dummies,
+            ..Default::default()
+        },
+        HitReaction::default(),
+        DemoScript {
+            period: FREEFLOW_PERIOD,
+            steps,
+            time: 0.0,
+            home: None,
+        },
     ));
 
     // --- Shuttle lane: sprint down it, dig in to stop, run back backwards, turn and run
