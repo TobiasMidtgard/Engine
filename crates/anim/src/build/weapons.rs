@@ -63,6 +63,12 @@ pub const SHIELD_CENTER: Vec3 = Vec3::new(0.0, -0.14, 0.0);
 /// A round shield's radius, meters.
 pub const SHIELD_RADIUS: f32 = 0.3;
 
+/// The shield punched out into a blade just as it lands, turning it aside (a deflect).
+pub const SHIELD_DEFLECT: &str = "shield_deflect";
+
+/// The guard beaten open by a heavy blow: the shield flung out wide, a stagger step back.
+pub const GUARD_BROKEN: &str = "guard_broken";
+
 /// A bow's tips: this far up and down its grip axis from the fist, and this far back toward
 /// the archer (the string's brace height), meters.
 pub const BOW_HALF: f32 = 0.7;
@@ -1019,12 +1025,7 @@ fn sword_stance(s: &Skeleton) -> AnimationClip {
 /// The shield up over the chest and chin, the sword back ready to answer (a loop).
 fn shield_guard(s: &Skeleton) -> AnimationClip {
     let braced = STANCE.hips([0.0, -0.1, 0.02], [6.0, -20.0, 0.0], [5.0, 6.0, 0.0]);
-    let sword = Hold::new(
-        Vec3::new(0.3, 1.2, -0.1),
-        Vec3::new(0.05, 0.85, -0.5),
-        Vec3::NEG_Z,
-        Vec3::new(0.8, -0.8, 0.4),
-    );
+    let sword = guard_sword();
     Moves::new(
         [HANDLE, SWORD],
         vec![
@@ -1040,6 +1041,130 @@ fn shield_guard(s: &Skeleton) -> AnimationClip {
     )
     .clip(s, "shield_guard", true)
     .with_curve("effort", 2, |_| 0.35)
+}
+
+/// The sword held back over the guard, ready to answer (as in `shield_guard`).
+fn guard_sword() -> Hold {
+    Hold::new(
+        Vec3::new(0.3, 1.2, -0.1),
+        Vec3::new(0.05, 0.85, -0.5),
+        Vec3::NEG_Z,
+        Vec3::new(0.8, -0.8, 0.4),
+    )
+}
+
+/// A deflect: from the guard the shield is punched out a hand's breadth into the blade and
+/// turned outward, swatting it aside with the trunk turning into it, the sword drawn back
+/// to answer; then back to the guard.
+fn shield_deflect(s: &Skeleton) -> AnimationClip {
+    let braced = STANCE.hips([0.0, -0.1, 0.02], [6.0, -20.0, 0.0], [5.0, 6.0, 0.0]);
+    let swat = STANCE
+        .hips([0.0, -0.11, -0.05], [8.0, -14.0, 0.0], [7.0, 14.0, 0.0])
+        .shoulders([14.0, 4.0], [0.0, 0.0]);
+    let out = Hold::new(
+        Vec3::new(-0.2, 1.38, -0.52),
+        Vec3::new(0.85, 0.15, -0.5),
+        Vec3::new(-0.5, 0.1, -0.86),
+        Vec3::new(-1.0, -0.3, 0.2),
+    );
+    let cocked = guard_sword().at(Vec3::new(0.32, 1.22, -0.02));
+    let secs = 0.5;
+    Moves::new(
+        [HANDLE, SWORD],
+        vec![
+            key(
+                0.0,
+                braced,
+                Stroke::To(shield_up()),
+                Stroke::To(guard_sword()),
+            ),
+            key(0.08, swat, Stroke::To(out), Stroke::To(cocked)),
+            key(
+                0.18,
+                swat,
+                Stroke::To(out.at(out.at + Vec3::new(-0.03, 0.0, 0.02))),
+                Stroke::To(cocked),
+            ),
+            key(
+                secs,
+                braced,
+                Stroke::To(shield_up()),
+                Stroke::To(guard_sword()),
+            ),
+        ],
+    )
+    .clip(s, SHIELD_DEFLECT, false)
+    .with_curve("effort", 11, move |ph| {
+        keyed(
+            ph * secs,
+            &[(0.0, 0.35), (0.08, 1.0), (0.2, 0.7), (secs, 0.35)],
+        )
+    })
+}
+
+/// A broken guard: the shield is flung out wide and up by the blow, the trunk thrown back
+/// and twisted, the sword arm out for balance, and the rear foot steps back to catch the
+/// weight; then the shield comes back in front, low, and the foot steps back up.
+fn guard_broken(s: &Skeleton) -> AnimationClip {
+    let braced = STANCE.hips([0.0, -0.1, 0.02], [6.0, -20.0, 0.0], [5.0, 6.0, 0.0]);
+    let thrown = STANCE
+        .hips([0.02, -0.08, 0.1], [-6.0, -6.0, 0.0], [-12.0, 16.0, 5.0])
+        .shoulders([-4.0, 14.0], [0.0, 8.0]);
+    let caught = thrown
+        .hips([0.03, -0.13, 0.2], [-2.0, -10.0, 0.0], [-6.0, 10.0, 3.0])
+        .foot(1, foot(0.2, 0.5, -38.0));
+    let flung = Hold::new(
+        Vec3::new(-0.5, 1.45, -0.12),
+        Vec3::new(0.25, 0.95, -0.1),
+        Vec3::new(-0.9, 0.2, -0.3),
+        Vec3::new(-0.3, -1.0, 0.4),
+    );
+    let balance = Hold::new(
+        Vec3::new(0.48, 1.18, -0.02),
+        Vec3::new(0.5, 0.75, -0.4),
+        Vec3::new(0.0, -0.4, -0.9),
+        Vec3::new(0.6, -1.0, 0.5),
+    );
+    let secs = 1.0;
+    Moves::new(
+        [HANDLE, SWORD],
+        vec![
+            key(
+                0.0,
+                braced,
+                Stroke::To(shield_up()),
+                Stroke::To(guard_sword()),
+            ),
+            key(0.12, thrown, Stroke::To(flung), Stroke::To(balance)),
+            key(
+                0.38,
+                caught,
+                Stroke::To(flung.at(flung.at + Vec3::new(0.04, -0.06, 0.04))),
+                Stroke::To(balance.at(balance.at - Vec3::Y * 0.04)),
+            ),
+            key(
+                0.72,
+                caught.hips([0.0, -0.11, 0.16], [2.0, -16.0, 0.0], [2.0, 8.0, 0.0]),
+                Stroke::To(shield_low()),
+                // Still drawn in a little while the weight is back.
+                Stroke::To(sword_ready().at(Vec3::new(0.25, 1.06, -0.25))),
+            ),
+            // The rear foot steps back up into the stance.
+            key(
+                secs,
+                STANCE,
+                Stroke::To(shield_low()),
+                Stroke::To(sword_ready()),
+            ),
+        ],
+    )
+    .clip(s, GUARD_BROKEN, false)
+    .with_curve("effort", 21, move |ph| {
+        keyed(
+            ph * secs,
+            &[(0.0, 0.4), (0.12, 1.0), (0.4, 0.8), (secs, 0.2)],
+        )
+    })
 }
 
 /// Carrying the sword and shield while walking about: arms only, for a layer.
@@ -1479,6 +1604,8 @@ pub fn clips(s: &Skeleton) -> Vec<AnimationClip> {
         shield_bash(s),
         sword_stance(s),
         shield_guard(s),
+        shield_deflect(s),
+        guard_broken(s),
         sword_carry(s),
         greatsword_sweep(s),
         greatsword_rise(s),

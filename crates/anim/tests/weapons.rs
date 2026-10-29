@@ -1,9 +1,11 @@
 //! Weapon fighting: a sword-and-shield combo that cuts twice and thrusts, a heavy press that
 //! rams the shield in, a raised shield taking an overhead, a great sword's sweep and rising
 //! cut, its overhead landing through its armor, and a bow drawn to the jaw and loosed at a
-//! target off to the side. Runs without the fetched models.
+//! target off to the side; a shield raised just as a blade lands deflects it, a blocked
+//! defender slides back and waits out shield-stun, and a great sword's overhead breaks a
+//! raised guard. Runs without the fetched models.
 
-use engine_anim::combat::{Attacker, Shield};
+use engine_anim::combat::{Attacker, Defense, Shield};
 use engine_anim::demo::spawn_humanoid;
 use engine_anim::{AnimationPlugin, Animator, HitReaction, build::humanoid::Outfit};
 use engine_core::prelude::*;
@@ -255,6 +257,221 @@ fn a_blocked_blade_bounces_back_and_the_struck_body_shakes() {
     );
 }
 
+/// Frames from the press until `input` meets the dummy's raised shield.
+fn frames_to_contact(input: &str) -> usize {
+    let (mut app, fighter, _) = duel("sword_shield", 1.3, true);
+    app.world
+        .get_mut::<Animator>(fighter)
+        .unwrap()
+        .trigger(input);
+    for frame in 1..=(2.0 / DT) as usize {
+        app.update();
+        if app.world.get::<Attacker>(fighter).unwrap().blocked > 0 {
+            return frame;
+        }
+    }
+    panic!("{input} never met the shield");
+}
+
+fn set_guard(app: &mut App, who: Entity, on: bool) {
+    app.world
+        .get_mut::<AnimationParams>(who)
+        .unwrap()
+        .set("shield_guard", if on { 1.0 } else { 0.0 });
+}
+
+/// Press `input` with the dummy's guard down, raising it `before` frames ahead of where the
+/// blow would meet it (and, if `dropped` is set, lowering it that many frames earlier
+/// still, as if it had just been up). The attacker and the dummy's defense after.
+fn raise_late(input: &str, before: usize, dropped: Option<usize>) -> (App, Entity, Entity) {
+    let contact = frames_to_contact(input);
+    let (mut app, fighter, dummy) = duel("sword_shield", 1.3, true);
+    let raise = contact - before;
+    let lower = dropped.map_or(0, |d| raise - d);
+    if dropped.is_none() {
+        set_guard(&mut app, dummy, false);
+    }
+    app.world
+        .get_mut::<Animator>(fighter)
+        .unwrap()
+        .trigger(input);
+    for frame in 1..=(2.0 / DT) as usize {
+        if dropped.is_some() && frame == lower {
+            set_guard(&mut app, dummy, false);
+        }
+        if frame == raise {
+            set_guard(&mut app, dummy, true);
+        }
+        app.update();
+    }
+    (app, fighter, dummy)
+}
+
+/// A shield raised just before a blade lands turns it aside: nothing gets through, the
+/// attacker is left open for longer than a block's rebound and the shield swats out.
+#[test]
+fn a_shield_raised_just_as_the_blade_lands_deflects_it() {
+    let contact = frames_to_contact("attack_heavy");
+    let (mut app, fighter, dummy) = duel("sword_shield", 1.3, true);
+    set_guard(&mut app, dummy, false);
+    app.world
+        .get_mut::<Animator>(fighter)
+        .unwrap()
+        .trigger("attack_heavy");
+    let (mut recoil, mut swatted, mut deflected_at) = (0.0f32, false, None);
+    for frame in 1..=(2.0 / DT) as usize {
+        if frame == contact - 6 {
+            set_guard(&mut app, dummy, true);
+        }
+        app.update();
+        let a = app.world.get::<Attacker>(fighter).unwrap();
+        if deflected_at.is_none() && a.deflected > 0 {
+            deflected_at = Some(frame);
+            recoil = a.recoil;
+        }
+        let d = app.world.get::<Animator>(dummy).unwrap();
+        swatted |= d
+            .overlay()
+            .is_some_and(|o| o.clip.name == engine_anim::build::weapons::SHIELD_DEFLECT);
+    }
+    let a = app.world.get::<Attacker>(fighter).unwrap();
+    assert!(deflected_at.is_some(), "not deflected: {a:?}");
+    assert_eq!(a.blocked, 0);
+    assert!(landed(&app).is_empty(), "{:?}", landed(&app));
+    assert!(recoil > 0.8, "open for {recoil} s");
+    assert!(swatted, "the shield never swatted");
+    assert_eq!(app.world.get::<Defense>(dummy).unwrap().deflects, 1);
+}
+
+/// A guard raised early only blocks, and so does one raised again right after it came down
+/// (mashing the guard doesn't deflect).
+#[test]
+fn a_guard_raised_early_or_mashed_only_blocks() {
+    for (before, dropped) in [(30, None), (6, Some(12))] {
+        let (app, fighter, dummy) = raise_late("attack_heavy", before, dropped);
+        let a = app.world.get::<Attacker>(fighter).unwrap();
+        assert_eq!(
+            (a.blocked, a.deflected),
+            (1, 0),
+            "raised {before} frames early, dropped {dropped:?}"
+        );
+        assert_eq!(app.world.get::<Defense>(dummy).unwrap().blocks, 1);
+    }
+}
+
+/// A blocked cut shoves the defender back along it, and the defender can't start a move of
+/// its own until shield-stun is over.
+#[test]
+fn a_blocked_defender_slides_back_and_waits_out_shield_stun() {
+    let (mut app, fighter, dummy) = duel("sword_shield", 1.3, true);
+    app.world
+        .entity_mut(dummy)
+        .insert(Attacker::new("sword_shield", Some(fighter)));
+    let z0 = app
+        .world
+        .get::<GlobalTransform>(dummy)
+        .unwrap()
+        .translation()
+        .z;
+    app.world
+        .get_mut::<Animator>(fighter)
+        .unwrap()
+        .trigger("attack_light");
+    let (mut contact, mut stun, mut started) = (None, 0.0f32, None);
+    let mut z_min = z0;
+    for frame in 1..=(2.0 / DT) as usize {
+        if contact.is_some() && started.is_none() {
+            // Mash the counter.
+            set_guard(&mut app, dummy, false);
+            app.world
+                .get_mut::<Animator>(dummy)
+                .unwrap()
+                .trigger("attack_light");
+        }
+        app.update();
+        let t = frame as f32 * DT;
+        if contact.is_none() && app.world.get::<Attacker>(fighter).unwrap().blocked > 0 {
+            contact = Some(t);
+            stun = app.world.get::<Defense>(dummy).unwrap().stun;
+        }
+        if contact.is_some()
+            && started.is_none()
+            && app.world.get::<Attacker>(dummy).unwrap().current.is_some()
+        {
+            started = Some(t);
+        }
+        z_min = z_min.min(
+            app.world
+                .get::<GlobalTransform>(dummy)
+                .unwrap()
+                .translation()
+                .z,
+        );
+    }
+    let contact = contact.expect("the slash never met the shield");
+    assert!(stun > 0.15, "shield-stun {stun} s");
+    let waited = started.expect("the counter never started") - contact;
+    assert!(
+        waited >= stun - DT,
+        "countered {waited} s after contact, stun {stun} s"
+    );
+    assert!(z0 - z_min > 0.05, "slid back {} m", z0 - z_min);
+}
+
+/// The great sword's overhead breaks a raised guard and the sweep after it cuts through,
+/// though the shield is still held up.
+#[test]
+fn a_great_sword_overhead_breaks_a_raised_guard_and_the_next_cut_gets_through() {
+    let (mut app, fighter, dummy) = duel("greatsword", 2.0, true);
+    let mut flung = false;
+    let mut moves: Vec<String> = Vec::new();
+    let mut pressed = 0;
+    for _ in 1..=(4.0 / DT) as usize {
+        let a = app.world.get::<Attacker>(fighter).unwrap().clone();
+        let press = match pressed {
+            0 => Some("attack_heavy"),
+            1 if a.cancel_open => Some("attack_light"),
+            _ => None,
+        };
+        if let Some(p) = press {
+            app.world.get_mut::<Animator>(fighter).unwrap().trigger(p);
+            pressed += 1;
+        }
+        app.update();
+        let a = app.world.get::<Attacker>(fighter).unwrap();
+        if let Some(c) = &a.current
+            && moves.last() != Some(c)
+        {
+            moves.push(c.clone());
+            if c == "greatsword_sweep" {
+                // The overhead broke through.
+                assert!(app.world.get::<Defense>(dummy).unwrap().broken > 0.0);
+            }
+        }
+        flung |= app
+            .world
+            .get::<Animator>(dummy)
+            .unwrap()
+            .overlay()
+            .is_some_and(|o| o.clip.name == engine_anim::build::weapons::GUARD_BROKEN);
+    }
+    assert_eq!(moves, ["greatsword_overhead", "greatsword_sweep"]);
+    assert!(flung, "the guard was never flung open");
+    let hits: Vec<f32> = landed(&app).iter().map(|h| h.amount).collect();
+    // A block's share of the overhead, then all of the sweep.
+    assert_eq!(hits.len(), 2, "{hits:?}");
+    assert!((hits[0] - 42.0 * 0.05).abs() < 1e-3, "{hits:?}");
+    assert!((hits[1] - 22.0).abs() < 1e-3, "{hits:?}");
+    assert_eq!(app.world.get::<Defense>(dummy).unwrap().breaks, 1);
+    assert_eq!(
+        app.world
+            .get::<AnimationParams>(dummy)
+            .unwrap()
+            .get("shield_guard"),
+        1.0
+    );
+}
+
 #[test]
 fn a_great_sword_sweeps_rises_and_lands_its_overhead_through_its_armor() {
     let (mut app, fighter, _) = duel("greatsword", 2.0, false);
@@ -380,9 +597,10 @@ fn a_bow_is_drawn_to_the_jaw_turned_on_the_target_and_loosed() {
 
 /// The paddock's weapons yard plays its script: the swordsman's combo cuts twice and thrusts,
 /// its overhead bounces off the partner's raised shield and the partner cuts back while it
-/// recovers, then a slash, a bash and a thrust land; the partner's cut bounces off the
-/// swordsman's shield and the swordsman answers; the great sword's sweep, rising cut and
-/// overhead land; and the archer's arrows stick in the butt's face.
+/// recovers, then a slash, a bash and a thrust land; the swordsman's shield deflects the
+/// partner's cut and the swordsman answers; the great sword's sweep bounces off the dummy's
+/// shield, its overhead breaks the guard and a sweep and an overhead get through; and the
+/// archer's arrows stick in the butt's face.
 #[test]
 fn the_paddock_weapons_yard_plays_out() {
     use engine_anim::demo::spawn_demo_world;
@@ -403,8 +621,9 @@ fn the_paddock_weapons_yard_plays_out() {
         ("greatsword", d.greatsword),
         ("archer", d.archer),
     ];
-    // Each move played: who, which, when it started, and what it did (hits, blocked, missed).
-    let mut moves: Vec<(&str, String, f32, [u32; 3])> = Vec::new();
+    // Each move played: who, which, when it started, and what it did (hits, blocked, missed,
+    // deflected, broke a guard).
+    let mut moves: Vec<(&str, String, f32, [u32; 5])> = Vec::new();
     let mut last: Vec<Option<(String, f32)>> = vec![None; fighters.len()];
     for frame in 1..=(13.0 / DT) as usize {
         app.update();
@@ -418,19 +637,19 @@ fn the_paddock_weapons_yard_plays_out() {
                 _ => false,
             };
             if started {
-                moves.push((who, now.clone().unwrap().0, t, [0; 3]));
+                moves.push((who, now.clone().unwrap().0, t, [0; 5]));
             }
             if now.is_some()
                 && let Some(m) = moves.iter_mut().rev().find(|m| m.0 == who)
             {
-                m.3 = [a.hits, a.blocked, a.missed];
+                m.3 = [a.hits, a.blocked, a.missed, a.deflected, a.broke];
             }
             last[k] = now;
         }
     }
     // What each played in its first round (the duel's is 13 s, the great sword's 10, the
     // archer's 9).
-    let played = |who: &str| -> Vec<(String, [u32; 3])> {
+    let played = |who: &str| -> Vec<(String, [u32; 5])> {
         let round = match who {
             "greatsword" => 10.0,
             "archer" => 9.0,
@@ -442,8 +661,13 @@ fn the_paddock_weapons_yard_plays_out() {
             .map(|m| (m.1.clone(), m.3))
             .collect()
     };
-    let (hit, blocked) = ([1, 0, 0], [0, 1, 0]);
-    let named = |list: &[(&str, [u32; 3])]| -> Vec<(String, [u32; 3])> {
+    let (hit, blocked, deflected, broke) = (
+        [1, 0, 0, 0, 0],
+        [0, 1, 0, 0, 0],
+        [0, 0, 0, 1, 0],
+        [0, 1, 0, 0, 1],
+    );
+    let named = |list: &[(&str, [u32; 5])]| -> Vec<(String, [u32; 5])> {
         list.iter().map(|(m, r)| (m.to_string(), *r)).collect()
     };
     assert_eq!(
@@ -459,16 +683,18 @@ fn the_paddock_weapons_yard_plays_out() {
             ("sword_slash", hit),
         ])
     );
-    // Each cuts back while the other's blade bounces off its shield.
+    // The partner cuts back while the swordsman's blade bounces off its shield; its own
+    // last cut is deflected.
     assert_eq!(
         played("partner"),
-        named(&[("sword_slash", hit), ("sword_slash", blocked)])
+        named(&[("sword_slash", hit), ("sword_slash", deflected)])
     );
     assert_eq!(
         played("greatsword"),
         named(&[
+            ("greatsword_sweep", blocked),
+            ("greatsword_overhead", broke),
             ("greatsword_sweep", hit),
-            ("greatsword_rise", hit),
             ("greatsword_overhead", hit),
         ])
     );

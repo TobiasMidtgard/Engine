@@ -250,6 +250,11 @@ fn register_types(app: &mut App) {
          shield_guard > 0.5), the character blocks strikes at its face, high and low, within \
          block.cone_deg, letting through block's shares of damage, push and hitstop.",
     )
+    .register_component::<combat::Defense>(
+        "A target's guard (put on anything an Attacker goes for): seconds up and down, the \
+         deflect window it got as it rose (0.2 s, 0.07 s if it came down under 0.4 s before), \
+         shield-stun and broken-guard seconds left, and counts of blocks, deflects and breaks.",
+    )
     .register_component::<Freeflow>(
         "Freeflow targeting for an Attacker: each press goes at the foe nearest the way the \
          stick points (stick, or the stick_x/stick_z parameters; within cone_deg and reach \
