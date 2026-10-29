@@ -220,12 +220,12 @@ impl GrassStyle {
     /// leaves on stalks a hand high, swaying a little.
     pub fn forest_herbs() -> Self {
         Self {
-            blades_per_m2: 150.0,
-            height: 0.17,
+            blades_per_m2: 240.0,
+            height: 0.22,
             height_variation: 0.35,
-            width: 0.055,
+            width: 0.075,
             bend: 2.0,
-            lush_color: [0.05, 0.12, 0.022],
+            lush_color: [0.075, 0.17, 0.03],
             dry_color: [0.2, 0.16, 0.05],
             dryness: 0.1,
             wind_response: 0.35,

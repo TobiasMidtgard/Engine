@@ -711,6 +711,10 @@ fn spawn_log_collider(
 pub fn sync_tree_colliders(
     mut commands: Commands,
     library: Res<PlantLibrary>,
+    (visuals, surfaces): (
+        Option<Res<crate::assets::FoliageVisuals>>,
+        Option<Res<engine_world::SurfaceMaterials>>,
+    ),
     plants: Query<
         (Entity, &Plant, &Transform, Option<&HasCollider>),
         (
@@ -733,14 +737,32 @@ pub fn sync_tree_colliders(
             _ => height * scale_y * 0.6,
         }
         .max(2.0 * r + 0.05);
-        let shape = Collider::capsule(r, (h * 0.5 - r).max(0.02)).with_density(700.0);
-        let pose = Transform::from_translation(t.translation + DVec3::Y * (h as f64 * 0.5));
+        // A living tree's trunk and thick limbs once its species is built; a snag or stump
+        // (or a tree before then) one capsule up the bole.
+        let wood = plant
+            .stage
+            .is_alive()
+            .then(|| {
+                let v = visuals.as_deref()?;
+                crate::solids::plant_shape(plant, v, &library)
+            })
+            .flatten();
+        let (shape, pose) = match wood {
+            Some(wood) => (
+                crate::solids::wood_collider(wood, surfaces.as_deref()),
+                Transform::from_translation(t.translation),
+            ),
+            None => (
+                Collider::capsule(r, (h * 0.5 - r).max(0.02)).with_density(700.0),
+                Transform::from_translation(t.translation + DVec3::Y * (h as f64 * 0.5)),
+            ),
+        };
         match has {
             Some(h) => {
                 if let Ok((mut c, mut ct)) = colliders.get_mut(h.0)
                     && (c.shape != shape.shape || ct.translation != pose.translation)
                 {
-                    c.shape = shape.shape;
+                    *c = shape;
                     *ct = pose;
                 }
             }

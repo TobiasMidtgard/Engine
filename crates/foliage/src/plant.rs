@@ -339,6 +339,9 @@ pub struct EcologySettings {
     /// Only trees this close to a `FocusPoints` focus have a trunk collider, meters (colliders
     /// stream in and out as the focus moves; every tree has one when there is no focus).
     pub collider_distance_m: f32,
+    /// Scenery trees this close to a focus are solid (trunk and thick limbs,
+    /// [`crate::solids`]), meters.
+    pub tree_solid_distance_m: f32,
     /// Most catch-up years a far region simulates when the player returns.
     pub max_catch_up_years: f32,
     /// Draw each region's grass as GPU blades (`engine_render::GrassField`, fed from the
@@ -359,6 +362,7 @@ impl Default for EcologySettings {
             tree_distant_distance_m: 240.0,
             scenery_tree_draw_distance_m: 6000.0,
             collider_distance_m: 150.0,
+            tree_solid_distance_m: 80.0,
             max_catch_up_years: 40.0,
             gpu_grass: true,
         }

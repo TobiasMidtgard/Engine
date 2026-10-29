@@ -184,9 +184,9 @@ pub fn floor_maps(
             let herb = if blocked || bare[k] {
                 0.0
             } else {
-                let d = smoothstep(0.2, 0.9, canopy[k])
-                    * smoothstep(-0.2, 0.35, colony)
-                    * (0.4 + 0.6 * smoothstep(0.15, 0.45, water))
+                let d = smoothstep(0.2, 0.8, canopy[k])
+                    * smoothstep(-0.35, 0.2, colony)
+                    * (0.55 + 0.45 * smoothstep(0.15, 0.45, water))
                     * open
                     * (1.0 - hostile).max(0.0)
                     * (1.0 - 0.5 * needles);

@@ -85,6 +85,10 @@ pub struct VariantMeshes {
     /// Height of the full mesh, meters.
     pub height: f32,
     pub cut_height: f32,
+    /// Capsules over the trunk and the thickest limbs (`tree::PlantMeshes::collision`), and
+    /// over the sapling's.
+    pub collision: Vec<crate::meshgen::tree::CollisionCapsule>,
+    pub sapling_collision: Vec<crate::meshgen::tree::CollisionCapsule>,
 }
 
 /// Everything needed to draw one species.
@@ -606,9 +610,9 @@ fn build_species(
     let mut variants = Vec::with_capacity(parts.len());
     for (full, sapling) in parts {
         let mut add = |m: Option<Mesh>| m.map(|m| meshes.add(m));
-        let (sapling_wood, sapling_foliage, sapling_thin) = match sapling {
-            Some(s) => (add(s.wood), add(s.foliage), s.foliage_thin),
-            None => (None, None, Vec::new()),
+        let (sapling_wood, sapling_foliage, sapling_thin, sapling_collision) = match sapling {
+            Some(s) => (add(s.wood), add(s.foliage), s.foliage_thin, s.collision),
+            None => (None, None, Vec::new(), Vec::new()),
         };
         let mut add_all =
             |v: Vec<Mesh>| -> Vec<Handle<Mesh>> { v.into_iter().map(|m| meshes.add(m)).collect() };
@@ -659,6 +663,8 @@ fn build_species(
             stump_fungi: add(full.stump_fungi),
             height: full.height,
             cut_height: full.cut_height,
+            collision: full.collision,
+            sapling_collision,
         });
     }
 

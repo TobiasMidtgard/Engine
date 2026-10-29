@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use engine_assets::{Assets, Handle};
 use engine_core::prelude::*;
-use engine_render::{Camera, Mesh, MeshRenderer, NoVirtualGeometry, StandardMaterial};
+use engine_render::{Camera, DitherFade, Mesh, MeshRenderer, NoVirtualGeometry, StandardMaterial};
 use engine_world::{ForestCover, Ground, WorldShift};
 
 use crate::assets::FoliageVisuals;
@@ -349,6 +349,26 @@ pub struct FarWoodCell {
     epoch: u64,
 }
 
+/// A cell coming in: its cards dither in, then the cell it replaces (`ghost`) dithers out on
+/// the opposite pattern, over [`CELL_FADE_S`] ([`crate::lod_fade::overlapped`]).
+#[derive(Component, Debug, Clone, Copy)]
+pub struct CellFadeIn {
+    t: f32,
+    ghost: Option<Entity>,
+}
+
+/// A cell on its way out: no longer streamed, drawn on while it dithers away (by itself when
+/// `alone`, else timed by the [`CellFadeIn`] of the cell replacing it), then dropped.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct CellGhost {
+    t: f32,
+    alone: bool,
+}
+
+/// How long a far cell takes to dither in or out, seconds. Longer than a near part's fade: a
+/// whole hillside of crowns changing at once is seen, a single tree's level barely.
+pub const CELL_FADE_S: f32 = 1.0;
+
 /// Streaming state: the grid's origin (moved by world shifts), the cells by key and the
 /// cells being built.
 #[derive(Resource, Default)]
@@ -516,6 +536,91 @@ fn drop_cell(
     commands.entity(e).despawn();
 }
 
+/// Take a cell out of the stream: dithering away by itself when `smooth`, else at once. A cell
+/// still dithering in over another lets that one go at once.
+fn retire(
+    e: Entity,
+    smooth: bool,
+    cells: &Query<&FarWoodCell>,
+    incoming: &Query<&CellFadeIn>,
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+) {
+    if let Ok(&CellFadeIn { ghost: Some(g), .. }) = incoming.get(e) {
+        drop_cell(g, cells, commands, meshes);
+    }
+    if smooth {
+        commands.entity(e).remove::<CellFadeIn>().insert(CellGhost {
+            t: 0.0,
+            alone: true,
+        });
+    } else {
+        drop_cell(e, cells, commands, meshes);
+    }
+}
+
+/// Move the cells' fades on: dither the cards of cells coming in and going, and drop the gone.
+#[allow(clippy::type_complexity)]
+pub fn fade_far_cells(
+    mut commands: Commands,
+    time: Res<Time>,
+    mut incoming: Query<(Entity, &mut CellFadeIn, Option<&Children>)>,
+    mut ghosts: Query<(Entity, &mut CellGhost, Option<&Children>), Without<CellFadeIn>>,
+    mut dithers: Query<&mut DitherFade>,
+    cells: Query<&FarWoodCell>,
+    mut meshes: ResMut<Assets<Mesh>>,
+) {
+    let step = time.delta_secs() / CELL_FADE_S;
+    let mut set = |commands: &mut Commands, children: Option<&Children>, d: Option<DitherFade>| {
+        for &c in children.into_iter().flatten() {
+            match (dithers.get_mut(c), d) {
+                (Ok(mut now), Some(d)) => {
+                    if *now != d {
+                        *now = d;
+                    }
+                }
+                (Err(_), Some(d)) => {
+                    commands.entity(c).insert(d);
+                }
+                (Ok(_), None) => {
+                    commands.entity(c).remove::<DitherFade>();
+                }
+                (Err(_), None) => {}
+            }
+        }
+    };
+    for (e, mut fade, children) in &mut incoming {
+        fade.t = (fade.t + step).min(1.0);
+        let (out, into) = crate::lod_fade::overlapped(fade.t);
+        let ghost = fade
+            .ghost
+            .and_then(|g| ghosts.get(g).ok().map(|(_, _, c)| c));
+        if fade.t >= 1.0 {
+            set(&mut commands, children, None);
+            if let Some(g) = fade.ghost {
+                drop_cell(g, &cells, &mut commands, &mut meshes);
+            }
+            commands.entity(e).remove::<CellFadeIn>();
+        } else {
+            set(&mut commands, children, Some(into));
+            if let Some(children) = ghost {
+                set(&mut commands, children, Some(out));
+            }
+        }
+    }
+    for (e, mut ghost, children) in &mut ghosts {
+        if !ghost.alone {
+            continue;
+        }
+        ghost.t = (ghost.t + step).min(1.0);
+        if ghost.t >= 1.0 {
+            drop_cell(e, &cells, &mut commands, &mut meshes);
+        } else {
+            set(&mut commands, children, Some(DitherFade(ghost.t)));
+        }
+    }
+}
+
 /// Stream the cells around the camera: drop those out of range, build missing ones and
 /// rebuild those that want another spacing, nearest first: on `background_builds` worker
 /// threads (the terrain's answers cost tens of microseconds each), or a few a frame in the
@@ -535,7 +640,13 @@ pub fn stream_far_woods(
     mut removed: RemovedComponents<SceneryTree>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    (fades, incoming, ghosts): (
+        Res<crate::lod_fade::LodFades>,
+        Query<&CellFadeIn>,
+        Query<Entity, With<CellGhost>>,
+    ),
 ) {
+    let smooth = fades.settled();
     // Scenery trees planted, felled or moved: look at their ground again (it changes the
     // woods like a new cover does).
     if removed.read().count() > 0 || trees.iter().any(|t| t.is_changed()) {
@@ -561,6 +672,9 @@ pub fn stream_far_woods(
     let settled = state.quiet_frames >= COVER_SETTLE_FRAMES;
     if !settings.enabled || settings.is_changed() {
         for (_, e) in std::mem::take(&mut state.cells) {
+            drop_cell(e, &cells, &mut commands, &mut meshes);
+        }
+        for e in &ghosts {
             drop_cell(e, &cells, &mut commands, &mut meshes);
         }
         // Builds still running finish on their own; their results are dropped.
@@ -618,7 +732,7 @@ pub fn stream_far_woods(
         .collect();
     for k in gone {
         if let Some(e) = state.cells.remove(&k) {
-            drop_cell(e, &cells, &mut commands, &mut meshes);
+            retire(e, smooth, &cells, &incoming, &mut commands, &mut meshes);
         }
     }
     // What each cell in range wants, nearest first.
@@ -637,7 +751,7 @@ pub fn stream_far_woods(
                 // stand here, so its cards go rather than drawing over them, even while a
                 // rebuild of it is still running (that build is dropped when it lands).
                 if let Some(e) = state.cells.remove(&(i, j)) {
-                    drop_cell(e, &cells, &mut commands, &mut meshes);
+                    retire(e, smooth, &cells, &incoming, &mut commands, &mut meshes);
                 }
                 continue;
             }
@@ -666,7 +780,7 @@ pub fn stream_far_woods(
                     .and_then(|&e| cells.get(e).ok())
                     .is_some_and(|c| inner && flat_distance(c.built_from) > JUMPED_M);
                 if moved_far && let Some(e) = state.cells.remove(&(i, j)) {
-                    drop_cell(e, &cells, &mut commands, &mut meshes);
+                    retire(e, false, &cells, &incoming, &mut commands, &mut meshes);
                 }
                 todo.push((d, (i, j), b));
             }
@@ -727,9 +841,27 @@ pub fn stream_far_woods(
         if flat_distance(center(key)) + half_diag < settings.start_m {
             continue;
         }
-        if let Some(e) = state.cells.remove(&key) {
-            drop_cell(e, &cells, &mut commands, &mut meshes);
-        }
+        // The cell it replaces dithers out under it; with nothing to replace it comes in alone.
+        let ghost = match state.cells.remove(&key) {
+            Some(old) if smooth => {
+                if let Ok(&CellFadeIn { ghost: Some(g), .. }) = incoming.get(old) {
+                    drop_cell(g, &cells, &mut commands, &mut meshes);
+                }
+                commands
+                    .entity(old)
+                    .remove::<CellFadeIn>()
+                    .insert(CellGhost {
+                        t: 0.0,
+                        alone: false,
+                    });
+                Some(old)
+            }
+            Some(old) => {
+                retire(old, false, &cells, &incoming, &mut commands, &mut meshes);
+                None
+            }
+            None => None,
+        };
         let e = commands.spawn(Transform::from_translation(p.origin)).id();
         let mut handles = Vec::new();
         for (tree, mesh) in parts {
@@ -745,7 +877,15 @@ pub fn stream_far_woods(
             r.mesh = engine_render::MeshRef::Handle(h);
             r.material = engine_render::MaterialRef::Handle(material);
             r.cast_shadows = false;
-            commands.spawn((Transform::default(), ChildOf(e), r, NoVirtualGeometry));
+            let card = commands
+                .spawn((Transform::default(), ChildOf(e), r, NoVirtualGeometry))
+                .id();
+            if smooth {
+                commands.entity(card).insert(DitherFade(-1.0));
+            }
+        }
+        if smooth {
+            commands.entity(e).insert(CellFadeIn { t: 0.0, ghost });
         }
         commands.entity(e).insert(FarWoodCell {
             band: p.band,
@@ -763,6 +903,7 @@ pub fn follow_world_shift(
     mut shifts: MessageReader<WorldShift>,
     mut state: ResMut<FarWoodsState>,
     cells: Query<&FarWoodCell>,
+    ghosts: Query<Entity, With<CellGhost>>,
     mut meshes: Option<ResMut<Assets<Mesh>>>,
 ) {
     for s in shifts.read() {
@@ -775,7 +916,8 @@ pub fn follow_world_shift(
         } else {
             state.occupied_stale = true;
             state.pending.clear();
-            for (_, e) in std::mem::take(&mut state.cells) {
+            let cells_now = std::mem::take(&mut state.cells).into_values();
+            for e in cells_now.chain(ghosts.iter()) {
                 if let (Ok(c), Some(meshes)) = (cells.get(e), meshes.as_mut()) {
                     for &h in &c.meshes {
                         meshes.remove(h);
@@ -1000,9 +1142,50 @@ mod tests {
         }
     }
 
-    /// Triangles drawn by every far woods cell.
+    #[test]
+    fn cells_cross_fade_as_the_camera_flies_over() {
+        let (mut app, cam) = woods_app();
+        app.world
+            .insert_resource(ForestCover(std::sync::Arc::new(Everywhere)));
+        app.update_n(COVER_SETTLE_FRAMES as usize + 2);
+        let meshes = app.world.resource::<Assets<Mesh>>().len();
+        // A low flight at 600 m/s (10 m a frame): cells come into the ring, leave it and are
+        // rebuilt with other spacings on the way.
+        let (mut crossed, mut alone) = (0, 0);
+        for f in 1..=60 {
+            app.world.get_mut::<Transform>(cam).unwrap().translation =
+                DVec3::new(10.0 * f as f64, 0.0, 0.0);
+            app.update();
+            let mut incoming = app.world.query::<&CellFadeIn>();
+            crossed += incoming
+                .iter(&app.world)
+                .filter(|c| c.ghost.is_some())
+                .count();
+            let mut ghosts = app.world.query::<&CellGhost>();
+            alone += ghosts.iter(&app.world).filter(|g| g.alone).count();
+        }
+        assert!(crossed > 0, "no rebuilt cell cross-faded");
+        assert!(alone > 0, "no cell faded out by itself");
+        // A second and a half later every fade is over: no ghosts, nothing dithered, and the
+        // gone cells' meshes freed.
+        app.update_n(90);
+        assert_eq!(app.world.query::<&CellGhost>().iter(&app.world).count(), 0);
+        assert_eq!(app.world.query::<&CellFadeIn>().iter(&app.world).count(), 0);
+        assert_eq!(app.world.query::<&DitherFade>().iter(&app.world).count(), 0);
+        let after = app.world.resource::<Assets<Mesh>>().len();
+        assert!(after <= meshes + meshes / 4, "{after} vs {meshes}");
+        // A cut (a tour stop, a teleport) swaps at once.
+        app.world.get_mut::<Transform>(cam).unwrap().translation = DVec3::new(3000.0, 0.0, 0.0);
+        app.update_n(3);
+        assert_eq!(app.world.query::<&CellGhost>().iter(&app.world).count(), 0);
+        assert_eq!(app.world.query::<&CellFadeIn>().iter(&app.world).count(), 0);
+    }
+
+    /// Triangles drawn by every far woods cell (not counting those fading out).
     fn woods_triangles(app: &mut App) -> usize {
-        let mut cells = app.world.query::<&FarWoodCell>();
+        let mut cells = app
+            .world
+            .query_filtered::<&FarWoodCell, Without<CellGhost>>();
         let handles: Vec<_> = cells
             .iter(&app.world)
             .flat_map(|c| c.meshes.clone())

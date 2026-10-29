@@ -22,6 +22,7 @@ pub mod season;
 pub mod shadow_standin;
 pub mod shift;
 pub mod sim;
+pub mod solids;
 pub mod species;
 pub mod visuals;
 
@@ -206,6 +207,7 @@ impl Plugin for FoliagePlugin {
                 Update,
                 (
                     (felling::stream_tree_colliders, felling::sync_tree_colliders).chain(),
+                    solids::stream_scenery_tree_solids,
                     season::follow_weather_calendar,
                     (grass::sync_region_grass, grass_wear::wear_grass).chain(),
                     felling::remove_orphan_colliders,
@@ -225,6 +227,7 @@ impl Plugin for FoliagePlugin {
                         scenery_tree::sync_scenery_trees,
                         lod_fade::advance_fades,
                         far_woods::stream_far_woods,
+                        far_woods::fade_far_cells,
                         near_woods::stream_near_woods,
                         visuals::sync_log_visuals,
                         shadow_standin::sync_shadow_standins,

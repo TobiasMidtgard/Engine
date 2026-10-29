@@ -83,6 +83,97 @@ pub struct PlantMeshes {
     pub height: f32,
     /// Height of the felling cut (top of the stump), meters.
     pub cut_height: f32,
+    /// What the tree collides with: capsules over its trunk and its thickest limbs (same
+    /// model space as `wood`; see [`collision_capsules`]).
+    pub collision: Vec<CollisionCapsule>,
+}
+
+/// A capsule of a tree's collision, from `a` to `b` in model space.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CollisionCapsule {
+    pub a: Vec3,
+    pub b: Vec3,
+    pub radius: f32,
+}
+
+/// Most capsules one tree collides with.
+pub const MAX_COLLISION_CAPSULES: usize = 14;
+/// Wood thinner than this (radius, meters) has no collision: branches and twigs bend aside.
+pub const COLLISION_MIN_RADIUS_M: f32 = 0.045;
+
+/// A tree's collision from its skeleton, the way SpeedTree's collision generator does it: the
+/// largest-volume branches first (the trunk, then the thickest limbs), each covered by a few
+/// capsules along the part of it thicker than [`COLLISION_MIN_RADIUS_M`], until
+/// [`MAX_COLLISION_CAPSULES`]. Trunks block walkers, limbs catch vehicles, grapples and shots;
+/// the crown's leaves stay soft, as in most open-world games. Research:
+/// engine-design/foliage-research.md, section 7.
+fn collision_capsules(branches: &[Branch]) -> Vec<CollisionCapsule> {
+    let volume = |b: &Branch| -> f32 {
+        b.path
+            .windows(2)
+            .zip(b.radius.windows(2))
+            .map(|(p, r)| p[0].distance(p[1]) * (r[0] * r[0] + r[1] * r[1]) * 0.5)
+            .sum()
+    };
+    let mut order: Vec<(f32, &Branch)> = branches
+        .iter()
+        .filter(|b| b.level <= 1 && b.path.len() >= 2)
+        .filter(|b| b.radius[0] >= COLLISION_MIN_RADIUS_M)
+        .map(|b| (volume(b), b))
+        .collect();
+    order.sort_by(|a, b| b.0.total_cmp(&a.0));
+    let mut out = Vec::new();
+    for (_, b) in order {
+        // The thick part: up to the first point thinner than the least.
+        let end = b
+            .radius
+            .iter()
+            .position(|&r| r < COLLISION_MIN_RADIUS_M)
+            .unwrap_or(b.path.len())
+            .max(2);
+        let (path, radius) = (&b.path[..end], &b.radius[..end]);
+        let lengths: Vec<f32> = std::iter::once(0.0)
+            .chain(path.windows(2).scan(0.0, |s, w| {
+                *s += w[0].distance(w[1]);
+                Some(*s)
+            }))
+            .collect();
+        let total = *lengths.last().unwrap_or(&0.0);
+        if total < 0.1 {
+            continue;
+        }
+        let at = |s: f32| -> (Vec3, f32) {
+            let i = lengths
+                .partition_point(|&l| l <= s)
+                .clamp(1, path.len() - 1);
+            let span = (lengths[i] - lengths[i - 1]).max(1e-5);
+            let t = ((s - lengths[i - 1]) / span).clamp(0.0, 1.0);
+            (
+                path[i - 1].lerp(path[i], t),
+                radius[i - 1] + (radius[i] - radius[i - 1]) * t,
+            )
+        };
+        // The trunk in four, a limb in two (one when short): enough to follow their bends.
+        let pieces = match (b.level, total) {
+            (0, _) => 4,
+            (_, l) if l < 2.0 => 1,
+            _ => 2,
+        };
+        for k in 0..pieces {
+            let (s0, s1) = (
+                total * k as f32 / pieces as f32,
+                total * (k + 1) as f32 / pieces as f32,
+            );
+            let ((a, ra), (z, rz)) = (at(s0), at(s1));
+            // A little inside the bark, so a body grazing the trunk touches what it sees.
+            let r = (ra + rz) * 0.5 * 0.95;
+            out.push(CollisionCapsule { a, b: z, radius: r });
+            if out.len() == MAX_COLLISION_CAPSULES {
+                return out;
+            }
+        }
+    }
+    out
 }
 
 /// A branch of the skeleton. Level 0 is the trunk, 1 the limbs, 2 branches, 3 twigs.
@@ -1672,6 +1763,7 @@ fn assemble(
     let mut out = PlantMeshes {
         height: top,
         cut_height: cut,
+        collision: collision_capsules(&crowns.branches),
         ..Default::default()
     };
     let branches = &crowns.branches;
@@ -2842,6 +2934,40 @@ mod tests {
         let hazel = lib.get(lib.id("hazel").unwrap());
         let m = woody(hazel, 3, false);
         assert!(m.base.is_none() && m.foliage.unwrap().triangle_count() > 50);
+    }
+
+    #[test]
+    fn trees_collide_with_their_trunk_and_thickest_limbs() {
+        let lib = PlantLibrary::default();
+        for name in ["oak", "birch", "pine", "spruce"] {
+            let sp = lib.get(lib.id(name).unwrap());
+            for seed in 0..3 {
+                let m = woody(sp, seed, false);
+                let c = &m.collision;
+                assert!(
+                    (4..=MAX_COLLISION_CAPSULES).contains(&c.len()),
+                    "{name}: {} capsules",
+                    c.len()
+                );
+                // The trunk from its foot up most of the way to where it thins into the crown,
+                // not just a stub at walking height.
+                let foot = c.iter().map(|k| k.a.y.min(k.b.y)).fold(f32::MAX, f32::min);
+                let top = c.iter().map(|k| k.a.y.max(k.b.y)).fold(0.0f32, f32::max);
+                assert!(foot < 0.3, "{name}: starts at {foot}");
+                assert!(top > m.height * 0.4, "{name}: up to {top} of {}", m.height);
+                for k in c {
+                    assert!(k.radius >= COLLISION_MIN_RADIUS_M * 0.9, "{name}: {k:?}");
+                    assert!(k.radius <= sp.trunk_radius_m * 1.6, "{name}: {k:?}");
+                    // Inside the tree's own outline.
+                    for p in [k.a, k.b] {
+                        assert!(p.y <= m.height && p.x.abs() < m.height && p.z.abs() < m.height);
+                    }
+                }
+            }
+        }
+        // Shrubs bend aside: none.
+        let hazel = lib.get(lib.id("hazel").unwrap());
+        assert!(woody(hazel, 1, false).collision.is_empty());
     }
 
     #[test]

@@ -104,10 +104,7 @@ fn main() {
         )
         .add_systems(Update, forest::install)
         .add_systems(Update, paint_cache::track_eye.after(camera::fly))
-        .add_systems(
-            Update,
-            (scenery::add_trunk_solids, scenery::stream_near_solids).chain(),
-        )
+        .add_systems(Update, scenery::stream_near_solids)
         .add_systems(
             Update,
             (scenery::stream_wall_heroes, scenery::pilot_interacts),

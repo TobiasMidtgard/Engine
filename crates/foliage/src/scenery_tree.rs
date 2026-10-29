@@ -57,7 +57,7 @@ impl SceneryTree {
     }
 
     /// The plant it would be: grown to `size`, alive.
-    fn plant(&self) -> Plant {
+    pub(crate) fn plant(&self) -> Plant {
         Plant::new(self.species, self.size, self.genes)
     }
 }

@@ -47,6 +47,8 @@ pub struct LodFades {
     started: usize,
     cut: bool,
     camera: Option<DVec3>,
+    /// Frames since the last cut.
+    since_cut: u32,
 }
 
 impl Default for LodFades {
@@ -56,6 +58,7 @@ impl Default for LodFades {
             started: 0,
             cut: false,
             camera: None,
+            since_cut: 0,
         }
     }
 }
@@ -69,7 +72,16 @@ impl LodFades {
         self.started += 1;
         true
     }
+
+    /// Whether what streams in or out now should fade: fades are on and the camera has moved
+    /// smoothly for [`SETTLED_FRAMES`] (what lands just after a cut is part of the new view).
+    pub(crate) fn settled(&self) -> bool {
+        self.enabled && self.since_cut >= SETTLED_FRAMES
+    }
 }
+
+/// Frames after a cut before streamed cells fade in and out rather than appear and go.
+pub const SETTLED_FRAMES: u32 = 30;
 
 /// Keep `shown` while the distance is within [`HYSTERESIS`] of where it is still right:
 /// `pick(d)` is the level wanted at distance `d`.
@@ -147,6 +159,11 @@ pub fn begin_fades(mut fades: ResMut<LodFades>, cams: Query<(&Camera, &GlobalTra
     };
     fades.camera = at;
     fades.started = 0;
+    fades.since_cut = if fades.cut {
+        0
+    } else {
+        fades.since_cut.saturating_add(1)
+    };
 }
 
 /// Move every fade on, and end the finished ones.

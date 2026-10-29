@@ -2636,34 +2636,6 @@ pub fn pilot_interacts(
     }
 }
 
-/// Trees, the valley's and the near woods' alike, get a trunk to bump into: a capsule up the
-/// bole, as a child so it goes with the tree. Understory shrubs (hazel) stay walk-through.
-pub fn add_trunk_solids(
-    mut commands: Commands,
-    library: Res<engine_foliage::PlantLibrary>,
-    trees: Query<(Entity, &engine_foliage::SceneryTree), Added<engine_foliage::SceneryTree>>,
-) {
-    for (e, tree) in &trees {
-        let sp = library.get(tree.species);
-        if sp.layer != engine_foliage::Layer::Canopy {
-            continue;
-        }
-        let radius = (sp.trunk_radius_m * tree.size.max(0.3)).clamp(0.12, 0.6);
-        let height = 3.5f32;
-        commands.spawn((
-            Transform::from_translation(DVec3::Y * (height as f64 * 0.5)),
-            NearSolid {
-                shape: ColliderShape::Capsule {
-                    radius,
-                    half_height: height * 0.5 - radius,
-                },
-                reach: SMALL_SOLID_REACH,
-            },
-            ChildOf(e),
-        ));
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
