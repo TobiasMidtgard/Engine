@@ -5,13 +5,15 @@
 -- final state: `sealed`'s `done` follows once every region is in one (XState's onDone,
 -- SCXML's done.state), so no code counts the runes. The door stays down `hold` seconds, rises
 -- and the runes go dark again. Put it on an empty entity: it builds its arch, its door and its
--- three rune stones (each runs examples/rune.luau: press E on one and it tells the seal). See
--- "State machines" in the scripts README.
+-- three rune stones (`construct`, so the editor shows them too; each runs examples/rune.luau:
+-- press E on one and it tells the seal). Selected, it shows where each rune's touch reaches
+-- and which socket it lights; drag `spread` in the scene view. See "State machines" and "In the
+-- editor's view" in the scripts README.
 local Seal = {}
 Seal.props = {
 	hold = 6, -- how long the door stays down @range 1 30 @unit s
 	open_secs = 2.2, -- to sink or rise all the way @range 0.3 6 @unit s
-	spread = 2.4, -- how far the side runes stand from the middle @range 1.5 5 @unit m
+	spread = 2.4, -- how far the side runes stand from the middle @range 1.5 5 @unit m @handle x
 }
 
 Seal.states = {
@@ -71,7 +73,18 @@ local function is_lit(machine: any, name: string): boolean
 	return machine:in_state(`{name}_lit`)
 end
 
-function Seal:start()
+-- Where each rune stands (the side ones `spread` from the middle), and whether it is a plate in
+-- the floor rather than a standing stone.
+local function spots(spread: number): { [string]: { at: Vec3, floor: boolean } }
+	return {
+		left = { at = vec3(-spread, 0, 0.9), floor = false },
+		middle = { at = vec3(0, 0, 2.3), floor = true },
+		right = { at = vec3(spread, 0, 0.9), floor = false },
+	}
+end
+
+-- Its parts (in the editor whenever its props change, and before `start` in play).
+function Seal:construct()
 	-- The arch (its front, +z, faces the way the entity does) and the alcove behind the door.
 	for _, x in { -1.55, 1.55 } do
 		self.entity:spawn(part("Pillar", box(0.55, 3.3, 0.75), vec3(x, 1.65, 0), STONE))
@@ -111,13 +124,9 @@ function Seal:start()
 		self.sockets[name] = self.door:find(`Socket {name}`) :: Entity
 	end
 	-- The rune stones: two standing at the sides, one set in the floor before the door.
-	local spots = {
-		left = { at = vec3(-self.props.spread, 0, 0.9), floor = false },
-		middle = { at = vec3(0, 0, 2.3), floor = true },
-		right = { at = vec3(self.props.spread, 0, 0.9), floor = false },
-	}
+	local where = spots(self.props.spread)
 	for k, name in RUNES do
-		local spot = spots[name]
+		local spot = where[name]
 		local floor = spot.floor
 		self.entity:spawn({
 			name = `{string.upper(string.sub(name, 1, 1))}{string.sub(name, 2)} rune`,
@@ -131,6 +140,9 @@ function Seal:start()
 			},
 		})
 	end
+end
+
+function Seal:start()
 	self.sink = 0 -- 0: the door up, 1: down in the ground
 	self.runes_lit = 0
 	self._shown = -1 -- what the glow shows (it changes materials only when it changes)
@@ -177,6 +189,22 @@ function Seal:update(_dt: number)
 	local rim = if self:in_state("sealed") then 1 + 9 * lit else 40
 	self.rim:material({ emissive_strength = rim })
 	self.gem:material({ emissive = if moving then AMBER else CYAN, emissive_strength = if moving then 40 else 2 + 8 * lit })
+end
+
+-- Selected: how far each rune's touch reaches, and the socket on the door it lights (cyan once
+-- lit), in the seal's own space.
+function Seal:draw_gizmos_selected()
+	local where = spots(self.props.spread)
+	local door = DOOR_Y - 2.95 * (self.sink or 0) -- it sinks while open
+	for k, name in RUNES do
+		local spot = where[name]
+		local color = if is_lit(self, name) then "cyan" else "white"
+		draw.circle(spot.at + vec3(0, 0.03, 0), 2.5, { color = color, alpha = 0.5 })
+		local a = math.rad(150 - 60 * (k - 1))
+		local socket = vec3(math.cos(a) * 0.68, door + math.sin(a) * 0.68, 0.2)
+		local top = spot.at + vec3(0, if spot.floor then 0.2 else 1.75, 0)
+		draw.arrow(top, socket, { color = color, on_top = true })
+	end
 end
 
 -- The states' own work: the door moves; the runes come from the regions.

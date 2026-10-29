@@ -11,6 +11,7 @@ engine_world.workspace = true
 engine_render.workspace = true
 engine_assets.workspace = true
 engine_input.workspace = true
+engine_debug.workspace = true
 bevy_ecs.workspace = true
 serde.workspace = true
 serde_json.workspace = true

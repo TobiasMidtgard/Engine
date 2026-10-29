@@ -263,6 +263,23 @@ const HOOKS: &[(&str, &str, &str)] = &[
         "(shift)",
         "The world moved to a new frame: map kept positions with shift:point(p).",
     ),
+    (
+        "construct",
+        "()",
+        "Builds the entity's parts (self:spawn): in the editor's edit mode whenever props change, \
+         and before start in play. Must not wait.",
+    ),
+    (
+        "draw_gizmos",
+        "()",
+        "Draws helpers with draw.* in the entity's own space while gizmos are shown (edit mode \
+         and play).",
+    ),
+    (
+        "draw_gizmos_selected",
+        "()",
+        "Like draw_gizmos, only while the entity is selected in the editor.",
+    ),
 ];
 
 const KEYWORDS: &[&str] = &[

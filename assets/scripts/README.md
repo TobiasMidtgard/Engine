@@ -114,6 +114,7 @@ Beacon.props = {
 | `@enum a\|b\|c` | a string chosen from a list |
 | `@entity` | a string naming an entity, picked from the scene (`world.find(self.props.target)`) |
 | `@hide` | not shown |
+| `@handle [x\|y\|z]` | a handle in the scene view: a point (`vec3`), a radius, or a distance along an axis |
 | `@group Name` | on a comment line of its own: the props below it fold under `Name` |
 
 A value set in the panel belongs to that entity (its name turns bold blue, with a bar, as
@@ -266,6 +267,72 @@ Seal.states = {
   and the panel beside it shows them as they were right after it, the ones that change set
   lit and what they are now beside them (PlayMaker's Debug Flow).
 
+## In the editor's view: `construct`, gizmos and handles
+
+A script can show in the editor before anyone presses Play, as Unreal's construction script and
+Unity's gizmos do:
+
+```lua
+Turret.props = {
+	range = 6, -- how near someone must come @range 1 20 @unit m @handle
+}
+
+-- Builds the turret's parts: in the editor (again whenever a prop changes) and in the game
+-- before start.
+function Turret:construct()
+	self.head = self.entity:spawn({ name = "Head", components = { ... } })
+end
+
+-- Drawn while gizmos show (Show menu, "Script gizmos"), in the entity's own space.
+function Turret:draw_gizmos()
+	draw.circle(vec3.zero, self.props.range, { color = "orange", normal = vec3.up })
+end
+
+-- Drawn only while the entity is selected.
+function Turret:draw_gizmos_selected()
+	draw.arrow(vec3(0, 1.2, 0), vec3(0, 1.2, 0) + vec3.forward * self.props.range, "red")
+end
+```
+
+- `construct()` builds the parts an entity's look depends on. In the editor it runs on its own
+  copy of the script (no `start`, no `update`), and runs again when the file is saved or a prop
+  changes, so dragging a prop's slider or handle rebuilds the parts at once. What it spawns is
+  marked as built (`Constructed`): never saved with the scene, removed before it is built
+  again, and clicking a part selects its owner. In the game it runs just before `start`, so
+  `start` can use what it built. Keep it to building: timers, messages and prints from it are
+  dropped in the editor.
+- `draw_gizmos()` runs every frame while gizmos show, in the editor and in the game, and
+  `draw_gizmos_selected()` while the entity is selected in the editor (Unity's `OnDrawGizmos`
+  and `OnDrawGizmosSelected`). Both start in the entity's own space: `vec3.zero` is the entity,
+  and the shapes move, turn and scale with it. They show in the scene view, not in the Game
+  view. `script.gizmos({ show = true, selected = { "Turret" } })` turns them on from code or
+  the console.
+- `@handle` on a prop puts a handle for it in the scene view, where it is (Unreal's "Show 3D
+  Widget", Unity's `Handles`): a `vec3` prop is a point to drag (on the ground; Shift drags it
+  up and down), a number with `@handle` is a radius drawn as a ring, and `@handle x` (or `y`,
+  `z`) a distance along that axis. Ctrl snaps to the prop's step. The value changes while you
+  drag (and `construct` rebuilds); releasing it is one undo step, and Escape puts it back.
+  Points are in the entity's own space.
+
+`draw` works in any hook, in the editor and the game (Unreal's DrawDebug functions). A shape
+lasts this frame unless `seconds` says longer, and its last value is a color (a name such as
+`"orange"`, a `vec3`, or `{r, g, b, a}`) or a table of options:
+
+| Call | Draws |
+| --- | --- |
+| `draw.line(a, b)`, `draw.ray(from, dir)`, `draw.arrow(from, to)` | a line, a ray, an arrow |
+| `draw.sphere(at, radius)`, `draw.box(at, size)` | a wire sphere, a box (`rotation`) |
+| `draw.circle(at, radius)`, `draw.arc(at, radius, from, angle)` | a ring round `normal`, part of one |
+| `draw.cone(apex, dir, half_angle)` | a cone `dir` long (a turret's view) |
+| `draw.capsule(a, b, radius)`, `draw.cylinder(a, b, radius)` | a capsule or cylinder from a to b |
+| `draw.point(at)`, `draw.path(points)`, `draw.axes(at, rotation?, size?)` | a cross (`size`), lines through points (`closed`), red-green-blue axes |
+| `draw.space(entity?)` | what follows is in that entity's space (none: the world's) |
+
+Options: `color`, `alpha`, `seconds` (up to 600, real time, so they count while paused),
+`on_top` (seen through walls), `normal` (circles and arcs), `rotation` (boxes), `closed`
+(paths) and `size` (points). `examples/patrol.luau` uses all three: its route is three
+`@handle` points, its drone is built by `construct`, and its gizmos draw the loop.
+
 ## Visual scripts (`.graph`)
 
 A `.graph` file is a script drawn as nodes and wires, for people who would rather not write
@@ -293,6 +360,9 @@ work the same. Edit graphs in the editor's **Graphs** tab:
   drag an arrow from one to another, and set its event, timer or condition in the sidebar; each
   state gets Enter, Update and Exit nodes, and **Go to** and **In?** nodes for the graph. It runs
   as a Luau script's `states` table does, and lights up the same while playing.
+- **Construct**, **Draw gizmos** and **Draw gizmos (selected)** are events too (see "In the
+  editor's view"), and the **Draw** nodes (line, arrow, sphere, circle, box) draw after them
+  or after Update.
 - **To script** writes the graph's Luau as a `.luau` file, for when a graph outgrows nodes.
 
 The file is JSON text with one node or wire per line, so changes diff and merge in git like
@@ -421,6 +491,10 @@ have them.
 - `examples/seal.luau`: a rune seal run by final states: three rune stones
   (`examples/rune.luau`, E on each) are the regions of a parallel group, and the door sinks
   once all three are lit. `examples/seal.test.luau` tests it. The courtyard has one.
+- `examples/patrol.luau`: a drone that flies a loop through three waypoints: the waypoints are
+  `@handle` props to drag in the scene view, `construct` builds the drone (so it shows in the
+  editor) and its gizmos draw the route. `examples/patrol.test.luau` tests it. The turret's
+  range and the seal's spread are handles too, and both draw gizmos.
 - `examples/pulse.graph`, `examples/hover.graph`: the same lamp and stone as visual scripts.
 - `examples/lamp.test.luau`, `examples/beacon.test.luau`, `examples/float.test.luau`: tests of
   the examples (and of the `wave` module), run in the game.

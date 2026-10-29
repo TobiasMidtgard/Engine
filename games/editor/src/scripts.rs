@@ -55,7 +55,7 @@ use engine_script::debug::{self, FileStop, Go, StopView};
 use engine_script::editing::{self, FileMarks, OutputCursor, Word, WordKind};
 use engine_script::props::{Prop, PropKind};
 use engine_script::states::{Hit, Live, Machine, Problem as MachineProblem, StateBreakpoints};
-use engine_script::{Script, ScriptRuntime, ScriptSettings, ScriptsHeld};
+use engine_script::{Script, ScriptGizmos, ScriptRuntime, ScriptSettings, ScriptsHeld};
 use serde_json::{Value, json};
 
 use crate::editor::{self, Editor, Mode, Tab};
@@ -73,7 +73,13 @@ impl Plugin for ScriptsTabPlugin {
     fn build(&self, app: &mut App) {
         app.insert_resource(ScriptsHeld)
             .init_resource::<ScriptsTab>()
+            // On by default, as in Unity's and Unreal's scene views.
+            .insert_resource(ScriptGizmos {
+                show: true,
+                ..Default::default()
+            })
             .add_systems(Update, hold_scripts.before(UpdateSet::Logic))
+            .add_systems(Update, follow_selection.before(UpdateSet::Logic))
             .add_systems(Update, follow_debugger.after(UpdateSet::Logic))
             .add_systems(Update, pause_on_state_breaks.after(UpdateSet::Logic))
             .add_systems(Update, keep_play_values.after(UpdateSet::Logic));
@@ -97,6 +103,23 @@ fn hold_scripts(world: &mut World) {
             world.remove_resource::<ScriptsHeld>();
         }
         _ => {}
+    }
+}
+
+/// Script gizmos follow the editor: the selection draws `draw_gizmos_selected`, and Game view
+/// hides them all.
+fn follow_selection(world: &mut World) {
+    let Some((selected, hide)) = world
+        .get_resource::<Editor>()
+        .map(|e| (e.selection.clone(), e.game_view))
+    else {
+        return;
+    };
+    if let Some(mut g) = world.get_resource_mut::<ScriptGizmos>()
+        && (g.selected != selected || g.hide != hide)
+    {
+        g.selected = selected;
+        g.hide = hide;
     }
 }
 
@@ -197,6 +220,8 @@ pub struct ScriptsTab {
     /// Where some widgets were last drawn, for screenshot runs to point at or click
     /// ("signal method 0", "heard 12").
     pub drawn_at: HashMap<String, Rect>,
+    /// The prop handle being dragged in the scene view ([`handles`]).
+    pub handle: Option<HandleDrag>,
 }
 
 /// An open file.
@@ -969,6 +994,9 @@ fn functions(text: &str) -> Vec<Function> {
         "on_reload",
         "on_destroy",
         "on_world_shift",
+        "construct",
+        "draw_gizmos",
+        "draw_gizmos_selected",
     ]
     .into();
     let mut out = Vec::new();
@@ -6684,6 +6712,321 @@ fn keep_play_values(world: &mut World) {
     });
 }
 
+// ----------------------------------------------------------------------------- prop handles
+
+/// Handle color, and while hovered or dragged.
+const HANDLE: Color32 = Color32::from_rgb(0x5a, 0xd6, 0xd2);
+const HANDLE_HOT: Color32 = Color32::from_rgb(0xff, 0xd2, 0x5a);
+/// How near the pointer must be to take a handle, points.
+const HANDLE_REACH: f32 = 10.0;
+
+/// A prop handle being dragged: the entity, the prop, and the Script as it was (Godot's
+/// restore value: letting go makes one undo step from it, Escape puts it back).
+pub struct HandleDrag {
+    entity: Entity,
+    prop: String,
+    before: Value,
+}
+
+/// One handle on screen: its prop, its point in the world and on screen.
+struct Spot {
+    prop: Prop,
+    kind: engine_script::props::Handle,
+    world: DVec3,
+    screen: Pos2,
+}
+
+/// A prop's value now: the Script's own, or the class's default.
+fn prop_value(script: &Script, prop: &Prop) -> Value {
+    script
+        .props
+        .get(&prop.name)
+        .cloned()
+        .unwrap_or_else(|| prop.default.clone())
+}
+
+fn vec3_of(v: &Value) -> Option<DVec3> {
+    let a = v.as_array()?;
+    Some(DVec3::new(
+        a.first()?.as_f64()?,
+        a.get(1)?.as_f64()?,
+        a.get(2)?.as_f64()?,
+    ))
+}
+
+/// The axis a handle uses, in the entity's space.
+fn axis_of(kind: engine_script::props::Handle) -> DVec3 {
+    match kind {
+        engine_script::props::Handle::Axis(1) => DVec3::Y,
+        engine_script::props::Handle::Axis(2) => DVec3::Z,
+        _ => DVec3::X,
+    }
+}
+
+/// Where a ray meets the plane through `at` across `normal`.
+fn ray_plane(o: DVec3, d: DVec3, at: DVec3, normal: DVec3) -> Option<DVec3> {
+    let den = d.dot(normal);
+    if den.abs() < 1e-6 {
+        return None;
+    }
+    let t = (at - o).dot(normal) / den;
+    (t > 0.0).then(|| o + d * t)
+}
+
+/// The point of the line through `a` along unit `u` nearest the ray `o + t d`.
+fn line_nearest_ray(a: DVec3, u: DVec3, o: DVec3, d: DVec3) -> f64 {
+    let w = a - o;
+    let (b, dd, e) = (u.dot(d), u.dot(w), d.dot(w));
+    let den = 1.0 - b * b;
+    if den.abs() < 1e-9 {
+        return 0.0;
+    }
+    (b * e - dd) / den
+}
+
+/// Handles for the selected script's `@handle` props in the scene view (Unreal's
+/// `MakeEditWidget`, Unity's `Handles`, Godot's gizmo handles): a diamond for a point (a
+/// `vec3` in the entity's space), dots around a ring for a radius, a dot on an axis for a
+/// distance. Dragging one sets the prop as it goes (in edit mode the script's `construct` builds
+/// again, as Unreal's construction script runs on drag); a point moves across the entity's
+/// ground plane, or up and down with Shift; Ctrl snaps to the prop's step (a quarter meter when
+/// it has none). Letting go is one undo step; Escape puts it back. True while a handle is under
+/// the pointer or dragged, so the view neither selects nor box-selects.
+pub fn handles(
+    ui: &egui::Ui,
+    world: &mut World,
+    editor: &mut Editor,
+    view: &crate::view::ViewInfo,
+    response: &egui::Response,
+) -> bool {
+    let Some(e) = editor.primary() else {
+        return false;
+    };
+    let Some(script) = world.get::<Script>(e).cloned() else {
+        return false;
+    };
+    let Some(global) = world.get::<GlobalTransform>(e).map(|g| g.0) else {
+        return false;
+    };
+    let Ok(props) = engine_script::props::of(world, &script.path) else {
+        return false;
+    };
+    let mut spots = Vec::new();
+    for prop in props.into_iter().filter(|p| p.handle.is_some()) {
+        let kind = prop.handle.expect("filtered");
+        let value = prop_value(&script, &prop);
+        let locals: Vec<DVec3> = match kind {
+            engine_script::props::Handle::Point => vec3_of(&value).into_iter().collect(),
+            engine_script::props::Handle::Radius => {
+                let r = value.as_f64().unwrap_or(0.0);
+                vec![DVec3::X * r, DVec3::Z * r, -DVec3::X * r, -DVec3::Z * r]
+            }
+            engine_script::props::Handle::Axis(_) => {
+                vec![axis_of(kind) * value.as_f64().unwrap_or(0.0)]
+            }
+        };
+        let mut debug = world.resource_mut::<DebugDraw>();
+        let dim = [0.35, 0.84, 0.82, 0.55];
+        match kind {
+            engine_script::props::Handle::Radius => {
+                let r = value.as_f64().unwrap_or(0.0);
+                let up = global.transform_vector3(DVec3::Y).normalize_or(DVec3::Y);
+                let scale = global.transform_vector3(DVec3::X).length();
+                debug
+                    .circle(global.translation, up.as_vec3(), (r * scale) as f32, dim)
+                    .on_top();
+            }
+            engine_script::props::Handle::Axis(_) => {
+                let end = global.transform_point3(locals[0]);
+                debug.line(global.translation, end, dim).on_top();
+            }
+            engine_script::props::Handle::Point => {}
+        }
+        for local in locals {
+            let at = global.transform_point3(local);
+            if let Some(screen) = view.project(at) {
+                spots.push(Spot {
+                    prop: prop.clone(),
+                    kind,
+                    world: at,
+                    screen,
+                });
+            }
+        }
+    }
+    if spots.is_empty() {
+        return false;
+    }
+    let pointer = ui.input(|i| i.pointer.hover_pos());
+    let dragging = world
+        .resource::<ScriptsTab>()
+        .handle
+        .as_ref()
+        .filter(|d| d.entity == e)
+        .map(|d| d.prop.clone());
+    let nearest = |at: Option<Pos2>| {
+        at.and_then(|p| {
+            spots
+                .iter()
+                .filter(|s| s.screen.distance(p) < HANDLE_REACH)
+                .min_by(|a, b| a.screen.distance(p).total_cmp(&b.screen.distance(p)))
+                .map(|s| s.prop.name.clone())
+        })
+    };
+    let hovered = match &dragging {
+        Some(_) => None,
+        None => nearest(pointer),
+    };
+    // Draw them: a diamond for a point, a dot for the rest, each with its name and value.
+    let painter = ui.painter_at(view.screen);
+    let mut labelled = HashSet::new();
+    for s in &spots {
+        let hot = dragging.as_deref() == Some(s.prop.name.as_str())
+            || hovered.as_deref() == Some(s.prop.name.as_str());
+        let color = if hot { HANDLE_HOT } else { HANDLE };
+        let r = if hot { 7.5 } else { 6.0 };
+        let outline = Stroke::new(1.5, Color32::from_black_alpha(200));
+        match s.kind {
+            engine_script::props::Handle::Point => {
+                let c = s.screen;
+                let pts = vec![
+                    c + Vec2::new(0.0, -r - 1.5),
+                    c + Vec2::new(r + 1.5, 0.0),
+                    c + Vec2::new(0.0, r + 1.5),
+                    c + Vec2::new(-r - 1.5, 0.0),
+                ];
+                painter.add(egui::Shape::convex_polygon(pts, color, outline));
+            }
+            _ => {
+                painter.circle(s.screen, r * 0.8, color, outline);
+            }
+        }
+        let value = prop_value(&script, &s.prop);
+        let shown = match s.kind {
+            engine_script::props::Handle::Point => vec3_of(&value)
+                .map(|v| format!("({:.1}, {:.1}, {:.1})", v.x, v.y, v.z))
+                .unwrap_or_default(),
+            _ => {
+                let unit = s.prop.unit.as_deref().unwrap_or("");
+                format!("{:.2} {unit}", value.as_f64().unwrap_or(0.0))
+            }
+        };
+        // A ring of four dots shows its label once.
+        if labelled.insert(s.prop.name.clone()) {
+            let text = format!("{}  {}", s.prop.name, shown.trim());
+            let at = s.screen + Vec2::new(11.0, -11.0);
+            let galley = painter.layout_no_wrap(text, FontId::proportional(13.0), color);
+            let back = Rect::from_min_size(
+                at - Vec2::new(4.0, 2.0),
+                galley.size() + Vec2::new(8.0, 4.0),
+            );
+            painter.rect_filled(back, 3.0, Color32::from_black_alpha(170));
+            painter.galley(at, galley, color);
+        }
+    }
+    let shift = ui.input(|i| i.modifiers.shift);
+    let ctrl = ui.input(|i| i.modifiers.ctrl);
+    // Take one: the handle the button went down on (egui starts a drag once the pointer has
+    // moved off it).
+    let pressed_on = nearest(ui.input(|i| i.pointer.press_origin()));
+    if dragging.is_none()
+        && response.drag_started_by(egui::PointerButton::Primary)
+        && let Some(name) = pressed_on.or(hovered.clone())
+        && let Ok(before) = serde_json::to_value(&script)
+    {
+        world.resource_mut::<ScriptsTab>().handle = Some(HandleDrag {
+            entity: e,
+            prop: name,
+            before,
+        });
+        return true;
+    }
+    let Some(name) = dragging else {
+        return hovered.is_some();
+    };
+    let Some(spot) = spots.iter().find(|s| s.prop.name == name) else {
+        return true;
+    };
+    // Escape: back to how it was, no undo step.
+    if ui.input(|i| i.key_pressed(Key::Escape)) {
+        if let Some(d) = world.resource_mut::<ScriptsTab>().handle.take()
+            && let Ok(back) = serde_json::from_value::<Script>(d.before)
+        {
+            world.entity_mut(e).insert(back);
+        }
+        return true;
+    }
+    if let Some(p) = pointer {
+        let (o, d) = view.ray(p);
+        let d = d.as_dvec3();
+        let inv = global.inverse();
+        let up = global.transform_vector3(DVec3::Y).normalize_or(DVec3::Y);
+        let snap = |v: f64| {
+            if ctrl {
+                let step = spot.prop.step.unwrap_or(0.25);
+                (v / step).round() * step
+            } else {
+                (v * 1000.0).round() / 1000.0
+            }
+        };
+        let value = match spot.kind {
+            engine_script::props::Handle::Point => {
+                let normal = if shift {
+                    // Up and down: a plane facing the camera, standing upright.
+                    let f = (view.rotation * Vec3::NEG_Z).as_dvec3();
+                    (f - up * f.dot(up)).normalize_or(DVec3::Z)
+                } else {
+                    up
+                };
+                ray_plane(o, d, spot.world, normal).map(|hit| {
+                    let old = inv.transform_point3(spot.world);
+                    let mut local = inv.transform_point3(hit);
+                    if shift {
+                        local = DVec3::new(old.x, local.y, old.z);
+                    }
+                    serde_json::json!([snap(local.x), snap(local.y), snap(local.z)])
+                })
+            }
+            engine_script::props::Handle::Radius => {
+                ray_plane(o, d, global.translation, up).map(|hit| {
+                    let local = inv.transform_point3(hit);
+                    let r = spot
+                        .prop
+                        .clamp(snap(DVec3::new(local.x, 0.0, local.z).length()));
+                    serde_json::json!(r)
+                })
+            }
+            engine_script::props::Handle::Axis(_) => {
+                let axis = global.transform_vector3(axis_of(spot.kind));
+                let scale = axis.length().max(1e-9);
+                let t = line_nearest_ray(global.translation, axis / scale, o, d);
+                Some(serde_json::json!(spot.prop.clamp(snap(t / scale))))
+            }
+        };
+        if let Some(value) = value
+            && world
+                .get::<Script>(e)
+                .is_some_and(|s| s.props.get(&name) != Some(&value))
+            && let Some(mut s) = world.get_mut::<Script>(e)
+        {
+            if !s.props.is_object() {
+                s.props = Value::Object(Default::default());
+            }
+            s.props[name.as_str()] = value;
+        }
+    }
+    // Let go: one undo step from how it was.
+    if (response.drag_stopped() || !ui.input(|i| i.pointer.primary_down()))
+        && let Some(d) = world.resource_mut::<ScriptsTab>().handle.take()
+        && let Some(after) = world
+            .get::<Script>(e)
+            .and_then(|s| serde_json::to_value(s).ok())
+    {
+        commit_script(world, editor, e, &d.before, after);
+    }
+    true
+}
+
 // ----------------------------------------------------------------------------- screenshots
 
 /// The example scripts the shots use (in the scripts folder): copied next to the shots, so
@@ -7560,10 +7903,16 @@ pub fn states_shots(dir: String) -> ShotScript {
     // E on `target`, by the player.
     let press = |target: &'static str| {
         move |world: &mut World, _: &mut Editor| {
-            let (Some(target), Some(actor)) = (
-                crate::shots::find(world, target),
-                crate::shots::find(world, "Player"),
-            ) else {
+            // The runes are the seal's own parts, not scene entities: any entity by that name.
+            let named = |world: &mut World, name: &str| {
+                let mut q = world.query::<(Entity, &Name)>();
+                q.iter(world)
+                    .find(|(_, n)| n.as_str() == name)
+                    .map(|(e, _)| e)
+            };
+            let (Some(target), Some(actor)) =
+                (named(world, target), crate::shots::find(world, "Player"))
+            else {
                 return;
             };
             let from = world
@@ -7853,6 +8202,215 @@ pub fn states_shots(dir: String) -> ShotScript {
         })),
     ];
     steps.extend(crate::graphs::states_steps());
+    ShotScript::new(dir, steps)
+}
+
+/// Where the turret and the patrol drone stand in the gizmos shots (the seal at [`SEAL_AT`]).
+const TURRET_AT: DVec3 = DVec3::new(3.9, 0.0, 1.2);
+const PATROL_AT: DVec3 = DVec3::new(-5.6, 0.0, 2.4);
+
+/// Screenshots of scripts in the editor's view (`--script gizmos`): the rune seal, a turret and
+/// a patrol drone built by their `construct` in edit mode, with their gizmos; prop handles
+/// dragged (the turret's range, the seal's spread, a waypoint), the parts building again as
+/// they go; then playing, the gizmos live.
+pub fn gizmos_shots(dir: String) -> ShotScript {
+    let _ = std::fs::create_dir_all(&dir);
+    let root = std::fs::canonicalize(&dir)
+        .unwrap_or_else(|_| std::env::current_dir().unwrap_or_default().join(&dir))
+        .join("scripts");
+    let setup = move |world: &mut World, editor: &mut Editor| {
+        editor.icons = false;
+        dusk_sky(world);
+        let from = engine_script::scripts_root(world).join(EXAMPLES);
+        copy_dir(&from, &root.join(EXAMPLES));
+        world.resource_mut::<ScriptSettings>().folder = root.to_string_lossy().to_string();
+        world.remove_resource::<ScriptRuntime>();
+        let script = |path: &str, props: Value| {
+            vec![(
+                "Script",
+                serde_json::to_value(Script::new(path).with_props(props)).unwrap_or_default(),
+            )]
+        };
+        editor::spawn_with(
+            world,
+            editor,
+            "Rune seal".into(),
+            script("examples/seal.luau", json!({})),
+            Transform::from_translation(SEAL_AT),
+        );
+        editor::spawn_with(
+            world,
+            editor,
+            "Turret".into(),
+            script(
+                "examples/turret.luau",
+                json!({"target": "Player", "range": 4.0}),
+            ),
+            Transform::from_translation(TURRET_AT)
+                .with_rotation(engine::core::math::Quat::from_rotation_y(1.2)),
+        );
+        editor::spawn_with(
+            world,
+            editor,
+            "Patrol".into(),
+            script("examples/patrol.luau", json!({})),
+            Transform::from_translation(PATROL_AT),
+        );
+        let body = MeshRenderer::new(
+            Shape::Capsule {
+                radius: 0.28,
+                height: 1.2,
+                segments: 0,
+            },
+            StandardMaterial::hex(0x3d6fb6),
+        );
+        editor::spawn_with(
+            world,
+            editor,
+            "Player".into(),
+            vec![(
+                "MeshRenderer",
+                serde_json::to_value(body).unwrap_or_default(),
+            )],
+            Transform::from_translation(DVec3::new(1.6, 0.88, 5.6)),
+        );
+        world.resource_mut::<EditorDock>().0 = props_layout();
+        world.resource_mut::<ScriptsTab>().files_next = 0.0;
+    };
+    // The pointer onto a point in an entity's own space, the left button pressed or let go
+    // there (a drag, as a hand would make it).
+    let point = |name: &'static str, local: DVec3, press: Option<bool>| {
+        move |world: &mut World, ed: &mut Editor| {
+            let (Some(e), Some(view)) = (crate::shots::find(world, name), ed.view) else {
+                return;
+            };
+            let Some(g) = world.get::<GlobalTransform>(e).map(|g| g.0) else {
+                return;
+            };
+            let Some(p) = view.project(g.transform_point3(local)) else {
+                return;
+            };
+            let mut input = world.resource_mut::<crate::egui_bridge::EguiInput>();
+            input.injected.push(egui::Event::PointerMoved(p));
+            if let Some(pressed) = press {
+                input.injected.push(egui::Event::PointerButton {
+                    pos: p,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: Default::default(),
+                });
+            }
+        }
+    };
+    // A drag of a handle from `from` to `to` (both in the entity's space), stopping before the
+    // button is let go so a shot can show it mid-drag.
+    let drag = |name: &'static str, from: DVec3, to: DVec3| -> Vec<Step> {
+        let mid = from.lerp(to, 0.3);
+        vec![
+            Step::Do(Box::new(point(name, from, None))),
+            Step::Wait(1),
+            Step::Do(Box::new(point(name, from, Some(true)))),
+            Step::Wait(1),
+            Step::Do(Box::new(point(name, mid, None))),
+            Step::Wait(1),
+            Step::Do(Box::new(point(name, to, None))),
+            Step::Wait(3),
+        ]
+    };
+    let open_file = |path: &'static str, line: u32| {
+        move |world: &mut World, _: &mut Editor| {
+            world.resource_scope(|world, mut tab: Mut<ScriptsTab>| {
+                open(world, &mut tab, path, Some(line));
+            });
+        }
+    };
+    let mut steps = vec![
+        Step::Do(Box::new(setup)),
+        Step::Tool(crate::editor::Tool::Select),
+        Step::Camera(DVec3::new(1.4, 6.4, 13.2), DVec3::new(-0.9, 0.9, -0.2)),
+        Step::Select(""),
+        Step::Wait(40),
+        Step::Shot("gizmos_01_built_in_edit_mode"),
+        // The turret selected: its range handle (four dots on the ring) and where it aims.
+        Step::Select("Turret"),
+        Step::Camera(
+            TURRET_AT + DVec3::new(-1.0, 6.0, 7.5),
+            TURRET_AT + DVec3::new(-0.6, 0.4, 0.0),
+        ),
+        Step::Wait(12),
+        Step::Shot("gizmos_02_turret_range_handle"),
+    ];
+    // Its range dragged out from 4 m to 6.5 m.
+    steps.extend(drag("Turret", DVec3::X * 4.0, DVec3::X * 6.5));
+    steps.extend([
+        Step::Shot("gizmos_03_dragging_the_range"),
+        Step::Do(Box::new(point("Turret", DVec3::X * 6.5, Some(false)))),
+        Step::Wait(2),
+        // The seal: where each rune's touch reaches and the socket it lights; its spread
+        // dragged wider, the runes rebuilt where it puts them as the drag goes.
+        Step::Select("Rune seal"),
+        Step::Camera(
+            SEAL_AT + DVec3::new(1.2, 5.2, 9.4),
+            SEAL_AT + DVec3::new(0.0, 1.0, 0.8),
+        ),
+        Step::Wait(12),
+        Step::Shot("gizmos_04_seal_selected"),
+    ]);
+    steps.extend(drag("Rune seal", DVec3::X * 2.4, DVec3::X * 3.7));
+    steps.extend([
+        Step::Shot("gizmos_05_spread_dragged_runes_follow"),
+        Step::Do(Box::new(point("Rune seal", DVec3::X * 3.7, Some(false)))),
+        Step::Wait(2),
+        // The drone's route: a handle on each waypoint; the second one dragged.
+        Step::Select("Patrol"),
+        Step::Camera(
+            PATROL_AT + DVec3::new(3.0, 6.0, 9.0),
+            PATROL_AT + DVec3::new(0.0, 1.8, -1.0),
+        ),
+        Step::Wait(12),
+        Step::Shot("gizmos_06_patrol_waypoints"),
+    ]);
+    steps.extend(drag(
+        "Patrol",
+        DVec3::new(3.0, 2.6, -1.0),
+        DVec3::new(4.2, 2.6, 2.4),
+    ));
+    steps.extend([
+        Step::Shot("gizmos_07_waypoint_dragged"),
+        Step::Do(Box::new(point(
+            "Patrol",
+            DVec3::new(4.2, 2.6, 2.4),
+            Some(false),
+        ))),
+        Step::Wait(2),
+        // Playing: the gizmos live (the turret's ring red once it tracks the player, the
+        // drone's place on its route), with the code that draws them.
+        Step::Tab(Tab::Scripts),
+        Step::Do(Box::new(|world: &mut World, _: &mut Editor| {
+            world.resource_mut::<EditorDock>().0 = tests_layout();
+        })),
+        Step::Do(Box::new(open_file("examples/turret.luau", 186))),
+        Step::Select("Turret"),
+        Step::Camera(DVec3::new(2.4, 7.4, 13.6), DVec3::new(-0.4, 0.8, 0.2)),
+        Step::Do(Box::new(|world: &mut World, ed: &mut Editor| {
+            editor::play(world, ed)
+        })),
+        Step::Wait(6),
+        Step::Do(Box::new(|world: &mut World, _: &mut Editor| {
+            dusk_sky(world);
+            if let Some(e) = crate::shots::find(world, "Player")
+                && let Some(mut t) = world.get_mut::<Transform>(e)
+            {
+                t.translation = TURRET_AT + DVec3::new(-2.6, 0.88, 2.0);
+            }
+        })),
+        Step::Wait(14),
+        Step::Shot("gizmos_08_playing_live"),
+        Step::Do(Box::new(|world: &mut World, ed: &mut Editor| {
+            editor::stop(world, ed)
+        })),
+        Step::Wait(2),
+    ]);
     ShotScript::new(dir, steps)
 }
 

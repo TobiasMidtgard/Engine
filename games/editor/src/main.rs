@@ -163,6 +163,7 @@ fn main() {
             Some("signals") => scripts::signals_shots(dir),
             Some("tests") => scripts::tests_shots(dir),
             Some("states") => scripts::states_shots(dir),
+            Some("gizmos") => scripts::gizmos_shots(dir),
             Some("graphs") => graphs::shots(dir),
             Some("graph_signals") => graphs::signals_shots(dir),
             _ => shots::gallery(dir),

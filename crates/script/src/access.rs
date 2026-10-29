@@ -347,6 +347,10 @@ pub(crate) struct Shared {
     /// Log lines and errors ever pushed (the debugger forwards the new ones).
     pub log_total: u64,
     pub errors_total: u64,
+    /// Shapes drawn with `draw` this frame ([`crate::draw`]).
+    pub draw: crate::draw::DrawState,
+    /// The script whose `construct` runs now: what it spawns is [`crate::Constructed`] by it.
+    pub constructing: Option<Entity>,
 }
 
 /// Errors and log lines kept for the API.

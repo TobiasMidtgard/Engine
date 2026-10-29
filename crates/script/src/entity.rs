@@ -455,8 +455,17 @@ fn spawn(lua: &Lua, spec: Value, parent: Option<Entity>) -> mlua::Result<EntityR
         map.insert("parent".into(), json!(p.to_bits()));
     }
     map.entry("components").or_insert_with(|| json!({}));
+    let by = shared(lua).constructing;
     let out = with_world_as(lua, "spawn", |w| {
-        call_api(w, "entity.spawn", args).map_err(mlua::Error::runtime)
+        let out = call_api(w, "entity.spawn", args).map_err(mlua::Error::runtime)?;
+        // Built by a script's `construct`: it goes when the script builds again.
+        if let Some(by) = by
+            && let Some(e) = out["id"].as_u64().and_then(Entity::try_from_bits)
+            && let Ok(mut spawned) = w.get_entity_mut(e)
+        {
+            spawned.insert(crate::Constructed { by });
+        }
+        Ok(out)
     })?;
     let bits = out["id"]
         .as_u64()

@@ -606,6 +606,29 @@ pub fn builtins() -> Vec<NodeSpec> {
             "The entity or its script is going away.",
         )
         .then(),
+        NodeSpec::new(
+            "event.construct",
+            "Construct",
+            "Events",
+            "Builds the entity's parts: in the editor (again whenever a prop changes) and before \
+             Start in the game. What Spawn makes here is taken down before each rebuild.",
+        )
+        .then(),
+        NodeSpec::new(
+            "event.draw_gizmos",
+            "Draw gizmos",
+            "Events",
+            "Every frame while the editor shows script gizmos (Show menu), in this entity's own \
+             space: vec3(0, 0, 0) is the entity. Draw nodes here show what it covers.",
+        )
+        .then(),
+        NodeSpec::new(
+            "event.draw_gizmos_selected",
+            "Draw gizmos (selected)",
+            "Events",
+            "As Draw gizmos, but only while the entity is selected in the editor.",
+        )
+        .then(),
         // A state machine's (the graph's States view).
         NodeSpec::new(
             "state.trigger",
@@ -984,7 +1007,62 @@ pub fn builtins() -> Vec<NodeSpec> {
         .run()
         .input("text", Text, json!("Hello"))
         .then(),
+        // Debug shapes (the `draw` library), this frame only.
+        draw_node(
+            "draw.line",
+            "Draw line",
+            "A line from a to b.",
+            ("a", "b"),
+            Vec3,
+        ),
+        draw_node(
+            "draw.arrow",
+            "Draw arrow",
+            "An arrow from a to b.",
+            ("from", "to"),
+            Vec3,
+        ),
+        draw_node(
+            "draw.sphere",
+            "Draw sphere",
+            "A wire sphere.",
+            ("center", "radius"),
+            Number,
+        ),
+        draw_node(
+            "draw.circle",
+            "Draw circle",
+            "A ring round the up axis (flat on the ground).",
+            ("center", "radius"),
+            Number,
+        ),
+        draw_node(
+            "draw.box",
+            "Draw box",
+            "A box this big.",
+            ("center", "size"),
+            Vec3,
+        ),
     ]
+}
+
+/// A Draw node: two inputs (the first a point) and a color, by name or a vec3 wire.
+fn draw_node(kind: &str, title: &str, doc: &str, pins: (&str, &str), second: PinType) -> NodeSpec {
+    let doc = format!(
+        "{doc} This frame only (put it after Update or Draw gizmos). color: a name (orange, \
+         cyan, red, ...) or a vec3."
+    );
+    let second_default = if second == PinType::Number {
+        json!(1.0)
+    } else {
+        json!([0.0, 1.0, 0.0])
+    };
+    NodeSpec::new(kind, title, "Draw", &doc)
+        .run()
+        .input(pins.0, PinType::Vec3, json!([0.0, 0.0, 0.0]))
+        .input(pins.1, second, second_default)
+        .input("color", PinType::Text, json!("orange"))
+        .then()
 }
 
 fn binary(kind: &str, title: &str, doc: &str) -> NodeSpec {
@@ -1658,6 +1736,9 @@ const HOOKS: &[(&str, &str, &[&str])] = &[
     ("event.contact", "on_contact", &["other", "info"]),
     ("event.message", "on_message", &["event", "data"]),
     ("event.destroy", "on_destroy", &[]),
+    ("event.construct", "construct", &[]),
+    ("event.draw_gizmos", "draw_gizmos", &[]),
+    ("event.draw_gizmos_selected", "draw_gizmos_selected", &[]),
 ];
 
 /// A hook parameter's Luau type (strict code needs them to do arithmetic on `dt`).
@@ -2769,6 +2850,16 @@ impl<'a> Gen<'a> {
                 self.line(format!("print({t})"), at);
                 self.chain(id, "then", scope);
             }
+            "draw.line" | "draw.arrow" | "draw.sphere" | "draw.circle" | "draw.box" => {
+                let args: Vec<String> = spec
+                    .inputs
+                    .iter()
+                    .filter(|p| p.ty != PinType::Exec)
+                    .map(|p| self.input(id, &p.name, scope))
+                    .collect();
+                self.line(format!("{}({})", n.kind, args.join(", ")), at);
+                self.chain(id, "then", scope);
+            }
             "comp.set" => {
                 let e = self.input(id, "entity", scope);
                 let fields = self.fields(id, &spec, &["entity"], scope);
@@ -3375,6 +3466,30 @@ mod tests {
             "{:?}",
             c.problems
         );
+    }
+
+    #[test]
+    fn gizmo_events_and_draw_nodes_compile() {
+        let g = Graph {
+            nodes: vec![
+                node(1, "event.draw_gizmos", "", json!({})),
+                node(2, "draw.circle", "", json!({"radius": 4})),
+                node(3, "event.construct", "", json!({})),
+                node(4, "debug.print", "", json!({"text": "built"})),
+            ],
+            links: vec![link(1, "then", 2, "in"), link(3, "then", 4, "in")],
+            ..Default::default()
+        };
+        let c = compile(&g, "x.graph");
+        assert!(c.problems.is_empty(), "{:?}", c.problems);
+        assert!(
+            c.luau.contains(
+                "function X:draw_gizmos()\n\tdraw.circle(vec3(0, 0, 0), 4, \"orange\")\nend"
+            ),
+            "{}",
+            c.luau
+        );
+        assert!(c.luau.contains("function X:construct()"), "{}", c.luau);
     }
 
     #[test]

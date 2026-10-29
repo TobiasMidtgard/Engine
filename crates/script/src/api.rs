@@ -160,6 +160,31 @@ pub(crate) fn register(app: &mut App) {
         },
     )
     .register_api(
+        "script.gizmos",
+        "Script gizmos: each script's draw_gizmos runs while show is on, draw_gizmos_selected on \
+         the selected entities (names or ids), also in an editor's edit mode. {} reads them.",
+        r#"{"show": true, "selected": ["Turret"]}"#,
+        |world, args| {
+            let picked = match args["selected"].as_array() {
+                Some(list) => Some(
+                    list.iter()
+                        .map(|v| resolve_entity(world, v))
+                        .collect::<Result<Vec<_>, _>>()?,
+                ),
+                None => None,
+            };
+            let mut g = world.get_resource_or_insert_with(crate::ScriptGizmos::default);
+            if let Some(show) = args["show"].as_bool() {
+                g.show = show;
+            }
+            if let Some(picked) = picked {
+                g.selected = picked;
+            }
+            let selected: Vec<u64> = g.selected.iter().map(|e| e.to_bits()).collect();
+            Ok(json!({"show": g.show, "selected": selected}))
+        },
+    )
+    .register_api(
         "script.reload",
         "Reload a script file now (\"path\"), or every loaded file when no path is given.",
         r#"{"path": "showcase/courtyard.luau"}"#,

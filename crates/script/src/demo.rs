@@ -38,6 +38,11 @@
 //!   lit, a final state; once all three are lit the group is done and its `done` sinks the
 //!   round door into the ground, lighting the sanctum behind it, for `hold` seconds. Its state
 //!   board marks each finished region "done".
+//! - A patrol drone flies a loop over the seal (`examples/patrol.luau`). With script gizmos on
+//!   (`script.gizmos {"show": true}`, the `script_gizmos` stop), its route shows as lines, and
+//!   the seal, as if selected, shows where each rune's touch reaches and the socket it lights.
+//!   The seal, its runes and the drone build themselves in `construct`, so the editor shows
+//!   them before Play, and the drone's waypoints and the seal's spread have handles there.
 //!
 //! `script.send {"entity": {"name": "Courtyard director"}, "event": "ritual"}` plays the ritual
 //! from the console or a tour stop; `script.edit` changes a script file like an editor would.
@@ -101,6 +106,11 @@ pub const SEAL_SCRIPT: &str = "examples/seal.luau";
 /// The seal's state board, on an easel south of it, turned to the middle and a little north.
 pub const SEAL_BOARD: [f64; 3] = [8.8, 2.0, 5.0];
 pub const SEAL_BOARD_YAW: f32 = -std::f32::consts::FRAC_PI_2 - 0.25;
+/// A patrol drone flying a loop over the seal (`examples/patrol.luau`; its waypoints are props
+/// with handles in the editor), high enough to stay out of the other stops' way.
+pub const PATROL: [f64; 3] = [9.4, 0.0, 0.0];
+pub const PATROL_NAME: &str = "Courtyard patrol";
+pub const PATROL_SCRIPT: &str = "examples/patrol.luau";
 
 /// A tour stop: eye and target relative to the courtyard's middle, and API calls made on
 /// arriving and leaving (name, JSON args).
@@ -225,6 +235,14 @@ pub const SEAL_ALL: (&str, &str) = (
     "script.eval",
     r#"{"code": "local s = world.find('Rune seal').script s:go('sealed') s:place(0) s:trigger('touch_left') s:trigger('touch_right') s:trigger('touch_middle')"}"#,
 );
+
+/// Script gizmos on (every script's `draw_gizmos`, and the seal's `draw_gizmos_selected` as if
+/// it were selected in the editor), and off.
+const GIZMOS_ON: (&str, &str) = (
+    "script.gizmos",
+    r#"{"show": true, "selected": ["Rune seal", "Courtyard patrol"]}"#,
+);
+const GIZMOS_OFF: (&str, &str) = ("script.gizmos", r#"{"show": false, "selected": []}"#);
 
 /// The courtyard's overview, from above the lanterns in the south-east, looking down enough
 /// that the floor fills the frame (the moonlit grass outside it outshone the lanterns).
@@ -417,6 +435,19 @@ pub const VIEWS: &[DemoView] = &[
         warmup_secs: 3.0,
         on_arrive: &[SEAL_ALL],
         on_leave: &[],
+    },
+    DemoView {
+        key: "script_gizmos",
+        name: "Script gizmos in the game: the seal shows where each rune's touch reaches and \
+               the socket it lights (cyan once lit), the drone its route over the arch, drawn \
+               by their draw_gizmos hooks",
+        // Back and up from the seal stops, so the rune rings on the floor and the route show.
+        eye: [3.6, 4.4 + LIFT, -6.2],
+        target: [9.0, 2.2 + LIFT, 0.6],
+        hour: 18.9,
+        warmup_secs: 1.2,
+        on_arrive: &[SEAL_TWO, GIZMOS_ON],
+        on_leave: &[GIZMOS_OFF],
     },
     DemoView {
         key: "script_paused",
@@ -783,6 +814,17 @@ pub fn spawn_demo(commands: &mut Commands, origin: DVec3) {
         Script::new(SEAL_SCRIPT),
     ));
     state_easel(commands, &at, SEAL_BOARD, SEAL_BOARD_YAW, SEAL_NAME);
+    let [px, _, pz] = PATROL;
+    commands.spawn((
+        Name::new(PATROL_NAME),
+        at(px, 0.0, pz),
+        Script::new(PATROL_SCRIPT).with_props(serde_json::json!({
+            "a": [-1.6, 5.4, -3.8],
+            "b": [-1.6, 5.8, 3.8],
+            "c": [2.2, 6.2, 0.0],
+            "speed": 1.8,
+        })),
+    ));
 
     // Four braziers on the diagonals, cold until the ritual lights them.
     for i in 0..4 {

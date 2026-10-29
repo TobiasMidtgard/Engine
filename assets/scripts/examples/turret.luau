@@ -3,11 +3,13 @@
 -- (sweeping, or turned on whoever comes near) and its gun (ready, firing, cooling down) each
 -- keep a state of their own, side by side, and both leave together when its power is cut (send
 -- it "power"; again to switch it back on, each region from its first state). Put it on an empty
--- entity: it builds its base, head and barrels. See "State machines" in the scripts README.
+-- entity: it builds its base, head and barrels (`construct`, so they show in the editor too),
+-- and selected it shows its range, which you can drag, and how far it sweeps. See "State
+-- machines" and "In the editor's view" in the scripts README.
 local Turret = {}
 Turret.props = {
 	target = "Player", -- who it watches for @entity
-	range = 6, -- how near they must come @range 1 20 @unit m
+	range = 6, -- how near they must come @range 1 20 @unit m @handle
 	sweep = 50, -- how far it looks either way while scanning @range 0 170 @unit deg
 	turn_rate = 150, -- how fast it turns @range 20 720 @unit deg/s
 	cooldown = 0.7, -- between shots @range 0.1 5 @unit s
@@ -64,12 +66,18 @@ local function box(x: number, y: number, z: number): any
 	return { RoundedCuboid = { size = { x, y, z }, radius = math.min(x, y, z) * 0.25, segments = 0 } }
 end
 
+-- The direction of a turn of the head (0: the turret's forward, -z), flat.
+local function heading(yaw: number): Vec3
+	return vec3(-math.sin(yaw), 0, -math.cos(yaw))
+end
+
 -- An angle in -pi..pi.
 local function wrap(a: number): number
 	return (a + math.pi) % (2 * math.pi) - math.pi
 end
 
-function Turret:start()
+-- Its parts (in the editor whenever its props change, and before `start` in play).
+function Turret:construct()
 	local along = quat.euler(0, math.pi / 2) -- a cylinder lying along the head's forward
 	self.entity:spawn(part("Base", { Cylinder = { radius = 0.34, height = 0.7, segments = 24 } }, vec3(0, 0.35, 0), IRON))
 	local barrels: { any } = {}
@@ -91,6 +99,9 @@ function Turret:start()
 			PointLight = { color = { 1, 0.7, 0.3 }, intensity_lm = 0, range = 6, radius = 0.05 },
 		},
 	})
+end
+
+function Turret:start()
 	self.flash = nil :: Entity?
 	self.yaw = 0 -- the head's turn, radians (0: the turret's forward)
 	self.sweep_t = 0
@@ -170,6 +181,28 @@ end
 
 function Turret:exit_firing()
 	self:douse()
+end
+
+-- Gizmos, in the turret's own space: what it covers, and while selected where it aims.
+
+function Turret:draw_gizmos()
+	local tracking = self:in_state("tracking")
+	local color = if tracking then "red" elseif self:in_state("off") then "gray" else "orange"
+	local range, half = self.props.range, math.rad(self.props.sweep)
+	local ground = vec3(0, 0.05, 0)
+	draw.circle(ground, range, { color = color, alpha = 0.6 })
+	-- The wedge its scan sweeps.
+	draw.line(ground, ground + heading(-half) * range, color)
+	draw.line(ground, ground + heading(half) * range, color)
+	draw.arc(ground, range, heading(-half), 2 * half, color)
+end
+
+function Turret:draw_gizmos_selected()
+	-- Not running in the editor's edit mode: it looks straight ahead.
+	local yaw = self.yaw or 0
+	local eye = vec3(0, 0.98, 0)
+	local color = if self:in_state("tracking") then "red" else "lime"
+	draw.arrow(eye, eye + heading(yaw) * self.props.range, { color = color, on_top = true })
 end
 
 -- Off: both regions stop where they are, the eye dark.

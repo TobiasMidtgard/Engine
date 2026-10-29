@@ -2421,10 +2421,9 @@ fn an_editor_sees_output_marks_and_can_hold_scripts() {
     app.insert_resource(ScriptsHeld);
     let e = spawn_script(&mut app, "Lamp", "lamp");
     app.update_n(10);
-    assert!(
-        app.world.get_resource::<ScriptRuntime>().is_none(),
-        "held: no VM, nothing ran"
-    );
+    // Held: the editor's VM loads the file (for `construct` and gizmos), but nothing runs.
+    let log = call_api(&mut app.world, "script.log", json!({})).unwrap();
+    assert!(!log.to_string().contains("lit"), "held: nothing ran: {log}");
     app.world.remove_resource::<ScriptsHeld>();
     call_api(
         &mut app.world,
@@ -3987,4 +3986,161 @@ fn final_and_history_mistakes_say_what_is_wrong() {
     for (_, _, want) in &cases {
         assert!(errs.iter().any(|e| e.contains(want)), "{want}: {errs:?}");
     }
+}
+
+const BUILDER: &str = r#"
+local B = {}
+B.props = {
+	width = 2, -- where the part stands @handle x
+}
+function B:construct()
+	self.part = self.entity:spawn({
+		name = "Part",
+		components = { Transform = { translation = vec3(self.props.width, 0, 0) } },
+	})
+	task.spawn(function() task.wait(1) print("never in edit mode") end)
+end
+function B:start()
+	self.found = self.part ~= nil and self.part:exists()
+end
+function B:draw_gizmos()
+	draw.sphere(vec3(1, 0, 0), 0.5, "orange")
+end
+function B:draw_gizmos_selected()
+	draw.line(vec3.zero, vec3(0, 3, 0), { color = "cyan", on_top = true })
+end
+return B
+"#;
+
+/// The parts a script's `construct` built, with where they stand (their Transform).
+fn parts_of(app: &mut App, by: Entity) -> Vec<(Entity, DVec3)> {
+    let mut q = app
+        .world
+        .query::<(Entity, &crate::Constructed, &Transform)>();
+    q.iter(&app.world)
+        .filter(|(_, c, _)| c.by == by)
+        .map(|(e, _, t)| (e, t.translation))
+        .collect()
+}
+
+/// In an editor's edit mode (`ScriptsHeld`) a script's `construct` builds its parts on a
+/// stand-in, again when its props change (the old parts go), and nothing else of it runs; once
+/// playing, the stand-in's parts go and the script builds its own before `start`. Stopping the
+/// script takes its parts with it.
+#[test]
+fn construct_builds_in_edit_mode_and_before_start() {
+    let folder = Folder::new();
+    folder.write("builder.luau", BUILDER);
+    let mut app = app_in(&folder.0);
+    app.insert_resource(crate::ScriptsHeld);
+    let e = spawn_script(&mut app, "Builder", "builder");
+    app.update_n(3);
+    assert!(errors(&mut app).is_empty(), "{:?}", errors(&mut app));
+    let parts = parts_of(&mut app, e);
+    assert_eq!(parts.len(), 1, "built once: {parts:?}");
+    assert_eq!(parts[0].1, DVec3::new(2.0, 0.0, 0.0));
+    assert_eq!(
+        app.world.get::<ChildOf>(parts[0].0).map(|c| c.parent()),
+        Some(e)
+    );
+    let first = parts[0].0;
+
+    // A props change (a Details edit, a handle drag) builds it again.
+    app.world.get_mut::<Script>(e).unwrap().props = json!({"width": 3.5});
+    app.update_n(2);
+    let parts = parts_of(&mut app, e);
+    assert_eq!(parts.len(), 1, "{parts:?}");
+    assert_eq!(parts[0].1, DVec3::new(3.5, 0.0, 0.0));
+    assert!(app.world.get_entity(first).is_err(), "the old part went");
+    // Its task was dropped: nothing runs in edit mode.
+    app.update_n(40);
+    let log = call_api(&mut app.world, "script.log", json!({})).unwrap();
+    assert!(!log.to_string().contains("never in edit mode"), "{log}");
+
+    // Play: built anew by the script itself, before its `start`.
+    app.world.remove_resource::<crate::ScriptsHeld>();
+    app.update_n(2);
+    let parts = parts_of(&mut app, e);
+    assert_eq!(parts.len(), 1, "the stand-in's part went: {parts:?}");
+    assert_eq!(
+        eval(&mut app, "return world.find('Builder').script.found"),
+        json!(true)
+    );
+    // The script goes, and its parts with it.
+    app.world.entity_mut(e).remove::<Script>();
+    app.update_n(2);
+    assert!(parts_of(&mut app, e).is_empty());
+}
+
+/// `draw_gizmos` runs while gizmos show, `draw_gizmos_selected` for the selected entities,
+/// both in the entity's own space; edit mode draws them from the stand-in. `draw` from any
+/// code reaches the debug lines.
+#[test]
+fn gizmos_draw_in_the_entitys_space() {
+    let folder = Folder::new();
+    folder.write("builder.luau", BUILDER);
+    let mut app = app_in(&folder.0);
+    app.insert_resource(engine_debug::DebugDraw::default());
+    app.insert_resource(crate::ScriptsHeld);
+    let e = app
+        .world
+        .spawn((
+            Name::new("Builder"),
+            Transform::from_translation(DVec3::new(10.0, 0.0, 0.0))
+                .with_rotation(Quat::from_rotation_y(std::f32::consts::FRAC_PI_2)),
+            Script::new("builder"),
+        ))
+        .id();
+    let lines = |app: &mut App| -> Vec<(DVec3, DVec3)> {
+        let mut d = app.world.resource_mut::<engine_debug::DebugDraw>();
+        let all: Vec<(DVec3, DVec3)> = [
+            engine_debug::DepthMode::Tested,
+            engine_debug::DepthMode::OnTop,
+        ]
+        .into_iter()
+        .flat_map(|m| d.lines(m).map(|l| (l.a, l.b)).collect::<Vec<_>>())
+        .collect();
+        d.clear();
+        all
+    };
+    app.update_n(2);
+    assert!(lines(&mut app).is_empty(), "gizmos are off by default");
+
+    app.world.resource_mut::<crate::ScriptGizmos>().show = true;
+    app.update_n(1);
+    let drawn = lines(&mut app);
+    assert!(!drawn.is_empty());
+    // The sphere at (1, 0, 0) in its space: turned a quarter, that is (10, 0, -1).
+    let mid = drawn.iter().fold(DVec3::ZERO, |s, (a, b)| s + *a + *b) / (2 * drawn.len()) as f64;
+    assert!((mid - DVec3::new(10.0, 0.0, -1.0)).length() < 0.05, "{mid}");
+
+    app.world.resource_mut::<crate::ScriptGizmos>().selected = vec![e];
+    app.update_n(1);
+    let drawn = lines(&mut app);
+    assert!(
+        drawn
+            .iter()
+            .any(|(a, b)| (*a - DVec3::new(10.0, 0.0, 0.0)).length() < 1e-6
+                && (*b - DVec3::new(10.0, 3.0, 0.0)).length() < 1e-6),
+        "the selected line, up from the entity"
+    );
+
+    // Playing, and from the console.
+    app.world.remove_resource::<crate::ScriptsHeld>();
+    app.update_n(2);
+    assert!(!lines(&mut app).is_empty(), "the running script draws too");
+    eval(&mut app, "draw.line(vec3(0, 0, 0), vec3(0, 0, 7), 'red')");
+    app.update_n(1);
+    assert!(
+        lines(&mut app)
+            .iter()
+            .any(|(a, b)| *a == DVec3::ZERO && *b == DVec3::new(0.0, 0.0, 7.0))
+    );
+    let err = call_api(
+        &mut app.world,
+        "script.eval",
+        json!({"code": "draw.line(vec3.zero, vec3.one, 'chartreuse')"}),
+    )
+    .unwrap_err();
+    assert!(err.contains("no color named"), "{err}");
 }

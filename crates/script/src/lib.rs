@@ -38,6 +38,23 @@
 //! `shift:orientation(q)`; entities move on their own). `start` and the event hooks (interact, contact,
 //! messages) run as tasks of their own, so they may `task.wait`; `update` must not wait.
 //!
+//! ## In the editor's view
+//!
+//! Three more hooks show a script in the editor before Play, after Unreal's construction script
+//! and Unity's gizmos:
+//!
+//! * `construct()` builds the parts the entity's look depends on. In the game it runs just
+//!   before `start`; in the editor (while [`ScriptsHeld`]) it runs on a stand-in `self` of its
+//!   own, and again whenever the file, the props or `enabled` change. What it spawns is marked
+//!   [`Constructed`], and goes before each rebuild, on destroy and when Play starts.
+//! * `draw_gizmos()` runs every frame while [`ScriptGizmos::show`] is on, and
+//!   `draw_gizmos_selected()` for the entities in [`ScriptGizmos::selected`]; both start in the
+//!   entity's own space. Scripts draw with the `draw` global (`draw.line`, `draw.sphere`,
+//!   `draw.circle`, `draw.cone`, `draw.path`, ...; `draw` module docs), which records shapes and
+//!   hands them to `engine_debug`'s `DebugDraw` after the frame, in any hook.
+//! * A prop hinted `@handle` ([`props::Handle`]) is a handle the editor draws in the scene view
+//!   and drags: a point for a `vec3`, a ring for a radius, or a distance along an axis.
+//!
 //! ## Props in the Details panel
 //!
 //! The editor shows each prop as a field of its kind ([`props`], after Unity's inspector,
@@ -262,6 +279,7 @@ pub mod debug;
 mod debugger;
 pub mod demo;
 pub mod diagram;
+mod draw;
 pub mod editing;
 mod entity;
 pub mod graph;
@@ -412,6 +430,43 @@ impl Default for ScriptSettings {
     }
 }
 
+/// Marks what a script's `construct` built (Unreal's construction script, Unity's
+/// `[ExecuteAlways]` scripts): `by` is the scripted entity. In an editor's edit mode the parts
+/// are rebuilt whenever the script's props or file change; while playing they are built once,
+/// before `start`, and go when the script stops or restarts. Not saved with a scene (the
+/// script builds them again), and an editor selects `by` when one is clicked.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Constructed {
+    pub by: Entity,
+}
+
+/// Which scripts draw gizmos: `draw_gizmos` on every script while `show` is on (the editor's
+/// Gizmos toggle), `draw_gizmos_selected` on the `selected` ones (the editor's selection). Both
+/// run in edit mode too, on each script's stand-in (see the crate docs, "In the editor's
+/// view"). `script.gizmos` sets it from the API.
+#[derive(Resource, Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ScriptGizmos {
+    pub show: bool,
+    #[serde(skip)]
+    pub selected: Vec<Entity>,
+    /// Hides them all for now, `show` kept (an editor's Game view).
+    #[serde(skip)]
+    pub hide: bool,
+}
+
+impl ScriptGizmos {
+    /// Whether `draw_gizmos` runs.
+    pub fn all(&self) -> bool {
+        self.show && !self.hide
+    }
+
+    /// Whether `e`'s `draw_gizmos_selected` runs.
+    pub fn picked(&self, e: Entity) -> bool {
+        !self.hide && self.selected.contains(&e)
+    }
+}
+
 /// Present while the runner holds the runtime (scripts are running), so `script.*` calls made
 /// from a script fail clearly instead of finding no runtime.
 #[derive(Resource)]
@@ -426,7 +481,8 @@ impl Plugin for ScriptPlugin {
         if !app.world.contains_resource::<ScriptSettings>() {
             app.insert_resource(ScriptSettings::default());
         }
-        app.init_resource::<states::StateBreakpoints>();
+        app.init_resource::<states::StateBreakpoints>()
+            .init_resource::<ScriptGizmos>();
         app.register_component::<Script>(
             "Runs a Luau script from assets/scripts on this entity: path (\"showcase/lantern.luau\"), \
              props (JSON over the script's defaults), enabled.",
@@ -454,12 +510,17 @@ impl Plugin for ScriptPlugin {
              entity's mesh as the editor draws it, live: the states it is in with their time, \
              the change just made, after timers filling and the last changes.",
         )
+        .register_resource::<ScriptGizmos>(
+            "Script gizmos: show runs every script's draw_gizmos (in an editor's edit mode too); \
+             the editor's selection runs draw_gizmos_selected.",
+        )
         .register_resource::<ScriptSettings>(
             "Scripting: folder under the asset root, hot_reload, poll_secs, call_limit_ms (per \
              call), memory_limit_mb (per VM), debug_port (the debugger's, for VS Code), \
              parallel_vms (actor VMs for parallel_update; null: cores - 1).",
         )
         .add_systems(Update, run_scripts.in_set(UpdateSet::Logic))
+        .add_systems(Update, preview_scripts.in_set(UpdateSet::Logic))
         .add_systems(FixedUpdate, run_fixed_scripts.in_set(SimSet::Gameplay))
         .add_systems(Update, board::draw_boards.after(run_scripts))
         .add_systems(
@@ -606,6 +667,25 @@ fn run_scripts(world: &mut World) {
             d.set("script.vms", vms as f64);
             d.set("script.parallel_ms", parallel_ms as f64);
         }
+    }
+}
+
+/// Edit mode ([`ScriptsHeld`]): scripts don't run, but each builds what it looks like
+/// (`construct`) and draws its gizmos, on a stand-in `self` ([`ScriptRuntime::preview_frame`]).
+fn preview_scripts(world: &mut World) {
+    if !world.contains_resource::<ScriptsHeld>() {
+        return;
+    }
+    let wanted = world.contains_resource::<ScriptRuntime>()
+        || world
+            .query_filtered::<(), With<Script>>()
+            .iter(world)
+            .next()
+            .is_some();
+    if wanted {
+        let _ = with_runtime(world, |world, rt, settings| {
+            rt.preview_frame(world, settings)
+        });
     }
 }
 

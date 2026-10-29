@@ -41,7 +41,8 @@ local function strokes(mark: number): { { number } }
 	return { { 0, 0, 0 } }
 end
 
-function Rune:start()
+-- Its stone (in the editor too).
+function Rune:construct()
 	local floor = self.props.floor
 	-- A standing stone faces +z; a plate in the floor faces up.
 	local face = if floor then quat.identity else quat.euler(0, math.pi / 2)
@@ -74,6 +75,9 @@ function Rune:start()
 			PointLight = { color = { 0.3, 0.8, 1 }, intensity_lm = 0, range = 5, radius = 0.05 },
 		},
 	})
+end
+
+function Rune:start()
 	self.level = 0 -- 0 dark, 1 lit
 	self._shown = -1
 end

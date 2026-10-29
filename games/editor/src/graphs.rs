@@ -3184,12 +3184,13 @@ fn category_rank(c: &str) -> usize {
         "Entity",
         "Math",
         "Text",
+        "Draw",
         "Components",
         "Engine",
     ]
     .iter()
     .position(|x| *x == top)
-    .unwrap_or(9)
+    .unwrap_or(10)
 }
 
 // ----------------------------------------------------------------------------- shots

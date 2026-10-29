@@ -364,7 +364,18 @@ pub fn scene_view(ui: &mut egui::Ui, world: &mut World, editor: &mut Editor) {
         overlays(ui, world, editor, rect);
         return;
     }
-    if response.clicked() && !gizmo_used && !snapping && !alt && !editor.gizmo.is_focused() {
+    // Handles of the selected script's `@handle` props (engine_script::props::Handle).
+    let handle_used = !gizmo_used
+        && !snapping
+        && !editor.game_view
+        && crate::scripts::handles(ui, world, editor, &view, &response);
+    if response.clicked()
+        && !gizmo_used
+        && !handle_used
+        && !snapping
+        && !alt
+        && !editor.gizmo.is_focused()
+    {
         let additive = ui.input(|i| i.modifiers.ctrl || i.modifiers.shift);
         if let Some(pos) = response.interact_pointer_pos() {
             click_select(world, editor, &view, &icons, pos, additive);
@@ -379,7 +390,7 @@ pub fn scene_view(ui: &mut egui::Ui, world: &mut World, editor: &mut Editor) {
         editor,
         &view,
         &response,
-        alt || gizmo_used || snapping,
+        alt || gizmo_used || snapping || handle_used,
     );
     // The snap hint runs along the bottom of a lone view; with several it would cover their
     // labels.

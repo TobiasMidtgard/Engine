@@ -54,6 +54,10 @@ pub(crate) struct Hooks {
     pub restart_on_reload: bool,
     /// A `states` table: the engine runs the class's state machine (`states.luau`).
     pub states: bool,
+    /// Builds the entity's parts: in the editor's edit mode, and before `start` in play.
+    pub construct: bool,
+    pub draw_gizmos: bool,
+    pub draw_gizmos_selected: bool,
 }
 
 impl Hooks {
@@ -76,6 +80,9 @@ impl Hooks {
                 Ok(Value::String(s)) if s.to_str().is_ok_and(|s| &*s == "restart")
             ),
             states: matches!(class.raw_get::<Value>("states"), Ok(Value::Table(_))),
+            construct: has("construct"),
+            draw_gizmos: has("draw_gizmos"),
+            draw_gizmos_selected: has("draw_gizmos_selected"),
         }
     }
 }
@@ -217,6 +224,18 @@ pub(crate) struct Instance {
     pub ms: f32,
 }
 
+/// A script's stand-in in the editor's edit mode, where scripts don't run: a `self` with its
+/// props, for `construct` and the gizmo hooks ([`ScriptRuntime::preview_frame`]).
+struct Preview {
+    path: String,
+    this: RegistryKey,
+    hooks: Hooks,
+    /// What it was built from: the file's version and the props (as JSON) and `enabled`.
+    key: (u32, String),
+    /// The last error it raised (reported once while it repeats).
+    last_error: Option<String>,
+}
+
 /// A coroutine stopped by the debugger, waiting at its line ([`crate::debugger`]).
 struct Held {
     thread: Thread,
@@ -275,6 +294,8 @@ pub struct ScriptRuntime {
     held: Option<Held>,
     /// The world's time is held still for a stop.
     holding_time: bool,
+    /// Edit mode's stand-ins, by entity.
+    previews: BTreeMap<Entity, Preview>,
 }
 
 /// Normalizes a script path: forward slashes, no leading `./` or `/`, `.luau` added when it has
@@ -290,6 +311,25 @@ pub fn normalize(path: &str) -> String {
         p
     } else {
         format!("{p}.luau")
+    }
+}
+
+/// Despawns what `by`'s `construct` built (and what those parts' own scripts built).
+fn unbuild(world: &mut World, by: Entity) {
+    let mut q = world.query::<(Entity, &crate::Constructed)>();
+    let all: Vec<(Entity, Entity)> = q.iter(world).map(|(e, c)| (e, c.by)).collect();
+    let mut builders = vec![by];
+    let mut parts = Vec::new();
+    while let Some(b) = builders.pop() {
+        for &(part, _) in all.iter().filter(|(_, c)| *c == b) {
+            parts.push(part);
+            builders.push(part);
+        }
+    }
+    for part in parts {
+        if let Ok(e) = world.get_entity_mut(part) {
+            e.despawn();
+        }
     }
 }
 
@@ -323,6 +363,7 @@ impl ScriptRuntime {
 
         crate::math::install(&lua)?;
         crate::entity::install(&lua)?;
+        crate::draw::install(&lua)?;
         crate::bind::install(&lua, api)?;
         install_tasks(&lua)?;
         install_require(&lua)?;
@@ -381,6 +422,7 @@ impl ScriptRuntime {
             held: None,
             holding_time: false,
             parallel_ms: 0.0,
+            previews: BTreeMap::new(),
         })
     }
 
@@ -543,6 +585,10 @@ impl ScriptRuntime {
             self.frame_ms = started.elapsed().as_secs_f32() * 1000.0;
             return;
         }
+        if !self.previews.is_empty() {
+            // Edit mode is over: the stand-ins' parts go, and each script builds its own.
+            self.drop_previews(world);
+        }
         self.route_messages();
         self.sync_breaks(world, settings);
         self.run_serial(world, settings);
@@ -554,6 +600,10 @@ impl ScriptRuntime {
             self.run_parallel(world, settings);
         }
         self.route_messages();
+        crate::draw::flush(world, &self.lua);
+        for actor in &self.actors {
+            crate::draw::flush(world, &actor.lua);
+        }
         self.debugger.flush(&self.lua);
         self.profiler.frame(&self.lua);
         for actor in &mut self.actors {
@@ -692,6 +742,36 @@ impl ScriptRuntime {
             }
         }
         self.run_tasks(now, settings);
+        if !self.debugger.stopped() {
+            self.draw_gizmos(w(), settings);
+        }
+    }
+
+    /// The gizmo hooks of the scripts [`crate::ScriptGizmos`] asks for, each in its entity's
+    /// space.
+    fn draw_gizmos(&mut self, world: &World, settings: &ScriptSettings) {
+        let Some(g) = world.get_resource::<crate::ScriptGizmos>() else {
+            return;
+        };
+        if !g.all() && (g.hide || g.selected.is_empty()) {
+            return;
+        }
+        let calls: Vec<(Entity, &'static str)> = self
+            .instances
+            .iter()
+            .filter(|(_, i)| i.started && i.enabled)
+            .flat_map(|(e, i)| {
+                let all = (g.all() && i.hooks.draw_gizmos).then_some((*e, "draw_gizmos"));
+                let picked = (i.hooks.draw_gizmos_selected && g.picked(*e))
+                    .then_some((*e, "draw_gizmos_selected"));
+                all.into_iter().chain(picked)
+            })
+            .collect();
+        for (e, hook) in calls {
+            crate::draw::begin_gizmos(&self.lua, e);
+            self.call_hook(e, hook, (), settings);
+            crate::draw::end_gizmos(&self.lua);
+        }
     }
 
     // ------------------------------------------------------------------------- parallel
@@ -1306,6 +1386,13 @@ impl ScriptRuntime {
             return;
         };
         i.started = true;
+        if i.hooks.construct {
+            // Its parts first, so `start` finds them.
+            self.construct(e, settings);
+        }
+        let Some(i) = self.instances.get_mut(&e) else {
+            return;
+        };
         if !i.hooks.start {
             if i.hooks.states {
                 let clock = i.clock;
@@ -1352,10 +1439,29 @@ impl ScriptRuntime {
         let Some(i) = self.instances.get(&e) else {
             return;
         };
+        let built = i.hooks.construct && i.started;
         if i.hooks.on_destroy && i.started {
             self.call_hook(e, "on_destroy", (), settings);
         }
+        if built {
+            // What its `construct` built goes with it (a restart builds it again).
+            let _ = crate::access::with_world(&self.lua, |w| {
+                unbuild(w, e);
+                Ok(())
+            });
+        }
         self.tasks.retain(|t| t.owner != Some(e));
+        self.drop_listeners(e);
+        if let Some(i) = self.instances.remove(&e) {
+            let _ = self.lua.remove_registry_value(i.this);
+        }
+        if let Ok(selves) = self.lua.named_registry_value::<Table>(SELVES) {
+            let _ = selves.raw_set(e.to_bits() as f64, Value::Nil);
+        }
+    }
+
+    /// Stops the listeners `e`'s script made (`entity:on`, `entity:once`).
+    fn drop_listeners(&mut self, e: Entity) {
         let dropped: Vec<RegistryKey> = {
             let mut s = shared(&self.lua);
             let (gone, kept) = std::mem::take(&mut s.listeners)
@@ -1369,11 +1475,218 @@ impl ScriptRuntime {
         for key in dropped {
             let _ = self.lua.remove_registry_value(key);
         }
-        if let Some(i) = self.instances.remove(&e) {
-            let _ = self.lua.remove_registry_value(i.this);
+    }
+
+    /// Runs `e`'s `construct` (what it spawns is [`crate::Constructed`] by `e`), after taking
+    /// down what it built before. It must not wait: what it spawns after a wait is its own.
+    fn construct(&mut self, e: Entity, settings: &ScriptSettings) {
+        let _ = crate::access::with_world(&self.lua, |w| {
+            unbuild(w, e);
+            Ok(())
+        });
+        shared(&self.lua).constructing = Some(e);
+        self.call_hook(e, "construct", (), settings);
+        shared(&self.lua).constructing = None;
+    }
+
+    // ------------------------------------------------------------------------- edit mode
+
+    /// One frame of the editor's edit mode, where scripts don't run (Unreal runs an actor's
+    /// construction script in the editor whenever it changes; Unity's `[ExecuteAlways]` and
+    /// Godot's `@tool` run scripts there). Each script with `construct` or a gizmo hook gets a
+    /// stand-in `self` (its props, its entity; no `start`): `construct` builds the entity's
+    /// parts, again whenever the props or the file change, and the gizmo hooks draw as
+    /// [`crate::ScriptGizmos`] asks. Tasks, listeners and messages they start are dropped.
+    pub(crate) fn preview_frame(&mut self, world: &mut World, settings: &ScriptSettings) {
+        let world_ptr: *mut World = world;
+        let _lent = lend_world(&self.lua, world_ptr);
+        // SAFETY: as in `run_serial`.
+        let w = || unsafe { &mut *world_ptr };
+        shared(&self.lua).world_secs = w()
+            .get_resource::<Time>()
+            .map_or(0.0, |t| t.elapsed_secs_f64());
+        if settings.hot_reload && self.next_poll.is_none_or(|t| Instant::now() >= t) {
+            self.next_poll =
+                Some(Instant::now() + std::time::Duration::from_secs_f32(settings.poll_secs));
+            self.poll_files(w(), settings);
         }
+        let scripts: Vec<(Entity, Script)> = {
+            let mut q = w().query::<(Entity, &Script)>();
+            q.iter(w()).map(|(e, s)| (e, s.clone())).collect()
+        };
+        let live: std::collections::HashMap<Entity, String> = scripts
+            .iter()
+            .map(|(e, s)| (*e, normalize(&s.path)))
+            .collect();
+        let stale: Vec<Entity> = self
+            .previews
+            .iter()
+            .filter(|(e, p)| live.get(e) != Some(&p.path))
+            .map(|(e, _)| *e)
+            .collect();
+        for e in stale {
+            self.drop_preview(w(), e);
+        }
+        // Parts whose builder is gone (Stop puts the scene back as new entities).
+        let built: Vec<(Entity, Entity)> = {
+            let mut q = w().query::<(Entity, &crate::Constructed)>();
+            q.iter(w()).map(|(e, c)| (e, c.by)).collect()
+        };
+        for (part, by) in built {
+            if w().get_entity(by).is_err()
+                && let Ok(part) = w().get_entity_mut(part)
+            {
+                part.despawn();
+            }
+        }
+        for (e, script) in &scripts {
+            let path = normalize(&script.path);
+            // A file that failed to load waits for an edit (the poll loads it again).
+            let broken = self
+                .files()
+                .map
+                .get(&path)
+                .is_some_and(|f| f.value.is_none() && f.error.is_some());
+            if broken {
+                self.drop_preview(w(), *e);
+                continue;
+            }
+            let Some(hooks) = self.hooks_of(&path) else {
+                continue;
+            };
+            if !(hooks.construct || hooks.draw_gizmos || hooks.draw_gizmos_selected) {
+                self.drop_preview(w(), *e);
+                continue;
+            }
+            let version = self.files().map.get(&path).map_or(0, |f| f.version);
+            let key = (
+                version,
+                format!(
+                    "{}{}",
+                    script.enabled,
+                    serde_json::to_string(&script.props).unwrap_or_default()
+                ),
+            );
+            if self.previews.get(e).is_some_and(|p| p.key == key) {
+                continue;
+            }
+            self.drop_preview(w(), *e);
+            // Parts a stand-in of an earlier VM built (the editor drops the VM on Stop).
+            unbuild(w(), *e);
+            let this = match self.make_self(*e, &path, script) {
+                Ok(this) => this,
+                Err(err) => {
+                    push_error(&self.lua, Some(&path), Some(*e), &err.to_string());
+                    continue;
+                }
+            };
+            self.previews.insert(
+                *e,
+                Preview {
+                    path,
+                    this,
+                    hooks,
+                    key,
+                    last_error: None,
+                },
+            );
+            if hooks.construct && script.enabled {
+                self.call_preview(*e, "construct", settings);
+            }
+        }
+        if let Some(g) = w().get_resource::<crate::ScriptGizmos>().cloned() {
+            let calls: Vec<(Entity, &'static str)> = self
+                .previews
+                .iter()
+                .flat_map(|(e, p)| {
+                    let all = (g.all() && p.hooks.draw_gizmos).then_some((*e, "draw_gizmos"));
+                    let picked = (p.hooks.draw_gizmos_selected && g.picked(*e))
+                        .then_some((*e, "draw_gizmos_selected"));
+                    all.into_iter().chain(picked)
+                })
+                .collect();
+            for (e, hook) in calls {
+                self.call_preview(e, hook, settings);
+            }
+        }
+        {
+            // Nothing runs later in edit mode.
+            let mut s = shared(&self.lua);
+            s.outbox.clear();
+            s.emitted.clear();
+        }
+        crate::draw::flush(w(), &self.lua);
+    }
+
+    /// Calls `hook` on `e`'s stand-in, with the watchdog armed and errors reported once.
+    fn call_preview(&mut self, e: Entity, hook: &str, settings: &ScriptSettings) {
+        let Some(p) = self.previews.get(&e) else {
+            return;
+        };
+        let Ok(Value::Table(this)) = self.lua.registry_value::<Value>(&p.this) else {
+            return;
+        };
+        let Ok(Value::Function(f)) = this.get::<Value>(hook) else {
+            return;
+        };
+        let path = p.path.clone();
+        let gizmo = hook != "construct";
+        {
+            let mut s = shared(&self.lua);
+            s.owner = Some(e);
+            s.constructing = (!gizmo).then_some(e);
+        }
+        if gizmo {
+            crate::draw::begin_gizmos(&self.lua, e);
+        }
+        self.watchdog.arm(settings.call_limit_ms);
+        let result = f.call::<()>(this);
+        self.watchdog.disarm();
+        self.profiler.settle(&self.lua);
+        {
+            let mut s = shared(&self.lua);
+            s.owner = None;
+            s.constructing = None;
+        }
+        if gizmo {
+            crate::draw::end_gizmos(&self.lua);
+        }
+        self.adopt_new_tasks();
+        self.tasks.retain(|t| t.owner != Some(e));
+        self.drop_listeners(e);
+        let message = match result {
+            Ok(()) => return,
+            Err(err) => format!("in the editor, {hook}: {err}"),
+        };
+        note_fault(&self.lua, &message);
+        if let Some(p) = self.previews.get_mut(&e) {
+            if p.last_error.as_deref() == Some(message.as_str()) {
+                return;
+            }
+            p.last_error = Some(message.clone());
+        }
+        push_error(&self.lua, Some(&path), Some(e), &message);
+    }
+
+    /// Drops `e`'s stand-in and what it built.
+    fn drop_preview(&mut self, world: &mut World, e: Entity) {
+        let Some(p) = self.previews.remove(&e) else {
+            return;
+        };
+        let _ = self.lua.remove_registry_value(p.this);
         if let Ok(selves) = self.lua.named_registry_value::<Table>(SELVES) {
             let _ = selves.raw_set(e.to_bits() as f64, Value::Nil);
+        }
+        if p.hooks.construct {
+            unbuild(world, e);
+        }
+    }
+
+    /// Edit mode ended: every stand-in goes, with what it built.
+    fn drop_previews(&mut self, world: &mut World) {
+        let all: Vec<Entity> = self.previews.keys().copied().collect();
+        for e in all {
+            self.drop_preview(world, e);
         }
     }
 

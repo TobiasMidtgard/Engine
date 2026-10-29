@@ -1000,6 +1000,18 @@ pub fn bounds(world: &World, e: Entity) -> Option<(DVec3, f64)> {
 
 /// What a click on `hit` selects: the demo it belongs to, else the entity itself.
 pub fn selectable(world: &World, hit: Entity) -> Entity {
+    // A part a script's `construct` built selects the scripted entity (Unity picks the object
+    // whose gizmo or child was clicked the same way), through parts of parts.
+    let mut hit = hit;
+    for _ in 0..16 {
+        let built =
+            std::iter::successors(Some(hit), |&e| world.get::<ChildOf>(e).map(|p| p.parent()))
+                .find_map(|e| world.get::<engine_script::Constructed>(e).map(|c| c.by));
+        match built {
+            Some(by) if by != hit => hit = by,
+            _ => break,
+        }
+    }
     let root = scene_ops::root_of(world, hit);
     if let Some(part) = world.get::<DemoPart>(root) {
         return part.spawner;

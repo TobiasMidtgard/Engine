@@ -19,7 +19,9 @@
 //! `@angle` (radians, shown in degrees), `@color` (a `vec3` as linear RGB; props named
 //! "color", "colour" or "tint" are colors anyway), `@enum a|b|c` (a string from a list),
 //! `@entity` (a string naming an entity: the panel offers the scene's names, the script finds it
-//! with `world.find`), `@hide`, and `@group Name` on a comment line of its own for the props
+//! with `world.find`), `@handle` (a handle in the scene view: a `vec3` is a point in the entity's
+//! space, a number a radius, or with `@handle x|y|z` a distance along that axis; [`Handle`]),
+//! `@hide`, and `@group Name` on a comment line of its own for the props
 //! below it. Tables of named values fold out with their own props.
 //!
 //! The defaults are what the class's `props` holds after its file runs, so `math.pi / 4` and
@@ -91,6 +93,22 @@ pub struct Prop {
     pub line: u32,
     /// A [`PropKind::Table`]'s own props.
     pub fields: Vec<Prop>,
+    /// A handle the editor draws for it in the scene view (`@handle`).
+    pub handle: Option<Handle>,
+}
+
+/// A handle in the scene view that sets a prop when dragged (`@handle`; Unreal's
+/// `MakeEditWidget`, Unity's `Handles`, Godot's gizmo handles). Shown while the scripted entity
+/// is selected, in its space; one drag is one undo step.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Handle {
+    /// A `vec3` prop: a point in the entity's space (`@handle`).
+    Point,
+    /// A number: a radius around the entity, across its up axis (`@handle radius`).
+    Radius,
+    /// A number: a distance along the entity's x, y or z axis (`@handle x`, `@handle y`,
+    /// `@handle z`).
+    Axis(u8),
 }
 
 impl Prop {
@@ -354,6 +372,7 @@ fn prop(name: String, v: &Value, note: Option<&Note>) -> Prop {
         hidden: tag("hide").is_some(),
         line: note.line,
         fields: Vec::new(),
+        handle: None,
     };
     if let Some(range) = tag("range") {
         let n: Vec<f64> = range
@@ -414,6 +433,17 @@ fn prop(name: String, v: &Value, note: Option<&Note>) -> Prop {
         },
         _ => p.kind,
     };
+    p.handle = tag("handle").and_then(|how| {
+        let how = how.split_whitespace().next().unwrap_or("");
+        match (&p.kind, how) {
+            (PropKind::Vec3, "" | "point") => Some(Handle::Point),
+            (PropKind::Number | PropKind::Integer, "" | "radius") => Some(Handle::Radius),
+            (PropKind::Number | PropKind::Integer, "x") => Some(Handle::Axis(0)),
+            (PropKind::Number | PropKind::Integer, "y") => Some(Handle::Axis(1)),
+            (PropKind::Number | PropKind::Integer, "z") => Some(Handle::Axis(2)),
+            _ => None,
+        }
+    });
     p
 }
 

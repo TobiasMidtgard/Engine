@@ -76,6 +76,7 @@ const MODULE_FLAGS: &[(&str, &[&str], &str)] = &[
     ),
     ("DebugViews", &["gravity"], "Gravity"),
     ("DebugViews", &["focus"], "Focus points"),
+    ("ScriptGizmos", &["show"], "Script gizmos"),
 ];
 
 /// The view mode's name, for the toolbar button.

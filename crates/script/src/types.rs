@@ -176,6 +176,41 @@ declare ease: {
 	smooth: (number) -> number,
 }
 
+-- How a shape looks: a color by name ("cyan", "orange", ...) or as a vec3, or a table
+-- { color, seconds (how long it stays; a frame when nil), on_top (seen through walls), alpha,
+-- and the shape's own: normal, rotation, closed, size }. Any, so table literals pass.
+type DrawStyle = any
+
+declare draw: {
+	--- A line from a to b.
+	line: (a: Vec3, b: Vec3, style: DrawStyle?) -> (),
+	--- A line from origin along dir (its length is the ray's).
+	ray: (origin: Vec3, dir: Vec3, style: DrawStyle?) -> (),
+	arrow: (from: Vec3, to: Vec3, style: DrawStyle?) -> (),
+	--- A wire sphere (three rings).
+	sphere: (center: Vec3, radius: number, style: DrawStyle?) -> (),
+	--- A box of this size (style.rotation turns it).
+	box: (center: Vec3, size: Vec3, style: DrawStyle?) -> (),
+	--- A ring across style.normal (up when nil).
+	circle: (center: Vec3, radius: number, style: DrawStyle?) -> (),
+	--- Part of a ring: from the direction `from`, turning angle radians (counterclockwise seen
+	--- from style.normal's side; up when nil).
+	arc: (center: Vec3, radius: number, from: Vec3, angle: number, style: DrawStyle?) -> (),
+	--- A cone from apex along dir (its length the cone's), half_angle radians wide.
+	cone: (apex: Vec3, dir: Vec3, half_angle: number, style: DrawStyle?) -> (),
+	--- A small cross (style.size meters).
+	point: (at: Vec3, style: DrawStyle?) -> (),
+	--- A line through the points (style.closed joins the ends).
+	path: (points: { Vec3 }, style: DrawStyle?) -> (),
+	capsule: (a: Vec3, b: Vec3, radius: number, style: DrawStyle?) -> (),
+	cylinder: (a: Vec3, b: Vec3, radius: number, style: DrawStyle?) -> (),
+	--- Red, green and blue axes of a frame.
+	axes: (at: Vec3, rotation: Quat?, size: number?) -> (),
+	--- Positions after this are in the entity's space (its position, rotation and scale) until
+	--- the hook returns; nil: the world. Gizmo hooks start in their own entity's space.
+	space: (entity: Entity?) -> (),
+}
+
 --- Calls an engine function by a name built at run time.
 declare function api(name: string, args: any?): any
 --- Prints to the script log as a warning (yellow in the Output).
