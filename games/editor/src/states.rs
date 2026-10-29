@@ -71,11 +71,20 @@ fn area(r: Rect) -> Area {
 /// regions in a row. States in `at` stay where it puts them when every state that isn't a group
 /// has a place there.
 pub fn layout(m: &Machine, at: &BTreeMap<String, Pos2>) -> Placed {
+    layout_for(m, at, None)
+}
+
+/// As [`layout`], for a view `aspect` times as wide as high: a parallel group's regions side
+/// by side or stacked, whichever draws larger there ([`geo::layout_for`]).
+pub fn layout_for(m: &Machine, at: &BTreeMap<String, Pos2>, aspect: Option<f32>) -> Placed {
     let at = at
         .iter()
         .map(|(k, p)| (k.clone(), geo::Vec2::new(p.x, p.y)))
         .collect();
-    let placed = geo::layout(m, &at);
+    let placed = match aspect {
+        Some(a) => geo::layout_for(m, &at, a),
+        None => geo::layout(m, &at),
+    };
     Placed {
         rects: placed
             .rects
@@ -217,14 +226,31 @@ pub fn paint(p: &Painter, d: &Diagram, view: View) -> Vec<(Pick, Rect)> {
                 .children(Some(&g.name))
                 .filter_map(|c| d.placed.rects.get(&c.name).map(|r| view.rect(*r)))
                 .collect();
-            regions.sort_by(|a, b| a.left().total_cmp(&b.left()));
+            // Side by side, or one under another (`geo::layout_for` picks for the view).
+            let stacked = regions.len() > 1
+                && (regions[0].bottom() <= regions[1].top()
+                    || regions[1].bottom() <= regions[0].top());
+            if stacked {
+                regions.sort_by(|a, b| a.top().total_cmp(&b.top()));
+            } else {
+                regions.sort_by(|a, b| a.left().total_cmp(&b.left()));
+            }
             for pair in regions.windows(2) {
-                let x = (pair[0].right() + pair[1].left()) / 2.0;
-                p.add(Shape::dashed_line(
-                    &[
+                let line = if stacked {
+                    let y = (pair[0].bottom() + pair[1].top()) / 2.0;
+                    [
+                        Pos2::new(r.left() + 6.0 * s, y),
+                        Pos2::new(r.right() - 6.0 * s, y),
+                    ]
+                } else {
+                    let x = (pair[0].right() + pair[1].left()) / 2.0;
+                    [
                         Pos2::new(x, head.bottom() + 6.0 * s),
                         Pos2::new(x, r.bottom() - 6.0 * s),
-                    ],
+                    ]
+                };
+                p.add(Shape::dashed_line(
+                    &line,
                     Stroke::new(1.2, GROUP_EDGE.gamma_multiply(1.6)),
                     7.0 * s,
                     5.0 * s,
@@ -232,10 +258,24 @@ pub fn paint(p: &Painter, d: &Diagram, view: View) -> Vec<(Pick, Rect)> {
             }
         }
         break_marks(p, d.breaks, &g.name, head, s);
+        // Its right end: the history mark (H, H* for deep), then whether it is done.
+        let mut right = head.right() - 8.0 * s;
         if g.history {
-            let c = head.right_center() - Vec2::new(16.0 * s, 0.0);
+            let c = Pos2::new(right - 8.5 * s, head.center().y);
             p.circle_stroke(c, 8.5 * s, Stroke::new(1.2, theme::TEXT_DIM));
-            text(p, c, Align2::CENTER_CENTER, "H", 10.5 * s, theme::TEXT_DIM);
+            let mark = if g.deep { "H*" } else { "H" };
+            text(p, c, Align2::CENTER_CENTER, mark, 10.5 * s, theme::TEXT_DIM);
+            right -= 24.0 * s;
+        }
+        if d.live.is_some_and(|l| l.done.contains(&g.name)) {
+            text(
+                p,
+                Pos2::new(right, head.center().y),
+                Align2::RIGHT_CENTER,
+                "✔ done",
+                12.0 * s,
+                theme::PLAY,
+            );
         }
         hits.push((pick, head));
     }
@@ -347,6 +387,15 @@ pub fn paint(p: &Painter, d: &Diagram, view: View) -> Vec<(Pick, Rect)> {
             Stroke::new(1.0, Color32::from_rgb(0x46, 0x4a, 0x52))
         };
         p.rect(r, 8.0 * s, fill, edge, StrokeKind::Inside);
+        if st.is_final {
+            // A final state: a second edge inside the first (where its group ends).
+            p.rect_stroke(
+                r.shrink(4.0 * s),
+                5.0 * s,
+                Stroke::new(edge.width * 0.8, edge.color),
+                StrokeKind::Inside,
+            );
+        }
         text(
             p,
             r.left_top() + Vec2::new(12.0 * s, 10.0 * s),
@@ -363,6 +412,17 @@ pub fn paint(p: &Painter, d: &Diagram, view: View) -> Vec<(Pick, Rect)> {
         let running = d.live.is_some_and(|l| l.running.contains(&st.name));
         let (line, color) = if running {
             ("⏳ enter running".to_string(), kind_color("after"))
+        } else if st.is_final {
+            let mut what = vec!["final".to_string()];
+            what.extend(st.hooks.iter().cloned());
+            (
+                what.join(" · "),
+                if is_current {
+                    theme::PLAY
+                } else {
+                    theme::TEXT_DIM
+                },
+            )
         } else if st.hooks.is_empty() {
             ("—".to_string(), theme::TEXT_DIM.gamma_multiply(0.7))
         } else {
@@ -547,6 +607,55 @@ pub fn log_rows(
         }
     }
     clicked
+}
+
+/// The script's values right after the change `shown` (None: now), as PlayMaker's Debug Flow
+/// shows them: at an earlier change, the ones it changed are lit and what they are now stands
+/// beside them.
+pub fn value_rows(ui: &mut egui::Ui, live: &Live, shown: Option<usize>) {
+    let (values, before) = match shown {
+        Some(k) => (
+            &live.log[k].values,
+            k.checked_sub(1).map(|j| &live.log[j].values),
+        ),
+        None => (&live.values, None),
+    };
+    if values.is_empty() {
+        ui.label(theme::dim("No values to show."));
+        return;
+    }
+    let was = |list: &Vec<(String, String)>, name: &str| {
+        list.iter().find(|(n, _)| n == name).map(|(_, v)| v.clone())
+    };
+    egui::Grid::new("state values")
+        .num_columns(3)
+        .spacing(Vec2::new(10.0, 2.0))
+        .show(ui, |ui| {
+            for (name, value) in values {
+                let changed = before.is_some_and(|b| was(b, name).as_ref() != Some(value));
+                ui.label(egui::RichText::new(name).monospace().color(theme::TEXT_DIM));
+                let v = egui::RichText::new(value).monospace();
+                ui.label(if changed {
+                    v.color(theme::ACCENT).strong()
+                } else {
+                    v.color(theme::TEXT)
+                })
+                .on_hover_text(if changed {
+                    "this change set it"
+                } else {
+                    "as it was then"
+                });
+                match was(&live.values, name).filter(|now| shown.is_some() && now != value) {
+                    Some(now) => {
+                        ui.label(theme::dim(format!("now {now}")));
+                    }
+                    None => {
+                        ui.label("");
+                    }
+                }
+                ui.end_row();
+            }
+        });
 }
 
 /// A diagram filling `rect` (fitted, no larger than life), with its hits.

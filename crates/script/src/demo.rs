@@ -33,6 +33,11 @@
 //!   stands under it while it closes. The state board on the easel beside it draws the machine
 //!   live, as the editor does: the state it is in with its time, the change just made glowing
 //!   along its arrow, the `after hold` timer filling and the last changes with their causes.
+//! - The rune seal on the east side is run by final states: `examples/seal.luau`. Its three
+//!   rune stones (E on each) are the three regions of a parallel group, each going from dark to
+//!   lit, a final state; once all three are lit the group is done and its `done` sinks the
+//!   round door into the ground, lighting the sanctum behind it, for `hold` seconds. Its state
+//!   board marks each finished region "done".
 //!
 //! `script.send {"entity": {"name": "Courtyard director"}, "event": "ritual"}` plays the ritual
 //! from the console or a tour stop; `script.edit` changes a script file like an editor would.
@@ -87,6 +92,15 @@ pub const GATE_SCRIPT: &str = "examples/gate.luau";
 /// The gate's state board, on an easel north of it, turned to the middle and a little south.
 pub const STATE_BOARD: [f64; 3] = [-9.0, 2.0, -4.3];
 pub const STATE_BOARD_YAW: f32 = std::f32::consts::FRAC_PI_2 - 0.25;
+/// The rune seal on the east side, opposite the gate, facing the middle (its script builds it
+/// facing its +Z), and the example script whose final states run it.
+pub const SEAL: [f64; 3] = [9.4, 0.0, 0.0];
+pub const SEAL_YAW: f32 = -std::f32::consts::FRAC_PI_2;
+pub const SEAL_NAME: &str = "Rune seal";
+pub const SEAL_SCRIPT: &str = "examples/seal.luau";
+/// The seal's state board, on an easel south of it, turned to the middle and a little north.
+pub const SEAL_BOARD: [f64; 3] = [8.8, 2.0, 5.0];
+pub const SEAL_BOARD_YAW: f32 = -std::f32::consts::FRAC_PI_2 - 0.25;
 
 /// A tour stop: eye and target relative to the courtyard's middle, and API calls made on
 /// arriving and leaving (name, JSON args).
@@ -197,6 +211,19 @@ const FLARE: (&str, &str) = (
 pub const GATE_PRESS: (&str, &str) = (
     "script.eval",
     r#"{"code": "local g = world.find('Courtyard gate').script g:go('closed') g:place(0) g:trigger('interact')"}"#,
+);
+
+/// The seal from the start (`go` back to `sealed`, the door put up at once), then its left and
+/// right runes touched as E on them would: two of its three regions in their final state.
+pub const SEAL_TWO: (&str, &str) = (
+    "script.eval",
+    r#"{"code": "local s = world.find('Rune seal').script s:go('sealed') s:place(0) s:trigger('touch_left') s:trigger('touch_right')"}"#,
+);
+
+/// As [`SEAL_TWO`], and the middle rune too: every region is done, so the seal opens.
+pub const SEAL_ALL: (&str, &str) = (
+    "script.eval",
+    r#"{"code": "local s = world.find('Rune seal').script s:go('sealed') s:place(0) s:trigger('touch_left') s:trigger('touch_right') s:trigger('touch_middle')"}"#,
 );
 
 /// The courtyard's overview, from above the lanterns in the south-east, looking down enough
@@ -356,6 +383,42 @@ pub const VIEWS: &[DemoView] = &[
         on_leave: &[],
     },
     DemoView {
+        key: "script_seal",
+        name: "Final states run the rune seal: each rune is a region that ends in a final \
+               state; two of three lit, the door stays shut",
+        // From the north-west, outside the wisps' ring: the left rune near, the door ahead.
+        eye: [6.0, 1.9 + LIFT, -3.2],
+        target: [9.4, 1.4 + LIFT, 0.3],
+        hour: 18.9,
+        warmup_secs: 1.2,
+        on_arrive: &[SEAL_TWO],
+        on_leave: &[],
+    },
+    DemoView {
+        key: "script_seal_board",
+        name: "The seal's state board: the two lit runes' regions marked done in their final \
+               states (drawn with a double edge), the middle one still dark",
+        // 2.4 m out along the board's normal (SEAL_BOARD_YAW).
+        eye: [6.47, 2.0 + LIFT, 4.41],
+        target: [SEAL_BOARD[0], SEAL_BOARD[1] + LIFT, SEAL_BOARD[2]],
+        hour: 18.9,
+        warmup_secs: 1.2,
+        on_arrive: &[SEAL_TWO],
+        on_leave: &[],
+    },
+    DemoView {
+        key: "script_seal_open",
+        name: "All three runes lit: every region is done, so the group's `done` opens the \
+               seal; the door sinks and the sanctum's crystal lights the arch",
+        eye: [6.0, 1.9 + LIFT, -3.2],
+        target: [9.4, 1.4 + LIFT, 0.3],
+        hour: 18.9,
+        // The door sinks in 2.2 s (seal.luau's open_secs), then the seal is open.
+        warmup_secs: 3.0,
+        on_arrive: &[SEAL_ALL],
+        on_leave: &[],
+    },
+    DemoView {
         key: "script_paused",
         name: "Paused at a breakpoint: the director waits on its line with the arrow, each \
                local's value beside the line that set it; the courtyard's time holds with it",
@@ -381,6 +444,60 @@ pub const VIEWS: &[DemoView] = &[
 
 fn mesh(shape: Shape, material: StandardMaterial) -> MeshRenderer {
     MeshRenderer::new(shape, material)
+}
+
+/// A state board on a walnut easel at `center` (its middle), turned `yaw`, drawing the machine
+/// of the entity named `target`.
+fn state_easel(
+    commands: &mut Commands,
+    at: &dyn Fn(f64, f64, f64) -> Transform,
+    center: [f64; 3],
+    yaw: f32,
+    target: &str,
+) {
+    let walnut = StandardMaterial::preset(MaterialPreset::WoodPlanks).with_tint(0.38, 0.27, 0.2);
+    let [sx, sy, sz] = center;
+    let turn = Quat::from_rotation_y(yaw);
+    let local = |x: f64, y: f64, z: f64| {
+        let o = turn.as_dquat() * DVec3::new(x, y, z);
+        at(sx + o.x, sy + o.y, sz + o.z).with_rotation(turn)
+    };
+    commands.spawn((
+        Name::new("State board frame"),
+        local(0.0, 0.0, -0.08),
+        mesh(
+            Shape::RoundedCuboid {
+                size: [3.45, 2.25, 0.14],
+                radius: 0.04,
+                segments: 0,
+            },
+            walnut,
+        ),
+    ));
+    for side in [-1.0, 1.0] {
+        commands.spawn((
+            Name::new("State board post"),
+            local(side * 1.6, 1.55 - sy, -0.17),
+            mesh(
+                Shape::RoundedCuboid {
+                    size: [0.13, 3.1, 0.13],
+                    radius: 0.03,
+                    segments: 0,
+                },
+                walnut,
+            ),
+        ));
+    }
+    commands.spawn((
+        Name::new("State board"),
+        local(0.0, 0.0, 0.0),
+        mesh(
+            Shape::Quad { size: [3.2, 2.0] },
+            StandardMaterial::color(0.02, 0.022, 0.026),
+        )
+        .without_shadows(),
+        StateBoard::new(target),
+    ));
 }
 
 /// Spawns the courtyard's stone, braziers, lever, code board and director around `origin`
@@ -656,48 +773,16 @@ pub fn spawn_demo(commands: &mut Commands, origin: DVec3) {
         // It won't close on the player (the play mode's pilot).
         Script::new(GATE_SCRIPT).with_props(serde_json::json!({ "blocker": "Pilot" })),
     ));
-    let [sx, sy, sz] = STATE_BOARD;
-    let turn = Quat::from_rotation_y(STATE_BOARD_YAW);
-    let local = |x: f64, y: f64, z: f64| {
-        let o = turn.as_dquat() * DVec3::new(x, y, z);
-        at(sx + o.x, sy + o.y, sz + o.z).with_rotation(turn)
-    };
+    state_easel(commands, &at, STATE_BOARD, STATE_BOARD_YAW, GATE_NAME);
+
+    // The rune seal, built by its script with its three rune stones, and its own state board.
+    let [rx, _, rz] = SEAL;
     commands.spawn((
-        Name::new("State board frame"),
-        local(0.0, 0.0, -0.08),
-        mesh(
-            Shape::RoundedCuboid {
-                size: [3.45, 2.25, 0.14],
-                radius: 0.04,
-                segments: 0,
-            },
-            walnut,
-        ),
+        Name::new(SEAL_NAME),
+        at(rx, 0.0, rz).with_rotation(Quat::from_rotation_y(SEAL_YAW)),
+        Script::new(SEAL_SCRIPT),
     ));
-    for side in [-1.0, 1.0] {
-        commands.spawn((
-            Name::new("State board post"),
-            local(side * 1.6, 1.55 - sy, -0.17),
-            mesh(
-                Shape::RoundedCuboid {
-                    size: [0.13, 3.1, 0.13],
-                    radius: 0.03,
-                    segments: 0,
-                },
-                walnut,
-            ),
-        ));
-    }
-    commands.spawn((
-        Name::new("State board"),
-        local(0.0, 0.0, 0.0),
-        mesh(
-            Shape::Quad { size: [3.2, 2.0] },
-            StandardMaterial::color(0.02, 0.022, 0.026),
-        )
-        .without_shadows(),
-        StateBoard::new(GATE_NAME),
-    ));
+    state_easel(commands, &at, SEAL_BOARD, SEAL_BOARD_YAW, SEAL_NAME);
 
     // Four braziers on the diagonals, cold until the ritual lights them.
     for i in 0..4 {

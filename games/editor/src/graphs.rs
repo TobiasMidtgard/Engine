@@ -4680,20 +4680,75 @@ fn state_settings(ui: &mut egui::Ui, doc: &mut GraphDoc, m: &Machine, name: &str
                         }
                         doc.push_undo(before);
                     }
-                    let mut history = st.history;
+                    // History: shallow (back to the state it was last in) or deep (and to
+                    // where the states inside that one were); a parallel group only has deep.
+                    let (mut history, mut deep) = (st.history, st.deep);
+                    let changed = if st.parallel {
+                        ui.checkbox(&mut deep, "Deep history")
+                            .on_hover_text(
+                                "Coming back, each region goes on where it was (history = \"deep\")",
+                            )
+                            .changed()
+                    } else {
+                        let a = ui
+                            .checkbox(&mut history, "History")
+                            .on_hover_text("Coming back, it goes on in the state it was last in")
+                            .changed();
+                        let b = history
+                            && ui
+                                .checkbox(&mut deep, "Deep")
+                                .on_hover_text(
+                                    "And the groups inside it go on where they were too \
+                                     (history = \"deep\")",
+                                )
+                                .changed();
+                        a || b
+                    };
+                    if changed {
+                        let before = doc.graph.clone();
+                        if let Some(o) = state_def_mut(&mut doc.graph.states, Some(name))
+                            .and_then(Value::as_object_mut)
+                        {
+                            if deep && (history || st.parallel) {
+                                o.insert("history".into(), json!("deep"));
+                            } else if history && !st.parallel {
+                                o.insert("history".into(), json!(true));
+                            } else {
+                                o.remove("history");
+                            }
+                        }
+                        doc.push_undo(before);
+                    }
+                } else {
+                    // A state on its own can be final: reaching it ends its group.
+                    let mut is_final = st.is_final;
+                    let leaves = m
+                        .transitions
+                        .iter()
+                        .any(|t| t.from.as_deref() == Some(name));
                     if ui
-                        .checkbox(&mut history, "History")
-                        .on_hover_text("Coming back, it goes on in the state it was last in")
+                        .add_enabled(
+                            is_final || !leaves,
+                            egui::Checkbox::new(&mut is_final, "Final"),
+                        )
+                        .on_hover_text(
+                            "Reaching it ends its group: the group's done transition follows \
+                             (a parallel group's once every region is in a final state); at the \
+                             outer level it ends the machine",
+                        )
+                        .on_disabled_hover_text(
+                            "A final state has no way out: delete its transitions first",
+                        )
                         .changed()
                     {
                         let before = doc.graph.clone();
                         if let Some(o) = state_def_mut(&mut doc.graph.states, Some(name))
                             .and_then(Value::as_object_mut)
                         {
-                            if history {
-                                o.insert("history".into(), json!(true));
+                            if is_final {
+                                o.insert("final".into(), json!(true));
                             } else {
-                                o.remove("history");
+                                o.remove("final");
                             }
                         }
                         doc.push_undo(before);

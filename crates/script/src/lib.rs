@@ -190,9 +190,14 @@
 //! `exit_<state>`; interactions, messages, wired signals and `self:trigger` are its events
 //! (`states.luau`). A group with `parallel = true` runs all its states at once (regions, as
 //! SCXML's `<parallel>` and XState's parallel states): an event reaches every region, and a
-//! change into one region leaves the others where they are. [`states`] reads a machine's shape and its live state for the
-//! editor (each change in the log keeps the states active after it, so the editor can show the
-//! machine as it was then), and `script.states {entity}` serves both. State breakpoints
+//! change into one region leaves the others where they are. A state with `final = true` ends
+//! its group: the group's `done` follows once it is in one of its final states (a parallel
+//! group's once every region is), and a final state at the outer level ends the machine;
+//! `history = "deep"` resumes a group all the way in. An event or `go` from an enter or exit
+//! hook waits until the change it is part of is done (run to completion). [`states`] reads a
+//! machine's shape and its live state for the editor (each change in the log keeps the states
+//! active after it and the script's values, so the editor can show the machine as it was then),
+//! and `script.states {entity}` serves both. State breakpoints
 //! ([`states::StateBreakpoints`], `script.state_breaks`) pause the game as a state starts or
 //! ends, as Unreal's StateTree debugger does. A [`state_board::StateBoard`] draws a running
 //! machine on a quad in the world, from the editor's layout ([`diagram`]).

@@ -1200,6 +1200,24 @@ fn the_showcase_courtyard_builds_and_plays_its_ritual() {
     let (name, args) = crate::demo::GATE_PRESS;
     call_api(&mut app.world, name, serde_json::from_str(args).unwrap()).unwrap();
     assert_eq!(eval(&mut app, gate), json!("opening"));
+    // The rune seal's: two runes leave it sealed, the third opens it.
+    let seal = "local s = world.find('Rune seal').script return";
+    assert_eq!(
+        eval(&mut app, &format!("{seal} s:in_state('sealed')")),
+        json!(true)
+    );
+    assert_eq!(eval(&mut app, "#world.find_all(' rune')"), json!(3));
+    let (name, args) = crate::demo::SEAL_TWO;
+    call_api(&mut app.world, name, serde_json::from_str(args).unwrap()).unwrap();
+    let e = eval(&mut app, "return world.find('Rune seal').id")
+        .as_u64()
+        .unwrap();
+    let live = crate::states::live(&app.world, Entity::from_bits(e)).unwrap();
+    assert_eq!(live.current, ["left_lit", "middle_dark", "right_lit"]);
+    assert_eq!(live.done.iter().collect::<Vec<_>>(), ["left", "right"]);
+    let (name, args) = crate::demo::SEAL_ALL;
+    call_api(&mut app.world, name, serde_json::from_str(args).unwrap()).unwrap();
+    assert_eq!(eval(&mut app, &format!("{seal} s.state")), json!("opening"));
     // The swarm: wisps on the actor VMs.
     let wisps = eval(&mut app, "#world.find_all('Wisp ')");
     assert_eq!(wisps, json!(320));
@@ -3675,4 +3693,298 @@ fn state_breakpoints_are_reached() {
         )),
         "{errs:?}"
     );
+}
+
+const SEAL: &str = r#"
+local Seal = {}
+Seal.props = { hold = 0.2 }
+Seal.states = {
+	initial = "sealed",
+	states = {
+		sealed = {
+			parallel = true,
+			done = "open",
+			states = {
+				a = {
+					initial = "a_dark",
+					states = { a_dark = { on = { touch_a = "a_lit" } }, a_lit = { final = true } },
+				},
+				b = {
+					initial = "b_dark",
+					states = { b_dark = { on = { touch_b = "b_lit" } }, b_lit = { final = true } },
+				},
+			},
+		},
+		open = { after = { "hold", "spent" } },
+		spent = { final = true },
+	},
+}
+function Seal:start()
+	self.opened = 0
+end
+function Seal:enter_open()
+	self.opened += 1
+end
+return Seal
+"#;
+
+/// `final = true` ends a group: a parallel group's `done` follows once every region is in a
+/// final state (XState's onDone), and a final state at the outer level ends the machine:
+/// events change nothing until a `go` starts it again. Each change keeps the script's values.
+#[test]
+fn final_states_finish_groups_and_end_the_machine() {
+    let folder = Folder::new();
+    folder.write("seal.luau", SEAL);
+    let mut app = app_in(&folder.0);
+    let e = spawn_script(&mut app, "Seal", "seal");
+    app.update_n(2);
+    assert!(errors(&mut app).is_empty(), "{:?}", errors(&mut app));
+    let seal = |app: &mut App, code: &str| {
+        eval(
+            app,
+            &format!("local s = world.find('Seal').script return {code}"),
+        )
+    };
+    let live = crate::states::live(&app.world, e).unwrap();
+    assert_eq!(live.current, ["a_dark", "b_dark"]);
+    assert!(live.done.is_empty() && !live.over);
+
+    // One region done: the group waits for the other.
+    send(&mut app, "Seal", "touch_a");
+    app.update();
+    let live = crate::states::live(&app.world, e).unwrap();
+    assert_eq!(live.current, ["a_lit", "b_dark"]);
+    assert_eq!(live.done.iter().collect::<Vec<_>>(), ["a"]);
+    assert_eq!(seal(&mut app, "s:in_state('sealed')"), json!(true));
+
+    // Both: the group is done and its `done` goes on, the same frame.
+    send(&mut app, "Seal", "touch_b");
+    app.update();
+    let live = crate::states::live(&app.world, e).unwrap();
+    assert_eq!(live.current, ["open"]);
+    let last = live.log.last().unwrap();
+    assert_eq!((last.to.as_str(), last.why.as_str()), ("open", "done"));
+    let value = |c: &crate::states::Change, name: &str| {
+        c.values
+            .iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, v)| v.clone())
+    };
+    assert_eq!(value(last, "opened").as_deref(), Some("1"), "{last:?}");
+    assert_eq!(value(last, "props.hold").as_deref(), Some("0.2"));
+    let before = &live.log[live.log.len() - 2];
+    assert_eq!(value(before, "opened").as_deref(), Some("0"));
+
+    // The machine as it was after the first rune: region a done.
+    let machine = crate::props::declared(&mut app.world, "seal.luau")
+        .unwrap()
+        .machine
+        .unwrap()
+        .unwrap();
+    assert!(machine.state("a_lit").unwrap().is_final);
+    let k = live.log.iter().position(|c| c.to == "a_lit").unwrap();
+    let then = live.as_of(k, &machine);
+    assert_eq!(then.done.iter().collect::<Vec<_>>(), ["a"]);
+    assert!(!then.over);
+
+    // A final state at the outer level ends the machine.
+    app.update_n(8);
+    let live = crate::states::live(&app.world, e).unwrap();
+    assert_eq!(live.current, ["spent"]);
+    assert!(live.over);
+    assert!(live.as_of(live.log.len() - 1, &machine).over);
+    assert_eq!(seal(&mut app, "s:trigger('touch_a')"), json!(false));
+    app.update_n(3);
+    assert_eq!(seal(&mut app, "s.state"), json!("spent"));
+
+    // `go` starts it again: each region from its first state.
+    seal(&mut app, "s:go('sealed')");
+    let live = crate::states::live(&app.world, e).unwrap();
+    assert!(!live.over);
+    assert_eq!(live.current, ["a_dark", "b_dark"]);
+    assert!(errors(&mut app).is_empty(), "{:?}", errors(&mut app));
+}
+
+const GUARD: &str = r#"
+local Guard = {}
+Guard.states = {
+	initial = "patrol",
+	states = {
+		patrol = {
+			initial = "route",
+			history = "deep",
+			on = { alarm = "alert", swap = "watch" },
+			states = {
+				route = {
+					initial = "north",
+					states = {
+						north = { on = { next = "east" } },
+						east = { on = { next = "south" } },
+						south = {},
+					},
+				},
+			},
+		},
+		alert = { on = { calm = "patrol" } },
+		watch = {
+			initial = "post",
+			history = true,
+			on = { swap = "patrol" },
+			states = {
+				post = {
+					initial = "left",
+					states = { left = { on = { turn = "right" } }, right = {} },
+				},
+			},
+		},
+	},
+}
+return Guard
+"#;
+
+/// `history = "deep"` brings a group back to where it was all the way in; `history = true`
+/// only to the state directly inside it (the groups in that one start from their first).
+#[test]
+fn deep_history_resumes_inside_groups() {
+    let folder = Folder::new();
+    folder.write("guard.luau", GUARD);
+    let mut app = app_in(&folder.0);
+    spawn_script(&mut app, "Guard", "guard");
+    app.update_n(2);
+    let state = |app: &mut App| eval(app, "return world.find('Guard').script.state");
+    assert_eq!(state(&mut app), json!("north"));
+    for (event, want) in [
+        ("next", "east"),
+        ("alarm", "alert"),
+        ("calm", "east"),
+        ("swap", "left"),
+        ("turn", "right"),
+        ("swap", "east"),
+        ("swap", "left"),
+    ] {
+        send(&mut app, "Guard", event);
+        app.update();
+        assert_eq!(state(&mut app), json!(want), "after {event}");
+    }
+    let machine = crate::props::declared(&mut app.world, "guard.luau")
+        .unwrap()
+        .machine
+        .unwrap()
+        .unwrap();
+    let patrol = machine.state("patrol").unwrap();
+    assert!(patrol.history && patrol.deep);
+    let watch = machine.state("watch").unwrap();
+    assert!(watch.history && !watch.deep);
+    assert!(errors(&mut app).is_empty(), "{:?}", errors(&mut app));
+}
+
+const CHAIN: &str = r#"
+local Chain = {}
+Chain.states = {
+	initial = "a",
+	states = {
+		a = { on = { push = "b" } },
+		b = { on = { next = "c" } },
+		c = {},
+		d = {},
+	},
+}
+function Chain:start()
+	self.trace = {}
+end
+function Chain:exit_a()
+	table.insert(self.trace, "exit a")
+end
+function Chain:enter_b()
+	table.insert(self.trace, "enter b")
+	local took = self:trigger("next")
+	table.insert(self.trace, `trigger {took} in {self.state}`)
+end
+function Chain:exit_b()
+	table.insert(self.trace, "exit b")
+end
+function Chain:enter_c()
+	table.insert(self.trace, "enter c")
+	self:go("d")
+	table.insert(self.trace, `go in {self.state}`)
+end
+function Chain:enter_d()
+	table.insert(self.trace, "enter d")
+end
+return Chain
+"#;
+
+/// An event or a `go` sent from an enter or exit hook waits until the change it is part of has
+/// settled (run to completion, as SCXML and XState), so every change finishes its exits and
+/// enters first; a hook sees the state it is entering.
+#[test]
+fn events_from_hooks_wait_for_the_change() {
+    let folder = Folder::new();
+    folder.write("chain.luau", CHAIN);
+    let mut app = app_in(&folder.0);
+    let e = spawn_script(&mut app, "Chain", "chain");
+    app.update_n(2);
+    send(&mut app, "Chain", "push");
+    app.update();
+    assert_eq!(
+        eval(
+            &mut app,
+            "return table.concat(world.find('Chain').script.trace, ', ')"
+        ),
+        json!("exit a, enter b, trigger true in b, exit b, enter c, go in c, enter d")
+    );
+    let live = crate::states::live(&app.world, e).unwrap();
+    let path: Vec<&str> = live.log.iter().map(|c| c.to.as_str()).collect();
+    assert_eq!(path, ["a", "b", "c", "d"]);
+    assert!(errors(&mut app).is_empty(), "{:?}", errors(&mut app));
+}
+
+/// Mistakes with final states and history say what is wrong.
+#[test]
+fn final_and_history_mistakes_say_what_is_wrong() {
+    let folder = Folder::new();
+    let cases = [
+        (
+            "out.luau",
+            "a = { final = true, on = { poke = \"b\" } }, b = {}",
+            "state a is final, so it has no way out (on): reaching it ends its group",
+        ),
+        (
+            "never.luau",
+            "a = { done = \"b\", states = { x = {} } }, b = {}",
+            "state a: done follows when it reaches a final state, and none of its states is final",
+        ),
+        (
+            "region.luau",
+            "a = { parallel = true, done = \"b\", states = { x = { final = true }, y = { states = { y1 = {} } } } }, b = {}",
+            "state a: done follows when every region is in a final state, and y never is",
+        ),
+        (
+            "leaf.luau",
+            "a = { history = true }, b = {}",
+            "state a has history but no states inside",
+        ),
+        (
+            "both.luau",
+            "a = { parallel = true, history = true, states = { x = {}, y = {} } }, b = {}",
+            "state a is parallel, so it enters all its states anyway: history = \"deep\"",
+        ),
+    ];
+    for (file, states, _) in &cases {
+        folder.write(
+            file,
+            &format!(
+                "local M = {{}}\nM.states = {{\n\tinitial = \"a\",\n\tstates = {{ {states} }},\n}}\nreturn M\n"
+            ),
+        );
+    }
+    let mut app = app_in(&folder.0);
+    for (file, _, _) in &cases {
+        spawn_script(&mut app, file, file.trim_end_matches(".luau"));
+    }
+    app.update_n(2);
+    let errs = errors(&mut app);
+    for (_, _, want) in &cases {
+        assert!(errs.iter().any(|e| e.contains(want)), "{want}: {errs:?}");
+    }
 }

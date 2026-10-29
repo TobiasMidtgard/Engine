@@ -17,18 +17,25 @@
 -- A state runs `enter_<name>` as a task when it starts (it may wait: `done` follows when it
 -- returns), `update_<name>(dt)` every frame and `exit_<name>` when it ends; the state's table
 -- can hold `enter`, `update` and `exit` functions instead. A state with `states` inside is a
--- group: entering it enters its `initial` one (or the one it was last in, with `history = true`).
+-- group: entering it enters its `initial` one (or the one it was last in, with `history = true`;
+-- with `history = "deep"` the states inside that one resume where they were too).
 -- A group with `parallel = true` runs all its states at once (regions, each usually a group of
 -- its own): an event reaches every region, and `self.state` is the first region's state.
+-- A state with `final = true` ends its group: a group's `done` follows when it reaches one of its
+-- final states (a parallel group's, when every region has), as XState's onDone and SCXML's
+-- done.state; a final state at the outer level ends the machine (nothing changes it until `go`).
 -- Triggers: `on = { event = "to" }` (interactions are `interact`; messages, wired signals and
 -- `self:trigger(event)` use their names), `after = { seconds, "to" }`, `done = "to"` and
 -- `when = { condition = "to" }` (a method or field of the script, `"not lit"` too, checked every
 -- frame). Events go from the innermost state out; the first that knows the event takes it. An
 -- `on` entry may be `{ to = "x", guard = "condition" }` or a list of those, the first whose guard
--- holds wins. Runs as part of the script: the runtime calls `__states_start` after `start`,
--- `__states_tick` after `update`, `__states_event` for each event and `__states_reload` after a
--- hot reload; `__states_hit` tells it a breakpoint the editor set was reached.
--- engine-design/scripting-research.md §19 and §20.
+-- holds wins. An event (or `go`) sent while the machine is changing state, from an enter or exit
+-- hook, waits until that change has settled: each change runs to completion first. Runs as part
+-- of the script: the runtime calls `__states_start` after `start`, `__states_tick` after
+-- `update`, `__states_event` for each event and `__states_reload` after a hot reload;
+-- `__states_hit` tells it a breakpoint the editor set was reached. Each change keeps the
+-- script's values as they were (the editor shows them when it scrubs back through the log).
+-- engine-design/scripting-research.md §19, §20 and §21.
 
 local Base = __script_base
 local spawn_as = __task_spawn_as
@@ -36,10 +43,13 @@ local hit_break = __states_hit
 
 local MAX_CHANGES = 32
 local LOG_LENGTH = 64
+-- The values a change keeps, at most.
+local MAX_VALUES = 24
 local KEYS = {
 	initial = true,
 	history = true,
 	parallel = true,
+	final = true,
 	on = true,
 	after = true,
 	done = true,
@@ -116,8 +126,33 @@ local function compile(def: any): (any, string?, string?)
 					k
 			end
 		end
+		if d.final ~= nil and type(d.final) ~= "boolean" then
+			return `state {name}: final must be true or false`, name
+		end
+		if d.final then
+			if name == "root" then
+				return "the outer table can't be final: put final = true on the state that ends the machine", nil
+			end
+			if d.states ~= nil then
+				return `state {name} is final, so it has no states inside: it is where its group ends`, name
+			end
+			for _, k in { "on", "after", "when", "done" } do
+				if d[k] ~= nil then
+					return `state {name} is final, so it has no way out ({k}): reaching it ends its group`, name
+				end
+			end
+		end
+		local h = d.history
+		if h ~= nil and h ~= true and h ~= false and h ~= "shallow" and h ~= "deep" then
+			return `state {name}: history must be true (back to the state it was last in) or "deep" (and to where the states inside that one were)`,
+				name
+		end
 		local kids = d.states
 		if kids == nil then
+			if h then
+				return `state {name} has history but no states inside: history picks which of them it goes back to`,
+					name
+			end
 			return nil
 		end
 		if type(kids) ~= "table" then
@@ -152,6 +187,10 @@ local function compile(def: any): (any, string?, string?)
 			end
 			if d.initial ~= nil then
 				return `state {name} is parallel: all its states start together, so it has no initial`,
+					name
+			end
+			if h == true or h == "shallow" then
+				return `state {name} is parallel, so it enters all its states anyway: history = "deep" keeps where each of them was`,
 					name
 			end
 			return nil
@@ -234,6 +273,40 @@ local function compile(def: any): (any, string?, string?)
 			end
 		end
 		if d.done ~= nil then
+			if name == "root" then
+				return nil, "the outer table has no done: a final state at the outer level ends the machine", nil
+			end
+			-- A group's done follows when it reaches a final state: it must have one to reach.
+			if #node.children > 0 then
+				local function finishes(n: any): boolean
+					if #n.children == 0 then
+						return n.def.final == true
+					end
+					for _, c in n.children do
+						if n.def.parallel then
+							if not finishes(nodes[c]) then
+								return false
+							end
+						elseif nodes[c].def.final then
+							return true
+						end
+					end
+					return n.def.parallel == true
+				end
+				if node.def.parallel then
+					for _, c in node.children do
+						if not finishes(nodes[c]) then
+							return nil,
+								`state {name}: done follows when every region is in a final state, and {c} never is (give one of its states final = true)`,
+								c
+						end
+					end
+				elseif not finishes(node) then
+					return nil,
+						`state {name}: done follows when it reaches a final state, and none of its states is final (give one final = true)`,
+						name
+				end
+			end
 			local p, about = target(name, d.done, "done")
 			if p then
 				return nil, p, about
@@ -419,9 +492,82 @@ local function snapshot(run: any): { string }
 	return out
 end
 
--- A change, with every state active after it (the editor shows the machine as it was then).
-local function log(run: any, from: string, to: string, why: string)
-	table.insert(run.log, { t = run.clock, from = from, to = to, why = why, active = snapshot(run) })
+-- A number as the editor shows it: whole numbers plain, others to three decimals.
+local function num(x: number): string
+	if x == math.floor(x) and math.abs(x) < 1e15 then
+		return string.format("%d", x)
+	end
+	local s = string.format("%.3f", x)
+	s = string.gsub(s, "0+$", "")
+	return s
+end
+
+-- A value as the editor shows it (nil: one it leaves out, as functions and tables).
+local function shown(v: any): string?
+	local kind = type(v)
+	if kind == "number" then
+		return num(v)
+	elseif kind == "boolean" then
+		return tostring(v)
+	elseif kind == "string" then
+		return if #v > 40 then `"{string.sub(v, 1, 39)}…"` else `"{v}"`
+	elseif kind == "table" then
+		local mt = getmetatable(v)
+		if type(mt) == "table" and mt.__name == "vec3" then
+			return `({num(v.x)}, {num(v.y)}, {num(v.z)})`
+		end
+		return nil
+	elseif kind == "userdata" then
+		-- An entity: its name.
+		local ok, name = pcall(function()
+			return v.name
+		end)
+		return if ok and type(name) == "string" and name ~= "" then name else nil
+	end
+	return nil
+end
+
+-- The script's values now, sorted by name: its props (`props.range`) and its own fields (not
+-- `_private` ones), those `shown` can show (PlayMaker's Debug Flow shows them as they were at
+-- each change).
+local function values(self: any): { { string } }
+	local out = {}
+	local props = rawget(self, "props")
+	if type(props) == "table" then
+		for _, k in sorted_keys(props) do
+			local s = shown(props[k])
+			if s then
+				table.insert(out, { `props.{k}`, s })
+			end
+		end
+	end
+	local own = {}
+	for k in self do
+		-- `_name` fields are the script's own business (and `__` ones the engine's).
+		if type(k) == "string" and string.sub(k, 1, 1) ~= "_" and k ~= "props" and k ~= "entity" and k ~= "state" then
+			table.insert(own, k)
+		end
+	end
+	table.sort(own)
+	for _, k in own do
+		local s = shown(rawget(self, k))
+		if s then
+			table.insert(out, { k, s })
+		end
+	end
+	while #out > MAX_VALUES do
+		table.remove(out)
+	end
+	return out
+end
+
+-- A change, with every state active after it and the script's values (the editor shows the
+-- machine as it was then).
+local function log(self: any, run: any, from: string, to: string, why: string)
+	table.insert(
+		run.log,
+		{ t = run.clock, from = from, to = to, why = why, active = snapshot(run), values = values(self) }
+	)
 	if #run.log > LOG_LENGTH then
 		table.remove(run.log, 1)
 	end
@@ -461,6 +607,8 @@ local function enter(self: any, run: any, node: any)
 	run.since[node.name] = run.clock
 	run.visit[node.name] = run.serial
 	run.finished[node.name] = nil
+	-- Its enter hook sees where it is (the change sets it again once every state is entered).
+	self.state = current(run).name
 	check_break(self, run, "enter", node.name)
 	local h = hook_of(self, node, "enter")
 	if not h then
@@ -513,18 +661,21 @@ end
 
 -- Enters what's missing under the active `node`, down to leaves: a group's `initial` state (or
 -- the one it was last in, with `history`, unless `fresh`) and every region of a parallel group.
-local function fill(self: any, run: any, node: any, fresh: boolean?)
+-- `deep`: inside a group with `history = "deep"`, so every group resumes where it was.
+local function fill(self: any, run: any, node: any, fresh: boolean?, deep: boolean?)
 	if #node.children == 0 then
 		return
 	end
 	local nodes = run.m.nodes
-	if node.def.parallel then
+	local d = node.def
+	deep = deep or d.history == "deep"
+	if d.parallel then
 		for _, name in node.children do
 			local c = nodes[name]
 			if not run.on[c] then
 				enter(self, run, c)
 			end
-			fill(self, run, c, fresh)
+			fill(self, run, c, fresh, deep)
 		end
 		return
 	end
@@ -538,13 +689,33 @@ local function fill(self: any, run: any, node: any, fresh: boolean?)
 	if not inside then
 		local next_name = node.initial
 		local last = run.last[node.name]
-		if not fresh and node.def.history and last and nodes[last] and nodes[last].parent == node then
+		if not fresh and (d.history or deep) and last and nodes[last] and nodes[last].parent == node then
 			next_name = last
 		end
 		inside = nodes[next_name]
 		enter(self, run, inside)
 	end
-	fill(self, run, inside, fresh)
+	fill(self, run, inside, fresh, deep)
+end
+
+-- Whether the active `node` is done: a group in one of its final states (a parallel group with
+-- every region done), a state on its own that is final.
+local function complete(run: any, node: any): boolean
+	local nodes = run.m.nodes
+	if #node.children == 0 then
+		return node.def.final == true
+	end
+	for _, name in node.children do
+		local c = nodes[name]
+		if node.def.parallel then
+			if not complete(run, c) then
+				return false
+			end
+		elseif run.on[c] then
+			return c.def.final == true
+		end
+	end
+	return node.def.parallel == true
 end
 
 -- Goes from `source` (an active state, the one whose transition fires) to the state named
@@ -553,7 +724,9 @@ end
 -- between two regions of a parallel group starts all its regions again, as in SCXML.
 local function change(self: any, run: any, source: any, to: string, why: string)
 	run.changes += 1
-	local from = leaf_under(run, source).name
+	-- Where it was: the state it was in under `source` (a parallel group: the group, its
+	-- regions each being in one).
+	local from = if source.def.parallel then source.name else leaf_under(run, source).name
 	if run.changes > MAX_CHANGES then
 		local path = {}
 		for k = math.max(1, #run.log - 6), #run.log do
@@ -601,15 +774,27 @@ local function change(self: any, run: any, source: any, to: string, why: string)
 	run.changing = false
 	run.why = nil
 	self.state = current(run).name
-	log(run, from, leaf_under(run, target).name, why)
+	log(self, run, from, leaf_under(run, target).name, why)
 end
 
--- `done` transitions of states whose enter task has finished, innermost first.
+local deliver
+
+-- What waited while the machine changed state: an event or a `go`.
+local function dispatch(self: any, run: any, q: any)
+	if q.go then
+		change(self, run, nearest(run, run.m.nodes[q.go]), q.go, "go")
+	else
+		deliver(self, run, q.event, table.unpack(q.args, 1, q.args.n))
+	end
+end
+
+-- After a change: `done` transitions, innermost first (of states whose enter task has
+-- finished, of groups that reached a final state), then what waited for the change, one at a
+-- time, each settling in turn. A final state at the outer level ends the machine.
 settle = function(self: any, run: any)
-	local guard = 0
 	while true do
-		guard += 1
-		if guard > MAX_CHANGES + 1 then
+		if run.over then
+			table.clear(run.queue)
 			return
 		end
 		local fired = false
@@ -617,14 +802,26 @@ settle = function(self: any, run: any)
 		for k = #list, 1, -1 do
 			local node = list[k]
 			local to = node.def.done
-			if to ~= nil and run.on[node] and run.finished[node.name] then
+			if
+				to ~= nil
+				and run.on[node]
+				and (if #node.children > 0 then complete(run, node) else run.finished[node.name])
+			then
 				change(self, run, node, to, "done")
 				fired = true
 				break
 			end
 		end
 		if not fired then
-			return
+			if complete(run, run.m.root) then
+				run.over = true
+			else
+				local q = table.remove(run.queue, 1)
+				if not q then
+					return
+				end
+				dispatch(self, run, q)
+			end
 		end
 	end
 end
@@ -650,6 +847,10 @@ local function start(self: any, clock: number, at: string?)
 		changes = 0,
 		changing = true,
 		why = if at then "go" else "start",
+		-- Events and `go`s sent while it changed state, waiting for the change to settle.
+		queue = {},
+		-- It reached a final state at the outer level.
+		over = false,
 	}
 	rawset(self, "__machine", run)
 	run.on[m.root] = true
@@ -669,7 +870,7 @@ local function start(self: any, clock: number, at: string?)
 	run.changing = false
 	run.why = nil
 	self.state = current(run).name
-	log(run, "", self.state, if at then "go" else "start")
+	log(self, run, "", self.state, if at then "go" else "start")
 	settle(self, run)
 	return run
 end
@@ -702,6 +903,9 @@ function Base:__states_tick(dt: number, clock: number)
 				h(self, dt)
 			end
 		end
+	end
+	if run.over then
+		return
 	end
 	-- Timers and conditions, innermost first; after a change, the new states' turn.
 	for _ = 1, MAX_CHANGES + 1 do
@@ -739,11 +943,7 @@ end
 
 -- An event: in each region, the innermost state that knows it changes state (a state that
 -- several regions share takes it once). Returns whether one did.
-function Base:__states_event(event: string, ...: any): boolean
-	local run = running(self)
-	if not run then
-		return false
-	end
+deliver = function(self: any, run: any, event: string, ...: any): boolean
 	local took = false
 	local ls = leaves(run)
 	local stamps = {}
@@ -777,6 +977,21 @@ function Base:__states_event(event: string, ...: any): boolean
 			end
 		end
 	end
+	return took
+end
+
+-- An event for the machine. While it is changing state (the event comes from an enter or exit
+-- hook) it waits until the change has settled, and the answer is whether some state takes it.
+function Base:__states_event(event: string, ...: any): boolean
+	local run = running(self)
+	if not run or run.over then
+		return false
+	end
+	if run.changing then
+		table.insert(run.queue, { event = event, args = table.pack(...) })
+		return run.m.events[event] == true
+	end
+	local took = deliver(self, run, event, ...)
 	if took then
 		settle(self, run)
 	end
@@ -845,9 +1060,10 @@ function Base:__states_reload(clock: number)
 	fill(self, run, m.root, true)
 	run.changing = false
 	run.why = nil
+	run.over = complete(run, m.root)
 	self.state = current(run).name
 	if run.enters ~= enters or kept ~= #old then
-		log(run, from, self.state, "reload")
+		log(self, run, from, self.state, "reload")
 		settle(self, run)
 	end
 end
@@ -875,7 +1091,17 @@ function Base:__states_live(): any
 	end
 	local entries = {}
 	for _, e in run.log do
-		table.insert(entries, { t = e.t, from = e.from, to = e.to, why = e.why, active = e.active })
+		table.insert(
+			entries,
+			{ t = e.t, from = e.from, to = e.to, why = e.why, active = e.active, values = e.values }
+		)
+	end
+	-- Active groups in one of their final states (every region, for a parallel group).
+	local done = {}
+	for _, node in actives(run) do
+		if node.name ~= "root" and #node.children > 0 and complete(run, node) then
+			table.insert(done, node.name)
+		end
 	end
 	return {
 		active = snapshot(run),
@@ -885,6 +1111,9 @@ function Base:__states_live(): any
 		clock = run.clock,
 		log = entries,
 		history = table.clone(run.last),
+		done = done,
+		over = run.over,
+		values = values(self),
 	}
 end
 
@@ -917,8 +1146,9 @@ function Base.__states_shape(class: any): any
 				name = node.name,
 				parent = if node.parent and node.parent.name ~= "root" then node.parent.name else nil,
 				initial = node.initial,
-				history = d.history and true or nil,
+				history = if d.history == "deep" then "deep" elseif d.history then true else nil,
 				parallel = d.parallel and true or nil,
+				final = d.final and true or nil,
 				doc = if type(d.doc) == "string" then d.doc else nil,
 				hooks = hooks,
 			})
@@ -965,7 +1195,9 @@ end
 
 -- What scripts call.
 
--- Goes to the state named `name` now (from the state nearest it: its exits and enters run).
+-- Goes to the state named `name` now (from the state nearest it: its exits and enters run; from
+-- an enter or exit hook, once the change it is part of has settled). It starts a machine that
+-- reached a final state at the outer level again.
 function Base:go(name: string)
 	local run = running(self)
 	if not run then
@@ -990,6 +1222,13 @@ function Base:go(name: string)
 		table.sort(names)
 		error(`no state "{name}" in states ({list(names)})`, 2)
 	end
+	if run.changing then
+		-- From an enter or exit hook: once this change has settled.
+		table.insert(run.queue, { go = name })
+		return
+	end
+	-- Going somewhere starts a finished machine again.
+	run.over = false
 	run.changes = 0
 	change(self, run, nearest(run, run.m.nodes[name]), name, "go")
 	settle(self, run)

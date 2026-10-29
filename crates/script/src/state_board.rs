@@ -145,6 +145,16 @@ fn rect4(a: Area) -> [f32; 4] {
     [a.min.x, a.min.y, a.max.x, a.max.y]
 }
 
+/// A check mark `r` across, centered on `c`.
+fn check(cv: &mut Canvas, c: Vec2, r: f32, color: Rgb) {
+    let w = (r * 0.32).max(1.2);
+    let a = c + Vec2::new(-r, 0.0);
+    let b = c + Vec2::new(-r * 0.3, r * 0.7);
+    let e = c + Vec2::new(r, -r * 0.8);
+    cv.segment(a.into(), b.into(), w, color, 0.8);
+    cv.segment(b.into(), e.into(), w, color, 0.8);
+}
+
 // ----------------------------------------------------------------------------- drawing
 
 /// What a board shows besides the machine.
@@ -209,20 +219,23 @@ pub(crate) fn draw(
             })
             .collect();
         if !now.is_empty() {
+            // A machine that reached a final state at the outer level has ended there.
+            let word = if l.over { "ended in" } else { "in" };
+            let gap = word.len() as f32 + 1.0;
             labels.push(Label {
                 px: head_px,
                 x,
                 baseline: head * 0.66,
-                text: "in".into(),
+                text: word.into(),
                 color: DIM,
             });
             let text = Canvas::fitted(
                 &now.join(" + "),
-                ((wf - x - adv * 9.0 - pad) / adv).max(4.0) as usize,
+                ((wf - x - adv * (gap + 6.0) - pad) / adv).max(4.0) as usize,
             );
             labels.push(Label {
                 px: head_px,
-                x: x + adv * 3.0,
+                x: x + adv * gap,
                 baseline: head * 0.66,
                 text,
                 color: LIVE,
@@ -255,7 +268,11 @@ pub(crate) fn draw(
         }
     }
     if let Some(m) = machine {
-        let placed = diagram::layout(m, &Default::default());
+        let placed = diagram::layout_for(
+            m,
+            &Default::default(),
+            area.width() / area.height().max(1.0),
+        );
         machine_drawing(
             &mut cv,
             &mut labels,
@@ -432,25 +449,48 @@ fn machine_drawing(
                 .children(Some(&g.name))
                 .filter_map(|c| placed.rects.get(&c.name).map(|r| rect(*r)))
                 .collect();
-            regions.sort_by(|a, b| a.min.x.total_cmp(&b.min.x));
+            // Side by side, or one under another (`diagram::layout_for` picks for the board).
+            let stacked = diagram::stacked(m, placed, &g.name);
+            if stacked {
+                regions.sort_by(|a, b| a.min.y.total_cmp(&b.min.y));
+            } else {
+                regions.sort_by(|a, b| a.min.x.total_cmp(&b.min.x));
+            }
             for pair in regions.windows(2) {
-                let x = (pair[0].max.x + pair[1].min.x) / 2.0;
-                let (mut y, end) = (head.max.y + 6.0 * s, r.max.y - 6.0 * s);
-                while y < end {
-                    let to = (y + 7.0 * s).min(end);
+                // A dashed line between them, the whole way across the group.
+                let (a, b) = if stacked {
+                    let y = (pair[0].max.y + pair[1].min.y) / 2.0;
+                    (
+                        Vec2::new(r.min.x + 6.0 * s, y),
+                        Vec2::new(r.max.x - 6.0 * s, y),
+                    )
+                } else {
+                    let x = (pair[0].max.x + pair[1].min.x) / 2.0;
+                    (
+                        Vec2::new(x, head.max.y + 6.0 * s),
+                        Vec2::new(x, r.max.y - 6.0 * s),
+                    )
+                };
+                let len = (b - a).length();
+                let dir = (b - a) / len.max(1e-3);
+                let mut at = 0.0;
+                while at < len {
+                    let to = (at + 7.0 * s).min(len);
                     cv.segment(
-                        [x, y],
-                        [x, to],
+                        (a + dir * at).into(),
+                        (a + dir * to).into(),
                         1.4 * s.max(1.0),
                         mix(pal.group_edge, TEXT, 0.3),
                         0.3,
                     );
-                    y = to + 5.0 * s;
+                    at = to + 5.0 * s;
                 }
             }
         }
+        // Its right end: the history mark (H, H* for deep), then whether it is done.
+        let mut right = head.max.x - 8.0 * s;
         if g.history {
-            let c = Vec2::new(head.max.x - 16.0 * s, head.center().y);
+            let c = Vec2::new(right - 8.5 * s, head.center().y);
             cv.outline(
                 rect4(Area::from_min_max(
                     c - Vec2::splat(8.5 * s),
@@ -461,13 +501,33 @@ fn machine_drawing(
                 DIM,
                 0.4,
             );
+            let mark = if g.deep { "H*" } else { "H" };
             labels.push(Label {
                 px: 10.5 * s,
-                x: c.x - 10.5 * s * 0.3,
+                x: c.x - 10.5 * s * 0.3 * mark.len() as f32,
                 baseline: c.y + 10.5 * s * 0.35,
-                text: "H".into(),
+                text: mark.into(),
                 color: DIM,
             });
+            right -= 24.0 * s;
+        }
+        if live.is_some_and(|l| l.done.contains(&g.name)) {
+            // Reached a final state (every region has): a check and "done".
+            let px = small_px;
+            let w = px * 0.6 * 4.0;
+            labels.push(Label {
+                px,
+                x: right - w,
+                baseline: head.center().y + px * 0.35,
+                text: "done".into(),
+                color: pal.play,
+            });
+            check(
+                cv,
+                Vec2::new(right - w - 10.0 * s, head.center().y),
+                6.0 * s,
+                pal.play,
+            );
         }
     }
 
@@ -574,6 +634,17 @@ fn machine_drawing(
             edge,
             if current { 1.0 } else { 0.4 },
         );
+        if st.is_final {
+            // A final state: a second edge inside the first (where its group ends).
+            let inset = Vec2::splat(4.0 * s);
+            cv.outline(
+                rect4(Area::from_min_max(r.min + inset, r.max - inset)),
+                5.0 * s,
+                width * 0.8,
+                edge,
+                if current { 1.0 } else { 0.4 },
+            );
+        }
         let inner = r.width() - 24.0 * s;
         let secs = on
             .then(|| live.and_then(|l| l.secs_in(&st.name)))
@@ -593,6 +664,10 @@ fn machine_drawing(
         let running = live.is_some_and(|l| l.running.contains(&st.name));
         let (what, color) = if running {
             ("enter running".to_string(), kind_color("after"))
+        } else if st.is_final {
+            let mut what = vec!["final".to_string()];
+            what.extend(st.hooks.iter().cloned());
+            (what.join(" · "), if current { pal.play } else { DIM })
         } else if st.hooks.is_empty() {
             ("-".to_string(), dimmed(DIM, 0.7))
         } else {
@@ -915,6 +990,7 @@ mod tests {
             to: to.into(),
             why: why.into(),
             active: active.iter().map(|a| a.to_string()).collect(),
+            values: Vec::new(),
         };
         let live = Live {
             active: vec!["powered".into(), "open".into()],
@@ -934,6 +1010,7 @@ mod tests {
                 change(9.5, "opening", "open", "done", &["powered", "open"]),
             ],
             history: BTreeMap::new(),
+            ..Default::default()
         };
         (m, live)
     }

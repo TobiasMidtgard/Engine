@@ -394,9 +394,11 @@ pub fn panel(ui: &mut egui::Ui, world: &mut World, editor: &mut Editor) {
     if let Some(machine) = machine.filter(|_| stop.is_none() && !tab.machine.hidden) {
         let selection = editor.selection.clone();
         let paused = editor.mode == Mode::Paused;
+        // Leaves the code at least 520 points (its tool bar's width) where it can.
+        let wide = (ui.available_width() - 520.0).clamp(300.0, 560.0);
         egui::Panel::right("script states")
             .resizable(true)
-            .default_size(560.0)
+            .default_size(wide)
             .size_range(300.0..=1000.0)
             .frame(
                 egui::Frame::new()
@@ -1040,9 +1042,16 @@ fn tool_bar(ui: &mut egui::Ui, world: &mut World, tab: &mut ScriptsTab, now: f64
             let right = egui::Layout::right_to_left(egui::Align::Center);
             if ui.available_width() < 780.0 {
                 ui.horizontal_wrapped(|ui| doc_tabs(ui, world, tab));
-                ui.horizontal(|ui| {
-                    ui.with_layout(right, |ui| tool_buttons(ui, world, tab, now));
-                });
+                // Their own row, laid out in a rect of its own: buttons that don't fit are
+                // cut off at its left end instead of pushing the code view out sideways (a
+                // right-to-left row that overflows widens its parent to the left).
+                let (row, _) = ui.allocate_exact_size(
+                    Vec2::new(ui.available_width(), ui.spacing().interact_size.y + 4.0),
+                    egui::Sense::hover(),
+                );
+                let mut buttons = ui.new_child(egui::UiBuilder::new().max_rect(row).layout(right));
+                buttons.set_clip_rect(row.intersect(ui.clip_rect()));
+                tool_buttons(&mut buttons, world, tab, now);
             } else {
                 ui.horizontal(|ui| {
                     doc_tabs(ui, world, tab);
@@ -5272,6 +5281,29 @@ fn states_panel(
                 });
             });
     }
+    // Ended in a final state at the outer level: nothing changes it until a `go`.
+    if let Some(l) = live
+        .as_ref()
+        .filter(|l| l.over && tab.machine.scrub.is_none())
+    {
+        egui::Frame::new()
+            .fill(theme::PLAY.gamma_multiply(0.14))
+            .corner_radius(4.0)
+            .inner_margin(egui::Margin::symmetric(8, 4))
+            .show(ui, |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(RichText::new("✔ Ended:").strong().color(theme::PLAY));
+                    ui.label(
+                        RichText::new(format!(
+                            "it reached {}, a final state",
+                            l.current().unwrap_or_default()
+                        ))
+                        .color(theme::TEXT),
+                    );
+                    ui.label(theme::dim("self:go(state) starts it again."));
+                });
+            });
+    }
     // Showing an earlier moment of the log: which, and the way back to live.
     let shown = tab.machine.scrub.as_ref().and_then(|(t, to)| {
         live.as_ref()?
@@ -5332,7 +5364,11 @@ fn states_panel(
     let h = (ui.available_height() - log_h - 8.0).max(140.0);
     let (rect, resp) =
         ui.allocate_exact_size(Vec2::new(ui.available_width(), h), egui::Sense::click());
-    let placed = crate::states::layout(&m, &BTreeMap::new());
+    let placed = crate::states::layout_for(
+        &m,
+        &BTreeMap::new(),
+        Some(rect.width() / rect.height().max(1.0)),
+    );
     let (hits, _) = crate::states::fitted(
         ui,
         rect,
@@ -5364,16 +5400,35 @@ fn states_panel(
                     if !st.doc.is_empty() {
                         lines.push(st.doc.clone());
                     }
-                    if m.is_group(name) {
+                    if m.is_group(name) && st.parallel {
+                        lines.push("a parallel group: all its states run at once".into());
+                    } else if m.is_group(name) {
                         lines.push(format!(
                             "a group: starts in {}{}",
                             st.initial.clone().unwrap_or_default(),
-                            if st.history {
+                            if st.deep {
+                                "; with deep history it goes back to where it was, all the way in"
+                            } else if st.history {
                                 "; with history it goes back to where it was"
                             } else {
                                 ""
                             }
                         ));
+                    }
+                    if m.is_group(name)
+                        && m.transitions.iter().any(|t| {
+                            t.from.as_deref() == Some(name.as_str())
+                                && matches!(t.trigger, engine_script::states::Trigger::Done)
+                        })
+                    {
+                        lines.push(if st.parallel {
+                            "done when every region reaches a final state".into()
+                        } else {
+                            "done when it reaches a final state".into()
+                        });
+                    }
+                    if st.is_final {
+                        lines.push("final: reaching it ends its group".into());
                     }
                     for h in &st.hooks {
                         lines.push(format!("{h}_{name}"));
@@ -5451,12 +5506,46 @@ fn states_panel(
     }
     if let Some(l) = &live {
         ui.separator();
-        ui.label(RichText::new("CHANGES").small().color(theme::TEXT_DIM))
-            .on_hover_text("Click a change to see the machine as it was after it");
-        let picked = egui::ScrollArea::vertical()
-            .id_salt("state log")
-            .max_height(log_h - 30.0)
-            .show(ui, |ui| crate::states::log_rows(ui, l, 64, shown))
+        // The changes, and beside them the script's values as they were after the one shown.
+        let picked = ui
+            .horizontal_top(|ui| {
+                let values_w = (ui.available_width() * 0.4).min(320.0);
+                let log_w = ui.available_width() - values_w - 14.0;
+                let picked = ui
+                    .allocate_ui(Vec2::new(log_w, log_h - 10.0), |ui| {
+                        ui.vertical(|ui| {
+                            ui.label(RichText::new("CHANGES").small().color(theme::TEXT_DIM))
+                                .on_hover_text(
+                                    "Click a change to see the machine as it was after it",
+                                );
+                            egui::ScrollArea::vertical()
+                                .id_salt("state log")
+                                .max_height(log_h - 30.0)
+                                .show(ui, |ui| crate::states::log_rows(ui, l, 64, shown))
+                                .inner
+                        })
+                        .inner
+                    })
+                    .inner;
+                ui.separator();
+                ui.vertical(|ui| {
+                    let what = if shown.is_some() {
+                        "VALUES THEN"
+                    } else {
+                        "VALUES NOW"
+                    };
+                    ui.label(RichText::new(what).small().color(theme::TEXT_DIM))
+                        .on_hover_text(
+                            "The script's props and fields, as they were right after the change \
+                             shown above (each change keeps them)",
+                        );
+                    egui::ScrollArea::vertical()
+                        .id_salt("state values")
+                        .max_height(log_h - 30.0)
+                        .show(ui, |ui| crate::states::value_rows(ui, l, shown));
+                });
+                picked
+            })
             .inner;
         if let Some(k) = picked {
             tab.machine.scrub = Some((l.log[k].t, l.log[k].to.clone()));
@@ -5476,7 +5565,7 @@ fn machine_section(ui: &mut egui::Ui, world: &World, entity: Entity, m: &Machine
             match live.as_ref().and_then(|l| l.current().map(|c| (c, l))) {
                 Some((c, l)) => {
                     ui.horizontal(|ui| {
-                        ui.label(theme::dim("In"));
+                        ui.label(theme::dim(if l.over { "Ended in" } else { "In" }));
                         ui.label(
                             RichText::new(l.current.join(" + "))
                                 .color(theme::PLAY)
@@ -5495,8 +5584,9 @@ fn machine_section(ui: &mut egui::Ui, world: &World, entity: Entity, m: &Machine
                     }));
                 }
             }
-            let placed = crate::states::layout(m, &BTreeMap::new());
+            // As wide as the panel, at most 300 high.
             let w = ui.available_width();
+            let placed = crate::states::layout_for(m, &BTreeMap::new(), Some(w / 300.0));
             let h =
                 (w * placed.bounds.height() / placed.bounds.width().max(1.0)).clamp(140.0, 300.0);
             let (rect, _) = ui.allocate_exact_size(Vec2::new(w, h), egui::Sense::hover());
@@ -7395,6 +7485,8 @@ pub fn tests_shots(dir: String) -> ShotScript {
 
 /// Where the state machine shots' gate stands, and the camera on it.
 const GATE_AT: DVec3 = DVec3::new(-0.3, 0.0, -0.5);
+/// Where the states shots put the rune seal, once the gate is gone.
+const SEAL_AT: DVec3 = DVec3::new(-0.3, 0.0, -2.0);
 
 /// `editor --headless --size 1920x1080 --shots <dir> --script states`: a gate run by its
 /// `states` table (examples/gate.luau): the diagram beside its code, live while it opens, waits
@@ -7698,6 +7790,67 @@ pub fn states_shots(dir: String) -> ShotScript {
         Step::Do(Box::new(player_to(GATE_AT + DVec3::new(0.9, 0.88, 1.5)))),
         Step::Wait(9),
         Step::Shot("states_12_two_regions_at_once"),
+        // Stopped. A rune seal in their place: each of its three runes is a region that ends in
+        // a final state, and the seal opens once all three have (examples/seal.luau).
+        Step::Do(Box::new(|world: &mut World, ed: &mut Editor| {
+            editor::stop(world, ed);
+            for name in ["Turret", "Gate"] {
+                ed.select(crate::shots::find(world, name));
+                editor::delete_selection(world, ed);
+            }
+            editor::spawn_with(
+                world,
+                ed,
+                "Seal".into(),
+                vec![(
+                    "Script",
+                    serde_json::to_value(Script::new("examples/seal.luau")).unwrap_or_default(),
+                )],
+                Transform::from_translation(SEAL_AT),
+            );
+        })),
+        Step::Camera(
+            SEAL_AT + DVec3::new(1.6, 2.5, 7.6),
+            SEAL_AT + DVec3::new(0.0, 1.2, 0.6),
+        ),
+        Step::Do(Box::new(open_file("examples/seal.luau", 18))),
+        Step::Select("Seal"),
+        Step::Wait(4),
+        Step::Do(Box::new(|world: &mut World, ed: &mut Editor| {
+            editor::play(world, ed)
+        })),
+        Step::Wait(6),
+        Step::Do(Box::new(|world: &mut World, _: &mut Editor| {
+            dusk_sky(world)
+        })),
+        Step::Do(Box::new(player_to(SEAL_AT + DVec3::new(1.2, 0.88, 3.6)))),
+        Step::Wait(4),
+        // E on the left rune, then the right: two of three regions done, the seal still shut.
+        Step::Do(Box::new(press("Left rune"))),
+        Step::Wait(3),
+        Step::Do(Box::new(press("Right rune"))),
+        Step::Wait(8),
+        Step::Shot("states_13_two_runes_two_regions_done"),
+        // The middle rune: every region is done, so `sealed`'s done opens it.
+        Step::Do(Box::new(press("Middle rune"))),
+        Step::Wait(14),
+        Step::Shot("states_14_every_region_done_it_opens"),
+        // Back to the first rune's change: the values as they were then, and now beside them.
+        Step::Do(Box::new(|world: &mut World, _: &mut Editor| {
+            let Some(e) = crate::shots::find(world, "Seal") else {
+                return;
+            };
+            let first = engine_script::states::live(world, e)
+                .and_then(|l| l.log.into_iter().find(|c| c.to == "left_lit"));
+            if let Some(c) = first {
+                world.resource_mut::<ScriptsTab>().machine.scrub = Some((c.t, c.to));
+            }
+        })),
+        Step::Wait(3),
+        Step::Shot("states_15_values_then_and_now"),
+        Step::Do(Box::new(|world: &mut World, _: &mut Editor| {
+            world.resource_mut::<ScriptsTab>().machine.scrub = None;
+        })),
     ];
     steps.extend(crate::graphs::states_steps());
     ShotScript::new(dir, steps)

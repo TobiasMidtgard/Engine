@@ -227,7 +227,44 @@ Turret.states = {
   saying what got it there; Play goes on. Click a change in the log to see the machine as it
   was right after it (Earlier, Later, Live).
 - In the world: a `StateBoard { target = "Gate" }` on a quad draws that object's machine live,
-  as the editor does (the Script courtyard's portcullis has one).
+  as the editor does (the Script courtyard's portcullis and rune seal have one).
+- Finishing: `final = true` marks a state that ends its group. A group's `done` follows once
+  it reaches one of its final states, and a parallel group's once every region has, so "all
+  three runes lit" needs no counting (XState's `onDone`). A final state at the outer level
+  ends the machine: nothing changes it until `self:go(...)`. A final state has no way out of
+  its own (no `on`, `after`, `when` or `done`).
+
+```lua
+Seal.states = {
+	initial = "sealed",
+	states = {
+		sealed = {
+			parallel = true,
+			done = "opening", -- once every rune is lit
+			states = {
+				left = { initial = "left_dark", states = {
+					left_dark = { on = { touch_left = "left_lit" } },
+					left_lit = { final = true },
+				} },
+				-- middle and right the same
+			},
+		},
+		opening = { done = "open" },
+		open = { after = { "hold", "closing" } },
+		closing = { done = "sealed" },
+	},
+}
+```
+
+- `history = "deep"` resumes a group all the way in: the state it was in and, inside that
+  one, where each group was (`history = true` resumes only the state directly inside it).
+  A guard called away from its patrol comes back to the same waypoint.
+- An event or `go` from an enter or exit hook waits until the change it is part of is done
+  (each change runs to completion, as in SCXML), so `self:trigger("next")` in `enter_b` takes
+  effect once b is fully entered.
+- Each change keeps the script's values (props and its own fields). Click a change in the log
+  and the panel beside it shows them as they were right after it, the ones that change set
+  lit and what they are now beside them (PlayMaker's Debug Flow).
 
 ## Visual scripts (`.graph`)
 
@@ -381,6 +418,9 @@ have them.
 - `examples/turret.luau`: a sentry turret with two regions at once (`parallel = true`): its
   aim sweeps or follows whoever comes near while its gun fires and cools down; power off and
   on starts both again. `examples/turret.test.luau` tests them.
+- `examples/seal.luau`: a rune seal run by final states: three rune stones
+  (`examples/rune.luau`, E on each) are the regions of a parallel group, and the door sinks
+  once all three are lit. `examples/seal.test.luau` tests it. The courtyard has one.
 - `examples/pulse.graph`, `examples/hover.graph`: the same lamp and stone as visual scripts.
 - `examples/lamp.test.luau`, `examples/beacon.test.luau`, `examples/float.test.luau`: tests of
   the examples (and of the `wave` module), run in the game.

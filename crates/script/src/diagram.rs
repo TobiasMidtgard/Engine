@@ -102,6 +102,40 @@ pub struct Placed {
 /// sized to hold theirs. States in `at` stay where it puts them (their top left corners) when
 /// every state that isn't a group has a place there.
 pub fn layout(m: &Machine, at: &BTreeMap<String, Vec2>) -> Placed {
+    layout_with(m, at, false)
+}
+
+/// As [`layout`], for a view `aspect` times as wide as it is high: a parallel group's regions
+/// in a row or one under another (UML draws either), whichever the machine fits that view
+/// larger with. A machine of three regions side by side, each two states wide, is a strip too
+/// thin to read in a panel beside the code; stacked, it fills it.
+pub fn layout_for(m: &Machine, at: &BTreeMap<String, Vec2>, aspect: f32) -> Placed {
+    let row = layout_with(m, at, false);
+    if !m.states.iter().any(|s| s.parallel) {
+        return row;
+    }
+    let column = layout_with(m, at, true);
+    let fit =
+        |p: &Placed| (aspect / p.bounds.width().max(1.0)).min(1.0 / p.bounds.height().max(1.0));
+    if fit(&column) > fit(&row) * 1.05 {
+        column
+    } else {
+        row
+    }
+}
+
+/// Whether a parallel group's regions are one under another (else side by side).
+pub fn stacked(m: &Machine, placed: &Placed, group: &str) -> bool {
+    let mut regions = m
+        .children(Some(group))
+        .filter_map(|c| placed.rects.get(&c.name).copied());
+    match (regions.next(), regions.next()) {
+        (Some(a), Some(b)) => a.max.y <= b.min.y || b.max.y <= a.min.y,
+        _ => false,
+    }
+}
+
+fn layout_with(m: &Machine, at: &BTreeMap<String, Vec2>, stack: bool) -> Placed {
     let leaves: Vec<&str> = m
         .states
         .iter()
@@ -140,7 +174,7 @@ pub fn layout(m: &Machine, at: &BTreeMap<String, Vec2>) -> Placed {
             }
         }
     } else {
-        let (_, placed) = arrange(m, None);
+        let (_, placed) = arrange(m, None, stack);
         rects = placed.into_iter().collect();
     }
     let mut bounds = rects
@@ -182,7 +216,8 @@ fn sibling_of<'a>(m: &'a Machine, group: Option<&str>, name: &'a str) -> Option<
 }
 
 /// Lays out `group`'s states (None: the outer level): its size and their rects, from (0, 0).
-fn arrange(m: &Machine, group: Option<&str>) -> (Vec2, Vec<(String, Area)>) {
+/// `stack`: parallel groups' regions one under another.
+fn arrange(m: &Machine, group: Option<&str>, stack: bool) -> (Vec2, Vec<(String, Area)>) {
     let kids: Vec<&str> = m.children(group).map(|s| s.name.as_str()).collect();
     if kids.is_empty() {
         return (Vec2::new(STATE_W, STATE_H), Vec::new());
@@ -225,7 +260,7 @@ fn arrange(m: &Machine, group: Option<&str>) -> (Vec2, Vec<(String, Area)>) {
         .iter()
         .map(|s| {
             if m.is_group(s) {
-                let (size, placed) = arrange(m, Some(s));
+                let (size, placed) = arrange(m, Some(s), stack);
                 inner.insert(s.clone(), placed);
                 size + Vec2::new(2.0 * GROUP_PAD, 2.0 * GROUP_PAD + GROUP_HEAD)
             } else {
@@ -233,9 +268,12 @@ fn arrange(m: &Machine, group: Option<&str>) -> (Vec2, Vec<(String, Area)>) {
             }
         })
         .collect();
-    // A parallel group's regions side by side; other groups round a ring.
+    // A parallel group's regions side by side (or one under another); other groups round a
+    // ring.
     let parallel = group.is_some_and(|g| m.state(g).is_some_and(|s| s.parallel));
-    let cells = if parallel {
+    let cells = if parallel && stack {
+        (0..order.len()).map(|r| (0, r)).collect()
+    } else if parallel {
         (0..order.len()).map(|c| (c, 0)).collect()
     } else {
         ring(order.len())
@@ -262,14 +300,25 @@ fn arrange(m: &Machine, group: Option<&str>) -> (Vec2, Vec<(String, Area)>) {
     let mut out = Vec::new();
     for (k, name) in order.iter().enumerate() {
         let (c, r) = cells[k];
-        // Centered in its cell; regions side by side share a top.
-        let down = if parallel {
-            0.0
+        let rect = if parallel && m.is_group(name) {
+            // A region fills its cell across the group (so the lines between them run the
+            // whole way); its states stay at its top left.
+            let size = if stack {
+                Vec2::new(widths[c], sizes[k].y)
+            } else {
+                Vec2::new(sizes[k].x, heights[r])
+            };
+            Area::from_min_size(Vec2::new(xs[c], ys[r]), size)
         } else {
-            (heights[r] - sizes[k].y) / 2.0
+            // Centered in its cell; regions side by side share a top.
+            let down = if parallel {
+                0.0
+            } else {
+                (heights[r] - sizes[k].y) / 2.0
+            };
+            let min = Vec2::new(xs[c] + (widths[c] - sizes[k].x) / 2.0, ys[r] + down);
+            Area::from_min_size(min, sizes[k])
         };
-        let min = Vec2::new(xs[c] + (widths[c] - sizes[k].x) / 2.0, ys[r] + down);
-        let rect = Area::from_min_size(min, sizes[k]);
         out.push((name.clone(), rect));
         if let Some(placed) = inner.remove(name) {
             let offset = rect.min + Vec2::new(GROUP_PAD, GROUP_PAD + GROUP_HEAD);
@@ -658,5 +707,50 @@ mod tests {
         assert!(r("bars").max.x < r("lamp").min.x);
         assert!(r("powered").contains_area(r("bars")) && r("powered").contains_area(r("lamp")));
         assert!(r("bars").contains_area(r("open")));
+    }
+
+    /// The seal: three regions of two states each. In a wide view they sit side by side; in a
+    /// tall one they stack, each region as wide as the group, and the machine draws larger.
+    #[test]
+    fn a_parallel_groups_regions_stack_for_a_tall_view() {
+        let st = |name: &str, parent: Option<&str>, initial: Option<&str>| State {
+            name: name.into(),
+            parent: parent.map(str::to_string),
+            initial: initial.map(str::to_string),
+            ..Default::default()
+        };
+        let mut sealed = st("sealed", None, None);
+        sealed.parallel = true;
+        let mut m = Machine {
+            initial: "sealed".into(),
+            states: vec![sealed],
+            ..Default::default()
+        };
+        for r in ["left", "middle", "right"] {
+            let (dark, lit) = (format!("{r}_dark"), format!("{r}_lit"));
+            m.states.push(st(r, Some("sealed"), Some(&dark)));
+            m.states.push(st(&dark, Some(r), None));
+            m.states.push(st(&lit, Some(r), None));
+            m.transitions.push(Transition {
+                from: Some(dark),
+                to: lit,
+                trigger: Trigger::On {
+                    event: "touch".into(),
+                    guard: None,
+                },
+                line: 0,
+            });
+        }
+        m.states.push(st("open", None, None));
+        let wide = layout_for(&m, &BTreeMap::new(), 4.0);
+        assert!(!stacked(&m, &wide, "sealed"));
+        let tall = layout_for(&m, &BTreeMap::new(), 1.0);
+        assert!(stacked(&m, &tall, "sealed"));
+        let r = |n: &str| tall.rects[n];
+        assert!(r("left").max.y <= r("middle").min.y && r("middle").max.y <= r("right").min.y);
+        assert_eq!(r("left").width(), r("right").width());
+        assert!(r("sealed").contains_area(r("right")) && r("right").contains_area(r("right_lit")));
+        let fit = |p: &Placed| (1.0 / p.bounds.width()).min(1.0 / p.bounds.height());
+        assert!(fit(&tall) > fit(&wide));
     }
 }

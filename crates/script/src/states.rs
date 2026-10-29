@@ -7,7 +7,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use bevy_ecs::prelude::*;
 use mlua::{Table, Value};
-use serde_json::Value as Json;
+use serde_json::{Value as Json, json};
 
 use crate::runtime::ScriptRuntime;
 
@@ -21,8 +21,14 @@ pub struct State {
     pub initial: Option<String>,
     /// For a group: coming back resumes the state it was last in.
     pub history: bool,
+    /// With `history`: the states inside that one resume where they were too (`history =
+    /// "deep"`).
+    pub deep: bool,
     /// For a group: all its states run at once (regions), not one after another.
     pub parallel: bool,
+    /// Reaching it ends its group (`final = true`): the group's `done` follows; at the outer
+    /// level it ends the machine.
+    pub is_final: bool,
     pub doc: String,
     /// Which of `enter`, `update`, `exit` it has.
     pub hooks: Vec<String>,
@@ -42,7 +48,8 @@ pub enum Trigger {
     /// Seconds after the state started; `prop`: the prop that sets them (`after = { "hold",
     /// "closing" }`), its default in `secs` (0 when it has none).
     After { secs: f64, prop: Option<String> },
-    /// When the state's enter task has finished.
+    /// When the state's enter task has finished; for a group, when it reaches one of its
+    /// final states (a parallel group: every region has).
     Done,
     /// When a condition (a method or field of the script) holds; checked every frame.
     When(String),
@@ -121,6 +128,25 @@ impl Machine {
             .filter(move |s| s.parent.as_deref() == group)
     }
 
+    /// Whether the group `name` (None: the machine) is done with `active` the active states:
+    /// in one of its final states, a parallel group with every region done.
+    pub fn complete(&self, group: Option<&str>, active: &[String]) -> bool {
+        let parallel = group
+            .and_then(|g| self.state(g))
+            .is_some_and(|g| g.parallel);
+        let mut kids = self.children(group).peekable();
+        if kids.peek().is_none() {
+            return group
+                .and_then(|g| self.state(g))
+                .is_some_and(|g| g.is_final);
+        }
+        if parallel {
+            return kids.all(|k| self.complete(Some(&k.name), active));
+        }
+        kids.find(|k| active.contains(&k.name))
+            .is_some_and(|k| k.is_final)
+    }
+
     /// Whether `name` holds states.
     pub fn is_group(&self, name: &str) -> bool {
         self.states
@@ -158,8 +184,10 @@ impl Machine {
                 name: text(&s["name"]).unwrap_or_default(),
                 parent: text(&s["parent"]),
                 initial: text(&s["initial"]),
-                history: s["history"].as_bool().unwrap_or(false),
+                history: s["history"].as_bool().unwrap_or(false) || s["history"] == "deep",
+                deep: s["history"] == "deep",
                 parallel: s["parallel"].as_bool().unwrap_or(false),
+                is_final: s["final"].as_bool().unwrap_or(false),
                 doc: text(&s["doc"]).unwrap_or_default(),
                 hooks: s["hooks"]
                     .as_array()
@@ -243,8 +271,10 @@ impl Machine {
                 m.states.push(State {
                     name: k.clone(),
                     parent: name.map(str::to_string),
-                    history: kd["history"].as_bool().unwrap_or(false),
+                    history: kd["history"].as_bool().unwrap_or(false) || kd["history"] == "deep",
+                    deep: kd["history"] == "deep",
                     parallel: kd["parallel"].as_bool().unwrap_or(false),
+                    is_final: kd["final"].as_bool().unwrap_or(false),
                     doc: kd["doc"].as_str().unwrap_or_default().to_string(),
                     ..Default::default()
                 });
@@ -460,7 +490,7 @@ pub(crate) fn of_class(lua: &mlua::Lua, class: &Table) -> Option<Result<Machine,
 }
 
 /// One change of state.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct Change {
     /// Seconds on the script's clock.
     pub t: f64,
@@ -471,6 +501,9 @@ pub struct Change {
     pub why: String,
     /// Every state active after it, outermost first.
     pub active: Vec<String>,
+    /// The script's values right after it, by name (`props.range`, `shots`): PlayMaker's
+    /// Debug Flow.
+    pub values: Vec<(String, String)>,
 }
 
 /// A running machine.
@@ -491,6 +524,12 @@ pub struct Live {
     pub log: Vec<Change>,
     /// Groups with history: the state each was last in.
     pub history: BTreeMap<String, String>,
+    /// Active groups in one of their final states (a parallel group: every region).
+    pub done: BTreeSet<String>,
+    /// It reached a final state at the outer level: nothing changes it until a `go`.
+    pub over: bool,
+    /// The script's values now, as [`Change::values`].
+    pub values: Vec<(String, String)>,
 }
 
 impl Live {
@@ -541,12 +580,21 @@ impl Live {
             })
             .cloned()
             .collect();
+        let done = at
+            .active
+            .iter()
+            .filter(|a| m.is_group(a) && m.complete(Some(a.as_str()), &at.active))
+            .cloned()
+            .collect();
         Live {
             active: at.active.clone(),
             current,
             since,
             running: BTreeSet::new(),
             clock: at.t,
+            over: m.complete(None, &at.active),
+            done,
+            values: at.values.clone(),
             log,
             history: self.history.clone(),
         }
@@ -563,6 +611,18 @@ impl Live {
                 .map(|a| {
                     a.iter()
                         .filter_map(|s| s.as_str().map(str::to_string))
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        // [[name, value], ...]
+        let pairs = |v: &Json| -> Vec<(String, String)> {
+            v.as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|p| {
+                            Some((p[0].as_str()?.to_string(), p[1].as_str()?.to_string()))
+                        })
                         .collect()
                 })
                 .unwrap_or_default()
@@ -592,12 +652,16 @@ impl Live {
                     to: c["to"].as_str().unwrap_or_default().to_string(),
                     why: c["why"].as_str().unwrap_or_default().to_string(),
                     active: names(&c["active"]),
+                    values: pairs(&c["values"]),
                 })
                 .collect(),
             history: map(&v["history"])
                 .into_iter()
                 .filter_map(|(k, s)| Some((k, s.as_str()?.to_string())))
                 .collect(),
+            done: names(&v["done"]).into_iter().collect(),
+            over: v["over"].as_bool().unwrap_or(false),
+            values: pairs(&v["values"]),
         }
     }
 }
@@ -704,9 +768,10 @@ pub(crate) fn describe(world: &mut World, e: Entity) -> Result<Json, String> {
         .states
         .iter()
         .map(|s| {
-            serde_json::json!({
+            json!({
                 "name": s.name, "parent": s.parent, "initial": s.initial,
-                "history": s.history, "parallel": s.parallel, "hooks": s.hooks, "line": s.line,
+                "history": if s.deep { json!("deep") } else { json!(s.history) },
+                "parallel": s.parallel, "final": s.is_final, "hooks": s.hooks, "line": s.line,
             })
         })
         .collect();
@@ -714,12 +779,12 @@ pub(crate) fn describe(world: &mut World, e: Entity) -> Result<Json, String> {
         .transitions
         .iter()
         .map(|t| {
-            serde_json::json!({
+            json!({
                 "from": t.from, "to": t.to, "trigger": t.label(), "line": t.line,
             })
         })
         .collect();
-    Ok(serde_json::json!({
+    Ok(json!({
         "path": path,
         "initial": machine.initial,
         "states": states,
@@ -727,8 +792,12 @@ pub(crate) fn describe(world: &mut World, e: Entity) -> Result<Json, String> {
         "active": live.as_ref().map(|l| l.active.clone()),
         "current": live.as_ref().map(|l| l.current.clone()),
         "state_secs": live.as_ref().and_then(|l| l.current().and_then(|c| l.secs_in(c))),
-        "log": live.as_ref().map(|l| l.log.iter().map(|c| serde_json::json!({
+        "done": live.as_ref().map(|l| l.done.iter().collect::<Vec<_>>()),
+        "over": live.as_ref().map(|l| l.over),
+        "values": live.as_ref().map(|l| l.values.clone()),
+        "log": live.as_ref().map(|l| l.log.iter().map(|c| json!({
             "t": c.t, "from": c.from, "to": c.to, "why": c.why, "active": c.active,
+            "values": c.values,
         })).collect::<Vec<_>>()),
     }))
 }
