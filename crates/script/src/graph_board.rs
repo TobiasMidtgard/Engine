@@ -920,4 +920,35 @@ mod tests {
         };
         assert!(lit(&glow) < lit(&img));
     }
+
+    /// The crystal's board at full size with every node lit, as a picture to check a layout
+    /// before a render: `cargo test -p engine_script -- --ignored --nocapture board_picture`.
+    #[test]
+    #[ignore]
+    fn graph_board_picture() {
+        let text = include_str!("../../../assets/scripts/showcase/crystal.graph");
+        let g = Graph::parse(text).unwrap();
+        let c = graph::compile(&g, "showcase/crystal.graph");
+        let mut font = BoardFont::load(None);
+        let live = Live {
+            runs: g.nodes.iter().map(|n| (n.id, 1)).collect(),
+            values: (0..g.links.len())
+                .map(|i| (i, graph::short_value(&(0.5 + i as f64 * 0.137).to_string())))
+                .collect(),
+        };
+        let view = View {
+            path: "showcase/crystal.graph",
+            error: None,
+            running: true,
+            live: &live,
+            ran: &g.nodes.iter().map(|n| (n.id, 0.3)).collect(),
+        };
+        let board = GraphBoard::new("showcase/crystal.graph");
+        let (img, _) = draw(&board, &mut font, Some(&g), Some(&c), &view);
+        let path = std::env::temp_dir().join("crystal_board.ppm");
+        let mut ppm = format!("P6\n{} {}\n255\n", img.width, img.height).into_bytes();
+        ppm.extend(img.data.chunks(4).flat_map(|p| [p[0], p[1], p[2]]));
+        std::fs::write(&path, ppm).unwrap();
+        println!("{}", path.display());
+    }
 }

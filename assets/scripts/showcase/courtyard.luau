@@ -198,7 +198,7 @@ local WISP_GLOW = { { 1, 0.62, 0.3 }, { 1, 0.82, 0.5 }, { 0.55, 0.75, 1 } }
 local function wisp(i: number): any
 	local u = (i * 0.618034) % 1 -- spread evenly in radius and height
 	local v = (i * 0.754878) % 1
-	local radius, height = 2.0 + 4.2 * u, 1.5 + 3.4 * v
+	local radius, height = 2.0 + 2.6 * u, 1.5 + 3.4 * v -- inside the boards' tour cameras (5.9 m out)
 	local angle = i * 2.399963
 	return {
 		name = `Wisp {i}`,

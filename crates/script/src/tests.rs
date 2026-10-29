@@ -665,6 +665,23 @@ fn the_showcase_courtyard_builds_and_plays_its_ritual() {
     const WISP_HEIGHT: &str =
         "local s = 0 for _, w in world.find_all('Wisp ') do s += w.position.y end return s / 320";
     let resting = eval(&mut app, WISP_HEIGHT).as_f64().unwrap();
+    // No tour stop's camera stands in the swarm: a wisp passing a hand's width from the lens
+    // fills the frame (one hid the crystal stop). Orbits swing 0.5 m and lag, so keep a meter.
+    let widest = eval(
+        &mut app,
+        "local m = 0 for _, w in world.find_all('Wisp ') do \
+         m = math.max(m, math.sqrt(w.position.x ^ 2 + w.position.z ^ 2)) end return m",
+    )
+    .as_f64()
+    .unwrap();
+    for view in crate::demo::VIEWS {
+        let out = view.eye[0].hypot(view.eye[2]);
+        assert!(
+            out > widest + 1.0,
+            "{}: camera {out:.2} m out, wisps to {widest:.2} m",
+            view.key
+        );
+    }
     assert!(
         eval(&mut app, "world.find('Ring 3') ~= nil")
             .as_bool()

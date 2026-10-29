@@ -265,8 +265,21 @@ pub const VIEWS: &[DemoView] = &[
         key: "script_graph",
         name: "A visual script: the crystal's graph on its board, live: the nodes that run lit \
                and each wire's value beside it",
-        eye: [-2.86, 2.2 + LIFT, -5.46],
-        target: [-4.3, 2.05 + LIFT, -8.2],
+        // Square on, 2.1 m out along the board's normal (GRAPH_BOARD_YAW).
+        eye: [-3.33, 2.05 + LIFT, -6.34],
+        target: [GRAPH_BOARD[0], GRAPH_BOARD[1] + LIFT, GRAPH_BOARD[2]],
+        hour: 18.9,
+        warmup_secs: 0.6,
+        on_arrive: &[FLARE],
+        on_leave: &[],
+    },
+    DemoView {
+        key: "script_graph_close",
+        name: "Close up on the graph board: the flare's nodes lit as they run, each wire with \
+               the value it carried",
+        // 0.9 m from the board, on the flare section in its lower middle.
+        eye: [-4.01, 1.49 + LIFT, -7.34],
+        target: [-4.42, 1.49 + LIFT, -8.14],
         hour: 18.9,
         warmup_secs: 0.6,
         on_arrive: &[FLARE],
@@ -275,8 +288,8 @@ pub const VIEWS: &[DemoView] = &[
     DemoView {
         key: "script_graph_crystal",
         name: "The graph-driven crystal flaring in front of its graph board",
-        eye: [-1.3, 1.9 + LIFT, -5.0],
-        target: [-3.4, 1.8 + LIFT, -8.1],
+        eye: [-2.4, 1.2 + LIFT, -5.93],
+        target: [-3.06, 1.5 + LIFT, -7.42],
         hour: 18.9,
         warmup_secs: 0.5,
         on_arrive: &[FLARE],
