@@ -223,6 +223,24 @@ compresses and stretches.
   `AnimationParams` "evasive", when set, switches it. After a roll or pull-back an evader
   with its own `Attacker` presses `attack_heavy` halfway through, coming up with a counter.
   A fighter in the middle of their own strike or evasion doesn't block.
+- **Chaining kills (freeflow).** As in Batman Arkham, Spider-Man and Sifu, each press goes at
+  the foe the stick points at. A `Freeflow` on an `Attacker` picks the target again on every
+  press: foes within `reach()` (6 m, growing 0.25 m with each blow of the combo up to 7.5 m)
+  and 60° of the stick, scored 0.7 by angle and 0.3 by distance, the current target kept
+  unless the stick points clearly elsewhere (`keep_bonus`). With no stick it stays on the
+  current target, or takes the nearest in front. A target that goes down (knocked down, on a
+  knee, despawned) is handed over at once and the waiting press kept, so a kill never eats
+  the next press; `Attacker::struck` is who the current move is aimed at, and once its blows
+  are over a press at the new target starts at once (from the top of the combo) instead of
+  waiting out the recovery. A foe past the strike's range is closed on first with one of the
+  attack set's `approaches`: in `boxing` a `lunge` (0.45 s, a push-off with both feet off the
+  ground for a moment) beyond 1 m, a `leap` (0.75 s, a deep load, tucked flight, a landing
+  that sinks) beyond 2.6 m. Their warp is eased (`WindowKind::Warp::ease`: speeding up over
+  the first quarter and slowing over the last, capped at 12 and 18 m/s), turns to face the
+  target by 40% of the travel, and the punch follows on touch-down. `combo` counts blows in a
+  row (and is set as the `combo` parameter); it ends after 1.5 s without one or when the
+  fighter is hit. Gameplay steers it with `Freeflow::stick` or the `stick_x` / `stick_z`
+  parameters and limits it to `Freeflow::foes`; `freeflow::pick` is the choice on its own.
 - **Getting up.** A person whose weight returns to 0 while lying flat gets up rather than
   blending straight to standing: `get_up_back` (sits up, tucks a leg, plants a hand and a
   knee, steps up) or `get_up_front` (palms down, pushes up to all fours, kneels, steps up),
@@ -341,6 +359,7 @@ renderer's generated materials (planks, concrete, sand, rock), and the spider cl
 | Shuttle lane | An athlete sprints the lane flat out from a standing start (leaning into it, then at 7 m/s with the trunk forward, knees driven high, heels kicked up and arms pumping from hip to chin), digs in to stop, runs back backwards, turns on the spot and runs sideways to the start; a coach beside the lane, arms folded, turns where they stand to keep watching, the head first and the feet stepping round once the runner is well off to one side (`paddock_sprint_start`, `paddock_sprint_stop`) |
 | Sparring partner | A lifter in a boxer's guard (lead foot and fist forward, elbows tucked, bouncing lightly) blocks the boxer's jab, but a hook to the body gets under the guard to the liver and half a second later he folds onto his right knee, clutching his side, and gets up (`paddock_body_shot`); then he blocks the jab and cross on the gloves, takes the hook and uppercut to the face (the head snaps back and the feet step back to catch the body), a blow to the stomach (folds over it) and a shove on the back of a shoulder, flinching away from each and stepping back to the mark (`paddock_flinch`); in the last combo the guard drops early, the head shots leave his legs wobbling and a heavy uppercut knocks him down onto his back, braced (chin tucked, arms back), he lies a beat, gets up and comes back to the mark (`paddock_knockdown`) |
 | Boxer | An athlete squares up to the sparring partner and throws jab, cross, hook and uppercut, each press buffered until the last punch's cancel window opens; she steps in to range on the jab and closer for the hook and uppercut, each fist reaching the face, and both freeze for a beat as each lands (`paddock_combo`) |
+| Freeflow ring | An athlete tapping the light attack drops three dummies one after another with a jab, cross and hook each: the stick swings to the next as one goes down and she goes straight at it, a lunge to the one on the left, a leap to the one on the right, facing it before she lands and punching on touch-down; the dummies get up and walk back (`paddock_freeflow`) |
 | Horse oval | A textured horse walks, trots, canters and gallops by speed; in the swing the knees fold, the hocks bend and the hooves curl back behind the fetlocks; haunches and shoulders flex with each stride; the mane rides the neck and the tail streams |
 | Dog run | A furred Labrador walks off, trots, canters out of a turn and gallops down the far straight, the spine flexing with each stride, ears and tail swinging; it pants as it goes (`paddock_dog_trot`, `paddock_dog`) |
 | Spider garden | A furred red-knee tarantula climbs over boulders in alternating sets of legs, a wave running from the back legs forward; its palps tap, its jaws work and its abdomen sways (`paddock_spider`). On the far side it slows to a stop and rears up in threat: the front of the body tips up on the planted back legs, the first pair of legs rises high and the second reaches out level, the palps lift and the fangs unfold, then it settles back onto its footholds and walks on (`paddock_spider_threat`) |
@@ -407,6 +426,14 @@ blow only staggers, and two 55 N·s blows close together knock down where one do
 presses at a downed target are dropped, and that a body hook lands under a raised guard
 (the jab before it blocked) and presses wait while the target kneels, and at 8 frames a
 second the body hook still lands.
+`tests/freeflow.rs` rings a fighter with four dummies at 1.1, 3, 5 and 2 m (ahead, left,
+right, behind), taps the light attack every 0.22 s with the stick on the next dummy still up,
+and three blows put one down: all four go down in order, the left and behind ones after a
+lunge and the right one after a leap, the next move starts within 0.3 s of each kill, no
+blow whiffs, the warp never passes 18 m/s and the combo reaches 12. Unit tests in
+`freeflow.rs` check the stick picks the foe it points at over a nearer one, the current
+target is kept unless the stick points clearly elsewhere, no stick stays on it or takes the
+nearest in front, and reach grows with the combo up to its limit.
 Against a skilled `Evader` the jab, cross and hook all miss (`missed` 3, no hits or
 blocks), slipped right, slipped left and rolled under, and the counter cross lands on the
 attacker; with "evasive" off the combo lands.
