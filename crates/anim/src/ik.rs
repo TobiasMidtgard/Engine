@@ -432,6 +432,11 @@ pub struct FootIk {
     /// The leg that steps first while hurried.
     #[serde(skip)]
     pub lead: Option<usize>,
+    /// While hurried: how much farther the body is still going (world, along the ground, m).
+    /// Feet step to where the animation will have them once it gets there (the capture
+    /// point), so two steps catch it rather than a shuffle chasing it.
+    #[serde(skip)]
+    pub ahead: Vec3,
 }
 
 /// Where a planted foot is held (world space), and how strongly.
@@ -475,6 +480,7 @@ impl Default for FootIk {
             body_speed: 0.0,
             hurry: 0.0,
             lead: None,
+            ahead: Vec3::ZERO,
         }
     }
 }
@@ -674,7 +680,9 @@ pub fn solve_feet(
     ik.hurry = (ik.hurry - dt).max(0.0);
     if !hurried {
         ik.lead = None;
+        ik.ahead = Vec3::ZERO;
     }
+    let ahead = ik.ahead.with_y(0.0).as_dvec3();
     let may_step = body_speed < STEP_BELOW_SPEED || hurried;
     let mut stepping = !may_step || ik.locks.iter().any(|l| !l.held && l.step && l.blend > 0.0);
     let mut hits = Vec::with_capacity(legs.len());
@@ -715,15 +723,20 @@ pub fn solve_feet(
         l.last = Some(world);
         let planted = foot_speed < PLANT_SPEED + 0.5 * body_speed;
         if l.held {
-            let drift = l.at.map_or(f64::INFINITY, |a| {
-                ((a.x - world.x).powi(2) + (a.z - world.z).powi(2)).sqrt()
-            });
+            let drift_from = |p: DVec3| {
+                l.at.map_or(f64::INFINITY, |a| {
+                    ((a.x - p.x).powi(2) + (a.z - p.z).powi(2)).sqrt()
+                })
+            };
+            // How far the foot is from where it should stand: hurried, where the animation
+            // will have it once the body gets where it is going.
+            let (drift, wants) = (drift_from(world), drift_from(world + ahead));
             let turned = twist_angle(l.rot * rot.inverse(), Vec3::Y).abs() > STEP_TURN.to_radians();
             if !can_lock || lift > 2.0 * lock_lift {
                 l.held = false;
                 l.step = false;
-            } else if ((drift > reach || turned) && !stepping && !waits)
-                || drift > 2.0 * reach.max((ik.lock_reach * scale) as f64)
+            } else if ((wants > reach || turned) && !stepping && !waits)
+                || drift > 2.0 * (ik.lock_reach * scale) as f64
             {
                 l.held = false;
                 l.step = may_step;
@@ -745,6 +758,15 @@ pub fn solve_feet(
         } else {
             (l.blend - dt / LOCK_OUT_SECS).max(0.0)
         };
+        if hurried && l.step && !l.held && l.blend <= 0.0 && can_lock {
+            // A hurried step lands where it was headed, ahead of the animation, and stands
+            // there while the body comes over it.
+            l.held = true;
+            l.step = false;
+            l.at = Some(world + ahead);
+            l.rot = rot;
+            l.blend = 1.0;
+        }
         if !l.held && l.blend <= 0.0 {
             l.at = None;
         }
@@ -769,6 +791,11 @@ pub fn solve_feet(
         {
             let d = to_model(gt, at) - ankle;
             base += (d - up_model * d.dot(up_model)) * l.blend;
+            if l.step && !l.held {
+                // Headed for where the body is going.
+                let ahead = gt.rotation().conjugate() * ik.ahead / scale;
+                base += (ahead - up_model * ahead.dot(up_model)) * (1.0 - l.blend);
+            }
             // Only its heading: the animation still rolls it heel to toe.
             let animated = gt.rotation() * foot_rot;
             let yaw = twist_angle(l.rot * animated.inverse(), Vec3::Y);
