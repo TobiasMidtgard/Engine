@@ -1041,6 +1041,7 @@ struct FallIn {
     @location(1) normal_frac: vec4<f32>, // outward normal, 0 at the lip .. 1 at the foot
     @location(2) across_side: vec4<f32>, // direction across the curtain, strip edge (-1, 1)
     @location(3) uv_speed: vec4<f32>,    // meters across, seconds since the lip, lip speed
+    @location(4) edge: vec4<f32>,        // x 1 on a side where the fall ends (it frays there)
 };
 
 struct FallOut {
@@ -1050,7 +1051,8 @@ struct FallOut {
     @location(2) across: vec3<f32>,
     @location(3) uv: vec2<f32>,
     @location(4) look: vec4<f32>,        // q, frac, side, lip speed
-    @location(5) kind: f32,              // 1 spray cloud; -1 spray round a curtain; under a half a curtain, 0.45 where it slides down rock
+    @location(5) kind: f32,              // 1 spray cloud; -1 spray round a curtain; -2 wet rock under it; under a half a curtain, 0.45 where it slides down rock
+    @location(6) edge: f32,              // 1 toward a side where the fall ends
 };
 
 @vertex
@@ -1063,7 +1065,66 @@ fn vs_falls(v: FallIn) -> FallOut {
     out.uv = v.uv_speed.xy;
     out.look = vec4<f32>(v.rel_q.w, v.normal_frac.w, v.across_side.w, v.uv_speed.z);
     out.kind = v.uv_speed.w;
+    out.edge = v.edge.x;
     return out;
+}
+
+// How far in from a fall's ragged outer edge a point is, from `side` (-1..1 across its strip)
+// and `edge` (1 toward a side where the fall ends): where neighboring strips carry the sheet
+// on, |side| itself; at the fall's ends the edge wanders in and out down the rock or the
+// fall (fixed in the world: the brink and the rock shape it), so a fall isn't a ruled
+// rectangle. Over 1 is past the edge.
+fn fall_side(side: f32, edge: f32, rel: vec3<f32>, u: f32) -> f32 {
+    let w = tiling_pos(rel);
+    let wander = fbm2(vec2<f32>(w.y * 0.55 + u * 0.13, u * 0.31 + 5.1), 3) / 0.875;
+    return abs(side) + edge * (wander - 0.4) * 0.8;
+}
+
+// Rock a sheet slides down, and the band round it the flow and its splashes keep wet: darker
+// (the water fills its pores, Lagarde 2013) and with a film on it that mirrors the sky at a
+// glancing look and glints where the water runs over a bump. Drawn under the sheet,
+// darkening what is behind (premultiplied: the color added, alpha the darkening).
+fn fall_wet(in: FallOut) -> vec4<f32> {
+    let w = tiling_pos(in.rel);
+    let side = fall_side(in.look.z, in.edge, in.rel, in.uv.x);
+    // Ragged at its rim, with streaks of wetter rock where rills run down.
+    let rim = fbm2(vec2<f32>(in.uv.x * 0.9, w.y * 0.7), 3) / 0.875;
+    let cover = 1.0 - smoothstep(0.45 + 0.25 * rim, 1.0, side);
+    if (cover <= 0.01) { discard; }
+    let rills = value_noise2(vec2<f32>(in.uv.x * 2.7 + 3.3, w.y * 0.12));
+    let wetness = cover * (0.75 + 0.25 * rills);
+    // A decal on the rock: only what lies just behind the strip (the rock it stands off) gets
+    // wet, never the far side of the gorge seen past an edge.
+    let size = vec2<f32>(textureDimensions(scene_color));
+    let pix = vec2<i32>(clamp(in.clip.xy, vec2<f32>(0.0), size - 1.0));
+    let gap = linear_depth(textureLoad(scene_depth, pix, 0)) - max(view_depth(in.rel), 1e-3);
+    let near = 1.0 - smoothstep(0.7, 1.5, gap);
+    let alpha = wetness * 0.45 * near;
+    if (alpha < 0.004) { discard; }
+    let v = -in.rel / max(length(in.rel), 1e-4);
+    var n = in.normal;
+    // The film ripples as it runs down.
+    let t0 = time_s() - in.uv.y;
+    let ripple = value_noise2(vec2<f32>(in.uv.x * 6.0, t0 * 9.0)) - 0.5;
+    let along = cross(n, in.across);
+    n = normalize(n + along * ripple * 0.35 * wetness);
+    let n_dot_v = max(dot(n, v), 1e-3);
+    let fresnel = 0.02 + 0.98 * pow(1.0 - n_dot_v, 5.0);
+    let sky_vis = sky_visibility(in.rel, n);
+    let fill = frame.ambient.rgb;
+    let refl = pre_expose((sample_env(reflect(-v, n)) - fill) * sky_vis + fill);
+    let l = frame.sun_dir.xyz;
+    let h = normalize(l + v);
+    let n_dot_l = saturate(dot(n, l));
+    let a = 0.08 * 0.08;
+    let spec = d_ggx(saturate(dot(n, h)), a) * v_smith_ggx_correlated(n_dot_v, max(n_dot_l, 1e-3), a)
+        * f_schlick(vec3<f32>(0.02), saturate(dot(l, h))) * n_dot_l;
+    let sun = frame.sun_color.rgb * sun_transmittance(in.rel) * shadow_factor(in.rel, n);
+    let color = (refl * fresnel + pre_expose(spec * sun)) * wetness * near;
+    // The rock behind is fogged already (rock · T + in-scatter): darken only the rock, and
+    // fog the film's light as the rock's.
+    let fog = surface_fog(in.rel);
+    return vec4<f32>(color * fog.transmittance + fog.inscatter * alpha, alpha);
 }
 
 // The cloud of spray where a fall lands: a camera-facing puff (corner -1..1 in `normal.xy`,
@@ -1157,8 +1218,8 @@ fn fall_shell(in: FallOut) -> vec4<f32> {
     alpha = max(alpha, fine * 0.35 * smoothstep(0.6, 0.95, drops) * smoothstep(0.3, 0.6, clumps));
     let n_dot_v = abs(dot(in.normal, v));
     alpha *= broken * body * mix(1.5, 0.75, n_dot_v);
-    // Frayed at the sides.
-    alpha *= 1.0 - smoothstep(0.3, 1.0, abs(in.look.z) + (clumps - 0.5) * 0.6);
+    // Frayed at the sides, ragged where the fall ends.
+    alpha *= 1.0 - smoothstep(0.3, 1.0, fall_side(in.look.z, in.edge, in.rel, u) + (clumps - 0.5) * 0.6);
     // Soft against the rock behind and the pool below.
     let size = vec2<f32>(textureDimensions(scene_color));
     let pix = vec2<i32>(clamp(in.clip.xy, vec2<f32>(0.0), size - 1.0));
@@ -1175,6 +1236,7 @@ fn fall_shell(in: FallOut) -> vec4<f32> {
 @fragment
 fn fs_falls(in: FallOut) -> @location(0) vec4<f32> {
     if (in.kind > 0.5) { return fall_mist(in); }
+    if (in.kind < -1.5) { return fall_wet(in); }
     if (in.kind < -0.5) { return fall_shell(in); }
     // No lip is level: the water gathers into tongues where the rock dips and runs thin
     // between them (the pattern is fixed to the rock, `u` being meters across in the world).
@@ -1198,7 +1260,7 @@ fn fs_falls(in: FallOut) -> @location(0) vec4<f32> {
     // behind or below, the churned water under the tongue shows.
     let front = dot(in.normal, v) >= 0.0;
     // Past its break-up length the core is no longer a sheet but clumps of white water.
-    let broken = fall_broken(in.look.x, tau);
+    let broken = fall_broken(in.look.x, max(tau, 0.0));
     var aerated = max(smoothstep(0.03, 0.22, tau + (s - 0.5) * 0.1), select(0.6, 0.0, front));
     aerated = max(aerated, broken);
     // Sliding down rock (`ROCK_KIND`), the sheet tumbles over every bump: white in its
@@ -1226,7 +1288,12 @@ fn fs_falls(in: FallOut) -> @location(0) vec4<f32> {
     alpha = max(alpha, tear * body * 0.3 * smoothstep(0.35, 0.95, drops) * smoothstep(0.1, 0.5, s));
     // From afar those drops blur into a veil across the gaps.
     alpha = max(alpha, (1.0 - fine) * body * 0.4 * smoothstep(0.15, 0.9, frac) * smoothstep(0.0, 0.35, s));
-    alpha *= 1.0 - smoothstep(0.6, 1.0, abs(side) + (s - 0.5) * 0.4);
+    // Ragged where the fall ends at its sides (threads of it stray past that edge), and
+    // fading in where the water comes up to the brink.
+    let edge_x = fall_side(side, in.edge, in.rel, u);
+    var keep = (1.0 - smoothstep(0.6, 1.0, edge_x + (s - 0.5) * 0.4))
+        * (1.0 - smoothstep(0.08, 0.3, -tau * in.look.w));
+    alpha *= keep;
     // Sheets from neighboring lips overlap where they spread over rock: each is a thin film
     // there, so together they still read as one lacy veil and not an opaque white slab.
     alpha *= mix(1.0, 0.55, rock);
@@ -1238,7 +1305,10 @@ fn fs_falls(in: FallOut) -> @location(0) vec4<f32> {
     let z_scene = linear_depth(textureLoad(scene_depth, pix, 0));
     let z_frag = max(view_depth(in.rel), 1e-3);
     // (A sheet on the rock lies a few centimeters off it: soft over far less.)
+    keep *= saturate((z_scene - z_frag) / mix(0.5, 0.03, rock));
     alpha *= saturate((z_scene - z_frag) / mix(0.5, 0.03, rock));
+    let stray = in.edge * smoothstep(0.75, 1.0, edge_x) * (1.0 - smoothstep(0.88, 1.0, abs(side)));
+    alpha = max(alpha, stray * body * 0.7 * smoothstep(0.62, 0.9, s) * saturate((z_scene - z_frag) / 0.03));
     if (alpha < 0.004) { discard; }
 
     // Streak relief: each finger is rounded across, and the surges in it ripple the tongue.
@@ -1286,7 +1356,7 @@ fn fs_falls(in: FallOut) -> @location(0) vec4<f32> {
     // Denser froth is whiter; thin threads let a little of the water's own color through.
     var color = mix(glass, froth * (0.7 + 0.45 * s), aerated) + glint;
     // Over the lip the tongue is unbroken: `glass` already lets what's behind show through.
-    alpha = mix(max(alpha, body), alpha, aerated);
+    alpha = mix(max(alpha, body * keep), alpha, aerated);
     color = apply_fog(color, in.rel);
     return vec4<f32>(color * alpha, alpha);
 }

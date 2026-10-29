@@ -70,6 +70,9 @@ struct FallVertex {
     /// the lip, speed it left at (m/s), and 0 (a curtain; 1 is a spray cloud, see
     /// [`mist_puff`]).
     uv_speed: [f32; 4],
+    /// 1 on a strip's side where the fall ends (no neighboring lip carries the sheet on: its
+    /// edge frays there), 0 inside it; then unused.
+    edge: [f32; 4],
 }
 
 /// Turbulence of the water leaving a natural brink (rough rock, a ragged lip, a stream
@@ -78,6 +81,11 @@ struct FallVertex {
 const FALL_TURBULENCE: f32 = 0.18;
 /// `FallVertex::uv_speed.w` on the aerated spray round a falling curtain (see `fall_shell`).
 const SHELL_KIND: f32 = -1.0;
+/// `FallVertex::uv_speed.w` on the wet rock under a sheet sliding down it (see `fall_wet`).
+const WET_KIND: f32 = -2.0;
+/// How far back from its brink a curtain starts, meters: the water rolling over the edge
+/// (glassy, bending down), so a fall doesn't begin at a ruled line.
+const APPROACH_M: f32 = 0.35;
 
 /// How far a free-falling jet of `q` m²/s that left its brink at `speed` m/s has spread to
 /// each side of its core after falling `drop` meters: the turbulent spreading of a
@@ -95,24 +103,38 @@ fn jet_spread(q: f32, speed: f32, drop: f32) -> f32 {
 
 /// The curtain of water over `lip` as triangles down its `path` (see
 /// [`FlowSim::fall_path`](crate::flow::FlowSim::fall_path)), relative to the camera via `rel`.
-/// Where it slides down rock it lies on it, spreading wider. Falling free it is a volume:
-/// the glassy core, and in front of and behind it the aerated water and spray that it
-/// spreads into as it falls ([`jet_spread`]), so it has depth from every side.
+/// It starts a little upstream, rolling over the brink. Where it slides down rock it lies on
+/// it, spreading wider, over a band of rock it wets darker (into `wet`, drawn first). Falling
+/// free it is a volume: the glassy core, and in front of and behind it the aerated water and
+/// spray that it spreads into as it falls ([`jet_spread`]), so it has depth from every side.
+/// `sides`: whether neighboring lips carry the sheet on past each end (see
+/// [`Falls::sides`](crate::flow::Falls::sides)); where none does, its edge frays.
 fn fall_strip(
     lip: &crate::flow::Lip,
     path: &[crate::flow::FallPoint],
+    sides: [bool; 2],
     rel: impl Fn(DVec3) -> Vec3,
     out: &mut Vec<FallVertex>,
+    wet: &mut Vec<FallVertex>,
 ) {
     let across = Vec3::new(-lip.dir.y, 0.0, lip.dir.x);
     // Across coordinate from world x/z, so strips side by side share one pattern.
     let u0 = (lip.top.x * across.x as f64 + lip.top.z * across.z as f64).rem_euclid(4096.0) as f32;
     let last = path.len().saturating_sub(1).max(1);
     let mut spread = 0.0f32;
-    // Core, front spray, back spray.
-    let mut prev: [Option<[FallVertex; 2]>; 3] = [None; 3];
-    for (k, point) in path.iter().enumerate() {
-        let frac = k as f32 / last as f32;
+    // The water on its way to the brink, level with it and a little above the flow's own
+    // surface there.
+    let ahead = Vec3::new(lip.dir.x, 0.0, lip.dir.y);
+    let approach = path.first().map(|p| crate::flow::FallPoint {
+        pos: p.pos - (ahead * APPROACH_M).as_dvec3() + DVec3::Y * 0.015,
+        vel: ahead * lip.speed.max(0.3),
+        t: -APPROACH_M / lip.speed.max(0.3),
+        rock: Vec3::ZERO,
+    });
+    // Core, front spray, back spray, wet rock.
+    let mut prev: [Option<[FallVertex; 2]>; 4] = [None; 4];
+    for (k, point) in approach.iter().chain(path).enumerate() {
+        let frac = k.saturating_sub(1) as f32 / last as f32;
         let on_rock = point.rock != Vec3::ZERO;
         let normal = if on_rock {
             point.rock
@@ -149,24 +171,42 @@ fn fall_strip(
                 71.0,
                 SHELL_KIND,
             ),
+            // The rock under the sheet, wet wider than the sheet runs (splashed, and where the
+            // flow wandered). The strip lies at the sheet (the drawn rock is within a few
+            // tenths of a meter of the flow's bed) and darkens the scene just behind it
+            // (`fall_wet`).
+            (
+                p - normal * 0.01,
+                normal,
+                (half + jet) * 1.3 + 0.25,
+                0.0,
+                WET_KIND,
+            ),
         ];
         for (layer, (at, n, w, du, kind)) in layers.into_iter().enumerate() {
-            // Behind a sheet on rock is the rock.
-            if layer == 2 && on_rock {
-                prev[2] = None;
+            // Behind a sheet on rock is the rock; only there is rock to wet.
+            if (layer == 2 && on_rock) || (layer == 3 && !on_rock) {
+                prev[layer] = None;
                 continue;
             }
-            let ring = [-1.0f32, 1.0].map(|side| FallVertex {
-                rel_q: (at + across * (w * side)).extend(lip.q).to_array(),
-                normal_frac: n.extend(frac).to_array(),
-                across_side: across.extend(side).to_array(),
-                uv_speed: [u0 + du + w * side, point.t, lip.speed, kind],
+            // (The spray is thrown off as the water falls: none before the brink.)
+            if k == 0 && approach.is_some() && (layer == 1 || layer == 2) {
+                continue;
+            }
+            let ring = [-1.0f32, 1.0].map(|side| {
+                let open = !sides[(side > 0.0) as usize];
+                FallVertex {
+                    rel_q: (at + across * (w * side)).extend(lip.q).to_array(),
+                    normal_frac: n.extend(frac).to_array(),
+                    across_side: across.extend(side).to_array(),
+                    uv_speed: [u0 + du + w * side, point.t, lip.speed, kind],
+                    edge: [open as u8 as f32, 0.0, 0.0, 0.0],
+                }
             });
             if let Some(before) = prev[layer] {
                 // Wound so the front face is the one `normal` points out of.
-                out.extend_from_slice(&[
-                    before[0], before[1], ring[0], before[1], ring[1], ring[0],
-                ]);
+                let to = if layer == 3 { &mut *wet } else { &mut *out };
+                to.extend_from_slice(&[before[0], before[1], ring[0], before[1], ring[1], ring[0]]);
             }
             prev[layer] = Some(ring);
         }
@@ -180,11 +220,20 @@ fn boil_radius(power: f32) -> f32 {
 }
 
 /// The cloud of spray where a fall of `power` watts lands at `foot` (world; `rel` relative
-/// to the camera): camera-facing quads (`right`, `up`) drawn over the curtain's foot. A dense
+/// to the camera): camera-facing quads (`right`, `up`) drawn over the curtain's foot, out the way it lands
+/// (`away`, its horizontal velocity there). A dense
 /// cloud boiling off the pool, and over it a plume that billows up, grows and thins (the
 /// air the plunge drags down comes back up full of droplets). Corners go in
 /// `normal_frac.xy`, the radius in `.z` and how dense it is in `.w`.
-fn mist_puff(foot: DVec3, rel: Vec3, power: f32, right: Vec3, up: Vec3, out: &mut Vec<FallVertex>) {
+fn mist_puff(
+    foot: DVec3,
+    rel: Vec3,
+    power: f32,
+    away: Vec2,
+    right: Vec3,
+    up: Vec3,
+    out: &mut Vec<FallVertex>,
+) {
     // Flow times drop (m⁴/s), as for the spray particles: bigger falls make bigger clouds.
     let size = (power / 9810.0).max(0.0).sqrt();
     let radius = (0.8 + size * 0.9).min(8.0);
@@ -194,6 +243,7 @@ fn mist_puff(foot: DVec3, rel: Vec3, power: f32, right: Vec3, up: Vec3, out: &mu
     // (height over the foot, radius, density) in units of the foot cloud's radius: its lower
     // half is under the pool; the plume above it rises with the falls' power.
     let rise = (0.5 + size * 0.2).min(1.4);
+    let outward = Vec3::new(away.x, 0.0, away.y).normalize_or_zero();
     let layers = [
         (0.1, 1.0, 1.0),
         (0.55 * rise, 1.3, 0.3),
@@ -201,12 +251,15 @@ fn mist_puff(foot: DVec3, rel: Vec3, power: f32, right: Vec3, up: Vec3, out: &mu
     ];
     for (k, (lift, scale, density)) in layers.into_iter().enumerate() {
         let r = radius * scale;
-        let center = rel + Vec3::Y * (radius * lift);
+        // Out from the rock the water came down (where it lands against a wall the cloud
+        // would be all but hidden in it) and up.
+        let center = rel + outward * (radius * 0.6) + Vec3::Y * (radius * lift);
         let corner = |cx: f32, cy: f32| FallVertex {
             rel_q: (center + (right * cx + up * cy) * r).extend(0.0).to_array(),
             normal_frac: [cx, cy, r, strength * density],
             across_side: [0.0; 4],
             uv_speed: [seed + k as f32 * 13.7, 0.0, 0.0, 1.0],
+            edge: [0.0; 4],
         };
         out.extend_from_slice(&[
             corner(-1.0, -1.0),
@@ -756,7 +809,8 @@ impl WaterFeature {
                     array_stride: std::mem::size_of::<FallVertex>() as u64,
                     step_mode: wgpu::VertexStepMode::Vertex,
                     attributes: &wgpu::vertex_attr_array![
-                        0 => Float32x4, 1 => Float32x4, 2 => Float32x4, 3 => Float32x4
+                        0 => Float32x4, 1 => Float32x4, 2 => Float32x4, 3 => Float32x4,
+                        4 => Float32x4
                     ],
                 })],
             },
@@ -863,41 +917,59 @@ impl WaterFeature {
     }
 
     /// Curtains of water falling free over the flowing regions' lips.
-    /// `plunges`: where the visible falls land (world) and their power (W).
+    /// `plunges`: where the visible falls land (world), their horizontal velocity there
+    /// (m/s) and their power (W).
     fn upload_falls(
         gpu: &mut Gpu,
         shared: &GpuShared,
         state: &WaterState,
         view: &ViewData,
-        plunges: &[(DVec3, f32)],
+        plunges: &[(DVec3, Vec2, f32)],
     ) {
         // The falls as the flow step last worked them out (not traced again each frame).
-        let mut lips: Vec<(f64, &crate::flow::Lip, &[crate::flow::FallPoint])> = state
-            .flows
-            .iter()
-            .filter(|sim| sim.visible)
-            .flat_map(|sim| {
-                let falls = sim.falls();
-                falls
-                    .lips
-                    .iter()
-                    .zip(&falls.paths)
-                    .map(|(lip, path)| (lip.top.distance(view.origin), lip, path.as_slice()))
-            })
-            .filter(|(d, _, _)| *d < FALLS_REACH)
-            .collect();
+        type Drawn<'a> = (
+            f64,
+            &'a crate::flow::Lip,
+            &'a [crate::flow::FallPoint],
+            [bool; 2],
+        );
+        let mut lips: Vec<Drawn> =
+            state
+                .flows
+                .iter()
+                .filter(|sim| sim.visible)
+                .flat_map(|sim| {
+                    let falls = sim.falls();
+                    falls.lips.iter().zip(&falls.paths).zip(&falls.sides).map(
+                        |((lip, path), sides)| {
+                            (lip.top.distance(view.origin), lip, path.as_slice(), *sides)
+                        },
+                    )
+                })
+                .filter(|(d, ..)| *d < FALLS_REACH)
+                .collect();
         lips.sort_by(|a, b| a.0.total_cmp(&b.0));
         lips.truncate(MAX_LIPS);
-        let mut vertices = Vec::with_capacity(lips.len() * crate::flow::FALL_POINTS * 18);
-        for (_, lip, path) in &lips {
-            fall_strip(lip, path, |p| view.relative(p), &mut vertices);
+        let mut vertices = Vec::with_capacity(lips.len() * crate::flow::FALL_POINTS * 24);
+        let mut curtains = Vec::with_capacity(lips.len() * crate::flow::FALL_POINTS * 18);
+        for (_, lip, path, sides) in &lips {
+            fall_strip(
+                lip,
+                path,
+                *sides,
+                |p| view.relative(p),
+                &mut curtains,
+                &mut vertices,
+            );
         }
-        // Spray clouds last, so they draw over the curtains' feet.
+        // The wet rock first, under the curtains; spray clouds last, over their feet.
+        vertices.append(&mut curtains);
         if !lips.is_empty() {
             let (right, up) = (view.rotation * Vec3::X, view.rotation * Vec3::Y);
-            for &(foot, power) in plunges {
+            for &(foot, away, power) in plunges {
                 if foot.distance(view.origin) < FALLS_REACH {
-                    mist_puff(foot, view.relative(foot), power, right, up, &mut vertices);
+                    let rel = view.relative(foot);
+                    mist_puff(foot, rel, power, away, right, up, &mut vertices);
                 }
             }
         }
@@ -1499,16 +1571,15 @@ impl RenderFeature for WaterFeature {
             0,
         ];
         // Where the falls land, the water boils white (`plunge_boil`).
-        let plunges: Vec<(DVec3, f32)> = state
+        let plunges: Vec<(DVec3, Vec2, f32)> = state
             .flows
             .iter()
             .filter(|sim| sim.visible)
-            .flat_map(|sim| &sim.falls().plunges)
-            .map(|&(foot, _, power)| (foot, power))
+            .flat_map(|sim| sim.falls().plunges.iter().copied())
             .collect();
         let mut near: Vec<_> = plunges
             .iter()
-            .map(|(foot, power)| (foot.distance(view.origin), *foot, *power))
+            .map(|(foot, _, power)| (foot.distance(view.origin), *foot, *power))
             .filter(|(d, ..)| *d < PLUNGE_REACH)
             .collect();
         near.sort_by(|a, b| a.0.total_cmp(&b.0));
@@ -1767,15 +1838,29 @@ mod tests {
                 }
             })
             .collect();
-        let mut v = Vec::new();
+        let (mut v, mut wet) = (Vec::new(), Vec::new());
         let camera = DVec3::new(9.0, 7.0, -3.0);
-        fall_strip(&lip, &path, |p| (p - camera).as_vec3(), &mut v);
-        // The core, and the spray in front of and behind it.
-        assert_eq!(v.len(), FALL_SEGMENTS * 6 * 3);
+        fall_strip(
+            &lip,
+            &path,
+            [false, true],
+            |p| (p - camera).as_vec3(),
+            &mut v,
+            &mut wet,
+        );
+        // Falling free it wets no rock.
+        assert!(wet.is_empty());
+        // The core (from a little before the brink), and the spray in front of and behind it.
+        assert_eq!(v.len(), (FALL_SEGMENTS + 1) * 6 + FALL_SEGMENTS * 6 * 2);
         let (core, shells): (Vec<FallVertex>, Vec<FallVertex>) =
             v.iter().partition(|f| f.uv_speed[3] == 0.0);
-        assert_eq!(core.len(), FALL_SEGMENTS * 6);
+        assert_eq!(core.len(), (FALL_SEGMENTS + 1) * 6);
         assert!(shells.iter().all(|f| f.uv_speed[3] == SHELL_KIND));
+        // Only the end no other lip continues frays.
+        assert!(
+            v.iter()
+                .all(|f| f.edge[0] == if f.across_side[3] < 0.0 { 1.0 } else { 0.0 })
+        );
         let pos = |f: &FallVertex| Vec3::from_slice(&f.rel_q[..3]);
         // The spray spreads wider than the core as the jet falls (`jet_spread`), and stands
         // off it to both sides.
@@ -1788,10 +1873,15 @@ mod tests {
         let (c, s) = (width(&core), width(&shells));
         assert!(s.1 - s.0 > c.1 - c.0 + 0.2, "core {c:?}, spray {s:?}");
         let v = core;
-        // Starts at the lip, a strip as wide as the lip (a little more, to overlap).
+        // Starts just short of the lip, the water level with it rolling over it, a strip as
+        // wide as the lip (a little more, to overlap).
         let first = &v[0];
         assert!(first.normal_frac[3] == 0.0 && first.normal_frac[1] > 0.99);
-        assert!((pos(first) - Vec3::new(1.0, 2.0, 3.0 - 0.75 * 0.66)).length() < 1e-4);
+        assert!(first.uv_speed[1] < 0.0);
+        let start = Vec3::new(1.0 - APPROACH_M, 2.015, 3.0 - 0.75 * 0.66);
+        assert!((pos(first) - start).length() < 1e-4, "{}", pos(first));
+        let brink = v.iter().find(|f| f.uv_speed[1] == 0.0).unwrap();
+        assert!((pos(brink) - Vec3::new(1.0, 2.0, 3.0 - 0.75 * 0.66)).length() < 1e-4);
         // Ends where it lands, having carried on outward on its arc.
         let last = v
             .iter()
@@ -1814,12 +1904,68 @@ mod tests {
     }
 
     #[test]
+    fn a_sheet_sliding_down_rock_wets_a_wider_band_of_it() {
+        let lip = crate::flow::Lip {
+            top: DVec3::new(0.0, 5.0, 0.0),
+            dir: Vec2::X,
+            speed: 1.0,
+            q: 0.05,
+            drop: 4.0,
+            width: 0.5,
+        };
+        // Down a 60° slab facing +x.
+        let rock = Vec3::new(0.866, 0.5, 0.0);
+        let path: Vec<crate::flow::FallPoint> = (0..=FALL_SEGMENTS)
+            .map(|k| {
+                let s = 8.0 * k as f32 / FALL_SEGMENTS as f32;
+                crate::flow::FallPoint {
+                    pos: lip.top + DVec3::new(0.5 * s as f64, -0.866 * s as f64 * 0.577, 0.0),
+                    vel: Vec3::new(1.0, -1.7, 0.0),
+                    t: 0.2 * k as f32,
+                    rock: if k == 0 { Vec3::ZERO } else { rock },
+                }
+            })
+            .collect();
+        let (mut v, mut wet) = (Vec::new(), Vec::new());
+        fall_strip(&lip, &path, [true, true], |p| p.as_vec3(), &mut v, &mut wet);
+        assert_eq!(wet.len(), (FALL_SEGMENTS - 1) * 6);
+        assert!(
+            wet.iter()
+                .all(|f| f.uv_speed[3] == WET_KIND && f.edge[0] == 0.0)
+        );
+        let half = |set: &[FallVertex], at: f32| {
+            set.iter()
+                .filter(|f| f.normal_frac[3] == at)
+                .map(|f| f.rel_q[2].abs())
+                .fold(0.0f32, f32::max)
+        };
+        let sheet: Vec<_> = v
+            .iter()
+            .copied()
+            .filter(|f| f.uv_speed[3] == ROCK_KIND)
+            .collect();
+        assert!(half(&wet, 1.0) > half(&sheet, 1.0) + 0.2);
+        // Under the sheet, on the rock side of it.
+        let (w, c) = (wet.last().unwrap(), sheet.last().unwrap());
+        let d = Vec3::from_slice(&c.rel_q[..3]) - Vec3::from_slice(&w.rel_q[..3]);
+        assert!(d.dot(rock) > 0.005, "{d}");
+    }
+
+    #[test]
     fn spray_clouds_face_the_camera_over_the_foot() {
         let (right, up) = (Vec3::X, Vec3::Y);
         let mut v = Vec::new();
         let foot = Vec3::new(0.0, -5.0, -20.0);
         // A small stream falling 8 m (0.2 m³/s): about 16 kW.
-        mist_puff(DVec3::new(3.0, 1.0, 4.0), foot, 16_000.0, right, up, &mut v);
+        mist_puff(
+            DVec3::new(3.0, 1.0, 4.0),
+            foot,
+            16_000.0,
+            Vec2::ZERO,
+            right,
+            up,
+            &mut v,
+        );
         // The cloud on the pool and two layers of plume over it, each rising and spreading.
         assert_eq!(v.len(), 18);
         let pos = |f: &FallVertex| Vec3::from_slice(&f.rel_q[..3]);

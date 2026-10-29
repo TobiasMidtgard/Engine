@@ -263,6 +263,31 @@ const SHEET: f32 = 0.06;
 /// the grid. Steeper faces it slides down.
 const LANDING_SLOPE: f32 = 0.7;
 
+/// For each of `lips`, whether another carries its sheet on past its left and right ends
+/// (-across, +across): a neighbor about a lip's width along the brink at about its height.
+fn lip_sides(lips: &[Lip]) -> Vec<[bool; 2]> {
+    lips.iter()
+        .enumerate()
+        .map(|(k, lip)| {
+            let across = Vec2::new(-lip.dir.y, lip.dir.x);
+            let mut sides = [false; 2];
+            for (m, other) in lips.iter().enumerate() {
+                let d = other.top - lip.top;
+                if m == k || d.y.abs() > lip.width.max(0.5) as f64 {
+                    continue;
+                }
+                let d = Vec2::new(d.x as f32, d.z as f32);
+                let (a, b) = (d.dot(across), d.dot(lip.dir));
+                let reach = 1.6 * lip.width.max(other.width);
+                if b.abs() < lip.width && a.abs() > 0.3 * lip.width && a.abs() < reach {
+                    sides[(a > 0.0) as usize] = true;
+                }
+            }
+            sides
+        })
+        .collect()
+}
+
 /// Simulation state of one [`FlowRegion`].
 #[derive(Debug, Clone)]
 pub struct FlowSim {
@@ -326,6 +351,9 @@ pub struct Falls {
     pub paths: Vec<Vec<FallPoint>>,
     /// Where they land ([`FlowSim::plunges`]).
     pub plunges: Vec<(DVec3, Vec2, f32)>,
+    /// Per lip, whether the sheet carries on past its left and right ends (-across, +across:
+    /// another lip along the same brink), so only a fall's outer edges fray.
+    pub sides: Vec<[bool; 2]>,
 }
 
 /// Seconds of flow between working out a region's [`Falls`] again.
@@ -399,10 +427,12 @@ impl FlowSim {
             .map(|lip| self.fall_path(lip, FALL_POINTS))
             .collect::<Vec<_>>();
         let plunges = self.plunges_of(&lips, &paths);
+        let sides = lip_sides(&lips);
         self.falls = std::sync::Arc::new(Falls {
             lips,
             paths,
             plunges,
+            sides,
         });
         self.since_falls = 0.0;
     }
