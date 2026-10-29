@@ -42,6 +42,7 @@ engine_destruction.workspace = true
 engine_movement.workspace = true
 engine_audio.workspace = true
 engine_softbody.workspace = true
+engine_script.workspace = true
 
 [dev-dependencies]
 # The glyph test reads egui's built-in fonts directly.

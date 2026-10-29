@@ -44,6 +44,7 @@ mod rigs;
 mod sample;
 mod scatter;
 mod scene_ops;
+mod scripts;
 mod shots;
 mod show;
 mod snap;
@@ -107,6 +108,7 @@ fn main() {
             engine_audio::AudioPlugin,
             engine_softbody::SoftBodyPlugin,
         ))
+        .add_plugins((engine_script::ScriptPlugin, scripts::ScriptsTabPlugin))
         .add_plugins(EditorPlugin);
 
     let args: Vec<String> = std::env::args().collect();
@@ -149,6 +151,7 @@ fn main() {
             Some("round27") => shots::round27(dir),
             Some("round27b") => shots::round27b(dir),
             Some("play") => shots::play_in_editor(dir),
+            Some("scripts") => scripts::shots(dir),
             _ => shots::gallery(dir),
         };
         app.insert_resource(script);

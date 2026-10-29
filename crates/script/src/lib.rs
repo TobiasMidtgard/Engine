@@ -91,7 +91,9 @@
 //! "Uncaught errors" (on by default in VS Code's breakpoint list) stops where an error nothing
 //! catches is raised, with its stack and locals, before the call fails. Without a client,
 //! `script.logpoint {path, line, message}` prints values from a line without stopping, and
-//! code boards show the newest beside it. How it works: `src/debugger.rs`.
+//! code boards show the newest beside it. To try scripts and the debugger without the game (no
+//! GPU): `cargo run -p engine_script --example headless [-- files...]`. How it works:
+//! `src/debugger.rs`.
 //!
 //! ## Profiling
 //!
@@ -124,7 +126,10 @@
 //! game), `script.reload {path}`, `script.restart {entity}`, `script.send {entity, event, data}`,
 //! `script.source {path}`, `script.write {path, source}`, `script.edit {path, find, replace}`,
 //! `script.types` (writes `engine.d.luau` for luau-lsp autocompletion), `script.debug {port}`
-//! (start the debugger), `script.logpoint {path, line, message}`, `script.profile {seconds}`.
+//! (start the debugger), `script.logpoint {path, line, message}`, `script.profile {seconds}`,
+//! `script.marks {path}` (a file's errors, logpoint values and heat by line) and
+//! `script.check {source}` (compile without running). An editor holds scripts still with
+//! [`ScriptsHeld`] while a scene is edited ([`editing`]).
 //!
 //! ## Showcase
 //!
@@ -147,6 +152,7 @@ mod convert;
 mod dap;
 mod debugger;
 pub mod demo;
+pub mod editing;
 mod entity;
 #[cfg(feature = "hotpatch")]
 pub mod hotpatch;
@@ -161,6 +167,7 @@ use bevy_ecs::prelude::*;
 use engine_core::prelude::*;
 
 pub use access::ScriptError;
+pub use editing::ScriptsHeld;
 pub use entity::OwnMaterial;
 pub use runtime::{ScriptRuntime, normalize};
 pub use types::definitions;
@@ -393,6 +400,9 @@ pub(crate) fn with_runtime<R>(
 }
 
 fn run_scripts(world: &mut World) {
+    if world.contains_resource::<ScriptsHeld>() {
+        return;
+    }
     let has_scripts = !world
         .query_filtered::<(), With<Script>>()
         .iter(world)
@@ -448,6 +458,9 @@ fn shift_scripts(
 }
 
 fn run_fixed_scripts(world: &mut World) {
+    if world.contains_resource::<ScriptsHeld>() {
+        return;
+    }
     if !world
         .get_resource::<ScriptRuntime>()
         .is_some_and(|rt| rt.wants_fixed())

@@ -1117,6 +1117,7 @@ dependencies = [
  "engine_movement",
  "engine_npc",
  "engine_physics",
+ "engine_script",
  "engine_smoke",
  "engine_softbody",
  "engine_space",

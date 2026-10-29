@@ -264,6 +264,31 @@ pub(crate) fn register(app: &mut App) {
         },
     )
     .register_api(
+        "script.marks",
+        "What a code view shows beside a file's lines (\"path\"): whether it is loaded and its \
+         version, instances and ms, why its newest text didn't load, its last runtime error, \
+         logpoint values and profiler heat (percent) by line.",
+        r#"{"path": "showcase/courtyard.luau"}"#,
+        |world, args| {
+            let path = safe_path(str_arg(&args, "path").ok_or("missing 'path'")?)?;
+            serde_json::to_value(crate::editing::file_marks(world, &path))
+                .map_err(|e| e.to_string())
+        },
+    )
+    .register_api(
+        "script.check",
+        "Compile Luau text (\"source\") without running it: ok, or the line and message of \
+         its first syntax error.",
+        r#"{"source": "local S = {}\nreturn S"}"#,
+        |_, args| {
+            let source = str_arg(&args, "source").ok_or("missing 'source'")?;
+            Ok(match crate::editing::check(source) {
+                None => json!({"ok": true}),
+                Some((line, message)) => json!({"ok": false, "line": line, "message": message}),
+            })
+        },
+    )
+    .register_api(
         "script.types",
         "Write engine.d.luau (Luau type definitions of every engine function, vec3, quat, \
          entities and tasks) into the scripts folder for luau-lsp autocompletion; returns its \

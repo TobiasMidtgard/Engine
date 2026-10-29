@@ -1809,3 +1809,83 @@ fn math_speed() {
         );
     }
 }
+
+/// What the editor's Scripts tab reads: output since a cursor (with file and line), a file's
+/// marks (instances, the last runtime error's line and count, logpoint values), and scripts
+/// held still while `ScriptsHeld` is there.
+#[test]
+fn an_editor_sees_output_marks_and_can_hold_scripts() {
+    use crate::editing::{OutputCursor, ScriptsHeld, file_marks};
+
+    let folder = Folder::new();
+    folder.write(
+        "lamp.luau",
+        "local Lamp = {}\nfunction Lamp:start()\n\tself.t = 0\n\tprint('lit')\nend\n\
+         function Lamp:update(dt)\n\tself.t += dt\n\tlocal glow = self.t * 2\n\tif self.t > 0.5 then\n\
+         \t\terror('too bright')\n\tend\nend\nreturn Lamp\n",
+    );
+    let mut app = app_in(&folder.0);
+    app.insert_resource(ScriptsHeld);
+    let e = spawn_script(&mut app, "Lamp", "lamp");
+    app.update_n(10);
+    assert!(
+        app.world.get_resource::<ScriptRuntime>().is_none(),
+        "held: no VM, nothing ran"
+    );
+    app.world.remove_resource::<ScriptsHeld>();
+    call_api(
+        &mut app.world,
+        "script.logpoint",
+        json!({"path": "lamp.luau", "line": 9, "message": "glow = {glow}"}),
+    )
+    .unwrap();
+    app.update_n(30);
+    let mut cursor = OutputCursor::default();
+    let out = app
+        .world
+        .resource::<ScriptRuntime>()
+        .output_since(&mut cursor);
+    assert!(
+        out.iter()
+            .any(|l| !l.error && l.text.ends_with("lit") && l.at == Some(("lamp.luau".into(), 4))),
+        "{out:?}"
+    );
+    let error = out.iter().find(|l| l.error).expect("the error");
+    assert_eq!(error.at, Some(("lamp.luau".into(), 10)), "{error:?}");
+    assert!(error.text.contains("too bright"), "{error:?}");
+    // Only what is new comes next time.
+    app.update_n(2);
+    let again = app
+        .world
+        .resource::<ScriptRuntime>()
+        .output_since(&mut cursor);
+    assert!(again.iter().all(|l| l.error), "{again:?}");
+    assert!(again.len() <= 2, "{again:?}");
+
+    let marks = file_marks(&app.world, "lamp.luau");
+    assert!(
+        marks.loaded && marks.version == 1 && marks.instances == 1,
+        "{marks:?}"
+    );
+    let fault = marks.fault.expect("a fault");
+    assert_eq!(fault.line, Some(10));
+    assert!(fault.count > 5, "{}", fault.count);
+    assert!(
+        marks
+            .values
+            .get(&9)
+            .is_some_and(|v| v.starts_with("glow = ")),
+        "{:?}",
+        marks.values
+    );
+    let api = call_api(&mut app.world, "script.marks", json!({"path": "lamp.luau"})).unwrap();
+    assert_eq!(api["fault"]["line"], json!(10));
+    let check = call_api(
+        &mut app.world,
+        "script.check",
+        json!({"source": "local x = (1 +"}),
+    )
+    .unwrap();
+    assert_eq!(check["ok"], json!(false));
+    let _ = e;
+}

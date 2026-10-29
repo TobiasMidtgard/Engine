@@ -54,6 +54,7 @@ pub enum Tab {
     History,
     Partition,
     Matrix,
+    Scripts,
 }
 
 /// A message in the console.

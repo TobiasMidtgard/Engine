@@ -59,7 +59,21 @@ Each VM has its own globals and modules: talk to a script in another VM with `e:
 scripts the same `ScriptActor` number to keep them in one VM. The showcase swarm:
 `showcase/wisp.luau`.
 
-## Editor setup (autocomplete and type checking)
+## In the editor
+
+The editor's **Scripts** tab (beside Scene) edits these files: the folder with each file's
+state (green: running, red: an error), colored code with line numbers, and the file's functions
+to jump to. A syntax error is marked on its line as you type, before you save, and a call to an
+engine function that doesn't exist is underlined with the nearest name. Completion (as you
+type, or Ctrl+Space) knows every engine function with its summary and example arguments,
+`vec3`, entities, `task`, `self`, hooks and component names. Scripts run when you press Play,
+and every Play starts them afresh; Ctrl+S then hot reloads them with their state. While playing,
+click a line's number to see its values live, and Profile shows each line's share of the script
+time. The Output under the code shows prints and errors (click one to open its line), and its
+command bar runs Luau in the game. With an entity selected, open its script, or run the open
+file on it.
+
+## VS Code setup (autocomplete and type checking)
 
 1. Install the **Luau Language Server** extension (`JohnnyMorganz.luau-lsp`) in VS Code.
 2. Write the engine's type definitions from the running game, in the console or through the AI
@@ -85,7 +99,8 @@ and `script.restart` starts an entity's script from scratch.
 
 Start the game with `ENGINE_SCRIPT_DEBUG=4711` (or call `script.debug` while it runs) and attach
 VS Code with the extension in `crates/script/vscode` (its README has the setup) or any other
-Debug Adapter Protocol client. Breakpoints with conditions, hit counts and logpoints, stepping,
+Debug Adapter Protocol client (to try it without starting the game:
+`cargo run -p engine_script --example headless -- examples/float.luau`). Breakpoints with conditions, hit counts and logpoints, stepping,
 the call stack, variables, watches and the debug console all work in these files, and follow hot
 reloads. "Uncaught errors" in VS Code's breakpoint list (on by default) stops where an error
 nothing catches is raised, with the stack and locals still there. Without an editor,
@@ -115,3 +130,7 @@ have them.
 - `showcase/courtyard.luau`: the Script courtyard's director (lanterns, orrery, the ritual).
 - `showcase/lever.luau`: a lever that sends an event to another entity's script.
 - `showcase/wisp.luau`: one of the 320 wisps round the orrery (`parallel_update`, on every core).
+- `examples/lamp.luau`: a lamp that breathes and flickers (the editor's starter courtyard has a
+  lamp to put it on).
+- `examples/float.luau`: a stone that floats and turns, with a curve from a module
+  (`examples/lib/wave.luau`).
