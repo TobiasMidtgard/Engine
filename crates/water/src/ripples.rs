@@ -38,6 +38,15 @@ const STILL: f32 = 2e-4;
 const CURRENT: f32 = 0.15;
 /// A tile whose foam all stays under this has none.
 const FOAM_STILL: f32 = 2e-3;
+/// Seconds for the bubbles churned under foam to rise out and fade to a third. White foam
+/// on fresh water bursts in about 2.5 s, the bubble cloud under it lingers about four times
+/// as long (Callaghan, Deane and Stokes 2016; wake bubble plumes, Trevorrow et al. 1994).
+const BUBBLE_LIFE_S: f32 = 10.0;
+/// Bubbles under this are gone.
+const BUBBLE_STILL: f32 = 0.01;
+/// How fast the bubble cloud spreads sideways, m²/s: the wake's turbulence mixes it out, so
+/// the trail widens by about half a meter each side as it fades.
+const BUBBLE_SPREAD: f32 = 0.015;
 /// Fastest current the grid carries, m/s.
 pub const MAX_CURRENT: f32 = 6.0;
 /// Swirls turning slower than this (1/s) aren't kept tight: they fade (confinement would feed
@@ -104,6 +113,8 @@ pub struct RippleField {
     pub vel: Vec<[f32; 2]>,
     /// Foam, 0..1.
     pub foam: Vec<f32>,
+    /// Bubbles churned under the foam, 0..1: they outlast it, a pale cloud fading behind.
+    pub bubbles: Vec<f32>,
     /// Squared wave speed per cell (m²/s²); 0 = dry land.
     pub speed2: Vec<f32>,
     /// Waiting disturbances, applied at the start of the next step.
@@ -123,6 +134,11 @@ pub struct RippleField {
     active: Vec<bool>,
     /// Tiles with foam on them.
     foamy: Vec<bool>,
+    /// Tiles with bubbles under them.
+    bubbly: Vec<bool>,
+    /// Scratch for the bubbles' step: the next bubbles, and the tiles it touches.
+    bubbles2: Vec<f32>,
+    bubbling: Vec<bool>,
     /// Tiles with currents faster than waves alone make, at the end of the last step.
     currents: Vec<bool>,
     /// Tiles where the current is carried along and curled (active tiles with currents in
@@ -636,6 +652,7 @@ impl RippleField {
             h: vec![0.0; n * n],
             vel: vec![[0.0; 2]; n * n],
             foam: vec![0.0; n * n],
+            bubbles: vec![0.0; n * n],
             speed2: vec![0.0; n * n],
             pending: Vec::new(),
             version: 0,
@@ -645,6 +662,9 @@ impl RippleField {
             moving: vec![false; tiles],
             active: vec![false; tiles],
             foamy: vec![false; tiles],
+            bubbly: vec![false; tiles],
+            bubbles2: vec![0.0; n * n],
+            bubbling: vec![false; tiles],
             currents: vec![false; tiles],
             stirred: vec![false; tiles],
             max_current: 0.0,
@@ -704,6 +724,7 @@ impl RippleField {
     pub fn wake_all(&mut self) {
         self.moving.fill(true);
         self.foamy.fill(true);
+        self.bubbly.fill(true);
         self.currents.fill(true);
         self.max_current = MAX_CURRENT;
         self.h2.fill(0.0);
@@ -719,6 +740,7 @@ impl RippleField {
         self.h.fill(0.0);
         self.vel.fill([0.0; 2]);
         self.foam.fill(0.0);
+        self.bubbles.fill(0.0);
         self.h2.fill(0.0);
         self.vel2.fill([0.0; 2]);
         self.foam2.fill(0.0);
@@ -728,6 +750,7 @@ impl RippleField {
         self.moving.fill(false);
         self.active.fill(false);
         self.foamy.fill(false);
+        self.bubbly.fill(false);
         self.currents.fill(false);
         self.stirred.fill(false);
         self.max_current = 0.0;
@@ -772,6 +795,7 @@ impl RippleField {
             moved(&mut self.h, n, sx, sz);
             moved(&mut self.vel, n, sx, sz);
             moved(&mut self.foam, n, sx, sz);
+            moved(&mut self.bubbles, n, sx, sz);
             self.wake_all();
         }
         self.version += 1;
@@ -835,6 +859,7 @@ impl RippleField {
         self.h.clone_from(&other.h);
         self.vel.clone_from(&other.vel);
         self.foam.clone_from(&other.foam);
+        self.bubbles.clone_from(&other.bubbles);
         self.surface = other.surface.clone();
         self.coarse.clone_from(&other.coarse);
     }
@@ -867,7 +892,8 @@ impl RippleField {
         self.has_water
             && (!self.pending.is_empty()
                 || self.moving.iter().any(|m| *m)
-                || self.foamy.iter().any(|f| *f))
+                || self.foamy.iter().any(|f| *f)
+                || self.bubbly.iter().any(|b| *b))
     }
 
     /// Queue a push on the surface.
@@ -969,6 +995,10 @@ impl RippleField {
         }
         let any_active = self.active.iter().any(|a| *a);
         if !any_active && !self.foamy.iter().any(|f| *f) {
+            if self.bubbly.iter().any(|b| *b) {
+                self.age_bubbles(dt);
+                self.version += 1;
+            }
             return;
         }
         if any_active {
@@ -1003,7 +1033,66 @@ impl RippleField {
             self.march(dt, 0.0, 0.0, false, Some(foam));
         }
         self.settle();
+        self.age_bubbles(dt);
         self.version += 1;
+    }
+
+    /// Bubbles fill in under the foam and outlast it, spreading out as they fade: each cell
+    /// keeps the more of its fading, spreading bubbles and the foam on it now.
+    fn age_bubbles(&mut self, dt: f32) {
+        let (n, t) = (self.n, self.tiles());
+        let decay = (-dt / BUBBLE_LIFE_S).exp();
+        let k = (BUBBLE_SPREAD * dt / (self.cell * self.cell)).min(0.2);
+        for ty in 0..t {
+            for tx in 0..t {
+                let at = ty * t + tx;
+                self.bubbling[at] = self.foamy[at] || near(&self.bubbly, t, tx, ty);
+            }
+        }
+        let b = &self.bubbles;
+        for ty in 0..t {
+            for tx in 0..t {
+                if !self.bubbling[ty * t + tx] {
+                    continue;
+                }
+                for j in ty * TILE..((ty + 1) * TILE).min(n) {
+                    for i in tx * TILE..((tx + 1) * TILE).min(n) {
+                        let idx = j * n + i;
+                        if self.speed2[idx] <= 0.0 {
+                            self.bubbles2[idx] = 0.0;
+                            continue;
+                        }
+                        let c = b[idx];
+                        // (Land and the grid's edge hold them in.)
+                        let side = |o: Option<usize>| match o {
+                            Some(o) if self.speed2[o] > 0.0 => b[o] - c,
+                            _ => 0.0,
+                        };
+                        let spread = side((i > 0).then(|| idx - 1))
+                            + side((i + 1 < n).then_some(idx + 1))
+                            + side((j > 0).then(|| idx - n))
+                            + side((j + 1 < n).then_some(idx + n));
+                        let v = ((c + k * spread) * decay).max(self.foam[idx]);
+                        self.bubbles2[idx] = if v < BUBBLE_STILL { 0.0 } else { v };
+                    }
+                }
+            }
+        }
+        for ty in 0..t {
+            for tx in 0..t {
+                let at = ty * t + tx;
+                if !self.bubbling[at] {
+                    continue;
+                }
+                let mut most = 0.0f32;
+                for j in ty * TILE..((ty + 1) * TILE).min(n) {
+                    let row = j * n + tx * TILE..j * n + ((tx + 1) * TILE).min(n);
+                    self.bubbles[row.clone()].copy_from_slice(&self.bubbles2[row.clone()]);
+                    most = self.bubbles2[row].iter().copied().fold(most, f32::max);
+                }
+                self.bubbly[at] = most > 0.0;
+            }
+        }
     }
 
     /// Carry the heights and foam of the active tiles where the water flows downstream with
@@ -1386,6 +1475,7 @@ impl RippleField {
                 let at = DVec2::new(back.x, back.z);
                 self.h[k] = old.bilinear(&old.h, at);
                 self.foam[k] = old.bilinear(&old.foam, at);
+                self.bubbles[k] = old.bilinear(&old.bubbles, at);
                 // Faces take the turned current at their cell's center: close enough for
                 // the rare turn of the world.
                 let v = turned(old.sample(at).map_or(Vec2::ZERO, |s| s.current));
@@ -1686,6 +1776,43 @@ mod tests {
     }
 
     #[test]
+    fn bubbles_outlast_the_foam_spreading_out_then_clear() {
+        let mut f = pond();
+        f.disturb(drop_at(0.0, 0.0, 1.0, 0.0, 1.0));
+        let spread = |f: &RippleField, buf: &[f32]| {
+            // How far out they reach: the rms distance from the middle, meters.
+            let (mut sum, mut w) = (0.0f64, 0.0f64);
+            for j in 0..f.n {
+                for i in 0..f.n {
+                    let m = buf[j * f.n + i] as f64;
+                    sum += f.cell_center(i, j).length_squared() * m;
+                    w += m;
+                }
+            }
+            (sum / w.max(1e-9)).sqrt()
+        };
+        f.step(1.0 / 60.0, 0.35, 2.5);
+        let (foam0, bubbles0) = (spread(&f, &f.foam), spread(&f, &f.bubbles));
+        for _ in 0..6 * 60 {
+            f.step(1.0 / 60.0, 0.35, 2.5);
+        }
+        let most = |buf: &[f32]| buf.iter().copied().fold(0.0f32, f32::max);
+        // White foam bursts in a few seconds; the bubbles under it linger and widen.
+        assert!(most(&f.foam) < 0.1, "foam {}", most(&f.foam));
+        assert!(most(&f.bubbles) > 0.25, "bubbles {}", most(&f.bubbles));
+        let wider = spread(&f, &f.bubbles);
+        assert!(
+            wider > bubbles0.max(foam0) + 0.08,
+            "{bubbles0} {foam0} -> {wider}"
+        );
+        for _ in 0..60 * 60 {
+            f.step(1.0 / 60.0, 0.35, 2.5);
+        }
+        assert!(f.bubbles.iter().all(|x| *x == 0.0));
+        assert!(!f.needs_step());
+    }
+
+    #[test]
     fn calm_water_costs_nothing() {
         let mut f = pond();
         f.disturb(drop_at(0.0, 0.0, 0.4, 0.05, 0.5));
@@ -1698,6 +1825,8 @@ mod tests {
         assert_eq!(f.active_tiles(), 0);
         assert!(f.h.iter().all(|h| *h == 0.0));
         assert!(f.foam.iter().all(|x| *x == 0.0));
+        assert!(f.bubbles.iter().all(|x| *x == 0.0));
+        assert!(!f.needs_step());
         let v = f.version;
         f.step(1.0 / 60.0, 0.35, 1.0);
         assert_eq!(f.version, v, "a still pond needs no upload");

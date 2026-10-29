@@ -562,7 +562,8 @@ pub struct WaterSettings {
     pub ripple_speed: f32,
     /// How fast ripples die out, 1/s.
     pub ripple_damping: f32,
-    /// Seconds for foam to fade to a third.
+    /// Seconds for foam to fade to a third (white foam on fresh water bursts in about 2.5 s;
+    /// the bubbles under it linger on, see [`crate::ripples::RippleField::bubbles`]).
     pub foam_life_s: f32,
     /// Seconds for the currents bodies stir up (a boat's wash, the eddies behind a swimmer)
     /// to fade to a third.
@@ -594,7 +595,7 @@ impl Default for WaterSettings {
             ripple_cell_m: 0.25,
             ripple_speed: 1.3,
             ripple_damping: 0.35,
-            foam_life_s: 6.0,
+            foam_life_s: 3.0,
             current_life_s: 9.0,
             swirl: 0.5,
             rain_drops: 0.02,

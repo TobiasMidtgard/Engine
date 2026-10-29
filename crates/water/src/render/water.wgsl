@@ -58,7 +58,7 @@ struct WaterUniform {
 @group(1) @binding(2) var scene_color: texture_2d<f32>;     // pre-exposed HDR, before transparents
 @group(1) @binding(3) var scene_depth: texture_depth_2d;    // reverse-Z
 @group(1) @binding(4) var puddle_tex: texture_2d<f32>;      // r depth (m), g ground y rel puddle2.x
-@group(1) @binding(5) var current_tex: texture_2d<f32>;     // ripple grid currents: x, z (m/s), turn (1/s)
+@group(1) @binding(5) var current_tex: texture_2d<f32>;     // ripple grid currents: x, z (m/s), turn (1/s), bubbles
 @group(1) @binding(6) var detail_tex: texture_2d_array<f32>; // fine waves, per tile: (dh/dx, dh/dz, h, Jacobian), (moments, foam)
 @group(1) @binding(7) var surface_tex: texture_2d<f32>;     // dispersive ripples on the ripple grid: height, dh/dx, dh/dz
 @group(1) @binding(8) var coarse_tex: texture_2d<f32>;      // their long waves, on a grid 4 times larger: the same
@@ -76,6 +76,10 @@ struct FlowGpu {
 // Deep water's reflectance (Gordon) gives what one look straight down sees; light scattered
 // in from the sides and the view's slant through the bright top layer add to it.
 const SCATTER_GAIN: f32 = 2.5;
+// Backscattering of the bubble cloud under a fresh wake, 1/m: bubbles swamp what the water's
+// own particles scatter back many times over just after a breaker (Terrill, Melville and
+// Stramski 2001), so the cloud glows well above the water around it, far below white foam.
+const BUBBLE_BB: f32 = 0.06;
 
 // ---------------------------------------------------------------- helpers
 struct WaterLook {
@@ -366,8 +370,8 @@ fn ripple_at(rel_xz: vec2<f32>) -> vec4<f32> {
     return r * fade + long;
 }
 
-// Currents stirred into the ripple grid at a camera-relative x/z: (x, z m/s, turn 1/s, 0),
-// faded at the edge.
+// Currents stirred into the ripple grid at a camera-relative x/z: (x, z m/s, turn 1/s,
+// bubbles 0..1), faded at the edge.
 fn current_at(rel_xz: vec2<f32>) -> vec4<f32> {
     if (water.g.ripple.w < 0.5) { return vec4<f32>(0.0); }
     let uv = (rel_xz - water.g.ripple.xy) / water.g.ripple.z;
@@ -484,7 +488,15 @@ fn caustics(p: vec2<f32>) -> f32 {
 
 // Radiance the water itself sends back (in-scattering of sun and sky), not pre-exposed.
 fn medium_radiance(look: WaterLook, rel: vec3<f32>, depth_below: f32) -> vec3<f32> {
-    let sun = frame.sun_color.rgb * sun_transmittance(rel) * max(frame.sun_dir.y, 0.0);
+    return backscatter(look, rel, depth_below, 0.0, 1.0);
+}
+
+// `medium_radiance` with `extra_bb` (1/m) more backscattering, white: bubbles, which scatter
+// every color alike. What comes back is still tinted by what the water absorbs on the way, so
+// a bubble cloud glows in the water's own color, paler: turquoise in a green lake. `sun_vis`:
+// how much of the sun reaches the water (a cloud just under the surface sits in its shadows).
+fn backscatter(look: WaterLook, rel: vec3<f32>, depth_below: f32, extra_bb: f32, sun_vis: f32) -> vec3<f32> {
+    let sun = frame.sun_color.rgb * sun_transmittance(rel) * max(frame.sun_dir.y, 0.0) * sun_vis;
     let sky = sky_ambient(vec3<f32>(0.0, 1.0, 0.0)) * sky_visibility(rel, vec3<f32>(0.0, 1.0, 0.0)) * PI;
     let down = exp(-(look.absorb + vec3<f32>(look.scattering)) * max(depth_below, 0.0));
     let e = (sun * 0.98 + sky) * INV_PI * down;
@@ -493,7 +505,7 @@ fn medium_radiance(look: WaterLook, rel: vec3<f32>, depth_below: f32) -> vec3<f3
     // particles scatter back (`scatter_color` is backscattering per meter of scattering)
     // against what the water absorbs: blue for pure water, turquoise for rock flour, green
     // for algae, brown for silt and tannins.
-    let bb = look.scattering * look.scatter_color;
+    let bb = look.scattering * look.scatter_color + vec3<f32>(extra_bb);
     let u = bb / max(look.absorb + bb, vec3<f32>(1e-5));
     let r = (0.0949 + 0.0794 * u) * u;
     return r * e * PI * SCATTER_GAIN;
@@ -579,10 +591,10 @@ fn streak_foam(wp: vec2<f32>, vel: vec2<f32>) -> f32 {
 // `edge` is how deep the water gets before the waterline is fully drawn, meters.
 // `shore_depth`: water shallower than this laps at the shore (a lake's beach; 0 for none,
 // as for streams, which lap by their own depth). `vel`: the current (m/s), which carries the
-// foam downstream.
+// foam downstream. `bubbles` 0..1: the cloud churned under foam, lingering after it bursts.
 fn shade_water(rel: vec3<f32>, n_in: vec3<f32>, look: WaterLook, foam_in: f32, crest: f32,
                frag: vec4<f32>, wind: f32, edge: f32, shore_depth: f32, vel: vec2<f32>,
-               slope_var: f32) -> vec3<f32> {
+               slope_var: f32, bubbles: f32) -> vec3<f32> {
     let dist = length(rel);
     let v = -rel / max(dist, 1e-4);
     var n = n_in;
@@ -682,6 +694,19 @@ fn shade_water(rel: vec3<f32>, n_in: vec3<f32>, look: WaterLook, foam_in: f32, c
 
     var color = water_col * (1.0 - fresnel) + refl * fresnel + glitter + sss;
 
+    // ---- bubbles: churned under the foam, they rise out over seconds after it has burst. The
+    // cloud scatters light back up just under the surface and hides what is below, so a wake
+    // fades from white through a pale trail in the water's own color before it clears. It
+    // thins in wisps from its edges, as the foam does.
+    if (bubbles > 0.001 && thick < 1e5) {
+        let wp = tiling_pos(rel).xz;
+        let wisps = fbm2(wp * 1.3 + vec2<f32>(3.7, time_s() * 0.03), 3) / 0.875;
+        let theta = 1.0 - bubbles * 1.2;
+        let dense = smoothstep(theta - 0.25, theta + 0.25, wisps) * saturate(bubbles * 1.5) * 0.8;
+        let cloud = pre_expose(backscatter(look, rel, 0.0, BUBBLE_BB, shadow));
+        color += (1.0 - fresnel) * dense * (cloud - water_col);
+    }
+
     // ---- foam: whitecaps, wakes, splashes, shoreline
     var foam = foam_in;
     let shore = 1.0 - smoothstep(0.0, max(shore_depth, 1e-4), depth_below);
@@ -700,7 +725,11 @@ fn shade_water(rel: vec3<f32>, n_in: vec3<f32>, look: WaterLook, foam_in: f32, c
         if (moving > 0.0) {
             pattern = mix(pattern, streak_foam(wp, vel), moving);
         }
-        let cover = smoothstep(1.0 - foam, 1.0 - foam + 0.3, pattern + foam * 0.35);
+        // Foam is lace, not a sheet (Crest's coverage): a broad noise picks where it thins
+        // first, and the fine pattern tears holes in it from there as it fades.
+        let broad = value_noise2(wp * 0.35 + vec2<f32>(7.3, 1.9));
+        let theta = 1.0 - foam * (0.7 + 0.6 * broad);
+        let cover = smoothstep(theta, theta + 0.15, pattern);
         let up = sky_ambient(n) * sky_vis * PI;
         // Foam is a dense froth: light gets through it, so it glows even with the sun behind.
         let foam_col = pre_expose(0.85 * (sun * shadow * max(dot(n, l) * 0.6 + 0.4, 0.0) + up) * INV_PI);
@@ -791,12 +820,15 @@ fn fs_body(in: BodyOut) -> @location(0) vec4<f32> {
     var n = w.normal;
     var foam = 0.0;
     var vel = water.bodies[bi].wind.zw;
+    var bubbles = 0.0;
     if (water.bodies[bi].look.w > 0.5) {
         let rp = ripple_at(in.rest);
         n = normalize(n + vec3<f32>(-rp.z, 0.0, -rp.w));
-        foam += rp.y * 2.2;
+        foam += rp.y * 1.6;
         // Foam rides the stirred currents: its streaks follow their swirls.
-        vel += current_at(in.rest).xy;
+        let cur = current_at(in.rest);
+        vel += cur.xy;
+        bubbles = cur.w;
     }
     let wind = water.bodies[bi].bed.z;
     let wp = tiling_pos(in.rel).xz;
@@ -832,13 +864,18 @@ fn fs_body(in: BodyOut) -> @location(0) vec4<f32> {
         foam += smoothstep(0.6, 0.8, rows) * 0.35 * smoothstep(10.0, 16.0, wind);
         vel += wind_dir * wind * 0.03;
     }
-    var g = fine.grad * gust;
+    // A boat's churned track drains the fine ripples (its turbulence and the films its bubbles
+    // bring up), so it lies glassy for a while after the white has gone: the dark slick wake
+    // seen from the air and on radar (Peltzer et al. 1992, Milgram et al. 1993).
+    let slick = 1.0 - 0.35 * smoothstep(0.05, 0.5, bubbles) * (1.0 - saturate(foam * 3.0));
+    var g = fine.grad * gust * slick;
     // What the pixel can't resolve roughens it: waves faded for being too short to draw, fine
     // waves averaged away by the mips, and ripples under 2 cm.
-    let slope_var = w.slope_var + fine.variance * gust * gust + bd.w;
+    let slope_var = w.slope_var + (fine.variance * gust * gust + bd.w) * slick * slick;
     g += rain_gradient(wp, rain_at(in.rest), saturate(1.0 - pixel / 0.02));
     let boil = plunge_boil(in.rel);
     foam += boil.x;
+    bubbles += boil.x * 0.8;
     g += boil.yz;
     vel += plunge_flow(in.rel);
     n = normalize(n + vec3<f32>(-g.x, 0.0, -g.y));
@@ -847,7 +884,7 @@ fn fs_body(in: BodyOut) -> @location(0) vec4<f32> {
     if (water.g.rain.z >= 0.0) {
         color = shade_underside(in.rel, n, look, in.clip);
     } else {
-        color = shade_water(in.rel, n, look, foam, in.crest, in.clip, wind, 0.05, 0.3, vel, slope_var);
+        color = shade_water(in.rel, n, look, foam, in.crest, in.clip, wind, 0.05, 0.3, vel, slope_var, bubbles);
     }
     return vec4<f32>(color, 1.0);
 }
@@ -988,7 +1025,7 @@ fn fs_flow(in: FlowOut, @builtin(front_facing) front: bool) -> @location(0) vec4
         // Streams run shallow over riffles: only the last centimeter fades. Their banks lap
         // white by the stream's own depth (above), not the depth seen through it: a sheet a
         // centimeter or two deep over a slab looks like shoreline all over from here.
-        color = shade_water(in.rel, n, look, foam, saturate(steep * 2.0), in.clip, 3.0 + speed, 0.01, 0.0, in.vel, slope_var);
+        color = shade_water(in.rel, n, look, foam, saturate(steep * 2.0), in.clip, 3.0 + speed, 0.01, 0.0, in.vel, slope_var, 0.0);
     } else {
         color = shade_underside(in.rel, n, look, in.clip);
     }

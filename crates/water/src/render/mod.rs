@@ -1033,6 +1033,7 @@ impl WaterFeature {
                     currents[o + 1] = f32_to_f16(v.y);
                     currents[o + 2] = f32_to_f16(r.vorticity(i, j));
                 }
+                currents[o + 3] = f32_to_f16(r.bubbles[idx]);
             }
         }
         write_texture(
