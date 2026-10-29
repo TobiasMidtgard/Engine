@@ -113,8 +113,9 @@ everything else (streaming, LOD, colliders, ground queries, prints) follows the 
 - **Worlds locked to their star.** With `Climate::substellar` (`WorldRecipe::locked`, the
   star over planet-local +Z, as `engine_space` turns locked bodies) warmth, ice, rain and
   lava melt go by the angle from the point under the star instead of the latitude
-  (`Climate::climate_latitude`: ¾ of that angle). An eyeball: an open, wet eye under the star,
-  a dry ring around it, ice from the terminator over the whole night side, melt only on the
+  (`Climate::climate_latitude`: ¾ of that angle). An eyeball: an open eye under the star, wet
+  over most of the day side under its cloud deck (Del Genio et al. 2019), a dry ring toward
+  the ice, ice from the terminator over the whole night side, melt only on the
   day side of a lava world (Pierrehumbert 2011; Yang, Cowan & Abbot 2013; bare rock √2 × the
   mean temperature under the star, Koll & Abbot 2015). The far view paints locked worlds by
   the same angle, so they look the same from afar and from the ground.
@@ -296,7 +297,11 @@ craters, pressure, temperature, the star's temperature, the color seen from afar
 glow): `PlanetTerrain::world(&recipe)` starts from the closest known world (the Moon for
 airless rock, Io-like black crust over glowing melt for lava worlds, Mars for hot and cold
 deserts, Earth for temperate land and sea worlds with plants colored by the star, ice plains,
-Titan's dark dunes and lakes) and tunes it. The showcase gives the space module's planets of
+Titan's dark dunes and lakes) and tunes it. Temperate worlds of other stars have stones in
+their uncleared grass; under cool stars their dry grass is dark (plum-brown under M dwarfs,
+as their living plants are nearly black), and microbial mats (`TerrainPalette::shore_mats`,
+colored `mud`: purple under M dwarfs, orange and red under K, yellow under F; none under
+Sun-like stars) blotch their shores and wet lowlands (engine-design/exoplanet-surface-research.md). The showcase gives the space module's planets of
 other stars one as a ship comes within 40 radii. On lava worlds `TerrainPalette::lava_glow`
 lights fissures, rifts and pools of melt up to the (climate) latitude where it passes 1000 °C.
 Views `exo_lava`, `exo_lava_night`, `exo_airless`, `exo_desert`, `exo_terra`,

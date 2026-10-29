@@ -20,7 +20,7 @@ struct PlanetGpu {
     rays: array<vec4<f32>, 8>,
     young: array<vec4<f32>, 12>,
     params4: vec4<f32>,
-    far: vec4<f32>,                 // far look: map layer (−1 none), near tint; locked to its star (0/1); unused
+    far: vec4<f32>,                 // far look: map layer (−1 none), near tint; locked to its star (0/1); shore mats 0..1
     far_mean: vec4<f32>,            // far look: mean linear albedo, unused
 };
 

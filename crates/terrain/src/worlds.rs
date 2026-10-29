@@ -109,13 +109,50 @@ fn plants_under(kelvin: f64) -> ([f32; 3], [f32; 3]) {
         (6600.0, [0.150, 0.130, 0.020]),
         (8000.0, [0.190, 0.090, 0.018]),
     ];
-    let k = kelvin.clamp(stops[0].0, stops[5].0);
-    let i = stops.iter().rposition(|s| s.0 <= k).unwrap_or(0).min(4);
-    let t = ((k - stops[i].0) / (stops[i + 1].0 - stops[i].0)) as f32;
-    let lush = [0, 1, 2].map(|c| stops[i].1[c] + (stops[i + 1].1[c] - stops[i].1[c]) * t);
-    // Dry grass: paler, toward straw.
-    let dry = [0, 1, 2].map(|c| lush[c] * 0.5 + [0.16, 0.14, 0.07][c]);
+    let lush = between(kelvin, &stops);
+    // Dry grass: paler, toward straw; under cool stars a dark plum-brown, the dead leaves
+    // keeping much of their dark pigment.
+    let straw = between(
+        kelvin,
+        &[
+            (3200.0, [0.06, 0.04, 0.045]),
+            (3900.0, [0.13, 0.095, 0.06]),
+            (5000.0, [0.16, 0.14, 0.07]),
+        ],
+    );
+    let dry = [0, 1, 2].map(|c| lush[c] * 0.5 + straw[c]);
     (lush, dry)
+}
+
+/// Linear interpolation of colors between (kelvin, color) stops, clamped at both ends.
+fn between(kelvin: f64, stops: &[(f64, [f32; 3])]) -> [f32; 3] {
+    let k = kelvin.clamp(stops[0].0, stops[stops.len() - 1].0);
+    let i = stops
+        .iter()
+        .rposition(|s| s.0 <= k)
+        .unwrap_or(0)
+        .min(stops.len() - 2);
+    let t = ((k - stops[i].0) / (stops[i + 1].0 - stops[i].0).max(1e-9)) as f32;
+    [0, 1, 2].map(|c| stops[i].1[c] + (stops[i + 1].1[c] - stops[i].1[c]) * t)
+}
+
+/// Microbial mats on the shores and wet lowlands of a world under a star of `kelvin`: their
+/// color, and how thickly they cover (none under Sun-like stars, where plants took the
+/// shores). Purple bacteria under M dwarfs, orange and red under K stars, yellow under F stars
+/// (Coelho et al. 2024; engine-design/exoplanet-surface-research.md).
+fn mats_under(kelvin: f64) -> ([f32; 3], f32) {
+    let color = between(
+        kelvin,
+        &[
+            (3200.0, [0.12, 0.035, 0.09]),
+            (4200.0, [0.17, 0.06, 0.035]),
+            (5200.0, [0.17, 0.11, 0.03]),
+            (6600.0, [0.2, 0.15, 0.03]),
+        ],
+    );
+    let sunlike =
+        ((kelvin - 4800.0) / 500.0).clamp(0.0, 1.0) * ((6500.0 - kelvin) / 500.0).clamp(0.0, 1.0);
+    (color, 0.8 * (1.0 - sunlike as f32))
 }
 
 impl PlanetTerrain {
@@ -225,6 +262,7 @@ impl PlanetTerrain {
             }
             WorldKind::Terra | WorldKind::Ocean => {
                 let (lush, dry) = plants_under(r.star_kelvin);
+                let (mats, shore_mats) = mats_under(r.star_kelvin);
                 let ocean = r.kind == WorldKind::Ocean;
                 Self {
                     shape: PlanetShape {
@@ -238,7 +276,21 @@ impl PlanetTerrain {
                         lush,
                         dry,
                         night_lights: 0.0,
+                        mud: if shore_mats > 0.0 {
+                            mats
+                        } else {
+                            TerrainPalette::earth().mud
+                        },
+                        shore_mats,
                         ..TerrainPalette::earth()
+                    },
+                    // No farmers have cleared the fields: stones and boulders lie in the
+                    // grass, thickest on rocky patches and slopes.
+                    rocks: RockField {
+                        per_100m2: 8.0,
+                        coverage: 0.35,
+                        color: [0.17, 0.155, 0.14],
+                        ..RockField::mars()
                     },
                     ..Self::earthlike(seed)
                 }
@@ -312,6 +364,7 @@ impl PlanetTerrain {
                     ground_material: "sand".into(),
                     bare_material: "dirt".into(),
                     lava_glow: 0.0,
+                    shore_mats: 0.0,
                 },
                 ..Self::earthlike(seed)
             },
@@ -371,6 +424,36 @@ mod tests {
         );
         let luma = |c: [f32; 3]| 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
         assert!(luma(plants_under(6600.0).0) > luma(red));
+    }
+
+    #[test]
+    fn red_dwarf_shores_carry_purple_mats_and_sunlike_ones_none() {
+        let world = |star_kelvin| {
+            PlanetTerrain::world(&WorldRecipe {
+                kind: WorldKind::Terra,
+                sea_fraction: 0.5,
+                star_kelvin,
+                ..Default::default()
+            })
+        };
+        let red = world(3050.0);
+        let sun = world(5772.0);
+        let p = &red.palette;
+        assert!(
+            p.shore_mats > 0.5 && p.mud[2] > p.mud[1] && p.mud[0] > p.mud[1],
+            "{p:?}"
+        );
+        assert_eq!(sun.palette.shore_mats, 0.0);
+        assert_eq!(sun.palette.mud, TerrainPalette::earth().mud);
+        // Dry grass under the red dwarf is a dark plum-brown, under the Sun straw.
+        let (_, dry_red) = plants_under(3050.0);
+        let (_, dry_sun) = plants_under(5772.0);
+        assert!(
+            dry_red[0] > dry_red[1]
+                && dry_red.iter().sum::<f32>() < 0.5 * dry_sun.iter().sum::<f32>()
+        );
+        // Stones lie in their grass.
+        assert!(red.rocks.per_100m2 > 0.0);
     }
 
     #[test]

@@ -141,7 +141,7 @@ struct PlanetGpu {
     params4: [f32; 4],
     /// The far look ([`FarLook`](crate::FarLook)): layer in the map array (−1: none), how
     /// strongly it tints the ground up close; the climate goes by the angle from the star
-    /// (`Climate::substellar`, 0/1); unused.
+    /// (`Climate::substellar`, 0/1); shore mats (`TerrainPalette::shore_mats`).
     far: [f32; 4],
     /// The far look's mean linear albedo (rgb), unused.
     far_mean: [f32; 4],
@@ -1782,7 +1782,7 @@ impl RenderFeature for TerrainFeature {
             } else {
                 0.0
             };
-            let far = [far[0], far[1], locked, 0.0];
+            let far = [far[0], far[1], locked, t.config.palette.shore_mats];
             planet_gpu.push(PlanetGpu {
                 rot: [
                     rot_f.x_axis.extend(0.0).to_array(),

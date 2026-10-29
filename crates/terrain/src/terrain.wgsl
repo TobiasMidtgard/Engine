@@ -21,7 +21,7 @@ struct PlanetGpu {
     rays: array<vec4<f32>, 8>,      // rayed craters: center (planet-local unit direction), radius on the ground (m)
     young: array<vec4<f32>, 12>,    // young ground: middle (planet-local direction) × youth, angular radius
     params4: vec4<f32>,             // night lights (0..1), lamp page handoff distance (m), lava glow (cd/m²), melt latitude (rad)
-    far: vec4<f32>,                 // far look: map layer (−1 none), near tint; locked to its star (0/1); unused
+    far: vec4<f32>,                 // far look: map layer (−1 none), near tint; locked to its star (0/1); shore mats 0..1
     far_mean: vec4<f32>,            // far look: mean linear albedo, unused
 };
 
@@ -1958,6 +1958,14 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     let sward = (patch_v - 0.5) * 2.0 * macro_fade;
     let straw = planet.colors[C_DRY].rgb * 1.1;
     var grass_col = mix(col[M_GRASS], straw, saturate(clump) * 0.45 + saturate(sward - 0.2) * 0.25 + dune * 0.45);
+    // Worlds of other stars: microbial mats (purple, red or orange) in blotches along the
+    // shores and over wet lowlands, where Earth has salt grass and marsh.
+    if (planet.far.w > 0.0) {
+        let wet_low = smoothstep(0.62, 0.85, moisture) * (1.0 - smoothstep(40.0, 200.0, coast_alt));
+        let blotch = smoothstep(0.38, 0.6, patch_v * macro_fade + 0.5 * (1.0 - macro_fade) + (mid_v - 0.5) * 0.5 * clump_fade);
+        let mats = planet.far.w * saturate(dune * 1.5 + wet_low) * blotch * vegetation;
+        grass_col = mix(grass_col, planet.colors[C_MUD].rgb * (0.8 + 0.4 * variety), mats);
+    }
     grass_col *= (1.0 - saturate(-clump) * 0.35) * mix(vec3<f32>(1.0), vec3<f32>(0.88, 0.96, 1.05), saturate(-sward) * 0.5);
     // Hand-painted pasture (its tint sets one color) still lies across the land the way grass
     // grows: lusher and darker in hollows, sun-dried on crests and knolls, in drifts tens to

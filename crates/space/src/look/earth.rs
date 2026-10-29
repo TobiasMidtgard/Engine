@@ -50,8 +50,8 @@ pub(crate) struct Climate {
     /// Shows one face to its star (longitude 0, the substellar point): the climate follows
     /// the angle from that point instead of latitude, and there are no wandering storms.
     pub locked: bool,
-    /// Forest color (linear); `None`: Earth's greens.
-    pub plants: Option<Rgb>,
+    /// Forest and dry grass colors (linear); `None`: Earth's.
+    pub plants: Option<(Rgb, Rgb)>,
     /// Earth's own layout: an ice continent on the south pole, an ocean on the north.
     pub earth_poles: bool,
     /// Added to the cloud cover (about −0.3..0.3).
@@ -87,6 +87,20 @@ pub(crate) fn plants_under(kelvin: f32) -> Rgb {
             (5800.0, srgb!(0x22401b)),
             (6600.0, srgb!(0x4c4519)),
             (8000.0, srgb!(0x5e3a17)),
+        ],
+        kelvin,
+    )
+}
+
+/// Dry grass color (linear) under a star of `kelvin`: Earth's straw under Sun-like stars, a
+/// dark plum-brown under M dwarfs, the dead leaves keeping some of their dark pigment (as the
+/// terrain's `worlds::plants_under`).
+pub(crate) fn straw_under(kelvin: f32) -> Rgb {
+    super::color::ramp(
+        &[
+            (3200.0, srgb!(0x4c3e44)),
+            (3900.0, srgb!(0x6a5d4a)),
+            (5000.0, srgb!(0x8a7f52)),
         ],
         kelvin,
     )
@@ -342,9 +356,9 @@ impl Earth {
                 },
                 mix(srgb!(0x8a7f52), srgb!(0x6a7043), smooth(0.3, 0.6, temp)),
             ),
-            Some(p) => (
+            Some((p, straw)) => (
                 scale(p, 0.85 + 0.25 * smooth(0.3, 0.7, temp)),
-                mix(srgb!(0x8a7f52), scale(p, 1.9), smooth(0.3, 0.6, temp) * 0.7),
+                mix(straw, scale(p, 1.9), smooth(0.3, 0.6, temp) * 0.7),
             ),
         };
         // Texture down to the texel: dune seas, darker rock, dry valleys.

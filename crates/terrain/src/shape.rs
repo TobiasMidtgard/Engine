@@ -991,10 +991,11 @@ impl PlanetShape {
         let bell = |c: f64, w: f64| (-((lat_deg - c) / w).powi(2)).exp();
         let inland = smooth(0.1, 0.5, cont);
         if self.climate.substellar {
-            // Locked: rising air and heavy rain under the star, the air wrung dry in a ring
-            // around it (where the far view paints its deserts), a damper rim along the
-            // terminator and the night side's cold, dry air (Yang, Cowan & Abbot 2013).
-            let belts = 0.35 * bell(0.0, 16.0) - 0.55 * bell(37.0, 9.0) + 0.1 * bell(62.0, 8.0)
+            // Locked: rising air and heavy rain under the star, under a cloud deck over most
+            // of the day side (Yang, Cowan & Abbot 2013; Del Genio et al. 2019), the air
+            // wrung dry in a ring toward the ice, a damper rim along the terminator and the
+            // night side's cold, dry air.
+            let belts = 0.4 * bell(0.0, 26.0) - 0.45 * bell(48.0, 8.0) + 0.1 * bell(62.0, 8.0)
                 - 0.2 * smooth(70.0, 88.0, lat_deg);
             return if self.ocean {
                 belts - 0.25 * inland

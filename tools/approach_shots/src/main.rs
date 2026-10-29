@@ -680,18 +680,28 @@ fn place(app: &mut App, stop: &Stop) -> (DVec3, DVec3, DVec3) {
             let local_star = (rot.inverse() * (star - center)).normalize();
             let across = local_star.any_orthonormal_vector();
             let from_star = (90.0 - sun_deg).to_radians();
-            let height = |d: DVec3| terrain.as_ref().map_or(0.0, |t| t.height(d));
-            let spot = (0..36)
+            // Height and moisture there.
+            let ground = |d: DVec3| {
+                terrain.as_ref().map_or((0.0, 0.0), |t| {
+                    let s = t.sample(d, 1_000.0);
+                    (s.height, s.moisture as f64)
+                })
+            };
+            let spot = (0..72)
                 .map(|k| {
-                    let around = DQuat::from_axis_angle(local_star, k as f64 * 10f64.to_radians());
+                    let around = DQuat::from_axis_angle(local_star, k as f64 * 5f64.to_radians());
                     let d = DQuat::from_axis_angle(around * across, from_star) * local_star;
-                    (d, height(d))
+                    let (h, wet) = ground(d);
+                    (d, h, wet)
                 })
                 .max_by(|x, y| {
-                    // Land between 50 m and 1.5 km up beats everything else; then the higher.
+                    // Land between 50 m and 1.5 km up beats everything else; then the wetter
+                    // (where plants grow), then the higher.
                     let good = |h: f64| (50.0..1_500.0).contains(&h);
-                    (good(x.1), x.1).partial_cmp(&(good(y.1), y.1)).unwrap()
+                    let key = |s: &(DVec3, f64, f64)| (good(s.1), (s.2 * 10.0).round(), s.1);
+                    key(x).partial_cmp(&key(y)).unwrap()
                 })
+                .map(|(d, h, _)| (d, h))
                 .unwrap();
             let up = rot * spot.0;
             let eye = center + up * (radius + spot.1.max(0.0) + altitude_m);

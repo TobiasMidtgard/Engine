@@ -41,6 +41,10 @@ pub struct TerrainPalette {
     /// Luminance of molten rock where it shows through the crust, cd/m² (lava worlds; 0 =
     /// none). Melt opens where the climate makes the ground hotter than about 1000 °C.
     pub lava_glow: f32,
+    /// 0..1 how thickly microbial mats (colored `mud`) cover shores and wet lowlands: the
+    /// purple, red or orange accents of worlds whose plants grew under another star. 0 on
+    /// Earth.
+    pub shore_mats: f32,
     /// Snow lies where the mean temperature is below this, °C.
     pub snow_below_c: f32,
     /// Steepness (1 − cos of the slope angle) where rock shows through. 0.3 ≈ 45°.
@@ -73,6 +77,7 @@ impl TerrainPalette {
             regolith: 0.0,
             night_lights: 1.0,
             lava_glow: 0.0,
+            shore_mats: 0.0,
             snow_below_c: -2.0,
             rock_slope: 0.22,
             ground_material: "grass".into(),
@@ -95,6 +100,7 @@ impl TerrainPalette {
             regolith: 1.0,
             night_lights: 0.0,
             lava_glow: 0.0,
+            shore_mats: 0.0,
             snow_below_c: -200.0,
             rock_slope: 0.35,
             ground_material: "regolith".into(),
@@ -117,6 +123,7 @@ impl TerrainPalette {
             regolith: 0.3,
             night_lights: 0.0,
             lava_glow: 0.0,
+            shore_mats: 0.0,
             snow_below_c: -95.0,
             rock_slope: 0.3,
             ground_material: "sand".into(),

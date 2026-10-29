@@ -114,7 +114,10 @@ pub(crate) fn painter(
                 sea: Some(r.sea_fraction as f32),
                 kelvin: r.temperature_k as f32,
                 locked: body.tidally_locked,
-                plants: Some(earth::plants_under(r.star_kelvin as f32)),
+                plants: Some((
+                    earth::plants_under(r.star_kelvin as f32),
+                    earth::straw_under(r.star_kelvin as f32),
+                )),
                 earth_poles: false,
                 cloudiness: (r.cloud_cover - 0.55) * 0.6,
             };
