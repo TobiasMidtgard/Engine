@@ -3639,6 +3639,10 @@ impl Default for Locomotion {
     }
 }
 
+/// From this speed (m/s) up a weapon stance walks: the legs step with the locomotion and the
+/// stance holds the upper body.
+const STANCE_STEPPING: f32 = 0.3;
+
 /// The humanoid graph named `name`, moving with other locomotion clips (motion capture,
 /// say); the actions stay the humanoid's. Walk and run clips must start on the right foot's
 /// strike, like the humanoid's, so they blend in step.
@@ -3816,6 +3820,35 @@ pub fn graph_with(name: &str, motion: &Locomotion) -> AnimGraph {
             weight: Weight::param(carry),
             additive: false,
         });
+    // A weapon stance standing still, or stepping and circling in guard: the stance's upper
+    // body (its `_moving` clip, over square hips) from the spine up over the legs'
+    // locomotion, by speed.
+    let stance = |name: &str| NodeDef::Blend1d {
+        param: "speed".into(),
+        children: vec![
+            Blend1dChild {
+                at: 0.0,
+                node: NodeDef::clip(name),
+            },
+            Blend1dChild {
+                at: STANCE_STEPPING,
+                node: NodeDef::Layer {
+                    base: Box::new(leaning.clone()),
+                    overlay: Box::new(NodeDef::clip(&format!("{name}_moving"))),
+                    mask: BoneMaskDef {
+                        bones: vec!["spine".into()],
+                        include_children: true,
+                    },
+                    weight: Weight::default(),
+                    additive: false,
+                },
+            },
+        ],
+        sync: false,
+        match_speed: false,
+    };
+    let [sword_stance, shield_guard, greatsword_stance] =
+        ["sword_stance", "shield_guard", "greatsword_stance"].map(stance);
     let state = |name: &str, node: NodeDef| StateDef {
         name: name.into(),
         node,
@@ -3838,9 +3871,9 @@ pub fn graph_with(name: &str, motion: &Locomotion) -> AnimGraph {
                 state("fall_brace", NodeDef::one_shot("fall_brace")),
                 state("fall_back_brace", NodeDef::one_shot("fall_back_brace")),
                 state("kneel_hurt", NodeDef::one_shot("kneel_hurt")),
-                state("sword_stance", NodeDef::clip("sword_stance")),
-                state("shield_guard", NodeDef::clip("shield_guard")),
-                state("greatsword_stance", NodeDef::clip("greatsword_stance")),
+                state("sword_stance", sword_stance),
+                state("shield_guard", shield_guard),
+                state("greatsword_stance", greatsword_stance),
             ],
             transitions: vec![
                 TransitionDef::new(

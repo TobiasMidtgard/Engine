@@ -1059,6 +1059,8 @@ fn weapons_yard(world: &mut World, origin: DVec3) -> Yard {
     let heavy = |at: f32| DemoStep::trigger(at, "attack_heavy");
     let guard = |at: f32, on: bool| DemoStep::param(at, "shield_guard", if on { 1.0 } else { 0.0 });
     let stance = DemoStep::param(0.02, "sword_stance", 1.0);
+    // Round to the left (1) or right (-1) of the foe, or not (0), stepping in guard.
+    let circle = |at: f32, way: f32| DemoStep::param(at, "circle", way);
     let duel = |steps: Vec<DemoStep>| DemoScript {
         period: DUEL_PERIOD,
         steps,
@@ -1072,26 +1074,28 @@ fn weapons_yard(world: &mut World, origin: DVec3) -> Yard {
             "Swordsman",
             vec![
                 stance.clone(),
-                // Slash, backhand, thrust.
+                // Slash, backhand, thrust; then both step back to measure and circle.
                 light(0.6),
                 light(1.02),
                 light(1.42),
-                DemoStep::home(3.0),
+                circle(2.2, 1.0),
+                circle(3.4, 0.0),
                 // An overhead into the raised shield: it bounces off, and the partner cuts
                 // back at once while the swordsman recovers.
                 heavy(4.0),
-                DemoStep::home(6.3),
                 // A slash, the shield rammed in, a thrust.
                 light(6.6),
                 heavy(7.0),
                 light(7.45),
-                DemoStep::home(8.6),
                 // Its shield comes up just as the partner's cut arrives: a deflect, the
                 // partner staggers open and the swordsman answers.
                 guard(9.15, true),
                 guard(9.4, false),
                 light(9.42),
-                DemoStep::home(12.0),
+                // Circling back the other way, then to their marks for the next round.
+                circle(10.6, -1.0),
+                circle(11.8, 0.0),
+                DemoStep::home(12.3),
             ],
         ),
         (
@@ -1100,14 +1104,16 @@ fn weapons_yard(world: &mut World, origin: DVec3) -> Yard {
             "Shield partner",
             vec![
                 stance.clone(),
-                DemoStep::home(2.6),
+                circle(2.2, 1.0),
+                circle(3.4, 0.0),
                 guard(3.4, true),
                 // The guard counter, as the swordsman's overhead bounces off.
                 guard(4.7, false),
                 light(4.75),
-                DemoStep::home(6.3),
                 light(9.0),
-                DemoStep::home(12.0),
+                circle(10.6, -1.0),
+                circle(11.8, 0.0),
+                DemoStep::home(12.3),
             ],
         ),
     ] {
@@ -1129,6 +1135,13 @@ fn weapons_yard(world: &mut World, origin: DVec3) -> Yard {
                 hurt
             },
             crate::combat::Attacker::new("sword_shield", Some(foe)),
+            // Between blows they keep a step and a half apart, facing each other, stepping
+            // back to it after each exchange.
+            crate::footwork::Footwork {
+                foe: Some(foe),
+                measure: 1.4,
+                ..Default::default()
+            },
             duel(steps),
         ));
     }
@@ -1173,6 +1186,12 @@ fn weapons_yard(world: &mut World, origin: DVec3) -> Yard {
         Name::new("Great sword"),
         HitReaction::default(),
         crate::combat::Attacker::new("greatsword", Some(dummy)),
+        // It steps after the dummy when a blow shoves it back, and back to its mark with it.
+        crate::footwork::Footwork {
+            foe: Some(dummy),
+            measure: 1.6,
+            ..Default::default()
+        },
         DemoScript {
             period: GREATSWORD_PERIOD,
             steps: vec![
@@ -1182,7 +1201,6 @@ fn weapons_yard(world: &mut World, origin: DVec3) -> Yard {
                 // The overhead breaks the guard and the sweep goes through the opening.
                 heavy(2.25),
                 light(3.4),
-                DemoStep::home(8.5),
             ],
             time: 0.0,
             home: None,
@@ -1890,6 +1908,14 @@ pub const VIEWS: &[DemoView] = &[
         target: [-23.9, 1.1, -16.0],
         hour: 15.0,
         at: 7.15,
+    },
+    DemoView {
+        key: "paddock_circle",
+        name: "Between blows the duelists step back to measure and circle in guard",
+        eye: [-24.3, 1.6, -12.4],
+        target: [-24.0, 0.9, -16.0],
+        hour: 15.0,
+        at: 2.8,
     },
     DemoView {
         key: "paddock_deflect",
