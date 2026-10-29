@@ -1032,6 +1032,40 @@ pub fn views(zone: &str, center: DVec3) -> Vec<DemoView> {
                         ("input.press", serde_json::json!({"action": "sprint"})),
                     ],
                 ),
+                // Coming home: 30 000 km out, nose on the Earth, cruising back to the spot over
+                // the spaceport it left (the ship flies itself; the Earth's whole disc below).
+                DemoView::new(
+                    "spaceport_return",
+                    "Spaceplane cruising home from 30 000 km",
+                    [58.0, 30_000_030.0, -20.0],
+                    [58.0, 30_000_000.0, -45.0],
+                )
+                .at(17.0, 3.0)
+                .call(
+                    "vehicles.place",
+                    serde_json::json!({
+                        "vehicle": "Parked spaceplane",
+                        "at": abs(58.0, 30_000_000.0, -45.0),
+                        "on_ground": false,
+                        "yaw_deg": 0.0,
+                        "pitch_deg": -80.0,
+                        "velocity": [0.0, 0.0, 0.0],
+                    }),
+                )
+                .drive(
+                    "Parked spaceplane",
+                    vec![
+                        (
+                            "vehicles.cruise",
+                            serde_json::json!({
+                                "vehicle": "Parked spaceplane",
+                                "on": true,
+                                "origin": abs(58.0, 15_000.0, -45.0),
+                            }),
+                        ),
+                        ("input.press", serde_json::json!({"action": "sprint"})),
+                    ],
+                ),
             ]
         }
         _ => Vec::new(),

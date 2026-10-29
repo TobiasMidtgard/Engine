@@ -286,6 +286,12 @@ fn cruise_api(world: &mut World, args: Value) -> Result<Value, String> {
     let ship = vehicle_entity(world, &args)?;
     if args.get("on").and_then(Value::as_bool).unwrap_or(true) {
         crate::cruise::engage(world, ship)?;
+        if let Some(at) = vec3_arg(&args, "origin")? {
+            let origin = crate::cruise::origin_at(world.resource::<engine_world::Gravity>(), at);
+            if let Some(mut c) = world.get_mut::<crate::cruise::Cruise>(ship) {
+                c.origin = origin;
+            }
+        }
     } else {
         crate::cruise::drop_out(world, ship);
     }
@@ -406,9 +412,11 @@ pub(crate) fn register(app: &mut App) {
         "vehicles.cruise",
         "Put a spacecraft into cruise (\"on\": true, the default; it must be over 12 km up) or \
          drop it out (false). Cruising, it flies its nose at a speed set by the nearest body's \
-         distance (throttle 0..1 sets how many times that distance per second, up to 0.6) and \
-         drops out by itself closing on a surface under 10 km.",
-        r#"{"vehicle": "Parked spaceplane", "on": true}"#,
+         distance (throttle 0..1 sets how many times that distance per second, up to 0.6), homes \
+         on a planet or star the nose points at and drops out 30 km over it; aimed at the \
+         planet it left, it flies back over where cruise started (\"origin\": [x, y, z] sets \
+         that spot).",
+        r#"{"vehicle": "Parked spaceplane", "on": true, "origin": [0, 15000, 0]}"#,
         cruise_api,
     )
     .register_api(

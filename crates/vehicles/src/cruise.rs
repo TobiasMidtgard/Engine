@@ -178,19 +178,7 @@ pub fn engage(world: &mut World, ship: Entity) -> Result<(), String> {
     let gravity = world.resource::<Gravity>();
     let (h, _) = altitude(gravity, p);
     let origin = (h < ORIGIN_MAX_ALTITUDE_M)
-        .then(|| {
-            gravity
-                .bodies
-                .iter()
-                .min_by(|a, b| {
-                    let h = |b: &GravityBody| (p - b.center).length() - b.radius;
-                    h(a).total_cmp(&h(b))
-                })
-                .map(|b| Origin {
-                    radius: b.radius,
-                    offset: p - b.center,
-                })
-        })
+        .then(|| origin_at(gravity, p))
         .flatten();
     let mut e = world.entity_mut(ship);
     let collider = e.take::<Collider>();
@@ -221,6 +209,21 @@ pub fn engage(world: &mut World, ship: Entity) -> Result<(), String> {
         *v = Velocity::default();
     }
     Ok(())
+}
+
+/// The spot `p` on the body nearest it, as an [`Origin`].
+pub fn origin_at(gravity: &Gravity, p: DVec3) -> Option<Origin> {
+    gravity
+        .bodies
+        .iter()
+        .min_by(|a, b| {
+            let h = |b: &GravityBody| (p - b.center).length() - b.radius;
+            h(a).total_cmp(&h(b))
+        })
+        .map(|b| Origin {
+            radius: b.radius,
+            offset: p - b.center,
+        })
 }
 
 /// Out of cruise: back to physics along the nose at up to [`DROP_SPEED`]; back over where it
