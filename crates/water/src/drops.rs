@@ -114,6 +114,7 @@ pub fn landing(d: &Drop) -> Disturbance {
         foam: (0.15 * size).min(0.4),
         stir: None,
         spin: 0.0,
+        press: 0.0,
     }
 }
 

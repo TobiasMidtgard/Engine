@@ -29,6 +29,9 @@ const REACH_M: f64 = 128.0;
 /// Ground heights sampled per step at most: after the grid moves, the first pass is spread
 /// over many steps (a terrain sample costs about 10 µs on a planet).
 const SAMPLES_PER_UPDATE: usize = 200;
+/// Time the ground samples of one update may take, whatever their count: some grounds are far
+/// slower to sample than a planet's terrain (one update once took 58 ms at the fortress).
+const SAMPLE_TIME: std::time::Duration = std::time::Duration::from_micros(1500);
 /// Height of the wet band above a lake's still level in calm water, meters: sand wicks water
 /// up a few decimeters, and even ripples lap. Waves add 1.5 times their significant height.
 const SWASH_M: f32 = 0.4;
@@ -224,6 +227,7 @@ pub fn shore_wetness_system(
     let cols = (c0.x as i64 - reach).max(0)..=(c0.x as i64 + reach).min(width as i64 - 1);
     let runup_cells = (RUNUP_M / cell).ceil() as usize;
     let mut budget = SAMPLES_PER_UPDATE;
+    let started = std::time::Instant::now();
     let mut writes: Vec<(usize, f32)> = Vec::new();
     for j in rows.filter(|j| *j as usize % STRIDE == phase) {
         let j = j as usize;
@@ -252,6 +256,9 @@ pub fn shore_wetness_system(
                     continue;
                 }
                 budget -= 1;
+                if budget.is_multiple_of(16) && started.elapsed() > SAMPLE_TIME {
+                    budget = 0;
+                }
                 let (h, spread) = match ground.sample(p) {
                     Some(g) => {
                         let n = g.normal.normalize_or(Vec3::Y);

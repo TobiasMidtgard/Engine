@@ -7,7 +7,7 @@
 
 use std::collections::HashMap;
 
-use engine_core::math::{DVec2, DVec3, Rng, Vec2, Vec3};
+use engine_core::math::{DVec2, DVec3, Rng, Vec2, Vec3, smoothstep};
 use engine_core::prelude::*;
 use engine_world::{
     FocusPoints, GroundContact, NoiseEvent, ProjectileTrace, SimulationRange, WaterDisturbance,
@@ -25,8 +25,10 @@ const TELEPORT_SPEED: f32 = 150.0;
 /// Strouhal number of a body in the water: it sheds a pair of eddies every 1/0.2 = 5 body
 /// widths it travels (a Kármán vortex street).
 const STROUHAL: f32 = 0.2;
-/// Radius of a long hull's bow and stern pushes, as a share of its radius (its half beam).
-const HULL_END: f32 = 0.5;
+/// How far a long hull holds the water down under it per unit of its wake strength, meters
+/// (a motorboat's wake of 2.5 about the draft of its 650 kg with crew, 25 cm; a rowboat's
+/// 0.6, 6 cm).
+const HULL_HEAD: f32 = 0.1;
 /// How hard a shed eddy turns: its fastest water goes about 0.4 times the body's speed.
 const EDDY: f32 = 1.3;
 /// Going into the water faster than this, m/s, a `WaterDisturbance` throws spray.
@@ -115,6 +117,7 @@ pub fn splash(pos: DVec3, radius: f32, speed: f32) -> Disturbance {
         foam: (0.25 + speed * 0.08).min(1.0),
         stir: None,
         spin: 0.0,
+        press: 0.0,
     }
 }
 
@@ -155,7 +158,7 @@ pub fn disturbance_system(
     let mut out: Vec<Disturbance> = Vec::new();
     let mut noises: Vec<NoiseEvent> = Vec::new();
     let mut splashes: Vec<WaterSplash> = Vec::new();
-    let mut hulls: Vec<(DVec2, f32)> = Vec::new();
+    let mut hulls: Vec<crate::state::Hull> = Vec::new();
     let had_hulls;
     {
         let state = shared.0.read();
@@ -246,41 +249,62 @@ pub fn disturbance_system(
                     it.spray = 0.0;
                 }
                 let bob = (v.y.abs() * step * 0.6 * r).min(0.05);
+                // Its own dip, left out of what it floats on: a long hull's along its length.
+                let half = if it.length > r && speed > 0.3 {
+                    (Vec2::new(through.x, through.z) / speed * (it.length - r)).as_dvec2()
+                } else {
+                    DVec2::ZERO
+                };
+                let hull = crate::state::Hull {
+                    center: DVec2::new(p.x, p.z),
+                    half,
+                    radius: r,
+                };
                 it.trough_s = (it.trough_s - step).max(0.0);
                 if it.trough_s > 0.0 {
-                    hulls.push((DVec2::new(p.x, p.z), r));
+                    hulls.push(hull);
                 }
                 if push + bob > 1e-5 {
                     if it.trough_s <= 0.0 {
-                        hulls.push((DVec2::new(p.x, p.z), r));
+                        hulls.push(hull);
                     }
                     it.trough_s = 1.0;
                     // The body drags the water it moves through along with it: the wash
                     // behind it runs on and curls into eddies at its edges.
                     let flat = Vec2::new(through.x, through.z);
-                    // A long hull under way pushes the water at its bow and its stern, each
-                    // over a patch about the beam wide, not as one round blob: the two wave
-                    // systems interfere into the feathered crests of a Kelvin wake (thin-ship
-                    // theory: Michell 1898; Havelock 1932). The same water is moved.
-                    let ends = speed > 1.0 && it.length > r;
+                    // A long hull also holds the water down along its length as it goes: a
+                    // pressure patch, which the dispersive surface turns into a Kelvin wake
+                    // whose waves are as long as the speed makes them (Havelock 1908; the
+                    // grid takes the plain push). Five overlapping patches a beam wide,
+                    // bow to stern, sum to `head` under the hull.
+                    let long = it.length > r && speed > 0.3;
+                    let head = if long {
+                        (HULL_HEAD * it.wake).min(0.4) * smoothstep(0.3, 1.0, speed)
+                    } else {
+                        0.0
+                    };
+                    const PATCHES: usize = 5;
+                    let along = if long { flat / speed } else { Vec2::ZERO };
+                    let spacing = 1.6 * it.length / (PATCHES - 1) as f32;
+                    // Overlapping Gaussians exp(−2(d/r)²), σ = r/2, every `spacing` meters.
+                    let overlap = (0.5 * r * (std::f32::consts::TAU).sqrt() / spacing).max(1.0);
+                    let press = head * step / overlap;
                     out.push(Disturbance {
                         pos: DVec2::new(p.x, p.z),
                         radius: r * 0.9,
-                        depth: if ends { 0.0 } else { push + bob },
+                        depth: push + bob,
                         foam: (speed * 0.07 * it.wake).min(0.5) * dt * 30.0,
                         stir: (speed > 0.1).then_some(flat * 0.6),
                         spin: 0.0,
+                        press,
                     });
-                    if ends {
-                        let along = (flat / speed * it.length * 0.8).as_dvec2();
-                        let end = HULL_END * r;
-                        // Same volume as the one blob: depth × radius² kept.
-                        let depth = (push + bob) * 0.5 * (0.9 * r / end).powi(2);
-                        for at in [DVec2::new(p.x, p.z) + along, DVec2::new(p.x, p.z) - along] {
+                    if press > 0.0 {
+                        for k in [0, 1, 3, 4] {
+                            let t = k as f32 * spacing - 0.8 * it.length;
                             out.push(Disturbance {
-                                pos: at,
-                                radius: end,
-                                depth,
+                                pos: DVec2::new(p.x, p.z) + (along * t).as_dvec2(),
+                                radius: r,
+                                press,
                                 ..Default::default()
                             });
                         }
@@ -324,6 +348,7 @@ pub fn disturbance_system(
                             foam: (0.2 * churn * speed.min(6.0)).min(1.0) * dt * 30.0,
                             stir: Some(wobble.rotate(flat) * (0.6 - 0.45 * churn)),
                             spin: 0.0,
+                            press: 0.0,
                         });
                     }
                 }
@@ -345,6 +370,7 @@ pub fn disturbance_system(
                     foam: (0.15 + c.speed * 0.05).min(0.8),
                     stir: None,
                     spin: 0.0,
+                    press: 0.0,
                 });
             }
         }
@@ -377,6 +403,7 @@ pub fn disturbance_system(
                 foam: ((plunge - 0.8).max(0.0) * 0.25 + sweep * 0.06 * dt).min(0.6) * solid,
                 stir: (sweep > 0.1).then_some(flat.clamp_length_max(4.0) * 0.5 * solid),
                 spin: 0.0,
+                press: 0.0,
             });
             if plunge > SPLASH_SPEED {
                 let owed = spray_owed.entry(d.source).or_insert(0.0);
@@ -445,6 +472,7 @@ pub fn disturbance_system(
                 foam: 0.9,
                 stir: None,
                 spin: 0.0,
+                press: 0.0,
             });
             if settings.noise_events {
                 noises.push(NoiseEvent {
@@ -480,6 +508,7 @@ pub fn disturbance_system(
                 foam: 1.0,
                 stir: None,
                 spin: 0.0,
+                press: 0.0,
             });
             if settings.noise_events {
                 noises.push(NoiseEvent {
@@ -518,6 +547,7 @@ pub fn disturbance_system(
                         foam: 0.0,
                         stir: None,
                         spin: 0.0,
+                        press: 0.0,
                     });
                 }
             };

@@ -474,9 +474,12 @@ fn height_mesh(
 /// What a demo entity does.
 #[derive(Component, Debug, Clone, Copy)]
 pub enum DemoRole {
-    /// Drives around a circle on the lake.
+    /// Drives laps of a stadium on the lake: two straights `reach` either side of `center`
+    /// (world, flat; zero for a circle) joined by half circles of `radius`. The straights give
+    /// its wake room to open into a whole V.
     Motorboat {
         center: DVec3,
+        reach: Vec3,
         radius: f32,
         thrust: f32,
     },
@@ -498,9 +501,11 @@ impl DemoRole {
     /// Move the places this role keeps into the frame after a world shift.
     pub fn shift(&mut self, s: &WorldShift) {
         match self {
-            Self::Motorboat { center, .. } | Self::Swimmer { center, .. } => {
-                *center = s.point(*center)
+            Self::Motorboat { center, reach, .. } => {
+                *center = s.point(*center);
+                *reach = s.direction(*reach);
             }
+            Self::Swimmer { center, .. } => *center = s.point(*center),
             Self::Wader { from, to, .. } => {
                 *from = s.point(*from);
                 *to = s.point(*to);
@@ -934,13 +939,22 @@ pub fn spawn_demo_with(commands: &mut Commands, origin: DVec3, options: DemoOpti
         at(jetty_end.x, deck, jetty_end.y),
     );
 
-    // A motorboat doing laps.
-    let lap_center = Vec2::new(-5.0, -3.0);
-    let lap_radius = 12.0;
-    let start = lap_center + Vec2::new(lap_radius, 0.0);
-    let motorboat = spawn_motorboat(commands, at(start.x, LAKE_LEVEL, start.y), -PI * 0.5);
+    // A motorboat doing laps of a stadium across the middle, clear of the swimming area and
+    // the jetty: 20 m straights, 9 m turns.
+    let lap_center = Vec2::new(-6.0, -6.0);
+    let lap_radius = 9.0;
+    let reach = Vec2::new(1.0, -1.0).normalize() * 10.0;
+    let side = Vec2::new(reach.y, -reach.x).normalize() * lap_radius;
+    let start = lap_center + side;
+    let motorboat = spawn_motorboat(
+        commands,
+        at(start.x, LAKE_LEVEL, start.y),
+        // Along the straight, the way the helm steers round.
+        (-reach.y).atan2(reach.x) + PI,
+    );
     commands.entity(motorboat).insert(DemoRole::Motorboat {
         center: at(lap_center.x, LAKE_LEVEL, lap_center.y),
+        reach: Vec3::new(reach.x, 0.0, reach.y),
         radius: lap_radius,
         thrust: 5200.0,
     });
@@ -1169,10 +1183,15 @@ pub fn demo_system(
         match *role {
             DemoRole::Motorboat {
                 center,
+                reach,
                 radius,
                 thrust,
             } => {
+                // From the nearest point of the stadium's spine.
                 let rel = (tf.translation - center).as_vec3() * Vec3::new(1.0, 0.0, 1.0);
+                let half = reach.length();
+                let axis = reach.normalize_or_zero();
+                let rel = rel - axis * rel.dot(axis).clamp(-half, half);
                 let r = rel.length().max(0.1);
                 let tangent = Vec3::new(rel.z, 0.0, -rel.x) / r;
                 let pull = ((r - radius) * 0.25).clamp(-0.8, 0.8);

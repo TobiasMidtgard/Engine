@@ -25,7 +25,7 @@ use engine_core::tasks::ComputeTaskPool;
 use engine_world::WorldShift;
 use std::sync::Arc;
 
-use crate::surface::SurfaceLink;
+use crate::surface::{CoarseBed, SurfaceLink};
 
 /// Cells at the grid edge where waves are absorbed instead of reflected.
 const SPONGE: usize = 10;
@@ -68,6 +68,12 @@ pub struct Disturbance {
     /// Set the water inside the radius turning about the center, rad/s (positive turns from
     /// +x toward +z): an eddy shed off a moving body, a paddle's twist, a whirlpool.
     pub spin: f32,
+    /// Pressure head times the seconds it acts, m·s: a hull holding the water down as it
+    /// passes (its draft over its step). The dispersive surface ([`crate::surface`]) feels it
+    /// as a pressure on the water, so a hull at rest sits in a dip that deep and one under
+    /// way draws its wake from it (Havelock's moving pressure patch, 1908), the lake neither
+    /// rising nor sinking; it then ignores `depth`, which only the grid takes.
+    pub press: f32,
 }
 
 /// The interactive surface at a point (see [`RippleField::sample`]).
@@ -162,6 +168,9 @@ pub struct RippleField {
     /// The GPU's dispersive surface over this grid ([`crate::surface`]): it takes every push
     /// and, while it runs, its heights are the ones [`sample`](Self::sample) answers with.
     pub surface: Arc<SurfaceLink>,
+    /// The water under the surface's coarse level, centered on this grid ([`CoarseBed`]);
+    /// `None` until read, and for grids the surface doesn't run on.
+    pub coarse: Option<Arc<CoarseBed>>,
 }
 
 /// Bilinear sample of one velocity component, `g` in that component's own grid coordinates
@@ -658,6 +667,7 @@ impl RippleField {
             drift_h: vec![0.0; n * n],
             drift_foam: vec![0.0; n * n],
             surface: Arc::default(),
+            coarse: None,
         }
     }
 
@@ -826,6 +836,7 @@ impl RippleField {
         self.vel.clone_from(&other.vel);
         self.foam.clone_from(&other.foam);
         self.surface = other.surface.clone();
+        self.coarse.clone_from(&other.coarse);
     }
 
     /// Derive what the step needs from `speed2`: the open faces' depths, the wet mask and the
@@ -1297,7 +1308,7 @@ impl RippleField {
             + (at(&self.h, i + 1, j + 1) - at(&self.h, i + 1, j)) * fx)
             / self.cell;
         // The GPU's dispersive surface, when it runs, is the one drawn: ride that.
-        let (height, gradient) = self.surface.heights().and_then(|s| s.sample(p)).unwrap_or((
+        let (height, gradient) = self.surface.sample(p).unwrap_or((
             sample_cells(&self.h, n, g.x as f32, g.y as f32),
             Vec2::new(gx, gz),
         ));
@@ -1351,6 +1362,14 @@ impl RippleField {
             d.stir = d.stir.map(turned);
         }
         self.version += 1;
+        // The coarse level's water moves with the world (a turn reads it again).
+        if s.is_translation_only() {
+            if let Some(bed) = &mut self.coarse {
+                Arc::make_mut(bed).origin += to_xz(s.translation);
+            }
+        } else {
+            self.coarse = None;
+        }
         if s.is_translation_only() {
             self.origin += to_xz(s.translation);
             return;
@@ -1419,6 +1438,7 @@ mod tests {
             foam,
             stir: None,
             spin: 0.0,
+            press: 0.0,
         }
     }
 

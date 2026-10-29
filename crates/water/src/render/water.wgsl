@@ -45,6 +45,7 @@ struct Globals {
     detail: vec4<f32>,   // fine waves: 1/tile size (1/m) x, y; streams' amplitude scale; ripples from surface_tex (1/0)
     detail2: vec4<f32>,  // fine waves: tiles' wind direction x, z; on (1/0), unused
     plunges: array<vec4<f32>, 8>, // where falls land: foot rel camera xyz, boil radius (m)
+    coarse: vec4<f32>,   // dispersive ripples' coarse level: corner rel camera x, z, size (m), drawn (1/0)
 };
 
 struct WaterUniform {
@@ -60,6 +61,7 @@ struct WaterUniform {
 @group(1) @binding(5) var current_tex: texture_2d<f32>;     // ripple grid currents: x, z (m/s), turn (1/s)
 @group(1) @binding(6) var detail_tex: texture_2d_array<f32>; // fine waves, per tile: (dh/dx, dh/dz, h, Jacobian), (moments, foam)
 @group(1) @binding(7) var surface_tex: texture_2d<f32>;     // dispersive ripples on the ripple grid: height, dh/dx, dh/dz
+@group(1) @binding(8) var coarse_tex: texture_2d<f32>;      // their long waves, on a grid 4 times larger: the same
 
 struct FlowGpu {
     origin: vec4<f32>,  // corner rel camera x, base y, z, cell (m)
@@ -341,17 +343,27 @@ fn detail_height(p: vec2<f32>, scale: f32, turn: vec2<f32>, spacing: f32) -> f32
 // Interactive ripples at a camera-relative x/z: (height, foam, dh/dx, dh/dz), faded at the edge.
 fn ripple_at(rel_xz: vec2<f32>) -> vec4<f32> {
     if (water.g.ripple.w < 0.5) { return vec4<f32>(0.0); }
+    // The dispersive surface's long waves, out to 128 m (`surface.wgsl`'s coarse level).
+    var long = vec4<f32>(0.0);
+    if (water.g.coarse.w > 0.5) {
+        let cuv = (rel_xz - water.g.coarse.xy) / water.g.coarse.z;
+        if (all(cuv > vec2<f32>(0.0)) && all(cuv < vec2<f32>(1.0))) {
+            let cedge = min(min(cuv.x, cuv.y), min(1.0 - cuv.x, 1.0 - cuv.y));
+            let s = textureSampleLevel(coarse_tex, linear_clamp, cuv, 0.0);
+            long = vec4<f32>(s.x, 0.0, s.y, s.z) * smoothstep(0.0, 0.08, cedge);
+        }
+    }
     let uv = (rel_xz - water.g.ripple.xy) / water.g.ripple.z;
-    if (any(uv <= vec2<f32>(0.0)) || any(uv >= vec2<f32>(1.0))) { return vec4<f32>(0.0); }
+    if (any(uv <= vec2<f32>(0.0)) || any(uv >= vec2<f32>(1.0))) { return long; }
     let edge = min(min(uv.x, uv.y), min(1.0 - uv.x, 1.0 - uv.y));
     let fade = smoothstep(0.0, 0.08, edge);
     var r = textureSampleLevel(ripple_tex, linear_clamp, uv, 0.0);
     if (water.g.detail.w > 0.5) {
-        // The dispersive surface's waves (`surface.wgsl`), with the grid's foam.
+        // The dispersive surface's short waves, with the grid's foam.
         let s = textureSampleLevel(surface_tex, linear_clamp, uv, 0.0);
         r = vec4<f32>(s.x, r.y, s.y, s.z);
     }
-    return r * fade;
+    return r * fade + long;
 }
 
 // Currents stirred into the ripple grid at a camera-relative x/z: (x, z m/s, turn 1/s, 0),

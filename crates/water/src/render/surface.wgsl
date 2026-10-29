@@ -6,10 +6,15 @@
 // so each mode turns at ω = √(ab) (gravity waves plus capillary ones): long waves outrun short
 // ones, rings spread into trains and moving hulls draw Kelvin wakes.
 //
-// Each frame: `spatial` carries the surface along the currents (semi-Lagrangian), adds the
-// pushes, shuts dry land and soaks waves up at the grid's edge, and packs z = h + iφ (both
-// real, so one complex transform carries both); `fft_*_fwd` transform it; `evolve` splits the
-// two spectra (H = (Z(k) + Z*(−k))/2, Φ = (Z(k) − Z*(−k))/2i), turns each mode by ω·dt and
+// It runs on two levels, each with its own buffers and these passes (`crate::surface`): the
+// fine one holds the short waves, the coarse one the long, each mode in one of them.
+//
+// Each frame: `spatial` carries the surface along the currents (semi-Lagrangian), shuts dry
+// land and soaks waves up at the grid's edge, and packs z = h + iφ (both real, so one
+// complex transform carries both), and packs the pushes the same way (height pushed, and
+// the potential a pressure starts: dφ/dt = −g·h − p/ρ); `fft_*_fwd` and `fft_*_push`
+// transform them; `evolve` splits the spectra (H = (Z(k) + Z*(−k))/2,
+// Φ = (Z(k) − Z*(−k))/2i), adds this level's band of the pushes, turns each mode by ω·dt and
 // packs them again; `fft_*_inv` transform back; `resolve` keeps the result, writes the
 // texture the water shader reads (height, dh/dx, dh/dz) and the heights read back for
 // floating things.
@@ -19,12 +24,13 @@ struct Params {
     grid: vec4<f32>,  // cells per side, cell size (m), dt (s), depth (m)
     damp: vec4<f32>,  // wave damping (1/s), viscosity (m²/s) for the shortest waves, σ/ρ (m³/s²), pushes on
     shift: vec4<i32>, // cells the grid moved by since the last frame (x, z), unused, unused
+    band: vec4<f32>,  // crossover wavenumber (1/m), 0 all waves / 1 the short / 2 the long, sponge (cells), unused
 };
 
 @group(0) @binding(0) var<uniform> params: Params;
 @group(0) @binding(1) var<storage, read_write> surface: array<vec2<f32>>; // (h, φ) per cell
-@group(0) @binding(2) var<storage, read_write> work: array<vec2<f32>>;    // two complex fields
-@group(0) @binding(3) var<storage, read> pushes: array<f32>;              // height pushed per cell
+@group(0) @binding(2) var<storage, read_write> work: array<vec2<f32>>;    // three complex fields
+@group(0) @binding(3) var<storage, read> pushes: array<vec2<f32>>;        // height pushed, pressure impulse (m·s) per cell
 @group(0) @binding(4) var<storage, read> medium: array<vec2<u32>>;        // f16 (vx, vz), (wet, 0)
 @group(0) @binding(5) var<storage, read_write> heights: array<f32>;       // read back
 @group(0) @binding(6) var out_tex: texture_storage_2d<rgba16float, write>;
@@ -32,8 +38,6 @@ struct Params {
 const N: u32 = 256u;
 const LOG_N: u32 = 8u;
 const G: f32 = 9.81;
-/// Cells at the grid's edge where the waves are soaked up (the transform wraps around).
-const SPONGE: f32 = 20.0;
 
 fn cmul(a: vec2<f32>, b: vec2<f32>) -> vec2<f32> {
     return vec2<f32>(a.x * b.x - a.y * b.y, a.x * b.y + a.y * b.x);
@@ -72,13 +76,16 @@ fn spatial(@builtin(global_invocation_id) id: vec3<u32>) {
         let v = unpack2x16float(m.x);
         let back = vec2<f32>(id.xy) - v * (params.grid.z / params.grid.y);
         s = surface_at(back);
-        if (params.damp.w > 0.5) { s.x += pushes[i]; }
         // Soaked up toward the edge, so what leaves one side doesn't come back on the other.
         let edge = f32(min(min(id.x, id.y), min(N - 1u - id.x, N - 1u - id.y)));
-        let t = saturate(1.0 - edge / SPONGE);
+        let t = saturate(1.0 - edge / params.band.z);
         s *= exp(-6.0 * t * t * params.grid.z);
     }
     work[i] = s;
+    if (params.damp.w > 0.5) {
+        let p = pushes[i];
+        work[2u * N * N + i] = vec2<f32>(p.x, -G * p.y);
+    }
 }
 
 var<workgroup> line: array<vec2<f32>, 256>;
@@ -126,6 +133,16 @@ fn fft_cols_fwd(@builtin(local_invocation_id) lid: vec3<u32>, @builtin(workgroup
 }
 
 @compute @workgroup_size(128, 1, 1)
+fn fft_rows_push(@builtin(local_invocation_id) lid: vec3<u32>, @builtin(workgroup_id) wg: vec3<u32>) {
+    fft(lid.x, 2u * N * N + wg.x * N, 1u, -1.0);
+}
+
+@compute @workgroup_size(128, 1, 1)
+fn fft_cols_push(@builtin(local_invocation_id) lid: vec3<u32>, @builtin(workgroup_id) wg: vec3<u32>) {
+    fft(lid.x, 2u * N * N + wg.x, N, -1.0);
+}
+
+@compute @workgroup_size(128, 1, 1)
 fn fft_rows_inv(@builtin(local_invocation_id) lid: vec3<u32>, @builtin(workgroup_id) wg: vec3<u32>) {
     fft(lid.x, N * N + wg.x * N, 1u, 1.0);
 }
@@ -140,17 +157,33 @@ fn wave_index(i: u32) -> f32 {
     return select(f32(i), f32(i) - f32(N), i >= N / 2u);
 }
 
+// The share of waves of wavenumber `k` this level holds (`Band::share`).
+fn share(k: f32) -> f32 {
+    if (params.band.y < 0.5) { return 1.0; }
+    let s = saturate(log2(max(k, 1e-6) / params.band.x) + 0.5);
+    let c = cos(0.5 * PI * s);
+    return select(1.0 - c * c, c * c, params.band.y > 1.5);
+}
+
 @compute @workgroup_size(8, 8, 1)
 fn evolve(@builtin(global_invocation_id) id: vec3<u32>) {
     let i = id.y * N + id.x;
     let mirror = ((N - id.y) % N) * N + (N - id.x) % N;
     let z = work[i];
     let zm = conj(work[mirror]);
-    let h = 0.5 * (z + zm);
+    var h = 0.5 * (z + zm);
     let d = 0.5 * (z - zm);
-    let phi = vec2<f32>(d.y, -d.x);
+    var phi = vec2<f32>(d.y, -d.x);
     let k = vec2<f32>(wave_index(id.x), wave_index(id.y)) * (TAU / (f32(N) * params.grid.y));
     let kl = length(k);
+    if (params.damp.w > 0.5) {
+        let pz = work[2u * N * N + i];
+        let pm = conj(work[2u * N * N + mirror]);
+        let pd = 0.5 * (pz - pm);
+        let w = share(kl);
+        h += w * 0.5 * (pz + pm);
+        phi += w * vec2<f32>(pd.y, -pd.x);
+    }
     var out = vec2<f32>(0.0);
     if (kl > 1e-6) {
         let dt = params.grid.z;

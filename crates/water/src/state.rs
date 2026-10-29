@@ -95,7 +95,19 @@ pub struct WaterState {
     /// Moving interactors pushing the surface this step (x/z, radius). The dip a hull digs
     /// under itself drives its wake but isn't what it floats on: a boat would settle into its
     /// own trough, so the ripples are left out of [`WaterState::sample`] under each one.
-    pub hulls: Vec<(DVec2, f32)>,
+    pub hulls: Vec<Hull>,
+}
+
+/// A moving interactor's own dip ([`WaterState::hulls`]): round, or a capsule along a long
+/// hull.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Hull {
+    /// World x/z.
+    pub center: DVec2,
+    /// From the center to the end of the capsule's spine, meters (zero when round).
+    pub half: DVec2,
+    /// Meters.
+    pub radius: f32,
 }
 
 impl WaterState {
@@ -121,9 +133,15 @@ impl WaterState {
         for f in &mut self.flows {
             f.shift(s);
         }
-        for (c, _) in &mut self.hulls {
-            let p = s.point(DVec3::new(c.x, 0.0, c.y));
-            *c = DVec2::new(p.x, p.z);
+        for h in &mut self.hulls {
+            let p = s.point(DVec3::new(h.center.x, 0.0, h.center.y));
+            h.center = DVec2::new(p.x, p.z);
+            let d = s.direction(engine_core::math::Vec3::new(
+                h.half.x as f32,
+                0.0,
+                h.half.y as f32,
+            ));
+            h.half = DVec2::new(d.x as f64, d.z as f64);
         }
         self.shifts += 1;
     }
@@ -142,8 +160,15 @@ impl WaterState {
     /// How much of the ripples count at `p`: 0 under a moving interactor (its own push), 1
     /// clear of them.
     pub fn hull_weight(&self, p: DVec2) -> f32 {
-        self.hulls.iter().fold(1.0, |w, (c, r)| {
-            let d = (p - *c).length() as f32;
+        self.hulls.iter().fold(1.0, |w, h| {
+            let r = h.radius;
+            let len2 = h.half.length_squared();
+            let t = if len2 > 0.0 {
+                ((p - h.center).dot(h.half) / len2).clamp(-1.0, 1.0)
+            } else {
+                0.0
+            };
+            let d = (p - (h.center + h.half * t)).length() as f32;
             let t = ((d - r * 0.9) / (r * 0.9)).clamp(0.0, 1.0);
             w.min(t * t * (3.0 - 2.0 * t))
         })

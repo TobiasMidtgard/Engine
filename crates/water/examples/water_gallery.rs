@@ -272,13 +272,20 @@ fn main() {
             "surface: {:?}, highest ripple {peak:.4} m (grid's own {:.4} m)",
             link.runner(),
             state.ripples.h.iter().fold(0.0f32, |m, v| m.max(v.abs()))
-        ); // The two surfaces side by side, seen from above (grid's own left, dispersive right):
-        // what the water itself feels, without the light.
+        );
+        // The surfaces side by side, seen from above (the grid's own, the dispersive fine
+        // level over it, and its coarse level four times larger when it runs): what the water
+        // itself feels, without the light. Red up, blue down, full colour at 5 cm.
         if let Some(h) = link.heights() {
             let n = state.ripples.n;
-            let scale = 0.02;
-            let mut img = image::RgbImage::new(n as u32 * 2 + 8, n as u32);
-            for (side, buf) in [(0, &state.ripples.h), (1, &h.h)] {
+            let scale = 0.05;
+            let coarse = link.coarse();
+            let mut panels = vec![&state.ripples.h, &h.h];
+            if let Some(c) = &coarse {
+                panels.push(&c.h);
+            }
+            let mut img = image::RgbImage::new(((n + 8) * panels.len() - 8) as u32, n as u32);
+            for (side, buf) in panels.into_iter().enumerate() {
                 for j in 0..n {
                     for i in 0..n {
                         let v = (buf[j * n + i] / scale).clamp(-1.0, 1.0);

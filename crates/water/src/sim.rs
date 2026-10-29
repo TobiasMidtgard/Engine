@@ -189,6 +189,9 @@ pub struct StillDepths {
     depth: Vec<f32>,
     /// Cells still unread.
     unread: usize,
+    /// Never read more than [`STILL_READS`] a step, even the first time (the coarse level,
+    /// whose water can come in over a few steps).
+    patient: bool,
 }
 
 /// Cells of the ripple grid whose still depth is read per step after a jump (on four cores
@@ -230,7 +233,8 @@ impl StillDepths {
                 }
                 // The first read, or the lakes changed: all at once (the loading screen
                 // covers it).
-                _ => budget = usize::MAX,
+                _ if !self.patient => budget = usize::MAX,
+                _ => {}
             }
             self.unread = depth.iter().filter(|d| **d == f32::INFINITY).count();
             self.depth = depth;
@@ -290,6 +294,85 @@ impl StillDepths {
     }
 }
 
+/// The water under the dispersive surface's coarse level ([`crate::surface::CoarseBed`]),
+/// read like the ripple grid's still depths, but a few thousand cells a step from the
+/// start.
+pub struct CoarseStill {
+    depths: StillDepths,
+}
+
+impl Default for CoarseStill {
+    fn default() -> Self {
+        Self {
+            depths: StillDepths {
+                patient: true,
+                ..Default::default()
+            },
+        }
+    }
+}
+
+impl CoarseStill {
+    /// Read the coarse level's water round the ripple grid `field` (its old bed, moved in
+    /// whole coarse cells), and hand `field` the bed when it changed.
+    fn read(
+        &mut self,
+        field: &mut crate::ripples::RippleField,
+        layout: u64,
+        bodies: &[BodyState],
+        ground: &Ground,
+        level_y: f64,
+        focus: DVec2,
+    ) {
+        use crate::surface::{COARSE, CoarseBed, N};
+        if field.n != N {
+            field.coarse = None;
+            return;
+        }
+        let cell = field.cell * COARSE as f32;
+        let c = cell as f64;
+        let want = field.origin + DVec2::splat((field.size() - c * N as f64) * 0.5);
+        let origin = match &field.coarse {
+            Some(b) if b.cell == cell => b.origin + ((want - b.origin) / c).round() * c,
+            _ => (want / c).round() * c,
+        };
+        self.depths
+            .read((origin, N, cell, layout), bodies, ground, level_y, focus);
+        let (mut sum, mut count) = (0.0f64, 0usize);
+        let wet: Vec<f32> = (0..N * N)
+            .map(|k| {
+                let d = self.depths.at_cell(k);
+                if d > 0.0 && d < 1e4 {
+                    sum += d as f64;
+                    count += 1;
+                    1.0
+                } else {
+                    0.0
+                }
+            })
+            .collect();
+        let depth = if count > 0 {
+            (sum / count as f64) as f32
+        } else {
+            crate::surface::DEPTH_M
+        }
+        .clamp(0.5, 30.0);
+        let same = field.coarse.as_ref().is_some_and(|b| {
+            b.origin == origin && b.cell == cell && b.wet == wet && (b.depth - depth).abs() < 0.25
+        });
+        if !same {
+            let version = field.coarse.as_ref().map_or(0, |b| b.version + 1);
+            field.coarse = Some(std::sync::Arc::new(CoarseBed {
+                origin,
+                cell,
+                wet,
+                depth,
+                version,
+            }));
+        }
+    }
+}
+
 /// Fields stepped beside the physics step ([`SimSet::DuringPhysics`]), waiting to be put back
 /// in [`SimSet::Environment`]. Meanwhile readers (the physics step's buoyancy among them) see
 /// a copy of the state as it was, so what they read doesn't depend on which finishes first.
@@ -312,6 +395,7 @@ pub fn ripple_system(
     mut book: ResMut<SimBook>,
     mut flight: ResMut<RipplesInFlight>,
     mut still: Local<StillDepths>,
+    mut coarse: Local<CoarseStill>,
 ) {
     let dt = time.delta_secs();
     let mut state = shared.0.write();
@@ -328,8 +412,10 @@ pub fn ripple_system(
     let f = focus_point(&focus, &cameras);
     let center = ripple_center(&state, f, state.ripples.size() * 0.5);
     book.since_rebuild += dt;
-    let rebuild =
-        state.ripples.would_recenter(center) || book.since_rebuild > 2.0 || still.unread > 0;
+    let rebuild = state.ripples.would_recenter(center)
+        || book.since_rebuild > 2.0
+        || still.unread > 0
+        || coarse.depths.unread > 0;
     if !rebuild && !state.ripples.needs_step() {
         // Calm water: nothing to step, copy or upload.
         state.ripples.pending.clear();
@@ -364,6 +450,14 @@ pub fn ripple_system(
         let ground = state.ground.clone();
         drop(state);
         still.read(at, &bodies, &ground, f.y, DVec2::new(f.x, f.z));
+        coarse.read(
+            &mut field,
+            book.layout,
+            &bodies,
+            &ground,
+            f.y,
+            DVec2::new(f.x, f.z),
+        );
         state = shared.0.write();
         let (origin, n, cell) = (field.origin, field.n, field.cell);
         // Streams, cell by cell only where each one lies (cheap: a grid lookup).

@@ -256,6 +256,7 @@ struct Globals {
     detail: [f32; 4],
     detail2: [f32; 4],
     plunges: [[f32; 4]; MAX_PLUNGES],
+    coarse: [f32; 4],
 }
 
 #[repr(C)]
@@ -648,6 +649,7 @@ impl WaterFeature {
                     count: None,
                 },
                 tex(7, wgpu::TextureSampleType::Float { filterable: true }),
+                tex(8, wgpu::TextureSampleType::Float { filterable: true }),
             ],
         });
         let group2_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -1470,6 +1472,10 @@ impl RenderFeature for WaterFeature {
         );
         // The ripples' heights come from the dispersive surface while it runs.
         g.detail[3] = if gpu.surface.drawn() { 1.0 } else { 0.0 };
+        if let Some((corner, size)) = gpu.surface.coarse_drawn() {
+            let rel = view.relative(DVec3::new(corner.x, 0.0, corner.y));
+            g.coarse = [rel.x, rel.z, size, 1.0];
+        }
         if let Some((slot, depth)) = under {
             let b = &uniform.bodies[slot];
             g.rain[2] = slot as f32;
@@ -1561,7 +1567,11 @@ impl RenderFeature for WaterFeature {
                         },
                         wgpu::BindGroupEntry {
                             binding: 7,
-                            resource: wgpu::BindingResource::TextureView(&gpu.surface.view),
+                            resource: wgpu::BindingResource::TextureView(gpu.surface.view()),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 8,
+                            resource: wgpu::BindingResource::TextureView(gpu.surface.coarse_view()),
                         },
                     ],
                 }),
@@ -1652,8 +1662,8 @@ mod tests {
 
     #[test]
     fn uniform_layout_matches_the_shader() {
-        // WGSL: Globals 9 vec4 + 4 showers + 8 plunges; GpuBody 11 vec4 + 24 waves of 2 vec4.
-        assert_eq!(std::mem::size_of::<Globals>(), (9 + 4 + 8) * 16);
+        // WGSL: Globals 10 vec4 + 4 showers + 8 plunges; GpuBody 11 vec4 + 24 waves of 2 vec4.
+        assert_eq!(std::mem::size_of::<Globals>(), (10 + 4 + 8) * 16);
         assert_eq!(std::mem::size_of::<GpuBody>(), (11 + MAX_WAVES * 2) * 16);
         assert_eq!(
             std::mem::size_of::<WaterUniform>(),
