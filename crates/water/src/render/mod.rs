@@ -1489,7 +1489,10 @@ impl RenderFeature for WaterFeature {
     }
 
     fn order(&self) -> i32 {
-        -10
+        // Before the clouds' composite (weather, -90) and the far bodies (space, -50): a cloud
+        // or rain veil between the camera and a lake goes over it, as over the ground, and the
+        // bodies, farther than any water, fail the depth test the water writes.
+        -95
     }
 
     fn init(&mut self, gpu: &GpuShared) {

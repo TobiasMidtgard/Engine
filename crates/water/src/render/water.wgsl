@@ -529,12 +529,18 @@ fn medium_radiance(look: WaterLook, rel: vec3<f32>, depth_below: f32) -> vec3<f3
     return backscatter(look, rel, depth_below, 0.0, 1.0);
 }
 
+// Sunlight reaching camera-relative `rel` through the air and under the clouds' shadows, as the
+// ground beside the water gets it (lib_frame `cloud_shadow`).
+fn water_sun(rel: vec3<f32>) -> vec3<f32> {
+    return frame.sun_color.rgb * sun_transmittance(rel) * cloud_shadow(rel);
+}
+
 // `medium_radiance` with `extra_bb` (1/m) more backscattering, white: bubbles, which scatter
 // every color alike. What comes back is still tinted by what the water absorbs on the way, so
 // a bubble cloud glows in the water's own color, paler: turquoise in a green lake. `sun_vis`:
 // how much of the sun reaches the water (a cloud just under the surface sits in its shadows).
 fn backscatter(look: WaterLook, rel: vec3<f32>, depth_below: f32, extra_bb: f32, sun_vis: f32) -> vec3<f32> {
-    let sun = frame.sun_color.rgb * sun_transmittance(rel) * max(frame.sun_dir.y, 0.0) * sun_vis;
+    let sun = water_sun(rel) * max(frame.sun_dir.y, 0.0) * sun_vis;
     let sky = sky_ambient(vec3<f32>(0.0, 1.0, 0.0)) * sky_visibility(rel, vec3<f32>(0.0, 1.0, 0.0)) * PI;
     let down = exp(-(look.absorb + vec3<f32>(look.scattering)) * max(depth_below, 0.0));
     let e = (sun * 0.98 + sky) * INV_PI * down;
@@ -788,7 +794,7 @@ fn shade_water(rel: vec3<f32>, n_in: vec3<f32>, look: WaterLook, foam_in: f32, c
 
     // ---- sun glitter
     let l = frame.sun_dir.xyz;
-    let sun = frame.sun_color.rgb * sun_transmittance(rel);
+    let sun = water_sun(rel);
     let shadow = shadow_factor(rel, n);
     let h = normalize(l + v);
     let n_dot_l = saturate(dot(n, l));
@@ -1255,7 +1261,7 @@ fn fall_wet(in: FallOut) -> vec4<f32> {
     let a = 0.08 * 0.08;
     let spec = d_ggx(saturate(dot(n, h)), a) * v_smith_ggx_correlated(n_dot_v, max(n_dot_l, 1e-3), a)
         * f_schlick(vec3<f32>(0.02), saturate(dot(l, h))) * n_dot_l;
-    let sun = frame.sun_color.rgb * sun_transmittance(in.rel) * shadow_factor(in.rel, n);
+    let sun = water_sun(in.rel) * shadow_factor(in.rel, n);
     let color = (refl * fresnel + pre_expose(spec * sun)) * wetness * near;
     // The rock behind is fogged already (rock · T + in-scatter): darken only the rock, and
     // fog the film's light as the rock's.
@@ -1285,7 +1291,7 @@ fn fall_mist(in: FallOut) -> vec4<f32> {
     // Fine droplets: bright toward the sun, lit by the open sky in front of the cliff.
     let v = -in.rel / max(length(in.rel), 1e-4);
     let l = frame.sun_dir.xyz;
-    let sun = frame.sun_color.rgb * sun_transmittance(in.rel) * shadow_factor(in.rel, l);
+    let sun = water_sun(in.rel) * shadow_factor(in.rel, l);
     let phase = 0.3 + 1.6 * pow(saturate(dot(-v, l)), 6.0);
     let out_dir = normalize(vec3<f32>(v.x, 0.0, v.z) + vec3<f32>(0.0, 1e-3, 0.0));
     let n = normalize(out_dir + vec3<f32>(0.0, 0.7, 0.0));
@@ -1320,7 +1326,7 @@ fn fall_broken(q: f32, tau: f32) -> f32 {
 // sun behind, and the sky over it.
 fn froth_light(rel: vec3<f32>, n: vec3<f32>, v: vec3<f32>) -> vec3<f32> {
     let l = frame.sun_dir.xyz;
-    let sun = frame.sun_color.rgb * sun_transmittance(rel);
+    let sun = water_sun(rel);
     let shadow = shadow_factor(rel, n);
     // Light bounces many times inside froth: the sky's blue washes out toward grey-white.
     let sky = sky_ambient(n) * sky_visibility(rel, n) * PI;
@@ -1457,7 +1463,7 @@ fn fs_falls(in: FallOut) -> @location(0) vec4<f32> {
     // Light: sun (wrapping round, and glowing through the froth with the sun behind it),
     // sky, and glints off the wet surface.
     let l = frame.sun_dir.xyz;
-    let sun = frame.sun_color.rgb * sun_transmittance(in.rel);
+    let sun = water_sun(in.rel);
     let shadow = shadow_factor(in.rel, n);
     let sky_vis = sky_visibility(in.rel, n);
     let up = sky_ambient(n) * sky_vis * PI;
@@ -1549,7 +1555,7 @@ fn fs_puddle(in: PuddleOut) -> @location(0) vec4<f32> {
     let h = normalize(l + v);
     let spec = d_ggx(saturate(dot(n, h)), 0.004) * v_smith_ggx_correlated(n_dot_v, max(dot(n, l), 1e-3), 0.004)
         * f_schlick(vec3<f32>(0.02), saturate(dot(l, h))) * saturate(dot(n, l));
-    let sun = pre_expose(spec * frame.sun_color.rgb * sun_transmittance(in.rel) * shadow_factor(in.rel, n));
+    let sun = pre_expose(spec * water_sun(in.rel) * shadow_factor(in.rel, n));
     // Wet ground under a film of water: darker, then the mirror on top.
     let under = ground * 0.6;
     let color = under * (1.0 - fresnel) + refl * fresnel + sun;
