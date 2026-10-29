@@ -18,6 +18,8 @@
 -- returns), `update_<name>(dt)` every frame and `exit_<name>` when it ends; the state's table
 -- can hold `enter`, `update` and `exit` functions instead. A state with `states` inside is a
 -- group: entering it enters its `initial` one (or the one it was last in, with `history = true`).
+-- A group with `parallel = true` runs all its states at once (regions, each usually a group of
+-- its own): an event reaches every region, and `self.state` is the first region's state.
 -- Triggers: `on = { event = "to" }` (interactions are `interact`; messages, wired signals and
 -- `self:trigger(event)` use their names), `after = { seconds, "to" }`, `done = "to"` and
 -- `when = { condition = "to" }` (a method or field of the script, `"not lit"` too, checked every
@@ -25,16 +27,19 @@
 -- `on` entry may be `{ to = "x", guard = "condition" }` or a list of those, the first whose guard
 -- holds wins. Runs as part of the script: the runtime calls `__states_start` after `start`,
 -- `__states_tick` after `update`, `__states_event` for each event and `__states_reload` after a
--- hot reload. engine-design/scripting-research.md §19.
+-- hot reload; `__states_hit` tells it a breakpoint the editor set was reached.
+-- engine-design/scripting-research.md §19 and §20.
 
 local Base = __script_base
 local spawn_as = __task_spawn_as
+local hit_break = __states_hit
 
 local MAX_CHANGES = 32
 local LOG_LENGTH = 64
 local KEYS = {
 	initial = true,
 	history = true,
+	parallel = true,
 	on = true,
 	after = true,
 	done = true,
@@ -136,6 +141,20 @@ local function compile(def: any): (any, string?, string?)
 			if problem then
 				return problem, about
 			end
+		end
+		if d.parallel ~= nil and type(d.parallel) ~= "boolean" then
+			return `state {name}: parallel must be true or false`, name
+		end
+		if d.parallel then
+			if #names == 0 then
+				return `state {name} is parallel but has no states inside (its regions, all running at once)`,
+					name
+			end
+			if d.initial ~= nil then
+				return `state {name} is parallel: all its states start together, so it has no initial`,
+					name
+			end
+			return nil
 		end
 		if #names == 0 then
 			return nil
@@ -302,10 +321,133 @@ local function holds(self: any, cond: any, ...: any): boolean
 	return if negate then not yes else yes
 end
 
+-- The running machine. `run.on` is the set of active states: the root, one state of each
+-- active group, and every region of an active parallel group, so they form a tree.
+
+-- The active states in document order (a group before the states inside it, a parallel group's
+-- regions one after another).
+local function actives(run: any): { any }
+	local list = run.list
+	if list then
+		return list
+	end
+	list = {}
+	for _, node in run.m.order do
+		if run.on[node] then
+			table.insert(list, node)
+		end
+	end
+	run.list = list
+	return list
+end
+
+local function is_active(run: any, name: string): boolean
+	local node = run.m.nodes[name]
+	return node ~= nil and run.on[node] == true
+end
+
+-- Whether `node` is `outer` or inside it.
+local function within(node: any, outer: any): boolean
+	local n = node
+	while n do
+		if n == outer then
+			return true
+		end
+		n = n.parent
+	end
+	return false
+end
+
+-- The active states with no active state inside: the current state, or one per region.
+local function leaves(run: any): { any }
+	local out = {}
+	local list = actives(run)
+	for k, node in list do
+		-- In document order a state's first active child comes right after it.
+		local after = list[k + 1]
+		if not (after and after.parent == node) then
+			table.insert(out, node)
+		end
+	end
+	return out
+end
+
+-- `self.state`: the current state (with parallel regions, the first region's).
+local function current(run: any): any
+	return leaves(run)[1]
+end
+
+-- The active state a transition from `node` leaves: `node`, or the state it is in.
+local function leaf_under(run: any, node: any): any
+	for _, l in leaves(run) do
+		if within(l, node) then
+			return l
+		end
+	end
+	return node
+end
+
+-- The active leaf whose group is nearest `target` (what `go` changes from: only that region).
+local function nearest(run: any, target: any): any
+	local best, depth = nil, -1
+	for _, l in leaves(run) do
+		local seen = {}
+		local n = l
+		while n do
+			seen[n] = true
+			n = n.parent
+		end
+		n = target
+		while n and not seen[n] do
+			n = n.parent
+		end
+		local d = if n then n.depth else 0
+		if d > depth then
+			best, depth = l, d
+		end
+	end
+	return best or run.m.root
+end
+
+local function snapshot(run: any): { string }
+	local out = {}
+	for _, node in actives(run) do
+		if node.name ~= "root" then
+			table.insert(out, node.name)
+		end
+	end
+	return out
+end
+
+-- A change, with every state active after it (the editor shows the machine as it was then).
 local function log(run: any, from: string, to: string, why: string)
-	table.insert(run.log, { t = run.clock, from = from, to = to, why = why })
+	table.insert(run.log, { t = run.clock, from = from, to = to, why = why, active = snapshot(run) })
 	if #run.log > LOG_LENGTH then
 		table.remove(run.log, 1)
+	end
+end
+
+-- "interact by Player": the event, and who sent it when its first value is a named entity.
+local function why_of(event: string, ...: any): string
+	local by = ...
+	if type(by) == "userdata" then
+		local ok, name = pcall(function()
+			return by.name
+		end)
+		if ok and type(name) == "string" and name ~= "" then
+			return `{event} by {name}`
+		end
+	end
+	return event
+end
+
+-- A breakpoint the editor set on this state (`__states_breaks`): the game pauses at the end
+-- of the frame, as PlayMaker's and StateTree's do.
+local function check_break(self: any, run: any, kind: string, name: string)
+	local b = rawget(self, "__breaks")
+	local set = b and b[kind]
+	if set and set[name] then
+		hit_break(self.entity, kind, name, run.why or "")
 	end
 end
 
@@ -313,10 +455,13 @@ local settle
 
 -- Enters `node`: its time starts, its enter hook starts as a task.
 local function enter(self: any, run: any, node: any)
-	table.insert(run.active, node)
+	run.on[node] = true
+	run.list = nil
+	run.enters += 1
 	run.since[node.name] = run.clock
 	run.visit[node.name] = run.serial
 	run.finished[node.name] = nil
+	check_break(self, run, "enter", node.name)
 	local h = hook_of(self, node, "enter")
 	if not h then
 		run.finished[node.name] = true
@@ -343,9 +488,10 @@ local function enter(self: any, run: any, node: any)
 	end
 end
 
--- Leaves the innermost active state.
-local function exit(self: any, run: any)
-	local node = table.remove(run.active)
+-- Leaves the active state `node` (the states inside it have left already).
+local function exit(self: any, run: any, node: any)
+	run.on[node] = nil
+	run.list = nil
 	local name = node.name
 	local t = run.running[name]
 	if t then
@@ -358,46 +504,56 @@ local function exit(self: any, run: any)
 	if parent then
 		run.last[parent.name] = name
 	end
+	check_break(self, run, "exit", name)
 	local h = hook_of(self, node, "exit")
 	if h then
 		h(self)
 	end
 end
 
-local function leaf(run: any): any
-	return run.active[#run.active]
-end
-
--- Enters `node`'s inner states down to a leaf: `initial`, or the last one with `history`
--- (unless `fresh`).
-local function descend(self: any, run: any, node: any, fresh: boolean?)
-	while #node.children > 0 do
-		local d = node.def
+-- Enters what's missing under the active `node`, down to leaves: a group's `initial` state (or
+-- the one it was last in, with `history`, unless `fresh`) and every region of a parallel group.
+local function fill(self: any, run: any, node: any, fresh: boolean?)
+	if #node.children == 0 then
+		return
+	end
+	local nodes = run.m.nodes
+	if node.def.parallel then
+		for _, name in node.children do
+			local c = nodes[name]
+			if not run.on[c] then
+				enter(self, run, c)
+			end
+			fill(self, run, c, fresh)
+		end
+		return
+	end
+	local inside = nil
+	for _, name in node.children do
+		if run.on[nodes[name]] then
+			inside = nodes[name]
+			break
+		end
+	end
+	if not inside then
 		local next_name = node.initial
 		local last = run.last[node.name]
-		if not fresh and d.history and last and run.m.nodes[last] and run.m.nodes[last].parent == node then
+		if not fresh and node.def.history and last and nodes[last] and nodes[last].parent == node then
 			next_name = last
 		end
-		node = run.m.nodes[next_name]
-		enter(self, run, node)
+		inside = nodes[next_name]
+		enter(self, run, inside)
 	end
-end
-
-local function is_active(run: any, name: string): boolean
-	for _, n in run.active do
-		if n.name == name then
-			return true
-		end
-	end
-	return false
+	fill(self, run, inside, fresh)
 end
 
 -- Goes from `source` (an active state, the one whose transition fires) to the state named
--- `to`: leaves the states below the nearest group holding both, enters down to `to` and on
--- to a leaf.
+-- `to`: leaves every active state below the nearest group holding both, enters down to `to`,
+-- then fills in the rest (`initial` states, history, a parallel group's other regions). A change
+-- between two regions of a parallel group starts all its regions again, as in SCXML.
 local function change(self: any, run: any, source: any, to: string, why: string)
 	run.changes += 1
-	local from = leaf(run).name
+	local from = leaf_under(run, source).name
 	if run.changes > MAX_CHANGES then
 		local path = {}
 		for k = math.max(1, #run.log - 6), #run.log do
@@ -424,8 +580,13 @@ local function change(self: any, run: any, source: any, to: string, why: string)
 	lca = lca or run.m.root
 	run.changing = true
 	run.serial += 1
-	while leaf(run) ~= lca do
-		exit(self, run)
+	run.why = why
+	local list = actives(run)
+	for k = #list, 1, -1 do
+		local node = list[k]
+		if node ~= lca and within(node, lca) then
+			exit(self, run, node)
+		end
 	end
 	local path = {}
 	n = target
@@ -436,10 +597,11 @@ local function change(self: any, run: any, source: any, to: string, why: string)
 	for _, node in path do
 		enter(self, run, node)
 	end
-	descend(self, run, target)
+	fill(self, run, lca)
 	run.changing = false
-	self.state = leaf(run).name
-	log(run, from, self.state, why)
+	run.why = nil
+	self.state = current(run).name
+	log(run, from, leaf_under(run, target).name, why)
 end
 
 -- `done` transitions of states whose enter task has finished, innermost first.
@@ -451,10 +613,11 @@ settle = function(self: any, run: any)
 			return
 		end
 		local fired = false
-		for k = #run.active, 1, -1 do
-			local node = run.active[k]
+		local list = actives(run)
+		for k = #list, 1, -1 do
+			local node = list[k]
 			local to = node.def.done
-			if to ~= nil and run.finished[node.name] then
+			if to ~= nil and run.on[node] and run.finished[node.name] then
 				change(self, run, node, to, "done")
 				fired = true
 				break
@@ -473,7 +636,8 @@ local function start(self: any, clock: number, at: string?)
 	end
 	local run = {
 		m = m,
-		active = {},
+		on = {},
+		list = nil,
 		since = {},
 		visit = {},
 		finished = {},
@@ -482,25 +646,29 @@ local function start(self: any, clock: number, at: string?)
 		log = {},
 		clock = clock,
 		serial = 0,
+		enters = 0,
 		changes = 0,
 		changing = true,
+		why = if at then "go" else "start",
 	}
 	rawset(self, "__machine", run)
-	table.insert(run.active, m.root)
+	run.on[m.root] = true
 	run.since.root = clock
-	local first = m.nodes[at or m.root.initial]
-	local path = {}
-	local n = first
-	while n ~= m.root do
-		table.insert(path, 1, n)
-		n = n.parent
+	if at then
+		local path = {}
+		local n = m.nodes[at]
+		while n ~= m.root do
+			table.insert(path, 1, n)
+			n = n.parent
+		end
+		for _, node in path do
+			enter(self, run, node)
+		end
 	end
-	for _, node in path do
-		enter(self, run, node)
-	end
-	descend(self, run, first)
+	fill(self, run, m.root)
 	run.changing = false
-	self.state = leaf(run).name
+	run.why = nil
+	self.state = current(run).name
 	log(run, "", self.state, if at then "go" else "start")
 	settle(self, run)
 	return run
@@ -526,9 +694,9 @@ function Base:__states_tick(dt: number, clock: number)
 	end
 	run.clock = clock
 	run.changes = 0
-	-- Every active state's update, outermost first.
-	for _, node in table.clone(run.active) do
-		if run.visit[node.name] or node == run.m.root then
+	-- Every active state's update, outermost first (a state left by an earlier update skips).
+	for _, node in actives(run) do
+		if run.on[node] and (run.visit[node.name] or node == run.m.root) then
 			local h = hook_of(self, node, "update")
 			if h then
 				h(self, dt)
@@ -538,8 +706,9 @@ function Base:__states_tick(dt: number, clock: number)
 	-- Timers and conditions, innermost first; after a change, the new states' turn.
 	for _ = 1, MAX_CHANGES + 1 do
 		local fired = false
-		for k = #run.active, 1, -1 do
-			local node = run.active[k]
+		local list = actives(run)
+		for k = #list, 1, -1 do
+			local node = list[k]
 			local d = node.def
 			local a = d.after
 			local secs = a and seconds(self, a[1])
@@ -568,37 +737,50 @@ function Base:__states_tick(dt: number, clock: number)
 	end
 end
 
--- An event: the innermost state that knows it changes state. Returns whether one did.
+-- An event: in each region, the innermost state that knows it changes state (a state that
+-- several regions share takes it once). Returns whether one did.
 function Base:__states_event(event: string, ...: any): boolean
 	local run = running(self)
 	if not run then
 		return false
 	end
-	for k = #run.active, 1, -1 do
-		local node = run.active[k]
-		local on = node.def.on
-		local cs = on and choices(on[event])
-		if cs then
-			for _, c in cs do
-				if c.guard == nil or holds(self, c.guard, ...) then
-					local why = event
-					local by = ...
-					if type(by) == "userdata" then
-						local ok, name = pcall(function()
-							return by.name
-						end)
-						if ok and type(name) == "string" and name ~= "" then
-							why = `{event} by {name}`
+	local took = false
+	local ls = leaves(run)
+	local stamps = {}
+	for _, l in ls do
+		stamps[l] = run.visit[l.name]
+	end
+	local fired = {}
+	for _, l in ls do
+		-- Still where it was (an earlier region's change may have left it).
+		if run.on[l] and run.visit[l.name] == stamps[l] then
+			local node = l
+			while node and not fired[node] do
+				local on = node.def.on
+				local cs = on and choices(on[event])
+				local chosen = nil
+				if cs then
+					for _, c in cs do
+						if c.guard == nil or holds(self, c.guard, ...) then
+							chosen = c
+							break
 						end
 					end
-					change(self, run, node, c.to, why)
-					settle(self, run)
-					return true
 				end
+				if chosen then
+					fired[node] = true
+					change(self, run, node, chosen.to, why_of(event, ...))
+					took = true
+					break
+				end
+				node = node.parent
 			end
 		end
 	end
-	return false
+	if took then
+		settle(self, run)
+	end
+	return took
 end
 
 -- Whether some state of the class's machine takes `event`.
@@ -607,8 +789,13 @@ function Base:__states_hears(event: string): boolean
 	return m ~= nil and m.events[event] == true
 end
 
--- After a hot reload: the same states if they still exist (with their times), else the
--- nearest group that does, entered afresh.
+-- The editor's breakpoints on this script's states: { enter = { name = true }, exit = { ... } }.
+function Base:__states_breaks(breaks: any)
+	rawset(self, "__breaks", breaks)
+end
+
+-- After a hot reload: the same states if they still exist where they were (with their times);
+-- what's gone is left and the groups it was in start again from their first state.
 function Base:__states_reload(clock: number)
 	local run = running(self)
 	if not run then
@@ -623,72 +810,76 @@ function Base:__states_reload(clock: number)
 	if m == run.m then
 		return
 	end
-	local old = run.active
-	local kept = { m.root }
-	for k = 2, #old do
-		local node = m.nodes[old[k].name]
-		if not node or node.parent ~= kept[#kept] then
-			break
+	local old = actives(run)
+	local from = current(run).name
+	local keep = { [m.root] = true }
+	local kept = 1
+	for _, o in old do
+		local node = m.nodes[o.name]
+		if o.parent and node and node.parent and node.parent.name == o.parent.name and keep[node.parent] then
+			keep[node] = true
+			kept += 1
 		end
-		table.insert(kept, node)
+	end
+	-- Leave what's gone (its tasks stop).
+	for k = #old, 1, -1 do
+		local o = old[k]
+		local node = m.nodes[o.name]
+		if o.parent and not (node and keep[node]) then
+			local t = run.running[o.name]
+			if t then
+				run.running[o.name] = nil
+				task.cancel(t)
+			end
+			run.visit[o.name] = nil
+			run.finished[o.name] = nil
+		end
 	end
 	run.m = m
-	if #kept == #old and #m.nodes[old[#old].name].children == 0 then
-		run.active = kept
-		return
-	end
-	-- Leave what's gone (its tasks stop), then enter the rest afresh.
-	for k = #old, #kept + 1, -1 do
-		local name = old[k].name
-		local t = run.running[name]
-		if t then
-			run.running[name] = nil
-			task.cancel(t)
-		end
-		run.visit[name] = nil
-		run.finished[name] = nil
-	end
-	run.active = kept
-	local from = old[#old].name
+	run.on = keep
+	run.list = nil
 	run.changing = true
 	run.serial += 1
-	local base = kept[#kept]
-	if base == m.root then
-		local first = m.nodes[m.root.initial]
-		enter(self, run, first)
-		base = first
-	end
-	descend(self, run, base, true)
+	run.why = "reload"
+	local enters = run.enters
+	fill(self, run, m.root, true)
 	run.changing = false
-	self.state = leaf(run).name
-	log(run, from, self.state, "reload")
-	settle(self, run)
+	run.why = nil
+	self.state = current(run).name
+	if run.enters ~= enters or kept ~= #old then
+		log(run, from, self.state, "reload")
+		settle(self, run)
+	end
 end
 
--- What the editor shows of a running machine: active states, their times, the log.
+-- What the editor shows of a running machine: active states (and which are current), their
+-- times, the log.
 function Base:__states_live(): any
 	local run = running(self)
 	if not run then
 		return nil
 	end
-	local active = {}
 	local since = {}
 	local busy = {}
-	for _, node in run.active do
+	for _, node in actives(run) do
 		if node.name ~= "root" then
-			table.insert(active, node.name)
 			since[node.name] = run.since[node.name]
 			if run.running[node.name] then
 				busy[node.name] = true
 			end
 		end
 	end
+	local current_ones = {}
+	for _, l in leaves(run) do
+		table.insert(current_ones, l.name)
+	end
 	local entries = {}
 	for _, e in run.log do
-		table.insert(entries, { t = e.t, from = e.from, to = e.to, why = e.why })
+		table.insert(entries, { t = e.t, from = e.from, to = e.to, why = e.why, active = e.active })
 	end
 	return {
-		active = active,
+		active = snapshot(run),
+		current = current_ones,
 		since = since,
 		running = busy,
 		clock = run.clock,
@@ -727,6 +918,7 @@ function Base.__states_shape(class: any): any
 				parent = if node.parent and node.parent.name ~= "root" then node.parent.name else nil,
 				initial = node.initial,
 				history = d.history and true or nil,
+				parallel = d.parallel and true or nil,
 				doc = if type(d.doc) == "string" then d.doc else nil,
 				hooks = hooks,
 			})
@@ -773,7 +965,7 @@ end
 
 -- What scripts call.
 
--- Goes to the state named `name` now (from the current one; its exits and enters run).
+-- Goes to the state named `name` now (from the state nearest it: its exits and enters run).
 function Base:go(name: string)
 	local run = running(self)
 	if not run then
@@ -798,7 +990,8 @@ function Base:go(name: string)
 		table.sort(names)
 		error(`no state "{name}" in states ({list(names)})`, 2)
 	end
-	change(self, run, leaf(run), name, "go")
+	run.changes = 0
+	change(self, run, nearest(run, run.m.nodes[name]), name, "go")
 	settle(self, run)
 end
 
@@ -808,7 +1001,8 @@ function Base:trigger(event: string, ...: any): boolean
 	return (self :: any):__states_event(event, ...)
 end
 
--- Whether the state named `name` is active (the current one or a group around it).
+-- Whether the state named `name` is active (the current one, a group around it, or with
+-- parallel regions any region's).
 function Base:in_state(name: string): boolean
 	local run = running(self)
 	return run ~= nil and is_active(run, name)
@@ -820,6 +1014,6 @@ function Base:state_time(name: string?): number
 	if not run then
 		return 0
 	end
-	local at = run.since[name or leaf(run).name]
+	local at = run.since[name or current(run).name]
 	return if at then run.clock - at else 0
 end

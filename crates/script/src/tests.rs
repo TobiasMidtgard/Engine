@@ -850,6 +850,29 @@ fn finish_tests(app: &mut App, frames: usize) -> Value {
     );
 }
 
+/// A run started before any script has run (the editor's empty scene: Play, then a test run)
+/// times its tests from the world's clock, not from the new VM's zero: the first test used to
+/// time out at once when the world had been running for longer than its limit.
+#[test]
+fn a_test_run_on_a_fresh_vm_times_from_the_world_clock() {
+    let folder = Folder::new();
+    folder.write(
+        "quick.test.luau",
+        "it('waits a frame', function(t)\n\tt:frames(1)\nend, 2)\n",
+    );
+    let mut app = app_in(&folder.0);
+    // Twelve seconds of world time with nothing scripted: no VM yet.
+    app.update_n(30 * 12);
+    assert!(app.world.get_resource::<ScriptRuntime>().is_none());
+    call_api(&mut app.world, "script.test", json!({})).unwrap();
+    let done = finish_tests(&mut app, 300);
+    assert_eq!(done["passed"], json!(1), "{done:#}");
+    assert!(
+        done["results"][0]["secs"].as_f64().unwrap() < 0.5,
+        "{done:#}"
+    );
+}
+
 const DOOR: &str = r#"
 local Door = {}
 Door.signals = { opened = "by: Entity" }
@@ -1001,6 +1024,18 @@ end)
 /// The test files that ship with the engine pass, in a world with lights and materials.
 #[test]
 fn the_shipped_script_tests_pass() {
+    shipped_tests_pass(1.0 / 30.0);
+}
+
+/// At 4 frames a second too, the world stepping a quarter second a frame (its longest step),
+/// as in the editor's headless screenshot runs: a test that counts on a short state or a
+/// threshold crossing being seen fails there.
+#[test]
+fn the_shipped_script_tests_pass_at_four_frames_a_second() {
+    shipped_tests_pass(0.25);
+}
+
+fn shipped_tests_pass(step_secs: f64) {
     use engine_assets::Assets;
     use engine_render::{MeshRenderer, PointLight, StandardMaterial};
 
@@ -1008,6 +1043,9 @@ fn the_shipped_script_tests_pass() {
     let files = crate::testing::test_files(&shipped);
     assert!(files.len() >= 2, "{files:?}");
     let mut app = app_in(&shipped);
+    app.world
+        .resource_mut::<Time>()
+        .set_source(TimeSource::Manual { step_secs });
     app.world.resource_mut::<ScriptSettings>().hot_reload = false;
     app.insert_resource(Assets::<StandardMaterial>::default());
     app.register_component::<MeshRenderer>("A mesh.")
@@ -1156,6 +1194,12 @@ fn the_showcase_courtyard_builds_and_plays_its_ritual() {
     assert!(errors(&mut app).is_empty(), "{:?}", errors(&mut app));
     let lanterns = eval(&mut app, "#world.find_all('Lantern ')");
     assert_eq!(lanterns, json!(12));
+    // The portcullis's state machine runs; its tour stops' press raises it.
+    let gate = "world.find('Courtyard gate').script.state";
+    assert_eq!(eval(&mut app, gate), json!("closed"));
+    let (name, args) = crate::demo::GATE_PRESS;
+    call_api(&mut app.world, name, serde_json::from_str(args).unwrap()).unwrap();
+    assert_eq!(eval(&mut app, gate), json!("opening"));
     // The swarm: wisps on the actor VMs.
     let wisps = eval(&mut app, "#world.find_all('Wisp ')");
     assert_eq!(wisps, json!(320));
@@ -3429,4 +3473,206 @@ return Spin
     let declared = crate::props::declared(&mut app.world, "typo.luau").unwrap();
     let problem = declared.machine.unwrap().unwrap_err();
     assert_eq!(problem.line, 6, "{problem:?}");
+}
+
+const TURRET: &str = r#"
+local Turret = {}
+Turret.states = {
+	initial = "active",
+	states = {
+		off = { on = { power = "active" } },
+		active = {
+			parallel = true,
+			on = { power = "off" },
+			states = {
+				aim = {
+					initial = "scanning",
+					states = {
+						scanning = { on = { seen = "tracking", alarm = "tracking" } },
+						tracking = { on = { lost = "scanning" } },
+					},
+				},
+				gun = {
+					initial = "ready",
+					states = {
+						ready = { on = { fire = "reloading", alarm = "reloading" } },
+						reloading = { after = { 0.2, "ready" } },
+						jammed = { on = { fix = "ready" } },
+					},
+				},
+			},
+		},
+	},
+}
+function Turret:start()
+	self.trace = {}
+end
+function Turret:enter_active()
+	table.insert(self.trace, "+active")
+end
+function Turret:exit_active()
+	table.insert(self.trace, "-active")
+end
+function Turret:exit_gun()
+	table.insert(self.trace, "-gun")
+end
+return Turret
+"#;
+
+fn turret(app: &mut App, code: &str) -> Value {
+    eval(
+        app,
+        &format!("local t = world.find('Turret').script return {code}"),
+    )
+}
+
+/// A `parallel = true` group runs all its states at once: each region keeps its own state, an
+/// event reaches every region (one event can change both), `after` counts in each, leaving the
+/// group leaves every region and coming back starts each from its first state; `go` changes
+/// only the region of the state it goes to. The log keeps every state active after each
+/// change, so the editor can show the machine as it was.
+#[test]
+fn parallel_states_run_side_by_side() {
+    let folder = Folder::new();
+    folder.write("turret.luau", TURRET);
+    let mut app = app_in(&folder.0);
+    let e = spawn_script(&mut app, "Turret", "turret");
+    app.update_n(2);
+    assert!(errors(&mut app).is_empty(), "{:?}", errors(&mut app));
+    let live = crate::states::live(&app.world, e).unwrap();
+    assert_eq!(
+        live.active,
+        ["active", "aim", "scanning", "gun", "ready"],
+        "document order: a group before its states, regions one after another"
+    );
+    assert_eq!(live.current, ["scanning", "ready"]);
+    assert_eq!(turret(&mut app, "t.state"), json!("scanning"));
+    assert_eq!(turret(&mut app, "t:in_state('ready')"), json!(true));
+
+    // Each region on its own: firing reloads the gun, the aim keeps scanning.
+    send(&mut app, "Turret", "fire");
+    app.update();
+    assert_eq!(turret(&mut app, "t:in_state('reloading')"), json!(true));
+    assert_eq!(turret(&mut app, "t:in_state('scanning')"), json!(true));
+    for _ in 0..12 {
+        app.update();
+    }
+    assert_eq!(
+        turret(&mut app, "t:in_state('ready')"),
+        json!(true),
+        "after 0.2 s"
+    );
+
+    // One event, both regions.
+    send(&mut app, "Turret", "alarm");
+    app.update();
+    let live = crate::states::live(&app.world, e).unwrap();
+    assert_eq!(live.current, ["tracking", "reloading"]);
+    let alarms: Vec<&str> = live
+        .log
+        .iter()
+        .filter(|c| c.why == "alarm")
+        .map(|c| c.to.as_str())
+        .collect();
+    assert_eq!(alarms, ["tracking", "reloading"]);
+
+    // `go` changes only its region.
+    eval(&mut app, "world.find('Turret').script:go('jammed')");
+    let live = crate::states::live(&app.world, e).unwrap();
+    assert_eq!(live.current, ["tracking", "jammed"]);
+
+    // Leaving the group leaves both regions; back, each starts from its first state.
+    send(&mut app, "Turret", "power");
+    app.update();
+    assert_eq!(turret(&mut app, "t.state"), json!("off"));
+    assert_eq!(turret(&mut app, "t:in_state('aim')"), json!(false));
+    send(&mut app, "Turret", "power");
+    app.update();
+    let live = crate::states::live(&app.world, e).unwrap();
+    assert_eq!(live.current, ["scanning", "ready"]);
+    assert_eq!(
+        turret(&mut app, "table.concat(t.trace, ' ')"),
+        json!("+active -gun -active +active")
+    );
+
+    // The machine as it was after the alarm.
+    let machine = crate::props::declared(&mut app.world, "turret.luau")
+        .unwrap()
+        .machine
+        .unwrap()
+        .unwrap();
+    assert!(machine.state("active").unwrap().parallel);
+    let k = live.log.iter().position(|c| c.why == "alarm").unwrap() + 1;
+    let then = live.as_of(k, &machine);
+    assert_eq!(then.current, ["tracking", "reloading"]);
+    assert_eq!(then.clock, live.log[k].t);
+    assert!(errors(&mut app).is_empty(), "{:?}", errors(&mut app));
+}
+
+/// A breakpoint on a state's entry or exit is reached when the machine enters or leaves it: the
+/// runtime hands the editor which entity, which state and why.
+#[test]
+fn state_breakpoints_are_reached() {
+    let folder = Folder::new();
+    folder.write("turret.luau", TURRET);
+    let mut app = app_in(&folder.0);
+    let e = spawn_script(&mut app, "Turret", "turret");
+    app.update_n(2);
+    {
+        let mut b = app.world.resource_mut::<crate::states::StateBreakpoints>();
+        b.set("turret.luau", "reloading", false, true);
+        b.set("turret.luau", "tracking", true, true);
+    }
+    app.update();
+    send(&mut app, "Turret", "fire");
+    send(&mut app, "Turret", "seen");
+    app.update();
+    send(&mut app, "Turret", "lost");
+    app.update();
+    let hits = std::mem::take(
+        &mut app
+            .world
+            .resource_mut::<crate::states::StateBreakpoints>()
+            .hits,
+    );
+    let seen: Vec<(Entity, &str, &str, &str)> = hits
+        .iter()
+        .map(|h| (h.entity, h.kind.as_str(), h.state.as_str(), h.why.as_str()))
+        .collect();
+    assert_eq!(
+        seen,
+        [
+            (e, "enter", "reloading", "fire"),
+            (e, "exit", "tracking", "lost")
+        ]
+    );
+    assert_eq!(hits[0].path, "turret.luau");
+    // Cleared: no more.
+    app.world
+        .resource_mut::<crate::states::StateBreakpoints>()
+        .set("turret.luau", "reloading", false, false);
+    app.update_n(10);
+    send(&mut app, "Turret", "fire");
+    app.update();
+    assert!(
+        app.world
+            .resource::<crate::states::StateBreakpoints>()
+            .hits
+            .is_empty()
+    );
+
+    // A parallel group can't say which state starts: they all do.
+    folder.write(
+        "bad.luau",
+        "local Bad = {}\nBad.states = {\n\tstates = {\n\t\tboth = { parallel = true, initial = \"a\", states = { a = {}, b = {} } },\n\t},\n}\nreturn Bad\n",
+    );
+    spawn_script(&mut app, "Bad", "bad");
+    app.update_n(2);
+    let errs = errors(&mut app);
+    assert!(
+        errs.iter().any(|e| e.contains(
+            "state both is parallel: all its states start together, so it has no initial"
+        )),
+        "{errs:?}"
+    );
 }

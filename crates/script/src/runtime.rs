@@ -251,6 +251,9 @@ pub struct ScriptRuntime {
     next_poll: Option<Instant>,
     /// Milliseconds the scripts took last frame.
     pub(crate) frame_ms: f32,
+    /// The editor's state breakpoints as last handed to the machines, and their version.
+    breaks: BTreeMap<String, crate::states::Breaks>,
+    breaks_version: u64,
     /// Interact and contact messages read so far.
     interact_cursor: Option<bevy_ecs::message::MessageCursor<engine_world::Interact>>,
     contact_cursor: Option<bevy_ecs::message::MessageCursor<engine_world::physics::ContactEvent>>,
@@ -340,6 +343,7 @@ impl ScriptRuntime {
             "__script_base",
             "__task_spawn",
             "__task_spawn_as",
+            "__states_hit",
             "__task_delay",
             "__task_cancel",
             "__script_stopped",
@@ -364,6 +368,8 @@ impl ScriptRuntime {
             tasks: Vec::new(),
             next_poll: None,
             frame_ms: 0.0,
+            breaks: BTreeMap::new(),
+            breaks_version: 0,
             interact_cursor: None,
             contact_cursor: None,
             reloads: 0,
@@ -538,7 +544,9 @@ impl ScriptRuntime {
             return;
         }
         self.route_messages();
+        self.sync_breaks(world, settings);
         self.run_serial(world, settings);
+        self.hand_over_hits(world);
         for actor in &mut self.actors {
             actor.run_serial(world, settings);
         }
@@ -1222,6 +1230,77 @@ impl ScriptRuntime {
         }
     }
 
+    /// The editor's state breakpoints, to every machine of the scripts they are for (when they
+    /// change; a machine that starts later gets them in `start_instance`).
+    fn sync_breaks(&mut self, world: &World, settings: &ScriptSettings) {
+        let Some(b) = world.get_resource::<crate::states::StateBreakpoints>() else {
+            return;
+        };
+        if b.version == self.breaks_version {
+            return;
+        }
+        self.breaks_version = b.version;
+        self.breaks = b.by_path.clone();
+        let with_states: Vec<Entity> = self
+            .instances
+            .iter()
+            .filter(|(_, i)| i.hooks.states && i.started)
+            .map(|(e, _)| *e)
+            .collect();
+        for e in with_states {
+            self.give_breaks(e, settings);
+        }
+    }
+
+    fn give_breaks(&mut self, e: Entity, settings: &ScriptSettings) {
+        let Some(path) = self.instances.get(&e).map(|i| i.path.clone()) else {
+            return;
+        };
+        let table = (|| -> mlua::Result<Value> {
+            let Some(b) = self.breaks.get(&path) else {
+                return Ok(Value::Nil);
+            };
+            let t = self.lua.create_table()?;
+            for (kind, names) in [("enter", &b.enter), ("exit", &b.exit)] {
+                let set = self.lua.create_table()?;
+                for n in names {
+                    set.raw_set(n.as_str(), true)?;
+                }
+                t.raw_set(kind, set)?;
+            }
+            Ok(Value::Table(t))
+        })()
+        .unwrap_or(Value::Nil);
+        self.call_hook(e, "__states_breaks", table, settings);
+    }
+
+    /// Breakpoints reached this frame, to [`crate::states::StateBreakpoints::hits`].
+    fn hand_over_hits(&mut self, world: &mut World) {
+        let hits = std::mem::take(&mut shared(&self.lua).state_hits);
+        if hits.is_empty() {
+            return;
+        }
+        let t = shared(&self.lua).world_secs;
+        let hits: Vec<crate::states::Hit> = hits
+            .into_iter()
+            .map(|(entity, kind, state, why)| crate::states::Hit {
+                entity,
+                path: self
+                    .instances
+                    .get(&entity)
+                    .map(|i| i.path.clone())
+                    .unwrap_or_default(),
+                kind,
+                state,
+                why,
+                t,
+            })
+            .collect();
+        if let Some(mut b) = world.get_resource_mut::<crate::states::StateBreakpoints>() {
+            b.hits.extend(hits);
+        }
+    }
+
     fn start_instance(&mut self, e: Entity, settings: &ScriptSettings) {
         let Some(i) = self.instances.get_mut(&e) else {
             return;
@@ -1230,6 +1309,9 @@ impl ScriptRuntime {
         if !i.hooks.start {
             if i.hooks.states {
                 let clock = i.clock;
+                if self.breaks.contains_key(&i.path) {
+                    self.give_breaks(e, settings);
+                }
                 self.call_hook(e, "__states_start", clock, settings);
             }
             return;
@@ -1259,6 +1341,9 @@ impl ScriptRuntime {
         self.adopt_new_tasks();
         // The state machine starts once `start` has set things up (or reached its first wait).
         if states && let Some(clock) = self.instances.get(&e).map(|i| i.clock) {
+            if self.breaks.contains_key(&path) {
+                self.give_breaks(e, settings);
+            }
             self.call_hook(e, "__states_start", clock, settings);
         }
     }
@@ -2797,6 +2882,16 @@ fn install_tasks(lua: &Lua) -> mlua::Result<()> {
             }
             Ok(thread)
         })?,
+    )?;
+    // A state breakpoint reached (`states.luau`): the runner hands it to the editor.
+    g.set(
+        "__states_hit",
+        lua.create_function(
+            |lua, (entity, kind, state, why): (EntityRef, String, String, String)| {
+                shared(lua).state_hits.push((entity.0, kind, state, why));
+                Ok(())
+            },
+        )?,
     )?;
     // A task of `owner`'s script, whoever starts it: a state's enter task belongs to the
     // script whose state it is (its clock, stopped with it) even when a test or another

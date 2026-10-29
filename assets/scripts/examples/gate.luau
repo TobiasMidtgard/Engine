@@ -108,13 +108,14 @@ function Gate:shine(color: Vec3, level: number)
 	self.light:set("PointLight", { color = color, intensity_lm = 600 * level })
 end
 
--- Someone under it: the blocker within a meter of the opening.
+-- Someone under it: the blocker within a meter of the opening (in the gate's own frame, so a
+-- turned gate works too).
 function Gate:blocked(): boolean
 	local player = world.find(self.props.blocker)
 	if not player then
 		return false
 	end
-	local d = player.position - self.entity.position
+	local d = self.entity.rotation:inverse():rotate(player.position - self.entity.position)
 	return math.abs(d.x) < self.props.width / 2 and math.abs(d.z) < 1
 end
 

@@ -21,6 +21,8 @@ pub struct State {
     pub initial: Option<String>,
     /// For a group: coming back resumes the state it was last in.
     pub history: bool,
+    /// For a group: all its states run at once (regions), not one after another.
+    pub parallel: bool,
     pub doc: String,
     /// Which of `enter`, `update`, `exit` it has.
     pub hooks: Vec<String>,
@@ -157,6 +159,7 @@ impl Machine {
                 parent: text(&s["parent"]),
                 initial: text(&s["initial"]),
                 history: s["history"].as_bool().unwrap_or(false),
+                parallel: s["parallel"].as_bool().unwrap_or(false),
                 doc: text(&s["doc"]).unwrap_or_default(),
                 hooks: s["hooks"]
                     .as_array()
@@ -215,11 +218,13 @@ impl Machine {
         ) -> Option<String> {
             let kids = d.get("states").and_then(Json::as_object);
             let names: Vec<&String> = kids.map(|k| k.keys().collect()).unwrap_or_default();
+            let parallel = d["parallel"].as_bool().unwrap_or(false);
             let initial = d["initial"]
                 .as_str()
                 .map(str::to_string)
-                .or_else(|| (names.len() == 1).then(|| names[0].clone()));
-            if !names.is_empty() {
+                .or_else(|| (names.len() == 1).then(|| names[0].clone()))
+                .filter(|_| !parallel);
+            if !names.is_empty() && !parallel {
                 match &initial {
                     Some(i) if names.contains(&i) => {}
                     Some(i) => problems.push(format!(
@@ -239,6 +244,7 @@ impl Machine {
                     name: k.clone(),
                     parent: name.map(str::to_string),
                     history: kd["history"].as_bool().unwrap_or(false),
+                    parallel: kd["parallel"].as_bool().unwrap_or(false),
                     doc: kd["doc"].as_str().unwrap_or_default().to_string(),
                     ..Default::default()
                 });
@@ -463,13 +469,18 @@ pub struct Change {
     pub to: String,
     /// `interact by Player`, `after 4 s`, `done`, `when blocked`, `go`, `start`, `reload`.
     pub why: String,
+    /// Every state active after it, outermost first.
+    pub active: Vec<String>,
 }
 
 /// A running machine.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Live {
-    /// Outermost first; the last is the current state.
+    /// Outermost first (a group before the states in it).
     pub active: Vec<String>,
+    /// The active states with no active state inside: the current state, or one per region of
+    /// a parallel group.
+    pub current: Vec<String>,
     /// When each active state started (script clock).
     pub since: BTreeMap<String, f64>,
     /// Active states whose enter task is still going.
@@ -483,9 +494,62 @@ pub struct Live {
 }
 
 impl Live {
-    /// The current (innermost) state.
+    /// The current (innermost) state; with parallel regions, the first region's.
     pub fn current(&self) -> Option<&str> {
-        self.active.last().map(String::as_str)
+        self.current
+            .first()
+            .or(self.active.last())
+            .map(String::as_str)
+    }
+
+    /// Whether `name` is a current state (innermost, in any region).
+    pub fn is_current(&self, name: &str) -> bool {
+        if self.current.is_empty() {
+            return self.active.last().is_some_and(|a| a == name);
+        }
+        self.current.iter().any(|c| c == name)
+    }
+
+    /// The machine as it was right after change `k` of the log (PlayMaker's Debug Flow, the
+    /// StateTree debugger's timeline): its active states, when each started, that change last.
+    pub fn as_of(&self, k: usize, m: &Machine) -> Live {
+        let k = k.min(self.log.len().saturating_sub(1));
+        let log: Vec<Change> = self.log.iter().take(k + 1).cloned().collect();
+        let Some(at) = log.last() else {
+            return self.clone();
+        };
+        let mut since = BTreeMap::new();
+        let mut before: &[String] = &[];
+        // Each state's time from the change that entered it (one that stayed active through a
+        // change, as a group around both states does, keeps its time).
+        for c in &log {
+            for name in &c.active {
+                if !before.contains(name) || *name == c.to {
+                    since.insert(name.clone(), c.t);
+                }
+            }
+            since.retain(|name, _| c.active.contains(name));
+            before = &c.active;
+        }
+        let current = at
+            .active
+            .iter()
+            .filter(|a| {
+                !at.active
+                    .iter()
+                    .any(|b| m.state(b).and_then(|s| s.parent.as_deref()) == Some(a.as_str()))
+            })
+            .cloned()
+            .collect();
+        Live {
+            active: at.active.clone(),
+            current,
+            since,
+            running: BTreeSet::new(),
+            clock: at.t,
+            log,
+            history: self.history.clone(),
+        }
     }
 
     /// Seconds since the active state `name` started.
@@ -510,6 +574,7 @@ impl Live {
         };
         Live {
             active: names(&v["active"]),
+            current: names(&v["current"]),
             since: map(&v["since"])
                 .into_iter()
                 .filter_map(|(k, t)| Some((k, t.as_f64()?)))
@@ -526,6 +591,7 @@ impl Live {
                     from: c["from"].as_str().unwrap_or_default().to_string(),
                     to: c["to"].as_str().unwrap_or_default().to_string(),
                     why: c["why"].as_str().unwrap_or_default().to_string(),
+                    active: names(&c["active"]),
                 })
                 .collect(),
             history: map(&v["history"])
@@ -534,6 +600,73 @@ impl Live {
                 .collect(),
         }
     }
+}
+
+/// Breakpoints on states, by script path, as the editor sets them (PlayMaker's "Toggle
+/// Breakpoint", the StateTree debugger's "Break on Enter/Exit"). A machine that reaches one adds
+/// a [`Hit`]; the editor pauses the game on it. Change `by_path` through [`Self::set`] so the
+/// runtime sees the new ones.
+#[derive(Resource, Debug, Clone, Default)]
+pub struct StateBreakpoints {
+    pub by_path: BTreeMap<String, Breaks>,
+    /// Bumped by every change of `by_path`.
+    pub version: u64,
+    /// Reached since the editor last took them.
+    pub hits: Vec<Hit>,
+}
+
+/// One script's breakpoints: the states whose entry, and whose exit, pause the game.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Breaks {
+    pub enter: BTreeSet<String>,
+    pub exit: BTreeSet<String>,
+}
+
+impl Breaks {
+    pub fn is_empty(&self) -> bool {
+        self.enter.is_empty() && self.exit.is_empty()
+    }
+}
+
+impl StateBreakpoints {
+    /// Sets (`on`) or clears the breakpoint on `state`'s entry (`exit`: its exit) in `path`.
+    pub fn set(&mut self, path: &str, state: &str, exit: bool, on: bool) {
+        let breaks = self.by_path.entry(path.to_string()).or_default();
+        let set = if exit {
+            &mut breaks.exit
+        } else {
+            &mut breaks.enter
+        };
+        let changed = if on {
+            set.insert(state.to_string())
+        } else {
+            set.remove(state)
+        };
+        if breaks.is_empty() {
+            self.by_path.remove(path);
+        }
+        if changed {
+            self.version += 1;
+        }
+    }
+
+    pub fn of(&self, path: &str) -> Option<&Breaks> {
+        self.by_path.get(path)
+    }
+}
+
+/// A breakpoint reached.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Hit {
+    pub entity: Entity,
+    pub path: String,
+    /// `enter` or `exit`.
+    pub kind: String,
+    pub state: String,
+    /// What changed the state (`interact by Player`, `after hold (4 s)`, ...).
+    pub why: String,
+    /// World seconds.
+    pub t: f64,
 }
 
 /// The state machine running on `e` (None: no script with states runs there, or it hasn't
@@ -573,7 +706,7 @@ pub(crate) fn describe(world: &mut World, e: Entity) -> Result<Json, String> {
         .map(|s| {
             serde_json::json!({
                 "name": s.name, "parent": s.parent, "initial": s.initial,
-                "history": s.history, "hooks": s.hooks, "line": s.line,
+                "history": s.history, "parallel": s.parallel, "hooks": s.hooks, "line": s.line,
             })
         })
         .collect();
@@ -592,9 +725,10 @@ pub(crate) fn describe(world: &mut World, e: Entity) -> Result<Json, String> {
         "states": states,
         "transitions": transitions,
         "active": live.as_ref().map(|l| l.active.clone()),
+        "current": live.as_ref().map(|l| l.current.clone()),
         "state_secs": live.as_ref().and_then(|l| l.current().and_then(|c| l.secs_in(c))),
         "log": live.as_ref().map(|l| l.log.iter().map(|c| serde_json::json!({
-            "t": c.t, "from": c.from, "to": c.to, "why": c.why,
+            "t": c.t, "from": c.from, "to": c.to, "why": c.why, "active": c.active,
         })).collect::<Vec<_>>()),
     }))
 }

@@ -5,29 +5,23 @@
 //! state graphs and Unreal's StateTree debugger show them. The Scripts tab, the Details panel
 //! and the Graphs tab's States view draw with it.
 
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet};
 
 use egui::{Align2, Color32, FontId, Painter, Pos2, Rect, Shape, Stroke, StrokeKind, Vec2};
-use engine_script::states::{Live, Machine, Transition, Trigger};
+use engine_script::diagram::{self as geo, Area, GROUP_HEAD};
+use engine_script::states::{Breaks, Live, Machine};
 
 use crate::theme;
 
 /// A state's box (diagram units: pixels at zoom 1).
-pub const STATE_W: f32 = 156.0;
-pub const STATE_H: f32 = 58.0;
-const GROUP_PAD: f32 = 22.0;
-const GROUP_HEAD: f32 = 30.0;
-const GAP_X: f32 = 96.0;
-const GAP_Y: f32 = 78.0;
-/// Room between transitions that share two states.
-const BEND: f32 = 40.0;
-/// World seconds the last change glows.
-const GLOW_SECS: f64 = 1.6;
+pub use engine_script::diagram::{STATE_H, STATE_W};
 
 const BOX: Color32 = Color32::from_rgb(0x2b, 0x2d, 0x32);
 const GROUP: Color32 = Color32::from_rgb(0x1f, 0x22, 0x26);
 const GROUP_EDGE: Color32 = Color32::from_rgb(0x3a, 0x3e, 0x46);
 const CHIP: Color32 = Color32::from_rgb(0x17, 0x18, 0x1b);
+/// Breakpoints' red.
+pub const BREAK: Color32 = Color32::from_rgb(0xe5, 0x48, 0x3c);
 
 /// What a transition's trigger family is drawn in.
 pub fn kind_color(kind: &str) -> Color32 {
@@ -57,216 +51,54 @@ pub struct Placed {
     pub bounds: Rect,
 }
 
-/// Lays the machine out: each group's states round a ring in the order its transitions visit
-/// them from the first (a cycle reads clockwise), groups sized to hold theirs. States in `at`
-/// stay where it puts them when every state that isn't a group has a place there.
+fn pos(v: geo::Vec2) -> Pos2 {
+    Pos2::new(v.x, v.y)
+}
+
+fn rect(a: Area) -> Rect {
+    Rect::from_min_max(pos(a.min), pos(a.max))
+}
+
+fn area(r: Rect) -> Area {
+    Area::from_min_max(
+        geo::Vec2::new(r.min.x, r.min.y),
+        geo::Vec2::new(r.max.x, r.max.y),
+    )
+}
+
+/// Lays the machine out ([`geo::layout`], which [`engine_script::state_board`]'s boards share):
+/// each group's states round a ring in the order its transitions visit them, a parallel group's
+/// regions in a row. States in `at` stay where it puts them when every state that isn't a group
+/// has a place there.
 pub fn layout(m: &Machine, at: &BTreeMap<String, Pos2>) -> Placed {
-    let leaves: Vec<&str> = m
-        .states
+    let at = at
         .iter()
-        .filter(|s| !m.is_group(&s.name))
-        .map(|s| s.name.as_str())
+        .map(|(k, p)| (k.clone(), geo::Vec2::new(p.x, p.y)))
         .collect();
-    let mut rects = BTreeMap::new();
-    if !leaves.is_empty() && leaves.iter().all(|l| at.contains_key(*l)) {
-        for l in &leaves {
-            rects.insert(
-                l.to_string(),
-                Rect::from_min_size(at[*l], Vec2::new(STATE_W, STATE_H)),
-            );
-        }
-        // Groups hold theirs, innermost first.
-        let mut groups: Vec<(usize, &str)> = m
-            .states
+    let placed = geo::layout(m, &at);
+    Placed {
+        rects: placed
+            .rects
+            .into_iter()
+            .map(|(k, a)| (k, rect(a)))
+            .collect(),
+        any: placed.any.map(rect),
+        bounds: rect(placed.bounds),
+    }
+}
+
+/// The curves of the machine's transitions, in its order, as points (diagram units).
+fn paths(m: &Machine, placed: &Placed) -> Vec<Option<geo::Route>> {
+    let placed = geo::Placed {
+        rects: placed
+            .rects
             .iter()
-            .filter(|s| m.is_group(&s.name))
-            .map(|s| (depth(m, &s.name), s.name.as_str()))
-            .collect();
-        groups.sort_by_key(|g| std::cmp::Reverse(g.0));
-        for (_, g) in groups {
-            let inner = m
-                .children(Some(g))
-                .filter_map(|c| rects.get(&c.name).copied())
-                .reduce(|a, b| a.union(b));
-            if let Some(inner) = inner {
-                rects.insert(
-                    g.to_string(),
-                    Rect::from_min_max(
-                        inner.min - Vec2::new(GROUP_PAD, GROUP_PAD + GROUP_HEAD),
-                        inner.max + Vec2::splat(GROUP_PAD),
-                    ),
-                );
-            }
-        }
-    } else {
-        let (_, placed) = arrange(m, None);
-        rects = placed.into_iter().collect();
-    }
-    let mut bounds = rects
-        .values()
-        .copied()
-        .reduce(|a, b| a.union(b))
-        .unwrap_or(Rect::from_min_size(Pos2::ZERO, Vec2::new(STATE_W, STATE_H)));
-    let any =
-        m.transitions.iter().any(|t| t.from.is_none()).then(|| {
-            Rect::from_min_size(bounds.min + Vec2::new(-8.0, -92.0), Vec2::new(112.0, 34.0))
-        });
-    if let Some(a) = any {
-        bounds = bounds.union(a);
-    }
-    Placed { rects, any, bounds }
-}
-
-fn depth(m: &Machine, name: &str) -> usize {
-    let mut d = 0;
-    let mut at = m.state(name).and_then(|s| s.parent.clone());
-    while let Some(p) = at {
-        d += 1;
-        at = m.state(&p).and_then(|s| s.parent.clone());
-    }
-    d
-}
-
-/// The child of `group` that `name` is in (itself, or a group around it).
-fn sibling_of<'a>(m: &'a Machine, group: Option<&str>, name: &'a str) -> Option<&'a str> {
-    let mut at = name;
-    loop {
-        let s = m.state(at)?;
-        if s.parent.as_deref() == group {
-            return Some(&s.name);
-        }
-        at = s.parent.as_deref()?;
-    }
-}
-
-/// Lays out `group`'s states (None: the outer level): its size and their rects, from (0, 0).
-fn arrange(m: &Machine, group: Option<&str>) -> (Vec2, Vec<(String, Rect)>) {
-    let kids: Vec<&str> = m.children(group).map(|s| s.name.as_str()).collect();
-    if kids.is_empty() {
-        return (Vec2::new(STATE_W, STATE_H), Vec::new());
-    }
-    // Visit order: from the first state along the transitions between these states.
-    let first = match group {
-        Some(g) => m.state(g).and_then(|s| s.initial.clone()),
-        None => Some(m.initial.clone()),
-    }
-    .filter(|f| kids.contains(&f.as_str()))
-    .unwrap_or_else(|| kids[0].to_string());
-    let mut order: Vec<String> = Vec::new();
-    let mut queue = VecDeque::from([first]);
-    let mut seen = BTreeSet::new();
-    while let Some(s) = queue.pop_front() {
-        if !seen.insert(s.clone()) {
-            continue;
-        }
-        order.push(s.clone());
-        for t in &m.transitions {
-            let Some(from) = t.from.as_deref() else {
-                continue;
-            };
-            if sibling_of(m, group, from) == Some(s.as_str())
-                && let Some(to) = sibling_of(m, group, &t.to)
-                && !seen.contains(to)
-            {
-                queue.push_back(to.to_string());
-            }
-        }
-    }
-    for k in &kids {
-        if !seen.contains(*k) {
-            order.push(k.to_string());
-        }
-    }
-    // Each state's size (a group's from its own).
-    let mut inner: BTreeMap<String, Vec<(String, Rect)>> = BTreeMap::new();
-    let sizes: Vec<Vec2> = order
-        .iter()
-        .map(|s| {
-            if m.is_group(s) {
-                let (size, placed) = arrange(m, Some(s));
-                inner.insert(s.clone(), placed);
-                size + Vec2::new(2.0 * GROUP_PAD, 2.0 * GROUP_PAD + GROUP_HEAD)
-            } else {
-                Vec2::new(STATE_W, STATE_H)
-            }
-        })
-        .collect();
-    let cells = ring(order.len());
-    let cols = cells.iter().map(|c| c.0).max().unwrap_or(0) + 1;
-    let rows = cells.iter().map(|c| c.1).max().unwrap_or(0) + 1;
-    let mut widths = vec![0f32; cols];
-    let mut heights = vec![0f32; rows];
-    for (k, (c, r)) in cells.iter().enumerate() {
-        widths[*c] = widths[*c].max(sizes[k].x);
-        heights[*r] = heights[*r].max(sizes[k].y);
-    }
-    let xs: Vec<f32> = widths
-        .iter()
-        .scan(0.0, |x, w| {
-            let at = *x;
-            *x += w + GAP_X;
-            Some(at)
-        })
-        .collect();
-    let ys: Vec<f32> = heights
-        .iter()
-        .scan(0.0, |y, h| {
-            let at = *y;
-            *y += h + GAP_Y;
-            Some(at)
-        })
-        .collect();
-    let mut out = Vec::new();
-    for (k, name) in order.iter().enumerate() {
-        let (c, r) = cells[k];
-        // Centered in its cell.
-        let min = Pos2::new(
-            xs[c] + (widths[c] - sizes[k].x) / 2.0,
-            ys[r] + (heights[r] - sizes[k].y) / 2.0,
-        );
-        let rect = Rect::from_min_size(min, sizes[k]);
-        out.push((name.clone(), rect));
-        if let Some(placed) = inner.remove(name) {
-            let offset = rect.min.to_vec2() + Vec2::new(GROUP_PAD, GROUP_PAD + GROUP_HEAD);
-            out.extend(placed.into_iter().map(|(n, r)| (n, r.translate(offset))));
-        }
-    }
-    let size = Vec2::new(
-        widths.iter().sum::<f32>() + GAP_X * (cols as f32 - 1.0),
-        heights.iter().sum::<f32>() + GAP_Y * (rows as f32 - 1.0),
-    );
-    (size, out)
-}
-
-/// Grid cells (column, row) for `n` states, clockwise round the edge from the top left, then
-/// the middle.
-fn ring(n: usize) -> Vec<(usize, usize)> {
-    let cols = match n {
-        0..=2 => n.max(1),
-        3 | 4 => 2,
-        5 | 6 => 3,
-        7..=9 => 3,
-        _ => 4,
+            .map(|(k, r)| (k.clone(), area(*r)))
+            .collect(),
+        any: placed.any.map(area),
+        bounds: area(placed.bounds),
     };
-    let rows = n.div_ceil(cols);
-    let mut edge = Vec::new();
-    if rows == 1 {
-        edge.extend((0..cols).map(|c| (c, 0)));
-    } else {
-        edge.extend((0..cols).map(|c| (c, 0)));
-        edge.extend((1..rows - 1).map(|r| (cols - 1, r)));
-        edge.extend((0..cols).rev().map(|c| (c, rows - 1)));
-        edge.extend((1..rows - 1).rev().map(|r| (0, r)));
-    }
-    let mut cells: Vec<(usize, usize)> = edge;
-    for r in 1..rows.saturating_sub(1) {
-        for c in 1..cols.saturating_sub(1) {
-            cells.push((c, r));
-        }
-    }
-    cells.truncate(n);
-    // A short last row: its cells as far left as the ring allows.
-    cells
+    geo::paths(m, &placed)
 }
 
 /// Diagram units to screen points: `origin + p * scale`.
@@ -309,142 +141,8 @@ pub struct Diagram<'a> {
     pub selected: Option<&'a Pick>,
     /// A state the pointer is over (drawn lighter).
     pub hovered: Option<&'a Pick>,
-}
-
-/// Where a transition runs: a quadratic curve, or for a loop a cubic.
-enum Path {
-    Quad([Pos2; 3]),
-    Cubic([Pos2; 4]),
-}
-
-impl Path {
-    fn point(&self, t: f32) -> Pos2 {
-        let u = 1.0 - t;
-        match self {
-            Path::Quad([a, b, c]) => {
-                (a.to_vec2() * u * u + b.to_vec2() * 2.0 * u * t + c.to_vec2() * t * t).to_pos2()
-            }
-            Path::Cubic([a, b, c, d]) => (a.to_vec2() * u * u * u
-                + b.to_vec2() * 3.0 * u * u * t
-                + c.to_vec2() * 3.0 * u * t * t
-                + d.to_vec2() * t * t * t)
-                .to_pos2(),
-        }
-    }
-
-    fn points(&self, n: usize) -> Vec<Pos2> {
-        (0..=n).map(|k| self.point(k as f32 / n as f32)).collect()
-    }
-}
-
-/// Where the ray from `r`'s middle along `dir` leaves it.
-fn exit_point(r: Rect, dir: Vec2) -> Pos2 {
-    let c = r.center();
-    let d = if dir.length() < 1e-3 {
-        Vec2::X
-    } else {
-        dir.normalized()
-    };
-    let tx = if d.x.abs() > 1e-4 {
-        (r.width() / 2.0) / d.x.abs()
-    } else {
-        f32::INFINITY
-    };
-    let ty = if d.y.abs() > 1e-4 {
-        (r.height() / 2.0) / d.y.abs()
-    } else {
-        f32::INFINITY
-    };
-    c + d * tx.min(ty)
-}
-
-/// The curves of the machine's transitions, in its order (diagram units).
-fn paths(m: &Machine, placed: &Placed) -> Vec<Option<Path>> {
-    let key = |t: &Transition| t.from.clone().unwrap_or_else(|| "*".into());
-    let rect_of = |name: &str| -> Option<Rect> {
-        if name == "*" {
-            placed.any
-        } else {
-            placed.rects.get(name).copied()
-        }
-    };
-    // Transitions sharing two states fan out.
-    let mut pairs: BTreeMap<(String, String), Vec<usize>> = BTreeMap::new();
-    for (k, t) in m.transitions.iter().enumerate() {
-        let (a, b) = (key(t), t.to.clone());
-        let pair = if a <= b { (a, b) } else { (b, a) };
-        pairs.entry(pair).or_default().push(k);
-    }
-    let mut out: Vec<Option<Path>> = (0..m.transitions.len()).map(|_| None).collect();
-    for ((a, b), list) in pairs {
-        let (Some(ra), Some(rb)) = (rect_of(&a), rect_of(&b)) else {
-            continue;
-        };
-        if a == b {
-            for (i, k) in list.iter().enumerate() {
-                let lift = 46.0 + 26.0 * i as f32;
-                let p0 = Pos2::new(ra.left() + ra.width() * 0.32, ra.top());
-                let p3 = Pos2::new(ra.left() + ra.width() * 0.68, ra.top());
-                out[*k] = Some(Path::Cubic([
-                    p0,
-                    p0 + Vec2::new(-26.0, -lift),
-                    p3 + Vec2::new(26.0, -lift),
-                    p3,
-                ]));
-            }
-            continue;
-        }
-        let along = rb.center() - ra.center();
-        let normal = Vec2::new(-along.y, along.x).normalized();
-        let n = list.len() as f32;
-        for (i, k) in list.iter().enumerate() {
-            let t = &m.transitions[*k];
-            let off = (i as f32 - (n - 1.0) / 2.0) * BEND;
-            let (from, to) = if key(t) == a { (ra, rb) } else { (rb, ra) };
-            let mid = from.center() + (to.center() - from.center()) / 2.0 + normal * off;
-            let p0 = exit_point(from, mid - from.center());
-            let p2 = exit_point(to, mid - to.center());
-            // The control point that makes the curve pass through `mid`.
-            let c = (mid.to_vec2() * 2.0 - (p0.to_vec2() + p2.to_vec2()) / 2.0).to_pos2();
-            out[*k] = Some(Path::Quad([p0, c, p2]));
-        }
-    }
-    out
-}
-
-/// The transition behind the last change in the log, if it is still glowing: its index and how
-/// much (1 down to 0).
-fn glowing(m: &Machine, live: &Live) -> Option<(usize, f32)> {
-    let last = live.log.last()?;
-    let age = live.clock - last.t;
-    if !(0.0..GLOW_SECS).contains(&age) || last.from.is_empty() {
-        return None;
-    }
-    let within = |inner: &str, outer: &str| {
-        let mut at = Some(inner.to_string());
-        while let Some(s) = at {
-            if s == outer {
-                return true;
-            }
-            at = m.state(&s).and_then(|s| s.parent.clone());
-        }
-        false
-    };
-    let fits = |t: &Transition| {
-        let from_ok = t.from.as_deref().is_none_or(|f| within(&last.from, f));
-        let to_ok = within(&last.to, &t.to);
-        let why_ok = match &t.trigger {
-            Trigger::On { event, .. } => {
-                last.why == *event || last.why.starts_with(&format!("{event} by "))
-            }
-            Trigger::After { .. } => last.why.starts_with("after "),
-            Trigger::Done => last.why == "done",
-            Trigger::When(c) => last.why == format!("when {c}"),
-        };
-        from_ok && to_ok && why_ok
-    };
-    let k = m.transitions.iter().position(fits)?;
-    Some((k, (1.0 - age / GLOW_SECS) as f32))
+    /// The script's state breakpoints (a red dot: on entry, a red ring: on exit).
+    pub breaks: Option<&'a Breaks>,
 }
 
 fn text(p: &Painter, at: Pos2, align: Align2, s: &str, size: f32, color: Color32) -> Rect {
@@ -461,14 +159,13 @@ pub fn paint(p: &Painter, d: &Diagram, view: View) -> Vec<(Pick, Rect)> {
         .live
         .map(|l| l.active.iter().map(String::as_str).collect())
         .unwrap_or_default();
-    let current = d.live.and_then(|l| l.current());
-    let glow = d.live.and_then(|l| glowing(m, l));
+    let glow = d.live.map(|l| geo::glowing(m, l)).unwrap_or_default();
     let is_selected = |pick: &Pick| d.selected == Some(pick);
 
     // Groups, outermost first.
     let mut groups: Vec<&engine_script::states::State> =
         m.states.iter().filter(|st| m.is_group(&st.name)).collect();
-    groups.sort_by_key(|g| depth(m, &g.name));
+    groups.sort_by_key(|g| geo::depth(m, &g.name));
     for g in groups {
         let Some(r) = d.placed.rects.get(&g.name).map(|r| view.rect(*r)) else {
             continue;
@@ -498,7 +195,7 @@ pub fn paint(p: &Painter, d: &Diagram, view: View) -> Vec<(Pick, Rect)> {
                 Color32::from_rgb(0x27, 0x2a, 0x30)
             },
         );
-        text(
+        let title = text(
             p,
             head.left_center() + Vec2::new(10.0 * s, 0.0),
             Align2::LEFT_CENTER,
@@ -506,6 +203,35 @@ pub fn paint(p: &Painter, d: &Diagram, view: View) -> Vec<(Pick, Rect)> {
             13.5 * s,
             if on { theme::PLAY } else { theme::TEXT },
         );
+        if g.parallel {
+            // Its regions run at once: dashed lines between them (UML's orthogonal regions).
+            text(
+                p,
+                title.right_center() + Vec2::new(8.0 * s, 0.0),
+                Align2::LEFT_CENTER,
+                "all at once",
+                11.0 * s,
+                theme::TEXT_DIM,
+            );
+            let mut regions: Vec<Rect> = m
+                .children(Some(&g.name))
+                .filter_map(|c| d.placed.rects.get(&c.name).map(|r| view.rect(*r)))
+                .collect();
+            regions.sort_by(|a, b| a.left().total_cmp(&b.left()));
+            for pair in regions.windows(2) {
+                let x = (pair[0].right() + pair[1].left()) / 2.0;
+                p.add(Shape::dashed_line(
+                    &[
+                        Pos2::new(x, head.bottom() + 6.0 * s),
+                        Pos2::new(x, r.bottom() - 6.0 * s),
+                    ],
+                    Stroke::new(1.2, GROUP_EDGE.gamma_multiply(1.6)),
+                    7.0 * s,
+                    5.0 * s,
+                ));
+            }
+        }
+        break_marks(p, d.breaks, &g.name, head, s);
         if g.history {
             let c = head.right_center() - Vec2::new(16.0 * s, 0.0);
             p.circle_stroke(c, 8.5 * s, Stroke::new(1.2, theme::TEXT_DIM));
@@ -534,13 +260,7 @@ pub fn paint(p: &Painter, d: &Diagram, view: View) -> Vec<(Pick, Rect)> {
     }
 
     // Start markers: a dot and an arrow into each first state (UML's initial state).
-    let mut firsts: Vec<(Option<&str>, &str)> = vec![(None, m.initial.as_str())];
-    for st in &m.states {
-        if let Some(i) = &st.initial {
-            firsts.push((Some(&st.name), i));
-        }
-    }
-    for (_, first) in firsts {
+    for first in geo::firsts(m) {
         let Some(r) = d.placed.rects.get(first).map(|r| view.rect(*r)) else {
             continue;
         };
@@ -555,11 +275,16 @@ pub fn paint(p: &Painter, d: &Diagram, view: View) -> Vec<(Pick, Rect)> {
     let paths = paths(m, d.placed);
     let mut chips: Vec<(usize, Pos2, Vec2)> = Vec::new();
     for (k, t) in m.transitions.iter().enumerate() {
-        let Some(path) = &paths[k] else { continue };
+        let Some(route) = &paths[k] else { continue };
+        let path = &route.path;
         let color = kind_color(t.kind());
-        let pts: Vec<Pos2> = path.points(24).into_iter().map(|q| view.at(q)).collect();
+        let pts: Vec<Pos2> = path
+            .points(24)
+            .into_iter()
+            .map(|q| view.at(pos(q)))
+            .collect();
         let from_on = t.from.as_deref().is_none_or(|f| active.contains(f));
-        let lit = glow.filter(|(g, _)| *g == k).map(|(_, a)| a);
+        let lit = glow.iter().find(|(g, _)| *g == k).map(|(_, a)| *a);
         let selected = is_selected(&Pick::Transition(k));
         let base = if selected {
             theme::ACCENT
@@ -584,11 +309,11 @@ pub fn paint(p: &Painter, d: &Diagram, view: View) -> Vec<(Pick, Rect)> {
             // A spark runs along it as it fires.
             let along = (1.0 - a) * 2.4;
             if along < 1.0 {
-                let q = view.at(path.point(along.min(1.0)));
+                let q = view.at(pos(path.point(along.min(1.0))));
                 p.circle_filled(q, 4.5 * s.max(0.6), Color32::WHITE.gamma_multiply(0.9));
             }
         }
-        let mid = view.at(path.point(0.5));
+        let mid = view.at(pos(path.point(route.label)));
         chips.push((k, mid, dir));
     }
 
@@ -598,15 +323,9 @@ pub fn paint(p: &Painter, d: &Diagram, view: View) -> Vec<(Pick, Rect)> {
             continue;
         };
         let on = active.contains(st.name.as_str());
-        let is_current = current == Some(st.name.as_str());
+        let is_current = d.live.is_some_and(|l| l.is_current(&st.name));
         let pick = Pick::State(st.name.clone());
-        let just = d.live.and_then(|l| {
-            let last = l.log.last()?;
-            let age = l.clock - last.t;
-            (last.to == st.name && (0.0..GLOW_SECS).contains(&age))
-                .then_some((1.0 - age / GLOW_SECS) as f32)
-        });
-        if let Some(a) = just {
+        if let Some(a) = d.live.and_then(|l| geo::just_entered(l, &st.name)) {
             p.rect_filled(
                 r.expand(6.0 * a * s),
                 12.0 * s,
@@ -657,6 +376,7 @@ pub fn paint(p: &Painter, d: &Diagram, view: View) -> Vec<(Pick, Rect)> {
             11.5 * s,
             color,
         );
+        break_marks(p, d.breaks, &st.name, r, s);
         if on && let Some(secs) = d.live.and_then(|l| l.secs_in(&st.name)) {
             text(
                 p,
@@ -694,11 +414,7 @@ pub fn paint(p: &Painter, d: &Diagram, view: View) -> Vec<(Pick, Rect)> {
             ),
             StrokeKind::Inside,
         );
-        if let (Trigger::After { secs, .. }, Some(from), Some(l)) = (&t.trigger, &t.from, d.live)
-            && let Some(inside) = l.secs_in(from)
-            && *secs > 0.0
-        {
-            let f = (inside / secs).clamp(0.0, 1.0) as f32;
+        if let Some(f) = d.live.and_then(|l| geo::timer(t, l)) {
             let bar = Rect::from_min_size(
                 chip.left_bottom() + Vec2::new(2.0, -3.0),
                 Vec2::new((chip.width() - 4.0) * f, 2.0),
@@ -709,6 +425,28 @@ pub fn paint(p: &Painter, d: &Diagram, view: View) -> Vec<(Pick, Rect)> {
         hits.push((Pick::Transition(k), chip));
     }
     hits
+}
+
+/// A state's breakpoints on its box's top left corner: a red dot for its entry, a red ring for
+/// its exit.
+fn break_marks(p: &Painter, breaks: Option<&Breaks>, name: &str, r: Rect, s: f32) {
+    let Some(b) = breaks else {
+        return;
+    };
+    let at = r.left_top() + Vec2::new(1.0, 1.0);
+    if b.enter.contains(name) {
+        p.circle_filled(at, 6.5 * s.max(0.6), BREAK);
+        p.circle_stroke(
+            at,
+            6.5 * s.max(0.6),
+            Stroke::new(1.0, Color32::from_rgb(0x2a, 0x0c, 0x0a)),
+        );
+    }
+    if b.exit.contains(name) {
+        let at = at + Vec2::new(16.0 * s.max(0.6), 0.0);
+        p.circle_filled(at, 6.0 * s.max(0.6), Color32::from_rgb(0x2a, 0x0c, 0x0a));
+        p.circle_stroke(at, 5.0 * s.max(0.6), Stroke::new(2.2, BREAK));
+    }
 }
 
 fn arrow_head(p: &Painter, tip: Pos2, dir: Vec2, size: f32, color: Color32) {
@@ -742,153 +480,78 @@ pub fn hit(hits: &[(Pick, Rect)], pointer: Pos2) -> Option<Pick> {
         .map(|(p, _)| p.clone())
 }
 
-/// The log of changes, newest first: the time, from, to and why.
-pub fn log_rows(ui: &mut egui::Ui, live: &Live, rows: usize) {
+/// The log of changes, newest first: the time, from, to and why. `shown` (an index in the log)
+/// is highlighted; returns the row clicked, to show the machine as it was after it.
+pub fn log_rows(
+    ui: &mut egui::Ui,
+    live: &Live,
+    rows: usize,
+    shown: Option<usize>,
+) -> Option<usize> {
     if live.log.is_empty() {
         ui.label(theme::dim("No changes yet."));
-        return;
+        return None;
     }
-    for c in live.log.iter().rev().take(rows) {
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 6.0;
-            ui.label(
-                egui::RichText::new(format!("{:>7.2} s", c.t))
-                    .monospace()
-                    .color(theme::TEXT_DIM),
+    let mut clicked = None;
+    let n = live.log.len();
+    for (k, c) in live.log.iter().enumerate().rev().take(rows) {
+        let under = ui.painter().add(Shape::Noop);
+        let row = ui
+            .horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 6.0;
+                ui.label(
+                    egui::RichText::new(format!("{:>7.2} s", c.t))
+                        .monospace()
+                        .color(theme::TEXT_DIM),
+                );
+                if c.from.is_empty() {
+                    ui.label(egui::RichText::new("start").color(theme::TEXT_DIM));
+                } else {
+                    ui.label(egui::RichText::new(&c.from).color(theme::TEXT));
+                }
+                ui.label(egui::RichText::new("➡").color(theme::TEXT_DIM));
+                ui.label(egui::RichText::new(&c.to).color(theme::PLAY).strong());
+                let color = kind_color(geo::why_kind(&c.why));
+                ui.label(egui::RichText::new(&c.why).color(color));
+                ui.allocate_space(Vec2::new(ui.available_width(), 0.0));
+            })
+            .response;
+        let row = ui.interact(
+            row.rect,
+            ui.id().with(("state log row", k)),
+            egui::Sense::click(),
+        );
+        if shown == Some(k) {
+            ui.painter().set(
+                under,
+                egui::epaint::RectShape::filled(
+                    row.rect.expand(2.0),
+                    3.0,
+                    theme::ACCENT.gamma_multiply(0.22),
+                ),
             );
-            if c.from.is_empty() {
-                ui.label(egui::RichText::new("start").color(theme::TEXT_DIM));
-            } else {
-                ui.label(egui::RichText::new(&c.from).color(theme::TEXT));
-            }
-            ui.label(egui::RichText::new("➡").color(theme::TEXT_DIM));
-            ui.label(egui::RichText::new(&c.to).color(theme::PLAY).strong());
-            let kind = c.why.split_whitespace().next().unwrap_or("");
-            let color = match kind {
-                "after" => kind_color("after"),
-                "done" => kind_color("done"),
-                "when" => kind_color("when"),
-                "go" | "start" | "reload" => theme::TEXT_DIM,
-                _ => kind_color("on"),
-            };
-            ui.label(egui::RichText::new(&c.why).color(color));
-        });
+        } else if row.hovered() {
+            ui.painter().set(
+                under,
+                egui::epaint::RectShape::filled(row.rect.expand(2.0), 3.0, theme::HOVER),
+            );
+        }
+        if row
+            .on_hover_text(format!(
+                "Show the machine as it was after this change ({} of {n})",
+                k + 1
+            ))
+            .clicked()
+        {
+            clicked = Some(k);
+        }
     }
+    clicked
 }
 
 /// A diagram filling `rect` (fitted, no larger than life), with its hits.
-pub fn fitted(
-    ui: &egui::Ui,
-    rect: Rect,
-    machine: &Machine,
-    placed: &Placed,
-    live: Option<&Live>,
-    selected: Option<&Pick>,
-    hovered: Option<&Pick>,
-) -> (Vec<(Pick, Rect)>, View) {
-    let view = View::fit(placed.bounds, rect, 1.0);
+pub fn fitted(ui: &egui::Ui, rect: Rect, d: &Diagram) -> (Vec<(Pick, Rect)>, View) {
+    let view = View::fit(d.placed.bounds, rect, 1.0);
     let painter = ui.painter_at(rect);
-    let d = Diagram {
-        machine,
-        placed,
-        live,
-        selected,
-        hovered,
-    };
-    (paint(&painter, &d, view), view)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use engine_script::states::{Machine, State, Transition, Trigger};
-
-    fn gate() -> Machine {
-        let st = |name: &str, parent: Option<&str>| State {
-            name: name.into(),
-            parent: parent.map(str::to_string),
-            ..Default::default()
-        };
-        let on = |from: &str, to: &str, event: &str| Transition {
-            from: Some(from.into()),
-            to: to.into(),
-            trigger: Trigger::On {
-                event: event.into(),
-                guard: None,
-            },
-            line: 0,
-        };
-        let mut powered = st("powered", None);
-        powered.initial = Some("closed".into());
-        Machine {
-            initial: "powered".into(),
-            states: vec![
-                powered,
-                st("closed", Some("powered")),
-                st("opening", Some("powered")),
-                st("open", Some("powered")),
-                st("closing", Some("powered")),
-                st("unpowered", None),
-            ],
-            transitions: vec![
-                on("closed", "opening", "interact"),
-                Transition {
-                    from: Some("opening".into()),
-                    to: "open".into(),
-                    trigger: Trigger::Done,
-                    line: 0,
-                },
-                on("open", "closing", "interact"),
-                Transition {
-                    from: Some("closing".into()),
-                    to: "closed".into(),
-                    trigger: Trigger::Done,
-                    line: 0,
-                },
-                on("powered", "unpowered", "power"),
-                on("unpowered", "powered", "power"),
-            ],
-            line: 0,
-        }
-    }
-
-    #[test]
-    fn a_cycle_goes_round_clockwise_inside_its_group() {
-        let m = gate();
-        let placed = layout(&m, &BTreeMap::new());
-        let r = |n: &str| placed.rects[n];
-        // closed top left, opening top right, open bottom right, closing bottom left.
-        assert!(r("closed").center().x < r("opening").center().x);
-        assert!((r("closed").center().y - r("opening").center().y).abs() < 1.0);
-        assert!(r("open").center().y > r("opening").center().y);
-        assert!(r("closing").center().x < r("open").center().x);
-        // The group holds its states; the other state sits beside it.
-        let g = r("powered");
-        for s in ["closed", "opening", "open", "closing"] {
-            assert!(g.contains_rect(r(s)), "{s} outside its group");
-        }
-        assert!(!g.intersects(r("unpowered")));
-        assert!(placed.any.is_none());
-    }
-
-    #[test]
-    fn transitions_between_the_same_states_bend_apart() {
-        let m = gate();
-        let placed = layout(&m, &BTreeMap::new());
-        let ps = paths(&m, &placed);
-        let mid = |k: usize| ps[k].as_ref().unwrap().point(0.5);
-        // powered -> unpowered and back: two curves, not one line.
-        assert!((mid(4) - mid(5)).length() > BEND * 0.8);
-    }
-
-    #[test]
-    fn rings_cover_each_cell_once() {
-        for n in 1..14 {
-            let cells = ring(n);
-            assert_eq!(cells.len(), n);
-            let unique: BTreeSet<_> = cells.iter().collect();
-            assert_eq!(unique.len(), n, "{n}: {cells:?}");
-        }
-        assert_eq!(ring(4), vec![(0, 0), (1, 0), (1, 1), (0, 1)]);
-    }
+    (paint(&painter, d, view), view)
 }

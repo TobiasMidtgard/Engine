@@ -4317,6 +4317,7 @@ fn states_canvas(ui: &mut egui::Ui, world: &mut World, editor: &Editor, tab: &mu
         live: live.as_ref(),
         selected: doc.states.pick.as_ref(),
         hovered: doc.states.hover.as_ref(),
+        breaks: None,
     };
     let hits = crate::states::paint(&painter, &diagram, view);
     doc.states.drawn = hits
@@ -4631,8 +4632,15 @@ fn state_settings(ui: &mut egui::Ui, doc: &mut GraphDoc, m: &Machine, name: &str
                 None => Some(m.initial.clone()),
             };
             let first = parent_first.as_deref() == Some(name);
+            let in_parallel = st
+                .parent
+                .as_deref()
+                .and_then(|p| m.state(p))
+                .is_some_and(|p| p.parallel);
             ui.horizontal(|ui| {
-                if ui
+                if in_parallel {
+                    ui.label(theme::dim("A region: it runs alongside the others"));
+                } else if ui
                     .add_enabled(!first, egui::Button::new(if first { "• First state" } else { "Make it the first" }))
                     .on_hover_text("The state it starts in (in its group)")
                     .clicked()
@@ -4646,6 +4654,32 @@ fn state_settings(ui: &mut egui::Ui, doc: &mut GraphDoc, m: &Machine, name: &str
                     doc.push_undo(before);
                 }
                 if m.is_group(name) {
+                    let mut parallel = st.parallel;
+                    if ui
+                        .checkbox(&mut parallel, "All at once")
+                        .on_hover_text(
+                            "Parallel: all its states run at the same time (regions, each with \
+                             states of its own), and an event reaches each of them",
+                        )
+                        .changed()
+                    {
+                        let before = doc.graph.clone();
+                        let first_child = m.children(Some(name)).next().map(|c| c.name.clone());
+                        if let Some(o) = state_def_mut(&mut doc.graph.states, Some(name))
+                            .and_then(Value::as_object_mut)
+                        {
+                            if parallel {
+                                o.insert("parallel".into(), json!(true));
+                                o.remove("initial");
+                            } else {
+                                o.remove("parallel");
+                                if let Some(c) = first_child {
+                                    o.insert("initial".into(), json!(c));
+                                }
+                            }
+                        }
+                        doc.push_undo(before);
+                    }
                     let mut history = st.history;
                     if ui
                         .checkbox(&mut history, "History")

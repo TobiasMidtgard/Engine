@@ -27,6 +27,12 @@
 //!   signal is wired to it too), then fires its own `flared` signal. The graph board on the
 //!   easel behind it draws the graph live: the nodes that run light up and every wire shows
 //!   the value it carries.
+//! - The portcullis on the west side is run by a state machine: `examples/gate.luau`'s
+//!   `states` table (closed, opening, open, closing inside `powered`, and `unpowered`). Press E
+//!   and it rises, waits `hold` seconds and comes down by itself, and goes back up if someone
+//!   stands under it while it closes. The state board on the easel beside it draws the machine
+//!   live, as the editor does: the state it is in with its time, the change just made glowing
+//!   along its arrow, the `after hold` timer filling and the last changes with their causes.
 //!
 //! `script.send {"entity": {"name": "Courtyard director"}, "event": "ritual"}` plays the ritual
 //! from the console or a tour stop; `script.edit` changes a script file like an editor would.
@@ -39,6 +45,7 @@ use engine_world::Interactable;
 use crate::Script;
 use crate::board::{CodeBoard, ProfileBoard};
 use crate::graph_board::GraphBoard;
+use crate::state_board::StateBoard;
 
 /// The director: its script builds the lanterns and the orrery and plays the ritual.
 pub const DIRECTOR: &str = "Courtyard director";
@@ -71,6 +78,15 @@ pub const GRAPH_BOARD_YAW: f32 = 0.483;
 pub const CRYSTAL: [f64; 3] = [-2.4, 1.2, -7.0];
 /// Where the braziers stand: on the diagonals between the lanterns and the middle.
 pub const BRAZIER_RADIUS: f64 = 7.6;
+/// The portcullis on the west side, turned to face the middle, and the example script whose
+/// state machine runs it.
+pub const GATE: [f64; 3] = [-9.4, 0.0, 0.0];
+pub const GATE_YAW: f32 = std::f32::consts::FRAC_PI_2;
+pub const GATE_NAME: &str = "Courtyard gate";
+pub const GATE_SCRIPT: &str = "examples/gate.luau";
+/// The gate's state board, on an easel north of it, turned to the middle and a little south.
+pub const STATE_BOARD: [f64; 3] = [-9.0, 2.0, -4.3];
+pub const STATE_BOARD_YAW: f32 = std::f32::consts::FRAC_PI_2 - 0.25;
 
 /// A tour stop: eye and target relative to the courtyard's middle, and API calls made on
 /// arriving and leaving (name, JSON args).
@@ -174,6 +190,13 @@ const GO_ON: (&str, &str) = ("script.break", r#"{"detach": true}"#);
 const FLARE: (&str, &str) = (
     "script.send",
     r#"{"entity": {"name": "Graph crystal"}, "event": "flare"}"#,
+);
+
+/// The gate from the start: down (`go` back to `closed`, the bars put down at once), then raised
+/// as E would (an `interact` event), so a stop shows the same moment each time.
+pub const GATE_PRESS: (&str, &str) = (
+    "script.eval",
+    r#"{"code": "local g = world.find('Courtyard gate').script g:go('closed') g:place(0) g:trigger('interact')"}"#,
 );
 
 /// The courtyard's overview, from above the lanterns in the south-east, looking down enough
@@ -305,6 +328,31 @@ pub const VIEWS: &[DemoView] = &[
         hour: 18.9,
         warmup_secs: 0.5,
         on_arrive: &[FLARE],
+        on_leave: &[],
+    },
+    DemoView {
+        key: "script_gate",
+        name: "A state machine runs the portcullis: raised (E), it waits, then closes by itself; \
+               the state board beside it shows the machine live",
+        // From the east, outside the wisps' ring: the gate on the left, its board on the right.
+        eye: [-6.6, 2.1 + LIFT, 2.7],
+        target: [-9.2, 1.6 + LIFT, -1.6],
+        hour: 18.9,
+        warmup_secs: 1.0,
+        on_arrive: &[GATE_PRESS],
+        on_leave: &[],
+    },
+    DemoView {
+        key: "script_gate_board",
+        name: "The gate's state board: open, its `after hold` timer filling, the change just \
+               made glowing along its arrow and the last changes with what caused each",
+        // 2.4 m out along the board's normal (STATE_BOARD_YAW).
+        eye: [-6.68, 2.0 + LIFT, -3.71],
+        target: [STATE_BOARD[0], STATE_BOARD[1] + LIFT, STATE_BOARD[2]],
+        hour: 18.9,
+        // Raised in 1.6 s, then open: the `done` arrow still glows and the hold timer runs.
+        warmup_secs: 2.4,
+        on_arrive: &[GATE_PRESS],
         on_leave: &[],
     },
     DemoView {
@@ -592,6 +640,63 @@ pub fn spawn_demo(commands: &mut Commands, origin: DVec3) {
             ..Default::default()
         },
         Script::new(CRYSTAL_GRAPH),
+    ));
+
+    // The portcullis, built by its script, and its state board on an easel beside it.
+    let [gx, _, gz] = GATE;
+    commands.spawn((
+        Name::new(GATE_NAME),
+        at(gx, 0.0, gz).with_rotation(Quat::from_rotation_y(GATE_YAW)),
+        Interactable {
+            verb: "Raise".into(),
+            reach_m: 3.0,
+            offset: Vec3::new(0.0, 1.2, 0.0),
+            ..Default::default()
+        },
+        // It won't close on the player (the play mode's pilot).
+        Script::new(GATE_SCRIPT).with_props(serde_json::json!({ "blocker": "Pilot" })),
+    ));
+    let [sx, sy, sz] = STATE_BOARD;
+    let turn = Quat::from_rotation_y(STATE_BOARD_YAW);
+    let local = |x: f64, y: f64, z: f64| {
+        let o = turn.as_dquat() * DVec3::new(x, y, z);
+        at(sx + o.x, sy + o.y, sz + o.z).with_rotation(turn)
+    };
+    commands.spawn((
+        Name::new("State board frame"),
+        local(0.0, 0.0, -0.08),
+        mesh(
+            Shape::RoundedCuboid {
+                size: [3.45, 2.25, 0.14],
+                radius: 0.04,
+                segments: 0,
+            },
+            walnut,
+        ),
+    ));
+    for side in [-1.0, 1.0] {
+        commands.spawn((
+            Name::new("State board post"),
+            local(side * 1.6, 1.55 - sy, -0.17),
+            mesh(
+                Shape::RoundedCuboid {
+                    size: [0.13, 3.1, 0.13],
+                    radius: 0.03,
+                    segments: 0,
+                },
+                walnut,
+            ),
+        ));
+    }
+    commands.spawn((
+        Name::new("State board"),
+        local(0.0, 0.0, 0.0),
+        mesh(
+            Shape::Quad { size: [3.2, 2.0] },
+            StandardMaterial::color(0.02, 0.022, 0.026),
+        )
+        .without_shadows(),
+        StateBoard::new(GATE_NAME),
     ));
 
     // Four braziers on the diagonals, cold until the ritual lights them.

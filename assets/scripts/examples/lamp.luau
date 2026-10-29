@@ -26,8 +26,9 @@ function Lamp:update(dt: number)
 	self.t += dt
 	local p = self.props
 	local breath = 0.5 + 0.5 * math.sin(self.t * 2 * math.pi / p.period)
-	self.boost = math.max(0, self.boost - dt * 2.5)
 	local glow = if self.lit then 0.55 + 0.45 * breath + self.jitter + self.boost else 0
+	-- A flare shows at full strength for a frame however long the frame, then fades.
+	self.boost = math.max(0, self.boost - dt * 2.5)
 	self.entity:set("PointLight", { color = p.color, intensity_lm = p.lumens * glow })
 	self.entity:material({ emissive = p.color, emissive_strength = 2000 * glow })
 end

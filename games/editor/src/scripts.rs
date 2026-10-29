@@ -54,7 +54,7 @@ use engine_script::analysis::{
 use engine_script::debug::{self, FileStop, Go, StopView};
 use engine_script::editing::{self, FileMarks, OutputCursor, Word, WordKind};
 use engine_script::props::{Prop, PropKind};
-use engine_script::states::{Machine, Problem as MachineProblem};
+use engine_script::states::{Hit, Live, Machine, Problem as MachineProblem, StateBreakpoints};
 use engine_script::{Script, ScriptRuntime, ScriptSettings, ScriptsHeld};
 use serde_json::{Value, json};
 
@@ -75,6 +75,7 @@ impl Plugin for ScriptsTabPlugin {
             .init_resource::<ScriptsTab>()
             .add_systems(Update, hold_scripts.before(UpdateSet::Logic))
             .add_systems(Update, follow_debugger.after(UpdateSet::Logic))
+            .add_systems(Update, pause_on_state_breaks.after(UpdateSet::Logic))
             .add_systems(Update, keep_play_values.after(UpdateSet::Logic));
     }
 }
@@ -392,6 +393,7 @@ pub fn panel(ui: &mut egui::Ui, world: &mut World, editor: &mut Editor) {
     tab.machine.has = machine.is_some();
     if let Some(machine) = machine.filter(|_| stop.is_none() && !tab.machine.hidden) {
         let selection = editor.selection.clone();
+        let paused = editor.mode == Mode::Paused;
         egui::Panel::right("script states")
             .resizable(true)
             .default_size(560.0)
@@ -403,7 +405,7 @@ pub fn panel(ui: &mut egui::Ui, world: &mut World, editor: &mut Editor) {
             )
             .show(ui, |ui| {
                 ui.set_min_height(ui.available_height());
-                states_panel(ui, world, &mut tab, machine, &selection)
+                states_panel(ui, world, &mut tab, machine, &selection, paused)
             });
     }
     if let Some(stop) = &stop {
@@ -1033,128 +1035,20 @@ fn tool_bar(ui: &mut egui::Ui, world: &mut World, tab: &mut ScriptsTab, now: f64
         .fill(theme::BG)
         .inner_margin(egui::Margin::symmetric(6, 3))
         .show(ui, |ui| {
-            ui.horizontal(|ui| {
-                // Open files.
-                let mut close = None;
-                for (i, doc) in tab.docs.iter().enumerate() {
-                    let current = i == tab.current;
-                    let label = format!("{}{}", doc.name(), if doc.dirty() { " •" } else { "" });
-                    let mut text = RichText::new(label);
-                    if doc.marks.error.is_some()
-                        || doc.marks.fault.is_some()
-                        || doc.syntax.is_some()
-                    {
-                        text = text.color(ERROR);
-                    } else if current {
-                        text = text.color(Color32::WHITE);
-                    }
-                    let r = ui
-                        .add(egui::Button::selectable(current, text))
-                        .on_hover_text(format!("{}  (middle click closes)", doc.path));
-                    if r.clicked() {
-                        tab.current = i;
-                        tab.completion = None;
-                    }
-                    if r.middle_clicked() {
-                        close = Some(i);
-                    }
-                }
-                if let Some(i) = close {
-                    let doc = tab.docs.remove(i);
-                    if !doc.breakpoints.is_empty() {
-                        debug::set_breakpoints(world, &doc.path, &[]);
-                    }
-                    if tab.current >= i && tab.current > 0 {
-                        tab.current -= 1;
-                    }
-                }
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if tab.machine.has
-                        && ui
-                            .selectable_label(!tab.machine.hidden, "States")
-                            .on_hover_text(
-                                "The script's state machine (its states table) beside the code, \
-                                 live while playing",
-                            )
-                            .clicked()
-                    {
-                        tab.machine.hidden = !tab.machine.hidden;
-                    }
-                    if ui
-                        .selectable_label(tab.vscode, "VS Code")
-                        .on_hover_text(
-                            "Debug these files in VS Code: breakpoints, stepping, watches",
-                        )
-                        .clicked()
-                    {
-                        tab.vscode = !tab.vscode;
-                    }
-                    if ui
-                        .selectable_label(tab.debug.break_errors, "Stop on errors")
-                        .on_hover_text(
-                            "Stop where an error nothing catches is raised, with the call stack \
-                             and its values, instead of only reporting it",
-                        )
-                        .clicked()
-                    {
-                        tab.debug.break_errors = !tab.debug.break_errors;
-                        tab.debug.apply = true;
-                    }
-                    let can_break = tab.playing && debug::stopped(world).is_none();
-                    if ui
-                        .add_enabled(can_break, egui::Button::new("⏸ Break"))
-                        .on_hover_text(
-                            "Stop the scripts at the next line they run; the world's time holds \
-                             with them",
-                        )
-                        .clicked()
-                    {
-                        debug::pause(world);
-                    }
-                    let profile = ui
-                        .selectable_label(tab.profiling, "🔥 Profile")
-                        .on_hover_text(
-                            "Record where scripts spend their time while playing; each line's \
-                             share shows beside it",
-                        );
-                    if profile.clicked() {
-                        tab.profiling = !tab.profiling;
-                        let args = if tab.profiling {
-                            json!({"seconds": 0})
-                        } else {
-                            json!({"stop": true})
-                        };
-                        let _ = call_api(world, "script.profile", args);
-                    }
-                    if ui
-                        .button("Go to")
-                        .on_hover_text("Go to line (Ctrl+G)")
-                        .clicked()
-                    {
-                        tab.goto = Some(String::new());
-                    }
-                    if ui.button("🔍").on_hover_text("Find (Ctrl+F)").clicked() {
-                        tab.find = Some(tab.find.take().unwrap_or_default());
-                    }
-                    let dirty = tab.docs.get(tab.current).is_some_and(Doc::dirty);
-                    if ui
-                        .add_enabled(dirty, egui::Button::new("Revert"))
-                        .on_hover_text("Back to the file on disk")
-                        .clicked()
-                        && let Some(doc) = tab.docs.get_mut(tab.current)
-                    {
-                        doc.text = doc.saved.clone();
-                        doc.conflict = false;
-                    }
-                    if ui
-                        .add_enabled(dirty, egui::Button::new("💾 Save"))
-                        .on_hover_text("Save (Ctrl+S); a running game hot reloads it")
-                        .clicked()
-                    {
-                        save(world, tab, now);
-                    }
+            // The buttons take about 480 points: in a narrow code view (the States panel open
+            // beside it) they get a row of their own instead of covering the file names.
+            let right = egui::Layout::right_to_left(egui::Align::Center);
+            if ui.available_width() < 780.0 {
+                ui.horizontal_wrapped(|ui| doc_tabs(ui, world, tab));
+                ui.horizontal(|ui| {
+                    ui.with_layout(right, |ui| tool_buttons(ui, world, tab, now));
                 });
-            });
+            } else {
+                ui.horizontal(|ui| {
+                    doc_tabs(ui, world, tab);
+                    ui.with_layout(right, |ui| tool_buttons(ui, world, tab, now));
+                });
+            }
         });
     if tab.vscode {
         egui::Frame::new()
@@ -1226,6 +1120,127 @@ fn tool_bar(ui: &mut egui::Ui, world: &mut World, tab: &mut ScriptsTab, now: f64
                     }
                 });
             });
+    }
+}
+
+/// The open files, one button each (middle click closes).
+fn doc_tabs(ui: &mut egui::Ui, world: &mut World, tab: &mut ScriptsTab) {
+    let mut close = None;
+    for (i, doc) in tab.docs.iter().enumerate() {
+        let current = i == tab.current;
+        let label = format!("{}{}", doc.name(), if doc.dirty() { " •" } else { "" });
+        let mut text = RichText::new(label);
+        if doc.marks.error.is_some() || doc.marks.fault.is_some() || doc.syntax.is_some() {
+            text = text.color(ERROR);
+        } else if current {
+            text = text.color(Color32::WHITE);
+        }
+        let r = ui
+            .add(egui::Button::selectable(current, text))
+            .on_hover_text(format!("{}  (middle click closes)", doc.path));
+        if r.clicked() {
+            tab.current = i;
+            tab.completion = None;
+        }
+        if r.middle_clicked() {
+            close = Some(i);
+        }
+    }
+    if let Some(i) = close {
+        let doc = tab.docs.remove(i);
+        if !doc.breakpoints.is_empty() {
+            debug::set_breakpoints(world, &doc.path, &[]);
+        }
+        if tab.current >= i && tab.current > 0 {
+            tab.current -= 1;
+        }
+    }
+}
+
+/// The tool bar's buttons, right to left: States, VS Code, Stop on errors, Break, Profile,
+/// Go to, Find, Revert, Save.
+fn tool_buttons(ui: &mut egui::Ui, world: &mut World, tab: &mut ScriptsTab, now: f64) {
+    if tab.machine.has
+        && ui
+            .selectable_label(!tab.machine.hidden, "States")
+            .on_hover_text(
+                "The script's state machine (its states table) beside the code, \
+                 live while playing",
+            )
+            .clicked()
+    {
+        tab.machine.hidden = !tab.machine.hidden;
+    }
+    if ui
+        .selectable_label(tab.vscode, "VS Code")
+        .on_hover_text("Debug these files in VS Code: breakpoints, stepping, watches")
+        .clicked()
+    {
+        tab.vscode = !tab.vscode;
+    }
+    if ui
+        .selectable_label(tab.debug.break_errors, "Stop on errors")
+        .on_hover_text(
+            "Stop where an error nothing catches is raised, with the call stack \
+             and its values, instead of only reporting it",
+        )
+        .clicked()
+    {
+        tab.debug.break_errors = !tab.debug.break_errors;
+        tab.debug.apply = true;
+    }
+    let can_break = tab.playing && debug::stopped(world).is_none();
+    if ui
+        .add_enabled(can_break, egui::Button::new("⏸ Break"))
+        .on_hover_text(
+            "Stop the scripts at the next line they run; the world's time holds \
+             with them",
+        )
+        .clicked()
+    {
+        debug::pause(world);
+    }
+    let profile = ui
+        .selectable_label(tab.profiling, "🔥 Profile")
+        .on_hover_text(
+            "Record where scripts spend their time while playing; each line's \
+             share shows beside it",
+        );
+    if profile.clicked() {
+        tab.profiling = !tab.profiling;
+        let args = if tab.profiling {
+            json!({"seconds": 0})
+        } else {
+            json!({"stop": true})
+        };
+        let _ = call_api(world, "script.profile", args);
+    }
+    if ui
+        .button("Go to")
+        .on_hover_text("Go to line (Ctrl+G)")
+        .clicked()
+    {
+        tab.goto = Some(String::new());
+    }
+    if ui.button("🔍").on_hover_text("Find (Ctrl+F)").clicked() {
+        tab.find = Some(tab.find.take().unwrap_or_default());
+    }
+    let dirty = tab.docs.get(tab.current).is_some_and(Doc::dirty);
+    if ui
+        .add_enabled(dirty, egui::Button::new("Revert"))
+        .on_hover_text("Back to the file on disk")
+        .clicked()
+        && let Some(doc) = tab.docs.get_mut(tab.current)
+    {
+        doc.text = doc.saved.clone();
+        doc.conflict = false;
+    }
+    if ui
+        .add_enabled(dirty, egui::Button::new("💾 Save"))
+        .on_hover_text("Save (Ctrl+S); a running game hot reloads it")
+        .clicked()
+    {
+        save(world, tab, now);
     }
 }
 
@@ -1403,239 +1418,243 @@ fn code_view(ui: &mut egui::Ui, world: &mut World, tab: &mut ScriptsTab, now: f6
         ui.fonts_mut(|f| f.layout_job(job))
     };
     let mut output = None;
-    egui::ScrollArea::both()
+    let mut scroll = egui::ScrollArea::both()
         .id_salt(("script scroll", doc.path.as_str()))
-        .auto_shrink([false, false])
-        .show(ui, |ui| {
-            let backdrop = ui.painter().add(egui::Shape::Noop);
-            let rows = ((ui.available_height() / row_h) as usize).max(4);
-            let out = egui::TextEdit::multiline(&mut doc.text)
-                .id(id)
-                .code_editor()
-                .lock_focus(true)
-                .desired_width(f32::INFINITY)
-                .desired_rows(rows)
-                .frame(egui::Frame::NONE.inner_margin(egui::Margin {
-                    left: (GUTTER + 8.0) as i8,
-                    right: 8,
-                    top: 4,
-                    bottom: 4,
-                }))
-                .layouter(&mut layouter)
-                .show(ui);
-            let caret = out
-                .cursor_range
-                .map(|r| r.primary.index.0)
-                .unwrap_or(doc.caret);
-            if let Some((l, c)) = point_at {
-                let at = out
-                    .galley
-                    .pos_from_cursor(CCursor::new(char_at(&doc.text, l, c)));
-                let p = out.galley_pos + at.center().to_vec2() + Vec2::new(3.0, 0.0);
-                if tab.point_sent != Some(p) {
-                    tab.point_sent = Some(p);
-                    world
-                        .resource_mut::<crate::egui_bridge::EguiInput>()
-                        .injected
-                        .push(egui::Event::PointerMoved(p));
+        .auto_shrink([false, false]);
+    if jump_line.is_some() {
+        // A jump shows its line from the start.
+        scroll = scroll.horizontal_scroll_offset(0.0);
+    }
+    scroll.show(ui, |ui| {
+        let backdrop = ui.painter().add(egui::Shape::Noop);
+        let rows = ((ui.available_height() / row_h) as usize).max(4);
+        let out = egui::TextEdit::multiline(&mut doc.text)
+            .id(id)
+            .code_editor()
+            .lock_focus(true)
+            .desired_width(f32::INFINITY)
+            .desired_rows(rows)
+            .frame(egui::Frame::NONE.inner_margin(egui::Margin {
+                left: (GUTTER + 8.0) as i8,
+                right: 8,
+                top: 4,
+                bottom: 4,
+            }))
+            .layouter(&mut layouter)
+            .show(ui);
+        let caret = out
+            .cursor_range
+            .map(|r| r.primary.index.0)
+            .unwrap_or(doc.caret);
+        if let Some((l, c)) = point_at {
+            let at = out
+                .galley
+                .pos_from_cursor(CCursor::new(char_at(&doc.text, l, c)));
+            let p = out.galley_pos + at.center().to_vec2() + Vec2::new(3.0, 0.0);
+            if tab.point_sent != Some(p) {
+                tab.point_sent = Some(p);
+                world
+                    .resource_mut::<crate::egui_bridge::EguiInput>()
+                    .injected
+                    .push(egui::Event::PointerMoved(p));
+            }
+        }
+        let lines = line_rects(&out.galley, out.galley_pos);
+        let current_line = line_of(&doc.text, caret);
+        paint_backdrop(
+            ui,
+            backdrop,
+            &out.response.rect,
+            &lines,
+            current_line,
+            doc,
+            stop.as_ref(),
+        );
+        paint_gutter(
+            ui,
+            &out.response.rect,
+            &lines,
+            current_line,
+            doc,
+            &font,
+            row_h,
+            stop.as_ref(),
+            &unbound,
+        );
+        paint_heard(
+            ui,
+            &out.response.rect,
+            &lines,
+            &heard,
+            row_h,
+            &mut tab.drawn_at,
+        );
+        paint_test_marks(ui, &out.response.rect, &lines, &test_marks, row_h);
+        for (t, _) in &test_marks {
+            if let Some(r) = lines.get(t.line as usize - 1) {
+                let key = format!("test {}", t.line);
+                tab.drawn_at.insert(key, r.with_max_x(r.left()));
+            }
+        }
+        let lints = lints(&doc.text, &vocab);
+        let shown = shown_problems(doc, types, &lints);
+        paint_notes(
+            ui,
+            &lines,
+            doc,
+            &lints,
+            &shown,
+            &test_notes,
+            &font,
+            stop.as_ref(),
+        );
+        paint_type_marks(ui, &out.galley, out.galley_pos, &doc.text, &shown);
+        // Stopped: a name's value under the pointer, as Visual Studio's data tips.
+        if let Some(st) = &stop
+            && let Some(pos) = out.response.hover_pos()
+            && pos.x > out.response.rect.left() + GUTTER
+        {
+            let at = out.galley.cursor_from_pos(pos - out.galley_pos).index.0;
+            if let Some(expr) = expression_at(&doc.text, at)
+                && let Ok(v) = dbg.answer(world, st.id, st.frame, &expr).clone()
+            {
+                let tip = debug::Variable { name: expr, ..v };
+                let _ = out.response.response.clone().on_hover_ui_at_pointer(|ui| {
+                    ui.set_max_width(520.0);
+                    ui.label(variable_text(ui, &tip, f32::INFINITY).0);
+                });
+            }
+        } else if stop.is_none()
+            && let Some(pos) = out.response.hover_pos()
+            && pos.x > out.response.rect.left() + GUTTER
+        {
+            // A name's type and docs, and the problems there, from the checker.
+            let at = out.galley.cursor_from_pos(pos - out.galley_pos).index.0;
+            let (line, col) = line_col(&doc.text, at);
+            let here: Vec<Problem> = shown
+                .iter()
+                .copied()
+                .filter(|p| {
+                    p.span.line == line
+                        && p.span.col <= col
+                        && (col < p.span.end_col.max(p.span.col + 1) || p.span.end_line > line)
+                })
+                .cloned()
+                .collect();
+            let word = word_cols(&doc.text, line, col);
+            if let Some((a, _)) = word {
+                let key = (doc.path.clone(), line, a);
+                if types.hover_asked.as_ref() != Some(&key) {
+                    types.hover_asked = Some(key);
+                    types.hover = None;
+                    types.hover_ticket =
+                        types.ask(&doc.path, Some(&doc.text), Ask::Hover { line, col });
                 }
             }
-            let lines = line_rects(&out.galley, out.galley_pos);
-            let current_line = line_of(&doc.text, caret);
-            paint_backdrop(
-                ui,
-                backdrop,
-                &out.response.rect,
-                &lines,
-                current_line,
-                doc,
-                stop.as_ref(),
-            );
-            paint_gutter(
-                ui,
-                &out.response.rect,
-                &lines,
-                current_line,
-                doc,
-                &font,
-                row_h,
-                stop.as_ref(),
-                &unbound,
-            );
-            paint_heard(
-                ui,
-                &out.response.rect,
-                &lines,
-                &heard,
-                row_h,
-                &mut tab.drawn_at,
-            );
-            paint_test_marks(ui, &out.response.rect, &lines, &test_marks, row_h);
-            for (t, _) in &test_marks {
-                if let Some(r) = lines.get(t.line as usize - 1) {
-                    let key = format!("test {}", t.line);
-                    tab.drawn_at.insert(key, r.with_max_x(r.left()));
-                }
+            let hover = types
+                .hover
+                .as_ref()
+                .filter(|(p, h)| {
+                    *p == doc.path
+                        && h.span.line == line
+                        && word.is_some_and(|(a, _)| h.span.col == a)
+                })
+                .map(|(_, h)| h);
+            if hover.is_some() || !here.is_empty() {
+                let _ = out.response.response.clone().on_hover_ui_at_pointer(|ui| {
+                    type_tip(ui, hover, &here.iter().collect::<Vec<_>>())
+                });
             }
-            let lints = lints(&doc.text, &vocab);
-            let shown = shown_problems(doc, types, &lints);
-            paint_notes(
-                ui,
-                &lines,
-                doc,
-                &lints,
-                &shown,
-                &test_notes,
-                &font,
-                stop.as_ref(),
+        }
+        if let Some(line) = jump_line
+            && let Some(r) = lines.get(line)
+        {
+            // The line's height at the code's left edge: a long line must not scroll the
+            // view sideways to its middle.
+            let left = out.response.rect.left();
+            let at = Rect::from_x_y_ranges(left..=left + GUTTER, r.y_range());
+            ui.scroll_to_rect(
+                at.expand2(Vec2::new(0.0, row_h * 3.0)),
+                Some(egui::Align::Center),
             );
-            paint_type_marks(ui, &out.galley, out.galley_pos, &doc.text, &shown);
-            // Stopped: a name's value under the pointer, as Visual Studio's data tips.
-            if let Some(st) = &stop
-                && let Some(pos) = out.response.hover_pos()
-                && pos.x > out.response.rect.left() + GUTTER
-            {
-                let at = out.galley.cursor_from_pos(pos - out.galley_pos).index.0;
-                if let Some(expr) = expression_at(&doc.text, at)
-                    && let Ok(v) = dbg.answer(world, st.id, st.frame, &expr).clone()
-                {
-                    let tip = debug::Variable { name: expr, ..v };
-                    let _ = out.response.response.clone().on_hover_ui_at_pointer(|ui| {
-                        ui.set_max_width(520.0);
-                        ui.label(variable_text(ui, &tip, f32::INFINITY).0);
-                    });
-                }
-            } else if stop.is_none()
-                && let Some(pos) = out.response.hover_pos()
-                && pos.x > out.response.rect.left() + GUTTER
-            {
-                // A name's type and docs, and the problems there, from the checker.
-                let at = out.galley.cursor_from_pos(pos - out.galley_pos).index.0;
-                let (line, col) = line_col(&doc.text, at);
-                let here: Vec<Problem> = shown
+        }
+        // Gutter clicks: a breakpoint on that line, or off again; Shift+click shows the
+        // line's values live instead (a logpoint); right-click for a condition.
+        {
+            let gutter = Rect::from_min_max(
+                out.response.rect.min,
+                Pos2::new(
+                    out.response.rect.left() + GUTTER,
+                    out.response.rect.bottom(),
+                ),
+            );
+            let click = ui.interact(gutter, id.with("gutter"), egui::Sense::click());
+            let line_at = |pos: Pos2| {
+                lines
                     .iter()
-                    .copied()
-                    .filter(|p| {
-                        p.span.line == line
-                            && p.span.col <= col
-                            && (col < p.span.end_col.max(p.span.col + 1) || p.span.end_line > line)
+                    .position(|r| r.top() <= pos.y && pos.y < r.bottom())
+            };
+            let test_at = |pos: Option<Pos2>| {
+                let line = pos.and_then(line_at)? as u32 + 1;
+                test_marks.iter().find(|(t, _)| t.line == line)
+            };
+            let click = match heard_tip(&heard, &tab.drawn_at, click.hover_pos()) {
+                _ if test_at(click.hover_pos()).is_some() => {
+                    let (t, status) = test_at(click.hover_pos()).expect("just found");
+                    let what = if t.describe {
+                        "these tests"
+                    } else {
+                        "this test"
+                    };
+                    click.on_hover_text(match status.as_deref() {
+                        Some("passed") => format!("Passed. Click: run {what} again"),
+                        Some("failed") => format!("Failed. Click: run {what} again"),
+                        _ => format!("Click: run {what} in the game"),
                     })
-                    .cloned()
-                    .collect();
-                let word = word_cols(&doc.text, line, col);
-                if let Some((a, _)) = word {
-                    let key = (doc.path.clone(), line, a);
-                    if types.hover_asked.as_ref() != Some(&key) {
-                        types.hover_asked = Some(key);
-                        types.hover = None;
-                        types.hover_ticket =
-                            types.ask(&doc.path, Some(&doc.text), Ask::Hover { line, col });
-                    }
                 }
-                let hover = types
-                    .hover
-                    .as_ref()
-                    .filter(|(p, h)| {
-                        *p == doc.path
-                            && h.span.line == line
-                            && word.is_some_and(|(a, _)| h.span.col == a)
-                    })
-                    .map(|(_, h)| h);
-                if hover.is_some() || !here.is_empty() {
-                    let _ = out.response.response.clone().on_hover_ui_at_pointer(|ui| {
-                        type_tip(ui, hover, &here.iter().collect::<Vec<_>>())
-                    });
-                }
-            }
-            if let Some(line) = jump_line
-                && let Some(r) = lines.get(line)
-            {
-                // The line's height at the code's left edge: a long line must not scroll the
-                // view sideways to its middle.
-                let left = out.response.rect.left();
-                let at = Rect::from_x_y_ranges(left..=left + GUTTER, r.y_range());
-                ui.scroll_to_rect(
-                    at.expand2(Vec2::new(0.0, row_h * 3.0)),
-                    Some(egui::Align::Center),
-                );
-            }
-            // Gutter clicks: a breakpoint on that line, or off again; Shift+click shows the
-            // line's values live instead (a logpoint); right-click for a condition.
-            {
-                let gutter = Rect::from_min_max(
-                    out.response.rect.min,
-                    Pos2::new(
-                        out.response.rect.left() + GUTTER,
-                        out.response.rect.bottom(),
-                    ),
-                );
-                let click = ui.interact(gutter, id.with("gutter"), egui::Sense::click());
-                let line_at = |pos: Pos2| {
-                    lines
-                        .iter()
-                        .position(|r| r.top() <= pos.y && pos.y < r.bottom())
-                };
-                let test_at = |pos: Option<Pos2>| {
-                    let line = pos.and_then(line_at)? as u32 + 1;
-                    test_marks.iter().find(|(t, _)| t.line == line)
-                };
-                let click = match heard_tip(&heard, &tab.drawn_at, click.hover_pos()) {
-                    _ if test_at(click.hover_pos()).is_some() => {
-                        let (t, status) = test_at(click.hover_pos()).expect("just found");
-                        let what = if t.describe {
-                            "these tests"
-                        } else {
-                            "this test"
-                        };
-                        click.on_hover_text(match status.as_deref() {
-                            Some("passed") => format!("Passed. Click: run {what} again"),
-                            Some("failed") => format!("Failed. Click: run {what} again"),
-                            _ => format!("Click: run {what} in the game"),
-                        })
+                Some(from) => click.on_hover_ui(|ui| {
+                    ui.label(RichText::new("Called by signals").strong());
+                    for f in from {
+                        ui.label(RichText::new(f).monospace());
                     }
-                    Some(from) => click.on_hover_ui(|ui| {
-                        ui.label(RichText::new("Called by signals").strong());
-                        for f in from {
-                            ui.label(RichText::new(f).monospace());
-                        }
-                    }),
-                    None => click.on_hover_text(
-                        "Click: a breakpoint (the game waits there). Shift+click: the line's \
+                }),
+                None => click.on_hover_text(
+                    "Click: a breakpoint (the game waits there). Shift+click: the line's \
                          values, live. Right-click: a breakpoint with a condition.",
-                    ),
-                };
-                if let Some(line) = click.interact_pointer_pos().and_then(line_at) {
-                    if click.clicked() {
-                        if let Some((t, _)) = test_at(click.interact_pointer_pos()) {
-                            run_test = Some(t.line);
-                        } else if ui.input(|i| i.modifiers.shift) {
-                            toggle_logpoint(world, doc, line);
-                        } else {
-                            toggle_breakpoint(doc, dbg, line as u32 + 1);
-                        }
-                    }
-                    if click.secondary_clicked() {
-                        dbg.menu_line = line as u32 + 1;
-                        dbg.condition = doc
-                            .breakpoints
-                            .get(&dbg.menu_line)
-                            .cloned()
-                            .flatten()
-                            .unwrap_or_default();
+                ),
+            };
+            if let Some(line) = click.interact_pointer_pos().and_then(line_at) {
+                if click.clicked() {
+                    if let Some((t, _)) = test_at(click.interact_pointer_pos()) {
+                        run_test = Some(t.line);
+                    } else if ui.input(|i| i.modifiers.shift) {
+                        toggle_logpoint(world, doc, line);
+                    } else {
+                        toggle_breakpoint(doc, dbg, line as u32 + 1);
                     }
                 }
-                click.context_menu(|ui| gutter_menu(ui, world, doc, dbg));
+                if click.secondary_clicked() {
+                    dbg.menu_line = line as u32 + 1;
+                    dbg.condition = doc
+                        .breakpoints
+                        .get(&dbg.menu_line)
+                        .cloned()
+                        .flatten()
+                        .unwrap_or_default();
+                }
             }
-            if out.response.clicked() && ui.input(|i| i.modifiers.command) {
-                ask_definition = true;
-            }
-            output = Some((
-                out.response.changed(),
-                caret,
-                out.galley_pos,
-                out.galley.clone(),
-            ));
-        });
+            click.context_menu(|ui| gutter_menu(ui, world, doc, dbg));
+        }
+        if out.response.clicked() && ui.input(|i| i.modifiers.command) {
+            ask_definition = true;
+        }
+        output = Some((
+            out.response.changed(),
+            caret,
+            out.galley_pos,
+            out.galley.clone(),
+        ));
+    });
     if let Some(line) = run_test {
         tab.tests.run(json!({"file": doc.path, "line": line}));
     }
@@ -5082,6 +5101,59 @@ pub struct MachinePanel {
     has: bool,
     hovered: Option<Pick>,
     pub selected: Option<Pick>,
+    /// Showing the machine as it was after this change of the log (its time and state),
+    /// PlayMaker's Debug Flow; None: live.
+    pub scrub: Option<(f64, String)>,
+    /// The state a right-click opened the breakpoint menu on.
+    menu: Option<String>,
+    /// The breakpoint the game paused on.
+    pub hit: Option<Hit>,
+}
+
+/// Pauses the game when a state machine reaches a breakpoint set in the States panel, selects
+/// the object and shows its script's machine as it was then.
+fn pause_on_state_breaks(world: &mut World) {
+    let Some(hit) = world
+        .get_resource_mut::<StateBreakpoints>()
+        .and_then(|mut b| std::mem::take(&mut b.hits).into_iter().next())
+    else {
+        return;
+    };
+    let t = editor::now(world);
+    let name = world
+        .get::<Name>(hit.entity)
+        .map(|n| n.as_str().to_string())
+        .unwrap_or_else(|| format!("{}", hit.entity));
+    let paused = world.resource_scope(|world, mut ed: Mut<Editor>| {
+        if ed.mode != Mode::Play {
+            return false;
+        }
+        editor::pause(world, &mut ed);
+        ed.select(Some(hit.entity));
+        let verb = if hit.kind == "exit" {
+            "left"
+        } else {
+            "entered"
+        };
+        ed.info(
+            t,
+            format!(
+                "Paused: {name} {verb} {} ({}). Play goes on.",
+                hit.state, hit.why
+            ),
+        );
+        true
+    });
+    if !paused {
+        return;
+    }
+    if hit.path.ends_with(".luau") {
+        open_in_tab(world, &hit.path, None);
+    }
+    let mut tab = world.resource_mut::<ScriptsTab>();
+    tab.machine.hidden = false;
+    tab.machine.scrub = None;
+    tab.machine.hit = Some(hit);
 }
 
 /// The machine `path`'s class declares (None: no states table), or why it doesn't run.
@@ -5114,10 +5186,14 @@ fn states_panel(
     tab: &mut ScriptsTab,
     machine: Result<Machine, MachineProblem>,
     selection: &[Entity],
+    paused: bool,
 ) {
     let path = tab.docs[tab.current].path.clone();
     let entity = running_entity(world, &path, selection);
     let live = entity.and_then(|e| engine_script::states::live(world, e));
+    if !paused {
+        tab.machine.hit = None;
+    }
     ui.horizontal(|ui| {
         ui.label(RichText::new("STATES").strong().color(theme::TEXT));
         match (&live, entity) {
@@ -5127,9 +5203,13 @@ fn states_panel(
                     .map(|n| n.as_str().to_string())
                     .unwrap_or_else(|| format!("{e}"));
                 ui.label(RichText::new(name).color(theme::TEXT));
-                if let Some(c) = l.current() {
+                if !l.current.is_empty() {
                     ui.label(theme::dim("in"));
-                    ui.label(RichText::new(c).color(theme::PLAY).strong());
+                    ui.label(
+                        RichText::new(l.current.join(" + "))
+                            .color(theme::PLAY)
+                            .strong(),
+                    );
                 }
             }
             _ if tab.playing => {
@@ -5166,6 +5246,88 @@ fn states_panel(
         }
         Ok(m) => m,
     };
+    // Paused on a breakpoint: what reached it.
+    if let Some(hit) = &tab.machine.hit {
+        let verb = if hit.kind == "exit" {
+            "left"
+        } else {
+            "entered"
+        };
+        egui::Frame::new()
+            .fill(crate::states::BREAK.gamma_multiply(0.18))
+            .corner_radius(4.0)
+            .inner_margin(egui::Margin::symmetric(8, 4))
+            .show(ui, |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(
+                        RichText::new("⏸ Paused:")
+                            .strong()
+                            .color(crate::states::BREAK),
+                    );
+                    ui.label(
+                        RichText::new(format!("{verb} {} ({})", hit.state, hit.why))
+                            .color(theme::TEXT),
+                    );
+                    ui.label(theme::dim("Play goes on, Step one frame."));
+                });
+            });
+    }
+    // Showing an earlier moment of the log: which, and the way back to live.
+    let shown = tab.machine.scrub.as_ref().and_then(|(t, to)| {
+        live.as_ref()?
+            .log
+            .iter()
+            .position(|c| c.t == *t && c.to == *to)
+    });
+    if tab.machine.scrub.is_some() && shown.is_none() {
+        tab.machine.scrub = None;
+    }
+    if let (Some(k), Some(l)) = (shown, &live) {
+        let n = l.log.len();
+        let mut to = None;
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("⏪").color(theme::ACCENT));
+            ui.label(
+                RichText::new(format!(
+                    "As it was after change {} of {n}, at {:.2} s",
+                    k + 1,
+                    l.log[k].t
+                ))
+                .color(theme::TEXT),
+            );
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui
+                    .small_button("Live")
+                    .on_hover_text("Back to now")
+                    .clicked()
+                {
+                    tab.machine.scrub = None;
+                }
+                if ui
+                    .add_enabled(k + 1 < n, egui::Button::new("Later").small())
+                    .clicked()
+                {
+                    to = Some(k + 1);
+                }
+                if ui
+                    .add_enabled(k > 0, egui::Button::new("Earlier").small())
+                    .clicked()
+                {
+                    to = Some(k - 1);
+                }
+            });
+        });
+        if let Some(k) = to {
+            tab.machine.scrub = Some((l.log[k].t, l.log[k].to.clone()));
+        }
+    }
+    let then: Option<Live> = match (shown, &live) {
+        (Some(k), Some(l)) => Some(l.as_of(k, &m)),
+        _ => live.clone(),
+    };
+    let breaks = world
+        .get_resource::<StateBreakpoints>()
+        .and_then(|b| b.of(&path).cloned());
     let log_h = if live.is_some() { 150.0 } else { 0.0 };
     let h = (ui.available_height() - log_h - 8.0).max(140.0);
     let (rect, resp) =
@@ -5174,11 +5336,14 @@ fn states_panel(
     let (hits, _) = crate::states::fitted(
         ui,
         rect,
-        &m,
-        &placed,
-        live.as_ref(),
-        tab.machine.selected.as_ref(),
-        tab.machine.hovered.as_ref(),
+        &crate::states::Diagram {
+            machine: &m,
+            placed: &placed,
+            live: then.as_ref(),
+            selected: tab.machine.selected.as_ref(),
+            hovered: tab.machine.hovered.as_ref(),
+            breaks: breaks.as_ref(),
+        },
     );
     for (pick, r) in &hits {
         if let Pick::State(name) = pick {
@@ -5233,10 +5398,46 @@ fn states_panel(
                 .unwrap_or_default(),
         };
         let line = line_of(&pick);
-        resp.clone().on_hover_text(if line > 0 {
-            format!("{tip}\nline {line}: click to go there")
+        let more = if matches!(pick, Pick::State(_)) {
+            "\nright-click: pause the game when it starts or ends"
         } else {
-            tip
+            ""
+        };
+        resp.clone().on_hover_text(if line > 0 {
+            format!("{tip}\nline {line}: click to go there{more}")
+        } else {
+            format!("{tip}{more}")
+        });
+    }
+    // Breakpoints: right-click a state.
+    if resp.secondary_clicked() {
+        tab.machine.menu = match &tab.machine.hovered {
+            Some(Pick::State(name)) => Some(name.clone()),
+            _ => None,
+        };
+    }
+    if let Some(name) = tab.machine.menu.clone() {
+        resp.context_menu(|ui| {
+            ui.label(RichText::new(format!("state {name}")).strong());
+            for (exit, what) in [(false, "starts"), (true, "ends")] {
+                let on = breaks.as_ref().is_some_and(|b| {
+                    if exit {
+                        b.exit.contains(&name)
+                    } else {
+                        b.enter.contains(&name)
+                    }
+                });
+                let label = format!(
+                    "{}Pause the game when it {what}",
+                    if on { "✔ " } else { "" }
+                );
+                if ui.button(label).clicked() {
+                    world
+                        .resource_mut::<StateBreakpoints>()
+                        .set(&path, &name, exit, !on);
+                    ui.close();
+                }
+            }
         });
     }
     if resp.clicked()
@@ -5250,11 +5451,16 @@ fn states_panel(
     }
     if let Some(l) = &live {
         ui.separator();
-        ui.label(RichText::new("CHANGES").small().color(theme::TEXT_DIM));
-        egui::ScrollArea::vertical()
+        ui.label(RichText::new("CHANGES").small().color(theme::TEXT_DIM))
+            .on_hover_text("Click a change to see the machine as it was after it");
+        let picked = egui::ScrollArea::vertical()
             .id_salt("state log")
             .max_height(log_h - 30.0)
-            .show(ui, |ui| crate::states::log_rows(ui, l, 40));
+            .show(ui, |ui| crate::states::log_rows(ui, l, 64, shown))
+            .inner;
+        if let Some(k) = picked {
+            tab.machine.scrub = Some((l.log[k].t, l.log[k].to.clone()));
+        }
     }
 }
 
@@ -5271,7 +5477,11 @@ fn machine_section(ui: &mut egui::Ui, world: &World, entity: Entity, m: &Machine
                 Some((c, l)) => {
                     ui.horizontal(|ui| {
                         ui.label(theme::dim("In"));
-                        ui.label(RichText::new(c).color(theme::PLAY).strong());
+                        ui.label(
+                            RichText::new(l.current.join(" + "))
+                                .color(theme::PLAY)
+                                .strong(),
+                        );
                         if let Some(secs) = l.secs_in(c) {
                             ui.label(theme::dim(format!("for {secs:.1} s")));
                         }
@@ -5291,9 +5501,25 @@ fn machine_section(ui: &mut egui::Ui, world: &World, entity: Entity, m: &Machine
                 (w * placed.bounds.height() / placed.bounds.width().max(1.0)).clamp(140.0, 300.0);
             let (rect, _) = ui.allocate_exact_size(Vec2::new(w, h), egui::Sense::hover());
             ui.painter().rect_filled(rect, 6.0, CODE_BG);
-            crate::states::fitted(ui, rect, m, &placed, live.as_ref(), None, None);
+            let path = world.get::<Script>(entity).map(|s| s.path.clone());
+            let breaks = world
+                .get_resource::<StateBreakpoints>()
+                .zip(path)
+                .and_then(|(b, p)| b.of(&p).cloned());
+            crate::states::fitted(
+                ui,
+                rect,
+                &crate::states::Diagram {
+                    machine: m,
+                    placed: &placed,
+                    live: live.as_ref(),
+                    selected: None,
+                    hovered: None,
+                    breaks: breaks.as_ref(),
+                },
+            );
             if let Some(l) = &live {
-                crate::states::log_rows(ui, l, 4);
+                crate::states::log_rows(ui, l, 4, None);
             }
         });
 }
@@ -7267,17 +7493,35 @@ pub fn states_shots(dir: String) -> ShotScript {
             }
         }
     };
-    let hover = |what: &'static str| {
+    // The pointer onto something drawn (a state: "state closing"), and the right button
+    // pressed or let go there.
+    let pointer = |what: &'static str, right: Option<bool>| {
         move |world: &mut World, _: &mut Editor| {
             let at = world
                 .get_resource::<ScriptsTab>()
                 .and_then(|t| t.drawn_at.get(what).map(|r| r.center()));
             if let Some(p) = at {
-                world
-                    .resource_mut::<crate::egui_bridge::EguiInput>()
-                    .injected
-                    .push(egui::Event::PointerMoved(p));
+                let mut input = world.resource_mut::<crate::egui_bridge::EguiInput>();
+                input.injected.push(egui::Event::PointerMoved(p));
+                if let Some(pressed) = right {
+                    input.injected.push(egui::Event::PointerButton {
+                        pos: p,
+                        button: egui::PointerButton::Secondary,
+                        pressed,
+                        modifiers: Default::default(),
+                    });
+                }
             }
+        }
+    };
+    let gate_breaks = |on: bool| {
+        move |world: &mut World, _: &mut Editor| {
+            world.resource_mut::<StateBreakpoints>().set(
+                "examples/gate.luau",
+                "closing",
+                false,
+                on,
+            );
         }
     };
     let mut steps = vec![
@@ -7298,22 +7542,16 @@ pub fn states_shots(dir: String) -> ShotScript {
             dusk_sky(world)
         })),
         Step::Wait(20),
+        // Frames take longer than a quarter second here, so the world steps 0.25 s each (its
+        // longest step): the waits below are counted in those.
         Step::Do(Box::new(press("Gate"))),
-        Step::Wait(9),
+        Step::Wait(4),
         Step::Shot("states_02_opening_live"),
         // Open: its `after hold` timer fills.
-        Step::Wait(30),
-        Step::Do(Box::new(hover("state open"))),
-        Step::Wait(2),
+        Step::Wait(10),
         Step::Shot("states_03_open_waits_hold"),
         // Closing, someone steps under it: `when blocked` sends it back up.
-        Step::Do(Box::new(|world: &mut World, _: &mut Editor| {
-            world
-                .resource_mut::<crate::egui_bridge::EguiInput>()
-                .injected
-                .push(egui::Event::PointerGone);
-        })),
-        Step::Wait(30),
+        Step::Wait(7),
         Step::Do(Box::new(player_to(GATE_AT + DVec3::new(0.2, 0.88, 0.3)))),
         Step::Wait(5),
         Step::Shot("states_04_blocked_goes_back_up"),
@@ -7354,7 +7592,7 @@ pub fn states_shots(dir: String) -> ShotScript {
         Step::Do(Box::new(open_file("examples/gate.luau", 30))),
         Step::Wait(10),
         Step::Shot("states_06_mistakes"),
-        // Put right, and its tests run in the game.
+        // Put right, and every example's tests run in the game (the gate's among them).
         Step::Do(Box::new(|world: &mut World, _: &mut Editor| {
             world.resource_scope(|world, mut tab: Mut<ScriptsTab>| {
                 open(world, &mut tab, "examples/gate.luau", Some(1));
@@ -7365,7 +7603,7 @@ pub fn states_shots(dir: String) -> ShotScript {
                     .replace(r#"done = "closd","#, r#"done = "closed","#);
                 save(world, &mut tab, 0.0);
                 open(world, &mut tab, "examples/gate.test.luau", Some(1));
-                tab.tests.run(json!({"files": ["examples/gate.test.luau"]}));
+                tab.tests.run(json!({}));
                 tab.toast = None;
             });
         })),
@@ -7373,8 +7611,93 @@ pub fn states_shots(dir: String) -> ShotScript {
         Step::Do(Box::new(|world: &mut World, _: &mut Editor| {
             dusk_sky(world)
         })),
-        Step::Wait(400),
-        Step::Shot("states_07_gate_tests"),
+        Step::Wait(700),
+        Step::Shot("states_07_all_tests_pass"),
+        // A breakpoint on `closing` (its red dot): Play, E, and the game pauses as the gate
+        // starts to close, the panel saying what reached it.
+        Step::Do(Box::new(gate_breaks(true))),
+        Step::Do(Box::new(open_file("examples/gate.luau", 18))),
+        Step::Select("Gate"),
+        Step::Do(Box::new(|world: &mut World, ed: &mut Editor| {
+            editor::play(world, ed)
+        })),
+        Step::Wait(6),
+        Step::Do(Box::new(|world: &mut World, _: &mut Editor| {
+            dusk_sky(world)
+        })),
+        Step::Wait(4),
+        Step::Do(Box::new(press("Gate"))),
+        Step::Wait(34),
+        Step::Shot("states_09_paused_as_it_starts_closing"),
+        // Still paused: a click on an earlier change shows the machine as it was then.
+        Step::Do(Box::new(|world: &mut World, _: &mut Editor| {
+            let Some(gate) = crate::shots::find(world, "Gate") else {
+                return;
+            };
+            let opened = engine_script::states::live(world, gate)
+                .and_then(|l| l.log.iter().rev().find(|c| c.to == "opening").cloned());
+            if let Some(c) = opened {
+                world.resource_mut::<ScriptsTab>().machine.scrub = Some((c.t, c.to));
+            }
+        })),
+        Step::Wait(3),
+        Step::Shot("states_10_back_to_an_earlier_change"),
+        // Back to now; a right-click on `closing` shows its breakpoints, the one on its start
+        // ticked.
+        Step::Do(Box::new(|world: &mut World, _: &mut Editor| {
+            world.resource_mut::<ScriptsTab>().machine.scrub = None;
+        })),
+        Step::Wait(2),
+        Step::Do(Box::new(pointer("state closing", None))),
+        Step::Wait(1),
+        Step::Do(Box::new(pointer("state closing", Some(true)))),
+        Step::Do(Box::new(pointer("state closing", Some(false)))),
+        Step::Wait(3),
+        Step::Shot("states_11_breakpoint_menu"),
+        // Stopped, the breakpoint off. A sentry turret: its aim and its gun are two regions
+        // that run at once (`parallel = true`); someone walks up and it turns and fires.
+        Step::Do(Box::new(move |world: &mut World, ed: &mut Editor| {
+            let mut input = world.resource_mut::<crate::egui_bridge::EguiInput>();
+            input.injected.push(egui::Event::Key {
+                key: egui::Key::Escape,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: Default::default(),
+            });
+            input.injected.push(egui::Event::PointerGone);
+            gate_breaks(false)(world, ed);
+        })),
+        Step::Wait(2),
+        Step::Do(Box::new(|world: &mut World, ed: &mut Editor| {
+            editor::stop(world, ed);
+            let turret = Script::new("examples/turret.luau")
+                .with_props(json!({"target": "Player", "range": 4.5}));
+            editor::spawn_with(
+                world,
+                ed,
+                "Turret".into(),
+                vec![("Script", serde_json::to_value(turret).unwrap_or_default())],
+                // Right of the gate, facing the camera's side.
+                Transform::from_translation(GATE_AT + DVec3::new(2.6, 0.0, 1.6))
+                    .with_rotation(engine::core::math::Quat::from_rotation_y(2.6)),
+            );
+        })),
+        Step::Do(Box::new(open_file("examples/turret.luau", 16))),
+        Step::Select("Turret"),
+        Step::Wait(4),
+        Step::Do(Box::new(|world: &mut World, ed: &mut Editor| {
+            editor::play(world, ed)
+        })),
+        Step::Wait(6),
+        Step::Do(Box::new(|world: &mut World, _: &mut Editor| {
+            dusk_sky(world)
+        })),
+        Step::Wait(6),
+        // Beside the gate, so the turret turns side on to the camera.
+        Step::Do(Box::new(player_to(GATE_AT + DVec3::new(0.9, 0.88, 1.5)))),
+        Step::Wait(9),
+        Step::Shot("states_12_two_regions_at_once"),
     ];
     steps.extend(crate::graphs::states_steps());
     ShotScript::new(dir, steps)

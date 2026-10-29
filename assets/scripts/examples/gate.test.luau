@@ -83,4 +83,21 @@ describe("Gate", function()
 			return state(gate) == "closed"
 		end, 2)
 	end)
+
+	it("knows who is under it when turned", function(t)
+		local gate = t:spawn({
+			name = "Test gate",
+			components = {
+				Transform = { translation = { -4, 0, 8 }, rotation = quat.euler(math.pi / 2) },
+				Interactable = {},
+				Script = { path = "examples/gate.luau", props = { blocker = "Test walker" } },
+			},
+		})
+		-- Turned a quarter, its opening runs along z: 1.2 m along it is under it, 1.2 m across
+		-- it isn't.
+		local walker = t:spawn({ name = "Test walker", components = { Transform = { translation = { -4, 0, 9.2 } } } })
+		expect(gate.script:blocked()).to_be(true)
+		walker.position = vec3(-2.8, 0, 8)
+		expect(gate.script:blocked()).to_be(false)
+	end)
 end)

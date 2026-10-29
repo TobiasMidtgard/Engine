@@ -60,17 +60,17 @@ impl GraphBoard {
 
 // ----------------------------------------------------------------------------- colors
 
-const BG: Rgb = [0.045, 0.05, 0.062];
+pub(crate) const BG: Rgb = [0.045, 0.05, 0.062];
 const GRID: Rgb = [0.065, 0.072, 0.088];
 const GRID_MAJOR: Rgb = [0.085, 0.094, 0.115];
-const HEADER_BG: Rgb = [0.09, 0.1, 0.125];
+pub(crate) const HEADER_BG: Rgb = [0.09, 0.1, 0.125];
 const NODE_BG: Rgb = [0.085, 0.09, 0.105];
 const FIELD_BG: Rgb = [0.035, 0.038, 0.046];
-const TEXT: Rgb = [0.86, 0.88, 0.92];
-const DIM: Rgb = [0.52, 0.56, 0.63];
-const TITLE: Rgb = [0.98, 0.80, 0.42];
-const LIVE: Rgb = [0.45, 0.88, 0.5];
-const ERROR: Rgb = [1.0, 0.36, 0.33];
+pub(crate) const TEXT: Rgb = [0.86, 0.88, 0.92];
+pub(crate) const DIM: Rgb = [0.52, 0.56, 0.63];
+pub(crate) const TITLE: Rgb = [0.98, 0.80, 0.42];
+pub(crate) const LIVE: Rgb = [0.45, 0.88, 0.5];
+pub(crate) const ERROR: Rgb = [1.0, 0.36, 0.33];
 const WARN: Rgb = [1.0, 0.7, 0.25];
 const RAN: Rgb = [1.0, 0.82, 0.35];
 const VALUE: Rgb = [1.0, 0.84, 0.48];
@@ -80,7 +80,7 @@ const STOPPED: Rgb = [1.0, 0.86, 0.30];
 /// Seconds a node stays lit after it ran.
 const LIT_SECS: f64 = 0.9;
 
-fn srgb(c: [u8; 3]) -> Rgb {
+pub(crate) fn srgb(c: [u8; 3]) -> Rgb {
     let f = |v: u8| {
         let s = v as f32 / 255.0;
         if s <= 0.04045 {
@@ -92,7 +92,7 @@ fn srgb(c: [u8; 3]) -> Rgb {
     [f(c[0]), f(c[1]), f(c[2])]
 }
 
-fn mix(a: Rgb, b: Rgb, t: f32) -> Rgb {
+pub(crate) fn mix(a: Rgb, b: Rgb, t: f32) -> Rgb {
     [
         a[0] + (b[0] - a[0]) * t,
         a[1] + (b[1] - a[1]) * t,
@@ -104,7 +104,7 @@ fn mix(a: Rgb, b: Rgb, t: f32) -> Rgb {
 
 impl Canvas {
     /// Blends `c` into a pixel with coverage `a` (its glow at `glow` of its color).
-    fn blend(&mut self, x: i32, y: i32, c: Rgb, a: f32, glow: f32) {
+    pub(crate) fn blend(&mut self, x: i32, y: i32, c: Rgb, a: f32, glow: f32) {
         if a <= 0.0 || x < 0 || y < 0 || x >= self.w as i32 || y >= self.h as i32 {
             return;
         }
@@ -118,7 +118,7 @@ impl Canvas {
     }
 
     /// A rounded rectangle with soft edges, colored per pixel by `color(x, y)`.
-    fn rounded(
+    pub(crate) fn rounded(
         &mut self,
         [x0, y0, x1, y1]: [f32; 4],
         r: f32,
@@ -140,12 +140,19 @@ impl Canvas {
         }
     }
 
-    fn fill(&mut self, rect: [f32; 4], r: f32, c: Rgb, glow: f32) {
+    pub(crate) fn fill(&mut self, rect: [f32; 4], r: f32, c: Rgb, glow: f32) {
         self.rounded(rect, r, &|_, _| c, glow);
     }
 
     /// The outline of a rounded rectangle, `width` thick.
-    fn outline(&mut self, [x0, y0, x1, y1]: [f32; 4], r: f32, width: f32, c: Rgb, glow: f32) {
+    pub(crate) fn outline(
+        &mut self,
+        [x0, y0, x1, y1]: [f32; 4],
+        r: f32,
+        width: f32,
+        c: Rgb,
+        glow: f32,
+    ) {
         let (cx, cy) = ((x0 + x1) / 2.0, (y0 + y1) / 2.0);
         let (hx, hy) = ((x1 - x0) / 2.0, (y1 - y0) / 2.0);
         let r = r.min(hx).min(hy).max(0.0);
@@ -162,7 +169,7 @@ impl Canvas {
         }
     }
 
-    fn disc(&mut self, [cx, cy]: [f32; 2], r: f32, c: Rgb, glow: f32) {
+    pub(crate) fn disc(&mut self, [cx, cy]: [f32; 2], r: f32, c: Rgb, glow: f32) {
         for y in ((cy - r - 1.0).floor() as i32)..=((cy + r + 1.0).ceil() as i32) {
             for x in ((cx - r - 1.0).floor() as i32)..=((cx + r + 1.0).ceil() as i32) {
                 let d = ((x as f32 + 0.5 - cx).powi(2) + (y as f32 + 0.5 - cy).powi(2)).sqrt() - r;
@@ -172,7 +179,7 @@ impl Canvas {
     }
 
     /// A line `width` thick with round ends.
-    fn segment(&mut self, a: [f32; 2], b: [f32; 2], width: f32, c: Rgb, glow: f32) {
+    pub(crate) fn segment(&mut self, a: [f32; 2], b: [f32; 2], width: f32, c: Rgb, glow: f32) {
         let h = width / 2.0;
         let (minx, maxx) = (a[0].min(b[0]) - h - 1.0, a[0].max(b[0]) + h + 1.0);
         let (miny, maxy) = (a[1].min(b[1]) - h - 1.0, a[1].max(b[1]) + h + 1.0);
@@ -228,12 +235,12 @@ fn wire_points(a: [f32; 2], b: [f32; 2], s: f32) -> Vec<[f32; 2]> {
 }
 
 /// Text drawn after the shapes, grouped by size (the font redraws its glyphs at each size).
-struct Label {
-    px: f32,
-    x: f32,
-    baseline: f32,
-    text: String,
-    color: Rgb,
+pub(crate) struct Label {
+    pub px: f32,
+    pub x: f32,
+    pub baseline: f32,
+    pub text: String,
+    pub color: Rgb,
 }
 
 // ----------------------------------------------------------------------------- drawing
@@ -720,7 +727,7 @@ pub(crate) fn draw(
 }
 
 /// Draws the labels, a font size at a time.
-fn finish(cv: &mut Canvas, font: &mut BoardFont, mut labels: Vec<Label>) {
+pub(crate) fn finish(cv: &mut Canvas, font: &mut BoardFont, mut labels: Vec<Label>) {
     labels.sort_by(|a, b| a.px.total_cmp(&b.px));
     for l in labels {
         font.set_size(l.px);

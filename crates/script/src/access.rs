@@ -327,6 +327,8 @@ pub struct ScriptError {
 /// into Lua.
 #[derive(Default)]
 pub(crate) struct Shared {
+    /// State breakpoints reached this frame: (entity, enter or exit, state, why).
+    pub state_hits: Vec<(Entity, String, String, String)>,
     pub new_tasks: Vec<NewTask>,
     pub cancelled: Vec<Thread>,
     pub outbox: Vec<Outgoing>,

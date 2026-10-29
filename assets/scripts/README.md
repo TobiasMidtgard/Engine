@@ -193,6 +193,41 @@ end
   current state is green with its time, `after` timers fill up, the transition just taken
   glows, and the log below says each change and why ("interact by Player"). Click a state or
   an arrow to go to its line. The Details panel shows the same for the selected object.
+- Two things at once: a group with `parallel = true` runs all its states side by side
+  (regions, usually groups of their own), as a turret's aim and its gun. Every region takes
+  each event; a change inside one leaves the others where they are; leaving the group leaves
+  them all. It has no `initial`. `self:in_state` asks about any region's state.
+
+```lua
+Turret.states = {
+	initial = "active",
+	states = {
+		active = {
+			parallel = true,
+			on = { power = "off" },
+			states = {
+				aim = { initial = "scanning", states = {
+					scanning = { when = { sees = "tracking" } },
+					tracking = { when = { ["not sees"] = "scanning" } },
+				} },
+				gun = { initial = "ready", states = {
+					ready = { when = { locked = "firing" } },
+					firing = { done = "cooling" },
+					cooling = { after = { "cooldown", "ready" } },
+				} },
+			},
+		},
+		off = { on = { power = "active" } },
+	},
+}
+```
+
+- Pausing on a state: right-click a state in the diagram, "Pause the game when it starts" (a
+  red dot) or "when it ends" (a red ring). Play stops there, the object selected and the panel
+  saying what got it there; Play goes on. Click a change in the log to see the machine as it
+  was right after it (Earlier, Later, Live).
+- In the world: a `StateBoard { target = "Gate" }` on a quad draws that object's machine live,
+  as the editor does (the Script courtyard's portcullis has one).
 
 ## Visual scripts (`.graph`)
 
@@ -343,6 +378,9 @@ have them.
 - `examples/gate.luau`: a portcullis whose logic is all in its `states` table (E raises it, it
   closes after `hold` seconds, goes back up if someone is under it, and stops on a power cut);
   `examples/gate.test.luau` tests each of those.
+- `examples/turret.luau`: a sentry turret with two regions at once (`parallel = true`): its
+  aim sweeps or follows whoever comes near while its gun fires and cools down; power off and
+  on starts both again. `examples/turret.test.luau` tests them.
 - `examples/pulse.graph`, `examples/hover.graph`: the same lamp and stone as visual scripts.
 - `examples/lamp.test.luau`, `examples/beacon.test.luau`, `examples/float.test.luau`: tests of
   the examples (and of the `wave` module), run in the game.

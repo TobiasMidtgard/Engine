@@ -188,8 +188,14 @@
 //! `done`, `when`) is a hierarchical state machine the runtime runs with the script: the state's
 //! work is `enter_<state>` (a task: `done` follows when it returns), `update_<state>(dt)` and
 //! `exit_<state>`; interactions, messages, wired signals and `self:trigger` are its events
-//! (`states.luau`). [`states`] reads a machine's shape and its live state for the editor, and
-//! `script.states {entity}` serves both.
+//! (`states.luau`). A group with `parallel = true` runs all its states at once (regions, as
+//! SCXML's `<parallel>` and XState's parallel states): an event reaches every region, and a
+//! change into one region leaves the others where they are. [`states`] reads a machine's shape and its live state for the
+//! editor (each change in the log keeps the states active after it, so the editor can show the
+//! machine as it was then), and `script.states {entity}` serves both. State breakpoints
+//! ([`states::StateBreakpoints`], `script.state_breaks`) pause the game as a state starts or
+//! ends, as Unreal's StateTree debugger does. A [`state_board::StateBoard`] draws a running
+//! machine on a quad in the world, from the editor's layout ([`diagram`]).
 //!
 //! ## Tests
 //!
@@ -222,7 +228,8 @@
 //! `script.marks {path}` (a file's errors, logpoint values and heat by line) and
 //! `script.check {source}` (compile without running), `script.test {files, file, line,
 //! filter}` (run the script tests), `script.tests` (their results) and `script.states {entity}`
-//! (its state machine, live). An editor holds scripts still with
+//! (its state machine, live), `script.state_breaks {path, state, exit, on}` (pause on a state).
+//! An editor holds scripts still with
 //! [`ScriptsHeld`] while a scene is edited ([`editing`]).
 //!
 //! ## Showcase
@@ -249,6 +256,7 @@ mod dap;
 pub mod debug;
 mod debugger;
 pub mod demo;
+pub mod diagram;
 pub mod editing;
 mod entity;
 pub mod graph;
@@ -259,6 +267,7 @@ mod math;
 mod profiler;
 pub mod props;
 mod runtime;
+pub mod state_board;
 pub mod states;
 pub mod testing;
 mod types;
@@ -412,6 +421,7 @@ impl Plugin for ScriptPlugin {
         if !app.world.contains_resource::<ScriptSettings>() {
             app.insert_resource(ScriptSettings::default());
         }
+        app.init_resource::<states::StateBreakpoints>();
         app.register_component::<Script>(
             "Runs a Luau script from assets/scripts on this entity: path (\"showcase/lantern.luau\"), \
              props (JSON over the script's defaults), enabled.",
@@ -434,6 +444,11 @@ impl Plugin for ScriptPlugin {
             "Shows a visual script (a .graph file) on this entity's mesh as the editor draws \
              it; live: while it runs, the nodes that run light up and each wire shows its value.",
         )
+        .register_component::<state_board::StateBoard>(
+            "Shows the state machine of the script on the entity named target on this \
+             entity's mesh as the editor draws it, live: the states it is in with their time, \
+             the change just made, after timers filling and the last changes.",
+        )
         .register_resource::<ScriptSettings>(
             "Scripting: folder under the asset root, hot_reload, poll_secs, call_limit_ms (per \
              call), memory_limit_mb (per VM), debug_port (the debugger's, for VS Code), \
@@ -449,6 +464,10 @@ impl Plugin for ScriptPlugin {
         .add_systems(
             Update,
             graph_board::draw_graph_boards.after(board::draw_boards),
+        )
+        .add_systems(
+            Update,
+            state_board::draw_state_boards.after(board::draw_boards),
         )
         .add_systems(
             PostUpdate,
@@ -504,6 +523,13 @@ pub(crate) fn ensure_runtime(world: &mut World) -> bool {
     };
     match made {
         Ok(rt) => {
+            // Its clock starts where the world's is (`world.time()`, task waits and test limits
+            // read it before the first frame sets it).
+            if let Some(now) = world.get_resource::<Time>().map(|t| t.elapsed_secs_f64()) {
+                for vm in rt.vms() {
+                    crate::access::shared(&vm.lua).world_secs = now;
+                }
+            }
             if let Some(port) = settings.debug_port
                 && let Err(err) = rt.debugger.listen(port)
             {

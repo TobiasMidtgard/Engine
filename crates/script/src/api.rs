@@ -132,6 +132,34 @@ pub(crate) fn register(app: &mut App) {
         },
     )
     .register_api(
+        "script.state_breaks",
+        "Breakpoints on a script's states: the game's editor pauses when a machine of that file \
+         enters (or, with exit, leaves) the state. {path, state, exit?, on?} sets or clears one; \
+         {} lists them and the ones reached since the last call (taking them).",
+        r#"{"path": "examples/gate.luau", "state": "closing", "on": true}"#,
+        |world, args| {
+            let mut b = world.get_resource_or_insert_with(crate::states::StateBreakpoints::default);
+            if let (Some(path), Some(state)) = (str_arg(&args, "path"), str_arg(&args, "state")) {
+                let exit = args["exit"].as_bool().unwrap_or(false);
+                let on = args["on"].as_bool().unwrap_or(true);
+                b.set(&normalize(path), state, exit, on);
+            }
+            let hits: Vec<Value> = std::mem::take(&mut b.hits)
+                .into_iter()
+                .map(|h| {
+                    json!({"entity": h.entity.to_bits(), "path": h.path, "kind": h.kind,
+                           "state": h.state, "why": h.why, "t": h.t})
+                })
+                .collect();
+            let breaks: serde_json::Map<String, Value> = b
+                .by_path
+                .iter()
+                .map(|(p, br)| (p.clone(), json!({"enter": br.enter, "exit": br.exit})))
+                .collect();
+            Ok(json!({"breaks": breaks, "hits": hits}))
+        },
+    )
+    .register_api(
         "script.reload",
         "Reload a script file now (\"path\"), or every loaded file when no path is given.",
         r#"{"path": "showcase/courtyard.luau"}"#,
