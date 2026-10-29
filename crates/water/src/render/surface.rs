@@ -13,7 +13,7 @@ use engine_render::texture::f32_to_f16;
 use crate::ripples::{Disturbance, RippleField};
 use crate::surface::{
     Band, COARSE, COARSE_SPONGE, MAX_DT, Medium, N, RING_S, Runner, SPONGE, SurfaceHeights,
-    SurfaceLink, TENSION, VISCOSITY, cpu_ripples_forced, rasterize,
+    SurfaceLink, TENSION, VISCOSITY, cpu_ripples_forced, rasterize, shoal_weight,
 };
 
 const SHADER: &str = include_str!("surface.wgsl");
@@ -59,6 +59,9 @@ struct Level {
     push: Vec<[f32; 2]>,
     pushed_rows: Option<(usize, usize)>,
     medium_version: u64,
+    /// Some of its water is shallow enough for the waves to slow over it
+    /// (`surface::shoal_weight`): it evolves over the shallows too and blends.
+    shoals: bool,
     /// Seconds since the last push.
     quiet_s: f32,
     shift: [i32; 2],
@@ -72,9 +75,9 @@ struct Over<'a> {
     cell: f32,
     band: Band,
     sponge: f32,
-    /// Depth of the water its waves feel, meters.
+    /// Depth of the water its waves feel, meters (shallower cells blend in `surface::SHALLOW_M`).
     depth: f32,
-    /// Its medium's version, and a writer of (vx, vz, wet, absorb) per cell when it changed.
+    /// Its medium's version, and a writer of (vx, vz, wet, depth) per cell when it changed.
     version: u64,
     medium: &'a dyn Fn(usize, usize, usize) -> [f32; 4],
     /// Where the CPU left it, when it hands over.
@@ -90,6 +93,8 @@ pub struct SurfaceGpu {
     evolve: wgpu::ComputePipeline,
     rows_inv: wgpu::ComputePipeline,
     cols_inv: wgpu::ComputePipeline,
+    rows_shallow: wgpu::ComputePipeline,
+    cols_shallow: wgpu::ComputePipeline,
     resolve: wgpu::ComputePipeline,
     /// Fine (over the ripple grid) and coarse.
     levels: [Level; 2],
@@ -169,10 +174,11 @@ impl SurfaceGpu {
         };
         let storage_dst = wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST;
         // The levels step one after the other: they share the transforms' scratch (the
-        // state going forward, the evolved spectrum coming back, the pushes).
+        // state going forward, the evolved spectrum coming back, the pushes, and the spectrum
+        // evolved over the shallows).
         let work = buffer(
             "water surface work",
-            cells * 24,
+            cells * 32,
             wgpu::BufferUsages::STORAGE,
         );
         let level = |name: &str| {
@@ -262,6 +268,7 @@ impl SurfaceGpu {
                 push: vec![[0.0; 2]; N * N],
                 pushed_rows: None,
                 medium_version: u64::MAX,
+                shoals: false,
                 quiet_s: f32::INFINITY,
                 shift: [0; 2],
                 active: false,
@@ -276,6 +283,8 @@ impl SurfaceGpu {
             evolve: pipeline("evolve"),
             rows_inv: pipeline("fft_rows_inv"),
             cols_inv: pipeline("fft_cols_inv"),
+            rows_shallow: pipeline("fft_rows_shallow"),
+            cols_shallow: pipeline("fft_cols_shallow"),
             resolve: pipeline("resolve"),
             levels: [level("water surface fine"), level("water surface coarse")],
             link: None,
@@ -348,7 +357,7 @@ impl SurfaceGpu {
                 return [0.0; 4];
             }
             let v = r.carry(i, j, k);
-            [v.x, v.y, wet, r.absorb(k)]
+            [v.x, v.y, wet, r.cell_depth(k)]
         };
         self.levels[0].update(
             shared,
@@ -375,7 +384,7 @@ impl SurfaceGpu {
         match &r.coarse {
             Some(bed) => {
                 let coarse_medium =
-                    |_: usize, _: usize, k: usize| [0.0, 0.0, bed.wet(k), bed.absorb(k)];
+                    |_: usize, _: usize, k: usize| [0.0, 0.0, bed.wet(k), bed.cell_depth(k)];
                 self.levels[1].update(
                     shared,
                     Over {
@@ -416,6 +425,7 @@ impl SurfaceGpu {
                 });
                 pass.set_bind_group(0, &l.group, &[]);
                 let pushed = l.pushed_rows.is_some();
+                let shoals = l.shoals;
                 for (pipeline, groups, on) in [
                     (&self.spatial, (n / 8, n / 8), true),
                     (&self.rows_fwd, (n, 1), true),
@@ -425,6 +435,8 @@ impl SurfaceGpu {
                     (&self.evolve, (n / 8, n / 8), true),
                     (&self.rows_inv, (n, 1), true),
                     (&self.cols_inv, (n, 1), true),
+                    (&self.rows_shallow, (n, 1), shoals),
+                    (&self.cols_shallow, (n, 1), shoals),
                     (&self.resolve, (n / 8, n / 8), true),
                 ] {
                     if on {
@@ -587,20 +599,24 @@ impl Level {
                 .write_buffer(&self.surface, 0, &vec![0u8; N * N * 8]);
             self.medium_version = u64::MAX;
         }
+        // The wave the depth-sampled blend is matched on (`surface::shoal_weight`).
+        let shoal_k = Band::crossover(fine_cell);
         if self.medium_version != over.version {
             self.medium_version = over.version;
             let mut medium = vec![0u16; N * N * 4];
+            self.shoals = false;
             for j in 0..N {
                 for i in 0..N {
                     let k = j * N + i;
-                    let [vx, vz, wet, absorb] = (over.medium)(i, j, k);
+                    let [vx, vz, wet, depth] = (over.medium)(i, j, k);
                     if wet <= 0.0 {
                         continue;
                     }
+                    self.shoals |= shoal_weight(depth, over.depth, shoal_k) > 0.0;
                     medium[k * 4] = f32_to_f16(vx);
                     medium[k * 4 + 1] = f32_to_f16(vz);
                     medium[k * 4 + 2] = f32_to_f16(wet);
-                    medium[k * 4 + 3] = f32_to_f16(absorb);
+                    medium[k * 4 + 3] = f32_to_f16(depth);
                 }
             }
             shared
@@ -620,7 +636,12 @@ impl Level {
                 if self.pushed_rows.is_some() { 1.0 } else { 0.0 },
             ],
             shift: [self.shift[0], self.shift[1], 0, 0],
-            band: [k0, mode, over.sponge, 0.0],
+            band: [
+                k0,
+                mode,
+                over.sponge,
+                if self.shoals { shoal_k } else { 0.0 },
+            ],
         };
         shared
             .queue

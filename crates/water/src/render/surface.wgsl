@@ -24,20 +24,41 @@ struct Params {
     grid: vec4<f32>,  // cells per side, cell size (m), dt (s), depth (m)
     damp: vec4<f32>,  // wave damping (1/s), viscosity (m²/s) for the shortest waves, σ/ρ (m³/s²), pushes on
     shift: vec4<i32>, // cells the grid moved by since the last frame (x, z), unused, unused
-    band: vec4<f32>,  // crossover wavenumber (1/m), 0 all waves / 1 the short / 2 the long, sponge (cells), unused
+    band: vec4<f32>,  // crossover wavenumber (1/m), 0 all waves / 1 the short / 2 the long, sponge (cells), shoaling's wavenumber (1/m; 0 off)
 };
 
 @group(0) @binding(0) var<uniform> params: Params;
 @group(0) @binding(1) var<storage, read_write> surface: array<vec2<f32>>; // (h, φ) per cell
-@group(0) @binding(2) var<storage, read_write> work: array<vec2<f32>>;    // three complex fields
+@group(0) @binding(2) var<storage, read_write> work: array<vec2<f32>>;    // four complex fields
 @group(0) @binding(3) var<storage, read> pushes: array<vec2<f32>>;        // height pushed, pressure impulse (m·s) per cell
-@group(0) @binding(4) var<storage, read> medium: array<vec2<u32>>;        // f16 (vx, vz), (wet, absorb 1/s)
+@group(0) @binding(4) var<storage, read> medium: array<vec2<u32>>;        // f16 (vx, vz), (wet, depth m)
 @group(0) @binding(5) var<storage, read_write> heights: array<f32>;       // read back
 @group(0) @binding(6) var out_tex: texture_storage_2d<rgba16float, write>;
 
 const N: u32 = 256u;
 const LOG_N: u32 = 8u;
 const G: f32 = 9.81;
+// `surface::SHALLOW_M`, `SHORE_ABSORB_DEPTH_M`, `SHORE_ABSORB_MAX`.
+const SHALLOW_M: f32 = 0.4;
+const SHORE_ABSORB_DEPTH_M: f32 = 0.8;
+const SHORE_ABSORB_MAX: f32 = 3.0;
+
+// How fast the waves die out over water `depth` m deep, 1/s (`surface::shore_absorb`).
+fn shore_absorb(depth: f32) -> f32 {
+    let open = smoothstep(0.05, SHORE_ABSORB_DEPTH_M, depth);
+    return SHORE_ABSORB_MAX * (1.0 - open) * (1.0 - open);
+}
+
+// How much of the waves evolved over SHALLOW_M a cell `depth` m deep takes (`surface::shoal_weight`).
+fn shoal_weight(depth: f32) -> f32 {
+    let deep = params.grid.w;
+    let k = params.band.w;
+    if (k <= 0.0 || deep <= SHALLOW_M || depth >= deep) { return 0.0; }
+    let td = tanh(k * deep);
+    let ts = tanh(k * SHALLOW_M);
+    if (td - ts < 1e-4) { return 0.0; }
+    return saturate((td - tanh(k * max(depth, SHALLOW_M))) / (td - ts));
+}
 
 fn cmul(a: vec2<f32>, b: vec2<f32>) -> vec2<f32> {
     return vec2<f32>(a.x * b.x - a.y * b.y, a.x * b.y + a.y * b.x);
@@ -88,8 +109,8 @@ fn spatial(@builtin(global_invocation_id) id: vec3<u32>) {
         let edge = f32(min(min(id.x, id.y), min(N - 1u - id.x, N - 1u - id.y)));
         let t = saturate(1.0 - edge / params.band.z);
         s *= exp(-6.0 * t * t * params.grid.z);
-        // Soaked up over the shallows of a shelving shore (`surface::shore_absorb`).
-        s *= exp(-unpack2x16float(m.y).y * params.grid.z);
+        // Soaked up over the shallows of a shelving shore.
+        s *= exp(-shore_absorb(unpack2x16float(m.y).y) * params.grid.z);
     }
     work[i] = s;
     if (params.damp.w > 0.5) {
@@ -153,6 +174,16 @@ fn fft_cols_push(@builtin(local_invocation_id) lid: vec3<u32>, @builtin(workgrou
 }
 
 @compute @workgroup_size(128, 1, 1)
+fn fft_rows_shallow(@builtin(local_invocation_id) lid: vec3<u32>, @builtin(workgroup_id) wg: vec3<u32>) {
+    fft(lid.x, 3u * N * N + wg.x * N, 1u, 1.0);
+}
+
+@compute @workgroup_size(128, 1, 1)
+fn fft_cols_shallow(@builtin(local_invocation_id) lid: vec3<u32>, @builtin(workgroup_id) wg: vec3<u32>) {
+    fft(lid.x, 3u * N * N + wg.x, N, 1.0);
+}
+
+@compute @workgroup_size(128, 1, 1)
 fn fft_rows_inv(@builtin(local_invocation_id) lid: vec3<u32>, @builtin(workgroup_id) wg: vec3<u32>) {
     fft(lid.x, N * N + wg.x * N, 1u, 1.0);
 }
@@ -194,26 +225,42 @@ fn evolve(@builtin(global_invocation_id) id: vec3<u32>) {
         h += w * 0.5 * (pz + pm);
         phi += w * vec2<f32>(pd.y, -pd.x);
     }
-    var out = vec2<f32>(0.0);
-    if (kl > 1e-6) {
-        let dt = params.grid.z;
-        let a = kl * tanh(kl * params.grid.w);
-        let b = G + params.damp.z * kl * kl;
-        let w = sqrt(a * b);
-        let c = cos(w * dt);
-        let s = sin(w * dt);
-        let fade = exp(-(params.damp.x + params.damp.y * kl * kl) * dt);
-        let h2 = (h * c + phi * (a / w * s)) * fade;
-        let phi2 = (phi * c - h * (b / w * s)) * fade;
-        out = vec2<f32>(h2.x - phi2.y, h2.y + phi2.x);
+    work[N * N + i] = turn(h, phi, kl, params.grid.w);
+    // And over the shallows, for the cells there to blend in (`resolve`).
+    if (params.band.w > 0.0) {
+        work[3u * N * N + i] = turn(h, phi, kl, SHALLOW_M);
     }
-    work[N * N + i] = out;
+}
+
+// One mode (height spectrum `h`, potential `phi`, wavenumber `kl`) turned by this step over
+// water `depth` m deep, packed again as h + iφ.
+fn turn(h: vec2<f32>, phi: vec2<f32>, kl: f32, depth: f32) -> vec2<f32> {
+    if (kl <= 1e-6) { return vec2<f32>(0.0); }
+    let dt = params.grid.z;
+    let a = kl * tanh(kl * depth);
+    let b = G + params.damp.z * kl * kl;
+    let w = sqrt(a * b);
+    let c = cos(w * dt);
+    let s = sin(w * dt);
+    let fade = exp(-(params.damp.x + params.damp.y * kl * kl) * dt);
+    let h2 = (h * c + phi * (a / w * s)) * fade;
+    let phi2 = (phi * c - h * (b / w * s)) * fade;
+    return vec2<f32>(h2.x - phi2.y, h2.y + phi2.x);
+}
+
+// This step's surface at cell `i` (unnormalized): the waves evolved over the level's depth,
+// blended toward those evolved over the shallows by the cell's own depth.
+fn evolved(i: u32) -> vec2<f32> {
+    let deep = work[N * N + i];
+    if (params.band.w <= 0.0) { return deep; }
+    let w = shoal_weight(unpack2x16float(medium[i].y).y);
+    return mix(deep, work[3u * N * N + i], w);
 }
 
 fn height_at(x: i32, z: i32) -> f32 {
     let c = vec2<u32>(vec2<i32>(clamp(x, 0, i32(N) - 1), clamp(z, 0, i32(N) - 1)));
     let i = c.y * N + c.x;
-    return select(0.0, work[N * N + i].x, unpack2x16float(medium[i].y).x > 0.0);
+    return select(0.0, evolved(i).x, unpack2x16float(medium[i].y).x > 0.0);
 }
 
 @compute @workgroup_size(8, 8, 1)
@@ -222,7 +269,7 @@ fn resolve(@builtin(global_invocation_id) id: vec3<u32>) {
     let norm = 1.0 / f32(N * N);
     // Dry land stays still: the transform smears a little of the waves onto it.
     let wet = unpack2x16float(medium[i].y).x;
-    let s = select(vec2<f32>(0.0), work[N * N + i] * norm, wet > 0.0);
+    let s = select(vec2<f32>(0.0), evolved(i) * norm, wet > 0.0);
     surface[i] = s;
     heights[i] = s.x;
     let p = vec2<i32>(id.xy);

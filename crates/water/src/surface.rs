@@ -132,6 +132,33 @@ pub trait Medium {
     fn absorb(&self, _k: usize) -> f32 {
         0.0
     }
+    /// How deep the water is over cell `k`, meters: waves slow and bunch up where it is
+    /// shallower than [`Medium::depth`] ([`shoal_weight`]).
+    fn cell_depth(&self, _k: usize) -> f32 {
+        self.depth()
+    }
+}
+
+/// The shallow depth the surface is also evolved over, meters: each cell takes a blend of the
+/// waves evolved over the level's depth and over this, by its own depth (Jeschke & Wojtan
+/// 2023, §4.3, evaluate the dispersive step at a few fixed depths and interpolate per cell).
+/// So wakes slow as they reach the shallows, bunch up and turn to meet the beach head on.
+pub const SHALLOW_M: f32 = 0.4;
+
+/// How much of the shallow solution a cell `depth` m deep takes, on a level whose waves feel
+/// `deep` m and are about `k` (1/m) long: chosen so the blend's tanh(k·d) (which sets the wave
+/// speed) is the cell's own at that wavelength, not a straight blend in depth (which runs fast
+/// over middling depths).
+pub fn shoal_weight(depth: f32, deep: f32, k: f32) -> f32 {
+    if deep <= SHALLOW_M || depth >= deep {
+        return 0.0;
+    }
+    let t = |d: f32| (k * d.max(0.0)).tanh();
+    let (td, ts) = (t(deep), t(SHALLOW_M));
+    if td - ts < 1e-4 {
+        return 0.0;
+    }
+    ((td - t(depth.max(SHALLOW_M))) / (td - ts)).clamp(0.0, 1.0)
 }
 
 /// Water shallower than this (m) soaks up the waves running into it.
@@ -168,6 +195,10 @@ impl Medium for RippleField {
     fn absorb(&self, k: usize) -> f32 {
         self.absorb.get(k).copied().unwrap_or(0.0)
     }
+
+    fn cell_depth(&self, k: usize) -> f32 {
+        self.depth.get(k).copied().unwrap_or(DEPTH_M)
+    }
 }
 
 /// The water under the coarse level: which of its cells are lake (read from the bodies like
@@ -185,6 +216,8 @@ pub struct CoarseBed {
     pub depth: f32,
     /// Per cell: how fast the waves die out there, 1/s ([`shore_absorb`] of its depth).
     pub absorb: Vec<f32>,
+    /// Per cell: the water's depth, meters (waves slow in the shallows, [`shoal_weight`]).
+    pub depths: Vec<f32>,
     /// Counts up whenever `wet` changes.
     pub version: u64,
 }
@@ -204,6 +237,10 @@ impl Medium for CoarseBed {
 
     fn absorb(&self, k: usize) -> f32 {
         self.absorb.get(k).copied().unwrap_or(0.0)
+    }
+
+    fn cell_depth(&self, k: usize) -> f32 {
+        self.depths.get(k).copied().unwrap_or(self.depth)
     }
 }
 
@@ -579,6 +616,8 @@ pub struct SurfaceSim {
     work: Vec<[f32; 2]>,
     pushed: Vec<[f32; 2]>,
     spectrum: Vec<[f32; 2]>,
+    /// The waves evolved over [`SHALLOW_M`] instead, while any cell is that shallow.
+    shallow: Vec<[f32; 2]>,
     column: Vec<[f32; 2]>,
     /// Seconds since the last push.
     pub quiet_s: f32,
@@ -611,6 +650,7 @@ impl SurfaceSim {
             work: vec![[0.0; 2]; n * n],
             pushed: vec![[0.0; 2]; n * n],
             spectrum: vec![[0.0; 2]; n * n],
+            shallow: Vec::new(),
             column: Vec::new(),
             quiet_s: f32::INFINITY,
         }
@@ -718,6 +758,22 @@ impl SurfaceSim {
         }
         let dk = std::f32::consts::TAU / (n as f32 * self.cell);
         let depth = medium.depth();
+        // How much of the shallow solution each cell takes, at this level's typical wavelength.
+        // (The waves the two levels share, 4 m long: shorter ones hardly feel the bottom.)
+        let k_rep = Band::crossover(fine_cell);
+        let weights: Vec<f32> = (0..n * n)
+            .map(|k| {
+                if medium.wet(k) > 0.0 {
+                    shoal_weight(medium.cell_depth(k), depth, k_rep)
+                } else {
+                    0.0
+                }
+            })
+            .collect();
+        let shoals = weights.iter().any(|&w| w > 0.0);
+        if shoals {
+            self.shallow.resize(n * n, [0.0; 2]);
+        }
         for j in 0..n {
             for i in 0..n {
                 let mirror = ((n - j) % n) * n + (n - i) % n;
@@ -733,11 +789,25 @@ impl SurfaceSim {
                 }
                 let (h2, phi2) = evolve_mode(h, phi, k, depth, dt, damping);
                 self.spectrum[j * n + i] = [h2[0] - phi2[1], h2[1] + phi2[0]];
+                if shoals {
+                    let (h2, phi2) = evolve_mode(h, phi, k, SHALLOW_M, dt, damping);
+                    self.shallow[j * n + i] = [h2[0] - phi2[1], h2[1] + phi2[0]];
+                }
             }
         }
         fft2(&mut self.spectrum, n, 1.0, &mut self.column);
+        if shoals {
+            fft2(&mut self.shallow, n, 1.0, &mut self.column);
+        }
         let norm = 1.0 / (n * n) as f32;
         for (k, (s, z)) in self.state.iter_mut().zip(&self.spectrum).enumerate() {
+            let w = weights[k];
+            let z = if w > 0.0 {
+                let y = self.shallow[k];
+                [z[0] + (y[0] - z[0]) * w, z[1] + (y[1] - z[1]) * w]
+            } else {
+                *z
+            };
             *s = if medium.wet(k) > 0.0 {
                 [z[0] * norm, z[1] * norm]
             } else {
@@ -1013,6 +1083,54 @@ mod tests {
     }
 
     #[test]
+    fn waves_slow_down_as_they_run_into_the_shallows() {
+        // 2.5 m deep for x < 0, a shelf 0.4 m deep beyond: the rings from a stone dropped in
+        // the deep water reach less far over the shelf than over water as deep all the way.
+        let reach = |shelf: bool| {
+            let mut field = RippleField::new(N, 0.25);
+            field.rebuild_speeds(1.3, |p| Some(if shelf && p.x > 0.0 { 0.4 } else { 2.5 }));
+            let mut sim = SurfaceSim::new(N, field.cell, field.origin);
+            let stone = Disturbance {
+                pos: DVec2::new(-6.0, 0.0),
+                radius: 1.5,
+                depth: 0.05,
+                ..Default::default()
+            };
+            sim.step(&field, &[stone], 0.25, 1.0 / 30.0, 0.0);
+            for _ in 0..120 {
+                sim.step(&field, &[], 0.25, 1.0 / 30.0, 0.0);
+            }
+            // How far over the shelf the waves' energy has got, on the line through the stone.
+            let h = sim.heights().h;
+            let j = N / 2;
+            let (mut e, mut ex) = (0.0f64, 0.0f64);
+            for i in 0..N {
+                let x = field.cell_center(i, j).x;
+                if x > 0.0 {
+                    let w = (h[j * N + i] as f64).powi(2);
+                    e += w;
+                    ex += w * x;
+                }
+            }
+            ex / e.max(1e-30)
+        };
+        let (shelf, deep) = (reach(true), reach(false));
+        assert!(shelf < deep * 0.85, "shelf {shelf:.2} m, deep {deep:.2} m");
+    }
+
+    #[test]
+    fn shallow_water_takes_the_shallow_waves_and_deep_water_the_deep() {
+        let k = Band::crossover(0.25);
+        assert_eq!(shoal_weight(3.0, 2.5, k), 0.0);
+        assert_eq!(shoal_weight(0.2, 2.5, k), 1.0);
+        let mid = shoal_weight(1.0, 2.5, k);
+        assert!(mid > 0.0 && mid < 1.0, "{mid}");
+        // Matched on the waves' speed, not straight in depth: a meter of water is nearer the
+        // deep solution than a straight blend's 0.71.
+        assert!(mid < 0.71, "{mid}");
+    }
+
+    #[test]
     fn a_dropped_stone_sends_out_a_spreading_train_of_rings() {
         let field = pond();
         let mut sim = SurfaceSim::new(N, field.cell, field.origin);
@@ -1094,6 +1212,7 @@ mod tests {
             wet: vec![1.0; N * N],
             depth: 10.0,
             absorb: vec![0.0; N * N],
+            depths: Vec::new(),
             version: 0,
         }
     }

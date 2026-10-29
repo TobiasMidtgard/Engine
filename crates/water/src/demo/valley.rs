@@ -192,6 +192,47 @@ fn in_channel(p: DVec2, reach: f64, ground: &dyn Fn(f64, f64) -> f64) -> DVec2 {
     best.1
 }
 
+/// Banks this high over the bed hold a spring's water, meters.
+const SPRING_BANK_M: f64 = 0.7;
+/// The spring moves at most this far down its course looking for such banks, meters.
+const SPRING_SEARCH_M: f64 = 40.0;
+
+/// Where `stream`'s spring wells up: the head of its course, or, where the channel starts too
+/// shallow there to hold its flow (it spilled over the meadow), the first point down the course
+/// whose banks rise [`SPRING_BANK_M`] over the bed.
+fn spring_at(
+    stream: &ValleyStream,
+    channel: &dyn Fn(DVec2) -> DVec2,
+    ground: &dyn Fn(f64, f64) -> f64,
+) -> DVec2 {
+    let head = channel(DVec2::from_array(stream.path[0]));
+    let mut along = 0.0;
+    for w in stream.path.windows(2) {
+        let (a, b) = (DVec2::from_array(w[0]), DVec2::from_array(w[1]));
+        let len = a.distance(b);
+        let across = (b - a).perp() / len.max(1e-6);
+        let mut t = 0.0;
+        while t < len && along + t <= SPRING_SEARCH_M {
+            let c = channel(a.lerp(b, t / len));
+            let bed = ground(c.x, c.y);
+            let off = stream.width_m as f64 * 0.5 + 1.5;
+            let bank = [-1.0, 1.0]
+                .map(|side| {
+                    let q = c + across * off * side;
+                    ground(q.x, q.y)
+                })
+                .into_iter()
+                .fold(f64::MAX, f64::min);
+            if bank - bed >= SPRING_BANK_M {
+                return c;
+            }
+            t += 1.0;
+        }
+        along += len;
+    }
+    head
+}
+
 /// The flow region covering `stream`'s course: its corner (at height `base`) and settings, its
 /// spring, priming springs and pools placed in the channel the landscape carved (`ground`).
 pub fn stream_region(
@@ -217,7 +258,7 @@ pub fn stream_region(
         .windows(2)
         .map(|w| DVec2::from_array(w[0]).distance(DVec2::from_array(w[1])))
         .sum();
-    let spring = channel(DVec2::from_array(*first)) - lo;
+    let spring = spring_at(stream, &channel, ground) - lo;
     // Pools along the course (a plunge pool, hollows in the bed) start full, as the running
     // stream leaves them; seeds that aren't in a hollow fill nothing.
     let mut fills = Vec::new();
@@ -319,6 +360,27 @@ mod tests {
         // Hollows along the course start full.
         assert!(region.fills.iter().all(|f| f.to_spill));
         assert!(region.fills.len() > 100);
+    }
+
+    #[test]
+    fn a_spring_wells_up_where_the_channel_can_hold_it() {
+        // Dug 0.2 m deep at the head, deepening to 1.2 m over the first 30 m.
+        let path = [[0.0, 0.0], [0.0, 100.0]];
+        let s = ValleyStream {
+            path: &path,
+            width_m: 5.0,
+            flow_m3_s: 0.4,
+        };
+        let ground = |x: f64, z: f64| {
+            if x.abs() < 2.5 {
+                -(0.2 + (z / 30.0).clamp(0.0, 1.0))
+            } else {
+                0.0
+            }
+        };
+        let (corner, region) = stream_region(&s, 0.0, &ground).expect("region");
+        let z = corner.z + region.sources[0].at[1] as f64;
+        assert!((14.0..=18.0).contains(&z), "{z}");
     }
 
     #[test]
