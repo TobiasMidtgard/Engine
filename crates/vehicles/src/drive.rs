@@ -320,10 +320,15 @@ pub(crate) fn get_in(world: &mut World, actor: Entity, vehicle: Entity, b: Board
     let up = world.resource::<Gravity>().up_at(pose.translation);
     let fwd = pose.forward();
     let flat = (fwd - up * fwd.dot(up)).normalize_or(fwd);
+    // A car's camera looks level; a plane's or ship's along the nose (it is the aim).
+    let look = match b.style {
+        Style::Car => flat,
+        Style::Plane | Style::Ship => fwd,
+    };
     let from = Transform::from_translation(
-        pose.translation - (flat * (2.3 * b.radius() + 2.0)).as_dvec3() + (up * 2.0).as_dvec3(),
+        pose.translation - (look * (2.3 * b.radius() + 2.0)).as_dvec3() + (up * 2.0).as_dvec3(),
     )
-    .with_rotation(look_rotation(flat, up).unwrap_or(pose.rotation));
+    .with_rotation(look_rotation(look, up).unwrap_or(pose.rotation));
     camera.order += 1;
     camera.active = true;
     if let Projection::Perspective { fov_y_deg, near } = &mut camera.projection {
@@ -738,6 +743,7 @@ type ChaseTarget<'a> = (
     &'a mut Driven,
     &'a Boardable,
     Option<&'a VehicleTelemetry>,
+    Option<&'a Cruise>,
 );
 
 type Gauges<'a> = (
@@ -855,7 +861,7 @@ fn chase_camera(
         .filter(|_| locked)
         .map_or((Vec2::ZERO, 0.0), |m| (m.delta, m.scroll.y));
     let looked_back = keys.as_ref().is_some_and(|k| k.just_released(KeyCode::C));
-    for (vehicle, (t, interp, mut d, b, tel)) in &mut vehicles {
+    for (vehicle, (t, interp, mut d, b, tel, cruise)) in &mut vehicles {
         let Ok((mut cam, chase)) = cams.get_mut(d.camera) else {
             continue;
         };
@@ -907,6 +913,10 @@ fn chase_camera(
                 let mut rot = cam.rotation;
                 if looked_back {
                     rot = pose.rotation;
+                }
+                // Flying itself home: the view comes round with the ship till the mouse moves.
+                if cruise.is_some_and(|c| c.returning) && delta == Vec2::ZERO {
+                    rot = rot.slerp(pose.rotation, 1.0 - (-dt * 2.0).exp());
                 }
                 if delta != Vec2::ZERO {
                     let yaw_axis = if free { rot * Vec3::Y } else { up };
