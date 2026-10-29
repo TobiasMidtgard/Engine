@@ -17,7 +17,9 @@ struct Body {
     haze: vec4<f32>,    // relative extinction per channel, w: vertical optical depth
     haze2: vec4<f32>,   // single-scattering albedo per channel, w: scale height (R)
     haze3: vec4<f32>,   // x: forward scattering g; cloud shell: y radius (R), z fade, w hole (R)
-    rings: vec4<f32>,   // inner radius (R), outer radius (R), brightness; cloud shell: w local cover
+    // Inner radius (R), outer radius (R), brightness. Cloud shell: the weather's cover map
+    // (camera-relative world X/Z of its corner, m; its span, m, or 0 for none), w local cover.
+    rings: vec4<f32>,
     flags: vec4<u32>,   // x: F_* bits, y: luminance of glowing melt (f32 bits, cd/m²)
 };
 
@@ -34,6 +36,8 @@ const F_STAR: u32 = 256u;      // a star: light.rgb is its surface's luminance (
 @group(1) @binding(0) var<storage, read> bodies: array<Body>;
 @group(1) @binding(1) var map_sampler: sampler;   // repeat in u, clamp in v, trilinear, anisotropic
 @group(1) @binding(2) var ring_sampler: sampler;  // clamp, trilinear
+// The weather's cloud cover around the camera (engine_world's `CloudCoverMap`), R8.
+@group(1) @binding(3) var weather_cover: texture_2d<f32>;
 @group(2) @binding(0) var albedo_map: texture_2d<f32>;
 @group(2) @binding(1) var aux_map: texture_2d<f32>;
 @group(2) @binding(2) var ring_map: texture_2d<f32>;
@@ -490,11 +494,34 @@ fn shell_density(coverage: f32, d: vec3<f32>) -> f32 {
 // another body): the shell takes their cover where they hand over to it, at the edge of its
 // hole, and returns to the map's by three hole radii, so the two decks meet at the same share
 // of sky.
-fn shell_coverage(b: Body, map_cover: f32, apart: f32) -> f32 {
-    if (b.rings.w < 0.0 || b.haze3.w <= 0.0) {
+// Within the weather's cover map, the cloud tops cover what the weather's own clouds do (one
+// field from the ground up; Nubis drives every cloud from one weather map), easing into the
+// body's map over its last 10 km. Without the map, near the camera's ground point they ease to
+// the weather's mean cover. `rel` is the shell point from the camera (world axes, m), `apart`
+// its distance from the camera's ground point (R).
+fn shell_coverage(b: Body, map_cover: f32, apart: f32, rel: vec3<f32>) -> f32 {
+    if (b.rings.w < 0.0) {
+        return map_cover;
+    }
+    if (b.rings.z > 0.0) {
+        let uv = (rel.xz - b.rings.xy) / b.rings.z;
+        let rim = min(min(uv.x, uv.y), min(1.0 - uv.x, 1.0 - uv.y)) * b.rings.z;
+        let weather = textureSampleLevel(weather_cover, ring_sampler, uv, 0.0).r;
+        return mix(map_cover, weather, smoothstep(0.0, 10000.0, rim));
+    }
+    if (b.haze3.w <= 0.0) {
         return map_cover;
     }
     return mix(b.rings.w, map_cover, smoothstep(b.haze3.w, b.haze3.w * 3.0, apart));
+}
+
+// Unit-shell point `p` from the camera at `os` (both in the shell's stretched frame), in world
+// axes, m.
+fn shell_rel(b: Body, p: vec3<f32>, os: vec3<f32>) -> vec3<f32> {
+    let k = b.haze3.y;
+    let e = b.axis_x.w / b.axis_y.w;
+    let d = (p - os) * k;
+    return (b.axis_x.xyz * d.x + b.axis_y.xyz * (d.y / e) + b.axis_z.xyz * d.z) * b.axis_x.w;
 }
 
 // Unit-shell point `p` turned back by the clouds' drift (the map's longitude offset).
@@ -509,13 +536,13 @@ fn shell_turned(b: Body, p: vec3<f32>) -> vec3<f32> {
 // broken up by the coarse octaves of the shell's own detail (finer ones average out in a
 // shadow seen from this high), `foot` the size of a pixel on the shell (R), `apart` its
 // distance from the camera's ground point (R).
-fn shell_shadow(b: Body, p: vec3<f32>, foot: f32, apart: f32) -> f32 {
+fn shell_shadow(b: Body, p: vec3<f32>, os: vec3<f32>, foot: f32, apart: f32) -> f32 {
     let lon = atan2(p.x, p.z);
     let lat = asin(clamp(p.y, -1.0, 1.0));
     let uv = vec2<f32>(lon * (0.5 * INV_PI) + 0.5 + b.sun.w, 0.5 - lat * INV_PI);
     let texel = 2.0 * PI / f32(textureDimensions(aux_map).x);
     let map_cover = textureSampleLevel(aux_map, map_sampler, uv, max(log2(foot / texel), 0.0)).r;
-    let coverage = shell_coverage(b, map_cover, apart);
+    let coverage = shell_coverage(b, map_cover, apart, shell_rel(b, p, os));
     let d = shell_detail(shell_turned(b, p), foot, 4);
     let density = shell_density(coverage, d);
     let edge = 0.12 + 0.4 * (1.0 - d.z);
@@ -570,7 +597,7 @@ fn fs_shell(in: VsOut) -> FsOut {
                                       vec2<f32>(du.y, dv.y)).r;
     let hit = o + dl * t_hit;
     let apart = acos(clamp(dot(normalize(hit), normalize(o)), -1.0, 1.0));
-    let coverage = shell_coverage(b, map_cover, apart);
+    let coverage = shell_coverage(b, map_cover, apart, shell_rel(b, ps, os));
 
     // Detail: octaves of noise turning with the clouds' drift, each faded out before it is
     // smaller than a couple of pixels (seen slanted, the footprint stretches).
@@ -638,7 +665,7 @@ fn fs_shell(in: VsOut) -> FsOut {
                 apart_g = smoothstep(b.haze3.w * 0.7, b.haze3.w, a_g);
             }
             // Skylight still reaches the shade; a low sun's light was weak anyway.
-            shadow = shell_shadow(b, cp, foot, acos(clamp(dot(cp, normalize(os)), -1.0, 1.0))) * 0.75 * smoothstep(0.0, 0.15, mu_g)
+            shadow = shell_shadow(b, cp, os, foot, acos(clamp(dot(cp, normalize(os)), -1.0, 1.0))) * 0.75 * smoothstep(0.0, 0.15, mu_g)
                 * cover * b.haze3.z * apart_g;
         }
     }

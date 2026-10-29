@@ -19,6 +19,7 @@
 
 mod bake;
 mod color;
+mod cover;
 mod earth;
 mod flow;
 mod gas;

@@ -4,10 +4,11 @@
 //! background thread when the body is big on screen.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::thread::JoinHandle;
 
 use bytemuck::{Pod, Zeroable};
-use engine_core::math::{DVec3, Vec3};
+use engine_core::math::{DVec2, DVec3, Vec3};
 use engine_core::prelude::*;
 use engine_render::prelude::{Atmosphere, DirectionalLight};
 use engine_render::wgpu;
@@ -15,9 +16,10 @@ use engine_render::{
     FeatureStats, FrameContext, GpuShared, GrowBuffer, Image, RenderFeature, RenderPhase,
     RenderSettings, ViewData,
 };
-use engine_world::{FarCloudLayer, WeatherState};
+use engine_world::{CloudCoverField, CloudCoverMap, FarCloudLayer, WeatherState};
 
 use super::bake::{SurfaceMaps, bake_rings, bake_surface_on};
+use super::cover::{CloudChannel, cover_grid, drift_shift};
 use super::{
     BodyImpostor, BodyLook, BodyRings, FULL_MAP_WIDTH, FarGround, GroundDrawn, ImpostorPart,
     LookBakes, RING_MAP_WIDTH, SMALL_MAP_WIDTH, spheroid_radii,
@@ -167,9 +169,31 @@ struct BodyMaps {
     width: u32,
     group: wgpu::BindGroup,
     clouds: bool,
+    /// The cloud cover on the CPU too, for the weather (`CloudCoverField`).
+    cloud: Option<CloudChannel>,
     relief: bool,
     _textures: Vec<wgpu::Texture>,
 }
+
+/// The body, its center (world, m), the cover channel and the clouds' drift (a share of a
+/// turn) a `CloudCoverField` was built from.
+struct FieldBuild {
+    body: Entity,
+    center: DVec3,
+    channel: Arc<[u8]>,
+    drift: f64,
+    revision: u64,
+}
+
+/// A body the weather can follow: its distance, entity, center (world, m), axes, equatorial
+/// radius (m) and baked cloud cover.
+type FieldBody = (f64, Entity, DVec3, [DVec3; 3], f64, CloudChannel);
+
+/// The cloud field around the focus: cells per side and their size (512 km).
+const FIELD_SIZE: u32 = 256;
+const FIELD_CELL_M: f64 = 2_000.0;
+/// Rebuilt when the focus is this far from its center, or the clouds drifted this far.
+const FIELD_REBUILD_M: f64 = 32_000.0;
 
 struct Job {
     body: Entity,
@@ -187,6 +211,11 @@ pub struct BodiesFeature {
     layout2: Option<wgpu::BindGroupLayout>,
     instances: Option<GrowBuffer>,
     group1: Option<wgpu::BindGroup>,
+    /// What the published `CloudCoverField` was built from.
+    field: Option<FieldBuild>,
+    /// The weather's cloud cover (`CloudCoverMap`, R8, cells per side) and its revision.
+    weather_cover: Option<(wgpu::Texture, u32)>,
+    weather_revision: u64,
     map_sampler: Option<wgpu::Sampler>,
     ring_sampler: Option<wgpu::Sampler>,
     blank: Option<(wgpu::Texture, wgpu::Texture)>,
@@ -201,6 +230,24 @@ pub struct BodiesFeature {
     /// Bodies to draw, back to front, and whether each is a cloud shell.
     draws: Vec<(Entity, bool)>,
     stats: FeatureStats,
+}
+
+/// An R8 texture for the weather's cloud cover, `size` cells per side.
+fn weather_cover_texture(gpu: &GpuShared, size: u32) -> wgpu::Texture {
+    gpu.device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("weather cloud cover"),
+        size: wgpu::Extent3d {
+            width: size,
+            height: size,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::R8Unorm,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    })
 }
 
 fn upload(gpu: &GpuShared, image: &Image, srgb: bool, label: &str) -> wgpu::Texture {
@@ -255,6 +302,132 @@ fn upload(gpu: &GpuShared, image: &Image, srgb: bool, label: &str) -> wgpu::Text
 }
 
 impl BodiesFeature {
+    /// Publish the cloud systems of the body under the camera's air around the focus as
+    /// `CloudCoverField`: rebuilt when the focus wanders from its center, the world shifts (the
+    /// body's center moves), the clouds drift far or the maps change; in between only its
+    /// drift is updated. Removed when there is no such body.
+    fn publish_cloud_field(
+        &mut self,
+        world: &mut World,
+        view: &ViewData,
+        body: Option<FieldBody>,
+        drift: f64,
+    ) {
+        let Some((_, entity, center, axes, r_eq, channel)) = body else {
+            if self.field.take().is_some() {
+                world.remove_resource::<CloudCoverField>();
+            }
+            return;
+        };
+        let focus = view.origin;
+        // Where the drift since the build has carried what was at the focus.
+        let shift_m = |built: f64| drift_shift(center, axes, r_eq, focus, drift - built);
+        let focus_xz = DVec2::new(focus.x, focus.z);
+        let span = FIELD_SIZE as f64 * FIELD_CELL_M;
+        let stale = match (&self.field, world.get_resource::<CloudCoverField>()) {
+            (Some(f), Some(field)) => {
+                let middle = field.origin + DVec2::splat(span * 0.5);
+                f.body != entity
+                    || (f.center - center).length() > 1.0
+                    || !Arc::ptr_eq(&f.channel, &channel.cover)
+                    || (middle - focus_xz).length() > FIELD_REBUILD_M
+                    || shift_m(f.drift).length() > FIELD_REBUILD_M
+            }
+            _ => true,
+        };
+        if stale {
+            let origin = focus_xz - DVec2::splat(span * 0.5);
+            let coverage = cover_grid(
+                &channel,
+                center,
+                axes,
+                drift,
+                origin,
+                FIELD_SIZE,
+                FIELD_CELL_M,
+            );
+            let mean = coverage.iter().map(|&c| c as f64).sum::<f64>()
+                / (coverage.len().max(1) as f64 * 255.0);
+            let revision = self.field.as_ref().map_or(0, |f| f.revision) + 1;
+            world.insert_resource(CloudCoverField(CloudCoverMap {
+                origin,
+                cell_m: FIELD_CELL_M as f32,
+                size: FIELD_SIZE,
+                coverage: Arc::from(coverage),
+                drift_m: DVec2::ZERO,
+                background: mean as f32,
+                revision,
+            }));
+            self.field = Some(FieldBuild {
+                body: entity,
+                center,
+                channel: channel.cover.clone(),
+                drift,
+                revision,
+            });
+        } else if let Some(f) = &self.field {
+            let drift_m = shift_m(f.drift);
+            if let Some(mut field) = world.get_resource_mut::<CloudCoverField>()
+                && field.drift_m != drift_m
+            {
+                field.drift_m = drift_m;
+            }
+        }
+    }
+
+    /// Upload the weather's cloud cover map when it changed. Returns its window for the shell:
+    /// the camera-relative world X/Z of its corner where the pattern has drifted to, and its
+    /// span (m). `None` without a map.
+    fn upload_weather_cover(
+        &mut self,
+        world: &World,
+        gpu: &GpuShared,
+        view: &ViewData,
+    ) -> Option<[f32; 3]> {
+        let map = world.get_resource::<CloudCoverMap>()?;
+        let n = map.size;
+        if map.revision == 0 || n == 0 || map.coverage.len() < (n * n) as usize {
+            return None;
+        }
+        if map.revision != self.weather_revision {
+            if self
+                .weather_cover
+                .as_ref()
+                .is_none_or(|(_, size)| *size != n)
+            {
+                self.weather_cover = Some((weather_cover_texture(gpu, n), n));
+                self.group1 = None;
+            }
+            let (texture, _) = self.weather_cover.as_ref()?;
+            gpu.queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                &map.coverage[..(n * n) as usize],
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(n),
+                    rows_per_image: Some(n),
+                },
+                wgpu::Extent3d {
+                    width: n,
+                    height: n,
+                    depth_or_array_layers: 1,
+                },
+            );
+            self.weather_revision = map.revision;
+        }
+        let corner = map.origin + map.drift_m - DVec2::new(view.origin.x, view.origin.z);
+        Some([
+            corner.x as f32,
+            corner.y as f32,
+            (n as f64 * map.cell_m as f64) as f32,
+        ])
+    }
+
     fn make_maps(
         &self,
         gpu: &GpuShared,
@@ -299,6 +472,7 @@ impl BodiesFeature {
             width: maps.albedo.width,
             group,
             clouds: maps.clouds,
+            cloud: maps.clouds.then(|| CloudChannel::from_aux(&maps.aux)),
             relief: maps.relief,
             _textures: textures,
         })
@@ -420,6 +594,16 @@ impl RenderFeature for BodiesFeature {
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
             ],
         });
         let tex = |binding| wgpu::BindGroupLayoutEntry {
@@ -514,6 +698,7 @@ impl RenderFeature for BodiesFeature {
             upload(gpu, &flat, false, "flat aux"),
             upload(gpu, &empty, true, "no rings"),
         ));
+        self.weather_cover = Some((weather_cover_texture(gpu, 1), 1));
         self.instances = Some(GrowBuffer::new(
             device,
             "space bodies",
@@ -589,6 +774,8 @@ impl RenderFeature for BodiesFeature {
             .map(|a| a.planet_center);
         // The weather's cloud cover around the camera, matched by the cloud tops near it.
         let local_cover = world.get_resource::<WeatherState>().map(|w| w.cloud_cover);
+        // And its cover map, which the cloud tops follow within it.
+        let weather_window = self.upload_weather_cover(world, gpu, view);
         let clock = world
             .get_resource::<SpaceClock>()
             .map(|c| c.seconds)
@@ -604,6 +791,8 @@ impl RenderFeature for BodiesFeature {
         self.scratch.clear();
         // The cloud layer nearest the camera, told to the weather (FarCloudLayer).
         let mut far_layer: Option<(f64, FarCloudLayer)> = None;
+        // The nearest body whose cloud systems the weather follows (CloudCoverField).
+        let mut field_body: Option<FieldBody> = None;
         for (entity, depth_radius, gt) in parts {
             let Some(body) = world.get::<CelestialBody>(entity).cloned() else {
                 continue;
@@ -648,7 +837,12 @@ impl RenderFeature for BodiesFeature {
             let shell_wanted = body.look.clouds()
                 && (altitude < body.radius_m * SHELL_RANGE || ground_drawn)
                 && altitude > SHELL_FADE_M.0;
-            if ground && !shell_wanted {
+            // Under a cloudy body's air, from the ground up, the weather builds its clouds on
+            // this body's cloud systems (`CloudCoverField`): its maps are wanted down here too.
+            let field_here = body.look.clouds()
+                && body.atmosphere.is_some()
+                && altitude < body.radius_m * SHELL_RANGE;
+            if ground && !shell_wanted && !field_here {
                 continue;
             }
             let radius_px = view.projected_radius_px(r_eq as f32, d as f32);
@@ -669,6 +863,17 @@ impl RenderFeature for BodiesFeature {
             let Some(maps) = self.maps.get(&entity) else {
                 continue;
             };
+            if field_here
+                && let Some(channel) = &maps.cloud
+                && field_body.as_ref().is_none_or(|f| d < f.0)
+            {
+                let axes = [
+                    (m.x_axis / scale).normalize(),
+                    (m.y_axis / scale).normalize(),
+                    (m.z_axis / scale).normalize(),
+                ];
+                field_body = Some((d, entity, center, axes, r_eq, channel.clone()));
+            }
             let shell = shell_wanted && maps.clouds;
             if ground && !shell {
                 continue;
@@ -774,10 +979,11 @@ impl RenderFeature for BodiesFeature {
                     (space.cloud_hole_m * scale / r_eq) as f32,
                 ];
                 // Only the body whose air the camera is in has the weather's clouds.
+                let window = weather_window.filter(|_| in_air).unwrap_or([0.0; 3]);
                 g.rings = [
-                    0.0,
-                    0.0,
-                    0.0,
+                    window[0],
+                    window[1],
+                    window[2],
                     local_cover
                         .filter(|_| in_air)
                         .map_or(-1.0, |c| c.clamp(0.0, 1.0)),
@@ -787,6 +993,9 @@ impl RenderFeature for BodiesFeature {
         }
         self.run_jobs(world, gpu, &mut bakes);
         world.insert_resource(bakes);
+        // Clouds drift east about 1.5° a day relative to the ground (as the shell's `sun.w`).
+        let drift = (clock / 86_400.0 * 0.004) % 1.0;
+        self.publish_cloud_field(world, view, field_body, drift);
         match far_layer {
             Some((_, layer)) => {
                 if world.get_resource::<FarCloudLayer>() != Some(&layer) {
@@ -824,13 +1033,15 @@ impl RenderFeature for BodiesFeature {
 
     fn compute(&mut self, _encoder: &mut wgpu::CommandEncoder, ctx: &FrameContext) {
         if self.group1.is_none()
-            && let (Some(layout), Some(buf), Some(ms), Some(rs)) = (
+            && let (Some(layout), Some(buf), Some(ms), Some(rs), Some((cover, _))) = (
                 &self.layout1,
                 &self.instances,
                 &self.map_sampler,
                 &self.ring_sampler,
+                &self.weather_cover,
             )
         {
+            let cover = cover.create_view(&wgpu::TextureViewDescriptor::default());
             self.group1 = Some(
                 ctx.gpu
                     .device
@@ -849,6 +1060,10 @@ impl RenderFeature for BodiesFeature {
                             wgpu::BindGroupEntry {
                                 binding: 2,
                                 resource: wgpu::BindingResource::Sampler(rs),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 3,
+                                resource: wgpu::BindingResource::TextureView(&cover),
                             },
                         ],
                     }),
