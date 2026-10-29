@@ -4,6 +4,7 @@
 //!
 //! ```text
 //! cargo run --release -p approach_shots -- [out_dir] [WxH] [names…]
+//! cargo run --release -p approach_shots -- [out_dir] [WxH] flight [stops…]
 //! ```
 //!
 //! Each view is shot twice, `<name>_far.png` with the far view alone and `<name>_ground.png`
@@ -11,6 +12,10 @@
 //! them up (games/showcase/src/planet.rs): an Earth-like world's far view painted from its
 //! terrain's ground, the terrain wearing the far view's look from high up, the cloud tops kept
 //! over the ground. With `MAPS=1` the far look the ground wears is written as a flat map too.
+//!
+//! `flight` shoots one trip instead, stop by stop, with the showcase's adapting exposure: from
+//! a field on Earth to orbit, out past the Sun to Proxima Centauri and down onto Proxima b's
+//! ground (`<stop>.png` and all of them on `flight.jpg`).
 
 use engine_core::prelude::*;
 use engine_core::time::TimeSource;
@@ -253,6 +258,113 @@ fn build(size: (u32, u32)) -> App {
     app
 }
 
+/// Where a flight stop's camera is.
+enum Eye {
+    /// `distance_radii` from the body's center, `phase_deg` from the star (as [`View`]).
+    Radii { distance_radii: f64, phase_deg: f64 },
+    /// `altitude_m` above the ground where the star stands `sun_deg` high, looking along the
+    /// ground with the star to the side, `down_deg` below the horizon.
+    Ground {
+        altitude_m: f64,
+        sun_deg: f64,
+        down_deg: f64,
+    },
+    /// On the line from body `from` to body `to`, `from_m` out from `from`, looking on at
+    /// `to` (or back at `from`).
+    Between {
+        from: &'static str,
+        to: &'static str,
+        from_m: f64,
+        look_back: bool,
+    },
+}
+
+/// One stop of a flight from the ground of one world to the ground of another's.
+struct Stop {
+    name: &'static str,
+    body: &'static str,
+    star: &'static str,
+    eye: Eye,
+    fov: f32,
+}
+
+const AU: f64 = 1.495_978_707e11;
+
+/// From a field on Earth up to orbit, out of the solar system, across to Proxima Centauri and
+/// down onto Proxima b, as one flight would see it.
+fn flight() -> Vec<Stop> {
+    let ground = |name, body, star, altitude_m: f64, sun_deg, down_deg| Stop {
+        name,
+        body,
+        star,
+        eye: Eye::Ground {
+            altitude_m,
+            sun_deg,
+            down_deg,
+        },
+        fov: 70.0,
+    };
+    let radii = |name, body, star, distance_radii, phase_deg| Stop {
+        name,
+        body,
+        star,
+        eye: Eye::Radii {
+            distance_radii,
+            phase_deg,
+        },
+        fov: 40.0,
+    };
+    let between = |name, body, from, to, from_m, look_back| Stop {
+        name,
+        body,
+        star: body,
+        eye: Eye::Between {
+            from,
+            to,
+            from_m,
+            look_back,
+        },
+        fov: 50.0,
+    };
+    const LIGHT_YEAR: f64 = 9.460_730_472_580_8e15;
+    let proxima = "Proxima Centauri";
+    let b = "Proxima Centauri b";
+    vec![
+        ground("01_earth_ground", "Earth", "Sun", 2.0, 30.0, 4.0),
+        ground("02_earth_1km", "Earth", "Sun", 1_000.0, 30.0, 8.0),
+        ground("03_earth_10km", "Earth", "Sun", 10_000.0, 30.0, 10.0),
+        ground("04_earth_100km", "Earth", "Sun", 100_000.0, 30.0, 12.0),
+        ground("05_earth_1000km", "Earth", "Sun", 1_000_000.0, 30.0, 15.0),
+        radii("06_earth_4r", "Earth", "Sun", 4.5, 50.0),
+        radii("07_earth_40r", "Earth", "Sun", 40.0, 50.0),
+        between("08_sun_from_100au", "Sun", "Sun", proxima, 100.0 * AU, true),
+        between(
+            "09_proxima_from_3ly",
+            proxima,
+            "Sun",
+            proxima,
+            LIGHT_YEAR,
+            false,
+        ),
+        between(
+            "10_proxima_from_0.3au",
+            proxima,
+            proxima,
+            "Sun",
+            0.3 * AU,
+            true,
+        ),
+        radii("11_proxima_b_39r", b, proxima, 39.0, 40.0),
+        radii("12_proxima_b_3r", b, proxima, 3.0, 40.0),
+        Stop {
+            fov: 60.0,
+            ..radii("13_proxima_b_1.05r", b, proxima, 1.05, 40.0)
+        },
+        ground("14_proxima_b_10km", b, proxima, 10_000.0, 30.0, 10.0),
+        ground("15_proxima_b_ground", b, proxima, 2.0, 30.0, 4.0),
+    ]
+}
+
 /// The far view's sampler of a terrain's ground (as the showcase makes it).
 fn far_ground(terrain: &PlanetTerrain) -> FarGround {
     let shape = Arc::new(terrain.shape.clone());
@@ -490,6 +602,175 @@ fn shoot(view: &View, ground: bool, size: (u32, u32), out: &std::path::Path) {
     }
 }
 
+/// Where a stop's camera stands and what it looks at (world space, now).
+fn place(app: &mut App, stop: &Stop) -> (DVec3, DVec3, DVec3) {
+    let s = app.world.resource::<SpaceState>();
+    let b = s.body(stop.body).expect("body");
+    let (center, radius, rot) = (b.world_position, b.radius_m, b.world_rotation);
+    let star = s.body(stop.star).expect("star").world_position;
+    match stop.eye {
+        Eye::Radii {
+            distance_radii,
+            phase_deg,
+        } => {
+            let pole = rot * DVec3::Y;
+            let to_star = (star - center).normalize();
+            let side = to_star.cross(pole).normalize();
+            let flat_star = side.cross(pole).normalize() * -1.0;
+            let (sp, cp) = phase_deg.to_radians().sin_cos();
+            let (se, ce) = 15f64.to_radians().sin_cos();
+            let dir = ((flat_star * cp + side * sp) * ce + pole * se).normalize();
+            (center + dir * radius * distance_radii, center, pole)
+        }
+        Eye::Between {
+            from,
+            to,
+            from_m,
+            look_back,
+        } => {
+            let a = s.body(from).expect("from").world_position;
+            let z = s.body(to).expect("to").world_position;
+            let along = (z - a).normalize();
+            let eye = a + along * from_m;
+            // (Any up that isn't along the line of sight.)
+            let up = if along.y.abs() > 0.9 {
+                DVec3::Z
+            } else {
+                DVec3::Y
+            };
+            (eye, if look_back { a } else { z }, up)
+        }
+        Eye::Ground {
+            altitude_m,
+            sun_deg,
+            down_deg,
+        } => {
+            let terrain = app
+                .world
+                .get::<PlanetTerrain>(b.entity)
+                .map(|t| t.shape.clone());
+            // Planet-local: the star's direction, and a spot `90° − sun_deg` from under it,
+            // on land if there is some all round.
+            let local_star = (rot.inverse() * (star - center)).normalize();
+            let across = local_star.any_orthonormal_vector();
+            let from_star = (90.0 - sun_deg).to_radians();
+            let height = |d: DVec3| terrain.as_ref().map_or(0.0, |t| t.height(d));
+            let spot = (0..36)
+                .map(|k| {
+                    let around = DQuat::from_axis_angle(local_star, k as f64 * 10f64.to_radians());
+                    let d = DQuat::from_axis_angle(around * across, from_star) * local_star;
+                    (d, height(d))
+                })
+                .max_by(|x, y| {
+                    // Land between 50 m and 1.5 km up beats everything else; then the higher.
+                    let good = |h: f64| (50.0..1_500.0).contains(&h);
+                    (good(x.1), x.1).partial_cmp(&(good(y.1), y.1)).unwrap()
+                })
+                .unwrap();
+            let up = rot * spot.0;
+            let eye = center + up * (radius + spot.1.max(0.0) + altitude_m);
+            let to_star = (star - eye).normalize();
+            let star_flat = (to_star - up * to_star.dot(up)).normalize();
+            let ahead = up.cross(star_flat);
+            // Look below the horizon (which dips as the ground falls away).
+            let dip = (radius / (radius + altitude_m)).acos();
+            let pitch = dip + down_deg.to_radians();
+            let look = ahead * pitch.cos() - up * pitch.sin();
+            (eye, eye + look * 1_000.0, up)
+        }
+    }
+}
+
+/// Shoot one stop of the flight to `<out>/<name>.png`.
+fn shoot_stop(stop: &Stop, size: (u32, u32), out: &std::path::Path) -> std::path::PathBuf {
+    let started = std::time::Instant::now();
+    let mut app = build(size);
+    app.update();
+    if let Some(d) = app.world.get_resource::<RenderDisabled>() {
+        eprintln!("no GPU: {}", d.0);
+        std::process::exit(1);
+    }
+    let radius = app
+        .world
+        .resource::<SpaceState>()
+        .body(stop.body)
+        .expect("body")
+        .radius_m;
+    travel_to(&mut app.world, stop.body, 0.0, 0.0, radius).expect("travel");
+    add_ground(&mut app, stop.body, true);
+    app.update_n(2);
+    let aim = |app: &mut App| {
+        let (eye, at, up) = place(app, stop);
+        let mut q = app
+            .world
+            .query_filtered::<&mut Transform, With<SimulationFocus>>();
+        q.single_mut(&mut app.world).unwrap().translation = eye;
+        let mut q = app.world.query_filtered::<&mut Transform, With<Camera>>();
+        for mut tf in q.iter_mut(&mut app.world) {
+            *tf = Transform::from_translation(eye).looking_at(at, up.as_vec3());
+        }
+    };
+    let far = match stop.eye {
+        Eye::Radii { distance_radii, .. } if distance_radii > 10.0 => 3.0 / distance_radii,
+        _ => 1.0,
+    };
+    app.world.spawn((
+        Camera {
+            // As the showcase's camera, quick to adapt.
+            exposure: match Exposure::default() {
+                Exposure::Auto {
+                    min_ev100,
+                    max_ev100,
+                    compensation,
+                    ..
+                } => Exposure::Auto {
+                    min_ev100,
+                    max_ev100,
+                    speed: 40.0,
+                    compensation,
+                },
+                e => e,
+            },
+            ..Camera::perspective(stop.fov * far as f32)
+        },
+        Transform::default(),
+    ));
+    aim(&mut app);
+    app.update_n(2);
+    aim(&mut app);
+    settle(&mut app);
+    // Aim again: the world may have shifted its origin meanwhile.
+    aim(&mut app);
+    app.update_n(12);
+    let path = out.join(format!("{}.png", stop.name));
+    match capture_now(&mut app.world, &path) {
+        Ok(_) => println!(
+            "{:<24} {:>6.1}s  -> {}",
+            stop.name,
+            started.elapsed().as_secs_f32(),
+            path.display()
+        ),
+        Err(e) => eprintln!("{}: {e}", stop.name),
+    }
+    path
+}
+
+/// The flight's stops side by side, four to a row, in `<out>/flight.jpg`.
+fn contact_sheet(shots: &[std::path::PathBuf], out: &std::path::Path) {
+    let (w, h) = (480, 270);
+    let rows = shots.len().div_ceil(4) as u32;
+    let mut sheet = image::RgbImage::new(4 * w, rows * h);
+    for (i, p) in shots.iter().enumerate() {
+        let Ok(img) = image::open(p) else { continue };
+        let small = image::imageops::thumbnail(&img.to_rgb8(), w, h);
+        let (x, y) = ((i % 4) as i64 * w as i64, (i / 4) as i64 * h as i64);
+        image::imageops::overlay(&mut sheet, &small, x, y);
+    }
+    if let Err(e) = sheet.save(out.join("flight.jpg")) {
+        eprintln!("flight.jpg: {e}");
+    }
+}
+
 fn main() {
     engine_core::log::init("warn");
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -505,6 +786,16 @@ fn main() {
         .unwrap_or((960, 540));
     let only: Vec<&str> = args.iter().skip(2).map(String::as_str).collect();
     std::fs::create_dir_all(&out).expect("output folder");
+    // `flight [stops…]`: the flight from Earth's ground to Proxima b's, and a sheet of it.
+    if only.first() == Some(&"flight") {
+        let shots: Vec<_> = flight()
+            .iter()
+            .filter(|s| only.len() == 1 || only[1..].contains(&s.name))
+            .map(|s| shoot_stop(s, size, &out))
+            .collect();
+        contact_sheet(&shots, &out);
+        return;
+    }
     for view in views() {
         if !only.is_empty() && !only.contains(&view.name) {
             continue;

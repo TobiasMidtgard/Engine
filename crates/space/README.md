@@ -77,8 +77,10 @@ world re-anchors on the next body.
   frame behind a ship moving thousands of kilometers per frame.
 - **Gravity, air and light.** Writes `Gravity::bodies` (the anchor and any body whose reach
   holds the focus; never what the anchor orbits, which it falls around with us, so on the
-  Moon only the Moon pulls), sets the renderer's `Atmosphere` to the nearest body with air (off when
-  none), and points every `DirectionalLight` marked `StarLight` at its star with the right
+  Moon only the Moon pulls), sets the renderer's `Atmosphere` to the nearest body with air
+  while the focus is in its sphere of influence (100 to 300 radii; beyond, its far view draws
+  its air), else to no air at all (`density_scale` 0, over a stand-in planet far below, so
+  the renderer's height fog never takes the world's y for an altitude out in space), and points every `DirectionalLight` marked `StarLight` at its star with the right
   illuminance for the distance (≈127 000 lux at 1 AU). Each body's air carries its own
   scattering (`BodyAtmosphere`, with the renderer's presets `earth()` and `mars()`): Earth's
   sky is blue with red sunsets, and on Mars the sky is butterscotch by day with a blue glow
@@ -181,12 +183,17 @@ The terrain takes the far view's own maps the other way (`engine_terrain::FarLoo
 with `look::bake_surface_on`): from high up its ground wears them, so lava cracks, dune seas
 and the ice's stained lineae don't vanish when the ground comes. Pictures of the handover:
 `cargo run --release -p approach_shots -- out 960x540 [views…]` shoots each view with the far
-view alone and with the ground, from the same place.
+view alone and with the ground, from the same place. `… flight` shoots one trip instead, 15
+stops from a field on Earth through orbit, past the Sun and Proxima Centauri down onto
+Proxima b's ground, with the showcase's adapting exposure, and puts them on `flight.jpg`.
 
 ## Known limits (next rounds)
 
-- Planets of other stars: a locked world's terrain climate follows latitude, not the angle
-  from its star; their weather is the home weather. Seen from afar the ground under air is
+- Planets of other stars: their weather is the home weather.
+- Out in deep space (a few AU from the Sun and on) the renderer's volumetric fog pass draws a
+  lit gray half-plane with froxel steps across the view, whatever the height fog's settings
+  say (`approach_shots … flight 08_sun_from_100au`; gone with `volumetric_fog` off). Passed to
+  the render crate's owners. Seen from afar the ground under air is
   veiled by the sky's aerial perspective, a little more than the far view's own haze.
 
 - While the world is anchored elsewhere, what was left on a body is not simulated with it:

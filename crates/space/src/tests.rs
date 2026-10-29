@@ -142,6 +142,28 @@ fn travel_to_the_moon_and_stand_on_it() {
     assert_eq!(air.density, 0.0);
 }
 
+#[test]
+fn the_sky_has_no_air_far_from_every_planet() {
+    let mut app = app();
+    assert_eq!(app.world.resource::<Atmosphere>().density_scale, 1.0);
+    // Between the planets, a few AU out, or on an airless world with no air in reach
+    // (Mercury): no planet's air is near enough to be the sky's. No air, over a stand-in far
+    // below, so nothing finds fog at y = 0.
+    for (body, altitude) in [("Sun", 5.0 * 1.496e11), ("Mercury", 2.0)] {
+        travel_to(&mut app.world, body, 60.0, 0.0, altitude).unwrap();
+        app.update();
+        let sky = *app.world.resource::<Atmosphere>();
+        assert!(sky.enabled && sky.density_scale == 0.0, "{body}");
+        let focus = focus(&mut app);
+        assert!((focus - sky.planet_center).length() > 1e7, "{body}");
+    }
+    // Back near Earth (inside its sphere of influence), its air is the sky again.
+    travel_to(&mut app.world, "Earth", 0.0, 0.0, 100.0 * 6.371e6).unwrap();
+    app.update();
+    let sky = *app.world.resource::<Atmosphere>();
+    assert!(sky.density_scale == 1.0 && (sky.planet_radius - 6.371e6).abs() < 1e4);
+}
+
 fn sample_air(app: &App, p: DVec3) -> engine_world::AirSample {
     let w = &app.world;
     w.resource::<Atmospheres>().sample(

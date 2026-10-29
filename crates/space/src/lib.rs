@@ -1300,31 +1300,49 @@ pub fn update_space(world: &mut World) {
         }
     }
 
-    // Atmosphere: the body with air whose air is closest to the focus.
+    // Atmosphere: the body with air whose air is closest to the focus, while the focus is
+    // within its sphere of influence (at least 100 radii, at most 300: a terrain drawn from 40
+    // radii takes its aerial perspective from the sky's air). Further out its far view draws
+    // its air (`BodyHaze`): the sky's air would have to find the planet in single
+    // precision from too far, and drew a jagged ground sphere across the view (seen a few AU
+    // from the Sun). With no air near, the sky has none (`density_scale` 0) over a stand-in
+    // far below: the renderer's height fog and sky then know there is no air, instead of
+    // taking the world's y for an altitude. (Not over the airless body itself: the ground's
+    // shading then changes on the way down, away from its far view.)
     if settings.drive_atmosphere && world.contains_resource::<Atmosphere>() {
         let f = focus.unwrap_or(DVec3::ZERO);
+        let near = |i: usize| {
+            let s = &states[i];
+            let reach = if s.parent.is_some() {
+                s.soi_m.clamp(s.radius_m * 100.0, s.radius_m * 300.0)
+            } else {
+                s.radius_m * 300.0
+            };
+            (s.world_position - f).length() < reach
+        };
+        let above =
+            |i: usize, top: f64| (states[i].world_position - f).length() - states[i].radius_m - top;
         let best = bodies
             .iter()
             .enumerate()
+            .filter(|(i, _)| near(*i))
             .filter_map(|(i, (_, b))| b.atmosphere.map(|a| (i, a)))
             .min_by(|(a, aa), (b, ba)| {
-                let da = (states[*a].world_position - f).length()
-                    - states[*a].radius_m
-                    - aa.thickness_m as f64;
-                let db = (states[*b].world_position - f).length()
-                    - states[*b].radius_m
-                    - ba.thickness_m as f64;
-                da.total_cmp(&db)
+                above(*a, aa.thickness_m as f64).total_cmp(&above(*b, ba.thickness_m as f64))
             });
         let mut atmo = world.resource_mut::<Atmosphere>();
+        atmo.enabled = true;
         match best {
             Some((i, a)) => {
-                atmo.enabled = true;
                 atmo.planet_center = states[i].world_position;
                 atmo.planet_radius = states[i].radius_m;
                 a.apply(&mut atmo);
             }
-            None => atmo.enabled = false,
+            None => {
+                atmo.planet_center = f - DVec3::Y * NO_AIR_FLOOR_M;
+                atmo.planet_radius = 1.0;
+                atmo.density_scale = 0.0;
+            }
         }
     }
 
@@ -1422,6 +1440,10 @@ fn focus_position(world: &mut World) -> Option<DVec3> {
                 .map(|f| f.primary())
         })
 }
+
+/// With no air near, how far below the focus the sky's stand-in planet (1 m across, airless)
+/// lies, so nothing takes the world's y for an altitude.
+const NO_AIR_FLOOR_M: f64 = 1e8;
 
 /// Put the space module's anchor on `body` with `lat`/`lon` at the world origin, and move every
 /// `SimulationFocus` entity to `altitude_m` above that spot (a quick trip, for tours and
