@@ -499,6 +499,13 @@ impl ScriptRuntime {
             .map(|f| (f.source.clone(), f.version))
     }
 
+    /// `path`'s class table, once it has loaded.
+    pub(crate) fn class(&self, path: &str) -> Option<Table> {
+        let files = self.files();
+        let key = files.map.get(&normalize(path))?.value.as_ref()?;
+        self.lua.registry_value::<Table>(key).ok()
+    }
+
     /// Loads `path` now (or returns the error that kept it from loading). Scripts load on their
     /// own when an entity gets a `Script`; this is for tools.
     pub fn ensure_loaded(&mut self, world: &mut World, path: &str) -> Result<(), String> {
@@ -2269,7 +2276,7 @@ fn swap_in(
 
 /// A copy of a props default, so instances don't share one table. Frozen tables (`vec3`,
 /// `quat`, `table.freeze`) can't change, so they are shared as they are.
-fn deep_copy(lua: &Lua, v: &Value) -> mlua::Result<Value> {
+pub(crate) fn deep_copy(lua: &Lua, v: &Value) -> mlua::Result<Value> {
     match v {
         Value::Table(t) if !t.is_readonly() => {
             let c = lua.create_table()?;

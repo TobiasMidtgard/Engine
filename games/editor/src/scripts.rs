@@ -37,13 +37,16 @@ use engine::core::registry::{call_api, unknown_name_error};
 use engine::prelude::*;
 use engine_script::debug::{self, FileStop, Go, StopView};
 use engine_script::editing::{self, FileMarks, OutputCursor, Word, WordKind};
+use engine_script::props::{Prop, PropKind};
 use engine_script::{Script, ScriptRuntime, ScriptSettings, ScriptsHeld};
 use serde_json::{Value, json};
 
 use crate::editor::{self, Editor, Mode, Tab};
+use crate::scene_ops::SceneOrder;
 use crate::shots::{ShotScript, Step};
 use crate::theme;
 use crate::ui::EditorDock;
+use crate::undo::Command;
 
 /// Scripting in the editor: scripts held still outside Play.
 pub struct ScriptsTabPlugin;
@@ -53,7 +56,8 @@ impl Plugin for ScriptsTabPlugin {
         app.insert_resource(ScriptsHeld)
             .init_resource::<ScriptsTab>()
             .add_systems(Update, hold_scripts.before(UpdateSet::Logic))
-            .add_systems(Update, follow_debugger.after(UpdateSet::Logic));
+            .add_systems(Update, follow_debugger.after(UpdateSet::Logic))
+            .add_systems(Update, keep_play_values.after(UpdateSet::Logic));
     }
 }
 
@@ -157,6 +161,8 @@ pub struct ScriptsTab {
     /// The new-script name being typed (the New button's field).
     new_name: Option<String>,
     pub debug: DebugState,
+    /// The Details panel's script part.
+    pub props: PropsPanel,
 }
 
 /// An open file.
@@ -1309,14 +1315,22 @@ fn code_view(ui: &mut egui::Ui, world: &mut World, tab: &mut ScriptsTab, now: f6
                 {
                     let tip = debug::Variable { name: expr, ..v };
                     let _ = out.response.response.clone().on_hover_ui_at_pointer(|ui| {
-                        ui.label(variable_text(&tip));
+                        ui.set_max_width(520.0);
+                        ui.label(variable_text(ui, &tip, f32::INFINITY).0);
                     });
                 }
             }
             if let Some(line) = jump_line
                 && let Some(r) = lines.get(line)
             {
-                ui.scroll_to_rect(r.expand(row_h * 3.0), Some(egui::Align::Center));
+                // The line's height at the code's left edge: a long line must not scroll the
+                // view sideways to its middle.
+                let left = out.response.rect.left();
+                let at = Rect::from_x_y_ranges(left..=left + GUTTER, r.y_range());
+                ui.scroll_to_rect(
+                    at.expand2(Vec2::new(0.0, row_h * 3.0)),
+                    Some(egui::Align::Center),
+                );
             }
             // Gutter clicks: a breakpoint on that line, or off again; Shift+click shows the
             // line's values live instead (a logpoint); right-click for a condition.
@@ -2915,7 +2929,7 @@ fn stop_strip(ui: &mut egui::Ui, world: &mut World, stop: &StopView) {
         .fill(STOP_STRIP)
         .inner_margin(egui::Margin::symmetric(8, 4))
         .show(ui, |ui| {
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 let buttons = [
                     ("▶ Continue", "F5", Go::Continue),
                     ("Step over", "F10", Go::StepOver),
@@ -2945,10 +2959,7 @@ fn stop_strip(ui: &mut egui::Ui, world: &mut World, stop: &StopView) {
                 if let Some(e) = &stop.exception {
                     ui.label(RichText::new(e).color(ERROR));
                 } else {
-                    ui.label(theme::dim(
-                        "The other scripts wait and the world's time is held; the editor keeps \
-                         running.",
-                    ));
+                    ui.label(theme::dim("Other scripts wait, the world's time is held."));
                 }
             });
         });
@@ -2966,6 +2977,9 @@ fn debug_panel(ui: &mut egui::Ui, world: &mut World, tab: &mut ScriptsTab, stop:
         .id_salt("script debugger")
         .auto_shrink([false, false])
         .show(ui, |ui| {
+            // Every row is cut to the panel's width ("…"), never widening it under the code.
+            ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
+            ui.set_max_width(ui.available_width());
             heading(ui, "CALL STACK");
             let mut pick = None;
             for (i, f) in stop.frames.iter().enumerate() {
@@ -2980,7 +2994,11 @@ fn debug_panel(ui: &mut egui::Ui, world: &mut World, tab: &mut ScriptsTab, stop:
                     theme::TEXT_DIM
                 };
                 job.append(&f.name, 0.0, fmt(&mono, name_color));
-                job.append(&format!("  {file}:{}", f.line), 0.0, fmt(&mono, LINE_NO));
+                job.append(
+                    &format!("  {file}:{}", f.line),
+                    0.0,
+                    fmt(&mono, theme::TEXT_DIM),
+                );
                 let r = ui.add(egui::Button::selectable(i == tab.debug.frame, job));
                 if r.clicked() {
                     pick = Some(i);
@@ -3018,17 +3036,24 @@ fn debug_panel(ui: &mut egui::Ui, world: &mut World, tab: &mut ScriptsTab, stop:
                     {
                         remove = Some(i);
                     }
+                    let width = ui.available_width() - 20.0;
                     match answer {
                         Ok(v) if v.reference != 0 => {
-                            egui::CollapsingHeader::new(variable_text(&v))
+                            let (text, _) = variable_text(ui, &v, width);
+                            egui::CollapsingHeader::new(text)
                                 .id_salt(("script watch", &expr))
                                 .show(ui, |ui| variable_rows(ui, world, v.reference, &expr, 1));
                         }
                         Ok(v) => {
-                            ui.label(variable_text(&v));
+                            let (text, cut) = variable_text(ui, &v, width);
+                            let r = ui.label(text);
+                            if cut {
+                                r.on_hover_text(&v.value);
+                            }
                         }
                         Err(e) => {
-                            ui.label(RichText::new(format!("{expr}: {e}")).color(ERROR));
+                            ui.label(RichText::new(format!("{expr}: {e}")).color(ERROR))
+                                .on_hover_text(e);
                         }
                     }
                 });
@@ -3059,9 +3084,20 @@ fn fmt(font: &FontId, color: Color32) -> TextFormat {
     TextFormat::simple(font.clone(), color)
 }
 
-/// `name = value`, colored as the code is.
-fn variable_text(v: &debug::Variable) -> LayoutJob {
+/// `name = value`, colored as the code is; a value too long for `width` points is cut with "…"
+/// (true when cut: hover shows it whole).
+fn variable_text(ui: &egui::Ui, v: &debug::Variable, width: f32) -> (LayoutJob, bool) {
     let mono = FontId::monospace(12.5);
+    let em = ui.fonts_mut(|f| f.glyph_width(&mono, '0')).max(1.0);
+    let room = ((width / em) as usize)
+        .saturating_sub(v.name.chars().count() + 3)
+        .max(6);
+    let cut = v.value.chars().count() > room;
+    let value: String = if cut {
+        v.value.chars().take(room - 1).chain(['…']).collect()
+    } else {
+        v.value.clone()
+    };
     let mut job = LayoutJob::default();
     let name_color = if v.name == "self" { SELF } else { theme::TEXT };
     job.append(&v.name, 0.0, fmt(&mono, name_color));
@@ -3074,8 +3110,8 @@ fn variable_text(v: &debug::Variable) -> LayoutJob {
         "function" => CALL,
         _ => theme::TEXT_DIM,
     };
-    job.append(&v.value, 0.0, fmt(&mono, value_color));
-    job
+    job.append(&value, 0.0, fmt(&mono, value_color));
+    (job, cut)
 }
 
 /// A scope's variables or a table's entries; tables open up (their open state kept by the
@@ -3087,16 +3123,27 @@ fn variable_rows(ui: &mut egui::Ui, world: &World, reference: usize, path: &str,
     }
     for v in vars.into_iter().take(300) {
         let at = format!("{path}.{}", v.name);
-        if v.reference != 0 && depth < 8 {
-            egui::CollapsingHeader::new(variable_text(&v))
+        // Both kinds of row start after the open/close arrow's room.
+        let width = ui.available_width() - 20.0;
+        let (text, cut) = variable_text(ui, &v, width);
+        let r = if v.reference != 0 && depth < 8 {
+            egui::CollapsingHeader::new(text)
                 .id_salt(("script variable", &at))
                 .show(ui, |ui| {
                     variable_rows(ui, world, v.reference, &at, depth + 1)
-                });
+                })
+                .header_response
         } else {
             ui.horizontal(|ui| {
                 ui.add_space(18.0);
-                ui.label(variable_text(&v));
+                ui.label(text)
+            })
+            .inner
+        };
+        if cut {
+            r.on_hover_ui(|ui| {
+                ui.set_max_width(520.0);
+                ui.label(RichText::new(&v.value).monospace());
             });
         }
     }
@@ -3229,6 +3276,860 @@ fn expression_at(text: &str, char_index: usize) -> Option<String> {
         && !KEYWORDS.contains(&first)
         && !expr.split('.').any(str::is_empty))
     .then_some(expr)
+}
+
+// ----------------------------------------------------------------------------- the Details panel
+
+/// What the Details panel keeps for scripts between frames.
+#[derive(Default)]
+pub struct PropsPanel {
+    /// Scene objects (by [`SceneOrder`]) whose script values Stop keeps, as Unreal's Keep
+    /// Simulation Changes: their props as they were last frame.
+    keep: BTreeMap<u64, Option<Value>>,
+    /// A list prop's text while it is typed (by entity and prop).
+    typing: HashMap<(Entity, String), String>,
+    /// Each file's props as it last loaded, shown while it has a mistake.
+    good: HashMap<String, Vec<Prop>>,
+}
+
+/// What a prop's row asks for.
+enum RowAction {
+    Set(Value),
+    /// Back to the script's default.
+    Reset,
+    /// Show its line in the Scripts tab.
+    Open(u32),
+}
+
+/// A Script component in the Details panel (inspector.rs), as Unity's inspector shows a
+/// MonoBehaviour's fields and Unreal its Instance Editable variables: the file (pick another,
+/// or open it), Enabled, and each prop the script declares (`engine_script::props`) as a field
+/// of its kind, in its groups, with its comment as the tooltip. A value set here overrides the
+/// script's default for this object: bold, with the blue bar of an override (Unity's), and ↺ or
+/// right-click puts the default back (Unreal's reset arrow). While playing, changes reach the
+/// running script at once (`on_props`), the script's own values show live under its props, and
+/// Keep after Stop keeps what was tuned.
+pub fn details(
+    ui: &mut egui::Ui,
+    world: &mut World,
+    editor: &mut Editor,
+    entity: Entity,
+    value: &Value,
+) {
+    let path = value["path"].as_str().unwrap_or_default().to_string();
+    let file = path.rsplit('/').next().unwrap_or(&path).to_string();
+    let playing = editor.is_playing();
+    let mut after = value.clone();
+    let mut open_at: Option<Option<u32>> = None;
+
+    ui.horizontal(|ui| {
+        let shown = if path.is_empty() {
+            "Choose a script…".to_string()
+        } else {
+            path.clone()
+        };
+        egui::ComboBox::from_id_salt(("script file", entity))
+            .selected_text(RichText::new(format!("📜 {shown}")).monospace())
+            .width((ui.available_width() - 62.0).max(80.0))
+            .height(360.0)
+            .show_ui(ui, |ui| {
+                for f in engine_script::props::files(world) {
+                    if ui.selectable_label(f == path, &f).clicked() && f != path {
+                        after["path"] = json!(f);
+                        // Another script: its own defaults.
+                        after["props"] = json!({});
+                    }
+                }
+            });
+        if ui
+            .add_enabled(!path.is_empty(), egui::Button::new("Open"))
+            .on_hover_text("Show the file in the Scripts tab")
+            .clicked()
+        {
+            open_at = Some(None);
+        }
+    });
+    let mut enabled = value["enabled"].as_bool().unwrap_or(true);
+    if ui
+        .checkbox(&mut enabled, "Enabled")
+        .on_hover_text("While off, the script's hooks and tasks pause (its state stays)")
+        .changed()
+    {
+        after["enabled"] = json!(enabled);
+    }
+    if path.is_empty() {
+        commit_script(world, editor, entity, value, after);
+        return;
+    }
+
+    // What keeps it from running: a file that doesn't load, or an error while playing.
+    let schema = engine_script::props::of(world, &path);
+    let marks = editing::file_marks(world, &path);
+    let problem = match &schema {
+        Err(e) => Some((error_line(e), message_gist(e))),
+        Ok(_) => marks
+            .error
+            .as_ref()
+            .or(marks.fault.as_ref())
+            .map(|m| (m.line, m.message.clone())),
+    };
+    if let Some((line, message)) = problem {
+        let at = line.map(|l| format!("{file}:{l}: ")).unwrap_or_default();
+        let r = ui.add(
+            egui::Label::new(RichText::new(format!("✖ {at}{message}")).color(ERROR))
+                .wrap()
+                .sense(egui::Sense::click()),
+        );
+        if r.on_hover_text("Open its line").clicked() {
+            open_at = Some(line);
+        }
+    }
+
+    // A file with a mistake keeps the fields it had (as the running game keeps its old code).
+    let loaded = schema.is_ok();
+    let props = {
+        let mut tab = world.get_resource_mut::<ScriptsTab>();
+        match (schema, tab.as_deref_mut()) {
+            (Ok(props), Some(tab)) => {
+                tab.props.good.insert(path.clone(), props.clone());
+                props
+            }
+            (Ok(props), None) => props,
+            (Err(_), tab) => tab
+                .and_then(|t| t.props.good.get(&path).cloned())
+                .unwrap_or_default(),
+        }
+    };
+    let shown: Vec<&Prop> = props
+        .iter()
+        .filter(|p| !p.hidden && !matches!(p.kind, PropKind::Other(_)))
+        .collect();
+    if shown.is_empty() && loaded && problem_free(&marks) {
+        ui.label(theme::dim(
+            "No props: settings the script reads as self.props.<name> show here once its \
+             props table declares them.",
+        ));
+    } else if !loaded && !shown.is_empty() {
+        ui.label(theme::dim("As they were before the mistake:"));
+    }
+    let names = if shown.iter().any(|p| has_entity(p)) {
+        scene_names(world)
+    } else {
+        Vec::new()
+    };
+    let overrides = value["props"].as_object().cloned().unwrap_or_default();
+    let mut actions: Vec<(String, RowAction)> = Vec::new();
+    {
+        let mut typing = world
+            .get_resource_mut::<ScriptsTab>()
+            .map(|mut t| std::mem::take(&mut t.props.typing))
+            .unwrap_or_default();
+        let mut row_ctx = RowCtx {
+            entity,
+            names: &names,
+            typing: &mut typing,
+        };
+        // Props without a group first, then each group (Godot's and Unreal's categories).
+        let mut groups: Vec<Option<&str>> = Vec::new();
+        for p in &shown {
+            if !groups.contains(&p.group.as_deref()) {
+                groups.push(p.group.as_deref());
+            }
+        }
+        groups.sort_by_key(|g| g.is_some());
+        for group in groups {
+            let mut rows = |ui: &mut egui::Ui| {
+                for p in shown.iter().filter(|p| p.group.as_deref() == group) {
+                    if let Some(a) = prop_row(ui, &mut row_ctx, p, overrides.get(&p.name)) {
+                        actions.push((p.name.clone(), a));
+                    }
+                }
+            };
+            match group {
+                None => rows(ui),
+                Some(name) => {
+                    egui::CollapsingHeader::new(RichText::new(name).strong().color(theme::TEXT))
+                        .id_salt(("script group", entity, name))
+                        .default_open(true)
+                        .show(ui, rows);
+                }
+            }
+        }
+        if let Some(mut t) = world.get_resource_mut::<ScriptsTab>() {
+            t.props.typing = typing;
+        }
+    }
+    for (name, action) in actions {
+        match action {
+            RowAction::Set(v) => {
+                let default = props.iter().find(|p| p.name == name).map(|p| &p.default);
+                if let Some(map) = after["props"].as_object_mut() {
+                    // The default again is no override (the scene stays clean, as Unity's).
+                    if default.is_some_and(|d| same(d, &v)) {
+                        map.remove(&name);
+                    } else {
+                        map.insert(name, v);
+                    }
+                } else {
+                    after["props"] = json!({ name: v });
+                }
+            }
+            RowAction::Reset => {
+                if let Some(map) = after["props"].as_object_mut() {
+                    map.remove(&name);
+                }
+            }
+            RowAction::Open(line) => open_at = Some(Some(line)),
+        }
+    }
+
+    if playing {
+        live_values(ui, world, entity);
+        keep_toggle(ui, world, entity);
+    }
+    commit_script(world, editor, entity, value, after);
+    if let Some(line) = open_at {
+        open_in_tab(world, &path, line);
+    }
+}
+
+fn problem_free(marks: &FileMarks) -> bool {
+    marks.error.is_none() && marks.fault.is_none()
+}
+
+fn has_entity(p: &Prop) -> bool {
+    p.kind == PropKind::Entity || p.fields.iter().any(has_entity)
+}
+
+/// The scene's object names, for `@entity` props.
+fn scene_names(world: &World) -> Vec<String> {
+    let mut names: Vec<String> = world
+        .iter_entities()
+        .filter(|e| e.get::<crate::scene_ops::InScene>().is_some())
+        .filter_map(|e| e.get::<Name>().map(|n| n.as_str().to_string()))
+        .filter(|n| !n.is_empty())
+        .collect();
+    names.sort();
+    names.dedup();
+    names
+}
+
+/// Where a message's `file.luau:12:` (or `.graph`) ends, and the line.
+fn located(message: &str) -> Option<(usize, u32)> {
+    [".luau:", ".graph:"].iter().find_map(|ext| {
+        let start = message.find(ext)? + ext.len();
+        let digits: String = message[start..]
+            .chars()
+            .take_while(|c| c.is_ascii_digit())
+            .collect();
+        let line = digits.parse().ok()?;
+        let end = start + digits.len();
+        Some((end + usize::from(message[end..].starts_with(':')), line))
+    })
+}
+
+/// `lamp.luau:9: ...` → 9.
+fn error_line(message: &str) -> Option<u32> {
+    located(message).map(|(_, line)| line)
+}
+
+/// The message without its `file:line:` (shown apart) and the traceback.
+fn message_gist(message: &str) -> String {
+    let first = message.lines().next().unwrap_or(message);
+    match located(first) {
+        Some((end, _)) => first[end..].trim().to_string(),
+        None => first.trim().to_string(),
+    }
+}
+
+/// Sets the Script component to `after` if anything changed (one undo step per drag).
+fn commit_script(
+    world: &mut World,
+    editor: &mut Editor,
+    entity: Entity,
+    before: &Value,
+    after: Value,
+) {
+    if &after != before {
+        editor::apply(
+            world,
+            editor,
+            Command::Component {
+                entity,
+                name: "Script".into(),
+                before: Some(before.clone()),
+                after: Some(after),
+            },
+        );
+    }
+}
+
+/// Opens `path` in the Scripts tab (a graph in the Graphs tab) at `line`, and shows that tab.
+fn open_in_tab(world: &mut World, path: &str, line: Option<u32>) {
+    let to = if path.ends_with(".graph") {
+        if let Some(mut graphs) = world.remove_resource::<crate::graphs::GraphsTab>() {
+            crate::graphs::open(world, &mut graphs, path);
+            world.insert_resource(graphs);
+        }
+        Tab::Graphs
+    } else {
+        if let Some(mut tab) = world.remove_resource::<ScriptsTab>() {
+            open(world, &mut tab, path, line);
+            world.insert_resource(tab);
+        }
+        Tab::Scripts
+    };
+    if let Some(mut dock) = world.get_resource_mut::<EditorDock>()
+        && let Some(at) = dock.0.find_tab(&to)
+    {
+        let _ = dock.0.set_active_tab(at);
+    }
+}
+
+/// JSON values equal as props: numbers by value (`1800` and `1800.0`), arrays and objects
+/// entry by entry.
+fn same(a: &Value, b: &Value) -> bool {
+    match (a, b) {
+        (Value::Number(x), Value::Number(y)) => {
+            (x.as_f64().unwrap_or(f64::NAN) - y.as_f64().unwrap_or(f64::NAN)).abs() < 1e-9
+        }
+        (Value::Array(x), Value::Array(y)) => {
+            x.len() == y.len() && x.iter().zip(y).all(|(a, b)| same(a, b))
+        }
+        (Value::Object(x), Value::Object(y)) => {
+            x.len() == y.len() && x.iter().all(|(k, v)| y.get(k).is_some_and(|w| same(v, w)))
+        }
+        _ => a == b,
+    }
+}
+
+/// A number as the scene stores it: whole numbers as integers.
+fn num(v: f64) -> Value {
+    if v.fract() == 0.0 && v.abs() < 1e15 {
+        json!(v as i64)
+    } else {
+        json!(v)
+    }
+}
+
+struct RowCtx<'a> {
+    entity: Entity,
+    names: &'a [String],
+    typing: &'a mut HashMap<(Entity, String), String>,
+}
+
+/// One prop: its name (the override bar, the tooltip, a right-click menu), its field, and ↺
+/// while it differs from the default. A table prop folds out with a row per entry.
+fn prop_row(
+    ui: &mut egui::Ui,
+    ctx: &mut RowCtx,
+    p: &Prop,
+    current: Option<&Value>,
+) -> Option<RowAction> {
+    let overridden = current.is_some_and(|c| !same(c, &p.default));
+    let mut value = current.cloned().unwrap_or_else(|| p.default.clone());
+    if p.kind == PropKind::Table {
+        // A part set keeps the rest of the table's defaults (engine_script's props merge).
+        let mut set = None;
+        let r = egui::CollapsingHeader::new(prop_label(p, overridden))
+            .id_salt(("script table", ctx.entity, &p.name))
+            .default_open(true)
+            .show(ui, |ui| {
+                for f in &p.fields {
+                    let cur = value.get(&f.name).cloned();
+                    match prop_row(ui, ctx, f, cur.as_ref()) {
+                        Some(RowAction::Set(v)) => {
+                            value[&f.name] = v;
+                            set = Some(RowAction::Set(value.clone()));
+                        }
+                        Some(RowAction::Reset) => {
+                            value[&f.name] = f.default.clone();
+                            set = Some(RowAction::Set(value.clone()));
+                        }
+                        other => set = set.take().or(other),
+                    }
+                }
+            });
+        if overridden {
+            crate::prefab_ui::bar(ui, r.header_response.rect);
+        }
+        let mut action = set;
+        r.header_response
+            .on_hover_ui(|ui| prop_tip(ui, p, overridden))
+            .context_menu(|ui| {
+                if let Some(a) = row_menu(ui, p, overridden) {
+                    action = Some(a);
+                }
+            });
+        return action;
+    }
+    let mut action = None;
+    ui.horizontal(|ui| {
+        let label_w = (ui.available_width() * 0.36).clamp(80.0, 150.0);
+        let r = ui
+            .allocate_ui_with_layout(
+                Vec2::new(label_w, 20.0),
+                egui::Layout::left_to_right(egui::Align::Center),
+                |ui| {
+                    ui.set_min_width(label_w);
+                    ui.add(
+                        egui::Label::new(prop_label(p, overridden))
+                            .truncate()
+                            .sense(egui::Sense::click()),
+                    )
+                },
+            )
+            .inner;
+        if overridden {
+            crate::prefab_ui::bar(ui, r.rect);
+        }
+        r.on_hover_ui(|ui| prop_tip(ui, p, overridden))
+            .context_menu(|ui| {
+                if let Some(a) = row_menu(ui, p, overridden) {
+                    action = Some(a);
+                }
+            });
+        // Room for ↺ at the end, so the fields line up whether or not it shows.
+        let width = (ui.available_width() - 30.0).max(60.0);
+        if edit_prop(ui, ctx, p, &mut value, width) {
+            action = Some(RowAction::Set(value.clone()));
+        }
+        if overridden
+            && ui
+                .small_button("↺")
+                .on_hover_text(format!(
+                    "Back to the script's default ({})",
+                    prop_value_text(p, &p.default)
+                ))
+                .clicked()
+        {
+            action = Some(RowAction::Reset);
+        }
+    });
+    action
+}
+
+/// "Lumens" (bold blue while overridden).
+fn prop_label(p: &Prop, overridden: bool) -> RichText {
+    let text = RichText::new(crate::inspector::pretty(&p.name));
+    if overridden {
+        text.strong().color(crate::prefab_ui::PREFAB)
+    } else {
+        text
+    }
+}
+
+fn prop_tip(ui: &mut egui::Ui, p: &Prop, overridden: bool) {
+    ui.set_max_width(360.0);
+    ui.label(RichText::new(&p.name).monospace().strong());
+    if !p.doc.is_empty() {
+        ui.label(&p.doc);
+    }
+    let mut facts = vec![format!("Default: {}", prop_value_text(p, &p.default))];
+    if let (Some(lo), Some(hi)) = (p.min, p.max) {
+        facts.push(format!("from {} to {}", short(lo), short(hi)));
+    } else if let Some(lo) = p.min {
+        facts.push(format!("at least {}", short(lo)));
+    } else if let Some(hi) = p.max {
+        facts.push(format!("at most {}", short(hi)));
+    }
+    ui.label(theme::dim(facts.join(", ")));
+    if overridden {
+        ui.label(theme::dim(
+            "Set on this object (right-click or ↺ for the script's default)",
+        ));
+    }
+}
+
+fn row_menu(ui: &mut egui::Ui, p: &Prop, overridden: bool) -> Option<RowAction> {
+    let mut out = None;
+    if ui
+        .add_enabled(
+            overridden,
+            egui::Button::new("Reset to the script's default"),
+        )
+        .clicked()
+    {
+        out = Some(RowAction::Reset);
+        ui.close();
+    }
+    if p.line > 0 && ui.button(format!("Open its line ({})", p.line)).clicked() {
+        out = Some(RowAction::Open(p.line));
+        ui.close();
+    }
+    out
+}
+
+fn short(v: f64) -> String {
+    let s = format!("{v:.3}");
+    let s = s.trim_end_matches('0');
+    s.strip_suffix('.').unwrap_or(s).to_string()
+}
+
+/// A value as the tooltip shows it: `1800 lm`, `45°`, `(1, 0.72, 0.42)`.
+fn prop_value_text(p: &Prop, v: &Value) -> String {
+    let unit = p
+        .unit
+        .as_deref()
+        .map(|u| format!(" {u}"))
+        .unwrap_or_default();
+    match (&p.kind, v) {
+        (PropKind::Angle, Value::Number(n)) => {
+            format!("{}°", short(n.as_f64().unwrap_or(0.0).to_degrees()))
+        }
+        (_, Value::Number(n)) => format!("{}{unit}", short(n.as_f64().unwrap_or(0.0))),
+        (_, Value::String(s)) if s.is_empty() => "none".into(),
+        (_, Value::String(s)) => format!("\"{s}\""),
+        (_, Value::Array(a)) if a.iter().all(|x| x.is_number()) => format!(
+            "({})",
+            a.iter()
+                .map(|x| short(x.as_f64().unwrap_or(0.0)))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        (_, other) => other.to_string(),
+    }
+}
+
+/// How fast a number drags: about 1/200 of its default's size a point.
+fn drag_speed(p: &Prop) -> f64 {
+    if let Some(step) = p.step {
+        return step;
+    }
+    let size = p.default.as_f64().unwrap_or(1.0).abs().max(0.2);
+    size * 0.005
+}
+
+/// The field for one prop's value; true when it changed.
+fn edit_prop(ui: &mut egui::Ui, ctx: &mut RowCtx, p: &Prop, value: &mut Value, width: f32) -> bool {
+    let unit = p
+        .unit
+        .as_deref()
+        .map(|u| format!(" {u}"))
+        .unwrap_or_default();
+    match &p.kind {
+        PropKind::Number | PropKind::Integer => {
+            let mut v = value.as_f64().unwrap_or(0.0);
+            let changed = if let (true, Some(lo), Some(hi)) = (p.slider, p.min, p.max) {
+                // The slider and its number box share the width: the box as wide as its
+                // longest value with the unit.
+                let digits = format!("{:.2}", hi.abs().max(lo.abs())).len() + usize::from(lo < 0.0);
+                let chars = digits + unit.chars().count();
+                let number_w = 18.0 + 7.5 * chars as f32;
+                ui.spacing_mut().slider_width =
+                    (width - number_w - ui.spacing().item_spacing.x).max(40.0);
+                let mut s = egui::Slider::new(&mut v, lo..=hi)
+                    .suffix(unit)
+                    .clamping(egui::SliderClamping::Always);
+                if let Some(step) = p.step {
+                    s = s.step_by(step);
+                }
+                if p.kind == PropKind::Integer {
+                    s = s.integer();
+                }
+                ui.add(s).changed()
+            } else {
+                let mut d = egui::DragValue::new(&mut v)
+                    .speed(drag_speed(p))
+                    .suffix(unit)
+                    .range(p.min.unwrap_or(f64::NEG_INFINITY)..=p.max.unwrap_or(f64::INFINITY));
+                d = if p.kind == PropKind::Integer {
+                    d.fixed_decimals(0).speed(drag_speed(p).max(0.05))
+                } else {
+                    d.max_decimals(4)
+                };
+                ui.add_sized([width, 20.0], d).changed()
+            };
+            if changed {
+                *value = num(p.clamp(v));
+            }
+            changed
+        }
+        PropKind::Angle => {
+            let mut deg = value.as_f64().unwrap_or(0.0).to_degrees();
+            let d = egui::DragValue::new(&mut deg)
+                .speed(0.5)
+                .suffix("°")
+                .max_decimals(2)
+                .range(
+                    p.min.map_or(f64::NEG_INFINITY, f64::to_degrees)
+                        ..=p.max.map_or(f64::INFINITY, f64::to_degrees),
+                );
+            let changed = ui.add_sized([width, 20.0], d).changed();
+            if changed {
+                *value = num(p.clamp(deg.to_radians()));
+            }
+            changed
+        }
+        PropKind::Bool => {
+            let mut b = value.as_bool().unwrap_or(false);
+            let changed = ui.checkbox(&mut b, "").changed();
+            if changed {
+                *value = json!(b);
+            }
+            changed
+        }
+        PropKind::Text => {
+            let mut s = value.as_str().unwrap_or_default().to_string();
+            let changed = ui
+                .add(egui::TextEdit::singleline(&mut s).desired_width(width))
+                .changed();
+            if changed {
+                *value = json!(s);
+            }
+            changed
+        }
+        PropKind::Choice(list) => {
+            let mut s = value.as_str().unwrap_or_default().to_string();
+            let before = s.clone();
+            egui::ComboBox::from_id_salt(("script choice", ctx.entity, &p.name))
+                .selected_text(&s)
+                .width(width)
+                .show_ui(ui, |ui| {
+                    for c in list {
+                        ui.selectable_value(&mut s, c.clone(), c);
+                    }
+                });
+            if s != before {
+                *value = json!(s);
+                return true;
+            }
+            false
+        }
+        PropKind::Entity => {
+            let mut s = value.as_str().unwrap_or_default().to_string();
+            let before = s.clone();
+            let missing = !s.is_empty() && !ctx.names.contains(&s);
+            let shown = if s.is_empty() {
+                RichText::new("None").color(theme::TEXT_DIM)
+            } else if missing {
+                RichText::new(format!("{s} (not in the scene)")).color(ERROR)
+            } else {
+                RichText::new(format!("◼ {s}"))
+            };
+            egui::ComboBox::from_id_salt(("script entity", ctx.entity, &p.name))
+                .selected_text(shown)
+                .width(width)
+                .height(320.0)
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut s, String::new(), theme::dim("None"));
+                    for n in ctx.names {
+                        ui.selectable_value(&mut s, n.clone(), n);
+                    }
+                });
+            if s != before {
+                *value = json!(s);
+                return true;
+            }
+            false
+        }
+        PropKind::Vec3 | PropKind::Color => {
+            let mut v = [0.0f64; 3];
+            for (i, x) in v.iter_mut().enumerate() {
+                *x = value.get(i).and_then(Value::as_f64).unwrap_or(0.0);
+            }
+            let mut changed = false;
+            let mut fields = width;
+            if p.kind == PropKind::Color {
+                let mut rgb = v.map(|x| x.clamp(0.0, 1.0) as f32);
+                if egui::color_picker::color_edit_button_rgb(ui, &mut rgb).changed() {
+                    v = rgb.map(f64::from);
+                    changed = true;
+                }
+                fields -= ui.spacing().interact_size.x + ui.spacing().item_spacing.x;
+            }
+            let each = (fields / 3.0 - ui.spacing().item_spacing.x).max(30.0);
+            let speed = if p.kind == PropKind::Color {
+                0.005
+            } else {
+                drag_speed(p).max(0.01)
+            };
+            for x in &mut v {
+                changed |= ui
+                    .add_sized(
+                        [each, 20.0],
+                        egui::DragValue::new(x).speed(speed).max_decimals(3),
+                    )
+                    .changed();
+            }
+            if changed {
+                *value = json!(v.map(|x| match num(x) {
+                    Value::Number(n) => n,
+                    _ => serde_json::Number::from(0),
+                }));
+            }
+            changed
+        }
+        PropKind::Rotation => {
+            let get = |i: usize| value.get(i).and_then(Value::as_f64).unwrap_or(0.0) as f32;
+            let q = engine::core::math::Quat::from_xyzw(get(0), get(1), get(2), get(3));
+            let (y, x, z) = q.to_euler(engine::core::math::EulerRot::YXZ);
+            let mut deg = [x, y, z].map(|a| f64::from(a).to_degrees());
+            let each = (width / 3.0 - ui.spacing().item_spacing.x).max(30.0);
+            let mut changed = false;
+            for a in &mut deg {
+                changed |= ui
+                    .add_sized(
+                        [each, 20.0],
+                        egui::DragValue::new(a)
+                            .speed(0.5)
+                            .suffix("°")
+                            .max_decimals(1),
+                    )
+                    .changed();
+            }
+            if changed {
+                let [x, y, z] = deg.map(|a| a.to_radians() as f32);
+                let q = engine::core::math::Quat::from_euler(
+                    engine::core::math::EulerRot::YXZ,
+                    y,
+                    x,
+                    z,
+                );
+                *value = json!([q.x, q.y, q.z, q.w]);
+            }
+            changed
+        }
+        PropKind::List => {
+            // Typed as JSON; set when it parses and Enter or leaving the field ends it.
+            let key = (ctx.entity, p.name.clone());
+            let text = ctx
+                .typing
+                .entry(key.clone())
+                .or_insert_with(|| value.to_string());
+            let r = ui.add(
+                egui::TextEdit::singleline(text)
+                    .font(egui::TextStyle::Monospace)
+                    .desired_width(width),
+            );
+            if r.lost_focus() {
+                let parsed = serde_json::from_str::<Value>(text);
+                ctx.typing.remove(&key);
+                if let Ok(v) = parsed
+                    && v != *value
+                {
+                    *value = v;
+                    return true;
+                }
+            }
+            false
+        }
+        PropKind::Table | PropKind::Other(_) => false,
+    }
+}
+
+/// While playing: the script's own values on this object (`self.t`, `self.lit`, ...), live.
+fn live_values(ui: &mut egui::Ui, world: &World, entity: Entity) {
+    let Some(state) = engine_script::props::state(world, entity) else {
+        return;
+    };
+    egui::CollapsingHeader::new(RichText::new("Live values").strong().color(theme::TEXT))
+        .id_salt(("script live", entity))
+        .default_open(true)
+        .show(ui, |ui| {
+            ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
+            if state.is_empty() {
+                ui.label(theme::dim("(the script keeps no values of its own yet)"));
+            }
+            for v in &state {
+                let (job, cut) = variable_text(ui, v, ui.available_width());
+                let r = ui.label(job);
+                if cut {
+                    r.on_hover_text(&v.value);
+                }
+            }
+        });
+}
+
+/// While playing: Keep after Stop (Unreal's Keep Simulation Changes), for scene objects.
+fn keep_toggle(ui: &mut egui::Ui, world: &mut World, entity: Entity) {
+    let Some(order) = world.get::<SceneOrder>(entity).map(|o| o.0) else {
+        ui.label(theme::dim("Made while playing: Stop removes it."));
+        return;
+    };
+    let Some(mut tab) = world.get_resource_mut::<ScriptsTab>() else {
+        return;
+    };
+    let mut keep = tab.props.keep.contains_key(&order);
+    let r = ui
+        .toggle_value(&mut keep, "📌 Keep after Stop")
+        .on_hover_text(
+            "Stop puts the scene back as it was before Play. Pinned, this object keeps the script \
+         values set while playing (one undo step).",
+        );
+    if r.changed() {
+        if keep {
+            tab.props.keep.insert(order, None);
+        } else {
+            tab.props.keep.remove(&order);
+        }
+    }
+    if !keep {
+        ui.label(theme::dim("Values set while playing go back at Stop."));
+    }
+}
+
+/// Keep after Stop: the pinned objects' script props, read every frame while playing, and set
+/// again once Stop has put the scene back.
+fn keep_play_values(world: &mut World) {
+    let Some(mode) = world.get_resource::<Editor>().map(|e| e.mode) else {
+        return;
+    };
+    let mut keep = match world.get_resource_mut::<ScriptsTab>() {
+        Some(mut tab) if !tab.props.keep.is_empty() => std::mem::take(&mut tab.props.keep),
+        _ => return,
+    };
+    let mut q = world.query::<(Entity, &SceneOrder, &Script)>();
+    if mode != Mode::Edit {
+        for (_, order, script) in q.iter(world) {
+            if let Some(slot) = keep.get_mut(&order.0) {
+                *slot = Some(script.props.clone());
+            }
+        }
+        world.resource_mut::<ScriptsTab>().props.keep = keep;
+        return;
+    }
+    // Stopped: the scene is back as it was; the kept values go on again.
+    let changes: Vec<(Entity, Value, Value)> = q
+        .iter(world)
+        .filter_map(|(e, order, script)| {
+            let props = keep.get(&order.0)?.clone()?;
+            if script.props == props {
+                return None;
+            }
+            let before = serde_json::to_value(script).ok()?;
+            let mut after = before.clone();
+            after["props"] = props;
+            Some((e, before, after))
+        })
+        .collect();
+    keep.clear();
+    if changes.is_empty() {
+        return;
+    }
+    let n = changes.len();
+    world.resource_scope(|world, mut editor: Mut<Editor>| {
+        for (entity, before, after) in changes {
+            editor::apply(
+                world,
+                &mut editor,
+                Command::Component {
+                    entity,
+                    name: "Script".into(),
+                    before: Some(before),
+                    after: Some(after),
+                },
+            );
+        }
+        let now = editor::now(world);
+        editor.info(
+            now,
+            format!(
+                "Kept the script values set while playing on {n} object{}",
+                if n == 1 { "" } else { "s" }
+            ),
+        );
+    });
 }
 
 // ----------------------------------------------------------------------------- screenshots
@@ -3459,6 +4360,163 @@ fn shot_layout() -> DockState<Tab> {
     dock
 }
 
+/// `editor --headless --size 1920x1080 --shots <dir> --script props`: scripts' props in the
+/// Details panel. The lamp's sliders with their units; a beacon's groups, table, choice, entity
+/// picker and angle; values set on it (the override bar and ↺); playing, with the script's
+/// live values and Keep after Stop; after Stop, the kept values; a mistake in its props table.
+pub fn props_shots(dir: String) -> ShotScript {
+    let _ = std::fs::create_dir_all(&dir);
+    let root = std::fs::canonicalize(&dir)
+        .unwrap_or_else(|_| std::env::current_dir().unwrap_or_default().join(&dir))
+        .join("scripts");
+    let setup = move |world: &mut World, editor: &mut Editor| {
+        editor.icons = false;
+        let sky = world
+            .resource::<TypeRegistry>()
+            .resource("Sky")
+            .map(|r| r.patch);
+        if let Some(patch) = sky {
+            let _ = patch(world, json!({"hour": 19.3, "hours_per_second": 0.0}));
+        }
+        let from = engine_script::scripts_root(world).join(EXAMPLES);
+        copy_dir(&from, &root.join(EXAMPLES));
+        world.resource_mut::<ScriptSettings>().folder = root.to_string_lossy().to_string();
+        world.remove_resource::<ScriptRuntime>();
+        for (entity, path) in [
+            ("Lamp", "examples/lamp.luau"),
+            ("Stone", "examples/float.luau"),
+        ] {
+            if let Some(e) = crate::shots::find(world, entity) {
+                world.entity_mut(e).insert(Script::new(path));
+            }
+        }
+        // A beacon in front of the stone, made as a user would: a light with a script.
+        let bulb = MeshRenderer::new(
+            Shape::Sphere {
+                radius: 0.14,
+                segments: 0,
+            },
+            StandardMaterial::hex(0xb8e0ff).with_emissive([0.35, 0.75, 1.0], 2000.0),
+        );
+        editor::spawn_with(
+            world,
+            editor,
+            "Beacon".into(),
+            vec![
+                (
+                    "MeshRenderer",
+                    serde_json::to_value(bulb).unwrap_or_default(),
+                ),
+                (
+                    "PointLight",
+                    json!({"color": [0.35, 0.75, 1.0], "intensity_lm": 2400.0, "range": 10.0}),
+                ),
+                (
+                    "Script",
+                    serde_json::to_value(Script::new("examples/beacon.luau")).unwrap_or_default(),
+                ),
+            ],
+            Transform::from_translation(DVec3::new(-0.9, 1.1, 5.2)),
+        );
+        world.resource_mut::<EditorDock>().0 = props_layout();
+    };
+    // Sets props on an object as the Details panel does (one undo step each).
+    let set = |name: &'static str, props: Value| {
+        move |world: &mut World, ed: &mut Editor| {
+            let Some(e) = crate::shots::find(world, name) else {
+                return;
+            };
+            let Some(before) = world
+                .get::<Script>(e)
+                .and_then(|s| serde_json::to_value(s).ok())
+            else {
+                return;
+            };
+            let mut after = before.clone();
+            if let (Some(map), Some(add)) = (after["props"].as_object_mut(), props.as_object()) {
+                for (k, v) in add {
+                    map.insert(k.clone(), v.clone());
+                }
+            }
+            editor::apply(
+                world,
+                ed,
+                Command::Component {
+                    entity: e,
+                    name: "Script".into(),
+                    before: Some(before),
+                    after: Some(after),
+                },
+            );
+        }
+    };
+    let steps = vec![
+        Step::Do(Box::new(setup)),
+        Step::Tool(crate::editor::Tool::Select),
+        Step::Camera(DVec3::new(1.2, 1.5, 9.2), DVec3::new(-0.6, 1.0, 3.0)),
+        Step::Select("Lamp"),
+        Step::Wait(40),
+        Step::Shot("props_01_lamp_sliders"),
+        Step::Select("Beacon"),
+        Step::Wait(20),
+        Step::Shot("props_02_beacon_groups"),
+        // Values set on this beacon: warmer, brighter, blinking, aimed at the lamp.
+        Step::Do(Box::new(set(
+            "Beacon",
+            json!({"lumens": 5200, "color": [1.0, 0.45, 0.2], "mode": "blink",
+                   "target": "Lamp", "pulse": {"rate": 1.6, "depth": 0.6}}),
+        ))),
+        Step::Wait(20),
+        Step::Shot("props_03_overrides"),
+        // Playing: the script runs with them; tuned live, pinned to keep.
+        Step::Do(Box::new(|world: &mut World, ed: &mut Editor| {
+            editor::play(world, ed)
+        })),
+        Step::Wait(40),
+        Step::Do(Box::new(|world: &mut World, _: &mut Editor| {
+            if let Some(e) = crate::shots::find(world, "Beacon")
+                && let Some(order) = world.get::<SceneOrder>(e).map(|o| o.0)
+            {
+                world
+                    .resource_mut::<ScriptsTab>()
+                    .props
+                    .keep
+                    .insert(order, None);
+            }
+        })),
+        Step::Do(Box::new(set(
+            "Beacon",
+            json!({"spin": 1.2, "mode": "pulse", "color": [0.55, 1.0, 0.45], "tilt": 0.6}),
+        ))),
+        Step::Wait(90),
+        Step::Shot("props_04_playing_live"),
+        // Stop: the scene goes back, but the pinned beacon keeps what was tuned.
+        Step::Do(Box::new(|world: &mut World, ed: &mut Editor| {
+            editor::stop(world, ed)
+        })),
+        Step::Wait(20),
+        Step::Shot("props_05_kept_after_stop"),
+        // A mistake in the props table: the panel says where.
+        Step::Do(Box::new(|world: &mut World, _: &mut Editor| {
+            let path = engine_script::scripts_root(world).join("examples/beacon.luau");
+            if let Ok(text) = std::fs::read_to_string(&path) {
+                let _ = std::fs::write(&path, text.replace("every = 4,", "every = 4 +,"));
+            }
+        })),
+        Step::Wait(20),
+        Step::Shot("props_06_mistake"),
+    ];
+    ShotScript::new(dir, steps)
+}
+
+/// The props shots' layout: the viewport, and the Details panel beside it at full height.
+fn props_layout() -> DockState<Tab> {
+    let mut dock = DockState::new(vec![Tab::Viewport, Tab::Scripts]);
+    let surface = dock.main_surface_mut();
+    let [_view, _details] = surface.split_right(NodeIndex::root(), 0.64, vec![Tab::Inspector]);
+    dock
+}
+
 /// The debugging shots' layout: the Scripts tab wider, for the stop's panel beside the code.
 fn debug_layout() -> DockState<Tab> {
     let mut dock = DockState::new(vec![Tab::Scripts]);
@@ -3592,6 +4650,34 @@ mod tests {
         assert_eq!(expression_at(text, at("local", 1)), None);
         assert_eq!(expression_at(text, at(" = ", 1)), None);
         assert_eq!(expression_at(text, at("then", 0)), None);
+    }
+
+    #[test]
+    fn props_compare_by_value_and_store_whole_numbers_as_integers() {
+        assert!(same(&json!(1800), &json!(1800.0)));
+        assert!(same(&json!([1, 0.5, 0]), &json!([1.0, 0.5, 0.0])));
+        assert!(same(
+            &json!({"rate": 2, "depth": 0.5}),
+            &json!({"depth": 0.5, "rate": 2.0})
+        ));
+        assert!(!same(&json!({"rate": 2}), &json!({"rate": 2, "depth": 1})));
+        assert!(!same(&json!("calm"), &json!("storm")));
+        assert_eq!(num(4.0), json!(4));
+        assert!(num(4.0).is_i64());
+        assert_eq!(num(0.25), json!(0.25));
+    }
+
+    #[test]
+    fn load_errors_give_their_line_and_gist() {
+        let e = "beacon.luau:23: Expected identifier when parsing expression, got ','\nstack";
+        assert_eq!(error_line(e), Some(23));
+        assert_eq!(
+            message_gist(e),
+            "Expected identifier when parsing expression, got ','"
+        );
+        assert_eq!(error_line("can't read x"), None);
+        assert_eq!(message_gist("can't read x"), "can't read x");
+        assert_eq!(error_line("crystal.graph:4: node 3 has no input"), Some(4));
     }
 
     #[test]

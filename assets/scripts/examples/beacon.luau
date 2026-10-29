@@ -1,0 +1,64 @@
+--!strict
+-- A beacon: a light that pulses and turns its head, and sends a message to another entity
+-- every few flashes. Put it on an entity with a PointLight. Each prop below is a field in the
+-- editor's Details panel: the hints after @ give it a slider, a unit, a group or a picker
+-- (see "Props in the Details panel" in the scripts README).
+local Beacon = {}
+Beacon.props = {
+	-- @group Light
+	lumens = 2400, -- at the top of a pulse @range 0 8000 @unit lm
+	color = vec3(0.35, 0.75, 1), -- linear RGB
+	-- how it breathes
+	pulse = {
+		rate = 0.8, -- pulses a second @range 0.1 4 @unit Hz
+		depth = 0.6, -- how far each one dims @range 0 1
+	},
+	-- @group Motion
+	spin = 0.25, -- turns a second @range -2 2 0.05 @unit turns/s
+	tilt = 0.2, -- how far the head leans @angle
+	hover = vec3(0, 0.15, 0), -- how far it bobs, meters
+	-- @group Signal
+	mode = "pulse", -- how it shines @enum steady|pulse|blink
+	target = "Stone", -- who hears it flash @entity
+	every = 4, -- flashes between messages @int @min 1
+	announce = true, -- say so in the output too
+}
+
+function Beacon:start()
+	self.t = 0
+	self.home = self.entity.position
+	self.flashes = 0
+	self.was = 0
+end
+
+function Beacon:update(dt: number)
+	self.t += dt
+	local p = self.props
+	local wave = 0.5 + 0.5 * math.sin(self.t * 2 * math.pi * p.pulse.rate)
+	local level = if p.mode == "steady"
+		then 1
+		elseif p.mode == "blink" then (if wave > 0.5 then 1 else 0.05)
+		else 1 - p.pulse.depth * (1 - wave)
+	self.level = level
+	self.entity:set("PointLight", { color = p.color, intensity_lm = p.lumens * level })
+	self.entity:material({ emissive = p.color, emissive_strength = 2500 * level })
+	self.entity.position = self.home + p.hover * math.sin(self.t * 1.3)
+	self.entity.rotation = quat.axis_angle(vec3.up, self.t * p.spin * 2 * math.pi)
+		* quat.axis_angle(vec3.right, p.tilt)
+	-- A flash: the wave's crest.
+	if wave > 0.97 and self.was <= 0.97 then
+		self.flashes += 1
+		if self.flashes % math.max(1, p.every) == 0 then
+			local target = world.find(p.target)
+			if target then
+				target:send("beacon", { flashes = self.flashes })
+			end
+			if p.announce then
+				print(`{self.entity.name} flashed {self.flashes} times; told {p.target}`)
+			end
+		end
+	end
+	self.was = wave
+end
+
+return Beacon

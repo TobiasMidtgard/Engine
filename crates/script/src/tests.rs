@@ -169,6 +169,101 @@ fn props_on_the_entity_override_the_defaults() {
     assert_eq!(app.world.get::<Transform>(e).unwrap().translation.x, before);
 }
 
+const TUNED: &str = r#"
+local wave = require("lib/wave")
+local Tuned = {}
+Tuned.props = {
+	-- @group Light
+	lumens = 1800, -- at full brightness @range 0 5000 @unit lm
+	tint = vec3(1, 0.5, 0.25),
+	-- @group Motion
+	swing = math.pi / 4, -- how far it sways @angle
+	wave = { speed = 2, height = 0.5 }, -- how it bobs
+	target = "Door", -- who hears it @entity
+}
+
+function Tuned:start()
+	self.t = 0
+	self.lit = true
+end
+
+function Tuned:update(dt)
+	self.t += dt
+	self.height = self.props.wave.height
+	self.speed = self.props.wave.speed
+	self.bob = wave.bob(self.t, 1)
+end
+
+return Tuned
+"#;
+
+#[test]
+fn the_editor_reads_props_with_their_hints_and_the_live_state() {
+    use crate::props::{self, PropKind};
+    let folder = Folder::new();
+    folder.write(
+        "lib/wave.luau",
+        "return { bob = function(t, s) return math.sin(t * s) end }",
+    );
+    folder.write("tuned.luau", TUNED);
+    let mut app = app_in(&folder.0);
+    // Before anything runs: read in a VM of its own.
+    let read = props::of(&mut app.world, "tuned").unwrap();
+    let names: Vec<&str> = read.iter().map(|p| p.name.as_str()).collect();
+    assert_eq!(names, ["lumens", "tint", "swing", "wave", "target"]);
+    assert_eq!(read[0].unit.as_deref(), Some("lm"));
+    assert!(read[0].slider);
+    assert_eq!(read[0].group.as_deref(), Some("Light"));
+    assert_eq!(read[0].line, 6);
+    assert_eq!(read[1].kind, PropKind::Color);
+    assert_eq!(read[2].kind, PropKind::Angle);
+    assert!((read[2].default.as_f64().unwrap() - std::f64::consts::FRAC_PI_4).abs() < 1e-9);
+    assert_eq!(read[3].kind, PropKind::Table);
+    assert_eq!(read[3].doc, "how it bobs");
+    assert_eq!(read[4].kind, PropKind::Entity);
+    assert!(
+        !app.world.contains_resource::<ScriptRuntime>(),
+        "reading runs nothing"
+    );
+    // Files to pick from: scripts, not the shared modules.
+    assert_eq!(props::files(&app.world), ["tuned.luau"]);
+    // A new version on disk is read again; a broken one says why.
+    folder.write(
+        "tuned.luau",
+        &TUNED.replace("@range 0 5000", "@range 0 9000 50"),
+    );
+    let read = props::of(&mut app.world, "tuned").unwrap();
+    assert_eq!((read[0].max, read[0].step), (Some(9000.0), Some(50.0)));
+    folder.write(
+        "tuned.luau",
+        &TUNED.replace("swing = math.pi / 4", "swing = math.pi /"),
+    );
+    let err = props::of(&mut app.world, "tuned").unwrap_err();
+    assert!(err.contains("tuned.luau:9"), "{err}");
+    folder.write("tuned.luau", TUNED);
+
+    // Playing: a table prop set in part keeps its other defaults, and the panel sees `self`.
+    let e = app
+        .world
+        .spawn((
+            Name::new("Tuned"),
+            Transform::default(),
+            Script::new("tuned").with_props(json!({ "wave": { "speed": 3 } })),
+        ))
+        .id();
+    app.update_n(3);
+    assert!(errors(&mut app).is_empty(), "{:?}", errors(&mut app));
+    let state = props::state(&app.world, e).unwrap();
+    let names: Vec<&str> = state.iter().map(|v| v.name.as_str()).collect();
+    assert_eq!(names, ["bob", "height", "lit", "speed", "t"]);
+    let value = |n: &str| state.iter().find(|v| v.name == n).unwrap().value.clone();
+    assert_eq!(value("height"), "0.5");
+    assert_eq!(value("speed"), "3");
+    assert_eq!(value("lit"), "true");
+    let plain = app.world.spawn(Name::new("No script")).id();
+    assert!(props::state(&app.world, plain).is_none());
+}
+
 const COUNTER_V1: &str = r#"
 local Counter = {}
 Counter.props = { step = 1, label = "one" }

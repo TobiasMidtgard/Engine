@@ -810,6 +810,26 @@ fn variables(ui: &mut egui::Ui, doc: &mut GraphDoc, center: Pos2) {
                 let w = ui.available_width() - 4.0;
                 value_field(ui, v, kind, &[], w);
             });
+            if props {
+                // Its note: the tooltip in the Details panel, and hints that shape its field.
+                let mut note = doc.graph.prop_notes.get(&name).cloned().unwrap_or_default();
+                ui.horizontal(|ui| {
+                    ui.add_space(14.0);
+                    let r = ui.add(
+                        egui::TextEdit::singleline(&mut note)
+                            .font(egui::TextStyle::Small)
+                            .hint_text("what it's for  @range 0 10 @unit m")
+                            .desired_width(ui.available_width() - 4.0),
+                    );
+                    if r.changed() {
+                        if note.trim().is_empty() {
+                            doc.graph.prop_notes.remove(&name);
+                        } else {
+                            doc.graph.prop_notes.insert(name.clone(), note.clone());
+                        }
+                    }
+                });
+            }
             ui.add_space(2.0);
         }
         let map = if props {
@@ -819,10 +839,16 @@ fn variables(ui: &mut egui::Ui, doc: &mut GraphDoc, center: Pos2) {
         };
         if let Some(name) = remove {
             map.remove(&name);
+            if props {
+                doc.graph.prop_notes.remove(&name);
+            }
         }
         if let Some((old, new)) = rename.filter(|(_, new)| !map.contains_key(new)) {
             if let Some(v) = map.remove(&old) {
                 map.insert(new.clone(), v);
+            }
+            if props && let Some(note) = doc.graph.prop_notes.remove(&old) {
+                doc.graph.prop_notes.insert(new.clone(), note);
             }
             let kinds: &[&str] = if props {
                 &["prop.get"]

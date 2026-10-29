@@ -212,6 +212,9 @@ pub fn entity_details(ui: &mut egui::Ui, world: &mut World, editor: &mut Editor)
                 let marked = marks.as_ref().map(|m| (m, entry.name.as_str()));
                 if entry.name == "Transform" {
                     transform_editor(ui, world, editor, entity, &others, &value, marked);
+                } else if entry.name == "Script" && !multi {
+                    // Its props as typed fields (Scripting's).
+                    crate::scripts::details(ui, world, editor, entity, &value);
                 } else if multi {
                     let mixed = mixed_paths(world, entry, &value, &others);
                     edit_many(ui, world, editor, &target, &value, &others, &mixed);

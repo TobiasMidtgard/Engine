@@ -174,8 +174,12 @@ pub fn to_lua_like(lua: &Lua, json: &Json, like: &Value) -> mlua::Result<Value> 
             Quat(engine_core::math::Quat::from_xyzw(f(0), f(1), f(2), f(3)).normalize())
                 .into_lua(lua)
         }
-        (Json::Object(map), Value::Table(defaults)) => {
-            let t = lua.create_table()?;
+        // Over the default's own entries, so a table prop set in part keeps the rest.
+        (Json::Object(map), Value::Table(defaults)) if kind(defaults).is_none() => {
+            let t = match crate::runtime::deep_copy(lua, like)? {
+                Value::Table(t) if !t.is_readonly() => t,
+                _ => lua.create_table()?,
+            };
             for (k, v) in map {
                 let d: Value = defaults.raw_get(k.as_str())?;
                 t.raw_set(k.as_str(), to_lua_like(lua, v, &d)?)?;
@@ -235,5 +239,20 @@ mod tests {
         assert_eq!(kind(c.as_table().unwrap()), Some(Kind::Vec3));
         assert_eq!(Vec3::from_lua(c, &lua).unwrap().0.y, 0.5);
         assert_eq!(t.get::<f64>("speed").unwrap(), 3.0);
+        // A table prop set in part keeps its other defaults.
+        let defaults: Value = lua
+            .load("return { wave = { speed = 2, height = 0.5 } }")
+            .eval()
+            .unwrap();
+        let v = to_lua_like(&lua, &json!({"wave": {"speed": 3}}), &defaults).unwrap();
+        let wave: Table = v.as_table().unwrap().get("wave").unwrap();
+        assert_eq!(wave.get::<f64>("speed").unwrap(), 3.0);
+        assert_eq!(wave.get::<f64>("height").unwrap(), 0.5);
+        let d: Table = defaults.as_table().unwrap().get("wave").unwrap();
+        assert_eq!(
+            d.get::<f64>("speed").unwrap(),
+            2.0,
+            "the default stays as it was"
+        );
     }
 }

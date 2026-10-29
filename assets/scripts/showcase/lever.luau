@@ -5,10 +5,12 @@
 local Lever = {}
 
 Lever.props = {
-	target = "Courtyard director", -- the entity's Name
+	-- @group What it sends
+	target = "Courtyard director", -- the entity that hears it @entity
 	event = "ritual", -- the message its script gets
-	swing = 1.1, -- radians the arm swings
-	cooldown = 12, -- seconds before it can be pulled again
+	-- @group The arm
+	swing = 1.1, -- how far the arm swings @angle @range 0 3.14
+	cooldown = 12, -- before it can be pulled again @min 0 @unit s
 }
 
 function Lever:start()

@@ -2052,7 +2052,7 @@ fn number(n: f64) -> String {
 }
 
 /// How a value reads in the debugger (`quoted`: strings in quotes, as in the variables view).
-fn display(v: &Value, quoted: bool) -> String {
+pub(crate) fn display(v: &Value, quoted: bool) -> String {
     match v {
         Value::Nil => "nil".into(),
         Value::Boolean(b) => b.to_string(),

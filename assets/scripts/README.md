@@ -73,6 +73,44 @@ time. The Output under the code shows prints and errors (click one to open its l
 command bar runs Luau in the game. With an entity selected, open its script, or run the open
 file on it.
 
+## Props in the Details panel
+
+Select an entity with a script and the Details panel shows each of its props as a field, as
+Unity's inspector shows a component's fields: numbers, sliders, colors, vectors, angles,
+toggles, text, a list to choose from, a picker of the scene's entities, and tables that fold
+out. The comment after a prop is its tooltip, and hints in it shape the field:
+
+```lua
+Beacon.props = {
+	-- @group Light
+	lumens = 2400, -- at the top of a pulse @range 0 8000 @unit lm
+	color = vec3(0.35, 0.75, 1), -- linear RGB
+	-- @group Signal
+	mode = "pulse", -- how it shines @enum steady|pulse|blink
+	target = "Stone", -- who hears it flash @entity
+	every = 4, -- flashes between messages @int @min 1
+}
+```
+
+| Hint | Field |
+| --- | --- |
+| `@range min max [step]` | a slider; values stay inside |
+| `@min v`, `@max v`, `@step v` | a number kept above or below `v`, or moving in steps |
+| `@int` | a whole number |
+| `@unit text` | shown after the number (`lm`, `m`, `s`) |
+| `@angle` | radians, shown in degrees |
+| `@color` | a `vec3` as a color (props named `color`, `colour` or `tint` are colors anyway) |
+| `@enum a\|b\|c` | a string chosen from a list |
+| `@entity` | a string naming an entity, picked from the scene (`world.find(self.props.target)`) |
+| `@hide` | not shown |
+| `@group Name` | on a comment line of its own: the props below it fold under `Name` |
+
+A value set in the panel belongs to that entity (its name turns bold blue, with a bar, as
+Unity marks an override); ↺ or right-click puts the script's default back. While playing, a
+change reaches the running script at once (`on_props()` is called), the script's own values
+(`self.t`, ...) show live under its props, and **Keep after Stop** keeps what you tuned when
+Stop puts the scene back. `examples/beacon.luau` uses every kind of field.
+
 ## Visual scripts (`.graph`)
 
 A `.graph` file is a script drawn as nodes and wires, for people who would rather not write
@@ -166,6 +204,8 @@ have them.
 - `showcase/wisp.luau`: one of the 320 wisps round the orrery (`parallel_update`, on every core).
 - `examples/lamp.luau`: a lamp that breathes and flickers (the editor's starter courtyard has a
   lamp to put it on).
+- `examples/beacon.luau`: a light that pulses, turns and signals another entity; its props
+  show every kind of field in the Details panel.
 - `examples/float.luau`: a stone that floats and turns, with a curve from a module
   (`examples/lib/wave.luau`).
 - `examples/pulse.graph`, `examples/hover.graph`: the same lamp and stone as visual scripts.

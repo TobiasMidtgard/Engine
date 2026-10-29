@@ -60,6 +60,9 @@ pub struct Graph {
     pub doc: String,
     /// The script's props: settings per entity, `Script::props` overrides them.
     pub props: BTreeMap<String, Value>,
+    /// What each prop is for: the comment after it in the Luau, so its hints (`@range 0 10`,
+    /// `@unit m`, ...) shape its field in the Details panel (`crate::props`).
+    pub prop_notes: BTreeMap<String, String>,
     /// The script's own state (`self.<name>`), set to these values when it starts.
     pub vars: BTreeMap<String, Value>,
     pub nodes: Vec<Node>,
@@ -73,6 +76,7 @@ impl Default for Graph {
             version: VERSION,
             doc: String::new(),
             props: BTreeMap::new(),
+            prop_notes: BTreeMap::new(),
             vars: BTreeMap::new(),
             nodes: Vec::new(),
             links: Vec::new(),
@@ -143,6 +147,9 @@ impl Graph {
             out.push_str(&format!("  \"doc\": {},\n", json!(self.doc)));
         }
         out.push_str(&format!("  \"props\": {},\n", json!(self.props)));
+        if !self.prop_notes.is_empty() {
+            out.push_str(&format!("  \"prop_notes\": {},\n", json!(self.prop_notes)));
+        }
         out.push_str(&format!("  \"vars\": {},\n", json!(self.vars)));
         let list = |out: &mut String, name: &str, items: Vec<String>, last: bool| {
             if items.is_empty() {
@@ -1562,7 +1569,16 @@ impl<'a> Gen<'a> {
                     );
                     continue;
                 }
-                self.line(format!("{k} = {},", literal(&v)), None);
+                // Its note on one line, as the comment the Details panel reads.
+                let note = self
+                    .g
+                    .prop_notes
+                    .get(&k)
+                    .map(|n| n.split_whitespace().collect::<Vec<_>>().join(" "))
+                    .filter(|n| !n.is_empty())
+                    .map(|n| format!(" -- {n}"))
+                    .unwrap_or_default();
+                self.line(format!("{k} = {},{note}", literal(&v)), None);
             }
             self.indent -= 1;
             self.line("}", None);
@@ -2541,6 +2557,20 @@ mod tests {
         assert!(c.watches.iter().any(|w| w.link == 1 && w.expr == "dt"));
         // It loads as Luau.
         assert!(crate::editing::check(&c.luau).is_none(), "{}", c.luau);
+        // A prop's note is its comment, so its hints reach the Details panel; the text keeps it.
+        let mut g = spinner();
+        g.prop_notes.insert(
+            "speed".into(),
+            "degrees a second\n@range 0 360 @unit °/s".into(),
+        );
+        let c = compile(&g, "examples/spinner.graph");
+        assert!(
+            c.luau
+                .contains("speed = 25, -- degrees a second @range 0 360 @unit °/s"),
+            "{}",
+            c.luau
+        );
+        assert_eq!(Graph::parse(&g.to_text()).unwrap().prop_notes, g.prop_notes);
     }
 
     #[test]

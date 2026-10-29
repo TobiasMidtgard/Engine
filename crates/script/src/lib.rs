@@ -38,6 +38,28 @@
 //! `shift:orientation(q)`; entities move on their own). `start` and the event hooks (interact, contact,
 //! messages) run as tasks of their own, so they may `task.wait`; `update` must not wait.
 //!
+//! ## Props in the Details panel
+//!
+//! The editor shows each prop as a field of its kind ([`props`], after Unity's inspector,
+//! Unreal's Instance Editable variables and Godot's `@export`): numbers, sliders, colors,
+//! vectors, angles, toggles, text, lists of choices, entity pickers and tables that fold out,
+//! with the prop's comment as its tooltip. Hints in the comment shape the field:
+//!
+//! ```lua
+//! Beacon.props = {
+//!     -- @group Light
+//!     lumens = 2400, -- at the top of a pulse @range 0 8000 @unit lm
+//!     color = vec3(0.35, 0.75, 1), -- linear RGB (props named color or tint are colors)
+//!     -- @group Signal
+//!     mode = "pulse", -- how it shines @enum steady|pulse|blink
+//!     target = "Stone", -- who hears it flash @entity
+//!     every = 4, -- flashes between messages @int @min 1
+//! }
+//! ```
+//!
+//! A value set there goes in `Script::props` (only what differs from the default), reaches a
+//! running script at once (`on_props`), and a table prop set in part keeps its other defaults.
+//!
 //! ## What scripts can use
 //!
 //! * Every registered engine function as `module.verb(args)`: `fire.ignite { at = p }`,
@@ -187,6 +209,7 @@ pub mod graph_board;
 pub mod hotpatch;
 mod math;
 mod profiler;
+pub mod props;
 mod runtime;
 mod types;
 

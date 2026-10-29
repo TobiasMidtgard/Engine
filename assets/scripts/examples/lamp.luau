@@ -3,10 +3,10 @@
 -- (the editor's starter courtyard has one: "Lamp"). Press E on it to put it out and light it.
 local Lamp = {}
 Lamp.props = {
-	lumens = 1800, -- at full brightness
+	lumens = 1800, -- at full brightness @range 0 5000 @unit lm
 	color = vec3(1, 0.72, 0.42),
-	period = 2.4, -- seconds a breath
-	flicker = 0.18, -- how much the flame jitters
+	period = 2.4, -- seconds a breath @range 0.3 8 @unit s
+	flicker = 0.18, -- how much the flame jitters @range 0 1
 }
 
 function Lamp:start()

@@ -2,6 +2,7 @@
   "version": 1,
   "doc": "A lamp that breathes: its light and glow rise and fall with a sine wave. Put it on an\nentity with a PointLight (the editor's starter courtyard has one: \"Lamp\").",
   "props": {"brightness":2000,"color":[1.0,0.72,0.42],"high":1800,"low":250,"speed":2.4},
+  "prop_notes": {"brightness":"the glow's strength @range 0 5000","color":"linear RGB","high":"light at the crest @range 0 5000 @unit lm","low":"light at the trough @range 0 5000 @unit lm","speed":"how fast it breathes @range 0.2 10"},
   "vars": {},
   "nodes": [
     {"id":1,"kind":"event.update","at":[-600,0]},
