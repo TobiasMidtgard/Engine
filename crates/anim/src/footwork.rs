@@ -22,6 +22,7 @@ use crate::combat::{Attacker, Evader};
 use crate::hit::HitReaction;
 use crate::hurt::Hurt;
 use crate::knockdown::Knockdown;
+use crate::paired::Riposted;
 
 /// Keeps a fighter at its measure from its foe, facing it, stepping in guard.
 #[derive(Component, Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -97,18 +98,22 @@ pub(crate) fn step_footwork(
         Option<&HitReaction>,
         Option<&Hurt>,
         Option<&Knockdown>,
+        Option<&Riposted>,
         Option<&LocalTimeScale>,
     )>,
     foes: Query<(&GlobalTransform, Option<&Attacker>)>,
 ) {
-    for (entity, mut fw, mut t, params, attacker, evader, reaction, hurt, down, local) in &mut q {
+    for (entity, mut fw, mut t, params, attacker, evader, reaction, hurt, down, riposted, local) in
+        &mut q
+    {
         let dt = time.delta_for(local);
         let foe = fw.foe.or(attacker.and_then(|a| a.target));
         let busy = attacker.is_some_and(|a| a.current.is_some())
             || evader.is_some_and(|e| e.evading.is_some())
             || reaction.is_some_and(|r| r.stagger.0.length() > 0.02)
             || hurt.is_some_and(Hurt::is_down)
-            || down.is_some();
+            || down.is_some()
+            || riposted.is_some();
         let foe = foe.filter(|f| *f != entity).and_then(|f| foes.get(f).ok());
         // A blow coming in is met where it stands (blocked, deflected or taken), not walked
         // away from: stepping off it is the evasion's job.

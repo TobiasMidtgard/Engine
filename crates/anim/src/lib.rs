@@ -22,6 +22,7 @@ pub mod knockdown;
 pub mod model;
 pub mod motion;
 pub mod muscle;
+pub mod paired;
 pub mod procedural;
 pub mod props;
 pub mod ragdoll;
@@ -154,6 +155,7 @@ impl Plugin for AnimationPlugin {
                         animator::queue_triggers,
                         freeflow::pick_targets,
                         combat::run_attacks,
+                        paired::hold_pairs,
                         combat::evade_strikes,
                         footwork::step_footwork,
                         (model::spawn_rig_models, model::despawn_orphan_parts),
@@ -256,6 +258,12 @@ fn register_types(app: &mut App) {
         "A target's guard (put on anything an Attacker goes for): seconds up and down, the \
          deflect window it got as it rose (0.2 s, 0.07 s if it came down under 0.4 s before), \
          shield-stun and broken-guard seconds left, and counts of blocks, deflects and breaks.",
+    )
+    .register_component::<paired::Riposted>(
+        "The victim of a paired move (a riposte, after a deflect or a broken guard): who has \
+         it (by), its clip, the spot it is held on (distance m ahead of them, facing back, \
+         reached over align_secs), and whether it is getting up after (up_secs). Nobody \
+         else's blows touch it or its attacker meanwhile.",
     )
     .register_component::<footwork::Footwork>(
         "Footwork between blows: keeps the fighter at measure m (within slack) from its foe \

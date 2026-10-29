@@ -72,7 +72,7 @@ const FREEFLOW_PERIOD: f32 = 12.0;
 /// sword-and-shield pair, the great sword and its dummy south of them, the archer to the east
 /// shooting south at a butt.
 const DUEL: DVec3 = DVec3::new(-24.0, 0.0, -16.0);
-const DUEL_PERIOD: f32 = 13.0;
+const DUEL_PERIOD: f32 = 16.0;
 const GREATSWORD: DVec3 = DVec3::new(-24.0, 0.0, -21.0);
 const GREATSWORD_PERIOD: f32 = 10.0;
 const ARCHER: DVec3 = DVec3::new(-18.0, 0.0, -12.0);
@@ -1026,9 +1026,10 @@ pub struct DemoArcher {
 
 /// The weapons yard: a sword-and-shield exchange (a combo of two cuts and a thrust, an
 /// overhead the partner's raised shield takes, a slash into a shield bash and a thrust; then
-/// the partner attacks into the fighter's shield), a great sword against a dummy (a sweep, a
-/// rising cut and an overhead that knocks it down) and an archer shooting at a butt 12 m off
-/// (a quick shot, a full draw held on the anchor, another quick one).
+/// the partner attacks into the fighter's shield, is deflected and run through), a great
+/// sword against a dummy with a shield (a sweep it blocks, an overhead that breaks its guard
+/// and a riposte through the opening) and an archer shooting at a butt 12 m off (a quick
+/// shot, a full draw held on the anchor, another quick one).
 fn weapons_yard(world: &mut World, origin: DVec3) -> Yard {
     let at = |p: DVec3, x: f64, z: f64| origin + p + DVec3::new(x, 0.0, z);
     let facing = |yaw_deg: f32| Quat::from_rotation_y(yaw_deg.to_radians());
@@ -1088,14 +1089,15 @@ fn weapons_yard(world: &mut World, origin: DVec3) -> Yard {
                 heavy(7.0),
                 light(7.45),
                 // Its shield comes up just as the partner's cut arrives: a deflect, the
-                // partner staggers open and the swordsman answers.
+                // partner staggers open and the swordsman runs it through (a riposte); the
+                // partner falls on its back and gets up.
                 guard(9.15, true),
                 guard(9.4, false),
                 light(9.42),
                 // Circling back the other way, then to their marks for the next round.
-                circle(10.6, -1.0),
-                circle(11.8, 0.0),
-                DemoStep::home(12.3),
+                circle(14.2, -1.0),
+                circle(15.2, 0.0),
+                DemoStep::home(15.5),
             ],
         ),
         (
@@ -1111,9 +1113,9 @@ fn weapons_yard(world: &mut World, origin: DVec3) -> Yard {
                 guard(4.7, false),
                 light(4.75),
                 light(9.0),
-                circle(10.6, -1.0),
-                circle(11.8, 0.0),
-                DemoStep::home(12.3),
+                circle(14.2, -1.0),
+                circle(15.2, 0.0),
+                DemoStep::home(15.5),
             ],
         ),
     ] {
@@ -1147,7 +1149,7 @@ fn weapons_yard(world: &mut World, origin: DVec3) -> Yard {
     }
 
     // --- Great sword against a dummy with a shield up: the sweep bounces off it, the
-    // overhead breaks the guard and a sweep gets through the opening.
+    // overhead breaks the guard and a riposte runs it through.
     let greatsword = spawn_humanoid(
         world,
         humanoid::Outfit::Athlete,
@@ -1198,7 +1200,8 @@ fn weapons_yard(world: &mut World, origin: DVec3) -> Yard {
                 DemoStep::param(0.02, "greatsword_stance", 1.0),
                 // The sweep bounces off the shield.
                 light(0.8),
-                // The overhead breaks the guard and the sweep goes through the opening.
+                // The overhead breaks the guard and a light press runs the dummy through
+                // (a riposte): it falls on its back and gets up.
                 heavy(2.25),
                 light(3.4),
             ],
@@ -1920,18 +1923,34 @@ pub const VIEWS: &[DemoView] = &[
     DemoView {
         key: "paddock_deflect",
         name: "A shield raised just as the cut lands swats it aside; the attacker staggers open",
-        eye: [-25.7, 1.5, -14.2],
-        target: [-24.0, 1.2, -16.0],
+        eye: [-23.7, 1.5, -12.5],
+        target: [-22.3, 1.15, -15.8],
         hour: 15.0,
         at: 9.3,
     },
     DemoView {
+        key: "paddock_riposte",
+        name: "Deflected, the partner is run through: it sags on the blade and falls",
+        eye: [-23.8, 1.35, -12.4],
+        target: [-22.2, 0.8, -15.8],
+        hour: 15.0,
+        at: 10.0,
+    },
+    DemoView {
         key: "paddock_greatsword",
         name: "Great sword: the overhead from high guard breaks the dummy's raised shield",
-        eye: [-23.8, 1.5, -18.1],
-        target: [-24.0, 1.1, -21.0],
+        eye: [-23.4, 1.5, -18.0],
+        target: [-23.6, 1.05, -21.0],
         hour: 15.0,
         at: 3.15,
+    },
+    DemoView {
+        key: "paddock_greatsword_riposte",
+        name: "Its guard broken, the dummy is run through by the great sword and falls",
+        eye: [-23.0, 1.3, -17.9],
+        target: [-23.3, 0.7, -21.0],
+        hour: 15.0,
+        at: 4.6,
     },
     DemoView {
         key: "paddock_bow",

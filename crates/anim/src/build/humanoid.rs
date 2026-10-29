@@ -3068,6 +3068,12 @@ fn get_up(s: &Skeleton, name: &str, duration: f32, keys: &[Key], standing: f32) 
 /// Getting up from lying on the back (feet toward −Z): sit up on the hands, tuck the legs,
 /// roll forward onto the right knee with the left foot planted, push up on the left leg.
 fn get_up_back(s: &Skeleton) -> AnimationClip {
+    get_up(s, "get_up_back", 2.4, &get_up_back_keys(), 0.7)
+}
+
+/// [`get_up_back`]'s keys: lying, sitting up on the hands, tucked, stepping, kneeling,
+/// rising, standing.
+fn get_up_back_keys() -> [Key; 8] {
     let hz = GET_UP_BACK_HIPS.z;
     let lying = Key {
         at: 0.0,
@@ -3221,7 +3227,7 @@ fn get_up_back(s: &Skeleton) -> AnimationClip {
         effort: 0.9,
         ..kneeling
     };
-    let keys = [
+    [
         lying,
         Key { at: 0.08, ..lying },
         sitting,
@@ -3230,8 +3236,150 @@ fn get_up_back(s: &Skeleton) -> AnimationClip {
         kneeling,
         rising,
         Key::STAND,
+    ]
+}
+
+// ----------------------------------------------------------------------------- ripostes
+
+/// The victim's side of a paired riposte ([`crate::combat::Pairing`]), and the clip's name.
+pub const RIPOSTED: &str = "riposted";
+/// How long [`RIPOSTED`] lasts, s: it ends lying on the back on `get_up_back`'s first pose.
+pub const RIPOSTED_SECS: f32 = 2.2;
+/// When the blade goes in, seconds into [`RIPOSTED`] (and into the attacker's riposte).
+pub const RIPOSTED_LANDS: f32 = 0.5;
+
+/// Run through after a deflect or a broken guard: thrown open, the body jerks forward round
+/// the blade as it goes in at [`RIPOSTED_LANDS`] and sags on it, the hands coming in to it;
+/// as it is pulled out the legs give and it drops onto the right knee, sits back catching
+/// itself on its hands and lies down on its back, ending on `get_up_back`'s first pose (so
+/// the get-up plays straight out of it). `floor` is 1 once the knee is down (foot IK lets
+/// go).
+fn riposted(s: &Skeleton) -> AnimationClip {
+    let at = |secs: f32| secs / RIPOSTED_SECS;
+    let [lying, _, sitting, ..] = get_up_back_keys();
+    let feet = [
+        Some(Vec3::new(-0.12, 0.08, -0.03)),
+        Some(Vec3::new(0.12, 0.08, 0.08)),
     ];
-    get_up(s, "get_up_back", 2.4, &keys, 0.7)
+    // Guard knocked wide, trunk tipped back, weight on the back foot.
+    let open = Key {
+        at: at(0.22),
+        hips: Vec3::new(0.0, 0.86, 0.06),
+        pitch: 8.0,
+        yaw: 0.0,
+        roll: 0.0,
+        spine: [6.0, 4.0, -4.0, -4.0],
+        arm: [
+            Arm {
+                flex: 40.0,
+                abduct: 30.0,
+                elbow: 30.0,
+                ..Arm::HANG
+            },
+            Arm {
+                flex: 24.0,
+                abduct: 34.0,
+                elbow: 26.0,
+                ..Arm::HANG
+            },
+        ],
+        leg: [[10.0, 4.0, 18.0, 6.0], [8.0, 4.0, 22.0, 6.0]],
+        plant: [None, None, feet[0], feet[1]],
+        knee: [Vec3::NEG_Z; 2],
+        effort: 0.6,
+    };
+    // The blade goes in: the trunk folds round it, the hands come in toward it.
+    let reach_in = Arm {
+        flex: 34.0,
+        twist: 30.0,
+        abduct: -6.0,
+        elbow: 72.0,
+        wrist: 10.0,
+        protract: 6.0,
+        elevate: 4.0,
+    };
+    let struck = Key {
+        at: at(RIPOSTED_LANDS + 0.08),
+        hips: Vec3::new(0.0, 0.84, 0.1),
+        pitch: -14.0,
+        spine: [-14.0, -12.0, -6.0, -10.0],
+        arm: [reach_in, reach_in],
+        leg: [[24.0, 4.0, 40.0, 10.0], [22.0, 4.0, 44.0, 10.0]],
+        effort: 1.0,
+        ..open
+    };
+    // Sagging on the blade.
+    let sagging = Key {
+        at: at(0.95),
+        hips: Vec3::new(0.0, 0.79, 0.08),
+        pitch: -22.0,
+        spine: [-18.0, -16.0, -6.0, -16.0],
+        arm: [Arm {
+            elbow: 60.0,
+            flex: 26.0,
+            ..reach_in
+        }; 2],
+        leg: [[34.0, 4.0, 56.0, 12.0], [32.0, 4.0, 58.0, 12.0]],
+        effort: 0.5,
+        ..struck
+    };
+    // The blade out, down on the right knee, slumped, the arms hanging.
+    let kneeling = Key {
+        at: at(1.28),
+        hips: Vec3::new(0.0, 0.58, 0.4),
+        pitch: -10.0,
+        spine: [-14.0, -10.0, -6.0, -20.0],
+        arm: [Arm {
+            flex: 12.0,
+            elbow: 24.0,
+            ..Arm::HANG
+        }; 2],
+        leg: [[96.0, 6.0, 92.0, 2.0], [-6.0, 4.0, 98.0, -40.0]],
+        plant: [None, None, feet[0], Some(Vec3::new(0.12, 0.13, 0.84))],
+        knee: [Vec3::NEG_Z, Vec3::new(0.0, -1.0, -0.4)],
+        effort: 0.2,
+        ..sagging
+    };
+    let keys = [
+        Key {
+            at: 0.0,
+            ..Key::STAND
+        },
+        open,
+        Key {
+            at: at(RIPOSTED_LANDS),
+            ..open
+        },
+        struck,
+        sagging,
+        kneeling,
+        // Sat back, caught on the hands behind.
+        Key {
+            at: at(1.62),
+            effort: 0.3,
+            ..sitting
+        },
+        Key {
+            at: at(1.95),
+            ..lying
+        },
+        Key { at: 1.0, ..lying },
+    ];
+    let samples = (RIPOSTED_SECS * 30.0) as usize + 1;
+    let floor = [(0.0, 0.0), (at(1.1), 0.0), (at(1.28), 1.0), (1.0, 1.0)];
+    let brace = [
+        (0.0, 0.2),
+        (at(RIPOSTED_LANDS), 0.3),
+        (at(0.6), 1.0),
+        (at(1.3), 0.5),
+        (1.0, 0.0),
+    ];
+    AnimationClip::from_fn(RIPOSTED, RIPOSTED_SECS, samples, false, |ph| {
+        Key::sample(s, &keys, ph).1
+    })
+    .with_curve("effort", samples, |ph| Key::sample(s, &keys, ph).0.effort)
+    .with_curve("floor", 25, move |ph| keyed(ph, &floor))
+    .with_curve("brace", 25, move |ph| keyed(ph, &brace))
 }
 
 /// A liver shot folding the body onto a knee ([`crate::hurt`]): the legs give and the trunk
@@ -3568,6 +3716,7 @@ pub fn clips(s: &Skeleton) -> Vec<AnimationClip> {
         flex(s),
         get_up_back(s),
         get_up_front(s),
+        riposted(s),
         fall_brace(s),
         fall_back_brace(s),
         punch(s, Punch::Jab),

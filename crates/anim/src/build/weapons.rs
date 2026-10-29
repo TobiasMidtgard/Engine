@@ -1483,6 +1483,166 @@ fn greatsword_carry(s: &Skeleton) -> AnimationClip {
     .clip(s, "greatsword_carry", true)
 }
 
+// -------------------------------------------------------------------------------- ripostes
+
+/// The sword-and-shield riposte, and where its victim stands: this far ahead, facing back, m.
+pub const SWORD_RIPOSTE: &str = "sword_riposte";
+pub const SWORD_RIPOSTE_DISTANCE: f32 = 1.3;
+/// The great sword's riposte, and where its victim stands.
+pub const GREATSWORD_RIPOSTE: &str = "greatsword_riposte";
+pub const GREATSWORD_RIPOSTE_DISTANCE: f32 = 1.6;
+/// How long each riposte lasts, s (the blade goes in at
+/// [`RIPOSTED_LANDS`](super::humanoid::RIPOSTED_LANDS), with the victim's clip).
+pub const SWORD_RIPOSTE_SECS: f32 = 1.7;
+pub const GREATSWORD_RIPOSTE_SECS: f32 = 1.9;
+
+/// A riposte's thrust: the fist at `fist` with the blade along `axis` puts its tip `past`
+/// meters beyond the victim's middle (`distance` ahead), at `height`.
+fn run_through(distance: f32, blade: f32, past: f32, height: f32, axis: Vec3) -> Vec3 {
+    let axis = axis.normalize();
+    Vec3::new(0.0, height, -(distance + past)) - axis * blade
+}
+
+/// After a deflect: the sword chambered by the hip, a step in and the point driven through
+/// the body at [`RIPOSTED_LANDS`](super::humanoid::RIPOSTED_LANDS), the shield held aside;
+/// held in while the body sags on it, pulled out and back to the stance.
+fn sword_riposte(s: &Skeleton) -> AnimationClip {
+    use super::humanoid::RIPOSTED_LANDS as LANDS;
+    let secs = SWORD_RIPOSTE_SECS;
+    let point = Vec3::new(-0.04, -0.03, -1.0);
+    let fist = run_through(SWORD_RIPOSTE_DISTANCE, SWORD_BLADE[1], 0.14, 1.12, point);
+    let elbow = Vec3::new(0.7, -0.7, 0.1);
+    let through = Hold::new(fist, point, Vec3::NEG_Y, elbow);
+    let lunge = STANCE
+        .hips([0.0, -0.15, -0.26], [6.0, 4.0, 0.0], [14.0, 6.0, 0.0])
+        .foot(0, foot(-0.13, -0.58, 10.0))
+        .foot(1, STANCE.feet[1].heel(14.0));
+    let shield_aside = shield_low().at(Vec3::new(-0.24, 1.1, -0.28));
+    let chambered = Hold::new(
+        Vec3::new(0.24, 1.18, 0.05),
+        point,
+        Vec3::NEG_Y,
+        Vec3::new(0.6, -0.6, 0.6),
+    );
+    Moves::new(
+        [HANDLE, SWORD],
+        vec![
+            key(
+                0.0,
+                STANCE,
+                Stroke::To(shield_low()),
+                Stroke::To(sword_ready()),
+            ),
+            key(
+                LANDS - 0.24,
+                STANCE.hips([0.0, -0.1, 0.06], [2.0, -30.0, 0.0], [0.0, -12.0, 0.0]),
+                Stroke::To(shield_low().at(Vec3::new(-0.1, 1.15, -0.36))),
+                Stroke::To(chambered),
+            ),
+            key(LANDS, lunge, Stroke::To(shield_aside), Stroke::To(through)),
+            // Held in, dipping with the body as it sags onto it.
+            key(
+                0.95,
+                lunge,
+                Stroke::To(shield_aside),
+                Stroke::To(through.at(fist + Vec3::new(0.0, -0.04, 0.02))),
+            ),
+            // Pulled out along the blade, a step back.
+            key(
+                1.2,
+                STANCE.hips([0.0, -0.1, 0.05], [2.0, -24.0, 0.0], [0.0, -8.0, 0.0]),
+                Stroke::To(shield_low()),
+                Stroke::To(chambered.at(Vec3::new(0.24, 1.12, -0.02))),
+            ),
+            key(
+                secs,
+                STANCE,
+                Stroke::To(shield_low()),
+                Stroke::To(sword_ready()),
+            ),
+        ],
+    )
+    .clip(s, SWORD_RIPOSTE, false)
+    .with_curve("effort", 31, move |ph| {
+        keyed(
+            ph * secs,
+            &[
+                (0.0, 0.2),
+                (LANDS - 0.2, 0.6),
+                (LANDS, 1.0),
+                (1.2, 0.7),
+                (secs, 0.15),
+            ],
+        )
+    })
+    .with_event((LANDS - 0.24) / secs, "swing", Some("hand_r"))
+}
+
+/// After a broken guard: the great sword drawn back to the right shoulder, point at the foe
+/// (Ochs), then a step in and a two-handed thrust through the body at
+/// [`RIPOSTED_LANDS`](super::humanoid::RIPOSTED_LANDS); held, pulled out, back to the stance.
+fn greatsword_riposte(s: &Skeleton) -> AnimationClip {
+    use super::humanoid::RIPOSTED_LANDS as LANDS;
+    let secs = GREATSWORD_RIPOSTE_SECS;
+    let grip = Stroke::Below(GREATSWORD_HANDS);
+    let point = Vec3::new(-0.04, -0.04, -1.0);
+    let fist = run_through(
+        GREATSWORD_RIPOSTE_DISTANCE,
+        GREATSWORD_BLADE[1],
+        0.14,
+        1.12,
+        point,
+    );
+    let through = Hold::new(fist, point, Vec3::NEG_Y, Vec3::new(0.6, -0.8, 0.0));
+    let ochs = Hold::new(
+        Vec3::new(0.2, 1.45, 0.02),
+        Vec3::new(-0.1, -0.14, -1.0),
+        Vec3::NEG_Y,
+        Vec3::new(0.9, 0.2, 0.3),
+    );
+    let drawn = GS_STANCE.hips([0.0, -0.08, 0.06], [0.0, -26.0, 0.0], [-4.0, -8.0, 0.0]);
+    let lunge = GS_STANCE
+        .hips([0.0, -0.18, -0.24], [8.0, -4.0, 0.0], [16.0, 0.0, 0.0])
+        .foot(0, foot(-0.15, -0.55, 12.0))
+        .foot(1, GS_STANCE.feet[1].heel(18.0));
+    Moves::new(
+        [SWORD, SWORD],
+        vec![
+            key(0.0, GS_STANCE, grip, Stroke::To(gs_ready())),
+            key(LANDS - 0.22, drawn, grip, Stroke::To(ochs)),
+            key(LANDS, lunge, grip, Stroke::To(through)),
+            key(
+                1.0,
+                lunge,
+                grip,
+                Stroke::To(through.at(fist + Vec3::new(0.0, -0.04, 0.02))),
+            ),
+            key(
+                1.3,
+                GS_STANCE.hips([0.0, -0.1, 0.05], [2.0, -24.0, 0.0], [0.0, 4.0, 0.0]),
+                grip,
+                Stroke::To(through.at(Vec3::new(0.14, 1.16, -0.08))),
+            ),
+            key(secs, GS_STANCE, grip, Stroke::To(gs_ready())),
+        ],
+    )
+    .clip(s, GREATSWORD_RIPOSTE, false)
+    .with_curve("effort", 31, move |ph| {
+        keyed(
+            ph * secs,
+            &[
+                (0.0, 0.2),
+                (LANDS - 0.2, 0.7),
+                (LANDS, 1.0),
+                (1.3, 0.7),
+                (secs, 0.2),
+            ],
+        )
+    })
+    .with_curve("grip", 2, |_| 1.0)
+    .with_event((LANDS - 0.22) / secs, "swing", Some("hand_r"))
+}
+
 // ------------------------------------------------------------------------------------- bow
 
 /// Side-on to the target (ahead, −Z): feet across the line, toes to the right, hips turned
@@ -1674,6 +1834,8 @@ pub fn clips(s: &Skeleton) -> Vec<AnimationClip> {
         greatsword_overhead(s),
         greatsword_stance(s),
         greatsword_carry(s),
+        sword_riposte(s),
+        greatsword_riposte(s),
         bow_shot_clip(s, WeaponMove::BowShot),
         bow_shot_clip(s, WeaponMove::BowShotFull),
         bow_carry(s),
