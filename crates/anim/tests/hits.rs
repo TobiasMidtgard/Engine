@@ -18,9 +18,14 @@ fn person() -> (App, Entity) {
         });
     app.add_plugins((WorldPlugin, AnimationPlugin));
     let t = Transform::default();
+    // The flinch alone: no knock-back step (tests/stagger.rs has that).
+    let reaction = engine_anim::HitReaction {
+        stagger_above: 0.0,
+        ..Default::default()
+    };
     let e = app
         .world
-        .spawn((t, GlobalTransform::from(t), BodyRequest::human(0)))
+        .spawn((t, GlobalTransform::from(t), BodyRequest::human(0), reaction))
         .id();
     app.update();
     engine_anim::character::finish_loading(&mut app.world);
@@ -37,8 +42,7 @@ fn head(app: &App, e: Entity) -> DVec3 {
         .index_of("head")
         .or_else(|| pose.index_of("Bip01 Head"))
         .unwrap();
-    // Relative to the body: a blow this hard also knocks it back a step (tests/stagger.rs).
-    pose.bone_world(gt, i).unwrap().0 - gt.translation()
+    pose.bone_world(gt, i).unwrap().0
 }
 
 #[test]

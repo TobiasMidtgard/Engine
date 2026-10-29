@@ -101,6 +101,9 @@ pub struct HitReaction {
     /// The hips' shove (model space, meters) and its rate.
     #[serde(skip)]
     pub shove: (Vec3, Vec3),
+    /// The last blow knocked the whole body back: its shove only leans the trunk.
+    #[serde(skip)]
+    pub lean_only: bool,
 }
 
 impl Default for HitReaction {
@@ -125,6 +128,7 @@ impl Default for HitReaction {
             stagger: (Vec3::ZERO, 0.3),
             state: Vec::new(),
             shove: (Vec3::ZERO, Vec3::ZERO),
+            lean_only: false,
         }
     }
 }
@@ -175,10 +179,11 @@ impl HitReaction {
 
     /// Knock the body back from a blow pushing `push` (world, N·s) on hips `hips` m high:
     /// to its capture point, `v·sqrt(h/g)` along the push for the speed `v` the blow gives it.
-    fn knock_back(&mut self, push: Vec3, hips: f32) {
+    /// Returns whether it did.
+    fn knock_back(&mut self, push: Vec3, hips: f32) -> bool {
         let flat = push.with_y(0.0);
         if !self.enabled || self.stagger_above <= 0.0 || flat.length() < self.stagger_above {
-            return;
+            return false;
         }
         let size = (hips / HIPS_HEIGHT).clamp(0.2, 5.0);
         let speed = flat / (self.stagger_mass * size.powi(3)).max(1.0);
@@ -187,6 +192,21 @@ impl HitReaction {
         self.knock(by, tau);
         let left = self.stagger.0.clamp_length_max(self.stagger_max);
         self.stagger.0 = left;
+        true
+    }
+
+    /// Strike the body and knock it back if the blow is hard enough: then the whole body
+    /// moves, so the shove only leans the trunk over the hips rather than moving them (they
+    /// would carry the feet along).
+    fn take(
+        &mut self,
+        (point, push, pelvis): (Vec3, Vec3, Vec3),
+        bones: &[Option<Vec3>],
+        world_push: Vec3,
+        hips: f32,
+    ) {
+        self.strike(point, push, pelvis, bones);
+        self.lean_only = self.knock_back(world_push, hips);
     }
 
     fn omega(&self) -> f32 {
@@ -261,14 +281,12 @@ pub(crate) fn take_hits(
         let hips = pelvis.y * gt.scale().y;
         let tuning = match reaction {
             Some(mut r) => {
-                r.strike(point, push, pelvis, &bones);
-                r.knock_back(world_push, hips);
+                r.take((point, push, pelvis), &bones, world_push, hips);
                 r.clone()
             }
             None => {
                 let mut r = HitReaction::default();
-                r.strike(point, push, pelvis, &bones);
-                r.knock_back(world_push, hips);
+                r.take((point, push, pelvis), &bones, world_push, hips);
                 commands.entity(hit.target).insert(r.clone());
                 r
             }
@@ -309,11 +327,16 @@ pub(crate) fn stagger_system(
         Option<&CharacterController>,
     )>,
 ) {
-    for (mut reaction, mut transform, animator, gt, ik, local, controller) in &mut q {
+    for (mut reaction, mut transform, animator, gt, mut ik, local, controller) in &mut q {
         let (left, tau) = reaction.stagger;
         if left == Vec3::ZERO {
             if reaction.stagger_velocity != Vec3::ZERO {
                 reaction.stagger_velocity = Vec3::ZERO;
+            }
+            if let Some(ik) = ik.as_mut()
+                && ik.ahead != Vec3::ZERO
+            {
+                ik.ahead = Vec3::ZERO;
             }
             continue;
         }
@@ -336,15 +359,16 @@ pub(crate) fn stagger_system(
                     .max_by(|a, b| a.1.total_cmp(&b.1))
                     .map(|(n, _)| n);
             }
-            ik.hurry = ik.hurry.max(4.0 * tau);
+            // Long enough after the body stops for a last step under it.
+            ik.hurry = ik.hurry.max(2.0 * tau);
+            ik.ahead = left;
         }
-        let step = left * (1.0 - (-dt / tau).exp());
-        let rest = left - step;
-        reaction.stagger.0 = if rest.length() < 1e-3 {
-            Vec3::ZERO
-        } else {
-            rest
-        };
+        let mut step = left * (1.0 - (-dt / tau).exp());
+        if (left - step).length() < 0.01 {
+            // The last centimeter in one go, so the feet don't chase a crawl.
+            step = left;
+        }
+        reaction.stagger.0 = left - step;
         reaction.stagger_velocity = if dt > 0.0 { step / dt } else { Vec3::ZERO };
         if reaction.stagger_move && controller.is_none() {
             transform.translation += step.as_dvec3();
@@ -372,7 +396,9 @@ pub(crate) fn flinch_system(
         let skeleton = animator.skeleton.clone();
         let mut edit = animator.edit();
         let shove = reaction.shove.0;
-        if let Some(hips) = skeleton.index_of("hips") {
+        if let Some(hips) = skeleton.index_of("hips")
+            && !reaction.lean_only
+        {
             // The knees give a little as the hips are driven back.
             edit.translate_model(hips, shove - Vec3::Y * 0.5 * shove.length());
         }

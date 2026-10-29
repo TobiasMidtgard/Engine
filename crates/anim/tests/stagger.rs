@@ -94,10 +94,19 @@ fn a_hard_shove_knocks_the_body_back_and_the_feet_step_after_it() {
     for (n, f) in FEET.iter().enumerate() {
         assert!(lifted[n] > 0.02, "{f} lifted only {:.3} m", lifted[n]);
     }
-    for ((f, a), b) in FEET.iter().zip(stance_before).zip(stance(&app, e)) {
-        let off = (a - b).length();
+    // The body stands over its feet again, each held within foot IK's reach of its place
+    // in the stance (an idle's own weight shifts move those places a little).
+    let after = stance(&app, e);
+    let mid = |s: &[DVec3]| (s[0] + s[1]) * 0.5;
+    let off = (mid(&after) - mid(&stance_before)).length();
+    assert!(
+        off < 0.08,
+        "the feet ended {off:.3} m off-centre under the body"
+    );
+    for ((f, a), b) in FEET.iter().zip(&stance_before).zip(&after) {
+        let off = (*a - *b).length();
         assert!(
-            off < 0.08,
+            off < 0.15,
             "{f} ended {off:.3} m from its place in the stance"
         );
     }
