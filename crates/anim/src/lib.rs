@@ -22,6 +22,7 @@ pub mod model;
 pub mod motion;
 pub mod muscle;
 pub mod procedural;
+pub mod props;
 pub mod ragdoll;
 pub mod retarget;
 mod shift;
@@ -162,6 +163,7 @@ impl Plugin for AnimationPlugin {
                     .chain()
                     .in_set(AnimSet::Setup),
                 animator::evaluate_animators.in_set(AnimSet::Graph),
+                props::fly_arrows,
             ),
         )
         .add_systems(
@@ -217,6 +219,7 @@ impl Plugin for AnimationPlugin {
                         attach::attachment_system,
                         events::emit_events,
                     ),
+                    props::bow_string_system,
                 )
                     .chain()
                     .in_set(AnimSet::Output),
@@ -238,9 +241,14 @@ fn register_types(app: &mut App) {
          counter_after its own Attacker throws attack_heavy back.",
     )
     .register_component::<combat::Attacker>(
-        "Attacks with a named AttackSet: takes attack_light/attack_heavy presses (buffered \
-         0.2 s), links combos in cancel windows, closes in on its target, lands DamageEvents \
+        "Attacks with a named AttackSet (boxing, sword_shield, greatsword, bow): takes \
+         attack_light/attack_heavy presses (buffered 0.2 s), links combos in cancel windows, closes in on its target, lands DamageEvents \
          with hitstop; publishes the move, phase and cancel/armor flags.",
+    )
+    .register_component::<combat::Shield>(
+        "A shield held by a bone (center in its frame, radius m): guarding (guarding or \
+         shield_guard > 0.5), the character blocks strikes at its face, high and low, within \
+         block.cone_deg, letting through block's shares of damage, push and hitstop.",
     )
     .register_component::<Freeflow>(
         "Freeflow targeting for an Attacker: each press goes at the foe nearest the way the \
@@ -284,6 +292,14 @@ fn register_types(app: &mut App) {
     .register_component::<BoneAttachment>(
         "Follows a bone of another entity (props, weapons): bone name, offset (m), rotation, \
          and an optional hang (a loosely held prop swings down while no clip holds it up).",
+    )
+    .register_component::<props::BowString>(
+        "A piece of a bow's string or its nocked arrow: follows the archer's draw (the \
+         draw and nocked curves) from the bow's limb tips to the draw hand.",
+    )
+    .register_component::<props::Arrow>(
+        "A flying arrow: falls with gravity, turns along its flight and sticks where it \
+         hits, then goes after a few seconds.",
     )
     .register_component::<HandGrip>(
         "Keeps a character's hands closed at least this much (left, right: 0..1), as when it \

@@ -14,6 +14,7 @@ pub mod humanoid;
 pub mod rock;
 pub mod sdf;
 pub mod spider;
+pub mod weapons;
 
 use engine_core::math::{EulerRot, Quat, Vec3};
 

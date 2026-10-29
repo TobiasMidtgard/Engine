@@ -241,6 +241,29 @@ compresses and stretches.
   row (and is set as the `combo` parameter); it ends after 1.5 s without one or when the
   fighter is hit. Gameplay steers it with `Freeflow::stick` or the `stick_x` / `stick_z`
   parameters and limits it to `Freeflow::foes`; `freeflow::pick` is the choice on its own.
+- **Weapons.** [`build::weapons`](src/build/weapons.rs) authors sword, shield, great sword
+  and bow clips by the weapon rather than the joints: each key says where the grip is,
+  which way the blade points and which way its edge faces, plus the hips, trunk and feet;
+  between keys the blade swings round the shoulders with its speed peaking 60 to 70% of the
+  way through the cut and following through past the target, and both arms and legs are
+  solved with two-bone IK when the clip is built (so the fists stay on the hilt and the
+  feet on the ground). Sets: `sword_shield` (a forehand slash, a rising backhand, a thrust
+  finisher, a heavy overhead and `shield_bash`), `greatsword` (a horizontal sweep with the
+  blade rolling over so the edge leads, a rising cut, an overhead from high guard armored
+  through its wind-up), `bow` (`bow_shot` and the held `bow_shot_full`: draw to an anchor
+  under the jaw with the draw elbow behind it, a `release` event, the hand carrying on back
+  along the jaw). A hit window can name a `Striker`, a segment in a bone's frame (the blade,
+  the shield's face): it lands when that segment, swept from last frame's place to this
+  one's, passes within reach of the target, pushes along the blade's motion, and sends
+  `Slash`, `Pierce` or `Blunt`. A `Shield` on the target (`shield_guard` > 0.5) blocks high
+  and low strikes from within 80° of its front at the shield's face, letting through 5% of
+  the damage. Graph states `sword_stance`, `shield_guard`, `greatsword_stance` and the
+  arms-only layers `sword_carry`, `greatsword_carry` and `bow_carry` are set by parameters
+  of the same names. [`props`](src/props.rs) spawns matching weapons on the hands
+  (`spawn_sword`, `spawn_shield`, `spawn_greatsword` with the off hand reaching for the hilt
+  by the clip's `grip` curve, `spawn_bow` with a string from both tips to the draw hand and
+  a nocked arrow) and `shoot_arrow` flies a prop arrow that sticks. Blade blows under the
+  ribs don't fold a body onto a knee (`Hurt` keeps that for blunt blows to the liver).
 - **Getting up.** A person whose weight returns to 0 while lying flat gets up rather than
   blending straight to standing: `get_up_back` (sits up, tucks a leg, plants a hand and a
   knee, steps up) or `get_up_front` (palms down, pushes up to all fours, kneels, steps up),
@@ -360,6 +383,7 @@ renderer's generated materials (planks, concrete, sand, rock), and the spider cl
 | Sparring partner | A lifter in a boxer's guard (lead foot and fist forward, elbows tucked, bouncing lightly) blocks the boxer's jab, but a hook to the body gets under the guard to the liver and half a second later he folds onto his right knee, clutching his side, and gets up (`paddock_body_shot`); then he blocks the jab and cross on the gloves, takes the hook and uppercut to the face (the head snaps back and the feet step back to catch the body), a blow to the stomach (folds over it) and a shove on the back of a shoulder, flinching away from each and stepping back to the mark (`paddock_flinch`); in the last combo the guard drops early, the head shots leave his legs wobbling and a heavy uppercut knocks him down onto his back, braced (chin tucked, arms back), he lies a beat, gets up and comes back to the mark (`paddock_knockdown`) |
 | Boxer | An athlete squares up to the sparring partner and throws jab, cross, hook and uppercut, each press buffered until the last punch's cancel window opens; she steps in to range on the jab and closer for the hook and uppercut, each fist reaching the face, and both freeze for a beat as each lands (`paddock_combo`) |
 | Freeflow ring | An athlete tapping the light attack drops three dummies one after another with a jab, cross and hook each: the stick swings to the next as one goes down and she goes straight at it, a lunge to the one on the left, a leap to the one on the right, facing it before she lands and punching on touch-down; the dummies get up and walk back (`paddock_freeflow`) |
+| Weapons yard | A swordsman cuts a slash, a rising backhand and a thrust into his partner, then an overhead and a slash land on the partner's raised shield (he bounces off it), his own shield rams into it and a thrust gets through; then the partner attacks into his shield. A great sword sweeps, rises and comes down from high guard on a dummy, which the overhead knocks down. An archer draws to the jaw and looses three arrows into a butt 12 m off, one held at full draw (`paddock_sword`, `paddock_shield`, `paddock_bash`, `paddock_greatsword`, `paddock_bow`) |
 | Horse oval | A textured horse walks, trots, canters and gallops by speed; in the swing the knees fold, the hocks bend and the hooves curl back behind the fetlocks; haunches and shoulders flex with each stride; the mane rides the neck and the tail streams |
 | Dog run | A furred Labrador walks off, trots, canters out of a turn and gallops down the far straight, the spine flexing with each stride, ears and tail swinging; it pants as it goes (`paddock_dog_trot`, `paddock_dog`) |
 | Spider garden | A furred red-knee tarantula climbs over boulders in alternating sets of legs, a wave running from the back legs forward; its palps tap, its jaws work and its abdomen sways (`paddock_spider`). On the far side it slows to a stop and rears up in threat: the front of the body tips up on the planted back legs, the first pair of legs rises high and the second reaches out level, the palps lift and the fangs unfold, then it settles back onto its footholds and walks on (`paddock_spider_threat`) |
