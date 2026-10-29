@@ -1253,6 +1253,9 @@ mod tests {
     #[test]
     #[ignore]
     fn forest_step_timing() {
+        if std::env::var_os("SEQUENTIAL").is_none() {
+            engine_core::tasks::init_task_pools();
+        }
         let region = crate::demo::forest_region();
         let t = std::time::Instant::now();
         let (mut plants, mut logs, mut sim) = grow(&region, &[]);

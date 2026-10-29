@@ -22,8 +22,8 @@ use crate::plant::{EcologyRegion, Genes, Plant, PlantStage};
 use crate::species::{Layer, Need, PlantLibrary, PlantSpecies, ResourceLevels, SpeciesId};
 
 /// Environment the step reads. Implemented over the `engine_world` resources for live play and
-/// by a plain struct in tests.
-pub trait EnvSample {
+/// by a plain struct in tests. `Sync`, so a step can sample it from every core.
+pub trait EnvSample: Sync {
     /// Air temperature at `p`, °C (weather, altitude and fire heat).
     fn temperature_c(&self, p: DVec3) -> f32;
     /// Surface wetness from rain and puddles, 0..1.
@@ -632,6 +632,30 @@ impl RegionSim {
         let tfade = (-dt * 4.0).exp();
         self.soil.trample.iter_mut().for_each(|t| *t *= tfade);
 
+        // What each living plant gets this step, from every core: the neighbor searches for
+        // light and root competition are nearly all of a step's cost, and read only the index
+        // and soil as they stood when the step began, so the order plants are visited in no
+        // longer matters either (a plant later in the list used to see the soil enriched by
+        // snags that fell earlier in the same step).
+        let mut levels = vec![None; plants.len()];
+        {
+            let this = &*self;
+            let plants = &*plants;
+            par_fill(&mut levels, |i| {
+                let c = &this.cached[i];
+                (plants[i].plant.stage == PlantStage::Alive).then(|| {
+                    this.levels_at(
+                        ctx,
+                        plants[i].pos,
+                        c.height,
+                        c.root,
+                        c.layer,
+                        Some(i as u32),
+                    )
+                })
+            });
+        }
+
         let mut seeds: Vec<(DVec3, SpeciesId, Genes)> = Vec::new();
         #[allow(clippy::needless_range_loop)]
         for i in 0..plants.len() {
@@ -640,14 +664,7 @@ impl RegionSim {
             match plants[i].plant.stage {
                 PlantStage::Alive => {
                     let cached = self.cached[i];
-                    let (levels, share) = self.levels_at(
-                        ctx,
-                        pos,
-                        cached.height,
-                        cached.root,
-                        cached.layer,
-                        Some(i as u32),
-                    );
+                    let (levels, share) = levels[i].expect("alive plants have levels");
                     let p = &mut plants[i].plant;
                     let (suit, mut need) = sp.suitability(&levels, &p.genes);
                     if share < 0.8 && matches!(need, Need::Water | Need::Nutrients | Need::Minerals)
@@ -672,13 +689,13 @@ impl RegionSim {
                     } else if p.is_mature() && sp.seeds_per_year > 0.0 {
                         let expected = sp.seeds_per_year * dt * suit * p.size;
                         let n = poisson(&mut self.rng, expected);
+                        let wind = if n > 0 {
+                            ctx.env.wind(pos + DVec3::Y * cached.height as f64)
+                        } else {
+                            Vec3::ZERO
+                        };
                         for _ in 0..n {
-                            let q = disperse(
-                                &mut self.rng,
-                                pos,
-                                sp,
-                                ctx.env.wind(pos + DVec3::Y * cached.height as f64),
-                            );
+                            let q = disperse(&mut self.rng, pos, sp, wind);
                             let genes = p.genes.inherit(&mut self.rng);
                             seeds.push((q, species, genes));
                         }
@@ -786,27 +803,42 @@ impl RegionSim {
         }
 
         out.seeds_tried += seeds.len() as u32;
+        // Where each seed could take root and what it would get there, from every core; only
+        // the seedlings placed this step (and the layer caps) depend on the order.
+        let mut sites = vec![None; seeds.len()];
+        {
+            let (this, seeds) = (&*self, &seeds);
+            par_fill(&mut sites, |i| {
+                let (q, species, _) = seeds[i];
+                let sp = ctx.library.get(species);
+                let layer = sp.layer;
+                if !this.soil.contains(q) || this.soil.blocked[this.soil.index(q)] {
+                    return None;
+                }
+                if !ctx
+                    .region
+                    .may_root(layer, DVec2::new(q.x - ctx.center.x, q.z - ctx.center.z))
+                {
+                    return None;
+                }
+                if !this.has_room(ctx, q, sp) {
+                    return None;
+                }
+                let root = (sp.crown_radius_m * 0.04).max(0.35);
+                Some(this.levels_at(ctx, q, 0.15, root, layer, None).0)
+            });
+        }
         let start = out.births.len();
-        for (q, species, genes) in seeds {
+        for ((q, species, genes), site) in seeds.into_iter().zip(sites) {
             let sp = ctx.library.get(species);
             let layer = sp.layer;
             if layer_counts[layer.index()] >= ctx.region.max_plants[layer.index()] {
                 continue;
             }
-            if !self.soil.contains(q) || self.soil.blocked[self.soil.index(q)] {
+            let Some(levels) = site else { continue };
+            if !room_among(ctx, q, sp, &out.births[start..]) {
                 continue;
             }
-            if !ctx
-                .region
-                .may_root(layer, DVec2::new(q.x - ctx.center.x, q.z - ctx.center.z))
-            {
-                continue;
-            }
-            if !self.has_room(ctx, q, sp, &out.births[start..]) {
-                continue;
-            }
-            let root = (sp.crown_radius_m * 0.04).max(0.35);
-            let (levels, _) = self.levels_at(ctx, q, 0.15, root, layer, None);
             let (suit, _) = sp.suitability(&levels, &genes);
             if !self.rng.chance(sp.establishment * suit * suit) {
                 continue;
@@ -825,8 +857,8 @@ impl RegionSim {
         }
     }
 
-    /// No plant of the same layer too close (including seedlings placed this step).
-    fn has_room(&self, ctx: &StepContext, q: DVec3, sp: &PlantSpecies, fresh: &[SimPlant]) -> bool {
+    /// No plant of the same layer too close (seedlings placed this step: [`room_among`]).
+    fn has_room(&self, ctx: &StepContext, q: DVec3, sp: &PlantSpecies) -> bool {
         let layer = sp.layer;
         let mut room = true;
         self.by_layer[layer.index()].for_each_near(q, sp.min_spacing_m.max(2.5), |j| {
@@ -850,15 +882,36 @@ impl RegionSim {
                 }
             });
         }
-        room && fresh.iter().all(|b| {
-            let other = ctx.library.get(b.plant.species);
-            other.layer != layer
-                || horizontal(b.pos, q) >= 0.5 * (sp.min_spacing_m + other.min_spacing_m)
-        })
+        room
     }
 
     fn cached_species(&self, j: u32) -> SpeciesId {
         self.species_of[j as usize]
+    }
+}
+
+/// No seedling of the same layer placed this step too close to `q`.
+fn room_among(ctx: &StepContext, q: DVec3, sp: &PlantSpecies, fresh: &[SimPlant]) -> bool {
+    fresh.iter().all(|b| {
+        let other = ctx.library.get(b.plant.species);
+        other.layer != sp.layer
+            || horizontal(b.pos, q) >= 0.5 * (sp.min_spacing_m + other.min_spacing_m)
+    })
+}
+
+/// `out[i] = f(i)` for every `i`, spread over the compute pool when there is one (tests and
+/// tools without one run it here).
+fn par_fill<T: Send>(out: &mut [T], f: impl Fn(usize) -> T + Send + Sync) {
+    const CHUNK: usize = 256;
+    let fill = |chunk: usize, items: &mut [T]| {
+        for (k, item) in items.iter_mut().enumerate() {
+            *item = f(chunk * CHUNK + k);
+        }
+    };
+    if engine_core::tasks::ComputeTaskPool::try_get().is_some() {
+        engine_core::tasks::par_chunks_mut(out, CHUNK, fill);
+    } else {
+        fill(0, out);
     }
 }
 
