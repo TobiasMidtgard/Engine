@@ -206,7 +206,7 @@ pub fn spawn_rowboat(commands: &mut Commands, at: DVec3, yaw: f32, anchor: DVec3
                 anchor,
                 2.8,
             ),
-            WaterInteractor::new(0.6).with_wake(0.6),
+            WaterInteractor::new(0.6).with_wake(0.6).with_length(1.7),
         ))
         .id();
     add_parts(commands, e, parts);
@@ -231,7 +231,7 @@ pub fn spawn_motorboat(commands: &mut Commands, at: DVec3, yaw: f32) -> Entity {
             },
             Floating::default(),
             Boat::new(hull, 650.0, 0.3).with_interior(inside),
-            WaterInteractor::new(0.9).with_wake(2.5),
+            WaterInteractor::new(0.9).with_wake(2.5).with_length(2.3),
         ))
         .id();
     add_parts(commands, e, parts);

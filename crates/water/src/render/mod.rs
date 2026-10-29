@@ -23,6 +23,7 @@ use crate::state::{BodyState, SharedWater, WaterState};
 use crate::waves::MAX_WAVES;
 
 mod detail;
+mod surface;
 
 /// The water shader (composed after the renderer's `lib_types` and `lib_frame`).
 pub const SHADER: &str = include_str!("water.wgsl");
@@ -356,6 +357,8 @@ struct FlowGpu {
     index_count: u32,
     group: wgpu::BindGroup,
     version: u64,
+    /// The bed the triangles were laid out for.
+    bed_version: u64,
     drawn: bool,
 }
 
@@ -384,6 +387,8 @@ struct Gpu {
     fall_count: u32,
     /// The fine wind waves' tiles.
     detail: detail::DetailGpu,
+    /// The dispersive ripples over the ripple grid.
+    surface: surface::SurfaceGpu,
 }
 
 /// What the puddle window holds.
@@ -642,6 +647,7 @@ impl WaterFeature {
                     },
                     count: None,
                 },
+                tex(7, wgpu::TextureSampleType::Float { filterable: true }),
             ],
         });
         let group2_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -804,6 +810,7 @@ impl WaterFeature {
             wgpu::TextureFormat::Rg32Float,
         );
         let detail = detail::DetailGpu::new(gpu);
+        let surface = surface::SurfaceGpu::new(gpu);
         Gpu {
             body,
             flow,
@@ -826,6 +833,7 @@ impl WaterFeature {
             fall_capacity,
             fall_count: 0,
             detail,
+            surface,
         }
     }
 
@@ -1046,10 +1054,12 @@ impl WaterFeature {
     fn upload_flows(gpu: &mut Gpu, shared: &GpuShared, state: &WaterState, view: &ViewData) {
         let device = &shared.device;
         gpu.flows.retain(|f| {
-            state
-                .flows
-                .iter()
-                .any(|s| s.entity == f.entity && s.nx as u32 == f.nx && s.nz as u32 == f.nz)
+            state.flows.iter().any(|s| {
+                s.entity == f.entity
+                    && s.nx as u32 == f.nx
+                    && s.nz as u32 == f.nz
+                    && s.bed_version == f.bed_version
+            })
         });
         for f in &mut gpu.flows {
             f.drawn = false;
@@ -1107,6 +1117,7 @@ impl WaterFeature {
                         index_count: indices.len() as u32,
                         group,
                         version: u64::MAX,
+                        bed_version: sim.bed_version,
                         drawn: false,
                     });
                     gpu.flows.len() - 1
@@ -1345,6 +1356,9 @@ impl RenderFeature for WaterFeature {
             .filter(|w| w.is_raining())
             .map_or(0.0, |w| w.precipitation_mm_h);
         let (puddle, puddle2, puddles_on) = self.upload_puddles(world, shared, view);
+        let ripple_damping = world
+            .get_resource::<crate::body::WaterSettings>()
+            .map_or(0.35, |s| s.ripple_damping);
 
         let state = water.0.read();
         let gpu = self.gpu.as_mut().expect("checked above");
@@ -1447,6 +1461,15 @@ impl RenderFeature for WaterFeature {
         g.counts[3] = near.len().min(MAX_PLUNGES) as u32;
         let frame_wind = engine_core::math::Vec2::new(view.wind.x, view.wind.z);
         (g.detail, g.detail2) = gpu.detail.globals(frame_wind);
+        gpu.surface.update(
+            shared,
+            &state.ripples,
+            state.shifts,
+            view.delta,
+            ripple_damping,
+        );
+        // The ripples' heights come from the dispersive surface while it runs.
+        g.detail[3] = if gpu.surface.drawn() { 1.0 } else { 0.0 };
         if let Some((slot, depth)) = under {
             let b = &uniform.bodies[slot];
             g.rain[2] = slot as f32;
@@ -1492,6 +1515,7 @@ impl RenderFeature for WaterFeature {
             return;
         };
         gpu.detail.dispatch(encoder);
+        gpu.surface.dispatch(encoder);
         // Built again only when what it binds is made anew: the scene copies on resize, the
         // ripple textures when the grid changes size (both clear it).
         if gpu.group1.is_some() {
@@ -1534,6 +1558,10 @@ impl RenderFeature for WaterFeature {
                         wgpu::BindGroupEntry {
                             binding: 6,
                             resource: wgpu::BindingResource::TextureView(&gpu.detail.view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 7,
+                            resource: wgpu::BindingResource::TextureView(&gpu.surface.view),
                         },
                     ],
                 }),

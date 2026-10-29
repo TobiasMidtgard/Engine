@@ -7,6 +7,14 @@
 //! `seconds` of simulation run before the first picture (default 12); `views` is a
 //! comma-separated subset of: overview, falls, shore, under, pond, wake, aerial, swirl, ditch,
 //! cascade, crevice, ford, pools, pools_near, pools_dark.
+//!
+//! The dispersive ripples run on the CPU while the simulation runs without drawing, and the
+//! GPU picks them up for the pictures (`ENGINE_WATER_CPU_RIPPLES=1` draws the ripple grid's
+//! own waves instead, to compare). A crate stands in the stream above the ford, so the water
+//! parts round it (the gallery has no physics engine: a stand-in answers the stream's
+//! questions about what stands in it).
+
+use std::sync::Arc;
 
 use engine_core::prelude::*;
 use engine_core::time::TimeSource;
@@ -14,7 +22,97 @@ use engine_render::prelude::*;
 use engine_render::{RenderDisabled, capture_now};
 use engine_water::WaterPlugin;
 use engine_water::demo::{self, LAKE_LEVEL};
-use engine_world::WorldPlugin;
+use engine_water::state::SharedWater;
+use engine_world::physics::{
+    ColliderShape, Hit, PhysicsQueries, PhysicsQuery, QueryFilter, RigidBody,
+};
+use engine_world::{SurfaceId, WorldPlugin};
+
+/// The crate in the stream: its middle on the ground (world), half its size.
+struct Crate {
+    entity: Entity,
+    base: DVec3,
+    half: Vec3,
+}
+
+/// Answers the stream's physics questions about the crate (and nothing else).
+struct CrateQueries(Vec<Crate>);
+
+impl CrateQueries {
+    fn bounds(c: &Crate) -> (DVec3, DVec3) {
+        let lo = c.base - DVec3::new(c.half.x as f64, 0.0, c.half.z as f64);
+        let hi = c.base + DVec3::new(c.half.x as f64, 2.0 * c.half.y as f64, c.half.z as f64);
+        (lo, hi)
+    }
+}
+
+impl PhysicsQuery for CrateQueries {
+    fn raycast(&self, origin: DVec3, dir: Vec3, max: f32, filter: &QueryFilter) -> Option<Hit> {
+        self.0
+            .iter()
+            .filter(|c| !filter.exclude.contains(&c.entity))
+            .filter_map(|c| {
+                let (lo, hi) = Self::bounds(c);
+                if origin.x < lo.x || origin.x > hi.x || origin.z < lo.z || origin.z > hi.z {
+                    return None;
+                }
+                // Straight up or down only (all the stream asks).
+                let inside = origin.y >= lo.y && origin.y <= hi.y;
+                let d = if inside {
+                    0.0
+                } else if dir.y < 0.0 && origin.y > hi.y {
+                    origin.y - hi.y
+                } else if dir.y > 0.0 && origin.y < lo.y {
+                    lo.y - origin.y
+                } else {
+                    return None;
+                };
+                (d as f32 <= max).then(|| Hit {
+                    entity: c.entity,
+                    point: origin + dir.as_dvec3() * d,
+                    normal: -dir,
+                    distance: d as f32,
+                    surface: SurfaceId::default(),
+                })
+            })
+            .min_by(|a, b| a.distance.total_cmp(&b.distance))
+    }
+    fn shapecast(
+        &self,
+        _: &ColliderShape,
+        _: DVec3,
+        _: Quat,
+        _: Vec3,
+        _: f32,
+        _: &QueryFilter,
+    ) -> Option<Hit> {
+        None
+    }
+    fn overlap(
+        &self,
+        shape: &ColliderShape,
+        position: DVec3,
+        _: Quat,
+        _: &QueryFilter,
+        out: &mut Vec<Entity>,
+    ) {
+        // The patch's turned box, taken as the sphere round it.
+        let reach = match shape {
+            ColliderShape::Cuboid { half_extents } => half_extents.length() as f64,
+            _ => 0.0,
+        };
+        for c in &self.0 {
+            let (lo, hi) = Self::bounds(c);
+            let near = position.clamp(lo, hi);
+            if near.distance(position) <= reach {
+                out.push(c.entity);
+            }
+        }
+    }
+    fn closest_point(&self, _: DVec3, _: f32, _: &QueryFilter) -> Option<Hit> {
+        None
+    }
+}
 
 /// (key, eye, target), local to the test area's center.
 const VIEWS: &[(&str, [f64; 3], [f64; 3])] = &[
@@ -27,6 +125,8 @@ const VIEWS: &[(&str, [f64; 3], [f64; 3])] = &[
     ("aerial", [0.0, 95.0, 70.0], [10.0, 0.0, 8.0]),
     // Placed over the motorboat when it is found.
     ("swirl", [-5.0, 24.0, 19.0], [-5.0, 5.5, -4.0]),
+    // Low behind the motorboat, down its wake (placed when it is found).
+    ("kelvin", [-3.0, 9.0, 26.0], [-5.0, 5.5, -3.0]),
     ("ditch", [52.0, 30.0, 52.0], [51.0, 0.0, 50.0]),
     // Across the cove at the foot of the crag, and up close under its crevice.
     ("cascade", [-8.2, 9.0, -15.3], [-25.2, 13.0, -25.2]),
@@ -64,6 +164,9 @@ fn main() {
             step_secs: 1.0 / 30.0,
         });
     app.add_plugins((RenderPlugin, WorldPlugin, WaterPlugin));
+    app.world
+        .resource_mut::<engine_water::WaterSettings>()
+        .cpu_surface = true;
 
     let w = &mut app.world;
     w.spawn((
@@ -94,7 +197,7 @@ fn main() {
         .as_ref()
         .filter(|o| o.len() == 1)
         .and_then(|o| VIEWS.iter().find(|(k, ..)| *k == o[0].as_str()))
-        .filter(|(k, ..)| *k != "swirl");
+        .filter(|(k, ..)| !matches!(*k, "swirl" | "kelvin"));
     let sim_from = single.map_or(Transform::from_xyz(-3.0, 30.0, 0.0), |(_, eye, target)| {
         Transform::from_translation(DVec3::from_array(*eye))
             .looking_at(DVec3::from_array(*target), Vec3::Y)
@@ -103,6 +206,44 @@ fn main() {
     app.add_systems(Startup, |mut commands: Commands| {
         demo::spawn_demo(&mut commands, DVec3::ZERO);
     });
+
+    // The crate, once the valley's ground is in: a meter-wide box standing in the stream a few
+    // meters above the ford (`GALLERY_NO_CRATE=1` leaves it out, to compare).
+    app.update_n(3);
+    if std::env::var_os("GALLERY_NO_CRATE").is_none() {
+        let at = demo::outlet_point(31.0);
+        // On the stream's bed.
+        let water = app.world.resource::<SharedWater>().clone();
+        let base_y = water
+            .0
+            .read()
+            .bed_height(at + DVec3::Y * 20.0)
+            .unwrap_or(at.y);
+        eprintln!("crate at {at:?}, bed {base_y:.2}");
+        let half = Vec3::new(0.5, 0.45, 0.5);
+        let base = DVec3::new(at.x, base_y, at.z);
+        let entity = app
+            .world
+            .spawn((
+                Name::new("Crate in the stream"),
+                Transform::from_translation(base + DVec3::Y * half.y as f64),
+                MeshRenderer::new(
+                    Shape::Cuboid {
+                        size: (half * 2.0).to_array(),
+                    },
+                    StandardMaterial::hex(0x8a6a44).with_roughness(0.8),
+                ),
+                // Moved by gameplay, not the valley's scenery: the stream goes round it.
+                RigidBody::dynamic(),
+            ))
+            .id();
+        app.world
+            .insert_resource(PhysicsQueries(Arc::new(CrateQueries(vec![Crate {
+                entity,
+                base,
+                half,
+            }]))));
+    }
 
     // Let the simulation run without drawing (much faster on a software GPU).
     let render = app
@@ -120,6 +261,41 @@ fn main() {
         "simulated {seconds} s in {:.1} s",
         started.elapsed().as_secs_f32()
     );
+    {
+        let water = app.world.resource::<SharedWater>().clone();
+        let state = water.0.read();
+        let link = &state.ripples.surface;
+        let peak = link
+            .heights()
+            .map_or(0.0, |h| h.h.iter().fold(0.0f32, |m, v| m.max(v.abs())));
+        eprintln!(
+            "surface: {:?}, highest ripple {peak:.4} m (grid's own {:.4} m)",
+            link.runner(),
+            state.ripples.h.iter().fold(0.0f32, |m, v| m.max(v.abs()))
+        ); // The two surfaces side by side, seen from above (grid's own left, dispersive right):
+        // what the water itself feels, without the light.
+        if let Some(h) = link.heights() {
+            let n = state.ripples.n;
+            let scale = 0.02;
+            let mut img = image::RgbImage::new(n as u32 * 2 + 8, n as u32);
+            for (side, buf) in [(0, &state.ripples.h), (1, &h.h)] {
+                for j in 0..n {
+                    for i in 0..n {
+                        let v = (buf[j * n + i] / scale).clamp(-1.0, 1.0);
+                        let c = if v > 0.0 {
+                            [255, (255.0 * (1.0 - v)) as u8, (255.0 * (1.0 - v)) as u8]
+                        } else {
+                            [(255.0 * (1.0 + v)) as u8, (255.0 * (1.0 + v)) as u8, 255]
+                        };
+                        img.put_pixel((side * (n + 8) + i) as u32, j as u32, image::Rgb(c));
+                    }
+                }
+            }
+            let path = format!("{out}/heights.png");
+            img.save(&path).expect("heights image");
+            eprintln!("{path}");
+        }
+    }
     app.world.resource_mut::<Schedules>().insert(render);
 
     for (key, eye, target) in VIEWS {
@@ -134,6 +310,19 @@ fn main() {
                 let boat = g.translation();
                 eye = boat + DVec3::new(0.0, 22.0, 14.0);
                 target = boat;
+            }
+        }
+        if *key == "kelvin" {
+            let mut q = app.world.query::<(&Name, &GlobalTransform)>();
+            if let Some((_, g)) = q.iter(&app.world).find(|(n, _)| n.as_str() == "Motorboat") {
+                let boat = g.translation();
+                let fwd = (g.rotation() * Vec3::X)
+                    .with_y(0.0)
+                    .normalize_or_zero()
+                    .as_dvec3();
+                let side = DVec3::new(-fwd.z, 0.0, fwd.x);
+                eye = boat - fwd * 13.0 + side * 6.0 + DVec3::Y * 4.5;
+                target = boat - fwd * 2.0;
             }
         }
         *app.world.get_mut::<Transform>(camera).expect("camera") =

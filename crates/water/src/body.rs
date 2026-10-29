@@ -581,6 +581,10 @@ pub struct WaterSettings {
     pub wet_shores: bool,
     /// Interactors and splashes write `NoiseEvent`s AI can hear.
     pub noise_events: bool,
+    /// Run the dispersive ripples ([`crate::surface`]) on the CPU when no GPU runs them: a
+    /// headless server whose boats should ride the same Kelvin wakes, a gallery that
+    /// simulates without drawing. A few milliseconds a step; off by default.
+    pub cpu_surface: bool,
 }
 
 impl Default for WaterSettings {
@@ -598,6 +602,7 @@ impl Default for WaterSettings {
             puddle_radius_m: 64.0,
             wet_shores: true,
             noise_events: true,
+            cpu_surface: false,
         }
     }
 }

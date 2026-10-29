@@ -17,7 +17,11 @@ Background research: `game-engine-research/graphics.md` in the project files.
   Water over a lip falls on its arc until it meets the rock: onto a ledge or into a pool it
   lands, down a face too steep to land on it clings and slides, white, and leaves it again
   where the face drops away (`FlowSim::fall_path`), so falls cascade down crevices instead of
-  cutting through them. Regions step in parallel bands and skip dry ground.
+  cutting through them. Regions step in parallel bands and skip dry ground. The bed follows
+  the world: whatever stands on it in the water (a dropped crate, a boulder; from
+  the physics scene, patch by patch) raises it, so the stream parts and piles up round it, and
+  terrain edits re-read the ground under it. Fixed scenery that stood there when the stream
+  was made is left out (the stream was laid round it).
 - **Interaction**: a fluid field follows the camera (or the first `SimulationFocus`) over the
   nearest interactive body, or the stream beside it (where rings, wakes and foam drift
   downstream with the current): shallow water on a staggered grid, so pushes make ripples that
@@ -31,7 +35,18 @@ Background research: `game-engine-research/graphics.md` in the project files.
   (`ProjectileTrace`), blasts (`WorldImpulse`, domes from underwater charges), drops and wakes
   push it. Every splash is published as `WaterSplash` (particles, audio) and `NoiseEvent` (AI),
   including steady puffs of spray from fast boats' bows and from the foot of every waterfall
-  the flow finds.
+  the flow finds. The drops a splash throws (a crown round the hole, a jet up the middle after
+  a fast, small entry) fly back down and ring the water and fleck it with foam where they land
+  (`drops`).
+- **Dispersive ripples** (`surface`): over the fluid field, the surface that is drawn and
+  floated on is evolved for every wavelength at once in Fourier space (Tessendorf's eWave;
+  the hybrid with a shallow-water solver is Jeschke & Wojtan 2023): long waves outrun short
+  ones, a stone sends out a spreading train of rings and hulls draw Kelvin wakes, the 19.5°
+  wedge of feathered crests. It is carried along the field's currents and streams, shut out
+  of dry land and soaked up at the edge. The renderer runs it on the GPU and reads its
+  heights back for floating things; `WaterSettings::cpu_surface` runs it on the CPU where
+  there is no GPU (the GPU picks up where it left off). `ENGINE_WATER_CPU_RIPPLES=1` draws the
+  field's own waves instead, to compare.
 - **Floating** (`Buoyancy`): Archimedes over a probe grid with drag and wave forces, for props
   the module moves itself (`Floating`): buoys, moored boats, debris. Physics bodies
   (`RigidBody`) float in the physics module from their real collider shapes, through the same

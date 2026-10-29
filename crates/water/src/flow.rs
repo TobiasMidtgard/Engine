@@ -274,7 +274,16 @@ pub struct FlowSim {
     pub nx: usize,
     pub nz: usize,
     pub cell: f32,
+    /// The bed the water runs on: the ground, raised where something stands in the water
+    /// ([`FlowSim::set_standing`]).
     pub bed: Vec<f32>,
+    /// The ground under each cell, without what stands on it.
+    pub ground: Vec<f32>,
+    /// Top of whatever stands on the ground in each cell (a rock, a crate, a leg), relative to
+    /// `origin.y`; `NEG_INFINITY` where nothing does.
+    pub standing: Vec<f32>,
+    /// Bumped whenever the bed changes (copies and the renderer follow it).
+    pub bed_version: u64,
     pub depth: Vec<f32>,
     /// Outflow to −x, +x, −z, +z, m³/s.
     pub flux: Vec<[f32; 4]>,
@@ -298,7 +307,7 @@ pub struct FlowSim {
     /// Out of the `SimulationRange` of every focus: it holds still, as it last ran, until one
     /// comes near.
     pub resting: bool,
-    /// Lowest and highest bed, meters above `origin.y` (the bed never changes).
+    /// Lowest and highest bed, meters above `origin.y` (only ever grows).
     bed_span: [f32; 2],
     /// The falls as last worked out ([`FlowSim::falls`]), and seconds of flow since.
     falls: std::sync::Arc<Falls>,
@@ -346,6 +355,9 @@ impl FlowSim {
             nx,
             nz,
             cell: region.cell_m.max(0.05),
+            ground: bed.clone(),
+            standing: vec![f32::NEG_INFINITY; nx * nz],
+            bed_version: 0,
             bed,
             depth,
             flux: vec![[0.0; 4]; nx * nz],
@@ -407,7 +419,7 @@ impl FlowSim {
 
     /// World x/z of a cell center.
     /// Become a copy of `other`, reusing this one's buffers: no allocation once the shapes
-    /// match. The bed never changes, so a copy of the same region keeps its own.
+    /// match. The bed rarely changes, so a copy of the same region keeps its own until then.
     pub fn copy_from(&mut self, other: &FlowSim) {
         let FlowSim {
             entity,
@@ -417,6 +429,9 @@ impl FlowSim {
             nz,
             cell,
             bed,
+            ground,
+            standing,
+            bed_version,
             depth,
             flux,
             steady,
@@ -435,8 +450,12 @@ impl FlowSim {
             falls,
             since_falls,
         } = other;
-        if self.entity != *entity || self.bed.len() != bed.len() {
+        if self.entity != *entity || self.bed.len() != bed.len() || self.bed_version != *bed_version
+        {
             self.bed.clone_from(bed);
+            self.ground.clone_from(ground);
+            self.standing.clone_from(standing);
+            self.bed_version = *bed_version;
         }
         self.entity = *entity;
         self.origin = *origin;
@@ -461,6 +480,65 @@ impl FlowSim {
         self.bed_span = *bed_span;
         self.falls = falls.clone();
         self.since_falls = *since_falls;
+    }
+
+    /// Something stands in cell `idx` up to `top` meters above `origin.y` (`NEG_INFINITY`:
+    /// nothing does any more): the bed rises to it and the water parts round it, as round a
+    /// rock in a stream. Returns whether the bed changed.
+    pub fn set_standing(&mut self, idx: usize, top: f32) -> bool {
+        self.standing[idx] = top;
+        self.rebed(idx)
+    }
+
+    /// The ground under cell `idx` is now `ground` meters above `origin.y` (a terrain edit).
+    /// Returns whether the bed changed.
+    pub fn set_ground(&mut self, idx: usize, ground: f32) -> bool {
+        self.ground[idx] = ground;
+        self.rebed(idx)
+    }
+
+    /// Bring cell `idx`'s bed to its ground and what stands on it. Water a rising bed lifts
+    /// out spills onto the lower cells round it (none is lost while there is somewhere to go).
+    fn rebed(&mut self, idx: usize) -> bool {
+        let new = self.ground[idx].max(self.standing[idx]);
+        let old = self.bed[idx];
+        // Changes under 2 cm don't change the flow (and keep a scan's noise out).
+        if (new - old).abs() < 0.02 {
+            return false;
+        }
+        if new > old {
+            let lifted = self.depth[idx].min(new - old);
+            self.depth[idx] -= lifted;
+            let (i, j) = (idx % self.nx, idx / self.nx);
+            let mut lower = Vec::with_capacity(4);
+            for (di, dj) in [(-1i64, 0i64), (1, 0), (0, -1), (0, 1)] {
+                let (x, z) = (i as i64 + di, j as i64 + dj);
+                if x >= 0 && z >= 0 && (x as usize) < self.nx && (z as usize) < self.nz {
+                    let n = z as usize * self.nx + x as usize;
+                    if self.bed[n] < new {
+                        lower.push(n);
+                    }
+                }
+            }
+            if lower.is_empty() {
+                self.depth[idx] += lifted;
+            } else {
+                let share = lifted / lower.len() as f32;
+                for n in lower {
+                    self.depth[n] += share;
+                }
+            }
+        }
+        self.bed[idx] = new;
+        self.flux[idx] = [0.0; 4];
+        self.steady[idx] = [0.0; 4];
+        self.vel[idx] = Vec2::ZERO;
+        self.bed_span = [self.bed_span[0].min(new), self.bed_span[1].max(new)];
+        self.bed_version += 1;
+        self.version += 1;
+        // The falls move with the bed.
+        self.since_falls = f32::INFINITY;
+        true
     }
 
     /// The middle of the grid and the distance from it to a corner, meters: a sphere round
@@ -1042,6 +1120,67 @@ mod tests {
             friction: 0.3,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn water_parts_round_something_standing_in_it() {
+        let r = region(40, 9);
+        // A channel sloping down along +x, fed at its top end.
+        let bed: Vec<f32> = (0..40 * 9).map(|k| 2.0 - (k % 40) as f32 * 0.04).collect();
+        let mut sim = FlowSim::new(Entity::PLACEHOLDER, DVec3::ZERO, &r, bed);
+        sim.sources.push(FlowSource {
+            at: [1.0, 2.25],
+            radius_m: 1.5,
+            rate_m3_s: 0.3,
+        });
+        for _ in 0..60 * 15 {
+            sim.step(1.0 / 60.0);
+        }
+        // A crate 1 m tall drops into the middle of the channel (2 × 2 cells).
+        let crate_cells = [4 * 40 + 20, 4 * 40 + 21, 5 * 40 + 20, 5 * 40 + 21];
+        let before = sim.volume();
+        let (version, beside) = (sim.bed_version, sim.depth[4 * 40 + 19]);
+        for &k in &crate_cells {
+            let top = sim.ground[k] + 1.0;
+            assert!(sim.set_standing(k, top));
+        }
+        assert!(sim.bed_version > version);
+        // The water it stood in went to the cells round it, not away.
+        assert!(
+            (sim.volume() - before).abs() < 1e-3,
+            "{} vs {before}",
+            sim.volume()
+        );
+        for _ in 0..60 * 10 {
+            sim.step(1.0 / 60.0);
+        }
+        // Dry on top, the water piled up in front of it and running past its sides.
+        for &k in &crate_cells {
+            assert!(sim.depth[k] < 0.005, "on the crate: {}", sim.depth[k]);
+        }
+        assert!(
+            sim.depth[4 * 40 + 19] > beside * 1.2,
+            "in front: {beside} -> {}",
+            sim.depth[4 * 40 + 19]
+        );
+        assert!(sim.vel[3 * 40 + 20].length() > 0.05 && sim.vel[6 * 40 + 20].length() > 0.05);
+        // Lifted away again, the bed is the ground's.
+        for &k in &crate_cells {
+            sim.set_standing(k, f32::NEG_INFINITY);
+            assert_eq!(sim.bed[k], sim.ground[k]);
+        }
+    }
+
+    #[test]
+    fn a_terrain_edit_regrades_the_bed() {
+        let r = region(8, 8);
+        let mut sim = FlowSim::new(Entity::PLACEHOLDER, DVec3::ZERO, &r, vec![1.0; 64]);
+        assert!(sim.set_ground(27, 0.4));
+        assert_eq!(sim.bed[27], 0.4);
+        // Something standing there still holds the bed up.
+        sim.set_standing(27, 1.5);
+        assert!(!sim.set_ground(27, 0.2));
+        assert_eq!(sim.bed[27], 1.5);
     }
 
     #[test]

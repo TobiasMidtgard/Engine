@@ -6,6 +6,7 @@ pub mod body;
 pub mod buoyancy;
 pub mod demo;
 pub mod detail;
+pub mod drops;
 pub mod flow;
 pub mod interact;
 pub mod puddles;
@@ -15,6 +16,7 @@ pub mod shift;
 pub mod shore;
 pub mod sim;
 pub mod state;
+pub mod surface;
 pub mod waves;
 
 pub use boat::{Boat, HullCut, Interior, hull_collider};
@@ -68,6 +70,8 @@ impl Plugin for WaterPlugin {
             .insert_resource(shared)
             .init_resource::<sim::SimBook>()
             .init_resource::<sim::RipplesInFlight>()
+            .init_resource::<drops::SplashDrops>()
+            .init_resource::<surface::CpuSurface>()
             .init_resource::<sim::FlowsInFlight>()
             .init_resource::<WaterLoading>()
             .register_resource::<WaterSettings>(
@@ -124,9 +128,12 @@ impl Plugin for WaterPlugin {
                 (
                     sim::sync_bodies_system,
                     sim::publish_ripples_system,
+                    surface::cpu_surface_system,
                     sim::publish_flows_system,
                     sim::flow_system,
+                    sim::flow_bed_system,
                     interact::disturbance_system,
+                    drops::splash_drops_system,
                     puddles::puddle_system,
                     shore::shore_wetness_system,
                     sim::diagnostics_system,

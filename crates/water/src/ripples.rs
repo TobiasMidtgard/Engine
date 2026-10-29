@@ -23,6 +23,9 @@
 use engine_core::math::{DVec2, DVec3, Vec2, Vec3};
 use engine_core::tasks::ComputeTaskPool;
 use engine_world::WorldShift;
+use std::sync::Arc;
+
+use crate::surface::SurfaceLink;
 
 /// Cells at the grid edge where waves are absorbed instead of reflected.
 const SPONGE: usize = 10;
@@ -156,6 +159,9 @@ pub struct RippleField {
     /// Scratch for the drift (heights, foam), only ever read where just written.
     drift_h: Vec<f32>,
     drift_foam: Vec<f32>,
+    /// The GPU's dispersive surface over this grid ([`crate::surface`]): it takes every push
+    /// and, while it runs, its heights are the ones [`sample`](Self::sample) answers with.
+    pub surface: Arc<SurfaceLink>,
 }
 
 /// Bilinear sample of one velocity component, `g` in that component's own grid coordinates
@@ -651,6 +657,7 @@ impl RippleField {
             drifted: vec![false; tiles],
             drift_h: vec![0.0; n * n],
             drift_foam: vec![0.0; n * n],
+            surface: Arc::default(),
         }
     }
 
@@ -818,6 +825,7 @@ impl RippleField {
         self.h.clone_from(&other.h);
         self.vel.clone_from(&other.vel);
         self.foam.clone_from(&other.foam);
+        self.surface = other.surface.clone();
     }
 
     /// Derive what the step needs from `speed2`: the open faces' depths, the wet mask and the
@@ -863,6 +871,7 @@ impl RippleField {
         let tiles = self.tiles();
         let cell = self.cell as f64;
         for d in std::mem::take(&mut self.pending) {
+            self.surface.record(&d);
             let r = d.radius.max(self.cell * 0.75);
             let reach = (r * 2.0 / self.cell).ceil() as i64;
             let c = ((d.pos - self.origin) / cell).floor();
@@ -1287,17 +1296,33 @@ impl RippleField {
         let gz = ((at(&self.h, i, j + 1) - at(&self.h, i, j)) * (1.0 - fx)
             + (at(&self.h, i + 1, j + 1) - at(&self.h, i + 1, j)) * fx)
             / self.cell;
+        // The GPU's dispersive surface, when it runs, is the one drawn: ride that.
+        let (height, gradient) = self.surface.heights().and_then(|s| s.sample(p)).unwrap_or((
+            sample_cells(&self.h, n, g.x as f32, g.y as f32),
+            Vec2::new(gx, gz),
+        ));
         // Cell centers sit at whole grid coordinates + 0.5; faces half a cell further along.
         let (x, z) = (g.x as f32 + 0.5, g.y as f32 + 0.5);
         Some(RippleSample {
-            height: sample_cells(&self.h, n, g.x as f32, g.y as f32),
-            gradient: Vec2::new(gx, gz),
+            height,
+            gradient,
             foam: sample_cells(&self.foam, n, g.x as f32, g.y as f32),
             current: Vec2::new(
                 sample_component(&self.vel, 0, n, x - 1.0, z - 0.5),
                 sample_component(&self.vel, 1, n, x - 0.5, z - 1.0),
             ),
         })
+    }
+
+    /// How much of a step's change cell `k` (row-major) keeps: 0 on dry land, under 1 in the
+    /// sponge at the grid's edge.
+    pub fn cell_wet(&self, k: usize) -> f32 {
+        self.wet[k]
+    }
+
+    /// The flow cell `k` (row-major) rides on: a stream's current, world x/z, m/s.
+    pub fn cell_drift(&self, k: usize) -> Vec2 {
+        self.drift[k]
     }
 
     /// Current at the center of cell (i, j), world x/z, m/s.

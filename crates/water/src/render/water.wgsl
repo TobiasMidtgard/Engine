@@ -42,7 +42,7 @@ struct Globals {
     counts: vec4<u32>,   // bodies, showers, puddles on, plunges
     under: vec4<f32>,    // underwater absorption rgb, scattering
     under2: vec4<f32>,   // underwater scatter color rgb, surface level rel camera y
-    detail: vec4<f32>,   // fine waves: 1/tile size (1/m) x, y; streams' amplitude scale, unused
+    detail: vec4<f32>,   // fine waves: 1/tile size (1/m) x, y; streams' amplitude scale; ripples from surface_tex (1/0)
     detail2: vec4<f32>,  // fine waves: tiles' wind direction x, z; on (1/0), unused
     plunges: array<vec4<f32>, 8>, // where falls land: foot rel camera xyz, boil radius (m)
 };
@@ -59,6 +59,7 @@ struct WaterUniform {
 @group(1) @binding(4) var puddle_tex: texture_2d<f32>;      // r depth (m), g ground y rel puddle2.x
 @group(1) @binding(5) var current_tex: texture_2d<f32>;     // ripple grid currents: x, z (m/s), turn (1/s)
 @group(1) @binding(6) var detail_tex: texture_2d_array<f32>; // fine waves, per tile: (dh/dx, dh/dz, h, Jacobian), (moments, foam)
+@group(1) @binding(7) var surface_tex: texture_2d<f32>;     // dispersive ripples on the ripple grid: height, dh/dx, dh/dz
 
 struct FlowGpu {
     origin: vec4<f32>,  // corner rel camera x, base y, z, cell (m)
@@ -344,7 +345,13 @@ fn ripple_at(rel_xz: vec2<f32>) -> vec4<f32> {
     if (any(uv <= vec2<f32>(0.0)) || any(uv >= vec2<f32>(1.0))) { return vec4<f32>(0.0); }
     let edge = min(min(uv.x, uv.y), min(1.0 - uv.x, 1.0 - uv.y));
     let fade = smoothstep(0.0, 0.08, edge);
-    return textureSampleLevel(ripple_tex, linear_clamp, uv, 0.0) * fade;
+    var r = textureSampleLevel(ripple_tex, linear_clamp, uv, 0.0);
+    if (water.g.detail.w > 0.5) {
+        // The dispersive surface's waves (`surface.wgsl`), with the grid's foam.
+        let s = textureSampleLevel(surface_tex, linear_clamp, uv, 0.0);
+        r = vec4<f32>(s.x, r.y, s.y, s.z);
+    }
+    return r * fade;
 }
 
 // Currents stirred into the ripple grid at a camera-relative x/z: (x, z m/s, turn 1/s, 0),

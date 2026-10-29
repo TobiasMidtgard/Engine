@@ -60,6 +60,12 @@ const SHORE_WIDTH: f32 = 12.0;
 const RIM: f32 = LAKE_LEVEL + 1.4;
 /// Direction the outlet, falls, stream and pond lie in (local x, z).
 const OUTLET: Vec2 = Vec2::new(FRAC_1_SQRT_2, FRAC_1_SQRT_2);
+
+/// The point `d` meters from the tarn's middle along the stream's way out (the stream runs
+/// there, then over the falls), at height 0 (local to the test area).
+pub fn outlet_point(d: f32) -> DVec3 {
+    DVec3::new((OUTLET.x * d) as f64, 0.0, (OUTLET.y * d) as f64)
+}
 /// Along the outlet: the lip of the waterfall and the pond's center.
 const FALLS_AT: f32 = 38.5;
 const POND_AT: f32 = 66.0;

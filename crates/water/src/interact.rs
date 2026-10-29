@@ -25,6 +25,8 @@ const TELEPORT_SPEED: f32 = 150.0;
 /// Strouhal number of a body in the water: it sheds a pair of eddies every 1/0.2 = 5 body
 /// widths it travels (a Kármán vortex street).
 const STROUHAL: f32 = 0.2;
+/// Radius of a long hull's bow and stern pushes, as a share of its radius (its half beam).
+const HULL_END: f32 = 0.5;
 /// How hard a shed eddy turns: its fastest water goes about 0.4 times the body's speed.
 const EDDY: f32 = 1.3;
 /// Going into the water faster than this, m/s, a `WaterDisturbance` throws spray.
@@ -43,6 +45,9 @@ pub struct WaterInteractor {
     pub radius: f32,
     /// Wake strength multiplier (1 = a body this size; 2 = a churning propeller).
     pub wake: f32,
+    /// Half its length along the way it moves, meters, for a long hull (0: as round as
+    /// `radius`). Under way it pushes the water at its bow and stern.
+    pub length: f32,
     /// Last position seen (managed by the water module).
     #[serde(skip)]
     pub last: Option<DVec3>,
@@ -70,6 +75,7 @@ impl Default for WaterInteractor {
         Self {
             radius: 0.4,
             wake: 1.0,
+            length: 0.0,
             last: None,
             wet: false,
             spray: 0.0,
@@ -90,6 +96,12 @@ impl WaterInteractor {
 
     pub fn with_wake(mut self, wake: f32) -> Self {
         self.wake = wake;
+        self
+    }
+
+    /// A long hull, `half_length` from its middle to its bow (see [`Self::length`]).
+    pub fn with_length(mut self, half_length: f32) -> Self {
+        self.length = half_length;
         self
     }
 }
@@ -246,14 +258,33 @@ pub fn disturbance_system(
                     // The body drags the water it moves through along with it: the wash
                     // behind it runs on and curls into eddies at its edges.
                     let flat = Vec2::new(through.x, through.z);
+                    // A long hull under way pushes the water at its bow and its stern, each
+                    // over a patch about the beam wide, not as one round blob: the two wave
+                    // systems interfere into the feathered crests of a Kelvin wake (thin-ship
+                    // theory: Michell 1898; Havelock 1932). The same water is moved.
+                    let ends = speed > 1.0 && it.length > r;
                     out.push(Disturbance {
                         pos: DVec2::new(p.x, p.z),
                         radius: r * 0.9,
-                        depth: push + bob,
+                        depth: if ends { 0.0 } else { push + bob },
                         foam: (speed * 0.07 * it.wake).min(0.5) * dt * 30.0,
                         stir: (speed > 0.1).then_some(flat * 0.6),
                         spin: 0.0,
                     });
+                    if ends {
+                        let along = (flat / speed * it.length * 0.8).as_dvec2();
+                        let end = HULL_END * r;
+                        // Same volume as the one blob: depth × radius² kept.
+                        let depth = (push + bob) * 0.5 * (0.9 * r / end).powi(2);
+                        for at in [DVec2::new(p.x, p.z) + along, DVec2::new(p.x, p.z) - along] {
+                            out.push(Disturbance {
+                                pos: at,
+                                radius: end,
+                                depth,
+                                ..Default::default()
+                            });
+                        }
+                    }
                     // Eddies peel off alternate sides behind it, turning the way the water
                     // dragged past that side turns: its wake winds into a vortex street.
                     if speed > 0.3 {

@@ -2,11 +2,12 @@
 //!
 //! In `WorldShiftSet::Apply` everything the water module keeps in world space moves into the
 //! new frame: body centers and their waves, the ripple grid and its waiting splashes, flow
-//! grids, interactors' last positions, tethers and boats' moorings, things the water floats itself, and the test
+//! grids, interactors' last positions, tethers and boats' moorings, things the water floats itself, splash drops in flight, and the test
 //! area's routes. The `Water` query, buoyancy and the renderer then agree with the rest of the
 //! world in the same frame, and nothing reads the jump as motion (no wake from a boat that
 //! "moved" 10 km).
 
+use engine_core::math::DVec3;
 use engine_core::prelude::*;
 use engine_world::WorldShift;
 
@@ -27,6 +28,7 @@ pub fn shift_system(
     mut floating: Query<&mut Floating>,
     mut roles: Query<&mut DemoRole>,
     demo: Option<ResMut<DemoState>>,
+    drops: Option<ResMut<crate::drops::SplashDrops>>,
 ) {
     let Some(s) = shifts.read().copied().reduce(|a, next| a.then(&next)) else {
         return;
@@ -56,5 +58,12 @@ pub fn shift_system(
     }
     if let Some(mut demo) = demo {
         demo.origin = s.point(demo.origin);
+    }
+    if let Some(mut drops) = drops {
+        for d in &mut drops.drops {
+            d.pos = s.point(d.pos);
+            d.floor = s.point(DVec3::new(d.pos.x, d.floor, d.pos.z)).y;
+            d.vel = s.direction(d.vel);
+        }
     }
 }
