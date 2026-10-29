@@ -11,7 +11,7 @@
 //! from behind (the sun shining through the leaves), single leaves up close, the conifers,
 //! birch and hazel, the pine's crown from below, a small mixed grove from 40 m and from
 //! 150 m, and a wood of 12,000 scenery trees from a hill (with and without the distant level). Name shots after the directory to render
-//! only those (`lineup`, `lineup_lod`, `lineup_distant`, `roots`, `crown_front`,
+//! only those (`lineup`, `lineup_near`, `lineup_mid`, `lineup_lod`, `lineup_distant`, `roots`, `crown_front`,
 //! `leaves_close`, `crown_back`, `conifers`, `pine_crown`, `birch_hazel`, `grove`,
 //! `grove_far`, `valley`, `valley_far`, `far_woods`, `far_woods_off`), `textures`
 //! to save the leaf atlases, their normal maps, three of their mip levels and the mass atlases far
@@ -110,27 +110,29 @@ fn save_textures(out: &str) {
     }
 }
 
-/// Triangles of every tree species' near, far and distant meshes (mean over the mesh variants).
+/// Triangles of every tree species' near, mid, far and distant meshes (mean over the mesh variants).
 fn print_stats() {
     use engine_foliage::meshgen::tree::woody;
     let library = engine_foliage::PlantLibrary::default();
     for name in ["oak", "birch", "hazel", "pine", "spruce"] {
         let sp = library.get(library.id(name).unwrap());
         let tris = |m: &Option<engine_render::Mesh>| m.as_ref().map_or(0, |m| m.triangle_count());
-        let (mut near, mut far, mut distant, mut leaves, mut hero) = (0, 0, 0, 0, 0);
+        let (mut near, mut mid, mut far, mut distant, mut leaves, mut hero) = (0, 0, 0, 0, 0, 0);
         for seed in 0..4u64 {
             let m = woody(sp, seed * 0x9e37_79b9, false);
             near += tris(&m.wood) + tris(&m.foliage) + tris(&m.base);
+            mid += tris(&m.wood_mid) + tris(&m.foliage_mid) + tris(&m.base);
             far += tris(&m.wood_lod) + tris(&m.foliage_lod) + tris(&m.base);
             distant += tris(&m.wood_distant) + tris(&m.foliage_distant);
             leaves += tris(&m.foliage);
             hero += tris(&m.foliage_hero);
         }
         println!(
-            "{name:7} near {:6} (leaves {:6})  leaf by leaf {:6}  far {:5}  distant {:4}",
+            "{name:7} near {:6} (leaves {:6})  leaf by leaf {:6}  mid {:5}  far {:5}  distant {:4}",
             near / 4,
             leaves / 4,
             hero / 4,
+            mid / 4,
             far / 4,
             distant / 4
         );
@@ -288,6 +290,27 @@ fn main() {
             DVec3::new(-5.0, 8.0, 0.0),
             front_sun,
         );
+    }
+    for (name, mid) in [("lineup_near", 1000.0), ("lineup_mid", 1.0)] {
+        if !only.iter().any(|o| o == name) {
+            continue;
+        }
+        // The same lineup with every tree on its near level (as before the middle level), or
+        // on its middle level.
+        app.world
+            .resource_mut::<EcologySettings>()
+            .tree_mid_distance_m = mid;
+        shot(
+            &mut app,
+            &out,
+            name,
+            DVec3::new(-5.0, 4.0, 52.0),
+            DVec3::new(-5.0, 8.0, 0.0),
+            front_sun,
+        );
+        app.world
+            .resource_mut::<EcologySettings>()
+            .tree_mid_distance_m = 20.0;
     }
     if wanted("lineup_lod") {
         // The same lineup with every tree switched to its far level of detail.

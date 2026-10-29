@@ -50,6 +50,9 @@ pub struct VariantMeshes {
     /// The crown leaf by leaf, up close (broadleaves; `tree::PlantMeshes::foliage_hero`),
     /// drawn with `SpeciesVisual::leaves_hero`.
     pub foliage_hero: Option<Handle<Mesh>>,
+    /// The middle level, tens of meters off (trees and shrubs; `tree::PlantMeshes::foliage_mid`).
+    pub wood_mid: Option<Handle<Mesh>>,
+    pub foliage_mid: Option<Handle<Mesh>>,
     pub wood_lod: Option<Handle<Mesh>>,
     pub foliage_lod: Option<Handle<Mesh>>,
     /// The cheapest level, hundreds of meters off (trees and shrubs): the whole trunk (no
@@ -59,9 +62,10 @@ pub struct VariantMeshes {
     pub sapling_wood: Option<Handle<Mesh>>,
     pub sapling_foliage: Option<Handle<Mesh>>,
     /// Thinned crowns for leaf fall and leaf-out, one per [`crate::meshgen::tree::LEAF_STEPS`]
-    /// step (deciduous species; empty otherwise): of `foliage`, `foliage_lod` and
-    /// `sapling_foliage`.
+    /// step (deciduous species; empty otherwise): of `foliage`, `foliage_mid`, `foliage_lod`
+    /// and `sapling_foliage`.
     pub foliage_thin: Vec<Handle<Mesh>>,
+    pub foliage_mid_thin: Vec<Handle<Mesh>>,
     pub foliage_lod_thin: Vec<Handle<Mesh>>,
     pub foliage_distant_thin: Vec<Handle<Mesh>>,
     pub sapling_foliage_thin: Vec<Handle<Mesh>>,
@@ -606,6 +610,7 @@ fn build_species(
         let mut add_all =
             |v: Vec<Mesh>| -> Vec<Handle<Mesh>> { v.into_iter().map(|m| meshes.add(m)).collect() };
         let foliage_thin = add_all(full.foliage_thin);
+        let foliage_mid_thin = add_all(full.foliage_mid_thin);
         let foliage_lod_thin = add_all(full.foliage_lod_thin);
         let foliage_distant_thin = add_all(full.foliage_distant_thin);
         let sapling_foliage_thin = add_all(sapling_thin);
@@ -629,6 +634,8 @@ fn build_species(
             wood: add(full.wood),
             foliage: add(full.foliage),
             foliage_hero: add(full.foliage_hero),
+            wood_mid: add(full.wood_mid),
+            foliage_mid: add(full.foliage_mid),
             wood_lod: add(full.wood_lod),
             foliage_lod: add(full.foliage_lod),
             wood_distant: add(full.wood_distant),
@@ -636,6 +643,7 @@ fn build_species(
             sapling_wood,
             sapling_foliage,
             foliage_thin,
+            foliage_mid_thin,
             foliage_lod_thin,
             foliage_distant_thin,
             sapling_foliage_thin,

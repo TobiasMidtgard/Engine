@@ -119,6 +119,9 @@ pub fn desired_parts(
             let distant = !is_small(sp)
                 && distance > settings.tree_distant_distance_m * (0.5 + plant.size)
                 && v.foliage_distant.is_some();
+            let mid = !is_small(sp)
+                && distance > settings.tree_mid_distance_m * (0.5 + plant.size)
+                && v.foliage_mid.is_some();
             let glow =
                 (!vis.glow.is_empty()).then(|| vis.glow[tint % vis.glow.len()][glow_level(plant)]);
             let leaves = glow.unwrap_or(vis.leaves[tint]);
@@ -148,6 +151,14 @@ pub fn desired_parts(
                 [
                     pair(&v.base, vis.bark_rigid),
                     pair(&or(&v.wood_lod, &v.wood), vis.bark),
+                    pair(&crown, leaves),
+                ]
+            } else if mid {
+                // The near crown's cards, flat, with the near leaf material: the same crown.
+                let crown = leafy(v.foliage_mid, &v.foliage_mid_thin, amount);
+                [
+                    pair(&v.base, vis.bark_rigid),
+                    pair(&v.wood_mid.or(v.wood), vis.bark),
                     pair(&crown, leaves),
                 ]
             } else {
@@ -479,6 +490,7 @@ pub fn desired_log_parts(
     let v = &vis.variants[pose.genes.variant as usize % VARIANTS];
     let tint = (((pose.genes.hue + 1.0) * 0.5 * TINTS as f32) as usize).min(TINTS - 1);
     let lod = distance > settings.tree_lod_distance_m * (0.5 + size) && v.wood_lod.is_some();
+    let mid = distance > settings.tree_mid_distance_m * (0.5 + size) && v.wood_mid.is_some();
     let amount = vis
         .built_from
         .seasons
@@ -499,6 +511,11 @@ pub fn desired_log_parts(
         (
             v.wood_lod,
             leafy(v.foliage_lod, &v.foliage_lod_thin, amount),
+        )
+    } else if mid {
+        (
+            v.wood_mid,
+            leafy(v.foliage_mid, &v.foliage_mid_thin, amount),
         )
     } else {
         (v.wood, leafy(v.foliage, &v.foliage_thin, amount))

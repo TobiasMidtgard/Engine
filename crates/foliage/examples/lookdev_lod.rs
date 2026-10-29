@@ -2,12 +2,13 @@
 //! of detail as the camera moves (playtest #33, pop-in):
 //!
 //! ```sh
-//! cargo run -p engine_foliage --example lookdev_lod --release -- /tmp/lookdev_lod [off]
+//! cargo run -p engine_foliage --example lookdev_lod --release -- /tmp/lookdev_lod [off] [nomid]
 //! ```
 //!
 //! Writes `NNNNN.png` frames of a walk at 8 m/s along an avenue of scenery trees (oak, birch,
-//! pine, spruce, hazel) 6 m to 260 m away; `off` switches levels at once instead of
-//! cross-fading them, for a before. 960x540 and 150 frames at 30 fps unless `LOOKDEV_SIZE=WxH`
+//! pine, spruce, hazel) 6 m to 260 m away, printing the triangles drawn; `off` switches levels
+//! at once instead of cross-fading them, `nomid` leaves out the middle level (near trees out
+//! to the far level's distance), each for a before. 960x540 and 150 frames at 30 fps unless `LOOKDEV_SIZE=WxH`
 //! or `LOOKDEV_FRAMES=N`.
 
 use engine_core::prelude::*;
@@ -26,7 +27,9 @@ fn main() {
     engine_core::log::init("info,wgpu=warn,naga=warn");
     let mut args = std::env::args().skip(1);
     let out = args.next().unwrap_or_else(|| "/tmp/lookdev_lod".into());
-    let off = args.any(|a| a == "off");
+    let args: Vec<String> = args.collect();
+    let off = args.iter().any(|a| a == "off");
+    let nomid = args.iter().any(|a| a == "nomid");
     std::fs::create_dir_all(&out).expect("output directory");
     let frames: u32 = std::env::var("LOOKDEV_FRAMES")
         .ok()
@@ -55,6 +58,11 @@ fn main() {
     app.world
         .insert_resource(engine_foliage::FoliageLoading::in_frame());
     app.world.resource_mut::<LodFades>().enabled = !off;
+    if nomid {
+        app.world
+            .resource_mut::<engine_foliage::EcologySettings>()
+            .tree_mid_distance_m = 1.0e4;
+    }
     app.world.resource_mut::<WeatherState>().wind = Vec3::new(1.5, 0.0, 0.6);
     app.world.resource_mut::<Atmosphere>().ground_color = [0.16, 0.2, 0.08];
     app.world.spawn((
@@ -141,7 +149,12 @@ fn main() {
             .request(path.clone());
         app.update();
         if f % 30 == 0 {
-            println!("saved {path}");
+            let stats = app.world.resource::<engine_render::RenderStats>();
+            println!(
+                "saved {path}: {:.2}M triangles, {} draws",
+                stats.triangles as f64 / 1e6,
+                stats.draw_calls
+            );
         }
     }
     // The last screenshot is written a frame later.

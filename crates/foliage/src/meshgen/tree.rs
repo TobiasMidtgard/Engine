@@ -39,9 +39,17 @@ pub struct PlantMeshes {
     pub foliage: Option<engine_render::Mesh>,
     pub wood_lod: Option<engine_render::Mesh>,
     pub foliage_lod: Option<engine_render::Mesh>,
+    /// The middle level, for trees a few tens of meters off: every crown card of the near
+    /// level, flat (a quad each rather than a folded 3×3 grid), and the near trunk with its
+    /// limbs but no twigs. About a fifth of the near level's triangles with the same crown
+    /// outline and coverage, so the swap to it doesn't show.
+    pub wood_mid: Option<engine_render::Mesh>,
+    pub foliage_mid: Option<engine_render::Mesh>,
     /// Thinned copies of `foliage` for leaf fall and leaf-out ([`LEAF_STEPS`]); deciduous
     /// species only.
     pub foliage_thin: Vec<engine_render::Mesh>,
+    /// The same for `foliage_mid`.
+    pub foliage_mid_thin: Vec<engine_render::Mesh>,
     /// The same for `foliage_lod`.
     pub foliage_lod_thin: Vec<engine_render::Mesh>,
     /// The cheapest level, for trees hundreds of meters off (whole valleys of scenery trees):
@@ -483,6 +491,8 @@ impl PlantMeshes {
                 &self.wood,
                 &self.foliage,
                 &self.foliage_hero,
+                &self.wood_mid,
+                &self.foliage_mid,
                 &self.wood_lod,
                 &self.foliage_lod,
             ]
@@ -495,12 +505,15 @@ impl PlantMeshes {
                 &mut self.wood,
                 &mut self.foliage,
                 &mut self.foliage_hero,
+                &mut self.wood_mid,
+                &mut self.foliage_mid,
                 &mut self.wood_lod,
                 &mut self.foliage_lod,
             ]
             .into_iter()
             .flatten()
             .chain(&mut self.foliage_thin)
+            .chain(&mut self.foliage_mid_thin)
             .chain(&mut self.foliage_lod_thin),
             lo,
             hi,
@@ -1287,30 +1300,45 @@ fn add_branches(
     sp: &PlantSpecies,
     branches: &[Branch],
     h: f32,
-    lod: bool,
+    detail: Detail,
     seed: u64,
     shade: &Shading,
 ) {
+    let lod = matches!(detail, Detail::Far | Detail::Distant);
+    let mid = detail == Detail::Mid;
     let many = branches.iter().filter(|b| b.level == 1).count() > 30;
     let spruce_like = sp.form == PlantForm::Conifer && sp.shape.bark != BarkStyle::Pine;
     for (bi, br) in branches.iter().enumerate() {
-        // The trunk is drawn by the caller (split at the cut). Far away, twigs vanish and (on
-        // trees with many limbs) every other limb too.
-        if br.level == 0 || (lod && (br.level >= 2 || (many && br.level == 1 && bi % 2 == 0))) {
+        // The trunk is drawn by the caller (split at the cut). Further off twigs vanish (they
+        // are lost among the cards, as a spruce's inner branches are under its needle
+        // shelves), far away the branches too and (on trees with many limbs) every other limb.
+        if br.level == 0
+            || (mid && (br.level >= 3 || (spruce_like && br.level >= 2)))
+            || (lod && (br.level >= 2 || (many && br.level == 1 && bi % 2 == 0)))
+        {
             continue;
         }
         let r0 = br.radius[0];
-        let sides = match (br.level, lod) {
+        let sides = match (br.level, lod || mid) {
+            (1, true) if mid && r0 > 0.08 => 5,
             (1, false) if r0 > 0.08 => 8,
             (1, false) if r0 > 0.035 => 6,
             (1, false) if r0 > 0.022 => 4,
             (1, false) => 3,
             (1, true) => 3,
-            (2, _) if r0 > 0.03 => 5,
-            (2, _) => 4,
+            (2, false) if r0 > 0.03 => 5,
+            (2, false) => 4,
             _ => 3,
         };
-        let path = &br.path;
+        // The middle level keeps every other ring along a branch (and both ends).
+        let rings: Vec<usize> = if mid {
+            let last = br.path.len().saturating_sub(1);
+            (0..last).step_by(2).chain([last]).collect()
+        } else {
+            (0..br.path.len()).collect()
+        };
+        let path: Vec<Vec3> = rings.iter().map(|&i| br.path[i]).collect();
+        let radius: Vec<f32> = rings.iter().map(|&i| br.radius[i]).collect();
         // A spruce's limbs live in the shade of their own needle shelves and grey with age;
         // its inner twigs are dead and silvery.
         let (dim, grey) = match (spruce_like, br.level) {
@@ -1319,11 +1347,12 @@ fn add_branches(
             _ => (1.0, 0.0),
         };
         let color = |i: usize, a: f32| {
-            let c = bark_color(sp, path[i].y, h, i + bi * 7, a, seed) * shade.wood_ao(path[i]);
+            let c =
+                bark_color(sp, path[i].y, h, rings[i] + bi * 7, a, seed) * shade.wood_ao(path[i]);
             let luma = c.truncate().dot(Vec3::new(0.3, 0.55, 0.15));
             (c.truncate().lerp(Vec3::splat(luma), grey) * dim).extend(1.0)
         };
-        b.tube(path, &br.radius, sides, 0.5, &color, None, None);
+        b.tube(&path, &radius, sides, 0.5, &color, None, None);
     }
 }
 
@@ -1332,6 +1361,8 @@ fn add_branches(
 enum Detail {
     /// Every card, folded and drooping.
     Near,
+    /// Every card, flat.
+    Mid,
     /// The cards marked `far` (about a third), flat and 1.65× larger.
     Far,
     /// A share ([`DISTANT_KEEP`]) of the far cards, flat and [`DISTANT_CARD_SCALE`]× larger.
@@ -1345,7 +1376,7 @@ const DISTANT_KEEP: f32 = 0.45;
 const DISTANT_CARD_SCALE: f32 = 2.4;
 
 /// Emit one card: near cards are a 3×3 grid, folded along the twig and drooping toward the
-/// tip; far ones a flat quad. Both faces share the bent crown normals.
+/// tip; mid and far ones a flat quad. Both faces share the bent crown normals.
 fn emit_card(
     b: &mut MeshBuilder,
     c: &Card,
@@ -1356,7 +1387,7 @@ fn emit_card(
 ) {
     let far = detail != Detail::Near;
     let scale = match detail {
-        Detail::Near => 1.0,
+        Detail::Near | Detail::Mid => 1.0,
         Detail::Far => 1.65,
         Detail::Distant => DISTANT_CARD_SCALE,
     };
@@ -1380,10 +1411,12 @@ fn emit_card(
         let t = r as f32 / (rows - 1) as f32;
         for k in 0..cols {
             let s = k as f32 / (cols - 1) as f32 - 0.5;
-            let bend = if far {
-                0.0
-            } else {
-                c.droop * l * t * t + c.fold * w * s.abs()
+            // A mid card is the near one's chord: drooping to the same tip, halfway into
+            // its fold.
+            let bend = match detail {
+                Detail::Near => c.droop * l * t * t + c.fold * w * s.abs(),
+                Detail::Mid => c.droop * l * t * t + c.fold * w * s.abs() * 0.5,
+                Detail::Far | Detail::Distant => 0.0,
             };
             let p = start + g * (l * t) + u * (w * s) - n * bend;
             let su = if c.mirror { 0.5 - s } else { s + 0.5 };
@@ -1458,7 +1491,7 @@ fn crown_meshes(
     let mut full = MeshBuilder::new();
     let mut thin: Vec<MeshBuilder> = steps.iter().map(|_| MeshBuilder::new()).collect();
     let shown = |i: usize, c: &Card| match detail {
-        Detail::Near => true,
+        Detail::Near | Detail::Mid => true,
         Detail::Far => c.far,
         Detail::Distant => {
             c.far && engine_core::math::hash01(i as i64, 0, 0, 0xd157_a4ce) < DISTANT_KEEP
@@ -1789,7 +1822,14 @@ fn assemble(
         up: shading.1,
         deep: shading.2,
     };
-    for lod in [false, true] {
+    // A sapling is only ever drawn up close.
+    let levels: &[Detail] = if sapling {
+        &[Detail::Near, Detail::Far]
+    } else {
+        &[Detail::Near, Detail::Mid, Detail::Far]
+    };
+    for &detail in levels {
+        let lod = detail == Detail::Far;
         // Wood above the cut (with a cut face on its bottom, seen once it falls).
         let mut b = MeshBuilder::new();
         b.bark_v_shift = bark_v_shift;
@@ -1818,13 +1858,16 @@ fn assemble(
         if !lod && !sapling {
             trunk_shape.roughen_vertices(&mut b.vertices);
         }
-        add_branches(&mut b, sp, branches, h, lod, seed, &shading);
-        let detail = if lod { Detail::Far } else { Detail::Near };
+        add_branches(&mut b, sp, branches, h, detail, seed, &shading);
         let (f, thin) = crown_meshes(&crowns.cards, &shading, kind, detail, crowns.grid, steps);
         if lod {
             out.wood_lod = Some(b.finish());
             out.foliage_lod = Some(f);
             out.foliage_lod_thin = thin;
+        } else if detail == Detail::Mid {
+            out.wood_mid = Some(b.finish());
+            out.foliage_mid = Some(f);
+            out.foliage_mid_thin = thin;
         } else {
             out.wood = Some(b.finish());
             out.foliage = Some(f);
@@ -2677,15 +2720,18 @@ fn shrub(sp: &PlantSpecies, seed: u64) -> PlantMeshes {
         deep: 0.38,
     };
     let steps = leaf_steps(sp);
-    for lod in [false, true] {
+    for detail in [Detail::Near, Detail::Mid, Detail::Far] {
         let mut b = MeshBuilder::new();
-        add_branches(&mut b, sp, &cr.branches, h, lod, seed, &shading);
-        let detail = if lod { Detail::Far } else { Detail::Near };
+        add_branches(&mut b, sp, &cr.branches, h, detail, seed, &shading);
         let (f, thin) = crown_meshes(&cr.cards, &shading, kind, detail, cr.grid, steps);
-        if lod {
+        if detail == Detail::Far {
             out.wood_lod = Some(b.finish());
             out.foliage_lod = Some(f);
             out.foliage_lod_thin = thin;
+        } else if detail == Detail::Mid {
+            out.wood_mid = Some(b.finish());
+            out.foliage_mid = Some(f);
+            out.foliage_mid_thin = thin;
         } else {
             out.wood = Some(b.finish());
             out.foliage = Some(f);
@@ -2722,6 +2768,26 @@ mod tests {
                     + m.foliage_lod.as_ref().unwrap().triangle_count();
                 let near = wood.triangle_count() + foliage.triangle_count();
                 assert!(lod * 2 < near, "{name} LOD");
+                // The middle level: under half the near level, the same crown.
+                let (wood_mid, foliage_mid) = (
+                    m.wood_mid.as_ref().unwrap(),
+                    m.foliage_mid.as_ref().unwrap(),
+                );
+                let mid = wood_mid.triangle_count() + foliage_mid.triangle_count();
+                assert!(
+                    mid * 2 < near && mid > lod,
+                    "{name}: mid {mid}, near {near}"
+                );
+                let (a, b) = (foliage.aabb(), foliage_mid.aabb());
+                let tol = 0.05 * (a.max - a.min).max_element();
+                assert!(
+                    a.min.distance(b.min) < tol && a.max.distance(b.max) < tol,
+                    "{name}: mid crown {b:?} against {a:?}"
+                );
+                assert!(
+                    (wood_mid.aabb().max.y - a.max.y).abs() < 1e-4,
+                    "{name}: mid sways apart"
+                );
                 // The distant level: a few hundred triangles for whole wooded hillsides.
                 let distant = m.wood_distant.as_ref().unwrap().triangle_count()
                     + m.foliage_distant.as_ref().unwrap().triangle_count();

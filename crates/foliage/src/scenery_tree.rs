@@ -269,11 +269,11 @@ mod tests {
             .spawn((Camera::default(), Transform::from_translation(DVec3::ZERO)))
             .id();
         let at = |d: f64| Transform::from_translation(DVec3::new(d, 0.0, 0.0));
-        let trees = [10.0, 150.0, 900.0, 9000.0].map(|d| app.world.spawn((at(d), pine)).id());
+        let trees = [10.0, 60.0, 150.0, 900.0, 9000.0].map(|d| app.world.spawn((at(d), pine)).id());
         // Spawned with the camera: the first frame waits for their world transforms, rather
         // than drawing every tree in full detail at the origin.
         app.update();
-        assert!(app.world.get::<SceneryTreeVisual>(trees[3]).is_none());
+        assert!(app.world.get::<SceneryTreeVisual>(trees[4]).is_none());
         app.update_n(SLICES as usize + 2);
         let vis = app
             .world
@@ -281,8 +281,10 @@ mod tests {
             .get(pine.species)
             .unwrap();
         let v = vis.variants[pine.genes.variant as usize % crate::assets::VARIANTS].clone();
-        let [near, far, distant, gone] = trees.map(|t| shown(&app, t));
+        let [near, mid, far, distant, gone] = trees.map(|t| shown(&app, t));
         assert_eq!(near, [v.base, v.wood, v.foliage]);
+        assert_eq!(mid, [v.base, v.wood_mid, v.foliage_mid]);
+        assert!(v.foliage_mid.is_some());
         assert_eq!(far, [v.base, v.wood_lod, v.foliage_lod]);
         assert_eq!(distant, [None, v.wood_distant, v.foliage_distant]);
         assert!(v.foliage_distant.is_some());
@@ -292,11 +294,11 @@ mod tests {
             let p = app.world.get::<SceneryTreeVisual>(t).unwrap().parts[1];
             app.world.get::<MeshRenderer>(p).unwrap().cast_shadows
         };
-        assert!(casts(trees[0]) && casts(trees[1]) && !casts(trees[2]));
+        assert!(casts(trees[0]) && casts(trees[1]) && casts(trees[2]) && !casts(trees[3]));
         // The camera walks up to the far tree: it draws in full detail within a few frames.
         app.world.get_mut::<Transform>(cam).unwrap().translation = DVec3::new(140.0, 0.0, 0.0);
         app.update_n(SLICES as usize + 1);
-        assert_eq!(shown(&app, trees[1]), [v.base, v.wood, v.foliage]);
+        assert_eq!(shown(&app, trees[2]), [v.base, v.wood, v.foliage]);
         // Not plants: nothing grows them, and the ecology never sees them.
         let mut plants = app.world.query::<&Plant>();
         assert_eq!(plants.iter(&app.world).count(), 0);
