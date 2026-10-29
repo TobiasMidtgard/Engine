@@ -87,6 +87,17 @@ fn punch(app: &mut App, e: Entity, impulse: f32) {
     });
 }
 
+/// How far `name` is bent from its parent bone `parent`, beyond the animation, radians.
+fn bend(phys: &App, e: Entity, anim: &App, a: Entity, parent: &str, name: &str) -> f32 {
+    let rel = |app: &App, e: Entity| {
+        let pose = app.world.get::<SkeletonPose>(e).unwrap();
+        let gt = app.world.get::<GlobalTransform>(e).unwrap();
+        let r = |b: &str| pose.bone_world(gt, pose.index_of(b).unwrap()).unwrap().1;
+        r(parent).inverse() * r(name)
+    };
+    rel(phys, e).angle_between(rel(anim, a))
+}
+
 fn parts(app: &mut App) -> Vec<(Entity, RagdollPart)> {
     let mut q = app.world.query::<(Entity, &RagdollPart)>();
     q.iter(&app.world).map(|(e, p)| (e, p.clone())).collect()
@@ -101,6 +112,7 @@ fn a_hard_blow_rocks_the_upper_body_while_the_feet_stay_planted() {
     punch(&mut anim, a, 40.0);
     let (mut rocked, mut feet_moved, mut pushed) = (0.0f64, 0.0f64, 0.0f32);
     let mut kinematic_legs = false;
+    let (mut neck_bend, mut back_bend) = (0.0f32, 0.0f32);
     let mut physical_frames = 0;
     for frame in 0..90 {
         phys.update();
@@ -117,6 +129,8 @@ fn a_hard_blow_rocks_the_upper_body_while_the_feet_stay_planted() {
                 pushed = pushed.max(phys.world.get::<ExternalForce>(p).unwrap().force.z);
             }
         }
+        neck_bend = neck_bend.max(bend(&phys, e, &anim, a, "chest", "head"));
+        back_bend = back_bend.max(bend(&phys, e, &anim, a, "hips", "chest"));
         if frame < 40 {
             rocked = rocked.max((bone(&phys, e, "head") - bone(&anim, a, "head")).length());
         }
@@ -133,6 +147,13 @@ fn a_hard_blow_rocks_the_upper_body_while_the_feet_stay_planted() {
     assert!(
         rocked > 0.02,
         "the head moved only {rocked:.3} m beyond the flinch"
+    );
+    // ...but not so far that the neck or back look broken.
+    assert!(
+        neck_bend.to_degrees() < 30.0 && back_bend.to_degrees() < 20.0,
+        "bent {:.0}° at the neck and {:.0}° in the back beyond the flinch",
+        neck_bend.to_degrees(),
+        back_bend.to_degrees()
     );
     assert!(feet_moved < 0.005, "the feet moved {feet_moved:.3} m");
     // Settled: the bodies are gone and the pose is the animation's again.
