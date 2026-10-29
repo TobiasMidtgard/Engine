@@ -85,7 +85,7 @@ impl Default for HitReaction {
             physical_above: 15.0,
             physical_peak: 0.6,
             physical_secs: 0.5,
-            physical_push: 0.35,
+            physical_push: 0.2,
             state: Vec::new(),
             shove: (Vec3::ZERO, Vec3::ZERO),
         }
