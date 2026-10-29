@@ -1525,8 +1525,8 @@ pub const VIEWS: &[DemoView] = &[
     DemoView {
         key: "paddock_freeflow",
         name: "Chaining: a dummy drops and the brawler leaps straight at the next one",
-        eye: [0.9, 2.2, -3.4],
-        target: [0.6, 0.9, -10.0],
+        eye: [0.5, 1.6, -4.4],
+        target: [0.5, 0.9, -10.0],
         hour: 15.0,
         at: 4.0,
     },
@@ -2098,16 +2098,24 @@ fn build_paddock(world: &mut World, origin: DVec3) -> DemoEntities {
     ));
 
     // --- Freeflow ring: a brawler and three dummies around it, ahead at 1.2 m, to the left at
-    // 3 m and to the right at 4.3 m. Tapping the light attack, the stick on one dummy after
+    // 2.6 m and to the right at 3.6 m. Tapping the light attack, the stick on one dummy after
     // another (crate::freeflow::Freeflow), it drops each with a jab, a cross and a hook and
     // goes straight at the next: a lunge to the left one, a leap to the right one. The
     // dummies' legs are weak (a low `fall_beyond`): the cross and the hook together put one
     // down. They get up, walk back to their marks, and it starts over.
     let ring = |x: f64, z: f64| at(FREEFLOW.x + x, 0.0, FREEFLOW.z + z);
+    // A floor flush with the sand for the knocked-down dummies to land on.
+    let floor = Transform::from_translation(at(FREEFLOW.x + 0.5, -0.25, FREEFLOW.z));
+    world.spawn((
+        floor,
+        GlobalTransform::from(floor),
+        RigidBody::fixed(),
+        Collider::cuboid(Vec3::new(5.0, 0.25, 3.5)),
+    ));
     let dummies: Vec<Entity> = [
         (0.0, -1.2, 180.0, "walker"),
-        (-3.0, -0.3, -90.0, "reacher"),
-        (4.2, 0.6, 90.0, "lifter"),
+        (-2.6, -0.3, -90.0, "reacher"),
+        (3.6, 0.5, 90.0, "lifter"),
     ]
     .into_iter()
     .map(|(x, z, yaw, character)| {
@@ -2181,7 +2189,6 @@ fn build_paddock(world: &mut World, origin: DVec3) -> DemoEntities {
             foes: dummies,
             ..Default::default()
         },
-        HitReaction::default(),
         DemoScript {
             period: FREEFLOW_PERIOD,
             steps,
