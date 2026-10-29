@@ -290,11 +290,12 @@ enum Eye {
     },
     /// Standing on the ground before the nearest formation of `kind`, found where the star
     /// stands about `sun_deg` high, lit from `turn_deg` off the line of sight (0 = from the
-    /// side, 90 = from behind the camera).
+    /// side, 90 = from behind the camera). With `far_m`, flying low that far off a tall one.
     Landmark {
         kind: LandmarkKind,
         sun_deg: f64,
         turn_deg: f64,
+        far_m: f64,
     },
     /// On the line from body `from` to body `to`, `from_m` out from `from`, looking on at
     /// `to` (or back at `from`).
@@ -421,6 +422,7 @@ fn landmarks() -> Vec<Stop> {
             kind,
             sun_deg,
             turn_deg,
+            far_m: 0.0,
         },
         fov: 60.0,
     };
@@ -448,6 +450,17 @@ fn landmarks() -> Vec<Stop> {
             20.0,
             30.0,
         ),
+        // Buttes on the skyline, 12 km off, from 60 m up.
+        Stop {
+            eye: Eye::Landmark {
+                kind: Butte,
+                sun_deg: 20.0,
+                turn_deg: 30.0,
+                far_m: 12_000.0,
+            },
+            fov: 40.0,
+            ..stop("mars_far", "Mars", "Sun", Butte, 0.0, 0.0)
+        },
     ]
 }
 
@@ -462,6 +475,7 @@ fn landmark_view(
     kind: LandmarkKind,
     sun_deg: f64,
     turn_deg: f64,
+    far_m: f64,
 ) -> Option<EyeAndTarget> {
     let r = terrain.shape.radius_m;
     let across = star.any_orthonormal_vector();
@@ -476,7 +490,7 @@ fn landmark_view(
         .find_map(|d| {
             engine_terrain::landmarks_near(terrain, d * r, 5_000.0)
                 .into_iter()
-                .find(|l| l.kind == kind)
+                .find(|l| l.kind == kind && (far_m == 0.0 || l.height_m >= 45.0))
         })?;
     let up = found.up;
     let star_flat = (star - up * star.dot(up)).normalize();
@@ -493,7 +507,11 @@ fn landmark_view(
             -front
         };
     }
-    let back = (found.width_m * 0.75).max(found.height_m * 2.5) + 15.0;
+    let back = if far_m > 0.0 {
+        far_m
+    } else {
+        (found.width_m * 0.75).max(found.height_m * 2.5) + 15.0
+    };
     let foot = found.position - toward * back;
     let d = foot.normalize();
     let ground = terrain.shape.sample(d, 0.0).height;
@@ -502,7 +520,7 @@ fn landmark_view(
     } else {
         ground
     };
-    let eye = d * (r + ground + 1.8);
+    let eye = d * (r + ground + if far_m > 0.0 { 60.0 } else { 1.8 });
     let target = found.position + up * found.height_m * 0.4;
     eprintln!(
         "{kind:?} {:.0} m tall, {:.0} m wide, seen from {back:.0} m",
@@ -550,12 +568,19 @@ fn far_look(body: &CelestialBody, ground: Option<&FarGround>) -> FarLook {
 
 /// The terrain of `body`, if it has one.
 fn terrain_of(b: &CelestialBody) -> Option<PlanetTerrain> {
-    match &b.surface {
+    let mut terrain = match &b.surface {
         Some(s) => Some(PlanetTerrain::world(&world_recipe(b, s))),
         None if b.name == "Earth" => Some(PlanetTerrain::earthlike(1).with_radius(b.radius_m)),
         None if b.name == "Mars" => Some(PlanetTerrain::mars(1).with_radius(b.radius_m)),
         None => None,
+    };
+    // (`NO_FAR_LANDMARKS=1`: formations only near the eye, as before the far ones.)
+    if std::env::var_os("NO_FAR_LANDMARKS").is_some()
+        && let Some(t) = &mut terrain
+    {
+        t.landmarks.far_m = 0.0;
     }
+    terrain
 }
 
 /// Set `body` up the way the showcase does: an Earth-like planet of another star painted
@@ -791,6 +816,7 @@ fn place(app: &mut App, stop: &Stop) -> (DVec3, DVec3, DVec3) {
             kind,
             sun_deg,
             turn_deg,
+            far_m,
         } => {
             static FOUND: std::sync::Mutex<Vec<(&str, Option<EyeAndTarget>)>> =
                 std::sync::Mutex::new(Vec::new());
@@ -800,8 +826,9 @@ fn place(app: &mut App, stop: &Stop) -> (DVec3, DVec3, DVec3) {
                 None => {
                     let terrain = app.world.get::<PlanetTerrain>(b.entity).cloned();
                     let local_star = (rot.inverse() * (star - center)).normalize();
-                    let v = terrain
-                        .and_then(|t| landmark_view(&t, local_star, kind, sun_deg, turn_deg));
+                    let v = terrain.and_then(|t| {
+                        landmark_view(&t, local_star, kind, sun_deg, turn_deg, far_m)
+                    });
                     if v.is_none() {
                         eprintln!("{}: no {kind:?} found", stop.name);
                     }

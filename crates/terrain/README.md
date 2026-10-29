@@ -243,7 +243,8 @@ everything else (streaming, LOD, colliders, ground queries, prints) follows the 
   add 3D features to a terrain: sandstone arches (a fin with an opening worn through it, or a
   free-standing span swept along a Bezier as in Dey et al. 2017), fields of ribbed, waisted
   hoodoos under hard caps, layered buttes stepping up in ledges over a talus apron, granite
-  tors of stacked rounded blocks, and fields of ice spires leaning together
+  tors (sheets of joint blocks worn round, thinning upward, with clitter boulders around and
+  lichen on top), and fields of ice spires leaning together
   (`PlanetTerrain::landmarks`, a `LandmarkField`: Earth's deserts and dry uplands, Mars, dry
   and living worlds of other stars, ice worlds; none on the Moon or lava worlds). Each is a
   signed distance function meshed with naive surface nets on a worker thread (space far from
@@ -254,8 +255,12 @@ everything else (streaming, LOD, colliders, ground queries, prints) follows the 
   1 km quadtree cells, thickest in badlands regions tens of kilometers across, never in the
   sea, a river, on steep ground or within `clearance_m` of a flat pad or the hand-made
   overlay. Drawn out to 6 km around every focus point, with a static triangle-mesh collider
-  within 1.5 km. `landmarks_near` lists them; `approach_shots ... landmarks` photographs them.
-  Diagnostics `terrain.landmark_cells` and `terrain.landmark_builds`.
+  within 1.5 km; those 18 m and taller also coarsely (voxels 4× as big, no shadows) out to
+  `far_m` (30 km) in 4 km far cells, each hidden while its near cell is drawn, so buttes
+  stand on the skyline instead of popping in. `landmarks_near` lists them;
+  `approach_shots ... landmarks` photographs them (`mars_far`; `NO_FAR_LANDMARKS=1` for near
+  ones only). Diagnostics `terrain.landmark_cells`, `terrain.landmark_builds` and
+  `terrain.landmark_far`.
 - **Where the woods are.** Installs the `ForestCover` provider: canopy cover (0..1) and needle
   share at any point, by the same rules the shader paints its woods with (`forest.rs`; a
   test fails when the shader's rules change without it), so the foliage module plants trees
@@ -363,5 +368,6 @@ from `Ground` when they apply), so the lab works on uneven ground too.
   showcase map, or anywhere once the space module re-centers the world on the player).
 - River and lake water is drawn by the terrain and has no water query yet, so nothing floats
   or swims in it. A water module can draw and simulate it from `river_network().segments()`.
-- No caves yet. Overhangs come only with the landmarks, which the far view, the ground query
-  (footstep surface, foliage placement) and crater edits don't know about; physics does.
+- No caves yet. Overhangs come only with the landmarks, which the planet's far view from
+  orbit, the ground query (footstep surface, foliage placement) and crater edits don't know
+  about; physics does.

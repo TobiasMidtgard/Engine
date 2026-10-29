@@ -13,7 +13,8 @@
 //! sphere cut by planes into facets), turned, tilted to the ground and sunk into it.
 //!
 //! Cells take a few hundred full terrain samples, so they are built on worker threads a few
-//! at a time and appear when done.
+//! at a time and appear when done. Rocks [`COLLIDER_MIN_M`] and wider are solid: cells within
+//! [`COLLIDER_REACH_M`] of a focus point carry a static compound of their convex hulls.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
@@ -26,7 +27,8 @@ use engine_render::{
     MaterialPreset, MaterialRef, Mesh, MeshRef, MeshRenderer, NoMeshLod, NoVirtualGeometry,
     StandardMaterial, Vertex,
 };
-use engine_world::FocusPoints;
+use engine_world::physics::{Collider, ColliderShape};
+use engine_world::{FocusPoints, SurfaceMaterials};
 use serde::{Deserialize, Serialize};
 
 use crate::Terrains;
@@ -136,6 +138,11 @@ const MAX_CELL_VERTICES: usize = 60_000;
 /// Cells being built at once.
 const MAX_BUILDING: usize = 6;
 
+/// Rocks at least this wide get a collider (smaller ones are stepped over), meters.
+pub const COLLIDER_MIN_M: f64 = 0.3;
+/// Cells this near a focus point collide, meters.
+pub const COLLIDER_REACH_M: f64 = 150.0;
+
 /// One cell: terrain, quadtree node and tier.
 type CellKey = (Entity, NodeKey, u8);
 
@@ -145,11 +152,15 @@ struct CellMesh {
     origin: DVec3,
     rotation: DQuat,
     mesh: Option<Mesh>,
+    /// The hulls of its rocks wide enough to stand in the way.
+    collider: Option<ColliderShape>,
 }
 
 struct Cell {
     entity: Option<Entity>,
     mesh: Option<Handle<Mesh>>,
+    collider: Option<ColliderShape>,
+    collider_entity: Option<Entity>,
     origin: DVec3,
     rotation: DQuat,
 }
@@ -193,6 +204,7 @@ pub fn update_rocks(
     focus: Res<FocusPoints>,
     meshes: Option<ResMut<Assets<Mesh>>>,
     materials: Option<ResMut<Assets<StandardMaterial>>>,
+    surfaces: Option<Res<SurfaceMaterials>>,
     mut state: ResMut<RockCells>,
     diagnostics: Option<ResMut<engine_core::diagnostics::Diagnostics>>,
 ) {
@@ -248,9 +260,9 @@ pub fn update_rocks(
         }
         if moved {
             for (_, c) in state.cells.iter().filter(|(k, _)| k.0 == e) {
-                if let Some(entity) = c.entity {
+                for entity in c.entity.iter().chain(&c.collider_entity) {
                     commands
-                        .entity(entity)
+                        .entity(*entity)
                         .insert(place(pose, c.origin, c.rotation));
                 }
             }
@@ -300,6 +312,11 @@ pub fn update_rocks(
         .retain(|e, _| terrains.entries.contains_key(e));
     wanted.sort_by(|a, b| a.0.total_cmp(&b.0));
     let wanted_set: HashSet<CellKey> = wanted.iter().map(|w| w.1).collect();
+    // Each wanted cell's distance from the nearest focus.
+    let mut nearest: HashMap<CellKey, f64> = HashMap::new();
+    for &(d, k) in &wanted {
+        nearest.entry(k).or_insert(d);
+    }
 
     // Cells no longer wanted go; builds no longer wanted are left to finish and dropped.
     let stale: Vec<CellKey> = state
@@ -334,6 +351,8 @@ pub fn update_rocks(
         let mut cell = Cell {
             entity: None,
             mesh: None,
+            collider: built.collider,
+            collider_entity: None,
             origin: built.origin,
             rotation: built.rotation,
         };
@@ -361,6 +380,38 @@ pub fn update_rocks(
         }
         state.cells.insert(k, cell);
         state.placed += 1;
+    }
+    // Colliders on the cells near a focus.
+    let surface = surfaces
+        .map(|s| s.id_or_default("rock"))
+        .unwrap_or_default();
+    for (k, cell) in state.cells.iter_mut() {
+        let near = nearest.get(k).is_some_and(|&d| d <= COLLIDER_REACH_M);
+        match (near, cell.collider_entity, &cell.collider) {
+            (true, None, Some(shape)) => {
+                let Some(terrain) = state.terrains.get(&k.0) else {
+                    continue;
+                };
+                cell.collider_entity = Some(
+                    commands
+                        .spawn((
+                            Name::new("Rock colliders"),
+                            place(terrain.pose, cell.origin, cell.rotation),
+                            Collider {
+                                shape: shape.clone(),
+                                surface,
+                                ..Default::default()
+                            },
+                        ))
+                        .id(),
+                );
+            }
+            (false, Some(e), _) => {
+                commands.entity(e).despawn();
+                cell.collider_entity = None;
+            }
+            _ => {}
+        }
     }
     // Start the nearest missing cells.
     for (_, k) in &wanted {
@@ -392,7 +443,7 @@ fn drop_cell(commands: &mut Commands, meshes: &mut Assets<Mesh>, cell: Option<Ce
     let Some(cell) = cell else {
         return;
     };
-    if let Some(e) = cell.entity {
+    for e in cell.entity.into_iter().chain(cell.collider_entity) {
         commands.entity(e).despawn();
     }
     if let Some(h) = cell.mesh {
@@ -469,6 +520,7 @@ fn build_cell(
             origin,
             rotation,
             mesh: None,
+            collider: None,
         };
     }
     let expected = (field.density_over(small) - field.density_over(big)) * size * size;
@@ -478,6 +530,7 @@ fn build_cell(
     let count = expected.floor() as u64 + u64::from(rand(0, 1) < expected.fract());
     let shapes = rock_shapes(tier.detail);
     let (mut vertices, mut indices) = (Vec::new(), Vec::new());
+    let mut hulls: Vec<(Vec3, Quat, ColliderShape)> = Vec::new();
     let (ea, eb) = (small.powf(-field.exponent), big.powf(-field.exponent));
     for i in 1..=count {
         let local = map.position(key.face, lo.x + s * rand(i, 2), lo.y + s * rand(i, 3), 0.0);
@@ -516,7 +569,8 @@ fn build_cell(
         let q = Quat::from_rotation_arc(Vec3::Y, lean)
             * Quat::from_rotation_y(rand(i, 9) as f32 * std::f32::consts::TAU)
             * tumble;
-        let shape = &shapes[(rand(i, 10) * shapes.len() as f64) as usize % shapes.len()];
+        let variant = (rand(i, 10) * shapes.len() as f64) as usize % shapes.len();
+        let shape = &shapes[variant];
         if vertices.len() + shape.vertices.len() > MAX_CELL_VERTICES {
             break;
         }
@@ -533,11 +587,21 @@ fn build_cell(
             vertices.push(Vertex::new(at + q * p, q * nrm, Vec2::from(v.uv)).with_color(color));
         }
         indices.extend(shape.indices.iter().map(|i| start + i));
+        if d >= COLLIDER_MIN_M {
+            // The coarse shape's points make a hull close enough to walk and drive on.
+            let points = rock_shapes(1)[variant]
+                .vertices
+                .iter()
+                .map(|v| Vec3::from(v.position) * scale)
+                .collect();
+            hulls.push((at, q, ColliderShape::ConvexHull { points }));
+        }
     }
     CellMesh {
         origin,
         rotation,
         mesh: (!vertices.is_empty()).then(|| Mesh::new(vertices, indices)),
+        collider: (!hulls.is_empty()).then_some(ColliderShape::Compound(hulls)),
     }
 }
 
@@ -711,5 +775,38 @@ mod tests {
             .fold(f32::MIN, f32::max);
         let half = source.map.node_size(level) as f32;
         assert!(up_most < half, "{up_most}");
+    }
+
+    #[test]
+    fn boulders_are_solid_and_pebbles_are_not() {
+        let t = PlanetTerrain::mars(3);
+        let source = crate::TerrainRuntime::new(&t, Default::default(), 1).source;
+        let local = crate::dir_from_lat_lon(-4.6, 137.4) * source.map.radius;
+        let key = source
+            .map
+            .node_at(local, level_for(&source, BOULDERS.cell_m))
+            .unwrap();
+        let cell = build_cell(&source, &t.rocks, key, BOULDERS, 3);
+        let mesh = cell.mesh.expect("boulders");
+        let Some(ColliderShape::Compound(hulls)) = cell.collider else {
+            panic!("boulders collide");
+        };
+        // One hull per boulder, each about where its rock is drawn.
+        let rocks = mesh.vertices.len() / rock_shapes(BOULDERS.detail)[0].vertices.len();
+        assert_eq!(hulls.len(), rocks);
+        let a = mesh.aabb();
+        for (at, _, shape) in &hulls {
+            assert!(matches!(shape, ColliderShape::ConvexHull { points } if points.len() >= 12));
+            assert!(at.cmpge(a.min - Vec3::ONE).all() && at.cmple(a.max + Vec3::ONE).all());
+        }
+        // Pebbles (12 cm up) are only drawn unless they reach the collider size.
+        let stones = build_cell(&source, &t.rocks, key, STONES, 3);
+        let solid = match stones.collider {
+            Some(ColliderShape::Compound(h)) => h.len(),
+            _ => 0,
+        };
+        let drawn = stones.mesh.map_or(0, |m| m.vertices.len())
+            / rock_shapes(STONES.detail)[0].vertices.len();
+        assert!(solid < drawn, "{solid} of {drawn}");
     }
 }

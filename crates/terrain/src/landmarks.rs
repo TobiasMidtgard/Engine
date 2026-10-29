@@ -71,6 +71,9 @@ pub struct LandmarkField {
     pub ice: [f32; 3],
     /// Thickness of a bed of rock, meters.
     pub bed_m: f64,
+    /// Formations at least 18 m tall are drawn, coarsely, out to this far, meters (at most
+    /// the near reach of 6 km: only the near ones).
+    pub far_m: f64,
     /// The stone's surface texture, tinted by the colors (none: plain).
     pub texture: Option<MaterialPreset>,
 }
@@ -92,9 +95,10 @@ impl Default for LandmarkField {
             soft: [0.34, 0.12, 0.05],
             hard: [0.45, 0.25, 0.13],
             cap: [0.5, 0.43, 0.34],
-            granite: [0.32, 0.3, 0.27],
+            granite: [0.42, 0.4, 0.37],
             ice: [0.62, 0.74, 0.86],
             bed_m: 4.0,
+            far_m: 30_000.0,
             texture: Some(MaterialPreset::Rock),
         }
     }
@@ -474,9 +478,10 @@ enum Shape {
         h: f64,
         r: f64,
     },
-    /// Stacked rounded blocks: center, half extents, turn about Y.
+    /// Joint blocks of granite, each rounded by weathering; `grain` sizes the lumps.
     Tor {
-        blocks: Vec<(DVec3, DVec3, f64)>,
+        blocks: Vec<TorBlock>,
+        grain: f64,
     },
     /// A low mound of radius `r`, draped over the ground (heights on a grid spanning ±(r + 2)).
     Mound {
@@ -561,7 +566,7 @@ impl Part {
             } => window(p, *h, *len, *thick, *span, *hole_h, c),
             Shape::Span { curve, r } => span_arch(p, curve, *r, c),
             Shape::Butte { h, r } => butte(p, *h, *r, c),
-            Shape::Tor { blocks } => tor(p, blocks, c),
+            Shape::Tor { blocks, grain } => tor(p, blocks, *grain, c),
             Shape::Spire { h, r, lean } => spire(p, *h, *r, *lean, c),
             Shape::Mound { h, r, ground } => mound(p, *h, *r, ground, c),
         };
@@ -613,7 +618,7 @@ fn hoodoo(p: DVec3, h: f64, r: f64, cap_r: f64, cap_t: f64, squash: f64, c: &Ctx
 
 /// The low badland mound a field of hoodoos stands on: soft beds cut by gullies.
 /// Samples per side of a mound's grid of ground heights.
-const MOUND_GRID: usize = 9;
+const MOUND_GRID: usize = 13;
 
 /// The ground under a mound at (x, z), from its grid (spanning ±`half` on both axes).
 fn ground_grid(g: &[f64], half: f64, x: f64, z: f64) -> f64 {
@@ -639,6 +644,8 @@ fn mound(p: DVec3, h: f64, r: f64, ground: &[f64], c: &Ctx) -> (f64, Stone) {
         + h * (1.0 - x * x).powf(1.5) * (1.0 - 0.6 * gully)
         + 0.4 * c.noise(p / 3.0, 0x32)
         - 0.4
+        // Its skirt sinks under the ground, finer than the grid, rather than ending in a lip.
+        - 1.5 * x.powi(6)
         - (rq - r).max(0.0);
     ((p.y - height) * 0.6, Stone::Beds)
 }
@@ -744,17 +751,31 @@ fn butte(p: DVec3, h: f64, r: f64, c: &Ctx) -> (f64, Stone) {
     (d, stone)
 }
 
-fn tor(p: DVec3, blocks: &[(DVec3, DVec3, f64)], c: &Ctx) -> (f64, Stone) {
+/// One block of a tor, between its joints.
+#[derive(Debug, Clone, Copy)]
+struct TorBlock {
+    center: DVec3,
+    half: DVec3,
+    /// Turn about Y and how far its edges are worn round.
+    yaw: f64,
+    round: f64,
+}
+
+fn tor(p: DVec3, blocks: &[TorBlock], grain: f64, c: &Ctx) -> (f64, Stone) {
     let mut d = f64::MAX;
-    for &(center, half, yaw) in blocks {
-        let q = DQuat::from_rotation_y(-yaw) * (p - center);
-        // Corestones: weathered round along the joints, lumpy.
-        let round = half.min_element() * 0.8;
-        let lumps = 0.12 * half.min_element() * c.noise(p / (half.min_element() * 0.9), 0x70)
-            + 0.04 * half.min_element() * c.noise(p / (half.min_element() * 0.3), 0x71);
-        d = d.min(rounded_box(q, half, round) + lumps);
+    for b in blocks {
+        let q = p - b.center;
+        // A block's rounded box lies inside its bounding sphere.
+        if q.length() - b.half.length() > d {
+            continue;
+        }
+        let q = DQuat::from_rotation_y(-b.yaw) * q;
+        d = d.min(rounded_box(q, b.half, b.round));
     }
-    (d * 0.85, Stone::Granite)
+    // Granular, pitted surfaces.
+    let lumps =
+        grain * (0.1 * c.noise(p / (grain * 1.6), 0x70) + 0.035 * c.noise(p / (grain * 0.4), 0x71));
+    ((d + lumps) * 0.85, Stone::Granite)
 }
 
 fn spire(p: DVec3, h: f64, r: f64, lean: DVec2, c: &Ctx) -> (f64, Stone) {
@@ -939,44 +960,167 @@ fn parts_of(site: &Landmark, ground: &dyn Fn(f64, f64) -> f64) -> Vec<Part> {
             )]
         }
         LandmarkKind::Tor => {
-            let stacks = 1 + (rand(1) * 2.5) as u64;
+            // Granite cut by two sets of upright joints and by sheeting joints parallel to
+            // the ground, rotted along the joints and stripped down to its sound blocks:
+            // stacks of rounded slabs, thinner toward the top, along a crest (Dartmoor
+            // National Park, "Tors"; Linton 1955). Frost pried loose blocks downslope as
+            // clitter.
+            let jx = (w * (0.15 + 0.06 * rand(2))).clamp(1.4, 4.5);
+            let jz = jx * (0.8 + 0.4 * rand(3));
+            let (phase_x, phase_z) = (rand(4), rand(5));
+            let grain = jx * 0.25;
+            let stacks = 1 + (rand(1) * 3.0) as u64;
             let mut blocks = Vec::new();
             for s in 0..stacks {
-                let j = 20 + s * 40;
-                let sh = h * if s == 0 { 1.0 } else { 0.45 + 0.4 * rand(j) };
+                let j = 20 + s * 60;
+                // The tallest in the middle, lower ones along the crest to either side.
+                let side = if s % 2 == 1 { 1.0 } else { -1.0 };
                 let (ox, oz) = if s == 0 {
                     (0.0, 0.0)
                 } else {
-                    let a = rand(j + 1) * TAU;
-                    (a.cos() * w * 0.3, a.sin() * w * 0.3)
+                    (
+                        side * w * (0.26 + 0.1 * rand(j)),
+                        (rand(j + 1) - 0.5) * w * 0.15,
+                    )
                 };
-                let n = 2 + (rand(j + 2) * 3.0) as u64;
-                let base = DVec2::new(w * 0.32, w * 0.26) * if s == 0 { 1.0 } else { 0.7 };
-                let mut y = ground(ox, oz) - 1.0;
-                for k in 0..n {
-                    let jj = j + 4 + k * 6;
-                    let hy = sh / n as f64 * 0.5 * (0.8 + 0.4 * rand(jj));
-                    let shrink = 1.0 - (0.12 + 0.12 * rand(jj + 1)) * k as f64;
-                    let half = DVec3::new(base.x * shrink, hy, base.y * shrink);
-                    let jitter =
-                        DVec3::new(rand(jj + 2) - 0.5, 0.0, rand(jj + 3) - 0.5) * (half.x * 0.3);
-                    blocks.push((
-                        DVec3::new(ox, y + hy, oz) + jitter,
+                let sh = h * if s == 0 {
+                    1.0
+                } else {
+                    0.4 + 0.35 * rand(j + 2)
+                };
+                let rx = w * if s == 0 {
+                    0.22
+                } else {
+                    0.13 + 0.05 * rand(j + 3)
+                };
+                let rz = rx * (0.7 + 0.3 * rand(j + 4));
+                let g0 = ground(ox, oz);
+                let top = g0 + sh;
+                let mut y = g0 + low_under(ox, oz, rx) - 0.6;
+                for k in 0..16u64 {
+                    if y > top - 0.35 {
+                        break;
+                    }
+                    let jj = j + 6 + k * 9;
+                    let frac = ((y - g0) / sh).clamp(0.0, 1.0);
+                    // Sheets thin upward, as sheeting joints crowd toward the surface.
+                    let t = ((h / 5.0) * (1.4 - 0.7 * frac) * (0.7 + 0.6 * rand(jj)))
+                        .clamp(0.5, 3.0)
+                        .min(top - y);
+                    let yc = y + t * 0.5;
+                    let fy = ((yc - g0) / sh).clamp(0.0, 1.0);
+                    // A dome: the sheets narrow toward the top.
+                    let e = (1.0 - fy.powf(2.5)).max(0.0).sqrt() * (0.85 + 0.3 * rand(jj + 1));
+                    // Each sheet slid a little on the one below.
+                    let slide = DVec2::new(rand(jj + 2) - 0.5, rand(jj + 3) - 0.5) * jx * 0.12;
+                    let yaw = (rand(jj + 4) - 0.5) * 0.06;
+                    let (nx, nz) = ((rx / jx).ceil() as i64 + 1, (rz / jz).ceil() as i64 + 1);
+                    let before = blocks.len();
+                    for iz in -nz..=nz {
+                        for ix in -nx..=nx {
+                            let cx = (ix as f64 + phase_x - 0.5) * jx;
+                            let cz = (iz as f64 + phase_z - 0.5) * jz;
+                            let r2 = (cx / (rx * e).max(0.01)).powi(2)
+                                + (cz / (rz * e).max(0.01)).powi(2);
+                            if r2 > 1.0 {
+                                continue;
+                            }
+                            let rb = rand(jj + 5 + ((ix + 9) * 31 + iz + 9) as u64 * 3);
+                            // Blocks near the top weathered away here and there.
+                            if fy > 0.55 && rb < 0.18 {
+                                continue;
+                            }
+                            let outer = r2.sqrt();
+                            let half = DVec3::new(
+                                jx * 0.5 - 0.04 * jx - 0.03,
+                                t * 0.5 - 0.03,
+                                jz * 0.5 - 0.04 * jz - 0.03,
+                            );
+                            // Worn roundest at the top and the outside; lower down the
+                            // slabs keep fairly square edges.
+                            let round = half.min_element()
+                                * (0.2 + 0.35 * fy + 0.2 * outer + 0.15 * rb).min(0.75);
+                            blocks.push(TorBlock {
+                                center: DVec3::new(ox + cx + slide.x, yc, oz + cz + slide.y),
+                                half,
+                                yaw,
+                                round,
+                            });
+                        }
+                    }
+                    // A sheet too narrow for the joints: one slab.
+                    if blocks.len() == before && e > 0.2 {
+                        let half = DVec3::new(
+                            (rx * e).max(jx * 0.4),
+                            t * 0.5 - 0.03,
+                            (rz * e).max(jz * 0.4),
+                        );
+                        blocks.push(TorBlock {
+                            center: DVec3::new(ox + slide.x, yc, oz + slide.y),
+                            half,
+                            yaw,
+                            round: half.min_element() * 0.8,
+                        });
+                    }
+                    y += t;
+                }
+                // Now and then a rounded boulder perched on top (a logan stone).
+                if s == 0 && rand(j + 5) < 0.35 {
+                    let r = jx * (0.35 + 0.15 * rand(j + 6));
+                    let half = DVec3::new(r * 1.1, r * 0.7, r);
+                    blocks.push(TorBlock {
+                        center: DVec3::new(ox, y + half.y * 0.9, oz),
                         half,
-                        rand(jj + 4) * 1.2,
-                    ));
-                    y += hy * 1.94;
+                        yaw: rand(j + 7) * TAU,
+                        round: half.min_element() * 0.9,
+                    });
                 }
             }
-            let bottom = low_under(0.0, 0.0, w * 0.5) - 1.5;
-            vec![part(
+            let reach = blocks
+                .iter()
+                .map(|b| DVec2::new(b.center.x, b.center.z).length() + b.half.length())
+                .fold(1.0f64, f64::max);
+            let roof = blocks
+                .iter()
+                .map(|b| b.center.y + b.half.y)
+                .fold(1.0f64, f64::max);
+            let bottom = low_under(0.0, 0.0, reach) - 1.5;
+            let mut parts = vec![part(
                 DVec3::ZERO,
-                Shape::Tor { blocks },
-                w * 0.75,
-                h * 1.35 + 1.0,
+                Shape::Tor { blocks, grain },
+                reach,
+                roof + 0.5,
                 bottom,
-                72.0,
-            )]
+                110.0,
+            )];
+            // Clitter: blocks frost carried off the tor, half sunk in the ground around it.
+            let count = 6 + (rand(8) * 14.0) as u64;
+            for i in 0..count {
+                let j = 400 + i * 7;
+                let a = rand(j) * TAU;
+                let d = reach * (0.75 + 0.9 * rand(j + 1));
+                let (x, z) = (a.cos() * d, a.sin() * d);
+                let r = jx * (0.18 + 0.32 * rand(j + 2));
+                let half = DVec3::new(r * 1.2, r * (0.55 + 0.3 * rand(j + 3)), r);
+                let bottom = low_under(x, z, r * 1.2) - 0.3;
+                parts.push(part(
+                    DVec3::new(x, ground(x, z), z),
+                    Shape::Tor {
+                        blocks: vec![TorBlock {
+                            center: DVec3::new(0.0, half.y * 0.45, 0.0),
+                            half,
+                            yaw: rand(j + 4) * TAU,
+                            round: half.min_element() * 0.75,
+                        }],
+                        grain,
+                    },
+                    r * 1.6,
+                    half.y * 1.5,
+                    bottom,
+                    20.0,
+                ));
+            }
+            parts
         }
         LandmarkKind::IceSpires => {
             let count = 10 + (rand(1) * 20.0) as u64;
@@ -1234,7 +1378,18 @@ fn paint(stone: Stone, hard: f64, up: f64, w: DVec3, field: &LandmarkField, seed
             scale(base, speck * varnish)
         }
         Stone::Talus => scale(mix(field.soft, field.hard, 0.3), 0.9 * speck),
-        Stone::Granite => scale(field.granite, speck),
+        Stone::Granite => {
+            // Coarse crystals, grey-green lichen on the tops, dark weathering streaks down
+            // the sides.
+            let crystals = 1.0 + 0.1 * noise3(w / 0.4, seed ^ 0x6A1) as f32;
+            let lichen = ((noise3(w / 1.7, seed ^ 0x11C) as f32 - 0.05) / 0.3).clamp(0.0, 1.0)
+                * (0.3 + 0.7 * up.max(0.0) as f32);
+            let streak = noise3(DVec3::new(w.x / 1.2, w.y / 12.0, w.z / 1.2), seed ^ 0x57) as f32;
+            let steep = (1.0 - up.abs() as f32).clamp(0.0, 1.0);
+            let wet = 1.0 - 0.3 * steep * ((streak - 0.2) / 0.4).clamp(0.0, 1.0);
+            let stone = scale(field.granite, speck * crystals * wet);
+            mix(stone, [0.36, 0.38, 0.3], lichen * 0.55)
+        }
         Stone::Ice => {
             // Bluer in the hollows, whiter where the sun and frost reach.
             let frost = (0.5 + 0.5 * up as f32).clamp(0.0, 1.0);
@@ -1254,30 +1409,54 @@ struct CellMesh {
     collider: Option<ColliderShape>,
 }
 
-/// Mesh every formation of one cell.
-fn build_cell(source: &ChunkSource, field: &LandmarkField, key: NodeKey, seed: u64) -> CellMesh {
-    let map = &source.map;
+/// Rock and ice vertices and triangle indices of a cell.
+type Buffers = (Vec<Vertex>, Vec<u32>);
+
+/// The ground's terrain-local point and up under terrain-local point `local`.
+fn ground_at(source: &ChunkSource, local: DVec3) -> Option<(DVec3, DVec3)> {
+    let (dir, up, base) = source.map.locate(local)?;
+    Some((base + up * source.sample(base, up, dir, 0.0).height, up))
+}
+
+/// The ground's point and up at the middle of a quadtree cell, and the rotation from +Y to
+/// that up: the frame a cell's meshes are built in.
+fn cell_frame(source: &ChunkSource, key: NodeKey) -> (DVec3, DQuat) {
     let (lo, s) = key.face_rect();
-    let center = map.position(key.face, lo.x + s * 0.5, lo.y + s * 0.5, 0.0);
-    let ground_at = |local: DVec3| -> Option<(DVec3, DVec3)> {
-        let (dir, up, base) = map.locate(local)?;
-        Some((base + up * source.sample(base, up, dir, 0.0).height, up))
-    };
-    let (origin, up) = ground_at(center).unwrap_or((center, center.normalize()));
-    let rotation = DQuat::from_rotation_arc(DVec3::Y, up);
+    let center = source
+        .map
+        .position(key.face, lo.x + s * 0.5, lo.y + s * 0.5, 0.0);
+    let (origin, up) = ground_at(source, center).unwrap_or((center, center.normalize()));
+    (origin, DQuat::from_rotation_arc(DVec3::Y, up))
+}
+
+/// Mesh `sites` into rock and ice buffers in the frame (`origin`, `rotation`), with voxels
+/// `coarse` times their full size.
+fn mesh_sites(
+    source: &ChunkSource,
+    field: &LandmarkField,
+    seed: u64,
+    sites: &[Landmark],
+    (origin, rotation): (DVec3, DQuat),
+    coarse: f64,
+) -> (Buffers, Buffers) {
     let inv = rotation.inverse();
-    let mut rock: (Vec<Vertex>, Vec<u32>) = (Vec::new(), Vec::new());
-    let mut ice: (Vec<Vertex>, Vec<u32>) = (Vec::new(), Vec::new());
-    for site in sites_in(source, field, key, seed) {
+    let mut rock: Buffers = (Vec::new(), Vec::new());
+    let mut ice: Buffers = (Vec::new(), Vec::new());
+    for site in sites {
         let site_rot = site.rotation();
         // Ground under a point of the formation's frame, relative to its center.
         let ground = |x: f64, z: f64| -> f64 {
             let q = site.position + site_rot * DVec3::new(x, 0.0, z);
-            ground_at(q)
+            ground_at(source, q)
                 .map(|(g, _)| (g - site.position).dot(site.up))
                 .unwrap_or(0.0)
         };
-        for part in parts_of(&site, &ground) {
+        for mut part in parts_of(site, &ground) {
+            if coarse > 1.0 {
+                part.voxel *= coarse;
+                part.min -= DVec3::splat(part.voxel * 2.0);
+                part.max += DVec3::splat(part.voxel * 2.0);
+            }
             let ctx = Ctx {
                 field,
                 planet_seed: seed,
@@ -1324,6 +1503,18 @@ fn build_cell(source: &ChunkSource, field: &LandmarkField, key: NodeKey, seed: u
             target.1.extend(tris.iter().flatten().map(|i| start + i));
         }
     }
+    (rock, ice)
+}
+
+fn to_mesh((v, i): Buffers) -> Option<Mesh> {
+    (!v.is_empty()).then(|| Mesh::new(v, i))
+}
+
+/// Mesh every formation of one cell.
+fn build_cell(source: &ChunkSource, field: &LandmarkField, key: NodeKey, seed: u64) -> CellMesh {
+    let (origin, rotation) = cell_frame(source, key);
+    let sites = sites_in(source, field, key, seed);
+    let (rock, ice) = mesh_sites(source, field, seed, &sites, (origin, rotation), 1.0);
     let collider = (!rock.0.is_empty() || !ice.0.is_empty()).then(|| {
         let mut vertices: Vec<Vec3> = Vec::with_capacity(rock.0.len() + ice.0.len());
         let mut indices: Vec<[u32; 3]> = Vec::new();
@@ -1337,13 +1528,55 @@ fn build_cell(source: &ChunkSource, field: &LandmarkField, key: NodeKey, seed: u
         }
         ColliderShape::TriMesh { vertices, indices }
     });
-    let mesh = |(v, i): (Vec<Vertex>, Vec<u32>)| (!v.is_empty()).then(|| Mesh::new(v, i));
     CellMesh {
         origin,
         rotation,
-        rock: mesh(rock),
-        ice: mesh(ice),
+        rock: to_mesh(rock),
+        ice: to_mesh(ice),
         collider,
+    }
+}
+
+/// Formations at least this tall are drawn from afar.
+const FAR_MIN_HEIGHT_M: f64 = 18.0;
+/// Far cells are this many quadtree levels above the near ones (4 km across), drawn out to
+/// [`LandmarkField::far_m`] with voxels [`FAR_COARSE`] times as big.
+const FAR_LEVELS_UP: u8 = 2;
+const FAR_COARSE: f64 = 4.0;
+const MAX_FAR_BUILDING: usize = 1;
+
+/// A far cell's big formations, coarsely meshed, grouped by the near cell each stands in (a
+/// group hides while its near cell is drawn).
+struct FarMesh {
+    origin: DVec3,
+    rotation: DQuat,
+    groups: Vec<(NodeKey, Option<Mesh>, Option<Mesh>)>,
+}
+
+fn build_far_cell(source: &ChunkSource, field: &LandmarkField, key: NodeKey, seed: u64) -> FarMesh {
+    let (origin, rotation) = cell_frame(source, key);
+    let mut near = vec![key];
+    for _ in 0..FAR_LEVELS_UP {
+        near = near.iter().flat_map(|k| k.children()).collect();
+    }
+    let groups = near
+        .into_iter()
+        .filter_map(|k| {
+            let big: Vec<Landmark> = sites_in(source, field, k, seed)
+                .into_iter()
+                .filter(|s| s.height_m >= FAR_MIN_HEIGHT_M)
+                .collect();
+            if big.is_empty() {
+                return None;
+            }
+            let (rock, ice) = mesh_sites(source, field, seed, &big, (origin, rotation), FAR_COARSE);
+            Some((k, to_mesh(rock), to_mesh(ice)))
+        })
+        .collect();
+    FarMesh {
+        origin,
+        rotation,
+        groups,
     }
 }
 
@@ -1362,11 +1595,28 @@ struct Cell {
     rotation: DQuat,
 }
 
+/// A far cell: one entity per group of formations, with the near cell it stands in and
+/// whether it is shown.
+struct FarCell {
+    groups: Vec<FarGroup>,
+    origin: DVec3,
+    rotation: DQuat,
+}
+
+struct FarGroup {
+    near: NodeKey,
+    entities: Vec<Entity>,
+    meshes: Vec<Handle<Mesh>>,
+    shown: bool,
+}
+
 /// The landmark cells in the world.
 #[derive(Resource, Default)]
 pub struct LandmarkCells {
     cells: HashMap<CellKey, Cell>,
     building: HashMap<CellKey, JoinHandle<CellMesh>>,
+    far: HashMap<CellKey, FarCell>,
+    far_building: HashMap<CellKey, JoinHandle<FarMesh>>,
     terrains: HashMap<Entity, TerrainLandmarks>,
     /// Cells put in place since startup.
     pub placed: u64,
@@ -1388,9 +1638,18 @@ impl LandmarkCells {
             .count()
     }
 
+    /// Groups of far formations shown (their near cells not drawn yet).
+    pub fn far_shown(&self) -> usize {
+        self.far
+            .values()
+            .flat_map(|c| &c.groups)
+            .filter(|g| g.shown)
+            .count()
+    }
+
     /// Nothing waiting to be built.
     pub fn is_settled(&self) -> bool {
-        self.building.is_empty()
+        self.building.is_empty() && self.far_building.is_empty()
     }
 }
 
@@ -1427,6 +1686,17 @@ fn place(pose: (DVec3, DQuat), origin: DVec3, rotation: DQuat) -> Transform {
     }
 }
 
+fn drop_far(commands: &mut Commands, meshes: &mut Assets<Mesh>, cell: Option<FarCell>) {
+    for g in cell.into_iter().flat_map(|c| c.groups) {
+        for e in g.entities {
+            commands.entity(e).despawn();
+        }
+        for h in g.meshes {
+            meshes.remove(h);
+        }
+    }
+}
+
 fn drop_cell(commands: &mut Commands, meshes: &mut Assets<Mesh>, cell: Option<Cell>) {
     let Some(cell) = cell else {
         return;
@@ -1450,6 +1720,7 @@ pub fn update_landmarks(
     materials: Option<ResMut<Assets<StandardMaterial>>>,
     surfaces: Option<Res<SurfaceMaterials>>,
     mut state: ResMut<LandmarkCells>,
+    mut renderers: Query<&mut MeshRenderer>,
     diagnostics: Option<ResMut<engine_core::diagnostics::Diagnostics>>,
 ) {
     let (Some(mut meshes), Some(mut materials)) = (meshes, materials) else {
@@ -1457,6 +1728,7 @@ pub fn update_landmarks(
     };
     let state = &mut *state;
     let mut wanted: Vec<(f64, CellKey)> = Vec::new();
+    let mut wanted_far: Vec<(f64, CellKey)> = Vec::new();
     for (&e, t) in &terrains.entries {
         let field = &t.config.landmarks;
         if field.per_km2 <= 0.0 || !t.source.map.is_sphere() {
@@ -1479,6 +1751,11 @@ pub fn update_landmarks(
                 drop_cell(&mut commands, &mut meshes, state.cells.remove(&k));
             }
             state.building.retain(|k, _| k.0 != e);
+            let stale: Vec<CellKey> = state.far.keys().filter(|k| k.0 == e).copied().collect();
+            for k in stale {
+                drop_far(&mut commands, &mut meshes, state.far.remove(&k));
+            }
+            state.far_building.retain(|k, _| k.0 != e);
         }
         if entry.pose != pose {
             entry.pose = pose;
@@ -1488,13 +1765,30 @@ pub fn update_landmarks(
                     commands.entity(entity).insert(tf);
                 }
             }
+            for (_, c) in state.far.iter().filter(|(k, _)| k.0 == e) {
+                let tf = place(pose, c.origin, c.rotation);
+                for &entity in c.groups.iter().flat_map(|g| &g.entities) {
+                    commands.entity(entity).insert(tf);
+                }
+            }
         }
         let level = level_for(&t.source.map);
+        let far_level = level.saturating_sub(FAR_LEVELS_UP);
         for &p in &focus.points {
-            if t.altitude_hint(p) > REACH_M + t.config.height_range().1 {
+            let altitude = t.altitude_hint(p) - t.config.height_range().1;
+            if altitude > field.far_m.max(REACH_M) {
                 continue;
             }
-            for (d, key) in cells_around(&t.source.map, t.to_local(p), level, REACH_M) {
+            let local = t.to_local(p);
+            if field.far_m > REACH_M {
+                for (d, key) in cells_around(&t.source.map, local, far_level, field.far_m) {
+                    wanted_far.push((d, (e, key)));
+                }
+            }
+            if altitude > REACH_M {
+                continue;
+            }
+            for (d, key) in cells_around(&t.source.map, local, level, REACH_M) {
                 wanted.push((d, (e, key)));
             }
         }
@@ -1573,6 +1867,85 @@ pub fn update_landmarks(
         state.cells.insert(k, cell);
         state.placed += 1;
     }
+    // Far cells: drop the unwanted, put finished ones in place, show each group while its
+    // near cell is not drawn.
+    wanted_far.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let far_wanted: HashSet<CellKey> = wanted_far.iter().map(|w| w.1).collect();
+    let stale: Vec<CellKey> = state
+        .far
+        .keys()
+        .filter(|k| !far_wanted.contains(k))
+        .copied()
+        .collect();
+    for k in stale {
+        drop_far(&mut commands, &mut meshes, state.far.remove(&k));
+    }
+    let done: Vec<CellKey> = state
+        .far_building
+        .iter()
+        .filter(|(_, h)| h.is_finished())
+        .map(|(k, _)| *k)
+        .collect();
+    for k in done {
+        let Some(Ok(built)) = state.far_building.remove(&k).map(|h| h.join()) else {
+            continue;
+        };
+        let Some(terrain) = state.terrains.get(&k.0).filter(|_| far_wanted.contains(&k)) else {
+            continue;
+        };
+        let tf = place(terrain.pose, built.origin, built.rotation);
+        let mut cell = FarCell {
+            groups: Vec::new(),
+            origin: built.origin,
+            rotation: built.rotation,
+        };
+        for (near, rock, ice) in built.groups {
+            let shown = !state.cells.contains_key(&(k.0, near));
+            let mut group = FarGroup {
+                near,
+                entities: Vec::new(),
+                meshes: Vec::new(),
+                shown,
+            };
+            for (mesh, material) in [(rock, terrain.rock), (ice, terrain.ice)] {
+                let Some(mesh) = mesh else {
+                    continue;
+                };
+                let h = meshes.add(mesh);
+                group.entities.push(
+                    commands
+                        .spawn((
+                            Name::new("Far landmarks"),
+                            tf,
+                            MeshRenderer {
+                                mesh: MeshRef::Handle(h),
+                                material: MaterialRef::Handle(material),
+                                cast_shadows: false,
+                                visible: shown,
+                            },
+                        ))
+                        .id(),
+                );
+                group.meshes.push(h);
+            }
+            cell.groups.push(group);
+        }
+        state.far.insert(k, cell);
+    }
+    for (k, cell) in state.far.iter_mut() {
+        for g in &mut cell.groups {
+            let shown = !state.cells.contains_key(&(k.0, g.near));
+            if shown == g.shown {
+                continue;
+            }
+            g.shown = shown;
+            for &e in &g.entities {
+                if let Ok(mut r) = renderers.get_mut(e) {
+                    r.visible = shown;
+                }
+            }
+        }
+    }
     // Colliders on the cells near a focus.
     let surface = surfaces
         .map(|s| s.id_or_default("rock"))
@@ -1623,7 +1996,25 @@ pub fn update_landmarks(
             std::thread::spawn(move || build_cell(&source, &field, key, seed)),
         );
     }
+    for (_, k) in &wanted_far {
+        if state.far_building.len() >= MAX_FAR_BUILDING {
+            break;
+        }
+        if state.far.contains_key(k) || state.far_building.contains_key(k) {
+            continue;
+        }
+        let Some(t) = terrains.entries.get(&k.0) else {
+            continue;
+        };
+        let (source, field, key) = (t.source.clone(), t.config.landmarks.clone(), k.1);
+        let seed = t.config.shape.seed;
+        state.far_building.insert(
+            *k,
+            std::thread::spawn(move || build_far_cell(&source, &field, key, seed)),
+        );
+    }
     if let Some(mut d) = diagnostics {
+        d.set("terrain.landmark_far", state.far_shown() as f64);
         d.set("terrain.landmark_cells", state.drawn() as f64);
         d.set("terrain.landmark_builds", state.building.len() as f64);
     }
@@ -1837,6 +2228,81 @@ mod tests {
         assert!(cell.rock.is_some());
         assert!(matches!(cell.collider, Some(ColliderShape::TriMesh { .. })));
         assert!(took.as_secs_f64() < 8.0, "{took:?}");
+    }
+
+    #[test]
+    fn a_tor_is_sheets_of_jointed_blocks_with_clitter_around() {
+        for seed in 0..4u64 {
+            let (height_m, width_m) = size_of(LandmarkKind::Tor, 0.6, 0.5);
+            let site = Landmark {
+                kind: LandmarkKind::Tor,
+                position: DVec3::new(0.0, 3.4e6, 0.0),
+                up: DVec3::Y,
+                height_m,
+                width_m,
+                yaw: 0.0,
+                seed,
+                ground_asl: 400.0,
+            };
+            let parts = parts_of(&site, &|_, _| 0.0);
+            let Shape::Tor { blocks, .. } = &parts[0].shape else {
+                panic!("a tor");
+            };
+            let mut levels: Vec<i64> = blocks
+                .iter()
+                .map(|b| (b.center.y * 10.0).round() as i64)
+                .collect();
+            levels.sort_unstable();
+            levels.dedup();
+            assert!(blocks.len() >= 6, "{} blocks", blocks.len());
+            assert!(levels.len() >= 4, "{} sheets", levels.len());
+            // Joint blocks side by side in the lower sheets, not one slab.
+            let lowest = levels[1];
+            let across = blocks
+                .iter()
+                .filter(|b| (b.center.y * 10.0).round() as i64 == lowest)
+                .count();
+            assert!(across >= 2, "{across} blocks across");
+            assert!(parts.len() >= 7, "{} clitter boulders", parts.len() - 1);
+        }
+    }
+
+    #[test]
+    fn big_formations_show_from_afar_coarsely() {
+        let t = PlanetTerrain::mars(3);
+        let r = t.shape.radius_m;
+        let source = crate::TerrainRuntime::new(&t, Default::default(), 1).source;
+        let far_level = level_for(&source.map) - FAR_LEVELS_UP;
+        let mut found = None;
+        'search: for lat in [-30.0, -10.0, 10.0, 30.0] {
+            for lon in [0.0, 60.0, 120.0, 180.0, 240.0, 300.0] {
+                let at = crate::dir_from_lat_lon(lat, lon) * r;
+                for (_, key) in cells_around(&source.map, at, far_level, 8_000.0) {
+                    let far = build_far_cell(&source, &t.landmarks, key, t.shape.seed);
+                    if let Some((near, Some(rock), _)) =
+                        far.groups.iter().find(|g| g.1.is_some()).cloned()
+                    {
+                        found = Some((key, near, rock));
+                        break 'search;
+                    }
+                }
+            }
+        }
+        let (key, near, far_rock) = found.expect("a far cell with a big formation");
+        // The group's near cell lies inside the far cell.
+        let mut up = near;
+        for _ in 0..FAR_LEVELS_UP {
+            up = up.parent().unwrap();
+        }
+        assert_eq!(up, key);
+        let close = build_cell(&source, &t.landmarks, near, t.shape.seed);
+        let close = close.rock.expect("the near cell has it too");
+        assert!(
+            far_rock.vertices.len() * 6 < close.vertices.len(),
+            "far {} vs near {}",
+            far_rock.vertices.len(),
+            close.vertices.len()
+        );
     }
 
     #[test]
