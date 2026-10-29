@@ -128,19 +128,36 @@ impl Plugin for AnimationPlugin {
         .add_systems(
             Update,
             (
+                // Two groups, each ignoring its own systems' commands, so the setup needs one
+                // sync point in the middle rather than one after each system that spawns or
+                // inserts (each waits for every system running): bodies, models and the parts
+                // later stages want (warp state, ragdoll rigs, faces, hand controls) land
+                // between the groups, what the second queues lands before `AnimSet::Graph`.
+                // None of these is exclusive, so on a frame with nothing to build they run
+                // beside other modules' systems instead of draining the schedule.
                 (
-                    body::remove_bodies,
-                    body::answer_requests,
-                    character::load_human_models,
-                    horse_model::load_horse_models,
-                    animator::build_animators,
-                    animator::queue_triggers,
-                    freeflow::pick_targets,
-                    combat::run_attacks,
-                    combat::evade_strikes,
-                    (model::spawn_rig_models, model::despawn_orphan_parts),
-                    body::drive_bodies,
-                    body::hide_drawn_bodies,
+                    (
+                        body::remove_bodies,
+                        body::answer_requests,
+                        character::load_human_models,
+                        horse_model::load_horse_models,
+                        warp::add_warps,
+                        ragdoll::add_rigs,
+                        face::give_appearance_faces,
+                        body::give_hand_controls,
+                    )
+                        .chain_ignore_deferred(),
+                    (
+                        animator::build_animators,
+                        animator::queue_triggers,
+                        freeflow::pick_targets,
+                        combat::run_attacks,
+                        combat::evade_strikes,
+                        (model::spawn_rig_models, model::despawn_orphan_parts),
+                        body::drive_bodies,
+                        body::hide_drawn_bodies,
+                    )
+                        .chain_ignore_deferred(),
                 )
                     .chain()
                     .in_set(AnimSet::Setup),
@@ -157,20 +174,22 @@ impl Plugin for AnimationPlugin {
                         procedural::vehicle::vehicle_rig_system,
                     ),
                     procedural::spring::spring_chain_system,
+                    // Blows insert reactions (`HitReaction`, `Hurt`, `Knockdown`) the systems
+                    // after them read this frame: one sync point for both; what knockdowns
+                    // insert (ragdoll weight, tone, pushes) lands at the one before the IK.
+                    // (PostUpdate's animation stages need three in all; they were nine.)
+                    (hit::take_hits, hurt::take_hurts).chain_ignore_deferred(),
                     (
-                        hit::take_hits,
-                        hurt::take_hurts,
                         knockdown::knockdown_system,
                         hit::stagger_system,
                         hit::flinch_system,
                         hurt::hurt_system,
                     )
-                        .chain(),
+                        .chain_ignore_deferred(),
                 )
                     .chain()
                     .in_set(AnimSet::Procedural),
                 (
-                    warp::add_warps,
                     warp::warp_system,
                     ik::foot_ik_system,
                     ik::look_at_system,
@@ -179,20 +198,20 @@ impl Plugin for AnimationPlugin {
                 )
                     .chain()
                     .in_set(AnimSet::Ik),
+                // Spawned and despawned parts land at the end of the frame: nothing after
+                // the ragdoll stage looks at them.
                 (
-                    ragdoll::add_rigs,
                     ragdoll::ragdoll_system,
                     (ragdoll::despawn_orphan_parts, ragdoll::ragdoll_impacts),
                 )
-                    .chain()
+                    .chain_ignore_deferred()
                     .in_set(AnimSet::Ragdoll),
                 muscle::muscle_system.in_set(AnimSet::Muscles),
                 (
                     animator::publish_pose,
                     retarget::retarget_poses,
                     face::face_system,
-                    (face::give_appearance_faces, face::appearance_face_system),
-                    (body::give_hand_controls, body::hand_controls_system),
+                    (face::appearance_face_system, body::hand_controls_system),
                     (
                         skin::update_skin_poses,
                         attach::attachment_system,

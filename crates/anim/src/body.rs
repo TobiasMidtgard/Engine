@@ -128,21 +128,36 @@ const PARAMS: [&str; 7] = [
     "grade",
 ];
 
-/// Build bodies for new or changed requests.
-pub(crate) fn answer_requests(world: &mut World) {
-    let mut q =
-        world.query_filtered::<(Entity, &BodyRequest, Option<&Body>), Changed<BodyRequest>>();
+/// Build bodies for new or changed requests. A normal system that only queues world work
+/// when a request changed, so on most frames it runs beside everything else instead of as
+/// an exclusive system that waits for the whole schedule to drain.
+pub(crate) fn answer_requests(
+    mut commands: Commands,
+    q: Query<(Entity, &BodyRequest, Option<&Body>), Changed<BodyRequest>>,
+) {
     let todo: Vec<(Entity, BodyRequest, bool)> = q
-        .iter(world)
+        .iter()
         .filter(|(_, r, body)| body.is_none_or(|b| b.request != **r))
         .map(|(e, r, body)| (e, r.clone(), body.is_some()))
         .collect();
-    for (entity, request, rebuild) in todo {
-        if rebuild {
-            strip(world, entity);
-        }
-        build(world, entity, request);
+    if todo.is_empty() {
+        return;
     }
+    commands.queue(move |world: &mut World| {
+        for (entity, request, rebuild) in todo {
+            // (Despawned, or its request taken away, before the queue ran.)
+            if !world
+                .get_entity(entity)
+                .is_ok_and(|e| e.contains::<BodyRequest>())
+            {
+                continue;
+            }
+            if rebuild {
+                strip(world, entity);
+            }
+            build(world, entity, request);
+        }
+    });
 }
 
 /// Whether a character module draws this person (see the module docs).
@@ -168,13 +183,26 @@ pub(crate) fn hide_drawn_bodies(
     }
 }
 
-/// Take the body away from entities whose request was removed.
-pub(crate) fn remove_bodies(world: &mut World) {
-    let mut q = world.query_filtered::<Entity, (With<Body>, Without<BodyRequest>)>();
-    let gone: Vec<Entity> = q.iter(world).collect();
-    for entity in gone {
-        strip(world, entity);
+/// Take the body away from entities whose request was removed (queued, like
+/// [`answer_requests`], only when there is one).
+pub(crate) fn remove_bodies(
+    mut commands: Commands,
+    q: Query<Entity, (With<Body>, Without<BodyRequest>)>,
+) {
+    let gone: Vec<Entity> = q.iter().collect();
+    if gone.is_empty() {
+        return;
     }
+    commands.queue(move |world: &mut World| {
+        for entity in gone {
+            if world
+                .get_entity(entity)
+                .is_ok_and(|e| e.contains::<Body>() && !e.contains::<BodyRequest>())
+            {
+                strip(world, entity);
+            }
+        }
+    });
 }
 
 /// Turn each body's motion into its animation parameters (people; animals' gaits measure the

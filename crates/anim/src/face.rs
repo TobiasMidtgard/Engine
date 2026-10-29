@@ -648,7 +648,7 @@ pub(crate) fn give_appearance_faces(
             Option<&Face>,
             Option<&contract::FaceControls>,
         ),
-        (With<Animator>, Changed<Appearance>),
+        (With<Animator>, Or<(Changed<Appearance>, Added<Animator>)>),
     >,
 ) {
     for (e, appearance, face, controls) in &q {
