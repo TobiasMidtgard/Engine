@@ -209,7 +209,7 @@ fn place(
 
 /// A picture size for `pixels` on screen at `resolution`: whole steps of 32, kept while the
 /// previous size is enough and not much more, so it doesn't reallocate every frame.
-fn picture_size(pixels: Vec2, resolution: f32, previous: UVec2) -> UVec2 {
+pub(crate) fn picture_size(pixels: Vec2, resolution: f32, previous: UVec2) -> UVec2 {
     let want = pixels * resolution.clamp(0.05, 2.0);
     let axis = |want: f32, previous: u32| {
         let step = ((want / 32.0).ceil() as u32 * 32).clamp(32, 4096);

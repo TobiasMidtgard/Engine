@@ -9,9 +9,11 @@ pub mod detail;
 pub mod drops;
 pub mod flow;
 pub mod interact;
+pub mod mirror;
 pub mod puddles;
 pub mod render;
 pub mod ripples;
+pub mod shelter;
 pub mod shift;
 pub mod shore;
 pub mod sim;
@@ -74,10 +76,12 @@ impl Plugin for WaterPlugin {
             .init_resource::<surface::CpuSurface>()
             .init_resource::<sim::FlowsInFlight>()
             .init_resource::<WaterLoading>()
+            .init_resource::<shelter::ShelterMask>()
             .register_resource::<WaterSettings>(
                 "Water quality and behavior: ripple grid size (cells, meters), ripple speed (m/s) \
                  and damping (1/s), foam life (s), raindrops per m² per mm/h, puddles on/off, \
-                 wet shores on/off.",
+                 wet shores on/off, mirror reflections on calm lakes on/off and their \
+                 resolution.",
             )
             .register_component::<WaterBody>(
                 "A body of water (ocean, lake, pool): extent around the entity, bed (terrain, \
@@ -136,6 +140,7 @@ impl Plugin for WaterPlugin {
                     drops::splash_drops_system,
                     puddles::puddle_system,
                     shore::shore_wetness_system,
+                    shelter::shelter_system,
                     sim::diagnostics_system,
                 )
                     .chain()
@@ -148,6 +153,7 @@ impl Plugin for WaterPlugin {
                     .in_set(SimSet::Gameplay),
             )
             .add_systems(Update, boat::boat_bodies_system)
+            .add_systems(Extract, mirror::lake_mirror_system)
             .add_systems(
                 PreUpdate,
                 (

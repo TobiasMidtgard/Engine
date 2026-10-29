@@ -1447,7 +1447,13 @@ impl RenderFeature for TerrainFeature {
         view: &ViewData,
         render_settings: &RenderSettings,
     ) {
-        self.frame += 1;
+        // A planar reflection's view (a lake mirror) draws what is built from its own camera but
+        // leaves the quadtree, the builds and the frame count to the main view: a camera a few
+        // meters under the lake would split and merge patches against it every frame.
+        let mirror = engine_render::rendering_reflection(world).is_some();
+        if !mirror {
+            self.frame += 1;
+        }
         self.draws.clear();
         let lamp_handoff =
             crate::lights::handoff_distance(world, view, render_settings.max_point_lights);
@@ -1574,7 +1580,9 @@ impl RenderFeature for TerrainFeature {
             let motion = state
                 .last_position
                 .map_or(Vec3::ZERO, |last| (pos - last).as_vec3());
-            state.last_position = Some(pos);
+            if !mirror {
+                state.last_position = Some(pos);
+            }
             let cam_local = rot.inverse() * (view.origin - pos);
             let frustum = view.frustum;
             let origin = view.origin;
@@ -1587,13 +1595,27 @@ impl RenderFeature for TerrainFeature {
             // Select, and ask the workers for what the view lacks, nearest first. Until the
             // patches are built their parents are drawn. After a jump (many patches missing),
             // everything missing is queued at once.
-            let sel = state.lod.select(&SelectInput {
-                camera: cam_local,
-                split_factor: split,
-                merge_factor: Some(split * MERGE_HYSTERESIS),
-                visible: &visible,
-                min_size: 0.0,
-            });
+            let mut sel = if mirror {
+                // `walk` without a merge factor leaves the split state alone.
+                state.lod.walk(&SelectInput {
+                    camera: cam_local,
+                    split_factor: split,
+                    merge_factor: None,
+                    visible: &visible,
+                    min_size: 0.0,
+                })
+            } else {
+                state.lod.select(&SelectInput {
+                    camera: cam_local,
+                    split_factor: split,
+                    merge_factor: Some(split * MERGE_HYSTERESIS),
+                    visible: &visible,
+                    min_size: 0.0,
+                })
+            };
+            if mirror {
+                sel.missing.clear();
+            }
             let catch_up =
                 sel.missing.len() > settings.catch_up_threshold || state.chunks.is_empty();
             let in_flight = if catch_up {
@@ -1613,7 +1635,7 @@ impl RenderFeature for TerrainFeature {
             // Then edited patches, kept drawn meanwhile (one being built waits for that build
             // before the next: the edit may have come after it started).
             let mut i = 0;
-            while i < state.rebuild.len() && state.building.len() < in_flight {
+            while !mirror && i < state.rebuild.len() && state.building.len() < in_flight {
                 let k = state.rebuild[i];
                 if state.building.insert(k) {
                     state.rebuild.remove(i);
@@ -1625,7 +1647,7 @@ impl RenderFeature for TerrainFeature {
             // Few patches for the planet's share of the view (seen from orbit): split finer,
             // easing toward the detail that fills the budget. The patch count grows with the
             // square of the split factor.
-            if settings.patch_budget > 0 {
+            if settings.patch_budget > 0 && !mirror {
                 let dist = cam_local.length().max(1.0);
                 let angle = (src.map.radius / dist).min(1.0).asin();
                 let share = if view.fov_y > 0.0 {
@@ -1653,38 +1675,39 @@ impl RenderFeature for TerrainFeature {
             // what it lacks a few patches a frame after the view's own, drawing parents meanwhile.
             let far = view.far_shadow;
             let sun = view.sun_dir;
-            let far_sel = (t.config.cast_shadows && view.sun_shadows && far.enabled).then(|| {
-                let far_visible = move |c: DVec3, r: f64| {
-                    let rel = (pos + rot * c - origin).as_vec3();
-                    let r = r as f32;
-                    far.casts(rel, r)
-                        && (rel.dot(sun) + r >= 0.0 || rel.length() <= far.half_extent + r)
-                };
-                let input = SelectInput {
-                    camera: cam_local,
-                    split_factor: split * FAR_SHADOW_DETAIL,
-                    merge_factor: None,
-                    visible: &far_visible,
-                    min_size: far.texel() as f64 * 0.5 * crate::chunk::QUADS as f64,
-                };
-                let far_sel = state.lod.walk(&input);
-                let room = (workers.threads() * 3).saturating_sub(state.building.len());
-                for &(_, k) in far_sel
-                    .missing
-                    .iter()
-                    .take(room.min((settings.builds_per_frame / 2).max(1)))
-                {
-                    if state.building.insert(k) {
-                        workers.build(*e, state.version, &src, k);
+            let far_sel = (!mirror && t.config.cast_shadows && view.sun_shadows && far.enabled)
+                .then(|| {
+                    let far_visible = move |c: DVec3, r: f64| {
+                        let rel = (pos + rot * c - origin).as_vec3();
+                        let r = r as f32;
+                        far.casts(rel, r)
+                            && (rel.dot(sun) + r >= 0.0 || rel.length() <= far.half_extent + r)
+                    };
+                    let input = SelectInput {
+                        camera: cam_local,
+                        split_factor: split * FAR_SHADOW_DETAIL,
+                        merge_factor: None,
+                        visible: &far_visible,
+                        min_size: far.texel() as f64 * 0.5 * crate::chunk::QUADS as f64,
+                    };
+                    let far_sel = state.lod.walk(&input);
+                    let room = (workers.threads() * 3).saturating_sub(state.building.len());
+                    for &(_, k) in far_sel
+                        .missing
+                        .iter()
+                        .take(room.min((settings.builds_per_frame / 2).max(1)))
+                    {
+                        if state.building.insert(k) {
+                            workers.build(*e, state.version, &src, k);
+                        }
                     }
-                }
-                far_sel
-            });
+                    far_sel
+                });
 
             building_total += state.building.len();
 
             // Recycle patches nobody has looked at for a while.
-            if self.frame.is_multiple_of(60) {
+            if !mirror && self.frame.is_multiple_of(60) {
                 for k in state.lod.stale(STALE_FRAMES) {
                     if let Some(c) = state.chunks.remove(&k) {
                         self.pool.release(c.slot);

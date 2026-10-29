@@ -936,7 +936,8 @@ fn surface_in(in: VertexOut, front: bool) -> SurfaceIn {
 fn fs_main(in: VertexOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
     // The prepass's dither again: where a fading pair's two meshes lie at the same depth (flat
     // faces both levels share), each shades only its own pixels.
-    if (!dither_keeps(in.dither, in.clip.xy)) {
+    // Under a planar reflection's mirror (its view only; elsewhere the plane is zero).
+    if (!dither_keeps(in.dither, in.clip.xy) || clip_plane_distance(in.rel) < 0.0) {
         discard;
     }
     let mat = materials[in.material];
@@ -1092,7 +1093,9 @@ fn standard_prepass_vertex(in: VertexIn) -> PrepassVertexOut {
 fn fs_prepass(in: PrepassVertexOut, @builtin(front_facing) front: bool) -> PrepassOutput {
     // Dithered out (`DitherFade`, or cross-fading into its impostor, which takes the pixels the
     // mesh leaves): the scene pass shades only what the prepass kept.
-    if (!dither_keeps(in.fade, in.clip.xy)) {
+    // Under a planar reflection's mirror: cut away in its view, where the near plane alone
+    // leaves what pokes up from the bottom (posts, banks) in front of the reflected scene.
+    if (!dither_keeps(in.fade, in.clip.xy) || clip_plane_distance(in.rel) < 0.0) {
         discard;
     }
     let mat = materials[in.material];

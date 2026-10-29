@@ -87,6 +87,7 @@ mod mesh_scene;
 mod mipmaps;
 pub mod motion_blur;
 mod perf;
+pub mod planar_reflection;
 pub mod portal;
 mod probe_gi;
 pub mod renderer;
@@ -135,6 +136,9 @@ pub use material::{AlphaMode, StandardMaterial, TextureMapping, TextureProjectio
 pub use material_library::{MaterialMaps, MaterialPreset, MaterialTextures};
 pub use mesh::{Mesh, Shape, Vertex};
 pub use motion_blur::MotionBlur;
+pub use planar_reflection::{
+    PlanarReflection, PlanarReflectionPicture, planar_reflection_picture, rendering_reflection,
+};
 pub use portal::Portal;
 pub use renderer::{
     RenderDisabled, RenderPaused, RenderStats, RenderThread, Renderer, ScreenshotInfo, Screenshots,
@@ -227,6 +231,9 @@ impl Plugin for RenderPlugin {
             )
             .register_component::<Portal>(
                 "A door to another place: a rectangle size [w, h] (m) in this entity's XY plane, seen from its +Z side, showing what lies beyond exit (an entity; the view comes out of its +Z side, as if walked through), seamlessly (HDR, the main view's exposure, motion through it). resolution: picture pixels per screen pixel it covers (0.05..2); quality: a Scalability for the view through it. Costs an extra view while the camera sees it from the front. Portal::carry(entry, exit) maps what goes through.",
+            )
+            .register_component::<PlanarReflection>(
+                "A flat mirror in this entity's XZ plane (its +Y is the side it reflects), size [x, z] (m): calm lakes, pools, polished floors. Shows the scene reflected, off-screen parts and undersides too, through an extra view mirrored in the plane while the main camera sees it from above (HDR, mip chain for rough reflections). resolution: picture pixels per screen pixel it covers (0.05..2); quality: a Scalability for the reflected view. Features sample it with planar_reflection_picture.",
             )
             .register_component::<NoMeshLod>(
                 "Marker: keeps this entity's instanced MeshRenderer at full detail at every distance (no automatic levels of detail), for meshes simplifying would spoil, such as many small separate stones in one mesh.",

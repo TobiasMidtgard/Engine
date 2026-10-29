@@ -110,6 +110,9 @@ pub struct FrameUniform {
     /// Storage slot of the grid's first probe along x, y and z (it scrolls); the probes' epoch
     /// (0 = off: probes written in another epoch are ignored).
     pub gi_grid: [f32; 4],
+    /// A mirror's view ([`crate::PlanarReflection`]): the camera-relative plane (n, d) whose
+    /// side `dot(n, rel) + d < 0` is cut away; zero for every other view.
+    pub clip_plane: [f32; 4],
 }
 
 /// Most [`SkyLightVolume`]s shaded per frame (nearest the camera first).
@@ -560,15 +563,26 @@ pub fn build_view(
     // A portal's view looks through the portal's rectangle: an off-axis frustum through its
     // corners whose near plane lies in the exit's plane (portal.rs). Shadow cascades fit a
     // symmetric frustum around it.
-    let portal = camera_entity.and_then(|e| world.get::<crate::portal::PortalCamera>(e).copied());
-    let (proj, near, fov_y, cascade_fov_aspect) = match portal {
-        Some(p) => {
-            let t = p.tangents;
+    // A mirror's view does the same around the part of the screen the mirror covers, with its
+    // near plane where the mirror's plane begins (planar_reflection.rs).
+    let off_axis = camera_entity.and_then(|e| {
+        world
+            .get::<crate::portal::PortalCamera>(e)
+            .map(|p| (p.tangents, p.near))
+            .or_else(|| {
+                world
+                    .get::<crate::planar_reflection::MirrorCamera>(e)
+                    .map(|m| (m.tangents, m.near))
+            })
+    });
+    let (proj, near, fov_y, cascade_fov_aspect) = match off_axis {
+        Some((tangents, off_near)) => {
+            let t = tangents;
             let half = Vec2::new(t.x.abs().max(t.y.abs()), t.z.abs().max(t.w.abs()))
                 .max(Vec2::splat(1e-4));
             (
-                off_axis_infinite_reverse(t, p.near),
-                p.near,
+                off_axis_infinite_reverse(t, off_near),
+                off_near,
                 2.0 * ((t.w - t.z) * 0.5).atan(),
                 (2.0 * half.y.atan(), half.x / half.y),
             )
@@ -992,6 +1006,10 @@ pub fn frame_uniform(world: &World, v: &ViewData) -> FrameUniform {
         gi_volume: [0.0, 0.0, 0.0, 1.0],
         gi_size: [1.0, 1.0, 1.0, 0.0],
         gi_grid: [0.0; 4],
+        clip_plane: v
+            .camera
+            .and_then(|c| world.get::<crate::planar_reflection::MirrorCamera>(c))
+            .map_or([0.0; 4], |m| m.clip_plane(v.origin)),
     }
 }
 
@@ -1047,7 +1065,7 @@ mod tests {
         // 7 mat4 + 15 vec4 + 4 mat4 + 3 vec4 + ground, sky occlusion, volumes, then the
         // screen-space block (mat4 + 4 vec4), volumetric fog (vec4), far shadow (mat4 + vec4),
         // sky (vec4), surface weather (2 vec4), cloud shadows (mat4 + 2 vec4), the air (5 vec4),
-        // the window (vec4), probe GI (3 vec4).
+        // the window (vec4), probe GI (3 vec4), the clip plane (vec4).
         assert_eq!(
             std::mem::size_of::<FrameUniform>(),
             7 * 64
@@ -1069,6 +1087,7 @@ mod tests {
                 + 5 * 16
                 + 16
                 + 3 * 16
+                + 16
         );
         assert_eq!(std::mem::size_of::<GpuSkyVolume>(), 80);
         assert_eq!(std::mem::size_of::<GpuPointLight>(), 32);

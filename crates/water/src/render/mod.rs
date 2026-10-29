@@ -311,6 +311,15 @@ struct Globals {
     detail2: [f32; 4],
     plunges: [[f32; 4]; MAX_PLUNGES],
     coarse: [f32; 4],
+    /// The lake mirror's picture (`crate::mirror`): its view-projection relative to this camera,
+    /// (exposure ratio, near plane m, mips, body slot or -1), (mirrored eye rel camera xyz,
+    /// plane rel camera y).
+    mirror_vp: [[f32; 4]; 4],
+    mirror: [f32; 4],
+    mirror2: [f32; 4],
+    /// The wind exposure mask (`crate::shelter`): corner rel camera x, z, size (m), body slot
+    /// or -1 (-2: shelter and slicks off).
+    shelter: [f32; 4],
 }
 
 #[repr(C)]
@@ -442,7 +451,16 @@ struct Gpu {
     /// surface isn't).
     ripple_heights: bool,
     puddle_tex: wgpu::Texture,
-    group1: Option<wgpu::BindGroup>,
+    /// Group 1 for each set of views it binds (the main view's and each extra view's scene
+    /// copies, the mirror's picture), newest last; cleared when the textures it binds change.
+    group1: Vec<(Group1Key, wgpu::BindGroup)>,
+    /// Which of them this view draws with.
+    group1_now: usize,
+    /// Bound while there is no mirror picture.
+    no_mirror: (wgpu::TextureView, wgpu::TextureView),
+    /// The wind exposure mask over the nearest lake, and the mask version it holds.
+    shelter: wgpu::Texture,
+    shelter_version: u64,
     flows: Vec<FlowGpu>,
     falls: wgpu::RenderPipeline,
     fall_buffer: wgpu::Buffer,
@@ -473,6 +491,10 @@ struct PuddleWindow {
     since_upload: f32,
 }
 
+/// What a group 1 binds that changes from view to view: the scene copies and the mirror's
+/// picture (color, depth).
+type Group1Key = [wgpu::TextureView; 4];
+
 /// The water [`RenderFeature`]. Added by [`crate::WaterPlugin`].
 #[derive(Default)]
 pub struct WaterFeature {
@@ -482,6 +504,11 @@ pub struct WaterFeature {
     puddles: PuddleWindow,
     stats: FeatureStats,
     showers: Option<QueryState<(&'static GlobalTransform, &'static RainShower)>>,
+    /// This view is an extra one (a mirror's, a portal's, an inset): it draws the water as the
+    /// main view left it, without stepping the GPU simulations again.
+    extra_view: bool,
+    /// The lake mirror's picture this view samples (color, depth).
+    mirror: Option<(wgpu::TextureView, wgpu::TextureView)>,
 }
 
 fn create_texture(
@@ -713,6 +740,9 @@ impl WaterFeature {
                 },
                 tex(7, wgpu::TextureSampleType::Float { filterable: true }),
                 tex(8, wgpu::TextureSampleType::Float { filterable: true }),
+                tex(9, wgpu::TextureSampleType::Float { filterable: true }),
+                tex(10, wgpu::TextureSampleType::Depth),
+                tex(11, wgpu::TextureSampleType::Float { filterable: true }),
             ],
         });
         let group2_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -877,6 +907,26 @@ impl WaterFeature {
         );
         let detail = detail::DetailGpu::new(gpu);
         let surface = surface::SurfaceGpu::new(gpu);
+        let no_mirror = (
+            create_texture(device, "no mirror", 1, 1, gpu.formats.hdr)
+                .create_view(&Default::default()),
+            device
+                .create_texture(&wgpu::TextureDescriptor {
+                    label: Some("no mirror depth"),
+                    size: wgpu::Extent3d {
+                        width: 1,
+                        height: 1,
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: gpu.formats.depth,
+                    usage: wgpu::TextureUsages::TEXTURE_BINDING,
+                    view_formats: &[],
+                })
+                .create_view(&Default::default()),
+        );
         Gpu {
             body,
             flow,
@@ -896,7 +946,17 @@ impl WaterFeature {
             ripple_live: Vec::new(),
             ripple_heights: true,
             puddle_tex,
-            group1: None,
+            group1: Vec::new(),
+            group1_now: 0,
+            no_mirror,
+            shelter: create_texture(
+                device,
+                "water shelter",
+                crate::shelter::MASK_N as u32,
+                crate::shelter::MASK_N as u32,
+                wgpu::TextureFormat::R8Unorm,
+            ),
+            shelter_version: u64::MAX,
             flows: Vec::new(),
             falls,
             fall_buffer,
@@ -1094,7 +1154,7 @@ impl WaterFeature {
             );
             gpu.ripple_n = n;
             gpu.ripple_version = u64::MAX;
-            gpu.group1 = None;
+            gpu.group1.clear();
         }
         if gpu.ripple_heights != heights {
             gpu.ripple_heights = heights;
@@ -1438,7 +1498,7 @@ impl RenderFeature for WaterFeature {
 
     fn resize(&mut self, _gpu: &GpuShared, _width: u32, _height: u32) {
         if let Some(g) = &mut self.gpu {
-            g.group1 = None;
+            g.group1.clear();
         }
     }
 
@@ -1452,6 +1512,8 @@ impl RenderFeature for WaterFeature {
         self.bodies.clear();
         self.underwater = false;
         self.stats = FeatureStats::default();
+        self.extra_view = view.extra_view;
+        self.mirror = None;
         if self.gpu.is_none() {
             return;
         }
@@ -1488,8 +1550,57 @@ impl RenderFeature for WaterFeature {
         let surface_damping = world
             .get_resource::<crate::body::WaterSettings>()
             .map_or(0.05, |s| s.surface_damping);
+        // The lake mirror: in its own view the lake it reflects for isn't drawn; the main view
+        // samples its picture.
+        let lake = world
+            .get_resource::<crate::mirror::LakeMirror>()
+            .copied()
+            .unwrap_or_default();
+        // In the mirror's view: its lake, and every body level with it or below (puddles, a
+        // stream's mouth), which would stand in front of the reflected scene.
+        let hidden = lake
+            .entity
+            .filter(|e| engine_render::rendering_reflection(world) == Some(*e))
+            .and(lake.body);
+        let picture = lake
+            .entity
+            .filter(|_| !view.extra_view)
+            .and_then(|e| engine_render::planar_reflection_picture(world, e))
+            .cloned();
+        let shelter = world.get_resource::<crate::shelter::ShelterMask>();
+        let shelter_body = shelter.and_then(|m| m.body);
+        let shelter_place = shelter.map(|m| (m.corner, m.cell));
+        if let (Some(mask), Some(gpu)) = (shelter, self.gpu.as_mut())
+            && mask.version != gpu.shelter_version
+            && mask.exposure.len() == crate::shelter::MASK_N * crate::shelter::MASK_N
+        {
+            let n = crate::shelter::MASK_N as u32;
+            let bytes: Vec<u8> = mask
+                .exposure
+                .iter()
+                .map(|e| (e.clamp(0.0, 1.0) * 255.0).round() as u8)
+                .collect();
+            shared.queue.write_texture(
+                gpu.shelter.as_image_copy(),
+                &bytes,
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(n),
+                    rows_per_image: Some(n),
+                },
+                wgpu::Extent3d {
+                    width: n,
+                    height: n,
+                    depth_or_array_layers: 1,
+                },
+            );
+            gpu.shelter_version = mask.version;
+        }
 
         let state = water.0.read();
+        let hidden_below = hidden
+            .and_then(|e| state.bodies.iter().find(|b| b.entity == e))
+            .map(|b| b.center.y + 0.1);
         let gpu = self.gpu.as_mut().expect("checked above");
         let mut uniform = WaterUniform::zeroed();
 
@@ -1520,19 +1631,26 @@ impl RenderFeature for WaterFeature {
                 choppiness: 0.5,
             }
         };
-        gpu.detail.update(
-            shared,
-            Some(sea.unwrap_or_else(breeze)),
-            view.time,
-            view.delta,
-        );
+        if !view.extra_view {
+            gpu.detail.update(
+                shared,
+                Some(sea.unwrap_or_else(breeze)),
+                view.time,
+                view.delta,
+            );
+        }
         let tiles = gpu.detail.state.filter(|_| gpu.detail.active);
         let mut under: Option<(usize, f32)> = None;
+        let mut mirror_slot = None;
+        let mut shelter_slot = None;
         for &(_, i) in order.iter() {
             if self.bodies.len() >= MAX_BODIES {
                 break;
             }
             let b = &state.bodies[i];
+            if hidden_below.is_some_and(|y| b.center.y <= y) {
+                continue;
+            }
             let Some((mut body, draw)) = Self::body_uniform(b, view) else {
                 continue;
             };
@@ -1544,6 +1662,12 @@ impl RenderFeature for WaterFeature {
                 && cam.y > height - depth as f64 - 0.5
             {
                 under = Some((slot, (height - cam.y) as f32));
+            }
+            if lake.body == Some(b.entity) {
+                mirror_slot = Some(slot);
+            }
+            if shelter_body == Some(b.entity) {
+                shelter_slot = Some(slot);
             }
             uniform.bodies[slot] = body;
             self.bodies.push(draw);
@@ -1590,18 +1714,49 @@ impl RenderFeature for WaterFeature {
         let frame_wind = engine_core::math::Vec2::new(view.wind.x, view.wind.z);
         (g.detail, g.detail2) = gpu.detail.globals(frame_wind);
         let span = tracing::info_span!("water", name = "surface").entered();
-        gpu.surface.update(
-            shared,
-            &state.ripples,
-            state.shifts,
-            view.delta,
-            surface_damping,
-        );
+        if !view.extra_view {
+            gpu.surface.update(
+                shared,
+                &state.ripples,
+                state.shifts,
+                view.delta,
+                surface_damping,
+            );
+        }
         // The ripples' heights come from the dispersive surface while it runs.
         g.detail[3] = if gpu.surface.drawn() { 1.0 } else { 0.0 };
         if let Some((corner, size)) = gpu.surface.coarse_drawn() {
             let rel = view.relative(DVec3::new(corner.x, 0.0, corner.y));
             g.coarse = [rel.x, rel.z, size, 1.0];
+        }
+        // -2: no shelter at all (`WaterSettings::wind_shelter` off), not even slicks.
+        let sheltering = world
+            .get_resource::<crate::body::WaterSettings>()
+            .is_none_or(|s| s.wind_shelter);
+        g.shelter = [0.0, 0.0, 1.0, if sheltering { -1.0 } else { -2.0 }];
+        if let (Some((corner, cell)), Some(slot)) = (shelter_place, shelter_slot) {
+            let rel = view.relative(DVec3::new(corner.x, 0.0, corner.y));
+            g.shelter = [
+                rel.x,
+                rel.z,
+                cell * crate::shelter::MASK_N as f32,
+                slot as f32,
+            ];
+        }
+        g.mirror = [1.0, 1.0, 1.0, -1.0];
+        if let (Some(picture), Some(slot)) = (&picture, mirror_slot) {
+            g.mirror_vp = picture.view_proj_from(view.origin).to_cols_array_2d();
+            g.mirror = [
+                view.exposure / picture.exposure.max(1e-12),
+                picture.near,
+                picture.mips as f32,
+                slot as f32,
+            ];
+            g.mirror2 = view
+                .relative(picture.origin)
+                .extend((picture.plane_point.y - view.origin.y) as f32)
+                .to_array();
+            self.mirror = Some((picture.color.clone(), picture.depth.clone()));
         }
         if let Some((slot, depth)) = under {
             let b = &uniform.bodies[slot];
@@ -1619,7 +1774,9 @@ impl RenderFeature for WaterFeature {
         drop(span);
         let span = tracing::info_span!("water", name = "ripple upload").entered();
         let heights = !gpu.surface.drawn();
-        Self::upload_ripples(gpu, shared, &state, heights);
+        if !view.extra_view {
+            Self::upload_ripples(gpu, shared, &state, heights);
+        }
         drop(span);
         let span = tracing::info_span!("water", name = "flow upload").entered();
         Self::upload_flows(gpu, shared, &state, view);
@@ -1653,62 +1810,91 @@ impl RenderFeature for WaterFeature {
         let Some(gpu) = &mut self.gpu else {
             return;
         };
-        gpu.detail.dispatch(encoder);
-        gpu.surface.dispatch(encoder);
-        // Built again only when what it binds is made anew: the scene copies on resize, the
-        // ripple textures when the grid changes size (both clear it).
-        if gpu.group1.is_some() {
+        if !self.extra_view {
+            gpu.detail.dispatch(encoder);
+            gpu.surface.dispatch(encoder);
+        }
+        // Built again only when what it binds is made anew: the scene copies on resize and per
+        // view, the mirror's picture, the ripple textures when the grid changes size (which
+        // clears them all).
+        let (mirror, mirror_depth) = self.mirror.as_ref().unwrap_or(&gpu.no_mirror);
+        let key: Group1Key = [
+            ctx.scene_color_copy.clone(),
+            ctx.scene_depth_copy.clone(),
+            mirror.clone(),
+            mirror_depth.clone(),
+        ];
+        if let Some(i) = gpu.group1.iter().position(|(k, _)| *k == key) {
+            gpu.group1_now = i;
             return;
         }
         let ripple = gpu.ripple.create_view(&Default::default());
         let currents = gpu.currents.create_view(&Default::default());
         let puddle = gpu.puddle_tex.create_view(&Default::default());
-        gpu.group1 = Some(
-            ctx.gpu
-                .device
-                .create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some("water"),
-                    layout: &gpu.group1_layout,
-                    entries: &[
-                        wgpu::BindGroupEntry {
-                            binding: 0,
-                            resource: gpu.uniform.as_entire_binding(),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 1,
-                            resource: wgpu::BindingResource::TextureView(&ripple),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 2,
-                            resource: wgpu::BindingResource::TextureView(ctx.scene_color_copy),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 3,
-                            resource: wgpu::BindingResource::TextureView(ctx.scene_depth_copy),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 4,
-                            resource: wgpu::BindingResource::TextureView(&puddle),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 5,
-                            resource: wgpu::BindingResource::TextureView(&currents),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 6,
-                            resource: wgpu::BindingResource::TextureView(&gpu.detail.view),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 7,
-                            resource: wgpu::BindingResource::TextureView(gpu.surface.view()),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 8,
-                            resource: wgpu::BindingResource::TextureView(gpu.surface.coarse_view()),
-                        },
-                    ],
-                }),
-        );
+        let shelter = gpu.shelter.create_view(&Default::default());
+        let group = ctx
+            .gpu
+            .device
+            .create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("water"),
+                layout: &gpu.group1_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: gpu.uniform.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::TextureView(&ripple),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: wgpu::BindingResource::TextureView(ctx.scene_color_copy),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: wgpu::BindingResource::TextureView(ctx.scene_depth_copy),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 4,
+                        resource: wgpu::BindingResource::TextureView(&puddle),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 5,
+                        resource: wgpu::BindingResource::TextureView(&currents),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 6,
+                        resource: wgpu::BindingResource::TextureView(&gpu.detail.view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 7,
+                        resource: wgpu::BindingResource::TextureView(gpu.surface.view()),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 8,
+                        resource: wgpu::BindingResource::TextureView(gpu.surface.coarse_view()),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 9,
+                        resource: wgpu::BindingResource::TextureView(mirror),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 10,
+                        resource: wgpu::BindingResource::TextureView(mirror_depth),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 11,
+                        resource: wgpu::BindingResource::TextureView(&shelter),
+                    },
+                ],
+            });
+        // A few views at most (the main one, a mirror's, a portal's): drop the oldest.
+        if gpu.group1.len() >= 4 {
+            gpu.group1.remove(0);
+        }
+        gpu.group1.push((key, group));
+        gpu.group1_now = gpu.group1.len() - 1;
     }
 
     fn draw(&self, phase: RenderPhase, pass: &mut wgpu::RenderPass<'_>, _ctx: &FrameContext) {
@@ -1718,7 +1904,7 @@ impl RenderFeature for WaterFeature {
         let Some(gpu) = &self.gpu else {
             return;
         };
-        let Some(group1) = &gpu.group1 else {
+        let Some((_, group1)) = gpu.group1.get(gpu.group1_now) else {
             return;
         };
         pass.set_bind_group(1, group1, &[]);
@@ -1795,8 +1981,12 @@ mod tests {
 
     #[test]
     fn uniform_layout_matches_the_shader() {
-        // WGSL: Globals 10 vec4 + 4 showers + 8 plunges; GpuBody 11 vec4 + 24 waves of 2 vec4.
-        assert_eq!(std::mem::size_of::<Globals>(), (10 + 4 + 8) * 16);
+        // WGSL: Globals 10 vec4 + 4 showers + 8 plunges + the mirror's matrix and 2 vec4 +
+        // the shelter mask's; GpuBody 11 vec4 + 24 waves of 2 vec4.
+        assert_eq!(
+            std::mem::size_of::<Globals>(),
+            (10 + 4 + 8 + 4 + 2 + 1) * 16
+        );
         assert_eq!(std::mem::size_of::<GpuBody>(), (11 + MAX_WAVES * 2) * 16);
         assert_eq!(
             std::mem::size_of::<WaterUniform>(),

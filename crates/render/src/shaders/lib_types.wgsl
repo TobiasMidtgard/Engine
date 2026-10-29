@@ -63,6 +63,7 @@ struct Frame {
     gi_volume: vec4<f32>,          // probe GI (probe_gi/mod.rs): the grid's first probe relative to the camera xyz, spacing (m)
     gi_size: vec4<f32>,            // probes along x, y, z; w = indirect light's share where probes cover (0 = off)
     gi_grid: vec4<f32>,            // storage slot of the grid's first probe along x, y, z (scrolling); w = the probes' epoch (0 = off)
+    clip_plane: vec4<f32>,         // a mirror's view (planar_reflection.rs): camera-relative plane n.xyz, d; kept where dot(n, rel) + d >= 0 (0 = none)
 };
 
 // An indoor space (`SkyLightVolume`): sky light comes in only through its open faces.

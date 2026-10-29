@@ -26,7 +26,7 @@ use engine_water::state::SharedWater;
 use engine_world::physics::{
     ColliderShape, Hit, PhysicsQueries, PhysicsQuery, QueryFilter, RigidBody,
 };
-use engine_world::{SurfaceId, WorldPlugin};
+use engine_world::{Ground, GroundQuery, GroundSample, SurfaceId, WorldPlugin};
 
 /// The crate in the stream: its middle on the ground (world), half its size.
 struct Crate {
@@ -114,6 +114,32 @@ impl PhysicsQuery for CrateQueries {
     }
 }
 
+/// The test area's hill as the world's ground, as a world's terrain carries it in the
+/// showcase (`demo::area_height`): what wets, shelters and beds on it sees the real shape.
+struct AreaGround;
+
+impl GroundQuery for AreaGround {
+    fn sample(&self, p: DVec3) -> Option<GroundSample> {
+        let h = |x: f64, z: f64| demo::area_height(x as f32, z as f32);
+        let (x, z) = (p.x, p.z);
+        let normal = Vec3::new(
+            h(x - 0.25, z) - h(x + 0.25, z),
+            0.5,
+            h(x, z - 0.25) - h(x, z + 0.25),
+        )
+        .normalize();
+        Some(GroundSample {
+            height: h(x, z) as f64,
+            normal,
+            surface: SurfaceId(3),
+        })
+    }
+
+    fn height(&self, p: DVec3) -> Option<f64> {
+        Some(demo::area_height(p.x as f32, p.z as f32) as f64)
+    }
+}
+
 /// (key, eye, target), local to the test area's center.
 const VIEWS: &[(&str, [f64; 3], [f64; 3])] = &[
     ("overview", [62.0, 18.0, 66.0], [0.0, 4.0, 0.0]),
@@ -137,6 +163,10 @@ const VIEWS: &[(&str, [f64; 3], [f64; 3])] = &[
     ("pools", [36.8, 20.0, -40.9], [21.0, 5.5, -24.0]),
     ("pools_near", [-5.6, 10.0, -39.6], [18.0, 5.0, -31.2]),
     ("pools_dark", [40.0, 10.0, 1.4], [29.1, 5.0, -21.2]),
+    // The tarn as a mirror: from the end of the jetty across to the crag, low over the water
+    // from the far shore, and the crag's foot from the cove.
+    ("jetty", [4.6, 7.4, 18.0], [-14.0, 8.0, -20.0]),
+    ("grazing", [-27.0, 6.4, 12.0], [18.0, 7.0, -6.0]),
 ];
 
 fn main() {
@@ -164,6 +194,7 @@ fn main() {
             step_secs: 1.0 / 30.0,
         });
     app.add_plugins((RenderPlugin, WorldPlugin, WaterPlugin));
+    app.world.insert_resource(Ground(Arc::new(AreaGround)));
     app.world
         .resource_mut::<engine_water::WaterSettings>()
         .cpu_surface = true;
@@ -324,6 +355,19 @@ fn main() {
             let path = format!("{out}/heights.png");
             img.save(&path).expect("heights image");
             eprintln!("{path}");
+        }
+    }
+    // The wind's reach over the tarn (black: sheltered, white: open), north up.
+    {
+        let mask = app.world.resource::<engine_water::shelter::ShelterMask>();
+        if mask.exposure.len() == engine_water::shelter::MASK_N.pow(2) {
+            let n = engine_water::shelter::MASK_N as u32;
+            let img = image::GrayImage::from_fn(n, n, |i, j| {
+                image::Luma([(mask.exposure[(j * n + i) as usize] * 255.0) as u8])
+            });
+            let path = format!("{out}/shelter.png");
+            img.save(&path).expect("shelter image");
+            eprintln!("{path} (wind toward {:?})", mask.wind_dir);
         }
     }
     app.world.resource_mut::<Schedules>().insert(render);

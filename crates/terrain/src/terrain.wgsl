@@ -1171,8 +1171,18 @@ fn vs_prepass(in: VertexIn) -> PrepassOut {
     return out;
 }
 
+// Under a planar reflection's plane, in its view (a lake mirror, `engine_render::planar_reflection`):
+// cut away, or the lake bed would stand in front of the reflected scene. Other views have a zero
+// plane and skip the test.
+fn under_mirror(rel: vec3<f32>) -> bool {
+    return any(frame.clip_plane != vec4<f32>(0.0)) && clip_plane_distance(rel) < 0.0;
+}
+
 @fragment
 fn fs_prepass(in: PrepassOut) -> PrepassOutput {
+    if (under_mirror(in.rel)) {
+        discard;
+    }
     // Rain from the surface layers (or the weather where they don't reach), standing water and
     // prints, pooled the way the scene pass pools them (without the material detail).
     let layers = surface_layers(in.rel);
@@ -1596,6 +1606,9 @@ fn fill_low(amount: f32, height: f32) -> f32 {
 
 @fragment
 fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
+    if (under_mirror(in.rel)) {
+        discard;
+    }
     let planet = planets[in.planet];
     let up = normalize(in.up);
     let n_geo = normalize(in.normal);

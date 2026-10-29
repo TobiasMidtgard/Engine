@@ -591,10 +591,22 @@ pub struct WaterSettings {
     /// headless server whose boats should ride the same Kelvin wakes, a gallery that
     /// simulates without drawing. A few milliseconds a step; off by default.
     pub cpu_surface: bool,
+    /// Calm lakes and pools near the camera reflect through a planar reflection (an extra view
+    /// of the scene mirrored in the water: off-screen mountains, boats' undersides), not
+    /// screen-space reflections alone ([`crate::mirror`]).
+    pub mirror_reflections: bool,
+    /// The mirror's picture against the pixels the water covers on screen (0.05..2).
+    pub mirror_resolution: f32,
+    /// The wind roughens a lake only where it reaches the water: calm in the lee of banks and
+    /// crags, rougher downwind ([`crate::shelter`]).
+    pub wind_shelter: bool,
 }
 
 impl Default for WaterSettings {
     fn default() -> Self {
+        // `ENGINE_WATER_PLAIN_LAKE` set: lakes as before round 26 (no mirror, no shelter), for
+        // before shots.
+        let lake = std::env::var_os("ENGINE_WATER_PLAIN_LAKE").is_none();
         Self {
             ripple_cells: 256,
             ripple_cell_m: 0.25,
@@ -610,6 +622,9 @@ impl Default for WaterSettings {
             wet_shores: true,
             noise_events: true,
             cpu_surface: false,
+            mirror_reflections: lake,
+            mirror_resolution: 0.5,
+            wind_shelter: lake,
         }
     }
 }

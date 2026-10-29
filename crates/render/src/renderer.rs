@@ -1068,6 +1068,7 @@ impl Renderer {
     fn render_extra_views(&mut self, world: &mut World) -> Vec<Composite> {
         self.main_thread_submit_ms = 0.0;
         crate::portal::place_portal_views(world);
+        crate::planar_reflection::place_reflection_views(world);
         let mut views: Vec<_> = world
             .query::<(
                 Entity,
@@ -1075,9 +1076,10 @@ impl Renderer {
                 &crate::ExtraView,
                 Option<&crate::Viewport>,
                 Option<&crate::portal::PortalCamera>,
+                Option<&crate::planar_reflection::MirrorCamera>,
             )>()
             .iter(world)
-            .map(|(e, camera, extra, viewport, portal)| {
+            .map(|(e, camera, extra, viewport, portal, mirror)| {
                 (
                     e,
                     camera.order,
@@ -1085,6 +1087,7 @@ impl Renderer {
                     extra.clone(),
                     viewport.copied(),
                     portal.copied(),
+                    mirror.copied(),
                 )
             })
             .collect();
@@ -1108,10 +1111,12 @@ impl Renderer {
             .unwrap_or(self.targets.window);
         let mut composites = Vec::new();
         let mut gpu_ms = 0.0;
-        for (camera, _, _, extra, viewport, portal) in views {
-            let (origin, size, image) = match (&extra.target, portal) {
-                // A portal's view: the portal feature draws its picture.
-                (_, Some(portal)) => (None, portal.size.max(UVec2::ONE), None),
+        for (camera, _, _, extra, viewport, portal, mirror) in views {
+            let off_screen = portal.map(|p| p.size).or(mirror.map(|m| m.size));
+            let (origin, size, image) = match (&extra.target, off_screen) {
+                // A portal's or a mirror's view: the portal feature draws its picture, features
+                // sample a mirror's.
+                (_, Some(size)) => (None, size.max(UVec2::ONE), None),
                 (crate::ViewTarget::Window, None) => {
                     let (origin, size) = viewport.unwrap_or_default().within(window);
                     (Some(origin), size, None)
@@ -1161,7 +1166,31 @@ impl Renderer {
                 swap_quality(world, quality);
             }
             let exposure = frame.view.exposure;
+            let mirror_view = (
+                frame.view.unjittered_view_proj,
+                frame.view.origin,
+                frame.view.exposure,
+            );
             self.record_submit(frame);
+            if let Some(mirror) = mirror {
+                let mut encoder =
+                    self.shared
+                        .device
+                        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                            label: Some("planar reflection"),
+                        });
+                crate::planar_reflection::keep_picture(
+                    world,
+                    &self.shared,
+                    &mut encoder,
+                    &mirror,
+                    camera,
+                    &self.targets.hdr.texture,
+                    &self.targets.depth.view,
+                    mirror_view,
+                );
+                self.shared.queue.submit([encoder.finish()]);
+            }
             if let Some(portal) = portal {
                 world
                     .get_resource_or_init::<crate::portal::PortalPictures>()

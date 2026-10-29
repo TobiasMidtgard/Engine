@@ -52,6 +52,13 @@
 // Multiply final radiance by this before writing to the HDR target.
 fn pre_expose(c: vec3<f32>) -> vec3<f32> { return c * frame.exposure.x; }
 
+// Signed distance of camera-relative `rel` from the view's clip plane (a mirror's view, see
+// `planar_reflection.rs`): fragments below 0 are discarded (the mesh shaders' prepass and
+// scene pass). 0 everywhere when there is none.
+fn clip_plane_distance(rel: vec3<f32>) -> f32 {
+    return dot(frame.clip_plane.xyz, rel) + frame.clip_plane.w;
+}
+
 // Approximate world position (f32). Use camera-relative positions for precision-sensitive work.
 fn world_pos(rel: vec3<f32>) -> vec3<f32> { return rel + frame.camera_world.xyz; }
 

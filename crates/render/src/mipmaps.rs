@@ -57,6 +57,27 @@ impl MipGenerator {
     /// `format` (its own format or an sRGB alias); the commands go with the next frame's submit,
     /// after the uploads queued before it.
     pub fn generate(&self, gpu: &GpuShared, texture: &wgpu::Texture, format: wgpu::TextureFormat) {
+        if texture.mip_level_count() < 2 {
+            return;
+        }
+        let mut encoder = gpu
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("mip chain"),
+            });
+        self.record(gpu, &mut encoder, texture, format);
+        gpu.submit_with_frame(encoder.finish(), None);
+    }
+
+    /// Like [`generate`](Self::generate), recorded into `encoder` (for a chain needed before
+    /// the next frame's submit).
+    pub fn record(
+        &self,
+        gpu: &GpuShared,
+        encoder: &mut wgpu::CommandEncoder,
+        texture: &wgpu::Texture,
+        format: wgpu::TextureFormat,
+    ) {
         let levels = texture.mip_level_count();
         if levels < 2 {
             return;
@@ -65,9 +86,6 @@ impl MipGenerator {
         let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let inner = guard.get_or_insert_with(|| Inner::new(device));
         let pipeline = inner.pipeline(device, format);
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("mip chain"),
-        });
         let view = |level: u32| {
             texture.create_view(&wgpu::TextureViewDescriptor {
                 label: Some("mip level"),
@@ -110,8 +128,6 @@ impl MipGenerator {
             pass.set_bind_group(0, &group, &[]);
             pass.draw(0..3, 0..1);
         }
-        drop(guard);
-        gpu.submit_with_frame(encoder.finish(), None);
     }
 }
 

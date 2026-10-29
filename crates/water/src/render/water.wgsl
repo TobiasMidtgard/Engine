@@ -46,6 +46,10 @@ struct Globals {
     detail2: vec4<f32>,  // fine waves: tiles' wind direction x, z; on (1/0), unused
     plunges: array<vec4<f32>, 8>, // where falls land: foot rel camera xyz, boil radius (m)
     coarse: vec4<f32>,   // dispersive ripples' coarse level: corner rel camera x, z, size (m), drawn (1/0)
+    mirror_vp: mat4x4<f32>, // the lake mirror's picture: view-projection of camera-relative points
+    mirror: vec4<f32>,   // its exposure / ours, near plane (m), mips, body slot (-1 none)
+    mirror2: vec4<f32>,  // the mirrored eye rel camera xyz, the plane's y rel camera
+    shelter: vec4<f32>,  // wind exposure mask (crate::shelter): corner rel camera x, z, size (m), body slot (-1 none)
 };
 
 struct WaterUniform {
@@ -62,6 +66,12 @@ struct WaterUniform {
 @group(1) @binding(6) var detail_tex: texture_2d_array<f32>; // fine waves, per tile: (dh/dx, dh/dz, h, Jacobian), (moments, foam)
 @group(1) @binding(7) var surface_tex: texture_2d<f32>;     // dispersive ripples on the ripple grid: height, dh/dx, dh/dz
 @group(1) @binding(8) var coarse_tex: texture_2d<f32>;      // their long waves, on a grid 4 times larger: the same
+@group(1) @binding(9) var mirror_tex: texture_2d<f32>;      // the lake mirror's picture: pre-exposed HDR, mip chain
+@group(1) @binding(10) var mirror_depth: texture_depth_2d;  // its depth (reverse-Z, near / view depth)
+@group(1) @binding(11) var shelter_tex: texture_2d<f32>;    // wind exposure over the nearest lake: 0 lee .. 1 open
+
+// The body being shaded reflects through the lake mirror (set by fs_body).
+var<private> use_mirror: bool = false;
 
 struct FlowGpu {
     origin: vec4<f32>,  // corner rel camera x, base y, z, cell (m)
@@ -399,6 +409,30 @@ fn gusts(p: vec2<f32>, wind_dir: vec2<f32>, wind: f32) -> f32 {
     return 0.35 + 1.3 * smoothstep(0.3, 0.75, gust);
 }
 
+// How much of the wind reaches body `bi`'s water at camera-relative `rel` (crate::shelter):
+// 0 in the lee of its banks and crags .. 1 in the open.
+fn shelter_at(bi: u32, rel: vec3<f32>) -> f32 {
+    let s = water.g.shelter;
+    if (i32(bi) != i32(s.w)) { return 1.0; }
+    let uv = (rel.xz - s.xy) / s.z;
+    if (any(uv < vec2<f32>(0.0)) || any(uv > vec2<f32>(1.0))) { return 1.0; }
+    return textureSampleLevel(shelter_tex, linear_clamp, uv, 0.0).r;
+}
+
+// Natural slicks (0..1): below about 4 m/s, films of surfactant (algae, pollen) damp the short
+// waves in smooth bands and patches drawn out downwind, which drift with the breeze (EPFL's
+// Lake Geneva slicks); a stronger wind tears them up.
+fn slicks(p: vec2<f32>, wind_dir: vec2<f32>, wind: f32) -> f32 {
+    let calm = 1.0 - smoothstep(2.5, 4.5, wind);
+    if (calm <= 0.0) { return 0.0; }
+    let across = vec2<f32>(-wind_dir.y, wind_dir.x);
+    let drift = time_s() * 0.08;
+    let q = vec2<f32>(dot(p, wind_dir) * 0.025 - drift * 0.025, dot(p, across) * 0.09);
+    let warp = value_noise2(p * 0.05 + vec2<f32>(4.1, 9.3)) * 2.0;
+    let bands = value_noise2(q + vec2<f32>(warp, 0.0)) * 0.7 + value_noise2(q * 2.7 + vec2<f32>(1.3, 6.1)) * 0.3;
+    return smoothstep(0.52, 0.66, bands) * calm;
+}
+
 // Small wind ripples (capillary waves): gradient (dh/dx, dh/dz) of short analytic waves
 // spread around the wind direction. `wind` m/s; waves shorter than a few pixels of `fp` (along
 // their direction) fade out instead of shimmering.
@@ -511,6 +545,67 @@ fn backscatter(look: WaterLook, rel: vec3<f32>, depth_below: f32, extra_bb: f32,
     return r * e * PI * SCATTER_GAIN;
 }
 
+// Where the mirror's picture shows camera-relative point `p`: uv and view depth.
+fn mirror_uv(p: vec3<f32>) -> vec3<f32> {
+    let c = water.g.mirror_vp * vec4<f32>(p, 1.0);
+    let w = max(c.w, 1e-4);
+    return vec3<f32>(c.x / w * 0.5 + 0.5, 0.5 - c.y / w * 0.5, c.w);
+}
+
+// The lake mirror (crate::mirror, engine_render::PlanarReflection): the scene rendered from the
+// eye mirrored in the lake's plane, so every point of the plane shows what a flat mirror there
+// reflects, the crag above the screen's top edge and boats' undersides included. Looks up what
+// lies along the reflected ray `r` from surface point `rel`, blurred by the GGX lobe of
+// perceptual roughness `rough`. Returns (pre-exposed color, weight): 0 off the picture, or where
+// the picture holds something under the plane (a post's foot, a swimmer's legs), which the
+// mirrored view can't clip without an oblique near plane.
+fn mirror_reflection(rel: vec3<f32>, r: vec3<f32>, rough: f32) -> vec4<f32> {
+    let m = water.g.mirror;
+    let eye = water.g.mirror2.xyz;
+    let plane = water.g.mirror2.w;
+    let size = vec2<f32>(textureDimensions(mirror_depth));
+    // The flat mirror's ray through this point (the waves are centimeters on a calm lake), and
+    // how far beyond the plane it meets something, from the picture's depth there (the sky: far).
+    let p = vec3<f32>(rel.x, plane, rel.z);
+    let s0 = mirror_uv(p);
+    if (any(s0.xy < vec2<f32>(0.0)) || any(s0.xy > vec2<f32>(1.0))) { return vec4<f32>(0.0); }
+    let d0 = textureLoad(mirror_depth, vec2<i32>(min(s0.xy * size, size - 1.0)), 0);
+    var hit = 4000.0;
+    if (d0 > 0.0) {
+        hit = clamp((m.y / d0 - s0.z) / s0.z * length(p - eye), 0.0, 4000.0);
+    }
+    // Something under the plane (a post's foot, a hull) stands in the flat ray's way.
+    let flat_ok = d0 <= 0.0 || m.y / d0 > s0.z - 0.05;
+    // The waves tilt the ray: look up what lies that far along the tilted one, where the
+    // mirrored eye sees it (parallax-correct for small tilts, unlike a fixed uv offset).
+    let q = p + r * hit;
+    var s = mirror_uv(q);
+    if (s.z <= 1e-3) { return vec4<f32>(0.0); }
+    // Tilted past the picture's margin: its edge holds about what lies there (mostly sky),
+    // trusted less the farther out.
+    let edge = min(min(s.x, s.y), min(1.0 - s.x, 1.0 - s.y));
+    s = vec3<f32>(clamp(s.xy, vec2<f32>(0.0), vec2<f32>(1.0)), s.z);
+    // What the picture holds there must lie beyond the plane: its ray meets the plane at the
+    // fraction f of the way from the mirrored eye to q.
+    // If the tilted ray's is (the shore's slope under the water, seen along a grazing ray),
+    // the flat mirror's ray stands in for it.
+    let texel = vec2<i32>(min(s.xy * size, size - 1.0));
+    let d = textureLoad(mirror_depth, texel, 0);
+    let f = saturate((plane - eye.y) / max(q.y - eye.y, 1e-4));
+    if (d > 0.0 && m.y / d < s.z * f - 0.05) {
+        if (!flat_ok) { return vec4<f32>(0.0); }
+        s = vec3<f32>(s0.xy, s.z);
+    }
+    // Blur: the lobe's width where the ray ends, as the picture sees it, picks the mip.
+    let a = rough * rough;
+    let side = normalize(cross(r, vec3<f32>(0.0, 1.0, 0.0)) + vec3<f32>(1e-4, 0.0, 0.0));
+    let s2 = mirror_uv(q + side * max(hit, 0.05) * a);
+    let blur = length((s2.xy - s.xy) * size);
+    let lod = clamp(log2(max(blur, 1.0)), 0.0, m.z - 1.0);
+    let color = textureSampleLevel(mirror_tex, linear_clamp, s.xy, lod).rgb * m.x;
+    return vec4<f32>(color, 1.0 - smoothstep(0.0, 0.25, -edge));
+}
+
 // Screen-space reflection: march the reflected ray against the scene depth copy.
 // Returns (pre-exposed color, confidence).
 fn trace_reflection(rel: vec3<f32>, r: vec3<f32>, size: vec2<f32>, roughness: f32) -> vec4<f32> {
@@ -586,6 +681,9 @@ fn streak_foam(wp: vec2<f32>, vel: vec2<f32>) -> f32 {
     return 0.47 + (sum - 0.47) * inverseSqrt(f * f + (1.0 - f) * (1.0 - f));
 }
 
+// Water this deep (m) over whatever lies right behind it froths against it (`contact`).
+const CONTACT_M: f32 = 0.12;
+
 // Full water surface shading seen from above. `n` world normal, `foam` 0..1, `crest` 0..1 how
 // high on a wave this point is, `wind` m/s. Returns pre-exposed radiance with fog applied.
 // `edge` is how deep the water gets before the waterline is fully drawn, meters.
@@ -618,8 +716,16 @@ fn shade_water(rel: vec3<f32>, n_in: vec3<f32>, look: WaterLook, foam_in: f32, c
     // Water depth straight below this point, from the ground seen through it: the waterline
     // fades in over a few centimeters instead of showing the mesh edge.
     var shoreline = 1.0;
+    var contact = 0.0;
     if (rel.y < 0.0 && z0 < 1e5) {
-        shoreline = smoothstep(0.0, edge, -rel.y * max(z0 / z_frag - 1.0, 0.0));
+        let d_behind = -rel.y * max(z0 / z_frag - 1.0, 0.0);
+        shoreline = smoothstep(0.0, edge, d_behind);
+        // Contact: where something crosses the surface (a post, a hull, a stone, the beach),
+        // the water froths in a thin ragged ring against it (depth-difference foam, as Crest
+        // and most AAA water do): the "it touches the water" cue.
+        let wp = tiling_pos(rel).xz;
+        let ragged = 0.5 + value_noise2(wp * 3.1 + vec2<f32>(time_s() * 0.25, 0.0));
+        contact = 1.0 - smoothstep(0.0, CONTACT_M * ragged, d_behind);
     }
     let nv = (frame.view * vec4<f32>(n, 0.0)).xyz;
     let strength = look.refraction * 0.05 * saturate(thick0 * 0.7) * min(1.0, 12.0 / z_frag);
@@ -666,8 +772,15 @@ fn shade_water(rel: vec3<f32>, n_in: vec3<f32>, look: WaterLook, foam_in: f32, c
     let fill = frame.ambient.rgb;
     let env = (mix(sample_env(r), sky_ambient(r), saturate(rough * 1.5)) - fill) * sky_vis + fill;
     var refl = pre_expose(env);
-    let ssr = trace_reflection(rel, r, size, rough);
-    refl = mix(refl, ssr.rgb, ssr.a);
+    // The lake mirror where it has the answer; screen-space reflections, then the sky, where
+    // it doesn't.
+    var mirrored = vec4<f32>(0.0);
+    if (use_mirror) { mirrored = mirror_reflection(rel, r, rough); }
+    if (mirrored.a < 0.999) {
+        let ssr = trace_reflection(rel, r, size, rough);
+        refl = mix(refl, ssr.rgb, ssr.a);
+    }
+    refl = mix(refl, mirrored.rgb, mirrored.a);
 
     // ---- sun glitter
     let l = frame.sun_dir.xyz;
@@ -708,7 +821,7 @@ fn shade_water(rel: vec3<f32>, n_in: vec3<f32>, look: WaterLook, foam_in: f32, c
     }
 
     // ---- foam: whitecaps, wakes, splashes, shoreline
-    var foam = foam_in;
+    var foam = foam_in + contact * 0.45;
     let shore = 1.0 - smoothstep(0.0, max(shore_depth, 1e-4), depth_below);
     if (thick < 1e5 && shore_depth > 0.0) {
         let wp = tiling_pos(rel).xz;
@@ -810,14 +923,31 @@ fn vs_body(@builtin(vertex_index) vid: u32, @builtin(instance_index) bi: u32) ->
 @fragment
 fn fs_body(in: BodyOut) -> @location(0) vec4<f32> {
     let bi = in.body;
-    if (body_inset(bi, body_local(bi, in.rest)) < 0.0) { discard; }
+    // Under a lake mirror's plane, in its view (`clip_plane_distance` is 0 elsewhere).
+    if (body_inset(bi, body_local(bi, in.rest)) < 0.0 || clip_plane_distance(in.rel) < 0.0) { discard; }
+    use_mirror = i32(bi) == i32(water.g.mirror.w);
     let look = body_look(bi);
     let dist = length(in.rel);
     // Size of a pixel here, meters: drop detail finer than that.
     let pixel = pixel_footprint(in.rel);
     let depth = body_depth(bi, in.rest);
     let w = eval_waves(bi, in.p0, depth, pixel * 3.0);
-    var n = w.normal;
+    let wind = water.bodies[bi].bed.z;
+    let wp = tiling_pos(in.rel).xz;
+    let wind_dir = normalize(water.bodies[bi].wind.xy + vec2<f32>(1e-4, 0.0));
+    // How much wind reaches the water here: the lee of the banks and the crag lies calm, and
+    // the breeze touches down there only in its strongest gusts (cat's paws). Where it stays
+    // under about 4 m/s, slicks smooth the short waves in bands. Only the wind's own waves
+    // calm down: wakes, rings and swell come through.
+    let exposure = shelter_at(bi, in.rel);
+    let g0 = gusts(wp, wind_dir, wind);
+    let touch = smoothstep(1.15, 1.6, g0);
+    let reach = max(exposure, touch * 0.7);
+    let sheltering = water.g.shelter.w > -1.5;
+    let film = select(0.0, slicks(wp, wind_dir, wind * reach), sheltering);
+    let calm = select(1.0, reach * (1.0 - 0.85 * film), sheltering);
+    let tilt = mix(0.2, 1.0, calm);
+    var n = normalize(vec3<f32>(w.normal.x * tilt, w.normal.y, w.normal.z * tilt));
     var foam = 0.0;
     var vel = water.bodies[bi].wind.zw;
     var bubbles = 0.0;
@@ -830,18 +960,15 @@ fn fs_body(in: BodyOut) -> @location(0) vec4<f32> {
         vel += cur.xy;
         bubbles = cur.w;
     }
-    let wind = water.bodies[bi].bed.z;
-    let wp = tiling_pos(in.rel).xz;
-    let wind_dir = normalize(water.bodies[bi].wind.xy + vec2<f32>(1e-4, 0.0));
-    // The fine waves, roughened in gusts.
+    // The fine waves, roughened in gusts, calmed in the lee and the slicks.
     let bd = water.bodies[bi].detail;
     let fine = detail_at(wp, bd.x, bd.yz, footprint(in.rel));
-    let gust = gusts(wp, wind_dir, wind);
+    let gust = g0 * calm;
     // Whitecaps where the waves pinch (the long waves and the fine ones riding them), and the
     // foam the fine ones leave as they break, thinning.
     let jac = in.jac - fine.squeeze * gust;
-    foam += saturate((0.55 - jac) * 2.5) * saturate((wind - 4.0) * 0.25);
-    foam += fine.foam * saturate(bd.x) * saturate((wind - 5.0) * 0.2) * 0.6;
+    foam += saturate((0.55 - jac) * 2.5) * saturate((wind * reach - 4.0) * 0.25);
+    foam += fine.foam * saturate(bd.x) * saturate((wind * reach - 5.0) * 0.2) * 0.6;
     // In a strong wind the crests break all over, in patches too small and quick for the waves
     // above to pinch: about 3.84e-6·U^3.41 of the sea is white (Monahan), the breakers drawn
     // out downwind. The wind drags the surface along at about 3% of its speed, so foam streaks
@@ -871,7 +998,7 @@ fn fs_body(in: BodyOut) -> @location(0) vec4<f32> {
     var g = fine.grad * gust * slick;
     // What the pixel can't resolve roughens it: waves faded for being too short to draw, fine
     // waves averaged away by the mips, and ripples under 2 cm.
-    let slope_var = w.slope_var + (fine.variance * gust * gust + bd.w) * slick * slick;
+    let slope_var = w.slope_var * tilt * tilt + (fine.variance * gust * gust + bd.w * calm * calm) * slick * slick;
     g += rain_gradient(wp, rain_at(in.rest), saturate(1.0 - pixel / 0.02));
     let boil = plunge_boil(in.rel);
     foam += boil.x;
@@ -939,6 +1066,7 @@ fn vs_flow(@builtin(vertex_index) vid: u32) -> FlowOut {
 
 @fragment
 fn fs_flow(in: FlowOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
+    if (clip_plane_distance(in.rel) < 0.0) { discard; }
     // Where the surface drops more than its width in one cell, and at least half a meter
     // (`FALL_SLOPE`, `FALL_LEAST_DROP`), the water falls free: the curtain (`fs_falls`) draws
     // it, not the grid's steep triangles.
@@ -1385,6 +1513,7 @@ fn vs_puddle(@builtin(vertex_index) vid: u32) -> PuddleOut {
 
 @fragment
 fn fs_puddle(in: PuddleOut) -> @location(0) vec4<f32> {
+    if (clip_plane_distance(in.rel) < 0.0) { discard; }
     let wp = tiling_pos(in.rel).xz;
     // Water fills the low spots first: a noise "micro-relief" decides where the edge runs.
     let relief = fbm2(wp * 0.9, 4);
