@@ -7,6 +7,7 @@
 //! | [`SurfaceLayers`] | weather (rain/snow), water, fire (scorch) | render (wet/snow shading), footsteps, fire, foliage, vehicles (grip) |
 //! | [`HeatField`]     | `engine_fire` (and explosions) | weather (convection), foliage, NPC AI, smoke |
 //! | [`FarCloudLayer`] | `engine_space` (cloud tops seen from high up) | weather (fades its volumetric clouds where the far layer takes over) |
+//! | [`CloudCoverMap`] | `engine_weather` (its cloud map's coverage) | space (the cloud shell's tops over the weather's window) |
 //!
 //! Fields cover a window around the [`crate::FocusPoints`] (the player/camera) and
 //! re-center as it moves. Outside the window, sampling falls back to the global
@@ -14,6 +15,7 @@
 
 use engine_core::math::{DVec2, DVec3, Vec3};
 use engine_core::prelude::*;
+use std::sync::Arc;
 
 use crate::grid::{Grid2, Grid3};
 
@@ -338,6 +340,104 @@ impl FarCloudLayer {
         let t = ((ground_distance_m - self.inner_m) / span).clamp(0.0, 1.0);
         let handed_over = t * t * (3.0 - 2.0 * t);
         1.0 - self.weight.clamp(0.0, 1.0) * handed_over
+    }
+}
+
+/// Where the clouds are around the focus: the cloud cover the near (volumetric) clouds are carved
+/// from, so a far layer drawn by another module (space's cloud shell) puts its clouds in the
+/// same places instead of a pattern of its own. One map drives every cloud drawn, as in
+/// Horizon Zero Dawn's Nubis or Flight Simulator's weather grid.
+///
+/// A square of `size` × `size` cells of `cell_m` on world X/Z, laid out from `origin` (the
+/// minimum corner), rows along +Z. The pattern drifts with the wind: what the map holds at
+/// point `p` is now at `p + drift_m`, so read the cover at `q` from `q - drift_m`
+/// ([`CloudCoverMap::cover_at`] does). The writer inserts the resource while it draws clouds,
+/// rebuilds it after world shifts (in `PostUpdate`, after `WorldShiftSet::Apply`) and bumps
+/// `revision` whenever `coverage` changes; `drift_m` moves every frame without a new
+/// revision. Without the resource, readers draw as they would with no weather.
+#[derive(Resource, Debug, Clone, PartialEq)]
+pub struct CloudCoverMap {
+    /// World X/Z of the map's minimum corner (texel 0's outer corner), meters.
+    pub origin: DVec2,
+    /// Cell size, meters.
+    pub cell_m: f32,
+    /// Cells per side.
+    pub size: u32,
+    /// Cover per cell, 0..255 for 0..1, `size * size` of them, rows along +Z.
+    pub coverage: Arc<[u8]>,
+    /// How far the pattern has moved since the map was built (world X/Z, meters).
+    pub drift_m: DVec2,
+    /// Cover beyond the map, 0..1.
+    pub background: f32,
+    /// Increases whenever `coverage`, `origin` or the layout changes (re-upload then).
+    pub revision: u64,
+}
+
+impl Default for CloudCoverMap {
+    fn default() -> Self {
+        Self {
+            origin: DVec2::ZERO,
+            cell_m: 1000.0,
+            size: 0,
+            coverage: Arc::from([]),
+            drift_m: DVec2::ZERO,
+            background: 0.0,
+            revision: 0,
+        }
+    }
+}
+
+impl CloudCoverMap {
+    /// Cover (0..1) at world X/Z `p` now, bilinear between cell centers, `background` beyond
+    /// the map.
+    pub fn cover_at(&self, p: DVec2) -> f32 {
+        let n = self.size as usize;
+        if n == 0 || self.coverage.len() < n * n {
+            return self.background;
+        }
+        let f = (p - self.drift_m - self.origin) / self.cell_m as f64 - DVec2::splat(0.5);
+        let span = n as f64;
+        if f.x < -0.5 || f.y < -0.5 || f.x > span - 0.5 || f.y > span - 0.5 {
+            return self.background;
+        }
+        let (x0, z0) = (f.x.floor(), f.y.floor());
+        let (tx, tz) = ((f.x - x0) as f32, (f.y - z0) as f32);
+        let at = |x: f64, z: f64| {
+            let (x, z) = (
+                x.clamp(0.0, span - 1.0) as usize,
+                z.clamp(0.0, span - 1.0) as usize,
+            );
+            self.coverage[z * n + x] as f32 / 255.0
+        };
+        let a = at(x0, z0) + (at(x0 + 1.0, z0) - at(x0, z0)) * tx;
+        let b = at(x0, z0 + 1.0) + (at(x0 + 1.0, z0 + 1.0) - at(x0, z0 + 1.0)) * tx;
+        a + (b - a) * tz
+    }
+}
+
+#[cfg(test)]
+mod cloud_cover_tests {
+    use super::*;
+
+    #[test]
+    fn cover_is_read_where_the_pattern_drifted() {
+        // 2 x 2 cells of 100 m from (-100, -100): clear on the left (x < 0), cloudy on the right.
+        let mut map = CloudCoverMap {
+            origin: DVec2::splat(-100.0),
+            cell_m: 100.0,
+            size: 2,
+            coverage: Arc::from([0u8, 255, 0, 255]),
+            background: 0.25,
+            ..Default::default()
+        };
+        assert_eq!(map.cover_at(DVec2::new(-50.0, -50.0)), 0.0);
+        assert_eq!(map.cover_at(DVec2::new(50.0, 50.0)), 1.0);
+        assert!((map.cover_at(DVec2::new(0.0, 0.0)) - 0.5).abs() < 1e-6);
+        assert_eq!(map.cover_at(DVec2::new(500.0, 0.0)), 0.25);
+        // The wind carried the pattern 100 m toward -X: the cloudy half is now left of 0.
+        map.drift_m = DVec2::new(-100.0, 0.0);
+        assert_eq!(map.cover_at(DVec2::new(-50.0, 0.0)), 1.0);
+        assert_eq!(CloudCoverMap::default().cover_at(DVec2::ZERO), 0.0);
     }
 }
 

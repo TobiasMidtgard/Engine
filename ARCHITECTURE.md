@@ -117,6 +117,7 @@ module's **contract** in `engine_world`:
 | `interact`: `Interactable` (a usable thing: verb, reach, use point), `Interactor` (the player's body), `Using` (busy with a target, so E goes back to it), `InteractTarget` (what E would use now), `Interact` (E was pressed on it), `Readouts` (label/value lines of what is in use: speed, altitude, gear; cleared every frame in `First`) | `engine` picks the target and sends `Interact` from the `interact` action (E, gamepad West); `engine_debug` draws the prompt and the readouts under it until a UI does | vehicles (drive), destruction (stationed guns, doors), softbody (pull up cloth), foliage (fell a tree), movement and games (put `Interactor` on the player) |
 | `WindOverride`: a tester's wind speed (the F3 panel's PageUp/PageDown) that `WindField::prevailing` blows at instead of the weather's | `engine_world` applies it; `engine_debug` sets it | everyone reading `WindField` |
 | `FarCloudLayer`: a far cloud layer (a planet's cloud tops seen from high up) and where the volumetric clouds hand over to it (`near_share`) | `engine_space` | weather |
+| `CloudCoverMap`: the cloud cover around the focus the volumetric clouds are carved from (world X/Z grid, drifting with the wind, `cover_at`), so a far layer puts its clouds in the same places | weather | `engine_space` |
 | `Water`, `Gravity`, fields and world events (see the crate docs) | water, space, weather, … | everyone |
 
 Anything a module needs that isn't there is a missing contract: ask the core owner to add it

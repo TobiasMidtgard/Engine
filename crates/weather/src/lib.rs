@@ -70,6 +70,7 @@ impl Plugin for WeatherPlugin {
             .init_resource::<ActiveBolts>()
             .init_resource::<lightning::StrikeRequests>()
             .init_resource::<CloudMap>()
+            .init_resource::<engine_world::CloudCoverMap>()
             .register_resource::<Weather>(
                 "What the weather should do: preset (clear, partly_cloudy, overcast, showers, rain, storm, \
                  snow, blizzard, fog), transition_s (game seconds for a front to arrive), auto \
@@ -110,7 +111,10 @@ impl Plugin for WeatherPlugin {
             .add_systems(Update, (sky::ensure_lights, demo::instruments_system))
             .add_systems(
                 PostUpdate,
-                shift::shift_system.in_set(engine_world::WorldShiftSet::Apply),
+                (
+                    shift::shift_system.in_set(engine_world::WorldShiftSet::Apply),
+                    cloudmap::publish_cover_system.after(engine_world::WorldShiftSet::Apply),
+                ),
             )
             .add_systems(
                 FixedUpdate,

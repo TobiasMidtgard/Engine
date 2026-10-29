@@ -5,6 +5,8 @@
 use engine_core::math::{DVec2, Vec4};
 use engine_core::prelude::*;
 
+use engine_world::CloudCoverMap;
+
 use crate::sim::WeatherSim;
 
 /// Cells per side.
@@ -166,6 +168,33 @@ pub(crate) fn cloud_map_system(
     }
 }
 
+/// PostUpdate, after world shifts: share the map's coverage as `engine_world`'s
+/// [`CloudCoverMap`], so a far cloud layer (space's shell) draws its clouds where these are.
+/// The coverage is copied when the map is rebuilt; the drift follows every frame.
+pub(crate) fn publish_cover_system(
+    sim: Res<WeatherSim>,
+    map: Res<CloudMap>,
+    mut cover: ResMut<CloudCoverMap>,
+    mut published: Local<u64>,
+) {
+    let drift_m = sim
+        .frame
+        .dir_to_world((sim.cloud_drift - map.drift_at_build).as_vec2())
+        .as_dvec2();
+    if *published != map.revision || cover.revision == 0 {
+        *published = map.revision;
+        cover.origin = map.origin;
+        cover.cell_m = map.cell_m;
+        cover.size = map.size;
+        cover.coverage = map.texels.iter().map(|t| t[0]).collect();
+        cover.background = map.background.x;
+        cover.revision += 1;
+    }
+    if cover.drift_m != drift_m {
+        cover.drift_m = drift_m;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -190,5 +219,34 @@ mod tests {
             assert!(mean > lo && mean < hi, "{preset:?} coverage {mean}");
         }
         assert!(map.revision >= 2);
+    }
+
+    #[test]
+    fn the_shared_cover_is_the_maps_and_drifts_with_it() {
+        engine_core::tasks::init_task_pools();
+        let mut app = App::new();
+        app.add_plugins((engine_world::WorldPlugin, crate::WeatherPlugin));
+        app.update_n(3);
+        let (origin, coverage, drift_at_build) = {
+            let map = app.world.resource::<CloudMap>();
+            let coverage: Vec<u8> = map.texels.iter().map(|t| t[0]).collect();
+            (map.origin, coverage, map.drift_at_build)
+        };
+        let cover = app.world.resource::<CloudCoverMap>().clone();
+        assert!(cover.revision > 0);
+        assert_eq!(cover.size, MAP_SIZE);
+        assert_eq!(cover.origin, origin);
+        assert_eq!(&*cover.coverage, &coverage[..]);
+        // Drift the pattern by hand: the shared map moves with it, the cover follows.
+        let before = cover.cover_at(DVec2::new(1500.0, -2500.0));
+        app.world.resource_mut::<WeatherSim>().cloud_drift =
+            drift_at_build + DVec2::new(1000.0, 0.0);
+        use bevy_ecs::system::RunSystemOnce;
+        app.world.run_system_once(publish_cover_system).unwrap();
+        let cover = app.world.resource::<CloudCoverMap>();
+        let moved = cover.drift_m;
+        assert!((moved.length() - 1000.0).abs() < 1e-3, "{moved}");
+        let after = cover.cover_at(DVec2::new(1500.0, -2500.0) + moved);
+        assert!((after - before).abs() < 1e-3, "{before} vs {after}");
     }
 }
