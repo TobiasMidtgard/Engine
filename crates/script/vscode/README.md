@@ -29,6 +29,8 @@ The game listens; this extension only tells VS Code where (`crates/script/src/da
    - Windows (PowerShell): `$env:ENGINE_SCRIPT_DEBUG=4711; .\showcase.exe`
    - Linux/macOS: `ENGINE_SCRIPT_DEBUG=4711 ./showcase`
    - or while it runs: `script.debug {"port": 4711}` from the console or the AI bridge.
+   - or without the game: `cargo run -p engine_script --example headless -- examples/lamp.luau`
+     runs scripts on their own entities with the debugger listening on 4711.
 2. Open the Engine folder in VS Code, set breakpoints in `assets/scripts/**/*.luau`, and start
    **Attach to the game's scripts** (F5).
 

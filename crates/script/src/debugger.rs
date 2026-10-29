@@ -654,10 +654,11 @@ impl Session {
         self.set_stepping(false);
         self.step = None;
         self.pause_requested = false;
-        let frames = lua_frames(l)
+        let frames: Vec<c_int> = lua_frames(l)
             .into_iter()
             .filter(|&level| source_at(l, level).as_deref() != Some(CATCH_SOURCE))
             .collect();
+        let top = frames.first().copied().unwrap_or(0);
         let mut body = json!({"reason": reason, "threadId": 1, "allThreadsStopped": true});
         if let Some(id) = bp {
             body["hitBreakpointIds"] = json!([id]);
@@ -676,7 +677,7 @@ impl Session {
             link.event("stopped", body);
         }
         tracing::info!(target: "script", "script debugger: stopped ({reason}) at {}:{}",
-            source_at(l, 0).unwrap_or_default(), current_line(l, 0));
+            source_at(l, top).unwrap_or_default(), current_line(l, top));
         while let Some(message) = self
             .link
             .as_ref()
@@ -786,7 +787,8 @@ impl Session {
                         "exceptionId": "error",
                         "description": first,
                         "breakMode": "unhandled",
-                        "details": {"message": first, "typeName": "error", "stackTrace": text},
+                        "details": {"message": first, "typeName": "error",
+                            "stackTrace": script_traceback(&text)},
                     })),
                 );
                 false
@@ -1363,6 +1365,18 @@ fn frame_info(l: *mut ffi::lua_State, level: c_int) -> FrameInfo {
             line: ar.currentline,
         }
     }
+}
+
+/// The script lines of an error's traceback: no message (shown above it), no engine functions,
+/// no debugger wrapper.
+fn script_traceback(text: &str) -> String {
+    text.lines()
+        .skip_while(|l| !l.trim_start().starts_with("stack traceback:"))
+        .skip(1)
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with("[C]") && !l.starts_with("engine/"))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn source_at(l: *mut ffi::lua_State, level: c_int) -> Option<String> {

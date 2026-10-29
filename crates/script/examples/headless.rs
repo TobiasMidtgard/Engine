@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 use engine_assets::Assets;
 use engine_core::prelude::*;
 use engine_render::{MeshRenderer, PointLight, Shape, StandardMaterial};
-use engine_script::{Script, ScriptPlugin, ScriptRuntime, ScriptSettings};
+use engine_script::{Script, ScriptPlugin, ScriptSettings};
 use serde_json::Value;
 
 fn main() {
@@ -92,17 +92,11 @@ fn main() {
             files.join(", ")
         }
     );
+    // Prints and errors reach the terminal through the log.
     let frame = Duration::from_secs_f64(1.0 / 30.0);
-    let mut cursor = engine_script::editing::OutputCursor::default();
     loop {
         let start = Instant::now();
         app.update();
-        if let Some(rt) = app.world.get_resource::<ScriptRuntime>() {
-            for line in rt.output_since(&mut cursor) {
-                let error = if line.error { "error: " } else { "" };
-                println!("{error}{}", line.text);
-            }
-        }
         if let Some(rest) = frame.checked_sub(start.elapsed()) {
             std::thread::sleep(rest);
         }

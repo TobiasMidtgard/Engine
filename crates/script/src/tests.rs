@@ -1362,6 +1362,12 @@ fn the_debugger_stops_where_an_uncaught_error_is_raised() {
                 .contains("attempt to index nil"),
             "{info}"
         );
+        // Only the script's own lines under it, not the debugger's wrapper.
+        let trace = info["details"]["stackTrace"].as_str().unwrap();
+        assert!(
+            !trace.contains("engine/") && !trace.contains("[C]"),
+            "{trace}"
+        );
         let stack = c.request("stackTrace", json!({"threadId": 1}));
         let top = stack["stackFrames"][0].clone();
         assert_eq!(top["line"], json!(16), "{stack}");
