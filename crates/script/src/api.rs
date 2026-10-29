@@ -203,6 +203,56 @@ pub(crate) fn register(app: &mut App) {
         },
     )
     .register_api(
+        "script.break",
+        "Debug the scripts without a client: \"path\" and \"lines\" set a file's breakpoints \
+         (an empty list clears them). The next one a script reaches stops it there: the \
+         scripts wait and the world's time stands still, while everything else runs on. \
+         \"go\": \"continue\", \"over\", \"in\" or \"out\" goes on; \"pause\": true \
+         stops at the next line any script runs; \"detach\": true ends it; no arguments \
+         just answer. Returns the stop: why, the call stack and the top frame's locals.",
+        r#"{"path": "showcase/courtyard.luau", "lines": [31]}"#,
+        |world, args| {
+            with_runtime(world, |_, rt, _| {
+                if args["detach"].as_bool() == Some(true) {
+                    rt.debugger.detach_local(&rt.lua);
+                    return Ok(crate::debug::stop_json(rt));
+                }
+                if args.get("path").is_some() || args["pause"].as_bool() == Some(true) {
+                    rt.debugger.attach_local();
+                }
+                if let Some(path) = str_arg(&args, "path") {
+                    let path = safe_path(path)?;
+                    let lines: Vec<(u32, Option<String>)> = args["lines"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|l| l.as_u64())
+                        .map(|l| (l as u32, None))
+                        .collect();
+                    rt.debugger.set_editor_breakpoints(&rt.lua, &path, &lines);
+                }
+                if args["pause"].as_bool() == Some(true) {
+                    rt.debugger.pause();
+                }
+                if let Some(go) = args["go"].as_str() {
+                    let go = match go {
+                        "continue" => crate::debug::Go::Continue,
+                        "over" => crate::debug::Go::StepOver,
+                        "in" => crate::debug::Go::StepIn,
+                        "out" => crate::debug::Go::StepOut,
+                        other => {
+                            return Err(format!(
+                                "go: {other}? one of continue, over, in, out"
+                            ));
+                        }
+                    };
+                    rt.debugger.go(go);
+                }
+                Ok(crate::debug::stop_json(rt))
+            })?
+        },
+    )
+    .register_api(
         "script.logpoint",
         "Print values from a script line each time it runs, without stopping: \"message\" \
          fills in {expressions} with the line's locals (\"glow = {glow}\"). Code boards show \

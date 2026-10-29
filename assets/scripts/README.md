@@ -120,6 +120,17 @@ and `script.restart` starts an entity's script from scratch.
 
 ## Debugging
 
+In the editor's Scripts tab, click left of a line number for a breakpoint (right-click for one
+that stops only when a condition holds; F9 on the caret's line). Press Play: when a script gets
+there it waits on that line, the other scripts wait with it and the world's time stands still,
+but the editor keeps running. The line gets a yellow arrow, each local's value shows beside the
+line that set it, hovering a name shows its value, and the panel on the right has the call
+stack (click a frame for its line and values), the variables (tables open up) and your watches.
+F5 goes on, F10 steps over, F11 in, Shift+F11 out; ⏸ Break stops at the next line any script
+runs, and Stop on errors stops where an error is raised. In the Graphs tab, F9 or a node's
+right-click menu puts a breakpoint on a node, and Next node (F10) runs on to the next one.
+`script.break {"path": ..., "lines": [31]}` does the same from the API or the AI bridge.
+
 Start the game with `ENGINE_SCRIPT_DEBUG=4711` (or call `script.debug` while it runs) and attach
 VS Code with the extension in `crates/script/vscode` (its README has the setup) or any other
 Debug Adapter Protocol client (to try it without starting the game:

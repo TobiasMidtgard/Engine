@@ -102,9 +102,19 @@
 //! client: run the game with `ENGINE_SCRIPT_DEBUG=4711` (or call `script.debug`), attach, and
 //! set breakpoints in `.luau` files: conditions, hit counts and logpoints, step in, over and
 //! out, the call stack, locals, upvalues and `self` expandable, watches and hovers, and the debug
-//! console evaluating in the stopped frame. A stop holds the game still until you continue.
-//! "Uncaught errors" (on by default in VS Code's breakpoint list) stops where an error nothing
-//! catches is raised, with its stack and locals, before the call fails. Without a client,
+//! console evaluating in the stopped frame. "Uncaught errors" (on by default in VS Code's
+//! breakpoint list) stops where an error nothing catches is raised, with its stack and locals.
+//!
+//! A stop doesn't freeze the program: the stopped script waits at its line (its coroutine
+//! yields there), the other scripts wait for it and the world's time is held still
+//! ([`TimeDilation`](engine_core::prelude::TimeDilation)), while rendering, the UI and an editor
+//! in the same process keep running. The editor debugs through [`debug`] (no socket: the
+//! Scripts tab's gutter breakpoints, call stack, variables, watches and stepping, the Graphs
+//! tab's node breakpoints), and both can be attached at once. Where a script can't wait
+//! (engine code between it and the frame, as in a `table.sort` comparator) or after an error,
+//! the stop shows the values as they were and the code goes on. Code boards draw a stop: the
+//! line, its arrow and each local's value beside the line that set it; `script.break` does all
+//! this from the API (the tour's `script_paused` stop). Without a client,
 //! `script.logpoint {path, line, message}` prints values from a line without stopping, and
 //! code boards show the newest beside it. To try scripts and the debugger without the game (no
 //! GPU): `cargo run -p engine_script --example headless [-- files...]`. How it works:
@@ -141,7 +151,8 @@
 //! game), `script.reload {path}`, `script.restart {entity}`, `script.send {entity, event, data}`,
 //! `script.source {path}`, `script.write {path, source}`, `script.edit {path, find, replace}`,
 //! `script.types` (writes `engine.d.luau` for luau-lsp autocompletion), `script.debug {port}`
-//! (start the debugger), `script.logpoint {path, line, message}`, `script.profile {seconds}`,
+//! (start the debugger), `script.break {path, lines}` (breakpoints and stepping without a
+//! client), `script.logpoint {path, line, message}`, `script.profile {seconds}`,
 //! `script.marks {path}` (a file's errors, logpoint values and heat by line) and
 //! `script.check {source}` (compile without running). An editor holds scripts still with
 //! [`ScriptsHeld`] while a scene is edited ([`editing`]).
@@ -165,6 +176,7 @@ mod bind;
 pub mod board;
 mod convert;
 mod dap;
+pub mod debug;
 mod debugger;
 pub mod demo;
 pub mod editing;

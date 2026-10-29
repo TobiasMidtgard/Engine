@@ -10,15 +10,23 @@
 //! before you save; a call to an engine function that doesn't exist is underlined with the
 //! nearest name; and while playing, the runtime's errors are marked on their line with how
 //! often they repeated. Save (Ctrl+S) hot reloads the running game, which keeps every script's
-//! state. While playing, a click in the gutter shows a line's values live (a logpoint, without
-//! stopping the game) and Profile shows each line's share of the script time beside it. Under
-//! the code, the Output (prints, warnings, errors; click one to open its line) and a command bar
-//! that runs Luau in the game, as Roblox's.
+//! state. While playing, Shift+click in the gutter shows a line's values live (a logpoint,
+//! without stopping the game) and Profile shows each line's share of the script time beside it.
+//! Under the code, the Output (prints, warnings, errors; click one to open its line) and a
+//! command bar that runs Luau in the game, as Roblox's.
+//!
+//! Debugging, as in Roblox Studio and Visual Studio: a click in the gutter sets a breakpoint
+//! (right-click for one with a condition). A script that reaches it waits there, and so do the
+//! other scripts and the world's time, while the editor keeps running ([`engine_script::debug`]):
+//! the stopped line gets an arrow, each local's value shows beside the line that declares it,
+//! hovering a name shows its value, and a panel holds the call stack, the variables and the
+//! watches. F5 goes on, F10 steps over, F11 in, Shift+F11 out; F9 sets a breakpoint on the
+//! caret's line; Stop on errors stops where an error is raised, with its locals.
 //!
 //! Scripts run only while playing ([`ScriptsHeld`] in edit mode) and Stop drops their VMs, so
 //! every Play starts them afresh, as it does the scene.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 use std::time::SystemTime;
 
@@ -27,6 +35,7 @@ use egui::{Align2, Color32, FontId, Key, Modifiers, Pos2, Rect, RichText, Stroke
 use egui_dock::{DockState, NodeIndex};
 use engine::core::registry::{call_api, unknown_name_error};
 use engine::prelude::*;
+use engine_script::debug::{self, FileStop, Go, StopView};
 use engine_script::editing::{self, FileMarks, OutputCursor, Word, WordKind};
 use engine_script::{Script, ScriptRuntime, ScriptSettings, ScriptsHeld};
 use serde_json::{Value, json};
@@ -43,7 +52,8 @@ impl Plugin for ScriptsTabPlugin {
     fn build(&self, app: &mut App) {
         app.insert_resource(ScriptsHeld)
             .init_resource::<ScriptsTab>()
-            .add_systems(Update, hold_scripts.before(UpdateSet::Logic));
+            .add_systems(Update, hold_scripts.before(UpdateSet::Logic))
+            .add_systems(Update, follow_debugger.after(UpdateSet::Logic));
     }
 }
 
@@ -57,6 +67,8 @@ fn hold_scripts(world: &mut World) {
         (true, false) => {
             world.insert_resource(ScriptsHeld);
             world.remove_resource::<ScriptRuntime>();
+            // Stopped at a breakpoint: the world's time was held for it.
+            debug::release_time(world);
         }
         (false, true) => {
             world.remove_resource::<ScriptsHeld>();
@@ -92,6 +104,14 @@ const LINT: Color32 = Color32::from_rgb(0xf0, 0xb4, 0x3c);
 const VALUE: Color32 = Color32::from_rgb(0xff, 0xc9, 0x5c);
 const VALUE_BG: Color32 = Color32::from_rgba_premultiplied(0x2c, 0x20, 0x08, 0x2c);
 const FIND_BG: Color32 = Color32::from_rgb(0x5a, 0x4a, 0x14);
+/// Breakpoints (Visual Studio's red), the stopped line (its yellow arrow and line), a caller's
+/// line picked in the call stack, and the values of the stop's locals.
+const BREAKPOINT: Color32 = Color32::from_rgb(0xe5, 0x3e, 0x3e);
+const STOP: Color32 = Color32::from_rgb(0xff, 0xd8, 0x4c);
+const STOP_BG: Color32 = Color32::from_rgba_premultiplied(0x3c, 0x34, 0x0c, 0x3c);
+const CALLER_BG: Color32 = Color32::from_rgba_premultiplied(0x10, 0x34, 0x22, 0x34);
+const STOP_VALUE: Color32 = Color32::from_rgb(0x9c, 0xdc, 0xfe);
+const STOP_STRIP: Color32 = Color32::from_rgb(0x3a, 0x31, 0x0e);
 const HEAT: [Color32; 3] = [
     Color32::from_rgb(0x6e, 0x1c, 0x10),
     Color32::from_rgb(0xff, 0x6a, 0x1a),
@@ -136,6 +156,7 @@ pub struct ScriptsTab {
     playing: bool,
     /// The new-script name being typed (the New button's field).
     new_name: Option<String>,
+    pub debug: DebugState,
 }
 
 /// An open file.
@@ -155,6 +176,8 @@ pub struct Doc {
     checked: String,
     /// Logpoints by the line they show on (1-based).
     logpoints: BTreeMap<u32, Logpoint>,
+    /// Breakpoints by line (1-based), each with the condition it stops on, if any.
+    pub breakpoints: BTreeMap<u32, Option<String>>,
     /// Put the caret here (a char index) and scroll to it, next frame.
     pub jump: Option<usize>,
     /// The caret last frame (char index).
@@ -290,6 +313,10 @@ pub fn panel(ui: &mut egui::Ui, world: &mut World, editor: &mut Editor) {
         tab.vocab = Some(Vocab::new(world));
     }
     poll(world, editor, &mut tab, now);
+    let stop = debug::stopped(world);
+    if let Some(stop) = &stop {
+        debug_keys(ui, world, stop);
+    }
 
     egui::Panel::left("script files")
         .resizable(true)
@@ -310,10 +337,25 @@ pub fn panel(ui: &mut egui::Ui, world: &mut World, editor: &mut Editor) {
             ui.set_min_height(ui.available_height());
             output(ui, world, &mut tab)
         });
+    if let Some(stop) = &stop {
+        egui::Panel::right("script debugger")
+            .resizable(true)
+            .default_size(310.0)
+            .size_range(220.0..=560.0)
+            .frame(
+                egui::Frame::new()
+                    .fill(theme::PANEL)
+                    .inner_margin(egui::Margin::symmetric(8, 4)),
+            )
+            .show(ui, |ui| debug_panel(ui, world, &mut tab, stop));
+    }
     egui::CentralPanel::default()
         .frame(egui::Frame::NONE)
         .show(ui, |ui| {
             tool_bar(ui, world, &mut tab, now);
+            if let Some(stop) = &stop {
+                stop_strip(ui, world, stop);
+            }
             if tab.docs.is_empty() {
                 ui.add_space(40.0);
                 ui.vertical_centered(|ui| {
@@ -365,6 +407,7 @@ pub fn open(world: &World, tab: &mut ScriptsTab, path: &str, line: Option<u32>) 
                 syntax: None,
                 checked: String::new(),
                 logpoints: BTreeMap::new(),
+                breakpoints: BTreeMap::new(),
                 jump: None,
                 caret: 0,
             });
@@ -895,7 +938,10 @@ fn tool_bar(ui: &mut egui::Ui, world: &mut World, tab: &mut ScriptsTab, now: f64
                     }
                 }
                 if let Some(i) = close {
-                    tab.docs.remove(i);
+                    let doc = tab.docs.remove(i);
+                    if !doc.breakpoints.is_empty() {
+                        debug::set_breakpoints(world, &doc.path, &[]);
+                    }
                     if tab.current >= i && tab.current > 0 {
                         tab.current -= 1;
                     }
@@ -909,6 +955,28 @@ fn tool_bar(ui: &mut egui::Ui, world: &mut World, tab: &mut ScriptsTab, now: f64
                         .clicked()
                     {
                         tab.vscode = !tab.vscode;
+                    }
+                    if ui
+                        .selectable_label(tab.debug.break_errors, "Stop on errors")
+                        .on_hover_text(
+                            "Stop where an error nothing catches is raised, with the call stack \
+                             and its values, instead of only reporting it",
+                        )
+                        .clicked()
+                    {
+                        tab.debug.break_errors = !tab.debug.break_errors;
+                        tab.debug.apply = true;
+                    }
+                    let can_break = tab.playing && debug::stopped(world).is_none();
+                    if ui
+                        .add_enabled(can_break, egui::Button::new("⏸ Break"))
+                        .on_hover_text(
+                            "Stop the scripts at the next line they run; the world's time holds \
+                             with them",
+                        )
+                        .clicked()
+                    {
+                        debug::pause(world);
                     }
                     let profile = ui
                         .selectable_label(tab.profiling, "🔥 Profile")
@@ -1104,6 +1172,11 @@ fn code_view(ui: &mut egui::Ui, world: &mut World, tab: &mut ScriptsTab, now: f6
     if focused && ui.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::Space)) {
         tab.complete_now = true;
     }
+    if focused && ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::F9)) {
+        let doc = &mut tab.docs[i];
+        let line = line_of(&doc.text, doc.caret) as u32 + 1;
+        toggle_breakpoint(doc, &mut tab.debug, line);
+    }
     let mut accept = None;
     let mut close_list = false;
     if focused && let Some(c) = &mut tab.completion {
@@ -1141,7 +1214,9 @@ fn code_view(ui: &mut egui::Ui, world: &mut World, tab: &mut ScriptsTab, now: f6
         doc.jump = Some(c.start + item.insert.chars().count());
     }
 
+    let playing = tab.playing;
     let doc = &mut tab.docs[i];
+    let dbg = &mut tab.debug;
     if doc.checked != doc.text {
         doc.syntax = editing::check(&doc.text);
         doc.checked = doc.text.clone();
@@ -1158,6 +1233,18 @@ fn code_view(ui: &mut egui::Ui, world: &mut World, tab: &mut ScriptsTab, now: f6
     }
 
     let find = tab.find.clone().filter(|f| !f.is_empty());
+    // The stop, where it is in this file (the frame picked in the call stack if it's here).
+    let stop = debug::stop_at(world, &doc.path, &doc.text, Some(dbg.frame));
+    // Breakpoints the running file has no code for yet (drawn hollow, as unverified).
+    let unbound: HashSet<u32> = if playing {
+        debug::breakpoints(world, &doc.path)
+            .into_iter()
+            .filter(|b| b.at.is_none())
+            .map(|b| b.line)
+            .collect()
+    } else {
+        HashSet::new()
+    };
     let mut layouter = |ui: &egui::Ui, buf: &dyn egui::TextBuffer, _wrap: f32| {
         let job = highlight(buf.as_str(), &font, &vocab, find.as_deref());
         ui.fonts_mut(|f| f.layout_job(job))
@@ -1189,7 +1276,15 @@ fn code_view(ui: &mut egui::Ui, world: &mut World, tab: &mut ScriptsTab, now: f6
                 .unwrap_or(doc.caret);
             let lines = line_rects(&out.galley, out.galley_pos);
             let current_line = line_of(&doc.text, caret);
-            paint_backdrop(ui, backdrop, &out.response.rect, &lines, current_line, doc);
+            paint_backdrop(
+                ui,
+                backdrop,
+                &out.response.rect,
+                &lines,
+                current_line,
+                doc,
+                stop.as_ref(),
+            );
             paint_gutter(
                 ui,
                 &out.response.rect,
@@ -1198,15 +1293,33 @@ fn code_view(ui: &mut egui::Ui, world: &mut World, tab: &mut ScriptsTab, now: f6
                 doc,
                 &font,
                 row_h,
+                stop.as_ref(),
+                &unbound,
             );
             let lints = lints(&doc.text, &vocab);
-            paint_notes(ui, &lines, doc, &lints, &font);
+            paint_notes(ui, &lines, doc, &lints, &font, stop.as_ref());
+            // Stopped: a name's value under the pointer, as Visual Studio's data tips.
+            if let Some(st) = &stop
+                && let Some(pos) = out.response.hover_pos()
+                && pos.x > out.response.rect.left() + GUTTER
+            {
+                let at = out.galley.cursor_from_pos(pos - out.galley_pos).index.0;
+                if let Some(expr) = expression_at(&doc.text, at)
+                    && let Ok(v) = dbg.answer(world, st.id, st.frame, &expr).clone()
+                {
+                    let tip = debug::Variable { name: expr, ..v };
+                    let _ = out.response.response.clone().on_hover_ui_at_pointer(|ui| {
+                        ui.label(variable_text(&tip));
+                    });
+                }
+            }
             if let Some(line) = jump_line
                 && let Some(r) = lines.get(line)
             {
                 ui.scroll_to_rect(r.expand(row_h * 3.0), Some(egui::Align::Center));
             }
-            // Gutter clicks: a logpoint on that line, or off again.
+            // Gutter clicks: a breakpoint on that line, or off again; Shift+click shows the
+            // line's values live instead (a logpoint); right-click for a condition.
             {
                 let gutter = Rect::from_min_max(
                     out.response.rect.min,
@@ -1215,16 +1328,36 @@ fn code_view(ui: &mut egui::Ui, world: &mut World, tab: &mut ScriptsTab, now: f6
                         out.response.rect.bottom(),
                     ),
                 );
-                let click = ui.interact(gutter, id.with("gutter"), egui::Sense::click());
-                if click.clicked()
-                    && let Some(pos) = click.interact_pointer_pos()
-                    && let Some(line) = lines
+                let click = ui
+                    .interact(gutter, id.with("gutter"), egui::Sense::click())
+                    .on_hover_text(
+                        "Click: a breakpoint (the game waits there). Shift+click: the line's \
+                         values, live. Right-click: a breakpoint with a condition.",
+                    );
+                let line_at = |pos: Pos2| {
+                    lines
                         .iter()
                         .position(|r| r.top() <= pos.y && pos.y < r.bottom())
-                {
-                    toggle_logpoint(world, doc, line);
+                };
+                if let Some(line) = click.interact_pointer_pos().and_then(line_at) {
+                    if click.clicked() {
+                        if ui.input(|i| i.modifiers.shift) {
+                            toggle_logpoint(world, doc, line);
+                        } else {
+                            toggle_breakpoint(doc, dbg, line as u32 + 1);
+                        }
+                    }
+                    if click.secondary_clicked() {
+                        dbg.menu_line = line as u32 + 1;
+                        dbg.condition = doc
+                            .breakpoints
+                            .get(&dbg.menu_line)
+                            .cloned()
+                            .flatten()
+                            .unwrap_or_default();
+                    }
                 }
-                let _ = click.on_hover_text("Click a line to show its values live while playing");
+                click.context_menu(|ui| gutter_menu(ui, world, doc, dbg));
             }
             output = Some((
                 out.response.changed(),
@@ -1315,7 +1448,7 @@ fn char_to_byte(text: &str, char_index: usize) -> usize {
         .map_or(text.len(), |(b, _)| b)
 }
 
-/// The line under each one's marks: the caret's line, errors, logpoints.
+/// The line under each one's marks: the caret's line, errors, logpoints, the stop.
 fn paint_backdrop(
     ui: &egui::Ui,
     slot: egui::layers::ShapeIdx,
@@ -1323,6 +1456,7 @@ fn paint_backdrop(
     lines: &[Rect],
     current: usize,
     doc: &Doc,
+    stop: Option<&FileStop>,
 ) {
     let width = area.width().max(ui.clip_rect().width()) + 2000.0;
     let row = |r: &Rect| {
@@ -1362,6 +1496,23 @@ fn paint_backdrop(
             shapes.push(egui::Shape::rect_filled(row(r), 0.0, ERROR_BG));
         }
     }
+    if let Some(stop) = stop
+        && let Some(r) = lines.get((stop.line as usize).saturating_sub(1))
+    {
+        // Where it stopped in yellow; a caller's line (picked in the call stack) in green.
+        let (fill, edge) = if stop.frame == 0 {
+            (STOP_BG, STOP)
+        } else {
+            (CALLER_BG, theme::PLAY)
+        };
+        shapes.push(egui::Shape::rect_filled(row(r), 0.0, fill));
+        shapes.push(egui::Shape::rect_stroke(
+            row(r),
+            0.0,
+            Stroke::new(1.0, edge.gamma_multiply(0.45)),
+            egui::StrokeKind::Inside,
+        ));
+    }
     ui.painter().set(slot, egui::Shape::Vec(shapes));
 }
 
@@ -1393,7 +1544,9 @@ fn heat_color(t: f32) -> Color32 {
     a.lerp_to_gamma(b, k)
 }
 
-/// Line numbers, the profiler's heat bars and the markers (error, logpoint).
+/// Line numbers, the profiler's heat bars and the markers (breakpoint, error, logpoint), and
+/// the stop's arrow.
+#[allow(clippy::too_many_arguments)]
 fn paint_gutter(
     ui: &egui::Ui,
     area: &Rect,
@@ -1402,6 +1555,8 @@ fn paint_gutter(
     doc: &Doc,
     font: &FontId,
     row_h: f32,
+    stop: Option<&FileStop>,
+    unbound: &HashSet<u32>,
 ) {
     let painter = ui.painter();
     let max_heat = doc
@@ -1439,8 +1594,32 @@ fn paint_gutter(
             );
         }
         let marker = Pos2::new(area.left() + 24.0, r.center().y);
-        if errors.contains(&line) {
-            painter.circle_filled(marker, row_h * 0.26, ERROR);
+        if let Some(condition) = doc.breakpoints.get(&line) {
+            let radius = row_h * 0.3;
+            if unbound.contains(&line) {
+                painter.circle_stroke(marker, radius - 0.75, Stroke::new(1.5, BREAKPOINT));
+            } else {
+                painter.circle_filled(marker, radius, BREAKPOINT);
+            }
+            if condition.is_some() {
+                // Visual Studio's conditional mark: a bar across the dot.
+                let w = radius * 0.55;
+                painter.line_segment(
+                    [marker - Vec2::new(w, 0.0), marker + Vec2::new(w, 0.0)],
+                    Stroke::new(1.6, Color32::WHITE),
+                );
+            }
+        } else if errors.contains(&line) {
+            let s = row_h * 0.2;
+            let stroke = Stroke::new(2.0, ERROR);
+            painter.line_segment(
+                [marker + Vec2::new(-s, -s), marker + Vec2::new(s, s)],
+                stroke,
+            );
+            painter.line_segment(
+                [marker + Vec2::new(-s, s), marker + Vec2::new(s, -s)],
+                stroke,
+            );
         } else if doc.logpoints.contains_key(&line) {
             let s = row_h * 0.28;
             painter.add(egui::Shape::convex_polygon(
@@ -1455,11 +1634,39 @@ fn paint_gutter(
             ));
         }
     }
+    // The stop's arrow over the marker, as Visual Studio's (green on a caller's line).
+    if let Some(stop) = stop
+        && let Some(r) = lines.get((stop.line as usize).saturating_sub(1))
+    {
+        let c = Pos2::new(area.left() + 25.0, r.center().y);
+        let h = row_h * 0.32;
+        let color = if stop.frame == 0 { STOP } else { theme::PLAY };
+        painter.add(egui::Shape::convex_polygon(
+            vec![
+                c + Vec2::new(-h * 1.3, -h * 0.55),
+                c + Vec2::new(0.0, -h * 0.55),
+                c + Vec2::new(0.0, -h),
+                c + Vec2::new(h, 0.0),
+                c + Vec2::new(0.0, h),
+                c + Vec2::new(0.0, h * 0.55),
+                c + Vec2::new(-h * 1.3, h * 0.55),
+            ],
+            color,
+            Stroke::new(1.0, Color32::from_black_alpha(160)),
+        ));
+    }
 }
 
 /// Notes after the end of lines, as Error Lens draws them: errors, unknown engine functions,
-/// logpoint values, heat.
-fn paint_notes(ui: &egui::Ui, lines: &[Rect], doc: &Doc, lints: &[Lint], font: &FontId) {
+/// logpoint values, heat, and while stopped each local's value beside the line declaring it.
+fn paint_notes(
+    ui: &egui::Ui,
+    lines: &[Rect],
+    doc: &Doc,
+    lints: &[Lint],
+    font: &FontId,
+    stop: Option<&FileStop>,
+) {
     let painter = ui.painter();
     let small = FontId::monospace(font.size * 0.92);
     let mut notes: BTreeMap<usize, Vec<(String, Color32)>> = BTreeMap::new();
@@ -1509,6 +1716,26 @@ fn paint_notes(ui: &egui::Ui, lines: &[Rect], doc: &Doc, lints: &[Lint], font: &
             .entry(*shown as usize - 1)
             .or_default()
             .push((format!("» {text}"), VALUE));
+    }
+    if let Some(stop) = stop {
+        let why = match &stop.exception {
+            Some(e) => (format!("⏸ {e}"), ERROR),
+            None if stop.frame > 0 => (
+                format!("⏸ calls on from here ({})", stop.function),
+                theme::PLAY,
+            ),
+            None => (format!("⏸ paused: {}", stop.reason), STOP),
+        };
+        notes
+            .entry((stop.line as usize).saturating_sub(1))
+            .or_default()
+            .insert(0, why);
+        for (line, values) in &stop.values {
+            notes
+                .entry(*line as usize - 1)
+                .or_default()
+                .push((values.clone(), STOP_VALUE));
+        }
     }
     for (line, pct) in &doc.marks.heat {
         if *pct >= 0.5 {
@@ -2523,6 +2750,487 @@ fn show_value(v: &Value) -> String {
     }
 }
 
+// ----------------------------------------------------------------------------- debugging
+
+/// The debugger in the tab: the stop it went to, the frame picked in the call stack, the
+/// watches, and the answers for this stop (asked once per stop and frame, since a watch may do
+/// more than read).
+#[derive(Default)]
+pub struct DebugState {
+    /// Stop on errors nothing catches, where they are raised.
+    pub break_errors: bool,
+    /// Watch expressions (Luau), run in the picked frame at each stop.
+    pub watches: Vec<String>,
+    /// The call stack's frame shown (0: where it stopped).
+    pub frame: usize,
+    /// The stop the tab last went to.
+    seen: u64,
+    watch_new: String,
+    answers: HashMap<String, Result<debug::Variable, String>>,
+    answers_for: (u64, usize),
+    /// The tab's breakpoints are in the running scripts; set them again.
+    applied: bool,
+    apply: bool,
+    /// The gutter menu's line (1-based) and the condition typed in it.
+    menu_line: u32,
+    condition: String,
+}
+
+impl DebugState {
+    /// The answer to `expr` at this stop, in frame `frame`.
+    fn answer(
+        &mut self,
+        world: &mut World,
+        stop: u64,
+        frame: usize,
+        expr: &str,
+    ) -> &Result<debug::Variable, String> {
+        if self.answers_for != (stop, frame) {
+            self.answers.clear();
+            self.answers_for = (stop, frame);
+        }
+        self.answers
+            .entry(expr.to_string())
+            .or_insert_with(|| debug::evaluate(world, frame, expr))
+    }
+}
+
+/// Puts the tab's breakpoints in the running scripts. The editor's client attaches with the
+/// first one (until then scripts run without the debugger's hooks) and stays for the Play.
+fn apply_debugging(world: &mut World, tab: &ScriptsTab) {
+    let any = tab.debug.break_errors || tab.docs.iter().any(|d| !d.breakpoints.is_empty());
+    if !any && !debug::attached(world) {
+        return;
+    }
+    debug::attach(world);
+    debug::set_break_on_errors(world, tab.debug.break_errors);
+    for doc in &tab.docs {
+        let lines: Vec<(u32, Option<String>)> = doc
+            .breakpoints
+            .iter()
+            .map(|(line, condition)| (*line, condition.clone()))
+            .collect();
+        debug::set_breakpoints_with(world, &doc.path, &lines);
+    }
+}
+
+/// Keeps the running scripts' breakpoints the tab's, and goes to each stop: its file at its
+/// line, in front (as Roblox Studio and Visual Studio bring the stopped script up), with a
+/// note on the editor's status bar.
+fn follow_debugger(world: &mut World) {
+    let Some(mut tab) = world.remove_resource::<ScriptsTab>() else {
+        return;
+    };
+    if world.contains_resource::<ScriptsHeld>() {
+        tab.debug.applied = false;
+        tab.debug.seen = 0;
+    } else if !tab.debug.applied || std::mem::take(&mut tab.debug.apply) {
+        apply_debugging(world, &tab);
+        tab.debug.applied = true;
+    }
+    if let Some(stop) = debug::stopped(world)
+        && stop.id != tab.debug.seen
+    {
+        tab.debug.seen = stop.id;
+        tab.debug.frame = 0;
+        if let Some(f) = stop.frames.iter().find(|f| openable(&f.path)) {
+            let to = if f.path.ends_with(".graph") {
+                if let Some(mut graphs) = world.remove_resource::<crate::graphs::GraphsTab>() {
+                    crate::graphs::open(world, &mut graphs, &f.path);
+                    world.insert_resource(graphs);
+                }
+                Tab::Graphs
+            } else {
+                open(world, &mut tab, &f.path, Some(f.line));
+                Tab::Scripts
+            };
+            if let Some(mut dock) = world.get_resource_mut::<EditorDock>()
+                && let Some(at) = dock.0.find_tab(&to)
+            {
+                let _ = dock.0.set_active_tab(at);
+            }
+        }
+        let now = editor::now(world);
+        let text = format!(
+            "{}: the scripts wait and the world's time is held (F5 goes on)",
+            stop_title(&stop)
+        );
+        if let Some(mut ed) = world.get_resource_mut::<Editor>() {
+            ed.info(now, text);
+        }
+    }
+    world.insert_resource(tab);
+}
+
+/// A frame's file the editor can show (not the engine's own Luau, nor the command bar's).
+fn openable(path: &str) -> bool {
+    (path.ends_with(".luau") || path.ends_with(".lua") || path.ends_with(".graph"))
+        && !path.starts_with("engine/")
+}
+
+/// "Paused at a breakpoint in Lamp:update (lamp.luau:27)".
+pub(crate) fn stop_title(stop: &StopView) -> String {
+    let what = match (&stop.exception, stop.reason.as_str()) {
+        (Some(_), _) => "Stopped on an error".to_string(),
+        (None, "breakpoint") => "Paused at a breakpoint".into(),
+        (None, "step") => "Paused after a step".into(),
+        (None, "pause") => "Paused".into(),
+        (None, other) => format!("Paused ({other})"),
+    };
+    match stop.frames.iter().find(|f| openable(&f.path)) {
+        Some(f) => format!(
+            "{what} in {} ({}:{})",
+            f.name,
+            f.path.rsplit('/').next().unwrap_or(&f.path),
+            f.line
+        ),
+        None => what,
+    }
+}
+
+/// F5, F10, F11 and Shift+F11 while stopped (taken before the editor's F5, Play/Stop).
+fn debug_keys(ui: &egui::Ui, world: &mut World, stop: &StopView) {
+    let key = |mods: Modifiers, k: Key| ui.input_mut(|i| i.consume_key(mods, k));
+    let go = if key(Modifiers::NONE, Key::F5) {
+        Some(Go::Continue)
+    } else if key(Modifiers::NONE, Key::F10) {
+        Some(Go::StepOver)
+    } else if key(Modifiers::SHIFT, Key::F11) {
+        Some(Go::StepOut)
+    } else if key(Modifiers::NONE, Key::F11) {
+        Some(Go::StepIn)
+    } else {
+        None
+    };
+    if let Some(go) = go
+        && (stop.live || go == Go::Continue)
+    {
+        debug::go(world, go);
+    }
+}
+
+/// The strip over the code while stopped: where and why, and the buttons to go on.
+fn stop_strip(ui: &mut egui::Ui, world: &mut World, stop: &StopView) {
+    egui::Frame::new()
+        .fill(STOP_STRIP)
+        .inner_margin(egui::Margin::symmetric(8, 4))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                let buttons = [
+                    ("▶ Continue", "F5", Go::Continue),
+                    ("Step over", "F10", Go::StepOver),
+                    ("Step into", "F11", Go::StepIn),
+                    ("Step out", "Shift+F11", Go::StepOut),
+                ];
+                for (label, key, go) in buttons {
+                    let enabled = stop.live || go == Go::Continue;
+                    let text = if go == Go::Continue {
+                        RichText::new(label).color(theme::PLAY).strong()
+                    } else {
+                        RichText::new(label)
+                    };
+                    if ui
+                        .add_enabled(enabled, egui::Button::new(text))
+                        .on_hover_text(key)
+                        .on_disabled_hover_text(
+                            "The error ended this script's call: look at its values, then go on",
+                        )
+                        .clicked()
+                    {
+                        debug::go(world, go);
+                    }
+                }
+                ui.add_space(8.0);
+                ui.label(RichText::new(stop_title(stop)).color(STOP).strong());
+                if let Some(e) = &stop.exception {
+                    ui.label(RichText::new(e).color(ERROR));
+                } else {
+                    ui.label(theme::dim(
+                        "The other scripts wait and the world's time is held; the editor keeps \
+                         running.",
+                    ));
+                }
+            });
+        });
+}
+
+/// The stop's panel, as Visual Studio's and Roblox Studio's debugger windows: the call stack
+/// (click a frame for its line and variables), the frame's variables (tables open up), the
+/// watches and every breakpoint.
+fn debug_panel(ui: &mut egui::Ui, world: &mut World, tab: &mut ScriptsTab, stop: &StopView) {
+    let heading = |ui: &mut egui::Ui, text: &str| {
+        ui.add_space(6.0);
+        ui.label(RichText::new(text).small().strong().color(theme::TEXT_DIM));
+    };
+    egui::ScrollArea::vertical()
+        .id_salt("script debugger")
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            heading(ui, "CALL STACK");
+            let mut pick = None;
+            for (i, f) in stop.frames.iter().enumerate() {
+                let file = f.path.rsplit('/').next().unwrap_or(&f.path);
+                let mut job = LayoutJob::default();
+                let mono = FontId::monospace(12.5);
+                let arrow = if i == 0 { "▶ " } else { "   " };
+                job.append(arrow, 0.0, fmt(&mono, STOP));
+                let name_color = if openable(&f.path) {
+                    theme::TEXT
+                } else {
+                    theme::TEXT_DIM
+                };
+                job.append(&f.name, 0.0, fmt(&mono, name_color));
+                job.append(&format!("  {file}:{}", f.line), 0.0, fmt(&mono, LINE_NO));
+                let r = ui.add(egui::Button::selectable(i == tab.debug.frame, job));
+                if r.clicked() {
+                    pick = Some(i);
+                }
+            }
+            if let Some(i) = pick {
+                tab.debug.frame = i;
+                let f = &stop.frames[i];
+                if openable(&f.path) && !f.path.ends_with(".graph") {
+                    open(world, tab, &f.path, Some(f.line));
+                }
+            }
+            let frame = tab.debug.frame.min(stop.frames.len().saturating_sub(1));
+
+            heading(ui, "VARIABLES");
+            for scope in debug::scopes(world, frame) {
+                egui::CollapsingHeader::new(RichText::new(&scope.name).strong())
+                    .id_salt(("script scope", frame, &scope.name))
+                    .default_open(scope.name == "Locals")
+                    .show(ui, |ui| {
+                        variable_rows(ui, world, scope.reference, &scope.name, 0)
+                    });
+            }
+
+            heading(ui, "WATCH");
+            let mut remove = None;
+            for i in 0..tab.debug.watches.len() {
+                let expr = tab.debug.watches[i].clone();
+                let answer = tab.debug.answer(world, stop.id, frame, &expr).clone();
+                ui.horizontal(|ui| {
+                    if ui
+                        .small_button("✖")
+                        .on_hover_text("Remove the watch")
+                        .clicked()
+                    {
+                        remove = Some(i);
+                    }
+                    match answer {
+                        Ok(v) if v.reference != 0 => {
+                            egui::CollapsingHeader::new(variable_text(&v))
+                                .id_salt(("script watch", &expr))
+                                .show(ui, |ui| variable_rows(ui, world, v.reference, &expr, 1));
+                        }
+                        Ok(v) => {
+                            ui.label(variable_text(&v));
+                        }
+                        Err(e) => {
+                            ui.label(RichText::new(format!("{expr}: {e}")).color(ERROR));
+                        }
+                    }
+                });
+            }
+            if let Some(i) = remove {
+                tab.debug.watches.remove(i);
+            }
+            let r = ui.add(
+                egui::TextEdit::singleline(&mut tab.debug.watch_new)
+                    .font(egui::TextStyle::Monospace)
+                    .hint_text("Add a watch: self.t * 2")
+                    .desired_width(f32::INFINITY),
+            );
+            if r.lost_focus()
+                && ui.input(|i| i.key_pressed(Key::Enter))
+                && !tab.debug.watch_new.trim().is_empty()
+            {
+                let w = std::mem::take(&mut tab.debug.watch_new).trim().to_string();
+                tab.debug.watches.push(w);
+            }
+
+            heading(ui, "BREAKPOINTS");
+            breakpoint_list(ui, world, tab);
+        });
+}
+
+fn fmt(font: &FontId, color: Color32) -> TextFormat {
+    TextFormat::simple(font.clone(), color)
+}
+
+/// `name = value`, colored as the code is.
+fn variable_text(v: &debug::Variable) -> LayoutJob {
+    let mono = FontId::monospace(12.5);
+    let mut job = LayoutJob::default();
+    let name_color = if v.name == "self" { SELF } else { theme::TEXT };
+    job.append(&v.name, 0.0, fmt(&mono, name_color));
+    job.append(" = ", 0.0, fmt(&mono, LINE_NO));
+    let value_color = match v.kind.as_str() {
+        "number" | "integer" => NUMBER,
+        "string" => STRING,
+        "boolean" | "nil" => KEYWORD,
+        "vec3" | "quat" => ENGINE,
+        "function" => CALL,
+        _ => theme::TEXT_DIM,
+    };
+    job.append(&v.value, 0.0, fmt(&mono, value_color));
+    job
+}
+
+/// A scope's variables or a table's entries; tables open up (their open state kept by the
+/// path of names, so it stays from step to step).
+fn variable_rows(ui: &mut egui::Ui, world: &World, reference: usize, path: &str, depth: usize) {
+    let vars = debug::children(world, reference);
+    if vars.is_empty() {
+        ui.label(theme::dim("(none)"));
+    }
+    for v in vars.into_iter().take(300) {
+        let at = format!("{path}.{}", v.name);
+        if v.reference != 0 && depth < 8 {
+            egui::CollapsingHeader::new(variable_text(&v))
+                .id_salt(("script variable", &at))
+                .show(ui, |ui| {
+                    variable_rows(ui, world, v.reference, &at, depth + 1)
+                });
+        } else {
+            ui.horizontal(|ui| {
+                ui.add_space(18.0);
+                ui.label(variable_text(&v));
+            });
+        }
+    }
+}
+
+/// Every open file's breakpoints, with their conditions and how often they stopped.
+fn breakpoint_list(ui: &mut egui::Ui, world: &mut World, tab: &mut ScriptsTab) {
+    let mut go_to = None;
+    let mut remove = None;
+    for (d, doc) in tab.docs.iter().enumerate() {
+        let hits: HashMap<u32, u64> = debug::breakpoints(world, &doc.path)
+            .into_iter()
+            .map(|b| (b.line, b.hits))
+            .collect();
+        for (line, condition) in &doc.breakpoints {
+            ui.horizontal(|ui| {
+                if ui.small_button("✖").on_hover_text("Remove").clicked() {
+                    remove = Some((d, *line));
+                }
+                let (dot, _) = ui.allocate_exact_size(Vec2::splat(12.0), egui::Sense::hover());
+                ui.painter().circle_filled(dot.center(), 4.5, BREAKPOINT);
+                let mut text = format!("{}:{line}", doc.name());
+                if let Some(c) = condition {
+                    text.push_str(&format!("  when {c}"));
+                }
+                if let Some(n) = hits.get(line).filter(|n| **n > 0) {
+                    text.push_str(&format!("  · {n} hit{}", if *n == 1 { "" } else { "s" }));
+                }
+                if ui
+                    .add(
+                        egui::Label::new(RichText::new(text).monospace())
+                            .sense(egui::Sense::click()),
+                    )
+                    .on_hover_text("Open its line")
+                    .clicked()
+                {
+                    go_to = Some((doc.path.clone(), *line));
+                }
+            });
+        }
+    }
+    if tab.docs.iter().all(|d| d.breakpoints.is_empty()) {
+        ui.label(theme::dim("Click left of a line number to stop there."));
+    }
+    if let Some((d, line)) = remove {
+        tab.docs[d].breakpoints.remove(&line);
+        tab.debug.apply = true;
+    }
+    if let Some((path, line)) = go_to {
+        open(world, tab, &path, Some(line));
+    }
+}
+
+/// A click in the gutter: a breakpoint on that line (1-based), or none again.
+fn toggle_breakpoint(doc: &mut Doc, debug: &mut DebugState, line: u32) {
+    if doc.breakpoints.remove(&line).is_none() {
+        doc.breakpoints.insert(line, None);
+    }
+    debug.apply = true;
+}
+
+/// The gutter's right-click menu: a breakpoint, one with a condition, or a logpoint.
+fn gutter_menu(ui: &mut egui::Ui, world: &mut World, doc: &mut Doc, debug: &mut DebugState) {
+    let line = debug.menu_line;
+    ui.set_min_width(260.0);
+    let has = doc.breakpoints.contains_key(&line);
+    let label = if has {
+        "Remove the breakpoint"
+    } else {
+        "Add a breakpoint (F9)"
+    };
+    if ui.button(label).clicked() {
+        toggle_breakpoint(doc, debug, line);
+        ui.close();
+    }
+    ui.label(theme::dim("Stop only when (Luau, in the line's scope):"));
+    let r = ui.add(
+        egui::TextEdit::singleline(&mut debug.condition)
+            .font(egui::TextStyle::Monospace)
+            .hint_text("self.t > 5")
+            .desired_width(f32::INFINITY),
+    );
+    let enter = r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
+    if (ui.button("Set the conditional breakpoint").clicked() || enter)
+        && !debug.condition.trim().is_empty()
+    {
+        doc.breakpoints
+            .insert(line, Some(debug.condition.trim().to_string()));
+        debug.apply = true;
+        ui.close();
+    }
+    ui.separator();
+    let label = if doc.logpoints.contains_key(&line) {
+        "Stop showing its values"
+    } else {
+        "Show its values live (Shift+click)"
+    };
+    if ui.button(label).clicked() {
+        toggle_logpoint(world, doc, line as usize - 1);
+        ui.close();
+    }
+}
+
+/// The name under the pointer in the code, with what leads to it (`self.props.period`), to
+/// show its value while stopped.
+fn expression_at(text: &str, char_index: usize) -> Option<String> {
+    let chars: Vec<char> = text.chars().collect();
+    let word = |c: char| c.is_alphanumeric() || c == '_';
+    if !chars.get(char_index).is_some_and(|c| word(*c)) {
+        return None;
+    }
+    let mut end = char_index;
+    while end < chars.len() && word(chars[end]) {
+        end += 1;
+    }
+    let mut start = char_index;
+    while start > 0 && (word(chars[start - 1]) || chars[start - 1] == '.') {
+        start -= 1;
+    }
+    let expr: String = chars[start..end].iter().collect();
+    let expr = expr.trim_start_matches('.').to_string();
+    const KEYWORDS: &[&str] = &[
+        "and", "break", "do", "else", "elseif", "end", "false", "for", "function", "if", "in",
+        "local", "nil", "not", "or", "repeat", "return", "then", "true", "until", "while",
+        "continue", "export", "type",
+    ];
+    let first = expr.split('.').next().unwrap_or("");
+    (!expr.is_empty()
+        && !first.starts_with(|c: char| c.is_ascii_digit())
+        && !KEYWORDS.contains(&first)
+        && !expr.split('.').any(str::is_empty))
+    .then_some(expr)
+}
+
 // ----------------------------------------------------------------------------- screenshots
 
 /// The example scripts the shots use (in the scripts folder): copied next to the shots, so
@@ -2675,6 +3383,65 @@ pub fn shots(dir: String) -> ShotScript {
         }))),
         Step::Wait(6),
         Step::Shot("scripts_06_console"),
+        // Debugging: a breakpoint on the lamp's glow line. Its script waits there and the
+        // world's time with it, while the editor runs on: the arrow, each local's value beside
+        // its line, the call stack, the variables and the watches.
+        Step::Do(Box::new(open_file("examples/lamp.luau", Some(26)))),
+        Step::Do(Box::new(|world: &mut World, _: &mut Editor| {
+            world.resource_mut::<EditorDock>().0 = debug_layout();
+        })),
+        Step::Do(Box::new(with_tab(|_, tab| {
+            let doc = &mut tab.docs[tab.current];
+            if let Some(line) = doc.text.lines().position(|l| l.contains("local glow")) {
+                doc.breakpoints.insert(line as u32 + 1, None);
+            }
+            tab.debug.watches = vec![
+                "p.lumens * breath".into(),
+                "self.t % p.period".into(),
+                "self.props".into(),
+            ];
+            tab.debug.apply = true;
+        }))),
+        Step::Wait(40),
+        Step::Shot("scripts_07_breakpoint"),
+        // Two steps over: the glow is worked out and the light set; the arrow moves on.
+        Step::Do(Box::new(|world: &mut World, _: &mut Editor| {
+            debug::go(world, Go::StepOver);
+        })),
+        Step::Wait(4),
+        Step::Do(Box::new(|world: &mut World, _: &mut Editor| {
+            debug::go(world, Go::StepOver);
+        })),
+        Step::Wait(30),
+        Step::Shot("scripts_08_stepped"),
+        // On again without the breakpoint, and Stop on errors: the light's misspelt name stops
+        // where the error is raised, with the values that led to it.
+        Step::Do(Box::new(with_tab(|world, tab| {
+            for doc in &mut tab.docs {
+                doc.breakpoints.clear();
+            }
+            tab.debug.break_errors = true;
+            tab.debug.apply = true;
+            debug::go(world, Go::Continue);
+            let doc = &mut tab.docs[tab.current];
+            doc.text = doc
+                .saved
+                .replace("\"PointLight\", { color", "\"PointLigth\", { color");
+            let now = editor::now(world);
+            save(world, tab, now);
+        }))),
+        Step::Wait(60),
+        Step::Shot("scripts_09_error_stop"),
+        Step::Do(Box::new(with_tab(|world, tab| {
+            tab.debug.break_errors = false;
+            tab.debug.apply = true;
+            let doc = &mut tab.docs[tab.current];
+            doc.text = doc.saved.replace("\"PointLigth\"", "\"PointLight\"");
+            let now = editor::now(world);
+            save(world, tab, now);
+            debug::go(world, Go::Continue);
+        }))),
+        Step::Wait(10),
         Step::Do(Box::new(|world: &mut World, ed: &mut Editor| {
             editor::stop(world, ed)
         })),
@@ -2689,6 +3456,15 @@ fn shot_layout() -> DockState<Tab> {
     let surface = dock.main_surface_mut();
     let [_scripts, right] = surface.split_right(NodeIndex::root(), 0.55, vec![Tab::Viewport]);
     let [_view, _details] = surface.split_below(right, 0.52, vec![Tab::Inspector]);
+    dock
+}
+
+/// The debugging shots' layout: the Scripts tab wider, for the stop's panel beside the code.
+fn debug_layout() -> DockState<Tab> {
+    let mut dock = DockState::new(vec![Tab::Scripts]);
+    let surface = dock.main_surface_mut();
+    let [_scripts, right] = surface.split_right(NodeIndex::root(), 0.7, vec![Tab::Viewport]);
+    let [_view, _details] = surface.split_below(right, 0.6, vec![Tab::Inspector]);
     dock
 }
 
@@ -2797,6 +3573,25 @@ mod tests {
         assert_eq!(lp.at, 5);
         let lp = logpoint_for("self.t += dt\nprint(1)", 0);
         assert_eq!(lp.message, "self.t = {self.t}");
+    }
+
+    #[test]
+    fn hovering_a_name_asks_for_it_and_what_leads_to_it() {
+        let text = "local glow = self.props.lumens * k2\nif x then end";
+        let at = |needle: &str, k: usize| text.find(needle).unwrap() + k;
+        assert_eq!(
+            expression_at(text, at("lumens", 2)).as_deref(),
+            Some("self.props.lumens")
+        );
+        assert_eq!(
+            expression_at(text, at("props", 0)).as_deref(),
+            Some("self.props")
+        );
+        assert_eq!(expression_at(text, at("glow", 1)).as_deref(), Some("glow"));
+        assert_eq!(expression_at(text, at("k2", 1)).as_deref(), Some("k2"));
+        assert_eq!(expression_at(text, at("local", 1)), None);
+        assert_eq!(expression_at(text, at(" = ", 1)), None);
+        assert_eq!(expression_at(text, at("then", 0)), None);
     }
 
     #[test]

@@ -83,6 +83,8 @@ pub(crate) struct Drawn {
     drawn_at: f64,
     /// The board's settings when drawn (scrolling it redraws it).
     board: CodeBoard,
+    /// The debugger stop drawn ([`StopView::id`](crate::debug::StopView)).
+    stop: Option<u64>,
 }
 
 /// Glyph coverage, cached per character.
@@ -233,6 +235,11 @@ const VALUE_BG: Rgb = [0.13, 0.095, 0.03];
 const VALUE_GLOW: f32 = 0.55;
 const ERROR_GLOW: f32 = 0.6;
 /// The error's message beside its line.
+const STOP: Rgb = [1.0, 0.86, 0.30];
+const STOP_BG: Rgb = [0.24, 0.19, 0.03];
+const STOP_GLOW: f32 = 0.85;
+const STOP_VALUE: Rgb = [0.62, 0.86, 1.0];
+const STOP_VALUE_BG: Rgb = [0.03, 0.08, 0.13];
 const FAULT_BG: Rgb = [0.30, 0.05, 0.05];
 const FAULT_TEXT: Rgb = [1.0, 0.72, 0.68];
 /// The profiler's heat, from a line that took little of the script time to the hottest.
@@ -497,6 +504,36 @@ struct Marks<'a> {
     heat: &'a BTreeMap<u32, f32>,
     /// The last runtime error raised in this file.
     fault: Option<&'a Fault>,
+    /// The debugger stopped in this file.
+    stop: Option<&'a BoardStop>,
+}
+
+/// A debugger stop in a board's file: its line, and the locals' values to show beside the
+/// lines that declare them (as JetBrains IDEs and VS Code show inline values).
+pub(crate) struct BoardStop {
+    pub line: u32,
+    /// "stopped at line 31 in update · breakpoint".
+    pub status: String,
+    /// Values by the line that declares them.
+    pub values: BTreeMap<u32, String>,
+}
+
+impl BoardStop {
+    /// From the stop's frame in `path`, if one is.
+    pub(crate) fn of(rt: &ScriptRuntime, path: &str, source: &str) -> Option<(u64, Self)> {
+        let stop = crate::debug::file_stop(rt, path, source, None)?;
+        Some((
+            stop.id,
+            Self {
+                line: stop.line,
+                status: format!(
+                    "● stopped at line {} in {} · {}",
+                    stop.line, stop.function, stop.reason
+                ),
+                values: stop.values,
+            },
+        ))
+    }
 }
 
 /// Draws `source` (with `error`, if the last reload failed) onto a board's image.
@@ -514,6 +551,7 @@ fn draw(
         values,
         heat,
         fault,
+        stop,
     } = marks;
     // The line the error is on: the runtime error's, or the failed reload's.
     let error_line = fault.map(|f| f.line).or_else(|| {
@@ -537,6 +575,7 @@ fn draw(
     let header_base = header * 0.5 + font.ascent() * 0.4;
     cv.text(font, title, margin, header_base, &|_| TITLE);
     let (status, status_color) = match (error, fault) {
+        _ if stop.is_some() => (stop.map(|s| s.status.clone()).unwrap_or_default(), STOP),
         (Some(_), _) => ("● error: previous version running".to_string(), ERROR),
         (None, Some(f)) => (
             format!("● error on line {} · version {version}", f.line),
@@ -582,7 +621,17 @@ fn draw(
     for (row, i) in (first..all.len()).take(shown).enumerate() {
         let top = header + margin + row as f32 * line_h;
         let line_no = i as u32 + 1;
-        if error_line == Some(line_no) {
+        let stopped_here = stop.is_some_and(|s| s.line == line_no);
+        if stopped_here {
+            cv.rect(
+                0,
+                top as i32,
+                w as i32,
+                (top + line_h) as i32,
+                STOP_BG,
+                STOP_GLOW,
+            );
+        } else if error_line == Some(line_no) {
             cv.rect(
                 0,
                 top as i32,
@@ -633,7 +682,9 @@ fn draw(
             }
         }
         let no = format!("{:>3}", i + 1);
-        let no_color = if error_line == Some(line_no) {
+        let no_color = if stopped_here {
+            STOP
+        } else if error_line == Some(line_no) {
             ERROR
         } else if pct > 0.0 {
             TEXT
@@ -641,6 +692,24 @@ fn draw(
             LINE_NO
         };
         cv.text(font, &no, margin, base, &|_| no_color);
+        if stopped_here {
+            // The arrow at the line that runs next, as debuggers mark it.
+            let x0 = margin * 0.25;
+            let x1 = margin * 0.25 + line_h * 0.55;
+            let mid = top + line_h * 0.5;
+            let half = line_h * 0.32;
+            for dy in -(half as i32)..=(half as i32) {
+                let k = 1.0 - (dy as f32).abs() / half;
+                cv.rect(
+                    x0 as i32,
+                    (mid + dy as f32) as i32,
+                    (x0 + (x1 - x0) * k) as i32,
+                    (mid + dy as f32 + 1.0) as i32,
+                    STOP,
+                    STOP_GLOW,
+                );
+            }
+        }
         let text = all[i].replace('\t', "    ");
         let colors = highlight(&text, &mut in_comment);
         cv.text(font, &text, gutter + adv, base, &|k| {
@@ -661,6 +730,21 @@ fn draw(
                 VALUE_GLOW,
             );
             cv.text(font, &label, x, base, &|_| VALUE);
+        }
+        if let Some(value) = stop.and_then(|s| s.values.get(&line_no)) {
+            let label: String = value.chars().take(56).collect();
+            let width = adv * (label.chars().count() as f32 + 1.0);
+            let after = gutter + adv * (text.chars().count() as f32 + 3.0);
+            let x = after.min(w as f32 - margin - width).max(gutter + adv);
+            cv.rect(
+                (x - adv * 0.5) as i32,
+                (top + line_h * 0.06) as i32,
+                (x + width) as i32,
+                (top + line_h * 0.94) as i32,
+                STOP_VALUE_BG,
+                VALUE_GLOW,
+            );
+            cv.text(font, &label, x, base, &|_| STOP_VALUE);
         }
         if let Some(f) = fault.filter(|f| f.line == line_no) {
             let count = if f.count > 1 {
@@ -761,6 +845,9 @@ pub(crate) fn draw_boards(
             })
         });
         let known = drawn.get(&e);
+        let stop = runtime
+            .as_ref()
+            .and_then(|rt| BoardStop::of(rt, &path, loaded.as_ref().map_or("", |l| &l.0)));
         let (inline_version, inline) = runtime
             .as_ref()
             .map(|rt| rt.debugger.inline_values(&path))
@@ -808,6 +895,7 @@ pub(crate) fn draw_boards(
                 && d.error == error
                 && fault_key(&d.fault) == fault_key(&fault)
                 && d.board == *board
+                && d.stop == stop.as_ref().map(|s| s.0)
         });
         let recount = known.is_some_and(|d| d.fault != fault && now - d.drawn_at > 2.0);
         // New logpoint values redraw a few times a second at most; a new profile (once a
@@ -837,6 +925,7 @@ pub(crate) fn draw_boards(
                 values: &inline,
                 heat: &heat,
                 fault: fault.as_ref(),
+                stop: stop.as_ref().map(|s| &s.1),
             },
         );
         let (handle, glow_handle) = show(
@@ -862,6 +951,7 @@ pub(crate) fn draw_boards(
                 fault,
                 drawn_at: now,
                 board: board.clone(),
+                stop: stop.map(|s| s.0),
             },
         );
     }
@@ -896,7 +986,9 @@ pub(crate) fn show(
     material.emissive_texture = Some(glow_handle);
     material.emissive = [1.0, 1.0, 1.0];
     material.emissive_strength = glow_cd_m2;
-    material.perceptual_roughness = 0.35;
+    // Matte, as an anti-glare screen: glossier, the graph board mirrored the wisp swarm behind
+    // the camera as a band of speckles across its nodes.
+    material.perceptual_roughness = 0.85;
     material.metallic = 0.0;
     renderer.material = MaterialRef::Inline(material);
     (handle, glow_handle)
@@ -917,6 +1009,21 @@ mod tests {
         assert_eq!(colors[line.len() - 1], COMMENT);
         let s = highlight("print(\"hi\")", &mut c);
         assert_eq!(s[7], STRING);
+    }
+
+    #[test]
+    fn locals_are_found_where_they_are_declared() {
+        use crate::debug::declares;
+        assert!(declares("\tlocal phase = (i - 1) / n", "phase"));
+        assert!(declares("local a: number, b = 1, 2", "b"));
+        assert!(!declares("local phase = crest", "crest"));
+        assert!(declares("\tfor i, lamp in self.lanterns do", "lamp"));
+        assert!(declares("for k = 1, 10 do", "k"));
+        assert!(declares("function Courtyard:update(dt: number)", "dt"));
+        assert!(declares("function Courtyard:update(dt: number)", "self"));
+        assert!(!declares("function M.go(dt)", "self"));
+        assert!(declares("local function shake(e, amount)", "amount"));
+        assert!(!declares("\tself.t += dt", "dt"));
     }
 
     #[test]
@@ -950,6 +1057,11 @@ mod tests {
                     line: 4,
                     message: "attempt to add nil".into(),
                     count: 30,
+                }),
+                stop: Some(&BoardStop {
+                    line: 3,
+                    status: "● stopped at line 3 in update · breakpoint".into(),
+                    values: BTreeMap::from([(2, "self = {t = 0.25} · dt = 0.016".into())]),
                 }),
             },
         );

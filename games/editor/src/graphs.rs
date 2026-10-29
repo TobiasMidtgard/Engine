@@ -14,6 +14,11 @@
 //! (Blueprints' debugger), and a runtime error marks the node it came from. Saving (Ctrl+S)
 //! hot reloads the running graph, which keeps its state.
 //!
+//! Breakpoints go on nodes, as Blueprints': F9 or a node's right-click menu puts a red octagon
+//! on it, and when the graph gets there it waits (the other scripts and the world's time with
+//! it) with the node outlined in yellow under an arrow and the locals' values over the canvas;
+//! Next node (F10) runs on to the next node, Continue (F5) goes on.
+//!
 //! On the canvas: right-click or Space adds a node (a search of everything there is); drag from
 //! a pin to wire it, or into empty space to add a node already wired; drag the background with
 //! the right or middle button to pan, the wheel zooms, and a left drag selects a box. Delete,
@@ -31,6 +36,7 @@ use egui::{
 use egui_dock::{DockState, NodeIndex};
 use engine::core::registry::call_api;
 use engine::prelude::*;
+use engine_script::debug::{self, Go};
 use engine_script::editing::{self, FileMarks};
 use engine_script::graph::{
     self, Comment, Compiled, Graph, Link, Live, Node, NodeSpec, PinType, Problem, look,
@@ -68,6 +74,13 @@ const VALUE_BG: Color32 = Color32::from_rgb(0x2e, 0x22, 0x0a);
 const CODE_BG: Color32 = Color32::from_rgb(0x17, 0x18, 0x1b);
 const LINE_NO: Color32 = Color32::from_rgb(0x52, 0x57, 0x60);
 const CODE_PICKED: Color32 = Color32::from_rgb(0x2a, 0x2f, 0x3a);
+/// A node breakpoint's octagon, the node the graph waits at, and its values.
+const BREAKPOINT: Color32 = Color32::from_rgb(0xe5, 0x3e, 0x3e);
+const STOPPED: Color32 = Color32::from_rgb(0xff, 0xd8, 0x4c);
+const STOP_STRIP: Color32 = Color32::from_rgb(0x3a, 0x31, 0x0e);
+const STOP_VALUE: Color32 = Color32::from_rgb(0x9c, 0xdc, 0xfe);
+/// Line steps "Next node" takes at most before it stops anyway.
+const NODE_STEPS: u32 = 400;
 /// Seconds a node stays lit after it ran.
 const LIT_SECS: f64 = 0.6;
 /// How often the runtime is asked what the graph did.
@@ -96,6 +109,9 @@ pub struct GraphsTab {
     /// Copied nodes, for Ctrl+V.
     clipboard: Option<Graph>,
     vocab: Option<crate::scripts::Vocab>,
+    /// Next node: stepping lines until the graph is at another node (from this node, steps
+    /// left).
+    stepping: Option<(Option<u32>, u32)>,
 }
 
 impl Default for GraphsTab {
@@ -114,6 +130,7 @@ impl Default for GraphsTab {
             new_name: None,
             clipboard: None,
             vocab: None,
+            stepping: None,
         }
     }
 }
@@ -154,6 +171,9 @@ pub struct GraphDoc {
     boxing: Option<Pos2>,
     /// A comment whose text is being edited.
     editing_comment: Option<usize>,
+    /// Nodes with a breakpoint, and the lines last set for them in the running scripts.
+    pub breakpoints: BTreeSet<u32>,
+    applied: Option<Vec<u32>>,
 }
 
 impl GraphDoc {
@@ -250,6 +270,7 @@ pub fn panel(ui: &mut egui::Ui, world: &mut World, editor: &mut Editor) {
         .frame(egui::Frame::NONE)
         .show(ui, |ui| {
             tool_bar(ui, world, editor, &mut tab, now);
+            stop_strip(ui, world, &mut tab);
             if tab.docs.is_empty() {
                 ui.add_space(40.0);
                 ui.vertical_centered(|ui| {
@@ -315,6 +336,8 @@ pub fn open(world: &World, tab: &mut GraphsTab, path: &str) {
         wiring: None,
         boxing: None,
         editing_comment: None,
+        breakpoints: BTreeSet::new(),
+        applied: None,
     });
     tab.current = tab.docs.len() - 1;
 }
@@ -333,7 +356,12 @@ fn poll(world: &mut World, editor: &Editor, tab: &mut GraphsTab, now: f64) {
             doc.watched = None;
             doc.live = Live::default();
             doc.ran.clear();
+            doc.applied = None;
         }
+        tab.stepping = None;
+    }
+    if playing {
+        breakpoints_and_steps(world, tab);
     }
     if now >= tab.files_next {
         tab.files_next = now + FILES_SECS;
@@ -1167,6 +1195,7 @@ fn specs_for(tab: &GraphsTab, g: &Graph) -> Vec<NodeSpec> {
 
 fn canvas(ui: &mut egui::Ui, world: &mut World, editor: &Editor, tab: &mut GraphsTab, now: f64) {
     let lib = specs_for(tab, &tab.docs[tab.current].graph);
+    let stopped_node = stopped_node(world, &mut tab.docs[tab.current]);
     let playing = editor.mode != Mode::Edit;
     let live_on = tab.live && playing;
     let clipboard = tab.clipboard.clone();
@@ -1380,6 +1409,12 @@ fn canvas(ui: &mut egui::Ui, world: &mut World, editor: &Editor, tab: &mut Graph
                 &problems,
                 fault_node == Some(id),
             );
+            if doc.breakpoints.contains(&id) {
+                paint_breakpoint(&painter, rect);
+            }
+            if stopped_node == Some(id) {
+                paint_stopped(&painter, rect);
+            }
             if resp.drag_started() {
                 drag_started = true;
                 if !selected {
@@ -1401,6 +1436,15 @@ fn canvas(ui: &mut egui::Ui, world: &mut World, editor: &Editor, tab: &mut Graph
                 }
                 if ui.button("Break its wires").clicked() {
                     menu = Some((id, "break"));
+                }
+                ui.separator();
+                let label = if doc.breakpoints.contains(&id) {
+                    "Remove the breakpoint (F9)"
+                } else {
+                    "Add a breakpoint (F9)"
+                };
+                if ui.button(label).clicked() {
+                    menu = Some((id, "breakpoint"));
                 }
             });
             let mut tip = format!("{}\n{}", spec.title, spec.doc);
@@ -1637,6 +1681,11 @@ fn canvas(ui: &mut egui::Ui, world: &mut World, editor: &Editor, tab: &mut Graph
                     let frag = fragment(&doc.graph, &doc.selected);
                     paste(doc, &frag, Vec2::new(30.0, 30.0));
                 }
+                "breakpoint" => {
+                    if !doc.breakpoints.remove(&id) {
+                        doc.breakpoints.insert(id);
+                    }
+                }
                 _ => doc.graph.links.retain(|l| l.from.0 != id && l.to.0 != id),
             }
         }
@@ -1734,6 +1783,18 @@ fn canvas(ui: &mut egui::Ui, world: &mut World, editor: &Editor, tab: &mut Graph
     // Keys, while the pointer is over the canvas and nothing is being typed.
     let over = ui.rect_contains_pointer(outer);
     if over && !ui.ctx().egui_wants_keyboard_input() {
+        // F9: a breakpoint on each selected node, or off again.
+        if ui.input(|i| i.key_pressed(Key::F9)) {
+            let ids: Vec<u32> = doc.selected.iter().copied().collect();
+            let all_on = ids.iter().all(|id| doc.breakpoints.contains(id));
+            for id in ids {
+                if all_on {
+                    doc.breakpoints.remove(&id);
+                } else {
+                    doc.breakpoints.insert(id);
+                }
+            }
+        }
         let (del, dup, undo, redo, frame, copy, pastes, space, comment, all) = ui.input(|i| {
             let cmd = i.modifiers.command;
             (
@@ -1982,6 +2043,185 @@ fn paint_pin(p: &egui::Painter, at: Pos2, ty: PinType, on: bool) {
         p.circle_filled(at, 5.0, c);
     } else {
         p.circle_stroke(at, 4.5, Stroke::new(1.6, c));
+    }
+}
+
+/// Unreal's breakpoint mark: a red octagon on the node's top-left corner.
+fn paint_breakpoint(p: &egui::Painter, rect: Rect) {
+    let c = rect.left_top() + Vec2::new(2.0, 2.0);
+    let r = 8.5;
+    let points: Vec<Pos2> = (0..8)
+        .map(|i| {
+            let a = std::f32::consts::TAU * (i as f32 + 0.5) / 8.0;
+            c + Vec2::new(a.cos(), a.sin()) * r
+        })
+        .collect();
+    p.add(Shape::convex_polygon(
+        points,
+        BREAKPOINT,
+        Stroke::new(1.5, Color32::from_black_alpha(200)),
+    ));
+}
+
+/// The node the graph waits at: outlined in yellow, under a big arrow (as Blueprints mark the
+/// node a breakpoint stopped on).
+fn paint_stopped(p: &egui::Painter, rect: Rect) {
+    p.rect_stroke(
+        rect.expand(3.0),
+        9.0,
+        Stroke::new(3.5, STOPPED),
+        egui::StrokeKind::Outside,
+    );
+    let tip = Pos2::new(rect.center().x, rect.top() - 8.0);
+    let (w, h, stem) = (16.0, 16.0, 7.0);
+    p.add(Shape::convex_polygon(
+        vec![
+            tip,
+            tip + Vec2::new(w, -h),
+            tip + Vec2::new(stem, -h),
+            tip + Vec2::new(stem, -h - 18.0),
+            tip + Vec2::new(-stem, -h - 18.0),
+            tip + Vec2::new(-stem, -h),
+            tip + Vec2::new(-w, -h),
+        ],
+        STOPPED,
+        Stroke::new(1.5, Color32::from_black_alpha(200)),
+    ));
+}
+
+/// The node of `doc` the scripts are stopped at (the innermost frame in its code).
+fn stopped_node(world: &World, doc: &mut GraphDoc) -> Option<u32> {
+    let stop = debug::stopped(world)?;
+    let frame = stop.frames.iter().find(|f| f.path == doc.path)?;
+    doc.compiled().node_at(frame.line)
+}
+
+/// Puts each graph's node breakpoints on the lines their nodes run from (again when the code
+/// moves), and runs Next node: line steps until the graph is at another node.
+fn breakpoints_and_steps(world: &mut World, tab: &mut GraphsTab) {
+    for doc in &mut tab.docs {
+        if doc.dirty() || (doc.breakpoints.is_empty() && doc.applied.is_none()) {
+            continue;
+        }
+        doc.compiled();
+        let lines: Vec<u32> = doc
+            .breakpoints
+            .iter()
+            .filter_map(|n| doc.compiled.node_lines.get(n).copied())
+            .collect();
+        if doc.applied.as_ref() != Some(&lines) {
+            debug::set_breakpoints(world, &doc.path, &lines);
+            doc.applied = Some(lines);
+        }
+    }
+    let Some((from, left)) = tab.stepping else {
+        return;
+    };
+    let Some(stop) = debug::stopped(world) else {
+        return;
+    };
+    let Some(doc) = tab.docs.get_mut(tab.current) else {
+        tab.stepping = None;
+        return;
+    };
+    let here = stop
+        .frames
+        .first()
+        .filter(|f| f.path == doc.path)
+        .map(|f| doc.compiled().node_at(f.line));
+    match here {
+        // Still in the node it left from, or in the graph's own scaffolding: on.
+        Some(node) if (node == from || node.is_none()) && left > 0 && stop.live => {
+            if debug::go(world, Go::StepOver) {
+                tab.stepping = Some((from, left - 1));
+            }
+        }
+        _ => tab.stepping = None,
+    }
+}
+
+/// While the scripts are stopped: where, its locals, and Continue and the steps (F5, F10 for
+/// the next node, F11, Shift+F11).
+fn stop_strip(ui: &mut egui::Ui, world: &mut World, tab: &mut GraphsTab) {
+    let Some(stop) = debug::stopped(world) else {
+        return;
+    };
+    let node = tab
+        .docs
+        .get_mut(tab.current)
+        .and_then(|doc| stopped_node(world, doc));
+    let in_graph = tab
+        .docs
+        .get(tab.current)
+        .is_some_and(|d| stop.frames.iter().any(|f| f.path == d.path));
+    let stepping = tab.stepping.is_some();
+    let mut go = None;
+    let key = |mods: egui::Modifiers, k: Key| ui.input_mut(|i| i.consume_key(mods, k));
+    if !stepping {
+        if key(egui::Modifiers::NONE, Key::F5) {
+            go = Some(Go::Continue);
+        } else if key(egui::Modifiers::NONE, Key::F10) {
+            go = Some(Go::StepOver);
+        } else if key(egui::Modifiers::SHIFT, Key::F11) {
+            go = Some(Go::StepOut);
+        } else if key(egui::Modifiers::NONE, Key::F11) {
+            go = Some(Go::StepIn);
+        }
+    }
+    egui::Frame::new()
+        .fill(STOP_STRIP)
+        .inner_margin(egui::Margin::symmetric(8, 4))
+        .show(ui, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                let buttons = [
+                    ("▶ Continue", "F5", Go::Continue),
+                    ("Next node", "F10: run on to the next node", Go::StepOver),
+                    ("Step into", "F11", Go::StepIn),
+                    ("Step out", "Shift+F11", Go::StepOut),
+                ];
+                for (label, tip, g) in buttons {
+                    let enabled = !stepping && (stop.live || g == Go::Continue);
+                    let text = if g == Go::Continue {
+                        RichText::new(label).color(theme::PLAY).strong()
+                    } else {
+                        RichText::new(label)
+                    };
+                    if ui
+                        .add_enabled(enabled, egui::Button::new(text))
+                        .on_hover_text(tip)
+                        .clicked()
+                    {
+                        go = Some(g);
+                    }
+                }
+                ui.add_space(8.0);
+                let title = crate::scripts::stop_title(&stop);
+                ui.label(RichText::new(title).color(STOPPED).strong());
+                if let Some(e) = &stop.exception {
+                    ui.label(RichText::new(e).color(ERROR));
+                }
+            });
+            // The locals where it waits: the graph's variables and the values on its wires.
+            if in_graph && let Some(doc) = tab.docs.get_mut(tab.current) {
+                let luau = doc.compiled().luau.clone();
+                if let Some(at) = debug::stop_in(world, &doc.path, &luau) {
+                    let values: Vec<String> = at.values.into_values().collect();
+                    if !values.is_empty() {
+                        ui.label(
+                            RichText::new(values.join("   "))
+                                .monospace()
+                                .color(STOP_VALUE),
+                        );
+                    }
+                }
+            }
+        });
+    if let Some(g) = go
+        && debug::go(world, g)
+        && g == Go::StepOver
+        && in_graph
+    {
+        tab.stepping = Some((node, NODE_STEPS));
     }
 }
 
@@ -2691,6 +2931,36 @@ pub fn shots(dir: String) -> ShotScript {
         Step::Do(Box::new(close_up)),
         Step::Wait(90),
         Step::Shot("graphs_05_hot_reload"),
+        // A breakpoint on the light node: the graph waits there (with the world's time), the
+        // node outlined under an arrow and the values it has over the canvas.
+        Step::Do(Box::new(with_tab(|_, tab| {
+            let doc = &mut tab.docs[tab.current];
+            if let Some(n) = doc.graph.nodes.iter().find(|n| n.kind == "comp.set") {
+                doc.breakpoints.insert(n.id);
+            }
+        }))),
+        Step::Wait(40),
+        Step::Shot("graphs_06_breakpoint"),
+        // Next node (F10): line steps until the graph is at the material node.
+        Step::Do(Box::new(with_tab(|world, tab| {
+            let node = tab
+                .docs
+                .get_mut(tab.current)
+                .and_then(|doc| stopped_node(world, doc));
+            if debug::go(world, Go::StepOver) {
+                tab.stepping = Some((node, NODE_STEPS));
+            }
+        }))),
+        Step::Wait(40),
+        Step::Shot("graphs_07_next_node"),
+        Step::Do(Box::new(with_tab(|world, tab| {
+            for doc in &mut tab.docs {
+                doc.breakpoints.clear();
+            }
+            breakpoints_and_steps(world, tab);
+            debug::go(world, Go::Continue);
+        }))),
+        Step::Wait(10),
         Step::Do(Box::new(|world: &mut World, ed: &mut Editor| {
             editor::stop(world, ed)
         })),
@@ -2781,6 +3051,8 @@ mod tests {
             wiring: None,
             boxing: None,
             editing_comment: None,
+            breakpoints: BTreeSet::new(),
+            applied: None,
         }
     }
 

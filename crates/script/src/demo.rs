@@ -158,6 +158,14 @@ const TIDY: &[(&str, &str)] = &[
     ),
 ];
 
+/// A breakpoint on the line that lights each lantern (the editor's client, as the Scripts tab
+/// sets them), and off again: the director goes on.
+const PAUSE_AT_GLOW: (&str, &str) = (
+    "script.break",
+    r#"{"path": "showcase/courtyard.luau", "lines": [32]}"#,
+);
+const GO_ON: (&str, &str) = ("script.break", r#"{"detach": true}"#);
+
 /// Flares the crystal (its graph's Message event).
 const FLARE: (&str, &str) = (
     "script.send",
@@ -294,6 +302,17 @@ pub const VIEWS: &[DemoView] = &[
         warmup_secs: 0.5,
         on_arrive: &[FLARE],
         on_leave: &[],
+    },
+    DemoView {
+        key: "script_paused",
+        name: "Paused at a breakpoint: the director waits on its line with the arrow, each \
+               local's value beside the line that set it; the courtyard's time holds with it",
+        eye: [0.5, 2.2 + LIFT, -5.9],
+        target: [0.0, 2.05 + LIFT, -9.0],
+        hour: 18.9,
+        warmup_secs: 1.0,
+        on_arrive: &[PAUSE_AT_GLOW, BOARD_AT_UPDATE],
+        on_leave: &[GO_ON, BOARD_AT_TOP],
     },
     DemoView {
         key: "script_error",

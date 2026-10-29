@@ -884,6 +884,16 @@ impl Client {
     }
 }
 
+/// Runs frames while a client thread drives the debugger: a stop no longer holds a frame, so
+/// the frames go on (the stopped script and the world's time wait) until it is done.
+fn run_while_client(app: &mut App, client: &std::thread::JoinHandle<()>) {
+    let start = std::time::Instant::now();
+    while !client.is_finished() && start.elapsed().as_secs() < 60 {
+        app.update();
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+}
+
 #[test]
 fn the_debugger_stops_at_a_breakpoint_shows_variables_and_steps() {
     let folder = Folder::new();
@@ -962,11 +972,7 @@ fn the_debugger_stops_at_a_breakpoint_shows_variables_and_steps() {
         c.request("continue", json!({"threadId": 1}));
         c.request("disconnect", json!({}));
     });
-    let mut frames = 0;
-    while !client.is_finished() && frames < 600 {
-        app.update();
-        frames += 1;
-    }
+    run_while_client(&mut app, &client);
     client.join().expect("the debug session failed");
     assert!(errors(&mut app).is_empty(), "{:?}", errors(&mut app));
     let before = eval(&mut app, "world.find('Counter').script.count")
@@ -1098,11 +1104,7 @@ return Waiter
         c.request("continue", json!({"threadId": 1}));
         c.request("disconnect", json!({}));
     });
-    let mut frames = 0;
-    while !client.is_finished() && frames < 600 {
-        app.update();
-        frames += 1;
-    }
+    run_while_client(&mut app, &client);
     client.join().expect("the debug session failed");
     assert!(errors(&mut app).is_empty(), "{:?}", errors(&mut app));
     let before = eval(&mut app, "world.find('Waiter').script.n")
@@ -1423,11 +1425,7 @@ fn the_debugger_stops_where_an_uncaught_error_is_raised() {
         app.update();
     }
     spawn_script(&mut app, "Faults", "debug/faults");
-    let mut frames = 0;
-    while !client.is_finished() && frames < 900 {
-        app.update();
-        frames += 1;
-    }
+    run_while_client(&mut app, &client);
     client.join().expect("the debug session failed");
     app.update_n(3);
     let errs = errors(&mut app);
@@ -2219,4 +2217,355 @@ fn the_example_graphs_run() {
         .unwrap();
     assert!(y > 1.5 && y < 2.2, "floating: {y}");
     assert_eq!(errors(&mut app), Vec::<String>::new());
+}
+
+const LANTERN: &str = "local Lantern = {}
+function Lantern:start()
+	self.t = 0
+	self.lit = 0
+end
+function Lantern:light(k)
+	local glow = k * 2
+	return glow
+end
+function Lantern:update(dt)
+	self.t += dt
+	local k = self.t * 10
+	local glow = self:light(k)
+	self.lit += 1
+end
+return Lantern
+";
+
+const OTHER: &str = "local Other = {}
+function Other:start()
+	self.n = 0
+end
+function Other:update()
+	self.n += 1
+end
+return Other
+";
+
+fn local_names(world: &World, frame: usize) -> Vec<String> {
+    let scopes = crate::debug::scopes(world, frame);
+    let locals = scopes
+        .iter()
+        .find(|s| s.name == "Locals")
+        .expect("a Locals scope");
+    crate::debug::children(world, locals.reference)
+        .into_iter()
+        .map(|v| v.name)
+        .collect()
+}
+
+fn script_number(app: &mut App, entity: &str, field: &str) -> f64 {
+    eval(
+        app,
+        &format!("return world.find('{entity}').script.{field}"),
+    )
+    .as_f64()
+    .unwrap()
+}
+
+#[test]
+fn the_editor_debugs_in_place_while_the_frames_go_on() {
+    use crate::debug::{self, Go};
+    let folder = Folder::new();
+    folder.write("debug/lantern.luau", LANTERN);
+    folder.write("debug/other.luau", OTHER);
+    let mut app = app_in(&folder.0);
+    spawn_script(&mut app, "Lantern", "debug/lantern");
+    spawn_script(&mut app, "Other", "debug/other");
+    app.update_n(3);
+    assert_eq!(
+        debug::set_breakpoints(&mut app.world, "debug/lantern.luau", &[13]),
+        vec![Some(13)]
+    );
+    assert!(debug::attached(&app.world));
+    app.update();
+    let stop = debug::stopped(&app.world).expect("stopped at the breakpoint");
+    assert_eq!(stop.reason, "breakpoint");
+    assert!(stop.live && stop.exception.is_none());
+    assert_eq!(stop.frames[0].name, "update");
+    assert_eq!(stop.frames[0].path, "debug/lantern.luau");
+    assert_eq!(stop.frames[0].line, 13);
+    let names = local_names(&app.world, 0);
+    for name in ["self", "dt", "k"] {
+        assert!(names.contains(&name.to_string()), "{name} in {names:?}");
+    }
+    let k = debug::evaluate(&mut app.world, 0, "k").unwrap();
+    let k: f64 = k.value.parse().unwrap();
+    let twice = debug::evaluate(&mut app.world, 0, "k * 2").unwrap();
+    let twice: f64 = twice.value.parse().unwrap();
+    assert!(
+        (twice - k * 2.0).abs() <= 0.01 * k.abs().max(1.0),
+        "{twice} vs {k}"
+    );
+    assert_eq!(
+        debug::breakpoints(&app.world, "debug/lantern.luau")[0].hits,
+        1
+    );
+
+    // The frames go on, and everything waits: the stopped script, the others, the world's
+    // time.
+    let (lit, n) = (
+        script_number(&mut app, "Lantern", "lit"),
+        script_number(&mut app, "Other", "n"),
+    );
+    app.update_n(5);
+    assert_eq!(debug::stopped(&app.world).map(|s| s.id), Some(stop.id));
+    assert_eq!(script_number(&mut app, "Lantern", "lit"), lit);
+    assert_eq!(script_number(&mut app, "Other", "n"), n);
+    assert!(
+        app.world
+            .resource::<TimeDilation>()
+            .is_active("script-debugger")
+    );
+
+    // In: the arrow in light(), its caller under it; the file's values by their lines.
+    assert!(debug::go(&mut app.world, Go::StepIn));
+    app.update();
+    let stop = debug::stopped(&app.world).expect("stepped in");
+    assert_eq!(stop.reason, "step");
+    assert_eq!(
+        (stop.frames[0].name.as_str(), stop.frames[0].line),
+        ("light", 7)
+    );
+    assert_eq!(
+        (stop.frames[1].name.as_str(), stop.frames[1].line),
+        ("update", 13)
+    );
+    let here = debug::stop_in(&app.world, "debug/lantern.luau", LANTERN).unwrap();
+    assert_eq!((here.frame, here.line), (0, 7));
+    assert!(here.values[&6].contains("k = "), "{:?}", here.values);
+    let caller = debug::stop_at(&app.world, "debug/lantern.luau", LANTERN, Some(1)).unwrap();
+    assert_eq!((caller.frame, caller.line), (1, 13));
+    assert!(caller.values[&10].contains("dt = "), "{:?}", caller.values);
+    assert!(caller.values[&12].contains("k = "), "{:?}", caller.values);
+
+    // Out, back in update; over, to the next line.
+    assert!(debug::go(&mut app.world, Go::StepOut));
+    app.update();
+    let stop = debug::stopped(&app.world).expect("stepped out");
+    assert_eq!(stop.frames[0].name, "update");
+    let line = stop.frames[0].line;
+    assert!((13..=14).contains(&line), "{line}");
+    assert!(debug::go(&mut app.world, Go::StepOver));
+    app.update();
+    let stop = debug::stopped(&app.world).expect("stepped over");
+    assert!(stop.frames[0].line > line, "{:?}", stop.frames[0]);
+
+    // Breakpoint off, Continue: the scripts and the time go on.
+    debug::set_breakpoints(&mut app.world, "debug/lantern.luau", &[]);
+    assert!(debug::go(&mut app.world, Go::Continue));
+    app.update_n(3);
+    assert!(debug::stopped(&app.world).is_none());
+    assert!(script_number(&mut app, "Lantern", "lit") > lit);
+    assert!(script_number(&mut app, "Other", "n") > n);
+    assert!(errors(&mut app).is_empty(), "{:?}", errors(&mut app));
+
+    // A conditional breakpoint stops only when its condition holds.
+    debug::set_breakpoints_with(
+        &mut app.world,
+        "debug/lantern.luau",
+        &[(14, Some("self.lit % 4 == 3".into()))],
+    );
+    app.update();
+    for _ in 0..4 {
+        if debug::stopped(&app.world).is_some() {
+            break;
+        }
+        app.update();
+    }
+    debug::stopped(&app.world).expect("stopped when the condition held");
+    let lit = debug::evaluate(&mut app.world, 0, "self.lit").unwrap();
+    assert_eq!(lit.value.parse::<f64>().unwrap() % 4.0, 3.0);
+    debug::detach(&mut app.world);
+    app.update_n(2);
+    assert!(debug::stopped(&app.world).is_none(), "detaching goes on");
+    assert!(!debug::attached(&app.world));
+}
+
+#[test]
+fn the_editor_stops_in_tasks_on_errors_and_where_it_cannot_wait() {
+    use crate::debug::{self, Go};
+    let folder = Folder::new();
+    folder.write(
+        "debug/waiter.luau",
+        "local Waiter = {}
+function Waiter:start()
+	self.n = 0
+	while true do
+		self.n += 1
+		task.wait(0.1)
+	end
+end
+return Waiter
+",
+    );
+    folder.write(
+        "debug/sorter.luau",
+        "local Sorter = {}
+function Sorter:start()
+	self.sorted = 0
+end
+function Sorter:update()
+	local items = { 3, 1, 2 }
+	table.sort(items, function(a, b)
+		return a < b
+	end)
+	self.sorted += 1
+end
+return Sorter
+",
+    );
+    let mut app = app_in(&folder.0);
+    spawn_script(&mut app, "Waiter", "debug/waiter");
+    spawn_script(&mut app, "Sorter", "debug/sorter");
+    app.update_n(2);
+
+    // In a task: it waits at its line; a step over its wait ends when it runs again.
+    debug::set_breakpoints(&mut app.world, "debug/waiter.luau", &[6]);
+    let mut frames = 0;
+    while debug::stopped(&app.world).is_none() && frames < 20 {
+        app.update();
+        frames += 1;
+    }
+    let stop = debug::stopped(&app.world).expect("stopped in the task");
+    assert_eq!(
+        (stop.frames[0].name.as_str(), stop.frames[0].line),
+        ("start", 6)
+    );
+    assert!(stop.live);
+    let n = debug::evaluate(&mut app.world, 0, "self.n").unwrap().value;
+    debug::set_breakpoints(&mut app.world, "debug/waiter.luau", &[]);
+    assert!(debug::go(&mut app.world, Go::StepOver));
+    let mut frames = 0;
+    app.update();
+    while debug::stopped(&app.world).is_none() && frames < 30 {
+        app.update();
+        frames += 1;
+    }
+    let stop = debug::stopped(&app.world).expect("the step ended after the wait");
+    assert_eq!(stop.reason, "step");
+    assert_eq!(stop.frames[0].name, "start");
+    assert_eq!(
+        debug::evaluate(&mut app.world, 0, "self.n").unwrap().value,
+        n
+    );
+    assert!(debug::go(&mut app.world, Go::Continue));
+    app.update_n(2);
+    assert!(debug::stopped(&app.world).is_none());
+
+    // Inside a sort's comparator a script can't wait (engine code is between it and the
+    // frame): the stop shows the values there and the code goes on.
+    debug::set_breakpoints(&mut app.world, "debug/sorter.luau", &[8]);
+    app.update();
+    let stop = debug::stopped(&app.world).expect("stopped in the comparator");
+    assert_eq!(stop.reason, "breakpoint");
+    assert!(!stop.live, "a look, not a wait");
+    assert_eq!(stop.frames[0].line, 8);
+    let names = local_names(&app.world, 0);
+    assert!(names.contains(&"a".to_string()), "{names:?}");
+    assert!(
+        stop.frames.iter().any(|f| f.name == "update"),
+        "{:?}",
+        stop.frames
+    );
+    debug::set_breakpoints(&mut app.world, "debug/sorter.luau", &[]);
+    assert!(debug::go(&mut app.world, Go::Continue));
+    app.update_n(2);
+    assert!(debug::stopped(&app.world).is_none());
+
+    // On errors: where it was raised, with the locals there; going on, it stops again at the
+    // next one until errors no longer stop.
+    folder.write(
+        "debug/sorter.luau",
+        "local Sorter = {}
+function Sorter:update(dt)
+	self.n = (self.n or 0) + 1
+	local limit = 30
+	if self.n > 0 then
+		local missing = nil
+		missing.field = self.n
+	end
+end
+return Sorter
+",
+    );
+    debug::set_break_on_errors(&mut app.world, true);
+    let mut frames = 0;
+    while debug::stopped(&app.world).is_none() && frames < 10 {
+        app.update();
+        frames += 1;
+    }
+    let stop = debug::stopped(&app.world).expect("stopped on the error");
+    let e = stop.exception.clone().expect("an exception stop");
+    assert!(e.contains("attempt to index nil"), "{e}");
+    assert!(!stop.live);
+    assert_eq!(
+        (stop.frames[0].name.as_str(), stop.frames[0].line),
+        ("update", 7)
+    );
+    assert_eq!(
+        debug::evaluate(&mut app.world, 0, "limit").unwrap().value,
+        "30"
+    );
+    // `self` too: the VM writes an error over the frame's first registers once it unwinds.
+    let n = debug::evaluate(&mut app.world, 0, "self.n").unwrap();
+    assert!(n.kind == "integer" || n.kind == "number", "{n:?}");
+    assert!(
+        debug::go(&mut app.world, Go::StepOver),
+        "goes on from an error"
+    );
+    app.update_n(2);
+    let again = debug::stopped(&app.world).expect("the next error stops again");
+    assert!(again.id > stop.id);
+    debug::set_break_on_errors(&mut app.world, false);
+    assert!(debug::go(&mut app.world, Go::Continue));
+    app.update_n(3);
+    assert!(debug::stopped(&app.world).is_none());
+    assert!(
+        errors(&mut app)
+            .iter()
+            .any(|e| e.contains("attempt to index nil")),
+        "the errors are still reported"
+    );
+}
+
+#[test]
+fn script_break_debugs_from_the_api() {
+    let folder = Folder::new();
+    folder.write("debug/lantern.luau", LANTERN);
+    let mut app = app_in(&folder.0);
+    spawn_script(&mut app, "Lantern", "debug/lantern");
+    app.update_n(2);
+    let set = call_api(
+        &mut app.world,
+        "script.break",
+        json!({"path": "debug/lantern.luau", "lines": [12]}),
+    )
+    .unwrap();
+    assert_eq!(set["attached"], json!(true));
+    assert_eq!(set["stopped"], Value::Null);
+    app.update();
+    let stop = call_api(&mut app.world, "script.break", json!({})).unwrap();
+    assert_eq!(stop["stopped"]["reason"], json!("breakpoint"), "{stop}");
+    assert_eq!(stop["stopped"]["frames"][0]["line"], json!(12));
+    let locals = stop["stopped"]["locals"].as_array().unwrap();
+    assert!(locals.iter().any(|l| l["name"] == "dt"), "{stop}");
+    call_api(&mut app.world, "script.break", json!({"go": "over"})).unwrap();
+    app.update();
+    let stop = call_api(&mut app.world, "script.break", json!({})).unwrap();
+    assert_eq!(stop["stopped"]["reason"], json!("step"), "{stop}");
+    assert_eq!(stop["stopped"]["frames"][0]["line"], json!(13));
+    assert!(call_api(&mut app.world, "script.break", json!({"go": "sideways"})).is_err());
+    let lit = script_number(&mut app, "Lantern", "lit");
+    call_api(&mut app.world, "script.break", json!({"detach": true})).unwrap();
+    app.update_n(3);
+    let done = call_api(&mut app.world, "script.break", json!({})).unwrap();
+    assert_eq!(done["stopped"], Value::Null);
+    assert!(script_number(&mut app, "Lantern", "lit") > lit);
+    assert_eq!(done["attached"], json!(false));
 }

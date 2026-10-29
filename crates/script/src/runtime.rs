@@ -20,7 +20,7 @@ use std::time::{Instant, SystemTime};
 
 use bevy_ecs::change_detection::Tick;
 use bevy_ecs::prelude::*;
-use engine_core::prelude::{LocalTimeScale, Name, Time};
+use engine_core::prelude::{LocalTimeScale, Name, Time, TimeDilation};
 use engine_core::registry::ApiRegistry;
 use mlua::{Function, Lua, MultiValue, RegistryKey, Table, Thread, Value, Variadic};
 
@@ -214,6 +214,19 @@ pub(crate) struct Instance {
     pub ms: f32,
 }
 
+/// A coroutine stopped by the debugger, waiting at its line ([`crate::debugger`]).
+struct Held {
+    thread: Thread,
+    owner: Option<Entity>,
+    path: String,
+    /// A task (or an event or `start`, which may wait): when it waits again it goes back to
+    /// the tasks. A hook like `update` can't wait.
+    task: bool,
+}
+
+/// The key of the debugger's [`TimeDilation`] hold.
+pub(crate) const DEBUG_HOLD: &str = "script-debugger";
+
 struct Task {
     thread: Thread,
     owner: Option<Entity>,
@@ -252,6 +265,10 @@ pub struct ScriptRuntime {
     synced: Vec<(Thread, Entity, String)>,
     /// Wall-clock milliseconds of last frame's parallel phase (every VM).
     pub(crate) parallel_ms: f32,
+    /// The coroutine stopped at a breakpoint or step.
+    held: Option<Held>,
+    /// The world's time is held still for a stop.
+    holding_time: bool,
 }
 
 /// Normalizes a script path: forward slashes, no leading `./` or `/`, `.luau` added when it has
@@ -346,6 +363,8 @@ impl ScriptRuntime {
             actors: Vec::new(),
             spare: None,
             synced: Vec::new(),
+            held: None,
+            holding_time: false,
             parallel_ms: 0.0,
         })
     }
@@ -497,12 +516,19 @@ impl ScriptRuntime {
     /// move to the VMs of the scripts they are for.
     pub(crate) fn run_frame(&mut self, world: &mut World, settings: &ScriptSettings) {
         let started = Instant::now();
+        if self.debug_hold(world, settings) {
+            self.debugger.flush(&self.lua);
+            self.frame_ms = started.elapsed().as_secs_f32() * 1000.0;
+            return;
+        }
         self.route_messages();
         self.run_serial(world, settings);
         for actor in &mut self.actors {
             actor.run_serial(world, settings);
         }
-        self.run_parallel(world, settings);
+        if !self.debugger.stopped() {
+            self.run_parallel(world, settings);
+        }
         self.route_messages();
         self.debugger.flush(&self.lua);
         self.profiler.frame(&self.lua);
@@ -512,12 +538,9 @@ impl ScriptRuntime {
         self.frame_ms = started.elapsed().as_secs_f32() * 1000.0;
     }
 
-    /// One VM's serial work for the frame.
-    fn run_serial(&mut self, world: &mut World, settings: &ScriptSettings) {
-        let now = world.resource::<Time>().elapsed_secs_f64();
-        shared(&self.lua).world_secs = now;
-        // The debugger's client: console code it sends runs like `script.eval` (which lends
-        // the world itself, so before the frame does).
+    /// The debugger's DAP client: what it sent since last frame. Console code it sends runs
+    /// like `script.eval` (which lends the world itself, so before the frame does).
+    fn serve_debugger(&mut self, world: &mut World, settings: &ScriptSettings) {
         for request in self.debugger.poll(&self.lua) {
             let code = request["arguments"]["expression"]
                 .as_str()
@@ -532,6 +555,65 @@ impl ScriptRuntime {
             });
             self.debugger.respond(&request, result);
         }
+    }
+
+    /// While the debugger is stopped: serves its client, holds the world's time still, and
+    /// resumes the stopped coroutine when a client says go on. Returns true when the frame's
+    /// scripts don't run (still stopped, or the stopped script just went on).
+    fn debug_hold(&mut self, world: &mut World, settings: &ScriptSettings) -> bool {
+        if !self.debugger.stopped() && self.held.is_none() {
+            self.release_time(world);
+            return false;
+        }
+        self.serve_debugger(world, settings);
+        if !self.holding_time {
+            if let Some(mut d) = world.get_resource_mut::<TimeDilation>() {
+                d.hold(DEBUG_HOLD, 0.0, 0.0);
+            }
+            self.holding_time = true;
+        }
+        if !self.debugger.take_go() {
+            return true;
+        }
+        if let Some(held) = self.held.take() {
+            let world_ptr: *mut World = world;
+            let _lent = lend_world(&self.lua, world_ptr);
+            let Held {
+                thread,
+                owner,
+                path,
+                task,
+            } = held;
+            shared(&self.lua).owner = owner;
+            self.debugger.resuming(&self.lua, &thread);
+            self.watchdog.arm(settings.call_limit_ms);
+            let result = thread.resume::<MultiValue>(());
+            self.watchdog.disarm();
+            self.debugger.resumed();
+            shared(&self.lua).owner = None;
+            self.after_resume(thread, owner, &path, result, task);
+            self.adopt_new_tasks();
+        }
+        if !self.debugger.stopped() && self.held.is_none() {
+            self.release_time(world);
+        }
+        true
+    }
+
+    /// Lets the world's time run again after a stop (it eases back in).
+    fn release_time(&mut self, world: &mut World) {
+        if std::mem::take(&mut self.holding_time)
+            && let Some(mut d) = world.get_resource_mut::<TimeDilation>()
+        {
+            d.release(DEBUG_HOLD);
+        }
+    }
+
+    /// One VM's serial work for the frame.
+    fn run_serial(&mut self, world: &mut World, settings: &ScriptSettings) {
+        let now = world.resource::<Time>().elapsed_secs_f64();
+        shared(&self.lua).world_secs = now;
+        self.serve_debugger(world, settings);
         let world_ptr: *mut World = world;
         let _lent = lend_world(&self.lua, world_ptr);
         // SAFETY (for every `unsafe { &mut *world_ptr }` below): the runner owns the world for
@@ -560,6 +642,10 @@ impl ScriptRuntime {
             .map(|(e, _)| *e)
             .collect();
         for e in updating {
+            if self.debugger.stopped() {
+                // The others wait with the stopped script.
+                break;
+            }
             let dt_e = {
                 let w = w();
                 w.resource::<Time>().delta_for(w.get::<LocalTimeScale>(e)) as f64
@@ -1132,7 +1218,10 @@ impl ScriptRuntime {
         };
         // `start` runs as a task, so it may wait.
         self.profiler.phase(Phase::Start);
-        match self.lua.create_thread(start) {
+        match self
+            .lua
+            .create_thread(crate::debugger::catching(&self.lua, start))
+        {
             Ok(thread) => self.resume(thread, Some(e), &path, (this,), settings),
             Err(err) => push_error(&self.lua, Some(&path), Some(e), &err.to_string()),
         }
@@ -1207,14 +1296,37 @@ impl ScriptRuntime {
             "fixed_update" => Phase::FixedUpdate,
             _ => Phase::Events,
         });
+        if self.debugger.attached() {
+            // In a coroutine, so a breakpoint can stop it in place (and an error where it
+            // is raised).
+            let f = crate::debugger::catching(&self.lua, f);
+            let thread = match self.spare.take() {
+                Some(t) if t.reset(f.clone()).is_ok() => t,
+                _ => match self.lua.create_thread(f) {
+                    Ok(t) => t,
+                    Err(err) => return self.report(e, &path, &err),
+                },
+            };
+            let mut args = match args.into_lua_multi(&self.lua) {
+                Ok(a) => a,
+                Err(err) => return self.report(e, &path, &err),
+            };
+            args.push_front(Value::Table(this));
+            shared(&self.lua).owner = Some(e);
+            self.debugger.resuming(&self.lua, &thread);
+            self.watchdog.arm(settings.call_limit_ms);
+            let result = thread.resume::<MultiValue>(args);
+            self.watchdog.disarm();
+            self.debugger.resumed();
+            self.profiler.settle(&self.lua);
+            shared(&self.lua).owner = None;
+            self.after_resume(thread, Some(e), &path, result, false);
+            self.adopt_new_tasks();
+            return;
+        }
         shared(&self.lua).owner = Some(e);
         self.watchdog.arm(settings.call_limit_ms);
-        // With the debugger set to stop on errors, through a handler that stops where the
-        // error is raised, before the stack unwinds.
-        let result = match self.debugger.catcher() {
-            Some((catch, handler)) => catch.call::<()>((handler, f, this, args)),
-            None => f.call::<()>((this, args)),
-        };
+        let result = f.call::<()>((this, args));
         self.watchdog.disarm();
         self.profiler.settle(&self.lua);
         shared(&self.lua).owner = None;
@@ -1249,7 +1361,10 @@ impl ScriptRuntime {
         };
         args.push_front(Value::Table(this));
         self.profiler.phase(Phase::Events);
-        match self.lua.create_thread(f) {
+        match self
+            .lua
+            .create_thread(crate::debugger::catching(&self.lua, f))
+        {
             Ok(thread) => self.resume(thread, Some(e), &path, args, settings),
             Err(err) => self.report(e, &path, &err),
         }
@@ -1432,7 +1547,14 @@ impl ScriptRuntime {
             // In the order they were due, so the same scripts run the same way every time.
             due.sort_by(|a, b| a.wake_at.total_cmp(&b.wake_at));
             self.profiler.phase(Phase::Tasks);
-            for t in due {
+            let mut due = due.into_iter();
+            while let Some(t) = due.next() {
+                if self.debugger.stopped() {
+                    // They wait with the stopped script, still due.
+                    self.tasks.push(t);
+                    self.tasks.extend(due);
+                    return;
+                }
                 let clock = self.clock_of(t.owner, world_secs);
                 let path = t
                     .owner
@@ -1463,23 +1585,56 @@ impl ScriptRuntime {
         settings: &ScriptSettings,
     ) {
         shared(&self.lua).owner = owner;
-        if self.debugger.attached() {
-            self.debugger.prepare(&self.lua, &thread);
+        let debugging = self.debugger.attached();
+        if debugging {
+            self.debugger.resuming(&self.lua, &thread);
         }
         self.watchdog.arm(settings.call_limit_ms);
         let result = thread.resume::<MultiValue>(args);
         self.watchdog.disarm();
+        if debugging {
+            self.debugger.resumed();
+        }
         self.profiler.settle(&self.lua);
         shared(&self.lua).owner = None;
+        self.after_resume(thread, owner, path, result, true);
+    }
+
+    /// What a resume of one of the runtime's coroutines came to: stopped by the debugger (held
+    /// until it says go on), waiting (a task again; a hook can't wait), done, or failed.
+    fn after_resume(
+        &mut self,
+        thread: Thread,
+        owner: Option<Entity>,
+        path: &str,
+        result: mlua::Result<MultiValue>,
+        task: bool,
+    ) {
+        if result.is_ok() && thread.is_resumable() && self.debugger.holds(&self.lua, &thread) {
+            self.held = Some(Held {
+                thread,
+                owner,
+                path: path.to_string(),
+                task,
+            });
+            return;
+        }
+        if !thread.is_resumable() && self.debugger.attached() {
+            self.debugger.step_left(&self.lua, &thread);
+        }
         if let Err(err) = &result
             && self.debugger.breaks_on_errors()
         {
-            // The task's stack is still there (a coroutine that fails keeps its frames).
+            // The coroutine's stack is still there (a coroutine that fails keeps its frames).
             self.debugger.stop_on_task_error(&self.lua, &thread, err);
         }
+        let report = |rt: &mut Self, err: &mlua::Error| match owner {
+            Some(e) => rt.report(e, path, err),
+            None => push_error(&rt.lua, Some(path), None, &err.to_string()),
+        };
         match result {
-            Ok(values) => {
-                if thread.is_resumable() {
+            Ok(values) if thread.is_resumable() => {
+                if task {
                     let wait = wait_secs(&values);
                     let world_secs = shared(&self.lua).world_secs;
                     let clock = self.clock_of(owner, world_secs);
@@ -1490,12 +1645,20 @@ impl ScriptRuntime {
                         since: clock,
                         fresh: false,
                     });
+                } else {
+                    let err = mlua::Error::runtime(
+                        "a hook like update can't wait (it runs again next frame); start a \
+                         task with task.spawn for things that take time",
+                    );
+                    report(self, &err);
                 }
             }
-            Err(err) => match owner {
-                Some(e) => self.report(e, path, &err),
-                None => push_error(&self.lua, Some(path), None, &err.to_string()),
-            },
+            Ok(_) => {
+                if !task {
+                    self.spare = Some(thread);
+                }
+            }
+            Err(err) => report(self, &err),
         }
     }
 
@@ -2187,7 +2350,7 @@ fn install_tasks(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "__task_spawn",
         lua.create_function(|lua, (f, args): (Function, Variadic<Value>)| {
-            let thread = lua.create_thread(f)?;
+            let thread = lua.create_thread(crate::debugger::catching(lua, f))?;
             let owner = shared(lua).owner;
             let result = thread.resume::<MultiValue>(MultiValue::from_iter(args));
             // A nested task may have cleared the owner when it finished.
@@ -2215,7 +2378,7 @@ fn install_tasks(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "__task_delay",
         lua.create_function(|lua, (secs, f, args): (f64, Function, Variadic<Value>)| {
-            let thread = lua.create_thread(f)?;
+            let thread = lua.create_thread(crate::debugger::catching(lua, f))?;
             let packed = lua.create_table()?;
             packed.raw_set("n", args.len())?;
             for (i, a) in args.into_iter().enumerate() {

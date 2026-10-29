@@ -75,6 +75,7 @@ const WARN: Rgb = [1.0, 0.7, 0.25];
 const RAN: Rgb = [1.0, 0.82, 0.35];
 const VALUE: Rgb = [1.0, 0.84, 0.48];
 const VALUE_BG: Rgb = [0.15, 0.11, 0.035];
+const STOPPED: Rgb = [1.0, 0.86, 0.30];
 
 /// Seconds a node stays lit after it ran.
 const LIT_SECS: f64 = 0.9;
@@ -246,6 +247,8 @@ pub(crate) struct View<'a> {
     pub live: &'a Live,
     /// Seconds since each node last ran.
     pub ran: &'a HashMap<u32, f64>,
+    /// The node the debugger stopped at.
+    pub stopped: Option<u32>,
 }
 
 fn value_text(v: &serde_json::Value) -> String {
@@ -560,7 +563,34 @@ pub(crate) fn draw(
             color: TEXT,
         });
         let ps = problems(n.id);
-        if ps.iter().any(|p| p.error) {
+        if view.stopped == Some(n.id) {
+            // Where the debugger stopped: a thick outline and an arrow over the node, as
+            // Unreal marks a Blueprint breakpoint's node.
+            cv.outline(
+                [
+                    a[0] - 3.0 * s,
+                    a[1] - 3.0 * s,
+                    b[0] + 3.0 * s,
+                    b[1] + 3.0 * s,
+                ],
+                r + 3.0 * s,
+                5.0 * s,
+                STOPPED,
+                1.0,
+            );
+            let tip = [(a[0] + b[0]) * 0.5, a[1] - 8.0 * s];
+            let size = 16.0 * s;
+            for dy in 0..(size as i32) {
+                let half = size * 0.6 * (1.0 - dy as f32 / size);
+                let y = tip[1] - dy as f32;
+                cv.fill(
+                    [tip[0] - half, y - 1.0, tip[0] + half, y],
+                    0.0,
+                    STOPPED,
+                    1.0,
+                );
+            }
+        } else if ps.iter().any(|p| p.error) {
             cv.outline([a[0], a[1], b[0], b[1]], r, 3.0 * s, ERROR, 0.9);
         } else if !ps.is_empty() {
             cv.outline([a[0], a[1], b[0], b[1]], r, 2.0 * s, WARN, 0.6);
@@ -718,6 +748,8 @@ pub(crate) struct Drawn {
     ran: HashMap<u32, f64>,
     running: bool,
     board: GraphBoard,
+    /// The node the debugger stopped at, when drawn.
+    stopped: Option<u32>,
 }
 
 #[derive(Default)]
@@ -759,6 +791,7 @@ pub(crate) fn draw_graph_boards(
             ran: HashMap::new(),
             running: false,
             board: board.clone(),
+            stopped: None,
         });
         if d.board != *board {
             d.board = board.clone();
@@ -843,6 +876,15 @@ pub(crate) fn draw_graph_boards(
             d.running = running;
             d.dirty = true;
         }
+        let stopped = runtime.as_deref().and_then(|rt| {
+            let stop = rt.debugger.stop_view()?;
+            let frame = stop.frames.iter().find(|f| f.path == path)?;
+            d.compiled.as_ref()?.node_at(frame.line)
+        });
+        if stopped != d.stopped {
+            d.stopped = stopped;
+            d.dirty = true;
+        }
         if !d.dirty {
             continue;
         }
@@ -861,6 +903,7 @@ pub(crate) fn draw_graph_boards(
                 running: d.running,
                 live: &d.live,
                 ran: &ran,
+                stopped: d.stopped,
             },
         );
         d.image = Some(show(
@@ -903,6 +946,7 @@ mod tests {
             running: true,
             live: &live,
             ran: &HashMap::from([(5, 0.1)]),
+            stopped: Some(8),
         };
         let (img, glow) = draw(&board, &mut font, Some(&g), Some(&c), &view);
         assert_eq!((img.width, img.height), (768, 480));
@@ -942,6 +986,7 @@ mod tests {
             running: true,
             live: &live,
             ran: &g.nodes.iter().map(|n| (n.id, 0.3)).collect(),
+            stopped: None,
         };
         let board = GraphBoard::new("showcase/crystal.graph");
         let (img, _) = draw(&board, &mut font, Some(&g), Some(&c), &view);
