@@ -1116,7 +1116,7 @@ fn weapons_yard(world: &mut World, origin: DVec3) -> Yard {
         world.entity_mut(person).insert((
             Name::new(name),
             // Knocked back a step by what gets through, never off their feet: the exchange
-            // keeps its rhythm (the great sword's dummy shows the knockdown).
+            // keeps its rhythm (the boxing ring shows knockdowns).
             HitReaction {
                 fall_beyond: 0.0,
                 ..Default::default()
@@ -1134,8 +1134,7 @@ fn weapons_yard(world: &mut World, origin: DVec3) -> Yard {
     }
 
     // --- Great sword against a dummy with a shield up: the sweep bounces off it, the
-    // overhead breaks the guard, a sweep gets through the opening and a second overhead
-    // knocks the dummy down.
+    // overhead breaks the guard and a sweep gets through the opening.
     let greatsword = spawn_humanoid(
         world,
         humanoid::Outfit::Athlete,
@@ -1152,7 +1151,7 @@ fn weapons_yard(world: &mut World, origin: DVec3) -> Yard {
     world.entity_mut(dummy).insert((
         Name::new("Great sword dummy"),
         HitReaction {
-            // The light cuts knock it back a step; the overhead puts it down.
+            // The cuts knock it back a step; a harder blow would put it down.
             fall_beyond: 0.7,
             down_secs: 3.0,
             ..Default::default()
@@ -1180,11 +1179,9 @@ fn weapons_yard(world: &mut World, origin: DVec3) -> Yard {
                 DemoStep::param(0.02, "greatsword_stance", 1.0),
                 // The sweep bounces off the shield.
                 light(0.8),
-                // The overhead breaks the guard, the sweep goes through the opening, and a
-                // second overhead puts the dummy down.
+                // The overhead breaks the guard and the sweep goes through the opening.
                 heavy(2.25),
                 light(3.4),
-                heavy(4.25),
                 DemoStep::home(8.5),
             ],
             time: 0.0,
