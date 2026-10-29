@@ -1237,10 +1237,33 @@ impl PlanetShape {
             let cell = radius * 3.2;
             let seed = self.crater_seed() ^ (class as u32).wrapping_mul(0x9E37);
             let n = (self.radius_m / cell).ceil() as i32 + 1;
+            // Only cells near the surface can hold a crater on it (the cube around the planet
+            // is mostly empty: billions of cells for small craters on a big world). A crater
+            // is on the ground only if its center is within a third of a cell of it, and a
+            // cell's points are within 0.9 of its middle: cells whose index (its lowest
+            // corner) is within 2 cells of the surface cover all of them.
+            let (inner, outer) = (
+                (self.radius_m / cell - 2.0).max(0.0),
+                self.radius_m / cell + 2.0,
+            );
             let mut found: Vec<(DVec3, f64)> = Vec::new();
-            for cz in -n..=n {
-                for cy in -n..=n {
-                    for cx in -n..=n {
+            for cy in -n..=n {
+                for cx in -n..=n {
+                    let (x, y) = (cx as f64 + 0.5, cy as f64 + 0.5);
+                    let r2 = x * x + y * y;
+                    if r2 > outer * outer {
+                        continue;
+                    }
+                    let z_out = (outer * outer - r2).sqrt().ceil() as i32;
+                    // Cells with |z| up to `z_in` lie wholly inside.
+                    let z_in = if r2 < inner * inner {
+                        (inner * inner - r2).sqrt().floor() as i32
+                    } else {
+                        -1
+                    };
+                    let below = -z_out..=-(z_in + 1);
+                    let above = (z_in + 1).max(-(z_in + 1) + 1)..=z_out;
+                    for cz in below.chain(above) {
                         let rnd = |salt| noise::cell_random32(cx, cy, cz, seed, salt);
                         if rnd(6) > RAYED_AGE || rnd(1) > self.crater_density {
                             continue;

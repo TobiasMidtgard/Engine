@@ -374,6 +374,23 @@ mod tests {
     }
 
     #[test]
+    fn a_big_world_finds_its_rayed_craters_at_once() {
+        // Small craters on a world half again Earth's size: the search scans the shell of cells
+        // around the surface, not the whole cube (1.7 billion cells, a minute's stall when the
+        // terrain was first drawn).
+        let lava = PlanetTerrain::world(&WorldRecipe {
+            kind: WorldKind::Lava,
+            radius_m: 9_500_000.0,
+            ..Default::default()
+        });
+        let started = std::time::Instant::now();
+        let rayed = lava.shape.rayed_craters();
+        let secs = started.elapsed().as_secs_f64();
+        assert!(secs < 1.5, "{secs} s");
+        assert!(!rayed.is_empty());
+    }
+
+    #[test]
     fn lava_glows_only_on_lava_worlds() {
         let lava = PlanetTerrain::world(&WorldRecipe {
             kind: WorldKind::Lava,

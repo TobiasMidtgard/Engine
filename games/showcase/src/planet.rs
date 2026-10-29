@@ -120,7 +120,6 @@ const FAR_LOOK_LEAD: f64 = 1.5;
 type PlanetGround = (
     Entity,
     &'static CelestialBody,
-    &'static Transform,
     Has<PlanetTerrain>,
     Option<&'static FarGround>,
     Option<&'static mut BakingGround>,
@@ -141,13 +140,27 @@ pub struct BakingGround(Option<std::thread::JoinHandle<FarLook>>);
 pub fn ground_near_planets(
     mut commands: Commands,
     focus: Query<&Transform, With<engine::world::SimulationFocus>>,
+    space: Option<Res<engine_space::SpaceState>>,
     mut bodies: Query<PlanetGround>,
 ) {
     let Some(eye) = focus.iter().next().map(|t| t.translation) else {
         return;
     };
-    for (entity, body, transform, has, ground, baking) in &mut bodies {
+    // Where space put each body this frame. Until it has (the first frame), every body sits
+    // at the origin, right on the camera, and each planet would get its ground at startup.
+    let Some(space) = space.filter(|s| s.anchor.is_some()) else {
+        return;
+    };
+    for (entity, body, has, ground, baking) in &mut bodies {
         let Some(surface) = body.surface else {
+            continue;
+        };
+        let Some(position) = space
+            .bodies
+            .iter()
+            .find(|b| b.entity == entity)
+            .map(|b| b.world_position)
+        else {
             continue;
         };
         let recipe = world_recipe(body, &surface);
@@ -157,7 +170,7 @@ pub fn ground_near_planets(
                 .entity(entity)
                 .insert(far_ground(&PlanetTerrain::world(&recipe)));
         }
-        let radii = (transform.translation - eye).length() / body.radius_m;
+        let radii = (position - eye).length() / body.radius_m;
         // Under a cloud deck the ground is hidden from above: it comes only below the deck.
         let reach = if body.look.solid() {
             GROUND_REACH_RADII
