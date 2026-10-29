@@ -315,7 +315,7 @@ pub fn state(world: &World, e: Entity) -> Option<Vec<crate::debug::Variable>> {
 }
 
 /// The script files under the scripts folder (`.luau` and `.graph`, not the shared modules in
-/// `lib/` folders), sorted.
+/// `lib/` folders nor `engine.d.luau`), sorted.
 pub fn files(world: &World) -> Vec<String> {
     fn walk(dir: &Path, prefix: &str, out: &mut Vec<String>) {
         let Ok(read) = std::fs::read_dir(dir) else {
@@ -328,7 +328,9 @@ pub fn files(world: &World) -> Vec<String> {
                 if name != "lib" && !name.starts_with('.') {
                     walk(&path, &format!("{prefix}{name}/"), out);
                 }
-            } else if name.ends_with(".luau") || name.ends_with(".graph") {
+            } else if (name.ends_with(".luau") && !name.ends_with(".d.luau"))
+                || name.ends_with(".graph")
+            {
                 out.push(format!("{prefix}{name}"));
             }
         }

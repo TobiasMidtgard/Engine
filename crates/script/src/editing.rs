@@ -198,7 +198,7 @@ pub struct Word {
     /// The word itself ("wait").
     pub name: String,
     /// Where it is reached: a global table or namespace ("task", "physics.proving_ground"), a
-    /// class after `.` or `:` ("Entity", "Vec3", "Quat", "ScriptSelf"), "hook", "component", or
+    /// class after `.` or `:` ("Entity", "Vec3", "Quat", "ScriptBase"), "hook", "component", or
     /// "" (a global or keyword).
     pub scope: String,
     pub kind: WordKind,
@@ -418,7 +418,10 @@ fn builtin_words(out: &mut Vec<Word>) {
             }
             continue;
         }
-        if let Some(name) = line.strip_prefix("declare class ") {
+        if let Some(name) = line
+            .strip_prefix("declare extern type ")
+            .and_then(|r| r.strip_suffix(" with"))
+        {
             class = Some(name.trim().to_string());
         } else if let Some(c) = &class {
             if line == "end" {
@@ -459,7 +462,7 @@ fn builtin_words(out: &mut Vec<Word>) {
                     scope: String::new(),
                     kind: WordKind::Global,
                     detail: format!("({sig}"),
-                    doc: "Calls an engine function by a name built at run time.".into(),
+                    doc: std::mem::take(&mut doc),
                 });
             }
         } else if let Some(rest) = line
@@ -647,8 +650,8 @@ mod tests {
         );
         assert_eq!(find("vec3", "up").kind, WordKind::Field);
         assert_eq!(find("vec3", "from_angle").kind, WordKind::Function);
-        assert_eq!(find("ScriptSelf", "every").kind, WordKind::Function);
-        assert!(!find("ScriptSelf", "every").detail.contains("self"));
+        assert_eq!(find("ScriptBase", "every").kind, WordKind::Function);
+        assert!(!find("ScriptBase", "every").detail.contains("self"));
         assert_eq!(find("", "world").kind, WordKind::Namespace);
         assert_eq!(find("", "vec3").kind, WordKind::Global);
         assert_eq!(

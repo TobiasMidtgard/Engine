@@ -60,6 +60,13 @@
 //! A value set there goes in `Script::props` (only what differs from the default), reaches a
 //! running script at once (`on_props`), and a table prop set in part keeps its other defaults.
 //!
+//! ## Type checking
+//!
+//! [`analysis`] (feature `analysis`, on by default) runs Luau's own type checker on the scripts
+//! against the engine's definitions ([`definitions`]), knowing what a class script's
+//! `self` is: problems, the type under the pointer, members, a call's parameters and where a
+//! name is defined, for the editor's Scripts tab and `script.typecheck`.
+//!
 //! ## What scripts can use
 //!
 //! * Every registered engine function as `module.verb(args)`: `fire.ignite { at = p }`,
@@ -193,6 +200,8 @@
 //! through the registry and `Transform`. Draws code boards ([`board::CodeBoard`]).
 
 pub mod access;
+#[cfg(feature = "analysis")]
+pub mod analysis;
 mod api;
 mod bind;
 pub mod board;

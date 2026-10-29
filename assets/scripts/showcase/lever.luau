@@ -14,7 +14,8 @@ Lever.props = {
 }
 
 function Lever:start()
-	self.arm = self.entity:find("Lever arm")
+	-- The part that swings (a lever built without one swings whole).
+	self.arm = self.entity:find("Lever arm") or self.entity
 	self.rest = self.arm.rotation
 end
 

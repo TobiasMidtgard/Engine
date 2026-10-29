@@ -23,6 +23,14 @@
 //! watches. F5 goes on, F10 steps over, F11 in, Shift+F11 out; F9 sets a breakpoint on the
 //! caret's line; Stop on errors stops where an error is raised, with its locals.
 //!
+//! Types, as in Roblox Studio and Godot: Luau's own type checker ([`engine_script::analysis`])
+//! reads every script on a thread of its own and knows what a script's `self` is (its class,
+//! its props as declared, its entity), so a misspelt prop or entity field is underlined as you
+//! type. Hovering a name shows its type and docs; after `.` and `:` completion lists the
+//! members that value really has; inside a call the parameters show over the line with the
+//! one being typed lit; F12 or Ctrl+click goes to where a name is declared. The Problems list
+//! under the code has every script's type errors and warnings.
+//!
 //! Scripts run only while playing ([`ScriptsHeld`] in edit mode) and Stop drops their VMs, so
 //! every Play starts them afresh, as it does the scene.
 
@@ -35,6 +43,9 @@ use egui::{Align2, Color32, FontId, Key, Modifiers, Pos2, Rect, RichText, Stroke
 use egui_dock::{DockState, NodeIndex};
 use engine::core::registry::{call_api, unknown_name_error};
 use engine::prelude::*;
+use engine_script::analysis::{
+    Ask, Checker, Hover, Job, Problem, Reply, Report, Signature, SuggestKind, Suggestion,
+};
 use engine_script::debug::{self, FileStop, Go, StopView};
 use engine_script::editing::{self, FileMarks, OutputCursor, Word, WordKind};
 use engine_script::props::{Prop, PropKind};
@@ -163,6 +174,10 @@ pub struct ScriptsTab {
     pub debug: DebugState,
     /// The Details panel's script part.
     pub props: PropsPanel,
+    /// Luau's type checker and what it found.
+    pub types: Types,
+    /// Screenshot runs: put the pointer over this (0-based line, char column) of the code.
+    pub point_at: Option<(u32, u32)>,
 }
 
 /// An open file.
@@ -319,6 +334,12 @@ pub fn panel(ui: &mut egui::Ui, world: &mut World, editor: &mut Editor) {
         tab.vocab = Some(Vocab::new(world));
     }
     poll(world, editor, &mut tab, now);
+    types_poll(world, &mut tab, now);
+    if let Some((path, line, col)) = tab.types.goto.take() {
+        open(world, &mut tab, &path, Some(line + 1));
+        let doc = &mut tab.docs[tab.current];
+        doc.jump = Some(char_at(&doc.text, line, col));
+    }
     let stop = debug::stopped(world);
     if let Some(stop) = &stop {
         debug_keys(ui, world, stop);
@@ -736,7 +757,8 @@ fn sidebar(
             for (dir, rows) in folders {
                 let row_ui = |ui: &mut egui::Ui| {
                     for f in rows {
-                        if file_row(ui, f, current == Some(f.path.as_str())) {
+                        let errors = tab.types.reports.get(&f.path).map_or(0, |r| r.errors());
+                        if file_row(ui, f, current == Some(f.path.as_str()), errors) {
                             open_path = Some(f.path.clone());
                         }
                     }
@@ -817,7 +839,7 @@ fn class_name(path: &str) -> String {
 
 /// One file in the list: a dot for its state, its name, how many scripts run it. True when
 /// clicked.
-fn file_row(ui: &mut egui::Ui, f: &FileRow, current: bool) -> bool {
+fn file_row(ui: &mut egui::Ui, f: &FileRow, current: bool, type_errors: usize) -> bool {
     let m = &f.marks;
     let failed = m.error.is_some() || m.fault.is_some();
     let (dot, state) = if failed {
@@ -840,6 +862,13 @@ fn file_row(ui: &mut egui::Ui, f: &FileRow, current: bool) -> bool {
             &format!("  ×{}", m.instances),
             0.0,
             TextFormat::simple(FontId::proportional(11.0), theme::TEXT_DIM),
+        );
+    }
+    if type_errors > 0 {
+        text.append(
+            &format!("  ✖{type_errors}"),
+            0.0,
+            TextFormat::simple(FontId::proportional(11.0), ERROR),
         );
     }
     let r = ui
@@ -1183,6 +1212,8 @@ fn code_view(ui: &mut egui::Ui, world: &mut World, tab: &mut ScriptsTab, now: f6
         let line = line_of(&doc.text, doc.caret) as u32 + 1;
         toggle_breakpoint(doc, &mut tab.debug, line);
     }
+    // F12 (or Ctrl+click, below): where the name at the caret is declared.
+    let mut ask_definition = focused && ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::F12));
     let mut accept = None;
     let mut close_list = false;
     if focused && let Some(c) = &mut tab.completion {
@@ -1221,8 +1252,10 @@ fn code_view(ui: &mut egui::Ui, world: &mut World, tab: &mut ScriptsTab, now: f6
     }
 
     let playing = tab.playing;
+    let point_at = tab.point_at;
     let doc = &mut tab.docs[i];
     let dbg = &mut tab.debug;
+    let types = &mut tab.types;
     if doc.checked != doc.text {
         doc.syntax = editing::check(&doc.text);
         doc.checked = doc.text.clone();
@@ -1280,6 +1313,16 @@ fn code_view(ui: &mut egui::Ui, world: &mut World, tab: &mut ScriptsTab, now: f6
                 .cursor_range
                 .map(|r| r.primary.index.0)
                 .unwrap_or(doc.caret);
+            if let Some((l, c)) = point_at {
+                let at = out
+                    .galley
+                    .pos_from_cursor(CCursor::new(char_at(&doc.text, l, c)));
+                let p = out.galley_pos + at.center().to_vec2() + Vec2::new(3.0, 0.0);
+                world
+                    .resource_mut::<crate::egui_bridge::EguiInput>()
+                    .injected
+                    .push(egui::Event::PointerMoved(p));
+            }
             let lines = line_rects(&out.galley, out.galley_pos);
             let current_line = line_of(&doc.text, caret);
             paint_backdrop(
@@ -1303,7 +1346,9 @@ fn code_view(ui: &mut egui::Ui, world: &mut World, tab: &mut ScriptsTab, now: f6
                 &unbound,
             );
             let lints = lints(&doc.text, &vocab);
-            paint_notes(ui, &lines, doc, &lints, &font, stop.as_ref());
+            let shown = shown_problems(doc, types, &lints);
+            paint_notes(ui, &lines, doc, &lints, &shown, &font, stop.as_ref());
+            paint_type_marks(ui, &out.galley, out.galley_pos, &doc.text, &shown);
             // Stopped: a name's value under the pointer, as Visual Studio's data tips.
             if let Some(st) = &stop
                 && let Some(pos) = out.response.hover_pos()
@@ -1317,6 +1362,47 @@ fn code_view(ui: &mut egui::Ui, world: &mut World, tab: &mut ScriptsTab, now: f6
                     let _ = out.response.response.clone().on_hover_ui_at_pointer(|ui| {
                         ui.set_max_width(520.0);
                         ui.label(variable_text(ui, &tip, f32::INFINITY).0);
+                    });
+                }
+            } else if stop.is_none()
+                && let Some(pos) = out.response.hover_pos()
+                && pos.x > out.response.rect.left() + GUTTER
+            {
+                // A name's type and docs, and the problems there, from the checker.
+                let at = out.galley.cursor_from_pos(pos - out.galley_pos).index.0;
+                let (line, col) = line_col(&doc.text, at);
+                let here: Vec<Problem> = shown
+                    .iter()
+                    .copied()
+                    .filter(|p| {
+                        p.span.line == line
+                            && p.span.col <= col
+                            && (col < p.span.end_col.max(p.span.col + 1) || p.span.end_line > line)
+                    })
+                    .cloned()
+                    .collect();
+                let word = word_cols(&doc.text, line, col);
+                if let Some((a, _)) = word {
+                    let key = (doc.path.clone(), line, a);
+                    if types.hover_asked.as_ref() != Some(&key) {
+                        types.hover_asked = Some(key);
+                        types.hover = None;
+                        types.hover_ticket =
+                            types.ask(&doc.path, Some(&doc.text), Ask::Hover { line, col });
+                    }
+                }
+                let hover = types
+                    .hover
+                    .as_ref()
+                    .filter(|(p, h)| {
+                        *p == doc.path
+                            && h.span.line == line
+                            && word.is_some_and(|(a, _)| h.span.col == a)
+                    })
+                    .map(|(_, h)| h);
+                if hover.is_some() || !here.is_empty() {
+                    let _ = out.response.response.clone().on_hover_ui_at_pointer(|ui| {
+                        type_tip(ui, hover, &here.iter().collect::<Vec<_>>())
                     });
                 }
             }
@@ -1373,6 +1459,9 @@ fn code_view(ui: &mut egui::Ui, world: &mut World, tab: &mut ScriptsTab, now: f6
                 }
                 click.context_menu(|ui| gutter_menu(ui, world, doc, dbg));
             }
+            if out.response.clicked() && ui.input(|i| i.modifiers.command) {
+                ask_definition = true;
+            }
             output = Some((
                 out.response.changed(),
                 caret,
@@ -1387,13 +1476,84 @@ fn code_view(ui: &mut egui::Ui, world: &mut World, tab: &mut ScriptsTab, now: f6
     let moved = caret != doc.caret;
     doc.caret = caret;
 
-    // Completion: opened by typing a word, `.`, `:` or a component's quote; Ctrl+Space.
+    // Completion: opened by typing a word, `.`, `:` or a component's quote; Ctrl+Space. After
+    // `.`/`:` on a value completion's word list doesn't know (`self.props.`, `target:`), the
+    // checker's members, typed.
     let typed = changed && moved;
     if typed || tab.complete_now {
         let explicit = std::mem::take(&mut tab.complete_now);
         tab.completion = complete(&doc.text, caret, &vocab, explicit);
+        if let Some(start) = typed_member_at(&doc.text, caret, &vocab) {
+            match &tab.types.typed {
+                Some((p, s, list)) if *p == doc.path && *s == start => {
+                    let prefix: String = doc.text.chars().skip(start).take(caret - start).collect();
+                    let items = typed_items(list, &receiver_text(&doc.text, start), &prefix);
+                    tab.completion = (!items.is_empty()).then_some(Completion {
+                        start,
+                        prefix,
+                        items,
+                        selected: 0,
+                    });
+                }
+                _ => {
+                    let (line, col) = line_col(&doc.text, caret);
+                    tab.types.complete_for = Some((doc.path.clone(), start));
+                    tab.types.complete_ticket =
+                        tab.types
+                            .ask(&doc.path, Some(&doc.text), Ask::Complete { line, col });
+                }
+            }
+        }
     } else if moved {
         tab.completion = None;
+    }
+    if std::mem::take(&mut tab.types.typed_fresh)
+        && let Some((p, start, list)) = &tab.types.typed
+        && *p == doc.path
+        && typed_member_at(&doc.text, caret, &vocab) == Some(*start)
+    {
+        let prefix: String = doc.text.chars().skip(*start).take(caret - start).collect();
+        let items = typed_items(list, &receiver_text(&doc.text, *start), &prefix);
+        if !items.is_empty() {
+            tab.completion = Some(Completion {
+                start: *start,
+                prefix,
+                items,
+                selected: 0,
+            });
+        }
+    }
+    // The call the caret is in: its parameters over the line.
+    if changed || moved {
+        if in_call(&doc.text, caret) {
+            let (line, col) = line_col(&doc.text, caret);
+            let key = (doc.path.clone(), line, col);
+            if tab.types.signature_asked.as_ref() != Some(&key) {
+                tab.types.signature_asked = Some(key);
+                tab.types.signature_ticket =
+                    tab.types
+                        .ask(&doc.path, Some(&doc.text), Ask::Signature { line, col });
+            }
+        } else {
+            tab.types.signature = None;
+            tab.types.signature_asked = None;
+        }
+    }
+    if ui.memory(|m| m.has_focus(id))
+        && let Some((p, line, s)) = &tab.types.signature
+        && *p == doc.path
+        && *line as usize == line_of(&doc.text, caret)
+        && in_call(&doc.text, caret)
+    {
+        let at = galley.pos_from_cursor(CCursor::new(caret));
+        let pos = galley_pos + at.left_top().to_vec2() + Vec2::new(-6.0, -3.0);
+        signature_popup(ui, s, pos);
+    }
+    if ask_definition {
+        let (line, col) = line_col(&doc.text, caret);
+        tab.types.definition_ticket =
+            tab.types
+                .ask(&doc.path, Some(&doc.text), Ask::Definition { line, col });
     }
     let clicked = tab.completion.as_ref().and_then(|c| {
         let at = galley.pos_from_cursor(CCursor::new(c.start));
@@ -1673,11 +1833,13 @@ fn paint_gutter(
 
 /// Notes after the end of lines, as Error Lens draws them: errors, unknown engine functions,
 /// logpoint values, heat, and while stopped each local's value beside the line declaring it.
+#[allow(clippy::too_many_arguments)]
 fn paint_notes(
     ui: &egui::Ui,
     lines: &[Rect],
     doc: &Doc,
     lints: &[Lint],
+    types: &[&Problem],
     font: &FontId,
     stop: Option<&FileStop>,
 ) {
@@ -1718,6 +1880,18 @@ fn paint_notes(
             .entry(l.line)
             .or_default()
             .push((format!("⚠ {}", l.message), LINT));
+    }
+    // The checker's: the first on each line, errors before warnings.
+    for p in types {
+        let line = notes.entry(p.span.line as usize).or_default();
+        if !line.iter().any(|(_, c)| *c == ERROR || *c == LINT) {
+            let (icon, color) = if p.error {
+                ("✖", ERROR)
+            } else {
+                ("⚠", LINT)
+            };
+            line.push((format!("{icon} {}", p.message), color));
+        }
     }
     for (shown, lp) in &doc.logpoints {
         let text = doc
@@ -1931,6 +2105,37 @@ fn status_line(ui: &mut egui::Ui, editor: &Editor, tab: &mut ScriptsTab) {
                 let col = doc.caret - line_start_char(&doc.text, line) + 1;
                 ui.label(theme::dim(format!("Ln {}, Col {col}", line + 1)).monospace());
                 ui.label(theme::dim("·  Luau"));
+                // The checker's verdict on this file.
+                let types = &tab.types;
+                if let Some(e) = &types.failed {
+                    ui.label(theme::dim("·  types off"))
+                        .on_hover_text(format!("The type checker didn't start: {e}"));
+                } else if let Some(r) = types.reports.get(&doc.path) {
+                    let (e, w) = (r.errors(), r.problems.len() - r.errors());
+                    let (text, color) = if e + w == 0 {
+                        ("·  ✔ types".to_string(), theme::PLAY)
+                    } else {
+                        (format!("·  types ✖ {e} ⚠ {w}"), if e > 0 { ERROR } else { LINT })
+                    };
+                    let tip = format!(
+                        "Luau's type checker: {e} error{}, {w} warning{} ({:.1} ms). Click: the first.",
+                        if e == 1 { "" } else { "s" },
+                        if w == 1 { "" } else { "s" },
+                        r.micros as f64 / 1000.0
+                    );
+                    let first = r.problems.first().map(|p| (p.span.line, p.span.col));
+                    let label = ui
+                        .add(
+                            egui::Label::new(RichText::new(text).color(color))
+                                .sense(egui::Sense::click()),
+                        )
+                        .on_hover_text(tip);
+                    if label.clicked()
+                        && let Some((l, c)) = first
+                    {
+                        doc.jump = Some(char_at(&doc.text, l, c));
+                    }
+                }
                 let errors = error_lines(doc);
                 if !errors.is_empty() {
                     let r = ui.add(
@@ -2361,7 +2566,7 @@ fn complete(text: &str, caret: usize, vocab: &Vocab, explicit: bool) -> Option<C
                 items.push(item(w, &recv, "."));
             }
         } else if recv == "self" {
-            let scope = "ScriptSelf";
+            let scope = "ScriptBase";
             for w in words.iter().filter(|w| w.scope == scope) {
                 let method = w.kind == WordKind::Function;
                 if method == colon {
@@ -2621,16 +2826,528 @@ fn completion_popup(ui: &egui::Ui, c: &Completion, pos: Pos2) -> Option<usize> {
     clicked
 }
 
+// ----------------------------------------------------------------------------- types
+
+/// Luau's type checker on the scripts (`engine_script::analysis`, on a thread of its own): a
+/// report per file, and its answers to what the code view asks (Roblox Studio's script
+/// analysis, Godot's typed GDScript: problems as you type, types under the pointer).
+#[derive(Default)]
+pub struct Types {
+    checker: Option<Checker>,
+    /// Why there is no checker (the engine's definitions didn't load).
+    failed: Option<String>,
+    ticket: u64,
+    /// The last report for each file.
+    pub reports: HashMap<String, Report>,
+    /// The text last sent for each open file; the other files' times on disk.
+    sent: HashMap<String, String>,
+    disk: HashMap<String, Option<SystemTime>>,
+    disk_next: f64,
+    /// The word under the pointer: asked for at (path, line, word start), and the answer.
+    hover_asked: Option<(String, u32, u32)>,
+    hover_ticket: u64,
+    hover: Option<(String, Hover)>,
+    /// Members asked for at (path, char index where the word starts); the last list got.
+    complete_ticket: u64,
+    complete_for: Option<(String, usize)>,
+    typed: Option<(String, usize, Vec<Suggestion>)>,
+    /// A new member list came in: show it.
+    typed_fresh: bool,
+    /// The call the caret is in: asked for at (path, line, col), and the answer.
+    signature_asked: Option<(String, u32, u32)>,
+    signature_ticket: u64,
+    signature: Option<(String, u32, Signature)>,
+    /// Go to definition: asked, and where it is.
+    definition_ticket: u64,
+    goto: Option<(String, u32, u32)>,
+    /// The bottom panel shows the problems instead of the output.
+    pub show_problems: bool,
+}
+
+impl Types {
+    fn next(&mut self) -> u64 {
+        self.ticket += 1;
+        self.ticket
+    }
+
+    fn ask(&mut self, path: &str, text: Option<&str>, ask: Ask) -> u64 {
+        let ticket = self.next();
+        if let Some(c) = &self.checker {
+            c.send(Job {
+                ticket,
+                path: path.to_string(),
+                text: text.map(str::to_string),
+                ask,
+            });
+        }
+        ticket
+    }
+
+    /// The current problems of `path` (none while it has a syntax error: those come first).
+    fn problems(&self, path: &str) -> &[Problem] {
+        self.reports
+            .get(path)
+            .map_or(&[], |r| r.problems.as_slice())
+    }
+
+    /// Errors and warnings over every file.
+    fn counts(&self) -> (usize, usize) {
+        let all = self.reports.values().flat_map(|r| &r.problems);
+        let (e, w): (Vec<&Problem>, Vec<&Problem>) = all.partition(|p| p.error);
+        (e.len(), w.len())
+    }
+}
+
+/// Keeps the checker fed: open files as typed, the others when they change on disk; takes its
+/// answers.
+fn types_poll(world: &mut World, tab: &mut ScriptsTab, now: f64) {
+    let t = &mut tab.types;
+    if t.checker.is_none() && t.failed.is_none() {
+        t.checker = Some(Checker::for_world(world));
+    }
+    if t.checker.is_none() {
+        return;
+    }
+    for doc in &tab.docs {
+        if t.sent.get(&doc.path) != Some(&doc.text) {
+            t.sent.insert(doc.path.clone(), doc.text.clone());
+            t.ask(&doc.path, Some(&doc.text), Ask::Check);
+        }
+    }
+    let closed: Vec<String> = t
+        .sent
+        .keys()
+        .filter(|p| !tab.docs.iter().any(|d| &d.path == *p))
+        .cloned()
+        .collect();
+    for p in closed {
+        t.sent.remove(&p);
+        t.ask(&p, None, Ask::Closed);
+    }
+    if now >= t.disk_next && !tab.files.is_empty() {
+        t.disk_next = now + FILES_SECS;
+        let root = engine_script::scripts_root(world);
+        for f in &tab.files {
+            let stamp = modified(&root.join(&f.path));
+            if t.disk.get(&f.path) == Some(&stamp) {
+                continue;
+            }
+            let seen = t.disk.insert(f.path.clone(), stamp).is_some();
+            if t.sent.contains_key(&f.path) {
+                continue;
+            }
+            if seen {
+                t.ask(&f.path, None, Ask::Touched);
+            }
+            t.ask(&f.path, None, Ask::Check);
+        }
+    }
+    let answers = t.checker.as_ref().map(|c| c.answers()).unwrap_or_default();
+    for a in answers {
+        match a.reply {
+            Reply::Report(r) => {
+                t.reports.insert(a.path, r);
+            }
+            Reply::Hover(h) if a.ticket == t.hover_ticket => {
+                t.hover = h.map(|h| (a.path, h));
+            }
+            Reply::Complete(list) if a.ticket == t.complete_ticket => {
+                if let Some((path, start)) = t.complete_for.take() {
+                    t.typed = Some((path, start, list));
+                    t.typed_fresh = true;
+                }
+            }
+            Reply::Signature(s) if a.ticket == t.signature_ticket => {
+                let line = t.signature_asked.as_ref().map_or(0, |s| s.1);
+                t.signature = s.map(|s| (a.path, line, s));
+            }
+            Reply::Definition(d) if a.ticket == t.definition_ticket => {
+                t.goto = d;
+            }
+            Reply::Failed(e) => {
+                t.failed = Some(e);
+                t.checker = None;
+            }
+            _ => {}
+        }
+    }
+}
+
+/// The char index of a (0-based line, char column) in `text`.
+fn char_at(text: &str, line: u32, col: u32) -> usize {
+    let start = line_start_char(text, line as usize);
+    let len = text
+        .split('\n')
+        .nth(line as usize)
+        .map_or(0, |l| l.chars().count());
+    start + (col as usize).min(len)
+}
+
+/// (0-based line, char column) of a char index.
+fn line_col(text: &str, at: usize) -> (u32, u32) {
+    let line = line_of(text, at);
+    (line as u32, (at - line_start_char(text, line)) as u32)
+}
+
+/// The identifier around a char index: (start, end) char columns on its line.
+fn word_cols(text: &str, line: u32, col: u32) -> Option<(u32, u32)> {
+    let chars: Vec<char> = text.split('\n').nth(line as usize)?.chars().collect();
+    let w = |c: char| c.is_alphanumeric() || c == '_';
+    let mut a = (col as usize).min(chars.len());
+    if a == chars.len() || !w(chars[a]) {
+        return None;
+    }
+    while a > 0 && w(chars[a - 1]) {
+        a -= 1;
+    }
+    let mut b = col as usize;
+    while b < chars.len() && w(chars[b]) {
+        b += 1;
+    }
+    (!chars[a].is_ascii_digit()).then_some((a as u32, b as u32))
+}
+
+/// Whether the caret is inside a call's parentheses on its line (a quick look before asking
+/// the checker for the call's parameters).
+fn in_call(text: &str, caret: usize) -> bool {
+    let (line, col) = line_col(text, caret);
+    let Some(l) = text.split('\n').nth(line as usize) else {
+        return false;
+    };
+    let before: String = l.chars().take(col as usize).collect();
+    if in_comment_or_string(&before) {
+        return false;
+    }
+    let mut depth = 0i32;
+    for c in before.chars().rev() {
+        match c {
+            ')' => depth += 1,
+            '(' if depth == 0 => return true,
+            '(' => depth -= 1,
+            _ => {}
+        }
+    }
+    false
+}
+
+/// Where completion should ask the checker: a member after `.`/`:` on something completion's
+/// word list doesn't know (`self.`, `p.pulse.`, `target:`). Returns the word's start.
+fn typed_member_at(text: &str, caret: usize, vocab: &Vocab) -> Option<usize> {
+    let before: Vec<char> = text.chars().take(caret).collect();
+    let mut start = before.len();
+    while start > 0 && (before[start - 1].is_alphanumeric() || before[start - 1] == '_') {
+        start -= 1;
+    }
+    let sep = *before.get(start.checked_sub(1)?)?;
+    if sep != '.' && sep != ':' {
+        return None;
+    }
+    let line_start = before[..start]
+        .iter()
+        .rposition(|&c| c == '\n')
+        .map_or(0, |k| k + 1);
+    let line: String = before[line_start..start - 1].iter().collect();
+    if in_comment_or_string(&line) || (sep == ':' && line.trim_start().starts_with("function ")) {
+        return None;
+    }
+    let mut r = start - 1;
+    while r > 0 && (before[r - 1].is_alphanumeric() || before[r - 1] == '_' || before[r - 1] == '.')
+    {
+        r -= 1;
+    }
+    let recv: String = before[r..start - 1].iter().collect();
+    if recv.is_empty() || recv.starts_with(|c: char| c.is_ascii_digit()) {
+        return None;
+    }
+    let known = vocab.words.iter().any(|w| w.scope == recv);
+    (!known).then_some(start)
+}
+
+/// The checker's members as completion rows, filtered by what is typed.
+fn typed_items(list: &[Suggestion], recv_sep: &str, prefix: &str) -> Vec<Item> {
+    let p = prefix.to_lowercase();
+    let mut out: Vec<(u8, Item)> = list
+        .iter()
+        .filter_map(|s| {
+            let l = s.name.to_lowercase();
+            let rank = if l.starts_with(&p) {
+                0
+            } else if p.len() >= 2 && l.contains(&p) {
+                1
+            } else {
+                return None;
+            };
+            let kind = match s.kind {
+                SuggestKind::Field | SuggestKind::Local => WordKind::Field,
+                SuggestKind::Method => WordKind::Method,
+                SuggestKind::Function => WordKind::Function,
+                SuggestKind::Keyword => WordKind::Keyword,
+                SuggestKind::Type => WordKind::Global,
+                SuggestKind::Module => WordKind::Namespace,
+            };
+            Some((
+                rank,
+                Item {
+                    label: s.name.clone(),
+                    insert: s.name.clone(),
+                    kind,
+                    full: format!("{recv_sep}{}", s.name),
+                    detail: s.ty.clone(),
+                    doc: s.doc.clone(),
+                },
+            ))
+        })
+        .filter(|(_, it)| it.label != prefix)
+        .collect();
+    out.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.label.cmp(&b.1.label)));
+    out.into_iter().map(|(_, it)| it).take(60).collect()
+}
+
+/// The receiver and separator before a member being typed: `self.props.` for `self.props.lu`.
+fn receiver_text(text: &str, start: usize) -> String {
+    let before: Vec<char> = text.chars().take(start).collect();
+    let mut r = before.len().saturating_sub(1);
+    while r > 0 && (before[r - 1].is_alphanumeric() || before[r - 1] == '_' || before[r - 1] == '.')
+    {
+        r -= 1;
+    }
+    before[r..].iter().collect()
+}
+
+/// The type problems to draw for a file: none while it has a syntax error (that one is shown
+/// alone), and none where completion's own check already says the same.
+fn shown_problems<'a>(doc: &Doc, types: &'a Types, lints: &[Lint]) -> Vec<&'a Problem> {
+    if doc.syntax.is_some() {
+        return Vec::new();
+    }
+    types
+        .problems(&doc.path)
+        .iter()
+        .filter(|p| {
+            !lints
+                .iter()
+                .any(|l| l.line as u32 == p.span.line && p.message.contains("not found"))
+        })
+        .collect()
+}
+
+/// Squiggles under the checker's problems (red errors, amber warnings), where the text is.
+fn paint_type_marks(
+    ui: &egui::Ui,
+    galley: &egui::Galley,
+    origin: Pos2,
+    text: &str,
+    problems: &[&Problem],
+) {
+    let painter = ui.painter();
+    let clip = ui.clip_rect();
+    for p in problems {
+        let a = char_at(text, p.span.line, p.span.col);
+        let b = if p.span.end_line == p.span.line && p.span.end_col > p.span.col {
+            char_at(text, p.span.line, p.span.end_col)
+        } else {
+            char_at(text, p.span.line, u32::MAX)
+        };
+        let ra = galley.pos_from_cursor(CCursor::new(a));
+        let rb = galley.pos_from_cursor(CCursor::new(b.max(a + 1)));
+        let y = origin.y + ra.max.y - 1.0;
+        if y < clip.top() || y > clip.bottom() + 4.0 {
+            continue;
+        }
+        let x0 = origin.x + ra.min.x;
+        let x1 = (origin.x + rb.min.x).max(x0 + 6.0);
+        let color = if p.error { ERROR } else { LINT };
+        let mut points = Vec::new();
+        let mut x = x0;
+        let mut up = true;
+        while x < x1 {
+            points.push(Pos2::new(x, if up { y - 2.0 } else { y }));
+            x += 2.5;
+            up = !up;
+        }
+        points.push(Pos2::new(x1, if up { y - 2.0 } else { y }));
+        painter.add(egui::Shape::line(points, Stroke::new(1.2, color)));
+    }
+}
+
+/// The tooltip over code: the type of the name and its docs (from the checker), and any
+/// problem there.
+fn type_tip(ui: &mut egui::Ui, hover: Option<&Hover>, problems: &[&Problem]) {
+    ui.set_max_width(560.0);
+    if let Some(h) = hover {
+        let (name, ty) = h.text.split_once(": ").unwrap_or((&h.text, ""));
+        let mono = FontId::monospace(12.5);
+        let mut job = LayoutJob::default();
+        job.append(name, 0.0, TextFormat::simple(mono.clone(), Color32::WHITE));
+        if !ty.is_empty() {
+            job.append(": ", 0.0, TextFormat::simple(mono.clone(), theme::TEXT_DIM));
+            job.append(ty, 0.0, TextFormat::simple(mono, CALL));
+        }
+        job.wrap.max_width = 540.0;
+        ui.label(job);
+        if !h.doc.is_empty() {
+            ui.add_space(2.0);
+            ui.label(&h.doc);
+        }
+    }
+    for p in problems {
+        if hover.is_some() {
+            ui.separator();
+        }
+        let (icon, color) = if p.error {
+            ("✖", ERROR)
+        } else {
+            ("⚠", LINT)
+        };
+        ui.label(RichText::new(format!("{icon} {}", p.message)).color(color));
+        ui.label(theme::dim(p.code.as_str()).small());
+    }
+}
+
+/// The parameters of the call the caret is in, over the caret's line.
+fn signature_popup(ui: &egui::Ui, s: &Signature, pos: Pos2) {
+    egui::Area::new(egui::Id::new("script signature"))
+        .order(egui::Order::Foreground)
+        .pivot(Align2::LEFT_BOTTOM)
+        .fixed_pos(pos)
+        .show(ui.ctx(), |ui| {
+            egui::Frame::popup(ui.style())
+                .inner_margin(egui::Margin::symmetric(8, 5))
+                .show(ui, |ui| {
+                    ui.set_max_width(620.0);
+                    let mono = FontId::monospace(12.5);
+                    let plain = TextFormat::simple(mono.clone(), theme::TEXT);
+                    let mut job = LayoutJob::default();
+                    job.append(&s.name, 0.0, TextFormat::simple(mono.clone(), CALL));
+                    job.append("(", 0.0, plain.clone());
+                    for (k, p) in s.params.iter().enumerate() {
+                        if k > 0 {
+                            job.append(", ", 0.0, plain.clone());
+                        }
+                        if k == s.active {
+                            let mut f = TextFormat::simple(mono.clone(), Color32::WHITE);
+                            f.underline = Stroke::new(1.5, theme::ACCENT);
+                            f.background = theme::ACCENT.gamma_multiply(0.18);
+                            job.append(p, 0.0, f);
+                        } else {
+                            job.append(p, 0.0, TextFormat::simple(mono.clone(), theme::TEXT_DIM));
+                        }
+                    }
+                    job.append(")", 0.0, plain.clone());
+                    if !s.ret.is_empty() && s.ret != "()" {
+                        job.append(": ", 0.0, plain);
+                        job.append(&s.ret, 0.0, TextFormat::simple(mono, ENGINE));
+                    }
+                    ui.label(job);
+                    if !s.doc.is_empty() {
+                        ui.label(theme::dim(s.doc.as_str()).small());
+                    }
+                });
+        });
+}
+
+/// The problems list (Roblox Studio's Script Analysis, Unreal's Compiler Results): every
+/// file's type errors and warnings; a click opens the line.
+fn problems_list(ui: &mut egui::Ui, world: &mut World, tab: &mut ScriptsTab) {
+    let mut open_at = None;
+    egui::ScrollArea::vertical()
+        .id_salt("script problems")
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            ui.spacing_mut().item_spacing.y = 1.0;
+            if let Some(e) = &tab.types.failed {
+                ui.label(RichText::new(format!("The type checker didn't start: {e}")).color(ERROR));
+                return;
+            }
+            let mut files: Vec<&Report> = tab
+                .types
+                .reports
+                .values()
+                .filter(|r| !r.problems.is_empty())
+                .collect();
+            files.sort_by(|a, b| b.errors().cmp(&a.errors()).then(a.path.cmp(&b.path)));
+            if files.is_empty() {
+                ui.label(theme::dim(if tab.types.reports.is_empty() {
+                    "Checking the scripts…".to_string()
+                } else {
+                    format!(
+                        "✔ {} scripts, no problems: Luau's type checker found nothing wrong.",
+                        tab.types.reports.len()
+                    )
+                }));
+            }
+            for r in files {
+                ui.label(
+                    RichText::new(format!(
+                        "{}   {} error{}, {} warning{}",
+                        r.path,
+                        r.errors(),
+                        if r.errors() == 1 { "" } else { "s" },
+                        r.problems.len() - r.errors(),
+                        if r.problems.len() - r.errors() == 1 {
+                            ""
+                        } else {
+                            "s"
+                        },
+                    ))
+                    .small()
+                    .strong()
+                    .color(theme::TEXT_DIM),
+                );
+                for p in &r.problems {
+                    let (icon, color) = if p.error {
+                        ("✖", ERROR)
+                    } else {
+                        ("⚠", LINT)
+                    };
+                    let place = match p.node {
+                        Some(n) => format!("node {n}"),
+                        None => format!("{}:{}", p.span.line + 1, p.span.col + 1),
+                    };
+                    let mut job = LayoutJob::default();
+                    let mono = FontId::monospace(12.0);
+                    job.append(
+                        &format!("  {icon} "),
+                        0.0,
+                        TextFormat::simple(mono.clone(), color),
+                    );
+                    job.append(
+                        &format!("{place:<8} "),
+                        0.0,
+                        TextFormat::simple(mono.clone(), theme::TEXT_DIM),
+                    );
+                    job.append(&p.message, 0.0, TextFormat::simple(mono, theme::TEXT));
+                    let row = ui
+                        .add(egui::Label::new(job).truncate().sense(egui::Sense::click()))
+                        .on_hover_text(format!("{} ({}): {}", place, p.code, p.message));
+                    if row.clicked() {
+                        open_at = Some((r.path.clone(), p.span.line, p.span.col));
+                    }
+                }
+            }
+        });
+    if let Some((path, line, col)) = open_at {
+        if path.ends_with(".graph") {
+            open_in_tab(world, &path, Some(line + 1));
+        } else {
+            open(world, tab, &path, Some(line + 1));
+            let doc = &mut tab.docs[tab.current];
+            doc.jump = Some(char_at(&doc.text, line, col));
+        }
+    }
+}
+
 // ----------------------------------------------------------------------------- output
 
 fn output(ui: &mut egui::Ui, world: &mut World, tab: &mut ScriptsTab) {
     ui.horizontal(|ui| {
-        ui.label(
-            RichText::new("OUTPUT")
-                .small()
-                .strong()
-                .color(theme::TEXT_DIM),
-        );
+        let head = |text: &str, color: Color32| RichText::new(text).small().strong().color(color);
+        if ui
+            .selectable_label(!tab.types.show_problems, head("OUTPUT", theme::TEXT_DIM))
+            .clicked()
+        {
+            tab.types.show_problems = false;
+        }
         let errors = tab
             .output
             .iter()
@@ -2639,12 +3356,37 @@ fn output(ui: &mut egui::Ui, world: &mut World, tab: &mut ScriptsTab) {
         if errors > 0 {
             ui.label(RichText::new(format!("✖ {errors}")).small().color(ERROR));
         }
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if ui.small_button("Clear").clicked() {
-                tab.output.clear();
-            }
-        });
+        ui.add_space(8.0);
+        let (e, w) = tab.types.counts();
+        let color = if e > 0 {
+            ERROR
+        } else if w > 0 {
+            LINT
+        } else {
+            theme::TEXT_DIM
+        };
+        if ui
+            .selectable_label(
+                tab.types.show_problems,
+                head(&format!("PROBLEMS   ✖ {e}   ⚠ {w}"), color),
+            )
+            .on_hover_text("Luau's type checker on every script: type errors and warnings")
+            .clicked()
+        {
+            tab.types.show_problems = true;
+        }
+        if !tab.types.show_problems {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.small_button("Clear").clicked() {
+                    tab.output.clear();
+                }
+            });
+        }
     });
+    if tab.types.show_problems {
+        problems_list(ui, world, tab);
+        return;
+    }
     let bar_h = 26.0;
     let mut open_at = None;
     egui::ScrollArea::vertical()
@@ -4509,6 +5251,126 @@ pub fn props_shots(dir: String) -> ShotScript {
     ShotScript::new(dir, steps)
 }
 
+/// `editor --headless --size 1920x1080 --shots <dir> --script types`: Luau's type checker in the
+/// Scripts tab: misspelt props and entity fields and a wrong argument underlined as typed (with
+/// the Problems list), a field's inferred type under the pointer, the members of `self.props`
+/// with their types, and a call's parameters while typing it.
+pub fn types_shots(dir: String) -> ShotScript {
+    let _ = std::fs::create_dir_all(&dir);
+    let root = std::fs::canonicalize(&dir)
+        .unwrap_or_else(|_| std::env::current_dir().unwrap_or_default().join(&dir))
+        .join("scripts");
+    let setup = move |world: &mut World, editor: &mut Editor| {
+        editor.icons = false;
+        let sky = world
+            .resource::<TypeRegistry>()
+            .resource("Sky")
+            .map(|r| r.patch);
+        if let Some(patch) = sky {
+            let _ = patch(world, json!({"hour": 19.3, "hours_per_second": 0.0}));
+        }
+        let from = engine_script::scripts_root(world).join(EXAMPLES);
+        copy_dir(&from, &root.join(EXAMPLES));
+        world.resource_mut::<ScriptSettings>().folder = root.to_string_lossy().to_string();
+        world.remove_resource::<ScriptRuntime>();
+        if let Some(e) = crate::shots::find(world, "Lamp") {
+            world
+                .entity_mut(e)
+                .insert(Script::new("examples/beacon.luau"));
+        }
+        world.resource_mut::<EditorDock>().0 = shot_layout();
+        world.resource_mut::<ScriptsTab>().files_next = 0.0;
+        world.resource_scope(|world, mut tab: Mut<ScriptsTab>| {
+            open(world, &mut tab, "examples/beacon.luau", Some(34));
+        });
+    };
+    let with_tab = |f: fn(&mut World, &mut ScriptsTab)| {
+        move |world: &mut World, _: &mut Editor| {
+            world.resource_scope(|world, mut tab: Mut<ScriptsTab>| f(world, &mut tab));
+        }
+    };
+    /// The caret at the end of the first line holding `needle`.
+    fn caret_after(text: &str, needle: &str) -> Option<usize> {
+        let b = text.find(needle)? + needle.len();
+        Some(text[..b].chars().count())
+    }
+    let steps = vec![
+        Step::Do(Box::new(setup)),
+        Step::Select("Lamp"),
+        Step::Tool(crate::editor::Tool::Select),
+        Step::Camera(DVec3::new(1.5, 1.3, 9.0), DVec3::new(-0.5, 1.0, 2.5)),
+        Step::Tab(Tab::Scripts),
+        Step::Wait(30),
+        // Three mistakes typed, not saved: a misspelt prop, a misspelt entity field and a number
+        // where a name goes. Each is underlined where it is; the Problems list has them all.
+        Step::Do(Box::new(with_tab(|_, tab| {
+            let doc = &mut tab.docs[tab.current];
+            doc.text = doc
+                .saved
+                .replace("p.lumens * level", "p.lumen * level")
+                .replace(
+                    "self.entity.position = self.home",
+                    "self.entity.positon = self.home",
+                )
+                .replace("world.find(p.target)", "world.find(p.every)");
+            doc.jump = caret_after(&doc.text, "p.lumen");
+            tab.types.show_problems = true;
+        }))),
+        Step::Wait(40),
+        Step::Shot("types_01_mistakes_underlined"),
+        // Fixed; the pointer on a field the script set itself: its type, found by the checker.
+        Step::Do(Box::new(with_tab(|_, tab| {
+            let doc = &mut tab.docs[tab.current];
+            doc.text = doc.saved.clone();
+            tab.types.show_problems = false;
+            if let Some((l, line)) = doc
+                .text
+                .split('\n')
+                .enumerate()
+                .find(|(_, l)| l.contains("= self.home +"))
+                && let Some(b) = line.find("self.home")
+            {
+                tab.point_at = Some((l as u32, line[..b].chars().count() as u32 + 6));
+            }
+        }))),
+        Step::Wait(60),
+        Step::Shot("types_02_hover_type"),
+        // `self.props.` typed: the props as declared, with their types.
+        Step::Do(Box::new(with_tab(|_, tab| {
+            tab.point_at = None;
+            let doc = &mut tab.docs[tab.current];
+            doc.text = doc.saved.replace(
+                "\tlocal p = self.props\n",
+                "\tlocal p = self.props\n\tlocal q = self.props.\n",
+            );
+            doc.jump = caret_after(&doc.text, "local q = self.props.");
+            tab.complete_now = true;
+        }))),
+        Step::Wait(4),
+        Step::Do(Box::new(with_tab(|_, tab| tab.complete_now = true))),
+        Step::Wait(30),
+        Step::Shot("types_03_props_members"),
+        // A call being typed: its parameters over the line, the one being typed lit.
+        Step::Do(Box::new(with_tab(|_, tab| {
+            tab.completion = None;
+            let doc = &mut tab.docs[tab.current];
+            doc.text = doc.saved.replace(
+                "\tlocal p = self.props\n",
+                "\tlocal p = self.props\n\tlocal lean = quat.axis_angle(vec3.right, \n",
+            );
+            doc.jump = caret_after(&doc.text, "quat.axis_angle(vec3.right, ");
+        }))),
+        Step::Wait(30),
+        Step::Shot("types_04_call_parameters"),
+        Step::Do(Box::new(with_tab(|_, tab| {
+            let doc = &mut tab.docs[tab.current];
+            doc.text = doc.saved.clone();
+        }))),
+        Step::Wait(5),
+    ];
+    ShotScript::new(dir, steps)
+}
+
 /// The props shots' layout: the viewport, and the Details panel beside it at full height.
 fn props_layout() -> DockState<Tab> {
     let mut dock = DockState::new(vec![Tab::Viewport, Tab::Scripts]);
@@ -4705,6 +5567,40 @@ mod tests {
         assert!(f[1].hook && f[1].line == 2);
         assert_eq!(f[2].label, "wave.bob(t)");
         assert_eq!(class_name("examples/new_script.luau"), "NewScript");
+    }
+
+    #[test]
+    fn the_checker_is_asked_where_the_word_list_knows_nothing() {
+        let v = vocab();
+        let at = |text: &str| typed_member_at(text, text.chars().count(), &v);
+        // `self.props.` and a local's members: only the checker knows them.
+        assert_eq!(at("\tlocal q = self.props.lu"), Some(22));
+        assert_eq!(at("\tp.pulse."), Some(9));
+        assert!(at("\ttask.w").is_none(), "the word list has task");
+        assert!(at("-- p.pulse.").is_none() && at("print(\"p.").is_none());
+        assert!(
+            at("function Lamp:on_i").is_none(),
+            "hooks come from the word list"
+        );
+        assert_eq!(
+            receiver_text("\tlocal q = self.props.lu", 22),
+            "self.props."
+        );
+        // A call's parameters: inside its parentheses, not in a string or after it closed.
+        let caret = |t: &str| t.chars().count();
+        assert!(in_call(
+            "quat.axis_angle(vec3.up, ",
+            caret("quat.axis_angle(vec3.up, ")
+        ));
+        assert!(!in_call("f(a)", caret("f(a)")));
+        assert!(!in_call("print(\"(", caret("print(\"(")));
+        // The word under the pointer, and positions both ways.
+        assert_eq!(word_cols("\tself.home + x", 0, 8), Some((6, 10)));
+        assert_eq!(word_cols("x = 12", 0, 5), None);
+        let text = "ab\ncdé\nf";
+        assert_eq!(char_at(text, 1, 2), 5);
+        assert_eq!(char_at(text, 1, 99), 6, "clamped to the line");
+        assert_eq!(line_col(text, 7), (2, 0));
     }
 
     #[test]

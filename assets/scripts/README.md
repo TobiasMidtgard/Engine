@@ -73,6 +73,17 @@ time. The Output under the code shows prints and errors (click one to open its l
 command bar runs Luau in the game. With an entity selected, open its script, or run the open
 file on it.
 
+Scripts are type checked as you type by Luau's own checker (the one Roblox Studio and luau-lsp
+use; scripts here start with `--!strict`). A type error is underlined in red and a lint warning
+(an unused local, a shadowed name) in yellow, with the message on hover and at the line's end;
+**Problems** beside Output lists them all (click one to open it), the file list shows a ✖ count
+and the status line says "✔ types" when a file is clean. Hover over a name to see its type,
+`.` and `:` complete the members of that value's real type (`self.props.` lists the props), a
+call shows its parameters with the current one in bold, and F12 or Ctrl+click goes to where a
+name is defined. The checker knows what `self` is in a class script: the engine's part
+(`entity`, `every`, `after`, `spawn`, the `ScriptBase` type), the class's methods and `props`,
+and the fields its methods set, typed from what they are set to.
+
 ## Props in the Details panel
 
 Select an entity with a script and the Details panel shows each of its props as a field, as
@@ -154,7 +165,8 @@ component has Get and Set nodes.
 `script.eval {code}` runs Luau in the live game (`return world.find("Lantern 3").position`),
 `script.errors` and `script.log` show what scripts reported, `script.list` shows every file and
 instance with its cost per frame, `script.edit` and `script.write` change files like an editor,
-and `script.restart` starts an entity's script from scratch.
+and `script.restart` starts an entity's script from scratch. `script.typecheck {path?, text?}`
+type checks one file (or text as that file), or every script, and returns the problems.
 
 ## Debugging
 

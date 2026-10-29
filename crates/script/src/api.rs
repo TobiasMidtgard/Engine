@@ -403,6 +403,45 @@ pub(crate) fn register(app: &mut App) {
             Ok(json!({"file": full.display().to_string(), "bytes": text.len()}))
         },
     );
+    #[cfg(feature = "analysis")]
+    app.register_api(
+        "script.typecheck",
+        "Type-check scripts with Luau's own checker before running them: each file's type \
+         errors and lint warnings, with lines (1-based). \"path\" checks one file, else every \
+         script in the folder; \"text\" checks that text as the file.",
+        r#"{"path": "examples/lamp.luau"}"#,
+        |world, args| {
+            let mut checker = crate::analysis::Analyzer::for_world(world)?;
+            let paths = match str_arg(&args, "path") {
+                Some(p) => vec![crate::runtime::normalize(p)],
+                None => crate::props::files(world),
+            };
+            if let (Some(text), [one]) = (str_arg(&args, "text"), paths.as_slice()) {
+                checker.set_text(one, Some(text.to_string()));
+            }
+            let files: Vec<Value> = paths
+                .iter()
+                .map(|p| {
+                    let r = checker.check(p);
+                    let problems: Vec<Value> = r
+                        .problems
+                        .iter()
+                        .map(|p| {
+                            json!({
+                                "line": p.span.line + 1,
+                                "column": p.span.col + 1,
+                                "message": p.message,
+                                "error": p.error,
+                                "code": p.code,
+                            })
+                        })
+                        .collect();
+                    json!({"path": r.path, "errors": r.errors(), "problems": problems})
+                })
+                .collect();
+            Ok(json!({"files": files}))
+        },
+    );
 }
 
 fn write_file(full: &Path, text: &str) -> Result<(), String> {

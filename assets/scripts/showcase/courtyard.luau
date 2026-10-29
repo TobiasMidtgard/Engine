@@ -56,7 +56,7 @@ function Courtyard:ritual()
 		ui.notify({ title = "The courtyard stirs", text = "courtyard.luau: Courtyard:ritual()" })
 	end
 	for _, lamp in self.lanterns do -- out, one by one
-		task.spawn(task.tween, 0.35, function(a)
+		task.spawn(task.tween, 0.35, function(a: number)
 			lamp.dim = 1 - a
 		end)
 		task.wait(0.08)
@@ -67,7 +67,7 @@ function Courtyard:ritual()
 	end
 	for i, lamp in self.lanterns do -- back in sequence, each with a flash
 		vfx.spawn({ effect = "spell.charge", position = lamp.bulb.world_position, scale = 0.6 })
-		task.spawn(task.tween, 0.5, function(a)
+		task.spawn(task.tween, 0.5, function(a: number)
 			lamp.dim = a
 		end, ease.out_back)
 		task.wait(0.12)

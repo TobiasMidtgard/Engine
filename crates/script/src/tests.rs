@@ -2003,6 +2003,19 @@ fn an_editor_sees_output_marks_and_can_hold_scripts() {
     )
     .unwrap();
     assert_eq!(check["ok"], json!(false));
+    // Luau's type checker, with every API this app registers in its definitions.
+    let types = call_api(
+        &mut app.world,
+        "script.typecheck",
+        json!({"path": "lamp.luau", "text": "--!strict\nlocal x: number = \"a\"\nreturn x\n"}),
+    )
+    .unwrap();
+    assert_eq!(types["files"][0]["errors"], json!(1), "{types}");
+    assert_eq!(
+        types["files"][0]["problems"][0]["line"],
+        json!(2),
+        "{types}"
+    );
     let _ = e;
 }
 
