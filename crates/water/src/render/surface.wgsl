@@ -31,7 +31,7 @@ struct Params {
 @group(0) @binding(1) var<storage, read_write> surface: array<vec2<f32>>; // (h, φ) per cell
 @group(0) @binding(2) var<storage, read_write> work: array<vec2<f32>>;    // three complex fields
 @group(0) @binding(3) var<storage, read> pushes: array<vec2<f32>>;        // height pushed, pressure impulse (m·s) per cell
-@group(0) @binding(4) var<storage, read> medium: array<vec2<u32>>;        // f16 (vx, vz), (wet, 0)
+@group(0) @binding(4) var<storage, read> medium: array<vec2<u32>>;        // f16 (vx, vz), (wet, absorb 1/s)
 @group(0) @binding(5) var<storage, read_write> heights: array<f32>;       // read back
 @group(0) @binding(6) var out_tex: texture_storage_2d<rgba16float, write>;
 
@@ -88,6 +88,8 @@ fn spatial(@builtin(global_invocation_id) id: vec3<u32>) {
         let edge = f32(min(min(id.x, id.y), min(N - 1u - id.x, N - 1u - id.y)));
         let t = saturate(1.0 - edge / params.band.z);
         s *= exp(-6.0 * t * t * params.grid.z);
+        // Soaked up over the shallows of a shelving shore (`surface::shore_absorb`).
+        s *= exp(-unpack2x16float(m.y).y * params.grid.z);
     }
     work[i] = s;
     if (params.damp.w > 0.5) {

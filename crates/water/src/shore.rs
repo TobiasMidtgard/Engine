@@ -35,6 +35,12 @@ const SAMPLE_TIME: std::time::Duration = std::time::Duration::from_micros(1500);
 /// Height of the wet band above a lake's still level in calm water, meters: sand wicks water
 /// up a few decimeters, and even ripples lap. Waves add 1.5 times their significant height.
 const SWASH_M: f32 = 0.4;
+/// A crest reaching the waterline runs up the beach this many times its height above the
+/// still level: on a gentle beach the swash climbs about as high as the wave was tall (Hunt's
+/// run-up R ≈ ξ·H, ξ around 1 for a lake's short waves on sand), twice the crest's elevation.
+const RUNUP_PER_CREST: f32 = 2.0;
+/// The run-up of one crest wets the shore this far either side of where it came in, meters.
+const RUNUP_SPREAD_M: f64 = 1.5;
 /// Waves wet the shore only this close to the water, meters: low land far inside a sea's
 /// extent stays dry.
 const RUNUP_M: f64 = 24.0;
@@ -90,6 +96,9 @@ pub struct ShoreCache {
     ground_changed: bool,
     /// Seconds since cells without ground were last retried.
     since_retry: f32,
+    /// Per cell: the highest a wake or ring has run up there since its row was last visited,
+    /// meters above the still level ([`RUNUP_PER_CREST`]).
+    runup: Vec<f32>,
 }
 
 impl ShoreCache {
@@ -103,6 +112,7 @@ impl ShoreCache {
             shifts,
             heights: vec![f64::NAN; n],
             spread: vec![0.0; n],
+            runup: vec![0.0; n],
             lakebed: vec![false; blocks],
             // Keep turning through the rows: a cache reset every update must not visit only
             // one row in four.
@@ -219,6 +229,7 @@ pub fn shore_wetness_system(
     }
     let phase = cache.phase;
     cache.phase = (phase + 1) % STRIDE;
+    note_runup(&mut cache, &state.ripples, origin, cell, (width, height));
 
     let focus_xz = DVec2::new(focus.x, focus.z);
     let c0 = ((focus_xz - origin) / cell).floor();
@@ -280,12 +291,16 @@ pub fn shore_wetness_system(
 
             let mut target = 0.0f32;
             let mut under_lake = false;
+            // Wakes and rings that ran up here since the last visit: the swash band of waves
+            // that tall (`swash_wetness`), for this pass.
+            let ran = std::mem::take(&mut cache.runup[idx]) / 1.5;
             for (b, hs) in lakes.iter().filter(|(b, _)| b.contains(ground_p)) {
                 let above = (h - b.center.y) as f32;
                 if above + spread < -UNDER_M {
                     under_lake = true;
                 } else if cache.lakebed_near(i, j, runup_cells) {
-                    target = target.max(swash_wetness((above - spread).max(0.0), *hs));
+                    let hs = hs.max(ran);
+                    target = target.max(swash_wetness((above - spread).max(0.0), hs));
                 }
             }
             if under_lake {
@@ -317,6 +332,59 @@ pub fn shore_wetness_system(
         let grid = &mut surface.grid;
         for (idx, w) in writes {
             grid.data[idx].wetness = w.min(1.0);
+        }
+    }
+}
+
+/// Note how high the crests on the ripple grid's waterline run up the beach this step (the
+/// dispersive surface's heights over its wet cells beside dry ones), on the cells around them.
+fn note_runup(
+    cache: &mut ShoreCache,
+    ripples: &crate::ripples::RippleField,
+    origin: DVec2,
+    cell: f64,
+    (width, height): (usize, usize),
+) {
+    if !ripples.has_water || cache.runup.len() != width * height {
+        return;
+    }
+    let Some(s) = ripples.surface.heights() else {
+        return;
+    };
+    let n = ripples.n;
+    if s.n != n || s.cell != ripples.cell || s.h.len() != n * n || ripples.depth.len() != n * n {
+        return;
+    }
+    let d = ((s.origin - ripples.origin) / ripples.cell as f64).round();
+    let (dx, dz) = (d.x as i64, d.y as i64);
+    let dry = |i: i64, j: i64| {
+        i < 0
+            || j < 0
+            || i >= n as i64
+            || j >= n as i64
+            || ripples.depth[j as usize * n + i as usize] <= 0.0
+    };
+    let reach = (RUNUP_SPREAD_M / cell).ceil() as i64;
+    for sj in 1..n - 1 {
+        for si in 1..n - 1 {
+            let crest = s.h[sj * n + si];
+            if crest < 0.005 {
+                continue;
+            }
+            let (i, j) = (si as i64 + dx, sj as i64 + dz);
+            if dry(i, j) || !(dry(i + 1, j) || dry(i - 1, j) || dry(i, j + 1) || dry(i, j - 1)) {
+                continue;
+            }
+            let run = crest * RUNUP_PER_CREST;
+            let at =
+                ripples.origin + DVec2::new(i as f64 + 0.5, j as f64 + 0.5) * ripples.cell as f64;
+            let c = ((at - origin) / cell).floor();
+            for cj in (c.y as i64 - reach).max(0)..=(c.y as i64 + reach).min(height as i64 - 1) {
+                for ci in (c.x as i64 - reach).max(0)..=(c.x as i64 + reach).min(width as i64 - 1) {
+                    let r = &mut cache.runup[cj as usize * width + ci as usize];
+                    *r = r.max(run);
+                }
+            }
         }
     }
 }
@@ -402,6 +470,39 @@ fn bank_distance(f: &FlowSim, p: DVec3, spread: f32) -> Option<f32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_wake_running_in_wets_the_beach_where_it_lands() {
+        use crate::surface::{Runner, SurfaceHeights};
+        // A pond 16 m across, dry from x = 4 m, and a 10 cm crest on its waterline at z = 0.
+        let mut r = crate::ripples::RippleField::new(64, 0.25);
+        r.rebuild_speeds(1.3, |p| (p.x < 4.0).then_some(1.0));
+        let n = r.n;
+        let mut h = vec![0.0; n * n];
+        let (i, j) = (
+            ((4.0 - 0.125 - r.origin.x) / 0.25) as usize,
+            (-r.origin.y / 0.25) as usize,
+        );
+        h[j * n + i] = 0.1;
+        r.surface.claim(Runner::Cpu);
+        r.surface.publish(SurfaceHeights {
+            origin: r.origin,
+            n,
+            cell: r.cell,
+            h,
+            phi: Vec::new(),
+        });
+        let mut cache = ShoreCache::default();
+        let (origin, size) = (DVec2::new(-32.0, -32.0), (64usize, 64usize));
+        cache.reset(origin, (64, 64), 0);
+        note_runup(&mut cache, &r, origin, 1.0, size);
+        let at = |x: f64, z: f64| cache.runup[((z + 32.0) as usize) * 64 + (x + 32.0) as usize];
+        // Twice the crest's height, on the sand beside where it came in; nothing far along.
+        assert!((at(4.5, 0.5) - 0.2).abs() < 1e-5, "{}", at(4.5, 0.5));
+        assert_eq!(at(4.5, 6.5), 0.0);
+        // Ran up that high, the sand is wet a little over 0.4 m above the still level.
+        assert!(swash_wetness(0.5, at(4.5, 0.5) / 1.5) > swash_wetness(0.5, 0.0));
+    }
 
     #[test]
     fn shores_are_wet_by_the_water_and_dry_above() {

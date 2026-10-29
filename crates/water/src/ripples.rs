@@ -47,6 +47,9 @@ const BUBBLE_LIFE_S: f32 = 10.0;
 /// before, and the grid's quarter-meter cells round the sharpest off: Barthelemy et al. 2018).
 const BREAK_SLOPE: f32 = 0.45;
 const BREAK_FULL: f32 = 0.7;
+/// In the shallows a crest breaks once it stands this many times the still water's depth
+/// above it (half of McCowan's height-to-depth 0.78).
+const BREAK_DEPTH_RATIO: f32 = 0.39;
 /// Foam a fully breaking crest whips up per second.
 const BREAK_FOAM: f32 = 2.0;
 /// Bubbles under this are gone.
@@ -128,6 +131,11 @@ pub struct RippleField {
     pub bubbles: Vec<f32>,
     /// Squared wave speed per cell (m²/s²); 0 = dry land.
     pub speed2: Vec<f32>,
+    /// Still water's depth per cell, meters; 0 = dry land.
+    pub depth: Vec<f32>,
+    /// How fast the dispersive surface's waves die out over each cell, 1/s: on a shelving
+    /// shore they break and run up the beach instead of bouncing back (`surface::shore_absorb`).
+    pub absorb: Vec<f32>,
     /// Waiting disturbances, applied at the start of the next step.
     pub pending: Vec<Disturbance>,
     /// Bumped whenever heights change (for GPU uploads).
@@ -668,6 +676,8 @@ impl RippleField {
             foam: vec![0.0; n * n],
             bubbles: vec![0.0; n * n],
             speed2: vec![0.0; n * n],
+            depth: vec![0.0; n * n],
+            absorb: vec![0.0; n * n],
             pending: Vec::new(),
             version: 0,
             medium_version: 0,
@@ -825,16 +835,21 @@ impl RippleField {
         let mut changed = false;
         for j in 0..n {
             for i in 0..n {
-                let c2 = match depth_at(self.cell_center(i, j)) {
-                    Some(d) if d > 0.02 => {
+                let d = depth_at(self.cell_center(i, j)).filter(|d| *d > 0.02);
+                let c2 = match d {
+                    Some(d) => {
                         any = true;
                         let shallow = G * d;
                         (speed * speed).min(shallow)
                     }
                     _ => 0.0,
                 };
-                changed |= self.speed2[j * n + i] != c2;
-                self.speed2[j * n + i] = c2;
+                let k = j * n + i;
+                let (d, absorb) = d.map_or((0.0, 0.0), |d| (d, crate::surface::shore_absorb(d)));
+                changed |= self.speed2[k] != c2 || self.absorb[k] != absorb;
+                self.speed2[k] = c2;
+                self.depth[k] = d;
+                self.absorb[k] = absorb;
             }
         }
         self.has_water = any;
@@ -880,6 +895,8 @@ impl RippleField {
     /// Make this a copy of what readers of `other` see (heights, currents, foam and where
     /// the grid is), without its working buffers: cheap enough to publish every step.
     pub fn copy_view_from(&mut self, other: &RippleField) {
+        let medium_changed =
+            self.medium_version != other.medium_version || self.wet.len() != other.wet.len();
         self.n = other.n;
         self.cell = other.cell;
         self.origin = other.origin;
@@ -890,6 +907,14 @@ impl RippleField {
         self.vel.clone_from(&other.vel);
         self.foam.clone_from(&other.foam);
         self.bubbles.clone_from(&other.bubbles);
+        // What the dispersive surface runs over, when it changed.
+        if medium_changed {
+            self.wet.clone_from(&other.wet);
+            self.drift.clone_from(&other.drift);
+            self.speed2.clone_from(&other.speed2);
+            self.depth.clone_from(&other.depth);
+            self.absorb.clone_from(&other.absorb);
+        }
         self.surface = other.surface.clone();
         self.coarse.clone_from(&other.coarse);
     }
@@ -1091,9 +1116,6 @@ impl RippleField {
                 let gx = (s.h[k + 1] - s.h[k - 1]) * inv;
                 let gz = (s.h[k + s.n] - s.h[k - s.n]) * inv;
                 let slope2 = gx * gx + gz * gz;
-                if slope2 < BREAK_SLOPE * BREAK_SLOPE {
-                    continue;
-                }
                 let (i, j) = (si + dx, sj + dz);
                 if i < 0 || j < 0 || i >= n || j >= n {
                     continue;
@@ -1102,7 +1124,20 @@ impl RippleField {
                 if self.speed2[idx] <= 0.0 {
                     continue;
                 }
-                let white = ((slope2.sqrt() - BREAK_SLOPE) / (BREAK_FULL - BREAK_SLOPE)).min(1.0);
+                // Steep crests spill; in the shallows a crest about as high as the water is
+                // deep trips over the bottom (McCowan: H/h ≈ 0.78, a crest ~0.39·h above the
+                // still level) and the wake's last rollers break white along the beach.
+                let steep = (slope2.sqrt() - BREAK_SLOPE) / (BREAK_FULL - BREAK_SLOPE);
+                let depth = self.depth[idx];
+                let shoal = if depth > 0.0 && s.h[k] > 0.01 {
+                    (s.h[k] / (BREAK_DEPTH_RATIO * depth) - 1.0) * 2.0
+                } else {
+                    0.0
+                };
+                let white = steep.max(shoal).min(1.0);
+                if white <= 0.0 {
+                    continue;
+                }
                 self.foam[idx] = (self.foam[idx] + white * BREAK_FOAM * dt).min(1.0);
                 self.foamy[(j as usize / TILE) * t + i as usize / TILE] = true;
             }
@@ -1555,11 +1590,16 @@ impl RippleField {
                 self.vel[k] = [v.x, v.y];
                 // Speeds follow the depth there; rebuilt properly on the next step.
                 let g = ((at - old.origin) / old.cell as f64).floor();
-                self.speed2[k] = if g.x >= 0.0 && g.y >= 0.0 && g.x < n as f64 && g.y < n as f64 {
-                    old.speed2[g.y as usize * n + g.x as usize]
+                let inside = g.x >= 0.0 && g.y >= 0.0 && g.x < n as f64 && g.y < n as f64;
+                let o = if inside {
+                    g.y as usize * n + g.x as usize
                 } else {
-                    0.0
+                    0
                 };
+                let take = |v: &[f32]| if inside { v[o] } else { 0.0 };
+                self.speed2[k] = take(&old.speed2);
+                self.depth[k] = take(&old.depth);
+                self.absorb[k] = take(&old.absorb);
             }
         }
         self.speeds_changed();

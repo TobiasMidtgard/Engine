@@ -849,7 +849,11 @@ fn shade_water(rel: vec3<f32>, n_in: vec3<f32>, look: WaterLook, foam_in: f32, c
         color = mix(color, foam_col, cover * 0.95);
     }
     let ground = textureSampleLevel(scene_color, linear_clamp, uv0, 0.0).rgb;
-    return mix(ground, apply_fog(color, rel), shoreline);
+    // The last centimeters at the waterline are a film over the sand: no water color to speak
+    // of, but it darkens the grains a little more and mirrors the sky and the sun like the
+    // water does (a swash film's sheen), before the mesh's edge gives way to the ground.
+    let film = mix(ground, ground * 0.85 + refl * fresnel + glitter, smoothstep(0.0, 0.35, shoreline));
+    return mix(film, apply_fog(color, rel), shoreline);
 }
 
 // The surface seen from below: Snell's window to the world above, total internal reflection

@@ -128,6 +128,28 @@ pub trait Medium {
     fn depth(&self) -> f32 {
         DEPTH_M
     }
+    /// How fast the waves die out over cell `k`, 1/s ([`shore_absorb`]).
+    fn absorb(&self, _k: usize) -> f32 {
+        0.0
+    }
+}
+
+/// Water shallower than this (m) soaks up the waves running into it.
+pub const SHORE_ABSORB_DEPTH_M: f32 = 0.8;
+/// How fast the shallowest water soaks them up, 1/s.
+pub const SHORE_ABSORB_MAX: f32 = 3.0;
+
+/// How fast waves die out over water `depth` m deep, 1/s. A wave running up a shelving beach
+/// steepens, breaks once it is about as high as the water is deep (McCowan's H/h ≈ 0.78) and
+/// spends itself in the surf and the swash: sand gives back about a tenth of a wave or less
+/// (reflection ~0.1·ξ², Battjes 1974), a wall nearly all of it. The linear surface can't
+/// break, so the last stretch of shallows takes the energy out instead, over many cells so
+/// the soaking edge doesn't reflect in its turn (an absorbing layer, as the grid's sponge).
+/// Steep banks go from deep to dry within a cell or two and still bounce most of it back.
+pub fn shore_absorb(depth: f32) -> f32 {
+    let t = ((depth - 0.05) / (SHORE_ABSORB_DEPTH_M - 0.05)).clamp(0.0, 1.0);
+    let open = t * t * (3.0 - 2.0 * t);
+    SHORE_ABSORB_MAX * (1.0 - open) * (1.0 - open)
 }
 
 impl Medium for RippleField {
@@ -141,6 +163,10 @@ impl Medium for RippleField {
     /// would only blur its wake away (the grid's foam swirls with them instead).
     fn carry(&self, _: usize, _: usize, k: usize) -> Vec2 {
         self.cell_drift(k)
+    }
+
+    fn absorb(&self, k: usize) -> f32 {
+        self.absorb.get(k).copied().unwrap_or(0.0)
     }
 }
 
@@ -157,6 +183,8 @@ pub struct CoarseBed {
     /// The water's mean depth over the level, meters: long waves feel the bottom (a boat
     /// going faster than √(g·depth) leaves no transverse waves at all).
     pub depth: f32,
+    /// Per cell: how fast the waves die out there, 1/s ([`shore_absorb`] of its depth).
+    pub absorb: Vec<f32>,
     /// Counts up whenever `wet` changes.
     pub version: u64,
 }
@@ -172,6 +200,10 @@ impl Medium for CoarseBed {
 
     fn depth(&self) -> f32 {
         self.depth
+    }
+
+    fn absorb(&self, k: usize) -> f32 {
+        self.absorb.get(k).copied().unwrap_or(0.0)
     }
 }
 
@@ -671,7 +703,7 @@ impl SurfaceSim {
                     let back = Vec2::new(i as f32, j as f32) - v * (dt / self.cell);
                     at(&self.state, back.x, back.y)
                 };
-                let keep = sponge(n, self.sponge, i, j, dt);
+                let keep = sponge(n, self.sponge, i, j, dt) * (-medium.absorb(k) * dt).exp();
                 self.work[k] = [s[0] * keep, s[1] * keep];
             }
         }
@@ -942,6 +974,45 @@ mod tests {
     }
 
     #[test]
+    fn a_shelving_beach_soaks_up_the_waves_a_wall_sends_back() {
+        // Dry from x = 10 m. The beach shelves from 3 m deep at x = 2 m up to the waterline;
+        // the wall drops straight to 3 m.
+        let energy = |beach: bool| {
+            let mut field = RippleField::new(N, 0.25);
+            field.rebuild_speeds(1.3, |p| {
+                let d = if beach { (10.0 - p.x) * 3.0 / 8.0 } else { 3.0 };
+                (p.x < 10.0).then_some(d.min(3.0) as f32)
+            });
+            let mut sim = SurfaceSim::new(N, field.cell, field.origin);
+            let stone = Disturbance {
+                pos: DVec2::new(-2.0, 0.0),
+                radius: 0.6,
+                depth: 0.05,
+                ..Default::default()
+            };
+            sim.step(&field, &[stone], 0.25, 1.0 / 30.0, 0.0);
+            for _ in 0..480 {
+                sim.step(&field, &[], 0.25, 1.0 / 30.0, 0.0);
+            }
+            // What is left in front of the shore: the rings running in, and what came back.
+            let h = sim.heights().h;
+            let mut e = 0.0f64;
+            for j in 0..N {
+                for i in 0..N {
+                    let x = field.cell_center(i, j).x;
+                    if x > 0.0 {
+                        e += (h[j * N + i] as f64).powi(2);
+                    }
+                }
+            }
+            e
+        };
+        let (beach, wall) = (energy(true), energy(false));
+        // About 0.54 of the wall's.
+        assert!(beach < wall * 0.7, "beach {beach:.3e}, wall {wall:.3e}");
+    }
+
+    #[test]
     fn a_dropped_stone_sends_out_a_spreading_train_of_rings() {
         let field = pond();
         let mut sim = SurfaceSim::new(N, field.cell, field.origin);
@@ -1022,6 +1093,7 @@ mod tests {
             cell,
             wet: vec![1.0; N * N],
             depth: 10.0,
+            absorb: vec![0.0; N * N],
             version: 0,
         }
     }

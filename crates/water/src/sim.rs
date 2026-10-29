@@ -339,12 +339,14 @@ impl CoarseStill {
         self.depths
             .read((origin, N, cell, layout), bodies, ground, level_y, focus);
         let (mut sum, mut count) = (0.0f64, 0usize);
+        let mut absorb = vec![0.0; N * N];
         let wet: Vec<f32> = (0..N * N)
             .map(|k| {
                 let d = self.depths.at_cell(k);
                 if d > 0.0 && d < 1e4 {
                     sum += d as f64;
                     count += 1;
+                    absorb[k] = crate::surface::shore_absorb(d);
                     1.0
                 } else {
                     0.0
@@ -358,7 +360,11 @@ impl CoarseStill {
         }
         .clamp(0.5, 30.0);
         let same = field.coarse.as_ref().is_some_and(|b| {
-            b.origin == origin && b.cell == cell && b.wet == wet && (b.depth - depth).abs() < 0.25
+            b.origin == origin
+                && b.cell == cell
+                && b.wet == wet
+                && b.absorb == absorb
+                && (b.depth - depth).abs() < 0.25
         });
         if !same {
             let version = field.coarse.as_ref().map_or(0, |b| b.version + 1);
@@ -367,6 +373,7 @@ impl CoarseStill {
                 cell,
                 wet,
                 depth,
+                absorb,
                 version,
             }));
         }

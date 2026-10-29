@@ -74,9 +74,9 @@ struct Over<'a> {
     sponge: f32,
     /// Depth of the water its waves feel, meters.
     depth: f32,
-    /// Its medium's version, and a writer of (vx, vz, wet) per cell when it changed.
+    /// Its medium's version, and a writer of (vx, vz, wet, absorb) per cell when it changed.
     version: u64,
-    medium: &'a dyn Fn(usize, usize, usize) -> [f32; 3],
+    medium: &'a dyn Fn(usize, usize, usize) -> [f32; 4],
     /// Where the CPU left it, when it hands over.
     handed: Option<Arc<SurfaceHeights>>,
 }
@@ -345,10 +345,10 @@ impl SurfaceGpu {
         let fine_medium = |i: usize, j: usize, k: usize| {
             let wet = r.wet(k);
             if wet <= 0.0 {
-                return [0.0; 3];
+                return [0.0; 4];
             }
             let v = r.carry(i, j, k);
-            [v.x, v.y, wet]
+            [v.x, v.y, wet, r.absorb(k)]
         };
         self.levels[0].update(
             shared,
@@ -374,7 +374,8 @@ impl SurfaceGpu {
         );
         match &r.coarse {
             Some(bed) => {
-                let coarse_medium = |_: usize, _: usize, k: usize| [0.0, 0.0, bed.wet(k)];
+                let coarse_medium =
+                    |_: usize, _: usize, k: usize| [0.0, 0.0, bed.wet(k), bed.absorb(k)];
                 self.levels[1].update(
                     shared,
                     Over {
@@ -592,13 +593,14 @@ impl Level {
             for j in 0..N {
                 for i in 0..N {
                     let k = j * N + i;
-                    let [vx, vz, wet] = (over.medium)(i, j, k);
+                    let [vx, vz, wet, absorb] = (over.medium)(i, j, k);
                     if wet <= 0.0 {
                         continue;
                     }
                     medium[k * 4] = f32_to_f16(vx);
                     medium[k * 4 + 1] = f32_to_f16(vz);
                     medium[k * 4 + 2] = f32_to_f16(wet);
+                    medium[k * 4 + 3] = f32_to_f16(absorb);
                 }
             }
             shared
