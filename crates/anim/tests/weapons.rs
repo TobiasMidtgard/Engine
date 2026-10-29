@@ -625,42 +625,48 @@ fn the_paddock_weapons_yard_plays_out() {
     // deflected, broke a guard).
     let mut moves: Vec<(&str, String, f32, [u32; 5])> = Vec::new();
     let mut last: Vec<Option<(String, f32)>> = vec![None; fighters.len()];
-    for frame in 1..=(13.0 / DT) as usize {
-        app.update();
-        let t = frame as f32 * DT;
-        for (k, (who, e)) in fighters.into_iter().enumerate() {
-            let a = app.world.get::<Attacker>(e).unwrap();
-            let now = a.current.clone().map(|c| (c, a.time));
-            let started = match (&last[k], &now) {
-                (None, Some(_)) => true,
-                (Some((was, wt)), Some((c, ct))) => was != c || ct < wt,
-                _ => false,
-            };
-            if started {
-                moves.push((who, now.clone().unwrap().0, t, [0; 5]));
+    let mut play = |app: &mut App, moves: &mut Vec<(&str, String, f32, [u32; 5])>, frames| {
+        for frame in frames {
+            app.update();
+            let t = frame as f32 * DT;
+            for (k, (who, e)) in fighters.into_iter().enumerate() {
+                let a = app.world.get::<Attacker>(e).unwrap();
+                let now = a.current.clone().map(|c| (c, a.time));
+                let started = match (&last[k], &now) {
+                    (None, Some(_)) => true,
+                    (Some((was, wt)), Some((c, ct))) => was != c || ct < wt,
+                    _ => false,
+                };
+                if started {
+                    moves.push((who, now.clone().unwrap().0, t, [0; 5]));
+                }
+                if now.is_some()
+                    && let Some(m) = moves.iter_mut().rev().find(|m| m.0 == who)
+                {
+                    m.3 = [a.hits, a.blocked, a.missed, a.deflected, a.broke];
+                }
+                last[k] = now;
             }
-            if now.is_some()
-                && let Some(m) = moves.iter_mut().rev().find(|m| m.0 == who)
-            {
-                m.3 = [a.hits, a.blocked, a.missed, a.deflected, a.broke];
-            }
-            last[k] = now;
         }
-    }
-    // What each played in its first round (the duel's is 13 s, the great sword's 10, the
+    };
+    let round_secs = |who: &str| match who {
+        "greatsword" => 10.0,
+        "archer" => 9.0,
+        _ => 13.0,
+    };
+    // What each played in its `n`th round (the duel's is 13 s, the great sword's 10, the
     // archer's 9).
-    let played = |who: &str| -> Vec<(String, [u32; 5])> {
-        let round = match who {
-            "greatsword" => 10.0,
-            "archer" => 9.0,
-            _ => 13.0,
-        };
+    let in_round = |moves: &[(&str, String, f32, [u32; 5])], who: &str, n: u32| {
+        let round = round_secs(who);
+        let (from, to) = (round * n as f32, round * (n + 1) as f32);
         moves
             .iter()
-            .filter(|m| m.0 == who && m.2 < round)
+            .filter(|m| m.0 == who && (from..to).contains(&m.2))
             .map(|m| (m.1.clone(), m.3))
-            .collect()
+            .collect::<Vec<(String, [u32; 5])>>()
     };
+    play(&mut app, &mut moves, 1..=(13.0 / DT) as usize);
+    let played = |who: &str| in_round(&moves, who, 0);
     let (hit, blocked, deflected, broke) = (
         [1, 0, 0, 0, 0],
         [0, 1, 0, 0, 0],
@@ -724,5 +730,19 @@ fn the_paddock_weapons_yard_plays_out() {
         );
         let off = (mid - butt).with_z(0.0).length();
         assert!(off < 0.5, "{off} m off the gold");
+    }
+    // The fighters step about between blows and are back on their marks for the next round:
+    // the second round plays out like the first.
+    play(
+        &mut app,
+        &mut moves,
+        (13.0 / DT) as usize + 1..=(26.0 / DT) as usize,
+    );
+    for who in ["swordsman", "partner", "greatsword"] {
+        assert_eq!(
+            in_round(&moves, who, 1),
+            in_round(&moves, who, 0),
+            "{who}'s second round"
+        );
     }
 }

@@ -10,6 +10,7 @@ pub mod combat;
 pub mod demo;
 pub mod events;
 pub mod face;
+pub mod footwork;
 pub mod freeflow;
 pub mod graph;
 pub mod hit;
@@ -154,6 +155,7 @@ impl Plugin for AnimationPlugin {
                         freeflow::pick_targets,
                         combat::run_attacks,
                         combat::evade_strikes,
+                        footwork::step_footwork,
                         (model::spawn_rig_models, model::despawn_orphan_parts),
                         body::drive_bodies,
                         body::hide_drawn_bodies,
@@ -254,6 +256,13 @@ fn register_types(app: &mut App) {
         "A target's guard (put on anything an Attacker goes for): seconds up and down, the \
          deflect window it got as it rose (0.2 s, 0.07 s if it came down under 0.4 s before), \
          shield-stun and broken-guard seconds left, and counts of blocks, deflects and breaks.",
+    )
+    .register_component::<footwork::Footwork>(
+        "Footwork between blows: keeps the fighter at measure m (within slack) from its foe \
+         (foe, or its Attacker's target), facing it, stepping in at advance_speed, back at \
+         retreat_speed and round it at circle_speed when the circle parameter says (-1 right, 1 \
+         left); rests while a move, an evasion, a knock-back or a fall plays. Moves the \
+         Transform and writes speed and heading, or publishes velocity (move_transform off).",
     )
     .register_component::<Freeflow>(
         "Freeflow targeting for an Attacker: each press goes at the foe nearest the way the \

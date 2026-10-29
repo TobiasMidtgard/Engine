@@ -324,6 +324,17 @@ impl Body {
         self.shoulders = [left, right];
         self
     }
+
+    /// The same upper body over square hips: the hips' turn moved into the trunk, so the
+    /// chest faces the same way when the legs below walk (for a stance layered over
+    /// locomotion from the spine up).
+    fn squared(self) -> Body {
+        Body {
+            turn: Vec3::ZERO,
+            trunk: self.turn + self.trunk,
+            ..self
+        }
+    }
 }
 
 /// What a hand does with what it holds.
@@ -1167,6 +1178,57 @@ fn guard_broken(s: &Skeleton) -> AnimationClip {
     })
 }
 
+/// A stance's upper body for stepping and circling in guard: its pose over square hips (the
+/// graph layers it from the spine up over the legs' locomotion), held still.
+fn moving(
+    s: &Skeleton,
+    name: &str,
+    rigs: [Rig; 2],
+    body: Body,
+    hands: [Stroke; 2],
+) -> AnimationClip {
+    let body = body.squared();
+    Moves::new(
+        rigs,
+        vec![
+            key(0.0, body, hands[0], hands[1]),
+            key(1.0, body, hands[0], hands[1]),
+        ],
+    )
+    .clip(s, name, true)
+    .with_curve("effort", 2, |_| 0.25)
+}
+
+/// The weapon stances' upper bodies for walking in guard: `sword_stance_moving`,
+/// `shield_guard_moving` and `greatsword_stance_moving`.
+fn moving_stances(s: &Skeleton) -> Vec<AnimationClip> {
+    let braced = STANCE.hips([0.0, -0.1, 0.02], [6.0, -20.0, 0.0], [5.0, 6.0, 0.0]);
+    vec![
+        moving(
+            s,
+            "sword_stance_moving",
+            [HANDLE, SWORD],
+            STANCE,
+            [Stroke::To(shield_low()), Stroke::To(sword_ready())],
+        ),
+        moving(
+            s,
+            "shield_guard_moving",
+            [HANDLE, SWORD],
+            braced,
+            [Stroke::To(shield_up()), Stroke::To(guard_sword())],
+        ),
+        moving(
+            s,
+            "greatsword_stance_moving",
+            [SWORD, SWORD],
+            GS_STANCE,
+            [Stroke::Below(GREATSWORD_HANDS), Stroke::To(gs_ready())],
+        )
+        .with_curve("grip", 2, |_| 1.0),
+    ]
+}
+
 /// Carrying the sword and shield while walking about: arms only, for a layer.
 fn sword_carry(s: &Skeleton) -> AnimationClip {
     let sword = Hold::new(
@@ -1596,7 +1658,7 @@ fn bow_carry(s: &Skeleton) -> AnimationClip {
 
 /// Every weapon clip.
 pub fn clips(s: &Skeleton) -> Vec<AnimationClip> {
-    vec![
+    let mut all = vec![
         sword_slash(s),
         sword_backhand(s),
         sword_thrust(s),
@@ -1615,7 +1677,9 @@ pub fn clips(s: &Skeleton) -> Vec<AnimationClip> {
         bow_shot_clip(s, WeaponMove::BowShot),
         bow_shot_clip(s, WeaponMove::BowShotFull),
         bow_carry(s),
-    ]
+    ];
+    all.extend(moving_stances(s));
+    all
 }
 
 #[cfg(test)]
