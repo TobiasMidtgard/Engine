@@ -1895,3 +1895,311 @@ fn an_editor_sees_output_marks_and_can_hold_scripts() {
     assert_eq!(check["ok"], json!(false));
     let _ = e;
 }
+
+/// A visual script: a `.graph` file runs like a `.luau` one, hot reloads keeping its state,
+/// keeps its old version while an edit has mistakes, and can be watched (each node's runs and
+/// each wire's value) by the editor and graph boards.
+#[test]
+fn a_graph_runs_reloads_and_is_watched() {
+    use crate::editing::file_marks;
+    use crate::graph::{self, Graph, Link, Node};
+
+    let node = |id: u32, kind: &str, of: &str, values: Value| Node {
+        id,
+        kind: kind.into(),
+        of: of.into(),
+        at: [0, 0],
+        values: serde_json::from_value(values).unwrap_or_default(),
+    };
+    let link = |a: u32, ap: &str, b: u32, bp: &str| Link {
+        from: (a, ap.into()),
+        to: (b, bp.into()),
+    };
+    // Every frame: count = count + dt × speed.
+    let counter = |speed: f64| Graph {
+        props: [("speed".to_string(), json!(speed))].into(),
+        vars: [("count".to_string(), json!(0))].into(),
+        nodes: vec![
+            node(1, "event.update", "", json!({})),
+            node(2, "var.set", "count", json!({})),
+            node(3, "math.add", "", json!({})),
+            node(4, "var.get", "count", json!({})),
+            node(5, "math.multiply", "", json!({})),
+            node(6, "prop.get", "speed", json!({})),
+        ],
+        links: vec![
+            link(1, "then", 2, "in"),
+            link(4, "value", 3, "a"),
+            link(5, "value", 3, "b"),
+            link(1, "dt", 5, "a"),
+            link(6, "value", 5, "b"),
+            link(3, "value", 2, "value"),
+        ],
+        ..Default::default()
+    };
+    let folder = Folder::new();
+    folder.write("counter.graph", &counter(3.0).to_text());
+    let mut app = app_in(&folder.0);
+    spawn_script(&mut app, "Counter", "counter.graph");
+    app.update_n(10);
+    let s = "world.find('Counter').script";
+    let count = |app: &mut App| eval(app, &format!("return {s}.count")).as_f64().unwrap();
+    let first = count(&mut app);
+    assert!((0.8..=1.2).contains(&first), "{first}");
+
+    // Faster, and the count goes on from where it was.
+    edit(&folder, "counter.graph", &counter(30.0).to_text());
+    app.update_n(3);
+    assert_eq!(
+        eval(&mut app, &format!("return {s}.props.speed")),
+        json!(30)
+    );
+    let second = count(&mut app);
+    assert!(second > first + 1.5, "{first} -> {second}");
+    assert_eq!(file_info(&mut app, "counter.graph")["version"], json!(2));
+
+    // A mistake (a variable that doesn't exist) keeps the last good version running.
+    let mut broken = counter(30.0);
+    broken.nodes[3].of = "nope".into();
+    edit(&folder, "counter.graph", &broken.to_text());
+    app.update_n(3);
+    let errs = errors(&mut app);
+    assert!(
+        errs.iter()
+            .any(|e| e.contains("counter.graph") && e.contains("no variable named 'nope'")),
+        "{errs:?}"
+    );
+    assert!(count(&mut app) > second, "still counting");
+    assert_eq!(file_info(&mut app, "counter.graph")["version"], json!(2));
+    edit(&folder, "counter.graph", &counter(30.0).to_text());
+    app.update_n(2);
+    assert!(file_info(&mut app, "counter.graph")["error"].is_null());
+
+    // Watched: node 2 runs every frame, and the wires carry their values.
+    let compiled = graph::compile(&counter(30.0), "counter.graph");
+    assert!(graph::watch(&app.world, "counter.graph", &compiled));
+    app.update_n(5);
+    let marks = file_marks(&app.world, "counter.graph");
+    let live = graph::live(&compiled, &marks.hits, &marks.values);
+    assert!(live.runs.get(&2).is_some_and(|n| *n >= 4), "{live:?}");
+    let dt = live.values.get(&3).expect("the dt wire's value");
+    assert!(
+        dt.parse::<f64>()
+            .is_ok_and(|v| (v - 1.0 / 30.0).abs() < 1e-3),
+        "{dt}"
+    );
+    assert!(
+        live.values
+            .get(&4)
+            .and_then(|v| v.parse::<f64>().ok())
+            .is_some(),
+        "{live:?}"
+    );
+
+    // The API compiles graphs and lists the nodes there are.
+    let api = call_api(
+        &mut app.world,
+        "script.graph",
+        json!({"path": "counter.graph"}),
+    )
+    .unwrap();
+    assert_eq!(api["ok"], json!(true));
+    assert!(
+        api["luau"]
+            .as_str()
+            .unwrap()
+            .contains("function Counter:update(dt)")
+    );
+    let nodes = call_api(&mut app.world, "script.graph_nodes", json!({})).unwrap();
+    assert!(
+        nodes
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|n| n["kind"] == "api.call" && n["of"] == "test.add"),
+        "engine functions are nodes"
+    );
+
+    // Every timers follow the graph across reloads: one whose node is deleted stops.
+    let ticker = |every: bool| Graph {
+        vars: [("ticks".to_string(), json!(0))].into(),
+        nodes: if every {
+            vec![
+                node(1, "event.every", "", json!({"seconds": 0.1})),
+                node(2, "var.set", "ticks", json!({})),
+                node(3, "math.add", "", json!({"b": 1})),
+                node(4, "var.get", "ticks", json!({})),
+            ]
+        } else {
+            vec![node(5, "event.update", "", json!({}))]
+        },
+        links: if every {
+            vec![
+                link(1, "then", 2, "in"),
+                link(4, "value", 3, "a"),
+                link(3, "value", 2, "value"),
+            ]
+        } else {
+            Vec::new()
+        },
+        ..Default::default()
+    };
+    folder.write("ticker.graph", &ticker(true).to_text());
+    spawn_script(&mut app, "Ticker", "ticker.graph");
+    app.update_n(31);
+    let ticks = |app: &mut App| {
+        eval(app, "return world.find('Ticker').script.ticks")
+            .as_f64()
+            .unwrap()
+    };
+    assert!(ticks(&mut app) >= 8.0, "{}", ticks(&mut app));
+    edit(&folder, "ticker.graph", &ticker(false).to_text());
+    app.update_n(3);
+    let stopped = ticks(&mut app);
+    app.update_n(30);
+    assert_eq!(ticks(&mut app), stopped, "the deleted node's timer stopped");
+    let errs = errors(&mut app);
+    assert!(!errs.iter().any(|e| e.contains("ticker")), "{errs:?}");
+}
+
+/// The courtyard's crystal graph runs as it says: it bobs, changes color every 1.5 s and
+/// flares when sent "flare", counting its flares.
+#[test]
+fn the_showcase_crystal_graph_runs() {
+    use engine_render::{MeshRenderer, PointLight, Shape, StandardMaterial};
+
+    let folder = Folder::new();
+    let graph = include_str!("../../../assets/scripts/showcase/crystal.graph");
+    folder.write("showcase/crystal.graph", graph);
+    let mut app = app_in(&folder.0);
+    app.insert_resource(engine_assets::Assets::<StandardMaterial>::default());
+    app.register_component::<MeshRenderer>("A mesh.")
+        .register_component::<PointLight>("A light.");
+    app.world.spawn((
+        Name::new("Graph crystal"),
+        Transform::from_translation(DVec3::new(0.0, 1.0, 0.0)),
+        MeshRenderer::new(
+            Shape::Sphere {
+                radius: 0.2,
+                segments: 6,
+            },
+            StandardMaterial::default(),
+        ),
+        PointLight::default(),
+        Script::new("showcase/crystal.graph"),
+    ));
+    app.update_n(50);
+    assert_eq!(errors(&mut app), Vec::<String>::new());
+    let s = "world.find('Graph crystal')";
+    let y = eval(&mut app, &format!("return {s}.position.y"))
+        .as_f64()
+        .unwrap();
+    assert!(
+        (y - 1.0).abs() > 1e-4 && (y - 1.0).abs() < 0.13,
+        "bobbing: {y}"
+    );
+    // Every 1.5 s the other color: A first (as it started), then B.
+    let red = |app: &mut App| {
+        eval(app, &format!("return {s}:get('PointLight').color"))[0]
+            .as_f64()
+            .unwrap()
+    };
+    assert!(red(&mut app) < 0.3);
+    app.update_n(45);
+    assert!(red(&mut app) > 0.9);
+    call_api(
+        &mut app.world,
+        "script.send",
+        json!({"entity": {"name": "Graph crystal"}, "event": "flare"}),
+    )
+    .unwrap();
+    app.update_n(10);
+    let lm = eval(
+        &mut app,
+        &format!("return {s}:get('PointLight').intensity_lm"),
+    )
+    .as_f64()
+    .unwrap();
+    assert!(lm > 2000.0, "flaring: {lm}");
+    app.update_n(45);
+    assert_eq!(
+        eval(&mut app, &format!("return {s}.script.flares")),
+        json!(1)
+    );
+    assert_eq!(errors(&mut app), Vec::<String>::new());
+}
+
+/// The example graphs the editor's Graphs tab opens: the lamp breathes between its low and
+/// high lumens, the stone floats above where it started.
+#[test]
+fn the_example_graphs_run() {
+    use engine_render::{MeshRenderer, PointLight, Shape, StandardMaterial};
+
+    let folder = Folder::new();
+    for (path, text) in [
+        (
+            "examples/pulse.graph",
+            include_str!("../../../assets/scripts/examples/pulse.graph"),
+        ),
+        (
+            "examples/hover.graph",
+            include_str!("../../../assets/scripts/examples/hover.graph"),
+        ),
+    ] {
+        let compiled = crate::graph::compile_text(text, path).unwrap();
+        assert!(
+            compiled.problems.is_empty(),
+            "{path}: {:?}",
+            compiled.problems
+        );
+        folder.write(path, text);
+    }
+    let mut app = app_in(&folder.0);
+    app.insert_resource(engine_assets::Assets::<StandardMaterial>::default());
+    app.register_component::<MeshRenderer>("A mesh.")
+        .register_component::<PointLight>("A light.");
+    let sphere = || {
+        MeshRenderer::new(
+            Shape::Sphere {
+                radius: 0.2,
+                segments: 6,
+            },
+            StandardMaterial::default(),
+        )
+    };
+    app.world.spawn((
+        Name::new("Lamp"),
+        Transform::default(),
+        sphere(),
+        PointLight::default(),
+        Script::new("examples/pulse.graph"),
+    ));
+    app.world.spawn((
+        Name::new("Stone"),
+        Transform::from_translation(DVec3::new(0.0, 1.0, 0.0)),
+        sphere(),
+        Script::new("examples/hover.graph"),
+    ));
+    let mut seen = Vec::new();
+    for _ in 0..8 {
+        app.update_n(10);
+        let lm = eval(
+            &mut app,
+            "return world.find('Lamp'):get('PointLight').intensity_lm",
+        );
+        seen.push(lm.as_f64().unwrap());
+    }
+    assert!(
+        seen.iter().all(|lm| (250.0..=1800.0).contains(lm)),
+        "{seen:?}"
+    );
+    assert!(
+        seen.iter().any(|lm| (lm - seen[0]).abs() > 50.0),
+        "breathing: {seen:?}"
+    );
+    let y = eval(&mut app, "return world.find('Stone').position.y")
+        .as_f64()
+        .unwrap();
+    assert!(y > 1.5 && y < 2.2, "floating: {y}");
+    assert_eq!(errors(&mut app), Vec::<String>::new());
+}

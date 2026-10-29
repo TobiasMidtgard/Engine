@@ -48,6 +48,8 @@ pub struct FileMarks {
     pub values: BTreeMap<u32, String>,
     /// Each line's share of the recorded script time, percent.
     pub heat: BTreeMap<u32, f32>,
+    /// How many times each line with an API logpoint has run (not in `stamp`).
+    pub hits: BTreeMap<u32, u64>,
     /// Changes whenever `values` or `heat` do.
     pub stamp: u64,
 }
@@ -93,6 +95,7 @@ pub fn file_marks(world: &World, path: &str) -> FileMarks {
     let (heat_version, heat) = crate::profiler::line_heat(&rt.luas(), &path);
     marks.values = values;
     marks.heat = heat;
+    marks.hits = rt.debugger.line_hits(&path);
     marks.stamp = values_version
         .wrapping_mul(1 << 20)
         .wrapping_add(heat_version);

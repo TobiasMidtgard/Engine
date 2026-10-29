@@ -81,6 +81,21 @@
 //! being given the same `ScriptActor`. With `ENGINE_SCRIPT_DEBUG` set at start there are no
 //! actor VMs, so breakpoints reach every script.
 //!
+//! ## Visual scripts
+//!
+//! A `.graph` file ([`graph`]) is a script drawn as nodes and wires: JSON text, one node, wire
+//! or comment per line, so it diffs and merges like code. A `Script` whose path ends in
+//! `.graph` compiles it to Luau ([`graph::compile`]) and runs that, so hot reload, errors,
+//! the profiler and the debugger work as for `.luau`; a graph with mistakes doesn't load and the
+//! old one keeps running. The nodes come from the engine: events, flow (branch, sequence,
+//! delay, do once, flip flop, gate, loops, every, tween), variables and props, math, text,
+//! entities, every registered engine function and Get/Set for every reflected component
+//! ([`graph::library`]). [`graph::watch`] puts counting logpoints on a graph's lines, and
+//! [`graph::live`] turns their hits and values into which nodes ran and what each wire
+//! carries. A [`graph_board::GraphBoard`] draws a graph on a quad in the world, live.
+//! `script.graph {path}` compiles one and returns its Luau and problems; `script.graph_nodes`
+//! lists the library. The editor's Graphs tab edits them.
+//!
 //! ## Debugging
 //!
 //! A script debugger for VS Code (`crates/script/vscode`) and any other Debug Adapter Protocol
@@ -154,6 +169,8 @@ mod debugger;
 pub mod demo;
 pub mod editing;
 mod entity;
+pub mod graph;
+pub mod graph_board;
 #[cfg(feature = "hotpatch")]
 pub mod hotpatch;
 mod math;
@@ -292,6 +309,10 @@ impl Plugin for ScriptPlugin {
              live: records by itself, window_secs at a time, while no script.profile \
              recording is shown.",
         )
+        .register_component::<graph_board::GraphBoard>(
+            "Shows a visual script (a .graph file) on this entity's mesh as the editor draws \
+             it; live: while it runs, the nodes that run light up and each wire shows its value.",
+        )
         .register_resource::<ScriptSettings>(
             "Scripting: folder under the asset root, hot_reload, poll_secs, call_limit_ms (per \
              call), memory_limit_mb (per VM), debug_port (the debugger's, for VS Code), \
@@ -303,6 +324,10 @@ impl Plugin for ScriptPlugin {
         .add_systems(
             Update,
             board::draw_profile_boards.after(board::draw_boards),
+        )
+        .add_systems(
+            Update,
+            graph_board::draw_graph_boards.after(board::draw_boards),
         )
         .add_systems(
             PostUpdate,

@@ -1,0 +1,44 @@
+{
+  "version": 1,
+  "doc": "A lamp that breathes: its light and glow rise and fall with a sine wave. Put it on an\nentity with a PointLight (the editor's starter courtyard has one: \"Lamp\").",
+  "props": {"brightness":2000,"color":[1.0,0.72,0.42],"high":1800,"low":250,"speed":2.4},
+  "vars": {},
+  "nodes": [
+    {"id":1,"kind":"event.update","at":[-600,0]},
+    {"id":2,"kind":"comp.set","of":"PointLight","at":[-250,0]},
+    {"id":3,"kind":"entity.material","at":[-10,0]},
+    {"id":4,"kind":"math.time","at":[-1240,300]},
+    {"id":5,"kind":"prop.get","of":"speed","at":[-1240,390]},
+    {"id":6,"kind":"math.multiply","at":[-1080,320]},
+    {"id":7,"kind":"math.sin","at":[-920,320]},
+    {"id":8,"kind":"math.multiply","at":[-760,320],"values":{"b":0.5}},
+    {"id":9,"kind":"math.add","at":[-600,320],"values":{"b":0.5}},
+    {"id":10,"kind":"prop.get","of":"low","at":[-600,460]},
+    {"id":11,"kind":"prop.get","of":"high","at":[-600,540]},
+    {"id":12,"kind":"math.lerp","at":[-420,430]},
+    {"id":13,"kind":"prop.get","of":"color","at":[-420,170]},
+    {"id":14,"kind":"prop.get","of":"brightness","at":[-420,620]},
+    {"id":15,"kind":"math.multiply","at":[-250,580]}
+  ],
+  "links": [
+    {"from":[1,"then"],"to":[2,"in"]},
+    {"from":[2,"then"],"to":[3,"in"]},
+    {"from":[4,"seconds"],"to":[6,"a"]},
+    {"from":[5,"value"],"to":[6,"b"]},
+    {"from":[6,"value"],"to":[7,"x"]},
+    {"from":[7,"value"],"to":[8,"a"]},
+    {"from":[8,"value"],"to":[9,"a"]},
+    {"from":[10,"value"],"to":[12,"a"]},
+    {"from":[11,"value"],"to":[12,"b"]},
+    {"from":[9,"value"],"to":[12,"t"]},
+    {"from":[12,"value"],"to":[2,"intensity_lm"]},
+    {"from":[13,"value"],"to":[2,"color"]},
+    {"from":[13,"value"],"to":[3,"emissive"]},
+    {"from":[9,"value"],"to":[15,"a"]},
+    {"from":[14,"value"],"to":[15,"b"]},
+    {"from":[15,"value"],"to":[3,"emissive_strength"]}
+  ],
+  "comments": [
+    {"at":[-1280,250],"size":[810,200],"text":"glow = 0.5 + 0.5 sin(time x speed)","color":[60,92,140]}
+  ]
+}

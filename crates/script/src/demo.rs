@@ -20,18 +20,23 @@
 //!   shows each line's share of it beside the line.
 //! - An error in a script marks its line on the board in red with the message, and the rest of
 //!   the courtyard keeps running.
+//! - The crystal left of the code board is run by a visual script, `showcase/crystal.graph`
+//!   (nodes and wires, as Unreal's Blueprints): it spins and bobs, changes color every 1.5 s
+//!   and flares when used (E). The graph board on the easel behind it draws the graph live:
+//!   the nodes that run light up and every wire shows the value it carries.
 //!
 //! `script.send {"entity": {"name": "Courtyard director"}, "event": "ritual"}` plays the ritual
 //! from the console or a tour stop; `script.edit` changes a script file like an editor would.
 
 use engine_core::math::{DVec3, Quat};
 use engine_core::prelude::*;
-use engine_render::{MaterialPreset, MeshRenderer, Shape, StandardMaterial};
+use engine_render::{MaterialPreset, MeshRenderer, PointLight, Shape, StandardMaterial};
 use engine_world::Interactable;
 use serde_json::json;
 
 use crate::Script;
 use crate::board::{CodeBoard, ProfileBoard};
+use crate::graph_board::GraphBoard;
 
 /// The director: its script builds the lanterns and the orrery and plays the ritual.
 pub const DIRECTOR: &str = "Courtyard director";
@@ -53,6 +58,13 @@ pub const PROFILE_BOARD: [f64; 3] = [4.3, 2.05, -8.2];
 pub const PROFILE_BOARD_YAW: f32 = -0.483;
 /// Where the lever stands.
 pub const LEVER: [f64; 3] = [4.2, 0.0, 6.6];
+/// The crystal's visual script.
+pub const CRYSTAL_GRAPH: &str = "showcase/crystal.graph";
+/// The graph board, on the code board's left (the profile board's mirror image).
+pub const GRAPH_BOARD: [f64; 3] = [-4.3, 2.05, -8.2];
+pub const GRAPH_BOARD_YAW: f32 = 0.483;
+/// The crystal, on its pedestal in front of the graph board.
+pub const CRYSTAL: [f64; 3] = [-2.4, 1.2, -7.0];
 /// Where the braziers stand: on the diagonals between the lanterns and the middle.
 pub const BRAZIER_RADIUS: f64 = 7.6;
 
@@ -145,6 +157,12 @@ const TIDY: &[(&str, &str)] = &[
         r#"{"path": "showcase/courtyard.luau", "find": "color = vec3(0.25, 0.62, 1.0)", "replace": "color = vec3(1.0, 0.56, 0.22)", "missing_ok": true}"#,
     ),
 ];
+
+/// Flares the crystal (its graph's Message event).
+const FLARE: (&str, &str) = (
+    "script.send",
+    r#"{"entity": {"name": "Graph crystal"}, "event": "flare"}"#,
+);
 
 /// The courtyard's overview, from above the lanterns in the south-east, looking down enough
 /// that the floor fills the frame (the moonlit grass outside it outshone the lanterns).
@@ -241,6 +259,27 @@ pub const VIEWS: &[DemoView] = &[
         hour: 18.9,
         warmup_secs: 0.5,
         on_arrive: &[BOARD_AT_UPDATE],
+        on_leave: &[],
+    },
+    DemoView {
+        key: "script_graph",
+        name: "A visual script: the crystal's graph on its board, live: the nodes that run lit \
+               and each wire's value beside it",
+        eye: [-2.86, 2.2 + LIFT, -5.46],
+        target: [-4.3, 2.05 + LIFT, -8.2],
+        hour: 18.9,
+        warmup_secs: 0.6,
+        on_arrive: &[FLARE],
+        on_leave: &[],
+    },
+    DemoView {
+        key: "script_graph_crystal",
+        name: "The graph-driven crystal flaring in front of its graph board",
+        eye: [-1.3, 1.9 + LIFT, -5.0],
+        target: [-3.4, 1.8 + LIFT, -8.1],
+        hour: 18.9,
+        warmup_secs: 0.5,
+        on_arrive: &[FLARE],
         on_leave: &[],
     },
     DemoView {
@@ -423,6 +462,100 @@ pub fn spawn_demo(commands: &mut Commands, origin: DVec3) {
         )
         .without_shadows(),
         ProfileBoard::default(),
+    ));
+
+    // The graph board, on the code board's left, and the crystal its graph runs.
+    let [gx, gy, gz] = GRAPH_BOARD;
+    let turn = Quat::from_rotation_y(GRAPH_BOARD_YAW);
+    let local = |x: f64, y: f64, z: f64| {
+        let o = turn.as_dquat() * DVec3::new(x, y, z);
+        at(gx + o.x, gy + o.y, gz + o.z).with_rotation(turn)
+    };
+    commands.spawn((
+        Name::new("Graph board frame"),
+        local(0.0, 0.0, -0.08),
+        mesh(
+            Shape::RoundedCuboid {
+                size: [3.85, 2.5, 0.14],
+                radius: 0.04,
+                segments: 0,
+            },
+            walnut,
+        ),
+    ));
+    for side in [-1.0, 1.0] {
+        commands.spawn((
+            Name::new("Graph board post"),
+            local(side * 1.78, 1.68 - gy, -0.17),
+            mesh(
+                Shape::RoundedCuboid {
+                    size: [0.13, 3.36, 0.13],
+                    radius: 0.03,
+                    segments: 0,
+                },
+                walnut,
+            ),
+        ));
+    }
+    commands.spawn((
+        Name::new("Graph board"),
+        local(0.0, 0.0, 0.0),
+        mesh(
+            Shape::Quad { size: [3.6, 2.25] },
+            StandardMaterial::color(0.02, 0.022, 0.026),
+        )
+        .without_shadows(),
+        GraphBoard::new(CRYSTAL_GRAPH),
+    ));
+    let [cx, cy, cz] = CRYSTAL;
+    commands.spawn((
+        Name::new("Crystal pedestal"),
+        at(cx, (cy - 0.42) / 2.0, cz),
+        mesh(
+            Shape::Cylinder {
+                radius: 0.2,
+                height: (cy - 0.42) as f32,
+                segments: 24,
+            },
+            granite,
+        ),
+    ));
+    commands.spawn((
+        Name::new("Crystal pedestal cap"),
+        at(cx, cy - 0.4, cz),
+        mesh(
+            Shape::Cylinder {
+                radius: 0.27,
+                height: 0.05,
+                segments: 32,
+            },
+            brass,
+        ),
+    ));
+    commands.spawn((
+        Name::new("Graph crystal"),
+        at(cx, cy, cz).with_scale(Vec3::new(1.0, 1.9, 1.0)),
+        mesh(
+            Shape::Sphere {
+                radius: 0.17,
+                segments: 6,
+            },
+            StandardMaterial::color(0.05, 0.12, 0.16)
+                .with_roughness(0.08)
+                .with_emissive([0.25, 0.75, 1.0], 14.0),
+        ),
+        PointLight {
+            color: [0.25, 0.75, 1.0],
+            intensity_lm: 1500.0,
+            range: 9.0,
+            radius: 0.15,
+        },
+        Interactable {
+            verb: "Flare".into(),
+            reach_m: 2.5,
+            ..Default::default()
+        },
+        Script::new(CRYSTAL_GRAPH),
     ));
 
     // Four braziers on the diagonals, cold until the ritual lights them.

@@ -19,8 +19,8 @@ fn safe_path(raw: &str) -> Result<String, String> {
             "'{raw}' is not a path inside the scripts folder (no '..', e.g. \"showcase/lamp.luau\")"
         ));
     }
-    if !path.ends_with(".luau") && !path.ends_with(".lua") {
-        return Err(format!("'{raw}' is not a .luau file"));
+    if !path.ends_with(".luau") && !path.ends_with(".lua") && !path.ends_with(".graph") {
+        return Err(format!("'{raw}' is not a .luau or .graph file"));
     }
     Ok(path)
 }
@@ -286,6 +286,54 @@ pub(crate) fn register(app: &mut App) {
                 None => json!({"ok": true}),
                 Some((line, message)) => json!({"ok": false, "line": line, "message": message}),
             })
+        },
+    )
+    .register_api(
+        "script.graph",
+        "Compile a visual script (a .graph file, \"path\", or a graph given as \"graph\") to \
+         Luau without running it: the code, the node each line came from, the problems found \
+         (on which node and pin; errors stop it loading) and a Luau expression per data wire.",
+        r#"{"path": "showcase/glow_crystal.graph"}"#,
+        |world, args| {
+            let (graph, path) = if let Some(g) = args.get("graph").filter(|g| g.is_object()) {
+                let graph: crate::graph::Graph = serde_json::from_value(g.clone())
+                    .map_err(|e| format!("not a graph: {e}"))?;
+                (graph, str_arg(&args, "path").unwrap_or("graph.graph").to_string())
+            } else {
+                let path = safe_path(str_arg(&args, "path").ok_or("missing 'path' or 'graph'")?)?;
+                let full = scripts_root(world).join(&path);
+                let text = std::fs::read_to_string(&full)
+                    .map_err(|e| format!("can't read {}: {e}", full.display()))?;
+                (crate::graph::Graph::parse(&text)?, path)
+            };
+            let c = crate::graph::compile(&graph, &path);
+            Ok(json!({
+                "path": path,
+                "ok": c.errors().next().is_none(),
+                "luau": c.luau,
+                "node_lines": c.node_lines,
+                "problems": c.problems,
+                "watches": c.watches,
+            }))
+        },
+    )
+    .register_api(
+        "script.graph_nodes",
+        "Every node a visual script can use in this game: events, flow, math, one per engine \
+         function and a get and a set per component, with their pins and docs. \"category\" \
+         narrows it (\"Flow\", \"Engine: fire\").",
+        r#"{"category": "Flow"}"#,
+        |world, args| {
+            let category = str_arg(&args, "category").map(str::to_lowercase);
+            let nodes: Vec<_> = crate::graph::library(world, None)
+                .into_iter()
+                .filter(|s| {
+                    category
+                        .as_ref()
+                        .is_none_or(|c| s.category.to_lowercase().starts_with(c.as_str()))
+                })
+                .collect();
+            Ok(json!(nodes))
         },
     )
     .register_api(

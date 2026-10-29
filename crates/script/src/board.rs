@@ -86,7 +86,7 @@ pub(crate) struct Drawn {
 }
 
 /// Glyph coverage, cached per character.
-struct Glyph {
+pub(crate) struct Glyph {
     w: usize,
     h: usize,
     left: i32,
@@ -102,7 +102,7 @@ pub(crate) struct BoardFont {
 }
 
 impl BoardFont {
-    fn load(asset_root: Option<std::path::PathBuf>) -> Self {
+    pub(crate) fn load(asset_root: Option<std::path::PathBuf>) -> Self {
         let font = asset_root
             .map(|r| r.join("fetched/fonts/JetBrainsMono-Regular.ttf"))
             .and_then(|p| std::fs::read(p).ok())
@@ -120,7 +120,7 @@ impl BoardFont {
         }
     }
 
-    fn set_size(&mut self, px: f32) {
+    pub(crate) fn set_size(&mut self, px: f32) {
         if (px - self.px).abs() > 0.01 {
             self.px = px;
             self.glyphs.clear();
@@ -128,7 +128,7 @@ impl BoardFont {
     }
 
     /// Horizontal advance of one character, pixels.
-    fn advance(&self) -> f32 {
+    pub(crate) fn advance(&self) -> f32 {
         match &self.font {
             Some(f) => f
                 .as_scaled(PxScale::from(self.px))
@@ -138,7 +138,7 @@ impl BoardFont {
     }
 
     /// Distance from a line's top to its baseline, pixels.
-    fn ascent(&self) -> f32 {
+    pub(crate) fn ascent(&self) -> f32 {
         match &self.font {
             Some(f) => f.as_scaled(PxScale::from(self.px)).ascent(),
             None => self.px * 0.8,
@@ -208,7 +208,7 @@ impl BoardFont {
 
 // ----------------------------------------------------------------------------- colors
 
-type Rgb = [f32; 3];
+pub(crate) type Rgb = [f32; 3];
 
 const BG: Rgb = [0.055, 0.062, 0.078];
 const GUTTER_BG: Rgb = [0.045, 0.05, 0.064];
@@ -370,19 +370,19 @@ fn changed_lines(old: &str, new: &str) -> HashSet<usize> {
 }
 
 /// A board's picture: its colors (lit like paint) and its glow (the emissive texture).
-struct Canvas {
-    w: usize,
-    h: usize,
-    px: Vec<Rgb>,
-    glow: Vec<Rgb>,
+pub(crate) struct Canvas {
+    pub(crate) w: usize,
+    pub(crate) h: usize,
+    pub(crate) px: Vec<Rgb>,
+    pub(crate) glow: Vec<Rgb>,
 }
 
-fn scaled(c: Rgb, k: f32) -> Rgb {
+pub(crate) fn scaled(c: Rgb, k: f32) -> Rgb {
     [c[0] * k, c[1] * k, c[2] * k]
 }
 
 impl Canvas {
-    fn new(w: usize, h: usize) -> Self {
+    pub(crate) fn new(w: usize, h: usize) -> Self {
         Self {
             w,
             h,
@@ -392,7 +392,7 @@ impl Canvas {
     }
 
     /// Fills a panel of color `c` glowing at `glow` of its color.
-    fn rect(&mut self, x0: i32, y0: i32, x1: i32, y1: i32, c: Rgb, glow: f32) {
+    pub(crate) fn rect(&mut self, x0: i32, y0: i32, x1: i32, y1: i32, c: Rgb, glow: f32) {
         for y in y0.max(0)..y1.min(self.h as i32) {
             for x in x0.max(0)..x1.min(self.w as i32) {
                 let i = y as usize * self.w + x as usize;
@@ -427,7 +427,7 @@ impl Canvas {
         }
     }
 
-    fn text(
+    pub(crate) fn text(
         &mut self,
         font: &mut BoardFont,
         s: &str,
@@ -448,7 +448,7 @@ impl Canvas {
     }
 
     /// The color and glow images (sRGB).
-    fn into_images(self) -> (Image, Image) {
+    pub(crate) fn into_images(self) -> (Image, Image) {
         // Linear to sRGB through a table: a board has millions of channels to convert.
         const STEPS: usize = 4096;
         let table: Vec<u8> = (0..=STEPS)
@@ -476,7 +476,7 @@ impl Canvas {
     }
 
     /// Text that fits in `max_chars` (cut with an ellipsis).
-    fn fitted(s: &str, max_chars: usize) -> String {
+    pub(crate) fn fitted(s: &str, max_chars: usize) -> String {
         if s.chars().count() <= max_chars {
             return s.to_string();
         }
@@ -869,7 +869,7 @@ pub(crate) fn draw_boards(
 
 /// Puts a board's new images on its mesh: redrawn in place, so the material (and its key in the
 /// material cache) stays the same. Returns the image handles.
-fn show(
+pub(crate) fn show(
     images: &mut Assets<Image>,
     old: Option<(Handle<Image>, Handle<Image>)>,
     (image, glow): (Image, Image),

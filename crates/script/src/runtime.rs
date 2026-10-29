@@ -119,12 +119,15 @@ pub(crate) struct Fault {
 /// first Luau frame for errors raised by engine calls).
 pub(crate) fn error_location(message: &str) -> Option<(String, u32)> {
     let mut rest = message;
-    while let Some(i) = rest.find(".luau:").or_else(|| rest.find(".lua:")) {
-        let ext = if rest[i..].starts_with(".luau:") {
-            6
-        } else {
-            5
-        };
+    while let Some(i) = [".luau:", ".lua:", ".graph:"]
+        .iter()
+        .filter_map(|e| rest.find(e))
+        .min()
+    {
+        let ext = [".luau:", ".lua:", ".graph:"]
+            .iter()
+            .find(|e| rest[i..].starts_with(**e))
+            .map_or(5, |e| e.len());
         let start = rest[..i]
             .rfind(|c: char| c.is_whitespace() || c == '"' || c == '\'' || c == '(')
             .map(|j| j + 1)
@@ -1576,7 +1579,35 @@ impl ScriptRuntime {
                 return;
             }
         };
+        let source = match runnable(&path, source) {
+            Ok(s) => s,
+            Err(err) => {
+                let message = format!("{err}\n(the previous version of {path} keeps running)");
+                if let Some(f) = self
+                    .lua
+                    .app_data_mut::<Files>()
+                    .expect("files")
+                    .map
+                    .get_mut(&path)
+                {
+                    f.error = Some(message.clone());
+                }
+                push_error(&self.lua, Some(&path), None, &message);
+                return;
+            }
+        };
         if source == old_source && !force {
+            // A graph put back as it was (its code didn't change) is fine again.
+            if path.ends_with(".graph")
+                && let Some(f) = self
+                    .lua
+                    .app_data_mut::<Files>()
+                    .expect("files")
+                    .map
+                    .get_mut(&path)
+            {
+                f.error = None;
+            }
             return;
         }
         match eval_file(&self.lua, &self.watchdog, &path, &source, kind) {
@@ -1648,6 +1679,9 @@ impl ScriptRuntime {
                 i.last_error = None;
             }
             self.merge_default_props(e);
+            if path.ends_with(".graph") {
+                self.stop_removed_timers(e);
+            }
             if hooks.on_reload {
                 self.call_hook(e, "on_reload", (), settings);
             }
@@ -1693,6 +1727,43 @@ impl ScriptRuntime {
             if !overridden {
                 let _ = props.raw_set(k, deep_copy(&self.lua, &v).unwrap_or(v));
             }
+        }
+    }
+
+    /// A graph's Every timers are `self.__tick<N>` calling `__every<N>`: after a reload, those
+    /// whose method is gone (the node was deleted) stop. The new version's `on_reload` starts
+    /// the new ones and restarts the changed ones.
+    fn stop_removed_timers(&self, e: Entity) {
+        let Some(i) = self.instances.get(&e) else {
+            return;
+        };
+        let (Ok(Value::Table(this)), Some(class)) = (
+            self.lua.registry_value::<Value>(&i.this),
+            self.files()
+                .map
+                .get(&i.path)
+                .and_then(|f| f.value.as_ref())
+                .and_then(|k| self.lua.registry_value::<Table>(k).ok()),
+        ) else {
+            return;
+        };
+        let gone: Vec<(String, Value)> = this
+            .pairs::<Value, Value>()
+            .flatten()
+            .filter_map(|(k, t)| {
+                let k = k.as_string()?.to_str().ok()?.to_string();
+                let n = k.strip_prefix("__tick")?;
+                class
+                    .raw_get::<Value>(format!("__every{n}"))
+                    .is_ok_and(|m| m.is_nil())
+                    .then_some((k, t))
+            })
+            .collect();
+        for (k, t) in gone {
+            if let Value::Thread(t) = t {
+                shared(&self.lua).cancelled.push(t);
+            }
+            let _ = this.raw_set(k, Value::Nil);
         }
     }
 
@@ -1884,6 +1955,30 @@ fn eval_file(
     Ok((chunk, value))
 }
 
+/// The Luau a file runs: its text, or for a `.graph` file the code it compiles to (an error
+/// naming the nodes when the graph has mistakes that stop it).
+pub(crate) fn runnable(path: &str, text: String) -> Result<String, String> {
+    if !path.ends_with(".graph") {
+        return Ok(text);
+    }
+    let compiled = crate::graph::compile_text(&text, path).map_err(|e| format!("{path}: {e}"))?;
+    let errors: Vec<String> = compiled
+        .errors()
+        .map(|p| match p.node {
+            Some(id) => format!("node {id}: {}", p.message),
+            None => p.message.clone(),
+        })
+        .collect();
+    if errors.is_empty() {
+        Ok(compiled.luau)
+    } else {
+        Err(format!(
+            "{path}: the graph has mistakes: {}",
+            errors.join("; ")
+        ))
+    }
+}
+
 /// Loads `path` for the first time; returns its hooks.
 fn load_file(lua: &Lua, watchdog: &Watchdog, path: &str, kind: FileKind) -> mlua::Result<Hooks> {
     let full = {
@@ -1903,6 +1998,7 @@ fn load_file(lua: &Lua, watchdog: &Watchdog, path: &str, kind: FileKind) -> mlua
                 .unwrap_or_default()
         ))
     })?;
+    let source = runnable(path, source).map_err(mlua::Error::runtime)?;
     {
         let mut files = lua.app_data_mut::<Files>().expect("files");
         files.map.entry(path.to_string()).or_insert(FileState {

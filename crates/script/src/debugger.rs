@@ -311,6 +311,19 @@ impl Debugger {
         removed
     }
 
+    /// How many times each line of `path` with an API logpoint has run (the graph editor
+    /// counts its nodes' runs this way).
+    pub fn line_hits(&self, path: &str) -> BTreeMap<u32, u64> {
+        let s = self.lock();
+        let mut out = BTreeMap::new();
+        for b in s.breakpoints.get(path).into_iter().flatten() {
+            if b.from_api {
+                *out.entry(b.line).or_insert(0) += b.hits;
+            }
+        }
+        out
+    }
+
     /// The newest logpoint values of `path`, by line, and a number that changes with them.
     pub fn inline_values(&self, path: &str) -> (u64, BTreeMap<u32, String>) {
         let s = self.lock();
@@ -1134,7 +1147,16 @@ impl Session {
         let mut out = String::new();
         let mut rest = message;
         while let Some(open) = rest.find('{') {
-            let Some(close) = rest[open..].find('}') else {
+            // The matching brace, so an expression may hold a table: `{#{a, b}}`.
+            let mut depth = 0;
+            let Some(close) = rest[open..].find(|c| {
+                depth += match c {
+                    '{' => 1,
+                    '}' => -1,
+                    _ => 0,
+                };
+                depth == 0
+            }) else {
                 break;
             };
             out.push_str(&rest[..open]);

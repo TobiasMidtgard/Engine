@@ -203,7 +203,7 @@ struct OutLine {
 }
 
 /// What completion knows, built once from the running engine.
-struct Vocab {
+pub(crate) struct Vocab {
     words: Vec<Word>,
     /// Engine globals and API namespaces, colored apart.
     engine: HashSet<String>,
@@ -216,7 +216,7 @@ struct Vocab {
 }
 
 impl Vocab {
-    fn new(world: &World) -> Self {
+    pub(crate) fn new(world: &World) -> Self {
         let words = editing::vocabulary(world);
         let mut engine: HashSet<String> = [
             "vec3", "quat", "world", "task", "ease", "input", "api", "require", "print", "warn",
@@ -1931,7 +1931,7 @@ fn find_all(text: &str, needle: &str) -> Vec<(usize, usize)> {
 }
 
 /// The text as colored sections, with find matches behind and unknown engine functions under.
-fn highlight(text: &str, font: &FontId, vocab: &Vocab, find: Option<&str>) -> LayoutJob {
+pub(crate) fn highlight(text: &str, font: &FontId, vocab: &Vocab, find: Option<&str>) -> LayoutJob {
     let toks = tokens(text, &vocab.engine);
     let matches = find.map(|f| find_all(text, f)).unwrap_or_default();
     let mut cuts: Vec<usize> = vec![0, text.len()];

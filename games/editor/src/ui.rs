@@ -31,7 +31,7 @@ pub fn default_layout() -> DockState<Tab> {
 
 /// The default layout with the scene view taking `scene` of the middle column's height.
 pub fn layout(scene: f32) -> DockState<Tab> {
-    let mut dock = DockState::new(vec![Tab::Viewport, Tab::Scripts]);
+    let mut dock = DockState::new(vec![Tab::Viewport, Tab::Scripts, Tab::Graphs]);
     let surface = dock.main_surface_mut();
     let [center, _right] =
         surface.split_right(NodeIndex::root(), 0.77, vec![Tab::Inspector, Tab::World]);
@@ -134,6 +134,7 @@ impl TabViewer for Viewer<'_> {
             Tab::Partition => "🗺 World Partition",
             Tab::Matrix => "📊 Property Matrix",
             Tab::Scripts => "📜 Scripts",
+            Tab::Graphs => "🔀 Graphs",
         }
         .into()
     }
@@ -159,6 +160,7 @@ impl TabViewer for Viewer<'_> {
             Tab::Partition => crate::partition::panel(ui, world, editor),
             Tab::Matrix => crate::matrix::panel(ui, world, editor),
             Tab::Scripts => crate::scripts::panel(ui, world, editor),
+            Tab::Graphs => crate::graphs::panel(ui, world, editor),
         }
     }
 

@@ -73,6 +73,29 @@ time. The Output under the code shows prints and errors (click one to open its l
 command bar runs Luau in the game. With an entity selected, open its script, or run the open
 file on it.
 
+## Visual scripts (`.graph`)
+
+A `.graph` file is a script drawn as nodes and wires, for people who would rather not write
+code. Put it on an entity like a Luau file (`Script { path: "examples/pulse.graph" }`): the
+engine compiles it to Luau and runs that, so hot reload, errors, the profiler and the debugger
+work the same. Edit graphs in the editor's **Graphs** tab:
+
+- Right-click (or Space) for the node search; drag from a pin into empty space to search only
+  for nodes that can take that wire. Events are red, execution wires white, data wires colored
+  by type.
+- Variables (the script's own state) and props (settings each entity can override) are listed
+  on the left; Get and Set put their nodes on the canvas.
+- Mistakes show before you run: on the node, in Problems, and on the line of the Luau panel,
+  which shows the code the graph runs as. A graph with mistakes doesn't load; the old one keeps
+  running.
+- While playing, the nodes that run light up, pulses run along their execution wires and every
+  data wire shows its value. Ctrl+S hot reloads the graph in the running game.
+- **To script** writes the graph's Luau as a `.luau` file, for when a graph outgrows nodes.
+
+The file is JSON text with one node or wire per line, so changes diff and merge in git like
+code. Every engine function is a node (`fire.ignite`, `weather.set`, ...), and every
+component has Get and Set nodes.
+
 ## VS Code setup (autocomplete and type checking)
 
 1. Install the **Luau Language Server** extension (`JohnnyMorganz.luau-lsp`) in VS Code.
@@ -134,3 +157,6 @@ have them.
   lamp to put it on).
 - `examples/float.luau`: a stone that floats and turns, with a curve from a module
   (`examples/lib/wave.luau`).
+- `examples/pulse.graph`, `examples/hover.graph`: the same lamp and stone as visual scripts.
+- `showcase/crystal.graph`: the courtyard's graph crystal (spins, changes color every 1.5 s,
+  flares when used), drawn live on the board beside it.
