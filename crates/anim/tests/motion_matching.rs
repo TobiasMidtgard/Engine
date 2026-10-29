@@ -89,6 +89,13 @@ fn setup() -> (Skeleton, Vec<AnimationClip>, MotionDatabase) {
     (s, clips, db)
 }
 
+/// Sideways at walking pace, with orientation warping up to 60°.
+fn warped_strafe() -> AnimationParams {
+    let mut p = params(WALK_SPEED, 0.0, std::f32::consts::FRAC_PI_2);
+    p.set("warp_max", 60f32.to_radians());
+    p
+}
+
 fn params(speed: f32, turn: f32, heading: f32) -> AnimationParams {
     let mut p = AnimationParams::default();
     p.set("speed", speed);
@@ -216,7 +223,7 @@ fn the_graph_node_hands_sideways_motion_to_its_fallback() {
         (n == "test/motion").then(|| db.clone())
     })
     .unwrap();
-    let mut run = |p: &AnimationParams, secs: f32| -> (f32, usize) {
+    let mut run = |p: &AnimationParams, secs: f32| -> (f32, usize, f32) {
         let mut triggers = Vec::new();
         let mut events = Vec::new();
         let mut curves = Vec::new();
@@ -235,18 +242,39 @@ fn the_graph_node_hands_sideways_motion_to_its_fallback() {
         }
         let fallback = g.describe()["motion"][0]["fallback"].as_f64().unwrap() as f32;
         let steps = events.iter().filter(|e| e.name == "footstep").count();
-        (fallback, steps)
+        let stride = g.motion().map_or(0.0, |m| m.stride_speed());
+        (fallback, steps, stride)
     };
-    let (fallback, steps) = run(&params(WALK_SPEED, 0.0, 0.0), 3.0);
+    let (fallback, steps, _) = run(&params(WALK_SPEED, 0.0, 0.0), 3.0);
     assert_eq!(fallback, 0.0);
     assert!(
         steps >= 3,
         "{steps} footsteps in 3 s of motion-matched walking"
     );
-    let (fallback, _) = run(&params(WALK_SPEED, 0.0, std::f32::consts::FRAC_PI_2), 1.0);
+    let (fallback, _, _) = run(&params(WALK_SPEED, 0.0, std::f32::consts::FRAC_PI_2), 1.0);
     assert_eq!(fallback, 1.0, "strafing stayed on motion matching");
-    let (fallback, _) = run(&params(WALK_SPEED, 0.0, 0.0), 1.0);
+    let (fallback, _, _) = run(&params(WALK_SPEED, 0.0, 0.0), 1.0);
     assert_eq!(fallback, 0.0);
+    // A 45° diagonal hands over too, unless the lower body is turned toward it (orientation
+    // warping publishes `warp_max`): then it stays on the database and plays a forward walk.
+    let diagonal = std::f32::consts::FRAC_PI_4;
+    let (fallback, _, _) = run(&params(WALK_SPEED, 0.0, diagonal), 1.0);
+    assert_eq!(fallback, 1.0, "a diagonal stayed on motion matching");
+    let mut warped = params(WALK_SPEED, 0.0, diagonal);
+    warped.set("warp_max", 60f32.to_radians());
+    let (fallback, steps, stride) = run(&warped, 3.0);
+    assert_eq!(fallback, 0.0, "the warped diagonal handed over");
+    assert!(
+        steps >= 3,
+        "{steps} footsteps in 3 s of the warped diagonal"
+    );
+    // The pace its feet cover is known, for stride warping.
+    assert!(stride > 0.5 * WALK_SPEED, "the feet cover {stride} m/s");
+    let (fallback, _, _) = run(&warped_strafe(), 1.0);
+    assert_eq!(
+        fallback, 1.0,
+        "strafing past the warp stayed on motion matching"
+    );
 
     // Without the database the graph names it.
     let err = GraphInstance::compile(&graph, &s, &lookup).err().unwrap();

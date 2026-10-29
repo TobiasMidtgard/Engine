@@ -1922,8 +1922,8 @@ fn build_paddock(world: &mut World, origin: DVec3) -> DemoEntities {
         ),
     ));
 
-    // Footwork drill: round a square facing one way, walking ahead, sidestepping left,
-    // backpedalling and sidestepping right.
+    // Footwork drill: round a square facing one way, walking ahead, cutting forward and to the
+    // left at 45°, sidestepping left, backpedalling and sidestepping right.
     let drill = spawn_humanoid(
         world,
         humanoid::Outfit::Shirt,
@@ -1939,9 +1939,10 @@ fn build_paddock(world: &mut World, origin: DVec3) -> DemoEntities {
                 origin,
                 vec![
                     [-4.5, -2.0, ahead],
-                    [-4.5, -4.0, ahead],
-                    [-4.5, -6.0, side],
-                    [-6.0, -6.0, side],
+                    [-4.5, -3.5, ahead],
+                    [-5.25, -4.25, ahead],
+                    [-6.0, -5.0, ahead],
+                    [-6.75, -5.75, side],
                     [-7.5, -6.0, back],
                     [-7.5, -4.0, back],
                     [-7.5, -2.0, side],
