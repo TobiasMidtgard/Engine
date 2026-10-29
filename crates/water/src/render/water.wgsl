@@ -52,6 +52,8 @@ struct Globals {
     shelter: vec4<f32>,  // wind exposure mask (crate::shelter): corner rel camera x, z, size (m), body slot (-1 none)
     swash: vec4<f32>,    // the swash (render/swash.rs): corner rel camera x, z, size (m), on (1/0)
     swash2: vec4<f32>,   // its datum rel camera y, cell (m), unused, unused
+    waterline: vec4<f32>,  // the camera at the waterline: split per pixel (1/0), lens dome radius (m), lens wetness 0..1, seconds since it surfaced
+    waterline2: vec4<f32>, // meters of the dome per pixel, drop seed, unused, unused
 };
 
 struct WaterUniform {
@@ -596,6 +598,39 @@ fn medium_radiance(look: WaterLook, rel: vec3<f32>, depth_below: f32) -> vec3<f3
     return backscatter(look, rel, depth_below, 0.0, 1.0);
 }
 
+// Henyey-Greenstein phase function (1/sr) at the cosine of the scattering angle.
+fn phase_hg(cos_t: f32, g: f32) -> f32 {
+    let d = 1.0 + g * g - 2.0 * g * cos_t;
+    return (1.0 - g * g) / (4.0 * PI * d * sqrt(d));
+}
+
+// The water's own light seen along `dir` from inside it, `depth_below` meters under the
+// surface, as far as the eye sees: the light coming down scattered once toward the eye,
+// L = b·β̃(θ)·E / c per band. Natural waters scatter mostly forward: a Henyey-Greenstein
+// phase function with g = 0.924 matches Petzold's measured average (Mobley, Ocean Optics Web
+// Book): about 0.004 /sr sideways, a bright halo looking toward the sun, dark looking down
+// (the light comes from above: Tyler 1960). The light coming down fades with depth by the
+// diffuse attenuation, about (a + bb) / 0.8, not by the beam's a + b. Seen from above the
+// water is what it sends back up (`medium_radiance`); from inside it this, which is far less
+// saturated: a green lake is a pale green-grey under the water, not a deep green.
+fn in_water_radiance(look: WaterLook, dir: vec3<f32>, depth_below: f32) -> vec3<f32> {
+    let up = vec3<f32>(0.0, 1.0, 0.0);
+    let bb = look.scattering * look.scatter_color;
+    let b = look.scattering * look.scatter_color / max(dot(look.scatter_color, vec3<f32>(1.0 / 3.0)), 1e-6);
+    let c = look.absorb + b;
+    let down = exp(-(look.absorb + bb) / 0.8 * max(depth_below, 0.0));
+    // The sun's beam, bent down through the surface (Fresnel's loss is a few percent).
+    let sun_in = refract(-frame.sun_dir.xyz, up, 1.0 / 1.333);
+    let sun = water_sun(vec3<f32>(0.0)) * max(frame.sun_dir.y, 0.0) * shadow_factor(vec3<f32>(0.0), up);
+    let p_sun = phase_hg(dot(sun_in, -dir), 0.924);
+    // The sky's light comes down within Snell's window: a broad beam from overhead.
+    let sky = sky_ambient(up) * sky_visibility(vec3<f32>(0.0), up) * PI;
+    let p_sky = phase_hg(-dir.y, 0.6);
+    // Multiple scattering spreads some of it every way.
+    let spread = (sun + sky) * (0.15 * b / max(c, vec3<f32>(1e-5))) / (4.0 * PI);
+    return pre_expose((b / max(c, vec3<f32>(1e-5)) * (sun * p_sun + sky * p_sky) + spread) * down);
+}
+
 // Sunlight reaching camera-relative `rel` through the air and under the clouds' shadows, as the
 // ground beside the water gets it (lib_frame `cloud_shadow`).
 fn water_sun(rel: vec3<f32>) -> vec3<f32> {
@@ -935,6 +970,41 @@ fn shade_water(rel: vec3<f32>, n_in: vec3<f32>, look: WaterLook, foam_in: f32, c
     return mix(film, apply_fog(color, rel), shoreline);
 }
 
+// Where along its steps a ray march starts at pixel `px`, 0..1: interleaved gradient noise
+// instead of banding, turned by the golden ratio every frame so TAA averages it away (a fixed
+// pattern stays as a fine grid).
+fn march_jitter(px: vec2<f32>) -> f32 {
+    let ign = fract(52.9829189 * fract(dot(px, vec2<f32>(0.06711056, 0.00583715))));
+    return fract(ign + frame.time.w * 0.6180339);
+}
+
+// What the underside of the surface at `rel` mirrors along `r` (heading down into the water):
+// the screen's view that way where it shows something under the water (from just under the
+// surface the mirror image is the view flipped about the horizon: a hull, a post, the bed),
+// through the water the light travels; else the water's own light.
+fn under_mirror(look: WaterLook, rel: vec3<f32>, r: vec3<f32>, jitter: f32) -> vec3<f32> {
+    let c = frame.view_proj * vec4<f32>(rel + r * 50.0, 1.0);
+    if (c.w > 1e-4) {
+        let uv = vec2<f32>(c.x / c.w * 0.5 + 0.5, 0.5 - c.y / c.w * 0.5);
+        if (all(uv > vec2<f32>(0.0)) && all(uv < vec2<f32>(1.0))) {
+            let size = vec2<f32>(textureDimensions(scene_depth));
+            let d = textureLoad(scene_depth, vec2<i32>(uv * size), 0);
+            if (d > 1e-7) {
+                let ndc = vec2<f32>(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0);
+                let p4 = frame.inv_view_proj * vec4<f32>(ndc, d, 1.0);
+                let p = p4.xyz / p4.w;
+                if (p.y < water.g.under2.w) {
+                    let path = length(rel) + length(p - rel);
+                    let tr = exp(-(look.absorb + vec3<f32>(look.scattering)) * path);
+                    let seen = textureSampleLevel(scene_color, linear_clamp, uv, 0.0).rgb;
+                    return seen * tr + under_light(look, r, path, jitter);
+                }
+            }
+        }
+    }
+    return under_light(look, r, 1e3, jitter);
+}
+
 // The surface seen from below: Snell's window to the world above, total internal reflection
 // of the deep around it, all through the water between the camera and the surface.
 fn shade_underside(rel: vec3<f32>, n_up: vec3<f32>, look: WaterLook, frag: vec4<f32>) -> vec3<f32> {
@@ -943,8 +1013,15 @@ fn shade_underside(rel: vec3<f32>, n_up: vec3<f32>, look: WaterLook, frag: vec4<
     let n = -n_up;
     let cos_i = max(dot(n, v), 1e-3);
     let t = refract(-v, n, 1.333);
-    let medium = pre_expose(medium_radiance(look, rel, water.g.rain.w));
-    var color = medium;
+    let medium = in_water_radiance(look, -v, water.g.rain.w);
+    // What the surface mirrors from below (all of it past the critical angle): the water under
+    // it, lit as the view down into it is, and what stands in it.
+    var mirrored = medium;
+    if (water.g.rain.z >= 0.0) {
+        let jitter = march_jitter(frag.xy);
+        mirrored = under_mirror(look, rel, reflect(-v, n), jitter);
+    }
+    var color = mirrored;
     if (dot(t, t) > 0.0) {
         // Leaving the water: Fresnel from the water side.
         let f = 0.02 + 0.98 * pow(1.0 - cos_i, 5.0);
@@ -954,7 +1031,7 @@ fn shade_underside(rel: vec3<f32>, n_up: vec3<f32>, look: WaterLook, frag: vec4<
         let above = textureSampleLevel(scene_color, linear_clamp, uv, 0.0).rgb;
         let sky = pre_expose(sample_env(t));
         let world = mix(sky, above, 0.65);
-        color = world * (1.0 - f) * 1.4 + medium * f;
+        color = world * (1.0 - f) * 1.4 + mirrored * f;
     }
     let sigma_t = look.absorb + vec3<f32>(look.scattering);
     let tr = exp(-sigma_t * dist);
@@ -1012,6 +1089,11 @@ fn vs_body(@builtin(vertex_index) vid: u32, @builtin(instance_index) bi: u32) ->
 
 @fragment
 fn fs_body(in: BodyOut) -> @location(0) vec4<f32> {
+    // Whether the eye is under the surface here, from the triangles' own facing: exact where
+    // the camera straddles the waterline (the surface on one side of the screen seen from
+    // below, on the other from above).
+    let ng = cross(dpdx(in.rel), dpdy(in.rel));
+    let from_below = dot(in.rel, ng * sign(ng.y)) > 0.0;
     let bi = in.body;
     // Under a lake mirror's plane, in its view (`clip_plane_distance` is 0 elsewhere).
     // Past the lake's edge only where the swash has run up the beach.
@@ -1019,6 +1101,10 @@ fn fs_body(in: BodyOut) -> @location(0) vec4<f32> {
     if (water.bodies[bi].look.w > 0.5) { sw = swash_at(in.rest); }
     let up_the_beach = sw.w > 0.5 && sw.depth > 5e-4;
     if ((body_inset(bi, body_local(bi, in.rest)) < 0.0 && !up_the_beach) || clip_plane_distance(in.rel) < 0.0) { discard; }
+    // At the waterline the lens's dome decides which side each pixel sees from (`fs_under`):
+    // the surface closer than the dome would cut across that.
+    let dome = water.g.waterline.y;
+    if (water.g.waterline.x > 0.5 && dot(in.rel, in.rel) < dome * dome) { discard; }
     use_mirror = i32(bi) == i32(water.g.mirror.w);
     wet_bed = mix(1.0, WET_SAND, sw.w);
     let look = body_look(bi);
@@ -1112,8 +1198,8 @@ fn fs_body(in: BodyOut) -> @location(0) vec4<f32> {
         foam += sw.foam * sw.w * 1.4;
     }
     var color: vec3<f32>;
-    // Seen from below when the camera is under the water.
-    if (water.g.rain.z >= 0.0) {
+    // Seen from below when the camera is under the water (at the waterline, where it is).
+    if (water.g.rain.z >= 0.0 && (water.g.waterline.x < 0.5 || from_below)) {
         color = shade_underside(in.rel, n, look, in.clip);
     } else {
         // Where the swash runs, the shore's procedural lapping gives way to it.
@@ -1713,41 +1799,57 @@ fn fs_sand(in: FullscreenOut) -> @location(0) vec4<f32> {
     return vec4<f32>(add * fog.transmittance, keep);
 }
 
-// ---------------------------------------------------------------- underwater
-@vertex
-fn vs_under(@builtin(vertex_index) vid: u32) -> FullscreenOut {
-    return fullscreen_vertex(vid, 0.0);
+// ---------------------------------------------------------------- the waterline
+// A camera half in the water sees the waterline cross its lens: below it the water's fog, above
+// it the air, a meniscus of water clinging along the line (Crest's and HDRP's underwater views
+// split the screen the same way). The line is where the water meets the lens's dome: a pixel
+// sees from under the water if the dome's point along its ray is. A dome of 20 cm, the size an
+// over-under shot is taken through, holds the line steady across the frame while the water
+// laps at it; the 5 cm near plane would flip the whole screen with every ripple.
+
+// The surface's height (rel camera y) over a camera-relative x/z of body `bi`, as `vs_body`
+// lifts its mesh there: the Gerstner waves' sideways push undone by a fixed-point step, then
+// the ripples, the swash and the fine waves.
+fn surface_y(bi: u32, xz: vec2<f32>) -> f32 {
+    let origin = water.bodies[bi].origin;
+    let s0 = water.bodies[bi].grid.z;
+    var rest = xz;
+    var w = eval_waves(bi, rest - origin.xz, body_depth(bi, rest), s0 * 2.5);
+    rest = xz - w.offset.xz;
+    w = eval_waves(bi, rest - origin.xz, body_depth(bi, rest), s0 * 2.5);
+    var y = origin.y + w.offset.y;
+    var free = 0.0;
+    if (water.bodies[bi].look.w > 0.5) {
+        y += ripple_at(rest).x;
+        let sw = swash_at(rest);
+        free = sw.w;
+        y = mix(y, sw.level, free);
+    }
+    let bd = water.bodies[bi].detail;
+    return y + detail_height(tiling_pos(vec3<f32>(xz.x, y, xz.y)).xz, bd.x, bd.yz, s0) * (1.0 - free);
 }
 
-@fragment
-fn fs_under(in: FullscreenOut) -> @location(0) vec4<f32> {
-    let pix = vec2<i32>(in.position.xy);
-    let d = textureLoad(scene_depth, pix, 0);
-    var color = textureLoad(scene_color, pix, 0).rgb;
-    let ndc = vec2<f32>(in.uv.x * 2.0 - 1.0, 1.0 - in.uv.y * 2.0);
+// The view ray through a screen uv (0..1, y down), camera-relative.
+fn view_dir(uv: vec2<f32>) -> vec3<f32> {
+    let ndc = vec2<f32>(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0);
     let far = frame.inv_view_proj * vec4<f32>(ndc, 1e-6, 1.0);
-    let dir = normalize(far.xyz / far.w);
-    var dist = 1e5;
-    var rel = dir * 1e5;
-    if (d > 1e-7) {
-        let p = frame.inv_view_proj * vec4<f32>(ndc, d, 1.0);
-        rel = p.xyz / p.w;
-        dist = length(rel);
-    }
+    return normalize(far.xyz / far.w);
+}
+
+// How far the lens's dome along `dir` is above the water, meters (below 0: under it). The
+// water clings to the dome in a capillary wobble a few tenths of a millimeter high.
+fn dome_above(dir: vec3<f32>) -> f32 {
+    let q = dir * water.g.waterline.y;
+    let wobble = (value_noise2(vec2<f32>(atan2(dir.x, dir.z) * 25.0, time_s() * 2.5)) - 0.5) * 4e-4;
+    return q.y - surface_y(u32(water.g.rain.z), q.xz) + wobble;
+}
+
+// The water's own light along a view ray through `in_water` meters of it from the camera: the
+// medium scattering in, brightened in the sheets of light the waves focus down. `jitter` (0..1,
+// per pixel) staggers the march.
+fn under_light(look: WaterLook, dir: vec3<f32>, in_water: f32, jitter: f32) -> vec3<f32> {
     let level = water.g.under2.w;
-    // Only the stretch of the ray below the surface is in water.
-    var in_water = dist;
-    if (dir.y > 1e-4) { in_water = min(dist, level / dir.y); }
-    let look = WaterLook(water.g.under.rgb, water.g.under.w, water.g.under2.rgb, 0.05, 0.0, 1.0, 0.0);
-    // Caustics dance on everything under the surface.
-    if (d > 1e-7 && rel.y < level) {
-        let sun_up = saturate(frame.sun_dir.y * 3.0);
-        let depth_below = level - rel.y;
-        let k = sun_up * exp(-depth_below * 0.2) * shadow_factor(rel, vec3<f32>(0.0, 1.0, 0.0));
-        color *= 1.0 + caustics(tiling_pos(rel).xz * 1.4) * k * 1.4;
-        color *= exp(-look.absorb * depth_below * 0.5);
-    }
-    let medium = pre_expose(medium_radiance(look, vec3<f32>(0.0), water.g.rain.w));
+    let medium = in_water_radiance(look, dir, water.g.rain.w);
     let tr = exp(-(look.absorb + vec3<f32>(look.scattering)) * in_water);
     var glow = medium * (1.0 - tr);
     // Light shafts: the waves focus sunlight into moving sheets and columns. March the view
@@ -1759,8 +1861,6 @@ fn fs_under(in: FullscreenOut) -> @location(0) vec4<f32> {
         let sun_in = refract(-frame.sun_dir.xyz, vec3<f32>(0.0, 1.0, 0.0), 1.0 / 1.333);
         let up_sun = -sun_in / max(-sun_in.y, 0.2);
         let reach = min(in_water, 30.0);
-        // Per-pixel jitter (interleaved gradient noise) instead of banding; TAA smooths it.
-        let jitter = fract(52.9829189 * fract(dot(in.position.xy, vec2<f32>(0.06711056, 0.00583715))));
         var rays = 0.0;
         var weight = 0.0;
         for (var i = 0; i < 12; i++) {
@@ -1777,5 +1877,171 @@ fn fs_under(in: FullscreenOut) -> @location(0) vec4<f32> {
         let toward = 0.4 + 2.0 * pow(saturate(dot(dir, -sun_in)), 6.0);
         glow *= max(1.0 + rays * 2.2 * toward * sun_up * shadow_factor(vec3<f32>(0.0), vec3<f32>(0.0, 1.0, 0.0)), 0.0);
     }
-    return vec4<f32>(color * tr + glow, 1.0);
+    return glow;
+}
+
+// ---------------------------------------------------------------- underwater
+@vertex
+fn vs_under(@builtin(vertex_index) vid: u32) -> FullscreenOut {
+    return fullscreen_vertex(vid, 0.0);
+}
+
+@fragment
+fn fs_under(in: FullscreenOut) -> @location(0) vec4<f32> {
+    let pix = vec2<i32>(in.position.xy);
+    let d = textureLoad(scene_depth, pix, 0);
+    var color = textureLoad(scene_color, pix, 0).rgb;
+    let ndc = vec2<f32>(in.uv.x * 2.0 - 1.0, 1.0 - in.uv.y * 2.0);
+    let dir = view_dir(in.uv);
+    // At the waterline only the pixels whose dome is under the water see through it.
+    let split = water.g.waterline.x > 0.5;
+    var above = 0.0;
+    if (split) {
+        above = dome_above(dir);
+        if (above > 0.0) { discard; }
+    }
+    var dist = 1e5;
+    var rel = dir * 1e5;
+    if (d > 1e-7) {
+        let p = frame.inv_view_proj * vec4<f32>(ndc, d, 1.0);
+        rel = p.xyz / p.w;
+        dist = length(rel);
+    }
+    let level = water.g.under2.w;
+    // Only the stretch of the ray below the surface is in water (from the dome, at the
+    // waterline: up to the surface over it).
+    var in_water = dist;
+    if (split) {
+        in_water = max(dist - water.g.waterline.y, 0.0);
+        if (dir.y > 1e-4) { in_water = min(in_water, -above / dir.y); }
+    } else if (dir.y > 1e-4) {
+        in_water = min(dist, level / dir.y);
+    }
+    let look = WaterLook(water.g.under.rgb, water.g.under.w, water.g.under2.rgb, 0.05, 0.0, 1.0, 0.0);
+    // Caustics dance on everything under the surface.
+    if (d > 1e-7 && rel.y < level) {
+        let sun_up = saturate(frame.sun_dir.y * 3.0);
+        let depth_below = level - rel.y;
+        let k = sun_up * exp(-depth_below * 0.2) * shadow_factor(rel, vec3<f32>(0.0, 1.0, 0.0));
+        color *= 1.0 + caustics(tiling_pos(rel).xz * 1.4) * k * 1.4;
+        color *= exp(-look.absorb * depth_below * 0.5);
+    }
+    let tr = exp(-(look.absorb + vec3<f32>(look.scattering)) * in_water);
+    let jitter = march_jitter(in.position.xy);
+    return vec4<f32>(color * tr + under_light(look, dir, in_water, jitter), 1.0);
+}
+
+// ---------------------------------------------------------------- the lens
+// Water on the camera: the meniscus along the waterline, and as the camera comes up out of the
+// water the sheet that drains off its glass and the drops it leaves behind. A drop has no color
+// of its own: it is a tiny wide lens showing the scene shrunk and upside down, dark at its rim
+// and with the sky's highlight on its upper side, wider at its foot as it sags (Hargreaves,
+// "MotoGP: raindrops keep falling on my lens"). Drops past a critical size slide (gravity beats
+// the pinning of contact angle hysteresis: Furmidge 1962); smaller ones stay and evaporate.
+// Blended as dst · a + rgb.
+
+// What the lens sees along `uv`: the scene copy taken before the water was drawn, with the
+// lake's surface put back as a plane (its deep tint, the sky mirrored), which is all a blurred
+// drop shows of it.
+fn lens_scene(uv: vec2<f32>) -> vec3<f32> {
+    let u = clamp(uv, vec2<f32>(0.0), vec2<f32>(0.999));
+    var color = textureSampleLevel(scene_color, linear_clamp, u, 0.0).rgb;
+    let level = water.g.under2.w;
+    let dir = view_dir(u);
+    if (level < 0.0 && dir.y < -1e-4) {
+        let size = vec2<f32>(textureDimensions(scene_depth));
+        let d = textureLoad(scene_depth, vec2<i32>(u * size), 0);
+        var hidden = d <= 1e-7;
+        if (!hidden) {
+            let ndc = vec2<f32>(u.x * 2.0 - 1.0, 1.0 - u.y * 2.0);
+            let p = frame.inv_view_proj * vec4<f32>(ndc, d, 1.0);
+            hidden = p.y / p.w < level;
+        }
+        if (hidden) {
+            let look = WaterLook(water.g.under.rgb, water.g.under.w, water.g.under2.rgb, 0.05, 0.0, 1.0, 0.0);
+            let fresnel = 0.02 + 0.98 * pow(1.0 - saturate(-dir.y), 5.0);
+            let sky = pre_expose(sample_env(reflect(dir, vec3<f32>(0.0, 1.0, 0.0))));
+            color = mix(pre_expose(medium_radiance(look, vec3<f32>(0.0), 0.0)), sky, fresnel);
+        }
+    }
+    return color;
+}
+
+@fragment
+fn fs_lens(in: FullscreenOut) -> @location(0) vec4<f32> {
+    let uv = in.uv;
+    let size = vec2<f32>(textureDimensions(scene_color));
+    let aspect = size.x / size.y;
+    let sky_up = pre_expose(sample_env(vec3<f32>(0.0, 1.0, 0.0)));
+    var add = vec3<f32>(0.0);
+    var keep = 1.0;
+    if (water.g.waterline.x > 0.5) {
+        // The meniscus: water climbing the dome a millimeter or two over the line bends the
+        // dark water below up into a band, its top edge catching the sky.
+        let above = dome_above(view_dir(uv));
+        let w = max(0.0015, water.g.waterline2.x * 2.5);
+        let t = above / w;
+        let band = exp(-(t - 0.5) * (t - 0.5) / 0.5) * 0.85;
+        let rim = exp(-(t - 1.35) * (t - 1.35) / 0.03);
+        if (band + rim > 0.01) {
+            // The film is water: it tints what it bends toward the water's own color.
+            let look = WaterLook(water.g.under.rgb, water.g.under.w, water.g.under2.rgb, 0.05, 0.0, 1.0, 0.0);
+            let bent = lens_scene(uv + vec2<f32>(0.0, w / max(water.g.waterline2.x, 1e-6) * 2.0 / size.y));
+            let tint = mix(bent * exp(-look.absorb * 0.3), pre_expose(medium_radiance(look, vec3<f32>(0.0), 0.0)), 0.5);
+            add = tint * band + sky_up * rim * 0.3;
+            keep = 1.0 - band;
+        }
+        // Under the line the lens is in the water: nothing clings to it.
+        if (above < 0.0) { return vec4<f32>(add, keep); }
+    }
+    let wet = water.g.waterline.z;
+    if (wet > 0.0) {
+        let since = water.g.waterline.w;
+        let seed = water.g.waterline2.y;
+        let p = vec2<f32>(uv.x * aspect, uv.y);
+        // The sheet draining off: its ragged front runs down the glass, gone about a second
+        // after the camera is out. It dims what is seen through it a little, and its runnels
+        // catch the sky in streaks down the glass.
+        let front = since * 1.6 - 0.1 + (value_noise2(vec2<f32>(p.x * 9.0, seed)) - 0.5) * 0.12;
+        let sheet = smoothstep(front - 0.03, front + 0.03, uv.y) * saturate(1.0 - since / 1.2);
+        if (sheet > 0.0) {
+            let runnels = value_noise2(vec2<f32>(p.x * 38.0, p.y * 2.5 - since * 5.0));
+            let lip = exp(-pow((uv.y - front) / 0.012, 2.0));
+            add += sky_up * sheet * (0.12 * pow(runnels, 6.0) + 0.1 * lip);
+            keep *= 1.0 - sheet * (0.2 + 0.15 * runnels);
+        }
+        // The drops: big ones (some sliding) over a scatter of small ones.
+        for (var layer = 0; layer < 2; layer++) {
+            let big = layer == 0;
+            let cell = select(0.035, 0.09, big);
+            var q = p;
+            let col = floor(q.x / cell);
+            let slides = big && hash12(vec2<f32>(col, seed + 3.0)) > 0.55;
+            q.y -= select(0.0, (0.03 + 0.12 * hash12(vec2<f32>(col, seed + 7.0))) * since, slides);
+            let id = floor(q / cell);
+            let f = q / cell - id;
+            let k = id + vec2<f32>(seed * 13.1, f32(layer) * 17.3);
+            let h = vec4<f32>(hash12(k), hash12(k + 1.7), hash12(k + 3.1), hash12(k + 5.9));
+            if (h.x > select(0.3, 0.2, big)) { continue; }
+            // Each drop dries off at its own time as the wetness falls.
+            let life = saturate((wet - h.y * 0.9) * 8.0);
+            if (life <= 0.0) { continue; }
+            let r = mix(0.12, 0.36, h.z);
+            let c = vec2<f32>(r + (1.0 - 2.0 * r) * h.w, r + (1.0 - 2.0 * r) * fract(h.w * 7.3 + h.z));
+            var d = (f - c) / r;
+            d.y *= select(1.0, 0.85, d.y > 0.0);
+            let d2 = dot(d, d);
+            if (d2 >= 1.0) { continue; }
+            let a = smoothstep(1.0, 0.8, sqrt(d2)) * life;
+            let r_uv = r * cell;
+            let seen = lens_scene(uv - vec2<f32>(d.x / aspect, d.y) * (r_uv + 0.12));
+            var drop = seen * (1.0 - 0.55 * smoothstep(0.55, 1.0, sqrt(d2)));
+            let hl = d - vec2<f32>(-0.3, -0.45);
+            drop += sky_up * 0.5 * exp(-dot(hl, hl) * 30.0);
+            add = mix(add, drop, a);
+            keep *= 1.0 - a;
+        }
+    }
+    if (keep > 0.999) { discard; }
+    return vec4<f32>(add, keep);
 }

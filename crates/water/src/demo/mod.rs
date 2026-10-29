@@ -616,6 +616,15 @@ pub const VIEWS: &[DemoView] = &[
         quick_warmup: false,
     },
     DemoView {
+        key: "water_waterline",
+        name: "Tarn waterline: half under the water by the rowboat",
+        eye: [-2.35, 5.5, 14.84],
+        target: [1.0, 5.6, 13.9],
+        hour: 16.5,
+        warmup_secs: 3.0,
+        quick_warmup: false,
+    },
+    DemoView {
         key: "water_falls",
         name: "Water spilling from the tarn over the falls",
         eye: [34.5, 3.6, 33.0],

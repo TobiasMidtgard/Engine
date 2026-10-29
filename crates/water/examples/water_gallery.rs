@@ -6,7 +6,8 @@
 //!
 //! `seconds` of simulation run before the first picture (default 12); `views` is a
 //! comma-separated subset of: overview, falls, shore, under, pond, wake, aerial, swirl, ditch,
-//! cascade, crevice, ford, pools, pools_near, pools_dark, jetty, grazing, low_pass.
+//! swash, beach, paddler, waterline, surfacing, cascade, crevice, ford, pools, pools_near,
+//! pools_dark, jetty, grazing, low_pass.
 //!
 //! The dispersive ripples run on the CPU while the simulation runs without drawing, and the
 //! GPU picks them up for the pictures (`ENGINE_WATER_CPU_RIPPLES=1` draws the ripple grid's
@@ -152,6 +153,12 @@ const VIEWS: &[(&str, [f64; 3], [f64; 3])] = &[
     // Close by the paddler wading along the beach, its legs parting the swash.
     ("paddler", [-1.5, 6.6, 25.5], [-6.0, 5.2, 20.5]),
     ("under", [-2.0, 3.6, 7.0], [5.0, 4.6, 17.5]),
+    // The camera half in the tarn by the moored rowboat: the screen split at the waterline,
+    // its meniscus, the hull above and below.
+    ("waterline", [-2.35, 5.5, 14.84], [1.0, 5.6, 13.9]),
+    // Just up out of it (from under the water a moment before): the sheet draining off the
+    // lens and the drops it leaves.
+    ("surfacing", [-3.0, 5.95, 9.0], [-20.0, 7.0, -14.0]),
     ("pond", [56.0, 2.0, 38.0], [46.7, 0.3, 46.7]),
     ("wake", [-3.0, 11.0, 26.0], [-5.0, 5.5, -3.0]),
     ("aerial", [0.0, 95.0, 70.0], [10.0, 0.0, 8.0]),
@@ -425,7 +432,18 @@ fn main() {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(6);
-        app.update_n(frames);
+        if *key == "surfacing" {
+            let up = frames.min(12);
+            let under = eye.with_y(LAKE_LEVEL as f64 - 0.6);
+            *app.world.get_mut::<Transform>(camera).expect("camera") =
+                Transform::from_translation(under).looking_at(target, Vec3::Y);
+            app.update_n(frames - up);
+            *app.world.get_mut::<Transform>(camera).expect("camera") =
+                Transform::from_translation(eye).looking_at(target, Vec3::Y);
+            app.update_n(up);
+        } else {
+            app.update_n(frames);
+        }
         if let Some(d) = app.world.get_resource::<RenderDisabled>() {
             eprintln!("no GPU: {}", d.0);
             return;

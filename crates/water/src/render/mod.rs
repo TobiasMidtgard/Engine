@@ -26,6 +26,7 @@ use crate::waves::MAX_WAVES;
 mod detail;
 mod surface;
 mod swash;
+mod waterline;
 
 /// The water shader (composed after the renderer's `lib_types` and `lib_frame`).
 pub const SHADER: &str = include_str!("water.wgsl");
@@ -325,6 +326,11 @@ struct Globals {
     /// camera y, cell (m), false colour on (`ENGINE_WATER_SWASH_DEBUG`), unused.
     swash: [f32; 4],
     swash2: [f32; 4],
+    /// The camera at the waterline (`waterline.rs`): split per pixel (1/0), the lens's dome
+    /// radius (m), the lens's wetness (0..1), seconds since it surfaced; meters of the dome per
+    /// pixel, the drops' seed, unused, unused.
+    waterline: [f32; 4],
+    waterline2: [f32; 4],
 }
 
 #[repr(C)]
@@ -437,6 +443,7 @@ struct Gpu {
     puddle: wgpu::RenderPipeline,
     sand: wgpu::RenderPipeline,
     under: wgpu::RenderPipeline,
+    lens: wgpu::RenderPipeline,
     group1_layout: wgpu::BindGroupLayout,
     group2_layout: wgpu::BindGroupLayout,
     uniform: wgpu::Buffer,
@@ -509,6 +516,15 @@ pub struct WaterFeature {
     gpu: Option<Gpu>,
     bodies: Vec<BodyDraw>,
     underwater: bool,
+    /// The camera straddles the waterline: the screen splits per pixel.
+    split: bool,
+    /// The lens pass draws (the meniscus, or a wet lens).
+    lens_on: bool,
+    /// Water on the main view's lens.
+    lens: waterline::Lens,
+    /// The water the camera last came out of: absorption, scattering, surface world y (what
+    /// the drops refract of it).
+    lens_water: Option<([f32; 4], [f32; 4], f64)>,
     puddles: PuddleWindow,
     stats: FeatureStats,
     showers: Option<QueryState<(&'static GlobalTransform, &'static RainShower)>>,
@@ -684,6 +700,13 @@ fn plain_shore() -> bool {
     *PLAIN.get_or_init(|| std::env::var_os("ENGINE_WATER_PLAIN_SHORE").is_some())
 }
 
+/// `ENGINE_WATER_PLAIN_WATERLINE` set: the camera as before round 31 (all under the water or
+/// all above it, no meniscus or drops), for before shots.
+fn plain_waterline() -> bool {
+    static PLAIN: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *PLAIN.get_or_init(|| std::env::var_os("ENGINE_WATER_PLAIN_WATERLINE").is_some())
+}
+
 /// `ENGINE_WATER_SWASH_DEBUG` set: the sand in false colour (depth red, damp green, sheen blue).
 fn swash_debug() -> bool {
     static DEBUG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -855,44 +878,49 @@ impl WaterFeature {
             "fs_under",
             always.clone(),
         );
-        // Wet sand where the swash has been: darkens what is there and adds its sheen
-        // (dst · a + rgb).
-        let sand = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("water wet sand"),
-            layout: Some(&layout1),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_under"),
-                compilation_options: Default::default(),
-                buffers: &[],
-            },
-            primitive: Default::default(),
-            depth_stencil: Some(always.clone()),
-            multisample: Default::default(),
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_sand"),
-                compilation_options: Default::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: gpu.formats.hdr,
-                    blend: Some(wgpu::BlendState {
-                        color: wgpu::BlendComponent {
-                            src_factor: wgpu::BlendFactor::One,
-                            dst_factor: wgpu::BlendFactor::SrcAlpha,
-                            operation: wgpu::BlendOperation::Add,
-                        },
-                        alpha: wgpu::BlendComponent {
-                            src_factor: wgpu::BlendFactor::Zero,
-                            dst_factor: wgpu::BlendFactor::One,
-                            operation: wgpu::BlendOperation::Add,
-                        },
-                    }),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            multiview_mask: None,
-            cache: None,
-        });
+        // Fullscreen decals over what is drawn: darken it and add to it (dst · a + rgb).
+        let decal = |label: &str, fs: &str| {
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some(label),
+                layout: Some(&layout1),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("vs_under"),
+                    compilation_options: Default::default(),
+                    buffers: &[],
+                },
+                primitive: Default::default(),
+                depth_stencil: Some(always.clone()),
+                multisample: Default::default(),
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some(fs),
+                    compilation_options: Default::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: gpu.formats.hdr,
+                        blend: Some(wgpu::BlendState {
+                            color: wgpu::BlendComponent {
+                                src_factor: wgpu::BlendFactor::One,
+                                dst_factor: wgpu::BlendFactor::SrcAlpha,
+                                operation: wgpu::BlendOperation::Add,
+                            },
+                            alpha: wgpu::BlendComponent {
+                                src_factor: wgpu::BlendFactor::Zero,
+                                dst_factor: wgpu::BlendFactor::One,
+                                operation: wgpu::BlendOperation::Add,
+                            },
+                        }),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                multiview_mask: None,
+                cache: None,
+            })
+        };
+        // Wet sand where the swash has been.
+        let sand = decal("water wet sand", "fs_sand");
+        // Water on the lens: the meniscus at the waterline, the drops after.
+        let lens = decal("water lens", "fs_lens");
         // Falling curtains: aerated water blended over everything (premultiplied alpha).
         let falls = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("water falls"),
@@ -1000,6 +1028,7 @@ impl WaterFeature {
             puddle,
             sand,
             under,
+            lens,
             group1_layout,
             group2_layout,
             uniform,
@@ -1583,6 +1612,8 @@ impl RenderFeature for WaterFeature {
     ) {
         self.bodies.clear();
         self.underwater = false;
+        self.split = false;
+        self.lens_on = false;
         self.stats = FeatureStats::default();
         self.extra_view = view.extra_view;
         self.mirror = None;
@@ -1712,7 +1743,14 @@ impl RenderFeature for WaterFeature {
             );
         }
         let tiles = gpu.detail.state.filter(|_| gpu.detail.active);
-        let mut under: Option<(usize, f32)> = None;
+        // (slot, surface rel camera y, the camera straddles it)
+        let mut under: Option<(usize, f32, bool)> = None;
+        // How near the surface the screen splits: the waves' reach and then some (not in
+        // mirrors and other extra views, nor orthographic ones).
+        let split_reach = |b: &GpuBody| {
+            (!plain_waterline() && !view.extra_view && !view.orthographic)
+                .then(|| b.grid2[3] as f64 + waterline::SLACK_M + waterline::DOME_M as f64)
+        };
         let mut mirror_slot = None;
         let mut shelter_slot = None;
         for &(_, i) in order.iter() {
@@ -1730,10 +1768,13 @@ impl RenderFeature for WaterFeature {
             let slot = self.bodies.len();
             if under.is_none()
                 && let Some((height, depth, ..)) = state.sample_body(b, cam)
-                && cam.y < height - 0.02
                 && cam.y > height - depth as f64 - 0.5
             {
-                under = Some((slot, (height - cam.y) as f32));
+                let reach = split_reach(&body);
+                let split = reach.is_some_and(|r| (cam.y - height).abs() <= r);
+                if split || cam.y < height - reach.unwrap_or(0.02) {
+                    under = Some((slot, (height - cam.y) as f32, split));
+                }
             }
             if lake.body == Some(b.entity) {
                 mirror_slot = Some(slot);
@@ -1871,14 +1912,47 @@ impl RenderFeature for WaterFeature {
                 .to_array();
             self.mirror = Some((picture.color.clone(), picture.depth.clone()));
         }
-        if let Some((slot, depth)) = under {
+        if let Some((slot, level, split)) = under {
             let b = &uniform.bodies[slot];
             g.rain[2] = slot as f32;
-            g.rain[3] = depth;
+            g.rain[3] = level.max(0.0);
             g.under = b.absorb;
-            g.under2 = [b.scatter[0], b.scatter[1], b.scatter[2], depth];
+            g.under2 = [b.scatter[0], b.scatter[1], b.scatter[2], level];
             self.underwater = true;
+            self.split = split;
+            if !view.extra_view {
+                self.lens_water = Some((b.absorb, b.scatter, cam.y + level as f64));
+            }
         }
+        // The lens: wet for a while after the camera comes up.
+        if !view.extra_view && !plain_waterline() {
+            self.lens.step(
+                under.map_or(-1.0, |(_, level, _)| level),
+                view.delta,
+                !view.history_valid,
+            );
+            let wet = self.lens.wetness();
+            if wet > 0.0 {
+                if under.is_none()
+                    && let Some((absorb, scatter, level)) = self.lens_water
+                {
+                    g.under = absorb;
+                    g.under2 = [scatter[0], scatter[1], scatter[2], (level - cam.y) as f32];
+                }
+                g.waterline[2] = wet;
+                g.waterline[3] = self.lens.since();
+                self.lens_on = true;
+            }
+        }
+        self.lens_on |= self.split;
+        g.waterline[0] = if self.split { 1.0 } else { 0.0 };
+        g.waterline[1] = waterline::DOME_M;
+        g.waterline2 = [
+            waterline::DOME_M * view.fov_y / view.height.max(1) as f32,
+            self.lens.seed(),
+            0.0,
+            0.0,
+        ];
         uniform.g = g;
         shared
             .queue
@@ -1902,6 +1976,7 @@ impl RenderFeature for WaterFeature {
             + flows.clone().count() as u32
             + puddles_on as u32
             + self.underwater as u32
+            + self.lens_on as u32
             + (gpu.fall_count > 0) as u32;
         self.stats.instances = self.bodies.len() as u32;
         self.stats.triangles = self
@@ -2030,12 +2105,14 @@ impl RenderFeature for WaterFeature {
             return;
         };
         pass.set_bind_group(1, group1, &[]);
-        if self.underwater {
-            pass.set_pipeline(&gpu.under);
+        // At the waterline the sand goes on first: the underwater pass covers it where the
+        // screen is under the water.
+        if gpu.swash.frame().is_some() && (!self.underwater || self.split) {
+            pass.set_pipeline(&gpu.sand);
             pass.draw(0..3, 0..1);
         }
-        if gpu.swash.frame().is_some() && !self.underwater {
-            pass.set_pipeline(&gpu.sand);
+        if self.underwater {
+            pass.set_pipeline(&gpu.under);
             pass.draw(0..3, 0..1);
         }
         if self.puddles.wet {
@@ -2068,10 +2145,15 @@ impl RenderFeature for WaterFeature {
             pass.set_vertex_buffer(0, gpu.fall_buffer.slice(..));
             pass.draw(0..gpu.fall_count, 0..1);
         }
+        if self.lens_on {
+            pass.set_pipeline(&gpu.lens);
+            pass.draw(0..3, 0..1);
+        }
     }
 
     fn needs_scene_copy(&self) -> bool {
         !self.bodies.is_empty()
+            || self.lens_on
             || self.puddles.wet
             || self.gpu.as_ref().is_some_and(|g| {
                 g.fall_count > 0 || g.flows.iter().any(|f| f.drawn) || g.swash.frame().is_some()
@@ -2107,10 +2189,11 @@ mod tests {
     #[test]
     fn uniform_layout_matches_the_shader() {
         // WGSL: Globals 10 vec4 + 4 showers + 8 plunges + the mirror's matrix and 2 vec4 +
-        // the shelter mask's + the swash's 2; GpuBody 11 vec4 + 24 waves of 2 vec4.
+        // the shelter mask's + the swash's 2 + the waterline's 2; GpuBody 11 vec4 + 24 waves of
+        // 2 vec4.
         assert_eq!(
             std::mem::size_of::<Globals>(),
-            (10 + 4 + 8 + 4 + 2 + 1 + 2) * 16
+            (10 + 4 + 8 + 4 + 2 + 1 + 2 + 2) * 16
         );
         assert_eq!(std::mem::size_of::<GpuBody>(), (11 + MAX_WAVES * 2) * 16);
         assert_eq!(
