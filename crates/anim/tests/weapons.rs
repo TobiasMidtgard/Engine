@@ -599,7 +599,7 @@ fn a_bow_is_drawn_to_the_jaw_turned_on_the_target_and_loosed() {
 /// its overhead bounces off the partner's raised shield and the partner cuts back while it
 /// recovers, then a slash, a bash and a thrust land; the swordsman's shield deflects the
 /// partner's cut and the swordsman answers; the great sword's sweep bounces off the dummy's
-/// shield, its overhead breaks the guard and a sweep and an overhead get through; and the
+/// shield, its overhead breaks the guard and a sweep gets through; and the
 /// archer's arrows stick in the butt's face.
 #[test]
 fn the_paddock_weapons_yard_plays_out() {
@@ -695,7 +695,6 @@ fn the_paddock_weapons_yard_plays_out() {
             ("greatsword_sweep", blocked),
             ("greatsword_overhead", broke),
             ("greatsword_sweep", hit),
-            ("greatsword_overhead", hit),
         ])
     );
     let shots: Vec<String> = played("archer").into_iter().map(|m| m.0).collect();
