@@ -15,6 +15,7 @@ pub mod hit;
 pub mod horse_model;
 pub mod ik;
 pub mod import;
+pub mod knockdown;
 pub mod model;
 pub mod motion;
 pub mod muscle;
@@ -38,6 +39,7 @@ pub use graph::{AnimGraph, NodeDef};
 pub use hit::HitReaction;
 pub use horse_model::{HorseModel, HorseModels};
 pub use ik::{FootIk, IkShape, IkSurface, LegIk, LookAt, Reach, ReachIk};
+pub use knockdown::{Knockdown, KnockdownPhase};
 pub use muscle::{MorphWeights, Muscle, MuscleDriver, MuscleRig};
 pub use procedural::gait::{GaitLeg, GaitStage, LeggedGait};
 pub use procedural::spring::{SpringChainDef, SpringChains};
@@ -147,7 +149,13 @@ impl Plugin for AnimationPlugin {
                         procedural::vehicle::vehicle_rig_system,
                     ),
                     procedural::spring::spring_chain_system,
-                    (hit::take_hits, hit::stagger_system, hit::flinch_system).chain(),
+                    (
+                        hit::take_hits,
+                        knockdown::knockdown_system,
+                        hit::stagger_system,
+                        hit::flinch_system,
+                    )
+                        .chain(),
                 )
                     .chain()
                     .in_set(AnimSet::Procedural),
@@ -252,7 +260,12 @@ fn register_types(app: &mut App) {
          physical_above N·s also rock the upper body with physics for physical_secs, and \
          ones pushing at least stagger_above N·s along the ground knock the body back a step \
          or two (with a CharacterController or stagger_move off: only publishes \
-         stagger_velocity for the movement module).",
+         stagger_velocity for the movement module); past fall_beyond m of knock-back the \
+         body is knocked down instead and lies down_secs before getting up.",
+    )
+    .register_component::<Knockdown>(
+        "A person knocked off their feet: limp and braced for the fall (phase Down), lying \
+         still, then getting up (Rising); removed once up. Attackers hold off meanwhile.",
     )
     .register_component::<PhysicalBlend>(
         "Parts of a body made physical for a moment: each pulse simulates the parts from its \

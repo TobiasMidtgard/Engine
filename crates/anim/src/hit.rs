@@ -26,7 +26,12 @@
 //! easing out over about `sqrt(h/g)` (0.3 s), and the feet step to keep up: the one
 //! farthest along the push first, so the stance widens to catch the body ([`FootIk::hurry`]).
 //!
+//! A blow that would carry the body farther than two steps can catch it
+//! ([`HitReaction::fall_beyond`]) knocks it down instead ([`Knockdown`]).
+//!
 //! People get a [`HitReaction`] when they are first hit; insert one to tune it.
+//!
+//! [`Knockdown`]: crate::knockdown::Knockdown
 //!
 //! [`FootIk::hurry`]: crate::ik::FootIk::hurry
 //!
@@ -34,11 +39,12 @@
 
 use engine_core::prelude::*;
 use engine_world::DamageEvent;
-use engine_world::physics::CharacterController;
+use engine_world::physics::{CharacterController, PhysicsBackend};
 
 use crate::animator::Animator;
 use crate::build::humanoid::HIPS_HEIGHT;
 use crate::ik::{FootIk, to_model, to_world};
+use crate::knockdown::Knockdown;
 use crate::ragdoll::{PhysicalBlend, PhysicalPulse, RagdollRig};
 
 /// Bones that flinch, and how much of the blow each can take.
@@ -85,6 +91,12 @@ pub struct HitReaction {
     pub stagger_scale: f32,
     /// Farthest one blow knocks the body back, m.
     pub stagger_max: f32,
+    /// Knock-back (still to come, counting earlier blows) past this distance, m, knocks the
+    /// body down instead: farther than two steps can catch it (0 = never). Needs a physics
+    /// backend; without one the body only staggers.
+    pub fall_beyond: f32,
+    /// How long a knocked-down body lies still before it gets up, s.
+    pub down_secs: f32,
     /// Move its own `Transform` while knocked back. Characters with a `CharacterController`
     /// never do (their movement owns the transform, and collides); for them, and with this
     /// off, [`HitReaction::stagger_velocity`] says how fast the blow pushes them.
@@ -123,6 +135,8 @@ impl Default for HitReaction {
             stagger_mass: 75.0,
             stagger_scale: 1.5,
             stagger_max: 0.5,
+            fall_beyond: 0.55,
+            down_secs: 1.0,
             stagger_move: true,
             stagger_velocity: Vec3::ZERO,
             stagger: (Vec3::ZERO, 0.3),
@@ -179,34 +193,41 @@ impl HitReaction {
 
     /// Knock the body back from a blow pushing `push` (world, N·s) on hips `hips` m high:
     /// to its capture point, `v·sqrt(h/g)` along the push for the speed `v` the blow gives it.
-    /// Returns whether it did.
-    fn knock_back(&mut self, push: Vec3, hips: f32) -> bool {
+    /// If that (with what earlier blows left) is past [`HitReaction::fall_beyond`] and the
+    /// body `can_fall`, it is knocked down instead.
+    fn knock_back(&mut self, push: Vec3, hips: f32, can_fall: bool) -> Knock {
         let flat = push.with_y(0.0);
         if !self.enabled || self.stagger_above <= 0.0 || flat.length() < self.stagger_above {
-            return false;
+            return Knock::None;
         }
         let size = (hips / HIPS_HEIGHT).clamp(0.2, 5.0);
         let speed = flat / (self.stagger_mass * size.powi(3)).max(1.0);
         let tau = (hips.max(0.05) / 9.81).sqrt();
-        let by = (speed * tau * self.stagger_scale).clamp_length_max(self.stagger_max);
-        self.knock(by, tau);
+        let by = speed * tau * self.stagger_scale;
+        if can_fall && self.fall_beyond > 0.0 && (self.stagger.0 + by).length() > self.fall_beyond {
+            self.stagger.0 = Vec3::ZERO;
+            return Knock::Down;
+        }
+        self.knock(by.clamp_length_max(self.stagger_max), tau);
         let left = self.stagger.0.clamp_length_max(self.stagger_max);
         self.stagger.0 = left;
-        true
+        Knock::Back
     }
 
     /// Strike the body and knock it back if the blow is hard enough: then the whole body
     /// moves, so the shove only leans the trunk over the hips rather than moving them (they
-    /// would carry the feet along).
+    /// would carry the feet along). Returns whether it was knocked down.
     fn take(
         &mut self,
         (point, push, pelvis): (Vec3, Vec3, Vec3),
         bones: &[Option<Vec3>],
-        world_push: Vec3,
-        hips: f32,
-    ) {
+        (world_push, hips): (Vec3, f32),
+        can_fall: bool,
+    ) -> bool {
         self.strike(point, push, pelvis, bones);
-        self.lean_only = self.knock_back(world_push, hips);
+        let knock = self.knock_back(world_push, hips, can_fall);
+        self.lean_only = knock != Knock::None;
+        knock == Knock::Down
     }
 
     fn omega(&self) -> f32 {
@@ -241,21 +262,31 @@ impl HitReaction {
     }
 }
 
+/// What a blow does to where the body stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Knock {
+    None,
+    Back,
+    Down,
+}
+
 /// Kick the bodies that were hit this frame.
 #[allow(clippy::type_complexity)]
 pub(crate) fn take_hits(
     mut commands: Commands,
     mut hits: MessageReader<DamageEvent>,
+    backend: Option<Res<PhysicsBackend>>,
     mut q: Query<(
         &Animator,
         &GlobalTransform,
         Option<&mut HitReaction>,
         Option<&RagdollRig>,
         Option<&mut PhysicalBlend>,
+        Option<&Knockdown>,
     )>,
 ) {
     for hit in hits.read() {
-        let Ok((animator, gt, reaction, rig, physical)) = q.get_mut(hit.target) else {
+        let Ok((animator, gt, reaction, rig, physical, down)) = q.get_mut(hit.target) else {
             continue;
         };
         let skeleton = &animator.skeleton;
@@ -279,18 +310,34 @@ pub(crate) fn take_hits(
             .collect();
         let world_push = gt.rotation() * push;
         let hips = pelvis.y * gt.scale().y;
-        let tuning = match reaction {
+        if down.is_some() {
+            // Down already: the blow only pushes the limp body.
+            if let Some(mut p) = physical
+                && rig.is_some_and(|r| r.is_physical())
+            {
+                p.pushes.push((hit.point, world_push * 0.5));
+            }
+            continue;
+        }
+        let can_fall = backend.is_some() && rig.is_some();
+        let (tuning, fell) = match reaction {
             Some(mut r) => {
-                r.take((point, push, pelvis), &bones, world_push, hips);
-                r.clone()
+                let fell = r.take((point, push, pelvis), &bones, (world_push, hips), can_fall);
+                (r.clone(), fell)
             }
             None => {
                 let mut r = HitReaction::default();
-                r.take((point, push, pelvis), &bones, world_push, hips);
+                let fell = r.take((point, push, pelvis), &bones, (world_push, hips), can_fall);
                 commands.entity(hit.target).insert(r.clone());
-                r
+                (r, fell)
             }
         };
+        if fell {
+            commands
+                .entity(hit.target)
+                .insert(Knockdown::new(hit.point, world_push));
+            continue;
+        }
         // A hard blow rocks the upper body with physics too.
         let strength = push.length();
         if rig.is_some()
@@ -325,10 +372,18 @@ pub(crate) fn stagger_system(
         Option<&mut FootIk>,
         Option<&LocalTimeScale>,
         Option<&CharacterController>,
+        Option<&Knockdown>,
     )>,
 ) {
-    for (mut reaction, mut transform, animator, gt, mut ik, local, controller) in &mut q {
+    for (mut reaction, mut transform, animator, gt, mut ik, local, controller, down) in &mut q {
         let (left, tau) = reaction.stagger;
+        if down.is_some() {
+            // On the floor: a step asked for (a walk home) waits until it is up.
+            if reaction.stagger_velocity != Vec3::ZERO {
+                reaction.stagger_velocity = Vec3::ZERO;
+            }
+            continue;
+        }
         if left == Vec3::ZERO {
             if reaction.stagger_velocity != Vec3::ZERO {
                 reaction.stagger_velocity = Vec3::ZERO;

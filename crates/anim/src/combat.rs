@@ -30,7 +30,7 @@
 //!
 //! [`HitReaction::knock`]: crate::hit::HitReaction::knock
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use engine_core::prelude::*;
 use engine_world::animation::AnimationParams;
@@ -41,6 +41,7 @@ use crate::animator::{AnimationLibrary, AnimatorSettings};
 use crate::build::humanoid::Punch;
 use crate::hit::HitReaction;
 use crate::ik::{to_model, two_bone};
+use crate::knockdown::Knockdown;
 
 /// What a window does.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -154,8 +155,10 @@ impl AttackSet {
 
     /// Boxing on the humanoid's punches: jab (light) or cross (heavy) from neutral; jab →
     /// cross → hook → uppercut on light presses, a heavy press after a jab or cross goes
-    /// straight to the hook or the uppercut. Each steps in to its range (closer for hooks
-    /// and uppercuts) and the uppercut steps back out to sparring distance.
+    /// straight to the hook or the uppercut, and a heavy press after the hook throws
+    /// `uppercut_heavy`, a finisher hard enough to knock a person down. Each steps in to its
+    /// range (closer for hooks and uppercuts) and the uppercuts step back out to sparring
+    /// distance.
     pub fn boxing() -> Self {
         let mv = |p: Punch, starts_on: Option<&str>, links: &[(&str, Punch)]| {
             let (secs, land) = p.timing();
@@ -252,8 +255,33 @@ impl AttackSet {
                         ("attack_heavy", Punch::Uppercut),
                     ],
                 ),
-                mv(Punch::Hook, None, &[("attack_light", Punch::Uppercut)]),
+                {
+                    let mut hook = mv(Punch::Hook, None, &[("attack_light", Punch::Uppercut)]);
+                    hook.links.push(Link {
+                        input: "attack_heavy".into(),
+                        to: "uppercut_heavy".into(),
+                    });
+                    hook
+                },
                 mv(Punch::Uppercut, None, &[]),
+                // Everything behind it: the same punch, hard enough to put a person down
+                // (HitReaction::fall_beyond), freezing both for longer.
+                {
+                    let mut heavy = mv(Punch::Uppercut, None, &[]);
+                    heavy.name = "uppercut_heavy".into();
+                    for w in &mut heavy.windows {
+                        if let WindowKind::Hit {
+                            damage,
+                            impulse,
+                            hitstop,
+                            ..
+                        } = &mut w.kind
+                        {
+                            (*damage, *impulse, *hitstop) = (30.0, 95.0, 0.13);
+                        }
+                    }
+                    heavy
+                },
             ],
             block: Block::default(),
         }
@@ -500,6 +528,7 @@ pub(crate) fn run_attacks(
             &GlobalTransform,
             Option<&Animator>,
             Option<&AnimationParams>,
+            Option<&Knockdown>,
         )>,
         Query<(&mut Animator, Option<&mut HitReaction>)>,
     )>,
@@ -511,13 +540,19 @@ pub(crate) fn run_attacks(
     };
     // Where targets are: chest and head height and the guard, world space.
     let mut targets: HashMap<Entity, Target> = HashMap::new();
+    let mut downed: HashSet<Entity> = HashSet::new();
     {
         let attackers: Vec<Entity> = set.p0().iter().filter_map(|(_, a, ..)| a.target).collect();
         let q = set.p1();
         for t in attackers {
-            let Ok((gt, animator, params)) = q.get(t) else {
+            let Ok((gt, animator, params, down)) = q.get(t) else {
                 continue;
             };
+            // Knocked down: nothing to strike until it is up again.
+            if down.is_some() {
+                downed.insert(t);
+                continue;
+            }
             let at = |bone: &str, up: f64| -> DVec3 {
                 animator
                     .and_then(|a| a.skeleton.index_of(bone).map(|b| a.bone_world(gt, b).0))
@@ -566,14 +601,20 @@ pub(crate) fn run_attacks(
                 true
             }
         });
-        if let Some(p) = pressed {
-            attacker.buffered = Some((p, 0.0));
-        }
+        // An older press ages first, so a new one always gets this frame to start in, however
+        // long the frame (at 4 fps a frame outlasts the buffer).
         if let Some(b) = &mut attacker.buffered {
             b.1 += dt;
             if b.1 > attacker.buffer_secs {
                 attacker.buffered = None;
             }
+        }
+        if let Some(p) = pressed {
+            attacker.buffered = Some((p, 0.0));
+        }
+        // No pressing on a target that is down.
+        if attacker.target.is_some_and(|t| downed.contains(&t)) {
+            attacker.buffered = None;
         }
         let Some(moves) = sets.0.get(&attacker.set) else {
             continue;

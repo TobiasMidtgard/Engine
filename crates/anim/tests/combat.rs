@@ -4,7 +4,7 @@
 
 use engine_anim::combat::{AttackPhase, Attacker};
 use engine_anim::demo::spawn_humanoid;
-use engine_anim::{AnimationPlugin, Animator, HitReaction, build::humanoid::Outfit};
+use engine_anim::{AnimationPlugin, Animator, HitReaction, Knockdown, build::humanoid::Outfit};
 use engine_core::prelude::*;
 use engine_core::time::TimeSource;
 use engine_world::WorldPlugin;
@@ -229,4 +229,30 @@ fn a_raised_guard_blocks_the_combo_on_the_gloves() {
     assert!(bounced, "the boxer wasn't pushed back");
     // The partner's struck arm flinched.
     assert!(app.world.get::<HitReaction>(partner).is_some());
+}
+
+#[test]
+fn a_heavy_press_after_the_hook_finishes_hard_and_a_downed_target_is_left_alone() {
+    let (mut app, boxer, partner) = ring(true, false);
+    let (moves, hits, _) = fight(
+        &mut app,
+        boxer,
+        3.5,
+        &[
+            (0.1, "attack_light"),
+            (0.35, "attack_light"),
+            (0.8, "attack_light"),
+            (1.3, "attack_heavy"),
+        ],
+    );
+    assert_eq!(moves, ["jab", "cross", "hook", "uppercut_heavy"]);
+    assert_eq!(hits, 4, "only {hits} of 4 punches landed");
+    // On the floor (no physics here, so knocked down by hand): presses are dropped.
+    app.world.entity_mut(partner).insert(Knockdown::default());
+    let (moves, ..) = fight(&mut app, boxer, 1.0, &[(0.1, "attack_light")]);
+    assert!(moves.is_empty(), "attacked a downed target: {moves:?}");
+    // Up again: back at it.
+    app.world.entity_mut(partner).remove::<Knockdown>();
+    let (moves, ..) = fight(&mut app, boxer, 1.0, &[(0.1, "attack_light")]);
+    assert_eq!(moves, ["jab"]);
 }

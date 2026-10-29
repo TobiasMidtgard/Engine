@@ -33,7 +33,7 @@ use engine_render::{
 };
 use engine_world::animation::{AnimationParams, BodyRequest};
 use engine_world::character::{Ancestry, AppearanceRequest};
-use engine_world::physics::PhysicsQueries;
+use engine_world::physics::{Collider, PhysicsQueries, RigidBody};
 use engine_world::{DamageEvent, DamageKind, FocusPoints, Ground, SimulationRange};
 use serde_json::{Value, json};
 
@@ -380,6 +380,10 @@ impl DemoStep {
         }
     }
 }
+
+/// How long the boxer's and sparring partner's routine takes, s: a combo that knocks the
+/// partner back, then one that knocks them down.
+const SPARRING_PERIOD: f32 = 13.0;
 
 /// How fast a [`DemoStep::home`] walk back comes (time constant, s): slower than a blow, so
 /// the feet shuffle.
@@ -1467,6 +1471,14 @@ pub const VIEWS: &[DemoView] = &[
         at: 1.45,
     },
     DemoView {
+        key: "paddock_knockdown",
+        name: "A heavy uppercut knocks the sparring partner down, braced; they get up",
+        eye: [-3.0, 1.4, 0.2],
+        target: [-6.0, 0.7, 0.2],
+        hour: 15.0,
+        at: 7.4,
+    },
+    DemoView {
         key: "paddock_sprint_start",
         name: "Driving off into a sprint, leaning into it",
         eye: [-18.6, 1.3, 7.8],
@@ -1917,7 +1929,17 @@ fn build_paddock(world: &mut World, origin: DVec3) -> DemoEntities {
 
     // Sparring partner: in a boxer's guard that blocks the first punches of the boxer's combo,
     // struck in turn on the side of the head and the chin, the stomach and the back of a
-    // shoulder, flinching away from each blow.
+    // shoulder, flinching away from each blow; every second combo ends in a heavy uppercut
+    // that knocks them down, and they get up and come back to their mark.
+    // The floor under the ring, flush with the sand (the terrain may have no collider here),
+    // for a knocked-down partner to land on.
+    let floor = Transform::from_translation(at(-6.0, -0.25, 0.5));
+    world.spawn((
+        floor,
+        GlobalTransform::from(floor),
+        RigidBody::fixed(),
+        Collider::cuboid(Vec3::new(4.0, 0.25, 4.0)),
+    ));
     let sparring = spawn_humanoid(
         world,
         humanoid::Outfit::Shirt,
@@ -1927,7 +1949,7 @@ fn build_paddock(world: &mut World, origin: DVec3) -> DemoEntities {
     world.entity_mut(sparring).insert((
         Name::new("Sparring partner"),
         DemoScript {
-            period: 6.0,
+            period: SPARRING_PERIOD,
             steps: vec![
                 DemoStep::param(0.05, "guarding", 1.0),
                 // The boxer's combo comes in between 0.6 and 2 s (see below): the guard takes
@@ -1939,6 +1961,12 @@ fn build_paddock(world: &mut World, origin: DVec3) -> DemoEntities {
                 DemoStep::hit(3.8, Vec3::new(0.02, 1.1, -0.15), Vec3::new(0.0, 0.0, 32.0)),
                 DemoStep::hit(5.0, Vec3::new(0.18, 1.42, 0.08), Vec3::new(0.0, 0.0, -24.0)),
                 DemoStep::home(5.4),
+                // The second combo (from 6.6 s): only the jab is blocked; the cross and the
+                // hook land and the heavy uppercut knocks the partner down. Up again, guard
+                // up and back to the mark.
+                DemoStep::param(6.85, "guarding", 0.0),
+                DemoStep::param(12.0, "guarding", 1.0),
+                DemoStep::home(12.2),
             ],
             time: 0.0,
             home: None,
@@ -1959,7 +1987,7 @@ fn build_paddock(world: &mut World, origin: DVec3) -> DemoEntities {
         crate::combat::Attacker::new("boxing", Some(sparring)),
         HitReaction::default(),
         DemoScript {
-            period: 6.0,
+            period: SPARRING_PERIOD,
             steps: vec![
                 DemoStep::param(0.05, "guarding", 1.0),
                 DemoStep::trigger(0.45, "attack_light"),
@@ -1968,6 +1996,12 @@ fn build_paddock(world: &mut World, origin: DVec3) -> DemoEntities {
                 DemoStep::trigger(1.62, "attack_light"),
                 // Back to the start line once the combo has carried it after the partner.
                 DemoStep::home(3.0),
+                // Again, finishing with the heavy uppercut (a heavy press after the hook).
+                DemoStep::trigger(6.45, "attack_light"),
+                DemoStep::trigger(6.72, "attack_light"),
+                DemoStep::trigger(7.15, "attack_light"),
+                DemoStep::trigger(7.62, "attack_heavy"),
+                DemoStep::home(9.0),
             ],
             time: 0.0,
             home: None,
