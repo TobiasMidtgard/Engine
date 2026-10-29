@@ -22,6 +22,8 @@ use crate::state::{SharedWater, WaterState};
 /// motion: spawned in place, teleported, or shifted with the world before its transform caught
 /// up. It throws no spray and digs no wake for that step.
 const TELEPORT_SPEED: f32 = 150.0;
+/// A position unchanged this long, seconds, is standing still (not just between frames).
+const STILL_AFTER_S: f32 = 0.25;
 /// Strouhal number of a body in the water: it sheds a pair of eddies every 1/0.2 = 5 body
 /// widths it travels (a Kármán vortex street).
 const STROUHAL: f32 = 0.2;
@@ -36,6 +38,49 @@ const SPLASH_SPEED: f32 = 2.0;
 /// Spray owed by one source is sent as a `WaterSplash` once it reaches this much water, kg
 /// (a few puffs a second for a flapping sheet, not one per patch per step).
 const SPRAY_PUFF_KG: f32 = 0.15;
+/// Bow spray stops growing past this hull speed through the water, m/s (see the bow spray).
+const SPRAY_TOP_MS: f32 = 12.0;
+/// The most water one puff of bow spray carries, kg: a puff goes out every step or two, so
+/// more makes a standing cloud rather than a sheet off the bow.
+const SPRAY_PUFF_MAX_KG: f32 = 8.0;
+
+/// What [`disturbance_system`] reads of each interactor: its place, its time scale and, for a
+/// physics body, its velocity.
+type Interactors = (
+    Entity,
+    &'static GlobalTransform,
+    &'static mut WaterInteractor,
+    Option<&'static LocalTimeScale>,
+    Option<&'static engine_world::physics::Velocity>,
+);
+
+/// How fast `it`, now at `p`, moves: a physics body's own velocity, else its position's change
+/// over the time since that last changed. Fixed steps run several to a frame and the transform
+/// moves once a frame, so dividing a frame's move by one step made a boat look several times as
+/// fast as it went at low frame rates (and throw a wall of spray); the steps between moves keep
+/// the last velocity seen.
+fn moved(it: &mut WaterInteractor, p: DVec3, step: f32, body: Option<Vec3>) -> Vec3 {
+    it.since += step;
+    let Some(last) = it.last else {
+        it.last = Some(p);
+        it.since = 0.0;
+        it.moving = Vec3::ZERO;
+        return body.unwrap_or(Vec3::ZERO);
+    };
+    if p != last {
+        let v = ((p - last) / it.since as f64).as_vec3();
+        it.moving = if v.length() < TELEPORT_SPEED {
+            v
+        } else {
+            Vec3::ZERO
+        };
+        it.last = Some(p);
+        it.since = 0.0;
+    } else if it.since > STILL_AFTER_S {
+        it.moving = Vec3::ZERO;
+    }
+    body.unwrap_or(it.moving)
+}
 
 /// Something that pushes the water as it moves through it: a swimmer, a wading animal, a
 /// boat's hull, a dragging rope. Leaves wakes and rings, and splashes on entry.
@@ -53,6 +98,12 @@ pub struct WaterInteractor {
     /// Last position seen (managed by the water module).
     #[serde(skip)]
     pub last: Option<DVec3>,
+    /// Seconds since that position was seen, and the velocity it was last seen moving at
+    /// (managed): a transform moves once a frame however many fixed steps the frame takes.
+    #[serde(skip)]
+    pub since: f32,
+    #[serde(skip)]
+    pub moving: Vec3,
     /// Was touching the water last step (managed).
     #[serde(skip)]
     pub wet: bool,
@@ -79,6 +130,8 @@ impl Default for WaterInteractor {
             wake: 1.0,
             length: 0.0,
             last: None,
+            since: 0.0,
+            moving: Vec3::ZERO,
             wet: false,
             spray: 0.0,
             trough_s: 0.0,
@@ -138,12 +191,7 @@ pub fn disturbance_system(
     focus: Res<FocusPoints>,
     range: Res<SimulationRange>,
     weather: Option<Res<WeatherState>>,
-    mut interactors: Query<(
-        Entity,
-        &GlobalTransform,
-        &mut WaterInteractor,
-        Option<&LocalTimeScale>,
-    )>,
+    mut interactors: Query<Interactors>,
     showers: Query<(&GlobalTransform, &RainShower)>,
     mut contacts: MessageReader<GroundContact>,
     mut pushes: MessageReader<WaterDisturbance>,
@@ -166,7 +214,7 @@ pub fn disturbance_system(
         had_hulls = !state.hulls.is_empty();
 
         // Swimmers, boats, wading animals.
-        for (entity, gt, mut it, local) in &mut interactors {
+        for (entity, gt, mut it, local, body) in &mut interactors {
             let p = gt.translation();
             let mut resting = it.resting;
             if crate::rests(&range, &focus, p, it.radius as f64, &mut resting) {
@@ -179,7 +227,7 @@ pub fn disturbance_system(
             }
             it.resting = false;
             let step = time.delta_for(local).max(1e-5);
-            let last = it.last.replace(p);
+            let v = moved(&mut it, p, step, body.map(|b| b.linear));
             let Some(water) = state.sample(p) else {
                 it.wet = false;
                 continue;
@@ -189,10 +237,6 @@ pub fn disturbance_system(
                 ((water.surface_height - (p.y - r as f64)) as f32 / (2.0 * r)).clamp(0.0, 1.0);
             let touching = submerged > 0.0 && submerged < 1.0
                 || (submerged >= 1.0 && (water.surface_height - p.y) < r as f64 * 1.5);
-            let v = last
-                .map(|l| ((p - l) / step as f64).as_vec3())
-                .filter(|v| v.length() < TELEPORT_SPEED)
-                .unwrap_or(Vec3::ZERO);
             // What makes the wake is how it moves through the water: a wader standing in a
             // stream parts the current as one walking through still water does.
             let through = v - water.velocity;
@@ -226,8 +270,12 @@ pub fn disturbance_system(
                     * (1.0 - (2.0 * submerged - 1.0).abs()).max(0.35);
                 // Fast hulls throw bow spray: sent out in puffs as `WaterSplash` so particles
                 // and audio can show and play it.
-                let fast = speed - 2.5;
-                if fast > 0.0 && it.wake >= 1.0 {
+                // Past [`SPRAY_TOP_MS`] the sheet thrown off the bow no longer grows: it breaks
+                // into finer drops, and a hull moving that fast is a glitch more often than not.
+                // Only a hull planing along the surface: a log tumbling down a fall or a
+                // swimmer isn't one.
+                let fast = speed.min(SPRAY_TOP_MS) - 2.5;
+                if fast > 0.0 && it.wake >= 1.0 && it.length > r && v.y.abs() < 2.0 {
                     it.spray += 1000.0 * r * r * fast * fast * 0.004 * it.wake * step;
                     if it.spray > 2.0 {
                         let dir = Vec3::new(through.x, 0.0, through.z) / speed;
@@ -236,13 +284,14 @@ pub fn disturbance_system(
                         let at = p + (dir * r * 1.6 + side * r * 0.4).as_dvec3();
                         // Bow spray flies out sideways, faster than the hull goes; thrown gently
                         // up, readers would take it for a waterfall's mist.
+                        let speed = speed.min(SPRAY_TOP_MS);
                         splashes.push(WaterSplash {
                             position: DVec3::new(at.x, water.surface_height, at.z),
                             velocity: dir * speed * 0.5
                                 + side * (speed * 0.6 + 1.5)
                                 + Vec3::Y * (1.0 + speed * 0.3),
                             radius: r * 0.5,
-                            mass_kg: std::mem::take(&mut it.spray),
+                            mass_kg: std::mem::take(&mut it.spray).min(SPRAY_PUFF_MAX_KG),
                             source: Some(entity),
                         });
                     }
@@ -572,5 +621,34 @@ pub fn disturbance_system(
     }
     for s in splashes {
         splash_out.write(s);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_hull_moved_once_a_frame_goes_its_real_speed() {
+        // 6 m/s, three fixed steps of 1/60 s to a frame, the transform moving once a frame.
+        let mut it = WaterInteractor::new(0.9);
+        let mut p = DVec3::ZERO;
+        let mut seen = Vec::new();
+        for _frame in 0..10 {
+            p.x += 6.0 * 3.0 / 60.0;
+            for _ in 0..3 {
+                seen.push(moved(&mut it, p, 1.0 / 60.0, None).x);
+            }
+        }
+        for v in &seen[3..] {
+            assert!((v - 6.0).abs() < 0.05, "{seen:?}");
+        }
+        // Stopped: still after a moment.
+        for _ in 0..30 {
+            moved(&mut it, p, 1.0 / 60.0, None);
+        }
+        assert_eq!(moved(&mut it, p, 1.0 / 60.0, None), Vec3::ZERO);
+        // A physics body says how fast it goes.
+        assert_eq!(moved(&mut it, p, 1.0 / 60.0, Some(Vec3::X)), Vec3::X);
     }
 }

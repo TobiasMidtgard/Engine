@@ -92,12 +92,18 @@ pub fn spawn_pools(commands: &mut Commands, at: DVec3) {
     for (c, yaw, name) in pools() {
         let ground = at + DVec3::new(c.x as f64, TERRACE as f64, c.y as f64);
         let turn = Quat::from_rotation_y(yaw);
-        spawn_prop(
+        let pool = spawn_prop(
             commands,
             "Pool",
             Transform::from_translation(ground).with_rotation(turn),
             liner.clone(),
         );
+        // Walls and paving to stand on, the basin left open.
+        commands
+            .entity(pool)
+            .insert(engine_world::physics::FitCollider::new(
+                engine_world::physics::Fit::Mesh,
+            ));
         let optics = WaterOptics::preset(name).unwrap_or_default();
         commands.spawn((
             Name::new(format!("Pool: {name}")),

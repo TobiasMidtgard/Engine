@@ -354,6 +354,14 @@ fn detail_height(p: vec2<f32>, scale: f32, turn: vec2<f32>, spacing: f32) -> f32
     return h * scale;
 }
 
+// How much of a camera-centred grid (the ripples, the dispersive surface's levels) shows at
+// `uv` (0..1 across it): all of it in the middle, fading out over the outer third of a round
+// patch. A square cut at the edge read from the air as a sharp-edged block of detailed water
+// under a low-flying craft (playtest 2026-10-29 item 7).
+fn grid_fade(uv: vec2<f32>) -> f32 {
+    return 1.0 - smoothstep(0.65, 0.98, length(uv - vec2<f32>(0.5)) * 2.0);
+}
+
 // Interactive ripples at a camera-relative x/z: (height, foam, dh/dx, dh/dz), faded at the edge.
 fn ripple_at(rel_xz: vec2<f32>) -> vec4<f32> {
     if (water.g.ripple.w < 0.5) { return vec4<f32>(0.0); }
@@ -362,15 +370,13 @@ fn ripple_at(rel_xz: vec2<f32>) -> vec4<f32> {
     if (water.g.coarse.w > 0.5) {
         let cuv = (rel_xz - water.g.coarse.xy) / water.g.coarse.z;
         if (all(cuv > vec2<f32>(0.0)) && all(cuv < vec2<f32>(1.0))) {
-            let cedge = min(min(cuv.x, cuv.y), min(1.0 - cuv.x, 1.0 - cuv.y));
             let s = textureSampleLevel(coarse_tex, linear_clamp, cuv, 0.0);
-            long = vec4<f32>(s.x, 0.0, s.y, s.z) * smoothstep(0.0, 0.08, cedge);
+            long = vec4<f32>(s.x, 0.0, s.y, s.z) * grid_fade(cuv);
         }
     }
     let uv = (rel_xz - water.g.ripple.xy) / water.g.ripple.z;
     if (any(uv <= vec2<f32>(0.0)) || any(uv >= vec2<f32>(1.0))) { return long; }
-    let edge = min(min(uv.x, uv.y), min(1.0 - uv.x, 1.0 - uv.y));
-    let fade = smoothstep(0.0, 0.08, edge);
+    let fade = grid_fade(uv);
     var r = textureSampleLevel(ripple_tex, linear_clamp, uv, 0.0);
     if (water.g.detail.w > 0.5) {
         // The dispersive surface's short waves, with the grid's foam.
@@ -386,9 +392,7 @@ fn current_at(rel_xz: vec2<f32>) -> vec4<f32> {
     if (water.g.ripple.w < 0.5) { return vec4<f32>(0.0); }
     let uv = (rel_xz - water.g.ripple.xy) / water.g.ripple.z;
     if (any(uv <= vec2<f32>(0.0)) || any(uv >= vec2<f32>(1.0))) { return vec4<f32>(0.0); }
-    let edge = min(min(uv.x, uv.y), min(1.0 - uv.x, 1.0 - uv.y));
-    let fade = smoothstep(0.0, 0.08, edge);
-    return textureSampleLevel(current_tex, linear_clamp, uv, 0.0) * fade;
+    return textureSampleLevel(current_tex, linear_clamp, uv, 0.0) * grid_fade(uv);
 }
 
 // Rain falling at a camera-relative x/z, mm/h.

@@ -35,7 +35,7 @@ use engine_core::math::noise;
 use engine_core::prelude::*;
 use engine_core::tasks::{ComputeTaskPool, par_chunks_mut};
 use engine_render::{Mesh, Vertex};
-use engine_world::physics::Velocity;
+use engine_world::physics::{Fit, FitCollider, Velocity};
 use engine_world::{ContactKind, GroundContact, ProjectileTrace, WorldImpulse, WorldShift};
 
 use crate::boat::Boat;
@@ -953,23 +953,26 @@ pub fn spawn_demo_with(commands: &mut Commands, origin: DVec3, options: DemoOpti
     // the pipe runs on into the bank.
     let culvert = OUTLET * (DITCH_TO - 0.1);
     let invert = tarn_height(culvert.x, culvert.y) - 0.05;
-    spawn_prop(
+    let culvert = spawn_prop(
         commands,
         "Culvert",
         Transform::from_translation(at(culvert.x, invert + 0.38, culvert.y))
             .with_rotation(Quat::from_rotation_y(PI * 0.75)),
         art::culvert(),
     );
+    // Solid as drawn, the pipe left open (playtest 2026-10-29 item 15: props without hitboxes).
+    commands.entity(culvert).insert(FitCollider::new(Fit::Mesh));
 
     // Boulders: by the falls and down the ravine, on the rim, and in the shallows.
     for b in art::boulders() {
-        spawn_prop(
+        let boulder = spawn_prop(
             commands,
             "Boulder",
             Transform::from_translation(origin + b.at.as_dvec3())
                 .with_rotation(Quat::from_rotation_y(b.yaw)),
             b.parts,
         );
+        commands.entity(boulder).insert(FitCollider::new(Fit::Hull));
     }
 
     // The jetty: decking on piles, from the bank out over the deep water.
@@ -1165,7 +1168,7 @@ pub fn spawn_demo_with(commands: &mut Commands, origin: DVec3, options: DemoOpti
         next_volley: 2.5,
         shots_left: 0,
         next_shot: 0.0,
-        next_charge: 6.0,
+        next_charge: 30.0,
         next_step: 0.0,
         step_left: false,
         rng: Rng::new(0x1A4E),
@@ -1182,6 +1185,16 @@ pub fn unload_demo(world: &mut World) {
 }
 
 /// Signed angle (radians) to turn about +y from `from` to `to` (horizontal parts).
+/// The demo motorboat's cruising speed, m/s (about 12 knots: a runabout on a small lake).
+const CRUISE_MS: f32 = 6.0;
+
+/// How much of its thrust the helm gives at `forward` m/s: full below cruising speed, easing
+/// off toward it and backing off past it. Without it the boat ran up to 20 m/s on full
+/// throttle, the physics backend's hull drag being light, and threw a wall of spray.
+fn throttle(forward: f32) -> f32 {
+    ((CRUISE_MS - forward) / 1.5).clamp(-0.5, 1.0)
+}
+
 fn yaw_between(from: Vec3, to: Vec3) -> f32 {
     let cross = from.z * to.x - from.x * to.z;
     let dot = from.x * to.x + from.z * to.z;
@@ -1258,7 +1271,8 @@ pub fn demo_system(
                     if in_water {
                         let lin = Vec3::new(v.linear.x, 0.0, v.linear.z);
                         let side = lin - flat * flat.dot(lin);
-                        drive.0 = flat * thrust - side * boat.mass_kg * 1.8;
+                        let gas = throttle(lin.dot(flat));
+                        drive.0 = flat * thrust * gas - side * boat.mass_kg * 1.8;
                         drive.1.y = boat.inertia.y * (10.0 * err - 3.0 * v.angular.y);
                     }
                     if boat.drive != drive {
@@ -1276,9 +1290,9 @@ pub fn demo_system(
                 let in_water = fl.submerged > 0.05;
                 if in_water {
                     let flat = Vec3::new(fwd.x, 0.0, fwd.z).normalize_or_zero();
-                    fl.force += flat * thrust;
-                    // The keel: water resists sliding sideways.
                     let v = fl.velocity;
+                    fl.force += flat * thrust * throttle(flat.dot(v));
+                    // The keel: water resists sliding sideways.
                     let side = Vec3::new(v.x, 0.0, v.z) - flat * flat.dot(Vec3::new(v.x, 0.0, v.z));
                     fl.force -= side * mass * 1.8;
                     // Firm steering: the hull's turning drag needs a good rudder to hold a
@@ -1388,9 +1402,10 @@ pub fn demo_system(
         });
     }
 
-    // A depth charge off the far side of the swimming area.
+    // A depth charge off the far side of the swimming area, now and then: every 11 s its
+    // 19 m column hung over most pictures of the tarn.
     if t >= demo.next_charge {
-        demo.next_charge = t + 11.0;
+        demo.next_charge = t + 40.0;
         blasts.write(WorldImpulse {
             center: origin + DVec3::new(-9.0, (LAKE_LEVEL - 2.2) as f64, -6.0),
             radius: 7.0,

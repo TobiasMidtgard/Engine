@@ -6,7 +6,7 @@
 //!
 //! `seconds` of simulation run before the first picture (default 12); `views` is a
 //! comma-separated subset of: overview, falls, shore, under, pond, wake, aerial, swirl, ditch,
-//! cascade, crevice, ford, pools, pools_near, pools_dark.
+//! cascade, crevice, ford, pools, pools_near, pools_dark, jetty, grazing, low_pass.
 //!
 //! The dispersive ripples run on the CPU while the simulation runs without drawing, and the
 //! GPU picks them up for the pictures (`ENGINE_WATER_CPU_RIPPLES=1` draws the ripple grid's
@@ -167,6 +167,9 @@ const VIEWS: &[(&str, [f64; 3], [f64; 3])] = &[
     // from the far shore, and the crag's foot from the cove.
     ("jetty", [4.6, 7.4, 18.0], [-14.0, 8.0, -20.0]),
     ("grazing", [-27.0, 6.4, 12.0], [18.0, 7.0, -6.0]),
+    // Low over the tarn as a craft flies it, the ripple grid round the camera: its edge must
+    // not show as a block of detailed water (playtest 2026-10-29 item 7).
+    ("low_pass", [-10.0, 22.0, 34.0], [-4.0, 5.5, -6.0]),
 ];
 
 fn main() {

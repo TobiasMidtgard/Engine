@@ -17,6 +17,7 @@ pub mod shelter;
 pub mod shift;
 pub mod shore;
 pub mod sim;
+pub mod spill;
 pub mod state;
 pub mod surface;
 pub mod waves;
@@ -141,6 +142,7 @@ impl Plugin for WaterPlugin {
                     puddles::puddle_system,
                     shore::shore_wetness_system,
                     shelter::shelter_system,
+                    spill::spill_audit_system,
                     sim::diagnostics_system,
                 )
                     .chain()
