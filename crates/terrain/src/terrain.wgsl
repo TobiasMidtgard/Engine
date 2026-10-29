@@ -35,6 +35,10 @@ struct Maps {
     wear_u: vec4<f32>,      // the window's column axis, cells per side
     wear_v: vec4<f32>,      // the window's row axis, 1 when paths are drawn
     wear_far: vec4<f32>,    // the coarse window: corner relative to the camera, cell size
+    paint_origin: vec4<f32>, // paint map: texel (0, 0) center relative to the camera, texel size
+    paint_u: vec4<f32>,      // its column axis, texels per side
+    paint_v: vec4<f32>,      // its row axis, 1 when there is a map
+    paint_up: vec4<f32>,     // the home spot's up
 };
 
 const C_LUSH: u32 = 0u;
@@ -65,6 +69,9 @@ struct Print {
 @group(1) @binding(12) var<storage, read> prints: array<Print>;
 // Planets' looks from afar (far_look.rs): sRGB albedo, glowing melt in alpha; a layer each.
 @group(1) @binding(13) var far_tex: texture_2d_array<f32>;
+// The hand-made ground's paint map (`paint_map.rs`): layer 0 = paint layer / 255, weight,
+// tint amount, painted; layer 1 = sqrt of the tint's linear color.
+@group(1) @binding(14) var paint_tex: texture_2d_array<f32>;
 
 // Must match `MaterialsGpu` in render.rs.
 struct Materials {
@@ -1225,6 +1232,55 @@ fn paint_weights(in: VertexOut) -> array<f32, 11> {
     );
 }
 
+// The hand-made ground's paint at a pixel from the paint map: layer weights (index 0 unused),
+// tint (linear color, amount) and how much the map covers the pixel (0 outside it).
+struct MapPaint {
+    w: array<f32, 11>,
+    tint: vec4<f32>,
+    cover: f32,
+};
+
+fn map_paint(rel: vec3<f32>) -> MapPaint {
+    var out: MapPaint;
+    if (maps.paint_v.w < 0.5) {
+        return out;
+    }
+    let d = rel - maps.paint_origin.xyz;
+    // Only near the home spot's ground (not another planet lined up with it).
+    if (abs(dot(d, maps.paint_up.xyz)) > 4000.0) {
+        return out;
+    }
+    let size = maps.paint_u.w;
+    let f = vec2<f32>(dot(d, maps.paint_u.xyz), dot(d, maps.paint_v.xyz)) / maps.paint_origin.w;
+    if (any(f < vec2(0.0)) || any(f > vec2(size - 1.0))) {
+        return out;
+    }
+    // Bilinear per layer: each texel holds one layer, so the four taps add into the weights.
+    let i0 = vec2<i32>(floor(f));
+    let t = fract(f);
+    var color = vec3<f32>(0.0);
+    var amount = 0.0;
+    for (var k = 0u; k < 4u; k++) {
+        let o = vec2<i32>(i32(k & 1u), i32(k >> 1u));
+        let wx = select(1.0 - t.x, t.x, o.x == 1);
+        let wy = select(1.0 - t.y, t.y, o.y == 1);
+        let b = wx * wy;
+        let p = textureLoad(paint_tex, i0 + o, 0, 0);
+        let c = textureLoad(paint_tex, i0 + o, 1, 0).rgb;
+        let layer = u32(round(p.r * 255.0));
+        if (layer >= 1u && layer <= 10u) {
+            out.w[layer] += b * p.g;
+        }
+        color += b * p.b * c * c;
+        amount += b * p.b;
+    }
+    out.tint = vec4<f32>(color / max(amount, 1e-4), amount);
+    // Fade in from the map's rim (8 texels).
+    let rim = min(min(f.x, f.y), min(size - 1.0 - f.x, size - 1.0 - f.y));
+    out.cover = smoothstep(0.0, 8.0, rim);
+    return out;
+}
+
 // Painted layer -> ground material.
 fn paint_material(layer: u32) -> u32 {
     switch (layer) {
@@ -1616,10 +1672,26 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     let temp_c = in.climate.y;
     let mare = in.climate.z;
     let altitude = in.climate.w;
-    let paint_w = in.ocean_paint.y;
+    var paint_w = in.ocean_paint.y;
     let variety = in.ocean_paint.z;
     let patches = in.ocean_paint.w;
     var pw = paint_weights(in);
+    var tint = in.tint;
+    // Beyond the near patches the vertices are too far apart for roads and field edges: the
+    // paint map draws them per pixel (blended in by vertex spacing, so patches don't seam).
+    let mp = map_paint(in.rel);
+    let by_map = mp.cover * smoothstep(1.2, 2.5, in.lod.x);
+    if (by_map > 0.0) {
+        var sum = 0.0;
+        for (var l = 1u; l < 11u; l++) {
+            pw[l] = mix(pw[l], mp.w[l], by_map);
+            sum += pw[l];
+        }
+        paint_w = saturate(sum);
+        let a = mix(tint.a, mp.tint.a, by_map);
+        let c = tint.rgb * tint.a * (1.0 - by_map) + mp.tint.rgb * mp.tint.a * by_map;
+        tint = vec4<f32>(c / max(a, 1e-4), a);
+    }
     let tp = tiling_pos(in.rel);
     let dist = length(in.rel);
     // Ridge outlines: where a crest hides the slope behind it, a sliver of that back slope
@@ -1924,9 +1996,9 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     // keeps its own color instead of turning white in the shape of the vertex grid.
     // (Far vertices carry the mean over their cell, so a tint partly snow is part white: that
     // share is snow, and the rest of the color is the ground's.)
-    let tint_white = smoothstep(0.22, 0.75, min(in.tint.r, min(in.tint.g, in.tint.b)));
-    let tint_ground = clamp((in.tint.rgb - SNOW_TINT * tint_white) / max(1.0 - tint_white, 0.05), vec3(0.0), vec3(1.0));
-    let tint_a = in.tint.a * (1.0 - tint_white);
+    let tint_white = smoothstep(0.22, 0.75, min(tint.r, min(tint.g, tint.b)));
+    let tint_ground = clamp((tint.rgb - SNOW_TINT * tint_white) / max(1.0 - tint_white, 0.05), vec3(0.0), vec3(1.0));
+    let tint_a = tint.a * (1.0 - tint_white);
     if (tint_a > 0.001) {
         for (var i = 0u; i < MAT_COUNT; i++) {
             if (i != M_SNOW && i != M_MUD) { col[i] = mix(col[i], tint_ground, tint_a); }
@@ -1983,7 +2055,7 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     // Hand-painted pasture (its tint sets one color) still lies across the land the way grass
     // grows: lusher and darker in hollows, sun-dried on crests and knolls, in drifts tens to
     // hundreds of meters across. (Natural grass has this in its own color already.)
-    let lay = ((meadow_v - 0.5) * 2.5 * meadow_fade + (macro_v - 0.5) * 1.2 * macro_fade + (crest - gully) * 0.8) * in.tint.a;
+    let lay = ((meadow_v - 0.5) * 2.5 * meadow_fade + (macro_v - 0.5) * 1.2 * macro_fade + (crest - gully) * 0.8) * tint.a;
     grass_col = mix(grass_col, straw, saturate(lay) * 0.5);
     grass_col *= mix(vec3<f32>(1.0), vec3<f32>(0.7, 0.85, 0.95), saturate(-lay));
     col[M_GRASS] = grass_col;
@@ -2255,7 +2327,7 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     // on far mountains: on its own it lies in straight-edged blocks across faces too steep to
     // hold it. Per pixel it settles like the climate's snow: off the steep faces, deeper in the
     // hollows, thinner on the crests, its edges ragged instead of following the triangles.
-    let hand_snow = max(pw[2], tint_white * smoothstep(0.0, 0.5, in.tint.a));
+    let hand_snow = max(pw[2], tint_white * smoothstep(0.0, 0.5, tint.a));
     let hand_edge = ((patch_v - 0.5) * 0.6 * macro_fade + (macro_v - 0.5) * 0.5 * macro_fade
         + (mid_v - 0.5) * 0.3 * clump_fade + gully * 0.3 - crest * 0.2 + (far_n.x - 0.5) * 0.8 * far)
         * (0.25 + 3.0 * hand_snow * (1.0 - hand_snow));
@@ -2605,7 +2677,7 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     // rivers; not on the sea, ice, deserts or mountains, nor on hand-made ground.
     if (planet.params4.x > 0.0) {
         let night = smoothstep(0.03, -0.1, dot(up, to_sun)) * smoothstep(1500.0, 6000.0, dist);
-        let hab = planet.params4.x * (1.0 - ocean) * (1.0 - smoothstep(0.0, 0.3, in.tint.a))
+        let hab = planet.params4.x * (1.0 - ocean) * (1.0 - smoothstep(0.0, 0.3, tint.a))
             * smoothstep(-6.0, 4.0, temp_c) * (1.0 - smoothstep(27.0, 35.0, temp_c))
             * mix(0.15, 1.0, smoothstep(0.05, 0.3, moisture + in.water.z))
             * (1.0 - smoothstep(800.0, 2500.0, altitude)) * (1.0 - smoothstep(0.12, 0.3, slope))

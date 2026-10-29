@@ -78,10 +78,14 @@ impl PaintCache {
         }
     }
 
-    /// The paint at (x, z), worked out as finely as the camera's distance asks.
+    /// The paint at (x, z), worked out as finely as the terrain asks (its paint map) or else as
+    /// the camera's distance asks.
     pub fn paint(&self, x: f64, z: f64) -> OverlayPaint {
-        let eye = eye();
-        self.paint_for(x, z, (x - eye.x).hypot(z - eye.z) * FOOTPRINT_PER_M)
+        let footprint = engine_terrain::paint_footprint().unwrap_or_else(|| {
+            let eye = eye();
+            (x - eye.x).hypot(z - eye.z) * FOOTPRINT_PER_M
+        });
+        self.paint_for(x, z, footprint)
     }
 
     /// The paint at (x, z) for a tap standing for `footprint` meters of ground.

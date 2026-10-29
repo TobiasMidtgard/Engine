@@ -15,6 +15,7 @@ pub mod lights;
 pub mod lod;
 pub mod materials;
 pub mod noise;
+pub mod paint_map;
 pub mod palette;
 pub mod render;
 pub mod rivers;
@@ -41,6 +42,7 @@ pub use edits::{EditLayer, LocalEdit, OverlayPaint, PAINT_NAMES, paint_index};
 pub use far_look::{FarLook, FarLookMap};
 pub use ground::GroundSurface;
 pub use landmarks::{Landmark, LandmarkField, LandmarkKind, landmarks_near};
+pub use paint_map::{PaintMap, paint_footprint};
 pub use palette::TerrainPalette;
 pub use shape::{
     Climate, FlatPad, HeightOverlay, OverlayPaintFn, PlanetShape, ShapeSample, dir_from_lat_lon,

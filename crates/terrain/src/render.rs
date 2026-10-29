@@ -24,6 +24,7 @@ use crate::far_look::{FarLook, FarLookPages};
 use crate::lights::{CityLights, NO_PAGE, NightPages};
 use crate::lod::{Lod, SelectInput};
 use crate::materials::{self, BakedMaterials, MATERIAL_COUNT};
+use crate::paint_map::{PAINT_MAP_HALF_M, PAINT_MAP_TEXEL_M, PaintMap};
 use crate::wear::{PathWear, TILE, WearSettings};
 use crate::{TerrainRuntime, TerrainSettings, Terrains};
 
@@ -172,6 +173,15 @@ struct MapsGpu {
     wear_v: [f32; 4],
     /// The coarse window of paths: its corner relative to the camera, cell size.
     wear_far: [f32; 4],
+    /// The hand-made ground's paint map ([`PaintMap`]): texel (0, 0)'s center relative to
+    /// the camera, texel size.
+    paint_origin: [f32; 4],
+    /// Its column axis (world), texels per side.
+    paint_u: [f32; 4],
+    /// Its row axis (world), 1 when there is a map.
+    paint_v: [f32; 4],
+    /// The home spot's up (world), unused.
+    paint_up: [f32; 4],
 }
 
 /// A print the shader draws sharp. Matches `Print` in terrain.wgsl.
@@ -234,7 +244,68 @@ struct Gpu {
     night: NightPages,
     /// Planets' looks from afar (see [`FarLook`](crate::FarLook)).
     far_looks: FarLookPages,
+    /// The hand-made ground's paint ([`PaintMap`]): paint and tint layers (RGBA8), and the
+    /// map's texel (0, 0) center in the overlay's frame, texel size and texels per side.
+    paint_tex: (wgpu::Texture, wgpu::TextureView),
+    paint_map: Option<([f64; 2], f64, u32)>,
+    /// The overlay paint baked or being baked (its function's address), and the bake.
+    paint_key: Option<usize>,
+    paint_bake: Option<std::thread::JoinHandle<PaintMap>>,
     group: Option<wgpu::BindGroup>,
+}
+
+/// A 2-layer RGBA8 array holding a paint map's paint and tint (1×1 and empty without one).
+fn paint_texture(gpu: &GpuShared, map: Option<&PaintMap>) -> (wgpu::Texture, wgpu::TextureView) {
+    let size = map.map_or(1, |m| m.size);
+    let tex = gpu.device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("terrain paint map"),
+        size: wgpu::Extent3d {
+            width: size,
+            height: size,
+            depth_or_array_layers: 2,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8Unorm,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    let empty = [[0u8; 4]];
+    let layers: [&[[u8; 4]]; 2] = match map {
+        Some(m) => [&m.paint, &m.tint],
+        None => [&empty, &empty],
+    };
+    for (z, texels) in layers.into_iter().enumerate() {
+        gpu.queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &tex,
+                mip_level: 0,
+                origin: wgpu::Origin3d {
+                    x: 0,
+                    y: 0,
+                    z: z as u32,
+                },
+                aspect: wgpu::TextureAspect::All,
+            },
+            bytemuck::cast_slice(texels),
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(size * 4),
+                rows_per_image: Some(size),
+            },
+            wgpu::Extent3d {
+                width: size,
+                height: size,
+                depth_or_array_layers: 1,
+            },
+        );
+    }
+    let view = tex.create_view(&wgpu::TextureViewDescriptor {
+        dimension: Some(wgpu::TextureViewDimension::D2Array),
+        ..Default::default()
+    });
+    (tex, view)
 }
 
 /// Two `MATERIAL_COUNT`-layer texture arrays (albedo + height in sRGB, normal + roughness +
@@ -589,6 +660,10 @@ impl TerrainFeature {
                             binding: 13,
                             resource: wgpu::BindingResource::TextureView(&gpu.far_looks.view),
                         },
+                        wgpu::BindGroupEntry {
+                            binding: 14,
+                            resource: wgpu::BindingResource::TextureView(&gpu.paint_tex.1),
+                        },
                     ],
                 }),
         );
@@ -830,6 +905,88 @@ impl TerrainFeature {
         fresh
     }
 
+    /// Bake the hand-made ground's paint into a map when a terrain's overlay is painted (on
+    /// worker threads), upload it when done, and place its window. True when the texture is
+    /// new (the bind group must be made again).
+    fn upload_paint_map(
+        &mut self,
+        world: &World,
+        gpu_shared: &GpuShared,
+        view: &ViewData,
+        maps: &mut MapsGpu,
+    ) -> bool {
+        let gpu = self.gpu.as_mut().expect("gpu");
+        let terrains = world.get_resource::<Terrains>();
+        // The first terrain with a painted overlay on a sphere.
+        let painted = terrains.and_then(|ts| {
+            ts.entries.values().find_map(|t| {
+                let o = t.config.shape.overlay.as_ref().filter(|o| !o.flat)?;
+                Some((t, o, o.paint.clone()?))
+            })
+        });
+        let Some((t, overlay, paint)) = painted else {
+            return false;
+        };
+        let key = Arc::as_ptr(&paint) as *const () as usize;
+        let mut fresh = false;
+        if gpu.paint_key != Some(key) {
+            match gpu.paint_bake.take() {
+                Some(job) if job.is_finished() => {
+                    if let Ok(map) = job.join() {
+                        engine_core::log::info!(
+                            "terrain: paint map of the hand-made ground, {}² texels of {} m",
+                            map.size,
+                            map.texel_m
+                        );
+                        gpu.paint_tex = paint_texture(gpu_shared, Some(&map));
+                        gpu.paint_map = Some((map.min, map.texel_m, map.size));
+                        gpu.paint_key = Some(key);
+                        fresh = true;
+                    }
+                }
+                Some(job) => gpu.paint_bake = Some(job),
+                None => {
+                    let (radius, blend) = (overlay.radius_m, overlay.blend_m);
+                    gpu.paint_bake = Some(
+                        std::thread::Builder::new()
+                            .name("terrain-paint-map".into())
+                            .spawn(move || {
+                                PaintMap::bake_paint(
+                                    &paint,
+                                    radius,
+                                    blend,
+                                    PAINT_MAP_HALF_M,
+                                    PAINT_MAP_TEXEL_M,
+                                )
+                            })
+                            .expect("spawn the paint map bake"),
+                    );
+                }
+            }
+        }
+        let Some((min, texel, size)) = gpu.paint_map.filter(|_| gpu.paint_key == Some(key)) else {
+            return fresh;
+        };
+        // The overlay's frame: planet-local = R⁻¹ (home − T); world = position + rotation ·
+        // planet-local.
+        let to_local = overlay.rotation.inverse();
+        let world_of =
+            |home: DVec3| t.position + t.rotation * (to_local * (home - overlay.translation));
+        let axis = |d: DVec3| t.rotation * (to_local * d);
+        let corner = world_of(DVec3::new(min[0], 0.0, min[1])) - view.origin;
+        let (u, v, up) = (axis(DVec3::X), axis(DVec3::Z), axis(DVec3::Y));
+        maps.paint_origin = [
+            corner.x as f32,
+            corner.y as f32,
+            corner.z as f32,
+            texel as f32,
+        ];
+        maps.paint_u = [u.x as f32, u.y as f32, u.z as f32, size as f32];
+        maps.paint_v = [v.x as f32, v.y as f32, v.z as f32, 1.0];
+        maps.paint_up = [up.x as f32, up.y as f32, up.z as f32, 0.0];
+        fresh
+    }
+
     /// Upload changed parts of the footprint grid and the weather surface layers.
     fn upload_maps(
         &mut self,
@@ -1048,6 +1205,7 @@ impl TerrainFeature {
             maps.far = [self.surface_far[0], 0.0, self.surface_far[1], 0.0];
         }
         recreate |= self.upload_wear(world, gpu_shared, view, &mut maps);
+        recreate |= self.upload_paint_map(world, gpu_shared, view, &mut maps);
         let gpu = self.gpu.as_mut().expect("gpu");
         // Placeholders so the bind group is always complete.
         for (label, slot) in [("deform", 0usize), ("surface", 1usize), ("wear", 2usize)] {
@@ -1262,6 +1420,16 @@ impl RenderFeature for TerrainFeature {
                     },
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 14,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2Array,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
             ],
         });
         let buffers = [Some(TerrainVertex::layout()), Some(ChunkInstance::layout())];
@@ -1436,6 +1604,10 @@ impl RenderFeature for TerrainFeature {
             mat_scanned: 0,
             night: NightPages::new(device),
             far_looks: FarLookPages::new(device),
+            paint_tex: paint_texture(gpu, None),
+            paint_map: None,
+            paint_key: None,
+            paint_bake: None,
             group: None,
         });
     }
@@ -2252,7 +2424,7 @@ mod tests {
             std::mem::size_of::<PlanetGpu>(),
             16 * (3 + 1 + 10 + 7 + MAX_RAYED + MAX_YOUNG)
         );
-        assert_eq!(std::mem::size_of::<MapsGpu>(), 16 * 8);
+        assert_eq!(std::mem::size_of::<MapsGpu>(), 16 * 12);
         assert_eq!(std::mem::size_of::<TerrainVertex>(), 48);
     }
 }

@@ -81,9 +81,13 @@ pub fn install(app: &mut App, keys: &str, secs: f32, fps: f32, follow: Option<St
     let all = places::places();
     let mut list = Vec::new();
     for key in keys.split(',').filter(|k| !k.is_empty()) {
-        match all.iter().find(|p| p.key == key) {
-            Some(p) => list.push(p.clone()),
-            None => engine::core::log::warn!("film: no place called \"{key}\""),
+        match all.iter().find(|p| p.key == key).cloned() {
+            Some(p) => list.push(p),
+            // An ad-hoc spot, `at:x:y:z:tx:ty:tz:hour`, as the tour takes.
+            None => match crate::tour::at(key) {
+                Some(p) => list.push(p),
+                None => engine::core::log::warn!("film: no place called \"{key}\""),
+            },
         }
     }
     let fps = fps.clamp(1.0, 120.0);

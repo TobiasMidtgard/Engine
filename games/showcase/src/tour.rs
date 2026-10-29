@@ -54,8 +54,8 @@ impl Tour {
 /// An ad-hoc stop, `at:x:y:z:tx:ty:tz:hour` (eye, target and hour; the eye stays above the
 /// ground), for looking at any spot without adding a place. These come after the named stops
 /// and are saved as `NN_at.png`. Pair them with `--zones none` (or the zones they show): they
-/// belong to no zone.
-fn at(key: &str) -> Option<Place> {
+/// belong to no zone. Films take them too (`--film at:…,at:…` glides between them).
+pub(crate) fn at(key: &str) -> Option<Place> {
     let nums: Vec<f64> = key
         .strip_prefix("at:")?
         .split(':')
