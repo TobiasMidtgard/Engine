@@ -621,6 +621,15 @@ fn views() -> Vec<View> {
             ..BASE
         },
         View {
+            // On foot below the cliffs: where the mountainside meets the valley floor.
+            name: "range_foot",
+            eye: DVec3::new(-10_600.0, 0.0, -22_300.0),
+            target: DVec3::new(-13_000.0, 1_100.0, -21_800.0),
+            above_ground: Some(1.8),
+            sun: (175.0, 28.0),
+            ..BASE
+        },
+        View {
             name: "earth_cliff_beds",
             eye: DVec3::new(-12_300.0, 0.0, -22_050.0),
             target: DVec3::new(-13_000.0, 1_500.0, -21_750.0),
