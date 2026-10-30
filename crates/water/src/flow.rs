@@ -51,6 +51,30 @@ impl Default for FlowSource {
     }
 }
 
+/// A stone standing in a [`FlowRegion`]'s bed: the bed rises over it in a dome and the water
+/// parts round it, piling up in front, racing past its sides and leaving slack water behind,
+/// as round a boulder in a stream. Fixed scenery; moving things are found by the physics scan
+/// instead ([`FlowSim::set_standing`]).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct FlowRock {
+    /// Its middle, meters from the region's origin corner (x, z).
+    pub at: [f32; 2],
+    pub radius_m: f32,
+    /// Its top over the ground under its middle, meters.
+    pub height_m: f32,
+}
+
+impl Default for FlowRock {
+    fn default() -> Self {
+        Self {
+            at: [0.0, 0.0],
+            radius_m: 0.5,
+            height_m: 0.4,
+        }
+    }
+}
+
 /// Standing water a [`FlowRegion`] starts with: the basin containing `at` (meters from the
 /// region's origin corner, x and z) filled up to `level` (meters above the origin), or with
 /// `to_spill`, filled to the brim: up to where it would overflow (a stream's pools and hollows
@@ -172,6 +196,35 @@ pub fn flood(bed: &[f32], nx: usize, nz: usize, cell: f32, fills: &[FlowFill]) -
     depth
 }
 
+/// Top of the stones standing in each cell (`NEG_INFINITY` where none does), over `ground`:
+/// each a dome over the ground under its middle, sampled at the cell centers it covers.
+fn rock_tops(rocks: &[FlowRock], ground: &[f32], nx: usize, nz: usize, cell: f32) -> Vec<f32> {
+    let mut tops = vec![f32::NEG_INFINITY; nx * nz];
+    for r in rocks {
+        let radius = r.radius_m.max(1e-3);
+        let cell_of = |x: f32| (x / cell).floor() as i64;
+        let (ci, cj) = (cell_of(r.at[0]), cell_of(r.at[1]));
+        if ci < 0 || cj < 0 || ci >= nx as i64 || cj >= nz as i64 {
+            continue;
+        }
+        let base = ground[cj as usize * nx + ci as usize];
+        let reach = (radius / cell).ceil() as i64 + 1;
+        for j in (cj - reach).max(0)..=(cj + reach).min(nz as i64 - 1) {
+            for i in (ci - reach).max(0)..=(ci + reach).min(nx as i64 - 1) {
+                let c = [(i as f32 + 0.5) * cell, (j as f32 + 0.5) * cell];
+                let d = ((c[0] - r.at[0]).powi(2) + (c[1] - r.at[1]).powi(2)).sqrt() / radius;
+                // A rock narrower than a cell still stands in the cell it is in.
+                let d = if (i, j) == (ci, cj) { d.min(0.5) } else { d };
+                if d < 1.0 {
+                    let k = j as usize * nx + i as usize;
+                    tops[k] = tops[k].max(base + r.height_m * (1.0 - d * d).sqrt());
+                }
+            }
+        }
+    }
+    tops
+}
+
 /// A patch of ground where water flows (see the [module docs](self)).
 ///
 /// The entity's position is the grid's corner (cell (0, 0)); cells run along the entity's +x
@@ -202,6 +255,8 @@ pub struct FlowRegion {
     /// course, they fill it everywhere at once instead of from one end, without flooding the
     /// head of the stream.
     pub priming: Vec<FlowSource>,
+    /// Stones standing in the bed.
+    pub rocks: Vec<FlowRock>,
     pub optics: WaterOptics,
     pub visible: bool,
 }
@@ -219,6 +274,7 @@ impl Default for FlowRegion {
             fills: Vec::new(),
             prewarm_s: 0.0,
             priming: Vec::new(),
+            rocks: Vec::new(),
             optics: WaterOptics::stream(),
             visible: true,
         }
@@ -368,9 +424,19 @@ impl FlowSim {
         engine_core::tasks::init_task_pools();
         let nx = region.cells[0].max(2) as usize;
         let nz = region.cells[1].max(2) as usize;
-        let mut bed = bed;
-        bed.resize(nx * nz, 0.0);
-        let depth = flood(&bed, nx, nz, region.cell_m.max(0.05), &region.fills);
+        let cell = region.cell_m.max(0.05);
+        let ground = {
+            let mut g = bed;
+            g.resize(nx * nz, 0.0);
+            g
+        };
+        let standing = rock_tops(&region.rocks, &ground, nx, nz, cell);
+        let bed: Vec<f32> = ground
+            .iter()
+            .zip(&standing)
+            .map(|(g, s)| g.max(*s))
+            .collect();
+        let depth = flood(&bed, nx, nz, cell, &region.fills);
         let bed_span = bed
             .iter()
             .fold([f32::INFINITY, f32::NEG_INFINITY], |[lo, hi], &h| {
@@ -382,9 +448,9 @@ impl FlowSim {
             yaw: 0.0,
             nx,
             nz,
-            cell: region.cell_m.max(0.05),
-            ground: bed.clone(),
-            standing: vec![f32::NEG_INFINITY; nx * nz],
+            cell,
+            ground,
+            standing,
             bed_version: 0,
             bed,
             depth,
@@ -1150,6 +1216,43 @@ mod tests {
             friction: 0.3,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn water_parts_round_a_rock_in_the_bed() {
+        let mut r = region(40, 9);
+        // A boulder 1.5 m across in the middle of the channel, a meter tall.
+        r.rocks.push(FlowRock {
+            at: [10.25, 2.25],
+            radius_m: 0.75,
+            height_m: 1.0,
+        });
+        let bed: Vec<f32> = (0..40 * 9).map(|k| 2.0 - (k % 40) as f32 * 0.04).collect();
+        let mut sim = FlowSim::new(Entity::PLACEHOLDER, DVec3::ZERO, &r, bed.clone());
+        let middle = 4 * 40 + 20;
+        assert!(
+            (sim.bed[middle] - (bed[middle] + 1.0)).abs() < 0.05,
+            "{}",
+            sim.bed[middle]
+        );
+        assert_eq!(sim.ground, bed, "the ground stays the ground's");
+        assert!(sim.standing[middle].is_finite() && sim.standing[0] == f32::NEG_INFINITY);
+        sim.sources.push(FlowSource {
+            at: [1.0, 2.25],
+            radius_m: 1.5,
+            rate_m3_s: 0.3,
+        });
+        for _ in 0..60 * 20 {
+            sim.step(1.0 / 60.0);
+        }
+        assert!(
+            sim.depth[middle] < 0.005,
+            "over the rock: {}",
+            sim.depth[middle]
+        );
+        // The current runs past its sides, and the water stays in the channel round it.
+        assert!(sim.vel[2 * 40 + 20].length() > 0.05 && sim.vel[6 * 40 + 20].length() > 0.05);
+        assert!(sim.depth[4 * 40 + 18] > 0.01, "in front of it");
     }
 
     #[test]
