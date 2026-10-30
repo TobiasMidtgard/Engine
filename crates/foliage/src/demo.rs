@@ -78,18 +78,29 @@ pub fn polyline_distance(p: Vec2, line: &[[f32; 2]]) -> f32 {
         .fold(f32::INFINITY, f32::min)
 }
 
-/// Circles along the trail for [`EcologyRegion::keep_clear`].
-fn trail_clearance() -> Vec<[f32; 3]> {
+/// Circles of `radius` along the trail, 1.5 m apart (up to its last point).
+fn along_trail(radius: f32) -> Vec<[f32; 3]> {
     let mut out = Vec::new();
     for w in TRAIL.windows(2) {
         let (a, b) = (Vec2::from(w[0]), Vec2::from(w[1]));
         let n = (a.distance(b) / 1.5).ceil() as usize;
         for i in 0..n {
             let p = a.lerp(b, i as f32 / n as f32);
-            out.push([p.x, p.y, TRAIL_HALF_WIDTH + 0.6]);
+            out.push([p.x, p.y, radius]);
         }
     }
     out
+}
+
+/// Circles along the trail for [`EcologyRegion::keep_clear`]: nothing roots on the tread.
+fn trail_clearance() -> Vec<[f32; 3]> {
+    along_trail(TRAIL_HALF_WIDTH + 0.6)
+}
+
+/// The trail's brushed corridor ([`EcologyRegion::corridors`]): the tread and a foot each side
+/// kept clear of low branches, as trail crews brush a hiking trail.
+fn trail_corridor() -> Vec<[f32; 3]> {
+    along_trail(TRAIL_HALF_WIDTH + 0.3)
 }
 
 /// A camera viewpoint of a showcase: world-space eye and target, and a good hour of day.
@@ -315,6 +326,7 @@ pub fn forest_region() -> EcologyRegion {
         time_scale: 30.0,
         keep_clear: [vec![POND, GARDEN], trail_clearance()].concat(),
         sight_lines: lens_clearance(),
+        corridors: trail_corridor(),
         history: RegionHistory {
             grow_years: 110.0,
             initial_plants: [260, 120, 1500],
@@ -945,7 +957,9 @@ mod tests {
 
     use super::*;
     use crate::ecology::play_history;
+    use crate::plant::Brushing;
     use crate::sim::{FlatEnv, RegionSim, SimPlant, SimSource, Soil};
+    use crate::species::PlantForm;
 
     fn grown_forest() -> (Vec<SimPlant>, usize) {
         grow(forest_region(), forest_sources())
@@ -1000,6 +1014,34 @@ mod tests {
             *out.entry(key).or_insert(0) += 1;
         }
         out
+    }
+
+    #[test]
+    fn the_trail_is_brushed_clear_of_low_branches() {
+        let (plants, _) = grown_forest();
+        let library = PlantLibrary::default();
+        let region = forest_region();
+        let mut shrubs_by_the_trail = 0;
+        for p in plants.iter().filter(|p| p.plant.stage.is_alive()) {
+            let sp = library.get(p.plant.species);
+            let local = DVec2::new(p.pos.x, p.pos.z);
+            assert_eq!(
+                region.brushing(sp, &p.plant, local),
+                Brushing::Keep,
+                "{} size {:.2} at {local:.1} reaches into the trail or a view",
+                sp.name,
+                p.plant.size
+            );
+            let to_trail = polyline_distance(local.as_vec2(), &TRAIL);
+            if sp.form == PlantForm::Shrub && to_trail < 6.0 {
+                shrubs_by_the_trail += 1;
+            }
+        }
+        // Brushed, not bare: shrubs still line it.
+        assert!(
+            shrubs_by_the_trail >= 5,
+            "{shrubs_by_the_trail} shrubs by the trail"
+        );
     }
 
     #[test]

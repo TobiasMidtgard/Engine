@@ -187,8 +187,12 @@ pub struct EcologyRegion {
     /// meters from the region's center.
     pub keep_clear: Vec<[f32; 3]>,
     /// Circles kept free of trees and shrubs, though ground plants still grow there: sight
-    /// lines, the view from a bench. Local `[x, z, radius]` like `keep_clear`.
+    /// lines, the view from a bench. Local `[x, z, radius]` like `keep_clear`. Crowns that
+    /// grow into one below [`CLEAR_HEIGHT_M`] are cut back too ([`EcologyRegion::brushing`]).
     pub sight_lines: Vec<[f32; 3]>,
+    /// Circles kept clear of branches below [`CLEAR_HEIGHT_M`]: a trail's brushed corridor.
+    /// Local `[x, z, radius]` like `keep_clear`.
+    pub corridors: Vec<[f32; 3]>,
     /// Soil grid cell size, meters.
     pub cell_m: f32,
     /// Species that can arrive from outside on the wind or with animals (names).
@@ -225,6 +229,7 @@ impl Default for EcologyRegion {
             round: false,
             keep_clear: Vec::new(),
             sight_lines: Vec::new(),
+            corridors: Vec::new(),
             cell_m: 2.0,
             species: Vec::new(),
             seed_rain: 2.0,
@@ -252,6 +257,58 @@ impl EcologyRegion {
                 .sight_lines
                 .iter()
                 .any(|c| local.distance(DVec2::new(c[0] as f64, c[1] as f64)) < c[2] as f64)
+    }
+}
+
+/// Headroom kept under branches over a trail or a sight line, meters. Hiking trails are cleared
+/// 2.5 m high and anything reaching in below is cut (US Forest Service, *Trail Construction
+/// and Maintenance Notebook*, "Clearing and Brushing").
+pub const CLEAR_HEIGHT_M: f32 = 2.5;
+
+/// What the keepers of a trail or a view do to a woody plant growing into it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Brushing {
+    Keep,
+    /// A shrub cut back to this size, its crown just outside.
+    CutBack(f32),
+    /// Cut at the ground: a young tree (crews fell those rather than prune more than half a
+    /// tree away), or a shrub too close to keep (it may sprout again from the stump).
+    CutDown,
+}
+
+impl EcologyRegion {
+    /// Whether a living plant at `local` (meters from the region's center) reaches into a
+    /// trail's corridor or a sight line below [`CLEAR_HEIGHT_M`], and what is done about it.
+    /// Ground plants, and trees whose crowns start above the clearance, are left alone.
+    pub fn brushing(
+        &self,
+        species: &crate::species::PlantSpecies,
+        plant: &Plant,
+        local: DVec2,
+    ) -> Brushing {
+        if species.layer == Layer::Ground
+            || (self.corridors.is_empty() && self.sight_lines.is_empty())
+            || plant.height(species) * species.shape.crown_base >= CLEAR_HEIGHT_M
+        {
+            return Brushing::Keep;
+        }
+        let room = self
+            .corridors
+            .iter()
+            .chain(&self.sight_lines)
+            .map(|c| local.distance(DVec2::new(c[0] as f64, c[1] as f64)) as f32 - c[2])
+            .fold(f32::INFINITY, f32::min);
+        let reach = plant.crown_radius(species);
+        // (A shrub cut back to fit sits right at the edge; rounding leaves it there.)
+        if reach <= room + 0.01 {
+            return Brushing::Keep;
+        }
+        let fits = room / (species.crown_radius_m * plant.genes.crown).max(1e-3);
+        if species.is_tree() || fits < 0.15 {
+            Brushing::CutDown
+        } else {
+            Brushing::CutBack(fits)
+        }
     }
 }
 
@@ -391,5 +448,47 @@ impl Default for FelledLog {
             rot_years: 12.0,
             size: 1.0,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::species::PlantLibrary;
+
+    #[test]
+    fn trail_crews_cut_back_shrubs_and_fell_young_trees_but_leave_tall_crowns() {
+        let library = PlantLibrary::default();
+        let region = EcologyRegion {
+            corridors: vec![[0.0, 0.0, 2.0]],
+            ..Default::default()
+        };
+        let at = DVec2::new(3.0, 0.0);
+        let plant = |name: &str, size: f32| {
+            let mut p = Plant::new(library.id(name).unwrap(), size, Genes::default());
+            p.genes.crown = 1.0;
+            p.genes.height = 1.0;
+            (library.get(p.species), p)
+        };
+        let (hazel, p) = plant("hazel", 1.0);
+        let Brushing::CutBack(size) = region.brushing(hazel, &p, at) else {
+            panic!("a hazel 1 m from the corridor stays whole");
+        };
+        assert!((size * hazel.crown_radius_m - 1.0).abs() < 0.05, "{size}");
+        let (oak, young) = plant("oak", 0.3);
+        assert_eq!(region.brushing(oak, &young, at), Brushing::CutDown);
+        // A grown oak's crown starts well above head height: it may arch over the trail.
+        let (_, grown) = plant("oak", 1.0);
+        assert_eq!(region.brushing(oak, &grown, at), Brushing::Keep);
+        let (fern, f) = plant("fern", 1.0);
+        assert_eq!(
+            region.brushing(fern, &f, DVec2::new(1.0, 0.0)),
+            Brushing::Keep
+        );
+        // Far enough off, nothing is cut.
+        assert_eq!(
+            region.brushing(hazel, &p, DVec2::new(4.5, 0.0)),
+            Brushing::Keep
+        );
     }
 }
