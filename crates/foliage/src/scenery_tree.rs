@@ -306,7 +306,8 @@ mod tests {
         assert_eq!(near, [v.base, v.wood, v.foliage]);
         assert_eq!(mid, [v.base, v.wood_mid, v.foliage_mid]);
         assert!(v.foliage_mid.is_some());
-        assert_eq!(far, [v.base, v.wood_lod, v.foliage_lod]);
+        // The far trunk reaches the ground: no stump with it.
+        assert_eq!(far, [None, v.wood_lod, v.foliage_lod]);
         assert_eq!(distant, [None, v.wood_distant, v.foliage_distant]);
         assert!(v.foliage_distant.is_some());
         assert_eq!(gone, [None; 3]);

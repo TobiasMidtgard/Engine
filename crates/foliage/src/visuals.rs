@@ -149,8 +149,11 @@ pub fn desired_parts(
                     None => (leafy(v.foliage, &v.foliage_thin, amount), leaves),
                 };
                 [
-                    pair(&v.base, vis.bark_rigid)
-                        .or_else(|| pair(&v.foliage_dead_lod, vis.dead_leaves)),
+                    // A tree's far trunk reaches the ground and stands in for its stump.
+                    match v.wood_lod {
+                        Some(_) => pair(&v.foliage_dead_lod, vis.dead_leaves),
+                        None => pair(&v.base, vis.bark_rigid),
+                    },
                     pair(&or(&v.wood_lod, &v.wood), vis.bark),
                     pair(&crown, leaves),
                 ]

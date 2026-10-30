@@ -1417,9 +1417,11 @@ fn add_branches(
         // The trunk is drawn by the caller (split at the cut). Further off twigs vanish (they
         // are lost among the cards, as a spruce's inner branches are under its needle
         // shelves), far away the branches too and (on trees with many limbs) every other limb.
+        // A spruce's limbs hide under its needle shelves past the middle level: only its
+        // trunk shows among the far cards.
         if br.level == 0
             || (mid && (br.level >= 3 || (spruce_like && br.level >= 2)))
-            || (lod && (br.level >= 2 || (many && br.level == 1 && bi % 2 == 0)))
+            || (lod && (br.level >= 2 || spruce_like || (many && br.level == 1 && bi % 2 == 0)))
         {
             continue;
         }
@@ -1435,8 +1437,8 @@ fn add_branches(
             (2, false) => 4,
             _ => 3,
         };
-        // The middle level keeps every other ring along a branch (and both ends).
-        let rings: Vec<usize> = if mid {
+        // The middle and far levels keep every other ring along a branch (and both ends).
+        let rings: Vec<usize> = if mid || lod {
             let last = br.path.len().saturating_sub(1);
             (0..last).step_by(2).chain([last]).collect()
         } else {
@@ -1936,12 +1938,15 @@ fn assemble(
     };
     for &detail in levels {
         let lod = detail == Detail::Far;
-        // Wood above the cut (with a cut face on its bottom, seen once it falls).
+        // Wood above the cut (with a cut face on its bottom, seen once it falls). Far off the
+        // trunk reaches the ground and stands in for the stump and its root flare (as the
+        // distant level's does): hundreds of triangles a tree that don't show at that range.
+        let whole = sapling || lod;
         let mut b = MeshBuilder::new();
         b.bark_v_shift = bark_v_shift;
-        let start = if sapling { 0 } else { cut_i };
+        let start = if whole { 0 } else { cut_i };
         let mut path = trunk_path[start..].to_vec();
-        if !sapling {
+        if !whole {
             // Reach a few centimeters into the stump: the two tubes' rings meet the cut at
             // slightly different angles, and would leave hairline cracks there otherwise.
             let down = (path[0] - path[1]).normalize_or(-Vec3::Y);
@@ -1958,7 +1963,7 @@ fn assemble(
             if lod { 6 } else { TRUNK_SIDES },
             0.5,
             &color,
-            if sapling { None } else { Some(&cap) },
+            if whole { None } else { Some(&cap) },
             Some(&tip),
         );
         if !lod && !sapling {
@@ -2856,6 +2861,61 @@ fn shrub(sp: &PlantSpecies, seed: u64) -> PlantMeshes {
 mod tests {
     use super::*;
     use crate::species::PlantLibrary;
+
+    /// Far trees (100-350 m) cost a few thousand triangles at most: the trunk reaches the
+    /// ground (no stump with it) and a spruce's limbs stay under its shelves.
+    #[test]
+    fn far_trees_stay_light() {
+        let lib = PlantLibrary::default();
+        for name in ["oak", "birch", "pine", "spruce"] {
+            let sp = lib.get(lib.id(name).unwrap());
+            for seed in 0..3 {
+                let m = woody(sp, seed, false);
+                let wood = m.wood_lod.as_ref().unwrap();
+                let all = wood.triangle_count() + m.foliage_lod.as_ref().unwrap().triangle_count();
+                assert!(
+                    wood.triangle_count() < 1000,
+                    "{name}: far wood {}",
+                    wood.triangle_count()
+                );
+                assert!(all < 4000, "{name}: far level {all}");
+                // Down to the ground, as the stump it replaces.
+                let low = wood
+                    .vertices
+                    .iter()
+                    .map(|v| v.position[1])
+                    .fold(f32::MAX, f32::min);
+                assert!(low < 0.05, "{name}: far trunk starts at {low} m");
+            }
+        }
+    }
+
+    #[test]
+    #[ignore]
+    fn print_level_triangles() {
+        let lib = PlantLibrary::default();
+        for sp in &lib.species {
+            if !sp.is_woody() {
+                continue;
+            }
+            let m = woody(sp, 1, false);
+            let t = |m: &Option<engine_render::Mesh>| m.as_ref().map_or(0, |m| m.triangle_count());
+            println!(
+                "{:10} base {:5} | near w {:6} f {:6} | mid w {:5} f {:5} | far w {:5} f {:5} | distant w {:4} f {:4} | hero {:6}",
+                sp.name,
+                t(&m.base),
+                t(&m.wood),
+                t(&m.foliage),
+                t(&m.wood_mid),
+                t(&m.foliage_mid),
+                t(&m.wood_lod),
+                t(&m.foliage_lod),
+                t(&m.wood_distant),
+                t(&m.foliage_distant),
+                t(&m.foliage_hero)
+            );
+        }
+    }
 
     #[test]
     fn trees_have_all_parts_within_their_bounds() {
