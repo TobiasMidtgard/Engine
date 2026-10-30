@@ -32,8 +32,9 @@ describe("Keeper", function()
 		local c: Conversation = keeper.script.conversation
 		expect(c.speaker).to_be("Keeper")
 		local first = options(t, c)
-		expect(#first).to_be(3)
+		expect(#first).to_be(4)
 		expect(first[1]).to_be("Who sealed it?")
+		expect(first[4]).to_be("I can read old runes.")
 		c:choose(3)
 		t:wait_until(function()
 			return c.done
@@ -46,6 +47,26 @@ describe("Keeper", function()
 		expect(again.line).to_be("Back again?")
 		expect(options(t, again)[2]).to_be("I'll try the runes.")
 		again:stop()
+	end)
+
+	it("reads the runes on a lore check, its odds shown", function(t)
+		fresh()
+		local keeper = t:spawn(KEEPER)
+		keeper.script:talk()
+		local c: Conversation = keeper.script.conversation
+		options(t, c)
+		local check = api("story.state", {}).current.checks[1]
+		expect(check.option).to_be(4)
+		expect(check.skill).to_be("lore")
+		-- 2d6 + Lore 2 against 9: 21 ways in 36.
+		expect(math.abs(check.chance - 21 / 36) < 1e-9).to_be(true)
+		c:choose(4, true)
+		t:wait_until(function()
+			return c.done
+		end, 2)
+		expect(c.passed).to_be(true)
+		expect(facts.read_runes).to_be(true)
+		expect(c.line).to_be("You can? Then you know the third one lies. It is no stone at all.")
 	end)
 
 	it("gives the quest, which follows the seal's runes", function(t)

@@ -866,6 +866,17 @@ static SOLVED: RwLock<Vec<(u64, Arc<Rivers>)>> = RwLock::new(Vec::new());
 static SOLVING: Mutex<()> = Mutex::new(());
 
 impl RiverCache {
+    /// The rivers for `key` if they are solved (here or for another terrain of the same
+    /// shape), without solving them.
+    pub(crate) fn solved(&self, key: u64) -> Option<Arc<Rivers>> {
+        if let Some((k, r)) = self.0.get()
+            && *k == key
+        {
+            return Some(r.clone());
+        }
+        solved(key)
+    }
+
     /// The rivers for `key`, solving them with `build` the first time.
     pub(crate) fn get(&self, key: u64, build: impl FnOnce() -> Rivers) -> Arc<Rivers> {
         if let Some((k, r)) = self.0.get()

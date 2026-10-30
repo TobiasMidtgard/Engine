@@ -54,6 +54,7 @@ struct Globals {
     swash2: vec4<f32>,   // its datum rel camera y, cell (m), unused, unused
     waterline: vec4<f32>,  // the camera at the waterline: split per pixel (1/0), lens dome radius (m), lens wetness 0..1, seconds since it surfaced
     waterline2: vec4<f32>, // meters of the dome per pixel, drop seed, unused, unused
+    trail: vec4<f32>,      // the ripple grid's trail (`trail.rs`): corner rel camera x, z, size (m), on
 };
 
 struct WaterUniform {
@@ -74,13 +75,19 @@ struct WaterUniform {
 @group(1) @binding(10) var mirror_depth: texture_depth_2d;  // its depth (reverse-Z, near / view depth)
 @group(1) @binding(11) var shelter_tex: texture_2d<f32>;    // wind exposure over the nearest lake: 0 lee .. 1 open
 @group(1) @binding(12) var swash_a: texture_2d<f32>;        // the swash: level drawn (m over its datum; below -1e3 none), depth (m), strip weight, foam
-@group(1) @binding(13) var swash_b: texture_2d<f32>;        // what its sand remembers: sheen, damp, mark, bed (m over the datum)
+@group(1) @binding(13) var swash_b: texture_2d<f32>;
+@group(1) @binding(14) var trail_tex: texture_2d<f32>;       // foam and bubbles the ripple grid's wakes left, 4 times wider        // what its sand remembers: sheen, damp, mark, bed (m over the datum)
 
 // The body being shaded reflects through the lake mirror (set by fs_body).
 var<private> use_mirror: bool = false;
 // How much the bed seen through the water darkens: the swash's sand is soaked, though the scene
 // colour the water refracts was drawn dry (the sand decal goes on after it is copied).
 var<private> wet_bed: f32 = 1.0;
+// The bed seen through running water is the stream's own stones (set by fs_flow), the current
+// there (m/s) sorting them by size.
+var<private> stream_bed: f32 = 0.0;
+var<private> stream_speed: f32 = 0.0;
+var<private> stream_depth: f32 = 0.0;
 
 struct FlowGpu {
     origin: vec4<f32>,  // corner rel camera x, base y, z, cell (m)
@@ -464,6 +471,21 @@ fn current_at(rel_xz: vec2<f32>) -> vec4<f32> {
     return textureSampleLevel(current_tex, linear_clamp, uv, 0.0) * grid_fade(uv);
 }
 
+// Foam and bubbles the ripple grid's wakes left behind at a camera-relative x/z: the trail's
+// share, which takes over as the grid fades out (Crest's blend from one level of its cascade
+// to the next), and fades out itself in a circle four times as wide.
+fn trail_at(rel_xz: vec2<f32>) -> vec2<f32> {
+    if (water.g.trail.w < 0.5) { return vec2<f32>(0.0); }
+    let tuv = (rel_xz - water.g.trail.xy) / water.g.trail.z;
+    if (any(tuv <= vec2<f32>(0.0)) || any(tuv >= vec2<f32>(1.0))) { return vec2<f32>(0.0); }
+    var t = textureSampleLevel(trail_tex, linear_clamp, tuv, 0.0).xy * grid_fade(tuv);
+    if (water.g.ripple.w > 0.5) {
+        let uv = (rel_xz - water.g.ripple.xy) / water.g.ripple.z;
+        if (all(uv > vec2<f32>(0.0)) && all(uv < vec2<f32>(1.0))) { t *= 1.0 - grid_fade(uv); }
+    }
+    return t;
+}
+
 // Rain falling at a camera-relative x/z, mm/h.
 fn rain_at(rel_xz: vec2<f32>) -> f32 {
     var r = water.g.rain.x;
@@ -768,6 +790,24 @@ fn trace_reflection(rel: vec3<f32>, r: vec3<f32>, size: vec2<f32>, roughness: f3
 // and carried downstream (two copies over 4 s, cross-faded). Streaks run along the two nearest
 // of eight fixed headings, blended by the current's own, so where the current turns the pattern
 // bends with it instead of winding up.
+// Froth's structure, 0..1: aged foam gathers along the walls between the cells of the water
+// it floats on and opens in their middles, a web of lines round clear patches (the lace seen
+// on any wake or swash from above). High along the walls of two warped cell sizes, about
+// 0.55 m and 0.2 m, so the web tears into finer threads as it thins; far off, where a pixel
+// spans the cells, their mean.
+fn foam_cells(wp: vec2<f32>, rel: vec3<f32>) -> f32 {
+    let warp = vec2<f32>(value_noise2(wp * 0.9), value_noise2(wp * 0.9 + vec2<f32>(5.2, 1.3))) - 0.5;
+    let q = wp + warp * 0.7;
+    let big = stone_cell(q / 0.55 + vec2<f32>(13.1, 7.7));
+    let small = stone_cell(q / 0.2 + vec2<f32>(3.9, 21.4));
+    let web_big = 1.0 - smoothstep(0.0, 0.22, big.d2 - big.d1);
+    let web_small = 1.0 - smoothstep(0.0, 0.3, small.d2 - small.d1);
+    let v = 0.2 + 0.55 * web_big + 0.25 * web_small;
+    let pixel = pixel_footprint(rel);
+    let near = mix(v, 0.2 + 0.55 * web_big + 0.25 * 0.45, smoothstep(0.08, 0.2, pixel));
+    return mix(near, 0.5, smoothstep(0.2, 0.5, pixel));
+}
+
 fn streak_foam(wp: vec2<f32>, vel: vec2<f32>) -> f32 {
     let t = time_s();
     let ph0 = fract(t * 0.25);
@@ -849,11 +889,21 @@ fn shade_water(rel: vec3<f32>, n_in: vec3<f32>, look: WaterLook, foam_in: f32, c
         uv = uv0;
         z_bottom = z0;
     }
-    let behind = textureSampleLevel(scene_color, linear_clamp, uv, 0.0).rgb * wet_bed;
+    var behind = textureSampleLevel(scene_color, linear_clamp, uv, 0.0).rgb * wet_bed;
     let ratio = z_bottom / z_frag;
     let thick = dist * max(ratio - 1.0, 0.0);
     let bottom_rel = rel * ratio;
     let depth_below = max(rel.y - bottom_rel.y, 0.0);
+    if (stream_bed > 0.0) {
+        // The bed under the stream's own depth along the bent view ray (the scene copy's depth
+        // there holds the channel's ground, which a thin sheet hardly differs from).
+        // The flat surface bends the ray as a whole; its ripples only shift the bed by a
+        // fraction of the depth (all of it would scramble the stones pixel by pixel).
+        let bent = refract(-v, vec3<f32>(0.0, 1.0, 0.0), 1.0 / 1.333);
+        let bed_rel = rel + bent * (stream_depth / max(-bent.y, 0.25))
+            + vec3<f32>(n.x, 0.0, n.z) * stream_depth * 0.35;
+        behind = mix(behind, river_stones(bed_rel, rel, stream_speed), stream_bed * smoothstep(0.0, 0.03, stream_depth));
+    }
     let sigma_t = look.absorb + vec3<f32>(look.scattering);
     // Light reaching the bottom lost depth_below on the way down, then `thick` back up to us.
     let t_view = exp(-sigma_t * min(thick, 400.0));
@@ -952,15 +1002,19 @@ fn shade_water(rel: vec3<f32>, n_in: vec3<f32>, look: WaterLook, foam_in: f32, c
         if (moving > 0.0) {
             pattern = mix(pattern, streak_foam(wp, vel), moving);
         }
-        // Foam is lace, not a sheet (Crest's coverage): a broad noise picks where it thins
-        // first, and the fine pattern tears holes in it from there as it fades.
+        // Foam is lace, not a sheet (Crest's coverage, HDRP's erosion): a broad noise picks
+        // where it thins first; as it ages it opens along the walls between its bubble
+        // clusters into a web of streaks, then holes, then scattered flecks.
         let broad = value_noise2(wp * 0.35 + vec2<f32>(7.3, 1.9));
+        pattern = mix(pattern, foam_cells(wp, rel), 0.6);
         let theta = 1.0 - foam * (0.7 + 0.6 * broad);
         let cover = smoothstep(theta, theta + 0.15, pattern);
         let up = sky_ambient(n) * sky_vis * PI;
         // Foam is a dense froth: light gets through it, so it glows even with the sun behind.
-        let foam_col = pre_expose(0.85 * (sun * shadow * max(dot(n, l) * 0.6 + 0.4, 0.0) + up) * INV_PI);
-        color = mix(color, foam_col, cover * 0.95);
+        // Its albedo is well under snow's (whitecaps reflect at most about 55%, Whitlock 1982;
+        // ours is brighter, fresh froth on fresh water), and thin lace lets the water through.
+        let foam_col = pre_expose(0.75 * (sun * shadow * max(dot(n, l) * 0.6 + 0.4, 0.0) + up) * INV_PI);
+        color = mix(color, foam_col, cover * mix(0.8, 0.95, saturate(foam * 2.0)));
     }
     let ground = textureSampleLevel(scene_color, linear_clamp, uv0, 0.0).rgb * wet_bed;
     // The last centimeters at the waterline are a film over the sand: no water color to speak
@@ -1036,6 +1090,96 @@ fn shade_underside(rel: vec3<f32>, n_up: vec3<f32>, look: WaterLook, frag: vec4<
     let sigma_t = look.absorb + vec3<f32>(look.scattering);
     let tr = exp(-sigma_t * dist);
     return color * tr + medium * (1.0 - tr);
+}
+
+// The nearest two of a grid of jittered points (one per cell) to `q`: distances, the
+// nearest's cell and the offset from it.
+struct StoneCell {
+    d1: f32,
+    d2: f32,
+    id: vec2<f32>,
+    off: vec2<f32>,
+};
+
+fn stone_cell(q: vec2<f32>) -> StoneCell {
+    let cell = floor(q);
+    var out = StoneCell(9.0, 9.0, vec2<f32>(0.0), vec2<f32>(0.0));
+    for (var j = -1; j <= 1; j++) {
+        for (var i = -1; i <= 1; i++) {
+            let c = cell + vec2<f32>(f32(i), f32(j));
+            let o = vec2<f32>(hash12(c), hash12(c + vec2<f32>(19.7, 3.1))) * 0.8 + 0.1;
+            let dv = q - c - o;
+            let d = length(dv);
+            if (d < out.d1) {
+                out.d2 = out.d1;
+                out.d1 = d;
+                out.id = c;
+                out.off = dv;
+            } else if (d < out.d2) {
+                out.d2 = d;
+            }
+        }
+    }
+    return out;
+}
+
+// One stone's wet color: granite greys and rusty ochres, slate, the odd white quartz, each a
+// shade of its own; slow water films them green with algae.
+fn stone_albedo(id: vec2<f32>, speed: f32) -> vec3<f32> {
+    let h = hash12(id + vec2<f32>(3.3, 0.7));
+    let h2 = hash12(id + vec2<f32>(7.1, 5.9));
+    var albedo = mix(vec3<f32>(0.19, 0.18, 0.16), vec3<f32>(0.26, 0.20, 0.12), h);
+    albedo = mix(albedo, vec3<f32>(0.09, 0.10, 0.11), step(0.7, h2));
+    albedo = mix(albedo, vec3<f32>(0.45, 0.44, 0.41), step(0.95, h2));
+    albedo *= 0.6 + 0.8 * hash12(id + vec2<f32>(1.1, 9.3));
+    return albedo * mix(vec3<f32>(0.8, 0.95, 0.65), vec3<f32>(1.0), smoothstep(0.2, 0.8, speed));
+}
+
+// The bed of a stream seen through its water: rounded cobbles packed together with pebbles
+// in the gaps between them, wet, lit by the sun and sky through the water (the caller adds
+// the caustics and what the water absorbs). The current sorts them: it carries off whatever
+// it can lift (Shields 1936), so fast water runs over coarse cobbles, slow water over finer
+// ones. Each layer fades to its mean where a pixel spans several of its stones.
+fn river_stones(rel: vec3<f32>, surface_rel: vec3<f32>, speed: f32) -> vec3<f32> {
+    let wp = tiling_pos(rel).xz;
+    // One fixed grid: scaling it by the current (which changes from place to place) would
+    // smear the stones into contours. The current sorts them within it instead: big cobbles
+    // packed tight where it runs fast, smaller ones with pebbles between where it is slow.
+    let size = 0.45;
+    let coarse = smoothstep(0.3, 1.8, speed);
+    let pixel = pixel_footprint(rel);
+    let up = vec3<f32>(0.0, 1.0, 0.0);
+    let sun_in = -refract(-frame.sun_dir.xyz, up, 1.0 / 1.333);
+    // Shadowed as the surface above it is: the bed itself lies under the shadow map's bias.
+    let sun = water_sun(surface_rel) * max(frame.sun_dir.y, 0.0) * shadow_factor(surface_rel, up);
+    let sky = sky_ambient(up) * sky_visibility(rel, up) * PI;
+
+    // Cobbles: domes filling most of their cells.
+    let c = stone_cell(wp / size);
+    let radius = mix(0.22, 0.36, coarse) + 0.12 * hash12(c.id + vec2<f32>(5.5, 2.2));
+    let r = c.d1 / radius;
+    let on = 1.0 - smoothstep(0.85, 1.0, r);
+    var slope = c.off / max(c.d1, 1e-4) * r / sqrt(max(1.0 - r * r, 0.05)) * 0.6;
+    // Pebbles: smaller stones packed into the gaps, half in the cobbles' shade.
+    let pq = wp / (size * 0.28) + vec2<f32>(31.7, 17.3);
+    let pc = stone_cell(pq);
+    let pr = saturate(pc.d1 / 0.42);
+    let pebble_fade = smoothstep(0.25, 0.8, pixel / (size * 0.28));
+    let p_slope = pc.off / max(pc.d1, 1e-4) * pr * 0.7 * (1.0 - pebble_fade);
+    slope = mix(p_slope, slope, on);
+    let p_alb = mix(stone_albedo(pc.id, speed) * mix(0.35, 1.0, smoothstep(1.0, 0.6, pr)), vec3<f32>(0.11, 0.10, 0.09), pebble_fade);
+    var albedo = mix(p_alb * 0.7, stone_albedo(c.id, speed), on);
+    let len = length(slope);
+    if (len > 2.0) { slope *= 2.0 / len; }
+    // Each stone's top tilts away from its middle.
+    let n = normalize(vec3<f32>(slope.x, 1.0, slope.y));
+    let grain = 0.85 + 0.3 * value_noise2(wp * 23.0);
+    var lit = albedo * grain * INV_PI
+        * (sun * max(dot(n, sun_in), 0.0) / max(sun_in.y, 0.2) + sky * (0.55 + 0.45 * n.y));
+    // Far off, where a pixel spans several cobbles, their mean.
+    let mean = vec3<f32>(0.15, 0.14, 0.12) * 0.85 * INV_PI * (sun + sky);
+    lit = mix(lit, mean, smoothstep(0.3, 1.0, pixel / size));
+    return pre_expose(lit);
 }
 
 // ---------------------------------------------------------------- lakes and oceans
@@ -1140,6 +1284,9 @@ fn fs_body(in: BodyOut) -> @location(0) vec4<f32> {
         let cur = current_at(in.rest);
         vel += cur.xy;
         bubbles = cur.w;
+        let trail = trail_at(in.rest);
+        foam += trail.x * 1.6;
+        bubbles += trail.y;
     }
     // The fine waves, roughened in gusts, calmed in the lee and the slicks.
     let bd = water.bodies[bi].detail;
@@ -1215,6 +1362,8 @@ struct FlowOut {
     @location(1) depth: f32,
     @location(2) vel: vec2<f32>,
     @location(3) normal: vec3<f32>,
+    // How fast the current turns here (1/s): eddy lines behind stones and along the banks.
+    @location(4) shear: f32,
 };
 
 fn flow_load(i: i32, j: i32) -> vec4<f32> {
@@ -1253,7 +1402,35 @@ fn vs_flow(@builtin(vertex_index) vid: u32) -> FlowOut {
     out.clip = frame.view_proj * vec4<f32>(out.rel, 1.0);
     out.depth = s.g;
     out.vel = s.ba;
+    // The current's curl, from the wet neighbors (dry ones hold no current to shear against).
+    let vl = select(s.ba, l.ba, l.g > 0.003);
+    let vr = select(s.ba, r.ba, r.g > 0.003);
+    let vb = select(s.ba, b.ba, b.g > 0.003);
+    let vt = select(s.ba, t.ba, t.g > 0.003);
+    out.shear = ((vr.y - vl.y) - (vt.x - vb.x)) / (2.0 * cell);
     return out;
+}
+
+// fbm stretched along the current (`stretch`: its scale along and across) and carried down it
+// at a steady 1.2 m/s (at the current's own speed, which differs from place to place, the
+// pattern would shear apart more every second).
+// The pattern is drawn in two fixed directions, the eighths of a turn either side of the
+// current's, and cross-faded: turned to the current itself (which turns from place to place,
+// while the world position runs to hundreds of meters) it would smear into zigzags.
+fn flow_streaks(wp: vec2<f32>, vel: vec2<f32>, stretch: vec2<f32>, t: f32) -> f32 {
+    let turns = atan2(vel.y, vel.x) / (PI / 4.0);
+    let k = floor(turns);
+    var sum = 0.0;
+    for (var i = 0; i < 2; i++) {
+        // Each direction's own pattern (the same one either side of the wrap at ±π).
+        let bin = (k + f32(i)) - 8.0 * floor((k + f32(i)) / 8.0);
+        let a = bin * (PI / 4.0);
+        let along = vec2<f32>(cos(a), sin(a));
+        let q = vec2<f32>(dot(wp, along), dot(wp, vec2<f32>(-along.y, along.x))) * stretch;
+        let w = select(1.0 - (turns - k), turns - k, i == 1);
+        sum += w * fbm2(q - vec2<f32>(t * 1.2 * stretch.x, 0.0) + bin * 7.3, 3);
+    }
+    return sum;
 }
 
 @fragment
@@ -1271,6 +1448,9 @@ fn fs_flow(in: FlowOut, @builtin(front_facing) front: bool) -> @location(0) vec4
     let look = flow_look();
     let pixel = pixel_footprint(in.rel);
     let speed = length(in.vel);
+    stream_bed = 1.0;
+    stream_speed = speed;
+    stream_depth = in.depth;
     let wp = tiling_pos(in.rel).xz;
     // Flow-mapped ripples: two copies of the pattern scrolled downstream, cross-faded.
     let t = time_s();
@@ -1310,14 +1490,13 @@ fn fs_flow(in: FlowOut, @builtin(front_facing) front: bool) -> @location(0) vec4
     let rapid = smoothstep(0.8, 2.6, speed) * saturate(in.depth * 20.0);
     var crests = 0.0;
     if (rapid > 0.0) {
-        let across = vec2<f32>(-in.vel.y, in.vel.x) / max(speed, 1e-3);
-        let along = in.vel / max(speed, 1e-3);
-        // Longer across the current than along it, like the ribs of a riffle.
-        let q = vec2<f32>(dot(wp, along) * 1.8, dot(wp, across) * 0.9) + vec2<f32>(sin(t * 3.1), cos(t * 2.3)) * 0.05;
+        // In fixed world axes: turned to the local current (which turns from place to place,
+        // while the world position runs to hundreds of meters) the pattern smeared into zigzags.
+        let q = wp * 1.3 + vec2<f32>(sin(t * 3.1), cos(t * 2.3)) * 0.05;
         let e = 0.05;
         let h = fbm2(q, 3) / 0.875;
         let dh = vec2<f32>(fbm2(q + vec2<f32>(e, 0.0), 3), fbm2(q + vec2<f32>(0.0, e), 3)) / 0.875 - h;
-        let slope = (along * dh.x * 1.8 + across * dh.y * 0.9) / e;
+        let slope = dh * 1.3 / e;
         g += slope * 0.08 * rapid * (1.0 + speed * 0.15);
         crests = smoothstep(0.55, 0.75, h) * rapid;
     }
@@ -1334,6 +1513,10 @@ fn fs_flow(in: FlowOut, @builtin(front_facing) front: bool) -> @location(0) vec4
     // (`shade_water` covers nearly everything in foam from about 0.6: the white water stays
     // under that, so the dark glassy water between its lumps shows.)
     var foam = min(min(churn, 1.0) * mix(0.0, 0.55, lumps) + crests * 0.25 * (1.0 - lumps), 0.55);
+    // Where the slack water behind a stone meets the current, the eddy line gathers the foam
+    // the riffles above it made into a line trailing downstream, torn into flecks.
+    let flecks = smoothstep(0.45, 0.7, flow_streaks(wp, in.vel, vec2<f32>(0.7, 6.0), t) / 0.875);
+    foam += smoothstep(0.8, 2.5, abs(in.shear)) * smoothstep(0.2, 0.6, speed) * flecks * 0.45;
     foam *= saturate(in.depth * 30.0);
     // Only a pool boils where a fall lands: on running water the current sweeps the froth
     // downstream in the lumps above.
@@ -1787,11 +1970,13 @@ fn fs_sand(in: FullscreenOut) -> @location(0) vec4<f32> {
     // The swash mark: lace of stranded foam, torn as it pops.
     var keep = dark;
     if (sand.z > 0.01) {
-        let pattern = fbm2(wp * 3.1, 4);
-        let theta = 1.0 - sand.z * 0.9;
+        let pattern = mix(fbm2(wp * 3.1, 4), foam_cells(wp, rel), 0.6);
+        // Stranded foam is a line of lace popping on the sand, never a sheet, however much of
+        // it the swash leaves.
+        let theta = 1.0 - sand.z * 0.6;
         let cover = smoothstep(theta, theta + 0.12, pattern) * 0.9;
         let up = sky_ambient(n) * sky_vis * PI;
-        let foam_col = pre_expose(0.85 * (sun * shadow * max(dot(n, l) * 0.6 + 0.4, 0.0) + up) * INV_PI);
+        let foam_col = pre_expose(0.75 * (sun * shadow * max(dot(n, l) * 0.6 + 0.4, 0.0) + up) * INV_PI);
         add = mix(add, foam_col, cover);
         keep *= 1.0 - cover;
     }

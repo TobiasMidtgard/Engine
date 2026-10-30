@@ -457,6 +457,100 @@ quests.start("sealed_bridge") -- quests.complete / quests.fail / quests.state
 With no conversation screen (a test, or the editor without the UI module) a conversation
 runs **headless**: lines go to the log and options wait for `handle:choose(i)`.
 
+### Choices made by walking: spots
+
+An option set can be answered by **where the player walks** instead of a menu (as in
+Oxenfree, Pendragon and Detroit: Become Human): tag each option with the spot it is picked at.
+
+```
+Captain: Who speaks for the company? Step up, or hold your place.
+<<spots 12>>
+-> Hold your place in the rank #spot:rank #fallback
+-> Step past him and take the front #spot:forward
+-> Lean in and whisper him an idea #spot:ear
+-> Slip behind him, a hand on your knife #spot:behind
+```
+
+- A **spot** is an entity with a `StorySpot` component (`name`, `radius_m`), placed in the
+  scene; often a child of the speaker, so "at the captain's ear" moves with him. Of several
+  spots with one name, the nearest is used.
+- While the choice is open the player keeps walking: a ring glows at each spot with its option
+  over it and the question over the speaker, the view blends up to one from above (keeping the
+  camera's heading, so up still walks up the screen) and the world slows while the player keeps
+  full speed. Standing in a ring for 0.7 s (it fills meanwhile) or pressing E there picks it.
+  A spot the player already stands in when the choice opens counts once they step out and back.
+- `<<spots 12>>` gives 12 seconds, after which the `#fallback` option is taken (else the
+  nearest spot's); `<<spots 12 0.5>>` slows the world to half instead of 0.35, `1` not at all.
+  Tags come after an option's condition: `-> Go <<if $brave>> #spot:front`.
+- `standing_at("rank")` in the conversation tells whether the player stands in that spot
+  (`Captain: Out of the line already? <<if not standing_at("rank")>>`).
+- The speaker's script can react as the player comes close: `on_spot_near(name)` runs when they
+  step into a spot, and the text it returns is the speaker's new line over their head.
+- `dialogue.start(path, node, { chooser = recruit })` lets someone else walk (an entity, or its
+  name); the player's body (the `Interactor`) otherwise. `story.choose` still picks directly.
+
+In the Story tab each option walked to shows its spot on its card (red when the scene has no
+spot of that name), and **Walked to** draws the choice from above: the speaker, the people round
+them, the player and each spot, to drag where it belongs (one undo step), with buttons to place a
+missing spot and to look down on it all in the scene view. The scene view draws each spot as a
+dashed ring with its name; while the game plays, the open choice shows there as in the game, and
+the corner preview looks through the game's view from above. The captain at the courtyard's gate
+(`examples/captain.luau`, `dialogue/muster.yarn`) is the example.
+
+### Skill checks
+
+An option can be a **skill check** (Disco Elysium's and Baldur's Gate 3's): picking it rolls,
+and `passed()` in the reply says how it went.
+
+```
+<<if $read_orders>>
+    <<bonus persuade 2 "You read the parley orders">>
+<<endif>>
+-> Step past him and take the front #check:nerve:9 #red
+    <<jump Forward>>
+-> Lean in and whisper him an idea #check:persuade:8
+    <<if passed()>>
+        Captain: ...Clever. Quietly now.
+    <<else>>
+        Captain: Not now, recruit.
+    <<endif>>
+```
+
+- `#check:skill:difficulty`: 2d6 plus the chooser's skill and the bonuses, against the
+  difficulty; double six always passes, double one always fails. The option shows its odds
+  ("PERSUADE 8 · 83%"), counted exactly over every way the dice fall.
+- The skill is the fact `$skill_persuade` (`<<declare $skill_persuade = 1>>`), or a game's own
+  stats: `dialogue.checks.skill = function(name, chooser) return ... end`.
+- Bonuses, each shown with why: `<<bonus persuade 2 "why">>` (or `all`) for the next options;
+  `dialogue.checks.bonuses = function(skill, chooser) return { { 2, "Watch colours" } } end`;
+  the speaker's regard for the player (fact `$regard_captain` for Captain); and luck, +1 for
+  each check failed in a row.
+- A failed check (white) is shut until the skill is higher; a **red** check (`#red`) rolls
+  once, ever. Both are remembered with the facts.
+- `dialogue.settings({ dice = "d20", difficulty = "easy", luck = false })` (or the Story tab's
+  Checks row, or the `story.settings` API): a d20 with natural 20 and 1 instead, easy or hard
+  (−2 or +2 on every difficulty), no luck.
+- In a choice made by walking the roll shows over the ring for a moment before the reply. With
+  the UI's conversation screen, the screen rolls (its choices carry the odds).
+- Tests decide a check: `dialogue.checks.next = true`, `handle:choose(2, true)`, or
+  `story.choose {index, pass}`; the handle has `.passed` and `.roll`.
+
+### Barks and people watching
+
+While the player walks to choose, the people round them react:
+
+- `<<watch Soldier*>>` before the options: they turn their heads (then their bodies, past 45°)
+  to follow the chooser and look back once it's over. The speaker always watches;
+  `<<watch none>>` turns it off. A trailing `*` matches the start of a name. Each turns its
+  child named `Head` (and `Body`, else itself), and its eyes when it has a face.
+- `<<barks Murmur>>` before the options: the node group `Murmur` is said as **barks** (lines
+  in a bubble over each speaker's head, while play goes on) when something happens: `moment()`
+  is `"out"` (the chooser left where they stood), `"near"` (stepped into a spot; ask
+  `standing_at("ear")`) or `"hurry"` (three seconds left). The node whose `when:` fits best is
+  said, one at a time.
+- `<<bark Laugh>>` says a node as barks anywhere in a conversation; `dialogue.bark(path, node,
+  { owner = self.entity })` from a script. A bark has no options.
+
 A **quest** is a `.quest` file under `quests/`: JSON with a title, a giver and its
 **objectives**, each a condition on the facts (`"done_when": "$seal_opened"`, or
 `"progress": "$runes_lit", "count": 3`), plus `start_when`, `fail_when`, `rewards` and
@@ -469,7 +563,9 @@ detours and each option; drag a card to place it, kept in its `position:` header
 double-click to edit its text). While the game plays, the node a conversation is in glows,
 the ones it went through are tinted, its lines and options are beside the map (click one to
 pick it), and ▶ Talk plays the selected node a line at a time. The facts are listed and can
-be changed there, and the quests started, completed or failed. The Scripts tab colors
+be changed there, and the quests started, completed or failed. A check shows its odds on its
+card and, once offered, what makes them (the skill, each bonus and why, the luck), with each
+roll in the transcript; **Checks** sets the dice, the difficulty and the luck. The Scripts tab colors
 `.yarn` files and marks their mistakes as it does Luau's.
 
 ## In the editor's view: `construct`, gizmos and handles

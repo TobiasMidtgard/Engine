@@ -39,6 +39,7 @@ struct Maps {
     paint_u: vec4<f32>,      // its column axis, texels per side
     paint_v: vec4<f32>,      // its row axis, 1 when there is a map
     paint_up: vec4<f32>,     // the home spot's up
+    deform_base: vec4<f32>,  // the deformation window's start in its texture: share, cells
 };
 
 const C_LUSH: u32 = 0u;
@@ -153,8 +154,15 @@ fn planet_up(p: PlanetGpu, rel: vec3<f32>) -> vec3<f32> {
     return p.rot[1].xyz;
 }
 
+// Window coordinates (0..1 across the deformation grid's window) of a camera-relative point.
 fn deform_uv(rel: vec3<f32>) -> vec2<f32> {
     return (rel.xz - maps.deform.xy) / (maps.deform.z * maps.deform.w);
+}
+
+// Where window coordinates are in the deformation textures: the window wraps around in them
+// (the sampler repeats, so filtering across the wrap is seamless).
+fn deform_st(uv: vec2<f32>) -> vec2<f32> {
+    return uv + maps.deform_base.xy;
 }
 
 fn ellipse_d(u: f32, v: f32, cu: f32, cv: f32, ru: f32, rv: f32) -> f32 {
@@ -1126,11 +1134,11 @@ fn place_vertex(in: VertexIn, planet: PlanetGpu) -> vec3<f32> {
     if (maps.flags.x > 0.5 && in.lod.x < 1.5 && (flags & 2u) == 0u) {
         let uv = deform_uv(rel);
         let o = 0.35 * in.lod.x / (maps.deform.z * maps.deform.w);
-        var d = textureSampleLevel(deform_tex, map_sampler, uv, 0.0).r * 0.4;
-        d += textureSampleLevel(deform_tex, map_sampler, uv + vec2(o, 0.0), 0.0).r * 0.15;
-        d += textureSampleLevel(deform_tex, map_sampler, uv - vec2(o, 0.0), 0.0).r * 0.15;
-        d += textureSampleLevel(deform_tex, map_sampler, uv + vec2(0.0, o), 0.0).r * 0.15;
-        d += textureSampleLevel(deform_tex, map_sampler, uv - vec2(0.0, o), 0.0).r * 0.15;
+        var d = textureSampleLevel(deform_tex, map_sampler, deform_st(uv), 0.0).r * 0.4;
+        d += textureSampleLevel(deform_tex, map_sampler, deform_st(uv + vec2(o, 0.0)), 0.0).r * 0.15;
+        d += textureSampleLevel(deform_tex, map_sampler, deform_st(uv - vec2(o, 0.0)), 0.0).r * 0.15;
+        d += textureSampleLevel(deform_tex, map_sampler, deform_st(uv + vec2(0.0, o)), 0.0).r * 0.15;
+        d += textureSampleLevel(deform_tex, map_sampler, deform_st(uv - vec2(0.0, o)), 0.0).r * 0.15;
         rel -= up * d * inside01(uv);
     }
     // Worn paths sink a few centimeters into the ground.
@@ -1223,7 +1231,7 @@ fn fs_prepass(in: PrepassOut) -> PrepassOutput {
     let layers = surface_layers(in.rel);
     let rain_wet = saturate(layers.x);
     let duv = deform_uv(in.rel);
-    let depth = textureSampleLevel(deform_tex, map_sampler, duv, 0.0).r * inside01(duv) * maps.flags.x;
+    let depth = textureSampleLevel(deform_tex, map_sampler, deform_st(duv), 0.0).r * inside01(duv) * maps.flags.x;
     let snow = smoothstep(0.005, 0.03, layers.z);
     let pool = max(
         smoothstep(0.0005, 0.015, layers.y),
@@ -1784,11 +1792,11 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     let duv = deform_uv(in.rel);
     let in_deform = inside01(duv) * maps.flags.x * (1.0 - ocean);
     let texel = 1.0 / maps.deform.w;
-    let d0 = textureSampleLevel(deform_tex, map_sampler, duv, 0.0);
-    let dxp = textureSampleLevel(deform_tex, map_sampler, duv + vec2(texel, 0.0), 0.0).r;
-    let dxn = textureSampleLevel(deform_tex, map_sampler, duv - vec2(texel, 0.0), 0.0).r;
-    let dzp = textureSampleLevel(deform_tex, map_sampler, duv + vec2(0.0, texel), 0.0).r;
-    let dzn = textureSampleLevel(deform_tex, map_sampler, duv - vec2(0.0, texel), 0.0).r;
+    let d0 = textureSampleLevel(deform_tex, map_sampler, deform_st(duv), 0.0);
+    let dxp = textureSampleLevel(deform_tex, map_sampler, deform_st(duv + vec2(texel, 0.0)), 0.0).r;
+    let dxn = textureSampleLevel(deform_tex, map_sampler, deform_st(duv - vec2(texel, 0.0)), 0.0).r;
+    let dzp = textureSampleLevel(deform_tex, map_sampler, deform_st(duv + vec2(0.0, texel)), 0.0).r;
+    let dzn = textureSampleLevel(deform_tex, map_sampler, deform_st(duv - vec2(0.0, texel)), 0.0).r;
     let layers = surface_layers(in.rel);
 
     // Worn paths: the wear, and its slope across the path (for the sunken bed's normal).
@@ -2272,7 +2280,8 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     var ids = vec2<u32>(0u);
     if (print_fade > 0.0) {
         let n_cells = i32(maps.deform.w);
-        ids = textureLoad(print_ids, clamp(vec2<i32>(floor(duv * maps.deform.w)), vec2<i32>(0), vec2<i32>(n_cells - 1)), 0).rg;
+        let window_cell = clamp(vec2<i32>(floor(duv * maps.deform.w)), vec2<i32>(0), vec2<i32>(n_cells - 1));
+        ids = textureLoad(print_ids, (window_cell + vec2<i32>(maps.deform_base.zw)) % n_cells, 0).rg;
     }
     if (ids.x != 0u) {
         let g = in.rel.xz - maps.deform.xy;
@@ -2286,7 +2295,7 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
             let id = ids[k];
             if (id == 0u) { continue; }
             let p = prints[id - 1u];
-            let now = textureSampleLevel(deform_tex, map_sampler, p.at.xy / span, 0.0).r;
+            let now = textureSampleLevel(deform_tex, map_sampler, deform_st(p.at.xy / span), 0.0).r;
             let left = select(1.0, saturate(now / p.info.x), p.info.x > 1e-4);
             amp[k] = p.size.z * left;
             relief[k] = min(amp[k] * 0.35, 0.004) * tread_fade;
@@ -2327,7 +2336,7 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
         let rise = cell * sun.y / sun_flat;
         var print_shadow = 0.0;
         for (var k = 1; k <= 6; k++) {
-            let dk = textureSampleLevel(deform_tex, map_sampler, duv + step_uv * f32(k), 0.0).r;
+            let dk = textureSampleLevel(deform_tex, map_sampler, deform_st(duv + step_uv * f32(k)), 0.0).r;
             print_shadow = max(print_shadow, saturate((depth - dk - rise * f32(k)) / 0.004));
         }
         albedo *= 1.0 - print_shadow * 0.6 * print_fade * (1.0 - print_sharp) * saturate(sun.y * 5.0);

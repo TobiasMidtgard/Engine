@@ -639,6 +639,14 @@ fn sync_terrains(
                 .unwrap_or_default();
             let mut runtime = TerrainRuntime::new(&config, edits, version);
             runtime.edit_log = log;
+            // Solve the planet's rivers now, off the frame: the first patch or collider
+            // outside the hand-made ground needs them, and they take a second or two.
+            if runtime.source.shape.river_network_solved().is_none() {
+                let shape = runtime.source.shape.clone();
+                let _ = std::thread::Builder::new()
+                    .name("terrain-rivers".into())
+                    .spawn(move || shape.river_network());
+            }
             terrains.entries.insert(e, runtime);
             changed = true;
         }
@@ -1500,6 +1508,42 @@ mod tests {
         }
         let us = t.elapsed().as_secs_f64() * 1e6 / n as f64;
         println!("forest lookup {us:.1} µs ({wooded} of {n} wooded)");
+    }
+
+    #[test]
+    fn hand_made_ground_needs_no_rivers_and_meets_the_planet_smoothly() {
+        // A seed of its own: the solved rivers are shared by every shape with the same key.
+        let t = PlanetTerrain::earthlike(9_137)
+            .with_pad(FlatPad::default())
+            .with_overlay(8_000.0, 3_000.0, |x, z| 40.0 + 0.01 * x - 0.005 * z);
+        let shape = &t.shape;
+        let deg = 180.0 / std::f64::consts::PI / shape.radius_m;
+        let at = |m: f64| dir_from_lat_lon(40.0 + m * deg, 0.0);
+        // Inside it: its own height (world y, over the home spot 60 m above the sea; north
+        // is −z), and the rivers were never solved for it.
+        let start = std::time::Instant::now();
+        let inside = shape.sample(at(2_000.0), 1.0);
+        assert!(start.elapsed().as_secs_f64() < 0.1);
+        assert!(shape.river_network_solved().is_none());
+        assert!(
+            (inside.height - (60.0 + 40.0 + 0.005 * 2_000.0)).abs() < 0.5,
+            "{}",
+            inside.height
+        );
+        assert_eq!((inside.water, inside.lake, inside.banks), (0.0, 0.0, 0.0));
+        // Across its edge (one side all hand-made, the other a hair into the blend) the
+        // climate runs on.
+        let a = shape.sample(at(7_990.0), 1.0);
+        let b = shape.sample(at(8_010.0), 1.0);
+        assert!(shape.river_network_solved().is_some());
+        assert!(
+            (a.height - b.height).abs() < 0.5,
+            "{} vs {}",
+            a.height,
+            b.height
+        );
+        assert!((a.temperature_c - b.temperature_c).abs() < 0.05);
+        assert!((a.moisture - b.moisture).abs() < 0.01);
     }
 
     #[test]

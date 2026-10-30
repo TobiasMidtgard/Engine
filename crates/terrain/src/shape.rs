@@ -534,8 +534,30 @@ impl PlanetShape {
     /// (the renderer passes twice the vertex spacing; physics and gameplay pass 0 for full
     /// detail).
     pub fn sample(&self, dir: DVec3, min_wavelength_m: f64) -> ShapeSample {
+        // The hand-made ground has no rivers of the planet's: there they are never solved
+        // (it takes a second or two, and the first frame asks for the ground underfoot).
+        if self.overlaid(dir) {
+            return self.sample_with(dir, min_wavelength_m, None);
+        }
         let rivers = self.river_network();
         self.sample_with(dir, min_wavelength_m, rivers.as_deref())
+    }
+
+    /// Whether the ground at `dir` is all hand-made (inside the overlay's blend), so the
+    /// natural landforms below it are never seen.
+    fn overlaid(&self, dir: DVec3) -> bool {
+        self.overlay_skips()
+            && self
+                .overlay
+                .as_ref()
+                .and_then(|o| o.sample(dir.normalize(), self.radius_m))
+                .is_some_and(|(t, _)| t >= 1.0)
+    }
+
+    /// Whether the overlay replaces everything it covers: nothing but the climate is kept
+    /// from below (craters and maria darken the ground under it too).
+    fn overlay_skips(&self) -> bool {
+        self.maria <= 0.0 && self.crater_max_radius_m <= 0.0
     }
 
     /// The rivers of this shape, solved the first time they are asked for (`None` on worlds
@@ -550,12 +572,23 @@ impl PlanetShape {
         )
     }
 
+    /// The rivers if they are solved already: `Some(None)` on worlds without them, `None`
+    /// while they are still to be solved.
+    pub fn river_network_solved(&self) -> Option<Option<Arc<Rivers>>> {
+        if !self.rivers || !self.ocean || self.erosion <= 0.0 {
+            return Some(None);
+        }
+        self.river_cache.solved(self.river_key()).map(Some)
+    }
+
     /// What the rivers depend on: the shape's large landforms, climate, pads and overlay.
     pub(crate) fn river_key(&self) -> u64 {
         use std::hash::{Hash, Hasher};
         let mut h = std::collections::hash_map::DefaultHasher::new();
         (self.seed, self.ocean, self.rivers, self.pads.len()).hash(&mut h);
-        let mut values = vec![
+        // (Asked by every sample: hashed as it goes, nothing allocated.)
+        let mut put = |v: f64| v.to_bits().hash(&mut h);
+        for v in [
             self.radius_m,
             self.ocean_fraction,
             self.continent_scale_m,
@@ -573,9 +606,11 @@ impl PlanetShape {
             self.climate.wetness as f64,
             self.climate.circulation as f64,
             self.climate.substellar as u8 as f64,
-        ];
+        ] {
+            put(v);
+        }
         for p in &self.pads {
-            values.extend([
+            for v in [
                 p.lat_deg,
                 p.lon_deg,
                 p.radius_m,
@@ -586,14 +621,15 @@ impl PlanetShape {
                 p.mountain_distance_m,
                 p.sea_azimuth_deg,
                 p.sea_distance_m,
-            ]);
+            ] {
+                put(v);
+            }
         }
         if let Some(o) = &self.overlay {
             let q = o.rotation;
-            values.extend([o.radius_m, o.blend_m, q.x, q.y, q.z, q.w]);
-        }
-        for v in values {
-            v.to_bits().hash(&mut h);
+            for v in [o.radius_m, o.blend_m, q.x, q.y, q.z, q.w] {
+                put(v);
+            }
         }
         h.finish()
     }
@@ -653,6 +689,10 @@ impl PlanetShape {
         };
 
         // Pads lay out the land around them: a continent, a coast, uplands and a range.
+        // The hand-made ground around the home spot, where there is one. Where it covers
+        // the ground entirely, only the continents (for the climate) are worked out below.
+        let overlay_hit = self.overlay.as_ref().and_then(|o| o.sample(dir, r));
+        let overlaid = self.overlay_skips() && overlay_hit.is_some_and(|(t, _)| t >= 1.0);
         let mut calm = 1.0f64;
         let mut range_mask = 0.0f64;
         let mut range_h = D::ZERO;
@@ -721,7 +761,7 @@ impl PlanetShape {
             cl = (cl + continent * (1.0 - sea)).lerp(design, region);
             cl = cl.lerp(open_sea, sea);
             // The range: a bent crest line with passes; spurs and valleys run down from it.
-            if pad.mountains > 0.0 {
+            if pad.mountains > 0.0 && !overlaid {
                 let bend = fbm(45_000.0, s ^ 0x7C, 3.0, 3, 0.5);
                 let crest = (1.0 + 0.4 * bend) * pad.mountain_distance_m;
                 let x = (mu - crest) / 11_000.0;
@@ -780,6 +820,13 @@ impl PlanetShape {
                     range_h = range_h + h;
                 }
             }
+        }
+
+        if overlaid {
+            let (_, ground) = overlay_hit.expect("overlaid");
+            let mut scratch = ground;
+            let marks = self.landforms.apply(dir, r, finest, s, &mut scratch);
+            return self.climate_sample(p, dir, cl.v, ground, marks.ice, 0.0, [0.0; 3], finest);
         }
 
         let (base, coast) = if self.ocean {
@@ -981,13 +1028,42 @@ impl PlanetShape {
             banks *= 1.0 - w;
         }
         // A hand-made ground replaces all of the above around the home spot.
-        if let Some((t, ground)) = self.overlay.as_ref().and_then(|o| o.sample(dir, r)) {
+        if let Some((t, ground)) = overlay_hit {
             h = lerp(h, ground, t);
             water *= 1.0 - t;
             lake *= 1.0 - t;
             banks *= 1.0 - t;
         }
 
+        self.climate_sample(
+            p,
+            dir,
+            cl.v,
+            h,
+            marks.ice,
+            mare,
+            [water, lake, banks],
+            finest,
+        )
+    }
+
+    /// The climate at `dir` (`p` on the sphere) over ground `h` above sea level, and the
+    /// sample with it. `cont` is the continent field (coast at 0), `ice` how much of a polar
+    /// cap lies here, then the river water, lake and banks; `finest` the smallest wavelength.
+    #[allow(clippy::too_many_arguments)]
+    fn climate_sample(
+        &self,
+        p: DVec3,
+        dir: DVec3,
+        cont: f64,
+        h: f64,
+        ice: f64,
+        mare: f32,
+        [water, lake, banks]: [f64; 3],
+        finest: f64,
+    ) -> ShapeSample {
+        let s = self.seed;
+        let octaves_for = |scale: f64, max: f64| ((scale / finest).log2() + 1.0).clamp(0.0, max);
         // Climate.
         let c = &self.climate;
         let lat = c.climate_latitude(dir);
@@ -1000,18 +1076,18 @@ impl PlanetShape {
             temperature_c += 9.0 * c.circulation * currents * smooth(0.0, 300.0, -h) as f32;
         }
         // Polar caps hold their ice whatever the latitude says.
-        let temperature_c = temperature_c + (POLAR_ICE_C - temperature_c) * marks.ice as f32;
+        let temperature_c = temperature_c + (POLAR_ICE_C - temperature_c) * ice as f32;
         // Wet and dry regions, and woods and fields between them.
         let wet_noise = (noise::fbm(p / 900_000.0, s ^ 0x71, 4, 0.5)
             + noise::fbm_smooth(p / 40_000.0, s ^ 0x72, octaves_for(40_000.0, 3.0), 0.5) * 0.7)
             as f32;
         let coastal = if self.ocean {
-            (1.0 - smooth(0.05, 0.5, cl.v)) as f32 * 0.2
+            (1.0 - smooth(0.05, 0.5, cont)) as f32 * 0.2
         } else {
             0.0
         };
         let belts = if c.circulation > 0.0 {
-            c.circulation * self.circulation(p, dir, lat, cl.v) as f32
+            c.circulation * self.circulation(p, dir, lat, cont) as f32
         } else {
             0.0
         };

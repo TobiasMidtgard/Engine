@@ -40,6 +40,11 @@ pub struct StoryFacts {
     pub visits: BTreeMap<String, u32>,
     /// `<<once>>` lines, options and blocks that have run (`file:line`).
     pub once: Vec<String>,
+    /// Skill checks rolled (`file:line` of the option): `{"shut": skill}` for a white check
+    /// that failed at that skill (open again once it is higher), `{"red": true}` for a red one.
+    pub checks: BTreeMap<String, Json>,
+    /// Checks failed in a row (each is +1 luck on the next, while luck is on).
+    pub luck: u32,
     /// Changes whenever any of it does.
     #[serde(skip)]
     pub version: u64,
@@ -67,6 +72,72 @@ impl StoryFacts {
         if !self.values.contains_key(name) {
             self.set(name, value);
         }
+    }
+}
+
+// ------------------------------------------------------------------------------ checks
+
+/// How skill checks roll (scripting-research.md §29), set by the game or `story.settings`.
+#[derive(Resource, Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct StorySettings {
+    /// "2d6" (Disco Elysium: double six passes, double one fails) or "d20" (Baldur's Gate 3:
+    /// a natural 20 passes, a natural 1 fails).
+    pub dice: String,
+    /// "easy", "normal" or "hard": −2, 0 or +2 on every check's difficulty.
+    pub difficulty: String,
+    /// +1 on a check for each one failed in a row before it (Karmic Dice, shown).
+    pub luck: bool,
+}
+
+impl Default for StorySettings {
+    fn default() -> Self {
+        Self {
+            dice: "2d6".into(),
+            difficulty: "normal".into(),
+            luck: true,
+        }
+    }
+}
+
+impl StorySettings {
+    /// What the difficulty setting adds to every check's difficulty.
+    pub fn shift(&self) -> f64 {
+        match self.difficulty.as_str() {
+            "easy" => -2.0,
+            "hard" => 2.0,
+            _ => 0.0,
+        }
+    }
+}
+
+/// The chance (0..1) that `dice` ("2d6" or "d20") plus `modifier` reaches `target`, with the
+/// automatic pass and fail at the top and bottom of the dice, counted over every way they fall.
+pub fn check_chance(dice: &str, modifier: f64, target: f64) -> f64 {
+    if dice == "d20" {
+        let pass = (1..=20)
+            .filter(|&r| r == 20 || (r != 1 && r as f64 + modifier >= target))
+            .count();
+        return pass as f64 / 20.0;
+    }
+    let mut pass = 0;
+    for a in 1..=6 {
+        for b in 1..=6 {
+            if (a == 6 && b == 6) || (!(a == 1 && b == 1) && (a + b) as f64 + modifier >= target) {
+                pass += 1;
+            }
+        }
+    }
+    pass as f64 / 36.0
+}
+
+/// A skill name as people read it: "persuade" → "Persuade", "half_truth" → "Half truth".
+pub fn skill_title(skill: &str) -> String {
+    let s = skill.replace('_', " ");
+    let mut c = s.chars();
+    match c.next() {
+        Some(f) => f.to_uppercase().chain(c).collect(),
+        None => String::new(),
     }
 }
 
@@ -415,6 +486,25 @@ pub struct NodeInfo {
     pub lines: Vec<(u32, String)>,
     /// Where it goes: (target, how: "jump", "detour" or an option's text, line).
     pub links: Vec<(String, String, u32)>,
+    /// Its options, with the spot each is walked to (`#spot:name`).
+    pub options: Vec<OptionInfo>,
+}
+
+/// An option, for the editor (the plan of a choice made by walking).
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+pub struct OptionInfo {
+    /// The line of the first option of its set (options shown together).
+    pub set: u32,
+    pub line: u32,
+    pub text: String,
+    /// `#spot:name`: picked by walking to the spot of that name.
+    pub spot: Option<String>,
+    /// `#fallback`: taken when the time to choose runs out.
+    pub fallback: bool,
+    /// `#check:skill:difficulty`: a skill check (the skill, its difficulty).
+    pub check: Option<(String, f64)>,
+    /// `#red`: a red check, rolled once.
+    pub red: bool,
 }
 
 /// A compiled `.yarn` file.
@@ -425,6 +515,14 @@ pub struct Compiled {
     /// `<<declare>>`d facts and their starting values.
     pub declares: Vec<(String, Json)>,
     pub problems: Vec<Problem>,
+}
+
+/// `persuade:8` → ("persuade", 8).
+pub fn parse_check(tag: &str) -> Option<(String, f64)> {
+    let (skill, n) = tag.split_once(':')?;
+    let ok = !skill.is_empty() && skill.chars().all(|c| c.is_alphanumeric() || c == '_');
+    let n = n.trim().parse::<f64>().ok()?;
+    ok.then(|| (skill.to_string(), n))
 }
 
 /// One line of the body, split up.
@@ -638,8 +736,13 @@ impl Out {
 enum Open {
     /// `<<if>>` or `<<once>>`: whether `<<else>>` was seen.
     If { line: u32, once: bool },
-    /// Options (or a line group) at this indent, inside an item's body now.
-    Choices { indent: usize, group: bool },
+    /// Options (or a line group) at this indent, inside an item's body now; `start` is the
+    /// first one's line.
+    Choices {
+        indent: usize,
+        group: bool,
+        start: u32,
+    },
 }
 
 /// The compiled module's first statement.
@@ -813,7 +916,7 @@ pub fn compile_yarn(text: &str, path: &str) -> Compiled {
             // round): `=> Back again?` then `-> Ask`.
             let group_item = matches!(body, Body::Group { .. });
             if is_item
-                && matches!(stack.last(), Some(Open::Choices { indent: at, group })
+                && matches!(stack.last(), Some(Open::Choices { indent: at, group, .. })
                     if *at == indent && *group != group_item)
             {
                 close_choices(&mut out, &mut stack, indent, n);
@@ -860,7 +963,7 @@ pub fn compile_yarn(text: &str, path: &str) -> Compiled {
                     tags,
                 } => {
                     info.lines.push((n, format!("-> {text}")));
-                    let open = matches!(stack.last(), Some(Open::Choices { indent: at, group: false }) if *at == indent);
+                    let open = matches!(stack.last(), Some(Open::Choices { indent: at, group: false, .. }) if *at == indent);
                     if open {
                         out.put(n, "end)");
                     } else {
@@ -868,6 +971,41 @@ pub fn compile_yarn(text: &str, path: &str) -> Compiled {
                         stack.push(Open::Choices {
                             indent,
                             group: false,
+                            start: n,
+                        });
+                    }
+                    let set = match stack.last() {
+                        Some(Open::Choices { start, .. }) => *start,
+                        _ => n,
+                    };
+                    let tag = |key: &str| {
+                        tags.iter().find_map(|t| {
+                            if t == key {
+                                Some(String::new())
+                            } else {
+                                t.strip_prefix(key)
+                                    .and_then(|r| r.strip_prefix(':'))
+                                    .map(str::to_string)
+                            }
+                        })
+                    };
+                    info.options.push(OptionInfo {
+                        set,
+                        line: n,
+                        text: text.clone(),
+                        spot: tag("spot").filter(|s| !s.is_empty()),
+                        fallback: tag("fallback").is_some(),
+                        check: tag("check").and_then(|c| parse_check(&c)),
+                        red: tag("red").is_some(),
+                    });
+                    if let Some(c) = tag("check")
+                        && parse_check(&c).is_none()
+                    {
+                        problems.push(Problem {
+                            line: n,
+                            message: format!(
+                                "#check:{c}: write #check:skill:difficulty, like #check:persuade:8"
+                            ),
                         });
                     }
                     let t = interpolate(&text).unwrap_or_else(|e| {
@@ -914,7 +1052,7 @@ pub fn compile_yarn(text: &str, path: &str) -> Compiled {
                             None => format!("=> {text}"),
                         },
                     ));
-                    let open = matches!(stack.last(), Some(Open::Choices { indent: at, group: true }) if *at == indent);
+                    let open = matches!(stack.last(), Some(Open::Choices { indent: at, group: true, .. }) if *at == indent);
                     if open {
                         out.put(n, "end)");
                     } else {
@@ -922,6 +1060,7 @@ pub fn compile_yarn(text: &str, path: &str) -> Compiled {
                         stack.push(Open::Choices {
                             indent,
                             group: true,
+                            start: n,
                         });
                     }
                     let score = cond.as_deref().map_or(0, specificity) + u32::from(once);
@@ -1061,7 +1200,10 @@ fn guard(
 
 /// Closes the option groups at or right of `indent`: their last body, then the pick.
 fn close_choices(out: &mut Out, stack: &mut Vec<Open>, indent: usize, n: u32) {
-    while let Some(Open::Choices { indent: at, group }) = stack.last() {
+    while let Some(Open::Choices {
+        indent: at, group, ..
+    }) = stack.last()
+    {
         if *at < indent {
             break;
         }
@@ -1246,6 +1388,11 @@ fn command(
                 })
                 .collect();
             info.lines.push((n, format!("<<{cmd}>>")));
+            if (word == "bark" || word == "barks")
+                && let Some(target) = rest.split_whitespace().next()
+            {
+                info.links.push((target.to_string(), word.to_string(), n));
+            }
             out.put(
                 n,
                 &format!(
@@ -1862,7 +2009,8 @@ pub struct RunInfo {
     pub text: String,
     /// The options shown now (their text).
     pub options: Vec<String>,
-    /// What it waits for: "options", "reading", "command", "wait" or "".
+    /// What it waits for: "options", "spots" (a choice made by walking), "reading", "until",
+    /// "time" or "".
     pub waiting: String,
     /// The nodes it went through, in order.
     pub taken: Vec<String>,
@@ -1870,6 +2018,61 @@ pub struct RunInfo {
     pub lines: Vec<RunLine>,
     pub done: bool,
     pub error: Option<String>,
+    /// Barks (`<<barks>>`, `dialogue.bark`): said over the speakers' heads while play goes on.
+    pub bark: bool,
+    /// The skill checks among the options shown now.
+    pub checks: Vec<CheckInfo>,
+    /// Options left out for now: white checks failed, until the skill is higher.
+    pub shut: Vec<ShutInfo>,
+    /// The last check rolled.
+    pub roll: Option<RollInfo>,
+}
+
+/// A skill check on an option (`#check:persuade:8`), as the player sees it.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CheckInfo {
+    /// The option (1 is the first).
+    pub option: usize,
+    pub skill: String,
+    /// As written, and after the difficulty setting.
+    pub difficulty: f64,
+    pub target: f64,
+    /// The chooser's skill.
+    pub value: f64,
+    /// Everything else added: (amount, why).
+    pub bonuses: Vec<(f64, String)>,
+    /// "2d6" or "d20".
+    pub dice: String,
+    pub chance: f64,
+    pub red: bool,
+}
+
+/// An option a failed white check keeps shut.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ShutInfo {
+    pub text: String,
+    pub skill: String,
+    /// It opens once the skill is above this.
+    pub above: f64,
+}
+
+/// A check rolled.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RollInfo {
+    pub skill: String,
+    pub option: String,
+    /// The dice (none when the result was forced or the conversation screen rolled).
+    pub dice: Vec<u32>,
+    /// Skill and bonuses.
+    pub modifier: f64,
+    pub total: f64,
+    pub target: f64,
+    pub passed: bool,
+    /// How it was decided when not by these dice: "forced", "screen".
+    pub how: String,
 }
 
 /// A line said in a conversation, or an option picked.
@@ -1880,6 +2083,9 @@ pub struct RunLine {
     pub text: String,
     /// The player picked this option.
     pub choice: bool,
+    /// A check's roll (`text` says it; `passed` is how it went).
+    pub roll: bool,
+    pub passed: bool,
     /// The .yarn line.
     pub line: u32,
 }
@@ -1889,6 +2095,8 @@ pub struct RunLine {
 pub struct StoryRuns {
     pub runs: Vec<RunInfo>,
     picks: HashMap<u64, usize>,
+    /// Checks forced to pass or fail with a pick (`story.choose {pass}`).
+    forced: HashMap<u64, bool>,
     stops: Vec<u64>,
     /// The last id given out (ids stay unique when Stop drops the script VM).
     next_id: u64,
@@ -1901,14 +2109,180 @@ impl StoryRuns {
         self.runs.iter().find(|r| r.id == id)
     }
 
-    /// The newest conversation still going.
+    /// The newest conversation still going (not a bark).
     pub fn current(&self) -> Option<&RunInfo> {
-        self.runs.iter().rev().find(|r| !r.done)
+        self.runs.iter().rev().find(|r| !r.done && !r.bark)
     }
 
     /// Picks option `index` (from 1) in conversation `id`.
     pub fn choose(&mut self, id: u64, index: usize) {
         self.picks.insert(id, index);
+    }
+
+    /// Picks option `index`, its check (if it has one) passing or failing as `pass` says.
+    pub fn choose_forced(&mut self, id: u64, index: usize, pass: Option<bool>) {
+        self.picks.insert(id, index);
+        match pass {
+            Some(p) => self.forced.insert(id, p),
+            None => self.forced.remove(&id),
+        };
+    }
+}
+
+// ---------------------------------------------------------------------------------- barks
+
+/// A bark line being said: a speech bubble over its speaker for a few seconds.
+#[derive(Clone, Debug, Serialize)]
+pub struct BarkLine {
+    /// The bark's run (`StoryRuns`).
+    pub run: u64,
+    pub speaker: String,
+    #[serde(skip)]
+    pub entity: Option<Entity>,
+    pub text: String,
+    /// Real seconds it has been up, and how long it stays.
+    pub age: f32,
+    pub secs: f32,
+    #[serde(skip)]
+    marker: Option<Entity>,
+}
+
+/// The barks being said now (the UI's world markers show them in the game, the editor draws
+/// them in its view).
+#[derive(Resource, Default)]
+pub struct StoryBarks {
+    pub lines: Vec<BarkLine>,
+    /// Changes whenever a line comes or goes.
+    pub version: u64,
+}
+
+/// The entity a line's speaker names: one of `owner`'s descendants of that name, else the
+/// first in the world.
+fn speaker_entity(world: &mut World, name: &str, owner: Option<Entity>) -> Option<Entity> {
+    if let Some(o) = owner {
+        let mut stack = vec![o];
+        while let Some(e) = stack.pop() {
+            if world.get::<Name>(e).map(|n| n.as_str()) == Some(name) {
+                return Some(e);
+            }
+            if let Some(ch) = world.get::<Children>(e) {
+                stack.extend(ch.iter());
+            }
+        }
+    }
+    named(world, name)
+}
+
+/// `speaker` says `text` for `secs` real seconds, over their head (over `owner` when no one
+/// has that name); a line they were still saying goes.
+pub fn bark_say(
+    world: &mut World,
+    run: u64,
+    speaker: &str,
+    text: &str,
+    secs: f32,
+    owner: Option<Entity>,
+) {
+    let entity = speaker_entity(world, speaker, owner).or(owner);
+    let gone: Vec<Option<Entity>> = {
+        let mut barks = world.get_resource_or_insert_with(StoryBarks::default);
+        let mut gone = Vec::new();
+        barks.lines.retain(|l| {
+            let same = l.entity.is_some() && l.entity == entity || l.speaker == speaker;
+            if same {
+                gone.push(l.marker);
+            }
+            !same
+        });
+        gone
+    };
+    for m in gone.into_iter().flatten() {
+        if let Ok(e) = world.get_entity_mut(m) {
+            e.despawn();
+        }
+    }
+    let at = entity.and_then(|e| crate::cutscene::world_pose(world, e).map(|t| t.translation));
+    let has_markers = world
+        .get_resource::<engine_core::registry::ApiRegistry>()
+        .is_some_and(|r| r.get("hud.marker").is_some());
+    let marker = match at {
+        Some(p) if has_markers => call_api(
+            world,
+            "hud.marker",
+            json!({
+                "title": speaker,
+                "subtitle": text,
+                "icon": "dot",
+                "color": "#ece6d6",
+                "position": [p.x, p.y + 2.05, p.z],
+                "distance": false,
+                "always": true,
+            }),
+        )
+        .ok()
+        .and_then(|out| out["entity"].as_u64())
+        .and_then(Entity::try_from_bits),
+        _ => None,
+    };
+    let mut barks = world.get_resource_or_insert_with(StoryBarks::default);
+    barks.lines.push(BarkLine {
+        run,
+        speaker: speaker.to_string(),
+        entity,
+        text: text.to_string(),
+        age: 0.0,
+        secs: secs.max(0.5),
+        marker,
+    });
+    barks.version += 1;
+}
+
+/// Lines whose time is up go (every frame, real time).
+fn age_barks(world: &mut World) {
+    let dt = world
+        .get_resource::<engine_core::prelude::Time>()
+        .map(|t| t.real_delta_secs())
+        .unwrap_or(1.0 / 60.0)
+        .min(0.1);
+    let Some(mut barks) = world.get_resource_mut::<StoryBarks>() else {
+        return;
+    };
+    if barks.lines.is_empty() {
+        return;
+    }
+    let mut gone = Vec::new();
+    barks.lines.retain_mut(|l| {
+        l.age += dt;
+        let keep = l.age < l.secs;
+        if !keep {
+            gone.push(l.marker);
+        }
+        keep
+    });
+    if !gone.is_empty() {
+        barks.version += 1;
+    }
+    for m in gone.into_iter().flatten() {
+        if let Ok(e) = world.get_entity_mut(m) {
+            e.despawn();
+        }
+    }
+}
+
+/// Every bark goes at once (the editor's Stop, scripts held).
+pub fn clear_barks(world: &mut World) {
+    let Some(mut barks) = world.get_resource_mut::<StoryBarks>() else {
+        return;
+    };
+    if barks.lines.is_empty() {
+        return;
+    }
+    let all = std::mem::take(&mut barks.lines);
+    barks.version += 1;
+    for m in all.into_iter().filter_map(|l| l.marker) {
+        if let Ok(e) = world.get_entity_mut(m) {
+            e.despawn();
+        }
     }
 }
 
@@ -2102,7 +2476,10 @@ pub(crate) fn install(lua: &mlua::Lua) -> mlua::Result<()> {
             let j = crate::convert::to_json(&Value::Table(info))?;
             with_world_as(lua, "dialogue", |w| {
                 let mut runs = w.get_resource_or_insert_with(StoryRuns::default);
-                let mut r: RunInfo = serde_json::from_value(j).unwrap_or_default();
+                let mut r: RunInfo = serde_json::from_value(j).unwrap_or_else(|e| {
+                    engine_core::log::warn!("story: conversation {id}'s report: {e}");
+                    RunInfo::default()
+                });
                 r.id = id;
                 match runs.runs.iter_mut().find(|x| x.id == id) {
                     Some(x) => *x = r,
@@ -2129,9 +2506,114 @@ pub(crate) fn install(lua: &mlua::Lua) -> mlua::Result<()> {
                 let mut runs = w.get_resource_or_insert_with(StoryRuns::default);
                 let stop = runs.stops.contains(&id);
                 runs.stops.retain(|s| *s != id);
-                Ok((runs.picks.remove(&id), stop))
+                let pick = runs.picks.remove(&id);
+                let forced = if pick.is_some() {
+                    runs.forced.remove(&id)
+                } else {
+                    None
+                };
+                Ok((pick, stop, forced))
             })
         })?,
+    )?;
+    g.set(
+        "__story_check_get",
+        lua.create_function(|lua, key: String| {
+            let v = read_world_as(lua, "dialogue", |w| {
+                Ok(w.get_resource::<StoryFacts>()
+                    .and_then(|f| f.checks.get(&key).cloned()))
+            })?;
+            match v {
+                Some(v) => json_to_lua(lua, &v),
+                None => Ok(Value::Nil),
+            }
+        })?,
+    )?;
+    g.set(
+        "__story_check_set",
+        lua.create_function(|lua, (key, v): (String, Value)| {
+            let j = crate::convert::to_json(&v)?;
+            with_world_as(lua, "dialogue", |w| {
+                let mut f = w.get_resource_or_insert_with(StoryFacts::default);
+                if j.is_null() {
+                    f.checks.remove(&key);
+                } else {
+                    f.checks.insert(key, j);
+                }
+                f.version += 1;
+                Ok(())
+            })
+        })?,
+    )?;
+    g.set(
+        "__story_luck",
+        lua.create_function(|lua, op: String| {
+            with_world_as(lua, "dialogue", |w| {
+                let mut f = w.get_resource_or_insert_with(StoryFacts::default);
+                match op.as_str() {
+                    "fail" => f.luck += 1,
+                    "pass" => f.luck = 0,
+                    _ => return Ok(f.luck),
+                }
+                f.version += 1;
+                Ok(f.luck)
+            })
+        })?,
+    )?;
+    g.set(
+        "__story_settings",
+        lua.create_function(|lua, ()| {
+            let st = read_world_as(lua, "dialogue", |w| {
+                Ok(w.get_resource::<StorySettings>()
+                    .cloned()
+                    .unwrap_or_default())
+            })?;
+            let t = lua.create_table()?;
+            t.set("dice", st.dice.clone())?;
+            t.set("difficulty", st.difficulty.clone())?;
+            t.set("luck", st.luck)?;
+            t.set("shift", st.shift())?;
+            Ok(t)
+        })?,
+    )?;
+    g.set(
+        "__story_settings_set",
+        lua.create_function(|lua, t: Table| {
+            let j = crate::convert::to_json(&Value::Table(t))?;
+            with_world_as(lua, "dialogue", |w| {
+                apply_settings(w, &j)
+                    .map(|_| ())
+                    .map_err(mlua::Error::runtime)
+            })
+        })?,
+    )?;
+    g.set(
+        "__story_real_dt",
+        lua.create_function(|lua, ()| {
+            read_world_as(lua, "dialogue", |w| {
+                Ok(w.get_resource::<engine_core::prelude::Time>()
+                    .map(|t| t.real_delta_secs() as f64)
+                    .unwrap_or(1.0 / 60.0)
+                    .min(0.1))
+            })
+        })?,
+    )?;
+    g.set(
+        "__story_bark_say",
+        lua.create_function(
+            |lua, (run, speaker, text, secs, owner): (u64, String, String, f32, Value)| {
+                let owner = match &owner {
+                    Value::UserData(ud) => {
+                        ud.borrow::<crate::entity::EntityRef>().ok().map(|e| e.0)
+                    }
+                    _ => None,
+                };
+                with_world_as(lua, "dialogue", |w| {
+                    bark_say(w, run, &speaker, &text, secs, owner);
+                    Ok(())
+                })
+            },
+        )?,
     )?;
     g.set(
         "__story_dt",
@@ -2193,8 +2675,10 @@ pub(crate) fn install(lua: &mlua::Lua) -> mlua::Result<()> {
 /// Runs the conversations one frame and ticks the quests (after the scripts).
 pub(crate) fn run_story(world: &mut World) {
     if world.contains_resource::<crate::ScriptsHeld>() {
+        clear_barks(world);
         return;
     }
+    age_barks(world);
     let now = world
         .get_resource::<engine_core::prelude::Time>()
         .map(|t| t.elapsed_secs() as f64)
@@ -2287,6 +2771,29 @@ fn send_to_journal(world: &mut World) {
     }
 }
 
+/// `{dice, difficulty, luck}` (any of them) into [`StorySettings`].
+fn apply_settings(world: &mut World, args: &Json) -> Result<StorySettings, String> {
+    let mut st = world.get_resource_or_insert_with(StorySettings::default);
+    if let Some(d) = args.get("dice").and_then(Json::as_str) {
+        if d != "2d6" && d != "d20" {
+            return Err(format!("dice \"{d}\": use \"2d6\" or \"d20\""));
+        }
+        st.dice = d.to_string();
+    }
+    if let Some(d) = args.get("difficulty").and_then(Json::as_str) {
+        if !matches!(d, "easy" | "normal" | "hard") {
+            return Err(format!(
+                "difficulty \"{d}\": use \"easy\", \"normal\" or \"hard\""
+            ));
+        }
+        st.difficulty = d.to_string();
+    }
+    if let Some(l) = args.get("luck").and_then(Json::as_bool) {
+        st.luck = l;
+    }
+    Ok(st.clone())
+}
+
 /// The entity named `name`.
 fn named(world: &mut World, name: &str) -> Option<Entity> {
     world
@@ -2354,7 +2861,8 @@ pub(crate) fn register(app: &mut engine_core::App) {
     app.register_api(
         "story.start",
         "Starts a conversation: {path: \"dialogue/keeper\", node: \"Start\", owner: \"Keeper\" \
-         (the entity whose script runs its commands), headless: false, step: false}. It shows \
+         (the entity whose script runs its commands), chooser (the entity that walks to \
+         #spot: options; the player), headless: false, step: false}. It shows \
          in the UI's conversation screen (the log with headless or without the UI module; \
          step waits after each line for story.choose) and returns its id.",
         r#"{"path": "dialogue/keeper", "node": "Start", "owner": "Keeper"}"#,
@@ -2380,6 +2888,12 @@ pub(crate) fn register(app: &mut engine_core::App) {
                 }
                 None => None,
             };
+            let chooser = match args.get("chooser").and_then(Json::as_str) {
+                Some(name) => {
+                    Some(named(world, name).ok_or_else(|| format!("there is no entity '{name}'"))?)
+                }
+                None => None,
+            };
             crate::with_runtime(world, |world, rt, _| {
                 let _lent = crate::access::lend_world(&rt.lua, world);
                 let start: mlua::Table = rt.lua.globals().get("dialogue")?;
@@ -2390,6 +2904,9 @@ pub(crate) fn register(app: &mut engine_core::App) {
                 if let Some(e) = owner {
                     opts.set("owner", crate::entity::EntityRef(e))?;
                 }
+                if let Some(e) = chooser {
+                    opts.set("chooser", crate::entity::EntityRef(e))?;
+                }
                 let h: mlua::Table = f.call((path, node, opts))?;
                 h.get::<u64>("id")
             })?
@@ -2399,10 +2916,28 @@ pub(crate) fn register(app: &mut engine_core::App) {
     );
     app.register_api(
         "story.state",
-        "The conversations: the newest one going (its node, the line shown, its options, what \
-         it waits for, the nodes it went through) and the others. {id} for one.",
+        "The conversations: the newest one going (its node, the line shown, its options and \
+         their skill checks with the odds, what it waits for, the nodes it went through, the \
+         last roll) and the others, the choices made by walking open now (spots: each \
+         option's spot, where it is, whether the player stands in it and how far its ring \
+         filled, the seconds left, who is watching), rolls shown over rings, the barks being \
+         said, and how checks roll. {id} for one.",
         "{}",
         |world, args| {
+            let spots = crate::spots::describe(world);
+            let rolls = crate::spots::describe_rolls(world);
+            let barks = world
+                .get_resource::<StoryBarks>()
+                .map(|b| json!(b.lines))
+                .unwrap_or_else(|| json!([]));
+            let settings = world
+                .get_resource::<StorySettings>()
+                .cloned()
+                .unwrap_or_default();
+            let luck = world
+                .get_resource::<StoryFacts>()
+                .map(|f| f.luck)
+                .unwrap_or(0);
             let runs = world.get_resource_or_insert_with(StoryRuns::default);
             if let Some(id) = args.get("id").and_then(Json::as_u64) {
                 return runs
@@ -2410,13 +2945,75 @@ pub(crate) fn register(app: &mut engine_core::App) {
                     .map(|r| json!(r))
                     .ok_or_else(|| format!("no conversation {id}"));
             }
-            Ok(json!({ "current": runs.current(), "all": runs.runs }))
+            Ok(json!({
+                "current": runs.current(),
+                "all": runs.runs,
+                "spots": spots,
+                "rolls": rolls,
+                "barks": barks,
+                "checks": { "settings": settings, "luck": luck },
+            }))
+        },
+    );
+    app.register_api(
+        "story.settings",
+        "How skill checks roll: {dice: \"2d6\" (Disco Elysium: double six passes, double one \
+         fails) or \"d20\" (natural 20 and 1), difficulty: \"easy\" | \"normal\" | \"hard\" \
+         (−2, 0, +2 on every difficulty), luck: true (+1 on a check for each failed in a \
+         row)}. Returns them; {} reads.",
+        r#"{"difficulty": "easy"}"#,
+        |world, args| {
+            let st = apply_settings(world, &args)?;
+            Ok(json!(st))
+        },
+    );
+    app.register_api(
+        "story.bark",
+        "Says a node's lines as barks, over each speaker's head, while play goes on: {path: \
+         \"dialogue/muster\", node: \"Murmur\", owner: \"Captain\" (whose children are \
+         looked in first for the speakers)}. Of a node group, the one that fits best. Returns \
+         its id (null when no node fits).",
+        r#"{"path": "dialogue/muster", "node": "Murmur", "owner": "Captain"}"#,
+        |world, args| {
+            let path = args
+                .get("path")
+                .and_then(Json::as_str)
+                .ok_or("pass the .yarn file as \"path\"")?
+                .to_string();
+            let node = args
+                .get("node")
+                .and_then(Json::as_str)
+                .ok_or("pass the node as \"node\"")?
+                .to_string();
+            let owner = match args.get("owner").and_then(Json::as_str) {
+                Some(name) => {
+                    Some(named(world, name).ok_or_else(|| format!("there is no entity '{name}'"))?)
+                }
+                None => None,
+            };
+            crate::with_runtime(world, |world, rt, _| {
+                let _lent = crate::access::lend_world(&rt.lua, world);
+                let d: mlua::Table = rt.lua.globals().get("dialogue")?;
+                let f: mlua::Function = d.get("bark")?;
+                let opts = rt.lua.create_table()?;
+                if let Some(e) = owner {
+                    opts.set("owner", crate::entity::EntityRef(e))?;
+                }
+                let h: Option<mlua::Table> = f.call((path, node, opts))?;
+                match h {
+                    Some(h) => h.get::<Option<u64>>("id"),
+                    None => Ok(None),
+                }
+            })?
+            .map(|id| json!({ "id": id }))
+            .map_err(|e| e.to_string())
         },
     );
     app.register_api(
         "story.choose",
         "Picks an option (1 is the first) in a conversation: {index, id}; the newest one \
-         without id. Index 0 goes on past a line of a conversation started with step.",
+         without id. Index 0 goes on past a line of a conversation started with step. \
+         {pass: true|false} decides the option's skill check instead of the dice.",
         r#"{"index": 1}"#,
         |world, args| {
             let index = args
@@ -2424,6 +3021,7 @@ pub(crate) fn register(app: &mut engine_core::App) {
                 .and_then(Json::as_u64)
                 .ok_or("pass the option as \"index\" (1 is the first)")?
                 as usize;
+            let pass = args.get("pass").and_then(Json::as_bool);
             let mut runs = world.get_resource_or_insert_with(StoryRuns::default);
             let id = match args.get("id").and_then(Json::as_u64) {
                 Some(id) => id,
@@ -2432,7 +3030,7 @@ pub(crate) fn register(app: &mut engine_core::App) {
                     .map(|r| r.id)
                     .ok_or("no conversation is going")?,
             };
-            runs.choose(id, index);
+            runs.choose_forced(id, index, pass);
             Ok(json!({ "ok": true, "id": id }))
         },
     );
@@ -2534,6 +3132,37 @@ mod tests {
             lines[4].starts_with("do local __o = S:options()"),
             "{}",
             c.luau
+        );
+    }
+
+    #[test]
+    fn options_name_their_spots_and_sets() {
+        let src = "title: Start\n---\nWho speaks?\n-> Stay <<if $a>> #spot:rank #fallback\n    \
+                   -> Inner #spot:x\n    -> Other\n-> Go #spot:front\n-> Talk\n===\n";
+        let c = compile_yarn(src, "dialogue/x.yarn");
+        assert!(c.problems.is_empty(), "{:?}", c.problems);
+        let o = &c.nodes[0].options;
+        let seen: Vec<(u32, u32, &str, Option<&str>, bool)> = o
+            .iter()
+            .map(|o| {
+                (
+                    o.set,
+                    o.line,
+                    o.text.as_str(),
+                    o.spot.as_deref(),
+                    o.fallback,
+                )
+            })
+            .collect();
+        assert_eq!(
+            seen,
+            vec![
+                (4, 4, "Stay", Some("rank"), true),
+                (5, 5, "Inner", Some("x"), false),
+                (5, 6, "Other", None, false),
+                (4, 7, "Go", Some("front"), false),
+                (4, 8, "Talk", None, false),
+            ]
         );
     }
 

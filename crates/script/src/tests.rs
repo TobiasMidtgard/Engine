@@ -5239,6 +5239,221 @@ fn conversations_run_lines_options_and_commands() {
     assert!(e.contains("dialogue/bad.yarn:3"), "{e}");
 }
 
+const GATE_YARN: &str = r#"title: Start
+---
+<<declare $skill_persuade = 1>>
+<<bonus persuade 2 "Knows his name">>
+Guard: Halt.
+-> Talk him round #check:persuade:8
+    <<if passed()>>
+        Guard: Fine, go on.
+    <<else>>
+        Guard: Nice try.
+    <<endif>>
+-> Shove past #check:might:10 #red
+    Guard: Oof. {passed()}
+-> Leave
+===
+title: Chatter
+when: $mood == "happy"
+---
+Guard: Lovely day.
+Guard: Isn't it?
+===
+title: Chatter
+when: $mood == "cross"
+---
+Guard: Hm.
+===
+"#;
+
+fn close(a: &Value, b: f64) -> bool {
+    a.as_f64().is_some_and(|a| (a - b).abs() < 1e-9)
+}
+
+/// The odds are counted over every way the dice fall, with double six and double one (or a
+/// natural 20 and 1) deciding by themselves.
+#[test]
+fn check_odds_count_every_roll() {
+    use crate::story::check_chance;
+    assert_eq!(
+        check_chance("2d6", 0.0, 13.0),
+        1.0 / 36.0,
+        "double six still passes"
+    );
+    assert_eq!(
+        check_chance("2d6", 0.0, 2.0),
+        35.0 / 36.0,
+        "double one still fails"
+    );
+    assert_eq!(check_chance("2d6", 3.0, 8.0), 30.0 / 36.0);
+    assert_eq!(check_chance("2d6", 0.0, 10.0), 6.0 / 36.0);
+    assert_eq!(check_chance("d20", 0.0, 11.0), 0.5);
+    assert_eq!(check_chance("d20", 0.0, 40.0), 0.05, "a natural 20");
+    assert_eq!(check_chance("d20", 0.0, -5.0), 0.95, "a natural 1");
+}
+
+/// Skill checks on options: their odds with the skill and bonuses in them, the result in the
+/// option's lines through passed(), a failed white check shut until the skill is higher, a
+/// red check gone once rolled, luck after a failure, and the difficulty setting.
+#[test]
+fn checks_roll_remember_and_shut() {
+    let folder = Folder::new();
+    folder.write("dialogue/gate.yarn", GATE_YARN);
+    let mut app = app_in(&folder.0);
+    app.update_n(2);
+    let start = |app: &mut App| -> u64 {
+        call_api(
+            &mut app.world,
+            "story.start",
+            json!({"path": "dialogue/gate", "headless": true}),
+        )
+        .unwrap_or_else(|e| panic!("{e}"))["id"]
+            .as_u64()
+            .unwrap()
+    };
+
+    let id = start(&mut app);
+    let now = story_now(&mut app);
+    assert_eq!(now["waiting"], "options", "{now}");
+    let talk = &now["checks"][0];
+    assert_eq!(talk["option"].as_f64(), Some(1.0), "{now}");
+    assert_eq!(talk["skill"], "persuade");
+    assert_eq!(talk["value"].as_f64(), Some(1.0));
+    assert_eq!(talk["bonuses"], json!([[2.0, "Knows his name"]]));
+    assert!(close(&talk["chance"], 30.0 / 36.0), "{talk}");
+    let shove = &now["checks"][1];
+    assert_eq!(shove["red"], true);
+    assert!(close(&shove["chance"], 6.0 / 36.0), "{shove}");
+
+    // The talk fails (decided here, not rolled): its failure lines, and it is shut.
+    call_api(
+        &mut app.world,
+        "story.choose",
+        json!({"index": 1, "pass": false}),
+    )
+    .unwrap();
+    app.update_n(2);
+    let done = story_last(&mut app, id);
+    assert_eq!(done["done"], true, "{done}");
+    assert_eq!(done["text"], "Nice try.", "{done}");
+    assert_eq!(done["roll"]["passed"], false);
+    assert_eq!(done["roll"]["how"], "forced");
+    assert!(
+        done["lines"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|l| l["roll"] == true && l["text"] == "Persuade 8: failure (decided, not rolled)"),
+        "{done}"
+    );
+
+    // Again: the talk is shut until Persuade is above 1, and luck helps the shove.
+    let id = start(&mut app);
+    let now = story_now(&mut app);
+    assert_eq!(now["options"], json!(["Shove past", "Leave"]), "{now}");
+    assert_eq!(
+        now["shut"],
+        json!([{"text": "Talk him round", "skill": "persuade", "above": 1.0}])
+    );
+    assert_eq!(now["checks"][0]["bonuses"], json!([[1.0, "Luck"]]));
+    assert!(close(&now["checks"][0]["chance"], 10.0 / 36.0), "{now}");
+    call_api(
+        &mut app.world,
+        "story.choose",
+        json!({"index": 1, "pass": true}),
+    )
+    .unwrap();
+    app.update_n(2);
+    assert_eq!(story_last(&mut app, id)["text"], "Oof. true");
+
+    // Better at persuading: the talk opens again; the shove, a red check, is gone for good,
+    // and the pass took the luck away.
+    call_api(
+        &mut app.world,
+        "story.facts",
+        json!({"set": {"skill_persuade": 2}}),
+    )
+    .unwrap();
+    call_api(
+        &mut app.world,
+        "story.settings",
+        json!({"difficulty": "hard"}),
+    )
+    .unwrap();
+    let id = start(&mut app);
+    let now = story_now(&mut app);
+    assert_eq!(now["options"], json!(["Talk him round", "Leave"]), "{now}");
+    assert_eq!(now["checks"][0]["target"].as_f64(), Some(10.0), "hard: +2");
+    assert_eq!(
+        now["checks"][0]["bonuses"],
+        json!([[2.0, "Knows his name"]])
+    );
+    // Rolled for real this time: the dice and the sum in the roll.
+    call_api(&mut app.world, "story.choose", json!({"index": 1})).unwrap();
+    app.update_n(2);
+    let done = story_last(&mut app, id);
+    let roll = &done["roll"];
+    let dice: Vec<f64> = roll["dice"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|d| d.as_f64().unwrap())
+        .collect();
+    assert_eq!(dice.len(), 2, "{roll}");
+    assert_eq!(roll["total"].as_f64(), Some(dice[0] + dice[1] + 4.0));
+    let passed = roll["passed"].as_bool().unwrap();
+    assert_eq!(
+        done["text"],
+        if passed { "Fine, go on." } else { "Nice try." },
+        "{done}"
+    );
+}
+
+/// Barks: a node group said over the speaker's head, the best fit for the facts, line after
+/// line in real time; nothing when no node fits.
+#[test]
+fn barks_say_the_best_fit_over_the_speaker() {
+    let folder = Folder::new();
+    folder.write("dialogue/gate.yarn", GATE_YARN);
+    let mut app = app_in(&folder.0);
+    app.world.spawn((Name::new("Guard"), Transform::default()));
+    app.update_n(2);
+    let bark = |app: &mut App| {
+        call_api(
+            &mut app.world,
+            "story.bark",
+            json!({"path": "dialogue/gate", "node": "Chatter", "owner": "Guard"}),
+        )
+        .unwrap_or_else(|e| panic!("{e}"))
+    };
+    let barks = |app: &mut App| {
+        call_api(&mut app.world, "story.state", json!({})).unwrap()["barks"].clone()
+    };
+    assert_eq!(bark(&mut app)["id"], Value::Null, "no node fits yet");
+    call_api(
+        &mut app.world,
+        "story.facts",
+        json!({"set": {"mood": "happy"}}),
+    )
+    .unwrap();
+    assert!(bark(&mut app)["id"].is_u64());
+    app.update_n(1);
+    let now = barks(&mut app);
+    assert_eq!(now[0]["speaker"], "Guard", "{now}");
+    assert_eq!(now[0]["text"], "Lovely day.");
+    assert!(
+        story_now(&mut app).is_null(),
+        "a bark is not a conversation going on"
+    );
+    // 1.6 s up (1.1 s + 0.05 s a letter, at least 1.6), then the next line.
+    app.update_n(52);
+    let now = barks(&mut app);
+    assert_eq!(now[0]["text"], "Isn't it?", "{now}");
+    app.update_n(60);
+    assert_eq!(barks(&mut app), json!([]));
+}
+
 const RELIC_QUEST: &str = r#"{
   "title": "The Relic",
   "start_when": "$met_priest",
@@ -5347,4 +5562,182 @@ fn the_shipped_story_files_compile() {
     book.reload(&shipped);
     assert!(book.problems.is_empty(), "{:?}", book.problems);
     assert!(book.def("sealed_bridge").is_some());
+}
+
+const YARD_YARN: &str = r#"title: Start
+---
+Guard: Where do you stand?
+<<spots 2 0.5>>
+-> Stay #spot:here #fallback
+    Guard: As you were.
+-> Go left #spot:left
+    Guard: Left it is. <<if standing_at("left")>>
+-> Go right #spot:right
+    Guard: Right it is.
+===
+
+title: Lost
+---
+Guard: Nowhere to go.
+-> Up there #spot:roof
+    Guard: Up it is.
+-> Stay
+    Guard: Fine.
+===
+"#;
+
+/// A yard with a walker standing in the spot "here", and spots "left" and "right" 3 m away.
+fn yard() -> (Folder, App, Entity) {
+    let folder = Folder::new();
+    folder.write("dialogue/yard.yarn", YARD_YARN);
+    let mut app = app_in(&folder.0);
+    app.add_message::<engine_world::Interact>();
+    let walker = app
+        .world
+        .spawn((Name::new("Walker"), Transform::from_xyz(0.0, 0.0, 0.0)))
+        .id();
+    for (name, x) in [("here", 0.0), ("left", -3.0), ("right", 3.0)] {
+        app.world.spawn((
+            Name::new(format!("Spot {name}")),
+            Transform::from_xyz(x, 0.0, 0.0),
+            crate::spots::StorySpot {
+                name: name.into(),
+                radius_m: 0.5,
+            },
+        ));
+    }
+    app.update_n(2);
+    (folder, app, walker)
+}
+
+fn walk_in_yard(app: &mut App, node: &str) -> u64 {
+    call_api(
+        &mut app.world,
+        "story.start",
+        json!({"path": "dialogue/yard", "node": node, "headless": true, "chooser": "Walker"}),
+    )
+    .unwrap_or_else(|e| panic!("{e}"))["id"]
+        .as_u64()
+        .unwrap()
+}
+
+fn rings(app: &mut App) -> usize {
+    let mut q = app.world.query::<&crate::spots::SpotRing>();
+    q.iter(&app.world).count()
+}
+
+/// Options tagged `#spot:` are picked by walking: standing in a ring for a moment (not the one
+/// you stood in when the choice opened), E on a ring, the fallback when time runs out, or
+/// `story.choose`; the world slows meanwhile while the walker keeps its speed, and everything
+/// the choice put up goes when it lands.
+#[test]
+fn choices_are_made_by_walking_to_spots() {
+    let (_folder, mut app, walker) = yard();
+    let id = walk_in_yard(&mut app, "Start");
+    app.update_n(1);
+    let now = story_last(&mut app, id);
+    assert_eq!(now["waiting"], "spots", "{now}");
+    let spots = call_api(&mut app.world, "story.state", json!({})).unwrap()["spots"].clone();
+    assert_eq!(spots[0]["prompt"], "Where do you stand?", "{spots}");
+    assert_eq!(spots[0]["options"][0]["spot"], "here");
+    assert_eq!(spots[0]["options"][0]["inside"], true);
+    assert_eq!(spots[0]["options"][0]["fallback"], true);
+    assert!(
+        rings(&mut app) >= 3 * 5,
+        "a ring, its discs and light for each spot"
+    );
+    // Standing where it opened picks nothing; the world slows, the walker doesn't.
+    app.update_n(12);
+    assert_eq!(story_last(&mut app, id)["waiting"], "spots");
+    assert!(app.world.resource::<TimeDilation>().factor() < 0.9);
+    assert_eq!(
+        app.world
+            .get::<LocalTimeScale>(walker)
+            .map(|l| l.ignore_world_dilation),
+        Some(true)
+    );
+    // Over to the left: in its ring for 0.7 s.
+    app.world.get_mut::<Transform>(walker).unwrap().translation = DVec3::new(-2.8, 0.0, 0.2);
+    app.update_n(10);
+    assert_eq!(
+        story_last(&mut app, id)["waiting"],
+        "spots",
+        "still filling"
+    );
+    app.update_n(16);
+    let done = story_last(&mut app, id);
+    assert_eq!(done["done"], true, "{done}");
+    assert_eq!(done["text"], "Left it is.", "standing_at sees it");
+    // The rings, the view and the slow motion go; the walker's clock is its own again.
+    app.update_n(30);
+    assert_eq!(rings(&mut app), 0);
+    assert!(app.world.get::<LocalTimeScale>(walker).is_none());
+    let mut views = app.world.query::<&crate::spots::SpotView>();
+    assert_eq!(views.iter(&app.world).count(), 0);
+    app.update_n(15);
+    assert!(app.world.resource::<TimeDilation>().factor() > 0.99);
+
+    // Nothing chosen in two seconds: the fallback.
+    app.world.get_mut::<Transform>(walker).unwrap().translation = DVec3::ZERO;
+    let id = walk_in_yard(&mut app, "Start");
+    app.update_n(70);
+    let done = story_last(&mut app, id);
+    assert_eq!(done["text"], "As you were.", "{done}");
+
+    // E on the right ring.
+    app.update_n(30);
+    let id = walk_in_yard(&mut app, "Start");
+    app.update_n(1);
+    let ring = {
+        let mut q = app
+            .world
+            .query::<(Entity, &crate::spots::SpotRing, &engine_world::Interactable)>();
+        q.iter(&app.world)
+            .find(|(_, r, _)| r.option == 2)
+            .map(|(e, _, i)| (e, i.verb.clone()))
+            .unwrap()
+    };
+    assert_eq!(ring.1, "Go right");
+    app.world.write_message(engine_world::Interact {
+        actor: walker,
+        target: ring.0,
+        from: DVec3::ZERO,
+    });
+    app.update_n(2);
+    assert_eq!(story_last(&mut app, id)["text"], "Right it is.");
+
+    // story.choose still picks.
+    app.update_n(30);
+    let id = walk_in_yard(&mut app, "Start");
+    app.update_n(1);
+    call_api(
+        &mut app.world,
+        "story.choose",
+        json!({"index": 3, "id": id}),
+    )
+    .unwrap();
+    app.update_n(2);
+    assert_eq!(story_last(&mut app, id)["text"], "Right it is.");
+    app.update_n(30);
+    assert_eq!(rings(&mut app), 0);
+
+    // A spot that isn't there: the options show as a menu instead.
+    let id = walk_in_yard(&mut app, "Lost");
+    app.update_n(1);
+    assert_eq!(story_last(&mut app, id)["waiting"], "options");
+    assert!(
+        logs(&mut app)
+            .iter()
+            .any(|l| l.contains("no StorySpot named 'roof'")),
+        "{:?}",
+        logs(&mut app)
+    );
+}
+
+/// What scripts printed (and warned), each entry as text.
+fn logs(app: &mut App) -> Vec<String> {
+    let log = call_api(&mut app.world, "script.log", json!({})).unwrap();
+    log.as_array()
+        .map(|a| a.iter().map(|l| l.to_string()).collect())
+        .unwrap_or_default()
 }

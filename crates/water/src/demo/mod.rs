@@ -854,6 +854,16 @@ fn stream_bed_heights() -> Vec<f32> {
     bed
 }
 
+/// One of [`ROCKS`]' shapes for a stone `size` meters across (`k` picks among those of its
+/// size class), and the size it was built at.
+pub(crate) fn rock_for(size: f32, k: usize) -> (usize, f32) {
+    if size < 1.5 {
+        (k % SMALL_ROCKS, 1.0)
+    } else {
+        (SMALL_ROCKS + k % (ROCKS.len() - SMALL_ROCKS), 2.0)
+    }
+}
+
 /// A boulder of the test area: where it sits (meters from the area's center), its turn and
 /// its stretched rock.
 #[derive(Clone)]
@@ -896,11 +906,7 @@ fn boulder_layout(rocks: &[Vec<Part>]) -> Vec<Boulder> {
             }
         };
         // One of the shapes for its size class, stretched a little so no two look alike.
-        let (shape, built) = if size < 1.5 {
-            (k % SMALL_ROCKS, 1.0)
-        } else {
-            (SMALL_ROCKS + k % (ROCKS.len() - SMALL_ROCKS), 2.0)
-        };
+        let (shape, built) = rock_for(size, k);
         let stretch = Vec3::new(
             rng.range(0.85, 1.15),
             rng.range(0.8, 1.1),

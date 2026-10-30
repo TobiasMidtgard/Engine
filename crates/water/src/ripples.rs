@@ -20,12 +20,13 @@
 //! each other's wakes, floating things drift in them), and the renderer uploads them as
 //! textures each frame.
 
-use engine_core::math::{DVec2, DVec3, Vec2, Vec3};
+use engine_core::math::{DVec2, DVec3, Vec2, Vec3, smoothstep};
 use engine_core::tasks::ComputeTaskPool;
 use engine_world::WorldShift;
 use std::sync::Arc;
 
 use crate::surface::{CoarseBed, SurfaceLink};
+use crate::trail::Trail;
 
 /// Cells at the grid edge where waves are absorbed instead of reflected.
 const SPONGE: usize = 10;
@@ -39,9 +40,10 @@ const CURRENT: f32 = 0.15;
 /// A tile whose foam all stays under this has none.
 const FOAM_STILL: f32 = 2e-3;
 /// Seconds for the bubbles churned under foam to rise out and fade to a third. White foam
-/// on fresh water bursts in about 2.5 s, the bubble cloud under it lingers about four times
-/// as long (Callaghan, Deane and Stokes 2016; wake bubble plumes, Trevorrow et al. 1994).
-const BUBBLE_LIFE_S: f32 = 10.0;
+/// on fresh water bursts in about 2.5 s; the bubble cloud under it lingers far longer
+/// (Callaghan, Deane and Stokes 2016; wake bubble plumes last minutes, Trevorrow et al. 1994,
+/// Thorpe): a motorboat's pale trail runs a hundred meters behind it.
+const BUBBLE_LIFE_S: f32 = 20.0;
 /// The dispersive surface's crests break white from this slope on, fully at `BREAK_FULL`
 /// (Stokes's steepest wave turns its crest at 30°, a slope of 0.58; real crests spill well
 /// before, and the grid's quarter-meter cells round the sharpest off: Barthelemy et al. 2018).
@@ -54,6 +56,8 @@ const BREAK_DEPTH_RATIO: f32 = 0.39;
 const BREAK_FOAM: f32 = 2.0;
 /// Bubbles under this are gone.
 const BUBBLE_STILL: f32 = 0.01;
+/// Foam or bubbles under this aren't handed down to the trail.
+const TRAIL_LEAST: f32 = 0.01;
 /// How fast the bubble cloud spreads sideways, m²/s: the wake's turbulence mixes it out, so
 /// the trail widens by about half a meter each side as it fades.
 const BUBBLE_SPREAD: f32 = 0.015;
@@ -129,6 +133,9 @@ pub struct RippleField {
     pub foam: Vec<f32>,
     /// Bubbles churned under the foam, 0..1: they outlast it, a pale cloud fading behind.
     pub bubbles: Vec<f32>,
+    /// What the grid's foam and bubbles leave behind once out of it: a coarser field four
+    /// times as wide, where wakes fade on past the grid's edge.
+    pub trail: Trail,
     /// Squared wave speed per cell (m²/s²); 0 = dry land.
     pub speed2: Vec<f32>,
     /// Still water's depth per cell, meters; 0 = dry land.
@@ -283,15 +290,44 @@ fn sponge(n: usize, i: usize, j: usize) -> f32 {
     }
 }
 
+/// Foam thinner than this has stopped bursting and lingers as lace, `RESIDUAL_LIFE` times as
+/// long (fully from `RESIDUAL_LO` down): a whitecap's actively breaking "stage A" foam decays in
+/// a few seconds, the residual "stage B" patches it leaves cover 1.5 to 40 times the area and
+/// last much longer (Callaghan, Deane and Stokes 2012; Monahan's stage A/B). A boat leaves a
+/// lacy trail far behind its white wash.
+const RESIDUAL_HI: f32 = 0.35;
+const RESIDUAL_LO: f32 = 0.15;
+pub const RESIDUAL_LIFE: f32 = 4.0;
+
 /// How a step's foam fades and grows (see [`RippleField::step`]).
 #[derive(Clone, Copy)]
 struct Foam {
-    /// What's left after the step.
+    /// What's left of fresh foam after the step.
     decay: f32,
+    /// What's left of residual foam after the step.
+    decay_residual: f32,
     /// Foam per (m/s of surface speed over the breaking speed) per step.
     gain: f32,
     /// The step in cells per (m/s): how far the current carries the foam.
     k: f32,
+}
+
+impl Foam {
+    fn new(dt: f32, foam_life: f32, cell: f32) -> Self {
+        let life = foam_life.max(0.05);
+        Foam {
+            decay: (-dt / life).exp(),
+            decay_residual: (-dt / (life * RESIDUAL_LIFE)).exp(),
+            gain: dt * 2.0,
+            k: dt / cell,
+        }
+    }
+
+    /// `f` after the step's fading: fresh foam bursts fast, its thin residue lingers.
+    fn fade(&self, f: f32) -> f32 {
+        let fresh = smoothstep(RESIDUAL_LO, RESIDUAL_HI, f);
+        f * (self.decay_residual + (self.decay - self.decay_residual) * fresh)
+    }
 }
 
 /// What one substep's march reads (see [`RippleField::march`]).
@@ -543,7 +579,7 @@ impl March<'_> {
                     let mut most = stat[2];
                     for o in 0..len {
                         let speed = (moved[o] - hc[o]).abs() * inv;
-                        let v = (f[o] * fm.decay + fm.gain * (speed - 0.35).max(0.0)).min(1.0);
+                        let v = (fm.fade(f[o]) + fm.gain * (speed - 0.35).max(0.0)).min(1.0);
                         let v = if wet[o] > 0.0 { v } else { 0.0 };
                         out[o] = v;
                         most = most.max(v);
@@ -576,7 +612,7 @@ impl March<'_> {
                             0.0
                         };
                         let out =
-                            (f * fm.decay + fm.gain * ((speed - 0.35).max(0.0) + churn)).min(1.0);
+                            (fm.fade(f) + fm.gain * ((speed - 0.35).max(0.0) + churn)).min(1.0);
                         foam2[r + i] = out;
                         stat[2] = stat[2].max(out);
                     }
@@ -694,6 +730,7 @@ impl RippleField {
             foamy: vec![false; tiles],
             bubbly: vec![false; tiles],
             bubbles2: vec![0.0; n * n],
+            trail: Trail::default(),
             bubbling: vec![false; tiles],
             currents: vec![false; tiles],
             stirred: vec![false; tiles],
@@ -808,6 +845,7 @@ impl RippleField {
         let (sx, sz) = (shift.x as i64, shift.y as i64);
         self.origin = target;
         self.medium_version += 1;
+        self.trail.follow(target + DVec2::splat(half));
         let n = self.n as i64;
         if sx.abs() >= n || sz.abs() >= n {
             self.clear();
@@ -913,6 +951,9 @@ impl RippleField {
         self.h.clone_from(&other.h);
         self.vel.clone_from(&other.vel);
         self.foam.clone_from(&other.foam);
+        if self.trail.version != other.trail.version {
+            self.trail.clone_from(&other.trail);
+        }
         self.bubbles.clone_from(&other.bubbles);
         // What the dispersive surface runs over, when it changed.
         if medium_changed {
@@ -1043,6 +1084,46 @@ impl RippleField {
     /// Advance by `dt` seconds. Waves die out at `damping` per second (currents at
     /// [`current_damping`](Self::current_damping)); foam fades to a third in `foam_life` seconds.
     pub fn step(&mut self, dt: f32, damping: f32, foam_life: f32) {
+        self.step_grid(dt, damping, foam_life);
+        self.hand_down(dt, foam_life);
+    }
+
+    /// The grid's foam and bubbles go into the trail, which fades what is outside the grid.
+    fn hand_down(&mut self, dt: f32, foam_life: f32) {
+        let _span = tracing::info_span!("water", name = "ripples: trail").entered();
+        self.trail
+            .follow(self.origin + DVec2::splat(self.size() * 0.5));
+        self.trail
+            .step(dt, foam_life * RESIDUAL_LIFE, BUBBLE_LIFE_S);
+        if !self.has_water {
+            return;
+        }
+        let (n, t) = (self.n, self.tiles());
+        let mut any = false;
+        for ty in 0..t {
+            for tx in 0..t {
+                let k = ty * t + tx;
+                if !self.foamy[k] && !self.bubbly[k] {
+                    continue;
+                }
+                for j in ty * TILE..((ty + 1) * TILE).min(n) {
+                    for i in tx * TILE..((tx + 1) * TILE).min(n) {
+                        let idx = j * n + i;
+                        let (f, b) = (self.foam[idx], self.bubbles[idx]);
+                        if f > TRAIL_LEAST || b > TRAIL_LEAST {
+                            self.trail.deposit(self.cell_center(i, j), f, b);
+                            any = true;
+                        }
+                    }
+                }
+            }
+        }
+        if any {
+            self.trail.version += 1;
+        }
+    }
+
+    fn step_grid(&mut self, dt: f32, damping: f32, foam_life: f32) {
         if !self.has_water || dt <= 0.0 {
             self.pending.clear();
             return;
@@ -1083,11 +1164,7 @@ impl RippleField {
         if any_active {
             self.drift_along(dt);
         }
-        let foam = Foam {
-            decay: (-dt / foam_life.max(0.05)).exp(),
-            gain: dt * 2.0,
-            k: dt / self.cell,
-        };
+        let foam = Foam::new(dt, foam_life, self.cell);
         self.stats.fill([0.0; 3]);
         if any_active {
             let courant = (self.max_speed2.sqrt() + self.max_current) * dt / self.cell;
@@ -1590,8 +1667,11 @@ impl RippleField {
         }
         if s.is_translation_only() {
             self.origin += to_xz(s.translation);
+            self.trail.translate(to_xz(s.translation));
             return;
         }
+        // The trail is square to the world too; it is let go (it fades in seconds anyway).
+        self.trail.clear();
         let old = self.clone();
         let half = DVec2::splat(self.size() * 0.5);
         self.origin = moved(old.origin + half) - half;
@@ -1965,8 +2045,13 @@ mod tests {
             f.step(1.0 / 60.0, 0.35, 2.5);
         }
         let most = |buf: &[f32]| buf.iter().copied().fold(0.0f32, f32::max);
-        // White foam bursts in a few seconds; the bubbles under it linger and widen.
-        assert!(most(&f.foam) < 0.1, "foam {}", most(&f.foam));
+        // White foam bursts in a few seconds, leaving thin lace; the bubbles under it linger
+        // and widen.
+        assert!(
+            most(&f.foam) < RESIDUAL_HI && most(&f.foam) > 0.02,
+            "foam {}",
+            most(&f.foam)
+        );
         assert!(most(&f.bubbles) > 0.25, "bubbles {}", most(&f.bubbles));
         let wider = spread(&f, &f.bubbles);
         assert!(

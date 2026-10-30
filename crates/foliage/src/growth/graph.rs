@@ -41,6 +41,9 @@ pub enum Node {
     Leaf(Leaf),
     Flower(Flower),
     Fruit(Fruit),
+    /// A woody plant grown for years from its buds, shaped by the light it finds (the root
+    /// only; see [`Tree`]).
+    Tree(Tree),
 }
 
 /// How an axis runs.
@@ -115,6 +118,126 @@ impl Default for Axis {
             life_days: 0.0,
             children: Vec::new(),
             apex: None,
+        }
+    }
+}
+
+/// A tree (or a big shrub) grown year by year from its buds, as in Palubicki et al.,
+/// "Self-organizing tree models for image synthesis" (SIGGRAPH 2009): each spring every bud
+/// gets light from a shadow grid the crown casts, the light is summed down the branches and
+/// handed back up as vigor (apical control decides how much the leader keeps), and a bud with
+/// vigor `v` grows a shoot of `v` metamers toward the light. Branches that no longer pay
+/// their way in light are shed, and wood thickens by the pipe model (every shoot tip needs
+/// its pipe down to the roots). Leaves come out on young shoots each spring and fall each
+/// autumn. Sources: engine-design/foliage-research.md, sections 1.1 and 10.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Tree {
+    /// Growing seasons simulated (it stands as it is after them).
+    pub years: u32,
+    /// Day of the year shoots start growing, and the days a spring flush takes.
+    pub flush_day: f32,
+    pub flush_days: f32,
+    /// Days an internode takes to reach its length.
+    pub internode_days: f32,
+    /// A metamer's length on the trunk, meters (shorter with each branching order).
+    pub internode_m: f32,
+    /// Length kept with each branching order (shoots get shorter out in the crown).
+    pub order_length: f32,
+    /// Most metamers one shoot adds in a year.
+    pub max_shoot: u32,
+    /// Angle of a new branch out of its parent, degrees, and the turn from bud to bud.
+    pub branch_angle_deg: f32,
+    pub phyllotaxis: Phyllotaxis,
+    /// Apical control: above 0.5 the leader keeps more vigor than the branches (one trunk).
+    pub apical_control: f32,
+    /// Vigor per unit of light reaching the crown.
+    pub vigor: f32,
+    /// How strongly a growing shoot turns toward the light, and up.
+    pub light_seeking: f32,
+    pub gravitropism: f32,
+    /// How strongly limbs (not the leader) turn out toward the level.
+    pub plagiotropism: f32,
+    /// Random turn of each metamer, degrees.
+    pub wander_deg: f32,
+    /// Shadow grid: cell size (m), the shadow one bud casts, how fast it falls off with
+    /// depth (`shadow * falloff^-q`), and how many cells deep it reaches.
+    pub voxel_m: f32,
+    pub shadow: f32,
+    pub falloff: f32,
+    pub shadow_depth: u32,
+    /// Cells the shadow widens for each cell it falls (1: a 45 degree pyramid).
+    pub shadow_spread: f32,
+    /// A branch is shed when the light per bud it carries falls below this.
+    pub shed_light: f32,
+    /// Years a lateral bud waits to break before it dies.
+    pub bud_years: f32,
+    /// A bud with less vigor than one metamer but at least this much still breaks into a
+    /// short shoot (a spur) of one short metamer: the leafy short shoots that fill an oak's
+    /// crown on older wood. Above 1: such buds stay dormant.
+    pub spur_vigor: f32,
+    /// Only the buds of the last this-many metamers of each year's shoot can break (oaks
+    /// branch from the cluster of buds at a shoot's tip, so their limbs come in tiers); 0: all.
+    pub distal_buds: u32,
+    /// Most metamers in the whole tree (growth stops there).
+    pub max_metamers: u32,
+    /// Radius of a shoot tip, meters, and the pipe model's exponent (2: a branch's cross
+    /// section is the sum of those it carries).
+    pub tip_radius_m: f32,
+    pub pipe_exponent: f32,
+    pub color: [f32; 3],
+    pub wood_color: [f32; 3],
+    /// Days a shoot takes to turn woody.
+    pub lignify_days: f32,
+    /// The leaf generator, leaves at a node, their angle out of the shoot, and how many
+    /// years a node keeps leafing (1: only the current year's shoots; more stands for the
+    /// short leafy spurs older wood puts out, which a metamer this coarse leaves out).
+    pub leaf: Option<String>,
+    pub leaves_per_node: u32,
+    pub leaf_angle_deg: f32,
+    pub leaf_years: u32,
+    /// Day of the year the leaves come out.
+    pub leaf_day: f32,
+}
+
+impl Default for Tree {
+    fn default() -> Self {
+        Self {
+            years: 20,
+            flush_day: 110.0,
+            flush_days: 35.0,
+            internode_days: 20.0,
+            internode_m: 0.14,
+            order_length: 0.9,
+            max_shoot: 4,
+            branch_angle_deg: 50.0,
+            phyllotaxis: Phyllotaxis::Spiral(144.0),
+            apical_control: 0.5,
+            vigor: 4.5,
+            light_seeking: 0.1,
+            gravitropism: 0.12,
+            plagiotropism: 0.0,
+            wander_deg: 8.0,
+            voxel_m: 0.4,
+            shadow: 0.05,
+            falloff: 1.8,
+            shadow_depth: 8,
+            shadow_spread: 0.35,
+            shed_light: 0.05,
+            bud_years: 3.0,
+            spur_vigor: 0.3,
+            distal_buds: 0,
+            max_metamers: 40_000,
+            tip_radius_m: 0.003,
+            pipe_exponent: 2.4,
+            color: [0.20, 0.26, 0.07],
+            wood_color: [0.26, 0.21, 0.16],
+            lignify_days: 60.0,
+            leaf: None,
+            leaves_per_node: 5,
+            leaf_angle_deg: 50.0,
+            leaf_years: 4,
+            leaf_day: 118.0,
         }
     }
 }
@@ -378,6 +501,14 @@ impl PlantGraph {
                 Node::Flower(f) => {
                     if let Some(then) = &f.then {
                         known(then, name)?;
+                    }
+                }
+                Node::Tree(t) => {
+                    if *name != self.root {
+                        return Err(format!("\"{name}\" is a tree: a tree can only be the root"));
+                    }
+                    if let Some(leaf) = &t.leaf {
+                        known(leaf, name)?;
                     }
                 }
                 Node::Leaf(_) | Node::Fruit(_) => {}

@@ -9,9 +9,11 @@
 //!
 //! A tile takes thousands of full terrain samples (over 100 ms on a showcase planet), so
 //! tiles are built on worker threads, a few at a time, and put in place when done: the frame
-//! never waits for them. Only the tiles right under a focus point or a body in the simulated
-//! range ([`SimulationRange`]), when they have none (at the start, or after a jump), are built
-//! on the spot, side by side on all cores, so nothing stands on thin air.
+//! never waits for them. A moving focus point has its tiles built ahead along its path
+//! ([`LOOK_AHEAD_S`]), so a fast flight finds them ready. Only the tiles right under a focus
+//! point or a body in the simulated range ([`SimulationRange`]), when they have none (at the
+//! start, or after a jump), are built on the spot, side by side on all cores, so nothing
+//! stands on thin air.
 //!
 //! Heightfield layout: `heights[row * cols + col]`, rows along local Z from −size/2 to
 //! +size/2, columns along local X from −size/2 to +size/2, heights in meters above the tile
@@ -50,6 +52,13 @@ pub struct TerrainColliders {
     /// Tiles built so far (diagnostics: a count that keeps climbing while nothing moves is
     /// tiles being thrown away and built again).
     built: u64,
+    /// Tiles built on the spot because the ground underfoot had none, after the first frame
+    /// (diagnostics: a moving focus should find its tiles built ahead of it).
+    waits: u64,
+    /// Each focus point's last terrain-local position and smoothed velocity, per terrain.
+    motion: HashMap<(Entity, usize), (DVec3, DVec3)>,
+    /// Frames run (the first one builds its underfoot tiles on the spot by design).
+    frames: u64,
 }
 
 impl TerrainColliders {
@@ -184,6 +193,13 @@ fn tile_shape(
 pub const MAX_BODY_TILES: usize = 64;
 /// Most tiles built at once on worker threads.
 const MAX_BUILDING: usize = 3;
+/// A moving focus has its tiles built this many seconds ahead along its path, so it finds
+/// them ready instead of waiting for the one underfoot.
+const LOOK_AHEAD_S: f64 = 1.5;
+/// But no farther ahead than this, meters.
+const LOOK_AHEAD_MAX_M: f64 = 400.0;
+/// Faster than this a focus jumped (a teleport, a tour stop) rather than moved, m/s.
+const JUMP_SPEED: f64 = 3_000.0;
 
 /// Keep collider tiles on every terrain that wants colliders: the 3 × 3 block around every
 /// focus point, and the tile under every dynamic body (awake or asleep, so a crate left
@@ -197,9 +213,13 @@ pub fn update_colliders(
     materials: Res<SurfaceMaterials>,
     bodies: Query<(&Transform, &RigidBody)>,
     range: Option<Res<SimulationRange>>,
+    time: Option<Res<Time>>,
     mut state: ResMut<TerrainColliders>,
     diagnostics: Option<ResMut<engine_core::diagnostics::Diagnostics>>,
 ) {
+    let dt = time.map_or(0.0, |t| t.delta_secs_f64());
+    state.frames += 1;
+    let mut moving: HashMap<(Entity, usize), (DVec3, DVec3)> = HashMap::new();
     let range = range.map(|r| *r).unwrap_or_default();
     let body_points: Vec<DVec3> = bodies
         .iter()
@@ -224,8 +244,23 @@ pub fn update_colliders(
         let size = t.source.map.node_size(level);
         // Only near the surface (within 2 km).
         let near = |p: DVec3| t.altitude_hint(p).abs() <= 2_000.0 + t.config.height_range().1;
-        for &p in focus.points.iter().filter(|&&p| near(p)) {
+        for (i, &p) in focus.points.iter().enumerate().filter(|(_, p)| near(**p)) {
             let local = t.to_local(p);
+            // How fast it moves over the terrain (terrain-local, so world shifts and the
+            // planet's turning don't count), smoothed over a few frames.
+            let v = match state.motion.get(&(e, i)) {
+                Some(&(last, v)) if dt > 1e-6 => {
+                    let now = (local - last) / dt;
+                    if now.length() > JUMP_SPEED {
+                        DVec3::ZERO
+                    } else {
+                        v.lerp(now, (dt * 4.0).min(1.0))
+                    }
+                }
+                Some(&(_, v)) => v,
+                None => DVec3::ZERO,
+            };
+            moving.insert((e, i), (local, v));
             let Some((_, up, _)) = t.source.map.locate(local) else {
                 continue;
             };
@@ -242,6 +277,18 @@ pub fn update_colliders(
                     {
                         wanted.push((e, k));
                     }
+                }
+            }
+            // Then the tiles along its path, every half tile.
+            let ahead = (v - up * v.dot(up)) * LOOK_AHEAD_S;
+            let ahead = ahead.clamp_length_max(LOOK_AHEAD_MAX_M);
+            let steps = (ahead.length() / (size * 0.5)).ceil() as usize;
+            for s in 1..=steps {
+                let q = local + ahead * (s as f64 / steps as f64);
+                if let Some(k) = t.source.map.node_at(q, level)
+                    && wanted_set.insert((e, k))
+                {
+                    wanted.push((e, k));
                 }
             }
         }
@@ -274,6 +321,7 @@ pub fn update_colliders(
             state.seen_edits.insert(e, t.edit_log.len());
         }
     }
+    state.motion = moving;
     body_tiles.sort_by(|a, b| a.0.total_cmp(&b.0));
     let mut extra = 0;
     for (_, k) in body_tiles {
@@ -328,15 +376,21 @@ pub fn update_colliders(
         if state.tiles.contains_key(&k) || missing.contains(&k) || !wanted_set.contains(&k) {
             continue;
         }
-        if let Some(handle) = state.building.remove(&k)
-            && let Ok(shape) = handle.join()
-        {
-            place(&mut commands, &terrains, &mut state, &wanted_set, k, shape);
-            continue;
+        if let Some(handle) = state.building.remove(&k) {
+            if !handle.is_finished() && state.frames > 1 {
+                state.waits += 1;
+            }
+            if let Ok(shape) = handle.join() {
+                place(&mut commands, &terrains, &mut state, &wanted_set, k, shape);
+                continue;
+            }
         }
         missing.push(k);
     }
     if !missing.is_empty() {
+        if state.frames > 1 {
+            state.waits += missing.len() as u64;
+        }
         let samples = settings.collider_samples;
         let shapes: Vec<_> = std::thread::scope(|scope| {
             let jobs: Vec<_> = missing
@@ -393,6 +447,7 @@ pub fn update_colliders(
     if let Some(mut d) = diagnostics {
         d.set("terrain.collider_tiles", state.tiles.len() as f64);
         d.set("terrain.collider_builds", state.built as f64);
+        d.set("terrain.collider_waits", state.waits as f64);
     }
 }
 
@@ -616,6 +671,28 @@ mod tests {
         let state = app.world.resource::<TerrainColliders>();
         assert!(state.is_settled());
         assert_eq!(state.built, built, "tiles were rebuilt while nothing moved");
+    }
+
+    #[test]
+    fn a_fast_focus_finds_its_ground_built_ahead() {
+        let (mut app, focus) = app_with_planet();
+        app.world
+            .resource_mut::<Time>()
+            .set_source(engine_core::time::TimeSource::Manual { step_secs: 0.05 });
+        settle(&mut app);
+        // A low pass at 250 m/s for two kilometers, frames at about the pace they would run.
+        let speed = 250.0;
+        let mut x = 0.0;
+        while x < 2_000.0 {
+            x += speed * 0.05;
+            app.world.get_mut::<Transform>(focus).unwrap().translation = DVec3::new(x, 2.0, 0.0);
+            let t = std::time::Instant::now();
+            app.update();
+            std::thread::sleep(std::time::Duration::from_millis(50).saturating_sub(t.elapsed()));
+        }
+        assert!(tile_under(&mut app, x, 0.0));
+        let state = app.world.resource::<TerrainColliders>();
+        assert_eq!(state.waits, 0, "frames waited for the ground underfoot");
     }
 
     #[test]

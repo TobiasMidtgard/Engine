@@ -331,6 +331,9 @@ struct Globals {
     /// pixel, the drops' seed, unused, unused.
     waterline: [f32; 4],
     waterline2: [f32; 4],
+    /// The trail of foam and bubbles round the ripple grid (`crate::trail`): corner rel camera
+    /// x, z, size (m), anything on it (1/0).
+    trail: [f32; 4],
 }
 
 #[repr(C)]
@@ -474,6 +477,9 @@ struct Gpu {
     /// The wind exposure mask over the nearest lake, and the mask version it holds.
     shelter: wgpu::Texture,
     shelter_version: u64,
+    /// The ripple grid's trail (`crate::trail`): foam, bubbles; and the version it holds.
+    trail: wgpu::Texture,
+    trail_version: u64,
     flows: Vec<FlowGpu>,
     falls: wgpu::RenderPipeline,
     fall_buffer: wgpu::Buffer,
@@ -788,6 +794,7 @@ impl WaterFeature {
                 tex(11, wgpu::TextureSampleType::Float { filterable: true }),
                 tex(12, wgpu::TextureSampleType::Float { filterable: true }),
                 tex(13, wgpu::TextureSampleType::Float { filterable: true }),
+                tex(14, wgpu::TextureSampleType::Float { filterable: true }),
             ],
         });
         let group2_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -1054,6 +1061,14 @@ impl WaterFeature {
                 wgpu::TextureFormat::R8Unorm,
             ),
             shelter_version: u64::MAX,
+            trail: create_texture(
+                device,
+                "water trail",
+                crate::trail::N as u32,
+                crate::trail::N as u32,
+                wgpu::TextureFormat::Rg16Float,
+            ),
+            trail_version: u64::MAX,
             flows: Vec::new(),
             falls,
             fall_buffer,
@@ -1232,6 +1247,28 @@ impl WaterFeature {
 
     /// `heights`: write the grid's own heights and slopes too (the dispersive surface's
     /// replace them while it is drawn; only the foam is read then).
+    fn upload_trail(gpu: &mut Gpu, shared: &GpuShared, trail: &crate::trail::Trail) {
+        if gpu.trail_version == trail.version {
+            return;
+        }
+        gpu.trail_version = trail.version;
+        let data: Vec<u16> = trail
+            .foam
+            .iter()
+            .zip(&trail.bubbles)
+            .flat_map(|(f, b)| [f32_to_f16(*f), f32_to_f16(*b)])
+            .collect();
+        let n = crate::trail::N as u32;
+        write_texture(
+            &shared.queue,
+            &gpu.trail,
+            n,
+            n,
+            4,
+            bytemuck::cast_slice(data.as_slice()),
+        );
+    }
+
     fn upload_ripples(gpu: &mut Gpu, shared: &GpuShared, state: &WaterState, heights: bool) {
         let r = &state.ripples;
         let n = r.n as u32;
@@ -1795,6 +1832,13 @@ impl RenderFeature for WaterFeature {
             r.size() as f32,
             if r.has_water { 1.0 } else { 0.0 },
         ];
+        let trail_rel = view.relative(DVec3::new(r.trail.origin.x, 0.0, r.trail.origin.y));
+        g.trail = [
+            trail_rel.x,
+            trail_rel.z,
+            crate::trail::Trail::size() as f32,
+            if r.trail.live { 1.0 } else { 0.0 },
+        ];
         g.rain = [rain, view.time, -1.0, 0.0];
         for (dst, (_, s)) in g.showers.iter_mut().zip(&showers) {
             *dst = *s;
@@ -1963,6 +2007,7 @@ impl RenderFeature for WaterFeature {
         let heights = !gpu.surface.drawn();
         if !view.extra_view {
             Self::upload_ripples(gpu, shared, &state, heights);
+            Self::upload_trail(gpu, shared, &state.ripples.trail);
         }
         drop(span);
         let span = tracing::info_span!("water", name = "flow upload").entered();
@@ -2021,6 +2066,7 @@ impl RenderFeature for WaterFeature {
         let currents = gpu.currents.create_view(&Default::default());
         let puddle = gpu.puddle_tex.create_view(&Default::default());
         let shelter = gpu.shelter.create_view(&Default::default());
+        let trail = gpu.trail.create_view(&Default::default());
         let group = ctx
             .gpu
             .device
@@ -2083,6 +2129,10 @@ impl RenderFeature for WaterFeature {
                     wgpu::BindGroupEntry {
                         binding: 13,
                         resource: wgpu::BindingResource::TextureView(gpu.swash.view_b()),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 14,
+                        resource: wgpu::BindingResource::TextureView(&trail),
                     },
                 ],
             });
@@ -2189,11 +2239,11 @@ mod tests {
     #[test]
     fn uniform_layout_matches_the_shader() {
         // WGSL: Globals 10 vec4 + 4 showers + 8 plunges + the mirror's matrix and 2 vec4 +
-        // the shelter mask's + the swash's 2 + the waterline's 2; GpuBody 11 vec4 + 24 waves of
-        // 2 vec4.
+        // the shelter mask's + the swash's 2 + the waterline's 2 + the trail's; GpuBody 11 vec4
+        // + 24 waves of 2 vec4.
         assert_eq!(
             std::mem::size_of::<Globals>(),
-            (10 + 4 + 8 + 4 + 2 + 1 + 2 + 2) * 16
+            (10 + 4 + 8 + 4 + 2 + 1 + 2 + 2 + 1) * 16
         );
         assert_eq!(std::mem::size_of::<GpuBody>(), (11 + MAX_WAVES * 2) * 16);
         assert_eq!(

@@ -1,7 +1,9 @@
 // The keeper of the rune seal (examples/keeper.luau talks from this file). Yarn Spinner's
 // language: `Name: line`, `-> option`, `<<command>>`, $facts. The seal's script sets
 // $runes_lit and $seal_opened, so the keeper knows how far you are; the quest it gives
-// (quests/sealed_bridge.quest) follows the same facts. See "Story" in the scripts README.
+// (quests/sealed_bridge.quest) follows the same facts. Reading the runes is a skill check
+// (#check:lore:9): 2d6 plus $skill_lore against 9, its odds shown on the option.
+// See "Story" in the scripts README.
 
 title: Start
 when: $seal_opened
@@ -29,6 +31,7 @@ title: Start
 when: once
 position: 0,0
 ---
+<<declare $skill_lore = 2>>
 <<bow>>
 Keeper: Ah. A traveller, and at this hour.
 Keeper: I keep the seal. Three runes, one door, and a hundred winters since anyone opened it.
@@ -38,6 +41,13 @@ Keeper: I keep the seal. Three runes, one door, and a hundred winters since anyo
     <<jump Offer>>
 -> I'll leave you to it.
     Keeper: Most do. The door does not mind.
+-> I can read old runes. #check:lore:9
+    <<if passed()>>
+        <<set $read_runes to true>>
+        Keeper: You can? Then you know the third one lies. It is no stone at all.
+    <<else>>
+        Keeper: Those are not letters, traveller. That is moss.
+    <<endif>>
 ===
 
 title: Start
