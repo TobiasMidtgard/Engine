@@ -18,6 +18,11 @@ local dt_now = __story_dt
 local new_id = __story_new_id
 local has_api = __story_has_api
 local log_error = __story_error
+local spots_begin = __story_spots_begin
+local spots_poll = __story_spots_poll
+local spots_end = __story_spots_end
+local spots_say = __story_spots_say
+local standing_at = __story_standing_at
 local quest_module = __quest_module
 local quest_ctl = __quest_ctl
 local call_api = api
@@ -243,6 +248,11 @@ D.commands = {}
 D.functions = {}
 
 function Ops:call(name: string, ...: any): any
+	if name == "standing_at" then
+		-- Where the conversation's chooser (the player) stands: `<<if standing_at("ear")>>`.
+		local opts = rawget(self, "opts")
+		return standing_at(opts and opts.chooser, text_of((...)))
+	end
 	local f = Funcs[name] or D.functions[name]
 	if f == nil then
 		fail(`there is no function {name}() (Yarn's own, or one in dialogue.functions)`)
@@ -481,6 +491,90 @@ function Run:read_first()
 	end
 end
 
+-- `#spot:name` (or `#fallback`) among an option's tags: its value ("" for a bare tag).
+local function tag_value(tags: any, key: string): string?
+	if tags == nil then
+		return nil
+	end
+	for _, t in tags do
+		if t == key then
+			return ""
+		end
+		local v = string.match(t, "^" .. key .. ":(.+)$")
+		if v then
+			return v
+		end
+	end
+	return nil
+end
+
+-- Options with `#spot:name` tags are picked by walking there (spots.rs): the lines said
+-- before them read first, the last stays up as the speaker's bubble, the player walks. The
+-- option picked (from 1), or nil when they show as a menu after all.
+function Run:walk(items: { any }, texts: { string }): number?
+	local list = {}
+	local any = false
+	for n, it in items do
+		local spot = tag_value(it.tags, "spot")
+		list[n] = { text = texts[n], spot = spot, fallback = tag_value(it.tags, "fallback") ~= nil }
+		any = any or spot ~= nil
+	end
+	local o = self.spot_opts or {}
+	self.spot_opts = nil
+	if not any then
+		return nil
+	end
+	local prompt = self.last
+	if self.ui then
+		prompt = table.remove(self.buf) or self.last
+		if #self.buf > 0 then
+			self:show(nil, true)
+			yield(PAUSE, "reading")
+		end
+		self.buf = {}
+		self:hide()
+	end
+	local spec = {
+		options = list,
+		prompt = { speaker = prompt and prompt.speaker, text = prompt and prompt.text or "" },
+		time = o.time,
+		slow = o.slow,
+	}
+	local id, why = spots_begin(self.id, spec, self.opts.chooser, self.owner)
+	if id == nil then
+		warn_log(`{self.path}: {why}; the options show as a menu`)
+		return nil
+	end
+	self.spots = id
+	if not self.ui then
+		say("  (walk to one)")
+		for n, it in list do
+			say(`  {n}. {it.text}{if it.spot then ` [{it.spot}]` else ""}{if it.fallback then " (fallback)" else ""}`)
+		end
+	end
+	self.dirty = true
+	local i = yield(PAUSE, "spots", #texts, id)
+	self.spots = nil
+	spots_end(id, i)
+	return i
+end
+
+-- A script's word when the player steps into a spot: the owner's `on_spot_near(name)` runs,
+-- and what it returns (text) is the speaker's new line over their head.
+function Run:near_spot(id: number, name: string)
+	local s = self.owner and self.owner.script
+	local m = s and s.on_spot_near
+	if type(m) ~= "function" then
+		return
+	end
+	local ok, said = pcall(m, s, name)
+	if not ok then
+		warn_log(`{self.path}: on_spot_near: {said}`)
+	elseif type(said) == "string" then
+		spots_say(id, said)
+	end
+end
+
 local Options = {}
 Options.__index = Options
 
@@ -507,14 +601,17 @@ function Options:pick(): any
 	end
 	c.options_now = texts
 	c.dirty = true
-	if c.ui then
-		c:show(texts, false)
-	else
-		for i, t in texts do
-			say(`  {i}. {t}`)
+	local i = c:walk(items, texts)
+	if i == nil then
+		if c.ui then
+			c:show(texts, false)
+		else
+			for n, t in texts do
+				say(`  {n}. {t}`)
+			end
 		end
+		i = yield(PAUSE, "options", #texts)
 	end
-	local i = yield(PAUSE, "options", #texts)
 	c.options_now = nil
 	c.jumps = 0
 	c.dirty = true
@@ -606,6 +703,12 @@ local Commands: { [string]: (c: any, ...any) -> any } = {
 -- the function returns true.
 function Run:command(name: string, args: { any }, n: number): any
 	self.jumps = 0
+	if name == "spots" then
+		-- `<<spots 12 0.35>>`: the next options walked to have 12 s (then the #fallback),
+		-- the world at 0.35 speed meanwhile. Nothing to read first: the lines stay up.
+		self.spot_opts = { time = tonumber(args[1]), slow = tonumber(args[2]) }
+		return nil
+	end
 	local f = Commands[name]
 	if f == nil then
 		local user = D.commands[name]
@@ -686,6 +789,10 @@ function Run:finish(err: string?)
 	self.done = true
 	self.wait = nil
 	self.options_now = nil
+	if self.spots then
+		spots_end(self.spots, nil)
+		self.spots = nil
+	end
 	if err then
 		self.error = err
 		log_error(self.path, err)
@@ -717,7 +824,7 @@ end
 function Run:resume(...: any)
 	local before = owner_now()
 	set_owner(self.owner)
-	local ok, a, b, c = resume(self.co, ...)
+	local ok, a, b, c, d = resume(self.co, ...)
 	set_owner(before)
 	if not ok then
 		self:failed(a)
@@ -728,7 +835,7 @@ function Run:resume(...: any)
 		return
 	end
 	if a == PAUSE then
-		self.wait = { kind = b, n = c, check = c }
+		self.wait = { kind = b, n = c, check = c, choice = d }
 	elseif a == "wait" then
 		local secs = tonumber(b) or 0
 		self.wait = { kind = "time", left = secs, total = secs }
@@ -786,6 +893,24 @@ function Run:step(dt: number)
 				end
 				self:follow(st)
 				pick = st.node and tonumber(string.match(st.node, "^p(%d+)$"))
+			end
+			if pick == nil then
+				return
+			end
+			if pick < 1 or pick > w.n then
+				warn_log(`{self.path}: there is no option {pick} (1 to {w.n})`)
+				return
+			end
+			arg = pick
+		elseif kind == "spots" then
+			if pick == nil then
+				local p, near = spots_poll(w.choice)
+				if near then
+					for _, name in near do
+						self:near_spot(w.choice, name)
+					end
+				end
+				pick = p
 			end
 			if pick == nil then
 				return
@@ -882,9 +1007,17 @@ end
 -- ("dialogue/keeper"). Options: headless (lines to the log, picks by handle:choose or
 -- story.choose, not the screen), step (headless, a line at a time: a pick goes on),
 -- speakers ({ Keeper = { title, portrait, side } }), owner (the entity whose script runs its
--- commands; the calling script's).
+-- commands; the calling script's), chooser (who walks to `#spot:` options, an entity or its
+-- name; the player).
 function D.start(path: string, node: string?, opts: any?): any
 	local o = opts or {}
+	if type(o.chooser) == "string" then
+		local who = world.find(o.chooser)
+		if who == nil then
+			fail(`dialogue.start: there is no entity '{o.chooser}' to be the chooser`)
+		end
+		o.chooser = who
+	end
 	local c = setmetatable({
 		id = new_id(),
 		path = path,

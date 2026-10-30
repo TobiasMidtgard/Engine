@@ -7223,6 +7223,7 @@ pub fn handles(
     response: &egui::Response,
 ) -> bool {
     crate::rewind::overlay(ui, world, view);
+    crate::story::overlay(ui, world, editor, view);
     let Some(e) = editor.primary() else {
         return false;
     };
@@ -9688,11 +9689,16 @@ pub fn cutscenes_shots(dir: String) -> ShotScript {
 /// the player stands.
 const STORY_KEEPER_AT: DVec3 = DVec3::new(2.5, 0.0, -0.6);
 const STORY_PLAYER_AT: DVec3 = DVec3::new(0.9, 0.88, 1.6);
+/// Where the story shots muster the captain's company (he faces +Z, to his rank), west of the
+/// seal.
+const STORY_MUSTER_AT: DVec3 = DVec3::new(-7.0, 0.0, 3.0);
 
 /// Screenshots of conversations and quests (`--script story`): the keeper's conversation
 /// (dialogue/keeper.yarn) as a map in the Story tab; talked to in the game, its node lit and
 /// its options beside it; the quest it gives following the seal's runes by itself; the thanks
-/// once the door is open; a node played a line at a time; the file in the Scripts tab.
+/// once the door is open; a node played a line at a time; the file in the Scripts tab; then a
+/// choice made by walking (dialogue/muster.yarn): planned from above, open in the game, the
+/// player walked to a spot, and its option taken.
 pub fn story_shots(dir: String) -> ShotScript {
     let _ = std::fs::create_dir_all(&dir);
     let root = std::fs::canonicalize(&dir)
@@ -9742,14 +9748,21 @@ pub fn story_shots(dir: String) -> ShotScript {
             },
             StandardMaterial::hex(0x3d6fb6),
         );
+        // The player's body: what walks to the spots of a choice made by walking.
         editor::spawn_with(
             world,
             editor,
             "Player".into(),
-            vec![(
-                "MeshRenderer",
-                serde_json::to_value(body).unwrap_or_default(),
-            )],
+            vec![
+                (
+                    "MeshRenderer",
+                    serde_json::to_value(body).unwrap_or_default(),
+                ),
+                (
+                    "Interactor",
+                    serde_json::to_value(engine::world::Interactor).unwrap_or_default(),
+                ),
+            ],
             Transform::from_translation(STORY_PLAYER_AT),
         );
         world.resource_mut::<EditorDock>().0 = story_layout();
@@ -9805,6 +9818,42 @@ pub fn story_shots(dir: String) -> ShotScript {
         }
     };
     let play = |world: &mut World, ed: &mut Editor| editor::play(world, ed);
+    // The captain and his company, his spots as his children (as a scene has them), and the
+    // player in the gap of his rank.
+    let muster = |world: &mut World, ed: &mut Editor| {
+        world.resource_mut::<EditorDock>().0 = story_layout();
+        let script = Script::new("examples/captain.luau").with_props(json!({"recruit": false}));
+        let captain = editor::spawn_with(
+            world,
+            ed,
+            "Captain".into(),
+            vec![
+                ("Script", serde_json::to_value(script).unwrap_or_default()),
+                (
+                    "Interactable",
+                    json!({"verb": "Talk", "reach_m": 2.6, "offset": [0.0, 1.5, 0.0], "enabled": true}),
+                ),
+            ],
+            Transform::from_translation(STORY_MUSTER_AT),
+        );
+        for (name, [x, y, z], radius) in engine_script::demo::MUSTER_SPOTS {
+            crate::story::place_spot(world, ed, Some(captain), name, DVec3::new(x, y, z), radius);
+        }
+        if let Some(p) = crate::shots::find(world, "Player")
+            && let Some(mut t) = world.get_mut::<Transform>(p)
+        {
+            t.translation = STORY_MUSTER_AT + DVec3::new(0.0, 0.88, 3.2);
+        }
+        crate::story::open(world, "dialogue/muster");
+    };
+    // The player out of the rank and at the captain's ear.
+    let to_ear = |world: &mut World, _: &mut Editor| {
+        if let Some(p) = crate::shots::find(world, "Player")
+            && let Some(mut t) = world.get_mut::<Transform>(p)
+        {
+            t.translation = STORY_MUSTER_AT + DVec3::new(-0.62, 0.88, -0.18);
+        }
+    };
     let steps = vec![
         Step::Do(Box::new(setup)),
         Step::Tool(crate::editor::Tool::Select),
@@ -9819,6 +9868,8 @@ pub fn story_shots(dir: String) -> ShotScript {
             dusk_sky(world)
         })),
         Step::Select(""),
+        // Beside the player, the keeper and the seal ahead.
+        Step::Camera(DVec3::new(-0.4, 1.9, 3.2), DVec3::new(1.9, 1.1, -0.3)),
         Step::Wait(2),
         // Talk (E): the first meeting's node of the Start group, its lines, its options.
         Step::Do(Box::new(press("Keeper"))),
@@ -9866,6 +9917,37 @@ pub fn story_shots(dir: String) -> ShotScript {
         })),
         Step::Wait(8),
         Step::Shot("story_07_yarn_in_scripts"),
+        // A choice made by walking (dialogue/muster.yarn): its options name the captain's
+        // spots; the plan from above beside the map, a spot selected; the scene view looks down
+        // as the game's view will.
+        Step::Do(Box::new(muster)),
+        Step::Select("Spot ear"),
+        Step::Camera(
+            STORY_MUSTER_AT + DVec3::new(2.8, 2.4, -3.6),
+            STORY_MUSTER_AT + DVec3::new(0.0, 0.6, 1.6),
+        ),
+        Step::Wait(8),
+        Step::Do(Box::new(click("view from above"))),
+        Step::Wait(10),
+        Step::Shot("story_08_spots_plan"),
+        // Play, E on the captain: he asks, and the choice waits for a walk, its rings and
+        // labels as in the game, the game's view from above in the corner.
+        Step::Do(Box::new(play)),
+        Step::Wait(6),
+        Step::Do(Box::new(|world: &mut World, _: &mut Editor| {
+            dusk_sky(world)
+        })),
+        Step::Select(""),
+        Step::Do(Box::new(press("Captain"))),
+        Step::Wait(10),
+        Step::Shot("story_09_choosing"),
+        // The player at his ear: the ring fills, and he answers over his head.
+        Step::Do(Box::new(to_ear)),
+        Step::Wait(4),
+        Step::Shot("story_10_walked_to_his_ear"),
+        // Stood there long enough: the whisper is taken and the talk goes on.
+        Step::Wait(16),
+        Step::Shot("story_11_the_whisper_taken"),
     ];
     ShotScript::new(dir, steps)
 }

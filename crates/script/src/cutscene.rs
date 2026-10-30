@@ -1435,13 +1435,13 @@ fn events(
     }
 }
 
-fn smooth(x: f64) -> f64 {
+pub(crate) fn smooth(x: f64) -> f64 {
     let x = x.clamp(0.0, 1.0);
     x * x * (3.0 - 2.0 * x)
 }
 
 /// From `a` toward `b` by `k`: position, rotation and (both perspective) field of view.
-fn blend(
+pub(crate) fn blend(
     a: &(Transform, Projection),
     b: &(Transform, Projection),
     k: f64,

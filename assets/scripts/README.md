@@ -457,6 +457,46 @@ quests.start("sealed_bridge") -- quests.complete / quests.fail / quests.state
 With no conversation screen (a test, or the editor without the UI module) a conversation
 runs **headless**: lines go to the log and options wait for `handle:choose(i)`.
 
+### Choices made by walking: spots
+
+An option set can be answered by **where the player walks** instead of a menu (as in
+Oxenfree, Pendragon and Detroit: Become Human): tag each option with the spot it is picked at.
+
+```
+Captain: Who speaks for the company? Step up, or hold your place.
+<<spots 12>>
+-> Hold your place in the rank #spot:rank #fallback
+-> Step past him and take the front #spot:forward
+-> Lean in and whisper him an idea #spot:ear
+-> Slip behind him, a hand on your knife #spot:behind
+```
+
+- A **spot** is an entity with a `StorySpot` component (`name`, `radius_m`), placed in the
+  scene; often a child of the speaker, so "at the captain's ear" moves with him. Of several
+  spots with one name, the nearest is used.
+- While the choice is open the player keeps walking: a ring glows at each spot with its option
+  over it and the question over the speaker, the view blends up to one from above (keeping the
+  camera's heading, so up still walks up the screen) and the world slows while the player keeps
+  full speed. Standing in a ring for 0.7 s (it fills meanwhile) or pressing E there picks it.
+  A spot the player already stands in when the choice opens counts once they step out and back.
+- `<<spots 12>>` gives 12 seconds, after which the `#fallback` option is taken (else the
+  nearest spot's); `<<spots 12 0.5>>` slows the world to half instead of 0.35, `1` not at all.
+  Tags come after an option's condition: `-> Go <<if $brave>> #spot:front`.
+- `standing_at("rank")` in the conversation tells whether the player stands in that spot
+  (`Captain: Out of the line already? <<if not standing_at("rank")>>`).
+- The speaker's script can react as the player comes close: `on_spot_near(name)` runs when they
+  step into a spot, and the text it returns is the speaker's new line over their head.
+- `dialogue.start(path, node, { chooser = recruit })` lets someone else walk (an entity, or its
+  name); the player's body (the `Interactor`) otherwise. `story.choose` still picks directly.
+
+In the Story tab each option walked to shows its spot on its card (red when the scene has no
+spot of that name), and **Walked to** draws the choice from above: the speaker, the people round
+them, the player and each spot, to drag where it belongs (one undo step), with buttons to place a
+missing spot and to look down on it all in the scene view. The scene view draws each spot as a
+dashed ring with its name; while the game plays, the open choice shows there as in the game, and
+the corner preview looks through the game's view from above. The captain at the courtyard's gate
+(`examples/captain.luau`, `dialogue/muster.yarn`) is the example.
+
 A **quest** is a `.quest` file under `quests/`: JSON with a title, a giver and its
 **objectives**, each a condition on the facts (`"done_when": "$seal_opened"`, or
 `"progress": "$runes_lit", "count": 3`), plus `start_when`, `fail_when`, `rewards` and

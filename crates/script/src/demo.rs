@@ -38,6 +38,13 @@
 //!   lit, a final state; once all three are lit the group is done and its `done` sinks the
 //!   round door into the ground, lighting the sanctum behind it, for `hold` seconds. Its state
 //!   board marks each finished region "done".
+//! - The captain of the gate watch musters his company on the south-west side
+//!   (`examples/captain.luau`). E on him and he asks who speaks for the company
+//!   (`dialogue/muster.yarn`); the answer is where you walk: hold your place in the rank, step
+//!   past him, lean in to his ear or slip behind him. Each is a `StorySpot` under him; while
+//!   the choice is open the view rises over the muster, the world slows and a ring glows at
+//!   each spot, filling as you stand in it (the `script_story_spots` stops, the recruit in the
+//!   rank walking for the tour).
 //! - A patrol drone flies a loop over the seal (`examples/patrol.luau`). With script gizmos on
 //!   (`script.gizmos {"show": true}`, the `script_gizmos` stop), its route shows as lines, and
 //!   the seal, as if selected, shows where each rune's touch reaches and the socket it lights.
@@ -70,6 +77,7 @@ use engine_world::Interactable;
 use crate::Script;
 use crate::board::{CodeBoard, ProfileBoard};
 use crate::graph_board::GraphBoard;
+use crate::spots::StorySpot;
 use crate::state_board::StateBoard;
 
 /// The director: its script builds the lanterns and the orrery and plays the ritual.
@@ -128,6 +136,21 @@ pub const KEEPER: [f64; 3] = [5.6, 0.0, 3.6];
 pub const KEEPER_YAW: f32 = 2.47;
 pub const KEEPER_NAME: &str = "Keeper";
 pub const KEEPER_SCRIPT: &str = "examples/keeper.luau";
+/// The captain of the gate watch (`examples/captain.luau`) and his company, mustered on the
+/// south-west of the floor between the lanterns at 120 and 150 degrees, facing north to his rank
+/// (the gate beyond it), clear of the other stops' views. His conversation
+/// (`dialogue/muster.yarn`) is answered by walking to one of his spots, scene entities under him.
+pub const MUSTER: [f64; 3] = [-9.0, 0.0, 7.3];
+pub const MUSTER_YAW: f32 = std::f32::consts::PI;
+pub const CAPTAIN_NAME: &str = "Captain";
+pub const CAPTAIN_SCRIPT: &str = "examples/captain.luau";
+/// His spots in his space (he faces +Z): name, where, radius in meters.
+pub const MUSTER_SPOTS: [(&str, [f64; 3], f32); 4] = [
+    ("rank", [0.0, 0.0, 3.2], 0.5),
+    ("forward", [1.45, 0.0, 0.15], 0.6),
+    ("ear", [-0.62, 0.0, -0.18], 0.42),
+    ("behind", [0.1, 0.0, -1.35], 0.55),
+];
 /// The drawbridge (`examples/drawbridge.luau`): its hinge, between the lanterns at 90 and 120
 /// degrees, and its turn (the deck lowers toward the middle).
 pub const BRIDGE: [f64; 3] = [-2.69, 0.0, 10.05];
@@ -296,6 +319,31 @@ pub const QUEST_TAKEN: [(&str, &str); 2] = [
         r#"{"reset": true, "start": "sealed_bridge"}"#,
     ),
     ("ui.show", r#"{"screen": "hud", "instant": true}"#),
+];
+
+/// Talking to the captain with the recruit choosing (it walks for the tour; the player does in
+/// the game): two presses of Space read his first line through, then the choice opens.
+pub const MUSTER_TALK: [(&str, &str); 3] = [
+    (
+        "story.start",
+        r#"{"path": "dialogue/muster", "owner": "Captain", "chooser": "Recruit"}"#,
+    ),
+    ("dialogue.next", "{}"),
+    ("dialogue.next", "{}"),
+];
+/// The recruit out of the rank and at the captain's ear, turned to him.
+const MUSTER_TO_EAR: (&str, &str) = (
+    "script.eval",
+    r#"{"code": "local c = world.find('Captain') local r = c:find('Recruit') r.position = c:find('Spot ear').position r.rotation = quat.euler(1.29, 0, 0)"}"#,
+);
+/// The talk over, the captain and the recruit back in their places.
+const MUSTER_BYE: [(&str, &str); 3] = [
+    ("story.stop", "{}"),
+    ("ui.hide", r#"{"screen": "dialogue", "instant": true}"#),
+    (
+        "script.eval",
+        r#"{"code": "local c = world.find('Captain') c.script:reset() local r = c:find('Recruit') r.position = vec3(0, 0, 3.2) r.rotation = quat.euler(math.pi, 0, 0)"}"#,
+    ),
 ];
 
 /// The drawbridge from the top: raised at once, then lowered as E would, so a stop shows the
@@ -643,6 +691,52 @@ pub const VIEWS: &[DemoView] = &[
             ("ui.hide", r#"{"screen": "journal", "instant": true}"#),
             ("ui.hide", r#"{"screen": "hud", "instant": true}"#),
         ],
+    },
+    DemoView {
+        key: "script_story_spots",
+        name: "A choice made by walking: the captain asks who speaks for the company, and the \
+               view rises over the muster while the world slows; a ring glows at each place \
+               to stand: hold the rank, step past him, lean in to his ear, slip behind him",
+        // South-east of the captain over his shoulder, a lantern beyond him: the view from
+        // above keeps this heading.
+        eye: [-7.0, 2.6 + LIFT, 11.6],
+        target: [-9.0, 0.9 + LIFT, 5.6],
+        hour: 18.9,
+        // The first line read through, then the view's 0.8 s rise.
+        warmup_secs: 1.6,
+        on_arrive: &[
+            STORY_FRESH[0],
+            MUSTER_TALK[0],
+            MUSTER_TALK[1],
+            MUSTER_TALK[2],
+        ],
+        on_leave: &[],
+    },
+    DemoView {
+        key: "script_story_spots_walk",
+        name: "Walking to his ear: the recruit leaves the rank for the captain's shoulder, the \
+               ring fills while it stands there, and the captain reacts over his head",
+        // Follows script_story_spots: its choice is still open.
+        eye: [-7.0, 2.6 + LIFT, 11.6],
+        target: [-9.0, 0.9 + LIFT, 5.6],
+        hour: 18.9,
+        // The picture comes the tour's settling frames after the move: about 0.4 s into the
+        // 0.7 s it takes to pick by standing.
+        warmup_secs: 0.0,
+        on_arrive: &[MUSTER_TO_EAR],
+        on_leave: &[],
+    },
+    DemoView {
+        key: "script_story_spots_after",
+        name: "The whisper taken: the view comes back down, the world's pace returns, the \
+               captain nods and the conversation goes on from the place chosen",
+        // In front of the captain, the recruit at his right shoulder, the lanterns behind.
+        eye: [-7.6, 1.8 + LIFT, 4.9],
+        target: [-8.7, 1.45 + LIFT, 7.4],
+        hour: 18.9,
+        warmup_secs: 1.6,
+        on_arrive: &[],
+        on_leave: &[MUSTER_BYE[0], MUSTER_BYE[1], MUSTER_BYE[2]],
     },
     DemoView {
         key: "script_paused",
@@ -1022,6 +1116,32 @@ pub fn spawn_demo(commands: &mut Commands, origin: DVec3) {
         },
         Script::new(KEEPER_SCRIPT),
     ));
+    // The captain and his company; his spots are his children, so they go where he goes.
+    let [mx, _, mz] = MUSTER;
+    commands
+        .spawn((
+            Name::new(CAPTAIN_NAME),
+            at(mx, 0.0, mz).with_rotation(Quat::from_rotation_y(MUSTER_YAW)),
+            Interactable {
+                verb: "Talk".into(),
+                reach_m: 2.6,
+                offset: Vec3::new(0.0, 1.5, 0.0),
+                ..Default::default()
+            },
+            Script::new(CAPTAIN_SCRIPT).with_props(serde_json::json!({ "recruit": true })),
+        ))
+        .with_children(|c| {
+            for (name, [x, y, z], radius_m) in MUSTER_SPOTS {
+                c.spawn((
+                    Name::new(format!("Spot {name}")),
+                    Transform::from_xyz(x, y, z),
+                    StorySpot {
+                        name: name.into(),
+                        radius_m,
+                    },
+                ));
+            }
+        });
     // The drawbridge, built by its script and run by its timeline.
     let [bx, _, bz] = BRIDGE;
     commands.spawn((

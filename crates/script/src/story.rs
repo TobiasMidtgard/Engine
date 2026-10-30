@@ -415,6 +415,21 @@ pub struct NodeInfo {
     pub lines: Vec<(u32, String)>,
     /// Where it goes: (target, how: "jump", "detour" or an option's text, line).
     pub links: Vec<(String, String, u32)>,
+    /// Its options, with the spot each is walked to (`#spot:name`).
+    pub options: Vec<OptionInfo>,
+}
+
+/// An option, for the editor (the plan of a choice made by walking).
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+pub struct OptionInfo {
+    /// The line of the first option of its set (options shown together).
+    pub set: u32,
+    pub line: u32,
+    pub text: String,
+    /// `#spot:name`: picked by walking to the spot of that name.
+    pub spot: Option<String>,
+    /// `#fallback`: taken when the time to choose runs out.
+    pub fallback: bool,
 }
 
 /// A compiled `.yarn` file.
@@ -638,8 +653,13 @@ impl Out {
 enum Open {
     /// `<<if>>` or `<<once>>`: whether `<<else>>` was seen.
     If { line: u32, once: bool },
-    /// Options (or a line group) at this indent, inside an item's body now.
-    Choices { indent: usize, group: bool },
+    /// Options (or a line group) at this indent, inside an item's body now; `start` is the
+    /// first one's line.
+    Choices {
+        indent: usize,
+        group: bool,
+        start: u32,
+    },
 }
 
 /// The compiled module's first statement.
@@ -813,7 +833,7 @@ pub fn compile_yarn(text: &str, path: &str) -> Compiled {
             // round): `=> Back again?` then `-> Ask`.
             let group_item = matches!(body, Body::Group { .. });
             if is_item
-                && matches!(stack.last(), Some(Open::Choices { indent: at, group })
+                && matches!(stack.last(), Some(Open::Choices { indent: at, group, .. })
                     if *at == indent && *group != group_item)
             {
                 close_choices(&mut out, &mut stack, indent, n);
@@ -860,7 +880,7 @@ pub fn compile_yarn(text: &str, path: &str) -> Compiled {
                     tags,
                 } => {
                     info.lines.push((n, format!("-> {text}")));
-                    let open = matches!(stack.last(), Some(Open::Choices { indent: at, group: false }) if *at == indent);
+                    let open = matches!(stack.last(), Some(Open::Choices { indent: at, group: false, .. }) if *at == indent);
                     if open {
                         out.put(n, "end)");
                     } else {
@@ -868,8 +888,31 @@ pub fn compile_yarn(text: &str, path: &str) -> Compiled {
                         stack.push(Open::Choices {
                             indent,
                             group: false,
+                            start: n,
                         });
                     }
+                    let set = match stack.last() {
+                        Some(Open::Choices { start, .. }) => *start,
+                        _ => n,
+                    };
+                    let tag = |key: &str| {
+                        tags.iter().find_map(|t| {
+                            if t == key {
+                                Some(String::new())
+                            } else {
+                                t.strip_prefix(key)
+                                    .and_then(|r| r.strip_prefix(':'))
+                                    .map(str::to_string)
+                            }
+                        })
+                    };
+                    info.options.push(OptionInfo {
+                        set,
+                        line: n,
+                        text: text.clone(),
+                        spot: tag("spot").filter(|s| !s.is_empty()),
+                        fallback: tag("fallback").is_some(),
+                    });
                     let t = interpolate(&text).unwrap_or_else(|e| {
                         problems.push(Problem {
                             line: n,
@@ -914,7 +957,7 @@ pub fn compile_yarn(text: &str, path: &str) -> Compiled {
                             None => format!("=> {text}"),
                         },
                     ));
-                    let open = matches!(stack.last(), Some(Open::Choices { indent: at, group: true }) if *at == indent);
+                    let open = matches!(stack.last(), Some(Open::Choices { indent: at, group: true, .. }) if *at == indent);
                     if open {
                         out.put(n, "end)");
                     } else {
@@ -922,6 +965,7 @@ pub fn compile_yarn(text: &str, path: &str) -> Compiled {
                         stack.push(Open::Choices {
                             indent,
                             group: true,
+                            start: n,
                         });
                     }
                     let score = cond.as_deref().map_or(0, specificity) + u32::from(once);
@@ -1061,7 +1105,10 @@ fn guard(
 
 /// Closes the option groups at or right of `indent`: their last body, then the pick.
 fn close_choices(out: &mut Out, stack: &mut Vec<Open>, indent: usize, n: u32) {
-    while let Some(Open::Choices { indent: at, group }) = stack.last() {
+    while let Some(Open::Choices {
+        indent: at, group, ..
+    }) = stack.last()
+    {
         if *at < indent {
             break;
         }
@@ -1862,7 +1909,8 @@ pub struct RunInfo {
     pub text: String,
     /// The options shown now (their text).
     pub options: Vec<String>,
-    /// What it waits for: "options", "reading", "command", "wait" or "".
+    /// What it waits for: "options", "spots" (a choice made by walking), "reading", "until",
+    /// "time" or "".
     pub waiting: String,
     /// The nodes it went through, in order.
     pub taken: Vec<String>,
@@ -2354,7 +2402,8 @@ pub(crate) fn register(app: &mut engine_core::App) {
     app.register_api(
         "story.start",
         "Starts a conversation: {path: \"dialogue/keeper\", node: \"Start\", owner: \"Keeper\" \
-         (the entity whose script runs its commands), headless: false, step: false}. It shows \
+         (the entity whose script runs its commands), chooser (the entity that walks to \
+         #spot: options; the player), headless: false, step: false}. It shows \
          in the UI's conversation screen (the log with headless or without the UI module; \
          step waits after each line for story.choose) and returns its id.",
         r#"{"path": "dialogue/keeper", "node": "Start", "owner": "Keeper"}"#,
@@ -2380,6 +2429,12 @@ pub(crate) fn register(app: &mut engine_core::App) {
                 }
                 None => None,
             };
+            let chooser = match args.get("chooser").and_then(Json::as_str) {
+                Some(name) => {
+                    Some(named(world, name).ok_or_else(|| format!("there is no entity '{name}'"))?)
+                }
+                None => None,
+            };
             crate::with_runtime(world, |world, rt, _| {
                 let _lent = crate::access::lend_world(&rt.lua, world);
                 let start: mlua::Table = rt.lua.globals().get("dialogue")?;
@@ -2389,6 +2444,9 @@ pub(crate) fn register(app: &mut engine_core::App) {
                 opts.set("step", step)?;
                 if let Some(e) = owner {
                     opts.set("owner", crate::entity::EntityRef(e))?;
+                }
+                if let Some(e) = chooser {
+                    opts.set("chooser", crate::entity::EntityRef(e))?;
                 }
                 let h: mlua::Table = f.call((path, node, opts))?;
                 h.get::<u64>("id")
@@ -2400,9 +2458,12 @@ pub(crate) fn register(app: &mut engine_core::App) {
     app.register_api(
         "story.state",
         "The conversations: the newest one going (its node, the line shown, its options, what \
-         it waits for, the nodes it went through) and the others. {id} for one.",
+         it waits for, the nodes it went through) and the others, and the choices made by \
+         walking open now (spots: each option's spot, where it is, whether the player stands \
+         in it and how far its ring filled, the seconds left). {id} for one.",
         "{}",
         |world, args| {
+            let spots = crate::spots::describe(world);
             let runs = world.get_resource_or_insert_with(StoryRuns::default);
             if let Some(id) = args.get("id").and_then(Json::as_u64) {
                 return runs
@@ -2410,7 +2471,7 @@ pub(crate) fn register(app: &mut engine_core::App) {
                     .map(|r| json!(r))
                     .ok_or_else(|| format!("no conversation {id}"));
             }
-            Ok(json!({ "current": runs.current(), "all": runs.runs }))
+            Ok(json!({ "current": runs.current(), "all": runs.runs, "spots": spots }))
         },
     );
     app.register_api(
@@ -2534,6 +2595,37 @@ mod tests {
             lines[4].starts_with("do local __o = S:options()"),
             "{}",
             c.luau
+        );
+    }
+
+    #[test]
+    fn options_name_their_spots_and_sets() {
+        let src = "title: Start\n---\nWho speaks?\n-> Stay <<if $a>> #spot:rank #fallback\n    \
+                   -> Inner #spot:x\n    -> Other\n-> Go #spot:front\n-> Talk\n===\n";
+        let c = compile_yarn(src, "dialogue/x.yarn");
+        assert!(c.problems.is_empty(), "{:?}", c.problems);
+        let o = &c.nodes[0].options;
+        let seen: Vec<(u32, u32, &str, Option<&str>, bool)> = o
+            .iter()
+            .map(|o| {
+                (
+                    o.set,
+                    o.line,
+                    o.text.as_str(),
+                    o.spot.as_deref(),
+                    o.fallback,
+                )
+            })
+            .collect();
+        assert_eq!(
+            seen,
+            vec![
+                (4, 4, "Stay", Some("rank"), true),
+                (5, 5, "Inner", Some("x"), false),
+                (5, 6, "Other", None, false),
+                (4, 7, "Go", Some("front"), false),
+                (4, 8, "Talk", None, false),
+            ]
         );
     }
 
