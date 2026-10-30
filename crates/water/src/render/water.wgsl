@@ -54,6 +54,7 @@ struct Globals {
     swash2: vec4<f32>,   // its datum rel camera y, cell (m), unused, unused
     waterline: vec4<f32>,  // the camera at the waterline: split per pixel (1/0), lens dome radius (m), lens wetness 0..1, seconds since it surfaced
     waterline2: vec4<f32>, // meters of the dome per pixel, drop seed, unused, unused
+    trail: vec4<f32>,      // the ripple grid's trail (`trail.rs`): corner rel camera x, z, size (m), on
 };
 
 struct WaterUniform {
@@ -74,7 +75,8 @@ struct WaterUniform {
 @group(1) @binding(10) var mirror_depth: texture_depth_2d;  // its depth (reverse-Z, near / view depth)
 @group(1) @binding(11) var shelter_tex: texture_2d<f32>;    // wind exposure over the nearest lake: 0 lee .. 1 open
 @group(1) @binding(12) var swash_a: texture_2d<f32>;        // the swash: level drawn (m over its datum; below -1e3 none), depth (m), strip weight, foam
-@group(1) @binding(13) var swash_b: texture_2d<f32>;        // what its sand remembers: sheen, damp, mark, bed (m over the datum)
+@group(1) @binding(13) var swash_b: texture_2d<f32>;
+@group(1) @binding(14) var trail_tex: texture_2d<f32>;       // foam and bubbles the ripple grid's wakes left, 4 times wider        // what its sand remembers: sheen, damp, mark, bed (m over the datum)
 
 // The body being shaded reflects through the lake mirror (set by fs_body).
 var<private> use_mirror: bool = false;
@@ -469,6 +471,21 @@ fn current_at(rel_xz: vec2<f32>) -> vec4<f32> {
     return textureSampleLevel(current_tex, linear_clamp, uv, 0.0) * grid_fade(uv);
 }
 
+// Foam and bubbles the ripple grid's wakes left behind at a camera-relative x/z: the trail's
+// share, which takes over as the grid fades out (Crest's blend from one level of its cascade
+// to the next), and fades out itself in a circle four times as wide.
+fn trail_at(rel_xz: vec2<f32>) -> vec2<f32> {
+    if (water.g.trail.w < 0.5) { return vec2<f32>(0.0); }
+    let tuv = (rel_xz - water.g.trail.xy) / water.g.trail.z;
+    if (any(tuv <= vec2<f32>(0.0)) || any(tuv >= vec2<f32>(1.0))) { return vec2<f32>(0.0); }
+    var t = textureSampleLevel(trail_tex, linear_clamp, tuv, 0.0).xy * grid_fade(tuv);
+    if (water.g.ripple.w > 0.5) {
+        let uv = (rel_xz - water.g.ripple.xy) / water.g.ripple.z;
+        if (all(uv > vec2<f32>(0.0)) && all(uv < vec2<f32>(1.0))) { t *= 1.0 - grid_fade(uv); }
+    }
+    return t;
+}
+
 // Rain falling at a camera-relative x/z, mm/h.
 fn rain_at(rel_xz: vec2<f32>) -> f32 {
     var r = water.g.rain.x;
@@ -773,6 +790,24 @@ fn trace_reflection(rel: vec3<f32>, r: vec3<f32>, size: vec2<f32>, roughness: f3
 // and carried downstream (two copies over 4 s, cross-faded). Streaks run along the two nearest
 // of eight fixed headings, blended by the current's own, so where the current turns the pattern
 // bends with it instead of winding up.
+// Froth's structure, 0..1: aged foam gathers along the walls between the cells of the water
+// it floats on and opens in their middles, a web of lines round clear patches (the lace seen
+// on any wake or swash from above). High along the walls of two warped cell sizes, about
+// 0.55 m and 0.2 m, so the web tears into finer threads as it thins; far off, where a pixel
+// spans the cells, their mean.
+fn foam_cells(wp: vec2<f32>, rel: vec3<f32>) -> f32 {
+    let warp = vec2<f32>(value_noise2(wp * 0.9), value_noise2(wp * 0.9 + vec2<f32>(5.2, 1.3))) - 0.5;
+    let q = wp + warp * 0.7;
+    let big = stone_cell(q / 0.55 + vec2<f32>(13.1, 7.7));
+    let small = stone_cell(q / 0.2 + vec2<f32>(3.9, 21.4));
+    let web_big = 1.0 - smoothstep(0.0, 0.22, big.d2 - big.d1);
+    let web_small = 1.0 - smoothstep(0.0, 0.3, small.d2 - small.d1);
+    let v = 0.2 + 0.55 * web_big + 0.25 * web_small;
+    let pixel = pixel_footprint(rel);
+    let near = mix(v, 0.2 + 0.55 * web_big + 0.25 * 0.45, smoothstep(0.08, 0.2, pixel));
+    return mix(near, 0.5, smoothstep(0.2, 0.5, pixel));
+}
+
 fn streak_foam(wp: vec2<f32>, vel: vec2<f32>) -> f32 {
     let t = time_s();
     let ph0 = fract(t * 0.25);
@@ -967,15 +1002,19 @@ fn shade_water(rel: vec3<f32>, n_in: vec3<f32>, look: WaterLook, foam_in: f32, c
         if (moving > 0.0) {
             pattern = mix(pattern, streak_foam(wp, vel), moving);
         }
-        // Foam is lace, not a sheet (Crest's coverage): a broad noise picks where it thins
-        // first, and the fine pattern tears holes in it from there as it fades.
+        // Foam is lace, not a sheet (Crest's coverage, HDRP's erosion): a broad noise picks
+        // where it thins first; as it ages it opens along the walls between its bubble
+        // clusters into a web of streaks, then holes, then scattered flecks.
         let broad = value_noise2(wp * 0.35 + vec2<f32>(7.3, 1.9));
+        pattern = mix(pattern, foam_cells(wp, rel), 0.6);
         let theta = 1.0 - foam * (0.7 + 0.6 * broad);
         let cover = smoothstep(theta, theta + 0.15, pattern);
         let up = sky_ambient(n) * sky_vis * PI;
         // Foam is a dense froth: light gets through it, so it glows even with the sun behind.
-        let foam_col = pre_expose(0.85 * (sun * shadow * max(dot(n, l) * 0.6 + 0.4, 0.0) + up) * INV_PI);
-        color = mix(color, foam_col, cover * 0.95);
+        // Its albedo is well under snow's (whitecaps reflect at most about 55%, Whitlock 1982;
+        // ours is brighter, fresh froth on fresh water), and thin lace lets the water through.
+        let foam_col = pre_expose(0.75 * (sun * shadow * max(dot(n, l) * 0.6 + 0.4, 0.0) + up) * INV_PI);
+        color = mix(color, foam_col, cover * mix(0.8, 0.95, saturate(foam * 2.0)));
     }
     let ground = textureSampleLevel(scene_color, linear_clamp, uv0, 0.0).rgb * wet_bed;
     // The last centimeters at the waterline are a film over the sand: no water color to speak
@@ -1245,6 +1284,9 @@ fn fs_body(in: BodyOut) -> @location(0) vec4<f32> {
         let cur = current_at(in.rest);
         vel += cur.xy;
         bubbles = cur.w;
+        let trail = trail_at(in.rest);
+        foam += trail.x * 1.6;
+        bubbles += trail.y;
     }
     // The fine waves, roughened in gusts, calmed in the lee and the slicks.
     let bd = water.bodies[bi].detail;
@@ -1928,11 +1970,13 @@ fn fs_sand(in: FullscreenOut) -> @location(0) vec4<f32> {
     // The swash mark: lace of stranded foam, torn as it pops.
     var keep = dark;
     if (sand.z > 0.01) {
-        let pattern = fbm2(wp * 3.1, 4);
-        let theta = 1.0 - sand.z * 0.9;
+        let pattern = mix(fbm2(wp * 3.1, 4), foam_cells(wp, rel), 0.6);
+        // Stranded foam is a line of lace popping on the sand, never a sheet, however much of
+        // it the swash leaves.
+        let theta = 1.0 - sand.z * 0.6;
         let cover = smoothstep(theta, theta + 0.12, pattern) * 0.9;
         let up = sky_ambient(n) * sky_vis * PI;
-        let foam_col = pre_expose(0.85 * (sun * shadow * max(dot(n, l) * 0.6 + 0.4, 0.0) + up) * INV_PI);
+        let foam_col = pre_expose(0.75 * (sun * shadow * max(dot(n, l) * 0.6 + 0.4, 0.0) + up) * INV_PI);
         add = mix(add, foam_col, cover);
         keep *= 1.0 - cover;
     }
