@@ -320,6 +320,21 @@ compresses and stretches.
   by the clip's `grip` curve, `spawn_bow` with a string from both tips to the draw hand and
   a nocked arrow) and `shoot_arrow` flies a prop arrow that sticks. Blade blows under the
   ribs don't fold a body onto a knee (`Hurt` keeps that for blunt blows to the liver).
+- **Grips.** [`grip`](src/grip.rs) fits held items to the hands people see. Clips and props
+  share one standard fist per hand (origin at `GRIP`, fingers −Y, thumb side −Z, palm toward
+  `PALM`). An imported model's [`Retargeter`] turns each visible hand so its palm faces the
+  standard way (knuckles and all, not just the hand's direction) and measures where its fist
+  closes: behind the knuckles and a palm's depth plus a sword grip's radius below them,
+  scaled by the hand's size. Props attached `in_fist` and two-handed reaches with `fist`
+  then hold the item in that fist, and a `Reach` with `turn` also turns the off hand to the
+  grip (the great sword's left hand is held the same way round as the right). Each prop
+  declares its handle (`HeldItems`: axis, radius, length), a hand holding one is closed on
+  it, and `Retargeter::wrap` curls each finger segment from the knuckle out until it
+  touches the handle (joint-lock-on-contact, Rijpkema and Girard 1991), so a bow's thick
+  riser and a sword's grip close differently. `Retargeter::grip_report` measures a posed
+  hand on its handle (palm gap, finger penetration and gaps, thumb opposition, handle size
+  over hand length) and `cargo run -p engine_anim --example grip_check --release` runs the
+  paddock and reports every held hand.
 - **Getting up.** A person whose weight returns to 0 while lying flat gets up rather than
   blending straight to standing: `get_up_back` (sits up, tucks a leg, plants a hand and a
   knee, steps up) or `get_up_front` (palms down, pushes up to all fours, kneels, steps up),

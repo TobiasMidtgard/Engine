@@ -15,7 +15,7 @@ use engine_world::physics::{PhysicsQueries, QueryFilter};
 use engine_world::{Ground, SurfaceId};
 
 use crate::animator::{Animator, PoseEdit};
-use crate::xform::{rotation_between, smoothing, twist_angle};
+use crate::xform::{Xf, rotation_between, smoothing, twist_angle};
 
 /// How fast a planted foot's hold takes over, and how long a released one takes to rejoin
 /// the animation, s.
@@ -571,6 +571,14 @@ pub struct Reach {
     /// Multiply the weight by this animation curve (empty = always on), so clips decide when
     /// the hand grips.
     pub weight_curve: String,
+    /// Also turn the end bone to the target bone's frame (times the weight), as an off hand
+    /// on a grip held the same way round as the main hand: 0 moves it only.
+    pub turn: f32,
+    /// The target is one hand's fist on an item the other (`target_bone`) holds:
+    /// `target_offset` is where this fist is in the holding hand's standard fist frame, less
+    /// [`GRIP`](crate::grip::GRIP), and both hands' measured fists are used
+    /// ([`crate::grip`]).
+    pub fist: bool,
 }
 
 impl Default for Reach {
@@ -586,6 +594,8 @@ impl Default for Reach {
             pole: Vec3::new(0.0, -0.3, 1.0),
             weight: 1.0,
             weight_curve: String::new(),
+            turn: 0.0,
+            fist: false,
         }
     }
 }
@@ -902,8 +912,16 @@ pub(crate) fn look_at_system(
     }
 }
 
-pub(crate) fn reach_ik_system(mut q: Query<(&mut Animator, &ReachIk, &GlobalTransform)>) {
-    for (mut animator, reach, gt) in &mut q {
+pub(crate) fn reach_ik_system(
+    mut q: Query<(
+        &mut Animator,
+        &ReachIk,
+        &GlobalTransform,
+        Option<&crate::retarget::Retarget>,
+    )>,
+) {
+    for (mut animator, reach, gt, retarget) in &mut q {
+        let retargeter = retarget.map(|r| &*r.retargeter);
         if !animator.posed() {
             continue;
         }
@@ -924,21 +942,28 @@ pub(crate) fn reach_ik_system(mut q: Query<(&mut Animator, &ReachIk, &GlobalTran
                 continue;
             };
             animator.refresh_model();
-            let target = match s.index_of(&chain.target_bone) {
+            // The end bone's wanted frame (its rotation only matters when it turns).
+            let frame = match s.index_of(&chain.target_bone) {
                 Some(t) if !chain.target_bone.is_empty() => {
-                    animator.model[t].transform_point(chain.target_offset)
+                    let offset = Xf::from_t(chain.target_offset);
+                    let fit = |bone: &str| match crate::grip::side_of(bone) {
+                        Some(side) if chain.fist => crate::grip::fist_correction(retargeter, side),
+                        _ => Xf::IDENTITY,
+                    };
+                    animator.model[t]
+                        .mul(&fit(&chain.target_bone))
+                        .mul(&offset)
+                        .mul(&fit(&chain.end).inverse())
                 }
-                _ => to_model(gt, chain.target),
+                _ => Xf::from_t(to_model(gt, chain.target)),
             };
-            two_bone(
-                &mut animator.edit(),
-                a,
-                b,
-                c,
-                target,
-                chain.pole,
-                weight.min(1.0),
-            );
+            let w = weight.min(1.0);
+            let mut edit = animator.edit();
+            two_bone(&mut edit, a, b, c, frame.t, chain.pole, w);
+            if chain.turn > 0.0 {
+                let r = edit.model[c].r.slerp(frame.r, (chain.turn * w).min(1.0));
+                edit.set_model_rotation(c, r);
+            }
         }
     }
 }

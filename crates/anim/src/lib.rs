@@ -15,6 +15,7 @@ pub mod face;
 pub mod footwork;
 pub mod freeflow;
 pub mod graph;
+pub mod grip;
 pub mod hit;
 pub mod horse_model;
 pub mod hurt;
@@ -350,6 +351,10 @@ fn register_types(app: &mut App) {
     .register_component::<HandGrip>(
         "Keeps a character's hands closed at least this much (left, right: 0..1), as when it \
          carries something.",
+    )
+    .register_component::<grip::HeldItems>(
+        "The handle each hand holds (left, right: axis and radius in the standard fist), for \
+         the fingers to close round.",
     )
     .register_component::<RagdollTone>(
         "Muscle tone in a limp body: joints hold the animated pose in the air (tone 0..1) \

@@ -21,7 +21,9 @@ use crate::build::weapons::{
     HANDLE_AXIS, HANDLE_FACE, SHIELD_CENTER, SHIELD_RADIUS, SWORD_BLADE,
 };
 use crate::combat::Shield;
+use crate::grip::{Handle, HeldItems, fist_correction};
 use crate::ik::{Reach, ReachIk};
+use crate::retarget::{Retarget, Retargeter};
 
 fn steel() -> StandardMaterial {
     StandardMaterial::hex(0xc9cdd3)
@@ -40,7 +42,7 @@ fn leather() -> StandardMaterial {
 }
 
 /// Spawn a part held by `bone` of `person`: `shape` at `offset` turned by `rotation` in the
-/// bone's frame.
+/// bone's standard fist ([`crate::grip`]).
 fn part(
     world: &mut World,
     person: Entity,
@@ -59,9 +61,17 @@ fn part(
             t,
             GlobalTransform::from(t),
             MeshRenderer::new(shape, material),
-            BoneAttachment::new(person, bone).with_offset(offset, rotation),
+            BoneAttachment::new(person, bone)
+                .with_offset(offset, rotation)
+                .in_fist(),
         ))
         .id()
+}
+
+/// Let `person`'s `side` hand (0 left, 1 right) close round `handle`.
+fn hold(world: &mut World, person: Entity, side: usize, handle: Handle) {
+    let held = world.get::<HeldItems>(person).copied().unwrap_or_default();
+    world.entity_mut(person).insert(held.hold(side, handle));
 }
 
 /// A rotation taking X to `width`, Y to `length` (square to each other), Z to their cross.
@@ -146,31 +156,41 @@ fn sword_parts(
     ]
 }
 
+/// A sword grip's radius, meters.
+pub const SWORD_GRIP_RADIUS: f32 = 0.017;
+/// A shield's handle and a bow's grip, meters.
+pub const SHIELD_HANDLE_RADIUS: f32 = 0.015;
+pub const BOW_GRIP_RADIUS: f32 = 0.02;
+
 /// An arming sword in `person`'s right hand.
 pub fn spawn_sword(world: &mut World, person: Entity) -> Vec<Entity> {
-    sword_parts(world, person, SWORD_BLADE, 0.045, 0.2, [-0.065, 0.05])
+    let grip = [-0.065, 0.05];
+    hold(
+        world,
+        person,
+        1,
+        Handle::new(BLADE_AXIS, SWORD_GRIP_RADIUS, grip),
+    );
+    sword_parts(world, person, SWORD_BLADE, 0.045, 0.2, grip)
 }
 
 /// A great sword in `person`'s right hand, the left hand on the grip below it: the clips put
 /// it there, and a [`ReachIk`] on the `grip` curve keeps it there on characters whose
 /// proportions differ from the clips'.
 pub fn spawn_greatsword(world: &mut World, person: Entity) -> Vec<Entity> {
-    let parts = sword_parts(
-        world,
-        person,
-        GREATSWORD_BLADE,
-        0.055,
-        0.32,
-        [-GREATSWORD_HANDS - 0.08, 0.055],
-    );
-    // The left wrist where the left fist closes round the grip, in the right hand's frame
-    // (the hands hold the grip the same way round).
-    let left_fist = GRIP - BLADE_AXIS * GREATSWORD_HANDS;
+    let grip = [-GREATSWORD_HANDS - 0.08, 0.055];
+    let parts = sword_parts(world, person, GREATSWORD_BLADE, 0.055, 0.32, grip);
+    let handle = |at: f32| Handle::new(BLADE_AXIS, SWORD_GRIP_RADIUS, [grip[0] + at, grip[1] + at]);
+    hold(world, person, 1, handle(0.0));
+    hold(world, person, 0, handle(GREATSWORD_HANDS));
+    // The left fist on the grip below the right, turned the same way round as the right.
     world.entity_mut(person).insert(ReachIk::new(vec![Reach {
         target_bone: "hand_r".into(),
-        target_offset: left_fist - GRIP,
+        target_offset: -BLADE_AXIS * GREATSWORD_HANDS,
         pole: Vec3::new(-0.6, -1.0, 0.2),
         weight_curve: "grip".into(),
+        turn: 1.0,
+        fist: true,
         ..Reach::arm(0)
     }]));
     parts
@@ -237,6 +257,12 @@ pub fn spawn_shield(world: &mut World, person: Entity) -> Vec<Entity> {
         ),
     ];
     world.entity_mut(person).insert(Shield::default());
+    hold(
+        world,
+        person,
+        0,
+        Handle::new(HANDLE_AXIS, SHIELD_HANDLE_RADIUS, [-0.06, 0.06]),
+    );
     ids
 }
 
@@ -262,12 +288,18 @@ pub struct BowString {
 /// An arrow's length, meters.
 pub const ARROW_LENGTH: f32 = 0.78;
 
-/// The bow's tips in the left hand's frame.
+/// The middle of the bow's grip in the left hand's standard fist: the grip is thicker than
+/// the standard one, so its axis sits further from the palm.
+fn bow_grip() -> Vec3 {
+    Handle::new(HANDLE_AXIS, BOW_GRIP_RADIUS, [0.0, 0.0]).ends(0)[0]
+}
+
+/// The bow's tips in the left hand's standard fist.
 fn bow_tips() -> [Vec3; 2] {
     let back = -HANDLE_FACE * BOW_TIP_BACK;
     [
-        GRIP + HANDLE_AXIS * BOW_HALF + back,
-        GRIP - HANDLE_AXIS * BOW_HALF + back,
+        bow_grip() + HANDLE_AXIS * BOW_HALF + back,
+        bow_grip() - HANDLE_AXIS * BOW_HALF + back,
     ]
 }
 
@@ -285,6 +317,12 @@ fn arrow_shape() -> (Shape, StandardMaterial) {
 /// A recurve bow in `person`'s left fist (its back out over the knuckles, the string toward
 /// the archer), its string and an arrow for the draw hand.
 pub fn spawn_bow(world: &mut World, person: Entity) -> Vec<Entity> {
+    hold(
+        world,
+        person,
+        0,
+        Handle::new(HANDLE_AXIS, BOW_GRIP_RADIUS, [-0.07, 0.07]),
+    );
     let wood = StandardMaterial::hex(0x5b3a1e).with_roughness(0.5);
     let back = -HANDLE_FACE;
     let mut ids = vec![part(
@@ -297,15 +335,15 @@ pub fn spawn_bow(world: &mut World, person: Entity) -> Vec<Entity> {
             segments: 10,
         },
         leather(),
-        GRIP,
+        bow_grip(),
         along(HANDLE_FACE, HANDLE_AXIS),
     )];
     // Each limb in two pieces: out from the riser bowing a little toward the target, then
     // back to the tip.
     for sign in [1.0, -1.0] {
-        let riser = GRIP + HANDLE_AXIS * 0.13 * sign;
-        let mid = GRIP + HANDLE_AXIS * 0.45 * sign - back * 0.02;
-        let tip = GRIP + HANDLE_AXIS * BOW_HALF * sign + back * BOW_TIP_BACK;
+        let riser = bow_grip() + HANDLE_AXIS * 0.13 * sign;
+        let mid = bow_grip() + HANDLE_AXIS * 0.45 * sign - back * 0.02;
+        let tip = bow_grip() + HANDLE_AXIS * BOW_HALF * sign + back * BOW_TIP_BACK;
         for (a, b, w) in [(riser, mid, 0.034), (mid, tip, 0.026)] {
             let length = (b - a).normalize();
             ids.push(part(
@@ -362,8 +400,13 @@ pub fn spawn_bow(world: &mut World, person: Entity) -> Vec<Entity> {
 
 /// Where `archer`'s draw hand nocks the arrow (world), the bow's tips (world), and the draw
 /// and nocked curves.
-fn bow_state(animator: &Animator, gt: &GlobalTransform) -> Option<(DVec3, [DVec3; 2], f32, f32)> {
-    let left = animator.model[animator.skeleton.index_of("hand_l")?];
+fn bow_state(
+    animator: &Animator,
+    gt: &GlobalTransform,
+    retargeter: Option<&Retargeter>,
+) -> Option<(DVec3, [DVec3; 2], f32, f32)> {
+    let left =
+        animator.model[animator.skeleton.index_of("hand_l")?].mul(&fist_correction(retargeter, 0));
     let right = animator.model[animator.skeleton.index_of("hand_r")?];
     let world = |p: Vec3| crate::ik::to_world(gt, p);
     let [a, b] = bow_tips().map(|t| world(left.transform_point(t)));
@@ -389,7 +432,7 @@ fn span(t: &mut Transform, a: DVec3, b: DVec3) {
 
 /// Pose bow strings and nocked arrows (after the pose is final).
 pub(crate) fn bow_string_system(
-    archers: Query<(&Animator, &GlobalTransform), Without<BowString>>,
+    archers: Query<(&Animator, &GlobalTransform, Option<&Retarget>), Without<BowString>>,
     mut q: Query<(
         &BowString,
         &mut Transform,
@@ -401,7 +444,7 @@ pub(crate) fn bow_string_system(
         let Some((nock, [upper, lower], _, nocked)) = piece
             .archer
             .and_then(|e| archers.get(e).ok())
-            .and_then(|(a, gt)| bow_state(a, gt))
+            .and_then(|(a, gt, r)| bow_state(a, gt, r.map(|r| &*r.retargeter)))
         else {
             continue;
         };
