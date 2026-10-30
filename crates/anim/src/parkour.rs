@@ -16,7 +16,7 @@ use engine_world::{LocomotionMode, LocomotionState};
 use crate::Animator;
 use crate::build::humanoid::{
     TRIGGER_DOUBLE_JUMP, TRIGGER_JUMP, TRIGGER_LAND, TRIGGER_LAND_HARD, TRIGGER_WALL_KICK,
-    WALL_CURVES, WALL_DISTANCE,
+    WALL_CURVES, WALL_DISTANCE, WALL_INSET,
 };
 use crate::ik::{IkShape, IkSurface, IkSurfaces, two_bone};
 
@@ -244,17 +244,17 @@ fn ray_box(
 }
 
 /// Move the feet (and any hand a clip plants) of a wall run onto the wall that is there
-/// (`AnimSet::Ik`, after the feet): each by how firmly its clip has it on the wall.
+/// (`AnimSet::Ik`, after the feet): each by how firmly its clip has it on the wall. A limb is
+/// taken to the wall's plane itself, not moved by the clip's offset from it, so a foot still
+/// blending in from a jump lands on the wall as soon as its clip says it is there.
 pub(crate) fn wall_ik(mut q: Query<(&GlobalTransform, &mut Animator, &Parkour)>) {
     for (gt, mut animator, parkour) in &mut q {
         let Some(wall) = parkour.wall else {
             continue;
         };
         let scale = gt.scale().y.max(1e-3);
-        let delta = (wall.distance / scale - WALL_DISTANCE).clamp(WALL_REACH_MIN, WALL_REACH_MAX);
-        if delta.abs() < 1e-3 {
-            continue;
-        }
+        let plane = WALL_DISTANCE
+            + (wall.distance / scale - WALL_DISTANCE).clamp(WALL_REACH_MIN, WALL_REACH_MAX);
         let firm: Vec<f32> = WALL_CURVES
             .iter()
             .map(|c| animator.curve(c).clamp(0.0, 1.0))
@@ -286,7 +286,11 @@ pub(crate) fn wall_ik(mut q: Query<(&GlobalTransform, &mut Animator, &Parkour)>)
             }
             let (pa, pb, pc) = (edit.position(a), edit.position(b), edit.position(c));
             let pole = pb - (pa + pc) * 0.5;
-            let target = pc + Vec3::X * wall.side * delta * w;
+            let shift = wall.side * (plane - WALL_INSET[limb]) - pc.x;
+            if shift.abs() < 1e-3 {
+                continue;
+            }
+            let target = pc + Vec3::X * shift * w;
             let held = edit.model[c].r;
             two_bone(&mut edit, a, b, c, target, pole, 1.0);
             edit.set_model_rotation(c, held);
