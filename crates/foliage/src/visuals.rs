@@ -844,6 +844,13 @@ mod tests {
         use engine_assets::Assets;
         use engine_render::{Camera, MeshRef};
         let mut app = App::new();
+        // Game time, not the wall clock: the level fades run in seconds, and on a fast or
+        // busy machine 60 real frames can end before a fade does.
+        app.world
+            .resource_mut::<Time>()
+            .set_source(engine_core::time::TimeSource::Manual {
+                step_secs: 1.0 / 30.0,
+            });
         app.add_plugins(engine_world::WorldPlugin);
         app.init_resource::<Assets<Mesh>>()
             .init_resource::<Assets<StandardMaterial>>()
