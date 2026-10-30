@@ -2049,8 +2049,8 @@ pub const VIEWS: &[DemoView] = &[
     DemoView {
         key: "paddock_horse_graze",
         name: "Then grazes beside it, nibbling and moving on a little",
-        eye: [20.5, 1.3, 5.8],
-        target: [18.0, 0.5, 7.6],
+        eye: [16.2, 1.2, 5.4],
+        target: [17.5, 0.45, 7.9],
         hour: 15.0,
         at: 26.0,
     },
@@ -2851,12 +2851,6 @@ fn build_paddock(world: &mut World, origin: DVec3) -> DemoEntities {
         GlobalTransform::from(trough),
         RigidBody::fixed(),
         Collider::cuboid(Vec3::new(0.7, 0.25, 0.25)),
-        MeshRenderer::new(
-            MeshShape::Cuboid {
-                size: [1.4, 0.5, 0.5],
-            },
-            StandardMaterial::hex(0x5b4636).with_roughness(0.8),
-        ),
         crate::actions::ActionSpot {
             actions: vec!["drink".into()],
             // The water's near side.
@@ -2864,17 +2858,25 @@ fn build_paddock(world: &mut World, origin: DVec3) -> DemoEntities {
             radius: 1.9,
         },
     ));
-    let water = Transform::from_translation(trough_at + DVec3::Y * 0.19);
-    world.spawn((
-        water,
-        GlobalTransform::from(water),
-        MeshRenderer::new(
-            MeshShape::Cuboid {
-                size: [1.3, 0.02, 0.4],
-            },
-            StandardMaterial::hex(0x34505a).with_roughness(0.05),
-        ),
-    ));
+    // Planks round the water: the bottom, the long sides and the ends (center offset, size),
+    // the water filled to just under the rim.
+    let wood = StandardMaterial::hex(0x5b4636).with_roughness(0.8);
+    let water = StandardMaterial::hex(0x34505a).with_roughness(0.05);
+    for (offset, size, material) in [
+        ([0.0, -0.2, 0.0], [1.4, 0.1, 0.5], wood),
+        ([0.0, 0.0, 0.225], [1.4, 0.5, 0.05], wood),
+        ([0.0, 0.0, -0.225], [1.4, 0.5, 0.05], wood),
+        ([0.675, 0.0, 0.0], [0.05, 0.5, 0.4], wood),
+        ([-0.675, 0.0, 0.0], [0.05, 0.5, 0.4], wood),
+        ([0.0, 0.02, 0.0], [1.3, 0.38, 0.4], water),
+    ] {
+        let t = Transform::from_translation(trough_at + Vec3::from(offset).as_dvec3());
+        world.spawn((
+            t,
+            GlobalTransform::from(t),
+            MeshRenderer::new(MeshShape::Cuboid { size }, material),
+        ));
+    }
     let mut horse_route = horse_path.clone();
     horse_route.push([HORSE_DRINK[0], HORSE_DRINK[1], 1.0]);
     let horse_e = spawn_horse(
