@@ -4,21 +4,33 @@
 // pressing E there, seen from above while the world slows. <<spots 12>> gives 12 seconds,
 // then the #fallback option is taken: staying put is an answer too. The spots are children of
 // the captain (rank, forward, ear, behind), so they go where he goes.
+// Two of the ways are skill checks (#check:skill:difficulty): 2d6 plus your skill (the facts
+// $skill_persuade and $skill_nerve) and any <<bonus>>, against the difficulty, the odds shown
+// over the ring. Stepping past him is a red check (#red): one try, ever. While you walk he
+// and his soldiers turn to watch you (<<watch Soldier*>>), and they mutter as you go: the
+// Murmur nodes below are said as barks (<<barks Murmur>>), the one that fits the moment best.
 // See "Story" in the scripts README.
 
 title: Start
 position: 0,0
 ---
+<<declare $skill_persuade = 1>>
+<<declare $skill_nerve = 0>>
 <<call_to_order>>
 Captain: Company! The gate opens at dawn, and someone speaks for us at the parley.
 Captain: You there, out of the line already? Back in it. <<if not standing_at("rank")>>
+<<if $read_orders>>
+    <<bonus persuade 2 "You read the parley orders">>
+<<endif>>
 Captain: Who speaks for the company? Step up, or hold your place.
+<<watch Soldier*>>
+<<barks Murmur>>
 <<spots 12>>
 -> Hold your place in the rank #spot:rank #fallback
     <<jump Rank>>
--> Step past him and take the front #spot:forward
+-> Step past him and take the front #spot:forward #check:nerve:9 #red
     <<jump Forward>>
--> Lean in and whisper him an idea #spot:ear
+-> Lean in and whisper him an idea #spot:ear #check:persuade:8
     <<jump Whisper>>
 -> Slip behind him, a hand on your knife #spot:behind
     <<jump Behind>>
@@ -35,20 +47,31 @@ Captain: Dismissed.
 title: Forward
 position: 420,80
 ---
-<<set $spoke_up to true>>
 <<set $overstepped to true>>
-<<step_aside>>
-Captain: Bold. Then you speak at dawn, and you answer for every word.
-Captain: The company will remember who stood in front.
+<<if passed()>>
+    <<set $spoke_up to true>>
+    <<step_aside>>
+    Captain: Bold. Then you speak at dawn, and you answer for every word.
+    Captain: The company will remember who stood in front.
+<<else>>
+    <<set $regard_captain to -1>>
+    Captain: Back in line, recruit. When I want a speaker, I will point at one.
+    <<bark Laugh>>
+<<endif>>
 ===
 
 title: Whisper
 position: 420,280
 ---
-<<set $whispered to true>>
-<<nod>>
-Captain: ...Clever. Quietly now.
-Captain: If it works, it was my idea. If it fails, it was yours.
+<<if passed()>>
+    <<set $whispered to true>>
+    <<nod>>
+    Captain: ...Clever. Quietly now.
+    Captain: If it works, it was my idea. If it fails, it was yours.
+<<else>>
+    <<set $whispered to false>>
+    Captain: Not now, recruit. Whatever it is, it keeps until after the parley.
+<<endif>>
 ===
 
 title: Behind
@@ -59,4 +82,48 @@ position: 420,480
 Captain: I hear you, recruit. I always hear the ones behind me.
 => Captain: Put it away, and we never speak of this.
 => Captain: Again? The rest of them are watching now. <<if visited("Behind")>>
+===
+
+title: Murmur
+position: 860,-120
+when: moment() == "out"
+---
+=> Soldier 2: Where's he going?
+=> Soldier 3: Here we go...
+===
+
+title: Murmur
+position: 860,40
+when: moment() == "near" and standing_at("forward")
+---
+Soldier 2: He's not serious.
+Soldier 3: Somebody stop him.
+===
+
+title: Murmur
+position: 860,200
+when: moment() == "near" and standing_at("ear")
+---
+Soldier 1: What's he whispering?
+===
+
+title: Murmur
+position: 860,320
+when: moment() == "near" and standing_at("behind")
+---
+Soldier 4: Is that a knife?
+===
+
+title: Murmur
+position: 860,440
+when: moment() == "hurry"
+---
+Soldier 3: Make up your mind, green.
+===
+
+title: Laugh
+position: 860,580
+---
+Soldier 1: Ha!
+Soldier 4: Front of the line, he says.
 ===

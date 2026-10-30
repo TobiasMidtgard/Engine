@@ -33,6 +33,7 @@ local TABARDS = {
 	{ base_color = { 0.08, 0.14, 0.28, 1 }, perceptual_roughness = 0.9 },
 }
 local RECRUIT = { base_color = { 0.17, 0.24, 0.12, 1 }, perceptual_roughness = 0.9 } -- still in green
+local EYE = { base_color = { 0.05, 0.04, 0.04, 1 }, perceptual_roughness = 0.3 }
 
 local function part(name: string, shape: any, at: Vec3, material: any, rotation: Quat?, scale: Vec3?): any
 	return {
@@ -48,8 +49,29 @@ local function box(x: number, y: number, z: number): any
 	return { RoundedCuboid = { size = { x, y, z }, radius = math.min(x, y, z) * 0.35, segments = 0 } }
 end
 
+-- A head under a kettle helmet, turning about the neck (a conversation's watchers turn the
+-- child named Head to follow whoever is choosing).
+local function head(extra: { any }?): any
+	local children = {
+		part("Face", { Sphere = { radius = 0.11, segments = 20 } }, vec3(0, 0.08, 0.01), SKIN, nil, vec3(1, 1.12, 1)),
+		part("Nose", { Cone = { radius = 0.018, height = 0.05, segments = 8 } }, vec3(0, 0.07, 0.125), SKIN, quat.euler(0, math.pi / 2, 0)),
+		part("Left eye", { Sphere = { radius = 0.012, segments = 8 } }, vec3(-0.04, 0.1, 0.105), EYE),
+		part("Right eye", { Sphere = { radius = 0.012, segments = 8 } }, vec3(0.04, 0.1, 0.105), EYE),
+		part("Helmet", { Sphere = { radius = 0.13, segments = 20 } }, vec3(0, 0.14, 0), STEEL, nil, vec3(1, 0.72, 1.04)),
+		part("Brim", { Torus = { radius = 0.17, tube = 0.016, segments = 32 } }, vec3(0, 0.12, 0), STEEL),
+	}
+	for _, x in extra or {} do
+		table.insert(children, x)
+	end
+	return {
+		name = "Head",
+		components = { Transform = { translation = vec3(0, 1.52, 0) } },
+		children = children,
+	}
+end
+
 -- A figure facing +z: legs, a tabard over mail, arms, a head under a kettle helmet.
-local function figure(name: string, at: Vec3, yaw: number, tabard: any, extra: { any }): any
+local function figure(name: string, at: Vec3, yaw: number, tabard: any, extra: { any }, crest: { any }?): any
 	local children = {
 		part("Left leg", { Capsule = { radius = 0.075, height = 0.78, segments = 12 } }, vec3(-0.1, 0.42, 0), LEATHER),
 		part("Right leg", { Capsule = { radius = 0.075, height = 0.78, segments = 12 } }, vec3(0.1, 0.42, 0), LEATHER),
@@ -59,9 +81,7 @@ local function figure(name: string, at: Vec3, yaw: number, tabard: any, extra: {
 		part("Left arm", { Capsule = { radius = 0.058, height = 0.56, segments = 12 } }, vec3(-0.27, 1.14, 0.02), DARK_STEEL, quat.euler(0, 0.12, -0.12)),
 		part("Right arm", { Capsule = { radius = 0.058, height = 0.56, segments = 12 } }, vec3(0.27, 1.14, 0.02), DARK_STEEL, quat.euler(0, 0.12, 0.12)),
 		part("Neck", { Cylinder = { radius = 0.05, height = 0.1, segments = 12 } }, vec3(0, 1.5, 0), SKIN),
-		part("Head", { Sphere = { radius = 0.11, segments = 20 } }, vec3(0, 1.6, 0.01), SKIN, nil, vec3(1, 1.12, 1)),
-		part("Helmet", { Sphere = { radius = 0.13, segments = 20 } }, vec3(0, 1.66, 0), STEEL, nil, vec3(1, 0.72, 1.04)),
-		part("Brim", { Torus = { radius = 0.17, tube = 0.016, segments = 32 } }, vec3(0, 1.64, 0), STEEL),
+		head(crest),
 	}
 	for _, x in extra do
 		table.insert(children, x)
@@ -92,10 +112,11 @@ function Captain:construct()
 		part("Left pauldron", { Sphere = { radius = 0.1, segments = 16 } }, vec3(-0.25, 1.42, 0), STEEL, nil, vec3(1.1, 0.7, 1)),
 		part("Right pauldron", { Sphere = { radius = 0.1, segments = 16 } }, vec3(0.25, 1.42, 0), STEEL, nil, vec3(1.1, 0.7, 1)),
 		part("Cape", box(0.52, 1.12, 0.035), vec3(0, 0.98, -0.17), CRIMSON, quat.euler(0, -0.07, 0)),
-		part("Plume", { Cone = { radius = 0.045, height = 0.32, segments = 12 } }, vec3(0, 1.86, -0.04), CRIMSON, quat.euler(0, -0.35, 0)),
 		part("Gorget", { Torus = { radius = 0.075, tube = 0.02, segments = 24 } }, vec3(0, 1.49, 0), GOLD),
 		part("Scabbard", { Cylinder = { radius = 0.025, height = 0.8, segments = 10 } }, vec3(-0.24, 0.72, 0.05), LEATHER, quat.euler(0, 0.25, 0.18)),
 		part("Hilt", { Cylinder = { radius = 0.018, height = 0.2, segments = 10 } }, vec3(-0.3, 1.18, 0.16), GOLD, quat.euler(0, 0.25, 0.18)),
+	}, {
+		part("Plume", { Cone = { radius = 0.045, height = 0.32, segments = 12 } }, vec3(0, 0.34, -0.04), CRIMSON, quat.euler(0, -0.35, 0)),
 	}))
 	-- The rank faces him, a gap in the middle (the recruit's place, or yours).
 	self.soldiers = {}

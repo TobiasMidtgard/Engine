@@ -9691,14 +9691,15 @@ const STORY_KEEPER_AT: DVec3 = DVec3::new(2.5, 0.0, -0.6);
 const STORY_PLAYER_AT: DVec3 = DVec3::new(0.9, 0.88, 1.6);
 /// Where the story shots muster the captain's company (he faces +Z, to his rank), west of the
 /// seal.
-const STORY_MUSTER_AT: DVec3 = DVec3::new(-7.0, 0.0, 3.0);
+const STORY_MUSTER_AT: DVec3 = DVec3::new(-4.0, 0.0, 6.0);
 
 /// Screenshots of conversations and quests (`--script story`): the keeper's conversation
 /// (dialogue/keeper.yarn) as a map in the Story tab; talked to in the game, its node lit and
 /// its options beside it; the quest it gives following the seal's runes by itself; the thanks
 /// once the door is open; a node played a line at a time; the file in the Scripts tab; then a
-/// choice made by walking (dialogue/muster.yarn): planned from above, open in the game, the
-/// player walked to a spot, and its option taken.
+/// choice made by walking and its skill checks (dialogue/muster.yarn): planned from above with
+/// each check's odds, open in the game, the player out of the rank (the soldiers turn and
+/// mutter), at the captain's ear, the check rolled over the ring, and his answer.
 pub fn story_shots(dir: String) -> ShotScript {
     let _ = std::fs::create_dir_all(&dir);
     let root = std::fs::canonicalize(&dir)
@@ -9845,8 +9846,17 @@ pub fn story_shots(dir: String) -> ShotScript {
             t.translation = STORY_MUSTER_AT + DVec3::new(0.0, 0.88, 3.2);
         }
         crate::story::open(world, "dialogue/muster");
+        // The scene starts with the parley orders read: +2 on the whisper's check.
+        let _ = call_api(world, "story.facts", json!({"set": {"read_orders": true}}));
     };
-    // The player out of the rank and at the captain's ear.
+    // The player out of the rank (in no ring), then at the captain's ear.
+    let step_out = |world: &mut World, _: &mut Editor| {
+        if let Some(p) = crate::shots::find(world, "Player")
+            && let Some(mut t) = world.get_mut::<Transform>(p)
+        {
+            t.translation = STORY_MUSTER_AT + DVec3::new(-1.0, 0.88, 1.9);
+        }
+    };
     let to_ear = |world: &mut World, _: &mut Editor| {
         if let Some(p) = crate::shots::find(world, "Player")
             && let Some(mut t) = world.get_mut::<Transform>(p)
@@ -9918,8 +9928,9 @@ pub fn story_shots(dir: String) -> ShotScript {
         Step::Wait(8),
         Step::Shot("story_07_yarn_in_scripts"),
         // A choice made by walking (dialogue/muster.yarn): its options name the captain's
-        // spots; the plan from above beside the map, a spot selected; the scene view looks down
-        // as the game's view will.
+        // spots, two are skill checks (their odds on the cards, the dice under Checks); the
+        // plan from above beside the map, a spot selected; the scene view looks down as the
+        // game's view will.
         Step::Do(Box::new(muster)),
         Step::Select("Spot ear"),
         Step::Camera(
@@ -9931,7 +9942,8 @@ pub fn story_shots(dir: String) -> ShotScript {
         Step::Wait(10),
         Step::Shot("story_08_spots_plan"),
         // Play, E on the captain: he asks, and the choice waits for a walk, its rings and
-        // labels as in the game, the game's view from above in the corner.
+        // labels as in the game (each check's odds, what makes them in the panel), the game's
+        // view from above in the corner.
         Step::Do(Box::new(play)),
         Step::Wait(6),
         Step::Do(Box::new(|world: &mut World, _: &mut Editor| {
@@ -9941,13 +9953,27 @@ pub fn story_shots(dir: String) -> ShotScript {
         Step::Do(Box::new(press("Captain"))),
         Step::Wait(10),
         Step::Shot("story_09_choosing"),
-        // The player at his ear: the ring fills, and he answers over his head.
+        // Out of the rank, seen from behind him: the soldiers turn their heads to follow,
+        // and one mutters (a bark, over his head).
+        Step::Do(Box::new(step_out)),
+        Step::Camera(
+            STORY_MUSTER_AT + DVec3::new(2.3, 1.9, -2.0),
+            STORY_MUSTER_AT + DVec3::new(-0.5, 1.0, 2.0),
+        ),
+        Step::Wait(5),
+        Step::Shot("story_10_out_of_the_rank"),
+        // Once that bark is said, to his ear: the ring fills and another mutters.
+        Step::Wait(26),
         Step::Do(Box::new(to_ear)),
-        Step::Wait(4),
-        Step::Shot("story_10_walked_to_his_ear"),
-        // Stood there long enough: the whisper is taken and the talk goes on.
-        Step::Wait(16),
-        Step::Shot("story_11_the_whisper_taken"),
+        Step::Wait(3),
+        Step::Shot("story_11_at_his_ear"),
+        // Stood there long enough: the whisper is taken and its check rolled, over the ring
+        // and in the transcript.
+        Step::Wait(8),
+        Step::Shot("story_12_the_roll"),
+        // His answer, by how it went.
+        Step::Wait(30),
+        Step::Shot("story_13_his_answer"),
     ];
     ShotScript::new(dir, steps)
 }

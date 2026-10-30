@@ -101,6 +101,8 @@ pub struct SpotOption {
     pub spot_name: Option<String>,
     pub spot: Option<Entity>,
     pub fallback: bool,
+    /// Its skill check as its label shows it ("PERSUADE 8 · 72%").
+    pub check: Option<String>,
     /// Where the spot is now and how big.
     pub at: DVec3,
     pub radius: f32,
@@ -140,6 +142,12 @@ pub struct SpotChoice {
     pub closing: Option<f32>,
     /// Spots the player stepped into since the conversation last looked.
     entered: Vec<String>,
+    /// What happened since the conversation last looked, for its barks: "near" (stepped into
+    /// a spot), "out" (left the one they started in), "hurry" (three seconds left).
+    moments: Vec<String>,
+    /// The option whose spot the chooser stood in when it opened, until they leave it.
+    start_inside: Option<usize>,
+    hurried: bool,
     view: Option<Entity>,
     look: Option<(Transform, Projection)>,
     center: Option<DVec3>,
@@ -163,6 +171,10 @@ impl SpotChoice {
 #[derive(Resource, Default)]
 pub struct SpotChoices {
     pub choices: Vec<SpotChoice>,
+    /// People turning to follow the chooser (and easing back after).
+    pub watchers: Vec<Watcher>,
+    /// Checks rolled, shown over their rings for a moment.
+    pub rolls: Vec<RollShow>,
     next_id: u64,
     cursor: MessageCursor<Interact>,
     /// Changes whenever a choice opens, moves on or closes.
@@ -180,6 +192,49 @@ impl SpotChoices {
     }
 }
 
+/// Someone turning to follow the chooser through a walk-to choice (the speaker, and
+/// `<<watch>>`'s names): the child named `Head` turns, the child named `Body` (or the entity)
+/// too past [`HEAD_FREE`], as Unity's look-at shares a turn between eyes, head and body.
+#[derive(Debug, Clone)]
+pub struct Watcher {
+    pub choice: u64,
+    pub entity: Entity,
+    chooser: Entity,
+    head: Option<Entity>,
+    body: Option<Entity>,
+    head_rest: Quat,
+    body_rest: Quat,
+    /// Turned now, radians (yaw toward +x is positive, as `Quat::from_rotation_y`).
+    pub head_yaw: f32,
+    pub head_pitch: f32,
+    pub body_yaw: f32,
+    /// What was written last frame: when something else changes it, the watcher lets go.
+    wrote_head: Option<Quat>,
+    wrote_body: Option<Quat>,
+    /// The choice is over: easing back.
+    releasing: bool,
+}
+
+/// How far the head turns before the body helps, and at most; how far it looks up or down.
+const HEAD_FREE: f32 = 45.0 * std::f32::consts::PI / 180.0;
+const HEAD_MAX: f32 = 60.0 * std::f32::consts::PI / 180.0;
+const PITCH_MAX: f32 = 25.0 * std::f32::consts::PI / 180.0;
+const BODY_MAX: f32 = 150.0 * std::f32::consts::PI / 180.0;
+
+/// A check's roll over the ring it was made at, for [`ROLL_SECS`].
+#[derive(Debug, Clone, Serialize)]
+pub struct RollShow {
+    pub at: [f64; 3],
+    pub title: String,
+    pub text: String,
+    pub passed: bool,
+    pub age: f32,
+    #[serde(skip)]
+    marker: Option<Entity>,
+}
+
+const ROLL_SECS: f32 = 2.8;
+
 // ------------------------------------------------------------------------------- opening
 
 /// What `story.luau` asks for: `{ options = { {text, spot, fallback} }, prompt = {speaker,
@@ -191,6 +246,8 @@ pub struct Spec {
     pub prompt: SpecPrompt,
     pub time: Option<f32>,
     pub slow: Option<f32>,
+    /// `<<watch>>`'s names (the speaker watches too unless one is "none").
+    pub watch: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -199,6 +256,7 @@ pub struct SpecOption {
     pub text: String,
     pub spot: Option<String>,
     pub fallback: bool,
+    pub check: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -272,6 +330,7 @@ pub fn begin(
             text: o.text.clone(),
             spot_name: o.spot.clone(),
             fallback: o.fallback,
+            check: o.check.clone(),
             armed: true,
             ..Default::default()
         };
@@ -316,14 +375,26 @@ pub fn begin(
         picked: None,
         closing: None,
         entered: Vec::new(),
+        moments: Vec::new(),
+        start_inside: None,
+        hurried: false,
         view: None,
         look: None,
         center: None,
         bubble: None,
         spared: None,
     };
+    choice.start_inside = choice.options.iter().position(|o| o.inside);
     for i in 0..choice.options.len() {
         spawn_ring(world, &mut choice, i);
+    }
+    let names = spec.watch.clone().unwrap_or_default();
+    if !names.iter().any(|n| n == "none") {
+        let mut who: Vec<Entity> = speaker.into_iter().collect();
+        for n in &names {
+            who.extend(find_watchers(world, n, owner));
+        }
+        watch(world, id, chooser, &who);
     }
     show_labels(world, &mut choice);
     if slow < 0.999 {
@@ -527,10 +598,11 @@ fn update_label(world: &mut World, choice: &mut SpotChoice, i: usize) {
     if o.spot.is_none() {
         return;
     }
-    let note = if o.fallback {
-        fallback_note(choice)
-    } else {
-        String::new()
+    let note = match (&o.check, o.fallback) {
+        (Some(c), true) => format!("{c} · {}", fallback_note(choice)),
+        (Some(c), false) => c.clone(),
+        (None, true) => fallback_note(choice),
+        (None, false) => String::new(),
     };
     if choice.options[i].label.is_some() && choice.options[i].label_text == note {
         return;
@@ -556,17 +628,18 @@ fn update_label(world: &mut World, choice: &mut SpotChoice, i: usize) {
 
 // ------------------------------------------------------------------------------- running
 
-/// What the conversation sees each frame: the option picked (from 1), and the spots stepped
-/// into since it last asked.
-pub fn poll(world: &mut World, id: u64) -> (Option<usize>, Vec<String>) {
+/// What the conversation sees each frame: the option picked (from 1), the spots stepped into
+/// since it last asked, and what happened for its barks ("near", "out", "hurry").
+pub fn poll(world: &mut World, id: u64) -> (Option<usize>, Vec<String>, Vec<String>) {
     let Some(mut choices) = world.get_resource_mut::<SpotChoices>() else {
-        return (None, Vec::new());
+        return (None, Vec::new(), Vec::new());
     };
     let Some(c) = choices.choices.iter_mut().find(|c| c.id == id) else {
-        return (None, Vec::new());
+        return (None, Vec::new(), Vec::new());
     };
     let entered = std::mem::take(&mut c.entered);
-    (c.picked.map(|i| i + 1), entered)
+    let moments = std::mem::take(&mut c.moments);
+    (c.picked.map(|i| i + 1), entered, moments)
 }
 
 /// The conversation has its pick (`index` from 1, when it came another way such as
@@ -626,6 +699,8 @@ pub(crate) fn run_spots(world: &mut World) {
         for c in choices.choices.iter_mut() {
             changed |= step(world, c, dt, &pressed);
         }
+        step_watchers(world, &mut choices, dt);
+        changed |= age_rolls(world, &mut choices, dt);
         let mut gone = Vec::new();
         choices.choices.retain(|c| {
             let keep = c.closing.is_none_or(|t| t < BLEND_OUT.max(0.45) as f32);
@@ -710,7 +785,12 @@ fn step(world: &mut World, c: &mut SpotChoice, dt: f32, pressed: &[Entity]) -> b
             if let Some(name) = &o.spot_name {
                 c.entered.push(name.clone());
             }
+            c.moments.push("near".into());
             changed = true;
+        }
+        if !inside && c.start_inside == Some(i) {
+            c.start_inside = None;
+            c.moments.push("out".into());
         }
         o.inside = inside;
         let before = o.progress;
@@ -756,6 +836,10 @@ fn step(world: &mut World, c: &mut SpotChoice, dt: f32, pressed: &[Entity]) -> b
             );
         } else if let Some(i) = c.options.iter().position(|o| o.fallback) {
             update_label(world, c, i);
+        }
+        if left > 0.0 && left <= 3.0 && !c.hurried {
+            c.hurried = true;
+            c.moments.push("hurry".into());
         }
     }
     if c.picked.is_some() {
@@ -824,22 +908,318 @@ pub(crate) fn spare_choosers(
     }
 }
 
-/// Drops every choice at once (the editor's Stop, scripts held).
+/// Drops every choice at once (the editor's Stop, scripts held): watchers stand as they
+/// were, rolls and barks go.
 pub fn reset(world: &mut World) {
+    crate::story::clear_barks(world);
     let Some(mut choices) = world.get_resource_mut::<SpotChoices>() else {
         return;
     };
-    if choices.choices.is_empty() {
+    if choices.choices.is_empty() && choices.watchers.is_empty() && choices.rolls.is_empty() {
         return;
     }
     let all = std::mem::take(&mut choices.choices);
+    let watchers = std::mem::take(&mut choices.watchers);
+    let rolls = std::mem::take(&mut choices.rolls);
     choices.version += 1;
     for c in &all {
         close(world, c);
     }
+    for w in watchers {
+        for (part, rest) in [(w.body, w.body_rest), (w.head, w.head_rest)] {
+            if let Some(p) = part
+                && let Some(mut t) = world.get_mut::<Transform>(p)
+            {
+                t.rotation = rest;
+            }
+        }
+    }
+    for r in rolls {
+        despawn(world, r.marker);
+    }
     if let Some(mut d) = world.get_resource_mut::<TimeDilation>() {
         d.release(SLOW_KEY);
     }
+}
+
+// ------------------------------------------------------------------- watchers and rolls
+
+/// The entities `name` names for `<<watch>>`: among `owner`'s descendants first, then in the
+/// world; `Soldier*` matches every name that starts with "Soldier".
+fn find_watchers(world: &mut World, name: &str, owner: Option<Entity>) -> Vec<Entity> {
+    let fits = |n: &str| match name.strip_suffix('*') {
+        Some(start) => n.starts_with(start),
+        None => n == name,
+    };
+    let mut found = Vec::new();
+    if let Some(o) = owner {
+        let mut stack: Vec<Entity> = world
+            .get::<Children>(o)
+            .map(|c| c.iter().collect())
+            .unwrap_or_default();
+        while let Some(e) = stack.pop() {
+            if world.get::<Name>(e).is_some_and(|n| fits(n.as_str())) {
+                found.push(e);
+            } else if let Some(c) = world.get::<Children>(e) {
+                stack.extend(c.iter());
+            }
+        }
+    }
+    if found.is_empty() {
+        let mut q = world.query::<(Entity, &Name)>();
+        found = q
+            .iter(world)
+            .filter(|(_, n)| fits(n.as_str()))
+            .map(|(e, _)| e)
+            .collect();
+    }
+    found
+}
+
+/// A child of `e` named `name`, searched depth first.
+fn descendant(world: &World, e: Entity, name: &str) -> Option<Entity> {
+    let mut stack: Vec<Entity> = world
+        .get::<Children>(e)
+        .map(|c| c.iter().collect())
+        .unwrap_or_default();
+    stack.reverse();
+    while let Some(x) = stack.pop() {
+        if world.get::<Name>(x).is_some_and(|n| n.as_str() == name) {
+            return Some(x);
+        }
+        if let Some(c) = world.get::<Children>(x) {
+            let mut more: Vec<Entity> = c.iter().collect();
+            more.reverse();
+            stack.extend(more);
+        }
+    }
+    None
+}
+
+/// `who` start following `chooser` through choice `id`.
+fn watch(world: &mut World, id: u64, chooser: Entity, who: &[Entity]) {
+    let mut seen = HashSet::new();
+    let mut list = Vec::new();
+    for &e in who {
+        if e == chooser || !seen.insert(e) || world.get_entity(e).is_err() {
+            continue;
+        }
+        let body_child = world.get::<Children>(e).and_then(|c| {
+            c.iter()
+                .find(|x| world.get::<Name>(*x).is_some_and(|n| n.as_str() == "Body"))
+        });
+        let has_spots = world
+            .get::<Children>(e)
+            .is_some_and(|c| c.iter().any(|x| world.get::<StorySpot>(x).is_some()));
+        // The entity itself turns unless its spots would turn with it.
+        let body = body_child.or((!has_spots).then_some(e));
+        let head = descendant(world, body.unwrap_or(e), "Head");
+        if head.is_none() && body.is_none() {
+            continue;
+        }
+        let rot = |x: Option<Entity>| {
+            x.and_then(|x| world.get::<Transform>(x).map(|t| t.rotation))
+                .unwrap_or(Quat::IDENTITY)
+        };
+        list.push(Watcher {
+            choice: id,
+            entity: e,
+            chooser,
+            head,
+            body,
+            head_rest: rot(head),
+            body_rest: rot(body),
+            head_yaw: 0.0,
+            head_pitch: 0.0,
+            body_yaw: 0.0,
+            wrote_head: None,
+            wrote_body: None,
+            releasing: false,
+        });
+    }
+    let mut choices = world.get_resource_or_insert_with(SpotChoices::default);
+    // Someone already watching for an earlier choice carries on from where they are turned.
+    choices
+        .watchers
+        .retain(|w| !list.iter().any(|n| n.entity == w.entity));
+    choices.watchers.extend(list);
+}
+
+/// The world rotation of `e`'s parent.
+fn parent_rotation(world: &World, e: Entity) -> Quat {
+    world
+        .get::<ChildOf>(e)
+        .and_then(|c| world.get::<engine_core::prelude::GlobalTransform>(c.parent()))
+        .map(|g| g.to_transform().rotation)
+        .unwrap_or(Quat::IDENTITY)
+}
+
+/// Eases `now` toward `goal` at `rate` per second.
+fn ease(now: f32, goal: f32, rate: f32, dt: f32) -> f32 {
+    now + (goal - now) * (1.0 - (-rate * dt).exp())
+}
+
+/// One frame of a watcher; false once it has eased back (or been taken over) and is done.
+fn step_watcher(world: &mut World, w: &mut Watcher, open: bool, dt: f32) -> bool {
+    if !open {
+        w.releasing = true;
+    }
+    // Something else moved a part (a tween, the animation module): it is theirs now.
+    for (part, wrote) in [(&mut w.body, w.wrote_body), (&mut w.head, w.wrote_head)] {
+        if let (Some(p), Some(q)) = (*part, wrote)
+            && world
+                .get::<Transform>(p)
+                .is_none_or(|t| t.rotation.angle_between(q) > 1e-3)
+        {
+            *part = None;
+        }
+    }
+    if w.body.is_none() && w.head.is_none() {
+        return false;
+    }
+    let (mut yaw, mut pitch) = (0.0f32, 0.0f32);
+    if !w.releasing {
+        let frame = w.body.or(w.head).unwrap_or(w.entity);
+        let rest = parent_rotation(world, frame)
+            * if w.body.is_some() {
+                w.body_rest
+            } else {
+                Quat::IDENTITY
+            };
+        let eye = w
+            .head
+            .and_then(|h| pos(world, h))
+            .or_else(|| pos(world, frame).map(|p| p + DVec3::new(0.0, 1.6, 0.0)));
+        let target = pos(world, w.chooser).map(|p| p + DVec3::new(0.0, 1.5, 0.0));
+        if let (Some(eye), Some(target)) = (eye, target) {
+            let d = (target - eye).as_vec3();
+            let local = rest.inverse() * d;
+            yaw = local.x.atan2(local.z);
+            pitch = local.y.atan2(Vec3::new(local.x, 0.0, local.z).length());
+            // Straight behind: keep turning the way it already is, not back and forth.
+            if w.body_yaw.abs() > 0.5 && yaw.signum() != w.body_yaw.signum() && yaw.abs() > 2.6 {
+                yaw += std::f32::consts::TAU * w.body_yaw.signum();
+            }
+        }
+    }
+    let body_goal = if w.body.is_some() && w.head.is_some() {
+        (yaw.signum() * (yaw.abs() - HEAD_FREE).max(0.0)).clamp(-BODY_MAX, BODY_MAX)
+    } else if w.body.is_some() {
+        yaw.clamp(-BODY_MAX, BODY_MAX)
+    } else {
+        0.0
+    };
+    w.body_yaw = ease(w.body_yaw, body_goal, 3.0, dt);
+    let head_goal = (yaw - w.body_yaw).clamp(-HEAD_MAX, HEAD_MAX);
+    w.head_yaw = ease(w.head_yaw, head_goal, 7.0, dt);
+    w.head_pitch = ease(w.head_pitch, pitch.clamp(-PITCH_MAX, PITCH_MAX), 7.0, dt);
+    let done = w.releasing
+        && w.body_yaw.abs() < 0.004
+        && w.head_yaw.abs() < 0.004
+        && w.head_pitch.abs() < 0.004;
+    if done {
+        w.body_yaw = 0.0;
+        w.head_yaw = 0.0;
+        w.head_pitch = 0.0;
+    }
+    if let Some(b) = w.body
+        && let Some(mut t) = world.get_mut::<Transform>(b)
+    {
+        t.rotation = w.body_rest * Quat::from_rotation_y(w.body_yaw);
+        w.wrote_body = Some(t.rotation);
+    }
+    if let Some(h) = w.head
+        && let Some(mut t) = world.get_mut::<Transform>(h)
+    {
+        t.rotation =
+            w.head_rest * Quat::from_rotation_y(w.head_yaw) * Quat::from_rotation_x(-w.head_pitch);
+        w.wrote_head = Some(t.rotation);
+    }
+    // Eyes, for a character the character module draws.
+    if let Some(mut face) = world.get_mut::<engine_world::character::FaceControls>(w.entity) {
+        let (gy, gp) = if w.releasing {
+            (0.0, 0.0)
+        } else {
+            (
+                (yaw - w.body_yaw - w.head_yaw).clamp(-0.6, 0.6),
+                (pitch - w.head_pitch).clamp(-0.4, 0.4),
+            )
+        };
+        face.gaze_yaw = gy;
+        face.gaze_pitch = gp;
+    }
+    !done
+}
+
+/// Every watcher a frame, open choices or not.
+fn step_watchers(world: &mut World, choices: &mut SpotChoices, dt: f32) {
+    if choices.watchers.is_empty() {
+        return;
+    }
+    let open: HashSet<u64> = choices
+        .choices
+        .iter()
+        .filter(|c| c.is_open())
+        .map(|c| c.id)
+        .collect();
+    let mut list = std::mem::take(&mut choices.watchers);
+    list.retain_mut(|w| step_watcher(world, w, open.contains(&w.choice), dt));
+    choices.watchers = list;
+}
+
+/// Shows a check's roll over option `index`'s ring (from 1) of choice `id`.
+pub fn show_roll(world: &mut World, id: u64, index: usize, title: &str, text: &str, passed: bool) {
+    let at = world.get_resource::<SpotChoices>().and_then(|c| {
+        let c = c.get(id)?;
+        let o = c.options.get(index.checked_sub(1)?)?;
+        o.spot.map(|_| o.at)
+    });
+    let Some(at) = at else {
+        return;
+    };
+    let marker = marker(
+        world,
+        json!({
+            "title": title,
+            "subtitle": text,
+            "icon": "dot",
+            "color": if passed { "#7ee08a" } else { "#ff7a6b" },
+            "position": [at.x, at.y + 0.9, at.z],
+            "distance": false,
+            "always": true,
+        }),
+    );
+    let mut choices = world.resource_mut::<SpotChoices>();
+    choices.rolls.push(RollShow {
+        at: [at.x, at.y, at.z],
+        title: title.to_string(),
+        text: text.to_string(),
+        passed,
+        age: 0.0,
+        marker,
+    });
+    choices.version += 1;
+}
+
+/// Rolls shown long enough go.
+fn age_rolls(world: &mut World, choices: &mut SpotChoices, dt: f32) -> bool {
+    if choices.rolls.is_empty() {
+        return false;
+    }
+    let mut gone = Vec::new();
+    choices.rolls.retain_mut(|r| {
+        r.age += dt;
+        let keep = r.age < ROLL_SECS;
+        if !keep {
+            gone.push(r.marker);
+        }
+        keep
+    });
+    let changed = !gone.is_empty();
+    for m in gone {
+        despawn(world, m);
+    }
+    changed
 }
 
 // ---------------------------------------------------------------------------------- view
@@ -1029,14 +1409,33 @@ pub fn describe(world: &World) -> Json {
                     "text": o.text,
                     "spot": o.spot_name,
                     "fallback": o.fallback,
+                    "check": o.check,
                     "at": o.spot.map(|_| [o.at.x, o.at.y, o.at.z]),
                     "inside": o.inside,
                     "progress": o.progress,
                 })).collect::<Vec<_>>(),
+                "watching": choices
+                    .watchers
+                    .iter()
+                    .filter(|w| w.choice == c.id)
+                    .map(|w| json!({
+                        "entity": world.get::<Name>(w.entity).map(|n| n.as_str().to_string()),
+                        "head_deg": w.head_yaw.to_degrees(),
+                        "body_deg": w.body_yaw.to_degrees(),
+                    }))
+                    .collect::<Vec<_>>(),
             })
         })
         .collect();
     json!(list)
+}
+
+/// The rolls showing over rings now.
+pub fn describe_rolls(world: &World) -> Json {
+    world
+        .get_resource::<SpotChoices>()
+        .map(|c| json!(c.rolls))
+        .unwrap_or_else(|| json!([]))
 }
 
 /// The spot names in the world, for checks (the editor marks options whose spot is missing).
@@ -1079,8 +1478,12 @@ pub(crate) fn install(lua: &mlua::Lua) -> mlua::Result<()> {
         "__story_spots_poll",
         lua.create_function(|lua, id: u64| {
             with_world_as(lua, "dialogue", |w| {
-                let (pick, entered) = poll(w, id);
-                Ok((pick, (!entered.is_empty()).then_some(entered)))
+                let (pick, entered, moments) = poll(w, id);
+                Ok((
+                    pick,
+                    (!entered.is_empty()).then_some(entered),
+                    (!moments.is_empty()).then_some(moments),
+                ))
             })
         })?,
     )?;
@@ -1099,6 +1502,27 @@ pub(crate) fn install(lua: &mlua::Lua) -> mlua::Result<()> {
             with_world_as(lua, "dialogue", |w| {
                 say(w, id, text);
                 Ok(())
+            })
+        })?,
+    )?;
+    g.set(
+        "__story_spots_roll",
+        lua.create_function(
+            |lua, (id, index, title, text, passed): (u64, usize, String, String, bool)| {
+                with_world_as(lua, "dialogue", |w| {
+                    show_roll(w, id, index, &title, &text, passed);
+                    Ok(())
+                })
+            },
+        )?,
+    )?;
+    g.set(
+        "__story_spots_left",
+        lua.create_function(|lua, id: u64| {
+            with_world_as(lua, "dialogue", |w| {
+                Ok(w.get_resource::<SpotChoices>()
+                    .and_then(|c| c.get(id))
+                    .and_then(|c| c.seconds_left()))
             })
         })?,
     )?;

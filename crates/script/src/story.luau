@@ -23,6 +23,15 @@ local spots_poll = __story_spots_poll
 local spots_end = __story_spots_end
 local spots_say = __story_spots_say
 local standing_at = __story_standing_at
+local spots_roll = __story_spots_roll
+local spots_left = __story_spots_left
+local check_get = __story_check_get
+local check_set = __story_check_set
+local luck_op = __story_luck
+local settings_now = __story_settings
+local settings_set = __story_settings_set
+local real_dt = __story_real_dt
+local bark_say = __story_bark_say
 local quest_module = __quest_module
 local quest_ctl = __quest_ctl
 local call_api = api
@@ -246,12 +255,39 @@ D.commands = {}
 -- Functions for conditions and text: `dialogue.functions.gold = function() ... end` makes
 -- `{gold()}` and `<<if gold() > 3>>` work.
 D.functions = {}
+-- Skill checks (`#check:persuade:8` on an option). `dialogue.checks.skill = function(name,
+-- chooser) return ... end` gives the chooser's skills (facts `$skill_<name>` otherwise);
+-- `dialogue.checks.bonuses = function(skill, chooser) return { { 2, "Watch colours" } } end`
+-- adds a game's own; `dialogue.checks.next = true` (or false) decides the next check, for
+-- tests.
+D.checks = {}
+
+-- How checks roll: `dialogue.settings({ dice = "d20", difficulty = "easy", luck = false })`
+-- (any of them); returns them all.
+function D.settings(t: any?): any
+	if t ~= nil then
+		settings_set(t)
+	end
+	return settings_now()
+end
 
 function Ops:call(name: string, ...: any): any
 	if name == "standing_at" then
 		-- Where the conversation's chooser (the player) stands: `<<if standing_at("ear")>>`.
 		local opts = rawget(self, "opts")
 		return standing_at(opts and opts.chooser, text_of((...)))
+	elseif name == "passed" then
+		-- Whether the conversation's last skill check passed.
+		return rawget(self, "passed") == true
+	elseif name == "moment" then
+		-- In a bark: what happened ("near", "out" or "hurry"; "" outside a walk-to choice).
+		local opts = rawget(self, "opts")
+		return opts and opts.moment or ""
+	elseif name == "seconds_left" then
+		-- Of the walk-to choice open now (a large number without a time limit).
+		local opts = rawget(self, "opts")
+		local id = rawget(self, "spots") or (opts and opts.choice)
+		return (id and spots_left(id)) or 1e9
 	end
 	local f = Funcs[name] or D.functions[name]
 	if f == nil then
@@ -271,6 +307,77 @@ function Ops:once(key: string): boolean
 	end
 	once_seen(key, true)
 	return true
+end
+
+-- -------------------------------------------------------------------------- checks
+
+-- The chance that `dice` ("2d6" or "d20") plus `mod` reaches `target`, with the automatic
+-- pass and fail at the top and bottom (story.rs's check_chance).
+local function chance_of(dice: string, mod: number, target: number): number
+	local pass = 0
+	if dice == "d20" then
+		for r = 1, 20 do
+			if r == 20 or (r ~= 1 and r + mod >= target) then
+				pass += 1
+			end
+		end
+		return pass / 20
+	end
+	for a = 1, 6 do
+		for b = 1, 6 do
+			if (a == 6 and b == 6) or (not (a == 1 and b == 1) and a + b + mod >= target) then
+				pass += 1
+			end
+		end
+	end
+	return pass / 36
+end
+
+-- "persuade" -> "Persuade", "half_truth" -> "Half truth".
+local function skill_title(skill: string): string
+	local s = string.gsub(skill, "_", " ")
+	return string.upper(string.sub(s, 1, 1)) .. string.sub(s, 2)
+end
+
+-- A name as a fact's: "Old Brannoc" -> "old_brannoc".
+local function fact_name(name: string): string
+	return (string.gsub(string.lower(name), "[^%w]+", "_"))
+end
+
+-- "PERSUADE 8 · 72%" (what a ring's label shows under its option).
+local function check_label(spec: any): string
+	local head = `{string.upper(skill_title(spec.skill))} {text_of(spec.target)} · {math.floor(spec.chance * 100 + 0.5)}%`
+	return if spec.red then `RED · {head}` else head
+end
+
+-- "Persuade 8: rolled 3 + 5, +2 = 10, success".
+local function roll_text(r: any): string
+	local head = `{skill_title(r.skill)} {text_of(r.target)}`
+	local result = if r.passed then "success" else "failure"
+	if #r.dice == 0 then
+		return `{head}: {result}{if r.how == "forced" then " (decided, not rolled)" else ""}`
+	end
+	local parts = {}
+	for i, d in r.dice do
+		parts[i] = text_of(d)
+	end
+	local mod = ""
+	if r.modifier > 0 then
+		mod = `, +{text_of(r.modifier)}`
+	elseif r.modifier < 0 then
+		mod = `, -{text_of(-r.modifier)}`
+	end
+	local why = ""
+	if #r.dice == 2 and r.dice[1] == 6 and r.dice[2] == 6 then
+		why = " (double six)"
+	elseif #r.dice == 2 and r.dice[1] == 1 and r.dice[2] == 1 then
+		why = " (double one)"
+	elseif #r.dice == 1 and r.dice[1] == 20 then
+		why = " (natural 20)"
+	elseif #r.dice == 1 and r.dice[1] == 1 then
+		why = " (natural 1)"
+	end
+	return `{head}: rolled {table.concat(parts, " + ")}{mod} = {text_of(r.total)}{why}, {result}`
 end
 
 -- ------------------------------------------------------------------- conversations
@@ -313,7 +420,7 @@ end
 
 -- The node to run for `title`: of a node group (several nodes with one title and when:
 -- headers), the one whose conditions hold that tests the most, the least seen on a tie.
-function Run:pick_node(title: string): any
+function Run:pick_node(title: string, quiet: boolean?): any
 	self:load()
 	local list = self.by[title]
 	if list == nil then
@@ -338,7 +445,7 @@ function Run:pick_node(title: string): any
 			end
 		end
 	end
-	if best == nil then
+	if best == nil and not quiet then
 		fail(`no node called '{title}' fits now (every one's when: is false)`)
 	end
 	return best
@@ -413,6 +520,15 @@ function Run:line(speaker: string?, text: string, tags: any, n: number)
 	self.last = l
 	self:remember({ speaker = speaker, text = text, line = n })
 	self.dirty = true
+	if self.bark then
+		-- Over the speaker's head while play goes on, then the next line (as Valve's
+		-- follow-ups go once a line is said).
+		local secs = math.clamp(1.1 + 0.05 * #text, 1.6, 6)
+		bark_say(self.id, speaker or "", text, secs, self.owner)
+		say(`  ({speaker or "?"}) {text}`)
+		yield(PAUSE, "real", secs)
+		return
+	end
 	if self.ui then
 		table.insert(self.buf, l)
 	else
@@ -427,7 +543,7 @@ end
 -- The conversation screen (the UI module's): the lines said since it last showed, as one
 -- conversation the player reads through; then the options (each leads to a line of the
 -- player's, which tells the runner the pick) or a blank line to wait on ("h").
-function Run:show(choices: { string }?, hold: boolean)
+function Run:show(choices: { string }?, hold: boolean, checks: any?)
 	local lines = self.buf
 	self.buf = {}
 	if #lines == 0 then
@@ -462,6 +578,14 @@ function Run:show(choices: { string }?, hold: boolean)
 		for i, t in choices do
 			list[i] = { text = t, next = `p{i}` }
 			nodes[`p{i}`] = { speaker = "__player", text = t }
+			-- A check: the screen shows its odds and rolls them; a failure goes to f<i>.
+			local spec = checks and checks[i]
+			if spec then
+				list[i].tag = `{skill_title(spec.skill)} {text_of(spec.target)}{if spec.red then " · red" else ""}`
+				list[i].chance = spec.chance
+				list[i].fail = `f{i}`
+				nodes[`f{i}`] = { speaker = "__player", text = t }
+			end
 		end
 		last.choices = list
 	elseif hold then
@@ -511,16 +635,23 @@ end
 -- Options with `#spot:name` tags are picked by walking there (spots.rs): the lines said
 -- before them read first, the last stays up as the speaker's bubble, the player walks. The
 -- option picked (from 1), or nil when they show as a menu after all.
-function Run:walk(items: { any }, texts: { string }): number?
+function Run:walk(items: { any }, texts: { string }, checks: any): number?
 	local list = {}
 	local any = false
 	for n, it in items do
 		local spot = tag_value(it.tags, "spot")
-		list[n] = { text = texts[n], spot = spot, fallback = tag_value(it.tags, "fallback") ~= nil }
+		list[n] = {
+			text = texts[n],
+			spot = spot,
+			fallback = tag_value(it.tags, "fallback") ~= nil,
+			check = if checks[n] then check_label(checks[n]) else nil,
+		}
 		any = any or spot ~= nil
 	end
 	local o = self.spot_opts or {}
-	self.spot_opts = nil
+	local watch = self.watch or {}
+	local barks = self.barks_node
+	self.spot_opts, self.watch, self.barks_node = nil, nil, nil
 	if not any then
 		return nil
 	end
@@ -539,6 +670,7 @@ function Run:walk(items: { any }, texts: { string }): number?
 		prompt = { speaker = prompt and prompt.speaker, text = prompt and prompt.text or "" },
 		time = o.time,
 		slow = o.slow,
+		watch = if #watch > 0 then watch else nil,
 	}
 	local id, why = spots_begin(self.id, spec, self.opts.chooser, self.owner)
 	if id == nil then
@@ -546,17 +678,43 @@ function Run:walk(items: { any }, texts: { string }): number?
 		return nil
 	end
 	self.spots = id
+	self.walk_barks = barks
 	if not self.ui then
 		say("  (walk to one)")
 		for n, it in list do
-			say(`  {n}. {it.text}{if it.spot then ` [{it.spot}]` else ""}{if it.fallback then " (fallback)" else ""}`)
+			say(
+				`  {n}. {it.text}{if it.spot then ` [{it.spot}]` else ""}{if it.fallback then " (fallback)" else ""}`
+					.. (if it.check then `  [{it.check}]` else "")
+			)
 		end
 	end
 	self.dirty = true
 	local i = yield(PAUSE, "spots", #texts, id)
 	self.spots = nil
+	self.walk_barks, self.bark_next = nil, nil
+	self.walked = id
 	spots_end(id, i)
 	return i
+end
+
+-- Something happened in a walk-to choice with `<<barks Node>>`: the node's best fit is said
+-- as barks. One at a time: a moment while one is being said waits (only the newest).
+function Run:moment(kind: string)
+	if self.walk_barks == nil then
+		return
+	end
+	local b = self.barking
+	if b and not b.done then
+		self.bark_next = kind
+		return
+	end
+	self.bark_next = nil
+	self.barking = D.bark(self.path, self.walk_barks, {
+		owner = self.owner,
+		chooser = self.opts.chooser,
+		moment = kind,
+		choice = self.spots,
+	})
 end
 
 -- A script's word when the player steps into a spot: the owner's `on_spot_near(name)` runs,
@@ -588,31 +746,213 @@ function Options:add(text: string, ok: any, key: string?, tags: any, n: number, 
 	end
 end
 
--- Shows the options that are open and runs the one picked (nothing when none is open).
-function Options:pick(): any
-	local items = self.items
-	if #items == 0 then
+-- The chooser's skill: dialogue.checks.skill's answer, or the fact $skill_<name> (0).
+function Run:skill(name: string): number
+	local f = D.checks.skill
+	if type(f) == "function" then
+		local ok, v = pcall(f, name, self.opts.chooser)
+		if not ok then
+			warn_log(`dialogue.checks.skill: {v}`)
+		elseif tonumber(v) then
+			return tonumber(v) :: number
+		end
+	end
+	return tonumber(F[`skill_{name}`]) or 0
+end
+
+-- An option's skill check (`#check:skill:difficulty`, `#red`) as it stands now: the odds and
+-- everything in them; { shut } for a failed white check until the skill is higher, { gone }
+-- for a red one rolled before; nil without a check.
+function Run:check_of(it: any): any
+	local raw = tag_value(it.tags, "check")
+	if raw == nil then
 		return nil
 	end
+	local skill, dc = string.match(raw, "^([%w_]+):(%-?[%d%.]+)$")
+	local difficulty = tonumber(dc)
+	if skill == nil or difficulty == nil then
+		fail(`#check:{raw}: write #check:skill:difficulty, like #check:persuade:8`)
+	end
+	local red = tag_value(it.tags, "red") ~= nil
+	local key = `{self.path}:{it.line}`
+	local value = self:skill(skill)
+	local rec = check_get(key)
+	if type(rec) == "table" then
+		if rec.red then
+			return { gone = true }
+		elseif rec.shut ~= nil and value <= num(rec.shut) then
+			return { shut = true, skill = skill, above = num(rec.shut) }
+		end
+	end
+	local st = settings_now()
+	local bonuses = {}
+	for _, b in self.bonuses or {} do
+		if b.skill == skill or b.skill == "all" then
+			table.insert(bonuses, { n = b.n, why = b.why })
+		end
+	end
+	local game = D.checks.bonuses
+	if type(game) == "function" then
+		local ok, list = pcall(game, skill, self.opts.chooser)
+		if not ok then
+			warn_log(`dialogue.checks.bonuses: {list}`)
+		elseif type(list) == "table" then
+			for _, b in list do
+				local n = tonumber(b[1] or b.n)
+				if n and n ~= 0 then
+					table.insert(bonuses, { n = n, why = text_of(b[2] or b.why or "Bonus") })
+				end
+			end
+		end
+	end
+	local who = self.last and self.last.speaker
+	if who then
+		local r = tonumber(F[`regard_{fact_name(who)}`])
+		if r and r ~= 0 then
+			table.insert(bonuses, { n = r, why = `{who}'s regard for you` })
+		end
+	end
+	if st.luck then
+		local l = luck_op("get")
+		if l > 0 then
+			table.insert(bonuses, { n = l, why = "Luck" })
+		end
+	end
+	local mod = value
+	for _, b in bonuses do
+		mod += b.n
+	end
+	local target = difficulty + st.shift
+	return {
+		skill = skill,
+		difficulty = difficulty,
+		target = target,
+		value = value,
+		bonuses = bonuses,
+		mod = mod,
+		dice = st.dice,
+		chance = chance_of(st.dice, mod, target),
+		red = red,
+		key = key,
+	}
+end
+
+-- Rolls an option's check (or takes `forced`, or the result the conversation screen rolled),
+-- remembers it (a red check is gone, a failed white one shut), and shows it: in the log, and
+-- over the ring of a choice walked to (`choice`, option `i`) for a moment.
+function Run:settle(spec: any, text: string, forced: boolean?, screen: boolean?, choice: number?, i: number)
+	local r = {
+		skill = spec.skill,
+		option = text,
+		dice = {},
+		modifier = spec.mod,
+		total = spec.mod,
+		target = spec.target,
+		passed = false,
+		how = "",
+	}
+	if forced ~= nil then
+		r.passed, r.how = forced, "forced"
+	elseif screen ~= nil then
+		r.passed, r.how = screen, "screen"
+	elseif spec.dice == "d20" then
+		local d = math.random(1, 20)
+		r.dice, r.total = { d }, d + spec.mod
+		r.passed = d == 20 or (d ~= 1 and r.total >= spec.target)
+	else
+		local a, b = math.random(1, 6), math.random(1, 6)
+		r.dice, r.total = { a, b }, a + b + spec.mod
+		r.passed = (a == 6 and b == 6) or (not (a == 1 and b == 1) and r.total >= spec.target)
+	end
+	if spec.red then
+		check_set(spec.key, { red = true })
+	elseif r.passed then
+		check_set(spec.key, nil)
+	else
+		check_set(spec.key, { shut = spec.value })
+	end
+	luck_op(if r.passed then "pass" else "fail")
+	self.passed = r.passed
+	self.last_roll = r
+	local said = roll_text(r)
+	self:remember({ text = said, roll = true, passed = r.passed })
+	self.dirty = true
+	if not self.ui then
+		say(`  [{said}]`)
+	end
+	if choice ~= nil then
+		spots_roll(choice, i, if r.passed then "SUCCESS" else "FAILURE", said, r.passed)
+		self:report()
+		yield(PAUSE, "real", 1.6)
+	end
+end
+
+-- Shows the options that are open and runs the one picked (nothing when none is open). An
+-- option with a check rolls it once picked; `passed()` is how it went.
+function Options:pick(): any
 	local c = self.c
+	if c.bark then
+		fail("a bark can't have options (it is said while the player walks)")
+	end
+	local items, checks, infos, shut = {}, {}, {}, {}
+	for _, it in self.items do
+		local spec = c:check_of(it)
+		if spec and spec.gone then
+			-- A red check rolled before: that moment passed.
+		elseif spec and spec.shut then
+			table.insert(shut, { text = it.text, skill = spec.skill, above = spec.above })
+		else
+			table.insert(items, it)
+			if spec then
+				checks[#items] = spec
+				table.insert(infos, {
+					option = #items,
+					skill = spec.skill,
+					difficulty = spec.difficulty,
+					target = spec.target,
+					value = spec.value,
+					bonuses = (function()
+						local out = {}
+						for k, b in spec.bonuses do
+							out[k] = { b.n, b.why }
+						end
+						return if #out > 0 then out else nil
+					end)(),
+					dice = spec.dice,
+					chance = spec.chance,
+					red = spec.red,
+				})
+			end
+		end
+	end
+	c.bonuses = nil
+	c.shut_now = if #shut > 0 then shut else nil
+	if #items == 0 then
+		c.dirty = true
+		return nil
+	end
 	local texts = {}
 	for i, it in items do
 		texts[i] = it.text
 	end
 	c.options_now = texts
+	c.checks_now = if #infos > 0 then infos else nil
 	c.dirty = true
-	local i = c:walk(items, texts)
+	c.walked = nil
+	local i = c:walk(items, texts, checks)
 	if i == nil then
 		if c.ui then
-			c:show(texts, false)
+			c:show(texts, false, checks)
 		else
 			for n, t in texts do
-				say(`  {n}. {t}`)
+				say(`  {n}. {t}{if checks[n] then `  [{check_label(checks[n])}]` else ""}`)
 			end
 		end
 		i = yield(PAUSE, "options", #texts)
 	end
 	c.options_now = nil
+	c.checks_now = nil
+	c.shut_now = nil
 	c.jumps = 0
 	c.dirty = true
 	local it = items[i]
@@ -623,6 +963,16 @@ function Options:pick(): any
 	c:remember({ text = it.text, choice = true, line = it.line })
 	if not c.ui then
 		say(`  > {it.text}`)
+	end
+	local forced, screen = c.forced, c.screen_result
+	c.forced, c.screen_result = nil, nil
+	local spec = checks[i]
+	if spec then
+		if forced == nil and D.checks.next ~= nil then
+			forced = D.checks.next == true
+			D.checks.next = nil
+		end
+		c:settle(spec, it.text, forced, screen, c.walked, i)
 	end
 	return it.body()
 end
@@ -708,6 +1058,44 @@ function Run:command(name: string, args: { any }, n: number): any
 		-- the world at 0.35 speed meanwhile. Nothing to read first: the lines stay up.
 		self.spot_opts = { time = tonumber(args[1]), slow = tonumber(args[2]) }
 		return nil
+	elseif name == "bonus" then
+		-- `<<bonus persuade 2 "You read the orders">>`: added to the next options' checks of
+		-- that skill ("all" for every skill), with its reason shown.
+		local skill, n = args[1], tonumber(args[2])
+		if skill == nil or n == nil then
+			fail(`<<bonus>>: write <<bonus persuade 2 "why">> (a skill or all, an amount, a reason)`)
+		end
+		self.bonuses = self.bonuses or {}
+		table.insert(self.bonuses, {
+			skill = text_of(skill),
+			n = n,
+			why = if args[3] ~= nil then text_of(args[3]) else "Bonus",
+		})
+		return nil
+	elseif name == "watch" then
+		-- `<<watch Soldier*>>`: they turn to follow the chooser through the next choice walked
+		-- to, as the speaker does (`<<watch none>>`: nobody does).
+		self.watch = self.watch or {}
+		for _, a in args do
+			table.insert(self.watch, text_of(a))
+		end
+		return nil
+	elseif name == "barks" then
+		-- `<<barks Murmur>>`: through the next choice walked to, node group Murmur is said as
+		-- barks whenever the chooser steps into a spot or out of theirs, or time runs short.
+		local title = text_of(args[1])
+		self:load()
+		if self.by[title] == nil then
+			fail(`<<barks {title}>>: there is no node called '{title}' in {self.path}`)
+		end
+		self.barks_node = title
+		return nil
+	elseif name == "bark" then
+		-- `<<bark Node>>`: said as barks once the lines before it are read; the conversation
+		-- goes on at once.
+		self:read_first()
+		D.bark(self.path, text_of(args[1]), { owner = self.owner, chooser = self.opts.chooser })
+		return nil
 	end
 	local f = Commands[name]
 	if f == nil then
@@ -752,6 +1140,10 @@ function Run:wait(seconds: any, n: number)
 end
 
 function Run:main()
+	if self.bark and self:pick_node(self.start, true) == nil then
+		-- Nothing fits now: nothing is said (as a Valve query no rule matches).
+		return
+	end
 	self:go(self.start)
 	-- The last lines: the screen closes once the player reads past them.
 	if self.ui and #self.buf > 0 then
@@ -766,7 +1158,14 @@ function Run:report()
 	end
 	self.dirty = false
 	local l = self.on_screen or self.last
-	local w = self.wait
+	-- The field (`self.wait` is the <<wait>> command's method when there is none).
+	local w = rawget(self, "wait")
+	-- No dice (decided, not rolled): none rather than an empty table, which reads as a map.
+	local roll = self.last_roll
+	if roll and #roll.dice == 0 then
+		roll = table.clone(roll)
+		roll.dice = nil
+	end
 	report(self.id, {
 		path = self.path,
 		node = self.node or "",
@@ -779,6 +1178,10 @@ function Run:report()
 		lines = if #self.said > 0 then self.said else nil,
 		done = self.done,
 		error = self.error,
+		bark = self.bark or nil,
+		checks = self.checks_now,
+		shut = self.shut_now,
+		roll = roll,
 	})
 end
 
@@ -865,15 +1268,19 @@ function Run:follow(st: any)
 end
 
 function Run:step(dt: number)
-	local pick, stop = take(self.id)
+	local pick, stop, forced = take(self.id)
 	if self.next_pick then
 		pick, self.next_pick = self.next_pick, nil
+		forced, self.next_forced = self.next_forced, nil
+	end
+	if pick ~= nil then
+		self.forced = forced
 	end
 	if stop or self.stopping then
 		self:finish(nil)
 		return
 	end
-	local w = self.wait
+	local w = rawget(self, "wait")
 	local arg = nil
 	if w then
 		local kind = w.kind
@@ -883,6 +1290,12 @@ function Run:step(dt: number)
 				return
 			end
 			arg = w.total - w.left
+		elseif kind == "real" then
+			-- Real seconds (a bark's line, a roll shown), whatever the world's speed.
+			w.n -= real_dt()
+			if w.n > 0 then
+				return
+			end
 		elseif kind == "options" then
 			if pick == nil and self.ui then
 				local st = screen_now()
@@ -892,7 +1305,12 @@ function Run:step(dt: number)
 					return
 				end
 				self:follow(st)
-				pick = st.node and tonumber(string.match(st.node, "^p(%d+)$"))
+				-- p<i>: option i (its check passed, if it has one); f<i>: its check failed.
+				local k, i = string.match(st.node or "", "^([pf])(%d+)$")
+				pick = tonumber(i)
+				if pick ~= nil then
+					self.screen_result = k == "p"
+				end
 			end
 			if pick == nil then
 				return
@@ -904,11 +1322,18 @@ function Run:step(dt: number)
 			arg = pick
 		elseif kind == "spots" then
 			if pick == nil then
-				local p, near = spots_poll(w.choice)
+				local p, near, moments = spots_poll(w.choice)
 				if near then
 					for _, name in near do
 						self:near_spot(w.choice, name)
 					end
+				end
+				if moments then
+					-- Of several at once (a step from one spot straight into another), the last.
+					self:moment(moments[#moments])
+				end
+				if self.bark_next and (self.barking == nil or self.barking.done) then
+					self:moment(self.bark_next)
 				end
 				pick = p
 			end
@@ -976,6 +1401,10 @@ Handle.__index = function(self: any, key: string): any
 		return table.clone(c.taken)
 	elseif key == "path" then
 		return c.path
+	elseif key == "passed" then
+		return c.passed == true
+	elseif key == "roll" then
+		return c.last_roll and table.clone(c.last_roll)
 	end
 	return nil
 end
@@ -983,9 +1412,12 @@ Handle.__tostring = function(self: any): string
 	return `conversation {rawget(self, "c").path}`
 end
 
--- Picks option `i` (1 is the first) when it shows options.
-function handle_methods.choose(self: any, i: number): any
-	rawget(self, "c").next_pick = i
+-- Picks option `i` (1 is the first) when it shows options; `pass` (true or false) decides
+-- its skill check instead of the dice.
+function handle_methods.choose(self: any, i: number, pass: boolean?): any
+	local c = rawget(self, "c")
+	c.next_pick = i
+	c.next_forced = pass
 	return self
 end
 
@@ -1009,12 +1441,12 @@ end
 -- speakers ({ Keeper = { title, portrait, side } }), owner (the entity whose script runs its
 -- commands; the calling script's), chooser (who walks to `#spot:` options, an entity or its
 -- name; the player).
-function D.start(path: string, node: string?, opts: any?): any
+local function new_run(what: string, path: string, node: string?, opts: any?, bark: boolean): any
 	local o = opts or {}
 	if type(o.chooser) == "string" then
 		local who = world.find(o.chooser)
 		if who == nil then
-			fail(`dialogue.start: there is no entity '{o.chooser}' to be the chooser`)
+			fail(`{what}: there is no entity '{o.chooser}' to be the chooser`)
 		end
 		o.chooser = who
 	end
@@ -1024,7 +1456,8 @@ function D.start(path: string, node: string?, opts: any?): any
 		start = node or "Start",
 		opts = o,
 		owner = if o.owner ~= nil then o.owner else owner_now(),
-		ui = not o.headless and has_api("ui.show") and has_api("dialogue.state"),
+		ui = not bark and not o.headless and has_api("ui.show") and has_api("dialogue.state"),
+		bark = bark,
 		buf = {},
 		taken = {},
 		jumps = 0,
@@ -1043,10 +1476,26 @@ function D.start(path: string, node: string?, opts: any?): any
 	return setmetatable({ id = c.id, c = c }, Handle)
 end
 
--- Whether a conversation is going on.
+function D.start(path: string, node: string?, opts: any?): any
+	return new_run("dialogue.start", path, node, opts, false)
+end
+
+-- Says node `node` of `path` as barks: each line over its speaker's head (looked for among
+-- the owner's children first, then everywhere) for a moment, one after another, while play
+-- goes on. Of a node group, the one that fits best now; nil when none does. Options: owner
+-- (whose script runs its commands; the calling script's), chooser (for standing_at()).
+function D.bark(path: string, node: string, opts: any?): any
+	local h = new_run("dialogue.bark", path, node, opts, true)
+	if rawget(h, "c").done and #rawget(h, "c").said == 0 then
+		return nil
+	end
+	return h
+end
+
+-- Whether a conversation is going on (barks aside).
 function D.running(): boolean
 	for _, c in ORDER do
-		if not c.done then
+		if not c.done and not c.bark then
 			return true
 		end
 	end

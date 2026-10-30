@@ -44,7 +44,8 @@
 //!   past him, lean in to his ear or slip behind him. Each is a `StorySpot` under him; while
 //!   the choice is open the view rises over the muster, the world slows and a ring glows at
 //!   each spot, filling as you stand in it (the `script_story_spots` stops, the recruit in the
-//!   rank walking for the tour).
+//!   rank walking for the tour). Stepping past him and whispering are skill checks, their odds
+//!   over their rings and rolled over them; his soldiers turn to watch you and mutter.
 //! - A patrol drone flies a loop over the seal (`examples/patrol.luau`). With script gizmos on
 //!   (`script.gizmos {"show": true}`, the `script_gizmos` stop), its route shows as lines, and
 //!   the seal, as if selected, shows where each rune's touch reaches and the socket it lights.
@@ -322,8 +323,14 @@ pub const QUEST_TAKEN: [(&str, &str); 2] = [
 ];
 
 /// Talking to the captain with the recruit choosing (it walks for the tour; the player does in
-/// the game): two presses of Space read his first line through, then the choice opens.
-pub const MUSTER_TALK: [(&str, &str); 3] = [
+/// the game): two presses of Space read his first line through, then the choice opens. The
+/// recruit has read the parley orders (+2) and is a fair talker (Persuade 4), so the whisper's
+/// check is 97% and its roll the same every tour but one in 36.
+pub const MUSTER_TALK: [(&str, &str); 4] = [
+    (
+        "story.facts",
+        r#"{"set": {"read_orders": true, "skill_persuade": 4}}"#,
+    ),
     (
         "story.start",
         r#"{"path": "dialogue/muster", "owner": "Captain", "chooser": "Recruit"}"#,
@@ -696,7 +703,8 @@ pub const VIEWS: &[DemoView] = &[
         key: "script_story_spots",
         name: "A choice made by walking: the captain asks who speaks for the company, and the \
                view rises over the muster while the world slows; a ring glows at each place \
-               to stand: hold the rank, step past him, lean in to his ear, slip behind him",
+               to stand: hold the rank, step past him, lean in to his ear, slip behind him; \
+               two are skill checks, their odds over their rings",
         // South-east of the captain over his shoulder, a lantern beyond him: the view from
         // above keeps this heading.
         eye: [-7.0, 2.6 + LIFT, 11.6],
@@ -709,19 +717,21 @@ pub const VIEWS: &[DemoView] = &[
             MUSTER_TALK[0],
             MUSTER_TALK[1],
             MUSTER_TALK[2],
+            MUSTER_TALK[3],
         ],
         on_leave: &[],
     },
     DemoView {
         key: "script_story_spots_walk",
-        name: "Walking to his ear: the recruit leaves the rank for the captain's shoulder, the \
-               ring fills while it stands there, and the captain reacts over his head",
+        name: "Walking to his ear: the recruit leaves the rank for the captain's shoulder and \
+               stands in its ring; the whisper's skill check is rolled over the ring, and the \
+               soldiers turn their heads to watch and mutter",
         // Follows script_story_spots: its choice is still open.
         eye: [-7.0, 2.6 + LIFT, 11.6],
         target: [-9.0, 0.9 + LIFT, 5.6],
         hour: 18.9,
-        // The picture comes the tour's settling frames after the move: about 0.4 s into the
-        // 0.7 s it takes to pick by standing.
+        // The picture comes the tour's settling frames after the move: the ring picked (0.7 s
+        // of standing), its roll over it for 2.8 s while the reply waits 1.6 s.
         warmup_secs: 0.0,
         on_arrive: &[MUSTER_TO_EAR],
         on_leave: &[],
@@ -730,9 +740,10 @@ pub const VIEWS: &[DemoView] = &[
         key: "script_story_spots_after",
         name: "The whisper taken: the view comes back down, the world's pace returns, the \
                captain nods and the conversation goes on from the place chosen",
-        // In front of the captain, the recruit at his right shoulder, the lanterns behind.
-        eye: [-7.6, 1.8 + LIFT, 4.9],
-        target: [-8.7, 1.45 + LIFT, 7.4],
+        // In front of the captain, the recruit at his right shoulder; looking down onto the
+        // cobbles, so the lit field beyond the wall stays out of the picture.
+        eye: [-7.4, 2.4 + LIFT, 4.6],
+        target: [-8.8, 1.2 + LIFT, 7.3],
         hour: 18.9,
         warmup_secs: 1.6,
         on_arrive: &[],

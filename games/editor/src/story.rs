@@ -27,21 +27,31 @@
 //! the choice is open it shows what the game shows (each option over its ring, filling as the
 //! player stands in it, the speaker's prompt and the time left) and the corner preview looks
 //! through the game's view from above.
+//!
+//! Skill checks (options tagged `#check:skill:difficulty`, `#red` for one try): their cards
+//! show the odds with the scene's facts (green likely, amber even, red unlikely; Disco Elysium's
+//! check labels), the panel shows each offered check's odds and what makes them (the skill,
+//! each bonus and why, the luck, the difficulty setting), the options a failed check keeps shut
+//! and each roll in the transcript; "Checks" sets the dice, the difficulty and the luck. In the
+//! scene view a roll shows over its ring for a moment, and the barks said while the player walks
+//! show over the speakers' heads. Labels there and in the plan make room for each other.
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::sync::Arc;
 use std::time::SystemTime;
 
 use egui::text::LayoutJob;
 use egui::{
-    Align2, Color32, FontId, Pos2, Rect, RichText, Sense, Shape, Stroke, StrokeKind, TextFormat,
-    Vec2,
+    Align2, Color32, FontId, Galley, Pos2, Rect, RichText, Sense, Shape, Stroke, StrokeKind,
+    TextFormat, Vec2,
 };
 use engine::core::registry::call_api;
 use engine::prelude::*;
 use engine_script::Script;
 use engine_script::spots::{SpotChoice, SpotChoices, SpotView, StorySpot};
 use engine_script::story::{
-    self, Compiled, NodeInfo, OptionInfo, QuestBook, QuestState, RunInfo, StoryFacts, StoryRuns,
+    self, CheckInfo, Compiled, NodeInfo, OptionInfo, QuestBook, QuestState, RunInfo, StoryBarks,
+    StoryFacts, StoryRuns, StorySettings,
 };
 use serde_json::{Value, json};
 
@@ -96,6 +106,12 @@ const SPOT_WARM: Color32 = Color32::from_rgb(0xff, 0xb0, 0x48);
 const SPOT_COOL: Color32 = Color32::from_rgb(0x8c, 0xc0, 0xff);
 const OWNER: Color32 = Color32::from_rgb(0xe8, 0x6a, 0x58);
 const PERSON: Color32 = Color32::from_rgb(0x7c, 0x82, 0x8c);
+/// A check's odds: likely, even, unlikely; a white check's mark and a red one's.
+const ODDS_GOOD: Color32 = Color32::from_rgb(0x7e, 0xe0, 0x8a);
+const ODDS_EVEN: Color32 = Color32::from_rgb(0xff, 0xc8, 0x5a);
+const ODDS_BAD: Color32 = Color32::from_rgb(0xff, 0x7a, 0x6b);
+const CHECK_WHITE: Color32 = Color32::from_rgb(0xe6, 0xe6, 0xea);
+const CHECK_RED: Color32 = Color32::from_rgb(0xf0, 0x52, 0x4c);
 
 /// The Story tab's state.
 #[derive(Resource)]
@@ -458,7 +474,7 @@ fn live(world: &World, tab: &StoryTab) -> Live {
         tab.talking
             .and_then(|id| r.get(id))
             .filter(|x| x.path == tab.path)
-            .or_else(|| r.runs.iter().rev().find(|x| x.path == tab.path))
+            .or_else(|| r.runs.iter().rev().find(|x| x.path == tab.path && !x.bark))
             .cloned()
     });
     let visits = world
@@ -565,6 +581,14 @@ fn map(ui: &mut egui::Ui, world: &mut World, editor: &mut Editor, tab: &mut Stor
         .unwrap_or_default();
     let groups = group_sizes(nodes);
     let spot_names = engine_script::spots::spot_names(world);
+    let facts = world
+        .get_resource::<StoryFacts>()
+        .cloned()
+        .unwrap_or_default();
+    let settings = world
+        .get_resource::<StorySettings>()
+        .cloned()
+        .unwrap_or_default();
 
     // Arrows first, under the cards.
     for (i, n) in nodes.iter().enumerate() {
@@ -748,31 +772,50 @@ fn map(ui: &mut egui::Ui, world: &mut World, editor: &mut Editor, tab: &mut Stor
                     NOW.gamma_multiply(0.25),
                 );
             }
-            // An option walked to: its spot on the right ("○ ear"), red when the scene has
-            // no spot of that name.
-            let mut width = r.width() - 20.0 * zoom;
-            if let Some(o) = n.options.iter().find(|o| o.line == *line)
-                && let Some(name) = &o.spot
-            {
-                let missing = !spot_names.contains(name);
-                let (mark, color) = match (missing, o.fallback) {
-                    (true, _) => ("⚠", ERROR),
-                    (false, true) => ("○", SPOT_COOL),
-                    (false, false) => ("○", SPOT_WARM),
-                };
-                let g = painter.layout_no_wrap(format!("{mark} {name}"), mono(10.5), color);
-                let size = g.size() + Vec2::new(10.0, 3.0) * zoom;
-                let chip = Rect::from_min_size(
-                    Pos2::new(
-                        r.right() - 7.0 * zoom - size.x,
-                        y + (LINE_H * zoom - size.y) * 0.5,
-                    ),
-                    size,
-                );
-                painter.rect_filled(chip, 4.0 * zoom, color.gamma_multiply(0.15));
-                painter.galley(chip.min + Vec2::new(5.0, 1.5) * zoom, g, color);
-                width = chip.left() - r.left() - 16.0 * zoom;
+            // On the right of an option: its spot when it is walked to ("○ ear", red when
+            // the scene has no spot of that name), and its check with the odds the scene's
+            // facts give ("🎲 8 58%", red for a red check).
+            let mut right = r.right() - 7.0 * zoom;
+            if let Some(o) = n.options.iter().find(|o| o.line == *line) {
+                let mut chips: Vec<(LayoutJob, Color32)> = Vec::new();
+                if let Some(name) = &o.spot {
+                    let missing = !spot_names.contains(name);
+                    let (mark, color) = match (missing, o.fallback) {
+                        (true, _) => ("⚠", ERROR),
+                        (false, true) => ("○", SPOT_COOL),
+                        (false, false) => ("○", SPOT_WARM),
+                    };
+                    let mut job = LayoutJob::default();
+                    job.append(
+                        &format!("{mark} {name}"),
+                        0.0,
+                        TextFormat::simple(mono(10.5), color),
+                    );
+                    chips.push((job, color));
+                }
+                if let Some((skill, difficulty)) = &o.check {
+                    let (target, chance) = static_odds(
+                        &doc.compiled.declares,
+                        &facts,
+                        &settings,
+                        skill,
+                        *difficulty,
+                    );
+                    chips.push(check_chip(o.red, target, chance, mono(10.5)));
+                }
+                for (job, color) in chips {
+                    let g = ui.fonts_mut(|f| f.layout_job(job));
+                    let size = g.size() + Vec2::new(10.0, 3.0) * zoom;
+                    let chip = Rect::from_min_size(
+                        Pos2::new(right - size.x, y + (LINE_H * zoom - size.y) * 0.5),
+                        size,
+                    );
+                    painter.rect_filled(chip, 4.0 * zoom, color.gamma_multiply(0.15));
+                    painter.galley(chip.min + Vec2::new(5.0, 1.5) * zoom, g, color);
+                    right = chip.left() - 4.0 * zoom;
+                }
             }
+            let width = right - r.left() - 12.0 * zoom;
             let job = card_line(text, 12.0 * zoom, width.max(20.0));
             let g = ui.fonts_mut(|f| f.layout_job(job));
             painter.galley(
@@ -921,6 +964,87 @@ fn short(text: &str, n: usize) -> String {
     }
 }
 
+/// A check's odds as people read them: "58%".
+fn percent(chance: f64) -> String {
+    format!("{}%", (chance * 100.0).round() as i64)
+}
+
+/// Green when likely, amber when about even, red when unlikely.
+fn odds_color(chance: f64) -> Color32 {
+    if chance >= 0.67 {
+        ODDS_GOOD
+    } else if chance >= 0.34 {
+        ODDS_EVEN
+    } else {
+        ODDS_BAD
+    }
+}
+
+/// `8`, `2.5`, `-1`.
+fn num(x: f64) -> String {
+    if x.fract() == 0.0 {
+        format!("{}", x as i64)
+    } else {
+        format!("{x:.1}")
+    }
+}
+
+/// `+2`, `−1` (a bonus).
+fn signed(x: f64) -> String {
+    if x < 0.0 {
+        format!("−{}", num(-x))
+    } else {
+        format!("+{}", num(x))
+    }
+}
+
+/// A check's chip: the dice, what to reach (white, or red for a red check) and the odds in
+/// their color: "🎲 8 58%". Its color is the chip's tint.
+fn check_chip(red: bool, target: f64, chance: f64, font: FontId) -> (LayoutJob, Color32) {
+    let kind = if red { CHECK_RED } else { CHECK_WHITE };
+    let mut job = LayoutJob::default();
+    job.append(
+        &format!("🎲 {}", num(target)),
+        0.0,
+        TextFormat::simple(font.clone(), kind),
+    );
+    job.append(
+        &percent(chance),
+        5.0,
+        TextFormat::simple(font, odds_color(chance)),
+    );
+    (job, kind)
+}
+
+/// A check's target and odds before it is offered: the chooser's skill from its
+/// `$skill_<name>` fact (or the file's `<<declare>>` of it), the luck so far and the difficulty
+/// setting. The bonuses the moment brings come once it is offered (the panel shows those).
+fn static_odds(
+    declares: &[(String, Value)],
+    facts: &StoryFacts,
+    settings: &StorySettings,
+    skill: &str,
+    difficulty: f64,
+) -> (f64, f64) {
+    let key = format!("skill_{skill}");
+    let value = facts
+        .values
+        .get(&key)
+        .or_else(|| declares.iter().find(|(k, _)| *k == key).map(|(_, v)| v))
+        .and_then(Value::as_f64)
+        .unwrap_or(0.0);
+    let luck = if settings.luck {
+        facts.luck as f64
+    } else {
+        0.0
+    };
+    let target = difficulty + settings.shift();
+    (
+        target,
+        story::check_chance(&settings.dice, value + luck, target),
+    )
+}
+
 /// A card's line: `Speaker: text` with the speaker colored, options and line groups with
 /// their arrows, commands in their own color, `{expressions}` and `$facts` picked out.
 fn card_line(text: &str, size: f32, width: f32) -> LayoutJob {
@@ -1040,6 +1164,7 @@ fn side(ui: &mut egui::Ui, world: &mut World, editor: &mut Editor, tab: &mut Sto
     let playing = editor.mode != Mode::Edit;
     conversation(ui, world, tab, playing);
     ui.add_space(8.0);
+    checks(ui, world, tab);
     walk_plan(ui, world, editor, tab);
     facts(ui, world, tab);
     ui.add_space(8.0);
@@ -1055,6 +1180,16 @@ fn heading(ui: &mut egui::Ui, text: &str) {
 fn conversation(ui: &mut egui::Ui, world: &mut World, tab: &mut StoryTab, playing: bool) {
     heading(ui, "💬 Conversation");
     let run = live(world, tab).run;
+    // Barks being said now (over the speakers' heads in the scene view).
+    let barks: Vec<(String, String)> = world
+        .get_resource::<StoryBarks>()
+        .map(|b| {
+            b.lines
+                .iter()
+                .map(|l| (l.speaker.clone(), l.text.clone()))
+                .collect()
+        })
+        .unwrap_or_default();
     let Some(run) = run else {
         ui.label(theme::dim(if playing {
             "None yet. ▶ Talk starts this file at the selected node; talking to its owner in \
@@ -1084,7 +1219,11 @@ fn conversation(ui: &mut egui::Ui, world: &mut World, tab: &mut StoryTab, playin
                 ui.label(theme::dim(format!("… {shown} lines before")));
             }
             for l in &run.lines[shown..] {
-                if l.choice {
+                if l.roll {
+                    // A check's roll: the dice, what they made and how it went.
+                    let color = if l.passed { ODDS_GOOD } else { ODDS_BAD };
+                    ui.label(RichText::new(format!("🎲 {}", l.text)).small().color(color));
+                } else if l.choice {
                     ui.label(RichText::new(format!("➡ {}", l.text)).color(PICKED));
                 } else if l.speaker.is_empty() {
                     ui.label(RichText::new(&l.text).italics().color(theme::TEXT));
@@ -1096,6 +1235,13 @@ fn conversation(ui: &mut egui::Ui, world: &mut World, tab: &mut StoryTab, playin
                     });
                 }
             }
+            for (who, said) in &barks {
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing.x = 4.0;
+                    ui.label(RichText::new(format!("💭 {who}")).small().color(SPEAKER));
+                    ui.label(RichText::new(said).small().italics().color(theme::TEXT_DIM));
+                });
+            }
         });
     if run.done {
         return;
@@ -1105,6 +1251,10 @@ fn conversation(ui: &mut egui::Ui, world: &mut World, tab: &mut StoryTab, playin
     let walk = world
         .get_resource::<SpotChoices>()
         .and_then(|c| c.of_run(run.id).cloned());
+    let settings = world
+        .get_resource::<StorySettings>()
+        .cloned()
+        .unwrap_or_default();
     if !run.options.is_empty() {
         if let Some(c) = &walk {
             let left = c
@@ -1153,6 +1303,22 @@ fn conversation(ui: &mut egui::Ui, world: &mut World, tab: &mut StoryTab, playin
             if b.clicked() {
                 pick = Some(i + 1);
             }
+            if let Some(c) = run.checks.iter().find(|c| c.option == i + 1) {
+                check_line(ui, c, &settings);
+            }
+        }
+        // The options a failed check keeps shut, and what opens them.
+        for s in &run.shut {
+            ui.label(
+                RichText::new(format!(
+                    "🔒 {} · shut until {} is above {}",
+                    s.text,
+                    story::skill_title(&s.skill),
+                    num(s.above)
+                ))
+                .small()
+                .color(theme::TEXT_DIM),
+            );
         }
     } else if run.waiting == "reading" {
         let b = ui.button("Continue ›");
@@ -1171,6 +1337,127 @@ fn conversation(ui: &mut egui::Ui, world: &mut World, tab: &mut StoryTab, playin
     }
 }
 
+/// Under an option with a check: the check (red or white), its odds, and what makes them: "🎲
+/// RED · Nerve 9 · 41%  2d6 + 1 vs 9: Nerve 0, +1 luck (1 failed in a row)".
+fn check_line(ui: &mut egui::Ui, c: &CheckInfo, settings: &StorySettings) {
+    let modifier = c.value + c.bonuses.iter().map(|(n, _)| n).sum::<f64>();
+    let mut parts = vec![format!("{} {}", story::skill_title(&c.skill), num(c.value))];
+    for (n, why) in &c.bonuses {
+        parts.push(format!("{} {why}", signed(*n)));
+    }
+    if c.target != c.difficulty {
+        parts.push(format!(
+            "{} {} on the difficulty",
+            settings.difficulty,
+            signed(c.target - c.difficulty)
+        ));
+    }
+    let head = format!(
+        "{}{} {} · {}",
+        if c.red { "RED · " } else { "" },
+        story::skill_title(&c.skill),
+        num(c.target),
+        percent(c.chance)
+    );
+    let mut job = LayoutJob::default();
+    job.wrap.max_width = ui.available_width();
+    let small = FontId::proportional(11.5);
+    job.append(
+        "🎲 ",
+        0.0,
+        TextFormat::simple(small.clone(), if c.red { CHECK_RED } else { CHECK_WHITE }),
+    );
+    job.append(
+        &head,
+        0.0,
+        TextFormat::simple(small.clone(), odds_color(c.chance)),
+    );
+    job.append(
+        &format!(
+            "{} {} vs {}: {}",
+            c.dice,
+            signed(modifier),
+            num(c.target),
+            parts.join(", ")
+        ),
+        8.0,
+        TextFormat::simple(small, theme::TEXT_DIM),
+    );
+    ui.label(job);
+}
+
+/// How checks roll (when this file has any): the dice, the difficulty setting and the luck.
+fn checks(ui: &mut egui::Ui, world: &mut World, tab: &mut StoryTab) {
+    let any = tab.doc.as_ref().is_some_and(|d| {
+        d.compiled
+            .nodes
+            .iter()
+            .any(|n| n.options.iter().any(|o| o.check.is_some()))
+    });
+    if !any {
+        return;
+    }
+    heading(ui, "🎲 Checks");
+    let st = world
+        .get_resource::<StorySettings>()
+        .cloned()
+        .unwrap_or_default();
+    let luck = world.get_resource::<StoryFacts>().map_or(0, |f| f.luck);
+    let mut set = None;
+    ui.horizontal(|ui| {
+        let r = egui::ComboBox::from_id_salt("story dice")
+            .width(58.0)
+            .selected_text(st.dice.as_str())
+            .show_ui(ui, |ui| {
+                for d in ["2d6", "d20"] {
+                    if ui.selectable_label(st.dice == d, d).clicked() {
+                        set = Some(json!({ "dice": d }));
+                    }
+                }
+            });
+        tab.drawn_at.insert("checks dice".into(), r.response.rect);
+        let r = egui::ComboBox::from_id_salt("story difficulty")
+            .width(76.0)
+            .selected_text(st.difficulty.as_str())
+            .show_ui(ui, |ui| {
+                for d in ["easy", "normal", "hard"] {
+                    if ui.selectable_label(st.difficulty == d, d).clicked() {
+                        set = Some(json!({ "difficulty": d }));
+                    }
+                }
+            });
+        tab.drawn_at
+            .insert("checks difficulty".into(), r.response.rect);
+        let mut on = st.luck;
+        if ui
+            .checkbox(&mut on, "Luck")
+            .on_hover_text("+1 on a check for each one failed in a row before it")
+            .changed()
+        {
+            set = Some(json!({ "luck": on }));
+        }
+    });
+    let dice = if st.dice == "d20" {
+        "d20: a natural 20 passes, a natural 1 fails"
+    } else {
+        "2d6: double six passes, double one fails"
+    };
+    let luck = match (st.luck, luck) {
+        (false, _) => String::new(),
+        (true, 0) => " · luck +0".into(),
+        (true, n) => format!(" · luck +{n} ({n} failed in a row)"),
+    };
+    ui.label(theme::dim(format!(
+        "{dice} · {} {} on every difficulty{luck}",
+        st.difficulty,
+        signed(st.shift())
+    )));
+    if let Some(args) = set {
+        let _ = call_api(world, "story.settings", args);
+    }
+    ui.add_space(8.0);
+}
+
 fn waiting_text(w: &str) -> &'static str {
     match w {
         "options" => "waiting for a pick",
@@ -1179,6 +1466,7 @@ fn waiting_text(w: &str) -> &'static str {
         "until" => "waiting for a command to finish",
         "closing" => "the last lines on screen",
         "spots" => "waiting for a walk",
+        "real" => "a moment (the roll)",
         _ => "running",
     }
 }
@@ -1495,7 +1783,9 @@ fn ground_arc(view: &ViewInfo, yaw: f32, at: DVec3, r: f64, from: f32, to: f32) 
 
 /// The scene view's part, drawn with the script handles: each spot a dashed ring on the ground
 /// with its name (an editor helper, so not in Game view); while a walk-to choice is open, what
-/// the game shows over the world, as the UI markers don't draw in the editor's view.
+/// the game shows over the world, as the UI markers don't draw in the editor's view: the rings,
+/// the speaker's prompt, each option over its ring with its check, the rolls, and the barks over
+/// the speakers. Those labels make room for each other and for the corner preview.
 pub fn overlay(ui: &egui::Ui, world: &mut World, editor: &Editor, view: &ViewInfo) {
     if let Some(mut tab) = world.get_resource_mut::<StoryTab>() {
         tab.view_aspect = view.aspect();
@@ -1506,11 +1796,20 @@ pub fn overlay(ui: &egui::Ui, world: &mut World, editor: &Editor, view: &ViewInf
     pin_view(world, editor, choice.as_ref());
     let p = ui.painter().with_clip_rect(view.screen);
     let yaw = heading_of(view.rotation);
+    // Below the scene view's toolbar; what is placed first keeps its place.
+    let bounds =
+        Rect::from_min_max(view.screen.min + Vec2::new(4.0, 34.0), view.screen.max).shrink(4.0);
+    let mut taken: Vec<Rect> = preview_corner(world, view.screen).into_iter().collect();
     if let Some(c) = &choice {
-        choice_overlay(&p, world, view, yaw, c);
-        return;
+        choice_rings(&p, view, yaw, c);
+        prompt_bubble(&p, world, view, c, bounds, &mut taken);
     }
-    if editor.game_view {
+    bark_bubbles(&p, world, view, bounds, &mut taken);
+    roll_labels(&p, world, view, bounds, &mut taken);
+    if let Some(c) = choice.as_ref().filter(|c| c.is_open()) {
+        option_labels(&p, world, view, c, bounds, &mut taken);
+    }
+    if choice.is_some() || editor.game_view {
         return;
     }
     for s in spots_in(world) {
@@ -1533,10 +1832,23 @@ pub fn overlay(ui: &egui::Ui, world: &mut World, editor: &Editor, view: &ViewInf
     }
 }
 
-/// An open (or closing) walk-to choice over the world: each ring, filling as the chooser stands
-/// in it; each option over its ring (the fallback with the time left); the prompt over the
-/// speaker. The labels go at the pick and the rings shrink, as in the game.
-fn choice_overlay(p: &egui::Painter, world: &World, view: &ViewInfo, yaw: f32, c: &SpotChoice) {
+/// Where the scene view's corner preview is while a camera is pinned there (placed as
+/// `camera_preview` places it), so labels keep out from under it.
+fn preview_corner(world: &World, screen: Rect) -> Option<Rect> {
+    world
+        .get_resource::<crate::camera_preview::CameraPreview>()?
+        .pinned?;
+    let aspect = world.get_resource::<Window>().map_or(16.0 / 9.0, |w| {
+        (w.width.max(1) as f32 / w.height.max(1) as f32).clamp(0.5, 3.0)
+    });
+    let width = (screen.width() * 0.3).clamp(220.0, 440.0);
+    let size = Vec2::new(width, width / aspect + 24.0);
+    Some(Rect::from_min_size(screen.right_bottom() - size - Vec2::splat(10.0), size).expand(6.0))
+}
+
+/// An open (or closing) walk-to choice's rings on the ground, filling as the chooser stands in
+/// them; at the pick the others fade and the picked one fills, as in the game.
+fn choice_rings(p: &egui::Painter, view: &ViewInfo, yaw: f32, c: &SpotChoice) {
     let k = c.closing.map_or(0.0, |t| (t / 0.45).clamp(0.0, 1.0));
     for (i, o) in c.options.iter().enumerate() {
         if o.spot.is_none() {
@@ -1569,50 +1881,172 @@ fn choice_overlay(p: &egui::Painter, world: &World, view: &ViewInfo, yaw: f32, c
                 p.add(Shape::line(run, Stroke::new(5.0, color)));
             }
         }
-        if c.closing.is_some() {
+    }
+}
+
+/// The speaker's prompt over their head while the choice is open.
+fn prompt_bubble(
+    p: &egui::Painter,
+    world: &World,
+    view: &ViewInfo,
+    c: &SpotChoice,
+    bounds: Rect,
+    taken: &mut Vec<Rect>,
+) {
+    if !c.is_open() {
+        return;
+    }
+    let Some(sp) = c.speaker else { return };
+    let Some(at) = world_pos(world, sp).and_then(|q| view.project(q + DVec3::new(0.0, 2.35, 0.0)))
+    else {
+        return;
+    };
+    let who = if c.prompt_speaker.is_empty() {
+        world
+            .get::<Name>(sp)
+            .map(|n| n.as_str().to_string())
+            .unwrap_or_default()
+    } else {
+        c.prompt_speaker.clone()
+    };
+    let r = bubble(p, at, &who, &c.prompt, 14.0, bounds, taken);
+    taken.push(r);
+}
+
+/// Each bark being said, over its speaker's head.
+fn bark_bubbles(
+    p: &egui::Painter,
+    world: &World,
+    view: &ViewInfo,
+    bounds: Rect,
+    taken: &mut Vec<Rect>,
+) {
+    let Some(barks) = world.get_resource::<StoryBarks>() else {
+        return;
+    };
+    for l in &barks.lines {
+        let Some(at) = l
+            .entity
+            .and_then(|e| world_pos(world, e))
+            .and_then(|q| view.project(q + DVec3::new(0.0, 2.1, 0.0)))
+        else {
+            continue;
+        };
+        let r = bubble(p, at, &l.speaker, &l.text, 13.0, bounds, taken);
+        taken.push(r);
+    }
+}
+
+/// Each check rolled at a ring, over it for a moment: SUCCESS or FAILURE and the roll.
+fn roll_labels(
+    p: &egui::Painter,
+    world: &World,
+    view: &ViewInfo,
+    bounds: Rect,
+    taken: &mut Vec<Rect>,
+) {
+    let Some(choices) = world.get_resource::<SpotChoices>() else {
+        return;
+    };
+    for r in &choices.rolls {
+        let Some(at) = view.project(DVec3::new(r.at[0], r.at[1] + 0.9, r.at[2])) else {
+            continue;
+        };
+        let color = if r.passed { ODDS_GOOD } else { ODDS_BAD };
+        let l = label(
+            p,
+            &format!("🎲 {}", r.title),
+            color,
+            &[(r.text.clone(), theme::TEXT)],
+        );
+        let rect = place(l.size, &tries_over(at, l.size), taken, bounds);
+        draw_label(p, l, rect, color, true, at);
+        taken.push(rect);
+    }
+}
+
+/// Each option over its ring: its text, its check and odds, the fallback's time left.
+fn option_labels(
+    p: &egui::Painter,
+    world: &World,
+    view: &ViewInfo,
+    c: &SpotChoice,
+    bounds: Rect,
+    taken: &mut Vec<Rect>,
+) {
+    let checks: Vec<CheckInfo> = world
+        .get_resource::<StoryRuns>()
+        .and_then(|r| r.get(c.run))
+        .map(|r| r.checks.clone())
+        .unwrap_or_default();
+    for (i, o) in c.options.iter().enumerate() {
+        if o.spot.is_none() {
             continue;
         }
         let Some(at) = view.project(o.at + DVec3::new(0.0, 0.3, 0.0)) else {
             continue;
         };
-        let note = o.fallback.then(|| match c.seconds_left() {
-            Some(s) => format!("if you wait · {} s", s.ceil() as i32),
-            None => "where you stand".to_string(),
-        });
-        pill(p, at, &o.text, note.as_deref(), color, o.inside);
-    }
-    if c.is_open()
-        && let Some(sp) = c.speaker
-        && let Some(head) = world_pos(world, sp)
-        && let Some(at) = view.project(head + DVec3::new(0.0, 2.35, 0.0))
-    {
-        let who = if c.prompt_speaker.is_empty() {
-            world
-                .get::<Name>(sp)
-                .map(|n| n.as_str().to_string())
-                .unwrap_or_default()
-        } else {
-            c.prompt_speaker.clone()
-        };
-        bubble(p, at, &who, &c.prompt);
+        let color = if o.fallback { SPOT_COOL } else { SPOT_WARM };
+        let mut lines = Vec::new();
+        if let Some(k) = checks.iter().find(|k| k.option == i + 1) {
+            lines.push((
+                // As the game's label says it.
+                format!(
+                    "🎲 {}{} {} · {}",
+                    if k.red { "RED · " } else { "" },
+                    story::skill_title(&k.skill).to_uppercase(),
+                    num(k.target),
+                    percent(k.chance)
+                ),
+                odds_color(k.chance),
+            ));
+        } else if let Some(text) = &o.check {
+            lines.push((format!("🎲 {text}"), CHECK_WHITE));
+        }
+        if o.fallback {
+            lines.push((
+                match c.seconds_left() {
+                    Some(s) => format!("if you wait · {} s", s.ceil() as i32),
+                    None => "where you stand".to_string(),
+                },
+                color,
+            ));
+        }
+        let l = label(p, &o.text, Color32::WHITE, &lines);
+        let rect = place(l.size, &tries_over(at, l.size), taken, bounds);
+        draw_label(p, l, rect, color, o.inside, at);
+        taken.push(rect);
     }
 }
 
-/// A label in the scene view standing on `at`: a title and a line under it in `color`.
-fn pill(p: &egui::Painter, at: Pos2, title: &str, sub: Option<&str>, color: Color32, lit: bool) {
-    let t = p.layout(
-        title.to_string(),
-        FontId::proportional(13.0),
-        Color32::WHITE,
-        230.0,
-    );
-    let s = sub.map(|s| p.layout_no_wrap(s.to_string(), FontId::proportional(11.0), color));
-    let (tw, th) = (t.size().x, t.size().y);
-    let (sw, sh) = s
-        .as_ref()
-        .map_or((0.0, 0.0), |g| (g.size().x, g.size().y + 1.0));
-    let size = Vec2::new(tw.max(sw) + 18.0, th + sh + 8.0);
-    let rect = Rect::from_min_size(at - Vec2::new(size.x / 2.0, size.y), size);
+/// A label laid out: its title and the lines under it, each in its color.
+struct Label {
+    title: Arc<Galley>,
+    lines: Vec<Arc<Galley>>,
+    size: Vec2,
+}
+
+fn label(p: &egui::Painter, title: &str, color: Color32, lines: &[(String, Color32)]) -> Label {
+    let title = p.layout(title.to_string(), FontId::proportional(13.0), color, 230.0);
+    let lines: Vec<Arc<Galley>> = lines
+        .iter()
+        .map(|(t, c)| p.layout_no_wrap(t.clone(), FontId::proportional(11.0), *c))
+        .collect();
+    let w = lines
+        .iter()
+        .map(|g| g.size().x)
+        .fold(title.size().x, f32::max);
+    let h = title.size().y + lines.iter().map(|g| g.size().y + 1.0).sum::<f32>();
+    Label {
+        title,
+        lines,
+        size: Vec2::new(w + 18.0, h + 8.0),
+    }
+}
+
+/// Draws `l` in `rect`, edged in `color`; a line down to `at` when it had to stand aside.
+fn draw_label(p: &egui::Painter, l: Label, rect: Rect, color: Color32, lit: bool, at: Pos2) {
+    leader(p, rect, at, color);
     p.rect_filled(
         rect,
         5.0,
@@ -1627,48 +2061,80 @@ fn pill(p: &egui::Painter, at: Pos2, title: &str, sub: Option<&str>, color: Colo
         ),
         StrokeKind::Inside,
     );
+    let mut y = rect.top() + 4.0;
+    let th = l.title.size().y;
     p.galley(
-        Pos2::new(rect.center().x - tw / 2.0, rect.top() + 4.0),
-        t,
+        Pos2::new(rect.center().x - l.title.size().x / 2.0, y),
+        l.title,
         Color32::WHITE,
     );
-    if let Some(g) = s {
+    y += th + 1.0;
+    for g in l.lines {
+        let h = g.size().y;
         p.galley(
-            Pos2::new(rect.center().x - sw / 2.0, rect.top() + 5.0 + th),
+            Pos2::new(rect.center().x - g.size().x / 2.0, y),
             g,
-            color,
+            Color32::WHITE,
         );
+        y += h + 1.0;
     }
 }
 
-/// The speaker's prompt over their head, as the game's marker shows it: who, and what they ask.
-fn bubble(p: &egui::Painter, at: Pos2, who: &str, text: &str) {
+/// A thin line from a label moved off its place to the point it is about.
+fn leader(p: &egui::Painter, rect: Rect, at: Pos2, color: Color32) {
+    let from = rect.clamp(at);
+    if from.distance(at) < 6.0 {
+        return;
+    }
+    p.line_segment([from, at], Stroke::new(1.2, color.gamma_multiply(0.7)));
+    p.circle_filled(at, 2.5, color);
+}
+
+/// Who says it and what, in a speech bubble over `at` (moved aside, its tail a line, when the
+/// place is taken). Returns where it went.
+fn bubble(
+    p: &egui::Painter,
+    at: Pos2,
+    who: &str,
+    text: &str,
+    size: f32,
+    bounds: Rect,
+    taken: &[Rect],
+) -> Rect {
     let name = p.layout_no_wrap(who.to_string(), FontId::proportional(12.0), SPEAKER);
     let said = p.layout(
         text.to_string(),
-        FontId::proportional(14.0),
+        FontId::proportional(size),
         Color32::WHITE,
         300.0,
     );
-    let (nh, size) = (
-        name.size().y,
-        Vec2::new(
-            name.size().x.max(said.size().x) + 22.0,
-            name.size().y + said.size().y + 15.0,
-        ),
+    let nh = name.size().y;
+    let dims = Vec2::new(
+        name.size().x.max(said.size().x) + 22.0,
+        name.size().y + said.size().y + 15.0,
     );
-    let rect = Rect::from_min_size(at - Vec2::new(size.x / 2.0, size.y + 9.0), size);
+    let rect = place(
+        dims,
+        &tries_over(at - Vec2::new(0.0, 9.0), dims),
+        taken,
+        bounds,
+    );
     let fill = Color32::from_rgba_unmultiplied(0x22, 0x1d, 0x18, 232);
+    let tail = rect.center_bottom();
+    if (tail - (at - Vec2::new(0.0, 9.0))).length() < 2.0 {
+        p.add(Shape::convex_polygon(
+            vec![
+                tail + Vec2::new(-8.0, -0.5),
+                tail + Vec2::new(8.0, -0.5),
+                at,
+            ],
+            fill,
+            Stroke::NONE,
+        ));
+    } else {
+        leader(p, rect, at, Color32::from_rgb(0x9a, 0x88, 0x6c));
+    }
     p.rect_filled(rect, 7.0, fill);
-    p.add(Shape::convex_polygon(
-        vec![
-            rect.center_bottom() + Vec2::new(-8.0, -0.5),
-            rect.center_bottom() + Vec2::new(8.0, -0.5),
-            at,
-        ],
-        fill,
-        Stroke::NONE,
-    ));
     p.rect_stroke(
         rect,
         7.0,
@@ -1677,6 +2143,70 @@ fn bubble(p: &egui::Painter, at: Pos2, who: &str, text: &str) {
     );
     p.galley(rect.min + Vec2::new(11.0, 6.0), name, SPEAKER);
     p.galley(rect.min + Vec2::new(11.0, 9.0 + nh), said, Color32::WHITE);
+    rect
+}
+
+/// Where a label of `size` goes: the first of `tries` (top-left corners, best first) that
+/// stays in `bounds` and covers nothing in `taken`, else the one that covers least.
+fn place(size: Vec2, tries: &[Pos2], taken: &[Rect], bounds: Rect) -> Rect {
+    let cost = |r: Rect| {
+        let covered: f32 = taken.iter().map(|t| overlap(*t, r)).sum();
+        covered + 3.0 * (r.area() - overlap(bounds, r))
+    };
+    let mut best = (f32::MAX, Rect::from_min_size(tries[0], size));
+    for &at in tries {
+        let r = Rect::from_min_size(at, size);
+        let c = cost(r);
+        if c < 1.0 {
+            return r;
+        }
+        if c < best.0 {
+            best = (c, r);
+        }
+    }
+    best.1
+}
+
+fn overlap(a: Rect, b: Rect) -> f32 {
+    let i = a.intersect(b);
+    if i.is_positive() { i.area() } else { 0.0 }
+}
+
+/// Places for a label standing on `at` (its bottom middle): right over it, higher, then to
+/// the sides, then under it.
+fn tries_over(at: Pos2, size: Vec2) -> Vec<Pos2> {
+    let base = at - Vec2::new(size.x / 2.0, size.y);
+    let (up, side) = (size.y + 5.0, size.x * 0.5 + 8.0);
+    let mut v = vec![base];
+    for k in 1..=3 {
+        let k = k as f32;
+        v.push(base - Vec2::new(0.0, up * k));
+        v.push(base + Vec2::new(side * k, 0.0));
+        v.push(base - Vec2::new(side * k, 0.0));
+        v.push(base + Vec2::new(side * k, -up * k));
+        v.push(base - Vec2::new(side * k, up * k));
+    }
+    v.push(base + Vec2::new(0.0, size.y + 46.0));
+    v
+}
+
+/// Places for a label beside a circle (`c`, radius `r` on screen): right, left, under, over,
+/// then the corners, then further out.
+fn tries_round(c: Pos2, r: f32, size: Vec2) -> Vec<Pos2> {
+    let mut v = Vec::new();
+    for k in 0..3 {
+        let d = r + 3.0 + k as f32 * (size.y + 4.0);
+        let e = d * 0.72;
+        v.push(Pos2::new(c.x + d, c.y - size.y / 2.0));
+        v.push(Pos2::new(c.x - d - size.x, c.y - size.y / 2.0));
+        v.push(Pos2::new(c.x - size.x / 2.0, c.y + d));
+        v.push(Pos2::new(c.x - size.x / 2.0, c.y - d - size.y));
+        v.push(Pos2::new(c.x + e, c.y + e));
+        v.push(Pos2::new(c.x - e - size.x, c.y + e));
+        v.push(Pos2::new(c.x + e, c.y - e - size.y));
+        v.push(Pos2::new(c.x - e - size.x, c.y - e - size.y));
+    }
+    v
 }
 
 /// While a walk-to choice is on in the game, the corner preview looks through its camera (what
@@ -1740,6 +2270,7 @@ fn walk_plan(ui: &mut egui::Ui, world: &mut World, editor: &mut Editor, tab: &mu
         .map_or(0, |o| o.set);
     let options: Vec<OptionInfo> = n.options.iter().filter(|o| o.set == set).cloned().collect();
     let title = n.title.clone();
+    let declares = doc.compiled.declares.clone();
     let path = tab.path.clone();
     let editing = editor.mode == Mode::Edit;
     let choice = run
@@ -1805,7 +2336,7 @@ fn walk_plan(ui: &mut egui::Ui, world: &mut World, editor: &mut Editor, tab: &mu
     let (right, ahead) = ground_axes(yaw);
     let w = ui.available_width();
     let (rect, response) = ui.allocate_exact_size(
-        Vec2::new(w, (w * 0.72).clamp(170.0, 300.0)),
+        Vec2::new(w, (w * 0.85).clamp(200.0, 360.0)),
         Sense::click_and_drag(),
     );
     tab.drawn_at.insert("walk plan".into(), rect);
@@ -1862,12 +2393,36 @@ fn walk_plan(ui: &mut egui::Ui, world: &mut World, editor: &mut Editor, tab: &mu
             y += scale;
         }
     }
+    let corner = match choice.as_ref().and_then(SpotChoice::seconds_left) {
+        Some(s) => format!("{title} · {} s left", s.ceil() as i32),
+        None => format!("{title} · 1 square = 1 m"),
+    };
+    let g = p.layout_no_wrap(corner, FontId::proportional(11.0), theme::TEXT_DIM);
+    let corner = Rect::from_min_size(rect.left_top() + Vec2::new(8.0, 6.0), g.size());
+    p.galley(corner.min, g, theme::TEXT_DIM);
+    // What is drawn keeps its room; the labels then go where they cover nothing (or least).
+    let bounds = rect.shrink(3.0);
+    let mut taken = vec![corner.expand(2.0)];
     for q in &people {
-        p.circle_filled(to_screen(*q), (0.17 * scale).clamp(2.5, 7.0), PERSON);
+        let c = to_screen(*q);
+        let r = (0.17 * scale).clamp(2.5, 7.0);
+        p.circle_filled(c, r, PERSON);
+        taken.push(Rect::from_center_size(c, Vec2::splat(2.0 * r)));
     }
-    // The spots, under the speaker and the player.
+    // The spots, under the speaker and the player; each one's label says its name, its option
+    // and a check's odds (live once offered, else with the scene's facts).
+    let facts = world
+        .get_resource::<StoryFacts>()
+        .cloned()
+        .unwrap_or_default();
+    let settings = world
+        .get_resource::<StorySettings>()
+        .cloned()
+        .unwrap_or_default();
+    let offered = run.as_ref().filter(|r| r.node == title);
     let pointer = response.hover_pos();
     let mut over = None;
+    let mut labels: Vec<(Pos2, f32, LayoutJob, Color32)> = Vec::new();
     for (i, s) in &placed {
         let o = &options[*i];
         let live_opt = choice.as_ref().and_then(|c| c.options.get(*i));
@@ -1885,43 +2440,62 @@ fn walk_plan(ui: &mut egui::Ui, world: &mut World, editor: &mut Editor, tab: &mu
             p.circle_filled(c, r * l.progress, color.gamma_multiply(0.4));
         }
         p.circle_stroke(c, r, Stroke::new(if lit { 2.6 } else { 1.6 }, color));
-        p.text(
-            c,
-            Align2::CENTER_CENTER,
-            &s.name,
-            FontId::monospace(11.5),
-            color,
-        );
-        p.text(
-            c + Vec2::new(0.0, r + 3.0),
-            Align2::CENTER_TOP,
-            short(&o.text, 30),
-            FontId::proportional(10.5),
-            theme::TEXT_DIM,
-        );
+        taken.push(Rect::from_center_size(c, Vec2::splat(2.0 * r)));
         tab.drawn_at.insert(
             format!("plan spot {}", s.name),
             Rect::from_center_size(c, Vec2::splat(2.0 * r)),
         );
+        let mut job = LayoutJob::default();
+        job.append(
+            &s.name,
+            0.0,
+            TextFormat::simple(FontId::monospace(11.0), color),
+        );
+        job.append(
+            &short(&o.text, 24),
+            6.0,
+            TextFormat::simple(FontId::proportional(10.5), theme::TEXT_DIM),
+        );
+        let odds = offered
+            .and_then(|run| {
+                run.checks
+                    .iter()
+                    .find(|k| run.options.get(k.option.wrapping_sub(1)) == Some(&o.text))
+            })
+            .map(|k| k.chance)
+            .or_else(|| {
+                let (skill, d) = o.check.as_ref()?;
+                Some(static_odds(&declares, &facts, &settings, skill, *d).1)
+            });
+        if let Some(chance) = odds {
+            job.append(
+                &format!("🎲 {}", percent(chance)),
+                6.0,
+                TextFormat::simple(
+                    FontId::proportional(10.5),
+                    if o.red { CHECK_RED } else { odds_color(chance) },
+                ),
+            );
+        }
+        labels.push((c, r, job, color));
     }
+    let mut named: Vec<(Pos2, f32, String, Color32)> = Vec::new();
     if let (Some(e), Some(q)) = (owner, owner_at) {
         let c = to_screen(q);
-        p.circle_filled(c, (0.24 * scale).clamp(4.0, 10.0), OWNER);
+        let r = (0.24 * scale).clamp(4.0, 10.0);
+        p.circle_filled(c, r, OWNER);
+        taken.push(Rect::from_center_size(c, Vec2::splat(2.0 * r)));
         let name = world
             .get::<Name>(e)
             .map(|n| n.as_str().to_string())
             .unwrap_or_default();
-        p.text(
-            c + Vec2::new(0.0, -(0.24 * scale).clamp(4.0, 10.0) - 2.0),
-            Align2::CENTER_BOTTOM,
-            name,
-            FontId::proportional(11.5),
-            OWNER,
-        );
+        named.push((c, r, name, OWNER));
     }
     if let (Some(e), Some(q)) = (chooser, chooser_at) {
         let c = to_screen(q);
-        p.circle_filled(c, (0.2 * scale).clamp(3.5, 8.0), NOW);
+        let r = (0.2 * scale).clamp(3.5, 8.0);
+        p.circle_filled(c, r, NOW);
+        taken.push(Rect::from_center_size(c, Vec2::splat(2.0 * r)));
         let who = if world.get::<engine::world::Interactor>(e).is_some() {
             "you".to_string()
         } else {
@@ -1930,25 +2504,28 @@ fn walk_plan(ui: &mut egui::Ui, world: &mut World, editor: &mut Editor, tab: &mu
                 .map(|n| n.as_str().to_string())
                 .unwrap_or_default()
         };
-        p.text(
-            c + Vec2::new((0.2 * scale).clamp(3.5, 8.0) + 3.0, 0.0),
-            Align2::LEFT_CENTER,
-            who,
-            FontId::proportional(11.5),
-            NOW,
-        );
+        named.push((c, r, who, NOW));
     }
-    let corner = match choice.as_ref().and_then(SpotChoice::seconds_left) {
-        Some(s) => format!("{title} · {} s left", s.ceil() as i32),
-        None => format!("{title} · 1 square = 1 m"),
-    };
-    p.text(
-        rect.left_top() + Vec2::new(8.0, 6.0),
-        Align2::LEFT_TOP,
-        corner,
-        FontId::proportional(11.0),
-        theme::TEXT_DIM,
-    );
+    for (c, r, text, color) in named {
+        let g = p.layout_no_wrap(text, FontId::proportional(11.5), color);
+        let at = place(g.size(), &tries_round(c, r, g.size()), &taken, bounds);
+        p.galley(at.min, g, color);
+        taken.push(at);
+    }
+    for (c, r, job, color) in labels {
+        let g = p.layout_job(job);
+        let size = g.size() + Vec2::new(8.0, 4.0);
+        let at = place(size, &tries_round(c, r, size), &taken, bounds);
+        // A line to its ring when it had to go further off.
+        let from = at.clamp(c);
+        if from.distance(c) > r + 6.0 {
+            let edge = c + (from - c).normalized() * r;
+            p.line_segment([from, edge], Stroke::new(1.0, color.gamma_multiply(0.6)));
+        }
+        p.rect_filled(at, 3.0, Color32::from_black_alpha(150));
+        p.galley(at.min + Vec2::new(4.0, 2.0), g, color);
+        taken.push(at);
+    }
 
     // Dragging a spot (before Play): it follows the pointer on the ground; letting go is one
     // undo step. A click selects it.

@@ -2,7 +2,8 @@
 -- Tests for captain.luau and the muster (dialogue/muster.yarn), whose options are picked by
 -- walking: the recruit it builds in the gap of the rank walks (its position set) to a spot
 -- and stands in its ring until that option is taken. Headless here (no conversation screen),
--- but the spots, rings and slow motion work as in the game.
+-- but the spots, rings, slow motion, checks, barks and watchers work as in the game.
+-- `dialogue.checks.next` decides a check instead of the dice.
 local function spot(name: string, at: { number }, radius: number): any
 	return {
 		name = `Spot {name}`,
@@ -51,6 +52,7 @@ describe("Captain", function()
 		-- Standing in the rank, where it began, picks nothing by itself.
 		t:wait(0.5)
 		expect(c.waiting).to_be("spots")
+		dialogue.checks.next = true
 		walk(captain, recruit, "ear")
 		t:wait_until(function()
 			return c.done
@@ -59,7 +61,54 @@ describe("Captain", function()
 		expect(captain.script.noticed).to_be("ear")
 		expect(facts.whispered).to_be(true)
 		expect(c.taken[#c.taken]).to_be("Whisper")
+		expect(c.passed).to_be(true)
 		expect(c.line).to_be("If it works, it was my idea. If it fails, it was yours.")
+	end)
+
+	it("shows the odds over the rings, and a failed whisper is brushed off", function(t)
+		local captain = t:spawn(CAPTAIN)
+		local c, recruit = muster(t, captain)
+		local open = api("story.state", {}).spots[1]
+		-- 2d6 + Persuade 1 against 8: 21 ways in 36. Nerve 0 against 9: 10 in 36, and red.
+		expect(open.options[3].check).to_be("PERSUADE 8 · 58%")
+		expect(open.options[2].check).to_be("RED · NERVE 9 · 28%")
+		dialogue.checks.next = false
+		walk(captain, recruit, "ear")
+		t:wait_until(function()
+			return c.done
+		end, 5)
+		expect(c.passed).to_be(false)
+		expect(facts.whispered).to_be(false)
+		expect(c.line).to_be("Not now, recruit. Whatever it is, it keeps until after the parley.")
+	end)
+
+	it("mutters and watches as you step out of the rank", function(t)
+		local captain = t:spawn(CAPTAIN)
+		local c, recruit = muster(t, captain)
+		-- He and his two soldiers follow the recruit.
+		expect(#api("story.state", {}).spots[1].watching).to_be(3)
+		dialogue.checks.next = false
+		walk(captain, recruit, "forward")
+		t:wait_until(function()
+			for _, b in api("story.state", {}).barks do
+				if b.speaker == "Soldier 2" and b.text == "He's not serious." then
+					return true
+				end
+			end
+			return false
+		end, 2)
+		t:wait_until(function()
+			local open = api("story.state", {}).spots[1]
+			return open ~= nil and math.abs(open.watching[1].head_deg) > 20
+		end, 1)
+		-- A red check failed: back in line, his regard for you lower, the rank laughing.
+		t:wait_until(function()
+			return c.done
+		end, 6)
+		expect(facts.overstepped).to_be(true)
+		expect(facts.spoke_up).to_be(nil)
+		expect(facts.regard_captain).to_be(-1)
+		expect(c.line).to_be("Back in line, recruit. When I want a speaker, I will point at one.")
 	end)
 
 	it("turns around when you slip behind him", function(t)

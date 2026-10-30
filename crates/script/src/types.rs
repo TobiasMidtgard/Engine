@@ -336,13 +336,18 @@ export type Conversation = {
 	speaker: string?,
 	--- The options shown now.
 	options: { string }?,
-	--- "options", "reading", "time", "until" or nil.
+	--- "options", "spots", "reading", "time", "real", "until" or nil.
 	waiting: string?,
 	error: string?,
 	--- The nodes it went through.
 	taken: { string },
-	--- Picks option i (1 is the first) when it shows options.
-	choose: (self: Conversation, i: number) -> Conversation,
+	--- Whether the last skill check passed (passed() in its lines).
+	passed: boolean,
+	--- The last check rolled: { skill, dice, modifier, total, target, passed, how }.
+	roll: any?,
+	--- Picks option i (1 is the first) when it shows options; pass (true or false) decides
+	--- its skill check instead of the dice.
+	choose: (self: Conversation, i: number, pass: boolean?) -> Conversation,
 	stop: (self: Conversation) -> (),
 	--- Waits (in a task) until it ends; true unless an error ended it.
 	wait: (self: Conversation) -> boolean,
@@ -614,6 +619,16 @@ const DIALOGUE_FIELDS: &str =
 \tcommands: { [string]: (...any) -> any },
 \t--- Functions for conditions and {text}.
 \tfunctions: { [string]: (...any) -> any },
+\t--- Says a node's lines as barks over the speakers' heads while play goes on (the node
+\t--- group's best fit; nil when none fits). opts: owner, chooser.
+\tbark: (path: string, node: string, opts: ConversationOptions?) -> Conversation?,
+\t--- How checks roll: { dice = \"2d6\" or \"d20\", difficulty = \"easy\", \"normal\" or
+\t--- \"hard\", luck = true }; any of them. Returns them all.
+\tsettings: (t: { [string]: any }?) -> { [string]: any },
+\t--- Skill checks: skill = function(name, chooser) -> number (facts $skill_<name>
+\t--- otherwise), bonuses = function(skill, chooser) -> { {amount, why} }, next = true or
+\t--- false to decide the next check (tests).
+\tchecks: { skill: ((string, any) -> number)?, bonuses: ((string, any) -> { any })?, next: boolean? },
 ";
 
 /// The whole definitions file for this world's registry.
