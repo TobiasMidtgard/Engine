@@ -41,6 +41,8 @@ pub(crate) struct Drawn {
     pub style: ShapeStyle,
     /// The entity whose space its positions are in (`None`: the world).
     pub space: Option<Entity>,
+    /// The script that drew it.
+    pub owner: Option<Entity>,
 }
 
 /// What `draw` keeps between calls: the frame's shapes and the space they go in.
@@ -176,6 +178,7 @@ fn record(lua: &Lua, shape: DebugShape, style: ShapeStyle) {
         shape,
         style,
         space,
+        owner,
     });
 }
 
@@ -510,32 +513,41 @@ pub(crate) fn placed(shape: &DebugShape, to: &DAffine3) -> DebugShape {
 }
 
 /// Hands the shapes `lua`'s scripts drew to [`DebugDraw`], each placed in its space (a shape
-/// whose space entity is gone is dropped). Without a `DebugDraw` they are dropped.
-pub(crate) fn flush(world: &mut World, lua: &Lua) {
-    let shapes = {
+/// whose space entity is gone is dropped). Without a `DebugDraw` they are dropped. While the
+/// rewind recorder records ([`crate::rewind`]), returns them placed, with the script that drew
+/// each.
+pub(crate) fn flush(world: &mut World, lua: &Lua) -> Vec<(Entity, DebugShape, ShapeStyle)> {
+    let (shapes, keep) = {
         let mut s = shared(lua);
         s.draw.space = None;
         s.draw.dropped = 0;
-        std::mem::take(&mut s.draw.shapes)
+        (std::mem::take(&mut s.draw.shapes), s.trace.is_some())
     };
     if shapes.is_empty() {
-        return;
+        return Vec::new();
     }
-    let placed_shapes: Vec<(DebugShape, ShapeStyle)> = shapes
+    let placed_shapes: Vec<(Option<Entity>, DebugShape, ShapeStyle)> = shapes
         .into_iter()
         .filter_map(|d| match d.space {
-            None => Some((d.shape, d.style)),
+            None => Some((d.owner, d.shape, d.style)),
             Some(e) => world
                 .get::<GlobalTransform>(e)
-                .map(|g| (placed(&d.shape, &g.0), d.style)),
+                .map(|g| (d.owner, placed(&d.shape, &g.0), d.style)),
         })
         .collect();
-    let Some(mut debug) = world.get_resource_mut::<DebugDraw>() else {
-        return;
-    };
-    for (shape, style) in &placed_shapes {
-        debug.styled(shape, *style);
+    if let Some(mut debug) = world.get_resource_mut::<DebugDraw>() {
+        for (_, shape, style) in &placed_shapes {
+            debug.styled(shape, *style);
+        }
     }
+    // The rewind recorder keeps them, by the script that drew them.
+    if !keep {
+        return Vec::new();
+    }
+    placed_shapes
+        .into_iter()
+        .filter_map(|(owner, shape, style)| owner.map(|e| (e, shape, style)))
+        .collect()
 }
 
 #[cfg(test)]

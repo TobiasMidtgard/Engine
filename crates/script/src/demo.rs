@@ -43,6 +43,9 @@
 //!   the seal, as if selected, shows where each rune's touch reaches and the socket it lights.
 //!   The seal, its runes and the drone build themselves in `construct`, so the editor shows
 //!   them before Play, and the drone's waypoints and the seal's spread have handles there.
+//! - Rewind (`script.rewind {"show_ago": 2}`, the `script_rewind` stop): the recorder keeps
+//!   what every script does and draws where each scripted thing went around the moment two
+//!   seconds ago: the wisps' flight and the drone's loop as streaks.
 //!
 //! `script.send {"entity": {"name": "Courtyard director"}, "event": "ritual"}` plays the ritual
 //! from the console or a tour stop; `script.edit` changes a script file like an editor would.
@@ -243,6 +246,12 @@ const GIZMOS_ON: (&str, &str) = (
     r#"{"show": true, "selected": ["Rune seal", "Courtyard patrol"]}"#,
 );
 const GIZMOS_OFF: (&str, &str) = ("script.gizmos", r#"{"show": false, "selected": []}"#);
+/// Record, and keep drawing the moment two seconds ago (each moving part's path round it).
+const REWIND_ON: (&str, &str) = ("script.rewind", r#"{"show_ago": 2.0}"#);
+const REWIND_OFF: (&str, &str) = (
+    "script.rewind",
+    r#"{"record": false, "show": false, "clear": true}"#,
+);
 
 /// The courtyard's overview, from above the lanterns in the south-east, looking down enough
 /// that the floor fills the frame (the moonlit grass outside it outshone the lanterns).
@@ -448,6 +457,19 @@ pub const VIEWS: &[DemoView] = &[
         warmup_secs: 1.2,
         on_arrive: &[SEAL_TWO, GIZMOS_ON],
         on_leave: &[GIZMOS_OFF],
+    },
+    DemoView {
+        key: "script_rewind",
+        name: "Rewind in the game: the recorder keeps what every script did, and draws where \
+               each scripted thing went over the last seconds from it: the wisps' flight round \
+               the orrery and the drone's loop as streaks, bright behind, faint ahead",
+        eye: OVERVIEW.0,
+        target: OVERVIEW.1,
+        hour: 18.9,
+        // Six seconds recorded: four behind the moment shown, two ahead of it.
+        warmup_secs: 6.0,
+        on_arrive: &[REWIND_ON],
+        on_leave: &[REWIND_OFF],
     },
     DemoView {
         key: "script_paused",

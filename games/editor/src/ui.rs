@@ -43,6 +43,7 @@ pub fn layout(scene: f32) -> DockState<Tab> {
             Tab::Content,
             Tab::Console,
             Tab::History,
+            Tab::Rewind,
             Tab::Partition,
             Tab::Matrix,
         ],
@@ -135,6 +136,7 @@ impl TabViewer for Viewer<'_> {
             Tab::Matrix => "📊 Property Matrix",
             Tab::Scripts => "📜 Scripts",
             Tab::Graphs => "🔀 Graphs",
+            Tab::Rewind => "⏪ Rewind",
         }
         .into()
     }
@@ -161,6 +163,7 @@ impl TabViewer for Viewer<'_> {
             Tab::Matrix => crate::matrix::panel(ui, world, editor),
             Tab::Scripts => crate::scripts::panel(ui, world, editor),
             Tab::Graphs => crate::graphs::panel(ui, world, editor),
+            Tab::Rewind => crate::rewind::panel(ui, world, editor),
         }
     }
 

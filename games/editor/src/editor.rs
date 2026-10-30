@@ -56,6 +56,7 @@ pub enum Tab {
     Matrix,
     Scripts,
     Graphs,
+    Rewind,
 }
 
 /// A message in the console.

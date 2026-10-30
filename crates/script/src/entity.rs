@@ -371,10 +371,21 @@ impl UserData for EntityRef {
                 Some(v) => to_json(&v)?,
                 None => serde_json::Value::Null,
             };
-            shared(lua).outbox.push(Outgoing {
+            let mut s = shared(lua);
+            let from = s.owner;
+            if let (Some(trace), Some(me)) = (s.trace.as_mut(), from) {
+                trace.push(crate::rewind::Traced {
+                    owner: me,
+                    kind: crate::rewind::EventKind::Sent,
+                    text: event.clone(),
+                    other: Some(e.0),
+                });
+            }
+            s.outbox.push(Outgoing {
                 to: e.0,
                 event,
                 data,
+                from,
             });
             Ok(())
         });

@@ -490,6 +490,35 @@ nothing catches is raised, with the stack and locals still there. Without an edi
 (`"message": "glow = {glow}"`), and code boards show them beside the line. A code board also
 marks the line the last error came from, with the message, until the file is fixed.
 
+## Rewind: scrubbing back through what scripts did
+
+Every Play in the editor is recorded, frame by frame: each script's values (its own fields,
+then its props), its state machine's states, where it and the entities it holds were
+(`self.drone`, `self.head`), what happened (prints, errors, messages sent and received, signals,
+hot reloads) and what it drew (`draw`, gizmos). The editor's **Rewind** tab (beside History)
+shows it as a timeline, one track per script: states as colored bars (one row per parallel
+region), what happened as marks along the top (a dot for a print, triangles for messages, a
+diamond for a signal, a red diamond for an error). Click a track's arrow for its values: numbers
+as curves, `true`/`false` as bars, text and entities as spans; hover anywhere for the value then.
+
+Click or drag on the timeline to see that moment: the game pauses, and the scripts' entities
+and their parts go back to where they were, with each moving part's path drawn around it
+(bright behind, faint ahead, a dot each second), the shapes the scripts drew then and a label
+on each. The panel on the right has the picked script's values at that moment (the ones that
+changed right then are lit) and what it did just before. ◀ ▶ (or the arrow keys) step a frame,
+⚠ jumps to the next error, Live goes back to now, and Play goes on from where the game was
+paused: nothing is replayed, so what you see is what happened. After Stop the recording stays to
+look through; the next Play starts a new one. A failed test in the Tests panel has a
+**Rewind to it** button. Ctrl+wheel zooms the timeline, Shift+wheel pans, Fit shows it all.
+
+A typical find: a script errors now and then. Press ⚠ to land on the error, look at the values
+it had (the one that just went unset is lit), then ◀ one frame for what they were before.
+
+From the API or the AI bridge, `script.rewind {"record": true}` records in a game too;
+`{"at": 12.5}` gives every script as it was then, `{"entity": {"name": "Turret"}, "value":
+"yaw"}` one value over time, `{"events": true, "kind": "error"}` what happened, and
+`{"show": 12.5}` draws that moment in the world.
+
 ## Profiling
 
 `script.profile {"seconds": 5}` records where the scripts spend their time while the game runs;

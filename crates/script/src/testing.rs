@@ -68,6 +68,8 @@ pub struct TestResult {
     /// World seconds and frames it took.
     pub secs: f64,
     pub frames: u32,
+    /// World seconds when it started (the rewind recorder's time).
+    pub at: f64,
 }
 
 /// A test file that didn't load (a syntax error, or an error in a `describe` body).
@@ -198,6 +200,7 @@ fn report(lua: &Lua, args: mlua::MultiValue) -> mlua::Result<()> {
             let i = index(next());
             if let Some(r) = i.and_then(|i| run.results.get_mut(i)) {
                 r.status = "running".into();
+                r.at = now;
             }
             run.worker = match next() {
                 Value::Thread(t) => Some(t),

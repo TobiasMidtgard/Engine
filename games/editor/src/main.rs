@@ -41,6 +41,7 @@ mod picking;
 mod prefab;
 mod prefab_ui;
 mod remap;
+mod rewind;
 mod rigs;
 mod sample;
 mod scatter;
@@ -114,6 +115,7 @@ fn main() {
             engine_script::ScriptPlugin,
             scripts::ScriptsTabPlugin,
             graphs::GraphsTabPlugin,
+            rewind::RewindTabPlugin,
         ))
         .add_plugins(EditorPlugin);
 
@@ -165,6 +167,7 @@ fn main() {
             Some("states") => scripts::states_shots(dir),
             Some("gizmos") => scripts::gizmos_shots(dir),
             Some("tools") => scripts::tools_shots(dir),
+            Some("rewind") => scripts::rewind_shots(dir),
             Some("graphs") => graphs::shots(dir),
             Some("graph_signals") => graphs::signals_shots(dir),
             _ => shots::gallery(dir),

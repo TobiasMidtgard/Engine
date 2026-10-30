@@ -185,6 +185,59 @@ pub(crate) fn register(app: &mut App) {
         },
     )
     .register_api(
+        "script.rewind",
+        "The rewind recorder: what every script did, frame by frame (its values, states, where it \
+         and its parts were, prints, errors, messages, signals and shapes). {record: true or \
+         false} starts or stops it, {clear: true} forgets, {keep_secs} sets how long it keeps; \
+         {} sums it up; {at: seconds} gives every script as it was then; {entity, value} one \
+         value over time; {events: true, kind} what happened (print, error, sent, got, signal, \
+         reload); {show: seconds or false} draws that moment (paths and shapes) or stops; \
+         {show_ago: seconds} records and keeps drawing the moment that long ago (trailing \
+         paths).",
+        r#"{"at": 12.5}"#,
+        |world, args| {
+            let entity = match args.get("entity") {
+                Some(v) if !v.is_null() => Some(resolve_entity(world, v)?),
+                _ => None,
+            };
+            let mut rw = world.get_resource_or_insert_with(crate::ScriptRewind::default);
+            if let Some(on) = args["record"].as_bool() {
+                rw.recording = on;
+            }
+            if args["clear"].as_bool() == Some(true) {
+                rw.clear();
+            }
+            if let Some(secs) = args["keep_secs"].as_f64() {
+                rw.keep_secs = secs.clamp(1.0, 3600.0);
+            }
+            if let Some(lag) = args["show_ago"].as_f64() {
+                rw.recording = true;
+                rw.follow = Some(lag.max(0.0));
+            }
+            match &args["show"] {
+                Value::Bool(false) => {
+                    rw.shown = None;
+                    rw.follow = None;
+                }
+                v => {
+                    if let Some(t) = v.as_f64() {
+                        rw.shown = Some(t);
+                    }
+                }
+            }
+            if let Some(t) = args["at"].as_f64() {
+                return Ok(rw.describe_at(t));
+            }
+            if let (Some(e), Some(name)) = (entity, str_arg(&args, "value")) {
+                return rw.series_json(e, name, 400);
+            }
+            if args["events"].as_bool() == Some(true) {
+                return rw.events_list(str_arg(&args, "kind"));
+            }
+            Ok(rw.describe())
+        },
+    )
+    .register_api(
         "script.tool",
         "Run a tool. {entity, method}: a script's @button method on that entity, before Play too \
          (on the script's editor stand-in); what it sets in self.props stays in the entity's \
@@ -300,7 +353,12 @@ pub(crate) fn register(app: &mut App) {
                 .to_string();
             let data = args.get("data").cloned().unwrap_or(Value::Null);
             with_runtime(world, |_, rt, _| {
-                shared(&rt.lua).outbox.push(Outgoing { to: e, event, data });
+                shared(&rt.lua).outbox.push(Outgoing {
+                    to: e,
+                    event,
+                    data,
+                    from: None,
+                });
             })?;
             Ok(json!({"queued": true}))
         },

@@ -1068,6 +1068,20 @@ function Base:__states_reload(clock: number)
 	end
 end
 
+-- The current states (one per parallel region), for the rewind recorder each frame: nil
+-- before the machine starts.
+function Base:__states_now(): { string }?
+	local run = running(self)
+	if not run then
+		return nil
+	end
+	local out = {}
+	for _, l in leaves(run) do
+		table.insert(out, l.name)
+	end
+	return out
+end
+
 -- What the editor shows of a running machine: active states (and which are current), their
 -- times, the log.
 function Base:__states_live(): any

@@ -208,6 +208,21 @@
 //! Errors are marked where they happen: a code board shows the line an error came from in red,
 //! with the message and how often it repeated, until the file is fixed.
 //!
+//! ## Rewind
+//!
+//! A [`ScriptRewind`] resource records what every script does, frame by frame, to scrub back
+//! through afterwards (Unreal's Rewind Debugger and Visual Logger): each script's values
+//! (`self`'s fields and props, kept when they change), its state machine's current states, where
+//! it and the parts it holds were (`self.drone`: entities it built or that are below it),
+//! what happened (prints, errors, messages sent and received, signals, hot reloads) and the
+//! shapes it drew. It keeps the last two minutes (or about 96 MB) by default. With
+//! `ScriptRewind::shown` set to a time, [`rewind::show_rewind`] draws the shapes as they were
+//! then and each moving part's path around it. The editor's Rewind tab records each Play, and
+//! scrubbing there pauses the game and puts the entities back where they were;
+//! `script.rewind` records in a game and answers what was when (`{at}`, `{entity, value}`,
+//! `{events, kind}`). Nothing is replayed: the world isn't recorded, so the game goes on from
+//! where it is. How it works: `src/rewind.rs`.
+//!
 //! ## State machines
 //!
 //! A class's `states` table (`initial`, nested `states`, `history`, and per state `on`, `after`,
@@ -259,7 +274,8 @@
 //! `script.marks {path}` (a file's errors, logpoint values and heat by line) and
 //! `script.check {source}` (compile without running), `script.test {files, file, line,
 //! filter}` (run the script tests), `script.tests` (their results) and `script.states {entity}`
-//! (its state machine, live), `script.state_breaks {path, state, exit, on}` (pause on a state).
+//! (its state machine, live), `script.state_breaks {path, state, exit, on}` (pause on a state),
+//! `script.rewind {record, at, entity, value, events, show}` (the rewind recorder).
 //! An editor holds scripts still with
 //! [`ScriptsHeld`] while a scene is edited ([`editing`]).
 //!
@@ -298,6 +314,7 @@ pub mod hotpatch;
 mod math;
 mod profiler;
 pub mod props;
+pub mod rewind;
 mod runtime;
 pub mod state_board;
 pub mod states;
@@ -312,6 +329,7 @@ use engine_core::prelude::*;
 pub use access::ScriptError;
 pub use editing::ScriptsHeld;
 pub use entity::OwnMaterial;
+pub use rewind::ScriptRewind;
 pub use runtime::{ScriptRuntime, normalize};
 pub use types::definitions;
 
@@ -535,6 +553,12 @@ impl Plugin for ScriptPlugin {
         .add_systems(Update, run_scripts.in_set(UpdateSet::Logic))
         .add_systems(Update, preview_scripts.in_set(UpdateSet::Logic))
         .add_systems(FixedUpdate, run_fixed_scripts.in_set(SimSet::Gameplay))
+        .add_systems(
+            Update,
+            rewind::show_rewind
+                .after(run_scripts)
+                .after(preview_scripts),
+        )
         .add_systems(Update, board::draw_boards.after(run_scripts))
         .add_systems(
             Update,
@@ -666,7 +690,10 @@ fn run_scripts(world: &mut World) {
     if !has_scripts && !has_work {
         return;
     }
-    let _ = with_runtime(world, |world, rt, settings| rt.run_frame(world, settings));
+    let _ = with_runtime(world, |world, rt, settings| {
+        rt.run_frame(world, settings);
+        rewind::record(world, rt);
+    });
     if let Some(rt) = world.get_resource::<ScriptRuntime>() {
         let (ms, instances, tasks) = (rt.frame_ms, rt.instance_count(), rt.task_count());
         let memory_mb = rt.used_memory() as f64 / (1024.0 * 1024.0);
@@ -717,6 +744,7 @@ fn shift_scripts(
     let Some(shift) = cursor.read(messages).copied().reduce(|a, b| a.then(&b)) else {
         return;
     };
+    rewind::forget_on_shift(world);
     if world
         .get_resource::<ScriptRuntime>()
         .is_some_and(|rt| rt.wants_world_shift())

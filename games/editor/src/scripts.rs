@@ -109,12 +109,16 @@ fn hold_scripts(world: &mut World) {
 /// Script gizmos follow the editor: the selection draws `draw_gizmos_selected`, and Game view
 /// hides them all.
 fn follow_selection(world: &mut World) {
-    let Some((selected, hide)) = world
+    let Some((selected, mut hide)) = world
         .get_resource::<Editor>()
         .map(|e| (e.selection.clone(), e.game_view))
     else {
         return;
     };
+    // A moment shown in the Rewind tab draws the gizmos as they were then instead.
+    hide |= world
+        .get_resource::<engine_script::ScriptRewind>()
+        .is_some_and(|r| r.shown.is_some());
     if let Some(mut g) = world.get_resource_mut::<ScriptGizmos>()
         && (g.selected != selected || g.hide != hide)
     {
@@ -3989,6 +3993,11 @@ fn tests_list(ui: &mut egui::Ui, world: &mut World, tab: &mut ScriptsTab) {
         }
     });
     let mut open_at = None;
+    // A failed test's run, if the Rewind tab recorded it.
+    let recorded = world
+        .get_resource::<engine_script::ScriptRewind>()
+        .and_then(|r| r.span());
+    let mut rewind_to = None;
     egui::ScrollArea::vertical()
         .id_salt("script tests")
         .auto_shrink([false, false])
@@ -4085,11 +4094,32 @@ fn tests_list(ui: &mut egui::Ui, world: &mut World, tab: &mut ScriptsTab) {
                     if why.clicked() {
                         open_at = Some((file.to_string(), at));
                     }
+                    let start = r["at"].as_f64().unwrap_or(0.0);
+                    let end = start + r["secs"].as_f64().unwrap_or(0.0);
+                    if status == "failed"
+                        && recorded.is_some_and(|(a, b)| start >= a - 0.01 && end <= b + 0.01)
+                    {
+                        let rewind = ui
+                            .horizontal(|ui| {
+                                ui.add_space(30.0);
+                                ui.small_button("⏪ Rewind to it").on_hover_text(
+                                    "See what the scripts did in this test, at the moment it \
+                                     failed (the Rewind tab)",
+                                )
+                            })
+                            .inner;
+                        if rewind.clicked() {
+                            rewind_to = Some((start, end));
+                        }
+                    }
                 }
             }
         });
     if let Some((path, line)) = open_at {
         open(world, tab, &path, Some(line));
+    }
+    if let Some((from, to)) = rewind_to {
+        crate::rewind::open_at(world, from, to, to);
     }
 }
 
@@ -7124,6 +7154,7 @@ pub fn handles(
     view: &crate::view::ViewInfo,
     response: &egui::Response,
 ) -> bool {
+    crate::rewind::overlay(ui, world, view);
     let Some(e) = editor.primary() else {
         return false;
     };
@@ -8937,6 +8968,9 @@ pub fn tools_shots(dir: String) -> ShotScript {
                     modifiers: Modifiers::NONE,
                 });
         })),
+        // Escape closed the menu and cleared the selection: the crates again.
+        Step::Do(Box::new(crates)),
+        Step::Wait(2),
         Step::Do(Box::new(tool("tools/line_up.luau", "Line up"))),
         Step::Wait(4),
         Step::Shot("tools_07_crates_lined_up"),
@@ -8954,6 +8988,223 @@ fn tools_layout() -> DockState<Tab> {
     let [view, _details] = surface.split_right(NodeIndex::root(), 0.7, vec![Tab::Inspector]);
     let [_list, left] = surface.split_left(view, 0.22, vec![Tab::Outliner]);
     let [_list, _history] = surface.split_below(left, 0.62, vec![Tab::History]);
+    dock
+}
+
+// ----------------------------------------------------------------------------- rewind shots
+
+const REWIND_PATROL_AT: DVec3 = DVec3::new(0.0, 0.0, 1.0);
+const REWIND_TURRET_AT: DVec3 = DVec3::new(4.4, 0.0, 2.2);
+const REWIND_SPOT_AT: DVec3 = DVec3::new(-3.8, 0.0, -0.8);
+
+/// The rewind shots' spotlight: it turns on the drone while the drone is near, and has a bug
+/// for the Rewind tab to find (it forgets its target a line before it says which it lost).
+const SPOTLIGHT: &str = r#"-- A spotlight that lights the drone while the drone is near. It has a bug to find with the
+-- Rewind tab: it forgets its target a line before it says which one it lost.
+local Spot = {}
+Spot.props = { target = "Drone", range = 3 }
+
+local POST = { base_color = { 0.08, 0.085, 0.09, 1 }, metallic = 0.8, perceptual_roughness = 0.4 }
+local LAMP = { base_color = { 0.05, 0.05, 0.04, 1 }, emissive = { 1, 0.85, 0.4 }, emissive_strength = 25 }
+
+function Spot:construct()
+	self.entity:spawn({
+		name = "Post",
+		components = {
+			Transform = { translation = vec3(0, 0.75, 0) },
+			MeshRenderer = { mesh = { shape = { Cylinder = { radius = 0.07, height = 1.5, segments = 16 } } }, material = { inline = POST } },
+		},
+	})
+	self.lamp = self.entity:spawn({
+		name = "Lamp",
+		components = {
+			Transform = { translation = vec3(0, 1.6, 0) },
+			MeshRenderer = { mesh = { shape = { Sphere = { radius = 0.16, segments = 16 } } }, material = { inline = LAMP } },
+			PointLight = { color = { 1, 0.85, 0.4 }, intensity_lm = 300, range = 5, radius = 0.05 },
+		},
+	})
+end
+
+function Spot:start()
+	self.target = nil
+	self.lost = 0
+end
+
+function Spot:update(dt)
+	local who = world.find(self.props.target)
+	local near = who ~= nil and (who.position - self.entity.position):flat():length() < self.props.range
+	if near and not self.target then
+		self.target = who
+		print(`Spotlight: found {who.name}`)
+	elseif not near and self.target then
+		self.target = nil
+		self.lost += 1
+		print(`Spotlight: lost {self.target.name}`)
+	end
+	if self.target then
+		draw.line(self.lamp.position, self.target.position, { color = "yellow", on_top = true })
+	end
+end
+
+function Spot:draw_gizmos()
+	draw.circle(vec3(0, 0.05, 0), self.props.range, { color = if self.target then "yellow" else "gray", alpha = 0.7 })
+end
+
+return Spot
+"#;
+
+/// The Rewind tab: a patrol drone, a turret watching it and a spotlight with a bug play for
+/// nine seconds while everything is recorded; then scrubbing back (the game pauses and the
+/// drone and the turret's head go back to where they were, with the drone's path), the
+/// turret's values, the jump to the spotlight's error and the frame before it, and the
+/// recording after Stop. `editor --headless --size 1920x1080 --shots <dir> --script rewind`.
+pub fn rewind_shots(dir: String) -> ShotScript {
+    let _ = std::fs::create_dir_all(&dir);
+    let root = std::fs::canonicalize(&dir)
+        .unwrap_or_else(|_| std::env::current_dir().unwrap_or_default().join(&dir))
+        .join("scripts");
+    let setup = move |world: &mut World, editor: &mut Editor| {
+        editor.icons = false;
+        dusk_sky(world);
+        let scripts = engine_script::scripts_root(world);
+        copy_dir(&scripts.join(EXAMPLES), &root.join(EXAMPLES));
+        let _ = std::fs::write(root.join(EXAMPLES).join("spotlight.luau"), SPOTLIGHT);
+        world.resource_mut::<ScriptSettings>().folder = root.to_string_lossy().to_string();
+        world.remove_resource::<ScriptRuntime>();
+        let script = |path: &str, props: Value| {
+            vec![(
+                "Script",
+                serde_json::to_value(Script::new(path).with_props(props)).unwrap_or_default(),
+            )]
+        };
+        editor::spawn_with(
+            world,
+            editor,
+            "Patrol drone".into(),
+            script("examples/patrol.luau", json!({})),
+            Transform::from_translation(REWIND_PATROL_AT),
+        );
+        editor::spawn_with(
+            world,
+            editor,
+            "Turret".into(),
+            script(
+                "examples/turret.luau",
+                json!({"target": "Drone", "range": 4.5, "sweep": 60}),
+            ),
+            Transform::from_translation(REWIND_TURRET_AT)
+                .with_rotation(engine::core::math::Quat::from_rotation_y(1.35)),
+        );
+        editor::spawn_with(
+            world,
+            editor,
+            "Spotlight".into(),
+            script("examples/spotlight.luau", json!({})),
+            Transform::from_translation(REWIND_SPOT_AT),
+        );
+        world.resource_mut::<EditorDock>().0 = rewind_layout();
+        world.resource_mut::<ScriptsTab>().files_next = 0.0;
+    };
+    let open_track = |name: &'static str| {
+        move |world: &mut World, _: &mut Editor| {
+            if let Some(e) = crate::shots::find(world, name) {
+                world
+                    .resource_mut::<crate::rewind::RewindTab>()
+                    .open
+                    .insert(e);
+            }
+        }
+    };
+    // The pointer resting on something the Rewind tab drew; with `click`, pressed there.
+    let pointer = |what: String, click: bool, along: f32| {
+        move |world: &mut World, _: &mut Editor| {
+            let Some(r) = world
+                .get_resource::<crate::rewind::RewindTab>()
+                .and_then(|t| t.drawn_at.get(&what).copied())
+            else {
+                return;
+            };
+            let at = Pos2::new(r.left() + r.width() * along, r.center().y);
+            let input = &mut world
+                .resource_mut::<crate::egui_bridge::EguiInput>()
+                .injected;
+            input.push(egui::Event::PointerMoved(at));
+            if click {
+                for pressed in [true, false] {
+                    input.push(egui::Event::PointerButton {
+                        pos: at,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: Modifiers::NONE,
+                    });
+                }
+            }
+        }
+    };
+    let since_start = |secs: f64| {
+        move |world: &mut World, ed: &mut Editor| {
+            if let Some((from, _)) = world.resource::<engine_script::ScriptRewind>().span() {
+                crate::rewind::show_at(world, ed, from + secs);
+            }
+        }
+    };
+    let steps = vec![
+        Step::Do(Box::new(setup)),
+        Step::Tool(crate::editor::Tool::Select),
+        Step::Select(""),
+        Step::Camera(DVec3::new(0.6, 6.6, 11.8), DVec3::new(0.2, 1.3, -0.2)),
+        Step::Wait(24),
+        // Play: every script recorded as it runs (the Live playhead at the right).
+        Step::Do(Box::new(|world: &mut World, ed: &mut Editor| {
+            editor::play(world, ed);
+        })),
+        Step::Wait(2),
+        Step::Do(Box::new(open_track("Patrol drone"))),
+        Step::Wait(36),
+        Step::Shot("rewind_01_recording_while_playing"),
+        // A click back on the timeline: paused there, the drone and the turret's head where
+        // they were, the drone's path, the gizmos as they were.
+        Step::Do(Box::new(since_start(3.6))),
+        Step::Wait(4),
+        Step::Shot("rewind_02_scrubbed_back"),
+        // The turret's values, its head's turn (yaw) as a curve under the pointer.
+        Step::Select("Turret"),
+        Step::Do(Box::new(open_track("Turret"))),
+        Step::Wait(3),
+        Step::Do(Box::new(pointer("value Turret yaw".into(), false, 0.55))),
+        Step::Wait(3),
+        Step::Shot("rewind_03_turret_values"),
+        // The spotlight's error: the button jumps to it.
+        Step::Select("Spotlight"),
+        Step::Do(Box::new(open_track("Spotlight"))),
+        Step::Wait(3),
+        Step::Do(Box::new(pointer("errors".into(), true, 0.5))),
+        Step::Wait(4),
+        Step::Shot("rewind_04_at_the_error"),
+        // A frame before: the target still there; it was cleared before the print read it.
+        Step::Do(Box::new(|world: &mut World, ed: &mut Editor| {
+            crate::rewind::step(world, ed, -1);
+        })),
+        Step::Wait(4),
+        Step::Shot("rewind_05_a_frame_before"),
+        // Stop: the scene is back, the recording stays to look through.
+        Step::Do(Box::new(|world: &mut World, ed: &mut Editor| {
+            editor::stop(world, ed);
+        })),
+        Step::Select(""),
+        Step::Wait(6),
+        Step::Do(Box::new(since_start(5.4))),
+        Step::Wait(4),
+        Step::Shot("rewind_06_after_stop"),
+    ];
+    ShotScript::new(dir, steps)
+}
+
+/// The rewind shots' layout: the scene view over the Rewind tab, full width.
+fn rewind_layout() -> DockState<Tab> {
+    let mut dock = DockState::new(vec![Tab::Viewport]);
+    let surface = dock.main_surface_mut();
+    let [_view, _rewind] = surface.split_below(NodeIndex::root(), 0.52, vec![Tab::Rewind]);
     dock
 }
 

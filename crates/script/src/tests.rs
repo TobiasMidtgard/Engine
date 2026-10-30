@@ -4290,3 +4290,183 @@ fn tool_files_run_on_the_selection() {
             == json!(true)
     );
 }
+
+const WATCHER: &str = r#"
+local Watcher = {}
+Watcher.props = { speed = 2 }
+Watcher.signals = { spotted = "" }
+Watcher.states = {
+	initial = "idle",
+	states = {
+		idle = { after = { 0.5, "alert" } },
+		alert = {},
+	},
+}
+
+function Watcher:construct()
+	self.eye = self.entity:spawn({ name = "Eye", components = { Transform = { translation = vec3(0, 1, 0) } } })
+end
+
+function Watcher:start()
+	self.flown = 0
+end
+
+function Watcher:update(dt)
+	self.flown += self.props.speed * dt
+	self.eye.position = vec3(self.flown, 1, 0)
+	draw.sphere(vec3(0, 0, 0), 1, "red")
+	if self.flown > 1 and not self.said then
+		self.said = true
+		print("past one meter")
+		world.find("Ear"):send("hello")
+		self:emit("spotted")
+	end
+	if self.flown > 1.5 and not self.failed then
+		self.failed = true
+		error("boom")
+	end
+end
+return Watcher
+"#;
+
+/// The rewind recorder keeps each script's values (when they change), its states, where it
+/// and the parts it holds were, what happened (prints, messages both ways, signals, errors) and
+/// what it drew, frame by frame; it answers what was when, and forgets what is too old.
+#[test]
+fn the_rewind_recorder_keeps_what_each_script_did_frame_by_frame() {
+    let folder = Folder::new();
+    folder.write("watcher.luau", WATCHER);
+    folder.write(
+        "ear.luau",
+        "local Ear = {}\nfunction Ear:hello() self.heard = true end\nreturn Ear\n",
+    );
+    let mut app = app_in(&folder.0);
+    app.insert_resource(crate::ScriptRewind::recording());
+    let watcher = spawn_script(&mut app, "Watcher", "watcher");
+    spawn_script(&mut app, "Ear", "ear");
+    // 2 m/s at 30 frames a second: past 1 m after 15 frames, 1.5 m after 23.
+    app.update_n(40);
+
+    let rw = app.world.resource::<crate::ScriptRewind>();
+    let (from, to) = rw.span().expect("frames were recorded");
+    assert!(to - from > 1.2, "{from}..{to}");
+    let track = rw.track(watcher).expect("the watcher has a track");
+    assert_eq!(track.name, "Watcher");
+    assert_eq!(track.path, "watcher.luau");
+    // `flown` grows every frame; the prop never changes, so it is kept once.
+    let flown = track.values.iter().find(|s| s.name == "flown").unwrap();
+    assert!(flown.points.len() > 30, "{}", flown.points.len());
+    let speed = track
+        .values
+        .iter()
+        .find(|s| s.name == "props.speed")
+        .unwrap();
+    assert_eq!(speed.points.len(), 1);
+    // Half a second in: idle; a second in: alert (the machine's `state` isn't a value).
+    let half = rw.frame_at(from + 0.25).unwrap();
+    let later = rw.frame_at(from + 1.0).unwrap();
+    assert_eq!(track.states_at(half), ["idle"]);
+    assert_eq!(track.states_at(later), ["alert"]);
+    assert!(track.value_at("state", later).is_none());
+    // The eye it holds moved with `flown`; the watcher itself stayed put.
+    let eye = track.parts.iter().find(|p| p.field == "eye").unwrap();
+    let at_later = eye.pose_at(later).unwrap().position.x;
+    let flown_later = track
+        .value_at("flown", later)
+        .and_then(|v| v.number())
+        .unwrap();
+    assert!(
+        (at_later - flown_later).abs() < 1e-6,
+        "{at_later} vs {flown_later}"
+    );
+    assert_eq!(track.parts[0].poses.len(), 1);
+    // What happened, each in its frame: the print, the message (both ends), the signal, the
+    // error; and the sphere it drew every frame.
+    let kinds: Vec<&str> = track.events.iter().map(|e| e.kind.name()).collect();
+    for kind in ["print", "sent", "signal", "error"] {
+        assert!(kinds.contains(&kind), "{kind} missing from {kinds:?}");
+    }
+    let sent = track
+        .events
+        .iter()
+        .find(|e| e.kind.name() == "sent")
+        .unwrap();
+    assert_eq!(sent.text, "hello to Ear");
+    let printed = track
+        .events
+        .iter()
+        .find(|e| e.kind.name() == "print")
+        .unwrap();
+    let said_at = track
+        .values
+        .iter()
+        .find(|s| s.name == "said")
+        .unwrap()
+        .points[0]
+        .0;
+    assert_eq!(
+        printed.frame, said_at,
+        "the print is in the frame `said` was set"
+    );
+    let ear = rw.tracks().iter().find(|t| t.name == "Ear").unwrap();
+    assert!(
+        ear.events.iter().any(|e| e.text == "hello from Watcher"),
+        "{:?}",
+        ear.events
+    );
+    let last = rw.frame_span().unwrap().1;
+    assert_eq!(track.shapes_at(rw, last, to).count(), 1);
+
+    // The API: as it was, one value over time, and the errors.
+    let then = call_api(&mut app.world, "script.rewind", json!({"at": from + 1.0})).unwrap();
+    let w = then["scripts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["name"] == "Watcher")
+        .unwrap()
+        .clone();
+    assert_eq!(w["states"], json!(["alert"]));
+    assert!(w["values"]["flown"].as_f64().unwrap() > 1.9, "{w}");
+    let series = call_api(
+        &mut app.world,
+        "script.rewind",
+        json!({"entity": {"name": "Watcher"}, "value": "flown"}),
+    )
+    .unwrap();
+    assert!(series["points"].as_array().unwrap().len() > 30, "{series}");
+    let errors = call_api(
+        &mut app.world,
+        "script.rewind",
+        json!({"events": true, "kind": "error"}),
+    )
+    .unwrap();
+    assert_eq!(errors.as_array().unwrap().len(), 1, "{errors}");
+    assert!(
+        errors[0]["text"].as_str().unwrap().contains("boom"),
+        "{errors}"
+    );
+
+    // Kept for `keep_secs`: older frames go, and what was set before stays known.
+    call_api(&mut app.world, "script.rewind", json!({"keep_secs": 1.0})).unwrap();
+    app.update_n(60);
+    let rw = app.world.resource::<crate::ScriptRewind>();
+    let (first_before, _) = (from, to);
+    let (from, to) = rw.span().unwrap();
+    // It trims in steps: back to 1 s once over 1.1 s and a second.
+    assert!(from > first_before + 1.0, "{first_before} then {from}");
+    assert!(to - from <= 2.15, "{from}..{to}");
+    let track = rw.track(watcher).unwrap();
+    let first = rw.frame_span().unwrap().0;
+    assert!(track.value_at("props.speed", first).is_some());
+    assert_eq!(track.states_at(first), ["alert"]);
+
+    // Stopped: nothing more is kept.
+    call_api(&mut app.world, "script.rewind", json!({"record": false})).unwrap();
+    let frames = app.world.resource::<crate::ScriptRewind>().frame_count();
+    app.update_n(5);
+    assert_eq!(
+        app.world.resource::<crate::ScriptRewind>().frame_count(),
+        frames
+    );
+}

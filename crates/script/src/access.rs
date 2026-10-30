@@ -290,6 +290,8 @@ pub(crate) struct Outgoing {
     pub to: Entity,
     pub event: String,
     pub data: serde_json::Value,
+    /// The script that sent it (none from the console or the API).
+    pub from: Option<Entity>,
 }
 
 /// A signal a script emitted (`self:emit`), delivered later in the frame.
@@ -351,6 +353,9 @@ pub(crate) struct Shared {
     pub draw: crate::draw::DrawState,
     /// The script whose `construct` runs now: what it spawns is [`crate::Constructed`] by it.
     pub constructing: Option<Entity>,
+    /// What scripts did, for the rewind recorder: kept only while it records
+    /// ([`crate::rewind`]).
+    pub trace: Option<Vec<crate::rewind::Traced>>,
 }
 
 /// Errors and log lines kept for the API.
@@ -365,6 +370,13 @@ pub(crate) fn push_error(lua: &Lua, path: Option<&str>, entity: Option<Entity>, 
     let mut s = shared(lua);
     let at_secs = s.world_secs;
     tracing::warn!(target: "script", "{message}");
+    if let (Some(trace), Some(e)) = (s.trace.as_mut(), entity) {
+        trace.push(crate::rewind::Traced::new(
+            e,
+            crate::rewind::EventKind::Error,
+            message,
+        ));
+    }
     s.errors.push_back(ScriptError {
         path: path.map(str::to_string),
         entity: entity.map(|e| e.to_bits()),
@@ -380,6 +392,15 @@ pub(crate) fn push_error(lua: &Lua, path: Option<&str>, entity: Option<Entity>, 
 pub(crate) fn push_log(lua: &Lua, line: String) {
     tracing::info!(target: "script", "{line}");
     let mut s = shared(lua);
+    if let Some(e) = s.owner
+        && let Some(trace) = s.trace.as_mut()
+    {
+        trace.push(crate::rewind::Traced::new(
+            e,
+            crate::rewind::EventKind::Print,
+            &line,
+        ));
+    }
     s.log.push_back(line);
     s.log_total += 1;
     while s.log.len() > KEEP_LINES {

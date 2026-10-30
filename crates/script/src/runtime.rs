@@ -211,7 +211,7 @@ pub(crate) struct Files {
 /// A script running on one entity.
 pub(crate) struct Instance {
     pub path: String,
-    this: RegistryKey,
+    pub(crate) this: RegistryKey,
     pub started: bool,
     pub enabled: bool,
     /// Seconds on this instance's clock (world time scaled by its entity's LocalTimeScale).
@@ -296,6 +296,8 @@ pub struct ScriptRuntime {
     holding_time: bool,
     /// Edit mode's stand-ins, by entity.
     previews: BTreeMap<Entity, Preview>,
+    /// The shapes scripts drew last frame, for the rewind recorder (only while it records).
+    pub(crate) drawn: Vec<(Entity, engine_debug::DebugShape, engine_debug::ShapeStyle)>,
 }
 
 /// Normalizes a script path: forward slashes, no leading `./` or `/`, `.luau` added when it has
@@ -423,6 +425,7 @@ impl ScriptRuntime {
             holding_time: false,
             parallel_ms: 0.0,
             previews: BTreeMap::new(),
+            drawn: Vec::new(),
         })
     }
 
@@ -600,9 +603,10 @@ impl ScriptRuntime {
             self.run_parallel(world, settings);
         }
         self.route_messages();
-        crate::draw::flush(world, &self.lua);
+        self.drawn = crate::draw::flush(world, &self.lua);
         for actor in &self.actors {
-            crate::draw::flush(world, &actor.lua);
+            let more = crate::draw::flush(world, &actor.lua);
+            self.drawn.extend(more);
         }
         self.debugger.flush(&self.lua);
         self.profiler.frame(&self.lua);
@@ -2054,6 +2058,14 @@ impl ScriptRuntime {
             if !i.started {
                 continue;
             }
+            if let Some(trace) = shared(&self.lua).trace.as_mut() {
+                trace.push(crate::rewind::Traced {
+                    owner: m.to,
+                    kind: crate::rewind::EventKind::Got,
+                    text: m.event.clone(),
+                    other: m.from,
+                });
+            }
             let data = to_lua(&self.lua, &m.data).unwrap_or(Value::Nil);
             let states = i.hooks.states;
             if i.hooks.on_message {
@@ -2094,6 +2106,13 @@ impl ScriptRuntime {
         // hang the game.
         let emitted = std::mem::take(&mut shared(&self.lua).emitted);
         for m in emitted {
+            if let Some(trace) = shared(&self.lua).trace.as_mut() {
+                trace.push(crate::rewind::Traced::new(
+                    m.from,
+                    crate::rewind::EventKind::Signal,
+                    &m.signal,
+                ));
+            }
             let packed: Option<Table> = self.lua.registry_value(&m.args).ok();
             let _ = self.lua.remove_registry_value(m.args);
             let Some(packed) = packed else { continue };
@@ -2568,6 +2587,21 @@ impl ScriptRuntime {
                     }
                 };
                 tracing::info!(target: "script", "reloaded {path}");
+                let users: Vec<Entity> = self
+                    .instances
+                    .iter()
+                    .filter(|(_, i)| i.path == path)
+                    .map(|(e, _)| *e)
+                    .collect();
+                if let Some(trace) = shared(&self.lua).trace.as_mut() {
+                    for e in users {
+                        trace.push(crate::rewind::Traced::new(
+                            e,
+                            crate::rewind::EventKind::Reload,
+                            "hot reload",
+                        ));
+                    }
+                }
                 match kind {
                     FileKind::Script => self.refresh_instances(&path, hooks, settings),
                     FileKind::Module => {
