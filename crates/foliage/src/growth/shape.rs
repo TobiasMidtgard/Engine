@@ -11,7 +11,7 @@
 use engine_core::math::{Quat, Rng, Vec2, Vec3, Vec4, smoothstep};
 
 use super::develop::{Organ, Skeleton};
-use super::graph::{Axis, AxisKind, Flower, Fruit, Leaf, LeafKind, Node, PlantGraph};
+use super::graph::{Axis, AxisKind, Flower, Fruit, Leaf, LeafKind, Node, PlantGraph, Tree};
 use crate::meshgen::MeshBuilder;
 
 const UP: Vec3 = Vec3::Y;
@@ -126,6 +126,13 @@ pub fn grow_meshes(graph: &PlantGraph, sk: &Skeleton, t: f32, detail: f32) -> Gr
         }
     }
 
+    let pipes = tree_radii(graph, sk, t);
+    // A tree's thousands of leaves are drawn plainer (lobes and teeth in the texture alone).
+    let leaf_detail = match graph.nodes.get(&graph.root) {
+        Some(Node::Tree(_)) => detail.min(0.25),
+        _ => detail,
+    };
+
     let mut grown: Vec<Option<Grown>> = vec![None; n];
     for i in 0..n {
         if !shown[i] {
@@ -157,7 +164,11 @@ pub fn grow_meshes(graph: &PlantGraph, sk: &Skeleton, t: f32, detail: f32) -> Gr
                 let g = grow_axis(a, o, age, base, dir, side, load[i], detail, &mut out.stems);
                 grown[i] = Some(g);
             }
-            Some(Node::Leaf(l)) => leaf(l, o, age, base, dir, side, detail, &mut out),
+            Some(Node::Tree(tr)) => {
+                let g = grow_shoot(tr, o, t, base, dir, side, &pipes[i], detail, &mut out.stems);
+                grown[i] = Some(g);
+            }
+            Some(Node::Leaf(l)) => leaf(l, o, age, base, dir, side, leaf_detail, &mut out),
             Some(Node::Flower(f)) => flower(f, o, age, base, dir, side, &mut out),
             Some(Node::Fruit(f)) => fruit(f, o, age, base, dir, side, &mut out),
             None => {}
@@ -283,6 +294,123 @@ fn grow_axis(
     g
 }
 
+/// Radii along every tree shoot on day `t` (empty for other organs), by the pipe model: a
+/// node's cross section is the sum of the shoot tips it carries, each pipe `tip_radius_m`
+/// across, so the trunk thickens year by year as the crown grows. Wood stays when a branch is
+/// shed. A tip fades in over its first internode's growth, so nothing thickens in a jump.
+fn tree_radii(graph: &PlantGraph, sk: &Skeleton, t: f32) -> Vec<Vec<f32>> {
+    let n = sk.organs.len();
+    let mut out = vec![Vec::new(); n];
+    let Some(Node::Tree(tr)) = graph.nodes.get(&graph.root) else {
+        return out;
+    };
+    let tree_node = sk.names.iter().position(|m| *m == graph.root);
+    let is_shoot = |o: &Organ| Some(o.node) == tree_node;
+    let grow = |o: &Organ| {
+        o.node_days
+            .first()
+            .map_or(0.0, |&d| hermite((t - d) / tr.internode_days.max(1e-3)))
+    };
+    // Each shoot's pipes at its base, children first (they come later in the list).
+    let mut base = vec![0.0f32; n];
+    for i in (0..n).rev() {
+        let o = &sk.organs[i];
+        if !is_shoot(o) || o.birth > t {
+            continue;
+        }
+        let laid = o.node_days.iter().filter(|&&d| d <= t).count();
+        let mut at_node = vec![0.0f32; laid + 1];
+        for &c in &sk.children[i] {
+            let c = c as usize;
+            if is_shoot(&sk.organs[c]) && sk.organs[c].birth <= t {
+                let k = (sk.organs[c].at_node as usize).min(laid);
+                at_node[k] += base[c];
+            }
+        }
+        // From the tip down: the tip's own pipe, then each branch's pipes where it joins.
+        let mut pipes = grow(o);
+        let mut radii = vec![0.0f32; laid + 1];
+        for k in (0..=laid).rev() {
+            pipes += at_node[k];
+            radii[k] = tr.tip_radius_m * pipes.max(1e-4).powf(1.0 / tr.pipe_exponent.max(1.0));
+        }
+        base[i] = pipes;
+        out[i] = radii;
+    }
+    out
+}
+
+/// A tree shoot as grown on day `t`: its metamers in the directions they grew, each
+/// lengthening after the day its node was laid.
+#[allow(clippy::too_many_arguments)]
+fn grow_shoot(
+    tr: &Tree,
+    o: &Organ,
+    t: f32,
+    base: Vec3,
+    dir: Vec3,
+    side: Vec3,
+    radii: &[f32],
+    detail: f32,
+    stems: &mut MeshBuilder,
+) -> Grown {
+    let laid = o.node_days.iter().filter(|&&d| d <= t).count();
+    let mut g = Grown::default();
+    let mut p = base;
+    let mut d = o.dirs.first().copied().unwrap_or(dir);
+    let mut normal = (side - d * side.dot(d)).normalize_or(perpendicular(d));
+    g.points.push(p);
+    g.tangents.push(d);
+    g.normals.push(normal);
+    let mut ages = vec![t - o.node_days.first().copied().unwrap_or(o.birth)];
+    for k in 0..laid {
+        let node_age = t - o.node_days[k];
+        d = o.dirs[k];
+        normal = (normal - d * normal.dot(d)).normalize_or(perpendicular(d));
+        p += d * o.internodes[k] * hermite(node_age / tr.internode_days.max(1e-3));
+        g.points.push(p);
+        g.tangents.push(d);
+        g.normals.push(normal);
+        ages.push(node_age);
+    }
+    g.radii = (0..g.points.len())
+        .map(|k| radii.get(k).copied().unwrap_or(tr.tip_radius_m))
+        .collect();
+    if g.points.len() >= 2 {
+        let r0 = g.radii[0];
+        let sides = if r0 > 0.05 {
+            12
+        } else if r0 > 0.015 {
+            8
+        } else if r0 > 0.006 {
+            5
+        } else {
+            3
+        };
+        let sides = ((sides as f32 * detail).round() as u32).max(3);
+        let colors: Vec<Vec4> = ages
+            .iter()
+            .enumerate()
+            .map(|(k, &na)| {
+                let woody = smoothstep(0.0, tr.lignify_days.max(1.0), na);
+                // Still at the trunk's foot, swaying in the crown.
+                let sway = (g.points[k].y / 3.0).clamp(0.05, 1.0);
+                rgba(mix3(tr.color, tr.wood_color, woody), sway)
+            })
+            .collect();
+        stems.tube(
+            &g.points,
+            &g.radii,
+            sides,
+            1.0,
+            &|k, _| colors[k],
+            None,
+            Some(&|_| colors[colors.len() - 1]),
+        );
+    }
+    g
+}
+
 /// The outline of a blade: half-width (fraction of its widest) at `s` along it.
 fn outline(l: &Leaf, s: f32) -> f32 {
     let widest = l.widest.clamp(0.1, 0.9);
@@ -325,7 +453,8 @@ fn blade(
         0
     };
     let rows = ((14.0 * detail * small).round() as usize).max(3) + teeth;
-    let cols = 2usize; // vertices each side of the midrib, plus the midrib
+    // Vertices each side of the midrib, plus the midrib (one: a tree's plain far leaves).
+    let cols = if detail < 0.3 { 1usize } else { 2 };
     let side = dir.cross(up).normalize_or(perpendicular(dir));
     let up = side.cross(dir).normalize();
     let half_w = 0.5 * l.width * length;
@@ -415,7 +544,8 @@ fn leaf(
     }
     let stalk = rgba(mix3([0.20, 0.28, 0.07], color, 0.3), 1.0);
     let sides = if detail >= 0.75 { 4 } else { 3 };
-    if petiole > 0.002 {
+    // A short stalk on a plain leaf is too small to see.
+    if petiole > 0.002 && (detail >= 0.75 || petiole > 0.012) {
         out.stems
             .tube(&path, &radius, sides, 1.0, &|_, _| stalk, None, None);
     }

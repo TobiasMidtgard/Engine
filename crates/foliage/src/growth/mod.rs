@@ -23,6 +23,7 @@
 pub mod develop;
 pub mod graph;
 pub mod shape;
+pub mod tree;
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
@@ -34,16 +35,16 @@ use engine_render::{Image, Mesh, MeshRenderer, NoVirtualGeometry, StandardMateri
 
 pub use develop::Skeleton;
 pub use graph::{
-    Axis, AxisKind, Child, Flower, Fruit, Leaf, LeafKind, Node, Phyllotaxis, PlantGraph,
+    Axis, AxisKind, Child, Flower, Fruit, Leaf, LeafKind, Node, Phyllotaxis, PlantGraph, Tree,
 };
 pub use shape::{GrownMeshes, grow_meshes};
 
 use crate::assets::FoliageVisuals;
 use crate::species::PlantLibrary;
 
-/// The graphs that come with the engine: `strawberry`, `sapling`.
+/// The graphs that come with the engine: `strawberry`, `sapling`, `oak`.
 pub fn presets() -> Vec<PlantGraph> {
-    vec![strawberry(), sapling()]
+    vec![strawberry(), sapling(), oak()]
 }
 
 /// A built-in graph by name.
@@ -283,7 +284,7 @@ pub fn sapling() -> PlantGraph {
                     gravitropism: 0.5,
                     wander_deg: 6.0,
                     color: [0.20, 0.26, 0.07],
-                    wood_color: [0.26, 0.21, 0.16],
+                    wood_color: OAK_BARK,
                     lignify_days: 50.0,
                     children: vec![
                         Child {
@@ -315,7 +316,7 @@ pub fn sapling() -> PlantGraph {
                     wander_deg: 10.0,
                     sag: 0.25,
                     color: [0.20, 0.26, 0.07],
-                    wood_color: [0.26, 0.21, 0.16],
+                    wood_color: OAK_BARK,
                     lignify_days: 70.0,
                     life_days: 950.0,
                     children: vec![
@@ -348,7 +349,7 @@ pub fn sapling() -> PlantGraph {
                     wander_deg: 12.0,
                     sag: 0.2,
                     color: [0.22, 0.27, 0.08],
-                    wood_color: [0.28, 0.22, 0.16],
+                    wood_color: OAK_BARK,
                     lignify_days: 80.0,
                     life_days: 600.0,
                     children: vec![leaf_child(55.0)],
@@ -373,6 +374,64 @@ pub fn sapling() -> PlantGraph {
                     fade_days: 16.0,
                     color: [0.06, 0.17, 0.03],
                     old_color: [0.50, 0.32, 0.05],
+                }),
+            ),
+        ]),
+    }
+}
+
+/// The oak's bark color (linear; its bark texture is painted relative to it, so woody stems
+/// of this color show the texture as painted).
+const OAK_BARK: [f32; 3] = [0.144, 0.117, 0.091];
+
+/// A pedunculate oak (Quercus robur) from an acorn, grown 25 years by the light it finds
+/// ([`Tree`]): one spring flush a year of 30-50 cm on the leader (Colin et al. 2010), branches
+/// from the buds near each year's tip, lower limbs shed as the crown shades them, and lobed
+/// leaves on the new shoots from late April until they brown and fall in late October.
+pub fn oak() -> PlantGraph {
+    PlantGraph {
+        name: "oak".into(),
+        root: "tree".into(),
+        life_days: 24.0 * 365.0 + 300.0,
+        bark_species: Some("oak".into()),
+        nodes: nodes(vec![
+            (
+                "tree",
+                Node::Tree(Tree {
+                    years: 25,
+                    // An open-grown oak: limbs spread out low and wide, side light reaches
+                    // the lower crown, and leafy spurs fill it (foliage-research.md, 10).
+                    light_seeking: 0.12,
+                    plagiotropism: 0.14,
+                    shadow_spread: 0.5,
+                    shed_light: 0.06,
+                    leaves_per_node: 8,
+                    leaf_years: 6,
+                    spur_vigor: 0.2,
+                    wander_deg: 12.0,
+                    wood_color: OAK_BARK,
+                    leaf: Some("leaf".into()),
+                    ..Default::default()
+                }),
+            ),
+            (
+                "leaf",
+                Node::Leaf(Leaf {
+                    kind: LeafKind::Simple,
+                    petiole_m: (0.004, 0.009),
+                    petiole_radius_m: 0.0012,
+                    blade_m: (0.10, 0.16),
+                    width: 0.55,
+                    widest: 0.6,
+                    teeth: 5,
+                    tooth_depth: 0.38,
+                    droop: 0.25,
+                    grow_days: 18.0,
+                    unfold: 0.3,
+                    senesce_days: 175.0,
+                    fade_days: 20.0,
+                    color: [0.05, 0.15, 0.03],
+                    old_color: [0.42, 0.24, 0.06],
                 }),
             ),
         ]),

@@ -7,7 +7,10 @@
 //! Shots: `strawberry_row` (one strawberry at eight ages side by side, seedling to ripe
 //! berries and runners), `strawberry` (a grown plant up close), `berries` (the fruit up
 //! close), `sapling_row` (a sapling at five ages over three years), `sapling` (the three-year-old), `film` (frames of one
-//! strawberry growing, `film/NNNNN.png`; `LOOKDEV_FRAMES` frames, default 120, over 130 days).
+//! strawberry growing, `film/NNNNN.png`; `LOOKDEV_FRAMES` frames, default 120, over 130 days),
+//! `oak_row` (an oak at six ages, 2 to 24 years, in midsummer), `oak` (the 24-year-old, and from
+//! under its crown), `oak_seasons` (a 20-year-old in spring, summer, autumn and winter) and
+//! `oak_film` (an oak growing from an acorn for 25 years, `oak_film/NNNNN.png`, 300 frames).
 //! 1280x720 unless `LOOKDEV_SIZE=WxH`.
 
 use engine_core::prelude::*;
@@ -156,6 +159,33 @@ fn main() {
     }
     // A plant for the film, on its own.
     let film_at = DVec3::new(0.0, 0.0, -40.0);
+    // Oaks grown from the light-seeking tree node: six ages in midsummer, 16 m apart, and one
+    // 20-year-old tree in each season, far off on their own.
+    let oaks = DVec3::new(0.0, 0.0, 150.0);
+    let oak_years = [2.0, 5.0, 9.0, 14.0, 19.0, 24.0];
+    if wanted("oak_row") || wanted("oak") {
+        for (i, &y) in oak_years.iter().enumerate() {
+            spawn(
+                &mut app,
+                oaks + DVec3::new(i as f64 * 16.0, 0.0, 0.0),
+                "oak",
+                3,
+                y * 365.0 + 200.0,
+            );
+        }
+    }
+    let seasons = DVec3::new(0.0, 0.0, 300.0);
+    if wanted("oak_seasons") {
+        for (i, &day) in [140.0, 200.0, 304.0, 345.0].iter().enumerate() {
+            spawn(
+                &mut app,
+                seasons + DVec3::new(i as f64 * 16.0, 0.0, 0.0),
+                "oak",
+                3,
+                19.0 * 365.0 + day,
+            );
+        }
+    }
 
     if wanted("strawberry_row") {
         shot(
@@ -209,6 +239,71 @@ fn main() {
             p + DVec3::new(0.0, 1.3, 0.0),
             sun,
         );
+    }
+    if wanted("oak_row") {
+        shot(
+            &mut app,
+            &out,
+            "oak_row",
+            oaks + DVec3::new(40.0, 7.0, 72.0),
+            oaks + DVec3::new(40.0, 5.0, 0.0),
+            sun,
+        );
+    }
+    if wanted("oak") {
+        let p = oaks + DVec3::new(80.0, 0.0, 0.0);
+        shot(
+            &mut app,
+            &out,
+            "oak",
+            p + DVec3::new(9.0, 3.0, 22.0),
+            p + DVec3::new(0.0, 6.5, 0.0),
+            sun,
+        );
+        shot(
+            &mut app,
+            &out,
+            "oak_under",
+            p + DVec3::new(2.5, 1.6, 4.0),
+            p + DVec3::new(0.0, 5.0, 0.0),
+            sun,
+        );
+    }
+    if wanted("oak_seasons") {
+        shot(
+            &mut app,
+            &out,
+            "oak_seasons",
+            seasons + DVec3::new(24.0, 6.0, 52.0),
+            seasons + DVec3::new(24.0, 5.0, 0.0),
+            sun,
+        );
+    }
+    if wanted("oak_film") {
+        let frames: u32 = std::env::var("LOOKDEV_FRAMES")
+            .ok()
+            .and_then(|f| f.parse().ok())
+            .unwrap_or(300);
+        let at = DVec3::new(0.0, 0.0, -400.0);
+        let plant = spawn(&mut app, at, "oak", 3, 0.0);
+        std::fs::create_dir_all(format!("{out}/oak_film")).expect("film directory");
+        set_sun(&mut app.world, sun);
+        for f in 0..frames {
+            let u = f as f64 / (frames.max(2) - 1) as f64;
+            let age = (60.0 + (24.0 * 365.0 + 240.0) * u) as f32;
+            app.world.get_mut::<GrowingPlant>(plant).unwrap().age_days = age;
+            // The camera backs away and rises as the tree grows, circling a quarter turn.
+            let h = (age / 365.0 * 0.58 + 0.4) as f64;
+            let a = 0.4 + 1.2 * u;
+            let d = 1.2 + h * 1.9;
+            let eye = at + DVec3::new(a.cos() * d, 0.3 + h * 0.35, a.sin() * d);
+            aim(&mut app.world, eye, at + DVec3::new(0.0, h * 0.5, 0.0));
+            capture(
+                &mut app,
+                &format!("{out}/oak_film/{f:05}.png"),
+                if f == 0 { 12 } else { 1 },
+            );
+        }
     }
     if wanted("film") {
         let frames: u32 = std::env::var("LOOKDEV_FRAMES")

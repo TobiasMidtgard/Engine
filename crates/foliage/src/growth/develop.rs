@@ -37,6 +37,11 @@ pub struct Organ {
     /// angles, radians).
     pub internodes: Vec<f32>,
     pub bends: Vec<(f32, f32)>,
+    /// A tree's shoots ([`super::graph::Tree`]): each internode's direction (set by the light
+    /// it grew toward, not by the generator's bends) and the day its node was laid (shoots
+    /// grow in spring flushes over many years). Empty for other axes.
+    pub dirs: Vec<engine_core::math::Vec3>,
+    pub node_days: Vec<f32>,
 }
 
 /// Every organ a plant grows, parents before their children.
@@ -50,7 +55,7 @@ pub struct Skeleton {
     pub life_days: f32,
 }
 
-fn mix_seed(seed: u64, a: u64) -> u64 {
+pub(super) fn mix_seed(seed: u64, a: u64) -> u64 {
     let mut x = seed ^ a.wrapping_mul(0x9e37_79b9_7f4a_7c15);
     x ^= x >> 30;
     x = x.wrapping_mul(0xbf58_476d_1ce4_e5b9);
@@ -86,6 +91,10 @@ impl Skeleton {
         let Some(root) = index(&graph.root) else {
             return sk;
         };
+        if let Some(Node::Tree(tree)) = graph.nodes.get(&graph.root) {
+            super::tree::develop(graph, tree, root, seed, &mut sk);
+            return sk;
+        }
         // Breadth-first by spawn order, so parents always come first.
         let mut queue = std::collections::VecDeque::new();
         queue.push_back(Spawn {
@@ -121,6 +130,8 @@ impl Skeleton {
                 depth: s.depth,
                 internodes: Vec::new(),
                 bends: Vec::new(),
+                dirs: Vec::new(),
+                node_days: Vec::new(),
             };
             match generator {
                 Node::Axis(a) => {
@@ -235,6 +246,8 @@ impl Skeleton {
                         organ.death = s.birth + f.ripe_days + f.drop_days;
                     }
                 }
+                // Only ever the root (validated), developed above.
+                Node::Tree(_) => {}
             }
             sk.organs.push(organ);
             sk.children.push(Vec::new());
