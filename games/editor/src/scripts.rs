@@ -96,6 +96,8 @@ fn hold_scripts(world: &mut World) {
         (true, false) => {
             world.insert_resource(ScriptsHeld);
             world.remove_resource::<ScriptRuntime>();
+            // Their conversations went with the VMs.
+            crate::story::reset(world);
             // Stopped at a breakpoint: the world's time was held for it.
             debug::release_time(world);
         }
@@ -643,8 +645,8 @@ fn poll(world: &mut World, editor: &Editor, tab: &mut ScriptsTab, now: f64) {
     }
 }
 
-/// Every `.luau`/`.lua` file under `dir`, relative to `root` (the generated type definitions
-/// left out).
+/// Every `.luau`/`.lua` file under `dir`, and every conversation (`.yarn`) and quest
+/// (`.quest`), relative to `root` (the generated type definitions left out).
 fn list_files(root: &Path, dir: &Path, out: &mut Vec<String>) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
@@ -653,7 +655,9 @@ fn list_files(root: &Path, dir: &Path, out: &mut Vec<String>) {
         let path = entry.path();
         if path.is_dir() {
             list_files(root, &path, out);
-        } else if path.extension().is_some_and(|e| e == "luau" || e == "lua")
+        } else if path
+            .extension()
+            .is_some_and(|e| e == "luau" || e == "lua" || e == "yarn" || e == "quest")
             && !path.to_string_lossy().ends_with(".d.luau")
             && let Ok(rel) = path.strip_prefix(root)
         {
@@ -878,7 +882,13 @@ fn sidebar(
         .id_salt("script functions")
         .auto_shrink([false, false])
         .show(ui, |ui| {
-            for f in functions(&doc.text) {
+            let yarn = doc.path.ends_with(".yarn");
+            let rows = if yarn {
+                yarn_nodes(&doc.text)
+            } else {
+                functions(&doc.text)
+            };
+            for f in rows {
                 if !filter.is_empty() && !f.label.to_lowercase().contains(&filter) {
                     continue;
                 }
@@ -886,7 +896,9 @@ fn sidebar(
                 let text = RichText::new(&f.label).monospace().color(color);
                 let r = ui
                     .add(egui::Button::selectable(false, text))
-                    .on_hover_text(if f.hook {
+                    .on_hover_text(if yarn {
+                        "A node (the Story tab draws them as a map)"
+                    } else if f.hook {
                         "A hook: the engine calls it"
                     } else {
                         "Your function"
@@ -989,6 +1001,33 @@ struct Function {
     line: usize,
     label: String,
     hook: bool,
+}
+
+/// A conversation's nodes: `Start`, `Start (when: once)`; the start node as a hook.
+fn yarn_nodes(text: &str) -> Vec<Function> {
+    let mut out: Vec<Function> = Vec::new();
+    let mut header = true;
+    for (i, line) in text.lines().enumerate() {
+        let t = line.trim();
+        if t == "---" {
+            header = false;
+        } else if t == "===" {
+            header = true;
+        } else if header && let Some(title) = t.strip_prefix("title:") {
+            let title = title.trim();
+            out.push(Function {
+                line: i,
+                label: title.to_string(),
+                hook: title == "Start",
+            });
+        } else if header
+            && let Some(when) = t.strip_prefix("when:")
+            && let Some(last) = out.last_mut()
+        {
+            last.label = format!("{} (when: {})", last.label, when.trim());
+        }
+    }
+    out
 }
 
 /// The functions a file defines: `Lamp:update`, `wave.bob`, `local helper`.
@@ -1420,7 +1459,7 @@ fn code_view(ui: &mut egui::Ui, world: &mut World, tab: &mut ScriptsTab, now: f6
     let dbg = &mut tab.debug;
     let types = &mut tab.types;
     if doc.checked != doc.text {
-        doc.syntax = editing::check(&doc.text);
+        doc.syntax = check_text(&doc.path, &doc.text);
         doc.checked = doc.text.clone();
     }
     let mut jump_line = None;
@@ -1462,8 +1501,14 @@ fn code_view(ui: &mut egui::Ui, world: &mut World, tab: &mut ScriptsTab, now: f6
         };
     let test_notes = test_notes(&tab.tests, &doc.path);
     let mut run_test = None;
+    let luau = is_luau(&doc.path);
+    let yarn = doc.path.ends_with(".yarn");
     let mut layouter = |ui: &egui::Ui, buf: &dyn egui::TextBuffer, _wrap: f32| {
-        let job = highlight(buf.as_str(), &font, &vocab, find.as_deref());
+        let job = if yarn {
+            crate::story::highlight_yarn(buf.as_str(), &font, find.as_deref())
+        } else {
+            highlight(buf.as_str(), &font, &vocab, find.as_deref())
+        };
         ui.fonts_mut(|f| f.layout_job(job))
     };
     let mut output = None;
@@ -1545,7 +1590,11 @@ fn code_view(ui: &mut egui::Ui, world: &mut World, tab: &mut ScriptsTab, now: f6
                 tab.drawn_at.insert(key, r.with_max_x(r.left()));
             }
         }
-        let lints = lints(&doc.text, &vocab);
+        let lints = if luau {
+            lints(&doc.text, &vocab)
+        } else {
+            Vec::new()
+        };
         let shown = shown_problems(doc, types, &lints);
         paint_notes(
             ui,
@@ -1590,7 +1639,7 @@ fn code_view(ui: &mut egui::Ui, world: &mut World, tab: &mut ScriptsTab, now: f6
                 })
                 .cloned()
                 .collect();
-            let word = word_cols(&doc.text, line, col);
+            let word = word_cols(&doc.text, line, col).filter(|_| luau);
             if let Some((a, _)) = word {
                 let key = (doc.path.clone(), line, a);
                 if types.hover_asked.as_ref() != Some(&key) {
@@ -1717,8 +1766,8 @@ fn code_view(ui: &mut egui::Ui, world: &mut World, tab: &mut ScriptsTab, now: f6
     // Completion: opened by typing a word, `.`, `:` or a component's quote; Ctrl+Space. After
     // `.`/`:` on a value completion's word list doesn't know (`self.props.`, `target:`), the
     // checker's members, typed.
-    let typed = changed && moved;
-    if typed || tab.complete_now {
+    let typed = changed && moved && luau;
+    if typed || (tab.complete_now && luau) {
         let explicit = std::mem::take(&mut tab.complete_now);
         tab.completion = complete(&doc.text, caret, &vocab, explicit);
         if let Some(start) = typed_member_at(&doc.text, caret, &vocab) {
@@ -1762,7 +1811,7 @@ fn code_view(ui: &mut egui::Ui, world: &mut World, tab: &mut ScriptsTab, now: f6
         }
     }
     // The call the caret is in: its parameters over the line.
-    if changed || moved {
+    if luau && (changed || moved) {
         if in_call(&doc.text, caret) {
             let (line, col) = line_col(&doc.text, caret);
             let key = (doc.path.clone(), line, col);
@@ -2552,6 +2601,9 @@ fn first_problem(doc: &Doc, vocab: Option<&Vocab>) -> Option<(u32, String)> {
         };
         return Some((f.line.unwrap_or(1), format!("{}{count}", f.message)));
     }
+    if !is_luau(&doc.path) {
+        return None;
+    }
     let lint = lints(&doc.text, vocab?).into_iter().next()?;
     Some((lint.line as u32 + 1, lint.message))
 }
@@ -3257,7 +3309,7 @@ fn types_poll(world: &mut World, tab: &mut ScriptsTab, now: f64) {
     if t.checker.is_none() {
         return;
     }
-    for doc in &tab.docs {
+    for doc in tab.docs.iter().filter(|d| is_luau(&d.path)) {
         if t.sent.get(&doc.path) != Some(&doc.text) {
             t.sent.insert(doc.path.clone(), doc.text.clone());
             t.ask(&doc.path, Some(&doc.text), Ask::Check);
@@ -3276,7 +3328,7 @@ fn types_poll(world: &mut World, tab: &mut ScriptsTab, now: f64) {
     if now >= t.disk_next && !tab.files.is_empty() {
         t.disk_next = now + FILES_SECS;
         let root = engine_script::scripts_root(world);
-        for f in &tab.files {
+        for f in tab.files.iter().filter(|f| is_luau(&f.path)) {
             let stamp = modified(&root.join(&f.path));
             if t.disk.get(&f.path) == Some(&stamp) {
                 continue;
@@ -4525,8 +4577,24 @@ fn follow_debugger(world: &mut World) {
 
 /// A frame's file the editor can show (not the engine's own Luau, nor the command bar's).
 fn openable(path: &str) -> bool {
-    (path.ends_with(".luau") || path.ends_with(".lua") || path.ends_with(".graph"))
+    (is_luau(path) || path.ends_with(".graph") || path.ends_with(".yarn"))
         && !path.starts_with("engine/")
+}
+
+/// Luau, which the type checker, lints and completion know (not a conversation or a quest).
+fn is_luau(path: &str) -> bool {
+    path.ends_with(".luau") || path.ends_with(".lua")
+}
+
+/// The compile check for a file of each kind: Luau's, a conversation's, a quest's.
+fn check_text(path: &str, text: &str) -> Option<(u32, String)> {
+    if path.ends_with(".yarn") {
+        engine_script::story::check_yarn(text, path)
+    } else if path.ends_with(".quest") {
+        engine_script::story::check_quest(text)
+    } else {
+        editing::check(text)
+    }
 }
 
 /// "Paused at a breakpoint in Lamp:update (lamp.luau:27)".
@@ -9614,6 +9682,209 @@ pub fn cutscenes_shots(dir: String) -> ShotScript {
         Step::Shot("cutscenes_07_bridge_cut"),
     ];
     ShotScript::new(dir, steps)
+}
+
+/// Where the story shots put the keeper: beside the rune seal ([`SEAL_AT`]), turned to where
+/// the player stands.
+const STORY_KEEPER_AT: DVec3 = DVec3::new(2.5, 0.0, -0.6);
+const STORY_PLAYER_AT: DVec3 = DVec3::new(0.9, 0.88, 1.6);
+
+/// Screenshots of conversations and quests (`--script story`): the keeper's conversation
+/// (dialogue/keeper.yarn) as a map in the Story tab; talked to in the game, its node lit and
+/// its options beside it; the quest it gives following the seal's runes by itself; the thanks
+/// once the door is open; a node played a line at a time; the file in the Scripts tab.
+pub fn story_shots(dir: String) -> ShotScript {
+    let _ = std::fs::create_dir_all(&dir);
+    let root = std::fs::canonicalize(&dir)
+        .unwrap_or_else(|_| std::env::current_dir().unwrap_or_default().join(&dir))
+        .join("scripts");
+    let setup = move |world: &mut World, editor: &mut Editor| {
+        dusk_sky(world);
+        let scripts = engine_script::scripts_root(world);
+        for folder in [EXAMPLES, "dialogue", "quests", "cutscenes", "curves"] {
+            copy_dir(&scripts.join(folder), &root.join(folder));
+        }
+        world.resource_mut::<ScriptSettings>().folder = root.to_string_lossy().to_string();
+        world.remove_resource::<ScriptRuntime>();
+        let _ = call_api(world, "story.quests", json!({"reset": true}));
+        editor::spawn_with(
+            world,
+            editor,
+            "Seal".into(),
+            vec![(
+                "Script",
+                serde_json::to_value(Script::new("examples/seal.luau")).unwrap_or_default(),
+            )],
+            Transform::from_translation(SEAL_AT),
+        );
+        editor::spawn_with(
+            world,
+            editor,
+            "Keeper".into(),
+            vec![
+                (
+                    "Script",
+                    serde_json::to_value(Script::new("examples/keeper.luau")).unwrap_or_default(),
+                ),
+                (
+                    "Interactable",
+                    json!({"verb": "Talk", "reach_m": 2.6, "offset": [0.0, 1.5, 0.0], "enabled": true}),
+                ),
+            ],
+            Transform::from_translation(STORY_KEEPER_AT)
+                .with_rotation(engine::core::math::Quat::from_rotation_y(-0.45)),
+        );
+        let body = MeshRenderer::new(
+            Shape::Capsule {
+                radius: 0.3,
+                height: 1.2,
+                segments: 0,
+            },
+            StandardMaterial::hex(0x3d6fb6),
+        );
+        editor::spawn_with(
+            world,
+            editor,
+            "Player".into(),
+            vec![(
+                "MeshRenderer",
+                serde_json::to_value(body).unwrap_or_default(),
+            )],
+            Transform::from_translation(STORY_PLAYER_AT),
+        );
+        world.resource_mut::<EditorDock>().0 = story_layout();
+        crate::story::open(world, "dialogue/keeper");
+    };
+    // E on `target` (a scene entity or a part, by name), by the player.
+    let press = |target: &'static str| {
+        move |world: &mut World, _: &mut Editor| {
+            let named = |world: &mut World, name: &str| {
+                let mut q = world.query::<(Entity, &Name)>();
+                q.iter(world)
+                    .find(|(_, n)| n.as_str() == name)
+                    .map(|(e, _)| e)
+            };
+            let (Some(target), Some(actor)) =
+                (named(world, target), crate::shots::find(world, "Player"))
+            else {
+                return;
+            };
+            let from = world
+                .get::<Transform>(actor)
+                .map_or(DVec3::ZERO, |t| t.translation);
+            world.write_message(engine::world::Interact {
+                actor,
+                target,
+                from,
+            });
+        }
+    };
+    // A click on something the Story tab drew ("option 2", "talk", "node Lore").
+    let click = |what: &'static str| {
+        move |world: &mut World, _: &mut Editor| {
+            let Some(r) = world
+                .get_resource::<crate::story::StoryTab>()
+                .and_then(|t| t.drawn_at.get(what).copied())
+            else {
+                engine::core::log::warn!("story shots: nothing drawn as {what}");
+                return;
+            };
+            let at = r.center();
+            let input = &mut world
+                .resource_mut::<crate::egui_bridge::EguiInput>()
+                .injected;
+            input.push(egui::Event::PointerMoved(at));
+            for pressed in [true, false] {
+                input.push(egui::Event::PointerButton {
+                    pos: at,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: Modifiers::NONE,
+                });
+            }
+        }
+    };
+    let play = |world: &mut World, ed: &mut Editor| editor::play(world, ed);
+    let steps = vec![
+        Step::Do(Box::new(setup)),
+        Step::Tool(crate::editor::Tool::Select),
+        Step::Select("Keeper"),
+        Step::Camera(DVec3::new(2.3, 2.3, 6.4), DVec3::new(1.0, 1.15, -1.2)),
+        Step::Wait(20),
+        // Before Play: the conversation's nodes, where each goes, the quest not started.
+        Step::Shot("story_01_map"),
+        Step::Do(Box::new(play)),
+        Step::Wait(6),
+        Step::Do(Box::new(|world: &mut World, _: &mut Editor| {
+            dusk_sky(world)
+        })),
+        Step::Select(""),
+        Step::Wait(2),
+        // Talk (E): the first meeting's node of the Start group, its lines, its options.
+        Step::Do(Box::new(press("Keeper"))),
+        Step::Wait(6),
+        Step::Shot("story_02_talking"),
+        // "Can it be opened?": Offer; <<raise_staff>> holds the conversation while it plays.
+        Step::Do(Box::new(click("option 2"))),
+        Step::Wait(4),
+        Step::Shot("story_03_raise_staff"),
+        Step::Wait(14),
+        // The quest it gave follows the runes by itself: two touched, 2 of 3.
+        Step::Do(Box::new(press("Left rune"))),
+        Step::Wait(3),
+        Step::Do(Box::new(press("Right rune"))),
+        Step::Wait(8),
+        Step::Shot("story_04_quest_follows_the_runes"),
+        // The last rune: the door sinks; back to the keeper, whose open-door node thanks you,
+        // and that ends the quest.
+        Step::Do(Box::new(press("Middle rune"))),
+        Step::Wait(16),
+        Step::Do(Box::new(press("Keeper"))),
+        Step::Wait(8),
+        Step::Shot("story_05_door_open_quest_done"),
+        Step::Do(Box::new(click("option 2"))),
+        Step::Wait(4),
+        // ▶ Talk from Lore: the node played a line at a time (Continue), from the tab.
+        Step::Do(Box::new(click("node Lore"))),
+        Step::Wait(2),
+        Step::Do(Box::new(click("talk"))),
+        Step::Wait(3),
+        Step::Do(Box::new(click("continue"))),
+        Step::Wait(3),
+        Step::Shot("story_06_a_line_at_a_time"),
+        // The file in the Scripts tab, its nodes listed; a jump to a node that isn't there.
+        Step::Do(Box::new(|world: &mut World, ed: &mut Editor| {
+            editor::stop(world, ed);
+            world.resource_mut::<EditorDock>().0 = story_text_layout();
+            world.resource_scope(|world, mut tab: Mut<ScriptsTab>| {
+                open(world, &mut tab, "dialogue/keeper.yarn", Some(36));
+                let i = tab.current;
+                if let Some(doc) = tab.docs.get_mut(i) {
+                    doc.text = doc.text.replacen("<<jump Offer>>", "<<jump Ofer>>", 1);
+                }
+            });
+        })),
+        Step::Wait(8),
+        Step::Shot("story_07_yarn_in_scripts"),
+    ];
+    ShotScript::new(dir, steps)
+}
+
+/// The story shots' layout: the Story tab left at full height, the game over Details right.
+fn story_layout() -> DockState<Tab> {
+    let mut dock = DockState::new(vec![Tab::Story, Tab::Scripts]);
+    let surface = dock.main_surface_mut();
+    let [_story, right] = surface.split_right(NodeIndex::root(), 0.64, vec![Tab::Viewport]);
+    let [_view, _details] = surface.split_below(right, 0.6, vec![Tab::Inspector]);
+    dock
+}
+
+/// The Scripts tab wide with the Story tab beside it.
+fn story_text_layout() -> DockState<Tab> {
+    let mut dock = DockState::new(vec![Tab::Scripts]);
+    let surface = dock.main_surface_mut();
+    let [_scripts, _story] = surface.split_right(NodeIndex::root(), 0.52, vec![Tab::Story]);
+    dock
 }
 
 /// The Sequencer shots' layout: the scene view over the Sequencer (the Curves tab behind it).

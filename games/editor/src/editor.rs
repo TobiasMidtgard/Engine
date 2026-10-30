@@ -59,6 +59,7 @@ pub enum Tab {
     Rewind,
     Curves,
     Sequencer,
+    Story,
 }
 
 /// A message in the console.

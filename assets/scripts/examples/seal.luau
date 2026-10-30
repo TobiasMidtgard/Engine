@@ -177,6 +177,10 @@ function Seal:update(_dt: number)
 	end
 	local moving = self:in_state("opening") or self:in_state("closing")
 	local key = lit + (if moving then 10 elseif self:in_state("open") then 20 else 0)
+	-- The story's fact: the keeper's conversation and its quest follow it.
+	if lit ~= self.runes_lit then
+		facts.runes_lit = lit
+	end
 	self.runes_lit = lit
 	if key == self._shown then
 		return
@@ -210,6 +214,7 @@ end
 -- The states' own work: the door moves; the runes come from the regions.
 
 function Seal:enter_opening()
+	facts.seal_opened = true
 	self:move_to(1)
 end
 

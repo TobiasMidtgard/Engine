@@ -1,0 +1,82 @@
+// The keeper of the rune seal (examples/keeper.luau talks from this file). Yarn Spinner's
+// language: `Name: line`, `-> option`, `<<command>>`, $facts. The seal's script sets
+// $runes_lit and $seal_opened, so the keeper knows how far you are; the quest it gives
+// (quests/sealed_bridge.quest) follows the same facts. See "Story" in the scripts README.
+
+title: Start
+when: $seal_opened
+position: 0,540
+---
+<<bow>>
+Keeper: The door stands open. Listen... the crystal sings again.
+<<once>>
+    Keeper: A hundred winters I kept that seal. I had forgotten what the light looked like.
+    <<set $keeper_thanked to true>>
+    -> What now?
+        Keeper: Now the way across is ours. Watch.
+        <<cutscene cutscenes/courtyard>>
+        Keeper: Go well, traveller. The courtyard will remember you.
+    -> I should go.
+        Keeper: Then go with the light at your back.
+<<else>>
+    => Keeper: Every lantern burns a little brighter tonight.
+    => Keeper: The herald has not flown so high since I was young.
+    => Keeper: You again. The runes still hum your name. <<if visited_count("Start") > 3>>
+<<endonce>>
+===
+
+title: Start
+when: once
+position: 0,0
+---
+<<bow>>
+Keeper: Ah. A traveller, and at this hour.
+Keeper: I keep the seal. Three runes, one door, and a hundred winters since anyone opened it.
+-> Who sealed it?
+    <<jump Lore>>
+-> Can it be opened?
+    <<jump Offer>>
+-> I'll leave you to it.
+    Keeper: Most do. The door does not mind.
+===
+
+title: Start
+when: always
+position: 0,280
+---
+=> Keeper: Back again?
+=> Keeper: {$runes_lit} of three. The seal is listening. <<if $runes_lit > 0>>
+=> Keeper: The drone has been watching you. Mind its light. <<if quest_active("sealed_bridge")>>
+-> Tell me about the seal again.
+    <<jump Lore>>
+-> I'll try the runes. <<if quest_state("sealed_bridge") == "inactive">>
+    <<jump Offer>>
+-> Nothing. Goodbye.
+===
+
+title: Lore
+position: 440,0
+---
+Keeper: Those who built this courtyard were afraid of what sleeps behind that door.
+Keeper: Or of who would come looking for it. The old songs disagree.
+Keeper: Each rune answers a touch: the left stone, the right, and the plate in the floor.
+-> And if all three are lit?
+    Keeper: Then the seal lets go. That is all a seal is: a promise kept until it is not.
+    <<if quest_state("sealed_bridge") == "inactive">>
+        <<jump Offer>>
+    <<endif>>
+-> Enough stories.
+===
+
+title: Offer
+position: 440,300
+---
+<<if quest_active("sealed_bridge")>>
+    Keeper: You carry the task already. {$runes_lit} of three, so far.
+    <<stop>>
+<<endif>>
+Keeper: Then the seal is yours to try.
+<<raise_staff>>
+<<quest start sealed_bridge>>
+Keeper: Touch each rune. When the door sinks, come and tell me what you saw.
+===

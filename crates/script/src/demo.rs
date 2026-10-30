@@ -121,6 +121,13 @@ pub const SEAL_SCRIPT: &str = "examples/seal.luau";
 /// The seal's state board, on an easel south of it, turned to the middle and a little north.
 pub const SEAL_BOARD: [f64; 3] = [8.8, 2.0, 5.0];
 pub const SEAL_BOARD_YAW: f32 = -std::f32::consts::FRAC_PI_2 - 0.25;
+/// The keeper of the seal (`examples/keeper.luau`): it talks from `dialogue/keeper.yarn` and
+/// gives the quest `quests/sealed_bridge.quest`. South-west of the seal by a brazier, facing
+/// the seal, out of the seal stops' views.
+pub const KEEPER: [f64; 3] = [5.6, 0.0, 3.6];
+pub const KEEPER_YAW: f32 = 2.47;
+pub const KEEPER_NAME: &str = "Keeper";
+pub const KEEPER_SCRIPT: &str = "examples/keeper.luau";
 /// The drawbridge (`examples/drawbridge.luau`): its hinge, between the lanterns at 90 and 120
 /// degrees, and its turn (the deck lowers toward the middle).
 pub const BRIDGE: [f64; 3] = [-2.69, 0.0, 10.05];
@@ -261,6 +268,35 @@ pub const SEAL_ALL: (&str, &str) = (
     "script.eval",
     r#"{"code": "local s = world.find('Rune seal').script s:go('sealed') s:place(0) s:trigger('touch_left') s:trigger('touch_right') s:trigger('touch_middle')"}"#,
 );
+
+/// The story from the start: no facts, every quest inactive.
+pub const STORY_FRESH: [(&str, &str); 2] = [
+    ("story.facts", r#"{"clear": true}"#),
+    ("story.quests", r#"{"reset": true}"#),
+];
+/// Talking to the keeper as E would; three presses of Space (the first line's typing shown
+/// whole, the second line, its typing) leave its options on screen.
+pub const KEEPER_TALK: [(&str, &str); 4] = [
+    (
+        "story.start",
+        r#"{"path": "dialogue/keeper", "owner": "Keeper"}"#,
+    ),
+    ("dialogue.next", "{}"),
+    ("dialogue.next", "{}"),
+    ("dialogue.next", "{}"),
+];
+pub const KEEPER_BYE: [(&str, &str); 2] = [
+    ("story.stop", "{}"),
+    ("ui.hide", r#"{"screen": "dialogue", "instant": true}"#),
+];
+/// The keeper's quest taken, its tracker on the HUD.
+pub const QUEST_TAKEN: [(&str, &str); 2] = [
+    (
+        "story.quests",
+        r#"{"reset": true, "start": "sealed_bridge"}"#,
+    ),
+    ("ui.show", r#"{"screen": "hud", "instant": true}"#),
+];
 
 /// The drawbridge from the top: raised at once, then lowered as E would, so a stop shows the
 /// same moment each time.
@@ -559,6 +595,54 @@ pub const VIEWS: &[DemoView] = &[
         warmup_secs: 3.0,
         on_arrive: &[CINEMATIC_FROM_BRIDGE],
         on_leave: &[CINEMATIC_STOP],
+    },
+    DemoView {
+        key: "script_story_talk",
+        name: "Talking to the keeper: its conversation is a Yarn file (dialogue/keeper.yarn), \
+               the first meeting's node of its Start group, the keeper bowing as it begins",
+        // Between the keeper and the seal, outside the wisps' ring, a little off its front:
+        // the brazier behind it.
+        eye: [7.8, 1.7 + LIFT, 2.3],
+        target: [5.6, 1.2 + LIFT, 3.6],
+        hour: 18.9,
+        warmup_secs: 2.0,
+        on_arrive: &[
+            STORY_FRESH[0],
+            STORY_FRESH[1],
+            KEEPER_TALK[0],
+            KEEPER_TALK[1],
+            KEEPER_TALK[2],
+            KEEPER_TALK[3],
+        ],
+        on_leave: &[KEEPER_BYE[0], KEEPER_BYE[1]],
+    },
+    DemoView {
+        key: "script_story_quest",
+        name: "The keeper's quest follows the facts by itself: the seal's script sets \
+               $runes_lit, so two runes touched read 2 of 3 on the HUD's tracker",
+        eye: [6.0, 1.9 + LIFT, -3.2],
+        target: [9.4, 1.4 + LIFT, 0.3],
+        hour: 18.9,
+        warmup_secs: 1.6,
+        on_arrive: &[STORY_FRESH[0], QUEST_TAKEN[0], SEAL_TWO, QUEST_TAKEN[1]],
+        on_leave: &[],
+    },
+    DemoView {
+        key: "script_story_journal",
+        name: "The quest in the journal: its giver, its objectives and their progress, kept \
+               up to date from the same facts",
+        eye: [6.0, 1.9 + LIFT, -3.2],
+        target: [9.4, 1.4 + LIFT, 0.3],
+        hour: 18.9,
+        warmup_secs: 1.2,
+        on_arrive: &[(
+            "ui.show",
+            r#"{"screen": "journal", "select": "sealed_bridge"}"#,
+        )],
+        on_leave: &[
+            ("ui.hide", r#"{"screen": "journal", "instant": true}"#),
+            ("ui.hide", r#"{"screen": "hud", "instant": true}"#),
+        ],
     },
     DemoView {
         key: "script_paused",
@@ -925,6 +1009,19 @@ pub fn spawn_demo(commands: &mut Commands, origin: DVec3) {
         Script::new(SEAL_SCRIPT),
     ));
     state_easel(commands, &at, SEAL_BOARD, SEAL_BOARD_YAW, SEAL_NAME);
+    // Its keeper, who talks (Yarn dialogue) and gives the quest to open it.
+    let [kx, _, kz] = KEEPER;
+    commands.spawn((
+        Name::new(KEEPER_NAME),
+        at(kx, 0.0, kz).with_rotation(Quat::from_rotation_y(KEEPER_YAW)),
+        Interactable {
+            verb: "Talk".into(),
+            reach_m: 2.6,
+            offset: Vec3::new(0.0, 1.5, 0.0),
+            ..Default::default()
+        },
+        Script::new(KEEPER_SCRIPT),
+    ));
     // The drawbridge, built by its script and run by its timeline.
     let [bx, _, bz] = BRIDGE;
     commands.spawn((

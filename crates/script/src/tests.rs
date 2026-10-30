@@ -5063,3 +5063,288 @@ fn the_shipped_cutscenes_read_back_as_the_editor_writes_them() {
         );
     }
 }
+
+// ------------------------------------------------------------------------------- story
+
+const GUIDE_YARN: &str = r#"title: Start
+when: once
+---
+<<declare $gold = 5>>
+Guide: Hello, {$name}. You have {$gold} gold.
+<<wave 2>>
+-> Buy a map (3 gold) <<if $gold >= 3>>
+    <<set $gold -= 3>>
+    <<set $has_map to true>>
+    Guide: Here you are.
+-> Ask the way
+    <<detour Way>>
+    Guide: Anything else?
+-> Rob me <<if $gold > 100>>
+-> Leave
+    <<stop>>
+Guide: Safe travels.
+<<shout "bye now" 2>>
+===
+title: Start
+when: always
+---
+=> Guide: Back so soon?
+=> Guide: Map treating you well? <<if $has_map>>
+<<wait 0.5>>
+Guide: Off you go.
+===
+title: Way
+---
+Guide: North, past the seal.
+<<return>>
+Guide: (never said)
+===
+title: Broken
+---
+Guide: Fine so far.
+Guide: {10 / $zero}
+===
+"#;
+
+const GUIDE_SCRIPT: &str = r#"local Guide = {}
+function Guide:start()
+	self.waves = 0
+	dialogue.commands.shout = function(words, times)
+		self.shouted = `{words} x{times}`
+	end
+end
+function Guide:wave(n)
+	self.waves += n
+end
+return Guide
+"#;
+
+fn story_now(app: &mut App) -> Value {
+    call_api(&mut app.world, "story.state", json!({})).unwrap()["current"].clone()
+}
+
+fn story_last(app: &mut App, id: u64) -> Value {
+    call_api(&mut app.world, "story.state", json!({ "id": id })).unwrap()
+}
+
+fn start_guide(app: &mut App, node: &str) -> u64 {
+    call_api(
+        &mut app.world,
+        "story.start",
+        json!({"path": "dialogue/guide", "node": node, "owner": "Guide", "headless": true}),
+    )
+    .unwrap_or_else(|e| panic!("{e}"))["id"]
+        .as_u64()
+        .unwrap()
+}
+
+/// A Yarn conversation: its lines with facts in them, a command on the script that started
+/// it, options shown by their conditions, picks, `<<set>>`, a detour and its return, and a
+/// command of `dialogue.commands`; then the node group's other node, its line group and a
+/// wait.
+#[test]
+fn conversations_run_lines_options_and_commands() {
+    let folder = Folder::new();
+    folder.write("dialogue/guide.yarn", GUIDE_YARN);
+    folder.write("guide.luau", GUIDE_SCRIPT);
+    let mut app = app_in(&folder.0);
+    spawn_script(&mut app, "Guide", "guide.luau");
+    app.update_n(2);
+
+    // The detour first.
+    let id = start_guide(&mut app, "Start");
+    let now = story_now(&mut app);
+    assert_eq!(now["text"], "Hello, . You have 5 gold.", "{now}");
+    assert_eq!(now["speaker"], "Guide");
+    assert_eq!(now["waiting"], "options");
+    assert_eq!(
+        now["options"],
+        json!(["Buy a map (3 gold)", "Ask the way", "Leave"]),
+        "Rob me is hidden by its condition"
+    );
+    assert_eq!(
+        eval(&mut app, "return world.find('Guide').script.waves"),
+        json!(2)
+    );
+    call_api(&mut app.world, "story.choose", json!({"index": 2})).unwrap();
+    app.update_n(2);
+    let done = story_last(&mut app, id);
+    assert_eq!(done["done"], true, "{done}");
+    assert_eq!(done["text"], "Safe travels.");
+    assert_eq!(done["taken"], json!(["Start", "Way"]));
+    assert_eq!(
+        eval(&mut app, "return world.find('Guide').script.shouted"),
+        json!("bye now x2")
+    );
+    let facts = call_api(&mut app.world, "story.facts", json!({})).unwrap();
+    assert_eq!(facts["facts"]["gold"], json!(5));
+    assert_eq!(facts["visited"]["Start"], json!(1));
+    assert_eq!(facts["visited"]["Way"], json!(1));
+
+    // Again from the start of the story: the map bought this time.
+    call_api(
+        &mut app.world,
+        "story.facts",
+        json!({"clear": true, "set": {"name": "Ada"}}),
+    )
+    .unwrap();
+    let id = start_guide(&mut app, "Start");
+    assert_eq!(story_now(&mut app)["text"], "Hello, Ada. You have 5 gold.");
+    call_api(
+        &mut app.world,
+        "story.choose",
+        json!({"index": 1, "id": id}),
+    )
+    .unwrap();
+    app.update_n(2);
+    assert_eq!(story_last(&mut app, id)["done"], true);
+    assert_eq!(
+        eval(&mut app, "return { facts.gold, facts.has_map }"),
+        json!([2, true]),
+        "scripts read what the conversation set"
+    );
+
+    // The once node is spent: the other one, whose line group picks the line that tests more,
+    // then waits half a second of game time.
+    let id = start_guide(&mut app, "Start");
+    let now = story_last(&mut app, id);
+    assert_eq!(now["text"], "Map treating you well?", "{now}");
+    assert_eq!(now["waiting"], "time");
+    app.update_n(10);
+    assert_eq!(story_last(&mut app, id)["done"], false, "still waiting");
+    app.update_n(8);
+    let end = story_last(&mut app, id);
+    assert_eq!(end["done"], true, "{end}");
+    assert_eq!(end["text"], "Off you go.");
+
+    // A mistake at run time ends it with its .yarn line, in the script errors too.
+    let id = start_guide(&mut app, "Broken");
+    app.update_n(1);
+    let broken = story_last(&mut app, id);
+    assert_eq!(broken["done"], true);
+    let error = broken["error"].as_str().unwrap_or("").to_string();
+    assert!(
+        error.contains("dialogue/guide.yarn:37") && error.contains("divided by zero"),
+        "{error}"
+    );
+    assert!(errors(&mut app).iter().any(|e| e.contains("guide.yarn:37")));
+    // And one in the file itself names its line before anything runs.
+    folder.write("dialogue/bad.yarn", "title: A\n---\n<<if $x>>\nHi\n===\n");
+    let e = call_api(
+        &mut app.world,
+        "story.start",
+        json!({"path": "dialogue/bad", "node": "A", "headless": true}),
+    )
+    .unwrap_err();
+    assert!(e.contains("dialogue/bad.yarn:3"), "{e}");
+}
+
+const RELIC_QUEST: &str = r#"{
+  "title": "The Relic",
+  "start_when": "$met_priest",
+  "facts": { "relics": 0 },
+  "objectives": [
+    { "text": "Find the relics", "progress": "$relics", "count": 3 },
+    { "text": "Bring them back", "done_when": "$returned" },
+    { "text": "Find the bonus", "done_when": "$bonus", "optional": true }
+  ],
+  "on_done": { "blessed": true }
+}"#;
+
+const ESCORT_QUEST: &str = r#"{
+  "id": "escort",
+  "title": "Escort",
+  "fail_when": "$merchant_hp <= 0",
+  "objectives": [{ "text": "Reach the gate", "done_when": "$at_gate" }],
+  "on_fail": { "merchant_lost": true }
+}"#;
+
+fn quest(app: &mut App, id: &str) -> Value {
+    let all = call_api(&mut app.world, "story.quests", json!({})).unwrap();
+    all.as_array()
+        .unwrap()
+        .iter()
+        .find(|q| q["id"] == id)
+        .cloned()
+        .unwrap_or_else(|| panic!("no quest {id} in {all}"))
+}
+
+/// Quests are data: one starts by itself once its condition holds, its objectives follow the
+/// facts (a count, a condition; an optional one isn't needed), and finishing sets its facts.
+/// Another fails by its condition.
+#[test]
+fn quests_follow_the_facts() {
+    let folder = Folder::new();
+    folder.write("quests/relic.quest", RELIC_QUEST);
+    folder.write("quests/escort.quest", ESCORT_QUEST);
+    let mut app = app_in(&folder.0);
+    app.update_n(2);
+    assert_eq!(quest(&mut app, "relic")["state"], "inactive");
+    let set = |app: &mut App, facts: Value| {
+        call_api(&mut app.world, "story.facts", json!({ "set": facts })).unwrap();
+        app.update_n(1);
+    };
+    set(&mut app, json!({"met_priest": true}));
+    let q = quest(&mut app, "relic");
+    assert_eq!(q["state"], "active", "{q}");
+    assert_eq!(
+        eval(&mut app, "return facts.relics"),
+        json!(0),
+        "its starting facts"
+    );
+    set(&mut app, json!({"relics": 2}));
+    let q = quest(&mut app, "relic");
+    assert_eq!(q["objectives"][0]["progress"], 2);
+    assert_eq!(q["objectives"][0]["done"], false);
+    set(&mut app, json!({"relics": 3}));
+    assert_eq!(quest(&mut app, "relic")["objectives"][0]["done"], true);
+    // Done stays done.
+    set(&mut app, json!({"relics": 1}));
+    assert_eq!(quest(&mut app, "relic")["objectives"][0]["done"], true);
+    set(&mut app, json!({"returned": true}));
+    assert_eq!(quest(&mut app, "relic")["state"], "completed");
+    assert_eq!(eval(&mut app, "return facts.blessed"), json!(true));
+    assert_eq!(
+        eval(&mut app, "return quests.state('relic')"),
+        json!("completed")
+    );
+
+    // Started by hand (from a script here), failed by its condition.
+    eval(&mut app, "quests.start('escort')");
+    set(&mut app, json!({"merchant_hp": 5}));
+    assert_eq!(quest(&mut app, "escort")["state"], "active");
+    set(&mut app, json!({"merchant_hp": 0}));
+    assert_eq!(quest(&mut app, "escort")["state"], "failed");
+    assert_eq!(eval(&mut app, "return facts.merchant_lost"), json!(true));
+    // A mistake in a condition is the quest's error, not a crash.
+    folder.write(
+        "quests/odd.quest",
+        r#"{"title": "Odd", "start_when": "$a / 0 > 1", "objectives": []}"#,
+    );
+    app.update_n(20);
+    let odd = quest(&mut app, "odd");
+    assert_eq!(odd["state"], "inactive");
+    assert!(
+        odd["error"]
+            .as_str()
+            .unwrap_or("")
+            .contains("divided by zero"),
+        "{odd}"
+    );
+    assert!(errors(&mut app).is_empty(), "{:?}", errors(&mut app));
+}
+
+/// The shipped conversation and quest compile without problems.
+#[test]
+fn the_shipped_story_files_compile() {
+    let shipped = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/scripts");
+    for f in crate::story::find_files(&shipped, crate::story::DIALOGUE_FOLDER, "yarn") {
+        let text = std::fs::read_to_string(shipped.join(&f)).unwrap();
+        let c = crate::story::compile_yarn(&text, &f);
+        assert!(c.problems.is_empty(), "{f}: {:?}", c.problems);
+    }
+    let mut book = crate::story::QuestBook::default();
+    book.reload(&shipped);
+    assert!(book.problems.is_empty(), "{:?}", book.problems);
+    assert!(book.def("sealed_bridge").is_some());
+}

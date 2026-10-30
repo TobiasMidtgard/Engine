@@ -19,8 +19,13 @@ fn safe_path(raw: &str) -> Result<String, String> {
             "'{raw}' is not a path inside the scripts folder (no '..', e.g. \"showcase/lamp.luau\")"
         ));
     }
-    if !path.ends_with(".luau") && !path.ends_with(".lua") && !path.ends_with(".graph") {
-        return Err(format!("'{raw}' is not a .luau or .graph file"));
+    if ![".luau", ".lua", ".graph", ".yarn", ".quest"]
+        .iter()
+        .any(|ext| path.ends_with(ext))
+    {
+        return Err(format!(
+            "'{raw}' is not a .luau, .graph, .yarn (dialogue) or .quest file"
+        ));
     }
     Ok(path)
 }

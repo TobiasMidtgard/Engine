@@ -357,6 +357,7 @@ pub mod rewind;
 mod runtime;
 pub mod state_board;
 pub mod states;
+pub mod story;
 pub mod testing;
 pub mod tween;
 mod types;
@@ -558,7 +559,11 @@ impl Plugin for ScriptPlugin {
             .init_resource::<ScriptGizmos>()
             .init_resource::<ScriptCurves>()
             .init_resource::<CutsceneFiles>()
-            .init_resource::<Cutscenes>();
+            .init_resource::<Cutscenes>()
+            .init_resource::<story::StoryFacts>()
+            .init_resource::<story::QuestBook>()
+            .init_resource::<story::StoryRuns>()
+            .init_resource::<story::DialogueFiles>();
         app.register_component::<Script>(
             "Runs a Luau script from assets/scripts on this entity: path (\"showcase/lantern.luau\"), \
              props (JSON over the script's defaults), enabled.",
@@ -592,6 +597,15 @@ impl Plugin for ScriptPlugin {
              entity's mesh as the editor draws it, live: the states it is in with their time, \
              the change just made, after timers filling and the last changes.",
         )
+        .register_resource::<story::StoryFacts>(
+            "The story's facts: the values dialogue reads as $name and scripts as facts.name \
+             (what a save keeps), how many times each conversation node was left, and the \
+             <<once>> lines that ran.",
+        )
+        .register_resource::<story::QuestBook>(
+            "Where each quest (a .quest file in scripts/quests) is: inactive, active, \
+             completed or failed, with each objective's progress.",
+        )
         .register_resource::<ScriptGizmos>(
             "Script gizmos: show runs every script's draw_gizmos (in an editor's edit mode too); \
              the editor's selection runs draw_gizmos_selected.",
@@ -606,6 +620,12 @@ impl Plugin for ScriptPlugin {
         .add_systems(
             Update,
             cutscene::run_cutscenes
+                .in_set(UpdateSet::Logic)
+                .after(run_scripts),
+        )
+        .add_systems(
+            Update,
+            story::run_story
                 .in_set(UpdateSet::Logic)
                 .after(run_scripts),
         )
@@ -639,6 +659,7 @@ impl Plugin for ScriptPlugin {
         app.add_plugins(hotpatch::HotPatchPlugin);
         api::register(app);
         cutscene::register(app);
+        story::register(app);
     }
 }
 

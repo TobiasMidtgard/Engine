@@ -53,6 +53,7 @@ mod shots;
 mod show;
 mod snap;
 mod states;
+mod story;
 mod theme;
 mod thumbs;
 mod ui;
@@ -120,6 +121,7 @@ fn main() {
             rewind::RewindTabPlugin,
             curves::CurvesTabPlugin,
             sequencer::SequencerTabPlugin,
+            story::StoryTabPlugin,
         ))
         .add_plugins(EditorPlugin);
 
@@ -174,6 +176,7 @@ fn main() {
             Some("rewind") => scripts::rewind_shots(dir),
             Some("tweens") => scripts::tweens_shots(dir),
             Some("cutscenes") => scripts::cutscenes_shots(dir),
+            Some("story") => scripts::story_shots(dir),
             Some("graphs") => graphs::shots(dir),
             Some("graph_signals") => graphs::signals_shots(dir),
             _ => shots::gallery(dir),

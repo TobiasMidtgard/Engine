@@ -399,6 +399,79 @@ to retime them (snapped to frames), box select across rows, Delete removes them;
 is saved at once and is one undo step. While the game plays, the playhead follows the
 cutscene and its camera shows in the corner.
 
+## Story: conversations (`.yarn`), facts and quests (`.quest`)
+
+Conversations are written in **Yarn Spinner**'s language, in `.yarn` files under
+`dialogue/`; each compiles to Luau line for line, so a mistake is reported at its `.yarn`
+line. A file is **nodes**: headers (`title: Start`), `---`, the body, `===`.
+
+```
+title: Start
+when: once
+---
+<<bow>>
+Keeper: Ah. A traveller. {$runes_lit} of three runes are lit.
+-> Who sealed it?
+    <<jump Lore>>
+-> Can it be opened? <<if quest_state("sealed_bridge") == "inactive">>
+    <<quest start sealed_bridge>>
+-> Goodbye.
+===
+```
+
+- **Lines** are `Speaker: text`, with `{expressions}` in them and `#tags` after. **Options**
+  are `->` lines, their replies indented under them; `<<if ...>>` after one hides it.
+- `$name` is a **fact**: the story's shared memory, `facts.name` in any script. Facts are
+  part of the scene's state (the editor's Stop puts back the scene's).
+  `<<set $x to 3>>`, `<<declare $x = 3>>` (its starting value), `<<if>>`, `<<elseif>>`,
+  `<<else>>`, `<<endif>>`.
+- `<<jump Node>>` goes on there; `<<detour Node>>` runs it and comes back (`<<return>>`
+  comes back early); `<<stop>>` ends the conversation; `<<wait 2>>` hides the screen for two
+  seconds.
+- `<<once>> ... <<else>> ... <<endonce>>`: the first time only. `=>` lines are a **line
+  group**: one of them is said, the most specific one whose `<<if>>` holds, ties going to the
+  one said least.
+- **Node groups**: nodes with the same title and `when:` headers (`when: $seal_opened`,
+  `when: once`, `when: always`). Jumping to the title runs the one whose conditions test the
+  most and hold (Valve's dynamic dialog, Yarn Spinner 3's saliency), so a character answers
+  by what has happened without a chain of ifs.
+- Functions: `visited("Node")`, `visited_count("Node")`, `random()`, `random_range(a, b)`,
+  `dice(6)`, `round`, `floor`, `ceil`, `quest_state(id)`, `quest_active(id)`,
+  `quest_done(id)`; add your own with `dialogue.functions.name = function(...) end`.
+- **Commands**: `<<cutscene cutscenes/courtyard>>` plays one and waits for it,
+  `<<quest start id>>` (`complete`, `fail`), `<<emit signal>>` (the starting script emits
+  it), `<<hide>>`; then `dialogue.commands.name`; then a method of the script that started
+  the conversation (`<<bow>>` runs `Keeper:bow()`). A command that returns a function holds
+  the conversation until that function returns true.
+
+```lua
+-- In a script: the conversation shows in the UI's conversation screen.
+self.talk = dialogue.start("dialogue/keeper", "Start", {
+    speakers = { Keeper = { title = "Keeper of the rune seal", portrait = "portrait:merchant" } },
+})
+-- The handle: .done .node .line .speaker .options .waiting .taken .error, :choose(i), :stop()
+facts.runes_lit = 2           -- read in dialogue as $runes_lit
+quests.start("sealed_bridge") -- quests.complete / quests.fail / quests.state
+```
+
+With no conversation screen (a test, or the editor without the UI module) a conversation
+runs **headless**: lines go to the log and options wait for `handle:choose(i)`.
+
+A **quest** is a `.quest` file under `quests/`: JSON with a title, a giver and its
+**objectives**, each a condition on the facts (`"done_when": "$seal_opened"`, or
+`"progress": "$runes_lit", "count": 3`), plus `start_when`, `fail_when`, `rewards` and
+`on_done` (facts it sets when it completes). Nobody has to tell a quest it moved on: it
+checks its conditions as the facts change, completes when its objectives are done, and the
+journal and the HUD's tracker follow it.
+
+In the editor's **Story** tab, a `.yarn` file is a map of its nodes (arrows for jumps,
+detours and each option; drag a card to place it, kept in its `position:` header;
+double-click to edit its text). While the game plays, the node a conversation is in glows,
+the ones it went through are tinted, its lines and options are beside the map (click one to
+pick it), and ▶ Talk plays the selected node a line at a time. The facts are listed and can
+be changed there, and the quests started, completed or failed. The Scripts tab colors
+`.yarn` files and marks their mistakes as it does Luau's.
+
 ## In the editor's view: `construct`, gizmos and handles
 
 A script can show in the editor before anyone presses Play, as Unreal's construction script and
@@ -703,6 +776,10 @@ have them.
   trigger's script. `examples/cutscene_trigger.test.luau` tests it. `cutscenes/courtyard.cutscene`
   is the courtyard's cinematic: a herald rises and lights the way to the drawbridge, which
   lowers on its event, through three camera shots.
+- `examples/keeper.luau`, `dialogue/keeper.yarn`, `quests/sealed_bridge.quest`: the keeper of
+  the rune seal, who talks (E) and gives the quest "The Sealed Door", which follows the seal's
+  runes by itself; it answers by what has happened (a node group). `examples/keeper.test.luau`
+  tests both.
 - `tools/line_up.luau`, `tools/vary.luau`: tools for the Scripts tab's Tools menu (line the
   selection up; give each a random turn and size).
 - `examples/pulse.graph`, `examples/hover.graph`: the same lamp and stone as visual scripts.

@@ -322,6 +322,48 @@ declare cutscene: {
 	stop_all: () -> (),
 }
 
+--- A conversation (dialogue.start): a .yarn file's nodes running, shown in the conversation
+--- screen.
+export type Conversation = {
+	id: number,
+	path: string,
+	--- Ended, stopped, or stopped by an error.
+	done: boolean,
+	--- The node it is in.
+	node: string,
+	--- The line shown last, and who said it.
+	line: string?,
+	speaker: string?,
+	--- The options shown now.
+	options: { string }?,
+	--- "options", "reading", "time", "until" or nil.
+	waiting: string?,
+	error: string?,
+	--- The nodes it went through.
+	taken: { string },
+	--- Picks option i (1 is the first) when it shows options.
+	choose: (self: Conversation, i: number) -> Conversation,
+	stop: (self: Conversation) -> (),
+	--- Waits (in a task) until it ends; true unless an error ended it.
+	wait: (self: Conversation) -> boolean,
+}
+
+-- How to start a conversation: headless (the log instead of the screen), speakers
+-- ({ Keeper = { title, portrait, side, color } }), owner (whose script runs its commands).
+type ConversationOptions = any
+
+--- The story's facts: `$name` in .yarn files, facts.name here (nil until set).
+declare facts: { [string]: any }
+
+declare quests: {
+	--- Starts a quest (scripts/quests/<id>.quest); returns its state.
+	start: (id: string) -> string,
+	complete: (id: string) -> string,
+	fail: (id: string) -> string,
+	--- "inactive", "active", "completed" or "failed".
+	state: (id: string) -> string,
+}
+
 -- How a shape looks: a color by name ("cyan", "orange", ...) or as a vec3, or a table
 -- { color, seconds (how long it stays; a frame when nil), on_top (seen through walls), alpha,
 -- and the shape's own: normal, rotation, closed, size }. Any, so table literals pass.
@@ -558,6 +600,22 @@ fn write_ns(out: &mut String, ns: &Ns, indent: usize) {
     }
 }
 
+/// `dialogue`'s fields from story.luau.
+const DIALOGUE_FIELDS: &str =
+    "\t--- Starts a conversation at node (\"Start\") of a .yarn file (\"dialogue/keeper\").
+\tstart: (path: string, node: string?, opts: ConversationOptions?) -> Conversation,
+\t--- Whether a conversation is going on.
+\trunning: () -> boolean,
+\t--- How each speaker shows: { title, portrait, side, color } by name.
+\tspeakers: { [string]: any },
+\t--- The player's replies: { name, portrait }.
+\tplayer: { [string]: any },
+\t--- <<name args>> commands for every conversation; return a function to wait on it.
+\tcommands: { [string]: (...any) -> any },
+\t--- Functions for conditions and {text}.
+\tfunctions: { [string]: (...any) -> any },
+";
+
 /// The whole definitions file for this world's registry.
 pub fn definitions(world: &World) -> String {
     let mut out = String::from(BUILTINS);
@@ -581,6 +639,12 @@ pub fn definitions(world: &World) -> String {
         }
     }
     out.push_str("-- Engine functions, one table per module (from the API registry).\n\n");
+    // `dialogue` gains story.luau's fields beside the UI module's functions.
+    if !tops.contains_key("dialogue") {
+        out.push_str("declare dialogue: {\n");
+        out.push_str(DIALOGUE_FIELDS);
+        out.push_str("}\n\n");
+    }
     for (top, ns) in &tops {
         if top == "input" {
             out.push_str(
@@ -590,6 +654,9 @@ pub fn definitions(world: &World) -> String {
             );
         } else {
             let _ = writeln!(out, "declare {top}: {{");
+        }
+        if top == "dialogue" {
+            out.push_str(DIALOGUE_FIELDS);
         }
         write_ns(&mut out, ns, 1);
         out.push_str("}\n\n");

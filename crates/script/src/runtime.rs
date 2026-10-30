@@ -371,6 +371,7 @@ impl ScriptRuntime {
         crate::draw::install(&lua)?;
         crate::tween::install(&lua)?;
         crate::cutscene::install(&lua)?;
+        crate::story::install(&lua)?;
         crate::bind::install(&lua, api)?;
         install_tasks(&lua)?;
         install_require(&lua)?;
@@ -394,8 +395,13 @@ impl ScriptRuntime {
         lua.load(include_str!("cutscene.luau"))
             .set_name("@engine/cutscene.luau")
             .exec()?;
+        lua.load(include_str!("story.luau"))
+            .set_name("@engine/story.luau")
+            .exec()?;
         let base: Table = g.get("__script_base")?;
         lua.set_named_registry_value(BASE, base)?;
+        let tick: Function = g.get("__story_tick")?;
+        lua.set_named_registry_value(crate::story::TICK, tick)?;
         for internal in [
             "__script_base",
             "__task_spawn",
@@ -417,6 +423,21 @@ impl ScriptRuntime {
             "__cutscene_ctl",
             "__cutscene_info",
             "__cutscene_stop_all",
+            "__story_module",
+            "__story_version",
+            "__story_visit",
+            "__story_once",
+            "__story_owner",
+            "__story_set_owner",
+            "__story_report",
+            "__story_take",
+            "__story_dt",
+            "__story_new_id",
+            "__story_has_api",
+            "__story_error",
+            "__story_tick",
+            "__quest_module",
+            "__quest_ctl",
         ] {
             g.raw_set(internal, Value::Nil)?;
         }

@@ -1,0 +1,17 @@
+{
+  "id": "sealed_bridge",
+  "title": "The Sealed Door",
+  "kind": "side",
+  "giver": "The Keeper",
+  "giver_title": "Keeper of the rune seal",
+  "giver_portrait": "portrait:merchant",
+  "region": "Script courtyard",
+  "summary": "The keeper of the rune seal says its door has not opened in a hundred winters. Three runes stand before it, and each answers a touch.",
+  "objectives": [
+    { "text": "Light the three runes", "progress": "$runes_lit", "count": 3, "done_when": "$seal_opened" },
+    { "text": "Tell the keeper the door is open", "done_when": "$keeper_thanked" }
+  ],
+  "rewards": { "xp": 150 },
+  "on_done": { "courtyard_hero": true },
+  "track": true
+}
