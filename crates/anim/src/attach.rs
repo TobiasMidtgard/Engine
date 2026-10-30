@@ -3,6 +3,8 @@
 use engine_core::prelude::*;
 
 use crate::animator::Animator;
+use crate::grip::{fist_correction, side_of};
+use crate::retarget::{Retarget, Retargeter};
 use crate::xform::{Xf, rotation_between};
 
 /// Make this entity follow a bone of `target` (a hammer in a hand, a hat on a head, a torch
@@ -20,6 +22,10 @@ pub struct BoneAttachment {
     pub rotation: Quat,
     /// Let a held prop hang from the hand while no clip holds it up.
     pub hang: Option<Hang>,
+    /// `offset` and `rotation` place a held item in the standard fist of a hand bone
+    /// (`hand_l`, `hand_r`); it follows the fist the model's visible hand actually makes
+    /// ([`crate::grip`]).
+    pub fist: bool,
 }
 
 /// A prop held loosely, like a sledgehammer carried at the side: while none of `curves` is
@@ -64,6 +70,7 @@ impl Default for BoneAttachment {
             offset: Vec3::ZERO,
             rotation: Quat::IDENTITY,
             hang: None,
+            fist: false,
         }
     }
 }
@@ -88,10 +95,30 @@ impl BoneAttachment {
         self
     }
 
+    /// Hold the item in the hand's fist (see [`BoneAttachment::fist`]).
+    pub fn in_fist(mut self) -> Self {
+        self.fist = true;
+        self
+    }
+
     /// Where the attachment is this frame, in the animator's model space.
     pub fn socket(&self, animator: &Animator) -> Option<Xf> {
+        self.socket_fitted(animator, None)
+    }
+
+    /// [`socket`](Self::socket), held in the fist `retargeter`'s visible hand makes.
+    pub fn socket_fitted(
+        &self,
+        animator: &Animator,
+        retargeter: Option<&Retargeter>,
+    ) -> Option<Xf> {
         let index = animator.skeleton.index_of(&self.bone)?;
-        let bone = animator.model[index];
+        let mut bone = animator.model[index];
+        if self.fist
+            && let Some(side) = side_of(&self.bone)
+        {
+            bone = bone.mul(&fist_correction(retargeter, side));
+        }
         let Some(hang) = &self.hang else {
             return Some(bone.mul(&Xf::from_tr(self.offset, self.rotation)));
         };
@@ -120,12 +147,17 @@ impl BoneAttachment {
     }
 }
 
+#[allow(clippy::type_complexity)]
 pub(crate) fn attachment_system(
-    characters: Query<(&Animator, Ref<GlobalTransform>), Without<BoneAttachment>>,
+    characters: Query<
+        (&Animator, Ref<GlobalTransform>, Option<&Retarget>),
+        Without<BoneAttachment>,
+    >,
     mut q: Query<(&BoneAttachment, &mut Transform, &mut GlobalTransform)>,
 ) {
     for (attach, mut t, mut gt) in &mut q {
-        let Some((animator, owner)) = attach.target.and_then(|e| characters.get(e).ok()) else {
+        let Some((animator, owner, retarget)) = attach.target.and_then(|e| characters.get(e).ok())
+        else {
             continue;
         };
         // A resting owner that stands still keeps its props where they are.
@@ -133,7 +165,7 @@ pub(crate) fn attachment_system(
             continue;
         }
         let owner = &*owner;
-        let Some(socket) = attach.socket(animator) else {
+        let Some(socket) = attach.socket_fitted(animator, retarget.map(|r| &*r.retargeter)) else {
             continue;
         };
         let (pos, rot) = animator_world(owner, socket);

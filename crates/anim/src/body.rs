@@ -39,6 +39,7 @@ use crate::demo::{
     character_model, fetched_path, give_dog_body, give_horse_body, give_humanoid_body,
     give_spider_body, horse_model,
 };
+use crate::grip::HeldItems;
 use crate::horse_model::{AppliedHorseModel, HorseModel};
 use crate::ik::FootIk;
 use crate::muscle::{MorphWeights, MuscleRig};
@@ -318,11 +319,18 @@ pub(crate) fn give_hand_controls(
 }
 
 /// Write how closed each person's hands are: the closing curves of what they're doing, at
-/// least what they hold.
+/// least what they hold (closed all the way on a held item).
+#[allow(clippy::type_complexity)]
 pub(crate) fn hand_controls_system(
-    mut q: Query<(&Body, &Animator, Option<&HandGrip>, &mut HandControls)>,
+    mut q: Query<(
+        &Body,
+        &Animator,
+        Option<&HandGrip>,
+        Option<&HeldItems>,
+        &mut HandControls,
+    )>,
 ) {
-    for (body, animator, held, mut out) in &mut q {
+    for (body, animator, held, items, mut out) in &mut q {
         if body.kind != BodyKind::Human || !animator.posed() {
             continue;
         }
@@ -330,7 +338,14 @@ pub(crate) fn hand_controls_system(
             .iter()
             .map(|c| animator.curve(c))
             .fold(0.0, f32::max);
-        let held = held.map_or([0.0; 2], |h| [h.left, h.right]);
+        let mut held = held.map_or([0.0; 2], |h| [h.left, h.right]);
+        if let Some(items) = items {
+            for (side, handle) in items.hands.iter().enumerate() {
+                if handle.is_some() {
+                    held[side] = 1.0;
+                }
+            }
+        }
         let grip = held.map(|h| closed.max(h).clamp(0.0, 1.0));
         if out.grip != grip {
             out.grip = grip;

@@ -188,6 +188,7 @@ pub(crate) fn spawn_rig_models(
                     offset: socket.t,
                     rotation: socket.r,
                     hang: None,
+                    fist: false,
                 },
                 RigModelPart { owner: entity },
             ));
