@@ -60,6 +60,7 @@ pub enum Tab {
     Curves,
     Sequencer,
     Story,
+    Grips,
 }
 
 /// A message in the console.

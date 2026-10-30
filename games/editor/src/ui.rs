@@ -33,8 +33,11 @@ pub fn default_layout() -> DockState<Tab> {
 pub fn layout(scene: f32) -> DockState<Tab> {
     let mut dock = DockState::new(vec![Tab::Viewport, Tab::Scripts, Tab::Graphs, Tab::Story]);
     let surface = dock.main_surface_mut();
-    let [center, _right] =
-        surface.split_right(NodeIndex::root(), 0.77, vec![Tab::Inspector, Tab::World]);
+    let [center, _right] = surface.split_right(
+        NodeIndex::root(),
+        0.77,
+        vec![Tab::Inspector, Tab::World, Tab::Grips],
+    );
     let [center, _left] = surface.split_left(center, 0.21, vec![Tab::Outliner]);
     let [_center, _bottom] = surface.split_below(
         center,
@@ -142,6 +145,7 @@ impl TabViewer for Viewer<'_> {
             Tab::Curves => "📈 Curves",
             Tab::Sequencer => "🎬 Sequencer",
             Tab::Story => "📖 Story",
+            Tab::Grips => "✋ Grips",
         }
         .into()
     }
@@ -172,6 +176,7 @@ impl TabViewer for Viewer<'_> {
             Tab::Curves => crate::curves::panel(ui, world, editor),
             Tab::Sequencer => crate::sequencer::panel(ui, world, editor),
             Tab::Story => crate::story::panel(ui, world, editor),
+            Tab::Grips => crate::grips::panel(ui, world, editor),
         }
     }
 

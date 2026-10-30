@@ -944,6 +944,7 @@ pub fn dress(world: &mut World, person: Entity, character: &str, material: SkinM
 fn hammer_part(person: Entity, offset: Vec3, rotation: Quat) -> BoneAttachment {
     BoneAttachment::new(person, "hand_r")
         .with_offset(offset, rotation)
+        .in_fist()
         .with_hang(Hang {
             pivot: GRIP,
             fist: -GRIP.y,
@@ -997,13 +998,26 @@ pub fn spawn_hammer(world: &mut World, person: Entity, near: DVec3) -> [Entity; 
         left: 0.0,
         right: 1.0,
     });
+    // The right fist closes round the handle, held in the fist the model's hand makes.
+    let preset = match world.get_resource::<crate::grip::GripPresets>() {
+        Some(presets) => presets.get("hammer"),
+        None => crate::grip::GripPresets::builtin().get("hammer"),
+    };
+    let held = world
+        .get::<crate::grip::HeldItems>(person)
+        .cloned()
+        .unwrap_or_default()
+        .hold_preset(1, preset.handle(dir, 0.0), "hammer", &preset);
+    world.entity_mut(person).insert(held);
     world.entity_mut(person).insert(ReachIk::new(vec![
         Reach {
             target_bone: "hand_r".into(),
-            // The left wrist sits where the left fist closes around the handle's end.
+            // The left fist closes around the handle's end, turned as the right one is.
             target_offset: -dir * 0.11,
             pole: Vec3::new(-0.5, -1.0, 0.3),
             weight_curve: "grip".into(),
+            turn: 1.0,
+            fist: true,
             ..Reach::arm(0)
         },
         Reach {
@@ -1388,7 +1402,14 @@ pub fn hammer_head(world: &World, person: Entity) -> Option<DVec3> {
     let animator = world.get::<Animator>(person)?;
     let gt = world.get::<GlobalTransform>(person)?;
     let head = hammer_part(person, GRIP + HANDLE_DIR.normalize() * 0.6, Quat::IDENTITY);
-    Some(crate::ik::to_world(gt, head.socket(animator)?.t))
+    let retargeter = world
+        .get::<crate::retarget::Retarget>(person)
+        .map(|r| &*r.retargeter);
+    let held = world.get::<crate::grip::HeldItems>(person);
+    Some(crate::ik::to_world(
+        gt,
+        head.socket_held(animator, retargeter, held)?.t,
+    ))
 }
 
 /// A horse; it wears the realistic horse model once that has loaded (when fetched).

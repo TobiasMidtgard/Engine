@@ -27,6 +27,7 @@ mod editor;
 mod egui_bridge;
 mod folder;
 mod graphs;
+mod grips;
 mod hide;
 mod import;
 mod inspector;
@@ -122,6 +123,7 @@ fn main() {
             curves::CurvesTabPlugin,
             sequencer::SequencerTabPlugin,
             story::StoryTabPlugin,
+            grips::GripsTabPlugin,
         ))
         .add_plugins(EditorPlugin);
 
@@ -178,6 +180,7 @@ fn main() {
             Some("cutscenes") => scripts::cutscenes_shots(dir),
             Some("story") => scripts::story_shots(dir),
             Some("graphs") => graphs::shots(dir),
+            Some("grips") => grips::shots(dir),
             Some("graph_signals") => graphs::signals_shots(dir),
             _ => shots::gallery(dir),
         };

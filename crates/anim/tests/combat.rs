@@ -41,6 +41,9 @@ fn ring_at(target: bool, guard: bool, step: f32) -> (App, Entity, Entity) {
         Outfit::Athlete,
         Transform::from_xyz(0.0, 0.0, 1.1),
     );
+    // The people's models (when fetched) are on before the first frame, so a run doesn't
+    // depend on how fast they load.
+    engine_anim::character::finish_loading(&mut app.world);
     app.world
         .entity_mut(boxer)
         .insert(Attacker::new("boxing", target.then_some(partner)));
@@ -100,6 +103,10 @@ fn fight(
 #[test]
 fn presses_link_into_a_combo_that_steps_in_and_lands() {
     let (mut app, boxer, partner) = ring(true, false);
+    // The partner takes the blows but its legs don't go: a rocked body lurches about on its
+    // own, and this measures where the boxer stepped to.
+    app.world.entity_mut(partner).insert(Hurt::default());
+    app.world.get_mut::<Hurt>(partner).unwrap().rocked_at = 1e6;
     let (moves, hits, frozen) = fight(
         &mut app,
         boxer,

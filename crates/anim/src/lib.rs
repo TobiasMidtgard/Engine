@@ -99,6 +99,7 @@ impl Plugin for AnimationPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<AnimationLibrary>()
             .init_resource::<combat::AttackSets>()
+            .init_resource::<grip::GripPresets>()
             .init_resource::<ik::IkSurfaces>()
             .init_resource::<ragdoll::RagdollDefs>()
             .init_asset::<SkinnedMesh>()
@@ -224,6 +225,7 @@ impl Plugin for AnimationPlugin {
                     .in_set(AnimSet::Ragdoll),
                 muscle::muscle_system.in_set(AnimSet::Muscles),
                 (
+                    grip::apply_grip_presets,
                     animator::publish_pose,
                     retarget::retarget_poses,
                     face::face_system,
@@ -354,7 +356,8 @@ fn register_types(app: &mut App) {
     )
     .register_component::<grip::HeldItems>(
         "The handle each hand holds (left, right: axis and radius in the standard fist), for \
-         the fingers to close round.",
+         the fingers to close round; how the item sits in the fist (slide, roll), extra finger \
+         curl, and the grip preset it came from.",
     )
     .register_component::<RagdollTone>(
         "Muscle tone in a limp body: joints hold the animated pose in the air (tone 0..1) \

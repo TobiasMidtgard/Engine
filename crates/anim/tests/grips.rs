@@ -85,9 +85,10 @@ fn the_paddocks_people_hold_their_weapons_in_their_hands() {
                 else {
                     continue;
                 };
+                // Within the grip research's warning limits (anim-grip-research.md §3d).
                 assert!(report.palm.abs() < 0.004, "{who} {side}: {report:?}");
-                assert!(report.deepest < 0.005, "{who} {side}: {report:?}");
-                assert!(report.widest < 0.006, "{who} {side}: {report:?}");
+                assert!(report.deepest < 0.002, "{who} {side}: {report:?}");
+                assert!(report.widest < 0.004, "{who} {side}: {report:?}");
                 unopposed += usize::from(!report.thumb_opposed);
                 checked += 1;
             }
