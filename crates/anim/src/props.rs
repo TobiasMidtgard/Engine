@@ -196,13 +196,33 @@ pub fn spawn_greatsword(world: &mut World, person: Entity) -> Vec<Entity> {
     parts
 }
 
-/// A round shield in `person`'s left fist (its boss over the fist, the face out over the
-/// knuckles), and the [`Shield`] that blocks with it.
+/// A round shield's boss: a steel cone on the painted face (`BOSS_BASE` out from the board's
+/// centre), rounded at its top by a ball of `BOSS_CAP` that touches its sides, meters.
+const BOSS_RADIUS: f32 = 0.07;
+const BOSS_HEIGHT: f32 = 0.05;
+const BOSS_BASE: f32 = 0.011;
+const BOSS_CAP: f32 = 0.03;
+/// Hammered, not polished: a mirror boss shows the ground and reads as a hole.
+const BOSS_ROUGHNESS: f32 = 0.45;
+
+/// How far out from the board's centre the boss's rounding ball sits: inside the cone, touching
+/// its sides.
+fn boss_cap_centre() -> f32 {
+    let slant = BOSS_RADIUS.hypot(BOSS_HEIGHT);
+    BOSS_BASE + BOSS_HEIGHT - BOSS_CAP * slant / BOSS_RADIUS
+}
+
+/// A round shield in `person`'s left fist (the fist on a bar behind the board, the face out
+/// over the knuckles), and the [`Shield`] that blocks with it.
 pub fn spawn_shield(world: &mut World, person: Entity) -> Vec<Entity> {
     let face = along(HANDLE_AXIS, HANDLE_FACE);
     let wood = StandardMaterial::hex(0x7b5634).with_roughness(0.75);
     let paint = StandardMaterial::hex(0x8c2a22).with_roughness(0.6);
-    let ids = vec![
+    let handle = Handle::new(HANDLE_AXIS, SHIELD_HANDLE_RADIUS, [-0.06, 0.06]);
+    let [a, b] = handle.ends(0);
+    // The board's back, where the bar's blocks meet it.
+    let back = SHIELD_CENTER - HANDLE_FACE * 0.008;
+    let mut ids = vec![
         part(
             world,
             person,
@@ -243,26 +263,64 @@ pub fn spawn_shield(world: &mut World, person: Entity) -> Vec<Entity> {
             SHIELD_CENTER,
             face,
         ),
+        // The boss, all in front of the board, so none of it reaches the fist behind.
+        part(
+            world,
+            person,
+            "hand_l",
+            Shape::Cone {
+                radius: BOSS_RADIUS,
+                height: BOSS_HEIGHT,
+                segments: 24,
+            },
+            steel().with_roughness(BOSS_ROUGHNESS),
+            SHIELD_CENTER + HANDLE_FACE * (BOSS_BASE + BOSS_HEIGHT * 0.5),
+            face,
+        ),
         part(
             world,
             person,
             "hand_l",
             Shape::Sphere {
-                radius: 0.075,
+                radius: BOSS_CAP,
                 segments: 16,
             },
-            steel(),
-            SHIELD_CENTER + HANDLE_FACE * 0.005,
+            steel().with_roughness(BOSS_ROUGHNESS),
+            SHIELD_CENTER + HANDLE_FACE * boss_cap_centre(),
             face,
         ),
+        // The bar the fist closes on.
+        part(
+            world,
+            person,
+            "hand_l",
+            Shape::Cylinder {
+                radius: SHIELD_HANDLE_RADIUS,
+                height: (b - a).length() + 0.03,
+                segments: 12,
+            },
+            leather(),
+            (a + b) * 0.5,
+            along(Vec3::X, HANDLE_AXIS),
+        ),
     ];
+    // A block at each end of the bar holds it off the board.
+    for end in [a - HANDLE_AXIS * 0.008, b + HANDLE_AXIS * 0.008] {
+        let depth = (back - end).dot(HANDLE_FACE) + SHIELD_HANDLE_RADIUS;
+        ids.push(part(
+            world,
+            person,
+            "hand_l",
+            Shape::Cuboid {
+                size: [0.025, depth, 0.02],
+            },
+            StandardMaterial::hex(0x5b4029).with_roughness(0.8),
+            end + HANDLE_FACE * (depth * 0.5 - SHIELD_HANDLE_RADIUS),
+            face,
+        ));
+    }
     world.entity_mut(person).insert(Shield::default());
-    hold(
-        world,
-        person,
-        0,
-        Handle::new(HANDLE_AXIS, SHIELD_HANDLE_RADIUS, [-0.06, 0.06]),
-    );
+    hold(world, person, 0, handle);
     ids
 }
 
