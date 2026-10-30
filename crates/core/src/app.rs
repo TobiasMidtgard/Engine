@@ -706,9 +706,14 @@ mod tests {
         }
     }
 
+    /// Tests that need systems running side by side take turns: run together, one's spinning
+    /// systems can hold every pool thread the other needs (CI's 4-core runners).
+    static POOL_TESTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn during_physics_overlaps_the_physics_step_in_order() {
         use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+        let _alone = POOL_TESTS.lock().unwrap_or_else(|e| e.into_inner());
         static GAMEPLAY: AtomicBool = AtomicBool::new(false);
         static PHYSICS: AtomicBool = AtomicBool::new(false);
         static DURING: AtomicBool = AtomicBool::new(false);
@@ -716,7 +721,7 @@ mod tests {
         fn wait_for(flag: &AtomicBool) -> bool {
             let start = std::time::Instant::now();
             while !flag.load(Ordering::SeqCst) {
-                if start.elapsed() > std::time::Duration::from_secs(2) {
+                if start.elapsed() > std::time::Duration::from_secs(10) {
                     return false;
                 }
                 std::hint::spin_loop();
@@ -763,6 +768,7 @@ mod tests {
     #[test]
     fn independent_systems_run_side_by_side() {
         use std::sync::atomic::{AtomicUsize, Ordering};
+        let _alone = POOL_TESTS.lock().unwrap_or_else(|e| e.into_inner());
         static RUNNING: AtomicUsize = AtomicUsize::new(0);
         static MOST: AtomicUsize = AtomicUsize::new(0);
         // Each system waits (up to a while, so a busy test machine can't fail it) to see
