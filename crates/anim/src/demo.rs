@@ -2009,8 +2009,8 @@ pub const VIEWS: &[DemoView] = &[
     DemoView {
         key: "paddock_wallrun",
         name: "Wall run: feet on the wall, body tilted off it, the inside arm out toward it",
-        eye: [9.5, 1.6, 25.0],
-        target: [6.6, 1.2, 22.2],
+        eye: [10.8, 1.5, 23.9],
+        target: [6.8, 1.3, 22.2],
         hour: 15.0,
         at: 2.65,
     },
@@ -2025,8 +2025,8 @@ pub const VIEWS: &[DemoView] = &[
     DemoView {
         key: "paddock_wallrun_right",
         name: "Running the second wall, the other side leading",
-        eye: [16.5, 1.5, 22.5],
-        target: [14.4, 1.2, 25.6],
+        eye: [18.8, 1.5, 24.1],
+        target: [14.8, 1.3, 25.8],
         hour: 15.0,
         at: 3.75,
     },

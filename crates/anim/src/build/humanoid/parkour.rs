@@ -22,6 +22,9 @@ pub const WALL_RUN_SECS: f32 = 0.56;
 const WALL_DUTY: f32 = 0.27;
 /// Ankle joint to sole, m.
 const ANKLE_TO_SOLE: f32 = 0.085;
+/// How far in from the wall each limb's joint sits when the clips have it on the wall
+/// (`WALL_CURVES` order: the wrist off the palm, the ankle off the sole), m.
+pub const WALL_INSET: [f32; 4] = [0.04, 0.04, ANKLE_TO_SOLE, ANKLE_TO_SOLE];
 /// The clips and the graph states of the same names.
 pub const JUMP: &str = "jump";
 pub const DOUBLE_JUMP: &str = "double_jump";
