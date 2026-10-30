@@ -21,6 +21,7 @@ mod camera_preview;
 mod collision;
 mod content;
 mod convert;
+mod curves;
 mod demos;
 mod editor;
 mod egui_bridge;
@@ -116,6 +117,7 @@ fn main() {
             scripts::ScriptsTabPlugin,
             graphs::GraphsTabPlugin,
             rewind::RewindTabPlugin,
+            curves::CurvesTabPlugin,
         ))
         .add_plugins(EditorPlugin);
 
@@ -168,6 +170,7 @@ fn main() {
             Some("gizmos") => scripts::gizmos_shots(dir),
             Some("tools") => scripts::tools_shots(dir),
             Some("rewind") => scripts::rewind_shots(dir),
+            Some("tweens") => scripts::tweens_shots(dir),
             Some("graphs") => graphs::shots(dir),
             Some("graph_signals") => graphs::signals_shots(dir),
             _ => shots::gallery(dir),

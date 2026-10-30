@@ -248,12 +248,14 @@ fn event_color(kind: EventKind) -> Color32 {
 fn view_span(tab: &RewindTab, rw: &ScriptRewind) -> Option<(f64, f64)> {
     let (from, to) = rw.span()?;
     let window = tab.window.max(0.5);
-    let end = match tab.end {
-        Some(end) => end,
-        // Following: from the start while the recording is shorter, then the newest at the
-        // right.
-        None if to - from + 0.5 < window => from - 0.25 + window,
-        None => to + 0.25,
+    // A recording shorter than the window shows from its start; a longer one never shows
+    // time before it starts or long after it ends.
+    let end = if to - from + 0.5 < window {
+        from - 0.25 + window
+    } else {
+        tab.end
+            .unwrap_or(to + 0.25)
+            .clamp(from - 0.25 + window, to + 0.25)
     };
     Some((end - window, end))
 }
@@ -1320,11 +1322,15 @@ pub fn overlay(ui: &egui::Ui, world: &World, view: &crate::view::ViewInfo) {
             continue;
         };
         let states = tr.states_at(frame).join(" | ");
+        // Its states, else its first value that tells something (not a part it holds).
         let detail = if !states.is_empty() {
             states
         } else {
-            tr.values_at(frame)
-                .first()
+            let values = tr.values_at(frame);
+            values
+                .iter()
+                .find(|(_, v, _)| !matches!(v, Val::Entity(..) | Val::Table(_)))
+                .or(values.first())
                 .map(|(k, v, _)| format!("{k} {}", clip(&v.show(), 16)))
                 .unwrap_or_default()
         };

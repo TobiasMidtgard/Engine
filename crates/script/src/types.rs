@@ -170,10 +170,121 @@ declare task: {
 	synchronize: () -> (),
 }
 
+--- Easing curves: progress 0..1 in, how far along out (out_back and elastic overshoot).
+--- in_/out_/in_out_/out_in_ with sine, quad, cubic, quart, quint, expo, circ, back, elastic or
+--- bounce; linear, smooth, smoother, spring.
 declare ease: {
-	linear: (number) -> number, in_quad: (number) -> number, out_quad: (number) -> number,
-	in_out: (number) -> number, out_back: (number) -> number, out_elastic: (number) -> number,
-	smooth: (number) -> number,
+	linear: (number) -> number, smooth: (number) -> number, smoother: (number) -> number,
+	spring: (number) -> number, in_out: (number) -> number, in_sine: (number) -> number,
+	out_sine: (number) -> number, in_out_sine: (number) -> number, out_in_sine: (number) -> number,
+	in_quad: (number) -> number, out_quad: (number) -> number, in_out_quad: (number) -> number,
+	out_in_quad: (number) -> number, in_cubic: (number) -> number, out_cubic: (number) -> number,
+	in_out_cubic: (number) -> number, out_in_cubic: (number) -> number,
+	in_quart: (number) -> number, out_quart: (number) -> number, in_out_quart: (number) -> number,
+	out_in_quart: (number) -> number, in_quint: (number) -> number, out_quint: (number) -> number,
+	in_out_quint: (number) -> number, out_in_quint: (number) -> number, in_expo: (number) -> number,
+	out_expo: (number) -> number, in_out_expo: (number) -> number, out_in_expo: (number) -> number,
+	in_circ: (number) -> number, out_circ: (number) -> number, in_out_circ: (number) -> number,
+	out_in_circ: (number) -> number, in_back: (number) -> number, out_back: (number) -> number,
+	in_out_back: (number) -> number, out_in_back: (number) -> number,
+	in_elastic: (number) -> number, out_elastic: (number) -> number,
+	in_out_elastic: (number) -> number, out_in_elastic: (number) -> number,
+	in_bounce: (number) -> number, out_bounce: (number) -> number,
+	in_out_bounce: (number) -> number, out_in_bounce: (number) -> number,
+	--- CSS's cubic-bezier(x1, y1, x2, y2) as an ease.
+	bezier: (x1: number, y1: number, x2: number, y2: number) -> (number) -> number,
+	--- Holds each of n levels in turn (CSS's steps(n)).
+	steps: (n: number) -> (number) -> number,
+	--- A curve (a .curve file or keys) as an ease, over its keys' span.
+	curve: (source: string | { any }) -> (number) -> number,
+	--- Every named ease.
+	names: () -> { string },
+}
+
+-- A tween's options: ease (a name, a .curve file, a curve, a function or {x1, y1, x2, y2}),
+-- delay, loops (-1: forever), yoyo, relative, from, speed, unscaled, done (a function),
+-- label, paused. Any, so table literals pass.
+type TweenOptions = any
+
+--- A running tween, sequence or spring: self:tween, self:sequence, self:spring.
+export type Tween = {
+	playing: boolean,
+	--- Finished or killed.
+	done: boolean,
+	--- Seconds into this pass, one pass's length, and 0..1 over every pass.
+	time: number,
+	length: number,
+	progress: number,
+	pause: (self: Tween) -> Tween,
+	play: (self: Tween) -> Tween,
+	--- Stops it where it is (complete: at its end, calling done).
+	kill: (self: Tween, complete: boolean?) -> (),
+	restart: (self: Tween) -> Tween,
+	seek: (self: Tween, seconds: number) -> Tween,
+	speed: (self: Tween, rate: number) -> Tween,
+	--- Waits (in a task) until it is done.
+	wait: (self: Tween) -> (),
+	--- A step after the last one (a sequence).
+	to: (self: Tween, target: any, props: any, seconds: number, opts: TweenOptions?) -> Tween,
+	--- A step with the last one added.
+	join: (self: Tween, target: any, props: any, seconds: number, opts: TweenOptions?) -> Tween,
+	--- A step from a time of its own.
+	at: (self: Tween, time: number, target: any, props: any, seconds: number, opts: TweenOptions?) -> Tween,
+	--- A pause before the next step.
+	interval: (self: Tween, seconds: number) -> Tween,
+	--- Calls f (as a task) when the sequence gets here.
+	call: (self: Tween, f: () -> ()) -> Tween,
+}
+
+declare tween: {
+	--- Moves target's values (position, rotation, scale, "Component.field", "material.field",
+	--- or a table's fields) to props over seconds.
+	to: (target: any, props: any, seconds: number, opts: TweenOptions?) -> Tween,
+	--- An empty sequence: add steps with :to, :join, :at, :interval and :call.
+	sequence: (opts: TweenOptions?) -> Tween,
+	--- Makes target's values follow props like a spring (halflife, bounce); call again to move
+	--- the goal.
+	spring: (target: any, props: any, opts: any?) -> Tween,
+	--- Stops the tweens moving target (or its value named value); how many.
+	kill: (target: any, value: string?) -> number,
+}
+
+--- A curve: keys over time from a .curve file (edited in the Curves tab) or a script.
+declare extern type Curve with
+	--- Its file (nil when made from keys).
+	path: string?
+	first: number
+	last: number
+	length: number
+	--- Its value at time t.
+	function at(self, t: number): number
+	function keys(self): { { number } }
+end
+
+--- A curve from a .curve file ("curves/door.curve") or keys { {t, v}, {t, v, "linear"} }.
+declare function curve(source: string | { any }): Curve
+
+--- One of the class's timelines (self:timeline(name)): tracks of curves and events, played
+--- forward or back; on_<name>(values, timeline) runs each frame it plays.
+export type Timeline = {
+	name: string,
+	time: number,
+	length: number,
+	playing: boolean,
+	--- 1 forward, -1 backward.
+	direction: number,
+	rate: number,
+	--- Each track's value now.
+	values: { [string]: number },
+	play: (self: Timeline) -> Timeline,
+	play_from_start: (self: Timeline) -> Timeline,
+	reverse: (self: Timeline) -> Timeline,
+	reverse_from_end: (self: Timeline) -> Timeline,
+	stop: (self: Timeline) -> Timeline,
+	seek: (self: Timeline, seconds: number, fire_events: boolean?) -> Timeline,
+	set_rate: (self: Timeline, rate: number) -> Timeline,
+	--- Waits (in a task) until it stops.
+	wait: (self: Timeline) -> (),
 }
 
 -- How a shape looks: a color by name ("cyan", "orange", ...) or as a vec3, or a table
@@ -300,6 +411,14 @@ export type ScriptBase = {
 	after: (self: any, seconds: number, method: string | (any) -> (), ...any) -> thread,
 	--- Spawns a child of this script's entity.
 	spawn: (self: any, spec: EntitySpec) -> Entity,
+	--- Moves target's values to props over seconds (target: an entity, or a table like self).
+	tween: (self: any, target: any, props: any, seconds: number, opts: TweenOptions?) -> Tween,
+	--- An empty sequence: add steps with :to, :join, :at, :interval and :call.
+	sequence: (self: any, opts: TweenOptions?) -> Tween,
+	--- Makes target's values follow props like a spring; call again to move the goal.
+	spring: (self: any, target: any, props: any, opts: any?) -> Tween,
+	--- One of the class's timelines (a table named timelines).
+	timeline: (self: any, name: string) -> Timeline,
 }
 
 -- For annotating `self` by hand (luau-lsp): the engine's part, any props and any signal.

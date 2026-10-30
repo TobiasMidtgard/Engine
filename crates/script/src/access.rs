@@ -356,6 +356,8 @@ pub(crate) struct Shared {
     /// What scripts did, for the rewind recorder: kept only while it records
     /// ([`crate::rewind`]).
     pub trace: Option<Vec<crate::rewind::Traced>>,
+    /// The tweens, sequences and springs this VM runs ([`crate::tween`]).
+    pub tweens: crate::tween::Tweens,
 }
 
 /// Errors and log lines kept for the API.

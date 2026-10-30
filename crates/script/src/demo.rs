@@ -46,6 +46,12 @@
 //! - Rewind (`script.rewind {"show_ago": 2}`, the `script_rewind` stop): the recorder keeps
 //!   what every script does and draws where each scripted thing went around the moment two
 //!   seconds ago: the wisps' flight and the drone's loop as streaks.
+//! - The drawbridge on the south side, between two lanterns, is run by a timeline:
+//!   `examples/drawbridge.luau`'s `timelines` table plays `curves/drawbridge.curve` (slow to
+//!   start, a heavy landing with a small bounce) and keys of its own for the winch wheels,
+//!   with events that clank and thud; E lowers it, E again raises it from wherever it is. Its
+//!   lamps blink by a looping tween of their material while it moves (the `script_drawbridge`
+//!   stops). The editor's Curves tab edits the curve while it plays.
 //!
 //! `script.send {"entity": {"name": "Courtyard director"}, "event": "ritual"}` plays the ritual
 //! from the console or a tour stop; `script.edit` changes a script file like an editor would.
@@ -109,6 +115,12 @@ pub const SEAL_SCRIPT: &str = "examples/seal.luau";
 /// The seal's state board, on an easel south of it, turned to the middle and a little north.
 pub const SEAL_BOARD: [f64; 3] = [8.8, 2.0, 5.0];
 pub const SEAL_BOARD_YAW: f32 = -std::f32::consts::FRAC_PI_2 - 0.25;
+/// The drawbridge (`examples/drawbridge.luau`): its hinge, between the lanterns at 90 and 120
+/// degrees, and its turn (the deck lowers toward the middle).
+pub const BRIDGE: [f64; 3] = [-2.69, 0.0, 10.05];
+pub const BRIDGE_YAW: f32 = 2.88;
+pub const BRIDGE_NAME: &str = "Drawbridge";
+pub const BRIDGE_SCRIPT: &str = "examples/drawbridge.luau";
 /// A patrol drone flying a loop over the seal (`examples/patrol.luau`; its waypoints are props
 /// with handles in the editor), high enough to stay out of the other stops' way.
 pub const PATROL: [f64; 3] = [9.4, 0.0, 0.0];
@@ -237,6 +249,13 @@ pub const SEAL_TWO: (&str, &str) = (
 pub const SEAL_ALL: (&str, &str) = (
     "script.eval",
     r#"{"code": "local s = world.find('Rune seal').script s:go('sealed') s:place(0) s:trigger('touch_left') s:trigger('touch_right') s:trigger('touch_middle')"}"#,
+);
+
+/// The drawbridge from the top: raised at once, then lowered as E would, so a stop shows the
+/// same moment each time.
+pub const BRIDGE_LOWER: (&str, &str) = (
+    "script.eval",
+    r#"{"code": "local b = world.find('Drawbridge').script b:raise_now() b:toggle()"}"#,
 );
 
 /// Script gizmos on (every script's `draw_gizmos`, and the seal's `draw_gizmos_selected` as if
@@ -470,6 +489,30 @@ pub const VIEWS: &[DemoView] = &[
         warmup_secs: 6.0,
         on_arrive: &[REWIND_ON],
         on_leave: &[REWIND_OFF],
+    },
+    DemoView {
+        key: "script_drawbridge",
+        name: "A drawbridge on a timeline: its deck swings down along a curve file while the \
+               winches turn, and its lamps blink by a looping tween of their glow",
+        // From inside the courtyard, outside the wisps' ring, the deck side-on.
+        eye: [-4.9, 2.4 + LIFT, 4.8],
+        target: [-2.38, 1.5 + LIFT, 8.89],
+        hour: 18.9,
+        // A second into the timeline: the deck about a third of the way down.
+        warmup_secs: 1.0,
+        on_arrive: &[BRIDGE_LOWER],
+        on_leave: &[],
+    },
+    DemoView {
+        key: "script_drawbridge_down",
+        name: "The drawbridge down: the curve's heavy landing and bounce are over, the timeline \
+               fired its thud, and the lamps fade back",
+        eye: [-4.9, 2.4 + LIFT, 4.8],
+        target: [-2.38, 1.0 + LIFT, 8.89],
+        hour: 18.9,
+        warmup_secs: 2.8,
+        on_arrive: &[BRIDGE_LOWER],
+        on_leave: &[],
     },
     DemoView {
         key: "script_paused",
@@ -836,6 +879,19 @@ pub fn spawn_demo(commands: &mut Commands, origin: DVec3) {
         Script::new(SEAL_SCRIPT),
     ));
     state_easel(commands, &at, SEAL_BOARD, SEAL_BOARD_YAW, SEAL_NAME);
+    // The drawbridge, built by its script and run by its timeline.
+    let [bx, _, bz] = BRIDGE;
+    commands.spawn((
+        Name::new(BRIDGE_NAME),
+        at(bx, 0.0, bz).with_rotation(Quat::from_rotation_y(BRIDGE_YAW)),
+        Interactable {
+            verb: "Lower or raise".into(),
+            reach_m: 3.5,
+            offset: Vec3::new(0.0, 1.0, 1.2),
+            ..Default::default()
+        },
+        Script::new(BRIDGE_SCRIPT).with_props(serde_json::json!({ "span": 3.4, "width": 2.2 })),
+    ));
     let [px, _, pz] = PATROL;
     commands.spawn((
         Name::new(PATROL_NAME),

@@ -32,7 +32,8 @@ return Lantern
 Every engine function is there as `module.verb(args)` (`fire.ignite`, `weather.set`,
 `npc.spawn`, ...), plus `world.find/spawn`, entity handles, `vec3`/`quat`, the `task` library
 (`wait`, `spawn`, `delay`, `defer`, `cancel`, `tween`, `wait_until`), `self:every`,
-`self:after`, `ease.*`, `input.pressed`, and `require("lib/name")` for shared modules.
+`self:after`, `ease.*`, tweens, springs and timelines (`self:tween`, `self:spring`,
+`self:timeline`), `input.pressed`, and `require("lib/name")` for shared modules.
 
 ## Many scripts at once: `parallel_update`
 
@@ -266,6 +267,88 @@ Seal.states = {
 - Each change keeps the script's values (props and its own fields). Click a change in the log
   and the panel beside it shows them as they were right after it, the ones that change set
   lit and what they are now beside them (PlayMaker's Debug Flow).
+
+## Tweens and timelines
+
+Doors swing, lifts rise, pickups bob, lights pulse, menus slide in: most of what a script
+animates is a value going somewhere over a set time. A **tween** moves values for you; the
+runtime runs every tween each frame, after `update`, so they cost no Lua time.
+
+```lua
+-- Over 0.8 s, out_back (past the end and back): an entity's position, rotation, scale, any
+-- component's field ("PointLight.intensity_lm"), its material's ("material.emissive"), or a
+-- table's fields.
+self:tween(self.door, { rotation = quat.euler(1.6) }, 0.8, { ease = "out_back" })
+self:tween(self.lamp, { ["PointLight.intensity_lm"] = 900 }, 0.3, { loops = -1, yoyo = true })
+self:tween(self.hud, { alpha = 0 }, 1, { delay = 2, done = function() self.hud_shown = false end })
+
+-- A sequence: `to` after the last step, `join` with it, `at` at a time of its own.
+self:sequence({ loops = -1 })
+	:to(self.lift, { position = vec3(0, 6, 0) }, 2, { ease = "in_out_cubic" })
+	:join(self.lamp, { ["material.emissive_strength"] = 40 }, 2)
+	:interval(1)
+	:call(function() self:emit("arrived") end)
+	:to(self.lift, { position = vec3(0, 0, 0) }, 2)
+```
+
+- Options: `ease` (a name, `ease.bezier(x1, y1, x2, y2)` as CSS, `ease.steps(n)`, a curve
+  file `"curves/drop"`, or a function), `delay`, `loops` (passes; -1 forever), `yoyo` (back
+  and forth), `speed`, `relative` (adds to the value), `from` (starts there),
+  `unscaled` (keeps going in slow motion), `paused`, `label` (shown in the editor) and `done`.
+- The handle: `:pause()`, `:play()`, `:kill()` (`:kill(true)` jumps to the end first),
+  `:restart()`, `:seek(s)`, `:speed(r)`, `:wait()` (in a task), and `.playing`, `.done`,
+  `.time`, `.length`, `.progress`. `tween.kill(entity)` stops whatever moves it.
+- A newer tween of the same value takes it over: tween a door open while it closes and it
+  turns round. Tweens stop with the script that made them and follow its `LocalTimeScale`.
+- Eases: `in_`, `out_`, `in_out_` and `out_in_` with `sine`, `quad`, `cubic`, `quart`,
+  `quint`, `expo`, `circ`, `back`, `elastic` or `bounce`, plus `linear`, `smooth`, `smoother`
+  and `spring`; out_quad when none is given. The Curves tab's Eases view shows them all
+  moving. `ease.out_back(x)` is a plain function too.
+
+**Springs** follow a goal that moves (a camera, a drone, a hand reaching for something):
+
+```lua
+function Drone:update(dt)
+	-- Each call gives it a new goal and keeps its speed. halflife: seconds to close half the
+	-- gap; bounce: 0 (none) to 0.9 (wobbly).
+	self:spring(self.entity, { position = self.target.position + vec3(0, 2, 0) }, { halflife = 0.3, bounce = 0.4 })
+end
+```
+
+**Curves** are `.curve` files here (JSON: keys with a time, a value, how the curve leaves it
+and its slope), drawn and edited in the editor's **Curves** tab. Keys are smooth without
+overshooting by themselves; `"tangent": "user"` or `"break"` gives them slopes of their own.
+`curve("curves/door_swing"):at(t)` reads one in code; a tween eases by one; a timeline plays
+them. Saving the file (or dragging a key in the editor) changes every script using it at once.
+
+**Timelines** are Unreal's: a few curves played together, with events at times on them,
+forward or backward from wherever they are.
+
+```lua
+Bridge.timelines = {
+	lower = {
+		tracks = { swing = "curves/drawbridge", winch = { { 0, 0 }, { 1.9, 1 } } },
+		events = { clank = { 0.05, 1.1 }, thud = 1.9 }, -- methods called as it passes them
+	},
+}
+
+function Bridge:on_lower(v) -- each frame it plays, each track's value
+	self.deck.rotation = quat.axis_angle(vec3(1, 0, 0), -1.4 * (1 - v.swing))
+end
+
+function Bridge:on_interact()
+	local tl = self:timeline("lower")
+	if tl.direction > 0 and tl.time > 0 then tl:reverse() else tl:play() end
+end
+```
+
+- `:play()`, `:play_from_start()`, `:reverse()`, `:reverse_from_end()`, `:stop()`,
+  `:seek(s, fire_events)`, `:set_rate(r)`, `:wait()`; `.time`, `.length`, `.playing`,
+  `.direction`, `.values`. `on_<name>_done(tl)` runs at either end. A timeline may also have
+  `length`, `loop = true`, `autoplay = true` and `rate`.
+- Hot reload rebuilds its tracks and keeps where it is. In the editor's Curves tab, select the
+  object to see its timelines with their playheads; click a track to edit its curve under the
+  playhead while it plays.
 
 ## In the editor's view: `construct`, gizmos and handles
 
@@ -562,6 +645,10 @@ have them.
   range and the seal's spread are handles too, and both draw gizmos.
 - `examples/scatter.luau`: stones scattered round an entity, built as you tune them, with Bake,
   Reseed and Clear buttons in its Details panel. `examples/scatter.test.luau` tests it.
+- `examples/drawbridge.luau`: a drawbridge on a timeline (`curves/drawbridge.curve` and keys
+  of its own), with events that clank and thud, raised from wherever it is; its lamps blink
+  by a tween. `examples/ease_race.luau`: six runners each easing its own way, a ring going
+  round a sequence and an orb following it on a spring. Each has a `.test.luau`.
 - `tools/line_up.luau`, `tools/vary.luau`: tools for the Scripts tab's Tools menu (line the
   selection up; give each a random turn and size).
 - `examples/pulse.graph`, `examples/hover.graph`: the same lamp and stone as visual scripts.

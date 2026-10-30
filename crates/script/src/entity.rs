@@ -98,7 +98,7 @@ pub(crate) fn free_own_materials(
 
 /// `entity:material(patch)`: the entity's material as a table, after merging `patch` into its
 /// own copy (made on the first patch).
-fn material(
+pub(crate) fn material(
     world: &mut World,
     e: Entity,
     patch: Option<serde_json::Value>,

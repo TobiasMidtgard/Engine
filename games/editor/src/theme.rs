@@ -196,6 +196,7 @@ mod tests {
             include_str!("graphs.rs"),
             include_str!("states.rs"),
             include_str!("rewind.rs"),
+            include_str!("curves.rs"),
         ];
         let faces: Vec<_> = [
             epaint_default_fonts::UBUNTU_LIGHT,

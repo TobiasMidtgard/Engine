@@ -57,6 +57,7 @@ pub enum Tab {
     Scripts,
     Graphs,
     Rewind,
+    Curves,
 }
 
 /// A message in the console.

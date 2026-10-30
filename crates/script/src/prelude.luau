@@ -115,34 +115,7 @@ function task.wait_for(entity: any, signal: string, timeout: number?): ...any
 	return
 end
 
--- Easing curves for task.tween, alpha 0..1 in and out.
-ease = {}
-function ease.linear(t: number): number
-	return t
-end
-function ease.in_quad(t: number): number
-	return t * t
-end
-function ease.out_quad(t: number): number
-	return 1 - (1 - t) * (1 - t)
-end
-function ease.in_out(t: number): number
-	return if t < 0.5 then 2 * t * t else 1 - (-2 * t + 2) ^ 2 / 2
-end
-function ease.out_back(t: number): number
-	local c1 = 1.70158
-	local c3 = c1 + 1
-	return 1 + c3 * (t - 1) ^ 3 + c1 * (t - 1) ^ 2
-end
-function ease.out_elastic(t: number): number
-	if t == 0 or t == 1 then
-		return t
-	end
-	return 2 ^ (-10 * t) * math.sin((t * 10 - 0.75) * (2 * math.pi) / 3) + 1
-end
-function ease.smooth(t: number): number
-	return t * t * (3 - 2 * t)
-end
+-- `ease` (easing curves for task.tween and tweens) is the runtime's (ease.rs).
 
 -- What every script instance can call on `self`, besides its own class's methods.
 local Base = {}

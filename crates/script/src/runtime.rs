@@ -58,6 +58,8 @@ pub(crate) struct Hooks {
     pub construct: bool,
     pub draw_gizmos: bool,
     pub draw_gizmos_selected: bool,
+    /// A `timelines` table: the engine plays them (`timelines.luau`).
+    pub timelines: bool,
 }
 
 impl Hooks {
@@ -83,6 +85,7 @@ impl Hooks {
             construct: has("construct"),
             draw_gizmos: has("draw_gizmos"),
             draw_gizmos_selected: has("draw_gizmos_selected"),
+            timelines: matches!(class.raw_get::<Value>("timelines"), Ok(Value::Table(_))),
         }
     }
 }
@@ -366,6 +369,7 @@ impl ScriptRuntime {
         crate::math::install(&lua)?;
         crate::entity::install(&lua)?;
         crate::draw::install(&lua)?;
+        crate::tween::install(&lua)?;
         crate::bind::install(&lua, api)?;
         install_tasks(&lua)?;
         install_require(&lua)?;
@@ -380,6 +384,12 @@ impl ScriptRuntime {
         lua.load(include_str!("states.luau"))
             .set_name("@engine/states.luau")
             .exec()?;
+        lua.load(include_str!("tween.luau"))
+            .set_name("@engine/tween.luau")
+            .exec()?;
+        lua.load(include_str!("timelines.luau"))
+            .set_name("@engine/timelines.luau")
+            .exec()?;
         let base: Table = g.get("__script_base")?;
         lua.set_named_registry_value(BASE, base)?;
         for internal in [
@@ -392,6 +402,13 @@ impl ScriptRuntime {
             "__script_stopped",
             "__script_parallel",
             "__script_emit",
+            "__tween_to",
+            "__tween_seq",
+            "__tween_add",
+            "__tween_spring",
+            "__tween_ctl",
+            "__tween_info",
+            "__tween_kill",
         ] {
             g.raw_set(internal, Value::Nil)?;
         }
@@ -717,7 +734,9 @@ impl ScriptRuntime {
         let updating: Vec<Entity> = self
             .instances
             .iter()
-            .filter(|(_, i)| i.enabled && i.started && (i.hooks.update || i.hooks.states))
+            .filter(|(_, i)| {
+                i.enabled && i.started && (i.hooks.update || i.hooks.states || i.hooks.timelines)
+            })
             .map(|(e, _)| *e)
             .collect();
         for e in updating {
@@ -730,9 +749,12 @@ impl ScriptRuntime {
                 w.resource::<Time>().delta_for(w.get::<LocalTimeScale>(e)) as f64
             };
             let t0 = Instant::now();
-            let (update, states, clock) = self.instances.get(&e).map_or((false, false, 0.0), |i| {
-                (i.hooks.update, i.hooks.states, i.clock)
-            });
+            let (update, states, timelines, clock) = self
+                .instances
+                .get(&e)
+                .map_or((false, false, false, 0.0), |i| {
+                    (i.hooks.update, i.hooks.states, i.hooks.timelines, i.clock)
+                });
             if update {
                 self.call_hook(e, "update", dt_e, settings);
             }
@@ -740,15 +762,79 @@ impl ScriptRuntime {
                 // Its states' updates, timers and conditions, after `update`.
                 self.call_hook(e, "__states_tick", (dt_e, clock), settings);
             }
+            if timelines {
+                self.call_hook(e, "__timelines_tick", dt_e, settings);
+            }
             if let Some(i) = self.instances.get_mut(&e) {
                 let ms = t0.elapsed().as_secs_f32() * 1000.0;
                 i.ms = i.ms * 0.9 + ms * 0.1;
             }
         }
+        if !self.debugger.stopped() {
+            self.run_tweens(w(), settings);
+        }
         self.run_tasks(now, settings);
         if !self.debugger.stopped() {
             self.draw_gizmos(w(), settings);
         }
+    }
+
+    /// The tweens' frame (after the scripts' updates, before their tasks, so a task waiting on
+    /// a tween goes on the frame it ends); their callbacks run as tasks of their scripts.
+    fn run_tweens(&mut self, world: &mut World, settings: &ScriptSettings) {
+        let ran = crate::tween::run(&self.lua, world);
+        for (owner, message) in ran.errors {
+            let path = owner
+                .and_then(|o| self.instances.get(&o))
+                .map(|i| i.path.clone());
+            push_error(&self.lua, path.as_deref(), owner, &message);
+        }
+        for (owner, f) in ran.calls {
+            if owner.is_none_or(|o| self.instances.contains_key(&o)) {
+                self.spawn_function(owner, f, MultiValue::new(), settings);
+            }
+        }
+    }
+
+    /// How many tweens and springs run (every VM's).
+    pub fn tween_count(&self) -> usize {
+        self.vms().map(|vm| crate::tween::count(&vm.lua)).sum()
+    }
+
+    /// The running tweens (every VM's), for the editor.
+    pub fn tweens(&self) -> Vec<crate::tween::TweenRow> {
+        self.vms()
+            .flat_map(|vm| crate::tween::rows(&vm.lua))
+            .collect()
+    }
+
+    /// The entities whose scripts declare timelines.
+    pub fn with_timelines(&self) -> Vec<Entity> {
+        let mut out: Vec<Entity> = self
+            .vms()
+            .flat_map(|vm| {
+                vm.instances
+                    .iter()
+                    .filter(|(_, i)| i.hooks.timelines)
+                    .map(|(e, _)| *e)
+            })
+            .collect();
+        out.sort();
+        out
+    }
+
+    /// The timelines of `e`'s script: where each is, its tracks and events (the editor's
+    /// Curves tab).
+    pub fn timelines_of(&self, world: &mut World, e: Entity) -> Vec<crate::tween::TimelineInfo> {
+        for vm in self.vms() {
+            if let Some(i) = vm.instances.get(&e) {
+                if !i.hooks.timelines {
+                    return Vec::new();
+                }
+                return crate::tween::timelines_now(&vm.lua, world, &i.this);
+            }
+        }
+        Vec::new()
     }
 
     /// The gizmo hooks of the scripts [`crate::ScriptGizmos`] asks for, each in its entity's
@@ -1455,6 +1541,7 @@ impl ScriptRuntime {
             });
         }
         self.tasks.retain(|t| t.owner != Some(e));
+        crate::tween::forget_owner(&self.lua, e);
         self.drop_listeners(e);
         if let Some(i) = self.instances.remove(&e) {
             let _ = self.lua.remove_registry_value(i.this);
@@ -1793,6 +1880,7 @@ impl ScriptRuntime {
         }
         self.adopt_new_tasks();
         self.tasks.retain(|t| t.owner != Some(e));
+        crate::tween::forget_owner(&self.lua, e);
         self.drop_listeners(e);
         let message = match result {
             Ok(()) => return,
@@ -2469,7 +2557,12 @@ impl ScriptRuntime {
 
     /// Checks every loaded file's modification time and reloads those that changed.
     fn poll_files(&mut self, world: &mut World, settings: &ScriptSettings) {
-        let _ = world;
+        // Curves too: a tween or timeline playing one follows the file.
+        if self.role == 0
+            && let Some(mut curves) = world.get_resource_mut::<crate::curve::ScriptCurves>()
+        {
+            curves.poll();
+        }
         let changed: Vec<String> = {
             let mut files = self
                 .lua

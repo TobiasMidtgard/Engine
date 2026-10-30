@@ -9152,7 +9152,7 @@ pub fn rewind_shots(dir: String) -> ShotScript {
         Step::Do(Box::new(setup)),
         Step::Tool(crate::editor::Tool::Select),
         Step::Select(""),
-        Step::Camera(DVec3::new(0.6, 6.6, 11.8), DVec3::new(0.2, 1.3, -0.2)),
+        Step::Camera(DVec3::new(0.4, 4.2, 7.0), DVec3::new(0.3, 1.0, -0.2)),
         Step::Wait(24),
         // Play: every script recorded as it runs (the Live playhead at the right).
         Step::Do(Box::new(|world: &mut World, ed: &mut Editor| {
@@ -9205,6 +9205,189 @@ fn rewind_layout() -> DockState<Tab> {
     let mut dock = DockState::new(vec![Tab::Viewport]);
     let surface = dock.main_surface_mut();
     let [_view, _rewind] = surface.split_below(NodeIndex::root(), 0.52, vec![Tab::Rewind]);
+    dock
+}
+
+// ----------------------------------------------------------------------------- tween shots
+
+const TWEEN_BRIDGE_AT: DVec3 = DVec3::new(-2.6, 0.0, 0.4);
+const TWEEN_RACE_AT: DVec3 = DVec3::new(1.4, 0.0, -6.2);
+
+/// The Curves tab: a drawbridge on a timeline and the ease race play; the game paused part way
+/// down shows the bridge's curve with the timeline's playhead and events, the landing key's
+/// broken tangent, a key dragged (the bridge follows at once), a key's menu, the ease gallery
+/// and the tweens running. `editor --headless --size 1920x1080 --shots <dir> --script tweens`.
+pub fn tweens_shots(dir: String) -> ShotScript {
+    let _ = std::fs::create_dir_all(&dir);
+    let root = std::fs::canonicalize(&dir)
+        .unwrap_or_else(|_| std::env::current_dir().unwrap_or_default().join(&dir))
+        .join("scripts");
+    let setup = move |world: &mut World, editor: &mut Editor| {
+        editor.icons = false;
+        dusk_sky(world);
+        let scripts = engine_script::scripts_root(world);
+        copy_dir(&scripts.join(EXAMPLES), &root.join(EXAMPLES));
+        copy_dir(&scripts.join("curves"), &root.join("curves"));
+        world.resource_mut::<ScriptSettings>().folder = root.to_string_lossy().to_string();
+        world.remove_resource::<ScriptRuntime>();
+        let script = |path: &str, props: Value| {
+            (
+                "Script",
+                serde_json::to_value(Script::new(path).with_props(props)).unwrap_or_default(),
+            )
+        };
+        editor::spawn_with(
+            world,
+            editor,
+            "Drawbridge".into(),
+            vec![script(
+                "examples/drawbridge.luau",
+                json!({"span": 4.2, "width": 2.4}),
+            )],
+            Transform::from_translation(TWEEN_BRIDGE_AT).with_rotation(
+                engine::core::math::Quat::from_rotation_y(std::f32::consts::FRAC_PI_2),
+            ),
+        );
+        editor::spawn_with(
+            world,
+            editor,
+            "Ease race".into(),
+            vec![script(
+                "examples/ease_race.luau",
+                json!({"length": 4.5, "secs": 1.4}),
+            )],
+            Transform::from_translation(TWEEN_RACE_AT),
+        );
+        world.resource_mut::<EditorDock>().0 = curves_layout();
+        world.resource_mut::<ScriptsTab>().files_next = 0.0;
+    };
+    let eval = |code: &'static str| {
+        move |world: &mut World, _: &mut Editor| {
+            if let Err(e) = call_api(world, "script.eval", json!({ "code": code })) {
+                engine::core::log::warn!("tween shots: {code}: {e}");
+            }
+        }
+    };
+    let curves = |f: fn(&mut crate::curves::CurvesTab)| {
+        move |world: &mut World, _: &mut Editor| {
+            f(&mut world.resource_mut::<crate::curves::CurvesTab>());
+        }
+    };
+    // The pointer on something the Curves tab drew; with `button`, clicked there.
+    let pointer = |what: &'static str, button: Option<egui::PointerButton>| {
+        move |world: &mut World, _: &mut Editor| {
+            let Some(r) = world
+                .get_resource::<crate::curves::CurvesTab>()
+                .and_then(|t| t.drawn_at.get(what).copied())
+            else {
+                return;
+            };
+            let at = r.center();
+            let input = &mut world
+                .resource_mut::<crate::egui_bridge::EguiInput>()
+                .injected;
+            input.push(egui::Event::PointerMoved(at));
+            if let Some(button) = button {
+                for pressed in [true, false] {
+                    input.push(egui::Event::PointerButton {
+                        pos: at,
+                        button,
+                        pressed,
+                        modifiers: Modifiers::NONE,
+                    });
+                }
+            }
+        }
+    };
+    let steps = vec![
+        Step::Do(Box::new(setup)),
+        Step::Tool(crate::editor::Tool::Select),
+        Step::Select(""),
+        Step::Camera(DVec3::new(2.2, 5.6, 8.4), DVec3::new(1.6, 0.9, -2.0)),
+        Step::Wait(24),
+        Step::Do(Box::new(|world: &mut World, ed: &mut Editor| {
+            editor::play(world, ed);
+        })),
+        Step::Wait(20),
+        // Lowering, paused 1.15 s into its timeline: the deck part way down, the lamps lit.
+        Step::Do(Box::new(eval(
+            "local b = world.find('Drawbridge').script b:raise_now() b:toggle()",
+        ))),
+        Step::Wait(6),
+        Step::Do(Box::new(eval(
+            "world.find('Drawbridge').script:timeline('lower'):seek(1.15)",
+        ))),
+        Step::Do(Box::new(|world: &mut World, ed: &mut Editor| {
+            editor::pause(world, ed);
+        })),
+        Step::Select("Drawbridge"),
+        Step::Do(Box::new(|world: &mut World, _: &mut Editor| {
+            if let Some(e) = crate::shots::find(world, "Drawbridge") {
+                crate::curves::show_track(world, e, "lower", "swing");
+            }
+        })),
+        Step::Wait(6),
+        Step::Shot("tweens_01_timeline_on_its_curve"),
+        // The landing key: its two tangents set apart (fast in, a bounce out).
+        Step::Do(Box::new(curves(|t| t.picked = Some(2)))),
+        Step::Wait(3),
+        Step::Shot("tweens_02_landing_key_tangents"),
+        // The second key raised: the deck starts faster, and the paused bridge moves with it.
+        Step::Do(Box::new(curves(|t| {
+            t.picked = Some(1);
+            t.edit(|c| c.keys[1].v = 0.46);
+        }))),
+        Step::Wait(3),
+        Step::Do(Box::new(eval(
+            "world.find('Drawbridge').script:timeline('lower'):seek(1.15)",
+        ))),
+        Step::Wait(4),
+        Step::Shot("tweens_03_key_dragged_live"),
+        // A key's menu: how the curve leaves it, and its tangent.
+        Step::Do(Box::new(pointer(
+            "key 2",
+            Some(egui::PointerButton::Secondary),
+        ))),
+        Step::Wait(3),
+        Step::Shot("tweens_04_key_menu"),
+        Step::Do(Box::new(pointer(
+            "canvas",
+            Some(egui::PointerButton::Primary),
+        ))),
+        Step::Wait(2),
+        // Every named ease, moving.
+        Step::Do(Box::new(curves(|t| t.view = crate::curves::View::Eases))),
+        Step::Wait(8),
+        Step::Shot("tweens_05_ease_gallery"),
+        // Going on: the runners race, the orb springs after the ring, the list shows each.
+        Step::Do(Box::new(curves(|t| t.view = crate::curves::View::Curve))),
+        Step::Do(Box::new(|world: &mut World, ed: &mut Editor| {
+            editor::play(world, ed);
+        })),
+        Step::Select("Ease race"),
+        Step::Wait(14),
+        Step::Do(Box::new(|world: &mut World, ed: &mut Editor| {
+            editor::pause(world, ed);
+        })),
+        Step::Wait(3),
+        Step::Shot("tweens_06_tweens_running"),
+        // The winch's keys are in the script: shown, with Save as file.
+        Step::Do(Box::new(|world: &mut World, _: &mut Editor| {
+            if let Some(e) = crate::shots::find(world, "Drawbridge") {
+                crate::curves::show_track(world, e, "lower", "winch");
+            }
+        })),
+        Step::Wait(4),
+        Step::Shot("tweens_07_keys_in_the_script"),
+    ];
+    ShotScript::new(dir, steps)
+}
+
+/// The Curves shots' layout: the scene view over the Curves tab, full width.
+fn curves_layout() -> DockState<Tab> {
+    let mut dock = DockState::new(vec![Tab::Viewport]);
+    let surface = dock.main_surface_mut();
+    let [_view, _curves] = surface.split_below(NodeIndex::root(), 0.46, vec![Tab::Curves]);
     dock
 }
 

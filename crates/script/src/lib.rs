@@ -223,6 +223,23 @@
 //! `{events, kind}`). Nothing is replayed: the world isn't recorded, so the game goes on from
 //! where it is. How it works: `src/rewind.rs`.
 //!
+//! ## Tweens and timelines
+//!
+//! `self:tween(target, {position = ..., ["PointLight.intensity_lm"] = ...}, secs, opts)` moves
+//! an entity's transform, any registered component's field, its material's fields or a
+//! table's fields over time; `self:sequence()` chains steps (`to`, `join`, `at`, `interval`,
+//! `call`, as DOTween's Append, Join and Insert); `self:spring(target, {position = goal})`
+//! follows a goal that moves (an exact damped spring set by its halflife, as in Daniel
+//! Holden's *Spring-It-On*). They run in Rust each frame after `update` ([`tween`]); a newer
+//! tween of a value takes it over, and they stop with their script. Eases ([`ease`]) are
+//! Penner's families, CSS's `cubic-bezier` and `steps`, a curve or a function. Curves
+//! ([`curve`]) are `.curve` files of keys (monotone auto tangents, Fritsch and Carlson; user
+//! and broken slopes; hold, loop and pingpong outside), kept loaded and hot reloaded by
+//! [`ScriptCurves`]. A class's `timelines` table declares Unreal-style timelines: curves as
+//! tracks and method names at times as events, played forward or backward from where they are
+//! (`timelines.luau`). The editor's Curves tab edits the curves live and shows the timelines'
+//! playheads and the tweens running.
+//!
 //! ## State machines
 //!
 //! A class's `states` table (`initial`, nested `states`, `history`, and per state `on`, `after`,
@@ -299,12 +316,14 @@ mod api;
 mod bind;
 pub mod board;
 mod convert;
+pub mod curve;
 mod dap;
 pub mod debug;
 mod debugger;
 pub mod demo;
 pub mod diagram;
 mod draw;
+pub mod ease;
 pub mod editing;
 mod entity;
 pub mod graph;
@@ -319,6 +338,7 @@ mod runtime;
 pub mod state_board;
 pub mod states;
 pub mod testing;
+pub mod tween;
 mod types;
 
 use std::path::PathBuf;
@@ -327,6 +347,7 @@ use bevy_ecs::prelude::*;
 use engine_core::prelude::*;
 
 pub use access::ScriptError;
+pub use curve::ScriptCurves;
 pub use editing::ScriptsHeld;
 pub use entity::OwnMaterial;
 pub use rewind::ScriptRewind;
@@ -513,7 +534,8 @@ impl Plugin for ScriptPlugin {
             app.insert_resource(ScriptSettings::default());
         }
         app.init_resource::<states::StateBreakpoints>()
-            .init_resource::<ScriptGizmos>();
+            .init_resource::<ScriptGizmos>()
+            .init_resource::<ScriptCurves>();
         app.register_component::<Script>(
             "Runs a Luau script from assets/scripts on this entity: path (\"showcase/lantern.luau\"), \
              props (JSON over the script's defaults), enabled.",
@@ -685,7 +707,10 @@ fn run_scripts(world: &mut World) {
         .is_none();
     let has_work = world.get_resource::<ScriptRuntime>().is_some_and(|rt| {
         // A debugger client may attach before the first script spawns.
-        rt.task_count() > 0 || rt.instance_count() > 0 || rt.debugger.listening()
+        rt.task_count() > 0
+            || rt.instance_count() > 0
+            || rt.tween_count() > 0
+            || rt.debugger.listening()
     });
     if !has_scripts && !has_work {
         return;

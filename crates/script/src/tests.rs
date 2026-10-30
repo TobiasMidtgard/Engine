@@ -4470,3 +4470,312 @@ fn the_rewind_recorder_keeps_what_each_script_did_frame_by_frame() {
         frames
     );
 }
+
+const TWEENER: &str = r#"
+local Tweener = {}
+
+function Tweener:start()
+	self.glow = 0
+	self.peak = 0
+	self.log = {}
+	self.door = world.find("Door")
+	self.lift = world.find("Lift")
+	self.slow = world.find("Slow")
+	-- An entity's position, linear over a second, then a callback.
+	self.move = self:tween(self.door, { position = vec3(4, 0, 0) }, 1, {
+		ease = "linear",
+		done = function()
+			table.insert(self.log, "moved")
+		end,
+	})
+	-- A field of self, overshooting.
+	self:tween(self, { glow = 1 }, 0.5, { ease = ease.out_back })
+	-- A sequence: up, a call, then 2 m along x from wherever it is.
+	self:sequence()
+		:to(self.lift, { position = vec3(0, 1, 0) }, 0.5, { ease = "linear" })
+		:call(function()
+			table.insert(self.log, "up")
+		end)
+		:to(self.lift, { position = vec3(2, 0, 0) }, 0.5, { ease = "linear", relative = true })
+	-- A component's field.
+	self:tween(self.slow, { ["LocalTimeScale.factor"] = 0.25 }, 0.5, { ease = "linear" })
+end
+
+function Tweener:update()
+	self.peak = math.max(self.peak, self.glow)
+end
+
+return Tweener
+"#;
+
+fn spawn_at(app: &mut App, name: &str, at: DVec3) -> Entity {
+    app.world
+        .spawn((Name::new(name.to_string()), Transform::from_translation(at)))
+        .id()
+}
+
+/// Tweens move entities, a script's own fields and components' fields, through their eases;
+/// sequences run their steps in order with calls between; a newer tween takes a value over.
+#[test]
+fn tweens_and_sequences_move_values_over_time() {
+    let folder = Folder::new();
+    folder.write("tweener.luau", TWEENER);
+    let mut app = app_in(&folder.0);
+    let door = spawn_at(&mut app, "Door", DVec3::ZERO);
+    let lift = spawn_at(&mut app, "Lift", DVec3::ZERO);
+    let slow = app
+        .world
+        .spawn((
+            Name::new("Slow"),
+            Transform::default(),
+            LocalTimeScale {
+                factor: 1.0,
+                ignore_world_dilation: false,
+            },
+        ))
+        .id();
+    spawn_script(&mut app, "Tweener", "tweener.luau");
+    let x = |app: &App, e: Entity| app.world.get::<Transform>(e).unwrap().translation;
+    // The start frame, then half a second (the tween starts the frame after it's made).
+    app.update_n(2 + 15);
+    assert!(errors(&mut app).is_empty(), "{:?}", errors(&mut app));
+    let half = x(&app, door).x;
+    assert!((half - 2.0).abs() < 0.2, "half way at half time: {half}");
+    assert!((x(&app, lift).y - 1.0).abs() < 0.1, "{}", x(&app, lift));
+    app.update_n(20);
+    assert!((x(&app, door).x - 4.0).abs() < 1e-9, "{}", x(&app, door));
+    let lifted = x(&app, lift);
+    assert!(
+        (lifted - DVec3::new(2.0, 1.0, 0.0)).length() < 1e-6,
+        "up, then 2 m along: {lifted}"
+    );
+    let factor = app.world.get::<LocalTimeScale>(slow).unwrap().factor;
+    assert!((factor - 0.25).abs() < 1e-6, "{factor}");
+    assert_eq!(
+        eval(&mut app, "return world.find('Tweener').script.log"),
+        json!(["up", "moved"])
+    );
+    let peak = eval(&mut app, "return world.find('Tweener').script.peak");
+    assert!(peak.as_f64().unwrap() > 1.05, "out_back overshoots: {peak}");
+    assert_eq!(
+        eval(&mut app, "return world.find('Tweener').script.glow"),
+        json!(1)
+    );
+    assert!(eval(&mut app, "return world.find('Tweener').script.move.done") == json!(true));
+
+    // A newer tween on the same value takes it over; the older one stops moving it.
+    eval(
+        &mut app,
+        "local d = world.find('Door')
+         tween.to(d, { position = vec3(0, 0, 0) }, 10, { ease = 'linear', label = 'slow' })
+         tween.to(d, { position = vec3(0, 3, 0) }, 0.2, { ease = 'linear' })",
+    );
+    app.update_n(12);
+    assert!(
+        (x(&app, door) - DVec3::new(0.0, 3.0, 0.0)).length() < 1e-6,
+        "{}",
+        x(&app, door)
+    );
+    let rows = app.world.resource::<ScriptRuntime>().tweens();
+    assert!(
+        rows.is_empty(),
+        "the slow one lost its only value: {rows:?}"
+    );
+
+    // Loops and yoyo: there and back, twice.
+    eval(
+        &mut app,
+        "tween.to(world.find('Door'), { position = vec3(1, 3, 0) }, 0.2, { ease = 'linear', loops = 4, yoyo = true })",
+    );
+    // Its first frame starts it; three more are 0.1 s.
+    app.update_n(1 + 3);
+    assert!((x(&app, door).x - 0.5).abs() < 0.05, "{}", x(&app, door));
+    app.update_n(7);
+    assert!(x(&app, door).x < 0.4, "on its way back: {}", x(&app, door));
+    app.update_n(30);
+    assert!(
+        x(&app, door).x.abs() < 1e-6,
+        "back where it began: {}",
+        x(&app, door)
+    );
+
+    // Mistakes are said where they're made.
+    let err = eval(
+        &mut app,
+        "local ok, err = pcall(tween.to, world.find('Door'), { postion = vec3(1, 0, 0) }, 1)
+         return tostring(err)",
+    );
+    assert!(
+        err.as_str().unwrap().contains("can't tween \"postion\""),
+        "{err}"
+    );
+    let err = eval(
+        &mut app,
+        "local ok, err = pcall(tween.to, world.find('Door'), { position = vec3(1, 0, 0) }, 1, { ease = 'out_wobble' })
+         return tostring(err)",
+    );
+    assert!(
+        err.as_str().unwrap().contains("no ease \"out_wobble\""),
+        "{err}"
+    );
+}
+
+/// A spring follows its goal without overshooting (critically damped), and calling it again
+/// moves the goal; a bouncy one overshoots.
+#[test]
+fn springs_follow_their_goal() {
+    let folder = Folder::new();
+    let mut app = app_in(&folder.0);
+    let ball = spawn_at(&mut app, "Ball", DVec3::ZERO);
+    let bob = spawn_at(&mut app, "Bob", DVec3::ZERO);
+    eval(
+        &mut app,
+        "tween.spring(world.find('Ball'), { position = vec3(3, 0, 0) }, { halflife = 0.1 })
+         tween.spring(world.find('Bob'), { position = vec3(3, 0, 0) }, { halflife = 0.2, bounce = 0.6 })",
+    );
+    let mut ball_max = 0.0f64;
+    let mut bob_max = 0.0f64;
+    for _ in 0..30 {
+        app.update();
+        ball_max = ball_max.max(app.world.get::<Transform>(ball).unwrap().translation.x);
+        bob_max = bob_max.max(app.world.get::<Transform>(bob).unwrap().translation.x);
+    }
+    assert!(
+        ball_max <= 3.0 + 1e-6,
+        "critical: no overshoot ({ball_max})"
+    );
+    assert!(bob_max > 3.05, "bouncy: past the goal ({bob_max})");
+    let x = app.world.get::<Transform>(ball).unwrap().translation.x;
+    assert!((x - 3.0).abs() < 0.01, "{x}");
+    eval(
+        &mut app,
+        "tween.spring(world.find('Ball'), { position = vec3(-1, 0, 0) }, { halflife = 0.1 })",
+    );
+    app.update_n(45);
+    let x = app.world.get::<Transform>(ball).unwrap().translation.x;
+    assert!((x + 1.0).abs() < 1e-3, "{x}");
+}
+
+const TIMELINE_DOOR: &str = r#"
+local Door = {}
+Door.timelines = {
+	open = {
+		tracks = {
+			swing = { { 0, 0, "linear" }, { 1, 1 } },
+			glow = "curves/glow.curve",
+		},
+		events = { creak = 0.25, thud = 1 },
+	},
+}
+
+function Door:start()
+	self.events = {}
+	self.swing = 0
+	self.glow = 0
+end
+
+function Door:on_open(v)
+	self.swing = v.swing
+	self.glow = v.glow
+end
+
+function Door:creak()
+	table.insert(self.events, "creak")
+end
+
+function Door:thud()
+	table.insert(self.events, "thud")
+end
+
+function Door:on_open_done(tl)
+	table.insert(self.events, "done " .. tl.direction)
+end
+
+return Door
+"#;
+
+/// A class's timelines play their tracks (keys in the script, or a .curve file that follows
+/// edits), call their events' methods as they pass them either way, and say when they end.
+#[test]
+fn timelines_play_tracks_and_events_both_ways() {
+    let folder = Folder::new();
+    folder.write("door.luau", TIMELINE_DOOR);
+    folder.write(
+        "curves/glow.curve",
+        r#"{ "keys": [ { "t": 0, "v": 0, "interp": "linear" }, { "t": 1, "v": 2 } ] }"#,
+    );
+    let mut app = app_in(&folder.0);
+    let door = spawn_script(&mut app, "Door", "door.luau");
+    app.update_n(2);
+    eval(
+        &mut app,
+        "world.find('Door').script:timeline('open'):play()",
+    );
+    app.update_n(15);
+    assert!(errors(&mut app).is_empty(), "{:?}", errors(&mut app));
+    let get = |app: &mut App, k: &str| eval(app, &format!("return world.find('Door').script.{k}"));
+    let swing = get(&mut app, "swing").as_f64().unwrap();
+    assert!((swing - 0.5).abs() < 0.05, "{swing}");
+    let glow = get(&mut app, "glow").as_f64().unwrap();
+    assert!((glow - 1.0).abs() < 0.1, "{glow}");
+    assert_eq!(get(&mut app, "events"), json!(["creak"]));
+    app.update_n(20);
+    assert_eq!(get(&mut app, "swing"), json!(1));
+    assert_eq!(get(&mut app, "events"), json!(["creak", "thud", "done 1"]));
+
+    // The editor sees where it is, its tracks and events.
+    let tl = app
+        .world
+        .resource_scope(|world, rt: Mut<ScriptRuntime>| rt.timelines_of(world, door));
+    assert_eq!(tl.len(), 1);
+    assert_eq!(tl[0].name, "open");
+    assert_eq!(tl[0].length, 1.0);
+    assert_eq!(tl[0].tracks.len(), 2);
+    assert_eq!(tl[0].events.len(), 2);
+
+    // Back from the end: creak again, then done backward.
+    eval(
+        &mut app,
+        "world.find('Door').script:timeline('open'):reverse()",
+    );
+    app.update_n(40);
+    assert_eq!(get(&mut app, "swing"), json!(0));
+    assert_eq!(
+        get(&mut app, "events"),
+        json!(["creak", "thud", "done 1", "creak", "done -1"])
+    );
+
+    // The curve file changes: the next play follows it.
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    folder.write(
+        "curves/glow.curve",
+        r#"{ "keys": [ { "t": 0, "v": 5, "interp": "constant" }, { "t": 1, "v": 5 } ] }"#,
+    );
+    app.update_n(2);
+    eval(
+        &mut app,
+        "world.find('Door').script:timeline('open'):play_from_start()",
+    );
+    app.update_n(3);
+    assert_eq!(get(&mut app, "glow"), json!(5));
+}
+
+/// Eases by name, CSS beziers and curves made from keys.
+#[test]
+fn eases_and_curves_for_scripts() {
+    let folder = Folder::new();
+    let mut app = app_in(&folder.0);
+    assert_eq!(eval(&mut app, "return ease.out_cubic(0.5)"), json!(0.875));
+    assert_eq!(eval(&mut app, "return ease.in_out(0.25)"), json!(0.125));
+    let b = eval(&mut app, "return ease.bezier(0.42, 0, 0.58, 1)(0.5)");
+    assert!((b.as_f64().unwrap() - 0.5).abs() < 1e-5, "{b}");
+    assert_eq!(
+        eval(&mut app, "return curve({ {0, 0}, {1, 2} }):at(0.5)"),
+        json!(1)
+    );
+    assert_eq!(
+        eval(&mut app, "return curve({ {0, 0}, {2, 4} }).length"),
+        json!(2)
+    );
+    assert_eq!(eval(&mut app, "return #ease.names()"), json!(44));
+}
