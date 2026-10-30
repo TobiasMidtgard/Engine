@@ -548,6 +548,92 @@ fn far_noise(p: PlanetGpu, rel: vec3<f32>, pixel: f32) -> vec2<f32> {
     return mix(vec2<f32>(0.5), vec2<f32>(a, b) / max(norm, 1e-4), saturate(norm * 4.0));
 }
 
+// Farmland seen from the air: fields in regions a few kilometers across (a village's or an
+// estate's land), each region with its own field size and lay. Most regions are laid out in
+// long strips across a few hundred meters (medium and large fields, 2.5-100 ha, Lesiv et al.
+// 2019), split into fields of their own crops; field edges are grass margins or hedgerows, and
+// tracks run between the regions. Coordinates are meters on the planet's cube face under the
+// point (gnomonic), relative to the region's middle (f32 keeps half a meter there).
+struct Fields {
+    crop: f32,    // which crop, 0..1
+    present: f32, // 0..1: whether the field is farmed (against the farmland's share)
+    edge: f32,    // distance to the field's edge, meters
+    track: f32,   // distance to the region's edge (a track or lane), meters
+    rows: f32,    // across the field in meters, for the tramlines
+    hedged: f32,  // 1 where fields are hedged (old enclosures)
+}
+
+const FIELD_REGION_M: f32 = 5000.0;
+
+fn fields(p: PlanetGpu, rel: vec3<f32>) -> Fields {
+    let local = transpose(planet_rot(p)) * (rel - p.center.xyz);
+    let a = abs(local);
+    var uv: vec2<f32>;
+    var face: f32;
+    if (a.x >= a.y && a.x >= a.z) {
+        uv = local.yz / a.x;
+        face = select(0.0, 1.0, local.x < 0.0);
+    } else if (a.y >= a.z) {
+        uv = local.xz / a.y;
+        face = select(2.0, 3.0, local.y < 0.0);
+    } else {
+        uv = local.xy / a.z;
+        face = select(4.0, 5.0, local.z < 0.0);
+    }
+    let m = uv * p.center.w;
+    // The region: the nearest of jittered points a region apart, and how far its edge is.
+    let rc = m / FIELD_REGION_M;
+    let ic = floor(rc);
+    var d1 = 1e9;
+    var d2 = 1e9;
+    var seed = vec2<f32>(0.0);
+    var cell = vec2<f32>(0.0);
+    for (var j = -1; j <= 1; j++) {
+        for (var i = -1; i <= 1; i++) {
+            let c = ic + vec2<f32>(f32(i), f32(j));
+            let s = c + 0.15 + 0.7 * vec2<f32>(hash13(vec3<f32>(c, face * 7.0 + 0.5)), hash13(vec3<f32>(c, face * 7.0 + 3.5)));
+            let d = length(rc - s);
+            if (d < d1) {
+                d2 = d1;
+                d1 = d;
+                seed = s;
+                cell = c;
+            } else if (d < d2) {
+                d2 = d;
+            }
+        }
+    }
+    let rh = hash13(vec3<f32>(cell, face * 7.0 + 5.5));
+    let rh2 = hash13(vec3<f32>(cell.yx, face * 7.0 + 1.5));
+    // The region's lay: one direction for its strips, and their width.
+    let angle = rh * 3.14159265;
+    let width = mix(110.0, 380.0, rh2 * rh2);
+    let rel_m = m - seed * FIELD_REGION_M;
+    let q = vec2<f32>(cos(angle) * rel_m.x + sin(angle) * rel_m.y, -sin(angle) * rel_m.x + cos(angle) * rel_m.y);
+    // Strips side by side, each cut across into fields of its own length.
+    let col_i = floor(q.x / width);
+    let ch = hash13(vec3<f32>(col_i, rh * 913.0, 2.5));
+    let len = width * mix(0.8, 3.2, ch);
+    let along = q.y / len + hash13(vec3<f32>(col_i, rh * 913.0, 4.5));
+    let row_j = floor(along);
+    let fx = q.x / width - col_i;
+    let fy = along - row_j;
+    // Some fields are split down the middle between two crops.
+    let split = select(0.0, step(0.5, fx) + 1.0, hash13(vec3<f32>(col_i, row_j, rh * 37.0 + 6.5)) < 0.3);
+    var edge = min(min(fx, 1.0 - fx) * width, min(fy, 1.0 - fy) * len);
+    if (split > 0.0) {
+        edge = min(edge, abs(fx - 0.5) * width);
+    }
+    var out: Fields;
+    out.crop = hash13(vec3<f32>(col_i * 3.0 + split, row_j, rh * 131.0 + 8.5));
+    out.present = hash13(vec3<f32>(col_i * 3.0 + split, row_j, rh * 131.0 + 9.5));
+    out.edge = edge;
+    out.track = (d2 - d1) * 0.5 * FIELD_REGION_M;
+    out.rows = q.x;
+    out.hedged = step(0.62, 1.0 - rh2 + (rh - 0.5) * 0.3);
+    return out;
+}
+
 // The planet's look from afar (far_look.rs) at planet-local direction `d`, filtered to the
 // pixel's footprint: linear albedo, and in alpha where molten rock glows.
 fn far_look(p: PlanetGpu, d: vec3<f32>, pixel: f32) -> vec4<f32> {
@@ -2094,6 +2180,76 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     let lay = ((meadow_v - 0.5) * 2.5 * meadow_fade + (macro_v - 0.5) * 1.2 * macro_fade + (crest - gully) * 0.8) * tint.a;
     grass_col = mix(grass_col, straw, saturate(lay) * 0.5);
     grass_col *= mix(vec3<f32>(1.0), vec3<f32>(0.7, 0.85, 0.95), saturate(-lay));
+    // Farmland, seen from a few hundred meters up and more: on level, mild, watered lowland in
+    // settled country, the open grass gives way to fields (see `fields`): pasture and hay,
+    // green crops, ripening and cut grain, ploughed and harrowed earth, and now and then
+    // flowering rapeseed, with drier country growing more grain and wetter more grass. Near
+    // the eye the ground stays as it was (the foliage module's grass grows there). From high
+    // up, once fields are only a few pixels across, they settle to their mean color, and from
+    // orbit to the land's own (the far look's).
+    let field_k = (1.0 - smoothstep(250.0, 900.0, pixel)) * smoothstep(250.0, 700.0, dist)
+        * vegetation * (1.0 - paint_w) * (1.0 - tint.a);
+    var farm = field_k * (1.0 - smoothstep(0.012, 0.035, slope))
+        * smoothstep(3.0, 9.0, temp_c) * (1.0 - smoothstep(24.0, 30.0, temp_c))
+        * smoothstep(0.12, 0.28, moisture + (variety - 0.5) * 0.1) * (1.0 - smoothstep(0.8, 0.95, moisture))
+        * (1.0 - smoothstep(900.0, 1600.0, altitude + (variety - 0.5) * 400.0))
+        * smoothstep(2.0, 12.0, coast_alt) * (1.0 - smoothstep(0.2, 0.5, in.water.z));
+    if (farm > 0.002) {
+        // Settled country, in stretches tens of kilometers across.
+        let km = transpose(planet_rot(planet)) * (in.rel - planet.center.xyz) * 0.001;
+        let settled = smoothstep(0.28, 0.42, pnoise3(km / 40.0 + vec3<f32>(3.1), 1.0e6) * 0.65 + pnoise3(km / 11.0 + vec3<f32>(8.7), 1.0e6) * 0.35);
+        farm *= settled;
+    }
+    if (farm > 0.002) {
+        let f = fields(planet, in.rel);
+        // Fields come and go at the farmland's edges whole, not faded.
+        let suited = farm / max(field_k, 1e-4);
+        // (Seen at a glancing angle a field is foreshortened along the view only.)
+        let blur = smoothstep(50.0, 160.0, sqrt(pixel * pixel_across));
+        // (Where fields are a pixel or two across, the share of them farmed.)
+        let farmed = mix(smoothstep(f.present - 0.03, f.present + 0.03, suited), suited, blur);
+        let lush = planet.colors[C_LUSH].rgb;
+        let dry = planet.colors[C_DRY].rgb;
+        let soil = planet.colors[C_SOIL].rgb;
+        // Dry country grows grain, wet country grass.
+        let c = fract(f.crop + (0.5 - moisture) * 0.25);
+        let pasture = mix(dry, lush, 0.6);
+        let green = mix(lush, dry, 0.2) * vec3<f32>(0.85, 1.0, 0.8);
+        let grain = dry * vec3<f32>(1.18, 1.02, 0.72);
+        let stubble = dry * vec3<f32>(1.3, 1.22, 1.02);
+        let ploughed = mix(soil, dry, 0.15) * 0.7;
+        let harrowed = mix(soil, dry, 0.3) * 0.95;
+        let hay = mix(dry, lush, 0.35) * 1.12;
+        let rape = vec3<f32>(0.55, 0.47, 0.06);
+        var crop = pasture * (0.92 + 0.16 * fract(f.crop * 7.3));
+        if (c > 0.3) { crop = green; }
+        if (c > 0.42) { crop = grain; }
+        if (c > 0.58) { crop = stubble; }
+        if (c > 0.68) { crop = ploughed; }
+        if (c > 0.8) { crop = harrowed; }
+        if (c > 0.88) { crop = hay; }
+        if (c > 0.985) { crop = rape; }
+        // Their mean, where fields are only a pixel or two across.
+        let mean = pasture * 0.3 + green * 0.12 + grain * 0.16 + stubble * 0.1 + ploughed * 0.12
+            + harrowed * 0.08 + hay * 0.105 + rape * 0.015;
+        // Tramlines along the field, a tractor's boom apart.
+        let tram = smoothstep(0.88, 0.96, abs(fract(f.rows / 18.0) - 0.5) * 2.0) * (1.0 - smoothstep(0.6, 2.5, pixel));
+        crop *= 1.0 - tram * 0.12 * step(0.3, c) * step(c, 0.68);
+        // Within a field: wetter and drier, thinner and thicker stretches.
+        crop *= 1.0 + 0.12 * (patch_v - 0.5) * macro_fade;
+        // Edges: a grass margin, or a hedgerow in old enclosed country; tracks between
+        // the regions. (Thinner than a pixel, a line keeps its share of it.)
+        var col_f = crop;
+        let hedge_w = mix(2.5, 5.0, f.hedged);
+        let hedge = (1.0 - smoothstep(max(hedge_w, pixel) * 0.5, max(hedge_w, pixel), f.edge)) * min(1.0, hedge_w / max(pixel, 1e-3));
+        let hedge_col = mix(mix(dry, lush, 0.7), lush * vec3<f32>(0.42, 0.55, 0.4), f.hedged);
+        col_f = mix(col_f, hedge_col, hedge * farmed);
+        let track_w = 4.0;
+        let track = (1.0 - smoothstep(max(track_w, pixel) * 0.5, max(track_w, pixel), f.track)) * min(1.0, track_w / max(pixel, 1e-3));
+        col_f = mix(col_f, mix(soil, dry, 0.5) * 1.15, track);
+        col_f = mix(col_f, mean, blur);
+        grass_col = mix(grass_col, col_f, farm * max(farmed, track));
+    }
     col[M_GRASS] = grass_col;
     // Bare ground in patches too: damper, darker earth next to dry, pale stretches.
     let bare_v = 1.0 + (mid_v - 0.5) * 0.3 * clump_fade + (patch_v - 0.5) * 0.2 * macro_fade;

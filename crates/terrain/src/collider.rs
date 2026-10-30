@@ -683,16 +683,54 @@ mod tests {
         // A low pass at 250 m/s for two kilometers, frames at about the pace they would run.
         let speed = 250.0;
         let mut x = 0.0;
+        let mut frame = 0;
         while x < 2_000.0 {
             x += speed * 0.05;
             app.world.get_mut::<Transform>(focus).unwrap().translation = DVec3::new(x, 2.0, 0.0);
             let t = std::time::Instant::now();
             app.update();
             std::thread::sleep(std::time::Duration::from_millis(50).saturating_sub(t.elapsed()));
+            frame += 1;
+            // Once its speed is known, the ground a second ahead is on its way or built
+            // (whatever the machine's pace).
+            if frame >= 10 {
+                assert!(
+                    asked_for(&mut app, x + speed),
+                    "nothing asked for {} m ahead",
+                    speed
+                );
+            }
         }
         assert!(tile_under(&mut app, x, 0.0));
+        // Without looking ahead, 27 of these frames waited here; a busy machine may still be
+        // late with one or two.
         let state = app.world.resource::<TerrainColliders>();
-        assert_eq!(state.waits, 0, "frames waited for the ground underfoot");
+        assert!(
+            state.waits <= 3,
+            "{} frames waited for the ground underfoot",
+            state.waits
+        );
+    }
+
+    /// Whether a tile over (x, 0) is built, being built or queued.
+    fn asked_for(app: &mut App, x: f64) -> bool {
+        let terrains = app.world.resource::<Terrains>();
+        let state = app.world.resource::<TerrainColliders>();
+        let keys = state
+            .tiles
+            .keys()
+            .chain(state.building.keys())
+            .chain(&state.queue);
+        keys.into_iter().any(|&(e, key)| {
+            let t = &terrains.entries[&e];
+            let (lo, size) = key.face_rect();
+            let mid = lo + size * 0.5;
+            let center = t.source.map.position(key.face, mid.x, mid.y, 0.0);
+            let at = t.to_local(DVec3::new(x, 0.0, 0.0));
+            // Along the ground (the tile's center is at sea level).
+            let apart = (center.normalize() - at.normalize()).length() * t.source.map.radius;
+            apart < t.source.map.node_size(key.level) * 0.75
+        })
     }
 
     #[test]

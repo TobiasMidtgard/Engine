@@ -653,6 +653,28 @@ fn views() -> Vec<View> {
             sun_ll: Some([-5.3, -64.8]),
             ..BASE
         },
+        // Open lowland far from the pad: from a light aircraft, a climbing plane and an airliner.
+        View {
+            name: "farmland_low",
+            eye_ll: Some([41.0, 1.45, 700.0]),
+            target_ll: Some([41.06, 1.53, 0.0]),
+            sun_ll: Some([10.0, -38.0]),
+            ..BASE
+        },
+        View {
+            name: "farmland_3km",
+            eye_ll: Some([40.95, 1.4, 3_000.0]),
+            target_ll: Some([41.1, 1.65, 0.0]),
+            sun_ll: Some([10.0, -38.0]),
+            ..BASE
+        },
+        View {
+            name: "farmland_10km",
+            eye_ll: Some([40.85, 1.3, 10_000.0]),
+            target_ll: Some([41.2, 1.8, 0.0]),
+            sun_ll: Some([10.0, -38.0]),
+            ..BASE
+        },
         View {
             name: "earth_downs_walk",
             eye_ll: Some([41.0, 1.5, 1.8]),
