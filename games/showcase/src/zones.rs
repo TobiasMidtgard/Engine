@@ -1369,8 +1369,10 @@ pub fn demo_views(z: &Zone) -> Vec<View> {
         "paddock" => engine_anim::demo::VIEWS
             .iter()
             .map(|v| {
+                // The paddock's moments are CPU animation: warm up without drawing.
                 View::new(v.key, v.name, v.eye, v.target, v.hour)
                     .warmup((v.at - 0.4).max(0.0))
+                    .quick_warmup()
                     .on_arrive("anim.demo_restart", "{}")
             })
             .collect(),
