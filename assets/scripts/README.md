@@ -350,6 +350,55 @@ end
   object to see its timelines with their playheads; click a track to edit its curve under the
   playhead while it plays.
 
+## Cutscenes (`.cutscene`)
+
+A cutscene is a file of **tracks** on one timeline, made in the editor's **Sequencer** tab
+(Unreal's Sequencer, Unity's Timeline): values of named objects as curves, events sent to
+their scripts, and camera cuts. Nothing is spawned for it: its tracks name objects in the
+scene, so the same cutscene plays wherever those names are.
+
+```lua
+-- Plays it; names are looked up below this script's entity first, then in the whole world.
+local cs = cutscene.play("cutscenes/lift", { done = function() self:emit("arrived") end })
+cs:pause() cs:play() cs:seek("top") cs:set_rate(2)
+cs:skip() -- to the end at once: what it changes ends as it leaves it, its retro events still go out
+cs:wait() -- in a task: returns when it ends
+```
+
+- A **value track** binds a name and a property: `position`, `rotation` (as `yaw`, `pitch`
+  and `roll`, in degrees), `scale`, any component's number (`"PointLight.intensity_lm"`) or
+  the material's (`"material.emissive_strength"`). Each axis is a curve with the same keys as
+  `.curve` files; axes it doesn't key are left as they are, so an object can be moved up by
+  the cutscene and sideways by its own script.
+- An **event track** sends messages to a name's script at times (a method of that name runs,
+  with the event's `data`); `retro = true` sends one even if a seek or a late start jumps past
+  it, so a door the cutscene opens is open after a skip. With no name, events go to the
+  player's own script.
+- The **camera cuts** track switches between cameras in the scene (`blend` seconds to ease
+  from the last one). While it plays, its own camera shows the shot (with black bars to the
+  file's `aspect`), blending in from the game's camera over `blend_in` and back over
+  `blend_out`.
+- When it ends, everything keeps the value it was left at; `finished = "restore"` on a track,
+  or `restore = true` when playing, puts things back as they were.
+- Options: `at` (the calling script's entity unless given), `bind` (`{ Hero = entity }`:
+  a name played by an entity of your choosing), `rate`, `loop`, `from` (seconds or a mark's
+  name), `to`, `restore`, `cameras = false` (leave the game's camera alone), `unscaled`
+  (keeps going in slow motion), `done`. The handle's fields: `.playing`, `.done`, `.time`, `.length`, `.missing` (names it
+  couldn't find). `cutscene.stop_all()` stops every one.
+- A `CutscenePlayer` component plays one with no script at all (`autoplay`, `loop`, `rate`,
+  `restore`, `cameras`), as Unreal's Level Sequence Actor does.
+
+In the **Sequencer**, each object is a group of rows with a diamond at each key; click the
+arrow on a track to unfold its axes. Drag the ruler to scrub: the objects are posed as they
+would be then, their paths are drawn through the scene view, and the shot's camera shows in
+its corner. The pose is put back before Play and before the scene is saved, so a preview
+never ends up in the scene. S keys the selection's position and rotation at the playhead;
+with ⏺ Auto key on, moving a bound object keys only the axes that changed. ➕ Track adds
+tracks for the selection; double-click an axis to edit its curve in the Curves tab. Drag keys
+to retime them (snapped to frames), box select across rows, Delete removes them; each change
+is saved at once and is one undo step. While the game plays, the playhead follows the
+cutscene and its camera shows in the corner.
+
 ## In the editor's view: `construct`, gizmos and handles
 
 A script can show in the editor before anyone presses Play, as Unreal's construction script and
@@ -649,6 +698,11 @@ have them.
   of its own), with events that clank and thud, raised from wherever it is; its lamps blink
   by a tween. `examples/ease_race.luau`: six runners each easing its own way, a ring going
   round a sequence and an orb following it on a spring. Each has a `.test.luau`.
+- `cutscenes/lift.cutscene` and `examples/cutscene_trigger.luau`: a lift that rises, turns
+  its gear and pulses its beacon, played (and skipped) by pressing E; its events go to the
+  trigger's script. `examples/cutscene_trigger.test.luau` tests it. `cutscenes/courtyard.cutscene`
+  is the courtyard's cinematic: a herald rises and lights the way to the drawbridge, which
+  lowers on its event, through three camera shots.
 - `tools/line_up.luau`, `tools/vary.luau`: tools for the Scripts tab's Tools menu (line the
   selection up; give each a random turn and size).
 - `examples/pulse.graph`, `examples/hover.graph`: the same lamp and stone as visual scripts.

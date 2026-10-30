@@ -52,13 +52,19 @@
 //!   with events that clank and thud; E lowers it, E again raises it from wherever it is. Its
 //!   lamps blink by a looping tween of their material while it moves (the `script_drawbridge`
 //!   stops). The editor's Curves tab edits the curve while it plays.
+//! - A cutscene, `cutscenes/courtyard.cutscene`, made in the editor's Sequencer: a glowing
+//!   herald rises over the orrery and glides south to the drawbridge, which its events lower
+//!   as it comes, and lands over the deck in a flare of light. Its camera cuts go from a high
+//!   wide shot to a camera tracking the herald (a blended cut) and a low one by the bridge,
+//!   letterboxed like cinema; the `script_cutscene` stops look through them. The herald and
+//!   the three cameras are only placed here: everything that moves is the cutscene's.
 //!
 //! `script.send {"entity": {"name": "Courtyard director"}, "event": "ritual"}` plays the ritual
 //! from the console or a tour stop; `script.edit` changes a script file like an editor would.
 
 use engine_core::math::{DVec3, Quat};
 use engine_core::prelude::*;
-use engine_render::{MaterialPreset, MeshRenderer, PointLight, Shape, StandardMaterial};
+use engine_render::{Camera, MaterialPreset, MeshRenderer, PointLight, Shape, StandardMaterial};
 use engine_world::Interactable;
 
 use crate::Script;
@@ -126,6 +132,11 @@ pub const BRIDGE_SCRIPT: &str = "examples/drawbridge.luau";
 pub const PATROL: [f64; 3] = [9.4, 0.0, 0.0];
 pub const PATROL_NAME: &str = "Courtyard patrol";
 pub const PATROL_SCRIPT: &str = "examples/patrol.luau";
+
+/// The cutscene's player, at the middle: its herald and cameras are its children, so the
+/// cutscene's positions are from the middle.
+pub const CINEMATIC_NAME: &str = "Courtyard cinematic";
+pub const CINEMATIC_PATH: &str = "cutscenes/courtyard";
 
 /// A tour stop: eye and target relative to the courtyard's middle, and API calls made on
 /// arriving and leaving (name, JSON args).
@@ -257,6 +268,18 @@ pub const BRIDGE_LOWER: (&str, &str) = (
     "script.eval",
     r#"{"code": "local b = world.find('Drawbridge').script b:raise_now() b:toggle()"}"#,
 );
+
+/// The cutscene from its start, looking through its cameras, and stopped again.
+const CINEMATIC_PLAY: (&str, &str) = (
+    "script.cutscene",
+    r#"{"path": "cutscenes/courtyard", "play": true, "at": {"name": "Courtyard cinematic"}}"#,
+);
+/// From its "bridge" mark, where it sends the drawbridge "toggle".
+const CINEMATIC_FROM_BRIDGE: (&str, &str) = (
+    "script.cutscene",
+    r#"{"path": "cutscenes/courtyard", "play": true, "from": 6.0, "at": {"name": "Courtyard cinematic"}}"#,
+);
+const CINEMATIC_STOP: (&str, &str) = ("script.cutscene", r#"{"stop": true}"#);
 
 /// Script gizmos on (every script's `draw_gizmos`, and the seal's `draw_gizmos_selected` as if
 /// it were selected in the editor), and off.
@@ -513,6 +536,29 @@ pub const VIEWS: &[DemoView] = &[
         warmup_secs: 2.8,
         on_arrive: &[BRIDGE_LOWER],
         on_leave: &[],
+    },
+    DemoView {
+        key: "script_cutscene",
+        name: "A cutscene through its own camera: the herald rises over the orrery in the high \
+               wide shot, letterboxed, the camera easing in on its key frames",
+        // The stop's eye only places the streaming; the picture is the cutscene camera's.
+        eye: [9.5, 8.6 + LIFT, 13.5],
+        target: [0.0, 3.0 + LIFT, 1.5],
+        hour: 18.9,
+        warmup_secs: 2.6,
+        on_arrive: &[CINEMATIC_PLAY],
+        on_leave: &[CINEMATIC_STOP],
+    },
+    DemoView {
+        key: "script_cutscene_bridge",
+        name: "The cutscene's last cut, low by the drawbridge: its event lowered the deck as \
+               the herald came, and the herald flares as it glides over",
+        eye: [-6.7, 1.05 + LIFT, 5.3],
+        target: [-2.3, 1.2 + LIFT, 8.0],
+        hour: 18.9,
+        warmup_secs: 3.0,
+        on_arrive: &[CINEMATIC_FROM_BRIDGE],
+        on_leave: &[CINEMATIC_STOP],
     },
     DemoView {
         key: "script_paused",
@@ -904,6 +950,8 @@ pub fn spawn_demo(commands: &mut Commands, origin: DVec3) {
         })),
     ));
 
+    spawn_cinematic(commands, at(0.0, 0.0, 0.0));
+
     // Four braziers on the diagonals, cold until the ritual lights them.
     for i in 0..4 {
         let a = (i as f64 + 0.5) * std::f64::consts::FRAC_PI_2;
@@ -1013,4 +1061,55 @@ pub fn spawn_demo(commands: &mut Commands, origin: DVec3) {
         at(0.0, 0.0, 0.0),
         Script::new(COURTYARD_SCRIPT),
     ));
+}
+
+/// The courtyard cutscene's player at `at` (the courtyard's middle), with its herald and its
+/// three cameras placed where the cutscene starts them (cameras off until it looks through
+/// them).
+pub fn spawn_cinematic(commands: &mut Commands, at: Transform) {
+    let camera = |fov: f32| Camera {
+        active: false,
+        ..Camera::perspective(fov)
+    };
+    let looking = |eye: [f64; 3], target: [f64; 3]| {
+        Transform::from_xyz(eye[0], eye[1], eye[2])
+            .looking_at(DVec3::new(target[0], target[1], target[2]), Vec3::Y)
+    };
+    commands
+        .spawn((
+            Name::new(CINEMATIC_NAME),
+            at,
+            crate::CutscenePlayer {
+                path: CINEMATIC_PATH.into(),
+                autoplay: false,
+                ..Default::default()
+            },
+        ))
+        .with_children(|c| {
+            c.spawn((
+                Name::new("Herald"),
+                Transform::from_xyz(0.0, 4.6, 0.0),
+                mesh(
+                    Shape::Sphere {
+                        radius: 0.24,
+                        segments: 24,
+                    },
+                    StandardMaterial::color(0.3, 0.22, 0.1).with_emissive([1.0, 0.72, 0.36], 2.0),
+                )
+                .without_shadows(),
+                PointLight {
+                    color: [1.0, 0.72, 0.42],
+                    intensity_lm: 0.0,
+                    range: 9.0,
+                    radius: 0.24,
+                },
+            ));
+            for (name, eye, target, fov) in [
+                ("Cam wide", [9.5, 8.6, 13.5], [0.0, 4.6, 0.0], 50.0),
+                ("Cam herald", [2.48, 4.84, 1.94], [-0.48, 4.18, 2.72], 44.0),
+                ("Cam bridge", [-6.7, 1.05, 5.3], [-2.3, 1.2, 8.0], 40.0),
+            ] {
+                c.spawn((Name::new(name), looking(eye, target), camera(fov)));
+            }
+        });
 }

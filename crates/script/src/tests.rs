@@ -4779,3 +4779,287 @@ fn eases_and_curves_for_scripts() {
     );
     assert_eq!(eval(&mut app, "return #ease.names()"), json!(44));
 }
+
+const STAGE_CUT: &str = r#"{
+  "length": 4,
+  "blend_in": 0,
+  "marks": [ { "t": 3, "name": "late" } ],
+  "tracks": [
+    { "kind": "cuts", "cuts": [ { "t": 0, "camera": "A" }, { "t": 2, "camera": "B", "blend": 1 } ] },
+    { "kind": "events", "bind": "Ear", "events": [
+      { "t": 0, "event": "heard", "data": { "word": "start" } },
+      { "t": 1, "event": "heard", "data": { "word": "one" } },
+      { "t": 3.5, "event": "heard", "data": { "word": "late" }, "retro": true }
+    ] },
+    { "kind": "value", "bind": "Box", "prop": "position", "channels": {
+      "x": { "keys": [ { "t": 0, "v": 0, "interp": "linear" }, { "t": 4, "v": 8 } ] } } },
+    { "kind": "value", "bind": "Box", "prop": "scale", "finished": "restore", "channels": {
+      "y": { "keys": [ { "t": 0, "v": 1, "interp": "linear" }, { "t": 4, "v": 3 } ] } } }
+  ]
+}"#;
+
+const CUT_EAR: &str = r#"
+local Ear = {}
+function Ear:start() self.words = {} end
+function Ear:heard(data) table.insert(self.words, data.word) end
+return Ear
+"#;
+
+/// The stage for the cutscene tests: a box, a script that hears events, two cameras.
+fn cutscene_stage(folder: &Folder) -> (App, Entity, Entity, Entity) {
+    folder.write("cutscenes/stage.cutscene", STAGE_CUT);
+    folder.write("ear.luau", CUT_EAR);
+    let mut app = app_in(&folder.0);
+    let boxed = app
+        .world
+        .spawn((Name::new("Box"), Transform::from_xyz(0.0, 1.0, 5.0)))
+        .id();
+    spawn_script(&mut app, "Ear", "ear.luau");
+    let off = engine_render::Camera {
+        active: false,
+        ..engine_render::Camera::perspective(40.0)
+    };
+    let a = app
+        .world
+        .spawn((Name::new("A"), Transform::from_xyz(10.0, 2.0, 0.0), off))
+        .id();
+    let b = app
+        .world
+        .spawn((
+            Name::new("B"),
+            Transform::from_xyz(-10.0, 2.0, 0.0),
+            engine_render::Camera {
+                active: false,
+                ..engine_render::Camera::perspective(80.0)
+            },
+        ))
+        .id();
+    // The game's own camera, behind the cutscene's view.
+    app.world
+        .spawn((Transform::default(), engine_render::Camera::default()));
+    app.update_n(2);
+    let _ = a;
+    (app, boxed, a, b)
+}
+
+fn the_view(app: &mut App) -> Option<(Transform, engine_render::Camera)> {
+    let mut q = app.world.query::<(
+        &Transform,
+        &engine_render::Camera,
+        &crate::cutscene::CutsceneView,
+    )>();
+    q.iter(&app.world).next().map(|(t, c, _)| (*t, *c))
+}
+
+/// A cutscene moves its objects on their curves, sends its events in order, looks through its
+/// cameras (blending between them), and at its end keeps or restores what each track says.
+#[test]
+fn cutscenes_move_objects_send_events_and_cut_cameras() {
+    let folder = Folder::new();
+    let (mut app, boxed, _, _) = cutscene_stage(&folder);
+    let id = call_api(
+        &mut app.world,
+        "script.cutscene",
+        json!({"path": "cutscenes/stage", "play": true}),
+    )
+    .unwrap()["id"]
+        .as_u64()
+        .unwrap();
+    // 1 s in (30 frames): the box a quarter of the way, its scale too; camera A shown.
+    app.update_n(30);
+    let t = *app.world.get::<Transform>(boxed).unwrap();
+    assert!((t.translation.x - 2.0).abs() < 0.15, "{t:?}");
+    assert_eq!(t.translation.y, 1.0, "axes without curves keep their value");
+    assert!((t.scale.y - 1.5).abs() < 0.1, "{t:?}");
+    let (view, lens) = the_view(&mut app).expect("a view camera while it plays");
+    assert!((view.translation.x - 10.0).abs() < 1e-6, "{view:?}");
+    assert_eq!(lens.order, crate::cutscene::VIEW_ORDER);
+    assert!(lens.active);
+    app.update_n(5);
+    assert_eq!(
+        eval(&mut app, "return world.find('Ear').script.words"),
+        json!(["start", "one"])
+    );
+    // 2.5 s: half way through the blend from A to B, the lens between.
+    app.update_n(40);
+    let (view, lens) = the_view(&mut app).unwrap();
+    assert!(view.translation.x.abs() < 1.5, "{view:?}");
+    let engine_render::Projection::Perspective { fov_y_deg, .. } = lens.projection else {
+        panic!()
+    };
+    assert!(fov_y_deg > 50.0 && fov_y_deg < 70.0, "{fov_y_deg}");
+    // To the end: the box kept where it ended, its scale put back, the view gone.
+    app.update_n(60);
+    let t = *app.world.get::<Transform>(boxed).unwrap();
+    assert!((t.translation.x - 8.0).abs() < 1e-6, "{t:?}");
+    assert_eq!(t.scale.y, 1.0, "a restore track puts it back");
+    assert!(the_view(&mut app).is_none());
+    assert!(app.world.resource::<crate::Cutscenes>().get(id).is_none());
+    app.update_n(2);
+    assert_eq!(
+        eval(&mut app, "return world.find('Ear').script.words"),
+        json!(["start", "one", "late"])
+    );
+    assert!(errors(&mut app).is_empty(), "{:?}", errors(&mut app));
+}
+
+/// From a script: a handle to pause, seek to a mark, skip (its retro events still sent), and
+/// `restore` putting back everything.
+#[test]
+fn scripts_play_pause_seek_and_skip_cutscenes() {
+    let folder = Folder::new();
+    let (mut app, boxed, _, _) = cutscene_stage(&folder);
+    let ear = "world.find('Ear').script";
+    eval(
+        &mut app,
+        &format!("{ear}.cs = cutscene.play('cutscenes/stage', {{ cameras = false }})"),
+    );
+    app.update_n(15);
+    eval(&mut app, &format!("{ear}.cs:pause()"));
+    let x = app.world.get::<Transform>(boxed).unwrap().translation.x;
+    app.update_n(15);
+    assert_eq!(app.world.get::<Transform>(boxed).unwrap().translation.x, x);
+    assert_eq!(
+        eval(&mut app, &format!("return {ear}.cs.playing")),
+        json!(false)
+    );
+    assert!(the_view(&mut app).is_none(), "cameras = false: no view");
+    // To the "late" mark: posed there at once.
+    eval(&mut app, &format!("{ear}.cs:seek('late')"));
+    let x = app.world.get::<Transform>(boxed).unwrap().translation.x;
+    assert!((x - 6.0).abs() < 1e-6, "{x}");
+    assert_eq!(
+        eval(&mut app, &format!("return {ear}.cs.time")).as_f64(),
+        Some(3.0)
+    );
+    eval(&mut app, &format!("{ear}.cs:skip()"));
+    app.update_n(3);
+    assert_eq!(
+        eval(&mut app, &format!("return {ear}.cs.done")),
+        json!(true)
+    );
+    assert_eq!(
+        eval(&mut app, "return world.find('Ear').script.words"),
+        json!(["start", "late"]),
+        "the jump to 'late' sends nothing; the skip sends the retro event"
+    );
+    // restore = true: everything goes back when it ends.
+    eval(
+        &mut app,
+        &format!("{ear}.cs = cutscene.play('cutscenes/stage', {{ restore = true, rate = 4 }})"),
+    );
+    app.update_n(10);
+    let x = app.world.get::<Transform>(boxed).unwrap().translation.x;
+    assert!(
+        x > 1.0 && x < 6.0,
+        "{x}: from the start again, four times as fast"
+    );
+    app.update_n(30);
+    let t = *app.world.get::<Transform>(boxed).unwrap();
+    assert!(
+        (t.translation.x - 8.0).abs() < 1e-6,
+        "{t:?}: kept from the first play"
+    );
+    assert!(errors(&mut app).is_empty(), "{:?}", errors(&mut app));
+}
+
+/// A `CutscenePlayer` plays by itself when the game runs, finding names below it first; a
+/// looping one goes round, sending a `once` event only the first time.
+#[test]
+fn a_cutscene_player_autoplays_and_loops() {
+    let folder = Folder::new();
+    folder.write(
+        "cutscenes/spin.cutscene",
+        r#"{ "length": 1, "tracks": [
+  { "kind": "value", "bind": "Wheel", "prop": "rotation", "channels": {
+    "yaw": { "keys": [ { "t": 0, "v": 0, "interp": "linear" }, { "t": 1, "v": 90 } ] } } },
+  { "kind": "events", "events": [ { "t": 0.5, "event": "half", "once": true }, { "t": 0.25, "event": "tick" } ] }
+] }"#,
+    );
+    folder.write(
+        "counter.luau",
+        "local C = {}\nfunction C:start() self.halves = 0 self.ticks = 0 end\nfunction C:half() self.halves += 1 end\nfunction C:tick() self.ticks += 1 end\nreturn C\n",
+    );
+    let mut app = app_in(&folder.0);
+    // Another Wheel elsewhere: the player's own child is the one that turns.
+    let elsewhere = app
+        .world
+        .spawn((Name::new("Wheel"), Transform::default()))
+        .id();
+    let player = app
+        .world
+        .spawn((
+            Name::new("Spinner"),
+            Transform::default(),
+            Script::new("counter.luau"),
+            crate::CutscenePlayer {
+                path: "cutscenes/spin".into(),
+                looping: true,
+                ..Default::default()
+            },
+        ))
+        .id();
+    let wheel = app
+        .world
+        .spawn((Name::new("Wheel"), Transform::default(), ChildOf(player)))
+        .id();
+    app.update_n(15);
+    let yaw = |app: &App, e: Entity| {
+        app.world
+            .get::<Transform>(e)
+            .unwrap()
+            .rotation
+            .to_euler(engine_core::math::EulerRot::YXZ)
+            .0
+            .to_degrees()
+    };
+    assert!(
+        (yaw(&app, wheel) - 45.0).abs() < 4.0,
+        "{}",
+        yaw(&app, wheel)
+    );
+    assert_eq!(yaw(&app, elsewhere), 0.0);
+    app.update_n(80);
+    assert_eq!(
+        eval(&mut app, "return world.find('Spinner').script.halves"),
+        json!(1)
+    );
+    let ticks = eval(&mut app, "return world.find('Spinner').script.ticks")
+        .as_f64()
+        .unwrap();
+    assert!(ticks >= 3.0, "{ticks}: once a loop");
+    assert_eq!(app.world.resource::<crate::Cutscenes>().playing.len(), 1);
+}
+
+/// The shipped cutscenes read back as the editor writes them (a key a line), and the
+/// courtyard's names are the showcase's.
+#[test]
+fn the_shipped_cutscenes_read_back_as_the_editor_writes_them() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/scripts");
+    let files = crate::cutscene::find_files(&root);
+    assert!(files.len() >= 2, "{files:?}");
+    for f in &files {
+        let text = std::fs::read_to_string(root.join(f)).unwrap();
+        let c = crate::cutscene::Cutscene::parse(&text).unwrap_or_else(|e| panic!("{f}: {e}"));
+        assert_eq!(
+            c.to_text(),
+            text,
+            "{f} isn't written as the editor writes it"
+        );
+    }
+    let text = std::fs::read_to_string(root.join("cutscenes/courtyard.cutscene")).unwrap();
+    let c = crate::cutscene::Cutscene::parse(&text).unwrap();
+    for name in c.names() {
+        assert!(
+            [
+                "Herald",
+                "Cam wide",
+                "Cam herald",
+                "Cam bridge",
+                crate::demo::BRIDGE_NAME
+            ]
+            .contains(&name.as_str()),
+            "{name}"
+        );
+    }
+}

@@ -1,0 +1,53 @@
+{
+  "length": 2.5,
+  "marks": [
+    { "t": 2.0, "name": "top" }
+  ],
+  "tracks": [
+    {
+      "kind": "events", "bind": "",
+      "events": [
+        { "t": 0.0, "event": "departed" },
+        { "t": 2.0, "event": "arrived", "data": { "floor": 2 }, "retro": true }
+      ]
+    },
+    {
+      "kind": "value", "bind": "Platform", "prop": "position",
+      "channels": {
+        "y": { "keys": [
+          { "t": 0.0, "v": 0.0 },
+          { "t": 2.0, "v": 3.0 }
+        ] }
+      }
+    },
+    {
+      "kind": "value", "bind": "Gear", "prop": "rotation",
+      "channels": {
+        "roll": { "keys": [
+          { "t": 0.0, "v": 0.0, "interp": "linear" },
+          { "t": 2.0, "v": 720.0 }
+        ] }
+      }
+    },
+    {
+      "kind": "value", "bind": "Beacon", "prop": "scale", "finished": "restore",
+      "channels": {
+        "x": { "keys": [
+          { "t": 0.0, "v": 1.0 },
+          { "t": 1.0, "v": 1.6 },
+          { "t": 2.0, "v": 1.0 }
+        ] },
+        "y": { "keys": [
+          { "t": 0.0, "v": 1.0 },
+          { "t": 1.0, "v": 1.6 },
+          { "t": 2.0, "v": 1.0 }
+        ] },
+        "z": { "keys": [
+          { "t": 0.0, "v": 1.0 },
+          { "t": 1.0, "v": 1.6 },
+          { "t": 2.0, "v": 1.0 }
+        ] }
+      }
+    }
+  ]
+}

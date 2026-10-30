@@ -240,6 +240,24 @@
 //! (`timelines.luau`). The editor's Curves tab edits the curves live and shows the timelines'
 //! playheads and the tweens running.
 //!
+//! ## Cutscenes
+//!
+//! A `.cutscene` file ([`cutscene`]) animates several objects on one clock, cuts between
+//! cameras and sends events at times, as Unreal's Sequencer and Unity's Timeline do: tracks
+//! bound to objects by name (looked up under the player first), each axis of a value a curve
+//! (`position`, `rotation` in degrees, `scale`, `"Component.field"`, `"material.field"`),
+//! events sent to the bound object's script (`retro` ones also when a skip jumps past them,
+//! `once` ones once across loops), and camera cuts that a view camera of its own follows,
+//! blending between cuts, in from the game's camera and back out, letterboxed to `aspect`.
+//! `cutscene.play(path, opts)` plays one from a script and returns a handle (`pause`, `play`,
+//! `seek` to a time or mark, `set_rate`, `skip` to the end, `stop`, `wait`); a
+//! [`CutscenePlayer`] plays one when the game starts. Values stay as it leaves them unless a
+//! track says `"finished": "restore"` or the player restores. [`CutsceneFiles`] keeps the
+//! files loaded and hot reloaded. The editor's Sequencer tab makes them: a dope sheet of the
+//! tracks, scrubbing that poses the objects in edit mode ([`cutscene::pose`]), keys from the
+//! selection (S, auto key) and the cut camera's view in the corner. `script.cutscene` reads,
+//! plays, skips and stops them.
+//!
 //! ## State machines
 //!
 //! A class's `states` table (`initial`, nested `states`, `history`, and per state `on`, `after`,
@@ -305,9 +323,10 @@
 //!
 //! ## Reads and writes (for replacing this module)
 //!
-//! Reads `Script`, `Time`, `LocalTimeScale`, `ActionState`, the `Interact` and `ContactEvent`
-//! messages, and whatever scripts read through the registry. Writes only what scripts write,
-//! through the registry and `Transform`. Draws code boards ([`board::CodeBoard`]).
+//! Reads `Script`, `CutscenePlayer`, `Time`, `LocalTimeScale`, `ActionState`, `Window`, the
+//! `Interact` and `ContactEvent` messages, and whatever scripts read through the registry.
+//! Writes only what scripts and cutscenes write, through the registry and `Transform`, and the
+//! cutscene view camera (`Camera`, `Viewport`). Draws code boards ([`board::CodeBoard`]).
 
 pub mod access;
 #[cfg(feature = "analysis")]
@@ -317,6 +336,7 @@ mod bind;
 pub mod board;
 mod convert;
 pub mod curve;
+pub mod cutscene;
 mod dap;
 pub mod debug;
 mod debugger;
@@ -348,6 +368,7 @@ use engine_core::prelude::*;
 
 pub use access::ScriptError;
 pub use curve::ScriptCurves;
+pub use cutscene::{CutsceneFiles, CutscenePlayer, Cutscenes};
 pub use editing::ScriptsHeld;
 pub use entity::OwnMaterial;
 pub use rewind::ScriptRewind;
@@ -535,10 +556,18 @@ impl Plugin for ScriptPlugin {
         }
         app.init_resource::<states::StateBreakpoints>()
             .init_resource::<ScriptGizmos>()
-            .init_resource::<ScriptCurves>();
+            .init_resource::<ScriptCurves>()
+            .init_resource::<CutsceneFiles>()
+            .init_resource::<Cutscenes>();
         app.register_component::<Script>(
             "Runs a Luau script from assets/scripts on this entity: path (\"showcase/lantern.luau\"), \
              props (JSON over the script's defaults), enabled.",
+        )
+        .register_component::<CutscenePlayer>(
+            "Plays a cutscene (a .cutscene file: objects' values as curves, events, camera cuts) \
+             on this entity: path (\"cutscenes/intro\"), autoplay (when the game starts), loop, \
+             rate, restore (put back what it changed when it ends), cameras (look through its \
+             camera cuts). The names its tracks bind are looked up below this entity first.",
         )
         .register_component::<ScriptActor>(
             "The actor VM (1, 2, ...) that runs this entity's script; set by the runtime for \
@@ -574,6 +603,12 @@ impl Plugin for ScriptPlugin {
         )
         .add_systems(Update, run_scripts.in_set(UpdateSet::Logic))
         .add_systems(Update, preview_scripts.in_set(UpdateSet::Logic))
+        .add_systems(
+            Update,
+            cutscene::run_cutscenes
+                .in_set(UpdateSet::Logic)
+                .after(run_scripts),
+        )
         .add_systems(FixedUpdate, run_fixed_scripts.in_set(SimSet::Gameplay))
         .add_systems(
             Update,
@@ -603,6 +638,7 @@ impl Plugin for ScriptPlugin {
         #[cfg(feature = "hotpatch")]
         app.add_plugins(hotpatch::HotPatchPlugin);
         api::register(app);
+        cutscene::register(app);
     }
 }
 

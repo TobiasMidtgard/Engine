@@ -58,6 +58,7 @@ pub enum Tab {
     Graphs,
     Rewind,
     Curves,
+    Sequencer,
 }
 
 /// A message in the console.
@@ -1053,6 +1054,8 @@ pub fn save_scene(world: &mut World, editor: &mut Editor, path: &str) {
         return;
     }
     crate::prefab::refresh_all(world);
+    // A pose the Sequencer is previewing is not part of the scene.
+    crate::sequencer::put_back(world);
     let scene = scene_ops::snapshot_scene(world);
     match scene.save(path) {
         Ok(()) => {
@@ -1119,6 +1122,7 @@ pub fn play(world: &mut World, editor: &mut Editor) {
         Mode::Edit => {}
     }
     crate::prefab::exit_all(world, editor);
+    crate::sequencer::put_back(world);
     let roots = scene_ops::scene_roots(world);
     let saved = roots
         .iter()

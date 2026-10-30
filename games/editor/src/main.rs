@@ -48,6 +48,7 @@ mod sample;
 mod scatter;
 mod scene_ops;
 mod scripts;
+mod sequencer;
 mod shots;
 mod show;
 mod snap;
@@ -118,6 +119,7 @@ fn main() {
             graphs::GraphsTabPlugin,
             rewind::RewindTabPlugin,
             curves::CurvesTabPlugin,
+            sequencer::SequencerTabPlugin,
         ))
         .add_plugins(EditorPlugin);
 
@@ -171,6 +173,7 @@ fn main() {
             Some("tools") => scripts::tools_shots(dir),
             Some("rewind") => scripts::rewind_shots(dir),
             Some("tweens") => scripts::tweens_shots(dir),
+            Some("cutscenes") => scripts::cutscenes_shots(dir),
             Some("graphs") => graphs::shots(dir),
             Some("graph_signals") => graphs::signals_shots(dir),
             _ => shots::gallery(dir),

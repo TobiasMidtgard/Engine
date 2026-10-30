@@ -287,6 +287,41 @@ export type Timeline = {
 	wait: (self: Timeline) -> (),
 }
 
+-- How to play a cutscene: rate, loop, from (seconds or a mark), to, restore, cameras,
+-- unscaled, at (an entity), bind ({ Name = entity }), done (a function). Any, so table
+-- literals pass.
+type CutsceneOptions = any
+
+--- A cutscene playing (cutscene.play): a .cutscene file's tracks moving its objects, its
+--- events sent to their scripts, its camera cuts shown.
+export type Cutscene = {
+	path: string,
+	playing: boolean,
+	--- Ended, stopped or skipped.
+	done: boolean,
+	time: number,
+	length: number,
+	--- The names it couldn't find, comma separated ("" when it found them all).
+	missing: string,
+	pause: (self: Cutscene) -> Cutscene,
+	play: (self: Cutscene) -> Cutscene,
+	--- Jumps to seconds or a mark's name (the retro events it passes are sent).
+	seek: (self: Cutscene, at: number | string) -> Cutscene,
+	set_rate: (self: Cutscene, rate: number) -> Cutscene,
+	--- To the end and stop: its objects as it leaves them, its retro events sent.
+	skip: (self: Cutscene) -> (),
+	stop: (self: Cutscene) -> (),
+	--- Waits (in a task) until it ends.
+	wait: (self: Cutscene) -> (),
+}
+
+declare cutscene: {
+	--- Plays a .cutscene file ("cutscenes/intro"); its names are looked up below this
+	--- script's entity first.
+	play: (path: string, opts: CutsceneOptions?) -> Cutscene,
+	stop_all: () -> (),
+}
+
 -- How a shape looks: a color by name ("cyan", "orange", ...) or as a vec3, or a table
 -- { color, seconds (how long it stays; a frame when nil), on_top (seen through walls), alpha,
 -- and the shape's own: normal, rotation, closed, size }. Any, so table literals pass.

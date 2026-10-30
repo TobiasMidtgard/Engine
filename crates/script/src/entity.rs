@@ -437,7 +437,7 @@ fn named(w: &World, test: impl Fn(&str) -> bool) -> Vec<(String, Entity)> {
 }
 
 /// Depth-first search under `root` for an entity named `name`.
-fn find_descendant(world: &World, root: Entity, name: &str) -> Option<Entity> {
+pub(crate) fn find_descendant(world: &World, root: Entity, name: &str) -> Option<Entity> {
     let mut stack: Vec<Entity> = world
         .get::<Children>(root)
         .map(|c| c.iter().collect())

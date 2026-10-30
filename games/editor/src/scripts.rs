@@ -9383,6 +9383,248 @@ pub fn tweens_shots(dir: String) -> ShotScript {
     ShotScript::new(dir, steps)
 }
 
+/// Where the cutscene shots' drawbridge stands (as in the showcase's script courtyard).
+const CINEMATIC_BRIDGE_AT: DVec3 = DVec3::new(-2.69, 0.0, 10.05);
+const CINEMATIC_PATH: &str = "cutscenes/courtyard.cutscene";
+
+/// `--script cutscenes`: the courtyard cutscene in the Sequencer, posed as it is scrubbed with
+/// motion trails and the cut camera in the corner, axes unfolded, auto key, the add-track
+/// menu, an axis in the Curves tab, and playing in the game.
+pub fn cutscenes_shots(dir: String) -> ShotScript {
+    let _ = std::fs::create_dir_all(&dir);
+    let root = std::fs::canonicalize(&dir)
+        .unwrap_or_else(|_| std::env::current_dir().unwrap_or_default().join(&dir))
+        .join("scripts");
+    let setup = move |world: &mut World, editor: &mut Editor| {
+        dusk_sky(world);
+        let scripts = engine_script::scripts_root(world);
+        for folder in [EXAMPLES, "curves", "cutscenes"] {
+            copy_dir(&scripts.join(folder), &root.join(folder));
+        }
+        world.resource_mut::<ScriptSettings>().folder = root.to_string_lossy().to_string();
+        world.remove_resource::<ScriptRuntime>();
+        editor::spawn_with(
+            world,
+            editor,
+            "Drawbridge".into(),
+            vec![(
+                "Script",
+                serde_json::to_value(
+                    Script::new("examples/drawbridge.luau")
+                        .with_props(json!({"span": 3.4, "width": 2.2})),
+                )
+                .unwrap_or_default(),
+            )],
+            Transform::from_translation(CINEMATIC_BRIDGE_AT)
+                .with_rotation(engine::core::math::Quat::from_rotation_y(2.88)),
+        );
+        let orb = MeshRenderer::new(
+            Shape::Sphere {
+                radius: 0.24,
+                segments: 24,
+            },
+            StandardMaterial::color(0.3, 0.22, 0.1).with_emissive([1.0, 0.72, 0.36], 2.0),
+        )
+        .without_shadows();
+        editor::spawn_with(
+            world,
+            editor,
+            "Herald".into(),
+            vec![
+                (
+                    "MeshRenderer",
+                    serde_json::to_value(orb).unwrap_or_default(),
+                ),
+                (
+                    "PointLight",
+                    json!({"color": [1.0, 0.72, 0.42], "intensity_lm": 0.0, "range": 9.0, "radius": 0.24}),
+                ),
+            ],
+            Transform::from_xyz(0.0, 4.6, 0.0),
+        );
+        for (name, eye, target, fov) in [
+            ("Cam wide", [9.5, 8.6, 13.5], [0.0, 4.6, 0.0], 50.0),
+            ("Cam herald", [2.48, 4.84, 1.94], [-0.48, 4.18, 2.72], 44.0),
+            ("Cam bridge", [-6.7, 1.05, 5.3], [-2.3, 1.2, 8.0], 40.0),
+        ] {
+            let camera = Camera {
+                active: false,
+                ..Camera::perspective(fov)
+            };
+            editor::spawn_with(
+                world,
+                editor,
+                name.into(),
+                vec![("Camera", serde_json::to_value(camera).unwrap_or_default())],
+                Transform::from_xyz(eye[0], eye[1], eye[2])
+                    .looking_at(DVec3::new(target[0], target[1], target[2]), Vec3::Y),
+            );
+        }
+        editor::spawn_with(
+            world,
+            editor,
+            "Courtyard cinematic".into(),
+            vec![(
+                "CutscenePlayer",
+                json!({"path": "cutscenes/courtyard", "autoplay": false}),
+            )],
+            Transform::default(),
+        );
+        world.resource_mut::<EditorDock>().0 = sequencer_layout();
+        crate::sequencer::open(world, CINEMATIC_PATH);
+    };
+    let seq = |f: fn(&mut crate::sequencer::SequencerTab)| {
+        move |world: &mut World, _: &mut Editor| {
+            f(&mut world.resource_mut::<crate::sequencer::SequencerTab>());
+        }
+    };
+    // The index of the Herald's position track.
+    let herald_position = |world: &World| {
+        world
+            .get_resource::<engine_script::CutsceneFiles>()
+            .and_then(|f| f.loaded(CINEMATIC_PATH))
+            .and_then(|c| {
+                c.tracks
+                    .iter()
+                    .position(|t| t.bind() == "Herald" && t.label() == "position")
+            })
+    };
+    // The pointer clicked on something the Sequencer drew.
+    let click = |what: &'static str| {
+        move |world: &mut World, _: &mut Editor| {
+            let Some(r) = world
+                .get_resource::<crate::sequencer::SequencerTab>()
+                .and_then(|t| t.drawn_at.get(what).copied())
+            else {
+                return;
+            };
+            let at = r.center();
+            let input = &mut world
+                .resource_mut::<crate::egui_bridge::EguiInput>()
+                .injected;
+            input.push(egui::Event::PointerMoved(at));
+            for pressed in [true, false] {
+                input.push(egui::Event::PointerButton {
+                    pos: at,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: Modifiers::NONE,
+                });
+            }
+        }
+    };
+    let steps = vec![
+        Step::Do(Box::new(setup)),
+        Step::Tool(crate::editor::Tool::Select),
+        Step::Select("Herald"),
+        Step::Camera(DVec3::new(13.5, 7.4, 7.5), DVec3::new(-1.4, 2.4, 5.2)),
+        Step::Wait(20),
+        // 2.5 s in: the herald risen and lit, the wide camera in the corner, every object's
+        // path drawn through the scene.
+        Step::Do(Box::new(seq(|t| t.seek(2.5)))),
+        Step::Wait(8),
+        Step::Shot("cutscenes_01_sequencer"),
+        // 5 s, in the blend to the herald's camera: its position unfolded into axes, the keys
+        // at 5 s picked.
+        Step::Do(Box::new(move |world: &mut World, _: &mut Editor| {
+            let Some(i) = herald_position(world) else {
+                return;
+            };
+            let mut tab = world.resource_mut::<crate::sequencer::SequencerTab>();
+            tab.unfolded.insert(i);
+            tab.selected = vec![crate::sequencer::Sel {
+                track: i,
+                axis: None,
+                t: 5.0,
+            }];
+            tab.seek(5.0);
+        })),
+        Step::Wait(6),
+        Step::Shot("cutscenes_02_axes_unfolded"),
+        // Auto key at 7 s: the herald lifted 0.9 m keys only its height; the trail bends.
+        Step::Do(Box::new(seq(|t| {
+            t.auto_key = true;
+            t.selected.clear();
+            t.seek(7.0);
+        }))),
+        Step::Wait(4),
+        Step::Do(Box::new(|world: &mut World, _: &mut Editor| {
+            if let Some(e) = crate::shots::find(world, "Herald")
+                && let Some(mut t) = world.get_mut::<Transform>(e)
+            {
+                t.translation.y += 0.9;
+            }
+        })),
+        Step::Wait(6),
+        Step::Shot("cutscenes_03_auto_key"),
+        // ➕ Track for the selection: its transform, its numbers, an event, a cut.
+        Step::Do(Box::new(seq(|t| t.auto_key = false))),
+        Step::Do(Box::new(click("add track"))),
+        Step::Wait(4),
+        Step::Shot("cutscenes_04_add_track"),
+        Step::Do(Box::new(|world: &mut World, _: &mut Editor| {
+            world
+                .resource_mut::<crate::egui_bridge::EguiInput>()
+                .injected
+                .push(egui::Event::Key {
+                    key: Key::Escape,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: Modifiers::NONE,
+                });
+        })),
+        Step::Wait(2),
+        // The height axis in the Curves tab (a double-click on its row).
+        Step::Do(Box::new(move |world: &mut World, _: &mut Editor| {
+            if let Some(i) = herald_position(world) {
+                crate::curves::show_channel(world, CINEMATIC_PATH, i, "y");
+            }
+        })),
+        Step::Wait(6),
+        Step::Shot("cutscenes_05_axis_in_curves"),
+        // Playing in the game: the drawbridge lowers on its event, the corner shows the
+        // cutscene's camera, the playhead follows.
+        Step::Do(Box::new(|world: &mut World, ed: &mut Editor| {
+            crate::sequencer::open(world, CINEMATIC_PATH);
+            editor::play(world, ed);
+        })),
+        Step::Wait(4),
+        Step::Do(Box::new(|world: &mut World, _: &mut Editor| {
+            let args =
+                json!({"path": "cutscenes/courtyard", "play": true, "at": "Courtyard cinematic"});
+            if let Err(e) = call_api(world, "script.cutscene", args) {
+                engine::core::log::warn!("cutscene shots: {e}");
+            }
+        })),
+        Step::Wait(27),
+        Step::Do(Box::new(|world: &mut World, ed: &mut Editor| {
+            editor::pause(world, ed);
+        })),
+        Step::Wait(3),
+        Step::Shot("cutscenes_06_playing"),
+        Step::Do(Box::new(|world: &mut World, ed: &mut Editor| {
+            editor::play(world, ed);
+        })),
+        Step::Wait(10),
+        Step::Do(Box::new(|world: &mut World, ed: &mut Editor| {
+            editor::pause(world, ed);
+        })),
+        Step::Wait(3),
+        Step::Shot("cutscenes_07_bridge_cut"),
+    ];
+    ShotScript::new(dir, steps)
+}
+
+/// The Sequencer shots' layout: the scene view over the Sequencer (the Curves tab behind it).
+fn sequencer_layout() -> DockState<Tab> {
+    let mut dock = DockState::new(vec![Tab::Viewport]);
+    let surface = dock.main_surface_mut();
+    let [_view, _seq] =
+        surface.split_below(NodeIndex::root(), 0.5, vec![Tab::Sequencer, Tab::Curves]);
+    dock
+}
+
 /// The Curves shots' layout: the scene view over the Curves tab, full width.
 fn curves_layout() -> DockState<Tab> {
     let mut dock = DockState::new(vec![Tab::Viewport]);

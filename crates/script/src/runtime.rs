@@ -370,6 +370,7 @@ impl ScriptRuntime {
         crate::entity::install(&lua)?;
         crate::draw::install(&lua)?;
         crate::tween::install(&lua)?;
+        crate::cutscene::install(&lua)?;
         crate::bind::install(&lua, api)?;
         install_tasks(&lua)?;
         install_require(&lua)?;
@@ -390,6 +391,9 @@ impl ScriptRuntime {
         lua.load(include_str!("timelines.luau"))
             .set_name("@engine/timelines.luau")
             .exec()?;
+        lua.load(include_str!("cutscene.luau"))
+            .set_name("@engine/cutscene.luau")
+            .exec()?;
         let base: Table = g.get("__script_base")?;
         lua.set_named_registry_value(BASE, base)?;
         for internal in [
@@ -409,6 +413,10 @@ impl ScriptRuntime {
             "__tween_ctl",
             "__tween_info",
             "__tween_kill",
+            "__cutscene_play",
+            "__cutscene_ctl",
+            "__cutscene_info",
+            "__cutscene_stop_all",
         ] {
             g.raw_set(internal, Value::Nil)?;
         }

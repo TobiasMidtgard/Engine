@@ -9,8 +9,9 @@
 //! tangent; F fits, the wheel zooms (Ctrl: time only, Shift: value only), dragging the
 //! background pans. Each change reaches the scripts at once ([`ScriptCurves::set`]) and the
 //! file when the mouse is let go, as one undo step (Ctrl+Z, Ctrl+Y). Over a curve a timeline
-//! plays, its playhead and events are drawn, following the game. The Eases view shows every
-//! named ease moving; click one to copy its name.
+//! plays, its playhead and events are drawn, following the game. A cutscene's axis
+//! (double-clicked in the Sequencer) is edited here the same way and saved in its `.cutscene`
+//! file. The Eases view shows every named ease moving; click one to copy its name.
 
 use std::collections::HashMap;
 
@@ -20,6 +21,7 @@ use egui::{
 };
 use engine::prelude::*;
 use engine_script::curve::{self, Curve, Extend, Interp, Tangent};
+use engine_script::cutscene::{Cutscene, CutsceneFiles, Track};
 use engine_script::ease::{self, Named};
 use engine_script::tween::{CurveSrc, TimelineInfo, TweenRow};
 use engine_script::{ScriptCurves, ScriptRuntime};
@@ -84,13 +86,61 @@ pub enum View {
     Eases,
 }
 
-/// The curve open: a file, or keys a timeline's track has in its script (shown, not edited).
+/// The curve open: a file, a cutscene's axis, or keys a timeline's track has in its script
+/// (shown, not edited).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Open {
-    /// The file (None: keys written in the script).
+    /// The file (None: keys written in the script, or a cutscene's).
     pub path: Option<String>,
     /// The track it was opened from: the script's entity, its timeline, the track.
     pub track: Option<(Entity, String, String)>,
+    /// A cutscene's axis.
+    pub channel: Option<Channel>,
+}
+
+impl Open {
+    /// Edits are saved: it is a file or a cutscene's axis.
+    fn editable(&self) -> bool {
+        self.path.is_some() || self.channel.is_some()
+    }
+}
+
+/// One axis of a cutscene's value track: the cutscene, the track's index, the axis.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Channel {
+    pub path: String,
+    pub track: usize,
+    pub axis: String,
+}
+
+impl Channel {
+    fn curve(&self, c: &Cutscene) -> Result<Curve, String> {
+        match c.tracks.get(self.track) {
+            Some(Track::Value(v)) => v
+                .channels
+                .get(&self.axis)
+                .cloned()
+                .ok_or_else(|| format!("The track has no {} axis now", self.axis)),
+            _ => Err("The cutscene's track is gone".into()),
+        }
+    }
+
+    /// `c` with this axis replaced by `curve`.
+    fn with(&self, c: &Cutscene, curve: &Curve) -> Cutscene {
+        let mut c = c.clone();
+        if let Some(Track::Value(v)) = c.tracks.get_mut(self.track) {
+            v.channels.insert(self.axis.clone(), curve.clone());
+        }
+        c
+    }
+
+    /// "Herald · position · y".
+    fn label(&self, c: Option<&Cutscene>) -> String {
+        match c.and_then(|c| c.tracks.get(self.track)) {
+            Some(t) => format!("{} · {} · {}", t.bind(), t.label(), self.axis),
+            None => self.axis.clone(),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -177,7 +227,7 @@ impl CurvesTab {
     /// Changes the curve as an edit would (shot scripts; the next frame sends and saves it).
     pub fn edit(&mut self, f: impl FnOnce(&mut Curve)) {
         if let Some(c) = self.curve.as_mut()
-            && self.open.as_ref().is_some_and(|o| o.path.is_some())
+            && self.open.as_ref().is_some_and(Open::editable)
         {
             f(c);
         }
@@ -197,6 +247,21 @@ pub fn show_track(world: &mut World, e: Entity, timeline: &str, track: &str) {
     world.resource_mut::<CurvesTab>().open(Open {
         path,
         track: Some((e, timeline.to_string(), track.to_string())),
+        channel: None,
+    });
+    to_front(world);
+}
+
+/// Opens one axis of a cutscene's value track (the Sequencer) and brings the tab to the front.
+pub fn show_channel(world: &mut World, path: &str, track: usize, axis: &str) {
+    world.resource_mut::<CurvesTab>().open(Open {
+        path: None,
+        track: None,
+        channel: Some(Channel {
+            path: path.to_string(),
+            track,
+            axis: axis.to_string(),
+        }),
     });
     to_front(world);
 }
@@ -310,6 +375,29 @@ fn follow_file(
     if tab.drag.is_some() {
         return;
     }
+    if let Some(ch) = &open.channel {
+        let root = engine_script::scripts_root(world);
+        let mut files = world.get_resource_or_insert_with(CutsceneFiles::default);
+        if tab.curve.is_some() && files.version == tab.seen {
+            return;
+        }
+        tab.seen = files.version;
+        match files.get(&root, &ch.path).and_then(|c| ch.curve(&c)) {
+            Ok(c) => {
+                tab.error = None;
+                if tab.committed.as_ref() != Some(&c) {
+                    tab.picked = tab.picked.filter(|i| *i < c.keys.len());
+                    tab.curve = Some(c.clone());
+                    tab.committed = Some(c);
+                }
+            }
+            Err(e) => {
+                tab.error = Some(e);
+                tab.curve = None;
+            }
+        }
+        return;
+    }
     match &open.path {
         Some(path) => {
             let root = engine_script::scripts_root(world);
@@ -359,16 +447,28 @@ fn commit(world: &mut World, editor: &mut Editor, tab: &mut CurvesTab, pointer_d
     let (Some(open), Some(curve)) = (&tab.open, &tab.curve) else {
         return;
     };
-    let Some(path) = open.path.clone() else {
-        return;
-    };
     let root = engine_script::scripts_root(world);
-    let Some(mut curves) = world.get_resource_mut::<ScriptCurves>() else {
-        return;
-    };
-    if curves.loaded(&path).as_deref() != Some(curve) {
-        curves.set(&root, &path, curve.clone());
-        tab.seen = curves.version;
+    if let Some(ch) = &open.channel {
+        let mut files = world.get_resource_or_insert_with(CutsceneFiles::default);
+        let Some(c) = files.loaded(&ch.path) else {
+            return;
+        };
+        if ch.curve(&c).ok().as_ref() != Some(curve) {
+            files.put(&root, &ch.path, ch.with(&c, curve));
+            tab.seen = files.version;
+            crate::sequencer::repose(world, editor, &ch.path);
+        }
+    } else {
+        let Some(path) = open.path.clone() else {
+            return;
+        };
+        let Some(mut curves) = world.get_resource_mut::<ScriptCurves>() else {
+            return;
+        };
+        if curves.loaded(&path).as_deref() != Some(curve) {
+            curves.set(&root, &path, curve.clone());
+            tab.seen = curves.version;
+        }
     }
     if pointer_down || tab.committed.as_ref() == Some(curve) {
         return;
@@ -388,10 +488,27 @@ fn save(world: &mut World, editor: &mut Editor, tab: &mut CurvesTab) {
     let (Some(open), Some(curve)) = (&tab.open, &tab.curve) else {
         return;
     };
+    let root = engine_script::scripts_root(world);
+    if let Some(ch) = &open.channel {
+        let mut files = world.get_resource_or_insert_with(CutsceneFiles::default);
+        let Some(c) = files.loaded(&ch.path) else {
+            return;
+        };
+        let changed = ch.with(&c, curve);
+        match files.set(&root, &ch.path, changed) {
+            Ok(()) => tab.seen = files.version,
+            Err(e) => {
+                let t = editor::now(world);
+                editor.error(t, e);
+            }
+        }
+        let path = ch.path.clone();
+        crate::sequencer::repose(world, editor, &path);
+        return;
+    }
     let Some(path) = &open.path else {
         return;
     };
-    let root = engine_script::scripts_root(world);
     let full = root.join(curve::normalize(path));
     if let Some(dir) = full.parent() {
         let _ = std::fs::create_dir_all(dir);
@@ -448,6 +565,7 @@ fn new_file(world: &mut World, editor: &mut Editor, tab: &mut CurvesTab, name: &
     tab.open(Open {
         path: Some(path),
         track: None,
+        channel: None,
     });
 }
 
@@ -496,8 +614,26 @@ fn toolbar(ui: &mut egui::Ui, world: &mut World, editor: &mut Editor, tab: &mut 
             ));
             return;
         }
-        let editable = tab.open.as_ref().is_some_and(|o| o.path.is_some()) && tab.curve.is_some();
+        let editable = tab.open.as_ref().is_some_and(Open::editable) && tab.curve.is_some();
         match &tab.open {
+            Some(open) if open.channel.is_some() => {
+                let ch = open.channel.as_ref().unwrap();
+                let c = world
+                    .get_resource::<CutsceneFiles>()
+                    .and_then(|f| f.loaded(&ch.path));
+                ui.label(
+                    RichText::new(ch.label(c.as_deref()))
+                        .strong()
+                        .color(theme::TEXT),
+                );
+                ui.label(theme::dim(format!("in {}", ch.path)));
+                let r = ui
+                    .button("🎬 Sequencer")
+                    .on_hover_text("Back to the cutscene");
+                if r.clicked() {
+                    crate::sequencer::open(world, &ch.path);
+                }
+            }
             Some(open) => {
                 let name = open
                     .path
@@ -652,6 +788,7 @@ fn sidebar(
                     tab.open(Open {
                         path: Some(path.clone()),
                         track: None,
+                        channel: None,
                     });
                 }
             }
@@ -876,6 +1013,7 @@ fn timeline_block(ui: &mut egui::Ui, tab: &mut CurvesTab, e: Entity, tl: &Timeli
             tab.open(Open {
                 path,
                 track: Some((e, tl.name.clone(), name.clone())),
+                channel: None,
             });
         }
     }
@@ -1128,7 +1266,7 @@ fn curve_area(
         });
         return;
     };
-    let editable = open.path.is_some();
+    let editable = open.editable();
     let tl = timeline_for(&open, focus, timelines);
     if tab.fit {
         fit(tab, &c, tl);
@@ -2026,5 +2164,36 @@ mod tests {
         };
         fit(&mut tab, &c, Some(&tl));
         assert!(tab.t_view.0 < 0.0 && tab.t_view.1 > 3.0);
+    }
+
+    #[test]
+    fn a_cutscene_axis_reads_and_writes_only_itself() {
+        use engine_script::cutscene::ValueTrack;
+        let mut v = ValueTrack {
+            bind: "Herald".into(),
+            prop: "position".into(),
+            ..Default::default()
+        };
+        v.channels
+            .insert("x".into(), Curve::new(vec![CurveKey::new(0.0, 1.0)]));
+        v.channels
+            .insert("y".into(), Curve::new(vec![CurveKey::new(0.0, 2.0)]));
+        let mut c = Cutscene::default();
+        c.tracks.push(Track::Value(v));
+        let ch = Channel {
+            path: "cutscenes/a.cutscene".into(),
+            track: 0,
+            axis: "y".into(),
+        };
+        assert_eq!(ch.curve(&c).unwrap().keys[0].v, 2.0);
+        assert_eq!(ch.label(Some(&c)), "Herald · position · y");
+        let changed = ch.with(&c, &Curve::new(vec![CurveKey::new(0.0, 5.0)]));
+        let Track::Value(v) = &changed.tracks[0] else {
+            panic!()
+        };
+        assert_eq!(v.channels["y"].keys[0].v, 5.0);
+        assert_eq!(v.channels["x"].keys[0].v, 1.0);
+        let gone = Channel { track: 3, ..ch };
+        assert!(gone.curve(&c).is_err());
     }
 }

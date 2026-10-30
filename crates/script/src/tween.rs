@@ -199,7 +199,7 @@ pub(crate) enum Prop {
 }
 
 impl Prop {
-    fn parse(name: &str, entity: bool) -> Result<Prop, String> {
+    pub(crate) fn parse(name: &str, entity: bool) -> Result<Prop, String> {
         if !entity {
             return Ok(Prop::Field(name.to_string()));
         }
@@ -277,17 +277,35 @@ impl Target {
 }
 
 fn read(lua: &Lua, world: &mut World, target: &Target, prop: &Prop) -> Result<TVal, String> {
-    let value = match (target, prop) {
-        (Target::Entity(e), Prop::Position | Prop::Rotation | Prop::Scale) => {
-            let t = world.get::<Transform>(*e).ok_or("gone")?;
+    match (target, prop) {
+        (Target::Entity(e), _) => read_entity(world, *e, prop),
+        (Target::Table(key, _), Prop::Field(f)) => {
+            let t: Table = lua.registry_value(key).map_err(|e| e.to_string())?;
+            let v: Value = t.get(f.as_str()).map_err(|e| e.to_string())?;
+            TVal::from_lua(&v).ok_or_else(|| {
+                format!(
+                    "{f} is {} (a tween moves numbers, vec3s, quats and lists)",
+                    type_name(&v)
+                )
+            })
+        }
+        _ => Err("can't tween that".into()),
+    }
+}
+
+/// An entity's value of `prop` (its transform's, a component's field, its material's field).
+pub(crate) fn read_entity(world: &mut World, e: Entity, prop: &Prop) -> Result<TVal, String> {
+    let value = match prop {
+        Prop::Position | Prop::Rotation | Prop::Scale => {
+            let t = world.get::<Transform>(e).ok_or("gone")?;
             match prop {
                 Prop::Position => TVal::Vec3(t.translation),
                 Prop::Rotation => TVal::Quat(t.rotation),
                 _ => TVal::Vec3(t.scale.as_dvec3()),
             }
         }
-        (Target::Entity(e), Prop::Component(c, path)) => {
-            if world.get_entity(*e).is_err() {
+        Prop::Component(c, path) => {
+            if world.get_entity(e).is_err() {
                 return Err("gone".into());
             }
             let get = world
@@ -295,7 +313,7 @@ fn read(lua: &Lua, world: &mut World, target: &Target, prop: &Prop) -> Result<TV
                 .component_or_err(c)
                 .map_err(|e| e.to_string())?
                 .get;
-            let json = get(world, *e).ok_or_else(|| format!("the entity has no {c}"))?;
+            let json = get(world, e).ok_or_else(|| format!("the entity has no {c}"))?;
             let at = path
                 .iter()
                 .try_fold(&json, |j, k| j.get(k))
@@ -307,11 +325,11 @@ fn read(lua: &Lua, world: &mut World, target: &Target, prop: &Prop) -> Result<TV
                 )
             })?
         }
-        (Target::Entity(e), Prop::Material(path)) => {
-            if world.get_entity(*e).is_err() {
+        Prop::Material(path) => {
+            if world.get_entity(e).is_err() {
                 return Err("gone".into());
             }
-            let json = crate::entity::material(world, *e, None).map_err(|e| e.to_string())?;
+            let json = crate::entity::material(world, e, None).map_err(|e| e.to_string())?;
             let at = path
                 .iter()
                 .try_fold(&json, |j, k| j.get(k))
@@ -323,17 +341,7 @@ fn read(lua: &Lua, world: &mut World, target: &Target, prop: &Prop) -> Result<TV
                 )
             })?
         }
-        (Target::Table(key, _), Prop::Field(f)) => {
-            let t: Table = lua.registry_value(key).map_err(|e| e.to_string())?;
-            let v: Value = t.get(f.as_str()).map_err(|e| e.to_string())?;
-            TVal::from_lua(&v).ok_or_else(|| {
-                format!(
-                    "{f} is {} (a tween moves numbers, vec3s, quats and lists)",
-                    type_name(&v)
-                )
-            })?
-        }
-        _ => return Err("can't tween that".into()),
+        Prop::Field(_) => return Err("can't tween that".into()),
     };
     Ok(value)
 }
@@ -357,8 +365,26 @@ fn write(
     v: &TVal,
 ) -> Result<(), String> {
     match (target, prop) {
-        (Target::Entity(e), Prop::Position | Prop::Rotation | Prop::Scale) => {
-            let Some(mut t) = world.get_mut::<Transform>(*e) else {
+        (Target::Entity(e), _) => write_entity(world, *e, prop, v),
+        (Target::Table(key, _), Prop::Field(f)) => {
+            let t: Table = lua.registry_value(key).map_err(|e| e.to_string())?;
+            t.set(f.as_str(), v.to_lua(lua).map_err(|e| e.to_string())?)
+                .map_err(|e| e.to_string())
+        }
+        _ => Err("can't tween that".into()),
+    }
+}
+
+/// Sets an entity's value of `prop`.
+pub(crate) fn write_entity(
+    world: &mut World,
+    e: Entity,
+    prop: &Prop,
+    v: &TVal,
+) -> Result<(), String> {
+    match prop {
+        Prop::Position | Prop::Rotation | Prop::Scale => {
+            let Some(mut t) = world.get_mut::<Transform>(e) else {
                 return Err("gone".into());
             };
             match (prop, v) {
@@ -368,8 +394,8 @@ fn write(
                 _ => return Err(format!("{} can't be {}", prop.label(), v.kind_name())),
             }
         }
-        (Target::Entity(e), Prop::Component(c, path)) => {
-            if world.get_entity(*e).is_err() {
+        Prop::Component(c, path) => {
+            if world.get_entity(e).is_err() {
                 return Err("gone".into());
             }
             let patch = world
@@ -377,21 +403,16 @@ fn write(
                 .component_or_err(c)
                 .map_err(|e| e.to_string())?
                 .patch;
-            patch(world, *e, nest(path, v.to_json())).map_err(|e| e.to_string())?;
+            patch(world, e, nest(path, v.to_json())).map_err(|e| e.to_string())?;
         }
-        (Target::Entity(e), Prop::Material(path)) => {
-            if world.get_entity(*e).is_err() {
+        Prop::Material(path) => {
+            if world.get_entity(e).is_err() {
                 return Err("gone".into());
             }
-            crate::entity::material(world, *e, Some(nest(path, v.to_json())))
+            crate::entity::material(world, e, Some(nest(path, v.to_json())))
                 .map_err(|e| e.to_string())?;
         }
-        (Target::Table(key, _), Prop::Field(f)) => {
-            let t: Table = lua.registry_value(key).map_err(|e| e.to_string())?;
-            t.set(f.as_str(), v.to_lua(lua).map_err(|e| e.to_string())?)
-                .map_err(|e| e.to_string())?;
-        }
-        _ => return Err("can't tween that".into()),
+        Prop::Field(_) => return Err("can't tween that".into()),
     }
     Ok(())
 }
