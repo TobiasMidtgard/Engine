@@ -1,5 +1,6 @@
 #![doc = include_str!("../README.md")]
 
+pub mod actions;
 pub mod animator;
 pub mod attach;
 pub mod body;
@@ -7,6 +8,7 @@ pub mod build;
 pub mod character;
 pub mod clip;
 pub mod combat;
+pub mod course;
 pub mod demo;
 pub mod events;
 pub mod face;
@@ -23,6 +25,7 @@ pub mod model;
 pub mod motion;
 pub mod muscle;
 pub mod paired;
+pub mod parkour;
 pub mod procedural;
 pub mod props;
 pub mod ragdoll;
@@ -148,6 +151,8 @@ impl Plugin for AnimationPlugin {
                         ragdoll::add_rigs,
                         face::give_appearance_faces,
                         body::give_hand_controls,
+                        parkour::give_parkour,
+                        actions::give_animal_actions,
                     )
                         .chain_ignore_deferred(),
                     (
@@ -160,6 +165,8 @@ impl Plugin for AnimationPlugin {
                         footwork::step_footwork,
                         (model::spawn_rig_models, model::despawn_orphan_parts),
                         body::drive_bodies,
+                        parkour::sense_parkour,
+                        actions::run_animal_actions,
                         body::hide_drawn_bodies,
                     )
                         .chain_ignore_deferred(),
@@ -198,7 +205,9 @@ impl Plugin for AnimationPlugin {
                 (
                     warp::warp_system,
                     ik::foot_ik_system,
+                    parkour::wall_ik,
                     ik::look_at_system,
+                    actions::reach_heads,
                     ik::reach_ik_system,
                     combat::aim_strikes,
                 )
@@ -264,6 +273,21 @@ fn register_types(app: &mut App) {
          it (by), its clip, the spot it is held on (distance m ahead of them, facing back, \
          reached over align_secs), and whether it is getting up after (up_secs). Nobody \
          else's blows touch it or its attacker meanwhile.",
+    )
+    .register_component::<actions::AnimalActions>(
+        "A horse's or dog's actions (horse graze/drink/rear/shake/paw, dog sit/lie/play_bow/\
+         shake_off/sniff): queue (request, or a parameter act.<action> rising past 0.5), the \
+         one playing (clip, seconds, entry pose distance m and fade s), the idle picker \
+         (idle_after s standing, seed) and the point the head reaches for at a spot.",
+    )
+    .register_component::<actions::ActionSpot>(
+        "A place an animal does something (a trough, grass): the actions it is for, the point \
+         they are about (local m; the head reaches for it) and how near to stop (radius m).",
+    )
+    .register_component::<parkour::Parkour>(
+        "Parkour for a person with a LocomotionState: the wall it is running on (side +1 right \
+         or -1 left, distance m from the body's axis to its face, normal), found with rays; \
+         jumps, the air, landings, wall runs, kicks off walls and slides play from the state.",
     )
     .register_component::<footwork::Footwork>(
         "Footwork between blows: keeps the fighter at measure m (within slack) from its foe \

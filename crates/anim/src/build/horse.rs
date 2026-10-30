@@ -4,6 +4,7 @@
 
 use engine_core::prelude::*;
 
+use super::quadruped::{Leg, Rig, Stance, action_clip};
 use super::sdf::{Body, Paint, Shape};
 use super::{PoseBuilder, bone, cycle_sin};
 use crate::clip::AnimationClip;
@@ -456,7 +457,7 @@ pub fn gait() -> LeggedGait {
                 foot_size: [0.13, 0.15],
                 sole: 0.18,
                 stance_offset: Vec3::ZERO,
-                ..Default::default()
+                release: RIG.release[legs.len()].into(),
             });
         }
     }
@@ -607,7 +608,242 @@ fn idle(s: &Skeleton) -> AnimationClip {
 }
 
 pub fn clips(s: &Skeleton) -> Vec<AnimationClip> {
-    vec![idle(s)]
+    let mut out = vec![idle(s)];
+    out.extend(actions(s));
+    out
+}
+
+/// What the horse's actions move.
+const RIG: Rig = Rig {
+    legs: [
+        &[
+            "front_upper_l",
+            "front_lower_l",
+            "front_cannon_l",
+            "front_hoof_l",
+        ],
+        &[
+            "front_upper_r",
+            "front_lower_r",
+            "front_cannon_r",
+            "front_hoof_r",
+        ],
+        &[
+            "hind_upper_l",
+            "hind_lower_l",
+            "hind_cannon_l",
+            "hind_hoof_l",
+        ],
+        &[
+            "hind_upper_r",
+            "hind_lower_r",
+            "hind_cannon_r",
+            "hind_hoof_r",
+        ],
+    ],
+    release: [
+        "release.front_l",
+        "release.front_r",
+        "release.hind_l",
+        "release.hind_r",
+    ],
+    neck: &["neck_1", "neck_2", "neck_3", "head"],
+    jaw: None,
+    tail: &["tail_1", "tail_2", "tail_3", "tail_4"],
+    loin: None,
+};
+
+/// The horse's actions ([`crate::actions`]): `horse_graze`, `horse_drink`, `horse_rear`,
+/// `horse_shake` and `horse_paw`.
+pub const ACTIONS: [&str; 5] = ["graze", "drink", "rear", "shake", "paw"];
+
+/// Where the muzzle is in the head bone's frame (the head bone sits at the poll), m.
+pub const MUZZLE: Vec3 = Vec3::new(0.0, -0.34, -0.42);
+
+fn actions(s: &Skeleton) -> Vec<AnimationClip> {
+    let rest = Stance::REST;
+    // Head down to the grass, nibbling and moving on a little, then up.
+    let down = Stance {
+        body: Vec3::new(0.0, -0.03, 0.0),
+        pitch: -4.0,
+        neck: [-58.0, -22.0, -12.0, -18.0],
+        tail: -4.0,
+        ..rest
+    };
+    let nibble = |at: f32, yaw: f32, nod: f32| Stance {
+        neck_yaw: [yaw, yaw * 0.6, yaw * 0.3, 0.0],
+        neck: [-58.0, -22.0, -12.0, -18.0 + nod],
+        ..down.at(at)
+    };
+    let graze = action_clip(
+        &RIG,
+        s,
+        1.0,
+        "horse_graze",
+        &[
+            rest.at(0.0),
+            down.at(1.3),
+            nibble(2.2, 4.0, -5.0),
+            nibble(3.0, 6.0, 2.0),
+            nibble(3.8, -3.0, -6.0),
+            nibble(4.8, -5.0, 3.0),
+            nibble(5.6, 0.0, -2.0),
+            rest.at(7.0),
+        ],
+        &[(1.0, 0.0), (1.3, 1.0), (5.6, 1.0), (6.1, 0.0)],
+    );
+    // Head down to a trough's water, drinking in pulls, then up.
+    let low = Stance {
+        neck: [-38.0, -16.0, -8.0, -20.0],
+        pitch: -2.0,
+        ..rest
+    };
+    let pull = |at: f32, k: f32| Stance {
+        neck: [-38.0 - 2.0 * k, -16.0, -8.0, -20.0 - 3.0 * k],
+        ..low.at(at)
+    };
+    let drink = action_clip(
+        &RIG,
+        s,
+        1.0,
+        "horse_drink",
+        &[
+            rest.at(0.0),
+            low.at(1.1),
+            pull(1.9, 1.0),
+            pull(2.5, 0.0),
+            pull(3.1, 1.0),
+            pull(3.7, 0.0),
+            pull(4.3, 1.0),
+            low.at(5.0),
+            rest.at(6.4),
+        ],
+        &[(0.8, 0.0), (1.1, 1.0), (5.0, 1.0), (5.5, 0.0)],
+    );
+    // Gathering onto the haunches, up on the hind legs with the forelegs folded and
+    // pawing the air, then down again.
+    let folded = |lift: f32, reach: f32| Leg::Free {
+        joint: Vec3::new(0.2, 1.25 + lift, -0.75 - reach),
+        cannon: Vec3::new(0.0, -0.75, 0.6),
+        end: 40.0,
+        pole: Vec3::Z,
+    };
+    let mirror = |l: Leg| match l {
+        Leg::Free {
+            joint,
+            cannon,
+            end,
+            pole,
+        } => Leg::Free {
+            joint: Vec3::new(-joint.x, joint.y, joint.z),
+            cannon,
+            end,
+            pole,
+        },
+        l => l,
+    };
+    let gather = Stance {
+        body: Vec3::new(0.0, -0.08, 0.12),
+        pitch: 6.0,
+        neck: [8.0, 4.0, 0.0, 6.0],
+        ..rest
+    };
+    let up = |at: f32, a: f32, b: f32| Stance {
+        at,
+        body: Vec3::new(0.0, -0.05, 0.42),
+        pitch: 42.0,
+        neck: [14.0, 6.0, 4.0, 14.0],
+        tail: -12.0,
+        legs: [
+            mirror(folded(a, 0.05 * a)),
+            folded(b, 0.05 * b),
+            Leg::Planted,
+            Leg::Planted,
+        ],
+        ..rest
+    };
+    let rear = action_clip(
+        &RIG,
+        s,
+        1.0,
+        "horse_rear",
+        &[
+            rest.at(0.0),
+            gather.at(0.45),
+            up(1.0, 0.1, 0.0),
+            up(1.35, -0.05, 0.12),
+            up(1.7, 0.1, -0.02),
+            gather.at(2.25),
+            rest.at(2.8),
+        ],
+        &[(0.0, 0.0)],
+    );
+    // Shaking the head and neck from side to side.
+    let shake_to = |at: f32, side: f32| Stance {
+        neck_yaw: [6.0 * side, 14.0 * side, 10.0 * side, 8.0 * side],
+        head_roll: 18.0 * side,
+        roll: -2.0 * side,
+        neck: [4.0, 0.0, 0.0, -6.0],
+        ..rest.at(at)
+    };
+    let shake = action_clip(
+        &RIG,
+        s,
+        1.0,
+        "horse_shake",
+        &[
+            rest.at(0.0),
+            shake_to(0.25, 1.0),
+            shake_to(0.5, -1.0),
+            shake_to(0.72, 1.0),
+            shake_to(0.92, -0.8),
+            shake_to(1.1, 0.4),
+            rest.at(1.5),
+        ],
+        &[(0.0, 0.0)],
+    );
+    // Pawing the ground with the right foreleg: lifted, reached forward and scraped back,
+    // twice, the head down watching.
+    let watch = Stance {
+        neck: [-14.0, -6.0, -4.0, -10.0],
+        ..rest
+    };
+    let fore = |at: f32, joint: Vec3, cannon: Vec3| Stance {
+        legs: [
+            Leg::Planted,
+            Leg::Free {
+                joint,
+                cannon,
+                end: 20.0,
+                pole: Vec3::Z,
+            },
+            Leg::Planted,
+            Leg::Planted,
+        ],
+        ..watch.at(at)
+    };
+    let lift = (Vec3::new(0.2, 0.72, -0.86), Vec3::new(0.0, -0.8, 0.55));
+    let ahead = (Vec3::new(0.2, 0.6, -1.02), Vec3::new(0.0, -0.95, -0.3));
+    let scrape = (Vec3::new(0.2, 0.53, -0.7), Vec3::new(0.0, -1.0, 0.12));
+    let paw = action_clip(
+        &RIG,
+        s,
+        1.0,
+        "horse_paw",
+        &[
+            rest.at(0.0),
+            fore(0.35, lift.0, lift.1),
+            fore(0.65, ahead.0, ahead.1),
+            fore(0.95, scrape.0, scrape.1),
+            fore(1.25, lift.0, lift.1),
+            fore(1.55, ahead.0, ahead.1),
+            fore(1.85, scrape.0, scrape.1),
+            watch.at(2.2),
+            rest.at(2.6),
+        ],
+        &[(0.0, 0.0)],
+    );
+    vec![graze, drink, rear, shake, paw]
 }
 
 pub fn graph() -> AnimGraph {

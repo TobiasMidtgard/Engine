@@ -11,6 +11,7 @@ pub mod car;
 pub mod dog;
 pub mod horse;
 pub mod humanoid;
+pub mod quadruped;
 pub mod rock;
 pub mod sdf;
 pub mod spider;

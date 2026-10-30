@@ -280,3 +280,23 @@ fn the_graph_node_hands_sideways_motion_to_its_fallback() {
     let err = GraphInstance::compile(&graph, &s, &lookup).err().unwrap();
     assert!(err.contains("test/motion"), "{err}");
 }
+
+#[test]
+fn every_frame_is_labelled_with_the_feet_on_the_ground() {
+    use engine_anim::motion::contact_bits;
+    let (_, _, db) = setup();
+    let down = |b: u8, foot: usize| b & (contact_bits(foot, false) | contact_bits(foot, true)) != 0;
+    // Standing, both feet are down throughout.
+    let idle = db.first_frame("idle").unwrap();
+    for f in idle..idle + 30 {
+        assert!(
+            down(db.contacts(f), 0) && down(db.contacts(f), 1),
+            "frame {f}"
+        );
+    }
+    // These test walks carry their travel on the hips without matching the stride (a planted
+    // foot still drifts at 0.5-1.4 m/s), so they never count as standing: a foot sliding
+    // over the ground is not a contact.
+    let walk = db.first_frame("walk_moving").unwrap();
+    assert!((walk..walk + 30).all(|f| !down(db.contacts(f), 0)));
+}
