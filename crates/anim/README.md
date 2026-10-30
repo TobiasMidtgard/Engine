@@ -27,9 +27,33 @@ compresses and stretches.
   ahead), brute-force search every 0.1 s, jumps hidden by spring inertialization that keeps
   velocity. Takes keep their root motion (starts, stops, turns on the spot and into a walk,
   walk and run cycles at five paces), each also mirrored; loops play round, and a take's
-  trajectory carries on past its end. Strafing and backpedalling hand over to the blend
+  trajectory carries on past its end. Every frame is labelled with which heels and toes are
+  on the ground (below 3 cm and 0.25 m/s, lifted above 5 cm or 0.5 m/s, smoothed over five
+  frames, MotionBricks' thresholds); the node publishes them as `contact.foot_l`/`_r` curves
+  and foot IK holds a foot as soon as the data has it down, before it has come to rest. Strafing and backpedalling hand over to the blend
   tree. Diagonals up to 60° stay on the captured walk, turned (below). Fetched people move with 28 Rocketbox takes (`anim/moves/`); `examples/motion_db.rs`
   reports a database and which moves a scripted walk plays.
+- **Parkour.** People jump, fly (an air blend by vertical speed: rising, at the top,
+  falling), double-jump, land soft or hard, slide, and run on walls either side with a kick
+  off across to the next. `parkour::Parkour` turns a `LocomotionState` (its mode and velocity)
+  into the graph's parameters and triggers, so whatever moves a person (Movement's
+  player, an NPC, the paddock's course runner) gets them with no new contract fields. Which
+  side the wall is on and how far is found with rays at hip height against physics colliders
+  and `IkSurface` boxes; the wall-run cycle (0.56 s a stride, 4 m at 7 m/s, after sprint data)
+  plants the feet flat on a wall 0.55 m off with the body leaning 32° from it, the inside
+  arm held out toward it and the head level, and `wall_ik` moves the feet onto the wall that
+  is actually there (`build/humanoid/parkour.rs`).
+- **Animal actions.** A horse grazes, drinks, rears, shakes its head and paws; a dog sits,
+  lies down (from standing or from the sit), bows to play, shakes off and sniffs a trail.
+  Each is a clip played over the gait that frees the legs it moves with `release` curves
+  (`build::quadruped`, poses keyed as body, neck, tail and folded legs placed by IK) and puts
+  them back on the ground as they fall. `actions::AnimalActions` takes requests (or a
+  parameter `act.<action>`) and queues them, cutting into a hold where an action allows; an
+  idle picker plays one when the animal has stood a while. Borrowed from MotionBricks, with
+  none of its code or data: of an action's entry clips the one whose first pose is nearest
+  the pose shown plays, with a fade from that distance (a sitting dog lies down from the
+  sit), and an `ActionSpot` (a trough) names its action and the point it is about, the neck
+  reaching the muzzle to it by CCD while the clip's `reach` curve is up.
 - **Locomotion warping.** Before foot IK, `LocomotionWarp` (Unreal's Animation Warping, as
   Lyra uses it) fits the captured walk to how the body actually moves. Orientation warping
   turns the hips toward the travel, up to 60°, while the spine, chest, neck and head take the
@@ -416,8 +440,9 @@ renderer's generated materials (planks, concrete, sand, rock), and the spider cl
 | Boxer | An athlete squares up to the sparring partner and throws jab, cross, hook and uppercut, each press buffered until the last punch's cancel window opens; she steps in to range on the jab and closer for the hook and uppercut, each fist reaching the face, and both freeze for a beat as each lands (`paddock_combo`) |
 | Freeflow ring | An athlete tapping the light attack drops three dummies one after another with a jab, cross and hook each: the stick swings to the next as one goes down and she goes straight at it, a lunge to the one on the left, a leap to the one on the right, facing it before she lands and punching on touch-down; the dummies get up and walk back (`paddock_freeflow`) |
 | Weapons yard | A swordsman cuts a slash, a rising backhand and a thrust into his partner; his overhead bounces off the partner's raised shield and the partner cuts back while he recovers; then a slash, his own shield rammed in and a thrust land; his shield comes up just as the partner's cut lands, swats it aside and he runs the partner through while it staggers open (a riposte: the two lined up, the partner sags on the blade, drops to a knee, falls on its back and gets up). Each struck body shakes through the hitstop. Between blows the two step back to measure and circle each other in guard. A great sword's sweep bounces off a dummy's raised shield, its overhead from high guard flings the shield open and a riposte runs the dummy through; it falls and gets up. An archer draws to the jaw and looses three arrows into a butt 12 m off, one held at full draw (`paddock_sword`, `paddock_shield`, `paddock_bash`, `paddock_circle`, `paddock_deflect`, `paddock_riposte`, `paddock_greatsword`, `paddock_greatsword_riposte`, `paddock_bow`, `paddock_butt`) |
-| Horse oval | A textured horse walks, trots, canters and gallops by speed; in the swing the knees fold, the hocks bend and the hooves curl back behind the fetlocks; haunches and shoulders flex with each stride; the mane rides the neck and the tail streams |
-| Dog run | A furred Labrador walks off, trots, canters out of a turn and gallops down the far straight, the spine flexing with each stride, ears and tail swinging; it pants as it goes (`paddock_dog_trot`, `paddock_dog`) |
+| Horse oval | A textured horse walks, trots, canters and gallops by speed; in the swing the knees fold, the hocks bend and the hooves curl back behind the fetlocks; haunches and shoulders flex with each stride; the mane rides the neck and the tail streams. At the end of the lap it stops by a water trough and drinks, its neck reaching for the water, then grazes beside it (`paddock_gallop`, `paddock_horse_drink`, `paddock_horse_graze`) |
+| Dog run | A furred Labrador walks off, trots, canters out of a turn and gallops down the far straight, the spine flexing with each stride, ears and tail swinging; it pants as it goes. Then it stops to shake off, casts about with its nose down, sits, lies down from the sit and gets up into a play bow (`paddock_dog_trot`, `paddock_dog`, `paddock_dog_shake`, `paddock_dog_sniff`, `paddock_dog_sit`, `paddock_dog_lie`, `paddock_dog_bow`) |
+| Wall-run course | An athlete sprints down a lane between two staggered walls, jumps onto the left one and runs along it (feet on the wall, body tilted off it, inside arm out toward it), kicks across onto the right one, runs that, drops off and lands, then jogs back (`paddock_wallrun`, `paddock_wallkick`, `paddock_wallrun_right`, `paddock_wall_land`) |
 | Spider garden | A furred red-knee tarantula climbs over boulders in alternating sets of legs, a wave running from the back legs forward; its palps tap, its jaws work and its abdomen sways (`paddock_spider`). On the far side it slows to a stop and rears up in threat: the front of the body tips up on the planted back legs, the first pair of legs rises high and the second reaches out level, the palps lift and the fangs unfold, then it settles back onto its footholds and walks on (`paddock_spider_threat`) |
 | Car loop | A concept car: suspension over speed bumps, roll in corners, steering and spinning wheels with the brake calipers held still |
 | Parked car | A second concept car inside the loop swings its doors open on their front hinges, holds, and shuts them with a bounce on the latch |

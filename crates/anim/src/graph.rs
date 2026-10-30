@@ -34,6 +34,11 @@ use serde_json::json;
 
 use crate::clip::{AnimationClip, ClipBinding};
 use crate::motion::{MotionDatabase, MotionPlayer, decay_spring, from_scaled_axis, to_scaled_axis};
+
+/// Curves a motion-matching node publishes: how far each foot is on the ground in its data
+/// (weighted by the node's share of the pose, which [`CONTACT_WEIGHT`] carries).
+pub const CONTACT_CURVES: [&str; 2] = ["contact.foot_l", "contact.foot_r"];
+pub const CONTACT_WEIGHT: &str = "contact.weight";
 use crate::skeleton::{Skeleton, apply_additive, blend_masked};
 use crate::xform::Xf;
 
@@ -1127,6 +1132,12 @@ impl GraphInstance {
                     }
                     if args.weight > 0.0 {
                         ctx.root_delta += player.root_velocity() * dt * args.weight * (1.0 - show);
+                        // The data's foot contacts, for foot locking (`FootIk`).
+                        let w = args.weight * (1.0 - show);
+                        let [l, r] = player.contacts();
+                        ctx.add_curve(CONTACT_CURVES[0], l * w);
+                        ctx.add_curve(CONTACT_CURVES[1], r * w);
+                        ctx.add_curve(CONTACT_WEIGHT, w);
                     }
                 }
                 if show > 0.0 {

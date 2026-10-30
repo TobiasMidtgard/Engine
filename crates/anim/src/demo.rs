@@ -93,6 +93,13 @@ const DOG_PATH: [[f32; 3]; 10] = [
     [-15.6, 17.8, 3.0],
     [-15.6, 14.2, 1.6],
 ];
+/// The water trough's center by the horse track (x, z), where the horse stops to drink, and
+/// how long it stays (it drinks, then grazes).
+const TROUGH: [f32; 2] = [17.25, 8.0];
+const HORSE_DRINK: [f32; 2] = [18.5, 7.2];
+const HORSE_DRINK_SECS: f32 = 15.0;
+/// How long the dog stays at its start to sit, lie down and bow.
+const DOG_SIT_SECS: f32 = 10.0;
 /// The realistic horse (`assets/manifests/animation.toml`).
 const HORSE_FILE: &str = "anim/animals/horse/Horse.gltf";
 /// The hammer in the right hand's frame: the fist's center, and the handle's direction toward
@@ -132,6 +139,8 @@ pub struct DemoEntities {
     pub greatsword_dummy: Entity,
     /// Shoots at the butt.
     pub archer: Entity,
+    /// Runs the wall-run course.
+    pub wall_runner: Entity,
 }
 
 /// Follows a closed, smooth path through `waypoints` (`[x, z, speed]`, meters and m/s,
@@ -187,6 +196,9 @@ pub struct DemoPause {
     pub waypoint: usize,
     pub secs: f32,
     pub param: String,
+    /// Further parameters set to 1 from that many seconds into the stop until the end of the
+    /// wait (a dog told to sit and then to lie down).
+    pub later: Vec<(f32, String)>,
 }
 
 /// How far before and after a stop a walker slows down and gets going again, m.
@@ -329,6 +341,12 @@ impl DemoPath {
             let w = &mut self.pause_weights[i];
             *w += (f32::from(u8::from(on)) - *w) * k;
             out.push((p.param.clone(), *w));
+            for (from, name) in &p.later {
+                let up = self
+                    .pause
+                    .is_some_and(|(j, t)| j == i && t >= *from && t < p.secs - PAUSE_PARAM_SECS);
+                out.push((name.clone(), f32::from(u8::from(up))));
+            }
         }
         out
     }
@@ -478,6 +496,7 @@ pub(crate) fn register(app: &mut App) {
             stunt::stunt_system,
             crate::shuttle::shuttle_system,
             crate::shuttle::watch_system,
+            crate::course::run_courses,
         )
             .in_set(UpdateSet::Logic),
     )
@@ -1453,7 +1472,10 @@ pub fn give_dog_body(world: &mut World, dog: Entity, scale: f32) {
     {
         let mut lib = world.resource_mut::<AnimationLibrary>();
         if !lib.skeletons.contains_key(&skeleton) {
-            lib.add_skeleton(dog::skeleton(scale));
+            let s = lib.add_skeleton(dog::skeleton(scale));
+            for clip in dog::action_clips(&s, scale) {
+                lib.add_clip(clip);
+            }
         }
     }
     let handle = mesh_handle(world, &format!("anim/{skeleton}"), || dog::mesh(scale));
@@ -1983,6 +2005,94 @@ pub const VIEWS: &[DemoView] = &[
         target: [-22.6, 0.9, -6.4],
         hour: 15.0,
         at: 4.3,
+    },
+    DemoView {
+        key: "paddock_wallrun",
+        name: "Wall run: feet on the wall, body tilted off it, the inside arm out toward it",
+        eye: [9.5, 1.6, 25.0],
+        target: [6.6, 1.2, 22.2],
+        hour: 15.0,
+        at: 2.65,
+    },
+    DemoView {
+        key: "paddock_wallkick",
+        name: "Kicked off one wall across the lane toward the other",
+        eye: [12.0, 1.5, 19.5],
+        target: [10.6, 1.6, 24.0],
+        hour: 15.0,
+        at: 3.2,
+    },
+    DemoView {
+        key: "paddock_wallrun_right",
+        name: "Running the second wall, the other side leading",
+        eye: [16.5, 1.5, 22.5],
+        target: [14.4, 1.2, 25.6],
+        hour: 15.0,
+        at: 3.75,
+    },
+    DemoView {
+        key: "paddock_wall_land",
+        name: "Dropping off the wall and landing",
+        eye: [20.0, 1.2, 23.3],
+        target: [17.4, 0.7, 25.2],
+        hour: 15.0,
+        at: 4.7,
+    },
+    DemoView {
+        key: "paddock_horse_drink",
+        name: "The horse drinks at the trough, its neck reaching for the water",
+        eye: [17.2, 1.4, 4.6],
+        target: [17.6, 0.7, 7.8],
+        hour: 15.0,
+        at: 19.5,
+    },
+    DemoView {
+        key: "paddock_horse_graze",
+        name: "Then grazes beside it, nibbling and moving on a little",
+        eye: [20.5, 1.3, 5.8],
+        target: [18.0, 0.5, 7.6],
+        hour: 15.0,
+        at: 26.0,
+    },
+    DemoView {
+        key: "paddock_dog_shake",
+        name: "The dog shakes off, the twist running from head to tail",
+        eye: [-13.6, 0.7, 16.6],
+        target: [-15.6, 0.4, 17.8],
+        hour: 15.0,
+        at: 12.3,
+    },
+    DemoView {
+        key: "paddock_dog_sniff",
+        name: "Nose down, casting along a scent",
+        eye: [-13.5, 0.8, 13.4],
+        target: [-15.4, 0.25, 14.0],
+        hour: 15.0,
+        at: 18.5,
+    },
+    DemoView {
+        key: "paddock_dog_sit",
+        name: "The dog sits: haunches down between folded hind legs",
+        eye: [-10.4, 0.75, 10.6],
+        target: [-12.0, 0.35, 12.0],
+        hour: 15.0,
+        at: 26.3,
+    },
+    DemoView {
+        key: "paddock_dog_lie",
+        name: "Lies down from the sit, forelegs out ahead",
+        eye: [-10.4, 0.6, 10.6],
+        target: [-12.0, 0.25, 12.0],
+        hour: 15.0,
+        at: 29.0,
+    },
+    DemoView {
+        key: "paddock_dog_bow",
+        name: "Up into a play bow, tail high and wagging",
+        eye: [-10.4, 0.7, 10.6],
+        target: [-12.0, 0.3, 12.0],
+        hour: 15.0,
+        at: 32.9,
     },
 ];
 
@@ -2730,13 +2840,56 @@ fn build_paddock(world: &mut World, origin: DVec3) -> DemoEntities {
             );
         }
     }
+    // A water trough beside the home straight, outside the rail's line: the horse stops by it
+    // at the end of its first lap, drinks (its neck reaching for the water wherever it
+    // stopped) and then grazes there.
+    let trough_at = at(TROUGH[0] as f64, 0.25, TROUGH[1] as f64);
+    let trough = Transform::from_translation(trough_at);
+    world.spawn((
+        Name::new("Water trough"),
+        trough,
+        GlobalTransform::from(trough),
+        RigidBody::fixed(),
+        Collider::cuboid(Vec3::new(0.7, 0.25, 0.25)),
+        MeshRenderer::new(
+            MeshShape::Cuboid {
+                size: [1.4, 0.5, 0.5],
+            },
+            StandardMaterial::hex(0x5b4636).with_roughness(0.8),
+        ),
+        crate::actions::ActionSpot {
+            actions: vec!["drink".into()],
+            // The water's near side.
+            point: Vec3::new(0.0, 0.17, -0.08),
+            radius: 1.9,
+        },
+    ));
+    let water = Transform::from_translation(trough_at + DVec3::Y * 0.19);
+    world.spawn((
+        water,
+        GlobalTransform::from(water),
+        MeshRenderer::new(
+            MeshShape::Cuboid {
+                size: [1.3, 0.02, 0.4],
+            },
+            StandardMaterial::hex(0x34505a).with_roughness(0.05),
+        ),
+    ));
+    let mut horse_route = horse_path.clone();
+    horse_route.push([HORSE_DRINK[0], HORSE_DRINK[1], 1.0]);
     let horse_e = spawn_horse(
         world,
         Transform::from_translation(at(16.0, 0.0, 7.0)).with_rotation(facing(90.0)),
     );
     world.entity_mut(horse_e).insert(DemoPath {
         effort_speed: 11.0,
-        ..DemoPath::new(origin, horse_path)
+        pauses: vec![DemoPause {
+            waypoint: horse_route.len() - 1,
+            secs: HORSE_DRINK_SECS,
+            param: "act.drink".into(),
+            later: vec![(6.2, "act.graze".into())],
+        }],
+        ..DemoPath::new(origin, horse_route)
     });
 
     // --- Spider garden: flat-topped boulders to climb over.
@@ -2765,6 +2918,7 @@ fn build_paddock(world: &mut World, origin: DVec3) -> DemoEntities {
             waypoint: 5,
             secs: 5.0,
             param: "threat".into(),
+            ..Default::default()
         }],
         ..DemoPath::new(
             origin,
@@ -2838,13 +2992,38 @@ fn build_paddock(world: &mut World, origin: DVec3) -> DemoEntities {
         Transform::from_translation(at(-12.0, 0.0, 12.0)).with_rotation(facing(-90.0)),
         1.0,
     );
+    // After the gallop it slows, stops to shake off, casts about with its nose down, then at
+    // its start sits, lies down from the sit and gets up to bow for play.
     world.entity_mut(dog_e).insert(DemoPath {
         effort_speed: 8.0,
+        pauses: vec![
+            DemoPause {
+                waypoint: 8,
+                secs: 2.6,
+                param: "act.shake_off".into(),
+                ..Default::default()
+            },
+            DemoPause {
+                waypoint: 9,
+                secs: 4.8,
+                param: "act.sniff".into(),
+                ..Default::default()
+            },
+            DemoPause {
+                waypoint: 0,
+                secs: DOG_SIT_SECS,
+                param: "act.sit".into(),
+                later: vec![(1.6, "act.lie".into()), (6.0, "act.play_bow".into())],
+            },
+        ],
         ..DemoPath::new(origin, DOG_PATH.to_vec())
     });
 
     // --- Stunt yard: off a deck onto a crash mat, limp, and up again.
     let stuntman = stunt::spawn_yard(world, origin);
+
+    // --- Wall-run course: two walls either side of a lane, a runner over both.
+    let wall_runner = crate::course::spawn_course(world, origin);
 
     let yard = weapons_yard(world, origin);
 
@@ -2869,6 +3048,7 @@ fn build_paddock(world: &mut World, origin: DVec3) -> DemoEntities {
         greatsword: yard.greatsword,
         greatsword_dummy: yard.dummy,
         archer: yard.archer,
+        wall_runner,
     }
 }
 
@@ -3073,6 +3253,7 @@ mod tests {
                 waypoint: 1,
                 secs: 3.0,
                 param: "threat".into(),
+                ..Default::default()
             }],
             ..DemoPath::new(
                 DVec3::ZERO,

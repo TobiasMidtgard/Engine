@@ -356,6 +356,16 @@ pub(crate) fn gather_surfaces(
 
 // --------------------------------------------------------------------------- foot placement
 
+/// How far the data under an animator's pose has a foot on the ground (its contact curve over
+/// the motion-matching node's share of the pose), when that node has most of the pose.
+fn contact_label(animator: &Animator, foot: &str) -> Option<f32> {
+    let k = crate::graph::CONTACT_CURVES
+        .iter()
+        .position(|c| c.strip_prefix("contact.") == Some(foot))?;
+    let weight = animator.curve(crate::graph::CONTACT_WEIGHT);
+    (weight > 0.5).then(|| animator.curve(crate::graph::CONTACT_CURVES[k]) / weight)
+}
+
 /// One leg for [`FootIk`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -715,13 +725,17 @@ pub fn solve_feet(
         // While hurried the lead foot goes first.
         let waits = hurried && ik.lead.is_some_and(|lead| lead != n);
         let rot = gt.rotation() * animator.model[foot].r;
+        // A foot is down once it is (nearly) still, or as soon as the animation's data labels
+        // it in contact (motion matching), which catches a foot still skimming in.
+        let labelled = contact_label(animator, &skeleton.names[foot]);
         let l = &mut ik.locks[n];
         let foot_speed = match (l.last, dt > 0.0) {
             (Some(p), true) => ((p - world).with_y(0.0).length() as f32) / dt,
             _ => 0.0,
         };
         l.last = Some(world);
-        let planted = foot_speed < PLANT_SPEED + 0.5 * body_speed;
+        let planted =
+            foot_speed < PLANT_SPEED + 0.5 * body_speed || labelled.is_some_and(|c| c > 0.5);
         if l.held {
             let drift_from = |p: DVec3| {
                 l.at.map_or(f64::INFINITY, |a| {

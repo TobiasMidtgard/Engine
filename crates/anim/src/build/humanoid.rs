@@ -23,6 +23,13 @@ use crate::skeleton::Skeleton;
 use crate::skin::SkinnedMesh;
 use crate::xform::Xf;
 
+mod parkour;
+pub use parkour::{
+    AIR, DOUBLE_JUMP, JUMP, LAND, LAND_HARD, SLIDE, TRIGGER_DOUBLE_JUMP, TRIGGER_JUMP,
+    TRIGGER_LAND, TRIGGER_LAND_HARD, TRIGGER_WALL_KICK, WALL_CURVES, WALL_DISTANCE, WALL_KICK,
+    WALL_RUN, WALL_RUN_SECS, WALL_TILT,
+};
+
 pub const SKELETON: &str = "humanoid";
 pub const GRAPH: &str = "humanoid";
 
@@ -3734,6 +3741,7 @@ pub fn clips(s: &Skeleton) -> Vec<AnimationClip> {
     ]
     .into_iter()
     .chain(super::weapons::clips(s))
+    .chain(parkour::clips(s))
     .collect()
 }
 
@@ -4023,7 +4031,10 @@ pub fn graph_with(name: &str, motion: &Locomotion) -> AnimGraph {
                 state("sword_stance", sword_stance),
                 state("shield_guard", shield_guard),
                 state("greatsword_stance", greatsword_stance),
-            ],
+            ]
+            .into_iter()
+            .chain(parkour::states())
+            .collect(),
             transitions: vec![
                 TransitionDef::new(
                     "move",
@@ -4155,7 +4166,10 @@ pub fn graph_with(name: &str, motion: &Locomotion) -> AnimGraph {
                     .inertialize(),
                 TransitionDef::new("*", "kneel_hurt", Condition::trigger("kneel_hurt"), 0.15),
                 TransitionDef::new("kneel_hurt", "move", Condition::Finished, 0.4).inertialize(),
-            ],
+            ]
+            .into_iter()
+            .chain(parkour::transitions())
+            .collect(),
             initial: Some("move".into()),
         },
     }

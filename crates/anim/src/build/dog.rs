@@ -7,10 +7,12 @@
 //! the coat, the step and the gaits' speeds and rhythm scale with it (dynamic similarity: speeds
 //! grow with the square root of size, stride rates shrink with it), so the same rig serves a
 //! terrier and a mastiff. Each size has its own skeleton name ([`skeleton_name`]); the idle clip
-//! and graph only rotate bones, so every size shares them.
+//! and graph only rotate bones, so every size shares them. The actions (sit, lie down, play bow,
+//! shake off, sniff) move the body, so each size has its own ([`action_clips`]).
 
 use engine_core::prelude::*;
 
+use super::quadruped::{Leg, Rig, Stance, action_clip, sized_name};
 use super::sdf::{Body, Paint, Shape};
 use super::{PoseBuilder, bone, cycle_sin};
 use crate::clip::AnimationClip;
@@ -561,6 +563,7 @@ pub fn gait(scale: f32) -> LeggedGait {
                 (&["upper", "lower", "cannon", "paw"], LegStyle::Hoofed)
             };
             legs.push(GaitLeg {
+                release: RIG.release[legs.len()].into(),
                 bones: parts.iter().map(|p| name(prefix, p, side)).collect(),
                 style,
                 phase: 0.0,
@@ -578,7 +581,6 @@ pub fn gait(scale: f32) -> LeggedGait {
                 } else {
                     Vec3::new(0.0, 0.0, -0.04 * s)
                 },
-                ..Default::default()
             });
         }
     }
@@ -746,7 +748,268 @@ fn idle(s: &Skeleton) -> AnimationClip {
 }
 
 pub fn clips(s: &Skeleton) -> Vec<AnimationClip> {
-    vec![idle(s)]
+    let mut out = vec![idle(s)];
+    out.extend(action_clips(s, 1.0));
+    out
+}
+
+/// What the dog's actions move.
+const RIG: Rig = Rig {
+    legs: [
+        &[
+            "front_scapula_l",
+            "front_upper_l",
+            "front_lower_l",
+            "front_cannon_l",
+            "front_paw_l",
+        ],
+        &[
+            "front_scapula_r",
+            "front_upper_r",
+            "front_lower_r",
+            "front_cannon_r",
+            "front_paw_r",
+        ],
+        &[
+            "hind_upper_l",
+            "hind_lower_l",
+            "hind_cannon_l",
+            "hind_paw_l",
+        ],
+        &[
+            "hind_upper_r",
+            "hind_lower_r",
+            "hind_cannon_r",
+            "hind_paw_r",
+        ],
+    ],
+    release: [
+        "release.front_l",
+        "release.front_r",
+        "release.hind_l",
+        "release.hind_r",
+    ],
+    neck: &["neck_1", "neck_2", "head"],
+    jaw: Some("jaw"),
+    tail: &["tail_1", "tail_2", "tail_3", "tail_4"],
+    loin: Some("loin"),
+};
+
+/// The dog's actions ([`crate::actions`]): `dog_sit`, `dog_lie` (and `dog_lie_from_sit`, the
+/// same down begun from a sit), `dog_play_bow`, `dog_shake_off` and `dog_sniff`.
+pub const ACTIONS: [&str; 5] = ["sit", "lie", "play_bow", "shake_off", "sniff"];
+
+/// Where the nose is in the head bone's frame, m (scale 1).
+pub const MUZZLE: Vec3 = Vec3::new(0.0, -0.05, -0.17);
+
+/// A leg folded under the dog: its cannon's top (`joint`, the hock or the carpus) on the
+/// ground, the cannon lying flat forward to a flat paw. Given for the right side (+X).
+fn folded(joint: Vec3, pole: Vec3) -> Leg {
+    Leg::Free {
+        joint,
+        cannon: Vec3::new(0.0, -0.06, -1.0),
+        end: 84.0,
+        pole,
+    }
+}
+
+/// The same leg on the left.
+fn mirror(l: Leg) -> Leg {
+    match l {
+        Leg::Free {
+            joint,
+            cannon,
+            end,
+            pole,
+        } => Leg::Free {
+            joint: Vec3::new(-joint.x, joint.y, joint.z),
+            cannon,
+            end,
+            pole: Vec3::new(-pole.x, pole.y, pole.z),
+        },
+        l => l,
+    }
+}
+
+fn pair(l: Leg) -> [Leg; 2] {
+    [mirror(l), l]
+}
+
+/// The sit: the haunches down between folded hind legs, the forelegs straight, the head level.
+fn sit_stance() -> Stance {
+    let [hl, hr] = pair(folded(
+        Vec3::new(0.085, 0.04, 0.27),
+        Vec3::new(0.4, 0.2, -1.0),
+    ));
+    Stance {
+        body: Vec3::new(0.0, -0.09, 0.03),
+        pitch: 35.0,
+        loin: 15.0,
+        neck: [-14.0, -10.0, 0.0, -10.0],
+        tail: 12.0,
+        jaw: 8.0,
+        legs: [Leg::Planted, Leg::Planted, hl, hr],
+        ..Stance::REST
+    }
+}
+
+/// Lying down on the chest (the sphinx): forelegs flat ahead from the elbows, hind legs folded
+/// to the sides, the head up.
+fn lie_stance() -> Stance {
+    let [fl, fr] = pair(folded(
+        Vec3::new(0.08, 0.04, -0.41),
+        Vec3::new(0.2, 0.0, 1.0),
+    ));
+    let [hl, hr] = pair(folded(
+        Vec3::new(0.12, 0.04, 0.31),
+        Vec3::new(0.7, 0.3, -1.0),
+    ));
+    Stance {
+        body: Vec3::new(0.0, -0.23, 0.0),
+        pitch: 3.0,
+        loin: 4.0,
+        neck: [6.0, 2.0, 0.0, -6.0],
+        tail: 14.0,
+        jaw: 6.0,
+        legs: [fl, fr, hl, hr],
+        ..Stance::REST
+    }
+}
+
+/// The dog's action clips for its skeleton `s` at `scale` (named for the size,
+/// [`sized_name`]).
+pub fn action_clips(s: &Skeleton, scale: f32) -> Vec<AnimationClip> {
+    let rest = Stance::REST;
+    let clip = |name: &str, keys: &[Stance], reach: &[(f32, f32)]| {
+        action_clip(&RIG, s, scale, &sized_name(name, &s.name), keys, reach)
+    };
+    let sit = sit_stance();
+    let pant = |at: f32, open: f32| Stance {
+        jaw: 8.0 + 5.0 * open,
+        pitch: sit.pitch + 0.8 * open,
+        ..sit.at(at)
+    };
+    let mut sit_keys = vec![rest.at(0.0), sit.at(0.75)];
+    sit_keys.extend((0..8).map(|k| pant(0.95 + 0.25 * k as f32, (k % 2) as f32)));
+    sit_keys.extend([
+        Stance {
+            neck_yaw: [8.0, 10.0, 0.0, 12.0],
+            head_roll: -10.0,
+            ..sit.at(3.3)
+        },
+        sit.at(3.9),
+        rest.at(4.6),
+    ]);
+    let lie = lie_stance();
+    let lie_hold = |from: f32| {
+        [
+            lie.at(from),
+            Stance {
+                neck_yaw: [-10.0, -10.0, 0.0, -14.0],
+                ..lie.at(from + 1.4)
+            },
+            Stance {
+                neck: [-6.0, -4.0, 0.0, -10.0],
+                ..lie.at(from + 2.6)
+            },
+            lie.at(from + 3.4),
+        ]
+    };
+    // Down from standing: the haunches go first, then the chest.
+    let crouch = Stance {
+        body: Vec3::new(0.0, -0.12, 0.04),
+        pitch: 18.0,
+        loin: 10.0,
+        legs: sit.legs,
+        ..rest
+    };
+    let mut lie_keys = vec![rest.at(0.0), crouch.at(0.55)];
+    lie_keys.extend(lie_hold(1.2));
+    lie_keys.extend([crouch.at(5.1), rest.at(5.7)]);
+    let mut from_sit = vec![sit.at(0.0)];
+    from_sit.extend(lie_hold(0.9));
+    from_sit.extend([crouch.at(4.8), rest.at(5.4)]);
+    // Chest down, rear up, tail high and wagging: an invitation to play.
+    let [fl, fr] = pair(folded(
+        Vec3::new(0.085, 0.04, -0.45),
+        Vec3::new(0.2, 0.0, 1.0),
+    ));
+    let bow = |at: f32, wag: f32| Stance {
+        at,
+        body: Vec3::new(0.0, -0.14, 0.03),
+        pitch: -25.0,
+        neck: [24.0, 10.0, 0.0, 12.0],
+        jaw: 12.0,
+        tail: 10.0,
+        tail_swing: 22.0 * wag,
+        legs: [fl, fr, Leg::Planted, Leg::Planted],
+        ..rest
+    };
+    let mut bow_keys = vec![rest.at(0.0)];
+    bow_keys
+        .extend((0..9).map(|k| bow(0.4 + 0.16 * k as f32, if k % 2 == 0 { 1.0 } else { -1.0 })));
+    bow_keys.push(rest.at(2.3));
+    // Shaking off water: the body twists from side to side four and a half times a second,
+    // the head leading it, wide in the middle and dying away.
+    let shake_to = |at: f32, side: f32, amount: f32| Stance {
+        at,
+        roll: 22.0 * side * amount,
+        yaw: 6.0 * side * amount,
+        loin: -2.0,
+        neck_yaw: [
+            -10.0 * side * amount,
+            -14.0 * side * amount,
+            0.0,
+            -10.0 * side * amount,
+        ],
+        head_roll: -30.0 * side * amount,
+        tail_swing: 30.0 * side * amount,
+        jaw: 4.0,
+        ..rest
+    };
+    let mut shake_keys = vec![rest.at(0.0)];
+    shake_keys.extend((0..13).map(|k| {
+        let amount = (1.0 - (k as f32 - 5.0).abs() / 7.0).clamp(0.2, 1.0);
+        shake_to(
+            0.2 + 0.11 * k as f32,
+            if k % 2 == 0 { 1.0 } else { -1.0 },
+            amount,
+        )
+    }));
+    shake_keys.push(rest.at(1.85));
+    // Nose to the ground, casting from side to side along a trail.
+    let nose_down = |at: f32, yaw: f32| Stance {
+        at,
+        body: Vec3::new(0.0, -0.04, 0.0),
+        pitch: -8.0,
+        neck: [-62.0, -44.0, 0.0, -30.0],
+        neck_yaw: [yaw, yaw * 0.8, 0.0, yaw * 0.5],
+        tail: 6.0,
+        tail_swing: yaw * 0.6,
+        ..rest
+    };
+    let sniff_keys = [
+        rest.at(0.0),
+        nose_down(0.7, 0.0),
+        nose_down(1.3, 16.0),
+        nose_down(1.9, 6.0),
+        nose_down(2.5, -18.0),
+        nose_down(3.1, -4.0),
+        nose_down(3.6, 10.0),
+        rest.at(4.4),
+    ];
+    vec![
+        clip("dog_sit", &sit_keys, &[(0.0, 0.0)]),
+        clip("dog_lie", &lie_keys, &[(0.0, 0.0)]),
+        clip("dog_lie_from_sit", &from_sit, &[(0.0, 0.0)]),
+        clip("dog_play_bow", &bow_keys, &[(0.0, 0.0)]),
+        clip("dog_shake_off", &shake_keys, &[(0.0, 0.0)]),
+        clip(
+            "dog_sniff",
+            &sniff_keys,
+            &[(0.5, 0.0), (0.8, 1.0), (3.6, 1.0), (4.0, 0.0)],
+        ),
+    ]
 }
 
 pub fn graph() -> AnimGraph {
@@ -760,6 +1023,51 @@ pub fn graph() -> AnimGraph {
 mod tests {
     use super::*;
     use crate::muscle::MorphWeights;
+
+    fn name_of(prefix: &str, part: &str, side: usize) -> String {
+        name(prefix, part, side)
+    }
+
+    #[test]
+    fn a_sitting_or_lying_dog_rests_its_folded_legs_on_the_ground_at_any_size() {
+        for scale in [1.0, scale_for_height(0.35)] {
+            let s = skeleton(scale);
+            let clips = action_clips(&s, scale);
+            for (name, t, legs) in [
+                ("dog_sit", 2.0, &["hind"][..]),
+                ("dog_lie", 3.0, &["front", "hind"][..]),
+            ] {
+                let name = sized_name(name, &s.name);
+                let clip = clips.iter().find(|c| c.name == name).unwrap();
+                let binding = crate::clip::ClipBinding::new(clip, &s);
+                let mut local = s.rest.clone();
+                clip.sample(t, &binding, &mut local);
+                let mut model = s.rest_model.clone();
+                s.to_model(&local, &mut model);
+                for prefix in legs {
+                    for side in 0..2 {
+                        for part in ["cannon", "paw"] {
+                            let y = model[s.bone(&name_of(prefix, part, side))].t.y;
+                            assert!(
+                                y > -0.01 * scale && y < 0.08 * scale,
+                                "{name} {prefix}_{part}_{side} at {y}"
+                            );
+                        }
+                        let release = clip
+                            .curve(
+                                RIG.release[if *prefix == "front" { side } else { 2 + side }],
+                                t,
+                            )
+                            .unwrap();
+                        assert!(release > 0.99);
+                    }
+                }
+                // The haunches (or the chest) come down.
+                let body = model[s.bone("body")].t.y / scale;
+                assert!(body < BODY.y - 0.05, "{name}: body at {body}");
+            }
+        }
+    }
 
     #[test]
     fn dog_stands_on_its_paws_at_its_size() {

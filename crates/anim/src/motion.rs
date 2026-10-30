@@ -87,6 +87,8 @@ pub struct MotionDatabase {
     pub clip_names: Vec<String>,
     /// Events fired on entering each frame: (frame, name, bone).
     events: Vec<(usize, String, Option<String>)>,
+    /// Which parts of the feet are on the ground each frame ([`contact_bits`]).
+    contacts: Vec<u8>,
     /// Fastest root speed in the database, m/s.
     pub top_speed: f32,
 }
@@ -95,6 +97,7 @@ pub struct MotionDatabase {
 struct Rig {
     hips: usize,
     feet: [usize; 2],
+    toes: [Option<usize>; 2],
 }
 
 impl Rig {
@@ -102,8 +105,49 @@ impl Rig {
         Some(Self {
             hips: skeleton.index_of("hips")?,
             feet: [skeleton.index_of("foot_l")?, skeleton.index_of("foot_r")?],
+            toes: [skeleton.index_of("toe_l"), skeleton.index_of("toe_r")],
         })
     }
+}
+
+/// A part of a foot counts as planted once it is below this height over its lowest in the
+/// clip and slower than this (m, m/s), and as lifted again above the second pair: the
+/// thresholds MotionBricks' data labels its contacts with.
+const PLANT_BELOW: (f32, f32) = (0.03, 0.25);
+const LIFT_ABOVE: (f32, f32) = (0.05, 0.5);
+/// Contact labels are smoothed by the majority over this many frames.
+const CONTACT_SMOOTH: usize = 5;
+
+/// The bit for a foot's (0 left, 1 right) heel or toe in [`MotionDatabase::contacts`].
+pub fn contact_bits(foot: usize, toe: bool) -> u8 {
+    1 << (foot * 2 + usize::from(toe))
+}
+
+/// Label each frame of a track (height over the ground, speed) planted or not, with
+/// hysteresis, then smooth the labels by majority.
+fn label_contacts(track: &[(f32, f32)]) -> Vec<bool> {
+    let mut down = track
+        .first()
+        .is_some_and(|&(h, v)| h < PLANT_BELOW.0 && v < PLANT_BELOW.1);
+    let raw: Vec<bool> = track
+        .iter()
+        .map(|&(h, v)| {
+            if down && (h > LIFT_ABOVE.0 || v > LIFT_ABOVE.1) {
+                down = false;
+            } else if !down && h < PLANT_BELOW.0 && v < PLANT_BELOW.1 {
+                down = true;
+            }
+            down
+        })
+        .collect();
+    let half = CONTACT_SMOOTH / 2;
+    (0..raw.len())
+        .map(|f| {
+            let (a, b) = (f.saturating_sub(half), (f + half + 1).min(raw.len()));
+            let on = raw[a..b].iter().filter(|&&d| d).count();
+            on * 2 > b - a
+        })
+        .collect()
 }
 
 /// Mirror image (across the character's left-right plane, x → −x) of a rotation.
@@ -192,6 +236,7 @@ impl MotionDatabase {
             frame_range: Vec::new(),
             clip_names: Vec::new(),
             events: Vec::new(),
+            contacts: Vec::new(),
             top_speed: 0.0,
         };
         let mut raw: Vec<[f32; DIM]> = Vec::new();
@@ -397,6 +442,27 @@ impl MotionDatabase {
                 .top_speed
                 .max(self.root_velocity.last().unwrap().length());
         }
+        // Foot contacts: heel (the ankle) and toe, each over its lowest in the clip.
+        let mut bits = vec![0u8; frames];
+        for (k, &foot) in rig.feet.iter().enumerate() {
+            for (toe, bone) in [(false, Some(foot)), (true, rig.toes[k])] {
+                let Some(bone) = bone else {
+                    continue;
+                };
+                let floor = (0..frames)
+                    .map(|f| world_of(f, bone).y)
+                    .fold(f32::INFINITY, f32::min);
+                let track: Vec<(f32, f32)> = (0..frames)
+                    .map(|f| (world_of(f, bone).y - floor, velocity_of(f, bone).length()))
+                    .collect();
+                for (f, down) in label_contacts(&track).into_iter().enumerate() {
+                    if down {
+                        bits[f] |= contact_bits(k, toe);
+                    }
+                }
+            }
+        }
+        self.contacts.extend(bits);
         // Events, every time round (left and right swap in the mirror).
         let duration = clip.duration.max(1e-4);
         for k in 0..cycles {
@@ -524,6 +590,11 @@ impl MotionDatabase {
     }
 
     /// Root velocity (root space, m/s) of a frame.
+    /// Which parts of the feet are on the ground at a frame ([`contact_bits`]).
+    pub fn contacts(&self, frame: usize) -> u8 {
+        self.contacts.get(frame).copied().unwrap_or(0)
+    }
+
     pub fn root_velocity(&self, frame: usize) -> Vec3 {
         self.root_velocity[frame]
     }
@@ -999,7 +1070,46 @@ impl MotionPlayer {
     }
 
     /// The frame playing.
+    /// How far each foot (left, right) is on the ground at the frame playing, heel or toe,
+    /// blended between the two frames it is between (0 with nothing playing).
+    pub fn contacts(&self) -> [f32; 2] {
+        let Some(frame) = self.frame else {
+            return [0.0; 2];
+        };
+        let f0 = (frame as usize).min(self.db.frame_count() - 1);
+        let f1 = if self.db.continues(f0) { f0 + 1 } else { f0 };
+        let w = frame.fract();
+        std::array::from_fn(|k| {
+            let on = |f: usize| {
+                let b = self.db.contacts(f);
+                f32::from(u8::from(
+                    b & (contact_bits(k, false) | contact_bits(k, true)) != 0,
+                ))
+            };
+            on(f0) + (on(f1) - on(f0)) * w
+        })
+    }
+
     pub fn frame(&self) -> Option<usize> {
         self.frame.map(|f| f as usize)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn contacts_need_the_foot_low_and_still_and_ride_over_a_one_frame_blip() {
+        let mut track = vec![(0.0, 0.0); 10];
+        track.extend(vec![(0.2, 2.0); 10]);
+        track.extend(vec![(0.01, 0.1); 10]);
+        track[25] = (0.06, 0.1);
+        let c = label_contacts(&track);
+        assert!(c[..9].iter().all(|&d| d));
+        assert!(c[11..19].iter().all(|&d| !d));
+        assert!(c[22..].iter().all(|&d| d), "{c:?}");
+        // Low but sliding fast is not a contact.
+        assert!(!label_contacts(&[(0.0, 1.0); 6]).iter().any(|&d| d));
     }
 }
