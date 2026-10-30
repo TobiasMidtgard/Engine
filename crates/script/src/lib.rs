@@ -355,6 +355,7 @@ mod profiler;
 pub mod props;
 pub mod rewind;
 mod runtime;
+pub mod spots;
 pub mod state_board;
 pub mod states;
 pub mod story;
@@ -563,7 +564,8 @@ impl Plugin for ScriptPlugin {
             .init_resource::<story::StoryFacts>()
             .init_resource::<story::QuestBook>()
             .init_resource::<story::StoryRuns>()
-            .init_resource::<story::DialogueFiles>();
+            .init_resource::<story::DialogueFiles>()
+            .init_resource::<spots::SpotChoices>();
         app.register_component::<Script>(
             "Runs a Luau script from assets/scripts on this entity: path (\"showcase/lantern.luau\"), \
              props (JSON over the script's defaults), enabled.",
@@ -573,6 +575,12 @@ impl Plugin for ScriptPlugin {
              on this entity: path (\"cutscenes/intro\"), autoplay (when the game starts), loop, \
              rate, restore (put back what it changed when it ends), cameras (look through its \
              camera cuts). The names its tracks bind are looked up below this entity first.",
+        )
+        .register_component::<spots::StorySpot>(
+            "A place to walk to in a conversation: options tagged #spot:<name> in a .yarn file \
+             are picked by standing in the spot of that name (the nearest when several share \
+             it) for a moment, or pressing E there: name, radius_m. Often a child of the person \
+             it belongs to (\"at the captain's ear\").",
         )
         .register_component::<ScriptActor>(
             "The actor VM (1, 2, ...) that runs this entity's script; set by the runtime for \
@@ -628,6 +636,18 @@ impl Plugin for ScriptPlugin {
             story::run_story
                 .in_set(UpdateSet::Logic)
                 .after(run_scripts),
+        )
+        .add_systems(
+            Update,
+            spots::run_spots
+                .in_set(UpdateSet::Logic)
+                .after(story::run_story),
+        )
+        .add_systems(
+            FixedUpdate,
+            spots::spare_choosers
+                .after(SimSet::Input)
+                .before(SimSet::Gameplay),
         )
         .add_systems(FixedUpdate, run_fixed_scripts.in_set(SimSet::Gameplay))
         .add_systems(

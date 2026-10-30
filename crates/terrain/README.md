@@ -173,6 +173,8 @@ everything else (streaming, LOD, colliders, ground queries, prints) follows the 
   tank tracks and bodies. Each surface responds differently: mud is plastic and pushes up a
   rim, snow compacts down to its depth, sand is granular and slowly fills back in, grass is
   flattened and springs back. Prints outside the grid are kept and re-stamped when it moves.
+  The grid wraps around in its arrays and texture (like a geometry clipmap), so a move clears
+  and sends only the strip that came into view, and only tiles that changed reach the GPU.
 - **Worn paths.** Ground that many feet cross wears into a path (`wear.rs`). Every
   `GroundContact` adds a little wear to the half-meter cells it lands on (heavier contacts,
   wheels and soaked ground more), and unused ground heals, each kind at its own pace: turf is

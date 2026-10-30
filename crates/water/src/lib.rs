@@ -29,7 +29,7 @@ pub use body::{
     WaveSettings,
 };
 pub use buoyancy::{Buoyancy, Floating, Tether};
-pub use flow::{FlowBed, FlowFill, FlowRegion, FlowSource, Lip};
+pub use flow::{FlowBed, FlowFill, FlowRegion, FlowRock, FlowSource, Lip};
 pub use interact::WaterInteractor;
 pub use render::WaterFeature;
 pub use shore::ShoreCover;

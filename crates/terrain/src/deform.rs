@@ -1,6 +1,6 @@
 //! Footprints, paw prints, hoof marks, tire tracks and flattened grass.
 //!
-//! A high-resolution grid (8 cm cells, ~120 m across) follows the simulation focus. Every
+//! A high-resolution grid (4 cm cells, ~80 m across) follows the simulation focus. Every
 //! [`GroundContact`](engine_world::GroundContact) stamps its shape into it, shaped by the
 //! surface material and the weather: deep prints with pushed-up rims in mud, compacted prints
 //! in snow (as deep as the snow), soft prints in sand, bent blades in grass and nothing on
@@ -108,22 +108,35 @@ pub struct StampRecord {
 }
 
 /// The deformation grid around the focus.
+///
+/// The window's cells are stored with wraparound addressing, like a geometry clipmap's
+/// (Asirvatham and Hoppe, GPU Gems 2, ch. 2): window cell (x, y) lives at storage cell
+/// ((x + base.x) mod size, (y + base.y) mod size). Moving the window only moves `base` and
+/// clears the strips that come into view, instead of copying every cell and sending the whole
+/// grid to the GPU again. The arrays and the tile flags are indexed by storage cell; the
+/// methods take window cells.
 #[derive(Resource, Debug, Clone)]
 pub struct DeformationMap {
-    /// World x/z of cell (0, 0)'s corner.
+    /// World x/z of window cell (0, 0)'s corner.
     pub origin: DVec2,
     pub cell: f32,
     pub size: u32,
+    /// Storage cell of window cell (0, 0).
+    pub base: [u32; 2],
     /// Depth pressed in, meters (negative = raised rim).
     pub depth: Vec<f32>,
     /// Grass bent flat, 0..1.
     pub flatten: Vec<f32>,
     pub kind: Vec<CellKind>,
-    /// Tiles with something in them (for recovery).
+    /// Storage tiles with depth or bent grass in them (for recovery).
     pub active: Vec<bool>,
-    /// Cell rectangle changed since the last upload: (x0, y0, x1, y1) exclusive.
-    pub dirty: Option<(u32, u32, u32, u32)>,
-    /// Bumped when the whole grid moved (re-upload everything).
+    /// Storage tiles that may hold anything (cleared when the window leaves them).
+    touched: Vec<bool>,
+    /// Storage tiles changed since the last upload.
+    dirty: Vec<bool>,
+    /// This grid's number: a new grid (other settings) starts from a clean texture.
+    pub epoch: u64,
+    /// Bumped when the window moved (print shapes are kept relative to its corner).
     pub generation: u64,
     /// Prints stamped since startup.
     pub stamps: u64,
@@ -143,17 +156,21 @@ pub struct DeformationMap {
 
 impl DeformationMap {
     pub fn new(cell: f32, size: u32) -> Self {
+        static EPOCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
         let n = (size * size) as usize;
-        let tiles = size.div_ceil(TILE);
+        let tiles = (size.div_ceil(TILE) * size.div_ceil(TILE)) as usize;
         Self {
             origin: DVec2::splat(-(size as f64) * cell as f64 * 0.5),
             cell,
             size,
+            base: [0, 0],
             depth: vec![0.0; n],
             flatten: vec![0.0; n],
             kind: vec![CellKind::None; n],
-            active: vec![false; (tiles * tiles) as usize],
-            dirty: None,
+            active: vec![false; tiles],
+            touched: vec![false; tiles],
+            dirty: vec![false; tiles],
+            epoch: EPOCH.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             generation: 1,
             stamps: 0,
             history: VecDeque::new(),
@@ -170,8 +187,114 @@ impl DeformationMap {
         self.size as f64 * self.cell as f64
     }
 
+    /// Storage index of window cell (x, y).
     fn index(&self, x: u32, y: u32) -> usize {
-        (y * self.size + x) as usize
+        let wrap = |v: u32, b: u32| {
+            let s = v + b;
+            if s >= self.size { s - self.size } else { s }
+        };
+        (wrap(y, self.base[1]) * self.size + wrap(x, self.base[0])) as usize
+    }
+
+    /// Storage ranges (at most two) of window cells `a..b` along an axis whose base is `base`.
+    fn storage_ranges(&self, a: u32, b: u32, base: u32) -> impl Iterator<Item = (u32, u32)> {
+        let n = self.size;
+        let s = (a + base) % n;
+        let len = b - a;
+        let first = (s, (s + len).min(n));
+        let second = (s + len > n).then_some((0, s + len - n));
+        std::iter::once(first).chain(second).filter(|(a, b)| a < b)
+    }
+
+    /// Storage rectangles of the window rectangle (x0, y0)..(x1, y1).
+    fn storage_rects(&self, x0: u32, y0: u32, x1: u32, y1: u32) -> Vec<[u32; 4]> {
+        let mut out = Vec::with_capacity(4);
+        for (sy0, sy1) in self.storage_ranges(y0, y1, self.base[1]) {
+            for (sx0, sx1) in self.storage_ranges(x0, x1, self.base[0]) {
+                out.push([sx0, sy0, sx1, sy1]);
+            }
+        }
+        out
+    }
+
+    fn tiles_per_side(&self) -> u32 {
+        self.size.div_ceil(TILE)
+    }
+
+    /// Whether anything changed since the last [`take_dirty`](Self::take_dirty).
+    pub fn is_dirty(&self) -> bool {
+        self.dirty.iter().any(|&d| d)
+    }
+
+    /// The storage rectangles (x0, y0, x1, y1, exclusive) changed since the last call: runs of
+    /// changed tiles along each row of tiles.
+    pub fn take_dirty(&mut self) -> Vec<[u32; 4]> {
+        let tiles = self.tiles_per_side();
+        let mut out = Vec::new();
+        for ty in 0..tiles {
+            let mut tx = 0;
+            while tx < tiles {
+                if !self.dirty[(ty * tiles + tx) as usize] {
+                    tx += 1;
+                    continue;
+                }
+                let start = tx;
+                while tx < tiles && self.dirty[(ty * tiles + tx) as usize] {
+                    self.dirty[(ty * tiles + tx) as usize] = false;
+                    tx += 1;
+                }
+                out.push([
+                    start * TILE,
+                    ty * TILE,
+                    (tx * TILE).min(self.size),
+                    ((ty + 1) * TILE).min(self.size),
+                ]);
+            }
+        }
+        out
+    }
+
+    /// Mark every tile that may hold something as changed (a new texture must get them all).
+    pub fn mark_all_dirty(&mut self) {
+        for (d, &t) in self.dirty.iter_mut().zip(&self.touched) {
+            *d |= t;
+        }
+    }
+
+    /// Clear the window rectangle (x0, y0)..(x1, y1): only the tiles that hold something.
+    fn clear(&mut self, x0: u32, y0: u32, x1: u32, y1: u32) {
+        let tiles = self.tiles_per_side();
+        let n = self.size;
+        for [sx0, sy0, sx1, sy1] in self.storage_rects(x0, y0, x1, y1) {
+            for ty in sy0 / TILE..sy1.div_ceil(TILE) {
+                for tx in sx0 / TILE..sx1.div_ceil(TILE) {
+                    let t = (ty * tiles + tx) as usize;
+                    if !self.touched[t] {
+                        continue;
+                    }
+                    let (cx0, cy0) = ((tx * TILE).max(sx0), (ty * TILE).max(sy0));
+                    let (cx1, cy1) = (((tx + 1) * TILE).min(sx1), ((ty + 1) * TILE).min(sy1));
+                    for y in cy0..cy1 {
+                        let row = (y * n) as usize;
+                        let (a, b) = (row + cx0 as usize, row + cx1 as usize);
+                        self.depth[a..b].fill(0.0);
+                        self.flatten[a..b].fill(0.0);
+                        self.kind[a..b].fill(CellKind::None);
+                        self.prints[a..b].fill([0; 2]);
+                    }
+                    self.dirty[t] = true;
+                    // The whole tile is empty now.
+                    let whole = cx0 == tx * TILE
+                        && cy0 == ty * TILE
+                        && cx1 == ((tx + 1) * TILE).min(n)
+                        && cy1 == ((ty + 1) * TILE).min(n);
+                    if whole {
+                        self.touched[t] = false;
+                        self.active[t] = false;
+                    }
+                }
+            }
+        }
     }
 
     /// Depth (m) and flattening at a world point (bilinear), zero outside.
@@ -192,16 +315,16 @@ impl DeformationMap {
         (bil(&self.depth), bil(&self.flatten))
     }
 
+    /// The window rectangle (x0, y0)..(x1, y1) changed: its tiles hold something now.
     fn mark(&mut self, x0: u32, y0: u32, x1: u32, y1: u32) {
-        self.dirty = Some(match self.dirty {
-            None => (x0, y0, x1, y1),
-            Some((a, b, c, d)) => (a.min(x0), b.min(y0), c.max(x1), d.max(y1)),
-        });
-        let tiles = self.size.div_ceil(TILE);
-        for ty in y0 / TILE..=(y1.saturating_sub(1)) / TILE {
-            for tx in x0 / TILE..=(x1.saturating_sub(1)) / TILE {
-                if tx < tiles && ty < tiles {
-                    self.active[(ty * tiles + tx) as usize] = true;
+        let tiles = self.tiles_per_side();
+        for [sx0, sy0, sx1, sy1] in self.storage_rects(x0, y0, x1, y1) {
+            for ty in sy0 / TILE..sy1.div_ceil(TILE) {
+                for tx in sx0 / TILE..sx1.div_ceil(TILE) {
+                    let t = (ty * tiles + tx) as usize;
+                    self.active[t] = true;
+                    self.touched[t] = true;
+                    self.dirty[t] = true;
                 }
             }
         }
@@ -235,12 +358,25 @@ impl DeformationMap {
     /// prints that stay inside and re-pressing remembered prints that come into view (aged by
     /// `now`: grass has sprung back, sand has softened).
     pub fn follow(&mut self, focus: DVec3, now: f64, grass_recover_s: f32, sand_half_life_s: f32) {
-        if self.shift_to(focus) {
+        // Farthest a print reaches from its middle, meters (a lying body's rim).
+        const REACH_M: f64 = 2.0;
+        let kept = (
+            self.origin + REACH_M,
+            self.origin + DVec2::splat(self.extent() - REACH_M),
+        );
+        if let Some(cleared) = self.shift_to(focus) {
             let history = std::mem::take(&mut self.history);
             let (lo, hi) = (self.origin, self.origin + DVec2::splat(self.extent()));
             for r in &history {
                 let p = r.contact.position;
                 if p.x < lo.x || p.z < lo.y || p.x > hi.x || p.z > hi.y {
+                    continue;
+                }
+                // Prints wholly inside the old window are still there (and may have recovered
+                // since: pressing them again would undo that).
+                let inside_old =
+                    p.x > kept.0.x && p.z > kept.0.y && p.x < kept.1.x && p.z < kept.1.y;
+                if !cleared && inside_old {
                     continue;
                 }
                 let age = (now - r.time).max(0.0) as f32;
@@ -264,23 +400,25 @@ impl DeformationMap {
     /// or stopping to turn with its planet, both far above the ground) clears them.
     pub fn follow_shift(&mut self, s: &WorldShift) {
         if s.is_translation_only() {
-            self.origin += DVec2::new(s.translation.x, s.translation.z);
+            // The cells and the print shapes (kept relative to the window's corner) stay as
+            // they are: only where the window is changes.
+            let t = DVec2::new(s.translation.x, s.translation.z);
+            self.origin += t;
             for r in &mut self.history {
                 r.contact.follow(s);
             }
             for p in &mut self.slots {
-                p.center += DVec2::new(s.translation.x, s.translation.z);
+                p.center += t;
+            }
+            for r in &mut self.rolling {
+                r.1 += t;
             }
         } else {
-            self.depth.iter_mut().for_each(|d| *d = 0.0);
-            self.flatten.iter_mut().for_each(|f| *f = 0.0);
-            self.kind.iter_mut().for_each(|k| *k = CellKind::None);
-            self.active.iter_mut().for_each(|a| *a = false);
-            self.prints.iter_mut().for_each(|p| *p = [0; 2]);
+            self.clear(0, 0, self.size, self.size);
             self.history.clear();
+            self.rolling.clear();
+            self.generation += 1;
         }
-        self.dirty = Some((0, 0, self.size, self.size));
-        self.generation += 1;
     }
 
     /// Clear the prints within `radius` of `center` (the ground there was dug, raised or
@@ -312,47 +450,46 @@ impl DeformationMap {
             .retain(|h| DVec2::new(h.contact.position.x, h.contact.position.z).distance(at) > r);
     }
 
-    /// Move the window over `focus` if needed. Returns whether it moved.
-    fn shift_to(&mut self, focus: DVec3) -> bool {
+    /// Move the window over `focus` if needed: `None` if it stayed, else whether it jumped so
+    /// far that nothing was kept.
+    fn shift_to(&mut self, focus: DVec3) -> Option<bool> {
         let half = self.extent() * 0.5;
         let center = self.origin + DVec2::splat(half);
         let d = DVec2::new(focus.x, focus.z) - center;
         if d.abs().max_element() < half * 0.5 {
-            return false;
+            return None;
         }
         let shift_x = (d.x / self.cell as f64).round() as i64;
         let shift_y = (d.y / self.cell as f64).round() as i64;
         let n = self.size as i64;
-        let mut depth = vec![0.0; self.depth.len()];
-        let mut flatten = vec![0.0; self.flatten.len()];
-        let mut kind = vec![CellKind::None; self.kind.len()];
-        let mut prints = vec![[0; 2]; self.prints.len()];
-        for y in 0..n {
-            let sy = y + shift_y;
-            if sy < 0 || sy >= n {
-                continue;
-            }
-            for x in 0..n {
-                let sx = x + shift_x;
-                if sx < 0 || sx >= n {
-                    continue;
-                }
-                let (di, si) = ((y * n + x) as usize, (sy * n + sx) as usize);
-                depth[di] = self.depth[si];
-                flatten[di] = self.flatten[si];
-                kind[di] = self.kind[si];
-                prints[di] = self.prints[si];
-            }
-        }
-        self.depth = depth;
-        self.flatten = flatten;
-        self.kind = kind;
-        self.prints = prints;
         self.origin += DVec2::new(shift_x as f64, shift_y as f64) * self.cell as f64;
-        self.active.iter_mut().for_each(|a| *a = true);
-        self.dirty = Some((0, 0, self.size, self.size));
         self.generation += 1;
-        true
+        if shift_x.abs() >= n || shift_y.abs() >= n {
+            self.clear(0, 0, self.size, self.size);
+            return Some(true);
+        }
+        // Window cell (x, y) is old window cell (x + shift): only the base moves.
+        self.base = [
+            (self.base[0] as i64 + shift_x).rem_euclid(n) as u32,
+            (self.base[1] as i64 + shift_y).rem_euclid(n) as u32,
+        ];
+        // The cells that came into view hold what left it.
+        let (size, sx, sy) = (
+            self.size,
+            shift_x.unsigned_abs() as u32,
+            shift_y.unsigned_abs() as u32,
+        );
+        match shift_x.signum() {
+            1 => self.clear(size - sx, 0, size, size),
+            -1 => self.clear(0, 0, sx, size),
+            _ => {}
+        }
+        match shift_y.signum() {
+            1 => self.clear(0, size - sy, size, size),
+            -1 => self.clear(0, 0, size, sy),
+            _ => {}
+        }
+        Some(false)
     }
 
     /// Press a print into the grid. `depth` meters, `rim` share of the depth pushed up around
@@ -505,7 +642,7 @@ impl DeformationMap {
         grass_recover_s: f32,
         sand_half_life_s: f32,
     ) {
-        let tiles = self.size.div_ceil(TILE);
+        let tiles = self.tiles_per_side();
         let sand_k = 0.5f32.powf(dt / sand_half_life_s.max(1.0));
         let grass_step = dt / grass_recover_s.max(0.1);
         let snow_step = snowfall_m_s * dt;
@@ -519,9 +656,10 @@ impl DeformationMap {
                 let mut changed = false;
                 let (x0, y0) = (tx * TILE, ty * TILE);
                 let (x1, y1) = ((x0 + TILE).min(self.size), (y0 + TILE).min(self.size));
+                // (Storage cells: recovery doesn't care where they are in the window.)
                 for y in y0..y1 {
                     for x in x0..x1 {
-                        let i = self.index(x, y);
+                        let i = (y * self.size + x) as usize;
                         if self.flatten[i] > 0.0 {
                             self.flatten[i] = (self.flatten[i] - grass_step).max(0.0);
                             changed = true;
@@ -551,9 +689,7 @@ impl DeformationMap {
                     }
                 }
                 self.active[t] = any;
-                if changed {
-                    self.mark(x0, y0, x1, y1);
-                }
+                self.dirty[t] |= changed;
             }
         }
     }
@@ -725,7 +861,7 @@ mod tests {
         // Just beside the foot the ground is pushed up.
         let (beside, _) = map.sample(DVec3::new(0.075, 0.0, 0.08));
         assert!(beside < 0.0, "{beside}");
-        assert!(map.dirty.is_some());
+        assert!(map.is_dirty());
     }
 
     #[test]
@@ -800,11 +936,11 @@ mod tests {
             map.record(&c, CellKind::Plastic, 0.03, 0.005, 0.0, 0.0);
         }
         assert!(peak(&map, 0.0, 0.0) > 0.01 && peak(&map, 3.0, 0.0) > 0.01);
-        map.dirty = None;
+        map.take_dirty();
         map.erase(DVec3::new(0.0, 0.0, 0.0), 1.0);
         assert_eq!(peak(&map, 0.0, 0.0), 0.0);
         assert!(peak(&map, 3.0, 0.0) > 0.01, "prints outside stay");
-        assert!(map.dirty.is_some());
+        assert!(map.is_dirty());
         assert_eq!(map.history.len(), 1);
     }
 
@@ -904,5 +1040,73 @@ mod tests {
         assert_eq!(peak(&map, 3.0, 0.0), 0.0);
         map.follow(DVec3::new(0.0, 0.0, 0.0), 2.0, 20.0, 240.0);
         assert!(peak(&map, 3.0, 0.0) > 0.03);
+    }
+
+    /// The window wraps around in its arrays: walking far keeps the prints in view where they
+    /// were, clears what it leaves, and marks every changed cell for the GPU's copy (kept in
+    /// step here by applying only the changed rectangles), a few tiles per move rather than the
+    /// whole grid.
+    #[test]
+    fn the_window_wraps_around_and_sends_only_what_changed() {
+        let mut map = DeformationMap::new(0.04, 256);
+        let mut gpu = vec![0.0f32; map.depth.len()];
+        let mut sync = |map: &mut DeformationMap| {
+            let mut sent = 0;
+            for [x0, y0, x1, y1] in map.take_dirty() {
+                for y in y0..y1 {
+                    for x in x0..x1 {
+                        let i = (y * map.size + x) as usize;
+                        gpu[i] = map.depth[i];
+                        sent += 1;
+                    }
+                }
+            }
+            assert_eq!(gpu, map.depth, "the GPU's copy fell behind");
+            sent
+        };
+        assert_eq!(sync(&mut map), 0, "an empty grid sends nothing");
+        // A walk east, then north, then back west, pressing (unremembered) prints.
+        let mut at = DVec2::ZERO;
+        let mut pressed = Vec::new();
+        for (step, dir) in [(80, DVec2::X), (60, DVec2::Y), (90, -DVec2::X)] {
+            for _ in 0..step {
+                at += dir * 0.25;
+                map.follow(DVec3::new(at.x, 0.0, at.y), 0.0, 20.0, 240.0);
+                map.stamp(
+                    &contact(at.x, at.y, ContactKind::Hoof),
+                    CellKind::Plastic,
+                    0.05,
+                    0.3,
+                    0.0,
+                );
+                pressed.push(at);
+                let sent = sync(&mut map);
+                assert!(sent <= 256 * 256 / 4, "{sent} cells sent for one move");
+            }
+        }
+        assert!(map.base != [0, 0], "the window wrapped");
+        let (lo, hi) = (map.origin, map.origin + DVec2::splat(map.extent()));
+        let inside = |p: DVec2| p.cmpgt(lo + 0.5).all() && p.cmplt(hi - 0.5).all();
+        let (mut kept, mut gone) = (0, 0);
+        for p in &pressed {
+            if inside(*p) {
+                assert!(peak(&map, p.x, p.y) > 0.03, "print at {p} lost");
+                kept += 1;
+            } else {
+                gone += 1;
+            }
+        }
+        assert!(kept > 10 && gone > 10, "{kept} kept, {gone} gone");
+        // Back where the walk started, nothing comes back from cells the window reused (these
+        // prints weren't remembered).
+        map.follow(DVec3::ZERO, 0.0, 20.0, 240.0);
+        map.follow(DVec3::ZERO, 0.0, 20.0, 240.0);
+        sync(&mut map);
+        for p in pressed.iter().filter(|p| p.length() < 3.0) {
+            assert_eq!(peak(&map, p.x, p.y), 0.0, "stale print at {p}");
+        }
+        // A floating-origin move changes nothing in the cells.
+        map.follow_shift(&WorldShift::translate(DVec3::new(1_000.0, 0.0, -500.0)));
+        assert_eq!(sync(&mut map), 0);
     }
 }

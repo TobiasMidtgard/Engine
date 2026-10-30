@@ -17,6 +17,16 @@
 //! before Play: they are the scene's starting facts) and the quests, which can be started,
 //! completed or failed by hand. ▶ Talk starts this file's conversation at the selected node,
 //! a line at a time, its commands run by the script whose `conversation` prop is this file.
+//!
+//! Choices made by walking (options tagged `#spot:<name>`, [`engine_script::spots`]): their
+//! cards mark each option's spot, and "Walked to" on the right is the plan of the choice from
+//! above (Pendragon's board; Unreal's top view to lay things out):
+//! the speaker, the people round them, the player and each spot's ring, to drag where it
+//! belongs (one undo step), a button to place a spot that is missing, and one to look down on
+//! it all in the scene view. In the scene view each spot is a dashed ring with its name; while
+//! the choice is open it shows what the game shows (each option over its ring, filling as the
+//! player stands in it, the speaker's prompt and the time left) and the corner preview looks
+//! through the game's view from above.
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::time::SystemTime;
@@ -29,14 +39,19 @@ use egui::{
 use engine::core::registry::call_api;
 use engine::prelude::*;
 use engine_script::Script;
+use engine_script::spots::{SpotChoice, SpotChoices, SpotView, StorySpot};
 use engine_script::story::{
-    self, Compiled, NodeInfo, QuestBook, QuestState, RunInfo, StoryFacts, StoryRuns,
+    self, Compiled, NodeInfo, OptionInfo, QuestBook, QuestState, RunInfo, StoryFacts, StoryRuns,
 };
 use serde_json::{Value, json};
 
+use crate::camera::EditorCamera;
 use crate::editor::{self, Editor, Mode, Tab};
+use crate::scene_ops::{self, InScene, SceneOrder};
 use crate::theme;
 use crate::ui::EditorDock;
+use crate::undo::Command;
+use crate::view::ViewInfo;
 
 pub struct StoryTabPlugin;
 
@@ -75,6 +90,12 @@ const TAKEN: Color32 = Color32::from_rgb(0x2a, 0x5a, 0x3e);
 const PICKED: Color32 = Color32::from_rgb(0xff, 0xd0, 0x5a);
 const ERROR: Color32 = Color32::from_rgb(0xff, 0x6b, 0x6b);
 const COMMENT: Color32 = Color32::from_rgb(0x6a, 0x73, 0x7d);
+/// A spot's ring: gold for a choice, silver-blue for the one taken if the player waits (the
+/// game's colors).
+const SPOT_WARM: Color32 = Color32::from_rgb(0xff, 0xb0, 0x48);
+const SPOT_COOL: Color32 = Color32::from_rgb(0x8c, 0xc0, 0xff);
+const OWNER: Color32 = Color32::from_rgb(0xe8, 0x6a, 0x58);
+const PERSON: Color32 = Color32::from_rgb(0x7c, 0x82, 0x8c);
 
 /// The Story tab's state.
 #[derive(Resource)]
@@ -98,6 +119,12 @@ pub struct StoryTab {
     toast: Option<(String, f64, bool)>,
     /// Where things were drawn (shot scripts click them).
     pub drawn_at: HashMap<String, Rect>,
+    /// The choice's camera this tab pinned in the corner preview.
+    pinned: Option<Entity>,
+    /// A spot dragged in the plan, and its transform before.
+    plan_drag: Option<(Entity, Transform)>,
+    /// The scene view's width over its height, as last drawn.
+    view_aspect: f32,
 }
 
 impl Default for StoryTab {
@@ -117,6 +144,9 @@ impl Default for StoryTab {
             new_fact: String::new(),
             toast: None,
             drawn_at: HashMap::new(),
+            pinned: None,
+            plan_drag: None,
+            view_aspect: 16.0 / 9.0,
         }
     }
 }
@@ -534,11 +564,14 @@ fn map(ui: &mut egui::Ui, world: &mut World, editor: &mut Editor, tab: &mut Stor
         .map(|r| r.taken.iter().map(String::as_str).collect())
         .unwrap_or_default();
     let groups = group_sizes(nodes);
+    let spot_names = engine_script::spots::spot_names(world);
 
     // Arrows first, under the cards.
     for (i, n) in nodes.iter().enumerate() {
         for (k, (target, how, line)) in n.links.iter().enumerate() {
-            let row = n.lines.iter().position(|(l, _)| l == line);
+            // The row it leaves from: the last one shown at or before its line (a jump under
+            // an option leaves from the option's row).
+            let row = n.lines.iter().rposition(|(l, _)| l <= line);
             let from_y = match row {
                 Some(r) if r < CARD_LINES => {
                     rects[i].top() + (TITLE_H + when_h(n) + (r as f32 + 0.5) * LINE_H) * zoom
@@ -715,7 +748,32 @@ fn map(ui: &mut egui::Ui, world: &mut World, editor: &mut Editor, tab: &mut Stor
                     NOW.gamma_multiply(0.25),
                 );
             }
-            let job = card_line(text, 12.0 * zoom, r.width() - 20.0 * zoom);
+            // An option walked to: its spot on the right ("○ ear"), red when the scene has
+            // no spot of that name.
+            let mut width = r.width() - 20.0 * zoom;
+            if let Some(o) = n.options.iter().find(|o| o.line == *line)
+                && let Some(name) = &o.spot
+            {
+                let missing = !spot_names.contains(name);
+                let (mark, color) = match (missing, o.fallback) {
+                    (true, _) => ("⚠", ERROR),
+                    (false, true) => ("○", SPOT_COOL),
+                    (false, false) => ("○", SPOT_WARM),
+                };
+                let g = painter.layout_no_wrap(format!("{mark} {name}"), mono(10.5), color);
+                let size = g.size() + Vec2::new(10.0, 3.0) * zoom;
+                let chip = Rect::from_min_size(
+                    Pos2::new(
+                        r.right() - 7.0 * zoom - size.x,
+                        y + (LINE_H * zoom - size.y) * 0.5,
+                    ),
+                    size,
+                );
+                painter.rect_filled(chip, 4.0 * zoom, color.gamma_multiply(0.15));
+                painter.galley(chip.min + Vec2::new(5.0, 1.5) * zoom, g, color);
+                width = chip.left() - r.left() - 16.0 * zoom;
+            }
+            let job = card_line(text, 12.0 * zoom, width.max(20.0));
             let g = ui.fonts_mut(|f| f.layout_job(job));
             painter.galley(
                 Pos2::new(
@@ -982,6 +1040,7 @@ fn side(ui: &mut egui::Ui, world: &mut World, editor: &mut Editor, tab: &mut Sto
     let playing = editor.mode != Mode::Edit;
     conversation(ui, world, tab, playing);
     ui.add_space(8.0);
+    walk_plan(ui, world, editor, tab);
     facts(ui, world, tab);
     ui.add_space(8.0);
     quests(ui, world, playing);
@@ -1042,12 +1101,54 @@ fn conversation(ui: &mut egui::Ui, world: &mut World, tab: &mut StoryTab, playin
         return;
     }
     let mut pick = None;
+    // Picked by walking: each option's spot, how far the player is into its ring, the time.
+    let walk = world
+        .get_resource::<SpotChoices>()
+        .and_then(|c| c.of_run(run.id).cloned());
     if !run.options.is_empty() {
-        for (i, o) in run.options.iter().enumerate() {
-            let b = ui.add(
-                egui::Button::new(RichText::new(format!("{}. {o}", i + 1)).color(OPTION))
-                    .min_size(Vec2::new(ui.available_width(), 26.0)),
+        if let Some(c) = &walk {
+            let left = c
+                .seconds_left()
+                .map(|s| format!(" · {} s left", s.ceil() as i32))
+                .unwrap_or_default();
+            ui.label(
+                RichText::new(format!(
+                    "Walk to choose: stand in a ring or press E there (or click){left}"
+                ))
+                .small()
+                .color(SPOT_WARM),
             );
+        }
+        for (i, o) in run.options.iter().enumerate() {
+            let spot = walk.as_ref().and_then(|c| c.options.get(i));
+            let mut job = LayoutJob::default();
+            let font = FontId::proportional(14.0);
+            job.append(
+                &format!("{}. {o}", i + 1),
+                0.0,
+                TextFormat::simple(font.clone(), OPTION),
+            );
+            if let Some(name) = spot.and_then(|s| s.spot_name.as_ref()) {
+                let color = if spot.is_some_and(|s| s.fallback) {
+                    SPOT_COOL
+                } else {
+                    SPOT_WARM
+                };
+                job.append(
+                    &format!("○ {name}"),
+                    10.0,
+                    TextFormat::simple(FontId::monospace(11.5), color),
+                );
+            }
+            let b = ui.add(egui::Button::new(job).min_size(Vec2::new(ui.available_width(), 26.0)));
+            if let Some(s) = spot.filter(|s| s.progress > 0.0) {
+                let color = if s.fallback { SPOT_COOL } else { SPOT_WARM };
+                let bar = Rect::from_min_size(
+                    b.rect.left_bottom() + Vec2::new(3.0, -4.0),
+                    Vec2::new((b.rect.width() - 6.0) * s.progress, 3.0),
+                );
+                ui.painter().rect_filled(bar, 1.5, color);
+            }
             tab.drawn_at.insert(format!("option {}", i + 1), b.rect);
             if b.clicked() {
                 pick = Some(i + 1);
@@ -1077,6 +1178,7 @@ fn waiting_text(w: &str) -> &'static str {
         "time" => "waiting (<<wait>>)",
         "until" => "waiting for a command to finish",
         "closing" => "the last lines on screen",
+        "spots" => "waiting for a walk",
         _ => "running",
     }
 }
@@ -1326,6 +1428,708 @@ fn toast(ui: &egui::Ui, text: &str, error: bool) {
         });
 }
 
+// ---------------------------------------------------------------- choices made by walking
+
+/// A [`StorySpot`] in the world: where (world meters) and how big.
+struct SpotAt {
+    entity: Entity,
+    name: String,
+    at: DVec3,
+    radius: f32,
+}
+
+fn spots_in(world: &mut World) -> Vec<SpotAt> {
+    let mut q = world.query::<(Entity, &StorySpot, &GlobalTransform)>();
+    q.iter(world)
+        .map(|(entity, s, g)| SpotAt {
+            entity,
+            name: s.name.clone(),
+            at: g.0.translation,
+            radius: s.radius_m.max(0.2),
+        })
+        .collect()
+}
+
+fn find_named(world: &mut World, name: &str) -> Option<Entity> {
+    let mut q = world.query::<(Entity, &Name)>();
+    q.iter(world)
+        .find(|(_, n)| n.as_str() == name)
+        .map(|(e, _)| e)
+}
+
+fn world_pos(world: &World, e: Entity) -> Option<DVec3> {
+    world.get::<GlobalTransform>(e).map(|g| g.0.translation)
+}
+
+/// The heading (yaw about up) a camera turned by `rotation` looks along.
+fn heading_of(rotation: Quat) -> f32 {
+    let f = rotation * Vec3::NEG_Z;
+    (-f.x).atan2(-f.z)
+}
+
+/// Right and ahead on the ground for heading `yaw`.
+fn ground_axes(yaw: f32) -> (DVec3, DVec3) {
+    let (s, c) = (yaw.sin() as f64, yaw.cos() as f64);
+    (DVec3::new(c, 0.0, -s), DVec3::new(-s, 0.0, -c))
+}
+
+/// A ring on the ground round `at` from `from` to `to` turns, clockwise seen from above and
+/// starting on its far side for a camera heading `yaw`; in pieces where it goes behind the
+/// camera.
+fn ground_arc(view: &ViewInfo, yaw: f32, at: DVec3, r: f64, from: f32, to: f32) -> Vec<Vec<Pos2>> {
+    let (right, ahead) = ground_axes(yaw);
+    let n = (((to - from).abs() * 72.0).ceil() as usize).max(2);
+    let mut runs = vec![Vec::new()];
+    for i in 0..=n {
+        let a = ((from + (to - from) * i as f32 / n as f32) * std::f32::consts::TAU) as f64;
+        let p = at + (right * a.sin() + ahead * a.cos()) * r + DVec3::new(0.0, 0.03, 0.0);
+        match view.project(p) {
+            Some(q) => runs.last_mut().expect("one run").push(q),
+            None if runs.last().is_some_and(|r| !r.is_empty()) => runs.push(Vec::new()),
+            None => {}
+        }
+    }
+    runs.retain(|r| r.len() > 1);
+    runs
+}
+
+/// The scene view's part, drawn with the script handles: each spot a dashed ring on the ground
+/// with its name (an editor helper, so not in Game view); while a walk-to choice is open, what
+/// the game shows over the world, as the UI markers don't draw in the editor's view.
+pub fn overlay(ui: &egui::Ui, world: &mut World, editor: &Editor, view: &ViewInfo) {
+    if let Some(mut tab) = world.get_resource_mut::<StoryTab>() {
+        tab.view_aspect = view.aspect();
+    }
+    let choice = world
+        .get_resource::<SpotChoices>()
+        .and_then(|c| c.choices.first().cloned());
+    pin_view(world, editor, choice.as_ref());
+    let p = ui.painter().with_clip_rect(view.screen);
+    let yaw = heading_of(view.rotation);
+    if let Some(c) = &choice {
+        choice_overlay(&p, world, view, yaw, c);
+        return;
+    }
+    if editor.game_view {
+        return;
+    }
+    for s in spots_in(world) {
+        let lit = editor.selection.contains(&s.entity);
+        let color = if lit {
+            SPOT_WARM
+        } else {
+            SPOT_WARM.gamma_multiply(0.7)
+        };
+        let stroke = Stroke::new(if lit { 2.4 } else { 1.6 }, color);
+        for run in ground_arc(view, yaw, s.at, s.radius as f64, 0.0, 1.0) {
+            p.extend(Shape::dashed_line(&run, stroke, 7.0, 5.0));
+        }
+        if let Some(c) = view.project(s.at + DVec3::new(0.0, 0.03, 0.0)) {
+            let g = p.layout_no_wrap(s.name.clone(), FontId::proportional(12.0), color);
+            let r = Rect::from_center_size(c, g.size() + Vec2::new(10.0, 4.0));
+            p.rect_filled(r, 4.0, Color32::from_black_alpha(160));
+            p.galley(r.min + Vec2::new(5.0, 2.0), g, color);
+        }
+    }
+}
+
+/// An open (or closing) walk-to choice over the world: each ring, filling as the chooser stands
+/// in it; each option over its ring (the fallback with the time left); the prompt over the
+/// speaker. The labels go at the pick and the rings shrink, as in the game.
+fn choice_overlay(p: &egui::Painter, world: &World, view: &ViewInfo, yaw: f32, c: &SpotChoice) {
+    let k = c.closing.map_or(0.0, |t| (t / 0.45).clamp(0.0, 1.0));
+    for (i, o) in c.options.iter().enumerate() {
+        if o.spot.is_none() {
+            continue;
+        }
+        let picked = c.picked == Some(i);
+        let fade = if c.closing.is_some() && !picked {
+            1.0 - k
+        } else {
+            1.0
+        };
+        if fade < 0.02 {
+            continue;
+        }
+        let color = if o.fallback { SPOT_COOL } else { SPOT_WARM }.gamma_multiply(fade);
+        let r = o.radius as f64;
+        for run in ground_arc(view, yaw, o.at, r, 0.0, 1.0) {
+            p.add(Shape::line(
+                run,
+                Stroke::new(if o.inside { 3.0 } else { 2.0 }, color),
+            ));
+        }
+        let fill = if picked && c.closing.is_some() {
+            1.0
+        } else {
+            o.progress
+        };
+        if fill > 0.01 {
+            for run in ground_arc(view, yaw, o.at, r * 0.8, 0.0, fill) {
+                p.add(Shape::line(run, Stroke::new(5.0, color)));
+            }
+        }
+        if c.closing.is_some() {
+            continue;
+        }
+        let Some(at) = view.project(o.at + DVec3::new(0.0, 0.3, 0.0)) else {
+            continue;
+        };
+        let note = o.fallback.then(|| match c.seconds_left() {
+            Some(s) => format!("if you wait · {} s", s.ceil() as i32),
+            None => "where you stand".to_string(),
+        });
+        pill(p, at, &o.text, note.as_deref(), color, o.inside);
+    }
+    if c.is_open()
+        && let Some(sp) = c.speaker
+        && let Some(head) = world_pos(world, sp)
+        && let Some(at) = view.project(head + DVec3::new(0.0, 2.35, 0.0))
+    {
+        let who = if c.prompt_speaker.is_empty() {
+            world
+                .get::<Name>(sp)
+                .map(|n| n.as_str().to_string())
+                .unwrap_or_default()
+        } else {
+            c.prompt_speaker.clone()
+        };
+        bubble(p, at, &who, &c.prompt);
+    }
+}
+
+/// A label in the scene view standing on `at`: a title and a line under it in `color`.
+fn pill(p: &egui::Painter, at: Pos2, title: &str, sub: Option<&str>, color: Color32, lit: bool) {
+    let t = p.layout(
+        title.to_string(),
+        FontId::proportional(13.0),
+        Color32::WHITE,
+        230.0,
+    );
+    let s = sub.map(|s| p.layout_no_wrap(s.to_string(), FontId::proportional(11.0), color));
+    let (tw, th) = (t.size().x, t.size().y);
+    let (sw, sh) = s
+        .as_ref()
+        .map_or((0.0, 0.0), |g| (g.size().x, g.size().y + 1.0));
+    let size = Vec2::new(tw.max(sw) + 18.0, th + sh + 8.0);
+    let rect = Rect::from_min_size(at - Vec2::new(size.x / 2.0, size.y), size);
+    p.rect_filled(
+        rect,
+        5.0,
+        Color32::from_black_alpha(if lit { 225 } else { 190 }),
+    );
+    p.rect_stroke(
+        rect,
+        5.0,
+        Stroke::new(
+            if lit { 2.0 } else { 1.0 },
+            color.gamma_multiply(if lit { 1.0 } else { 0.75 }),
+        ),
+        StrokeKind::Inside,
+    );
+    p.galley(
+        Pos2::new(rect.center().x - tw / 2.0, rect.top() + 4.0),
+        t,
+        Color32::WHITE,
+    );
+    if let Some(g) = s {
+        p.galley(
+            Pos2::new(rect.center().x - sw / 2.0, rect.top() + 5.0 + th),
+            g,
+            color,
+        );
+    }
+}
+
+/// The speaker's prompt over their head, as the game's marker shows it: who, and what they ask.
+fn bubble(p: &egui::Painter, at: Pos2, who: &str, text: &str) {
+    let name = p.layout_no_wrap(who.to_string(), FontId::proportional(12.0), SPEAKER);
+    let said = p.layout(
+        text.to_string(),
+        FontId::proportional(14.0),
+        Color32::WHITE,
+        300.0,
+    );
+    let (nh, size) = (
+        name.size().y,
+        Vec2::new(
+            name.size().x.max(said.size().x) + 22.0,
+            name.size().y + said.size().y + 15.0,
+        ),
+    );
+    let rect = Rect::from_min_size(at - Vec2::new(size.x / 2.0, size.y + 9.0), size);
+    let fill = Color32::from_rgba_unmultiplied(0x22, 0x1d, 0x18, 232);
+    p.rect_filled(rect, 7.0, fill);
+    p.add(Shape::convex_polygon(
+        vec![
+            rect.center_bottom() + Vec2::new(-8.0, -0.5),
+            rect.center_bottom() + Vec2::new(8.0, -0.5),
+            at,
+        ],
+        fill,
+        Stroke::NONE,
+    ));
+    p.rect_stroke(
+        rect,
+        7.0,
+        Stroke::new(1.0, Color32::from_rgb(0x6a, 0x5c, 0x4a)),
+        StrokeKind::Inside,
+    );
+    p.galley(rect.min + Vec2::new(11.0, 6.0), name, SPEAKER);
+    p.galley(rect.min + Vec2::new(11.0, 9.0 + nh), said, Color32::WHITE);
+}
+
+/// While a walk-to choice is on in the game, the corner preview looks through its camera (what
+/// the player sees from above), unless something else is pinned there.
+fn pin_view(world: &mut World, editor: &Editor, choice: Option<&SpotChoice>) {
+    let want = choice.filter(|_| editor.mode != Mode::Edit).and_then(|c| {
+        let mut q = world.query::<(Entity, &SpotView)>();
+        q.iter(world)
+            .find(|(_, v)| v.choice == c.id)
+            .map(|(e, _)| e)
+    });
+    let ours = world.get_resource::<StoryTab>().and_then(|t| t.pinned);
+    if want.is_none() && ours.is_none() {
+        return;
+    }
+    let took = {
+        let Some(mut preview) = world.get_resource_mut::<crate::camera_preview::CameraPreview>()
+        else {
+            return;
+        };
+        let take = preview.pinned == want || preview.pinned.is_none() || preview.pinned == ours;
+        if take {
+            preview.pinned = want;
+        }
+        take
+    };
+    if took && let Some(mut tab) = world.get_resource_mut::<StoryTab>() {
+        tab.pinned = want;
+    }
+}
+
+/// "Walked to": the plan of a choice made by walking, from above and turned like the scene view
+/// (up is where it looks): the speaker (the script that talks from this file), the people round
+/// them, the player and each option's spot (the open choice live: rings filling, time left).
+/// Before Play a spot is dragged to move it (one undo step) and a missing one placed.
+fn walk_plan(ui: &mut egui::Ui, world: &mut World, editor: &mut Editor, tab: &mut StoryTab) {
+    let Some(doc) = tab.doc.as_ref() else {
+        return;
+    };
+    let nodes = &doc.compiled.nodes;
+    let walked = |n: &NodeInfo| n.options.iter().any(|o| o.spot.is_some());
+    if !nodes.iter().any(walked) {
+        return;
+    }
+    let run = live(world, tab).run.filter(|r| !r.done);
+    let node = tab
+        .selected
+        .filter(|&i| nodes.get(i).is_some_and(walked))
+        .or_else(|| {
+            let r = run.as_ref()?;
+            nodes.iter().position(|n| n.title == r.node && walked(n))
+        })
+        .or_else(|| nodes.iter().position(walked));
+    let Some(n) = node.map(|i| &nodes[i]) else {
+        return;
+    };
+    let set = n
+        .options
+        .iter()
+        .find(|o| o.spot.is_some())
+        .map_or(0, |o| o.set);
+    let options: Vec<OptionInfo> = n.options.iter().filter(|o| o.set == set).cloned().collect();
+    let title = n.title.clone();
+    let path = tab.path.clone();
+    let editing = editor.mode == Mode::Edit;
+    let choice = run
+        .as_ref()
+        .filter(|r| r.node == title)
+        .and_then(|r| world.get_resource::<SpotChoices>()?.of_run(r.id).cloned());
+
+    heading(ui, "👣 Walked to");
+    ui.label(theme::dim(format!(
+        "{title}'s options are picked by walking to their spots (#spot:name), the view from \
+         above. {}",
+        if editing {
+            "Drag a spot to move it."
+        } else {
+            "Live: the rings fill as you stand in them."
+        }
+    )));
+
+    // Who and what it shows.
+    let owner = owner_of(world, &path).and_then(|name| find_named(world, &name));
+    let owner_at = owner.and_then(|e| world_pos(world, e));
+    let chooser = match &choice {
+        Some(c) => Some(c.chooser),
+        None => engine_script::spots::find_chooser(world, None),
+    };
+    let chooser_at = chooser.and_then(|e| world_pos(world, e));
+    let all = spots_in(world);
+    let near = owner_at.or(chooser_at).unwrap_or(DVec3::ZERO);
+    // Each option's spot: the one of its name nearest the speaker.
+    let placed: Vec<(usize, &SpotAt)> = options
+        .iter()
+        .enumerate()
+        .filter_map(|(i, o)| {
+            let name = o.spot.as_ref()?;
+            let s = all.iter().filter(|s| &s.name == name).min_by(|a, b| {
+                a.at.distance_squared(near)
+                    .total_cmp(&b.at.distance_squared(near))
+            })?;
+            Some((i, s))
+        })
+        .collect();
+    let people: Vec<DVec3> = match owner {
+        Some(o) => {
+            let mut q = world.query_filtered::<(&ChildOf, &GlobalTransform), Without<StorySpot>>();
+            q.iter(world)
+                .filter(|(c, _)| c.parent() == o)
+                .map(|(_, g)| g.0.translation)
+                .collect()
+        }
+        None => Vec::new(),
+    };
+    let mut points: Vec<(DVec3, f64)> = placed
+        .iter()
+        .map(|(_, s)| (s.at, s.radius as f64))
+        .collect();
+    points.extend(owner_at.map(|p| (p, 0.4)));
+    points.extend(chooser_at.map(|p| (p, 0.35)));
+    points.extend(people.iter().map(|p| (*p, 0.25)));
+
+    let yaw = world
+        .get::<Transform>(editor.camera)
+        .map_or(0.0, |t| heading_of(t.rotation));
+    let (right, ahead) = ground_axes(yaw);
+    let w = ui.available_width();
+    let (rect, response) = ui.allocate_exact_size(
+        Vec2::new(w, (w * 0.72).clamp(170.0, 300.0)),
+        Sense::click_and_drag(),
+    );
+    tab.drawn_at.insert("walk plan".into(), rect);
+    let p = ui.painter_at(rect);
+    p.rect_filled(rect, 6.0, Color32::from_rgb(0x18, 0x19, 0x1c));
+    if points.is_empty() {
+        p.text(
+            rect.center(),
+            Align2::CENTER_CENTER,
+            "No spots in the scene yet",
+            FontId::proportional(13.0),
+            theme::TEXT_DIM,
+        );
+    }
+    let origin = points.first().map_or(DVec3::ZERO, |p| p.0);
+    let (mut lo, mut hi) = (egui::Vec2::splat(f32::MAX), egui::Vec2::splat(f32::MIN));
+    for (q, r) in &points {
+        let d = *q - origin;
+        let (u, v) = (d.dot(right) as f32, d.dot(ahead) as f32);
+        lo = lo.min(Vec2::new(u, v) - Vec2::splat(*r as f32));
+        hi = hi.max(Vec2::new(u, v) + Vec2::splat(*r as f32));
+    }
+    let margin = 0.7;
+    let span = (hi - lo + Vec2::splat(2.0 * margin)).max(Vec2::splat(1.0));
+    let scale = (rect.width() / span.x)
+        .min(rect.height() / span.y)
+        .min(90.0);
+    let mid_uv = (lo + hi) * 0.5;
+    let mid = origin + right * mid_uv.x as f64 + ahead * mid_uv.y as f64;
+    let to_screen = |q: DVec3| {
+        let d = q - mid;
+        Pos2::new(
+            rect.center().x + d.dot(right) as f32 * scale,
+            rect.center().y - d.dot(ahead) as f32 * scale,
+        )
+    };
+    // A meter grid, for size.
+    if scale > 12.0 {
+        let grid = Stroke::new(1.0, GRID);
+        let mut x = rect.center().x % scale;
+        while x < rect.right() {
+            p.line_segment(
+                [Pos2::new(x, rect.top()), Pos2::new(x, rect.bottom())],
+                grid,
+            );
+            x += scale;
+        }
+        let mut y = rect.center().y % scale;
+        while y < rect.bottom() {
+            p.line_segment(
+                [Pos2::new(rect.left(), y), Pos2::new(rect.right(), y)],
+                grid,
+            );
+            y += scale;
+        }
+    }
+    for q in &people {
+        p.circle_filled(to_screen(*q), (0.17 * scale).clamp(2.5, 7.0), PERSON);
+    }
+    // The spots, under the speaker and the player.
+    let pointer = response.hover_pos();
+    let mut over = None;
+    for (i, s) in &placed {
+        let o = &options[*i];
+        let live_opt = choice.as_ref().and_then(|c| c.options.get(*i));
+        let c = to_screen(s.at);
+        let r = s.radius * scale;
+        let color = if o.fallback { SPOT_COOL } else { SPOT_WARM };
+        if pointer.is_some_and(|q| q.distance(c) <= r + 5.0) {
+            over = Some(s.entity);
+        }
+        let lit = live_opt.is_some_and(|l| l.inside)
+            || editor.selection.contains(&s.entity)
+            || tab.plan_drag.is_some_and(|(e, _)| e == s.entity);
+        p.circle_filled(c, r, color.gamma_multiply(0.09));
+        if let Some(l) = live_opt.filter(|l| l.progress > 0.0) {
+            p.circle_filled(c, r * l.progress, color.gamma_multiply(0.4));
+        }
+        p.circle_stroke(c, r, Stroke::new(if lit { 2.6 } else { 1.6 }, color));
+        p.text(
+            c,
+            Align2::CENTER_CENTER,
+            &s.name,
+            FontId::monospace(11.5),
+            color,
+        );
+        p.text(
+            c + Vec2::new(0.0, r + 3.0),
+            Align2::CENTER_TOP,
+            short(&o.text, 30),
+            FontId::proportional(10.5),
+            theme::TEXT_DIM,
+        );
+        tab.drawn_at.insert(
+            format!("plan spot {}", s.name),
+            Rect::from_center_size(c, Vec2::splat(2.0 * r)),
+        );
+    }
+    if let (Some(e), Some(q)) = (owner, owner_at) {
+        let c = to_screen(q);
+        p.circle_filled(c, (0.24 * scale).clamp(4.0, 10.0), OWNER);
+        let name = world
+            .get::<Name>(e)
+            .map(|n| n.as_str().to_string())
+            .unwrap_or_default();
+        p.text(
+            c + Vec2::new(0.0, -(0.24 * scale).clamp(4.0, 10.0) - 2.0),
+            Align2::CENTER_BOTTOM,
+            name,
+            FontId::proportional(11.5),
+            OWNER,
+        );
+    }
+    if let (Some(e), Some(q)) = (chooser, chooser_at) {
+        let c = to_screen(q);
+        p.circle_filled(c, (0.2 * scale).clamp(3.5, 8.0), NOW);
+        let who = if world.get::<engine::world::Interactor>(e).is_some() {
+            "you".to_string()
+        } else {
+            world
+                .get::<Name>(e)
+                .map(|n| n.as_str().to_string())
+                .unwrap_or_default()
+        };
+        p.text(
+            c + Vec2::new((0.2 * scale).clamp(3.5, 8.0) + 3.0, 0.0),
+            Align2::LEFT_CENTER,
+            who,
+            FontId::proportional(11.5),
+            NOW,
+        );
+    }
+    let corner = match choice.as_ref().and_then(SpotChoice::seconds_left) {
+        Some(s) => format!("{title} · {} s left", s.ceil() as i32),
+        None => format!("{title} · 1 square = 1 m"),
+    };
+    p.text(
+        rect.left_top() + Vec2::new(8.0, 6.0),
+        Align2::LEFT_TOP,
+        corner,
+        FontId::proportional(11.0),
+        theme::TEXT_DIM,
+    );
+
+    // Dragging a spot (before Play): it follows the pointer on the ground; letting go is one
+    // undo step. A click selects it.
+    if editing {
+        if response.drag_started_by(egui::PointerButton::Primary)
+            && let Some(e) = over
+            && let Some(t) = world.get::<Transform>(e).copied()
+        {
+            tab.plan_drag = Some((e, t));
+            editor.select(Some(e));
+        }
+        if response.dragged()
+            && let (Some((e, _)), Some(q)) = (tab.plan_drag, response.interact_pointer_pos())
+            && let Some(now_at) = world_pos(world, e)
+        {
+            let u = ((q.x - rect.center().x) / scale) as f64;
+            let v = ((rect.center().y - q.y) / scale) as f64;
+            let mut target = mid + right * u + ahead * v;
+            target.y = now_at.y;
+            let local = match world
+                .get::<ChildOf>(e)
+                .and_then(|c| world.get::<GlobalTransform>(c.parent()))
+            {
+                Some(g) => g.0.inverse().transform_point3(target),
+                None => target,
+            };
+            if let Some(mut t) = world.get_mut::<Transform>(e) {
+                t.translation = local;
+            }
+        }
+        if response.drag_stopped()
+            && let Some((e, before)) = tab.plan_drag.take()
+            && let Some(after) = world.get::<Transform>(e).copied()
+            && after != before
+            && let (Ok(b), Ok(a)) = (serde_json::to_value(before), serde_json::to_value(after))
+        {
+            let t = editor::now(world);
+            editor.history.record(
+                world,
+                Command::Component {
+                    entity: e,
+                    name: "Transform".into(),
+                    before: Some(b),
+                    after: Some(a),
+                },
+                t,
+            );
+        }
+        if response.clicked()
+            && let Some(e) = over
+        {
+            editor.select(Some(e));
+        }
+    } else {
+        tab.plan_drag = None;
+    }
+
+    // Spots the options name that the scene hasn't got.
+    let mut place = None;
+    for (k, o) in options.iter().enumerate() {
+        let Some(name) = &o.spot else { continue };
+        if all.iter().any(|s| &s.name == name) {
+            continue;
+        }
+        ui.horizontal(|ui| {
+            ui.label(RichText::new(format!("⚠ no spot '{name}' in the scene")).color(ERROR));
+            if editing
+                && ui
+                    .small_button("+ Place it")
+                    .on_hover_text(match owner {
+                        Some(_) => "A StorySpot beside the speaker, as their child (so it goes where they go)",
+                        None => "A StorySpot where the scene view looks",
+                    })
+                    .clicked()
+            {
+                place = Some((name.clone(), k));
+            }
+        });
+    }
+    ui.horizontal(|ui| {
+        let b = ui
+            .button("👁 View from above")
+            .on_hover_text("The scene view looks down on the spots, as the game's view does");
+        tab.drawn_at.insert("view from above".into(), b.rect);
+        if b.clicked() {
+            look_down_on(world, editor, &points, tab.view_aspect);
+        }
+    });
+    if let Some((name, k)) = place {
+        let at = match owner {
+            Some(_) => DVec3::new(1.2 + 0.9 * k as f64, 0.0, 0.0),
+            None => world
+                .get::<Transform>(editor.camera)
+                .map_or(DVec3::ZERO, |t| {
+                    let mut q = t.translation + t.forward().as_dvec3() * 6.0;
+                    q.y = 0.0;
+                    q
+                }),
+        };
+        place_spot(world, editor, owner, &name, at, 0.6);
+    }
+    ui.add_space(8.0);
+}
+
+/// A [`StorySpot`] named `name` in the scene (one undo step), under `parent` when given (`at`
+/// in its space then), selected.
+pub fn place_spot(
+    world: &mut World,
+    editor: &mut Editor,
+    parent: Option<Entity>,
+    name: &str,
+    at: DVec3,
+    radius_m: f32,
+) -> Entity {
+    let mut e = world.spawn((
+        InScene,
+        SceneOrder::next(),
+        Name::new(format!("Spot {name}")),
+        Transform::from_translation(at),
+        StorySpot {
+            name: name.to_string(),
+            radius_m,
+        },
+    ));
+    if let Some(p) = parent {
+        e.insert(ChildOf(p));
+    }
+    let id = e.id();
+    let saved = scene_ops::save_entity(world, id);
+    let t = editor::now(world);
+    editor
+        .history
+        .record(world, Command::Spawned { saved, parent }, t);
+    editor.select(Some(id));
+    editor.info(t, format!("Placed spot '{name}'"));
+    id
+}
+
+/// The scene view looks down on `points` (each with room round it) as the game's view from
+/// above does: 64 degrees down, keeping its heading.
+fn look_down_on(world: &mut World, editor: &Editor, points: &[(DVec3, f64)], aspect: f32) {
+    let Some(mut t) = world.get::<Transform>(editor.camera).copied() else {
+        return;
+    };
+    if points.is_empty() {
+        return;
+    }
+    let yaw = heading_of(t.rotation);
+    let (right, ahead) = ground_axes(yaw);
+    let (mut lo, mut hi) = (DVec3::splat(f64::MAX), DVec3::splat(f64::MIN));
+    for (q, _) in points {
+        lo = lo.min(*q);
+        hi = hi.max(*q);
+    }
+    let mut mid = (lo + hi) * 0.5;
+    mid.y = lo.y;
+    let (mut across, mut along) = (0.0f64, 0.0f64);
+    for (q, r) in points {
+        let d = *q - mid;
+        across = across.max(d.dot(right).abs() + r);
+        along = along.max(d.dot(ahead).abs() + r);
+    }
+    let fov = match world.get::<Camera>(editor.camera).map(|c| c.projection) {
+        Some(Projection::Perspective { fov_y_deg, .. }) => fov_y_deg,
+        _ => 60.0,
+    };
+    let pitch = -64f32.to_radians();
+    let half = (fov.to_radians() as f64 * 0.5).tan();
+    let dist = ((along + 1.1) * (-pitch as f64).sin() / half)
+        .max((across + 1.1) / (half * aspect.max(0.3) as f64))
+        .max(4.0);
+    let rotation = Quat::from_rotation_y(yaw) * Quat::from_rotation_x(pitch);
+    let at = mid - (rotation * Vec3::NEG_Z).as_dvec3() * dist;
+    if let Some(mut cam) = world.get_mut::<EditorCamera>(editor.camera) {
+        cam.jump(&mut t, at, yaw, pitch, dist);
+    }
+    if let Some(mut tr) = world.get_mut::<Transform>(editor.camera) {
+        *tr = t;
+    }
+}
+
 // --------------------------------------------------------------- .yarn in the Scripts tab
 
 /// A `.yarn` file's text colored for the Scripts tab: headers, `---` and `===`, speakers,
@@ -1476,6 +2280,7 @@ fn yarn_body_line(
 /// Stop: the conversations ended with the scripts that ran them (the facts and quests go back
 /// to the scene's with the rest of its resources).
 pub fn reset(world: &mut World) {
+    engine_script::spots::reset(world);
     if let Some(mut runs) = world.get_resource_mut::<StoryRuns>() {
         runs.runs.clear();
         runs.version += 1;
@@ -1483,5 +2288,6 @@ pub fn reset(world: &mut World) {
     if let Some(mut tab) = world.get_resource_mut::<StoryTab>() {
         tab.talking = None;
         tab.fact_edit = None;
+        tab.plan_drag = None;
     }
 }

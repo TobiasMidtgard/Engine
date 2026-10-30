@@ -263,9 +263,11 @@ impl WaterOptics {
             roughness: 0.06,
             foam: 1.0,
             ..Self::from_constituents(WaterConstituents {
-                chlorophyll: 0.5,
-                cdom_440: 0.1,
-                sediment: 0.6,
+                // A mountain stream runs clear over its stones: little to grow algae on,
+                // the fine silt washed out (it settles in the lake).
+                chlorophyll: 0.2,
+                cdom_440: 0.08,
+                sediment: 0.15,
                 sediment_color: [0.8, 0.75, 0.65],
             })
         }

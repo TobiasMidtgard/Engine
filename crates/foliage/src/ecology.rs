@@ -539,6 +539,7 @@ pub fn play_history(
         h.years_since,
         region.step_years.max(0.5),
     );
+    crate::sim::brush(&ctx, &mut plants);
     fit_logs(region, center, library, &plants, &[], &mut logs);
     (plants, logs)
 }
@@ -1107,6 +1108,7 @@ pub fn ecology_step(world: &mut World) {
             state
                 .sim
                 .step(&ctx, &mut plants, &mut logs, dt, catch_up, &mut out);
+            crate::sim::brush(&ctx, &mut plants);
         }
         let mut stats = RegionStats {
             years,

@@ -5348,3 +5348,181 @@ fn the_shipped_story_files_compile() {
     assert!(book.problems.is_empty(), "{:?}", book.problems);
     assert!(book.def("sealed_bridge").is_some());
 }
+
+const YARD_YARN: &str = r#"title: Start
+---
+Guard: Where do you stand?
+<<spots 2 0.5>>
+-> Stay #spot:here #fallback
+    Guard: As you were.
+-> Go left #spot:left
+    Guard: Left it is. <<if standing_at("left")>>
+-> Go right #spot:right
+    Guard: Right it is.
+===
+
+title: Lost
+---
+Guard: Nowhere to go.
+-> Up there #spot:roof
+    Guard: Up it is.
+-> Stay
+    Guard: Fine.
+===
+"#;
+
+/// A yard with a walker standing in the spot "here", and spots "left" and "right" 3 m away.
+fn yard() -> (Folder, App, Entity) {
+    let folder = Folder::new();
+    folder.write("dialogue/yard.yarn", YARD_YARN);
+    let mut app = app_in(&folder.0);
+    app.add_message::<engine_world::Interact>();
+    let walker = app
+        .world
+        .spawn((Name::new("Walker"), Transform::from_xyz(0.0, 0.0, 0.0)))
+        .id();
+    for (name, x) in [("here", 0.0), ("left", -3.0), ("right", 3.0)] {
+        app.world.spawn((
+            Name::new(format!("Spot {name}")),
+            Transform::from_xyz(x, 0.0, 0.0),
+            crate::spots::StorySpot {
+                name: name.into(),
+                radius_m: 0.5,
+            },
+        ));
+    }
+    app.update_n(2);
+    (folder, app, walker)
+}
+
+fn walk_in_yard(app: &mut App, node: &str) -> u64 {
+    call_api(
+        &mut app.world,
+        "story.start",
+        json!({"path": "dialogue/yard", "node": node, "headless": true, "chooser": "Walker"}),
+    )
+    .unwrap_or_else(|e| panic!("{e}"))["id"]
+        .as_u64()
+        .unwrap()
+}
+
+fn rings(app: &mut App) -> usize {
+    let mut q = app.world.query::<&crate::spots::SpotRing>();
+    q.iter(&app.world).count()
+}
+
+/// Options tagged `#spot:` are picked by walking: standing in a ring for a moment (not the one
+/// you stood in when the choice opened), E on a ring, the fallback when time runs out, or
+/// `story.choose`; the world slows meanwhile while the walker keeps its speed, and everything
+/// the choice put up goes when it lands.
+#[test]
+fn choices_are_made_by_walking_to_spots() {
+    let (_folder, mut app, walker) = yard();
+    let id = walk_in_yard(&mut app, "Start");
+    app.update_n(1);
+    let now = story_last(&mut app, id);
+    assert_eq!(now["waiting"], "spots", "{now}");
+    let spots = call_api(&mut app.world, "story.state", json!({})).unwrap()["spots"].clone();
+    assert_eq!(spots[0]["prompt"], "Where do you stand?", "{spots}");
+    assert_eq!(spots[0]["options"][0]["spot"], "here");
+    assert_eq!(spots[0]["options"][0]["inside"], true);
+    assert_eq!(spots[0]["options"][0]["fallback"], true);
+    assert!(
+        rings(&mut app) >= 3 * 5,
+        "a ring, its discs and light for each spot"
+    );
+    // Standing where it opened picks nothing; the world slows, the walker doesn't.
+    app.update_n(12);
+    assert_eq!(story_last(&mut app, id)["waiting"], "spots");
+    assert!(app.world.resource::<TimeDilation>().factor() < 0.9);
+    assert_eq!(
+        app.world
+            .get::<LocalTimeScale>(walker)
+            .map(|l| l.ignore_world_dilation),
+        Some(true)
+    );
+    // Over to the left: in its ring for 0.7 s.
+    app.world.get_mut::<Transform>(walker).unwrap().translation = DVec3::new(-2.8, 0.0, 0.2);
+    app.update_n(10);
+    assert_eq!(
+        story_last(&mut app, id)["waiting"],
+        "spots",
+        "still filling"
+    );
+    app.update_n(16);
+    let done = story_last(&mut app, id);
+    assert_eq!(done["done"], true, "{done}");
+    assert_eq!(done["text"], "Left it is.", "standing_at sees it");
+    // The rings, the view and the slow motion go; the walker's clock is its own again.
+    app.update_n(30);
+    assert_eq!(rings(&mut app), 0);
+    assert!(app.world.get::<LocalTimeScale>(walker).is_none());
+    let mut views = app.world.query::<&crate::spots::SpotView>();
+    assert_eq!(views.iter(&app.world).count(), 0);
+    app.update_n(15);
+    assert!(app.world.resource::<TimeDilation>().factor() > 0.99);
+
+    // Nothing chosen in two seconds: the fallback.
+    app.world.get_mut::<Transform>(walker).unwrap().translation = DVec3::ZERO;
+    let id = walk_in_yard(&mut app, "Start");
+    app.update_n(70);
+    let done = story_last(&mut app, id);
+    assert_eq!(done["text"], "As you were.", "{done}");
+
+    // E on the right ring.
+    app.update_n(30);
+    let id = walk_in_yard(&mut app, "Start");
+    app.update_n(1);
+    let ring = {
+        let mut q = app
+            .world
+            .query::<(Entity, &crate::spots::SpotRing, &engine_world::Interactable)>();
+        q.iter(&app.world)
+            .find(|(_, r, _)| r.option == 2)
+            .map(|(e, _, i)| (e, i.verb.clone()))
+            .unwrap()
+    };
+    assert_eq!(ring.1, "Go right");
+    app.world.write_message(engine_world::Interact {
+        actor: walker,
+        target: ring.0,
+        from: DVec3::ZERO,
+    });
+    app.update_n(2);
+    assert_eq!(story_last(&mut app, id)["text"], "Right it is.");
+
+    // story.choose still picks.
+    app.update_n(30);
+    let id = walk_in_yard(&mut app, "Start");
+    app.update_n(1);
+    call_api(
+        &mut app.world,
+        "story.choose",
+        json!({"index": 3, "id": id}),
+    )
+    .unwrap();
+    app.update_n(2);
+    assert_eq!(story_last(&mut app, id)["text"], "Right it is.");
+    app.update_n(30);
+    assert_eq!(rings(&mut app), 0);
+
+    // A spot that isn't there: the options show as a menu instead.
+    let id = walk_in_yard(&mut app, "Lost");
+    app.update_n(1);
+    assert_eq!(story_last(&mut app, id)["waiting"], "options");
+    assert!(
+        logs(&mut app)
+            .iter()
+            .any(|l| l.contains("no StorySpot named 'roof'")),
+        "{:?}",
+        logs(&mut app)
+    );
+}
+
+/// What scripts printed (and warned), each entry as text.
+fn logs(app: &mut App) -> Vec<String> {
+    let log = call_api(&mut app.world, "script.log", json!({})).unwrap();
+    log.as_array()
+        .map(|a| a.iter().map(|l| l.to_string()).collect())
+        .unwrap_or_default()
+}

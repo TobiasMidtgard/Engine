@@ -205,7 +205,7 @@ pub fn install(lua: &Lua, api: &ApiRegistry) -> mlua::Result<()> {
                 }
                 line.push_str(&display(v));
             }
-            if let Some(at) = caller(lua) {
+            if let Some(at) = user_caller(lua) {
                 line = format!("{at}: {line}");
             }
             push_log(lua, line);
@@ -230,6 +230,28 @@ pub(crate) fn caller(lua: &Lua) -> Option<String> {
         Some(format!("{file}:{line}"))
     })
     .flatten()
+}
+
+/// Where the nearest script that isn't the engine's own Luau called from: a conversation's
+/// line prints at its `.yarn` line rather than inside `engine/story.luau`.
+fn user_caller(lua: &Lua) -> Option<String> {
+    let mut first = None;
+    for level in 1..16 {
+        let Some((file, line)) = lua
+            .inspect_stack(level, |d| {
+                Some((d.source().short_src?.to_string(), d.current_line()?))
+            })
+            .flatten()
+        else {
+            break;
+        };
+        let at = format!("{file}:{line}");
+        if !file.starts_with("engine/") {
+            return Some(at);
+        }
+        first.get_or_insert(at);
+    }
+    first
 }
 
 /// A value as `print` shows it: tables as JSON where they convert, else their type.

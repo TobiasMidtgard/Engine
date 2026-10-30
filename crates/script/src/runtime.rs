@@ -372,6 +372,7 @@ impl ScriptRuntime {
         crate::tween::install(&lua)?;
         crate::cutscene::install(&lua)?;
         crate::story::install(&lua)?;
+        crate::spots::install(&lua)?;
         crate::bind::install(&lua, api)?;
         install_tasks(&lua)?;
         install_require(&lua)?;
@@ -436,6 +437,11 @@ impl ScriptRuntime {
             "__story_has_api",
             "__story_error",
             "__story_tick",
+            "__story_spots_begin",
+            "__story_spots_poll",
+            "__story_spots_end",
+            "__story_spots_say",
+            "__story_standing_at",
             "__quest_module",
             "__quest_ctl",
         ] {

@@ -18,7 +18,7 @@ use engine_core::math::{DVec2, DVec3, Rng, Vec2, Vec3};
 use engine_core::prelude::Entity;
 use engine_world::WorldShift;
 
-use crate::plant::{EcologyRegion, Genes, Plant, PlantStage};
+use crate::plant::{Brushing, EcologyRegion, Genes, Plant, PlantStage};
 use crate::species::{Layer, Need, PlantLibrary, PlantSpecies, ResourceLevels, SpeciesId};
 
 /// Environment the step reads. Implemented over the `engine_world` resources for live play and
@@ -937,6 +937,29 @@ fn uptake_of(ctx: &StepContext, j: u32, sim: &RegionSim) -> f32 {
     let sp = ctx.library.get(sim.species_of[j as usize]);
     let s = sim.sizes[j as usize];
     sp.uptake * s * s
+}
+
+/// Trail crews and the keepers of a view cut what grows into them
+/// ([`EcologyRegion::brushing`]): shrubs are cut back, young trees cut to stumps. Run after
+/// each live step and once at the end of a region's history, outside the step, so the forest
+/// grows exactly as it would unbrushed apart from these plants.
+pub fn brush(ctx: &StepContext, plants: &mut [SimPlant]) {
+    if ctx.region.corridors.is_empty() && ctx.region.sight_lines.is_empty() {
+        return;
+    }
+    for p in plants
+        .iter_mut()
+        .filter(|p| p.plant.stage == PlantStage::Alive)
+    {
+        let sp = ctx.library.get(p.plant.species);
+        let local = DVec2::new(p.pos.x - ctx.center.x, p.pos.z - ctx.center.z);
+        match ctx.region.brushing(sp, &p.plant, local) {
+            Brushing::Keep => continue,
+            Brushing::CutBack(size) => p.plant.size = p.plant.size.min(size),
+            Brushing::CutDown => p.plant.stage = PlantStage::Stump { years: 0.0 },
+        }
+        p.changed = true;
+    }
 }
 
 /// Grow one living plant by `dt` years at its current vigor.

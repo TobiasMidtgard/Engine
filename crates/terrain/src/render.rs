@@ -189,6 +189,9 @@ struct MapsGpu {
     paint_v: [f32; 4],
     /// The home spot's up (world), unused.
     paint_up: [f32; 4],
+    /// Where the deformation grid's window starts in its texture (it wraps around): as a share
+    /// of the texture, and in cells.
+    deform_base: [f32; 4],
 }
 
 /// A print the shader draws sharp. Matches `Print` in terrain.wgsl.
@@ -531,6 +534,8 @@ pub struct TerrainFeature {
     /// Patches drawn into the far shadow map (big shadows beyond the cascades).
     far_shadow_draws: Vec<Draw>,
     deform_generation: u64,
+    /// The footprint grid the texture holds ([`DeformationMap::epoch`]).
+    deform_epoch: u64,
     surface_frame: u64,
     /// The paths drawn: terrain, region, window corner (cells), generation.
     wear_window: Option<(Entity, usize, IVec2, IVec2, u64)>,
@@ -1012,8 +1017,10 @@ impl TerrainFeature {
         // Footprints.
         if let Some(mut def) = world.get_resource_mut::<DeformationMap>() {
             let size = def.size;
-            let fresh = gpu.deform_tex.as_ref().is_none_or(|t| t.2 != size);
+            let fresh = gpu.deform_tex.as_ref().is_none_or(|t| t.2 != size)
+                || self.deform_epoch != def.epoch;
             if fresh {
+                self.deform_epoch = def.epoch;
                 let tex = gpu_shared.device.create_texture(&wgpu::TextureDescriptor {
                     label: Some("terrain footprints"),
                     size: wgpu::Extent3d {
@@ -1047,7 +1054,8 @@ impl TerrainFeature {
                 let view = ids.create_view(&Default::default());
                 gpu.print_ids = Some((ids, view));
                 recreate = true;
-                def.dirty = Some((0, 0, size, size));
+                // A new texture starts at zero: only the tiles holding something are sent.
+                def.mark_all_dirty();
             }
             // Print shapes are kept relative to the grid's corner: all of them again when it
             // moved, else the new ones.
@@ -1084,7 +1092,8 @@ impl TerrainFeature {
                     bytemuck::cast_slice(&data),
                 );
             }
-            if let Some((x0, y0, x1, y1)) = def.dirty.take() {
+            // Changed tiles, in storage cells (the grid wraps around; see `DeformationMap`).
+            for [x0, y0, x1, y1] in def.take_dirty() {
                 let (w, h) = (x1 - x0, y1 - y0);
                 let mut data = Vec::with_capacity((w * h * 2) as usize);
                 for y in y0..y1 {
@@ -1147,6 +1156,12 @@ impl TerrainFeature {
                 (def.origin.y - view.origin.z) as f32,
                 def.cell,
                 size as f32,
+            ];
+            maps.deform_base = [
+                def.base[0] as f32 / size as f32,
+                def.base[1] as f32 / size as f32,
+                def.base[0] as f32,
+                def.base[1] as f32,
             ];
             maps.flags[0] = 1.0;
         }
@@ -2471,7 +2486,7 @@ mod tests {
             std::mem::size_of::<PlanetGpu>(),
             16 * (3 + 1 + 10 + 7 + MAX_RAYED + MAX_YOUNG)
         );
-        assert_eq!(std::mem::size_of::<MapsGpu>(), 16 * 12);
+        assert_eq!(std::mem::size_of::<MapsGpu>(), 16 * 13);
         assert_eq!(std::mem::size_of::<TerrainVertex>(), 52);
     }
 }

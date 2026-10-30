@@ -1,0 +1,62 @@
+// The muster at the courtyard gate (examples/captain.luau talks from this file). The captain
+// asks who will speak for the company, and you answer by where you walk: options tagged
+// #spot:<name> are picked by standing in that spot (a ring on the ground) for a moment or
+// pressing E there, seen from above while the world slows. <<spots 12>> gives 12 seconds,
+// then the #fallback option is taken: staying put is an answer too. The spots are children of
+// the captain (rank, forward, ear, behind), so they go where he goes.
+// See "Story" in the scripts README.
+
+title: Start
+position: 0,0
+---
+<<call_to_order>>
+Captain: Company! The gate opens at dawn, and someone speaks for us at the parley.
+Captain: You there, out of the line already? Back in it. <<if not standing_at("rank")>>
+Captain: Who speaks for the company? Step up, or hold your place.
+<<spots 12>>
+-> Hold your place in the rank #spot:rank #fallback
+    <<jump Rank>>
+-> Step past him and take the front #spot:forward
+    <<jump Forward>>
+-> Lean in and whisper him an idea #spot:ear
+    <<jump Whisper>>
+-> Slip behind him, a hand on your knife #spot:behind
+    <<jump Behind>>
+===
+
+title: Rank
+position: 420,-120
+---
+<<set $spoke_up to false>>
+Captain: Nobody. Then I speak for you, as I always have.
+Captain: Dismissed.
+===
+
+title: Forward
+position: 420,80
+---
+<<set $spoke_up to true>>
+<<set $overstepped to true>>
+<<step_aside>>
+Captain: Bold. Then you speak at dawn, and you answer for every word.
+Captain: The company will remember who stood in front.
+===
+
+title: Whisper
+position: 420,280
+---
+<<set $whispered to true>>
+<<nod>>
+Captain: ...Clever. Quietly now.
+Captain: If it works, it was my idea. If it fails, it was yours.
+===
+
+title: Behind
+position: 420,480
+---
+<<set $drew_on_captain to true>>
+<<turn_around>>
+Captain: I hear you, recruit. I always hear the ones behind me.
+=> Captain: Put it away, and we never speak of this.
+=> Captain: Again? The rest of them are watching now. <<if visited("Behind")>>
+===
