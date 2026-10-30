@@ -103,6 +103,10 @@ fn fight(
 #[test]
 fn presses_link_into_a_combo_that_steps_in_and_lands() {
     let (mut app, boxer, partner) = ring(true, false);
+    // The partner takes the blows but its legs don't go: a rocked body lurches about on its
+    // own, and this measures where the boxer stepped to.
+    app.world.entity_mut(partner).insert(Hurt::default());
+    app.world.get_mut::<Hurt>(partner).unwrap().rocked_at = 1e6;
     let (moves, hits, frozen) = fight(
         &mut app,
         boxer,

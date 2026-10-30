@@ -244,7 +244,6 @@ pub(crate) fn take_hurts(
 pub(crate) fn hurt_system(
     time: Res<Time>,
     mut q: Query<(
-        Entity,
         &mut Hurt,
         &mut Animator,
         &GlobalTransform,
@@ -253,7 +252,7 @@ pub(crate) fn hurt_system(
         Option<&LocalTimeScale>,
     )>,
 ) {
-    for (entity, mut hurt, mut animator, gt, reaction, down, local) in &mut q {
+    for (mut hurt, mut animator, gt, reaction, down, local) in &mut q {
         let hurt = &mut *hurt;
         let dt = if animator.frozen() > 0.0 {
             0.0
@@ -299,7 +298,9 @@ pub(crate) fn hurt_system(
             hurt.lurch -= dt;
             if hurt.lurch <= 0.0 {
                 hurt.lurches += 1;
-                let jitter = ((entity.to_bits() as u32)
+                // Spread by how hard it was hit, not by who it is: entity ids shift whenever
+                // anything else adds a resource or an entity, and the sway with them.
+                let jitter = (((hurt.daze * 1000.0) as u32)
                     .wrapping_mul(7)
                     .wrapping_add(hurt.lurches * 13)
                     % 10) as f32
