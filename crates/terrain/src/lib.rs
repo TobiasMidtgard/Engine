@@ -306,6 +306,7 @@ impl PlanetTerrain {
         let mut high = s.plateau_height_m
             + s.mountain_height_m * 1.6
             + s.hill_height_m * 1.3
+            + s.downs_height_m * 1.6
             + s.detail_height_m * 4.5
             + s.crater_max_radius_m * 0.05
             + pad_range

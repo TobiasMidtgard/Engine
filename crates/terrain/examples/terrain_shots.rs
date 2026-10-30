@@ -637,6 +637,21 @@ fn views() -> Vec<View> {
             ..BASE
         },
         View {
+            // Rolling country 170 km from the pad, in hill country, under a low sun.
+            name: "earth_downs",
+            eye_ll: Some([40.98, 1.5, 220.0]),
+            target_ll: Some([41.04, 1.52, 0.0]),
+            sun_ll: Some([-5.3, -64.8]),
+            ..BASE
+        },
+        View {
+            name: "earth_downs_walk",
+            eye_ll: Some([41.0, 1.5, 1.8]),
+            target_ll: Some([41.012, 1.505, 10.0]),
+            sun_ll: Some([-2.5, -61.9]),
+            ..BASE
+        },
+        View {
             name: "earth_rivers_air",
             eye: DVec3::new(6_500.0, 0.0, -1_500.0),
             target: DVec3::new(9_000.0, 0.0, -5_000.0),

@@ -331,6 +331,9 @@ pub struct PlanetShape {
     /// Rolling hills: height and wavelength, meters.
     pub hill_height_m: f64,
     pub hill_scale_m: f64,
+    /// Rolling country between the hills and the gullies (300 m to 3 km across): how high
+    /// its rises stand where a region is hill country, meters (0 = none).
+    pub downs_height_m: f64,
     /// Eroded small-scale relief: height and largest wavelength, meters.
     pub detail_height_m: f64,
     pub detail_scale_m: f64,
@@ -396,6 +399,7 @@ impl PlanetShape {
             mountain_coverage: 0.35,
             hill_height_m: 200.0,
             hill_scale_m: 8_000.0,
+            downs_height_m: 140.0,
             detail_height_m: 10.0,
             detail_scale_m: 400.0,
             min_detail_m: 1.0,
@@ -431,6 +435,7 @@ impl PlanetShape {
             mountain_coverage: 0.2,
             hill_height_m: 180.0,
             hill_scale_m: 9_000.0,
+            downs_height_m: 0.0,
             detail_height_m: 18.0,
             detail_scale_m: 900.0,
             min_detail_m: 0.8,
@@ -477,6 +482,7 @@ impl PlanetShape {
             mountain_coverage: 0.25,
             hill_height_m: 300.0,
             hill_scale_m: 16_000.0,
+            downs_height_m: 0.0,
             detail_height_m: 30.0,
             detail_scale_m: 1_500.0,
             min_detail_m: 1.0,
@@ -560,6 +566,7 @@ impl PlanetShape {
             self.mountain_coverage,
             self.hill_height_m,
             self.hill_scale_m,
+            self.downs_height_m,
             self.erosion,
             self.climate.equator_c as f64,
             self.climate.pole_c as f64,
@@ -842,9 +849,26 @@ impl PlanetShape {
             D::c((hn * hn + k2).sqrt() - 0.055 - k2.sqrt() + 0.003f64.sqrt())
         };
         let hills = billow * hill_land * (2.0 * self.hill_height_m * (0.25 + 0.75 * calm));
+        // Rolling country: the scales between the wide hills and the gullies (300 m to
+        // 3 km). Without them the lowlands were nearly flat: within half a kilometer the
+        // ground rose and fell 2 to 5 m, a quarter of what rolling farmland does (landscapes'
+        // relief keeps growing with the scale, about in proportion to it: Perron, Kirchner and
+        // Dietrich 2008). Rounded rises and creased hollows, carrying their slopes so the
+        // erosion below cuts its gullies down them; plains in some regions, hill country in
+        // others (a 70 km pattern).
+        let downs = if self.downs_height_m > 0.0 {
+            let country = noise::fbm(p / 70_000.0, s ^ 0x43, 3, 0.5);
+            let rolling = 0.35 + 0.65 * smooth(-0.35, 0.0, country);
+            let dn = fbm(2_400.0, s ^ 0x42, octaves_for(2_400.0, 5.0), 3, 0.55);
+            dn.soft_abs(0.04, [0.3; LEVELS])
+                * hill_land
+                * (2.0 * self.downs_height_m * rolling * (0.25 + 0.75 * calm))
+        } else {
+            D::ZERO
+        };
 
         // Water and ice carve the big shapes into valleys, spurs and gullies.
-        let landforms = base + mountains + hills;
+        let landforms = base + mountains + hills + downs;
         let mut h = landforms.v;
         let mut slope = 0.0;
         if eroding {
@@ -897,7 +921,7 @@ impl PlanetShape {
 
         // Small eroded relief: rough on steep rock, smooth on meadows and valley floors.
         let roughness = if eroding {
-            0.3 + 2.4 * smooth(0.35, 1.2, slope)
+            0.4 + 2.3 * smooth(0.35, 1.2, slope)
         } else {
             0.5 + 4.0 * mask * (1.0 - 0.75 * self.worn)
         };
