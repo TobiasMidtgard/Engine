@@ -1342,7 +1342,10 @@ fn fs_body(in: BodyOut) -> @location(0) vec4<f32> {
         let keep = mix(0.3, 1.0, saturate(sw.depth / 0.15));
         let n_swash = normalize(vec3<f32>(-ss.x - g.x * keep, 1.0, -ss.y - g.y * keep));
         n = normalize(mix(n, n_swash, sw.w));
-        foam += sw.foam * sw.w * 1.4;
+        // The swash's foam is a thin film riding sheets of water centimeters deep: lace
+        // and streaks, never a white sheet, however much the bores have churned (a sheet
+        // only where it is fresh and thick, which the lake's own breaking draws).
+        foam += min(sw.foam, 0.6) * sw.w * 1.1;
     }
     var color: vec3<f32>;
     // Seen from below when the camera is under the water (at the waterline, where it is).
