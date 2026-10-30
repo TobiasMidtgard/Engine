@@ -11,8 +11,9 @@ use super::graph::{Node, PlantGraph, Tree};
 
 const UP: Vec3 = Vec3::Y;
 const YEAR: f32 = 365.0;
-/// Most leaf organs one tree holds over its life.
-pub const MAX_LEAVES: usize = 600_000;
+/// Most leaf organs one tree holds over its life (each comes back every spring its node
+/// leafs).
+pub const MAX_LEAVES: usize = 300_000;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Bud {
@@ -350,10 +351,11 @@ pub(super) fn develop(graph: &PlantGraph, tree: &Tree, node: usize, seed: u64, s
                 break;
             }
             let v = bud_vigor[bi];
-            // Under one metamer's vigor a bud can still put out a spur: one short metamer.
+            // Under one metamer's vigor a bud can still put out a spur, one short metamer, if it has
+            // some vigor or good light (lateral flushing by light, Stava et al. 2014).
             let (count, short) = if v >= 1.0 {
                 ((v.floor() as u32).min(tree.max_shoot) as usize, 1.0)
-            } else if v >= tree.spur_vigor {
+            } else if v >= tree.spur_vigor || b.light >= tree.spur_light {
                 (1, v.max(0.35))
             } else {
                 (0, 1.0)
@@ -541,6 +543,7 @@ fn write_organs(
             bends: vec![(0.0, 0.0); s.metamers.len()],
             dirs: s.metamers.iter().map(|m| m.dir).collect(),
             node_days: s.metamers.iter().map(|m| m.day).collect(),
+            recur: None,
         });
         sk.children.push(Vec::new());
         if let Some(p) = parent {
@@ -578,7 +581,7 @@ fn write_organs(
         .flat_map(|(_, s)| {
             s.metamers
                 .iter()
-                .map(move |m| seasons(tree, years, s, m).count())
+                .map(move |m| usize::from(seasons(tree, years, s, m).next().is_some()))
         })
         .sum::<usize>()
         * tree.leaves_per_node as usize;
@@ -586,34 +589,39 @@ fn write_organs(
     for (si, s) in shoots.iter().enumerate() {
         let Some(parent) = organ_of[si] else { continue };
         for (k, m) in s.metamers.iter().enumerate() {
-            for (y, birth) in seasons(tree, years, s, m) {
-                for i in 0..tree.leaves_per_node {
-                    let ls = mix_seed(s.seed, ((y as u64) << 40) | ((k as u64) << 8) | i as u64);
-                    if keep < 1.0 && (ls & 0xffff) as f64 >= keep * 65536.0 {
-                        continue;
-                    }
-                    let jitter = ((ls >> 40) as f32 / (1u64 << 24) as f32 - 0.5) * 0.5;
-                    let id = sk.organs.len() as u32;
-                    sk.organs.push(Organ {
-                        node: leaf,
-                        parent: Some(parent),
-                        at_node: k as u32 + 1,
-                        roll: m.roll + i as f32 * 2.4 + jitter,
-                        angle: tree.leaf_angle_deg.to_radians() * (1.0 + 0.4 * jitter),
-                        upright: false,
-                        birth: birth + jitter * 6.0,
-                        death: birth + jitter * 6.0 + lasts,
-                        scale: 1.0 + 0.3 * jitter,
-                        seed: ls,
-                        depth: s.depth + 1,
-                        internodes: Vec::new(),
-                        bends: Vec::new(),
-                        dirs: Vec::new(),
-                        node_days: Vec::new(),
-                    });
-                    sk.children.push(Vec::new());
-                    sk.children[parent as usize].push(id);
+            // One organ per leaf for all the springs its node leafs (it recurs yearly).
+            let mut springs = seasons(tree, years, s, m);
+            let Some((y0, first)) = springs.next() else {
+                continue;
+            };
+            let last = springs.last().map_or(first, |(_, b)| b);
+            for i in 0..tree.leaves_per_node {
+                let ls = mix_seed(s.seed, ((y0 as u64) << 40) | ((k as u64) << 8) | i as u64);
+                if keep < 1.0 && (ls & 0xffff) as f64 >= keep * 65536.0 {
+                    continue;
                 }
+                let jitter = ((ls >> 40) as f32 / (1u64 << 24) as f32 - 0.5) * 0.5;
+                let id = sk.organs.len() as u32;
+                sk.organs.push(Organ {
+                    node: leaf,
+                    parent: Some(parent),
+                    at_node: k as u32 + 1,
+                    roll: m.roll + i as f32 * 2.4 + jitter,
+                    angle: tree.leaf_angle_deg.to_radians() * (1.0 + 0.4 * jitter),
+                    upright: false,
+                    birth: first + jitter * 6.0,
+                    death: last + jitter * 6.0 + lasts,
+                    scale: 1.0 + 0.3 * jitter,
+                    seed: ls,
+                    depth: s.depth + 1,
+                    internodes: Vec::new(),
+                    bends: Vec::new(),
+                    dirs: Vec::new(),
+                    node_days: Vec::new(),
+                    recur: Some((YEAR, lasts)),
+                });
+                sk.children.push(Vec::new());
+                sk.children[parent as usize].push(id);
             }
         }
     }
@@ -716,6 +724,8 @@ mod tests {
         assert_eq!(leaves(year + 360.0), 0, "fallen by the next winter");
         assert!(shoots(year + 30.0) > 20, "{} shoots", shoots(year + 30.0));
         assert!(sk.organs.len() < MAX_LEAVES + 50_000);
+        // One record per leaf, not per leaf and year.
+        assert!(sk.organs.len() < 40_000, "{} organs", sk.organs.len());
     }
 
     #[test]

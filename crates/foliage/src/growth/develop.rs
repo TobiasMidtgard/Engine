@@ -42,6 +42,26 @@ pub struct Organ {
     /// grow in spring flushes over many years). Empty for other axes.
     pub dirs: Vec<engine_core::math::Vec3>,
     pub node_days: Vec<f32>,
+    /// Comes back every `period` days for `lasts` days of it, from `birth` to `death` (a tree's
+    /// leaves, out each spring); `None`: once.
+    pub recur: Option<(f32, f32)>,
+}
+
+impl Organ {
+    /// Its age on day `t` (in this round, if it recurs), or `None` while it is not there.
+    pub fn age_at(&self, t: f32) -> Option<f32> {
+        if t < self.birth || t >= self.death {
+            return None;
+        }
+        let age = t - self.birth;
+        match self.recur {
+            None => Some(age),
+            Some((period, lasts)) => {
+                let a = age.rem_euclid(period.max(1.0));
+                (a < lasts).then_some(a)
+            }
+        }
+    }
 }
 
 /// Every organ a plant grows, parents before their children.
@@ -132,6 +152,7 @@ impl Skeleton {
                 bends: Vec::new(),
                 dirs: Vec::new(),
                 node_days: Vec::new(),
+                recur: None,
             };
             match generator {
                 Node::Axis(a) => {
@@ -263,7 +284,7 @@ impl Skeleton {
         self.organs
             .iter()
             .enumerate()
-            .filter(move |(_, o)| o.birth <= t && t < o.death)
+            .filter(move |(_, o)| o.age_at(t).is_some())
     }
 
     /// How many organs are alive on day `t`, by generator name.

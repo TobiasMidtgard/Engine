@@ -103,7 +103,7 @@ pub fn grow_meshes(graph: &PlantGraph, sk: &Skeleton, t: f32, detail: f32) -> Gr
     // Shown: alive, on a shown parent.
     let mut shown = vec![false; n];
     for (i, o) in sk.organs.iter().enumerate() {
-        let alive = o.birth <= t && t < o.death;
+        let alive = o.age_at(t).is_some();
         shown[i] = alive && o.parent.is_none_or(|p| shown[p as usize]);
     }
     // What each organ carries (leaves, flowers and fruit at their size today), for sagging.
@@ -113,7 +113,7 @@ pub fn grow_meshes(graph: &PlantGraph, sk: &Skeleton, t: f32, detail: f32) -> Gr
             continue;
         }
         let o = &sk.organs[i];
-        let age = t - o.birth;
+        let age = o.age_at(t).unwrap_or(0.0);
         load[i] += match node_of(o) {
             Some(Node::Fruit(f)) => 1.0 * logistic(age / f.swell_days.max(0.1)),
             Some(Node::Flower(f)) => 0.25 * hermite(age / f.bud_days.max(0.1)),
@@ -139,7 +139,7 @@ pub fn grow_meshes(graph: &PlantGraph, sk: &Skeleton, t: f32, detail: f32) -> Gr
             continue;
         }
         let o = &sk.organs[i];
-        let age = t - o.birth;
+        let age = o.age_at(t).unwrap_or(0.0);
         // Where it grows from and which way.
         let (base, dir, side, surface) = match o.parent {
             None => (Vec3::ZERO, UP, Vec3::X, 0.0),

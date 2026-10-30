@@ -176,6 +176,9 @@ pub struct Tree {
     /// short shoot (a spur) of one short metamer: the leafy short shoots that fill an oak's
     /// crown on older wood. Above 1: such buds stay dormant.
     pub spur_vigor: f32,
+    /// A bud in at least this much light (1: open sky) breaks into a spur whatever its vigor,
+    /// as lateral buds flush by light in Stava et al. 2014. Above 1: never.
+    pub spur_light: f32,
     /// Only the buds of the last this-many metamers of each year's shoot can break (oaks
     /// branch from the cluster of buds at a shoot's tip, so their limbs come in tiers); 0: all.
     pub distal_buds: u32,
@@ -226,6 +229,7 @@ impl Default for Tree {
             shed_light: 0.05,
             bud_years: 3.0,
             spur_vigor: 0.3,
+            spur_light: 2.0,
             distal_buds: 0,
             max_metamers: 40_000,
             tip_radius_m: 0.003,
