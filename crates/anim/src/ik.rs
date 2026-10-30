@@ -912,15 +912,17 @@ pub(crate) fn look_at_system(
     }
 }
 
+#[allow(clippy::type_complexity)]
 pub(crate) fn reach_ik_system(
     mut q: Query<(
         &mut Animator,
         &ReachIk,
         &GlobalTransform,
         Option<&crate::retarget::Retarget>,
+        Option<&crate::grip::HeldItems>,
     )>,
 ) {
-    for (mut animator, reach, gt, retarget) in &mut q {
+    for (mut animator, reach, gt, retarget, held) in &mut q {
         let retargeter = retarget.map(|r| &*r.retargeter);
         if !animator.posed() {
             continue;
@@ -946,8 +948,15 @@ pub(crate) fn reach_ik_system(
             let frame = match s.index_of(&chain.target_bone) {
                 Some(t) if !chain.target_bone.is_empty() => {
                     let offset = Xf::from_t(chain.target_offset);
+                    // The fist and the item's seat in it: the reaching hand holds the item
+                    // where the target hand's seat puts it.
                     let fit = |bone: &str| match crate::grip::side_of(bone) {
-                        Some(side) if chain.fist => crate::grip::fist_correction(retargeter, side),
+                        Some(side) if chain.fist => {
+                            let seat = held
+                                .and_then(|h| Some(h.seats[side].xf(h.hands[side].as_ref()?, side)))
+                                .unwrap_or(Xf::IDENTITY);
+                            crate::grip::fist_correction(retargeter, side).mul(&seat)
+                        }
                         _ => Xf::IDENTITY,
                     };
                     animator.model[t]

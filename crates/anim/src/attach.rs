@@ -3,7 +3,7 @@
 use engine_core::prelude::*;
 
 use crate::animator::Animator;
-use crate::grip::{fist_correction, side_of};
+use crate::grip::{HeldItems, fist_correction, side_of};
 use crate::retarget::{Retarget, Retargeter};
 use crate::xform::{Xf, rotation_between};
 
@@ -112,12 +112,28 @@ impl BoneAttachment {
         animator: &Animator,
         retargeter: Option<&Retargeter>,
     ) -> Option<Xf> {
+        self.socket_held(animator, retargeter, None)
+    }
+
+    /// [`socket_fitted`](Self::socket_fitted), seated in the fist as `held` says
+    /// ([`crate::grip::Seat`]).
+    pub fn socket_held(
+        &self,
+        animator: &Animator,
+        retargeter: Option<&Retargeter>,
+        held: Option<&HeldItems>,
+    ) -> Option<Xf> {
         let index = animator.skeleton.index_of(&self.bone)?;
         let mut bone = animator.model[index];
         if self.fist
             && let Some(side) = side_of(&self.bone)
         {
             bone = bone.mul(&fist_correction(retargeter, side));
+            if let Some(held) = held
+                && let Some(handle) = &held.hands[side]
+            {
+                bone = bone.mul(&held.seats[side].xf(handle, side));
+            }
         }
         let Some(hang) = &self.hang else {
             return Some(bone.mul(&Xf::from_tr(self.offset, self.rotation)));
@@ -150,22 +166,31 @@ impl BoneAttachment {
 #[allow(clippy::type_complexity)]
 pub(crate) fn attachment_system(
     characters: Query<
-        (&Animator, Ref<GlobalTransform>, Option<&Retarget>),
+        (
+            &Animator,
+            Ref<GlobalTransform>,
+            Option<&Retarget>,
+            Option<Ref<HeldItems>>,
+        ),
         Without<BoneAttachment>,
     >,
     mut q: Query<(&BoneAttachment, &mut Transform, &mut GlobalTransform)>,
 ) {
     for (attach, mut t, mut gt) in &mut q {
-        let Some((animator, owner, retarget)) = attach.target.and_then(|e| characters.get(e).ok())
+        let Some((animator, owner, retarget, held)) =
+            attach.target.and_then(|e| characters.get(e).ok())
         else {
             continue;
         };
         // A resting owner that stands still keeps its props where they are.
-        if !animator.posed() && !owner.is_changed() {
+        let reseated = held.as_ref().is_some_and(|h| h.is_changed());
+        if !animator.posed() && !owner.is_changed() && !reseated {
             continue;
         }
         let owner = &*owner;
-        let Some(socket) = attach.socket_fitted(animator, retarget.map(|r| &*r.retargeter)) else {
+        let Some(socket) =
+            attach.socket_held(animator, retarget.map(|r| &*r.retargeter), held.as_deref())
+        else {
             continue;
         };
         let (pos, rot) = animator_world(owner, socket);

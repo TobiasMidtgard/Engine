@@ -21,7 +21,7 @@ use crate::build::weapons::{
     HANDLE_AXIS, HANDLE_FACE, SHIELD_CENTER, SHIELD_RADIUS, SWORD_BLADE,
 };
 use crate::combat::Shield;
-use crate::grip::{Handle, HeldItems, fist_correction};
+use crate::grip::{GripPresets, Handle, HeldItems, fist_correction};
 use crate::ik::{Reach, ReachIk};
 use crate::retarget::{Retarget, Retargeter};
 
@@ -68,10 +68,20 @@ fn part(
         .id()
 }
 
-/// Let `person`'s `side` hand (0 left, 1 right) close round `handle`.
-fn hold(world: &mut World, person: Entity, side: usize, handle: Handle) {
-    let held = world.get::<HeldItems>(person).copied().unwrap_or_default();
-    world.entity_mut(person).insert(held.hold(side, handle));
+/// Let `person`'s `side` hand (0 left, 1 right) close round item `name`'s handle (its
+/// [`GripPresets`] entry, along `axis`, moved `shift` along it).
+fn hold(world: &mut World, person: Entity, side: usize, name: &str, axis: Vec3, shift: f32) {
+    let preset = match world.get_resource::<GripPresets>() {
+        Some(presets) => presets.get(name),
+        None => GripPresets::builtin().get(name),
+    };
+    let held = world.get::<HeldItems>(person).cloned().unwrap_or_default();
+    world.entity_mut(person).insert(held.hold_preset(
+        side,
+        preset.handle(axis, shift),
+        name,
+        &preset,
+    ));
 }
 
 /// A rotation taking X to `width`, Y to `length` (square to each other), Z to their cross.
@@ -133,7 +143,7 @@ fn sword_parts(
             person,
             "hand_r",
             Shape::Cylinder {
-                radius: 0.017,
+                radius: SWORD_GRIP_RADIUS,
                 height: grip[1] - grip[0],
                 segments: 12,
             },
@@ -161,16 +171,13 @@ pub const SWORD_GRIP_RADIUS: f32 = 0.017;
 /// A shield's handle and a bow's grip, meters.
 pub const SHIELD_HANDLE_RADIUS: f32 = 0.015;
 pub const BOW_GRIP_RADIUS: f32 = 0.02;
+/// Where along the shield's bar the fist may close, meters from its middle.
+const SHIELD_HANDLE: [f32; 2] = [-0.06, 0.06];
 
 /// An arming sword in `person`'s right hand.
 pub fn spawn_sword(world: &mut World, person: Entity) -> Vec<Entity> {
     let grip = [-0.065, 0.05];
-    hold(
-        world,
-        person,
-        1,
-        Handle::new(BLADE_AXIS, SWORD_GRIP_RADIUS, grip),
-    );
+    hold(world, person, 1, "sword", BLADE_AXIS, 0.0);
     sword_parts(world, person, SWORD_BLADE, 0.045, 0.2, grip)
 }
 
@@ -180,9 +187,8 @@ pub fn spawn_sword(world: &mut World, person: Entity) -> Vec<Entity> {
 pub fn spawn_greatsword(world: &mut World, person: Entity) -> Vec<Entity> {
     let grip = [-GREATSWORD_HANDS - 0.08, 0.055];
     let parts = sword_parts(world, person, GREATSWORD_BLADE, 0.055, 0.32, grip);
-    let handle = |at: f32| Handle::new(BLADE_AXIS, SWORD_GRIP_RADIUS, [grip[0] + at, grip[1] + at]);
-    hold(world, person, 1, handle(0.0));
-    hold(world, person, 0, handle(GREATSWORD_HANDS));
+    hold(world, person, 1, "greatsword", BLADE_AXIS, 0.0);
+    hold(world, person, 0, "greatsword", BLADE_AXIS, GREATSWORD_HANDS);
     // The left fist on the grip below the right, turned the same way round as the right.
     world.entity_mut(person).insert(ReachIk::new(vec![Reach {
         target_bone: "hand_r".into(),
@@ -218,7 +224,7 @@ pub fn spawn_shield(world: &mut World, person: Entity) -> Vec<Entity> {
     let face = along(HANDLE_AXIS, HANDLE_FACE);
     let wood = StandardMaterial::hex(0x7b5634).with_roughness(0.75);
     let paint = StandardMaterial::hex(0x8c2a22).with_roughness(0.6);
-    let handle = Handle::new(HANDLE_AXIS, SHIELD_HANDLE_RADIUS, [-0.06, 0.06]);
+    let handle = Handle::new(HANDLE_AXIS, SHIELD_HANDLE_RADIUS, SHIELD_HANDLE);
     let [a, b] = handle.ends(0);
     // The board's back, where the bar's blocks meet it.
     let back = SHIELD_CENTER - HANDLE_FACE * 0.008;
@@ -320,7 +326,7 @@ pub fn spawn_shield(world: &mut World, person: Entity) -> Vec<Entity> {
         ));
     }
     world.entity_mut(person).insert(Shield::default());
-    hold(world, person, 0, handle);
+    hold(world, person, 0, "shield", HANDLE_AXIS, 0.0);
     ids
 }
 
@@ -375,12 +381,7 @@ fn arrow_shape() -> (Shape, StandardMaterial) {
 /// A recurve bow in `person`'s left fist (its back out over the knuckles, the string toward
 /// the archer), its string and an arrow for the draw hand.
 pub fn spawn_bow(world: &mut World, person: Entity) -> Vec<Entity> {
-    hold(
-        world,
-        person,
-        0,
-        Handle::new(HANDLE_AXIS, BOW_GRIP_RADIUS, [-0.07, 0.07]),
-    );
+    hold(world, person, 0, "bow", HANDLE_AXIS, 0.0);
     let wood = StandardMaterial::hex(0x5b3a1e).with_roughness(0.5);
     let back = -HANDLE_FACE;
     let mut ids = vec![part(
@@ -607,5 +608,36 @@ pub(crate) fn fly_arrows(
         if arrow.left <= 1e-6 {
             arrow.stuck = Some(0.0);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The grips file's handles are the ones the items' meshes are built round.
+    #[test]
+    fn the_grips_file_matches_the_items() {
+        let presets = GripPresets::builtin();
+        let gs = [-GREATSWORD_HANDS - 0.08, 0.055];
+        for (name, radius, extent) in [
+            ("sword", SWORD_GRIP_RADIUS, [-0.065, 0.05]),
+            ("greatsword", SWORD_GRIP_RADIUS, gs),
+            ("shield", SHIELD_HANDLE_RADIUS, SHIELD_HANDLE),
+            ("bow", BOW_GRIP_RADIUS, [-0.07, 0.07]),
+        ] {
+            let p = presets
+                .0
+                .get(name)
+                .unwrap_or_else(|| panic!("no {name} grip"));
+            assert_eq!(p.radius, radius, "{name}");
+            assert!(
+                (p.extent[0] - extent[0]).abs() < 1e-6 && (p.extent[1] - extent[1]).abs() < 1e-6,
+                "{name}: {:?}",
+                p.extent
+            );
+        }
+        // And it reads back as it was written.
+        assert_eq!(GripPresets::parse(&presets.to_json()).unwrap(), presets);
     }
 }

@@ -334,7 +334,12 @@ compresses and stretches.
   riser and a sword's grip close differently. `Retargeter::grip_report` measures a posed
   hand on its handle (palm gap, finger penetration and gaps, thumb opposition, handle size
   over hand length) and `cargo run -p engine_anim --example grip_check --release` runs the
-  paddock and reports every held hand.
+  paddock and reports every held hand. Each item's grip is data, `GripPresets`
+  (`assets/anim/grips.json`, built in): its handle's size, its seat in the fist (slid along
+  the handle, rolled about it) and an extra curl per finger. Changing an entry re-seats every
+  hand holding that item; the editor's Grips tab draws a chosen hand's grip over the scene
+  view (handle, palm, finger segments coloured by their gap), shows the measurements against
+  the grip research's limits, tunes the seat and finger curls live and saves the file.
 - **Getting up.** A person whose weight returns to 0 while lying flat gets up rather than
   blending straight to standing: `get_up_back` (sits up, tucks a leg, plants a hand and a
   knee, steps up) or `get_up_front` (palms down, pushes up to all fours, kneels, steps up),

@@ -438,6 +438,8 @@ const FIST_DEPTH: f32 = 0.012;
 const FINGER_RADIUS: f32 = 0.0085;
 /// How far past its fist curl a finger may close round something, as a fraction.
 const WRAP_LIMIT: f32 = 1.3;
+/// How far a finger segment may open back past straight to lie on a handle, radians.
+const WRAP_OPEN: f32 = 0.35;
 /// The angle step a wrapping finger closes by, radians.
 const WRAP_STEP: f32 = 0.02;
 
@@ -547,6 +549,21 @@ impl Retargeter {
         side: usize,
         handle: &crate::grip::Handle,
     ) -> Option<crate::grip::GripReport> {
+        self.grip_geometry(logic_model, logic, target_model, side, handle)
+            .map(|g| g.report)
+    }
+
+    /// [`grip_report`](Self::grip_report) with what it measured, in model space: the handle,
+    /// the palm and every finger segment with its gap to the handle (what the editor's Grips
+    /// tab draws).
+    pub fn grip_geometry(
+        &self,
+        logic_model: &[Xf],
+        logic: &Skeleton,
+        target_model: &[Xf],
+        side: usize,
+        handle: &crate::grip::Handle,
+    ) -> Option<crate::grip::GripGeometry> {
         let fit = &self.fits[self.hand_of(side)?];
         let hand = logic_model[logic.index_of(["hand_l", "hand_r"][side])?];
         let fist = hand.mul(&crate::grip::fist_correction(Some(self), side));
@@ -568,39 +585,50 @@ impl Retargeter {
         let palm_dir = fist.r * PALM[side];
         let skin = knuckles + palm_dir * FIST_DEPTH * size;
         let palm = off_axis(skin).length() - handle.radius;
+        let reach = handle.radius + fit.finger_radius;
+        let fingers: Vec<Vec<(Vec3, Vec3, f32)>> = fit
+            .chains
+            .iter()
+            .enumerate()
+            .map(|(c, chain)| {
+                (0..chain.len())
+                    .map(|k| {
+                        let x = target_model[chain[k] as usize];
+                        let end = match chain.get(k + 1) {
+                            Some(&n) => point(n),
+                            None => x.transform_point(fit.tips[c]),
+                        };
+                        let gap = segment_distance(x.t, end, a - axis, b + axis) - reach;
+                        (x.t, end, gap)
+                    })
+                    .collect()
+            })
+            .collect();
         let mut deepest = 0.0f32;
         let mut widest = 0.0f32;
-        let segments = |c: usize| -> Vec<(Vec3, Vec3)> {
-            let chain = &fit.chains[c];
-            (0..chain.len())
-                .map(|k| {
-                    let x = target_model[chain[k] as usize];
-                    let end = match chain.get(k + 1) {
-                        Some(&n) => point(n),
-                        None => x.transform_point(fit.tips[c]),
-                    };
-                    (x.t, end)
-                })
-                .collect()
-        };
-        let reach = handle.radius + fit.finger_radius;
-        for c in 1..fit.chains.len() {
-            let mut closest = f32::MAX;
-            for (p0, p1) in segments(c) {
-                let d = segment_distance(p0, p1, a - axis, b + axis) - reach;
-                deepest = deepest.min(d);
-                closest = closest.min(d);
-            }
+        for finger in fingers.iter().skip(1) {
+            let closest = finger.iter().map(|s| s.2).fold(f32::MAX, f32::min);
+            deepest = deepest.min(closest);
             widest = widest.max(closest);
         }
-        let thumb_tip = segments(0).last().map_or(wrist, |s| s.1);
+        let thumb_tip = fingers
+            .first()
+            .and_then(|t| t.last())
+            .map_or(wrist, |s| s.1);
         let thumb_opposed = off_axis(thumb_tip).dot(off_axis(skin)) < 0.0;
-        Some(crate::grip::GripReport {
-            palm,
-            deepest: -deepest.min(0.0),
-            widest,
-            thumb_opposed,
-            size: handle.radius * 2.0 / (0.19 * size),
+        Some(crate::grip::GripGeometry {
+            report: crate::grip::GripReport {
+                palm,
+                deepest: (-deepest).max(0.0),
+                widest,
+                thumb_opposed,
+                size: handle.radius * 2.0 / (0.19 * size),
+            },
+            handle: [a, b],
+            radius: handle.radius,
+            palm: skin,
+            palm_dir,
+            fingers,
         })
     }
 
@@ -624,6 +652,11 @@ impl Retargeter {
         let [a, b] = handle
             .ends(side)
             .map(|p| fit.correction.conjugate() * correction.transform_point(p));
+        // A finger past the handle's ends (beside a sword's guard, past a bar's end) closes
+        // on the line through it, as the grip check measures it, instead of curling round
+        // the end into where the item goes on.
+        let axis = (b - a).normalize_or(Vec3::Z);
+        let (a, b) = (a - axis, b + axis);
         let reach = handle.radius + fit.finger_radius;
         let hand_rest = target.rest_model[fit.bone as usize].inverse();
         let mut angles = vec![0.0; target.len()];
@@ -650,17 +683,23 @@ impl Retargeter {
                     local.r = (rest.r * Quat::from_axis_angle(f.axis, angle)).normalize();
                     parent.mul(&local)
                 };
-                let touches = |x: &Xf| segment_distance(x.t, x.transform_point(end), a, b) <= reach;
+                let gap = |x: &Xf| segment_distance(x.t, x.transform_point(end), a, b) - reach;
                 let limit = f.angle.abs() * WRAP_LIMIT;
                 let sign = f.angle.signum();
                 let mut angle = 0.0;
-                if !touches(&posed(0.0)) {
+                if gap(&posed(0.0)) > 0.0 {
                     while angle < limit {
                         let next = (angle + WRAP_STEP).min(limit);
-                        if touches(&posed(next * sign)) {
+                        if gap(&posed(next * sign)) <= 0.0 {
                             break;
                         }
                         angle = next;
+                    }
+                } else {
+                    // Straight on from a segment that stopped on the handle, this one runs
+                    // into it: it opens back until it lies on it.
+                    while angle > -WRAP_OPEN && gap(&posed(angle * sign)) < 0.0 {
+                        angle -= WRAP_STEP;
                     }
                 }
                 angles[bone as usize] = angle * sign;
@@ -787,6 +826,9 @@ impl Retargeter {
     }
 }
 
+/// A hand's handle and finger trims, and the finger curls that close it round them.
+type Wrap = (crate::grip::Handle, [f32; 5], Vec<f32>);
+
 /// Drives this entity's [`SkinnedMeshRenderer`](crate::SkinnedMeshRenderer) mesh, which is
 /// rigged to `retargeter.target`, from its [`Animator`] (the logic skeleton).
 #[derive(Component, Debug, Clone)]
@@ -794,8 +836,9 @@ pub struct Retarget {
     pub retargeter: Arc<Retargeter>,
     /// The target skeleton's pose this frame (model space).
     pub model: Vec<Xf>,
-    /// What each hand closes round (in `retargeter`'s hand order) and the finger curls for it.
-    wraps: Vec<Option<(crate::grip::Handle, Vec<f32>)>>,
+    /// What each hand closes round (in `retargeter`'s hand order), with its finger trims, and
+    /// the finger curls for it.
+    wraps: Vec<Option<Wrap>>,
 }
 
 impl Retarget {
@@ -810,14 +853,25 @@ impl Retarget {
     /// Re-solve the finger wraps for what the hands hold now.
     fn hold(&mut self, held: Option<&crate::grip::HeldItems>) {
         for (h, fit) in self.retargeter.fits.iter().enumerate() {
-            let handle = fit.side.and_then(|side| held.and_then(|i| i.hands[side]));
-            let current = self.wraps[h].as_ref().map(|(handle, _)| *handle);
-            if handle == current {
+            let wanted = fit
+                .side
+                .and_then(|side| held.and_then(|i| Some((i.hands[side]?, i.trims[side]))));
+            let current = self.wraps[h]
+                .as_ref()
+                .map(|(handle, trims, _)| (*handle, *trims));
+            if wanted == current {
                 continue;
             }
-            self.wraps[h] = handle.and_then(|handle| {
+            self.wraps[h] = wanted.and_then(|(handle, trims)| {
                 let side = fit.side?;
-                Some((handle, self.retargeter.wrap(side, &handle)?))
+                let mut angles = self.retargeter.wrap(side, &handle)?;
+                // Each finger's trim curls all its segments further.
+                for (chain, trim) in fit.chains.iter().zip(trims) {
+                    for &bone in chain {
+                        angles[bone as usize] += trim.to_radians();
+                    }
+                }
+                Some((handle, trims, angles))
             });
         }
     }
@@ -857,7 +911,7 @@ pub(crate) fn retarget_poses(
             let wraps: Vec<Option<&[f32]>> = r
                 .wraps
                 .iter()
-                .map(|w| w.as_ref().map(|(_, a)| a.as_slice()))
+                .map(|w| w.as_ref().map(|(_, _, a)| a.as_slice()))
                 .collect();
             r.retargeter
                 .apply_holding(&animator.model, &closure, &wraps, &mut r.model);
