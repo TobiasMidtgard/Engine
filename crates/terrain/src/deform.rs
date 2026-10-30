@@ -202,7 +202,7 @@ impl DeformationMap {
         let s = (a + base) % n;
         let len = b - a;
         let first = (s, (s + len).min(n));
-        let second = (s + len > n).then_some((0, s + len - n));
+        let second = (s + len > n).then(|| (0, s + len - n));
         std::iter::once(first).chain(second).filter(|(a, b)| a < b)
     }
 
