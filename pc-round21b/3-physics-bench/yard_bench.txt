@@ -1,0 +1,37 @@
+﻿Step 3: cargo run --release -p engine_physics --example yard_bench -- 20 on main aac391d4, headless, nothing else running. Tobias's PC: 32 threads.
+
+== default
+     Running `target\release\examples\yard_bench.exe 20`
+yard_bench: 1200 frames in 5.3 s; physics step ms mean 4.08 median 3.14 p95 8.33 p99 10.88 max 47.59; frame ms p95 8.57 max 48.04
+yard_bench: at the end, load level 0
+yard_bench: busiest step: 1492 awake of 1492 bodies, 3 regions, 2919 touching pairs, 47.59 ms
+
+== wide8
+     Running `target\release\examples\yard_bench.exe 20`
+yard_bench: 1200 frames in 5.2 s; physics step ms mean 3.95 median 2.99 p95 8.19 p99 10.29 max 46.81; frame ms p95 8.46 max 47.17
+yard_bench: at the end, load level 0
+yard_bench: busiest step: 1492 awake of 1492 bodies, 3 regions, 2919 touching pairs, 46.81 ms
+
+== wide16
+     Running `target\release\examples\yard_bench.exe 20`
+yard_bench: 1200 frames in 5.3 s; physics step ms mean 4.03 median 3.00 p95 8.57 p99 11.44 max 48.18; frame ms p95 8.85 max 48.45
+yard_bench: at the end, load level 0
+yard_bench: busiest step: 1492 awake of 1492 bodies, 3 regions, 2919 touching pairs, 48.18 ms
+
+== wide24
+     Running `target\release\examples\yard_bench.exe 20`
+yard_bench: 1200 frames in 6.2 s; physics step ms mean 4.78 median 3.22 p95 11.17 p99 13.77 max 49.12; frame ms p95 11.51 max 49.56
+yard_bench: at the end, load level 0
+yard_bench: busiest step: 1492 awake of 1492 bodies, 3 regions, 2919 touching pairs, 49.12 ms
+
+== budget0
+     Running `target\release\examples\yard_bench.exe 20`
+yard_bench: 1200 frames in 7.5 s; physics step ms mean 5.84 median 4.28 p95 12.61 p99 15.82 max 46.63; frame ms p95 13.16 max 46.88
+yard_bench: at the end, load level 0
+yard_bench: busiest step: 1492 awake of 1492 bodies, 3 regions, 2919 touching pairs, 46.63 ms
+
+== default (=) exit 0 in 7 s
+== wide8 (PHYSICS_WIDE_THREADS=8) exit 0 in 6 s
+== wide16 (PHYSICS_WIDE_THREADS=16) exit 0 in 6 s
+== wide24 (PHYSICS_WIDE_THREADS=24) exit 0 in 7 s
+== budget0 (PHYSICS_BUDGET_MS=0) exit 0 in 8 s
