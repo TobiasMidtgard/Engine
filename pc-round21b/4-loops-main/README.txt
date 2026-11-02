@@ -20,8 +20,8 @@ High run took it in round 2.
 GI: showcase.exe --fly --profile --quality ultra, showcase.goto plaza, window 5-25 s after the jump, picture
 after the window; GI default vs ENGINE_PROBE_GI=off.
 
-plaza --fly, ENGINE_PROBE_GI default: fps 10,5, 1% low (0.5 s samples) 6,2, worst 142,1 ms, frame 95,2 ms, systems busy / one at a time 96.9 / 79.4 ms, render_system 48.21 (max 54.46), GPU 26.5 ms, GPU busy 28%, cores 1.08; top 5 ran alone: render::render_system 48.21, softbody::step_bodies 2.89, water::boat_air_system 2.40, smoke::step 2.36, movement::step_movers 2.25
-plaza --fly, ENGINE_PROBE_GI =off: fps 29,6, 1% low (0.5 s samples) 11,4, worst 80,2 ms, frame 33,8 ms, systems busy / one at a time 28.7 / 21.3 ms, render_system 7.75 (max 10.77), GPU 24.1 ms, GPU busy 74%, cores 1.08; top 5 ran alone: render::render_system 7.75, script::run_scripts 1.26, softbody::step_bodies 0.91, water::boat_air_system 0.75, smoke::step 0.71
+plaza --fly, ENGINE_PROBE_GI default: fps 10.5, 1% low (0.5 s samples) 6.2, worst 142.1 ms, frame 95.2 ms, systems busy / one at a time 96.9 / 79.4 ms, render_system 48.21 (max 54.46), GPU 26.5 ms, GPU busy 28%, cores 1.08; top 5 ran alone: render::render_system 48.21, softbody::step_bodies 2.89, water::boat_air_system 2.40, smoke::step 2.36, movement::step_movers 2.25
+plaza --fly, ENGINE_PROBE_GI =off: fps 29.6, 1% low (0.5 s samples) 11.4, worst 80.2 ms, frame 33.8 ms, systems busy / one at a time 28.7 / 21.3 ms, render_system 7.75 (max 10.77), GPU 24.1 ms, GPU busy 74%, cores 1.08; top 5 ran alone: render::render_system 7.75, script::run_scripts 1.26, softbody::step_bodies 0.91, water::boat_air_system 0.75, smoke::step 0.71
 
 === ULTRA (main aac391d4), round 1 (last 20 s of each 25 s dwell; * = first stop after the world built)
 stop | fps | 1% low (0.5 s samples) | worst frame ms (5 s profiles) | frame ms | systems busy / one at a time ms | render_system ms (max) | GPU ms | GPU busy % | cores busy | top 5 ran alone (ms/frame)
