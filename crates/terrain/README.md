@@ -173,7 +173,8 @@ everything else (streaming, LOD, colliders, ground queries, prints) follows the 
   and width (110-380 m, medium and large fields), cut into fields of pasture, green crops, grain,
   stubble, ploughed and harrowed earth, hay and some rapeseed (drier country more grain), with
   tramlines, grass margins or hedgerows, and tracks between regions. Only from 250-700 m away
-  (the ground underfoot is unchanged); from orbit it settles to the land's own color.
+  (the ground underfoot is unchanged); from orbit it settles to the land's own color. Off by
+  default (`TerrainPalette::farmland`): no farms stand on the ground yet, so landing found none.
 - **Footprints and tracks.** A deformation grid (4 cm cells, 82 m across) follows the
   focus and records every `GroundContact`: feet (heel, arch, toes), paws, hooves, wheels,
   tank tracks and bodies. Each surface responds differently: mud is plastic and pushes up a

@@ -38,6 +38,9 @@ pub struct TerrainPalette {
     /// 0..1 how built-up the habitable land is: towns and cities light the night side (seen
     /// from a few kilometers off up to orbit). 0 on uninhabited worlds.
     pub night_lights: f32,
+    /// 0..1 fields painted on open, settled lowland seen from the air. Off (0) until farms
+    /// stand on the ground too: from a plane they read as farmland, and landing finds none.
+    pub farmland: f32,
     /// Luminance of molten rock where it shows through the crust, cd/m² (lava worlds; 0 =
     /// none). Melt opens where the climate makes the ground hotter than about 1000 °C.
     pub lava_glow: f32,
@@ -76,6 +79,7 @@ impl TerrainPalette {
             vegetation: true,
             regolith: 0.0,
             night_lights: 1.0,
+            farmland: 0.0,
             lava_glow: 0.0,
             shore_mats: 0.0,
             snow_below_c: -2.0,
@@ -99,6 +103,7 @@ impl TerrainPalette {
             vegetation: false,
             regolith: 1.0,
             night_lights: 0.0,
+            farmland: 0.0,
             lava_glow: 0.0,
             shore_mats: 0.0,
             snow_below_c: -200.0,
@@ -122,6 +127,7 @@ impl TerrainPalette {
             vegetation: false,
             regolith: 0.3,
             night_lights: 0.0,
+            farmland: 0.0,
             lava_glow: 0.0,
             shore_mats: 0.0,
             snow_below_c: -95.0,

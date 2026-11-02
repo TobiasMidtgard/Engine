@@ -22,7 +22,7 @@ struct PlanetGpu {
     young: array<vec4<f32>, 12>,    // young ground: middle (planet-local direction) × youth, angular radius
     params4: vec4<f32>,             // night lights (0..1), lamp page handoff distance (m), lava glow (cd/m²), melt latitude (rad)
     far: vec4<f32>,                 // far look: map layer (−1 none), near tint; locked to its star (0/1); shore mats 0..1
-    far_mean: vec4<f32>,            // far look: mean linear albedo, unused
+    far_mean: vec4<f32>,            // far look: mean linear albedo (unused); farmland 0..1
 };
 
 // Must match `MapsGpu` in render.rs.
@@ -2187,7 +2187,7 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     // the eye the ground stays as it was (the foliage module's grass grows there). From high
     // up, once fields are only a few pixels across, they settle to their mean color, and from
     // orbit to the land's own (the far look's).
-    let field_k = (1.0 - smoothstep(250.0, 900.0, pixel)) * smoothstep(250.0, 700.0, dist)
+    let field_k = planet.far_mean.w * (1.0 - smoothstep(250.0, 900.0, pixel)) * smoothstep(250.0, 700.0, dist)
         * vegetation * (1.0 - paint_w) * (1.0 - tint.a);
     var farm = field_k * (1.0 - smoothstep(0.012, 0.035, slope))
         * smoothstep(3.0, 9.0, temp_c) * (1.0 - smoothstep(24.0, 30.0, temp_c))

@@ -370,6 +370,7 @@ impl PlanetTerrain {
                     bare_material: "dirt".into(),
                     lava_glow: 0.0,
                     shore_mats: 0.0,
+                    farmland: 0.0,
                 },
                 landmarks: LandmarkField::default(),
                 ..Self::earthlike(seed)

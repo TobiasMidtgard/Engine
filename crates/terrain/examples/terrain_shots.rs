@@ -1215,6 +1215,11 @@ fn build(view: &View, size: (u32, u32)) -> App {
     if std::env::var_os("NO_LIGHTS").is_some() || view.town {
         planet.palette.night_lights = 0.0;
     }
+    // The farmland views show the fields painted from the air (off by default: no farms
+    // stand on the ground yet).
+    if view.name.starts_with("farmland") {
+        planet.palette.farmland = 1.0;
+    }
     // `NO_ROCKS=1`: bare ground without stones and boulders, for a before picture.
     if std::env::var_os("NO_ROCKS").is_some() {
         planet.rocks.per_100m2 = 0.0;
