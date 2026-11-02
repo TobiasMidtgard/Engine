@@ -266,7 +266,9 @@ fn vogel_disk(i: i32, n: i32, angle: f32) -> vec2<f32> {
 // far shadow map (big casters only, out to `far_shadow_distance`; `far_shadow_visibility`).
 fn shadow_factor(rel: vec3<f32>, n: vec3<f32>) -> f32 {
     if (frame.sun_color.w < 0.5) { return 1.0; }
-    let depth = view_depth(rel);
+    // Cascades are squares centred on the camera (they don't turn with it), so a cascade holds
+    // every point nearer than its split: pick by distance, not view depth.
+    let depth = length(rel);
     let noise = frame_noise(pixel_of(rel));
     let reach = frame.shadow_splits[3];
     let near = saturate((reach - depth) / (reach * 0.1));
@@ -276,7 +278,7 @@ fn shadow_factor(rel: vec3<f32>, n: vec3<f32>) -> f32 {
     return mix(far_shadow_visibility(rel, n, noise), s, near);
 }
 
-// Sun visibility from the shadow cascades at view depth `depth` (within their reach).
+// Sun visibility from the shadow cascades at camera distance `depth` (within their reach).
 //
 // Percentage-closer soft shadows: a blocker search estimates how far the caster is from the
 // receiver, and the filter grows with that distance times the sun's angular size

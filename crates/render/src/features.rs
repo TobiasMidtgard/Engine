@@ -566,7 +566,8 @@ pub trait RenderFeature: Send + Sync + 'static {
     /// Draw depth into shadow cascade `cascade` (cull with `ctx.view.cascades`), or into the
     /// sky occlusion map when `cascade == SKY_OCCLUSION_VIEW` (cull with
     /// `ctx.view.sky_occlusion.contains_sphere`). Anything that roofs over the ground (rock,
-    /// buildings, canopies) should draw into both.
+    /// buildings, canopies) should draw into both. Called every frame, on top of the map's
+    /// static image (see [`RenderFeature::draw_shadow_static`]): what moves goes here.
     fn draw_shadow(&self, pass: &mut wgpu::RenderPass<'_>, cascade: usize, ctx: &FrameContext) {}
 
     /// Draw depth into the far shadow map: one coarse map (texels of several meters) around the
@@ -574,8 +575,26 @@ pub trait RenderFeature: Send + Sync + 'static {
     /// `RenderSettings::far_shadow_distance`. Draw only what is big enough to show at that
     /// resolution, culled with `ctx.view.far_shadow.casts(center, radius)`: terrain, mountains,
     /// cliffs, large buildings. Same pipeline and group 0 layout as `draw_shadow`. Features that
-    /// don't implement it simply cast no shadows past the cascades.
+    /// don't implement it simply cast no shadows past the cascades. Called every frame, like
+    /// `draw_shadow`.
     fn draw_far_shadow(&self, pass: &mut wgpu::RenderPass<'_>, ctx: &FrameContext) {}
+
+    /// Draw the casters that hold still into shadow map `map`'s static image: a cascade
+    /// (`0..MAX_CASCADES`, cull with `ctx.view.cascades.sphere_in_square`: the whole square,
+    /// whatever the camera looks at), the sky occlusion map (`SKY_OCCLUSION_VIEW`) or the far
+    /// map (`FAR_SHADOW_MAP`). Called only on frames the image is drawn again
+    /// (`static_redraw` on the map's view); the other frames the image is copied and
+    /// `draw_shadow`/`draw_far_shadow` draw on top. So terrain, buildings and still props cost
+    /// nothing most frames. A caster that starts moving must leave the image: say so with
+    /// [`RenderFeature::shadow_static_changed`].
+    fn draw_shadow_static(&self, pass: &mut wgpu::RenderPass<'_>, map: usize, ctx: &FrameContext) {}
+
+    /// Whether what this feature draws into `map`'s static image changed (a caster added,
+    /// removed, moved or turned still), so the image must be drawn again. Asked after
+    /// `prepare_frame`; the image is drawn again the next frame.
+    fn shadow_static_changed(&self, map: usize) -> bool {
+        false
+    }
 
     /// Draw the depth prepass: opaque geometry with depth writes, returning `PrepassOutput`
     /// (world normal, roughness, motion) into [`GpuShared::prepass_targets`]. Use the same

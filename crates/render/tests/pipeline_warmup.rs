@@ -101,14 +101,20 @@ fn materials_first_seen_later_draw_alike_without_a_compile() {
             Transform::from_xyz(0.0, 0.6, -1.0),
             MeshRenderer::new(mesh, StandardMaterial::preset(MaterialPreset::Marble)),
         ));
-        app.update();
-        let ms = metric(&app, "render.cpu.meshes: pipelines");
+        // A material first met by the camera's cull (on the render thread) gets its slot in
+        // the next frame's extract, so the new ones are drawn from the second frame on: take
+        // the longest compile of the two.
+        let mut ms: f64 = 0.0;
+        for _ in 0..2 {
+            app.update();
+            ms = ms.max(metric(&app, "render.cpu.meshes: pipelines"));
+        }
         // Generating the preset's textures takes long under lavapipe either way; what the
         // warm-up saves is compiling its pipelines (150 ms there).
         presets_compiled.push(metric(&app, "render.materials.pipelines_built_inline"));
-        eprintln!("{warmup:?}: first frame with the new material compiled for {ms:.1} ms");
+        eprintln!("{warmup:?}: first frames with the new material compiled for {ms:.1} ms");
         compile_ms.push(ms);
-        for _ in 0..3 {
+        for _ in 0..2 {
             app.update();
         }
         let path = dir.join(format!("{warmup:?}.png"));

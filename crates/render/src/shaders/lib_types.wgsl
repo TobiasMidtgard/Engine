@@ -33,7 +33,7 @@ struct Frame {
     atmosphere: vec4<f32>,         // atmosphere thickness (m), rayleigh scale height, mie scale height, mie g
     exposure: vec4<f32>,           // pre-exposure multiplier, ev100, near plane, 1 if orthographic
     shadow_cascades: array<mat4x4<f32>, 4>,  // camera-relative -> light clip space
-    shadow_splits: vec4<f32>,      // far view distance of each cascade
+    shadow_splits: vec4<f32>,      // far camera distance of each cascade
     shadow_params: vec4<f32>,      // depth bias, normal bias (texels), pcf radius (texels), map size
     counts: vec4<u32>,             // point light count, cascade count, debug view, sky volume count
     ground: vec4<f32>,             // planet surface albedo RGB (beyond the terrain), w = ground-bounce weight (fades with altitude)

@@ -1,7 +1,8 @@
-//! Far shadow cascades keep their image for a few frames (`RenderSettings::shadow_cascade_reuse`):
-//! a camera walking through a field of pillars and a dense boulder sees the same shadows as with
-//! every cascade redrawn each frame, while drawing less. Needs a GPU or lavapipe; passes with a
-//! note when neither is available.
+//! Shadow maps keep a static image of their still casters (`RenderSettings::shadow_cascade_reuse`)
+//! and draw only the moving ones on top each frame: a camera walking through a field of pillars
+//! and a dense boulder, past a moving crate, sees the same shadows as with every caster drawn each
+//! frame, while drawing less. Needs a GPU or lavapipe; passes with a note when neither is
+//! available.
 
 use engine_assets::Assets;
 use engine_core::prelude::*;
@@ -13,8 +14,8 @@ const W: u32 = 320;
 const H: u32 = 180;
 const FRAMES: u32 = 12;
 
-/// Walk the camera for a few frames with cascades reused up to `reuse` frames: the draw calls
-/// over the walk and the last frame's pixels.
+/// Walk the camera for a few frames, with static shadow images (`reuse` > 0) or without: the
+/// draw calls over the walk and the last frame's pixels.
 fn walk(reuse: u32, shot: &str) -> Option<(u32, Vec<u8>)> {
     engine_core::log::init("error");
     let mut app = App::new();
@@ -77,17 +78,33 @@ fn walk(reuse: u32, shot: &str) -> Option<(u32, Vec<u8>)> {
         Transform::from_xyz(-10.0, 1.0, -120.0),
         MeshRenderer::new(boulder, StandardMaterial::color(0.4, 0.38, 0.35)),
     ));
-    // Settle: the boulder's clusters are built in the background.
+    // A crate sliding across the view: its shadow must be right every frame.
+    let crate_ = w
+        .spawn((
+            Transform::from_xyz(-3.0, 0.5, -9.0),
+            MeshRenderer::new(
+                Shape::Cuboid {
+                    size: [1.0, 1.0, 1.0],
+                },
+                StandardMaterial::color(0.5, 0.3, 0.2),
+            ),
+        ))
+        .id();
+    // Settle: the boulder's clusters are built in the background, and the still casters join
+    // the static images once they have been still for a while (well under 200 frames).
     let start = std::time::Instant::now();
-    while start.elapsed().as_secs() < 60 {
+    let mut frames = 0;
+    while start.elapsed().as_secs() < 120 {
         app.update();
+        frames += 1;
         if app.world.get_resource::<RenderDisabled>().is_some() {
             break;
         }
-        if app
-            .world
-            .get_resource::<RenderStats>()
-            .is_some_and(|s| s.clusters > 0)
+        if frames >= 200
+            && app
+                .world
+                .get_resource::<RenderStats>()
+                .is_some_and(|s| s.clusters > 0)
         {
             break;
         }
@@ -103,6 +120,11 @@ fn walk(reuse: u32, shot: &str) -> Option<(u32, Vec<u8>)> {
             .expect("camera")
             .translation
             .z -= 0.03;
+        app.world
+            .get_mut::<Transform>(crate_)
+            .expect("crate")
+            .translation
+            .x += 0.25;
         app.update();
         draws += app.world.resource::<RenderStats>().draw_calls;
     }
@@ -118,14 +140,16 @@ fn walk(reuse: u32, shot: &str) -> Option<(u32, Vec<u8>)> {
 }
 
 #[test]
-fn reused_far_cascades_cast_the_same_shadows_with_fewer_draws() {
-    let Some((every, before)) = walk(0, "cascades_every_frame.png") else {
+fn static_shadow_images_cast_the_same_shadows_with_fewer_draws() {
+    let Some((every, before)) = walk(0, "shadows_every_frame.png") else {
         return;
     };
-    let Some((reused, after)) = walk(3, "cascades_reused.png") else {
+    let Some((reused, after)) = walk(3, "shadows_static_images.png") else {
         return;
     };
-    eprintln!("draw calls over the walk: {every} redrawing every frame, {reused} reusing");
+    eprintln!(
+        "draw calls over the walk: {every} drawing every caster, {reused} with static images"
+    );
     assert!(reused < every, "{reused} draws reusing, {every} without");
     let diff = before
         .iter()

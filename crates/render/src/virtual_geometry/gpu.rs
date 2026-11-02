@@ -1217,13 +1217,12 @@ impl ClusterRenderer {
         // Shadow views that are on.
         let mut shadow_views = [false; VIEWS - 1];
         if view.sun_shadows {
-            // Cascades keeping last frame's image (shadows::CascadeCache) cull nothing.
-            for (v, drawn) in shadow_views
+            // Every cascade is drawn every frame (clusters with the moving casters).
+            for v in shadow_views
                 .iter_mut()
-                .zip(view.cascades.drawn)
                 .take((view.cascades.count as usize).min(MAX_CASCADES))
             {
-                *v = drawn;
+                *v = true;
             }
         }
         shadow_views[SKY_OCCLUSION_VIEW] = view.sky_occlusion.enabled;

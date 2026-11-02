@@ -359,6 +359,8 @@ pub struct ExposureState {
     /// EV100 measured from a recent frame's luminance histogram (GPU metering). `None` until the
     /// first reading arrives; the scene-luminance estimate is used meanwhile.
     pub measured_ev100: Option<f32>,
+    /// The same reading's highlights (`exposure::highlights_ev100_from_histogram`).
+    pub measured_highlights_ev100: Option<f32>,
     /// Set on a camera cut: hold the exposure until the meter has measured the new view, then
     /// jump straight to it instead of adapting from the old view's exposure.
     pub snap: bool,
@@ -370,6 +372,7 @@ impl Default for ExposureState {
             ev100: 14.0,
             initialized: false,
             measured_ev100: None,
+            measured_highlights_ev100: None,
             snap: false,
         }
     }
@@ -656,8 +659,17 @@ pub fn build_view(
                 .log2();
             let facing_sun = smoothstep(0.3, 0.8, (rotation * Vec3::NEG_Z).dot(sun_dir));
             let grade = exposure_grade(&settings, metered, incident, sun_dir.y, facing_sun);
-            let target = (metered + grade - compensation - crate::exposure::METER_BIAS_EV)
-                .clamp(min_ev100, max_ev100);
+            let target = metered + grade - compensation - crate::exposure::METER_BIAS_EV;
+            // Highlights kept from blowing out: a bright part of the view (a lamplit white
+            // wall in a dim courtyard) darkens the exposure until it shows at about twice
+            // white, as a camera's highlight-weighted metering does.
+            let target = match exposure_state.measured_highlights_ev100 {
+                Some(high) => {
+                    target.max(high - compensation - crate::exposure::HIGHLIGHT_HEADROOM_EV)
+                }
+                None => target,
+            }
+            .clamp(min_ev100, max_ev100);
             if !exposure_state.initialized || exposure_state.snap {
                 exposure_state.ev100 = target;
                 exposure_state.snap = false;

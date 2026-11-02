@@ -195,14 +195,18 @@ pub struct RenderSettings {
     pub far_shadow_distance: f32,
     /// 0 = uniform cascade splits, 1 = logarithmic.
     pub shadow_split_lambda: f32,
-    /// Most frames a far shadow cascade may keep its last image instead of being redrawn: the
-    /// third cascade redraws every second frame and the fourth every fourth, staggered, never
-    /// older than this. A cascade redraws early when the camera has drifted out of its margin,
-    /// the sun has moved or the camera cut. Far shadows of moving objects lag by up to this many
-    /// frames. 0 redraws every cascade every frame.
+    /// Shadow maps keep a static image of what holds still (`shadows::ShadowCache`), drawn
+    /// again only when a map moves past its margin, the sun turns or what is in it changes;
+    /// each frame it is copied and the moving casters are drawn on top, so every map is current
+    /// every frame. 0 draws every caster into every map every frame (for comparisons); any
+    /// other value keeps the static images.
     pub shadow_cascade_reuse: u32,
     /// Record and submit on a render thread (see [`Pipelining`]).
     pub pipelining: Pipelining,
+    /// Split each frame's commands into a few encoders and finish (encode) all but the last on
+    /// worker threads while the rest is recorded (`finish::Finisher`); off: one encoder,
+    /// finished on the render thread.
+    pub parallel_encoding: bool,
     pub shadow_depth_bias: f32,
     /// Normal offset in shadow texels.
     pub shadow_normal_bias: f32,
@@ -298,6 +302,10 @@ pub struct RenderSettings {
     /// brighter than the exposure (a neon ring at night, the sun) glow without swamping the
     /// frame, while everything up to half of it blooms as before. 0 = no limit.
     pub bloom_limit: f32,
+    /// The sun's glare: light scattered around the sun by the eye or a lens, so it reads as
+    /// the sun and not a white dot (`sun_glare` in post.wgsl). Fades as trees, clouds or mist
+    /// cover the disc. 1 is the eye's full glare, 0 none.
+    pub sun_glare: f32,
     pub saturation: f32,
     pub contrast: f32,
     pub vignette: f32,
@@ -461,6 +469,7 @@ impl Default for RenderSettings {
             shadow_split_lambda: 0.8,
             shadow_cascade_reuse: 3,
             pipelining: Pipelining::Windowed,
+            parallel_encoding: true,
             shadow_depth_bias: 0.0,
             shadow_normal_bias: 1.5,
             shadow_softness: 1.0,
@@ -493,6 +502,7 @@ impl Default for RenderSettings {
             tonemapper: Tonemapper::AgXPunchy,
             bloom_intensity: 0.04,
             bloom_limit: 64.0,
+            sun_glare: 0.04,
             saturation: 1.05,
             contrast: 1.0,
             vignette: 0.2,

@@ -114,7 +114,8 @@ fn lit_point(c: vec3<f32>, rel: vec3<f32>) -> vec3<f32> {
 // moves inside its froxel every frame, which softens the edges of the shafts over time.
 fn volume_shadow(rel: vec3<f32>) -> f32 {
     if (frame.sun_color.w < 0.5) { return 1.0; }
-    let depth = view_depth(rel);
+    // Cascades are camera-centred squares: pick by distance (`shadow_factor`).
+    let depth = length(rel);
     if (depth > frame.shadow_splits[3]) { return 1.0; }
     var cascade = 0u;
     for (var i = 0u; i < 3u; i++) {

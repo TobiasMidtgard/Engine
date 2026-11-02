@@ -62,9 +62,9 @@ use crate::material::{
 use crate::material_library::{MaterialPreset, MaterialTextures};
 use crate::mesh::{Mesh, Vertex};
 use crate::mesh_pool::{MeshPool, PoolMesh};
-use crate::mesh_scene::{self, Cold, Hot, MeshScene};
+use crate::mesh_scene::{self, Cold, Hot, LOD_UNSET, MeshScene, SlotChange};
 use crate::settings::{RenderSettings, TextureCompression};
-use crate::shadows::{MAX_CASCADES, SKY_OCCLUSION_VIEW};
+use crate::shadows::{FAR_SHADOW_MAP, MAX_CASCADES, SHADOW_MAPS, SKY_OCCLUSION_VIEW};
 use crate::texture::Image;
 use crate::virtual_geometry::{
     BuildCache, BuildJob, ClusterInstance, ClusterRenderer, DisplacedJob, Displacement,
@@ -191,6 +191,8 @@ struct GpuMesh {
     height: f32,
     /// Last frame the instanced path drew it.
     last_used: u64,
+    /// The frame it was uploaded (static shadow images hold it from `STILL_FRAMES` later).
+    uploaded: u64,
     /// Coarser levels of detail, finest first (empty until built, or for small meshes).
     lods: Vec<GpuLod>,
 }
@@ -355,6 +357,10 @@ struct Item {
     page: u16,
     /// Level of detail in the camera's view.
     lod: u8,
+    /// While it cross-fades between levels (`LOD_FADE_FRAMES`): the level fading out, and the
+    /// share of the pixels the new level `lod` already shows (0..1; 0: no fade).
+    lod_from: u8,
+    lod_fade: f32,
     /// Largest scale of the instance (level errors are in mesh space).
     scale: f32,
     /// Always its full mesh (`NoMeshLod`).
@@ -382,6 +388,11 @@ struct Item {
     fade: f32,
     /// `DitherFade` (0 without one).
     dither: f32,
+    /// The frame from which static shadow images may hold it: `STILL_FRAMES` after its slot
+    /// last changed or its mesh was uploaded (`u64::MAX`: never, skinned or dithering).
+    since: u64,
+    /// Its material sways in the wind: the near cascades draw it every frame.
+    sways: bool,
 }
 
 /// What the gather needs of a mesh, looked up once a frame for the meshes the scene uses (by
@@ -412,6 +423,10 @@ struct MeshFrame {
     coarsest: u32,
     /// Can be drawn as an impostor (enough triangles, levels built).
     impostor: bool,
+    /// Skinned on the GPU (`GpuSkin`): never in static shadow images.
+    skinned: bool,
+    /// The frame its upload was made (`GpuMesh::uploaded`).
+    uploaded: u64,
     /// Whether its clusters are ready, once asked this frame (undisplaced instances).
     clusters: Option<bool>,
 }
@@ -430,6 +445,8 @@ impl MeshFrame {
             coarsest,
             // A skinned mesh's pose changes: no bake can show it.
             impostor: coarsest >= crate::impostor::MIN_TRIANGLES && !building_levels && !skinned,
+            skinned,
+            uploaded: gpu_mesh.uploaded,
             ..*self
         };
     }
@@ -447,6 +464,8 @@ struct MaterialFrame {
     glows: bool,
     /// Opaque and without wind sway: may take the cluster path.
     still_opaque: bool,
+    /// Sways in the wind: drawn every frame into the near cascades' shadows.
+    sways: bool,
     /// Its material slot and texture set this frame, once something drawn uses it.
     slot: Option<(u32, u32)>,
     /// Which impostors show it: the handle index, the material's GPU values and its images'
@@ -465,6 +484,37 @@ struct GatherChunk {
     culled: u32,
     /// Bits by mesh handle index: meshes drawn on the instanced path.
     instanced: Vec<u64>,
+}
+
+/// One shadow map's casters for a list: instances (`items` indices), their batch keys, and
+/// those drawn as impostors.
+#[derive(Default)]
+struct CasterList {
+    picked: Vec<u32>,
+    keys: Vec<BatchKey>,
+    impostors: Vec<u32>,
+}
+
+/// One shadow map's casters: moving (drawn every frame) and still (its static image, on the
+/// frames it is drawn again), and the still casters waiting to join the image.
+#[derive(Default)]
+struct MapCasters {
+    moving: CasterList,
+    still: CasterList,
+    waiting: u32,
+    oldest: u64,
+}
+
+impl MapCasters {
+    fn clear(&mut self) {
+        for list in [&mut self.moving, &mut self.still] {
+            list.picked.clear();
+            list.keys.clear();
+            list.impostors.clear();
+        }
+        self.waiting = 0;
+        self.oldest = u64::MAX;
+    }
 }
 
 fn set_bit(bits: &mut Vec<u64>, index: u32) {
@@ -502,6 +552,42 @@ fn run_jobs<'env, F: FnOnce() + Send + 'env>(jobs: impl Iterator<Item = F>) {
     }
 }
 
+/// Whether a caster with this camera-relative bounding sphere belongs in shadow map `map`'s
+/// static image: anywhere in its square (or box), whatever the camera looks at.
+fn map_holds(view: &ViewData, map: usize, center: Vec3, radius: f32) -> bool {
+    match map {
+        SKY_OCCLUSION_VIEW => {
+            view.sky_occlusion.enabled && view.sky_occlusion.contains_sphere(center, radius)
+        }
+        FAR_SHADOW_MAP => {
+            view.sun_shadows && view.far_shadow.enabled && view.far_shadow.casts(center, radius)
+        }
+        c => {
+            view.sun_shadows
+                && c < (view.cascades.count as usize).min(MAX_CASCADES)
+                && view.cascades.sphere_in_square(c, center, radius)
+        }
+    }
+}
+
+/// Whether a caster with this camera-relative bounding sphere can cast into what map `map`
+/// shades of this frame's view (the moving casters' cull).
+fn map_shades(view: &ViewData, map: usize, center: Vec3, radius: f32) -> bool {
+    match map {
+        SKY_OCCLUSION_VIEW | FAR_SHADOW_MAP => map_holds(view, map, center, radius),
+        c => view.cascades.sphere_in_cascade(c, center, radius),
+    }
+}
+
+/// Whether shadow map `map`'s static image is drawn again this frame.
+fn static_redraw(view: &ViewData, map: usize) -> bool {
+    match map {
+        SKY_OCCLUSION_VIEW => view.sky_occlusion.static_redraw,
+        FAR_SHADOW_MAP => view.far_shadow.static_redraw,
+        c => view.cascades.static_redraw[c],
+    }
+}
+
 /// Whether a slot may take the cluster path (virtual geometry). Not while it dithers out
 /// (`DitherFade`): the instanced path draws the dither.
 fn cluster_candidate(hot: &Hot, mesh: &MeshFrame, mat: &MaterialFrame) -> bool {
@@ -522,6 +608,11 @@ struct CullParams<'a> {
     min_pixels: f32,
     impostor_pixels: f32,
     shadows: bool,
+    /// The camera's own view (not an extra one), its history kept: levels keep their
+    /// hysteresis state and cross-fade.
+    lod_fades: bool,
+    /// This frame (low 32 bits).
+    frame: u32,
 }
 
 struct Cull<'a> {
@@ -531,6 +622,13 @@ struct Cull<'a> {
 }
 
 impl Cull<'_> {
+    /// Out of the camera's view: it comes back at its level without a fade.
+    fn unseen(&self, hot: &mut Hot) {
+        if self.p.lod_fades {
+            hot.lod = LOD_UNSET;
+        }
+    }
+
     /// An instance on the instanced path: left out (`None`) or an item to draw. Its world
     /// bounds are recomputed first when its transform or mesh changed.
     fn item(
@@ -545,11 +643,14 @@ impl Cull<'_> {
             hot.center = cold.transform.transform_point(mesh.center.as_dvec3());
             hot.radius = mesh.radius * hot.scale;
             hot.mesh_version = mesh.version;
+            // Its levels may have changed.
+            hot.lod = LOD_UNSET;
         }
         let center = (hot.center - self.p.view.origin).as_vec3();
         let radius = hot.radius;
         let distance = center.length();
         if distance - radius > hot.max_distance || hot.dither.abs() >= 1.0 {
+            self.unseen(hot);
             return None;
         }
         // Too small to cover a pixel: left out of the view (it may still cast a shadow).
@@ -571,14 +672,53 @@ impl Cull<'_> {
         let casts =
             self.p.shadows && hot.flags & mesh_scene::CASTS != 0 && !mat.blend && dither_casts;
         if !visible && !casts {
+            self.unseen(hot);
             return None;
         }
         let full_detail = hot.flags & mesh_scene::FULL_DETAIL != 0;
         let lod = match (meters_per_pixel, self.meshes.get(&mesh.index)) {
             (Some(m), Some(g)) if self.p.lod_pixels > 0.0 && !full_detail => {
-                crate::mesh_lod::pick(g.errors(), hot.scale, self.p.lod_pixels * m)
+                let tolerance = self.p.lod_pixels * m;
+                if self.p.lod_fades && hot.lod != LOD_UNSET {
+                    // Hysteresis: keep the level while it is within a band around the
+                    // threshold, so a mesh standing at one doesn't flip back and forth.
+                    let finest = crate::mesh_lod::pick(g.errors(), hot.scale, tolerance / LOD_BAND);
+                    let coarsest =
+                        crate::mesh_lod::pick(g.errors(), hot.scale, tolerance * LOD_BAND);
+                    hot.lod.clamp(finest, coarsest)
+                } else {
+                    crate::mesh_lod::pick(g.errors(), hot.scale, tolerance)
+                }
             }
             _ => 0,
+        };
+        // A new level cross-fades in over the old one (both drawn, complementary dither), as
+        // Unreal's dithered LOD transitions and Unity's LOD cross-fade do.
+        let (lod_from, lod_fade) = if !visible {
+            self.unseen(hot);
+            (lod, 0.0)
+        } else if self.p.lod_fades {
+            if hot.lod != lod {
+                if hot.lod != LOD_UNSET && hot.dither == 0.0 {
+                    hot.lod_from = hot.lod;
+                    hot.lod_frame = self.p.frame;
+                } else {
+                    hot.lod_from = lod;
+                }
+                hot.lod = lod;
+            }
+            let age = self.p.frame.wrapping_sub(hot.lod_frame);
+            if hot.lod_from != lod && age < LOD_FADE_FRAMES && hot.dither == 0.0 {
+                (
+                    hot.lod_from,
+                    ((age + 1) as f32 / (LOD_FADE_FRAMES + 1) as f32),
+                )
+            } else {
+                hot.lod_from = lod;
+                (lod, 0.0)
+            }
+        } else {
+            (lod, 0.0)
         };
         // Far away, meshes whose levels of detail can't get cheap are drawn as impostors,
         // baked the first time one is that small. The bake keeps no emission, so glowing
@@ -620,11 +760,19 @@ impl Cull<'_> {
             } else {
                 0
             };
+        // Impostors fade on their own; a level fade gives way to theirs.
+        let (lod_from, lod_fade) = if lod == IMPOSTOR_LOD || fade > 0.0 {
+            (lod, 0.0)
+        } else {
+            (lod_from, lod_fade)
+        };
         Some(Item {
             slot,
             mesh: mesh.index,
             page: mesh.page,
             lod,
+            lod_from,
+            lod_fade,
             scale: hot.scale,
             full_detail,
             impostor,
@@ -643,6 +791,12 @@ impl Cull<'_> {
             impostor_size,
             fade,
             dither: hot.dither,
+            since: if mesh.skinned || hot.dither != 0.0 {
+                u64::MAX
+            } else {
+                cold.changed.max(mesh.uploaded) + STILL_FRAMES
+            },
+            sways: mat.sways,
         })
     }
 }
@@ -867,7 +1021,7 @@ pub struct MeshFeature {
     /// Meshes waiting for a free worker to build their levels.
     lod_waiting: Vec<(u32, Handle<Mesh>)>,
     /// Each shadow map's casters and batch keys, kept between frames for their allocations.
-    shadow_scratch: Vec<(Vec<u32>, Vec<BatchKey>, Vec<u32>)>,
+    shadow_scratch: Vec<MapCasters>,
     /// Depth-only shadow pipeline (opaque casters).
     shadow_pipeline: Option<wgpu::RenderPipeline>,
     /// Alpha-tested shadow pipeline (masked casters).
@@ -894,10 +1048,23 @@ pub struct MeshFeature {
     frame: u64,
     opaque: Vec<Batch>,
     transparent: Vec<Batch>,
-    /// Per shadow cascade, then the sky occlusion map (index `SKY_OCCLUSION_VIEW`).
-    shadow: [Vec<Batch>; MAX_CASCADES + 1],
-    /// Big casters in the far shadow map.
-    far_shadow: Vec<Batch>,
+    /// The moving casters drawn into each shadow map every frame (`draw_shadow`): the
+    /// cascades, the sky occlusion map (`SKY_OCCLUSION_VIEW`), the far map (`FAR_SHADOW_MAP`).
+    shadow: [Vec<Batch>; SHADOW_MAPS],
+    /// The still casters drawn into each map's static image, on the frames it is drawn again
+    /// (`draw_shadow_static`).
+    shadow_static: [Vec<Batch>; SHADOW_MAPS],
+    /// Per map: the frame its static image was last drawn (it holds the casters still since
+    /// then: `Item::since`), whether a caster in it changed so it must be drawn again, and
+    /// whether still casters wait to join it.
+    image_frame: [u64; SHADOW_MAPS],
+    static_dirty: [bool; SHADOW_MAPS],
+    static_waiting: [bool; SHADOW_MAPS],
+    /// Triangles in each map's static image when it was last drawn (for the report).
+    static_triangles: [u64; SHADOW_MAPS],
+    /// Slots changed or dropped since the main view last checked them against the static
+    /// images (from every view's sync).
+    shadow_changes: Vec<SlotChange>,
     items: Vec<Item>,
     /// This frame's draw order: a sort key and an index into `items`.
     order: Vec<(u64, u32)>,
@@ -926,6 +1093,12 @@ pub struct MeshFeature {
     instanced_meshes: Vec<u64>,
     /// Per-thread results of the parallel cull.
     gather_scratch: Vec<GatherChunk>,
+    /// `prepare` left the cull to `prepare_frame` (on the render thread when pipelined).
+    cull_later: bool,
+    /// Bits by slot: drawn (or culled) on the cluster path this frame, left out of the cull.
+    cluster_slots: Vec<u64>,
+    /// By material handle index: the frame its items were last drawn (`MATERIAL_KEEP_FRAMES`).
+    material_seen: Vec<u64>,
     /// Streamed virtual textures.
     vt: Option<VirtualTextureSystem>,
     /// Generated preset height maps read back for displacement, by preset and size.
@@ -942,8 +1115,12 @@ pub struct MeshFeature {
     impostor_view: (u32, u32),
     /// How many of them are cross-fading from their meshes (drawn both ways).
     impostors_fading: u32,
-    /// Their ranges per shadow map: the cascades, the sky occlusion map, the far shadow map.
-    impostor_shadow: [(u32, u32); FAR_SHADOW_MAP + 1],
+    /// Meshes cross-fading between levels of detail this frame (drawn at both).
+    lods_fading: u32,
+    /// Their ranges per shadow map: the cascades, the sky occlusion map, the far shadow map;
+    /// moving and in the static images.
+    impostor_shadow: [(u32, u32); SHADOW_MAPS],
+    impostor_shadow_static: [(u32, u32); SHADOW_MAPS],
     stats: FeatureStats,
     /// When the profiler's mesh report was last logged (`--profile`).
     last_report: Option<std::time::Instant>,
@@ -958,11 +1135,29 @@ const PIPELINE_VARIANTS: u8 = 8;
 const SHADOW_DEPTH: u8 = 0;
 const SHADOW_MASKED: u8 = 1;
 /// The far shadow map, after the cascades and the sky occlusion map in the shadow loop.
-const FAR_SHADOW_MAP: usize = SKY_OCCLUSION_VIEW + 1;
+/// Frames a caster stays unchanged (unmoved, its mesh uploaded) before static shadow images
+/// may hold it (`RenderFeature::draw_shadow_static`); until then it is drawn every frame.
+pub(crate) const STILL_FRAMES: u64 = 90;
+/// Still casters waiting to join a map's static image (drawn every frame meanwhile): the image
+/// is drawn again once this many wait, or one has waited `JOIN_FRAMES`.
+const JOIN_COUNT: u32 = 64;
+const JOIN_FRAMES: u64 = 60;
+/// Radius (far map texels) from which a caster that isn't still is drawn into the far map every
+/// frame; smaller ones (down to `FarShadowView::min_caster_radius`) cast from its static image.
+const FAR_MOVING_CASTER_TEXELS: f32 = 2.0;
 /// Mesh level-of-detail builds running at once.
 const MAX_LOD_JOBS: usize = 2;
 /// `MeshFeature::layout`: drawn as its impostor.
 const AS_IMPOSTOR: u32 = 1 << 31;
+/// In `layout`: the item's previous level, drawn while the new one cross-fades in.
+const AS_OLD_LEVEL: u32 = 1 << 30;
+/// An item index in `layout`, without the flags above.
+const ITEM: u32 = AS_OLD_LEVEL - 1;
+/// Frames a mesh takes to cross-fade from one level of detail to the next (0.4 s at 60 fps).
+const LOD_FADE_FRAMES: u32 = 24;
+/// The hysteresis band of level picks: a level is kept until the tolerance it was picked
+/// for is this factor off.
+const LOD_BAND: f32 = 1.1;
 /// `Item::lod` of an instance drawn as its impostor.
 const IMPOSTOR_LOD: u8 = u8::MAX;
 /// Meshes cross-fade into their impostors (dithered, smoothed by temporal anti-aliasing) while
@@ -973,6 +1168,18 @@ const IMPOSTOR_FADE: f32 = 0.7;
 const PARALLEL_CASTERS: usize = 2000;
 /// Slots (and instances) from which the gather's loops run on the worker threads.
 const PARALLEL_GATHER: usize = 4096;
+/// Frames a material keeps its slot after it was last drawn, so the render thread's cull
+/// finds it (`MeshFeature::finish_items`).
+const MATERIAL_KEEP_FRAMES: u64 = 2;
+
+/// Threads for a pass over `slots` scene slots.
+fn gather_threads(slots: usize) -> usize {
+    if slots >= PARALLEL_GATHER {
+        std::thread::available_parallelism().map_or(1, |n| n.get().min(8))
+    } else {
+        1
+    }
+}
 /// Seconds between the profiler's mesh reports.
 const PROFILE_REPORT_SECS: f32 = 10.0;
 
@@ -993,7 +1200,7 @@ impl MeshFeature {
         let masked = self
             .shadow
             .iter()
-            .chain(std::iter::once(&self.far_shadow))
+            .chain(self.shadow_static.iter())
             .flatten()
             .any(|b| b.key.pipeline == SHADOW_MASKED);
         if warm && self.warmup.is_none() {
@@ -1141,6 +1348,8 @@ impl MeshFeature {
     fn upload_mesh(&mut self, gpu: &GpuShared, index: u32, mesh: &Mesh, version: u64) {
         if let Some(old) = self.meshes.remove(&index) {
             old.free(&mut self.pool);
+            // A mesh edited in place: static shadow images may show its old shape.
+            self.static_dirty = [true; SHADOW_MAPS];
         }
         if mesh.indices.is_empty() || mesh.vertices.is_empty() {
             return;
@@ -1166,9 +1375,24 @@ impl MeshFeature {
                 min_y: aabb.min.y,
                 height: (aabb.max.y - aabb.min.y).max(1e-3),
                 last_used: self.frame,
+                uploaded: self.frame,
                 lods: Vec::new(),
             },
         );
+    }
+
+    /// Mark the static shadow images that hold a slot changed or dropped since (it was still
+    /// when the image was drawn, and inside the map) to be drawn again.
+    fn check_static_images(&mut self, view: &ViewData) {
+        for change in self.shadow_changes.drain(..) {
+            let center = (change.center - view.origin).as_vec3();
+            for map in 0..SHADOW_MAPS {
+                if self.static_dirty[map] || change.changed + STILL_FRAMES > self.image_frame[map] {
+                    continue;
+                }
+                self.static_dirty[map] = map_holds(view, map, center, change.radius);
+            }
+        }
     }
 
     /// Start building the levels of detail of a mesh just uploaded (or queue it while the
@@ -1250,6 +1474,183 @@ impl MeshFeature {
 
     /// Material buffer slot and texture set id of a material, added to this frame's materials
     /// on first use.
+    /// The cull of the instanced path, over every slot in parallel chunks, leaving out those
+    /// the cluster path took and meshes not uploaded yet: this frame's `items` (their
+    /// material slots still to set, `finish_items`), and how many were culled.
+    fn cull(&mut self, view: &ViewData, settings: &RenderSettings) -> u32 {
+        let params = CullParams {
+            view,
+            pixel_meters: crate::mesh_lod::meters_per_pixel(view.fov_y, view.height, 1.0),
+            lod_pixels: settings.mesh_lod_pixels.max(0.0),
+            min_pixels: settings.min_object_pixels.max(0.0),
+            impostor_pixels: settings.impostor_pixels.max(0.0),
+            shadows: view.sun_shadows || view.sky_occlusion.enabled,
+            lod_fades: !view.extra_view && view.history_valid,
+            frame: self.frame as u32,
+        };
+        let threads = gather_threads(self.scene.hot.len());
+        let mut chunks = std::mem::take(&mut self.gather_scratch);
+        chunks.resize_with(threads, Default::default);
+        // Cleared here: a chunk gets no job when there are fewer slots than threads.
+        for out in &mut chunks {
+            out.items.clear();
+            out.culled = 0;
+            out.instanced.fill(0);
+        }
+        {
+            let (mesh_frames, material_frames) = (&self.mesh_frames, &self.material_frames);
+            let clustered = &self.cluster_slots;
+            let cull = Cull {
+                p: params,
+                meshes: &self.meshes,
+                impostors: self.impostors.as_ref(),
+            };
+            let gather = |base: usize, hot: &mut [Hot], cold: &[Cold], out: &mut GatherChunk| {
+                for (k, (h, c)) in hot.iter_mut().zip(cold).enumerate() {
+                    if h.flags & mesh_scene::VISIBLE == 0 {
+                        continue;
+                    }
+                    let mesh = &mesh_frames[h.mesh as usize];
+                    if mesh.version == 0 || !mesh.ready {
+                        continue;
+                    }
+                    let slot = base + k;
+                    if clustered
+                        .get(slot / 64)
+                        .is_some_and(|w| w >> (slot % 64) & 1 != 0)
+                    {
+                        continue;
+                    }
+                    let mat = &material_frames[h.material as usize];
+                    set_bit(&mut out.instanced, h.mesh);
+                    match cull.item(slot as u32, h, c, mesh, mat) {
+                        Some(item) => out.items.push(item),
+                        None => out.culled += 1,
+                    }
+                }
+            };
+            let scene = &mut self.scene;
+            let per = scene.hot.len().div_ceil(threads).max(1);
+            let gather = &gather;
+            let parts = scene.hot.chunks_mut(per).zip(scene.cold.chunks(per));
+            run_jobs(
+                parts
+                    .zip(chunks.iter_mut())
+                    .enumerate()
+                    .map(|(k, ((hot, cold), out))| move || gather(k * per, hot, cold, out)),
+            );
+        }
+        let mut culled = 0;
+        let mut items = std::mem::take(&mut self.items);
+        let mut instanced = std::mem::take(&mut self.instanced_meshes);
+        items.clear();
+        instanced.clear();
+        for chunk in &mut chunks {
+            items.append(&mut chunk.items);
+            culled += chunk.culled;
+            if instanced.len() < chunk.instanced.len() {
+                instanced.resize(chunk.instanced.len(), 0);
+            }
+            for (a, b) in instanced.iter_mut().zip(&chunk.instanced) {
+                *a |= b;
+            }
+        }
+        // Meshes drawn as instances stay uploaded.
+        for (word, &bits) in instanced.iter().enumerate() {
+            let mut bits = bits;
+            while bits != 0 {
+                let raw = word * 64 + bits.trailing_zeros() as usize;
+                bits &= bits - 1;
+                if let Some(gpu_mesh) = self.meshes.get_mut(&self.mesh_frames[raw].index) {
+                    gpu_mesh.last_used = self.frame;
+                }
+            }
+        }
+        self.items = items;
+        self.instanced_meshes = instanced;
+        self.gather_scratch = chunks;
+        culled
+    }
+
+    /// Material slots for the cull's items, impostor layers in use and bakes asked for. A
+    /// material without a slot is set up from `assets` when the world is at hand (`prepare`);
+    /// on the render thread its items wait a frame while the next `prepare` sets it up
+    /// (`material_seen`). Returns how many items are culled (those waiting, and those only
+    /// casting shadows).
+    fn finish_items(
+        &mut self,
+        gpu: &GpuShared,
+        assets: Option<(
+            Option<&Assets<StandardMaterial>>,
+            &TextureSources<'_>,
+            &StandardMaterial,
+        )>,
+    ) -> u32 {
+        let frame = self.frame;
+        let mut culled = 0;
+        let mut items = std::mem::take(&mut self.items);
+        items.retain_mut(|item| {
+            let index = item.material as usize;
+            if self.material_seen.len() <= index {
+                self.material_seen.resize(index + 1, 0);
+            }
+            self.material_seen[index] = frame;
+            let (material_slot, textures) = match (self.material_frames[index].slot, &assets) {
+                (Some(slot), _) => slot,
+                (None, Some((material_assets, sources, default_material))) => {
+                    let handle = Handle::from_index(self.material_frames[index].index);
+                    let material = material_assets
+                        .and_then(|m| m.get(handle))
+                        .unwrap_or(default_material);
+                    let slot = self.material_slot(gpu, handle.index() as u64, material, sources);
+                    self.material_frames[index].slot = Some(slot);
+                    slot
+                }
+                (None, None) => {
+                    culled += 1;
+                    return false;
+                }
+            };
+            item.material_slot = material_slot;
+            item.textures = textures;
+            if item.impostor_ok
+                && let Some(impostors) = &mut self.impostors
+            {
+                if item.impostor != crate::impostor::NONE {
+                    impostors.mark_drawn(item.impostor);
+                } else if item.visible && item.impostor_size {
+                    // Baked with the material's images, once they have all loaded.
+                    let loaded = self
+                        .texture_sets
+                        .get(textures as usize)
+                        .and_then(Option::as_ref)
+                        .is_some_and(TextureSet::complete);
+                    if loaded && let Some(key) = self.material_frames[index].impostor_key {
+                        let hot = &self.scene.hot[item.slot as usize];
+                        let mesh = &self.mesh_frames[hot.mesh as usize];
+                        impostors.request(
+                            (item.mesh, key),
+                            crate::impostor::Request {
+                                mesh: item.mesh,
+                                material_slot,
+                                textures,
+                                center: mesh.center,
+                                radius: mesh.radius,
+                                score: mesh.coarsest as u64,
+                            },
+                        );
+                    }
+                }
+            }
+            if !item.visible {
+                culled += 1;
+            }
+            true
+        });
+        self.items = items;
+        culled
+    }
+
     fn material_slot(
         &mut self,
         gpu: &GpuShared,
@@ -1297,19 +1698,22 @@ impl MeshFeature {
             self.impostor_view.1
         );
         if shadows {
+            // Moving casters every frame; the still ones when their static image was last
+            // drawn (how many frames ago).
             for (c, s) in self.shadow.iter().enumerate() {
-                let name = if c == SKY_OCCLUSION_VIEW {
-                    "sky occlusion".to_string()
-                } else {
-                    format!("cascade {c}")
+                let name = match c {
+                    SKY_OCCLUSION_VIEW => "sky occlusion".to_string(),
+                    FAR_SHADOW_MAP => "far shadow".to_string(),
+                    _ => format!("cascade {c}"),
                 };
-                let _ = write!(out, ", {name} {:.2} M", sum(s) as f64 / 1e6);
+                let _ = write!(
+                    out,
+                    ", {name} {:.2} M + {:.2} M still ({} frames ago)",
+                    sum(s) as f64 / 1e6,
+                    self.static_triangles[c] as f64 / 1e6,
+                    self.frame.saturating_sub(self.image_frame[c])
+                );
             }
-            let _ = write!(
-                out,
-                ", far shadow {:.2} M",
-                sum(&self.far_shadow) as f64 / 1e6
-            );
         }
         if let Some(c) = &self.clusters {
             let _ = write!(out, "; clusters {:.2} M", c.stats().triangles as f64 / 1e6);
@@ -1320,7 +1724,7 @@ impl MeshFeature {
         for b in self.opaque.iter().chain(&self.transparent) {
             per_mesh.entry(b.key.mesh).or_default()[0] += b.count as u64;
         }
-        for b in self.shadow.iter().flatten().chain(&self.far_shadow) {
+        for b in self.shadow.iter().chain(&self.shadow_static).flatten() {
             per_mesh.entry(b.key.mesh).or_default()[1] += b.count as u64;
         }
         let mut rows: Vec<_> = per_mesh
@@ -1528,19 +1932,24 @@ impl MeshFeature {
             .map(|s| &s.group)
     }
 
-    /// Draw a shadow view's batches and its clusters (`view`: a cascade, `SKY_OCCLUSION_VIEW`
-    /// or `FAR_SHADOW_CLUSTERS`).
+    /// Draw a shadow view's batches and, with `with_clusters`, its clusters (`view`: a cascade,
+    /// `SKY_OCCLUSION_VIEW` or `FAR_SHADOW_CLUSTERS`). Clusters are culled on the GPU every
+    /// frame, so they are drawn with the moving casters, never into a static image.
     fn draw_shadow_view(
         &self,
         pass: &mut wgpu::RenderPass<'_>,
         batches: &[Batch],
         view: usize,
         impostors: (u32, u32),
+        with_clusters: bool,
     ) {
         let (Some(group), Some(instances)) = (&self.material_group, &self.instances) else {
             return;
         };
-        let clusters = self.clusters.as_ref().filter(|c| c.is_active());
+        let clusters = self
+            .clusters
+            .as_ref()
+            .filter(|c| with_clusters && c.is_active());
         if batches.is_empty() && clusters.is_none() && impostors.1 == 0 {
             return;
         }
@@ -1654,7 +2063,7 @@ impl MeshFeature {
         let lists = [&mut self.opaque, &mut self.transparent]
             .into_iter()
             .chain(self.shadow.iter_mut())
-            .chain(std::iter::once(&mut self.far_shadow));
+            .chain(self.shadow_static.iter_mut());
         for b in lists.flatten() {
             b.args = match meshes.get(&b.key.mesh).filter(|_| self.multi_draw) {
                 Some(m) => {
@@ -2087,6 +2496,10 @@ impl RenderFeature for MeshFeature {
         let frame = self.frame;
         let mut scene = std::mem::take(&mut self.scene);
         scene.sync(world, frame);
+        self.shadow_changes.extend_from_slice(&scene.changes);
+        if !view.extra_view {
+            self.check_static_images(view);
+        }
         let mut skin_query = self.skin_query.take().unwrap_or_else(|| world.query());
         let world_ref: &World = world;
         let Some(mesh_assets) = world_ref.get_resource::<Assets<Mesh>>() else {
@@ -2114,10 +2527,6 @@ impl RenderFeature for MeshFeature {
         let mut culled = 0u32;
         let shadows = view.sun_shadows || view.sky_occlusion.enabled;
         let lod_pixels = settings.mesh_lod_pixels.max(0.0);
-        let min_pixels = settings.min_object_pixels.max(0.0);
-        let impostor_pixels = settings.impostor_pixels.max(0.0);
-        // Meters a pixel spans per meter of distance (none for orthographic views).
-        let pixel_meters = crate::mesh_lod::meters_per_pixel(view.fov_y, view.height, 1.0);
         if let Some(meshes) = world.get_resource::<Assets<Mesh>>() {
             self.collect_lods(&gpu.queue, meshes);
         }
@@ -2231,46 +2640,26 @@ impl RenderFeature for MeshFeature {
                 glows: material.emissive_strength > 0.0
                     && material.emissive.iter().any(|&c| c > 0.0),
                 still_opaque: material.alpha_mode == AlphaMode::Opaque && material.wind_sway <= 0.0,
+                sways: material.wind_sway > 0.0,
                 slot: None,
                 impostor_key,
             };
         }
 
-        steps.step("meshes: cull");
-        // 1. The cull, over the scene's slots in parallel chunks. Slots that may take the
-        //    cluster path, and meshes not uploaded yet, wait for the serial pass.
-        let params = CullParams {
-            view,
-            pixel_meters,
-            lod_pixels,
-            min_pixels,
-            impostor_pixels,
-            shadows,
-        };
+        steps.step("meshes: classify");
+        // 1. Which slots the serial pass looks at first: cluster candidates and meshes not
+        //    uploaded yet (a quick parallel scan; the cull comes after the serial pass).
         let clusters_on = settings.virtual_geometry && self.clusters.is_some();
-        let threads = if scene.hot.len() >= PARALLEL_GATHER {
-            std::thread::available_parallelism().map_or(1, |n| n.get().min(8))
-        } else {
-            1
-        };
+        let threads = gather_threads(scene.hot.len());
         let mut chunks = std::mem::take(&mut self.gather_scratch);
         chunks.resize_with(threads, Default::default);
-        // Cleared here: a chunk gets no job when there are fewer slots than threads.
         for out in &mut chunks {
-            out.items.clear();
             out.deferred.clear();
-            out.culled = 0;
-            out.instanced.fill(0);
         }
         {
             let (mesh_frames, material_frames) = (&self.mesh_frames, &self.material_frames);
-            let cull = Cull {
-                p: params,
-                meshes: &self.meshes,
-                impostors: self.impostors.as_ref(),
-            };
-            let gather = |base: usize, hot: &mut [Hot], cold: &[Cold], out: &mut GatherChunk| {
-                for (k, (h, c)) in hot.iter_mut().zip(cold).enumerate() {
+            let classify = |base: usize, hot: &[Hot], out: &mut GatherChunk| {
+                for (k, h) in hot.iter().enumerate() {
                     if h.flags & mesh_scene::VISIBLE == 0 {
                         continue;
                     }
@@ -2279,44 +2668,30 @@ impl RenderFeature for MeshFeature {
                         continue;
                     }
                     let mat = &material_frames[h.material as usize];
-                    let slot = (base + k) as u32;
                     if !mesh.ready || (clusters_on && cluster_candidate(h, mesh, mat)) {
-                        out.deferred.push(slot);
-                        continue;
-                    }
-                    set_bit(&mut out.instanced, h.mesh);
-                    match cull.item(slot, h, c, mesh, mat) {
-                        Some(item) => out.items.push(item),
-                        None => out.culled += 1,
+                        out.deferred.push((base + k) as u32);
                     }
                 }
             };
             let per = scene.hot.len().div_ceil(threads).max(1);
-            let gather = &gather;
-            let parts = scene.hot.chunks_mut(per).zip(scene.cold.chunks(per));
+            let classify = &classify;
             run_jobs(
-                parts
+                scene
+                    .hot
+                    .chunks(per)
                     .zip(chunks.iter_mut())
                     .enumerate()
-                    .map(|(k, ((hot, cold), out))| move || gather(k * per, hot, cold, out)),
+                    .map(|(k, (hot, out))| move || classify(k * per, hot, out)),
             );
         }
-        let mut items = std::mem::take(&mut self.items);
         let mut deferred = std::mem::take(&mut self.deferred);
-        let mut instanced = std::mem::take(&mut self.instanced_meshes);
         deferred.clear();
-        instanced.clear();
-        for chunk in &mut chunks {
-            items.append(&mut chunk.items);
+        for chunk in &chunks {
             deferred.extend_from_slice(&chunk.deferred);
-            culled += chunk.culled;
-            if instanced.len() < chunk.instanced.len() {
-                instanced.resize(chunk.instanced.len(), 0);
-            }
-            for (a, b) in instanced.iter_mut().zip(&chunk.instanced) {
-                *a |= b;
-            }
         }
+        self.gather_scratch = chunks;
+        self.cluster_slots.clear();
+        self.cluster_slots.resize(scene.hot.len().div_ceil(64), 0);
 
         steps.step("meshes: clusters");
         // 2. In turn: the cluster path (dense opaque meshes and displaced ones, culled and
@@ -2395,6 +2770,8 @@ impl RenderFeature for MeshFeature {
                     }
                 };
                 if ready && let Some((cluster_key, _)) = cluster_path {
+                    // Drawn (or culled) here: the instanced cull leaves it out.
+                    set_bit(&mut self.cluster_slots, slot);
                     self.clustered.insert(mesh.index);
                     if hot.max_distance < f32::MAX
                         && let Some(bounds) =
@@ -2438,7 +2815,7 @@ impl RenderFeature for MeshFeature {
             }
 
             // The instanced path: uploaded (and its levels asked for) the first time this
-            // frame.
+            // frame; the cull takes it once uploaded.
             if !self.mesh_frames[raw].checked {
                 let handle = Handle::<Mesh>::from_index(mesh.index);
                 let resident = self.meshes.get(&mesh.index).map(|m| m.version);
@@ -2469,96 +2846,47 @@ impl RenderFeature for MeshFeature {
                     entry.set_uploaded(gpu_mesh, building, skinned);
                 }
             }
-            let mesh = self.mesh_frames[raw];
-            if !mesh.ready {
-                continue;
-            }
-            set_bit(&mut instanced, hot.mesh);
-            let cull = Cull {
-                p: params,
-                meshes: &self.meshes,
-                impostors: self.impostors.as_ref(),
-            };
-            match cull.item(slot, &mut scene.hot[s], &scene.cold[s], &mesh, &mat) {
-                Some(item) => items.push(item),
-                None => culled += 1,
-            }
         }
-        // Meshes drawn as instances stay uploaded.
-        for (word, &bits) in instanced.iter().enumerate() {
-            let mut bits = bits;
-            while bits != 0 {
-                let raw = word * 64 + bits.trailing_zeros() as usize;
-                bits &= bits - 1;
-                if let Some(gpu_mesh) = self.meshes.get_mut(&self.mesh_frames[raw].index) {
-                    gpu_mesh.last_used = frame;
-                }
-            }
-        }
-
-        // 3. In turn again: material slots (and texture sets) for what is drawn, impostor
-        //    layers in use and bakes asked for.
-        steps.step("meshes: materials");
-        for item in &mut items {
-            let index = item.material as usize;
-            let (material_slot, textures) = match self.material_frames[index].slot {
-                Some(slot) => slot,
-                None => {
-                    let handle = Handle::from_index(self.material_frames[index].index);
-                    let material = material_assets
-                        .and_then(|m| m.get(handle))
-                        .unwrap_or(&default_material);
-                    let slot = self.material_slot(gpu, handle.index() as u64, material, &sources);
-                    self.material_frames[index].slot = Some(slot);
-                    slot
-                }
-            };
-            item.material_slot = material_slot;
-            item.textures = textures;
-            if item.impostor_ok
-                && let Some(impostors) = &mut self.impostors
-            {
-                if item.impostor != crate::impostor::NONE {
-                    impostors.mark_drawn(item.impostor);
-                } else if item.visible && item.impostor_size {
-                    // Baked with the material's images, once they have all loaded.
-                    let loaded = self
-                        .texture_sets
-                        .get(textures as usize)
-                        .and_then(Option::as_ref)
-                        .is_some_and(TextureSet::complete);
-                    if loaded && let Some(key) = self.material_frames[index].impostor_key {
-                        let mesh = &self.mesh_frames[scene.hot[item.slot as usize].mesh as usize];
-                        impostors.request(
-                            (item.mesh, key),
-                            crate::impostor::Request {
-                                mesh: item.mesh,
-                                material_slot,
-                                textures,
-                                center: mesh.center,
-                                radius: mesh.radius,
-                                score: mesh.coarsest as u64,
-                            },
-                        );
-                    }
-                }
-            }
-            if !item.visible {
-                culled += 1;
-            }
-        }
-
-        self.items = items;
         self.deferred = deferred;
-        self.instanced_meshes = instanced;
-        self.gather_scratch = chunks;
+
+        // 3. Material slots (and texture sets) for the materials drawn lately; the cull's
+        //    items take theirs from these.
+        steps.step("meshes: materials");
+        let recent = frame.saturating_sub(MATERIAL_KEEP_FRAMES);
+        for raw in scene.materials_used() {
+            let i = raw as usize;
+            if self.material_frames[i].slot.is_none()
+                && self
+                    .material_seen
+                    .get(i)
+                    .is_some_and(|&seen| seen >= recent)
+            {
+                let handle = Handle::from_index(self.material_frames[i].index);
+                let material = material_assets
+                    .and_then(|m| m.get(handle))
+                    .unwrap_or(&default_material);
+                let slot = self.material_slot(gpu, handle.index() as u64, material, &sources);
+                self.material_frames[i].slot = Some(slot);
+            }
+        }
         self.scene = scene;
+
+        // 4. The cull of the instanced path: on the render thread (`prepare_frame`) for the
+        //    camera's view, here for extra views and after a camera cut (when every material
+        //    must be at hand at once).
+        self.cull_later = !view.extra_view && view.history_valid;
+        if !self.cull_later {
+            steps.step("meshes: cull");
+            culled += self.cull(view, settings);
+            culled += self.finish_items(gpu, Some((material_assets, &sources, &default_material)));
+        }
         // Meshes now drawn only as clusters don't need their instanced copy.
         if !self.clustered.is_empty() {
             let clustered = &self.clustered;
             let pool = &mut self.pool;
             self.meshes.retain(|m, g| {
-                let keep = g.last_used == frame || !clustered.contains(m);
+                // Used last frame or this one (the cull may run on the render thread).
+                let keep = g.last_used + 1 >= frame || !clustered.contains(m);
                 if !keep {
                     g.free(pool);
                 }
@@ -2589,6 +2917,13 @@ impl RenderFeature for MeshFeature {
         if !std::mem::take(&mut self.prepared) {
             return;
         }
+        let mut steps = PrepareSteps::default();
+        if std::mem::take(&mut self.cull_later) {
+            // The cull `prepare` left for the render thread: the main thread only synced.
+            steps.step("meshes: cull");
+            self.culled += self.cull(view, settings);
+            self.culled += self.finish_items(gpu, None);
+        }
         let frame = self.frame;
         let culled = self.culled;
         let shadows = view.sun_shadows || view.sky_occlusion.enabled;
@@ -2596,12 +2931,7 @@ impl RenderFeature for MeshFeature {
         let lod_pixels = settings.mesh_lod_pixels.max(0.0);
         let min_pixels = settings.min_object_pixels.max(0.0);
         let impostor_pixels = settings.impostor_pixels.max(0.0);
-        let threads = if self.scene.hot.len() >= PARALLEL_GATHER {
-            std::thread::available_parallelism().map_or(1, |n| n.get().min(8))
-        } else {
-            1
-        };
-        let mut steps = PrepareSteps::default();
+        let threads = gather_threads(self.scene.hot.len());
         steps.step("meshes: sort and batch");
         // Order: opaque (by pipeline, texture set, mesh), transparent (back to front). The
         // visible items' keys are sorted, not the items themselves.
@@ -2618,10 +2948,9 @@ impl RenderFeature for MeshFeature {
         self.layout.clear();
         self.opaque.clear();
         self.transparent.clear();
-        for s in &mut self.shadow {
+        for s in self.shadow.iter_mut().chain(&mut self.shadow_static) {
             s.clear();
         }
-        self.far_shadow.clear();
         self.keys.clear();
 
         // Opaque.
@@ -2638,6 +2967,32 @@ impl RenderFeature for MeshFeature {
                 lod: item.lod,
             });
         }
+        // Old levels while new ones fade in, after the rest in the same order (the sort key
+        // ends with the level), so they batch together and split no runs.
+        let mut fading: Vec<(u64, u32)> = ordered()
+            .filter(|(_, i)| {
+                i.pipeline & PIPE_BLEND == 0 && i.lod != IMPOSTOR_LOD && i.lod_fade > 0.0
+            })
+            .map(|(n, i)| {
+                let key = Item {
+                    lod: i.lod_from,
+                    ..*i
+                };
+                (key.sort_key(), n)
+            })
+            .collect();
+        fading.sort_unstable_by_key(|&(key, _)| key);
+        for &(_, n) in &fading {
+            let item = &items[n as usize];
+            self.layout.push(n | AS_OLD_LEVEL);
+            self.keys.push(BatchKey {
+                pipeline: item.pipeline,
+                textures: item.textures,
+                mesh: item.mesh,
+                lod: item.lod_from,
+            });
+        }
+        self.lods_fading = fading.len() as u32;
         Self::batch(&self.keys, 0, &mut self.opaque);
         // Impostors: one draw for all of them.
         let first = self.layout.len();
@@ -2649,6 +3004,7 @@ impl RenderFeature for MeshFeature {
         self.impostor_view = (first as u32, (self.layout.len() - first) as u32);
         self.impostors_fading = ordered().filter(|(_, i)| i.fade > 0.0).count() as u32;
         self.impostor_shadow = Default::default();
+        self.impostor_shadow_static = Default::default();
         // Transparent.
         let first = self.layout.len();
         self.keys.clear();
@@ -2665,7 +3021,9 @@ impl RenderFeature for MeshFeature {
         steps.step("meshes: shadow lists");
         // Shadows: opaque casters batch by mesh (depth only); masked casters by texture set
         // and mesh (alpha tested). Each map draws casters at the level of detail its texels
-        // can show, and leaves out those smaller than a texel.
+        // can show, and leaves out those smaller than a texel. Casters still since a map's
+        // static image was drawn are in it; the others are drawn every frame on top. A static
+        // image drawn again this frame takes every still caster in its square.
         if shadows {
             let shadow_key = |item: &Item, lod: u8| BatchKey {
                 pipeline: if item.masked {
@@ -2707,9 +3065,7 @@ impl RenderFeature for MeshFeature {
             } else {
                 0
             };
-            // Cascades keeping last frame's image need no casters.
             let maps = (0..cascades)
-                .filter(|&c| view.cascades.drawn[c])
                 .chain(view.sky_occlusion.enabled.then_some(SKY_OCCLUSION_VIEW))
                 .chain((view.sun_shadows && view.far_shadow.enabled).then_some(FAR_SHADOW_MAP));
             // Each map's casters on its own thread, then their instances in map order.
@@ -2717,49 +3073,68 @@ impl RenderFeature for MeshFeature {
             let mut lists = std::mem::take(&mut self.shadow_scratch);
             lists.resize_with(maps.len(), Default::default);
             let (items, casters, meshes) = (&self.items, &self.casters, &self.meshes);
-            let fill =
-                |c: usize, (picked, keys, impostors): &mut (Vec<u32>, Vec<BatchKey>, Vec<u32>)| {
-                    picked.clear();
-                    keys.clear();
-                    impostors.clear();
-                    let texel = match c {
-                        SKY_OCCLUSION_VIEW => {
-                            view.sky_occlusion.extent / view.sky_occlusion.map_size.max(1) as f32
-                        }
-                        FAR_SHADOW_MAP => view.far_shadow.texel(),
-                        _ => {
-                            2.0 * view.cascades.half_extent[c]
-                                / view.cascades.map_size.max(1) as f32
-                        }
-                    };
-                    for &n in casters {
-                        let item = &items[n as usize];
-                        let inside = match c {
-                            SKY_OCCLUSION_VIEW => {
-                                view.sky_occlusion.contains_sphere(item.center, item.radius)
-                            }
-                            FAR_SHADOW_MAP => view.far_shadow.casts(item.center, item.radius),
-                            _ => view.cascades.sphere_in_cascade(c, item.center, item.radius),
-                        };
-                        if !inside || 2.0 * item.radius < min_pixels * texel {
-                            continue;
-                        }
-                        if item.impostor != crate::impostor::NONE
-                            && 2.0 * item.radius < impostor_pixels * texel
-                        {
-                            impostors.push(n);
-                            continue;
-                        }
-                        let lod = match meshes.get(&item.mesh) {
-                            Some(m) if lod_pixels > 0.0 && !item.full_detail => {
-                                crate::mesh_lod::pick(m.errors(), item.scale, lod_pixels * texel)
-                            }
-                            _ => 0,
-                        };
-                        picked.push(n);
-                        keys.push(shadow_key(item, lod));
+            let image_frame = self.image_frame;
+            let fill = |c: usize, out: &mut MapCasters| {
+                out.clear();
+                let texel = match c {
+                    SKY_OCCLUSION_VIEW => {
+                        view.sky_occlusion.extent / view.sky_occlusion.map_size.max(1) as f32
                     }
+                    FAR_SHADOW_MAP => view.far_shadow.texel(),
+                    _ => 2.0 * view.cascades.half_extent[c] / view.cascades.map_size.max(1) as f32,
                 };
+                let redraw = static_redraw(view, c);
+                // Casters still since this frame are in the image when it is drawn again.
+                let image = if redraw { frame } else { image_frame[c] };
+                for &n in casters {
+                    let item = &items[n as usize];
+                    // Swaying leaves move in the near cascades' shadows: never still there.
+                    let can_rest = !(item.sways && c < 2);
+                    let in_image = can_rest && item.since <= image;
+                    if in_image && !redraw {
+                        continue;
+                    }
+                    let inside = if in_image {
+                        map_holds(view, c, item.center, item.radius)
+                    } else {
+                        map_shades(view, c, item.center, item.radius)
+                    };
+                    if !inside || 2.0 * item.radius < min_pixels * texel {
+                        continue;
+                    }
+                    if !in_image && can_rest && item.since <= frame {
+                        out.waiting += 1;
+                        out.oldest = out.oldest.min(item.since);
+                    }
+                    // Past the cascades only big casters are drawn every frame; mid-size ones
+                    // cast once still, from the static image.
+                    if !in_image
+                        && c == FAR_SHADOW_MAP
+                        && item.radius < FAR_MOVING_CASTER_TEXELS * texel
+                    {
+                        continue;
+                    }
+                    let list = if in_image {
+                        &mut out.still
+                    } else {
+                        &mut out.moving
+                    };
+                    if item.impostor != crate::impostor::NONE
+                        && 2.0 * item.radius < impostor_pixels * texel
+                    {
+                        list.impostors.push(n);
+                        continue;
+                    }
+                    let lod = match meshes.get(&item.mesh) {
+                        Some(m) if lod_pixels > 0.0 && !item.full_detail => {
+                            crate::mesh_lod::pick(m.errors(), item.scale, lod_pixels * texel)
+                        }
+                        _ => 0,
+                    };
+                    list.picked.push(n);
+                    list.keys.push(shadow_key(item, lod));
+                }
+            };
             let fill = &fill;
             let jobs = maps.iter().zip(lists.iter_mut());
             if casters.len() >= PARALLEL_CASTERS {
@@ -2767,18 +3142,56 @@ impl RenderFeature for MeshFeature {
             } else {
                 jobs.for_each(|(&c, list)| fill(c, list));
             }
-            for (&c, (picked, keys, impostors)) in maps.iter().zip(&lists) {
-                let first = self.layout.len();
-                self.layout.extend_from_slice(picked);
-                let out = match c {
-                    FAR_SHADOW_MAP => &mut self.far_shadow,
-                    _ => &mut self.shadow[c],
-                };
-                Self::batch(keys, first as u32, out);
-                let first = self.layout.len();
-                self.layout
-                    .extend(impostors.iter().map(|&n| n | AS_IMPOSTOR));
-                self.impostor_shadow[c] = (first as u32, impostors.len() as u32);
+            let mut join = None;
+            for (&c, lists) in maps.iter().zip(&lists) {
+                for (list, still) in [(&lists.moving, false), (&lists.still, true)] {
+                    let first = self.layout.len();
+                    self.layout.extend_from_slice(&list.picked);
+                    let out = if still {
+                        &mut self.shadow_static[c]
+                    } else {
+                        &mut self.shadow[c]
+                    };
+                    Self::batch(&list.keys, first as u32, out);
+                    let first = self.layout.len();
+                    self.layout
+                        .extend(list.impostors.iter().map(|&n| n | AS_IMPOSTOR));
+                    let range = (first as u32, list.impostors.len() as u32);
+                    if still {
+                        self.impostor_shadow_static[c] = range;
+                    } else {
+                        self.impostor_shadow[c] = range;
+                    }
+                }
+                if view.extra_view {
+                    continue;
+                }
+                if static_redraw(view, c) {
+                    // The image now holds what was still this frame.
+                    self.image_frame[c] = frame;
+                    self.static_dirty[c] = false;
+                    self.static_waiting[c] = false;
+                    self.static_triangles[c] = self.shadow_static[c]
+                        .iter()
+                        .map(|b| {
+                            meshes
+                                .get(&b.key.mesh)
+                                .map_or(0, |m| m.level(b.key.lod).1 / 3)
+                                as u64
+                                * b.count as u64
+                        })
+                        .sum();
+                }
+                // Still casters waiting to join: one map a frame asks for its image again.
+                let due = lists.waiting >= JOIN_COUNT
+                    || (lists.waiting > 0 && lists.oldest + JOIN_FRAMES <= frame);
+                self.static_waiting[c] = false;
+                if due && join.is_none() {
+                    join = Some(c);
+                }
+            }
+            if let Some(c) = join {
+                self.static_waiting[c] = true;
             }
             self.shadow_scratch = lists;
         }
@@ -2809,7 +3222,7 @@ impl RenderFeature for MeshFeature {
             const SIZE: usize = std::mem::size_of::<MeshInstance>();
             let (items, scene, mesh_frames) = (&self.items, &self.scene, &self.mesh_frames);
             let instance = |n: u32| {
-                let item = &items[(n & !AS_IMPOSTOR) as usize];
+                let item = &items[(n & ITEM) as usize];
                 let s = item.slot as usize;
                 let cold = &scene.cold[s];
                 let mesh = &mesh_frames[scene.hot[s].mesh as usize];
@@ -2822,7 +3235,8 @@ impl RenderFeature for MeshFeature {
                 // positive share hides the pixels whose noise is below it, a negative one keeps
                 // only those below its negation (`dither_keeps` in lib_frame.wgsl). A game's
                 // `DitherFade` hides `|t|` of the pixels; in a cross-fade the mesh hides the
-                // `fade` share its impostor shows.
+                // `fade` share its impostor shows, and a new level shows the `lod_fade` share
+                // its old level hides.
                 let mut normal = cold.normal;
                 normal[0][3] = if item.dither > 0.0 {
                     item.dither
@@ -2830,6 +3244,10 @@ impl RenderFeature for MeshFeature {
                     -(1.0 + item.dither)
                 } else if n & AS_IMPOSTOR != 0 {
                     -item.fade
+                } else if n & AS_OLD_LEVEL != 0 {
+                    item.lod_fade
+                } else if item.lod_fade > 0.0 {
+                    -item.lod_fade
                 } else {
                     item.fade
                 };
@@ -2917,7 +3335,7 @@ impl RenderFeature for MeshFeature {
         stats.draw_calls +=
             self.commands(&self.opaque, all) + self.commands(&self.transparent, all);
         let masked = |p: u8| p == SHADOW_MASKED;
-        for list in self.shadow.iter().chain(std::iter::once(&self.far_shadow)) {
+        for list in self.shadow.iter().chain(self.shadow_static.iter()) {
             stats.draw_calls += self.commands(list, masked);
         }
         for b in self.opaque.iter().chain(self.transparent.iter()) {
@@ -2926,7 +3344,10 @@ impl RenderFeature for MeshFeature {
                 stats.triangles += (m.level(b.key.lod).1 / 3) as u64 * b.count as u64;
             }
         }
-        for (_, count) in std::iter::once(self.impostor_view).chain(self.impostor_shadow) {
+        for (_, count) in std::iter::once(self.impostor_view)
+            .chain(self.impostor_shadow)
+            .chain(self.impostor_shadow_static)
+        {
             stats.draw_calls += (count > 0) as u32;
         }
         stats.instances += self.impostor_view.1;
@@ -2952,9 +3373,13 @@ impl RenderFeature for MeshFeature {
             d.set("render.meshes.dirty_slots", self.scene.dirty as f64);
             // Slots the serial pass took (cluster path and first uploads).
             d.set("render.meshes.serial_slots", self.deferred.len() as f64);
-            // Sun cascade casters drawn this frame (reused cascades draw none).
+            // Sun cascade casters drawn this frame: the moving ones, and the still ones of the
+            // static images drawn again.
             let (mut instances, mut triangles) = (0u64, 0u64);
-            for b in self.shadow[..SKY_OCCLUSION_VIEW].iter().flatten() {
+            let cascades = self.shadow[..SKY_OCCLUSION_VIEW]
+                .iter()
+                .chain(&self.shadow_static[..SKY_OCCLUSION_VIEW]);
+            for b in cascades.flatten() {
                 let level = self
                     .meshes
                     .get(&b.key.mesh)
@@ -2982,7 +3407,7 @@ impl RenderFeature for MeshFeature {
             let batches = [&self.opaque, &self.transparent]
                 .into_iter()
                 .chain(self.shadow.iter())
-                .chain(std::iter::once(&self.far_shadow))
+                .chain(self.shadow_static.iter())
                 .map(Vec::len)
                 .sum::<usize>();
             d.set("render.meshes.batches", batches as f64);
@@ -3127,16 +3552,38 @@ impl RenderFeature for MeshFeature {
             &self.shadow[cascade],
             cascade,
             self.impostor_shadow[cascade],
+            true,
         );
     }
 
     fn draw_far_shadow(&self, pass: &mut wgpu::RenderPass<'_>, _ctx: &FrameContext) {
         self.draw_shadow_view(
             pass,
-            &self.far_shadow,
+            &self.shadow[FAR_SHADOW_MAP],
             FAR_SHADOW_CLUSTERS,
             self.impostor_shadow[FAR_SHADOW_MAP],
+            true,
         );
+    }
+
+    fn draw_shadow_static(&self, pass: &mut wgpu::RenderPass<'_>, map: usize, _ctx: &FrameContext) {
+        let view = if map == FAR_SHADOW_MAP {
+            FAR_SHADOW_CLUSTERS
+        } else {
+            map
+        };
+        self.draw_shadow_view(
+            pass,
+            &self.shadow_static[map],
+            view,
+            self.impostor_shadow_static[map],
+            false,
+        );
+    }
+
+    fn shadow_static_changed(&self, map: usize) -> bool {
+        self.static_dirty.get(map).copied().unwrap_or(false)
+            || self.static_waiting.get(map).copied().unwrap_or(false)
     }
 
     fn stats(&self) -> FeatureStats {
@@ -3150,17 +3597,19 @@ impl RenderFeature for MeshFeature {
     fn describe(&self) -> serde_json::Value {
         serde_json::json!({
             "gpu_meshes": self.meshes.len(),
+            "meshes_with_lods": self.meshes.values().filter(|m| m.errors().next().is_some()).count(),
             "mesh_pool": self.pool.describe(),
             "texture_sets": self.texture_sets.iter().filter(|s| s.is_some()).count(),
             "materials": self.material_data.len(),
             "opaque_batches": self.opaque.len(),
             "transparent_batches": self.transparent.len(),
             "shadow_batches": self.shadow.iter().map(|s| s.len()).collect::<Vec<_>>(),
-            "far_shadow_batches": self.far_shadow.len(),
+            "shadow_static_batches": self.shadow_static.iter().map(|s| s.len()).collect::<Vec<_>>(),
             "impostors": self.impostors.as_ref().map_or(0, Impostors::count),
             "impostor_atlas_bc7": self.impostors.as_ref().is_some_and(Impostors::compressed),
             "impostors_in_view": self.impostor_view.1,
             "impostors_fading": self.impostors_fading,
+            "lods_fading": self.lods_fading,
             "virtual_geometry": self.clusters.as_ref().map(ClusterRenderer::describe),
             "virtual_textures": self.vt.as_ref().map(VirtualTextureSystem::describe),
         })

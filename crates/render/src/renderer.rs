@@ -34,11 +34,14 @@ use crate::frame::{
 };
 use crate::gpu::{self, SurfaceState};
 use crate::settings::{AntiAliasing, RenderSettings, Tonemapper};
-use crate::shadows::{FAR_SHADOW_LAYER, MAX_CASCADES, SKY_OCCLUSION_VIEW, ShadowViewUniform};
+use crate::shadows::{
+    FAR_SHADOW_LAYER, FAR_SHADOW_MAP, MAX_CASCADES, SHADOW_MAPS, SKY_OCCLUSION_VIEW,
+    ShadowViewUniform,
+};
 use crate::texture::Image;
 
 /// Index of the far shadow map's view buffer and bind group (after the sky occlusion map's).
-const FAR_SHADOW_VIEW: usize = SKY_OCCLUSION_VIEW + 1;
+const FAR_SHADOW_VIEW: usize = FAR_SHADOW_MAP;
 use crate::targets::{Targets, Tex};
 
 /// Set when the renderer could not start (no GPU); rendering is skipped. With the environment
@@ -124,6 +127,11 @@ struct PostUniform {
     params2: [f32; 4],
     params3: [f32; 4],
     params4: [f32; 4],
+    /// The sun in the image (uv), its angular radius, the glare's strength (`sun_glare` in
+    /// post.wgsl).
+    sun: [f32; 4],
+    /// Its illuminance at the camera and its uncovered disc's luminance, both pre-exposed.
+    sun_light: [f32; 4],
 }
 
 #[repr(C)]
@@ -133,11 +141,11 @@ struct BloomUniform {
 }
 
 struct ShadowResources {
-    #[allow(dead_code)]
     texture: wgpu::Texture,
     array_view: wgpu::TextureView,
     /// One per cascade, then the far shadow map's (`FAR_SHADOW_LAYER`).
     layer_views: Vec<wgpu::TextureView>,
+
     /// One per cascade, then one for the sky occlusion map (index `SKY_OCCLUSION_VIEW`) and one
     /// for the far shadow map (`FAR_SHADOW_VIEW`).
     view_buffers: Vec<wgpu::Buffer>,
@@ -146,7 +154,121 @@ struct ShadowResources {
     size: u32,
     /// Top-down depth map of the highest surface around the camera (see `SkyOcclusionView`).
     occlusion: wgpu::TextureView,
+    occlusion_texture: wgpu::Texture,
     occlusion_size: u32,
+    /// The maps' static images (`shadows::ShadowCache`), made the first time they are used.
+    statics: Option<StaticShadows>,
+}
+
+/// The static images of the shadow maps: drawn when a map moves or what holds still in it
+/// changes, copied into the maps every frame before the moving casters are drawn on top
+/// (Unity HDRP's mixed cached shadows). Extra views draw everything straight into their maps
+/// each frame and have none.
+struct StaticShadows {
+    /// The same layers as `ShadowResources::texture`.
+    texture: wgpu::Texture,
+    layers: Vec<wgpu::TextureView>,
+    occlusion: (wgpu::Texture, wgpu::TextureView),
+    occlusion_size: u32,
+}
+
+impl StaticShadows {
+    fn new(shared: &GpuShared, size: u32, occlusion_size: u32) -> Self {
+        let texture = shared.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("shadow static images"),
+            size: wgpu::Extent3d {
+                width: size,
+                height: size,
+                depth_or_array_layers: FAR_SHADOW_LAYER as u32 + 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: shared.formats.shadow,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let layers = layer_views(&texture);
+        Self {
+            texture,
+            layers,
+            occlusion: create_occlusion_target(
+                shared,
+                occlusion_size,
+                wgpu::TextureUsages::COPY_SRC,
+            ),
+            occlusion_size,
+        }
+    }
+}
+
+/// One 2D view per layer of a shadow map array.
+fn layer_views(texture: &wgpu::Texture) -> Vec<wgpu::TextureView> {
+    (0..texture.depth_or_array_layers())
+        .map(|i| {
+            texture.create_view(&wgpu::TextureViewDescriptor {
+                label: Some("shadow layer"),
+                dimension: Some(wgpu::TextureViewDimension::D2),
+                base_array_layer: i,
+                array_layer_count: Some(1),
+                ..Default::default()
+            })
+        })
+        .collect()
+}
+
+/// Copy layer `layer` of `from` into the same layer of `to` (whole layers of the same size).
+fn copy_layer(
+    encoder: &mut wgpu::CommandEncoder,
+    from: &wgpu::Texture,
+    to: &wgpu::Texture,
+    layer: u32,
+) {
+    let at = |texture| wgpu::TexelCopyTextureInfo {
+        texture,
+        mip_level: 0,
+        origin: wgpu::Origin3d {
+            x: 0,
+            y: 0,
+            z: layer,
+        },
+        aspect: wgpu::TextureAspect::All,
+    };
+    encoder.copy_texture_to_texture(
+        at(from),
+        at(to),
+        wgpu::Extent3d {
+            width: to.width(),
+            height: to.height(),
+            depth_or_array_layers: 1,
+        },
+    );
+}
+
+/// A depth-only pass into `target`, cleared to 1 or loaded.
+fn depth_pass<'e>(
+    encoder: &'e mut wgpu::CommandEncoder,
+    label: &str,
+    target: &wgpu::TextureView,
+    clear: bool,
+) -> wgpu::RenderPass<'e> {
+    encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        label: Some(label),
+        color_attachments: &[],
+        depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+            view: target,
+            depth_ops: Some(wgpu::Operations {
+                load: if clear {
+                    wgpu::LoadOp::Clear(1.0)
+                } else {
+                    wgpu::LoadOp::Load
+                },
+                store: wgpu::StoreOp::Store,
+            }),
+            stencil_ops: None,
+        }),
+        ..Default::default()
+    })
 }
 
 #[allow(dead_code)] // layouts and buffers are kept alive with their bind groups
@@ -219,8 +341,8 @@ pub struct Renderer {
     perf: crate::perf::PerfLog,
     /// `render.record_cpu_ms`, averaged.
     thread_cpu: crate::perf::ThreadCpu,
-    /// Which far shadow cascades keep last frame's image.
-    cascade_cache: crate::shadows::CascadeCache,
+    /// Where each shadow map's static image was drawn, and which are drawn again.
+    shadow_cache: crate::shadows::ShadowCache,
     previous: Option<PreviousView>,
     /// How far the camera moved the frame before (camera cut detection).
     prev_step: f64,
@@ -243,6 +365,11 @@ pub struct Renderer {
     probe_gi: crate::probe_gi::ProbeGi,
     /// The main view's world reflections target holds a trace (clear it when they stop).
     world_reflection_written: bool,
+    /// Shadow maps whose static image a feature asked to draw again (`shadow_static_changed`
+    /// after the main view's `prepare_frame`), for the next frame.
+    static_requests: [bool; SHADOW_MAPS],
+    /// Finishes the frame's earlier encoders on worker threads (`RenderSettings::parallel_encoding`).
+    finisher: crate::finish::Finisher,
 }
 
 /// Declares [`ViewState`] with the [`Renderer`] fields that belong to one view, and
@@ -291,7 +418,7 @@ per_view! {
     lens: crate::lens::LensEffects,
     subsurface: Option<crate::subsurface::SubsurfacePass>,
     perf: crate::perf::PerfLog,
-    cascade_cache: crate::shadows::CascadeCache,
+    shadow_cache: crate::shadows::ShadowCache,
     previous: Option<PreviousView>,
     prev_step: f64,
     prev_aa: AntiAliasing,
@@ -391,7 +518,7 @@ impl ViewState {
             lens: Default::default(),
             subsurface: None,
             perf,
-            cascade_cache: Default::default(),
+            shadow_cache: Default::default(),
             previous: None,
             prev_step: 0.0,
             prev_aa: settings.anti_aliasing,
@@ -823,7 +950,7 @@ impl Renderer {
             subsurface: view.subsurface,
             perf: view.perf,
             thread_cpu: Default::default(),
-            cascade_cache: view.cascade_cache,
+            shadow_cache: view.shadow_cache,
             previous: view.previous,
             prev_step: view.prev_step,
             prev_aa: view.prev_aa,
@@ -834,6 +961,8 @@ impl Renderer {
             extra_views: HashMap::new(),
             main_thread_submit_ms: 0.0,
             probe_gi,
+            static_requests: [false; SHADOW_MAPS],
+            finisher: crate::finish::Finisher::new(2),
             world_reflection_written: false,
         })
     }
@@ -1288,6 +1417,7 @@ impl Renderer {
         self.meter.collect(&self.shared.device);
         self.lens.collect();
         self.exposure.measured_ev100 = self.meter.measured_ev100;
+        self.exposure.measured_highlights_ev100 = self.meter.measured_highlights_ev100;
 
         // View & uniforms.
         cpu.step("view");
@@ -1333,12 +1463,27 @@ impl Renderer {
             self.meter.restart();
             self.exposure.snap = true;
         }
-        self.cascade_cache.apply(
+        // Extra views draw every shadow caster straight into their maps each frame.
+        let requests = if is_extra {
+            [false; SHADOW_MAPS]
+        } else {
+            std::mem::take(&mut self.static_requests)
+        };
+        let new_statics = !is_extra && self.shadow.statics.is_none();
+        if new_statics {
+            self.shadow.statics = Some(StaticShadows::new(
+                &self.shared,
+                self.shadow.size,
+                self.shadow.occlusion_size,
+            ));
+        }
+        self.shadow_cache.apply(
             &mut view.cascades,
+            &mut view.sky_occlusion,
+            &mut view.far_shadow,
             view.origin,
-            self.frame_index,
-            settings.shadow_cascade_reuse,
-            !view.history_valid,
+            new_statics || is_extra || settings.shadow_cascade_reuse == 0 || !view.history_valid,
+            requests,
         );
         let mut uniform = frame_uniform(world, &view);
         uniform.shadow_params[3] = self.shadow.size as f32;
@@ -1398,8 +1543,11 @@ impl Renderer {
             view.sky_occlusion.enabled && view.sky_occlusion.map_size != self.shadow.occlusion_size;
         if occlusion_resized {
             self.shadow.occlusion_size = view.sky_occlusion.map_size;
-            self.shadow.occlusion =
-                create_occlusion_target(&self.shared, self.shadow.occlusion_size);
+            (self.shadow.occlusion_texture, self.shadow.occlusion) = create_occlusion_target(
+                &self.shared,
+                self.shadow.occlusion_size,
+                wgpu::TextureUsages::COPY_DST,
+            );
             self.sky_camera
                 .set_inputs(&self.shared, &self.frame_buffer, &self.shadow.occlusion);
         }
@@ -1450,7 +1598,8 @@ impl Renderer {
                 bytemuck::bytes_of(&u),
             );
         }
-        self.write_post_params(&settings, &view, taa);
+        let sun_camera = Vec3::from_slice(&uniform.sun_camera[..3]);
+        self.write_post_params(&settings, &view, taa, sun_camera);
 
         // Prepare features.
         for f in &mut self.features {
@@ -1569,6 +1718,13 @@ impl Renderer {
         for f in &mut self.features {
             f.prepare_frame(&self.shared, &view, &settings, &mut feature_diagnostics);
         }
+        if !extra {
+            for f in &self.features {
+                for (map, asked) in self.static_requests.iter_mut().enumerate() {
+                    *asked |= f.shadow_static_changed(map);
+                }
+            }
+        }
         cpu.inner(std::mem::take(
             &mut *self
                 .shared
@@ -1647,78 +1803,154 @@ impl Renderer {
             self.env_rendered = true;
         }
         let frame_group = &self.frame_group;
+        // The frame so far is finished on a worker while the rest is recorded (`finish.rs`).
+        let new_encoder = |label| {
+            device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some(label) })
+        };
+        let parallel = settings.parallel_encoding;
+        if parallel {
+            self.finisher
+                .send(std::mem::replace(&mut encoder, new_encoder("shadows")));
+        }
 
-        // Shadows.
+        // Shadows: each map's static image (drawn again only when due, `ShadowCache`) copied
+        // in, then what moves drawn on top. Extra views draw everything straight in.
         if view.sun_shadows {
             self.perf.pass(&mut cpu, &mut encoder, "shadows");
-            for i in 0..(view.cascades.count as usize).min(MAX_CASCADES) {
-                // A reused cascade keeps last frame's image.
-                if !view.cascades.drawn[i] {
-                    continue;
-                }
-                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some("shadow cascade"),
-                    color_attachments: &[],
-                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                        view: &self.shadow.layer_views[i],
-                        depth_ops: Some(wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(1.0),
-                            store: wgpu::StoreOp::Store,
-                        }),
-                        stencil_ops: None,
-                    }),
-                    ..Default::default()
-                });
-                pass.set_bind_group(0, &self.shadow.view_bind_groups[i], &[]);
-                for f in &self.features {
-                    f.draw_shadow(&mut pass, i, &ctx);
-                }
+            let size = self.shadow.size;
+            let occlusion_size = self.shadow.occlusion_size;
+            // The map size changed (the cache redraws every map then).
+            if !extra
+                && self
+                    .shadow
+                    .statics
+                    .as_ref()
+                    .is_some_and(|s| s.texture.width() != size)
+            {
+                self.shadow.statics = Some(StaticShadows::new(&self.shared, size, occlusion_size));
             }
-            // The far shadow map: big casters out to `far_shadow_distance`.
-            if view.far_shadow.enabled {
-                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some("far shadow"),
-                    color_attachments: &[],
-                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                        view: &self.shadow.layer_views[FAR_SHADOW_LAYER],
-                        depth_ops: Some(wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(1.0),
-                            store: wgpu::StoreOp::Store,
-                        }),
-                        stencil_ops: None,
-                    }),
-                    ..Default::default()
-                });
-                pass.set_bind_group(0, &self.shadow.view_bind_groups[FAR_SHADOW_VIEW], &[]);
-                for f in &self.features {
-                    f.draw_far_shadow(&mut pass, &ctx);
+            let count = (view.cascades.count as usize).min(MAX_CASCADES);
+            let maps = (0..count)
+                .map(|i| (i, i, view.cascades.static_redraw[i]))
+                .chain(view.far_shadow.enabled.then_some((
+                    FAR_SHADOW_MAP,
+                    FAR_SHADOW_LAYER,
+                    view.far_shadow.static_redraw,
+                )));
+            let shadow = &self.shadow;
+            let statics = shadow.statics.as_ref().filter(|_| !extra);
+            for (map, layer, redraw) in maps {
+                let group = &shadow.view_bind_groups[map];
+                let live = &shadow.layer_views[layer];
+                let draw_moving = |pass: &mut wgpu::RenderPass<'_>| {
+                    pass.set_bind_group(0, group, &[]);
+                    for f in &self.features {
+                        if map == FAR_SHADOW_MAP {
+                            f.draw_far_shadow(pass, &ctx);
+                        } else {
+                            f.draw_shadow(pass, map, &ctx);
+                        }
+                    }
+                };
+                let draw_still = |pass: &mut wgpu::RenderPass<'_>| {
+                    pass.set_bind_group(0, group, &[]);
+                    for f in &self.features {
+                        f.draw_shadow_static(pass, map, &ctx);
+                    }
+                };
+                let Some(statics) = statics else {
+                    let mut pass = depth_pass(&mut encoder, "shadow map", live, true);
+                    draw_still(&mut pass);
+                    draw_moving(&mut pass);
+                    continue;
+                };
+                if redraw {
+                    let mut pass = depth_pass(
+                        &mut encoder,
+                        "shadow static image",
+                        &statics.layers[layer],
+                        true,
+                    );
+                    draw_still(&mut pass);
                 }
+                copy_layer(
+                    &mut encoder,
+                    &statics.texture,
+                    &shadow.texture,
+                    layer as u32,
+                );
+                let mut pass = depth_pass(&mut encoder, "shadow map", live, false);
+                draw_moving(&mut pass);
             }
         }
 
         // Sky occlusion: the highest surface around the camera, seen from above. Cleared to
         // 1 (nothing) when disabled so stale data never darkens the sky light.
         self.perf.pass(&mut cpu, &mut encoder, "sky occlusion");
-        {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("sky occlusion"),
-                color_attachments: &[],
-                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: &self.shadow.occlusion,
-                    depth_ops: Some(wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(1.0),
-                        store: wgpu::StoreOp::Store,
-                    }),
-                    stencil_ops: None,
-                }),
-                ..Default::default()
-            });
-            if view.sky_occlusion.enabled {
-                pass.set_bind_group(0, &self.shadow.view_bind_groups[SKY_OCCLUSION_VIEW], &[]);
-                for f in &self.features {
-                    f.draw_shadow(&mut pass, SKY_OCCLUSION_VIEW, &ctx);
+        if view.sky_occlusion.enabled {
+            let shadow = &mut self.shadow;
+            if !extra
+                && shadow
+                    .statics
+                    .as_ref()
+                    .is_some_and(|s| s.occlusion_size != shadow.occlusion_size)
+            {
+                let statics = shadow.statics.as_mut().expect("checked");
+                statics.occlusion = create_occlusion_target(
+                    &self.shared,
+                    shadow.occlusion_size,
+                    wgpu::TextureUsages::COPY_SRC,
+                );
+                statics.occlusion_size = shadow.occlusion_size;
+            }
+            let shadow = &self.shadow;
+            let group = &shadow.view_bind_groups[SKY_OCCLUSION_VIEW];
+            let statics = shadow.statics.as_ref().filter(|_| !extra);
+            match statics {
+                // Without static images (an extra view, or no sun): everything, straight in.
+                None => {
+                    let mut pass =
+                        depth_pass(&mut encoder, "sky occlusion", &shadow.occlusion, true);
+                    pass.set_bind_group(0, group, &[]);
+                    for f in &self.features {
+                        f.draw_shadow_static(&mut pass, SKY_OCCLUSION_VIEW, &ctx);
+                        f.draw_shadow(&mut pass, SKY_OCCLUSION_VIEW, &ctx);
+                    }
+                }
+                Some(statics) => {
+                    if view.sky_occlusion.static_redraw {
+                        let mut pass = depth_pass(
+                            &mut encoder,
+                            "sky occlusion static image",
+                            &statics.occlusion.1,
+                            true,
+                        );
+                        pass.set_bind_group(0, group, &[]);
+                        for f in &self.features {
+                            f.draw_shadow_static(&mut pass, SKY_OCCLUSION_VIEW, &ctx);
+                        }
+                    }
+                    copy_layer(
+                        &mut encoder,
+                        &statics.occlusion.0,
+                        &shadow.occlusion_texture,
+                        0,
+                    );
+                    let mut pass =
+                        depth_pass(&mut encoder, "sky occlusion", &shadow.occlusion, false);
+                    pass.set_bind_group(0, group, &[]);
+                    for f in &self.features {
+                        f.draw_shadow(&mut pass, SKY_OCCLUSION_VIEW, &ctx);
+                    }
                 }
             }
+        } else {
+            // Cleared to 1 (nothing) when disabled so stale data never darkens the sky light.
+            depth_pass(&mut encoder, "sky occlusion", &self.shadow.occlusion, true);
+        }
+        if parallel {
+            self.finisher
+                .send(std::mem::replace(&mut encoder, new_encoder("scene")));
         }
         self.sky_camera.encode(&mut encoder);
         if !extra {
@@ -1990,6 +2222,11 @@ impl Renderer {
             self.effects.encode_reactive(&mut encoder, &self.targets);
         }
 
+        if parallel {
+            self.finisher
+                .send(std::mem::replace(&mut encoder, new_encoder("post")));
+        }
+
         // Depth of field, on the scene before TAA (see depth_of_field.rs).
         self.perf.pass(&mut cpu, &mut encoder, "depth of field");
         self.lens.encode_depth_of_field(
@@ -2192,12 +2429,15 @@ impl Renderer {
         let finishing = Instant::now();
         let commands = encoder.finish();
         let finish_ms = finishing.elapsed().as_secs_f64() * 1000.0;
+        cpu.step("wait for the finishing threads");
+        let mut buffers = self.finisher.collect();
+        buffers.push(commands);
         cpu.step("submit");
         let submitting = Instant::now();
         let side = self.shared.take_side_commands();
         self.shared
             .queue
-            .submit(side.commands.into_iter().chain([commands]));
+            .submit(side.commands.into_iter().chain(buffers));
         side.after.into_iter().for_each(|f| f());
         let side_work = if extra {
             Default::default()
@@ -2327,6 +2567,9 @@ impl Renderer {
                 "render.pending_upload_mb",
                 mb(self.shared.uploads.pending()),
             );
+            if let Some(ev) = self.meter.measured_highlights_ev100 {
+                d.set("render.ev100_highlights", ev as f64);
+            }
             if let Some(ev) = self.meter.measured_ev100 {
                 d.set("render.ev100_metered", ev as f64);
             }
@@ -2407,8 +2650,15 @@ impl Renderer {
         world.insert_resource(back.stats);
     }
 
-    /// `taa`: temporal anti-aliasing runs this frame (its softness is sharpened back).
-    fn write_post_params(&self, settings: &RenderSettings, view: &ViewData, taa: bool) {
+    /// `taa`: temporal anti-aliasing runs this frame (its softness is sharpened back);
+    /// `sun_camera`: the sun's color times illuminance reaching the camera (lux).
+    fn write_post_params(
+        &self,
+        settings: &RenderSettings,
+        view: &ViewData,
+        taa: bool,
+        sun_camera: Vec3,
+    ) {
         let tonemapper = match settings.tonemapper {
             Tonemapper::AgX => 0.0,
             Tonemapper::Aces => 1.0,
@@ -2443,8 +2693,16 @@ impl Renderer {
                 view.exposure,
                 settings.night_desaturation,
             ],
-            params4: [if upscaled { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0],
+            params4: [
+                if upscaled { 1.0 } else { 0.0 },
+                view.viewport_size.x.max(1) as f32 / view.viewport_size.y.max(1) as f32,
+                (view.fov_y * 0.5).tan(),
+                0.0,
+            ],
+            sun: [0.0; 4],
+            sun_light: [0.0; 4],
         };
+        let u = sun_glare_params(u, settings, view, sun_camera);
         self.shared
             .queue
             .write_buffer(&self.post.params, 0, bytemuck::bytes_of(&u));
@@ -2623,7 +2881,9 @@ fn create_shadow_resources(shared: &GpuShared, size: u32, occlusion_size: u32) -
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
         format: shared.formats.shadow,
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+            | wgpu::TextureUsages::TEXTURE_BINDING
+            | wgpu::TextureUsages::COPY_DST,
         view_formats: &[],
     });
     let array_view = texture.create_view(&wgpu::TextureViewDescriptor {
@@ -2631,17 +2891,7 @@ fn create_shadow_resources(shared: &GpuShared, size: u32, occlusion_size: u32) -
         dimension: Some(wgpu::TextureViewDimension::D2Array),
         ..Default::default()
     });
-    let layer_views = (0..=FAR_SHADOW_LAYER as u32)
-        .map(|i| {
-            texture.create_view(&wgpu::TextureViewDescriptor {
-                label: Some("shadow layer"),
-                dimension: Some(wgpu::TextureViewDimension::D2),
-                base_array_layer: i,
-                array_layer_count: Some(1),
-                ..Default::default()
-            })
-        })
-        .collect();
+    let layer_views = layer_views(&texture);
     let view_buffers: Vec<wgpu::Buffer> = (0..=FAR_SHADOW_VIEW)
         .map(|_| {
             device.create_buffer(&wgpu::BufferDescriptor {
@@ -2675,6 +2925,7 @@ fn create_shadow_resources(shared: &GpuShared, size: u32, occlusion_size: u32) -
         compare: Some(wgpu::CompareFunction::LessEqual),
         ..Default::default()
     });
+    let occlusion = create_occlusion_target(shared, occlusion_size, wgpu::TextureUsages::COPY_DST);
     ShadowResources {
         texture,
         array_view,
@@ -2683,29 +2934,37 @@ fn create_shadow_resources(shared: &GpuShared, size: u32, occlusion_size: u32) -
         view_bind_groups,
         compare_sampler,
         size,
-        occlusion: create_occlusion_target(shared, occlusion_size),
+        occlusion: occlusion.1,
+        occlusion_texture: occlusion.0,
         occlusion_size,
+        statics: None,
     }
 }
 
-fn create_occlusion_target(shared: &GpuShared, size: u32) -> wgpu::TextureView {
-    shared
-        .device
-        .create_texture(&wgpu::TextureDescriptor {
-            label: Some("sky occlusion"),
-            size: wgpu::Extent3d {
-                width: size,
-                height: size,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: shared.formats.shadow,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
-            view_formats: &[],
-        })
-        .create_view(&wgpu::TextureViewDescriptor::default())
+/// The sky occlusion map's depth texture (`extra` usage: copies into or out of it).
+fn create_occlusion_target(
+    shared: &GpuShared,
+    size: u32,
+    extra: wgpu::TextureUsages,
+) -> (wgpu::Texture, wgpu::TextureView) {
+    let texture = shared.device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("sky occlusion"),
+        size: wgpu::Extent3d {
+            width: size,
+            height: size,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: shared.formats.shadow,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+            | wgpu::TextureUsages::TEXTURE_BINDING
+            | extra,
+        view_formats: &[],
+    });
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    (texture, view)
 }
 
 /// Group 0 bind groups for every kind of pass.
@@ -2922,6 +3181,38 @@ pub(crate) fn fullscreen_pipeline(
         })
 }
 
+/// The sun's glare in the tonemap (`sun_glare` in post.wgsl): where the sun is in the image and
+/// how bright, when it is in front of a perspective camera and `RenderSettings::sun_glare` is on.
+fn sun_glare_params(
+    mut u: PostUniform,
+    settings: &RenderSettings,
+    view: &ViewData,
+    sun_camera: Vec3,
+) -> PostUniform {
+    let radius = view.sun_angular_radius;
+    if settings.sun_glare <= 0.0 || view.orthographic || view.fov_y <= 0.0 || radius <= 0.0 {
+        return u;
+    }
+    // A direction projects like a point at infinity.
+    let clip = view.unjittered_view_proj * view.sun_dir.extend(0.0);
+    if clip.w <= 1e-4 {
+        return u;
+    }
+    let ndc = clip.truncate().truncate() / clip.w;
+    let uv = [ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5];
+    if !(-0.1..=1.1).contains(&uv[0]) || !(-0.1..=1.1).contains(&uv[1]) {
+        return u;
+    }
+    let light = sun_camera * view.exposure;
+    let solid_angle = std::f32::consts::PI * radius * radius;
+    let lum = light.dot(Vec3::new(0.2126, 0.7152, 0.0722));
+    // The sky clamps what it writes (`fs_sky`): the uncovered disc reads no more than that.
+    let disc = (lum / solid_angle).min(50_000.0);
+    u.sun = [uv[0], uv[1], radius, settings.sun_glare];
+    u.sun_light = [light.x, light.y, light.z, disc];
+    u
+}
+
 fn texture_sampler_layout(
     device: &wgpu::Device,
     label: &str,
@@ -2932,7 +3223,7 @@ fn texture_sampler_layout(
     let mut entries = vec![
         layout_entry(
             0,
-            S::FRAGMENT,
+            S::VERTEX_FRAGMENT,
             wgpu::BindingType::Texture {
                 sample_type: wgpu::TextureSampleType::Float { filterable: true },
                 view_dimension: wgpu::TextureViewDimension::D2,
@@ -2941,14 +3232,14 @@ fn texture_sampler_layout(
         ),
         layout_entry(
             1,
-            S::FRAGMENT,
+            S::VERTEX_FRAGMENT,
             wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
         ),
     ];
     if with_uniform {
         entries.push(layout_entry(
             2,
-            S::FRAGMENT,
+            S::VERTEX_FRAGMENT,
             wgpu::BindingType::Buffer {
                 ty: wgpu::BufferBindingType::Uniform,
                 has_dynamic_offset: false,
@@ -2959,7 +3250,7 @@ fn texture_sampler_layout(
     if with_second_texture {
         entries.push(layout_entry(
             3,
-            S::FRAGMENT,
+            S::VERTEX_FRAGMENT,
             wgpu::BindingType::Texture {
                 sample_type: wgpu::TextureSampleType::Float { filterable: true },
                 view_dimension: wgpu::TextureViewDimension::D2,
@@ -2991,7 +3282,7 @@ fn create_post(
         shared,
         "tonemap",
         &post_module,
-        "vs_fullscreen",
+        "vs_tonemap",
         "fs_tonemap",
         &[&tonemap_layout],
         shared.formats.ldr,

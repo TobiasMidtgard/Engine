@@ -72,6 +72,9 @@ pub struct ExposureMeter {
     pending: Option<usize>,
     /// Latest measurement (EV100 of the metered average, without compensation).
     pub measured_ev100: Option<f32>,
+    /// The same reading's highlights: the EV100 of the brightest metered pixels
+    /// (`highlights_ev100_from_histogram`).
+    pub measured_highlights_ev100: Option<f32>,
     /// Bumped by [`ExposureMeter::restart`]; readings recorded before it are dropped.
     generation: u64,
 }
@@ -168,6 +171,7 @@ impl ExposureMeter {
             readbacks,
             pending: None,
             measured_ev100: None,
+            measured_highlights_ev100: None,
             generation: 0,
         }
     }
@@ -245,6 +249,7 @@ impl ExposureMeter {
     pub fn restart(&mut self) {
         self.generation += 1;
         self.measured_ev100 = None;
+        self.measured_highlights_ev100 = None;
     }
 
     /// Start mapping this frame's readback (call right after `queue.submit`).
@@ -278,6 +283,7 @@ impl ExposureMeter {
                         && let Some(ev) = ev100_from_histogram(&bins)
                     {
                         self.measured_ev100 = Some(ev);
+                        self.measured_highlights_ev100 = highlights_ev100_from_histogram(&bins);
                     }
                 }
                 FAILED => {
@@ -324,9 +330,63 @@ pub fn ev100_from_histogram(bins: &[u32]) -> Option<f32> {
     Some(avg_log2 + (100.0f32 / 12.5).log2())
 }
 
+/// Where the brightest metered pixels start: the EV100 of the `HIGHLIGHT_PERCENT` point of the
+/// metered (non-black, center-weighted) distribution. Auto exposure keeps them from blowing out
+/// (`HIGHLIGHT_HEADROOM_EV`); the metered average ignores them.
+pub fn highlights_ev100_from_histogram(bins: &[u32]) -> Option<f32> {
+    let n = bins.len() as f32;
+    let first = (((BLACK_LOG2 - MIN_LOG2) / RANGE_LOG2) * n).ceil().max(0.0) as usize;
+    let bins = &bins[first.min(bins.len())..];
+    let total: f64 = bins.iter().map(|&b| b as f64).sum();
+    if total <= 0.0 {
+        return None;
+    }
+    let at = total * HIGHLIGHT_PERCENT as f64;
+    let mut seen = 0.0f64;
+    for (i, &b) in bins.iter().enumerate() {
+        let count = b as f64;
+        if seen + count >= at && count > 0.0 {
+            // Within the bin, as far as the point lies in it.
+            let into = ((at - seen) / count) as f32;
+            let log2_l = MIN_LOG2 + ((first + i) as f32 + into) / n * RANGE_LOG2;
+            return Some(log2_l + (100.0f32 / 12.5).log2());
+        }
+        seen += count;
+    }
+    None
+}
+
+/// The share of the metered pixels below the highlights (`highlights_ev100_from_histogram`):
+/// the brightest 5% are the highlights.
+pub const HIGHLIGHT_PERCENT: f32 = 0.95;
+
+/// How many EV the highlights may sit above the exposure (EV100 of the image's white): at 4.5
+/// they show at about twice white before tonemapping, bright but not blown out. A white
+/// marble wall in lamplight beside a dim courtyard would otherwise be exposed for the
+/// courtyard and blow out; a sunny view (highlights a few EV above the exposure) is untouched.
+pub const HIGHLIGHT_HEADROOM_EV: f32 = 4.5;
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn highlights_read_the_brightest_pixels() {
+        // Most pixels at 2^0 cd/m², a tenth at 2^8.
+        let mut bins = vec![0u32; BINS];
+        let bin = |log2: f32| ((log2 - MIN_LOG2) / RANGE_LOG2 * BINS as f32) as usize;
+        bins[bin(0.0)] = 900;
+        bins[bin(8.0)] = 100;
+        let avg = ev100_from_histogram(&bins).expect("a reading");
+        let high = highlights_ev100_from_histogram(&bins).expect("highlights");
+        assert!((high - (8.0 + 3.0)).abs() < 0.6, "highlights at {high}");
+        assert!(high > avg + 3.0, "highlights {high} vs average {avg}");
+        // Without bright pixels the highlights are where everything is.
+        let mut flat = vec![0u32; BINS];
+        flat[bin(0.0)] = 1000;
+        let high = highlights_ev100_from_histogram(&flat).expect("highlights");
+        assert!((high - 3.0).abs() < 0.6, "flat highlights at {high}");
+    }
 
     fn bin_for(l: f32) -> usize {
         (((l.log2() - MIN_LOG2) / RANGE_LOG2) * BINS as f32) as usize
