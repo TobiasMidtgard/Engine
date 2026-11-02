@@ -186,20 +186,55 @@ pub fn ensure_materials(world: &mut World) {
         return;
     }
     let start = std::time::Instant::now();
-    let wood = texgen::wood(WOOD_SIZE);
+    // The generators are independent and pure CPU work: run them side by side on scoped
+    // threads instead of one after another (the serial build was a 7.4 s load hitch on
+    // the round 21 PC profile; the largest single texture now sets the time).
     let paints: Vec<Vec3> = PAINTS.iter().map(|&c| Vec3::from(c)).collect();
-    let (paint_albedos, paint_normal, paint_orm) = texgen::painted_steel(SIZE, &paints);
-    let galv = texgen::galvanized(SIZE);
-    let iron = texgen::cast_iron(SIZE, Vec3::new(0.035, 0.065, 0.05));
-    let metal = texgen::worn_metal(SIZE);
-    let stone = texgen::stone(SIZE);
-    let concrete = texgen::concrete(SIZE);
-    let rope = texgen::rope(ROPE_SIZE);
-    let varnish = texgen::varnished_wood(VARNISH_SIZE.0, VARNISH_SIZE.1);
-    let enamel = texgen::gloss_paint(PAINT_SIZE);
-    let antifoul = texgen::antifoul(ANTIFOUL_SIZE);
-    let marble = texgen::marble(MARBLE_SIZE);
-    let bamboo = texgen::bamboo(BAMBOO_SIZE.0, BAMBOO_SIZE.1);
+    let (
+        wood,
+        (paint_albedos, paint_normal, paint_orm),
+        galv,
+        iron,
+        metal,
+        stone,
+        concrete,
+        rope,
+        varnish,
+        enamel,
+        antifoul,
+        marble,
+        bamboo,
+    ) = std::thread::scope(|s| {
+        let wood = s.spawn(|| texgen::wood(WOOD_SIZE));
+        let paint = s.spawn(|| texgen::painted_steel(SIZE, &paints));
+        let galv = s.spawn(|| texgen::galvanized(SIZE));
+        let iron = s.spawn(|| texgen::cast_iron(SIZE, Vec3::new(0.035, 0.065, 0.05)));
+        let metal = s.spawn(|| texgen::worn_metal(SIZE));
+        let stone = s.spawn(|| texgen::stone(SIZE));
+        let concrete = s.spawn(|| texgen::concrete(SIZE));
+        let rope = s.spawn(|| texgen::rope(ROPE_SIZE));
+        let varnish = s.spawn(|| texgen::varnished_wood(VARNISH_SIZE.0, VARNISH_SIZE.1));
+        let enamel = s.spawn(|| texgen::gloss_paint(PAINT_SIZE));
+        let antifoul = s.spawn(|| texgen::antifoul(ANTIFOUL_SIZE));
+        let marble = s.spawn(|| texgen::marble(MARBLE_SIZE));
+        let bamboo = s.spawn(|| texgen::bamboo(BAMBOO_SIZE.0, BAMBOO_SIZE.1));
+        let done = "softbody yard: a texture generator panicked";
+        (
+            wood.join().expect(done),
+            paint.join().expect(done),
+            galv.join().expect(done),
+            iron.join().expect(done),
+            metal.join().expect(done),
+            stone.join().expect(done),
+            concrete.join().expect(done),
+            rope.join().expect(done),
+            varnish.join().expect(done),
+            enamel.join().expect(done),
+            antifoul.join().expect(done),
+            marble.join().expect(done),
+            bamboo.join().expect(done),
+        )
+    });
     let mut bytes: usize = [
         &wood, &galv, &iron, &metal, &stone, &concrete, &rope, &varnish, &enamel, &antifoul,
         &marble, &bamboo,
@@ -507,5 +542,27 @@ mod tests {
             .iter(&world)
             .count();
         assert!(solids > 70, "only {solids} solid props");
+    }
+
+    /// The yard's materials are all made in one go (their textures built side by side)
+    /// and a second call keeps the first set.
+    #[test]
+    fn yard_materials_are_made_once_with_every_texture() {
+        let mut world = World::new();
+        world.insert_resource(Assets::<Image>::default());
+        world.insert_resource(Assets::<StandardMaterial>::default());
+        let start = std::time::Instant::now();
+        ensure_materials(&mut world);
+        eprintln!("yard materials: {:.2} s", start.elapsed().as_secs_f64());
+        let images = world.resource::<Assets<Image>>().len();
+        let mats = world.resource::<Assets<StandardMaterial>>();
+        for m in Mat::ALL {
+            assert!(mats.loaded_by_key(&m.key()).is_some(), "{m:?} missing");
+        }
+        let made = mats.len();
+        ensure_materials(&mut world);
+        assert_eq!(world.resource::<Assets<StandardMaterial>>().len(), made);
+        assert_eq!(world.resource::<Assets<Image>>().len(), images);
+        assert!(images >= 3 * 12, "only {images} images");
     }
 }
