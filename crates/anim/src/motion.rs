@@ -930,7 +930,9 @@ impl MotionPlayer {
                         .map(|e| (e.1.clone(), e.2.clone())),
                 );
             }
-            *frame = next;
+            // Never past the clip's last frame: a long frame (a hitch, a slow machine) would
+            // otherwise run on into the next clip, or past the database's end.
+            *frame = next.min((db.end_of(f) - 1) as f32);
         }
         self.since_search += dt;
         self.played.retain_mut(|p| {

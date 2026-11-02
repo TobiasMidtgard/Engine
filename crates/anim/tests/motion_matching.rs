@@ -300,3 +300,33 @@ fn every_frame_is_labelled_with_the_feet_on_the_ground() {
     let walk = db.first_frame("walk_moving").unwrap();
     assert!((walk..walk + 30).all(|f| !down(db.contacts(f), 0)));
 }
+
+#[test]
+fn long_frames_stay_inside_the_clip_playing() {
+    // Round 21 on the PC: at 5 fps a step of several frames ran past the database's last frame
+    // and the next search indexed out of bounds.
+    let (_, _, db) = setup();
+    let db = Arc::new(db);
+    let s = humanoid::skeleton();
+    let mut player = MotionPlayer::new(db.clone(), &s).unwrap();
+    let mut pose: Vec<Xf> = vec![Xf::IDENTITY; db.bone_count()];
+    let mut events = Vec::new();
+    for (i, p) in [
+        params(0.0, 1.0, 0.0),
+        params(0.0, -1.0, 0.0),
+        params(RUN_SPEED, 0.0, 0.0),
+        params(WALK_SPEED, 0.5, 0.0),
+    ]
+    .iter()
+    .cycle()
+    .take(16)
+    .enumerate()
+    {
+        for k in 0..30 {
+            let dt = [0.2, 0.35, 0.5][(i + k) % 3];
+            player.update(p, dt, &mut pose, &mut events);
+            let f = player.frame().unwrap();
+            assert!(f < db.frame_count(), "frame {f} of {}", db.frame_count());
+        }
+    }
+}
