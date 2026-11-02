@@ -363,3 +363,136 @@ fn a_mirror_reflects_what_is_above_it_even_off_screen_and_nothing_under_it() {
         "{green} pixels show the green ball under the mirror"
     );
 }
+
+/// A white wall behind the mirror with a post's shadow on it, seen in the mirror: rendered with
+/// the mirror lit by the main view's shadow maps (`mirror_shares_lighting`) or by its own.
+/// Returns the shot and how many extra views borrowed the main view's maps.
+fn render_wall(share: bool) -> Option<(image::RgbImage, f64)> {
+    engine_core::log::init("error");
+    let mut app = App::new();
+    app.world.resource_mut::<EngineConfig>().headless = true;
+    {
+        let mut w = app.world.resource_mut::<Window>();
+        w.width = WINDOW.x;
+        w.height = WINDOW.y;
+    }
+    app.add_plugins(RenderPlugin);
+    app.add_render_feature(MirrorFeature::default());
+    {
+        let mut s = app.world.resource_mut::<RenderSettings>();
+        s.anti_aliasing = AntiAliasing::None;
+        s.film_grain = 0.0;
+        s.screen_space_gi = false;
+        s.probe_gi = false;
+        s.mirror_shares_lighting = share;
+    }
+    let w = &mut app.world;
+    w.spawn((
+        Camera {
+            exposure: Exposure::Manual { ev100: 14.0 },
+            ..Camera::perspective(FOV)
+        },
+        Transform::from_translation(EYE).looking_at(TARGET, Vec3::Y),
+    ));
+    w.spawn((
+        DirectionalLight::default(),
+        Transform::default().looking_at(SUN_TRAVEL, Vec3::Y),
+    ));
+    w.spawn((
+        Transform::default(),
+        PlanarReflection::new(Vec2::splat(SIZE)).with_resolution(1.0),
+    ));
+    w.spawn((
+        Transform::from_translation(DVec3::new(0.0, 2.0, WALL_Z - 0.25)),
+        MeshRenderer::new(
+            Shape::Cuboid {
+                size: [8.0, 4.0, 0.5],
+            },
+            StandardMaterial::color(0.8, 0.8, 0.8),
+        ),
+    ));
+    w.spawn((
+        Transform::from_translation(DVec3::new(0.0, 2.0, POST_Z)),
+        MeshRenderer::new(
+            Shape::Cuboid {
+                size: [0.4, 4.0, 0.4],
+            },
+            StandardMaterial::color(0.8, 0.8, 0.8),
+        ),
+    ));
+    app.update_n(5);
+    if let Some(d) = app.world.get_resource::<RenderDisabled>() {
+        eprintln!("skipping: no GPU ({})", d.0);
+        return None;
+    }
+    let dir = std::env::temp_dir().join("engine-planar-reflections");
+    let _ = std::fs::create_dir_all(&dir);
+    let name = format!("wall-shared-{share}.png");
+    let path = dir.join(&name);
+    capture_now(&mut app.world, &path).expect("screenshot");
+    if let Ok(out) = std::env::var("ENGINE_SHOTS") {
+        let _ = std::fs::copy(&path, std::path::Path::new(&out).join(&name));
+    }
+    let shared = app
+        .world
+        .resource::<Diagnostics>()
+        .get("render.extra_views_shared_lighting")
+        .unwrap_or(0.0);
+    Some((image::open(&path).expect("read the shot").to_rgb8(), shared))
+}
+
+/// Where the sun's light travels: down, away from the camera and a little to the right.
+const SUN_TRAVEL: DVec3 = DVec3::new(0.3, -0.5, -0.8);
+/// The wall's front face and the post in front of it.
+const WALL_Z: f64 = -8.0;
+const POST_Z: f64 = -6.0;
+
+/// Where the post's shadow falls on the wall's face at `height`.
+fn post_shadow(height: f64) -> DVec3 {
+    let t = (POST_Z - WALL_Z) / -SUN_TRAVEL.z;
+    DVec3::new(SUN_TRAVEL.x * t, 0.0, WALL_Z) + DVec3::Y * height
+}
+
+#[test]
+fn a_mirror_lit_by_the_main_views_shadow_maps_shows_the_same_shadows() {
+    let (Some((own, own_shared)), Some((borrowed, shared))) =
+        (render_wall(false), render_wall(true))
+    else {
+        return;
+    };
+    assert_eq!(own_shared, 0.0, "the mirror drew its own maps");
+    assert_eq!(shared, 1.0, "the mirror borrowed the main view's maps");
+    // In the reflection: the post's shadow on the wall (it reaches 2.75 m up the wall), and the
+    // lit wall beside it.
+    let shadow = mirrored(post_shadow(1.5));
+    let lit = mirrored(DVec3::new(-2.5, 1.5, WALL_Z));
+    let luma = |shot: &image::RgbImage, p: DVec3| {
+        let q = pixel(p);
+        assert!(
+            q.cmpge(IVec2::ZERO).all() && q.cmplt(WINDOW.as_ivec2()).all(),
+            "{p} is off screen at {q}"
+        );
+        let c = shot.get_pixel(q.x as u32, q.y as u32).0;
+        (
+            c[0] as f32 * 0.2126 + c[1] as f32 * 0.7152 + c[2] as f32 * 0.0722,
+            c,
+        )
+    };
+    for (name, shot) in [("own maps", &own), ("borrowed maps", &borrowed)] {
+        let (dark, dark_rgb) = luma(shot, shadow);
+        let (bright, bright_rgb) = luma(shot, lit);
+        assert!(
+            bright > dark + 40.0,
+            "{name}: the reflected wall in the post's shadow {dark_rgb:?} is not darker than \
+             the lit wall {bright_rgb:?}"
+        );
+    }
+    for p in [shadow, lit] {
+        let (a, a_rgb) = luma(&own, p);
+        let (b, b_rgb) = luma(&borrowed, p);
+        assert!(
+            (a - b).abs() < 12.0,
+            "the reflection at {p} differs: own maps {a_rgb:?}, borrowed {b_rgb:?}"
+        );
+    }
+}

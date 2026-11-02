@@ -10,7 +10,9 @@
 //!
 //! The first number is the frames averaged per run (30); `--small` renders 480x270 instead of
 //! 1600x900 (lavapipe). Lavapipe's ratios are not a GPU's (its rasterizer and compute run on the
-//! CPU): read the shares on a real GPU.
+//! CPU): read the shares on a real GPU. The last two runs add a lake-sized mirror
+//! (`PlanarReflection`) in front of the camera and print its view's cost (`render.extra_views*`)
+//! with its own shadow maps and with the main view's (`mirror_shares_lighting`).
 
 use std::collections::BTreeMap;
 
@@ -21,7 +23,7 @@ use engine_render::prelude::*;
 
 type Tweak = fn(&mut RenderSettings);
 
-fn scene(width: u32, height: u32, tweak: Tweak) -> App {
+fn scene(width: u32, height: u32, tweak: Tweak, mirror: bool) -> App {
     engine_core::log::init("error");
     let mut app = App::new();
     app.world.resource_mut::<EngineConfig>().headless = true;
@@ -65,6 +67,12 @@ fn scene(width: u32, height: u32, tweak: Tweak) -> App {
             ),
         ));
     }
+    if mirror {
+        w.spawn((
+            Transform::from_xyz(0.0, 0.05, -20.0),
+            engine_render::PlanarReflection::new(Vec2::new(60.0, 30.0)),
+        ));
+    }
     w.spawn((
         Camera::perspective(70.0),
         Transform::from_xyz(0.0, 3.0, 4.0).looking_at(DVec3::new(0.0, 1.0, -30.0), Vec3::Y),
@@ -88,9 +96,9 @@ fn size() -> (u32, u32) {
     }
 }
 
-fn measure(frames: usize, tweak: Tweak) -> Option<BTreeMap<String, f64>> {
+fn measure(frames: usize, tweak: Tweak, mirror: bool) -> Option<BTreeMap<String, f64>> {
     let (width, height) = size();
-    let mut app = scene(width, height, tweak);
+    let mut app = scene(width, height, tweak, mirror);
     app.update_n(20);
     if app.world.get_resource::<RenderDisabled>().is_some() {
         return None;
@@ -102,6 +110,8 @@ fn measure(frames: usize, tweak: Tweak) -> Option<BTreeMap<String, f64>> {
         for (k, v) in &d.metrics {
             if let Some(pass) = k.strip_prefix("render.gpu.") {
                 *sums.entry(pass.to_string()).or_default() += v / frames as f64;
+            } else if k.starts_with("render.extra_views") {
+                *sums.entry(k.to_string()).or_default() += v / frames as f64;
             }
         }
     }
@@ -130,7 +140,7 @@ fn main() {
     ];
     let mut base: Option<BTreeMap<String, f64>> = None;
     for (name, tweak) in runs {
-        let Some(m) = measure(frames, tweak) else {
+        let Some(m) = measure(frames, tweak, false) else {
             eprintln!("no GPU");
             return;
         };
@@ -159,5 +169,22 @@ fn main() {
             }
             base = Some(m);
         }
+    }
+    let mirrors: [(&str, Tweak); 2] = [
+        ("mirror, own maps", |s| s.mirror_shares_lighting = false),
+        ("mirror, main view's", |_| {}),
+    ];
+    for (name, tweak) in mirrors {
+        let Some(m) = measure(frames, tweak, true) else {
+            return;
+        };
+        let get = |k: &str| m.get(k).copied().unwrap_or(0.0);
+        println!(
+            "{name:<22} extra view CPU {:6.2} ms  GPU {:6.2} ms  (views {:.0}, sharing {:.0})",
+            get("render.extra_views_ms"),
+            get("render.extra_views_gpu_ms"),
+            get("render.extra_views"),
+            get("render.extra_views_shared_lighting"),
+        );
     }
 }

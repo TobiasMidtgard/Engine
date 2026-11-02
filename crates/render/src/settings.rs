@@ -324,6 +324,13 @@ pub struct RenderSettings {
     /// travels 50 m. The sky changes slowly, so 4 looks the same as 1 for a quarter of the cost
     /// (Unreal's real-time sky light capture is time-sliced the same way).
     pub environment_interval: u32,
+    /// A mirror's view ([`crate::PlanarReflection`]) lights the reflected scene with the main
+    /// view's last sun shadow maps, sky occlusion, environment, cloud shadow and surface
+    /// weather maps instead of drawing its own: all of them are centered on the camera's
+    /// position, which a horizontal mirror's camera shares (Unreal's planar reflections and
+    /// HDRP's planar probe likewise skip shadow maps of their own). Off: the mirror draws its
+    /// own every frame.
+    pub mirror_shares_lighting: bool,
     /// The sky's own flat cloud layer (a 2D deck 1.5 km up whose cover follows
     /// `WeatherState::cloud_cover`), in the sky and in the environment map that lights the
     /// scene. Turn it off when a feature draws its own clouds over the sky (volumetric clouds):
@@ -515,6 +522,7 @@ impl Default for RenderSettings {
             debug_view: DebugView::None,
             perf_log_secs: 10.0,
             environment_interval: 4,
+            mirror_shares_lighting: true,
             sky_cloud_layer: true,
             sky_occlusion: true,
             sky_occlusion_extent: 256.0,

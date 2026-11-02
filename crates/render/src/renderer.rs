@@ -354,6 +354,10 @@ pub struct Renderer {
     prev_exposure: f32,
     frame_index: u64,
     last_view: Option<ViewData>,
+    /// Where the cloud shadow map was placed in the last extracted frame.
+    last_cloud_area: Option<CloudShadowArea>,
+    /// A mirror's view: the main view's maps it lights with (none for the main view).
+    borrowed: Option<SharedLighting>,
     /// The last recorded frame's results, until `apply_return` hands them to the world.
     returned: Option<RenderReturn>,
     /// Each `ExtraView` camera's own resources and history, by camera.
@@ -425,6 +429,8 @@ per_view! {
     prev_aa: AntiAliasing,
     prev_exposure: f32,
     last_view: Option<ViewData>,
+    last_cloud_area: Option<CloudShadowArea>,
+    borrowed: Option<SharedLighting>,
 }
 
 impl ViewState {
@@ -487,6 +493,7 @@ impl ViewState {
             &screen_stand_ins,
             &cloud_shadows,
             gi_atlas,
+            None,
         );
         let post = create_post(shared, &targets, surface);
         let effects = ScreenEffects::new(shared, &targets);
@@ -525,6 +532,8 @@ impl ViewState {
             prev_aa: settings.anti_aliasing,
             prev_exposure: 0.0,
             last_view: None,
+            last_cloud_area: None,
+            borrowed: None,
         }
     }
 }
@@ -547,6 +556,69 @@ struct Composite {
 struct ExtraJob {
     size: UVec2,
     settings: RenderSettings,
+}
+
+/// The main view's maps a mirror's view binds instead of its own
+/// (`RenderSettings::mirror_shares_lighting`); compared to rebuild its bind groups on a change.
+#[derive(Clone, PartialEq)]
+struct SharedMaps {
+    shadows: wgpu::TextureView,
+    occlusion: wgpu::TextureView,
+    env_specular: wgpu::TextureView,
+    env_irradiance: wgpu::TextureView,
+    surface: wgpu::TextureView,
+    clouds: wgpu::TextureView,
+}
+
+/// What a mirror's view lights its scene with from the main view's last frame instead of
+/// drawing its own (`RenderSettings::mirror_shares_lighting`): the sun's shadow maps, sky
+/// occlusion, environment, cloud shadow and surface weather maps. All are placed around the
+/// camera's position (cascades are squares centered on it, picked by distance), which a
+/// mirror's camera shares but for the mirrored height, so the main view's maps hold what the
+/// reflection shows; a point above the plane is never nearer the main camera than the mirrored
+/// one, so its cascade (picked by distance from the mirrored eye) always holds it.
+#[derive(Clone)]
+struct SharedLighting {
+    maps: SharedMaps,
+    /// The main view's eye that frame: its maps' matrices are relative to it.
+    origin: DVec3,
+    sun_shadows: bool,
+    cascades: crate::shadows::Cascades,
+    far_shadow: crate::shadows::FarShadowView,
+    sky_occlusion: crate::shadows::SkyOcclusionView,
+    shadow_size: u32,
+    /// The surface weather map's frame parameters at `origin`.
+    surface: ([f32; 4], [f32; 4]),
+    cloud_area: Option<CloudShadowArea>,
+}
+
+impl SharedLighting {
+    /// Main-view-relative matrices made relative to `origin` (this view's eye) instead.
+    fn place(&self, view: &mut ViewData) {
+        let shift = Mat4::from_translation((view.origin - self.origin).as_vec3());
+        view.sun_shadows = self.sun_shadows;
+        view.cascades = self.cascades;
+        for i in 0..MAX_CASCADES {
+            view.cascades.view_proj[i] *= shift;
+            view.cascades.light_view[i] *= shift;
+        }
+        view.far_shadow = self.far_shadow;
+        view.far_shadow.view_proj *= shift;
+        view.far_shadow.light_view *= shift;
+        view.sky_occlusion = self.sky_occlusion;
+        view.sky_occlusion.view_proj *= shift;
+        view.sky_occlusion.view *= shift;
+    }
+
+    /// The surface weather map's frame parameters for a view at `origin`.
+    fn surface_params(&self, origin: DVec3) -> ([f32; 4], [f32; 4]) {
+        let (mut map, open) = self.surface;
+        if map[2] > 0.0 {
+            map[0] += (self.origin.x - origin.x) as f32;
+            map[1] += (self.origin.z - origin.z) as f32;
+        }
+        (map, open)
+    }
 }
 
 /// What [`Renderer::extract_frame`] takes from the world for [`Renderer::record_submit`]: the
@@ -958,6 +1030,8 @@ impl Renderer {
             prev_exposure: view.prev_exposure,
             frame_index: 0,
             last_view: view.last_view,
+            last_cloud_area: view.last_cloud_area,
+            borrowed: view.borrowed,
             returned: None,
             extra_views: HashMap::new(),
             main_thread_submit_ms: 0.0,
@@ -1096,6 +1170,60 @@ impl Renderer {
         }
     }
 
+    /// The main view's last frame's lighting, for a mirror's view to borrow (`SharedLighting`);
+    /// `None` before the main view's first frame. Call with the main view's state in place.
+    fn lighting_to_share(&self) -> Option<SharedLighting> {
+        let last = self.last_view.as_ref()?;
+        Some(SharedLighting {
+            maps: SharedMaps {
+                shadows: self.shadow.array_view.clone(),
+                occlusion: self.shadow.occlusion.clone(),
+                env_specular: self.environment.specular.clone(),
+                env_irradiance: self.environment.irradiance.view.clone(),
+                surface: self.surface_weather.view.clone(),
+                clouds: self.cloud_shadows.view.clone(),
+            },
+            origin: last.origin,
+            sun_shadows: last.sun_shadows,
+            cascades: last.cascades,
+            far_shadow: last.far_shadow,
+            sky_occlusion: last.sky_occlusion,
+            shadow_size: self.shadow.size,
+            surface: self.surface_weather.frame_params(last.origin),
+            cloud_area: self.last_cloud_area,
+        })
+    }
+
+    /// Set what the extra view in place borrows from the main view. Its own shadow maps shrink
+    /// to a stand-in while it borrows (they are not drawn) and come back at full size when it
+    /// stops; its bind groups follow the maps.
+    fn set_borrowed(&mut self, lighting: Option<SharedLighting>, settings: &RenderSettings) {
+        let before = self.borrowed.as_ref().map(|b| b.maps.clone());
+        let was = self.borrowed.is_some();
+        self.borrowed = lighting;
+        if self.borrowed.as_ref().map(|b| &b.maps) == before.as_ref() {
+            return;
+        }
+        match (was, self.borrowed.is_some()) {
+            (false, true) => self.shadow = create_shadow_resources(&self.shared, 256, 64),
+            (true, false) => {
+                self.shadow = create_shadow_resources(
+                    &self.shared,
+                    settings.shadow_map_size.clamp(256, 8192),
+                    settings.sky_occlusion_size.clamp(64, 4096),
+                )
+            }
+            _ => {}
+        }
+        let occlusion = self
+            .borrowed
+            .as_ref()
+            .map_or(&self.shadow.occlusion, |b| &b.maps.occlusion);
+        self.sky_camera
+            .set_inputs(&self.shared, &self.frame_buffer, occlusion);
+        self.rebuild_frame_groups();
+    }
+
     fn rebuild_frame_groups(&mut self) {
         let groups = FrameGroups::new(
             &self.shared,
@@ -1110,6 +1238,7 @@ impl Renderer {
             &self.screen_stand_ins,
             &self.cloud_shadows,
             self.probe_gi.atlas_view(),
+            self.borrowed.as_ref().map(|b| &b.maps),
         );
         self.frame_group = groups.scene;
         self.compute_group = groups.compute;
@@ -1241,6 +1370,9 @@ impl Renderer {
             .unwrap_or(self.targets.window);
         let mut composites = Vec::new();
         let mut gpu_ms = 0.0;
+        let mut shared_lighting = 0;
+        // The main view's state is in place until the first swap.
+        let main_lighting = self.lighting_to_share();
         for (camera, _, _, extra, viewport, portal, mirror) in views {
             let off_screen = portal.map(|p| p.size).or(mirror.map(|m| m.size));
             let (origin, size, image) = match (&extra.target, off_screen) {
@@ -1289,6 +1421,11 @@ impl Renderer {
                 state.image = Some((index, texture));
             }
             self.swap_view(&mut state.view);
+            let lighting = main_lighting
+                .clone()
+                .filter(|_| mirror.is_some() && settings.mirror_shares_lighting);
+            shared_lighting += lighting.is_some() as u32;
+            self.set_borrowed(lighting, &settings);
             world.insert_resource(crate::frame::RenderingExtraView(camera));
             let frame = self.extract_frame(world, started, Some(ExtraJob { size, settings }));
             world.remove_resource::<crate::frame::RenderingExtraView>();
@@ -1367,6 +1504,8 @@ impl Renderer {
                 started.elapsed().as_secs_f64() * 1000.0,
             );
             d.set("render.extra_views_gpu_ms", gpu_ms as f64);
+            // Mirrors lit with the main view's maps (`RenderSettings::mirror_shares_lighting`).
+            d.set("render.extra_views_shared_lighting", shared_lighting as f64);
         }
         composites
     }
@@ -1464,6 +1603,15 @@ impl Renderer {
             self.meter.restart();
             self.exposure.snap = true;
         }
+        // A mirror borrowing the main view's maps takes their placement too.
+        let borrowed = if is_extra {
+            self.borrowed.clone()
+        } else {
+            None
+        };
+        if let Some(b) = &borrowed {
+            b.place(&mut view);
+        }
         // Extra views draw every shadow caster straight into their maps each frame.
         let requests = if is_extra {
             [false; SHADOW_MAPS]
@@ -1478,16 +1626,29 @@ impl Renderer {
                 self.shadow.occlusion_size,
             ));
         }
-        self.shadow_cache.apply(
-            &mut view.cascades,
-            &mut view.sky_occlusion,
-            &mut view.far_shadow,
-            view.origin,
-            new_statics || is_extra || settings.shadow_cascade_reuse == 0 || !view.history_valid,
-            requests,
-        );
+        if borrowed.is_none() {
+            self.shadow_cache.apply(
+                &mut view.cascades,
+                &mut view.sky_occlusion,
+                &mut view.far_shadow,
+                view.origin,
+                new_statics
+                    || is_extra
+                    || settings.shadow_cascade_reuse == 0
+                    || !view.history_valid,
+                requests,
+            );
+        }
         let mut uniform = frame_uniform(world, &view);
-        uniform.shadow_params[3] = self.shadow.size as f32;
+        uniform.shadow_params[3] = borrowed
+            .as_ref()
+            .map_or(self.shadow.size, |b| b.shadow_size) as f32;
+        if borrowed.is_some() {
+            // The main view draws these maps: no feature draws casters for this view.
+            view.sun_shadows = false;
+            view.far_shadow.enabled = false;
+            view.sky_occlusion.enabled = false;
+        }
         let real_dt = world
             .get_resource::<Time>()
             .map_or(0.0, |t| t.real_delta_secs());
@@ -1499,9 +1660,18 @@ impl Renderer {
             )
         });
         cpu.step("surface weather");
-        let surface_resized = self.surface_weather.prepare(world, &self.shared, real_dt);
-        (uniform.surface_map, uniform.surface_open) =
-            self.surface_weather.frame_params(view.origin);
+        let surface_resized = match &borrowed {
+            Some(b) => {
+                (uniform.surface_map, uniform.surface_open) = b.surface_params(view.origin);
+                false
+            }
+            None => {
+                let resized = self.surface_weather.prepare(world, &self.shared, real_dt);
+                (uniform.surface_map, uniform.surface_open) =
+                    self.surface_weather.frame_params(view.origin);
+                resized
+            }
+        };
         // Screen-space reflections and bounce light need the previous frame's image of the same
         // view.
         cpu.step("uniforms and lights");
@@ -1618,7 +1788,7 @@ impl Renderer {
 
         // Cloud shadows: the first feature that asks draws the map in `compute`. The frame
         // uniform written above has them off; turn them on now that the area is known.
-        let cloud_writer = if settings.cloud_shadows {
+        let cloud_writer = if settings.cloud_shadows && borrowed.is_none() {
             self.features
                 .iter()
                 .enumerate()
@@ -1628,10 +1798,16 @@ impl Renderer {
         };
         let cloud_area = cloud_writer
             .map(|(_, request)| CloudShadowArea::place(&request, view.origin, view.sun_dir));
-        if let Some(area) = cloud_area {
-            if self
-                .cloud_shadows
-                .ensure_size(&self.shared.device, area.size)
+        if !is_extra {
+            self.last_cloud_area = cloud_area;
+        }
+        // A mirror borrowing the main view's maps shows its cloud shadows where they lie.
+        let shown_area = cloud_area.or(borrowed.as_ref().and_then(|b| b.cloud_area));
+        if let Some(area) = shown_area {
+            if cloud_area.is_some()
+                && self
+                    .cloud_shadows
+                    .ensure_size(&self.shared.device, area.size)
             {
                 self.rebuild_frame_groups();
             }
@@ -1784,9 +1960,11 @@ impl Renderer {
             sun_dir: view.sun_dir,
             origin: view.origin,
         };
-        let env_due = self.env_rendered.is_none_or(|last| {
-            last.due(&env_now, settings.environment_interval, view.history_valid)
-        });
+        // A mirror borrowing the main view's maps lights with its environment.
+        let env_due = self.borrowed.is_none()
+            && self.env_rendered.is_none_or(|last| {
+                last.due(&env_now, settings.environment_interval, view.history_valid)
+            });
         if env_due {
             self.perf.pass(&mut cpu, &mut encoder, "environment");
             {
@@ -1953,7 +2131,7 @@ impl Renderer {
                     }
                 }
             }
-        } else {
+        } else if self.borrowed.is_none() {
             // Cleared to 1 (nothing) when disabled so stale data never darkens the sky light.
             depth_pass(&mut encoder, "sky occlusion", &self.shadow.occlusion, true);
         }
@@ -3004,20 +3182,47 @@ impl FrameGroups {
         stand_ins: &ScreenMaps,
         clouds: &CloudShadowMap,
         gi_atlas: &wgpu::TextureView,
+        borrowed: Option<&SharedMaps>,
     ) -> Self {
+        let lighting = match borrowed {
+            Some(b) => LightingMaps {
+                shadows: &b.shadows,
+                occlusion: &b.occlusion,
+                env_specular: &b.env_specular,
+                env_irradiance: &b.env_irradiance,
+                surface: &b.surface,
+            },
+            None => LightingMaps {
+                shadows: &shadow.array_view,
+                occlusion: &shadow.occlusion,
+                env_specular: &env.specular,
+                env_irradiance: &env.irradiance.view,
+                surface,
+            },
+        };
+        let shown_clouds = borrowed.map_or(&clouds.view, |b| &b.clouds);
         let group = |uniform: &wgpu::Buffer, maps: &ScreenMaps, clouds: &wgpu::TextureView| {
             create_frame_group(
-                shared, uniform, lights, shadow, env, sky_camera, atmosphere, surface, maps,
+                shared, uniform, lights, shadow, env, &lighting, sky_camera, atmosphere, maps,
                 clouds, gi_atlas,
             )
         };
         Self {
-            scene: group(frame[0], maps, &clouds.view),
+            scene: group(frame[0], maps, shown_clouds),
             compute: group(frame[0], maps, &clouds.stand_in),
-            prepass: group(frame[0], stand_ins, &clouds.view),
-            overlay: group(frame[1], maps, &clouds.view),
+            prepass: group(frame[0], stand_ins, shown_clouds),
+            overlay: group(frame[1], maps, shown_clouds),
         }
     }
+}
+
+/// The lighting maps a view's frame group binds: its own, or the main view's (`SharedMaps`).
+struct LightingMaps<'a> {
+    shadows: &'a wgpu::TextureView,
+    occlusion: &'a wgpu::TextureView,
+    env_specular: &'a wgpu::TextureView,
+    env_irradiance: &'a wgpu::TextureView,
+    surface: &'a wgpu::TextureView,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3027,9 +3232,9 @@ fn create_frame_group(
     lights: &GrowBuffer,
     shadow: &ShadowResources,
     env: &EnvironmentMaps,
+    lighting: &LightingMaps<'_>,
     sky_camera: &crate::sky_occlusion::SkyCamera,
     atmosphere: &AtmosphereLuts,
-    surface: &wgpu::TextureView,
     maps: &ScreenMaps,
     clouds: &wgpu::TextureView,
     gi_atlas: &wgpu::TextureView,
@@ -3051,7 +3256,7 @@ fn create_frame_group(
             },
             wgpu::BindGroupEntry {
                 binding: 2,
-                resource: view(&shadow.array_view),
+                resource: view(lighting.shadows),
             },
             wgpu::BindGroupEntry {
                 binding: 3,
@@ -3063,7 +3268,7 @@ fn create_frame_group(
             },
             wgpu::BindGroupEntry {
                 binding: 5,
-                resource: view(&env.specular),
+                resource: view(lighting.env_specular),
             },
             wgpu::BindGroupEntry {
                 binding: 6,
@@ -3071,7 +3276,7 @@ fn create_frame_group(
             },
             wgpu::BindGroupEntry {
                 binding: 7,
-                resource: view(&shadow.occlusion),
+                resource: view(lighting.occlusion),
             },
             wgpu::BindGroupEntry {
                 binding: 8,
@@ -3107,7 +3312,7 @@ fn create_frame_group(
             },
             wgpu::BindGroupEntry {
                 binding: 16,
-                resource: view(&env.irradiance.view),
+                resource: view(lighting.env_irradiance),
             },
             wgpu::BindGroupEntry {
                 binding: 17,
@@ -3127,7 +3332,7 @@ fn create_frame_group(
             },
             wgpu::BindGroupEntry {
                 binding: 21,
-                resource: view(surface),
+                resource: view(lighting.surface),
             },
             wgpu::BindGroupEntry {
                 binding: 22,
