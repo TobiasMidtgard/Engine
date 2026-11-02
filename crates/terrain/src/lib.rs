@@ -340,11 +340,7 @@ pub struct TerrainSettings {
     /// up to four times the detail, so mountains, canyons and craters stay sharp from space.
     /// Planets covering less of the view get a share of it (0 = never boost).
     pub patch_budget: usize,
-    /// Patches built per frame while moving (they build in parallel).
-    pub builds_per_frame: usize,
-    /// When more patches than this are missing (after a teleport), build them all at once.
-    pub catch_up_threshold: usize,
-    /// GPU patch slots (32 KB each).
+    /// GPU patch slots (64 KB each).
     pub max_patches: usize,
     /// Physics collider tile size (meters) and resolution (samples per side).
     pub collider_tile_m: f64,
@@ -381,8 +377,6 @@ impl Default for TerrainSettings {
         Self {
             split_factor: 3.2,
             patch_budget: 700,
-            builds_per_frame: 24,
-            catch_up_threshold: 48,
             max_patches: 6144,
             collider_tile_m: 64.0,
             collider_samples: 65,

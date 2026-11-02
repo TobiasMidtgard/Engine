@@ -3,8 +3,8 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::mpsc::{Receiver, Sender, channel};
-use std::sync::{Arc, Mutex};
+use std::sync::mpsc::{Receiver, channel};
+use std::sync::{Arc, Condvar, Mutex};
 
 use bytemuck::{Pod, Zeroable};
 use engine_core::diagnostics::Diagnostics;
@@ -41,13 +41,21 @@ const FAR_SHADOW_DETAIL: f64 = 0.5;
 const MAX_BOOST: f64 = 4.0;
 /// Most finished patches uploaded to the GPU in one frame (the rest wait for the next).
 const MAX_UPLOADS_PER_FRAME: usize = 64;
+/// And no more once uploading has taken this long in a frame (ms), after the first few.
+const UPLOAD_BUDGET_MS: f64 = 1.5;
+/// Patches always uploaded in a frame, whatever the time.
+const MIN_UPLOADS_PER_FRAME: usize = 8;
+/// Patches a planet keeps queued for the workers at most (the most urgent).
+const MAX_QUEUED: usize = 256;
 /// A drawn patch's children replace it at `split_factor` patch sizes; it takes over from
 /// them again only past this many times that, so the detail doesn't flicker back and forth
 /// at the boundary (or a patch budget easing up and down).
 const MERGE_HYSTERESIS: f64 = 1.15;
-/// A moving camera's patches are built this many seconds ahead along its path, so a fast
-/// flight doesn't outrun them (a coarse parent stands in until its children are built).
-const LOOK_AHEAD_S: f64 = 1.5;
+/// A moving camera's patches are built ahead along its path, so a fast flight doesn't outrun
+/// them (a coarse parent stands in until its children are built): twice the measured time
+/// from asking for a patch to drawing it, within these seconds.
+const LOOK_AHEAD_S: f64 = 3.0;
+const LOOK_AHEAD_MIN_S: f64 = 0.75;
 /// But no farther ahead than this, meters.
 const LOOK_AHEAD_MAX_M: f64 = 3_000.0;
 /// Faster than this the camera jumped (a teleport, a tour stop), meters per second.
@@ -151,7 +159,7 @@ struct PlanetGpu {
     /// strongly it tints the ground up close; the climate goes by the angle from the star
     /// (`Climate::substellar`, 0/1); shore mats (`TerrainPalette::shore_mats`).
     far: [f32; 4],
-    /// The far look's mean linear albedo (rgb), unused.
+    /// The far look's mean linear albedo (rgb, unused), farmland (w, `TerrainPalette::farmland`).
     far_mean: [f32; 4],
 }
 
@@ -407,8 +415,12 @@ struct PlanetState {
     chunks: HashMap<NodeKey, ChunkGpu>,
     /// Built patches to rebuild in place (edited), nearest first when drained.
     rebuild: Vec<NodeKey>,
-    /// Patches being built on the workers (see [`PatchWorkers`]).
+    /// Patches being built on the workers or queued for them (see [`PatchWorkers`]).
     building: HashSet<NodeKey>,
+    /// When each of them was first asked for.
+    asked: HashMap<NodeKey, std::time::Instant>,
+    /// Smoothed time from asking for a patch to uploading it (s).
+    latency_s: f64,
     /// World position last frame (motion vectors for moving planets).
     last_position: Option<DVec3>,
     /// The shape's rayed craters, packed for the shader.
@@ -451,6 +463,8 @@ impl PlanetState {
             chunks: HashMap::new(),
             rebuild: Vec::new(),
             building: HashSet::new(),
+            asked: HashMap::new(),
+            latency_s: 0.5,
             last_position: None,
             rays,
             rayed,
@@ -1723,6 +1737,7 @@ impl RenderFeature for TerrainFeature {
         // Patches the view lacks, and those on their way.
         let mut missing_total = 0usize;
         let mut building_total = 0usize;
+        let mut latency_ms = 0.0f64;
         let mut max_boost = 1.0f64;
         let max_slots = settings.max_patches as u32;
         // Put the patches the workers finished into vertex slots, a few a frame.
@@ -1730,6 +1745,7 @@ impl RenderFeature for TerrainFeature {
         self.finished.extend(workers.take_done());
         let mut uploads = 0;
         let mut waiting = Vec::new();
+        let upload_started = std::time::Instant::now();
         for f in std::mem::take(&mut self.finished) {
             let Some(state) = self.planets.get_mut(&f.planet) else {
                 continue;
@@ -1737,13 +1753,21 @@ impl RenderFeature for TerrainFeature {
             if state.version != f.version {
                 continue;
             }
-            if uploads >= MAX_UPLOADS_PER_FRAME {
+            if uploads >= MAX_UPLOADS_PER_FRAME
+                || (uploads >= MIN_UPLOADS_PER_FRAME
+                    && upload_started.elapsed().as_secs_f64() * 1000.0 > UPLOAD_BUDGET_MS)
+            {
                 waiting.push(f);
                 continue;
             }
             let key = f.mesh.key;
             upload(&mut self.pool, state, f.mesh, gpu_shared, max_slots);
             state.building.remove(&key);
+            // How long patches take from being asked for to being drawn, for the look-ahead.
+            if let Some(at) = state.asked.remove(&key) {
+                let s = at.elapsed().as_secs_f64();
+                state.latency_s += (s - state.latency_s) * 0.05;
+            }
             uploads += 1;
         }
         self.finished = waiting;
@@ -1815,23 +1839,19 @@ impl RenderFeature for TerrainFeature {
             if mirror {
                 sel.missing.clear();
             }
-            let catch_up =
-                sel.missing.len() > settings.catch_up_threshold || state.chunks.is_empty();
-            let in_flight = if catch_up {
-                usize::MAX
-            } else {
-                workers.threads() * 2
-            };
-            for &(_, k) in &sel.missing {
-                if state.building.len() >= in_flight {
-                    break;
-                }
-                if state.building.insert(k) {
-                    workers.build(*e, state.version, &src, k);
-                }
+            // What the workers should build, most urgent first: the view's missing patches by
+            // distance in patch sizes (coarse before fine at the same distance, the way the
+            // screen-space error ranks them), then those the camera will need where it is
+            // heading, then the far shadow map's (below). Re-asked every frame, so what the
+            // view no longer needs is dropped before it is built.
+            let mut wants: Vec<Want> = Vec::new();
+            let urgency = |dist: f64, k: NodeKey| dist / src.map.node_size(k.level);
+            for &(dist, k) in &sel.missing {
+                wants.push((urgency(dist, k), k, false));
             }
             missing_total += sel.missing.len();
-            // Then what the camera will need where it is heading.
+            // Where the camera will be by the time a patch asked for now is built and drawn
+            // (the measured wait, with room to spare), up to a few kilometers ahead.
             if !mirror {
                 let now = std::time::Instant::now();
                 if let Some((last, at)) = state.last_camera {
@@ -1846,9 +1866,9 @@ impl RenderFeature for TerrainFeature {
                     }
                 }
                 state.last_camera = Some((cam_local, now));
-                let ahead =
-                    (state.camera_velocity * LOOK_AHEAD_S).clamp_length_max(LOOK_AHEAD_MAX_M);
-                if !catch_up && ahead.length() > 10.0 {
+                let lead_s = (state.latency_s * 2.0).clamp(LOOK_AHEAD_MIN_S, LOOK_AHEAD_S);
+                let ahead = (state.camera_velocity * lead_s).clamp_length_max(LOOK_AHEAD_MAX_M);
+                if ahead.length() > 10.0 {
                     let soon = state.lod.walk(&SelectInput {
                         camera: cam_local + ahead,
                         split_factor: split,
@@ -1856,27 +1876,24 @@ impl RenderFeature for TerrainFeature {
                         visible: &visible,
                         min_size: 0.0,
                     });
-                    for &(_, k) in &soon.missing {
-                        if state.building.len() >= in_flight {
-                            break;
-                        }
-                        if state.building.insert(k) {
-                            workers.build(*e, state.version, &src, k);
-                        }
+                    for &(dist, k) in &soon.missing {
+                        wants.push((urgency(dist, k) + 1.0, k, false));
                     }
                 }
             }
-            // Then edited patches, kept drawn meanwhile (one being built waits for that build
-            // before the next: the edit may have come after it started).
+            // Edited patches, kept drawn meanwhile, queued until built (one being built waits
+            // for that build before the next: the edit may have come after it started).
             let mut i = 0;
-            while !mirror && i < state.rebuild.len() && state.building.len() < in_flight {
+            while !mirror && i < state.rebuild.len() {
                 let k = state.rebuild[i];
-                if state.building.insert(k) {
-                    state.rebuild.remove(i);
-                    workers.build(*e, state.version, &src, k);
-                } else {
+                if state.building.contains(&k) {
                     i += 1;
+                    continue;
                 }
+                state.rebuild.remove(i);
+                let dist =
+                    (cam_local - state.chunks.get(&k).map_or(cam_local, |c| c.center)).length();
+                wants.push((urgency(dist, k), k, true));
             }
             // Few patches for the planet's share of the view (seen from orbit): split finer,
             // easing toward the detail that fills the budget. The patch count grows with the
@@ -1924,21 +1941,35 @@ impl RenderFeature for TerrainFeature {
                         visible: &far_visible,
                         min_size: far.texel() as f64 * 0.5 * crate::chunk::QUADS as f64,
                     };
-                    let far_sel = state.lod.walk(&input);
-                    let room = (workers.threads() * 3).saturating_sub(state.building.len());
-                    for &(_, k) in far_sel
-                        .missing
-                        .iter()
-                        .take(room.min((settings.builds_per_frame / 2).max(1)))
-                    {
-                        if state.building.insert(k) {
-                            workers.build(*e, state.version, &src, k);
-                        }
-                    }
-                    far_sel
+                    state.lod.walk(&input)
                 });
+            // (Its patches after the view's: the shadows of ridges far off can wait a little.)
+            if let Some(far_sel) = &far_sel {
+                for &(dist, k) in &far_sel.missing {
+                    wants.push((urgency(dist, k) + 2.0, k, false));
+                }
+            }
+            if !mirror {
+                // Each patch once, at its most urgent; at most a few hundred (after a jump the
+                // nearest go first and the rest are asked for again as those land).
+                wants.sort_by(|a, b| a.0.total_cmp(&b.0));
+                let mut seen = HashSet::new();
+                wants.retain(|w| seen.insert(w.1));
+                wants.truncate(MAX_QUEUED.max(workers.threads() * 4));
+                let dropped = workers.request(*e, state.version, &src, &wants);
+                for k in dropped {
+                    state.building.remove(&k);
+                    state.asked.remove(&k);
+                }
+                for &(_, k, _) in &wants {
+                    if state.building.insert(k) {
+                        state.asked.insert(k, std::time::Instant::now());
+                    }
+                }
+            }
 
             building_total += state.building.len();
+            latency_ms = latency_ms.max(state.latency_s * 1000.0);
 
             // Recycle patches nobody has looked at for a while.
             if !mirror && self.frame.is_multiple_of(60) {
@@ -2040,6 +2071,7 @@ impl RenderFeature for TerrainFeature {
                 0.0
             };
             let far = [far[0], far[1], locked, t.config.palette.shore_mats];
+            let far_mean = [far_mean[0], far_mean[1], far_mean[2], p.farmland];
             planet_gpu.push(PlanetGpu {
                 rot: [
                     rot_f.x_axis.extend(0.0).to_array(),
@@ -2153,6 +2185,7 @@ impl RenderFeature for TerrainFeature {
             d.set("terrain.patches_built", built_total as f64);
             d.set("terrain.patches_missing", missing_total as f64);
             d.set("terrain.patches_building", building_total as f64);
+            d.set("terrain.patch_latency_ms", latency_ms);
             d.set("terrain.detail_boost", max_boost);
             if let Some(gpu) = &self.gpu {
                 d.set("terrain.night_pages", gpu.night.resident() as f64);
@@ -2263,47 +2296,75 @@ struct FinishedPatch {
 }
 
 /// Threads that build terrain patches, so neither the frame nor the render step ever waits
-/// for one. Patches come back through a channel; the render step uploads a few each frame.
+/// for one. The render step hands them the patches it wants each frame, most urgent first
+/// ([`PatchWorkers::request`]); a patch nobody asks for any more is dropped before it starts,
+/// so after a fast turn or climb the threads build what the view needs now, not what it
+/// needed a second ago (Cesium's request culling while moving, Unreal's streaming priority).
+/// Finished patches come back through a channel; the render step uploads them a few a frame.
 struct PatchWorkers {
-    jobs: Sender<PatchJob>,
+    queue: Arc<(Mutex<PatchQueue>, Condvar)>,
     done: Mutex<Receiver<FinishedPatch>>,
     threads: usize,
 }
 
-struct PatchJob {
-    planet: Entity,
-    version: u64,
-    src: ChunkSource,
-    key: NodeKey,
+#[derive(Default)]
+struct PatchQueue {
+    /// Patches asked for and not started: priority (lower first), the planet's version and
+    /// shape, and whether it stays queued until built (an edited patch).
+    waiting: HashMap<(Entity, NodeKey), (f64, u64, ChunkSource, bool)>,
+    /// Patches a thread is building.
+    started: HashSet<(Entity, NodeKey)>,
 }
+
+/// A patch wanted this frame: priority (lower first), the patch, whether it stays queued
+/// until built.
+type Want = (f64, NodeKey, bool);
 
 impl PatchWorkers {
     /// Half the cores (the frame's own systems and the GPU driver keep the rest).
     fn new() -> Self {
         let cores = std::thread::available_parallelism().map_or(4, |n| n.get());
-        let threads = (cores / 2).clamp(2, 12);
-        let (jobs, job_rx) = channel::<PatchJob>();
+        Self::with_threads((cores / 2).clamp(2, 12))
+    }
+
+    fn with_threads(threads: usize) -> Self {
         let (done_tx, done) = channel();
-        let job_rx = Arc::new(Mutex::new(job_rx));
+        let queue = Arc::new((Mutex::new(PatchQueue::default()), Condvar::new()));
         for i in 0..threads {
-            let job_rx = job_rx.clone();
+            let queue = queue.clone();
             let done_tx = done_tx.clone();
             std::thread::Builder::new()
                 .name(format!("terrain-patches-{i}"))
                 .spawn(move || {
                     loop {
-                        // (The lock is held only while taking a job.)
-                        let job = match job_rx.lock() {
-                            Ok(rx) => rx.recv(),
-                            Err(_) => return,
+                        // The most urgent patch (the lock is held only while taking it).
+                        let (planet, key, version, src) = {
+                            let (lock, ready) = &*queue;
+                            let Ok(mut q) = lock.lock() else {
+                                return;
+                            };
+                            while q.waiting.is_empty() {
+                                q = match ready.wait(q) {
+                                    Ok(q) => q,
+                                    Err(_) => return,
+                                };
+                            }
+                            let (&id, _) = q
+                                .waiting
+                                .iter()
+                                .min_by(|a, b| a.1.0.total_cmp(&b.1.0))
+                                .expect("not empty");
+                            let (_, version, src, _) = q.waiting.remove(&id).expect("queued");
+                            q.started.insert(id);
+                            (id.0, id.1, version, src)
                         };
-                        let Ok(job) = job else {
-                            return;
-                        };
-                        let mesh = build_chunk(&job.src, job.key);
+                        let mesh = build_chunk(&src, key);
+                        if let Ok(mut q) = queue.0.lock() {
+                            q.started.remove(&(planet, key));
+                        }
                         let done = FinishedPatch {
-                            planet: job.planet,
-                            version: job.version,
+                            planet,
+                            version,
                             mesh,
                         };
                         if done_tx.send(done).is_err() {
@@ -2314,7 +2375,7 @@ impl PatchWorkers {
                 .expect("spawn a terrain patch thread");
         }
         Self {
-            jobs,
+            queue,
             done: Mutex::new(done),
             threads,
         }
@@ -2324,13 +2385,48 @@ impl PatchWorkers {
         self.threads
     }
 
-    fn build(&self, planet: Entity, version: u64, src: &ChunkSource, key: NodeKey) {
-        let _ = self.jobs.send(PatchJob {
-            planet,
-            version,
-            src: src.clone(),
-            key,
+    /// The patches `planet` wants now, in place of what it asked for before: new ones are
+    /// queued, queued ones take their new priority, and queued ones it no longer wants are
+    /// dropped (returned) unless they stay until built. Patches being built carry on.
+    fn request(
+        &self,
+        planet: Entity,
+        version: u64,
+        src: &ChunkSource,
+        wants: &[Want],
+    ) -> Vec<NodeKey> {
+        let (lock, ready) = &*self.queue;
+        let Ok(mut q) = lock.lock() else {
+            return Vec::new();
+        };
+        let wanted: HashSet<NodeKey> = wants.iter().map(|w| w.1).collect();
+        let mut dropped = Vec::new();
+        q.waiting.retain(|(p, k), job| {
+            let keep = *p != planet || job.3 || (wanted.contains(k) && job.1 == version);
+            if !keep {
+                dropped.push(*k);
+            }
+            keep
         });
+        for &(priority, key, stays) in wants {
+            let id = (planet, key);
+            if q.started.contains(&id) {
+                continue;
+            }
+            match q.waiting.get_mut(&id) {
+                Some(job) => {
+                    job.0 = priority;
+                    job.2 = src.clone();
+                    job.3 |= stays;
+                }
+                None => {
+                    q.waiting
+                        .insert(id, (priority, version, src.clone(), stays));
+                }
+            }
+        }
+        ready.notify_all();
+        dropped
     }
 
     /// Patches finished since the last call.
@@ -2478,6 +2574,72 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn workers_build_the_most_urgent_first_and_drop_what_is_no_longer_wanted() {
+        use crate::cube::{SurfaceMap, TerrainDomain};
+        use crate::edits::EditLayer;
+        use crate::shape::PlanetShape;
+        let shape = PlanetShape::moon(1);
+        let src = ChunkSource {
+            map: SurfaceMap::new(TerrainDomain::Sphere, shape.radius_m),
+            shape: Arc::new(shape),
+            edits: Arc::new(EditLayer::default()),
+            ocean_surface: false,
+        };
+        let planet = Entity::from_raw_u32(7).expect("an entity");
+        let key = |x: u32| NodeKey {
+            face: 2,
+            level: 8,
+            x,
+            y: 3,
+        };
+        let wait_for = |w: &PatchWorkers, n: usize| {
+            let mut got = Vec::new();
+            let start = std::time::Instant::now();
+            while got.len() < n && start.elapsed().as_secs() < 60 {
+                got.extend(w.take_done().into_iter().map(|f| f.mesh.key.x));
+                std::thread::yield_now();
+            }
+            got
+        };
+        // One thread: the order is the priority's, whatever the order asked in.
+        let w = PatchWorkers::with_threads(1);
+        w.request(
+            planet,
+            1,
+            &src,
+            &[
+                (3.0, key(1), false),
+                (0.0, key(0), false),
+                (1.0, key(2), false),
+                (2.0, key(3), false),
+            ],
+        );
+        assert_eq!(wait_for(&w, 4), [0, 2, 3, 1]);
+
+        // Asked for 40, then only for two of them: the rest are dropped before they start
+        // (the thread may have started the first already), except a patch kept until built
+        // (an edit).
+        let w = PatchWorkers::with_threads(1);
+        let many: Vec<Want> = (0..40).map(|i| (i as f64, key(i), i == 30)).collect();
+        w.request(planet, 1, &src, &many);
+        let dropped = w.request(
+            planet,
+            1,
+            &src,
+            &[(0.5, key(5), false), (0.6, key(6), false)],
+        );
+        assert!(dropped.len() >= 35, "{dropped:?}");
+        assert!(!dropped.contains(&key(5)) && !dropped.contains(&key(30)));
+        let mut expected: Vec<u32> = (0..40).filter(|&i| !dropped.contains(&key(i))).collect();
+        let mut built = wait_for(&w, expected.len());
+        built.sort();
+        expected.sort();
+        assert_eq!(built, expected);
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        assert!(w.take_done().is_empty());
     }
 
     #[test]
