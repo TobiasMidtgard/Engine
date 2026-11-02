@@ -10,10 +10,14 @@
 //! the eight probes around it, with DDGI's visibility weights so light doesn't leak through
 //! walls. See /engine-design/dynamic-gi.md in the project files for the research behind it.
 //!
-//! Made cheap enough to be on by default (/engine-design/world-gi-on.md): the instances are
-//! gathered again only when a mesh entity changes (by change ticks), a mesh or material asset
-//! changes, or the camera leaves the snapped region; they stay relative to an anchor that moves
-//! in 64 m steps, so a moving camera leaves them as they are. The hierarchies are packed in one
+//! Made cheap enough to be on by default (/engine-design/world-gi-on.md): every mesh entity's
+//! world box is cached and updated only when its change ticks moved (a share of the cache is
+//! checked again each frame for meshes edited in place and entities gone), so a frame reads
+//! the components of only what changed, never the whole world. The instances are gathered
+//! again, from the cached entities in the snapped region alone, when one of those changes, a
+//! mesh or material asset changes, or the camera leaves the region; they stay relative to an
+//! anchor that moves in 64 m steps, so a moving camera leaves them as they are. Hierarchies of
+//! all but small meshes build on worker threads. The hierarchies are packed in one
 //! store that only appends what's new. Each frame traces the probes that fit
 //! `RenderSettings::gi_budget_ms` at the cost per ray timestamps measured, and probes with
 //! nothing near sleep (Majercik et al. 2021).
@@ -39,7 +43,7 @@ use crate::frame::{FrameUniform, ViewData};
 use crate::material::{AlphaMode, StandardMaterial};
 use crate::mesh::Mesh;
 use crate::settings::RenderSettings;
-use engine_assets::Assets;
+use engine_assets::{Assets, Handle};
 
 /// Texels along a probe's tile side (`PROBE_GI_TEXELS` in lib_frame.wgsl).
 const TEXELS: u32 = 8;
@@ -50,13 +54,17 @@ pub(crate) const MAX_PROBES: u32 = TILES_X * TILES_X;
 /// Rays per probe at most (`MAX_RAYS` in probe_gi.wgsl).
 const MAX_RAYS: u32 = 256;
 const ATLAS_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
-/// Triangles whose hierarchies may be built per frame on the render thread (at least one mesh
+/// Triangles whose hierarchies may be built per frame where the gather runs (at least one mesh
 /// is).
-const BUILD_TRIANGLES_PER_FRAME: usize = 60_000;
-/// Meshes with more triangles than this build on a worker thread instead.
-const INLINE_BUILD_TRIANGLES: usize = 20_000;
+const BUILD_TRIANGLES_PER_FRAME: usize = 8_000;
+/// Meshes with more triangles than this build on a worker thread instead (a small mesh's
+/// hierarchy takes microseconds; a few thousand triangles, a fraction of a millisecond).
+const INLINE_BUILD_TRIANGLES: usize = 2_000;
 /// Worker builds at once.
-const MAX_BUILD_JOBS: usize = 2;
+const MAX_BUILD_JOBS: usize = 4;
+/// Cached mesh entities checked again a frame (are they still there, has their mesh asset
+/// changed): the whole cache in turn, without a frame that scans it all.
+const REVALIDATE_PER_FRAME: usize = 1024;
 /// Meters between the anchors instances are kept relative to.
 const ANCHOR_CELL: f64 = 64.0;
 /// Meters the region instances are gathered from snaps to.
@@ -227,12 +235,28 @@ struct Gathered {
 
 /// What the instance gather reads; only change ticks while nothing changed.
 type GatherQuery = (
+    Entity,
     Ref<'static, GlobalTransform>,
     Ref<'static, crate::MeshRenderer>,
     Ref<'static, crate::ResolvedMesh>,
 );
 /// Skinned meshes are left out (the rays would see their bind pose), and shadow-only stand-ins.
 type GatherFilter = (Without<crate::GpuSkin>, Without<crate::ShadowOnly>);
+
+/// A mesh entity as the gather last saw it: its world box (absolute) and its mesh's version.
+#[derive(Clone, Copy)]
+struct Cached {
+    lo: DVec3,
+    hi: DVec3,
+    mesh: u32,
+    version: u64,
+}
+
+impl Cached {
+    fn overlaps(&self, region: &(DVec3, DVec3)) -> bool {
+        self.hi.cmpge(region.0).all() && self.lo.cmple(region.1).all()
+    }
+}
 
 /// The probes' placement: `dims` probes `spacing` apart from world probe `origin` (probe `i` of
 /// the world lattice sits at `(i + 0.5) * spacing`).
@@ -309,6 +333,16 @@ pub(crate) struct ProbeGi {
     /// The world's change tick at the last gather check, and the mesh entities it found.
     tick: Option<Tick>,
     entities: usize,
+    /// Every visible mesh entity's world box, updated only for those whose change ticks moved
+    /// (Unreal caches static ray-tracing instances the same way): a frame reads the change
+    /// ticks of all and the components of only what changed.
+    cache: HashMap<Entity, Cached>,
+    /// The cached entities whose box overlaps the gather region, and that region (absolute).
+    in_region: Vec<Entity>,
+    region: Option<(DVec3, DVec3)>,
+    /// The cache's entities in the order `REVALIDATE_PER_FRAME` walks them.
+    revalidate: Vec<Entity>,
+    revalidate_at: usize,
     /// Measured GPU milliseconds per thousand probe rays (0: not yet), and rays traced a frame
     /// lately (a moving average, as the measurements arrive a few frames late).
     ms_per_kray: f32,
@@ -379,8 +413,14 @@ fn material_light(m: &StandardMaterial, texture_mean: Option<Vec3>) -> (Vec3, Ve
 
 /// The world box of a mesh's local box under `affine`, relative to `origin`.
 fn world_box(local: (Vec3, Vec3), affine: &DAffine3, origin: DVec3) -> (Vec3, Vec3) {
+    let (lo, hi) = world_box_abs(local, affine);
+    ((lo - origin).as_vec3(), (hi - origin).as_vec3())
+}
+
+/// The world box of a mesh's local box under `affine` (absolute).
+fn world_box_abs(local: (Vec3, Vec3), affine: &DAffine3) -> (DVec3, DVec3) {
     let (lo, hi) = (local.0.as_dvec3(), local.1.as_dvec3());
-    let center = affine.transform_point3((lo + hi) * 0.5) - origin;
+    let center = affine.transform_point3((lo + hi) * 0.5);
     let half = (hi - lo) * 0.5;
     let m = affine.matrix3;
     let extent = DVec3::new(
@@ -388,7 +428,7 @@ fn world_box(local: (Vec3, Vec3), affine: &DAffine3, origin: DVec3) -> (Vec3, Ve
         m.row(1).abs().dot(half),
         m.row(2).abs().dot(half),
     );
-    ((center - extent).as_vec3(), (center + extent).as_vec3())
+    (center - extent, center + extent)
 }
 
 /// This frame's ray rotation (DDGI turns the ray set randomly every frame so the probes see
@@ -435,6 +475,11 @@ impl ProbeGi {
             query: None,
             tick: None,
             entities: 0,
+            cache: HashMap::new(),
+            in_region: Vec::new(),
+            region: None,
+            revalidate: Vec::new(),
+            revalidate_at: 0,
             ms_per_kray: 0.0,
             rays_lately: 0.0,
             grid: None,
@@ -632,6 +677,67 @@ impl ProbeGi {
         (fit as u32).clamp(least, most)
     }
 
+    /// A mesh's local bounds at its current version (`None` while it isn't loaded or has no
+    /// triangles).
+    fn local_bounds(
+        &mut self,
+        meshes: &Assets<Mesh>,
+        handle: Handle<Mesh>,
+    ) -> Option<(Vec3, Vec3)> {
+        let key = handle.index();
+        let version = meshes.version(handle);
+        let local = match self.bounds.get(&key) {
+            Some(&(v, b)) if v == version => b,
+            _ => {
+                let aabb = meshes.get(handle)?.aabb();
+                let b = (aabb.min, aabb.max);
+                self.bounds.insert(key, (version, b));
+                b
+            }
+        };
+        (!local.0.cmpgt(local.1).any()).then_some(local)
+    }
+
+    /// Bring `entity`'s cache entry up to date (or drop it, gone or hidden). True when its box
+    /// was or now is in `region`: the gather must run again.
+    fn refresh(
+        &mut self,
+        entity: Entity,
+        query: &mut QueryState<GatherQuery, GatherFilter>,
+        world: &World,
+        meshes: &Assets<Mesh>,
+        region: &(DVec3, DVec3),
+    ) -> bool {
+        let old = self.cache.remove(&entity);
+        let was_in = old.is_some_and(|c| c.overlaps(region));
+        let new = match query.get(world, entity) {
+            Ok((_, transform, renderer, resolved)) if renderer.visible => {
+                let handle = meshes.canonical(resolved.mesh);
+                self.local_bounds(meshes, handle).map(|local| {
+                    let (lo, hi) = world_box_abs(local, &transform.0);
+                    Cached {
+                        lo,
+                        hi,
+                        mesh: handle.index(),
+                        version: meshes.version(handle),
+                    }
+                })
+            }
+            _ => None,
+        };
+        let is_in = new.is_some_and(|c| c.overlaps(region));
+        if let Some(c) = new {
+            self.cache.insert(entity, c);
+        }
+        if was_in && !is_in {
+            self.in_region.retain(|&e| e != entity);
+        }
+        if is_in && !was_in {
+            self.in_region.push(entity);
+        }
+        was_in || is_in
+    }
+
     /// Store the hierarchies the workers finished; true when any did.
     fn collect_builds(&mut self, limit: u64) -> bool {
         let done: Vec<u32> = self
@@ -809,32 +915,76 @@ impl ProbeGi {
         let margin = spacing * 16.0;
         let lo = ((first_probe - margin) / REGION_SNAP).floor();
         let hi = ((first_probe + (dims - 1).as_dvec3() * spacing + margin) / REGION_SNAP).ceil();
-        let region = (
-            (lo * REGION_SNAP - anchor).as_vec3(),
-            (hi * REGION_SNAP - anchor).as_vec3(),
-        );
+        let region_abs = (lo * REGION_SNAP, hi * REGION_SNAP);
         // Which mesh entities changed, from their change ticks alone.
         let mut query = self.query.take().unwrap_or_else(|| world.query_filtered());
-        let (touched, entities) = match self.tick {
+        let mut changed: Vec<Entity> = Vec::new();
+        let entities = match self.tick {
             Some(tick) => world.last_change_tick_scope(tick, |w| {
-                let mut touched = false;
                 let mut n = 0usize;
-                for (transform, renderer, resolved) in query.iter(w) {
+                for (entity, transform, renderer, resolved) in query.iter(w) {
                     n += 1;
-                    touched |=
-                        transform.is_changed() || renderer.is_changed() || resolved.is_changed();
+                    if transform.is_changed() || renderer.is_changed() || resolved.is_changed() {
+                        changed.push(entity);
+                    }
                 }
-                (touched, n)
+                n
             }),
-            None => (true, 0),
+            None => {
+                changed.extend(query.iter(world).map(|q| q.0));
+                changed.len()
+            }
         };
         // Changes from here on get a newer tick, so the next frame finds them.
         self.tick = Some(world.increment_change_tick());
-        scene_changed |= touched || entities != self.entities;
+        // Fewer or as many entities with some gone: the gather drops what is gone.
+        scene_changed |= entities != self.entities;
         self.entities = entities;
         let world: &World = world;
         let meshes = world.get_resource::<Assets<Mesh>>();
         let materials = world.get_resource::<Assets<StandardMaterial>>();
+
+        // The cache: the changed entities, then a share of the rest checked again.
+        let build_started = std::time::Instant::now();
+        if let Some(meshes) = meshes {
+            for &entity in &changed {
+                scene_changed |= self.refresh(entity, &mut query, world, meshes, &region_abs);
+            }
+            if self.revalidate_at >= self.revalidate.len() {
+                self.revalidate.clear();
+                self.revalidate.extend(self.cache.keys().copied());
+                self.revalidate_at = 0;
+            }
+            let end = (self.revalidate_at + REVALIDATE_PER_FRAME).min(self.revalidate.len());
+            for i in self.revalidate_at..end {
+                let entity = self.revalidate[i];
+                let current = match (self.cache.get(&entity), query.get(world, entity)) {
+                    (Some(c), Ok((_, _, renderer, resolved))) => {
+                        renderer.visible
+                            && meshes.canonical(resolved.mesh).index() == c.mesh
+                            && meshes.version(meshes.canonical(resolved.mesh)) == c.version
+                    }
+                    (None, _) => true,
+                    (Some(_), Err(_)) => false,
+                };
+                if !current {
+                    scene_changed |= self.refresh(entity, &mut query, world, meshes, &region_abs);
+                }
+            }
+            self.revalidate_at = end;
+        }
+        if self.region != Some(region_abs) {
+            // The camera crossed a snap cell: which cached boxes are in the new region.
+            self.region = Some(region_abs);
+            self.in_region.clear();
+            self.in_region.extend(
+                self.cache
+                    .iter()
+                    .filter(|(_, c)| c.overlaps(&region_abs))
+                    .map(|(e, _)| *e),
+            );
+            scene_changed = true;
+        }
         let mut key = GatherKey {
             anchor: anchor_cell.as_ivec3(),
             region: (lo.as_ivec3(), hi.as_ivec3()),
@@ -848,7 +998,6 @@ impl ProbeGi {
                 g.key != key || g.incomplete || self.frame >= g.frame + REGATHER_FRAMES
             });
 
-        let build_started = std::time::Instant::now();
         if regather {
             // Before gathering: a compaction moves hierarchies, so it can't come after.
             self.forget_unused();
@@ -860,7 +1009,13 @@ impl ProbeGi {
         if regather && let Some(meshes) = meshes {
             let images = world.get_resource::<Assets<crate::Image>>();
             let default_material = StandardMaterial::default();
-            for (transform, renderer, resolved) in query.iter(world) {
+            let mut gone = Vec::new();
+            let in_region = std::mem::take(&mut self.in_region);
+            for &entity in &in_region {
+                let Ok((_, transform, renderer, resolved)) = query.get(world, entity) else {
+                    gone.push(entity);
+                    continue;
+                };
                 if !renderer.visible {
                     continue;
                 }
@@ -873,26 +1028,10 @@ impl ProbeGi {
                 let handle = meshes.canonical(resolved.mesh);
                 let key = handle.index();
                 let version = meshes.version(handle);
-                // Only meshes near the grid are built and uploaded.
-                let local = match self.bounds.get(&key) {
-                    Some(&(v, b)) if v == version => b,
-                    _ => {
-                        let Some(mesh) = meshes.get(handle) else {
-                            continue;
-                        };
-                        let aabb = mesh.aabb();
-                        let b = (aabb.min, aabb.max);
-                        self.bounds.insert(key, (version, b));
-                        b
-                    }
+                let Some(local) = self.local_bounds(meshes, handle) else {
+                    continue;
                 };
-                if local.0.cmpgt(local.1).any() {
-                    continue;
-                }
                 let bounds = world_box(local, &transform.0, anchor);
-                if bounds.1.cmplt(region.0).any() || bounds.0.cmpgt(region.1).any() {
-                    continue;
-                }
                 let current = self.meshes.get(&key).is_some_and(|e| e.version == version);
                 if !current {
                     if self.jobs.get(&key).is_some_and(|j| j.version == version) {
@@ -903,11 +1042,12 @@ impl ProbeGi {
                         continue;
                     };
                     let triangles = mesh.indices.len() / 3;
-                    let positions: Vec<[f32; 3]> =
-                        mesh.vertices.iter().map(|v| v.position).collect();
+                    let positions =
+                        || -> Vec<[f32; 3]> { mesh.vertices.iter().map(|v| v.position).collect() };
                     if triangles > INLINE_BUILD_TRIANGLES {
-                        // Large meshes build on a worker; the rays miss them until it's done.
+                        // Larger meshes build on a worker; the rays miss them until it's done.
                         if self.jobs.len() < MAX_BUILD_JOBS {
+                            let positions = positions();
                             let indices = mesh.indices.clone();
                             match std::thread::Builder::new()
                                 .name("probe gi bvh".into())
@@ -928,7 +1068,7 @@ impl ProbeGi {
                         continue;
                     }
                     built += triangles;
-                    let bvh = bvh::build_mesh(&positions, &mesh.indices);
+                    let bvh = bvh::build_mesh(&positions(), &mesh.indices);
                     self.add_mesh(key, version, bvh, limit);
                 }
                 let Some(entry) = self.meshes.get_mut(&key) else {
@@ -969,6 +1109,11 @@ impl ProbeGi {
                     },
                     bounds,
                 ));
+            }
+            self.in_region = in_region;
+            for entity in gone {
+                self.cache.remove(&entity);
+                self.in_region.retain(|&e| e != entity);
             }
         }
         self.query = Some(query);

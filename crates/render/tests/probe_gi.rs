@@ -3,8 +3,9 @@
 //! night, and none of it leaks through a wall into the room next door; meshes far from the probe
 //! grid are not built for its rays; an indoor volume's closed faces stop the probes' rays where
 //! no mesh does (rock drawn by another feature); a mirror reflects what is behind the camera
-//! through world reflections; a still scene isn't gathered again every frame, and a large mesh
-//! builds on a worker before the rays see it. Needs a GPU or lavapipe; passes with a note when
+//! through world reflections; a still scene isn't gathered again every frame, moving entities
+//! far from the grid don't gather it again, and a large mesh builds on a worker before the rays
+//! see it. Needs a GPU or lavapipe; passes with a note when
 //! neither is available.
 
 use engine_core::prelude::*;
@@ -537,6 +538,91 @@ fn a_still_scene_is_not_gathered_again_every_frame() {
         "a still room's gather (gathered, instances)"
     );
     assert_eq!(moved, (1.0, 7.0), "after the block moved");
+}
+
+/// A crowd far from the probe grid costs the gather nothing: moving one of them doesn't gather
+/// the instances again, moving or removing one near the grid does, and the gather reads only
+/// the entities near the grid (`render.gi.build_ms` stays small with thousands far away).
+#[test]
+fn far_entities_moving_leave_the_gather_alone() {
+    let mut app = app(true);
+    let w = &mut app.world;
+    room(w, DVec3::ZERO, 0.7, 0.5, None);
+    sun(w, 110_000.0, DVec3::new(0.3, -1.0, -0.4));
+    camera(w, EYE, TARGET, 12.0);
+    let crate_at = |w: &mut World, at: DVec3| {
+        w.spawn((
+            Transform::from_translation(at),
+            MeshRenderer::new(
+                Shape::Cuboid {
+                    size: [0.5, 1.0, 0.5],
+                },
+                StandardMaterial::color(0.5, 0.5, 0.5),
+            ),
+        ))
+        .id()
+    };
+    let near = crate_at(w, DVec3::new(0.0, 0.5, 0.0));
+    // 20 000 crates 1-2 km away.
+    let mut far = Vec::new();
+    for i in 0..20_000 {
+        let (x, z) = ((i % 200) as f64, (i / 200) as f64);
+        far.push(crate_at(w, DVec3::new(1000.0 + 5.0 * x, 0.5, 5.0 * z)));
+    }
+    app.update_n(6);
+    if app.world.get_resource::<RenderDisabled>().is_some() {
+        eprintln!("skipping: no GPU");
+        return;
+    }
+    let diag = |app: &App, name: &str| {
+        app.world
+            .resource::<Diagnostics>()
+            .get(name)
+            .unwrap_or(-1.0)
+    };
+    assert_eq!(
+        diag(&app, "render.gi.instances"),
+        7.0,
+        "the room and one crate"
+    );
+
+    // A far crate walks: no gather.
+    let mut gathers = 0.0;
+    let mut slowest: f64 = 0.0;
+    for step in 0..10 {
+        app.world
+            .get_mut::<Transform>(far[step * 997])
+            .expect("crate")
+            .translation
+            .y += 0.1;
+        app.update();
+        gathers += diag(&app, "render.gi.gathered");
+        slowest = slowest.max(diag(&app, "render.gi.extract_ms"));
+    }
+    eprintln!("far crates moving: {gathers} gathers, slowest extract {slowest:.2} ms");
+    assert_eq!(
+        gathers, 0.0,
+        "a far crate's move gathered the instances again"
+    );
+
+    // The near crate moves: gathered again, still 7.
+    app.world
+        .get_mut::<Transform>(near)
+        .expect("crate")
+        .translation
+        .x = 1.0;
+    app.update();
+    assert_eq!(diag(&app, "render.gi.gathered"), 1.0);
+    assert_eq!(diag(&app, "render.gi.instances"), 7.0);
+
+    // And goes: 6 left.
+    app.world.despawn(near);
+    app.update();
+    assert_eq!(
+        diag(&app, "render.gi.instances"),
+        6.0,
+        "the removed crate is still in the rays"
+    );
 }
 
 /// A mesh too large to build on the render thread builds on a worker, and the rays see it once
