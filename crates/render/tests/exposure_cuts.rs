@@ -116,3 +116,30 @@ fn exposure_still_adapts_gradually_while_the_camera_walks() {
         "exposure jumped while walking: {bright} -> {walked}"
     );
 }
+
+/// A camera whose rotation isn't finite on the first frame (a scripted route's first frame)
+/// leaves the exposure finite, and the next frames meter as usual.
+#[test]
+fn a_first_frame_with_a_broken_camera_keeps_a_finite_exposure() {
+    let mut app = walls_app(HOP);
+    let cam = camera(&mut app);
+    app.world.get_mut::<Transform>(cam).unwrap().rotation =
+        Quat::from_xyzw(f32::NAN, 0.0, 0.0, 1.0);
+    app.update();
+    if app.world.get_resource::<RenderDisabled>().is_some() {
+        return;
+    }
+    let first = app.world.resource::<RenderStats>().ev100;
+    app.world.get_mut::<Transform>(cam).unwrap().rotation = Quat::IDENTITY;
+    app.update_n(16);
+    let later = app.world.resource::<RenderStats>().ev100;
+    let mut dim = walls_app(HOP);
+    dim.update_n(16);
+    let dim_ev = dim.world.resource::<RenderStats>().ev100;
+    eprintln!("EV100: first frame {first}, later {later}, metered from the start {dim_ev}");
+    assert!(first.is_finite(), "the first frame's exposure is {first}");
+    assert!(
+        (later - dim_ev).abs() < 0.5,
+        "after a broken first frame the exposure is {later}, not {dim_ev}"
+    );
+}

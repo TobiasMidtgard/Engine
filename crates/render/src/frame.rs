@@ -668,6 +668,15 @@ pub fn build_view(
                     target.max(high - compensation - crate::exposure::HIGHLIGHT_HEADROOM_EV)
                 }
                 None => target,
+            };
+            // A frame whose camera or light isn't finite yet (a route's first frame) would
+            // set a NaN exposure and blow the picture out: meter it plainly instead.
+            let target = if target.is_finite() {
+                target
+            } else if metered.is_finite() {
+                metered - compensation - crate::exposure::METER_BIAS_EV
+            } else {
+                exposure_state.ev100
             }
             .clamp(min_ev100, max_ev100);
             if !exposure_state.initialized || exposure_state.snap {
@@ -680,6 +689,8 @@ pub fn build_view(
             exposure_state.ev100
         }
     };
+    // Never keep a NaN: the next frames ease from it and would stay blown out.
+    let ev100 = if ev100.is_finite() { ev100 } else { 14.0 };
     exposure_state.initialized = true;
     exposure_state.ev100 = ev100;
 
