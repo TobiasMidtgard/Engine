@@ -68,8 +68,7 @@ gltf = "1.4"
 notify = "8"
 
 # --- subsystems ---
-# Without "parallel": physics steps its regions as parallel jobs already, and Rapier's hand-offs
-# to its rayon pool stalled single steps 5-15 ms on a busy machine (engine_physics).
+# engine_physics turns on "parallel" for its busiest region's own pool (crates/physics/Cargo.toml).
 rapier3d = { version = "0.36" }
 kira = "0.12"
 egui = "0.36"

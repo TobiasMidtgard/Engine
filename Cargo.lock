@@ -4357,6 +4357,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "schedule-audit"
+version = "0.1.0"
+dependencies = [
+ "engine",
+ "engine_anim",
+ "engine_audio",
+ "engine_character",
+ "engine_core",
+ "engine_destruction",
+ "engine_fire",
+ "engine_foliage",
+ "engine_movement",
+ "engine_npc",
+ "engine_physics",
+ "engine_script",
+ "engine_smoke",
+ "engine_softbody",
+ "engine_space",
+ "engine_terrain",
+ "engine_ui",
+ "engine_vehicles",
+ "engine_vfx",
+ "engine_water",
+ "engine_weather",
+]
+
+[[package]]
 name = "scoped-tls"
 version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"

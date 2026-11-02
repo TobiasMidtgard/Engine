@@ -230,6 +230,11 @@ lighting (8K only for a visible backdrop). JPG or PNG for color, HDR or EXR only
     A system that doesn't need this step's bodies (no raycasts, overlaps or body poses; a
     wind, cloud, smoke or water-flow step on last step's state) goes in
     `SimSet::DuringPhysics`, which runs beside `Physics`, like Unreal's `TG_DuringPhysics`.
+  - `tools/schedule-audit` holds the lists: every schedule's exclusive systems and sync
+    points, `PostUpdate`'s `GlobalTransform` writers and the count of `FixedUpdate`'s
+    `Transform` writers, with every module's plugin added. Its test fails when one grows (and
+    when one shrinks, so the list comes down with it). `cargo run -p schedule-audit` prints
+    the report.
 - GPU: instance everything; one storage buffer per kind of data; avoid per-object bind
   groups; compute shaders for anything with more than ~10k elements (particles, fluids).
 - Measure: `Diagnostics::set("module.metric", v)` shows up in `engine.describe`.
