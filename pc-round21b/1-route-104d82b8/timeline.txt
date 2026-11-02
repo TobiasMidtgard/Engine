@@ -1,0 +1,15 @@
+22:08:45.414Z     0,04  mode route quality ultra spec ''; idle before start 69 823 s; HEAD 104d82b8
+22:08:46.467Z     1,09  started: showcase.exe --route --profile --quality ultra
+22:09:03.403Z    18,03  window visible: client 1600x900, window 1616x939 at (156,156), maximized False
+22:09:03.429Z    18,06  world built
+22:09:03.768Z    18,39  after build: working set 5 064 MB, private 6 977 MB; system free 33 436 of 65 277 MB
+22:09:18.094Z    32,72  log: village done at 8.2 s, 5 m up
+22:09:18.364Z    32,99  log: face up done at 8.4 s, 5 m up
+22:09:28.416Z    43,04  log: climb to 2 km done at 17.8 s, 2100 m up
+22:09:34.183Z    48,81  mem: working set 7 513 MB, private 13 936 MB; system free 31 088 of 65 277 MB
+22:09:41.353Z    55,98  log: cruise at 2 km done at 30.0 s, 5496 m up
+22:09:41.356Z    55,98  log: face down done at 30.2 s, 5570 m up
+22:10:04.448Z    79,07  mem: working set 7 455 MB, private 14 795 MB; system free 31 121 of 65 277 MB
+22:10:11.405Z    86,03  HANG: the engine's watchdog fired - stopping this run
+22:10:11.413Z    86,04  killing the game
+22:10:14.438Z    89,06  done

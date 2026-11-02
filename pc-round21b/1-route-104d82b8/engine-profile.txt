@@ -1,0 +1,132 @@
+32 frames in 5.1 s: 159.6 ms per frame (6.3 fps), worst 254.6 ms
+systems busy 177.2 ms per frame: 1.11 of 32 cores on average
+one system at a time 152.9 ms per frame, no system 3.6 ms, several at once 3.1 ms
+systems ran on: compute 97.7 ms on 14 threads, main 79.5 ms, render 0.0 ms
+
+schedule                       ms/frame  runs/frame
+Update                            79.52         1.0
+Render                            43.85         1.0
+FixedUpdate                       38.12         3.9
+PostUpdate                         3.85         1.0
+Last                               0.44         1.0
+FixedPreUpdate                     0.31         3.9
+Extract                            0.31         1.0
+First                              0.28         1.0
+PreUpdate                          0.13         1.0
+FixedPostUpdate                    0.08         3.9
+
+slowest systems                                                   ms/frame   max ms  runs/frame
+engine_render::render_system                                         43.79    49.60         1.0
+engine_script::draw_state_boards                                     30.80    64.38         1.0
+engine_script::draw_graph_boards                                     21.33    59.78         1.0
+engine_script::draw_boards                                           21.23    44.95         1.0
+engine_water::ripple_system                                          18.45    16.80         3.9
+engine_softbody::step_beside_physics                                 16.41    14.92         3.9
+engine_physics::physics_simulate                                      2.69     3.52         3.9
+engine_script::run_scripts                                            2.09    15.54         1.0
+engine_terrain::update_colliders                                      1.56    21.17         1.0
+engine_water::boat_air_system                                         1.30     0.60         3.9
+engine_script::draw_profile_boards                                    1.20    38.00         1.0
+engine_weather::ground_system                                         0.88     1.92         3.9
+engine_destruction::simulate_debris_system                            0.72     8.83         3.9
+engine_water::flow_step_system                                        0.72     1.12         3.9
+engine_physics::physics_sync                                          0.69     0.60         3.9
+engine_softbody::gather_colliders                                     0.67     0.32         3.9
+engine_movement::step_movers                                          0.59     0.30         3.9
+engine_audio::water_ambience                                          0.56     0.57         1.0
+engine_softbody::write_posed_guides                                   0.42     0.22         3.9
+engine_foliage::stream_far_woods                                      0.37     1.12         1.0
+engine_core::propagate_transforms_system                              0.34     0.83         1.0
+engine_physics::physics_write_back                                    0.34     0.27         3.9
+engine_softbody::snapshot_frames                                      0.33     0.31         3.9
+engine_vehicles::wheels_system                                        0.32     0.32         3.9
+engine::stream_system                                                 0.31     0.96         1.0
+engine_fire::update_grass                                             0.29     0.42         1.0
+engine_space::follow_world_clock                                      0.29     0.12         3.9
+engine_render::resolve_mesh_renderers                                 0.25     1.06         1.0
+engine_core::snapshot_interpolation_system                            0.25     0.19         3.9
+engine_weather::cloud_map_system                                      0.24     0.69         3.9
+engine_audio::vehicle_sounds                                          0.20     0.23         1.0
+engine_terrain::walk                                                  0.20     0.23         3.9
+engine_terrain::update_landmarks                                      0.19     0.29         1.0
+engine_water::sync_bodies_system                                      0.19     0.10         3.9
+engine_fire::step_field                                               0.18     0.34         3.9
+engine_ui::ui_layout_system                                           0.17     0.23         1.0
+engine_water::shore_wetness_system                                    0.16     0.45         3.9
+engine_npc::rebuild_world_model                                       0.15     1.29         3.9
+engine_core::frame_diagnostics_system                                 0.15     0.20         1.0
+engine_foliage::sync_scenery_trees                                    0.14     0.24         1.0
+
+ran alone (nothing else running)                                  ms/frame
+engine_render::render_system                                         43.79
+engine_script::draw_state_boards                                     30.80
+engine_script::draw_graph_boards                                     21.33
+engine_script::draw_boards                                           21.23
+engine_water::ripple_system                                          10.55
+engine_softbody::step_beside_physics                                  8.50
+engine_script::run_scripts                                            2.09
+engine_water::boat_air_system                                         1.29
+engine_terrain::update_colliders                                      1.21
+engine_script::draw_profile_boards                                    1.20
+engine_weather::ground_system                                         0.84
+engine_physics::physics_sync                                          0.69
+engine_softbody::gather_colliders                                     0.63
+engine_movement::step_movers                                          0.57
+engine_foliage::stream_far_woods                                      0.37
+engine_core::propagate_transforms_system                              0.34
+engine_softbody::write_posed_guides                                   0.34
+engine_physics::physics_write_back                                    0.34
+engine::stream_system                                                 0.31
+engine_space::follow_world_clock                                      0.29
+
+inside systems                                                    ms/frame   max ms  runs/frame
+  in engine_render: probe gi                                         31.97    35.63         2.1
+  in engine_water: ripples: rebuild                                  17.88    16.54         3.3
+  in engine_render: prepare meshes                                    7.06    12.68         1.0
+  in engine_render: meshes: materials                                 4.61     8.64         1.0
+  in engine_render: screenshot save                                   2.81    50.29         0.1
+  in engine_render: finish commands                                   1.89     4.08         1.0
+  in engine_render: meshes: sync                                      1.20     2.81         1.0
+  in engine_physics: substep upkeep                                   1.19     1.23         4.4
+  in engine_render: prepare terrain                                   1.07     2.83         1.0
+  in engine_render: surface weather                                   0.99     1.64         1.0
+  in engine_physics: sync from world                                  0.66     0.59         3.9
+  in engine_physics: rapier step                                      0.64     0.36         4.4
+  in engine_destruction: debris step                                  0.64     8.80         3.9
+  in engine_render: meshes: cull                                      0.54     0.96         1.0
+  in engine_render: prepare weather ground                            0.50     0.99         1.0
+  in engine_physics: region upkeep                                    0.48     0.45         3.9
+  in engine_render: meshes: gather                                    0.42     1.13         1.0
+  in engine_render: frame setup                                       0.41     0.75         1.0
+  in engine_physics: characters and bounds                            0.40     0.47         3.9
+  in engine_render: prepare water                                     0.38     0.84         1.0
+  in engine_render: submit                                            0.36     0.62         1.0
+  in engine_render: prepare on the render thread                      0.36     0.52         1.0
+  in engine_physics: region splits                                    0.34     0.32         3.9
+  in engine_render: prepare character                                 0.32     0.48         1.0
+  in engine_physics: sync water and holds                             0.31     0.39         3.9
+  in engine_render: meshes: shadow lists                              0.25     0.37         1.0
+  in engine_render: meshes: clusters                                  0.23     0.85         1.0
+  in engine_physics: write back                                       0.19     0.12         3.9
+  in engine_physics: region plans                                     0.18     0.21         3.9
+  in engine_water: ripple upload                                      0.17     0.62         1.0
+  in engine_physics: region tiers                                     0.14     0.10         3.9
+  in engine_render: prepare grass                                     0.14     0.88         2.1
+  in engine_fire: fire grow                                           0.12     0.21         1.3
+  in engine_physics: sync inputs                                      0.11     0.05         3.9
+  in engine_physics: stats                                            0.11     0.11         3.9
+  in engine_physics: region merges                                    0.11     0.29         3.9
+  in engine_render: prepare foliage scenery                           0.10     0.12         1.0
+  in engine_physics: sync colliders                                   0.09     0.12         3.9
+  in engine_render: present                                           0.09     0.18         1.0
+  in engine_physics: sync joints and characters                       0.07     0.13         3.9
+
+ordering floor (longest before/after chain, ms per frame, of the schedule's ms)
+Update            54.12 of  79.52 (3 systems; heaviest: engine_script::draw_state_boards 30.80, engine_script::draw_boards 21.23, engine_script::run_scripts 2.09)
+Render            43.80 of  43.85 (2 systems; heaviest: engine_render::render_system 43.79)
+FixedUpdate       24.00 of  38.12 (56 systems; heaviest: engine_water::ripple_system 18.45, engine_water::boat_air_system 1.30, engine_weather::ground_system 0.88, engine_physics::physics_sync 0.69, engine_softbody::gather_colliders 0.67, engine_softbody::write_posed_guides 0.42, engine_vehicles::wheels_system 0.32, engine_weather::cloud_map_system 0.24)
+PostUpdate         2.43 of   3.85 (39 systems; heaviest: engine_terrain::update_colliders 1.56, engine_core::propagate_transforms_system 0.34, engine_anim::foot_ik_system 0.08, engine_space::reanchor 0.07, engine_space::update_space 0.07, engine_anim::ragdoll_system 0.06)
+Last               0.31 of   0.44 (1 systems; heaviest: engine::stream_system 0.31)
+Extract            0.25 of   0.31 (1 systems; heaviest: engine_render::resolve_mesh_renderers 0.25)
+FixedPreUpdate     0.25 of   0.31 (1 systems; heaviest: engine_core::snapshot_interpolation_system 0.25)
+First              0.16 of   0.28 (4 systems; heaviest: engine_core::frame_diagnostics_system 0.15)
