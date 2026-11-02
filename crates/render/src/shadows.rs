@@ -279,6 +279,8 @@ impl ShadowCache {
             due
         };
         let count = (cascades.count as usize).min(MAX_CASCADES);
+        // `i` indexes the placements, the requests and every per-cascade array of the view.
+        #[allow(clippy::needless_range_loop)]
         for i in 0..MAX_CASCADES {
             if i >= count {
                 self.cascades[i] = None;
