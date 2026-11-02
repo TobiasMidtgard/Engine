@@ -171,6 +171,7 @@ pub fn cave_shell(
         let look = crate::rocks::RockLook {
             wet: false,
             moss: i % 3 != 1,
+            ghost: false,
         };
         kit.spawn(commands, v, tf, look);
     }
@@ -197,6 +198,7 @@ pub fn cave_shell(
         let look = crate::rocks::RockLook {
             wet: false,
             moss: true,
+            ghost: false,
         };
         kit.spawn(commands, v, tf, look);
     }
@@ -226,6 +228,7 @@ pub fn cave_shell(
             let look = crate::rocks::RockLook {
                 wet: false,
                 moss: pick.chance(0.7),
+                ghost: false,
             };
             kit.spawn(commands, v, tf, look);
             y += 2.4;

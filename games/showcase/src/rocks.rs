@@ -21,11 +21,12 @@
 use crate::landscape::{Landscape, Scarp, Stream};
 use crate::meshgen::icosphere;
 use crate::rock_textures::{self, MOSS_TILE_M, ROCK_TILE_M, RockImages};
-use crate::scenery::Lod;
+use crate::scenery::{Lod, NearSolid, SMALL_SOLID_REACH};
 use engine::core::math::noise::{fbm2, fbm3, perlin3};
 use engine::core::math::smoothstep;
 use engine::prelude::*;
 use engine::render::Vertex;
+use engine::world::physics::ColliderShape;
 use std::sync::Mutex;
 use std::thread::JoinHandle;
 
@@ -170,10 +171,17 @@ fn moss_layer(mesh: &Mesh, src: &[u32], cover: &[f32], tint: &[Vec3], lift: f32)
 pub struct RockMaterials {
     /// Dry rock: albedo, normal and occlusion/roughness textures.
     pub rock: Handle<StandardMaterial>,
-    /// The same rock, wet: darker and glossy (stream banks, the falls).
-    pub wet: Handle<StandardMaterial>,
     /// Alpha-masked cushion moss for the moss skins.
     pub moss: Handle<StandardMaterial>,
+    /// Boulders, dry and wet (darker and glossy: stream banks, the falls): the rock projected along the boulder's own axes (triplanar),
+    /// so no face stretches the texture whatever way it turns.
+    pub boulder: Handle<StandardMaterial>,
+    pub boulder_wet: Handle<StandardMaterial>,
+    /// The cliff, dry and wet: projected in world space, seamless across its chunks, with the
+    /// texture's own relief as parallax (playtest 3 #11: the rock by the falls was smeared in
+    /// vertical streaks where per-triangle box mapping projected along the face).
+    pub cliff: Handle<StandardMaterial>,
+    pub cliff_wet: Handle<StandardMaterial>,
 }
 
 /// Make the three rock materials from the generated textures ([`rock_textures::generate`]).
@@ -185,6 +193,7 @@ pub fn rock_materials(
     let albedo = images.insert_keyed("showcase/rock/albedo", t.rock_albedo);
     let normal = images.insert_keyed("showcase/rock/normal", t.rock_normal);
     let orm = images.insert_keyed("showcase/rock/orm", t.rock_orm);
+    let height = images.insert_keyed("showcase/rock/height", t.rock_height);
     // Roughness comes from the texture (G, 0.45–1); the factor scales it.
     let mut rock = StandardMaterial::hex(0xffffff)
         .with_roughness(1.0)
@@ -208,10 +217,21 @@ pub fn rock_materials(
         .with_uv_scale(tiles, tiles)
         .with_subsurface(0.3);
     moss.reflectance = 0.3;
+    // Triplanar reads texture_scale as meters per tile; UV mapping reads the same UVs the
+    // meshes lay out in tiles, so the rock keeps its scale.
+    let projected = |m: StandardMaterial| m.with_triplanar().with_texture_scale(ROCK_TILE_M);
+    let cliff = |m: StandardMaterial| {
+        m.with_triplanar_world()
+            .with_texture_scale(ROCK_TILE_M)
+            .with_height_texture(height, t.rock_relief_m.clamp(0.01, 0.08))
+    };
     RockMaterials {
         rock: materials.add(rock),
-        wet: materials.add(wet),
         moss: materials.add(moss),
+        boulder: materials.add(projected(rock)),
+        boulder_wet: materials.add(projected(wet)),
+        cliff: materials.add(cliff(rock)),
+        cliff_wet: materials.add(cliff(wet)),
     }
 }
 
@@ -582,6 +602,8 @@ pub struct RockVariant {
     pub extent: Vec3,
     /// Fresh, sharp talus block rather than a weathered boulder.
     pub angular: bool,
+    /// Corners of a convex hull round the far mesh, for its collider (at scale 1).
+    pub hull: Vec<Vec3>,
 }
 
 /// The shared rock materials and every boulder variant.
@@ -599,6 +621,9 @@ pub struct RockLook {
     pub wet: bool,
     /// Draw the moss skin when near.
     pub moss: bool,
+    /// No collider of its own (something else already blocks it, such as the always-on
+    /// capsules the wildlife paths round).
+    pub ghost: bool,
 }
 
 /// Seeds and styles of the library's boulders: (size, angular).
@@ -668,6 +693,7 @@ impl KitJob {
             .into_iter()
             .zip(VARIANTS)
             .map(|(b, (size, angular))| RockVariant {
+                hull: hull_points(&b.far),
                 size,
                 near: meshes.add(b.near),
                 far: meshes.add(b.far),
@@ -713,9 +739,9 @@ impl RockKit {
         let scale = tf.scale.max_element();
         let switch = v.size.switch() * scale.max(0.5);
         let mat = if look.wet {
-            self.mats.wet
+            self.mats.boulder_wet
         } else {
-            self.mats.rock
+            self.mats.boulder
         };
         let mut renderer = MeshRenderer::new(v.near, mat);
         if v.size == RockSize::Small {
@@ -739,7 +765,56 @@ impl RockKit {
                 Lod::hide_beyond(v.moss, switch * 0.8),
             ));
         }
+        // Anything taller than a step blocks the way (playtest 3 #13: cliffs, scree and the
+        // waterfall's rocks were walk-through): a hull round the far mesh, scaled as drawn,
+        // made solid while someone is near.
+        if !look.ghost && v.extent.y * tf.scale.y >= SOLID_ROCK_M {
+            commands.spawn((
+                Transform::from_translation(tf.translation).with_rotation(tf.rotation),
+                NearSolid {
+                    shape: ColliderShape::ConvexHull {
+                        points: v.hull.iter().map(|p| *p * tf.scale).collect(),
+                    },
+                    reach: SMALL_SOLID_REACH,
+                },
+            ));
+        }
     }
+}
+
+/// Rocks at least this tall (m) get a collider; lower stones are stepped over.
+const SOLID_ROCK_M: f32 = 0.3;
+
+/// The corners of a convex hull round `mesh`: its farthest vertex along each of 40 directions
+/// spread over the sphere (a Fibonacci lattice), duplicates dropped. Few enough points that
+/// the physics builds the hull quickly each time the rock turns solid, close enough to the
+/// mesh that feet don't sink or hover (the far mesh is the coarse silhouette already).
+fn hull_points(mesh: &Mesh) -> Vec<Vec3> {
+    const DIRS: usize = 40;
+    let golden = std::f32::consts::PI * (3.0 - 5.0f32.sqrt());
+    let mut picked: Vec<usize> = (0..DIRS)
+        .filter_map(|i| {
+            let y = 1.0 - 2.0 * (i as f32 + 0.5) / DIRS as f32;
+            let r = (1.0 - y * y).sqrt();
+            let a = golden * i as f32;
+            let d = Vec3::new(a.cos() * r, y, a.sin() * r);
+            mesh.vertices
+                .iter()
+                .enumerate()
+                .max_by(|a, b| {
+                    Vec3::from(a.1.position)
+                        .dot(d)
+                        .total_cmp(&Vec3::from(b.1.position).dot(d))
+                })
+                .map(|(k, _)| k)
+        })
+        .collect();
+    picked.sort_unstable();
+    picked.dedup();
+    picked
+        .into_iter()
+        .map(|k| Vec3::from(mesh.vertices[k].position))
+        .collect()
 }
 
 // ---------------------------------------------------------------------------------------------

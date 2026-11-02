@@ -253,9 +253,12 @@ fn stone(
     // Rocks are rounder than the boxes they fill: a little bigger along the face, so their
     // bellies meet and only chinks show between them.
     let size = half * 2.0 * Vec3::new(1.18, 1.2, 1.0);
-    // About 1,300 triangles for small stones, 5,000 for the big ones: facets of a centimeter
-    // or two, which virtual geometry thins out with distance.
-    let detail = if size.max_element() > 0.6 { 4 } else { 3 };
+    // About 320 triangles for small stones, 1,300 for the big ones: facets of 2-4 cm. These
+    // stones only show beyond the hero stones' 30 m, where a pixel is 3 cm or more, so finer
+    // facets were never seen; at 1-2 cm a segment was 350-410 thousand triangles and the
+    // valley's 420 segments in view were 134 million triangles casting shadows (scene census,
+    // performance week). Still dense enough to draw as virtual geometry.
+    let detail = if size.max_element() > 0.6 { 3 } else { 2 };
     // Dress it like a waller would: split along its bedding planes (flat top and bottom) with a
     // squared-off face and ends, so it reads as a slab of gritstone rather than a river cobble.
     // The rock starts a little bigger, so the dressed stone still fills `size`.
@@ -580,9 +583,10 @@ mod tests {
     #[test]
     fn segments_stay_in_budget_and_inside_their_box() {
         let s = segment(3);
-        // Dense enough for virtual geometry (50,000 triangles by default), not wasteful.
+        // Dense enough for virtual geometry (50,000 triangles by default), not wasteful: the
+        // stones only show beyond the hero stones' 30 m.
         let near = tris(&s.near);
-        assert!((60_000..700_000).contains(&near), "near {near}");
+        assert!((50_000..150_000).contains(&near), "near {near}");
         assert!(tris(&s.near_end) < near, "end {}", tris(&s.near_end));
         assert!(tris(&s.core) <= 12, "core {}", tris(&s.core));
         assert!(tris(&s.core_far) <= 12, "far core {}", tris(&s.core_far));
@@ -637,8 +641,8 @@ mod tests {
                 assert!((m.determinant().abs() - 1.0).abs() < 1e-3, "{p:?}");
             }
         }
-        // A stone per merged rock: about 2,500 triangles each.
-        assert!(tris(&s.near) / s.placed.len() > 1000);
+        // A stone per merged rock: about 600 triangles each.
+        assert!((250..1500).contains(&(tris(&s.near) / s.placed.len())));
     }
 
     #[test]

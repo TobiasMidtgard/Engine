@@ -25,12 +25,14 @@
 
 mod build;
 mod camera;
+mod census;
 mod film;
 mod forest;
 mod garden;
 mod landscape;
 mod loops;
 mod meshgen;
+mod pack;
 mod paint_cache;
 mod placeholders;
 mod places;
@@ -158,6 +160,7 @@ fn main() {
     // run too, to measure its start.
     let exe = (!headless && !scripted) || args.iter().any(|a| a == "--exe");
     walk::install(&mut app, exe);
+    pack::install(&mut app);
     if exe {
         // The window draws a loading screen at once while the world builds a step a frame,
         // and Movement's look bakes on its own thread meanwhile.

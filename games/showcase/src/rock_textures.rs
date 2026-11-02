@@ -21,6 +21,10 @@ pub struct RockImages {
     /// R = ambient occlusion, G = roughness, B = metallic (0): serves as both the occlusion and
     /// the metallic/roughness texture.
     pub rock_orm: Image,
+    /// R = height (0 deepest .. 1 top, linear), for parallax on the cliffs.
+    pub rock_height: Image,
+    /// How deep that relief is, m (top to deepest).
+    pub rock_relief_m: f32,
     pub moss_albedo: Image,
     pub moss_normal: Image,
 }
@@ -36,6 +40,8 @@ pub fn generate(rock_size: u32, moss_size: u32) -> RockImages {
         rock_albedo: rock.0,
         rock_normal: rock.1,
         rock_orm: rock.2,
+        rock_height: rock.3,
+        rock_relief_m: rock.4,
         moss_albedo: moss.0,
         moss_normal: moss.1,
     }
@@ -489,7 +495,7 @@ fn rock_texel(u: f32, v: f32, lo: &[f32; 12]) -> RockTexel {
     }
 }
 
-fn rock_maps(size: u32) -> (Image, Image, Image) {
+fn rock_maps(size: u32) -> (Image, Image, Image, Image, f32) {
     let n = size as usize;
     let lo = LowRes::new((n / 4).max(8), rock_low);
     let mut texels = vec![RockTexel::default(); n * n];
@@ -556,10 +562,28 @@ fn rock_maps(size: u32) -> (Image, Image, Image) {
 
     // Height is in mm and a texel is ROCK_TILE_M / size, so slopes come out right.
     let texel_mm = ROCK_TILE_M * 1000.0 / size as f32;
+    // The height map for parallax: 0 at the deepest texel, 1 at the top. Robust ends (the
+    // 0.5th and 99.5th percentiles), so a single deep pit doesn't flatten the rest.
+    let mut sorted = height.clone();
+    sorted.sort_unstable_by(f32::total_cmp);
+    let (lo_mm, hi_mm) = (
+        sorted[sorted.len() / 200],
+        sorted[sorted.len() - 1 - sorted.len() / 200],
+    );
+    let span = (hi_mm - lo_mm).max(1e-3);
+    let heights: Vec<u8> = height
+        .iter()
+        .flat_map(|h| {
+            let r = to_unorm(((h - lo_mm) / span).clamp(0.0, 1.0));
+            [r, r, r, 255]
+        })
+        .collect();
     (
         Image::new(size, size, albedo, true),
         normal_map(&height, n, 1.0 / texel_mm),
         Image::new(size, size, orm, false),
+        Image::new(size, size, heights, false),
+        span / 1000.0,
     )
 }
 

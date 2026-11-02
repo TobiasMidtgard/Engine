@@ -140,8 +140,13 @@ fn run(world: &mut World) {
     // The place's calls wait for the meshes in view to finish building, so the frames run
     // meanwhile don't eat into the warm-up: a timed moment (a vault, a leap onto a moving car)
     // is caught when the warm-up says, however long the builds take.
+    // A blind census draws nothing at all (a software renderer takes minutes a frame).
+    let blind = crate::census::blind();
+    if blind {
+        park(world);
+    }
     if frames == 1 {
-        if wait_for_builds(world, ARRIVAL_STALL_SECS) {
+        if !blind && wait_for_builds(world, ARRIVAL_STALL_SECS) {
             return;
         }
         crate::places::visit_soon(world, &place);
@@ -150,11 +155,15 @@ fn run(world: &mut World) {
     // A quick warm-up runs without drawing, from after the arrival calls until the frames
     // that settle the picture.
     let settle_from = capture_at - SETTLE_FRAMES;
-    if place.quick_warmup && frames == crate::places::ARRIVE_DELAY + 3 && frames < settle_from {
+    if place.quick_warmup
+        && frames == crate::places::ARRIVE_DELAY + 3
+        && frames < settle_from
+        && !blind
+    {
         park(world);
     }
     // Anything the calls brought into view gets the same wait before the picture.
-    if frames == settle_from {
+    if frames == settle_from && !blind {
         unpark(world);
         if wait_for_builds(world, BUILD_STALL_SECS) {
             return;
@@ -168,13 +177,16 @@ fn run(world: &mut World) {
             d.get("render.ev100").unwrap_or(f64::NAN),
             d.get("render.ev100_metered").unwrap_or(f64::NAN)
         );
+        crate::census::take(world, place.key, index == 0);
     }
     let mut tour = world.resource_mut::<Tour>();
     if frames == capture_at {
         let path = format!("{out_dir}/{:02}_{}.png", index + 1, place.key);
         tour.frames = 0;
         tour.index += 1;
-        world.resource_mut::<Screenshots>().request(path);
+        if !blind {
+            world.resource_mut::<Screenshots>().request(path);
+        }
     } else {
         tour.frames += 1;
     }

@@ -1064,17 +1064,18 @@ pub fn spawn_rocks(commands: &mut Commands, lib: &Library, land: &Landscape, rng
             RockLook {
                 wet: false,
                 moss: pick.chance(0.85),
+                // The wildlife's always-on capsule blocks these already.
+                ghost: big && near_wildlife(x, z),
             },
         );
         count += 1;
         if big {
             let (foot, radius, height) =
                 (DVec3::new(x, h, z), r * 0.75, v.extent.y * scale * squash);
-            // Wildlife paths round them, so there they stay solid whoever is near.
+            // Wildlife paths round them, so there they stay solid whoever is near (elsewhere
+            // the kit's hull turns solid near the action).
             if near_wildlife(x, z) {
                 solid(commands, foot, radius, height);
-            } else {
-                NearSolid::upright(commands, foot, radius, height);
             }
         }
     }
@@ -1144,6 +1145,7 @@ pub fn spawn_cliffs_and_stream(
         let look = RockLook {
             wet: spot.wet,
             moss: local.chance(0.45),
+            ghost: false,
         };
         kit.spawn(commands, v, tf, look);
         talus_count += 1;
@@ -1173,6 +1175,7 @@ pub fn spawn_cliffs_and_stream(
             let look = RockLook {
                 wet: spot.wet,
                 moss: false,
+                ghost: false,
             };
             kit.spawn(commands, v, tf, look);
             talus_count += 1;
@@ -1209,6 +1212,7 @@ pub fn spawn_cliffs_and_stream(
             let look = RockLook {
                 wet: off < 1.0,
                 moss: off >= 1.0,
+                ghost: false,
             };
             kit.spawn(commands, v, tf, look);
         }
@@ -1238,6 +1242,7 @@ pub fn spawn_cliffs_and_stream(
                 let look = RockLook {
                     wet: false,
                     moss: true,
+                    ghost: false,
                 };
                 kit.spawn(commands, v, tf, look);
             }
@@ -1279,6 +1284,7 @@ pub fn spawn_cliffs_and_stream(
             let look = RockLook {
                 wet: true,
                 moss: false,
+                ghost: false,
             };
             kit.spawn(commands, v, tf, look);
         }
@@ -1288,11 +1294,29 @@ pub fn spawn_cliffs_and_stream(
         far_tris += ch.far.triangle_count();
         let tf = Transform::from_translation(ch.origin);
         let switch = 160.0;
+        // The rock face is solid near the action (playtest 3 #13): its third-resolution mesh
+        // (about 1 m voxels) as a static triangle mesh, enough to stand on and run into.
+        let b = ch.far.aabb();
+        commands.spawn((
+            tf,
+            NearSolid {
+                shape: ColliderShape::TriMesh {
+                    vertices: ch
+                        .far
+                        .vertices
+                        .iter()
+                        .map(|v| Vec3::from(v.position))
+                        .collect(),
+                    indices: ch.far.indices.as_chunks::<3>().0.to_vec(),
+                },
+                reach: CLIFF_SOLID_REACH + b.min.abs().max(b.max.abs()).length(),
+            },
+        ));
         let near = meshes.add(ch.near);
         let far = meshes.add(ch.far);
         commands.spawn((
             tf,
-            MeshRenderer::new(near, kit.mats.rock),
+            MeshRenderer::new(near, kit.mats.cliff),
             Lod {
                 near,
                 far: Some(far),
@@ -1305,7 +1329,7 @@ pub fn spawn_cliffs_and_stream(
             let wet = meshes.add(ch.wet);
             commands.spawn((
                 tf,
-                MeshRenderer::new(wet, kit.mats.wet),
+                MeshRenderer::new(wet, kit.mats.cliff_wet),
                 Lod::hide_beyond(wet, switch),
             ));
         }
@@ -2510,7 +2534,11 @@ impl NearSolid {
 
 /// Trunks, boulders, lamps and fences get their colliders within this distance of a focus
 /// point, m (houses and walls at [`WALL_COLLIDER_DISTANCE`]).
-const SMALL_SOLID_REACH: f32 = 70.0;
+pub(crate) const SMALL_SOLID_REACH: f32 = 70.0;
+
+/// A cliff chunk's collider exists while a focus point is this far beyond its bounding sphere,
+/// m (measured from the chunk's origin, so its farthest corner is added).
+const CLIFF_SOLID_REACH: f32 = 60.0;
 
 /// The dry-stone walls ([`plan_walls`]): the stones, the core, a box collider per segment
 /// (streamed in near the action) and the heads that end the runs.
