@@ -397,6 +397,16 @@ impl Region {
         out
     }
 
+    /// Speed of the fastest awake body here, m/s.
+    pub fn fastest(&self) -> f32 {
+        let w = &self.world;
+        w.islands
+            .active_bodies()
+            .filter_map(|h| w.bodies.get(h))
+            .map(|b| b.linvel().length())
+            .fold(0.0, f32::max)
+    }
+
     /// World position → this region's local `f32` coordinates.
     pub fn local(&self, p: DVec3) -> Vec3 {
         (p - self.anchor).as_vec3()
@@ -2299,7 +2309,8 @@ impl Simulation {
     /// Re-center, split and merge regions so every mover stays near its region's anchor and
     /// movers that could touch share a region. Also freezes regions far from every focus, and
     /// sets each region's level of detail ([`crate::lod`]).
-    pub fn maintain_regions(&mut self, foci: &[DVec3], max_speed_step: f64) {
+    /// `max_speed_step`: the fastest awake body's travel in a step of `dt` seconds, anywhere.
+    pub fn maintain_regions(&mut self, foci: &[DVec3], max_speed_step: f64, dt: f64) {
         let radius = self.settings.region_radius_m;
         // Freeze far regions.
         let freeze = self.settings.freeze_distance_m;
@@ -2319,7 +2330,6 @@ impl Simulation {
         let margin = 20.0 + max_speed_step * 4.0;
         self.lod_clock += 1;
         // Bodies asking for fine steps keep to regions of their own (`crate::fine`).
-        let fine_margin = crate::fine::MARGIN + max_speed_step * 3.0;
         let splits = tracing::info_span!("region splits").entered();
         let newly_mixed = self.update_fine();
         self.wake_dormant();
@@ -2332,7 +2342,7 @@ impl Simulation {
         }
         if newly_mixed || self.lod_clock.is_multiple_of(crate::lod::LOD_EVERY) {
             let _fine = tracing::info_span!("split fine").entered();
-            self.split_fine(fine_margin * 1.25);
+            self.split_fine(dt);
         }
         self.update_fine();
         let tiers = tracing::info_span!("region tiers").entered();
@@ -2409,6 +2419,10 @@ impl Simulation {
                     let (da, db) = (self.region(a).dormant, self.region(b).dormant);
                     let apart = if fa.is_some() != fb.is_some() {
                         let (fine, other) = if fa.is_some() { (a, b) } else { (b, a) };
+                        // (Three steps of the two regions' own fastest travel, as the split
+                        // uses: a fast plane elsewhere must not pull the yard in.)
+                        let fastest = self.region(a).fastest().max(self.region(b).fastest());
+                        let fine_margin = crate::fine::MARGIN + 3.0 * fastest as f64 * dt;
                         !self.movers_near(fine, other, fine_margin)
                     } else if ta != tb || da != db {
                         // (A dormant region lies among the movers it was split from, so it

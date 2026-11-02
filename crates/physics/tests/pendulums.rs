@@ -269,3 +269,44 @@ fn a_pendulum_wave_comes_back_into_step_after_a_minute() {
         );
     }
 }
+
+/// A fast body far away (a plane over the airfield) doesn't chain the cradle to the crates
+/// beside it: the split's gap is three steps of the region's own fastest travel, not the
+/// fastest anywhere (with a body at 60 m/s it was 4.4 m, and the crates 4 m off stepped
+/// finely with the cradle; the whole proving ground did at the showcase's forest).
+#[test]
+fn a_fast_body_far_away_keeps_the_cradle_apart() {
+    let mut app = app();
+    app.world.spawn((
+        Transform::from_xyz(0.0, -0.5, 0.0),
+        RigidBody::fixed(),
+        Collider::cuboid(Vec3::new(50.0, 0.5, 50.0)),
+    ));
+    for i in 0..12 {
+        app.world.spawn((
+            Transform::from_xyz(-4.0 + (i % 3) as f64 * 0.05, 0.3 + i as f64 * 0.62, 0.0)
+                .with_rotation(Quat::from_rotation_y(i as f32 * 0.4)),
+            RigidBody::dynamic(),
+            Collider::cuboid(Vec3::splat(0.3)).with_density(300.0),
+            Velocity::default(),
+        ));
+    }
+    app.world.spawn((
+        Transform::from_xyz(300.0, 50.0, 0.0),
+        RigidBody {
+            gravity_scale: 0.0,
+            ..RigidBody::dynamic()
+        },
+        Collider::sphere(1.0),
+        Velocity {
+            linear: Vec3::new(60.0, 0.0, 0.0),
+            angular: Vec3::ZERO,
+        },
+    ));
+    let at = DVec3::new(0.0, 0.8, 0.0);
+    cradle(&mut app, at, 0, false);
+    app.update_n(40);
+    let s = stats(&app);
+    assert!(s.fine_awake <= 5, "the crates step finely too: {s:?}");
+    assert!(s.awake > s.fine_awake, "{s:?}");
+}

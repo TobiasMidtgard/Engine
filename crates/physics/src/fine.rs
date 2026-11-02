@@ -43,6 +43,11 @@ impl Default for FineSteps {
     }
 }
 
+/// Most movers a region steps finely (`Region::plan`). A cluster the split can't part (a
+/// cradle in the middle of a collapse) steps at the usual rate rather than taking the whole
+/// heap to 1 ms substeps: a few balls swinging off as a lump is the cheaper error.
+pub const MAX_FINE_MOVERS: u32 = 256;
+
 /// Movers of a region with fine steps and of one without closer than this (plus their travel
 /// in three steps) share a region, meters.
 pub const MARGIN: f64 = 0.5;
@@ -181,8 +186,12 @@ impl Simulation {
     }
 
     /// Move the clusters holding bodies with fine steps out of regions that hold others too
-    /// ([module docs](self)). Two movers less than `gap` meters apart stay together.
-    pub(crate) fn split_fine(&mut self, gap: f64) {
+    /// ([module docs](self)). Two movers less than [`MARGIN`] plus three steps (of `dt` seconds)
+    /// of the region's fastest travel apart, and a quarter more, stay together. (The region's
+    /// own: with the fastest anywhere, a plane at 57 m/s over the airfield chained the proving
+    /// ground's stations 4 m apart into one cluster with the cradle, and the whole yard and the
+    /// fortress's debris, 1500 bodies, stepped finely: 30 ms a frame at the forest on the PC.)
+    pub(crate) fn split_fine(&mut self, dt: f64) {
         let join = self.settings.region_radius_m * 0.5;
         for id in self.live_region_ids() {
             let (frozen, mixed, tier, fine) = {
@@ -192,6 +201,7 @@ impl Simulation {
             if frozen || !mixed {
                 continue;
             }
+            let gap = (MARGIN + 3.0 * self.region(id).fastest() as f64 * dt) * 1.25;
             // Characters step with the rest and don't chain bodies together: walkers among the
             // stations would hold the whole yard in one cluster, all of it stepping finely.
             let members: Vec<Member> = self

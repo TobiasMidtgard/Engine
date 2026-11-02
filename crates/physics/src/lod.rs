@@ -126,8 +126,11 @@ impl Region {
             return None;
         }
         let span = dt + std::mem::take(&mut self.owed_secs);
-        // Fine steps only while two bodies here may meet this frame.
-        let fine = self.fine.filter(|_| self.meeting_soon(span));
+        // Fine steps only while two bodies here may meet this frame, and never for a crowd: a
+        // cradle the split couldn't part from a heap steps with it at the heap's rate.
+        let fine = self
+            .fine
+            .filter(|_| self.movers <= crate::fine::MAX_FINE_MOVERS && self.meeting_soon(span));
         let base = crate::fine::finest(Some(settings.max_substep_secs), fine).unwrap_or(0.0);
         let longest = base.max(1e-4) * (1u32 << self.tier.min(2)) as f32;
         // (The cap guards the frame rate at extreme speed-ups; fine steps are few bodies, and

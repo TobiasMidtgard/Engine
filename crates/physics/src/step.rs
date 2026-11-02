@@ -597,7 +597,7 @@ pub(crate) fn physics_simulate(
         })
         .fold(0.0f32, f32::max) as f64
         * dt as f64;
-    sim.maintain_regions(&foci, max_step);
+    sim.maintain_regions(&foci, max_step, dt as f64);
 
     // ---------------------------------------------------------------- step
     let substeps = if dt > 0.0 {
