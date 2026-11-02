@@ -118,6 +118,9 @@ pub struct Region {
     step_stamp: u64,
 }
 
+/// Contact pairs a worker reads at once in [`Region::touches`] on a wide pool.
+const TOUCH_CHUNK: usize = 2048;
+
 /// The contact pairs a substep left for a closer look ([`Region::touches`]), each sorted by
 /// collider handles.
 #[derive(Default)]
@@ -295,7 +298,10 @@ impl Region {
         if awake.is_empty() {
             return out;
         }
-        let mut look = |pair: &ContactPair, (m1, s1): (f32, bool), (m2, s2): (f32, bool)| {
+        let look = |out: &mut Touches,
+                    pair: &ContactPair,
+                    (m1, s1): (f32, bool),
+                    (m2, s2): (f32, bool)| {
             if !pair.has_any_active_contact() {
                 return;
             }
@@ -327,18 +333,45 @@ impl Region {
             // Much of the region is awake: read every pair in the order they are stored,
             // skipping those with no awake side (cheaper than hopping from collider to
             // collider through the contact graph).
-            for pair in world.narrow_phase.contact_pairs() {
-                let (n1, n2) = (noted(pair.collider1), noted(pair.collider2));
-                if n1.is_none() && n2.is_none() {
-                    continue;
+            let read = |out: &mut Touches, pairs: &[&ContactPair]| {
+                for pair in pairs {
+                    let (n1, n2) = (noted(pair.collider1), noted(pair.collider2));
+                    if n1.is_none() && n2.is_none() {
+                        continue;
+                    }
+                    let (Some(a), Some(b)) = (
+                        n1.or_else(|| lookup(pair.collider1)),
+                        n2.or_else(|| lookup(pair.collider2)),
+                    ) else {
+                        continue;
+                    };
+                    look(out, pair, a, b);
                 }
-                let (Some(a), Some(b)) = (
-                    n1.or_else(|| lookup(pair.collider1)),
-                    n2.or_else(|| lookup(pair.collider2)),
-                ) else {
-                    continue;
-                };
-                look(pair, a, b);
+            };
+            let pairs: Vec<&ContactPair> = world.narrow_phase.contact_pairs().collect();
+            // A busy region's pairs are read in chunks on the pool its step ran on (only the
+            // wide pool has more than one thread), and joined back in order.
+            match world.physics_pipeline.thread_pool() {
+                Some(pool) if pool.current_num_threads() > 1 && pairs.len() >= 2 * TOUCH_CHUNK => {
+                    use rayon::prelude::*;
+                    let parts: Vec<Touches> = pool.install(|| {
+                        pairs
+                            .par_chunks(TOUCH_CHUNK)
+                            .map(|chunk| {
+                                let mut part = Touches::default();
+                                read(&mut part, chunk);
+                                part
+                            })
+                            .collect()
+                    });
+                    for part in parts {
+                        out.spins += part.spins;
+                        out.pushes.extend(part.pushes);
+                        out.touched.extend(part.touched);
+                        out.hits.extend(part.hits);
+                    }
+                }
+                _ => read(&mut out, &pairs),
             }
         } else {
             // Only the awake colliders' pairs; one with two awake sides from its first.
@@ -354,7 +387,7 @@ impl Region {
                     ) else {
                         continue;
                     };
-                    look(pair, a, b);
+                    look(&mut out, pair, a, b);
                 }
             }
         }
