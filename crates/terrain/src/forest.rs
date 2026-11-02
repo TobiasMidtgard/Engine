@@ -133,8 +133,9 @@ pub(crate) fn woods(
         _ => (0.0, 0.0),
     };
     density *= 1.0 - painted;
-    // Rivers and lakes.
-    density *= 1.0 - smoothstep(0.3, 0.6, s.water);
+    // Rivers and lakes: no trunk stands in water, however shallow the edge (crowns may still
+    // lean over it from the bank).
+    density *= 1.0 - smoothstep(0.02, 0.1, s.water);
     // Needle trees in the cold: up mountains and toward the poles, mixed woods in between.
     let conifer = smoothstep(
         11.0,
