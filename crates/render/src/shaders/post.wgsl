@@ -9,8 +9,15 @@ struct PostParams {
     params2: vec4<f32>,
     // x: sharpening 0..1, y: white balance warm(+)/cool(-), z: pre-exposure, w: night desaturation
     params3: vec4<f32>,
-    // x: 1 when the scene is upscaled to the viewport (a render scale under 1), yzw unused
+    // x: 1 when the scene is upscaled to the viewport (a render scale under 1), y: the
+    // viewport's aspect (width / height), z: tan(vertical field of view / 2), w unused
     params4: vec4<f32>,
+    // The sun's glare (`sun_glare_light`): xy where the sun is in the image (uv), z its
+    // angular radius (radians), w the glare's strength (0: none)
+    sun: vec4<f32>,
+    // rgb: the sun's illuminance reaching the camera, pre-exposed; w: the luminance its disc
+    // has in the image when nothing covers it, pre-exposed
+    sun_light: vec4<f32>,
 };
 
 @group(0) @binding(0) var hdr_tex: texture_2d<f32>;
@@ -79,6 +86,61 @@ fn vs_fullscreen(@builtin(vertex_index) i: u32) -> FullscreenOut {
     return fullscreen_vertex(i, 0.0);
 }
 
+struct TonemapOut {
+    @builtin(position) position: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+    // How much of the sun's disc shows (0..1), the same for every pixel.
+    @location(1) @interpolate(flat) sun_visible: f32,
+};
+
+// The tonemap's fullscreen triangle. Its three vertices also measure how much of the sun's
+// disc shows: the image's luminance at the disc's middle and on a ring at half its radius,
+// against what the uncovered disc has. Trees, clouds, mist and the edge of the image all cover
+// it, so the glare fades with them.
+@vertex
+fn vs_tonemap(@builtin(vertex_index) i: u32) -> TonemapOut {
+    let f = fullscreen_vertex(i, 0.0);
+    var out: TonemapOut;
+    out.position = f.position;
+    out.uv = f.uv;
+    out.sun_visible = 0.0;
+    if (post.sun.w > 0.0 && post.sun_light.w > 0.0) {
+        let center = post.sun.xy;
+        // The disc's radius in uv (y), and in x for the image's aspect.
+        let r = tan(post.sun.z) / (2.0 * post.params4.z);
+        let ruv = vec2<f32>(r / post.params4.y, r);
+        var lum = luminance(textureSampleLevel(hdr_tex, post_sampler, center, 0.0).rgb);
+        for (var k = 0; k < 6; k++) {
+            let a = f32(k) * (TAU / 6.0);
+            let p = center + vec2<f32>(cos(a), sin(a)) * ruv * 0.5;
+            lum += luminance(textureSampleLevel(hdr_tex, post_sampler, p, 0.0).rgb);
+        }
+        // The disc's limb is darker (the sky shader's `limb`); the ring reads about 0.92.
+        let shown = saturate(lum / 7.0 / (0.95 * post.sun_light.w));
+        // Off the image's edge the taps read the edge: fade the glare out there.
+        let edge = min(min(center.x, 1.0 - center.x), min(center.y, 1.0 - center.y));
+        out.sun_visible = shown * smoothstep(0.0, 0.03, edge);
+    }
+    return out;
+}
+
+// The sun's glare at `uv` (pre-exposed): light the eye's (and a lens') optics scatter around a
+// bright source. The shape is the halo of Spencer et al.'s glare point spread function for the
+// eye (SIGGRAPH 1995, "Physically-Based Glare Effects for Digital Images"), P(θ) = 0.478 f1 +
+// 0.138 f2 per steradian with θ in degrees, scaled by `post.sun.w` (1: the eye's full glare,
+// which washes out several degrees around the sun): the light at angle θ from the sun is its
+// illuminance times P(θ). The disc itself is the sky's.
+fn sun_glare(uv: vec2<f32>, visible: f32) -> vec3<f32> {
+    if (visible <= 0.0) { return vec3(0.0); }
+    // Angle from the sun, from the offset on the image plane (exact on the sun's axis, close
+    // enough off it for a glow that fades within a few degrees).
+    let d = (uv - post.sun.xy) * vec2<f32>(post.params4.y, 1.0) * 2.0 * post.params4.z;
+    let theta = max(degrees(atan(length(d))), degrees(post.sun.z));
+    let t = theta + 0.02;
+    let psf = 0.478 * 20.91 / (t * t * t) + 0.138 * 72.37 / (t * t);
+    return post.sun_light.rgb * (psf * post.sun.w * visible);
+}
+
 // Contrast-adaptive sharpening (after AMD FidelityFX CAS): pushes each pixel away from its four
 // neighbors, less where the neighborhood is already contrasty, and never beyond the
 // neighborhood's range, so temporal anti-aliasing's softness goes without halos. Works on
@@ -128,10 +190,11 @@ fn cas(c: vec3<f32>, n: vec3<f32>, s: vec3<f32>, e: vec3<f32>, w: vec3<f32>, amo
 }
 
 @fragment
-fn fs_tonemap(in: FullscreenOut) -> @location(0) vec4<f32> {
+fn fs_tonemap(in: TonemapOut) -> @location(0) vec4<f32> {
     var c = sharpened(in.uv, post.params3.x);
     let bloom = textureSampleLevel(bloom_tex, post_sampler, in.uv, 0.0).rgb * post.params2.w;
     c = mix(c, bloom, post.params2.x);
+    c += sun_glare(in.uv, in.sun_visible);
     // Scotopic (night) vision: below ~1 cd/m^2 color fades toward a blue-gray.
     let night = post.params3.w;
     if (night > 0.0) {

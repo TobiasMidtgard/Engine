@@ -53,6 +53,16 @@ fn pending_mb(app: &App) -> f64 {
     app.world.resource::<Diagnostics>().metrics["render.pending_upload_mb"]
 }
 
+/// How many meshes are cross-fading between levels of detail (the meshes feature's state).
+fn lods_fading(app: &App) -> u64 {
+    let describe = app.world.resource::<engine_render::Renderer>().describe();
+    describe["features"]
+        .as_array()
+        .and_then(|f| f.iter().find(|f| f["name"] == "meshes"))
+        .and_then(|f| f["state"]["lods_fading"].as_u64())
+        .unwrap_or(0)
+}
+
 #[test]
 fn new_meshes_spread_over_frames_and_all_arrive() {
     let mut app = app(1.0);
@@ -78,6 +88,15 @@ fn new_meshes_spread_over_frames_and_all_arrive() {
         );
     }
     app.update();
+    // The balls' coarser levels arrive after their uploads; while a ball cross-fades to one,
+    // both levels are drawn (`lods_fading`). Count once the fades are over.
+    for _ in 0..60 {
+        if lods_fading(&app) == 0 {
+            break;
+        }
+        app.update();
+    }
+    assert_eq!(lods_fading(&app), 0, "level fades never ended");
     let instances = app.world.resource::<RenderStats>().instances;
     eprintln!("all uploaded after {frames} frames: {instances} instances");
     assert!(frames >= BALLS / 2, "done in {frames} frames");

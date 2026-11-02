@@ -1024,7 +1024,7 @@ fn fs_main(in: VertexOut, @builtin(front_facing) front: bool) -> @location(0) ve
         color = apply_fog(color, in.rel);
     }
     if (frame.counts.z == 2u) {
-        let depth = view_depth(in.rel);
+        let depth = length(in.rel);
         var tint = vec3<f32>(1.0, 0.4, 0.4);
         if (depth > frame.shadow_splits[0]) { tint = vec3(0.4, 1.0, 0.4); }
         if (depth > frame.shadow_splits[1]) { tint = vec3(0.4, 0.4, 1.0); }

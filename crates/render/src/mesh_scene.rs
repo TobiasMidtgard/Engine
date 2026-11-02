@@ -58,7 +58,15 @@ pub(crate) struct Hot {
     /// The mesh version `center` and `radius` were computed for (`u64::MAX`: not yet).
     pub mesh_version: u64,
     pub flags: u8,
+    /// The camera's level of detail last frame (`LOD_UNSET`: none yet), kept with hysteresis.
+    pub lod: u8,
+    /// The level it cross-fades from, and the frame (low 32 bits) the fade started.
+    pub lod_from: u8,
+    pub lod_frame: u32,
 }
+
+/// `Hot::lod` before the slot has been seen by the camera: its first level is taken as it is.
+pub(crate) const LOD_UNSET: u8 = u8::MAX - 1;
 
 /// What only the drawn instances read of a slot.
 #[derive(Clone, Copy, Debug)]
@@ -69,6 +77,9 @@ pub(crate) struct Cold {
     pub previous: GlobalTransform,
     /// The frame the transform last changed.
     pub moved: u64,
+    /// The frame the slot was last written: added, moved, or any of its components changed.
+    /// Static shadow images hold slots unchanged for a while (`mesh_feature::STILL_FRAMES`).
+    pub changed: u64,
     /// The normal matrix's rows (`MeshInstance::n`).
     pub normal: [[f32; 4]; 3],
     /// The rows of the transform's linear part, `f32` (translations are added per view, from
@@ -142,6 +153,19 @@ pub(crate) struct MeshScene {
     tick: Option<Tick>,
     /// Slots rewritten by the latest sync.
     pub dirty: u32,
+    /// Slots rewritten or dropped by the latest sync, as they were before (static shadow
+    /// images that hold them must be drawn again).
+    pub changes: Vec<SlotChange>,
+}
+
+/// A slot as it was before the latest sync rewrote or dropped it.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct SlotChange {
+    /// World-space bounds.
+    pub center: DVec3,
+    pub radius: f32,
+    /// `Cold::changed` before.
+    pub changed: u64,
 }
 
 impl MeshScene {
@@ -153,6 +177,7 @@ impl MeshScene {
             .take()
             .unwrap_or_else(|| world.query::<SceneQuery>());
         self.dirty = 0;
+        self.changes.clear();
         match self.tick {
             Some(tick) => {
                 world.last_change_tick_scope(tick, |w| self.sweep(&mut query, w, frame, false))
@@ -171,6 +196,7 @@ impl MeshScene {
                 continue;
             }
             self.release(s);
+            self.note_change(s);
             let entity = self.cold[s].entity;
             if let Some(e) = self.slot_of.get_mut(entity.index_u32() as usize)
                 && e.0 == entity
@@ -242,7 +268,9 @@ impl MeshScene {
                         continue;
                     }
                     self.release(s);
+                    self.note_change(s);
                     let cold = &mut self.cold[s];
+                    cold.changed = frame;
                     if cold.transform != *transform {
                         cold.previous = cold.transform;
                         cold.previous_rows = cold.rows;
@@ -259,6 +287,7 @@ impl MeshScene {
                         transform: *transform,
                         previous: *transform,
                         moved: 0,
+                        changed: frame,
                         normal: [[0.0; 4]; 3],
                         rows: [[0.0; 4]; 3],
                         previous_rows: [[0.0; 4]; 3],
@@ -276,6 +305,9 @@ impl MeshScene {
                         material: 0,
                         mesh_version: u64::MAX,
                         flags: 0,
+                        lod: LOD_UNSET,
+                        lod_from: LOD_UNSET,
+                        lod_frame: 0,
                     });
                     s
                 }
@@ -301,10 +333,28 @@ impl MeshScene {
                 // Bounds again, from the mesh, when next culled.
                 mesh_version: u64::MAX,
                 flags: flags | if mirrored { MIRRORED } else { 0 },
+                // Another mesh has other levels: start over without a fade.
+                lod: if self.hot[s].mesh == resolved.mesh.index() {
+                    self.hot[s].lod
+                } else {
+                    LOD_UNSET
+                },
                 ..self.hot[s]
             };
             count(&mut self.mesh_users, resolved.mesh.index(), 1);
             count(&mut self.material_users, resolved.material.index(), 1);
+        }
+    }
+
+    /// Remember slot `s` as it is, before it is rewritten or dropped (if it was ever placed).
+    fn note_change(&mut self, s: usize) {
+        let hot = &self.hot[s];
+        if hot.mesh_version != u64::MAX {
+            self.changes.push(SlotChange {
+                center: hot.center,
+                radius: hot.radius,
+                changed: self.cold[s].changed,
+            });
         }
     }
 

@@ -1,9 +1,15 @@
 //! Cascaded shadow maps for the sun.
 //!
-//! Each cascade covers a slice of the view frustum with a bounding sphere whose radius only
-//! depends on the slice (not the camera rotation), and its center is snapped to whole shadow
-//! texels in world space (f64), so shadows don't shimmer when the camera moves or turns.
-//! Casters between the sun and a cascade are "pancaked" onto its near plane in the shader.
+//! Each cascade is a square around the camera covering everything within its split distance
+//! (so it doesn't depend on where the camera looks), its center snapped to whole shadow texels
+//! in world space (f64), so shadows don't shimmer when the camera moves or turns. Casters
+//! between the sun and a cascade are "pancaked" onto its near plane in the shader.
+//!
+//! Every map (the cascades, the far map, the sky occlusion map) keeps a **static image**: the
+//! casters that haven't moved for a while, drawn only when the map moves past its margin, the
+//! sun turns, or what is in it changes (Unity HDRP's mixed cached shadows, Insomniac's cached
+//! cascades, Unreal's static virtual shadow map pages). Each frame the static image is copied
+//! and the moving casters are drawn on top ([`ShadowCache`]).
 
 use bytemuck::{Pod, Zeroable};
 use engine_core::prelude::*;
@@ -31,10 +37,10 @@ pub struct Cascades {
     pub center: [DVec3; MAX_CASCADES],
     /// The direction toward the sun each cascade was drawn with.
     pub sun_dir: [Vec3; MAX_CASCADES],
-    /// Whether each cascade is drawn this frame. A cascade that isn't keeps last frame's image
-    /// (see [`CascadeCache`]), so features skip their caster lists for it.
-    pub drawn: [bool; MAX_CASCADES],
-    /// Where each cascade's casters can be (see [`CasterVolume`]).
+    /// Whether each cascade's static image is drawn again this frame (see [`ShadowCache`]):
+    /// features draw their still casters for it (`RenderFeature::draw_shadow_static`) only then.
+    pub static_redraw: [bool; MAX_CASCADES],
+    /// Where each cascade's casters can be for this frame's view (see [`CasterVolume`]).
     pub casters: [CasterVolume; MAX_CASCADES],
     /// Corners of the part of the view each cascade shades (camera-relative; see
     /// [`CasterVolume`] for the corner order).
@@ -53,7 +59,7 @@ impl Default for Cascades {
             splits: [0.0; 4],
             center: [DVec3::ZERO; MAX_CASCADES],
             sun_dir: [Vec3::Y; MAX_CASCADES],
-            drawn: [true; MAX_CASCADES],
+            static_redraw: [true; MAX_CASCADES],
             casters: [CasterVolume::default(); MAX_CASCADES],
             slice: [[Vec3::ZERO; 8]; MAX_CASCADES],
         }
@@ -66,12 +72,15 @@ impl Cascades {
     /// [`CasterVolume`]). Spheres toward the sun are kept (they cast onto the cascade from
     /// outside it).
     pub fn sphere_in_cascade(&self, i: usize, center: Vec3, radius: f32) -> bool {
+        self.sphere_in_square(i, center, radius) && self.casters[i].contains_sphere(center, radius)
+    }
+
+    /// Whether a camera-relative bounding sphere can cast into cascade `i` anywhere in its
+    /// square, whatever the camera looks at: what its static image holds.
+    pub fn sphere_in_square(&self, i: usize, center: Vec3, radius: f32) -> bool {
         let p = self.light_view[i].transform_point3(center);
         let e = self.half_extent[i] + radius;
-        p.x.abs() <= e
-            && p.y.abs() <= e
-            && -p.z - radius <= self.depth_range[i]
-            && self.casters[i].contains_sphere(center, radius)
+        p.x.abs() <= e && p.y.abs() <= e && -p.z - radius <= self.depth_range[i]
     }
 
     /// Point cascade `i` at `center` (absolute, on its texel grid) for a camera at `origin`.
@@ -107,10 +116,8 @@ impl Cascades {
 pub struct CasterVolume {
     planes: [Vec4; 16],
     count: usize,
-    /// Added to every caster's radius (m): the shadow filter's reach plus `drift`.
+    /// Added to every caster's radius (m): the shadow filter's reach.
     margin: f32,
-    /// How far (m) the slice may move outside the volume while the cascade's image is reused.
-    drift: f32,
 }
 
 /// Corner indices of each face of a frustum slice (near 0..4, far 4..8, both in the order
@@ -141,7 +148,7 @@ const EDGES: [(usize, usize, usize, usize); 12] = [
 
 impl CasterVolume {
     /// The shadow volume of the slice with camera-relative `corners` for a sun toward `sun_dir`.
-    pub fn new(corners: &[Vec3; 8], sun_dir: Vec3, margin: f32, drift: f32) -> Self {
+    pub fn new(corners: &[Vec3; 8], sun_dir: Vec3, margin: f32) -> Self {
         let inside = corners.iter().copied().sum::<Vec3>() / 8.0;
         let plane = |n: Vec3, a: Vec3| {
             let n = if n.dot(inside - a) < 0.0 { -n } else { n };
@@ -156,7 +163,6 @@ impl CasterVolume {
         let lit = faces.map(|f| f.truncate().dot(sun_dir) >= 0.0);
         let mut out = Self {
             margin,
-            drift,
             ..Default::default()
         };
         for (face, &lit) in faces.iter().zip(&lit) {
@@ -187,118 +193,188 @@ impl CasterVolume {
             .iter()
             .all(|p| p.truncate().dot(center) + p.w >= reach)
     }
-
-    /// The same volume for a camera moved by `offset`.
-    fn moved(mut self, offset: Vec3) -> Self {
-        for p in &mut self.planes[..self.count] {
-            p.w += p.truncate().dot(offset);
-        }
-        self
-    }
-
-    /// Whether everything in the slice with camera-relative `corners` is still covered.
-    fn covers(&self, corners: &[Vec3; 8]) -> bool {
-        corners.iter().all(|&c| {
-            self.planes[..self.count]
-                .iter()
-                .all(|p| p.truncate().dot(c) + p.w >= -self.drift)
-        })
-    }
 }
 
-/// Share of a far cascade's radius kept as margin when cascades are reused, so the camera can
-/// drift that far before the cascade must be redrawn.
-const REUSE_MARGIN: f64 = 0.06;
-/// The sun may move this far (radians) before reused cascades are redrawn.
-const REUSE_SUN_ANGLE: f32 = 0.001;
-/// Reused cascades take casters for a view this much wider (radians, each side), so the camera
-/// can turn that far before they must be redrawn.
-const REUSE_TURN: f64 = 0.1;
+/// Share of a map's radius kept as margin: the camera can drift this far (of the map's
+/// radius) from where the map's static image was drawn before it is drawn again.
+pub const STATIC_MARGIN: f64 = 0.08;
+/// The sun may turn this far (radians) before static images are drawn again, one map a frame.
+const STATIC_SUN_ANGLE: f32 = 0.0015;
+/// Past this, every map is drawn again at once.
+const STATIC_SUN_ANGLE_MAX: f32 = 0.006;
 /// Shadow map texels a receiver's filter can reach from where it projects (the blocker search
 /// and the widest PCF kernel in `cascade_visibility`, plus the normal bias).
 const FILTER_TEXELS: f32 = 28.0;
 
-/// Lets the far shadow cascades keep their image for a few frames
-/// (`RenderSettings::shadow_cascade_reuse`): the frame's cascades are pointed back at where
-/// they were last drawn, and only the ones due (or drifted out of their margin) are drawn.
-#[derive(Debug, Default)]
-pub struct CascadeCache {
-    last: Option<Cascades>,
-    age: [u32; MAX_CASCADES],
-    /// Where the camera was when each cascade was last drawn (its caster volume is relative to
-    /// that).
-    origin: [DVec3; MAX_CASCADES],
+/// Index of the far shadow map among the shadow maps (`RenderFeature::draw_shadow_static`):
+/// after the cascades (`0..MAX_CASCADES`) and [`SKY_OCCLUSION_VIEW`].
+pub const FAR_SHADOW_MAP: usize = SKY_OCCLUSION_VIEW + 1;
+/// Number of shadow maps: the cascades, the sky occlusion map and the far map.
+pub const SHADOW_MAPS: usize = FAR_SHADOW_MAP + 1;
+
+/// Where a map's static image was drawn.
+#[derive(Debug, Clone, Copy)]
+struct Placed {
+    center: DVec3,
+    sun_dir: Vec3,
+    half_extent: f32,
+    map_size: u32,
 }
 
-impl CascadeCache {
-    /// Frames between redraws of cascade `i` of `count`, at most `max_reuse + 1`: the last
-    /// cascade every 4th frame, the one before every 2nd, the rest every frame.
-    fn interval(i: usize, count: usize, max_reuse: u32) -> u32 {
-        let from_last = count.saturating_sub(1 + i);
-        let interval = match from_last {
-            0 => 4,
-            1 => 2,
-            _ => 1,
-        };
-        interval.min(max_reuse + 1)
+impl Placed {
+    /// Whether a camera at `origin` with the sun toward `sun_dir` can still use the image (the
+    /// sun turned less than [`STATIC_SUN_ANGLE_MAX`]); `drift` is how far it may be from the
+    /// center.
+    fn holds(
+        &self,
+        origin: DVec3,
+        sun_dir: Vec3,
+        half_extent: f32,
+        map_size: u32,
+        drift: f64,
+    ) -> bool {
+        self.half_extent == half_extent
+            && self.map_size == map_size
+            && (origin - self.center).length() <= drift
+            && self.sun_dir.angle_between(sun_dir) <= STATIC_SUN_ANGLE_MAX
     }
 
-    /// Decide which of `cascades` (just computed for a camera at `origin`) to draw on frame
-    /// `frame`; the others are pointed at their last image. `fresh` forces every cascade to
-    /// redraw (a camera cut, the first frame).
+    fn sun_turned(&self, sun_dir: Vec3) -> bool {
+        self.sun_dir.angle_between(sun_dir) > STATIC_SUN_ANGLE
+    }
+}
+
+/// Keeps each shadow map where its static image was drawn while the camera stays within the
+/// map's margin ([`STATIC_MARGIN`]) and the sun holds still, and says which static images are
+/// drawn again this frame (`Cascades::static_redraw`, `FarShadowView::static_redraw`,
+/// `SkyOcclusionView::static_redraw`). Every map is drawn every frame: its static image
+/// copied, the moving casters on top.
+#[derive(Debug, Default)]
+pub struct ShadowCache {
+    cascades: [Option<Placed>; MAX_CASCADES],
+    sky: Option<Placed>,
+    far: Option<Placed>,
+}
+
+impl ShadowCache {
+    /// Point this frame's maps (just computed for a camera at `origin`) back at where their
+    /// static images were drawn, or mark them to be drawn again: when the camera left the
+    /// margin, the sun turned (one map a frame unless it turned a lot), a feature asked
+    /// (`requested`, by map index: what is in it changed), or `fresh` (a camera cut, the first
+    /// frame, caching off).
     pub fn apply(
         &mut self,
         cascades: &mut Cascades,
+        sky: &mut SkyOcclusionView,
+        far: &mut FarShadowView,
         origin: DVec3,
-        frame: u64,
-        max_reuse: u32,
         fresh: bool,
+        requested: [bool; SHADOW_MAPS],
     ) {
+        // The sun turned a little: one map a frame, nearest first.
+        let mut sun_spent = false;
+        let mut sun_due = |last: &Placed, sun: Vec3| {
+            let due = !sun_spent && last.sun_turned(sun);
+            sun_spent |= due;
+            due
+        };
         let count = (cascades.count as usize).min(MAX_CASCADES);
-        let last = self.last.as_ref().filter(|l| {
-            !fresh && max_reuse > 0 && l.count == cascades.count && l.map_size == cascades.map_size
-        });
-        for i in 0..count {
-            let interval = Self::interval(i, count, max_reuse);
-            let reuse = last.is_some_and(|l| {
-                let due = (frame + i as u64).is_multiple_of(interval as u64)
-                    || self.age[i] + 1 >= interval;
-                let margin = cascades.half_extent[i] as f64 * REUSE_MARGIN;
-                // The image must still hold every caster of what the camera now sees.
-                let moved = (origin - self.origin[i]).as_vec3();
-                !due && l.half_extent[i] == cascades.half_extent[i]
-                    && l.center[i].distance(cascades.center[i]) <= margin
-                    && l.sun_dir[i].angle_between(cascades.sun_dir[i]) <= REUSE_SUN_ANGLE
-                    && l.casters[i].moved(moved).covers(&cascades.slice[i])
-            });
-            if reuse {
-                let l = self.last.as_ref().expect("checked");
-                cascades.place(i, l.center[i], origin, l.sun_dir[i], l.half_extent[i]);
-                cascades.casters[i] = l.casters[i].moved((origin - self.origin[i]).as_vec3());
-                cascades.drawn[i] = false;
-                self.age[i] += 1;
-            } else {
-                cascades.drawn[i] = true;
-                self.age[i] = 0;
-                self.origin[i] = origin;
+        // `i` indexes the placements, the requests and every per-cascade array of the view.
+        #[allow(clippy::needless_range_loop)]
+        for i in 0..MAX_CASCADES {
+            if i >= count {
+                self.cascades[i] = None;
+                continue;
             }
-        }
-        if count == 0 {
-            self.last = None;
-            return;
-        }
-        // Remember where each cascade's image was drawn.
-        let mut keep = *cascades;
-        if let Some(l) = &self.last {
-            for i in 0..count {
-                if !cascades.drawn[i] {
-                    keep.center[i] = l.center[i];
-                    keep.sun_dir[i] = l.sun_dir[i];
-                    keep.casters[i] = l.casters[i];
+            let r = cascades.half_extent[i];
+            let drift = r as f64 * STATIC_MARGIN / (1.0 + STATIC_MARGIN);
+            let keep = self.cascades[i].filter(|l| {
+                !fresh
+                    && !requested[i]
+                    && l.holds(origin, cascades.sun_dir[i], r, cascades.map_size, drift)
+            });
+            match keep {
+                Some(l) if !sun_due(&l, cascades.sun_dir[i]) => {
+                    cascades.place(i, l.center, origin, l.sun_dir, l.half_extent);
+                    cascades.static_redraw[i] = false;
+                }
+                _ => {
+                    cascades.static_redraw[i] = true;
+                    self.cascades[i] = Some(Placed {
+                        center: cascades.center[i],
+                        sun_dir: cascades.sun_dir[i],
+                        half_extent: r,
+                        map_size: cascades.map_size,
+                    });
                 }
             }
         }
-        self.last = Some(keep);
+        if sky.enabled {
+            let r = sky.extent * 0.5;
+            let keep = self.sky.filter(|l| {
+                let d = origin - l.center;
+                !fresh
+                    && !requested[SKY_OCCLUSION_VIEW]
+                    && l.half_extent == r
+                    && l.map_size == sky.map_size
+                    && d.x.hypot(d.z) <= r as f64 * STATIC_MARGIN
+                    && d.y.abs() <= sky.depth_range as f64 * 0.1
+            });
+            match keep {
+                Some(l) => {
+                    *sky = SkyOcclusionView::around(
+                        l.center,
+                        origin,
+                        sky.map_size,
+                        sky.extent,
+                        sky.depth_range,
+                    );
+                    sky.static_redraw = false;
+                }
+                None => {
+                    sky.static_redraw = true;
+                    self.sky = Some(Placed {
+                        center: sky.center,
+                        sun_dir: Vec3::Y,
+                        half_extent: r,
+                        map_size: sky.map_size,
+                    });
+                }
+            }
+        } else {
+            self.sky = None;
+        }
+        if far.enabled {
+            let drift = far.half_extent as f64 * STATIC_MARGIN;
+            let keep = self.far.filter(|l| {
+                !fresh
+                    && !requested[FAR_SHADOW_MAP]
+                    && l.holds(origin, far.sun_dir, far.half_extent, far.map_size, drift)
+            });
+            match keep {
+                Some(l) if !sun_due(&l, far.sun_dir) => {
+                    *far = FarShadowView::around(
+                        l.center,
+                        origin,
+                        l.sun_dir,
+                        far.map_size,
+                        far.half_extent,
+                    );
+                    far.static_redraw = false;
+                }
+                _ => {
+                    far.static_redraw = true;
+                    self.far = Some(Placed {
+                        center: far.center,
+                        sun_dir: far.sun_dir,
+                        half_extent: far.half_extent,
+                        map_size: far.map_size,
+                    });
+                }
+            }
+        } else {
+            self.far = None;
+        }
     }
 }
 
@@ -320,6 +396,10 @@ pub struct SkyOcclusionView {
     pub view_proj: Mat4,
     /// Camera-relative → occlusion view space (looking down −Z), for culling.
     pub view: Mat4,
+    /// Center of the square (absolute; on its texel grid, at the camera's height when placed).
+    pub center: DVec3,
+    /// Whether its static image is drawn again this frame (see [`ShadowCache`]).
+    pub static_redraw: bool,
 }
 
 /// Cascade index passed to `RenderFeature::draw_shadow` for the sky occlusion map.
@@ -334,6 +414,8 @@ impl Default for SkyOcclusionView {
             depth_range: 800.0,
             view_proj: Mat4::IDENTITY,
             view: Mat4::IDENTITY,
+            center: DVec3::ZERO,
+            static_redraw: true,
         }
     }
 }
@@ -348,18 +430,34 @@ impl SkyOcclusionView {
             origin.y,
             (origin.z / texel).floor() * texel,
         );
-        let eye = (snapped - origin).as_vec3() + Vec3::Y * (depth_range * 0.5);
+        Self {
+            enabled,
+            ..Self::around(snapped, origin, map_size, extent, depth_range)
+        }
+    }
+
+    /// The view centered on `center` (absolute, snapped) for a camera at `origin`.
+    pub fn around(
+        center: DVec3,
+        origin: DVec3,
+        map_size: u32,
+        extent: f32,
+        depth_range: f32,
+    ) -> Self {
+        let eye = (center - origin).as_vec3() + Vec3::Y * (depth_range * 0.5);
         // Looking straight down (−Y) with −Z as "up" in the map.
         let rotation = Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2);
         let view = Mat4::from_rotation_translation(rotation, eye).inverse();
         let proj = crate::frame::orthographic_standard(extent * 0.5, 0.0, depth_range);
         Self {
-            enabled,
+            enabled: true,
             map_size,
             extent,
             depth_range,
             view_proj: proj * view,
             view,
+            center,
+            static_redraw: true,
         }
     }
 
@@ -409,8 +507,15 @@ pub struct FarShadowView {
     pub view_proj: Mat4,
     /// Camera-relative → light view space (looking down −Z), for culling.
     pub light_view: Mat4,
-    /// Casters smaller than this bounding radius (meters, two texels) are left out.
+    /// Casters smaller than this bounding radius (meters, three quarters of a texel: houses,
+    /// trees and boulders cast, pebbles don't) are left out.
     pub min_caster_radius: f32,
+    /// Center of the square (absolute, on its texel grid).
+    pub center: DVec3,
+    /// The direction toward the sun it is drawn with.
+    pub sun_dir: Vec3,
+    /// Whether its static image is drawn again this frame (see [`ShadowCache`]).
+    pub static_redraw: bool,
 }
 
 impl Default for FarShadowView {
@@ -423,6 +528,9 @@ impl Default for FarShadowView {
             view_proj: Mat4::IDENTITY,
             light_view: Mat4::IDENTITY,
             min_caster_radius: f32::INFINITY,
+            center: DVec3::ZERO,
+            sun_dir: Vec3::Y,
+            static_redraw: true,
         }
     }
 }
@@ -448,7 +556,21 @@ impl FarShadowView {
         let mut ls = light_rot.inverse() * origin;
         ls.x = (ls.x / texel).floor() * texel;
         ls.y = (ls.y / texel).floor() * texel;
-        let center_rel = (light_rot * ls - origin).as_vec3();
+        Self::around(light_rot * ls, origin, sun_dir, map_size, distance)
+    }
+
+    /// The far view centered on `center` (absolute, on its texel grid) for a camera at
+    /// `origin`.
+    pub fn around(
+        center: DVec3,
+        origin: DVec3,
+        sun_dir: Vec3,
+        map_size: u32,
+        distance: f32,
+    ) -> Self {
+        let texel = 2.0 * distance / map_size.max(1) as f32;
+        let light_rot = look_rotation_f64(-sun_dir.as_dvec3());
+        let center_rel = (center - origin).as_vec3();
         // Casters up to two radii toward the sun (mountains across the valley) get their real
         // depth; anything further is pancaked onto the near plane.
         let back = 2.0 * distance + 2000.0;
@@ -464,7 +586,10 @@ impl FarShadowView {
             depth_range,
             view_proj: proj * light_view,
             light_view,
-            min_caster_radius: 2.0 * texel as f32,
+            min_caster_radius: 0.75 * texel,
+            center,
+            sun_dir,
+            static_redraw: true,
         }
     }
 
@@ -551,14 +676,12 @@ pub fn compute_cascades(
         settings.shadow_split_lambda,
     );
 
-    let forward = (rotation * Vec3::NEG_Z).as_dvec3();
     let (tx, ty) = if orthographic {
         (1.0 / proj.x_axis.x as f64, 1.0 / proj.y_axis.y as f64)
     } else {
         let ty = (fov_y as f64 * 0.5).tan();
         (ty * aspect as f64, ty)
     };
-    let s = tx * tx + ty * ty;
 
     // Light basis: looking along −sun_dir.
     let light_rot = look_rotation_f64(-sun_dir.as_dvec3());
@@ -573,64 +696,43 @@ pub fn compute_cascades(
     let mut slice_near = first_near as f64;
     for (i, &split) in splits.iter().enumerate().take(count) {
         let slice_far = split as f64;
-        // Rotation-invariant bounding sphere of the frustum slice.
-        let (d, radius) = if orthographic {
-            let d = (slice_near + slice_far) * 0.5;
-            let r = (tx * tx + ty * ty + ((slice_far - slice_near) * 0.5).powi(2)).sqrt();
-            (d, r)
-        } else {
-            let mut d = (slice_near + slice_far) * (s + 1.0) * 0.5;
-            if d > slice_far {
-                d = slice_far;
-            }
-            let r = (slice_far * slice_far * s + (slice_far - d) * (slice_far - d)).sqrt();
-            (d, r)
-        };
-        // A margin the camera can drift within while far cascades are reused.
-        let reused = settings.shadow_cascade_reuse > 0 && i + 2 >= count;
-        let radius = if reused {
-            radius * (1.0 + REUSE_MARGIN)
-        } else {
-            radius
-        };
-        // Quantize the radius so the texel size is stable.
+        // A square around the camera holding everything within the split distance (shading
+        // picks the cascade by distance, `cascade_visibility`), plus the margin the camera may
+        // drift while the static image is kept. Quantized so the texel size is stable.
+        let radius = slice_far * (1.0 + STATIC_MARGIN);
         let radius = (radius * 16.0).ceil() / 16.0;
         let texel = 2.0 * radius / map_size as f64;
 
         // Snap the center to the texel grid in light space, in absolute world coordinates.
-        let center_world = origin + forward * d;
-        let mut ls = light_rot_inv * center_world;
+        let mut ls = light_rot_inv * origin;
         ls.x = (ls.x / texel).floor() * texel;
         ls.y = (ls.y / texel).floor() * texel;
         out.place(i, light_rot * ls, origin, sun_dir, radius as f32);
 
-        // What the cascade shades: its slice, from where shading dithers in from the cascade
-        // before (the last tenth of it) to its split. Reused cascades take casters for a wider
-        // view and a camera that may drift by their margin.
+        // What the cascade shades in this frame's view: its slice, from where shading dithers
+        // in from the cascade before (the last tenth of it) to its split. Shading picks by
+        // distance, so the slice starts at the view depth that distance has at the screen's
+        // corners. Moving casters are culled to it; still casters are drawn for the whole square.
         let from = if i == 0 { slice_near } else { slice_near * 0.9 };
-        let corners = |(tx, ty): (f64, f64)| {
-            [from, slice_far].map(|d| {
-                let (x, y) = if orthographic {
-                    (tx, ty)
-                } else {
-                    (tx * d, ty * d)
-                };
-                [(-x, -y), (x, -y), (x, y), (-x, y)]
-                    .map(|(x, y)| rotation * Vec3::new(x as f32, y as f32, -d as f32))
-            })
-        };
-        let flat = |c: [[Vec3; 4]; 2]| std::array::from_fn(|k| c[k / 4][k % 4]);
-        out.slice[i] = flat(corners((tx, ty)));
-        let wide = |t: f64| (t.atan() + REUSE_TURN).min(1.5).tan();
-        let (volume, drift) = if reused && !orthographic {
-            (flat(corners((wide(tx), wide(ty)))), radius * REUSE_MARGIN)
-        } else if reused {
-            (out.slice[i], radius * REUSE_MARGIN)
+        let from = if i == 0 {
+            from
+        } else if orthographic {
+            (from * from - tx * tx - ty * ty).max(0.0).sqrt()
         } else {
-            (out.slice[i], 0.0)
+            from / (1.0 + tx * tx + ty * ty).sqrt()
         };
+        let corners = [from, slice_far].map(|d| {
+            let (x, y) = if orthographic {
+                (tx, ty)
+            } else {
+                (tx * d, ty * d)
+            };
+            [(-x, -y), (x, -y), (x, y), (-x, y)]
+                .map(|(x, y)| rotation * Vec3::new(x as f32, y as f32, -d as f32))
+        });
+        out.slice[i] = std::array::from_fn(|k| corners[k / 4][k % 4]);
         let filter = FILTER_TEXELS * texel as f32;
-        out.casters[i] = CasterVolume::new(&volume, sun_dir, filter + drift as f32, drift as f32);
+        out.casters[i] = CasterVolume::new(&out.slice[i], sun_dir, filter);
         slice_near = slice_far;
     }
     out
@@ -771,54 +873,113 @@ mod sky_occlusion_tests {
         )
     }
 
+    fn apply(
+        cache: &mut ShadowCache,
+        origin: DVec3,
+        sun: Vec3,
+        fresh: bool,
+        requested: [bool; SHADOW_MAPS],
+    ) -> Cascades {
+        let mut c = cascades_at(origin, sun);
+        let mut sky = SkyOcclusionView::new(origin, 512, 256.0, 800.0, true);
+        let mut far = FarShadowView::new(origin, sun, 2048, 8000.0, c.splits[3]);
+        cache.apply(&mut c, &mut sky, &mut far, origin, fresh, requested);
+        // A kept map still maps the world where its image was drawn: its center lands in the
+        // middle of the map.
+        for i in 0..MAX_CASCADES {
+            let rel = (c.center[i] - origin).as_vec3();
+            let p = c.view_proj[i] * rel.extend(1.0);
+            assert!(p.x.abs() < 1e-3 && p.y.abs() < 1e-3, "cascade {i}: {p}");
+        }
+        c
+    }
+
     #[test]
-    fn far_cascades_are_redrawn_less_often_and_stay_put_when_reused() {
+    fn static_images_are_kept_until_the_camera_leaves_the_margin_or_the_sun_turns() {
         let sun = Vec3::new(0.3, 0.8, 0.2).normalize();
-        let mut cache = CascadeCache::default();
-        let mut drawn = [0; MAX_CASCADES];
+        let none = [false; SHADOW_MAPS];
+        let mut cache = ShadowCache::default();
         let mut origin = DVec3::new(1000.0, 20.0, -5000.0);
-        for frame in 0..16u64 {
-            // A slow walk: the far cascades keep their images between redraws.
+        let first = apply(&mut cache, origin, sun, true, none);
+        assert_eq!(first.static_redraw, [true; MAX_CASCADES]);
+        // A slow walk: the far cascades keep their images; the nearest, small one is drawn
+        // again whenever the camera leaves its margin.
+        let mut redrawn = [0; MAX_CASCADES];
+        for _ in 0..16 {
             origin.x += 0.05;
-            let mut c = cascades_at(origin, sun);
-            let computed = c;
-            cache.apply(&mut c, origin, frame, 3, frame == 0);
-            for (i, count) in drawn.iter_mut().enumerate() {
-                *count += c.drawn[i] as u32;
-                if c.drawn[i] {
-                    assert_eq!(c.view_proj[i], computed.view_proj[i]);
-                }
-            }
-            // A reused cascade still maps the world where its image was drawn: its center lands
-            // in the middle of the map.
-            for i in 0..MAX_CASCADES {
-                let rel = (c.center[i] - origin).as_vec3();
-                let p = c.view_proj[i] * rel.extend(1.0);
-                assert!(p.x.abs() < 1e-3 && p.y.abs() < 1e-3, "cascade {i}: {p}");
+            let c = apply(&mut cache, origin, sun, false, none);
+            for (n, r) in redrawn.iter_mut().zip(c.static_redraw) {
+                *n += r as u32;
             }
         }
-        // The first frame draws all; then the third cascade every 2nd frame, the fourth every 4th.
-        assert_eq!(drawn, [16, 16, 8, 5]);
+        assert_eq!(redrawn[2..], [0, 0], "{redrawn:?}");
+        // Leaving the margin redraws.
+        let jump = origin + DVec3::new(first.half_extent[3] as f64 * 0.2, 0.0, 0.0);
+        let c = apply(&mut cache, jump, sun, false, none);
+        assert!(c.static_redraw[3] && c.static_redraw[2]);
+        // A feature asking redraws that map alone.
+        let mut ask = none;
+        ask[1] = true;
+        let c = apply(&mut cache, jump, sun, false, ask);
+        assert_eq!(c.static_redraw, [false, true, false, false]);
+        // A sun turning slowly: one map a frame, until all have the new sun.
+        let turned = Quat::from_rotation_y(0.01) * sun;
+        let mut frames = 0;
+        loop {
+            let c = apply(&mut cache, jump, turned, false, none);
+            let n = c.static_redraw.iter().filter(|&&r| r).count();
+            assert!(n <= 1, "{:?}", c.static_redraw);
+            frames += 1;
+            if n == 0 && c.sun_dir.iter().all(|s| s.angle_between(turned) < 1e-4) {
+                break;
+            }
+            assert!(frames < 10);
+        }
+        // A sun turning a lot: everything at once. A camera cut: everything.
+        let c = apply(
+            &mut cache,
+            jump,
+            Quat::from_rotation_y(0.05) * sun,
+            false,
+            none,
+        );
+        assert_eq!(c.static_redraw, [true; MAX_CASCADES]);
+        let c = apply(&mut cache, jump, sun, true, none);
+        assert_eq!(c.static_redraw, [true; MAX_CASCADES]);
+    }
 
-        // A camera cut, or reuse turned off, redraws everything.
-        let mut c = cascades_at(origin, sun);
-        cache.apply(&mut c, origin, 17, 3, true);
-        assert_eq!(c.drawn, [true; MAX_CASCADES]);
-        let mut c = cascades_at(origin, sun);
-        cache.apply(&mut c, origin, 18, 0, false);
-        assert_eq!(c.drawn, [true; MAX_CASCADES]);
-
-        // Drifting past the margin, or the sun moving, redraws a cascade before it is due.
-        let mut c = cascades_at(origin, sun);
-        cache.apply(&mut c, origin, 20, 3, false);
-        let jump = origin + DVec3::new(c.half_extent[3] as f64 * 0.2, 0.0, 0.0);
-        let mut c = cascades_at(jump, sun);
-        cache.apply(&mut c, jump, 21, 3, false);
-        assert!(c.drawn[3] && c.drawn[2]);
-        let turned = Vec3::new(0.32, 0.8, 0.2).normalize();
-        let mut c = cascades_at(jump, turned);
-        cache.apply(&mut c, jump, 22, 3, false);
-        assert!(c.drawn[3] && c.drawn[2]);
+    #[test]
+    fn static_images_are_kept_while_the_camera_turns() {
+        let sun = Vec3::new(0.3, 0.8, 0.2).normalize();
+        let origin = DVec3::new(1000.0, 20.0, -5000.0);
+        let proj = crate::frame::perspective_infinite_reverse(1.2, 1.6, 0.1);
+        let mut cache = ShadowCache::default();
+        for (k, angle) in [0.0f32, 0.6, 2.5].into_iter().enumerate() {
+            let mut c = compute_cascades(
+                &RenderSettings::default(),
+                origin,
+                Quat::from_rotation_y(angle),
+                0.1,
+                1.2,
+                1.6,
+                false,
+                sun,
+                &proj,
+            );
+            let mut sky = SkyOcclusionView::new(origin, 512, 256.0, 800.0, true);
+            let mut far = FarShadowView::new(origin, sun, 2048, 8000.0, c.splits[3]);
+            cache.apply(
+                &mut c,
+                &mut sky,
+                &mut far,
+                origin,
+                k == 0,
+                [false; SHADOW_MAPS],
+            );
+            assert_eq!(c.static_redraw, [k == 0; MAX_CASCADES]);
+            assert_eq!(sky.static_redraw, k == 0);
+            assert_eq!(far.static_redraw, k == 0);
+        }
     }
 }
 
@@ -865,6 +1026,11 @@ mod caster_culling_tests {
             for i in 0..MAX_CASCADES {
                 let p = in_slice(&c, i, rand(), rand(), rand());
                 let toward = rand() * c.depth_range[i] * 0.4;
+                // Shading picks a cascade by distance: the slice's far corners, beyond the
+                // split, are the next cascade's.
+                if p.length() > c.splits[i] {
+                    continue;
+                }
                 assert!(
                     c.sphere_in_cascade(i, p + sun * toward, 0.3),
                     "cascade {i}, sun {sun}, rotation {rot}"
@@ -889,21 +1055,5 @@ mod caster_culling_tests {
         assert!(box_only(behind));
         assert!(!c.sphere_in_cascade(i, behind, 5.0));
         assert!(c.sphere_in_cascade(i, ahead, 5.0));
-    }
-
-    #[test]
-    fn reused_cascades_redraw_once_the_camera_turns_away() {
-        let sun = Vec3::new(0.3, 0.8, 0.2).normalize();
-        let origin = DVec3::new(1000.0, 20.0, -5000.0);
-        let mut cache = CascadeCache::default();
-        let mut c = cascades(Quat::IDENTITY, sun);
-        cache.apply(&mut c, origin, 0, 3, true);
-        // A small turn keeps the last cascade's image; a big one redraws it.
-        let mut c = cascades(Quat::from_rotation_y(0.05), sun);
-        cache.apply(&mut c, origin, 2, 3, false);
-        assert!(!c.drawn[3]);
-        let mut c = cascades(Quat::from_rotation_y(0.6), sun);
-        cache.apply(&mut c, origin, 3, 3, false);
-        assert!(c.drawn[3]);
     }
 }

@@ -70,6 +70,7 @@ pub mod effects;
 mod environment;
 pub mod exposure;
 pub mod features;
+pub(crate) mod finish;
 pub mod frame;
 pub mod gltf_loader;
 pub mod gpu;

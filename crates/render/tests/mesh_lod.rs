@@ -95,7 +95,8 @@ fn render(lods: Lods, shot: &str) -> Option<(u64, Vec<u8>)> {
     }
     let mut last = u64::MAX;
     let start = std::time::Instant::now();
-    // Until the levels are built (the triangle count stops falling).
+    // Until the levels are built (the triangle count stops falling) and no stone is still
+    // fading from one level to the next.
     let mut steady = 0;
     while steady < 3 && start.elapsed().as_secs() < 120 {
         app.update();
@@ -106,7 +107,12 @@ fn render(lods: Lods, shot: &str) -> Option<(u64, Vec<u8>)> {
             .world
             .get_resource::<RenderStats>()
             .map_or(0, |s| s.triangles);
-        steady = if tris == last { steady + 1 } else { 0 };
+        let fading = describe(&app)["lods_fading"].as_u64().unwrap_or(0);
+        steady = if tris == last && fading == 0 {
+            steady + 1
+        } else {
+            0
+        };
         last = tris;
     }
     if let Some(d) = app.world.get_resource::<RenderDisabled>() {
@@ -165,4 +171,118 @@ fn stones_marked_no_mesh_lod_keep_every_triangle() {
         .max()
         .unwrap_or(0);
     assert!(max <= 1, "pictures differ by up to {max}");
+}
+
+/// The meshes feature's state in `Renderer::describe`.
+fn describe(app: &App) -> serde_json::Value {
+    let describe = app.world.resource::<engine_render::Renderer>().describe();
+    describe["features"]
+        .as_array()
+        .and_then(|f| f.iter().find(|f| f["name"] == "meshes"))
+        .map(|f| f["state"].clone())
+        .unwrap_or_default()
+}
+
+/// A camera walking away from a row of stones: each stone crossing a level threshold draws both
+/// levels for the fade (`lods_fading`), then only the new one; a camera swaying at a threshold
+/// doesn't make the stones flip back and forth.
+#[test]
+fn levels_cross_fade_and_hold_at_their_thresholds() {
+    engine_core::log::init("error");
+    let mut app = App::new();
+    app.world.resource_mut::<EngineConfig>().headless = true;
+    {
+        let mut w = app.world.resource_mut::<Window>();
+        w.width = W;
+        w.height = H;
+    }
+    app.add_plugins(RenderPlugin);
+    {
+        let mut s = app.world.resource_mut::<RenderSettings>();
+        s.anti_aliasing = AntiAliasing::None;
+        s.virtual_geometry = false;
+        s.impostor_pixels = 0.0;
+        s.min_object_pixels = 0.0;
+    }
+    let w = &mut app.world;
+    let camera = w
+        .spawn((
+            Camera::perspective(60.0),
+            Transform::from_xyz(0.0, 1.0, 2.0).looking_at(DVec3::new(0.0, 0.5, -10.0), Vec3::Y),
+        ))
+        .id();
+    w.spawn((DirectionalLight::default(), Transform::default()));
+    let stone = w
+        .resource_mut::<Assets<Mesh>>()
+        .add(rock(Vec3::new(0.5, 0.3, 0.4), 1, 5));
+    for i in 0..12 {
+        w.spawn((
+            Transform::from_xyz(i as f64 * 0.8 - 4.4, 0.3, -4.0),
+            MeshRenderer::new(stone, StandardMaterial::color(0.45, 0.42, 0.38)),
+        ));
+    }
+    // Until the levels are built.
+    let start = std::time::Instant::now();
+    while start.elapsed().as_secs() < 60 {
+        app.update();
+        if let Some(d) = app.world.get_resource::<RenderDisabled>() {
+            eprintln!("skipping: no GPU ({})", d.0);
+            return;
+        }
+        if describe(&app)["meshes_with_lods"].as_u64().unwrap_or(0) > 0 {
+            break;
+        }
+    }
+    for _ in 0..5 {
+        app.update();
+    }
+    let triangles = |app: &App| app.world.resource::<RenderStats>().triangles;
+    let fading = |app: &App| describe(app)["lods_fading"].as_u64().unwrap_or(0);
+    // Walk back until the stones change level: they fade, and the fade ends.
+    let mut z = 2.0;
+    let mut faded = false;
+    let mut before = triangles(&app);
+    while z < 200.0 && !faded {
+        z *= 1.04;
+        app.world
+            .get_mut::<Transform>(camera)
+            .expect("camera")
+            .translation
+            .z = z;
+        app.update();
+        faded = fading(&app) > 0;
+        if !faded {
+            before = triangles(&app);
+        }
+    }
+    assert!(
+        faded,
+        "no stone faded to another level walking back to {z:.0} m"
+    );
+    let during = triangles(&app);
+    eprintln!("at {z:.1} m: {before} triangles before the fade, {during} during it");
+    assert!(during > before / 2, "both levels are drawn while fading");
+    let mut frames = 0;
+    while fading(&app) > 0 {
+        app.update();
+        frames += 1;
+        assert!(frames < 60, "the fade ends");
+    }
+    eprintln!("the fade took {frames} more frames");
+    // Sway 2% around where the level changed: no more fades.
+    let mut flips = 0;
+    for k in 0..30 {
+        let t = if k % 2 == 0 { 0.98 } else { 1.02 };
+        app.world
+            .get_mut::<Transform>(camera)
+            .expect("camera")
+            .translation
+            .z = z * t;
+        app.update();
+        flips += fading(&app);
+    }
+    assert_eq!(
+        flips, 0,
+        "stones swaying at a threshold faded {flips} times"
+    );
 }

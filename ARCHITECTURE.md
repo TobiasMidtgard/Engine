@@ -170,6 +170,7 @@ Writes: `HeatField`, `WorldImpulse`, `IgniteRequest`, `DamageEvent`, `NoiseEvent
 | `draw_prepass` | write depth, normal, roughness and motion for opaque geometry (`vs`/`fs` using `prepass_output` from `lib_frame.wgsl`, targets `GpuShared::prepass_targets()`); ambient occlusion, contact shadows and TAA motion work only on surfaces drawn here, and the scene pass must then write the same depth (mark clip positions `@invariant`) |
 | `draw_shadow(cascade)` | cast sun shadows; with `cascade == SKY_OCCLUSION_VIEW`, draw into the top-down sky occlusion map so whatever roofs over the ground (rock, buildings, canopies) keeps sky light and rain out |
 | `draw_far_shadow` | big casters only (terrain, mountains, cliffs, large buildings; cull with `ctx.view.far_shadow.casts(center, radius)`): the coarse far shadow map that shades the land beyond the cascades |
+| `draw_shadow_static(map)`, `shadow_static_changed(map)` | optional: casters that have not moved, drawn only when the map's static image is redrawn (`ShadowCache`); `draw_shadow`/`draw_far_shadow` then draw only the moving ones on top each frame. Say when something in the image changed (`shadow_static_changed`) so it is drawn again |
 | `draw(Opaque/Sky/Transparent)` | draw into the HDR scene; transparent can read scene color/depth copies |
 | `overlay` | draw onto the final LDR image (UI, debug) |
 
@@ -269,8 +270,9 @@ culling; `density` grass; `effects` turns off volumetric fog and screen-space re
 0.75, screen-space GI below 1 and ambient occlusion below 0.5, and thins point lights. Nothing
 the game turned off comes back on. Features get the scaled settings in `prepare` and `ctx`.
 
-**Sun shadows** (built): four cascades out to `RenderSettings::shadow_distance` (rotation-
-invariant spheres snapped to texels, PCSS filtering), then a **far shadow map** out to
+**Sun shadows** (built): four cascades out to `RenderSettings::shadow_distance` (squares
+centred on the camera, so they don't turn with it, snapped to texels; shading picks the cascade by
+distance; PCSS filtering), then a **far shadow map** out to
 `far_shadow_distance` (8 km by default; 0 = off): one `shadow_map_size`² map around the camera
 (texels of about 8 m), snapped to world texels, in the shadow array's last layer
 (`FAR_SHADOW_LAYER`). Only casters at least two of its texels across draw into it
@@ -280,8 +282,14 @@ mountains shade the valley at low sun and ridges shade themselves kilometers awa
 shows its region in magenta. Casters are culled against what each cascade shades
 (`Cascades::casters`, a `CasterVolume`): the cascade's slice of the view swept toward the sun,
 widened by the filter's reach, so `sphere_in_cascade` drops casters inside the square whose
-shadows fall outside the view. Reused cascades take a slightly wider view and redraw once the
-camera turns or moves out of it. A feature that needs a cascade's whole square uses
+shadows fall outside the view. **Static images** (`ShadowCache`, on unless
+`shadow_cascade_reuse` is 0): every map (cascades, sky occlusion, far map) keeps an image of
+the casters that have been still for 1.5 s (`draw_shadow_static`), drawn again only when the
+camera leaves the map's margin (8% of its radius), the sun turns (one map a frame), or a feature
+says something in it changed; each frame the image is copied into the live map and the moving
+casters drawn on top, so every map is current every frame. Clustered (virtual geometry) casters
+are culled on the GPU and always drawn with the moving ones. Extra views draw everything
+straight in. A feature that needs a cascade's whole square uses
 `light_view` and `half_extent` directly.
 
 **Cloud shadows** (built; `cloud_shadows.rs`): a top-down map of the sunlight the clouds let
@@ -509,6 +517,13 @@ threshold, mixed in by `RenderSettings::bloom_intensity` (0.04). What a pixel br
 limited to `bloom_limit` times white at the current exposure (64; it rolls off smoothly from half
 of that), so a neon sign at night or the sun's disc glows instead of swamping the frame.
 
+**Sun glare** (built; `post.wgsl` `sun_glare`): the tonemap adds the light the eye's and a
+lens' optics scatter around the sun, shaped by the halo of Spencer et al.'s glare point spread
+function (SIGGRAPH 1995) and scaled by `RenderSettings::sun_glare` (0.04; 1 = the eye's full
+glare). The tonemap's three vertices measure how much of the disc shows (the image at the disc
+against the uncovered disc's luminance), so trees, clouds and mist in front of the sun dim the
+glare with it, and it fades out at the image's edge.
+
 **Depth of field** (built; `depth_of_field.rs`): a `DepthOfField` component on the camera (off
 without it) is a thin lens: the focal length follows from the vertical field of view and
 `sensor_height_mm` (`DepthOfField::fov_y_deg_for_lens(50.0, 24.0)` is a 50 mm full-frame lens),
@@ -593,7 +608,10 @@ for 300 frames). Where GPU texture compression is on, each layer is baked into a
 and encoded to BC7 on the GPU (1.5 MB a layer instead of 6 MB); RGBA8 atlases stop at 32
 layers. No component is needed: every module's instanced meshes get both. The `NoMeshLod`
 marker keeps a mesh at full detail everywhere, for meshes simplifying would spoil (one mesh of
-many small separate stones loses whole stones). The far shadow cascades keep their image for a few frames (`shadow_cascade_reuse`).
+many small separate stones loses whole stones). A mesh changing level cross-fades over 24
+frames (both levels drawn with complementary dither, like Unreal's dithered LOD transitions and
+Unity's LOD cross-fade), and keeps its level until the threshold is 10% off (hysteresis), so a
+mesh standing at a threshold doesn't flip; `lods_fading` in the meshes' `describe` counts them.
 
 **Virtual geometry** (built: cluster LOD and GPU-driven drawing; `crates/render/src/virtual_geometry`):
 dense opaque meshes (`RenderSettings::virtual_geometry_min_triangles`, 50 000 by default) are
@@ -675,6 +693,14 @@ is re-uploaded every frame, because its asset changes every frame. Other crates'
 use it the same way. On lavapipe the first frame's cost is pipeline compiles (`render.cpu.meshes: pipelines`,
 ~1.4 s for the mesh shader's first two variants), not bytes.
 
+**Feature-owned extract** (built for meshes): a feature's `prepare` should only copy what it
+needs from the world and leave the per-instance work to `prepare_frame`, which runs on the
+render thread. The mesh feature's `prepare` syncs its scene (changed entities only), resolves
+meshes, materials and the cluster path; its cull over every instance (frustum, distance, levels
+of detail, impostors) runs in `prepare_frame`, in parallel chunks. After a camera cut, and for
+extra views, the cull runs in `prepare` (every material must be at hand at once); otherwise a
+material first drawn this frame gets its slot in the next `prepare`, its instances a frame late.
+
 **Render thread** (built; `renderer.rs` `RenderThread`, after Unreal's render thread and
 Unity's graphics jobs): with a window (`RenderSettings::pipelining`, default `Windowed`; the
 environment variable `ENGINE_PIPELINING=off|windowed|always` overrides it) a frame is split in
@@ -686,8 +712,10 @@ thread uses the renderer and its queue at a time. The picture shows the world on
 step late, and `RenderStats`, `render.*` diagnostics and finished screenshots arrive a frame
 late. Timings: on the main thread `render.wait_ms` (waiting for the frame in flight) and
 `extract_ms`; on the render thread `render.record_ms` (recording the passes), `acquire_ms`,
-`finish_ms` (wgpu validates and encodes the recorded passes in `CommandEncoder::finish`),
-`submit_ms`, `present_ms`, `screenshot_ms` (the blocking GPU readback and the PNGs) and
+`finish_ms` (wgpu validates and encodes the recorded passes in `CommandEncoder::finish`; with
+`RenderSettings::parallel_encoding`, on by default, the frame is split into four encoders, the
+first three finished on worker threads while the rest is recorded, `finish.rs`, so this is the
+last one's), `submit_ms`, `present_ms`, `screenshot_ms` (the blocking GPU readback and the PNGs) and
 `record_other_ms` (the rest), which add up to `record_total_ms`. `record_cpu_ms` is the
 thread's CPU time per frame averaged over a second (Windows counts thread time in 15.6 ms
 ticks), and well under `record_total_ms` means waiting: for the GPU, the window, a lock or a
