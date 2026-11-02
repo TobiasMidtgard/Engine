@@ -1,6 +1,7 @@
 //! The fixed-step system: read the ECS, step every region, write the results back.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use engine_core::ecs::system::SystemState;
@@ -1040,7 +1041,17 @@ pub(crate) fn physics_write_back(world: &mut World) {
         crate::report::step_done(world, &sim, &foci, started);
     }
     // ---------------------------------------------------------------- stats
-    let stats = PhysicsStats::from_sim(&sim, started.elapsed().as_secs_f64() * 1000.0, substeps);
+    let step_ms = started.elapsed().as_secs_f64() * 1000.0;
+    // ---------------------------------------------------------------- budget
+    // (`settings` are the step's: degraded already, but with the budget as set.)
+    let changed = sim.load.observe(step_ms, settings.step_budget_ms);
+    if changed || (sim.load.level > 0 && sim.load.due()) {
+        let load = sim.load.clone();
+        for r in sim.regions.iter_mut().flatten() {
+            crate::budget::apply_sleep(&mut r.world, &load);
+        }
+    }
+    let stats = PhysicsStats::from_sim(&sim, step_ms, substeps);
     drop(sim);
     if let Some(mut d) = world.get_resource_mut::<Diagnostics>() {
         d.set("physics.bodies", stats.bodies as f64);
@@ -1904,11 +1915,19 @@ fn substep(
         r.world.integration_parameters.num_solver_iterations =
             crate::fine::iterations(shared.settings, r.fine, p.sub_dt);
         let collector = std::mem::take(&mut r.collector);
+        let pool = match wide_pool() {
+            Some(wide) if r.wide => Arc::clone(wide),
+            _ => lane(),
+        };
+        r.world.set_thread_pool(Some(pool));
         crate::articulation::before_step(&mut r.world, &r.links);
         if shared.settings.contact_events {
             r.note_velocities();
         }
         r.world.step_with_events(&filter, &collector);
+        if crate::report::wanted() {
+            crate::report::rapier_stages(&r.world.physics_pipeline.counters);
+        }
         crate::articulation::after_step(&mut r.world, &mut r.links);
         r.collector = collector;
         r.needs_refresh = false;
@@ -1959,9 +1978,75 @@ fn region_pool() -> Option<&'static TaskPool> {
     .as_ref()
 }
 
+/// Awake bodies a region needs before its own step spreads over [`wide_pool`]: below this
+/// the hand-offs between Rapier's workers cost more than they save.
+const WIDE_MIN_AWAKE: usize = 200;
+
+/// Threads one busy region's Rapier step spreads over (Rapier's `parallel` build: its colored
+/// contact solver, narrow phase and body passes run on the pool the step is given). A pool of
+/// its own, held by one region at a time: Rapier broadcasts work to every thread of its pool and
+/// spin-waits between solver stages, so two regions sharing threads would stall each other (the
+/// 5-15 ms stalls of the global pool). Jolt splits one big island over the job system the same
+/// way (its large island splitter); Rapier colors the contacts so same-color ones share no body.
+fn wide_pool() -> Option<&'static Arc<rayon::ThreadPool>> {
+    static POOL: std::sync::OnceLock<Option<Arc<rayon::ThreadPool>>> = std::sync::OnceLock::new();
+    POOL.get_or_init(|| {
+        let threads = std::thread::available_parallelism().map_or(1, |n| n.get());
+        // Rapier's solver is laid out for 8 workers, and its stage barriers stop paying past
+        // about 16; leave the rest of the machine to the frame's other systems.
+        // (`PHYSICS_WIDE_THREADS=n` sets it, for measuring.)
+        let n = std::env::var("PHYSICS_WIDE_THREADS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or((threads / 2).clamp(1, 16));
+        (n > 1)
+            .then(|| {
+                rayon::ThreadPoolBuilder::new()
+                    .num_threads(n)
+                    .thread_name(|i| format!("physics wide {i}"))
+                    .build()
+                    .ok()
+                    .map(Arc::new)
+            })
+            .flatten()
+    })
+    .as_ref()
+}
+
+/// A one-thread pool for a region stepping on its own: Rapier's parallel passes then run in
+/// line on it, sharing nothing with other regions.
+fn lane() -> Arc<rayon::ThreadPool> {
+    thread_local! {
+        static LANE: Arc<rayon::ThreadPool> = Arc::new(
+            rayon::ThreadPoolBuilder::new()
+                .num_threads(1)
+                .thread_name(|_| "physics lane".into())
+                .build()
+                .expect("a one-thread pool"),
+        );
+    }
+    LANE.with(Arc::clone)
+}
+
+/// Give each region the pool its Rapier step runs on: the one with the most awake bodies (when
+/// it has [`WIDE_MIN_AWAKE`]) gets [`wide_pool`], the rest their own [`lane`]s.
+fn assign_pools(jobs: &mut [Job]) {
+    let wide = jobs
+        .iter()
+        .enumerate()
+        .map(|(i, j)| (i, j.0.world.islands.num_active_bodies()))
+        .filter(|&(_, n)| n >= WIDE_MIN_AWAKE)
+        .max_by_key(|&(_, n)| n)
+        .map(|(i, _)| i);
+    for (i, j) in jobs.iter_mut().enumerate() {
+        j.0.wide = Some(i) == wide && wide_pool().is_some();
+    }
+}
+
 /// Run the regions' substep `jobs` side by side on [`region_pool`] (in place when there is
 /// one, or a single thread); the results come back in the jobs' order.
-fn run_substeps(jobs: Vec<Job>, shared: &SubstepShared) -> Vec<SubstepOut> {
+fn run_substeps(mut jobs: Vec<Job>, shared: &SubstepShared) -> Vec<SubstepOut> {
+    assign_pools(&mut jobs);
     match region_pool() {
         Some(pool) if jobs.len() > 1 => pool.scope(|scope| {
             for (r, p, pending) in jobs {
@@ -1988,7 +2073,13 @@ fn break_joints(sim: &mut Simulation, rid: RegionId, sub_dt: f32) {
             (r == rid).then_some((*e, h.impulse()?, j.desc.break_force?))
         })
         .collect();
-    let iterations = sim.settings.solver_iterations.clamp(1, 64) as f32;
+    // (The iterations the region last stepped with: fewer under load, `crate::budget`.)
+    let iterations = sim
+        .region(rid)
+        .world
+        .integration_parameters
+        .num_solver_iterations
+        .clamp(1, 64) as f32;
     for (e, h, limit) in candidates {
         let region = sim.region_mut(rid);
         let Some(joint) = region.world.impulse_joints.get(h) else {

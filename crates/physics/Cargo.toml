@@ -14,7 +14,12 @@ engine_assets.workspace = true
 bevy_ecs.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-rapier3d.workspace = true
+# "parallel": one busy region's step spreads over a pool of its own (`step::wide_pool`); the
+# rest step on one-thread lanes, so no two regions share Rapier's spin-waiting workers (which
+# stalled steps 5-15 ms on the global pool). "profiler": Rapier's stage timers, for
+# PHYSICS_REPORT.
+rapier3d = { workspace = true, features = ["parallel", "profiler"] }
+rayon = "1"
 parking_lot.workspace = true
 tracing.workspace = true
 

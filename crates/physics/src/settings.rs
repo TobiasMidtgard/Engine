@@ -20,6 +20,11 @@ pub struct PhysicsSettings {
     pub max_substep_secs: f32,
     /// Upper bound on substeps per fixed step (protects the frame rate at extreme speed-ups).
     pub max_substeps: u32,
+    /// Time one physics step may take, ms: when steps keep running over it, big simulations
+    /// degrade a level at a time (bodies settling into sleep sooner, coarse level of detail
+    /// nearer) until they fit, and recover when there is room again
+    /// (see `PhysicsStats::load_level`). `None` = never degrade.
+    pub step_budget_ms: Option<f32>,
     /// How far colliders may sink into each other before being pushed apart, meters. Smaller
     /// = tall stacks sag less, but resting contacts need more work.
     pub allowed_penetration_m: f32,
@@ -90,6 +95,7 @@ impl Default for PhysicsSettings {
             solver_iterations: 8,
             max_substep_secs: 1.0 / 60.0,
             max_substeps: 24,
+            step_budget_ms: Some(8.0),
             allowed_penetration_m: 0.001,
             contact_stiffness_hz: 60.0,
             region_radius_m: 1000.0,

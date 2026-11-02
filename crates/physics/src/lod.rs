@@ -192,6 +192,16 @@ fn union(parent: &mut [usize], a: usize, b: usize) {
 }
 
 impl Simulation {
+    /// The settings with the level-of-detail distances the step's load allows
+    /// (`crate::budget`: nearer under load).
+    fn lod_settings(&self) -> PhysicsSettings {
+        let mut s = self.settings.clone();
+        let k = self.load.lod_scale();
+        s.coarse_beyond_m = s.coarse_beyond_m.map(|d| d * k);
+        s.half_rate_beyond_m = s.half_rate_beyond_m.map(|d| d * k);
+        s
+    }
+
     /// The movers of a region: its bodies and characters.
     pub(crate) fn members(&self, id: RegionId) -> Vec<Member> {
         let region = self.region(id);
@@ -235,7 +245,7 @@ impl Simulation {
     pub(crate) fn update_tiers(&mut self, foci: &[DVec3]) {
         let with_characters: HashSet<RegionId> =
             self.characters.values().map(|c| c.region).collect();
-        let settings = self.settings.clone();
+        let settings = self.lod_settings();
         let rest = self
             .range
             .map(|r| (r.active_m * (1.0 + r.hysteresis), r.active_m));
@@ -387,12 +397,13 @@ impl Simulation {
             return;
         }
         let join = self.settings.region_radius_m * 0.5;
+        let settings = self.lod_settings();
         for id in self.live_region_ids() {
             let (frozen, movers, tier) = {
                 let r = self.region(id);
                 (r.frozen, r.movers, r.tier)
             };
-            let Some(next) = threshold(&self.settings, tier + 1) else {
+            let Some(next) = threshold(&settings, tier + 1) else {
                 continue;
             };
             if frozen || movers == 0 {

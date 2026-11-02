@@ -2,6 +2,7 @@
 
 mod api;
 mod articulation;
+mod budget;
 mod buoyancy;
 mod capsule_box;
 mod character;
@@ -55,6 +56,9 @@ pub struct PhysicsStats {
     pub touching: usize,
     /// Time the last step took, milliseconds.
     pub step_ms: f64,
+    /// How far big simulations are degraded to keep steps within
+    /// [`PhysicsSettings::step_budget_ms`]: 0 (not at all) to 3.
+    pub load_level: u8,
     /// Substeps in the last fixed step.
     pub substeps: u32,
     /// Joints solved as articulations (see [`PhysicsSettings::articulated_joints`]).
@@ -106,6 +110,7 @@ impl PhysicsStats {
             regions: sim.live_regions().count(),
             touching: sim.contacts.touching.len(),
             step_ms,
+            load_level: sim.load.level,
             substeps,
             articulated: sim
                 .joints

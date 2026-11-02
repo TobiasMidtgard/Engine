@@ -86,6 +86,9 @@ pub struct Region {
     pub reach: f64,
     /// Colliders changed while frozen: refresh the query structures before the next query.
     pub needs_refresh: bool,
+    /// This substep, the region's Rapier step spreads over the wide pool (it is the busiest
+    /// region; see `step::assign_pools`).
+    pub wide: bool,
     /// Collision events from Rapier, drained after every substep.
     pub collector: Collector,
     /// Local bounds of every collider here, refreshed after each step (scene-query culling).
@@ -176,6 +179,7 @@ impl Region {
             lost: false,
             reach: 0.0,
             needs_refresh: true,
+            wide: false,
             collector: Collector::default(),
             bounds: None,
             fresh: Vec::new(),
@@ -718,6 +722,8 @@ pub struct Simulation {
     pub characters: EntityHashMap<CharacterEntry>,
     pub contacts: Contacts,
     pub settings: PhysicsSettings,
+    /// How loaded the step is, and how far big simulations degrade for it (`crate::budget`).
+    pub load: crate::budget::Load,
     /// Friction and restitution per surface material.
     pub materials: MaterialCache,
     /// Joints that broke this step (to despawn).
@@ -1055,7 +1061,12 @@ impl Simulation {
         rb.set_angular_damping(convert::damping(desc.angular_damping));
         rb.set_gravity_scale(desc.gravity_scale, true);
         rb.enable_ccd(desc.ccd);
-        rb.activation_mut().normalized_linear_threshold = if desc.can_sleep { 0.4 } else { -1.0 };
+        // (Rapier's resting speed, as a body built may sleep; the budget's levels raise it.)
+        rb.activation_mut().normalized_linear_threshold = if desc.can_sleep {
+            crate::budget::SLEEP_SPEED
+        } else {
+            -1.0
+        };
         rb.set_locked_axes(locked_axes(desc.lock_rotation), true);
         self.fix_mass(entity);
     }

@@ -27,6 +27,8 @@ struct Totals {
     parts: [f64; PARTS.len()],
     /// Things counted per substep, by name: their sum and the number of substeps.
     counts: Vec<(&'static str, usize, usize)>,
+    /// Rapier's own stages ([`STAGES`]), ms, all regions together.
+    stages: [f64; STAGES.len()],
     regions: HashMap<RegionId, (f64, u32)>,
 }
 
@@ -65,6 +67,34 @@ pub(crate) fn substep_parts(parts: [std::time::Duration; PARTS.len()]) {
     let mut t = totals().lock();
     for (i, d) in parts.iter().enumerate() {
         t.parts[i] += d.as_secs_f64() * 1000.0;
+    }
+}
+
+/// Rapier's stages, in order, as its counters time them.
+const STAGES: [&str; 7] = [
+    "broad phase",
+    "narrow phase",
+    "islands",
+    "solver set-up",
+    "solving",
+    "CCD",
+    "user changes",
+];
+
+/// One Rapier step's stage times, read from its counters.
+pub(crate) fn rapier_stages(c: &rapier3d::counters::Counters) {
+    let ms = [
+        c.cd.broad_phase_time.time_ms(),
+        c.cd.narrow_phase_time.time_ms(),
+        c.stages.island_construction_time.time_ms(),
+        c.solver.velocity_assembly_time.time_ms(),
+        c.solver.velocity_resolution_time.time_ms(),
+        c.stages.ccd_time.time_ms(),
+        c.stages.user_changes.time_ms(),
+    ];
+    let mut t = totals().lock();
+    for (i, v) in ms.iter().enumerate() {
+        t.stages[i] += v;
     }
 }
 
@@ -130,6 +160,12 @@ pub(crate) fn step_done(world: &World, sim: &Simulation, foci: &[DVec3], started
         parts.join(", "),
         (t.step_ms - in_regions) / steps
     );
+    let stages: Vec<String> = STAGES
+        .iter()
+        .zip(t.stages)
+        .map(|(name, ms)| format!("{name} {:.2}", ms / steps))
+        .collect();
+    out += &format!("; Rapier's stages ({})", stages.join(", "));
     for (name, sum, n) in &t.counts {
         out += &format!(
             ", {:.0} {name} per substep",
