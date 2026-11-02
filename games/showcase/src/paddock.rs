@@ -136,6 +136,13 @@ fn band() -> Mesh {
             mesh.indices.extend([a, c, b, b, c, d]);
         }
     }
+    // Face up whichever way round the lane runs.
+    let p = |i: u32| Vec3::from(mesh.vertices[mesh.indices[i as usize] as usize].position);
+    if (p(1) - p(0)).cross(p(2) - p(0)).y < 0.0 {
+        for t in mesh.indices.as_chunks_mut::<3>().0 {
+            t.swap(1, 2);
+        }
+    }
     mesh
 }
 
@@ -201,6 +208,11 @@ mod tests {
         assert!(!b.indices.is_empty());
         for v in &b.vertices {
             assert!(v.position[1] > 0.0 && v.position[1] < 0.05);
+        }
+        // Every triangle faces up (seen from above, not culled).
+        for t in b.indices.as_chunks::<3>().0 {
+            let p = |i: u32| Vec3::from(b.vertices[i as usize].position);
+            assert!((p(t[1]) - p(t[0])).cross(p(t[2]) - p(t[0])).y > 0.0);
         }
     }
 }

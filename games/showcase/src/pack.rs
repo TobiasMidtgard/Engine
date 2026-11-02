@@ -236,17 +236,24 @@ fn gear_the_pilot(
 }
 
 /// Tab and M (Select and D-pad up on a gamepad) open and close the bag and the map.
-fn toggle_screens(world: &mut World) {
-    let Some(actions) = world.get_resource::<engine::input::ActionState>() else {
+///
+/// A plain system that queues the change only on the frame a key goes down, so the frame
+/// keeps no exclusive system for it (the lead's schedule audit).
+fn toggle_screens(mut commands: Commands, actions: Option<Res<engine::input::ActionState>>) {
+    let Some(actions) = actions else {
         return;
     };
     let (bag, map) = (
         actions.just_pressed("inventory"),
         actions.just_pressed("map"),
     );
-    if !bag && !map {
-        return;
+    if bag || map {
+        commands.queue(move |world: &mut World| toggle(world, bag));
     }
+}
+
+/// Open the bag (`bag`) or the map, or close it when it is open.
+fn toggle(world: &mut World, bag: bool) {
     let key = if bag { "inventory" } else { "map" };
     if screens::find_screen(world, key).is_some() {
         screens::hide(world, key, false);
