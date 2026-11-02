@@ -16,7 +16,7 @@ use engine_core::prelude::*;
 use engine_render::{Image, MeshRenderer};
 
 use crate::ScriptRuntime;
-use crate::board::{BoardFont, Canvas, Rgb, scaled, show};
+use crate::board::{BOARD_RANGE_M, BoardFont, Canvas, Painter, Rgb, in_view, scaled, show};
 use crate::graph::{self, Compiled, Graph, Live, PinType, look};
 use crate::runtime::normalize;
 
@@ -757,6 +757,7 @@ pub(crate) struct Drawn {
     board: GraphBoard,
     /// The node the debugger stopped at, when drawn.
     stopped: Option<u32>,
+    painter: Option<Painter>,
 }
 
 #[derive(Default)]
@@ -766,9 +767,17 @@ pub(crate) struct GraphBoards {
 }
 
 /// Rereads graph boards' files a few times a second, watches their graphs while they run and
-/// redraws them when something shows a change (`Update`, after the scripts ran).
+/// redraws them when something shows a change while a camera is near enough to read them
+/// (`Update`, after the scripts ran). The drawing runs off the main thread ([`Painter`]).
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn draw_graph_boards(
-    mut boards: Query<(Entity, &GraphBoard, &mut MeshRenderer)>,
+    mut boards: Query<(
+        Entity,
+        &GraphBoard,
+        &mut MeshRenderer,
+        Option<&GlobalTransform>,
+    )>,
+    cameras: Query<(&engine_render::Camera, &GlobalTransform)>,
     runtime: Option<Res<ScriptRuntime>>,
     server: Option<Res<AssetServer>>,
     settings: Option<Res<crate::ScriptSettings>>,
@@ -782,7 +791,12 @@ pub(crate) fn draw_graph_boards(
     let GraphBoards { drawn, font } = &mut *state;
     drawn.retain(|e, _| boards.contains(*e));
     let now = time.real_elapsed_secs_f64();
-    for (e, board, mut renderer) in boards.iter_mut() {
+    let spots: Vec<_> = cameras
+        .iter()
+        .filter(|(c, _)| c.active)
+        .map(|(_, g)| g.translation())
+        .collect();
+    for (e, board, mut renderer, at) in boards.iter_mut() {
         let path = normalize(&board.path);
         let d = drawn.entry(e).or_insert_with(|| Drawn {
             text: String::new(),
@@ -799,7 +813,17 @@ pub(crate) fn draw_graph_boards(
             running: false,
             board: board.clone(),
             stopped: None,
+            painter: None,
         });
+        if let Some(pictures) = d.painter.as_mut().and_then(Painter::finished) {
+            d.image = Some(show(
+                images,
+                d.image,
+                pictures,
+                &mut renderer,
+                board.glow_cd_m2,
+            ));
+        }
         if d.board != *board {
             d.board = board.clone();
             d.dirty = true;
@@ -895,31 +919,57 @@ pub(crate) fn draw_graph_boards(
         if !d.dirty {
             continue;
         }
+        // Out of reading range it keeps its picture (but always gets a first one), and one
+        // drawing runs at a time; it stays dirty until it can draw.
+        let near = match at {
+            Some(g) => spots.is_empty() || in_view(&spots, g.translation(), BOARD_RANGE_M),
+            None => true,
+        };
+        if d.image.is_some() && !near || d.painter.as_mut().is_some_and(Painter::busy) {
+            continue;
+        }
         d.dirty = false;
         d.drawn_at = now;
-        let font = font.get_or_insert_with(|| BoardFont::load(server.as_ref().map(|s| s.root())));
+        let painter = d.painter.get_or_insert_with(|| {
+            Painter::new(
+                font.get_or_insert_with(|| BoardFont::load(server.as_ref().map(|s| s.root()))),
+            )
+        });
         let ran: HashMap<u32, f64> = d.ran.iter().map(|(k, t)| (*k, now - t)).collect();
-        let pictures = draw(
-            board,
-            font,
-            d.graph.as_ref(),
-            d.compiled.as_ref(),
-            &View {
-                path: &path,
-                error: d.error.as_deref(),
-                running: d.running,
-                live: &d.live,
-                ran: &ran,
-                stopped: d.stopped,
-            },
+        let (b, graph, compiled, error, live) = (
+            board.clone(),
+            d.graph.clone(),
+            d.compiled.clone(),
+            d.error.clone(),
+            d.live.clone(),
         );
-        d.image = Some(show(
-            images,
-            d.image,
-            pictures,
-            &mut renderer,
-            board.glow_cd_m2,
-        ));
+        let (running, stopped, path) = (d.running, d.stopped, path.clone());
+        painter.start(move |font| {
+            draw(
+                &b,
+                font,
+                graph.as_ref(),
+                compiled.as_ref(),
+                &View {
+                    path: &path,
+                    error: error.as_deref(),
+                    running,
+                    live: &live,
+                    ran: &ran,
+                    stopped,
+                },
+            )
+        });
+        // Without the pool it drew at once: show it this frame, as before.
+        if let Some(pictures) = d.painter.as_mut().and_then(Painter::finished) {
+            d.image = Some(show(
+                images,
+                d.image,
+                pictures,
+                &mut renderer,
+                board.glow_cd_m2,
+            ));
+        }
     }
 }
 

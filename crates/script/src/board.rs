@@ -68,8 +68,6 @@ impl CodeBoard {
 pub(crate) struct Drawn {
     text: String,
     version: u32,
-    image: Handle<Image>,
-    glow: Handle<Image>,
     changed: HashSet<usize>,
     changed_at: f64,
     error: Option<String>,
@@ -98,9 +96,11 @@ pub(crate) struct Glyph {
 
 /// The font and its glyph cache.
 pub(crate) struct BoardFont {
-    font: Option<FontVec>,
+    font: Option<std::sync::Arc<FontVec>>,
     px: f32,
-    glyphs: HashMap<char, Option<Glyph>>,
+    /// Rasterized glyphs by character and size (`px` bits): a board draws in a few sizes, and
+    /// clearing the cache on each change re-rasterized every glyph on every draw.
+    glyphs: HashMap<(char, u32), Option<Glyph>>,
 }
 
 impl BoardFont {
@@ -108,7 +108,8 @@ impl BoardFont {
         let font = asset_root
             .map(|r| r.join("fetched/fonts/JetBrainsMono-Regular.ttf"))
             .and_then(|p| std::fs::read(p).ok())
-            .and_then(|bytes| FontVec::try_from_vec(bytes).ok());
+            .and_then(|bytes| FontVec::try_from_vec(bytes).ok())
+            .map(std::sync::Arc::new);
         if font.is_none() {
             tracing::info!(
                 target: "script",
@@ -122,10 +123,23 @@ impl BoardFont {
         }
     }
 
+    /// The same font with a glyph cache of its own (for a board drawn on another thread).
+    pub(crate) fn fresh(&self) -> Self {
+        Self {
+            font: self.font.clone(),
+            px: 0.0,
+            glyphs: HashMap::new(),
+        }
+    }
+
     pub(crate) fn set_size(&mut self, px: f32) {
         if (px - self.px).abs() > 0.01 {
             self.px = px;
-            self.glyphs.clear();
+            // Sizes are fixed per board, so this stays small; a runaway (a board resized
+            // every frame) starts over.
+            if self.glyphs.len() > 4096 {
+                self.glyphs.clear();
+            }
         }
     }
 
@@ -148,11 +162,12 @@ impl BoardFont {
     }
 
     fn glyph(&mut self, c: char) -> Option<&Glyph> {
-        if !self.glyphs.contains_key(&c) {
+        let key = (c, self.px.to_bits());
+        if !self.glyphs.contains_key(&key) {
             let g = self.rasterize(c);
-            self.glyphs.insert(c, g);
+            self.glyphs.insert(key, g);
         }
-        self.glyphs.get(&c).and_then(|g| g.as_ref())
+        self.glyphs.get(&key).and_then(|g| g.as_ref())
     }
 
     fn rasterize(&self, c: char) -> Option<Glyph> {
@@ -207,6 +222,117 @@ impl BoardFont {
         }
     }
 }
+
+// ----------------------------------------------------------------------------- off the main thread
+
+/// A board's color and glow pictures.
+pub(crate) type Pictures = (Image, Image);
+
+type Painted = (Pictures, BoardFont);
+
+/// Draws one board's pictures on the async compute pool, so a redraw (tens of milliseconds for
+/// a large board) never holds up the frame, as Unreal's widget components and Unity's
+/// world-space canvases rebuild apart from the game thread. One drawing at a time per board;
+/// without the pool (tests, tools) it draws at once.
+pub(crate) struct Painter {
+    /// Its own glyph cache, lent to the drawing while one runs.
+    font: Option<BoardFont>,
+    /// The font to start over from if a drawing panicked.
+    base: BoardFont,
+    running: Option<std::sync::mpsc::Receiver<Painted>>,
+    done: Option<Pictures>,
+}
+
+impl Painter {
+    pub(crate) fn new(font: &BoardFont) -> Self {
+        Self {
+            font: Some(font.fresh()),
+            base: font.fresh(),
+            running: None,
+            done: None,
+        }
+    }
+
+    /// A drawing is under way.
+    pub(crate) fn busy(&mut self) -> bool {
+        self.poll();
+        self.running.is_some()
+    }
+
+    /// Starts `draw` unless one is still running (then returns false and drops it).
+    pub(crate) fn start(
+        &mut self,
+        draw: impl FnOnce(&mut BoardFont) -> Pictures + Send + 'static,
+    ) -> bool {
+        if self.busy() {
+            return false;
+        }
+        let mut font = self.font.take().unwrap_or_else(|| self.base.fresh());
+        match engine_core::tasks::AsyncComputeTaskPool::try_get() {
+            Some(pool) => {
+                let (tx, rx) = std::sync::mpsc::channel();
+                pool.spawn(async move {
+                    let pictures = draw(&mut font);
+                    let _ = tx.send((pictures, font));
+                })
+                .detach();
+                self.running = Some(rx);
+            }
+            None => {
+                self.done = Some(draw(&mut font));
+                self.font = Some(font);
+            }
+        }
+        true
+    }
+
+    fn poll(&mut self) {
+        use std::sync::mpsc::TryRecvError;
+        let Some(rx) = &self.running else {
+            return;
+        };
+        match rx.try_recv() {
+            Ok((pictures, font)) => {
+                self.done = Some(pictures);
+                self.font = Some(font);
+                self.running = None;
+            }
+            Err(TryRecvError::Empty) => {}
+            // The drawing panicked: start the next one over with a new cache.
+            Err(TryRecvError::Disconnected) => self.running = None,
+        }
+    }
+
+    /// The pictures of the drawing that just finished, once.
+    pub(crate) fn finished(&mut self) -> Option<Pictures> {
+        self.poll();
+        self.done.take()
+    }
+}
+
+/// Whether a board at `at` is worth redrawing: an active camera within `range_m` of it (text a
+/// few centimeters high can't be read from farther). It keeps its last picture meanwhile.
+pub(crate) fn in_view(
+    cameras: &[engine_core::math::DVec3],
+    at: engine_core::math::DVec3,
+    range_m: f64,
+) -> bool {
+    cameras
+        .iter()
+        .any(|c| c.distance_squared(at) <= range_m * range_m)
+}
+
+/// Where the active cameras are.
+pub(crate) fn camera_spots(world: &mut World) -> Vec<engine_core::math::DVec3> {
+    let mut q = world.query::<(&engine_render::Camera, &GlobalTransform)>();
+    q.iter(world)
+        .filter(|(c, _)| c.active)
+        .map(|(_, g)| g.translation())
+        .collect()
+}
+
+/// How far from a camera boards still redraw, meters.
+pub(crate) const BOARD_RANGE_M: f64 = 60.0;
 
 // ----------------------------------------------------------------------------- colors
 
@@ -510,6 +636,7 @@ struct Marks<'a> {
 
 /// A debugger stop in a board's file: its line, and the locals' values to show beside the
 /// lines that declare them (as JetBrains IDEs and VS Code show inline values).
+#[derive(Clone)]
 pub(crate) struct BoardStop {
     pub line: u32,
     /// "stopped at line 31 in update · breakpoint".
@@ -797,18 +924,31 @@ fn draw(
     cv.into_images()
 }
 
+/// The color and glow images a board shows.
+type Shown = (Handle<Image>, Handle<Image>);
+
 /// What [`draw_boards`] keeps between frames.
 #[derive(Default)]
 pub(crate) struct Boards {
     drawn: HashMap<Entity, Drawn>,
+    /// Each board's drawing and the images it shows.
+    painters: HashMap<Entity, (Painter, Option<Shown>)>,
     font: Option<BoardFont>,
     /// When files no script has loaded are next read from disk (real seconds).
     next_check: f64,
 }
 
-/// Redraws boards whose script changed (`Update`, after the scripts ran).
+/// Redraws boards whose script changed while a camera is near enough to read them (`Update`,
+/// after the scripts ran). The drawing runs off the main thread ([`Painter`]).
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn draw_boards(
-    mut boards: Query<(Entity, &CodeBoard, &mut MeshRenderer)>,
+    mut boards: Query<(
+        Entity,
+        &CodeBoard,
+        &mut MeshRenderer,
+        Option<&GlobalTransform>,
+    )>,
+    cameras: Query<(&engine_render::Camera, &GlobalTransform)>,
     runtime: Option<Res<ScriptRuntime>>,
     server: Option<Res<AssetServer>>,
     time: Res<Time>,
@@ -821,6 +961,7 @@ pub(crate) fn draw_boards(
     };
     let Boards {
         drawn,
+        painters,
         font,
         next_check,
     } = &mut *state;
@@ -830,7 +971,34 @@ pub(crate) fn draw_boards(
         *next_check = now + 0.25;
     }
     drawn.retain(|e, _| boards.contains(*e));
-    for (e, board, mut renderer) in boards.iter_mut() {
+    painters.retain(|e, _| boards.contains(*e));
+    let spots: Vec<_> = cameras
+        .iter()
+        .filter(|(c, _)| c.active)
+        .map(|(_, g)| g.translation())
+        .collect();
+    for (e, board, mut renderer, at) in boards.iter_mut() {
+        if let Some((painter, shown)) = painters.get_mut(&e)
+            && let Some(pictures) = painter.finished()
+        {
+            *shown = Some(show(
+                images,
+                *shown,
+                pictures,
+                &mut renderer,
+                board.glow_cd_m2,
+            ));
+        }
+        // Out of reading range it keeps its picture (but always gets a first one), and one
+        // drawing runs at a time: nothing to look at until then.
+        let near = match at {
+            Some(g) => spots.is_empty() || in_view(&spots, g.translation(), BOARD_RANGE_M),
+            None => true,
+        };
+        if drawn.contains_key(&e) && (!near || painters.get_mut(&e).is_some_and(|(p, _)| p.busy()))
+        {
+            continue;
+        }
         let path = normalize(&board.path);
         let loaded = runtime.as_ref().and_then(|rt| {
             let files = rt.files();
@@ -906,42 +1074,55 @@ pub(crate) fn draw_boards(
         if same && !fade && !values && !recount {
             continue;
         }
-        let font = font.get_or_insert_with(|| BoardFont::load(server.as_ref().map(|s| s.root())));
         let (changed, changed_at, faded) = match known {
             Some(d) if fade && same => (HashSet::new(), d.changed_at, true),
             Some(d) if d.text != source => (changed_lines(&d.text, &source), now, false),
             Some(d) => (d.changed.clone(), d.changed_at, d.faded),
             None => (HashSet::new(), now, true),
         };
-        let (image, glow) = draw(
-            board,
-            font,
-            &path,
-            version,
-            &source,
-            error.as_deref(),
-            Marks {
-                changed: &changed,
-                values: &inline,
-                heat: &heat,
-                fault: fault.as_ref(),
-                stop: stop.as_ref().map(|s| &s.1),
-            },
-        );
-        let (handle, glow_handle) = show(
-            images,
-            drawn.get(&e).map(|d| (d.image, d.glow)),
-            (image, glow),
-            &mut renderer,
-            board.glow_cd_m2,
-        );
+        let (painter, shown) = painters.entry(e).or_insert_with(|| {
+            let font =
+                font.get_or_insert_with(|| BoardFont::load(server.as_ref().map(|s| s.root())));
+            (Painter::new(font), None)
+        });
+        {
+            let (b, path, source, error) =
+                (board.clone(), path.clone(), source.clone(), error.clone());
+            let (changed, fault) = (changed.clone(), fault.clone());
+            let stop = stop.as_ref().map(|s| s.1.clone());
+            painter.start(move |font| {
+                draw(
+                    &b,
+                    font,
+                    &path,
+                    version,
+                    &source,
+                    error.as_deref(),
+                    Marks {
+                        changed: &changed,
+                        values: &inline,
+                        heat: &heat,
+                        fault: fault.as_ref(),
+                        stop: stop.as_ref(),
+                    },
+                )
+            });
+        }
+        // Without the pool it drew at once: show it this frame, as before.
+        if let Some(pictures) = painter.finished() {
+            *shown = Some(show(
+                images,
+                *shown,
+                pictures,
+                &mut renderer,
+                board.glow_cd_m2,
+            ));
+        }
         drawn.insert(
             e,
             Drawn {
                 text: source,
                 version,
-                image: handle,
-                glow: glow_handle,
                 changed,
                 changed_at,
                 error,
@@ -1032,6 +1213,48 @@ mod tests {
         let new = "a\nb\nC changed\nd";
         let changed = changed_lines(old, new);
         assert_eq!(changed, HashSet::from([2]));
+    }
+
+    #[test]
+    fn a_painter_draws_off_the_main_thread_one_drawing_at_a_time() {
+        engine_core::tasks::AsyncComputeTaskPool::get_or_init(Default::default);
+        let mut painter = Painter::new(&BoardFont::load(None));
+        let (go, wait) = std::sync::mpsc::channel::<()>();
+        let picture = |n: u32| {
+            (
+                Image::new(n, 1, vec![0; 4 * n as usize], true),
+                Image::new(1, 1, vec![0; 4], true),
+            )
+        };
+        assert!(painter.start(move |_| {
+            wait.recv().unwrap();
+            picture(2)
+        }));
+        // Still drawing: nothing to show, and a second drawing waits its turn.
+        assert!(painter.busy());
+        assert!(painter.finished().is_none());
+        assert!(!painter.start(move |_| picture(3)));
+        go.send(()).unwrap();
+        let start = std::time::Instant::now();
+        let done = loop {
+            if let Some(p) = painter.finished() {
+                break p;
+            }
+            assert!(start.elapsed().as_secs() < 10, "the drawing never finished");
+            std::thread::yield_now();
+        };
+        assert_eq!(done.0.width, 2);
+        assert!(!painter.busy());
+        assert!(painter.finished().is_none());
+    }
+
+    #[test]
+    fn boards_redraw_only_with_a_camera_in_reading_range() {
+        use engine_core::math::DVec3;
+        let cams = [DVec3::new(0.0, 2.0, 0.0)];
+        assert!(in_view(&cams, DVec3::new(30.0, 0.0, 0.0), BOARD_RANGE_M));
+        assert!(!in_view(&cams, DVec3::new(500.0, 0.0, 0.0), BOARD_RANGE_M));
+        assert!(!in_view(&[], DVec3::ZERO, BOARD_RANGE_M));
     }
 
     #[test]

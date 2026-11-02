@@ -16,7 +16,7 @@ use engine_core::prelude::*;
 use engine_render::{Image, MeshRenderer};
 
 use crate::Script;
-use crate::board::{BoardFont, Canvas, Rgb, show};
+use crate::board::{BOARD_RANGE_M, BoardFont, Canvas, Painter, Rgb, camera_spots, in_view, show};
 use crate::diagram::{self, Area, GROUP_HEAD, Placed};
 use crate::graph_board::{BG, DIM, ERROR, HEADER_BG, LIVE, Label, TEXT, TITLE, finish, mix, srgb};
 use crate::states::{Live, Machine};
@@ -833,6 +833,7 @@ pub(crate) struct Drawn {
     drawn_at: f64,
     /// What it showed last: the board, the machine (or why none) and the live state.
     shown: Option<(StateBoard, Result<Machine, String>, Option<Live>)>,
+    painter: Option<Painter>,
 }
 
 #[derive(Default)]
@@ -842,26 +843,58 @@ pub(crate) struct StateBoards {
 }
 
 /// Reads each board's target, its script's machine and where it is now, and redraws the board
-/// when that changed, a few times a second at most (`Update`, after the scripts ran).
+/// when that changed, a few times a second at most, while a camera is near enough to read it
+/// (`Update`, after the scripts ran). The drawing runs off the main thread ([`Painter`]).
 pub(crate) fn draw_state_boards(world: &mut World, mut state: Local<StateBoards>) {
-    let mut q = world.query::<(Entity, &StateBoard)>();
-    let boards: Vec<(Entity, StateBoard)> = q.iter(world).map(|(e, b)| (e, b.clone())).collect();
+    let mut q = world.query::<(Entity, &StateBoard, Option<&GlobalTransform>)>();
+    let boards: Vec<(Entity, StateBoard, Option<_>)> = q
+        .iter(world)
+        .map(|(e, b, g)| (e, b.clone(), g.map(|g| g.translation())))
+        .collect();
     let StateBoards { drawn, font } = &mut *state;
-    drawn.retain(|e, _| boards.iter().any(|(b, _)| b == e));
+    drawn.retain(|e, _| boards.iter().any(|(b, ..)| b == e));
     if boards.is_empty() || !world.contains_resource::<Assets<Image>>() {
         return;
     }
     let now = world
         .get_resource::<Time>()
         .map_or(0.0, |t| t.real_elapsed_secs_f64());
+    let cameras = camera_spots(world);
     let mut names = world.query::<(Entity, &Name, &Script)>();
-    for (e, board) in boards {
+    for (e, board, at) in boards {
         let d = drawn.entry(e).or_insert_with(|| Drawn {
             image: None,
             drawn_at: f64::MIN,
             shown: None,
+            painter: None,
         });
+        // A finished drawing goes on the board.
+        if let Some(pictures) = d.painter.as_mut().and_then(Painter::finished) {
+            let old = d.image;
+            world.resource_scope(|world, mut images: Mut<Assets<Image>>| {
+                if let Some(mut renderer) = world.get_mut::<MeshRenderer>(e) {
+                    d.image = Some(show(
+                        &mut images,
+                        old,
+                        pictures,
+                        &mut renderer,
+                        board.glow_cd_m2,
+                    ));
+                }
+            });
+        }
         if now - d.drawn_at < 1.0 / board.fps.max(0.1) as f64 {
+            continue;
+        }
+        // Out of reading range it keeps its picture (but always gets a first one).
+        let near = match at {
+            Some(at) => cameras.is_empty() || in_view(&cameras, at, BOARD_RANGE_M),
+            None => true,
+        };
+        if d.shown.is_some() && !near {
+            continue;
+        }
+        if d.painter.as_mut().is_some_and(Painter::busy) {
             continue;
         }
         let target = names
@@ -898,34 +931,37 @@ pub(crate) fn draw_state_boards(world: &mut World, mut state: Local<StateBoards>
             continue;
         }
         d.drawn_at = now;
-        let font = font.get_or_insert_with(|| {
-            BoardFont::load(world.get_resource::<AssetServer>().map(|s| s.root()))
+        let painter = d.painter.get_or_insert_with(|| {
+            let font = font.get_or_insert_with(|| {
+                BoardFont::load(world.get_resource::<AssetServer>().map(|s| s.root()))
+            });
+            Painter::new(font)
         });
-        let (board, machine, live) = &shown;
-        let pictures = draw(
-            board,
-            font,
-            machine.as_ref().ok(),
-            &View {
-                title: &board.target,
-                path: &path,
-                error: machine.as_ref().err().map(String::as_str),
-                live: live.as_ref(),
-            },
-        );
-        let old = d.image;
-        world.resource_scope(|world, mut images: Mut<Assets<Image>>| {
-            if let Some(mut renderer) = world.get_mut::<MeshRenderer>(e) {
-                d.image = Some(show(
-                    &mut images,
-                    old,
-                    pictures,
-                    &mut renderer,
-                    board.glow_cd_m2,
-                ));
-            }
+        let (board, machine, live) = shown.clone();
+        painter.start(move |font| {
+            draw(
+                &board,
+                font,
+                machine.as_ref().ok(),
+                &View {
+                    title: &board.target,
+                    path: &path,
+                    error: machine.as_ref().err().map(String::as_str),
+                    live: live.as_ref(),
+                },
+            )
         });
         d.shown = Some(shown);
+        // Without the pool it drew at once: show it this frame, as before.
+        if let Some(pictures) = d.painter.as_mut().and_then(Painter::finished) {
+            let old = d.image;
+            let glow = d.shown.as_ref().map_or(60.0, |s| s.0.glow_cd_m2);
+            world.resource_scope(|world, mut images: Mut<Assets<Image>>| {
+                if let Some(mut renderer) = world.get_mut::<MeshRenderer>(e) {
+                    d.image = Some(show(&mut images, old, pictures, &mut renderer, glow));
+                }
+            });
+        }
     }
 }
 
