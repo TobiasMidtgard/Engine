@@ -314,7 +314,8 @@ pub struct Renderer {
     /// Whether the stand-in has been cleared to 1 yet (textures start at 0).
     cloud_stand_in_ready: bool,
     environment: EnvironmentMaps,
-    env_rendered: bool,
+    /// When the environment map was last drawn: the frame, the sun's direction and the camera.
+    env_rendered: Option<EnvDrawn>,
     /// 1x1 neutral stand-ins for the screen-space maps (no occlusion, nothing in the prepass),
     /// bound while the real ones are being drawn.
     screen_stand_ins: ScreenMaps,
@@ -403,7 +404,7 @@ per_view! {
     cloud_shadows: CloudShadowMap,
     cloud_stand_in_ready: bool,
     environment: EnvironmentMaps,
-    env_rendered: bool,
+    env_rendered: Option<EnvDrawn>,
     screen_stand_ins: ScreenMaps,
     frame_group: wgpu::BindGroup,
     compute_group: wgpu::BindGroup,
@@ -503,7 +504,7 @@ impl ViewState {
             cloud_shadows,
             cloud_stand_in_ready: false,
             environment,
-            env_rendered: false,
+            env_rendered: None,
             screen_stand_ins,
             frame_group: groups.scene,
             compute_group: groups.compute,
@@ -1776,9 +1777,17 @@ impl Renderer {
         }
 
         // Environment map: draw the sky, then filter it for reflections and diffuse light. The
-        // passes drawing it read last frame's filtered maps.
-        let interval = settings.environment_interval.max(1) as u64;
-        if !self.env_rendered || self.frame_index.is_multiple_of(interval) {
+        // passes drawing it read last frame's filtered maps. Every `environment_interval`
+        // frames, and at once after a cut, when the sun turns or the camera travels far.
+        let env_now = EnvDrawn {
+            frame: self.frame_index,
+            sun_dir: view.sun_dir,
+            origin: view.origin,
+        };
+        let env_due = self.env_rendered.is_none_or(|last| {
+            last.due(&env_now, settings.environment_interval, view.history_valid)
+        });
+        if env_due {
             self.perf.pass(&mut cpu, &mut encoder, "environment");
             {
                 let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -1800,7 +1809,7 @@ impl Renderer {
                 }
             }
             self.environment.filter(&mut encoder);
-            self.env_rendered = true;
+            self.env_rendered = Some(env_now);
         }
         let frame_group = &self.frame_group;
         // The frame so far is finished on a worker while the rest is recorded (`finish.rs`).
@@ -3630,6 +3639,32 @@ pub struct RenderThread(engine_core::tasks::Pipelined<Renderer>);
 
 /// Put `quality` in the world as the game's `Scalability` (none: remove it) without marking it
 /// changed, and return what was there.
+/// When the environment map was drawn (`RenderSettings::environment_interval`).
+#[derive(Clone, Copy, Debug)]
+struct EnvDrawn {
+    frame: u64,
+    sun_dir: Vec3,
+    origin: DVec3,
+}
+
+/// The sun may turn this far (radians, 0.2°) before the environment map is drawn again early:
+/// a day-night cycle of a few minutes turns it about that much a frame.
+const ENV_SUN_TURN: f32 = 0.0035;
+/// The camera may travel this far (m) before it is drawn again early (the sky's color changes
+/// with altitude; the map holds no nearby geometry).
+const ENV_TRAVEL_M: f64 = 50.0;
+
+impl EnvDrawn {
+    /// Whether the map drawn at `self` is due again at `now`.
+    fn due(&self, now: &EnvDrawn, interval: u32, history_valid: bool) -> bool {
+        !history_valid
+            || now.frame >= self.frame + interval.max(1) as u64
+            || now.frame < self.frame
+            || self.sun_dir.dot(now.sun_dir) < ENV_SUN_TURN.cos()
+            || self.origin.distance(now.origin) > ENV_TRAVEL_M
+    }
+}
+
 fn swap_quality(
     world: &mut World,
     quality: Option<engine_world::Scalability>,
@@ -3799,4 +3834,30 @@ fn log_uploads(world: &mut World, report: &crate::features::UploadReport) {
         report.items,
         parts.join("; ")
     );
+}
+
+#[cfg(test)]
+mod env_tests {
+    use super::*;
+
+    #[test]
+    fn the_environment_map_is_drawn_every_interval_and_early_when_the_sky_changes() {
+        let at = |frame: u64, sun: Vec3, origin: DVec3| EnvDrawn {
+            frame,
+            sun_dir: sun.normalize(),
+            origin,
+        };
+        let sun = Vec3::new(0.3, 0.8, 0.2);
+        let last = at(100, sun, DVec3::ZERO);
+        // Within the interval, nothing changed: not yet.
+        assert!(!last.due(&at(103, sun, DVec3::new(10.0, 0.0, 0.0)), 4, true));
+        assert!(last.due(&at(104, sun, DVec3::ZERO), 4, true));
+        // A cut, a turned sun, a long trip: at once.
+        assert!(last.due(&at(101, sun, DVec3::ZERO), 4, false));
+        let turned = Quat::from_rotation_y(0.01) * sun;
+        assert!(last.due(&at(101, turned, DVec3::ZERO), 4, true));
+        assert!(last.due(&at(101, sun, DVec3::new(0.0, 60.0, 0.0)), 4, true));
+        // Interval 1: every frame.
+        assert!(last.due(&at(101, sun, DVec3::ZERO), 1, true));
+    }
 }
