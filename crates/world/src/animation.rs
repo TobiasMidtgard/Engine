@@ -105,6 +105,16 @@ pub struct AnimationEvent {
     pub bone: Option<String>,
 }
 
+/// Who a character's strikes go at, for the animation module to close on and land on.
+/// Gameplay (the combat module, AI) writes it: `target` is the one gameplay picked, and `foes`
+/// limits whom the animation module's own freeflow picking may choose (empty: anyone it can
+/// strike).
+#[derive(Component, Debug, Clone, PartialEq, Default)]
+pub struct StrikeTargets {
+    pub target: Option<Entity>,
+    pub foes: Vec<Entity>,
+}
+
 /// How physical a character is: 0 = fully animated, 1 = limp ragdoll; in between, the
 /// animation drives the ragdoll with motors (stumbles, hit reactions). The animation module
 /// builds the ragdoll from physics contract components (`RigidBody`, `Collider`, `Joint`).

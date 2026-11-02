@@ -891,6 +891,84 @@ pub(crate) fn parallelism_report(world: &World) -> String {
     out
 }
 
+/// What the systems of one schedule may touch: for tests that keep the frame running side by
+/// side (a new exclusive system or a new writer of a contested component shows up here).
+#[derive(Debug, Default, Clone)]
+pub struct ScheduleAccess {
+    /// The schedule's label, as `{:?}` prints it.
+    pub schedule: String,
+    /// Systems that take the whole world (`&mut World`, `apply_deferred` included), short names.
+    pub exclusive: Vec<String>,
+    /// Per component or resource (short name), the systems that write it (short names, sorted).
+    pub writers: std::collections::BTreeMap<String, Vec<String>>,
+}
+
+/// Builds every schedule as its first run would (without running anything) and lists, per
+/// schedule, its exclusive systems and who writes what.
+pub fn schedule_access(world: &mut World) -> Vec<ScheduleAccess> {
+    use bevy_ecs::query::ComponentAccessKind;
+    use bevy_ecs::schedule::Schedules;
+    // One at a time out of `Schedules`: building one reads `Schedules` itself.
+    let labels: Vec<_> = world
+        .get_resource::<Schedules>()
+        .map(|s| s.iter().map(|(_, schedule)| schedule.label()).collect())
+        .unwrap_or_default();
+    for label in labels {
+        let Some(mut schedule) = world.resource_mut::<Schedules>().remove(label) else {
+            continue;
+        };
+        if let Err(e) = schedule.initialize(world) {
+            crate::log::warn!("schedule {label:?} doesn't build: {e}");
+        }
+        world.resource_mut::<Schedules>().insert(schedule);
+    }
+    let Some(schedules) = world.get_resource::<Schedules>() else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for (label, schedule) in schedules.iter() {
+        let Ok(systems) = schedule.systems_with_access() else {
+            continue;
+        };
+        let mut access = ScheduleAccess {
+            schedule: format!("{label:?}"),
+            ..Default::default()
+        };
+        for (_, s) in systems {
+            let name = short_name(&s.system().name().to_string());
+            if s.access().is_exclusive() {
+                access.exclusive.push(name);
+                continue;
+            }
+            let set = s.access().to_filtered_access_set();
+            let Ok(kinds) = set.combined_access().try_iter_access() else {
+                continue;
+            };
+            for kind in kinds {
+                if let ComponentAccessKind::Exclusive(id) = kind {
+                    let written = world
+                        .components()
+                        .get_name(id)
+                        .map_or_else(|| format!("{id:?}"), |n| n.shortname().to_string());
+                    access
+                        .writers
+                        .entry(written)
+                        .or_default()
+                        .push(name.clone());
+                }
+            }
+        }
+        access.exclusive.sort();
+        for w in access.writers.values_mut() {
+            w.sort();
+            w.dedup();
+        }
+        out.push(access);
+    }
+    out.sort_by(|a, b| a.schedule.cmp(&b.schedule));
+    out
+}
+
 fn truncate(s: &str, n: usize) -> String {
     if s.chars().count() <= n {
         s.to_string()
@@ -1028,6 +1106,31 @@ mod tests {
                 .contains("Shared: 3 pairs, 3 systems (engine_core::reader, engine_core::writer_a"),
             "{report}"
         );
+    }
+
+    #[test]
+    fn schedule_access_lists_exclusive_systems_and_writers() {
+        #[derive(Component)]
+        struct Spot(f32);
+        fn mover(mut q: Query<&mut Spot>) {
+            for mut s in &mut q {
+                s.0 += 1.0;
+            }
+        }
+        fn looker(_q: Query<&Spot>) {}
+        fn whole(_world: &mut World) {}
+        let mut app = crate::app::App::new();
+        app.add_systems(crate::schedule::Update, (mover, looker, whole));
+        let all = schedule_access(&mut app.world);
+        let update = all.iter().find(|a| a.schedule == "Update").unwrap();
+        assert_eq!(update.exclusive, ["engine_core::whole"]);
+        let spot = update
+            .writers
+            .iter()
+            .find(|(k, _)| k.ends_with("Spot"))
+            .unwrap()
+            .1;
+        assert_eq!(spot, &["engine_core::mover"]);
     }
 
     #[test]
