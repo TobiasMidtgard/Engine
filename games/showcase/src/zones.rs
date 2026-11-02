@@ -590,9 +590,58 @@ pub fn proxy_version(seed: u64, key: &str) -> u64 {
     fnv(h, &ZONE_CONTENT_REVISION.to_le_bytes())
 }
 
-/// What each cell shows ([`zone_cells`]). Each zone is one line, owned by its module's thread:
-/// swap the placeholder (`ph::…`) for your demo and leave the other lines alone.
-pub fn spawn_cell(commands: &mut Commands, lib: &Library, land: &Landscape, seed: u64, key: &str) {
+/// The slices a cell spawns in, one a step of its streamed load (`StreamCell::in_steps`), named
+/// by who owns each (for the spawn-cost log, [`crate::spawn_costs`]): a zone whose module demo
+/// and showcase dressing each take a while spreads them over frames, as Unreal's time-sliced
+/// level streaming spreads a level's actors (`s.LevelStreamingComponentsRegistrationGranularity`).
+/// Cells not listed spawn in one slice, their module's demo.
+const PARTS: [(&str, &[&str]); 7] = [
+    ("plaza", &crate::plaza::PARTS),
+    ("paddock", &["anim demo", "showcase rails"]),
+    ("yard", &["softbody demo", "showcase firebreak"]),
+    ("lake", &["water demo", "physics floaters"]),
+    ("fortress", &["destruction demo", "showcase fuel"]),
+    (
+        "field",
+        &["fire demo", "showcase field edge", "showcase smoke air"],
+    ),
+    ("spaceport", &["showcase spaceport", "vehicles spaceport"]),
+];
+
+/// Who owns each slice of cell `key`'s spawn, in order ([`PARTS`]).
+pub fn cell_parts(key: &str) -> &'static [&'static str] {
+    PARTS
+        .iter()
+        .find(|(k, _)| *k == key)
+        .map_or(&["demo"], |(_, parts)| parts)
+}
+
+/// What a cell makes off the frame before it spawns (`StreamCell::built_in_steps`): the slow,
+/// world-free part of the showcase's own content.
+#[derive(Default)]
+pub struct CellArt {
+    pub plaza: Option<crate::plaza::Art>,
+}
+
+/// Make cell `key`'s [`CellArt`] (on a worker thread).
+pub fn build_cell(key: &str) -> CellArt {
+    CellArt {
+        plaza: (key == "plaza").then(crate::plaza::build_art),
+    }
+}
+
+/// Slice `part` of what each cell shows ([`zone_cells`], [`cell_parts`]). Each zone is one line,
+/// owned by its module's thread: swap the placeholder (`ph::…`) for your demo and leave the
+/// other lines alone.
+pub fn spawn_cell(
+    commands: &mut Commands,
+    lib: &Library,
+    land: &Landscape,
+    seed: u64,
+    key: &str,
+    part: usize,
+    art: &mut CellArt,
+) {
     let rng = &mut cell_rng(seed, key);
     // The yard's outlying parts belong to the yard.
     let zone_key = if key.starts_with("yard_") {
@@ -603,16 +652,14 @@ pub fn spawn_cell(commands: &mut Commands, lib: &Library, land: &Landscape, seed
     let Some(z) = ZONES.iter().find(|z| z.key == zone_key) else {
         return;
     };
-    match key {
-        "plaza" => crate::plaza::spawn(commands, lib, z),
-        "market" => engine_ui::demo::spawn_demo(commands, z.center),
-        "paddock" => {
-            engine_anim::demo::spawn_demo(commands, z.center);
-            crate::paddock::spawn(commands, z.center);
-        }
-        "physics" => engine_physics::demo::spawn_demo(commands, z.center),
-        "yard" => {
-            engine_softbody::demo::spawn_demo(commands, z.center);
+    match (key, part) {
+        ("plaza", _) => crate::plaza::spawn(commands, lib, z, part, &mut art.plaza),
+        ("market", 0) => engine_ui::demo::spawn_demo(commands, z.center),
+        ("paddock", 0) => engine_anim::demo::spawn_demo(commands, z.center),
+        ("paddock", 1) => crate::paddock::spawn(commands, z.center),
+        ("physics", 0) => engine_physics::demo::spawn_demo(commands, z.center),
+        ("yard", 0) => engine_softbody::demo::spawn_demo(commands, z.center),
+        ("yard", 1) => {
             // Bare earth under the burning curtain's burner, so its flame lights the
             // curtain and not the meadow.
             commands.spawn((
@@ -621,7 +668,7 @@ pub fn spawn_cell(commands: &mut Commands, lib: &Library, land: &Landscape, seed
                 engine_fire::FuelPatch::firebreak(engine_fire::PatchShape::Disc { radius: 4.0 }),
             ));
         }
-        "yard_sailboat" => {
+        ("yard_sailboat", 0) => {
             // The sailing dinghy works the lake east of the jetty, leaving a wake as wide
             // as its hull.
             let boat = engine_softbody::demo::spawn_sailboat(
@@ -633,7 +680,7 @@ pub fn spawn_cell(commands: &mut Commands, lib: &Library, land: &Landscape, seed
                 .entity(boat)
                 .insert(engine_water::WaterInteractor::new(0.8).with_wake(1.0));
         }
-        "yard_rinse" => {
+        ("yard_rinse", 0) => {
             // Dyed silks rinsed in the stream above the falls (they tie on once the
             // lake zone's stream is running), the pole's ends against the banks.
             let (at, down, width) = rinse_site(land);
@@ -644,29 +691,29 @@ pub fn spawn_cell(commands: &mut Commands, lib: &Library, land: &Landscape, seed
                 width as f32 + 0.1,
             );
         }
-        "magic" => engine_vfx::demo::spawn_demo(commands, z.center),
-        "script" => engine_script::demo::spawn_demo(commands, z.center),
-        "gallery2d" => ph::gallery2d(commands, lib, z),
-        "forest" => engine_foliage::demo::spawn_demo(commands, z.center),
-        "meadow" => engine_npc::demo::spawn_wildlife(commands, z.center, z.radius * 0.8),
-        "lake" => {
+        ("magic", 0) => engine_vfx::demo::spawn_demo(commands, z.center),
+        ("script", 0) => engine_script::demo::spawn_demo(commands, z.center),
+        ("gallery2d", 0) => ph::gallery2d(commands, lib, z),
+        ("forest", 0) => engine_foliage::demo::spawn_demo(commands, z.center),
+        ("meadow", 0) => engine_npc::demo::spawn_wildlife(commands, z.center, z.radius * 0.8),
+        ("lake", 0) => {
             engine_water::demo::spawn_valley(commands, &lake_water(z, &|x, z| land.height(x, z)));
-            engine_physics::demo::spawn_floaters(commands, float_test(z));
         }
-        "water" => engine_water::demo::spawn_demo(commands, z.center),
-        "footsteps" => engine_audio::demo::spawn_demo(commands, z.center),
-        "tracks" => engine_terrain::demo::spawn_demo_with(
+        ("lake", 1) => engine_physics::demo::spawn_floaters(commands, float_test(z)),
+        ("water", 0) => engine_water::demo::spawn_demo(commands, z.center),
+        ("footsteps", 0) => engine_audio::demo::spawn_demo(commands, z.center),
+        ("tracks", 0) => engine_terrain::demo::spawn_demo_with(
             commands,
             z.center,
             engine_terrain::demo::LabOptions {
                 stand_in_bodies: true,
             },
         ),
-        "cave" => engine_foliage::demo::spawn_cave_demo(commands, z.center),
-        "arena" => engine_npc::demo::spawn_demo(commands, z.center),
-        "parkour" => engine_movement::demo::spawn_demo(commands, z.center),
-        "fortress" => {
-            engine_destruction::demo::spawn_demo(commands, z.center);
+        ("cave", 0) => engine_foliage::demo::spawn_cave_demo(commands, z.center),
+        ("arena", 0) => engine_npc::demo::spawn_demo(commands, z.center),
+        ("parkour", 0) => engine_movement::demo::spawn_demo(commands, z.center),
+        ("fortress", 0) => engine_destruction::demo::spawn_demo(commands, z.center),
+        ("fortress", 1) => {
             // The burning storehouse has straw on its floor (it goes up fast and grows back
             // for the next loop) and stands in a bare earth yard ringed by green grass, so
             // its fire stays a house fire: no grass fire runs off across the valley, and
@@ -696,10 +743,10 @@ pub fn spawn_cell(commands: &mut Commands, lib: &Library, land: &Landscape, seed
                     .with_priority(5),
             ));
         }
-        "voxel" => engine_destruction::hill::spawn_voxel_hill(commands, z.center),
-        "field" => {
-            engine_fire::demo::spawn_demo(commands, z.center);
-            ph::field_edge(commands, lib, z, rng);
+        ("voxel", 0) => engine_destruction::hill::spawn_voxel_hill(commands, z.center),
+        ("field", 0) => engine_fire::demo::spawn_demo(commands, z.center),
+        ("field", 1) => ph::field_edge(commands, lib, z, rng),
+        ("field", 2) => {
             // Air over the meadow, so the fire's smoke rises as one simulated plume. It
             // reaches farther downwind (the valley's wind blows west and a little north) so
             // the plume drifts out of it well clear of the fire.
@@ -722,10 +769,10 @@ pub fn spawn_cell(commands: &mut Commands, lib: &Library, land: &Landscape, seed
                 },
             ));
         }
-        "range" => engine_smoke::demo::spawn_demo(commands, z.center),
-        "weather" => engine_weather::demo::spawn_demo(commands, z.center),
-        "track" => engine_vehicles::demo::spawn_track(commands, z.center),
-        "airfield" => {
+        ("range", 0) => engine_smoke::demo::spawn_demo(commands, z.center),
+        ("weather", 0) => engine_weather::demo::spawn_demo(commands, z.center),
+        ("track", 0) => engine_vehicles::demo::spawn_track(commands, z.center),
+        ("airfield", 0) => {
             let (a, b) = RUNWAY;
             engine_vehicles::demo::spawn_airfield(
                 commands,
@@ -733,8 +780,8 @@ pub fn spawn_cell(commands: &mut Commands, lib: &Library, land: &Landscape, seed
                 DVec3::new(b[0], z.center.y, b[1]),
             );
         }
-        "spaceport" => {
-            ph::spaceport(commands, lib, z);
+        ("spaceport", 0) => ph::spaceport(commands, lib, z),
+        ("spaceport", 1) => {
             engine_vehicles::demo::spawn_spaceport(
                 commands,
                 z.center + DVec3::new(0.0, 0.4, 0.0),

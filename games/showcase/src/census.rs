@@ -341,6 +341,9 @@ fn census(world: &mut World, stop: &str, first: bool) -> String {
         .collect();
     cells_line.sort();
     let _ = writeln!(more, "- Cells loaded: {}", cells_line.join(", "));
+    if first && let Some(table) = crate::spawn_costs::table(world) {
+        let _ = writeln!(more, "\nZone spawn slices (main thread):\n\n{table}");
+    }
     if let Some(list) = features["features"].as_array() {
         let mut list: Vec<_> = list
             .iter()

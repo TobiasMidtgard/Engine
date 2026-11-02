@@ -21,6 +21,8 @@ use crate::zones::Zone;
 use engine::prelude::*;
 use engine::render::{MaterialRef, Vertex};
 use engine::world::physics::ColliderShape;
+use engine_vfx::demo::art::Surface;
+use engine_vfx::demo::art::materials::textures::TextureImages;
 use engine_vfx::demo::art::meshes::{self as m, Profile};
 use std::collections::HashMap;
 use std::f32::consts::{FRAC_PI_2, PI, TAU};
@@ -931,80 +933,158 @@ fn canvas(hex: u32) -> StandardMaterial {
 }
 
 /// The square: paving, wall and fountain (Particles'), then the market round it.
-pub fn spawn(commands: &mut Commands, lib: &Library, z: &Zone) {
+/// The slices the square spawns in ([`spawn`]'s `part`), a frame or more apart while it
+/// streams in.
+pub const PARTS: [&str; 4] = [
+    "showcase paving and fountain",
+    "showcase stalls",
+    "showcase maypole",
+    "showcase oaks and benches",
+];
+
+/// The square's fountain, made without the world: Particles' court fountain and the generated
+/// stone, water and bronze it is made of. Their textures took 1-3 s of the frame the square
+/// loaded in (sampled, 2026-11-02), so the square's cell makes them on a worker first
+/// (`StreamCell::built_in_steps`), as Unreal's async loading thread prepares a level's assets
+/// before the game thread adds its actors.
+pub struct Art {
+    parts: Vec<(Mesh, Surface)>,
+    looks: Vec<(Surface, StandardMaterial, TextureImages)>,
+}
+
+/// Make the fountain's meshes and materials ([`Art`]); runs off the frame.
+pub fn build_art() -> Art {
+    let prop = engine_vfx::demo::art::props::water::fountain();
+    let parts: Vec<(Mesh, Surface)> = prop
+        .parts
+        .into_iter()
+        .map(|p| (p.mesh, p.surface))
+        .collect();
+    let mut looks: Vec<(Surface, StandardMaterial, TextureImages)> = Vec::new();
+    for (_, surface) in &parts {
+        if !looks.iter().any(|(s, ..)| s == surface) {
+            let (material, images) = engine_vfx::demo::art::materials::generate(*surface, 0);
+            looks.push((*surface, material, images));
+        }
+    }
+    Art { parts, looks }
+}
+
+impl Art {
+    fn spawn(self, commands: &mut Commands, at: Transform) {
+        commands.queue(move |world: &mut World| {
+            if !world.contains_resource::<Assets<Mesh>>() {
+                return;
+            }
+            let mut made = Vec::new();
+            for (surface, material, images) in self.looks {
+                let material = engine_vfx::demo::art::materials::attach(
+                    material,
+                    images,
+                    &mut world.resource_mut::<Assets<Image>>(),
+                );
+                made.push((
+                    surface,
+                    world
+                        .resource_mut::<Assets<StandardMaterial>>()
+                        .add(material),
+                ));
+            }
+            for (mesh, surface) in self.parts {
+                let mesh = world.resource_mut::<Assets<Mesh>>().add(mesh);
+                let Some(&(_, material)) = made.iter().find(|(s, _)| *s == surface) else {
+                    continue;
+                };
+                world.spawn((at, MeshRenderer::new(mesh, material)));
+            }
+        });
+    }
+}
+
+/// Slice `part` of the square ([`PARTS`]); the fountain from `art` when it was made ahead.
+pub fn spawn(commands: &mut Commands, lib: &Library, z: &Zone, part: usize, art: &mut Option<Art>) {
     let c = z.center;
     let vm = &lib.mats.village;
-    // Paving: granite setts in concentric bands (a darker band of smaller setts between two
-    // light ones) round a polished marble middle, laid in world meters so the joints line up.
-    let cobbles = |tile: f32, tint: u32| {
-        StandardMaterial::preset(MaterialPreset::Cobblestone)
-            .with_texture_scale(tile)
-            .with_tint_hex(tint)
-    };
-    let paving = [
-        (31.0f32, cobbles(1.5, 0xf2eee8)),
-        (24.0, cobbles(1.0, 0xc4beb6)),
-        (16.0, cobbles(1.5, 0xfaf6f0)),
-        (
-            8.0,
-            StandardMaterial::preset(MaterialPreset::Marble).with_texture_scale(1.6),
-        ),
-    ];
-    for (i, (r, material)) in paving.into_iter().enumerate() {
-        commands.spawn((
-            Transform::from_translation(c + DVec3::new(0.0, 0.1 + i as f64 * 0.005, 0.0)),
-            MeshRenderer::new(
-                Shape::Cylinder {
-                    radius: r,
-                    height: 0.2,
-                    segments: 128,
-                },
-                material.with_triplanar_world(),
-            ),
-        ));
-    }
-    // Low wall round the edge, with gaps for the four roads.
+    let mut pieces = Pieces::default();
+    // The low wall's stone, also the oaks' planters.
     let wall = StandardMaterial::preset(MaterialPreset::Concrete)
         .with_tint_hex(0xe6ddd0)
         .with_triplanar();
-    for i in 0..32 {
-        let a = i as f64 / 32.0 * std::f64::consts::TAU;
-        if i % 8 == 0 {
-            continue;
+    if part == 0 {
+        // Paving: granite setts in concentric bands (a darker band of smaller setts between two
+        // light ones) round a polished marble middle, laid in world meters so the joints line up.
+        let cobbles = |tile: f32, tint: u32| {
+            StandardMaterial::preset(MaterialPreset::Cobblestone)
+                .with_texture_scale(tile)
+                .with_tint_hex(tint)
+        };
+        let paving = [
+            (31.0f32, cobbles(1.5, 0xf2eee8)),
+            (24.0, cobbles(1.0, 0xc4beb6)),
+            (16.0, cobbles(1.5, 0xfaf6f0)),
+            (
+                8.0,
+                StandardMaterial::preset(MaterialPreset::Marble).with_texture_scale(1.6),
+            ),
+        ];
+        for (i, (r, material)) in paving.into_iter().enumerate() {
+            commands.spawn((
+                Transform::from_translation(c + DVec3::new(0.0, 0.1 + i as f64 * 0.005, 0.0)),
+                MeshRenderer::new(
+                    Shape::Cylinder {
+                        radius: r,
+                        height: 0.2,
+                        segments: 128,
+                    },
+                    material.with_triplanar_world(),
+                ),
+            ));
+        }
+        // Low wall round the edge, with gaps for the four roads.
+        for i in 0..32 {
+            let a = i as f64 / 32.0 * std::f64::consts::TAU;
+            if i % 8 == 0 {
+                continue;
+            }
+            commands.spawn((
+                Transform::from_translation(c + DVec3::new(a.cos() * 31.0, 0.35, a.sin() * 31.0))
+                    .with_rotation(Quat::from_rotation_y(-(a as f32) + FRAC_PI_2)),
+                MeshRenderer::new(
+                    Shape::Cuboid {
+                        size: [6.2, 0.55, 0.6],
+                    },
+                    wall,
+                ),
+            ));
+        }
+        // A carved fountain in the middle of the marble (Particles' court fountain, a third bigger),
+        // its jets falling into the basin.
+        let fountain = 1.3;
+        let at = Transform::from_translation(c + DVec3::new(0.0, 0.2, 0.0))
+            .with_scale(Vec3::splat(fountain));
+        match art.take() {
+            // Made on a worker while the square was wanted ([`build_art`]): only the uploads
+            // are left for the frame.
+            Some(art) => art.spawn(commands, at),
+            None => engine_vfx::demo::art::spawn_prop(
+                commands,
+                "plaza.fountain",
+                at,
+                engine_vfx::demo::art::props::water::fountain,
+            ),
         }
         commands.spawn((
-            Transform::from_translation(c + DVec3::new(a.cos() * 31.0, 0.35, a.sin() * 31.0))
-                .with_rotation(Quat::from_rotation_y(-(a as f32) + FRAC_PI_2)),
-            MeshRenderer::new(
-                Shape::Cuboid {
-                    size: [6.2, 0.55, 0.6],
-                },
-                wall,
+            Transform::from_translation(
+                c + DVec3::new(
+                    0.0,
+                    0.2 + (engine_vfx::demo::art::props::water::NOZZLE * fountain) as f64,
+                    0.0,
+                ),
             ),
+            engine_vfx::ParticleEffect::new("water.fountain"),
         ));
     }
-    // A carved fountain in the middle of the marble (Particles' court fountain, a third bigger),
-    // its jets falling into the basin.
-    let fountain = 1.3;
-    engine_vfx::demo::art::spawn_prop(
-        commands,
-        "plaza.fountain",
-        Transform::from_translation(c + DVec3::new(0.0, 0.2, 0.0))
-            .with_scale(Vec3::splat(fountain)),
-        engine_vfx::demo::art::props::water::fountain,
-    );
-    commands.spawn((
-        Transform::from_translation(
-            c + DVec3::new(
-                0.0,
-                0.2 + (engine_vfx::demo::art::props::water::NOZZLE * fountain) as f64,
-                0.0,
-            ),
-        ),
-        engine_vfx::ParticleEffect::new("water.fountain"),
-    ));
 
-    let mut pieces = Pieces::default();
     let floor = c + DVec3::Y * FLOOR;
     let round = |a_deg: f64, r: f64| {
         let a = a_deg.to_radians();
@@ -1019,356 +1099,362 @@ pub fn spawn(commands: &mut Commands, lib: &Library, z: &Zone) {
     // Red glaze (smooth to matte) and copper (polished to dull), left to right as the customer
     // sees them: Rendering's roughness ladders.
     let ladder = |k: usize| (k as f32 / 6.0).max(0.05);
-    for (n, &(trade, a_deg, color)) in STALLS.iter().enumerate() {
-        let a = a_deg.to_radians();
-        let pos = round(a_deg, STALL_R);
-        let rot = Quat::from_rotation_y(facing_center(a));
-        let tf = Transform::from_translation(pos).with_rotation(rot);
-        let local = |p: Vec3| pos + (rot * p).as_dvec3();
-        let at = |p: Vec3, yaw: f32| {
-            Transform::from_translation(local(p)).with_rotation(rot * Quat::from_rotation_y(yaw))
-        };
-        pieces.add("stall_frame", stall_frame, tf, vm.timber[2], STALL_HIDE);
-        pieces.add("awning_a", || awning(false), tf, canvas(color), STALL_HIDE);
-        pieces.add("awning_b", || awning(true), tf, cream, STALL_HIDE);
+    if part == 1 {
+        for (n, &(trade, a_deg, color)) in STALLS.iter().enumerate() {
+            let a = a_deg.to_radians();
+            let pos = round(a_deg, STALL_R);
+            let rot = Quat::from_rotation_y(facing_center(a));
+            let tf = Transform::from_translation(pos).with_rotation(rot);
+            let local = |p: Vec3| pos + (rot * p).as_dvec3();
+            let at = |p: Vec3, yaw: f32| {
+                Transform::from_translation(local(p))
+                    .with_rotation(rot * Quat::from_rotation_y(yaw))
+            };
+            pieces.add("stall_frame", stall_frame, tf, vm.timber[2], STALL_HIDE);
+            pieces.add("awning_a", || awning(false), tf, canvas(color), STALL_HIDE);
+            pieces.add("awning_b", || awning(true), tf, cream, STALL_HIDE);
+            commands.spawn((
+                Transform::from_translation(pos + DVec3::Y * 1.4).with_rotation(rot),
+                NearSolid {
+                    shape: ColliderShape::Cuboid {
+                        half_extents: Vec3::new(STALL_HALF.x + 0.05, 1.4, STALL_HALF.y + 0.05),
+                    },
+                    reach: 70.0,
+                },
+            ));
+            // A lantern on the front-left post, lit.
+            let lamp = Vec3::new(-STALL_HALF.x, 1.85, STALL_HALF.y + 0.3);
+            pieces.add(
+                "lantern_cage",
+                lantern_cage,
+                at(lamp, 0.0),
+                vm.iron,
+                WARES_HIDE,
+            );
+            pieces.add(
+                "lantern_glass",
+                lantern_glass,
+                at(lamp, 0.0),
+                vm.lantern,
+                WARES_HIDE,
+            );
+            commands.spawn((
+                Transform::from_translation(local(lamp + Vec3::Y * 0.12)),
+                PointLight {
+                    color: [1.0, 0.7, 0.42],
+                    intensity_lm: 350.0,
+                    range: 7.0,
+                    radius: 0.05,
+                },
+            ));
+            let counter = |x: f32, z: f32| Vec3::new(x, COUNTER_Y, z);
+            match trade {
+                Trade::Potter => {
+                    for k in 0..7 {
+                        // Left to right as the customer sees them (from the front, −X is left).
+                        let x = -1.45 + k as f32 * 0.48;
+                        pieces.add(
+                            "jug",
+                            jug,
+                            at(counter(x, 0.6), 2.4),
+                            StandardMaterial::hex(0xa3281c).with_roughness(ladder(k)),
+                            WARES_HIDE,
+                        );
+                    }
+                    pieces.add(
+                        "earthenware",
+                        earthenware,
+                        tf,
+                        StandardMaterial::hex(0xb5653a)
+                            .with_roughness(0.85)
+                            .with_detail(0.4, 0.01),
+                        WARES_HIDE,
+                    );
+                }
+                Trade::Coppersmith => {
+                    for k in 0..7 {
+                        let x = -1.45 + k as f32 * 0.48;
+                        pieces.add(
+                            "pot",
+                            pot,
+                            at(counter(x, 0.6), 0.3 + k as f32),
+                            StandardMaterial::hex(COPPER)
+                                .with_metallic(1.0)
+                                .with_roughness(ladder(k)),
+                            WARES_HIDE,
+                        );
+                    }
+                    for x in [-1.5f32, 1.5] {
+                        pieces.add(
+                            "pan",
+                            pan,
+                            at(Vec3::new(x, FRONT_H - 0.1, STALL_HALF.y + 0.06), 0.15),
+                            StandardMaterial::hex(COPPER)
+                                .with_metallic(1.0)
+                                .with_roughness(0.4),
+                            WARES_HIDE,
+                        );
+                    }
+                    // Brass kettles on the shelf.
+                    for x in [-1.1f32, -0.2, 0.9] {
+                        pieces.add(
+                            "pot",
+                            pot,
+                            at(Vec3::new(x, 1.27, -0.72), x),
+                            StandardMaterial::hex(0xf2e8b0)
+                                .with_metallic(1.0)
+                                .with_roughness(0.35),
+                            WARES_HIDE,
+                        );
+                    }
+                }
+                Trade::Greengrocer => {
+                    // Crates tipped toward the customer.
+                    let tip = Quat::from_rotation_x(0.22);
+                    for (x, wares) in [
+                        (1.1f32, ("apples", apples as fn() -> Mesh)),
+                        (0.0, ("cabbages", cabbages as fn() -> Mesh)),
+                        (-1.1, ("pears", pears as fn() -> Mesh)),
+                    ] {
+                        let p = counter(x, 0.58) + Vec3::Y * 0.05;
+                        let t = Transform::from_translation(local(p)).with_rotation(rot * tip);
+                        pieces.add("crate", crate_box, t, painted, WARES_HIDE);
+                        pieces.add(
+                            wares.0,
+                            wares.1,
+                            t,
+                            StandardMaterial::color(1.0, 1.0, 1.0)
+                                .with_roughness(0.45)
+                                .with_subsurface(0.3),
+                            WARES_HIDE,
+                        );
+                    }
+                    for (x, yaw) in [(-0.9f32, 0.3f32), (0.6, -0.2)] {
+                        let t = at(Vec3::new(x, 0.57, -0.72), yaw);
+                        pieces.add("crate", crate_box, t, painted, WARES_HIDE);
+                        pieces.add(
+                            "onions",
+                            onions,
+                            t,
+                            StandardMaterial::color(1.0, 1.0, 1.0).with_roughness(0.6),
+                            WARES_HIDE,
+                        );
+                    }
+                }
+                Trade::Cloth => {
+                    pieces.add("drapes", drapes, tf, fabric, WARES_HIDE);
+                    // Bolts of cloth lying on the counter.
+                    for (k, hex) in [
+                        0x7a2440u32,
+                        0x2f6b62,
+                        0xd9c79a,
+                        0x3b4e7a,
+                        0xb0703a,
+                        0x5d4a6e,
+                    ]
+                    .into_iter()
+                    .enumerate()
+                    {
+                        let x = -1.35 + k as f32 * 0.54;
+                        commands.spawn((
+                            Transform::from_translation(local(counter(x, 0.55) + Vec3::Y * 0.085))
+                                .with_rotation(
+                                    rot * Quat::from_rotation_y(0.08 * (k as f32 - 2.5))
+                                        * Quat::from_rotation_x(FRAC_PI_2),
+                                ),
+                            MeshRenderer::new(
+                                Shape::Cylinder {
+                                    radius: 0.085,
+                                    height: 0.62,
+                                    segments: 20,
+                                },
+                                canvas(hex),
+                            ),
+                        ));
+                    }
+                }
+                Trade::Baker => {
+                    pieces.add("baskets", baskets, tf, painted, WARES_HIDE);
+                    pieces.add(
+                        "breads",
+                        breads,
+                        tf,
+                        StandardMaterial::color(1.0, 1.0, 1.0)
+                            .with_roughness(0.7)
+                            .with_detail(0.5, 0.008),
+                        WARES_HIDE,
+                    );
+                }
+            }
+            // By its side, a barrel or sacks and a stack of crates, turned off the stall's lines.
+            let side = if n % 2 == 0 { 1.0 } else { -1.0 };
+            let barrels = &lib.props.barrels;
+            scenery::spawn_prop(
+                commands,
+                lib,
+                &barrels[n % barrels.len()],
+                local(Vec3::new(side * (STALL_HALF.x + 0.7), 0.0, -0.3)),
+                facing_center(a) + 0.4 * side,
+                0,
+            );
+            for (k, (dx, dz, y, yaw)) in [
+                (0.75f32, 0.55f32, 0.0f32, 0.25f32),
+                (0.82, 0.5, 0.2, -0.1),
+                (0.7, 1.05, 0.0, 0.55),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                if trade == Trade::Greengrocer && k == 2 {
+                    continue;
+                }
+                pieces.add(
+                    "crate",
+                    crate_box,
+                    at(
+                        Vec3::new(-side * (STALL_HALF.x + dx), y, dz - 0.4),
+                        yaw * side,
+                    ),
+                    painted,
+                    WARES_HIDE,
+                );
+            }
+            if trade == Trade::Greengrocer || trade == Trade::Baker {
+                for (dx, dz, yaw) in [(0.3f32, 1.25f32, 0.3f32), (0.75, 1.4, 1.9)] {
+                    pieces.add(
+                        "sack",
+                        sack,
+                        at(Vec3::new(side * (STALL_HALF.x - dx), 0.0, dz), yaw),
+                        StandardMaterial::hex(0xa08a62)
+                            .with_roughness(1.0)
+                            .with_detail(0.5, 0.006),
+                        WARES_HIDE,
+                    );
+                }
+            }
+        }
+    }
+
+    if part == 2 {
+        // The maypole: the square's landmark, seen from the village's streets.
+        let (ma, mr) = MAYPOLE;
+        let foot = round(ma, mr);
+        let pole = Transform::from_translation(foot).with_rotation(Quat::from_rotation_y(0.35));
+        pieces.add(
+            "maypole_pole",
+            maypole_pole,
+            pole,
+            StandardMaterial::color(1.0, 1.0, 1.0).with_roughness(0.45),
+            f32::INFINITY,
+        );
+        pieces.add("maypole_foot", maypole_foot, pole, vm.stone, STALL_HIDE);
+        let spruce = StandardMaterial::hex(0x2c4a26)
+            .with_roughness(0.9)
+            .with_subsurface(0.4)
+            .with_detail(0.8, 0.03);
+        pieces.add("maypole_wreaths", maypole_wreaths, pole, spruce, STALL_HIDE);
+        pieces.add("maypole_crown", maypole_crown, pole, spruce, f32::INFINITY);
+        pieces.add("maypole_iron", maypole_iron, pole, vm.iron, STALL_HIDE);
+        pieces.add("maypole_signs", maypole_signs, pole, painted, STALL_HIDE);
+        pieces.add("maypole_ribbons", maypole_ribbons, pole, fabric, STALL_HIDE);
         commands.spawn((
-            Transform::from_translation(pos + DVec3::Y * 1.4).with_rotation(rot),
+            Transform::from_translation(foot + DVec3::Y * 1.5),
             NearSolid {
-                shape: ColliderShape::Cuboid {
-                    half_extents: Vec3::new(STALL_HALF.x + 0.05, 1.4, STALL_HALF.y + 0.05),
+                shape: ColliderShape::Capsule {
+                    radius: 0.5,
+                    half_height: 1.0,
                 },
                 reach: 70.0,
             },
         ));
-        // A lantern on the front-left post, lit.
-        let lamp = Vec3::new(-STALL_HALF.x, 1.85, STALL_HALF.y + 0.3);
-        pieces.add(
-            "lantern_cage",
-            lantern_cage,
-            at(lamp, 0.0),
-            vm.iron,
-            WARES_HIDE,
-        );
-        pieces.add(
-            "lantern_glass",
-            lantern_glass,
-            at(lamp, 0.0),
-            vm.lantern,
-            WARES_HIDE,
-        );
-        commands.spawn((
-            Transform::from_translation(local(lamp + Vec3::Y * 0.12)),
-            PointLight {
-                color: [1.0, 0.7, 0.42],
-                intensity_lm: 350.0,
-                range: 7.0,
-                radius: 0.05,
-            },
-        ));
-        let counter = |x: f32, z: f32| Vec3::new(x, COUNTER_Y, z);
-        match trade {
-            Trade::Potter => {
-                for k in 0..7 {
-                    // Left to right as the customer sees them (from the front, −X is left).
-                    let x = -1.45 + k as f32 * 0.48;
-                    pieces.add(
-                        "jug",
-                        jug,
-                        at(counter(x, 0.6), 2.4),
-                        StandardMaterial::hex(0xa3281c).with_roughness(ladder(k)),
-                        WARES_HIDE,
-                    );
-                }
-                pieces.add(
-                    "earthenware",
-                    earthenware,
-                    tf,
-                    StandardMaterial::hex(0xb5653a)
-                        .with_roughness(0.85)
-                        .with_detail(0.4, 0.01),
-                    WARES_HIDE,
-                );
-            }
-            Trade::Coppersmith => {
-                for k in 0..7 {
-                    let x = -1.45 + k as f32 * 0.48;
-                    pieces.add(
-                        "pot",
-                        pot,
-                        at(counter(x, 0.6), 0.3 + k as f32),
-                        StandardMaterial::hex(COPPER)
-                            .with_metallic(1.0)
-                            .with_roughness(ladder(k)),
-                        WARES_HIDE,
-                    );
-                }
-                for x in [-1.5f32, 1.5] {
-                    pieces.add(
-                        "pan",
-                        pan,
-                        at(Vec3::new(x, FRONT_H - 0.1, STALL_HALF.y + 0.06), 0.15),
-                        StandardMaterial::hex(COPPER)
-                            .with_metallic(1.0)
-                            .with_roughness(0.4),
-                        WARES_HIDE,
-                    );
-                }
-                // Brass kettles on the shelf.
-                for x in [-1.1f32, -0.2, 0.9] {
-                    pieces.add(
-                        "pot",
-                        pot,
-                        at(Vec3::new(x, 1.27, -0.72), x),
-                        StandardMaterial::hex(0xf2e8b0)
-                            .with_metallic(1.0)
-                            .with_roughness(0.35),
-                        WARES_HIDE,
-                    );
-                }
-            }
-            Trade::Greengrocer => {
-                // Crates tipped toward the customer.
-                let tip = Quat::from_rotation_x(0.22);
-                for (x, wares) in [
-                    (1.1f32, ("apples", apples as fn() -> Mesh)),
-                    (0.0, ("cabbages", cabbages as fn() -> Mesh)),
-                    (-1.1, ("pears", pears as fn() -> Mesh)),
-                ] {
-                    let p = counter(x, 0.58) + Vec3::Y * 0.05;
-                    let t = Transform::from_translation(local(p)).with_rotation(rot * tip);
-                    pieces.add("crate", crate_box, t, painted, WARES_HIDE);
-                    pieces.add(
-                        wares.0,
-                        wares.1,
-                        t,
-                        StandardMaterial::color(1.0, 1.0, 1.0)
-                            .with_roughness(0.45)
-                            .with_subsurface(0.3),
-                        WARES_HIDE,
-                    );
-                }
-                for (x, yaw) in [(-0.9f32, 0.3f32), (0.6, -0.2)] {
-                    let t = at(Vec3::new(x, 0.57, -0.72), yaw);
-                    pieces.add("crate", crate_box, t, painted, WARES_HIDE);
-                    pieces.add(
-                        "onions",
-                        onions,
-                        t,
-                        StandardMaterial::color(1.0, 1.0, 1.0).with_roughness(0.6),
-                        WARES_HIDE,
-                    );
-                }
-            }
-            Trade::Cloth => {
-                pieces.add("drapes", drapes, tf, fabric, WARES_HIDE);
-                // Bolts of cloth lying on the counter.
-                for (k, hex) in [
-                    0x7a2440u32,
-                    0x2f6b62,
-                    0xd9c79a,
-                    0x3b4e7a,
-                    0xb0703a,
-                    0x5d4a6e,
-                ]
-                .into_iter()
-                .enumerate()
-                {
-                    let x = -1.35 + k as f32 * 0.54;
-                    commands.spawn((
-                        Transform::from_translation(local(counter(x, 0.55) + Vec3::Y * 0.085))
-                            .with_rotation(
-                                rot * Quat::from_rotation_y(0.08 * (k as f32 - 2.5))
-                                    * Quat::from_rotation_x(FRAC_PI_2),
-                            ),
-                        MeshRenderer::new(
-                            Shape::Cylinder {
-                                radius: 0.085,
-                                height: 0.62,
-                                segments: 20,
-                            },
-                            canvas(hex),
-                        ),
-                    ));
-                }
-            }
-            Trade::Baker => {
-                pieces.add("baskets", baskets, tf, painted, WARES_HIDE);
-                pieces.add(
-                    "breads",
-                    breads,
-                    tf,
-                    StandardMaterial::color(1.0, 1.0, 1.0)
-                        .with_roughness(0.7)
-                        .with_detail(0.5, 0.008),
-                    WARES_HIDE,
-                );
-            }
-        }
-        // By its side, a barrel or sacks and a stack of crates, turned off the stall's lines.
-        let side = if n % 2 == 0 { 1.0 } else { -1.0 };
-        let barrels = &lib.props.barrels;
-        scenery::spawn_prop(
-            commands,
-            lib,
-            &barrels[n % barrels.len()],
-            local(Vec3::new(side * (STALL_HALF.x + 0.7), 0.0, -0.3)),
-            facing_center(a) + 0.4 * side,
-            0,
-        );
-        for (k, (dx, dz, y, yaw)) in [
-            (0.75f32, 0.55f32, 0.0f32, 0.25f32),
-            (0.82, 0.5, 0.2, -0.1),
-            (0.7, 1.05, 0.0, 0.55),
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            if trade == Trade::Greengrocer && k == 2 {
-                continue;
-            }
-            pieces.add(
-                "crate",
-                crate_box,
-                at(
-                    Vec3::new(-side * (STALL_HALF.x + dx), y, dz - 0.4),
-                    yaw * side,
-                ),
-                painted,
-                WARES_HIDE,
-            );
-        }
-        if trade == Trade::Greengrocer || trade == Trade::Baker {
-            for (dx, dz, yaw) in [(0.3f32, 1.25f32, 0.3f32), (0.75, 1.4, 1.9)] {
-                pieces.add(
-                    "sack",
-                    sack,
-                    at(Vec3::new(side * (STALL_HALF.x - dx), 0.0, dz), yaw),
-                    StandardMaterial::hex(0xa08a62)
-                        .with_roughness(1.0)
-                        .with_detail(0.5, 0.006),
-                    WARES_HIDE,
-                );
-            }
-        }
     }
-
-    // The maypole: the square's landmark, seen from the village's streets.
-    let (ma, mr) = MAYPOLE;
-    let foot = round(ma, mr);
-    let pole = Transform::from_translation(foot).with_rotation(Quat::from_rotation_y(0.35));
-    pieces.add(
-        "maypole_pole",
-        maypole_pole,
-        pole,
-        StandardMaterial::color(1.0, 1.0, 1.0).with_roughness(0.45),
-        f32::INFINITY,
-    );
-    pieces.add("maypole_foot", maypole_foot, pole, vm.stone, STALL_HIDE);
-    let spruce = StandardMaterial::hex(0x2c4a26)
-        .with_roughness(0.9)
-        .with_subsurface(0.4)
-        .with_detail(0.8, 0.03);
-    pieces.add("maypole_wreaths", maypole_wreaths, pole, spruce, STALL_HIDE);
-    pieces.add("maypole_crown", maypole_crown, pole, spruce, f32::INFINITY);
-    pieces.add("maypole_iron", maypole_iron, pole, vm.iron, STALL_HIDE);
-    pieces.add("maypole_signs", maypole_signs, pole, painted, STALL_HIDE);
-    pieces.add("maypole_ribbons", maypole_ribbons, pole, fabric, STALL_HIDE);
-    commands.spawn((
-        Transform::from_translation(foot + DVec3::Y * 1.5),
-        NearSolid {
-            shape: ColliderShape::Capsule {
-                radius: 0.5,
-                half_height: 1.0,
-            },
-            reach: 70.0,
-        },
-    ));
-
-    // The village oak in its bed of grass, a round bench under it.
-    let oak = round(135.0, 21.0);
-    pieces.add(
-        "tree_curb",
-        tree_curb,
-        Transform::from_translation(oak),
-        vm.stone,
-        STALL_HIDE,
-    );
-    commands.spawn((
-        Transform::from_translation(oak + DVec3::Y * 0.03),
-        MeshRenderer::new(
-            Shape::Cylinder {
-                radius: 2.8,
-                height: 0.12,
-                segments: 64,
-            },
-            StandardMaterial::preset(MaterialPreset::Grass).with_triplanar_world(),
-        ),
-    ));
-    pieces.add(
-        "round_bench",
-        round_bench,
-        Transform::from_translation(oak).with_rotation(Quat::from_rotation_y(0.2)),
-        painted,
-        WARES_HIDE,
-    );
-    let t = lib
-        .trees_of(crate::meshgen::TreeKind::Oak)
-        .nth(1)
-        .expect("oak");
-    scenery::spawn_tree(commands, t, oak, 0.9, 1.2);
-    commands.spawn((
-        Transform::from_translation(oak + DVec3::Y * 1.5),
-        NearSolid {
-            shape: ColliderShape::Capsule {
-                radius: 1.45,
-                half_height: 0.1,
-            },
-            reach: 70.0,
-        },
-    ));
-    // Oaks in planters at the other three corners.
-    for k in [0, 2, 3] {
-        let a = (k as f64 + 0.5) * 90.0;
-        let p = round(a, 22.0);
+    if part == 3 {
+        // The village oak in its bed of grass, a round bench under it.
+        let oak = round(135.0, 21.0);
+        pieces.add(
+            "tree_curb",
+            tree_curb,
+            Transform::from_translation(oak),
+            vm.stone,
+            STALL_HIDE,
+        );
         commands.spawn((
-            Transform::from_translation(p + DVec3::Y * 0.4),
+            Transform::from_translation(oak + DVec3::Y * 0.03),
             MeshRenderer::new(
                 Shape::Cylinder {
-                    radius: 2.0,
-                    height: 0.8,
-                    segments: 24,
+                    radius: 2.8,
+                    height: 0.12,
+                    segments: 64,
                 },
-                wall,
+                StandardMaterial::preset(MaterialPreset::Grass).with_triplanar_world(),
             ),
         ));
+        pieces.add(
+            "round_bench",
+            round_bench,
+            Transform::from_translation(oak).with_rotation(Quat::from_rotation_y(0.2)),
+            painted,
+            WARES_HIDE,
+        );
         let t = lib
             .trees_of(crate::meshgen::TreeKind::Oak)
-            .nth(k)
+            .nth(1)
             .expect("oak");
-        scenery::spawn_tree(commands, t, p + DVec3::Y * 0.6, a.to_radians() as f32, 0.8);
-    }
-    // Benches facing the fountain, and bollards at each road's way in.
-    for a_deg in [30.0f64, -150.0, 100.0] {
-        let a = a_deg.to_radians();
-        scenery::spawn_prop(
-            commands,
-            lib,
-            &lib.props.bench,
-            round(a_deg, 12.5),
-            facing_center(a),
-            2,
-        );
-    }
-    for road in 0..4 {
-        for side in [-1.0f64, 1.0] {
-            let a = road as f64 * 90.0 + side * 4.5;
-            pieces.add(
-                "bollard",
-                bollard,
-                Transform::from_translation(round(a, 30.0)),
-                vm.stone,
-                WARES_HIDE,
+        scenery::spawn_tree(commands, t, oak, 0.9, 1.2);
+        commands.spawn((
+            Transform::from_translation(oak + DVec3::Y * 1.5),
+            NearSolid {
+                shape: ColliderShape::Capsule {
+                    radius: 1.45,
+                    half_height: 0.1,
+                },
+                reach: 70.0,
+            },
+        ));
+        // Oaks in planters at the other three corners.
+        for k in [0, 2, 3] {
+            let a = (k as f64 + 0.5) * 90.0;
+            let p = round(a, 22.0);
+            commands.spawn((
+                Transform::from_translation(p + DVec3::Y * 0.4),
+                MeshRenderer::new(
+                    Shape::Cylinder {
+                        radius: 2.0,
+                        height: 0.8,
+                        segments: 24,
+                    },
+                    wall,
+                ),
+            ));
+            let t = lib
+                .trees_of(crate::meshgen::TreeKind::Oak)
+                .nth(k)
+                .expect("oak");
+            scenery::spawn_tree(commands, t, p + DVec3::Y * 0.6, a.to_radians() as f32, 0.8);
+        }
+        // Benches facing the fountain, and bollards at each road's way in.
+        for a_deg in [30.0f64, -150.0, 100.0] {
+            let a = a_deg.to_radians();
+            scenery::spawn_prop(
+                commands,
+                lib,
+                &lib.props.bench,
+                round(a_deg, 12.5),
+                facing_center(a),
+                2,
             );
+        }
+        for road in 0..4 {
+            for side in [-1.0f64, 1.0] {
+                let a = road as f64 * 90.0 + side * 4.5;
+                pieces.add(
+                    "bollard",
+                    bollard,
+                    Transform::from_translation(round(a, 30.0)),
+                    vm.stone,
+                    WARES_HIDE,
+                );
+            }
         }
     }
     pieces.spawn(commands);

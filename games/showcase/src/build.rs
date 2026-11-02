@@ -288,9 +288,23 @@ const STEPS: [Step; 13] = [
         let lib = b.lib.clone().expect(LIB);
         for cell in zones::zone_cells(&b.land, only.as_ref()) {
             let (lib, land, key) = (lib.clone(), b.land.clone(), cell.key);
-            let mut streamed = StreamCell::new(key, cell.center, cell.radius, move |world| {
-                with_commands(world, |c| zones::spawn_cell(c, &lib, &land, seed, key));
-            })
+            // A slice a step, so the streaming budget spreads a zone's parts over frames.
+            let parts = zones::cell_parts(key);
+            // The showcase's own slow, world-free content is made on a worker first.
+            let mut streamed = StreamCell::built_in_steps(
+                key,
+                cell.center,
+                cell.radius,
+                move || zones::build_cell(key),
+                move |world, art, part| {
+                    let t = std::time::Instant::now();
+                    with_commands(world, |c| {
+                        zones::spawn_cell(c, &lib, &land, seed, key, part, art)
+                    });
+                    crate::spawn_costs::note(world, key, parts[part], t.elapsed());
+                    part + 1 >= parts.len()
+                },
+            )
             .load_within(if staged { ZONE_LOAD_M } else { f64::INFINITY });
             if cell.keep_loaded {
                 streamed = streamed.keep_loaded();
@@ -321,10 +335,8 @@ const STEPS: [Step; 13] = [
     }),
     ("nearby zones", "Waking the zones nearby", |world, b| {
         // The exe opens once the zones around the camera are in (the streaming plugin wakes
-        // one a frame); the rest wake as the player gets near them.
-        if !world.contains_resource::<Staged>() {
-            return true;
-        }
+        // one a frame); the rest wake as the player gets near them. Tours and tools wait for
+        // every zone, the ones whose art is still being made on a worker too.
         let cells = world.resource::<StreamedCells>();
         let waking = cells.waking().next();
         b.detail = waking

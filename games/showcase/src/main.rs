@@ -44,6 +44,7 @@ mod rock_textures;
 mod rocks;
 mod route;
 mod scenery;
+mod spawn_costs;
 mod texgen;
 mod tour;
 mod tower;
