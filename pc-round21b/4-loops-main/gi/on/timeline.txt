@@ -1,0 +1,12 @@
+22:53:32.465Z     0,04  mode gi quality ultra spec ''; idle before start 72 510 s; HEAD aac391d4
+22:53:33.081Z     0,65  started: showcase.exe --fly --profile --quality ultra
+22:53:50.188Z    17,76  window visible: client 1600x900, window 1616x939 at (26,26), maximized False
+22:53:50.206Z    17,78  bridge connected
+22:53:50.524Z    18,09  world built
+22:53:55.942Z    23,51  goto plaza: {"id":1,"jsonrpc":"2.0","result":{"place":"plaza","position":[10.0,4.5,16.0]}}
+22:54:01.150Z    28,72  WINDOW start (5-25 s after the jump)
+22:54:20.508Z    48,08  WINDOW end
+22:54:21.722Z    49,29  shot plaza: {"id":4,"jsonrpc":"2.0","result":{"height":900,"path":"screenshots/r21b/plaza.png","width":1600}}
+22:54:25.119Z    52,69  sampler job: Completed
+22:54:25.126Z    52,70  killing the game
+22:54:27.810Z    55,38  done

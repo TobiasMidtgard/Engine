@@ -1,0 +1,19 @@
+{
+    "round":  "",
+    "stop":  "s4_gi_on",
+    "fps":  10.508846922949946,
+    "low1":  6.2214538957085326,
+    "slowest_half_s_ms":  160.73413333333312,
+    "worst":  142.1,
+    "frame_ms":  95.157918592964833,
+    "samples":  38,
+    "profiles":  3,
+    "sys_busy":  "96.9",
+    "one_at_a_time":  "79.4",
+    "render":  "48.21 (max 54.46)",
+    "gpu_ms":  "26.5",
+    "gpu_busy":  28.315789473684209,
+    "cores":  "1.08",
+    "alone":  "render::render_system 48.21, softbody::step_bodies 2.89, water::boat_air_system 2.40, smoke::step 2.36, movement::step_movers 2.25",
+    "perf":  "10.7 fps (93.5 ms, worst 154.7); render CPU 49.8 ms (acquiring the window image 0.0 ms), everything else 43.7 ms; GPU 26.5 ms; GPU memory 7.06 GB in use, 7.38 GB reserved; 2338 draws, 11.2 M triangles"
+}

@@ -1,0 +1,60 @@
+22:18:37.108Z     0,04  mode loops quality ultra spec 'overview,plaza,market,forest,lake,fortress,field,orbit'; idle before start 70 414 s; HEAD aac391d4
+22:18:37.726Z     0,65  started: showcase.exe --loops overview,plaza,market,forest,lake,fortress,field,orbit --profile --quality ultra
+22:18:54.908Z    17,83  window visible: client 1600x900, window 1616x939 at (26,26), maximized False
+22:18:54.926Z    17,85  bridge connected
+22:18:55.221Z    18,15  world built
+22:18:55.539Z    18,47  after build: working set 4 963 MB, private 7 091 MB; system free 32 986 of 65 277 MB
+22:18:55.543Z    18,47  window: client 1600x900, window 1616x939 at (26,26), maximized False
+22:19:02.981Z    25,91  frames running
+22:19:06.878Z    29,80  loop line: 1 overview
+22:19:27.187Z    50,11  shot 02-plaza: {"id":2,"jsonrpc":"2.0","result":{"height":900,"path":"screenshots/r21b/02-plaza.png","width":1600}}
+22:19:31.966Z    54,89  loop line: 1 plaza
+22:19:52.223Z    75,15  shot 03-market: {"id":4,"jsonrpc":"2.0","result":{"height":900,"path":"screenshots/r21b/03-market.png","width":1600}}
+22:19:56.969Z    79,90  loop line: 1 market
+22:20:17.241Z   100,17  shot 04-forest: {"id":6,"jsonrpc":"2.0","result":{"height":900,"path":"screenshots/r21b/04-forest.png","width":1600}}
+22:20:22.241Z   105,17  loop line: 1 forest
+22:20:42.487Z   125,41  shot 05-lake: {"id":8,"jsonrpc":"2.0","result":{"height":900,"path":"screenshots/r21b/05-lake.png","width":1600}}
+22:20:47.480Z   130,41  loop line: 1 lake
+22:21:07.746Z   150,67  shot 06-fortress: {"id":10,"jsonrpc":"2.0","result":{"height":900,"path":"screenshots/r21b/06-fortress.png","width":1600}}
+22:21:12.557Z   155,48  loop line: 1 fortress
+22:21:32.833Z   175,76  shot 07-field: {"id":12,"jsonrpc":"2.0","result":{"height":900,"path":"screenshots/r21b/07-field.png","width":1600}}
+22:21:37.646Z   180,57  loop line: 1 field
+22:21:57.904Z   200,83  shot 08-orbit: {"id":14,"jsonrpc":"2.0","result":{"height":900,"path":"screenshots/r21b/08-orbit.png","width":1600}}
+22:22:02.961Z   205,89  loop line: 1 orbit
+22:22:28.006Z   230,93  loop line: 2 overview
+22:22:53.160Z   256,09  loop line: 2 plaza
+22:23:18.254Z   281,18  loop line: 2 market
+22:23:43.340Z   306,27  loop line: 2 forest
+22:24:08.520Z   331,45  loop line: 2 lake
+22:24:33.633Z   356,56  loop line: 2 fortress
+22:24:58.719Z   381,65  loop line: 2 field
+22:25:23.811Z   406,74  loop line: 2 orbit
+22:25:48.934Z   431,86  loop line: 3 overview
+22:26:14.170Z   457,10  loop line: 3 plaza
+22:26:39.342Z   482,27  loop line: 3 market
+22:27:04.448Z   507,37  loop line: 3 forest
+22:27:29.528Z   532,45  loop line: 3 lake
+22:27:54.708Z   557,63  loop line: 3 fortress
+22:28:19.847Z   582,77  loop line: 3 field
+22:28:45.027Z   607,95  loop line: 3 orbit
+22:29:09.986Z   632,91  loop line: 4 overview
+22:29:35.088Z   658,01  loop line: 4 plaza
+22:30:00.290Z   683,22  loop line: 4 market
+22:30:25.543Z   708,47  loop line: 4 forest
+22:30:50.655Z   733,58  loop line: 4 lake
+22:31:15.710Z   758,64  loop line: 4 fortress
+22:31:40.965Z   783,89  loop line: 4 field
+22:32:06.042Z   808,97  loop line: 4 orbit
+22:32:31.106Z   834,03  loop line: 5 overview
+22:32:56.207Z   859,13  loop line: 5 plaza
+22:33:21.281Z   884,21  loop line: 5 market
+22:33:46.458Z   909,38  loop line: 5 forest
+22:34:11.577Z   934,50  loop line: 5 lake
+22:34:36.814Z   959,74  loop line: 5 fortress
+22:35:01.961Z   984,89  loop line: 5 field
+22:35:27.174Z  1010,10  loop line: 5 orbit
+22:35:27.177Z  1010,10  all rounds done
+22:35:29.363Z  1012,29  end: working set 855 MB, private 872 MB; system free 38 465 of 65 277 MB
+22:35:29.389Z  1012,31  sampler job: Completed
+22:35:29.395Z  1012,32  game exited by itself, code 0
+22:35:32.329Z  1015,25  done
