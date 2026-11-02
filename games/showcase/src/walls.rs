@@ -60,6 +60,11 @@ pub struct WallSegment {
     pub core_end: Mesh,
     /// The core stone-colored, the whole wall from afar.
     pub core_far: Mesh,
+    /// The segment's shadow: a closed block the wall's full height and nearly its width, cast
+    /// in the stones' place (a few triangles instead of their hundred thousand, as Horizon's
+    /// vegetation casts from separate meshes; at the 30 m and more the stones show from, a
+    /// shadow-map texel is wider than their bumps).
+    pub shadow: Mesh,
 }
 
 /// A wall head's stones.
@@ -213,6 +218,13 @@ pub fn segment(seed: u64) -> WallSegment {
             Vec3::new(0.33, 0.32, 0.3),
             Vec3::new(0.4, 0.39, 0.36),
             CoreEnds::Closed,
+        ),
+        shadow: prism(
+            Vec3::ONE,
+            Vec3::ONE,
+            CoreEnds::Closed,
+            SHADOW_INSET,
+            HEIGHT - SHADOW_INSET,
         ),
     }
 }
@@ -521,10 +533,17 @@ enum CoreEnds {
 /// The core: a tapered prism just inside the stone faces, from the foot to just under the
 /// shortest coping stones' tops, with its sides `side` and its top `top` colored.
 fn core(side: Vec3, top: Vec3, ends: CoreEnds) -> Mesh {
-    let mut mb = Mb::new(true);
     // Deep enough that the rounded stones, not the core, fill the face.
-    let inset = CORE_INSET;
-    let y1 = BODY + 0.08;
+    prism(side, top, ends, CORE_INSET, BODY + 0.08)
+}
+
+/// How far inside the stones' faces the shadow block stands, m.
+const SHADOW_INSET: f32 = 0.04;
+
+/// A tapered block along the segment, `inset` inside the wall's faces, from the foot up to
+/// `y1`.
+fn prism(side: Vec3, top: Vec3, ends: CoreEnds, inset: f32, y1: f32) -> Mesh {
+    let mut mb = Mb::new(true);
     let x0 = -SEGMENT * 0.5;
     let x1 = SEGMENT * 0.5
         - if ends == CoreEnds::UnderHead {
@@ -590,6 +609,15 @@ mod tests {
         assert!(tris(&s.near_end) < near, "end {}", tris(&s.near_end));
         assert!(tris(&s.core) <= 12, "core {}", tris(&s.core));
         assert!(tris(&s.core_far) <= 12, "far core {}", tris(&s.core_far));
+        // The shadow block: a few triangles, standing the wall's full height.
+        assert!(tris(&s.shadow) <= 12, "shadow {}", tris(&s.shadow));
+        let top = s
+            .shadow
+            .vertices
+            .iter()
+            .map(|v| v.position[1])
+            .fold(f32::MIN, f32::max);
+        assert!(top > HEIGHT - 0.1, "shadow top {top}");
         for v in &s.near.vertices {
             let p = Vec3::from(v.position);
             assert!(p.x.abs() < SEGMENT * 0.5 + 0.3, "{p:?}");

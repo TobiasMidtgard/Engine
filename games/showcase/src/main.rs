@@ -34,6 +34,7 @@ mod landscape;
 mod loops;
 mod meshgen;
 mod pack;
+mod paddock;
 mod paint_cache;
 mod placeholders;
 mod places;

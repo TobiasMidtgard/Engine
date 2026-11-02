@@ -576,7 +576,7 @@ fn fnv(h: u64, bytes: &[u8]) -> u64 {
 
 /// Bump when the showcase changes what its zones spawn, so far-view proxies kept on disk from
 /// an older build aren't shown for them.
-const ZONE_CONTENT_REVISION: u64 = 2;
+const ZONE_CONTENT_REVISION: u64 = 3;
 
 /// The version a cell's far-view proxy is kept on disk under (`engine::hlod`): the world's
 /// seed, the cell, the commit a release was built from (CI sets `GITHUB_SHA`; a local build
@@ -606,7 +606,10 @@ pub fn spawn_cell(commands: &mut Commands, lib: &Library, land: &Landscape, seed
     match key {
         "plaza" => crate::plaza::spawn(commands, lib, z),
         "market" => engine_ui::demo::spawn_demo(commands, z.center),
-        "paddock" => engine_anim::demo::spawn_demo(commands, z.center),
+        "paddock" => {
+            engine_anim::demo::spawn_demo(commands, z.center);
+            crate::paddock::spawn(commands, z.center);
+        }
         "physics" => engine_physics::demo::spawn_demo(commands, z.center),
         "yard" => {
             engine_softbody::demo::spawn_demo(commands, z.center);

@@ -13,7 +13,7 @@ use crate::texgen::VillageMats;
 use crate::village::{self, Part, PropKind, PropSpot};
 use crate::zones::{ZONES, zone};
 use engine::prelude::*;
-use engine::render::{Displacement, DitherFade};
+use engine::render::{Displacement, DitherFade, ShadowOnly};
 use engine::world::physics::{Collider, ColliderShape};
 use std::sync::Arc;
 
@@ -97,6 +97,8 @@ pub struct WallHandles {
     pub core: Handle<Mesh>,
     pub core_end: Handle<Mesh>,
     pub core_far: Handle<Mesh>,
+    /// What the segment casts its shadow with (the stones and the core cast none).
+    pub shadow: Handle<Mesh>,
     /// Where `near`'s and `near_end`'s stones are, for the hero stones.
     pub placed: Arc<[crate::walls::Placed]>,
     pub placed_end: Arc<[crate::walls::Placed]>,
@@ -361,6 +363,7 @@ fn add_parts(
             core: meshes.add(w.core),
             core_end: meshes.add(w.core_end),
             core_far: meshes.add(w.core_far),
+            shadow: meshes.add(w.shadow),
             placed: w.placed.into(),
             placed_end: w.placed_end.into(),
         })
@@ -2570,16 +2573,19 @@ pub fn spawn_walls(
         };
         commands.spawn((
             tf,
-            MeshRenderer::new(near, stone),
+            MeshRenderer::new(near, stone).without_shadows(),
             Lod::hide_beyond(near, WALL_STONES),
             HideWithin(HERO_IN),
             WallHeroes::new(placed),
         ));
         commands.spawn((
             tf,
-            MeshRenderer::new(core, stone),
+            MeshRenderer::new(core, stone).without_shadows(),
             Lod::swap_then_hide(core, w.core_far, WALL_MID, f32::INFINITY),
         ));
+        // The wall's shadow, from a block of a few triangles (the hero stones up close cast
+        // their own over it).
+        commands.spawn((tf, MeshRenderer::new(w.shadow, stone), ShadowOnly));
         let mid_y = (HEIGHT - SINK) * 0.5;
         commands.spawn((
             Transform::from_translation(seg.pos + (seg.rot * Vec3::Y * mid_y).as_dvec3())
