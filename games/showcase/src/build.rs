@@ -377,7 +377,7 @@ const ZONE_LOAD_M: f64 = 100.0;
 const MODULE_WAIT_S: f32 = 60.0;
 
 /// Modules still baking art or settling their zones on other threads.
-const MODULES_LOADING: [fn(&World) -> bool; 8] = [
+const MODULES_LOADING: [fn(&World) -> bool; 9] = [
     engine_smoke::demo::loading,
     engine_fire::demo::loading,
     |world| {
@@ -394,6 +394,13 @@ const MODULES_LOADING: [fn(&World) -> bool; 8] = [
             .is_some_and(|f| !f.is_ready())
     },
     uploading,
+    // The ground in view: its patches and the valley's paint map (playtest 2026-11-01 item 1,
+    // the ground changing under the start screen).
+    |world| {
+        world
+            .get_resource::<Uploads>()
+            .is_some_and(|u| u.ground_settling())
+    },
     // Mesh, impostor and material pipelines compiling on workers, so the walk doesn't hitch
     // on first sight.
     |world| {
@@ -425,6 +432,12 @@ pub struct Uploads {
     pending: f64,
     low: f64,
     low_at: std::time::Instant,
+    /// The terrain's patches still missing or building in view.
+    ground: f64,
+    /// The valley's paint map is still baking (on workers; it always ends).
+    paint_baking: bool,
+    ground_low: f64,
+    ground_low_at: std::time::Instant,
 }
 
 impl Default for Uploads {
@@ -433,6 +446,10 @@ impl Default for Uploads {
             pending: 0.0,
             low: 0.0,
             low_at: std::time::Instant::now(),
+            ground: 0.0,
+            paint_baking: false,
+            ground_low: 0.0,
+            ground_low_at: std::time::Instant::now(),
         }
     }
 }
@@ -442,19 +459,32 @@ impl Uploads {
     fn loading(&self) -> bool {
         self.pending > 0.0 && self.low_at.elapsed().as_secs_f32() < UPLOAD_STALL_S
     }
+
+    /// The ground in view is still filling in and still getting closer to done.
+    fn ground_settling(&self) -> bool {
+        self.paint_baking
+            || (self.ground > 0.0 && self.ground_low_at.elapsed().as_secs_f32() < UPLOAD_STALL_S)
+    }
 }
 
 /// Seconds without the pending uploads going down before the wait for them ends.
 const UPLOAD_STALL_S: f32 = 2.0;
 
-/// Follow `render.pending_upload_mb` for [`uploading`].
+/// Follow `render.pending_upload_mb` for [`uploading`], and the terrain's work in view.
 pub fn watch_uploads(
     diagnostics: Option<Res<engine::core::diagnostics::Diagnostics>>,
     mut u: ResMut<Uploads>,
 ) {
-    let mb = diagnostics
-        .and_then(|d| d.get("render.pending_upload_mb"))
-        .unwrap_or(0.0);
+    let get = |k: &str| diagnostics.as_ref().and_then(|d| d.get(k)).unwrap_or(0.0);
+    let ground = get("terrain.patches_missing") + get("terrain.patches_building");
+    u.ground = ground;
+    u.paint_baking = get("terrain.paint_map_baking") > 0.0;
+    // Any patch finished (or a new low) counts as movement; work asked for anew doesn't.
+    if ground < u.ground_low || u.ground_low == 0.0 {
+        u.ground_low = ground;
+        u.ground_low_at = std::time::Instant::now();
+    }
+    let mb = get("render.pending_upload_mb");
     u.pending = mb;
     // Rising (new work asked for) or falling by a megabyte counts as movement.
     if mb < u.low - 1.0 || mb > u.low + 1.0 {

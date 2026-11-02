@@ -5,10 +5,14 @@
 //! altitude, speed, frame and render times, the terrain's patches, uploads, RAM, exposure);
 //! at the end the log lists each leg's frames, the hitches (frames over 33 ms, with their
 //! slowest render steps) and RAM. A picture is saved at the end of each leg and at a few
-//! heights on the way up, to catch a black screen high up.
+//! heights on the way up, to catch a black screen high up, and on the first frames after the
+//! world is built, to catch the ground changing as it settles (item 1).
 //!
-//! Headless runs step time by 1/60 s, so the camera flies as it would at 60 fps and the
-//! per-frame costs are comparable; in a window it flies in real time.
+//! `--route up` flies only the climb to orbit, with pictures at more heights (item 30).
+//!
+//! Headless runs (`--headless`) step time by 1/60 s, so the camera flies as it would at 60 fps
+//! and the per-frame costs are comparable; in a window it flies in real time. `--exe` keeps the
+//! exe's loading and start screens (the first pictures then show what the start screen opens on).
 
 use crate::camera::{self, ShowcaseCamera};
 use crate::places;
@@ -19,7 +23,11 @@ use std::fmt::Write as _;
 /// A frame longer than this is a hitch (two 60 Hz frames).
 const HITCH_MS: f64 = 33.0;
 /// Heights on the way up where a picture is saved (m).
-const SHOTS_UP_M: [f64; 4] = [20_000.0, 60_000.0, 150_000.0, 300_000.0];
+const SHOTS_UP_M: [f64; 9] = [
+    5_000.0, 10_000.0, 20_000.0, 40_000.0, 60_000.0, 100_000.0, 150_000.0, 200_000.0, 300_000.0,
+];
+/// Frames after the start where a picture is saved (the first leg).
+const SHOTS_FIRST: [u32; 7] = [1, 2, 4, 8, 16, 32, 64];
 
 #[derive(Clone, Copy)]
 enum Do {
@@ -38,7 +46,31 @@ enum Do {
     Fly { secs: f32, sprint: bool },
 }
 
-const LEGS: [(&str, Do); 13] = [
+type Leg = (&'static str, Do);
+
+/// `--route up`: straight up from the village to orbit, looking down at it.
+const UP_LEGS: [Leg; 4] = [
+    ("village", Do::Wait(1.0)),
+    (
+        "face down",
+        Do::Face {
+            pitch: -0.6,
+            turn: 0.0,
+        },
+    ),
+    (
+        "climb to orbit",
+        Do::Rise {
+            to_m: 400_000.0,
+            ascend: 1.0,
+            forward: 0.0,
+            sprint: false,
+        },
+    ),
+    ("orbit", Do::Wait(1.0)),
+];
+
+const LEGS: [Leg; 13] = [
     ("village", Do::Wait(8.0)),
     (
         "face up",
@@ -137,13 +169,17 @@ struct Row {
     upload_mb: f64,
     ram_mb: f64,
     ev100: f64,
+    ev100_metered: f64,
     /// The frame's slowest render steps, for the hitch list.
     slowest: String,
 }
 
 #[derive(Resource)]
 struct Route {
+    legs: &'static [Leg],
     out_dir: String,
+    /// Frames since the route started.
+    frames: u32,
     leg: usize,
     /// Time in the current leg (s).
     in_leg: f32,
@@ -155,7 +191,8 @@ struct Route {
     done_frames: u32,
 }
 
-pub fn install(app: &mut App) {
+/// `up` flies [`UP_LEGS`]; anything else the whole route.
+pub fn install(app: &mut App, which: Option<&str>) {
     if app.world.resource::<EngineConfig>().headless {
         app.world
             .resource_mut::<Time>()
@@ -165,8 +202,14 @@ pub fn install(app: &mut App) {
     }
     let out_dir = "screenshots/route".to_string();
     let _ = std::fs::create_dir_all(&out_dir);
+    let legs: &'static [Leg] = match which {
+        Some("up") => &UP_LEGS,
+        _ => &LEGS,
+    };
     app.insert_resource(Route {
+        legs,
         out_dir,
+        frames: 0,
         leg: 0,
         in_leg: 0.0,
         t: 0.0,
@@ -209,7 +252,7 @@ fn run(world: &mut World) {
         let r = world.resource::<Route>();
         (r.leg, r.in_leg)
     };
-    let Some(&(name, step)) = LEGS.get(leg) else {
+    let Some(&(name, step)) = world.resource::<Route>().legs.get(leg) else {
         finish(world);
         return;
     };
@@ -264,6 +307,10 @@ fn run(world: &mut World) {
     let shot = {
         let mut r = world.resource_mut::<Route>();
         let mut shot = None;
+        r.frames += 1;
+        if SHOTS_FIRST.contains(&r.frames) {
+            shot = Some(format!("{}/first_{:03}.png", r.out_dir, r.frames));
+        }
         if matches!(step, Do::Rise { ascend, .. } if ascend > 0.0)
             && r.shots_up < SHOTS_UP_M.len()
             && altitude >= SHOTS_UP_M[r.shots_up]
@@ -332,6 +379,7 @@ fn record(world: &mut World, pos: DVec3, altitude: f64, dt: f32, real_ms: f64) {
         upload_mb: get("render.upload_mb"),
         ram_mb: get(PROCESS_RAM_MB),
         ev100: get("render.ev100"),
+        ev100_metered: get("render.ev100_metered"),
         slowest,
     };
     let mut r = world.resource_mut::<Route>();
@@ -341,7 +389,7 @@ fn record(world: &mut World, pos: DVec3, altitude: f64, dt: f32, real_ms: f64) {
         .map_or(0.0, |p| (pos - p).length() / dt.max(1e-6) as f64);
     r.last_pos = Some(pos);
     r.t += dt as f64;
-    let (t, leg) = (r.t, r.leg.min(LEGS.len() - 1));
+    let (t, leg) = (r.t, r.leg.min(r.legs.len() - 1));
     r.rows.push(Row {
         t,
         leg,
@@ -363,14 +411,14 @@ fn finish(world: &mut World) {
     let r = world.resource::<Route>();
     let mut csv = String::from(
         "t_s,leg,altitude_m,speed_mps,frame_ms,render_cpu_ms,terrain_ms,patches_missing,\
-         patches_building,patches_built,patches_resident,upload_mb,ram_mb,ev100\n",
+         patches_building,patches_built,patches_resident,upload_mb,ram_mb,ev100,ev100_metered\n",
     );
     for x in &r.rows {
         let _ = writeln!(
             csv,
-            "{:.3},{},{:.0},{:.0},{:.2},{:.2},{:.2},{},{},{},{},{:.2},{:.0},{:.2}",
+            "{:.3},{},{:.0},{:.0},{:.2},{:.2},{:.2},{},{},{},{},{:.2},{:.0},{:.2},{:.2}",
             x.t,
-            LEGS[x.leg].0,
+            r.legs[x.leg].0,
             x.altitude_m,
             x.speed,
             x.frame_ms,
@@ -382,7 +430,8 @@ fn finish(world: &mut World) {
             x.resident,
             x.upload_mb,
             x.ram_mb,
-            x.ev100
+            x.ev100,
+            x.ev100_metered
         );
     }
     let path = format!("{}/route.csv", r.out_dir);
@@ -391,7 +440,7 @@ fn finish(world: &mut World) {
     }
     // Each leg: frames, frame times, hitches, the terrain's worst, RAM.
     let mut report = String::from("route summary\n");
-    for (i, (name, _)) in LEGS.iter().enumerate() {
+    for (i, (name, _)) in r.legs.iter().enumerate() {
         let rows: Vec<&Row> = r.rows.iter().filter(|x| x.leg == i).collect();
         if rows.is_empty() {
             continue;
@@ -416,7 +465,7 @@ fn finish(world: &mut World) {
         let _ = writeln!(
             report,
             "  {:.2} s {} at {:.0} m, {:.0} m/s: {:.1} ms (render CPU {:.1}; {})",
-            x.t, LEGS[x.leg].0, x.altitude_m, x.speed, x.frame_ms, x.render_cpu_ms, x.slowest
+            x.t, r.legs[x.leg].0, x.altitude_m, x.speed, x.frame_ms, x.render_cpu_ms, x.slowest
         );
     }
     let ram: Vec<f64> = r

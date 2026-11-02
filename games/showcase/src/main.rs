@@ -9,6 +9,7 @@
 //! cargo run -p showcase --release -- --headless --film overview,plaza,falls --secs 6
 //! cargo run -p showcase --release -- --headless --film footsteps --follow "Trail hiker" --secs 60
 //! cargo run -p showcase --release -- --route --profile  # the free-flight route (route.rs)
+//! cargo run -p showcase --release -- --route up           # only the climb to orbit (route.rs)
 //! ```
 //!
 //! `--film` saves frames and sound for a video (see `film.rs`); `--follow` films an entity, found
@@ -206,7 +207,7 @@ fn main() {
         loops::install(&mut app, spec);
     }
     if args.iter().any(|a| a == "--route") {
-        route::install(&mut app);
+        route::install(&mut app, value("--route"));
     }
     if args.iter().any(|a| a == "--tour") {
         tour::install(&mut app, value("--tour"));

@@ -2188,6 +2188,12 @@ impl RenderFeature for TerrainFeature {
             d.set("terrain.patch_latency_ms", latency_ms);
             d.set("terrain.detail_boost", max_boost);
             if let Some(gpu) = &self.gpu {
+                // The hand-made ground's paint map is still baking: until it lands, that ground
+                // is painted from its patches' vertices only (a loading screen waits for it).
+                d.set(
+                    "terrain.paint_map_baking",
+                    gpu.paint_bake.is_some() as u32 as f64,
+                );
                 d.set("terrain.night_pages", gpu.night.resident() as f64);
             }
         }
