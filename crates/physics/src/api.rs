@@ -303,8 +303,9 @@ pub(crate) fn register(app: &mut App) {
     )
     .register_api(
         "physics.proving_ground.replay",
-        "Restart a proving ground station now (tower, pile, dominoes, ragdolls, wrecking_ball, \
-         seesaw, paddle_wheel, bridge, turntable, balls), or every station with {}.",
+        "Restart a proving ground station at the next step (tower, pile, dominoes, ragdolls, \
+         wrecking_ball, seesaw, paddle_wheel, bridge, turntable, balls, ...), or every station \
+         with {}: one is rebuilt a step, in turn.",
         r#"{"station": "dominoes"}"#,
         crate::demo::replay_api,
     );

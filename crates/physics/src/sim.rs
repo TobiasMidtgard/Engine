@@ -812,6 +812,9 @@ pub struct Simulation {
     pub resting: EntityHashSet,
     /// Bodies held asleep until the ground under them loads ([`crate::grounding`]).
     pub ungrounded: EntityHashSet,
+    /// Held bodies (`resting`, `ungrounded`) whose gravity is off while held, given back once
+    /// they are let go (`step::hold_resting`).
+    pub weightless: EntityHashSet,
 }
 
 /// Rapier hooks: drop the contacts listed in [`Simulation::no_contact`], and keep round bodies
@@ -1156,7 +1159,35 @@ impl Simulation {
     pub fn forget_body(&mut self, entity: Entity) -> Vec<Entity> {
         self.resting.remove(&entity);
         self.ungrounded.remove(&entity);
+        self.weightless.remove(&entity);
         self.remove_body(entity)
+    }
+
+    /// Stop holding `entities` asleep ([`Simulation::resting`]) and wake them where they are,
+    /// so what hung mid-air falls on (a paused station going on).
+    pub fn release(&mut self, entities: &[Entity]) {
+        for e in entities {
+            if !self.resting.remove(e) {
+                continue;
+            }
+            let Some((region, handle)) = self
+                .bodies
+                .get(e)
+                .map(|b| (b.region, b.handle))
+                .or_else(|| self.characters.get(e).map(|c| (c.region, c.body)))
+            else {
+                continue;
+            };
+            if let Some(rb) = self
+                .regions
+                .get_mut(region as usize)
+                .and_then(|r| r.as_mut())
+                .and_then(|r| r.world.bodies.get_mut(handle))
+                && !rb.is_fixed()
+            {
+                rb.wake_up(true);
+            }
+        }
     }
 
     /// Give a body the mass properties its `RigidBody` asks for: `mass_kg` alone scales the

@@ -535,7 +535,7 @@ pub(crate) fn physics_sync(world: &mut World, mut q: Local<Option<StepQueries>>)
     }
 
     crate::grounding::hold_ungrounded(&mut sim, &foci);
-    if !sim.resting.is_empty() || !sim.ungrounded.is_empty() {
+    if !sim.resting.is_empty() || !sim.ungrounded.is_empty() || !sim.weightless.is_empty() {
         hold_resting(&mut sim);
     }
     drop(_part);
@@ -1759,15 +1759,40 @@ fn idle(r: &crate::sim::Region) -> bool {
 /// neighbours, from gameplay writing to them, or bodies made since they were told, go back to
 /// sleep, still. Every one is looked at, not only Rapier's active ones: a body woken since the
 /// last step joins them only as the next one starts, and wakes all it touches.
+///
+/// Held bodies weigh nothing until let go. `RigidBody::sleep` only flags a body: Rapier puts
+/// a whole contact island to sleep, once every body in it has been still long enough, so held
+/// bodies in an island with something awake (a paused station beside a running one, or
+/// touching it) stayed in the step. Each step gravity gave them 0.16 m/s, too fast to count as
+/// still, and what the solver did against it was undone with the velocity here: they sank
+/// through the slab, 4 m in 7 s (the Galton board's balls, the rockfall's rocks), and never
+/// slept. Weightless and stopped, they count as still, so their island sleeps when nothing
+/// else in it moves, and stays where it is when something does.
 fn hold_resting(sim: &mut Simulation) {
     let Simulation {
         resting,
         ungrounded,
+        weightless,
         bodies,
         characters,
         regions,
         ..
     } = sim;
+    // Let go since the last step: their weight back.
+    weightless.retain(|e| {
+        if resting.contains(e) || ungrounded.contains(e) {
+            return true;
+        }
+        if let Some(b) = bodies.get(e)
+            && let Some(rb) = regions
+                .get_mut(b.region as usize)
+                .and_then(|r| r.as_mut())
+                .and_then(|r| r.world.bodies.get_mut(b.handle))
+        {
+            rb.set_gravity_scale(b.desc.gravity_scale, true);
+        }
+        false
+    });
     let mut held = 0;
     for e in resting.iter().chain(ungrounded.iter()) {
         // (A character told to rest stands still: its body sleeps too.)
@@ -1782,14 +1807,25 @@ fn hold_resting(sim: &mut Simulation) {
             continue;
         };
         // `get`, not `get_mut`: Rapier re-checks every body taken mutably.
-        if r.world.bodies.get(handle).is_none_or(|rb| rb.is_sleeping()) {
+        // (Rebuilt bodies, moved to another region, weigh again.)
+        let Some(rb) = r.world.bodies.get(handle) else {
+            continue;
+        };
+        let weighs = rb.is_dynamic() && rb.gravity_scale() != 0.0 && bodies.contains_key(e);
+        if !weighs && rb.is_sleeping() {
             continue;
         }
         if let Some(rb) = r.world.bodies.get_mut(handle) {
-            rb.set_linvel(Vec3::ZERO, false);
-            rb.set_angvel(Vec3::ZERO, false);
-            rb.sleep();
-            held += 1;
+            if weighs {
+                rb.set_gravity_scale(0.0, false);
+                weightless.insert(*e);
+            }
+            if !rb.is_sleeping() {
+                rb.set_linvel(Vec3::ZERO, false);
+                rb.set_angvel(Vec3::ZERO, false);
+                rb.sleep();
+                held += 1;
+            }
         }
     }
     if held > 0 && crate::report::wanted() {
@@ -1827,6 +1863,8 @@ type Scaled = (RigidBodyHandle, f32, f32, [f32; 2]);
 fn time_scaled(sim: &Simulation, rid: RegionId, special: &[Entity]) -> Vec<Scaled> {
     special
         .iter()
+        // (Not held ones: their gravity stays off, `hold_resting`.)
+        .filter(|e| !sim.weightless.contains(*e))
         .filter_map(|e| sim.bodies.get(e))
         .filter(|b| {
             b.region == rid && b.kind == BodyKind::Dynamic && (b.time_factor - 1.0).abs() > 1e-3
@@ -1992,13 +2030,14 @@ fn wide_pool() -> Option<&'static Arc<rayon::ThreadPool>> {
     static POOL: std::sync::OnceLock<Option<Arc<rayon::ThreadPool>>> = std::sync::OnceLock::new();
     POOL.get_or_init(|| {
         let threads = std::thread::available_parallelism().map_or(1, |n| n.get());
-        // Rapier's solver is laid out for 8 workers, and its stage barriers stop paying past
-        // about 16; leave the rest of the machine to the frame's other systems.
-        // (`PHYSICS_WIDE_THREADS=n` sets it, for measuring.)
+        // Rapier's solver is laid out for 8 workers, and past them its stage barriers cost
+        // more than they share: on the 32-thread RTX 5080 PC the yard bench's mean step was
+        // 3.95 ms on 8, 4.03 on 16 and 4.78 on 24 (round 21b). The rest of the machine is left
+        // to the frame's other systems. (`PHYSICS_WIDE_THREADS=n` sets it, for measuring.)
         let n = std::env::var("PHYSICS_WIDE_THREADS")
             .ok()
             .and_then(|v| v.parse().ok())
-            .unwrap_or((threads / 2).clamp(1, 16));
+            .unwrap_or((threads / 2).clamp(1, 8));
         (n > 1)
             .then(|| {
                 rayon::ThreadPoolBuilder::new()

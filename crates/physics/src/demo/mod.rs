@@ -58,7 +58,8 @@ use engine_world::physics::{
     JointMotor, RigidBody, Velocity,
 };
 use engine_world::{
-    FocusPoints, Interact, Interactable, SurfaceId, SurfaceMaterial, SurfaceMaterials, WorldShift,
+    FocusPoints, Interact, Interactable, SimulationFocus, SurfaceId, SurfaceMaterial,
+    SurfaceMaterials, WorldShift,
 };
 
 /// Size of the concrete yard (x, z), meters.
@@ -432,6 +433,11 @@ pub struct ProvingGround {
     resting: [bool; Station::ALL.len()],
     /// Stations someone came near since they were built. One nobody has seen rests at once.
     seen: [bool; Station::ALL.len()],
+    /// Stations paused because nobody near looks their way: held asleep where they are, their
+    /// cycle clock stopped, and let go again, not rebuilt, once someone does ([`watched`]).
+    paused: [bool; Station::ALL.len()],
+    /// World seconds each station has gone unwatched while running.
+    unwatched: [f64; Station::ALL.len()],
     /// Stations not built yet: with a renderer they are built one a step, so the yard's first
     /// frame doesn't make every station's art at once ([`finish_building`]).
     unbuilt: [bool; Station::ALL.len()],
@@ -762,6 +768,8 @@ fn build(world: &mut World, origin: DVec3) {
         running: [0.0; Station::ALL.len()],
         resting: [false; Station::ALL.len()],
         seen: [false; Station::ALL.len()],
+        paused: [false; Station::ALL.len()],
+        unwatched: [0.0; Station::ALL.len()],
         unbuilt: [true; Station::ALL.len()],
         replay: true,
     });
@@ -900,6 +908,8 @@ fn build_station(world: &mut World, ground: Entity, station: Station) {
         g.running[station as usize] = 0.0;
         g.resting[station as usize] = false;
         g.seen[station as usize] = false;
+        g.paused[station as usize] = false;
+        g.unwatched[station as usize] = 0.0;
         g.unbuilt[station as usize] = false;
     }
 }
@@ -920,6 +930,45 @@ const STATION_WAKE_M: f64 = 55.0;
 /// `EActivation::DontActivate`, Unreal's `bStartAwake = false`).
 const FAR_REST_SECS: f64 = 8.0;
 
+/// Within this of a focus a station runs whichever way the focus faces, meters: what is around
+/// you, heard and turned to in a moment.
+const STATION_NEAR_M: f64 = 30.0;
+/// Half the angle of a focus's view (its −Z) in which a station counts as watched, degrees:
+/// wider than a 16:9 or 21:9 screen at the showcase's 55° field of view (43° and 52° across),
+/// so a station turning into view is already running.
+const VIEW_HALF_DEG: f64 = 70.0;
+/// How far a station reaches from its middle, meters, for the view test.
+const STATION_REACH_M: f64 = 10.0;
+/// World seconds a station runs on once nobody watches it, so a glance away doesn't pause it.
+const UNWATCHED_PAUSE_SECS: f64 = 3.0;
+
+/// Does anyone watch `at`: a focus within [`STATION_NEAR_M`], or one within
+/// [`STATION_REST_M`] facing it? Between those a station nobody looks at pauses (round 21: the
+/// forest's overview camera, 54 m off and facing away, kept the whole yard stepping at 27 ms a
+/// step). Engines tick what is off screen less (Unreal's significance manager and
+/// `OnlyTickPoseWhenRendered`, Unity's `CullingGroup`); the proving ground stops it outright,
+/// as nobody can tell it stood still while they looked away. A focus without a direction (a
+/// tool setting `FocusPoints` alone) watches every way.
+fn watched(foci: &[(DVec3, Option<Vec3>)], at: DVec3) -> bool {
+    let half = VIEW_HALF_DEG.to_radians();
+    foci.iter().any(|&(p, forward)| {
+        let to = at - p;
+        let d = to.length();
+        if d <= STATION_NEAR_M {
+            return true;
+        }
+        if d > STATION_REST_M {
+            return false;
+        }
+        let Some(f) = forward else {
+            return true;
+        };
+        // The angle off the view's middle, less what the station's reach covers at that range.
+        let off = f.as_dvec3().angle_between(to / d);
+        off - (STATION_REACH_M / d).min(1.0).asin() <= half
+    })
+}
+
 /// Stations due to replay, stations to rest and the ones of those nobody has seen, found by
 /// [`tick_stations`] for [`replay_stations`].
 #[derive(Resource, Default)]
@@ -928,6 +977,9 @@ pub(crate) struct StationWork {
     rest: Vec<(Entity, Station)>,
     /// Resting before their drop played out: settled off the frame.
     unsettled: Vec<(Entity, DVec3, Station)>,
+    /// Stations to pause (nobody near looks their way) and to let go again.
+    pause: Vec<(Entity, Station)>,
+    resume: Vec<(Entity, Station)>,
 }
 
 /// Follow a [`WorldShift`] (a floating-origin move, a re-homing, a trip to another body):
@@ -970,6 +1022,8 @@ pub(crate) fn stations_have_work(
 ) -> bool {
     !work.due.is_empty()
         || !work.rest.is_empty()
+        || !work.pause.is_empty()
+        || !work.resume.is_empty()
         || grounds.iter().any(|g| g.unbuilt.contains(&true))
         || settling.is_some_and(|s| s.any_done())
 }
@@ -980,11 +1034,25 @@ pub(crate) fn stations_have_work(
 pub(crate) fn tick_stations(
     time: Option<Res<FixedTime>>,
     focus: Option<Res<FocusPoints>>,
+    viewers: Query<&GlobalTransform, With<SimulationFocus>>,
     mut grounds: Query<(Entity, &mut ProvingGround)>,
     mut work: ResMut<StationWork>,
 ) {
     let dt = time.map_or(0.0, |t| t.world_step_secs());
     let focus = focus.map(|f| f.points.clone()).unwrap_or_default();
+    // Where each focus looks; `FocusPoints` alone (no focus entities) look every way.
+    let mut foci: Vec<(DVec3, Option<Vec3>)> = viewers
+        .iter()
+        .map(|g| {
+            (
+                g.translation(),
+                Some(g.forward()).filter(|f| *f != Vec3::ZERO),
+            )
+        })
+        .collect();
+    if foci.is_empty() {
+        foci = focus.iter().map(|p| (*p, None)).collect();
+    }
     // (No focus, as in tests and tools: everything runs.)
     let nearest = |at: DVec3| {
         focus
@@ -1002,23 +1070,48 @@ pub(crate) fn tick_stations(
             if g.unbuilt[i] {
                 continue;
             }
-            let d = nearest(g.origin + station.base());
+            let at = g.origin + station.base();
+            let d = nearest(at);
+            // (No focus: everything runs, watched.)
+            let looked_at = focus.is_empty() || watched(&foci, at);
             if g.resting[i] {
-                if d < STATION_WAKE_M {
+                if d < STATION_WAKE_M && looked_at {
                     work.due.push((e, station));
                 }
                 continue;
             }
-            g.running[i] += dt;
-            g.seen[i] |= !focus.is_empty() && d <= STATION_REST_M;
-            let t = g.running[i];
             let cycle = station.cycle_secs();
+            if g.paused[i] {
+                if d > STATION_REST_M {
+                    // Everyone left: it rests as one nobody is near (its bodies are held already).
+                    g.paused[i] = false;
+                    g.resting[i] = true;
+                    work.rest.push((e, station));
+                    if !g.seen[i]
+                        || g.running[i] < cycle.unwrap_or(f64::INFINITY).min(FAR_REST_SECS)
+                    {
+                        work.unsettled.push((e, g.origin, station));
+                    }
+                } else if looked_at {
+                    g.paused[i] = false;
+                    g.unwatched[i] = 0.0;
+                    work.resume.push((e, station));
+                }
+                continue;
+            }
+            g.running[i] += dt;
+            g.seen[i] |= !focus.is_empty() && looked_at;
+            g.unwatched[i] = if looked_at { 0.0 } else { g.unwatched[i] + dt };
+            let t = g.running[i];
             if d > STATION_REST_M {
                 g.resting[i] = true;
                 work.rest.push((e, station));
                 if !g.seen[i] || t < cycle.unwrap_or(f64::INFINITY).min(FAR_REST_SECS) {
                     work.unsettled.push((e, g.origin, station));
                 }
+            } else if g.unwatched[i] >= UNWATCHED_PAUSE_SECS {
+                g.paused[i] = true;
+                work.pause.push((e, station));
             } else if cycle.is_some_and(|c| t >= c) {
                 work.due.push((e, station));
                 if crate::report::wanted() {
@@ -1037,16 +1130,68 @@ pub(crate) fn tick_stations(
 pub(crate) fn replay_stations(world: &mut World) {
     settle::finish(world);
     build_unbuilt(world, 1);
-    let (due, rest, unsettled) = {
+    let (due, rest, unsettled, pause, resume) = {
         let mut work = world.resource_mut::<StationWork>();
         (
             std::mem::take(&mut work.due),
             std::mem::take(&mut work.rest),
             std::mem::take(&mut work.unsettled),
+            std::mem::take(&mut work.pause),
+            std::mem::take(&mut work.resume),
         )
     };
-    for (e, station) in due {
+    // One station a step: a station is up to 500 new bodies (the Galton board), and all of
+    // them waking together (someone walking in, the tour arriving) stepped 1,492 new bodies
+    // at once, 48 ms on the RTX 5080 PC. The rest wait their turn, a step each.
+    let mut due = due.into_iter();
+    if let Some((e, station)) = due.next() {
         build_station(world, e, station);
+    }
+    let mut waiting: Vec<(Entity, Station)> = Vec::new();
+    for d in due {
+        if !waiting.contains(&d) {
+            waiting.push(d);
+        }
+    }
+    if !waiting.is_empty() {
+        let mut work = world.resource_mut::<StationWork>();
+        // (`tick_stations` may have asked again for one still waiting.)
+        work.due.retain(|d| !waiting.contains(d));
+        waiting.append(&mut work.due);
+        work.due = waiting;
+    }
+    if !pause.is_empty() || !resume.is_empty() {
+        let mut held = Vec::new();
+        let mut freed = Vec::new();
+        for (e, p) in world
+            .query_filtered::<(Entity, &StationPart), Or<(With<RigidBody>, With<CharacterController>)>>()
+            .iter(world)
+        {
+            if pause.contains(&(p.ground, p.station)) {
+                held.push(e);
+            } else if resume.contains(&(p.ground, p.station)) {
+                freed.push(e);
+            }
+        }
+        if crate::report::wanted() {
+            let names = |l: &[(Entity, Station)]| {
+                l.iter()
+                    .map(|(_, s)| s.key())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+            engine_core::log::info!(
+                "proving ground: paused, nobody looking: [{}] ({} bodies); going on: [{}] ({} bodies)",
+                names(&pause),
+                held.len(),
+                names(&resume),
+                freed.len()
+            );
+        }
+        let shared = world.resource::<crate::SharedSimulation>().0.clone();
+        let mut sim = shared.write();
+        sim.resting.extend(held);
+        sim.release(&freed);
     }
     if !rest.is_empty() {
         let bodies: Vec<Entity> = world
@@ -1130,9 +1275,14 @@ pub(crate) fn replay_api(
         .query_filtered::<Entity, With<ProvingGround>>()
         .iter(world)
         .collect();
+    // Queued, built one a step (`replay_stations`): every station at once was 1,492 new
+    // bodies in one step, 48 ms on the RTX 5080 PC.
+    let mut work = world.resource_mut::<StationWork>();
     for &g in &grounds {
         for &s in &stations {
-            build_station(world, g, s);
+            if !work.due.contains(&(g, s)) {
+                work.due.push((g, s));
+            }
         }
     }
     Ok(serde_json::json!({

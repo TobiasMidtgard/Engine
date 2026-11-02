@@ -68,8 +68,9 @@ fn main() {
     let mut steps = Vec::with_capacity(frames);
     let mut walls = Vec::with_capacity(frames);
     let mut peak = PhysicsStats::default();
+    let mut slowest = (0, PhysicsStats::default());
     let start = Instant::now();
-    for _ in 0..frames {
+    for frame in 0..frames {
         let t = Instant::now();
         app.update();
         walls.push(t.elapsed().as_secs_f64() * 1e3);
@@ -77,6 +78,9 @@ fn main() {
         steps.push(st.step_ms);
         if st.awake > peak.awake {
             peak = *st;
+        }
+        if st.step_ms > slowest.1.step_ms {
+            slowest = (frame, *st);
         }
     }
     let total = start.elapsed().as_secs_f64();
@@ -100,5 +104,11 @@ fn main() {
     println!(
         "yard_bench: busiest step: {} awake of {} bodies, {} regions, {} touching pairs, {:.2} ms",
         peak.awake, peak.bodies, peak.regions, peak.touching, peak.step_ms
+    );
+    let (frame, s) = slowest;
+    println!(
+        "yard_bench: slowest step: frame {frame}, {:.2} ms, {} awake, {} regions, {} touching \
+         pairs, {} fine, {} substeps",
+        s.step_ms, s.awake, s.regions, s.touching, s.fine_awake, s.substeps
     );
 }

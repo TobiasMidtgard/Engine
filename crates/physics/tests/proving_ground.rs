@@ -897,3 +897,55 @@ fn pressing_use_at_a_station_replays_it() {
     let off = hopper(&mut app) - full;
     assert!(off.length() < 0.05, "the hopper wasn't refilled: {off:?}");
 }
+
+/// A camera 50 m off looking away (the forest's overview, round 21: the yard stepped at 27 ms
+/// behind it) pauses the stations: their bodies sleep where they are, and don't sink through
+/// the slab while held (they did, 4 m in 7 s, whenever something awake shared their island:
+/// the Galton board's balls beside running stations, on main too). Turned round, the same
+/// stations go on, not rebuilt, so nobody sees them start over.
+#[test]
+fn stations_nobody_looks_at_pause_and_go_on_when_looked_at() {
+    let mut app = app();
+    // (The budget's levels follow wall time: off, so the test doesn't.)
+    app.world
+        .resource_mut::<engine_physics::PhysicsSettings>()
+        .step_budget_ms = None;
+    let focus = app
+        .world
+        .spawn((
+            // Facing +Z, away from the yard.
+            Transform::from_xyz(0.0, 20.0, 55.0).with_rotation(
+                engine_core::math::Quat::from_rotation_y(std::f32::consts::PI),
+            ),
+            SimulationFocus::default(),
+        ))
+        .id();
+    app.update_n(10 * 60);
+    let away = *app.world.resource::<PhysicsStats>();
+    assert!(away.awake < 20, "the yard ran behind the camera: {away:?}");
+    let sunk = app
+        .world
+        .query::<(&Transform, &RigidBody)>()
+        .iter(&app.world)
+        .filter(|(t, rb)| rb.kind == BodyKind::Dynamic && t.translation.y < -0.2)
+        .count();
+    assert_eq!(sunk, 0, "bodies sank through the yard while held");
+    let ball = named(&mut app, "Seesaw ball");
+    assert_eq!(ball.len(), 1);
+    // Face the yard.
+    app.world.get_mut::<Transform>(focus).unwrap().rotation = engine_core::math::Quat::IDENTITY;
+    let mut woke = 0;
+    for _ in 0..2 * 60 {
+        app.update();
+        woke = woke.max(app.world.resource::<PhysicsStats>().awake);
+    }
+    assert!(
+        woke > 300,
+        "the yard didn't go on when looked at: {woke} awake"
+    );
+    assert_eq!(
+        named(&mut app, "Seesaw ball"),
+        ball,
+        "the seesaw was rebuilt instead of going on"
+    );
+}
