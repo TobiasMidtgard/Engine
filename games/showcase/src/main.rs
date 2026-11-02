@@ -8,6 +8,7 @@
 //! cargo run -p showcase --release -- --headless --tour paddock_car,yard   # loads 2 zones
 //! cargo run -p showcase --release -- --headless --film overview,plaza,falls --secs 6
 //! cargo run -p showcase --release -- --headless --film footsteps --follow "Trail hiker" --secs 60
+//! cargo run -p showcase --release -- --route --profile  # the free-flight route (route.rs)
 //! ```
 //!
 //! `--film` saves frames and sound for a video (see `film.rs`); `--follow` films an entity, found
@@ -37,6 +38,7 @@ mod planet;
 mod plaza;
 mod rock_textures;
 mod rocks;
+mod route;
 mod scenery;
 mod texgen;
 mod tour;
@@ -149,7 +151,7 @@ fn main() {
         app.insert_resource(zones);
     }
     let headless = app.world.resource::<EngineConfig>().headless;
-    let scripted = ["--tour", "--film", "--fly", "--loops"]
+    let scripted = ["--tour", "--film", "--fly", "--loops", "--route"]
         .iter()
         .any(|f| args.iter().any(|a| a == f));
     // `--exe` builds the way the exe does (a step a frame, then the start screen) in a headless
@@ -199,6 +201,9 @@ fn main() {
     }
     if let Some(spec) = value("--loops") {
         loops::install(&mut app, spec);
+    }
+    if args.iter().any(|a| a == "--route") {
+        route::install(&mut app);
     }
     if args.iter().any(|a| a == "--tour") {
         tour::install(&mut app, value("--tour"));

@@ -124,7 +124,7 @@ fn level_at(gravity: &Gravity, p: DVec3) -> Quat {
 
 /// Height above the ground under `p` (the nearest body's radius from far up, its terrain down
 /// low while world +Y is up there).
-fn altitude(gravity: &Gravity, ground: &engine::world::Ground, level: Quat, p: DVec3) -> f64 {
+pub fn altitude(gravity: &Gravity, ground: &engine::world::Ground, level: Quat, p: DVec3) -> f64 {
     let Some((center, radius)) = nearest_body(gravity, p) else {
         return p.y;
     };
