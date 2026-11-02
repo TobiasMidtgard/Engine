@@ -1,0 +1,60 @@
+22:58:56.888Z     0,04  mode tour quality ultra spec 'overview,plaza,village_garden,market,paddock,forest,meadow,lake,falls,falls_cliff,walk_path,fortress,field,weather,airfield,spaceport'; idle before start 72 834 s; HEAD aac391d4
+22:58:57.489Z     0,64  started: showcase.exe --tour overview,plaza,village_garden,market,paddock,forest,meadow,lake,falls,falls_cliff,walk_path,fortress,field,weather,airfield,spaceport --profile --quality ultra  env SHOWCASE_CENSUS=census.md
+22:59:10.641Z    13,79  window visible: client 1600x900, window 1616x939 at (286,286), maximized False
+22:59:10.659Z    13,81  world built
+22:59:10.962Z    14,11  after build: working set 3 533 MB, private 5 550 MB; system free 34 720 of 65 277 MB
+22:59:10.981Z    14,13  log: tour 1/16: The valley
+22:59:41.179Z    44,33  mem: working set 5 690 MB, private 10 294 MB; system free 32 648 of 65 277 MB
+23:00:11.653Z    74,80  mem: working set 5 858 MB, private 12 155 MB; system free 32 601 of 65 277 MB
+23:00:42.031Z   105,18  mem: working set 4 939 MB, private 11 490 MB; system free 33 496 of 65 277 MB
+23:01:12.281Z   135,43  mem: working set 4 892 MB, private 11 529 MB; system free 33 514 of 65 277 MB
+23:01:42.590Z   165,74  mem: working set 5 139 MB, private 12 034 MB; system free 33 689 of 65 277 MB
+23:02:12.910Z   196,06  mem: working set 5 362 MB, private 12 513 MB; system free 33 474 of 65 277 MB
+23:02:43.279Z   226,43  mem: working set 5 664 MB, private 12 815 MB; system free 33 181 of 65 277 MB
+23:03:13.744Z   256,89  mem: working set 6 020 MB, private 13 172 MB; system free 32 821 of 65 277 MB
+23:03:44.035Z   287,19  mem: working set 6 361 MB, private 13 517 MB; system free 32 496 of 65 277 MB
+23:04:14.369Z   317,52  mem: working set 6 524 MB, private 13 681 MB; system free 32 314 of 65 277 MB
+23:04:44.739Z   347,89  mem: working set 6 525 MB, private 13 681 MB; system free 32 305 of 65 277 MB
+23:05:15.123Z   378,27  mem: working set 6 448 MB, private 13 605 MB; system free 32 378 of 65 277 MB
+23:05:45.360Z   408,51  mem: working set 6 177 MB, private 13 334 MB; system free 32 650 of 65 277 MB
+23:06:15.924Z   439,07  mem: working set 6 102 MB, private 13 259 MB; system free 32 712 of 65 277 MB
+23:06:46.208Z   469,36  mem: working set 6 009 MB, private 13 161 MB; system free 32 801 of 65 277 MB
+23:07:16.473Z   499,62  mem: working set 5 943 MB, private 13 096 MB; system free 32 845 of 65 277 MB
+23:07:46.949Z   530,10  mem: working set 5 767 MB, private 12 928 MB; system free 33 005 of 65 277 MB
+23:08:17.291Z   560,44  mem: working set 5 550 MB, private 12 713 MB; system free 33 219 of 65 277 MB
+23:08:47.568Z   590,72  mem: working set 5 210 MB, private 12 371 MB; system free 33 545 of 65 277 MB
+23:09:18.049Z   621,20  mem: working set 4 908 MB, private 12 069 MB; system free 33 727 of 65 277 MB
+23:09:24.285Z   627,43  log:   waited 612 s for meshes' clusters, terrain patches and foliage (28 not ready)
+23:09:48.427Z   651,58  mem: working set 4 608 MB, private 11 773 MB; system free 34 022 of 65 277 MB
+23:10:18.693Z   681,84  mem: working set 4 277 MB, private 11 463 MB; system free 34 386 of 65 277 MB
+23:10:32.412Z   695,56  log:   waited 68 s for meshes' clusters, terrain patches and foliage (0 not ready)
+23:10:32.707Z   695,86  log:   exposure EV100 12.8 (metered 14.3)
+23:10:33.002Z   696,15  log: tour 2/16: The market square and the village
+23:10:49.099Z   712,25  mem: working set 4 632 MB, private 11 837 MB; system free 34 008 of 65 277 MB
+23:11:19.385Z   742,53  mem: working set 5 571 MB, private 12 752 MB; system free 33 069 of 65 277 MB
+23:11:49.756Z   772,91  mem: working set 6 369 MB, private 13 553 MB; system free 32 281 of 65 277 MB
+23:12:20.197Z   803,35  mem: working set 7 237 MB, private 14 421 MB; system free 31 351 of 65 277 MB
+23:12:50.693Z   833,84  mem: working set 7 803 MB, private 14 987 MB; system free 30 809 of 65 277 MB
+23:13:21.131Z   864,28  mem: working set 8 154 MB, private 15 337 MB; system free 30 461 of 65 277 MB
+23:13:51.453Z   894,60  mem: working set 8 522 MB, private 15 714 MB; system free 30 084 of 65 277 MB
+23:14:21.701Z   924,85  mem: working set 8 907 MB, private 16 099 MB; system free 29 682 of 65 277 MB
+23:14:52.213Z   955,36  mem: working set 9 313 MB, private 16 505 MB; system free 29 262 of 65 277 MB
+23:15:22.564Z   985,71  mem: working set 9 725 MB, private 16 917 MB; system free 28 818 of 65 277 MB
+23:15:53.060Z  1016,21  mem: working set 10 142 MB, private 17 335 MB; system free 28 401 of 65 277 MB
+23:16:23.482Z  1046,63  mem: working set 10 572 MB, private 17 765 MB; system free 27 672 of 65 277 MB
+23:16:53.965Z  1077,11  mem: working set 11 007 MB, private 18 200 MB; system free 27 332 of 65 277 MB
+23:17:24.494Z  1107,64  mem: working set 11 445 MB, private 18 639 MB; system free 27 253 of 65 277 MB
+23:17:54.725Z  1137,87  mem: working set 11 881 MB, private 19 076 MB; system free 26 820 of 65 277 MB
+23:18:25.001Z  1168,15  mem: working set 12 324 MB, private 19 519 MB; system free 26 358 of 65 277 MB
+23:18:55.260Z  1198,41  mem: working set 12 764 MB, private 19 983 MB; system free 25 900 of 65 277 MB
+23:19:25.627Z  1228,78  mem: working set 13 198 MB, private 20 411 MB; system free 25 374 of 65 277 MB
+23:19:56.167Z  1259,32  mem: working set 13 640 MB, private 20 855 MB; system free 25 025 of 65 277 MB
+23:20:26.659Z  1289,81  mem: working set 14 078 MB, private 21 292 MB; system free 24 587 of 65 277 MB
+23:20:57.229Z  1320,38  mem: working set 14 519 MB, private 21 735 MB; system free 24 143 of 65 277 MB
+23:21:27.509Z  1350,66  mem: working set 14 975 MB, private 22 207 MB; system free 23 693 of 65 277 MB
+23:21:58.003Z  1381,15  mem: working set 15 398 MB, private 22 615 MB; system free 23 237 of 65 277 MB
+23:22:28.270Z  1411,42  mem: working set 15 835 MB, private 23 053 MB; system free 22 786 of 65 277 MB
+23:22:43.592Z  1426,74  log:   waited 730 s for meshes' clusters, terrain patches and foliage (184 not ready)
+23:22:58.545Z  1441,69  mem: working set 16 274 MB, private 23 492 MB; system free 22 378 of 65 277 MB
+23:23:09.948Z  1453,10  game exited by itself, code 1
+23:23:12.403Z  1455,55  done

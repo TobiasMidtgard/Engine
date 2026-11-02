@@ -1,0 +1,23 @@
+23:23:28.188Z     0,04  mode route quality ultra spec ''; idle before start 74 305 s; HEAD aac391d4
+23:23:28.763Z     0,61  started: showcase.exe --route --profile --quality ultra
+23:23:46.094Z    17,94  window visible: client 1600x900, window 1616x939 at (156,156), maximized False
+23:23:46.122Z    17,97  world built
+23:23:46.521Z    18,37  after build: working set 4 984 MB, private 6 849 MB; system free 33 557 of 65 277 MB
+23:23:59.226Z    31,08  log: village done at 8.2 s, 5 m up
+23:23:59.229Z    31,08  log: face up done at 8.3 s, 5 m up
+23:24:08.436Z    40,29  log: climb to 2 km done at 17.3 s, 2023 m up
+23:24:16.828Z    48,68  mem: working set 7 167 MB, private 14 927 MB; system free 31 416 of 65 277 MB
+23:24:20.552Z    52,40  log: cruise at 2 km done at 29.5 s, 4931 m up
+23:24:20.554Z    52,40  log: face down done at 29.6 s, 4980 m up
+23:24:29.806Z    61,66  log: climb to orbit done at 38.7 s, 401246 m up
+23:24:35.881Z    67,73  log: orbit done at 44.8 s, 419484 m up
+23:24:46.421Z    78,27  log: descend to 2 km done at 55.4 s, 1990 m up
+23:24:46.423Z    78,27  log: turn home done at 55.5 s, 1918 m up
+23:24:47.198Z    79,05  mem: working set 5 144 MB, private 14 557 MB; system free 33 415 of 65 277 MB
+23:24:58.754Z    90,61  log: cruise home done at 67.6 s, 1646 m up
+23:25:03.774Z    95,62  log: down to 100 m done at 72.7 s, 97 m up
+23:25:13.809Z   105,66  log: low pass done at 82.8 s, 1 m up
+23:25:15.962Z   107,81  log: end done at 84.9 s, 1 m up
+23:25:17.519Z   109,37  mem: working set 1 109 MB, private 1 362 MB; system free 38 556 of 65 277 MB
+23:25:17.797Z   109,65  game exited by itself, code 0
+23:25:22.226Z   114,08  done

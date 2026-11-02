@@ -1,0 +1,76 @@
+route summary
+  village: 51 frames, 160.6 ms mean, 250.0 max, 51 over 33 ms; terrain prepare max 61.2 ms, patches missing max 253, RAM max 7409 MB
+  face up: 1 frames, 133.6 ms mean, 133.6 max, 1 over 33 ms; terrain prepare max 1.3 ms, patches missing max 265, RAM max 7409 MB
+  climb to 2 km: 77 frames, 116.6 ms mean, 250.0 max, 77 over 33 ms; terrain prepare max 5.2 ms, patches missing max 492, RAM max 7409 MB
+  cruise at 2 km: 112 frames, 108.7 ms mean, 188.9 max, 112 over 33 ms; terrain prepare max 3.6 ms, patches missing max 4, RAM max 7405 MB
+  face down: 1 frames, 108.2 ms mean, 108.2 max, 1 over 33 ms; terrain prepare max 2.6 ms, patches missing max 0, RAM max 6907 MB
+  climb to orbit: 114 frames, 80.1 ms mean, 135.8 max, 114 over 33 ms; terrain prepare max 2.7 ms, patches missing max 145, RAM max 6907 MB
+  orbit: 106 frames, 57.2 ms mean, 95.6 max, 106 over 33 ms; terrain prepare max 1.9 ms, patches missing max 13, RAM max 5820 MB
+  descend to 2 km: 145 frames, 73.2 ms mean, 134.6 max, 145 over 33 ms; terrain prepare max 2.8 ms, patches missing max 20, RAM max 5142 MB
+  turn home: 1 frames, 77.9 ms mean, 77.9 max, 1 over 33 ms; terrain prepare max 2.4 ms, patches missing max 0, RAM max 5142 MB
+  cruise home: 117 frames, 103.6 ms mean, 169.4 max, 117 over 33 ms; terrain prepare max 3.6 ms, patches missing max 748, RAM max 5152 MB
+  down to 100 m: 59 frames, 86.9 ms mean, 134.1 max, 59 over 33 ms; terrain prepare max 2.7 ms, patches missing max 16, RAM max 5052 MB
+  low pass: 116 frames, 87.3 ms mean, 124.8 max, 116 over 33 ms; terrain prepare max 2.7 ms, patches missing max 55, RAM max 4971 MB
+  end: 41 frames, 57.8 ms mean, 88.5 max, 41 over 33 ms; terrain prepare max 2.2 ms, patches missing max 4, RAM max 4943 MB
+hitches (941):
+  0.25 s village at 5 m, 0 m/s: 250.0 ms (render CPU NaN; meshes: sync 4.3, meshes: clusters 4.1, meshes: cull 0.2, meshes: begin frame 0.1)
+  0.50 s village at 5 m, 0 m/s: 250.0 ms (render CPU 275.6; prepare foliage scenery 151.1, meshes: sync 57.1, prepare on the render thread 21.5, compute weather clouds 14.7)
+  0.75 s village at 5 m, 0 m/s: 250.0 ms (render CPU 294.7; screenshot save 102.6, prepare meshes 68.6, prepare terrain 61.2, prepare space bodies 14.7)
+  1.00 s village at 5 m, 0 m/s: 250.0 ms (render CPU 114.5; screenshot save 58.8, prepare meshes 12.0, meshes: clusters 7.0, finish commands 3.2)
+  1.25 s village at 5 m, 0 m/s: 250.0 ms (render CPU 99.3; screenshot save 58.8, prepare meshes 11.3, meshes: clusters 10.0, prepare softbody 2.4)
+  1.48 s village at 5 m, 0 m/s: 234.4 ms (render CPU 86.4; screenshot save 61.0, meshes: materials 23.0, prepare meshes 11.5, meshes: clusters 10.2)
+  1.73 s village at 5 m, 0 m/s: 250.0 ms (render CPU 114.9; screenshot save 61.0, prepare meshes 48.0, meshes: begin frame 10.0, meshes: clusters 8.9)
+  1.91 s village at 5 m, 0 m/s: 177.8 ms (render CPU 116.0; screenshot save 61.0, prepare meshes 20.7, meshes: clusters 11.2, finish commands 5.5)
+  2.08 s village at 5 m, 0 m/s: 172.1 ms (render CPU 101.1; screenshot save 61.0, prepare meshes 18.2, prepare foliage scenery 9.7, finish commands 7.8)
+  2.27 s village at 5 m, 0 m/s: 182.4 ms (render CPU 95.3; screenshot save 44.0, prepare character 23.1, prepare meshes 12.3, meshes: clusters 5.0)
+  2.51 s village at 5 m, 0 m/s: 242.6 ms (render CPU 58.8; screenshot save 44.0, prepare meshes 9.9, meshes: clusters 6.4, finish commands 2.7)
+  2.66 s village at 5 m, 0 m/s: 148.3 ms (render CPU 65.1; screenshot save 44.0, prepare meshes 10.5, finish commands 5.2, meshes: clusters 4.7)
+  2.79 s village at 5 m, 0 m/s: 133.6 ms (render CPU 62.4; screenshot save 44.0, prepare meshes 6.9, meshes: clusters 5.9, finish commands 2.3)
+  3.02 s village at 5 m, 0 m/s: 225.4 ms (render CPU 56.8; screenshot save 44.0, meshes: clusters 8.9, prepare meshes 7.6, finish commands 4.0)
+  3.15 s village at 5 m, 0 m/s: 128.5 ms (render CPU 70.3; screenshot save 44.0, prepare meshes 14.5, meshes: clusters 13.7, cloud shadows 4.0)
+  3.27 s village at 5 m, 0 m/s: 125.5 ms (render CPU 66.3; screenshot save 44.0, prepare meshes 18.7, meshes: clusters 4.6, meshes: begin frame 3.6)
+  3.41 s village at 5 m, 0 m/s: 141.0 ms (render CPU 58.2; screenshot save 44.0, prepare meshes 10.1, meshes: clusters 9.4, meshes: begin frame 4.8)
+  3.55 s village at 5 m, 0 m/s: 136.3 ms (render CPU 68.8; screenshot save 48.3, prepare meshes 18.6, meshes: clusters 6.6, meshes: begin frame 3.1)
+  3.67 s village at 5 m, 0 m/s: 123.0 ms (render CPU 57.8; screenshot save 48.3, prepare meshes 11.5, meshes: clusters 3.8, finish commands 2.6)
+  3.83 s village at 5 m, 0 m/s: 157.6 ms (render CPU 57.9; screenshot save 48.3, prepare meshes 8.3, meshes: clusters 2.9, meshes: begin frame 2.3)
+  3.99 s village at 5 m, 0 m/s: 165.8 ms (render CPU 71.6; screenshot save 48.3, prepare meshes 8.1, meshes: clusters 6.0, finish commands 3.3)
+  4.12 s village at 5 m, 0 m/s: 128.1 ms (render CPU 59.2; screenshot save 48.3, prepare meshes 9.4, meshes: clusters 3.4, meshes: begin frame 2.6)
+  4.24 s village at 5 m, 0 m/s: 118.5 ms (render CPU 56.2; screenshot save 48.3, prepare meshes 8.4, finish commands 3.2, meshes: clusters 2.9)
+  4.36 s village at 5 m, 0 m/s: 119.4 ms (render CPU 59.0; screenshot save 48.3, finish commands 7.4, prepare meshes 5.1, meshes: clusters 4.3)
+  4.50 s village at 5 m, 0 m/s: 142.0 ms (render CPU 53.8; screenshot save 48.3, prepare meshes 7.0, meshes: clusters 3.4, finish commands 2.0)
+  4.75 s village at 5 m, 0 m/s: 250.0 ms (render CPU 81.4; screenshot save 48.3, meshes: materials 6.3, prepare meshes 5.4, meshes: clusters 4.2)
+  4.91 s village at 5 m, 0 m/s: 159.8 ms (render CPU 72.0; screenshot save 48.3, prepare meshes 14.5, finish commands 7.8, meshes: clusters 3.5)
+  5.08 s village at 5 m, 0 m/s: 167.1 ms (render CPU 96.1; screenshot save 48.3, prepare meshes 6.0, meshes: clusters 3.9, finish commands 2.8)
+  5.21 s village at 5 m, 0 m/s: 127.7 ms (render CPU 98.2; screenshot save 48.3, finish commands 7.0, prepare meshes 5.9, meshes: clusters 3.7)
+  5.46 s village at 5 m, 0 m/s: 250.0 ms (render CPU 65.8; screenshot save 48.3, finish commands 8.6, prepare meshes 6.2, meshes: clusters 4.7)
+  5.59 s village at 5 m, 0 m/s: 132.5 ms (render CPU 79.8; screenshot save 48.3, prepare character 25.2, prepare meshes 6.9, meshes: clusters 3.9)
+  5.71 s village at 5 m, 0 m/s: 125.1 ms (render CPU 64.4; screenshot save 48.3, prepare meshes 5.9, prepare terrain 2.9, meshes: clusters 2.5)
+  5.84 s village at 5 m, 0 m/s: 127.2 ms (render CPU 60.9; screenshot save 48.3, prepare meshes 5.3, meshes: clusters 4.7, finish commands 2.2)
+  5.97 s village at 5 m, 0 m/s: 128.7 ms (render CPU 68.7; screenshot save 47.1, prepare meshes 7.6, meshes: clusters 4.3, finish commands 3.4)
+  6.10 s village at 5 m, 0 m/s: 128.5 ms (render CPU 64.3; screenshot save 47.1, prepare meshes 6.9, meshes: clusters 4.2, meshes: sync 2.7)
+  6.23 s village at 5 m, 0 m/s: 129.7 ms (render CPU 62.4; screenshot save 47.1, prepare meshes 8.2, meshes: clusters 4.8, finish commands 4.5)
+  6.35 s village at 5 m, 0 m/s: 125.1 ms (render CPU 74.3; screenshot save 47.1, prepare meshes 7.6, meshes: clusters 3.7, finish commands 2.6)
+  6.47 s village at 5 m, 0 m/s: 120.3 ms (render CPU 57.4; screenshot save 47.1, prepare meshes 5.8, finish commands 4.3, meshes: clusters 2.9)
+  6.59 s village at 5 m, 0 m/s: 113.4 ms (render CPU 52.5; screenshot save 47.1, prepare meshes 5.1, finish commands 3.1, meshes: clusters 3.0)
+  6.73 s village at 5 m, 0 m/s: 146.5 ms (render CPU 56.2; screenshot save 47.1, prepare meshes 4.8, meshes: clusters 4.4, meshes: sync 2.6)
+  6.84 s village at 5 m, 0 m/s: 105.9 ms (render CPU 80.3; screenshot save 47.1, prepare meshes 8.2, meshes: clusters 3.5, finish commands 2.7)
+  7.03 s village at 5 m, 0 m/s: 188.0 ms (render CPU 50.7; screenshot save 47.1, prepare meshes 5.4, finish commands 4.3, meshes: clusters 3.4)
+  7.23 s village at 5 m, 0 m/s: 206.5 ms (render CPU 62.4; screenshot save 47.1, prepare meshes 6.0, meshes: clusters 4.2, finish commands 3.6)
+  7.37 s village at 5 m, 0 m/s: 132.5 ms (render CPU 78.5; screenshot save 47.1, prepare meshes 6.2, meshes: clusters 4.7, prepare terrain 2.4)
+  7.50 s village at 5 m, 0 m/s: 128.1 ms (render CPU 58.4; screenshot save 47.1, prepare meshes 7.4, meshes: clusters 4.3, finish commands 2.0)
+  7.62 s village at 5 m, 0 m/s: 125.0 ms (render CPU 61.8; screenshot save 47.1, prepare meshes 6.4, meshes: clusters 3.6, meshes: sync 3.2)
+  7.73 s village at 5 m, 0 m/s: 111.8 ms (render CPU 62.8; screenshot save 47.1, prepare meshes 8.0, meshes: clusters 4.2, finish commands 3.4)
+  7.85 s village at 5 m, 0 m/s: 120.3 ms (render CPU 55.8; screenshot save 47.1, prepare meshes 6.5, finish commands 3.8, meshes: clusters 3.4)
+  7.97 s village at 5 m, 0 m/s: 113.6 ms (render CPU 58.0; screenshot save 47.1, prepare meshes 6.3, finish commands 3.0, meshes: clusters 2.9)
+  8.08 s village at 5 m, 0 m/s: 111.1 ms (render CPU 59.0; screenshot save 47.1, prepare meshes 6.6, meshes: clusters 3.1, prepare terrain 3.0)
+  8.19 s village at 5 m, 0 m/s: 112.5 ms (render CPU 52.3; screenshot save 47.1, prepare meshes 6.1, meshes: clusters 3.2, finish commands 2.2)
+  8.32 s face up at 5 m, 0 m/s: 133.6 ms (render CPU 54.6; screenshot save 47.1, meshes: clusters 5.4, prepare meshes 5.3, finish commands 3.7)
+  8.45 s climb to 2 km at 5 m, 0 m/s: 126.9 ms (render CPU 68.9; screenshot save 36.5, prepare meshes 8.9, meshes: clusters 5.5, finish commands 2.4)
+  8.57 s climb to 2 km at 5 m, 0 m/s: 118.3 ms (render CPU 56.4; screenshot save 36.5, prepare meshes 7.9, meshes: clusters 5.0, finish commands 2.7)
+  8.68 s climb to 2 km at 6 m, 13 m/s: 112.4 ms (render CPU 59.6; screenshot save 36.5, prepare meshes 8.4, finish commands 3.9, prepare terrain 2.0)
+  8.81 s climb to 2 km at 7 m, 12 m/s: 128.9 ms (render CPU 53.6; screenshot save 36.5, meshes: clusters 4.5, finish commands 3.1, prepare meshes 3.0)
+  8.94 s climb to 2 km at 8 m, 14 m/s: 127.4 ms (render CPU 68.7; screenshot save 36.5, prepare meshes 8.0, meshes: clusters 3.4, prepare terrain 2.4)
+  9.06 s climb to 2 km at 10 m, 16 m/s: 118.2 ms (render CPU 57.2; screenshot save 36.5, prepare meshes 6.4, finish commands 2.6, prepare terrain 2.0)
+  9.18 s climb to 2 km at 11 m, 16 m/s: 123.4 ms (render CPU 52.9; screenshot save 36.5, meshes: clusters 7.9, finish commands 3.7, prepare meshes 3.4)
+  9.31 s climb to 2 km at 13 m, 16 m/s: 131.2 ms (render CPU 69.7; screenshot save 36.5, prepare meshes 11.4, finish commands 3.7, meshes: clusters 2.2)
+RAM: 7037 MB at the start, 7409 max, 4942 at the end
