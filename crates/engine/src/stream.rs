@@ -18,6 +18,14 @@
 //!
 //! Assets the cell's spawn added are its own ([`crate::cell_assets`]); a cell that opts in with
 //! [`StreamCell::release_assets`] frees them when it unloads.
+//!
+//! A moving source wants every cell along its path for its lookahead (its [`Velocity`], or its
+//! motion measured frame to frame for a camera or focus without one; one frame's jump is not
+//! motion), stretched to twice the time cells have been taking from wanted to loaded
+//! ([`StreamLatency`]). Cells load in the order the source will need them: those it stands in
+//! first, then by when its path gets there. Loading keeps to [`StreamingBudget::frame_ms`]
+//! a frame, and to the larger `late_frame_ms` while a source stands in a cell that is not in
+//! yet (`stream.late` counts those, the pop-in and hole the player sees).
 
 use std::any::Any;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
@@ -33,6 +41,7 @@ use engine_core::math::DQuat;
 use engine_core::prelude::*;
 use engine_render::{DitherFade, MeshRenderer};
 use engine_world::physics::Velocity;
+use engine_world::shift::{FollowsWorldShift, WorldShift, WorldShiftAppExt};
 use engine_world::stream::CellInfo;
 use engine_world::{
     CellId, CellMember, CellState, FocusPoints, SimulationFocus, StreamFrame, StreamedCells,
@@ -355,8 +364,13 @@ pub struct StreamingBudget {
     /// Cells that start spawning per frame at most.
     pub loads_per_frame: usize,
     /// No further spawn slice runs once this frame's loading took this long, ms (the first
-    /// always runs, so loading never stalls).
+    /// always runs, so loading never stalls). Cells loaded ahead of need keep to this, so a
+    /// streaming frame stays inside a 60 fps frame.
     pub frame_ms: f32,
+    /// The same while a cell a source already stands in is still not in (it shows as a hole or
+    /// pops in late): catching up beats a smooth frame, as Unreal's World Partition blocks on
+    /// slow streaming. Counted in `stream.late`.
+    pub late_frame_ms: f32,
     /// Build steps running on worker threads at once at most.
     pub builds: usize,
     /// Seconds a newly loaded cell's meshes take to fade in (0 shows them at once). Only while
@@ -376,7 +390,8 @@ impl Default for StreamingBudget {
     fn default() -> Self {
         Self {
             loads_per_frame: 1,
-            frame_ms: 8.0,
+            frame_ms: 3.0,
+            late_frame_ms: 8.0,
             builds: 2,
             fade_s: 0.4,
             fade_frames: 5,
@@ -418,6 +433,8 @@ struct Slot {
     ids_seen: std::collections::HashMap<u64, u32>,
     /// A remembering cell's spawned values, from its last load.
     baseline: Option<cell_memory::Baseline>,
+    /// When a source first wanted this load (for [`StreamLatency`]).
+    wanted_at: Option<Instant>,
 }
 
 impl Slot {
@@ -434,6 +451,7 @@ impl Slot {
             local: None,
             ids_seen: Default::default(),
             baseline: None,
+            wanted_at: None,
         }
     }
 
@@ -445,6 +463,7 @@ impl Slot {
         self.secs = 0.0;
         self.ram = None;
         self.ids_seen.clear();
+        self.wanted_at = None;
     }
 }
 
@@ -480,6 +499,9 @@ impl Plugin for StreamingPlugin {
             .init_resource::<engine_world::CellMemory>()
             .init_resource::<Fades>()
             .init_resource::<Leaves>()
+            .init_resource::<SourceMotion>()
+            .init_resource::<StreamLatency>()
+            .shift_resource::<SourceMotion>()
             .add_systems(Last, stream_system)
             .register_api(
                 "stream.cells",
@@ -577,9 +599,192 @@ impl Plugin for StreamingPlugin {
     }
 }
 
-/// Where the sources are: (point, range scale) for each, plus its lookahead point. None when
-/// there is no source and no focus (tools and tests: everything loads).
-pub(crate) fn source_points(world: &mut World) -> Option<Vec<(DVec3, f64)>> {
+/// A streaming source this frame: where it is, where its lookahead reaches along its path, and
+/// how it scales load distances.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct Source {
+    pub at: DVec3,
+    /// Where it will be `lookahead` seconds from now at its speed (`at` when still).
+    pub ahead: DVec3,
+    /// Its speed, m/s.
+    pub speed: f64,
+    pub scale: f64,
+}
+
+impl Source {
+    fn still(at: DVec3, scale: f64) -> Self {
+        Self {
+            at,
+            ahead: at,
+            speed: 0.0,
+            scale,
+        }
+    }
+
+    /// Distance from its path (now to `ahead`) to `c`'s edge, in units of `c`'s load distance:
+    /// at most 1 means the cell is wanted, now or before the source gets there.
+    pub(crate) fn reach(&self, c: &CellInfo) -> f64 {
+        let edge =
+            (closest_on_path(self.at, self.ahead, c.center).distance(c.center) - c.radius).max(0.0);
+        edge / (c.load_m * self.scale).max(1e-6)
+    }
+
+    /// When it will need `c` (seconds; 0: it needs it now), or `None` if its path doesn't come
+    /// within `c`'s load distance.
+    fn need_in(&self, c: &CellInfo) -> Option<f64> {
+        let load = (c.load_m * self.scale).max(1e-6);
+        if c.distance(self.at) <= load {
+            return Some(0.0);
+        }
+        if self.speed <= 0.0 || self.reach(c) > 1.0 {
+            return None;
+        }
+        // Where the path first comes within the load distance of the cell's edge.
+        let r = c.radius + load;
+        let d = self.ahead - self.at;
+        let len = d.length();
+        let dir = d / len;
+        let to = c.center - self.at;
+        let along = to.dot(dir);
+        let off2 = (to.length_squared() - along * along).max(0.0);
+        let enter = (along - (r * r - off2).max(0.0).sqrt()).clamp(0.0, len);
+        Some(enter / self.speed)
+    }
+}
+
+/// The point of segment `a`..`b` nearest `p`.
+fn closest_on_path(a: DVec3, b: DVec3, p: DVec3) -> DVec3 {
+    let d = b - a;
+    let len2 = d.length_squared();
+    if len2 <= 1e-12 {
+        return a;
+    }
+    a + d * ((p - a).dot(d) / len2).clamp(0.0, 1.0)
+}
+
+/// How fast each source has been moving, measured from its position frame to frame, so a
+/// camera or focus with no [`Velocity`] still streams ahead of itself (Flight Simulator and
+/// Unreal's World Partition both load along the predicted path of the view).
+#[derive(Resource, Debug, Default, Clone)]
+pub struct SourceMotion {
+    /// Per source entity.
+    sources: std::collections::HashMap<Entity, Track>,
+    /// The same for the focus points, by index, when no source exists.
+    foci: Vec<Track>,
+}
+
+/// One source's motion.
+#[derive(Debug, Default, Clone, Copy, PartialEq)]
+struct Track {
+    at: DVec3,
+    /// Smoothed velocity, m/s.
+    v: DVec3,
+    /// Last frame's raw velocity, m/s.
+    raw: DVec3,
+}
+
+impl FollowsWorldShift for SourceMotion {
+    fn follow(&mut self, s: &WorldShift) {
+        for t in self.sources.values_mut().chain(self.foci.iter_mut()) {
+            t.at = s.point(t.at);
+            t.v = s.direction(t.v.as_vec3()).as_dvec3();
+            t.raw = s.direction(t.raw.as_vec3()).as_dvec3();
+        }
+    }
+}
+
+/// Two frames' velocities further apart than this are a jump (a teleport, a tour stop), not
+/// flight, m/s² (500 g: no flight turns that hard; a jump is one frame's spike).
+const JUMP_ACCEL: f64 = 5_000.0;
+
+impl Track {
+    /// Feeds this frame's position. A frame's raw velocity counts only when the frame before
+    /// agrees with it, so one frame's spike (a jump) never steers the lookahead, while a
+    /// steady flight shows within a few frames.
+    fn update(slot: Option<Track>, at: DVec3, dt: f64) -> Track {
+        let Some(t) = slot else {
+            return Track {
+                at,
+                ..Default::default()
+            };
+        };
+        if dt <= 0.0 {
+            return Track { at, ..t };
+        }
+        let raw = (at - t.at) / dt;
+        let steady = (raw - t.raw).length() / dt <= JUMP_ACCEL;
+        let v = if steady {
+            // About a quarter second of smoothing: frame-time noise out, turns in.
+            t.v + (raw - t.v) * (dt / 0.25).min(1.0)
+        } else {
+            t.v
+        };
+        Track { at, v, raw }
+    }
+}
+
+/// How long cells take from wanted to loaded (seconds, smoothed over the last loads): the
+/// lookahead stretches to cover it, so a source moving at any speed finds its cells in, as
+/// Planets' terrain look-ahead does from its request-to-upload time.
+#[derive(Resource, Debug, Default, Clone, Copy, Serialize)]
+pub struct StreamLatency {
+    /// Smoothed seconds from wanted to loaded.
+    pub seconds: f64,
+    /// The last load's.
+    pub last: f64,
+    /// Loads measured.
+    pub loads: u64,
+}
+
+impl StreamLatency {
+    fn add(&mut self, secs: f64) {
+        self.last = secs;
+        self.loads += 1;
+        self.seconds = if self.loads == 1 {
+            secs
+        } else {
+            self.seconds + (secs - self.seconds) * 0.2
+        };
+    }
+}
+
+/// Measures the sources' motion (once a frame, first thing in [`stream_system`]).
+fn measure_sources(world: &mut World) {
+    let dt = world.resource::<Time>().delta_secs() as f64;
+    let at: Vec<(Entity, DVec3)> = world
+        .query_filtered::<(Entity, &GlobalTransform), With<StreamingSource>>()
+        .iter(world)
+        .map(|(e, g)| (e, g.translation()))
+        .collect();
+    let foci: Vec<DVec3> = if at.is_empty() {
+        let mut q = world.query_filtered::<&GlobalTransform, With<SimulationFocus>>();
+        let mut f: Vec<DVec3> = q.iter(world).map(|g| g.translation()).collect();
+        if f.is_empty() {
+            f = world.resource::<FocusPoints>().points.clone();
+        }
+        f
+    } else {
+        Vec::new()
+    };
+    let mut motion = world.resource_mut::<SourceMotion>();
+    motion.sources.retain(|e, _| at.iter().any(|(a, _)| a == e));
+    for (e, p) in at {
+        let t = Track::update(motion.sources.get(&e).copied(), p, dt);
+        motion.sources.insert(e, t);
+    }
+    let old = std::mem::take(&mut motion.foci);
+    motion.foci = foci
+        .into_iter()
+        .enumerate()
+        .map(|(k, p)| Track::update(old.get(k).copied(), p, dt))
+        .collect();
+}
+
+/// The sources this frame. None when there is no source and no focus (tools and tests:
+/// everything loads). Each looks ahead along its velocity (its [`Velocity`], else its measured
+/// motion) by its `lookahead_s`, or by twice the time cells have been taking to load if that
+/// is longer; focus points look ahead 2 s the same way.
+pub(crate) fn sources(world: &mut World) -> Option<Vec<Source>> {
     // Nothing streams around a ship in cruise: at its speed every cell would be passed before
     // it was in. Sources riding one (its pilot, its chase camera) count as cruising.
     let cruising: Vec<DVec3> = world
@@ -588,19 +793,44 @@ pub(crate) fn source_points(world: &mut World) -> Option<Vec<(DVec3, f64)>> {
         .map(|g| g.translation())
         .collect();
     let calm = |p: DVec3| cruising.iter().all(|c| c.distance(p) > CRUISE_REACH_M);
-    let mut points = Vec::new();
+    let lag = world
+        .get_resource::<StreamLatency>()
+        .map_or(0.0, |l| l.seconds);
+    let motion = world
+        .get_resource::<SourceMotion>()
+        .cloned()
+        .unwrap_or_default();
+    let ahead = |at: DVec3, v: DVec3, lookahead: f64, scale: f64| {
+        if lookahead <= 0.0 {
+            return Source::still(at, scale);
+        }
+        let t = lookahead.max(2.0 * lag).min(MAX_LOOKAHEAD_S);
+        Source {
+            at,
+            ahead: at + v * t,
+            speed: v.length(),
+            scale,
+        }
+    };
+    let mut out = Vec::new();
     let mut any = false;
-    let mut sources = world.query::<(&GlobalTransform, &StreamingSource, Option<&Velocity>)>();
-    for (g, s, v) in sources.iter(world) {
+    let mut q = world.query::<(
+        Entity,
+        &GlobalTransform,
+        &StreamingSource,
+        Option<&Velocity>,
+    )>();
+    for (e, g, s, v) in q.iter(world) {
         any = true;
         let p = g.translation();
         if !calm(p) {
             continue;
         }
-        points.push((p, s.range_scale));
-        if let Some(v) = v {
-            points.push((p + v.linear.as_dvec3() * s.lookahead_s, s.range_scale));
-        }
+        let v = match v {
+            Some(v) => v.linear.as_dvec3(),
+            None => motion.sources.get(&e).map_or(DVec3::ZERO, |m| m.v),
+        };
+        out.push(ahead(p, v, s.lookahead_s, s.range_scale));
     }
     if !any {
         let mut foci = world.query_filtered::<&GlobalTransform, With<SimulationFocus>>();
@@ -609,11 +839,34 @@ pub(crate) fn source_points(world: &mut World) -> Option<Vec<(DVec3, f64)>> {
             at = world.resource::<FocusPoints>().points.clone();
         }
         any = !at.is_empty();
-        points.extend(at.into_iter().filter(|p| calm(*p)).map(|p| (p, 1.0)));
+        for (k, p) in at.into_iter().enumerate() {
+            if calm(p) {
+                let v = motion.foci.get(k).map_or(DVec3::ZERO, |m| m.v);
+                out.push(ahead(p, v, FOCUS_LOOKAHEAD_S, 1.0));
+            }
+        }
     }
     // Sources all cruising: none wants anything (not "no sources", which loads everything).
-    any.then_some(points)
+    any.then_some(out)
 }
+
+/// Where the sources are and where their lookahead reaches: (point, range scale), for the far
+/// views and the procedural grids.
+pub(crate) fn source_points(world: &mut World) -> Option<Vec<(DVec3, f64)>> {
+    sources(world).map(|s| {
+        s.iter()
+            .flat_map(|s| {
+                let ahead = (s.ahead != s.at).then_some((s.ahead, s.scale));
+                std::iter::once((s.at, s.scale)).chain(ahead)
+            })
+            .collect()
+    })
+}
+
+/// Lookahead of a focus point (a source without [`StreamingSource`]), seconds.
+const FOCUS_LOOKAHEAD_S: f64 = 2.0;
+/// The lookahead never reaches farther ahead than this, seconds.
+const MAX_LOOKAHEAD_S: f64 = 20.0;
 
 /// Sources within this distance of a [`Cruising`](engine_world::physics::Cruising) ship are
 /// riding it, meters.
@@ -621,12 +874,13 @@ const CRUISE_REACH_M: f64 = 1000.0;
 
 /// `Last`: queue, build, load, fade and unload cells.
 pub fn stream_system(world: &mut World) {
+    measure_sources(world);
     crate::stream_grid::update(world);
     if world.resource::<StreamedCells>().cells.is_empty() {
         return;
     }
     let poses = follow_frames(world);
-    let sources = source_points(world);
+    let sources = sources(world);
     let budget = *world.resource::<StreamingBudget>();
     let has_build: Vec<(bool, bool)> = world
         .resource::<CellHooks>()
@@ -636,14 +890,35 @@ pub fn stream_system(world: &mut World) {
         .collect();
     let mut cells = world.resource_mut::<StreamedCells>();
     let hysteresis = cells.hysteresis;
-    // Each cell's distance from the nearest source, in units of its load distance.
+    // Each cell's distance from the nearest source's path, in units of its load distance.
     let reach = |c: &CellInfo| match &sources {
         None => 0.0,
-        Some(points) => points
+        Some(sources) => sources
             .iter()
-            .map(|(p, scale)| c.distance(*p) / (c.load_m * scale).max(1e-6))
+            .map(|s| s.reach(c))
             .fold(f64::INFINITY, f64::min),
     };
+    // Load order: cells a source stands in first (nearest first), then the rest by when a
+    // source will get there, so the cell ahead on a fast path beats a nearer one behind.
+    let priority = |c: &CellInfo, r: f64| match &sources {
+        None => r,
+        Some(sources) => match sources
+            .iter()
+            .filter_map(|s| s.need_in(c))
+            .fold(None, |a: Option<f64>, t| Some(a.map_or(t, |a| a.min(t))))
+        {
+            Some(t) if t <= 0.0 => r.min(1.0),
+            Some(t) => 2.0 + t,
+            None => 2.0 + MAX_LOOKAHEAD_S + r,
+        },
+    };
+    let now_in = |c: &CellInfo| {
+        sources
+            .as_ref()
+            .is_some_and(|s| s.iter().any(|s| c.distance(s.at) <= c.load_m * s.scale))
+    };
+    let mut late = 0usize;
+    let mut woke = Vec::new();
     let mut want = Vec::new();
     let mut dropped = Vec::new();
     let mut leaving = Vec::new();
@@ -667,6 +942,7 @@ pub fn stream_system(world: &mut World) {
                 } else {
                     CellState::Queued
                 };
+                woke.push(i);
             }
             CellState::Building | CellState::Queued if r > 1.0 + hysteresis => {
                 c.state = CellState::Unloaded;
@@ -681,10 +957,31 @@ pub fn stream_system(world: &mut World) {
             _ => {}
         }
         if c.state.is_waking() {
-            want.push((r, i, c.state));
+            if now_in(c) {
+                late += 1;
+            }
+            want.push((priority(c, r), i, c.state));
         }
     }
     cells.pins = pins;
+    {
+        let now = Instant::now();
+        let mut hooks = world.resource_mut::<CellHooks>();
+        for i in woke {
+            if let Some(slot) = hooks.0.get_mut(i) {
+                slot.wanted_at.get_or_insert(now);
+            }
+        }
+    }
+    if let Some(mut d) = world.get_resource_mut::<Diagnostics>() {
+        d.set("stream.late", late as f64);
+    }
+    // With no source (tools, tours) everything is wanted now: catch up the same way.
+    let frame_ms = if late > 0 || sources.is_none() {
+        budget.late_frame_ms.max(budget.frame_ms)
+    } else {
+        budget.frame_ms
+    };
     let pressed = leaving.is_empty() && budget.over(world.resource::<Diagnostics>());
     if let Some((_, i)) = spare.filter(|_| pressed) {
         leaving.push(i);
@@ -707,7 +1004,7 @@ pub fn stream_system(world: &mut World) {
     builds(world, &want, budget.builds);
     // Cells already loading go first, nearest first, then new ones in their turn.
     let start = Instant::now();
-    let over = |start: Instant| start.elapsed().as_secs_f32() * 1000.0 > budget.frame_ms;
+    let over = |start: Instant| start.elapsed().as_secs_f32() * 1000.0 > frame_ms;
     let mut stepped = false;
     let mut started = 0;
     let order = want
@@ -745,7 +1042,15 @@ pub fn stream_system(world: &mut World) {
         .map(|s| s.loader.proxy)
         .collect();
     let fading: Vec<CellId> = world.resource::<Fades>().0.iter().map(|f| f.cell).collect();
-    hlod::update(world, &configs, &fading, &poses, sources.as_deref());
+    let points: Option<Vec<(DVec3, f64)>> = sources.map(|s| {
+        s.iter()
+            .flat_map(|s| {
+                let ahead = (s.ahead != s.at).then_some((s.ahead, s.scale));
+                std::iter::once((s.at, s.scale)).chain(ahead)
+            })
+            .collect()
+    });
+    hlod::update(world, &configs, &fading, &poses, points.as_deref());
 }
 
 /// Where each cell's frame stands now (`None`: no frame, or it isn't there); moves framed
@@ -991,6 +1296,13 @@ fn finish(world: &mut World, i: usize) {
         .find(|f| f.cell == id)
     {
         fade.loaded = true;
+    }
+    if let Some(t) = world.resource_mut::<CellHooks>().0[i].wanted_at.take() {
+        let secs = t.elapsed().as_secs_f64();
+        world.resource_mut::<StreamLatency>().add(secs);
+        if let Some(mut d) = world.get_resource_mut::<Diagnostics>() {
+            d.set("stream.latency_s", secs);
+        }
     }
     let mut cells = world.resource_mut::<StreamedCells>();
     let c = &mut cells.cells[i];
@@ -1607,10 +1919,155 @@ mod tests {
         assert_eq!(named(&mut app, "block"), 1);
     }
 
+    /// A source flying along +x at `speed` m/s (measured from its motion, no `Velocity`), on a
+    /// manual 1/60 s clock.
+    fn flyer(app: &mut App, lookahead_s: f64) -> Entity {
+        app.world
+            .resource_mut::<Time>()
+            .set_source(engine_core::time::TimeSource::Manual {
+                step_secs: 1.0 / 60.0,
+            });
+        app.world
+            .spawn(StreamingSource {
+                lookahead_s,
+                ..Default::default()
+            })
+            .id()
+    }
+
+    fn fly(app: &mut App, e: Entity, from: f64, speed: f64, frames: usize) -> f64 {
+        let mut x = from;
+        for _ in 0..frames {
+            place(app, e, x);
+            app.update();
+            x += speed / 60.0;
+        }
+        x
+    }
+
+    #[test]
+    fn a_moving_source_loads_along_its_path_by_when_it_gets_there() {
+        let mut app = app();
+        let hut = |key: &'static str, x: f64| {
+            StreamCell::new(key, DVec3::new(x, 0.0, 0.0), 10.0, move |world| {
+                world.spawn(Name::new(key));
+            })
+            .load_within(50.0)
+        };
+        // Far behind (never wanted), mid-path, near the end of the lookahead.
+        app.stream_cell(hut("behind", -2_000.0));
+        let x0 = 10_000.0;
+        app.stream_cell(hut("near", x0 + 700.0));
+        app.stream_cell(hut("far", x0 + 1_600.0));
+        let ship = flyer(&mut app, 4.0);
+        // 400 m/s with a 4 s lookahead: its path reaches 1.6 km ahead. A teleport to the start
+        // is not motion: nothing ahead loads on the jump.
+        place(&mut app, ship, x0 - 5_000.0);
+        app.update();
+        place(&mut app, ship, x0);
+        app.update();
+        assert_eq!(
+            state(&app, "near"),
+            CellState::Unloaded,
+            "a jump is not a flight"
+        );
+        // A second of flight: the measured velocity settles and the path reaches both huts,
+        // the one it reaches first loading first.
+        let x = fly(&mut app, ship, x0, 400.0, 60);
+        let cells = app.world.resource::<StreamedCells>();
+        assert!(x < x0 + 700.0 - 60.0, "not there yet: {x}");
+        assert_eq!(
+            cells.get(cells.find("near").unwrap()).unwrap().state,
+            CellState::Loaded
+        );
+        assert_eq!(state(&app, "behind"), CellState::Unloaded);
+        let latency = *app.world.resource::<StreamLatency>();
+        assert!(latency.loads >= 1, "{latency:?}");
+        // With one load a frame, the cell needed first goes first.
+        let mut app = app_with_two_ahead();
+        let ship = flyer(&mut app, 4.0);
+        place(&mut app, ship, 0.0);
+        app.update();
+        fly(&mut app, ship, 0.0, 400.0, 30);
+        let order = app.world.resource::<LoadOrder>().0.clone();
+        assert_eq!(
+            order,
+            vec!["soon", "later"],
+            "loaded by when the path gets there"
+        );
+    }
+
+    #[derive(Resource, Default)]
+    struct LoadOrder(Vec<&'static str>);
+
+    /// Two huts ahead of a flight along +x from 0: "soon" on the line 600 m out, "later" 1 km
+    /// out and 300 m to the side, so its center is nearer the path's end than "soon" is to the
+    /// start, but the flight reaches it later.
+    fn app_with_two_ahead() -> App {
+        let mut app = app();
+        app.init_resource::<LoadOrder>();
+        app.world.resource_mut::<StreamingBudget>().loads_per_frame = 1;
+        for (key, at) in [
+            ("later", DVec3::new(1_000.0, 0.0, 300.0)),
+            ("soon", DVec3::new(600.0, 0.0, 0.0)),
+        ] {
+            app.stream_cell(
+                StreamCell::new(key, at, 10.0, move |world| {
+                    world.resource_mut::<LoadOrder>().0.push(key);
+                    world.spawn(Name::new(key));
+                })
+                .load_within(300.0),
+            );
+        }
+        app
+    }
+
+    #[test]
+    fn a_source_standing_in_an_unloaded_cell_counts_as_late_and_gets_the_bigger_budget() {
+        let mut app = app();
+        {
+            let mut budget = app.world.resource_mut::<StreamingBudget>();
+            budget.frame_ms = 0.0;
+            budget.late_frame_ms = 1_000.0;
+        }
+        app.stream_cell(
+            StreamCell::in_steps("wall", DVec3::new(100.0, 0.0, 0.0), 10.0, |world, i| {
+                world.spawn(Name::new("brick"));
+                i == 3
+            })
+            .load_within(50.0),
+        );
+        let player = app
+            .world
+            .spawn(StreamingSource {
+                lookahead_s: 0.0,
+                ..Default::default()
+            })
+            .id();
+        place(&mut app, player, 100.0);
+        app.update();
+        // Standing in it: every slice in one frame, and the frame counted late.
+        assert_eq!(state(&app, "wall"), CellState::Loaded);
+        assert_eq!(named(&mut app, "brick"), 4);
+        assert_eq!(
+            app.world.resource::<Diagnostics>().get("stream.late"),
+            Some(1.0)
+        );
+        app.update();
+        assert_eq!(
+            app.world.resource::<Diagnostics>().get("stream.late"),
+            Some(0.0)
+        );
+    }
+
     #[test]
     fn a_sliced_cell_spawns_a_slice_a_frame_and_can_leave_half_in() {
         let mut app = app();
-        app.world.resource_mut::<StreamingBudget>().frame_ms = 0.0;
+        {
+            let mut budget = app.world.resource_mut::<StreamingBudget>();
+            budget.frame_ms = 0.0;
+            budget.late_frame_ms = 0.0;
+        }
         app.stream_cell(
             StreamCell::in_steps("wall", DVec3::new(100.0, 0.0, 0.0), 10.0, |world, i| {
                 world.spawn(Name::new("brick")).with_children(|c| {
