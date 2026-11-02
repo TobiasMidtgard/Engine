@@ -186,14 +186,15 @@ mod tests {
 
     /// Writers of `GlobalTransform` after the update besides transform propagation. Each one
     /// waits for propagation and holds the animation module's pose work behind it
-    /// (engine-design/anim-parallel.md); step_effects and tick_effects are to leave.
+    /// (engine-design/anim-parallel.md). Small copy systems (place_lights) are fine;
+    /// step_effects is to leave.
     const GLOBAL_TRANSFORM_WRITERS: &[&str] = &[
         "engine_anim::attachment_system",
         "engine_anim::bow_string_system",
         "engine_anim::knockdown_system",
         "engine_core::propagate_transforms_system",
         "engine_movement::step_effects",
-        "engine_vfx::tick_effects",
+        "engine_vfx::place_lights",
     ];
 
     /// Most systems writing `Transform` in the fixed step. Two writers of one component only

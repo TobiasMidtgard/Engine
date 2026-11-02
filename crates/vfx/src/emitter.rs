@@ -106,6 +106,12 @@ impl ParticleEffect {
 #[derive(Component, Debug, Clone, Copy)]
 pub struct VfxLight;
 
+/// Where [`tick_effects`] wants its effect's light this frame; [`place_lights`] moves the light
+/// there. Kept apart so the particle step writes no `Transform` or `GlobalTransform` and runs
+/// beside the systems that read them after propagation (the animation module's IK and gaits).
+#[derive(Component, Debug, Clone, Copy, PartialEq)]
+pub struct VfxLightAt(pub DVec3);
+
 /// Tuning for the whole particle system.
 #[derive(Resource, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -724,7 +730,7 @@ pub fn tick_effects(
     mut runtime: ResMut<VfxRuntime>,
     mut frame: ResMut<ParticleFrame>,
     effects: EffectQuery,
-    mut lights: Query<(&mut Transform, &mut GlobalTransform, &mut PointLight), With<VfxLight>>,
+    mut lights: Query<(&mut VfxLightAt, &mut PointLight), With<VfxLight>>,
     mut marks: Option<ResMut<Marks>>,
     mut diagnostics: Option<ResMut<Diagnostics>>,
     range: Option<Res<SimulationRange>>,
@@ -1060,10 +1066,25 @@ fn push_frame_emitters(inst: &Instance, out: &mut Vec<FrameEmitter>) {
     }
 }
 
+type LightToPlace = (
+    &'static VfxLightAt,
+    &'static mut Transform,
+    &'static mut GlobalTransform,
+);
+
+/// Moves effects' lights to where [`tick_effects`] put them (`PostUpdate`, right after it): a
+/// small copy, so the particle step itself stays off the transforms.
+pub fn place_lights(mut lights: Query<LightToPlace, (With<VfxLight>, Changed<VfxLightAt>)>) {
+    for (at, mut t, mut g) in &mut lights {
+        t.translation = at.0;
+        *g = GlobalTransform::from_translation_rotation(at.0, Quat::IDENTITY);
+    }
+}
+
 fn update_light(
     commands: &mut Commands,
     inst: &mut Instance,
-    lights: &mut Query<(&mut Transform, &mut GlobalTransform, &mut PointLight), With<VfxLight>>,
+    lights: &mut Query<(&mut VfxLightAt, &mut PointLight), With<VfxLight>>,
 ) {
     let Some(desc) = inst.desc.light else {
         return;
@@ -1080,16 +1101,21 @@ fn update_light(
         radius: 0.1 * inst.scale.max(0.1),
     };
     match inst.light.and_then(|e| lights.get_mut(e).ok()) {
-        Some((mut t, mut g, mut l)) => {
-            t.translation = pos;
-            *g = GlobalTransform::from_translation_rotation(pos, Quat::IDENTITY);
+        Some((mut at, mut l)) => {
+            at.0 = pos;
             *l = light;
         }
         None if inst.light.is_none() && inst.started => {
             let t = Transform::from_translation(pos);
             inst.light = Some(
                 commands
-                    .spawn((t, GlobalTransform::from(t), light, VfxLight))
+                    .spawn((
+                        t,
+                        GlobalTransform::from(t),
+                        light,
+                        VfxLight,
+                        VfxLightAt(pos),
+                    ))
                     .id(),
             );
         }

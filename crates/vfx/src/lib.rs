@@ -157,6 +157,7 @@ impl Plugin for VfxPlugin {
                 PostUpdate,
                 (
                     emitter::tick_effects,
+                    emitter::place_lights.after(emitter::tick_effects),
                     trail::update_trails,
                     trail::update_beams,
                 )
