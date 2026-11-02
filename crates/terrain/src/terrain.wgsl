@@ -116,6 +116,7 @@ struct VertexIn {
     @location(11) river: vec4<f32>,    // river and lake water (0..1), lake share, river banks, spare
     @location(12) night: vec4<f32>,    // night glow page: face corner a, b, edge, layer·8 + face (−1 none)
     @location(13) parent_normal: vec2<f32>,  // the parent patch's normal here, octahedral
+    @location(14) water_above: f32,    // the river's or lake's surface above the ground (m)
 };
 
 // `@invariant` keeps the prepass and the scene pass depths bit-identical.
@@ -1323,10 +1324,11 @@ fn fs_prepass(in: PrepassOut) -> PrepassOutput {
         smoothstep(0.0005, 0.015, layers.y),
         smoothstep(0.015, 0.04, depth) * smoothstep(0.5, 0.85, rain_wet),
     );
+    // A river's or lake's bed is wet ground (the water's surface is drawn over it later).
     let river = smoothstep(0.2, 0.6, in.river) * (1.0 - in.ocean);
-    let water = max(max(pool * (1.0 - snow) * (1.0 - in.ocean), in.ocean), river);
+    let water = max(pool * (1.0 - snow) * (1.0 - in.ocean), in.ocean);
     let n = normalize(mix(normalize(in.normal), in.up, water));
-    let ground = 0.85 - 0.35 * rain_wet * (1.0 - snow);
+    let ground = mix(0.85 - 0.35 * rain_wet * (1.0 - snow), 0.45, river);
     let roughness = mix(ground, mix(0.04, 0.08, in.ocean), water);
     return prepass_output(n, roughness, in.motion_now, in.motion_prev);
 }
@@ -2637,10 +2639,11 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     roughness = mix(roughness, 0.04, puddle);
     reflectance = mix(reflectance, 0.354, puddle);
 
-    // ---- Rivers and lakes: the water of the channels and basins the shape carves and fills
-    // (rivers.rs), still and glossy with ripples drifting on it. Where the vertices resolve a
-    // channel its banks are sharp and a little ragged; from afar, where a river is narrower
-    // than the vertices, it is a share of the pixel. Frozen in hard frost.
+    // ---- Rivers and lakes: the beds of the channels and basins the shape carves (rivers.rs);
+    // their water's surface is drawn over them after the opaque scene (`fs_water`). Where the
+    // vertices resolve a channel its banks are sharp and a little ragged; from afar, where a
+    // river is narrower than the vertices, it is a share of the pixel. Frozen in hard frost,
+    // the ice is drawn here.
     let river_in = in.water.x;
     var river = 0.0;
     if (river_in > 0.002) {
@@ -2652,17 +2655,25 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
         albedo = mix(albedo, mix(col[M_SOIL], planet.colors[C_ROCK].rgb, 0.4) * 0.7, saturate(shore) * 0.7);
         roughness = mix(roughness, 0.5, saturate(shore) * 0.5);
         let frozen = smoothstep(-2.0, -8.0, temp_c);
-        // Silty, green-brown rivers; lakes clearer and bluer.
-        var river_col = mix(planet.colors[C_OCEAN].rgb * vec3<f32>(0.75, 1.1, 0.85), planet.colors[C_SOIL].rgb * 0.5, 0.35);
-        river_col = mix(river_col, planet.colors[C_OCEAN].rgb * vec3<f32>(0.8, 1.0, 0.95), saturate(in.water.y / max(river_in, 1e-3)));
-        river_col = mix(river_col, planet.colors[C_SNOW].rgb * 0.85, frozen);
-        let ripple_fade = (1.0 - smoothstep(0.5, 8.0, pixel)) * (1.0 - frozen);
-        let river_n = normalize(mix(up, bump(up, dp1, dp2, dw1, dw2), ripple_fade * 0.25));
-        albedo = mix(albedo, river_col, river);
-        n = normalize(mix(n, river_n, river));
-        roughness = mix(roughness, mix(0.06, 0.5, frozen), river);
-        reflectance = mix(reflectance, 0.354, river);
-        occlusion = mix(occlusion, 1.0, river);
+        // The bed: dark wet silt and gravel in rivers, finer, paler silt on lake floors, with
+        // stones showing in patches. Under ice, the ice.
+        let lake_share = saturate(in.water.y / max(river_in, 1e-3));
+        let stones = smoothstep(0.45, 0.7, detail_n + (mid_v - 0.5) * 0.4) * (1.0 - lake_share);
+        var bed_col = mix(planet.colors[C_SOIL].rgb * 0.42, planet.colors[C_SAND].rgb * 0.55, lake_share * 0.6);
+        bed_col = mix(bed_col, planet.colors[C_ROCK].rgb * 0.45, stones * 0.6);
+        bed_col = mix(bed_col, planet.colors[C_SNOW].rgb * 0.85, frozen);
+        let ice_n = normalize(mix(up, bump(up, dp1, dp2, dw1, dw2), (1.0 - smoothstep(0.5, 8.0, pixel)) * 0.1));
+        // From afar a river is narrower than the vertices: no sheet can lie in its channel, so
+        // its share of the pixel is drawn here as glossy water over the bed (lakes keep their
+        // sheet at every distance; `fs_water` fades a river's out as this fades in).
+        let far_water = (1.0 - crisp) * (1.0 - lake_share) * (1.0 - frozen);
+        let river_col = mix(planet.colors[C_OCEAN].rgb * vec3<f32>(0.75, 1.1, 0.85), planet.colors[C_SOIL].rgb * 0.5, 0.35);
+        bed_col = mix(bed_col, river_col, far_water);
+        albedo = mix(albedo, bed_col, river);
+        n = normalize(mix(n, mix(mix(n, ice_n, frozen), up, far_water), river));
+        roughness = mix(roughness, mix(mix(0.45, 0.5, frozen), 0.06, far_water), river);
+        reflectance = mix(reflectance, mix(mix(0.5, 0.354, frozen), 0.354, far_water), river);
+        occlusion = mix(occlusion, 1.0, river * max(frozen, far_water));
         subsurface = mix(subsurface, 0.0, river);
     }
 
@@ -2892,4 +2903,155 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     }
     color = apply_fog(color, in.rel);
     return vec4<f32>(color, 1.0);
+}
+
+
+// ---------------------------------------------------------------- rivers' and lakes' water
+// The surface of the rivers and lakes the shape carves (rivers.rs), drawn over their beds after
+// the opaque scene: the patch's own vertices raised to the water (below the ground on the banks,
+// where the rising ground hides it, so the shore is where the land comes out of the water).
+// Light: the sky and sun the surface mirrors (Fresnel), the light the water scatters back
+// toward the eye, and the bed (the scene copy behind the pixel) dimmed by what the water absorbs
+// on the way down and back up (Beer-Lambert, per color: the reds go first).
+
+// The scene drawn so far (pre-exposed HDR, after the sky) and its reverse-Z depth: the bed seen
+// through the water, and how far below the surface it lies along the view.
+@group(2) @binding(0) var scene_color: texture_2d<f32>;
+@group(2) @binding(1) var scene_depth: texture_depth_2d;
+
+struct WaterOut {
+    @builtin(position) clip: vec4<f32>,
+    @location(0) rel: vec3<f32>,
+    @location(1) up: vec3<f32>,
+    // Water over the ground here (m; negative on banks above it), how far the surface
+    // reaches (0..1), the river and lake water there, and 1 where it is still (a lake).
+    @location(2) water: vec4<f32>,
+    // Temperature (°C), vertex spacing (m).
+    @location(3) climate: vec2<f32>,
+    @location(4) @interpolate(flat) planet: u32,
+};
+
+@vertex
+fn vs_water(in: VertexIn) -> WaterOut {
+    let planet = planets[in.planet];
+    var rel = place_vertex(in, planet);
+    let up = planet_up(planet, rel);
+    // A vertex with no water near sinks well under the ground (not a kilometer: the triangles
+    // toward it would be needlessly long). Far off, the surface rises a hair with distance so
+    // shallow water doesn't flicker against its bed in the depth buffer.
+    // The near byte: 7 bits of nearness, the top bit set for still water (a lake).
+    let packed = u32(round(in.river.w * 255.0));
+    let still = f32(packed >> 7u);
+    let above = max(in.water_above, -30.0);
+    rel += up * (above + length(rel) * 2e-5);
+    var out: WaterOut;
+    out.clip = frame.view_proj * vec4<f32>(rel, 1.0);
+    out.rel = rel;
+    out.up = up;
+    out.water = vec4<f32>(above, f32(packed & 127u) / 127.0, in.river.x, still);
+    out.climate = vec2<f32>(in.climate.y * 190.0 - 130.0, in.lod.x);
+    out.planet = in.planet;
+    return out;
+}
+
+@fragment
+fn fs_water(in: WaterOut) -> @location(0) vec4<f32> {
+    let planet = planets[in.planet];
+    let up = normalize(in.up);
+    let dist = length(in.rel);
+    let to_eye = in.rel / -max(dist, 1e-6);
+    let depth = max(in.water.x, 0.0);
+    let temp_c = in.climate.x;
+    // Screen derivatives up front (uniform control flow).
+    let dp1 = dpdx(in.rel);
+    let dp2 = dpdy(in.rel);
+    let pixel = max(length(dp1), length(dp2));
+    let tp = tiling_pos(in.rel);
+    let t = frame.time.x;
+    // Ripples and wind waves: two octaves drifting, a third finer one in the near field. Each
+    // fades out before a pixel's footprint (its long side, at a slant) spans half its waves,
+    // or its slopes alias into grain and streaks; the slope it no longer draws roughens the
+    // mirror instead (as a mip of a normal map would, Toksvig 2005).
+    let oct = vec3<f32>(
+        1.0 - smoothstep(0.5, 2.0, pixel),
+        1.0 - smoothstep(0.1, 0.45, pixel),
+        1.0 - smoothstep(0.025, 0.11, pixel),
+    );
+    let wave_h = pnoise3(vec3<f32>(tp.x * 0.5, t * 0.35, tp.z * 0.5), 2048.0) * 0.08 * oct.x
+        + pnoise3(vec3<f32>(tp.x * 2.3 + 7.0, t * 0.8, tp.z * 2.3), 8192.0) * 0.025 * oct.y
+        + pnoise3(vec3<f32>(tp.x * 9.0 - 3.0, t * 1.7, tp.z * 9.0), 32768.0) * 0.006 * oct.z;
+    let dw1 = dpdx(wave_h);
+    let dw2 = dpdy(wave_h);
+    if (under_mirror(in.rel)) {
+        discard;
+    }
+    // Where the surface lies: up close wherever it reaches and stands above the ground (the
+    // ground's depth test draws the shore); from afar, where the vertices are too sparse for a
+    // channel, as much of the pixel as the channel covers. Fading over the last few
+    // centimeters of depth keeps the waterline soft.
+    // The bed behind this pixel, and how far the view runs through the water to reach it.
+    let pix = vec2<i32>(in.clip.xy);
+    let bed_z = textureLoad(scene_depth, pix, 0);
+    let bed_view = select(1e6, frame.exposure.z / bed_z, bed_z > 1e-7);
+    let surf_view = max(view_depth(in.rel), 1e-3);
+    let along = max(bed_view - surf_view, 0.0) * dist / surf_view;
+    let crisp = 1.0 - smoothstep(2.0, 12.0, in.climate.y);
+    // (A lake's outline is where its floor rises out of it, which coarse vertices hold as well
+    // as fine ones. A river narrower than the vertices is painted on the ground instead, by
+    // `fs_main`.)
+    let still = in.water.w;
+    let cover = smoothstep(0.02, 0.3, in.water.y)
+        * max(crisp, still)
+        // The last 15 cm of water along the view fade out, so no glossy line marks the shore
+        // (wider far off, where a pixel spans more).
+        * saturate(along / (0.15 + pixel * 0.05))
+        // Frozen over: the ground draws the ice.
+        * (1.0 - smoothstep(-2.0, -8.0, temp_c));
+    if (cover <= 0.001) {
+        discard;
+    }
+    let n = normalize(bump(up, dp1, dp2, dw1, dw2));
+    let cos_v = saturate(dot(n, to_eye));
+    let fresnel = 0.02 + 0.98 * pow(1.0 - cos_v, 5.0);
+    // Absorption (per meter) and the color the water scatters back: rivers carry silt (browner,
+    // murkier), lakes are clearer and bluer.
+    let lake = still;
+    // (Pure water takes the red within meters; silt takes the blue most and scatters tan.
+    // Estimates from pure water's absorption and Secchi depths, planet-water-research.md.)
+    let sigma = mix(vec3<f32>(1.0, 1.2, 1.6), vec3<f32>(0.45, 0.13, 0.12), lake);
+    let scatter = mix(vec3<f32>(0.11, 0.095, 0.06), vec3<f32>(0.02, 0.06, 0.07), lake);
+    // The water between: along the view from the surface to the bed, then back up to the
+    // surface from the bed on the refracted slant.
+    let cos_in = sqrt(1.0 - (1.0 - cos_v * cos_v) / (1.33 * 1.33));
+    // Down (the view's path) and back up from the bed (straight up through the depth there).
+    let path = min(along, 200.0) + min(along * cos_in, depth * 4.0 + 1.0);
+    let through = exp(-sigma * path);
+    let bed = textureLoad(scene_color, pix, 0).rgb;
+    let to_sun = frame.sun_dir.xyz;
+    var lit = 1.0;
+    if (planet.params2.x > 0.5) {
+        lit = smoothstep(-0.015, 0.01, dot(up, to_sun));
+    }
+    // The mirror: a glossy, black dielectric (its reflectance is water's 2 %).
+    var mirror = default_surface();
+    mirror.albedo = vec3<f32>(0.0);
+    mirror.roughness = 0.04 + 0.02 * (1.0 - oct.z) + 0.03 * (1.0 - oct.y) + 0.05 * (1.0 - oct.x);
+    mirror.reflectance = 0.354;
+    mirror.normal = n;
+    mirror.smooth_normal = up;
+    let reflected = shade_surface_shadowed(mirror, in.rel, lit);
+    // The water body: light scattered back from within, as from a matte layer of its color.
+    var body = default_surface();
+    body.albedo = scatter;
+    body.roughness = 1.0;
+    body.reflectance = 0.0;
+    body.normal = up;
+    let scattered = shade_surface_shadowed(body, in.rel, lit) * (1.0 - through) * (1.0 - fresnel);
+    let behind = through * (1.0 - fresnel);
+    // The bed behind already carries its fog: the fog's light is added once, the bed's own
+    // light is dimmed by the water (the bed is about as far as the surface).
+    let fog_light = apply_fog(vec3<f32>(0.0), in.rel);
+    let color = apply_fog(reflected + scattered, in.rel) + behind * max(bed - fog_light, vec3<f32>(0.0));
+    // Blended over the scene by how much of the pixel the water covers.
+    return vec4<f32>(max(color, vec3<f32>(0.0)) * cover, 1.0 - cover);
 }

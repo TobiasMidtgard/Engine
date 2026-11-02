@@ -38,6 +38,14 @@ pub struct ShapeSample {
     pub lake: f32,
     /// 0 .. 1 nearness to a river's banks (gallery woods line them).
     pub banks: f32,
+    /// The surface of the river or lake nearest here, meters above sea level (valid where
+    /// `water_near` > 0): the ground in a channel or a lake basin lies below it.
+    pub water_level_m: f64,
+    /// 0 .. 1 how far that surface reaches here: the water and the banks and shores just
+    /// beyond it, where the rising ground ends it.
+    pub water_near: f32,
+    /// The current at the water's surface, planet-local, m/s.
+    pub current: DVec3,
 }
 
 /// A flat area for a level, a base or a spaceport: inside `radius_m` the ground is exactly at
@@ -530,6 +538,19 @@ impl PlanetShape {
                 .is_some_and(|o| o.near(dir, r, margin_m))
     }
 
+    /// Whether planet-local direction `dir` lies inside a flat pad or the hand-made overlay
+    /// ground (short of their blends), where the planet's rivers and lakes never reach. Cheap.
+    pub(crate) fn inside_hand_made(&self, dir: DVec3) -> bool {
+        let r = self.radius_m;
+        self.pads
+            .iter()
+            .any(|p| great_circle(dir, p.direction(), r) < p.radius_m)
+            || self
+                .overlay
+                .as_ref()
+                .is_some_and(|o| o.near(dir, r, -o.blend_m))
+    }
+
     /// Sample at a planet-local unit direction. `min_wavelength_m` limits the finest detail
     /// (the renderer passes twice the vertex spacing; physics and gameplay pass 0 for full
     /// detail).
@@ -1012,10 +1033,16 @@ impl PlanetShape {
 
         // Rivers in their valleys.
         let (mut water, mut lake, mut banks) = (0.0, 0.0, 0.0);
+        let (mut level, mut near, mut current) = (0.0, 0.0, DVec3::ZERO);
         if let Some(rivers) = rivers {
+            // Channels are carved; lake basins keep their floor, under the lake's surface.
             let here = rivers.at(p, dir, h, finest, r, s);
-            h += here.fill - here.carve;
+            h -= here.carve;
             (water, lake, banks) = (here.water, here.lake, here.banks);
+            (level, near, current) = (here.level, here.near, here.flow);
+            if level - h > here.deepest {
+                near = 0.0;
+            }
         }
 
         // Pads: exactly flat inside, blended outside.
@@ -1026,6 +1053,7 @@ impl PlanetShape {
             water *= 1.0 - w;
             lake *= 1.0 - w;
             banks *= 1.0 - w;
+            near *= 1.0 - w;
         }
         // A hand-made ground replaces all of the above around the home spot.
         if let Some((t, ground)) = overlay_hit {
@@ -1033,9 +1061,10 @@ impl PlanetShape {
             water *= 1.0 - t;
             lake *= 1.0 - t;
             banks *= 1.0 - t;
+            near *= 1.0 - t;
         }
 
-        self.climate_sample(
+        let mut out = self.climate_sample(
             p,
             dir,
             cl.v,
@@ -1044,7 +1073,13 @@ impl PlanetShape {
             mare,
             [water, lake, banks],
             finest,
-        )
+        );
+        if near > 0.0 {
+            out.water_level_m = level;
+            out.water_near = near as f32;
+            out.current = current;
+        }
+        out
     }
 
     /// The climate at `dir` (`p` on the sphere) over ground `h` above sea level, and the
@@ -1103,6 +1138,7 @@ impl PlanetShape {
             water: water as f32,
             lake: lake as f32,
             banks: banks as f32,
+            ..Default::default()
         }
     }
 

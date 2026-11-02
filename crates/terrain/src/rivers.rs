@@ -156,10 +156,20 @@ pub(crate) struct RiverHere {
     pub water: f64,
     /// Nearness to a river, 0..1: wetter, greener ground.
     pub banks: f64,
-    /// How far to raise the ground to the level of a lake's surface, meters.
-    pub fill: f64,
     /// Lake water, 0..1 (the rest of [`Self::water`] is river).
     pub lake: f64,
+    /// The water surface of the river or lake nearest here, meters above sea level (valid
+    /// where [`Self::near`] > 0). The ground under a lake or in a channel lies below it (the
+    /// bed); on the banks it stands above it and hides it.
+    pub level: f64,
+    /// How far that surface reaches here, 0..1: the channel or lake, and the banks and shores
+    /// just beyond it, where the rising ground ends the water.
+    pub near: f64,
+    /// The current at the surface, planet-local, m/s (along the river; still on lakes).
+    pub flow: DVec3,
+    /// The deepest that water can be here, meters: ground lower than this under the surface
+    /// isn't its bed (a river that crosses a dip it never carved, a lake's last fringe).
+    pub deepest: f64,
 }
 
 impl Rivers {
@@ -209,6 +219,40 @@ impl Rivers {
         })
     }
 
+    /// Whether a river or lake may lie at planet-local direction `dir` (on a sphere of radius
+    /// `r`): false for most of the planet, cheaply (no warp, no meanders, no shape sample).
+    pub(crate) fn may_hold_water(&self, dir: DVec3, r: f64) -> bool {
+        let p = dir * r;
+        self.networks.iter().any(|net| {
+            let key = bucket(p, net.bucket_m);
+            if net.weight(dir, r) <= 0.0 {
+                return false;
+            }
+            let lakes = net.lake_buckets.get(&key).is_some_and(|list| {
+                let sigma = net.cell_m * 0.75;
+                let field: f64 = list
+                    .iter()
+                    .map(|&i| {
+                        (-((p - net.lakes[i as usize].center).length() / sigma).powi(2)).exp()
+                    })
+                    .sum();
+                field > 0.03
+            });
+            let warp: f64 = net.warp.iter().map(|w| w.1.abs()).sum();
+            lakes
+                || net.buckets.get(&key).is_some_and(|list| {
+                    list.iter().any(|&i| {
+                        let s = &net.segments[i as usize];
+                        let ab = s.b - s.a;
+                        let t = ((p - s.a).dot(ab) / ab.length_squared().max(1e-9)).clamp(0.0, 1.0);
+                        // The warp and the meanders move the river off its segment.
+                        (p - (s.a + ab * t)).length()
+                            < s.reach + warp + s.meander.abs() + s.bow.abs()
+                    })
+                })
+        })
+    }
+
     /// The rivers at planet-local point `p` (at the base radius `r`, direction `dir`) on ground
     /// `h` meters above sea level, with detail down to wavelength `finest`.
     pub(crate) fn at(
@@ -232,23 +276,29 @@ impl Rivers {
             // above the water.
             if let Some(list) = net.lake_buckets.get(&key) {
                 let sigma = net.cell_m * 0.75;
-                let (mut field, mut level, mut near) = (0.0, 0.0, f64::MAX);
+                let (mut field, mut level, mut nearest) = (0.0, 0.0, f64::MAX);
                 for &i in list {
                     let c = &net.lakes[i as usize];
                     let d = (p - c.center).length();
                     field += (-(d / sigma).powi(2)).exp();
-                    if d < near {
-                        (near, level) = (d, c.level);
+                    if d < nearest {
+                        (nearest, level) = (d, c.level);
                     }
                 }
-                if field > 0.2 {
+                if field > 0.05 {
                     let ragged = noise::fbm(p / (net.cell_m * 1.3), seed ^ 0x1A4E, 3, 0.5);
                     let within = smooth(0.4, 0.6, field + 0.35 * ragged) * weight;
                     if within > 0.0 && h < level {
                         let lake = within * smooth(0.0, 0.3, level - h);
-                        out.fill = out.fill.max((level - h) * within);
                         out.lake = out.lake.max(lake);
                         out.water = out.water.max(lake);
+                    }
+                    // The surface reaches a little past the outline, so the shore is where
+                    // the basin's floor rises out of it, not where the outline fades.
+                    let reach = smooth(0.12, 0.35, field + 0.35 * ragged) * weight;
+                    if reach > out.near {
+                        (out.near, out.level, out.flow) = (reach, level, DVec3::ZERO);
+                        out.deepest = if within > 0.0 { f64::MAX } else { 3.0 };
                     }
                 }
             }
@@ -293,7 +343,7 @@ impl Rivers {
                 // and only partly as water, so it neither flickers nor vanishes from afar.
                 let wide = half.max(finest * 0.6);
                 let cover = half / wide;
-                let depth = (0.3 + half * 0.01).min(2.5) * cover;
+                let depth = channel_depth_m(half) * cover;
                 let bank_w = 1.5 + half * 0.4;
                 let bank_h = (0.5 + half * 0.012).min(4.0);
                 let plain = wide + bank_w + half * 2.0 + 5.0;
@@ -305,6 +355,18 @@ impl Rivers {
                     + wall * (valley_d - plain - meander.abs()).max(0.0);
                 let fade = 1.0 - smooth(s.reach * 0.55, s.reach, valley_d);
                 out.carve = out.carve.max((h - profile).max(0.0) * fade * weight);
+                // The surface spans the channel and runs on up the banks until they rise out
+                // of it.
+                let reach = (1.0 - smooth(wide + bank_w, wide + bank_w + 4.0 + half * 0.25, d))
+                    * fade
+                    * weight;
+                if reach > out.near {
+                    let along = ab / len.max(1e-9);
+                    let slope = (s.level[0] - s.level[1]) / len.max(1.0);
+                    let speed = current_mps(channel_depth_m(half) / 1.5, slope);
+                    (out.near, out.level, out.flow) = (reach, level, along * speed);
+                    out.deepest = depth * 1.5 + 2.0;
+                }
                 out.water = out
                     .water
                     .max(cover * (1.0 - smooth(wide * 0.75, wide * 1.02, d)));
@@ -919,6 +981,25 @@ impl PartialEq for RiverCache {
     }
 }
 
+/// Depth of a channel `half` meters in half width at its middle, meters: bankfull channels
+/// are 10 times as wide as deep when 2 m wide, 30 times at 200 m (the ratio taken between
+/// on a log scale), and the middle is half again as deep as the mean (Leopold and Maddock
+/// 1953's hydraulic geometry; see engine-design/planet-water-research.md).
+fn channel_depth_m(half: f64) -> f64 {
+    let width = (2.0 * half).max(0.1);
+    let k = ((width / 2.0).log10() / 2.0).clamp(0.0, 1.0);
+    let ratio = 10.0 * 3.0f64.powf(k);
+    1.5 * width / ratio
+}
+
+/// Surface current of a channel `depth_m` deep on average falling `slope` (m per m), m/s:
+/// Manning's mean velocity with n = 0.035 (a natural channel), the surface a sixth faster
+/// than the mean.
+fn current_mps(depth_m: f64, slope: f64) -> f64 {
+    let mean = depth_m.max(0.0).powf(2.0 / 3.0) * slope.max(1e-5).sqrt() / 0.035;
+    (mean / 0.85).clamp(0.05, 3.5)
+}
+
 fn lerp(a: f64, b: f64, t: f64) -> f64 {
     a + (b - a) * t
 }
@@ -935,6 +1016,48 @@ mod tests {
 
     fn earth() -> PlanetShape {
         PlanetShape::earthlike(7).with_pad(FlatPad::default())
+    }
+
+    #[test]
+    fn channels_deepen_and_quicken_with_width_as_rivers_do() {
+        // Bankfull width ÷ depth ratios of 10 (2 m wide) to 30 (200 m), middle 1.5× the mean.
+        assert!((channel_depth_m(1.0) - 0.3).abs() < 1e-9);
+        assert!((channel_depth_m(100.0) - 10.0).abs() < 1e-9);
+        let mut last = 0.0;
+        for half in [0.5, 2.0, 8.0, 30.0, 100.0, 400.0] {
+            let d = channel_depth_m(half);
+            assert!(d > last, "deeper as wider: {d} m at {half} m");
+            last = d;
+        }
+        // Manning: a 1.5 m deep river falling 1 m a kilometer runs about a meter a second.
+        let v = current_mps(1.5, 0.001);
+        assert!((0.8..1.6).contains(&v), "{v} m/s");
+        assert!(current_mps(1.5, 0.01) > v);
+        assert!(current_mps(0.0, 0.0) >= 0.05);
+    }
+
+    #[test]
+    fn most_of_the_planet_has_no_water_near_and_rivers_do() {
+        let shape = earth();
+        let rivers = shape.river_network().expect("rivers");
+        let r = shape.radius_m;
+        let seg = rivers
+            .segments()
+            .find(|s| s.half_width_m[0] > 5.0)
+            .expect("a river");
+        assert!(rivers.may_hold_water(((seg.a + seg.b) * 0.5).normalize(), r));
+        let dry = (0..2000)
+            .filter(|i| {
+                let t = *i as f64 * 0.731;
+                let dir = DVec3::new(
+                    t.sin() * (t * 0.37).cos(),
+                    (t * 0.37).sin(),
+                    t.cos() * (t * 0.37).cos(),
+                );
+                !rivers.may_hold_water(dir.normalize(), r)
+            })
+            .count();
+        assert!(dry > 1000, "{dry} of 2000 spots answered without sampling");
     }
 
     #[test]

@@ -17,7 +17,9 @@ use engine_render::frame::ViewData;
 use engine_render::settings::RenderSettings;
 use engine_world::{Grid2, SurfaceCell, SurfaceLayers};
 
-use crate::chunk::{ChunkSource, TerrainVertex, VERTS_PER_CHUNK, build_chunk, chunk_indices};
+use crate::chunk::{
+    ChunkSource, QUADS, TerrainVertex, VERTS_PER_CHUNK, build_chunk, chunk_indices,
+};
 use crate::cube::NodeKey;
 use crate::deform::{DeformationMap, SLOTS};
 use crate::far_look::{FarLook, FarLookPages};
@@ -232,6 +234,12 @@ struct Gpu {
     /// Depth, normals and motion for ambient occlusion, contact shadows and anti-aliasing.
     prepass_pipeline: wgpu::RenderPipeline,
     shadow_pipeline: wgpu::RenderPipeline,
+    /// Rivers' and lakes' surfaces over their beds (blended, after the opaque scene).
+    water_pipeline: wgpu::RenderPipeline,
+    /// Its group 2 (the scene's color and depth copies), by the copies it binds.
+    water_layout: wgpu::BindGroupLayout,
+    water_groups: Vec<([wgpu::TextureView; 2], wgpu::BindGroup)>,
+    water_group_now: usize,
     layout: wgpu::BindGroupLayout,
     index: wgpu::Buffer,
     index_count: u32,
@@ -269,12 +277,15 @@ struct Gpu {
     /// The overlay paint baked or being baked (its function's address), and the bake.
     paint_key: Option<usize>,
     paint_bake: Option<std::thread::JoinHandle<PaintMap>>,
+    /// A baked paint map going up a band of rows a frame (32 MB at once was a hitch), and the
+    /// next row; the shader uses it once all of it is up.
+    paint_upload: Option<(PaintMap, u32)>,
     group: Option<wgpu::BindGroup>,
 }
 
-/// A 2-layer RGBA8 array holding a paint map's paint and tint (1×1 and empty without one).
-fn paint_texture(gpu: &GpuShared, map: Option<&PaintMap>) -> (wgpu::Texture, wgpu::TextureView) {
-    let size = map.map_or(1, |m| m.size);
+/// A 2-layer RGBA8 array for a paint map's paint and tint, `size` texels a side (empty until
+/// [`write_paint_rows`] fills it; 1×1 without a map).
+fn paint_texture(gpu: &GpuShared, size: u32) -> (wgpu::Texture, wgpu::TextureView) {
     let tex = gpu.device.create_texture(&wgpu::TextureDescriptor {
         label: Some("terrain paint map"),
         size: wgpu::Extent3d {
@@ -289,36 +300,6 @@ fn paint_texture(gpu: &GpuShared, map: Option<&PaintMap>) -> (wgpu::Texture, wgp
         usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
         view_formats: &[],
     });
-    let empty = [[0u8; 4]];
-    let layers: [&[[u8; 4]]; 2] = match map {
-        Some(m) => [&m.paint, &m.tint],
-        None => [&empty, &empty],
-    };
-    for (z, texels) in layers.into_iter().enumerate() {
-        gpu.queue.write_texture(
-            wgpu::TexelCopyTextureInfo {
-                texture: &tex,
-                mip_level: 0,
-                origin: wgpu::Origin3d {
-                    x: 0,
-                    y: 0,
-                    z: z as u32,
-                },
-                aspect: wgpu::TextureAspect::All,
-            },
-            bytemuck::cast_slice(texels),
-            wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(size * 4),
-                rows_per_image: Some(size),
-            },
-            wgpu::Extent3d {
-                width: size,
-                height: size,
-                depth_or_array_layers: 1,
-            },
-        );
-    }
     let view = tex.create_view(&wgpu::TextureViewDescriptor {
         dimension: Some(wgpu::TextureViewDimension::D2Array),
         ..Default::default()
@@ -406,6 +387,8 @@ struct ChunkGpu {
     center: DVec3,
     radius: f64,
     spacing: f64,
+    /// A river's or lake's surface shows over the patch.
+    water: bool,
 }
 
 struct PlanetState {
@@ -544,6 +527,8 @@ pub struct TerrainFeature {
     planets: HashMap<Entity, PlanetState>,
     pool: SlotPool,
     draws: Vec<Draw>,
+    /// Patches with a river's or lake's surface on them (the water pass).
+    water_draws: Vec<Draw>,
     shadow_draws: [Vec<Draw>; 4],
     /// Patches drawn into the far shadow map (big shadows beyond the cascades).
     far_shadow_draws: Vec<Draw>,
@@ -969,9 +954,10 @@ impl TerrainFeature {
                             map.size,
                             map.texel_m
                         );
-                        gpu.paint_tex = paint_texture(gpu_shared, Some(&map));
-                        gpu.paint_map = Some((map.min, map.texel_m, map.size));
+                        gpu.paint_tex = paint_texture(gpu_shared, map.size);
+                        gpu.paint_map = None;
                         gpu.paint_key = Some(key);
+                        gpu.paint_upload = Some((map, 0));
                         fresh = true;
                     }
                 }
@@ -993,6 +979,15 @@ impl TerrainFeature {
                             .expect("spawn the paint map bake"),
                     );
                 }
+            }
+        }
+        if let Some((map, row)) = gpu.paint_upload.take() {
+            let next = (row + PAINT_ROWS_PER_FRAME).min(map.size);
+            write_paint_rows(gpu_shared, &gpu.paint_tex.0, &map, row..next);
+            if next < map.size {
+                gpu.paint_upload = Some((map, next));
+            } else {
+                gpu.paint_map = Some((map.min, map.texel_m, map.size));
             }
         }
         let Some((min, texel, size)) = gpu.paint_map.filter(|_| gpu.paint_key == Some(key)) else {
@@ -1534,6 +1529,79 @@ impl RenderFeature for TerrainFeature {
             multiview_mask: None,
             cache: None,
         });
+        // The water's surface over the patches that hold a river or a lake: the same vertices
+        // raised to the water, drawn over the scene. Its color adds the light the water
+        // reflects and scatters back; the scene behind is dimmed by what the water lets
+        // through (the alpha), so no copy of the scene is needed.
+        let water_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("terrain water"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Depth,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+            ],
+        });
+        let wpl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("terrain water"),
+            bind_group_layouts: &[Some(&gpu.frame_layout), Some(&layout), Some(&water_layout)],
+            immediate_size: 0,
+        });
+        let water_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("terrain water"),
+            layout: Some(&wpl),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_water"),
+                compilation_options: Default::default(),
+                buffers: &buffers,
+            },
+            primitive: wgpu::PrimitiveState {
+                cull_mode: Some(wgpu::Face::Back),
+                ..Default::default()
+            },
+            depth_stencil: Some(gpu.depth_state(false)),
+            multisample: Default::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_water"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: gpu.formats.hdr,
+                    blend: Some(wgpu::BlendState {
+                        color: wgpu::BlendComponent {
+                            src_factor: wgpu::BlendFactor::One,
+                            dst_factor: wgpu::BlendFactor::SrcAlpha,
+                            operation: wgpu::BlendOperation::Add,
+                        },
+                        alpha: wgpu::BlendComponent {
+                            src_factor: wgpu::BlendFactor::Zero,
+                            dst_factor: wgpu::BlendFactor::One,
+                            operation: wgpu::BlendOperation::Add,
+                        },
+                    }),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
         let shadow_shader = gpu.shader("terrain shadow", SHADOW_SHADER, false);
         let spl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("terrain shadow"),
@@ -1609,6 +1677,10 @@ impl RenderFeature for TerrainFeature {
             pipeline,
             prepass_pipeline,
             shadow_pipeline,
+            water_pipeline,
+            water_layout,
+            water_groups: Vec::new(),
+            water_group_now: 0,
             layout,
             index,
             index_count: indices.len() as u32,
@@ -1645,10 +1717,11 @@ impl RenderFeature for TerrainFeature {
             mat_scanned: 0,
             night: NightPages::new(device),
             far_looks: FarLookPages::new(device),
-            paint_tex: paint_texture(gpu, None),
+            paint_tex: paint_texture(gpu, 1),
             paint_map: None,
             paint_key: None,
             paint_bake: None,
+            paint_upload: None,
             group: None,
         });
     }
@@ -1660,14 +1733,17 @@ impl RenderFeature for TerrainFeature {
         view: &ViewData,
         render_settings: &RenderSettings,
     ) {
-        // A planar reflection's view (a lake mirror) draws what is built from its own camera but
-        // leaves the quadtree, the builds and the frame count to the main view: a camera a few
-        // meters under the lake would split and merge patches against it every frame.
-        let mirror = engine_render::rendering_reflection(world).is_some();
+        // An extra view (a lake mirror, a portal, a picture-in-picture) draws what is built from
+        // its own camera but leaves the quadtree, the builds and the frame count to the main
+        // view: a camera a few meters under the lake would split and merge patches against it
+        // every frame, and one elsewhere would replace the main view's wanted patches with its
+        // own each frame.
+        let mirror = view.extra_view || engine_render::rendering_reflection(world).is_some();
         if !mirror {
             self.frame += 1;
         }
         self.draws.clear();
+        self.water_draws.clear();
         let lamp_handoff =
             crate::lights::handoff_distance(world, view, render_settings.max_point_lights);
         for s in &mut self.shadow_draws {
@@ -1681,7 +1757,9 @@ impl RenderFeature for TerrainFeature {
             .get_resource::<TerrainSettings>()
             .cloned()
             .unwrap_or_default();
+        let mut steps = Steps::start();
         let maps = self.upload_maps(world, gpu_shared, view);
+        steps.mark("maps");
         let Some(terrains) = world.get_resource::<Terrains>() else {
             return;
         };
@@ -1689,6 +1767,7 @@ impl RenderFeature for TerrainFeature {
             let scans = settings.scan_folder(world);
             self.upload_materials(gpu_shared, settings.material_resolution, scans);
         }
+        steps.mark("materials");
         let (materials_ready, scanned) = self
             .gpu
             .as_ref()
@@ -1731,6 +1810,7 @@ impl RenderFeature for TerrainFeature {
             gpu.night
                 .retain_planets(|e| terrains.entries.contains_key(e));
         }
+        steps.mark("far looks");
         let mut planet_gpu = Vec::with_capacity(entities.len());
         let mut instances: Vec<ChunkInstance> = Vec::new();
         let mut built_total = 0usize;
@@ -1748,9 +1828,11 @@ impl RenderFeature for TerrainFeature {
         let upload_started = std::time::Instant::now();
         for f in std::mem::take(&mut self.finished) {
             let Some(state) = self.planets.get_mut(&f.planet) else {
+                workers.taken(f.planet, f.mesh.key);
                 continue;
             };
             if state.version != f.version {
+                workers.taken(f.planet, f.mesh.key);
                 continue;
             }
             if uploads >= MAX_UPLOADS_PER_FRAME
@@ -1761,6 +1843,7 @@ impl RenderFeature for TerrainFeature {
                 continue;
             }
             let key = f.mesh.key;
+            workers.taken(f.planet, key);
             upload(&mut self.pool, state, f.mesh, gpu_shared, max_slots);
             state.building.remove(&key);
             // How long patches take from being asked for to being drawn, for the look-ahead.
@@ -1772,6 +1855,7 @@ impl RenderFeature for TerrainFeature {
         }
         self.finished = waiting;
         built_total += uploads;
+        steps.mark("uploads");
 
         for (pi, e) in entities.iter().enumerate() {
             let t = &terrains.entries[e];
@@ -2020,6 +2104,12 @@ impl RenderFeature for TerrainFeature {
                     slot: c.slot,
                     instance,
                 });
+                if c.water && !mirror {
+                    self.water_draws.push(Draw {
+                        slot: c.slot,
+                        instance,
+                    });
+                }
                 if casts {
                     let center = (pos + rot * c.center - view.origin).as_vec3();
                     for i in 0..(view.cascades.count as usize).min(4) {
@@ -2132,6 +2222,7 @@ impl RenderFeature for TerrainFeature {
             });
         }
         self.built_last_frame = built_total;
+        steps.mark("patches");
 
         // Group draws by vertex page.
         self.draws.sort_by_key(|d| d.slot / SLOTS_PER_PAGE);
@@ -2192,26 +2283,87 @@ impl RenderFeature for TerrainFeature {
                 // is painted from its patches' vertices only (a loading screen waits for it).
                 d.set(
                     "terrain.paint_map_baking",
-                    gpu.paint_bake.is_some() as u32 as f64,
+                    (gpu.paint_bake.is_some() || gpu.paint_upload.is_some()) as u32 as f64,
                 );
                 d.set("terrain.night_pages", gpu.night.resident() as f64);
             }
         }
+        steps.mark("buffers");
+        steps.publish(world);
     }
 
     fn draw(&self, phase: RenderPhase, pass: &mut wgpu::RenderPass<'_>, _ctx: &FrameContext) {
-        if phase != RenderPhase::Opaque || self.draws.is_empty() {
+        let (pipeline, draws, indices) = match phase {
+            RenderPhase::Opaque => (self.gpu.as_ref().map(|g| &g.pipeline), &self.draws, None),
+            // The water over the grid only (a skirt would hang a curtain of it).
+            RenderPhase::Transparent => (
+                self.gpu.as_ref().map(|g| &g.water_pipeline),
+                &self.water_draws,
+                Some((QUADS * QUADS * 6) as u32),
+            ),
+            RenderPhase::Sky => return,
+        };
+        if draws.is_empty() {
             return;
         }
-        let Some(gpu) = &self.gpu else {
+        let (Some(gpu), Some(pipeline)) = (&self.gpu, pipeline) else {
             return;
         };
         let Some(group) = &gpu.group else {
             return;
         };
-        pass.set_pipeline(&gpu.pipeline);
+        pass.set_pipeline(pipeline);
         pass.set_bind_group(1, group, &[]);
-        self.draw_list(pass, gpu, &self.draws);
+        if phase == RenderPhase::Transparent {
+            let Some((_, water)) = gpu.water_groups.get(gpu.water_group_now) else {
+                return;
+            };
+            pass.set_bind_group(2, water, &[]);
+        }
+        self.draw_indices(pass, gpu, draws, indices.unwrap_or(gpu.index_count));
+    }
+
+    fn needs_scene_copy(&self) -> bool {
+        !self.water_draws.is_empty()
+    }
+
+    /// The water pass's bind group for this view's scene copies (made anew only when they
+    /// are: on a resize, or for another view).
+    fn compute(&mut self, _encoder: &mut wgpu::CommandEncoder, ctx: &FrameContext) {
+        if self.water_draws.is_empty() {
+            return;
+        }
+        let Some(gpu) = &mut self.gpu else {
+            return;
+        };
+        let key = [ctx.scene_color_copy.clone(), ctx.scene_depth_copy.clone()];
+        if let Some(i) = gpu.water_groups.iter().position(|(k, _)| *k == key) {
+            gpu.water_group_now = i;
+            return;
+        }
+        let group = ctx
+            .gpu
+            .device
+            .create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("terrain water"),
+                layout: &gpu.water_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(ctx.scene_color_copy),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::TextureView(ctx.scene_depth_copy),
+                    },
+                ],
+            });
+        // A few views at most (the main view, a mirror); old sizes go.
+        if gpu.water_groups.len() >= 4 {
+            gpu.water_groups.remove(0);
+        }
+        gpu.water_groups.push((key, group));
+        gpu.water_group_now = gpu.water_groups.len() - 1;
     }
 
     fn draw_prepass(&self, pass: &mut wgpu::RenderPass<'_>, _ctx: &FrameContext) {
@@ -2278,6 +2430,11 @@ impl RenderFeature for TerrainFeature {
 
 impl TerrainFeature {
     fn draw_list(&self, pass: &mut wgpu::RenderPass<'_>, gpu: &Gpu, draws: &[Draw]) {
+        self.draw_indices(pass, gpu, draws, gpu.index_count);
+    }
+
+    /// Draw the patches with the first `count` indices (the grid, then the skirts).
+    fn draw_indices(&self, pass: &mut wgpu::RenderPass<'_>, gpu: &Gpu, draws: &[Draw], count: u32) {
         pass.set_index_buffer(gpu.index.slice(..), wgpu::IndexFormat::Uint16);
         pass.set_vertex_buffer(1, gpu.instances.buffer.slice(..));
         let mut page = u32::MAX;
@@ -2288,7 +2445,78 @@ impl TerrainFeature {
                 pass.set_vertex_buffer(0, self.pool.pages[p as usize].slice(..));
             }
             let base = ((d.slot % SLOTS_PER_PAGE) as usize * VERTS_PER_CHUNK) as i32;
-            pass.draw_indexed(0..gpu.index_count, base, d.instance..d.instance + 1);
+            pass.draw_indexed(0..count, base, d.instance..d.instance + 1);
+        }
+    }
+}
+
+/// Paint map rows written a frame (2 MB of each layer at 2048 texels a row).
+const PAINT_ROWS_PER_FRAME: u32 = 256;
+
+/// Write rows `rows` of a paint map into both layers of its texture.
+fn write_paint_rows(
+    gpu: &GpuShared,
+    tex: &wgpu::Texture,
+    map: &PaintMap,
+    rows: std::ops::Range<u32>,
+) {
+    let size = map.size;
+    let span = (rows.start * size) as usize..(rows.end * size) as usize;
+    for (z, texels) in [&map.paint, &map.tint].into_iter().enumerate() {
+        gpu.queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: tex,
+                mip_level: 0,
+                origin: wgpu::Origin3d {
+                    x: 0,
+                    y: rows.start,
+                    z: z as u32,
+                },
+                aspect: wgpu::TextureAspect::All,
+            },
+            bytemuck::cast_slice(&texels[span.clone()]),
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(size * 4),
+                rows_per_image: Some(rows.len() as u32),
+            },
+            wgpu::Extent3d {
+                width: size,
+                height: rows.len() as u32,
+                depth_or_array_layers: 1,
+            },
+        );
+    }
+}
+
+/// The parts of [`TerrainFeature::prepare`], timed for the hitch lists (`render.cpu.terrain:
+/// <part>` in `Diagnostics`, under the renderer's own `prepare terrain`).
+struct Steps {
+    at: std::time::Instant,
+    done: Vec<(&'static str, f64)>,
+}
+
+impl Steps {
+    fn start() -> Self {
+        Self {
+            at: std::time::Instant::now(),
+            done: Vec::new(),
+        }
+    }
+
+    /// The part since the last mark is done.
+    fn mark(&mut self, name: &'static str) {
+        let now = std::time::Instant::now();
+        self.done
+            .push((name, now.duration_since(self.at).as_secs_f64() * 1000.0));
+        self.at = now;
+    }
+
+    fn publish(self, world: &mut World) {
+        if let Some(mut d) = world.get_resource_mut::<Diagnostics>() {
+            for (name, ms) in self.done {
+                d.set(&format!("render.cpu.terrain: {name}"), ms);
+            }
         }
     }
 }
@@ -2320,6 +2548,9 @@ struct PatchQueue {
     waiting: HashMap<(Entity, NodeKey), (f64, u64, ChunkSource, bool)>,
     /// Patches a thread is building.
     started: HashSet<(Entity, NodeKey)>,
+    /// Patches built and not yet taken up by the render step ([`PatchWorkers::taken`]): asked
+    /// for again meanwhile (they are still missing from the view), they are not built again.
+    built: HashSet<(Entity, NodeKey)>,
 }
 
 /// A patch wanted this frame: priority (lower first), the patch, whether it stays queued
@@ -2367,6 +2598,7 @@ impl PatchWorkers {
                         let mesh = build_chunk(&src, key);
                         if let Ok(mut q) = queue.0.lock() {
                             q.started.remove(&(planet, key));
+                            q.built.insert((planet, key));
                         }
                         let done = FinishedPatch {
                             planet,
@@ -2416,7 +2648,7 @@ impl PatchWorkers {
         });
         for &(priority, key, stays) in wants {
             let id = (planet, key);
-            if q.started.contains(&id) {
+            if q.started.contains(&id) || q.built.contains(&id) {
                 continue;
             }
             match q.waiting.get_mut(&id) {
@@ -2433,6 +2665,14 @@ impl PatchWorkers {
         }
         ready.notify_all();
         dropped
+    }
+
+    /// The render step is done with a finished patch (uploaded or thrown away): it may be
+    /// built again when asked for.
+    fn taken(&self, planet: Entity, key: NodeKey) {
+        if let Ok(mut q) = self.queue.0.lock() {
+            q.built.remove(&(planet, key));
+        }
     }
 
     /// Patches finished since the last call.
@@ -2480,6 +2720,7 @@ fn upload(
             center: m.center,
             radius: m.radius,
             spacing: m.spacing,
+            water: m.water,
         },
     );
     true
@@ -2646,6 +2887,22 @@ mod tests {
         assert_eq!(built, expected);
         std::thread::sleep(std::time::Duration::from_millis(50));
         assert!(w.take_done().is_empty());
+
+        // A patch built but not yet uploaded is still missing from the view, so it is asked
+        // for again every frame: it is not built again until the render step has taken it
+        // (rebuilding it every frame grew memory without bound at a slow stop).
+        let w = PatchWorkers::with_threads(2);
+        w.request(planet, 1, &src, &[(0.0, key(7), false)]);
+        let first = wait_for(&w, 1);
+        assert_eq!(first, [7]);
+        for _ in 0..20 {
+            w.request(planet, 1, &src, &[(0.0, key(7), false)]);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        assert!(w.take_done().is_empty(), "built again before it was taken");
+        w.taken(planet, key(7));
+        w.request(planet, 1, &src, &[(0.0, key(7), false)]);
+        assert_eq!(wait_for(&w, 1), [7]);
     }
 
     #[test]
@@ -2655,6 +2912,6 @@ mod tests {
             16 * (3 + 1 + 10 + 7 + MAX_RAYED + MAX_YOUNG)
         );
         assert_eq!(std::mem::size_of::<MapsGpu>(), 16 * 13);
-        assert_eq!(std::mem::size_of::<TerrainVertex>(), 52);
+        assert_eq!(std::mem::size_of::<TerrainVertex>(), 56);
     }
 }

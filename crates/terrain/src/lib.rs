@@ -21,6 +21,7 @@ pub mod render;
 pub mod rivers;
 pub mod rocks;
 pub mod shape;
+pub mod water;
 pub mod wear;
 pub mod worlds;
 
@@ -340,7 +341,7 @@ pub struct TerrainSettings {
     /// up to four times the detail, so mountains, canyons and craters stay sharp from space.
     /// Planets covering less of the view get a share of it (0 = never boost).
     pub patch_budget: usize,
-    /// GPU patch slots (64 KB each).
+    /// GPU patch slots (68 KB each).
     pub max_patches: usize,
     /// Physics collider tile size (meters) and resolution (samples per side).
     pub collider_tile_m: f64,
@@ -606,6 +607,8 @@ fn sync_terrains(
     materials: Res<SurfaceMaterials>,
     mut ground: ResMut<engine_world::Ground>,
     mut forest: ResMut<engine_world::ForestCover>,
+    water: Option<ResMut<engine_world::Water>>,
+    mut water_installed: Local<water::Installed>,
     diagnostics: Option<ResMut<Diagnostics>>,
     focus: Option<Res<engine_world::FocusPoints>>,
     // Whether a provider is installed, and how many times one was (a diagnostic: the ground
@@ -681,6 +684,18 @@ fn sync_terrains(
     let before = terrains.entries.len();
     terrains.entries.retain(|e, _| seen.contains(e));
     changed |= terrains.entries.len() != before;
+    // The rivers and lakes answer the world's water too (wrapping the water module's query,
+    // which may come and go on its own).
+    if let Some(mut water) = water {
+        water::install(&mut water, &mut water_installed, changed, || {
+            terrains
+                .entries
+                .iter()
+                .filter(|(e, _)| answering.contains(e))
+                .map(|(_, t)| t.ground_terrain())
+                .collect()
+        });
+    }
     if !changed {
         return;
     }

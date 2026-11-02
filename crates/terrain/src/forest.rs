@@ -273,6 +273,9 @@ mod tests {
             water: 0.0,
             lake: 0.0,
             banks: 0.0,
+            water_level_m: 0.0,
+            water_near: 0.0,
+            current: DVec3::ZERO,
             paint: (0, 0.0),
             tint: [0.0; 4],
         }

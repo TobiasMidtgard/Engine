@@ -28,7 +28,7 @@ pub const FLAG_OCEAN: u8 = 2;
 /// The flag byte's upper 6 bits hold the vertex's convexity (see [`encode_convexity`]).
 pub const CONVEXITY_SHIFT: u8 = 2;
 
-/// GPU vertex of a terrain patch (48 bytes).
+/// GPU vertex of a terrain patch (56 bytes).
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod, Zeroable, PartialEq)]
 pub struct TerrainVertex {
@@ -48,19 +48,26 @@ pub struct TerrainVertex {
     pub paint: [u8; 12],
     /// Tint of hand-made ground: color (square root of linear) and amount (unorm8).
     pub tint: [u8; 4],
-    /// River and lake water, the lake's part of it and nearness to river banks (unorm8; see
-    /// [`ShapeSample::water`](crate::ShapeSample)), then a spare byte.
+    /// River and lake water, the lake's part of it, nearness to river banks, and how far the
+    /// water's surface reaches here (unorm8; see [`ShapeSample`](crate::ShapeSample)).
     pub river: [u8; 4],
     /// The parent patch's normal here (octahedral snorm16), which the shader blends toward as
     /// the vertex morphs.
     pub parent_normal: [i16; 2],
+    /// The river's or lake's surface above this vertex, meters (below the ground on banks;
+    /// [`NO_WATER_M`] where no water is near).
+    pub water_above: f32,
 }
+
+/// [`TerrainVertex::water_above`] where no river or lake is near: far below the ground.
+pub const NO_WATER_M: f32 = -1000.0;
 
 impl TerrainVertex {
     pub fn layout() -> wgpu::VertexBufferLayout<'static> {
-        const ATTRS: [wgpu::VertexAttribute; 10] = wgpu::vertex_attr_array![
+        const ATTRS: [wgpu::VertexAttribute; 11] = wgpu::vertex_attr_array![
             0 => Float32x3, 1 => Snorm16x4, 2 => Float32, 3 => Unorm8x4, 4 => Unorm8x4,
-            9 => Unorm8x4, 10 => Unorm8x4, 8 => Unorm8x4, 11 => Unorm8x4, 13 => Snorm16x2
+            9 => Unorm8x4, 10 => Unorm8x4, 8 => Unorm8x4, 11 => Unorm8x4, 13 => Snorm16x2,
+            14 => Float32
         ];
         wgpu::VertexBufferLayout {
             array_stride: std::mem::size_of::<TerrainVertex>() as u64,
@@ -147,6 +154,9 @@ impl ChunkSource {
             water: s.water,
             lake: s.lake,
             banks: s.banks,
+            water_level_m: s.water_level_m,
+            water_near: s.water_near,
+            current: s.current,
             paint,
             tint,
         }
@@ -164,6 +174,12 @@ pub struct Sample {
     pub water: f32,
     pub lake: f32,
     pub banks: f32,
+    /// The nearest river's or lake's surface (meters above sea level) and how far it reaches
+    /// here (0 where none is near; see [`ShapeSample`](crate::ShapeSample)).
+    pub water_level_m: f64,
+    pub water_near: f32,
+    /// The current at the water's surface, planet-local, m/s.
+    pub current: DVec3,
     pub paint: (u8, f32),
     /// Tint of hand-made ground: linear color and amount (0 = none).
     pub tint: [f32; 4],
@@ -184,6 +200,8 @@ pub struct ChunkMesh {
     pub radius: f64,
     /// Vertex spacing, meters.
     pub spacing: f64,
+    /// A river's or lake's surface shows over some of the patch (it is drawn with the water).
+    pub water: bool,
 }
 
 /// Height drawn for a sample: the sea surface hides the sea floor when the terrain draws it.
@@ -338,6 +356,9 @@ pub fn build_chunk(src: &ChunkSource, key: NodeKey) -> ChunkMesh {
             water: 0.0,
             lake: 0.0,
             banks: 0.0,
+            water_level_m: 0.0,
+            water_near: 0.0,
+            current: DVec3::ZERO,
             paint: (0, 0.0),
             tint: [0.0; 4],
         };
@@ -525,12 +546,29 @@ pub fn build_chunk(src: &ChunkSource, key: NodeKey) -> ChunkMesh {
                     (s.water.clamp(0.0, 1.0) * 255.0).round() as u8,
                     (s.lake.clamp(0.0, 1.0) * 255.0).round() as u8,
                     (s.banks.clamp(0.0, 1.0) * 255.0).round() as u8,
-                    0,
+                    // Nearness in 7 bits, the top bit for still water (a lake: no current).
+                    (s.water_near.clamp(0.0, 1.0) * 127.0).round() as u8
+                        | if s.water_near > 0.0 && s.current == DVec3::ZERO {
+                            128
+                        } else {
+                            0
+                        },
                 ],
+                water_above: if s.water_near > 0.0 {
+                    (s.water_level_m - s.height).clamp(-500.0, 500.0) as f32
+                } else {
+                    NO_WATER_M
+                },
             });
         }
     }
     let center = center_sum / (GRID * GRID) as f64;
+
+    // The water's surface shows where it reaches and stands above the ground (a little below
+    // counts too: a triangle's other corners may hold it up).
+    let water = vertices
+        .iter()
+        .any(|v| v.river[3] > 0 && v.water_above > -2.0);
 
     // Skirts: copies of the border vertices pushed down along `up`.
     let skirt = map.node_size(key.level) * 0.03 + 1.0;
@@ -563,6 +601,7 @@ pub fn build_chunk(src: &ChunkSource, key: NodeKey) -> ChunkMesh {
         center,
         radius: radius2.sqrt(),
         spacing,
+        water,
     }
 }
 

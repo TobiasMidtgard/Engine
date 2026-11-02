@@ -473,7 +473,7 @@ impl Uploads {
     }
 
     /// The ground in view is still filling in and still getting closer to done.
-    fn ground_settling(&self) -> bool {
+    pub(crate) fn ground_settling(&self) -> bool {
         self.paint_baking
             || (self.ground > 0.0 && self.ground_low_at.elapsed().as_secs_f32() < UPLOAD_STALL_S)
     }

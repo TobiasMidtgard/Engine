@@ -5,8 +5,9 @@
 //! altitude, speed, frame and render times, the terrain's patches, uploads, RAM, exposure);
 //! at the end the log lists each leg's frames, the hitches (frames over 33 ms, with their
 //! slowest render steps) and RAM. A picture is saved at the end of each leg and at a few
-//! heights on the way up, to catch a black screen high up, and on the first frames after the
-//! world is built, to catch the ground changing as it settles (item 1).
+//! heights on the way up, to catch a black screen high up, and on the first frames of the
+//! route, to catch the ground changing as it settles (item 1). Without `--exe` the route waits
+//! at the plaza for the ground in view before it starts, as the exe's loading screen does.
 //!
 //! `--route up` flies only the climb to orbit, with pictures at more heights (item 30).
 //!
@@ -188,8 +189,14 @@ struct Route {
     shots_up: usize,
     rows: Vec<Row>,
     started: bool,
+    /// Frames spent waiting at the start for the ground in view to fill in; `None` once the
+    /// route is flying.
+    settling: Option<u32>,
     done_frames: u32,
 }
+
+/// Frames the start waits at most for the ground (a wait that never ends goes on).
+const SETTLE_MAX_FRAMES: u32 = 1200;
 
 /// `up` flies [`UP_LEGS`]; anything else the whole route.
 pub fn install(app: &mut App, which: Option<&str>) {
@@ -217,6 +224,7 @@ pub fn install(app: &mut App, which: Option<&str>) {
         shots_up: 0,
         rows: Vec::new(),
         started: false,
+        settling: Some(0),
         done_frames: 0,
     });
     app.add_systems(Update, run.before(camera::fly));
@@ -230,6 +238,24 @@ fn run(world: &mut World) {
         let plaza = places::find("plaza").expect("plaza");
         camera::go_to(world, &plaza);
         world.resource_mut::<Route>().started = true;
+        return;
+    }
+    // Without the exe's loading screen the world is up before its ground: wait at the plaza
+    // until the ground in view is in, then stand there again on the real ground (the first
+    // stand was on what had loaded by then, and the camera could end up under the ground).
+    // With `--exe` the loading screen has already waited.
+    if let Some(waited) = world.resource::<Route>().settling {
+        let settling = world
+            .get_resource::<crate::build::Uploads>()
+            .is_some_and(|u| u.ground_settling());
+        if settling && waited < SETTLE_MAX_FRAMES {
+            world.resource_mut::<Route>().settling = Some(waited + 1);
+            return;
+        }
+        let plaza = places::find("plaza").expect("plaza");
+        camera::go_to(world, &plaza);
+        world.resource_mut::<Route>().settling = None;
+        engine::core::log::info!("route: the ground settled after {waited} frames");
         return;
     }
     let dt = world.resource::<Time>().delta_secs();
@@ -354,7 +380,8 @@ fn record(world: &mut World, pos: DVec3, altitude: f64, dt: f32, real_ms: f64) {
         .collect();
     let terrain_ms: f64 = steps
         .iter()
-        .filter(|(s, _)| s.contains("terrain"))
+        // The renderer's terrain steps (not the terrain's own parts inside them).
+        .filter(|(s, _)| s.contains("terrain") && !s.starts_with("terrain:"))
         .map(|(_, v)| v)
         .sum();
     steps.sort_by(|a, b| b.1.total_cmp(&a.1));

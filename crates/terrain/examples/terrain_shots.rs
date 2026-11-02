@@ -645,6 +645,28 @@ fn views() -> Vec<View> {
             sun: (230.0, 30.0),
             ..BASE
         },
+        // Rivers and lakes from the bank (their water's surface over the bed).
+        View {
+            name: "river_bank",
+            eye_ll: Some([40.02214, -0.0983, 3.0]),
+            target_ll: Some([40.02086, -0.0967, 0.0]),
+            sun_ll: Some([22.0, -28.0]),
+            ..BASE
+        },
+        View {
+            name: "lake_shore",
+            eye_ll: Some([40.0015, -0.0905, 5.0]),
+            target_ll: Some([40.012, -0.108, 0.0]),
+            sun_ll: Some([22.0, -28.0]),
+            ..BASE
+        },
+        View {
+            name: "lake_air",
+            eye_ll: Some([39.995, -0.075, 250.0]),
+            target_ll: Some([40.012, -0.108, 0.0]),
+            sun_ll: Some([22.0, -28.0]),
+            ..BASE
+        },
         View {
             // Rolling country 170 km from the pad, in hill country, under a low sun.
             name: "earth_downs",
