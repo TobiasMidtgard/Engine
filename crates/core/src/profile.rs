@@ -777,13 +777,23 @@ fn format_floors(floors: &[Floor]) -> String {
         let mut steps: Vec<&(String, f64)> = chain.iter().filter(|(_, t)| *t >= 0.05).collect();
         steps.sort_by(|a, b| b.1.total_cmp(&a.1));
         steps.truncate(CHAIN_ROWS);
-        let steps: Vec<String> = steps.iter().map(|(n, t)| format!("{n} {t:.2}")).collect();
+        let heaviest: Vec<String> = steps.iter().map(|(n, t)| format!("{n} {t:.2}")).collect();
         let _ = writeln!(
             out,
             "{label:<16} {floor:>6.2} of {wall:>6.2} ({} systems; heaviest: {})",
             chain.len(),
-            steps.join(", "),
+            heaviest.join(", "),
         );
+        // The chain itself, in run order (systems of 0.05 ms or more), to see which ordering
+        // edge joins the heavy ones.
+        if chain.len() > 1 {
+            let path: Vec<String> = chain
+                .iter()
+                .filter(|(_, t)| *t >= 0.05)
+                .map(|(n, t)| format!("{n} {t:.2}"))
+                .collect();
+            let _ = writeln!(out, "  chain: {}", path.join(" -> "));
+        }
     }
     out
 }
@@ -1288,6 +1298,14 @@ mod tests {
             names,
             ["engine_core::a", "engine_core::b", "engine_core::c"]
         );
-        assert!(format_floors(&floors).contains("Probe"));
+        let text = format_floors(&floors);
+        assert!(text.contains("Probe"), "{text}");
+        // The chain in run order, so the edge between two heavy systems can be found.
+        assert!(
+            text.contains(
+                "chain: engine_core::a 20.00 -> engine_core::b 30.00 -> engine_core::c 10.00"
+            ),
+            "{text}"
+        );
     }
 }
