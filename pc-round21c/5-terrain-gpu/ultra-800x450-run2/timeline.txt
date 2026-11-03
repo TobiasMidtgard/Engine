@@ -1,0 +1,15 @@
+00:32:12.410Z     0.04  mode stops quality ultra size '800x450' spec 'plaza:35,forest:30'; idle before start 78,430 s; HEAD 145dd3a6
+00:32:13.072Z     0.70  started: showcase.exe --fly --profile --quality ultra --size 800x450
+00:32:19.469Z     7.10  window visible: client 800x450, window 816x489 at (26,26), maximized False
+00:32:19.494Z     7.13  bridge connected
+00:32:19.816Z     7.45  world built
+00:32:25.224Z    12.86  after build: working set 4,288 MB, private 6,956 MB; system free 33,818 of 65,277 MB
+00:32:25.385Z    13.02  AT plaza: {"id":1,"jsonrpc":"2.0","result":{"place":"plaza","position":[10.0,4.5,16.0]}}
+00:33:00.856Z    48.49  END plaza: working set 4,960 MB, private 14,895 MB; system free 33,142 of 65,277 MB
+00:33:00.956Z    48.59  shot plaza: {"id":4,"jsonrpc":"2.0","result":{"height":450,"path":"screenshots/r21c/plaza.png","width":800}}
+00:33:02.059Z    49.69  AT forest: {"id":5,"jsonrpc":"2.0","result":{"place":"forest","position":[-148.0,32.0,-78.0]}}
+00:33:32.648Z    80.28  END forest: working set 5,043 MB, private 15,296 MB; system free 33,093 of 65,277 MB
+00:33:32.711Z    80.34  shot forest: {"id":8,"jsonrpc":"2.0","result":{"height":450,"path":"screenshots/r21c/forest.png","width":800}}
+00:33:36.208Z    83.84  sampler job: Completed
+00:33:36.212Z    83.85  killing the game
+00:34:18.936Z   126.57  done
