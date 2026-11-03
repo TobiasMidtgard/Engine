@@ -1365,6 +1365,9 @@ pub fn demo_views(z: &Zone) -> Vec<View> {
         ],
         "weather" => {
             let set = |preset: &str| format!(r#"{{"preset": "{preset}", "transition_s": 0}}"#);
+            // Leaving a stop eases back to fair weather over 45 s instead of swapping the whole
+            // sky in one frame (playtest 3 item 22: "clouds suddenly change position").
+            let ease = |preset: &str| format!(r#"{{"preset": "{preset}", "transition_s": 45}}"#);
             vec![
                 View::new(
                     "weather_station",
@@ -1385,7 +1388,7 @@ pub fn demo_views(z: &Zone) -> Vec<View> {
                 .on_arrive("weather.set", &set("storm"))
                 .on_arrive("weather.advance", r#"{"seconds": 900}"#)
                 .on_arrive("weather.ground", r#"{"wetness": 1.0, "puddle_m": 0.03}"#)
-                .on_leave("weather.set", &set("partly_cloudy"))
+                .on_leave("weather.set", &ease("partly_cloudy"))
                 .on_leave("weather.ground", r#"{"dry": true}"#),
                 View::new(
                     "weather_snow",
@@ -1397,7 +1400,7 @@ pub fn demo_views(z: &Zone) -> Vec<View> {
                 .warmup(3.0)
                 .on_arrive("weather.set", &set("snow"))
                 .on_arrive("weather.ground", r#"{"wetness": 0.3, "snow_m": 0.15}"#)
-                .on_leave("weather.set", &set("partly_cloudy"))
+                .on_leave("weather.set", &ease("partly_cloudy"))
                 .on_leave("weather.ground", r#"{"dry": true}"#),
                 // The wind comes from the west-southwest (+X, a little -Z): look upwind at the
                 // front rolling in.
@@ -1414,7 +1417,7 @@ pub fn demo_views(z: &Zone) -> Vec<View> {
                     r#"{"preset": "storm", "transition_s": 900, "wind_from_deg": 250}"#,
                 )
                 .on_arrive("weather.advance", r#"{"seconds": 640}"#)
-                .on_leave("weather.set", &set("partly_cloudy")),
+                .on_leave("weather.set", &ease("partly_cloudy")),
             ]
         }
         "forest" => engine_foliage::demo::forest_viewpoints(DVec3::ZERO)
