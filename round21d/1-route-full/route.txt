@@ -1,0 +1,76 @@
+route summary
+  village: 103 frames, 78.6 ms mean, 250.0 max, 103 over 33 ms; terrain prepare max 4.5 ms, patches missing max 228, RAM max 7274 MB
+  face up: 1 frames, 67.7 ms mean, 67.7 max, 1 over 33 ms; terrain prepare max 1.0 ms, patches missing max 0, RAM max 7274 MB
+  climb to 2 km: 130 frames, 67.5 ms mean, 227.7 max, 130 over 33 ms; terrain prepare max 8.1 ms, patches missing max 12, RAM max 7317 MB
+  cruise at 2 km: 183 frames, 66.2 ms mean, 110.7 max, 183 over 33 ms; terrain prepare max 10.1 ms, patches missing max 4, RAM max 6769 MB
+  face down: 1 frames, 83.2 ms mean, 83.2 max, 1 over 33 ms; terrain prepare max 0.8 ms, patches missing max 0, RAM max 4958 MB
+  climb to orbit: 331 frames, 27.2 ms mean, 69.8 max, 97 over 33 ms; terrain prepare max 3.0 ms, patches missing max 247, RAM max 5216 MB
+  orbit: 357 frames, 16.9 ms mean, 58.9 max, 5 over 33 ms; terrain prepare max 1.8 ms, patches missing max 12, RAM max 5248 MB
+  descend to 2 km: 392 frames, 27.1 ms mean, 65.3 max, 90 over 33 ms; terrain prepare max 2.5 ms, patches missing max 36, RAM max 5291 MB
+  turn home: 1 frames, 23.1 ms mean, 23.1 max, 0 over 33 ms; terrain prepare max 1.1 ms, patches missing max 0, RAM max 5291 MB
+  cruise home: 180 frames, 67.1 ms mean, 121.8 max, 180 over 33 ms; terrain prepare max 3.2 ms, patches missing max 829, RAM max 5377 MB
+  down to 100 m: 107 frames, 38.6 ms mean, 101.6 max, 51 over 33 ms; terrain prepare max 3.7 ms, patches missing max 22, RAM max 4927 MB
+  low pass: 282 frames, 35.8 ms mean, 81.9 max, 121 over 33 ms; terrain prepare max 3.0 ms, patches missing max 27, RAM max 5050 MB
+  end: 97 frames, 22.0 ms mean, 75.7 max, 10 over 33 ms; terrain prepare max 4.3 ms, patches missing max 34, RAM max 4976 MB
+hitches (972):
+  0.20 s village at 5 m, 0 m/s: 197.1 ms (render CPU 49.2; meshes: clusters 30.9, prepare character 24.8, prepare meshes 9.7, meshes: begin frame 1.7)
+  0.45 s village at 5 m, 0 m/s: 250.0 ms (render CPU 57.5; prepare meshes 34.7, meshes: begin frame 7.9, meshes: clusters 4.2, surface weather 2.3)
+  0.70 s village at 5 m, 0 m/s: 250.0 ms (render CPU 90.2; screenshot save 37.5, prepare painted ground 15.5, prepare meshes 13.9, meshes: clusters 4.2)
+  0.95 s village at 5 m, 0 m/s: 250.0 ms (render CPU 37.4; screenshot save 43.8, meshes: sync 7.3, prepare meshes 6.4, meshes: clusters 6.2)
+  1.20 s village at 5 m, 0 m/s: 250.0 ms (render CPU 29.1; prepare meshes 14.0, meshes: clusters 5.1, meshes: sync 3.7, wait for the finishing threads 2.2)
+  1.31 s village at 5 m, 0 m/s: 108.5 ms (render CPU 31.0; screenshot save 40.0, prepare meshes 9.3, meshes: clusters 5.5, meshes: materials 5.3)
+  1.39 s village at 5 m, 0 m/s: 85.1 ms (render CPU 30.0; prepare meshes 16.3, meshes: clusters 5.0, prepare on the render thread 2.0, meshes: sync 1.8)
+  1.64 s village at 5 m, 0 m/s: 250.0 ms (render CPU 21.3; meshes: clusters 9.7, prepare meshes 9.0, meshes: sync 3.1, meshes: begin frame 3.0)
+  1.78 s village at 5 m, 0 m/s: 140.0 ms (render CPU 29.0; prepare meshes 17.3, meshes: clusters 8.0, prepare on the render thread 2.3, meshes: sync 2.3)
+  1.88 s village at 5 m, 0 m/s: 95.4 ms (render CPU 27.2; screenshot save 31.2, prepare meshes 13.0, meshes: clusters 11.4, meshes: begin frame 2.9)
+  1.96 s village at 5 m, 0 m/s: 85.7 ms (render CPU 25.8; prepare meshes 16.0, meshes: clusters 6.7, meshes: begin frame 3.5, prepare on the render thread 2.2)
+  2.06 s village at 5 m, 0 m/s: 100.0 ms (render CPU 26.3; prepare meshes 12.1, meshes: clusters 7.5, prepare terrain 4.3, meshes: begin frame 3.3)
+  2.14 s village at 5 m, 0 m/s: 75.9 ms (render CPU 25.8; prepare meshes 12.8, meshes: clusters 3.4, wait for the finishing threads 2.1, prepare on the render thread 1.9)
+  2.22 s village at 5 m, 0 m/s: 82.3 ms (render CPU 15.6; prepare meshes 6.2, meshes: clusters 3.0, prepare on the render thread 2.0, wait for the finishing threads 1.4)
+  2.29 s village at 5 m, 0 m/s: 73.1 ms (render CPU 14.9; prepare meshes 4.7, meshes: clusters 3.4, prepare on the render thread 2.0, surface weather 1.4)
+  2.38 s village at 5 m, 0 m/s: 89.3 ms (render CPU 16.8; prepare meshes 5.4, meshes: clusters 3.1, meshes: sync 2.3, prepare on the render thread 2.2)
+  2.46 s village at 5 m, 0 m/s: 78.3 ms (render CPU 18.8; meshes: clusters 6.4, prepare meshes 6.2, meshes: sync 2.6, terrain: maps 2.2)
+  2.55 s village at 5 m, 0 m/s: 86.3 ms (render CPU 23.5; screenshot save 32.7, prepare meshes 9.8, meshes: clusters 5.7, prepare terrain 4.5)
+  2.62 s village at 5 m, 0 m/s: 77.0 ms (render CPU 23.0; prepare meshes 10.3, meshes: begin frame 3.6, meshes: clusters 3.5, meshes: sync 3.3)
+  2.72 s village at 5 m, 0 m/s: 92.3 ms (render CPU 24.8; prepare meshes 11.4, meshes: clusters 5.6, prepare terrain 2.5, prepare on the render thread 2.3)
+  2.79 s village at 5 m, 0 m/s: 75.2 ms (render CPU 18.5; prepare meshes 7.4, meshes: clusters 3.1, meshes: sync 2.3, prepare on the render thread 2.0)
+  3.04 s village at 5 m, 0 m/s: 250.0 ms (render CPU 17.5; prepare meshes 6.2, meshes: clusters 2.8, prepare on the render thread 2.3, meshes: sync 2.1)
+  3.13 s village at 5 m, 0 m/s: 88.3 ms (render CPU 16.6; prepare meshes 5.5, meshes: clusters 3.0, prepare on the render thread 2.2, wait for the finishing threads 1.9)
+  3.20 s village at 5 m, 0 m/s: 72.9 ms (render CPU 17.6; prepare meshes 5.1, meshes: clusters 4.4, prepare terrain 2.8, prepare on the render thread 1.8)
+  3.38 s village at 5 m, 0 m/s: 176.6 ms (render CPU 17.0; prepare meshes 6.9, meshes: clusters 3.3, prepare on the render thread 1.7, prepare terrain 1.7)
+  3.44 s village at 5 m, 0 m/s: 61.7 ms (render CPU 14.2; prepare meshes 5.1, meshes: clusters 3.0, prepare on the render thread 1.7, prepare terrain 1.3)
+  3.50 s village at 5 m, 0 m/s: 62.7 ms (render CPU 14.4; prepare meshes 4.7, meshes: clusters 3.1, prepare on the render thread 1.6, meshes: sync 1.1)
+  3.56 s village at 5 m, 0 m/s: 60.4 ms (render CPU 12.2; prepare meshes 4.9, meshes: clusters 2.6, prepare on the render thread 1.6, prepare softbody 1.1)
+  3.62 s village at 5 m, 0 m/s: 59.5 ms (render CPU 13.8; prepare meshes 4.3, meshes: clusters 3.1, prepare on the render thread 2.1, terrain: maps 1.2)
+  3.68 s village at 5 m, 0 m/s: 60.6 ms (render CPU 13.9; prepare meshes 4.8, meshes: clusters 3.0, prepare terrain 2.2, prepare on the render thread 1.9)
+  3.74 s village at 5 m, 0 m/s: 57.8 ms (render CPU 16.1; prepare meshes 4.7, meshes: clusters 4.0, prepare on the render thread 2.3, surface weather 1.9)
+  3.81 s village at 5 m, 0 m/s: 64.2 ms (render CPU 17.3; prepare meshes 6.3, meshes: clusters 3.2, prepare on the render thread 2.4, meshes: sync 1.8)
+  3.87 s village at 5 m, 0 m/s: 65.1 ms (render CPU 17.1; prepare meshes 5.9, meshes: clusters 3.5, prepare on the render thread 2.8, wait for the finishing threads 2.3)
+  3.93 s village at 5 m, 0 m/s: 54.4 ms (render CPU 13.3; screenshot save 37.1, prepare meshes 5.2, meshes: clusters 2.8, prepare on the render thread 1.8)
+  3.99 s village at 5 m, 0 m/s: 62.8 ms (render CPU 13.9; prepare meshes 4.9, meshes: clusters 4.2, wait for the finishing threads 1.9, prepare on the render thread 1.8)
+  4.05 s village at 5 m, 0 m/s: 57.2 ms (render CPU 15.8; prepare meshes 6.5, meshes: clusters 4.0, prepare terrain 2.3, prepare on the render thread 2.0)
+  4.11 s village at 5 m, 0 m/s: 59.2 ms (render CPU 16.5; prepare meshes 5.8, meshes: clusters 3.2, prepare on the render thread 2.0, prepare softbody 1.2)
+  4.17 s village at 5 m, 0 m/s: 61.5 ms (render CPU 15.1; prepare meshes 5.1, meshes: clusters 3.1, prepare on the render thread 2.2, prepare softbody 1.2)
+  4.23 s village at 5 m, 0 m/s: 59.2 ms (render CPU 14.4; prepare meshes 5.0, meshes: clusters 2.9, prepare on the render thread 1.9, wait for the finishing threads 1.2)
+  4.29 s village at 5 m, 0 m/s: 61.9 ms (render CPU 13.1; prepare meshes 4.8, meshes: clusters 3.3, prepare on the render thread 1.9, prepare softbody 1.2)
+  4.36 s village at 5 m, 0 m/s: 69.0 ms (render CPU 15.2; prepare meshes 5.2, meshes: clusters 3.3, prepare on the render thread 2.6, meshes: sync 1.9)
+  4.43 s village at 5 m, 0 m/s: 73.7 ms (render CPU 18.3; prepare meshes 6.4, meshes: clusters 3.7, prepare terrain 2.3, prepare on the render thread 2.2)
+  4.50 s village at 5 m, 0 m/s: 66.1 ms (render CPU 17.3; prepare meshes 7.0, meshes: clusters 4.1, prepare on the render thread 2.5, meshes: cull 1.4)
+  4.59 s village at 5 m, 0 m/s: 93.2 ms (render CPU 15.5; prepare meshes 6.4, meshes: clusters 3.3, prepare on the render thread 2.2, meshes: sync 1.2)
+  4.65 s village at 5 m, 0 m/s: 60.6 ms (render CPU 15.0; prepare meshes 5.5, meshes: clusters 3.2, prepare on the render thread 1.9, prepare softbody 1.2)
+  4.71 s village at 5 m, 0 m/s: 56.5 ms (render CPU 14.5; prepare meshes 5.1, prepare on the render thread 1.8, prepare terrain 1.1, prepare softbody 1.1)
+  4.77 s village at 5 m, 0 m/s: 59.1 ms (render CPU 12.7; prepare on the render thread 2.4, meshes: clusters 2.0, prepare meshes 1.9, surface weather 1.5)
+  4.83 s village at 5 m, 0 m/s: 62.0 ms (render CPU 19.3; prepare meshes 3.9, meshes: clusters 2.2, prepare terrain 2.2, prepare on the render thread 1.8)
+  4.88 s village at 5 m, 0 m/s: 48.9 ms (render CPU 13.6; prepare meshes 4.0, meshes: clusters 2.2, prepare on the render thread 1.8, prepare softbody 1.2)
+  4.93 s village at 5 m, 0 m/s: 55.3 ms (render CPU 12.2; prepare meshes 4.0, meshes: clusters 3.0, prepare on the render thread 1.9, wait for the finishing threads 1.3)
+  5.00 s village at 5 m, 0 m/s: 64.1 ms (render CPU 15.2; prepare meshes 4.9, meshes: clusters 4.7, prepare on the render thread 1.9, wait for the finishing threads 1.2)
+  5.06 s village at 5 m, 0 m/s: 62.8 ms (render CPU 15.5; prepare meshes 6.8, meshes: clusters 3.2, prepare on the render thread 2.3, wait for the finishing threads 1.7)
+  5.11 s village at 5 m, 0 m/s: 50.5 ms (render CPU 14.9; prepare meshes 5.2, prepare on the render thread 2.0, terrain: maps 1.2, meshes: sync 1.1)
+  5.16 s village at 5 m, 0 m/s: 53.8 ms (render CPU 11.7; meshes: clusters 3.2, prepare terrain 2.2, prepare meshes 2.1, prepare on the render thread 2.0)
+  5.23 s village at 5 m, 0 m/s: 62.0 ms (render CPU 14.4; prepare meshes 5.0, prepare on the render thread 2.2, meshes: clusters 2.0, wait for the finishing threads 1.4)
+  5.28 s village at 5 m, 0 m/s: 57.3 ms (render CPU 13.7; prepare meshes 3.7, prepare on the render thread 2.5, meshes: cull 1.5, meshes: sync 1.3)
+  5.35 s village at 5 m, 0 m/s: 67.3 ms (render CPU 12.9; prepare meshes 3.4, meshes: clusters 2.5, prepare on the render thread 1.9, prepare softbody 1.1)
+  5.42 s village at 5 m, 0 m/s: 70.7 ms (render CPU 13.4; prepare meshes 4.6, meshes: clusters 3.1, prepare on the render thread 2.2, prepare terrain 1.3)
+  5.48 s village at 5 m, 0 m/s: 57.8 ms (render CPU 14.4; prepare meshes 5.0, meshes: clusters 2.6, prepare on the render thread 1.9, wait for the finishing threads 1.3)
+  5.53 s village at 5 m, 0 m/s: 54.9 ms (render CPU 15.3; prepare meshes 4.6, prepare terrain 2.2, prepare on the render thread 1.9, meshes: clusters 1.8)
+RAM: 6069 MB at the start, 7317 max, 4976 at the end

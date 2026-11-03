@@ -1,0 +1,166 @@
+﻿route start (after the plaza settle): 05:28:13.222 UTC
+leg | wall s | ends at route s / m up | GPU busy % | frame profiles reporting in the leg (each covers the 5 s before it)
+== route: village | 11.6 s | 8.1 s / 5 m | GPU busy 22
+  05:28:16 8 frames in 5.1 s: 631.6 ms per frame (1.6 fps), worst 1668.4 ms
+    systems busy 813.8 ms per frame: 1.29 of 32 cores on average; schedules: FixedUpdate 180.93 (x0.8), Last 152.63 (x0.8), Update 138.79 (x0.8)
+    slowest: engine::stream_system 152.09/max 484.94, fire::run_demos 110.70/max 885.63, fire::step_field 87.43/max 9.19, npc::build_stand_ins 61.27/max 490.14, physics::physics_sync 37.56/max 194.74, render::render_system 34.26/max 88.19
+    ran alone: npc::build_stand_ins 61.16, physics::physics_sync 37.56, render::render_system 34.26, npc::rebuild_world_model 24.72; GPU passes 
+  05:28:21 49 frames in 5.0 s: 102.2 ms per frame (9.8 fps), worst 1296.6 ms
+    systems busy 129.0 ms per frame: 1.26 of 32 cores on average; schedules: FixedUpdate 43.34 (x2.1), Update 33.05 (x0.9), Render 13.36 (x0.9)
+    slowest: smoke::run_demos 24.42/max 1195.92, softbody::step_beside_physics 20.60/max 19.40, render::render_system 13.32/max 28.05, engine::stream_system 9.71/max 268.61, npc::think_and_act 8.77/max 209.99, physics::physics_simulate 4.71/max 6.72
+    ran alone: smoke::run_demos 24.42, softbody::step_beside_physics 14.71, render::render_system 13.32, npc::think_and_act 8.77; GPU passes 23.04 (render CPU 27.01)
+  05:28:26 81 frames in 5.0 s: 62.0 ms per frame (16.1 fps), worst 85.9 ms
+    systems busy 67.0 ms per frame: 1.08 of 32 cores on average; schedules: FixedUpdate 35.76 (x3.0), Render 11.70 (x0.9), Update 4.15 (x0.9)
+    slowest: softbody::step_beside_physics 16.94/max 12.90, render::render_system 11.65/max 24.12, physics::physics_simulate 9.72/max 6.94, smoke::step 2.18/max 5.13, softbody::step_bodies 1.76/max 1.91, water::boat_air_system 1.40/max 0.93
+    ran alone: render::render_system 11.65, softbody::step_beside_physics 10.54, physics::physics_simulate 2.75, softbody::step_bodies 1.75; GPU passes 
+== route: face up | 0.1 s | 8.2 s / 5 m | GPU busy 51
+  05:28:26 81 frames in 5.0 s: 62.0 ms per frame (16.1 fps), worst 85.9 ms
+    systems busy 67.0 ms per frame: 1.08 of 32 cores on average; schedules: FixedUpdate 35.76 (x3.0), Render 11.70 (x0.9), Update 4.15 (x0.9)
+    slowest: softbody::step_beside_physics 16.94/max 12.90, render::render_system 11.65/max 24.12, physics::physics_simulate 9.72/max 6.94, smoke::step 2.18/max 5.13, softbody::step_bodies 1.76/max 1.91, water::boat_air_system 1.40/max 0.93
+    ran alone: render::render_system 11.65, softbody::step_beside_physics 10.54, physics::physics_simulate 2.75, softbody::step_bodies 1.75; GPU passes 
+== route: climb to 2 km | 8.8 s | 16.9 s / 2049 m | GPU busy 25
+  05:28:26 81 frames in 5.0 s: 62.0 ms per frame (16.1 fps), worst 85.9 ms
+    systems busy 67.0 ms per frame: 1.08 of 32 cores on average; schedules: FixedUpdate 35.76 (x3.0), Render 11.70 (x0.9), Update 4.15 (x0.9)
+    slowest: softbody::step_beside_physics 16.94/max 12.90, render::render_system 11.65/max 24.12, physics::physics_simulate 9.72/max 6.94, smoke::step 2.18/max 5.13, softbody::step_bodies 1.76/max 1.91, water::boat_air_system 1.40/max 0.93
+    ran alone: render::render_system 11.65, softbody::step_beside_physics 10.54, physics::physics_simulate 2.75, softbody::step_bodies 1.75; GPU passes 
+  05:28:31 76 frames in 5.0 s: 66.4 ms per frame (15.1 fps), worst 227.4 ms
+    systems busy 80.5 ms per frame: 1.21 of 32 cores on average; schedules: FixedUpdate 42.14 (x2.9), Render 14.18 (x1.1), Update 5.02 (x1.1)
+    slowest: water::ripple_system 18.80/max 30.59, render::render_system 14.09/max 25.19, physics::physics_simulate 9.87/max 7.13, softbody::step_beside_physics 8.15/max 23.00, weather::ground_system 3.09/max 171.39, script::run_scripts 1.79/max 15.23
+    ran alone: render::render_system 14.09, water::ripple_system 12.48, weather::ground_system 2.94, softbody::step_beside_physics 2.59; GPU passes 18.40 (render CPU 18.35)
+== route: cruise at 2 km | 12.1 s | 29.0 s / 4872 m | GPU busy 20
+  05:28:36 70 frames in 5.1 s: 72.5 ms per frame (13.8 fps), worst 110.4 ms
+    systems busy 80.4 ms per frame: 1.11 of 32 cores on average; schedules: FixedUpdate 43.83 (x1.4), Render 14.20 (x1.0), Update 5.74 (x1.0)
+    slowest: water::ripple_system 36.58/max 37.98, render::render_system 14.13/max 42.40, softbody::step_beside_physics 6.55/max 35.75, physics::physics_simulate 2.10/max 10.59, terrain::update_colliders 1.59/max 26.82, script::run_scripts 1.48/max 3.12
+    ran alone: water::ripple_system 28.38, render::render_system 14.13, script::run_scripts 1.48, weather::ground_system 1.31; GPU passes 
+  05:28:42 80 frames in 5.0 s: 62.8 ms per frame (15.9 fps), worst 101.6 ms
+    systems busy 71.9 ms per frame: 1.14 of 32 cores on average; schedules: FixedUpdate 42.51 (x1.2), Render 8.80 (x1.0), Update 5.14 (x1.0)
+    slowest: water::ripple_system 36.71/max 37.78, render::render_system 8.74/max 16.06, softbody::step_beside_physics 7.19/max 33.85, terrain::update_colliders 1.74/max 37.50, weather::ground_system 1.55/max 2.58, script::run_scripts 1.51/max 14.16
+    ran alone: water::ripple_system 28.74, render::render_system 8.74, weather::ground_system 1.53, script::run_scripts 1.51; GPU passes 10.02 (render CPU 14.51)
+  05:28:47 108 frames in 5.0 s: 46.3 ms per frame (21.6 fps), worst 110.6 ms
+    systems busy 51.8 ms per frame: 1.12 of 32 cores on average; schedules: FixedUpdate 29.38 (x1.2), Render 6.59 (x0.8), PostUpdate 5.89 (x0.8)
+    slowest: water::ripple_system 24.46/max 41.09, render::render_system 6.54/max 18.60, terrain::update_colliders 3.51/max 41.06, softbody::step_beside_physics 3.00/max 37.69, weather::ground_system 1.33/max 2.35, physics::physics_simulate 1.12/max 7.65
+    ran alone: water::ripple_system 20.77, render::render_system 6.54, terrain::update_colliders 3.06, weather::ground_system 1.32; GPU passes 
+== route: face down | 0.1 s | 29.1 s / 4906 m | GPU busy 72
+  05:28:47 108 frames in 5.0 s: 46.3 ms per frame (21.6 fps), worst 110.6 ms
+    systems busy 51.8 ms per frame: 1.12 of 32 cores on average; schedules: FixedUpdate 29.38 (x1.2), Render 6.59 (x0.8), PostUpdate 5.89 (x0.8)
+    slowest: water::ripple_system 24.46/max 41.09, render::render_system 6.54/max 18.60, terrain::update_colliders 3.51/max 41.06, softbody::step_beside_physics 3.00/max 37.69, weather::ground_system 1.33/max 2.35, physics::physics_simulate 1.12/max 7.65
+    ran alone: water::ripple_system 20.77, render::render_system 6.54, terrain::update_colliders 3.06, weather::ground_system 1.32; GPU passes 
+== route: climb to orbit | 9.0 s | 38.1 s / 405875 m | GPU busy 64
+  05:28:47 108 frames in 5.0 s: 46.3 ms per frame (21.6 fps), worst 110.6 ms
+    systems busy 51.8 ms per frame: 1.12 of 32 cores on average; schedules: FixedUpdate 29.38 (x1.2), Render 6.59 (x0.8), PostUpdate 5.89 (x0.8)
+    slowest: water::ripple_system 24.46/max 41.09, render::render_system 6.54/max 18.60, terrain::update_colliders 3.51/max 41.06, softbody::step_beside_physics 3.00/max 37.69, weather::ground_system 1.33/max 2.35, physics::physics_simulate 1.12/max 7.65
+    ran alone: water::ripple_system 20.77, render::render_system 6.54, terrain::update_colliders 3.06, weather::ground_system 1.32; GPU passes 
+  05:28:52 225 frames in 5.0 s: 22.3 ms per frame (44.9 fps), worst 63.9 ms
+    systems busy 22.0 ms per frame: 0.98 of 32 cores on average; schedules: Render 7.48 (x1.0), FixedUpdate 6.28 (x1.3), Update 4.09 (x1.0)
+    slowest: render::render_system 7.43/max 53.34, water::ripple_system 2.77/max 22.71, script::run_scripts 1.33/max 14.75, softbody::step_beside_physics 0.48/max 22.75, physics::physics_simulate 0.48/max 1.58, audio::water_ambience 0.40/max 0.62
+    ran alone: render::render_system 7.43, water::ripple_system 2.42, script::run_scripts 1.33, core::propagate_transforms_system 0.39; GPU passes 14.79 (render CPU 10.96)
+  05:28:57 182 frames in 5.0 s: 27.5 ms per frame (36.4 fps), worst 64.9 ms
+    systems busy 28.2 ms per frame: 1.03 of 32 cores on average; schedules: FixedUpdate 14.50 (x1.4), Render 5.95 (x0.8), Update 3.56 (x0.8)
+    slowest: water::ripple_system 10.95/max 18.18, render::render_system 5.90/max 15.51, script::run_scripts 1.03/max 2.89, softbody::step_beside_physics 0.60/max 17.29, render::resolve_mesh_renderers 0.56/max 3.71, foliage::stream_far_woods 0.43/max 2.04
+    ran alone: water::ripple_system 10.30, render::render_system 5.90, script::run_scripts 1.03, render::resolve_mesh_renderers 0.55; GPU passes 
+== route: orbit | 6.0 s | 44.2 s / 418360 m | GPU busy 85
+  05:28:57 182 frames in 5.0 s: 27.5 ms per frame (36.4 fps), worst 64.9 ms
+    systems busy 28.2 ms per frame: 1.03 of 32 cores on average; schedules: FixedUpdate 14.50 (x1.4), Render 5.95 (x0.8), Update 3.56 (x0.8)
+    slowest: water::ripple_system 10.95/max 18.18, render::render_system 5.90/max 15.51, script::run_scripts 1.03/max 2.89, softbody::step_beside_physics 0.60/max 17.29, render::resolve_mesh_renderers 0.56/max 3.71, foliage::stream_far_woods 0.43/max 2.04
+    ran alone: water::ripple_system 10.30, render::render_system 5.90, script::run_scripts 1.03, render::resolve_mesh_renderers 0.55; GPU passes 
+  05:29:02 253 frames in 5.1 s: 20.0 ms per frame (50.1 fps), worst 62.8 ms
+    systems busy 23.8 ms per frame: 1.19 of 32 cores on average; schedules: Render 8.34 (x1.2), FixedUpdate 6.42 (x1.3), Update 4.98 (x1.2)
+    slowest: render::render_system 8.27/max 43.43, water::ripple_system 2.67/max 20.38, script::run_scripts 1.60/max 11.72, softbody::step_beside_physics 0.65/max 18.33, core::propagate_transforms_system 0.47/max 0.96, foliage::sync_scenery_trees 0.46/max 0.68
+    ran alone: render::render_system 8.27, water::ripple_system 2.30, script::run_scripts 1.60, core::propagate_transforms_system 0.47; GPU passes 14.79 (render CPU 10.09)
+== route: descend to 2 km | 10.6 s | 54.8 s / 1996 m | GPU busy 54
+  05:29:02 253 frames in 5.1 s: 20.0 ms per frame (50.1 fps), worst 62.8 ms
+    systems busy 23.8 ms per frame: 1.19 of 32 cores on average; schedules: Render 8.34 (x1.2), FixedUpdate 6.42 (x1.3), Update 4.98 (x1.2)
+    slowest: render::render_system 8.27/max 43.43, water::ripple_system 2.67/max 20.38, script::run_scripts 1.60/max 11.72, softbody::step_beside_physics 0.65/max 18.33, core::propagate_transforms_system 0.47/max 0.96, foliage::sync_scenery_trees 0.46/max 0.68
+    ran alone: render::render_system 8.27, water::ripple_system 2.30, script::run_scripts 1.60, core::propagate_transforms_system 0.47; GPU passes 14.79 (render CPU 10.09)
+  05:29:07 172 frames in 5.0 s: 29.1 ms per frame (34.4 fps), worst 65.5 ms
+    systems busy 24.1 ms per frame: 0.83 of 32 cores on average; schedules: FixedUpdate 12.07 (x1.3), Render 5.32 (x0.7), Update 3.12 (x0.7)
+    slowest: water::ripple_system 8.91/max 17.85, render::render_system 5.27/max 12.32, script::run_scripts 0.92/max 2.60, softbody::step_beside_physics 0.50/max 16.89, audio::water_ambience 0.40/max 0.60, foliage::stream_far_woods 0.36/max 2.06
+    ran alone: water::ripple_system 8.37, render::render_system 5.27, script::run_scripts 0.92, foliage::stream_far_woods 0.36; GPU passes 
+  05:29:12 207 frames in 5.1 s: 24.5 ms per frame (40.9 fps), worst 117.2 ms
+    systems busy 29.6 ms per frame: 1.21 of 32 cores on average; schedules: Render 9.87 (x1.2), FixedUpdate 8.70 (x1.6), Update 5.72 (x1.2)
+    slowest: render::render_system 9.80/max 28.43, water::ripple_system 2.86/max 27.24, script::run_scripts 1.69/max 14.72, physics::physics_simulate 1.08/max 2.65, softbody::step_beside_physics 0.70/max 27.29, terrain::update_colliders 0.58/max 26.49
+    ran alone: render::render_system 9.80, water::ripple_system 2.44, script::run_scripts 1.69, foliage::sync_scenery_trees 0.52; GPU passes 15.87 (render CPU 11.04)
+== route: turn home | 0.0 s | 54.8 s / 1975 m | GPU busy 60
+  05:29:12 207 frames in 5.1 s: 24.5 ms per frame (40.9 fps), worst 117.2 ms
+    systems busy 29.6 ms per frame: 1.21 of 32 cores on average; schedules: Render 9.87 (x1.2), FixedUpdate 8.70 (x1.6), Update 5.72 (x1.2)
+    slowest: render::render_system 9.80/max 28.43, water::ripple_system 2.86/max 27.24, script::run_scripts 1.69/max 14.72, physics::physics_simulate 1.08/max 2.65, softbody::step_beside_physics 0.70/max 27.29, terrain::update_colliders 0.58/max 26.49
+    ran alone: render::render_system 9.80, water::ripple_system 2.44, script::run_scripts 1.69, foliage::sync_scenery_trees 0.52; GPU passes 15.87 (render CPU 11.04)
+== route: cruise home | 12.1 s | 66.9 s / 1562 m | GPU busy 26
+  05:29:12 207 frames in 5.1 s: 24.5 ms per frame (40.9 fps), worst 117.2 ms
+    systems busy 29.6 ms per frame: 1.21 of 32 cores on average; schedules: Render 9.87 (x1.2), FixedUpdate 8.70 (x1.6), Update 5.72 (x1.2)
+    slowest: render::render_system 9.80/max 28.43, water::ripple_system 2.86/max 27.24, script::run_scripts 1.69/max 14.72, physics::physics_simulate 1.08/max 2.65, softbody::step_beside_physics 0.70/max 27.29, terrain::update_colliders 0.58/max 26.49
+    ran alone: render::render_system 9.80, water::ripple_system 2.44, script::run_scripts 1.69, foliage::sync_scenery_trees 0.52; GPU passes 15.87 (render CPU 11.04)
+  05:29:17 73 frames in 5.0 s: 68.9 ms per frame (14.5 fps), worst 121.6 ms
+    systems busy 60.1 ms per frame: 0.87 of 32 cores on average; schedules: FixedUpdate 35.69 (x1.5), Render 7.88 (x0.8), PostUpdate 5.33 (x0.8)
+    slowest: water::ripple_system 29.37/max 36.42, render::render_system 7.82/max 19.15, terrain::update_colliders 2.66/max 56.10, softbody::step_beside_physics 2.41/max 24.27, physics::physics_simulate 1.50/max 2.62, weather::ground_system 1.35/max 2.86
+    ran alone: water::ripple_system 25.94, render::render_system 7.82, terrain::update_colliders 2.27, weather::ground_system 1.32; GPU passes 
+  05:29:22 77 frames in 5.0 s: 64.9 ms per frame (15.4 fps), worst 112.1 ms
+    systems busy 75.4 ms per frame: 1.16 of 32 cores on average; schedules: FixedUpdate 43.92 (x1.0), Render 8.60 (x1.0), PostUpdate 6.97 (x1.0)
+    slowest: water::ripple_system 39.12/max 53.38, render::render_system 8.53/max 14.69, softbody::step_beside_physics 5.99/max 53.43, terrain::update_colliders 3.92/max 40.84, script::run_scripts 1.56/max 10.89, foliage::stream_far_woods 1.27/max 8.59
+    ran alone: water::ripple_system 32.23, render::render_system 8.53, terrain::update_colliders 3.45, script::run_scripts 1.56; GPU passes 16.15 (render CPU 13.37)
+== route: down to 100 m | 4.1 s | 71.0 s / 100 m | GPU busy 50
+  05:29:27 108 frames in 5.0 s: 46.3 ms per frame (21.6 fps), worst 101.7 ms
+    systems busy 49.3 ms per frame: 1.07 of 32 cores on average; schedules: FixedUpdate 30.04 (x1.2), Render 6.89 (x0.8), Update 4.20 (x0.8)
+    slowest: water::ripple_system 25.51/max 52.27, render::render_system 6.84/max 15.64, softbody::step_beside_physics 2.61/max 49.36, script::run_scripts 1.15/max 2.98, physics::physics_simulate 1.10/max 2.70, foliage::stream_far_woods 0.69/max 2.41
+    ran alone: water::ripple_system 22.18, render::render_system 6.84, script::run_scripts 1.15, foliage::stream_far_woods 0.69; GPU passes 
+== route: low pass | 10.1 s | 81.1 s / 575 m | GPU busy 66
+  05:29:32 154 frames in 5.0 s: 32.5 ms per frame (30.8 fps), worst 81.7 ms
+    systems busy 33.9 ms per frame: 1.04 of 32 cores on average; schedules: FixedUpdate 14.53 (x1.8), Render 8.57 (x1.0), Update 4.75 (x1.0)
+    slowest: render::render_system 8.52/max 43.23, water::ripple_system 8.14/max 52.14, softbody::step_beside_physics 1.54/max 52.20, script::run_scripts 1.51/max 11.81, physics::physics_simulate 1.23/max 2.61, audio::water_ambience 0.58/max 0.64
+    ran alone: render::render_system 8.52, water::ripple_system 6.54, script::run_scripts 1.51, movement::step_movers 0.56; GPU passes 18.18 (render CPU 13.53)
+  05:29:37 140 frames in 5.0 s: 36.0 ms per frame (27.8 fps), worst 73.8 ms
+    systems busy 37.6 ms per frame: 1.04 of 32 cores on average; schedules: FixedUpdate 18.33 (x2.0), Render 8.36 (x1.0), Update 4.57 (x1.0)
+    slowest: water::ripple_system 11.77/max 42.89, render::render_system 8.31/max 15.84, physics::physics_simulate 1.48/max 2.79, script::run_scripts 1.44/max 2.74, softbody::step_beside_physics 1.29/max 42.94, audio::water_ambience 0.59/max 0.63
+    ran alone: water::ripple_system 10.12, render::render_system 8.31, script::run_scripts 1.44, weather::ground_system 0.52; GPU passes 
+== route: end | 2.0 s | 83.1 s / 661 m | GPU busy n/a
+
+-- worst 25 frames in route.csv (frame_ms, leg, route s, m up, render CPU ms, terrain ms, patches missing, RAM MB)
+   250.00 ms  village            0.947 s       5 m  render CPU   37.42  terrain   1.62  missing  118  RAM 6069
+   250.00 ms  village            1.197 s       5 m  render CPU   29.08  terrain   1.55  missing  101  RAM 6069
+   250.00 ms  village            1.641 s       5 m  render CPU   21.31  terrain   1.14  missing  138  RAM 6069
+   250.00 ms  village            3.042 s       5 m  render CPU   17.50  terrain   1.57  missing  112  RAM 7212
+   250.00 ms  village            0.447 s       5 m  render CPU   57.54  terrain   1.46  missing   72  RAM 6069
+   250.00 ms  village            0.697 s       5 m  render CPU   90.23  terrain   1.09  missing  109  RAM 6069
+   227.69 ms  climb to 2 km     14.456 s     469 m  render CPU   17.38  terrain   0.84  missing    0  RAM 7092
+   197.11 ms  village            0.197 s       5 m  render CPU   49.18  terrain   1.24  missing   24  RAM 6069
+   176.65 ms  village            3.380 s       5 m  render CPU   16.98  terrain   1.74  missing    0  RAM 7212
+   139.99 ms  village            1.781 s       5 m  render CPU   28.97  terrain   1.86  missing  121  RAM 6069
+   121.80 ms  cruise home       59.648 s    1972 m  render CPU   11.16  terrain   0.98  missing    0  RAM 5218
+   119.27 ms  cruise home       55.774 s    1954 m  render CPU   15.80  terrain   1.69  missing  281  RAM 5364
+   117.13 ms  cruise home       55.310 s    1957 m  render CPU   16.36  terrain   2.75  missing  781  RAM 5364
+   115.70 ms  cruise home       59.452 s    1968 m  render CPU   10.73  terrain   2.15  missing    0  RAM 5218
+   112.90 ms  cruise home       60.351 s    1958 m  render CPU   13.52  terrain   1.90  missing    0  RAM 5215
+   111.97 ms  cruise home       61.179 s    1923 m  render CPU   12.37  terrain   2.26  missing    0  RAM 5194
+   110.71 ms  cruise at 2 km    17.981 s    2097 m  render CPU   17.72  terrain   1.44  missing    0  RAM 6694
+   110.52 ms  cruise at 2 km    27.445 s    4303 m  render CPU    8.78  terrain   0.87  missing    0  RAM 5254
+   108.78 ms  cruise at 2 km    27.335 s    4269 m  render CPU    9.26  terrain   0.97  missing    0  RAM 5254
+   108.51 ms  village            1.306 s       5 m  render CPU   31.01  terrain   2.48  missing  110  RAM 6069
+   105.55 ms  cruise at 2 km    27.551 s    4335 m  render CPU    9.61  terrain   0.79  missing    0  RAM 5254
+   103.77 ms  climb to 2 km     14.992 s     675 m  render CPU   19.43  terrain   2.41  missing    0  RAM 7092
+   102.56 ms  cruise home       62.417 s    1630 m  render CPU   14.85  terrain   2.08  missing    0  RAM 5087
+   101.65 ms  cruise at 2 km    21.848 s    2652 m  render CPU    8.92  terrain   0.96  missing    0  RAM 6207
+   101.64 ms  down to 100 m     67.099 s    1508 m  render CPU    9.20  terrain   1.05  missing    0  RAM 4905
+-- frames over 33 / 50 / 100 ms per leg (route.csv)
+  village           103 frames: over 33  103, over 50  101, over 100  10; median 62.7 ms; RAM 6,069-7,274 MB
+  face up             1 frames: over 33    1, over 50    1, over 100   0; median 67.7 ms; RAM 7,274-7,274 MB
+  climb to 2 km     130 frames: over 33  130, over 50  121, over 100   3; median 66.4 ms; RAM 6,769-7,317 MB
+  cruise at 2 km    183 frames: over 33  183, over 50  183, over 100   5; median 60.7 ms; RAM 4,958-6,769 MB
+  face down           1 frames: over 33    1, over 50    1, over 100   0; median 83.2 ms; RAM 4,958-4,958 MB
+  climb to orbit    331 frames: over 33   97, over 50   46, over 100   0; median 20.9 ms; RAM 4,958-5,216 MB
+  orbit             357 frames: over 33    5, over 50    3, over 100   0; median 16.1 ms; RAM 5,140-5,248 MB
+  descend to 2 km   392 frames: over 33   90, over 50   49, over 100   0; median 22.2 ms; RAM 5,190-5,291 MB
+  turn home           1 frames: over 33    0, over 50    0, over 100   0; median 23.1 ms; RAM 5,291-5,291 MB
+  cruise home       180 frames: over 33  180, over 50  177, over 100   8; median 62.9 ms; RAM 4,892-5,377 MB
+  down to 100 m     107 frames: over 33   51, over 50   34, over 100   1; median 29.4 ms; RAM 4,905-4,927 MB
+  low pass          282 frames: over 33  121, over 50   54, over 100   0; median 30.4 ms; RAM 4,922-5,050 MB
+  end                97 frames: over 33   10, over 50    8, over 100   0; median 17.0 ms; RAM 4,974-4,976 MB
+-- slow render frame lines (stderr)
+2026-11-03T05:28:01.657695 2916 ms of render steps (usually 0.0): prepare on the render thread 2029.5, probe gi 703.5, prepare foliage scenery 92.9, view 25.8, prepare meshes 17.1, prepare grass 12.0 (inside: meshes: pipelines 1969.0, meshes: upload 58.6, mesh
+2026-11-03T05:28:02.776665 874 ms of render steps (usually 0.0): prepare on the render thread 844.9, submit 7.6, prepare meshes 7.1, probe gi 3.2, prepare space bodies 2.6, prepare terrain 2.0 (inside: meshes: pipelines 843.7, meshes: clusters 5.4, meshes: syn
+2026-11-03T05:28:05.392360 2109 ms of render steps (usually 0.0): prepare meshes 2078.6, probe gi 14.7, prepare softbody 4.7, prepare terrain 1.5, prepare on the render thread 1.4, surface weather 1.3 (inside: meshes: materials 2068.9, meshes: clusters 4.2, me
+2026-11-03T05:28:09.505413 59 ms of render steps (usually 0.0): prepare character 37.6, prepare meshes 8.2, probe gi 2.4, prepare softbody 2.0, subsurface scattering 1.7, prepare on the render thread 1.5; GPU work queued in the 3 frames before: 51.0 MB uploade
+2026-11-03T05:28:24.843059 63 ms of render steps (usually 17.6): screenshot save 44.2, prepare meshes 6.0, prepare on the render thread 1.9, probe gi 1.2, surface weather 1.1, wait for the finishing threads 1.1; GPU work queued in the 3 frames before: 44.4 MB 
+2026-11-03T05:28:47.340541 63 ms of render steps (usually 9.9): screenshot save 53.3, prepare meshes 2.3, prepare terrain 1.8, probe gi 1.2, prepare on the render thread 1.0, wait for the finishing threads 0.8; GPU work queued in the 3 frames before: 0.9 MB up
+2026-11-03T05:29:00.857435 52 ms of render steps (usually 9.8): screenshot save 43.2, prepare meshes 2.6, probe gi 1.0, prepare on the render thread 0.9, wait for the finishing threads 0.8, submit 0.7; GPU work queued in the 3 frames before: 0.1 MB uploaded, 0
+2026-11-03T05:29:23.615588 55 ms of render steps (usually 13.5): screenshot save 40.0, prepare meshes 3.5, prepare on the render thread 2.0, probe gi 1.5, prepare terrain 1.2, wait for the finishing threads 1.0; GPU work queued in the 3 frames before: 0.1 MB u
+2026-11-03T05:29:27.719156 60 ms of render steps (usually 12.5): screenshot save 42.6, probe gi 6.1, prepare meshes 2.8, wait for the finishing threads 2.1, prepare terrain 1.9, prepare on the render thread 1.7; GPU work queued in the 3 frames before: 1.4 MB u
