@@ -13,10 +13,11 @@
 //! around it meet without doubling up.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use engine_assets::{Assets, Handle};
 use engine_core::prelude::*;
+use engine_core::tasks::AsyncComputeTaskPool;
 use engine_render::{Camera, DitherFade, Mesh, MeshRenderer, NoVirtualGeometry, StandardMaterial};
 use engine_world::{ForestCover, Ground, WorldShift};
 
@@ -43,9 +44,11 @@ pub struct FarWoods {
     /// closer than `min_spacing_m`.
     pub spacing_per_m: f32,
     pub min_spacing_m: f32,
-    /// Worker threads building cells (0: build up to `cells_per_frame` cells in the frame).
+    /// Cells building at once on the async task pool (0, or no pool: build up to
+    /// `cells_per_frame` cells in the frame itself, as tests do).
     pub background_builds: u32,
-    /// Most cells built per frame when `background_builds` is 0.
+    /// Most cells built per frame when `background_builds` is 0, and most finished cells put
+    /// in place per frame (nearest first) when it isn't.
     pub cells_per_frame: u32,
     /// More places far woods leave alone: no far woods within `radius` meters of `center`
     /// (world X/Z). Ground under [`SceneryTree`]s needs none: it is kept clear on its own.
@@ -68,7 +71,7 @@ impl Default for FarWoods {
             cell_m: 256.0,
             spacing_per_m: 0.01,
             min_spacing_m: 6.0,
-            background_builds: 2,
+            background_builds: 4,
             cells_per_frame: 6,
             keep_clear: Vec::new(),
         }
@@ -427,7 +430,7 @@ impl Occupied {
     }
 }
 
-/// A cell being built on a worker thread.
+/// A cell being built on the task pool.
 struct Pending {
     epoch: u64,
     band: i32,
@@ -437,24 +440,44 @@ struct Pending {
     build: Build,
 }
 
-/// A cell's build: on a worker thread, or done in the frame.
+/// A cell's meshes: `None` while building, then `Some` (empty if the build panicked).
+type Parts = Vec<(FarTree, Mesh)>;
+
+/// A cell's build: on the task pool, or done in the frame.
 enum Build {
-    Running(std::thread::JoinHandle<Vec<(FarTree, Mesh)>>),
-    Ready(Vec<(FarTree, Mesh)>),
+    Running(Arc<Mutex<Option<Option<Parts>>>>),
+    Ready(Parts),
 }
 
 impl Build {
+    /// Build on the pool when there is one, else at once.
+    fn start(job: CellJob, pool: Option<&AsyncComputeTaskPool>) -> Self {
+        let Some(pool) = pool else {
+            return Build::Ready(job.run());
+        };
+        let slot = Arc::new(Mutex::new(None));
+        let out = slot.clone();
+        pool.spawn(async move {
+            let parts = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| job.run()));
+            if let Ok(mut s) = out.lock() {
+                *s = Some(parts.ok());
+            }
+        })
+        .detach();
+        Build::Running(slot)
+    }
+
     fn is_done(&self) -> bool {
         match self {
-            Build::Running(h) => h.is_finished(),
+            Build::Running(slot) => slot.lock().is_ok_and(|s| s.is_some()),
             Build::Ready(_) => true,
         }
     }
 
-    /// The finished meshes (`None` if the worker panicked).
-    fn take(self) -> Option<Vec<(FarTree, Mesh)>> {
+    /// The finished meshes (`None` if the build panicked).
+    fn take(self) -> Option<Parts> {
         match self {
-            Build::Running(h) => h.join().ok(),
+            Build::Running(slot) => slot.lock().ok().and_then(|mut s| s.take()).flatten(),
             Build::Ready(parts) => Some(parts),
         }
     }
@@ -625,10 +648,11 @@ pub fn fade_far_cells(
 }
 
 /// Stream the cells around the camera: drop those out of range, build missing ones and
-/// rebuild those that want another spacing, nearest first: on `background_builds` worker
-/// threads (the terrain's answers cost tens of microseconds each), or a few a frame in the
-/// frame itself when that is 0.
-#[allow(clippy::too_many_arguments)]
+/// rebuild those that want another spacing, nearest first: `background_builds` at a time on
+/// the async task pool (the terrain's answers cost tens of microseconds each, and a jump to a
+/// new place wants a thousand cells: built in the frame, that held it for a second), or a few
+/// a frame in the frame itself when that is 0. Finished cells go in place a few a frame.
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub fn stream_far_woods(
     mut commands: Commands,
     settings: Res<FarWoods>,
@@ -643,10 +667,11 @@ pub fn stream_far_woods(
     mut removed: RemovedComponents<SceneryTree>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
-    (fades, incoming, ghosts): (
+    (fades, incoming, ghosts, mut loading): (
         Res<crate::lod_fade::LodFades>,
         Query<&CellFadeIn>,
         Query<Entity, With<CellGhost>>,
+        Option<ResMut<crate::loading::FoliageLoading>>,
     ),
 ) {
     let smooth = fades.settled();
@@ -791,12 +816,13 @@ pub fn stream_far_woods(
     }
     todo.sort_by(|a, b| a.0.total_cmp(&b.0));
     let epoch = state.epoch;
-    let threads = settings.background_builds as usize;
-    let room = if threads > 0 {
-        threads.saturating_sub(state.pending.len())
+    let pool = AsyncComputeTaskPool::try_get().filter(|_| settings.background_builds > 0);
+    let room = if pool.is_some() {
+        (settings.background_builds as usize).saturating_sub(state.pending.len())
     } else {
         settings.cells_per_frame as usize
     };
+    let backlog = todo.len().saturating_sub(room);
     for (_, key, b) in todo.into_iter().take(room) {
         let job = CellJob {
             origin: corner(key),
@@ -812,11 +838,7 @@ pub fn stream_far_woods(
             cover: cover.0.clone(),
             ground: ground.as_deref().cloned(),
         };
-        let build = if threads > 0 {
-            Build::Running(std::thread::spawn(move || job.run()))
-        } else {
-            Build::Ready(job.run())
-        };
+        let build = Build::start(job, pool);
         state.pending.insert(
             key,
             Pending {
@@ -828,14 +850,21 @@ pub fn stream_far_woods(
             },
         );
     }
-    // Place the cells whose builds are done.
-    let done: Vec<_> = state
+    // Place the cells whose builds are done, nearest first and a few a frame (all at once when
+    // they were built in the frame).
+    let mut done: Vec<_> = state
         .pending
         .iter()
         .filter(|(_, p)| p.build.is_done())
-        .map(|(&k, _)| k)
+        .map(|(&k, _)| (flat_distance(center(k)), k))
         .collect();
-    for key in done {
+    done.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let place = if pool.is_some() {
+        settings.cells_per_frame as usize
+    } else {
+        usize::MAX
+    };
+    for (_, key) in done.into_iter().take(place) {
         let p = state.pending.remove(&key).expect("pending cell");
         let Some(parts) = p.build.take() else {
             continue;
@@ -897,6 +926,12 @@ pub fn stream_far_woods(
             epoch: p.epoch,
         });
         state.cells.insert(key, e);
+    }
+    if let Some(loading) = loading.as_mut() {
+        let building = state.pending.len() + backlog;
+        if loading.far_building != building {
+            loading.far_building = building;
+        }
     }
 }
 
@@ -1102,8 +1137,12 @@ mod tests {
         );
         let after = app.world.resource::<Assets<Mesh>>().len();
         assert!(after <= meshes + meshes / 10, "{after} vs {meshes}");
-        // On worker threads (the default): the same cells arrive over a few frames.
+        // On the task pool (the default): the same cells arrive over a few frames, and count
+        // as foliage loading while they build.
+        engine_core::tasks::init_task_pools();
         app.world.resource_mut::<FarWoods>().background_builds = 2;
+        app.update();
+        assert!(!app.world.resource::<crate::FoliageLoading>().is_ready());
         let mut frames = 0;
         while cells
             .iter(&app.world)
