@@ -102,6 +102,13 @@ fn ray_triangle(origin: vec3<f32>, dir: vec3<f32>, t: u32) -> f32 {
     return select(NO_HIT, d, d > 0.0);
 }
 
+// Both hierarchies are walked nearest child first (Aila and Laine, "Understanding the Efficiency
+// of Ray Traversal on GPUs", HPG 2009): an inner node tests both children's boxes, goes on into
+// the nearer one and keeps the farther one on the stack with where the ray enters it, skipped
+// when popped if a hit nearer than that was found meanwhile. A ray through a crowd of trees
+// finds the near leaves first and leaves the far crowns unopened. The stack holds the node and
+// the entry distance's bits.
+
 // The nearest triangle of instance `i` along an anchor-relative ray, if nearer than `best`.
 // `first_hit`: stop at the first hit (shadow rays).
 fn trace_instance(i: u32, origin_rel: vec3<f32>, dir_rel: vec3<f32>, first_hit: bool, best: ptr<function, Hit>) {
@@ -113,15 +120,12 @@ fn trace_instance(i: u32, origin_rel: vec3<f32>, dir_rel: vec3<f32>, first_hit: 
     let dir = vec3<f32>(dot(inst.to_local_x, d4), dot(inst.to_local_y, d4), dot(inst.to_local_z, d4));
     let inv = safe_inverse(dir);
     let root = inst.mesh.x;
-    var stack: array<u32, STACK>;
-    var top = 1u;
-    stack[0] = root;
+    if (ray_box(origin, inv, blas[root].min, blas[root].max, (*best).t) >= NO_HIT) { return; }
+    var stack: array<vec2<u32>, STACK>;
+    var top = 0u;
+    var index = root;
     loop {
-        if (top == 0u) { break; }
-        top -= 1u;
-        let index = stack[top];
         let node = blas[index];
-        if (ray_box(origin, inv, node.min, node.max, (*best).t) >= NO_HIT) { continue; }
         if (node.count > 0u) {
             for (var k = 0u; k < node.count; k++) {
                 let tri = inst.mesh.y + node.right_or_first + k;
@@ -133,12 +137,36 @@ fn trace_instance(i: u32, origin_rel: vec3<f32>, dir_rel: vec3<f32>, first_hit: 
                     if (first_hit) { return; }
                 }
             }
-        } else if (top + 2u <= STACK) {
+        } else {
             // Children: the left one right after its parent, the right one where it says.
-            stack[top] = root + node.right_or_first;
-            stack[top + 1u] = index + 1u;
-            top += 2u;
+            let a = index + 1u;
+            let b = root + node.right_or_first;
+            let ta = ray_box(origin, inv, blas[a].min, blas[a].max, (*best).t);
+            let tb = ray_box(origin, inv, blas[b].min, blas[b].max, (*best).t);
+            if (ta < NO_HIT && tb < NO_HIT) {
+                let a_first = ta <= tb;
+                if (top < STACK) {
+                    stack[top] = vec2<u32>(select(a, b, a_first), bitcast<u32>(max(ta, tb)));
+                    top += 1u;
+                }
+                index = select(b, a, a_first);
+                continue;
+            }
+            if (ta < NO_HIT) { index = a; continue; }
+            if (tb < NO_HIT) { index = b; continue; }
         }
+        // The nearest pending node still in front of the best hit.
+        var next = false;
+        loop {
+            if (top == 0u) { break; }
+            top -= 1u;
+            if (bitcast<f32>(stack[top].y) < (*best).t) {
+                index = stack[top].x;
+                next = true;
+                break;
+            }
+        }
+        if (!next) { break; }
     }
 }
 
@@ -151,25 +179,45 @@ fn trace_scene(origin: vec3<f32>, dir: vec3<f32>, t_max: f32, first_hit: bool) -
     if (u32(pass_.params.z) == 0u) { return best; }
     let o = origin - pass_.anchor.xyz;
     let inv = safe_inverse(dir);
-    var stack: array<u32, STACK>;
-    var top = 1u;
-    stack[0] = 0u;
+    if (ray_box(o, inv, tlas[0].min, tlas[0].max, best.t) >= NO_HIT) { return best; }
+    var stack: array<vec2<u32>, STACK>;
+    var top = 0u;
+    var index = 0u;
     loop {
-        if (top == 0u) { break; }
-        top -= 1u;
-        let index = stack[top];
         let node = tlas[index];
-        if (ray_box(o, inv, node.min, node.max, best.t) >= NO_HIT) { continue; }
         if (node.count > 0u) {
             for (var k = 0u; k < node.count; k++) {
                 trace_instance(node.right_or_first + k, o, dir, first_hit, &best);
                 if (first_hit && best.instance != 0xffffffffu) { return best; }
             }
-        } else if (top + 2u <= STACK) {
-            stack[top] = node.right_or_first;
-            stack[top + 1u] = index + 1u;
-            top += 2u;
+        } else {
+            let a = index + 1u;
+            let b = node.right_or_first;
+            let ta = ray_box(o, inv, tlas[a].min, tlas[a].max, best.t);
+            let tb = ray_box(o, inv, tlas[b].min, tlas[b].max, best.t);
+            if (ta < NO_HIT && tb < NO_HIT) {
+                let a_first = ta <= tb;
+                if (top < STACK) {
+                    stack[top] = vec2<u32>(select(a, b, a_first), bitcast<u32>(max(ta, tb)));
+                    top += 1u;
+                }
+                index = select(b, a, a_first);
+                continue;
+            }
+            if (ta < NO_HIT) { index = a; continue; }
+            if (tb < NO_HIT) { index = b; continue; }
         }
+        var next = false;
+        loop {
+            if (top == 0u) { break; }
+            top -= 1u;
+            if (bitcast<f32>(stack[top].y) < best.t) {
+                index = stack[top].x;
+                next = true;
+                break;
+            }
+        }
+        if (!next) { break; }
     }
     return best;
 }

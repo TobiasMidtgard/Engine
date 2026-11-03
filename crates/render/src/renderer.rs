@@ -362,6 +362,10 @@ pub struct Renderer {
     returned: Option<RenderReturn>,
     /// Each `ExtraView` camera's own resources and history, by camera.
     extra_views: HashMap<Entity, ExtraViewState>,
+    /// The `render.extra_views_gpu.<pass>` keys the extra views set last.
+    extra_view_passes: std::collections::HashSet<String>,
+    /// When the extra views' GPU passes were last logged.
+    extra_view_logged: Option<Instant>,
     /// Main-thread time this frame in `queue.submit` (extra views submit there), for
     /// `render.extract_wait_ms`.
     main_thread_submit_ms: f64,
@@ -1055,6 +1059,8 @@ impl Renderer {
             borrowed: view.borrowed,
             returned: None,
             extra_views: HashMap::new(),
+            extra_view_passes: Default::default(),
+            extra_view_logged: None,
             main_thread_submit_ms: 0.0,
             probe_gi,
             static_requests: [false; SHADOW_MAPS],
@@ -1406,6 +1412,9 @@ impl Renderer {
                         d.set(key, 0.0);
                     }
                 }
+                for gone in self.extra_view_passes.drain() {
+                    d.set(&gone, 0.0);
+                }
             }
             return Vec::new();
         }
@@ -1418,6 +1427,7 @@ impl Renderer {
         let mut composites = Vec::new();
         let mut gpu_ms = 0.0;
         let mut shared_lighting = 0;
+        let mut passes: HashMap<String, f32> = HashMap::new();
         // The main view's state is in place until the first swap.
         let main_lighting = self.lighting_to_share();
         for (camera, _, _, extra, viewport, portal, mirror) in views {
@@ -1524,6 +1534,11 @@ impl Renderer {
             let texture = self.targets.ldr.texture.clone();
             self.swap_view(&mut state.view);
             gpu_ms += state.view.perf.gpu_ms.unwrap_or(0.0);
+            for (name, ms) in state.view.perf.gpu_passes().0 {
+                *passes
+                    .entry(format!("render.extra_views_gpu.{name}"))
+                    .or_insert(0.0) += *ms;
+            }
 
             let registered = state.image.as_ref().map(|(i, t)| (*i, t));
             if registered != image.map(|i| (i, &texture)) {
@@ -1544,7 +1559,46 @@ impl Renderer {
             }
             self.extra_views.insert(camera, state);
         }
-        if let Some(mut d) = world.get_resource_mut::<Diagnostics>() {
+        {
+            // Each GPU pass of the extra views together (`render.extra_views_gpu.<pass>`), to
+            // see what a mirror's or a portal's picture spends its time on.
+            let every = world
+                .get_resource::<RenderSettings>()
+                .map_or(0.0, |s| s.perf_log_secs);
+            if every > 0.0
+                && self
+                    .extra_view_logged
+                    .is_none_or(|t| t.elapsed().as_secs_f32() >= every)
+            {
+                self.extra_view_logged = Some(Instant::now());
+                let mut rows: Vec<_> = passes.iter().filter(|r| *r.1 >= 0.05).collect();
+                rows.sort_by(|a, b| b.1.total_cmp(a.1));
+                let rows: Vec<String> = rows
+                    .iter()
+                    .map(|(k, ms)| {
+                        let name = k.trim_start_matches("render.extra_views_gpu.");
+                        format!("{name} {ms:.2}")
+                    })
+                    .collect();
+                tracing::info!(
+                    "extra views: {} ({} sharing the main view's lighting), GPU {gpu_ms:.2} ms: {}",
+                    self.extra_views.len(),
+                    shared_lighting,
+                    rows.join(", ")
+                );
+            }
+            let Some(mut d) = world.get_resource_mut::<Diagnostics>() else {
+                return composites;
+            };
+            let mut now = std::collections::HashSet::new();
+            for (key, ms) in passes {
+                d.set(&key, ms as f64);
+                now.insert(key);
+            }
+            for gone in self.extra_view_passes.difference(&now) {
+                d.set(gone, 0.0);
+            }
+            self.extra_view_passes = now;
             d.set("render.extra_views", self.extra_views.len() as f64);
             d.set(
                 "render.extra_views_ms",
