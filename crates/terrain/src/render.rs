@@ -8,7 +8,7 @@ use std::sync::{Arc, Condvar, Mutex};
 
 use bytemuck::{Pod, Zeroable};
 use engine_core::diagnostics::Diagnostics;
-use engine_core::math::{DQuat, DVec3, IVec2, Mat3, Vec3};
+use engine_core::math::{DQuat, DVec3, IVec2, Mat3, UVec2, Vec3};
 use engine_core::prelude::*;
 use engine_render::features::{
     FeatureStats, FrameContext, GpuShared, GrowBuffer, RenderFeature, RenderPhase,
@@ -47,6 +47,9 @@ const MAX_UPLOADS_PER_FRAME: usize = 64;
 const UPLOAD_BUDGET_MS: f64 = 1.5;
 /// Patches always uploaded in a frame, whatever the time.
 const MIN_UPLOADS_PER_FRAME: usize = 8;
+/// Frames over which the weather's surface layers are sent to the GPU again, a band of rows
+/// at a time.
+const SURFACE_UPLOAD_FRAMES: u32 = 6;
 /// Patches a planet keeps queued for the workers at most (the most urgent).
 const MAX_QUEUED: usize = 256;
 
@@ -208,6 +211,9 @@ struct MapsGpu {
     /// Where the deformation grid's window starts in its texture (it wraps around): as a share
     /// of the texture, and in cells.
     deform_base: [f32; 4],
+    /// Where the surface layers' grid starts in its texture (it wraps around,
+    /// [`SurfaceUpload`]): as a share of the texture, unused.
+    surface_base: [f32; 4],
 }
 
 /// A print the shader draws sharp. Matches `Print` in terrain.wgsl.
@@ -518,11 +524,16 @@ struct SlotPool {
 
 impl SlotPool {
     fn alloc(&mut self, device: &wgpu::Device, max: u32) -> Option<u32> {
-        if let Some(s) = self.free.pop() {
-            return Some(s);
+        if self.free.is_empty() {
+            self.grow(device, max);
         }
+        self.free.pop()
+    }
+
+    /// Add a page of free slots (none past `max`).
+    fn grow(&mut self, device: &wgpu::Device, max: u32) {
         if self.capacity + SLOTS_PER_PAGE > max.max(SLOTS_PER_PAGE) {
-            return None;
+            return;
         }
         let page = self.pages.len() as u32;
         self.pages
@@ -537,8 +548,7 @@ impl SlotPool {
         self.capacity += SLOTS_PER_PAGE;
         // Hand out slots low to high.
         self.free
-            .extend((page * SLOTS_PER_PAGE + 1..(page + 1) * SLOTS_PER_PAGE).rev());
-        Some(page * SLOTS_PER_PAGE)
+            .extend((page * SLOTS_PER_PAGE..(page + 1) * SLOTS_PER_PAGE).rev());
     }
 
     fn release(&mut self, slot: u32) {
@@ -585,12 +595,11 @@ pub struct TerrainFeature {
     deform_generation: u64,
     /// The footprint grid the texture holds ([`DeformationMap::epoch`]).
     deform_epoch: u64,
-    surface_frame: u64,
+    /// What the weather layers' texture holds ([`SurfaceUpload`]).
+    surface: SurfaceUpload,
     /// The paths drawn: terrain, region, window corner (cells), generation.
     wear_window: Option<(Entity, usize, IVec2, IVec2, u64)>,
     wear_frame: u64,
-    /// Wetness and snow depth beyond the surface layers' grid (see [`beyond_grid`]).
-    surface_far: [f32; 2],
     frame: u64,
     stats: FeatureStats,
     built_last_frame: usize,
@@ -603,6 +612,162 @@ pub struct TerrainFeature {
 /// How wet and snowy the ground is beyond the weather's grid around the player: like the open
 /// ground along the grid's rim. The upper quartile of its last few cells, so shelters, fires
 /// and the strip a move has just uncovered (empty until the weather fills it) don't count.
+/// The weather's surface layers on the GPU (wetness, puddles, snow, scorch: a grid that
+/// follows the focus, `engine_world::SurfaceLayers`). The texture wraps around, as a clipmap's
+/// does (Asirvatham and Hoppe, "Terrain Rendering Using GPU-Based Geometry Clipmaps", GPU Gems
+/// 2, ch. 2): when the grid moves, its cells keep their texels and only the strips that came
+/// into it are sent. The rest goes a band of rows a frame ([`SURFACE_UPLOAD_FRAMES`]), and only
+/// where a value changed, so neither the weather's slow changes nor flying cost a spike.
+#[derive(Default)]
+struct SurfaceUpload {
+    /// The grid's origin when last sent.
+    origin: Option<DVec2>,
+    /// The texel of the grid's cell (0, 0).
+    base: UVec2,
+    /// The half floats in the texture, texel by texel (4 a texel).
+    sent: Vec<u16>,
+    /// The next band's first texel row.
+    row: u32,
+    /// Wetness and snow depth beyond the grid (see [`beyond_grid`]).
+    far: [f32; 2],
+}
+
+impl SurfaceUpload {
+    fn update(
+        &mut self,
+        g: &Grid2<SurfaceCell>,
+        fresh: bool,
+        tex: &wgpu::Texture,
+        queue: &wgpu::Queue,
+    ) {
+        let w = g.width;
+        for [x, y, cw, ch] in self.refresh(g, fresh) {
+            queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: tex,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d { x, y, z: 0 },
+                    aspect: wgpu::TextureAspect::All,
+                },
+                bytemuck::cast_slice(&self.sent),
+                wgpu::TexelCopyBufferLayout {
+                    offset: ((y * w + x) * 8) as u64,
+                    bytes_per_row: Some(w * 8),
+                    rows_per_image: Some(ch),
+                },
+                wgpu::Extent3d {
+                    width: cw,
+                    height: ch,
+                    depth_or_array_layers: 1,
+                },
+            );
+        }
+    }
+
+    /// Bring `sent` up to date for this frame; the texel rectangles to send (x, y, w, h).
+    fn refresh(&mut self, g: &Grid2<SurfaceCell>, fresh: bool) -> Vec<[u32; 4]> {
+        let (w, h) = (g.width, g.height);
+        if w == 0 || h == 0 {
+            return Vec::new();
+        }
+        // The move in whole cells, if it keeps some of the grid.
+        let shift = self.origin.and_then(|o| {
+            let s = (g.origin - o) / g.cell as f64;
+            let r = s.round();
+            ((s - r).abs().max_element() < 1e-3 && r.x.abs() < w as f64 && r.y.abs() < h as f64)
+                .then(|| IVec2::new(r.x as i32, r.y as i32))
+        });
+        let n = (w * h) as usize * 4;
+        let mut rects: Vec<[u32; 4]> = Vec::new();
+        match shift {
+            Some(d) if !fresh && self.sent.len() == n => {
+                if d != IVec2::ZERO {
+                    self.base = UVec2::new(
+                        (self.base.x as i32 + d.x).rem_euclid(w as i32) as u32,
+                        (self.base.y as i32 + d.y).rem_euclid(h as i32) as u32,
+                    );
+                    self.origin = Some(g.origin);
+                    // The columns and rows that came in (grid cells), as texel spans.
+                    let span = |d: i32, size: u32, base: u32| -> Option<(u32, u32)> {
+                        let (from, len) = if d > 0 {
+                            (size - d as u32, d as u32)
+                        } else if d < 0 {
+                            (0, (-d) as u32)
+                        } else {
+                            return None;
+                        };
+                        Some(((from + base) % size, len))
+                    };
+                    if let Some((x0, len)) = span(d.x, w, self.base.x) {
+                        self.convert(g, [x0, 0, len, h]);
+                        split_wrap(x0, len, w, |x, cw| rects.push([x, 0, cw, h]));
+                    }
+                    if let Some((y0, len)) = span(d.y, h, self.base.y) {
+                        self.convert(g, [0, y0, w, len]);
+                        split_wrap(y0, len, h, |y, ch| rects.push([0, y, w, ch]));
+                    }
+                }
+                let band = h.div_ceil(SURFACE_UPLOAD_FRAMES);
+                let (y0, y1) = (self.row, (self.row + band).min(h));
+                self.row = if y1 >= h { 0 } else { y1 };
+                if self.convert(g, [0, y0, w, y1 - y0]) {
+                    rects.push([0, y0, w, y1 - y0]);
+                }
+                if self.row == 0 {
+                    self.far = beyond_grid(g);
+                }
+            }
+            _ => {
+                self.origin = Some(g.origin);
+                self.base = UVec2::ZERO;
+                self.row = 0;
+                self.sent.clear();
+                self.sent.resize(n, 0);
+                self.convert(g, [0, 0, w, h]);
+                rects.push([0, 0, w, h]);
+                self.far = beyond_grid(g);
+            }
+        }
+        rects
+    }
+
+    /// Convert the grid's cells in a rectangle of texels (it may wrap around) into `sent`.
+    /// True when any changed.
+    fn convert(&mut self, g: &Grid2<SurfaceCell>, [x0, y0, cw, ch]: [u32; 4]) -> bool {
+        let (w, h) = (g.width, g.height);
+        let mut changed = false;
+        for ty in (y0..y0 + ch).map(|y| y % h) {
+            let gy = (ty + h - self.base.y) % h;
+            let row = &g.data[(gy * w) as usize..((gy + 1) * w) as usize];
+            for tx in (x0..x0 + cw).map(|x| x % w) {
+                let c = &row[((tx + w - self.base.x) % w) as usize];
+                let half = [
+                    f16_bits(c.wetness),
+                    f16_bits(c.puddle_m),
+                    f16_bits(c.snow_m),
+                    f16_bits(c.scorch),
+                ];
+                let at = ((ty * w + tx) * 4) as usize;
+                if self.sent[at..at + 4] != half {
+                    self.sent[at..at + 4].copy_from_slice(&half);
+                    changed = true;
+                }
+            }
+        }
+        changed
+    }
+}
+
+/// `f(start, len)` for the one or two runs a span of `len` from `start` takes in `0..size`
+/// (it wraps around).
+fn split_wrap(start: u32, len: u32, size: u32, mut f: impl FnMut(u32, u32)) {
+    let first = len.min(size - start);
+    f(start, first);
+    if len > first {
+        f(0, len - first);
+    }
+}
+
 fn beyond_grid(g: &Grid2<SurfaceCell>) -> [f32; 2] {
     let ring = 4.min(g.width / 2).min(g.height / 2);
     let (mut wet, mut snow) = (Vec::new(), Vec::new());
@@ -1069,6 +1234,7 @@ impl TerrainFeature {
         world: &mut World,
         gpu_shared: &GpuShared,
         view: &ViewData,
+        steps: &mut Steps,
     ) -> MapsGpu {
         let mut maps = MapsGpu::default();
         let mut recreate = false;
@@ -1224,6 +1390,7 @@ impl TerrainFeature {
             ];
             maps.flags[0] = 1.0;
         }
+        steps.mark("maps: footprints");
         // Wetness, puddles, snow and scorch from the weather (every few frames).
         if let Some(layers) = world.get_resource::<SurfaceLayers>() {
             let g = &layers.grid;
@@ -1250,37 +1417,8 @@ impl TerrainFeature {
                 gpu.surface_tex = Some((tex, view, g.width, g.height));
                 recreate = true;
             }
-            if fresh || self.frame >= self.surface_frame + 6 {
-                self.surface_frame = self.frame;
-                self.surface_far = beyond_grid(g);
-                let mut data = Vec::with_capacity(g.data.len() * 4);
-                for c in &g.data {
-                    data.push(f16_bits(c.wetness));
-                    data.push(f16_bits(c.puddle_m));
-                    data.push(f16_bits(c.snow_m));
-                    data.push(f16_bits(c.scorch));
-                }
-                let tex = &gpu.surface_tex.as_ref().expect("texture").0;
-                gpu_shared.queue.write_texture(
-                    wgpu::TexelCopyTextureInfo {
-                        texture: tex,
-                        mip_level: 0,
-                        origin: wgpu::Origin3d::ZERO,
-                        aspect: wgpu::TextureAspect::All,
-                    },
-                    bytemuck::cast_slice(&data),
-                    wgpu::TexelCopyBufferLayout {
-                        offset: 0,
-                        bytes_per_row: Some(g.width * 8),
-                        rows_per_image: Some(g.height),
-                    },
-                    wgpu::Extent3d {
-                        width: g.width,
-                        height: g.height,
-                        depth_or_array_layers: 1,
-                    },
-                );
-            }
+            let tex = &gpu.surface_tex.as_ref().expect("texture").0;
+            self.surface.update(g, fresh, tex, &gpu_shared.queue);
             maps.surface = [
                 (g.origin.x - view.origin.x) as f32,
                 (g.origin.y - view.origin.z) as f32,
@@ -1288,10 +1426,19 @@ impl TerrainFeature {
                 g.width as f32,
             ];
             maps.flags[1] = 1.0;
-            maps.far = [self.surface_far[0], 0.0, self.surface_far[1], 0.0];
+            maps.far = [self.surface.far[0], 0.0, self.surface.far[1], 0.0];
+            maps.surface_base = [
+                self.surface.base.x as f32 / g.width as f32,
+                self.surface.base.y as f32 / g.height as f32,
+                0.0,
+                0.0,
+            ];
         }
+        steps.mark("maps: weather");
         recreate |= self.upload_wear(world, gpu_shared, view, &mut maps);
+        steps.mark("maps: worn paths");
         recreate |= self.upload_paint_map(world, gpu_shared, view, &mut maps);
+        steps.mark("maps: paint");
         let gpu = self.gpu.as_mut().expect("gpu");
         // Placeholders so the bind group is always complete.
         for (label, slot) in [("deform", 0usize), ("surface", 1usize), ("wear", 2usize)] {
@@ -1851,8 +1998,8 @@ impl RenderFeature for TerrainFeature {
         settings.split_factor *= reach.sqrt();
         settings.patch_budget = (settings.patch_budget as f64 * reach).round() as usize;
         let mut steps = Steps::start();
-        let maps = self.upload_maps(world, gpu_shared, view);
-        steps.mark("maps");
+        let maps = self.upload_maps(world, gpu_shared, view, &mut steps);
+        steps.mark("maps: bind group");
         let Some(terrains) = world.get_resource::<Terrains>() else {
             return;
         };
@@ -1919,6 +2066,17 @@ impl RenderFeature for TerrainFeature {
         // Put the patches the workers finished into vertex slots, a few a frame.
         let workers = self.workers.get_or_insert_with(PatchWorkers::new);
         self.finished.extend(workers.take_done());
+        if !self.finished.is_empty() && self.pool.used() + SLOTS_PER_PAGE > max_slots {
+            for state in self.planets.values_mut() {
+                free_stale(&mut self.pool, state);
+            }
+        }
+        steps.mark("uploads: free stale");
+        // A new vertex page before the uploads, if they may need one (timed on its own).
+        if self.pool.free.len() < self.finished.len().min(MAX_UPLOADS_PER_FRAME) {
+            self.pool.grow(&gpu_shared.device, max_slots);
+        }
+        steps.mark("uploads: new page");
         let mut uploads = 0;
         let mut waiting = Vec::new();
         let mut taken = Vec::new();
@@ -3018,8 +3176,18 @@ impl PatchWorkers {
     }
 }
 
-/// Upload a finished patch into a vertex slot, first freeing patches unused for a while if
-/// the pool is filling up. False when there is no room.
+/// Free the vertex slots of a planet's patches unused for a while (once a frame while the pool
+/// is filling up: the scan walks every node the planet knows).
+fn free_stale(pool: &mut SlotPool, state: &mut PlanetState) {
+    for k in state.lod.stale(30) {
+        if let Some(c) = state.chunks.remove(&k) {
+            pool.release(c.slot);
+        }
+        state.lod.unbuild(k);
+    }
+}
+
+/// Upload a finished patch into a vertex slot. False when there is no room.
 fn upload(
     pool: &mut SlotPool,
     state: &mut PlanetState,
@@ -3027,14 +3195,6 @@ fn upload(
     gpu_shared: &GpuShared,
     max_slots: u32,
 ) -> bool {
-    if pool.used() + SLOTS_PER_PAGE > max_slots {
-        for k in state.lod.stale(30) {
-            if let Some(c) = state.chunks.remove(&k) {
-                pool.release(c.slot);
-            }
-            state.lod.unbuild(k);
-        }
-    }
     let slot = match state.chunks.get(&m.key) {
         Some(c) => Some(c.slot),
         None => pool.alloc(&gpu_shared.device, max_slots),
@@ -3080,6 +3240,81 @@ fn melt_latitude(c: &crate::shape::Climate) -> f32 {
 mod tests {
     use super::*;
     use engine_render::features::{compose_shader, validate_wgsl};
+
+    #[test]
+    fn weather_texture_follows_the_grid_as_it_moves() {
+        use engine_core::math::DVec2;
+        let cell = |x: f64, z: f64| SurfaceCell {
+            wetness: ((x * 0.37 + z * 0.11).sin() * 0.5 + 0.5) as f32,
+            puddle_m: 0.0,
+            snow_m: (x.rem_euclid(7.0) * 0.1) as f32,
+            scorch: (z.rem_euclid(5.0) * 0.2) as f32,
+        };
+        // A 16 x 12 grid of 2 m cells whose values belong to the world spot.
+        let mut g = Grid2::new(
+            DVec2::new(-16.0, -12.0),
+            2.0,
+            16,
+            12,
+            SurfaceCell::default(),
+        );
+        let fill = |g: &mut Grid2<SurfaceCell>| {
+            for y in 0..g.height {
+                for x in 0..g.width {
+                    let p = g.origin + DVec2::new(x as f64, y as f64) * g.cell as f64;
+                    g.data[(y * g.width + x) as usize] = cell(p.x, p.y);
+                }
+            }
+        };
+        let mut up = SurfaceUpload::default();
+        let mut tex = vec![0u16; 16 * 12 * 4];
+        let step = |up: &mut SurfaceUpload, g: &Grid2<SurfaceCell>, tex: &mut Vec<u16>| {
+            let rects = up.refresh(g, false);
+            for [x, y, w, h] in rects {
+                for ty in y..y + h {
+                    for tx in x..x + w {
+                        let at = ((ty * 16 + tx) * 4) as usize;
+                        tex[at..at + 4].copy_from_slice(&up.sent[at..at + 4]);
+                    }
+                }
+            }
+        };
+        let check = |up: &SurfaceUpload, g: &Grid2<SurfaceCell>, tex: &[u16]| {
+            for y in 0..g.height {
+                for x in 0..g.width {
+                    let c = g.data[(y * g.width + x) as usize];
+                    let (tx, ty) = ((x + up.base.x) % 16, (y + up.base.y) % 12);
+                    let at = ((ty * 16 + tx) * 4) as usize;
+                    assert_eq!(tex[at], f16_bits(c.wetness), "cell {x},{y}");
+                    assert_eq!(tex[at + 2], f16_bits(c.snow_m), "cell {x},{y}");
+                    assert_eq!(tex[at + 3], f16_bits(c.scorch), "cell {x},{y}");
+                }
+            }
+        };
+        fill(&mut g);
+        step(&mut up, &g, &mut tex);
+        check(&up, &g, &tex);
+        // Moves of a few cells each way (only the new strips and a band are sent), a change
+        // the bands catch within `SURFACE_UPLOAD_FRAMES` frames, and a jump past the grid.
+        for (dx, dy) in [(3, 0), (0, -2), (-5, 4), (1, 1), (0, 0), (-16, 0), (40, 7)] {
+            g.origin += DVec2::new(dx as f64, dy as f64) * g.cell as f64;
+            fill(&mut g);
+            // World-fixed values: right from the first frame after the move.
+            step(&mut up, &g, &mut tex);
+            check(&up, &g, &tex);
+        }
+        // A change anywhere arrives within the bands' round.
+        g.data[(7 * 16 + 9) as usize].snow_m = 2.5;
+        for _ in 0..SURFACE_UPLOAD_FRAMES {
+            step(&mut up, &g, &mut tex);
+        }
+        check(&up, &g, &tex);
+        // Without a change, a moved grid re-sends only what came in.
+        g.origin += DVec2::new(2.0 * g.cell as f64, 0.0);
+        fill(&mut g);
+        let sent: u32 = up.refresh(&g, false).iter().map(|r| r[2] * r[3]).sum();
+        assert!(sent <= 2 * 12 + 16 * 2, "{sent}");
+    }
 
     #[test]
     fn haze_coarsens_only_land_the_air_hides() {
@@ -3290,7 +3525,7 @@ mod tests {
             std::mem::size_of::<PlanetGpu>(),
             16 * (3 + 1 + 10 + 7 + MAX_RAYED + MAX_YOUNG)
         );
-        assert_eq!(std::mem::size_of::<MapsGpu>(), 16 * 13);
+        assert_eq!(std::mem::size_of::<MapsGpu>(), 16 * 14);
         assert_eq!(std::mem::size_of::<TerrainVertex>(), 56);
     }
 }

@@ -386,12 +386,16 @@ rock's larger scales; about 11% of the ground's pixel cost at `lake_shore` on la
 reflections are half resolution and rippled, as Unreal's reflection captures and HDRP's
 planar probes strip features.
 
-The ground's CPU cost per frame is in `Diagnostics` as `render.cpu.terrain: <part>` (maps,
-materials, far looks, uploads, then per planet `patches: select`, `look-ahead`, `far shadow`,
+The ground's CPU cost per frame is in `Diagnostics` as `render.cpu.terrain: <part>` (maps:
+footprints / weather / worn paths / paint / bind group, materials, far looks, uploads: free
+stale / new page, uploads, then per planet `patches: select`, `look-ahead`, `far shadow`,
 `ask workers`, `recycle`, `draw lists`, `planet data`, and buffers), so the renderer's hitch
 lists say which part of `prepare terrain` spiked. `ENGINE_PROFILE=1 FLY=200 terrain_shots
 <out> 640x360 earth_range` flies the view level toward its target at `FLY_MPF` meters a frame
-(5 by default: 300 m/s) and prints each part's mean and worst.
+(5 by default: 300 m/s) and prints each part's mean and worst. The weather's surface layers
+(wetness, puddles, snow, scorch) go to a texture that wraps around like a clipmap's: when the
+grid follows the camera only the strips that came in are sent, and changes go a sixth of the
+rows a frame, so a 20 m/frame flight's `maps: weather` worst fell from 29 to 6 ms on lavapipe.
 
 ## Test cases in the showcase
 
