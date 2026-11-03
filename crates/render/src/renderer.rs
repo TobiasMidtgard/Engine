@@ -362,7 +362,8 @@ pub struct Renderer {
     returned: Option<RenderReturn>,
     /// Each `ExtraView` camera's own resources and history, by camera.
     extra_views: HashMap<Entity, ExtraViewState>,
-    /// The `render.extra_views_gpu.<pass>` keys the extra views set last.
+    /// The `render.extra_views_gpu.<pass>` and `render.extra_views_cpu.<step>` keys the extra
+    /// views set last.
     extra_view_passes: std::collections::HashSet<String>,
     /// When the extra views' GPU passes were last logged.
     extra_view_logged: Option<Instant>,
@@ -1539,6 +1540,11 @@ impl Renderer {
                     .entry(format!("render.extra_views_gpu.{name}"))
                     .or_insert(0.0) += *ms;
             }
+            for (name, ms) in state.view.perf.cpu_steps() {
+                *passes
+                    .entry(format!("render.extra_views_cpu.{name}"))
+                    .or_insert(0.0) += *ms;
+            }
 
             let registered = state.image.as_ref().map(|(i, t)| (*i, t));
             if registered != image.map(|i| (i, &texture)) {
@@ -1560,8 +1566,9 @@ impl Renderer {
             self.extra_views.insert(camera, state);
         }
         {
-            // Each GPU pass of the extra views together (`render.extra_views_gpu.<pass>`), to
-            // see what a mirror's or a portal's picture spends its time on.
+            // Each GPU pass and CPU step of the extra views together
+            // (`render.extra_views_gpu.<pass>`, `render.extra_views_cpu.<step>`), to see what a
+            // mirror's or a portal's picture spends its time on.
             let every = world
                 .get_resource::<RenderSettings>()
                 .map_or(0.0, |s| s.perf_log_secs);
@@ -1571,20 +1578,25 @@ impl Renderer {
                     .is_none_or(|t| t.elapsed().as_secs_f32() >= every)
             {
                 self.extra_view_logged = Some(Instant::now());
-                let mut rows: Vec<_> = passes.iter().filter(|r| *r.1 >= 0.05).collect();
-                rows.sort_by(|a, b| b.1.total_cmp(a.1));
-                let rows: Vec<String> = rows
-                    .iter()
-                    .map(|(k, ms)| {
-                        let name = k.trim_start_matches("render.extra_views_gpu.");
-                        format!("{name} {ms:.2}")
-                    })
-                    .collect();
+                let rows = |prefix: &str| {
+                    let mut rows: Vec<_> = passes
+                        .iter()
+                        .filter(|r| r.0.starts_with(prefix) && *r.1 >= 0.05)
+                        .collect();
+                    rows.sort_by(|a, b| b.1.total_cmp(a.1));
+                    rows.iter()
+                        .map(|(k, ms)| format!("{} {ms:.2}", k.trim_start_matches(prefix)))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                };
                 tracing::info!(
-                    "extra views: {} ({} sharing the main view's lighting), GPU {gpu_ms:.2} ms: {}",
+                    "extra views: {} ({} sharing the main view's lighting), CPU {:.2} ms: {}; \
+                     GPU {gpu_ms:.2} ms: {}",
                     self.extra_views.len(),
                     shared_lighting,
-                    rows.join(", ")
+                    started.elapsed().as_secs_f64() * 1000.0,
+                    rows("render.extra_views_cpu."),
+                    rows("render.extra_views_gpu."),
                 );
             }
             let Some(mut d) = world.get_resource_mut::<Diagnostics>() else {
