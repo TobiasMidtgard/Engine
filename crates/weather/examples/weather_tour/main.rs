@@ -331,6 +331,15 @@ fn shots() -> Vec<Shot> {
             frames: 24,
             face_moon: false,
         },
+        // Facing the afternoon sun between heaps: the disc and its glare (playtest 3 item 36).
+        Shot {
+            name: "23_toward_the_sun",
+            setup: vec![set("partly_cloudy"), hour(16.5), advance(60.0)],
+            eye: DVec3::new(0.0, 4.0, 0.0),
+            target: DVec3::new(0.0, 4.0, -100.0),
+            frames: 16,
+            face_moon: false,
+        },
         // Hanging still inside a heap near its edge, looking out: the eddies inside the
         // cloud and its frayed edge, without the motion blur of the flight.
         Shot {
@@ -546,6 +555,20 @@ fn main() {
         }
         if shot.name.contains("cloud_shadows") {
             wait_for_cloud_shadows(&mut app, camera, shot.eye);
+        }
+        if shot.name.contains("toward_the_sun") {
+            let lights = engine_weather::sky::compute_lights(
+                app.world.resource::<engine_weather::Sky>(),
+                app.world.resource::<engine_weather::Climate>(),
+                app.world.resource::<engine_weather::WeatherSim>(),
+            );
+            // The sun a little above the middle of the frame, the horizon in view.
+            let s = lights.sun_dir.as_dvec3();
+            let flat = DVec3::new(s.x, 0.0, s.z).normalize_or(DVec3::Z);
+            let elevation = (s.y.asin() - 0.12).max(0.02);
+            let aim = flat * elevation.cos() + DVec3::Y * elevation.sin();
+            *app.world.get_mut::<Transform>(camera).unwrap() =
+                Transform::from_translation(shot.eye).looking_at(shot.eye + aim * 100.0, Vec3::Y);
         }
         if shot.name.contains("inside_a_heap") {
             place_inside_a_heap(&mut app, camera, shot.eye.y);
