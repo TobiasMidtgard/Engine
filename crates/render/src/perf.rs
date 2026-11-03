@@ -657,6 +657,12 @@ impl PerfLog {
             .map(|&(_, ms)| ms)
     }
 
+    /// The GPU passes of the latest frame whose times arrived, and whether they arrived with
+    /// the latest `frame` call.
+    pub fn gpu_passes(&self) -> (&[(Label, f32)], bool) {
+        (&self.gpu_passes, self.gpu_fresh)
+    }
+
     /// Call right after `queue.submit`.
     pub fn after_submit(&mut self) {
         if let Some(t) = &mut self.timer {
