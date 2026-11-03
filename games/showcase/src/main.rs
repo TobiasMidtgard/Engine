@@ -51,6 +51,7 @@ mod tower;
 mod village;
 mod walk;
 mod walls;
+mod weather_panel;
 mod zones;
 
 use engine::prelude::*;
@@ -164,6 +165,7 @@ fn main() {
     let exe = (!headless && !scripted) || args.iter().any(|a| a == "--exe");
     walk::install(&mut app, exe);
     pack::install(&mut app);
+    weather_panel::install(&mut app);
     if exe {
         // The window draws a loading screen at once while the world builds a step a frame,
         // and Movement's look bakes on its own thread meanwhile.
