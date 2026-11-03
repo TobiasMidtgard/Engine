@@ -1197,6 +1197,12 @@ impl GroundQuery for LandscapeGround {
             surface: self.surface_ids[l.cover_at(p.x, p.z) as usize],
         })
     }
+
+    /// The height alone, without the normal's four taps and the cover lookup (about 12x
+    /// cheaper); AI sight lines, footing, foliage and fire ask this most.
+    fn height(&self, p: DVec3) -> Option<f64> {
+        Some(self.land.height(p.x, p.z))
+    }
 }
 
 /// Radii of the terrain mesh rings: 1 m apart near the plaza, then growing so cells stay

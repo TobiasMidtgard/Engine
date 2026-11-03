@@ -188,14 +188,13 @@ mod tests {
 
     /// Writers of `GlobalTransform` after the update besides transform propagation. Each one
     /// waits for propagation and holds the animation module's pose work behind it
-    /// (engine-design/anim-parallel.md). Small copy systems (place_lights) are fine;
-    /// step_effects is to leave.
+    /// (engine-design/anim-parallel.md). Small copy systems (place_lights) are fine.
+    /// (Movement's step_effects left in 47390901.)
     const GLOBAL_TRANSFORM_WRITERS: &[&str] = &[
         "engine_anim::attachment_system",
         "engine_anim::bow_string_system",
         "engine_anim::knockdown_system",
         "engine_core::propagate_transforms_system",
-        "engine_movement::step_effects",
         "engine_vfx::place_lights",
     ];
 
