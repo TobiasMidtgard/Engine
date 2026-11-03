@@ -1,0 +1,12 @@
+22:28:47.525Z     0.04  mode stops quality ultra size '' spec 'plaza:75'; idle before start 317 s; HEAD 70b02d16
+22:28:48.735Z     1.25  started: showcase.exe --fly --profile --quality ultra  env ENGINE_PROFILE=1
+22:29:01.870Z    14.38  window visible: client 1600x900, window 1616x939 at (52,52), maximized False
+22:29:01.897Z    14.41  bridge connected
+22:29:02.262Z    14.77  world built
+22:29:07.868Z    20.38  after build: working set 5,102 MB, private 9,327 MB; system free 30,242 of 65,277 MB
+22:29:07.993Z    20.51  AT plaza: {"id":1,"jsonrpc":"2.0","result":{"place":"plaza","position":[10.0,4.5,16.0]}}
+22:30:23.459Z    95.97  END plaza: working set 5,224 MB, private 15,348 MB; system free 30,090 of 65,277 MB
+22:30:23.531Z    96.04  shot plaza: {"id":4,"jsonrpc":"2.0","result":{"height":900,"path":"screenshots/r23/plaza.png","width":1600}}
+22:30:27.305Z    99.82  sampler job: Completed
+22:30:27.310Z    99.82  killing the game
+22:31:09.928Z   142.44  done

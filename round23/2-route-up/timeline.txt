@@ -1,0 +1,30 @@
+22:33:58.211Z     0.03  mode route quality ultra size '' spec 'up'; idle before start 628 s; HEAD 70b02d16
+22:33:58.501Z     0.32  started: showcase.exe --route up --profile --quality ultra
+22:34:04.961Z     6.78  window visible: client 1600x900, window 1616x939 at (234,234), maximized False
+22:34:04.964Z     6.78  bridge connected
+22:34:05.198Z     7.02  fast sampler started (render.cpu. -> fast.jsonl)
+22:34:05.322Z     7.14  fast sampler started (offframe. -> fast_offframe.jsonl)
+22:34:05.329Z     7.15  world built
+22:34:05.657Z     7.48  after build: working set 3,027 MB, private 5,777 MB; system free 36,354 of 65,277 MB
+22:34:09.111Z    10.93  log: the ground settled after 49 frames
+22:34:11.721Z    13.54  log: and the view from the plaza after 4 more
+22:34:14.441Z    16.26  log: village done at 1.4 s, 5 m up
+22:34:14.480Z    16.30  log: face down done at 1.6 s, 5 m up
+22:34:16.539Z    18.36  mem: working set 6,709 MB, private 11,516 MB; system free 32,573 of 65,277 MB
+22:34:26.864Z    28.68  mem: working set 6,982 MB, private 15,276 MB; system free 32,585 of 65,277 MB
+22:34:29.738Z    31.56  shot up_8km_bridge: {"id":335,"jsonrpc":"2.0","result":{"height":900,"path":"screenshots/r23/up_8km_bridge.png","width":1600}}
+22:34:29.769Z    31.59  UP 8 km: altitude 8,030 m in the frame before the ask, 7,961 m the frame before 8,347 m after the shot's answer
+22:34:31.148Z    32.97  shot up_16km_bridge: {"id":410,"jsonrpc":"2.0","result":{"height":900,"path":"screenshots/r23/up_16km_bridge.png","width":1600}}
+22:34:31.179Z    33.00  UP 16 km: altitude 16,098 m in the frame before the ask, 15,956 m the frame before 16,785 m after the shot's answer
+22:34:32.219Z    34.04  shot up_25km_bridge: {"id":454,"jsonrpc":"2.0","result":{"height":900,"path":"screenshots/r23/up_25km_bridge.png","width":1600}}
+22:34:32.248Z    34.07  UP 25 km: altitude 27,637 m in the frame before the ask, 23,898 m the frame before 28,591 m after the shot's answer
+22:34:33.093Z    34.91  shot up_42km_bridge: {"id":505,"jsonrpc":"2.0","result":{"height":900,"path":"screenshots/r23/up_42km_bridge.png","width":1600}}
+22:34:33.120Z    34.94  UP 42 km: altitude 42,335 m in the frame before the ask, 41,808 m the frame before 44,135 m after the shot's answer
+22:34:37.614Z    39.43  mem: working set 4,984 MB, private 14,790 MB; system free 34,434 of 65,277 MB
+22:34:37.884Z    39.70  log: climb to orbit done at 22.2 s, 406038 m up
+22:34:38.671Z    40.49  log: orbit done at 23.2 s, 409146 m up
+22:34:40.261Z    42.08  sampler job: Completed
+22:34:40.264Z    42.08  fast sampler job 1: Completed
+22:34:40.271Z    42.09  fast sampler job 2: Completed
+22:34:40.275Z    42.09  game exited by itself, code 0
+22:35:23.534Z    85.35  done

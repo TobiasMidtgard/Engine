@@ -1,0 +1,37 @@
+22:31:31.601Z     0.04  mode route quality ultra size '' spec ''; idle before start 481 s; HEAD 70b02d16
+22:31:32.235Z     0.67  started: showcase.exe --route --profile --quality ultra
+22:31:38.755Z     7.19  window visible: client 1600x900, window 1616x939 at (130,130), maximized False
+22:31:38.777Z     7.21  bridge connected
+22:31:39.207Z     7.64  fast sampler started (render.cpu. -> fast.jsonl)
+22:31:39.331Z     7.77  fast sampler started (offframe. -> fast_offframe.jsonl)
+22:31:39.370Z     7.81  world built
+22:31:39.986Z     8.42  after build: working set 3,068 MB, private 5,813 MB; system free 31,957 of 65,277 MB
+22:31:43.129Z    11.57  log: the ground settled after 41 frames
+22:31:44.503Z    12.94  log: and the view from the plaza after 4 more
+22:31:51.000Z    19.44  mem: working set 6,788 MB, private 11,153 MB; system free 28,076 of 65,277 MB
+22:31:58.893Z    27.33  log: village done at 8.1 s, 5 m up
+22:31:58.895Z    27.33  log: face up done at 8.1 s, 5 m up
+22:32:01.260Z    29.70  mem: working set 7,180 MB, private 14,906 MB; system free 27,847 of 65,277 MB
+22:32:07.557Z    35.99  log: climb to 2 km done at 16.8 s, 2022 m up
+22:32:11.794Z    40.23  mem: working set 4,878 MB, private 14,749 MB; system free 30,141 of 65,277 MB
+22:32:19.413Z    47.85  log: cruise at 2 km done at 28.8 s, 4681 m up
+22:32:19.416Z    47.85  log: face down done at 28.8 s, 4693 m up
+22:32:22.049Z    50.49  mem: working set 5,072 MB, private 15,210 MB; system free 29,957 of 65,277 MB
+22:32:28.649Z    57.09  log: climb to orbit done at 37.8 s, 403823 m up
+22:32:32.381Z    60.82  mem: working set 5,148 MB, private 15,283 MB; system free 31,573 of 65,277 MB
+22:32:34.481Z    62.92  log: orbit done at 43.8 s, 407730 m up
+22:32:42.667Z    71.11  mem: working set 5,164 MB, private 15,554 MB; system free 34,228 of 65,277 MB
+22:32:45.301Z    73.74  log: descend to 2 km done at 54.5 s, 1988 m up
+22:32:45.304Z    73.74  log: turn home done at 54.5 s, 1965 m up
+22:32:53.179Z    81.62  mem: working set 4,904 MB, private 15,815 MB; system free 34,604 of 65,277 MB
+22:32:57.137Z    85.57  log: cruise home done at 66.5 s, 972 m up
+22:33:01.091Z    89.53  log: down to 100 m done at 70.5 s, 100 m up
+22:33:03.435Z    91.87  mem: working set 4,931 MB, private 15,835 MB; system free 34,597 of 65,277 MB
+22:33:11.313Z    99.75  log: low pass done at 80.5 s, 787 m up
+22:33:13.152Z   101.59  log: end done at 82.5 s, 791 m up
+22:33:13.949Z   102.39  mem: working set 2,691 MB, private 13,182 MB; system free 37,292 of 65,277 MB
+22:33:14.751Z   103.19  sampler job: Completed
+22:33:14.755Z   103.19  fast sampler job 1: Completed
+22:33:14.765Z   103.20  fast sampler job 2: Completed
+22:33:14.774Z   103.21  game exited by itself, code 0
+22:33:58.132Z   146.57  done

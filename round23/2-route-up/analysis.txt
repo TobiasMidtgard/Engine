@@ -1,0 +1,71 @@
+﻿route start (after the plaza settle): 22:34:10.700 UTC
+leg | wall s | ends at route s / m up | GPU busy % | frame profiles reporting in the leg (each covers the 5 s before it)
+== route: village | 3.5 s | 1.4 s / 5 m | GPU busy 2
+  22:34:16 11 frames in 6.3 s: 568.8 ms per frame (1.8 fps), worst 1807.5 ms
+    systems busy 764.3 ms per frame: 1.34 of 32 cores on average; schedules: FixedUpdate 354.64 (x1.4), Update 160.96 (x1.1), DefaultSchedule 113.26 (x90.9)
+    slowest: weather::ground_system 155.27/max 1705.38, fire::run_demos 114.03/max 1254.32, fire::step_field 90.18/max 34.28, engine::stream_system 48.70/max 264.22, npc::build_stand_ins 48.39/max 293.42, physics::physics_sync 44.79/max 165.20
+    ran alone: weather::ground_system 155.12, npc::build_stand_ins 47.65, physics::physics_sync 44.79, engine::stream_system 41.64; GPU passes 17.47 (render CPU 28.99)
+== route: face down | 0.2 s | 1.6 s / 5 m | GPU busy 6
+  22:34:16 11 frames in 6.3 s: 568.8 ms per frame (1.8 fps), worst 1807.5 ms
+    systems busy 764.3 ms per frame: 1.34 of 32 cores on average; schedules: FixedUpdate 354.64 (x1.4), Update 160.96 (x1.1), DefaultSchedule 113.26 (x90.9)
+    slowest: weather::ground_system 155.27/max 1705.38, fire::run_demos 114.03/max 1254.32, fire::step_field 90.18/max 34.28, engine::stream_system 48.70/max 264.22, npc::build_stand_ins 48.39/max 293.42, physics::physics_sync 44.79/max 165.20
+    ran alone: weather::ground_system 155.12, npc::build_stand_ins 47.65, physics::physics_sync 44.79, engine::stream_system 41.64; GPU passes 17.47 (render CPU 28.99)
+== route: climb to orbit | 23.2 s | 22.2 s / 406038 m | GPU busy 52
+  22:34:16 11 frames in 6.3 s: 568.8 ms per frame (1.8 fps), worst 1807.5 ms
+    systems busy 764.3 ms per frame: 1.34 of 32 cores on average; schedules: FixedUpdate 354.64 (x1.4), Update 160.96 (x1.1), DefaultSchedule 113.26 (x90.9)
+    slowest: weather::ground_system 155.27/max 1705.38, fire::run_demos 114.03/max 1254.32, fire::step_field 90.18/max 34.28, engine::stream_system 48.70/max 264.22, npc::build_stand_ins 48.39/max 293.42, physics::physics_sync 44.79/max 165.20
+    ran alone: weather::ground_system 155.12, npc::build_stand_ins 47.65, physics::physics_sync 44.79, engine::stream_system 41.64; GPU passes 17.47 (render CPU 28.99)
+  22:34:21 50 frames in 5.0 s: 101.0 ms per frame (9.9 fps), worst 1336.7 ms
+    systems busy 105.2 ms per frame: 1.04 of 32 cores on average; schedules: FixedUpdate 41.28 (x2.3), Update 30.14 (x0.9), Render 15.05 (x0.9)
+    slowest: smoke::run_demos 25.39/max 1269.08, softbody::step_beside_physics 19.72/max 18.46, render::render_system 14.99/max 43.32, npc::think_and_act 6.50/max 132.28, physics::physics_simulate 3.93/max 19.54, destruction::simulate_debris_system 2.53/max 13.36
+    ran alone: smoke::run_demos 25.39, render::render_system 14.99, softbody::step_beside_physics 14.26, npc::think_and_act 6.50; GPU passes 
+  22:34:26 110 frames in 5.0 s: 45.6 ms per frame (21.9 fps), worst 139.2 ms
+    systems busy 44.0 ms per frame: 0.97 of 32 cores on average; schedules: FixedUpdate 20.31 (x2.2), Render 11.15 (x0.8), Update 5.15 (x0.8)
+    slowest: softbody::step_beside_physics 11.38/max 13.47, render::render_system 11.11/max 104.11, physics::physics_simulate 2.58/max 3.50, foliage::sync_plant_visuals 1.93/max 4.81, smoke::step 1.58/max 4.01, script::run_scripts 1.08/max 2.12
+    ran alone: render::render_system 11.11, softbody::step_beside_physics 8.97, foliage::sync_plant_visuals 1.93, script::run_scripts 1.08; GPU passes 17.05 (render CPU 17.29)
+  22:34:31 236 frames in 5.0 s: 21.2 ms per frame (47.1 fps), worst 77.7 ms
+    systems busy 21.8 ms per frame: 1.03 of 32 cores on average; schedules: Render 7.90 (x0.9), FixedUpdate 6.40 (x1.3), Update 3.47 (x0.9)
+    slowest: render::render_system 7.86/max 26.81, softbody::step_beside_physics 1.67/max 9.58, script::run_scripts 1.21/max 15.23, physics::physics_simulate 0.80/max 1.63, smoke::step 0.78/max 3.45, weather::ground_system 0.40/max 0.71
+    ran alone: render::render_system 7.86, script::run_scripts 1.21, softbody::step_beside_physics 1.18, smoke::step 0.41; GPU passes 
+  22:34:36 302 frames in 5.0 s: 16.6 ms per frame (60.4 fps), worst 69.2 ms
+    systems busy 16.6 ms per frame: 1.00 of 32 cores on average; schedules: Render 5.88 (x1.0), FixedUpdate 3.62 (x1.0), Update 3.55 (x1.0)
+    slowest: render::render_system 5.83/max 30.33, script::run_scripts 1.21/max 2.46, ai_bridge::bridge_frame_start_system 0.59/max 50.21, smoke::step 0.40/max 2.81, physics::physics_simulate 0.36/max 1.51, weather::ground_system 0.35/max 0.82
+    ran alone: render::render_system 5.83, script::run_scripts 1.21, ai_bridge::bridge_frame_start_system 0.59, weather::ground_system 0.34; GPU passes 11.77 (render CPU 10.64)
+== route: orbit | 1.0 s | 23.2 s / 409146 m | GPU busy 33
+
+-- worst 25 frames in route.csv (frame_ms, leg, route s, m up, render CPU ms, terrain ms, patches missing, RAM MB)
+   250.00 ms  village            1.122 s       5 m  render CPU   17.98  terrain   2.38  missing  385  RAM 4997
+   250.00 ms  village            1.372 s       5 m  render CPU   29.55  terrain   3.38  missing  351  RAM 4997
+   250.00 ms  climb to orbit     2.427 s       9 m  render CPU   17.97  terrain   2.70  missing  211  RAM 4997
+   250.00 ms  village            0.872 s       5 m  render CPU   69.02  terrain   4.86  missing  305  RAM 4997
+   250.00 ms  climb to orbit     1.945 s       5 m  render CPU   33.17  terrain   2.95  missing  260  RAM 4997
+   250.00 ms  village            0.372 s       5 m  render CPU   28.98  terrain   3.10  missing  363  RAM 3791
+   250.00 ms  village            0.622 s       5 m  render CPU   25.52  terrain   2.66  missing  324  RAM 3791
+   237.73 ms  face down          1.610 s       5 m  render CPU   32.20  terrain   3.46  missing  309  RAM 4997
+   229.95 ms  climb to orbit     3.739 s      28 m  render CPU   21.17  terrain   1.68  missing   12  RAM 7125
+   193.78 ms  climb to orbit     3.365 s      22 m  render CPU   15.63  terrain   1.69  missing    0  RAM 7125
+   139.02 ms  climb to orbit     7.071 s     201 m  render CPU   16.74  terrain   1.50  missing    4  RAM 7223
+   122.45 ms  village            0.122 s       5 m  render CPU   47.01  terrain   2.96  missing  332  RAM 3791
+   105.29 ms  climb to orbit     2.533 s      11 m  render CPU   17.73  terrain   2.46  missing  151  RAM 4997
+   103.83 ms  climb to orbit     3.171 s      20 m  render CPU   17.02  terrain   1.82  missing   24  RAM 7125
+    96.49 ms  climb to orbit     2.629 s      13 m  render CPU   30.79  terrain   3.27  missing  187  RAM 4997
+    95.31 ms  climb to orbit     2.040 s       7 m  render CPU   54.84  terrain   1.94  missing  222  RAM 4997
+    89.43 ms  climb to orbit     5.625 s      95 m  render CPU   15.56  terrain   1.57  missing    4  RAM 7214
+    89.40 ms  climb to orbit     4.903 s      63 m  render CPU   16.62  terrain   2.02  missing    8  RAM 7198
+    84.96 ms  climb to orbit     1.695 s       5 m  render CPU   58.40  terrain   3.31  missing  200  RAM 4997
+    84.03 ms  climb to orbit     6.613 s     162 m  render CPU   15.26  terrain   1.43  missing    0  RAM 7223
+    82.93 ms  climb to orbit     2.938 s      17 m  render CPU   24.89  terrain   3.50  missing    0  RAM 7125
+    82.26 ms  climb to orbit     3.447 s      25 m  render CPU   34.82  terrain   1.85  missing    0  RAM 7125
+    80.22 ms  climb to orbit     7.432 s     249 m  render CPU   25.87  terrain   2.04  missing    8  RAM 7237
+    79.14 ms  climb to orbit     2.708 s      14 m  render CPU   30.37  terrain   3.42  missing  151  RAM 4997
+    76.79 ms  climb to orbit     2.855 s      16 m  render CPU   24.62  terrain   3.42  missing   39  RAM 4997
+-- frames over 33 / 50 / 100 ms per leg (route.csv)
+  village             6 frames: over 33    6, over 50    6, over 100   6; median 250.0 ms; RAM 3,791-4,997 MB
+  face down           1 frames: over 33    1, over 50    1, over 100   1; median 237.7 ms; RAM 4,997-4,997 MB
+  climb to orbit    776 frames: over 33  156, over 50   91, over 100   7; median 17.9 ms; RAM 4,979-7,237 MB
+  orbit              70 frames: over 33    2, over 50    0, over 100   0; median 15.4 ms; RAM 4,986-5,007 MB
+-- slow render frame lines (stderr)
+2026-11-03T22:34:04.960114 314 ms of render steps (usually 0.0): prepare foliage scenery 166.5, prepare on the render thread 54.3, probe gi 23.8, prepare meshes 14.5, prepare grass 12.9, prepare space bodies 10.1 (inside: meshes: upload 29.6, meshes: pipelines
+2026-11-03T22:34:11.763868 119 ms of render steps (usually 24.8): screenshot save 47.2, prepare grass 33.2, prepare painted ground 10.8, probe gi 6.4, prepare meshes 5.0, prepare terrain 4.8; GPU work queued in the 3 frames before: 48.7 MB uploaded, 2 material
+2026-11-03T22:34:13.673486 113 ms of render steps (usually 25.7): screenshot save 80.7, prepare meshes 11.7, prepare terrain 3.4, probe gi 2.9, wait for the finishing threads 2.5, prepare on the render thread 2.2; GPU work queued in the 3 frames before: 48.2 M
+2026-11-03T22:34:16.316598 125 ms of render steps (usually 29.1): screenshot save 68.4, prepare character 30.1, prepare meshes 10.1, subsurface scattering 2.7, probe gi 2.4, prepare terrain 1.9; GPU work queued in the 3 frames before: 47.9 MB uploaded, 1 mater

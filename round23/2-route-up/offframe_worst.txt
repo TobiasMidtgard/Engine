@@ -1,0 +1,66 @@
+﻿route.csv: 853 rows; row i = frame 56 + i (terrain_ms equal in 850 of the 853 rows the render.cpu sampler answered for); the offframe sampler answered for 853 of the rows
+
+leg | frames | mean ms | median | max ms | over 33 | over 50 | RAM max MB | offframe pending max | building_ms max | apply_ms max | frames with apply_ms > 1
+village | 6 | 228.7 | 250.0 | 250.0 | 6 | 6 | 4997 | 104 | 16868.81 | 0.76 | 0
+face down | 1 | 237.7 | 237.7 | 237.7 | 1 | 1 | 4997 | 88 | 428.62 | 247.39 | 1
+climb to orbit | 776 | 26.5 | 17.8 | 250.0 | 156 | 91 | 7237 | 57 | 7033.89 | 89.16 | 3
+orbit | 70 | 16.1 | 15.4 | 33.3 | 2 | 0 | 5007 | 0 | 0.00 | 0.00 | 0
+
+Worst 6 frames of each leg (route.csv frame_ms, time, m up; the frame's offframe.*; its 5 slowest render CPU rows):
+== village
+  frame 57, 0.372 s, 5 m: 250.0 ms, render CPU 29.0; offframe pending 45, building_ms 0.00, apply_ms 0.00; prepare meshes 10.8, meshes: clusters 3.8, prepare on the render thread 3.3, prepare terrain 3.1, prepare softbody 2.3
+  frame 58, 0.622 s, 5 m: 250.0 ms, render CPU 25.5; offframe pending 46, building_ms 0.00, apply_ms 0.00; screenshot save 39.0, prepare meshes 5.7, wait for the finishing threads 4.7, meshes: clusters 3.1, prepare terrain 2.6
+  frame 59, 0.872 s, 5 m: 250.0 ms, render CPU 69.0; offframe pending 47, building_ms 0.00, apply_ms 0.00; screenshot save 47.2, prepare painted ground 10.8, prepare meshes 5.0, prepare terrain 4.8, meshes: clusters 3.3
+  frame 60, 1.122 s, 5 m: 250.0 ms, render CPU 18.0; offframe pending 55, building_ms 16868.81, apply_ms 0.12; prepare meshes 5.3, meshes: clusters 5.2, meshes: skins 4.1, prepare on the render thread 2.4, prepare terrain 2.4
+  frame 61, 1.372 s, 5 m: 250.0 ms, render CPU 29.6; offframe pending 104, building_ms 2381.10, apply_ms 0.76; screenshot save 80.7, prepare meshes 11.7, meshes: clusters 6.1, prepare terrain 3.4, wait for the finishing threads 2.5
+  frame 56, 0.122 s, 5 m: 122.5 ms, render CPU 47.0; offframe pending 43, building_ms 0.00, apply_ms 0.00; prepare meshes 24.9, meshes: classify 5.0, meshes: clusters 4.1, prepare softbody 3.4, wait for the finishing threads 3.1
+== face down
+  frame 62, 1.610 s, 5 m: 237.7 ms, render CPU 32.2; offframe pending 88, building_ms 428.62, apply_ms 247.39; meshes: materials 25.6, meshes: clusters 10.2, prepare meshes 8.8, prepare terrain 3.4, prepare on the render thread 2.2
+== climb to orbit
+  frame 64, 1.945 s, 5 m: 250.0 ms, render CPU 33.2; offframe pending 57, building_ms 0.00, apply_ms 0.00; prepare meshes 13.8, meshes: clusters 5.4, prepare terrain 2.9, meshes: begin frame 2.2, prepare softbody 2.1
+  frame 68, 2.427 s, 9 m: 250.0 ms, render CPU 18.0; offframe pending 5, building_ms 0.00, apply_ms 0.00; prepare meshes 6.9, meshes: clusters 3.8, prepare terrain 2.7, prepare on the render thread 1.5, meshes: sync 1.3
+  frame 81, 3.739 s, 28 m: 229.9 ms, render CPU 21.2; offframe pending 0, building_ms 0.00, apply_ms 0.00; prepare meshes 9.2, meshes: clusters 3.5, wait for the finishing threads 3.0, prepare on the render thread 2.9, meshes: sync 2.8
+  frame 78, 3.365 s, 22 m: 193.8 ms, render CPU 15.6; offframe pending 0, building_ms 7033.89, apply_ms 30.56; prepare meshes 5.0, meshes: clusters 3.9, wait for the finishing threads 2.3, prepare on the render thread 1.8, meshes: sync 1.7
+  frame 131, 7.071 s, 201 m: 139.0 ms, render CPU 16.7; offframe pending 0, building_ms 0.00, apply_ms 0.00; prepare meshes 5.2, wait for the finishing threads 2.5, prepare on the render thread 2.1, prepare terrain 1.5, surface weather 1.1
+  frame 69, 2.533 s, 11 m: 105.3 ms, render CPU 17.7; offframe pending 5, building_ms 0.00, apply_ms 0.00; meshes: clusters 10.6, prepare meshes 6.1, prepare terrain 2.4, wait for the finishing threads 2.3, prepare on the render thread 2.0
+== orbit
+  frame 840, 22.203 s, 409146 m: 33.3 ms, render CPU 7.1; offframe pending 0, building_ms 0.00, apply_ms 0.00; screenshot save 23.4, prepare meshes 2.3, wait for the finishing threads 1.5, prepare on the render thread 1.2, meshes: sync 1.1
+  frame 905, 23.223 s, 409146 m: 33.1 ms, render CPU 8.3; offframe pending 0, building_ms 0.00, apply_ms 0.00; screenshot save 22.7, prepare meshes 2.4, meshes: sync 1.3, prepare on the render thread 1.2, surface weather 1.1
+  frame 874, 22.728 s, 409146 m: 29.0 ms, render CPU 7.2; offframe pending 0, building_ms 0.00, apply_ms 0.00; prepare meshes 2.5, meshes: sync 1.2, prepare on the render thread 1.2, wait for the finishing threads 1.0, meshes: cull 0.9
+  frame 906, 23.245 s, 409146 m: 22.5 ms, render CPU 9.0; offframe pending 0, building_ms 0.00, apply_ms 0.00; prepare meshes 2.7, prepare on the render thread 1.9, meshes: sync 1.7, meshes: cull 1.5, meshes: gather 1.0
+  frame 875, 22.749 s, 409146 m: 20.6 ms, render CPU 7.8; offframe pending 0, building_ms 0.00, apply_ms 0.00; prepare meshes 2.7, prepare on the render thread 1.5, wait for the finishing threads 1.2, meshes: cull 1.1, meshes: sync 1.1
+  frame 842, 22.240 s, 409146 m: 20.5 ms, render CPU 6.8; offframe pending 0, building_ms 0.00, apply_ms 0.00; prepare meshes 2.3, wait for the finishing threads 1.1, prepare on the render thread 1.0, meshes: sync 1.0, meshes: cull 0.7
+
+Worst 25 frames of the run:
+  frame 57, 0.372 s, village, 5 m: 250.0 ms, render CPU 29.0; offframe pending 45, building_ms 0.00, apply_ms 0.00; prepare meshes 10.8, meshes: clusters 3.8, prepare on the render thread 3.3, prepare terrain 3.1
+  frame 58, 0.622 s, village, 5 m: 250.0 ms, render CPU 25.5; offframe pending 46, building_ms 0.00, apply_ms 0.00; screenshot save 39.0, prepare meshes 5.7, wait for the finishing threads 4.7, meshes: clusters 3.1
+  frame 59, 0.872 s, village, 5 m: 250.0 ms, render CPU 69.0; offframe pending 47, building_ms 0.00, apply_ms 0.00; screenshot save 47.2, prepare painted ground 10.8, prepare meshes 5.0, prepare terrain 4.8
+  frame 60, 1.122 s, village, 5 m: 250.0 ms, render CPU 18.0; offframe pending 55, building_ms 16868.81, apply_ms 0.12; prepare meshes 5.3, meshes: clusters 5.2, meshes: skins 4.1, prepare on the render thread 2.4
+  frame 61, 1.372 s, village, 5 m: 250.0 ms, render CPU 29.6; offframe pending 104, building_ms 2381.10, apply_ms 0.76; screenshot save 80.7, prepare meshes 11.7, meshes: clusters 6.1, prepare terrain 3.4
+  frame 64, 1.945 s, climb to orbit, 5 m: 250.0 ms, render CPU 33.2; offframe pending 57, building_ms 0.00, apply_ms 0.00; prepare meshes 13.8, meshes: clusters 5.4, prepare terrain 2.9, meshes: begin frame 2.2
+  frame 68, 2.427 s, climb to orbit, 9 m: 250.0 ms, render CPU 18.0; offframe pending 5, building_ms 0.00, apply_ms 0.00; prepare meshes 6.9, meshes: clusters 3.8, prepare terrain 2.7, prepare on the render thread 1.5
+  frame 62, 1.610 s, face down, 5 m: 237.7 ms, render CPU 32.2; offframe pending 88, building_ms 428.62, apply_ms 247.39; meshes: materials 25.6, meshes: clusters 10.2, prepare meshes 8.8, prepare terrain 3.4
+  frame 81, 3.739 s, climb to orbit, 28 m: 229.9 ms, render CPU 21.2; offframe pending 0, building_ms 0.00, apply_ms 0.00; prepare meshes 9.2, meshes: clusters 3.5, wait for the finishing threads 3.0, prepare on the render thread 2.9
+  frame 78, 3.365 s, climb to orbit, 22 m: 193.8 ms, render CPU 15.6; offframe pending 0, building_ms 7033.89, apply_ms 30.56; prepare meshes 5.0, meshes: clusters 3.9, wait for the finishing threads 2.3, prepare on the render thread 1.8
+  frame 131, 7.071 s, climb to orbit, 201 m: 139.0 ms, render CPU 16.7; offframe pending 0, building_ms 0.00, apply_ms 0.00; prepare meshes 5.2, wait for the finishing threads 2.5, prepare on the render thread 2.1, prepare terrain 1.5
+  frame 56, 0.122 s, village, 5 m: 122.5 ms, render CPU 47.0; offframe pending 43, building_ms 0.00, apply_ms 0.00; prepare meshes 24.9, meshes: classify 5.0, meshes: clusters 4.1, prepare softbody 3.4
+  frame 69, 2.533 s, climb to orbit, 11 m: 105.3 ms, render CPU 17.7; offframe pending 5, building_ms 0.00, apply_ms 0.00; meshes: clusters 10.6, prepare meshes 6.1, prepare terrain 2.4, wait for the finishing threads 2.3
+  frame 77, 3.171 s, climb to orbit, 20 m: 103.8 ms, render CPU 17.0; offframe pending 5, building_ms 0.00, apply_ms 0.00; prepare meshes 5.5, meshes: clusters 3.2, wait for the finishing threads 2.1, prepare on the render thread 2.0
+  frame 70, 2.629 s, climb to orbit, 13 m: 96.5 ms, render CPU 30.8; offframe pending 6, building_ms 0.00, apply_ms 0.00; prepare meshes 13.1, meshes: clusters 5.5, meshes: begin frame 4.7, prepare terrain 3.3
+  frame 65, 2.040 s, climb to orbit, 7 m: 95.3 ms, render CPU 54.8; offframe pending 5, building_ms 4511.42, apply_ms 2.95; screenshot save 68.4, prepare character 30.1, prepare meshes 10.1, meshes: clusters 6.9
+  frame 110, 5.625 s, climb to orbit, 95 m: 89.4 ms, render CPU 15.6; offframe pending 0, building_ms 0.00, apply_ms 0.00; prepare meshes 5.0, meshes: clusters 3.6, prepare on the render thread 2.6, prepare terrain 1.6
+  frame 99, 4.903 s, climb to orbit, 63 m: 89.4 ms, render CPU 16.6; offframe pending 0, building_ms 0.00, apply_ms 0.00; prepare meshes 4.7, meshes: clusters 3.3, prepare on the render thread 2.5, prepare terrain 2.0
+  frame 63, 1.695 s, climb to orbit, 5 m: 85.0 ms, render CPU 58.4; offframe pending 57, building_ms 1044.06, apply_ms 89.16; screenshot save 106.4, prepare meshes 37.6, meshes: clusters 7.3, prepare softbody 5.8
+  frame 125, 6.613 s, climb to orbit, 162 m: 84.0 ms, render CPU 15.3; offframe pending 0, building_ms 0.00, apply_ms 0.00; meshes: sync 7.1, prepare meshes 5.2, meshes: materials 3.0, prepare on the render thread 2.1
+  frame 74, 2.938 s, climb to orbit, 17 m: 82.9 ms, render CPU 24.9; offframe pending 5, building_ms 0.00, apply_ms 0.00; prepare meshes 11.4, meshes: clusters 6.4, meshes: begin frame 4.1, prepare terrain 3.5
+  frame 79, 3.447 s, climb to orbit, 25 m: 82.3 ms, render CPU 34.8; offframe pending 0, building_ms 0.00, apply_ms 0.00; meshes: clusters 8.9, prepare meshes 6.5, prepare on the render thread 2.4, meshes: sync 2.3
+  frame 136, 7.432 s, climb to orbit, 249 m: 80.2 ms, render CPU 25.9; offframe pending 0, building_ms 0.00, apply_ms 0.00; prepare meshes 2.8, wait for the finishing threads 2.6, prepare on the render thread 2.5, prepare terrain 2.0
+  frame 71, 2.708 s, climb to orbit, 14 m: 79.1 ms, render CPU 30.4; offframe pending 5, building_ms 0.00, apply_ms 0.02; prepare meshes 13.7, meshes: clusters 4.8, prepare terrain 3.4, prepare on the render thread 1.9
+  frame 73, 2.855 s, climb to orbit, 16 m: 76.8 ms, render CPU 24.6; offframe pending 5, building_ms 0.00, apply_ms 0.00; screenshot save 30.8, meshes: clusters 8.6, prepare meshes 7.4, prepare terrain 3.4
+
+Frames with offframe.apply_ms > 1 ms (5; top 20 by apply_ms, with the frame's route.csv row):
+  frame 62: pending 88, building_ms 428.62, apply_ms 247.39 (face down, 5 m, 237.7 ms)
+  frame 63: pending 57, building_ms 1044.06, apply_ms 89.16 (climb to orbit, 5 m, 85.0 ms)
+  frame 43: pending 0, building_ms 1431.11, apply_ms 73.87 (not a route frame)
+  frame 78: pending 0, building_ms 7033.89, apply_ms 30.56 (climb to orbit, 22 m, 193.8 ms)
+  frame 65: pending 5, building_ms 4511.42, apply_ms 2.95 (climb to orbit, 7 m, 95.3 ms)

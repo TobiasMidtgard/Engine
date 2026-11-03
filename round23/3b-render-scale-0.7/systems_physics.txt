@@ -1,0 +1,927 @@
+﻿== round 1 overview (22:43:25-22:43:50 UTC)
+  profile 22:43:30 (70 frames in 5.0 s: 71.8 ms per frame (13.9 fps), worst 902.5 ms)
+    flow_bed_system        -
+    ripple_system          0.15 / max 3.86 / 2.5 runs
+    stream_far_woods       0.16 / max 2.12 / 0.9 runs
+    physics_simulate       3.12 / max 18.54 / 2.5 runs
+  profile 22:43:35 (175 frames in 5.0 s: 28.6 ms per frame (35.0 fps), worst 41.0 ms)
+    flow_bed_system        -
+    ripple_system          -
+    stream_far_woods       0.11 / max 0.74 / 0.8 runs
+    physics_simulate       2.58 / max 5.51 / 1.5 runs
+  profile 22:43:40 (246 frames in 5.0 s: 20.3 ms per frame (49.2 fps), worst 81.1 ms)
+    flow_bed_system        -
+    ripple_system          -
+    stream_far_woods       0.13 / max 0.39 / 1.0 runs
+    physics_simulate       1.08 / max 1.93 / 1.2 runs
+  profile 22:43:45 (257 frames in 5.0 s: 19.5 ms per frame (51.3 fps), worst 26.4 ms)
+    flow_bed_system        -
+    ripple_system          -
+    stream_far_woods       0.13 / max 0.35 / 1.0 runs
+    physics_simulate       0.93 / max 1.95 / 1.2 runs
+  profile 22:43:50 (243 frames in 5.0 s: 20.6 ms per frame (48.5 fps), worst 53.7 ms)
+    flow_bed_system        -
+    ripple_system          -
+    stream_far_woods       0.10 / max 0.44 / 1.0 runs
+    physics_simulate       0.98 / max 1.86 / 1.2 runs
+  physics report 22:43:29: 11.66 ms a step over 240 steps, 8 regions
+    region 0 1.40 ms, 35 of 51 bodies awake; awake: Swing seat, Bead curtain ball, Wrecking ball, Rowboat
+    region 2 0.26 ms, 11 of 12 bodies awake; awake: Red car, Blue car, Float test: raft, Sailing dinghy
+    region 3 0.21 ms, 2 of 8 bodies awake; awake: Motorboat, Rowboat
+    region 1 0.08 ms, 1 of 1 bodies awake; awake: Rally car
+    region 4 0.06 ms, 3 of 3 bodies awake; awake: Circuit plane, Hopper, Parked spaceplane
+  physics report 22:43:33: 4.50 ms a step over 240 steps, 8 regions
+    region 3 1.03 ms, 16 of 22 bodies awake; awake: Motorboat, Stuntman ragdoll lower_arm_l, Stuntman ragdoll lower_arm_r, Stuntman ragdoll upper_arm_l
+    region 2 0.23 ms, 14 of 14 bodies awake; awake: Red car, Blue car, Float test: ball, Sailing dinghy
+    region 0 0.12 ms, 35 of 49 bodies awake; awake: Freight car, Bead curtain ball, Swing seat, Wrecking ball
+    region 4 0.07 ms, 3 of 3 bodies awake; awake: Circuit plane, Hopper, Parked spaceplane
+    region 1 0.04 ms, 1 of 1 bodies awake; awake: Rally car
+  physics report 22:43:37: 2.06 ms a step over 240 steps, 8 regions
+    region 3 0.59 ms, 1 of 8 bodies awake; awake: Motorboat
+    region 2 0.27 ms, 5 of 14 bodies awake; awake: Red car, Motorboat, Rowboat, Sailing dinghy
+    region 4 0.07 ms, 3 of 3 bodies awake; awake: Circuit plane, Hopper, Parked spaceplane
+  physics report 22:43:41: 1.10 ms a step over 240 steps, 8 regions
+    region 2 0.28 ms, 6 of 14 bodies awake; awake: Red car, Sailing dinghy, Rowboat, Motorboat
+    region 3 0.23 ms, 1 of 8 bodies awake; awake: Motorboat
+    region 4 0.08 ms, 3 of 3 bodies awake; awake: Circuit plane, Hopper, Parked spaceplane
+  physics report 22:43:45: 1.03 ms a step over 240 steps, 8 regions
+    region 2 0.27 ms, 6 of 14 bodies awake; awake: Red car, Motorboat, Sailing dinghy, Rowboat
+    region 3 0.14 ms, 1 of 8 bodies awake; awake: Motorboat
+    region 4 0.10 ms, 3 of 3 bodies awake; awake: Circuit plane, Hopper, Parked spaceplane
+  physics report 22:43:49: 2.57 ms a step over 240 steps, 8 regions
+    region 3 0.26 ms, 2 of 8 bodies awake; awake: Motorboat, Rowboat
+    region 2 0.25 ms, 6 of 14 bodies awake; awake: Red car, Motorboat, Sailing dinghy, Rowboat
+    region 4 0.07 ms, 3 of 3 bodies awake; awake: Circuit plane, Hopper, Parked spaceplane
+== round 1 plaza (22:43:50-22:44:15 UTC)
+  profile 22:43:55 (186 frames in 5.0 s: 27.0 ms per frame (37.1 fps), worst 118.1 ms)
+    flow_bed_system        -
+    ripple_system          0.37 / max 4.05 / 1.5 runs
+    stream_far_woods       0.19 / max 4.06 / 1.0 runs
+    physics_simulate       1.66 / max 4.58 / 1.5 runs
+  profile 22:44:00 (205 frames in 5.0 s: 24.4 ms per frame (40.9 fps), worst 44.8 ms)
+    flow_bed_system        -
+    ripple_system          -
+    stream_far_woods       0.14 / max 0.44 / 1.0 runs
+    physics_simulate       1.57 / max 1.89 / 1.5 runs
+  profile 22:44:05 (209 frames in 5.0 s: 24.0 ms per frame (41.7 fps), worst 41.2 ms)
+    flow_bed_system        -
+    ripple_system          -
+    stream_far_woods       0.11 / max 0.33 / 1.0 runs
+    physics_simulate       1.50 / max 2.02 / 1.4 runs
+  profile 22:44:10 (198 frames in 5.0 s: 25.3 ms per frame (39.5 fps), worst 44.2 ms)
+    flow_bed_system        -
+    ripple_system          -
+    stream_far_woods       0.20 / max 1.16 / 1.0 runs
+    physics_simulate       1.70 / max 1.97 / 1.5 runs
+  profile 22:44:15 (204 frames in 5.0 s: 24.6 ms per frame (40.7 fps), worst 82.2 ms)
+    flow_bed_system        -
+    ripple_system          -
+    stream_far_woods       0.19 / max 0.42 / 1.0 runs
+    physics_simulate       1.57 / max 2.39 / 1.5 runs
+  physics report 22:43:53: 1.87 ms a step over 240 steps, 8 regions
+    region 2 0.38 ms, 6 of 14 bodies awake; awake: Red car, Rowboat, Motorboat, Sailing dinghy
+    region 3 0.32 ms, 2 of 8 bodies awake; awake: Motorboat, Rowboat
+    region 0 0.25 ms, 49 of 63 bodies awake; awake: 62651v1 engine_softbody::BridgePlank, 62656v1 engine_softbody::BridgePlank, 62653v1 engine_softbody::BridgePlank, 62662v1 engine_softbody::BridgePlank
+    region 4 0.05 ms, 2 of 2 bodies awake; awake: Hopper, Parked spaceplane
+    region 5 0.03 ms, 2 of 2 bodies awake; awake: Circuit plane, Departing plane
+  physics report 22:43:57: 1.61 ms a step over 240 steps, 8 regions
+    region 0 0.44 ms, 37 of 49 bodies awake; awake: Freight car, Wrecking ball, Swing seat, Bead curtain ball
+    region 2 0.41 ms, 6 of 14 bodies awake; awake: Red car, Rowboat, Sailing dinghy, Motorboat
+    region 3 0.19 ms, 2 of 8 bodies awake; awake: Motorboat, Rowboat
+    region 5 0.09 ms, 2 of 2 bodies awake; awake: Circuit plane, Departing plane
+  physics report 22:44:01: 1.48 ms a step over 240 steps, 8 regions
+    region 0 0.43 ms, 51 of 63 bodies awake; awake: Wrecking ball, Swing seat, Shield partner ragdoll lower_arm_l, Bead curtain ball
+    region 2 0.39 ms, 6 of 14 bodies awake; awake: Red car, Motorboat, Sailing dinghy, Rowboat
+    region 3 0.20 ms, 2 of 8 bodies awake; awake: Motorboat, Rowboat
+    region 5 0.09 ms, 2 of 2 bodies awake; awake: Circuit plane, Departing plane
+  physics report 22:44:05: 1.56 ms a step over 240 steps, 8 regions
+    region 0 0.47 ms, 66 of 77 bodies awake; awake: Wrecking ball, Freight car, Bead curtain ball, Sparring partner ragdoll lower_arm_l
+    region 2 0.40 ms, 6 of 14 bodies awake; awake: Red car, Motorboat, Rowboat, Sailing dinghy
+    region 3 0.20 ms, 2 of 8 bodies awake; awake: Motorboat, Rowboat
+    region 5 0.09 ms, 2 of 2 bodies awake; awake: Circuit plane, Departing plane
+  physics report 22:44:09: 1.67 ms a step over 240 steps, 8 regions
+    region 0 0.49 ms, 36 of 49 bodies awake; awake: Swing seat, Bead curtain ball, Wrecking ball, Press
+    region 2 0.41 ms, 6 of 14 bodies awake; awake: Red car, Rowboat, Motorboat, Sailing dinghy
+    region 3 0.20 ms, 1 of 8 bodies awake; awake: Motorboat
+    region 5 0.07 ms, 2 of 2 bodies awake; awake: Circuit plane, Departing plane
+  physics report 22:44:13: 1.49 ms a step over 240 steps, 8 regions
+    region 2 0.41 ms, 6 of 14 bodies awake; awake: Red car, Rowboat, Motorboat, Sailing dinghy
+    region 0 0.38 ms, 66 of 77 bodies awake; awake: Freight car, Wrecking ball, Bead curtain ball, Swing seat
+    region 3 0.20 ms, 2 of 8 bodies awake; awake: Motorboat, Rowboat
+    region 5 0.07 ms, 2 of 2 bodies awake; awake: Circuit plane, Departing plane
+== round 1 market (22:44:15-22:44:40 UTC)
+  profile 22:44:20 (146 frames in 5.0 s: 34.3 ms per frame (29.1 fps), worst 184.7 ms)
+    flow_bed_system        -
+    ripple_system          2.09 / max 31.52 / 1.9 runs
+    stream_far_woods       0.21 / max 0.72 / 1.0 runs
+    physics_simulate       2.57 / max 3.54 / 1.9 runs
+  profile 22:44:25 (148 frames in 5.0 s: 33.8 ms per frame (29.6 fps), worst 204.5 ms)
+    flow_bed_system        -
+    ripple_system          -
+    stream_far_woods       0.14 / max 0.31 / 1.0 runs
+    physics_simulate       2.87 / max 4.39 / 2.0 runs
+  profile 22:44:30 (134 frames in 5.0 s: 37.3 ms per frame (26.8 fps), worst 80.8 ms)
+    flow_bed_system        -
+    ripple_system          -
+    stream_far_woods       -
+    physics_simulate       2.66 / max 2.10 / 2.2 runs
+  profile 22:44:35 (143 frames in 5.0 s: 35.0 ms per frame (28.5 fps), worst 53.7 ms)
+    flow_bed_system        -
+    ripple_system          -
+    stream_far_woods       0.21 / max 1.09 / 1.0 runs
+    physics_simulate       2.70 / max 7.90 / 2.1 runs
+  profile 22:44:40 (141 frames in 5.0 s: 35.6 ms per frame (28.1 fps), worst 103.1 ms)
+    flow_bed_system        -
+    ripple_system          -
+    stream_far_woods       0.19 / max 0.48 / 1.0 runs
+    physics_simulate       3.07 / max 8.17 / 2.1 runs
+  physics report 22:44:18: 2.91 ms a step over 240 steps, 8 regions
+    region 0 0.54 ms, 63 of 77 bodies awake; awake: Shield partner ragdoll lower_arm_r, Wrecking ball, 62591v1 engine_softbody::BridgePlank, 62589v1 engine_softbody::BridgePlank
+    region 2 0.47 ms, 6 of 14 bodies awake; awake: Red car, Sailing dinghy, Motorboat, Rowboat
+    region 3 0.24 ms, 2 of 8 bodies awake; awake: Motorboat, Rowboat
+    region 5 0.13 ms, 1 of 1 bodies awake; awake: Circuit plane
+    region 6 0.04 ms, 2 of 2 bodies awake; awake: Departing plane, Parked plane
+    region 4 0.02 ms, 2 of 2 bodies awake; awake: Hopper, Parked spaceplane
+  physics report 22:44:22: 2.59 ms a step over 240 steps, 8 regions
+    region 0 0.54 ms, 38 of 49 bodies awake; awake: Wrecking ball, Freight car, Swing seat, 62616v1 engine_softbody::BridgePlank
+    region 2 0.42 ms, 6 of 14 bodies awake; awake: Red car, Rowboat, Motorboat, Sailing dinghy
+    region 3 0.21 ms, 2 of 8 bodies awake; awake: Motorboat, Rowboat
+    region 5 0.14 ms, 1 of 1 bodies awake; awake: Circuit plane
+    region 6 0.07 ms, 2 of 2 bodies awake; awake: Departing plane, Parked plane
+  physics report 22:44:26: 4.11 ms a step over 240 steps, 8 regions
+    region 3 0.63 ms, 2 of 8 bodies awake; awake: Motorboat, Rowboat
+    region 2 0.41 ms, 6 of 14 bodies awake; awake: Red car, Rowboat, Sailing dinghy, Motorboat
+    region 0 0.33 ms, 50 of 63 bodies awake; awake: 62589v1 engine_softbody::BridgePlank, 62598v1 engine_softbody::BridgePlank, 62567v1 engine_softbody::BridgePlank, 62602v1 engine_softbody::BridgePlank
+    region 5 0.13 ms, 1 of 1 bodies awake; awake: Circuit plane
+    region 6 0.07 ms, 2 of 2 bodies awake; awake: Departing plane, Parked plane
+  physics report 22:44:30: 4.50 ms a step over 240 steps, 8 regions
+    region 0 0.52 ms, 65 of 77 bodies awake; awake: Wrecking ball, Swing seat, Freeflow dummy ragdoll neck, Freeflow dummy ragdoll chest
+    region 2 0.44 ms, 6 of 14 bodies awake; awake: Red car, Rowboat, Motorboat, Sailing dinghy
+    region 3 0.21 ms, 2 of 8 bodies awake; awake: Motorboat, Rowboat
+    region 5 0.14 ms, 1 of 1 bodies awake; awake: Circuit plane
+    region 6 0.07 ms, 2 of 2 bodies awake; awake: Departing plane, Parked plane
+  physics report 22:44:34: 4.24 ms a step over 240 steps, 9 regions
+    region 0 0.62 ms, 56 of 69 bodies awake; awake: Wrecking ball, 62589v1 engine_softbody::BridgePlank, 62591v1 engine_softbody::BridgePlank, 62567v1 engine_softbody::BridgePlank
+    region 2 0.42 ms, 6 of 14 bodies awake; awake: Red car, Rowboat, Sailing dinghy, Motorboat
+    region 3 0.18 ms, 0 of 0 bodies awake
+    region 5 0.13 ms, 1 of 1 bodies awake; awake: Circuit plane
+    region 6 0.07 ms, 2 of 2 bodies awake; awake: Departing plane, Parked plane
+  physics report 22:44:38: 4.40 ms a step over 240 steps, 9 regions
+    region 0 0.50 ms, 43 of 55 bodies awake; awake: Wrecking ball, Swing seat, 62608v1 engine_softbody::BridgePlank, 62579v1 engine_softbody::BridgePlank
+    region 2 0.41 ms, 6 of 14 bodies awake; awake: Red car, Rowboat, Sailing dinghy, Motorboat
+    region 8 0.23 ms, 30 of 30 bodies awake; awake: Sparring partner ragdoll lower_arm_l, Motorboat, Sparring partner ragdoll neck, Sparring partner ragdoll upper_arm_l
+    region 5 0.12 ms, 1 of 1 bodies awake; awake: Circuit plane
+    region 6 0.07 ms, 2 of 2 bodies awake; awake: Departing plane, Parked plane
+== round 1 forest (22:44:40-22:45:05 UTC)
+  profile 22:44:45 (112 frames in 5.0 s: 45.0 ms per frame (22.2 fps), worst 103.7 ms)
+    flow_bed_system        -
+    ripple_system          2.46 / max 27.49 / 2.5 runs
+    stream_far_woods       0.26 / max 1.12 / 1.1 runs
+    physics_simulate       4.06 / max 4.44 / 2.5 runs
+  profile 22:44:50 (105 frames in 5.0 s: 47.8 ms per frame (20.9 fps), worst 70.2 ms)
+    flow_bed_system        -
+    ripple_system          1.24 / max 2.91 / 2.8 runs
+    stream_far_woods       -
+    physics_simulate       8.67 / max 7.25 / 2.8 runs
+  profile 22:44:55 (172 frames in 5.0 s: 29.2 ms per frame (34.3 fps), worst 64.6 ms)
+    flow_bed_system        -
+    ripple_system          0.60 / max 1.72 / 1.7 runs
+    stream_far_woods       0.19 / max 1.21 / 1.0 runs
+    physics_simulate       3.46 / max 8.18 / 1.7 runs
+  profile 22:45:00 (195 frames in 5.0 s: 25.7 ms per frame (38.9 fps), worst 61.4 ms)
+    flow_bed_system        0.12 / max 0.88 / 1.5 runs
+    ripple_system          0.59 / max 1.74 / 1.5 runs
+    stream_far_woods       0.19 / max 1.30 / 1.0 runs
+    physics_simulate       2.51 / max 2.78 / 1.5 runs
+  profile 22:45:05 (196 frames in 5.0 s: 25.5 ms per frame (39.2 fps), worst 88.8 ms)
+    flow_bed_system        0.44 / max 7.63 / 1.5 runs
+    ripple_system          0.65 / max 2.45 / 1.5 runs
+    stream_far_woods       0.20 / max 0.33 / 1.0 runs
+    physics_simulate       2.31 / max 5.77 / 1.5 runs
+  physics report 22:44:42: 4.13 ms a step over 240 steps, 7 regions
+    region 0 1.09 ms, 67 of 85 bodies awake; awake: Motorboat, Freeflow dummy ragdoll neck, Freeflow dummy ragdoll chest, Swing seat
+    region 2 0.44 ms, 6 of 14 bodies awake; awake: Red car, Sailing dinghy, Motorboat, Rowboat
+    region 6 0.08 ms, 3 of 3 bodies awake; awake: Circuit plane, Departing plane, Parked plane
+  physics report 22:44:46: 3.63 ms a step over 240 steps, 7 regions
+    region 0 1.88 ms, 153 of 164 bodies awake; awake: 78389v1 engine_destruction::Debris engine_destruction::DebrisMesh, 101936v2 engine_destruction::Debris engine_destruction::DebrisMesh, 83929v1 engine_destruction::Debris engine_destruction::DebrisMesh, 106787v1 engine_destruction::Debris engine_destruction::DebrisMesh
+    region 2 0.50 ms, 6 of 14 bodies awake; awake: Red car, Sailing dinghy, Rowboat, Motorboat
+    region 6 0.09 ms, 3 of 3 bodies awake; awake: Circuit plane, Departing plane, Parked plane
+  physics report 22:44:50: 3.72 ms a step over 240 steps, 7 regions
+    region 0 1.75 ms, 0 of 0 bodies awake
+    region 2 0.50 ms, 6 of 14 bodies awake; awake: Red car, Blue car, Rowboat, Sailing dinghy
+    region 3 0.39 ms, 130 of 177 bodies awake; awake: Rail, Motorboat, Wrecking ball, Freeflow dummy ragdoll chest
+    region 6 0.08 ms, 3 of 3 bodies awake; awake: Circuit plane, Departing plane, Parked plane
+  physics report 22:44:54: 2.37 ms a step over 240 steps, 8 regions
+    region 5 0.74 ms, 114 of 185 bodies awake; awake: 135725v3 engine_destruction::Debris engine_destruction::DebrisMesh, Motorboat, 135721v3 engine_destruction::Debris engine_destruction::DebrisMesh, Wrecking ball
+    region 3 0.51 ms, 0 of 0 bodies awake
+    region 2 0.50 ms, 6 of 14 bodies awake; awake: Red car, Sailing dinghy, Motorboat, Rowboat
+    region 6 0.08 ms, 3 of 3 bodies awake; awake: Circuit plane, Departing plane, Parked plane
+  physics report 22:44:58: 1.95 ms a step over 240 steps, 8 regions
+    region 5 0.94 ms, 94 of 171 bodies awake; awake: Motorboat, Swing seat, Freight car, Bead curtain ball
+    region 2 0.50 ms, 6 of 14 bodies awake; awake: Red car, Rowboat, Sailing dinghy, Motorboat
+    region 6 0.08 ms, 3 of 3 bodies awake; awake: Circuit plane, Departing plane, Parked plane
+    region 0 0.04 ms, 0 of 0 bodies awake
+  physics report 22:45:02: 1.83 ms a step over 240 steps, 9 regions
+    region 5 0.80 ms, 31 of 43 bodies awake; awake: Motorboat, Freeflow dummy ragdoll chest, Freeflow dummy ragdoll upper_arm_r, Freeflow dummy ragdoll neck
+    region 2 0.50 ms, 41 of 50 bodies awake; awake: Red car, Wrecking ball, Press, Swing seat
+    region 6 0.08 ms, 3 of 3 bodies awake; awake: Departing plane, Circuit plane, Parked plane
+    region 0 0.05 ms, 0 of 0 bodies awake
+== round 1 lake (22:45:05-22:45:30 UTC)
+  profile 22:45:10 (90 frames in 5.0 s: 55.7 ms per frame (18.0 fps), worst 187.2 ms)
+    flow_bed_system        0.68 / max 7.70 / 2.4 runs
+    ripple_system          10.71 / max 82.74 / 2.4 runs
+    stream_far_woods       0.29 / max 2.18 / 1.2 runs
+    physics_simulate       4.77 / max 4.09 / 2.4 runs
+  profile 22:45:15 (110 frames in 5.0 s: 45.5 ms per frame (22.0 fps), worst 65.5 ms)
+    flow_bed_system        0.16 / max 0.14 / 2.7 runs
+    ripple_system          1.03 / max 1.96 / 2.7 runs
+    stream_far_woods       0.17 / max 0.28 / 1.0 runs
+    physics_simulate       6.27 / max 4.98 / 2.7 runs
+  profile 22:45:20 (121 frames in 5.0 s: 41.4 ms per frame (24.1 fps), worst 61.5 ms)
+    flow_bed_system        0.15 / max 0.13 / 2.5 runs
+    ripple_system          0.94 / max 1.87 / 2.5 runs
+    stream_far_woods       0.19 / max 1.15 / 1.0 runs
+    physics_simulate       4.91 / max 6.79 / 2.5 runs
+  profile 22:45:25 (123 frames in 5.0 s: 40.8 ms per frame (24.5 fps), worst 50.0 ms)
+    flow_bed_system        0.17 / max 0.20 / 2.4 runs
+    ripple_system          0.94 / max 1.98 / 2.4 runs
+    stream_far_woods       0.24 / max 1.20 / 1.0 runs
+    physics_simulate       4.86 / max 4.09 / 2.4 runs
+  profile 22:45:30 (123 frames in 5.0 s: 40.7 ms per frame (24.6 fps), worst 102.4 ms)
+    flow_bed_system        0.17 / max 0.18 / 2.5 runs
+    ripple_system          0.95 / max 1.90 / 2.5 runs
+    stream_far_woods       0.20 / max 0.50 / 1.0 runs
+    physics_simulate       4.89 / max 3.15 / 2.5 runs
+  physics report 22:45:08: 5.43 ms a step over 240 steps, 10 regions
+    region 2 1.22 ms, 44 of 65 bodies awake; awake: Red car, Motorboat, Wrecking ball, Freight car
+    region 5 0.09 ms, 0 of 0 bodies awake
+    region 6 0.08 ms, 3 of 3 bodies awake; awake: Departing plane, Circuit plane, Parked plane
+    region 8 0.05 ms, 154 of 162 bodies awake; awake: Freeflow dummy ragdoll neck, Freeflow dummy ragdoll lower_arm_r, Freeflow dummy ragdoll upper_arm_r, Freeflow dummy ragdoll foot_l
+    region 0 0.01 ms, 0 of 0 bodies awake
+  physics report 22:45:12: 2.91 ms a step over 240 steps, 11 regions
+    region 2 1.10 ms, 39 of 60 bodies awake; awake: Wrecking ball, Swing seat, Sailing dinghy, Bead curtain ball
+    region 8 1.07 ms, 73 of 128 bodies awake; awake: Departing plane, Red car, Rally car, Motorboat
+    region 1 0.06 ms, 0 of 0 bodies awake
+    region 6 0.05 ms, 0 of 0 bodies awake
+    region 10 0.02 ms, 1 of 1 bodies awake; awake: Circuit plane
+  physics report 22:45:16: 2.39 ms a step over 240 steps, 11 regions
+    region 2 1.08 ms, 41 of 60 bodies awake; awake: Freight car, Swing seat, Wrecking ball, Bead curtain ball
+    region 8 0.88 ms, 47 of 128 bodies awake; awake: Departing plane, Red car, Motorboat, Rally car
+    region 10 0.06 ms, 1 of 1 bodies awake; awake: Circuit plane
+  physics report 22:45:20: 2.40 ms a step over 240 steps, 13 regions
+    region 8 1.03 ms, 43 of 64 bodies awake; awake: Rally car, Red car, Wrecking ball, Swing seat
+    region 2 0.56 ms, 0 of 0 bodies awake
+    region 10 0.06 ms, 1 of 1 bodies awake; awake: Circuit plane
+  physics report 22:45:24: 2.38 ms a step over 240 steps, 14 regions
+    region 8 1.10 ms, 41 of 60 bodies awake; awake: Wrecking ball, Freight car, Bead curtain ball, Sailing dinghy
+    region 11 0.77 ms, 42 of 122 bodies awake; awake: Motorboat, Rowboat, Rail, Rail
+    region 12 0.17 ms, 4 of 4 bodies awake; awake: Red car, Rally car, Parked car, Blue car
+    region 10 0.06 ms, 1 of 1 bodies awake; awake: Circuit plane
+    region 9 0.06 ms, 3 of 3 bodies awake; awake: Hopper, Parked plane, Parked spaceplane
+    region 13 0.03 ms, 1 of 1 bodies awake; awake: Departing plane
+  physics report 22:45:28: 2.44 ms a step over 240 steps, 14 regions
+    region 8 1.10 ms, 38 of 60 bodies awake; awake: 62656v1 engine_softbody::BridgePlank, Swing seat, 62643v1 engine_softbody::BridgePlank, 62662v1 engine_softbody::BridgePlank
+    region 11 0.64 ms, 44 of 122 bodies awake; awake: Motorboat, Rowboat, 120949v9 engine_destruction::Debris engine_destruction::DebrisMesh, 98613v1 engine_destruction::Debris engine_destruction::DebrisMesh
+    region 12 0.20 ms, 4 of 4 bodies awake; awake: Red car, Rally car, Parked car, Blue car
+    region 10 0.08 ms, 1 of 1 bodies awake; awake: Circuit plane
+    region 13 0.06 ms, 1 of 1 bodies awake; awake: Departing plane
+== round 1 fortress (22:45:30-22:45:55 UTC)
+  profile 22:45:35 (101 frames in 5.0 s: 49.5 ms per frame (20.2 fps), worst 126.0 ms)
+    flow_bed_system        2.09 / max 21.92 / 2.6 runs
+    ripple_system          4.34 / max 13.88 / 2.6 runs
+    stream_far_woods       0.28 / max 2.17 / 1.0 runs
+    physics_simulate       5.14 / max 7.01 / 2.6 runs
+  profile 22:45:40 (119 frames in 5.0 s: 42.1 ms per frame (23.7 fps), worst 68.2 ms)
+    flow_bed_system        2.74 / max 14.09 / 2.5 runs
+    ripple_system          2.88 / max 3.03 / 2.5 runs
+    stream_far_woods       -
+    physics_simulate       4.38 / max 3.62 / 2.5 runs
+  profile 22:45:45 (109 frames in 5.0 s: 45.9 ms per frame (21.8 fps), worst 72.0 ms)
+    flow_bed_system        3.06 / max 14.93 / 2.7 runs
+    ripple_system          2.96 / max 3.87 / 2.7 runs
+    stream_far_woods       -
+    physics_simulate       4.69 / max 3.43 / 2.7 runs
+  profile 22:45:50 (105 frames in 5.0 s: 47.8 ms per frame (20.9 fps), worst 78.8 ms)
+    flow_bed_system        3.11 / max 15.10 / 2.8 runs
+    ripple_system          3.23 / max 5.11 / 2.8 runs
+    stream_far_woods       -
+    physics_simulate       4.89 / max 3.76 / 2.8 runs
+  profile 22:45:55 (101 frames in 5.0 s: 49.7 ms per frame (20.1 fps), worst 115.8 ms)
+    flow_bed_system        3.10 / max 13.23 / 3.0 runs
+    ripple_system          3.46 / max 9.96 / 3.0 runs
+    stream_far_woods       0.21 / max 1.23 / 1.0 runs
+    physics_simulate       4.36 / max 3.11 / 3.0 runs
+  physics report 22:45:33: 2.98 ms a step over 240 steps, 14 regions
+    region 8 0.96 ms, 39 of 60 bodies awake; awake: Freight car, Wrecking ball, Bead curtain ball, Swing seat
+    region 11 0.90 ms, 60 of 122 bodies awake; awake: 106787v1 engine_destruction::Debris engine_destruction::DebrisMesh, 129495v8 engine_destruction::Debris engine_destruction::DebrisMesh, 83934v1 engine_destruction::Debris engine_destruction::DebrisMesh, 84109v2 engine_destruction::Debris engine_destruction::DebrisMesh
+    region 12 0.17 ms, 4 of 4 bodies awake; awake: Red car, Rally car, Parked car, Blue car
+    region 10 0.14 ms, 1 of 1 bodies awake; awake: Circuit plane
+    region 13 0.07 ms, 1 of 1 bodies awake; awake: Departing plane
+  physics report 22:45:37: 2.28 ms a step over 240 steps, 14 regions
+    region 11 0.80 ms, 43 of 122 bodies awake; awake: Motorboat, Rowboat, Rail, Rail
+    region 8 0.65 ms, 39 of 60 bodies awake; awake: Wrecking ball, Swing seat, Bead curtain ball, Sailing dinghy
+    region 10 0.15 ms, 1 of 1 bodies awake; awake: Circuit plane
+    region 12 0.12 ms, 4 of 4 bodies awake; awake: Red car, Rally car, Parked car, Blue car
+    region 13 0.07 ms, 1 of 1 bodies awake; awake: Departing plane
+  physics report 22:45:41: 2.53 ms a step over 240 steps, 14 regions
+    region 11 0.89 ms, 40 of 122 bodies awake; awake: Motorboat, Rail, Rowboat, Rail
+    region 8 0.57 ms, 54 of 74 bodies awake; awake: Wrecking ball, Swing seat, Freight car, Press
+    region 12 0.13 ms, 4 of 4 bodies awake; awake: Red car, Rally car, Parked car, Blue car
+    region 10 0.08 ms, 1 of 1 bodies awake; awake: Circuit plane
+    region 13 0.07 ms, 1 of 1 bodies awake; awake: Departing plane
+  physics report 22:45:45: 2.48 ms a step over 240 steps, 15 regions
+    region 11 0.85 ms, 49 of 109 bodies awake; awake: Motorboat, 85206v1 engine_destruction::Debris engine_destruction::DebrisMesh, 85228v1 engine_destruction::Debris engine_destruction::DebrisMesh, 83925v1 engine_destruction::Debris engine_destruction::DebrisMesh
+    region 8 0.57 ms, 39 of 60 bodies awake; awake: Swing seat, Wrecking ball, Bead curtain ball, Sailing dinghy
+    region 12 0.13 ms, 4 of 4 bodies awake; awake: Red car, Rally car, Parked car, Blue car
+    region 14 0.09 ms, 10 of 10 bodies awake; awake: 104267v2 engine_destruction::Debris engine_destruction::DebrisMesh, 74762v6 engine_destruction::Debris engine_destruction::DebrisMesh, 104268v2 engine_destruction::Debris engine_destruction::DebrisMesh, 137838v10 engine_destruction::Debris engine_destruction::DebrisMesh
+    region 10 0.08 ms, 1 of 1 bodies awake; awake: Circuit plane
+    region 13 0.06 ms, 1 of 1 bodies awake; awake: Departing plane
+    region 5 0.02 ms, 0 of 0 bodies awake
+  physics report 22:45:49: 2.48 ms a step over 240 steps, 15 regions
+    region 11 0.77 ms, 37 of 59 bodies awake; awake: Motorboat, Rail, 96202v4 engine_destruction::Debris engine_destruction::DebrisMesh, 80045v2 engine_destruction::Debris engine_destruction::DebrisMesh
+    region 8 0.55 ms, 40 of 60 bodies awake; awake: Swing seat, Wrecking ball, Freight car, Bead curtain ball
+    region 14 0.48 ms, 10 of 10 bodies awake; awake: 136926v13 engine_destruction::Debris engine_destruction::DebrisMesh, 102148v4 engine_destruction::Debris engine_destruction::DebrisMesh, 137838v10 engine_destruction::Debris engine_destruction::DebrisMesh, 89197v3 engine_destruction::Debris engine_destruction::DebrisMesh
+    region 12 0.13 ms, 4 of 4 bodies awake; awake: Red car, Rally car, Parked car, Blue car
+    region 10 0.09 ms, 1 of 1 bodies awake; awake: Circuit plane
+    region 13 0.06 ms, 1 of 1 bodies awake; awake: Departing plane
+  physics report 22:45:53: 2.72 ms a step over 240 steps, 15 regions
+    region 11 0.62 ms, 2 of 15 bodies awake; awake: Motorboat, Rowboat
+    region 8 0.57 ms, 54 of 74 bodies awake; awake: Wrecking ball, Bead curtain ball, Freight car, Sailing dinghy
+    region 14 0.27 ms, 15 of 24 bodies awake; awake: 136320v5 engine_destruction::Debris engine_destruction::DebrisMesh, 116828v9 engine_destruction::Debris engine_destruction::DebrisMesh, 84131v2 engine_destruction::Debris engine_destruction::DebrisMesh, Hut king post
+    region 12 0.11 ms, 4 of 4 bodies awake; awake: Red car, Rally car, Parked car, Blue car
+    region 10 0.09 ms, 1 of 1 bodies awake; awake: Circuit plane
+    region 13 0.07 ms, 1 of 1 bodies awake; awake: Departing plane
+== round 1 field (22:45:56-22:46:21 UTC)
+  profile 22:46:00 (166 frames in 5.0 s: 30.2 ms per frame (33.1 fps), worst 101.5 ms)
+    flow_bed_system        0.55 / max 12.93 / 1.6 runs
+    ripple_system          2.39 / max 35.47 / 1.6 runs
+    stream_far_woods       0.25 / max 2.05 / 0.9 runs
+    physics_simulate       2.07 / max 4.43 / 1.6 runs
+  profile 22:46:05 (213 frames in 5.0 s: 23.5 ms per frame (42.6 fps), worst 44.1 ms)
+    flow_bed_system        -
+    ripple_system          -
+    stream_far_woods       0.21 / max 0.44 / 1.0 runs
+    physics_simulate       1.49 / max 2.39 / 1.4 runs
+  profile 22:46:10 (208 frames in 5.0 s: 24.1 ms per frame (41.6 fps), worst 42.4 ms)
+    flow_bed_system        -
+    ripple_system          -
+    stream_far_woods       0.20 / max 1.22 / 1.0 runs
+    physics_simulate       1.63 / max 1.83 / 1.4 runs
+  profile 22:46:15 (212 frames in 5.0 s: 23.6 ms per frame (42.4 fps), worst 44.3 ms)
+    flow_bed_system        -
+    ripple_system          -
+    stream_far_woods       0.23 / max 1.16 / 1.0 runs
+    physics_simulate       1.34 / max 1.67 / 1.4 runs
+  profile 22:46:20 (216 frames in 5.0 s: 23.2 ms per frame (43.1 fps), worst 87.6 ms)
+    flow_bed_system        -
+    ripple_system          -
+    stream_far_woods       0.20 / max 0.45 / 1.0 runs
+    physics_simulate       1.59 / max 1.95 / 1.4 runs
+  physics report 22:45:57: 3.31 ms a step over 240 steps, 15 regions
+    region 8 0.57 ms, 56 of 74 bodies awake; awake: Stuntman ragdoll upper_arm_r, Stuntman ragdoll neck, Stuntman ragdoll lower_arm_r, Stuntman ragdoll chest
+    region 11 0.39 ms, 2 of 8 bodies awake; awake: Motorboat, Rowboat
+    region 14 0.24 ms, 1 of 24 bodies awake; awake: Plank door
+    region 12 0.13 ms, 4 of 4 bodies awake; awake: Red car, Rally car, Parked car, Blue car
+    region 10 0.08 ms, 1 of 1 bodies awake; awake: Circuit plane
+    region 13 0.08 ms, 1 of 1 bodies awake; awake: Departing plane
+  physics report 22:46:01: 2.08 ms a step over 240 steps, 15 regions
+    region 8 0.56 ms, 54 of 74 bodies awake; awake: Bead curtain ball, Freight car, Swing seat, Press
+    region 11 0.20 ms, 2 of 8 bodies awake; awake: Motorboat, Rowboat
+    region 12 0.11 ms, 4 of 4 bodies awake; awake: Red car, Rally car, Parked car, Blue car
+    region 10 0.07 ms, 1 of 1 bodies awake; awake: Circuit plane
+    region 13 0.06 ms, 1 of 1 bodies awake; awake: Departing plane
+  physics report 22:46:05: 2.03 ms a step over 240 steps, 14 regions
+    region 8 0.72 ms, 57 of 82 bodies awake; awake: Motorboat, Wrecking ball, Swing seat, Bead curtain ball
+    region 12 0.10 ms, 4 of 4 bodies awake; awake: Red car, Rally car, Parked car, Blue car
+    region 10 0.07 ms, 1 of 1 bodies awake; awake: Circuit plane
+    region 13 0.06 ms, 1 of 1 bodies awake; awake: Departing plane
+  physics report 22:46:09: 2.02 ms a step over 240 steps, 14 regions
+    region 8 0.73 ms, 55 of 82 bodies awake; awake: Motorboat, Wrecking ball, Freight car, Swing seat
+    region 12 0.10 ms, 4 of 4 bodies awake; awake: Red car, Rally car, Parked car, Blue car
+    region 10 0.06 ms, 1 of 1 bodies awake; awake: Circuit plane
+    region 13 0.06 ms, 1 of 1 bodies awake; awake: Departing plane
+  physics report 22:46:13: 1.93 ms a step over 240 steps, 14 regions
+    region 8 0.55 ms, 58 of 82 bodies awake; awake: Motorboat, Wrecking ball, Swing seat, Bead curtain ball
+    region 12 0.10 ms, 4 of 4 bodies awake; awake: Red car, Rally car, Parked car, Blue car
+    region 10 0.07 ms, 1 of 1 bodies awake; awake: Circuit plane
+    region 13 0.06 ms, 1 of 1 bodies awake; awake: Departing plane
+  physics report 22:46:17: 1.82 ms a step over 240 steps, 14 regions
+    region 8 0.73 ms, 98 of 124 bodies awake; awake: Motorboat, Freight car, Swing seat, Sparring partner ragdoll neck
+    region 12 0.09 ms, 4 of 4 bodies awake; awake: Red car, Rally car, Parked car, Blue car
+    region 10 0.06 ms, 1 of 1 bodies awake; awake: Circuit plane
+    region 13 0.06 ms, 1 of 1 bodies awake; awake: Departing plane
+== round 1 orbit (22:46:21-22:46:46 UTC)
+  profile 22:46:25 (295 frames in 5.0 s: 17.0 ms per frame (59.0 fps), worst 32.6 ms)
+    flow_bed_system        -
+    ripple_system          -
+    stream_far_woods       0.17 / max 2.11 / 0.9 runs
+    physics_simulate       0.49 / max 1.86 / 1.0 runs
+  profile 22:46:30 (324 frames in 5.0 s: 15.4 ms per frame (64.7 fps), worst 30.2 ms)
+    flow_bed_system        -
+    ripple_system          -
+    stream_far_woods       0.13 / max 0.32 / 1.0 runs
+    physics_simulate       0.18 / max 0.43 / 0.9 runs
+  profile 22:46:35 (328 frames in 5.0 s: 15.2 ms per frame (65.6 fps), worst 22.2 ms)
+    flow_bed_system        -
+    ripple_system          -
+    stream_far_woods       0.13 / max 0.32 / 1.0 runs
+    physics_simulate       0.18 / max 0.42 / 0.9 runs
+  profile 22:46:40 (329 frames in 5.0 s: 15.2 ms per frame (65.8 fps), worst 32.9 ms)
+    flow_bed_system        -
+    ripple_system          -
+    stream_far_woods       0.12 / max 0.20 / 1.0 runs
+    physics_simulate       0.18 / max 0.38 / 0.9 runs
+  profile 22:46:45 (341 frames in 5.0 s: 14.7 ms per frame (68.1 fps), worst 46.9 ms)
+    flow_bed_system        -
+    ripple_system          -
+    stream_far_woods       0.12 / max 0.21 / 1.0 runs
+    physics_simulate       0.17 / max 0.66 / 0.9 runs
+  physics report 22:46:21: 1.81 ms a step over 240 steps, 14 regions
+    region 8 0.65 ms, 55 of 82 bodies awake; awake: Motorboat, Wrecking ball, Stuntman ragdoll neck, Stuntman ragdoll upper_arm_l
+    region 12 0.08 ms, 4 of 4 bodies awake; awake: Red car, Rally car, Parked car, Blue car
+    region 13 0.05 ms, 1 of 1 bodies awake; awake: Departing plane
+    region 10 0.05 ms, 1 of 1 bodies awake; awake: Circuit plane
+  physics report 22:46:25: 0.93 ms a step over 240 steps, 14 regions
+  physics report 22:46:29: 0.77 ms a step over 240 steps, 14 regions
+  physics report 22:46:33: 0.76 ms a step over 240 steps, 14 regions
+  physics report 22:46:37: 0.87 ms a step over 240 steps, 14 regions
+  physics report 22:46:41: 0.71 ms a step over 240 steps, 14 regions
+  physics report 22:46:45: 0.56 ms a step over 240 steps, 14 regions
+== round 2 overview (22:46:46-22:47:11 UTC)
+  profile 22:46:50 (212 frames in 5.0 s: 23.6 ms per frame (42.3 fps), worst 50.7 ms)
+    flow_bed_system        -
+    ripple_system          -
+    stream_far_woods       0.25 / max 2.18 / 1.1 runs
+    physics_simulate       1.02 / max 1.93 / 1.4 runs
+  profile 22:46:55 (258 frames in 5.0 s: 19.4 ms per frame (51.6 fps), worst 37.2 ms)
+    flow_bed_system        -
+    ripple_system          -
+    stream_far_woods       0.18 / max 0.40 / 1.0 runs
+    physics_simulate       0.78 / max 1.25 / 1.2 runs
+  profile 22:47:00 (263 frames in 5.0 s: 19.0 ms per frame (52.6 fps), worst 37.2 ms)
+    flow_bed_system        -
+    ripple_system          -
+    stream_far_woods       0.15 / max 0.48 / 1.0 runs
+    physics_simulate       0.78 / max 1.53 / 1.1 runs
+  profile 22:47:05 (269 frames in 5.0 s: 18.6 ms per frame (53.7 fps), worst 23.1 ms)
+    flow_bed_system        -
+    ripple_system          -
+    stream_far_woods       0.14 / max 0.34 / 1.0 runs
+    physics_simulate       0.68 / max 1.26 / 1.1 runs
+  profile 22:47:10 (265 frames in 5.0 s: 18.9 ms per frame (53.0 fps), worst 32.9 ms)
+    flow_bed_system        -
+    ripple_system          -
+    stream_far_woods       0.14 / max 0.33 / 1.0 runs
+    physics_simulate       0.71 / max 1.65 / 1.1 runs
+  physics report 22:46:49: 1.24 ms a step over 240 steps, 14 regions
+    region 0 0.22 ms, 38 of 38 bodies awake; awake: Motorboat, Wrecking ball, Bead curtain ball, Swing seat
+    region 13 0.15 ms, 1 of 1 bodies awake; awake: Departing plane
+    region 12 0.11 ms, 4 of 4 bodies awake; awake: Red car, Rally car, Parked car, Blue car
+    region 8 0.10 ms, 5 of 30 bodies awake; awake: Rowboat, Motorboat, Sailing dinghy, Vaulter
+    region 10 0.07 ms, 1 of 1 bodies awake; awake: Circuit plane
+  physics report 22:46:53: 0.95 ms a step over 240 steps, 14 regions
+    region 0 0.16 ms, 38 of 38 bodies awake; awake: Motorboat, Wrecking ball, Swing seat, Press
+    region 13 0.14 ms, 1 of 1 bodies awake; awake: Departing plane
+    region 12 0.10 ms, 4 of 4 bodies awake; awake: Red car, Rally car, Parked car, Blue car
+    region 10 0.06 ms, 1 of 1 bodies awake; awake: Circuit plane
+  physics report 22:46:57: 0.98 ms a step over 240 steps, 14 regions
+    region 0 0.16 ms, 37 of 38 bodies awake; awake: Motorboat, Wrecking ball, Swing seat, Bead curtain ball
+    region 13 0.16 ms, 1 of 1 bodies awake; awake: Departing plane
+    region 12 0.10 ms, 4 of 4 bodies awake; awake: Red car, Rally car, Parked car, Blue car
+    region 10 0.07 ms, 1 of 1 bodies awake; awake: Circuit plane
+  physics report 22:47:01: 0.94 ms a step over 240 steps, 14 regions
+    region 0 0.16 ms, 37 of 38 bodies awake; awake: Motorboat, Swing seat, Wrecking ball, Bead curtain ball
+    region 13 0.14 ms, 1 of 1 bodies awake; awake: Departing plane
+    region 12 0.10 ms, 4 of 4 bodies awake; awake: Red car, Rally car, Parked car, Blue car
+    region 10 0.07 ms, 1 of 1 bodies awake; awake: Circuit plane
+  physics report 22:47:05: 0.88 ms a step over 240 steps, 14 regions
+    region 0 0.16 ms, 38 of 38 bodies awake; awake: Motorboat, Swing seat, Wrecking ball, Bead curtain ball
+    region 12 0.10 ms, 4 of 4 bodies awake; awake: Red car, Rally car, Parked car, Blue car
+    region 10 0.07 ms, 1 of 1 bodies awake; awake: Circuit plane
+    region 13 0.07 ms, 1 of 1 bodies awake; awake: Departing plane
+  physics report 22:47:09: 0.96 ms a step over 240 steps, 14 regions
+    region 0 0.16 ms, 38 of 52 bodies awake; awake: Motorboat, Wrecking ball, Bead curtain ball, Press
+    region 12 0.10 ms, 4 of 4 bodies awake; awake: Red car, Rally car, Parked car, Blue car
+    region 10 0.07 ms, 1 of 1 bodies awake; awake: Circuit plane
+    region 13 0.07 ms, 1 of 1 bodies awake; awake: Departing plane
+    region 8 0.07 ms, 18 of 44 bodies awake; awake: Stuntman ragdoll neck, Stuntman ragdoll chest, Stuntman ragdoll lower_arm_r, Stuntman ragdoll foot_r
+== round 2 plaza (22:47:11-22:47:36 UTC)
+  profile 22:47:15 (166 frames in 5.0 s: 30.2 ms per frame (33.1 fps), worst 130.4 ms)
+    flow_bed_system        -
+    ripple_system          1.90 / max 38.69 / 1.5 runs
+    stream_far_woods       0.22 / max 2.24 / 1.1 runs
+    physics_simulate       1.71 / max 2.89 / 1.5 runs
+  profile 22:47:20 (198 frames in 5.0 s: 25.3 ms per frame (39.6 fps), worst 48.1 ms)
+    flow_bed_system        -
+    ripple_system          -
+    stream_far_woods       0.18 / max 0.33 / 1.0 runs
+    physics_simulate       1.91 / max 3.46 / 1.5 runs
+  profile 22:47:25 (210 frames in 5.0 s: 23.9 ms per frame (41.8 fps), worst 37.6 ms)
+    flow_bed_system        -
+    ripple_system          -
+    stream_far_woods       0.15 / max 0.21 / 1.0 runs
+    physics_simulate       1.64 / max 2.00 / 1.4 runs
+  profile 22:47:30 (204 frames in 5.0 s: 24.6 ms per frame (40.6 fps), worst 39.4 ms)
+    flow_bed_system        -
+    ripple_system          -
+    stream_far_woods       0.13 / max 0.20 / 1.0 runs
+    physics_simulate       1.82 / max 1.90 / 1.5 runs
+  profile 22:47:35 (212 frames in 5.0 s: 23.7 ms per frame (42.2 fps), worst 40.3 ms)
+    flow_bed_system        -
+    ripple_system          -
+    stream_far_woods       0.13 / max 0.29 / 1.0 runs
+    physics_simulate       1.77 / max 2.21 / 1.4 runs
+  physics report 22:47:14: 2.52 ms a step over 240 steps, 14 regions
+    region 8 0.40 ms, 65 of 91 bodies awake; awake: 62651v1 engine_softbody::BridgePlank, 62662v1 engine_softbody::BridgePlank, 62649v1 engine_softbody::BridgePlank, Wrecking ball
+    region 10 0.18 ms, 4 of 4 bodies awake; awake: Circuit plane, Rowboat, Motorboat, Sailing dinghy
+    region 12 0.17 ms, 4 of 4 bodies awake; awake: Red car, Rally car, Parked car, Blue car
+    region 14 0.12 ms, 3 of 3 bodies awake; awake: Motorboat, Rowboat, Plank door
+    region 13 0.12 ms, 1 of 1 bodies awake; awake: Departing plane
+    region 0 0.09 ms, 0 of 0 bodies awake
+  physics report 22:47:18: 1.58 ms a step over 240 steps, 15 regions
+    region 8 0.54 ms, 64 of 91 bodies awake; awake: Freeflow dummy ragdoll lower_arm_r, Freeflow dummy ragdoll lower_arm_l, Freight car, Great sword dummy ragdoll lower_arm_l
+    region 10 0.26 ms, 3 of 3 bodies awake; awake: Motorboat, Sailing dinghy, Rowboat
+    region 12 0.19 ms, 4 of 4 bodies awake; awake: Red car, Rally car, Parked car, Blue car
+    region 14 0.18 ms, 3 of 3 bodies awake; awake: Motorboat, Rowboat, Plank door
+    region 13 0.13 ms, 1 of 1 bodies awake; awake: Departing plane
+    region 11 0.03 ms, 1 of 1 bodies awake; awake: Circuit plane
+  physics report 22:47:22: 1.55 ms a step over 240 steps, 15 regions
+    region 8 0.50 ms, 36 of 63 bodies awake; awake: Wrecking ball, Swing seat, Bead curtain ball, 62598v1 engine_softbody::BridgePlank
+    region 10 0.27 ms, 3 of 3 bodies awake; awake: Sailing dinghy, Rowboat, Motorboat
+    region 12 0.20 ms, 4 of 4 bodies awake; awake: Red car, Rally car, Parked car, Blue car
+    region 14 0.19 ms, 3 of 3 bodies awake; awake: Motorboat, Rowboat, Plank door
+    region 13 0.11 ms, 1 of 1 bodies awake; awake: Departing plane
+    region 11 0.06 ms, 1 of 1 bodies awake; awake: Circuit plane
+  physics report 22:47:26: 1.37 ms a step over 240 steps, 15 regions
+    region 8 0.34 ms, 80 of 105 bodies awake; awake: Wrecking ball, Freight car, Swing seat, Freeflow dummy ragdoll neck
+    region 10 0.27 ms, 3 of 3 bodies awake; awake: Sailing dinghy, Rowboat, Motorboat
+    region 12 0.19 ms, 4 of 4 bodies awake; awake: Red car, Rally car, Parked car, Blue car
+    region 14 0.19 ms, 3 of 3 bodies awake; awake: Motorboat, Rowboat, Plank door
+    region 13 0.07 ms, 1 of 1 bodies awake; awake: Departing plane
+    region 11 0.07 ms, 1 of 1 bodies awake; awake: Circuit plane
+  physics report 22:47:30: 1.58 ms a step over 240 steps, 15 regions
+    region 8 0.58 ms, 78 of 105 bodies awake; awake: Freeflow dummy ragdoll neck, Wrecking ball, Freeflow dummy ragdoll chest, Freeflow dummy ragdoll spine
+    region 10 0.26 ms, 3 of 3 bodies awake; awake: Motorboat, Rowboat, Sailing dinghy
+    region 14 0.19 ms, 3 of 3 bodies awake; awake: Motorboat, Rowboat, Plank door
+    region 12 0.19 ms, 4 of 4 bodies awake; awake: Red car, Rally car, Parked car, Blue car
+    region 13 0.07 ms, 1 of 1 bodies awake; awake: Departing plane
+    region 11 0.06 ms, 1 of 1 bodies awake; awake: Circuit plane
+  physics report 22:47:34: 1.56 ms a step over 240 steps, 15 regions
+    region 8 0.54 ms, 52 of 77 bodies awake; awake: Freight car, Swing seat, Wrecking ball, Bead curtain ball
+    region 10 0.26 ms, 3 of 3 bodies awake; awake: Motorboat, Sailing dinghy, Rowboat
+    region 12 0.19 ms, 4 of 4 bodies awake; awake: Red car, Rally car, Parked car, Blue car
+    region 14 0.19 ms, 3 of 3 bodies awake; awake: Motorboat, Rowboat, Plank door
+    region 13 0.07 ms, 1 of 1 bodies awake; awake: Departing plane
+    region 11 0.06 ms, 1 of 1 bodies awake; awake: Circuit plane
+== round 2 market (22:47:36-22:48:01 UTC)
+  profile 22:47:40 (154 frames in 5.0 s: 32.6 ms per frame (30.7 fps), worst 100.5 ms)
+    flow_bed_system        -
+    ripple_system          1.94 / max 35.50 / 1.8 runs
+    stream_far_woods       0.18 / max 0.75 / 1.1 runs
+    physics_simulate       2.26 / max 2.29 / 1.8 runs
+  profile 22:47:45 (177 frames in 5.0 s: 28.3 ms per frame (35.3 fps), worst 47.9 ms)
+    flow_bed_system        -
+    ripple_system          -
+    stream_far_woods       0.14 / max 0.33 / 1.0 runs
+    physics_simulate       2.30 / max 2.52 / 1.7 runs
+  profile 22:47:50 (156 frames in 5.0 s: 32.1 ms per frame (31.2 fps), worst 48.6 ms)
+    flow_bed_system        -
+    ripple_system          -
+    stream_far_woods       0.16 / max 1.15 / 1.0 runs
+    physics_simulate       2.28 / max 1.89 / 1.9 runs
+  profile 22:47:55 (150 frames in 5.0 s: 33.4 ms per frame (29.9 fps), worst 64.1 ms)
+    flow_bed_system        -
+    ripple_system          -
+    stream_far_woods       0.24 / max 1.16 / 1.0 runs
+    physics_simulate       2.63 / max 2.12 / 2.0 runs
+  profile 22:48:00 (154 frames in 5.0 s: 32.6 ms per frame (30.6 fps), worst 50.3 ms)
+    flow_bed_system        -
+    ripple_system          -
+    stream_far_woods       0.22 / max 0.37 / 1.0 runs
+    physics_simulate       2.47 / max 1.96 / 2.0 runs
+  physics report 22:47:38: 2.74 ms a step over 240 steps, 15 regions
+    region 8 0.35 ms, 35 of 63 bodies awake; awake: 62651v1 engine_softbody::BridgePlank, 62605v1 engine_softbody::BridgePlank, 62569v1 engine_softbody::BridgePlank, 62662v1 engine_softbody::BridgePlank
+    region 10 0.30 ms, 3 of 3 bodies awake; awake: Sailing dinghy, Rowboat, Motorboat
+    region 12 0.21 ms, 4 of 4 bodies awake; awake: Red car, Rally car, Parked car, Blue car
+    region 14 0.21 ms, 3 of 3 bodies awake; awake: Motorboat, Rowboat, Plank door
+    region 0 0.14 ms, 14 of 14 bodies awake; awake: Freeflow dummy ragdoll neck, Freeflow dummy ragdoll chest, Freeflow dummy ragdoll upper_arm_r, Freeflow dummy ragdoll lower_arm_r
+    region 13 0.07 ms, 1 of 1 bodies awake; awake: Departing plane
+    region 11 0.07 ms, 1 of 1 bodies awake; awake: Circuit plane
+  physics report 22:47:42: 2.07 ms a step over 240 steps, 15 regions
+    region 8 0.66 ms, 81 of 105 bodies awake; awake: Wrecking ball, Freight car, Swing seat, Bead curtain ball
+    region 10 0.28 ms, 3 of 3 bodies awake; awake: Sailing dinghy, Motorboat, Rowboat
+    region 12 0.20 ms, 4 of 4 bodies awake; awake: Red car, Rally car, Parked car, Blue car
+    region 14 0.20 ms, 3 of 3 bodies awake; awake: Motorboat, Rowboat, Plank door
+    region 13 0.07 ms, 1 of 1 bodies awake; awake: Departing plane
+    region 11 0.07 ms, 1 of 1 bodies awake; awake: Circuit plane
+    region 0 0.06 ms, 0 of 0 bodies awake
+  physics report 22:47:46: 2.64 ms a step over 240 steps, 15 regions
+    region 8 0.42 ms, 36 of 63 bodies awake; awake: Wrecking ball, 62587v1 engine_softbody::BridgePlank, 62605v1 engine_softbody::BridgePlank, Bead curtain ball
+    region 10 0.28 ms, 17 of 17 bodies awake; awake: Sailing dinghy, Boxer ragdoll chest, Boxer ragdoll lower_arm_r, Boxer ragdoll lower_arm_l
+    region 12 0.20 ms, 4 of 4 bodies awake; awake: Red car, Rally car, Parked car, Blue car
+    region 14 0.19 ms, 3 of 3 bodies awake; awake: Motorboat, Rowboat, Plank door
+    region 0 0.07 ms, 0 of 0 bodies awake
+    region 13 0.06 ms, 1 of 1 bodies awake; awake: Departing plane
+    region 11 0.06 ms, 1 of 1 bodies awake; awake: Circuit plane
+  physics report 22:47:50: 3.18 ms a step over 240 steps, 15 regions
+    region 8 0.31 ms, 65 of 91 bodies awake; awake: Freeflow dummy ragdoll lower_arm_l, Freeflow dummy ragdoll neck, Freeflow dummy ragdoll upper_arm_l, Freight car
+    region 10 0.29 ms, 3 of 3 bodies awake; awake: Sailing dinghy, Motorboat, Rowboat
+    region 12 0.21 ms, 4 of 4 bodies awake; awake: Red car, Rally car, Parked car, Blue car
+    region 14 0.20 ms, 3 of 3 bodies awake; awake: Motorboat, Rowboat, Plank door
+    region 0 0.16 ms, 0 of 0 bodies awake
+    region 13 0.07 ms, 1 of 1 bodies awake; awake: Departing plane
+    region 11 0.07 ms, 1 of 1 bodies awake; awake: Circuit plane
+  physics report 22:47:54: 3.27 ms a step over 240 steps, 15 regions
+    region 8 0.60 ms, 63 of 91 bodies awake; awake: Wrecking ball, Swing seat, 62589v1 engine_softbody::BridgePlank, 62587v1 engine_softbody::BridgePlank
+    region 10 0.28 ms, 3 of 3 bodies awake; awake: Sailing dinghy, Motorboat, Rowboat
+    region 12 0.20 ms, 4 of 4 bodies awake; awake: Red car, Rally car, Parked car, Blue car
+    region 14 0.20 ms, 3 of 3 bodies awake; awake: Motorboat, Rowboat, Plank door
+    region 13 0.07 ms, 1 of 1 bodies awake; awake: Departing plane
+    region 11 0.07 ms, 1 of 1 bodies awake; awake: Circuit plane
+    region 0 0.01 ms, 0 of 0 bodies awake
+  physics report 22:47:58: 3.22 ms a step over 240 steps, 15 regions
+    region 8 0.40 ms, 36 of 63 bodies awake; awake: Wrecking ball, Freight car, Bead curtain ball, Swing seat
+    region 10 0.29 ms, 31 of 31 bodies awake; awake: Great sword dummy ragdoll lower_arm_r, Great sword dummy ragdoll lower_arm_l, Sailing dinghy, Shield partner ragdoll lower_arm_r
+    region 0 0.22 ms, 0 of 0 bodies awake
+    region 12 0.20 ms, 4 of 4 bodies awake; awake: Red car, Rally car, Parked car, Blue car
+    region 14 0.19 ms, 3 of 3 bodies awake; awake: Motorboat, Rowboat, Plank door
+    region 11 0.09 ms, 1 of 1 bodies awake; awake: Circuit plane
+    region 13 0.07 ms, 1 of 1 bodies awake; awake: Departing plane
+== round 2 forest (22:48:01-22:48:26 UTC)
+  profile 22:48:05 (153 frames in 5.0 s: 32.7 ms per frame (30.6 fps), worst 98.8 ms)
+    flow_bed_system        1.37 / max 20.49 / 1.8 runs
+    ripple_system          1.65 / max 27.12 / 1.8 runs
+    stream_far_woods       0.24 / max 2.18 / 0.9 runs
+    physics_simulate       2.10 / max 4.37 / 1.8 runs
+  profile 22:48:10 (199 frames in 5.0 s: 25.2 ms per frame (39.7 fps), worst 45.4 ms)
+    flow_bed_system        1.55 / max 12.53 / 1.5 runs
+    ripple_system          0.46 / max 1.62 / 1.5 runs
+    stream_far_woods       0.18 / max 0.65 / 1.0 runs
+    physics_simulate       1.46 / max 2.62 / 1.5 runs
+  profile 22:48:15 (177 frames in 5.0 s: 28.4 ms per frame (35.2 fps), worst 62.3 ms)
+    flow_bed_system        1.69 / max 13.59 / 1.7 runs
+    ripple_system          0.59 / max 1.75 / 1.7 runs
+    stream_far_woods       0.16 / max 0.32 / 1.1 runs
+    physics_simulate       1.63 / max 2.51 / 1.7 runs
+  profile 22:48:20 (100 frames in 5.0 s: 50.2 ms per frame (19.9 fps), worst 77.7 ms)
+    flow_bed_system        3.13 / max 15.62 / 2.9 runs
+    ripple_system          1.32 / max 1.69 / 2.9 runs
+    stream_far_woods       -
+    physics_simulate       7.73 / max 9.54 / 2.9 runs
+  profile 22:48:25 (144 frames in 5.0 s: 34.8 ms per frame (28.7 fps), worst 62.8 ms)
+    flow_bed_system        2.00 / max 14.65 / 2.0 runs
+    ripple_system          0.96 / max 3.13 / 2.0 runs
+    stream_far_woods       0.18 / max 1.19 / 0.9 runs
+    physics_simulate       3.94 / max 5.14 / 2.0 runs
+  physics report 22:48:03: 3.23 ms a step over 240 steps, 13 regions
+    region 8 0.49 ms, 70 of 96 bodies awake; awake: Departing plane, Circuit plane, Motorboat, Swing seat
+    region 12 0.22 ms, 4 of 4 bodies awake; awake: Red car, Rally car, Parked car, Blue car
+    region 10 0.19 ms, 3 of 3 bodies awake; awake: Sailing dinghy, Rowboat, Motorboat
+    region 14 0.11 ms, 0 of 0 bodies awake
+    region 0 0.02 ms, 0 of 0 bodies awake
+  physics report 22:48:07: 1.37 ms a step over 240 steps, 14 regions
+    region 8 0.62 ms, 16 of 43 bodies awake; awake: Circuit plane, Freight car, Sparring partner ragdoll foot_l, Sparring partner ragdoll lower_leg_l
+    region 12 0.20 ms, 4 of 4 bodies awake; awake: Red car, Rally car, Parked car, Blue car
+    region 11 0.09 ms, 3 of 3 bodies awake; awake: Departing plane, Motorboat, Rowboat
+    region 0 0.04 ms, 0 of 0 bodies awake
+  physics report 22:48:11: 1.13 ms a step over 240 steps, 14 regions
+    region 8 0.39 ms, 5 of 32 bodies awake; awake: Departing plane, Circuit plane, Motorboat, Freight car
+    region 12 0.20 ms, 4 of 4 bodies awake; awake: Red car, Rally car, Parked car, Blue car
+    region 11 0.06 ms, 0 of 0 bodies awake
+    region 0 0.04 ms, 0 of 0 bodies awake
+  physics report 22:48:15: 1.50 ms a step over 240 steps, 14 regions
+    region 8 0.63 ms, 56 of 77 bodies awake; awake: Circuit plane, Departing plane, Motorboat, Freeflow dummy ragdoll lower_arm_r
+    region 12 0.23 ms, 4 of 4 bodies awake; awake: Red car, Rally car, Parked car, Blue car
+    region 10 0.04 ms, 0 of 0 bodies awake
+    region 0 0.01 ms, 0 of 0 bodies awake
+  physics report 22:48:19: 3.93 ms a step over 240 steps, 13 regions
+    region 8 1.33 ms, 0 of 0 bodies awake
+    region 14 0.85 ms, 136 of 163 bodies awake; awake: Departing plane, 123305v2 engine_destruction::Debris engine_destruction::DebrisMesh, Motorboat, 85689v3 engine_destruction::Debris engine_destruction::DebrisMesh
+    region 12 0.27 ms, 4 of 4 bodies awake; awake: Red car, Rally car, Parked car, Blue car
+    region 0 0.01 ms, 0 of 0 bodies awake
+  physics report 22:48:23: 2.74 ms a step over 240 steps, 13 regions
+    region 14 1.47 ms, 117 of 166 bodies awake; awake: Departing plane, 78380v12 engine_destruction::Debris engine_destruction::DebrisMesh, Motorboat, 121403v6 engine_destruction::Debris engine_destruction::DebrisMesh
+    region 12 0.27 ms, 4 of 4 bodies awake; awake: Red car, Rally car, Parked car, Blue car
+    region 0 0.09 ms, 0 of 0 bodies awake
+    region 9 0.08 ms, 4 of 4 bodies awake; awake: Circuit plane, Hopper, Parked plane, Parked spaceplane
+== round 2 lake (22:48:26-22:48:51 UTC)
+  profile 22:48:30 (77 frames in 5.0 s: 65.1 ms per frame (15.3 fps), worst 162.3 ms)
+    flow_bed_system        1.13 / max 10.92 / 2.8 runs
+    ripple_system          13.19 / max 74.88 / 2.8 runs
+    stream_far_woods       0.31 / max 1.46 / 1.1 runs
+    physics_simulate       6.36 / max 5.91 / 2.8 runs
+  profile 22:48:35 (108 frames in 5.0 s: 46.7 ms per frame (21.4 fps), worst 65.9 ms)
+    flow_bed_system        0.21 / max 0.21 / 2.8 runs
+    ripple_system          1.31 / max 1.98 / 2.8 runs
+    stream_far_woods       0.25 / max 1.17 / 0.9 runs
+    physics_simulate       5.15 / max 2.77 / 2.8 runs
+  profile 22:48:40 (123 frames in 5.0 s: 40.9 ms per frame (24.4 fps), worst 54.8 ms)
+    flow_bed_system        0.18 / max 0.23 / 2.4 runs
+    ripple_system          1.15 / max 1.83 / 2.4 runs
+    stream_far_woods       0.22 / max 0.37 / 1.0 runs
+    physics_simulate       4.42 / max 2.78 / 2.4 runs
+  profile 22:48:46 (125 frames in 5.0 s: 40.3 ms per frame (24.8 fps), worst 54.0 ms)
+    flow_bed_system        0.18 / max 0.16 / 2.4 runs
+    ripple_system          1.14 / max 2.15 / 2.4 runs
+    stream_far_woods       0.21 / max 0.57 / 1.0 runs
+    physics_simulate       4.31 / max 2.65 / 2.4 runs
+  profile 22:48:51 (124 frames in 5.0 s: 40.4 ms per frame (24.8 fps), worst 59.9 ms)
+    flow_bed_system        0.18 / max 0.15 / 2.4 runs
+    ripple_system          1.16 / max 2.22 / 2.4 runs
+    stream_far_woods       0.18 / max 0.30 / 1.0 runs
+    physics_simulate       4.36 / max 2.81 / 2.4 runs
+  physics report 22:48:29: 6.09 ms a step over 240 steps, 15 regions
+    region 14 1.49 ms, 42 of 62 bodies awake; awake: Departing plane, Wrecking ball, Freight car, Bead curtain ball
+    region 12 0.27 ms, 4 of 4 bodies awake; awake: Red car, Rally car, Parked car, Blue car
+    region 13 0.15 ms, 114 of 122 bodies awake; awake: Motorboat, 82291v5 engine_destruction::Debris engine_destruction::DebrisMesh, Stone block, 126029v3 engine_destruction::Debris engine_destruction::DebrisMesh
+    region 9 0.13 ms, 3 of 3 bodies awake; awake: Hopper, Parked plane, Parked spaceplane
+    region 10 0.04 ms, 1 of 1 bodies awake; awake: Circuit plane
+  physics report 22:48:33: 2.45 ms a step over 240 steps, 15 regions
+    region 14 1.06 ms, 39 of 61 bodies awake; awake: Wrecking ball, Swing seat, Bead curtain ball, Sailing dinghy
+    region 13 0.58 ms, 38 of 122 bodies awake; awake: Motorboat, Rail, 85775v3 engine_destruction::Debris engine_destruction::DebrisMesh, Rowboat
+    region 12 0.23 ms, 4 of 4 bodies awake; awake: Red car, Rally car, Parked car, Blue car
+    region 11 0.15 ms, 1 of 1 bodies awake; awake: Departing plane
+    region 10 0.13 ms, 1 of 1 bodies awake; awake: Circuit plane
+  physics report 22:48:37: 2.14 ms a step over 240 steps, 15 regions
+    region 14 1.03 ms, 39 of 61 bodies awake; awake: Freight car, Wrecking ball, Bead curtain ball, Sailing dinghy
+    region 13 0.46 ms, 38 of 122 bodies awake; awake: Motorboat, Rail, Rowboat, 85775v3 engine_destruction::Debris engine_destruction::DebrisMesh
+    region 12 0.22 ms, 4 of 4 bodies awake; awake: Red car, Rally car, Parked car, Blue car
+    region 11 0.14 ms, 1 of 1 bodies awake; awake: Departing plane
+    region 10 0.13 ms, 1 of 1 bodies awake; awake: Circuit plane
+  physics report 22:48:41: 2.31 ms a step over 240 steps, 15 regions
+    region 14 1.03 ms, 39 of 61 bodies awake; awake: Swing seat, Wrecking ball, Sailing dinghy, Bead curtain ball
+    region 13 0.41 ms, 3 of 122 bodies awake; awake: Motorboat, Rowboat, 85775v3 engine_destruction::Debris engine_destruction::DebrisMesh
+    region 12 0.23 ms, 4 of 4 bodies awake; awake: Red car, Rally car, Parked car, Blue car
+    region 10 0.14 ms, 1 of 1 bodies awake; awake: Circuit plane
+    region 11 0.12 ms, 1 of 1 bodies awake; awake: Departing plane
+    region 0 0.01 ms, 14 of 14 bodies awake; awake: Stuntman ragdoll foot_r, Stuntman ragdoll lower_arm_l, Stuntman ragdoll lower_arm_r, Stuntman ragdoll upper_arm_r
+  physics report 22:48:45: 2.08 ms a step over 240 steps, 15 regions
+    region 14 1.00 ms, 41 of 61 bodies awake; awake: Wrecking ball, Freight car, Swing seat, Sailing dinghy
+    region 13 0.27 ms, 3 of 122 bodies awake; awake: Motorboat, Rowboat, 85775v3 engine_destruction::Debris engine_destruction::DebrisMesh
+    region 12 0.23 ms, 4 of 4 bodies awake; awake: Red car, Rally car, Parked car, Blue car
+    region 10 0.12 ms, 1 of 1 bodies awake; awake: Circuit plane
+    region 11 0.11 ms, 1 of 1 bodies awake; awake: Departing plane
+    region 0 0.07 ms, 0 of 0 bodies awake
+  physics report 22:48:49: 2.08 ms a step over 240 steps, 15 regions
+    region 14 1.00 ms, 38 of 61 bodies awake; awake: 62656v1 engine_softbody::BridgePlank, Wrecking ball, 62653v1 engine_softbody::BridgePlank, Swing seat
+    region 13 0.39 ms, 3 of 122 bodies awake; awake: Motorboat, Rowboat, 85775v3 engine_destruction::Debris engine_destruction::DebrisMesh
+    region 12 0.24 ms, 4 of 4 bodies awake; awake: Red car, Rally car, Parked car, Blue car
+    region 10 0.12 ms, 1 of 1 bodies awake; awake: Circuit plane
+    region 11 0.11 ms, 1 of 1 bodies awake; awake: Departing plane
+== round 2 fortress (22:48:51-22:49:16 UTC)
+  profile 22:48:56 (80 frames in 5.0 s: 62.6 ms per frame (16.0 fps), worst 119.8 ms)
+    flow_bed_system        2.49 / max 21.29 / 3.0 runs
+    ripple_system          5.29 / max 11.78 / 3.0 runs
+    stream_far_woods       -
+    physics_simulate       5.29 / max 3.54 / 3.0 runs
+  profile 22:49:01 (94 frames in 5.0 s: 53.2 ms per frame (18.8 fps), worst 97.6 ms)
+    flow_bed_system        3.35 / max 14.01 / 3.2 runs
+    ripple_system          3.19 / max 3.11 / 3.2 runs
+    stream_far_woods       -
+    physics_simulate       4.51 / max 2.64 / 3.2 runs
+  profile 22:49:06 (88 frames in 5.0 s: 56.9 ms per frame (17.6 fps), worst 80.8 ms)
+    flow_bed_system        3.47 / max 13.90 / 3.3 runs
+    ripple_system          3.59 / max 9.02 / 3.3 runs
+    stream_far_woods       -
+    physics_simulate       4.53 / max 2.60 / 3.3 runs
+  profile 22:49:11 (85 frames in 5.1 s: 59.6 ms per frame (16.8 fps), worst 81.3 ms)
+    flow_bed_system        4.10 / max 22.26 / 3.2 runs
+    ripple_system          3.71 / max 5.12 / 3.2 runs
+    stream_far_woods       -
+    physics_simulate       6.24 / max 5.33 / 3.2 runs
+  profile 22:49:16 (84 frames in 5.0 s: 59.7 ms per frame (16.8 fps), worst 86.2 ms)
+    flow_bed_system        3.88 / max 19.37 / 3.4 runs
+    ripple_system          4.07 / max 3.97 / 3.4 runs
+    stream_far_woods       -
+    physics_simulate       6.45 / max 26.37 / 3.4 runs
+  physics report 22:48:54: 3.37 ms a step over 240 steps, 15 regions
+    region 14 0.79 ms, 50 of 75 bodies awake; awake: Freight car, Swing seat, Bead curtain ball, Wrecking ball
+    region 13 0.52 ms, 4 of 122 bodies awake; awake: Motorboat, Rowboat, 85775v3 engine_destruction::Debris engine_destruction::DebrisMesh, 136048v16 engine_destruction::Debris engine_destruction::DebrisMesh
+    region 12 0.21 ms, 4 of 4 bodies awake; awake: Red car, Rally car, Parked car, Blue car
+    region 10 0.13 ms, 1 of 1 bodies awake; awake: Circuit plane
+    region 11 0.13 ms, 1 of 1 bodies awake; awake: Departing plane
+  physics report 22:48:58: 2.84 ms a step over 240 steps, 15 regions
+    region 13 0.67 ms, 3 of 122 bodies awake; awake: Motorboat, Rowboat, 85775v3 engine_destruction::Debris engine_destruction::DebrisMesh
+    region 14 0.42 ms, 37 of 60 bodies awake; awake: Wrecking ball, Bead curtain ball, Swing seat, Sailing dinghy
+    region 12 0.16 ms, 4 of 4 bodies awake; awake: Red car, Rally car, Parked car, Blue car
+    region 10 0.10 ms, 1 of 1 bodies awake; awake: Circuit plane
+    region 11 0.09 ms, 1 of 1 bodies awake; awake: Departing plane
+  physics report 22:49:02: 2.22 ms a step over 240 steps, 15 regions
+    region 13 0.48 ms, 3 of 122 bodies awake; awake: Motorboat, Rowboat, 85775v3 engine_destruction::Debris engine_destruction::DebrisMesh
+    region 14 0.43 ms, 53 of 74 bodies awake; awake: Wrecking ball, Swing seat, Freight car, Bead curtain ball
+    region 12 0.13 ms, 4 of 4 bodies awake; awake: Red car, Rally car, Parked car, Blue car
+    region 10 0.12 ms, 1 of 1 bodies awake; awake: Circuit plane
+    region 11 0.11 ms, 1 of 1 bodies awake; awake: Departing plane
+  physics report 22:49:06: 2.91 ms a step over 240 steps, 15 regions
+    region 13 0.54 ms, 24 of 114 bodies awake; awake: Motorboat, 137759v6 engine_destruction::Debris engine_destruction::DebrisMesh, Rowboat, 136074v13 engine_destruction::Debris engine_destruction::DebrisMesh
+    region 14 0.47 ms, 55 of 78 bodies awake; awake: Stuntman ragdoll lower_arm_r, Wrecking ball, Stuntman ragdoll lower_leg_r, Stuntman ragdoll foot_l
+    region 12 0.14 ms, 4 of 4 bodies awake; awake: Red car, Rally car, Parked car, Blue car
+    region 10 0.12 ms, 1 of 1 bodies awake; awake: Circuit plane
+    region 11 0.12 ms, 1 of 1 bodies awake; awake: Departing plane
+    region 5 0.03 ms, 0 of 0 bodies awake
+  physics report 22:49:10: 2.97 ms a step over 240 steps, 16 regions
+    region 13 1.03 ms, 3 of 23 bodies awake; awake: Motorboat, Freight car, Rowboat
+    region 15 0.42 ms, 34 of 36 bodies awake; awake: 114839v1 engine_destruction::Debris engine_destruction::DebrisMesh, 114838v1 engine_destruction::Debris engine_destruction::DebrisMesh, 136867v6 engine_destruction::Debris engine_destruction::DebrisMesh, 93172v1 engine_destruction::Debris engine_destruction::DebrisMesh
+    region 14 0.29 ms, 0 of 0 bodies awake
+    region 12 0.18 ms, 6 of 6 bodies awake; awake: Red car, Rally car, Rowboat, Motorboat
+    region 10 0.14 ms, 2 of 2 bodies awake; awake: Circuit plane, Sailing dinghy
+    region 11 0.11 ms, 1 of 1 bodies awake; awake: Departing plane
+    region 0 0.03 ms, 0 of 0 bodies awake
+    region 5 0.01 ms, 0 of 0 bodies awake
+  physics report 22:49:15: 2.70 ms a step over 240 steps, 16 regions
+    region 7 1.00 ms, 37 of 94 bodies awake; awake: Motorboat, 90189v17 engine_destruction::Debris engine_destruction::DebrisMesh, Rowboat, Rail
+    region 15 0.47 ms, 33 of 36 bodies awake; awake: 134914v19 engine_destruction::Debris engine_destruction::DebrisMesh, 90408v2 engine_destruction::Debris engine_destruction::DebrisMesh, 134625v12 engine_destruction::Debris engine_destruction::DebrisMesh, 114838v1 engine_destruction::Debris engine_destruction::DebrisMesh
+    region 12 0.24 ms, 6 of 6 bodies awake; awake: Red car, Rally car, Motorboat, Rowboat
+    region 13 0.15 ms, 0 of 0 bodies awake
+    region 10 0.13 ms, 2 of 2 bodies awake; awake: Circuit plane, Sailing dinghy
+    region 11 0.10 ms, 1 of 1 bodies awake; awake: Departing plane
+    region 0 0.04 ms, 0 of 0 bodies awake
+== round 2 field (22:49:16-22:49:41 UTC)
+  profile 22:49:21 (165 frames in 5.0 s: 30.4 ms per frame (32.9 fps), worst 103.5 ms)
+    flow_bed_system        0.49 / max 13.65 / 1.6 runs
+    ripple_system          2.24 / max 28.76 / 1.6 runs
+    stream_far_woods       0.22 / max 2.14 / 0.9 runs
+    physics_simulate       2.67 / max 4.84 / 1.6 runs
+  profile 22:49:26 (206 frames in 5.0 s: 24.3 ms per frame (41.1 fps), worst 45.7 ms)
+    flow_bed_system        -
+    ripple_system          -
+    stream_far_woods       0.22 / max 0.43 / 1.0 runs
+    physics_simulate       1.74 / max 1.91 / 1.4 runs
+  profile 22:49:31 (203 frames in 5.0 s: 24.8 ms per frame (40.4 fps), worst 45.3 ms)
+    flow_bed_system        -
+    ripple_system          -
+    stream_far_woods       0.21 / max 1.15 / 1.0 runs
+    physics_simulate       1.80 / max 7.66 / 1.5 runs
+  profile 22:49:36 (203 frames in 5.0 s: 24.6 ms per frame (40.6 fps), worst 60.3 ms)
+    flow_bed_system        -
+    ripple_system          -
+    stream_far_woods       0.24 / max 1.22 / 1.0 runs
+    physics_simulate       1.61 / max 1.90 / 1.5 runs
+  profile 22:49:41 (190 frames in 5.0 s: 26.3 ms per frame (38.0 fps), worst 50.0 ms)
+    flow_bed_system        -
+    ripple_system          -
+    stream_far_woods       0.24 / max 1.17 / 1.0 runs
+    physics_simulate       2.77 / max 13.76 / 1.6 runs
+  physics report 22:49:19: 3.61 ms a step over 240 steps, 15 regions
+    region 7 1.19 ms, 114 of 166 bodies awake; awake: Circuit plane, Motorboat, Wrecking ball, Swing seat
+    region 15 0.10 ms, 1 of 36 bodies awake; awake: 134914v19 engine_destruction::Debris engine_destruction::DebrisMesh
+    region 11 0.08 ms, 1 of 1 bodies awake; awake: Departing plane
+    region 12 0.07 ms, 0 of 0 bodies awake
+    region 8 0.04 ms, 3 of 3 bodies awake; awake: Red car, Rally car, Parked car
+  physics report 22:49:23: 2.04 ms a step over 240 steps, 13 regions
+    region 7 0.88 ms, 83 of 131 bodies awake; awake: Departing plane, Circuit plane, Motorboat, Wrecking ball
+    region 8 0.10 ms, 3 of 3 bodies awake; awake: Red car, Rally car, Parked car
+  physics report 22:49:27: 2.01 ms a step over 240 steps, 13 regions
+    region 7 0.81 ms, 90 of 119 bodies awake; awake: Departing plane, Circuit plane, Stuntman ragdoll neck, Stuntman ragdoll lower_arm_l
+    region 8 0.10 ms, 3 of 3 bodies awake; awake: Red car, Rally car, Parked car
+  physics report 22:49:31: 2.04 ms a step over 240 steps, 14 regions
+    region 7 0.86 ms, 61 of 90 bodies awake; awake: Departing plane, Motorboat, Wrecking ball, Swing seat
+    region 8 0.10 ms, 3 of 3 bodies awake; awake: Red car, Rally car, Parked car
+    region 9 0.03 ms, 1 of 1 bodies awake; awake: Circuit plane
+  physics report 22:49:35: 1.84 ms a step over 240 steps, 14 regions
+    region 7 0.71 ms, 61 of 90 bodies awake; awake: Departing plane, 62662v1 engine_softbody::BridgePlank, Motorboat, Wrecking ball
+    region 8 0.10 ms, 3 of 3 bodies awake; awake: Red car, Rally car, Parked car
+    region 9 0.07 ms, 1 of 1 bodies awake; awake: Circuit plane
+  physics report 22:49:39: 2.62 ms a step over 240 steps, 15 regions
+    region 7 1.42 ms, 77 of 104 bodies awake; awake: Red car, Motorboat, Wrecking ball, Freight car
+    region 9 0.07 ms, 1 of 1 bodies awake; awake: Circuit plane
+    region 8 0.06 ms, 0 of 0 bodies awake
+    region 15 0.02 ms, 2 of 37 bodies awake; awake: Departing plane, 134914v19 engine_destruction::Debris engine_destruction::DebrisMesh
+== round 2 orbit (22:49:41-22:50:06 UTC)
+  profile 22:49:46 (283 frames in 5.0 s: 17.7 ms per frame (56.6 fps), worst 40.8 ms)
+    flow_bed_system        -
+    ripple_system          -
+    stream_far_woods       0.22 / max 1.38 / 0.9 runs
+    physics_simulate       0.80 / max 4.92 / 1.1 runs
+  profile 22:49:51 (315 frames in 5.0 s: 15.9 ms per frame (62.9 fps), worst 34.0 ms)
+    flow_bed_system        -
+    ripple_system          -
+    stream_far_woods       0.18 / max 0.40 / 1.0 runs
+    physics_simulate       0.21 / max 0.52 / 1.0 runs
+  profile 22:49:56 (322 frames in 5.0 s: 15.6 ms per frame (64.3 fps), worst 24.7 ms)
+    flow_bed_system        -
+    ripple_system          -
+    stream_far_woods       0.14 / max 0.43 / 1.0 runs
+    physics_simulate       0.21 / max 0.71 / 0.9 runs
+  profile 22:50:01 (331 frames in 5.0 s: 15.1 ms per frame (66.2 fps), worst 29.3 ms)
+    flow_bed_system        -
+    ripple_system          -
+    stream_far_woods       0.13 / max 0.32 / 1.0 runs
+    physics_simulate       0.20 / max 0.46 / 0.9 runs
+  profile 22:50:06 (334 frames in 5.0 s: 15.0 ms per frame (66.6 fps), worst 24.7 ms)
+    flow_bed_system        -
+    ripple_system          -
+    stream_far_woods       0.14 / max 0.33 / 1.0 runs
+    physics_simulate       0.18 / max 0.38 / 0.9 runs
+  physics report 22:49:43: 1.86 ms a step over 240 steps, 14 regions
+    region 7 0.83 ms, 47 of 76 bodies awake; awake: Red car, Motorboat, Swing seat, Press
+    region 15 0.04 ms, 2 of 37 bodies awake; awake: Departing plane, 134914v19 engine_destruction::Debris engine_destruction::DebrisMesh
+    region 10 0.04 ms, 2 of 2 bodies awake; awake: Rally car, Parked car
+    region 9 0.03 ms, 1 of 1 bodies awake; awake: Circuit plane
+  physics report 22:49:47: 0.95 ms a step over 240 steps, 14 regions
+  physics report 22:49:51: 0.78 ms a step over 240 steps, 14 regions
+  physics report 22:49:55: 0.77 ms a step over 240 steps, 14 regions
+  physics report 22:49:59: 0.90 ms a step over 240 steps, 14 regions
+  physics report 22:50:03: 0.60 ms a step over 240 steps, 14 regions
+
+stream_far_woods: the 10 highest max-ms-of-a-run over every profile of the run: 22:43:55 4.06, 22:47:15 2.24, 22:45:10 2.18, 22:46:50 2.18, 22:48:05 2.18, 22:45:35 2.17, 22:49:21 2.14, 22:43:30 2.12, 22:46:25 2.11, 22:46:00 2.05

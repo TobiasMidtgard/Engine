@@ -1,0 +1,48 @@
+22:50:51.169Z     0.03  mode night quality ultra size '' spec 'plaza,night,sunset,lake'; idle before start 1,641 s; HEAD 70b02d16
+22:50:51.500Z     0.36  started: showcase.exe --fly --profile --quality ultra
+22:50:57.993Z     6.86  window visible: client 1600x900, window 1616x939 at (208,208), maximized False
+22:50:58.008Z     6.87  bridge connected
+22:50:58.148Z     7.01  world built
+22:51:03.847Z    12.71  after build: working set 4,622 MB, private 8,826 MB; system free 34,677 of 65,277 MB
+22:51:09.780Z    18.64  TIME 22.5: {"id":4,"jsonrpc":"2.0","result":{"hour":22.5,"hours_per_second":0.0}}
+22:51:10.523Z    19.39  AT plaza at 22.5 h: {"id":5,"jsonrpc":"2.0","result":{"place":"plaza","position":[10.0,4.5,16.0]}}
+22:51:22.848Z    31.71  shot h22_5_plaza: {"id":9,"jsonrpc":"2.0","result":{"height":900,"path":"screenshots/r23/h22_5_plaza.png","width":1600}}
+22:51:23.120Z    31.98  END h22_5_plaza: working set 6,379 MB, private 15,748 MB; system free 33,392 of 65,277 MB
+22:51:24.209Z    33.07  AT night at 22.5 h: {"id":10,"jsonrpc":"2.0","result":{"place":"night","position":[-30.0,8.0,6.0]}}
+22:51:36.883Z    45.75  shot h22_5_night: {"id":14,"jsonrpc":"2.0","result":{"height":900,"path":"screenshots/r23/h22_5_night.png","width":1600}}
+22:51:37.146Z    46.01  END h22_5_night: working set 4,987 MB, private 15,908 MB; system free 34,705 of 65,277 MB
+22:51:38.196Z    47.06  AT sunset at 22.5 h: {"id":15,"jsonrpc":"2.0","result":{"place":"sunset","position":[-40.0,5.0,20.0]}}
+22:51:50.603Z    59.47  shot h22_5_sunset: {"id":19,"jsonrpc":"2.0","result":{"height":900,"path":"screenshots/r23/h22_5_sunset.png","width":1600}}
+22:51:50.863Z    59.73  END h22_5_sunset: working set 4,973 MB, private 15,912 MB; system free 34,748 of 65,277 MB
+22:51:52.003Z    60.87  AT lake at 22.5 h: {"id":20,"jsonrpc":"2.0","result":{"place":"lake","position":[160.0,6.0,-115.0]}}
+22:52:04.211Z    73.08  shot h22_5_lake: {"id":24,"jsonrpc":"2.0","result":{"height":900,"path":"screenshots/r23/h22_5_lake.png","width":1600}}
+22:52:04.492Z    73.36  END h22_5_lake: working set 5,019 MB, private 15,945 MB; system free 34,552 of 65,277 MB
+22:52:05.592Z    74.46  TIME 2.5: {"id":25,"jsonrpc":"2.0","result":{"hour":2.5,"hours_per_second":0.0}}
+22:52:05.641Z    74.51  AT plaza at 2.5 h: {"id":26,"jsonrpc":"2.0","result":{"place":"plaza","position":[10.0,4.5,16.0]}}
+22:52:17.784Z    86.65  shot h2_5_plaza: {"id":30,"jsonrpc":"2.0","result":{"height":900,"path":"screenshots/r23/h2_5_plaza.png","width":1600}}
+22:52:18.066Z    86.93  END h2_5_plaza: working set 5,038 MB, private 15,951 MB; system free 34,496 of 65,277 MB
+22:52:19.140Z    88.00  AT night at 2.5 h: {"id":31,"jsonrpc":"2.0","result":{"place":"night","position":[-30.0,8.0,6.0]}}
+22:52:31.359Z   100.22  shot h2_5_night: {"id":35,"jsonrpc":"2.0","result":{"height":900,"path":"screenshots/r23/h2_5_night.png","width":1600}}
+22:52:31.622Z   100.49  END h2_5_night: working set 5,071 MB, private 15,957 MB; system free 34,513 of 65,277 MB
+22:52:32.765Z   101.63  AT sunset at 2.5 h: {"id":36,"jsonrpc":"2.0","result":{"place":"sunset","position":[-40.0,5.0,20.0]}}
+22:52:45.219Z   114.08  shot h2_5_sunset: {"id":40,"jsonrpc":"2.0","result":{"height":900,"path":"screenshots/r23/h2_5_sunset.png","width":1600}}
+22:52:45.502Z   114.37  END h2_5_sunset: working set 5,091 MB, private 15,973 MB; system free 34,472 of 65,277 MB
+22:52:46.577Z   115.44  AT lake at 2.5 h: {"id":41,"jsonrpc":"2.0","result":{"place":"lake","position":[160.0,6.0,-115.0]}}
+22:52:58.785Z   127.65  shot h2_5_lake: {"id":45,"jsonrpc":"2.0","result":{"height":900,"path":"screenshots/r23/h2_5_lake.png","width":1600}}
+22:52:59.061Z   127.93  END h2_5_lake: working set 5,116 MB, private 15,904 MB; system free 34,478 of 65,277 MB
+22:53:00.126Z   128.99  TIME 3.5: {"id":46,"jsonrpc":"2.0","result":{"hour":3.5,"hours_per_second":0.0}}
+22:53:00.166Z   129.03  AT plaza at 3.5 h: {"id":47,"jsonrpc":"2.0","result":{"place":"plaza","position":[10.0,4.5,16.0]}}
+22:53:12.450Z   141.31  shot h3_5_plaza: {"id":51,"jsonrpc":"2.0","result":{"height":900,"path":"screenshots/r23/h3_5_plaza.png","width":1600}}
+22:53:12.729Z   141.59  END h3_5_plaza: working set 5,062 MB, private 15,757 MB; system free 34,545 of 65,277 MB
+22:53:13.837Z   142.70  AT night at 3.5 h: {"id":52,"jsonrpc":"2.0","result":{"place":"night","position":[-30.0,8.0,6.0]}}
+22:53:26.329Z   155.19  shot h3_5_night: {"id":56,"jsonrpc":"2.0","result":{"height":900,"path":"screenshots/r23/h3_5_night.png","width":1600}}
+22:53:26.584Z   155.45  END h3_5_night: working set 5,094 MB, private 15,826 MB; system free 34,510 of 65,277 MB
+22:53:27.707Z   156.57  AT sunset at 3.5 h: {"id":57,"jsonrpc":"2.0","result":{"place":"sunset","position":[-40.0,5.0,20.0]}}
+22:53:40.120Z   168.98  shot h3_5_sunset: {"id":61,"jsonrpc":"2.0","result":{"height":900,"path":"screenshots/r23/h3_5_sunset.png","width":1600}}
+22:53:40.351Z   169.21  END h3_5_sunset: working set 5,080 MB, private 15,813 MB; system free 34,527 of 65,277 MB
+22:53:41.419Z   170.28  AT lake at 3.5 h: {"id":62,"jsonrpc":"2.0","result":{"place":"lake","position":[160.0,6.0,-115.0]}}
+22:53:53.781Z   182.65  shot h3_5_lake: {"id":66,"jsonrpc":"2.0","result":{"height":900,"path":"screenshots/r23/h3_5_lake.png","width":1600}}
+22:53:54.050Z   182.91  END h3_5_lake: working set 5,121 MB, private 15,842 MB; system free 34,489 of 65,277 MB
+22:53:57.328Z   186.19  sampler job: Completed
+22:53:57.331Z   186.19  killing the game
+22:54:40.355Z   229.22  done

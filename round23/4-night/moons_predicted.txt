@@ -1,0 +1,60 @@
+﻿== h22_5_lake: clock hour 22.50, day 80.0, moon phase 0.420; sun elevation (weather) -45.2; camera at (160, 6, -115) looking elevation  -3.0, bearing 232.1
+   space Moon : elevation  47.2, bearing 142.4; behind the camera
+   space Sun  : elevation -45.2, bearing 327.1; behind the camera
+   stand-in moon (opposite the space Sun): elevation  45.2, bearing 147.1; pixel (-24529, -25220) - outside the picture
+   weather moon: elevation  55.0, bearing 191.0; pixel (-39, -1418) - outside the picture
+== h22_5_night: clock hour 22.50, day 80.0, moon phase 0.420; sun elevation (weather) -45.2; camera at (-30, 8, 6) looking elevation -10.9, bearing 258.1
+   space Moon : elevation  47.2, bearing 142.4; behind the camera
+   space Sun  : elevation -45.2, bearing 327.1; pixel (2287, 1916) - outside the picture
+   stand-in moon (opposite the space Sun): elevation  45.2, bearing 147.1; behind the camera
+   weather moon: elevation  55.0, bearing 191.0; pixel (-6328, -10958) - outside the picture
+== h22_5_plaza: clock hour 22.50, day 80.0, moon phase 0.420; sun elevation (weather) -45.2; camera at (10, 4, 16) looking elevation  -7.8, bearing 149.5
+   space Moon : elevation  47.2, bearing 142.4; pixel (672, -796) - outside the picture
+   space Sun  : elevation -45.2, bearing 327.1; behind the camera
+   stand-in moon (opposite the space Sun): elevation  45.2, bearing 147.1; pixel (757, -697) - outside the picture
+   weather moon: elevation  55.0, bearing 191.0; pixel (1844, -1936) - outside the picture
+== h22_5_sunset: clock hour 22.50, day 80.0, moon phase 0.420; sun elevation (weather) -45.2; camera at (-40, 5, 20) looking elevation   0.5, bearing 248.2
+   space Moon : elevation  47.2, bearing 142.4; behind the camera
+   space Sun  : elevation -45.2, bearing 327.1; pixel (5439, 5216) - outside the picture
+   stand-in moon (opposite the space Sun): elevation  45.2, bearing 147.1; behind the camera
+   weather moon: elevation  55.0, bearing 191.0; pixel (-508, -1763) - outside the picture
+== h2_5_lake: clock hour 2.50, day 80.0, moon phase 0.420; sun elevation (weather) -37.8; camera at (160, 6, -115) looking elevation  -3.0, bearing 232.1
+   space Moon : elevation  37.5, bearing 244.1; pixel (991, -305) - outside the picture
+   space Sun  : elevation -37.8, bearing  50.4; behind the camera
+   stand-in moon (opposite the space Sun): elevation  37.8, bearing 230.4; pixel (773, -297) - outside the picture
+   weather moon: elevation  19.5, bearing 256.3; pixel (1196, 61)
+== h2_5_night: clock hour 2.50, day 80.0, moon phase 0.420; sun elevation (weather) -37.8; camera at (-30, 8, 6) looking elevation -10.9, bearing 258.1
+   space Moon : elevation  37.5, bearing 244.1; pixel (540, -554) - outside the picture
+   space Sun  : elevation -37.8, bearing  50.4; behind the camera
+   stand-in moon (opposite the space Sun): elevation  37.8, bearing 230.4; pixel (243, -663) - outside the picture
+   weather moon: elevation  19.5, bearing 256.3; pixel (769, -58) - outside the picture
+== h2_5_plaza: clock hour 2.50, day 80.0, moon phase 0.420; sun elevation (weather) -37.8; camera at (10, 4, 16) looking elevation  -7.8, bearing 149.5
+   space Moon : elevation  37.5, bearing 244.1; behind the camera
+   space Sun  : elevation -37.8, bearing  50.4; behind the camera
+   stand-in moon (opposite the space Sun): elevation  37.8, bearing 230.4; pixel (17197, -12676) - outside the picture
+   weather moon: elevation  19.5, bearing 256.3; behind the camera
+== h2_5_sunset: clock hour 2.50, day 80.0, moon phase 0.420; sun elevation (weather) -37.8; camera at (-40, 5, 20) looking elevation   0.5, bearing 248.2
+   space Moon : elevation  37.5, bearing 244.1; pixel (738, -202) - outside the picture
+   space Sun  : elevation -37.8, bearing  50.4; behind the camera
+   stand-in moon (opposite the space Sun): elevation  37.8, bearing 230.4; pixel (525, -241) - outside the picture
+   weather moon: elevation  19.5, bearing 256.3; pixel (922, 150)
+== h3_5_lake: clock hour 3.50, day 80.0, moon phase 0.420; sun elevation (weather) -28.1; camera at (160, 6, -115) looking elevation  -3.0, bearing 232.1
+   space Moon : elevation  26.8, bearing 255.7; pixel (1190, -89) - outside the picture
+   space Sun  : elevation -28.1, bearing  64.1; behind the camera
+   stand-in moon (opposite the space Sun): elevation  28.1, bearing 244.1; pixel (989, -83) - outside the picture
+   weather moon: elevation   7.4, bearing 265.4; pixel (1372, 269)
+== h3_5_night: clock hour 3.50, day 80.0, moon phase 0.420; sun elevation (weather) -28.1; camera at (-30, 8, 6) looking elevation -10.9, bearing 258.1
+   space Moon : elevation  26.8, bearing 255.7; pixel (760, -221) - outside the picture
+   space Sun  : elevation -28.1, bearing  64.1; behind the camera
+   stand-in moon (opposite the space Sun): elevation  28.1, bearing 244.1; pixel (554, -270) - outside the picture
+   weather moon: elevation   7.4, bearing 265.4; pixel (915, 163)
+== h3_5_plaza: clock hour 3.50, day 80.0, moon phase 0.420; sun elevation (weather) -28.1; camera at (10, 4, 16) looking elevation  -7.8, bearing 149.5
+   space Moon : elevation  26.8, bearing 255.7; behind the camera
+   space Sun  : elevation -28.1, bearing  64.1; pixel (-4891, 3412) - outside the picture
+   stand-in moon (opposite the space Sun): elevation  28.1, bearing 244.1; behind the camera
+   weather moon: elevation   7.4, bearing 265.4; behind the camera
+== h3_5_sunset: clock hour 3.50, day 80.0, moon phase 0.420; sun elevation (weather) -28.1; camera at (-40, 5, 20) looking elevation   0.5, bearing 248.2
+   space Moon : elevation  26.8, bearing 255.7; pixel (914, 19)
+   space Sun  : elevation -28.1, bearing  64.1; behind the camera
+   stand-in moon (opposite the space Sun): elevation  28.1, bearing 244.1; pixel (738, -3) - outside the picture
+   weather moon: elevation   7.4, bearing 265.4; pixel (1067, 341)
