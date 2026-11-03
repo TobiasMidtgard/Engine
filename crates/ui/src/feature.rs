@@ -449,6 +449,12 @@ impl RenderFeature for UiFeature {
         view: &ViewData,
         _settings: &RenderSettings,
     ) {
+        // A mirror, portal or inset never draws the overlay: preparing it there rebuilt the blur
+        // targets at the other view's size and the draw list twice a frame. Left before the
+        // resets, so the window's prepared overlay stands whichever view prepares last.
+        if view.extra_view {
+            return;
+        }
         self.count = 0;
         self.stats = FeatureStats::default();
         let Some(g) = &mut self.gpu else {
