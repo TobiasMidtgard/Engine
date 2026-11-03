@@ -4,8 +4,8 @@
 //! grid are not built for its rays; an indoor volume's closed faces stop the probes' rays where
 //! no mesh does (rock drawn by another feature); a mirror reflects what is behind the camera
 //! through world reflections; a still scene isn't gathered again every frame, moving entities
-//! far from the grid don't gather it again, and a large mesh builds on a worker before the rays
-//! see it. Needs a GPU or lavapipe; passes with a note when
+//! far from the grid don't gather it again, a near one moving updates only its own instance and
+//! the rays see it where it went, and a large mesh builds on a worker before the rays see it. Needs a GPU or lavapipe; passes with a note when
 //! neither is available.
 
 use engine_core::prelude::*;
@@ -521,6 +521,7 @@ fn a_still_scene_is_not_gathered_again_every_frame() {
         (
             d.get("render.gi.gathered").unwrap_or(-1.0),
             d.get("render.gi.instances").unwrap_or(-1.0),
+            d.get("render.gi.full_gather").unwrap_or(-1.0),
         )
     };
     let still = gathered(&app);
@@ -534,10 +535,11 @@ fn a_still_scene_is_not_gathered_again_every_frame() {
     eprintln!("still: {still:?}, after a move: {moved:?}");
     assert_eq!(
         still,
-        (0.0, 7.0),
-        "a still room's gather (gathered, instances)"
+        (0.0, 7.0, 0.0),
+        "a still room's gather (gathered, instances, all read again)"
     );
-    assert_eq!(moved, (1.0, 7.0), "after the block moved");
+    // Only the block's instance is read and written again.
+    assert_eq!(moved, (1.0, 7.0, 0.0), "after the block moved");
 }
 
 /// A crowd far from the probe grid costs the gather nothing: moving one of them doesn't gather
@@ -605,7 +607,7 @@ fn far_entities_moving_leave_the_gather_alone() {
         "a far crate's move gathered the instances again"
     );
 
-    // The near crate moves: gathered again, still 7.
+    // The near crate moves: its instance is updated, still 7, and only it is read.
     app.world
         .get_mut::<Transform>(near)
         .expect("crate")
@@ -613,6 +615,7 @@ fn far_entities_moving_leave_the_gather_alone() {
         .x = 1.0;
     app.update();
     assert_eq!(diag(&app, "render.gi.gathered"), 1.0);
+    assert_eq!(diag(&app, "render.gi.full_gather"), 0.0);
     assert_eq!(diag(&app, "render.gi.instances"), 7.0);
 
     // And goes: 6 left.
@@ -622,6 +625,74 @@ fn far_entities_moving_leave_the_gather_alone() {
         diag(&app, "render.gi.instances"),
         6.0,
         "the removed crate is still in the rays"
+    );
+}
+
+/// A lid over the roof's opening slides aside while the scene runs: only its instance is
+/// updated (the instance hierarchy refit, nothing read again), and the room lights up as much
+/// as a room whose lid lay aside from the start.
+#[test]
+fn a_lid_slid_aside_lets_the_sun_in_like_one_that_was_never_on() {
+    let lid_over = DVec3::new(0.0, HEIGHT + THICK * 1.5, -0.5);
+    let lid_aside = DVec3::new(2.2, HEIGHT + THICK * 1.5, -0.5);
+    let scene = |lid_at: DVec3| {
+        let mut app = app(true);
+        let w = &mut app.world;
+        room(w, DVec3::ZERO, 0.7, 0.8, Some((1.4, -0.5)));
+        ground(w);
+        sun(w, 110_000.0, DVec3::new(0.05, -1.0, -0.1));
+        camera(w, EYE, TARGET, 12.0);
+        let lid = w
+            .spawn((
+                Transform::from_translation(lid_at),
+                MeshRenderer::new(
+                    Shape::Cuboid {
+                        size: [1.8, THICK as f32, 2.0],
+                    },
+                    StandardMaterial::color(0.7, 0.7, 0.7).with_roughness(0.9),
+                ),
+            ))
+            .id();
+        (app, lid)
+    };
+    let (mut slid, lid) = scene(lid_over);
+    slid.update_n(16);
+    if slid.world.get_resource::<RenderDisabled>().is_some() {
+        eprintln!("skipping: no GPU");
+        return;
+    }
+    let (closed, _) = scene(lid_over);
+    let Some(closed) = shoot(closed, 16, "lid_closed.png", UPPER) else {
+        return;
+    };
+    // Slide it aside over a few frames.
+    let mut full_gathers = 0.0;
+    for step in 1..=4 {
+        slid.world
+            .get_mut::<Transform>(lid)
+            .expect("lid")
+            .translation = lid_over.lerp(lid_aside, step as f64 / 4.0);
+        slid.update();
+        full_gathers += slid
+            .world
+            .resource::<Diagnostics>()
+            .get("render.gi.full_gather")
+            .unwrap_or(-1.0);
+    }
+    assert_eq!(
+        full_gathers, 0.0,
+        "sliding the lid read every instance again"
+    );
+    let slid = shoot(slid, 16, "lid_slid.png", UPPER).expect("GPU");
+    let (open, _) = scene(lid_aside);
+    let open = shoot(open, 20, "lid_open.png", UPPER).expect("GPU");
+    assert!(
+        open > closed * 1.3 + 3.0,
+        "the opening should light the room: lid on {closed:.1}, never on {open:.1}"
+    );
+    assert!(
+        (slid - open).abs() < (open - closed) * 0.15 + 1.0,
+        "lid slid aside {slid:.1}, never on {open:.1}, on {closed:.1}"
     );
 }
 

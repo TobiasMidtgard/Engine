@@ -13,10 +13,14 @@
 //! Made cheap enough to be on by default (/engine-design/world-gi-on.md): every mesh entity's
 //! world box is cached and updated only when its change ticks moved (a share of the cache is
 //! checked again each frame for meshes edited in place and entities gone), so a frame reads
-//! the components of only what changed, never the whole world. The instances are gathered
-//! again, from the cached entities in the snapped region alone, when one of those changes, a
-//! mesh or material asset changes, or the camera leaves the region; they stay relative to an
-//! anchor that moves in 64 m steps, so a moving camera leaves them as they are. Hierarchies of
+//! the components of only what changed, never the whole world. The instances near the grid are
+//! kept the same way, one per entity: a frame updates only the instances of entities that
+//! changed, entered or left the snapped region, or whose mesh or material asset changed (Unreal
+//! updates only dirty ray-tracing instances too), refits the instance hierarchy when only boxes
+//! moved and rebuilds it when instances came or went, and writes only the instances that
+//! changed. They stay relative to an anchor that moves in 64 m steps, so a moving camera
+//! leaves them as they are; only the anchor's step or moved hierarchies read them all again.
+//! A share of them is checked again each frame (textures whose mean color arrived). Hierarchies of
 //! all but small meshes build on worker threads. The hierarchies are packed in one
 //! store that only appends what's new. Each frame traces the probes that fit
 //! `RenderSettings::gi_budget_ms` at the cost per ray timestamps measured, and probes with
@@ -32,7 +36,7 @@
 
 mod bvh;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use bevy_ecs::change_detection::Tick;
 use bytemuck::{Pod, Zeroable};
@@ -69,12 +73,22 @@ const REVALIDATE_PER_FRAME: usize = 1024;
 const ANCHOR_CELL: f64 = 64.0;
 /// Meters the region instances are gathered from snaps to.
 const REGION_SNAP: f64 = 8.0;
-/// Frames between gathers of a scene that didn't change (texture colors arrive late).
-const REGATHER_FRAMES: u64 = 240;
+/// Instances checked again a frame, in turn (a texture's mean color arriving, anything the
+/// change ticks and asset versions don't show).
+const RECHECK_PER_FRAME: usize = 256;
+/// Refits of the instance hierarchy before it is built again (a refit tree slows the rays as
+/// instances wander from where it was built).
+const REFITS_BEFORE_REBUILD: u32 = 30;
+/// Frames between sweeps of hierarchies no instance used in a while.
+const FORGET_EVERY_FRAMES: u64 = 60;
 /// Probes a frame at least under a time budget.
 const MIN_PROBES_PER_FRAME: u32 = 128;
 /// Probes a frame under a time budget before timestamps measured their cost.
 const UNMEASURED_PROBES_PER_FRAME: u32 = 512;
+/// Frames a mesh edited in place keeps its last hierarchy before it is built again: a mesh
+/// edited every frame (a deforming or regenerated mesh) is built twice a second at 60 fps, not
+/// every frame, and the rays see its shape from a moment ago (diffuse light barely shows it).
+const REBUILD_AFTER_FRAMES: u64 = 30;
 /// Frames a mesh's hierarchy stays after its last use.
 const KEEP_UNUSED_FRAMES: u64 = 600;
 
@@ -102,6 +116,8 @@ struct GpuInstance {
 /// A mesh's hierarchy: where it sits in the shared buffers ([`BlasStore`]).
 struct MeshEntry {
     version: u64,
+    /// The frame it was stored.
+    built: u64,
     root: u32,
     first_triangle: u32,
     /// Its nodes and triangle corners in the store.
@@ -212,25 +228,71 @@ fn append<T: Pod>(
     false
 }
 
-/// What the instances were last gathered for: gather again when any of it changes.
+/// What every instance was last gathered for: all of them are read again when it changes.
 #[derive(Clone, Copy, PartialEq)]
 struct GatherKey {
-    /// The anchor's cell and the region (in `REGION_SNAP` cells).
+    /// The anchor's cell: instances are relative to it.
     anchor: IVec3,
-    region: (IVec3, IVec3),
-    /// The mesh and material assets' latest versions and removals.
-    meshes: (u64, u64),
-    materials: (u64, u64),
+    /// The hierarchies' places in the store: instances point into it.
     layout: u64,
 }
 
-/// The instances near the grid as last gathered (on the GPU with their hierarchy).
-struct Gathered {
-    key: GatherKey,
-    frame: u64,
-    instances: u32,
-    /// Meshes were left for later (the frame's build budget, busy workers): gather again.
-    incomplete: bool,
+/// What the rays see of one mesh entity near the grid.
+#[derive(Clone, Copy)]
+struct Record {
+    instance: GpuInstance,
+    /// Anchor-relative world box.
+    bounds: (Vec3, Vec3),
+}
+
+impl PartialEq for Record {
+    fn eq(&self, other: &Self) -> bool {
+        bytemuck::bytes_of(&self.instance) == bytemuck::bytes_of(&other.instance)
+            && self.bounds == other.bounds
+    }
+}
+
+/// A mesh entity in the gather region as last read: the asset versions it was read at, and its
+/// instance (`None`: the rays don't see it, hidden, see-through, unlit, not loaded or built yet).
+struct Entry {
+    mesh: Handle<Mesh>,
+    mesh_version: u64,
+    material: Handle<StandardMaterial>,
+    material_version: u64,
+    record: Option<Record>,
+}
+
+/// The instances on the GPU, in the instance hierarchy's order, and that hierarchy.
+#[derive(Default)]
+struct Placed {
+    entities: Vec<Entity>,
+    instances: Vec<GpuInstance>,
+    boxes: Vec<(Vec3, Vec3)>,
+    slot_of: HashMap<Entity, u32>,
+    tlas: Vec<bvh::Node>,
+    /// Refits since it was built.
+    refits: u32,
+}
+
+/// What reading an entity found.
+enum Read {
+    /// No longer a mesh entity the gather reads.
+    Gone,
+    /// Read; `true`: waiting on its hierarchy (a worker, the frame's build budget), read again
+    /// next frame.
+    Entry(Entry, bool),
+}
+
+/// What reading entities needs from the world.
+struct Look<'a> {
+    world: &'a World,
+    meshes: &'a Assets<Mesh>,
+    materials: Option<&'a Assets<StandardMaterial>>,
+    images: Option<&'a Assets<crate::Image>>,
+    shared: &'a GpuShared,
+    default_material: &'a StandardMaterial,
+    anchor: DVec3,
+    limit: u64,
 }
 
 /// What the instance gather reads; only change ticks while nothing changed.
@@ -328,7 +390,18 @@ pub(crate) struct ProbeGi {
     bounds: HashMap<u32, (u64, (Vec3, Vec3))>,
     /// Triangles left out for the binding limit (warned once).
     left_out_warned: bool,
-    gathered: Option<Gathered>,
+    /// What the instances were read for (`None`: read them all next frame).
+    gathered: Option<GatherKey>,
+    /// Every entity in the region as last read, and the instances on the GPU.
+    entries: HashMap<Entity, Entry>,
+    placed: Placed,
+    /// Entities waiting on their mesh's hierarchy.
+    pending: Vec<Entity>,
+    /// The entries in the order `RECHECK_PER_FRAME` walks them.
+    recheck: Vec<Entity>,
+    recheck_at: usize,
+    /// The mesh and material assets' latest versions and removals at the last check.
+    asset_marks: ((u64, u64), (u64, u64)),
     query: Option<QueryState<GatherQuery, GatherFilter>>,
     /// The world's change tick at the last gather check, and the mesh entities it found.
     tick: Option<Tick>,
@@ -338,7 +411,7 @@ pub(crate) struct ProbeGi {
     /// ticks of all and the components of only what changed.
     cache: HashMap<Entity, Cached>,
     /// The cached entities whose box overlaps the gather region, and that region (absolute).
-    in_region: Vec<Entity>,
+    in_region: HashSet<Entity>,
     region: Option<(DVec3, DVec3)>,
     /// The cache's entities in the order `REVALIDATE_PER_FRAME` walks them.
     revalidate: Vec<Entity>,
@@ -365,7 +438,14 @@ struct Stats {
     meshes: u32,
     built_triangles: u32,
     building: u32,
+    /// The instances on the GPU changed.
     gathered: bool,
+    /// Every instance was read again.
+    full: bool,
+    /// Entities read, and mesh entities whose change ticks moved.
+    read: u32,
+    changed: u32,
+    rebuilt: bool,
     build_ms: f32,
     extract_ms: f32,
 }
@@ -472,11 +552,17 @@ impl ProbeGi {
             bounds: HashMap::new(),
             left_out_warned: false,
             gathered: None,
+            entries: HashMap::new(),
+            placed: Placed::default(),
+            pending: Vec::new(),
+            recheck: Vec::new(),
+            recheck_at: 0,
+            asset_marks: ((0, 0), (0, 0)),
             query: None,
             tick: None,
             entities: 0,
             cache: HashMap::new(),
-            in_region: Vec::new(),
+            in_region: HashSet::new(),
             region: None,
             revalidate: Vec::new(),
             revalidate_at: 0,
@@ -699,7 +785,7 @@ impl ProbeGi {
     }
 
     /// Bring `entity`'s cache entry up to date (or drop it, gone or hidden). True when its box
-    /// was or now is in `region`: the gather must run again.
+    /// was or now is in `region`: its instance must be read again.
     fn refresh(
         &mut self,
         entity: Entity,
@@ -730,10 +816,10 @@ impl ProbeGi {
             self.cache.insert(entity, c);
         }
         if was_in && !is_in {
-            self.in_region.retain(|&e| e != entity);
+            self.in_region.remove(&entity);
         }
         if is_in && !was_in {
-            self.in_region.push(entity);
+            self.in_region.insert(entity);
         }
         was_in || is_in
     }
@@ -779,6 +865,7 @@ impl ProbeGi {
             key,
             MeshEntry {
                 version,
+                built: self.frame,
                 root,
                 first_triangle,
                 nodes: bvh.nodes.len() as u32,
@@ -797,14 +884,15 @@ impl ProbeGi {
         }
     }
 
-    /// Forget the hierarchies of meshes no gather used in a while, and close the gaps once
+    /// Forget the hierarchies of meshes no instance used in a while, and close the gaps once
     /// they're most of the store.
     fn forget_unused(&mut self) {
         let frame = self.frame;
+        let used: HashSet<u32> = self.placed.instances.iter().map(|i| i.mesh[3]).collect();
         let gone: Vec<u32> = self
             .meshes
             .iter()
-            .filter(|(_, e)| frame - e.last_used >= KEEP_UNUSED_FRAMES)
+            .filter(|(k, e)| frame - e.last_used >= KEEP_UNUSED_FRAMES && !used.contains(k))
             .map(|(k, _)| *k)
             .collect();
         for key in gone {
@@ -820,6 +908,124 @@ impl ProbeGi {
             let meshes = &self.meshes;
             self.bounds.retain(|k, _| meshes.contains_key(k));
         }
+    }
+
+    /// Read `entity`'s instance: its mesh's hierarchy (built here when small and the frame's
+    /// budget allows, on a worker when large), its transform and its material's light.
+    fn read(
+        &mut self,
+        look: &Look,
+        query: &mut QueryState<GatherQuery, GatherFilter>,
+        entity: Entity,
+        built: &mut usize,
+    ) -> Read {
+        let Ok((_, transform, renderer, resolved)) = query.get(look.world, entity) else {
+            return Read::Gone;
+        };
+        let meshes = look.meshes;
+        let handle = meshes.canonical(resolved.mesh);
+        let mut entry = Entry {
+            mesh: handle,
+            mesh_version: meshes.version(handle),
+            material: resolved.material,
+            material_version: look.materials.map_or(0, |m| m.version(resolved.material)),
+            record: None,
+        };
+        if !renderer.visible {
+            return Read::Entry(entry, false);
+        }
+        let material = look
+            .materials
+            .and_then(|m| m.get(resolved.material))
+            .unwrap_or(look.default_material);
+        if material.unlit || matches!(material.alpha_mode, AlphaMode::Blend) {
+            return Read::Entry(entry, false);
+        }
+        let key = handle.index();
+        let version = entry.mesh_version;
+        let Some(local) = self.local_bounds(meshes, handle) else {
+            // Not loaded: its version changes when it is.
+            return Read::Entry(entry, false);
+        };
+        // Read again next frame: its hierarchy is building, waits for the frame's budget, or
+        // is an older version's (the rays see that one meanwhile).
+        let mut waiting = false;
+        let stored = self.meshes.get(&key).map(|e| (e.version, e.built));
+        if stored.is_none_or(|(v, _)| v != version) {
+            waiting = true;
+            let recent = stored.is_some_and(|(_, at)| self.frame < at + REBUILD_AFTER_FRAMES);
+            if !recent && !self.jobs.contains_key(&key) {
+                let Some(mesh) = meshes.get(handle) else {
+                    return Read::Entry(entry, false);
+                };
+                let triangles = mesh.indices.len() / 3;
+                let positions =
+                    || -> Vec<[f32; 3]> { mesh.vertices.iter().map(|v| v.position).collect() };
+                if triangles > INLINE_BUILD_TRIANGLES {
+                    // Larger meshes build on a worker; until it's done the rays see the older
+                    // version, or miss a new mesh.
+                    if self.jobs.len() < MAX_BUILD_JOBS {
+                        let positions = positions();
+                        let indices = mesh.indices.clone();
+                        match std::thread::Builder::new()
+                            .name("probe gi bvh".into())
+                            .spawn(move || bvh::build_mesh(&positions, &indices))
+                        {
+                            Ok(job) => {
+                                self.jobs.insert(key, BuildJob { version, job });
+                            }
+                            Err(e) => tracing::warn!("probe GI: no worker for a mesh: {e}"),
+                        }
+                    }
+                } else if *built == 0 || *built + triangles <= BUILD_TRIANGLES_PER_FRAME {
+                    *built += triangles;
+                    let bvh = bvh::build_mesh(&positions(), &mesh.indices);
+                    self.add_mesh(key, version, bvh, look.limit);
+                    waiting = false;
+                }
+            }
+        }
+        let Some(mesh_entry) = self.meshes.get_mut(&key) else {
+            return Read::Entry(entry, waiting);
+        };
+        mesh_entry.last_used = self.frame;
+        if !mesh_entry.uploaded || mesh_entry.empty {
+            return Read::Entry(entry, waiting);
+        }
+        // Anchor-relative -> mesh.
+        let mut rel = transform.0;
+        rel.translation -= look.anchor;
+        let inv = rel.inverse();
+        let m = inv.matrix3.as_mat3();
+        let t = inv.translation.as_vec3();
+        let row = |i: usize| {
+            let r = m.row(i);
+            [r.x, r.y, r.z, t[i]]
+        };
+        let texture_mean = match (&material.base_color_texture, look.images) {
+            (Some(handle), Some(images)) => look
+                .shared
+                .images
+                .mean_color(images, *handle)
+                .map(Vec3::from),
+            _ => None,
+        };
+        let (albedo, emissive) = material_light(material, texture_mean);
+        entry.record = Some(Record {
+            instance: GpuInstance {
+                to_local: [row(0), row(1), row(2)],
+                mesh: [
+                    mesh_entry.root,
+                    mesh_entry.first_triangle,
+                    material.double_sided as u32,
+                    key,
+                ],
+                albedo: albedo.extend(0.0).to_array(),
+                emissive: emissive.extend(0.0).to_array(),
+            },
+            bounds: world_box(local, &transform.0, look.anchor),
+        });
+        Read::Entry(entry, waiting)
     }
 
     /// The main view's half on the main thread: place the grid, gather the instances near it,
@@ -900,9 +1106,9 @@ impl ProbeGi {
             self.cursor = (self.cursor + 1) % count;
         }
 
-        // Hierarchies the workers finished.
+        // Hierarchies the workers finished: the entities waiting on them are pending.
         let limit = shared.device.limits().max_storage_buffer_binding_size;
-        let mut scene_changed = self.collect_builds(limit);
+        self.collect_builds(limit);
 
         // Instances are kept relative to an anchor that moves in whole cells, and gathered from a
         // region snapped outward, so a moving camera changes neither most frames.
@@ -937,18 +1143,19 @@ impl ProbeGi {
         };
         // Changes from here on get a newer tick, so the next frame finds them.
         self.tick = Some(world.increment_change_tick());
-        // Fewer or as many entities with some gone: the gather drops what is gone.
-        scene_changed |= entities != self.entities;
-        self.entities = entities;
         let world: &World = world;
         let meshes = world.get_resource::<Assets<Mesh>>();
         let materials = world.get_resource::<Assets<StandardMaterial>>();
 
-        // The cache: the changed entities, then a share of the rest checked again.
+        // The entities whose instance must be read again.
         let build_started = std::time::Instant::now();
+        let mut dirty: Vec<Entity> = Vec::new();
         if let Some(meshes) = meshes {
+            // The cache: the changed entities, then a share of the rest checked again.
             for &entity in &changed {
-                scene_changed |= self.refresh(entity, &mut query, world, meshes, &region_abs);
+                if self.refresh(entity, &mut query, world, meshes, &region_abs) {
+                    dirty.push(entity);
+                }
             }
             if self.revalidate_at >= self.revalidate.len() {
                 self.revalidate.clear();
@@ -967,14 +1174,15 @@ impl ProbeGi {
                     (None, _) => true,
                     (Some(_), Err(_)) => false,
                 };
-                if !current {
-                    scene_changed |= self.refresh(entity, &mut query, world, meshes, &region_abs);
+                if !current && self.refresh(entity, &mut query, world, meshes, &region_abs) {
+                    dirty.push(entity);
                 }
             }
             self.revalidate_at = end;
         }
         if self.region != Some(region_abs) {
-            // The camera crossed a snap cell: which cached boxes are in the new region.
+            // The camera crossed a snap cell: which cached boxes are in the new region; those
+            // that entered or left are read again.
             self.region = Some(region_abs);
             self.in_region.clear();
             self.in_region.extend(
@@ -983,137 +1191,117 @@ impl ProbeGi {
                     .filter(|(_, c)| c.overlaps(&region_abs))
                     .map(|(e, _)| *e),
             );
-            scene_changed = true;
+            let entries = &self.entries;
+            dirty.extend(self.in_region.iter().filter(|e| !entries.contains_key(e)));
+            let in_region = &self.in_region;
+            dirty.extend(entries.keys().filter(|e| !in_region.contains(e)));
         }
-        let mut key = GatherKey {
+        if entities != self.entities {
+            // Some went (or came, and those changed): the entries whose entity is gone.
+            let query = &query;
+            dirty.extend(
+                self.entries
+                    .keys()
+                    .filter(|&&e| query.get_manual(world, e).is_err()),
+            );
+        }
+        self.entities = entities;
+        // An asset changed somewhere: the entries whose mesh or material it was.
+        let marks = (
+            meshes.map_or((0, 0), |m| (m.latest_version(), m.removals())),
+            materials.map_or((0, 0), |m| (m.latest_version(), m.removals())),
+        );
+        if marks != self.asset_marks {
+            self.asset_marks = marks;
+            for (&entity, entry) in &self.entries {
+                let mesh = meshes.map_or(0, |m| m.version(entry.mesh));
+                let material = materials.map_or(0, |m| m.version(entry.material));
+                if mesh != entry.mesh_version || material != entry.material_version {
+                    dirty.push(entity);
+                }
+            }
+        }
+        dirty.append(&mut self.pending);
+        // And a share of the rest, in turn.
+        if self.recheck_at >= self.recheck.len() {
+            self.recheck.clear();
+            self.recheck.extend(self.entries.keys().copied());
+            self.recheck_at = 0;
+        }
+        let end = (self.recheck_at + RECHECK_PER_FRAME).min(self.recheck.len());
+        dirty.extend_from_slice(&self.recheck[self.recheck_at..end]);
+        self.recheck_at = end;
+
+        // Hierarchies no instance used in a while go; a compaction moves the rest, and then
+        // every instance is read again.
+        if self.frame.is_multiple_of(FORGET_EVERY_FRAMES) {
+            self.forget_unused();
+        }
+        let key = GatherKey {
             anchor: anchor_cell.as_ivec3(),
-            region: (lo.as_ivec3(), hi.as_ivec3()),
-            meshes: meshes.map_or((0, 0), |m| (m.latest_version(), m.removals())),
-            materials: materials.map_or((0, 0), |m| (m.latest_version(), m.removals())),
             layout: self.store.layout,
         };
-
-        let regather = scene_changed
-            || self.gathered.as_ref().is_none_or(|g| {
-                g.key != key || g.incomplete || self.frame >= g.frame + REGATHER_FRAMES
-            });
-
-        if regather {
-            // Before gathering: a compaction moves hierarchies, so it can't come after.
-            self.forget_unused();
-            key.layout = self.store.layout;
+        let full = self.gathered != Some(key);
+        if full {
+            self.entries.clear();
+            dirty.clear();
+            dirty.extend(self.in_region.iter().copied());
+            self.gathered = Some(key);
         }
+        dirty.sort_unstable();
+        dirty.dedup();
+
         let mut built = 0usize;
-        let mut found: Vec<(GpuInstance, (Vec3, Vec3))> = Vec::new();
-        let mut incomplete = false;
-        if regather && let Some(meshes) = meshes {
-            let images = world.get_resource::<Assets<crate::Image>>();
+        // Instances came or went (the hierarchy is built again), or changed in place.
+        let mut membership = full;
+        let mut moved: Vec<u32> = Vec::new();
+        if let Some(meshes) = meshes {
             let default_material = StandardMaterial::default();
-            let mut gone = Vec::new();
-            let in_region = std::mem::take(&mut self.in_region);
-            for &entity in &in_region {
-                let Ok((_, transform, renderer, resolved)) = query.get(world, entity) else {
-                    gone.push(entity);
-                    continue;
+            let look = Look {
+                world,
+                meshes,
+                materials,
+                images: world.get_resource::<Assets<crate::Image>>(),
+                shared,
+                default_material: &default_material,
+                anchor,
+                limit,
+            };
+            for &entity in &dirty {
+                let read = if self.in_region.contains(&entity) {
+                    self.read(&look, &mut query, entity, &mut built)
+                } else {
+                    Read::Gone
                 };
-                if !renderer.visible {
-                    continue;
-                }
-                let material = materials
-                    .and_then(|m| m.get(resolved.material))
-                    .unwrap_or(&default_material);
-                if material.unlit || matches!(material.alpha_mode, AlphaMode::Blend) {
-                    continue;
-                }
-                let handle = meshes.canonical(resolved.mesh);
-                let key = handle.index();
-                let version = meshes.version(handle);
-                let Some(local) = self.local_bounds(meshes, handle) else {
-                    continue;
-                };
-                let bounds = world_box(local, &transform.0, anchor);
-                let current = self.meshes.get(&key).is_some_and(|e| e.version == version);
-                if !current {
-                    if self.jobs.get(&key).is_some_and(|j| j.version == version) {
-                        // Still building.
-                        continue;
-                    }
-                    let Some(mesh) = meshes.get(handle) else {
-                        continue;
-                    };
-                    let triangles = mesh.indices.len() / 3;
-                    let positions =
-                        || -> Vec<[f32; 3]> { mesh.vertices.iter().map(|v| v.position).collect() };
-                    if triangles > INLINE_BUILD_TRIANGLES {
-                        // Larger meshes build on a worker; the rays miss them until it's done.
-                        if self.jobs.len() < MAX_BUILD_JOBS {
-                            let positions = positions();
-                            let indices = mesh.indices.clone();
-                            match std::thread::Builder::new()
-                                .name("probe gi bvh".into())
-                                .spawn(move || bvh::build_mesh(&positions, &indices))
-                            {
-                                Ok(job) => {
-                                    self.jobs.insert(key, BuildJob { version, job });
-                                }
-                                Err(e) => tracing::warn!("probe GI: no worker for a mesh: {e}"),
-                            }
-                        } else {
-                            incomplete = true;
+                let (old, new) = match read {
+                    Read::Gone => {
+                        // Gone from the world (one that only left the region stays cached).
+                        if self.in_region.remove(&entity) {
+                            self.cache.remove(&entity);
                         }
-                        continue;
+                        (self.entries.remove(&entity), None)
                     }
-                    if built > 0 && built + triangles > BUILD_TRIANGLES_PER_FRAME {
-                        incomplete = true;
-                        continue;
+                    Read::Entry(entry, waiting) => {
+                        if waiting {
+                            self.pending.push(entity);
+                        }
+                        let record = entry.record;
+                        (self.entries.insert(entity, entry), record)
                     }
-                    built += triangles;
-                    let bvh = bvh::build_mesh(&positions(), &mesh.indices);
-                    self.add_mesh(key, version, bvh, limit);
-                }
-                let Some(entry) = self.meshes.get_mut(&key) else {
-                    continue;
                 };
-                entry.last_used = self.frame;
-                if !entry.uploaded || entry.empty {
-                    continue;
-                }
-                // Anchor-relative -> mesh.
-                let mut rel = transform.0;
-                rel.translation -= anchor;
-                let inv = rel.inverse();
-                let m = inv.matrix3.as_mat3();
-                let t = inv.translation.as_vec3();
-                let row = |i: usize| {
-                    let r = m.row(i);
-                    [r.x, r.y, r.z, t[i]]
-                };
-                let texture_mean = match (&material.base_color_texture, images) {
-                    (Some(handle), Some(images)) => {
-                        shared.images.mean_color(images, *handle).map(Vec3::from)
-                    }
-                    _ => None,
-                };
-                let (albedo, emissive) = material_light(material, texture_mean);
-                found.push((
-                    GpuInstance {
-                        to_local: [row(0), row(1), row(2)],
-                        mesh: [
-                            entry.root,
-                            entry.first_triangle,
-                            material.double_sided as u32,
-                            key,
-                        ],
-                        albedo: albedo.extend(0.0).to_array(),
-                        emissive: emissive.extend(0.0).to_array(),
+                match (old.and_then(|e| e.record), new) {
+                    (None, None) => {}
+                    (Some(a), Some(b)) if a == b => {}
+                    (Some(_), Some(b)) => match self.placed.slot_of.get(&entity) {
+                        Some(&slot) => {
+                            self.placed.instances[slot as usize] = b.instance;
+                            self.placed.boxes[slot as usize] = b.bounds;
+                            moved.push(slot);
+                        }
+                        None => membership = true,
                     },
-                    bounds,
-                ));
-            }
-            self.in_region = in_region;
-            for entity in gone {
-                self.cache.remove(&entity);
-                self.in_region.retain(|&e| e != entity);
+                    _ => membership = true,
+                }
             }
         }
         self.query = Some(query);
@@ -1124,29 +1312,69 @@ impl ProbeGi {
         let queue = &shared.queue;
         let mut regroup = recreated || active.group.is_none();
         regroup |= self.store.upload(active, device, queue);
-        if regather {
-            let boxes: Vec<(Vec3, Vec3)> = found.iter().map(|(_, b)| *b).collect();
+        let placed = &mut self.placed;
+        let rebuild = membership || (!moved.is_empty() && placed.refits >= REFITS_BEFORE_REBUILD);
+        if rebuild {
+            // Sorted, so the same scene builds the same hierarchy.
+            let mut list: Vec<(Entity, Record)> = self
+                .entries
+                .iter()
+                .filter_map(|(e, entry)| entry.record.map(|r| (*e, r)))
+                .collect();
+            list.sort_unstable_by_key(|(e, _)| *e);
+            let boxes: Vec<(Vec3, Vec3)> = list.iter().map(|(_, r)| r.bounds).collect();
             let (tlas, order) = bvh::build(&boxes);
-            let mut instances: Vec<GpuInstance> =
-                order.iter().map(|&i| found[i as usize].0).collect();
-            let count = instances.len();
-            if instances.is_empty() {
-                instances.push(GpuInstance::zeroed());
-            }
+            placed.entities = order.iter().map(|&i| list[i as usize].0).collect();
+            placed.instances = order.iter().map(|&i| list[i as usize].1.instance).collect();
+            placed.boxes = order.iter().map(|&i| boxes[i as usize]).collect();
+            placed.slot_of = placed
+                .entities
+                .iter()
+                .enumerate()
+                .map(|(slot, e)| (*e, slot as u32))
+                .collect();
+            placed.tlas = tlas;
+            placed.refits = 0;
             regroup |= active
                 .tlas
-                .write(device, queue, bytemuck::cast_slice(&tlas));
+                .write(device, queue, bytemuck::cast_slice(&placed.tlas));
+            let none = [GpuInstance::zeroed()];
+            let instances = if placed.instances.is_empty() {
+                &none[..]
+            } else {
+                &placed.instances[..]
+            };
             regroup |= active
                 .instances
-                .write(device, queue, bytemuck::cast_slice(&instances));
-            self.gathered = Some(Gathered {
-                key,
-                frame: self.frame,
-                instances: count as u32,
-                incomplete,
-            });
+                .write(device, queue, bytemuck::cast_slice(instances));
+        } else if !moved.is_empty() {
+            // Same instances, some moved or changed: fit the hierarchy around them again and
+            // write only what changed.
+            bvh::refit(&mut placed.tlas, &placed.boxes);
+            placed.refits += 1;
+            regroup |= active
+                .tlas
+                .write(device, queue, bytemuck::cast_slice(&placed.tlas));
+            moved.sort_unstable();
+            moved.dedup();
+            if moved.len() * 4 > placed.instances.len() {
+                regroup |=
+                    active
+                        .instances
+                        .write(device, queue, bytemuck::cast_slice(&placed.instances));
+            } else {
+                let size = size_of::<GpuInstance>() as u64;
+                for &slot in &moved {
+                    queue.write_buffer(
+                        &active.instances.buffer,
+                        slot as u64 * size,
+                        bytemuck::bytes_of(&placed.instances[slot as usize]),
+                    );
+                }
+            }
         }
-        let instance_count = self.gathered.as_ref().map_or(0, |g| g.instances);
+        let gathered = rebuild || !moved.is_empty();
+        let instance_count = placed.instances.len() as u32;
         regroup |= active
             .updates
             .write(device, queue, bytemuck::cast_slice(&updates));
@@ -1253,7 +1481,11 @@ impl ProbeGi {
             meshes: self.meshes.len() as u32,
             built_triangles: built as u32,
             building: self.jobs.len() as u32,
-            gathered: regather,
+            gathered,
+            full,
+            read: dirty.len() as u32,
+            changed: changed.len() as u32,
+            rebuilt: rebuild,
             build_ms,
             extract_ms: started.elapsed().as_secs_f32() * 1000.0,
         };
@@ -1375,6 +1607,10 @@ impl ProbeGi {
         d.set("render.gi.built_triangles", s.built_triangles as f64);
         d.set("render.gi.building", s.building as f64);
         d.set("render.gi.gathered", s.gathered as u8 as f64);
+        d.set("render.gi.full_gather", s.full as u8 as f64);
+        d.set("render.gi.read", s.read as f64);
+        d.set("render.gi.changed", s.changed as f64);
+        d.set("render.gi.rebuilt", s.rebuilt as u8 as f64);
         d.set("render.gi.gpu_ms_per_kray", self.ms_per_kray as f64);
         d.set("render.gi.build_ms", s.build_ms as f64);
         d.set("render.gi.extract_ms", s.extract_ms as f64);

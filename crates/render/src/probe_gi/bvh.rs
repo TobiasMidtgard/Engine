@@ -69,6 +69,35 @@ pub(crate) fn build(boxes: &[(Vec3, Vec3)]) -> (Vec<Node>, Vec<u32>) {
     (nodes, order)
 }
 
+/// Fit `nodes` (from [`build`]) around `boxes` again after items moved: the same tree with new
+/// bounds. `boxes` are in the order the leaves refer to (the build's `order` applied). Children
+/// follow their parent in the flattened tree, so one backward walk does it. A refit tree slows
+/// the rays as items wander from where it was built; rebuild now and then.
+pub(crate) fn refit(nodes: &mut [Node], boxes: &[(Vec3, Vec3)]) {
+    if boxes.is_empty() {
+        return;
+    }
+    for i in (0..nodes.len()).rev() {
+        let n = nodes[i];
+        let mut b = Bounds::EMPTY;
+        if n.count > 0 {
+            let first = n.right_or_first as usize;
+            for &(min, max) in &boxes[first..first + n.count as usize] {
+                b.grow(&Bounds { min, max });
+            }
+        } else {
+            for child in [nodes[i + 1], nodes[n.right_or_first as usize]] {
+                b.grow(&Bounds {
+                    min: Vec3::from(child.min),
+                    max: Vec3::from(child.max),
+                });
+            }
+        }
+        nodes[i].min = b.min.to_array();
+        nodes[i].max = b.max.to_array();
+    }
+}
+
 fn split(
     items: &[Bounds],
     centers: &[Vec3],
@@ -278,6 +307,50 @@ mod tests {
         assert!((t - 1.0).abs() < 0.01, "{t}");
         // Leaves stay small and the tree is reasonably shallow.
         assert!(bvh.nodes.iter().all(|n| n.count as usize <= LEAF_ITEMS));
+    }
+
+    #[test]
+    fn a_refit_tree_matches_one_built_around_the_moved_boxes() {
+        let boxes: Vec<(Vec3, Vec3)> = (0..40)
+            .map(|i| {
+                let c = Vec3::new((i % 7) as f32 * 3.0, (i / 7) as f32 * 2.0, (i % 3) as f32);
+                (c - 0.5, c + 0.5)
+            })
+            .collect();
+        let (mut nodes, order) = build(&boxes);
+        // Move a few, in the leaves' order.
+        let mut placed: Vec<(Vec3, Vec3)> = order.iter().map(|&i| boxes[i as usize]).collect();
+        for (k, b) in placed.iter_mut().enumerate().filter(|(k, _)| k % 9 == 0) {
+            let d = Vec3::new(k as f32, -4.0, 2.5);
+            *b = (b.0 + d, b.1 + d);
+        }
+        refit(&mut nodes, &placed);
+        // Every node holds exactly what is under it.
+        fn under(nodes: &[Node], placed: &[(Vec3, Vec3)], i: usize) -> (Vec3, Vec3) {
+            let n = nodes[i];
+            if n.count > 0 {
+                let f = n.right_or_first as usize;
+                placed[f..f + n.count as usize]
+                    .iter()
+                    .fold((Vec3::INFINITY, Vec3::NEG_INFINITY), |a, b| {
+                        (a.0.min(b.0), a.1.max(b.1))
+                    })
+            } else {
+                let (a, b) = (
+                    under(nodes, placed, i + 1),
+                    under(nodes, placed, n.right_or_first as usize),
+                );
+                (a.0.min(b.0), a.1.max(b.1))
+            }
+        }
+        for i in 0..nodes.len() {
+            let (lo, hi) = under(&nodes, &placed, i);
+            assert_eq!(
+                (nodes[i].min, nodes[i].max),
+                (lo.to_array(), hi.to_array()),
+                "node {i}"
+            );
+        }
     }
 
     #[test]
