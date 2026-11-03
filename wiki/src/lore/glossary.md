@@ -63,6 +63,9 @@ Marrowfruit
 Patternwork
 : [Tessara](../cities/tessara.md)'s ceramic tiles whose channels carry power, water, magic and information. Laid together, they form machines.
 
+Stormglass
+: Electrically charged glass harvested during thunderstorms above [Sky City](../cities/sky-city.md).
+
 Subclass
 : The clean or dark half of a magic class, levelled like any skill. See [Classes and subclasses](../magic/classes.md).
 

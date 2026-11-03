@@ -21,11 +21,17 @@ fix the pages, and delete the question.
 | "First Spring" | Orath's sacred spring | Rillvault also has a spring district; the wiki doesn't call it the First Spring there |
 | "Kestrel" | Kestrel Vale, the valley Orravell plans to take | The Kestrel spaceplane |
 | Similar names | Captain Sera Noll of Orravell | Sere, the Brinewing keeper of Keth Veyra |
+| "Veyrhold" | The mage quarry city, as on the world map | Sky City's first draft was also called Veyrhold |
+| The Black Weir | Not used: it was rejected as a city | The guild notes still send would-be assassins "to the Black Weir" |
 
 ## Maps
 
 - **Keth Veyra**: the world map draws a ring of walls in the snowy northern mountains, but the
   final city is a dam across a monsoon river. Where is the dam?
+- **Sky City**: its first design chained the island between mountain peaks, but the world map
+  floats it beside the Gilded Ascent in the middle of the continent. Are there peaks there, or are
+  the chains gone? Its first design also had fortified chain forts, which the garden look replaced;
+  the wiki leaves them out.
 - **Rillvault**: the world map still shows the rejected single-cavern city; the final city is many
   tunnel systems.
 - **Vantress's anchors**: the lore ties the city to nine stone anchor towers (the bank's vault is
@@ -34,6 +40,8 @@ fix the pages, and delete the question.
 - **Ward Null**: the lore puts it beneath the tavern, the casino, the Hall of Seals and the south of
   Knot Square; the labelled map marks it in the underdecks of the Lowwater Chainyards. The wiki
   says both.
+- **Sifting Basin**: the world map draws a moat around it, but its design keeps water covered or
+  confined to cisterns, gardens and canals.
 - **Vantress's raft yard**: the Cradle Yard was on the south-east edge, but the labelled map has
   Raftworks in the south-west. The wiki only mentions Raftworks.
 
@@ -61,6 +69,8 @@ Laurels and the Reed-Walker Tannery appear only as labels on the map, so their p
   Awakened, Ascendant), with Godslayer earned separately. The magic draft has every skill rise to
   100 and then ascend, with "God" when every skill has ascended. [Progression](../play/progression.md)
   shows both; how do they fit together?
+  The skill ranks differ too: Untrained, Familiar, Competent, Expert, Master, Transcendent in the
+  levelling chat, against Novice to God in the magic draft.
 - **How automated is Tessara?** The first version said nothing builds or repairs itself; the later
   one added repair robots, drones and an AI. The wiki follows the later one.
 - **Eighty-three years ago** both Vantress cut Ward Null loose and Keth Veyra had its Night of Cut
@@ -69,6 +79,9 @@ Laurels and the Reed-Walker Tannery appear only as labels on the map, so their p
   the guild chat. The wiki gives her both jobs.
 
 ## Still to come
+
+- **The Gilded Ascent** sits at the centre of the map and of trade, but none of the design chats
+  describes it. Its page is a stub until it is designed.
 
 - The lore files the chats produced as downloads (the Keth Veyra guide, Orravell's rewritten lore
   and Veyrhold's lore) hold characters, customs and quests that are not in the chat text.
