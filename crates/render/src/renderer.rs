@@ -1558,7 +1558,17 @@ impl Renderer {
                     .entry(format!("render.extra_views_gpu.{name}"))
                     .or_insert(0.0) += *ms;
             }
-            for (name, ms) in state.view.perf.cpu_steps() {
+            // With the parts features time inside their steps ("meshes: gather" inside
+            // "prepare meshes").
+            let inner = state.view.perf.inner_steps().iter();
+            for (name, ms) in state
+                .view
+                .perf
+                .cpu_steps()
+                .iter()
+                .map(|(n, ms)| (n.as_ref(), ms))
+                .chain(inner.map(|(n, ms)| (*n, ms)))
+            {
                 *passes
                     .entry(format!("render.extra_views_cpu.{name}"))
                     .or_insert(0.0) += *ms;

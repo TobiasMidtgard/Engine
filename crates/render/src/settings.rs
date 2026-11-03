@@ -222,6 +222,10 @@ pub struct RenderSettings {
     /// Shadow-map filter taps per pixel for the sun's soft shadows (PCSS filter step, 1..64).
     /// Planar reflections take half (`for_reflection`).
     pub shadow_filter_taps: u32,
+    /// Planar reflections pick levels of detail as if things were this many times farther
+    /// (Unreal's planar reflection "LOD Distance Factor"): coarser meshes and clusters, and
+    /// small things culled sooner, in a picture seen through ripples. 1 = as the main view.
+    pub reflection_lod_distance_factor: f32,
     /// Ground-truth ambient occlusion (GTAO) from the depth prepass: darkens ambient light in
     /// creases, under objects and where things touch.
     pub ambient_occlusion: bool,
@@ -405,6 +409,12 @@ pub struct RenderSettings {
     /// Instanced meshes narrower than this many pixels on screen (or texels in a shadow map)
     /// are left out of that view. 0 = draw everything.
     pub min_object_pixels: f32,
+    /// Shadow casters narrower than this many texels of a sun cascade skip that cascade (at
+    /// least `min_object_pixels`): their shadow is under the filter's width, so a far cascade
+    /// doesn't draw every pebble, plant part and prop in its 100 m squares. Unreal's
+    /// `r.Shadow.RadiusThreshold` culls small casters the same way, by screen radius. Scaled by
+    /// `Scalability::shadows` (smaller at higher quality).
+    pub shadow_caster_min_texels: f32,
     /// Instanced meshes whose levels of detail stay above a few hundred triangles (leaf-card
     /// trees, ragged props) are drawn as impostors, one baked quad each, once smaller than this
     /// many pixels on screen (or texels in a shadow map); see `impostor.rs`. On screen they
@@ -499,6 +509,7 @@ impl Default for RenderSettings {
             sun_penumbra_scale: 1.0,
             contact_shadow_length: 0.4,
             shadow_filter_taps: 16,
+            reflection_lod_distance_factor: 2.0,
             ambient_occlusion: true,
             ao_radius: 1.5,
             ao_intensity: 1.0,
@@ -557,6 +568,7 @@ impl Default for RenderSettings {
             cluster_error_px: 1.0,
             mesh_lod_pixels: 1.0,
             min_object_pixels: 1.0,
+            shadow_caster_min_texels: 3.0,
             impostor_pixels: 96.0,
             impostor_atlas_layers: 128,
             cluster_shadow_error_texels: 2.0,
@@ -660,6 +672,7 @@ impl RenderSettings {
         let size = self.shadow_map_size.max(1) as f32 * shadows;
         s.shadow_map_size = (2f32.powf(size.log2().round()) as u32).clamp(512, 8192);
         s.shadow_distance = self.shadow_distance * shadows;
+        s.shadow_caster_min_texels = self.shadow_caster_min_texels / shadows;
         s.far_shadow_distance = self.far_shadow_distance * shadows;
 
         // Farther detail at a higher view distance: a pixel threshold shrinks as it grows.
@@ -698,10 +711,23 @@ impl RenderSettings {
     /// tonemapping, as the picture is taken before them. HDRP does the same for reflection
     /// cameras (`FrameSettings.Sanitize` turns post-processing off), and Unreal gives planar
     /// reflections their own screen percentage and LOD distance.
+    ///
+    /// Levels of detail follow `reflection_lod_distance_factor`, as Unreal's "LOD Distance
+    /// Factor" ("values greater than 1 ... use lower LODs than the main view to speed up the
+    /// scene capture pass").
     pub fn for_reflection(&self) -> Self {
+        let far = if self.reflection_lod_distance_factor.is_finite() {
+            self.reflection_lod_distance_factor.clamp(0.1, 10.0)
+        } else {
+            1.0
+        };
         Self {
             contact_shadow_length: 0.0,
             shadow_filter_taps: (self.shadow_filter_taps / 2).max(4),
+            mesh_lod_pixels: self.mesh_lod_pixels * far,
+            cluster_error_px: self.cluster_error_px * far,
+            min_object_pixels: self.min_object_pixels * far,
+            impostor_pixels: self.impostor_pixels * far,
             ..self.clone()
         }
     }
@@ -1027,6 +1053,24 @@ fn ray_sphere(origin: DVec3, dir: DVec3, center: DVec3, radius: f64) -> Option<(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reflections_take_coarser_detail_and_cheaper_shadows() {
+        let base = RenderSettings::default();
+        let r = base.for_reflection();
+        assert_eq!(r.contact_shadow_length, 0.0);
+        assert_eq!(r.shadow_filter_taps, base.shadow_filter_taps / 2);
+        let f = base.reflection_lod_distance_factor;
+        assert!(f > 1.0);
+        assert_eq!(r.mesh_lod_pixels, base.mesh_lod_pixels * f);
+        assert_eq!(r.min_object_pixels, base.min_object_pixels * f);
+        let same = RenderSettings {
+            reflection_lod_distance_factor: 1.0,
+            ..base.clone()
+        }
+        .for_reflection();
+        assert_eq!(same.cluster_error_px, base.cluster_error_px);
+    }
 
     /// Sunlight through `air` reaching a point on its planet's surface (the camera), with the sun
     /// `elevation_deg` above the horizon.
