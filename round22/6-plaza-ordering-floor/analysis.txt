@@ -1,0 +1,364 @@
+==== frame profiles
+-- 19:19:44.064 1 frames in 6.2 s: 6236.7 ms per frame (0.2 fps), worst 6236.7 ms
+   systems busy 6200.7 ms per frame: 0.99 of 32 cores on average
+   schedules: First 2034.20 x1.0, Startup 1405.04 x1.0, Render 1397.91 x1.0, PostUpdate 1235.01 x1.0, Update 54.09 x1.0, Extract 15.50 x1.0, PreUpdate 1.65 x1.0
+   ordering floor (longest before/after chain, ms per frame, of the schedule's ms)
+   First            2033.84 of 2034.20 (1 systems; heaviest: engine_movement::build_library 2033.84)
+   Render           1397.79 of 1397.91 (2 systems; heaviest: engine_render::render_system 1397.79)
+     chain: engine_render::render_system 1397.79
+   Startup          1375.01 of 1405.04 (1 systems; heaviest: showcase::start 1375.01)
+   PostUpdate       1238.39 of 1235.01 (21 systems; heaviest: engine_terrain::update_colliders 1198.81, engine_softbody::follow_world_shift 17.62, engine_softbody::follow_world_shift 17.62, engine_core::propagate_transforms_system 3.46, engine_terrain::update_landmarks 0.30, engine_space::update_space 0.16, engine_space::reanchor 0.15, engine_terrain::sync_terrains 0.12)
+     chain: engine_space::reanchor 0.15 -> engine_softbody::follow_world_shift 17.62 -> engine_softbody::follow_world_shift 17.62 -> engine_space::update_space 0.16 -> engine_core::propagate_transforms_system 3.46 -> engine_terrain::sync_terrains 0.12 -> engine_terrain::register_lamps 0.06 -> engine_terrain::update_colliders 1198.81 -> engine_terrain::update_landmarks 0.30
+   Update            14.11 of  54.09 (30 systems; heaviest: engine_foliage::sync_chamber_colliders 13.97)
+     chain: engine_foliage::sync_chamber_colliders 13.97
+   Extract            1.16 of  15.50 (1 systems; heaviest: engine_render::resolve_mesh_renderers 1.16)
+   PreUpdate          0.43 of   1.65 (1 systems; heaviest: engine_destruction::ensure_assets 0.43)
+-- 19:19:50.082 10 frames in 6.0 s: 601.5 ms per frame (1.7 fps), worst 3319.3 ms
+   systems busy 1059.1 ms per frame: 1.76 of 32 cores on average
+   schedules: Last 471.92 x1.0, FixedUpdate 70.29 x2.7, Render 24.98 x1.0, PostUpdate 14.95 x1.0, Update 8.23 x1.0, Extract 6.21 x1.0, First 0.55 x1.0, PreUpdate 0.29 x1.0, FixedPreUpdate 0.14 x2.7, FixedPostUpdate 0.08 x2.7
+   physics_simulate (ms/frame, max ms, runs/frame): 8.16 / 19.30 / 2.7
+   physics_simulate ran alone: 4.15
+   ordering floor (longest before/after chain, ms per frame, of the schedule's ms)
+   Last             471.44 of 471.92 (1 systems; heaviest: engine::stream_system 471.44)
+   FixedUpdate       56.78 of  70.29 (57 systems; heaviest: engine_water::ripple_system 33.68, engine_npc::rebuild_world_model 8.43, engine_physics::physics_sync 4.91, engine_weather::ground_system 3.93, engine_physics::replay_stations 2.90, engine_softbody::step_bodies 2.05, engine_softbody::gather_colliders 0.29, engine_weather::weather_system 0.10)
+     chain: engine_npc::rebuild_world_model 8.43 -> engine_physics::replay_stations 2.90 -> engine_physics::physics_sync 4.91 -> engine_water::ripple_system 33.68 -> engine_softbody::gather_colliders 0.29 -> engine_softbody::step_bodies 2.05 -> engine_softbody::write_posed_guides 0.10 -> engine_weather::weather_system 0.10 -> engine_weather::cloud_map_system 0.08 -> engine_weather::ground_system 3.93
+   Render            24.93 of  24.98 (2 systems; heaviest: engine_render::render_system 24.93)
+     chain: engine_render::render_system 24.93
+   PostUpdate        11.28 of  14.95 (20 systems; heaviest: engine_terrain::update_colliders 5.85, engine_softbody::build_bodies 3.23, engine_softbody::prepare_bodies 0.70, engine_softbody::skin_bodies 0.60, engine_terrain::update_landmarks 0.35, engine_core::propagate_transforms_system 0.34, engine_space::fly 0.11, engine_space::update_space 0.08)
+     chain: engine_softbody::prepare_bodies 0.70 -> engine_softbody::skin_bodies 0.60 -> engine_space::update_space 0.08 -> engine_space::fly 0.11 -> engine_core::propagate_transforms_system 0.34 -> engine_terrain::update_colliders 5.85 -> engine_softbody::build_bodies 3.23 -> engine_terrain::update_landmarks 0.35
+   Extract            4.50 of   6.21 (1 systems; heaviest: engine_render::resolve_mesh_renderers 4.50)
+   Update             2.00 of   8.23 (59 systems; heaviest: engine_foliage::sync_scenery_trees 1.11, engine_foliage::stream_far_woods 0.46, showcase::fly 0.13, engine_foliage::sync_shadow_standins 0.10)
+     chain: showcase::fly 0.13 -> engine_foliage::sync_scenery_trees 1.11 -> engine_foliage::stream_far_woods 0.46 -> engine_foliage::sync_shadow_standins 0.10
+   First              0.33 of   0.55 (4 systems; heaviest: engine_ai_bridge::bridge_frame_start_system 0.17, engine_core::frame_diagnostics_system 0.15)
+     chain: engine_ai_bridge::bridge_frame_start_system 0.17 -> engine_core::frame_diagnostics_system 0.15
+   PreUpdate          0.05 of   0.29 (4 systems; heaviest: )
+     chain: 
+-- 19:19:55.275 9 frames in 5.2 s: 576.8 ms per frame (1.7 fps), worst 1268.7 ms
+   systems busy 812.5 ms per frame: 1.41 of 32 cores on average
+   schedules: FixedUpdate 230.63 x1.2, Last 226.91 x1.0, Update 48.83 x1.0, Render 36.18 x1.0, PostUpdate 19.43 x1.0, First 6.01 x1.0, Extract 3.43 x1.0, PreUpdate 3.29 x1.0, FixedPreUpdate 2.12 x1.2, FixedPostUpdate 0.03 x1.2
+   physics_simulate (ms/frame, max ms, runs/frame): 33.91 / 201.81 / 1.2
+   physics_simulate ran alone: 20.95
+   ordering floor (longest before/after chain, ms per frame, of the schedule's ms)
+   Last             226.31 of 226.91 (1 systems; heaviest: engine::stream_system 226.31)
+   FixedUpdate      216.69 of 230.63 (51 systems; heaviest: engine_npc::build_stand_ins 124.84, engine_physics::physics_simulate 33.91, engine_physics::physics_sync 32.06, engine_foliage::grow_plants 15.38, engine_physics::replay_stations 3.32, engine_npc::rebuild_world_model 3.20, engine_smoke::sync_volumes 2.05, engine_destruction::structure_system 0.50)
+     chain: engine_npc::rebuild_world_model 3.20 -> engine_npc::warm_nav 0.18 -> engine_npc::perceive 0.25 -> engine_physics::replay_stations 3.32 -> engine_softbody::snapshot_frames 0.37 -> engine_physics::physics_sync 32.06 -> engine_physics::physics_simulate 33.91 -> engine_physics::physics_write_back 0.28 -> engine_npc::build_stand_ins 124.84 -> engine_destruction::structure_system 0.50 -> engine_npc::build_posts 0.11 -> engine_smoke::sync_volumes 2.05 -> engine_foliage::grow_plants 15.38
+   Render            36.04 of  36.18 (2 systems; heaviest: engine_render::render_system 36.03)
+     chain: engine_render::render_system 36.03
+   Update            21.96 of  48.83 (64 systems; heaviest: engine_foliage::grow_plants 15.38, engine_foliage::sync_plant_visuals 2.57, engine_destruction::rebuild_walls_system 1.80, engine_destruction::build_prop_models_system 0.68, engine_destruction::build_system 0.38, engine_foliage::stream_far_woods 0.24, engine_anim::build_animators 0.19, engine_anim::evaluate_animators 0.14)
+     chain: engine_foliage::build_scenery 0.09 -> engine_foliage::sync_plant_visuals 2.57 -> engine_foliage::grow_plants 15.38 -> engine_destruction::rebuild_walls_system 1.80 -> engine_destruction::rebuild_voxels_system 0.05 -> engine_foliage::stream_far_woods 0.24 -> engine_destruction::build_system 0.38 -> engine_foliage::sync_shadow_standins 0.06 -> engine_destruction::build_prop_models_system 0.68 -> engine_anim::build_animators 0.19 -> engine_anim::evaluate_animators 0.14
+   PostUpdate        14.28 of  19.43 (37 systems; heaviest: engine_softbody::follow_world_shift 3.79, engine_softbody::follow_world_shift 3.79, engine_anim::gait_system 2.65, engine_core::propagate_transforms_system 1.26, engine_softbody::cast_statues 0.52, engine_anim::take_hits 0.50, engine_anim::foot_ik_system 0.45, engine_space::fly 0.32)
+     chain: engine_space::reanchor 0.09 -> engine_softbody::follow_world_shift 3.79 -> engine_softbody::follow_world_shift 3.79 -> engine_softbody::cast_statues 0.52 -> engine_space::update_space 0.10 -> engine_space::fly 0.32 -> engine_core::propagate_transforms_system 1.26 -> engine_anim::gait_system 2.65 -> engine_anim::spring_chain_system 0.15 -> engine_anim::take_hits 0.50 -> engine_softbody::build_bodies 0.10 -> engine_anim::foot_ik_system 0.45 -> engine_anim::ragdoll_system 0.08 -> engine_anim::muscle_system 0.07 -> engine_anim::face_system 0.05 -> engine_anim::update_skin_poses 0.13
+   Extract            2.60 of   3.43 (1 systems; heaviest: engine_render::resolve_mesh_renderers 2.60)
+   PreUpdate          0.73 of   3.29 (4 systems; heaviest: engine_foliage::init_regions 0.71)
+     chain: engine_foliage::init_regions 0.71
+   First              0.41 of   6.01 (4 systems; heaviest: engine_core::frame_diagnostics_system 0.29, engine_ai_bridge::bridge_frame_start_system 0.11)
+     chain: engine_ai_bridge::bridge_frame_start_system 0.11 -> engine_core::frame_diagnostics_system 0.29
+   FixedPreUpdate     0.08 of   2.12 (1 systems; heaviest: engine_core::snapshot_interpolation_system 0.08)
+-- 19:20:00.282 20 frames in 5.0 s: 250.3 ms per frame (4.0 fps), worst 1515.4 ms
+   systems busy 332.5 ms per frame: 1.33 of 32 cores on average
+   schedules: Update 117.23 x0.9, FixedUpdate 49.06 x1.6, DefaultSchedule 43.54 x50.0, Last 37.73 x0.9, Render 19.12 x0.9, PostUpdate 9.97 x0.9, Extract 1.88 x0.9, First 0.49 x0.9, PreUpdate 0.19 x0.9, FixedPreUpdate 0.19 x1.6, FixedPostUpdate 0.06 x1.6
+   physics_simulate (ms/frame, max ms, runs/frame): 7.68 / 20.79 / 1.6
+   ordering floor (longest before/after chain, ms per frame, of the schedule's ms)
+   FixedUpdate       63.19 of  49.06 (58 systems; heaviest: engine_fire::step_field 35.44, engine_physics::physics_sync 8.43, engine_fire::step_objects 5.51, engine_npc::rebuild_world_model 4.70, engine_softbody::step_bodies 3.23, engine_water::boat_air_system 1.29, engine_fire::handle_ignition 1.28, engine_npc::warm_nav 1.28)
+     chain: engine_npc::rebuild_world_model 4.70 -> engine_npc::warm_nav 1.28 -> engine_water::boat_air_system 1.29 -> engine_vehicles::prepare_frames 0.05 -> engine_vehicles::wheels_system 0.22 -> engine_vehicles::engine_events_system 0.07 -> engine_physics::physics_sync 8.43 -> engine_fire::step_field 35.44 -> engine_softbody::gather_colliders 0.87 -> engine_softbody::step_bodies 3.23 -> engine_fire::index_patches 0.09 -> engine_fire::handle_ignition 1.28 -> engine_fire::wake_fire 0.08 -> engine_fire::step_objects 5.51 -> engine_fire::emit_outputs 0.14 -> engine_fire::step_embers 0.05
+   Update            58.49 of 117.23 (2 systems; heaviest: engine_smoke::run_demos 58.49)
+     chain: engine_smoke::run_demos 58.49
+   Last              37.04 of  37.73 (1 systems; heaviest: engine::stream_system 37.04)
+   Render            19.05 of  19.12 (2 systems; heaviest: engine_render::render_system 19.05)
+     chain: engine_render::render_system 19.05
+   PostUpdate         8.04 of   9.97 (33 systems; heaviest: engine_terrain::wear_from_contacts 2.74, engine_terrain::deform_from_contacts 2.43, engine_vfx::tick_effects 1.19, engine_core::propagate_transforms_system 0.53, engine_anim::foot_ik_system 0.36, engine_space::fly 0.29, engine_anim::emit_events 0.07, engine_anim::ragdoll_system 0.07)
+     chain: engine_terrain::deform_from_contacts 2.43 -> engine_terrain::wear_from_contacts 2.74 -> engine_space::update_space 0.06 -> engine_space::fly 0.29 -> engine_core::propagate_transforms_system 0.53 -> engine_vfx::tick_effects 1.19 -> engine_anim::foot_ik_system 0.36 -> engine_anim::ragdoll_system 0.07 -> engine_anim::muscle_system 0.06 -> engine_anim::emit_events 0.07
+   Extract            1.67 of   1.88 (1 systems; heaviest: engine_render::resolve_mesh_renderers 1.67)
+   First              0.31 of   0.49 (4 systems; heaviest: engine_core::frame_diagnostics_system 0.22, engine_ai_bridge::bridge_frame_start_system 0.08)
+     chain: engine_ai_bridge::bridge_frame_start_system 0.08 -> engine_core::frame_diagnostics_system 0.22
+   FixedPreUpdate     0.13 of   0.19 (1 systems; heaviest: engine_core::snapshot_interpolation_system 0.13)
+   PreUpdate          0.05 of   0.19 (4 systems; heaviest: )
+     chain: 
+-- 19:20:05.298 90 frames in 5.0 s: 55.7 ms per frame (17.9 fps), worst 147.5 ms
+   systems busy 55.8 ms per frame: 1.00 of 32 cores on average
+   schedules: FixedUpdate 31.17 x2.4, Render 9.43 x0.8, Update 4.03 x0.8, PostUpdate 3.09 x0.8, Last 0.36 x0.8, Extract 0.32 x0.8, First 0.26 x0.8, FixedPreUpdate 0.21 x2.4, PreUpdate 0.11 x0.8, FixedPostUpdate 0.05 x2.4
+   physics_simulate (ms/frame, max ms, runs/frame): 3.09 / 4.24 / 2.4
+   ordering floor (longest before/after chain, ms per frame, of the schedule's ms)
+   FixedUpdate       25.78 of  31.17 (56 systems; heaviest: engine_softbody::step_beside_physics 16.58, engine_npc::think_and_act 4.06, engine_softbody::step_bodies 1.31, engine_water::boat_air_system 1.03, engine_weather::ground_system 0.61, engine_softbody::gather_colliders 0.56, engine_physics::physics_sync 0.51, engine_vehicles::wheels_system 0.22)
+     chain: engine_npc::rebuild_world_model 0.10 -> engine_npc::warm_nav 0.11 -> engine_npc::perceive 0.06 -> engine_npc::think_and_act 4.06 -> engine_water::boat_air_system 1.03 -> engine_vehicles::wheels_system 0.22 -> engine_vehicles::engine_events_system 0.08 -> engine_physics::physics_sync 0.51 -> engine_softbody::step_beside_physics 16.58 -> engine_softbody::gather_colliders 0.56 -> engine_softbody::step_bodies 1.31 -> engine_weather::cloud_map_system 0.12 -> engine_weather::ground_system 0.61
+   Render             9.39 of   9.43 (2 systems; heaviest: engine_render::render_system 9.39)
+     chain: engine_render::render_system 9.39
+   PostUpdate         2.08 of   3.09 (33 systems; heaviest: engine_vfx::tick_effects 0.74, engine_core::propagate_transforms_system 0.34, engine_anim::foot_ik_system 0.28, engine_terrain::deform_from_contacts 0.19, engine_terrain::wear_from_contacts 0.19, engine_anim::ragdoll_system 0.05)
+     chain: engine_terrain::deform_from_contacts 0.19 -> engine_terrain::wear_from_contacts 0.19 -> engine_core::propagate_transforms_system 0.34 -> engine_vfx::tick_effects 0.74 -> engine_anim::foot_ik_system 0.28 -> engine_anim::ragdoll_system 0.05
+   Update             1.35 of   4.03 (63 systems; heaviest: engine_foliage::sync_plant_visuals 0.73, engine_foliage::stream_far_woods 0.15, engine_foliage::sync_scenery_trees 0.13, engine_anim::evaluate_animators 0.08)
+     chain: engine_foliage::sync_plant_visuals 0.73 -> engine_foliage::sync_scenery_trees 0.13 -> engine_foliage::stream_far_woods 0.15 -> engine_anim::evaluate_animators 0.08
+   Extract            0.27 of   0.32 (1 systems; heaviest: engine_render::resolve_mesh_renderers 0.27)
+   Last               0.25 of   0.36 (1 systems; heaviest: engine::stream_system 0.25)
+   First              0.18 of   0.26 (4 systems; heaviest: engine_core::frame_diagnostics_system 0.14)
+     chain: engine_core::frame_diagnostics_system 0.14
+   FixedPreUpdate     0.16 of   0.21 (1 systems; heaviest: engine_core::snapshot_interpolation_system 0.16)
+-- 19:20:10.318 124 frames in 5.0 s: 40.5 ms per frame (24.7 fps), worst 77.6 ms
+   systems busy 44.3 ms per frame: 1.10 of 32 cores on average
+   schedules: FixedUpdate 20.86 x2.4, Render 11.14 x0.9, Update 3.64 x0.9, PostUpdate 3.22 x0.9, Last 0.33 x0.9, First 0.28 x0.9, FixedPreUpdate 0.20 x2.4, Extract 0.19 x0.9, PreUpdate 0.12 x0.9, FixedPostUpdate 0.05 x2.4
+   physics_simulate (ms/frame, max ms, runs/frame): 2.65 / 3.96 / 2.4
+   physics_simulate ran alone: 0.71
+   ordering floor (longest before/after chain, ms per frame, of the schedule's ms)
+   FixedUpdate       13.50 of  20.86 (56 systems; heaviest: engine_softbody::step_beside_physics 7.38, engine_softbody::step_bodies 1.38, engine_water::boat_air_system 1.02, engine_npc::think_and_act 0.93, engine_weather::ground_system 0.63, engine_softbody::gather_colliders 0.57, engine_physics::physics_sync 0.48, engine_vehicles::wheels_system 0.23)
+     chain: engine_npc::rebuild_world_model 0.12 -> engine_npc::think_and_act 0.93 -> engine_water::boat_air_system 1.02 -> engine_vehicles::wheels_system 0.23 -> engine_vehicles::engine_events_system 0.09 -> engine_physics::physics_sync 0.48 -> engine_softbody::step_beside_physics 7.38 -> engine_softbody::gather_colliders 0.57 -> engine_softbody::step_bodies 1.38 -> engine_weather::cloud_map_system 0.16 -> engine_weather::ground_system 0.63
+   Render            11.10 of  11.14 (2 systems; heaviest: engine_render::render_system 11.09)
+     chain: engine_render::render_system 11.09
+   PostUpdate         2.13 of   3.22 (33 systems; heaviest: engine_vfx::tick_effects 0.77, engine_core::propagate_transforms_system 0.39, engine_anim::foot_ik_system 0.31, engine_terrain::deform_from_contacts 0.15, engine_terrain::wear_from_contacts 0.15, engine_anim::ragdoll_system 0.05)
+     chain: engine_terrain::deform_from_contacts 0.15 -> engine_terrain::wear_from_contacts 0.15 -> engine_core::propagate_transforms_system 0.39 -> engine_vfx::tick_effects 0.77 -> engine_anim::foot_ik_system 0.31 -> engine_anim::ragdoll_system 0.05
+   Update             1.46 of   3.64 (32 systems; heaviest: engine_script::run_scripts 1.21, engine_anim::evaluate_animators 0.09)
+     chain: engine_script::run_scripts 1.21 -> engine_anim::evaluate_animators 0.09
+   Last               0.22 of   0.33 (1 systems; heaviest: engine::stream_system 0.22)
+   First              0.20 of   0.28 (4 systems; heaviest: engine_core::frame_diagnostics_system 0.16)
+     chain: engine_core::frame_diagnostics_system 0.16
+   FixedPreUpdate     0.16 of   0.20 (1 systems; heaviest: engine_core::snapshot_interpolation_system 0.16)
+   Extract            0.15 of   0.19 (1 systems; heaviest: engine_render::resolve_mesh_renderers 0.15)
+-- 19:20:15.333 159 frames in 5.0 s: 31.5 ms per frame (31.7 fps), worst 66.2 ms
+   systems busy 34.1 ms per frame: 1.08 of 32 cores on average
+   schedules: FixedUpdate 12.85 x1.9, Render 10.21 x0.9, Update 3.85 x0.9, PostUpdate 3.09 x0.9, Last 0.37 x0.9, First 0.28 x0.9, Extract 0.18 x0.9, FixedPreUpdate 0.16 x1.9, PreUpdate 0.12 x0.9, FixedPostUpdate 0.04 x1.9
+   physics_simulate (ms/frame, max ms, runs/frame): 2.13 / 1.94 / 1.9
+   physics_simulate ran alone: 0.85
+   ordering floor (longest before/after chain, ms per frame, of the schedule's ms)
+   Render            10.17 of  10.21 (2 systems; heaviest: engine_render::render_system 10.17)
+     chain: engine_render::render_system 10.17
+   FixedUpdate        7.15 of  12.85 (57 systems; heaviest: engine_physics::physics_simulate 2.13, engine_softbody::step_bodies 1.08, engine_water::boat_air_system 0.82, engine_npc::think_and_act 0.67, engine_softbody::gather_colliders 0.48, engine_weather::ground_system 0.46, engine_physics::physics_sync 0.42, engine_vehicles::wheels_system 0.19)
+     chain: engine_npc::rebuild_world_model 0.08 -> engine_npc::think_and_act 0.67 -> engine_water::boat_air_system 0.82 -> engine_vehicles::wheels_system 0.19 -> engine_vehicles::engine_events_system 0.07 -> engine_physics::physics_sync 0.42 -> engine_physics::physics_simulate 2.13 -> engine_physics::physics_write_back 0.19 -> engine_softbody::gather_colliders 0.48 -> engine_softbody::step_bodies 1.08 -> engine_weather::cloud_map_system 0.13 -> engine_weather::ground_system 0.46
+   PostUpdate         2.00 of   3.09 (33 systems; heaviest: engine_vfx::tick_effects 0.69, engine_core::propagate_transforms_system 0.38, engine_anim::foot_ik_system 0.32, engine_terrain::deform_from_contacts 0.12, engine_terrain::wear_from_contacts 0.12, engine_anim::ragdoll_system 0.06, engine_space::update_space 0.05)
+     chain: engine_terrain::deform_from_contacts 0.12 -> engine_terrain::wear_from_contacts 0.12 -> engine_space::update_space 0.05 -> engine_core::propagate_transforms_system 0.38 -> engine_vfx::tick_effects 0.69 -> engine_anim::foot_ik_system 0.32 -> engine_anim::ragdoll_system 0.06
+   Update             1.54 of   3.85 (32 systems; heaviest: engine_script::run_scripts 1.28, engine_anim::evaluate_animators 0.10)
+     chain: engine_script::run_scripts 1.28 -> engine_anim::evaluate_animators 0.10
+   Last               0.27 of   0.37 (1 systems; heaviest: engine::stream_system 0.27)
+   First              0.20 of   0.28 (4 systems; heaviest: engine_core::frame_diagnostics_system 0.17)
+     chain: engine_core::frame_diagnostics_system 0.17
+   Extract            0.15 of   0.18 (1 systems; heaviest: engine_render::resolve_mesh_renderers 0.15)
+   FixedPreUpdate     0.13 of   0.16 (1 systems; heaviest: engine_core::snapshot_interpolation_system 0.13)
+-- 19:20:20.371 138 frames in 5.0 s: 36.5 ms per frame (27.4 fps), worst 66.2 ms
+   systems busy 40.7 ms per frame: 1.11 of 32 cores on average
+   schedules: FixedUpdate 17.14 x2.2, Render 10.28 x1.1, Update 4.44 x1.1, PostUpdate 3.71 x1.1, Last 0.37 x1.1, First 0.34 x1.1, Extract 0.22 x1.1, FixedPreUpdate 0.20 x2.2, PreUpdate 0.15 x1.1, FixedPostUpdate 0.05 x2.2
+   physics_simulate (ms/frame, max ms, runs/frame): 2.50 / 2.28 / 2.2
+   physics_simulate ran alone: 0.83
+   ordering floor (longest before/after chain, ms per frame, of the schedule's ms)
+   Render            10.23 of  10.28 (2 systems; heaviest: engine_render::render_system 10.22)
+     chain: engine_render::render_system 10.22
+   FixedUpdate        8.74 of  17.14 (61 systems; heaviest: engine_softbody::step_beside_physics 3.22, engine_softbody::step_bodies 1.26, engine_water::boat_air_system 0.95, engine_softbody::gather_colliders 0.58, engine_npc::think_and_act 0.49, engine_physics::physics_sync 0.48, engine_smoke::publish 0.47, engine_smoke::disturb 0.25)
+     chain: engine_npc::rebuild_world_model 0.10 -> engine_npc::think_and_act 0.49 -> engine_water::boat_air_system 0.95 -> engine_vehicles::wheels_system 0.23 -> engine_vehicles::engine_events_system 0.09 -> engine_physics::physics_sync 0.48 -> engine_softbody::step_beside_physics 3.22 -> engine_softbody::gather_colliders 0.58 -> engine_softbody::step_bodies 1.26 -> engine_softbody::write_posed_guides 0.07 -> engine_smoke::release 0.06 -> engine_smoke::disturb 0.25 -> engine_smoke::publish 0.47
+   PostUpdate         2.36 of   3.71 (33 systems; heaviest: engine_vfx::tick_effects 0.81, engine_core::propagate_transforms_system 0.47, engine_anim::foot_ik_system 0.36, engine_terrain::deform_from_contacts 0.14, engine_terrain::wear_from_contacts 0.13, engine_anim::ragdoll_system 0.07, engine_space::update_space 0.06, engine_anim::muscle_system 0.05)
+     chain: engine_terrain::deform_from_contacts 0.14 -> engine_terrain::wear_from_contacts 0.13 -> engine_space::update_space 0.06 -> engine_core::propagate_transforms_system 0.47 -> engine_vfx::tick_effects 0.81 -> engine_anim::foot_ik_system 0.36 -> engine_anim::ragdoll_system 0.07 -> engine_anim::muscle_system 0.05
+   Update             1.71 of   4.44 (32 systems; heaviest: engine_script::run_scripts 1.41, engine_anim::evaluate_animators 0.11)
+     chain: engine_script::run_scripts 1.41 -> engine_anim::evaluate_animators 0.11
+   First              0.25 of   0.34 (4 systems; heaviest: engine_core::frame_diagnostics_system 0.21)
+     chain: engine_core::frame_diagnostics_system 0.21
+   Last               0.25 of   0.37 (1 systems; heaviest: engine::stream_system 0.25)
+   Extract            0.17 of   0.22 (1 systems; heaviest: engine_render::resolve_mesh_renderers 0.17)
+   FixedPreUpdate     0.15 of   0.20 (1 systems; heaviest: engine_core::snapshot_interpolation_system 0.15)
+-- 19:20:25.393 164 frames in 5.0 s: 30.6 ms per frame (32.7 fps), worst 47.8 ms
+   systems busy 33.8 ms per frame: 1.10 of 32 cores on average
+   schedules: FixedUpdate 14.36 x1.8, Render 8.37 x0.9, Update 3.61 x0.9, PostUpdate 3.00 x0.9, Last 0.28 x0.9, First 0.28 x0.9, Extract 0.18 x0.9, FixedPreUpdate 0.16 x1.8, PreUpdate 0.12 x0.9, FixedPostUpdate 0.04 x1.8
+   physics_simulate (ms/frame, max ms, runs/frame): 2.06 / 2.14 / 1.8
+   physics_simulate ran alone: 0.73
+   ordering floor (longest before/after chain, ms per frame, of the schedule's ms)
+   Render             8.33 of   8.37 (2 systems; heaviest: engine_render::render_system 8.33)
+     chain: engine_render::render_system 8.33
+   FixedUpdate        7.90 of  14.36 (65 systems; heaviest: engine_physics::physics_simulate 2.06, engine_water::flow_bed_system 1.40, engine_softbody::step_bodies 1.03, engine_water::boat_air_system 0.77, engine_softbody::gather_colliders 0.44, engine_physics::physics_sync 0.39, engine_npc::think_and_act 0.38, engine_softbody::write_posed_guides 0.20)
+     chain: engine_npc::rebuild_world_model 0.10 -> engine_npc::think_and_act 0.38 -> engine_water::boat_air_system 0.77 -> engine_vehicles::wheels_system 0.18 -> engine_vehicles::engine_events_system 0.07 -> engine_physics::physics_sync 0.39 -> engine_physics::physics_simulate 2.06 -> engine_physics::physics_write_back 0.18 -> engine_softbody::gather_colliders 0.44 -> engine_softbody::step_bodies 1.03 -> engine_softbody::write_posed_guides 0.20 -> engine_water::sync_bodies_system 0.10 -> engine_water::flow_bed_system 1.40 -> engine_water::disturbance_system 0.09 -> engine_water::shore_wetness_system 0.06
+   PostUpdate         1.94 of   3.00 (33 systems; heaviest: engine_vfx::tick_effects 0.65, engine_core::propagate_transforms_system 0.38, engine_anim::foot_ik_system 0.29, engine_terrain::deform_from_contacts 0.12, engine_terrain::wear_from_contacts 0.12, engine_anim::ragdoll_system 0.06, engine_space::update_space 0.05)
+     chain: engine_terrain::deform_from_contacts 0.12 -> engine_terrain::wear_from_contacts 0.12 -> engine_space::update_space 0.05 -> engine_core::propagate_transforms_system 0.38 -> engine_vfx::tick_effects 0.65 -> engine_anim::foot_ik_system 0.29 -> engine_anim::ragdoll_system 0.06
+   Update             1.43 of   3.61 (32 systems; heaviest: engine_script::run_scripts 1.18, engine_anim::evaluate_animators 0.09)
+     chain: engine_script::run_scripts 1.18 -> engine_anim::evaluate_animators 0.09
+   First              0.20 of   0.28 (4 systems; heaviest: engine_core::frame_diagnostics_system 0.17)
+     chain: engine_core::frame_diagnostics_system 0.17
+   Last               0.19 of   0.28 (1 systems; heaviest: engine::stream_system 0.19)
+   Extract            0.14 of   0.18 (1 systems; heaviest: engine_render::resolve_mesh_renderers 0.14)
+   FixedPreUpdate     0.12 of   0.16 (1 systems; heaviest: engine_core::snapshot_interpolation_system 0.12)
+-- 19:20:30.405 162 frames in 5.0 s: 30.9 ms per frame (32.3 fps), worst 61.0 ms
+   systems busy 33.6 ms per frame: 1.09 of 32 cores on average
+   schedules: FixedUpdate 13.95 x1.9, Render 8.89 x1.0, Update 3.66 x1.0, PostUpdate 3.17 x1.0, Last 0.31 x1.0, First 0.29 x1.0, Extract 0.19 x1.0, FixedPreUpdate 0.16 x1.9, PreUpdate 0.13 x1.0, FixedPostUpdate 0.04 x1.9
+   physics_simulate (ms/frame, max ms, runs/frame): 2.13 / 2.01 / 1.9
+   physics_simulate ran alone: 0.90
+   ordering floor (longest before/after chain, ms per frame, of the schedule's ms)
+   FixedUpdate        8.98 of  13.95 (65 systems; heaviest: engine_water::flow_bed_system 2.33, engine_physics::physics_simulate 2.13, engine_softbody::step_bodies 1.03, engine_water::boat_air_system 0.79, engine_softbody::gather_colliders 0.45, engine_npc::think_and_act 0.43, engine_physics::physics_sync 0.40, engine_softbody::write_posed_guides 0.21)
+     chain: engine_npc::rebuild_world_model 0.10 -> engine_npc::think_and_act 0.43 -> engine_water::boat_air_system 0.79 -> engine_vehicles::wheels_system 0.19 -> engine_vehicles::engine_events_system 0.07 -> engine_physics::physics_sync 0.40 -> engine_physics::physics_simulate 2.13 -> engine_physics::physics_write_back 0.17 -> engine_softbody::gather_colliders 0.45 -> engine_softbody::step_bodies 1.03 -> engine_softbody::write_posed_guides 0.21 -> engine_water::sync_bodies_system 0.10 -> engine_water::flow_bed_system 2.33 -> engine_water::disturbance_system 0.09 -> engine_water::shore_wetness_system 0.06
+   Render             8.84 of   8.89 (2 systems; heaviest: engine_render::render_system 8.84)
+     chain: engine_render::render_system 8.84
+   PostUpdate         1.99 of   3.17 (33 systems; heaviest: engine_vfx::tick_effects 0.64, engine_core::propagate_transforms_system 0.40, engine_anim::foot_ik_system 0.32, engine_terrain::deform_from_contacts 0.12, engine_terrain::wear_from_contacts 0.12, engine_space::update_space 0.07, engine_anim::ragdoll_system 0.07)
+     chain: engine_terrain::deform_from_contacts 0.12 -> engine_terrain::wear_from_contacts 0.12 -> engine_space::update_space 0.07 -> engine_core::propagate_transforms_system 0.40 -> engine_vfx::tick_effects 0.64 -> engine_anim::foot_ik_system 0.32 -> engine_anim::ragdoll_system 0.07
+   Update             1.40 of   3.66 (32 systems; heaviest: engine_script::run_scripts 1.15, engine_anim::evaluate_animators 0.09)
+     chain: engine_script::run_scripts 1.15 -> engine_anim::evaluate_animators 0.09
+   Last               0.21 of   0.31 (1 systems; heaviest: engine::stream_system 0.21)
+   First              0.21 of   0.29 (4 systems; heaviest: engine_core::frame_diagnostics_system 0.18)
+     chain: engine_core::frame_diagnostics_system 0.18
+   Extract            0.15 of   0.19 (1 systems; heaviest: engine_render::resolve_mesh_renderers 0.15)
+   FixedPreUpdate     0.13 of   0.16 (1 systems; heaviest: engine_core::snapshot_interpolation_system 0.13)
+-- 19:20:35.419 166 frames in 5.0 s: 30.2 ms per frame (33.1 fps), worst 50.1 ms
+   systems busy 33.1 ms per frame: 1.10 of 32 cores on average
+   schedules: FixedUpdate 13.62 x1.8, Render 8.76 x1.0, Update 3.66 x1.0, PostUpdate 3.06 x1.0, Last 0.31 x1.0, First 0.28 x1.0, Extract 0.19 x1.0, FixedPreUpdate 0.16 x1.8, PreUpdate 0.12 x1.0, FixedPostUpdate 0.04 x1.8
+   physics_simulate (ms/frame, max ms, runs/frame): 1.97 / 1.97 / 1.8
+   physics_simulate ran alone: 0.74
+   ordering floor (longest before/after chain, ms per frame, of the schedule's ms)
+   Render             8.72 of   8.76 (2 systems; heaviest: engine_render::render_system 8.71)
+     chain: engine_render::render_system 8.71
+   FixedUpdate        8.62 of  13.62 (65 systems; heaviest: engine_water::flow_bed_system 2.22, engine_physics::physics_simulate 1.97, engine_softbody::step_bodies 1.00, engine_water::boat_air_system 0.78, engine_npc::think_and_act 0.47, engine_softbody::gather_colliders 0.44, engine_physics::physics_sync 0.37, engine_softbody::write_posed_guides 0.21)
+     chain: engine_npc::rebuild_world_model 0.09 -> engine_npc::think_and_act 0.47 -> engine_water::boat_air_system 0.78 -> engine_vehicles::wheels_system 0.18 -> engine_vehicles::engine_events_system 0.07 -> engine_physics::physics_sync 0.37 -> engine_physics::physics_simulate 1.97 -> engine_physics::physics_write_back 0.17 -> engine_softbody::gather_colliders 0.44 -> engine_softbody::step_bodies 1.00 -> engine_softbody::write_posed_guides 0.21 -> engine_water::sync_bodies_system 0.10 -> engine_water::flow_bed_system 2.22 -> engine_water::disturbance_system 0.09 -> engine_water::shore_wetness_system 0.05
+   PostUpdate         1.90 of   3.06 (33 systems; heaviest: engine_vfx::tick_effects 0.56, engine_core::propagate_transforms_system 0.40, engine_anim::foot_ik_system 0.31, engine_terrain::deform_from_contacts 0.12, engine_terrain::wear_from_contacts 0.12, engine_space::update_space 0.06, engine_anim::ragdoll_system 0.05)
+     chain: engine_terrain::deform_from_contacts 0.12 -> engine_terrain::wear_from_contacts 0.12 -> engine_space::update_space 0.06 -> engine_core::propagate_transforms_system 0.40 -> engine_vfx::tick_effects 0.56 -> engine_anim::foot_ik_system 0.31 -> engine_anim::ragdoll_system 0.05
+   Update             1.41 of   3.66 (32 systems; heaviest: engine_script::run_scripts 1.16, engine_anim::evaluate_animators 0.09)
+     chain: engine_script::run_scripts 1.16 -> engine_anim::evaluate_animators 0.09
+   Last               0.21 of   0.31 (1 systems; heaviest: engine::stream_system 0.21)
+   First              0.20 of   0.28 (4 systems; heaviest: engine_core::frame_diagnostics_system 0.17)
+     chain: engine_core::frame_diagnostics_system 0.17
+   Extract            0.15 of   0.19 (1 systems; heaviest: engine_render::resolve_mesh_renderers 0.15)
+   FixedPreUpdate     0.12 of   0.16 (1 systems; heaviest: engine_core::snapshot_interpolation_system 0.12)
+-- 19:20:40.434 168 frames in 5.0 s: 29.8 ms per frame (33.5 fps), worst 44.1 ms
+   systems busy 32.5 ms per frame: 1.09 of 32 cores on average
+   schedules: FixedUpdate 12.71 x1.8, Render 9.26 x1.0, Update 3.62 x1.0, PostUpdate 3.11 x1.0, Last 0.32 x1.0, First 0.31 x1.0, Extract 0.19 x1.0, FixedPreUpdate 0.16 x1.8, PreUpdate 0.13 x1.0, FixedPostUpdate 0.03 x1.8
+   physics_simulate (ms/frame, max ms, runs/frame): 1.96 / 1.83 / 1.8
+   physics_simulate ran alone: 0.79
+   ordering floor (longest before/after chain, ms per frame, of the schedule's ms)
+   Render             9.22 of   9.26 (2 systems; heaviest: engine_render::render_system 9.22)
+     chain: engine_render::render_system 9.22
+   FixedUpdate        8.64 of  12.71 (65 systems; heaviest: engine_water::flow_bed_system 2.24, engine_physics::physics_simulate 1.96, engine_softbody::step_bodies 0.95, engine_water::boat_air_system 0.76, engine_npc::think_and_act 0.56, engine_softbody::gather_colliders 0.43, engine_physics::physics_sync 0.39, engine_softbody::write_posed_guides 0.20)
+     chain: engine_npc::rebuild_world_model 0.08 -> engine_npc::think_and_act 0.56 -> engine_water::boat_air_system 0.76 -> engine_vehicles::wheels_system 0.19 -> engine_vehicles::engine_events_system 0.07 -> engine_physics::physics_sync 0.39 -> engine_physics::physics_simulate 1.96 -> engine_physics::physics_write_back 0.16 -> engine_softbody::gather_colliders 0.43 -> engine_softbody::step_bodies 0.95 -> engine_softbody::write_posed_guides 0.20 -> engine_water::sync_bodies_system 0.10 -> engine_water::flow_bed_system 2.24 -> engine_water::disturbance_system 0.08 -> engine_water::shore_wetness_system 0.05
+   PostUpdate         1.93 of   3.11 (33 systems; heaviest: engine_vfx::tick_effects 0.57, engine_core::propagate_transforms_system 0.42, engine_anim::foot_ik_system 0.33, engine_terrain::deform_from_contacts 0.11, engine_terrain::wear_from_contacts 0.11, engine_space::update_space 0.07, engine_anim::ragdoll_system 0.06)
+     chain: engine_terrain::deform_from_contacts 0.11 -> engine_terrain::wear_from_contacts 0.11 -> engine_space::update_space 0.07 -> engine_core::propagate_transforms_system 0.42 -> engine_vfx::tick_effects 0.57 -> engine_anim::foot_ik_system 0.33 -> engine_anim::ragdoll_system 0.06
+   Update             1.33 of   3.62 (32 systems; heaviest: engine_script::run_scripts 1.08, engine_anim::evaluate_animators 0.10)
+     chain: engine_script::run_scripts 1.08 -> engine_anim::evaluate_animators 0.10
+   First              0.22 of   0.31 (4 systems; heaviest: engine_core::frame_diagnostics_system 0.19)
+     chain: engine_core::frame_diagnostics_system 0.19
+   Last               0.22 of   0.32 (1 systems; heaviest: engine::stream_system 0.22)
+   Extract            0.15 of   0.19 (1 systems; heaviest: engine_render::resolve_mesh_renderers 0.15)
+   FixedPreUpdate     0.12 of   0.16 (1 systems; heaviest: engine_core::snapshot_interpolation_system 0.12)
+-- 19:20:45.472 161 frames in 5.0 s: 31.3 ms per frame (32.0 fps), worst 85.6 ms
+   systems busy 34.1 ms per frame: 1.09 of 32 cores on average
+   schedules: FixedUpdate 14.20 x1.9, Render 9.13 x1.0, Update 3.61 x1.0, PostUpdate 3.02 x1.0, Last 0.31 x1.0, First 0.28 x1.0, Extract 0.19 x1.0, FixedPreUpdate 0.16 x1.9, PreUpdate 0.12 x1.0, FixedPostUpdate 0.04 x1.9
+   physics_simulate (ms/frame, max ms, runs/frame): 2.01 / 2.12 / 1.9
+   physics_simulate ran alone: 0.76
+   ordering floor (longest before/after chain, ms per frame, of the schedule's ms)
+   FixedUpdate        9.30 of  14.20 (65 systems; heaviest: engine_water::flow_bed_system 2.29, engine_physics::physics_simulate 2.01, engine_softbody::step_bodies 1.01, engine_npc::think_and_act 0.94, engine_water::boat_air_system 0.80, engine_softbody::gather_colliders 0.45, engine_physics::physics_sync 0.37, engine_softbody::write_posed_guides 0.21)
+     chain: engine_npc::rebuild_world_model 0.09 -> engine_npc::think_and_act 0.94 -> engine_water::boat_air_system 0.80 -> engine_vehicles::wheels_system 0.19 -> engine_vehicles::engine_events_system 0.07 -> engine_physics::physics_sync 0.37 -> engine_physics::physics_simulate 2.01 -> engine_physics::physics_write_back 0.17 -> engine_softbody::gather_colliders 0.45 -> engine_softbody::step_bodies 1.01 -> engine_softbody::write_posed_guides 0.21 -> engine_water::sync_bodies_system 0.10 -> engine_water::flow_bed_system 2.29 -> engine_water::disturbance_system 0.09 -> engine_water::shore_wetness_system 0.06
+   Render             9.09 of   9.13 (2 systems; heaviest: engine_render::render_system 9.09)
+     chain: engine_render::render_system 9.09
+   PostUpdate         1.90 of   3.02 (33 systems; heaviest: engine_vfx::tick_effects 0.59, engine_core::propagate_transforms_system 0.41, engine_anim::foot_ik_system 0.31, engine_terrain::deform_from_contacts 0.12, engine_terrain::wear_from_contacts 0.11, engine_space::update_space 0.06, engine_anim::ragdoll_system 0.05)
+     chain: engine_terrain::deform_from_contacts 0.12 -> engine_terrain::wear_from_contacts 0.11 -> engine_space::update_space 0.06 -> engine_core::propagate_transforms_system 0.41 -> engine_vfx::tick_effects 0.59 -> engine_anim::foot_ik_system 0.31 -> engine_anim::ragdoll_system 0.05
+   Update             1.38 of   3.61 (32 systems; heaviest: engine_script::run_scripts 1.13, engine_anim::evaluate_animators 0.10)
+     chain: engine_script::run_scripts 1.13 -> engine_anim::evaluate_animators 0.10
+   Last               0.21 of   0.31 (1 systems; heaviest: engine::stream_system 0.21)
+   First              0.20 of   0.28 (4 systems; heaviest: engine_core::frame_diagnostics_system 0.17)
+     chain: engine_core::frame_diagnostics_system 0.17
+   Extract            0.15 of   0.19 (1 systems; heaviest: engine_render::resolve_mesh_renderers 0.15)
+   FixedPreUpdate     0.13 of   0.16 (1 systems; heaviest: engine_core::snapshot_interpolation_system 0.13)
+-- 19:20:50.485 159 frames in 5.0 s: 31.5 ms per frame (31.7 fps), worst 54.7 ms
+   systems busy 34.6 ms per frame: 1.10 of 32 cores on average
+   schedules: FixedUpdate 13.97 x1.9, Render 9.45 x1.0, Update 3.67 x1.0, PostUpdate 3.27 x1.0, Last 0.32 x1.0, First 0.30 x1.0, Extract 0.19 x1.0, FixedPreUpdate 0.17 x1.9, PreUpdate 0.13 x1.0, FixedPostUpdate 0.04 x1.9
+   physics_simulate (ms/frame, max ms, runs/frame): 2.35 / 2.73 / 1.9
+   physics_simulate ran alone: 0.96
+   ordering floor (longest before/after chain, ms per frame, of the schedule's ms)
+   Render             9.41 of   9.45 (2 systems; heaviest: engine_render::render_system 9.40)
+     chain: engine_render::render_system 9.40
+   FixedUpdate        9.21 of  13.97 (65 systems; heaviest: engine_water::flow_bed_system 2.37, engine_physics::physics_simulate 2.35, engine_softbody::step_bodies 1.03, engine_water::boat_air_system 0.80, engine_softbody::gather_colliders 0.46, engine_physics::physics_sync 0.43, engine_npc::think_and_act 0.30, engine_softbody::write_posed_guides 0.22)
+     chain: engine_npc::rebuild_world_model 0.10 -> engine_npc::think_and_act 0.30 -> engine_water::boat_air_system 0.80 -> engine_vehicles::wheels_system 0.19 -> engine_vehicles::engine_events_system 0.07 -> engine_physics::physics_sync 0.43 -> engine_physics::physics_simulate 2.35 -> engine_physics::physics_write_back 0.19 -> engine_softbody::gather_colliders 0.46 -> engine_softbody::step_bodies 1.03 -> engine_softbody::write_posed_guides 0.22 -> engine_water::sync_bodies_system 0.10 -> engine_water::flow_bed_system 2.37 -> engine_water::disturbance_system 0.09 -> engine_water::shore_wetness_system 0.06
+   PostUpdate         2.08 of   3.27 (33 systems; heaviest: engine_vfx::tick_effects 0.64, engine_core::propagate_transforms_system 0.42, engine_anim::foot_ik_system 0.33, engine_terrain::deform_from_contacts 0.14, engine_terrain::wear_from_contacts 0.13, engine_space::update_space 0.07, engine_anim::ragdoll_system 0.07)
+     chain: engine_terrain::deform_from_contacts 0.14 -> engine_terrain::wear_from_contacts 0.13 -> engine_space::update_space 0.07 -> engine_core::propagate_transforms_system 0.42 -> engine_vfx::tick_effects 0.64 -> engine_anim::foot_ik_system 0.33 -> engine_anim::ragdoll_system 0.07
+   Update             1.34 of   3.67 (32 systems; heaviest: engine_script::run_scripts 1.08, engine_anim::evaluate_animators 0.10)
+     chain: engine_script::run_scripts 1.08 -> engine_anim::evaluate_animators 0.10
+   Last               0.22 of   0.32 (1 systems; heaviest: engine::stream_system 0.22)
+   First              0.21 of   0.30 (4 systems; heaviest: engine_core::frame_diagnostics_system 0.18)
+     chain: engine_core::frame_diagnostics_system 0.18
+   Extract            0.15 of   0.19 (1 systems; heaviest: engine_render::resolve_mesh_renderers 0.15)
+   FixedPreUpdate     0.13 of   0.17 (1 systems; heaviest: engine_core::snapshot_interpolation_system 0.13)
+-- 19:20:55.497 165 frames in 5.0 s: 30.4 ms per frame (32.9 fps), worst 51.4 ms
+   systems busy 33.3 ms per frame: 1.10 of 32 cores on average
+   schedules: FixedUpdate 13.46 x1.8, Render 9.07 x1.0, Update 3.55 x1.0, PostUpdate 3.06 x1.0, Last 0.30 x1.0, First 0.28 x1.0, Extract 0.19 x1.0, FixedPreUpdate 0.16 x1.8, PreUpdate 0.12 x1.0, FixedPostUpdate 0.04 x1.8
+   physics_simulate (ms/frame, max ms, runs/frame): 2.15 / 2.14 / 1.8
+   physics_simulate ran alone: 0.82
+   ordering floor (longest before/after chain, ms per frame, of the schedule's ms)
+   Render             9.03 of   9.07 (2 systems; heaviest: engine_render::render_system 9.02)
+     chain: engine_render::render_system 9.02
+   FixedUpdate        8.82 of  13.46 (65 systems; heaviest: engine_water::flow_bed_system 2.28, engine_physics::physics_simulate 2.15, engine_softbody::step_bodies 1.00, engine_water::boat_air_system 0.78, engine_softbody::gather_colliders 0.46, engine_npc::think_and_act 0.40, engine_physics::physics_sync 0.37, engine_softbody::write_posed_guides 0.21)
+     chain: engine_npc::rebuild_world_model 0.08 -> engine_npc::think_and_act 0.40 -> engine_water::boat_air_system 0.78 -> engine_vehicles::wheels_system 0.18 -> engine_vehicles::engine_events_system 0.07 -> engine_physics::physics_sync 0.37 -> engine_physics::physics_simulate 2.15 -> engine_physics::physics_write_back 0.17 -> engine_softbody::gather_colliders 0.46 -> engine_softbody::step_bodies 1.00 -> engine_softbody::write_posed_guides 0.21 -> engine_water::sync_bodies_system 0.10 -> engine_water::flow_bed_system 2.28 -> engine_water::disturbance_system 0.08 -> engine_water::shore_wetness_system 0.05
+   PostUpdate         1.93 of   3.06 (33 systems; heaviest: engine_vfx::tick_effects 0.60, engine_core::propagate_transforms_system 0.42, engine_anim::foot_ik_system 0.31, engine_terrain::deform_from_contacts 0.11, engine_terrain::wear_from_contacts 0.11, engine_space::update_space 0.06, engine_anim::ragdoll_system 0.06)
+     chain: engine_terrain::deform_from_contacts 0.11 -> engine_terrain::wear_from_contacts 0.11 -> engine_space::update_space 0.06 -> engine_core::propagate_transforms_system 0.42 -> engine_vfx::tick_effects 0.60 -> engine_anim::foot_ik_system 0.31 -> engine_anim::ragdoll_system 0.06
+   Update             1.38 of   3.55 (32 systems; heaviest: engine_script::run_scripts 1.13, engine_anim::evaluate_animators 0.09)
+     chain: engine_script::run_scripts 1.13 -> engine_anim::evaluate_animators 0.09
+   Last               0.21 of   0.30 (1 systems; heaviest: engine::stream_system 0.21)
+   First              0.20 of   0.28 (4 systems; heaviest: engine_core::frame_diagnostics_system 0.17)
+     chain: engine_core::frame_diagnostics_system 0.17
+   Extract            0.15 of   0.19 (1 systems; heaviest: engine_render::resolve_mesh_renderers 0.15)
+   FixedPreUpdate     0.12 of   0.16 (1 systems; heaviest: engine_core::snapshot_interpolation_system 0.12)
+-- 19:21:00.504 153 frames in 5.0 s: 32.7 ms per frame (30.6 fps), worst 51.6 ms
+   systems busy 36.5 ms per frame: 1.11 of 32 cores on average
+   schedules: FixedUpdate 14.99 x2.0, Render 9.71 x1.0, Update 3.69 x1.0, PostUpdate 3.60 x1.0, Last 0.32 x1.0, First 0.31 x1.0, Extract 0.19 x1.0, FixedPreUpdate 0.18 x2.0, PreUpdate 0.13 x1.0, FixedPostUpdate 0.04 x2.0
+   physics_simulate (ms/frame, max ms, runs/frame): 2.27 / 1.93 / 2.0
+   physics_simulate ran alone: 0.87
+   ordering floor (longest before/after chain, ms per frame, of the schedule's ms)
+   FixedUpdate        9.88 of  14.99 (65 systems; heaviest: engine_water::flow_bed_system 2.45, engine_physics::physics_simulate 2.27, engine_softbody::step_bodies 1.13, engine_water::boat_air_system 0.85, engine_npc::think_and_act 0.72, engine_softbody::gather_colliders 0.51, engine_physics::physics_sync 0.42, engine_softbody::write_posed_guides 0.22)
+     chain: engine_npc::rebuild_world_model 0.10 -> engine_npc::think_and_act 0.72 -> engine_water::boat_air_system 0.85 -> engine_vehicles::wheels_system 0.19 -> engine_vehicles::engine_events_system 0.08 -> engine_physics::physics_sync 0.42 -> engine_physics::physics_simulate 2.27 -> engine_physics::physics_write_back 0.19 -> engine_softbody::gather_colliders 0.51 -> engine_softbody::step_bodies 1.13 -> engine_softbody::write_posed_guides 0.22 -> engine_water::sync_bodies_system 0.11 -> engine_water::flow_bed_system 2.45 -> engine_water::disturbance_system 0.09 -> engine_water::shore_wetness_system 0.06
+   Render             9.67 of   9.71 (2 systems; heaviest: engine_render::render_system 9.66)
+     chain: engine_render::render_system 9.66
+   PostUpdate         2.20 of   3.60 (33 systems; heaviest: engine_vfx::tick_effects 0.77, engine_core::propagate_transforms_system 0.43, engine_anim::foot_ik_system 0.32, engine_terrain::deform_from_contacts 0.14, engine_terrain::wear_from_contacts 0.14, engine_space::update_space 0.06, engine_anim::ragdoll_system 0.06)
+     chain: engine_terrain::deform_from_contacts 0.14 -> engine_terrain::wear_from_contacts 0.14 -> engine_space::update_space 0.06 -> engine_core::propagate_transforms_system 0.43 -> engine_vfx::tick_effects 0.77 -> engine_anim::foot_ik_system 0.32 -> engine_anim::ragdoll_system 0.06
+   Update             1.37 of   3.69 (32 systems; heaviest: engine_script::run_scripts 1.11, engine_anim::evaluate_animators 0.10)
+     chain: engine_script::run_scripts 1.11 -> engine_anim::evaluate_animators 0.10
+   First              0.23 of   0.31 (4 systems; heaviest: engine_core::frame_diagnostics_system 0.19)
+     chain: engine_core::frame_diagnostics_system 0.19
+   Last               0.21 of   0.32 (1 systems; heaviest: engine::stream_system 0.21)
+   Extract            0.15 of   0.19 (1 systems; heaviest: engine_render::resolve_mesh_renderers 0.15)
+   FixedPreUpdate     0.14 of   0.18 (1 systems; heaviest: engine_core::snapshot_interpolation_system 0.14)
+-- 19:21:05.510 152 frames in 5.0 s: 32.9 ms per frame (30.4 fps), worst 111.0 ms
+   systems busy 35.7 ms per frame: 1.09 of 32 cores on average
+   schedules: FixedUpdate 15.02 x2.0, Render 9.22 x1.0, Update 3.81 x1.0, PostUpdate 3.46 x1.0, Last 0.30 x1.0, First 0.29 x1.0, Extract 0.19 x1.0, FixedPreUpdate 0.18 x2.0, PreUpdate 0.12 x1.0, FixedPostUpdate 0.04 x2.0
+   physics_simulate (ms/frame, max ms, runs/frame): 2.23 / 2.06 / 2.0
+   physics_simulate ran alone: 0.88
+   ordering floor (longest before/after chain, ms per frame, of the schedule's ms)
+   FixedUpdate        9.80 of  15.02 (65 systems; heaviest: engine_water::flow_bed_system 2.42, engine_physics::physics_simulate 2.23, engine_softbody::step_bodies 1.07, engine_water::boat_air_system 0.83, engine_npc::think_and_act 0.79, engine_softbody::gather_colliders 0.49, engine_physics::physics_sync 0.42, engine_softbody::write_posed_guides 0.22)
+     chain: engine_npc::rebuild_world_model 0.10 -> engine_npc::perceive 0.06 -> engine_npc::think_and_act 0.79 -> engine_water::boat_air_system 0.83 -> engine_vehicles::wheels_system 0.21 -> engine_vehicles::engine_events_system 0.07 -> engine_physics::physics_sync 0.42 -> engine_physics::physics_simulate 2.23 -> engine_physics::physics_write_back 0.19 -> engine_softbody::gather_colliders 0.49 -> engine_softbody::step_bodies 1.07 -> engine_softbody::write_posed_guides 0.22 -> engine_water::sync_bodies_system 0.11 -> engine_water::flow_bed_system 2.42 -> engine_water::disturbance_system 0.09 -> engine_water::shore_wetness_system 0.06
+   Render             9.18 of   9.22 (2 systems; heaviest: engine_render::render_system 9.17)
+     chain: engine_render::render_system 9.17
+   PostUpdate         2.09 of   3.46 (33 systems; heaviest: engine_vfx::tick_effects 0.69, engine_core::propagate_transforms_system 0.42, engine_anim::foot_ik_system 0.34, engine_terrain::deform_from_contacts 0.13, engine_terrain::wear_from_contacts 0.12, engine_space::update_space 0.06, engine_anim::ragdoll_system 0.06)
+     chain: engine_terrain::deform_from_contacts 0.13 -> engine_terrain::wear_from_contacts 0.12 -> engine_space::update_space 0.06 -> engine_core::propagate_transforms_system 0.42 -> engine_vfx::tick_effects 0.69 -> engine_anim::foot_ik_system 0.34 -> engine_anim::ragdoll_system 0.06
+   Update             1.42 of   3.81 (32 systems; heaviest: engine_script::run_scripts 1.16, engine_anim::evaluate_animators 0.10)
+     chain: engine_script::run_scripts 1.16 -> engine_anim::evaluate_animators 0.10
+   First              0.21 of   0.29 (4 systems; heaviest: engine_core::frame_diagnostics_system 0.17)
+     chain: engine_core::frame_diagnostics_system 0.17
+   Last               0.20 of   0.30 (1 systems; heaviest: engine::stream_system 0.20)
+   Extract            0.15 of   0.19 (1 systems; heaviest: engine_render::resolve_mesh_renderers 0.15)
+   FixedPreUpdate     0.14 of   0.18 (1 systems; heaviest: engine_core::snapshot_interpolation_system 0.14)
+==== physics.step_ms (sampled engine.stats, 2 Hz) and fixed steps per frame (engine.status)
+samples 148: physics.step_ms mean 4.96, median 1.32, p90 2.03, max 202.83; substeps 1.0; awake 0-586 of 1597.0 bodies; regions 10.0; contacts 0-4930
+per 5 s (mean / max physics.step_ms):
+  19:19:45  6.83 / 20.39  (3 samples)
+  19:19:50  53.25 / 115.01  (3 samples)
+  19:19:54  90.90 / 202.83  (4 samples)
+  19:19:59  2.46 / 5.03  (10 samples)
+  19:20:03  1.26 / 1.45  (10 samples)
+  19:20:08  1.26 / 1.62  (10 samples)
+  19:20:13  1.30 / 1.81  (9 samples)
+  19:20:18  1.32 / 1.57  (10 samples)
+  19:20:23  1.30 / 1.43  (10 samples)
+  19:20:28  1.21 / 1.57  (10 samples)
+  19:20:33  1.36 / 2.03  (9 samples)
+  19:20:38  1.14 / 1.56  (10 samples)
+  19:20:43  1.32 / 1.54  (10 samples)
+  19:20:48  1.44 / 2.10  (10 samples)
+  19:20:53  1.41 / 1.69  (10 samples)
+  19:20:58  1.29 / 1.70  (9 samples)
+  19:21:03  1.24 / 1.72  (10 samples)
+  19:21:08  1.14 / 1.14  (1 samples)
+engine.status samples 148: frames 3-2100, fixed ticks 2-4124: 1.97 fixed steps a frame over the run; 28.3 fps
+per 5 s (fixed steps a frame, fps):
+  19:19:45  4.00 steps/frame, 7.4 fps
+  19:19:49  1.50 steps/frame, 5.0 fps
+  19:19:53  1.00 steps/frame, 4.0 fps
+  19:19:58  2.74 steps/frame, 13.7 fps
+  19:20:03  2.77 steps/frame, 21.4 fps
+  19:20:08  2.03 steps/frame, 29.4 fps
+  19:20:13  1.78 steps/frame, 33.8 fps
+  19:20:18  2.14 steps/frame, 27.9 fps
+  19:20:23  1.88 steps/frame, 31.9 fps
+  19:20:28  1.83 steps/frame, 32.8 fps
+  19:20:33  1.77 steps/frame, 34.0 fps
+  19:20:38  1.90 steps/frame, 31.2 fps
+  19:20:43  1.86 steps/frame, 32.2 fps
+  19:20:48  1.84 steps/frame, 32.6 fps
+  19:20:53  1.96 steps/frame, 30.5 fps
+  19:20:58  1.97 steps/frame, 30.4 fps
+  19:21:03  1.95 steps/frame, 30.6 fps
+==== physics reports (PHYSICS_REPORT)
+==== tour lines

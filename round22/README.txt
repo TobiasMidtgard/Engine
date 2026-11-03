@@ -9,3 +9,4 @@ game's flags and bridge.
 3-mesh-occlusion           ENGINE_MESH_OCCLUSION on/off x2 at forest_trail, plaza, market, village_garden (for 'town street')
 4-lake-forest-stays        lake, forest_trail and plaza stays: scene/prepass rows, extra views, probe GI, mesh uploads
 5-census                   census tour of overview, plaza, forest, lake, fortress, field
+6-plaza-ordering-floor     75 s plaza stand in the full world, ENGINE_PROFILE=1: the ordering floor blocks
