@@ -180,6 +180,9 @@ const DEFAULT_TEXELS: [[u8; 4]; TEXTURE_SLOTS] = [
 ];
 /// Texture sets unused for this many frames are released.
 const EVICT_AFTER_FRAMES: u64 = 600;
+/// A mesh drawn as clusters lets go of its instanced copy after this many frames (views)
+/// without instances on the instanced path.
+const INSTANCED_COPY_KEEP_FRAMES: u64 = 240;
 
 struct GpuMesh {
     /// Its vertices and full index list in the shared buffers.
@@ -1091,6 +1094,11 @@ pub struct MeshFeature {
     uploads: u32,
     /// Of those, edits of meshes already on the GPU.
     edits: u32,
+    /// Of those, meshes uploaded before whose copy was let go (drawn only as clusters for a
+    /// while) and needed again.
+    reuploads: u32,
+    /// The meshes uploaded since their asset was made, to count `reuploads`.
+    uploaded_before: HashSet<u32>,
     /// This frame's mesh and material lookups, by the handle indices entities name.
     mesh_frames: Vec<MeshFrame>,
     material_frames: Vec<MaterialFrame>,
@@ -1350,6 +1358,7 @@ impl MeshFeature {
         self.lod_jobs.retain(|&index, _| !gone(index));
         self.lod_waiting.retain(|(index, _)| !gone(*index));
         self.warned_no_height.retain(|&index| !gone(index));
+        self.uploaded_before.retain(|&index| !gone(index));
     }
 
     fn upload_mesh(&mut self, gpu: &GpuShared, index: u32, mesh: &Mesh, version: u64) {
@@ -2899,6 +2908,8 @@ impl RenderFeature for MeshFeature {
                 {
                     self.uploads += 1;
                     self.edits += resident.is_some() as u32;
+                    self.reuploads +=
+                        (resident.is_none() && !self.uploaded_before.insert(mesh.index)) as u32;
                     self.upload_mesh(gpu, mesh.index, asset, mesh.version);
                     // Skinned meshes are drawn whole (`GpuSkin` requires `NoMeshLod`).
                     if lod_pixels > 0.0 && !self.skins.skins.contains_key(&mesh.index) {
@@ -2952,8 +2963,11 @@ impl RenderFeature for MeshFeature {
             let clustered = &self.clustered;
             let pool = &mut self.pool;
             self.meshes.retain(|m, g| {
-                // Used last frame or this one (the cull may run on the render thread).
-                let keep = g.last_used + 1 >= frame || !clustered.contains(m);
+                // Used as instances lately (the cull may run on the render thread): a mesh
+                // whose instances come and go from the instanced path (a fade, a mirror, a
+                // shadow-only copy) keeps its copy rather than uploading it again and again.
+                let keep =
+                    g.last_used + INSTANCED_COPY_KEEP_FRAMES >= frame || !clustered.contains(m);
                 if !keep {
                     g.free(pool);
                 }
@@ -3465,6 +3479,10 @@ impl RenderFeature for MeshFeature {
             d.set(
                 "render.meshes.edits",
                 std::mem::take(&mut self.edits) as f64,
+            );
+            d.set(
+                "render.meshes.reuploads",
+                std::mem::take(&mut self.reuploads) as f64,
             );
             // Occlusion culling (a few frames behind): opaque instances tested, and the
             // instances and triangles it drew of them.
