@@ -1,0 +1,33 @@
+/* The wiki's fonts, both SIL OFL 1.1: Inter for text, Cormorant Garamond for titles.
+   tools/fetch-fonts.sh downloads the files into src/fonts/ (they stay out of git); without
+   them the stacks in wiki.css fall back to system fonts. Replacing this file also stops mdBook
+   from shipping its default Open Sans. */
+
+@font-face {
+    font-family: "Inter";
+    src: url("inter-latin-wght-normal.woff2") format("woff2-variations");
+    font-weight: 100 900;
+    font-style: normal;
+    font-display: swap;
+}
+@font-face {
+    font-family: "Inter";
+    src: url("inter-latin-wght-italic.woff2") format("woff2-variations");
+    font-weight: 100 900;
+    font-style: italic;
+    font-display: swap;
+}
+@font-face {
+    font-family: "Cormorant Garamond";
+    src: url("cormorant-garamond-latin-wght-normal.woff2") format("woff2-variations");
+    font-weight: 300 700;
+    font-style: normal;
+    font-display: swap;
+}
+@font-face {
+    font-family: "Cormorant Garamond";
+    src: url("cormorant-garamond-latin-wght-italic.woff2") format("woff2-variations");
+    font-weight: 300 700;
+    font-style: italic;
+    font-display: swap;
+}

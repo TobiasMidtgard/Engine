@@ -1,0 +1,3 @@
+# Built site and fonts fetched by tools/fetch-fonts.sh (not committed: third-party files)
+/book/
+/src/fonts/

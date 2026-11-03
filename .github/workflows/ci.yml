@@ -1,9 +1,12 @@
 name: CI
 
+# Changes to the player wiki alone (wiki/) don't build the engine; the Wiki workflow checks them.
 on:
   pull_request:
+    paths-ignore: ["wiki/**"]
   push:
     branches: [main]
+    paths-ignore: ["wiki/**"]
 
 # A new push to a pull request replaces the run on its old head. On main the running check
 # always finishes and only a queued one gives way to a newer merge: with merges minutes apart,

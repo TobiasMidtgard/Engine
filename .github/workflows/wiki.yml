@@ -1,0 +1,80 @@
+name: Wiki
+
+# Builds the player wiki (wiki/, mdBook) and publishes it to GitHub Pages. Runs on every push to
+# main that changes wiki/, so an edit made on github.com goes live about a minute later. Pull
+# requests only build it. Broken links and missing pictures show as warnings, never as a red run.
+on:
+  push:
+    branches: [main]
+    paths: ["wiki/**", ".github/workflows/wiki.yml"]
+  pull_request:
+    paths: ["wiki/**", ".github/workflows/wiki.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# One publish at a time; a newer push waits rather than cancelling one halfway through.
+concurrency:
+  group: wiki-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  MDBOOK_VERSION: "0.5.4"
+  MDBOOK_SHA256: 3f28de05dafca9d0f2eab99c662116b0e37b89b1d96a08f8f430b9eeae958cd7
+
+jobs:
+  build:
+    name: Build the wiki
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install mdBook
+        run: |
+          curl -fsSL -o "$RUNNER_TEMP/mdbook.tgz" \
+            "https://github.com/rust-lang/mdBook/releases/download/v$MDBOOK_VERSION/mdbook-v$MDBOOK_VERSION-x86_64-unknown-linux-gnu.tar.gz"
+          echo "$MDBOOK_SHA256  $RUNNER_TEMP/mdbook.tgz" | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/bin"
+          tar xzf "$RUNNER_TEMP/mdbook.tgz" -C "$RUNNER_TEMP/bin"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+      - name: Fetch fonts
+        run: sh wiki/tools/fetch-fonts.sh
+      - name: Check links and pictures
+        run: python3 wiki/tools/wiki.py check
+      - name: Build
+        run: mdbook build wiki
+      - uses: actions/upload-pages-artifact@v5
+        with:
+          path: wiki/book
+
+  publish:
+    name: Publish to GitHub Pages
+    needs: build
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      # Until Pages is switched on (Settings > Pages > Source: GitHub Actions), skip publishing
+      # with a note instead of failing, so the run stays green.
+      - name: Is GitHub Pages on?
+        id: pages
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh api "repos/$GITHUB_REPOSITORY/pages" --silent 2>/dev/null; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::GitHub Pages is off for this repository, so the wiki was built but not published. Turn it on in Settings > Pages > Source: GitHub Actions, then re-run this workflow."
+          fi
+      - name: Publish
+        id: deploy
+        if: steps.pages.outputs.enabled == 'true'
+        uses: actions/deploy-pages@v5

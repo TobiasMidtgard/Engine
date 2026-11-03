@@ -1,0 +1,38 @@
+# The player wiki. Build: `mdbook build wiki` (mdBook 0.5.4, Python 3). Live preview while
+# editing: `mdbook serve wiki --open`. Published by .github/workflows/wiki.yml on every push to
+# main that changes wiki/. How to add pages: src/editing/how-to-add-a-page.md.
+
+[book]
+title = "Player Wiki"
+description = "The player's guide to the world, its creatures, cities, magic and machines."
+language = "en"
+src = "src"
+
+[build]
+create-missing = false
+
+# Infoboxes, status banners, picture cards, section tables and pages that join the sidebar by
+# themselves (tools/wiki.py explains each).
+[preprocessor.wiki]
+command = "python3 tools/wiki.py"
+after = ["links"]
+
+[output.html]
+default-theme = "light"
+preferred-dark-theme = "navy"
+site-url = "/Engine/"
+additional-css = ["theme/wiki.css"]
+no-section-label = true
+edit-url-template = "https://github.com/TobiasMidtgard/Engine/edit/main/wiki/{path}"
+smart-punctuation = true
+
+[output.html.fold]
+enable = true
+level = 0
+
+[output.html.print]
+enable = false
+
+[output.html.search]
+limit-results = 20
+boost-title = 3
