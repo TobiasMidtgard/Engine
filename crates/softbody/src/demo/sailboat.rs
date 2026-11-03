@@ -41,6 +41,11 @@ pub mod dims {
 }
 
 /// Sails a boat around `home`: back and forth across the wind, `range` meters each way.
+/// On a dinghy's rig and rudder: the only entities [`sail_boats`] turns besides the boats, so its
+/// write access to `Transform` stays on them and other systems' transforms can run beside it.
+#[derive(Component, Debug, Clone, Copy, Default)]
+pub struct HelmPart;
+
 #[derive(Component, Debug, Clone)]
 pub struct Helm {
     pub home: DVec3,
@@ -110,6 +115,7 @@ pub fn spawn_sailboat(commands: &mut Commands, home: DVec3, range: f32) -> Entit
     let rig = commands
         .spawn((
             Name::new("Dinghy rig"),
+            HelmPart,
             Transform::from_xyz(0.0, 0.0, dims::MAST_Z as f64),
             TransformInterpolation::default(),
             ChildOf(boat),
@@ -126,6 +132,7 @@ pub fn spawn_sailboat(commands: &mut Commands, home: DVec3, range: f32) -> Entit
     let rudder = commands
         .spawn((
             Name::new("Dinghy rudder"),
+            HelmPart,
             Transform::from_xyz(0.0, 0.0, dims::RUDDER_Z as f64),
             TransformInterpolation::default(),
             ChildOf(boat),
@@ -238,7 +245,7 @@ pub fn sail_boats(
         Option<&MassProperties>,
         Option<&mut TransformInterpolation>,
     )>,
-    mut parts: Query<&mut Transform, Without<Helm>>,
+    mut parts: Query<&mut Transform, (With<HelmPart>, Without<Helm>)>,
 ) {
     let dt = time.delta_secs();
     if dt <= 0.0 {

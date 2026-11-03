@@ -147,6 +147,7 @@ pub(crate) fn sky_system(
     mut ambient: ResMut<AmbientLight>,
     mut suns: Query<(&mut Transform, &mut DirectionalLight), (With<SunLight>, Without<MoonLight>)>,
     mut moons: Query<(&mut Transform, &mut DirectionalLight), (With<MoonLight>, Without<SunLight>)>,
+    sun_source: Option<Res<engine_world::SunSource>>,
 ) {
     let in_charge = !suns.is_empty();
     if !in_charge {
@@ -171,7 +172,10 @@ pub(crate) fn sky_system(
         *sky = s;
     }
 
-    let out = compute_lights(&sky, &climate, &sim);
+    // Perf week (Planets and terrain, 2026-11-03, for Weather to review): a space module that
+    // follows this clock says where the real star stands (engine_world::SunSource), so away
+    // from the home spot the sun is still the one in the sky. Playtest 3 item 36.
+    let out = compute_lights_toward(&sky, &climate, &sim, sun_source.map(|s| s.direction));
     *lights_out = out;
     state.time_of_day_h = sky.hour;
     state.day_of_year = sky.day_of_year;
@@ -200,10 +204,23 @@ pub(crate) fn sky_system(
 /// Where the sun and moon are and how bright, for a clock and climate. `sim` dims the sun
 /// under thick cloud.
 pub fn compute_lights(sky: &Sky, climate: &Climate, sim: &WeatherSim) -> SkyLights {
+    compute_lights_toward(sky, climate, sim, None)
+}
+
+/// [`compute_lights`] with the sun at world direction `sun` when given (engine_world's
+/// [`SunSource`](engine_world::SunSource): the real star, from a space module that follows
+/// this clock), else where the clock puts it over the home spot.
+pub fn compute_lights_toward(
+    sky: &Sky,
+    climate: &Climate,
+    sim: &WeatherSim,
+    sun: Option<Vec3>,
+) -> SkyLights {
     // The sky's compass turns with the world's frame (see `WeatherFrame`).
-    let sun_dir = sim
-        .frame
-        .dir3_to_world(climate.sun_direction(sky.hour, sky.day_of_year));
+    let sun_dir = sun.map(|d| d.normalize_or(Vec3::Y)).unwrap_or_else(|| {
+        sim.frame
+            .dir3_to_world(climate.sun_direction(sky.hour, sky.day_of_year))
+    });
     let elevation = sun_dir.y.clamp(-1.0, 1.0).asin().to_degrees();
     let (moon_dir, moon_lit) = climate::moon(climate, sky.hour, sky.day_of_year, sky.moon_phase);
     let moon_dir = sim.frame.dir3_to_world(moon_dir);
@@ -292,5 +309,22 @@ mod tests {
         assert_eq!(night.sun_lux, 0.0);
         assert!(night.moon_lux > 0.2, "full moon at midnight: {night:?}");
         assert!(night.moon_lux > night.sun_lux);
+    }
+
+    #[test]
+    fn the_real_star_steers_the_sun() {
+        let (climate, sim) = (Climate::default(), WeatherSim::default());
+        // Noon by the clock at home, but the star stands low in the east where the camera is.
+        let noon = Sky {
+            hour: 12.0,
+            ..Default::default()
+        };
+        let low_east = Vec3::new(-1.0, 0.05, 0.0).normalize();
+        let lights = compute_lights_toward(&noon, &climate, &sim, Some(low_east));
+        assert!(lights.sun_dir.angle_between(low_east) < 1e-5);
+        assert!((lights.sun_elevation_deg - 2.86).abs() < 0.1, "{lights:?}");
+        // Below the horizon there it is night.
+        let night = compute_lights_toward(&noon, &climate, &sim, Some(-Vec3::Y));
+        assert_eq!(night.sun_lux, 0.0);
     }
 }

@@ -554,6 +554,9 @@ pub struct BodyEntry {
     pub water_mark: Option<(f64, Vec3)>,
     /// How far its colliders reach from its origin, meters (never shrinks).
     pub reach: f32,
+    /// Where an awake body was last found clear of the water (no water there, or well above
+    /// it), and the substeps left before the water is looked at again (`step::prepare_forces`).
+    pub dry: Option<(DVec3, u8)>,
     /// The longest substep it asks for (`FineSteps`), seconds.
     pub fine: Option<f32>,
 }
@@ -784,6 +787,8 @@ pub struct Simulation {
     pub filtered_statics: EntityHashSet,
     /// Meshes that float bodies ([`crate::buoyancy`]), by shape.
     pub hulls: crate::buoyancy::HullCache,
+    /// The water's answers this step, shared by its substeps and floating bodies.
+    pub water_cache: crate::buoyancy::WaterCache,
     /// Bodies whose jointed group lost a joint or a body, to articulate again if it can now
     /// ([`Self::rearticulate`]).
     pub regroup: Vec<Entity>,
@@ -1090,6 +1095,7 @@ impl Simulation {
                 mass_dirty: true,
                 water_mark: None,
                 reach: 0.0,
+                dry: None,
                 fine: None,
             },
         );

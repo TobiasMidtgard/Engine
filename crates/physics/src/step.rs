@@ -742,6 +742,26 @@ pub(crate) fn physics_simulate(
     }
     drop(planning);
     let rounds = plans.iter().map(|p| p.substeps).max().unwrap_or(0);
+    // The water stands still through the step: its answers serve every substep (and, far
+    // from the foci, a few steps).
+    if sim.water_cache.asked() > 0 && crate::report::wanted() {
+        crate::report::count("water samples a step, not", sim.water_cache.asked());
+    }
+    sim.water_cache.next_step();
+    // The bodies with forces of their own, by region, once a step: `forced` holds those of
+    // every region (1,500 at the plaza, the proving ground's bodies moved to a dormant
+    // region), and walking it in every region's every substep was about 0.15 ms each.
+    let mut forced_in: HashMap<RegionId, Vec<Entity>> = HashMap::new();
+    {
+        let Simulation { forced, bodies, .. } = &mut *sim;
+        forced.retain(|e| {
+            let Some(entry) = bodies.get(e) else {
+                return false;
+            };
+            forced_in.entry(entry.region).or_default().push(*e);
+            true
+        });
+    }
     let min_speed = settings.contact_events.then_some(settings.impact_min_speed);
     for sub in 0..rounds {
         let here: Vec<usize> = (0..plans.len())
@@ -755,14 +775,14 @@ pub(crate) fn physics_simulate(
             let t0 = Instant::now();
             // Every substep: water pressure follows the pose (forces held over several
             // substeps lag behind it and pump energy into a floating body's rocking).
-            let g = sim.region(p.rid).world.gravity;
             prepare_forces(
                 &mut sim,
                 p.rid,
                 &gravity,
-                g,
                 water.as_ref(),
                 settings.buoyancy,
+                &foci,
+                forced_in.get(&p.rid).map_or(&[], |v| v.as_slice()),
             );
             let t0b = Instant::now();
             drive_kinematics(&mut sim, p.rid, &p.special, p.sub_dt, p.substeps - sub);
@@ -1284,10 +1304,12 @@ fn prepare_forces(
     sim: &mut Simulation,
     rid: RegionId,
     gravity: &Gravity,
-    region_g: Vec3,
     water: Option<&Water>,
     buoyancy: bool,
+    foci: &[DVec3],
+    forced: &[Entity],
 ) {
+    let region_g = sim.region(rid).world.gravity;
     let varying = !gravity.bodies.is_empty();
     // The awake bodies and those with forces set: a sleeping body without forces has nothing
     // to do here, and there may be thousands of them (settled debris).
@@ -1298,7 +1320,7 @@ fn prepare_forces(
             .active_bodies()
             .filter_map(|h| world.bodies.get(h))
             .map(|rb| convert::entity_of(rb.user_data))
-            .chain(sim.forced.iter().copied())
+            .chain(forced.iter().copied())
             .collect()
     };
     entities.sort_unstable();
@@ -1313,15 +1335,18 @@ fn prepare_forces(
         if entry.region != rid || entry.kind != BodyKind::Dynamic {
             continue;
         }
-        let (h, external, gravity_scale, had_forces, k) = (
+        let (h, external, gravity_scale, had_forces, k, reach) = (
             entry.handle,
             entry.external,
             entry.desc.gravity_scale,
             entry.forces_set,
             entry.time_factor,
+            entry.reach,
         );
+        let mut dry = entry.dry;
         let region = sim.regions[rid as usize].as_mut().unwrap();
         let hulls = &mut sim.hulls;
+        let wc = &mut sim.water_cache;
         let anchor = region.anchor;
         // Far away the water is looked at on a coarser grid.
         let cells = if region.tier >= 1 {
@@ -1361,7 +1386,33 @@ fn prepare_forces(
             && !rb.is_sleeping()
         {
             let world_com = anchor + com.as_dvec3();
-            if let Some(s) = w.sample(world_com) {
+            // Every awake body asked the water whether it was in it, every substep: at the
+            // plaza, cars and walkers far from any water spent about 1 ms a step on 4 cores
+            // in `Water::sample`. One found clear of it looks again after
+            // [`DRY_RECHECK_SUBSTEPS`], or once it has moved [`DRY_MOVE_M`].
+            let skip = match dry {
+                Some((at, left)) if left > 0 && at.distance(world_com) < DRY_MOVE_M => {
+                    dry = Some((at, left - 1));
+                    true
+                }
+                _ => false,
+            };
+            let body_cells = cells.min(crate::buoyancy::cells_at(world_com, foci));
+            let sample = if skip {
+                None
+            } else {
+                wc.at(w, world_com, body_cells)
+            };
+            if !skip {
+                // Clear: no water here, or its surface well below the body's lowest reach
+                // even after falling for the substeps until the next look.
+                let falls = rb.linvel().y.min(0.0).abs() * DRY_RECHECK_SUBSTEPS as f32 / 30.0;
+                let clear = sample.is_none_or(|(surface, _)| {
+                    world_com.y - (reach + falls + DRY_CLEARANCE_M) as f64 > surface
+                });
+                dry = clear.then_some((world_com, DRY_RECHECK_SUBSTEPS));
+            }
+            if let Some((surface_height, flow)) = sample.filter(|_| dry.is_none()) {
                 let colliders: Vec<_> = rb.colliders().to_vec();
                 let up = gravity.up_at(world_com);
                 let g = gravity.at(world_com).length();
@@ -1377,20 +1428,25 @@ fn prepare_forces(
                     }
                     wetted += 1;
                     let aabb = c.compute_aabb();
+                    let cells = cells.min(crate::buoyancy::cells_at(
+                        anchor + aabb.center().as_dvec3(),
+                        foci,
+                    ));
                     let height = (aabb.maxs.y - aabb.mins.y).max(1e-3);
                     // Lift (and its torque) from the pressure on the real shape where there
                     // is a mesh for it, else from the fraction of the box under water.
                     let hull = hulls.get(c.shared_shape());
                     let meshed = hull.is_some();
                     let (frac, current) = if let Some(hull) = hull {
-                        let Some(surface) = Surface::sample(w, anchor, aabb.mins, aabb.maxs, cells)
+                        let Some(surface) =
+                            Surface::sample(w, wc, anchor, aabb.mins, aabb.maxs, cells)
                         else {
                             continue;
                         };
                         if aabb.mins.y >= surface.top {
                             continue;
                         }
-                        let wetted = hull.immerse(
+                        let wetted = hull.at(cells).immerse(
                             c.position(),
                             &surface,
                             g,
@@ -1406,7 +1462,7 @@ fn prepare_forces(
                         ((wetted.volume / hull.volume).min(1.0), surface.current)
                     } else {
                         let bottom = anchor.y + aabb.mins.y as f64;
-                        let depth = (s.surface_height - bottom) as f32;
+                        let depth = (surface_height - bottom) as f32;
                         let frac = (depth / height).clamp(0.0, 1.0);
                         if frac <= 0.0 {
                             continue;
@@ -1417,7 +1473,7 @@ fn prepare_forces(
                             Vec3::new(center.x, aabb.mins.y + height * frac * 0.5, center.z);
                         force += lift;
                         torque += (point - com).cross(lift);
-                        (frac, s.velocity)
+                        (frac, flow)
                     };
                     wet = true;
                     // Water drag relative to the current, and rotational drag.
@@ -1453,7 +1509,9 @@ fn prepare_forces(
             }
         }
         let forced = needs || (wet && had_forces);
-        sim.bodies.get_mut(&e).unwrap().forces_set = forced;
+        let entry = sim.bodies.get_mut(&e).unwrap();
+        entry.forces_set = forced;
+        entry.dry = dry;
         if !forced {
             sim.forced.remove(&e);
         }
@@ -1462,6 +1520,13 @@ fn prepare_forces(
         crate::report::count("buoyant colliders", wetted);
     }
 }
+
+/// Substeps an awake body found clear of the water goes before it is looked at again.
+const DRY_RECHECK_SUBSTEPS: u8 = 10;
+/// How far a body found clear of the water may move before it is looked at again, meters.
+const DRY_MOVE_M: f64 = 2.0;
+/// How far above the water a body's lowest reach must be to count as clear of it, meters.
+const DRY_CLEARANCE_M: f32 = 1.0;
 
 /// Water's drag on a collider turning at `spin`, per unit of the body's mass and wetness: about
 /// each of the shape's own axes, as far as the shape reaches across that axis (a log rolls

@@ -1415,6 +1415,31 @@ pub fn update_space(world: &mut World) {
         {
             sun::write_weather_sun(world, &states, anchor, dir);
         }
+        // Following the weather's clock, the weather keeps its own sun light: tell it where
+        // the real star stands from here (the brightest), so away from the home spot (on the
+        // Moon, on Mars, re-homed across the planet) its sun is still the one in the sky.
+        let real_sun = settings
+            .follow_world_clock
+            .then(|| {
+                stars
+                    .iter()
+                    .map(|(_, p, l, _, _)| (*p - f, *l))
+                    .filter(|(d, _)| d.length_squared() > 1.0)
+                    .max_by(|a, b| {
+                        (a.1 / a.0.length_squared()).total_cmp(&(b.1 / b.0.length_squared()))
+                    })
+            })
+            .flatten();
+        match real_sun {
+            Some((d, _)) => world.insert_resource(engine_world::SunSource {
+                direction: d.normalize().as_vec3(),
+            }),
+            None => {
+                world.remove_resource::<engine_world::SunSource>();
+            }
+        }
+    } else {
+        world.remove_resource::<engine_world::SunSource>();
     }
 
     let home_frame = world.get_resource::<HomeFrame>().map(|h| h.0.clone());

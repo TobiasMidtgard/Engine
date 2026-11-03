@@ -703,6 +703,12 @@ fn starlight_tells_the_weather_where_the_sun_is() {
         let light = sun_dir(&mut app);
         let w = app.world.resource::<WeatherState>().clone();
         assert!(degrees_apart(light.as_dvec3(), w.sun_direction) < 0.01);
+        // The space module lights the scene itself: no other sun to steer.
+        assert!(
+            app.world
+                .get_resource::<engine_world::SunSource>()
+                .is_none()
+        );
         let formula = weather_sun_at_home(w.time_of_day_h as f64, w.day_of_year as f64);
         let apart = degrees_apart(formula, light);
         assert!(
@@ -735,8 +741,11 @@ fn the_space_clock_can_follow_the_weathers() {
             sun_dir(&mut app),
         );
         assert!(apart < 2.0, "{hour} h on day {day}: {apart}° off");
-        // The weather lights the scene: its sun stays its own.
+        // The weather lights the scene: its sun stays its own, told where the real one is.
         assert_eq!(app.world.resource::<WeatherState>().sun_direction, Vec3::Y);
+        let real = app.world.resource::<engine_world::SunSource>().direction;
+        let apart = degrees_apart(real.as_dvec3(), sun_dir(&mut app));
+        assert!(apart < 0.01, "SunSource {apart}° from the star light");
     }
     // Midwinter noon: due south, 26.6° up.
     set(&mut app, 12.0, 355.0);
