@@ -19,8 +19,11 @@ pub use precipitation::PrecipitationFeature;
 #[serde(default)]
 pub struct CloudSettings {
     pub enabled: bool,
-    /// March resolution relative to the screen (0.25–1).
+    /// Cloud image resolution relative to the screen (0.25–1).
     pub resolution_scale: f32,
+    /// March a quarter of the cloud image each frame and reproject the rest from the last
+    /// frames (about 4× cheaper; off marches every pixel every frame).
+    pub temporal: bool,
     /// Samples along each view ray through the cloud layer.
     pub steps: u32,
     /// Samples toward the sun or moon from each cloud sample (self-shadowing).
@@ -60,6 +63,7 @@ impl Default for CloudSettings {
         Self {
             enabled: true,
             resolution_scale: 0.5,
+            temporal: true,
             steps: 72,
             light_steps: 5,
             environment_steps: 24,
@@ -141,7 +145,7 @@ pub(crate) fn register(app: &mut App) {
         .init_resource::<PrecipitationSettings>()
         .init_resource::<GroundEffectSettings>()
         .register_resource::<CloudSettings>(
-            "Volumetric clouds: enabled, resolution_scale, steps, light_steps, \
+            "Volumetric clouds: enabled, resolution_scale, temporal, steps, light_steps, \
              environment_steps, extinction (1/m), max_distance_m, shape_scale_m, \
              detail_scale_m, replace_sky, rain_shafts.",
         )

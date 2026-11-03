@@ -251,16 +251,22 @@ fn march_clouds(dir: vec3<f32>, steps: i32, light_steps: i32, jitter: f32) -> Cl
     let ground_sky = ground_tint * sky * 0.4;
     let fill = frame.ambient.rgb * clouds.shadow.z;
 
-    // Big strides through empty air; on touching cloud, step back and walk it finely.
+    // Big strides through empty air; on touching cloud, step back and walk it finely. Steps
+    // also grow with distance (Nubis's adaptive stepping): cloud right by the camera, flying
+    // through or past it, is walked in meters, not in one stride of hundreds of meters that
+    // left a flight through cumulus a mess of jittered blotches.
     let len = t1 - t0;
-    let coarse_dt = clamp(len / f32(steps) * 1.5, 40.0, 1200.0);
-    let fine_dt = clamp(len / f32(steps) * 0.5, 20.0, 300.0);
-    var t = t0 + coarse_dt * jitter;
+    let coarse_far = clamp(len / f32(steps) * 1.5, 40.0, 1200.0);
+    let fine_far = clamp(len / f32(steps) * 0.5, 20.0, 300.0);
+    var t = t0 + min(coarse_far, max(t0 * 0.3, 24.0)) * jitter;
     var fine = false;
     var empty = 0;
     var hit = false;
+    var last = 0.0;
     for (var i = 0; i < steps * 2; i++) {
         if (t >= t1) { break; }
+        let coarse_dt = min(coarse_far, max(t * 0.3, 24.0));
+        let fine_dt = min(fine_far, max(t * 0.1, 6.0));
         let p = dir * t;
         let h = planet_height(p);
         let w = weather_at_smooth(p.xz);
@@ -269,16 +275,17 @@ fn march_clouds(dir: vec3<f32>, steps: i32, light_steps: i32, jitter: f32) -> Cl
             if (fine) {
                 empty += 1;
                 if (empty > 8) { fine = false; }
-                t += fine_dt;
+                last = fine_dt;
             } else {
-                t += coarse_dt;
+                last = coarse_dt;
             }
+            t += last;
             continue;
         }
         if (!fine) {
             fine = true;
             empty = 0;
-            t = max(t - coarse_dt + fine_dt * jitter, t0);
+            t = max(t - last + fine_dt * jitter, t0);
             continue;
         }
         empty = 0;
@@ -388,6 +395,7 @@ fn march_clouds(dir: vec3<f32>, steps: i32, light_steps: i32, jitter: f32) -> Cl
                 break;
             }
         }
+        last = dt;
         t += dt;
     }
     if (!hit) {
@@ -657,11 +665,21 @@ struct MarchOut {
     @location(2) sky: vec4<f32>,     // pre-exposed clear sky, rain 90% (km)
 };
 
-// Low-resolution march of the whole view (no scene depth; composited per pixel later).
+// Which pixel of each block of the cloud image this frame's march covers (see
+// cloud_reproject.wgsl): x, y within the block, block side; then the image's size.
+struct MarchSlot {
+    offset: vec4<f32>,
+    size: vec4<f32>,
+};
+@group(2) @binding(0) var<uniform> slot: MarchSlot;
+
+// Low-resolution march of the whole view (no scene depth; composited per pixel later), one
+// pixel of each block of the cloud image per frame.
 @fragment
 fn fs_march(in: FullscreenOut) -> MarchOut {
-    let dir = camera_dir(in.uv);
-    let r = clouds_and_rain(dir, i32(clouds.light.w), i32(clouds.light_dir.w), ign(in.position.xy));
+    let px = floor(in.position.xy) * slot.offset.z + slot.offset.xy + 0.5;
+    let dir = camera_dir(px / slot.size.xy);
+    let r = clouds_and_rain(dir, i32(clouds.light.w), i32(clouds.light_dir.w), ign(px));
     var out: MarchOut;
     out.color = vec4<f32>(min(pre_expose(r.radiance), vec3(60000.0)), r.transmittance);
     out.depth = vec4<f32>(r.front * 0.001, r.back * 0.001, r.rain, r.rain_front * 0.001);
