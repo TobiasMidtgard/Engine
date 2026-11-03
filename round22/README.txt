@@ -4,3 +4,5 @@ input, one at a time (no build beside a render), and ended with taskkill /IM sho
 game's flags and bridge.
 1-route-full, 1-route-up   route and route up: leg tables, hitches, RAM per leg, a picture per leg; soft bodies, water
                            ripples, terrain colliders and the worst frames' terrain rows on the 2 km legs / 79 m-1 km
+2a-loops-ultra             loops x2 at Ultra with PHYSICS_REPORT=240: tables, per-pass GPU, physics reports
+2b-render-scale-0.7        the same loops at ENGINE_RENDER_SCALE=0.7: per-pass GPU 1.0 vs 0.7; round 2 physics (CCD sweeps)
