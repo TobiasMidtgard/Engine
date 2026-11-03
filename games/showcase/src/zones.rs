@@ -617,16 +617,22 @@ pub fn cell_parts(key: &str) -> &'static [&'static str] {
 }
 
 /// What a cell makes off the frame before it spawns (`StreamCell::built_in_steps`): the slow,
-/// world-free part of the showcase's own content.
+/// world-free part of its content.
 #[derive(Default)]
 pub struct CellArt {
     pub plaza: Option<crate::plaza::Art>,
+    /// The paddock's generated bodies, in a tour or loop (the exe prefetches them at startup;
+    /// a tour built them on the frame when its zone spawned first, 3.9 s on ToiasPC).
+    pub paddock: Option<engine_anim::demo::DemoParts>,
 }
 
-/// Make cell `key`'s [`CellArt`] (on a worker thread).
-pub fn build_cell(key: &str) -> CellArt {
+/// Make cell `key`'s [`CellArt`] (on a worker thread); `staged` when the exe prefetched the
+/// modules' art behind its loading screen.
+pub fn build_cell(key: &str, staged: bool) -> CellArt {
     CellArt {
         plaza: (key == "plaza").then(crate::plaza::build_art),
+        paddock: (key == "paddock" && !staged)
+            .then(|| engine_anim::demo::build_demo(zone("paddock").center)),
     }
 }
 
@@ -655,7 +661,12 @@ pub fn spawn_cell(
     match (key, part) {
         ("plaza", _) => crate::plaza::spawn(commands, lib, z, part, &mut art.plaza),
         ("market", 0) => engine_ui::demo::spawn_demo(commands, z.center),
-        ("paddock", 0) => engine_anim::demo::spawn_demo(commands, z.center),
+        ("paddock", 0) => match art.paddock.take() {
+            Some(parts) => commands.queue(move |world: &mut World| {
+                engine_anim::demo::place_demo(world, parts);
+            }),
+            None => engine_anim::demo::spawn_demo(commands, z.center),
+        },
         ("paddock", 1) => crate::paddock::spawn(commands, z.center),
         ("physics", 0) => engine_physics::demo::spawn_demo(commands, z.center),
         ("yard", 0) => engine_softbody::demo::spawn_demo(commands, z.center),

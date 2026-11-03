@@ -47,8 +47,20 @@ pub fn install(app: &mut App, spec: &str) {
 
 /// Whether [`run`] has anything to do this frame: the world is built and the camera is due to
 /// move on (or hasn't gone to the first place yet).
-fn due(loops: Res<Loops>, build: Option<Res<crate::build::WorldBuild>>) -> bool {
+fn due(
+    loops: Res<Loops>,
+    build: Option<Res<crate::build::WorldBuild>>,
+    cells: Option<Res<engine::world::StreamedCells>>,
+) -> bool {
+    // The first stop's clock starts once every zone is in (`build::zones_in`).
+    let zones_in = loops.arrived.is_some()
+        || cells.is_none_or(|c| {
+            c.cells
+                .iter()
+                .all(|c| c.retired || c.state == engine::world::CellState::Loaded)
+        });
     build.is_none()
+        && zones_in
         && loops
             .arrived
             .is_none_or(|at| at.elapsed().as_secs_f32() >= DWELL_S)

@@ -100,6 +100,19 @@ pub fn install(app: &mut App, only: Option<&str>) {
 }
 
 fn run(world: &mut World) {
+    // The zones load over the first frames (`build::zones_in`); nothing is drawn meanwhile, as
+    // a software renderer would spend seconds on each of them.
+    let first = {
+        let tour = world.resource::<Tour>();
+        tour.index == 0 && tour.frames == 0
+    };
+    if first {
+        if !crate::build::zones_in(world) {
+            park(world);
+            return;
+        }
+        unpark(world);
+    }
     let (place, frames, index, total, out_dir) = {
         let tour = world.resource::<Tour>();
         let Some(place) = tour.places.get(tour.index).cloned() else {

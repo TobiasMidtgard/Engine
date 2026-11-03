@@ -273,12 +273,12 @@ const STEPS: [Step; 13] = [
                 only.0
             );
         }
-        // The zones whose art bakes on workers wait for it, so their spawn is quick.
-        if staged
-            && PREFETCH.iter().any(|(key, _, ready)| {
-                only.as_ref().is_none_or(|o| o.0.iter().any(|k| k == key)) && !ready(world)
-            })
-        {
+        // The zones whose art bakes on workers wait for it, so their spawn is quick. (A tour
+        // builds in one go, so it can't wait a frame: its paddock makes its bodies in the
+        // cell's build step instead, zones::build_cell.)
+        if PREFETCH.iter().any(|(key, _, ready)| {
+            staged && only.as_ref().is_none_or(|o| o.0.iter().any(|k| k == key)) && !ready(world)
+        }) {
             return false;
         }
         // Each zone is a streamed cell: in the exe it wakes when the player comes near (and
@@ -295,7 +295,7 @@ const STEPS: [Step; 13] = [
                 key,
                 cell.center,
                 cell.radius,
-                move || zones::build_cell(key),
+                move || zones::build_cell(key, staged),
                 move |world, art, part| {
                     let t = std::time::Instant::now();
                     with_commands(world, |c| {
@@ -325,9 +325,12 @@ const STEPS: [Step; 13] = [
             world.stream_cell(streamed);
         }
         if !staged {
+            // Every zone at once, but over a few frames of at most a quarter second each, not
+            // one 10 s frame that trips the engine's watchdog (round 21b); tours and loops start
+            // once they are in ([`zones_in`]).
             world.insert_resource(StreamingBudget {
                 loads_per_frame: usize::MAX,
-                frame_ms: f32::INFINITY,
+                frame_ms: 250.0,
                 ..Default::default()
             });
         }
@@ -640,6 +643,18 @@ pub fn step(world: &mut World) {
 }
 
 /// Whether the world is still being built (the start screen waits).
+/// Whether every zone a tour or loop loaded is in: they all load at once, over a few frames
+/// of at most a quarter second (round 21b: in one 10.7 s frame the first stop's clock ran
+/// through startup), the paddock's bodies on a worker first.
+pub fn zones_in(world: &World) -> bool {
+    world.get_resource::<StreamedCells>().is_none_or(|cells| {
+        cells
+            .cells
+            .iter()
+            .all(|c| c.retired || c.state == engine::world::CellState::Loaded)
+    })
+}
+
 pub fn building(world: &World) -> bool {
     world.contains_resource::<WorldBuild>()
 }
