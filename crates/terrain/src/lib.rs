@@ -341,6 +341,18 @@ pub struct TerrainSettings {
     /// up to four times the detail, so mountains, canyons and craters stay sharp from space.
     /// Planets covering less of the view get a share of it (0 = never boost).
     pub patch_budget: usize,
+    /// The budget's extra detail stops where the patches' quads would be smaller than this on
+    /// screen, pixels (at the split distance; the farthest of a level are half that): finer
+    /// triangles add nothing the screen can show, and the GPU shades every triangle in whole
+    /// 2×2 pixel quads, so sub-pixel ones cost several times their pixels (Fatahalian et al.,
+    /// "Reducing Shading on GPUs using Quad-Fragment Merging", SIGGRAPH 2010). Scales with the
+    /// view's resolution: about ×1.4 detail at 900 lines, ×2.2 at 1440. 0 = no limit.
+    pub min_quad_px: f64,
+    /// How much the air's haze and fog lower the detail of land seen through them: the split
+    /// distance is multiplied by 1 / (1 + k × (1 − transmittance)²), so land the haze hides
+    /// completely splits at a quarter of the distance with k = 3. As Cesium's fog does (35%
+    /// fewer tiles in views toward the horizon). 0 = off.
+    pub haze_detail: f64,
     /// GPU patch slots (68 KB each).
     pub max_patches: usize,
     /// Physics collider tile size (meters) and resolution (samples per side).
@@ -378,6 +390,8 @@ impl Default for TerrainSettings {
         Self {
             split_factor: 3.2,
             patch_budget: 700,
+            min_quad_px: 6.0,
+            haze_detail: 3.0,
             max_patches: 6144,
             collider_tile_m: 64.0,
             collider_samples: 65,

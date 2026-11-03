@@ -7,6 +7,11 @@
 //! copy shares them) and spawns one entity per part. Without a renderer (tests that only run
 //! the simulation) nothing is spawned.
 //!
+//! The meshes and the surfaces' textures are made on a worker ([`engine_core::off_frame`]):
+//! the prop's anchor entity stands at once, its parts appear under it once built (in a
+//! streamed cell, before the cell counts as loaded). Each prop and surface is built once
+//! however many copies wait for it.
+//!
 //! - [`materials`]: physically based materials per [`Surface`], with generated textures.
 //! - [`meshes`]: mesh building blocks (lathe, beveled boxes, rocks, paving, sweeps, …).
 //! - [`props`]: the Spell court's props, built from those blocks.
@@ -15,7 +20,8 @@ pub mod materials;
 pub mod meshes;
 pub mod props;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use engine_assets::{Assets, Handle};
 use engine_core::prelude::*;
@@ -111,6 +117,8 @@ pub struct ArtCache {
     glowing: Vec<(Handle<StandardMaterial>, f32)>,
     /// Factor on authored emission now in effect (see [`follow_exposure`]).
     glow: f32,
+    /// Props and surfaces being built on workers.
+    building: Building,
 }
 
 impl Default for ArtCache {
@@ -120,8 +128,68 @@ impl Default for ArtCache {
             materials: HashMap::new(),
             glowing: Vec::new(),
             glow: 1.0,
+            building: Building::default(),
         }
     }
+}
+
+/// A value built once on a worker and taken once on the main thread; every job that wants it
+/// shares the slot, and the first to wait on it builds it.
+type Once<T> = Arc<OnceLock<Mutex<Option<T>>>>;
+/// A built prop: its surfaces (read on the worker) and the prop, until it is registered.
+type BuiltProp = (Vec<Surface>, Mutex<Option<Prop>>);
+type BuiltSurface = (StandardMaterial, materials::textures::TextureImages);
+
+/// Props and surfaces being built on workers, shared by the jobs that want them.
+#[derive(Clone, Default)]
+struct Building {
+    props: Arc<Mutex<HashMap<String, Arc<OnceLock<BuiltProp>>>>>,
+    surfaces: Arc<Mutex<HashMap<Surface, Once<BuiltSurface>>>>,
+}
+
+impl Building {
+    /// The prop `key`, built by `build` here unless another job built it first.
+    fn prop(&self, key: &str, build: impl FnOnce() -> Prop) -> Arc<OnceLock<BuiltProp>> {
+        let slot = self
+            .props
+            .lock()
+            .unwrap()
+            .entry(key.to_string())
+            .or_default()
+            .clone();
+        slot.get_or_init(|| {
+            let prop = build();
+            let surfaces = prop.parts.iter().map(|p| p.surface).collect();
+            (surfaces, Mutex::new(Some(prop)))
+        });
+        slot
+    }
+
+    /// `surface`'s material and textures, generated here unless another job did it first.
+    fn surface(&self, surface: Surface) -> Once<BuiltSurface> {
+        let slot = self
+            .surfaces
+            .lock()
+            .unwrap()
+            .entry(surface)
+            .or_default()
+            .clone();
+        slot.get_or_init(|| Mutex::new(Some(materials::generate(surface, 0))));
+        slot
+    }
+
+    /// The generated `surface`, if a worker made it and nobody has taken it yet.
+    fn take_surface(&self, surface: Surface) -> Option<BuiltSurface> {
+        let slot = self.surfaces.lock().unwrap().get(&surface)?.clone();
+        slot.get()?.lock().unwrap().take()
+    }
+}
+
+/// Whether the renderer's asset stores are here (art is only made for one).
+fn has_renderer(world: &World) -> bool {
+    world.contains_resource::<Assets<Mesh>>()
+        && world.contains_resource::<Assets<StandardMaterial>>()
+        && world.contains_resource::<Assets<Image>>()
 }
 
 /// Exposure that glowing art (rune inlays, crystals, burning coals) is authored for: dusk.
@@ -165,7 +233,8 @@ pub fn follow_exposure(
 }
 
 /// Spawn the prop registered as `key` at `at`, building it with `build` the first time the key
-/// is used. Returns nothing: the entities appear when the command runs.
+/// is used. Returns nothing: the prop's anchor appears when the command runs, its parts once
+/// they are built (see the module docs).
 pub fn spawn_prop(
     commands: &mut Commands,
     key: impl Into<String>,
@@ -174,20 +243,80 @@ pub fn spawn_prop(
 ) {
     let key = key.into();
     commands.queue(move |world: &mut World| {
-        if !world.contains_resource::<Assets<Mesh>>()
-            || !world.contains_resource::<Assets<StandardMaterial>>()
-            || !world.contains_resource::<Assets<Image>>()
-        {
+        if !has_renderer(world) {
             return;
         }
-        let parts = register(world, &key, build);
-        for (mesh, material) in parts {
-            world.spawn((
-                at,
-                MeshRenderer::new(MeshRef::Handle(mesh), MaterialRef::Handle(material)),
-            ));
-        }
+        // Spawned now so the prop follows world shifts while its parts build.
+        let anchor = world.spawn(at).id();
+        place_under(world, key, anchor, build);
     });
+}
+
+/// Spawn prop `key`'s parts as children of `parent`, building what isn't registered yet on a
+/// worker first. Does nothing without a renderer, or if `parent` is gone by then.
+pub fn place_under(
+    world: &mut World,
+    key: String,
+    parent: Entity,
+    build: impl FnOnce() -> Prop + Send + 'static,
+) {
+    if !has_renderer(world) {
+        return;
+    }
+    world.init_resource::<ArtCache>();
+    let cache = world.resource::<ArtCache>();
+    let known: Option<Vec<Surface>> = cache
+        .props
+        .get(&key)
+        .map(|parts| parts.iter().map(|p| p.1).collect());
+    let made: HashSet<Surface> = cache.materials.keys().copied().collect();
+    if known
+        .as_ref()
+        .is_some_and(|s| s.iter().all(|s| made.contains(s)))
+    {
+        spawn_parts(world, &key, parent, None);
+        return;
+    }
+    let building = cache.building.clone();
+    let name = format!("vfx prop {key}");
+    engine_core::off_frame::off_frame(
+        world,
+        name,
+        move || {
+            let prop = known.is_none().then(|| building.prop(&key, build));
+            let surfaces = known.unwrap_or_else(|| prop.as_ref().unwrap().get().unwrap().0.clone());
+            for s in surfaces.into_iter().filter(|s| !made.contains(s)) {
+                building.surface(s);
+            }
+            (key, prop)
+        },
+        move |world, (key, prop)| {
+            if world.get_entity(parent).is_ok() {
+                spawn_parts(world, &key, parent, prop);
+            }
+        },
+    );
+}
+
+/// Register `key` (from its worker-built `prop`, when it isn't yet) and spawn its parts under
+/// `parent`.
+fn spawn_parts(
+    world: &mut World,
+    key: &str,
+    parent: Entity,
+    prop: Option<Arc<OnceLock<BuiltProp>>>,
+) {
+    let take = || {
+        prop.and_then(|p| p.get()?.1.lock().unwrap().take())
+            .expect("a prop is registered by the first job that takes it")
+    };
+    for (mesh, material) in register(world, key, take) {
+        world.spawn((
+            Transform::default(),
+            MeshRenderer::new(MeshRef::Handle(mesh), MaterialRef::Handle(material)),
+            ChildOf(parent),
+        ));
+    }
 }
 
 /// Register a prop's meshes and materials (once per key) and return them.
@@ -216,9 +345,14 @@ pub fn register(
                     Some(m) => *m,
                     None => {
                         let glow = cache.glow;
+                        // Made on a worker when one built it (see `place_under`).
+                        let (material, set) = cache
+                            .building
+                            .take_surface(surface)
+                            .unwrap_or_else(|| materials::generate(surface, 0));
                         let (m, authored) =
                             world.resource_scope(|world, mut images: Mut<Assets<Image>>| {
-                                let mut made = materials::make(surface, &mut images);
+                                let mut made = materials::attach(material, set, &mut images);
                                 let authored = made.emissive_strength;
                                 made.emissive_strength *= glow;
                                 let m = world.resource_mut::<Assets<StandardMaterial>>().add(made);
@@ -235,4 +369,80 @@ pub fn register(
             })
             .collect()
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use engine_assets::AssetAppExt;
+    use engine_render::Shape;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    fn meshes(app: &mut App) -> Vec<Entity> {
+        app.world
+            .query_filtered::<Entity, With<MeshRenderer>>()
+            .iter(&app.world)
+            .collect()
+    }
+
+    #[test]
+    fn copies_of_a_prop_wait_for_one_build_on_a_worker_then_stand_under_their_anchors() {
+        let mut app = App::new();
+        app.init_asset::<Mesh>()
+            .init_asset::<StandardMaterial>()
+            .init_asset::<Image>();
+        // The rock's material is made already, so the test builds no textures.
+        let rock = app
+            .world
+            .resource_mut::<Assets<StandardMaterial>>()
+            .add(StandardMaterial::default());
+        app.world.init_resource::<ArtCache>();
+        app.world
+            .resource_mut::<ArtCache>()
+            .materials
+            .insert(Surface::Rock, rock);
+        let builds = Arc::new(AtomicUsize::new(0));
+        let spawn = |app: &mut App, x: f64| {
+            let b = builds.clone();
+            let mut commands = app.world.commands();
+            spawn_prop(
+                &mut commands,
+                "test.rock",
+                Transform::from_translation(DVec3::new(x, 0.0, 0.0)),
+                move || {
+                    b.fetch_add(1, Ordering::SeqCst);
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                    Prop::new().with(Surface::Rock, Shape::Cuboid { size: [1.0; 3] }.mesh())
+                },
+            );
+            app.world.flush();
+        };
+        for x in [0.0, 10.0, 20.0] {
+            spawn(&mut app, x);
+        }
+        // The anchors stand at once; the parts wait for the build.
+        assert!(meshes(&mut app).is_empty());
+        engine_core::off_frame::finish(&mut app.world, None);
+        let parts = meshes(&mut app);
+        assert_eq!(parts.len(), 3);
+        assert_eq!(
+            builds.load(Ordering::SeqCst),
+            1,
+            "built once for every copy"
+        );
+        assert_eq!(app.world.resource::<Assets<Mesh>>().len(), 1);
+        let mut xs: Vec<f64> = parts
+            .iter()
+            .map(|&e| {
+                let parent = app.world.get::<ChildOf>(e).unwrap().parent();
+                app.world.get::<Transform>(parent).unwrap().translation.x
+            })
+            .collect();
+        xs.sort_by(f64::total_cmp);
+        assert_eq!(xs, [0.0, 10.0, 20.0]);
+        // A known prop with its materials made is placed at once.
+        spawn(&mut app, 30.0);
+        assert_eq!(meshes(&mut app).len(), 4);
+        assert_eq!(builds.load(Ordering::SeqCst), 1);
+    }
 }

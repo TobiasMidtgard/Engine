@@ -3,14 +3,15 @@
 //! procedural animation.
 //!
 //! ```text
-//! cargo run -p engine_movement --release --example fighter_preview -- [out_dir] [quick|ladder|vault]
+//! cargo run -p engine_movement --release --example fighter_preview -- [out_dir] [quick|ladder|vault|feet|swim]
 //! ```
 //!
 //! `quick` stops after the lineup, helmets, faces, backs and whole bodies (for iterating on
 //! armor); `ladder` renders only pilots on a ladder (climbing at two moments of the hand over
 //! hand cycle, sliding down, and getting on with the sword going away) from the side and from
 //! behind; `vault` renders only pilots vaulting a barrier at a sprint (the take-off, the hand
-//! planted, the legs over and the drop).
+//! planted, the legs over and the drop); `feet` renders pilots on a 30° slope with and without
+//! their feet placed on it; `swim` renders a pilot treading water and swimming the crawl.
 //!
 //! Each pose comes from the real animator ([`Animator`]) fed a short scripted timeline of
 //! movement and combat state, exactly as the demo feeds it from `Mover` and `CombatState`.
@@ -362,6 +363,158 @@ fn vault_shots(app: &mut App, camera: Entity, out: &Path, at: DVec3) {
 }
 
 /// Forward and up speeds as a character-space velocity (forward is −Z).
+/// A pilot side-on to a 30° slope, standing and walking up it, each as the body was posed
+/// before (flat at the capsule's bottom) and with its feet placed on the ground under them;
+/// shot at foot level from the side and from in front.
+fn feet_shots(app: &mut App, camera: Entity, out: &Path, at: DVec3) {
+    let v = DVec3::new;
+    let tan = 30f64.to_radians().tan();
+    let normal = Vec3::new(-0.5, 0.866, 0.0).normalize();
+    // The capsule's round bottom rests on the slope 5.4 cm above the ground under its centre.
+    let lift = 0.35 * (1.0 / 30f64.to_radians().cos() - 1.0);
+    let cases = [
+        ("standing", 0.0f32, LocomotionMode::Idle, Vec3::ZERO),
+        (
+            "walking_up",
+            -std::f32::consts::FRAC_PI_2,
+            LocomotionMode::Walk,
+            Vec3::new(0.0, 0.0, -1.6),
+        ),
+    ];
+    let mut paths = Vec::new();
+    for (k, (name, yaw, mode, velocity)) in cases.into_iter().enumerate() {
+        for (j, placed) in [false, true].into_iter().enumerate() {
+            // Raised clear of the stage floor, which would hide the slope's low half.
+            let base = at + v((k * 2 + j) as f64 * 8.0, 1.5, 0.0);
+            let ramp = Quat::from_rotation_z(30f32.to_radians());
+            app.world.spawn((
+                Transform::from_translation(base + (ramp * Vec3::new(0.0, -0.1, 0.0)).as_dvec3())
+                    .with_rotation(ramp),
+                MeshRenderer::new(
+                    Shape::Cuboid {
+                        size: [5.0, 0.2, 2.5],
+                    },
+                    StandardMaterial::hex(0x6f6a5c).with_roughness(0.85),
+                ),
+            ));
+            let rot = Quat::from_rotation_y(yaw);
+            let feet = base + v(0.0, lift, 0.0);
+            let mut anim = Animator::new(Style::Pilot);
+            let mut pose = Pose::BIND;
+            let mut t = 0.0;
+            while t < 1.6 {
+                let ground = pose.ankle.map(|a| {
+                    let w = feet + (rot * a).as_dvec3();
+                    let h = (w.x - base.x) * tan + base.y - feet.y;
+                    placed.then_some(rig::FootGround {
+                        height: h as f32,
+                        normal: rot.inverse() * normal,
+                    })
+                });
+                pose = anim.update(&AnimInput {
+                    dt: DT,
+                    mode,
+                    velocity,
+                    fighter: false,
+                    ground,
+                    ..AnimInput::default()
+                });
+                t += DT;
+            }
+            let a = spawn_actor(&mut app.world, Style::Pilot, feet, yaw);
+            set_pose(&mut app.world, &a, &pose);
+            let label = if placed { "after" } else { "before" };
+            for (view, eye, target) in [
+                ("profile", v(0.0, 0.55, -3.6), v(0.0, 0.45, 0.0)),
+                ("three_quarter", v(-2.3, 0.9, -2.9), v(0.0, 0.4, 0.0)),
+            ] {
+                let p = out.join(format!("feet_{name}_{label}_{view}.png"));
+                if shoot(app, camera, (feet + eye, feet + target, 30.0), &p) {
+                    paths.push(p);
+                }
+            }
+        }
+    }
+    if !paths.is_empty() {
+        sheet(
+            &paths,
+            4,
+            WIDTH / 4,
+            HEIGHT / 4,
+            &out.join("feet_sheet.png"),
+        );
+    }
+}
+
+/// A pilot in water at the profile's floating depth: treading water, and swimming the front
+/// crawl at three moments of the stroke; shot from the side, ahead and above.
+fn swim_shots(app: &mut App, camera: Entity, out: &Path, at: DVec3) {
+    let v = DVec3::new;
+    // Floating, the capsule's centre is 0.22 m under the surface: the feet 1.12 m under it.
+    let surface = 1.4;
+    let swim = |speed: f32, secs: f32| {
+        simulate(Style::Pilot, secs, |_| AnimInput {
+            mode: LocomotionMode::Swim,
+            grounded: false,
+            velocity: Vec3::new(0.0, 0.0, -speed),
+            fighter: false,
+            ..AnimInput::default()
+        })
+    };
+    let poses = [
+        ("treading", swim(0.0, 3.0)),
+        ("crawl_a", swim(1.8, 3.0)),
+        ("crawl_b", swim(1.8, 3.35)),
+        ("crawl_c", swim(1.8, 3.7)),
+    ];
+    let mut paths = Vec::new();
+    for (k, (name, pose)) in poses.iter().enumerate() {
+        let base = at + v(k as f64 * 8.0, 0.0, 0.0);
+        app.world.spawn((
+            Transform::from_translation(base + v(0.0, surface, 0.0)),
+            MeshRenderer::new(
+                Shape::Plane {
+                    size: [7.0, 7.0],
+                    subdivisions: 1,
+                },
+                StandardMaterial::hex(0x2c6a7a)
+                    .with_roughness(0.08)
+                    .with_alpha(0.55),
+            ),
+        ));
+        let feet = base + v(0.0, surface - 1.12, 0.0);
+        let a = spawn_actor(&mut app.world, Style::Pilot, feet, 0.0);
+        set_pose(&mut app.world, &a, pose);
+        for (view, eye, target) in [
+            (
+                "side",
+                v(2.6, surface + 0.5, -0.9),
+                v(0.0, surface - 0.1, -0.7),
+            ),
+            ("ahead", v(-1.2, surface + 0.9, -3.2), v(0.0, surface, -0.6)),
+            (
+                "above",
+                v(1.4, surface + 2.6, 0.6),
+                v(0.0, surface - 0.2, -0.6),
+            ),
+        ] {
+            let p = out.join(format!("swim_{name}_{view}.png"));
+            if shoot(app, camera, (base + eye, base + target, 38.0), &p) {
+                paths.push(p);
+            }
+        }
+    }
+    if !paths.is_empty() {
+        sheet(
+            &paths,
+            3,
+            WIDTH / 3,
+            HEIGHT / 3,
+            &out.join("swim_sheet.png"),
+        );
+    }
+}
+
 fn v3(forward: f32, up: f32) -> Vec3 {
     Vec3::new(0.0, up, -forward)
 }
@@ -481,6 +634,14 @@ fn main() {
 
     if std::env::args().nth(2).is_some_and(|a| a == "ladder") {
         ladder_shots(&mut app, camera, &out, stage(30));
+        return;
+    }
+    if std::env::args().nth(2).is_some_and(|a| a == "feet") {
+        feet_shots(&mut app, camera, &out, stage(30));
+        return;
+    }
+    if std::env::args().nth(2).is_some_and(|a| a == "swim") {
+        swim_shots(&mut app, camera, &out, stage(30));
         return;
     }
     if std::env::args().nth(2).is_some_and(|a| a == "vault") {

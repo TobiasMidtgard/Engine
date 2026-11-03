@@ -93,11 +93,14 @@ pub fn install(app: &mut App, only: Option<&str>) {
         .set_source(engine::core::time::TimeSource::Manual {
             step_secs: STEP_SECS as f64,
         });
-    // The far woods build, and the near woods plant, every cell in view on the first frame
-    // instead of a few a frame, which a tour's few frames per stop would never finish.
+    // The far woods build, and the near woods plant, every cell in view at once on the task
+    // pool instead of a few at a time, which a tour's few frames per stop would never finish.
+    // The stop waits for them (`FoliageLoading`). Built in the frame instead, a jump to the
+    // field held one frame for 1.2 s on the PC (round 22).
     if let Some(mut far) = app.world.get_resource_mut::<engine_foliage::FarWoods>() {
-        far.background_builds = 0;
-        far.cells_per_frame = u32::MAX;
+        far.background_builds = 4096;
+        far.cells_per_frame = 256;
+        far.hold_loading = true;
     }
     if let Some(mut near) = app.world.get_resource_mut::<engine_foliage::NearWoods>() {
         near.cells_per_frame = u32::MAX;

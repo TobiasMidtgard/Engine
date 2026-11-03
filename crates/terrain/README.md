@@ -19,7 +19,19 @@ everything else (streaming, LOD, colliders, ground queries, prints) follows the 
   A planet that fills only part of the view gets finer patches in its share of the screen
   (up to 4× finer split distance, aiming at `TerrainSettings::patch_budget` patches for a
   planet that fills the view), so seen from orbit its canyons, volcanoes and coasts stay
-  sharp instead of dissolving into a few big patches. Below High quality
+  sharp instead of dissolving into a few big patches. That extra detail stops where quads
+  would be under `TerrainSettings::min_quad_px` (6) pixels on screen, so it follows the
+  view's resolution (about ×1.4 at 900 lines, ×2.2 at 1440; `MIN_QUAD_PX=` in
+  `terrain_shots`): from low orbit at 1600x900 that is 245 patches instead of 690, the
+  ground's scene pass 35% and its prepass 62% cheaper on lavapipe, with the same picture
+  (sub-pixel triangles cost whole 2×2 pixel quads each). Land the air hides splits later,
+  as Cesium's fog does: the split distance is multiplied by 1 / (1 + k (1 − T)²), with T the
+  transmittance of the air's gas and haze and the weather's height fog from the camera to the
+  patch (`TerrainSettings::haze_detail`, k = 3; `HAZE_DETAIL=` in `terrain_shots`), and the
+  boost above fills its budget against a haze-free estimate, so what the haze saves stays
+  saved. At 1600x900 on lavapipe: `farmland_3km` 648 to 355 patches (GPU 16% cheaper),
+  `earth_range` 733 to 562, `lake_shore` 754 to 584, `earth_leo` 245 to 196, with the same
+  picture (no pixel off by more than 16 in 255 at more than 0.06% of the view). Below High quality
   (`engine_world::Scalability::view_distance`) both shrink: Medium draws about a quarter fewer
   patches, Low half (`QUALITY=` and `SPLIT_FACTOR=`/`PATCH_BUDGET=` in `terrain_shots`).
   Patches also draw the renderer's depth prepass (depth, normal, motion; moving planets
@@ -374,12 +386,16 @@ rock's larger scales; about 11% of the ground's pixel cost at `lake_shore` on la
 reflections are half resolution and rippled, as Unreal's reflection captures and HDRP's
 planar probes strip features.
 
-The ground's CPU cost per frame is in `Diagnostics` as `render.cpu.terrain: <part>` (maps,
-materials, far looks, uploads, then per planet `patches: select`, `look-ahead`, `far shadow`,
+The ground's CPU cost per frame is in `Diagnostics` as `render.cpu.terrain: <part>` (maps:
+footprints / weather / worn paths / paint / bind group, materials, far looks, uploads: free
+stale / new page, uploads, then per planet `patches: select`, `look-ahead`, `far shadow`,
 `ask workers`, `recycle`, `draw lists`, `planet data`, and buffers), so the renderer's hitch
 lists say which part of `prepare terrain` spiked. `ENGINE_PROFILE=1 FLY=200 terrain_shots
 <out> 640x360 earth_range` flies the view level toward its target at `FLY_MPF` meters a frame
-(5 by default: 300 m/s) and prints each part's mean and worst.
+(5 by default: 300 m/s) and prints each part's mean and worst. The weather's surface layers
+(wetness, puddles, snow, scorch) go to a texture that wraps around like a clipmap's: when the
+grid follows the camera only the strips that came in are sent, and changes go a sixth of the
+rows a frame, so a 20 m/frame flight's `maps: weather` worst fell from 29 to 6 ms on lavapipe.
 
 ## Test cases in the showcase
 

@@ -40,6 +40,7 @@ struct Maps {
     paint_v: vec4<f32>,      // its row axis, 1 when there is a map
     paint_up: vec4<f32>,     // the home spot's up
     deform_base: vec4<f32>,  // the deformation window's start in its texture: share, cells
+    surface_base: vec4<f32>, // the surface layers grid's start in its texture (it wraps): share
 };
 
 const C_LUSH: u32 = 0u;
@@ -317,7 +318,8 @@ fn surface_layers(rel: vec3<f32>) -> vec4<f32> {
     }
     let uv = surface_uv(rel);
     let edge = min(min(uv.x, uv.y), min(1.0 - uv.x, 1.0 - uv.y));
-    let grid = textureSampleLevel(surface_tex, map_sampler, uv, 0.0);
+    // The texture wraps around (render.rs `SurfaceUpload`; the sampler repeats).
+    let grid = textureSampleLevel(surface_tex, map_sampler, uv + maps.surface_base.xy, 0.0);
     return mix(maps.far, grid, smoothstep(0.0, 0.1, edge));
 }
 

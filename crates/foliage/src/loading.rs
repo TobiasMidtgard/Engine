@@ -29,6 +29,8 @@ pub struct FoliageLoading {
     pub(crate) floors_waiting: bool,
     /// Ground covers being rebuilt or waiting for their regions.
     pub(crate) scenery_building: usize,
+    /// Far woods cells building on workers or waiting to go in place.
+    pub(crate) far_building: usize,
     /// How long the last frame took on the wall clock (ms), measured by [`measure_frames`].
     pub(crate) last_frame_ms: f32,
 }
@@ -45,6 +47,7 @@ impl Default for FoliageLoading {
             trees_waiting: false,
             floors_waiting: false,
             scenery_building: 0,
+            far_building: 0,
             last_frame_ms: 0.0,
         }
     }
@@ -70,6 +73,7 @@ impl FoliageLoading {
             && !self.trees_waiting
             && !self.floors_waiting
             && self.scenery_building == 0
+            && self.far_building == 0
     }
 
     /// Milliseconds this frame may spend putting finished builds in place: the play budget,

@@ -62,9 +62,10 @@ const BACK_H: f32 = 2.75;
 const TOP_Y: f32 = 1.0;
 const COUNTER_Z: f32 = HD - 0.25;
 
-/// One stall's meshes, by material.
+/// One stall's meshes, by material: [`build_stall`] makes them without the world, so they
+/// can be made on a worker.
 #[derive(Default)]
-struct Parts {
+pub struct Parts {
     wood: Mesh,
     canvas: Mesh,
     iron: Mesh,
@@ -88,12 +89,19 @@ pub fn spawn_stall(
     goods: Goods,
     seed: u64,
 ) -> Vec<Entity> {
+    place_stall(world, mats, at, build_stall(goods, seed))
+}
+
+/// Where the lantern hangs, in the stall's space.
+const LANTERN_AT: Vec3 = Vec3::new(-0.95, FRONT_H - 0.62, HD + 0.02);
+
+/// A stall's meshes (see [`spawn_stall`]), made without the world.
+pub fn build_stall(goods: Goods, seed: u64) -> Parts {
     let mut rng = Rng::new(seed);
     let mut p = Parts::default();
     frame(&mut p, &mut rng);
     awning(&mut p, seed as u32);
-    let lantern_at = Vec3::new(-0.95, FRONT_H - 0.62, HD + 0.02);
-    lantern(&mut p, lantern_at);
+    lantern(&mut p, LANTERN_AT);
     match goods {
         Goods::Trader => trader(&mut p, &mut rng),
         Goods::Produce => produce(&mut p, &mut rng),
@@ -101,6 +109,13 @@ pub fn spawn_stall(
         Goods::Smith => smith(&mut p, &mut rng),
         Goods::Potter => potter(&mut p, &mut rng),
     }
+    p
+}
+
+/// Spawns a stall built by [`build_stall`] at `at` and returns its entities, the lantern's
+/// light included.
+pub fn place_stall(world: &mut World, mats: &StallMats, at: Transform, p: Parts) -> Vec<Entity> {
+    let lantern_at = LANTERN_AT;
     let mut out = Vec::new();
     for (mesh, mat, shadows) in [
         (p.wood, mats.wood, true),

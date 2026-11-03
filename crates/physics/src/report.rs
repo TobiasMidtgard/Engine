@@ -30,6 +30,8 @@ struct Totals {
     /// Rapier's own stages ([`STAGES`]), ms, all regions together.
     stages: [f64; STAGES.len()],
     regions: HashMap<RegionId, (f64, u32)>,
+    /// The step's own parts outside the regions' jobs, by name, ms ([`part_ms`]).
+    outside: Vec<(&'static str, f64)>,
 }
 
 fn totals() -> &'static Mutex<Totals> {
@@ -118,6 +120,15 @@ pub(crate) fn rapier_stages(c: &rapier3d::counters::Counters) {
     }
 }
 
+/// `ms` of the step's own work went to `name` (sync, upkeep, write back...).
+pub(crate) fn part_ms(name: &'static str, ms: f64) {
+    let mut t = totals().lock();
+    match t.outside.iter_mut().find(|c| c.0 == name) {
+        Some(c) => c.1 += ms,
+        None => t.outside.push((name, ms)),
+    }
+}
+
 /// Count `n` of something this substep (reported as an average per substep).
 pub(crate) fn count(name: &'static str, n: usize) {
     let mut t = totals().lock();
@@ -179,6 +190,19 @@ pub(crate) fn step_done(world: &World, sim: &Simulation, foci: &[DVec3], started
         in_regions / steps,
         parts.join(", "),
         (t.step_ms - in_regions) / steps
+    );
+    // The step's span holds the time `physics_simulate` waited for its lock and for the
+    // systems beside it, and the gap before `physics_write_back`: not physics's work.
+    let own: f64 = t.outside.iter().map(|o| o.1).sum();
+    let outside: Vec<String> = t
+        .outside
+        .iter()
+        .map(|(name, ms)| format!("{name} {:.2}", ms / steps))
+        .collect();
+    out += &format!(
+        "; the step's own parts ({}; waiting between them {:.2})",
+        outside.join(", "),
+        (t.step_ms - own).max(0.0) / steps
     );
     let stages: Vec<String> = STAGES
         .iter()

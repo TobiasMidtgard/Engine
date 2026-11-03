@@ -545,6 +545,9 @@ pub(crate) fn physics_sync(world: &mut World, mut q: Local<Option<StepQueries>>)
     drop(_part);
     drop(sync);
     drop(sim);
+    if crate::report::wanted() {
+        crate::report::part_ms("sync", started.elapsed().as_secs_f64() * 1000.0);
+    }
     let mut carry = world.resource_mut::<StepCarry>();
     *carry = StepCarry {
         started: Some(started),
@@ -591,6 +594,7 @@ pub(crate) fn physics_simulate(
     let water = carry.water.take();
     // ---------------------------------------------------------------- regions
     let upkeep = tracing::info_span!("region upkeep").entered();
+    let mark = Instant::now();
     // Only awake bodies move (sleeping ones are held still).
     let max_step = sim
         .live_regions()
@@ -622,6 +626,7 @@ pub(crate) fn physics_simulate(
     }
     let region_ids: Vec<RegionId> = sim.live_regions().map(|(id, _)| id).collect();
     drop(upkeep);
+    let upkept = mark.elapsed();
     let report = crate::report::wanted();
     let planning = tracing::info_span!("region plans").entered();
     let busy = busy_regions(&sim);
@@ -741,6 +746,7 @@ pub(crate) fn physics_simulate(
         });
     }
     drop(planning);
+    let planned = mark.elapsed();
     let rounds = plans.iter().map(|p| p.substeps).max().unwrap_or(0);
     // The water stands still through the step: its answers serve every substep (and, far
     // from the foci, a few steps).
@@ -876,6 +882,7 @@ pub(crate) fn physics_simulate(
             }
         }
     }
+    let stepped = mark.elapsed();
     let finish = tracing::info_span!("characters and bounds").entered();
     for p in &plans {
         let t = Instant::now();
@@ -890,6 +897,13 @@ pub(crate) fn physics_simulate(
     drop(finish);
     sim.recheck_contacts();
     drop(sim);
+    if report {
+        let ms = |d: std::time::Duration| d.as_secs_f64() * 1000.0;
+        crate::report::part_ms("region upkeep", ms(upkept));
+        crate::report::part_ms("plans", ms(planned - upkept));
+        crate::report::part_ms("substeps", ms(stepped - planned));
+        crate::report::part_ms("characters and bounds", ms(mark.elapsed() - stepped));
+    }
     carry.substeps = substeps;
     carry.report = report;
     carry.work_ms += simulating.elapsed().as_secs_f64() * 1000.0;
@@ -1067,6 +1081,7 @@ pub(crate) fn physics_write_back(world: &mut World) {
     drop(write_back);
     let _stats = tracing::info_span!("stats").entered();
     if report {
+        crate::report::part_ms("write back", writing.elapsed().as_secs_f64() * 1000.0);
         crate::report::step_done(world, &sim, &foci, started);
     }
     // ---------------------------------------------------------------- stats
@@ -1543,7 +1558,11 @@ fn spin_drag(c: &rapier3d::geometry::Collider, spin: Vec3) -> Vec3 {
 }
 
 /// Whether `r`'s Rapier step sweeps fast bodies (continuous collision detection): near a focus
-/// (tier 0), or for an awake body that asked for it (`engine_world::RigidBody::ccd`) anywhere.
+/// (tier 0), or anywhere while a body that asked for it (`engine_world::RigidBody::ccd`) moves
+/// more than [`BULLET_STEP_M`] a substep with something within reach of its path. Rapier's
+/// switch is the whole world's: every car and plane asks for it, so a parked car, or the
+/// circuit's planes 145 m up with nothing near them, kept the lake's boats beside them swept
+/// (8 ms a step at the field in the loops' second round, 1.4-4 ms on the PC).
 ///
 /// Rapier sweeps every dynamic body that moves more than half its thinnest collider in a
 /// step against the fixed geometry around it. A boat's side walls are a few centimeters
@@ -1552,14 +1571,47 @@ fn spin_drag(c: &rapier3d::geometry::Collider, spin: Vec3) -> Vec3 {
 /// most of the PC's slow second loop (round 21d). Past [`PhysicsSettings::coarse_beyond_m`]
 /// nobody sees a body poke into the ground for a step, and one that falls through is caught
 /// ([`crate::grounding`]).
-fn sweeps_wanted(r: &crate::sim::Region) -> bool {
-    r.tier == 0
-        || r.world
-            .islands
-            .active_bodies()
-            .filter_map(|h| r.world.bodies.get(h))
-            .any(|rb| rb.is_ccd_enabled())
+fn sweeps_wanted(r: &crate::sim::Region, dt: f32) -> bool {
+    use rapier3d::parry::bounding_volume::BoundingVolume;
+    if r.tier == 0 {
+        return true;
+    }
+    let w = &r.world;
+    w.islands.active_bodies().any(|h| {
+        let Some(rb) = w.bodies.get(h) else {
+            return false;
+        };
+        let step = rb.linvel().length() * dt;
+        if !rb.is_ccd_enabled() || step <= BULLET_STEP_M {
+            return false;
+        }
+        // Its path this substep, and a margin: anything there it could pass through?
+        let Some(mut path) = rb
+            .colliders()
+            .iter()
+            .filter_map(|c| w.colliders.get(*c))
+            .map(|c| c.compute_aabb())
+            .reduce(|a, b| a.merged(&b))
+        else {
+            return false;
+        };
+        path.mins -= Vec3::splat(step + BULLET_MARGIN_M);
+        path.maxs += Vec3::splat(step + BULLET_MARGIN_M);
+        let filter = rapier3d::prelude::QueryFilter::default()
+            .exclude_rigid_body(h)
+            .exclude_sensors();
+        w.query_pipeline_with_filter(filter)
+            .intersect_aabb_conservative(path)
+            .next()
+            .is_some()
+    })
 }
+
+/// How far a body that asked for continuous collision detection must move in a substep for a
+/// region past full detail to sweep, meters (6 m/s at 60 Hz).
+const BULLET_STEP_M: f32 = 0.1;
+/// Beyond its path, how near something must be to a fast body for its region to sweep, m.
+const BULLET_MARGIN_M: f32 = 0.5;
 
 /// A body whose far edge moves faster than this from turning alone, m/s, gets its contacts
 /// recomputed every step; below [`STILL_EDGE_SPEED`] Rapier may reuse them again.
@@ -2048,7 +2100,7 @@ fn substep(
         r.world.integration_parameters.dt = p.sub_dt;
         r.world.integration_parameters.num_solver_iterations =
             crate::fine::iterations(shared.settings, r.fine, p.sub_dt);
-        r.world.integration_parameters.max_ccd_substeps = usize::from(sweeps_wanted(r));
+        r.world.integration_parameters.max_ccd_substeps = usize::from(sweeps_wanted(r, p.sub_dt));
         let collector = std::mem::take(&mut r.collector);
         let pool = match wide_pool() {
             Some(wide) if r.wide => Arc::clone(wide),

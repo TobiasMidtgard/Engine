@@ -147,12 +147,158 @@ impl Target {
     }
 }
 
-struct Targets {
-    camera: Option<Entity>,
-    size: (u32, u32),
+/// One image of the clouds: in-scattered light and transmittance, depths, clear sky.
+struct CloudImage {
     color: Target,
     depth: Target,
     sky: Target,
+}
+
+impl CloudImage {
+    fn new(device: &wgpu::Device, label: &str, (w, h): (u32, u32)) -> Self {
+        Self {
+            color: Target::new(device, &format!("{label} color"), w, h),
+            depth: Target::new(device, &format!("{label} depth"), w, h),
+            sky: Target::new(device, &format!("{label} clear sky"), w, h),
+        }
+    }
+
+    fn attachments(&self) -> [Option<wgpu::RenderPassColorAttachment<'_>>; 3] {
+        let attachment = |view| {
+            Some(wgpu::RenderPassColorAttachment {
+                view,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                    store: wgpu::StoreOp::Store,
+                },
+            })
+        };
+        [
+            attachment(&self.color.view),
+            attachment(&self.depth.view),
+            attachment(&self.sky.view),
+        ]
+    }
+}
+
+/// The uniform the march and the reconstruction share (see cloud_reproject.wgsl).
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable, Default)]
+struct ReprojectUniform {
+    offset: [f32; 4],
+    size: [f32; 4],
+    exposure: [f32; 4],
+}
+
+/// The pixel of each 2x2 block marched on each frame of four: diagonals first, so two frames
+/// already cover the block evenly.
+const BLOCK_ORDER: [(f32, f32); 4] = [(0.0, 0.0), (1.0, 1.0), (1.0, 0.0), (0.0, 1.0)];
+
+/// One camera's cloud images.
+struct Targets {
+    camera: Option<Entity>,
+    /// The cloud image's size.
+    size: (u32, u32),
+    /// Pixels per block side: 2 marches a quarter of the image each frame, 1 all of it.
+    side: u32,
+    march: CloudImage,
+    /// The reconstructed image, this frame's and last frame's (`current` is this frame's).
+    history: [CloudImage; 2],
+    current: usize,
+    /// Frames drawn, picking the block pixel to march.
+    frames: u32,
+    /// Whether `history` holds a frame yet.
+    drawn: bool,
+    /// The pre-exposure the latest history was drawn with.
+    exposure: f32,
+    uniform: wgpu::Buffer,
+    march_group: wgpu::BindGroup,
+    /// Reads the march and `history[1 - i]`, for drawing `history[i]`.
+    reproject_groups: [wgpu::BindGroup; 2],
+}
+
+impl Targets {
+    fn new(
+        device: &wgpu::Device,
+        g: &Gpu,
+        camera: Option<Entity>,
+        size: (u32, u32),
+        side: u32,
+    ) -> Self {
+        let msize = (size.0.div_ceil(side), size.1.div_ceil(side));
+        let march = CloudImage::new(device, "clouds march", msize);
+        let history = [
+            CloudImage::new(device, "clouds", size),
+            CloudImage::new(device, "clouds", size),
+        ];
+        let uniform = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("clouds reproject"),
+            size: std::mem::size_of::<ReprojectUniform>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let march_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("clouds march slot"),
+            layout: &g.slot_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: uniform.as_entire_binding(),
+            }],
+        });
+        fn tex(binding: u32, t: &Target) -> wgpu::BindGroupEntry<'_> {
+            wgpu::BindGroupEntry {
+                binding,
+                resource: wgpu::BindingResource::TextureView(&t.view),
+            }
+        }
+        let reproject_group = |prev: &CloudImage| {
+            device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("clouds reproject"),
+                layout: &g.reproject_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: uniform.as_entire_binding(),
+                    },
+                    tex(1, &march.color),
+                    tex(2, &march.depth),
+                    tex(3, &march.sky),
+                    tex(4, &prev.color),
+                    tex(5, &prev.depth),
+                    tex(6, &prev.sky),
+                ],
+            })
+        };
+        let reproject_groups = [reproject_group(&history[1]), reproject_group(&history[0])];
+        Self {
+            camera,
+            size,
+            side,
+            march,
+            history,
+            current: 0,
+            frames: 0,
+            drawn: false,
+            exposure: 1.0,
+            uniform,
+            march_group,
+            reproject_groups,
+        }
+    }
+
+    fn march_size(&self) -> (u32, u32) {
+        (
+            self.size.0.div_ceil(self.side),
+            self.size.1.div_ceil(self.side),
+        )
+    }
+
+    /// This frame's image (what the composites read).
+    fn image(&self) -> &CloudImage {
+        &self.history[self.current]
+    }
 }
 
 struct Gpu {
@@ -170,6 +316,9 @@ struct Gpu {
     geo: wgpu::RenderPipeline,
     shadow: wgpu::RenderPipeline,
     composite_layout: wgpu::BindGroupLayout,
+    slot_layout: wgpu::BindGroupLayout,
+    reproject_layout: wgpu::BindGroupLayout,
+    reproject: wgpu::RenderPipeline,
 }
 
 /// The volumetric cloud [`RenderFeature`].
@@ -292,7 +441,8 @@ impl CloudFeature {
     /// The most cameras whose targets are kept; the least recently used goes first.
     const MAX_VIEWS: usize = 4;
 
-    fn ensure_targets(&mut self, device: &wgpu::Device, view: &ViewData, scale: f32) {
+    fn ensure_targets(&mut self, device: &wgpu::Device, view: &ViewData, scale: f32, side: u32) {
+        let Some(g) = &self.gpu else { return };
         let scale = scale.clamp(0.125, 1.0);
         let size = (
             ((view.width as f32 * scale).round() as u32).max(1),
@@ -300,20 +450,16 @@ impl CloudFeature {
         );
         let found = self.views.iter().position(|t| t.camera == view.camera);
         let targets = match found {
-            Some(i) if self.views[i].size == size => self.views.remove(i),
+            Some(i) if self.views[i].size == size && self.views[i].side == side => {
+                self.views.remove(i)
+            }
             found => {
                 if let Some(i) = found {
                     self.views.remove(i);
                 } else if self.views.len() >= Self::MAX_VIEWS {
                     self.views.remove(0);
                 }
-                Targets {
-                    camera: view.camera,
-                    size,
-                    color: Target::new(device, "clouds color", size.0, size.1),
-                    depth: Target::new(device, "clouds depth", size.0, size.1),
-                    sky: Target::new(device, "clouds clear sky", size.0, size.1),
-                }
+                Targets::new(device, g, view.camera, size, side)
             }
         };
         self.views.push(targets);
@@ -459,10 +605,19 @@ impl RenderFeature for CloudFeature {
             bind_group_layouts: &[Some(&gpu.frame_layout), Some(&layout)],
             immediate_size: 0,
         });
+        let slot_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("clouds march slot"),
+            entries: &[uniform_entry(0)],
+        });
+        let march_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("clouds march"),
+            bind_group_layouts: &[Some(&gpu.frame_layout), Some(&layout), Some(&slot_layout)],
+            immediate_size: 0,
+        });
         let march = fullscreen_pipeline(
             gpu,
             "clouds march",
-            &pipeline_layout,
+            &march_layout,
             &shader,
             "vs_full",
             "fs_march",
@@ -491,6 +646,45 @@ impl RenderFeature for CloudFeature {
             "vs_full",
             "fs_cloud_shadow",
             &[Some(target(CLOUD_SHADOW_FORMAT, None))],
+            None,
+        );
+
+        // Temporal reconstruction.
+        let reproject_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("clouds reproject"),
+            entries: &[
+                uniform_entry(0),
+                float_tex(1, wgpu::TextureViewDimension::D2),
+                float_tex(2, wgpu::TextureViewDimension::D2),
+                float_tex(3, wgpu::TextureViewDimension::D2),
+                float_tex(4, wgpu::TextureViewDimension::D2),
+                float_tex(5, wgpu::TextureViewDimension::D2),
+                float_tex(6, wgpu::TextureViewDimension::D2),
+            ],
+        });
+        let reproject_shader = gpu.shader(
+            "clouds reproject",
+            include_str!("../shaders/cloud_reproject.wgsl"),
+            true,
+        );
+        let reproject_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("clouds reproject"),
+                bind_group_layouts: &[Some(&gpu.frame_layout), Some(&reproject_layout)],
+                immediate_size: 0,
+            });
+        let reproject = fullscreen_pipeline(
+            gpu,
+            "clouds reproject",
+            &reproject_pipeline_layout,
+            &reproject_shader,
+            "vs_full",
+            "fs_reproject",
+            &[
+                Some(target(MARCH_FORMAT, None)),
+                Some(target(MARCH_FORMAT, None)),
+                Some(target(MARCH_FORMAT, None)),
+            ],
             None,
         );
 
@@ -566,7 +760,12 @@ impl RenderFeature for CloudFeature {
             geo,
             shadow,
             composite_layout,
+            slot_layout,
+            reproject_layout,
+            reproject,
         });
+        self.views.clear();
+        self.current = None;
         self.noise_ready = false;
         self.map_revision = 0;
     }
@@ -598,7 +797,28 @@ impl RenderFeature for CloudFeature {
         } else {
             settings.resolution_scale
         };
-        self.ensure_targets(&gpu.device, view, scale);
+        let side = if settings.temporal { 2 } else { 1 };
+        self.ensure_targets(&gpu.device, view, scale, side);
+        if let Some(t) = self.current.and_then(|i| self.views.get_mut(i)) {
+            t.current = 1 - t.current;
+            let (ox, oy) = if t.side > 1 {
+                BLOCK_ORDER[t.frames as usize % BLOCK_ORDER.len()]
+            } else {
+                (0.0, 0.0)
+            };
+            t.frames = t.frames.wrapping_add(1);
+            let usable = t.drawn && view.history_valid;
+            let ratio = view.exposure / t.exposure.max(1e-12);
+            t.exposure = view.exposure;
+            let m = t.march_size();
+            let u = ReprojectUniform {
+                offset: [ox, oy, t.side as f32, if usable { 1.0 } else { 0.0 }],
+                size: [t.size.0 as f32, t.size.1 as f32, m.0 as f32, m.1 as f32],
+                exposure: [ratio, 0.0, 0.0, 0.0],
+            };
+            gpu.queue
+                .write_buffer(&t.uniform, 0, bytemuck::bytes_of(&u));
+        }
         let Some(g) = &self.gpu else { return };
 
         let map = world.resource::<CloudMap>();
@@ -871,31 +1091,29 @@ impl RenderFeature for CloudFeature {
             pass.draw(0..3, 0..1);
         }
         {
-            let attachment = |view| {
-                Some(wgpu::RenderPassColorAttachment {
-                    view,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })
-            };
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("clouds march"),
-                color_attachments: &[
-                    attachment(&t.color.view),
-                    attachment(&t.depth.view),
-                    attachment(&t.sky.view),
-                ],
+                color_attachments: &t.march.attachments(),
                 ..Default::default()
             });
             pass.set_pipeline(&g.march);
             pass.set_bind_group(0, ctx.frame_group, &[]);
             pass.set_bind_group(1, &g.group, &[]);
+            pass.set_bind_group(2, &t.march_group, &[]);
             pass.draw(0..3, 0..1);
         }
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("clouds reproject"),
+                color_attachments: &t.image().attachments(),
+                ..Default::default()
+            });
+            pass.set_pipeline(&g.reproject);
+            pass.set_bind_group(0, ctx.frame_group, &[]);
+            pass.set_bind_group(1, &t.reproject_groups[t.current], &[]);
+            pass.draw(0..3, 0..1);
+        }
+        let image = t.image();
         let entries = [
             wgpu::BindGroupEntry {
                 binding: 0,
@@ -903,15 +1121,15 @@ impl RenderFeature for CloudFeature {
             },
             wgpu::BindGroupEntry {
                 binding: 1,
-                resource: wgpu::BindingResource::TextureView(&t.color.view),
+                resource: wgpu::BindingResource::TextureView(&image.color.view),
             },
             wgpu::BindGroupEntry {
                 binding: 2,
-                resource: wgpu::BindingResource::TextureView(&t.depth.view),
+                resource: wgpu::BindingResource::TextureView(&image.depth.view),
             },
             wgpu::BindGroupEntry {
                 binding: 3,
-                resource: wgpu::BindingResource::TextureView(&t.sky.view),
+                resource: wgpu::BindingResource::TextureView(&image.sky.view),
             },
             wgpu::BindGroupEntry {
                 binding: 4,
@@ -928,6 +1146,9 @@ impl RenderFeature for CloudFeature {
                     entries: &entries,
                 }),
         );
+        if let Some(t) = self.current.and_then(|i| self.views.get_mut(i)) {
+            t.drawn = true;
+        }
     }
 
     fn draw_environment(&self, pass: &mut wgpu::RenderPass<'_>, _ctx: &FrameContext) {

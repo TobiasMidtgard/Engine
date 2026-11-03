@@ -22,6 +22,7 @@ pub mod config;
 pub mod diagnostics;
 pub mod log;
 pub mod math;
+pub mod off_frame;
 pub mod profile;
 pub mod registry;
 pub mod scene;

@@ -10,7 +10,7 @@
 use engine_core::math::noise::fbm2;
 use engine_core::math::{DQuat, DVec2, DVec3, Rng, Vec2, Vec3, damp, smoothstep};
 use engine_core::prelude::*;
-use engine_world::{FocusPoints, PrecipitationKind, WeatherState};
+use engine_world::{FocusPoints, PrecipitationKind, WeatherState, WorldShift};
 
 use crate::climate::{self, Climate};
 use crate::presets::{Regime, WeatherPreset, cloud_thickness_m};
@@ -38,6 +38,51 @@ pub struct Weather {
     pub wind_from_deg: f32,
     /// Seed for clouds, gusts and auto weather.
     pub seed: u64,
+    /// Values set by hand over whatever weather is in (`weather.tune`, a weather panel).
+    pub tweaks: WeatherTweaks,
+}
+
+/// Hand-set weather values. Each one set holds everywhere, over the presets and fronts; the
+/// rest follow the weather.
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WeatherTweaks {
+    /// Fraction of the sky covered by cloud, 0..1.
+    pub cloud_cover: Option<f32>,
+    /// Cloud shape: 0 flat sheet, 0.5 heaps, 1 towering storm clouds.
+    pub cloud_type: Option<f32>,
+    /// Rain or snow under a full cover, mm of water per hour.
+    pub precipitation_mm_h: Option<f32>,
+    /// Wind 10 m above the ground, m/s.
+    pub wind_speed_m_s: Option<f32>,
+    /// Air temperature at the player, °C.
+    pub temperature_c: Option<f32>,
+    /// Ground fog, 0..1.
+    pub fog: Option<f32>,
+}
+
+impl WeatherTweaks {
+    fn apply(&self, r: &mut Regime) {
+        if let Some(v) = self.cloud_cover {
+            r.cloud_cover = v.clamp(0.0, 1.0);
+        }
+        if let Some(v) = self.cloud_type {
+            r.cloud_type = v.clamp(0.0, 1.0);
+        }
+        if let Some(v) = self.precipitation_mm_h {
+            r.precipitation_mm_h = v.max(0.0);
+        }
+        if let Some(v) = self.wind_speed_m_s {
+            r.wind_speed = v.max(0.0);
+        }
+        if let Some(v) = self.fog {
+            r.fog = v.clamp(0.0, 1.0);
+        }
+        if self.temperature_c.is_some() {
+            // The temperature is set where the air's target is worked out (see `step`).
+            r.temperature_cap_c = f32::INFINITY;
+        }
+    }
 }
 
 impl Default for Weather {
@@ -51,6 +96,7 @@ impl Default for Weather {
             time_scale: 1.0,
             wind_from_deg: 250.0,
             seed: 7,
+            tweaks: WeatherTweaks::default(),
         }
     }
 }
@@ -242,6 +288,11 @@ pub struct WeatherSim {
     /// The planet's cloud systems around the focus (`engine_world::CloudCoverField`), when a
     /// module draws them: the cover away from the player follows them.
     pub cover_field: Option<engine_world::CloudCoverMap>,
+    /// The hand-set values in force (copied from [`Weather::tweaks`] each step).
+    pub tweaks: WeatherTweaks,
+    /// The world shifts since [`Self::cover_field`] was built: it stays laid out on the axes
+    /// it was built on until its writer rebuilds it, and is read through these.
+    pub field_moved: WorldShift,
     initialized: bool,
     /// The next step sets the air (temperature, humidity, pressure, cloud base) straight to
     /// the regime's instead of easing toward it: the weather was switched everywhere at once.
@@ -275,6 +326,8 @@ impl WeatherSim {
             rng: Rng::new(weather.seed),
             seed: weather.seed,
             cover_field: None,
+            field_moved: WorldShift::IDENTITY,
+            tweaks: WeatherTweaks::default(),
             initialized: false,
             snap_air: false,
         }
@@ -290,7 +343,14 @@ impl WeatherSim {
         for f in &self.fronts {
             r = r.lerp(&f.to, f.weight(q, self.time_s));
         }
+        self.tweaks.apply(&mut r);
         r
+    }
+
+    /// Set the air (temperature, humidity, pressure) straight to the weather's on the next
+    /// step instead of easing toward it.
+    pub fn snap_air(&mut self) {
+        self.snap_air = true;
     }
 
     /// The preset that dominates at `p` (the newest front that has mostly arrived there).
@@ -321,8 +381,12 @@ impl WeatherSim {
             return regime_cover;
         };
         let near = 1.0 - smoothstep(FIELD_NEAR_M, FIELD_FAR_M, (p - self.focus).length() as f32);
-        let offset = regime_cover - field.cover_at(self.focus);
-        (field.cover_at(p) + offset * near).clamp(0.0, 1.0)
+        let at = |p: DVec2| {
+            let q = self.field_moved.inverse_point(DVec3::new(p.x, 0.0, p.y));
+            field.cover_at(DVec2::new(q.x, q.z))
+        };
+        let offset = regime_cover - at(self.focus);
+        (at(p) + offset * near).clamp(0.0, 1.0)
     }
 
     /// How much front `f` has taken over at world X/Z `p` (see [`Front::weight`]).
@@ -487,6 +551,7 @@ pub fn step(
 
     sim.time_s += dt_w as f64;
     sim.retire_fronts();
+    sim.tweaks = weather.tweaks;
 
     // The weather at the player.
     let regime = sim.regime_at_pattern(focus_q);
@@ -509,19 +574,21 @@ pub fn step(
     // Temperature and moisture relax toward the regime with thermal inertia (~25 min).
     let clear = 1.0 - sim.regional_cover * regime.cloud_density.max(0.3);
     let rain_cooling = cell.precipitation_mm_h.min(25.0) * 0.12;
-    let target_t = (climate.normal_temperature_c(day_of_year, hour, clear)
-        + regime.temperature_offset_c
-        - rain_cooling)
-        .min(regime.temperature_cap_c);
+    let target_t = sim.tweaks.temperature_c.unwrap_or_else(|| {
+        (climate.normal_temperature_c(day_of_year, hour, clear) + regime.temperature_offset_c
+            - rain_cooling)
+            .min(regime.temperature_cap_c)
+    });
     let rh_target = if cell.precipitation_mm_h > 0.3 {
         regime.humidity.max(0.96)
     } else {
         regime.humidity
     };
     // Dew point follows the day's mean temperature (moisture doesn't swing with the sun).
-    let daily_mean = (climate.normal_temperature_c(day_of_year, 9.5, clear)
-        + regime.temperature_offset_c)
-        .min(regime.temperature_cap_c);
+    let daily_mean = sim.tweaks.temperature_c.unwrap_or_else(|| {
+        (climate.normal_temperature_c(day_of_year, 9.5, clear) + regime.temperature_offset_c)
+            .min(regime.temperature_cap_c)
+    });
     let target_dew = climate::dew_point_c(daily_mean, rh_target);
     let rate = 1.0 / 1500.0;
     let snap = std::mem::take(&mut sim.snap_air);
@@ -738,6 +805,11 @@ pub(crate) fn weather_system(
 ) {
     let field = field.map(|f| f.0.clone());
     if sim.cover_field != field {
+        // A rebuilt field is laid out on today's axes; a drift update keeps the old layout.
+        let revision = |f: &Option<engine_world::CloudCoverMap>| f.as_ref().map(|f| f.revision);
+        if revision(&sim.cover_field) != revision(&field) {
+            sim.field_moved = WorldShift::IDENTITY;
+        }
         sim.cover_field = field;
     }
     let (hour, day) = (state.time_of_day_h, state.day_of_year);

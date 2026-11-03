@@ -392,29 +392,58 @@ fn yard_y(x: f32, z: f32) -> f32 {
     YARD_Y - 0.004 * (rut(-1.15) + rut(0.9)) * lane
 }
 
-/// Build the station at `origin` (call through `spawn_demo`).
+/// Stations waiting for the kit being built.
+#[derive(Resource, Default)]
+struct WaitingForKit(Vec<Entity>);
+
+/// Build the station at `origin` (call through `spawn_demo`). The first station's textures
+/// are generated on a worker; its root stands at once and its parts follow when they're done.
 pub(crate) fn build(world: &mut World, origin: DVec3) {
-    let started = std::time::Instant::now();
     world.init_resource::<Assets<Image>>();
     world.init_resource::<Assets<Mesh>>();
     world.init_resource::<Assets<StandardMaterial>>();
-    let kit = match world.get_resource::<StationKit>() {
-        Some(kit) => kit.clone(),
-        None => {
-            let kit = make_kit(world);
-            world.insert_resource(kit.clone());
-            kit
-        }
-    };
-    spawn(world, origin, &kit);
-    let ms = started.elapsed().as_secs_f64() * 1000.0;
-    if let Some(mut d) = world.get_resource_mut::<Diagnostics>() {
-        d.set("weather.station_build_ms", ms);
+    let root = spawn_root(world, origin);
+    if let Some(kit) = world.get_resource::<StationKit>().cloned() {
+        spawn(world, root, &kit);
+        return;
     }
+    if let Some(mut waiting) = world.get_resource_mut::<WaitingForKit>() {
+        waiting.0.push(root);
+        return;
+    }
+    world.insert_resource(WaitingForKit(vec![root]));
+    engine_core::off_frame::off_frame(
+        world,
+        "weather station kit",
+        || {
+            let started = std::time::Instant::now();
+            let baked = bake_textures();
+            (baked, started.elapsed().as_secs_f64() * 1000.0)
+        },
+        |world: &mut World, (baked, bake_ms): (Baked, f64)| {
+            let started = std::time::Instant::now();
+            let kit = make_kit(world, baked);
+            world.insert_resource(kit.clone());
+            let roots = world
+                .remove_resource::<WaitingForKit>()
+                .map(|w| w.0)
+                .unwrap_or_default();
+            for root in roots {
+                if world.get_entity(root).is_ok() {
+                    spawn(world, root, &kit);
+                }
+            }
+            let ms = started.elapsed().as_secs_f64() * 1000.0;
+            if let Some(mut d) = world.get_resource_mut::<Diagnostics>() {
+                d.set("weather.station_textures_ms", bake_ms);
+                d.set("weather.station_build_ms", ms);
+            }
+        },
+    );
 }
 
-fn make_kit(world: &mut World) -> StationKit {
-    let tex = make_textures(world);
+fn make_kit(world: &mut World, baked: Baked) -> StationKit {
+    let tex = install_textures(world, baked);
     let m = make_materials(world, &tex);
     let mesh = make_meshes(world);
     StationKit { m, mesh }
@@ -465,15 +494,28 @@ fn manhole_pattern(u: f32, v: f32) -> f32 {
         * smooth(0.99, 0.97, r)
 }
 
-fn make_textures(world: &mut World) -> Textures {
-    let started = std::time::Instant::now();
+type Painted = (Vec<Image>, Image, Image);
+use texgen::TexSet;
+
+/// The station's generated images, before they go into the asset store.
+type Baked = (
+    (TexSet, TexSet, TexSet, TexSet, TexSet, TexSet, TexSet),
+    (
+        Painted,
+        Painted,
+        TexSet,
+        TexSet,
+        (Image, Image),
+        TexSet,
+        (Image, Image, Image, Image, Image, Image, Image, Image),
+    ),
+    ((TexSet, TexSet), (Image, Image)),
+);
+
+/// Generate every texture (world-free, so it runs on a worker; about a second).
+fn bake_textures() -> Baked {
     // Everything is independent: generate on scoped threads (each recipe is itself parallel).
-    #[allow(clippy::type_complexity)]
-    let (
-        (asphalt, stone, sand, concrete, wood, galv, fabric),
-        (paint, wood_paint, iron, solar, glass, road, extras),
-        ((leaves, grass), (flag, timetable)),
-    ) = std::thread::scope(|s| {
+    std::thread::scope(|s| {
         // The asphalt is the biggest job: start it first.
         let a = s.spawn(texgen::asphalt);
         let b = s.spawn(texgen::stone);
@@ -523,7 +565,16 @@ fn make_textures(world: &mut World) -> Textures {
             ),
             (ph.join().expect("litter"), pi.join().expect("bus flag")),
         )
-    });
+    })
+}
+
+/// Put the baked images in the asset store.
+fn install_textures(world: &mut World, baked: Baked) -> Textures {
+    let (
+        (asphalt, stone, sand, concrete, wood, galv, fabric),
+        (paint, wood_paint, iron, solar, glass, road, extras),
+        ((leaves, grass), (flag, timetable)),
+    ) = baked;
     let mut images = world.resource_mut::<Assets<Image>>();
     let put = |images: &mut Assets<Image>, name: &str, image: Image| {
         images.insert_keyed(&format!("{KEY}/tex/{name}"), image)
@@ -567,7 +618,7 @@ fn make_textures(world: &mut World) -> Textures {
     );
     let (lettering, thermo, stake, rain, sign, plate, poster, face) = extras;
     let images = &mut *images;
-    let textures = Textures {
+    Textures {
         asphalt,
         stone,
         sand,
@@ -597,12 +648,7 @@ fn make_textures(world: &mut World) -> Textures {
         grass,
         flag: put(images, "bus_flag", flag),
         timetable: put(images, "timetable", timetable),
-    };
-    let ms = started.elapsed().as_secs_f64() * 1000.0;
-    if let Some(mut d) = world.get_resource_mut::<Diagnostics>() {
-        d.set("weather.station_textures_ms", ms);
     }
-    textures
 }
 
 fn pbr(t: TexSetH, uv: [f32; 2]) -> StandardMaterial {
@@ -1146,15 +1192,19 @@ impl Spawner<'_> {
     }
 }
 
-fn spawn(world: &mut World, origin: DVec3, kit: &StationKit) {
-    let (m, k) = (&kit.m, &kit.mesh);
-    let root = world
+/// The station's root, which world shifts move; its parts hang under it.
+fn spawn_root(world: &mut World, origin: DVec3) -> Entity {
+    world
         .spawn((
             Name::new("Weather station"),
             WeatherStation,
             Transform::from_translation(origin),
         ))
-        .id();
+        .id()
+}
+
+fn spawn(world: &mut World, root: Entity, kit: &StationKit) {
+    let (m, k) = (&kit.m, &kit.mesh);
     let mut s = Spawner { world, root };
     let id = Quat::IDENTITY;
 
@@ -1590,5 +1640,24 @@ mod tests {
         assert!(triangles < 300_000, "{triangles} triangles");
         assert!(largest <= 2048, "{largest}");
         assert!(world.query::<&WeatherStation>().iter(&world).count() == 2);
+    }
+
+    #[test]
+    fn the_kit_is_built_off_the_frame() {
+        engine_core::tasks::init_task_pools();
+        let mut world = World::new();
+        world.init_resource::<engine_core::off_frame::OffFrameJobs>();
+        world.init_resource::<engine_core::off_frame::OffFrameSettings>();
+        build(&mut world, DVec3::ZERO);
+        build(&mut world, DVec3::new(50.0, 0.0, 0.0));
+        // The roots stand at once; nothing is generated on this thread.
+        assert_eq!(world.query::<&WeatherStation>().iter(&world).count(), 2);
+        assert_eq!(world.query::<&MeshRenderer>().iter(&world).count(), 0);
+        engine_core::off_frame::finish(&mut world, None);
+        let parts = world.query::<&MeshRenderer>().iter(&world).count();
+        assert!(parts > 200, "{parts} parts");
+        // The second station took the first one's kit.
+        let images = world.resource::<Assets<Image>>().keys().count();
+        assert_eq!(images, 55);
     }
 }

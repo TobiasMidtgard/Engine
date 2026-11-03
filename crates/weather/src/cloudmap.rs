@@ -70,6 +70,9 @@ pub(crate) struct Rebuild {
     time_s: f64,
     texels: Vec<[u8; 4]>,
     next_row: usize,
+    /// The map's revision when this started: a newer map (built at once after a world shift)
+    /// makes it stale, since its rows were laid out on the old axes.
+    after: u64,
 }
 
 /// Rows of the map built per tick: the whole map in 8 ticks, well inside the half second
@@ -89,6 +92,7 @@ impl Rebuild {
             time_s: sim.time_s,
             texels: vec![[0; 4]; size * size],
             next_row: 0,
+            after: map.revision,
         }
     }
 
@@ -170,6 +174,9 @@ pub(crate) fn cloud_map_system(
     let center = map.origin + DVec2::splat(span * 0.5);
     let off = (center - sim.focus).abs().max_element();
     let since = (sim.time_s - map.built_at_s).abs();
+    if pending.as_ref().is_some_and(|p| p.after != map.revision) {
+        *pending = None;
+    }
     if map.revision == 0 || off > span * 0.4 || since > 5.0 {
         *pending = None;
         build(&mut map, &sim);

@@ -10,6 +10,7 @@
 //! vertices blend back toward it, so the two meet halfway and limbs bend smoothly instead of
 //! passing through each other.
 
+use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -201,7 +202,9 @@ impl Rig {
 const MAX_BONES: usize = 32;
 
 /// Spawn a walker and its body parts (meshes are built once and cached by key; without a
-/// renderer the parts are spawned without meshes and still animate).
+/// renderer the parts are spawned without meshes and still animate). The walker stands at
+/// once; its meshes and textures are made on a worker ([`engine_core::off_frame`]) and its
+/// parts join it when they are done.
 fn spawn(
     commands: &mut Commands,
     name: &'static str,
@@ -209,52 +212,9 @@ fn spawn(
     scale: Option<LocalTimeScale>,
     body: Option<BodyRequest>,
     rig: Rig,
-    parts: impl FnOnce(&textures::Textures) -> Vec<Part> + Send + 'static,
+    parts: impl Fn(&textures::Textures) -> Vec<Part> + Send + Sync + 'static,
 ) {
     commands.queue(move |world: &mut World| {
-        let tex = textures::Textures::get(world);
-        let parts = parts(&tex);
-        let mut built: Vec<(Option<Handle<Mesh>>, Option<Skin>)> = Vec::with_capacity(parts.len());
-        match world.get_resource_mut::<Assets<Mesh>>() {
-            Some(mut meshes) => {
-                for p in &parts {
-                    let h = meshes.get_or_insert_keyed(&p.key, || (p.mesh)());
-                    let skin = (!p.skin.is_empty()).then_some(()).and_then(|()| {
-                        let rest = meshes.get(h)?.clone();
-                        let weights: Vec<(u32, [f32; 2])> = rest
-                            .vertices
-                            .iter()
-                            .enumerate()
-                            .filter_map(|(i, v)| {
-                                let mut w = [0.0; 2];
-                                for (j, b) in p.skin.iter().take(2).enumerate() {
-                                    w[j] = (b.weight)(Vec3::from(v.position)).clamp(0.0, 1.0);
-                                }
-                                (w[0] > 1e-3 || w[1] > 1e-3).then_some((i as u32, w))
-                            })
-                            .collect();
-                        if weights.is_empty() {
-                            return None;
-                        }
-                        let rest_vertices = Arc::new(rest.vertices.clone());
-                        Some(Skin {
-                            bones: p
-                                .skin
-                                .iter()
-                                .take(2)
-                                .map(|b| (b.bone as u8, b.child))
-                                .collect(),
-                            mesh: meshes.add(rest),
-                            rest: rest_vertices,
-                            weights: Arc::new(weights),
-                            last: Vec::new(),
-                        })
-                    });
-                    built.push((Some(skin.as_ref().map_or(h, |s| s.mesh)), skin));
-                }
-            }
-            None => built.extend(parts.iter().map(|_| (None, None))),
-        }
         let (pos, dir) = gait::root(&walker);
         let mut root = world.spawn((
             Name::new(name),
@@ -269,16 +229,93 @@ fn spawn(
             root.insert(b);
         }
         let root = root.id();
-        for (p, (h, skin)) in parts.iter().zip(built) {
-            let mut e = world.spawn((Transform::default(), BodyPart(p.bone as u8), ChildOf(root)));
-            if let Some(h) = h {
-                e.insert(MeshRenderer::new(h, p.material));
-            }
-            if let Some(s) = skin {
-                e.insert(s);
+        if !world.contains_resource::<Assets<Mesh>>() {
+            let parts = parts(&textures::Textures::default());
+            attach(world, root, parts, HashMap::new());
+            return;
+        }
+        let missing = textures::Textures::missing(world);
+        let parts = Arc::new(parts);
+        let build = parts.clone();
+        engine_core::off_frame::off_frame(
+            world,
+            format!("audio walker {name}"),
+            move || {
+                let images = textures::Textures::bake(&missing);
+                // Meshes don't depend on the texture handles, so stand-ins do here.
+                let meshes: HashMap<String, Mesh> = build(&textures::Textures::default())
+                    .iter()
+                    .map(|p| (p.key.clone(), (p.mesh)()))
+                    .collect();
+                (images, meshes)
+            },
+            move |world, (images, meshes)| {
+                if world.get_entity(root).is_err() {
+                    return;
+                }
+                textures::Textures::install(world, images);
+                let tex = textures::Textures::get(world);
+                attach(world, root, parts(&tex), meshes);
+            },
+        );
+    });
+}
+
+/// Spawn `parts` under the walker `root`, their meshes from `made` (built on a worker) where
+/// they aren't registered yet.
+fn attach(world: &mut World, root: Entity, parts: Vec<Part>, mut made: HashMap<String, Mesh>) {
+    let mut built: Vec<(Option<Handle<Mesh>>, Option<Skin>)> = Vec::with_capacity(parts.len());
+    match world.get_resource_mut::<Assets<Mesh>>() {
+        Some(mut meshes) => {
+            for p in &parts {
+                let h = meshes.get_or_insert_keyed(&p.key, || {
+                    made.remove(&p.key).unwrap_or_else(|| (p.mesh)())
+                });
+                let skin = (!p.skin.is_empty()).then_some(()).and_then(|()| {
+                    let rest = meshes.get(h)?.clone();
+                    let weights: Vec<(u32, [f32; 2])> = rest
+                        .vertices
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(i, v)| {
+                            let mut w = [0.0; 2];
+                            for (j, b) in p.skin.iter().take(2).enumerate() {
+                                w[j] = (b.weight)(Vec3::from(v.position)).clamp(0.0, 1.0);
+                            }
+                            (w[0] > 1e-3 || w[1] > 1e-3).then_some((i as u32, w))
+                        })
+                        .collect();
+                    if weights.is_empty() {
+                        return None;
+                    }
+                    let rest_vertices = Arc::new(rest.vertices.clone());
+                    Some(Skin {
+                        bones: p
+                            .skin
+                            .iter()
+                            .take(2)
+                            .map(|b| (b.bone as u8, b.child))
+                            .collect(),
+                        mesh: meshes.add(rest),
+                        rest: rest_vertices,
+                        weights: Arc::new(weights),
+                        last: Vec::new(),
+                    })
+                });
+                built.push((Some(skin.as_ref().map_or(h, |s| s.mesh)), skin));
             }
         }
-    });
+        None => built.extend(parts.iter().map(|_| (None, None))),
+    }
+    for (p, (h, skin)) in parts.iter().zip(built) {
+        let mut e = world.spawn((Transform::default(), BodyPart(p.bone as u8), ChildOf(root)));
+        if let Some(h) = h {
+            e.insert(MeshRenderer::new(h, p.material));
+        }
+        if let Some(s) = skin {
+            e.insert(s);
+        }
+    }
 }
 
 /// A hiker (`runner` false: red shell jacket, daypack, boots) or a runner (fitted top,

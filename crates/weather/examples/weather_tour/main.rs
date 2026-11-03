@@ -288,6 +288,24 @@ fn shots() -> Vec<Shot> {
             frames: 10,
             face_moon: true,
         },
+        // In the cloud layer among the heaps, then flying through it at airliner speed (the
+        // camera moves every frame: the temporal march must keep up).
+        Shot {
+            name: "17_among_the_heaps",
+            setup: vec![set("partly_cloudy"), hour(11.0), advance(60.0)],
+            eye: DVec3::new(0.0, 2000.0, 0.0),
+            target: DVec3::new(0.0, 1900.0, -3000.0),
+            frames: 10,
+            face_moon: false,
+        },
+        Shot {
+            name: "18_flying_through_clouds",
+            setup: vec![set("partly_cloudy"), hour(11.0), advance(60.0)],
+            eye: DVec3::new(0.0, 2000.0, 400.0),
+            target: DVec3::new(0.0, 1900.0, -2600.0),
+            frames: 24,
+            face_moon: false,
+        },
     ]
 }
 
@@ -411,6 +429,12 @@ fn main() {
         if let Some(v) = env("CLOUD_STEPS") {
             c.steps = v as u32;
         }
+        if let Some(v) = env("CLOUD_SHADOWS") {
+            c.cloud_shadows = v > 0.5;
+        }
+        if let Some(v) = env("CLOUD_TEMPORAL") {
+            c.temporal = v > 0.5;
+        }
     }
     // The weather clock spawns its sun and moon on the second frame.
     app.update_n(3);
@@ -470,7 +494,18 @@ fn main() {
             *app.world.get_mut::<Transform>(camera).unwrap() =
                 Transform::from_translation(shot.eye).looking_at(shot.eye + aim * 100.0, Vec3::Y);
         }
-        app.update_n(shot.frames as usize);
+        if shot.name.contains("flying_through") {
+            // 12 m a frame: 240 m/s at the tour's 20 frames a second.
+            let step = (shot.target - shot.eye).normalize() * 12.0;
+            for i in 0..shot.frames {
+                let eye = shot.eye + step * i as f64;
+                *app.world.get_mut::<Transform>(camera).unwrap() =
+                    Transform::from_translation(eye).looking_at(eye + step * 100.0, Vec3::Y);
+                app.update();
+            }
+        } else {
+            app.update_n(shot.frames as usize);
+        }
         let path = format!("{out_dir}/{}.png", shot.name);
         match capture_now(&mut app.world, &path) {
             Ok(_) => println!(
@@ -489,6 +524,24 @@ fn main() {
                     .unwrap_or_default()
             ),
             Err(e) => eprintln!("{}: {e}", shot.name),
+        }
+        if std::env::var("TOUR_GPU").is_ok() {
+            // The weather's GPU passes, averaged over a few more frames.
+            let mut sums = std::collections::BTreeMap::<String, f64>::new();
+            for _ in 0..8 {
+                app.update();
+                let d = app
+                    .world
+                    .resource::<engine_core::diagnostics::Diagnostics>();
+                for (k, v) in &d.metrics {
+                    if k.starts_with("render.gpu.") && k.contains("weather") {
+                        *sums.entry(k.clone()).or_default() += v / 8.0;
+                    }
+                }
+            }
+            for (k, v) in sums {
+                println!("  {k}: {v:.2} ms");
+            }
         }
     }
 }

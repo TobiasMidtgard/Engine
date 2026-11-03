@@ -319,7 +319,7 @@ pub(crate) fn register(app: &mut App) {
         "movement.play",
         "Play mode: \"on\" true puts a level 10 pilot on the ground in front of the active \
          camera (or with its feet at \"at\") and a third-person camera behind it; false ends \
-         it. Leave \"on\" out to switch. Controls: the default action map, lock_on, Escape \
+         it, parking the pilot until play starts again. Leave \"on\" out to switch. Controls: the default action map, lock_on, Escape \
          frees the mouse.",
         r#"{"on": true, "at": [0.0, 0.0, -10.0]}"#,
         |world, args| {
@@ -327,6 +327,9 @@ pub(crate) fn register(app: &mut App) {
                 None | Some(Value::Null) => world.resource::<Play>().pilot.is_none(),
                 Some(v) => v.as_bool().ok_or("\"on\" must be true or false")?,
             };
+            if play::in_vehicle(world) {
+                return Err("the pilot is in a vehicle: get out first (E)".into());
+            }
             if !on {
                 let was_on = play::stop(world);
                 return Ok(json!({ "playing": false, "was_playing": was_on }));

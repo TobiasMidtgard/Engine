@@ -1271,6 +1271,24 @@ fn build(view: &View, size: (u32, u32)) -> App {
             .resource_mut::<engine_terrain::TerrainSettings>()
             .split_factor = k;
     }
+    // `MIN_QUAD_PX=px`: `TerrainSettings::min_quad_px` (0: the patch budget alone sets detail).
+    if let Some(px) = std::env::var("MIN_QUAD_PX")
+        .ok()
+        .and_then(|v| v.parse::<f64>().ok())
+    {
+        app.world
+            .resource_mut::<engine_terrain::TerrainSettings>()
+            .min_quad_px = px;
+    }
+    // `HAZE_DETAIL=k`: `TerrainSettings::haze_detail` (0: haze leaves the detail alone).
+    if let Some(k) = std::env::var("HAZE_DETAIL")
+        .ok()
+        .and_then(|v| v.parse::<f64>().ok())
+    {
+        app.world
+            .resource_mut::<engine_terrain::TerrainSettings>()
+            .haze_detail = k;
+    }
     // `QUALITY=low|medium|high|ultra`: the game's quality preset.
     if let Some(q) = std::env::var("QUALITY")
         .ok()

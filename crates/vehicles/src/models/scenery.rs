@@ -880,10 +880,76 @@ impl Parts {
 
     /// Spawn every non-empty builder as `<prefix>/<material>`.
     pub fn spawn(self, scene: &mut Scene, prefix: &str) {
-        for (s, b) in self.list {
+        self.finish().spawn(scene, prefix);
+    }
+
+    /// Finish every builder's mesh (no world needed, so it can run on a worker).
+    pub fn finish(self) -> Finished {
+        Finished(
+            self.list
+                .into_iter()
+                .map(|(s, b)| (s, b.finish()))
+                .collect(),
+        )
+    }
+}
+
+/// [`Parts`] with their meshes finished, ready to spawn.
+pub struct Finished(Vec<(Surface, Mesh)>);
+
+impl Finished {
+    /// Spawn every non-empty mesh as `<prefix>/<material>`.
+    pub fn spawn(self, scene: &mut Scene, prefix: &str) {
+        for (s, mesh) in self.0 {
             let name = format!("{prefix}/{s:?}");
-            scene.add(&name, b.finish(), s, casts_shadow(s));
+            scene.add(&name, mesh, s, casts_shadow(s));
         }
+    }
+
+    /// [`spawn`](Self::spawn) over later frames, one material's mesh per off-frame step:
+    /// making a material's first textures takes 5 to 15 ms (VM), too much to stack twenty
+    /// in one frame. `then` gets the zone's scene after the last, holding the totals, to add
+    /// lights and [`Scene::finish`].
+    pub(crate) fn spawn_sliced(
+        self,
+        world: &mut World,
+        origin: DVec3,
+        rotation: Quat,
+        zone: &'static str,
+        then: impl FnOnce(Scene) + Send + 'static,
+    ) {
+        let totals = std::sync::Arc::new(Mutex::new((0usize, 0usize)));
+        for (s, mesh) in self.0 {
+            let totals = totals.clone();
+            engine_core::off_frame::off_frame(
+                world,
+                format!("vehicles {zone} scenery {s:?}"),
+                || (),
+                move |world, ()| {
+                    let Some(scene) = Scene::new(world, origin, zone) else {
+                        return;
+                    };
+                    let mut scene = scene.rotated(rotation);
+                    scene.add(&format!("{zone}/{s:?}"), mesh, s, casts_shadow(s));
+                    let mut t = totals.lock().unwrap();
+                    t.0 += scene.triangles;
+                    t.1 += scene.entities;
+                },
+            );
+        }
+        engine_core::off_frame::off_frame(
+            world,
+            format!("vehicles {zone} scenery"),
+            || (),
+            move |world, ()| {
+                let Some(scene) = Scene::new(world, origin, zone) else {
+                    return;
+                };
+                let mut scene = scene.rotated(rotation);
+                (scene.triangles, scene.entities) = *totals.lock().unwrap();
+                then(scene);
+            },
+        );
     }
 }
 

@@ -718,7 +718,41 @@ pub struct AnimInput {
     pub fighter: bool,
     /// `AnimationParams::effort` (0..1).
     pub effort: f32,
+    /// The ground under each foot (left, right), if probed: see [`FootGround`].
+    pub ground: [Option<FootGround>; 2],
 }
+
+/// The ground under one foot, in character space (the capsule's bottom at y = 0, facing −Z).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FootGround {
+    /// Height of the ground under the foot above the capsule's bottom, m (negative below).
+    pub height: f32,
+    /// The ground's normal there.
+    pub normal: Vec3,
+}
+
+/// Feet placed on the ground under them, whatever the capsule stands on (playtest 2026-10-29
+/// #16, feet under the floor): each foot moves up or down by the ground under it and tilts to
+/// its slope, and the pelvis drops so the lower foot can reach (raises with both feet up, when
+/// the capsule's round bottom sinks over an edge). The shape of Unreal's Foot Placement and Leg
+/// IK nodes and of engine_anim's `FootIk`, after the gait, so stance and swing keep their height
+/// over the local ground.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+struct FootPlacement {
+    /// 0..1: how much the placement applies (eased on and off with the grounded modes).
+    weight: f32,
+    /// Smoothed ground height under each foot, m.
+    offset: [f32; 2],
+    /// Smoothed pelvis shift, m.
+    pelvis: f32,
+}
+
+/// Farthest a foot reaches up or down to the ground, m.
+const FOOT_REACH: f32 = 0.45;
+/// Lowest and highest the pelvis moves to let the feet reach, m.
+const PELVIS_DROP: (f32, f32) = (-0.4, 0.12);
+/// Steepest ground a foot tilts to, rad.
+const FOOT_MAX_TILT: f32 = 0.6;
 
 impl Default for AnimInput {
     fn default() -> Self {
@@ -742,6 +776,7 @@ impl Default for AnimInput {
             defeated: false,
             fighter: true,
             effort: 0.2,
+            ground: [None; 2],
         }
     }
 }
@@ -940,6 +975,8 @@ struct Weights {
     ladder: f32,
     /// Vaulting.
     vault: f32,
+    /// Swimming.
+    swim: f32,
     dash: f32,
     attack: f32,
     block: f32,
@@ -991,6 +1028,9 @@ pub struct Animator {
     vault: Option<VaultAnim>,
     secs: f32,
     last: Option<Pose>,
+    feet: FootPlacement,
+    /// Stroke cycle while swimming, 0..1 (the right hand enters the water at 0).
+    stroke: f32,
 }
 
 impl Animator {
@@ -1031,6 +1071,8 @@ impl Animator {
             vault: None,
             secs: 0.0,
             last: None,
+            feet: FootPlacement::default(),
+            stroke: 0.0,
         }
     }
 
@@ -1045,6 +1087,12 @@ impl Animator {
         self.secs += dt;
         self.track_events(input, dt);
         self.ease_weights(input, dt);
+        if self.w.swim > 1e-3 {
+            // About 40 strokes a minute crawling, slower treading water (a body length of
+            // about 1.5 m a cycle at the profile's 1.8 m/s).
+            let period = lerp(1.7, 1.3, self.swim_effort());
+            self.stroke = (self.stroke + dt / period).fract();
+        }
 
         let body = self.body_pose(input);
         let arms = self.arm_pose(input, &body);
@@ -1074,7 +1122,73 @@ impl Animator {
             pose = smoothed;
         }
         self.last = Some(pose);
+        self.place_feet(input, &mut pose, dt);
         pose
+    }
+
+    /// Put the feet on the ground under them (see [`FootPlacement`]). Applied after the
+    /// smoothing (which keeps the unplaced pose), with its own easing.
+    fn place_feet(&mut self, input: &AnimInput, pose: &mut Pose, dt: f32) {
+        let on_foot = input.grounded
+            && matches!(
+                input.mode,
+                LocomotionMode::Idle
+                    | LocomotionMode::Walk
+                    | LocomotionMode::Run
+                    | LocomotionMode::Sprint
+                    | LocomotionMode::Crouch
+            )
+            && input.vault.is_none()
+            && input.ladder.is_none()
+            && input.ledge.is_none()
+            && !input.defeated;
+        let probed = input.ground.iter().any(Option::is_some);
+        let f = &mut self.feet;
+        let want = if on_foot && probed { 1.0 } else { 0.0 };
+        f.weight += (want - f.weight) * approach(dt, 10.0);
+        if f.weight < 1e-3 {
+            f.weight = 0.0;
+            f.offset = [0.0; 2];
+            f.pelvis = 0.0;
+            return;
+        }
+        // A foot with no ground under it in reach keeps the other's height (over an edge).
+        let heights = input
+            .ground
+            .map(|g| g.map(|g| g.height.clamp(-FOOT_REACH, FOOT_REACH)));
+        let heights = match heights {
+            [Some(l), Some(r)] => [l, r],
+            [Some(l), None] => [l, l],
+            [None, Some(r)] => [r, r],
+            [None, None] => [0.0, 0.0],
+        };
+        let k = approach(dt, 18.0);
+        for (offset, h) in f.offset.iter_mut().zip(heights) {
+            *offset += (h - *offset) * k;
+        }
+        let low = f.offset[0]
+            .min(f.offset[1])
+            .clamp(PELVIS_DROP.0, PELVIS_DROP.1);
+        f.pelvis += (low - f.pelvis) * approach(dt, 12.0);
+        let w = f.weight;
+        pose.pelvis.y += f.pelvis * w;
+        pose.pivot.y += f.pelvis * w;
+        for i in 0..2 {
+            // How far the gait has lifted this foot off its floor: planted feet tilt fully.
+            let lift = pose.ankle[i].y - ANKLE_HEIGHT;
+            pose.ankle[i].y += f.offset[i] * w;
+            let Some(g) = input.ground[i] else {
+                continue;
+            };
+            let n = g.normal.normalize_or(Vec3::Y);
+            let tilt = n.angle_between(Vec3::Y).min(FOOT_MAX_TILT);
+            let axis = Vec3::Y.cross(n);
+            if tilt > 1e-3 && axis.length() > 1e-4 {
+                let planted = 1.0 - smooth(0.02, 0.12, lift);
+                let q = Quat::from_axis_angle(axis.normalize(), tilt * w * planted);
+                pose.foot[i] = q * pose.foot[i];
+            }
+        }
     }
 
     fn track_events(&mut self, input: &AnimInput, dt: f32) {
@@ -1244,6 +1358,7 @@ impl Animator {
         );
         ease(&mut w.ladder, on(input.ladder.is_some()), 10.0);
         ease(&mut w.vault, on(input.vault.is_some()), 18.0);
+        ease(&mut w.swim, on(mode == M::Swim), 6.0);
         ease(&mut w.aim, on(input.grapple.is_some()), 22.0);
         let reeling = input.grapple.is_some_and(|(_, bit)| bit) && mode == M::Air;
         ease(&mut w.reel, on(reeling), 10.0);
@@ -1335,6 +1450,13 @@ impl Animator {
         {
             p.blend(&ladder_body(l), w.ladder, Channels::Body);
         }
+        if w.swim > 1e-3 {
+            p.blend(
+                &swim_body(self.swim_effort(), self.stroke),
+                w.swim,
+                Channels::Body,
+            );
+        }
         if w.dash > 1e-3 {
             p.blend(&dash(input.dash_strike), w.dash, Channels::Body);
         }
@@ -1378,6 +1500,11 @@ impl Animator {
             p.blend(&fallen(self.defeat_secs), w.defeat, Channels::Body);
         }
         p
+    }
+
+    /// 0 treading water .. 1 swimming flat out, from the horizontal speed.
+    fn swim_effort(&self) -> f32 {
+        smooth(0.15, 1.5, self.speed)
     }
 
     /// Where the cut is: −1..0 through the windup, 0..1 through the strike and follow
@@ -1481,6 +1608,18 @@ impl Animator {
                 p.blend(&rungs, smooth(0.5, 1.0, w.ladder), Channels::Arms);
                 p.sword = in_sheath(p.sheath);
             }
+        }
+        if w.swim > 1e-3 {
+            // The sword goes into the scabbard, which hangs along the leg out of the stroke.
+            let mut a = swim_arms(self.swim_effort(), self.stroke);
+            a.sheath = ladder_sheath();
+            a.sword = Pose {
+                sheath: a.sheath,
+                ..*body
+            }
+            .sheath_xf()
+            .then(sheathed());
+            p.blend(&a, w.swim, Channels::Arms);
         }
         if w.dash > 1e-3 {
             p.blend(&to_ground(dash_arms()), w.dash, Channels::Arms);
@@ -2132,6 +2271,92 @@ fn aim_arm(p: &mut Pose, hook: Vec3, body: &Pose) {
 }
 
 /// Dashing: a low forward lunge through the air.
+/// Shoulder joints in the upright frame the swim poses are built in.
+const SWIM_SHOULDER: f32 = 1.44;
+
+/// Swimming, built upright and turned face-down by the body rotation (`effort` 0 treads water
+/// upright, 1 swims flat out, front crawl): a flutter kick from the hips with pointed toes, or
+/// slow eggbeater circles treading. Phases follow swimming coaching (six kicks to a stroke
+/// cycle; the head turned down, eyes forward) rather than mocap, which has no CC0 swim clips.
+fn swim_body(effort: f32, stroke: f32) -> Pose {
+    let mut p = Pose::BIND;
+    let s = effort.clamp(0.0, 1.0);
+    p.pivot = v3(0.0, 1.0, 0.0);
+    p.body = pitch(lerp(0.15, 1.35, s));
+    p.pelvis = v3(0.0, 0.97, 0.0);
+    // Along the line of the body when flat; the head lifts to look ahead.
+    p.spine = pitch(-0.04 * s);
+    p.neck = pitch(-0.45 * s);
+    p.head = pitch(-0.35 * s);
+    for i in 0..2 {
+        let side = if i == 0 { -1.0 } else { 1.0 };
+        let half = 0.5 * i as f32;
+        // Flutter: three kicks a leg per stroke cycle, ±12 cm about the line of the body.
+        let kick = 0.12 * s * ((3.0 * stroke + half) * TAU).sin();
+        let flutter = v3(side * 0.09, ANKLE_HEIGHT + 0.05, 0.04 + kick);
+        // Treading: the shins circle under the knees.
+        let c = ((stroke + half) * TAU) * 1.5;
+        let tread = v3(
+            side * (0.2 + 0.05 * c.cos()),
+            0.3 + 0.07 * c.sin(),
+            0.05 * c.cos(),
+        );
+        p.ankle[i] = tread.lerp(flutter, s);
+        p.foot[i] = ry(-side * 0.15 * s) * pitch(lerp(0.3, 1.1, s));
+        p.knee[i] = v3(side * lerp(0.6, 0.1, s), 0.0, -1.0);
+    }
+    p
+}
+
+/// The arms swimming (see [`swim_body`]): a front crawl, each hand reaching overhead (ahead,
+/// once the body lies flat), pulling through under the body to the hip and recovering with a
+/// high elbow, the arms half a cycle apart; treading, the hands scull out in front.
+fn swim_arms(effort: f32, stroke: f32) -> Pose {
+    let mut p = Pose::BIND;
+    let s = effort.clamp(0.0, 1.0);
+    let hand_at = |pos: Vec3, shoulder: Vec3| {
+        let along = (pos - shoulder).normalize_or(Vec3::NEG_Y);
+        Xf::new(pos, Quat::from_rotation_arc(Vec3::NEG_Y, along))
+    };
+    for i in 0..2 {
+        let side = if i == 0 { -1.0 } else { 1.0 };
+        let shoulder = v3(side * 0.19, SWIM_SHOULDER, 0.0);
+        let a = (stroke + 0.5 * i as f32).fract() * TAU;
+        // Pulling (0..π) the long arm sweeps down through the water from ahead of the head to
+        // the hip; recovering (π..2π) the hand swings forward low and wide over the water with
+        // the elbow folded high above it, as swim coaching teaches the front crawl.
+        let pulling = a < PI;
+        let crawl = if pulling {
+            shoulder + v3(side * 0.05, a.cos(), -a.sin()) * 0.55
+        } else {
+            let r = (a - PI).sin();
+            shoulder + v3(side * (0.03 + 0.17 * r), 0.55 * a.cos(), 0.16 * r)
+        };
+        let scull = v3(
+            side * (0.3 + 0.08 * ((stroke * 2.0 + 0.5 * i as f32) * TAU).sin()),
+            1.12,
+            -0.28,
+        );
+        let hand = hand_at(scull.lerp(crawl, s), shoulder);
+        let elbow = if pulling {
+            v3(side * 0.7, 0.0, 0.5)
+        } else {
+            v3(side * 0.6, 0.0, 0.8)
+        };
+        p.elbow[i] = v3(side * 0.8, -0.5, 0.3).lerp(elbow, s);
+        if i == 0 {
+            p.hand_l = hand;
+        } else {
+            p.hand_r = hand;
+        }
+    }
+    p.free_r = 1.0;
+    p.grip_l = 0.0;
+    p.follow_l = 0.0;
+    p.curl_l = 0.15;
+    p
+}
+
 fn dash(strike: bool) -> Pose {
     let mut p = Pose::BIND;
     let a = ANKLE_HEIGHT;

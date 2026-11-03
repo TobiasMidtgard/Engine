@@ -2041,3 +2041,47 @@ fn walking_over_wobbling_child_planks_keeps_a_walking_speed() {
     assert!(deck < 0.5, "the planks read as moving at {deck:.1} m/s");
     assert!(fastest < 6.5, "flung at {fastest:.1} m/s");
 }
+
+/// Playtest 2026-10-29 #16 ("the player's feet clip under the floor"): the body was posed for
+/// flat ground at the capsule's bottom, so on a slope the uphill foot went into the ground and
+/// the downhill one hung in the air. Each foot now stands on the ground under it.
+#[test]
+fn feet_stand_on_the_ground_under_them_on_a_slope() {
+    use engine_movement::demo::{self, Puppet};
+    use engine_movement::look::fighter::Style;
+    use engine_movement::look::rig::ANKLE_HEIGHT;
+    fn slope(x: f64, _: f64) -> f64 {
+        x * 30f64.to_radians().tan()
+    }
+    let mut app = app();
+    app.world
+        .insert_resource(engine_world::Ground(std::sync::Arc::new(Terrain(slope))));
+    // Side-on to the slope (facing -Z, the slope rising toward +X): one foot uphill.
+    let mut pilot = Entity::PLACEHOLDER;
+    with_commands(&mut app, |c| {
+        pilot = demo::spawn_character(
+            c,
+            "Pilot",
+            DVec3::new(0.0, 1.2, 0.0),
+            Vec3::NEG_Z,
+            Style::Pilot,
+            MovementProfile::pilot(),
+            (),
+        );
+    });
+    run(&mut app, 2.0);
+    assert!(mover(&app, pilot).grounded);
+    let t = *app.world.get::<Transform>(pilot).unwrap();
+    let cc = *app.world.get::<CharacterController>(pilot).unwrap();
+    let feet = t.translation - DVec3::Y * (cc.height as f64 * 0.5);
+    let ankles = app.world.get::<Puppet>(pilot).unwrap().ankles();
+    for a in ankles {
+        let at = feet + (t.rotation * a).as_dvec3();
+        let above = (at.y - slope(at.x, at.z)) as f32;
+        assert!(
+            (above - ANKLE_HEIGHT).abs() < 0.035,
+            "ankle {above:.3} m above the slope at x {:.2} (want {ANKLE_HEIGHT})",
+            at.x
+        );
+    }
+}

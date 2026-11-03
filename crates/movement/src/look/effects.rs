@@ -1246,14 +1246,13 @@ impl Effects {
 
 // ============================================================================ systems
 
-/// Advance effects on the world clock and drive the flash lights (PostUpdate).
+/// Advance effects on the world clock (PostUpdate, after transforms settle). The flash lights
+/// they light are moved by [`drive_effect_lights`] next frame.
 pub(crate) fn step_effects(
-    mut commands: Commands,
     time: Res<Time>,
     settings: Res<EffectSettings>,
     gravity: Option<Res<Gravity>>,
     mut fx: ResMut<Effects>,
-    mut lights: Query<(&mut PointLight, &mut Transform, &mut GlobalTransform)>,
     mut diagnostics: Option<ResMut<Diagnostics>>,
 ) {
     fx.now = time.elapsed_secs_f64();
@@ -1275,6 +1274,27 @@ pub(crate) fn step_effects(
     fx.step(time.delta_secs(), g);
     let max = fx.max_particles;
     fx.particles.truncate(max);
+    if let Some(d) = diagnostics.as_deref_mut() {
+        d.set("movement.effects.particles", fx.particles.len() as f64);
+        d.set("movement.effects.trails", fx.trails.len() as f64);
+    }
+}
+
+/// The point light of a strike's flash (one of a small pool, reused).
+#[derive(Component, Debug, Clone, Copy, Default)]
+pub struct EffectLight;
+
+/// Set the flash lights from last frame's effects (Update). They only write their own
+/// `Transform` and let transform propagation place them: writing `GlobalTransform` after
+/// propagation, as this did, kept every system that reads poses then (animation's foot IK,
+/// gaits, spring chains) from running beside it (round 22, anim-parallel.md). A flash a frame
+/// late is not visible; the same split as Unreal's game thread handing lights to the render
+/// thread a frame on.
+pub(crate) fn drive_effect_lights(
+    mut commands: Commands,
+    mut fx: ResMut<Effects>,
+    mut lights: Query<(&mut PointLight, &mut Transform), With<EffectLight>>,
+) {
     for l in &mut fx.lights {
         let t = (l.age / l.life.max(1e-3)).clamp(0.0, 1.0);
         let on = t < 1.0;
@@ -1292,13 +1312,12 @@ pub(crate) fn step_effects(
         let pos = if on { l.pos } else { l.pos - DVec3::Y * 1000.0 };
         match l.entity {
             Some(e) => {
-                if let Ok((mut pl, mut t, mut gt)) = lights.get_mut(e) {
+                if let Ok((mut pl, mut t)) = lights.get_mut(e) {
                     if *pl != light {
                         *pl = light;
                     }
                     if t.translation != pos {
                         t.translation = pos;
-                        *gt = GlobalTransform::from(*t);
                     }
                 }
             }
@@ -1308,6 +1327,7 @@ pub(crate) fn step_effects(
                     commands
                         .spawn((
                             Name::new("Effect flash light"),
+                            EffectLight,
                             light,
                             t,
                             GlobalTransform::from(t),
@@ -1317,10 +1337,6 @@ pub(crate) fn step_effects(
             }
             None => {}
         }
-    }
-    if let Some(d) = diagnostics.as_deref_mut() {
-        d.set("movement.effects.particles", fx.particles.len() as f64);
-        d.set("movement.effects.trails", fx.trails.len() as f64);
     }
 }
 

@@ -30,7 +30,7 @@
 use std::any::Any;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::cell_assets::{self, CellAssets, Marks};
 use crate::cell_memory;
@@ -38,6 +38,7 @@ use crate::hlod::{self, ProxyConfig};
 use engine_core::diagnostics::{Diagnostics, PROCESS_RAM_MB, process_ram_mb};
 use engine_core::ecs::resource::IsResource;
 use engine_core::math::DQuat;
+use engine_core::off_frame;
 use engine_core::prelude::*;
 use engine_render::{DitherFade, MeshRenderer};
 use engine_world::physics::Velocity;
@@ -346,6 +347,7 @@ fn take_out(world: &mut World, i: usize) {
         unload(world, i);
     }
     world.resource_mut::<CellHooks>().0[i].reset();
+    off_frame::drop_scope(world, art_scope(CellId(i as u32)));
     world.resource_mut::<StreamedCells>().cells[i].state = CellState::Unloaded;
     hlod::forget(world, i);
 }
@@ -423,6 +425,8 @@ struct Slot {
     /// A build step panicked: the cell stays out.
     failed: bool,
     step: usize,
+    /// The loader's last slice ran; the load waits only for its off-frame art.
+    spawned: bool,
     secs: f32,
     ram: Option<f64>,
     /// What the spawn added since the cell last unloaded.
@@ -445,6 +449,7 @@ impl Slot {
             built: None,
             failed: false,
             step: 0,
+            spawned: false,
             secs: 0.0,
             ram: None,
             assets: CellAssets::default(),
@@ -460,6 +465,7 @@ impl Slot {
         self.building = None;
         self.built = None;
         self.step = 0;
+        self.spawned = false;
         self.secs = 0.0;
         self.ram = None;
         self.ids_seen.clear();
@@ -988,6 +994,7 @@ pub fn stream_system(world: &mut World) {
     }
     for i in dropped {
         world.resource_mut::<CellHooks>().0[i].reset();
+        off_frame::drop_scope(world, art_scope(CellId(i as u32)));
     }
     let fading = sources.is_some() && budget.fade_s > 0.0;
     for &i in &leaving {
@@ -1028,9 +1035,14 @@ pub fn stream_system(world: &mut World) {
                 break 'cells;
             }
             stepped = true;
-            if step(world, id) {
-                finish(world, i);
-                break;
+            match step(world, id) {
+                Step::More => {}
+                Step::Done => {
+                    finish(world, i);
+                    break;
+                }
+                // Its art is still building: the next cell gets the time.
+                Step::Waiting => break,
             }
         }
     }
@@ -1185,6 +1197,7 @@ fn begin(world: &mut World, i: usize, fade: bool) {
     cell_assets::install_sizers(world);
     let slot = &mut world.resource_mut::<CellHooks>().0[i];
     slot.step = 0;
+    slot.spawned = false;
     slot.secs = 0.0;
     slot.ram = process_ram_mb();
     world.resource_mut::<StreamedCells>().cells[i].state = CellState::Loading;
@@ -1199,18 +1212,58 @@ fn begin(world: &mut World, i: usize, fade: bool) {
     }
 }
 
-/// Runs one slice of the cell's spawn and tags what it spawned; true when it is all in.
-fn step(world: &mut World, id: CellId) -> bool {
+/// Where a cell's load is after one [`step`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Step {
+    /// More to run now.
+    More,
+    /// All in.
+    Done,
+    /// Only off-frame art is left, and none of it has finished building.
+    Waiting,
+}
+
+/// The [`off_frame`] scope of a cell's art: what its spawn queues there is applied by the
+/// cell's own steps, so it is counted in the cell and leaves with it.
+fn art_scope(id: CellId) -> off_frame::Scope {
+    (1 << 32) | id.0 as u64
+}
+
+/// Runs one slice of the cell's spawn, or applies one piece of its off-frame art once the
+/// spawn has run, and tags what it spawned.
+fn step(world: &mut World, id: CellId) -> Step {
     let i = id.0 as usize;
+    let scope = art_scope(id);
+    let spawned = world.resource::<CellHooks>().0[i].spawned;
+    if spawned && !off_frame::ready(world, Some(scope)) {
+        return if off_frame::pending(world, Some(scope)) > 0 {
+            Step::Waiting
+        } else {
+            Step::Done
+        };
+    }
     let t = Instant::now();
     let before = Snapshot::of(world);
     let marks = Marks::of(world);
+    let outer = off_frame::set_scope(world, Some(scope));
+    if spawned {
+        // One piece a step, so the frame budget slices the art as it slices the spawn.
+        off_frame::apply_finished(world, Some(scope), Some(Duration::ZERO));
+    } else {
+        let mut hooks = std::mem::take(&mut world.resource_mut::<CellHooks>().0);
+        let slot = &mut hooks[i];
+        let built = slot.built.as_mut().and_then(|b| b.get_mut().ok());
+        slot.spawned = (slot.loader.step)(world, built, slot.step);
+        slot.step += 1;
+        restore(world, hooks);
+    }
+    // Commands the slice queued run now, so what they queue off-frame is the cell's too.
+    world.flush();
+    off_frame::set_scope(world, outer);
+    let pending = off_frame::pending(world, Some(scope));
+    let spawned = world.resource::<CellHooks>().0[i].spawned;
     let mut hooks = std::mem::take(&mut world.resource_mut::<CellHooks>().0);
-    let slot = &mut hooks[i];
-    let built = slot.built.as_mut().and_then(|b| b.get_mut().ok());
-    let done = (slot.loader.step)(world, built, slot.step);
-    slot.step += 1;
-    slot.assets.note(world, marks, Marks::of(world));
+    hooks[i].assets.note(world, marks, Marks::of(world));
     restore(world, hooks);
     // Resources are entities too (bevy 0.20); one a spawn inserts stays when the cell goes.
     // The tops of what it spawned: new entities with no parent, or a parent from before (a
@@ -1234,7 +1287,11 @@ fn step(world: &mut World, id: CellId) -> bool {
         world.resource_mut::<CellHooks>().0[i].ids_seen = seen;
     }
     world.resource_mut::<CellHooks>().0[i].secs += t.elapsed().as_secs_f32();
-    done
+    if !spawned || pending > 0 {
+        Step::More
+    } else {
+        Step::Done
+    }
 }
 
 /// Every entity alive, by index: cheaper to build and ask than a hash set over a big world.
@@ -1544,6 +1601,7 @@ fn unload(world: &mut World, i: usize) {
             entity.despawn();
         }
     }
+    off_frame::drop_scope(world, art_scope(id));
     world.resource_mut::<Fades>().0.retain(|f| f.cell != id);
     world.resource_mut::<Leaves>().0.retain(|l| l.cell != id);
     hlod::fade_in(world, id, 1.0);
@@ -2188,6 +2246,117 @@ mod tests {
         let next = app.world.resource_mut::<Assets<Mesh>>().add(cube());
         assert_eq!(next.index(), own.index());
         assert!(!app.world.resource::<Assets<Mesh>>().contains(own));
+    }
+
+    #[test]
+    fn a_cells_off_frame_art_lands_in_its_load_and_goes_with_it() {
+        use engine_assets::{AssetAppExt, Assets};
+        use engine_render::{MeshRef, Shape};
+
+        let mut app = app();
+        app.init_asset::<engine_render::Mesh>();
+        let sleep_ms = Arc::new(AtomicUsize::new(40));
+        let ms = sleep_ms.clone();
+        app.stream_cell(
+            StreamCell::new("court", DVec3::ZERO, 10.0, move |world| {
+                world.spawn((Name::new("court floor"), Transform::default()));
+                let ms = ms.load(Ordering::Relaxed) as u64;
+                off_frame::off_frame(
+                    world,
+                    "court statue",
+                    move || {
+                        std::thread::sleep(std::time::Duration::from_millis(ms));
+                        Shape::Cuboid { size: [1.0; 3] }.mesh()
+                    },
+                    |world, mesh| {
+                        let mesh = world
+                            .resource_mut::<Assets<engine_render::Mesh>>()
+                            .add(mesh);
+                        world
+                            .spawn((Name::new("statue"), Transform::default()))
+                            .with_children(|c| {
+                                c.spawn((
+                                    Name::new("statue body"),
+                                    Transform::default(),
+                                    MeshRenderer {
+                                        mesh: MeshRef::Handle(mesh),
+                                        ..Default::default()
+                                    },
+                                ));
+                            });
+                    },
+                );
+            })
+            .release_assets(),
+        );
+        app.update();
+        // The spawn ran; its art is still on the worker, so the cell isn't in yet.
+        assert_eq!(state(&app, "court"), CellState::Loading);
+        assert!(
+            !app.world
+                .resource::<StreamedCells>()
+                .is_ready_around(DVec3::ZERO, 50.0)
+        );
+        assert_eq!(
+            (named(&mut app, "court floor"), named(&mut app, "statue")),
+            (1, 0)
+        );
+        let t = Instant::now();
+        while state(&app, "court") != CellState::Loaded {
+            assert!(t.elapsed().as_secs() < 10, "the art never landed");
+            std::thread::sleep(std::time::Duration::from_millis(2));
+            app.update();
+        }
+        assert_eq!(named(&mut app, "statue body"), 1);
+        let statue = app
+            .world
+            .query::<(Entity, &Name)>()
+            .iter(&app.world)
+            .find(|(_, n)| n.as_str() == "statue")
+            .map(|(e, _)| e)
+            .unwrap();
+        assert_eq!(
+            app.world.get::<CellMember>(statue).map(|m| m.0),
+            Some(CellId(0)),
+            "the art is the cell's"
+        );
+        let info = app.world.resource::<StreamedCells>().cells[0].clone();
+        assert_eq!(info.assets, 1, "the statue's mesh is counted in the cell");
+
+        // It goes with the cell, mesh and all.
+        let pins = |app: &mut App, on: bool| {
+            app.world
+                .resource_mut::<StreamedCells>()
+                .pins
+                .insert("court".into(), on);
+        };
+        pins(&mut app, false);
+        app.update();
+        assert_eq!(state(&app, "court"), CellState::Unloaded);
+        assert_eq!(
+            (named(&mut app, "statue"), named(&mut app, "statue body")),
+            (0, 0)
+        );
+        assert_eq!(app.world.resource::<Assets<engine_render::Mesh>>().len(), 0);
+
+        // Leaving with the art in flight drops it: it never lands later.
+        sleep_ms.store(60, Ordering::Relaxed);
+        pins(&mut app, true);
+        app.update();
+        assert_eq!(state(&app, "court"), CellState::Loading);
+        pins(&mut app, false);
+        app.update();
+        assert_eq!(state(&app, "court"), CellState::Unloaded);
+        assert!(app.world.resource::<off_frame::OffFrameJobs>().is_empty());
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        for _ in 0..3 {
+            app.update();
+        }
+        assert_eq!(
+            (named(&mut app, "court floor"), named(&mut app, "statue")),
+            (0, 0)
+        );
+        assert_eq!(app.world.resource::<Assets<engine_render::Mesh>>().len(), 0);
     }
 
     #[test]

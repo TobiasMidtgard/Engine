@@ -5,12 +5,17 @@ mod support;
 use engine_core::math::{DVec3, Vec3};
 use engine_core::prelude::*;
 use engine_movement::combat::CombatState;
+use engine_movement::play::{self, Parked};
+use engine_movement::player::PlayerControlled;
 use engine_movement::prelude::*;
 use engine_movement::{AttackPhase, Play};
-use engine_render::Camera;
-use engine_world::AttackKind;
-use engine_world::locomotion::MoveIntent;
+use engine_render::{Camera, MeshRenderer};
+use engine_world::interact::Using;
+use engine_world::locomotion::{LocomotionMode, MoveIntent};
+use engine_world::physics::CharacterController;
+use engine_world::{AttackKind, Ground, GroundQuery, GroundSample, Water, WaterQuery, WaterSample};
 use serde_json::{Value, json};
+use std::sync::Arc;
 use support::*;
 
 fn api(app: &mut App, name: &str, args: Value) -> Result<Value, String> {
@@ -59,11 +64,169 @@ fn play_mode_puts_a_pilot_in_front_of_the_camera_and_follows_it() {
     let to_pilot = (p - eye).normalize().as_vec3();
     assert!(t.forward().dot(to_pilot) > 0.9, "{}", t.forward());
 
-    // Off: both are gone and the old camera is the one in use again.
+    // Off: the camera is gone and the old one is in use again; the pilot is parked, hidden
+    // and out of physics.
     let r = api(&mut app, "movement.play", json!({"on": false})).unwrap();
     assert_eq!(r["was_playing"], true);
-    assert!(app.world.get_entity(pilot).is_err() && app.world.get_entity(cam).is_err());
-    assert_eq!(*app.world.resource::<Play>(), Play::default());
+    assert!(app.world.get_entity(cam).is_err());
+    assert_parked(&mut app, pilot);
+    assert_eq!(
+        *app.world.resource::<Play>(),
+        Play {
+            parked: Some(pilot),
+            ..Play::default()
+        }
+    );
+}
+
+fn drawn_meshes(app: &mut App, root: Entity) -> (usize, usize) {
+    let mut stack = vec![root];
+    let (mut shown, mut all) = (0, 0);
+    while let Some(e) = stack.pop() {
+        if let Some(c) = app.world.get::<Children>(e) {
+            stack.extend(c.iter());
+        }
+        if let Some(m) = app.world.get::<MeshRenderer>(e) {
+            all += 1;
+            shown += m.visible as usize;
+        }
+    }
+    (shown, all)
+}
+
+fn assert_parked(app: &mut App, pilot: Entity) {
+    assert!(app.world.get::<Parked>(pilot).is_some());
+    assert!(app.world.get::<CharacterController>(pilot).is_none());
+    assert!(app.world.get::<PlayerControlled>(pilot).is_none());
+    let (shown, all) = drawn_meshes(app, pilot);
+    assert!(all > 0 && shown == 0, "{shown} of {all} meshes drawn");
+}
+
+/// Playtest 2026-10-29 #10: one pilot, parked while flying and brought along, not a fresh
+/// one each time.
+#[test]
+fn play_mode_brings_the_same_pilot_back_where_the_camera_is_now() {
+    let mut app = app();
+    let cam = app
+        .world
+        .spawn((Camera::default(), Transform::from_xyz(0.0, 2.0, 10.0)))
+        .id();
+    app.update();
+    let pilot = play::start(&mut app.world, None).unwrap();
+    run(&mut app, 0.5);
+    app.world.get_mut::<Fighter>(pilot).unwrap().health = 40.0;
+    assert!(play::stop(&mut app.world));
+    let parked_at = pos(&app, pilot);
+    // Parked, it stays put (no gravity, no controls) while the camera flies off.
+    app.world.get_mut::<Transform>(cam).unwrap().translation = DVec3::new(60.0, 30.0, 10.0);
+    run(&mut app, 1.0);
+    assert!(pos(&app, pilot).distance(parked_at) < 1e-6);
+    assert_parked(&mut app, pilot);
+
+    let again = play::start(&mut app.world, None).unwrap();
+    assert_eq!(again, pilot);
+    run(&mut app, 1.0);
+    let p = pos(&app, pilot);
+    assert!(p.distance(DVec3::new(60.0, 0.9, 4.0)) < 0.3, "{p:?}");
+    assert!(app.world.get::<Mover>(pilot).unwrap().grounded);
+    assert_eq!(app.world.get::<Fighter>(pilot).unwrap().health, 40.0);
+    assert!(app.world.get::<Parked>(pilot).is_none());
+    let (shown, all) = drawn_meshes(&mut app, pilot);
+    assert_eq!(shown, all);
+    assert_eq!(
+        app.world
+            .query_filtered::<(), With<PlayerControlled>>()
+            .iter(&app.world)
+            .count(),
+        1
+    );
+}
+
+struct NoGround;
+impl GroundQuery for NoGround {
+    fn sample(&self, _p: DVec3) -> Option<GroundSample> {
+        None
+    }
+}
+
+/// A 3 m deep pond, 20 m across, around the origin.
+struct Pond;
+impl WaterQuery for Pond {
+    fn sample(&self, p: DVec3) -> Option<WaterSample> {
+        (p.x.abs() < 10.0 && p.z.abs() < 10.0).then_some(WaterSample {
+            surface_height: 3.0,
+            depth: 3.0,
+            velocity: Vec3::ZERO,
+            normal: Vec3::Y,
+        })
+    }
+}
+
+/// Playtest 2026-10-29 #10: P from high up found nothing to stand on (a 400 m look), and it
+/// put the pilot on a lake's bed.
+#[test]
+fn play_mode_from_high_up_finds_the_ground_and_starts_on_water_not_its_bed() {
+    let mut app = app();
+    // Only colliders: no terrain answers the ground query.
+    app.world.insert_resource(Ground(Arc::new(NoGround)));
+    block(
+        &mut app,
+        DVec3::new(0.0, -0.5, 0.0),
+        Vec3::new(400.0, 1.0, 400.0),
+    );
+    let cam = app
+        .world
+        .spawn((Camera::default(), Transform::from_xyz(40.0, 1500.0, 10.0)))
+        .id();
+    app.update();
+    let pilot = play::start(&mut app.world, None).unwrap();
+    let p = pos(&app, pilot);
+    assert!(p.distance(DVec3::new(40.0, 0.95, 4.0)) < 0.1, "{p:?}");
+
+    // Over the pond: on its surface, then swimming.
+    app.world.insert_resource(Water(Arc::new(Pond)));
+    play::stop(&mut app.world);
+    app.world.get_mut::<Transform>(cam).unwrap().translation = DVec3::new(0.0, 8.0, 6.0);
+    app.update();
+    let again = play::start(&mut app.world, None).unwrap();
+    assert_eq!(again, pilot);
+    let p = pos(&app, pilot);
+    assert!((p.y - 3.95).abs() < 0.05, "{p:?}");
+    run(&mut app, 3.0);
+    let m = app.world.get::<Mover>(pilot).unwrap();
+    assert_eq!(m.mode, LocomotionMode::Swim);
+
+    // Nothing under the camera at all: the pilot drops from the air in front of it.
+    app.world.get_mut::<Transform>(cam).unwrap().translation = DVec3::new(900.0, 100.0, 6.0);
+    app.update();
+    play::start(&mut app.world, None).unwrap();
+    let p = pos(&app, pilot);
+    assert!(p.distance(DVec3::new(900.0, 100.95, 0.0)) < 0.1, "{p:?}");
+}
+
+/// Playtest 2026-10-29 #10: P while driving despawned the seated pilot (the drive ended by
+/// force and the free camera jumped back to where the pilot got in).
+#[test]
+fn play_mode_keeps_a_pilot_in_a_vehicle_until_it_gets_out() {
+    let mut app = app();
+    app.world
+        .spawn((Camera::default(), Transform::from_xyz(0.0, 2.0, 10.0)));
+    app.update();
+    let pilot = play::start(&mut app.world, None).unwrap();
+    let car = app.world.spawn(Name::new("Car")).id();
+    app.world.entity_mut(pilot).insert(Using { target: car });
+    assert!(play::in_vehicle(&app.world));
+    assert!(!play::stop(&mut app.world));
+    assert!(api(&mut app, "movement.play", json!({"on": false})).is_err());
+    assert!(play::start(&mut app.world, None).is_err());
+    let play = *app.world.resource::<Play>();
+    assert_eq!(play.pilot, Some(pilot));
+    assert!(app.world.get_entity(play.camera.unwrap()).is_ok());
+
+    // Out of the car: P parks it as usual.
+    app.world.entity_mut(pilot).remove::<Using>();
+    assert!(play::stop(&mut app.world));
+    assert_parked(&mut app, pilot);
 }
 
 #[test]
