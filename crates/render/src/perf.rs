@@ -668,6 +668,11 @@ impl PerfLog {
         &self.cpu_steps
     }
 
+    /// The steps features timed inside the latest frame's CPU steps ("meshes: gather", …).
+    pub fn inner_steps(&self) -> &[(&'static str, f32)] {
+        &self.inner_steps
+    }
+
     /// The GPU passes of the latest frame whose times arrived, and whether they arrived with
     /// the latest `frame` call.
     pub fn gpu_passes(&self) -> (&[(Label, f32)], bool) {

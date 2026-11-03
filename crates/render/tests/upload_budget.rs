@@ -116,3 +116,36 @@ fn a_loading_screen_uploads_everything_at_once() {
     assert_eq!(pending_mb(&app), 0.0);
     assert_eq!(app.world.resource::<RenderStats>().instances, BALLS as u32);
 }
+
+/// Meshes with nothing to draw (no triangles yet, as a placeholder) can't go on the GPU: they
+/// are tried once per version, not every frame, and don't count as uploads or re-uploads.
+#[test]
+fn empty_meshes_are_not_uploaded_every_frame() {
+    let mut app = app(64.0);
+    for i in 0..3 {
+        let mesh = app
+            .world
+            .resource_mut::<Assets<Mesh>>()
+            .add(Mesh::default());
+        app.world.spawn((
+            Transform::from_xyz(i as f64, 2.0, 0.0),
+            MeshRenderer::new(mesh, StandardMaterial::color(0.2, 0.3, 0.8)),
+        ));
+    }
+    app.update_n(3);
+    if let Some(d) = app.world.get_resource::<RenderDisabled>() {
+        eprintln!("no GPU ({}), skipping", d.0);
+        return;
+    }
+    let metric = |app: &App, key: &str| app.world.resource::<Diagnostics>().get(key).unwrap_or(0.0);
+    for frame in 0..5 {
+        app.update();
+        let uploads = metric(&app, "render.meshes.uploads");
+        let reuploads = metric(&app, "render.meshes.reuploads");
+        assert_eq!(
+            (uploads, reuploads),
+            (0.0, 0.0),
+            "frame {frame}: uploads and re-uploads of still meshes"
+        );
+    }
+}

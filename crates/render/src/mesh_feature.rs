@@ -1099,6 +1099,9 @@ pub struct MeshFeature {
     reuploads: u32,
     /// The meshes uploaded since their asset was made, to count `reuploads`.
     uploaded_before: HashSet<u32>,
+    /// Meshes that can't go on the GPU (no triangles, or larger than a buffer), by the version
+    /// found so: not tried (or counted as uploads) again until they change.
+    unusable: HashMap<u32, u64>,
     /// This frame's mesh and material lookups, by the handle indices entities name.
     mesh_frames: Vec<MeshFrame>,
     material_frames: Vec<MaterialFrame>,
@@ -1359,9 +1362,12 @@ impl MeshFeature {
         self.lod_waiting.retain(|(index, _)| !gone(*index));
         self.warned_no_height.retain(|&index| !gone(index));
         self.uploaded_before.retain(|&index| !gone(index));
+        self.unusable.retain(|&index, _| !gone(index));
     }
 
-    fn upload_mesh(&mut self, gpu: &GpuShared, index: u32, mesh: &Mesh, version: u64) {
+    /// Put `mesh` on the GPU as mesh `index`, replacing its old copy. False when it can't go
+    /// there (no triangles, or too large): it is then left off until it changes.
+    fn upload_mesh(&mut self, gpu: &GpuShared, index: u32, mesh: &Mesh, version: u64) -> bool {
         if let Some(old) = self.meshes.remove(&index) {
             old.free(&mut self.pool);
             // A mesh edited in place: static shadow images may show its old shape, but only
@@ -1372,7 +1378,8 @@ impl MeshFeature {
             }
         }
         if mesh.indices.is_empty() || mesh.vertices.is_empty() {
-            return;
+            self.unusable.insert(index, version);
+            return false;
         }
         let aabb = mesh.aabb();
         let Some(pool) = self
@@ -1383,7 +1390,8 @@ impl MeshFeature {
                 "mesh {index} ({} vertices) is larger than a GPU buffer may be",
                 mesh.vertices.len()
             );
-            return;
+            self.unusable.insert(index, version);
+            return false;
         };
         self.meshes.insert(
             index,
@@ -1399,6 +1407,8 @@ impl MeshFeature {
                 lods: Vec::new(),
             },
         );
+        self.unusable.remove(&index);
+        true
     }
 
     /// Mark the static shadow images that hold a slot changed or dropped since (it was still
@@ -2895,6 +2905,7 @@ impl RenderFeature for MeshFeature {
                 let handle = Handle::<Mesh>::from_index(mesh.index);
                 let resident = self.meshes.get(&mesh.index).map(|m| m.version);
                 if resident != Some(mesh.version)
+                    && self.unusable.get(&mesh.index) != Some(&mesh.version)
                     && let Some(asset) = mesh_assets.get(handle)
                     // Within this frame's upload budget (asked once per mesh a frame), else
                     // drawn from a later frame; an edit of a resident mesh goes at once.
@@ -2906,11 +2917,12 @@ impl RenderFeature for MeshFeature {
                         resident.is_some(),
                     )
                 {
-                    self.uploads += 1;
-                    self.edits += resident.is_some() as u32;
-                    self.reuploads +=
-                        (resident.is_none() && !self.uploaded_before.insert(mesh.index)) as u32;
-                    self.upload_mesh(gpu, mesh.index, asset, mesh.version);
+                    if self.upload_mesh(gpu, mesh.index, asset, mesh.version) {
+                        self.uploads += 1;
+                        self.edits += resident.is_some() as u32;
+                        self.reuploads +=
+                            (resident.is_none() && !self.uploaded_before.insert(mesh.index)) as u32;
+                    }
                     // Skinned meshes are drawn whole (`GpuSkin` requires `NoMeshLod`).
                     if lod_pixels > 0.0 && !self.skins.skins.contains_key(&mesh.index) {
                         self.request_lods(mesh.index, handle, asset, mesh.version);
