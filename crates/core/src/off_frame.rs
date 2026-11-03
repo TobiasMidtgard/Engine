@@ -86,6 +86,8 @@ pub struct OffFrameJobs {
     /// Since the frame system last reported: main-thread ms in applies, worker ms in builds.
     apply_ms: f64,
     build_ms: f64,
+    /// The frame system's last report wasn't all zeros (so it runs once more to zero it).
+    reported: bool,
 }
 
 impl OffFrameJobs {
@@ -292,6 +294,13 @@ pub const BUILDING_MS: &str = "offframe.building_ms";
 pub const APPLY_MS: &str = "offframe.apply_ms";
 
 /// Engine system (`First`): apply finished unscoped jobs within the budget, and report.
+/// Run condition for [`apply_off_frame_system`]: a job is queued, or the last report wasn't
+/// zero yet. It needs the whole world, so it runs only then (AGENTS.md, "Let systems run side
+/// by side").
+pub fn off_frame_due(jobs: Option<Res<OffFrameJobs>>) -> bool {
+    jobs.is_some_and(|j| !j.jobs.is_empty() || j.reported || j.apply_ms > 0.0 || j.build_ms > 0.0)
+}
+
 pub fn apply_off_frame_system(world: &mut World) {
     let budget = world
         .get_resource::<OffFrameSettings>()
@@ -307,6 +316,7 @@ pub fn apply_off_frame_system(world: &mut World) {
         std::mem::take(&mut jobs.build_ms),
         std::mem::take(&mut jobs.apply_ms),
     );
+    jobs.reported = report != (0.0, 0.0, 0.0);
     if let Some(mut diag) = world.get_resource_mut::<Diagnostics>() {
         diag.set(PENDING, report.0);
         diag.set(BUILDING_MS, report.1);

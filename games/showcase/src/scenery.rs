@@ -2768,12 +2768,13 @@ mod tests {
             app.update();
         };
         walk_to(&mut app, 10.0);
-        // Each entity looks once in LOD_STRIDE frames.
-        for _ in 1..LOD_STRIDE {
+        // Each entity looks once in LOD_STRIDE frames (which one depends on its index), and
+        // only while the camera moves: keep stepping in a little.
+        for i in 1..LOD_STRIDE {
             if mesh(&app) == MeshRef::Handle(near) {
                 break;
             }
-            app.update();
+            walk_to(&mut app, 10.0 - 0.1 * i as f64);
         }
         assert_eq!(mesh(&app), MeshRef::Handle(near));
         let fade = *app.world.get::<LodFade>(rock).unwrap();

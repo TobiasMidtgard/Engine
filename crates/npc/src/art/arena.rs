@@ -3894,6 +3894,21 @@ fn baked(m: Mat) -> Arc<Baked> {
     b
 }
 
+/// Put `m`'s baked images, owned, in the image store.
+fn store_owned(art: &mut ArtAssets, m: Mat, b: Baked) -> Option<()> {
+    let images = art.images.as_mut()?;
+    if let Some(set) = b.set {
+        let k = format!("npc/{}", m.key());
+        images.insert_keyed(&format!("{k}/albedo"), set.albedo);
+        images.insert_keyed(&format!("{k}/normal"), set.normal);
+        images.insert_keyed(&format!("{k}/orm"), set.orm);
+    }
+    if let (Some(glow), Some(k)) = (b.glow, m.glow_key()) {
+        images.insert_keyed(k, glow);
+    }
+    Some(())
+}
+
 /// Put `m`'s baked images in the image store.
 fn store(art: &mut ArtAssets, m: Mat, b: &Baked) -> Option<()> {
     let images = art.images.as_mut()?;
@@ -4329,12 +4344,197 @@ fn yaw_at(a: f64) -> Quat {
 
 /// Put the art on an arena laid out by `demo::spawn_demo` (see the module docs). Records
 /// `npc.arena_build_ms` and `npc.arena_triangles` in [`Diagnostics`] when present.
+///
+/// Textures and meshes this process hasn't built yet are made on a worker
+/// ([`engine_core::off_frame`]) and the art goes on once they are in, moved with any world
+/// shift since (an anchor stands at the origin meanwhile).
 pub fn dress(world: &mut World, layout: &ArenaLayout) {
-    let start = std::time::Instant::now();
     let grounds = Arc::new(Grounds::plan(world, layout));
+    let missing = {
+        let mut state = SystemState::<ArtAssets>::new(world);
+        match state.get_mut(world) {
+            Ok(art) if art.available() => Missing::of(&art, layout, &grounds),
+            _ => None,
+        }
+    };
+    let Some(missing) = missing.filter(|m| !m.is_empty()) else {
+        dress_now(world, layout, grounds, None);
+        return;
+    };
+    let anchor = world
+        .spawn((
+            Transform::from_translation(layout.origin),
+            Name::new("Arena art (building)"),
+        ))
+        .id();
+    let mut layout = layout.clone();
+    let (l, g) = (layout.clone(), grounds.clone());
+    engine_core::off_frame::off_frame(
+        world,
+        "npc arena art",
+        move || {
+            warm(&l, &g);
+            missing.copies()
+        },
+        move |world, copies| {
+            let Some(now) = world.get::<Transform>(anchor).map(|t| t.translation) else {
+                return;
+            };
+            world.despawn(anchor);
+            let d = now - layout.origin;
+            layout.origin += d;
+            layout.duel_ring += d;
+            for p in layout.braziers.iter_mut().chain(&mut layout.mats) {
+                *p += d;
+            }
+            dress_now(world, &layout, grounds, Some(copies));
+        },
+    );
+}
+
+/// What a world lacks of the arena's art: materials whose images aren't stored, and specs
+/// with a mesh not stored (by tag, with their keys).
+struct Missing {
+    mats: Vec<Mat>,
+    specs: Vec<(String, Vec<String>)>,
+}
+
+/// Owned copies of [`Missing`]'s images and meshes, made on the worker so the frame only moves
+/// them into the stores.
+struct Copies {
+    textures: Vec<(Mat, Baked)>,
+    meshes: Vec<(String, Mesh)>,
+}
+
+impl Missing {
+    fn of(art: &ArtAssets, layout: &ArenaLayout, g: &Arc<Grounds>) -> Option<Missing> {
+        let store = art.meshes.as_ref()?;
+        Some(Missing {
+            mats: Mat::ALL.into_iter().filter(|&m| !m.loaded(art)).collect(),
+            specs: specs(layout, g)
+                .into_iter()
+                .filter(|s| {
+                    s.keys
+                        .iter()
+                        .any(|k| store.loaded_by_key(&format!("npc/{k}")).is_none())
+                })
+                .map(|s| (s.tag, s.keys))
+                .collect(),
+        })
+    }
+
+    fn is_empty(&self) -> bool {
+        self.mats.is_empty() && self.specs.is_empty()
+    }
+
+    /// Copies from this process's cache (after [`warm`]).
+    fn copies(&self) -> Copies {
+        let cache = lock();
+        let textures = self
+            .mats
+            .iter()
+            .filter_map(|m| {
+                let b = cache.textures.get(m)?;
+                let set = b.set.as_ref().map(|t| TextureSet {
+                    albedo: t.albedo.clone(),
+                    normal: t.normal.clone(),
+                    orm: t.orm.clone(),
+                });
+                Some((
+                    *m,
+                    Baked {
+                        set,
+                        glow: b.glow.clone(),
+                    },
+                ))
+            })
+            .collect();
+        let meshes = self
+            .specs
+            .iter()
+            .filter_map(|(tag, keys)| Some((cache.meshes.get(tag)?, keys)))
+            .flat_map(|(built, keys)| {
+                keys.iter()
+                    .cloned()
+                    .zip(built.iter().map(|m| (**m).clone()))
+            })
+            .collect();
+        Copies { textures, meshes }
+    }
+}
+
+impl Copies {
+    /// Move the copies into the stores, where they aren't already.
+    fn store(self, art: &mut ArtAssets) -> Option<()> {
+        for (m, b) in self.textures {
+            if !m.loaded(art) {
+                store_owned(art, m, b)?;
+            }
+        }
+        let store = art.meshes.as_mut()?;
+        for (k, m) in self.meshes {
+            let k = format!("npc/{k}");
+            if store.loaded_by_key(&k).is_none() {
+                store.insert_keyed(&k, m);
+            }
+        }
+        Some(())
+    }
+}
+
+/// Make every texture and mesh the arena needs that this process hasn't built yet, on all
+/// cores, no world needed, so [`Kit::load`] only stores them.
+fn warm(layout: &ArenaLayout, g: &Arc<Grounds>) {
+    let specs = specs(layout, g);
+    let work: Vec<Work> = {
+        let cache = lock();
+        Mat::ALL
+            .into_iter()
+            .filter(|m| !cache.textures.contains_key(m))
+            .map(Work::Tex)
+            .chain(
+                specs
+                    .iter()
+                    .filter(|s| !cache.meshes.contains_key(&s.tag))
+                    .map(Work::Mesh),
+            )
+            .collect()
+    };
+    if work.is_empty() {
+        return;
+    }
+    let done = par_map(work.len(), |i| match work[i] {
+        Work::Tex(m) => Done::Tex(m, Arc::new(m.bake())),
+        Work::Mesh(s) => Done::Mesh(s, (s.make)().into_iter().map(Arc::new).collect()),
+    });
+    let mut cache = lock();
+    for d in done {
+        match d {
+            Done::Tex(m, b) => {
+                cache.textures.entry(m).or_insert(b);
+            }
+            Done::Mesh(s, built) => {
+                cache.meshes.entry(s.tag.clone()).or_insert(built);
+            }
+        }
+    }
+}
+
+fn dress_now(
+    world: &mut World,
+    layout: &ArenaLayout,
+    grounds: Arc<Grounds>,
+    copies: Option<Copies>,
+) {
+    let start = std::time::Instant::now();
     let mut state = SystemState::<ArtAssets>::new(world);
     let kit = match state.get_mut(world) {
-        Ok(mut art) if art.available() => Kit::load(&mut art, layout, &grounds),
+        Ok(mut art) if art.available() => {
+            if let Some(copies) = copies {
+                copies.store(&mut art);
+            }
+            Kit::load(&mut art, layout, &grounds)
+        }
         _ => None,
     };
     let Some(kit) = kit else {
@@ -4618,7 +4818,49 @@ pub struct PostKit {
     pub tip_hot: MaterialRef,
 }
 
+/// A sparring post's meshes, made once per process ([`PostKit::warm`]).
+struct PostMeshes {
+    body: [Mesh; 4],
+    arm: [Mesh; 2],
+    tip: Mesh,
+}
+
+static POST_MESHES: OnceLock<PostMeshes> = OnceLock::new();
+
+fn post_meshes() -> &'static PostMeshes {
+    POST_MESHES.get_or_init(|| {
+        let (s, w, i, l) = dummy_meshes(970);
+        let (aw, ai) = arm_meshes(971);
+        PostMeshes {
+            body: [s, w, i, l],
+            arm: [aw, ai],
+            tip: tip_mesh(),
+        }
+    })
+}
+
 impl PostKit {
+    /// The materials a post wears.
+    const MATS: [Mat; 4] = [Mat::Stone, Mat::Wood, Mat::Iron, Mat::Leather];
+
+    /// Whether this process has made everything [`PostKit::load`] needs, so loading only
+    /// stores it.
+    pub fn warmed() -> bool {
+        POST_MESHES.get().is_some() && {
+            let cache = lock();
+            Self::MATS.iter().all(|m| cache.textures.contains_key(m))
+        }
+    }
+
+    /// Make a post's meshes and bake its textures on this thread, no world needed (an
+    /// off-frame build), so [`PostKit::load`] only stores them.
+    pub fn warm() {
+        let _ = par_map(Self::MATS.len() + 1, |i| match Self::MATS.get(i) {
+            Some(&m) => drop(baked(m)),
+            None => drop(post_meshes()),
+        });
+    }
+
     pub fn load(art: &mut ArtAssets) -> Option<PostKit> {
         let [stone, wood, iron, leather] = meshes(
             art,
@@ -4628,16 +4870,12 @@ impl PostKit {
                 "arena/post_iron",
                 "arena/post_leather",
             ],
-            || {
-                let (s, w, i, l) = dummy_meshes(970);
-                [s, w, i, l]
-            },
+            || post_meshes().body.clone(),
         )?;
         let [arm_wood, arm_iron] = meshes(art, ["arena/arm_wood", "arena/arm_iron"], || {
-            let (w, i) = arm_meshes(971);
-            [w, i]
+            post_meshes().arm.clone()
         })?;
-        let [tip] = meshes(art, ["arena/tip"], || [tip_mesh()])?;
+        let [tip] = meshes(art, ["arena/tip"], || [post_meshes().tip.clone()])?;
         let m_stone = material(art, Mat::Stone)?;
         let m_wood = material(art, Mat::Wood)?;
         let m_iron = material(art, Mat::Iron)?;

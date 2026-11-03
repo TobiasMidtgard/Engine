@@ -6320,6 +6320,11 @@ pub fn kit() -> &'static Kit {
     KIT.get_or_init(build_kit)
 }
 
+/// Whether [`kit`] is built already (it takes a second or more the first time).
+pub fn kit_ready() -> bool {
+    KIT.get().is_some()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

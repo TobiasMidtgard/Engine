@@ -214,13 +214,64 @@ type BuildItem<'a> = (
     Option<&'a Npc>,
 );
 
-/// Spawn the parts of new stand-ins.
+/// The fighter kit's shared images are in this world (see [`build_stand_ins`]).
+#[derive(Resource)]
+pub(crate) struct FighterImagesIn;
+
+/// Spawn the parts of new stand-ins. The fighters' shared kit takes a second or more to make
+/// the first time, so it is built on a worker ([`engine_core::off_frame`]) and humanoid
+/// stand-ins get their parts once it is in.
 pub(crate) fn build_stand_ins(
     mut commands: Commands,
-    q: Query<BuildItem, Added<StandIn>>,
+    q: Query<BuildItem, Without<StandInState>>,
     mut art: ArtAssets,
+    mut warming: Local<bool>,
+    images_in: Option<Res<FighterImagesIn>>,
+    time: Res<Time>,
 ) {
+    use crate::art::fighter;
+    use engine_core::time::TimeSource;
+    // Until this world's kit job has put its images in, humanoids wait (the job may have
+    // finished the kit on its worker a moment before).
+    let kit_ready =
+        !art.available() || (fighter::kit_ready() && (!*warming || images_in.is_some()));
+    if art.available() && !fighter::kit_ready() && !*warming && q.iter().any(|i| i.2.is_none()) {
+        *warming = true;
+        // The kit, and copies of the images every fighter shares (the atlas and each wear's
+        // paint maps), made on the worker so the frame only moves them into the store.
+        engine_core::off_frame::OffFrameCommands::off_frame(
+            &mut commands,
+            "npc fighter kit",
+            || {
+                let kit = fighter::kit();
+                let mut sets = vec![("fighter/atlas".to_string(), kit.atlas())];
+                sets.extend(
+                    (0..fighter::WEARS).map(|w| (format!("fighter/paint{w}"), kit.paint_maps(w))),
+                );
+                sets
+            },
+            |world, sets| {
+                let mut state = bevy_ecs::system::SystemState::<ArtAssets>::new(world);
+                if let Ok(mut art) = state.get_mut(world) {
+                    for (key, set) in sets {
+                        let _ = art.textures(&key, move || set);
+                    }
+                }
+                world.insert_resource(FighterImagesIn);
+            },
+        );
+    }
+    // A new fighter's paint takes ~20 ms to make: with the renderer and a real-time clock, a
+    // few per frame and the rest on the next (a manual clock, as in tests, builds them all).
+    let start = std::time::Instant::now();
+    let budgeted = art.available() && matches!(time.source(), TimeSource::Realtime);
     for (e, stand_in, animal, weapon, faction, skills, npc) in &q {
+        if animal.is_none() && !kit_ready {
+            continue;
+        }
+        if budgeted && start.elapsed().as_secs_f64() > 0.004 {
+            break;
+        }
         let medic = npc.is_some_and(|n| n.role == NpcRole::Medic);
         let parts = match animal.map(|a| a.species) {
             None => humanoid::parts(stand_in, weapon, faction, skills, medic, &mut art),

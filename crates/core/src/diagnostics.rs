@@ -55,7 +55,7 @@ pub fn frame_diagnostics_system(
     diag.frame = time.frame_count();
     diag.entities = entities.count_spawned();
     if diag.frame.is_multiple_of(15)
-        && let Some(mb) = process_ram_mb()
+        && let Some(mb) = sampled_ram_mb()
     {
         diag.set(PROCESS_RAM_MB, mb);
     }
@@ -70,11 +70,55 @@ pub fn process_ram_mb() -> Option<f64> {
     memory_stats::memory_stats().map(|m| m.physical_mem as f64 / (1024.0 * 1024.0))
 }
 
+/// The process's resident memory as a background thread last read it (every 100 ms), MB;
+/// `None` until its first reading. Never blocks the caller: on Linux reading it takes the
+/// address space's lock, which waits behind any thread mapping memory (a worker building
+/// art), for 100 ms or more on a busy load.
+pub fn sampled_ram_mb() -> Option<f64> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static MB: AtomicU64 = AtomicU64::new(u64::MAX);
+    static SAMPLER: std::sync::Once = std::sync::Once::new();
+    SAMPLER.call_once(|| {
+        let spawned = std::thread::Builder::new()
+            .name("ram sampler".into())
+            .spawn(|| {
+                loop {
+                    if let Some(mb) = process_ram_mb() {
+                        MB.store(mb.to_bits(), Ordering::Relaxed);
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                }
+            });
+        if spawned.is_err()
+            && let Some(mb) = process_ram_mb()
+        {
+            MB.store(mb.to_bits(), Ordering::Relaxed);
+        }
+    });
+    match MB.load(Ordering::Relaxed) {
+        u64::MAX => None,
+        bits => Some(f64::from_bits(bits)),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
     fn the_process_ram_reads() {
         let mb = super::process_ram_mb().expect("supported on every target we ship");
+        assert!(mb > 1.0 && mb < 1.0e6, "{mb} MB");
+    }
+
+    #[test]
+    fn the_sampled_ram_arrives_without_blocking() {
+        let start = std::time::Instant::now();
+        let mb = loop {
+            if let Some(mb) = super::sampled_ram_mb() {
+                break mb;
+            }
+            assert!(start.elapsed().as_secs() < 10, "no sample");
+            std::thread::yield_now();
+        };
         assert!(mb > 1.0 && mb < 1.0e6, "{mb} MB");
     }
 }

@@ -90,6 +90,8 @@ mod tests {
             &[
                 "bevy_ecs::message_update_system",
                 "engine_ai_bridge::bridge_frame_start_system",
+                // Only while off-frame jobs are queued (`off_frame_due`).
+                "engine_core::apply_off_frame_system",
             ],
         ),
         ("FixedPostUpdate", 0, &[]),

@@ -117,6 +117,10 @@ fn tip(hot: bool) -> StandardMaterial {
     }
 }
 
+/// A post whose parts are spawned.
+#[derive(Component)]
+pub(crate) struct PostDressed;
+
 /// The two looks of a post's striking head: at rest, and glowing while a swing is telegraphed.
 #[derive(Component, Debug, Clone, PartialEq)]
 pub(crate) struct TipLooks {
@@ -126,16 +130,33 @@ pub(crate) struct TipLooks {
 
 /// Dress new posts: a stone base, a turned wooden post with iron bands and a leather grip,
 /// and a beam arm with a padded leather head (plain shapes without the renderer).
+///
+/// The first time in a process the post's meshes and textures are made on a worker
+/// ([`engine_core::off_frame`]) and the posts are dressed once they are in.
 pub(crate) fn build_posts(
     mut commands: Commands,
-    q: Query<Entity, Added<SparringPost>>,
+    q: Query<Entity, (With<SparringPost>, Without<PostDressed>)>,
     mut art: ArtAssets,
+    mut warming: Local<bool>,
 ) {
     if q.is_empty() {
         return;
     }
+    if art.available() && !PostKit::warmed() {
+        if !*warming {
+            *warming = true;
+            engine_core::off_frame::OffFrameCommands::off_frame(
+                &mut commands,
+                "npc sparring post kit",
+                PostKit::warm,
+                |_, ()| {},
+            );
+        }
+        return;
+    }
     let kit = PostKit::load(&mut art);
     for e in &q {
+        commands.entity(e).insert(PostDressed);
         let Some(kit) = &kit else {
             plain_post(&mut commands, e);
             continue;

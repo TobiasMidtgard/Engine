@@ -183,7 +183,7 @@ impl App {
                 time::time_system,
                 message_update_system.run_if(message_update_condition),
                 diagnostics::frame_diagnostics_system,
-                crate::off_frame::apply_off_frame_system,
+                crate::off_frame::apply_off_frame_system.run_if(crate::off_frame::off_frame_due),
             )
                 .chain(),
         )

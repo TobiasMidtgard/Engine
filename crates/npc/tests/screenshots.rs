@@ -71,6 +71,10 @@ fn app(width: u32, height: u32) -> App {
         demo::spawn_wildlife(&mut commands, MEADOW, 45.0);
     }
     app.world.flush();
+    // The arena's and the fighters' art is built on workers: wait for it.
+    engine_core::off_frame::finish(&mut app.world, None);
+    app.update();
+    engine_core::off_frame::finish(&mut app.world, None);
     app
 }
 

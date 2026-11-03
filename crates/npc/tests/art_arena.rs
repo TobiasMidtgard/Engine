@@ -62,6 +62,8 @@ fn app(width: u32, height: u32) -> App {
         demo::spawn_demo(&mut commands, DVec3::ZERO);
     }
     app.world.flush();
+    // The arena's art is built on workers: wait for it.
+    engine_core::off_frame::finish(&mut app.world, None);
     app
 }
 
