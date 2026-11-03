@@ -53,12 +53,15 @@ const FAILED: u8 = 4;
 const SLOTS: usize = 4;
 /// Most timestamps in one frame (one where each pass starts, one at the end); passes past it
 /// count towards the one before.
-const MAX_MARKS: usize = 128;
+const MAX_MARKS: usize = 256;
 /// Bytes of one frame's timestamps (a multiple of the 256 query resolves must start on).
 const SLOT_BYTES: u64 = (MAX_MARKS * 8) as u64;
 const _: () = assert!(SLOT_BYTES.is_multiple_of(wgpu::QUERY_RESOLVE_BUFFER_ALIGNMENT));
 
 type Label = Cow<'static, str>;
+
+/// Passes the profiler splits by feature ("scene: meshes", …): each also reports its whole.
+const SPLIT_PASSES: [&str; 2] = ["scene", "prepass"];
 
 struct Slot {
     buffer: wgpu::Buffer,
@@ -263,14 +266,17 @@ impl GpuTimer {
                         .zip(t.windows(2))
                         .map(|(label, w)| (label, w[1].saturating_sub(w[0]) as f32 * ms))
                         .collect();
-                    // A scene split by feature (profiler) still reports the whole scene.
-                    let split: Vec<f32> = passes
-                        .iter()
-                        .filter(|(label, _)| label.starts_with("scene: "))
-                        .map(|&(_, ms)| ms)
-                        .collect();
-                    if !split.is_empty() {
-                        passes.push(("scene".into(), split.iter().sum()));
+                    // A pass split by feature (profiler) still reports the whole pass.
+                    for whole in SPLIT_PASSES {
+                        let prefix = format!("{whole}: ");
+                        let split: Vec<f32> = passes
+                            .iter()
+                            .filter(|(label, _)| label.starts_with(prefix.as_str()))
+                            .map(|&(_, ms)| ms)
+                            .collect();
+                        if !split.is_empty() {
+                            passes.push((whole.into(), split.iter().sum()));
+                        }
                     }
                     out.push(GpuFrame {
                         total: total as f32 * ms,
@@ -1039,6 +1045,21 @@ mod tests {
         .map(|(n, ms)| (Label::from(n), ms))
         .collect();
         assert!((total_of_parts(&sums) - 29.6).abs() < 1e-4);
+    }
+
+    #[test]
+    fn a_split_prepass_counts_once_too() {
+        let sums: HashMap<Label, f32> = [
+            ("prepass", 3.0),
+            ("prepass: meshes", 2.0),
+            ("prepass: terrain", 1.0),
+            ("scene", 4.0),
+        ]
+        .into_iter()
+        .map(|(n, ms)| (Label::from(n), ms))
+        .collect();
+        assert!((total_of_parts(&sums) - 7.0).abs() < 1e-4);
+        assert!(SPLIT_PASSES.contains(&"prepass"));
     }
 
     #[test]

@@ -2267,40 +2267,29 @@ impl Renderer {
             self.probe_gi.encode(&mut encoder, frame_group);
         }
 
-        // Depth prepass: depth, normals and motion of opaque geometry.
-        self.perf.pass(&mut cpu, &mut encoder, "prepass");
-        {
-            let clear = wgpu::Operations {
-                load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                store: wgpu::StoreOp::Store,
-            };
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("prepass"),
-                color_attachments: &[
-                    Some(wgpu::RenderPassColorAttachment {
-                        view: &self.targets.prepass_normal.view,
-                        depth_slice: None,
-                        resolve_target: None,
-                        ops: clear,
-                    }),
-                    Some(wgpu::RenderPassColorAttachment {
-                        view: &self.targets.motion.view,
-                        depth_slice: None,
-                        resolve_target: None,
-                        ops: clear,
-                    }),
-                ],
-                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: &self.targets.depth.view,
-                    depth_ops: Some(wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(0.0),
-                        store: wgpu::StoreOp::Store,
-                    }),
-                    stencil_ops: None,
-                }),
-                ..Default::default()
-            });
-            pass.set_bind_group(0, &self.prepass_group, &[]);
+        // Depth prepass: depth, normals and motion of opaque geometry. With the frame profiler
+        // on, each feature's prepass draws get a pass of their own (`render.gpu.prepass:
+        // <feature>`), as the scene's do.
+        if engine_core::profile::enabled() {
+            for (i, f) in self.features.iter().enumerate() {
+                self.perf
+                    .pass(&mut cpu, &mut encoder, format!("prepass: {}", f.name()));
+                let mut pass =
+                    prepass_pass(&mut encoder, &self.targets, &self.prepass_group, i == 0);
+                f.draw_prepass(&mut pass, &ctx);
+            }
+            if self.features.is_empty() {
+                self.perf.pass(&mut cpu, &mut encoder, "prepass");
+                drop(prepass_pass(
+                    &mut encoder,
+                    &self.targets,
+                    &self.prepass_group,
+                    true,
+                ));
+            }
+        } else {
+            self.perf.pass(&mut cpu, &mut encoder, "prepass");
+            let mut pass = prepass_pass(&mut encoder, &self.targets, &self.prepass_group, true);
             for f in &self.features {
                 f.draw_prepass(&mut pass, &ctx);
                 pass.set_bind_group(0, &self.prepass_group, &[]);
@@ -3121,6 +3110,55 @@ pub(crate) fn layout_entry(
         ty,
         count: None,
     }
+}
+
+/// The depth prepass over the normal and motion targets and the depth, cleared or continued.
+fn prepass_pass<'e>(
+    encoder: &'e mut wgpu::CommandEncoder,
+    targets: &Targets,
+    prepass_group: &wgpu::BindGroup,
+    clear: bool,
+) -> wgpu::RenderPass<'e> {
+    let color = wgpu::Operations {
+        load: if clear {
+            wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT)
+        } else {
+            wgpu::LoadOp::Load
+        },
+        store: wgpu::StoreOp::Store,
+    };
+    let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        label: Some("prepass"),
+        color_attachments: &[
+            Some(wgpu::RenderPassColorAttachment {
+                view: &targets.prepass_normal.view,
+                depth_slice: None,
+                resolve_target: None,
+                ops: color,
+            }),
+            Some(wgpu::RenderPassColorAttachment {
+                view: &targets.motion.view,
+                depth_slice: None,
+                resolve_target: None,
+                ops: color,
+            }),
+        ],
+        depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+            view: &targets.depth.view,
+            depth_ops: Some(wgpu::Operations {
+                load: if clear {
+                    wgpu::LoadOp::Clear(0.0)
+                } else {
+                    wgpu::LoadOp::Load
+                },
+                store: wgpu::StoreOp::Store,
+            }),
+            stencil_ops: None,
+        }),
+        ..Default::default()
+    });
+    pass.set_bind_group(0, prepass_group, &[]);
+    pass
 }
 
 /// The scene pass over the HDR target and the prepass depth, cleared or continued.
