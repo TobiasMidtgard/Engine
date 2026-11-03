@@ -368,6 +368,30 @@ fn a_mirror_reflects_what_is_above_it_even_off_screen_and_nothing_under_it() {
 /// the mirror lit by the main view's shadow maps (`mirror_shares_lighting`) or by its own.
 /// Returns the shot and how many extra views borrowed the main view's maps.
 fn render_wall(share: bool) -> Option<(image::RgbImage, f64)> {
+    let mut app = wall_app(share);
+    app.update_n(5);
+    if let Some(d) = app.world.get_resource::<RenderDisabled>() {
+        eprintln!("skipping: no GPU ({})", d.0);
+        return None;
+    }
+    let dir = std::env::temp_dir().join("engine-planar-reflections");
+    let _ = std::fs::create_dir_all(&dir);
+    let name = format!("wall-shared-{share}.png");
+    let path = dir.join(&name);
+    capture_now(&mut app.world, &path).expect("screenshot");
+    if let Ok(out) = std::env::var("ENGINE_SHOTS") {
+        let _ = std::fs::copy(&path, std::path::Path::new(&out).join(&name));
+    }
+    let shared = app
+        .world
+        .resource::<Diagnostics>()
+        .get("render.extra_views_shared_lighting")
+        .unwrap_or(0.0);
+    Some((image::open(&path).expect("read the shot").to_rgb8(), shared))
+}
+
+/// The wall scene of [`render_wall`], not yet rendered.
+fn wall_app(share: bool) -> App {
     engine_core::log::init("error");
     let mut app = App::new();
     app.world.resource_mut::<EngineConfig>().headless = true;
@@ -420,25 +444,36 @@ fn render_wall(share: bool) -> Option<(image::RgbImage, f64)> {
             StandardMaterial::color(0.8, 0.8, 0.8),
         ),
     ));
-    app.update_n(5);
+    app
+}
+
+#[test]
+fn the_mirrors_numbers_go_to_zero_once_it_is_gone() {
+    let mut app = wall_app(true);
+    app.update_n(3);
     if let Some(d) = app.world.get_resource::<RenderDisabled>() {
         eprintln!("skipping: no GPU ({})", d.0);
-        return None;
+        return;
     }
-    let dir = std::env::temp_dir().join("engine-planar-reflections");
-    let _ = std::fs::create_dir_all(&dir);
-    let name = format!("wall-shared-{share}.png");
-    let path = dir.join(&name);
-    capture_now(&mut app.world, &path).expect("screenshot");
-    if let Ok(out) = std::env::var("ENGINE_SHOTS") {
-        let _ = std::fs::copy(&path, std::path::Path::new(&out).join(&name));
-    }
-    let shared = app
+    let get = |app: &App, key: &str| app.world.resource::<Diagnostics>().get(key).unwrap_or(-1.0);
+    assert!(
+        get(&app, "render.extra_views_ms") > 0.0,
+        "the mirror's view"
+    );
+    let mirror = app
         .world
-        .resource::<Diagnostics>()
-        .get("render.extra_views_shared_lighting")
-        .unwrap_or(0.0);
-    Some((image::open(&path).expect("read the shot").to_rgb8(), shared))
+        .query_filtered::<Entity, With<PlanarReflection>>()
+        .single(&app.world)
+        .unwrap();
+    app.world.despawn(mirror);
+    app.update_n(3);
+    for key in [
+        "render.extra_views_ms",
+        "render.extra_views_gpu_ms",
+        "render.extra_views_shared_lighting",
+    ] {
+        assert_eq!(get(&app, key), 0.0, "{key} with no mirror");
+    }
 }
 
 /// Where the sun's light travels: down, away from the camera and a little to the right.

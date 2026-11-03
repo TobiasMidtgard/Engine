@@ -1370,6 +1370,19 @@ impl Renderer {
         });
         views.retain(|v| v.2);
         if views.is_empty() {
+            // None this frame: say so, not the last extra view's numbers.
+            if let Some(mut d) = world.get_resource_mut::<Diagnostics>() {
+                for key in [
+                    "render.extra_views",
+                    "render.extra_views_ms",
+                    "render.extra_views_gpu_ms",
+                    "render.extra_views_shared_lighting",
+                ] {
+                    if d.metrics.contains_key(key) {
+                        d.set(key, 0.0);
+                    }
+                }
+            }
             return Vec::new();
         }
         views.sort_by_key(|v| v.1);
