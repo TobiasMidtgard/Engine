@@ -329,7 +329,7 @@ pub struct RenderSettings {
     /// weather maps instead of drawing its own: all of them are centered on the camera's
     /// position, which a horizontal mirror's camera shares (Unreal's planar reflections and
     /// HDRP's planar probe likewise skip shadow maps of their own). Off: the mirror draws its
-    /// own every frame.
+    /// own every frame. `ENGINE_MIRROR_SHARES_LIGHTING=on|off` overrides it.
     pub mirror_shares_lighting: bool,
     /// The sky's own flat cloud layer (a 2D deck 1.5 km up whose cover follows
     /// `WeatherState::cloud_cover`), in the sky and in the environment map that lights the
@@ -572,30 +572,31 @@ pub(crate) fn effective(world: &World) -> RenderSettings {
         Some(quality) => settings.scaled(quality),
         None => settings.clone(),
     };
-    if let Some(on) = probe_gi_from_env() {
+    static PROBE_GI: std::sync::OnceLock<Option<bool>> = std::sync::OnceLock::new();
+    if let Some(on) = switch_from_env("ENGINE_PROBE_GI", &PROBE_GI) {
         s.probe_gi = on;
+    }
+    static MIRROR: std::sync::OnceLock<Option<bool>> = std::sync::OnceLock::new();
+    if let Some(on) = switch_from_env("ENGINE_MIRROR_SHARES_LIGHTING", &MIRROR) {
+        s.mirror_shares_lighting = on;
     }
     s
 }
 
-/// `ENGINE_PROBE_GI=on|off`, when set, overrides `RenderSettings::probe_gi` (to compare the
-/// two on one build, in any game).
-fn probe_gi_from_env() -> Option<bool> {
-    static ON: std::sync::OnceLock<Option<bool>> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| {
-        match std::env::var("ENGINE_PROBE_GI")
-            .ok()?
-            .to_ascii_lowercase()
-            .as_str()
-        {
+/// `<name>=on|off`, when set, overrides a setting (to compare the two on one build, in any
+/// game): `ENGINE_PROBE_GI` (`RenderSettings::probe_gi`), `ENGINE_MIRROR_SHARES_LIGHTING`
+/// (`RenderSettings::mirror_shares_lighting`). Read once.
+fn switch_from_env(name: &str, cell: &'static std::sync::OnceLock<Option<bool>>) -> Option<bool> {
+    *cell.get_or_init(
+        || match std::env::var(name).ok()?.to_ascii_lowercase().as_str() {
             "off" | "0" => Some(false),
             "on" | "1" => Some(true),
             other => {
-                tracing::warn!("ENGINE_PROBE_GI={other} is not on or off");
+                tracing::warn!("{name}={other} is not on or off");
                 None
             }
-        }
-    })
+        },
+    )
 }
 
 impl RenderSettings {
