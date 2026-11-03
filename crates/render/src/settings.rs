@@ -409,6 +409,12 @@ pub struct RenderSettings {
     /// Instanced meshes narrower than this many pixels on screen (or texels in a shadow map)
     /// are left out of that view. 0 = draw everything.
     pub min_object_pixels: f32,
+    /// Shadow casters narrower than this many texels of a sun cascade skip that cascade (at
+    /// least `min_object_pixels`): their shadow is under the filter's width, so a far cascade
+    /// doesn't draw every pebble, plant part and prop in its 100 m squares. Unreal's
+    /// `r.Shadow.RadiusThreshold` culls small casters the same way, by screen radius. Scaled by
+    /// `Scalability::shadows` (smaller at higher quality).
+    pub shadow_caster_min_texels: f32,
     /// Instanced meshes whose levels of detail stay above a few hundred triangles (leaf-card
     /// trees, ragged props) are drawn as impostors, one baked quad each, once smaller than this
     /// many pixels on screen (or texels in a shadow map); see `impostor.rs`. On screen they
@@ -562,6 +568,7 @@ impl Default for RenderSettings {
             cluster_error_px: 1.0,
             mesh_lod_pixels: 1.0,
             min_object_pixels: 1.0,
+            shadow_caster_min_texels: 3.0,
             impostor_pixels: 96.0,
             impostor_atlas_layers: 128,
             cluster_shadow_error_texels: 2.0,
@@ -665,6 +672,7 @@ impl RenderSettings {
         let size = self.shadow_map_size.max(1) as f32 * shadows;
         s.shadow_map_size = (2f32.powf(size.log2().round()) as u32).clamp(512, 8192);
         s.shadow_distance = self.shadow_distance * shadows;
+        s.shadow_caster_min_texels = self.shadow_caster_min_texels / shadows;
         s.far_shadow_distance = self.far_shadow_distance * shadows;
 
         // Farther detail at a higher view distance: a pixel threshold shrinks as it grows.

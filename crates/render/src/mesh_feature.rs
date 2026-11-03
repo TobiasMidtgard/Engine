@@ -3011,6 +3011,7 @@ impl RenderFeature for MeshFeature {
         let prev_origin = view.prev_origin;
         let lod_pixels = settings.mesh_lod_pixels.max(0.0);
         let min_pixels = settings.min_object_pixels.max(0.0);
+        let min_caster_texels = settings.shadow_caster_min_texels.max(min_pixels);
         let impostor_pixels = settings.impostor_pixels.max(0.0);
         let threads = gather_threads(self.scene.hot.len());
         steps.step("meshes: sort and batch");
@@ -3180,7 +3181,14 @@ impl RenderFeature for MeshFeature {
                     } else {
                         map_shades(view, c, item.center, item.radius)
                     };
-                    if !inside || 2.0 * item.radius < min_pixels * texel {
+                    // Casters narrower than a few of a cascade's texels make no shadow its
+                    // filter keeps (`RenderSettings::shadow_caster_min_texels`).
+                    let min_size = if c < MAX_CASCADES {
+                        min_caster_texels
+                    } else {
+                        min_pixels
+                    };
+                    if !inside || 2.0 * item.radius < min_size * texel {
                         continue;
                     }
                     if !in_image && can_rest && item.since <= frame {
