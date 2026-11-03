@@ -2041,6 +2041,7 @@ impl Renderer {
                     f.draw_environment(&mut pass, &ctx);
                 }
             }
+            self.perf.pass(&mut cpu, &mut encoder, "environment filter");
             self.environment.filter(&mut encoder);
             self.env_rendered = Some(env_now);
         }
