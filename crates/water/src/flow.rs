@@ -388,6 +388,17 @@ pub struct FlowSim {
     /// Out of the `SimulationRange` of every focus: it holds still, as it last ran, until one
     /// comes near.
     pub resting: bool,
+    /// Settled, and farther from every focus than the flows' detail range
+    /// (`sim::FLOW_DETAIL_SHARE` of the `SimulationRange`): it holds still as it last ran,
+    /// throwing its falls' spray, until a focus comes nearer or its bed changes.
+    pub dozing: bool,
+    /// Seconds its water has held its shape (no cell's depth moving [`STEADY_DEPTH_M`] in a
+    /// [`STEADY_CHECK_S`]) over the same bed.
+    pub steady_s: f32,
+    /// The depths and bed version at the last steadiness check, and seconds since.
+    check_depth: Vec<f32>,
+    check_bed: u64,
+    check_s: f32,
     /// Lowest and highest bed, meters above `origin.y` (only ever grows).
     bed_span: [f32; 2],
     /// The falls as last worked out ([`FlowSim::falls`]), and seconds of flow since.
@@ -412,6 +423,13 @@ pub struct Falls {
     pub sides: Vec<[bool; 2]>,
 }
 
+/// How often a flow checks whether its water still moves, seconds of flow.
+pub const STEADY_CHECK_S: f32 = 1.0;
+/// Depth change in a [`STEADY_CHECK_S`] under which a cell's water holds its shape, meters
+/// (a steady stream's surface shimmers by millimeters; a filling pool rises by centimeters).
+pub const STEADY_DEPTH_M: f32 = 0.005;
+/// Seconds a flow's water must hold its shape before it may doze far from every focus.
+pub const SETTLED_S: f32 = 5.0;
 /// Seconds of flow between working out a region's [`Falls`] again.
 pub const FALLS_PERIOD: f32 = 0.2;
 /// Segments of each cached fall path.
@@ -467,6 +485,11 @@ impl FlowSim {
             version: 0,
             drained_m3: 0.0,
             resting: false,
+            dozing: false,
+            steady_s: 0.0,
+            check_depth: Vec::new(),
+            check_bed: u64::MAX,
+            check_s: 0.0,
             bed_span,
             falls: Default::default(),
             since_falls: f32::INFINITY,
@@ -542,6 +565,11 @@ impl FlowSim {
             version,
             drained_m3,
             resting,
+            dozing,
+            steady_s,
+            check_depth: _,
+            check_bed: _,
+            check_s: _,
             bed_span,
             falls,
             since_falls,
@@ -573,6 +601,8 @@ impl FlowSim {
         self.version = *version;
         self.drained_m3 = *drained_m3;
         self.resting = *resting;
+        self.dozing = *dozing;
+        self.steady_s = *steady_s;
         self.bed_span = *bed_span;
         self.falls = falls.clone();
         self.since_falls = *since_falls;
@@ -946,6 +976,42 @@ impl FlowSim {
         if self.since_falls >= FALLS_PERIOD {
             self.refresh_falls();
         }
+        self.watch_steady(dt);
+    }
+
+    /// Has its water held its shape for [`SETTLED_S`] over the bed it has now?
+    pub fn settled(&self) -> bool {
+        self.steady_s >= SETTLED_S && self.check_bed == self.bed_version
+    }
+
+    /// Something changed what it flows from or into (a lake's level, its springs): it is no
+    /// longer known to be settled.
+    pub fn unsettle(&mut self) {
+        self.steady_s = 0.0;
+        self.dozing = false;
+    }
+
+    /// Every [`STEADY_CHECK_S`] of flow: has any cell's depth moved by [`STEADY_DEPTH_M`]?
+    fn watch_steady(&mut self, dt: f32) {
+        self.check_s += dt;
+        if self.check_s < STEADY_CHECK_S {
+            return;
+        }
+        let same = self.check_bed == self.bed_version
+            && self.check_depth.len() == self.depth.len()
+            && self
+                .depth
+                .iter()
+                .zip(&self.check_depth)
+                .all(|(a, b)| (a - b).abs() < STEADY_DEPTH_M);
+        self.steady_s = if same {
+            self.steady_s + self.check_s
+        } else {
+            0.0
+        };
+        self.check_depth.clone_from(&self.depth);
+        self.check_bed = self.bed_version;
+        self.check_s = 0.0;
     }
 
     fn substep(&mut self, dt: f32) {

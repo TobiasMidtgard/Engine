@@ -199,3 +199,62 @@ fn only_moving_bodies_are_looked_for_and_only_where_they_move() {
     assert_eq!(standing(&app, flow, 15.1, 10.1), f32::NEG_INFINITY);
     assert!((standing(&app, flow, 25.1, 10.1) - 1.2).abs() < 0.01);
 }
+
+/// A settled stream past the flows' detail range holds still (no steps) and wakes when the
+/// focus comes back near.
+#[test]
+fn a_settled_stream_far_off_dozes_and_wakes_when_the_focus_returns() {
+    let scene = Arc::new(Scene::default());
+    let (mut app, flow) = app(&scene);
+    let state = |app: &App| {
+        let w = app.world.resource::<SharedWater>().0.clone();
+        let w = w.read();
+        let sim = w.flows.iter().find(|f| f.entity == flow).unwrap();
+        (sim.dozing, sim.resting, sim.version, sim.steady_s)
+    };
+    // Settling near the focus: it keeps stepping.
+    for _ in 0..30 * 8 {
+        app.update();
+    }
+    let (dozing, _, _, steady) = state(&app);
+    assert!(
+        !dozing && steady >= engine_water::flow::SETTLED_S,
+        "steady {steady} s"
+    );
+    let range = *app.world.resource::<engine_world::SimulationRange>();
+    let focus = app
+        .world
+        .query_filtered::<Entity, With<SimulationFocus>>()
+        .single(&app.world)
+        .unwrap();
+    // Out past the detail range, still well inside the simulation range.
+    let away = 20.0
+        + 30.0
+        + range.active_m * engine_water::sim::FLOW_DETAIL_SHARE * (1.0 + range.hysteresis)
+        + 5.0;
+    assert!(
+        away < 20.0 + range.active_m,
+        "detail {away} m vs active {} m",
+        range.active_m
+    );
+    app.world.get_mut::<Transform>(focus).unwrap().translation.x = away;
+    for _ in 0..5 {
+        app.update();
+    }
+    let (dozing, resting, v0, _) = state(&app);
+    assert!(dozing && !resting, "dozing {dozing}, resting {resting}");
+    for _ in 0..30 {
+        app.update();
+    }
+    assert_eq!(state(&app).2, v0, "a dozing stream takes no steps");
+    // Back by the stream: it runs again.
+    app.world.get_mut::<Transform>(focus).unwrap().translation.x = 20.0;
+    for _ in 0..5 {
+        app.update();
+    }
+    let (dozing, _, v1, _) = state(&app);
+    assert!(
+        !dozing && v1 > v0,
+        "awake again: dozing {dozing}, version {v0} -> {v1}"
+    );
+}

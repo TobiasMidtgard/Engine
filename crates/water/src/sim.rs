@@ -824,7 +824,11 @@ pub fn flow_system(
     // While a lake's bed grid is being read the reservoirs stay as they are (asking the
     // terrain for every cell instead cost a third of a second for the showcase's stream): the
     // grid coming in changes the layout again.
-    let waiting = state.bodies.iter().any(|b| b.bed_pending());
+    let pending_beds = state.bodies.iter().filter(|b| b.bed_pending()).count();
+    let waiting = pending_beds > 0;
+    if status.beds != pending_beds {
+        status.beds = pending_beds;
+    }
     let relayout = *last_layout != book.layout && !waiting;
     if !waiting {
         *last_layout = book.layout;
@@ -887,10 +891,25 @@ pub fn flow_system(
             sim.yaw = yaw;
         }
         if relayout {
+            let before = sim.reservoir.clone();
             set_reservoirs(sim, &state.bodies, &state.ground);
+            if !same_levels(&before, &sim.reservoir) {
+                sim.unsettle();
+            }
         }
         let (center, radius) = sim.bounds();
         crate::rests(&range, &focus, center, radius, &mut sim.resting);
+        // Far off, a settled stream looks the same holding still as running: only those
+        // within the flows' detail range keep stepping (the way engines tick far actors less,
+        // Unreal's significance manager and its update-rate optimization of far meshes).
+        let detail = range.active_m * FLOW_DETAIL_SHARE;
+        let far = focus.distance(center) - radius.max(0.0);
+        // With no focus at all (tests, tools) everything runs, as `SimulationRange` keeps it.
+        if sim.resting || focus.points.is_empty() || far < detail || !sim.settled() {
+            sim.dozing = false;
+        } else if far > detail * (1.0 + range.hysteresis) {
+            sim.dozing = true;
+        }
     }
     state.flows.retain(|f| seen.contains(&f.entity));
     // A region removed while it was settling: drop its work (that cancels it).
@@ -905,6 +924,18 @@ pub fn flow_system(
     drop(guard);
     let built: Vec<FlowSim> = builds.into_iter().map(FlowJob::build).collect();
     shared.0.write().flows.extend(built);
+}
+
+/// Share of the `SimulationRange` within which a settled flow keeps stepping; past it (110 m
+/// at Ultra) it dozes ([`FlowSim::dozing`]).
+pub const FLOW_DETAIL_SHARE: f64 = 0.5;
+
+/// Do two reservoir tables pin the same levels (NaN where none)?
+fn same_levels(a: &[f32], b: &[f32]) -> bool {
+    a.len() == b.len()
+        && a.iter()
+            .zip(b)
+            .all(|(x, y)| (x.is_nan() && y.is_nan()) || (x - y).abs() < 1e-3)
 }
 
 /// Flow regions stepped beside the physics step, waiting for [`publish_flows_system`], and the
@@ -933,7 +964,11 @@ pub fn flow_step_system(
         *since_spray = 0.0;
     }
     let mut state = shared.0.write();
-    if state.flows.iter().all(|f| f.resting) {
+    if state
+        .flows
+        .iter()
+        .all(|f| f.resting || (f.dozing && !spray))
+    {
         return;
     }
     // Step with the water unlocked (AGENTS.md, "Performance rules"): the step goes wide on
@@ -944,7 +979,10 @@ pub fn flow_step_system(
     view.truncate(flows.len());
     for (i, sim) in flows.iter().enumerate() {
         match view.get_mut(i) {
-            Some(v) if v.entity == sim.entity && v.version == sim.version && sim.resting => {}
+            Some(v)
+                if v.entity == sim.entity
+                    && v.version == sim.version
+                    && (sim.resting || sim.dozing) => {}
             Some(v) => v.copy_from(sim),
             None => view.push(sim.clone()),
         }
@@ -953,7 +991,10 @@ pub fn flow_step_system(
     drop(state);
 
     for sim in flows.iter_mut().filter(|sim| !sim.resting) {
-        sim.step(dt);
+        // A dozing stream holds still but its falls still throw spray.
+        if !sim.dozing {
+            sim.step(dt);
+        }
         if spray {
             for &(foot, v, power) in &sim.falls().plunges {
                 // About 1 kg of spray per second per 2 kW of falling water.
@@ -994,15 +1035,18 @@ pub fn publish_flows_system(shared: Res<SharedWater>, mut flight: ResMut<FlowsIn
 pub struct WaterLoading {
     /// Flow regions whose bed and settling stream are still being worked out.
     pub settling: usize,
+    /// Lakes whose bed grid is still being read (the streams' reservoirs wait for it).
+    pub beds: usize,
     /// Pieces of the demos' art (textures, ground, rocks, people) still being made on
     /// workers ([`crate::demo::art`]).
     pub art: usize,
 }
 
 impl WaterLoading {
-    /// Nothing left to make: the demo art is in and every stream has settled.
+    /// Nothing left to make: the demo art and the lakes' bed grids are in and every stream
+    /// has settled.
     pub fn is_ready(&self) -> bool {
-        self.settling == 0 && self.art == 0
+        self.settling == 0 && self.art == 0 && self.beds == 0
     }
 }
 
@@ -1200,7 +1244,7 @@ pub fn flow_bed_system(
         let running: Vec<&FlowSim> = state
             .flows
             .iter()
-            .filter(|f| f.visible && !f.resting)
+            .filter(|f| f.visible && !f.resting && !f.dozing)
             .collect();
         if physics.is_some() && !running.is_empty() {
             // The moving bodies, with how far their colliders reach.
