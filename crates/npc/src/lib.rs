@@ -220,6 +220,23 @@ impl Plugin for NpcPlugin {
                 )
                     .in_set(WorldShiftSet::Apply),
             );
+        // Sync points of their own between the NPC sets: what Prepare spawns and inserts
+        // (seeds, new animals, appearances) is there for Perceive, and what Perceive inserts
+        // for Decide, when the fixed step keeps only its set boundaries' sync points
+        // (`ENGINE_FIXED_SYNC=sets`, fixed-step-chain.md). By default Bevy puts them where the
+        // commands need them, and two more would be barriers for nothing.
+        if engine_core::app::set_sync_points() {
+            app.add_systems(
+                FixedUpdate,
+                (
+                    ApplyDeferred
+                        .after(NpcSet::Prepare)
+                        .before(NpcSet::Perceive),
+                    ApplyDeferred.after(NpcSet::Perceive).before(NpcSet::Decide),
+                )
+                    .in_set(SimSet::Input),
+            );
+        }
         api::register(app);
     }
 }
