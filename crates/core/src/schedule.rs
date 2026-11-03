@@ -3,7 +3,7 @@
 //! ```text
 //! Startup (once, before the first frame)
 //! ┌ frame ───────────────────────────────────────────────────────────────┐
-//! │ First           time + message bookkeeping (engine only)             │
+//! │ First           time, messages, off-frame applies (engine only)      │
 //! │ PreUpdate       platform events → input state, AI bridge requests    │
 //! │ ┌ fixed loop: 0..N times per frame, at a fixed REAL-time rate ─────┐ │
 //! │ │ FixedPreUpdate   snapshot transforms for interpolation           │ │

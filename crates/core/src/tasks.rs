@@ -3,11 +3,14 @@
 //! ECS systems already run in parallel, and `Query::par_iter_mut` splits work across the
 //! compute pool. For custom data-parallel loops in simulations (grids, particles), use
 //! [`par_chunks_mut`]. To run a stage of the frame one frame behind on its own thread (the
-//! renderer, like Unreal's render thread), use [`Pipelined`].
+//! renderer, like Unreal's render thread), use [`Pipelined`]. To build costly art on a worker
+//! and spawn it on the frame in budgeted, ordered slices, use [`off_frame`](crate::off_frame).
 
 pub use bevy_tasks::{
     AsyncComputeTaskPool, ComputeTaskPool, IoTaskPool, TaskPool, TaskPoolBuilder,
 };
+
+pub use crate::off_frame::{OffFrameCommands, off_frame};
 
 /// Create the compute / async / IO pools once per process.
 ///

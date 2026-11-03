@@ -142,6 +142,8 @@ impl App {
             .init_resource::<TypeRegistry>()
             .init_resource::<ApiRegistry>()
             .init_resource::<Diagnostics>()
+            .init_resource::<crate::off_frame::OffFrameJobs>()
+            .init_resource::<crate::off_frame::OffFrameSettings>()
             .init_resource::<crate::profile::ProfileWindow>()
             .init_resource::<crate::profile::ProfileSnapshot>()
             .init_resource::<Window>()
@@ -181,6 +183,7 @@ impl App {
                 time::time_system,
                 message_update_system.run_if(message_update_condition),
                 diagnostics::frame_diagnostics_system,
+                crate::off_frame::apply_off_frame_system,
             )
                 .chain(),
         )

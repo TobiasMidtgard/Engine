@@ -19,12 +19,9 @@
 
 pub mod art;
 
-use engine_assets::Assets;
 use engine_core::math::{DVec3, Quat, Rng, Vec3, smoothstep};
 use engine_core::prelude::*;
-use engine_render::{
-    Image, MaterialRef, Mesh, MeshRef, MeshRenderer, PointLight, StandardMaterial,
-};
+use engine_render::PointLight;
 use engine_world::{
     ContactKind, FocusPoints, GroundContact, SimulationRange, SurfaceMaterials, WorldImpulse,
 };
@@ -244,19 +241,8 @@ fn at(p: DVec3) -> Transform {
 fn attach_prop(commands: &mut Commands, parent: Entity, key: &str, build: fn() -> art::Prop) {
     let key = key.to_string();
     commands.queue(move |world: &mut World| {
-        if !world.contains_resource::<Assets<Mesh>>()
-            || !world.contains_resource::<Assets<StandardMaterial>>()
-            || !world.contains_resource::<Assets<Image>>()
-            || world.get_entity(parent).is_err()
-        {
-            return;
-        }
-        for (mesh, material) in art::register(world, &key, build) {
-            world.spawn((
-                Transform::default(),
-                MeshRenderer::new(MeshRef::Handle(mesh), MaterialRef::Handle(material)),
-                ChildOf(parent),
-            ));
+        if world.get_entity(parent).is_ok() {
+            art::place_under(world, key, parent, build);
         }
     });
 }
