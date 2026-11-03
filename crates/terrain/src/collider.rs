@@ -13,7 +13,7 @@
 //! ([`LOOK_AHEAD_S`]), so a fast flight finds them ready. Only the tiles right under a focus
 //! point or a body in the simulated range ([`SimulationRange`]), when they have none (at the
 //! start, or after a jump), are built on the spot, side by side on all cores, so nothing
-//! stands on thin air.
+//! stands on thin air; well above the ground ([`UNDERFOOT_CLEARANCE_M`]) nothing is.
 //!
 //! Heightfield layout: `heights[row * cols + col]`, rows along local Z from −size/2 to
 //! +size/2, columns along local X from −size/2 to +size/2, heights in meters above the tile
@@ -200,6 +200,11 @@ const LOOK_AHEAD_S: f64 = 1.5;
 const LOOK_AHEAD_MAX_M: f64 = 400.0;
 /// Faster than this a focus jumped (a teleport, a tour stop) rather than moved, m/s.
 const JUMP_SPEED: f64 = 3_000.0;
+/// A focus point or body higher than this above the ground (plus a second of its descent)
+/// can't stand on it this frame: its tile underfoot is built on worker threads like the
+/// rest, never on the spot. A camera flying at a couple of kilometers crossed a new tile
+/// every few frames and waited for each (27-56 ms a frame on the PC route).
+const UNDERFOOT_CLEARANCE_M: f64 = 150.0;
 
 /// Keep collider tiles on every terrain that wants colliders: the 3 × 3 block around every
 /// focus point, and the tile under every dynamic body (awake or asleep, so a crate left
@@ -261,12 +266,18 @@ pub fn update_colliders(
                 None => DVec3::ZERO,
             };
             moving.insert((e, i), (local, v));
-            let Some((_, up, _)) = t.source.map.locate(local) else {
+            let Some((dir, up, base)) = t.source.map.locate(local) else {
                 continue;
             };
             let side = up.any_orthonormal_vector();
             let fwd = up.cross(side);
-            if let Some(k) = t.source.map.node_at(local, level) {
+            // Its height above the ground (one coarse sample; ridges finer than 10 m don't
+            // matter at the clearance).
+            let clearance = (local - base).dot(up) - t.source.sample(base, up, dir, 10.0).height;
+            let descent = (-v.dot(up)).max(0.0);
+            if clearance < UNDERFOOT_CLEARANCE_M + descent
+                && let Some(k) = t.source.map.node_at(local, level)
+            {
                 underfoot.push((e, k));
             }
             for dz in -1..=1 {
@@ -295,7 +306,9 @@ pub fn update_colliders(
         for &p in body_points.iter().filter(|&&p| near(p)) {
             if let Some(k) = t.source.map.node_at(t.to_local(p), level) {
                 body_tiles.push((focus.distance(p), (e, k)));
-                if range.is_active(&focus, p) {
+                // (Well above the highest ground it can't be standing on it.)
+                let high = t.altitude_hint(p) > t.config.height_range().1 + UNDERFOOT_CLEARANCE_M;
+                if range.is_active(&focus, p) && !high {
                     underfoot.push((e, k));
                 }
             }
@@ -709,6 +722,35 @@ mod tests {
             state.waits <= 3,
             "{} frames waited for the ground underfoot",
             state.waits
+        );
+    }
+
+    #[test]
+    fn a_focus_high_above_the_ground_never_waits_for_it() {
+        let (mut app, focus) = app_with_planet();
+        app.world
+            .resource_mut::<Time>()
+            .set_source(engine_core::time::TimeSource::Manual { step_secs: 0.05 });
+        // A camera cruising 1.5 km up at 300 m/s: its tiles build on the workers, and no frame
+        // stops to build the one under it.
+        app.world.get_mut::<Transform>(focus).unwrap().translation = DVec3::new(0.0, 1_500.0, 0.0);
+        app.update();
+        assert_eq!(app.world.resource::<TerrainColliders>().built, 0);
+        let mut x = 0.0;
+        for _ in 0..40 {
+            x += 300.0 * 0.05;
+            app.world.get_mut::<Transform>(focus).unwrap().translation =
+                DVec3::new(x, 1_500.0, 0.0);
+            app.update();
+        }
+        assert_eq!(app.world.resource::<TerrainColliders>().waits, 0);
+        // Down on the ground it gets its tile on the spot again.
+        app.world.get_mut::<Transform>(focus).unwrap().translation = DVec3::new(-5_000.0, 2.0, 0.0);
+        app.update();
+        app.update();
+        assert!(
+            tile_under(&mut app, -5_000.0, 0.0),
+            "no ground after landing"
         );
     }
 
