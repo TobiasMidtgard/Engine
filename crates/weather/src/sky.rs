@@ -73,6 +73,11 @@ pub struct SkyLights {
     /// Factor the sun was dimmed by because thick cloud covers it (1 = not dimmed).
     pub cloud_dimming: f32,
     pub moon_lux: f32,
+    /// The moon's angular radius when the real moon is known (engine_world's
+    /// [`MoonSource`](engine_world::MoonSource)), radians; 0 = the clock's own moon.
+    pub moon_radius: f32,
+    /// Another module draws the moon's disc: the clouds draw none.
+    pub moon_drawn_elsewhere: bool,
     /// True while the clock drives the lights and the time (see the module docs).
     pub in_charge: bool,
 }
@@ -87,6 +92,8 @@ impl Default for SkyLights {
             sun_lux: 120_000.0,
             cloud_dimming: 1.0,
             moon_lux: 0.0,
+            moon_radius: 0.0,
+            moon_drawn_elsewhere: false,
             in_charge: false,
         }
     }
@@ -148,6 +155,7 @@ pub(crate) fn sky_system(
     mut suns: Query<(&mut Transform, &mut DirectionalLight), (With<SunLight>, Without<MoonLight>)>,
     mut moons: Query<(&mut Transform, &mut DirectionalLight), (With<MoonLight>, Without<SunLight>)>,
     sun_source: Option<Res<engine_world::SunSource>>,
+    moon_source: Option<Res<engine_world::MoonSource>>,
 ) {
     let in_charge = !suns.is_empty();
     if !in_charge {
@@ -175,7 +183,14 @@ pub(crate) fn sky_system(
     // Perf week (Planets and terrain, 2026-11-03, for Weather to review): a space module that
     // follows this clock says where the real star stands (engine_world::SunSource), so away
     // from the home spot the sun is still the one in the sky. Playtest 3 item 36.
-    let out = compute_lights_toward(&sky, &climate, &sim, sun_source.map(|s| s.direction));
+    // Likewise the moon: the body the night sky shows (round 23 found two moons 18-19° apart).
+    let out = compute_lights_toward(
+        &sky,
+        &climate,
+        &sim,
+        sun_source.map(|s| s.direction),
+        moon_source.map(|m| *m),
+    );
     *lights_out = out;
     state.time_of_day_h = sky.hour;
     state.day_of_year = sky.day_of_year;
@@ -204,17 +219,19 @@ pub(crate) fn sky_system(
 /// Where the sun and moon are and how bright, for a clock and climate. `sim` dims the sun
 /// under thick cloud.
 pub fn compute_lights(sky: &Sky, climate: &Climate, sim: &WeatherSim) -> SkyLights {
-    compute_lights_toward(sky, climate, sim, None)
+    compute_lights_toward(sky, climate, sim, None, None)
 }
 
 /// [`compute_lights`] with the sun at world direction `sun` when given (engine_world's
 /// [`SunSource`](engine_world::SunSource): the real star, from a space module that follows
-/// this clock), else where the clock puts it over the home spot.
+/// this clock), else where the clock puts it over the home spot; and the moon where `moon`
+/// ([`MoonSource`](engine_world::MoonSource), the real body) says, as full as it is.
 pub fn compute_lights_toward(
     sky: &Sky,
     climate: &Climate,
     sim: &WeatherSim,
     sun: Option<Vec3>,
+    moon: Option<engine_world::MoonSource>,
 ) -> SkyLights {
     // The sky's compass turns with the world's frame (see `WeatherFrame`).
     let sun_dir = sun.map(|d| d.normalize_or(Vec3::Y)).unwrap_or_else(|| {
@@ -222,8 +239,16 @@ pub fn compute_lights_toward(
             .dir3_to_world(climate.sun_direction(sky.hour, sky.day_of_year))
     });
     let elevation = sun_dir.y.clamp(-1.0, 1.0).asin().to_degrees();
-    let (moon_dir, moon_lit) = climate::moon(climate, sky.hour, sky.day_of_year, sky.moon_phase);
-    let moon_dir = sim.frame.dir3_to_world(moon_dir);
+    let (moon_dir, moon_lit) = match moon {
+        Some(m) => (
+            m.direction.normalize_or(Vec3::NEG_Y),
+            m.lit_fraction.clamp(0.0, 1.0),
+        ),
+        None => {
+            let (d, lit) = climate::moon(climate, sky.hour, sky.day_of_year, sky.moon_phase);
+            (sim.frame.dir3_to_world(d), lit)
+        }
+    };
     let moon_elevation = moon_dir.y.clamp(-1.0, 1.0).asin().to_degrees();
     // The renderer shades with the brightest light only, so the sun fades out during
     // nautical twilight and the moon takes over at night.
@@ -237,6 +262,8 @@ pub fn compute_lights_toward(
         sun_lux,
         cloud_dimming: cloud_dimming(sim, sun_dir),
         moon_lux,
+        moon_radius: moon.map_or(0.0, |m| (m.angular_diameter_deg * 0.5).to_radians()),
+        moon_drawn_elsewhere: moon.is_some_and(|m| m.drawn_by_space),
         in_charge: true,
     }
 }
@@ -312,6 +339,40 @@ mod tests {
     }
 
     #[test]
+    fn the_real_moon_steers_the_moonlight() {
+        let (climate, sim) = (Climate::default(), WeatherSim::default());
+        let midnight = Sky {
+            hour: 0.0,
+            moon_phase: 0.5,
+            ..Default::default()
+        };
+        let own = compute_lights(&midnight, &climate, &sim);
+        // The space Moon, high in the south, a thin crescent, drawn by space.
+        let up = Vec3::new(0.0, 0.8, -0.6).normalize();
+        let real = engine_world::MoonSource {
+            direction: up,
+            lit_fraction: 0.2,
+            angular_diameter_deg: 0.52,
+            drawn_by_space: true,
+        };
+        let lit = compute_lights_toward(&midnight, &climate, &sim, None, Some(real));
+        assert!(lit.moon_dir.dot(up) > 0.9999);
+        assert_eq!(lit.moon_lit, 0.2);
+        // A crescent lights the night far less than the full moon the clock had.
+        assert!(
+            lit.moon_lux < own.moon_lux * 0.2,
+            "{} vs {}",
+            lit.moon_lux,
+            own.moon_lux
+        );
+        assert!((lit.moon_radius - 0.26f32.to_radians()).abs() < 1e-5);
+        assert!(lit.moon_drawn_elsewhere);
+        // Without it the clock keeps its own moon.
+        assert_eq!(own.moon_radius, 0.0);
+        assert!(!own.moon_drawn_elsewhere);
+    }
+
+    #[test]
     fn the_real_star_steers_the_sun() {
         let (climate, sim) = (Climate::default(), WeatherSim::default());
         // Noon by the clock at home, but the star stands low in the east where the camera is.
@@ -320,11 +381,11 @@ mod tests {
             ..Default::default()
         };
         let low_east = Vec3::new(-1.0, 0.05, 0.0).normalize();
-        let lights = compute_lights_toward(&noon, &climate, &sim, Some(low_east));
+        let lights = compute_lights_toward(&noon, &climate, &sim, Some(low_east), None);
         assert!(lights.sun_dir.angle_between(low_east) < 1e-5);
         assert!((lights.sun_elevation_deg - 2.86).abs() < 0.1, "{lights:?}");
         // Below the horizon there it is night.
-        let night = compute_lights_toward(&noon, &climate, &sim, Some(-Vec3::Y));
+        let night = compute_lights_toward(&noon, &climate, &sim, Some(-Vec3::Y), None);
         assert_eq!(night.sun_lux, 0.0);
     }
 }
