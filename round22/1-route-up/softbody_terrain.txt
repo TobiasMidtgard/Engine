@@ -1,0 +1,126 @@
+route.csv row i = frame 20 + i: terrain_ms equal in 847 of 847 rows the sampler answered for
+route start (after the plaza settle) 18:31:31.077389 UTC; fast sampler 864 answers for 847 route frames
+
+== village: 18:31:31.077389-18:31:35.010313 UTC (3.9 s)
+softbody.stats (1 polls, 1 Hz): bodies 47, asleep 0, frozen 2, step_ms 19.24
+softbody.slowest_ms (2 Hz, 2 samples): mean 11.67, max 12.45; softbody.step_ms max 15.25
+slowest body (softbody.stats, polls named / max ms / its pending_prewarm, lod_every, substeps, kind): Shot curtain 1x / 12.92 ms / 108, 4, 5, Cloth
+softbody.list (1 polls): bodies 47, with pending_prewarm > 0: 13
+  pending: Bridge walker cloak (Cloth) in 1 polls (up to 5), Shot curtain (Cloth) in 1 polls (up to 108), Burning curtain (Cloth) in 1 polls (up to 106), Unveiling sheet (Cloth) in 1 polls (up to 173), Mannequin hair (Hair) in 1 polls (up to 32), Slow-motion mannequin hair (Hair) in 1 polls (up to 32), Dog fur (Hair) in 1 polls (up to 50), Dinghy sail (Cloth) in 1 polls (up to 42), Rinsing silk 0 (Cloth) in 1 polls (up to 192), Rinsing silk 1 (Cloth) in 1 polls (up to 192), Rinsing silk 2 (Cloth) in 1 polls (up to 168), Rinsing silk 3 (Cloth) in 1 polls (up to 168)
+  top 3 step_ms bodies per poll, most often: Unveiling sheet 1, Shot curtain 1, Burning curtain 1
+terrain.collider_tiles 19, collider_builds 32, collider_waits 2
+water.ripple_energy 0, water.bodies 14
+  profile 18:31:31 (9 frames in 5.2 s: 581.4 ms per frame (1.7 fps), worst 1267.3 ms):
+    water::ripple_system 22.60 ms/frame, max 156.09, 1.3 runs/frame
+    terrain::update_colliders 6.98 ms/frame, max 59.25, 1.0 runs/frame
+    softbody::step_beside_physics 14.72 ms/frame, max 27.56, 1.3 runs/frame; softbody::step_bodies 2.96 ms/frame, max 7.41, 1.3 runs/frame
+  profile 18:31:36 (18 frames in 5.0 s: 279.1 ms per frame (3.6 fps), worst 1504.8 ms):
+    water::ripple_system 5.13 ms/frame, max 4.49, 1.9 runs/frame
+    terrain::update_colliders 0.50 ms/frame, max 0.66, 0.9 runs/frame
+    softbody::step_beside_physics 19.06 ms/frame, max 17.94, 1.9 runs/frame; softbody::step_bodies 4.02 ms/frame, max 6.57, 1.9 runs/frame
+route.csv: 7 frames (frames 20-26); the sampler answered for 7 of them
+  worst 6 frames (route.csv frame_ms, m up, render CPU; then render.cpu.prepare terrain and every render.cpu.terrain: row >= 0.05 ms of that frame; then its 4 slowest render CPU rows):
+    frame 20 at 5 m: 250.0 ms, render CPU 148.49; prepare terrain 3.09 (uploads 0.73, patches: draw lists 0.31, patches: select 0.16, patches: ask workers 0.09); slowest: prepare character 67.05, prepare painted ground 20.81, submit 20.02, prepare meshes 13.61
+    frame 21 at 5 m: 250.0 ms, render CPU 28.81; prepare terrain 1.40 (uploads 0.85, patches: draw lists 0.34, patches: select 0.15, patches: ask workers 0.08, maps 0.08, patches: far shadow 0.06); slowest: meshes: clusters 7.22, prepare meshes 6.66, meshes: materials 5.00, frame setup 4.31
+    frame 22 at 5 m: 250.0 ms, render CPU 30.24; prepare terrain 1.62 (uploads 1.13, patches: draw lists 0.37, patches: select 0.14, patches: ask workers 0.09, patches: far shadow 0.07); slowest: screenshot save 74.01, prepare meshes 13.68, meshes: sync 7.10, meshes: clusters 5.51
+    frame 25 at 5 m: 250.0 ms, render CPU 18.56; prepare terrain 1.81 (maps 1.32, uploads 0.64, patches: draw lists 0.26, patches: select 0.19, patches: ask workers 0.10, patches: far shadow 0.08); slowest: screenshot save 33.91, prepare meshes 6.49, meshes: clusters 6.06, prepare terrain 1.81
+    frame 26 at 5 m: 140.9 ms, render CPU 43.70; prepare terrain 2.66 (uploads 0.62, patches: select 0.24, patches: draw lists 0.20, patches: far shadow 0.09, patches: ask workers 0.06); slowest: prepare character 25.04, prepare meshes 7.95, meshes: clusters 4.81, prepare terrain 2.66
+    frame 23 at 5 m: 129.4 ms, render CPU 39.77; prepare terrain 1.87 (uploads 0.95, patches: draw lists 0.36, patches: select 0.33, patches: far shadow 0.11, patches: ask workers 0.06); slowest: screenshot save 100.23, prepare meshes 17.01, prepare foliage scenery 5.97, wait for the finishing threads 5.19
+  terrain rows' max over the leg: prepare terrain 3.09, terrain: maps 1.32, terrain: uploads 1.13, terrain: patches: draw lists 0.39, terrain: patches: select 0.34, terrain: patches: far shadow 0.13, terrain: patches: ask workers 0.12
+
+== face down: 18:31:35.010313-18:31:35.097832 UTC (0.1 s)
+softbody.stats (0 polls, 1 Hz): bodies n/a, asleep n/a, frozen n/a, step_ms n/a
+water.ripple_energy 0, water.bodies 14
+  profile 18:31:36 (18 frames in 5.0 s: 279.1 ms per frame (3.6 fps), worst 1504.8 ms):
+    water::ripple_system 5.13 ms/frame, max 4.49, 1.9 runs/frame
+    terrain::update_colliders 0.50 ms/frame, max 0.66, 0.9 runs/frame
+    softbody::step_beside_physics 19.06 ms/frame, max 17.94, 1.9 runs/frame; softbody::step_bodies 4.02 ms/frame, max 6.57, 1.9 runs/frame
+route.csv: 1 frames (frames 27-27); the sampler answered for 1 of them
+  worst 6 frames (route.csv frame_ms, m up, render CPU; then render.cpu.prepare terrain and every render.cpu.terrain: row >= 0.05 ms of that frame; then its 4 slowest render CPU rows):
+    frame 27 at 5 m: 78.3 ms, render CPU 21.07; prepare terrain 1.29 (uploads 0.59, patches: select 0.18, patches: draw lists 0.14, patches: far shadow 0.07); slowest: prepare meshes 8.63, meshes: clusters 4.71, wait for the finishing threads 3.04, meshes: begin frame 1.87
+  terrain rows' max over the leg: prepare terrain 1.29, terrain: uploads 0.59, terrain: patches: select 0.18, terrain: patches: draw lists 0.14, terrain: patches: far shadow 0.07
+
+== climb to orbit: 18:31:35.097832-18:31:55.579818 UTC (20.5 s)
+softbody.stats (20 polls, 1 Hz): bodies 47-48, asleep 0, frozen 5-47, step_ms 0.18-16.83
+softbody.slowest_ms (2 Hz, 40 samples): mean 3.67, max 13.78; softbody.step_ms max 19.07
+slowest body (softbody.stats, polls named / max ms / its pending_prewarm, lod_every, substeps, kind): Dog fur 12x / 0.28 ms / 0, 1, 2, Hair; Unveiling sheet 3x / 16.75 ms / 151, 4, 13, Cloth; Burning curtain 2x / 10.72 ms / 94, 4, 5, Cloth; Shot curtain 2x / 9.53 ms / 82, 4, 5, Cloth; Hair simulation 1x / 7.59 ms / 53, 2, 4, Hair
+softbody.list (20 polls): bodies 47-48, with pending_prewarm > 0: 0-8
+  pending: Unveiling sheet (Cloth) in 9 polls (up to 166), Shot curtain (Cloth) in 5 polls (up to 94), Burning curtain (Cloth) in 5 polls (up to 94), Dog fur (Hair) in 3 polls (up to 37), Mannequin hair (Hair) in 1 polls (up to 6), Slow-motion mannequin hair (Hair) in 1 polls (up to 6), Rinsing silk 0 (Cloth) in 1 polls (up to 24), Rinsing silk 1 (Cloth) in 1 polls (up to 24), Hair simulation (Hair) in 1 polls (up to 53)
+  top 3 step_ms bodies per poll, most often: Dog fur 15, Mannequin hair 15, Slow-motion mannequin hair 10, Unveiling sheet 9, Burning curtain 5, Shot curtain 5
+terrain.collider_tiles 17-26, collider_builds 45-106, collider_waits 2
+water.ripple_energy 0, water.bodies 14
+  profile 18:31:36 (18 frames in 5.0 s: 279.1 ms per frame (3.6 fps), worst 1504.8 ms):
+    water::ripple_system 5.13 ms/frame, max 4.49, 1.9 runs/frame
+    terrain::update_colliders 0.50 ms/frame, max 0.66, 0.9 runs/frame
+    softbody::step_beside_physics 19.06 ms/frame, max 17.94, 1.9 runs/frame; softbody::step_bodies 4.02 ms/frame, max 6.57, 1.9 runs/frame
+  profile 18:31:41 (76 frames in 5.0 s: 65.9 ms per frame (15.2 fps), worst 172.8 ms):
+    water::ripple_system not in the profile's slowest systems
+    terrain::update_colliders 0.32 ms/frame, max 0.64, 0.9 runs/frame
+    softbody::step_beside_physics 18.12 ms/frame, max 18.69, 2.4 runs/frame; softbody::step_bodies 1.09 ms/frame, max 1.55, 2.4 runs/frame
+  profile 18:31:46 (171 frames in 5.0 s: 29.4 ms per frame (34.1 fps), worst 67.4 ms):
+    water::ripple_system not in the profile's slowest systems
+    terrain::update_colliders 0.24 ms/frame, max 0.48, 0.8 runs/frame
+    softbody::step_beside_physics 5.73 ms/frame, max 11.87, 1.7 runs/frame; softbody::step_bodies 0.09 ms/frame, max 0.47, 1.7 runs/frame
+  profile 18:31:51 (272 frames in 5.0 s: 18.4 ms per frame (54.3 fps), worst 80.3 ms):
+    water::ripple_system not in the profile's slowest systems
+    terrain::update_colliders 0.27 ms/frame, max 0.53, 0.9 runs/frame
+    softbody::step_beside_physics 0.32 ms/frame, max 6.45, 1.1 runs/frame; softbody::step_bodies not in the profile's slowest systems
+  profile 18:31:56 (285 frames in 5.0 s: 17.6 ms per frame (56.7 fps), worst 64.7 ms):
+    water::ripple_system not in the profile's slowest systems
+    terrain::update_colliders 0.29 ms/frame, max 0.51, 1.0 runs/frame
+    softbody::step_beside_physics 0.45 ms/frame, max 9.07, 1.1 runs/frame; softbody::step_bodies not in the profile's slowest systems
+route.csv: 786 frames (frames 28-813); the sampler answered for 786 of them
+  worst 6 frames (route.csv frame_ms, m up, render CPU; then render.cpu.prepare terrain and every render.cpu.terrain: row >= 0.05 ms of that frame; then its 4 slowest render CPU rows):
+    frame 37 at 11 m: 250.0 ms, render CPU 28.68; prepare terrain 2.63 (maps 2.25, patches: draw lists 1.02, uploads 0.84, patches: select 0.48, patches: far shadow 0.17, patches: ask workers 0.11); slowest: screenshot save 35.09, prepare meshes 15.52, meshes: begin frame 4.24, meshes: clusters 3.55
+    frame 41 at 17 m: 173.0 ms, render CPU 14.90; prepare terrain 1.81 (uploads 0.60, patches: draw lists 0.54, patches: select 0.26, maps 0.12, patches: far shadow 0.08, patches: ask workers 0.05); slowest: prepare meshes 4.77, meshes: clusters 3.28, meshes: sync 2.16, wait for the finishing threads 1.99
+    frame 103 at 200 m: 146.0 ms, render CPU 15.50; prepare terrain 1.49 (maps 1.03, patches: draw lists 0.53, patches: select 0.32, patches: look-ahead 0.22, patches: far shadow 0.12, patches: ask workers 0.06); slowest: prepare meshes 4.90, prepare on the render thread 2.49, wait for the finishing threads 1.77, prepare terrain 1.49
+    frame 36 at 10 m: 104.9 ms, render CPU 19.25; prepare terrain 2.18 (patches: draw lists 1.05, uploads 0.70, patches: select 0.48, patches: far shadow 0.17, patches: ask workers 0.13); slowest: meshes: clusters 8.41, prepare meshes 7.15, meshes: begin frame 3.27, meshes: sync 2.88
+    frame 30 at 5 m: 99.0 ms, render CPU 29.20; prepare terrain 2.76 (uploads 0.61, patches: draw lists 0.52, patches: select 0.18, patches: far shadow 0.10); slowest: prepare meshes 15.63, meshes: clusters 6.10, meshes: begin frame 3.56, prepare terrain 2.76
+    frame 28 at 5 m: 92.5 ms, render CPU 18.05; prepare terrain 1.10 (uploads 0.62, patches: draw lists 0.41, patches: select 0.20, patches: far shadow 0.08); slowest: screenshot save 32.81, meshes: clusters 11.74, prepare meshes 8.17, meshes: materials 2.65
+  terrain rows' max over the leg: prepare terrain 4.97, terrain: maps 2.25, terrain: patches: draw lists 1.22, terrain: uploads 0.84, terrain: patches: select 0.64, terrain: patches: look-ahead 0.44, terrain: patches: far shadow 0.23, terrain: patches: ask workers 0.16, terrain: buffers 0.08, terrain: patches: recycle 0.06
+
+== orbit: 18:31:55.579818-18:31:56.605136 UTC (1.0 s)
+softbody.stats (1 polls, 1 Hz): bodies 48, asleep 0, frozen 47, step_ms 9.37
+softbody.slowest_ms (2 Hz, 2 samples): mean 7.73, max 8.38; softbody.step_ms max 8.44
+slowest body (softbody.stats, polls named / max ms / its pending_prewarm, lod_every, substeps, kind): Hair simulation 1x / 9.33 ms / 22, 2, 4, Hair
+softbody.list (1 polls): bodies 48, with pending_prewarm > 0: 1
+  pending: Hair simulation (Hair) in 1 polls (up to 21)
+  top 3 step_ms bodies per poll, most often: Hair simulation 1, Dog fur 1, Mannequin hair 1
+terrain.collider_tiles 17-18, collider_builds 106-108, collider_waits 2
+water.ripple_energy 0, water.bodies 14
+  profile 18:31:56 (285 frames in 5.0 s: 17.6 ms per frame (56.7 fps), worst 64.7 ms):
+    water::ripple_system not in the profile's slowest systems
+    terrain::update_colliders 0.29 ms/frame, max 0.51, 1.0 runs/frame
+    softbody::step_beside_physics 0.45 ms/frame, max 9.07, 1.1 runs/frame; softbody::step_bodies not in the profile's slowest systems
+route.csv: 53 frames (frames 814-866); the sampler answered for 53 of them
+  worst 6 frames (route.csv frame_ms, m up, render CPU; then render.cpu.prepare terrain and every render.cpu.terrain: row >= 0.05 ms of that frame; then its 4 slowest render CPU rows):
+    frame 836 at 408605 m: 37.1 ms, render CPU 6.90; prepare terrain 1.36 (patches: select 0.18, patches: ask workers 0.06, patches: draw lists 0.05); slowest: prepare meshes 1.93, prepare terrain 1.36, meshes: sync 1.15, prepare on the render thread 0.95
+    frame 842 at 408605 m: 35.8 ms, render CPU 13.11; prepare terrain 1.52 (patches: select 0.18, patches: draw lists 0.05); slowest: prepare meshes 2.23, prepare terrain 1.52, prepare on the render thread 1.38, meshes: sync 1.13
+    frame 841 at 408605 m: 34.4 ms, render CPU 7.79; prepare terrain 0.34 (maps 1.12, patches: select 0.19, patches: draw lists 0.07, patches: ask workers 0.05); slowest: prepare meshes 2.10, surface weather 1.14, meshes: sync 1.14, prepare on the render thread 0.99
+    frame 815 at 408605 m: 34.0 ms, render CPU 6.96; prepare terrain 0.37 (patches: select 0.18, patches: ask workers 0.05); slowest: screenshot save 24.26, prepare meshes 1.92, prepare on the render thread 1.06, meshes: sync 1.05
+    frame 863 at 408605 m: 32.4 ms, render CPU 5.52; prepare terrain 0.30 (patches: select 0.18, patches: ask workers 0.06, patches: draw lists 0.06); slowest: screenshot save 23.69, prepare meshes 1.81, meshes: sync 1.06, prepare on the render thread 0.90
+    frame 864 at 408605 m: 31.2 ms, render CPU 6.87; prepare terrain 0.38 (patches: select 0.17); slowest: prepare meshes 2.06, prepare on the render thread 1.32, meshes: sync 1.04, meshes: cull 1.03
+  terrain rows' max over the leg: prepare terrain 1.52, terrain: maps 1.12, terrain: patches: select 0.19, terrain: patches: ask workers 0.08, terrain: patches: draw lists 0.07
+
+== 79-1000 m up (route s 5.097-9.935): 18:31:38.703738-18:31:43.541340 UTC (4.8 s)
+softbody.stats (5 polls, 1 Hz): bodies 47, asleep 0, frozen 13-46, step_ms 0.2-9.29
+softbody.slowest_ms (2 Hz, 10 samples): mean 5.67, max 11.84; softbody.step_ms max 11.90
+slowest body (softbody.stats, polls named / max ms / its pending_prewarm, lod_every, substeps, kind): Dog fur 2x / 0.16 ms / 0, 1, 2, Hair; Shot curtain 1x / 8.42 ms / 40, 4, 5, Cloth; Burning curtain 1x / 8.16 ms / 12, 4, 5, Cloth; Unveiling sheet 1x / 7.99 ms / 95, 2, 13, Cloth
+softbody.list (5 polls): bodies 47, with pending_prewarm > 0: 1-3
+  pending: Unveiling sheet (Cloth) in 5 polls (up to 139), Shot curtain (Cloth) in 2 polls (up to 40), Burning curtain (Cloth) in 2 polls (up to 38)
+  top 3 step_ms bodies per poll, most often: Unveiling sheet 5, Dog fur 3, Mannequin hair 3, Shot curtain 2, Burning curtain 2
+terrain.collider_tiles 25-26, collider_builds 57-78, collider_waits 2
+water.ripple_energy 0, water.bodies 14
+  profile 18:31:41 (76 frames in 5.0 s: 65.9 ms per frame (15.2 fps), worst 172.8 ms):
+    water::ripple_system not in the profile's slowest systems
+    terrain::update_colliders 0.32 ms/frame, max 0.64, 0.9 runs/frame
+    softbody::step_beside_physics 18.12 ms/frame, max 18.69, 2.4 runs/frame; softbody::step_bodies 1.09 ms/frame, max 1.55, 2.4 runs/frame
+route.csv: 105 frames (frames 73-177); the sampler answered for 105 of them
+  worst 6 frames (route.csv frame_ms, m up, render CPU; then render.cpu.prepare terrain and every render.cpu.terrain: row >= 0.05 ms of that frame; then its 4 slowest render CPU rows):
+    frame 103 at 200 m: 146.0 ms, render CPU 15.50; prepare terrain 1.49 (maps 1.03, patches: draw lists 0.53, patches: select 0.32, patches: look-ahead 0.22, patches: far shadow 0.12, patches: ask workers 0.06); slowest: prepare meshes 4.90, prepare on the render thread 2.49, wait for the finishing threads 1.77, prepare terrain 1.49
+    frame 104 at 215 m: 71.7 ms, render CPU 122.11; prepare terrain 2.36 (patches: draw lists 0.53, patches: select 0.32, patches: look-ahead 0.21, patches: far shadow 0.12); slowest: prepare terrain 2.36, prepare meshes 2.35, prepare on the render thread 2.03, wait for the finishing threads 1.27
+    frame 80 at 101 m: 71.5 ms, render CPU 18.26; prepare terrain 2.61 (patches: draw lists 0.55, patches: select 0.35, patches: look-ahead 0.23, patches: far shadow 0.12, patches: ask workers 0.05, buffers 0.05); slowest: prepare meshes 6.46, prepare on the render thread 3.25, meshes: clusters 3.07, prepare terrain 2.61
+    frame 84 at 116 m: 70.8 ms, render CPU 14.40; prepare terrain 1.62 (patches: draw lists 1.14, patches: select 0.36, patches: look-ahead 0.23, patches: far shadow 0.12, buffers 0.07); slowest: prepare meshes 4.51, prepare on the render thread 2.74, meshes: materials 2.47, meshes: sync 1.90
+    frame 108 at 245 m: 69.5 ms, render CPU 21.48; prepare terrain 1.40 (patches: draw lists 0.33, patches: select 0.32, patches: look-ahead 0.22, patches: far shadow 0.12); slowest: wait for the finishing threads 2.19, prepare on the render thread 1.96, prepare meshes 1.89, prepare terrain 1.40
+    frame 78 at 94 m: 68.2 ms, render CPU 16.19; prepare terrain 1.55 (patches: draw lists 0.60, patches: select 0.35, patches: look-ahead 0.24, patches: far shadow 0.13, buffers 0.05); slowest: prepare meshes 4.49, prepare on the render thread 2.72, meshes: clusters 2.06, prepare terrain 1.55
+  terrain rows' max over the leg: prepare terrain 2.64, terrain: maps 1.28, terrain: patches: draw lists 1.15, terrain: patches: select 0.46, terrain: patches: look-ahead 0.25, terrain: patches: ask workers 0.15, terrain: patches: far shadow 0.15, terrain: uploads 0.13, terrain: buffers 0.07

@@ -1,0 +1,20 @@
+18:31:12.952Z     0.04  mode route quality ultra size '' spec 'up'; idle before start 143,169 s; HEAD 5de4f33e
+18:31:13.572Z     0.66  started: showcase.exe --route up --profile --quality ultra
+18:31:19.939Z     7.03  window visible: client 1600x900, window 1616x939 at (104,104), maximized False
+18:31:19.985Z     7.07  bridge connected
+18:31:20.373Z     7.46  fast sampler started (render.cpu.)
+18:31:20.401Z     7.49  world built
+18:31:20.737Z     7.83  after build: working set 3,012 MB, private 5,751 MB; system free 34,490 of 65,277 MB
+18:31:27.673Z    14.76  log: the ground settled after 13 frames
+18:31:31.128Z    18.22  log: and the view from the plaza after 4 more
+18:31:31.407Z    18.50  mem: working set 6,125 MB, private 10,057 MB; system free 31,260 of 65,277 MB
+18:31:35.085Z    22.17  log: village done at 1.4 s, 5 m up
+18:31:35.347Z    22.44  log: face down done at 1.4 s, 5 m up
+18:31:41.918Z    29.01  mem: working set 7,222 MB, private 13,913 MB; system free 30,299 of 65,277 MB
+18:31:52.224Z    39.31  mem: working set 5,098 MB, private 14,486 MB; system free 32,400 of 65,277 MB
+18:31:55.665Z    42.75  log: climb to orbit done at 22.0 s, 404847 m up
+18:31:56.718Z    43.81  log: orbit done at 23.0 s, 408605 m up
+18:31:58.063Z    45.15  sampler job: Completed
+18:31:58.070Z    45.16  fast sampler job: Completed
+18:31:58.077Z    45.17  game exited by itself, code 0
+18:32:41.968Z    89.06  done
