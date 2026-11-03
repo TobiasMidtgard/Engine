@@ -33,7 +33,14 @@ pub(crate) struct Hull {
     tris: Vec<[u32; 3]>,
     /// Enclosed volume, m³ (the shape's own volume: curved meshes are scaled to it).
     pub volume: f32,
+    /// The same hull with fewer triangles, for bodies far from every focus ([`Hull::at`]).
+    coarse: Option<Box<Hull>>,
 }
+
+/// Hulls with more triangles than this get a coarse copy for far bodies.
+const COARSE_ABOVE: usize = 160;
+/// Cells across the coarse copy's vertex grid, along each axis.
+const COARSE_CELLS: f32 = 5.0;
 
 impl Hull {
     /// The mesh of `shape`, or `None` for shapes floated by their bounding box.
@@ -43,6 +50,7 @@ impl Hull {
             verts,
             tris,
             volume: 0.0,
+            coarse: None,
         };
         let (volume, centroid) = hull.volume_and_centroid();
         if volume.abs() < 1e-9 {
@@ -64,7 +72,85 @@ impl Hull {
             }
             hull.volume = real;
         }
+        if hull.tris.len() > COARSE_ABOVE {
+            hull.coarse = hull.decimated().map(Box::new);
+        }
         Some(hull)
+    }
+
+    /// This hull, or its coarse copy when the water is looked at on less than the full grid
+    /// (`cells` below [`MAX_CELLS`]: the body is far from every focus). Pressing on every
+    /// triangle of a boat's hull was most of the buoyancy's time at the plaza, for boats 300 m
+    /// away on the lake.
+    pub fn at(&self, cells: usize) -> &Hull {
+        match &self.coarse {
+            Some(c) if cells < MAX_CELLS => c,
+            _ => self,
+        }
+    }
+
+    /// The hull with its vertices merged on a [`COARSE_CELLS`]-across grid (vertex clustering,
+    /// Rossignac and Borrel 1993): triangles that collapse are dropped, and the rest scaled
+    /// about the centroid to the same volume, so it floats as deep. `None` if too little is
+    /// left.
+    fn decimated(&self) -> Option<Hull> {
+        let (lo, hi) = self.verts.iter().fold(
+            (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN)),
+            |(lo, hi), v| (lo.min(*v), hi.max(*v)),
+        );
+        let cell = ((hi - lo) / COARSE_CELLS).max(Vec3::splat(1e-4));
+        let mut index: HashMap<(i32, i32, i32), u32> = HashMap::new();
+        let (mut sums, mut counts): (Vec<Vec3>, Vec<f32>) = (Vec::new(), Vec::new());
+        let map: Vec<u32> = self
+            .verts
+            .iter()
+            .map(|v| {
+                let k = ((*v - lo) / cell)
+                    .floor()
+                    .min(Vec3::splat(COARSE_CELLS - 1.0));
+                let key = (k.x as i32, k.y as i32, k.z as i32);
+                let i = *index.entry(key).or_insert_with(|| {
+                    sums.push(Vec3::ZERO);
+                    counts.push(0.0);
+                    (sums.len() - 1) as u32
+                });
+                sums[i as usize] += *v;
+                counts[i as usize] += 1.0;
+                i
+            })
+            .collect();
+        let verts: Vec<Vec3> = sums.iter().zip(&counts).map(|(s, n)| *s / *n).collect();
+        let mut seen = std::collections::HashSet::new();
+        let tris: Vec<[u32; 3]> = self
+            .tris
+            .iter()
+            .map(|t| t.map(|i| map[i as usize]))
+            .filter(|t| t[0] != t[1] && t[1] != t[2] && t[0] != t[2])
+            .filter(|t| {
+                let mut k = *t;
+                k.sort_unstable();
+                seen.insert(k)
+            })
+            .collect();
+        if tris.len() < 4 || tris.len() >= self.tris.len() {
+            return None;
+        }
+        let mut coarse = Hull {
+            verts,
+            tris,
+            volume: 0.0,
+            coarse: None,
+        };
+        let (volume, centroid) = coarse.volume_and_centroid();
+        if volume < self.volume * 0.5 {
+            return None;
+        }
+        let k = (self.volume / volume).cbrt();
+        for v in &mut coarse.verts {
+            *v = centroid + (*v - centroid) * k;
+        }
+        coarse.volume = self.volume;
+        Some(coarse)
     }
 
     /// Signed volume and centroid (tetrahedra from the origin).
@@ -241,20 +327,125 @@ impl HullCache {
     }
 }
 
+/// The water's answers, on world-aligned lattices: one node every 2 m, 4 m, 8 m...
+///
+/// `Water::sample` is 5-35 us (every lake's waves, its depth from the ground, ripples, flows),
+/// and every floating collider asked for up to 26 of them every substep, at points that moved
+/// with it. The water stands still through a step (its systems run between steps), so a node
+/// asked once is shared by every substep, collider and body over it. A node near a focus is
+/// asked again each step; farther out the waves are followed less often ([`node_steps`]):
+/// at the plaza the lake's boats, 300-500 m off, were most of the step's water work, and in
+/// four steps (1/15 s) a wave there rises a few centimeters. Aged by [`WaterCache::next_step`].
+#[derive(Default)]
+pub(crate) struct WaterCache {
+    /// Value and the step it expires at.
+    nodes: HashMap<(u8, i64, i64), (Node, u64)>,
+    step: u64,
+    asked: usize,
+}
+
+/// A lattice node: the surface height (world) and current there, if there is water.
+type Node = Option<(f64, Vec3)>;
+
+/// Steps a lattice node is kept, by the grid cells its collider asked for ([`cells_at`]): every
+/// step near a focus, every second to [`MID_CELLS_M`], every fourth past it.
+fn node_steps(cells: usize) -> u64 {
+    if cells >= MAX_CELLS {
+        1
+    } else if cells > FAR_CELLS {
+        2
+    } else {
+        4
+    }
+}
+
+impl WaterCache {
+    /// Starts a step: forgets the nodes due to be asked again.
+    pub fn next_step(&mut self) {
+        self.step += 1;
+        let now = self.step;
+        self.nodes.retain(|_, (_, until)| *until > now);
+        self.asked = 0;
+    }
+
+    /// Forgets everything (the world moved under the lattice: a floating-origin shift).
+    pub fn clear(&mut self) {
+        self.nodes.clear();
+    }
+
+    /// Water samples taken this step (each one a `Water::sample`).
+    pub fn asked(&self) -> usize {
+        self.asked
+    }
+
+    /// Surface height (world) and current at lattice node `ix`, `iz` of `level`, kept for
+    /// `keep` steps once asked.
+    fn node(
+        &mut self,
+        water: &Water,
+        level: u8,
+        ix: i64,
+        iz: i64,
+        keep: u64,
+    ) -> Option<(f64, Vec3)> {
+        if let Some((n, _)) = self.nodes.get(&(level, ix, iz)) {
+            return *n;
+        }
+        self.asked += 1;
+        let s = spacing(level) as f64;
+        let n = water
+            .sample(DVec3::new(ix as f64 * s, 0.0, iz as f64 * s))
+            .map(|w| (w.surface_height, w.velocity));
+        self.nodes.insert((level, ix, iz), (n, self.step + keep));
+        n
+    }
+
+    /// Surface height (world) and current at `p`, bilinear between the finest lattice's
+    /// nodes; asked directly where the water ends between them (a shore).
+    pub fn at(&mut self, water: &Water, p: DVec3, cells: usize) -> Option<(f64, Vec3)> {
+        let keep = node_steps(cells);
+        let s = spacing(0) as f64;
+        let (fx, fz) = (p.x / s, p.z / s);
+        let (ix, iz) = (fx.floor() as i64, fz.floor() as i64);
+        let (tx, tz) = (fx - ix as f64, fz - iz as f64);
+        let mut corners = [(0.0, Vec3::ZERO); 4];
+        for (k, c) in corners.iter_mut().enumerate() {
+            match self.node(water, 0, ix + (k & 1) as i64, iz + (k >> 1) as i64, keep) {
+                Some(n) => *c = n,
+                None => {
+                    self.asked += 1;
+                    return water.sample(p).map(|w| (w.surface_height, w.velocity));
+                }
+            }
+        }
+        let lerp = |a: (f64, Vec3), b: (f64, Vec3), t: f64| {
+            (a.0 + (b.0 - a.0) * t, a.1 + (b.1 - a.1) * t as f32)
+        };
+        let near = lerp(corners[0], corners[1], tx);
+        let far = lerp(corners[2], corners[3], tx);
+        Some(lerp(near, far, tz))
+    }
+}
+
+/// Spacing of lattice `level`, meters.
+fn spacing(level: u8) -> f32 {
+    SAMPLE_SPACING * (1u32 << level) as f32
+}
+
 /// The water surface over a patch: heights on a grid (region-local y) and the mean current.
 pub(crate) struct Surface {
     x0: f32,
     z0: f32,
-    step_x: f32,
-    step_z: f32,
-    nodes: usize,
+    step: f32,
+    nx: usize,
+    nz: usize,
     heights: Vec<f32>,
     /// Highest point of the patch, region-local.
     pub top: f32,
     pub current: Vec3,
 }
 
-/// Grid spacing over a collider: one sample every 2 m, at most a 5 × 5 grid.
+/// Grid spacing over a collider: one sample every 2 m, at most about a 5 × 5 grid.
 const SAMPLE_SPACING: f32 = 2.0;
 pub(crate) const MAX_CELLS: usize = 4;
 /// The grid's cells across past the full level of detail ([`crate::lod`]): its corners only,
@@ -262,74 +453,108 @@ pub(crate) const MAX_CELLS: usize = 4;
 /// ripples, and a pixel there spans 15 cm or more.
 pub(crate) const FAR_CELLS: usize = 1;
 
+/// Within this of a focus a floating body's water is looked at on the full grid
+/// ([`MAX_CELLS`]), meters; to [`MID_CELLS_M`] on 2 × 2 cells, past it on [`FAR_CELLS`].
+const NEAR_CELLS_M: f64 = 60.0;
+const MID_CELLS_M: f64 = 150.0;
+
+/// The grid's cells across for a collider at `at` (world), by its own distance to the nearest
+/// focus: a region's tier follows its nearest mover, and the lake's boats share one with the
+/// race cars, so 300 m from the plaza they asked for the full grid, 26 water samples a
+/// collider a substep (1.5 ms a step for two boats on 4 cores, most of it `Water::sample`).
+/// No focus (tests, tools): the full grid.
+pub(crate) fn cells_at(at: DVec3, foci: &[DVec3]) -> usize {
+    let d = foci
+        .iter()
+        .map(|f| f.distance(at))
+        .fold(f64::INFINITY, f64::min);
+    if foci.is_empty() || d <= NEAR_CELLS_M {
+        MAX_CELLS
+    } else if d <= MID_CELLS_M {
+        2
+    } else {
+        FAR_CELLS
+    }
+}
+
 impl Surface {
-    /// The water over the box `mins`..`maxs` (region-local, region at `anchor`), sampled on a
-    /// grid of at most `max_cells` across, or `None` where there is no water under it.
+    /// The water over the box `mins`..`maxs` (region-local, region at `anchor`), from the
+    /// step's lattice ([`WaterCache`]) whose spacing spans the box in at most `max_cells`
+    /// cells, or `None` where there is no water under it. Nodes past the water's edge take
+    /// the mean height of those in it.
     pub fn sample(
         water: &Water,
+        cache: &mut WaterCache,
         anchor: DVec3,
         mins: Vec3,
         maxs: Vec3,
         max_cells: usize,
     ) -> Option<Surface> {
         let span = (maxs.x - mins.x).max(maxs.z - mins.z);
-        let cells = ((span / SAMPLE_SPACING).ceil() as usize).clamp(1, max_cells.max(1));
-        let nodes = cells + 1;
-        let (step_x, step_z) = (
-            (maxs.x - mins.x) / cells as f32,
-            (maxs.z - mins.z) / cells as f32,
+        let mut level = 0u8;
+        while level < 12 && span / spacing(level) > max_cells.max(1) as f32 {
+            level += 1;
+        }
+        let step = spacing(level);
+        let s = step as f64;
+        let keep = node_steps(max_cells);
+        let (lo, hi) = (anchor + mins.as_dvec3(), anchor + maxs.as_dvec3());
+        let (ix0, iz0) = ((lo.x / s).floor() as i64, (lo.z / s).floor() as i64);
+        let (ix1, iz1) = (
+            ((hi.x / s).ceil() as i64).max(ix0 + 1),
+            ((hi.z / s).ceil() as i64).max(iz0 + 1),
         );
-        let y = 0.5 * (mins.y + maxs.y);
-        let center =
-            anchor + Vec3::new(0.5 * (mins.x + maxs.x), y, 0.5 * (mins.z + maxs.z)).as_dvec3();
-        let middle = water.sample(center)?;
-        let fallback = (middle.surface_height - anchor.y) as f32;
-        let mut heights = Vec::with_capacity(nodes * nodes);
+        let (nx, nz) = ((ix1 - ix0 + 1) as usize, (iz1 - iz0 + 1) as usize);
+        let mut heights = Vec::with_capacity(nx * nz);
         let mut current = Vec3::ZERO;
-        let mut found = 0.0;
-        for iz in 0..nodes {
-            for ix in 0..nodes {
-                let p = Vec3::new(mins.x + step_x * ix as f32, y, mins.z + step_z * iz as f32);
-                let h = match water.sample(anchor + p.as_dvec3()) {
-                    Some(s) => {
-                        current += s.velocity;
-                        found += 1.0;
-                        (s.surface_height - anchor.y) as f32
+        let (mut found, mut sum) = (0usize, 0.0f32);
+        for iz in iz0..=iz1 {
+            for ix in ix0..=ix1 {
+                let h = match cache.node(water, level, ix, iz, keep) {
+                    Some((h, v)) => {
+                        current += v;
+                        found += 1;
+                        let h = (h - anchor.y) as f32;
+                        sum += h;
+                        h
                     }
-                    // Past the water's edge: as high as the water in the middle.
-                    None => fallback,
+                    None => f32::NAN,
                 };
                 heights.push(h);
             }
         }
+        if found == 0 {
+            return None;
+        }
+        let fallback = sum / found as f32;
+        for h in &mut heights {
+            if h.is_nan() {
+                *h = fallback;
+            }
+        }
         let top = heights.iter().copied().fold(f32::MIN, f32::max);
         Some(Surface {
-            x0: mins.x,
-            z0: mins.z,
-            step_x,
-            step_z,
-            nodes,
+            x0: (ix0 as f64 * s - anchor.x) as f32,
+            z0: (iz0 as f64 * s - anchor.z) as f32,
+            step,
+            nx,
+            nz,
             heights,
             top,
-            current: if found > 0.0 {
-                current / found
-            } else {
-                middle.velocity
-            },
+            current: current / found as f32,
         })
     }
 
     /// Surface height at `x`, `z` (region-local), bilinear between samples.
     pub fn height(&self, x: f32, z: f32) -> f32 {
-        let last = (self.nodes - 1) as f32;
-        let fx = ((x - self.x0) / self.step_x.max(1e-6)).clamp(0.0, last);
-        let fz = ((z - self.z0) / self.step_z.max(1e-6)).clamp(0.0, last);
+        let fx = ((x - self.x0) / self.step).clamp(0.0, (self.nx - 1) as f32);
+        let fz = ((z - self.z0) / self.step).clamp(0.0, (self.nz - 1) as f32);
         let (ix, iz) = (
-            (fx as usize).min(self.nodes - 2),
-            (fz as usize).min(self.nodes - 2),
+            (fx as usize).min(self.nx - 2),
+            (fz as usize).min(self.nz - 2),
         );
         let (tx, tz) = (fx - ix as f32, fz - iz as f32);
-        let at = |i: usize, j: usize| self.heights[j * self.nodes + i];
+        let at = |i: usize, j: usize| self.heights[j * self.nx + i];
         let near = at(ix, iz) + (at(ix + 1, iz) - at(ix, iz)) * tx;
         let far = at(ix, iz + 1) + (at(ix + 1, iz + 1) - at(ix, iz + 1)) * tx;
         near + (far - near) * tz
@@ -341,9 +566,9 @@ impl Surface {
         Surface {
             x0: -1e6,
             z0: -1e6,
-            step_x: 2e6,
-            step_z: 2e6,
-            nodes: 2,
+            step: 2e6,
+            nx: 2,
+            nz: 2,
             heights: vec![h; 4],
             top: h,
             current: Vec3::ZERO,
@@ -402,6 +627,42 @@ mod tests {
         assert!((w.force - Vec3::Y * RHO_G).length() < 1.0, "{w:?}");
         assert!(w.torque.length() < 0.5, "{w:?}");
         assert!((w.volume - 1.0).abs() < 1e-3);
+    }
+
+    /// A far body's coarse hull ([`Hull::at`]) has a fraction of the triangles and floats
+    /// about as deep: the same lift within a few percent, sunk to its middle or near its top.
+    #[test]
+    fn coarse_hulls_float_like_the_full_ones() {
+        let hull = Hull::of(&Capsule::new_x(0.8, 0.3)).unwrap();
+        let coarse = hull.at(FAR_CELLS);
+        assert!(
+            coarse.tris.len() * 2 < hull.tris.len(),
+            "{} of {} triangles",
+            coarse.tris.len(),
+            hull.tris.len()
+        );
+        assert!(std::ptr::eq(hull.at(MAX_CELLS), &hull));
+        for (depth, tip) in [(0.0, 0.0), (0.2, 0.0), (0.0, 0.25)] {
+            let pose = Pose::from_parts(
+                Vec3::new(0.0, -depth, 0.0),
+                engine_core::math::Quat::from_rotation_z(tip),
+            );
+            let lift = |h: &Hull| {
+                h.immerse(
+                    &pose,
+                    &Surface::flat(0.0),
+                    G,
+                    pose.translation,
+                    Vec3::ZERO,
+                    Vec3::ZERO,
+                )
+            };
+            let (fine, rough) = (lift(&hull), lift(coarse));
+            assert!(
+                (rough.volume - fine.volume).abs() < 0.06 * fine.volume,
+                "at {depth} m, {tip} rad: {rough:?} vs {fine:?}"
+            );
+        }
     }
 
     /// Half under water, a box tipped about a long axis is pushed back level.

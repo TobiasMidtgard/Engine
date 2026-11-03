@@ -41,6 +41,8 @@ impl Simulation {
         entity: impl Fn(Entity) -> (Option<DVec3>, bool),
     ) {
         let turns = !s.is_translation_only();
+        // Its lattice is in world coordinates.
+        self.water_cache.clear();
         let frame_moves = s.velocity != DVec3::ZERO || s.angular_velocity != DVec3::ZERO;
         let r = s.rotation.as_quat();
 
