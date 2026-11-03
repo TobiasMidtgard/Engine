@@ -11,10 +11,11 @@
 //!
 //! What last frame's depth wrongly hid is caught by the second test, so nothing that can be
 //! seen is left out: the picture is the same, with fewer triangles behind hills, walls and
-//! trees. The main camera only (extra views draw everything the frustum cull kept), with
-//! multi-draw indirect; `RenderSettings::mesh_occlusion_culling` (`ENGINE_MESH_OCCLUSION`)
+//! trees. Every view culls against its own HZB, kept by camera (a lake's mirror, a portal),
+//! with multi-draw indirect; `RenderSettings::mesh_occlusion_culling` (`ENGINE_MESH_OCCLUSION`)
 //! switches it.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -100,6 +101,18 @@ impl Hzb {
     }
 }
 
+/// A view's HZB and the camera-relative view-projection and camera position of the frame it
+/// holds, once built.
+struct ViewHzb {
+    hzb: Hzb,
+    built: Option<(Mat4, DVec3)>,
+    /// `MeshCulling::prepared` when last used.
+    used: u64,
+}
+
+/// A view not set up for this many views lets go of its HZB.
+const FORGET_AFTER_VIEWS: u64 = 240;
+
 pub(crate) struct MeshCulling {
     early: wgpu::ComputePipeline,
     early_args: wgpu::ComputePipeline,
@@ -114,19 +127,24 @@ pub(crate) struct MeshCulling {
     args: GrowBuffer,
     counts: GrowBuffer,
     drawn: GrowBuffer,
-    hzb: Hzb,
-    /// The camera, camera-relative view-projection and camera position of the frame the HZB
-    /// holds, once built.
-    built: Option<(Option<Entity>, Mat4, DVec3)>,
-    /// The bind group, rebuilt when a buffer or the HZB is recreated.
-    group: Option<wgpu::BindGroup>,
+    /// Each view's HZB (the main camera's, a mirror's, a portal's), by camera.
+    hzbs: HashMap<Option<Entity>, ViewHzb>,
+    /// The camera of this frame's view.
+    camera: Option<Entity>,
+    /// Views set up so far, to let go of the HZBs of views gone.
+    prepared: u64,
+    /// The bind group and the camera whose HZB it binds, rebuilt when a buffer or the HZB is
+    /// recreated.
+    group: Option<(wgpu::BindGroup, Option<Entity>)>,
     /// This frame: the instance buffer it was made for, and what it culls.
     source: Option<wgpu::Buffer>,
     item_count: u32,
     batches: u32,
-    /// This frame's camera and view-projection, for the HZB it builds.
-    frame: Option<(Option<Entity>, Mat4, DVec3)>,
+    /// This frame's view-projection and camera position, for the HZB it builds.
+    frame: Option<(Mat4, DVec3)>,
     active: bool,
+    /// This frame is an extra view's (its totals aren't read back).
+    extra: bool,
     /// Read-backs of the drawn totals (instances, triangles), a few frames behind: the
     /// buffers, whether each map finished (`None`: free) and the instances tested that frame.
     readback: Vec<(wgpu::Buffer, Option<Arc<AtomicBool>>, u32)>,
@@ -240,13 +258,15 @@ impl MeshCulling {
                 storage_usage | wgpu::BufferUsages::COPY_SRC,
             ),
             drawn: buffer("culled mesh early", storage_usage),
-            hzb: Hzb::new(device, [1, 1]),
-            built: None,
+            hzbs: HashMap::new(),
+            camera: None,
+            prepared: 0,
             group: None,
             source: None,
             item_count: 0,
             batches: 0,
             frame: None,
+            extra: false,
             active: false,
             readback: (0..3)
                 .map(|_| {
@@ -317,23 +337,44 @@ impl MeshCulling {
         source: &wgpu::Buffer,
         instances: usize,
     ) {
-        self.active = on && !view.extra_view && !items.is_empty() && !args.is_empty();
+        self.active = on && !items.is_empty() && !args.is_empty();
         if !self.active {
             return;
         }
         let device = &gpu.device;
         let queue = &gpu.queue;
         let depth_size = [view.width.max(1), view.height.max(1)];
-        let mut regroup = self.group.is_none()
+        self.prepared += 1;
+        let now = self.prepared;
+        self.hzbs
+            .retain(|_, v| now.saturating_sub(v.used) <= FORGET_AFTER_VIEWS);
+        let camera = view.camera;
+        let state = self.hzbs.entry(camera).or_insert_with(|| ViewHzb {
+            hzb: Hzb::new(device, depth_size),
+            built: None,
+            used: now,
+        });
+        state.used = now;
+        let mut regroup = self.group.as_ref().is_none_or(|g| g.1 != camera)
             || self.source.as_ref() != Some(source)
-            || self.hzb.depth_size != depth_size;
-        if self.hzb.depth_size != depth_size {
-            self.hzb = Hzb::new(device, depth_size);
-            self.built = None;
+            || state.hzb.depth_size != depth_size;
+        if state.hzb.depth_size != depth_size {
+            state.hzb = Hzb::new(device, depth_size);
+            state.built = None;
         }
         if !view.history_valid {
-            self.built = None;
+            state.built = None;
         }
+        let early = state
+            .built
+            .map(|(view_proj, origin)| (view_proj, (view.origin - origin).as_vec3()));
+        let hzb_size = [
+            state.hzb.size[0],
+            state.hzb.size[1],
+            state.hzb.levels.len() as u32,
+        ];
+        self.camera = camera;
+        self.extra = view.extra_view;
         regroup |= self.items.write(device, queue, bytemuck::cast_slice(items));
         // Early, late, both: each phase's arguments start as the CPU's with no instances.
         let mut all = Vec::with_capacity(args.len() * 3);
@@ -355,20 +396,11 @@ impl MeshCulling {
         regroup |= self
             .culled
             .reserve(device, (instances * INSTANCE_WORDS as usize * 16) as u64);
-        let early = self
-            .built
-            .filter(|(camera, ..)| *camera == view.camera)
-            .map(|(_, view_proj, origin)| (view_proj, (view.origin - origin).as_vec3()));
         let params = Params {
             early_view_proj: early.map_or(Mat4::IDENTITY, |e| e.0).to_cols_array_2d(),
             late_view_proj: view.view_proj.to_cols_array_2d(),
             early_offset: early.map_or([0.0; 4], |(_, o)| [o.x, o.y, o.z, 1.0]),
-            hzb: [
-                self.hzb.size[0],
-                self.hzb.size[1],
-                self.hzb.levels.len() as u32,
-                items.len() as u32,
-            ],
+            hzb: [hzb_size[0], hzb_size[1], hzb_size[2], items.len() as u32],
             sizes: [
                 depth_size[0],
                 depth_size[1],
@@ -384,7 +416,8 @@ impl MeshCulling {
                     resource: buffer.as_entire_binding(),
                 }
             }
-            self.group = Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
+            let hzb = &self.hzbs[&camera].hzb;
+            let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("mesh culling"),
                 layout: &self.layout,
                 entries: &[
@@ -397,20 +430,21 @@ impl MeshCulling {
                     entry(6, &self.drawn.buffer),
                     wgpu::BindGroupEntry {
                         binding: 7,
-                        resource: wgpu::BindingResource::TextureView(&self.hzb.view),
+                        resource: wgpu::BindingResource::TextureView(&hzb.view),
                     },
                 ],
-            }));
+            });
+            self.group = Some((group, camera));
             self.source = Some(source.clone());
         }
         self.item_count = items.len() as u32;
         self.batches = args.len() as u32;
-        self.frame = Some((view.camera, view.view_proj, view.origin));
+        self.frame = Some((view.view_proj, view.origin));
     }
 
     /// The early phase: before the depth prepass.
     pub fn encode_early(&self, encoder: &mut wgpu::CommandEncoder) {
-        let Some(group) = self.group.as_ref().filter(|_| self.active) else {
+        let Some((group, _)) = self.group.as_ref().filter(|_| self.active) else {
             return;
         };
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
@@ -432,13 +466,16 @@ impl MeshCulling {
         encoder: &mut wgpu::CommandEncoder,
         depth: &wgpu::TextureView,
     ) -> bool {
-        let Some(group) = self.group.as_ref().filter(|_| self.active) else {
+        let Some((group, _)) = self.group.as_ref().filter(|_| self.active) else {
             return false;
         };
+        let Some(state) = self.hzbs.get_mut(&self.camera) else {
+            return false;
+        };
+        let hzb = &state.hzb;
         // The HZB: level 0 from the depth, then each level from the one before.
         let device = &gpu.device;
-        let groups: Vec<_> = self
-            .hzb
+        let groups: Vec<_> = hzb
             .levels
             .iter()
             .enumerate()
@@ -446,7 +483,7 @@ impl MeshCulling {
                 let (pipeline, input) = if level == 0 {
                     (&self.hzb_from_depth, (1, depth))
                 } else {
-                    (&self.hzb_reduce, (2, &self.hzb.levels[level - 1]))
+                    (&self.hzb_reduce, (2, &hzb.levels[level - 1]))
                 };
                 let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
                     label: Some("mesh hzb"),
@@ -471,7 +508,7 @@ impl MeshCulling {
                 timestamp_writes: None,
             });
             for (level, (pipeline, group)) in groups.iter().enumerate() {
-                let size = self.hzb.size.map(|s| (s >> level).max(1));
+                let size = hzb.size.map(|s| (s >> level).max(1));
                 pass.set_pipeline(pipeline);
                 pass.set_bind_group(0, group, &[]);
                 pass.dispatch_workgroups(size[0].div_ceil(8), size[1].div_ceil(8), 1);
@@ -487,7 +524,12 @@ impl MeshCulling {
         pass.set_pipeline(&self.late_args);
         pass.dispatch_workgroups(self.batches.div_ceil(64), 1, 1);
         drop(pass);
-        // The totals into a free read-back buffer, mapped once the GPU is done.
+        // Next frame's early phase tests against this HZB.
+        state.built = self.frame;
+        // The main view's totals into a free read-back buffer, mapped once the GPU is done.
+        if self.extra {
+            return true;
+        }
         if let Some(k) = self.readback.iter().position(|(_, p, _)| p.is_none()) {
             let (buffer, pending, tested) = &mut self.readback[k];
             encoder.copy_buffer_to_buffer(
@@ -505,8 +547,6 @@ impl MeshCulling {
             *pending = Some(done);
             *tested = self.item_count;
         }
-        // Next frame's early phase tests against this HZB.
-        self.built = self.frame;
         true
     }
 }
