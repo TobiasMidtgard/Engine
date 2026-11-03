@@ -5,6 +5,11 @@
 // in Frostbite"). Requires lib_types + lib_frame + lib_atmosphere; group 0 is the prepass frame
 // group (binding 19 is a stand-in while the volume is written).
 //
+// cs_sky_corners, one thread per corner of the 4x4x4 froxel blocks: the sky occlusion map's
+// visibility there (the most expensive part of lighting a froxel, and it changes slowly, so
+// cs_scatter interpolates it between its block's corners). Eight blocks share a corner, and
+// none of cs_scatter's threads wait on a lookup while the rest of the block idles.
+//
 // cs_scatter, one thread per froxel: evaluates the medium (the height fog exactly along the
 // column's center ray, fog volumes at a point jittered inside the froxel, a different point every
 // frame), lights it at that point (from above the ground at its pixel when just below it, see
@@ -44,6 +49,8 @@ struct FogVolume {
 // cs_scatter: this frame's depth prepass (depth, reverse-Z, 0 = nothing; octahedral normals).
 @group(1) @binding(6) var scene_depth: texture_depth_2d;
 @group(1) @binding(7) var scene_normal: texture_2d<f32>;
+// cs_sky_corners writes, cs_scatter reads.
+@group(1) @binding(8) var<storage, read_write> sky_corners: array<f32>;
 
 const BLOCK: u32 = 4u;            // cs_scatter workgroups are blocks of 4x4x4 froxels
 const MAX_FOG_LIGHTS: u32 = 256u; // point lights considered (the nearest: the buffer is sorted)
@@ -154,6 +161,21 @@ fn fog_volume_amount(v: FogVolume, rel: vec3<f32>) -> f32 {
     return amount;
 }
 
+// Block corners along each axis.
+fn sky_corner_dims() -> vec3<u32> {
+    return (froxels.grid.xyz + BLOCK - 1u) / BLOCK + 1u;
+}
+
+@compute @workgroup_size(64)
+fn cs_sky_corners(@builtin(global_invocation_id) id: vec3<u32>) {
+    let dims = sky_corner_dims();
+    let i = id.x;
+    if (i >= dims.x * dims.y * dims.z) { return; }
+    let corner = vec3<u32>(i % dims.x, (i / dims.x) % dims.y, i / (dims.x * dims.y));
+    let c = vec3<f32>(corner * BLOCK);
+    sky_corners[i] = sky_map_visibility(lit_point(c, froxel_position(c)), vec3<f32>(0.0, 1.0, 0.0));
+}
+
 @compute @workgroup_size(4, 4, 4)
 fn cs_scatter(
     @builtin(global_invocation_id) id: vec3<u32>,
@@ -164,11 +186,11 @@ fn cs_scatter(
     // The block's corners, and the sky visibility there. The occlusion map lookup is the most
     // expensive part of lighting a froxel and changes slowly, so it is interpolated.
     if (local < 8u) {
-        let corner = vec3<u32>(local & 1u, (local >> 1u) & 1u, local >> 2u);
-        let c = vec3<f32>((block + corner) * BLOCK);
-        let p = froxel_position(c);
-        block_corners[local] = p;
-        block_sky[local] = sky_map_visibility(lit_point(c, p), vec3<f32>(0.0, 1.0, 0.0));
+        let corner = block + vec3<u32>(local & 1u, (local >> 1u) & 1u, local >> 2u);
+        let c = vec3<f32>(corner * BLOCK);
+        block_corners[local] = froxel_position(c);
+        let dims = sky_corner_dims();
+        block_sky[local] = sky_corners[corner.x + dims.x * (corner.y + dims.y * corner.z)];
         atomicStore(&light_mask[local], 0u);
         if (local < 2u) { atomicStore(&volume_mask[local], 0u); }
     } else if (local == 8u) {

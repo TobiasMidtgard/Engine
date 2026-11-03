@@ -53,6 +53,11 @@ const MAX_ROWS: u32 = 192;
 const DEPTH_SCALE_DIVISOR: f32 = 32.0;
 /// Froxels per side of a scatter workgroup (`BLOCK` in the shader).
 const BLOCK: u32 = 4;
+
+/// Block corners of a grid of `size` froxels (`sky_corner_dims` in the shader).
+fn sky_corners(size: [u32; 3]) -> u32 {
+    size.iter().map(|s| s.div_ceil(BLOCK) + 1).product()
+}
 /// Length of the per-frame jitter sequence.
 const JITTER_SAMPLES: u64 = 16;
 
@@ -192,6 +197,8 @@ struct Grid {
     scatter: [Volume; 2],
     /// Frame binding 19.
     integrated: Volume,
+    /// The sky occlusion map's visibility at every block corner (`cs_sky_corners`).
+    sky_corners: wgpu::Buffer,
     /// Indexed by the scatter volume written this frame.
     scatter_groups: [wgpu::BindGroup; 2],
     integrate_groups: [wgpu::BindGroup; 2],
@@ -199,6 +206,7 @@ struct Grid {
 
 /// GPU resources and temporal state of the volumetric fog.
 pub(crate) struct Volumetrics {
+    sky_corners_pipeline: wgpu::ComputePipeline,
     scatter_pipeline: wgpu::ComputePipeline,
     integrate_pipeline: wgpu::ComputePipeline,
     scatter_layout: wgpu::BindGroupLayout,
@@ -293,6 +301,15 @@ impl Volumetrics {
                         multisampled: false,
                     },
                 ),
+                layout_entry(
+                    8,
+                    S::COMPUTE,
+                    wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                ),
             ],
         });
         let integrate_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -319,6 +336,11 @@ impl Volumetrics {
                 cache: None,
             })
         };
+        let sky_corners_pipeline = pipeline(
+            "volumetric fog sky corners",
+            "cs_sky_corners",
+            &scatter_layout,
+        );
         let scatter_pipeline = pipeline("volumetric fog scatter", "cs_scatter", &scatter_layout);
         let integrate_pipeline = pipeline(
             "volumetric fog integrate",
@@ -371,6 +393,7 @@ impl Volumetrics {
         let stand_in = stand_in.create_view(&Default::default());
 
         Self {
+            sky_corners_pipeline,
             scatter_pipeline,
             integrate_pipeline,
             scatter_layout,
@@ -414,7 +437,7 @@ impl Volumetrics {
             targets.prepass_normal.view.clone(),
         ];
         if let Some(mut grid) = self.grid.take() {
-            grid.scatter_groups = self.scatter_groups(shared, &grid.scatter);
+            grid.scatter_groups = self.scatter_groups(shared, &grid.scatter, &grid.sky_corners);
             self.grid = Some(grid);
         }
     }
@@ -487,7 +510,7 @@ impl Volumetrics {
         ) && let Some(mut grid) = self.grid.take()
         {
             // The storage buffer was recreated: rebind it.
-            grid.scatter_groups = self.scatter_groups(shared, &grid.scatter);
+            grid.scatter_groups = self.scatter_groups(shared, &grid.scatter, &grid.sky_corners);
             self.grid = Some(grid);
         }
 
@@ -531,8 +554,10 @@ impl Volumetrics {
             timestamp_writes: None,
         });
         pass.set_bind_group(0, frame_group, &[]);
-        pass.set_pipeline(&self.scatter_pipeline);
         pass.set_bind_group(1, &grid.scatter_groups[self.current], &[]);
+        pass.set_pipeline(&self.sky_corners_pipeline);
+        pass.dispatch_workgroups(sky_corners(grid.size).div_ceil(64), 1, 1);
+        pass.set_pipeline(&self.scatter_pipeline);
         pass.dispatch_workgroups(w.div_ceil(BLOCK), h.div_ceil(BLOCK), d.div_ceil(BLOCK));
         pass.set_pipeline(&self.integrate_pipeline);
         pass.set_bind_group(1, &grid.integrate_groups[self.current], &[]);
@@ -566,7 +591,13 @@ impl Volumetrics {
             volume("volumetric fog scatter 1"),
         ];
         let integrated = volume("volumetric fog");
-        let scatter_groups = self.scatter_groups(shared, &scatter);
+        let sky_corners = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("volumetric fog sky corners"),
+            size: sky_corners(size) as u64 * 4,
+            usage: wgpu::BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        });
+        let scatter_groups = self.scatter_groups(shared, &scatter, &sky_corners);
         let integrate_groups = [0, 1].map(|current| {
             device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("volumetric fog integrate"),
@@ -591,13 +622,19 @@ impl Volumetrics {
             size,
             scatter,
             integrated,
+            sky_corners,
             scatter_groups,
             integrate_groups,
         }
     }
 
     /// Scatter pass groups, indexed by the volume written (the other one is the history).
-    fn scatter_groups(&self, shared: &GpuShared, scatter: &[Volume; 2]) -> [wgpu::BindGroup; 2] {
+    fn scatter_groups(
+        &self,
+        shared: &GpuShared,
+        scatter: &[Volume; 2],
+        sky_corners: &wgpu::Buffer,
+    ) -> [wgpu::BindGroup; 2] {
         [0, 1].map(|current| {
             shared.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("volumetric fog scatter"),
@@ -626,6 +663,10 @@ impl Volumetrics {
                     wgpu::BindGroupEntry {
                         binding: 7,
                         resource: wgpu::BindingResource::TextureView(&self.prepass[1]),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 8,
+                        resource: sky_corners.as_entire_binding(),
                     },
                 ],
             })
