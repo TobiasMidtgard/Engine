@@ -2,7 +2,8 @@
 //! crowd of crates hidden behind a wall isn't drawn, the ones beside it are, and the picture
 //! is the same as without culling, still and while the camera walks around the wall's end
 //! (the late phase catches what last frame's depth hid). Needs a GPU or lavapipe; passes with
-//! a note when neither is available.
+//! a note when neither is available. An inset (an extra view) culls against its own depth and
+//! looks the same too.
 
 use engine_core::prelude::*;
 use engine_render::prelude::*;
@@ -35,6 +36,19 @@ fn app(culling: bool) -> App {
             ..Camera::perspective(60.0)
         },
         Transform::from_xyz(0.0, 2.0, 0.0).looking_at(DVec3::new(0.0, 2.0, -50.0), Vec3::Y),
+    ));
+    // An inset (an extra view, culled against its own depth) from the wall's other end.
+    w.spawn((
+        Camera {
+            exposure: Exposure::Manual { ev100: 12.0 },
+            ..Camera::perspective(50.0)
+        },
+        Transform::from_xyz(-9.0, 3.0, 2.0).looking_at(DVec3::new(-2.0, 2.0, -40.0), Vec3::Y),
+        ExtraView::window(),
+        Viewport {
+            position: UVec2::new(W - 64, 4),
+            size: UVec2::new(60, 34),
+        },
     ));
     w.spawn((
         DirectionalLight::default(),
@@ -100,12 +114,11 @@ fn differing(a: &image::RgbaImage, b: &image::RgbaImage) -> usize {
         .count()
 }
 
-/// Walk the camera to the right, past the wall's end, one step a frame.
-fn walk(app: &mut App, step: usize) {
+/// Walk the cameras to the right, toward and past the wall's end, a step a frame.
+fn walk(app: &mut App) {
     let mut q = app.world.query::<(&Camera, &mut Transform)>();
     for (_, mut t) in q.iter_mut(&mut app.world) {
-        let x = step as f64 * 1.5;
-        *t = Transform::from_xyz(x, 2.0, 0.0).looking_at(DVec3::new(x, 2.0, -50.0), Vec3::Y);
+        t.translation.x += 1.5;
     }
 }
 
@@ -137,8 +150,8 @@ fn hidden_crates_are_skipped_and_the_picture_is_the_same() {
     // Walking past the wall's end, every frame matches (what comes into view is drawn the
     // frame it does).
     for step in 1..=12 {
-        walk(&mut on, step);
-        walk(&mut off, step);
+        walk(&mut on);
+        walk(&mut off);
         on.update();
         off.update();
         let (a, b) = (
