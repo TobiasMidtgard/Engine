@@ -8,3 +8,4 @@ game's flags and bridge.
 2b-render-scale-0.7        the same loops at ENGINE_RENDER_SCALE=0.7: per-pass GPU 1.0 vs 0.7; round 2 physics (CCD sweeps)
 3-mesh-occlusion           ENGINE_MESH_OCCLUSION on/off x2 at forest_trail, plaza, market, village_garden (for 'town street')
 4-lake-forest-stays        lake, forest_trail and plaza stays: scene/prepass rows, extra views, probe GI, mesh uploads
+5-census                   census tour of overview, plaza, forest, lake, fortress, field

@@ -1,0 +1,29 @@
+19:17:07.218Z     0.04  mode tour quality ultra size '' spec 'overview,plaza,forest,lake,fortress,field'; idle before start 145,923 s; HEAD 5de4f33e
+19:17:07.853Z     0.68  started: showcase.exe --tour overview,plaza,forest,lake,fortress,field --profile --quality ultra  env SHOWCASE_CENSUS=census.md
+19:17:12.672Z     5.50  window visible: client 1600x900, window 1616x939 at (312,312), maximized False
+19:17:12.730Z     5.55  bridge connected
+19:17:13.183Z     6.01  world built
+19:17:13.641Z     6.46  after build: working set 2,663 MB, private 2,924 MB; system free 35,173 of 65,277 MB
+19:17:18.910Z    11.73  log: tour 1/6: The valley
+19:17:24.166Z    16.99  mem: working set 3,415 MB, private 5,560 MB; system free 34,171 of 65,277 MB
+19:17:28.149Z    20.97  log:   waited 7 s for meshes' clusters, terrain patches and foliage (0 not ready)
+19:17:28.414Z    21.24  log:   exposure EV100 13.0 (metered 14.5)
+19:17:28.416Z    21.24  log: tour 2/6: The market square and the village
+19:17:31.051Z    23.87  log:   waited 2 s for meshes' clusters, terrain patches and foliage (0 not ready)
+19:17:31.054Z    23.88  log:   exposure EV100 13.4 (metered 14.9)
+19:17:31.060Z    23.88  log: tour 3/6: Living forest
+19:17:32.395Z    25.22  log:   exposure EV100 11.3 (metered 12.8)
+19:17:32.657Z    25.48  log: tour 4/6: Lake
+19:17:34.459Z    27.28  mem: working set 3,361 MB, private 8,811 MB; system free 34,218 of 65,277 MB
+19:17:34.732Z    27.56  log:   waited 2 s for meshes' clusters, terrain patches and foliage (0 not ready)
+19:17:34.994Z    27.82  log:   exposure EV100 13.5 (metered 15.0)
+19:17:34.997Z    27.82  log: tour 5/6: Siege fortress on its hill
+19:17:41.345Z    34.17  log:   waited 6 s for meshes' clusters, terrain patches and foliage (0 not ready)
+19:17:41.612Z    34.44  log:   exposure EV100 12.1 (metered 13.6)
+19:17:41.615Z    34.44  log: tour 6/6: Grass field
+19:17:43.209Z    36.03  log:   waited 2 s for meshes' clusters, terrain patches and foliage (0 not ready)
+19:17:43.482Z    36.31  log:   exposure EV100 12.9 (metered 14.4)
+19:17:44.806Z    37.63  mem: 
+19:17:45.091Z    37.91  sampler job: Completed
+19:17:45.099Z    37.92  game exited by itself, code 0
+19:18:27.984Z    80.81  done
