@@ -1033,6 +1033,11 @@ pub struct MeshFeature {
     materials: Option<GrowBuffer>,
     material_group: Option<wgpu::BindGroup>,
     instances: Option<GrowBuffer>,
+    /// GPU occlusion culling of the camera's opaque batches (`mesh_cull.rs`).
+    culling: Option<crate::mesh_cull::MeshCulling>,
+    /// This frame's opaque instances to test, and their batches' draw arguments.
+    cull_items: Vec<crate::mesh_cull::CullItem>,
+    cull_args: Vec<[u32; 5]>,
     meshes: FastMap<u32, GpuMesh>,
     /// The instanced meshes' vertices and indices.
     pool: MeshPool,
@@ -1965,7 +1970,7 @@ impl MeshFeature {
             SHADOW_MASKED => self.shadow_masked_pipeline.as_ref(),
             _ => self.shadow_pipeline.as_ref(),
         };
-        self.draw_batches(pass, batches, pipeline_for, |p| p == SHADOW_MASKED);
+        self.draw_batches(pass, batches, pipeline_for, |p| p == SHADOW_MASKED, None);
         if let Some(i) = &self.impostors {
             i.draw_shadow(pass, impostors);
         }
@@ -1974,17 +1979,25 @@ impl MeshFeature {
         }
     }
 
+    /// `culled`: the arguments buffer and offset (bytes) of a culling phase
+    /// (`MeshCulling::draws`), in place of this frame's arguments.
     fn draw_batches<'a>(
         &'a self,
         pass: &mut wgpu::RenderPass<'_>,
         batches: &[Batch],
         pipeline_for: impl Fn(u8) -> Option<&'a wgpu::RenderPipeline>,
         bind_textures: impl Fn(u8) -> bool,
+        culled: Option<(&wgpu::Buffer, u64)>,
     ) {
         let mut current_pipeline = u8::MAX;
         let mut current_textures = u32::MAX;
         let mut current_page = u16::MAX;
-        let indirect = self.indirect.as_ref().filter(|_| self.multi_draw);
+        let indirect = culled.or_else(|| {
+            self.indirect
+                .as_ref()
+                .filter(|_| self.multi_draw)
+                .map(|b| (&b.buffer, 0))
+        });
         let mut i = 0;
         while i < batches.len() {
             let b = &batches[i];
@@ -2015,10 +2028,10 @@ impl MeshFeature {
                 pass.set_index_buffer(index.slice(..), wgpu::IndexFormat::Uint32);
                 current_page = mesh.pool.page;
             }
-            if let Some(indirect) = indirect {
+            if let Some((buffer, offset)) = indirect {
                 pass.multi_draw_indexed_indirect(
-                    &indirect.buffer,
-                    b.args as u64 * std::mem::size_of::<DrawArgs>() as u64,
+                    buffer,
+                    offset + b.args as u64 * std::mem::size_of::<DrawArgs>() as u64,
                     run as u32,
                 );
                 continue;
@@ -2098,6 +2111,48 @@ impl MeshFeature {
                 })
                 .write(&gpu.device, &gpu.queue, bytemuck::cast_slice(&self.args));
         }
+    }
+
+    /// The opaque instances the GPU tests for occlusion (`mesh_cull.rs`) and their batches'
+    /// arguments, when drawn with multi-draw: those come first in this frame's arguments.
+    fn prepare_culling(&mut self, gpu: &GpuShared, view: &ViewData, settings: &RenderSettings) {
+        let (Some(culling), Some(instances)) = (&mut self.culling, &self.instances) else {
+            return;
+        };
+        self.cull_items.clear();
+        self.cull_args.clear();
+        let on = settings.mesh_occlusion_culling && self.multi_draw;
+        if on {
+            for b in self.opaque.iter().filter(|b| b.args != NO_ARGS) {
+                let a = &self.args[b.args as usize];
+                debug_assert_eq!(b.args as usize, self.cull_args.len());
+                self.cull_args.push([
+                    a.index_count,
+                    a.instance_count,
+                    a.first_index,
+                    a.base_vertex as u32,
+                    a.first_instance,
+                ]);
+                for at in b.first..b.first + b.count {
+                    let item = &self.items[(self.layout[at as usize] & ITEM) as usize];
+                    self.cull_items.push(crate::mesh_cull::CullItem {
+                        sphere: [item.center.x, item.center.y, item.center.z, item.radius],
+                        batch: b.args,
+                        instance: at,
+                        pad: [0; 2],
+                    });
+                }
+            }
+        }
+        culling.prepare(
+            gpu,
+            view,
+            on,
+            &self.cull_items,
+            &self.cull_args,
+            &instances.buffer,
+            self.layout.len(),
+        );
     }
 
     /// Draw commands a batch list goes out as.
@@ -2430,9 +2485,10 @@ impl RenderFeature for MeshFeature {
         self.instances = Some(GrowBuffer::new(
             device,
             "mesh instances",
-            wgpu::BufferUsages::VERTEX,
+            wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::STORAGE,
             1024 * std::mem::size_of::<MeshInstance>() as u64,
         ));
+        self.culling = Some(crate::mesh_cull::MeshCulling::new(gpu));
 
         self.shader_features = ShaderFeatures::default();
         self.shader = Some(shader);
@@ -2475,6 +2531,10 @@ impl RenderFeature for MeshFeature {
             return;
         }
         self.frame += 1;
+        // Until this view's batches are ready for it.
+        if let Some(culling) = &mut self.culling {
+            culling.deactivate();
+        }
         let mut steps = PrepareSteps::default();
         steps.step("meshes: begin frame");
         if let Some(clusters) = &mut self.clusters {
@@ -3291,6 +3351,7 @@ impl RenderFeature for MeshFeature {
                 .push(StandardMaterial::default().to_gpu());
         }
         self.write_draw_args(gpu, settings);
+        self.prepare_culling(gpu, view, settings);
         steps.step("meshes: pipelines");
         // Pipelines with the shader parts this frame's materials need, from now on.
         let needed = self
@@ -3405,6 +3466,14 @@ impl RenderFeature for MeshFeature {
                 "render.meshes.edits",
                 std::mem::take(&mut self.edits) as f64,
             );
+            // Occlusion culling (a few frames behind): opaque instances tested, and the
+            // instances and triangles it drew of them.
+            if let Some(culling) = &mut self.culling {
+                let c = culling.stats();
+                d.set("render.meshes.occlusion_tested", c.tested as f64);
+                d.set("render.meshes.occlusion_drawn", c.instances as f64);
+                d.set("render.meshes.occlusion_triangles", c.triangles as f64);
+            }
             // The shared vertex and index buffers: pages, MB reserved and MB in use.
             let (pages, reserved, used) = self.pool.usage();
             d.set("render.meshes.pool_pages", pages as f64);
@@ -3440,6 +3509,10 @@ impl RenderFeature for MeshFeature {
         self.skins.encode(ctx.gpu, encoder, &self.pool, |index| {
             meshes.get(&index).map(|m| (m.pool, m.version))
         });
+        // Occlusion culling's early phase, before the depth prepass.
+        if let Some(culling) = &self.culling {
+            culling.encode_early(encoder);
+        }
         if let Some(impostors) = &mut self.impostors
             && let Some(bake) = impostors.pending()
             && let Some(mesh) = self.meshes.get(&bake.mesh)
@@ -3492,13 +3565,22 @@ impl RenderFeature for MeshFeature {
             return;
         }
         pass.set_bind_group(1, group, &[]);
-        pass.set_vertex_buffer(1, instances.buffer.slice(..));
+        let culled = self
+            .culling
+            .as_ref()
+            .filter(|_| phase == RenderPhase::Opaque)
+            .and_then(|c| c.draws(crate::mesh_cull::Phase::Both));
+        pass.set_vertex_buffer(1, culled.map_or(&instances.buffer, |c| c.0).slice(..));
         self.draw_batches(
             pass,
             batches,
             |p| self.pipelines.get(p as usize).and_then(Option::as_ref),
             |_| true,
+            culled.map(|c| (c.1, c.2)),
         );
+        if culled.is_some() {
+            pass.set_vertex_buffer(1, instances.buffer.slice(..));
+        }
         if let Some(i) = &self.impostors {
             i.draw(pass, impostors, false);
         }
@@ -3516,7 +3598,11 @@ impl RenderFeature for MeshFeature {
             return;
         }
         pass.set_bind_group(1, group, &[]);
-        pass.set_vertex_buffer(1, instances.buffer.slice(..));
+        let culled = self
+            .culling
+            .as_ref()
+            .and_then(|c| c.draws(crate::mesh_cull::Phase::Early));
+        pass.set_vertex_buffer(1, culled.map_or(&instances.buffer, |c| c.0).slice(..));
         self.draw_batches(
             pass,
             &self.opaque,
@@ -3526,7 +3612,11 @@ impl RenderFeature for MeshFeature {
                     .and_then(Option::as_ref)
             },
             |_| true,
+            culled.map(|c| (c.1, c.2)),
         );
+        if culled.is_some() {
+            pass.set_vertex_buffer(1, instances.buffer.slice(..));
+        }
         if let Some(i) = &self.impostors {
             i.draw(pass, self.impostor_view, true);
         }
@@ -3541,15 +3631,41 @@ impl RenderFeature for MeshFeature {
         depth: &wgpu::TextureView,
         ctx: &FrameContext,
     ) -> bool {
-        self.clusters
+        let clusters = self
+            .clusters
             .as_mut()
-            .is_some_and(|c| c.encode_late(ctx.gpu, encoder, depth))
+            .is_some_and(|c| c.encode_late(ctx.gpu, encoder, depth));
+        let meshes = self
+            .culling
+            .as_mut()
+            .is_some_and(|c| c.encode_late(ctx.gpu, encoder, depth));
+        clusters || meshes
     }
 
     fn draw_prepass_late(&self, pass: &mut wgpu::RenderPass<'_>, _ctx: &FrameContext) {
         let Some(group) = &self.material_group else {
             return;
         };
+        // The opaque instances last frame's depth hid but this frame's doesn't.
+        if let Some((instances, args, offset)) = self
+            .culling
+            .as_ref()
+            .and_then(|c| c.draws(crate::mesh_cull::Phase::Late))
+        {
+            pass.set_bind_group(1, group, &[]);
+            pass.set_vertex_buffer(1, instances.slice(..));
+            self.draw_batches(
+                pass,
+                &self.opaque,
+                |p| {
+                    self.prepass_pipelines
+                        .get(p as usize)
+                        .and_then(Option::as_ref)
+                },
+                |_| true,
+                Some((args, offset)),
+            );
+        }
         let Some(clusters) = self.clusters.as_ref().filter(|c| c.is_active()) else {
             return;
         };
