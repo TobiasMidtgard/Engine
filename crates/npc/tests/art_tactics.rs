@@ -37,6 +37,8 @@ const STEP: f64 = 1.0 / 60.0;
 const SEED: u64 = 0;
 
 fn app() -> App {
+    // Build the fighter kit now (else a worker builds it and fighters wait for it).
+    engine_npc::art::fighter::kit();
     let mut app = App::new();
     app.world.resource_mut::<EngineConfig>().headless = true;
     {

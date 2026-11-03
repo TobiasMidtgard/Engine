@@ -34,6 +34,8 @@ const BAND: u32 = 30;
 const STEP: f64 = 1.0 / 30.0;
 
 fn app() -> App {
+    // Build the fighter kit now (else a worker builds it and fighters wait for it).
+    engine_npc::art::fighter::kit();
     let mut app = App::new();
     app.world.resource_mut::<EngineConfig>().headless = true;
     {

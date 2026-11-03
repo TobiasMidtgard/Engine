@@ -33,6 +33,9 @@ fn app() -> App {
 
 /// An app rendering `w` × `h` pixels, with the sun up and a plane of `ground` color.
 fn app_on(w: u32, h: u32, ground: u32) -> App {
+    // The fighter kit is otherwise built on a worker and the fighters dressed once it's in:
+    // build it now, so every fighter has its parts on its first frame.
+    engine_npc::art::fighter::kit();
     let mut app = App::new();
     app.world.resource_mut::<EngineConfig>().headless = true;
     {
