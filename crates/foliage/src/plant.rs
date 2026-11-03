@@ -379,7 +379,7 @@ pub struct EcologySettings {
     pub tree_lod_distance_m: f32,
     /// Trees and shrubs beyond this distance draw their middle level (the near crown's cards
     /// flat, the limbs without twigs: about a fifth of the triangles), meters, scaled like
-    /// `tree_lod_distance_m` (30 m for a grown tree by default).
+    /// `tree_lod_distance_m` (24 m for a grown tree by default).
     pub tree_mid_distance_m: f32,
     /// Broadleaf trees and shrubs within this distance draw their crown leaf by leaf (in full
     /// leaf), meters, scaled like `tree_lod_distance_m` (12 m for a grown tree by default:
@@ -414,7 +414,7 @@ impl Default for EcologySettings {
             small_plant_distance_m: 110.0,
             small_plant_lod_distance_m: 22.0,
             tree_lod_distance_m: 70.0,
-            tree_mid_distance_m: 20.0,
+            tree_mid_distance_m: 16.0,
             tree_hero_distance_m: 8.0,
             tree_distant_distance_m: 240.0,
             scenery_tree_draw_distance_m: 6000.0,

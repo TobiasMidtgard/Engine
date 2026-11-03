@@ -1759,6 +1759,9 @@ fn leaf_tint(sp: &PlantSpecies, rng: &mut Rng) -> Vec3 {
     ratio * rng.range(0.88, 1.1)
 }
 
+/// How far a trunk reaches under its foot, meters.
+pub const TRUNK_SINK_M: f32 = 1.0;
+
 #[allow(clippy::too_many_arguments)]
 fn assemble(
     sp: &PlantSpecies,
@@ -1771,6 +1774,22 @@ fn assemble(
     cut: f32,
     sapling: bool,
 ) -> PlantMeshes {
+    // The trunk goes on a meter under its foot, so a tree on ground drawn a little lower than
+    // the height it was planted at (coarser terrain further off, a cell planted before an edit)
+    // still stands in it instead of floating (playtest 3, #25: Planets measured the drawn
+    // ground within 42 cm of the true height out to 400 m, 12 cm at worst within 200 m).
+    let sunk: Vec<Vec3>;
+    let sunk_r: Vec<f32>;
+    let (trunk_path, trunk_r) = match (trunk_path.first(), trunk_r.first()) {
+        (Some(&foot), Some(&r)) if foot.y > -0.5 => {
+            sunk = std::iter::once(foot - Vec3::Y * TRUNK_SINK_M)
+                .chain(trunk_path.iter().copied())
+                .collect();
+            sunk_r = std::iter::once(r).chain(trunk_r.iter().copied()).collect();
+            (&sunk[..], &sunk_r[..])
+        }
+        _ => (trunk_path, trunk_r),
+    };
     let top = h * 1.02;
     let cut_i = trunk_path
         .iter()
