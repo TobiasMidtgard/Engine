@@ -11,6 +11,7 @@
 //! script.toml), else the built-in 8×8 font.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::sync::Arc;
 
 use ab_glyph::{Font, FontVec, PxScale, ScaleFont};
 use bevy_ecs::prelude::*;
@@ -229,6 +230,12 @@ impl BoardFont {
 pub(crate) type Pictures = (Image, Image);
 
 type Painted = (Pictures, BoardFont);
+
+/// A recording's flame graph and hottest lines, shared with the profile boards' drawings.
+type FlameRead = (
+    Arc<Option<(Summary, FlameNode)>>,
+    Arc<Vec<(String, u32, f64, String)>>,
+);
 
 /// Draws one board's pictures on the async compute pool, so a redraw (tens of milliseconds for
 /// a large board) never holds up the frame, as Unreal's widget components and Unity's
@@ -1631,15 +1638,25 @@ fn draw_profile(
     cv.into_images()
 }
 
+/// One profile board's picture and the drawing under way for it.
+struct ProfileDrawn {
+    /// The recording and board the last drawing started from.
+    started: Option<(u64, ProfileBoard)>,
+    image: Option<(Handle<Image>, Handle<Image>)>,
+    painter: Painter,
+}
+
 /// What [`draw_profile_boards`] keeps between frames.
 #[derive(Default)]
 pub(crate) struct ProfileBoards {
-    drawn: HashMap<Entity, (u64, Handle<Image>, Handle<Image>, ProfileBoard)>,
+    drawn: HashMap<Entity, ProfileDrawn>,
     font: Option<BoardFont>,
 }
 
 /// Redraws profile boards when a recording ends (or grows, for `script.profile`), and starts
-/// live boards' recordings (`Update`, after the code boards drew the last one's heat).
+/// live boards' recordings (`Update`, after the code boards drew the last one's heat). The
+/// flame graph is read on the main thread; the drawing (tens of milliseconds, a 37 ms frame
+/// on the round 21c PC profile) runs off it ([`Painter`]).
 pub(crate) fn draw_profile_boards(
     mut boards: Query<(Entity, &ProfileBoard, &mut MeshRenderer)>,
     runtime: Option<ResMut<ScriptRuntime>>,
@@ -1656,30 +1673,59 @@ pub(crate) fn draw_profile_boards(
     let ProfileBoards { drawn, font } = &mut *state;
     drawn.retain(|e, _| boards.contains(*e));
     let shown = crate::profiler::shown(&runtime.luas());
-    let mut profile = None;
-    let mut lines = None;
+    let mut read: Option<FlameRead> = None;
     let mut live = None;
     for (e, board, mut renderer) in boards.iter_mut() {
         if board.live && live.is_none() {
             live = Some((board.hz, board.window_secs));
         }
-        if drawn.get(&e).is_some_and(|d| d.0 == shown && d.3 == *board) {
+        let d = drawn.entry(e).or_insert_with(|| ProfileDrawn {
+            started: None,
+            image: None,
+            painter: Painter::new(
+                font.get_or_insert_with(|| BoardFont::load(server.as_ref().map(|s| s.root()))),
+            ),
+        });
+        if let Some(pictures) = d.painter.finished() {
+            d.image = Some(show(
+                images,
+                d.image,
+                pictures,
+                &mut renderer,
+                board.glow_cd_m2,
+            ));
+        }
+        let current = d
+            .started
+            .as_ref()
+            .is_some_and(|(at, b)| *at == shown && b == board);
+        // One drawing at a time; a board that changed meanwhile draws once it is done.
+        if current || d.painter.busy() {
             continue;
         }
         let rt = &*runtime;
-        let profile = profile
-            .get_or_insert_with(|| crate::profiler::flame(&rt.luas(), rt.profile_recording()));
-        let lines = lines.get_or_insert_with(|| crate::profiler::hot_lines(&rt.luas(), 6));
-        let font = font.get_or_insert_with(|| BoardFont::load(server.as_ref().map(|s| s.root())));
-        let pictures = draw_profile(board, font, profile.as_ref(), lines);
-        let (image, glow) = show(
-            images,
-            drawn.get(&e).map(|d| (d.1, d.2)),
-            pictures,
-            &mut renderer,
-            board.glow_cd_m2,
-        );
-        drawn.insert(e, (shown, image, glow, board.clone()));
+        let (profile, lines) = read
+            .get_or_insert_with(|| {
+                (
+                    Arc::new(crate::profiler::flame(&rt.luas(), rt.profile_recording())),
+                    Arc::new(crate::profiler::hot_lines(&rt.luas(), 6)),
+                )
+            })
+            .clone();
+        let b = board.clone();
+        d.painter
+            .start(move |font| draw_profile(&b, font, profile.as_ref().as_ref(), &lines));
+        d.started = Some((shown, board.clone()));
+        // Without the pool it drew at once: show it this frame, as before.
+        if let Some(pictures) = d.painter.finished() {
+            d.image = Some(show(
+                images,
+                d.image,
+                pictures,
+                &mut renderer,
+                board.glow_cd_m2,
+            ));
+        }
     }
     if let Some((hz, secs)) = live
         && runtime.profile_idle_for_boards()
