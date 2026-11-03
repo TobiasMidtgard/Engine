@@ -1559,8 +1559,10 @@ fn spin_drag(c: &rapier3d::geometry::Collider, spin: Vec3) -> Vec3 {
 
 /// Whether `r`'s Rapier step sweeps fast bodies (continuous collision detection): near a focus
 /// (tier 0), or anywhere while a body that asked for it (`engine_world::RigidBody::ccd`) moves
-/// more than [`BULLET_STEP_M`] a substep. (Rapier's switch is the whole world's: every car
-/// asks for it, and a parked one kept the boats beside it swept, 8 ms a step at the field.)
+/// more than [`BULLET_STEP_M`] a substep with something within reach of its path. Rapier's
+/// switch is the whole world's: every car and plane asks for it, so a parked car, or the
+/// circuit's planes 145 m up with nothing near them, kept the lake's boats beside them swept
+/// (8 ms a step at the field in the loops' second round, 1.4-4 ms on the PC).
 ///
 /// Rapier sweeps every dynamic body that moves more than half its thinnest collider in a
 /// step against the fixed geometry around it. A boat's side walls are a few centimeters
@@ -1570,17 +1572,46 @@ fn spin_drag(c: &rapier3d::geometry::Collider, spin: Vec3) -> Vec3 {
 /// nobody sees a body poke into the ground for a step, and one that falls through is caught
 /// ([`crate::grounding`]).
 fn sweeps_wanted(r: &crate::sim::Region, dt: f32) -> bool {
-    r.tier == 0
-        || r.world
-            .islands
-            .active_bodies()
-            .filter_map(|h| r.world.bodies.get(h))
-            .any(|rb| rb.is_ccd_enabled() && rb.linvel().length() * dt > BULLET_STEP_M)
+    use rapier3d::parry::bounding_volume::BoundingVolume;
+    if r.tier == 0 {
+        return true;
+    }
+    let w = &r.world;
+    w.islands.active_bodies().any(|h| {
+        let Some(rb) = w.bodies.get(h) else {
+            return false;
+        };
+        let step = rb.linvel().length() * dt;
+        if !rb.is_ccd_enabled() || step <= BULLET_STEP_M {
+            return false;
+        }
+        // Its path this substep, and a margin: anything there it could pass through?
+        let Some(mut path) = rb
+            .colliders()
+            .iter()
+            .filter_map(|c| w.colliders.get(*c))
+            .map(|c| c.compute_aabb())
+            .reduce(|a, b| a.merged(&b))
+        else {
+            return false;
+        };
+        path.mins -= Vec3::splat(step + BULLET_MARGIN_M);
+        path.maxs += Vec3::splat(step + BULLET_MARGIN_M);
+        let filter = rapier3d::prelude::QueryFilter::default()
+            .exclude_rigid_body(h)
+            .exclude_sensors();
+        w.query_pipeline_with_filter(filter)
+            .intersect_aabb_conservative(path)
+            .next()
+            .is_some()
+    })
 }
 
 /// How far a body that asked for continuous collision detection must move in a substep for a
 /// region past full detail to sweep, meters (6 m/s at 60 Hz).
 const BULLET_STEP_M: f32 = 0.1;
+/// Beyond its path, how near something must be to a fast body for its region to sweep, m.
+const BULLET_MARGIN_M: f32 = 0.5;
 
 /// A body whose far edge moves faster than this from turning alone, m/s, gets its contacts
 /// recomputed every step; below [`STILL_EDGE_SPEED`] Rapier may reuse them again.

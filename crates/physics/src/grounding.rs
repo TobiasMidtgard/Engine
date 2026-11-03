@@ -17,6 +17,10 @@
 //! fell at 100 m/s, 600 m under the hill). Unreal stops such actors at its kill height
 //! (`KillZ`); here one falling [`UNDER_M`] or more under the ground's surface with nothing
 //! below it is held too, wherever it is, until something is under it or it is back above.
+//! That is checked soon after it drops through: the fortress's debris fell through the hill at
+//! 19-24 m/s, and until 20 m down every piece was swept against the terrain it was inside of,
+//! every step (round 22 on the PC, up to 4 ms a step in the loops' second round). A crater or
+//! a cellar has a floor under it, so nothing standing in one is held.
 
 use engine_core::math::{DVec3, Vec3};
 use engine_core::prelude::*;
@@ -33,8 +37,8 @@ const ABOVE_M: f64 = 20.0;
 /// Or this far below it (deeper it fell through long ago, and rests as lost, `crate::lod`), m.
 const BELOW_M: f64 = 50.0;
 /// Falling this far under the ground's surface, with nothing below, a body has left the
-/// world (no cave in the showcase runs this deep under the terrain), m.
-const UNDER_M: f64 = 20.0;
+/// world (fell through the terrain's one-sided collider), m.
+const UNDER_M: f64 = 3.0;
 /// The ground is asked for from this high above a body (the first surface below is returned).
 const GROUND_PROBE_M: f64 = 2000.0;
 

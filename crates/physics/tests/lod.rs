@@ -409,7 +409,8 @@ fn a_crate_with_no_ground_loaded_under_it_waits_for_it() {
     // (The shot, fallen as far by now, with it.)
     assert_eq!(stats(&app).ungrounded, 2, "{:?}", stats(&app));
     let y = position(&app, crate_).y;
-    assert!((-45.0..-20.0).contains(&y), "the crate fell to {y}");
+    // (Held soon after 3 m under: looked at every few steps, it falls a little further.)
+    assert!((-25.0..-3.0).contains(&y), "the crate fell to {y}");
     app.update_n(30);
     assert!((position(&app, crate_).y - y).abs() < 1e-3, "it fell on");
 }
