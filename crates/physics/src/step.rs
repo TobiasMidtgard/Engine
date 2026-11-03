@@ -157,6 +157,10 @@ impl FromWorld for StepQueries {
 #[derive(Resource, Default)]
 pub(crate) struct StepCarry {
     started: Option<Instant>,
+    /// Time the step's own three parts took so far, ms: not the span from the first's start
+    /// to the last's end, which holds whatever ran beside `physics_simulate` and waited for
+    /// the lock ([`PhysicsStats::step_ms`]).
+    work_ms: f64,
     settings: PhysicsSettings,
     gravity: Gravity,
     foci: Vec<DVec3>,
@@ -544,6 +548,7 @@ pub(crate) fn physics_sync(world: &mut World, mut q: Local<Option<StepQueries>>)
     let mut carry = world.resource_mut::<StepCarry>();
     *carry = StepCarry {
         started: Some(started),
+        work_ms: started.elapsed().as_secs_f64() * 1000.0,
         settings,
         gravity,
         foci,
@@ -575,6 +580,7 @@ pub(crate) fn physics_simulate(
     if carry.started.is_none() {
         return;
     }
+    let simulating = Instant::now();
     let (settings, gravity, foci, dt) = (
         carry.settings.clone(),
         carry.gravity.clone(),
@@ -866,6 +872,7 @@ pub(crate) fn physics_simulate(
     drop(sim);
     carry.substeps = substeps;
     carry.report = report;
+    carry.work_ms += simulating.elapsed().as_secs_f64() * 1000.0;
 }
 
 /// The physics step, last part (`FixedUpdate`, `SimSet::Physics`, after
@@ -873,6 +880,7 @@ pub(crate) fn physics_simulate(
 /// back, send contact messages and stats.
 pub(crate) fn physics_write_back(world: &mut World) {
     let write_back = tracing::info_span!("write back").entered();
+    let writing = Instant::now();
     let carry = std::mem::take(&mut *world.resource_mut::<StepCarry>());
     let Some(started) = carry.started else {
         return;
@@ -884,6 +892,7 @@ pub(crate) fn physics_write_back(world: &mut World) {
         inserts,
         substeps,
         report,
+        work_ms,
         ..
     } = carry;
     let shared = world.resource::<SharedSimulation>().0.clone();
@@ -1041,7 +1050,10 @@ pub(crate) fn physics_write_back(world: &mut World) {
         crate::report::step_done(world, &sim, &foci, started);
     }
     // ---------------------------------------------------------------- stats
-    let step_ms = started.elapsed().as_secs_f64() * 1000.0;
+    // The step's own work, not its span: round 21c on the RTX 5080 PC, the span (with the
+    // frame's other systems running beside `physics_simulate`) sent the budget up a level on
+    // slow frames, and the levels cost 20-25% of the frame rate in those runs.
+    let step_ms = work_ms + writing.elapsed().as_secs_f64() * 1000.0;
     // ---------------------------------------------------------------- budget
     // (`settings` are the step's: degraded already, but with the budget as set.)
     let changed = sim.load.observe(step_ms, settings.step_budget_ms);

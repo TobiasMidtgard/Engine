@@ -176,9 +176,22 @@ const RHO: f32 = 1000.0;
 pub fn boat_air_system(
     water: Option<Res<Water>>,
     gravity: Option<Res<Gravity>>,
+    focus: Option<Res<engine_world::FocusPoints>>,
+    range: Option<Res<engine_world::SimulationRange>>,
     mut boats: Query<(&Boat, &Transform, &mut ExternalForce), With<RigidBody>>,
 ) {
+    let range = range.map_or_else(engine_world::SimulationRange::default, |r| *r);
     for (boat, tf, mut push) in &mut boats {
+        // An undriven boat past the simulation range rests with its region (the physics step
+        // skips it), so its lift is left as it was: each one costs a few hundred water samples
+        // a step (0.6-1.5 ms a frame on the PC wherever the camera was).
+        if boat.drive == (Vec3::ZERO, Vec3::ZERO)
+            && focus
+                .as_deref()
+                .is_some_and(|f| range.is_resting(f, tf.translation))
+        {
+            continue;
+        }
         let (mut force, mut torque) = boat.drive;
         if let (Some(water), Some(inside)) = (&water, &boat.interior) {
             let com = tf.translation + (tf.rotation * boat.center_of_mass).as_dvec3();
@@ -478,5 +491,39 @@ mod tests {
         assert!(heeled.torque.x > 50.0, "{heeled:?}");
         // Out of the water: nothing.
         assert_eq!(lift(Quat::IDENTITY, 1.0).force, Vec3::ZERO);
+    }
+
+    #[test]
+    fn a_boat_far_past_the_simulation_range_keeps_its_last_lift() {
+        let mut world = World::new();
+        world.insert_resource(Water(Arc::new(Pond)));
+        world.insert_resource(engine_world::FocusPoints {
+            points: vec![DVec3::ZERO],
+        });
+        let range = engine_world::SimulationRange::default();
+        let far = DVec3::new(range.active_m * 3.0, 0.0, 0.0);
+        let spawn = |world: &mut World, at: DVec3, drive: (Vec3, Vec3)| {
+            let mut b = boat();
+            b.drive = drive;
+            world
+                .spawn((
+                    b,
+                    Transform::from_translation(at),
+                    RigidBody::dynamic(),
+                    ExternalForce::default(),
+                ))
+                .id()
+        };
+        let near = spawn(&mut world, DVec3::ZERO, (Vec3::ZERO, Vec3::ZERO));
+        let resting = spawn(&mut world, far, (Vec3::ZERO, Vec3::ZERO));
+        let driven = spawn(&mut world, far, (Vec3::X * 100.0, Vec3::ZERO));
+        world.run_system_once(boat_air_system).unwrap();
+        let force = |e| world.get::<ExternalForce>(e).unwrap().force;
+        assert!(force(near).y > 1000.0, "near: {:?}", force(near));
+        assert_eq!(force(resting), Vec3::ZERO, "resting boats are left alone");
+        assert!(
+            force(driven).y > 1000.0,
+            "a driven boat is never left alone"
+        );
     }
 }

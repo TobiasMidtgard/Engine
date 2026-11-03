@@ -538,6 +538,8 @@ fn far_noise(p: PlanetGpu, rel: vec3<f32>, pixel: f32) -> vec2<f32> {
     var f = 1.0 / 64.0;
     for (var i = 0; i < 9; i++) {
         let keep = 1.0 - smoothstep(0.25, 0.5, f * pixel_km);
+        // (Finer octaves are finer still.)
+        if (keep <= 0.0) { break; }
         a += amp * keep * pnoise3(km * f + vec3(f32(i) * 7.1), 1.0e6);
         b += amp * keep * pnoise3(km * f + vec3(31.7 + f32(i) * 3.3), 1.0e6);
         norm += amp * keep;
@@ -1869,17 +1871,19 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
         * smoothstep(0.1, 0.4, pixel / max(in.lod.x, 1e-3));
     // Capped so far-off lowland at grazing angles never blends toward sea.
     let alt_width = clamp(fwidth(altitude), 1e-3, 2.0);
-    let detail_n = tile_fbm(tp, 1.0, 4);
-    let detail_f = pnoise3(tp * 8.0, 4096.0 * 8.0);
+    // The meter-scale detail noises are finer than a pixel wider than 2-3 m, where every use
+    // has faded them out (`fine_fade`): there they settle to their middle, uncomputed.
+    var detail_n = 0.5;
+    var detail_f = 0.5;
+    let detail_keep = 1.0 - smoothstep(2.0, 3.0, pixel);
+    if (detail_keep > 0.0) {
+        detail_n = mix(0.5, tile_fbm(tp, 1.0, 4), detail_keep);
+        detail_f = mix(0.5, pnoise3(tp * 8.0, 4096.0 * 8.0), detail_keep);
+    }
     let macro_v = tile_fbm(tp, 1.0 / 64.0, 3);
     let mid_v = tile_fbm(tp, 1.0 / 8.0, 3);
     let patch_v = tile_fbm(tp, 1.0 / 32.0, 3);
     let meadow_v = tile_fbm(tp, 1.0 / 512.0, 3);
-    let wave_t = frame.time.x;
-    let wave_h = pnoise3(vec3<f32>(tp.x * 0.25, wave_t * 0.25, tp.z * 0.25), 1024.0) * 0.6
-        + pnoise3(vec3<f32>(tp.x * 2.0 + 11.0, wave_t * 0.6, tp.z * 2.0), 8192.0) * 0.15;
-    let dw1 = dpdx(wave_h);
-    let dw2 = dpdy(wave_h);
     var ripple_h = 0.0;
     if (frame.weather.w > 0.01) {
         ripple_h = rain_ripples(tp.xz, frame.time.x, frame.weather.w * 0.25) * 0.004;
@@ -1895,6 +1899,17 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     // Beaches, shallows and the wash follow the same wandering coast.
     let coast_alt = altitude + coast_wander;
     let ocean = planet.params.w * saturate(0.5 - coast_alt / alt_width);
+    // Waves, on the sea and on rivers' and lakes' ice: computed where the 2×2 pixel quad
+    // holds any of either, so their screen derivatives stay right at the water's edge.
+    let wavy = select(0.0, 1.0, ocean > 0.0 || in.water.x > 0.002);
+    var wave_h = 0.0;
+    if (wavy + abs(dpdx(wavy)) + abs(dpdy(wavy)) > 0.0) {
+        let wave_t = frame.time.x;
+        wave_h = pnoise3(vec3<f32>(tp.x * 0.25, wave_t * 0.25, tp.z * 0.25), 1024.0) * 0.6
+            + pnoise3(vec3<f32>(tp.x * 2.0 + 11.0, wave_t * 0.6, tp.z * 2.0), 8192.0) * 0.15;
+    }
+    let dw1 = dpdx(wave_h);
+    let dw2 = dpdy(wave_h);
 
     // Ground maps around the focus.
     let duv = deform_uv(in.rel);
