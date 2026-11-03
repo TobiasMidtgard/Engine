@@ -35,13 +35,13 @@ struct Panel {
     open: bool,
     shown: Vec<(String, f64)>,
     refresh: f32,
+    /// UI events read so far.
+    seen: MessageCursor<UiEvent>,
 }
 
 pub fn install(app: &mut App) {
-    app.init_resource::<Panel>().add_systems(
-        Update,
-        (toggle_panel, run_panel.run_if(|p: Res<Panel>| p.open)),
-    );
+    app.init_resource::<Panel>()
+        .add_systems(Update, (toggle_panel, queue_panel));
 }
 
 /// F4 opens and closes the panel. Queues the change only on the frame the key goes down, so
@@ -243,8 +243,17 @@ fn open(world: &mut World) -> Result<(), String> {
     Ok(())
 }
 
+/// While the panel is open, queue [`run_panel`]. A plain system, so a closed panel costs the
+/// frame nothing: an exclusive system waits for an idle pool even when its run condition is
+/// false (the lead's engine-perf/fixed-step-chain.md).
+fn queue_panel(mut commands: Commands, panel: Res<Panel>) {
+    if panel.open {
+        commands.queue(run_panel);
+    }
+}
+
 /// Send what was moved, run the buttons, and let untouched sliders follow the weather.
-fn run_panel(world: &mut World, mut seen: Local<MessageCursor<UiEvent>>) {
+fn run_panel(world: &mut World) {
     if screens::find_screen(world, KEY).is_none() {
         // Closed with Escape or the header's button.
         world.resource_mut::<Panel>().open = false;
@@ -256,7 +265,10 @@ fn run_panel(world: &mut World, mut seen: Local<MessageCursor<UiEvent>>) {
         }
     };
     let mut reopen = false;
-    for ev in engine_ui::input::read_events(world, &mut seen) {
+    let mut seen = std::mem::take(&mut world.resource_mut::<Panel>().seen);
+    let events = engine_ui::input::read_events(world, &mut seen);
+    world.resource_mut::<Panel>().seen = seen;
+    for ev in events {
         let UiEvent::Action { action, .. } = ev else {
             continue;
         };
