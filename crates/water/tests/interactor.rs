@@ -170,3 +170,57 @@ fn a_sheet_dropped_in_sends_rings_and_spray() {
     let thrown: f32 = splashes.iter().map(|s| s.mass_kg).sum();
     assert!(thrown < 2.0, "a light sheet threw {thrown:.2} kg of spray");
 }
+
+/// A wader as the movement module reports one (crates/movement/src/swim.rs): an 80 kg body,
+/// half under, pushing through still water at 1.4 m/s.
+fn wade(mut step: Local<u32>, mut out: MessageWriter<WaterDisturbance>) {
+    *step += 1;
+    if *step < 10 {
+        return;
+    }
+    let x = -6.0 + 1.4 * (*step - 10) as f64 / 30.0;
+    if x > 6.0 {
+        return;
+    }
+    out.write(WaterDisturbance {
+        position: DVec3::new(x, 0.0, 0.0),
+        velocity: Vec3::new(1.4, 0.0, 0.0),
+        radius: 0.35 * 1.1,
+        mass_kg: 80.0 * 0.5,
+        source: None,
+    });
+}
+
+/// Playtest 2026-11-01 item 7: the player leaves a small foamy wake, not just rings.
+#[test]
+fn a_wader_leaves_a_foamy_wake() {
+    let mut app = App::new();
+    app.world.resource_mut::<EngineConfig>().headless = true;
+    app.world
+        .resource_mut::<Time>()
+        .set_source(TimeSource::Manual {
+            step_secs: 1.0 / 30.0,
+        });
+    app.add_plugins((WorldPlugin, WaterPlugin));
+    let mut lake = WaterBody::lake(60.0);
+    lake.waves.wind_waves = false;
+    lake.bed = engine_water::WaterBed::Flat { depth_m: 0.8 };
+    app.world
+        .spawn((Transform::from_translation(DVec3::ZERO), lake));
+    app.add_systems(Update, wade);
+    for _ in 0..200 {
+        app.update();
+    }
+    let w = app.world.resource::<engine_water::SharedWater>().0.clone();
+    let w = w.read();
+    // Along the path walked, a meter or two behind where it ended.
+    let foam: f32 = (0..20)
+        .map(|k| {
+            w.ripples
+                .sample(DVec2::new(-2.0 + k as f64 * 0.2, 0.0))
+                .map_or(0.0, |s| s.foam)
+        })
+        .fold(0.0, f32::max);
+    println!("wake foam {foam:.3}");
+    assert!(foam > 0.15, "the wader left {foam:.3} foam behind");
+}

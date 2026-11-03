@@ -52,6 +52,16 @@ const BREAK_FULL: f32 = 0.7;
 /// In the shallows a crest breaks once it stands this many times the still water's depth
 /// above it (half of McCowan's height-to-depth 0.78).
 const BREAK_DEPTH_RATIO: f32 = 0.39;
+/// Deepest a trough goes, as a share of the still water's depth there. The grid's waves are
+/// linear, so nothing else stops a dip in ankle-deep water from going under the bed, which
+/// showed as a diamond of no water round a wader (playtest 2026-11-01 item 12; the square
+/// grid's four-neighbour stencil makes the diamond). Real shallow-water waves can't go under
+/// their bed either: their troughs flatten while their crests sharpen (cnoidal waves), and
+/// ocean renderers damp waves where the floor is near (Crest's "Attenuation In Shallows" over
+/// its sea-floor depth cache).
+pub const TROUGH_OF_DEPTH: f32 = 0.5;
+/// Highest and lowest the grid's surface goes anywhere, meters.
+const MAX_HEIGHT_M: f32 = 2.0;
 /// Foam a fully breaking crest whips up per second.
 const BREAK_FOAM: f32 = 2.0;
 /// Bubbles under this are gone.
@@ -330,6 +340,12 @@ impl Foam {
     }
 }
 
+/// How far below the still level the surface may dip over still water `depth` m deep.
+#[inline]
+fn trough(depth: f32) -> f32 {
+    (TROUGH_OF_DEPTH * depth).min(MAX_HEIGHT_M)
+}
+
 /// What one substep's march reads (see [`RippleField::march`]).
 struct March<'a> {
     n: usize,
@@ -339,6 +355,8 @@ struct March<'a> {
     h: &'a [f32],
     faces: &'a [[f32; 2]],
     wet: &'a [f32],
+    /// Still depth per cell (the troughs' floor, [`TROUGH_OF_DEPTH`]).
+    depth: &'a [f32],
     foam: &'a [f32],
     curl: &'a [f32],
     active: &'a [bool],
@@ -485,7 +503,8 @@ impl March<'_> {
             if j > 0 {
                 div -= self.faces[idx - n][1] * prev[i][1];
             }
-            out[i] = ((self.h[idx] - self.k * div) * self.keep_h * self.wet[idx]).clamp(-2.0, 2.0);
+            out[i] = ((self.h[idx] - self.k * div) * self.keep_h * self.wet[idx])
+                .clamp(-trough(self.depth[idx]), MAX_HEIGHT_M);
         }
     }
 
@@ -547,13 +566,15 @@ impl March<'_> {
                         );
                         let (vc, vl, vb) = (&row[i0..i1], &row[i0 - 1..i1 - 1], &prev[i0..i1]);
                         let (hc, wet) = (&self.h[b..b + len], &self.wet[b..b + len]);
+                        let depth = &self.depth[b..b + len];
                         let out = &mut h2[r + i0..r + i1];
                         let (k, keep) = (self.k, self.keep_h);
                         for o in 0..len {
                             let div = fc[o][0] * vc[o][0] + fc[o][1] * vc[o][1]
                                 - fl[o][0] * vl[o][0]
                                 - fb[o][1] * vb[o][1];
-                            out[o] = ((hc[o] - k * div) * keep * wet[o]).clamp(-2.0, 2.0);
+                            out[o] = ((hc[o] - k * div) * keep * wet[o])
+                                .clamp(-trough(depth[o]), MAX_HEIGHT_M);
                         }
                     } else {
                         self.heights_edge(j, i0, i1, row, prev, &mut h2[r..r + n]);
@@ -1058,7 +1079,8 @@ impl RippleField {
                         continue;
                     }
                     // A displacement at rest: the surface springs back and rings spread.
-                    self.h[idx] -= d.depth * g;
+                    self.h[idx] =
+                        (self.h[idx] - d.depth * g).clamp(-trough(self.depth[idx]), MAX_HEIGHT_M);
                     self.foam[idx] = (self.foam[idx] + d.foam * g).min(1.0);
                     if let Some(s) = d.stir {
                         let k = STIR * g;
@@ -1496,6 +1518,7 @@ impl RippleField {
             h: &self.h,
             faces: &self.faces,
             wet: &self.wet,
+            depth: &self.depth,
             foam: &self.foam,
             curl: &self.curl,
             active: &self.active,
@@ -1810,6 +1833,30 @@ mod tests {
         assert!(
             up > 0.0 && down > up,
             "rings upstream {up}, downstream {down}"
+        );
+    }
+
+    /// Playtest 2026-11-01 item 12: a wader fidgeting in ankle-deep water (a push a step,
+    /// back and forth) never drives the surface under the bed.
+    #[test]
+    fn a_wader_in_the_shallows_leaves_water_round_it() {
+        let mut f = RippleField::new(128, 0.25);
+        f.origin = DVec2::new(-16.0, -16.0);
+        f.rebuild_speeds(1.3, |_| Some(0.25));
+        let mut deepest = 0.0f32;
+        for k in 0..600 {
+            let sway = if (k / 20) % 2 == 0 { 0.6 } else { -0.6 };
+            f.disturb(Disturbance {
+                stir: Some(Vec2::new(sway, 0.0)),
+                ..drop_at(0.1 * sway as f64, 0.0, 0.5, 0.03, 0.05)
+            });
+            f.step(1.0 / 60.0, 0.1, 4.0);
+            deepest = f.h.iter().fold(deepest, |m, h| m.max(-h));
+        }
+        println!("deepest dip {deepest:.3} m in 0.25 m of water");
+        assert!(
+            deepest <= TROUGH_OF_DEPTH * 0.25 + 1e-4,
+            "the surface dipped {deepest} m into 0.25 m of water"
         );
     }
 

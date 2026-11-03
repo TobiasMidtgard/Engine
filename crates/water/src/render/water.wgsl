@@ -1006,15 +1006,26 @@ fn shade_water(rel: vec3<f32>, n_in: vec3<f32>, look: WaterLook, foam_in: f32, c
         // where it thins first; as it ages it opens along the walls between its bubble
         // clusters into a web of streaks, then holes, then scattered flecks.
         let broad = value_noise2(wp * 0.35 + vec2<f32>(7.3, 1.9));
-        pattern = mix(pattern, foam_cells(wp, rel), 0.6);
-        let theta = 1.0 - foam * (0.7 + 0.6 * broad);
-        let cover = smoothstep(theta, theta + 0.15, pattern);
+        // Fresh, thick froth (a splash, a wake's churn) is a packed mass of bubbles, white
+        // with soft clumped edges; only as it thins does it open into the web of lines round
+        // clear patches (Sea of Thieves and Crest erode a foam texture by its coverage, so
+        // dense foam reads solid and old foam as lace). Webbing a fresh splash read as cracks
+        // (playtest 2026-11-01 item 9).
+        let fresh = smoothstep(0.3, 0.75, foam);
+        pattern = mix(pattern, foam_cells(wp, rel), 0.6 * (1.0 - fresh));
+        // Thick froth covers more of the pattern than its amount alone says, with soft edges.
+        let theta = 1.0 - foam * (0.7 + 0.6 * broad) - 0.3 * fresh;
+        let cover = smoothstep(theta, theta + mix(0.15, 0.3, fresh), pattern);
+        // Its bubbles: a fine fizz of brighter and darker clumps, gone where a pixel spans them.
+        let fizz = value_noise2(wp * 19.0 + vec2<f32>(0.0, time_s() * 0.4)) * 0.6
+            + value_noise2(wp * 41.0 + vec2<f32>(3.1, 8.7)) * 0.4;
+        let bubbly = fresh * (1.0 - smoothstep(0.04, 0.12, pixel_footprint(rel)));
         let up = sky_ambient(n) * sky_vis * PI;
         // Foam is a dense froth: light gets through it, so it glows even with the sun behind.
         // Its albedo is well under snow's (whitecaps reflect at most about 55%, Whitlock 1982;
         // ours is brighter, fresh froth on fresh water), and thin lace lets the water through.
         let foam_col = pre_expose(0.75 * (sun * shadow * max(dot(n, l) * 0.6 + 0.4, 0.0) + up) * INV_PI);
-        color = mix(color, foam_col, cover * mix(0.8, 0.95, saturate(foam * 2.0)));
+        color = mix(color, foam_col * mix(1.0, 0.82 + 0.36 * fizz, bubbly), cover * mix(0.8, 0.95, saturate(foam * 2.0)));
     }
     let ground = textureSampleLevel(scene_color, linear_clamp, uv0, 0.0).rgb * wet_bed;
     // The last centimeters at the waterline are a film over the sand: no water color to speak

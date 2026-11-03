@@ -22,6 +22,11 @@ use crate::state::{SharedWater, WaterState};
 /// motion: spawned in place, teleported, or shifted with the world before its transform caught
 /// up. It throws no spray and digs no wake for that step.
 const TELEPORT_SPEED: f32 = 150.0;
+/// Slowest a body moving through the water churns foam behind it, m/s.
+const WADE_FOAM_SPEED: f32 = 0.4;
+/// A body's wake foam per m/s of its speed through the water, per 1/30 s: a hull's is 0.07
+/// ([`crate::WaterInteractor`] with `wake` 1).
+const BODY_WAKE_FOAM: f32 = 0.04;
 /// A position unchanged this long, seconds, is standing still (not just between frames).
 const STILL_AFTER_S: f32 = 0.25;
 /// Strouhal number of a body in the water: it sheds a pair of eddies every 1/0.2 = 5 body
@@ -442,8 +447,18 @@ pub fn disturbance_system(
                 radius: r,
                 depth: depth.clamp(-0.05, 0.08),
                 // Slapping in churns up a little white; dragging through the water only a
-                // thin film over time (a sheet held in a stream all day stays a sheet).
-                foam: ((plunge - 0.8).max(0.0) * 0.25 + sweep * 0.06 * dt).min(0.6) * solid,
+                // thin film over time (a sheet held in a stream all day stays a sheet). A
+                // body wading or swimming through (a push as heavy as the water under it)
+                // churns a foamy wake behind it as a hull does, smaller (playtest
+                // 2026-11-01 item 7).
+                foam: ((plunge - 0.8).max(0.0) * 0.25
+                    + if solid >= 1.0 && sweep > WADE_FOAM_SPEED {
+                        (sweep * BODY_WAKE_FOAM).min(0.3) * dt * 30.0
+                    } else {
+                        sweep * 0.06 * dt
+                    })
+                .min(0.6)
+                    * solid,
                 stir: (sweep > 0.1).then_some(flat.clamp_length_max(4.0) * 0.5 * solid),
                 spin: 0.0,
                 press: 0.0,
