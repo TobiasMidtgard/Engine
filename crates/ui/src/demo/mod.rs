@@ -200,10 +200,23 @@ pub struct UiDemo;
 pub fn spawn_demo(commands: &mut Commands, origin: DVec3) {
     commands.queue(move |world: &mut World| {
         setup_data(world);
-        market::spawn_market(world, origin);
-        // Over Old Brannoc's stall, the middle one, in view of the tour's UI stops.
-        let (stall, _) = market::stall_place(2);
-        crate::hud::spawn_world_markers(world, origin, stall + DVec3::Y * 3.4);
-        world.spawn((UiDemo, Transform::from_translation(origin)));
+        // Stands at once, so it follows world shifts while the textures bake on a worker.
+        let demo = world
+            .spawn((UiDemo, Transform::from_translation(origin)))
+            .id();
+        engine_core::off_frame::off_frame(
+            world,
+            "ui market textures",
+            market::bake_market,
+            move |world, textures| {
+                let Some(origin) = world.get::<Transform>(demo).map(|t| t.translation) else {
+                    return;
+                };
+                market::place_market(world, origin, textures);
+                // Over Old Brannoc's stall, the middle one, in view of the tour's UI stops.
+                let (stall, _) = market::stall_place(2);
+                crate::hud::spawn_world_markers(world, origin, stall + DVec3::Y * 3.4);
+            },
+        );
     });
 }

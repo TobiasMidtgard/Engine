@@ -13,14 +13,14 @@ use engine_world::Ground;
 
 use super::art::mesh::{beam, bevel_box, icosphere, lathe, tube};
 use super::art::props::{barrel_mesh, sack_mesh};
-use super::art::stall::{Goods, StallMats, spawn_stall};
+use super::art::stall::{self, Goods, StallMats};
 use super::art::textures::{
     CREAM, HeightGrid, canvas_texel, chalkboard_texel, cobble_texel, linen_texel,
     parchment_map_texel, rock_texel, wicker_texel, wood_texel,
 };
 use super::art::{
-    TexSet, add_mat, add_mesh, bake_set, fix_winding, hex, lamp, moved, noise, rgba, sat, sstep,
-    textured, tint, vtx,
+    TexImages, TexSet, add_mat, add_mesh, add_set, bake_images, fix_winding, hex, lamp, moved,
+    noise, rgba, sat, sstep, textured, tint, vtx,
 };
 
 /// Stalls stand on a ring this far from the square's middle, facing it.
@@ -78,20 +78,70 @@ struct Mats {
     cobble: Handle<StandardMaterial>,
     stone: Handle<StandardMaterial>,
     parchment: Handle<StandardMaterial>,
+    /// The chalkboard's menu and each stall's striped canvas, in [`STALLS`] order.
+    chalkboard: TexSet,
+    canvases: Vec<TexSet>,
+}
+
+/// The market's baked textures and stall meshes, made without the world so they can be made
+/// on a worker: most of the market's load time.
+pub struct MarketBake {
+    wood: TexImages,
+    rock: TexImages,
+    linen: TexImages,
+    wicker: TexImages,
+    cobble: TexImages,
+    parchment: TexImages,
+    burlap_canvas: TexImages,
+    chalkboard: TexImages,
+    canvases: Vec<TexImages>,
+    stalls: Vec<stall::Parts>,
+}
+
+/// Bake every texture and stall the market uses (see [`place_market`]).
+pub fn bake_market() -> MarketBake {
+    MarketBake {
+        stalls: STALLS
+            .into_iter()
+            .enumerate()
+            .map(|(i, (goods, _))| stall::build_stall(goods, 40 + i as u64))
+            .collect(),
+        wood: bake_images(512, 1024, 0.5, true, 1.0, wood_texel),
+        rock: bake_images(512, 512, 1.6, true, 1.6, rock_texel),
+        linen: bake_images(512, 512, 0.5, true, 1.0, linen_texel),
+        wicker: bake_images(512, 512, 0.4, true, 1.0, wicker_texel),
+        cobble: bake_images(1024, 1024, 2.0, true, 1.0, cobble_texel),
+        parchment: parchment(),
+        burlap_canvas: bake_images(512, 512, 1.0, true, 1.0, |u, v| {
+            canvas_texel(u * 0.5 + 0.25, v * 0.5 + 0.2, CREAM, CREAM, 1.0, 9)
+        }),
+        chalkboard: bake_images(512, 800, 1.0, false, 1.0, chalkboard_texel),
+        canvases: STALLS
+            .into_iter()
+            .enumerate()
+            .map(|(i, (_, stripe))| {
+                bake_images(1024, 1024, 3.4, false, 1.0, move |u, v| {
+                    canvas_texel(u, v, CREAM, hex(stripe) * 0.85, 9.0, i as u32)
+                })
+            })
+            .collect(),
+    }
 }
 
 impl Mats {
-    fn new(world: &mut World) -> Self {
-        let wood = bake_set(world, 512, 1024, 0.5, true, 1.0, wood_texel);
-        let rock = bake_set(world, 512, 512, 1.6, true, 1.6, rock_texel);
-        let linen = bake_set(world, 512, 512, 0.5, true, 1.0, linen_texel);
-        let wicker = bake_set(world, 512, 512, 0.4, true, 1.0, wicker_texel);
-        let cobble = bake_set(world, 1024, 1024, 2.0, true, 1.0, cobble_texel);
-        let parchment = parchment(world);
-        let burlap_canvas = bake_set(world, 512, 512, 1.0, true, 1.0, |u, v| {
-            canvas_texel(u * 0.5 + 0.25, v * 0.5 + 0.2, CREAM, CREAM, 1.0, 9)
-        });
+    fn new(world: &mut World, tex: &mut MarketBake) -> Self {
+        let wood = add_set(world, std::mem::take(&mut tex.wood));
+        let rock = add_set(world, std::mem::take(&mut tex.rock));
+        let linen = add_set(world, std::mem::take(&mut tex.linen));
+        let wicker = add_set(world, std::mem::take(&mut tex.wicker));
+        let cobble = add_set(world, std::mem::take(&mut tex.cobble));
+        let parchment = add_set(world, std::mem::take(&mut tex.parchment));
+        let burlap_canvas = add_set(world, std::mem::take(&mut tex.burlap_canvas));
+        let chalkboard = add_set(world, std::mem::take(&mut tex.chalkboard));
+        let canvases = tex.canvases.drain(..).map(|t| add_set(world, t)).collect();
         Self {
+            chalkboard,
+            canvases,
             wood: add_mat(world, textured(&wood, 1.0)),
             iron: add_mat(
                 world,
@@ -198,10 +248,10 @@ impl Mats {
 
 /// The map on the table: Veyra's northern highlands around Hollow Reach, from the same
 /// terrain the star map draws.
-fn parchment(world: &mut World) -> TexSet {
+fn parchment() -> TexImages {
     let map = crate::map::demo_map();
     let Some((_, veyra)) = map.planet("veyra") else {
-        return bake_set(world, 8, 8, 1.0, false, 0.0, |u, v| {
+        return bake_images(8, 8, 1.0, false, 0.0, |u, v| {
             parchment_map_texel(u, v, &HeightGrid::sample(2, 2, |_, _| 0.0), 0.5, 0.1, &[])
         });
     };
@@ -224,25 +274,30 @@ fn parchment(world: &mut World) -> TexSet {
         })
         .collect();
     let sea = look.shape[1];
-    bake_set(world, 1024, 832, 1.0, false, 1.0, move |u, v| {
+    bake_images(1024, 832, 1.0, false, 1.0, move |u, v| {
         parchment_map_texel(u, v, &land, sea, 0.035, &marks)
     })
 }
 
-/// Spawns the market around `origin` (the square's middle, at ground level).
+/// Spawns the market around `origin` (the square's middle, at ground level), baking its
+/// textures here.
 pub fn spawn_market(world: &mut World, origin: DVec3) {
+    place_market(world, origin, bake_market());
+}
+
+/// Spawns the market around `origin` with the art from [`bake_market`].
+pub fn place_market(world: &mut World, origin: DVec3, mut tex: MarketBake) {
     let ground = world.get_resource::<Ground>().cloned().unwrap_or_default();
     let ground_y = |p: DVec3| ground.height(p).unwrap_or(origin.y);
-    let mats = Mats::new(world);
+    let mats = Mats::new(world, &mut tex);
+    let mut stalls = std::mem::take(&mut tex.stalls).into_iter();
     square(world, &mats, origin, &ground_y);
     let mut fronts = Vec::new();
-    for (i, (goods, stripe)) in STALLS.into_iter().enumerate() {
+    for i in 0..STALLS.len() {
         let (p, yaw) = stall_place(i);
         let at = origin + p;
         let y = ground_y(at);
-        let set = bake_set(world, 1024, 1024, 3.4, false, 1.0, move |u, v| {
-            canvas_texel(u, v, CREAM, hex(stripe) * 0.85, 9.0, i as u32)
-        });
+        let set = mats.canvases[i];
         let canvas = add_mat(
             world,
             StandardMaterial {
@@ -254,7 +309,8 @@ pub fn spawn_market(world: &mut World, origin: DVec3) {
         );
         let t = Transform::from_translation(DVec3::new(at.x, y, at.z))
             .with_rotation(Quat::from_rotation_y(yaw));
-        for e in spawn_stall(world, &mats.stall(canvas), t, goods, 40 + i as u64) {
+        let parts = stalls.next().expect("a stall for every place");
+        for e in stall::place_stall(world, &mats.stall(canvas), t, parts) {
             world.entity_mut(e).insert(MarketArt);
         }
         // The front beam's top above each corner post, for the bunting.
@@ -635,7 +691,7 @@ fn chalkboard(world: &mut World, mats: &Mats, at: DVec3, yaw: f32) {
         0.004,
         5,
     ));
-    let set = bake_set(world, 512, 800, 1.0, false, 1.0, chalkboard_texel);
+    let set = mats.chalkboard;
     let board = add_mat(world, textured(&set, 1.0));
     let t = Transform::from_translation(at).with_rotation(Quat::from_rotation_y(yaw));
     spawn(world, wood, mats.wood, t);

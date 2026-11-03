@@ -151,6 +151,14 @@ fn unorm8(v: f32) -> u8 {
     (sat(v) * 255.0 + 0.5) as u8
 }
 
+/// A baked texture set's images, before they are added to the world.
+#[derive(Default)]
+pub struct TexImages {
+    pub albedo: Image,
+    pub normal: Image,
+    pub orm: Image,
+}
+
 /// Build a texture set `w`×`h` texels covering `size_m` meters horizontally; `f(u, v)` gets
 /// texel coordinates in `[0, 1)`. Normals come from the height (meters), wrapping at the
 /// edges when `tile` is set.
@@ -163,6 +171,27 @@ pub fn bake_set(
     normal_strength: f32,
     f: impl Fn(f32, f32) -> Texel + Sync,
 ) -> TexSet {
+    add_set(world, bake_images(w, h, size_m, tile, normal_strength, f))
+}
+
+/// Add a baked set's images to the world.
+pub fn add_set(world: &mut World, images: TexImages) -> TexSet {
+    TexSet {
+        albedo: add_image(world, images.albedo),
+        normal: add_image(world, images.normal),
+        orm: add_image(world, images.orm),
+    }
+}
+
+/// [`bake_set`] without the world: the images only, so it can run on a worker.
+pub fn bake_images(
+    w: u32,
+    h: u32,
+    size_m: f32,
+    tile: bool,
+    normal_strength: f32,
+    f: impl Fn(f32, f32) -> Texel + Sync,
+) -> TexImages {
     let texels: Vec<Vec<Texel>> = par_map(h as usize, |y| {
         (0..w)
             .map(|x| f((x as f32 + 0.5) / w as f32, (y as f32 + 0.5) / h as f32))
@@ -201,10 +230,10 @@ pub fn bake_set(
             orm.extend_from_slice(&[unorm8(t.ao), unorm8(t.rough), unorm8(t.metal), 255]);
         }
     }
-    TexSet {
-        albedo: add_image(world, Image::new(w, h, albedo, true)),
-        normal: add_image(world, Image::new(w, h, normal, false)),
-        orm: add_image(world, Image::new(w, h, orm, false)),
+    TexImages {
+        albedo: Image::new(w, h, albedo, true),
+        normal: Image::new(w, h, normal, false),
+        orm: Image::new(w, h, orm, false),
     }
 }
 
