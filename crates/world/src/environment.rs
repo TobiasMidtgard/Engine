@@ -9,6 +9,7 @@
 //! | [`FarCloudLayer`] | `engine_space` (cloud tops seen from high up) | weather (fades its volumetric clouds where the far layer takes over) |
 //! | [`CloudCoverMap`] | `engine_weather` (its cloud map's coverage) | space (the cloud shell's tops over the weather's window) |
 //! | [`CloudCoverField`] | `engine_space` (the planet's cloud systems around the focus) | weather (its clouds' cover away from the player) |
+//! | [`SunSource`]     | `engine_space` (the real star, when it follows the world clock) | weather (aims its sun and sky lights from it) |
 //!
 //! Fields cover a window around the [`crate::FocusPoints`] (the player/camera) and
 //! re-center as it moves. Outside the window, sampling falls back to the global
@@ -516,4 +517,19 @@ mod wind_override_tests {
         assert_eq!(WindOverride::step(0.0, false), 0.0);
         assert_eq!(WindOverride::step(31.0, true), 31.0);
     }
+}
+
+/// The real star's direction this frame: unit vector in world space from the ground toward the
+/// star, so the sun the weather lights the world with is the star the sky shows, also after
+/// the world re-anchors on another body or re-homes far from the valley
+/// (engine-design/one-sun.md, playtest 3 item 36).
+///
+/// The writer (the space module, which already finds the star for its own light) inserts it
+/// every frame it knows the star, and removes it when it doesn't. The weather keeps its clock
+/// (hours, days, the moon) either way; with the resource it aims the sun and its sky lights
+/// from `direction`, without it from its own formula for the home spot.
+#[derive(Resource, Debug, Clone, Copy, PartialEq)]
+pub struct SunSource {
+    /// Unit vector toward the star, world space.
+    pub direction: Vec3,
 }
