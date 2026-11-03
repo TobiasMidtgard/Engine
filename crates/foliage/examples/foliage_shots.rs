@@ -8,11 +8,15 @@
 //! `FOLIAGE_DEBUG_VIEW=sky|reflections|gi|normals|cascades` shows a renderer debug view instead
 //! (on the ground and rocks, `cascades` shows where the sun reaches, tinted by shadow cascade).
 //!
+//! `FOLIAGE_CENSUS=1` also prints, for each shot, the plant parts' triangles by level of detail:
+//! in view (a cone a little wider than the camera's) and casting shadows (within 350 m).
+//!
 //! Grows the showcase forest and mushroom cave, then photographs them from the demo's
 //! viewpoints: the old forest, the trail, the clear-cut, a tree mid-fall and after it lands, the
 //! spring, the burn scar, the dry ridge, the clearing through the year (spring leaves, autumn
 //! color, leaf fall, bare winter), the clearing ten years later, and the cave.
 
+use engine_assets::{Assets, Handle};
 use engine_core::prelude::*;
 use engine_core::time::TimeSource;
 use engine_foliage::{
@@ -62,6 +66,127 @@ fn shot(app: &mut App, out: &str, name: &str, eye: DVec3, target: DVec3, hour: f
         .request(path.clone());
     app.update();
     println!("saved {path}");
+    if std::env::var("FOLIAGE_CENSUS").is_ok_and(|v| v == "1") {
+        census(app, name);
+    }
+}
+
+/// Plant parts' triangles by level of detail, in view and casting shadows.
+fn census(app: &mut App, name: &str) {
+    use engine_foliage::assets::FoliageVisuals;
+    use engine_foliage::shadow_standin::ShadowStandIn;
+    use engine_foliage::visuals::PlantPart;
+    use std::collections::BTreeMap;
+    let mut level = std::collections::HashMap::new();
+    for vis in app
+        .world
+        .resource::<FoliageVisuals>()
+        .species
+        .iter()
+        .flatten()
+    {
+        for v in &vis.variants {
+            let mut put = |name: &'static str, m: &Option<Handle<Mesh>>| {
+                if let Some(m) = m {
+                    level.insert(m.index(), name);
+                }
+            };
+            put("3 hero", &v.foliage_hero);
+            put("4 near", &v.foliage);
+            put("4 near", &v.wood);
+            put("4 near", &v.base);
+            put("5 mid", &v.foliage_mid);
+            put("5 mid", &v.wood_mid);
+            put("6 far", &v.foliage_lod);
+            put("6 far", &v.wood_lod);
+            put("7 distant", &v.foliage_distant);
+            put("7 distant", &v.wood_distant);
+            put("2 sapling", &v.sapling_foliage);
+            put("2 sapling", &v.sapling_wood);
+            for (name, list) in [
+                ("4 near", &v.foliage_thin),
+                ("5 mid", &v.foliage_mid_thin),
+                ("6 far", &v.foliage_lod_thin),
+                ("7 distant", &v.foliage_distant_thin),
+                ("2 sapling", &v.sapling_foliage_thin),
+            ] {
+                for m in list {
+                    level.insert(m.index(), name);
+                }
+            }
+        }
+    }
+    let (eye, forward, half_fov) = {
+        let mut q = app.world.query::<(&Camera, &GlobalTransform)>();
+        let (cam, gt) = q.iter(&app.world).next().expect("a camera");
+        let fov = match cam.projection {
+            Projection::Perspective { fov_y_deg, .. } => fov_y_deg,
+            _ => 60.0,
+        };
+        // 16:9, a little wider than the view.
+        let half = (fov.to_radians() * 0.5).tan() * 16.0 / 9.0;
+        (gt.translation(), gt.forward(), half.atan() * 1.15)
+    };
+    let mut view: BTreeMap<&str, (u32, u64)> = BTreeMap::new();
+    let mut cast: BTreeMap<&str, (u32, u64)> = BTreeMap::new();
+    let mut q = app.world.query::<(
+        &MeshRenderer,
+        &GlobalTransform,
+        Option<&PlantPart>,
+        Option<&ShadowStandIn>,
+    )>();
+    let meshes = app.world.resource::<Assets<Mesh>>();
+    for (r, gt, part, standin) in q.iter(&app.world) {
+        if part.is_none() && standin.is_none() {
+            continue;
+        }
+        let MeshRef::Handle(h) = &r.mesh else {
+            continue;
+        };
+        let Some(mesh) = meshes.get(*h) else { continue };
+        let tris = mesh.triangle_count() as u64;
+        let lvl = level.get(&h.index()).copied().unwrap_or("8 other");
+        let to = gt.translation() - eye;
+        let d = to.length();
+        if r.visible && standin.is_none() {
+            let angle = (to.normalize_or_zero().dot(forward.as_dvec3()))
+                .clamp(-1.0, 1.0)
+                .acos();
+            let slack = (12.0 / d.max(1.0)).atan();
+            if angle as f32 <= half_fov + slack as f32 {
+                let e = view.entry(lvl).or_default();
+                e.0 += 1;
+                e.1 += tris;
+            }
+        }
+        if r.cast_shadows && d < 350.0 {
+            let e = cast.entry(lvl).or_default();
+            e.0 += 1;
+            e.1 += tris;
+        }
+    }
+    let show = |m: &BTreeMap<&str, (u32, u64)>| {
+        let total: u64 = m.values().map(|v| v.1).sum();
+        let parts: Vec<String> = m
+            .iter()
+            .map(|(k, v)| format!("{} {}: {:.2} M", v.0, &k[2..], v.1 as f64 / 1e6))
+            .collect();
+        format!("{:.2} M ({})", total as f64 / 1e6, parts.join(", "))
+    };
+    println!("census {name}: in view {}", show(&view));
+    println!("census {name}: casting {}", show(&cast));
+    let d = app.world.resource::<Diagnostics>();
+    let ms = |k: &str| d.get(k).unwrap_or(f64::NAN);
+    println!(
+        "census {name}: drawn {:.2} M triangles in {} draws; GPU {:.0} ms: shadows {:.0}, prepass {:.0}, scene: meshes {:.0}, scene: grass {:.0}",
+        ms("render.triangles") / 1e6,
+        ms("render.draw_calls"),
+        ms("render.gpu_ms"),
+        ms("render.gpu.shadows"),
+        ms("render.gpu.prepass"),
+        ms("render.gpu.scene: meshes"),
+        ms("render.gpu.scene: grass"),
+    );
 }
 
 /// How far the tree being felled leans from upright, radians (`None` once it has settled).

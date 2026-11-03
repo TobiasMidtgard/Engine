@@ -12,6 +12,11 @@ struct GrassOut {
     @location(7) glow: f32,
 };
 
+// On screen every blade drawn is kept (for `grass_blade`).
+fn grass_pass_keep(f: GrassField, d: f32) -> f32 {
+    return 1.0;
+}
+
 // Snow depth (m) on the ground at camera-relative `rel` (for `grass_blade`).
 fn grass_snow_depth(f: GrassField, rel: vec3<f32>) -> f32 {
     // The ground's snow is stored up to SURFACE_SNOW_SCALE_M; deeper snow reads as full, so

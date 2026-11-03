@@ -434,27 +434,48 @@ fn shadow_source() -> String {
     .join("\n")
 }
 
-/// Fraction of blades drawn at distance `d` (must match `grass_lod` in the shader).
+/// Fraction of blades drawn at distance `d` (must match `grass_lod` in the shader): all of them
+/// out to `full`, then falling with the square of the distance, as the ground a pixel covers
+/// grows, so the blades a pixel holds stay about the same out to the draw distance (Ghost of
+/// Tsushima's grass and Unreal's foliage cull by screen size the same way); faded out over the
+/// last 30% of `far`.
 fn lod_factor(d: f32, full: f32, far: f32) -> f32 {
-    let thin = (full / d.max(1e-3)).powf(1.5).min(1.0);
+    let r = full / d.max(1e-3);
+    let thin = (r * r).min(1.0);
     let t = ((d - 0.7 * far) / (0.3 * far)).clamp(0.0, 1.0);
     thin * (1.0 - t * t * (3.0 - 2.0 * t))
 }
 
-/// Full density out to this distance.
+/// Full density out to this distance. Past it the survivors widen, and seen at a glancing
+/// angle a few meters of meadow still cover the ground.
 fn full_density_distance(draw_distance: f32) -> f32 {
-    (draw_distance * 0.2).clamp(4.0, 20.0)
+    (draw_distance * 0.15).clamp(4.0, 12.0)
 }
 
-/// Quads per blade at distance `d`: enough near the camera for a smooth arch.
+/// Of the blades drawn, the fraction that also cast shadows at distance `d` (must match
+/// `grass_pass_keep` in the shadow shader): all of them out to 40% of the shadow distance,
+/// fading out by the shadow distance, so the meadow's shadows thin out instead of ending at a
+/// line.
+fn shadow_keep(d: f32, shadow_distance: f32) -> f32 {
+    let t = ((d - 0.4 * shadow_distance) / (0.6 * shadow_distance).max(1e-3)).clamp(0.0, 1.0);
+    1.0 - t * t * (3.0 - 2.0 * t)
+}
+
+/// Quads per blade at distance `d`: enough near the camera for a smooth arch (Ghost of
+/// Tsushima draws 7 near and 3 far).
 fn segments_at(d: f32) -> u32 {
     match d {
-        d if d < 6.0 => 6,
-        d if d < 14.0 => 4,
-        d if d < 28.0 => 3,
-        d if d < 45.0 => 2,
+        d if d < 5.0 => 6,
+        d if d < 12.0 => 4,
+        d if d < 24.0 => 3,
+        d if d < 40.0 => 2,
         _ => 1,
     }
+}
+
+/// Quads per blade in the shadow maps, where the arch's curve hardly shows.
+fn shadow_segments_at(d: f32) -> u32 {
+    if d < 8.0 { 2 } else { 1 }
 }
 
 #[repr(C)]
@@ -1098,11 +1119,20 @@ impl RenderFeature for GrassFeature {
                         self.stats.instances += count;
                         self.stats.triangles += count as u64 * (2 * segments as u64 - 1);
                     }
-                    for c in in_cascade {
-                        self.shadow_draws[c].push(Draw {
-                            segments: segments.min(2),
-                            ..draw
-                        });
+                    let shadow_count = ((max_blades as f32)
+                        * lod_factor(d, full, far)
+                        * shadow_keep(d, style.shadow_distance)
+                        * b[2])
+                        .ceil()
+                        .min(count as f32) as u32;
+                    if shadow_count > 0 {
+                        for c in in_cascade {
+                            self.shadow_draws[c].push(Draw {
+                                segments: shadow_segments_at(d),
+                                count: shadow_count,
+                                ..draw
+                            });
+                        }
                     }
                     drew = true;
                 }
@@ -1137,7 +1167,12 @@ impl RenderFeature for GrassFeature {
                     style.dry_color[2],
                     style.wind_response.max(0.0),
                 ],
-                lod: [full, far, style.lying.clamp(0.0, 1.0), 0.0],
+                lod: [
+                    full,
+                    far,
+                    style.lying.clamp(0.0, 1.0),
+                    style.shadow_distance.max(0.0),
+                ],
                 clump: [
                     style.clump_size.max(0.0),
                     style.clump_pull.clamp(0.0, 0.95),

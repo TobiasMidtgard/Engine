@@ -10,8 +10,12 @@
 //! russet), `marsh` (tall, upright, dark), `alien` (a low-gravity world's violet grass under a
 //! paler sky), `path` (a footpath worn through the meadow: `GrassWear`), `snow` (the meadow
 //! under 12 cm of fresh snow), `herbs` and `litter` (a forest floor's shade herbs and fallen
-//! leaves on humus; `herbs_close` and `litter_close` from knee height). Each biome is its own field 1 km from the others, on ground of
-//! its own color.
+//! leaves on humus; `herbs_close` and `litter_close` from knee height), `field` (the showcase's
+//! meadow: drawn out to 120 m, shadows to 22 m, standing in it and looking out over it). Each
+//! biome is its own field 1 km from the others, on ground of its own color.
+//!
+//! `LOOKDEV_PERF=1` (with `ENGINE_PROFILE=1`) also prints, for each shot, what the grass costs:
+//! the GPU passes and triangles with the grass drawn and without it (`grass_density` 0).
 
 use engine_core::prelude::*;
 use engine_core::time::TimeSource;
@@ -43,13 +47,27 @@ fn biomes() -> Vec<Biome> {
     add("snow", GrassStyle::meadow());
     add("herbs", GrassStyle::forest_herbs());
     add("litter", GrassStyle::leaf_litter());
+    // games/showcase's `meadow_grass`.
+    add(
+        "field",
+        GrassStyle {
+            height: 0.36,
+            height_variation: 0.55,
+            lush_color: [0.09, 0.18, 0.042],
+            dry_color: [0.24, 0.21, 0.085],
+            draw_distance: 120.0,
+            shadow_distance: 22.0,
+            ..GrassStyle::meadow()
+        },
+    );
     out
 }
 
 /// Patches: thicker and fresher in hollows, thinner and drier on rises.
-fn field(style: GrassStyle) -> GrassField {
-    GrassField::flat(160.0, 160.0)
-        .sample([161, 161], |x, z| {
+fn field(style: GrassStyle, size: f32) -> GrassField {
+    let points = size as u32 + 1;
+    GrassField::flat(size, size)
+        .sample([points, points], |x, z| {
             let n =
                 engine_core::math::noise::fbm2(x as f64 * 0.045, z as f64 * 0.045, 11, 3, 2.0, 0.5);
             let density = (0.75 + 0.35 * n).clamp(0.15, 1.0);
@@ -117,6 +135,56 @@ fn shot(app: &mut App, out: &str, name: &str, eye: DVec3, target: DVec3, to_sun:
     app.update();
     app.update();
     println!("saved {path}");
+    if std::env::var("LOOKDEV_PERF").is_ok_and(|v| v == "1") {
+        perf(app, name);
+    }
+}
+
+/// The GPU passes (ms, averaged over frames) and triangles, with and without the grass.
+fn perf(app: &mut App, name: &str) {
+    let measure = |app: &mut App| {
+        app.update_n(8);
+        let mut sum = std::collections::BTreeMap::<String, f64>::new();
+        let frames = 24;
+        for _ in 0..frames {
+            app.update();
+            let d = app.world.resource::<Diagnostics>();
+            for (k, v) in &d.metrics {
+                if k.starts_with("render.gpu") || k == "render.triangles" {
+                    *sum.entry(k.clone()).or_default() += v / frames as f64;
+                }
+            }
+        }
+        sum
+    };
+    let with = measure(app);
+    let density = app.world.resource::<RenderSettings>().grass_density;
+    app.world.resource_mut::<RenderSettings>().grass_density = 0.0;
+    let without = measure(app);
+    app.world.resource_mut::<RenderSettings>().grass_density = density;
+    let get =
+        |m: &std::collections::BTreeMap<String, f64>, k: &str| m.get(k).copied().unwrap_or(0.0);
+    let line: Vec<String> = [
+        "render.gpu_ms",
+        "render.gpu.shadows",
+        "render.gpu.prepass",
+        "render.gpu.scene: grass",
+    ]
+    .iter()
+    .map(|k| {
+        format!(
+            "{} {:.2}",
+            k.trim_start_matches("render.gpu")
+                .trim_start_matches(['.', '_']),
+            get(&with, k) - get(&without, k)
+        )
+    })
+    .collect();
+    println!(
+        "perf {name}: grass costs {} ms; {:.2} M triangles",
+        line.join(", "),
+        (get(&with, "render.triangles") - get(&without, "render.triangles")) / 1e6
+    );
 }
 
 fn main() {
@@ -169,7 +237,10 @@ fn main() {
         ));
         let grass = app
             .world
-            .spawn((Transform::from_translation(at), field(b.style)))
+            .spawn((
+                Transform::from_translation(at),
+                field(b.style, if b.name == "field" { 300.0 } else { 160.0 }),
+            ))
             .id();
         if b.name == "path" {
             app.world.entity_mut(grass).insert(footpath());
@@ -278,6 +349,19 @@ fn main() {
                     side_sun,
                 );
                 app.world.remove_resource::<engine_world::SurfaceLayers>();
+            }
+        } else if b.name == "field" {
+            if wanted("field") {
+                // Standing in the meadow's middle, looking out over it toward the horizon.
+                let eye = o + DVec3::new(0.0, 1.7, 0.0);
+                shot(
+                    &mut app,
+                    &out,
+                    "field",
+                    eye,
+                    eye + DVec3::new(10.0, -0.9, -14.0),
+                    side_sun,
+                );
             }
         } else if b.name == "path" {
             if wanted("path") {

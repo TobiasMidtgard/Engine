@@ -15,6 +15,12 @@ fn grass_snow_depth(f: GrassField, rel: vec3<f32>) -> f32 {
     return f.look.w;
 }
 
+// Of the blades drawn, those that cast shadows: all nearby, thinning out toward the shadow
+// distance (must match `shadow_keep` in grass.rs).
+fn grass_pass_keep(f: GrassField, d: f32) -> f32 {
+    return 1.0 - smoothstep(0.4 * f.lod.w, f.lod.w, d);
+}
+
 @vertex
 fn vs_shadow(@builtin(instance_index) instance: u32, @builtin(vertex_index) vertex: u32) -> @builtin(position) vec4<f32> {
     let b = grass_blade(instance, vertex, shadow_view.time.x, shadow_view.camera_frac.xyz);

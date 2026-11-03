@@ -1,6 +1,9 @@
 // Grass blades, shared by the scene and prepass shader (grass.wgsl) and the shadow shader
 // (grass_shadow.wgsl). Requires lib_types.
 //
+// Each shader including this one also defines `grass_pass_keep` (the fraction of drawn blades its
+// pass keeps: all on screen, fewer in the shadow maps further out).
+//
 // Every blade is generated in the vertex shader from its tile's grid coordinates and its index,
 // so the same blade grows in the same spot every frame and nothing per blade is stored. Blades
 // grow in clumps (after Sucker Punch's grass in Ghost of Tsushima, GDC 2021): the nearest of a
@@ -43,7 +46,7 @@ struct GrassField {
     shape: vec4<f32>,   // blade height (m), height variation, root width (m), bend
     lush: vec4<f32>,    // fresh albedo (linear), w: leaf amount (0 blades .. 1 leaves)
     dry: vec4<f32>,     // dry albedo (linear), wind response
-    lod: vec4<f32>,     // full-density distance (m), draw distance (m), lying flat (0..1), unused
+    lod: vec4<f32>,     // full-density distance (m), draw distance (m), lying flat (0..1), shadow distance (m)
     clump: vec4<f32>,   // clump size (m, 0 = none), pull to center, fan out, height spread
     look: vec4<f32>,    // clump color spread, droop, gloss, snow depth by the camera (m)
     tip: vec4<f32>,     // tip tint (rgb, x the blade's color), w: a leaf's stalk (fraction of its length)
@@ -156,7 +159,8 @@ fn grass_wear_at(f: GrassField, p: vec2<f32>) -> f32 {
 fn grass_lod(f: GrassField, d: f32) -> f32 {
     let full = f.lod.x;
     let far = f.lod.y;
-    return min(1.0, pow(full / max(d, 1e-3), 1.5)) * (1.0 - smoothstep(0.7 * far, far, d));
+    let r = full / max(d, 1e-3);
+    return min(1.0, r * r) * (1.0 - smoothstep(0.7 * far, far, d));
 }
 
 // How far the wind pushes a blade's tip sideways, per meter of blade, at tiling position `p`
@@ -204,6 +208,13 @@ fn grass_blade(instance: u32, vertex: u32, t: f32, tiling: vec3<f32>) -> Blade {
     let r0 = grass_random(key, index, f.grid.w);
     let r1 = grass_random(key, index, f.grid.w ^ 0x9e3779b9u);
     var local = tile.corner + r0.xy * GRASS_TILE;
+    let rank = (f32(index) + 0.5) / f32(tile.blades);
+    // A blade thinned out by distance leaves before the costly part (its clump, the maps): the
+    // camera is no nearer than across the field's plane, less what the clump's pull can move it.
+    let flat_rel = f.origin.xyz + f.axis_x.xyz * local.x + f.axis_z.xyz * local.y;
+    let level = flat_rel - f.axis_y.xyz * dot(flat_rel, f.axis_y.xyz);
+    let nearest = max(length(level) - 2.0 * f.clump.x, 0.0);
+    if (rank >= grass_lod(f, nearest) * grass_pass_keep(f, nearest)) { return out; }
     // The clump: blades crowd in toward its center.
     var clump: GrassClump;
     clump.center = local;
@@ -228,8 +239,7 @@ fn grass_blade(instance: u32, vertex: u32, t: f32, tiling: vec3<f32>) -> Blade {
     // Worn ground: the blades trodden flat first, then fewer of them, none on a bare path.
     let worn = grass_wear_at(f, local);
     let trodden = smoothstep(0.03, 0.5, worn);
-    let keep = m.y * lod * (1.0 - smoothstep(0.2, 0.95, worn));
-    let rank = (f32(index) + 0.5) / f32(tile.blades);
+    let keep = m.y * lod * grass_pass_keep(f, d) * (1.0 - smoothstep(0.2, 0.95, worn));
     if (rank >= keep) { return out; }
     // Shrink into the ground just before being thinned out, and at thin edges of the meadow.
     let fade = saturate((keep - rank) * 10.0);
@@ -247,7 +257,7 @@ fn grass_blade(instance: u32, vertex: u32, t: f32, tiling: vec3<f32>) -> Blade {
     let leaf = f.lush.w;
     let lying = f.lod.z;
     // Thinned out, the survivors widen to keep the cover (leaves less: they'd turn into plates).
-    let width = f.shape.z * (0.75 + 0.5 * r1.x) * clamp(inverseSqrt(max(lod, 1e-3)), 1.0, mix(3.0, 1.5, leaf));
+    let width = f.shape.z * (0.75 + 0.5 * r1.x) * clamp(pow(max(lod, 1e-3), -0.6), 1.0, mix(4.0, 1.5, leaf));
 
     // Blade frame: facing its own way, or fanning out from its clump's center; leaning over
     // toward it, the clump's outer blades the most.
