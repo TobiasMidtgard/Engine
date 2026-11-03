@@ -216,21 +216,38 @@ pub(crate) fn build_jetty(plan: &[(Piece, Mat4)]) -> Vec<Part> {
 
 /// Build `jetty`: deck slots, pile pairs to the bottom, cleats and a swim ladder at the end.
 pub fn spawn_jetty(commands: &mut Commands, jetty: &Jetty) -> Entity {
+    spawn_jetty_made(
+        commands,
+        jetty.shore,
+        jetty.rotation(),
+        jetty.length,
+        super::art::jetty(jetty_plan(jetty)),
+    )
+}
+
+/// A jetty from its shore end, turn, length and its made `parts` ([`spawn_jetty`]).
+pub(crate) fn spawn_jetty_made(
+    commands: &mut Commands,
+    shore: DVec3,
+    rotation: Quat,
+    length: f32,
+    parts: Vec<Part>,
+) -> Entity {
     let e = commands
         .spawn((
             Name::new("Jetty"),
-            Transform::from_translation(jetty.shore).with_rotation(jetty.rotation()),
+            Transform::from_translation(shore).with_rotation(rotation),
             // The deck stands over the wet band at the shore: keep it out of the floor.
             crate::shore::ShoreCover {
                 min: [-0.3, -POST_ACROSS],
-                max: [jetty.length, POST_ACROSS],
+                max: [length, POST_ACROSS],
             },
             // Solid as drawn (deck, piles, cleats, ladder): physics fits the triangles once
             // the merged parts' meshes are in.
             FitCollider::new(Fit::Mesh),
         ))
         .id();
-    add_parts(commands, e, super::art::jetty(jetty_plan(jetty)));
+    add_parts(commands, e, parts);
     e
 }
 

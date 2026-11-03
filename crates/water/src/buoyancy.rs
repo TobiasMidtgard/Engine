@@ -449,6 +449,7 @@ mod tests {
             waves: WaveSet::default(),
             mean_depth: 10.0,
             wind: Vec3::ZERO,
+            bed: None,
         });
         s
     }

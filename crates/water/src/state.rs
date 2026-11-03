@@ -26,6 +26,17 @@ pub struct BodyState {
     pub mean_depth: f32,
     /// Wind over the body at 10 m, m/s.
     pub wind: Vec3,
+    /// Its ground bed read once into a grid ([`BedCache`]), for `WaterBed::Ground` bodies:
+    /// `None` until it is made (the ground is asked directly meanwhile).
+    pub bed: Option<BedRef>,
+}
+
+/// A body's [`BedCache`] and the place it was read for (which follows world shifts).
+#[derive(Debug, Clone)]
+pub struct BedRef {
+    pub center: DVec3,
+    pub yaw: f32,
+    pub grid: Arc<BedCache>,
 }
 
 impl BodyState {
@@ -44,6 +55,15 @@ impl BodyState {
     /// Follow a world shift: the body moves and turns with the world, its waves keep their
     /// phase and turn with it, so the surface is the same where it was.
     pub fn shift(&mut self, s: &WorldShift) {
+        // The bed grid lies in the body's own frame, which a move or a turn about the vertical
+        // carries along; a tilt of the world's frame puts the ground at other heights.
+        if !keeps_level(s) {
+            self.bed = None;
+        }
+        if let Some(b) = &mut self.bed {
+            b.center = s.point(b.center);
+            b.yaw = crate::flow::turned_yaw(s, b.yaw);
+        }
         self.center = s.point(self.center);
         self.yaw = crate::flow::turned_yaw(s, self.yaw);
         self.wind = s.direction(self.wind);
@@ -51,6 +71,13 @@ impl BodyState {
             let d = s.direction(Vec3::new(w.dir.x, 0.0, w.dir.y));
             w.dir = Vec2::new(d.x, d.z).normalize_or(w.dir);
         }
+    }
+
+    /// A ground-bedded lake whose bed grid ([`BedCache`]) is still being read.
+    pub fn bed_pending(&self) -> bool {
+        matches!(self.body.bed, WaterBed::Ground)
+            && self.body.extent.bounding_radius().is_finite()
+            && self.bed.is_none()
     }
 
     pub fn contains(&self, p: DVec3) -> bool {
@@ -71,6 +98,9 @@ impl BodyState {
                 depth_m * t * t * (3.0 - 2.0 * t)
             }
             WaterBed::Ground => {
+                if let Some(rel) = self.bed.as_ref().and_then(|b| b.grid.at(local)) {
+                    return Some(-rel);
+                }
                 let probe = DVec3::new(p.x, self.center.y + 0.05, p.z);
                 match ground.height(probe) {
                     Some(h) => (self.center.y - h) as f32,
@@ -78,6 +108,108 @@ impl BodyState {
                 }
             }
         })
+    }
+}
+
+/// A lake's ground bed read once into a grid in the body's own frame, as Crest bakes its sea
+/// floor depth cache once from the scene instead of asking the terrain every frame: the
+/// depth under a point is then a lookup (about 0.05 µs) instead of a terrain sample (1-14 µs
+/// with the showcase's landscape), and every reader of the water asks for it many times a
+/// step (ripple grid reads, buoyancy probes, boat lift, shore wetness, reservoirs).
+#[derive(Debug, Clone)]
+pub struct BedCache {
+    /// Half the side of the square it covers round the body's center, m (local frame).
+    pub half: f32,
+    /// Spacing of its points, m.
+    pub cell: f32,
+    /// Points per side.
+    pub n: usize,
+    /// Ground height over the still surface at each point, m (negative under water); NaN where
+    /// the ground didn't answer.
+    pub rel: Vec<f32>,
+}
+
+/// Whether a world shift keeps the vertical where it was (a move, or a turn about it).
+pub fn keeps_level(s: &WorldShift) -> bool {
+    (s.rotation * DVec3::Y).y > 1.0 - 1e-9
+}
+
+/// Bed grids are never finer than this, m.
+pub const BED_CELL_M: f32 = 0.5;
+/// Nor more points per side than this (a 512² grid is 1 MB).
+pub const BED_POINTS: usize = 512;
+
+impl BedCache {
+    /// Read the ground under a body with its still surface at `center`, turned by `yaw`, over
+    /// `half` m round it (goes wide on the pool it is called from).
+    pub fn build(center: DVec3, yaw: f32, half: f32, ground: &Ground) -> Self {
+        let cell = (2.0 * half / (BED_POINTS - 1) as f32).max(BED_CELL_M);
+        let n = ((2.0 * half / cell).ceil() as usize + 1).max(2);
+        let mut rel = vec![f32::NAN; n * n];
+        let (s, c) = yaw.sin_cos();
+        engine_core::tasks::init_task_pools();
+        engine_core::tasks::par_chunks_mut(&mut rel, n * 8, |k, chunk| {
+            for (o, r) in chunk.iter_mut().enumerate() {
+                let idx = k * n * 8 + o;
+                let (lx, lz) = (
+                    -half + (idx % n) as f32 * cell,
+                    -half + (idx / n) as f32 * cell,
+                );
+                // The inverse of `BodyState::local`.
+                let (dx, dz) = (c * lx + s * lz, -s * lx + c * lz);
+                let probe = DVec3::new(center.x + dx as f64, center.y + 0.05, center.z + dz as f64);
+                *r = ground
+                    .height(probe)
+                    .map_or(f32::NAN, |h| (h - center.y) as f32);
+            }
+        });
+        Self { half, cell, n, rel }
+    }
+
+    /// Ground over the still surface at body-local `local`, bilinear; `None` outside the grid
+    /// or next to a point the ground didn't answer.
+    pub fn at(&self, local: Vec2) -> Option<f32> {
+        let g = (local + Vec2::splat(self.half)) / self.cell;
+        let last = (self.n - 1) as f32;
+        if !(g.x >= 0.0 && g.y >= 0.0 && g.x <= last && g.y <= last) {
+            return None;
+        }
+        let (i, j) = (
+            (g.x as usize).min(self.n - 2),
+            (g.y as usize).min(self.n - 2),
+        );
+        let (fx, fz) = (g.x - i as f32, g.y - j as f32);
+        let k = j * self.n + i;
+        let r = &self.rel;
+        let a = r[k] + (r[k + 1] - r[k]) * fx;
+        let b = r[k + self.n] + (r[k + self.n + 1] - r[k + self.n]) * fx;
+        let v = a + (b - a) * fz;
+        (!v.is_nan()).then_some(v)
+    }
+
+    /// Read the ground again at the points within `radius` m of body-local `local` (a terrain
+    /// edit).
+    pub fn reread(&mut self, center: DVec3, yaw: f32, local: Vec2, radius: f32, ground: &Ground) {
+        let (s, c) = yaw.sin_cos();
+        let lo = ((local - Vec2::splat(radius) + Vec2::splat(self.half)) / self.cell)
+            .floor()
+            .max(Vec2::ZERO);
+        let hi = ((local + Vec2::splat(radius) + Vec2::splat(self.half)) / self.cell)
+            .ceil()
+            .min(Vec2::splat((self.n - 1) as f32));
+        for j in lo.y as usize..=hi.y as usize {
+            for i in lo.x as usize..=hi.x as usize {
+                let (lx, lz) = (
+                    -self.half + i as f32 * self.cell,
+                    -self.half + j as f32 * self.cell,
+                );
+                let (dx, dz) = (c * lx + s * lz, -s * lx + c * lz);
+                let probe = DVec3::new(center.x + dx as f64, center.y + 0.05, center.z + dz as f64);
+                self.rel[j * self.n + i] = ground
+                    .height(probe)
+                    .map_or(f32::NAN, |h| (h - center.y) as f32);
+            }
+        }
     }
 }
 
@@ -273,5 +405,113 @@ pub struct WaterProvider(pub Arc<RwLock<WaterState>>);
 impl WaterQuery for WaterProvider {
     fn sample(&self, p: DVec3) -> Option<WaterSample> {
         self.0.read().sample(p)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use engine_world::{GroundQuery, GroundSample, SurfaceId};
+
+    /// A bowl with ripples in its floor, raised by `bump` round (20, 0, 5) within 3 m.
+    struct Basin(f64);
+
+    impl GroundQuery for Basin {
+        fn sample(&self, p: DVec3) -> Option<GroundSample> {
+            let (x, z) = (p.x - 100.0, p.z + 40.0);
+            let mut h = -8.0 + 0.004 * (x * x + z * z) + 0.3 * (x * 0.7).sin() * (z * 0.4).cos();
+            if (x - 20.0).hypot(z - 5.0) < 3.0 {
+                h += self.0;
+            }
+            Some(GroundSample {
+                height: h + 2.0,
+                normal: Vec3::Y,
+                surface: SurfaceId(3),
+            })
+        }
+    }
+
+    fn lake(ground: &Ground, yaw: f32) -> BodyState {
+        BodyState {
+            entity: Entity::from_raw_u32(7).unwrap(),
+            center: DVec3::new(100.0, 2.0, -40.0),
+            yaw,
+            body: WaterBody::lake(45.0),
+            waves: WaveSet::default(),
+            mean_depth: 5.0,
+            wind: Vec3::ZERO,
+            bed: Some(BedRef {
+                center: DVec3::new(100.0, 2.0, -40.0),
+                yaw,
+                grid: Arc::new(BedCache::build(
+                    DVec3::new(100.0, 2.0, -40.0),
+                    yaw,
+                    45.0,
+                    ground,
+                )),
+            }),
+        }
+    }
+
+    #[test]
+    fn a_lakes_bed_grid_reads_as_the_ground_does_and_takes_edits() {
+        let ground = Ground(Arc::new(Basin(0.0)));
+        for yaw in [0.0, 0.7] {
+            let mut b = lake(&ground, yaw);
+            let mut bare = b.clone();
+            bare.bed = None;
+            let mut worst = 0.0f32;
+            for k in 0..2000 {
+                let a = k as f64 * 2.399;
+                let r = 44.0 * ((k as f64 + 0.5) / 2000.0).sqrt();
+                let p = b.center + DVec3::new(a.cos() * r, 0.0, a.sin() * r);
+                let (cached, direct) = (b.depth_at(p, &ground), bare.depth_at(p, &ground));
+                worst = worst.max((cached.unwrap() - direct.unwrap()).abs());
+            }
+            // 0.5 m points over a floor that rises 0.3 m in 2 m: within a couple of cm.
+            assert!(worst < 0.03, "yaw {yaw}: {worst} m off");
+            // Outside the lake: no water, as before.
+            assert_eq!(
+                b.depth_at(b.center + DVec3::new(60.0, 0.0, 0.0), &ground),
+                None
+            );
+            // A mound raised in the bed shows once the edit is read in.
+            let edited = Ground(Arc::new(Basin(1.5)));
+            let at = DVec3::new(120.0, 0.0, -35.0);
+            let before = b.depth_at(at, &ground).unwrap();
+            let r = b.bed.as_mut().unwrap();
+            let local = Vec2::new(
+                yaw.cos() * 20.0 - yaw.sin() * 5.0,
+                yaw.sin() * 20.0 + yaw.cos() * 5.0,
+            );
+            let (c, y) = (r.center, r.yaw);
+            Arc::make_mut(&mut r.grid).reread(c, y, local, 4.0, &edited);
+            let after = b.depth_at(at, &edited).unwrap();
+            assert!((before - after - 1.5).abs() < 0.05, "{before} -> {after}");
+        }
+    }
+
+    #[test]
+    fn a_bed_grid_follows_a_world_shift() {
+        let ground = Ground(Arc::new(Basin(0.0)));
+        let mut b = lake(&ground, 0.3);
+        let p = DVec3::new(112.0, 0.0, -31.0);
+        let before = b.depth_at(p, &ground).unwrap();
+        let s = WorldShift {
+            rotation: engine_core::math::DQuat::from_rotation_y(0.4),
+            translation: DVec3::new(-80.0, -2.0, 30.0),
+            ..WorldShift::IDENTITY
+        };
+        b.shift(&s);
+        assert!(b.bed.is_some());
+        // The same spot, in the new frame (the ground there is not asked: the grid answers).
+        let after = b.depth_at(s.point(p), &Ground::default()).unwrap();
+        assert!((before - after).abs() < 1e-3, "{before} -> {after}");
+        // A tilt drops it.
+        b.shift(&WorldShift {
+            rotation: engine_core::math::DQuat::from_rotation_x(0.01),
+            ..WorldShift::IDENTITY
+        });
+        assert!(b.bed.is_none());
     }
 }

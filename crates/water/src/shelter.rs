@@ -329,6 +329,7 @@ mod tests {
             waves: Default::default(),
             mean_depth: 3.0,
             wind: Vec3::new(5.0, 0.0, 0.0),
+            bed: None,
         };
         let mut state = WaterState::new(8, 1.0);
         state.bodies = vec![lake(1, 0.0), lake(2, 300.0)];

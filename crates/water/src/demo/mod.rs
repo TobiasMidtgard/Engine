@@ -27,7 +27,9 @@ pub mod props;
 pub mod scenery;
 pub mod valley;
 
-pub use valley::{Valley, ValleyStream, spawn_valley, valley_views};
+pub use valley::{
+    Valley, ValleySpec, ValleyStream, spawn_valley, spawn_valley_off_frame, valley_views,
+};
 
 use std::f32::consts::{FRAC_1_SQRT_2, PI, TAU};
 

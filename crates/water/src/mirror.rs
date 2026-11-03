@@ -121,6 +121,7 @@ mod tests {
             },
             mean_depth: 3.0,
             wind: Vec3::ZERO,
+            bed: None,
         }
     }
 

@@ -78,6 +78,7 @@ impl Plugin for WaterPlugin {
             .init_resource::<drops::SplashDrops>()
             .init_resource::<surface::CpuSurface>()
             .init_resource::<sim::FlowsInFlight>()
+            .init_resource::<sim::BedJobs>()
             .init_resource::<WaterLoading>()
             .init_resource::<shelter::ShelterMask>()
             .register_resource::<WaterSettings>(

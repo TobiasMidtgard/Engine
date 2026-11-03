@@ -8,8 +8,9 @@ use engine_core::prelude::*;
 use engine_world::physics::Collider;
 
 use super::DemoView;
+use super::props::Part;
 use super::scenery::{
-    Jetty, merged, moor_motorboat, spawn_buoy, spawn_jetty, spawn_motorboat, spawn_prop,
+    Jetty, merged, moor_motorboat, spawn_buoy, spawn_jetty_made, spawn_motorboat, spawn_prop,
     spawn_rowboat,
 };
 use crate::body::{WaterBed, WaterBody, WaterOptics};
@@ -52,32 +53,201 @@ pub const STREAM_CELL: f32 = 0.75;
 const PRIMING_STEP: f64 = 25.0;
 
 /// Fill `valley` with water: the lake as a body over the ground, each stream as a flowing
-/// region that already runs into the lake when the world starts.
+/// region that already runs into the lake when the world starts. Worked out here and now
+/// (tests, tools); a game loading the valley while it runs uses [`spawn_valley_off_frame`].
 pub fn spawn_valley(commands: &mut Commands, valley: &Valley) {
-    commands.spawn((
-        Name::new("Valley lake"),
-        Transform::from_translation(valley.lake_center),
-        WaterBody::lake(valley.lake_radius)
-            .with_bed(WaterBed::Ground)
-            .with_optics(WaterOptics::clear_lake()),
-    ));
-    for (k, stream) in valley.streams.iter().enumerate() {
+    spawn_lake(commands, valley);
+    place_valley(commands, plan_valley(valley), DVec3::ZERO);
+}
+
+/// A [`Valley`] that owns what it is made from, so it can be worked out on a worker.
+#[derive(Clone)]
+pub struct ValleySpec {
+    pub lake_center: DVec3,
+    pub lake_radius: f32,
+    /// Each stream's course (world x, z), width and flow (see [`ValleyStream`]).
+    pub streams: Vec<(Vec<[f64; 2]>, f32, f32)>,
+    pub ground: std::sync::Arc<dyn Fn(f64, f64) -> f64 + Send + Sync>,
+    pub jetty_bearing: Option<f64>,
+}
+
+impl ValleySpec {
+    /// Borrow it as a [`Valley`] for `f`.
+    pub fn with<R>(&self, f: impl FnOnce(&Valley) -> R) -> R {
+        let streams: Vec<ValleyStream> = self
+            .streams
+            .iter()
+            .map(|(path, width_m, flow_m3_s)| ValleyStream {
+                path,
+                width_m: *width_m,
+                flow_m3_s: *flow_m3_s,
+            })
+            .collect();
+        let ground = |x: f64, z: f64| (self.ground)(x, z);
+        f(&Valley {
+            lake_center: self.lake_center,
+            lake_radius: self.lake_radius,
+            streams: &streams,
+            ground: &ground,
+            jetty_bearing: self.jetty_bearing,
+        })
+    }
+}
+
+/// [`spawn_valley`] with the slow part on a worker ([`engine_core::off_frame`]): the lake is
+/// in at once, and the streams' courses, their stones, the jetty and the moored boats (about
+/// 170 ms of ground samples and meshes on the frame thread before, 128 ms on the PC) come in a
+/// frame or two later, where the lake then stands (the lake is their anchor through world
+/// shifts). Streamed in by a cell, they belong to it ([`engine_core::off_frame`]'s scopes).
+pub fn spawn_valley_off_frame(commands: &mut Commands, spec: ValleySpec) {
+    use engine_core::off_frame::OffFrameCommands;
+    let lake = spec.with(|v| spawn_lake(commands, v));
+    let at = spec.lake_center;
+    commands.off_frame(
+        "water valley",
+        move || spec.with(plan_valley),
+        move |world: &mut World, plan: ValleyPlan| {
+            let Some(now) = world.get::<Transform>(lake).map(|t| t.translation) else {
+                return;
+            };
+            let mut queue = bevy_ecs::world::CommandQueue::default();
+            let mut commands = Commands::new(&mut queue, world);
+            place_valley(&mut commands, plan, now - at);
+            queue.apply(world);
+        },
+    );
+}
+
+fn spawn_lake(commands: &mut Commands, valley: &Valley) -> Entity {
+    commands
+        .spawn((
+            Name::new("Valley lake"),
+            Transform::from_translation(valley.lake_center),
+            WaterBody::lake(valley.lake_radius)
+                .with_bed(WaterBed::Ground)
+                .with_optics(WaterOptics::clear_lake()),
+        ))
+        .id()
+}
+
+/// A stretch of stones: its origin, the merged parts, and a sphere per stone (center, radius).
+type StoneStretch = (DVec3, Vec<Part>, Vec<(DVec3, f32)>);
+
+/// What [`spawn_valley`] puts in round the lake, worked out from the ground and made
+/// beforehand ([`plan_valley`]), so placing it ([`place_valley`]) asks the ground nothing.
+pub struct ValleyPlan {
+    /// Each stream's flow region at its corner.
+    streams: Vec<(DVec3, FlowRegion)>,
+    /// Stones: a merged mesh per stretch at its origin, and a sphere per stone (center,
+    /// radius) to stand on.
+    stones: Vec<StoneStretch>,
+    jetty: Option<JettyPlan>,
+}
+
+/// The jetty, made, and what is moored at it.
+struct JettyPlan {
+    shore: DVec3,
+    rotation: Quat,
+    length: f32,
+    parts: Vec<Part>,
+    /// At, yaw, painter's anchor.
+    rowboat: (DVec3, f32, DVec3),
+    motorboat: (DVec3, f32, DVec3),
+    /// On the water, on the bottom under it.
+    buoys: Vec<(DVec3, DVec3)>,
+}
+
+/// Work out `valley`'s streams, stones and jetty from its ground and make their meshes
+/// (world-free: runs on a worker).
+pub fn plan_valley(valley: &Valley) -> ValleyPlan {
+    let mut plan = ValleyPlan {
+        streams: Vec::new(),
+        stones: Vec::new(),
+        jetty: None,
+    };
+    for stream in valley.streams {
         if let Some((corner, mut region)) =
             stream_region(stream, valley.lake_center.y, valley.ground)
         {
             let stones = stream_stones(stream, valley.ground);
             region.rocks = stones.iter().map(|s| s.rock(corner)).collect();
-            spawn_stones(commands, &stones);
-            commands.spawn((
-                Name::new(format!("Valley stream {k}")),
-                Transform::from_translation(corner),
-                region,
-            ));
+            plan.stones.extend(plan_stones(&stones));
+            plan.streams.push((corner, region));
         }
     }
     if let Some(jetty) = valley.jetty_bearing.and_then(|b| valley_jetty(valley, b)) {
-        spawn_jetty(commands, &jetty);
-        moor_boats(commands, &jetty, valley.ground);
+        let level = jetty.water_level;
+        let on_water = |p: DVec3| DVec3::new(p.x, level, p.z);
+        let along = jetty.length as f64;
+        let d = jetty.out();
+        let yaw = (-d.y).atan2(d.x) as f32;
+        // The boats' models, made now if nothing made them yet.
+        super::art::rowboat();
+        super::art::motorboat();
+        plan.jetty = Some(JettyPlan {
+            shore: jetty.shore,
+            rotation: jetty.rotation(),
+            length: jetty.length,
+            parts: super::art::jetty(super::scenery::jetty_plan(&jetty)),
+            rowboat: (
+                on_water(jetty.point(along - 2.5, 2.4)),
+                yaw,
+                jetty.point(along - 2.5, 0.9),
+            ),
+            motorboat: (
+                on_water(jetty.point(along - 7.0, -3.0)),
+                yaw + std::f32::consts::PI,
+                jetty.point(along - 7.0, -0.9),
+            ),
+            buoys: (0..3)
+                .map(|k| {
+                    let p =
+                        on_water(jetty.point(along + 7.0 + k as f64 * 5.0, (k as f64 - 1.0) * 6.0));
+                    (p, DVec3::new(p.x, (valley.ground)(p.x, p.z), p.z))
+                })
+                .collect(),
+        });
+        for k in 0..3 {
+            super::art::buoy(k);
+        }
+    }
+    plan
+}
+
+/// Put `plan` in, `shift` from where it was worked out (the world moved meanwhile).
+pub fn place_valley(commands: &mut Commands, plan: ValleyPlan, shift: DVec3) {
+    for (k, (corner, region)) in plan.streams.into_iter().enumerate() {
+        commands.spawn((
+            Name::new(format!("Valley stream {k}")),
+            Transform::from_translation(corner + shift),
+            region,
+        ));
+    }
+    for (k, (origin, parts, spheres)) in plan.stones.into_iter().enumerate() {
+        spawn_prop(
+            commands,
+            &format!("Stream stones {k}"),
+            Transform::from_translation(origin + shift),
+            parts,
+        );
+        for (at, r) in spheres {
+            commands.spawn((
+                Name::new("Stream stone"),
+                Transform::from_translation(at + shift),
+                Collider::sphere(r),
+            ));
+        }
+    }
+    if let Some(j) = plan.jetty {
+        spawn_jetty_made(commands, j.shore + shift, j.rotation, j.length, j.parts);
+        let (at, yaw, anchor) = j.rowboat;
+        spawn_rowboat(commands, at + shift, yaw, anchor + shift);
+        let (at, yaw, anchor) = j.motorboat;
+        let motorboat = spawn_motorboat(commands, at + shift, yaw);
+        moor_motorboat(commands, motorboat, anchor + shift, 3.6, 1400.0);
+        for (k, (p, bottom)) in j.buoys.into_iter().enumerate() {
+            spawn_buoy(commands, p + shift, bottom + shift, k as u64);
+        }
     }
 }
 
@@ -244,33 +414,30 @@ pub fn stream_stones(stream: &ValleyStream, ground: &dyn Fn(f64, f64) -> f64) ->
 }
 
 /// Stones in a merged mesh per stretch of stream (so stretches out of view are culled), each
-/// with a sphere to stand on.
-fn spawn_stones(commands: &mut Commands, stones: &[StreamStone]) {
+/// with a sphere to stand on: (origin, merged parts, spheres).
+fn plan_stones(stones: &[StreamStone]) -> Vec<StoneStretch> {
     let rocks = super::art::rocks();
-    for (k, chunk) in stones.chunks(16).enumerate() {
-        let origin = chunk[0].at;
-        let parts = merged(chunk.iter().map(|s| {
-            let built = super::rock_for(s.size, s.shape).1;
-            let m = Mat4::from_translation((s.at - origin).as_vec3() - Vec3::Y * s.size * 0.05)
-                * Mat4::from_rotation_y(s.yaw)
-                * Mat4::from_scale(s.stretch * (s.size / built));
-            (rocks[s.shape].clone(), m)
-        }));
-        spawn_prop(
-            commands,
-            &format!("Stream stones {k}"),
-            Transform::from_translation(origin),
-            parts,
-        );
-        for s in chunk {
-            let r = s.radius();
-            commands.spawn((
-                Name::new("Stream stone"),
-                Transform::from_translation(s.at + DVec3::Y * (s.height - r) as f64),
-                Collider::sphere(r),
-            ));
-        }
-    }
+    stones
+        .chunks(16)
+        .map(|chunk| {
+            let origin = chunk[0].at;
+            let parts = merged(chunk.iter().map(|s| {
+                let built = super::rock_for(s.size, s.shape).1;
+                let m = Mat4::from_translation((s.at - origin).as_vec3() - Vec3::Y * s.size * 0.05)
+                    * Mat4::from_rotation_y(s.yaw)
+                    * Mat4::from_scale(s.stretch * (s.size / built));
+                (rocks[s.shape].clone(), m)
+            }));
+            let spheres = chunk
+                .iter()
+                .map(|s| {
+                    let r = s.radius();
+                    (s.at + DVec3::Y * (s.height - r) as f64, r)
+                })
+                .collect();
+            (origin, parts, spheres)
+        })
+        .collect()
 }
 
 /// The jetty on the bank at `bearing`: from the first point out from the lake's middle that
@@ -332,38 +499,6 @@ pub fn valley_views(valley: &Valley) -> Vec<DemoView> {
             quick_warmup: true,
         },
     ]
-}
-
-/// A rowboat and a motorboat tied up either side of the jetty's end, and three buoys beyond.
-fn moor_boats(commands: &mut Commands, jetty: &Jetty, ground: &dyn Fn(f64, f64) -> f64) {
-    let level = jetty.water_level;
-    let on_water = |p: DVec3| DVec3::new(p.x, level, p.z);
-    let along = jetty.length as f64;
-    let d = jetty.out();
-    let yaw = (-d.y).atan2(d.x) as f32;
-    spawn_rowboat(
-        commands,
-        on_water(jetty.point(along - 2.5, 2.4)),
-        yaw,
-        jetty.point(along - 2.5, 0.9),
-    );
-    let motorboat = spawn_motorboat(
-        commands,
-        on_water(jetty.point(along - 7.0, -3.0)),
-        yaw + std::f32::consts::PI,
-    );
-    moor_motorboat(
-        commands,
-        motorboat,
-        jetty.point(along - 7.0, -0.9),
-        3.6,
-        1400.0,
-    );
-    for k in 0..3 {
-        let p = on_water(jetty.point(along + 7.0 + k as f64 * 5.0, (k as f64 - 1.0) * 6.0));
-        let bottom = DVec3::new(p.x, ground(p.x, p.z), p.z);
-        spawn_buoy(commands, p, bottom, k);
-    }
 }
 
 /// The lowest ground (`ground` at world x/z) within `reach` m of `p`, nearer spots preferred:

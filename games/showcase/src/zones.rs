@@ -293,6 +293,23 @@ fn lake_water<'a>(z: &Zone, ground: &'a dyn Fn(f64, f64) -> f64) -> engine_water
     }
 }
 
+/// [`lake_water`], owning its ground, for a build off the frame thread.
+fn lake_spec(z: &Zone, land: &Landscape) -> engine_water::demo::ValleySpec {
+    let land = std::sync::Arc::new(land.clone());
+    let v = lake_water(z, &|_, _| 0.0);
+    engine_water::demo::ValleySpec {
+        lake_center: v.lake_center,
+        lake_radius: v.lake_radius,
+        streams: v
+            .streams
+            .iter()
+            .map(|s| (s.path.to_vec(), s.width_m, s.flow_m3_s))
+            .collect(),
+        ground: std::sync::Arc::new(move |x, z| land.height(x, z)),
+        jetty_bearing: v.jetty_bearing,
+    }
+}
+
 /// A tour stop for one of the water module's views; those it marks as pure CPU simulation warm
 /// up without drawing.
 fn water_view(v: &engine_water::demo::DemoView) -> View {
@@ -707,9 +724,8 @@ pub fn spawn_cell(
         ("gallery2d", 0) => ph::gallery2d(commands, lib, z),
         ("forest", 0) => engine_foliage::demo::spawn_demo(commands, z.center),
         ("meadow", 0) => engine_npc::demo::spawn_wildlife(commands, z.center, z.radius * 0.8),
-        ("lake", 0) => {
-            engine_water::demo::spawn_valley(commands, &lake_water(z, &|x, z| land.height(x, z)));
-        }
+        // The streams, stones, jetty and boats are worked out on a worker.
+        ("lake", 0) => engine_water::demo::spawn_valley_off_frame(commands, lake_spec(z, land)),
         ("lake", 1) => engine_physics::demo::spawn_floaters(commands, float_test(z)),
         ("water", 0) => engine_water::demo::spawn_demo(commands, z.center),
         ("footsteps", 0) => engine_audio::demo::spawn_demo(commands, z.center),

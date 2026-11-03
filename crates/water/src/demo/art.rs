@@ -160,7 +160,7 @@ fn make_rowboat() -> (Vec<Part>, Collider, Interior) {
         HullCut {
             floor_y: -0.16,
             transom_x: -1.82,
-            wall: 0.05,
+            wall: 0.12,
         },
     );
     (parts, hull, inside)
@@ -173,7 +173,7 @@ fn make_motorboat() -> (Vec<Part>, Collider, Interior) {
         HullCut {
             floor_y: -0.05,
             transom_x: -2.62,
-            wall: 0.07,
+            wall: 0.12,
         },
     );
     (parts, hull, inside)

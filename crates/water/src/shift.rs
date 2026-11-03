@@ -29,11 +29,15 @@ pub fn shift_system(
     mut roles: Query<&mut DemoRole>,
     demo: Option<ResMut<DemoState>>,
     drops: Option<ResMut<crate::drops::SplashDrops>>,
+    beds: Option<ResMut<crate::sim::BedJobs>>,
 ) {
     let Some(s) = shifts.read().copied().reduce(|a, next| a.then(&next)) else {
         return;
     };
     shared.0.write().shift(&s);
+    if let Some(mut beds) = beds {
+        beds.shift(&s);
+    }
     for mut i in &mut interactors {
         i.last = i.last.map(|p| s.point(p));
     }

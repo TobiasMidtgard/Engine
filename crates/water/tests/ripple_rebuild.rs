@@ -1,7 +1,8 @@
 //! The ripple grid reads the terrain under the lakes once: its periodic refresh of wave
 //! speeds and currents (every 2 s, for the streams) reads none, and a small move of the grid
 //! reads only the cells it newly covers. Reading all of them every 2 s cost 1.8 s a time
-//! under the showcase's lake.
+//! under the showcase's lake. Since the lakes keep their beds in a grid read once
+//! (`BedCache`), moving or jumping the grid reads the terrain not at all.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -52,6 +53,14 @@ impl GroundQuery for Land {
     }
 }
 
+/// The ripple grid's middle (x/z) and whether it has water under it.
+fn grid(app: &App) -> (DVec2, bool) {
+    let w = app.world.resource::<engine_water::SharedWater>().0.clone();
+    let w = w.read();
+    let r = &w.ripples;
+    (r.origin + DVec2::splat(r.size() * 0.5), r.has_water)
+}
+
 /// The valley with its lake and stream, a focus at `at`, and the terrain read counter.
 fn valley_app(at: DVec3) -> (App, Entity, Arc<AtomicUsize>) {
     let reads = Arc::new(AtomicUsize::new(0));
@@ -93,6 +102,7 @@ fn the_ripple_grid_reads_the_lake_bed_once() {
     let (mut app, eye, reads) = valley_app(DVec3::new(0.0, 2.0, -30.0));
     app.update_n(30);
     let cells = 256 * 256;
+    let first = reads.load(Ordering::Relaxed);
 
     // Still focus: several 2 s refreshes, no terrain reads (the floats, puddles and shores
     // read a few hundred a second; a refresh of the grid would read tens of thousands).
@@ -127,13 +137,18 @@ fn the_ripple_grid_reads_the_lake_bed_once() {
     let before = reads.load(Ordering::Relaxed);
     app.update_n(30);
     let after = reads.load(Ordering::Relaxed) - before;
+    // The grid is there, over the lake (its bed comes from the lake's grid, not the terrain).
+    let (middle, wet) = grid(&app);
     assert!(
-        jump + after > cells / 2,
-        "only {} of the new grid read a second after the jump",
-        jump + after
+        middle.distance(DVec2::new(-20.0, 35.0)) < 8.0 && wet,
+        "the grid at {middle} (water {wet}) a second after the jump"
+    );
+    assert!(
+        after < cells / 4,
+        "{after} terrain reads in the second after"
     );
     println!(
-        "terrain reads: {still} in 7 s still, {moved} for a 20 m move, {jump} the frame after \
+        "terrain reads: {first} at load, {still} in 7 s still, {moved} for a 20 m move, {jump} the frame after \
          a jump ({cells} cells)"
     );
 }
@@ -164,12 +179,18 @@ fn the_ripple_grid_rests_while_the_focus_flies_high() {
 
     // Down on the far shore: the grid comes there and reads the bed under it.
     app.world.get_mut::<Transform>(eye).unwrap().translation = DVec3::new(-20.0, 2.0, 35.0);
+    let (high_middle, _) = grid(&app);
+    assert!(
+        high_middle.distance(DVec2::new(0.0, -30.0)) < 8.0,
+        "the grid followed the flight to {high_middle}"
+    );
     let before = reads.load(Ordering::Relaxed);
     app.update_n(30);
     let low = reads.load(Ordering::Relaxed) - before;
+    let (middle, wet) = grid(&app);
     assert!(
-        low > cells / 2,
-        "only {low} terrain reads in the second after landing by the lake"
+        middle.distance(DVec2::new(-20.0, 35.0)) < 8.0 && wet,
+        "the grid at {middle} (water {wet}) a second after landing by the lake"
     );
     println!("terrain reads: {high} in 2 s at 2 km, {low} in 1 s after landing");
 }

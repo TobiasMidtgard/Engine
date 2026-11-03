@@ -1030,15 +1030,19 @@ fn sample(
 ) -> (f64, f64) {
     let mut still = f64::NAN;
     let mut under = None;
+    // Under a lake, wet or dry, its bed grid has the ground (`BedCache`).
+    let mut over = None;
     for b in bodies.iter().filter(|b| b.body.interactive) {
         let p3 = DVec3::new(p.x, b.center.y, p.y);
         let inset = b.body.extent.inset(b.local(p3));
         if inset > -BEACH_M {
             still = still.max(b.center.y);
-            if let Some(d) = b.depth_at(p3, ground)
-                && d > 0.0
-            {
-                under = Some(b.center.y - d as f64);
+            if let Some(d) = b.depth_at(p3, ground) {
+                if d > 0.0 {
+                    under = Some(b.center.y - d as f64);
+                } else if b.bed.is_some() {
+                    over = Some(b.center.y - d as f64);
+                }
             }
         }
     }
@@ -1046,6 +1050,12 @@ fn sample(
         let (x, z) = ((p.x - c.x) as f32, (p.y - c.z) as f32);
         (x.abs() <= g.half_size && z.abs() <= g.half_size).then(|| c.y + (g.height)(x, z) as f64)
     });
+    // Far from any lake and off the beaches the swash never runs: a dry bank stands there
+    // instead of asking the terrain (16 000 samples over a fresh window, 0.25 s on the VM).
+    if still.is_nan() && beach.is_none() {
+        return (level_y + 100.0, f64::NAN);
+    }
+    let under = under.or(over);
     let probe = DVec3::new(p.x, level_y + 50.0, p.y);
     let g = beach
         .or(under)

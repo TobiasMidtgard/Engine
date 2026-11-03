@@ -323,8 +323,9 @@ pub fn hull_collider(parts: &[Part], cut: HullCut) -> (Collider, Interior) {
         }
     }
     let mut pieces = Vec::new();
+    let middle = (lo + hi) * 0.5;
     let mut push = |pts: Vec<Vec3>| {
-        let pts = thin(pts);
+        let pts = thicken(thin(pts), middle);
         if pts.len() >= 4 {
             pieces.push((
                 Vec3::ZERO,
@@ -389,6 +390,40 @@ pub fn hull_collider(parts: &[Part], cut: HullCut) -> (Collider, Interior) {
             slices,
         },
     )
+}
+
+/// The least half-thickness of any hull piece, meters. Rapier sweeps (CCD) a body whose
+/// farthest point moves more than half its thinnest piece in a step against everything
+/// around it: a boat with a centimeter-thin piece was swept against the lake bed on every
+/// step while it bobbed at its mooring (1-2 ms each, Physics 9912ab2d). At 6 cm a boat counts
+/// as fast from about 1.8 m/s of point speed at 60 Hz, so only a driven or tossed one is.
+pub const MIN_PIECE_HALF_M: f32 = 0.06;
+
+/// `points` made at least [`MIN_PIECE_HALF_M`] thick on every axis, by adding copies moved
+/// toward the boat's `middle`: the outside of the hull stays where the model draws it.
+fn thicken(mut points: Vec<Vec3>, middle: Vec3) -> Vec<Vec3> {
+    if points.is_empty() {
+        return points;
+    }
+    for axis in 0..3 {
+        let (lo, hi) = points.iter().fold((f32::MAX, f32::MIN), |(lo, hi), p| {
+            (lo.min(p[axis]), hi.max(p[axis]))
+        });
+        let short = 2.0 * MIN_PIECE_HALF_M - (hi - lo);
+        if short <= 0.0 {
+            continue;
+        }
+        let toward = if middle[axis] < 0.5 * (lo + hi) {
+            -1.0
+        } else {
+            1.0
+        };
+        let mut step = Vec3::ZERO;
+        step[axis] = toward * (short + 1e-3);
+        let moved: Vec<Vec3> = points.iter().map(|p| *p + step).collect();
+        points.extend(moved);
+    }
+    points
 }
 
 /// The middle of the numbers in `v` that aren't NaN.
@@ -525,5 +560,35 @@ mod tests {
             force(driven).y > 1000.0,
             "a driven boat is never left alone"
         );
+    }
+
+    /// Rapier sweeps (CCD) any body whose farthest point moves more than half its thinnest
+    /// piece in a step: a boat bobbing at its mooring must not count as fast.
+    #[test]
+    fn boat_hull_pieces_are_thick_enough_not_to_sweep_while_bobbing() {
+        let mut worst = Vec::new();
+        for (name, (_, hull, _)) in [
+            ("rowboat", crate::demo::art::rowboat()),
+            ("motorboat", crate::demo::art::motorboat()),
+        ] {
+            let ColliderShape::Compound(pieces) = &hull.shape else {
+                panic!("{name}: not a compound");
+            };
+            let thin: Vec<f32> = pieces
+                .iter()
+                .map(|(_, _, s)| {
+                    let (lo, hi) = bounds(s).unwrap();
+                    ((hi - lo) * 0.5).min_element()
+                })
+                .collect();
+            println!("{name}: piece half-thickness {thin:?}");
+            worst.push((name, thin.iter().copied().fold(f32::MAX, f32::min)));
+        }
+        for (name, thinnest) in worst {
+            assert!(
+                thinnest >= MIN_PIECE_HALF_M - 1e-3,
+                "{name}: thinnest piece {thinnest} m"
+            );
+        }
     }
 }

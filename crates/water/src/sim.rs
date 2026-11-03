@@ -13,7 +13,7 @@ use engine_world::{FocusPoints, Ground, SimulationRange, WaterSplash, WindField}
 
 use crate::body::{WaterBed, WaterBody, WaterSettings};
 use crate::flow::{FlowBed, FlowRegion, FlowSim, grid_point};
-use crate::state::{BodyState, SharedWater, WaterState};
+use crate::state::{BedCache, BodyState, SharedWater, WaterState};
 use crate::waves::{WaveSet, build_waves};
 
 /// Bookkeeping between steps.
@@ -41,6 +41,7 @@ fn typical_depth(body: &WaterBody, center: DVec3, ground: &Ground) -> f32 {
 }
 
 /// Mirror `WaterBody` components into the simulation and advance their waves.
+#[allow(clippy::too_many_arguments)]
 pub fn sync_bodies_system(
     time: Res<Time>,
     shared: Res<SharedWater>,
@@ -55,6 +56,9 @@ pub fn sync_bodies_system(
     )>,
     beaches: Query<(Entity, &GlobalTransform, &crate::swash::BeachGround)>,
     mut book: ResMut<SimBook>,
+    config: Res<EngineConfig>,
+    mut beds: ResMut<BedJobs>,
+    mut changes: MessageReader<engine_world::TerrainChanged>,
 ) {
     let dt = time.delta_secs();
     let mut state = shared.0.write();
@@ -92,6 +96,7 @@ pub fn sync_bodies_system(
                     waves: WaveSet::default(),
                     mean_depth: depth,
                     wind: w,
+                    bed: None,
                 });
                 let i = state.bodies.len() - 1;
                 // Start with the full sea state (no slow build-up at load).
@@ -129,11 +134,172 @@ pub fn sync_bodies_system(
         }
         state.beaches.push((at, beach.clone()));
     }
+    let changes: Vec<_> = changes.read().copied().collect();
+    let builds = keep_beds(&mut state, &mut beds, &changes);
+    // A lake's bed grid coming in changes the layout too: what waited for it reads it then.
+    for b in &state.bodies {
+        b.bed.is_some().hash(&mut hasher);
+    }
     let layout = hasher.finish();
     if layout != book.layout {
         book.layout = layout;
         book.since_rebuild = f32::INFINITY;
     }
+    if builds.is_empty() {
+        return;
+    }
+    // Read with the water unlocked (AGENTS.md, "Performance rules"): the read goes wide.
+    let ground = state.ground.clone();
+    drop(state);
+    if config.headless {
+        // Headless runs (tests, tours) read it there and then, so they see the same water.
+        let made: Vec<_> = builds
+            .into_iter()
+            .map(|b| (b, BedCache::build(b.center, b.yaw, b.half, &ground)))
+            .collect();
+        let mut state = shared.0.write();
+        for (b, grid) in made {
+            install_bed(&mut state, b, grid);
+        }
+    } else {
+        engine_core::tasks::init_task_pools();
+        for b in builds {
+            let ground = ground.clone();
+            let task = AsyncComputeTaskPool::get()
+                .spawn(async move { BedCache::build(b.center, b.yaw, b.half, &ground) });
+            beds.jobs.push((b, task));
+        }
+    }
+}
+
+/// A lake's bed grid being read on a worker ([`BedCache`]), for the place it was asked for
+/// (moved along by world shifts).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BedAsk {
+    pub entity: Entity,
+    pub center: DVec3,
+    pub yaw: f32,
+    pub half: f32,
+}
+
+/// Bed grids being read off the frame thread.
+#[derive(Resource, Default)]
+pub struct BedJobs {
+    pub jobs: Vec<(BedAsk, Task<BedCache>)>,
+    /// The ground provider they were read from (an address; a new provider reads them anew).
+    ground: usize,
+}
+
+impl BedJobs {
+    /// Follow a world shift: a tilt of the frame drops them (they will be asked again).
+    pub fn shift(&mut self, s: &engine_world::WorldShift) {
+        if !crate::state::keeps_level(s) {
+            self.jobs.clear();
+        }
+        for (b, _) in &mut self.jobs {
+            b.center = s.point(b.center);
+            b.yaw = crate::flow::turned_yaw(s, b.yaw);
+        }
+    }
+}
+
+/// Same place (a world shift moves both alike), within rounding.
+fn same_place(a: (DVec3, f32), b: (DVec3, f32)) -> bool {
+    a.0.distance(b.0) < 1e-3 && (a.1 - b.1).abs() < 1e-5
+}
+
+fn install_bed(state: &mut WaterState, ask: BedAsk, grid: BedCache) {
+    if let Some(b) = state.bodies.iter_mut().find(|b| b.entity == ask.entity)
+        && same_place((b.center, b.yaw), (ask.center, ask.yaw))
+    {
+        b.bed = Some(crate::state::BedRef {
+            center: ask.center,
+            yaw: ask.yaw,
+            grid: std::sync::Arc::new(grid),
+        });
+    }
+}
+
+/// Keep each ground-bedded lake's bed grid in step with it: put in the finished reads, drop
+/// grids of lakes that moved, turned or grew, read terrain edits into them, and return the
+/// lakes that need a read.
+fn keep_beds(
+    state: &mut WaterState,
+    beds: &mut BedJobs,
+    changes: &[engine_world::TerrainChanged],
+) -> Vec<BedAsk> {
+    let ground = std::sync::Arc::as_ptr(&state.ground.0) as *const () as usize;
+    if beds.ground != ground {
+        beds.ground = ground;
+        beds.jobs.clear();
+        for b in &mut state.bodies {
+            b.bed = None;
+        }
+    }
+    // Finished reads.
+    let mut k = 0;
+    while k < beds.jobs.len() {
+        if let Some(grid) = check_ready(&mut beds.jobs[k].1) {
+            let (ask, _) = beds.jobs.swap_remove(k);
+            install_bed(state, ask, grid);
+        } else {
+            k += 1;
+        }
+    }
+    let mut builds = Vec::new();
+    let ground = state.ground.clone();
+    for b in &mut state.bodies {
+        let half = b.body.extent.bounding_radius();
+        let ask = BedAsk {
+            entity: b.entity,
+            center: b.center,
+            yaw: b.yaw,
+            half,
+        };
+        if !matches!(b.body.bed, WaterBed::Ground) || !half.is_finite() {
+            b.bed = None;
+            continue;
+        }
+        if b.bed.as_ref().is_some_and(|r| {
+            r.grid.half != half || !same_place((r.center, r.yaw), (b.center, b.yaw))
+        }) {
+            b.bed = None;
+        }
+        // Edits of the ground under it.
+        let reach = half as f64 * std::f64::consts::SQRT_2;
+        for c in changes {
+            let flat = DVec2::new(c.center.x - b.center.x, c.center.z - b.center.z).length();
+            if flat > reach + c.radius as f64 {
+                continue;
+            }
+            if let Some(r) = &mut b.bed {
+                let local = b_local(r.center, r.yaw, c.center);
+                let (center, yaw, reach) = (r.center, r.yaw, c.radius + r.grid.cell);
+                std::sync::Arc::make_mut(&mut r.grid).reread(center, yaw, local, reach, &ground);
+            }
+            // A read under way missed it: ask again.
+            beds.jobs.retain(|(j, _)| j.entity != b.entity);
+        }
+        let asked = beds.jobs.iter().any(|(j, _)| {
+            j.entity == b.entity
+                && j.half == half
+                && same_place((j.center, j.yaw), (b.center, b.yaw))
+        });
+        if b.bed.is_none() && !asked {
+            beds.jobs.retain(|(j, _)| j.entity != b.entity);
+            builds.push(ask);
+        }
+    }
+    beds.jobs
+        .retain(|(j, _)| state.bodies.iter().any(|b| b.entity == j.entity));
+    builds
+}
+
+/// `p` in the frame of a body at `center` turned by `yaw` (as [`BodyState::local`]).
+fn b_local(center: DVec3, yaw: f32, p: DVec3) -> Vec2 {
+    let d = DVec2::new(p.x - center.x, p.z - center.z).as_vec2();
+    let (s, c) = yaw.sin_cos();
+    Vec2::new(c * d.x - s * d.y, s * d.x + c * d.y)
 }
 
 /// The point detail follows: the primary `SimulationFocus`, or the active camera when nothing
@@ -444,7 +610,18 @@ pub fn ripple_system(
         .is_some_and(|h| f.y - h > RIPPLES_SEEN_FROM_M);
     let center = ripple_center(&state, f, state.ripples.size() * 0.5);
     book.since_rebuild += dt;
+    // A lake under the grid still having its bed read on a worker: the grid waits for it
+    // (reading tens of thousands of cells from the terrain instead cost 77 ms in a frame on
+    // the PC when the lake streamed in), stepping where it is meanwhile.
+    let reach = state.ripples.size() * std::f64::consts::FRAC_1_SQRT_2;
+    let waiting = state.bodies.iter().any(|b| {
+        b.body.interactive
+            && b.bed_pending()
+            && DVec2::new(b.center.x - center.x, b.center.z - center.y).length()
+                < b.body.extent.bounding_radius() as f64 + reach
+    });
     let rebuild = !aloft
+        && !waiting
         && (state.ripples.would_recenter(center)
             || book.since_rebuild > 2.0
             || still.unread > 0
@@ -644,8 +821,14 @@ pub fn flow_system(
     engine_core::tasks::init_task_pools();
     let mut guard = shared.0.write();
     let state = &mut *guard;
-    let relayout = *last_layout != book.layout;
-    *last_layout = book.layout;
+    // While a lake's bed grid is being read the reservoirs stay as they are (asking the
+    // terrain for every cell instead cost a third of a second for the showcase's stream): the
+    // grid coming in changes the layout again.
+    let waiting = state.bodies.iter().any(|b| b.bed_pending());
+    let relayout = *last_layout != book.layout && !waiting;
+    if !waiting {
+        *last_layout = book.layout;
+    }
     let mut seen = Vec::new();
     // Regions headless runs make in place, after the lock is let go.
     let mut builds = Vec::new();
@@ -899,49 +1082,88 @@ pub fn init_state(settings: &WaterSettings) -> WaterState {
 
 /// Cells per side of the patches [`flow_bed_system`] looks over at once.
 const BED_PATCH: usize = 8;
-/// Patches looked over per step, across all streams: a stream's whole course in a few tenths
-/// of a second, at a few dozen physics queries a step where nothing stands in it.
-const BED_PATCHES_PER_STEP: usize = 24;
+/// Rays cast per step at most, across all streams (two a cell where something moving stands
+/// in a patch; a patch is 64 cells). Patches past it wait for the next step.
+const BED_RAYS_PER_STEP: usize = 768;
 /// Things standing less than this above the ground don't part the water, meters.
 const STANDING_MIN: f32 = 0.15;
 
-/// Where [`flow_bed_system`] has got to in one stream.
+/// A moving body's pose, rounded (cm, thousandths of the quaternion): a patch whose movers
+/// hold the same poses as when it was last looked at is left as it is.
+type Pose = (Entity, [i32; 7]);
+
+/// What [`flow_bed_system`] last found in one stream: per patch looked at, the moving bodies
+/// over it then (an empty list once they had all gone, until it was looked at again).
 pub struct BedScan {
     flow: Entity,
-    next: usize,
-    /// Every patch looked over once.
-    swept: bool,
-    /// Fixed scenery standing in the stream when it was made (a cliff it falls down, stones
-    /// it was laid round): its bed was made round them already, so they are left out.
-    scenery: Vec<Entity>,
+    seen: std::collections::HashMap<usize, Vec<Pose>>,
 }
 
 /// One patch of a stream to look over: its box (center, half extents, turn) and its cells
 /// (index, middle, ground and water surface, world y).
 struct BedPatch {
     flow: Entity,
-    first_sweep: bool,
+    patch: usize,
+    poses: Vec<Pose>,
     center: DVec3,
     half: Vec3,
     yaw: f32,
-    /// Something stood in it last time (it must be looked at even if nothing is now).
-    had: bool,
     cells: Vec<(usize, DVec3, f64, f64)>,
 }
 
+/// How far a collider reaches from its entity's origin, meters.
+fn reach(shape: &engine_world::physics::ColliderShape) -> f32 {
+    use engine_world::physics::ColliderShape as S;
+    let far = |points: &[Vec3]| points.iter().map(|p| p.length()).fold(0.0, f32::max);
+    match shape {
+        S::Sphere { radius } => *radius,
+        S::Cuboid { half_extents } => half_extents.length(),
+        S::Capsule {
+            radius,
+            half_height,
+        } => radius + half_height,
+        S::Cylinder {
+            radius,
+            half_height,
+        } => radius.hypot(*half_height),
+        S::ConvexHull { points } => far(points),
+        S::TriMesh { vertices, .. } => far(vertices),
+        S::Heightfield { size, .. } => Vec2::from(*size).length() * 0.5,
+        S::Compound(parts) => parts
+            .iter()
+            .map(|(at, _, s)| at.length() + reach(s))
+            .fold(0.0, f32::max),
+    }
+}
+
+/// A body `flow_bed_system` watches: its own collider and its children's.
+type BedMover = (
+    Entity,
+    &'static GlobalTransform,
+    &'static engine_world::physics::RigidBody,
+    Option<&'static engine_world::physics::Collider>,
+    Option<&'static Children>,
+);
+
 /// Keep the streams' beds up to date with what stands in them and the ground under them, so
 /// the water parts round a rock dropped in, piles up behind a crate and finds the trench dug
-/// for it. What stands on the bed comes from the physics scene, patch by patch (one overlap
-/// test; rays only where something is); terrain edits re-read the ground.
+/// for it. Terrain edits re-read the ground. Only moving bodies (dynamic or kinematic) are
+/// looked for, and only in the patches they are over and where they last were, the way
+/// Recast's tile cache rebuilds only the tiles an obstacle touches: fixed scenery was there
+/// when the stream was made (its bed was made round it, or it is the ground), and a patch
+/// whose movers hold still is not looked at again until one of them moves.
 #[allow(clippy::too_many_arguments)]
 pub fn flow_bed_system(
     shared: Res<SharedWater>,
     physics: Option<Res<engine_world::physics::PhysicsQueries>>,
     regions: Query<&FlowRegion>,
-    bodies: Query<&engine_world::physics::RigidBody>,
+    bodies: Query<BedMover>,
+    colliders: Query<(&GlobalTransform, &engine_world::physics::Collider)>,
+    kinds: Query<&engine_world::physics::RigidBody>,
     parents: Query<&ChildOf>,
     mut changes: MessageReader<engine_world::TerrainChanged>,
     mut scans: Local<Vec<BedScan>>,
+    mut diagnostics: ResMut<Diagnostics>,
 ) {
     use engine_world::physics::{BodyKind, ColliderShape, QueryFilter};
     let changes: Vec<_> = changes.read().copied().collect();
@@ -974,35 +1196,89 @@ pub fn flow_bed_system(
                 }
             }
         }
-        // What stands in the water: a few patches of each running stream a step.
-        if physics.is_some() {
-            scans.retain(|s| state.flows.iter().any(|f| f.entity == s.flow));
-            let running: Vec<&FlowSim> = state
-                .flows
-                .iter()
-                .filter(|f| f.visible && !f.resting)
-                .collect();
-            let per = (BED_PATCHES_PER_STEP / running.len().max(1)).max(1);
+        scans.retain(|s| state.flows.iter().any(|f| f.entity == s.flow));
+        let running: Vec<&FlowSim> = state
+            .flows
+            .iter()
+            .filter(|f| f.visible && !f.resting)
+            .collect();
+        if physics.is_some() && !running.is_empty() {
+            // The moving bodies, with how far their colliders reach.
+            let mut movers: Vec<(DVec3, f32, Pose)> = Vec::new();
+            for (e, gt, body, own, children) in &bodies {
+                if !matches!(body.kind, BodyKind::Dynamic | BodyKind::Kinematic) {
+                    continue;
+                }
+                let at = gt.translation();
+                let mut r = own.map_or(0.0, |c| reach(&c.shape));
+                for child in children.into_iter().flatten() {
+                    if let Ok((cg, c)) = colliders.get(*child) {
+                        r = r.max(cg.translation().distance(at) as f32 + reach(&c.shape));
+                    }
+                }
+                if r <= 0.0 {
+                    continue;
+                }
+                let q = gt.rotation();
+                let pose = [
+                    (at.x * 100.0).round() as i32,
+                    (at.y * 100.0).round() as i32,
+                    (at.z * 100.0).round() as i32,
+                    (q.x * 1000.0).round() as i32,
+                    (q.y * 1000.0).round() as i32,
+                    (q.z * 1000.0).round() as i32,
+                    (q.w * 1000.0).round() as i32,
+                ];
+                movers.push((at, r, (e, pose)));
+            }
+            let mut rays = 0;
             for sim in running {
-                let (px, pz) = (sim.nx.div_ceil(BED_PATCH), sim.nz.div_ceil(BED_PATCH));
                 let slot = match scans.iter().position(|s| s.flow == sim.entity) {
                     Some(k) => k,
                     None => {
                         scans.push(BedScan {
                             flow: sim.entity,
-                            next: 0,
-                            swept: false,
-                            scenery: Vec::new(),
+                            seen: Default::default(),
                         });
                         scans.len() - 1
                     }
                 };
-                for _ in 0..per.min(px * pz) {
-                    let scan = &mut scans[slot];
-                    let patch = scan.next;
-                    scan.next = (patch + 1) % (px * pz);
-                    let first_sweep = !scan.swept;
-                    scan.swept |= scan.next == 0;
+                let (px, pz) = (sim.nx.div_ceil(BED_PATCH), sim.nz.div_ceil(BED_PATCH));
+                let span = BED_PATCH as f64 * sim.cell as f64;
+                // Each patch with the movers over it now.
+                let mut over: std::collections::BTreeMap<usize, Vec<Pose>> = Default::default();
+                let (c, radius) = sim.bounds();
+                for (at, r, pose) in &movers {
+                    if at.distance(c) > radius + *r as f64 {
+                        continue;
+                    }
+                    let l = sim.local(*at);
+                    let r = *r as f64;
+                    let lo = ((l - DVec2::splat(r)) / span).floor().max(DVec2::ZERO);
+                    let hi = ((l + DVec2::splat(r)) / span)
+                        .floor()
+                        .min(DVec2::new(px as f64 - 1.0, pz as f64 - 1.0));
+                    for pj in lo.y as usize..=hi.y.max(-1.0) as usize {
+                        for pi in lo.x as usize..=hi.x.max(-1.0) as usize {
+                            if pi < px && pj < pz && lo.x <= hi.x && lo.y <= hi.y {
+                                over.entry(pj * px + pi).or_default().push(*pose);
+                            }
+                        }
+                    }
+                }
+                // And where something stood when last looked at.
+                for (&patch, poses) in &scans[slot].seen {
+                    if !poses.is_empty() {
+                        over.entry(patch).or_default();
+                    }
+                }
+                for (patch, mut poses) in over {
+                    poses.sort();
+                    if scans[slot].seen.get(&patch).is_some_and(|p| *p == poses)
+                        || (poses.is_empty() && !scans[slot].seen.contains_key(&patch))
+                    {
+                        continue;
+                    }
                     let (i0, j0) = ((patch % px) * BED_PATCH, (patch / px) * BED_PATCH);
                     let (i1, j1) = ((i0 + BED_PATCH).min(sim.nx), (j0 + BED_PATCH).min(sim.nz));
                     // Only patches with water in them, or something standing there last time.
@@ -1025,14 +1301,24 @@ pub fn flow_bed_system(
                         }
                     }
                     if !wet && !had {
+                        if poses.is_empty() {
+                            scans[slot].seen.remove(&patch);
+                        } else {
+                            scans[slot].seen.insert(patch, poses);
+                        }
                         continue;
                     }
+                    if rays + 2 * cells.len() > BED_RAYS_PER_STEP && rays > 0 {
+                        continue;
+                    }
+                    rays += 2 * cells.len();
                     let c = sim.cell as f64;
                     let mid = DVec2::new((i0 + i1) as f64 * 0.5 * c, (j0 + j1) as f64 * 0.5 * c);
                     let (bottom, top) = (lo + STANDING_MIN, hi.max(lo + STANDING_MIN) + 0.5);
                     patches.push(BedPatch {
                         flow: sim.entity,
-                        first_sweep,
+                        patch,
+                        poses,
                         center: sim.world(mid, (bottom + top) as f64 * 0.5),
                         half: Vec3::new(
                             (i1 - i0) as f32 * sim.cell * 0.5,
@@ -1040,22 +1326,22 @@ pub fn flow_bed_system(
                             (j1 - j0) as f32 * sim.cell * 0.5,
                         ),
                         yaw: sim.yaw,
-                        had,
                         cells,
                     });
                 }
             }
+            diagnostics.set("water.bed_patches", patches.len() as f64);
         }
     }
     // The physics queries with the water unlocked (AGENTS.md, "Performance rules").
     let moves = |e: Entity| {
-        let kind = |e: Entity| bodies.get(e).ok().map(|b| b.kind);
+        let kind = |e: Entity| kinds.get(e).ok().map(|b| b.kind);
         let k = kind(e).or_else(|| parents.get(e).ok().and_then(|p| kind(p.parent())));
         matches!(k, Some(BodyKind::Dynamic | BodyKind::Kinematic))
     };
     let mut standing: Vec<(Entity, usize, f32)> = Vec::new();
     if let Some(physics) = &physics {
-        for patch in &patches {
+        for patch in patches {
             let Some(scan) = scans.iter_mut().find(|s| s.flow == patch.flow) else {
                 continue;
             };
@@ -1069,24 +1355,17 @@ pub fn flow_bed_system(
                 &QueryFilter::default(),
                 &mut found,
             );
-            // Fixed things there on the first sweep are the stream's scenery.
-            for e in &found {
-                if patch.first_sweep && !moves(*e) && !scan.scenery.contains(e) {
-                    scan.scenery.push(*e);
-                }
-            }
-            found.retain(|e| !scan.scenery.contains(e));
-            if found.is_empty() && !patch.had {
-                continue;
-            }
+            // Rays pass through the fixed things there (scenery, the ground).
+            let (moving, fixed): (Vec<Entity>, Vec<Entity>) =
+                found.into_iter().partition(|e| moves(*e));
             let filter = QueryFilter {
-                exclude: scan.scenery.clone(),
+                exclude: fixed,
                 ..Default::default()
             };
             for &(k, at, ground, surface) in &patch.cells {
                 let from = surface.max(ground) + 3.0;
                 let reach = (from - ground) as f32 + 0.3;
-                let top = (!found.is_empty())
+                let top = (!moving.is_empty())
                     .then(|| {
                         physics.raycast(DVec3::new(at.x, from, at.z), Vec3::NEG_Y, reach, &filter)
                     })
@@ -1106,6 +1385,11 @@ pub fn flow_bed_system(
                             .is_some_and(|h| h.distance <= 0.2)
                     });
                 standing.push((patch.flow, k, top.map_or(f32::NAN, |y| y as f32)));
+            }
+            if patch.poses.is_empty() {
+                scan.seen.remove(&patch.patch);
+            } else {
+                scan.seen.insert(patch.patch, patch.poses);
             }
         }
     }
