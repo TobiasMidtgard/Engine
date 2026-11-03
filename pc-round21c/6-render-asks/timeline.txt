@@ -1,0 +1,23 @@
+00:35:22.152Z     0.04  mode stops quality ultra size '' spec 'plaza:35,forest_overview:20,fortress:20,forest_trail:20,walk:20'; idle before start 78,619 s; HEAD 145dd3a6
+00:35:22.773Z     0.66  started: showcase.exe --fly --profile --quality ultra
+00:35:29.147Z     7.03  window visible: client 1600x900, window 1616x939 at (104,104), maximized False
+00:35:29.186Z     7.07  bridge connected
+00:35:29.517Z     7.40  world built
+00:35:34.916Z    12.80  after build: working set 4,255 MB, private 7,174 MB; system free 33,802 of 65,277 MB
+00:35:35.102Z    12.99  AT plaza: {"id":1,"jsonrpc":"2.0","result":{"place":"plaza","position":[10.0,4.5,16.0]}}
+00:36:10.450Z    48.33  END plaza: working set 4,968 MB, private 15,394 MB; system free 33,136 of 65,277 MB
+00:36:10.549Z    48.43  shot plaza: {"id":4,"jsonrpc":"2.0","result":{"height":900,"path":"screenshots/r21c/plaza.png","width":1600}}
+00:36:11.683Z    49.57  AT forest_overview: {"id":5,"jsonrpc":"2.0","result":{"place":"forest_overview","position":[-148.0,32.0,-78.0]}}
+00:36:32.088Z    69.97  END forest_overview: working set 5,050 MB, private 15,584 MB; system free 33,043 of 65,277 MB
+00:36:32.200Z    70.08  shot forest_overview: {"id":8,"jsonrpc":"2.0","result":{"height":900,"path":"screenshots/r21c/forest_overview.png","width":1600}}
+00:36:33.278Z    71.16  AT fortress: {"id":9,"jsonrpc":"2.0","result":{"place":"fortress","position":[-334.0,36.0,128.0]}}
+00:36:53.686Z    91.57  END fortress: working set 5,011 MB, private 15,590 MB; system free 33,115 of 65,277 MB
+00:36:53.819Z    91.70  shot fortress: {"id":12,"jsonrpc":"2.0","result":{"height":900,"path":"screenshots/r21c/fortress.png","width":1600}}
+00:36:54.876Z    92.76  AT forest_trail: {"id":13,"jsonrpc":"2.0","result":{"place":"forest_trail","position":[-184.0,1.7000000476837158,-133.5]}}
+00:37:15.247Z   113.13  END forest_trail: working set 5,111 MB, private 16,556 MB; system free 33,002 of 65,277 MB
+00:37:15.370Z   113.25  shot forest_trail: {"id":16,"jsonrpc":"2.0","result":{"height":900,"path":"screenshots/r21c/forest_trail.png","width":1600}}
+00:37:16.436Z   114.32  WALK start: {"id":17,"jsonrpc":"2.0","result":{"ok":true}}
+00:37:36.567Z   134.45  WALK end: {"id":18,"jsonrpc":"2.0","result":{"ok":true}}
+00:37:39.022Z   136.91  sampler job: Completed
+00:37:39.029Z   136.91  killing the game
+00:38:21.980Z   179.87  done
