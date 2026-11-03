@@ -474,7 +474,12 @@ impl ViewState {
         );
         let environment = EnvironmentMaps::new(shared);
         let mut sky_camera = crate::sky_occlusion::SkyCamera::new(shared);
-        sky_camera.set_inputs(shared, &frame_buffer, &shadow.occlusion);
+        sky_camera.set_inputs(
+            shared,
+            &frame_buffer,
+            &shadow.occlusion,
+            shadow.occlusion_size,
+        );
         let volumetrics = crate::volumetrics::Volumetrics::new(shared, &targets);
         let screen_stand_ins = ScreenMaps::stand_ins(shared, &volumetrics);
         let atmosphere = AtmosphereLuts::new(shared, &frame_buffer);
@@ -564,6 +569,7 @@ struct ExtraJob {
 struct SharedMaps {
     shadows: wgpu::TextureView,
     occlusion: wgpu::TextureView,
+    occlusion_size: u32,
     env_specular: wgpu::TextureView,
     env_irradiance: wgpu::TextureView,
     surface: wgpu::TextureView,
@@ -666,6 +672,7 @@ struct ScreenMaps {
     ssr: wgpu::TextureView,
     fog: wgpu::TextureView,
     gi: wgpu::TextureView,
+    aerial: wgpu::TextureView,
 }
 
 impl ScreenMaps {
@@ -677,6 +684,7 @@ impl ScreenMaps {
             ssr: targets.ssr.view.clone(),
             fog: volumetrics.view().clone(),
             gi: targets.gi.view.clone(),
+            aerial: volumetrics.aerial.view().clone(),
         }
     }
 
@@ -720,6 +728,7 @@ impl ScreenMaps {
             ssr: ssr.view,
             fog: volumetrics.stand_in().clone(),
             gi: gi.view,
+            aerial: volumetrics.aerial.stand_in().clone(),
         }
     }
 }
@@ -933,6 +942,18 @@ impl Renderer {
                         multisampled: false,
                     },
                 ),
+                // The aerial perspective table (aerial.rs). The 17th.
+                layout_entry(
+                    24,
+                    all,
+                    wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D3,
+                        multisampled: false,
+                    },
+                ),
+                // The sky occlusion map's cover pyramid (sky_occlusion.rs). The 18th.
+                layout_entry(25, all, crate::sky_occlusion::cover_binding()),
             ],
         });
         let shadow_view_layout =
@@ -1178,6 +1199,7 @@ impl Renderer {
             maps: SharedMaps {
                 shadows: self.shadow.array_view.clone(),
                 occlusion: self.shadow.occlusion.clone(),
+                occlusion_size: self.shadow.occlusion_size,
                 env_specular: self.environment.specular.clone(),
                 env_irradiance: self.environment.irradiance.view.clone(),
                 surface: self.surface_weather.view.clone(),
@@ -1215,12 +1237,14 @@ impl Renderer {
             }
             _ => {}
         }
-        let occlusion = self
+        let (occlusion, occlusion_size) = self
             .borrowed
             .as_ref()
-            .map_or(&self.shadow.occlusion, |b| &b.maps.occlusion);
+            .map_or((&self.shadow.occlusion, self.shadow.occlusion_size), |b| {
+                (&b.maps.occlusion, b.maps.occlusion_size)
+            });
         self.sky_camera
-            .set_inputs(&self.shared, &self.frame_buffer, occlusion);
+            .set_inputs(&self.shared, &self.frame_buffer, occlusion, occlusion_size);
         self.rebuild_frame_groups();
     }
 
@@ -1742,14 +1766,22 @@ impl Renderer {
                 self.shadow.occlusion_size,
                 wgpu::TextureUsages::COPY_DST,
             );
-            self.sky_camera
-                .set_inputs(&self.shared, &self.frame_buffer, &self.shadow.occlusion);
+            self.sky_camera.set_inputs(
+                &self.shared,
+                &self.frame_buffer,
+                &self.shadow.occlusion,
+                self.shadow.occlusion_size,
+            );
         }
         let lights_moved = self.lights.write(&self.shared.device, queue, light_bytes);
         cpu.step("volumetrics prepare");
-        let fog_moved =
+        let mut fog_moved =
             self.volumetrics
                 .prepare(world, &self.shared, &view, &settings, uniform.volumetrics);
+        fog_moved |= self
+            .volumetrics
+            .aerial
+            .prepare(&self.shared, &view, uniform.aerial);
         cpu.step("shadow views");
         if lights_moved || occlusion_resized || fog_moved || surface_resized || gi_atlas_moved {
             self.rebuild_frame_groups();
@@ -2264,6 +2296,13 @@ impl Renderer {
         // group).
         self.perf.pass(&mut cpu, &mut encoder, "volumetric fog");
         self.volumetrics.encode(&mut encoder, &self.prepass_group);
+        // The haze and atmosphere in front of distant surfaces: needs the far shadow map and
+        // the cloud shadows; shading reads it from frame binding 24 (a stand-in in the prepass
+        // group).
+        self.perf.pass(&mut cpu, &mut encoder, "aerial perspective");
+        self.volumetrics
+            .aerial
+            .encode(&mut encoder, &self.prepass_group);
         if settings.ambient_occlusion {
             self.perf.pass(&mut cpu, &mut encoder, "ambient occlusion");
             self.effects
@@ -3364,6 +3403,14 @@ fn create_frame_group(
             wgpu::BindGroupEntry {
                 binding: 23,
                 resource: view(gi_atlas),
+            },
+            wgpu::BindGroupEntry {
+                binding: 24,
+                resource: view(&maps.aerial),
+            },
+            wgpu::BindGroupEntry {
+                binding: 25,
+                resource: view(sky_camera.cover_view()),
             },
         ],
     })

@@ -231,6 +231,8 @@ pub(crate) struct Volumetrics {
     history_params: [f32; 4],
     /// Whether the passes run this frame.
     active: bool,
+    /// The haze and atmosphere beyond, per screen column (frame binding 24).
+    pub aerial: crate::aerial::AerialTable,
 }
 
 impl Volumetrics {
@@ -414,6 +416,7 @@ impl Volumetrics {
             history_exposure: 0.0,
             history_params: [0.0; 4],
             active: false,
+            aerial: crate::aerial::AerialTable::new(shared),
         }
     }
 

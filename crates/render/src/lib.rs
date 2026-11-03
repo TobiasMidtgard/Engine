@@ -62,6 +62,7 @@
 //! spawn_gltf_scene_deferred(&mut commands, scene, Transform::from_xyz(4.0, 0.0, 0.0));
 //! ```
 
+mod aerial;
 mod atmosphere;
 pub mod cloud_shadows;
 pub mod components;
