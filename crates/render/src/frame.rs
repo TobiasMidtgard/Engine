@@ -116,6 +116,9 @@ pub struct FrameUniform {
     /// The aerial perspective table (`aerial::frame_params`): its reach (m, 0 = off: every
     /// pixel marches), 1 / depth scale (1/m), 1 / log2(1 + reach / depth scale), depth slices.
     pub aerial: [f32; 4],
+    /// Shading knobs: sun-shadow filter taps (`RenderSettings::shadow_filter_taps`), unused,
+    /// unused, unused.
+    pub shading: [f32; 4],
 }
 
 /// Most [`SkyLightVolume`]s shaded per frame (nearest the camera first).
@@ -1037,6 +1040,12 @@ pub fn frame_uniform(world: &World, v: &ViewData) -> FrameUniform {
             .and_then(|c| world.get::<crate::planar_reflection::MirrorCamera>(c))
             .map_or([0.0; 4], |m| m.clip_plane(v.origin)),
         aerial: crate::aerial::frame_params(settings, v),
+        shading: [
+            settings.shadow_filter_taps.clamp(1, 64) as f32,
+            0.0,
+            0.0,
+            0.0,
+        ],
     }
 }
 
@@ -1092,7 +1101,8 @@ mod tests {
         // 7 mat4 + 15 vec4 + 4 mat4 + 3 vec4 + ground, sky occlusion, volumes, then the
         // screen-space block (mat4 + 4 vec4), volumetric fog (vec4), far shadow (mat4 + vec4),
         // sky (vec4), surface weather (2 vec4), cloud shadows (mat4 + 2 vec4), the air (5 vec4),
-        // the window (vec4), probe GI (3 vec4), the clip plane (vec4), the aerial table (vec4).
+        // the window (vec4), probe GI (3 vec4), the clip plane (vec4), the aerial table (vec4),
+        // shading knobs (vec4).
         assert_eq!(
             std::mem::size_of::<FrameUniform>(),
             7 * 64
@@ -1114,6 +1124,7 @@ mod tests {
                 + 5 * 16
                 + 16
                 + 3 * 16
+                + 16
                 + 16
                 + 16
         );

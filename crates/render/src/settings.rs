@@ -219,6 +219,9 @@ pub struct RenderSettings {
     /// through the depth buffer, catching small shadows the shadow map is too coarse for
     /// (pebbles, grass, feet on the ground). 0 = off.
     pub contact_shadow_length: f32,
+    /// Shadow-map filter taps per pixel for the sun's soft shadows (PCSS filter step, 1..64).
+    /// Planar reflections take half (`for_reflection`).
+    pub shadow_filter_taps: u32,
     /// Ground-truth ambient occlusion (GTAO) from the depth prepass: darkens ambient light in
     /// creases, under objects and where things touch.
     pub ambient_occlusion: bool,
@@ -495,6 +498,7 @@ impl Default for RenderSettings {
             shadow_softness: 1.0,
             sun_penumbra_scale: 1.0,
             contact_shadow_length: 0.4,
+            shadow_filter_taps: 16,
             ambient_occlusion: true,
             ao_radius: 1.5,
             ao_intensity: 1.0,
@@ -682,6 +686,24 @@ impl RenderSettings {
         s.max_point_lights =
             ((self.max_point_lights as f32 * effects.clamp(0.25, 1.0)) as u32).max(8);
         s
+    }
+}
+
+impl RenderSettings {
+    /// These settings for a planar reflection's view ([`crate::PlanarReflection`]). The
+    /// picture covers a fraction of the screen's pixels and is seen through ripples, so it keeps
+    /// the look but drops what only shows up close: no screen-space contact shadows (0.4 m
+    /// marches, under a pixel in the picture) and half the sun-shadow filter taps (the view's
+    /// anti-aliasing averages the noise). The renderer also skips the view's bloom and
+    /// tonemapping, as the picture is taken before them. HDRP does the same for reflection
+    /// cameras (`FrameSettings.Sanitize` turns post-processing off), and Unreal gives planar
+    /// reflections their own screen percentage and LOD distance.
+    pub fn for_reflection(&self) -> Self {
+        Self {
+            contact_shadow_length: 0.0,
+            shadow_filter_taps: (self.shadow_filter_taps / 2).max(4),
+            ..self.clone()
+        }
     }
 }
 

@@ -237,7 +237,6 @@ fn wind_offset(rel: vec3<f32>, height01: f32, sway: f32) -> vec3<f32> {
 
 // ---------------------------------------------------------------- shadows
 const SHADOW_BLOCKER_TAPS: i32 = 8;
-const SHADOW_PCF_TAPS: i32 = 16;
 const GOLDEN_ANGLE: f32 = 2.39996323;
 
 // Per-pixel noise in [0, 1) that changes every frame when temporal anti-aliasing is on (its
@@ -338,12 +337,14 @@ fn cascade_visibility(rel: vec3<f32>, n: vec3<f32>, depth: f32, noise: f32) -> f
     let slope = sqrt(max(1.0 - n_dot_l * n_dot_l, 0.0)) / max(abs(n_dot_l), 0.2);
     let z_ref = z - radius * texel_world * min(slope, 5.0) * z_per_meter * 0.5;
 
+    // Filter taps: `RenderSettings::shadow_filter_taps` (fewer in planar reflections).
+    let taps = clamp(i32(frame.shading.x), 1, 64);
     var sum = 0.0;
-    for (var i = 0; i < SHADOW_PCF_TAPS; i++) {
-        let o = vogel_disk(i, SHADOW_PCF_TAPS, angle) * radius * texel;
+    for (var i = 0; i < taps; i++) {
+        let o = vogel_disk(i, taps, angle) * radius * texel;
         sum += textureSampleCompareLevel(shadow_map, shadow_sampler, uv + o, cascade, z_ref);
     }
-    return sum / f32(SHADOW_PCF_TAPS);
+    return sum / f32(taps);
 }
 
 // Sun visibility from the far shadow map: one coarse map around the camera (texels of several

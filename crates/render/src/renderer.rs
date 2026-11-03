@@ -566,6 +566,9 @@ struct Composite {
 struct ExtraJob {
     size: UVec2,
     settings: RenderSettings,
+    /// A planar reflection's view: its picture is taken before bloom and tonemapping, which
+    /// it skips.
+    mirror: bool,
 }
 
 /// The main view's maps a mirror's view binds instead of its own
@@ -653,6 +656,8 @@ struct FrameWork {
     screenshots: Vec<PathBuf>,
     /// An extra view's frame: no window, screenshots or report of its own.
     extra: bool,
+    /// A planar reflection's view (`ExtraJob::mirror`): no bloom or tonemapping.
+    mirror: bool,
     /// Extra views' pictures to copy into this view's output, over the scene and under the
     /// overlays.
     composites: Vec<Composite>,
@@ -1455,6 +1460,11 @@ impl Renderer {
                 .quality
                 .map(|quality| swap_quality(world, Some(quality)));
             let settings = crate::settings::effective(world);
+            let settings = if mirror.is_some() {
+                settings.for_reflection()
+            } else {
+                settings
+            };
             let mut state = match self.extra_views.remove(&camera) {
                 Some(state) => state,
                 None => ExtraViewState {
@@ -1485,7 +1495,15 @@ impl Renderer {
             shared_lighting += lighting.is_some() as u32;
             self.set_borrowed(lighting, &settings);
             world.insert_resource(crate::frame::RenderingExtraView(camera));
-            let frame = self.extract_frame(world, started, Some(ExtraJob { size, settings }));
+            let frame = self.extract_frame(
+                world,
+                started,
+                Some(ExtraJob {
+                    size,
+                    settings,
+                    mirror: mirror.is_some(),
+                }),
+            );
             world.remove_resource::<crate::frame::RenderingExtraView>();
             if let Some(quality) = game_quality {
                 swap_quality(world, quality);
@@ -1637,6 +1655,7 @@ impl Renderer {
         // Size & vsync: the scene fills the active camera's viewport, the output the window
         // (an extra view's picture).
         let is_extra = extra.is_some();
+        let mirror = extra.as_ref().is_some_and(|job| job.mirror);
         let (window, settings) = match extra {
             Some(job) => (job.size, job.settings),
             None => (
@@ -1962,6 +1981,7 @@ impl Renderer {
         }
         FrameWork {
             extra: is_extra,
+            mirror,
             composites: Vec::new(),
             started,
             extract_ms: started.elapsed().as_secs_f32() * 1000.0,
@@ -2003,6 +2023,7 @@ impl Renderer {
             cloud_area,
             screenshots,
             extra,
+            mirror,
             composites,
         } = frame;
         let recording = Instant::now();
@@ -2582,9 +2603,9 @@ impl Renderer {
             real_dt,
         );
 
-        // Bloom.
+        // Bloom (not in a planar reflection's view: its picture is the HDR image above).
         self.perf.pass(&mut cpu, &mut encoder, "bloom");
-        let levels = self.targets.bloom.len();
+        let levels = if mirror { 0 } else { self.targets.bloom.len() };
         for i in 0..levels {
             let mut pass = fullscreen_pass(
                 &mut encoder,
@@ -2608,9 +2629,9 @@ impl Renderer {
             pass.draw(0..3, 0..1);
         }
 
-        // Tonemap.
+        // Tonemap (not in a planar reflection's view either).
         self.perf.pass(&mut cpu, &mut encoder, "tonemap");
-        {
+        if !mirror {
             // Cleared to black around the scene's viewport.
             let mut pass = fullscreen_pass(&mut encoder, "tonemap", &self.targets.ldr.view, true);
             pass.set_viewport(
