@@ -204,6 +204,64 @@ pub fn chop(
     }
 }
 
+/// How much of a fresh crown's radius holds a fallen trunk off the ground: the limbs under it
+/// bend and snap, but a full crown still props its end up (a felled tree rests on its crown
+/// and its butt, the trunk between them clear of the ground).
+const CROWN_PROP: f32 = 0.35;
+
+/// What holds a lying tree's axis above the ground `s` of the way from its butt to its tip
+/// (meters), and how far either side of the axis that support reaches: the trunk's own
+/// radius, tapering, and past the crown's base the crushed crown, rounded at its ends.
+fn lying_support(sp: &PlantSpecies, r: f32, crown_r: f32, has_crown: bool, s: f32) -> (f32, f32) {
+    let trunk = r * (1.0 - 0.7 * s);
+    if !has_crown {
+        return (trunk, 0.0);
+    }
+    let (height, cut) = model_heights(sp);
+    let start = ((sp.shape.crown_base * height - cut) / (height - cut).max(0.1)).clamp(0.0, 0.9);
+    if s <= start {
+        return (trunk, 0.0);
+    }
+    let u = ((s - start) / (1.0 - start)).clamp(0.0, 1.0) * 2.0 - 1.0;
+    let round = (1.0 - u * u).max(0.0).sqrt();
+    (
+        trunk.max(crown_r * CROWN_PROP * round),
+        crown_r * 0.6 * round,
+    )
+}
+
+/// The pitch (radians, up from level) at which a pole of `length` pivoting at `from`, lying
+/// toward `dir`, rests on the highest of its supports (`support(s)`: height above the ground
+/// and reach to either side, `s` from 0 at `from` to 1 at the tip), so nothing along it sinks
+/// into a bump or a rise in the ground. Ground is sampled along it and either side under the
+/// crown.
+fn resting_pitch(
+    ground: Option<&Ground>,
+    from: DVec3,
+    dir: Vec3,
+    length: f32,
+    support: impl Fn(f32) -> (f32, f32),
+) -> f32 {
+    let side = Vec3::Y.cross(dir).normalize_or(Vec3::X);
+    let mut pitch = -0.6f32;
+    const SAMPLES: usize = 12;
+    for i in 1..=SAMPLES {
+        let s = i as f32 / SAMPLES as f32;
+        let (up, reach) = support(s);
+        // Where the pole lies over the ground, about (it is close to level).
+        let p = from + (dir * length * s).as_dvec3();
+        let mut floor = ground_y(ground, p);
+        if reach > 0.1 {
+            for k in [-1.0f32, 1.0] {
+                floor = floor.max(ground_y(ground, p + (side * reach * k).as_dvec3()));
+            }
+        }
+        let rise = (floor + up as f64 - from.y) as f32 / (length * s);
+        pitch = pitch.max(rise.clamp(-0.6, 0.98).asin());
+    }
+    pitch
+}
+
 /// Ground height under `p` (flat ground at y = 0 when the world has none).
 fn ground_y(ground: Option<&Ground>, p: DVec3) -> f64 {
     ground
@@ -241,12 +299,16 @@ pub fn fell_tree(world: &mut World, entity: Entity, dir: Vec3) -> Option<Entity>
     let charred = matches!(plant.stage, PlantStage::Burnt { .. });
     let mass_kg = sp.fuel_kg * plant.size * plant.size;
 
-    // Where the crown hits the ground decides the landing angle.
+    // It lands when the first of the ground under its length and the crown spread either
+    // side meets it (playtest 3, #33: one tip sample let the crown sink into rises).
     let ground = world.get_resource::<Ground>();
-    let tip_ground = ground_y(ground, hinge + (dir * length).as_dvec3());
-    let crown_support = sp.crown_radius_m * plant.size * plant.genes.crown * 0.12;
-    let drop = (hinge.y - tip_ground - crown_support as f64) as f32;
-    let land_angle = (drop / length).clamp(-0.6, 0.98).acos();
+    let r = (sp.trunk_radius_m * plant.size * plant.genes.crown).max(0.04);
+    let crown_r = sp.crown_radius_m * plant.size * plant.genes.crown;
+    let has_crown = years_dead < LOG_BARE_YEARS;
+    let pitch = resting_pitch(ground, hinge, dir, length, |s| {
+        lying_support(&sp, r, crown_r, has_crown, s)
+    });
+    let land_angle = std::f32::consts::FRAC_PI_2 - pitch;
 
     if let Some(mut p) = world.get_mut::<Plant>(entity) {
         p.stage = PlantStage::Stump { years: 0.0 };
@@ -390,14 +452,17 @@ pub fn log_rest_transform(
     let sink = 0.9 - 0.4 * rot.clamp(0.0, 1.0);
     let mut butt = stump + (side * r * 2.2 * flip + dir * r).as_dvec3();
     butt.y = ground_y(ground, butt) + (r * sink) as f64;
-    let mut tip_p = butt + (dir * length).as_dvec3();
-    let crown_support = if old {
-        r * 0.35 * sink
-    } else {
-        (sp.crown_radius_m * size * pose.genes.crown * 0.12).max(r)
-    };
-    tip_p.y = ground_y(ground, tip_p) + crown_support as f64;
-    let axis = (tip_p - butt).as_vec3().normalize_or(dir);
+    // It rests on its butt and on whatever is highest under the rest of it: the crown on
+    // flat ground, a rise or a rock under its middle on rough ground.
+    let crown_r = sp.crown_radius_m * size * pose.genes.crown;
+    let pitch = resting_pitch(ground, butt, dir, length, |s| {
+        if old {
+            (r * (1.0 - 0.7 * s) * sink, 0.0)
+        } else {
+            lying_support(sp, r, crown_r, true, s)
+        }
+    });
+    let axis = (dir * pitch.cos() + Vec3::Y * pitch.sin()).normalize_or(dir);
     let lying = Quat::from_rotation_arc(Vec3::Y, axis) * model_spin(&pose.genes);
     let roll = if old {
         // Turn the model's +X side (where the log mesh carries its moss) up, give or take.
@@ -1082,6 +1147,55 @@ mod tests {
             assert!(
                 rotten.translation.y < old.translation.y,
                 "it sinks as it rots"
+            );
+        }
+    }
+
+    /// A ridge 1.2 m high across the ground 6 m out along +X.
+    struct Ridge;
+    impl engine_world::GroundQuery for Ridge {
+        fn sample(&self, p: DVec3) -> Option<engine_world::GroundSample> {
+            let h = 1.2 * (1.0 - ((p.x - 6.0) / 1.5).powi(2)).max(0.0);
+            Some(engine_world::GroundSample {
+                height: h,
+                normal: Vec3::Y,
+                surface: engine_world::SurfaceId(3),
+            })
+        }
+    }
+
+    #[test]
+    fn a_log_rests_on_a_ridge_and_its_crown_instead_of_sinking_into_them() {
+        let lib = PlantLibrary::default();
+        let sp = lib.get(lib.id("oak").unwrap());
+        let pose = LogPose::default();
+        let size = 0.8;
+        let (height, cut) = model_heights(sp);
+        let r = sp.trunk_radius_m * size;
+        let along = |t: &Transform, d: f32| {
+            let axis = t.rotation * Vec3::Y;
+            let butt = t.translation + (t.rotation * (t.scale * Vec3::Y * cut)).as_dvec3();
+            let s = d / axis.x.max(1e-3);
+            butt + (axis * s).as_dvec3()
+        };
+        for ground in [Ground::default(), Ground(std::sync::Arc::new(Ridge))] {
+            let rest = log_rest_transform(Some(&ground), DVec3::ZERO, &pose, size, sp, 0.0, 0.0);
+            // Over the ridge's crest the trunk stays above it.
+            let crest = along(&rest, 6.0);
+            let floor = ground.height(crest).unwrap();
+            assert!(
+                crest.y >= floor + r as f64 * 0.25,
+                "{} over {floor}",
+                crest.y
+            );
+            // The crown holds the top end up by a good part of its radius.
+            let crown_mid = (height - cut) * size * 0.75;
+            let p = along(&rest, crown_mid);
+            let crown_r = sp.crown_radius_m * size;
+            assert!(
+                p.y - ground.height(p).unwrap() > (crown_r * CROWN_PROP * 0.6) as f64,
+                "crown pressed flat: {}",
+                p.y
             );
         }
     }

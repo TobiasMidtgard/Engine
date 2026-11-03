@@ -294,6 +294,25 @@ fn main() {
     }
     let started = std::time::Instant::now();
     app.update();
+    // Regions grow their history and plant on workers over frames: wait until the plant count
+    // holds still before picking a tree to fell.
+    let (mut last, mut still) = (0usize, 0u32);
+    for _ in 0..2400 {
+        simulate(&mut app, 1);
+        std::thread::sleep(std::time::Duration::from_millis(25));
+        let n = app.world.query::<&Plant>().iter(&app.world).count();
+        still = if n == last { still + 1 } else { 0 };
+        last = n;
+        if n > 0
+            && still > 40
+            && app
+                .world
+                .resource::<engine_foliage::FoliageLoading>()
+                .is_ready()
+        {
+            break;
+        }
+    }
     println!(
         "grew the forest and cave in {:.1} s",
         started.elapsed().as_secs_f32()
