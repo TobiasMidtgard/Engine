@@ -298,6 +298,31 @@ fn shots() -> Vec<Shot> {
             frames: 10,
             face_moon: false,
         },
+        // Climbing out: the same heaps from 8, 16 and 25 km up.
+        Shot {
+            name: "19_climb_8km",
+            setup: vec![set("partly_cloudy"), hour(11.0), advance(60.0)],
+            eye: DVec3::new(0.0, 8000.0, 6000.0),
+            target: DVec3::new(0.0, 2000.0, 0.0),
+            frames: 10,
+            face_moon: false,
+        },
+        Shot {
+            name: "20_climb_16km",
+            setup: vec![],
+            eye: DVec3::new(0.0, 16_000.0, 12_000.0),
+            target: DVec3::new(0.0, 2000.0, 0.0),
+            frames: 10,
+            face_moon: false,
+        },
+        Shot {
+            name: "21_climb_25km",
+            setup: vec![],
+            eye: DVec3::new(0.0, 25_000.0, 18_000.0),
+            target: DVec3::new(0.0, 2000.0, 0.0),
+            frames: 10,
+            face_moon: false,
+        },
         Shot {
             name: "18_flying_through_clouds",
             setup: vec![set("partly_cloudy"), hour(11.0), advance(60.0)],
