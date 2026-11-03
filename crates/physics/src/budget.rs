@@ -24,10 +24,11 @@
 //! after the step's smoothed time stays over budget, and given back after it stays well under
 //! for two seconds, so a level doesn't flicker; `PhysicsStats::load_level` shows it.
 //!
-//! Off by default (round 21c, RTX 5080 PC): the yard's busiest step is near 4 ms there, and
-//! runs that sat at levels 1-3 spent 10-12 ms a frame in physics against 2 ms at level 0. Those
-//! levels were taken on the step's span, which held the frame's other systems running beside
-//! it; the budget now reads the step's own work (`PhysicsStats::step_ms`).
+//! 8 ms by default (`PhysicsSettings::step_budget_ms`). Round 21c's runs that sat at levels 1-3
+//! spent 10-12 ms a frame in physics against 2 ms at level 0, because the levels were taken on
+//! the step's span, which held the frame's other systems running beside it; they now read the
+//! step's own work (`PhysicsStats::step_ms`, 21a5efc7). Round 21d (PC, yard_bench): off, the
+//! yard's median step is 7.0 ms and p95 12.7; at 8 ms, 3.0 and 8.8.
 
 /// Highest level.
 pub const MAX_LEVEL: u8 = 3;

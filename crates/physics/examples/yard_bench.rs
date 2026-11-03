@@ -7,7 +7,7 @@
 //!
 //! `stations` defaults to all of them (`galton`, `tower`, `jenga`, ...: [`Station::key`]).
 //! `PHYSICS_REPORT=N` also logs the per-region report every N steps; `PHYSICS_BUDGET_MS=ms`
-//! turns the step budget on (`0`: off, as by default).
+//! sets the step budget (`0`: off; 8 by default).
 
 use engine_core::math::DVec3;
 use engine_core::prelude::*;

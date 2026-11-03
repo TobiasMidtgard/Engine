@@ -23,9 +23,11 @@ pub struct PhysicsSettings {
     /// Time one physics step may take, ms: when steps keep running over it, big simulations
     /// degrade a level at a time (bodies settling into sleep sooner, coarse level of detail
     /// nearer) until they fit, and recover when there is room again
-    /// (see `PhysicsStats::load_level`). `None` = never degrade, the default: on the RTX 5080
-    /// PC the step stays near 4 ms with the yard at its busiest (round 21c), and the levels'
-    /// changes to sleep and level of detail cost more there than they saved.
+    /// (see `PhysicsStats::load_level`). `None` = never degrade. 8 ms by default: on the RTX
+    /// 5080 PC the yard's steps take 7 ms (median) without it and 3 with it (round 21d). Its
+    /// levels follow `PhysicsStats::step_ms`, physics's own work (until 21a5efc7 they followed
+    /// the step's span, which held other systems' time, and cost the PC 20-25% fps). They
+    /// follow wall time, so tests that compare settled results turn it off.
     pub step_budget_ms: Option<f32>,
     /// How far colliders may sink into each other before being pushed apart, meters. Smaller
     /// = tall stacks sag less, but resting contacts need more work.
@@ -97,7 +99,7 @@ impl Default for PhysicsSettings {
             solver_iterations: 8,
             max_substep_secs: 1.0 / 60.0,
             max_substeps: 24,
-            step_budget_ms: None,
+            step_budget_ms: Some(8.0),
             allowed_penetration_m: 0.001,
             contact_stiffness_hz: 60.0,
             region_radius_m: 1000.0,
