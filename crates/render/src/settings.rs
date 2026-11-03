@@ -331,6 +331,12 @@ pub struct RenderSettings {
     /// HDRP's planar probe likewise skip shadow maps of their own). Off: the mirror draws its
     /// own every frame. `ENGINE_MIRROR_SHARES_LIGHTING=on|off` overrides it.
     pub mirror_shares_lighting: bool,
+    /// The haze and the atmosphere between the camera and distant surfaces come from a small
+    /// table built once a frame (`aerial.rs`, after Hillaire 2020's aerial perspective volume)
+    /// instead of being marched for every pixel: one lookup where each pixel took an 8-step
+    /// atmosphere march and 8 haze shadow samples. Off: every pixel marches.
+    /// `ENGINE_AERIAL_TABLE=on|off` overrides it.
+    pub aerial_table: bool,
     /// The sky's own flat cloud layer (a 2D deck 1.5 km up whose cover follows
     /// `WeatherState::cloud_cover`), in the sky and in the environment map that lights the
     /// scene. Turn it off when a feature draws its own clouds over the sky (volumetric clouds):
@@ -523,6 +529,7 @@ impl Default for RenderSettings {
             perf_log_secs: 10.0,
             environment_interval: 4,
             mirror_shares_lighting: true,
+            aerial_table: true,
             sky_cloud_layer: true,
             sky_occlusion: true,
             sky_occlusion_extent: 256.0,
@@ -580,12 +587,17 @@ pub(crate) fn effective(world: &World) -> RenderSettings {
     if let Some(on) = switch_from_env("ENGINE_MIRROR_SHARES_LIGHTING", &MIRROR) {
         s.mirror_shares_lighting = on;
     }
+    static AERIAL: std::sync::OnceLock<Option<bool>> = std::sync::OnceLock::new();
+    if let Some(on) = switch_from_env("ENGINE_AERIAL_TABLE", &AERIAL) {
+        s.aerial_table = on;
+    }
     s
 }
 
 /// `<name>=on|off`, when set, overrides a setting (to compare the two on one build, in any
 /// game): `ENGINE_PROBE_GI` (`RenderSettings::probe_gi`), `ENGINE_MIRROR_SHARES_LIGHTING`
-/// (`RenderSettings::mirror_shares_lighting`). Read once.
+/// (`RenderSettings::mirror_shares_lighting`), `ENGINE_AERIAL_TABLE`
+/// (`RenderSettings::aerial_table`). Read once.
 fn switch_from_env(name: &str, cell: &'static std::sync::OnceLock<Option<bool>>) -> Option<bool> {
     *cell.get_or_init(
         || match std::env::var(name).ok()?.to_ascii_lowercase().as_str() {

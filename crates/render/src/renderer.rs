@@ -666,6 +666,7 @@ struct ScreenMaps {
     ssr: wgpu::TextureView,
     fog: wgpu::TextureView,
     gi: wgpu::TextureView,
+    aerial: wgpu::TextureView,
 }
 
 impl ScreenMaps {
@@ -677,6 +678,7 @@ impl ScreenMaps {
             ssr: targets.ssr.view.clone(),
             fog: volumetrics.view().clone(),
             gi: targets.gi.view.clone(),
+            aerial: volumetrics.aerial.view().clone(),
         }
     }
 
@@ -720,6 +722,7 @@ impl ScreenMaps {
             ssr: ssr.view,
             fog: volumetrics.stand_in().clone(),
             gi: gi.view,
+            aerial: volumetrics.aerial.stand_in().clone(),
         }
     }
 }
@@ -930,6 +933,16 @@ impl Renderer {
                     wgpu::BindingType::Texture {
                         sample_type: wgpu::TextureSampleType::Float { filterable: true },
                         view_dimension: wgpu::TextureViewDimension::D2Array,
+                        multisampled: false,
+                    },
+                ),
+                // The aerial perspective table (aerial.rs). The 17th.
+                layout_entry(
+                    24,
+                    all,
+                    wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D3,
                         multisampled: false,
                     },
                 ),
@@ -1747,9 +1760,13 @@ impl Renderer {
         }
         let lights_moved = self.lights.write(&self.shared.device, queue, light_bytes);
         cpu.step("volumetrics prepare");
-        let fog_moved =
+        let mut fog_moved =
             self.volumetrics
                 .prepare(world, &self.shared, &view, &settings, uniform.volumetrics);
+        fog_moved |= self
+            .volumetrics
+            .aerial
+            .prepare(&self.shared, &view, uniform.aerial);
         cpu.step("shadow views");
         if lights_moved || occlusion_resized || fog_moved || surface_resized || gi_atlas_moved {
             self.rebuild_frame_groups();
@@ -2264,6 +2281,13 @@ impl Renderer {
         // group).
         self.perf.pass(&mut cpu, &mut encoder, "volumetric fog");
         self.volumetrics.encode(&mut encoder, &self.prepass_group);
+        // The haze and atmosphere in front of distant surfaces: needs the far shadow map and
+        // the cloud shadows; shading reads it from frame binding 24 (a stand-in in the prepass
+        // group).
+        self.perf.pass(&mut cpu, &mut encoder, "aerial perspective");
+        self.volumetrics
+            .aerial
+            .encode(&mut encoder, &self.prepass_group);
         if settings.ambient_occlusion {
             self.perf.pass(&mut cpu, &mut encoder, "ambient occlusion");
             self.effects
@@ -3364,6 +3388,10 @@ fn create_frame_group(
             wgpu::BindGroupEntry {
                 binding: 23,
                 resource: view(gi_atlas),
+            },
+            wgpu::BindGroupEntry {
+                binding: 24,
+                resource: view(&maps.aerial),
             },
         ],
     })

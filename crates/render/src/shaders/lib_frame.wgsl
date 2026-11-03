@@ -48,6 +48,9 @@
 // radiance times PROBE_GI_SCALE), layer 1 the mean distance and squared distance to what it sees,
 // whether it is active and the epoch it was written in. The 16th sampled texture in group 0.
 @group(0) @binding(23) var gi_atlas: texture_2d_array<f32>;
+// The aerial perspective table (aerial.rs, `aerial_at`): the haze and the atmosphere in front
+// of distant surfaces, built once a frame (a clear stand-in in the passes that build it).
+@group(0) @binding(24) var aerial_table: texture_3d<f32>;
 
 // Multiply final radiance by this before writing to the HDR target.
 fn pre_expose(c: vec3<f32>) -> vec3<f32> { return c * frame.exposure.x; }
@@ -1331,21 +1334,26 @@ fn far_shadow_sun(rel: vec3<f32>) -> f32 {
 const HAZE_SHADOW_SAMPLES: i32 = 8;
 
 fn height_fog_sun_visibility(dir: vec3<f32>, t0: f32, t1: f32, tr: f32, noise: f32) -> f32 {
+    return height_fog_sun_visibility_n(dir, t0, t1, tr, noise, HAZE_SHADOW_SAMPLES);
+}
+
+// `height_fog_sun_visibility` with `samples` samples.
+fn height_fog_sun_visibility_n(dir: vec3<f32>, t0: f32, t1: f32, tr: f32, noise: f32, samples: i32) -> f32 {
     let mountains = frame.far_shadow_params.x > 0.0 && frame.sun_color.w > 0.5;
     let clouds = frame.cloud_shadow_params.x > 0.5;
     if ((!mountains && !clouds) || tr >= 1.0) { return 1.0; }
     var sum = 0.0;
-    for (var i = 0; i < HAZE_SHADOW_SAMPLES; i++) {
+    for (var i = 0; i < samples; i++) {
         // Optical depth from t0 at which this share of the segment's scattering is reached,
         // then where along the ray the fog adds up to it.
-        let tau = -log(1.0 - (f32(i) + noise) / f32(HAZE_SHADOW_SAMPLES) * (1.0 - tr));
+        let tau = -log(1.0 - (f32(i) + noise) / f32(samples) * (1.0 - tr));
         let q = dir * (t0 + height_fog_depth_at(dir, t0, t1, tau));
         var lit = 1.0;
         if (mountains) { lit = far_shadow_sun(q); }
         if (clouds) { lit *= cloud_shadow(q); }
         sum += lit;
     }
-    return sum / f32(HAZE_SHADOW_SAMPLES);
+    return sum / f32(samples);
 }
 
 // Volumetric fog between the camera and view depth `depth` (meters, up to the range) in the
@@ -1470,6 +1478,74 @@ fn limit_fog_opacity(fog: vec4<f32>) -> vec4<f32> {
     return vec4<f32>(fog.rgb * (frame.fog.w / max(1.0 - fog.a, 1e-4)), min_t);
 }
 
+// Distance (m) of the aerial perspective table's slice boundary `s` (aerial.rs
+// `slice_distance`).
+fn aerial_slice_distance(s: f32) -> f32 {
+    let p = frame.aerial;
+    return (exp2(s / (p.w * p.z)) - 1.0) / p.y;
+}
+
+// What the aerial perspective table holds between the camera and a point: the height fog
+// beyond the volumetric range (light, pre-exposed, and transmittance) and the atmosphere
+// (light, pre-exposed and sunlit, and transmittance per channel).
+struct AerialPerspective {
+    fog: vec4<f32>,
+    air_light: vec3<f32>,
+    air_t: vec3<f32>,
+};
+
+// True when the aerial perspective table covers `dist` meters: it is on, built this frame
+// (passes drawn before it, and compute passes in the prepass group, see the one-texel stand-in
+// and march per pixel instead), and the surface is within its reach.
+fn aerial_reaches(dist: f32) -> bool {
+    return frame.aerial.x > 0.0 && dist < frame.aerial.x && textureDimensions(aerial_table).z > 1u;
+}
+
+// The aerial perspective table at camera-relative `rel`, `dist` meters away (within its
+// reach): bilinear across the four columns around the pixel, and within the slice the light
+// builds up as transmittance falls (as `froxel_column_fog` takes the volumetric fog's slices),
+// so the slices don't show as bands.
+fn aerial_at(rel: vec3<f32>, dist: f32) -> AerialPerspective {
+    let p = frame.aerial;
+    let clip = frame.unjittered_view_proj * vec4<f32>(rel, 1.0);
+    let uv = clip.xy / max(clip.w, 1e-6) * vec2<f32>(0.5, -0.5) + 0.5;
+    let size = vec3<f32>(textureDimensions(aerial_table));
+    let columns = size.x / 3.0;
+    let s = min(log2(1.0 + dist * p.y) * p.z * p.w, p.w - 1e-3);
+    let k = floor(s);
+    let d0 = aerial_slice_distance(k);
+    let d1 = aerial_slice_distance(k + 1.0);
+    let f = saturate((dist - d0) / max(d1 - d0, 1e-6));
+    // Columns clamped to their part, so the parts never blend into each other.
+    let x = clamp(uv.x * columns, 0.5, columns - 0.5);
+    let y = clamp(uv.y, 0.5 / size.y, 1.0 - 0.5 / size.y);
+    let z_far = (k + 0.5) / size.z;
+    let z_near = (k - 0.5) / size.z;
+    let far_fog = textureSampleLevel(aerial_table, linear_clamp, vec3<f32>(x / size.x, y, z_far), 0.0);
+    let far_air = textureSampleLevel(aerial_table, linear_clamp, vec3<f32>((x + columns) / size.x, y, z_far), 0.0);
+    let far_air_gb = textureSampleLevel(aerial_table, linear_clamp, vec3<f32>((x + 2.0 * columns) / size.x, y, z_far), 0.0);
+    // At the camera: clear air.
+    var near_fog = vec4<f32>(0.0, 0.0, 0.0, 1.0);
+    var near_air = vec4<f32>(0.0, 0.0, 0.0, 1.0);
+    var near_air_gb = vec4<f32>(1.0, 1.0, 0.0, 0.0);
+    if (k >= 1.0) {
+        near_fog = textureSampleLevel(aerial_table, linear_clamp, vec3<f32>(x / size.x, y, z_near), 0.0);
+        near_air = textureSampleLevel(aerial_table, linear_clamp, vec3<f32>((x + columns) / size.x, y, z_near), 0.0);
+        near_air_gb = textureSampleLevel(aerial_table, linear_clamp, vec3<f32>((x + 2.0 * columns) / size.x, y, z_near), 0.0);
+    }
+    var out: AerialPerspective;
+    let slice_t = clamp(far_fog.a / max(near_fog.a, 1e-6), 1e-6, 1.0);
+    let t = pow(slice_t, f);
+    var share = f;
+    if (slice_t < 0.999) { share = (1.0 - t) / (1.0 - slice_t); }
+    out.fog = vec4<f32>(near_fog.rgb + (far_fog.rgb - near_fog.rgb) * share, near_fog.a * t);
+    let near_t = max(vec3<f32>(near_air.a, near_air_gb.xy), vec3<f32>(1e-6));
+    let far_t = vec3<f32>(far_air.a, far_air_gb.xy);
+    out.air_t = near_t * pow(clamp(far_t / near_t, vec3<f32>(1e-6), vec3<f32>(1.0)), vec3<f32>(f));
+    out.air_light = mix(near_air.rgb, far_air.rgb, f);
+    return out;
+}
+
 // Fog and atmospheric haze between the camera and a surface at camera-relative `rel`, in two
 // parts: the light they scatter toward the camera (pre-exposed) and the share of the surface's
 // own light that gets through, per channel (the air dims blue more than red). What `apply_fog`
@@ -1497,6 +1573,24 @@ fn surface_fog(rel: vec3<f32>) -> SurfaceFog {
         let range = frame.volumetrics.x;
         fog = volumetric_fog_at(rel, min(depth, range));
         start = select(dist, dist * range / depth, depth > range);
+    }
+    if (aerial_reaches(dist)) {
+        // The table holds the height fog beyond the volumetric range and the atmosphere.
+        let a = aerial_at(rel, dist);
+        if (start < dist) {
+            fog = vec4<f32>(fog.rgb + a.fog.rgb * fog.a, fog.a * a.fog.a);
+        }
+        fog = limit_fog_opacity(fog);
+        var out: SurfaceFog;
+        out.inscatter = fog.rgb;
+        out.transmittance = vec3<f32>(fog.a);
+        if (dist > 200.0) {
+            let overcast = smoothstep(0.55, 0.88, frame.weather.z);
+            let deck_lit = (1.0 - a.air_t) * (fog_sky_light() + frame.ambient.rgb) * overcast;
+            out.inscatter = out.inscatter * a.air_t + a.air_light + pre_expose(deck_lit);
+            out.transmittance *= a.air_t;
+        }
+        return out;
     }
     if (start < dist) {
         let tr = exp(-height_fog_optical_depth(dir, start, dist));
@@ -1568,7 +1662,17 @@ fn apply_full_sky_fog(color: vec3<f32>, dir: vec3<f32>, pixel: vec2<f32>) -> vec
         fog = volumetric_fog_at(dir, min(frame.volumetrics.x, end * depth));
         start = frame.volumetrics.x / depth;
     }
-    if (frame.fog.x > 0.0 && start < end) {
+    // Near the horizon the haze to the sky thickens too fast between the table's rows (a
+    // degree apart), so a band two degrees each side of it marches per pixel.
+    let elevation = abs(dot(dir, fog_up(vec3<f32>(0.0))));
+    if (elevation > 0.035 && aerial_reaches(end)) {
+        // The aerial perspective table holds the height fog beyond the volumetric range, so
+        // the sky's haze is the one the hills in front of it fade into.
+        if (frame.fog.x > 0.0 && start < end) {
+            let a = aerial_at(dir * end, end);
+            fog = vec4<f32>(fog.rgb + a.fog.rgb * fog.a, fog.a * a.fog.a);
+        }
+    } else if (frame.fog.x > 0.0 && start < end) {
         let tr = exp(-height_fog_optical_depth(dir, start, end));
         if (tr < 0.9999) {
             let sun = height_fog_sun_visibility(dir, start, end, tr, frame_noise(pixel));
