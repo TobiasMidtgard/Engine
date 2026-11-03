@@ -51,6 +51,9 @@
 // The aerial perspective table (aerial.rs, `aerial_at`): the haze and the atmosphere in front
 // of distant surfaces, built once a frame (a clear stand-in in the passes that build it).
 @group(0) @binding(24) var aerial_table: texture_3d<f32>;
+// The sky occlusion map's cover pyramid (sky_cover.wgsl): level L's texel is the highest
+// surface (smallest depth) over a 2^(L+1)-texel block of the map and the blocks around it.
+@group(0) @binding(25) var sky_cover: texture_2d<f32>;
 
 // Multiply final radiance by this before writing to the HDR target.
 fn pre_expose(c: vec3<f32>) -> vec3<f32> { return c * frame.exposure.x; }
@@ -731,6 +734,18 @@ fn sky_volume_wall(origin: vec3<f32>, dir: vec3<f32>, t_max: f32) -> f32 {
     return best;
 }
 
+// Whether anything in the sky occlusion map within `radius` texels of map position `at` (in
+// texels) stands higher than depth `top`: one load from the cover pyramid's level whose
+// blocks, with their neighbors, reach that far around any point inside them. False only when
+// nothing there is higher, so the taps that would read there find no cover.
+fn sky_cover_near(at: vec2<f32>, radius: f32, top: f32) -> bool {
+    let levels = textureNumLevels(sky_cover);
+    let level = min(u32(max(ceil(log2(max(radius, 1.0))) - 1.0, 0.0)), levels - 1u);
+    let blocks = vec2<i32>(textureDimensions(sky_cover, level));
+    let block = clamp(vec2<i32>(floor(at / f32(2u << level))), vec2<i32>(0), blocks - 1);
+    return textureLoad(sky_cover, block, i32(level)).r < top;
+}
+
 // Sky visibility from the top-down occlusion map alone.
 fn sky_map_visibility(rel: vec3<f32>, n: vec3<f32>) -> f32 {
     let params = frame.sky_occlusion_params;
@@ -752,37 +767,48 @@ fn sky_map_visibility(rel: vec3<f32>, n: vec3<f32>) -> f32 {
     let step_x = (frame.sky_occlusion * vec4<f32>(1.0, 0.0, 0.0, 0.0)).xy;
     let step_z = (frame.sky_occlusion * vec4<f32>(0.0, 0.0, 1.0, 0.0)).xy;
     let size = vec2<f32>(textureDimensions(sky_occlusion_map));
+    // Cover is a texel higher than this (with a little to spare): rings with none skip their
+    // taps, and open ground skips them all.
+    let top = c.z - bias / depth_range * 0.99;
+    let at = (c.xy * vec2<f32>(0.5, -0.5) + 0.5) * size;
+    // Taps reach the outer ring's edge, and their 2x2 gathers two texels past it.
+    let reach = SKY_CENTER_RADIUS * f32(2u << (SKY_RINGS - 1u)) / texel + 2.0;
+    if (!sky_cover_near(at, reach, top)) { return 1.0; }
     var hidden = 0.0;
-    for (var i = 0u; i <= SKY_RINGS * SKY_RING_TAPS; i++) {
-        var o = vec2<f32>(0.0);
+    for (var ring = -1; ring < i32(SKY_RINGS); ring++) {
         var a = 0.0;
         var b = SKY_CENTER_RADIUS;
-        var share = 1.0;
-        if (i > 0u) {
-            let ring = (i - 1u) / SKY_RING_TAPS;
-            let k = (i - 1u) % SKY_RING_TAPS;
-            a = SKY_CENTER_RADIUS * f32(1u << ring);
+        var taps = 1u;
+        if (ring >= 0) {
+            a = SKY_CENTER_RADIUS * f32(1u << u32(ring));
             b = a * 2.0;
-            // Odd rings are turned half a step so taps don't line up radially.
-            let angle = (f32(k) + 0.5 * f32(ring & 1u)) * (TAU / f32(SKY_RING_TAPS));
-            o = vec2<f32>(cos(angle), sin(angle)) * sqrt((a * a + b * b) * 0.5);
-            share = 1.0 / f32(SKY_RING_TAPS);
+            taps = SKY_RING_TAPS;
+            if (!sky_cover_near(at, b / texel + 2.0, top)) { continue; }
         }
-        let tc = c.xy + step_x * o.x + step_z * o.y;
-        let uv = tc * vec2<f32>(0.5, -0.5) + 0.5;
-        if (any(uv < vec2(0.0)) || any(uv >= vec2(1.0))) { continue; }
-        // Gather order: (0,1), (1,1), (1,0), (0,0) texels of the bilinear footprint.
-        let tops = textureGather(sky_occlusion_map, sky_occlusion_sampler, uv);
-        var cover = vec4<f32>(0.0);
-        for (var j = 0; j < 4; j++) {
-            let h = (c.z - tops[j]) * depth_range;
-            if (h > bias) {
-                let toward = dot(n, vec3<f32>(o.x, h, o.y)) / h;
-                cover[j] = sky_view_factor(a, b, h) * max(toward, 0.0);
+        let share = 1.0 / f32(taps);
+        for (var k = 0u; k < taps; k++) {
+            var o = vec2<f32>(0.0);
+            if (ring >= 0) {
+                // Odd rings are turned half a step so taps don't line up radially.
+                let angle = (f32(k) + 0.5 * f32(u32(ring) & 1u)) * (TAU / f32(SKY_RING_TAPS));
+                o = vec2<f32>(cos(angle), sin(angle)) * sqrt((a * a + b * b) * 0.5);
             }
+            let tc = c.xy + step_x * o.x + step_z * o.y;
+            let uv = tc * vec2<f32>(0.5, -0.5) + 0.5;
+            if (any(uv < vec2(0.0)) || any(uv >= vec2(1.0))) { continue; }
+            // Gather order: (0,1), (1,1), (1,0), (0,0) texels of the bilinear footprint.
+            let tops = textureGather(sky_occlusion_map, sky_occlusion_sampler, uv);
+            var cover = vec4<f32>(0.0);
+            for (var j = 0; j < 4; j++) {
+                let h = (c.z - tops[j]) * depth_range;
+                if (h > bias) {
+                    let toward = dot(n, vec3<f32>(o.x, h, o.y)) / h;
+                    cover[j] = sky_view_factor(a, b, h) * max(toward, 0.0);
+                }
+            }
+            let f = fract(uv * size - 0.5);
+            hidden += mix(mix(cover.w, cover.z, f.x), mix(cover.x, cover.y, f.x), f.y) * share;
         }
-        let f = fract(uv * size - 0.5);
-        hidden += mix(mix(cover.w, cover.z, f.x), mix(cover.x, cover.y, f.x), f.y) * share;
     }
     // Relative to the sky this surface could see at all (half of it for a wall).
     let vis = saturate(1.0 - hidden / max((1.0 + n.y) * 0.5, 0.05));
@@ -821,7 +847,14 @@ fn specular_sky_visibility(rel: vec3<f32>, dir: vec3<f32>, n: vec3<f32>, roughne
     // Sine of the elevation of the highest cover seen so far.
     var steepest = -1.0;
     var t = pow(1.25, frame_noise(pixel_of(rel).yx + 41.0));
-    for (var i = 0u; i < SPECULAR_SKY_TAPS; i++) {
+    // No cover anywhere along the march (taps reach 1.25^18 m, their gathers two texels
+    // past): skip it.
+    let size = vec2<f32>(textureDimensions(sky_occlusion_map));
+    let at = (c.xy * vec2<f32>(0.5, -0.5) + 0.5) * size;
+    let reach = pow(1.25, f32(SPECULAR_SKY_TAPS)) / params.z + 2.0;
+    var taps = SPECULAR_SKY_TAPS;
+    if (!sky_cover_near(at, reach, c.z - bias / params.w * 0.99)) { taps = 0u; }
+    for (var i = 0u; i < taps; i++) {
         let uv = (c.xy + step * t) * vec2<f32>(0.5, -0.5) + 0.5;
         if (any(uv < vec2(0.0)) || any(uv >= vec2(1.0))) { break; }
         // The highest of the 2x2 texels around the tap (smaller depth is higher).

@@ -474,7 +474,12 @@ impl ViewState {
         );
         let environment = EnvironmentMaps::new(shared);
         let mut sky_camera = crate::sky_occlusion::SkyCamera::new(shared);
-        sky_camera.set_inputs(shared, &frame_buffer, &shadow.occlusion);
+        sky_camera.set_inputs(
+            shared,
+            &frame_buffer,
+            &shadow.occlusion,
+            shadow.occlusion_size,
+        );
         let volumetrics = crate::volumetrics::Volumetrics::new(shared, &targets);
         let screen_stand_ins = ScreenMaps::stand_ins(shared, &volumetrics);
         let atmosphere = AtmosphereLuts::new(shared, &frame_buffer);
@@ -564,6 +569,7 @@ struct ExtraJob {
 struct SharedMaps {
     shadows: wgpu::TextureView,
     occlusion: wgpu::TextureView,
+    occlusion_size: u32,
     env_specular: wgpu::TextureView,
     env_irradiance: wgpu::TextureView,
     surface: wgpu::TextureView,
@@ -946,6 +952,8 @@ impl Renderer {
                         multisampled: false,
                     },
                 ),
+                // The sky occlusion map's cover pyramid (sky_occlusion.rs). The 18th.
+                layout_entry(25, all, crate::sky_occlusion::cover_binding()),
             ],
         });
         let shadow_view_layout =
@@ -1191,6 +1199,7 @@ impl Renderer {
             maps: SharedMaps {
                 shadows: self.shadow.array_view.clone(),
                 occlusion: self.shadow.occlusion.clone(),
+                occlusion_size: self.shadow.occlusion_size,
                 env_specular: self.environment.specular.clone(),
                 env_irradiance: self.environment.irradiance.view.clone(),
                 surface: self.surface_weather.view.clone(),
@@ -1228,12 +1237,14 @@ impl Renderer {
             }
             _ => {}
         }
-        let occlusion = self
+        let (occlusion, occlusion_size) = self
             .borrowed
             .as_ref()
-            .map_or(&self.shadow.occlusion, |b| &b.maps.occlusion);
+            .map_or((&self.shadow.occlusion, self.shadow.occlusion_size), |b| {
+                (&b.maps.occlusion, b.maps.occlusion_size)
+            });
         self.sky_camera
-            .set_inputs(&self.shared, &self.frame_buffer, occlusion);
+            .set_inputs(&self.shared, &self.frame_buffer, occlusion, occlusion_size);
         self.rebuild_frame_groups();
     }
 
@@ -1755,8 +1766,12 @@ impl Renderer {
                 self.shadow.occlusion_size,
                 wgpu::TextureUsages::COPY_DST,
             );
-            self.sky_camera
-                .set_inputs(&self.shared, &self.frame_buffer, &self.shadow.occlusion);
+            self.sky_camera.set_inputs(
+                &self.shared,
+                &self.frame_buffer,
+                &self.shadow.occlusion,
+                self.shadow.occlusion_size,
+            );
         }
         let lights_moved = self.lights.write(&self.shared.device, queue, light_bytes);
         cpu.step("volumetrics prepare");
@@ -3392,6 +3407,10 @@ fn create_frame_group(
             wgpu::BindGroupEntry {
                 binding: 24,
                 resource: view(&maps.aerial),
+            },
+            wgpu::BindGroupEntry {
+                binding: 25,
+                resource: view(sky_camera.cover_view()),
             },
         ],
     })
