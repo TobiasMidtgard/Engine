@@ -1527,11 +1527,18 @@ struct AerialPerspective {
     air_t: vec3<f32>,
 };
 
-// True when the aerial perspective table covers `dist` meters: it is on, built this frame
-// (passes drawn before it, and compute passes in the prepass group, see the one-texel stand-in
-// and march per pixel instead), and the surface is within its reach.
-fn aerial_reaches(dist: f32) -> bool {
-    return frame.aerial.x > 0.0 && dist < frame.aerial.x && textureDimensions(aerial_table).z > 1u;
+// True when the aerial perspective table covers camera-relative `rel`, `dist` meters away: it
+// is on, built this frame (passes drawn before it, and compute passes in the prepass group,
+// see the one-texel stand-in and march per pixel instead), the point is within its reach and
+// on screen (points behind the camera or well off its edges, which reflections and shadow
+// passes can ask about, march per pixel too).
+fn aerial_reaches(rel: vec3<f32>, dist: f32) -> bool {
+    if (frame.aerial.x <= 0.0 || dist >= frame.aerial.x || textureDimensions(aerial_table).z <= 1u) {
+        return false;
+    }
+    let clip = frame.unjittered_view_proj * vec4<f32>(rel, 1.0);
+    if (clip.w <= 0.0) { return false; }
+    return all(abs(clip.xy / clip.w) < vec2<f32>(1.1));
 }
 
 // The aerial perspective table at camera-relative `rel`, `dist` meters away (within its
@@ -1607,7 +1614,7 @@ fn surface_fog(rel: vec3<f32>) -> SurfaceFog {
         fog = volumetric_fog_at(rel, min(depth, range));
         start = select(dist, dist * range / depth, depth > range);
     }
-    if (aerial_reaches(dist)) {
+    if (aerial_reaches(rel, dist)) {
         // The table holds the height fog beyond the volumetric range and the atmosphere.
         let a = aerial_at(rel, dist);
         if (start < dist) {
@@ -1698,7 +1705,7 @@ fn apply_full_sky_fog(color: vec3<f32>, dir: vec3<f32>, pixel: vec2<f32>) -> vec
     // Near the horizon the haze to the sky thickens too fast between the table's rows (a
     // degree apart), so a band two degrees each side of it marches per pixel.
     let elevation = abs(dot(dir, fog_up(vec3<f32>(0.0))));
-    if (elevation > 0.035 && aerial_reaches(end)) {
+    if (elevation > 0.035 && aerial_reaches(dir * end, end)) {
         // The aerial perspective table holds the height fog beyond the volumetric range, so
         // the sky's haze is the one the hills in front of it fade into.
         if (frame.fog.x > 0.0 && start < end) {

@@ -591,6 +591,23 @@ pub(crate) fn effective(world: &World) -> RenderSettings {
     if let Some(on) = switch_from_env("ENGINE_AERIAL_TABLE", &AERIAL) {
         s.aerial_table = on;
     }
+    // `ENGINE_RENDER_SCALE=<0.25..2>` multiplies the internal resolution: a pass whose GPU time
+    // halves at 0.7 pays per pixel, one that doesn't per vertex or per dispatch.
+    static SCALE: std::sync::OnceLock<Option<f32>> = std::sync::OnceLock::new();
+    let scale = SCALE.get_or_init(|| {
+        let text = std::env::var("ENGINE_RENDER_SCALE").ok()?;
+        let scale = text
+            .parse::<f32>()
+            .ok()
+            .filter(|f| f.is_finite() && *f > 0.0);
+        if scale.is_none() {
+            tracing::warn!("ENGINE_RENDER_SCALE={text} is not a positive number");
+        }
+        scale
+    });
+    if let Some(scale) = scale {
+        s.render_scale = (s.render_scale * scale).clamp(0.25, 2.0);
+    }
     s
 }
 
