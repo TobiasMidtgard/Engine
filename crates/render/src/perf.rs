@@ -657,6 +657,11 @@ impl PerfLog {
             .map(|&(_, ms)| ms)
     }
 
+    /// The CPU steps of the latest frame (milliseconds).
+    pub fn cpu_steps(&self) -> &[(Label, f32)] {
+        &self.cpu_steps
+    }
+
     /// The GPU passes of the latest frame whose times arrived, and whether they arrived with
     /// the latest `frame` call.
     pub fn gpu_passes(&self) -> (&[(Label, f32)], bool) {
