@@ -1823,10 +1823,18 @@ impl RenderFeature for TerrainFeature {
         if self.gpu.is_none() {
             return;
         }
-        let settings = world
+        let mut settings = world
             .get_resource::<TerrainSettings>()
             .cloned()
             .unwrap_or_default();
+        // Low and Medium quality draw fewer, larger patches: the patch count goes with the
+        // square of the split factor, so both scale it by `view_distance` (High and Ultra
+        // keep the look the showcase is tuned for).
+        let reach = world
+            .get_resource::<engine_world::Scalability>()
+            .map_or(1.0, |s| s.view_distance.clamp(0.25, 1.0) as f64);
+        settings.split_factor *= reach.sqrt();
+        settings.patch_budget = (settings.patch_budget as f64 * reach).round() as usize;
         let mut steps = Steps::start();
         let maps = self.upload_maps(world, gpu_shared, view);
         steps.mark("maps");

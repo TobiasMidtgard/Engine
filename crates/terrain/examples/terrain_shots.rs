@@ -1223,6 +1223,33 @@ fn build(view: &View, size: (u32, u32)) -> App {
     app.add_plugins(engine_world::WorldPlugin)
         .add_plugins(RenderPlugin)
         .add_plugins(TerrainPlugin);
+    // `SPLIT_FACTOR=k`: patches split at k patch sizes (`TerrainSettings::split_factor`), to
+    // weigh triangle counts against the look.
+    if let Some(k) = std::env::var("SPLIT_FACTOR")
+        .ok()
+        .and_then(|v| v.parse::<f64>().ok())
+    {
+        app.world
+            .resource_mut::<engine_terrain::TerrainSettings>()
+            .split_factor = k;
+    }
+    // `QUALITY=low|medium|high|ultra`: the game's quality preset.
+    if let Some(q) = std::env::var("QUALITY")
+        .ok()
+        .and_then(|v| engine_world::QualityPreset::parse(&v))
+    {
+        app.world
+            .insert_resource(engine_world::Scalability::preset(q));
+    }
+    // `PATCH_BUDGET=n`: the patch count detail grows toward when few are needed (0 = none).
+    if let Some(n) = std::env::var("PATCH_BUDGET")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+    {
+        app.world
+            .resource_mut::<engine_terrain::TerrainSettings>()
+            .patch_budget = n;
+    }
 
     let pad = FlatPad::default();
     let planet = match view.world {
@@ -1562,6 +1589,8 @@ fn main() {
                 "render.gpu.scene",
                 "render.gpu.scene: terrain",
                 "render.gpu.shadows",
+                "terrain.patches_drawn",
+                "terrain.detail_boost",
             ];
             let mut sums = vec![(0.0, 0usize); keys.len()];
             for _ in 0..n {

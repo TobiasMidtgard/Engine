@@ -19,7 +19,9 @@ everything else (streaming, LOD, colliders, ground queries, prints) follows the 
   A planet that fills only part of the view gets finer patches in its share of the screen
   (up to 4× finer split distance, aiming at `TerrainSettings::patch_budget` patches for a
   planet that fills the view), so seen from orbit its canyons, volcanoes and coasts stay
-  sharp instead of dissolving into a few big patches.
+  sharp instead of dissolving into a few big patches. Below High quality
+  (`engine_world::Scalability::view_distance`) both shrink: Medium draws about a quarter fewer
+  patches, Low half (`QUALITY=` and `SPLIT_FACTOR=`/`PATCH_BUDGET=` in `terrain_shots`).
   Patches also draw the renderer's depth prepass (depth, normal, motion; moving planets
   carry their own motion), so the ground gets ambient occlusion and contact shadows from
   what stands on it and anti-aliasing reprojects it cleanly.
