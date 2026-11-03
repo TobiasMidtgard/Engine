@@ -1,0 +1,19 @@
+{
+    "round":  "",
+    "stop":  "plaza",
+    "fps":  23.260584511457772,
+    "low1":  8.474414682770897,
+    "slowest_half_s_ms":  192.82874999999987,
+    "worst":  104.4,
+    "frame_ms":  42.991181047381545,
+    "samples":  36,
+    "profiles":  3,
+    "sys_busy":  "35.1",
+    "one_at_a_time":  "25.7",
+    "render":  "9.29 (max 35.97)",
+    "gpu_ms":  "23.6",
+    "gpu_busy":  50.736842105263158,
+    "cores":  "1.09",
+    "alone":  "render::render_system 9.29, script::run_scripts 1.37, softbody::step_bodies 1.04, physics::physics_simulate 1.03, water::boat_air_system 0.92",
+    "perf":  "28.7 fps (34.9 ms, worst 83.2); render CPU 12.0 ms (acquiring the window image 0.0 ms), everything else 22.8 ms; GPU 23.6 ms; GPU memory 7.81 GB in use, 8.44 GB reserved; 2269 draws, 10.9 M triangles"
+}
