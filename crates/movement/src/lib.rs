@@ -17,6 +17,7 @@ pub mod platform;
 pub mod play;
 pub mod player;
 pub mod profile;
+pub mod reticle;
 mod shift;
 mod swim;
 pub mod tempo;
@@ -79,6 +80,8 @@ impl Plugin for MovementPlugin {
             .init_resource::<CombatLog>()
             .init_resource::<SlowMotionFx>()
             .init_resource::<Play>()
+            .init_resource::<reticle::GrappleAim>()
+            .init_resource::<reticle::GrappleReticle>()
             .register_component::<LockOn>(
                 "Lock-on for the player: the enemy locked onto (lock_on action), lock range and \
                  break range (m), widest pick angle from the view (deg).",
@@ -138,6 +141,13 @@ impl Plugin for MovementPlugin {
             .register_resource::<SlowMotionFx>(
                 "Slow-motion screen effect: vignette, tint, grade, speed lines.",
             )
+            .register_resource::<reticle::GrappleAim>(
+                "The player's grapple right now: active (on foot in play), ready (would hook \
+                 what the view's middle points at), distance and range (m), charge 0..1, hooked.",
+            )
+            .register_resource::<reticle::GrappleReticle>(
+                "The grapple reticle in the view's middle: enabled, size (px at 1080p), ring color.",
+            )
             .configure_sets(
                 FixedUpdate,
                 (
@@ -185,6 +195,7 @@ impl Plugin for MovementPlugin {
                     fx::camera_fx.after(UpdateSet::Camera),
                     lockon::place_markers.after(UpdateSet::Camera),
                     look::effects::drive_effect_lights,
+                    reticle::aim_grapple.after(UpdateSet::Camera),
                 ),
             )
             .add_systems(PostUpdate, play::capture_mouse)
@@ -204,6 +215,7 @@ impl Plugin for MovementPlugin {
                     .in_set(UpdateSet::AfterPropagate),
             )
             .add_render_feature(fx::SlowMotionOverlay::default())
+            .add_render_feature(reticle::ReticleFeature::default())
             .add_render_feature(look::effects::EffectsFeature::default());
         look::effects::register(app);
         demo::register(app);

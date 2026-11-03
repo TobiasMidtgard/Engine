@@ -3,7 +3,7 @@
 //! procedural animation.
 //!
 //! ```text
-//! cargo run -p engine_movement --release --example fighter_preview -- [out_dir] [quick|ladder|vault|feet|swim]
+//! cargo run -p engine_movement --release --example fighter_preview -- [out_dir] [quick|ladder|vault|feet|swim|reticle]
 //! ```
 //!
 //! `quick` stops after the lineup, helmets, faces, backs and whole bodies (for iterating on
@@ -11,7 +11,9 @@
 //! hand cycle, sliding down, and getting on with the sword going away) from the side and from
 //! behind; `vault` renders only pilots vaulting a barrier at a sprint (the take-off, the hand
 //! planted, the legs over and the drop); `feet` renders pilots on a 30° slope with and without
-//! their feet placed on it; `swim` renders a pilot treading water and swimming the crawl.
+//! their feet placed on it; `swim` renders a pilot treading water and swimming the crawl;
+//! `reticle` plays as the pilot (play mode, its own camera) and shoots the grapple reticle
+//! aimed at a wall in reach and at open ground out of reach, with close-ups of the middle.
 //!
 //! Each pose comes from the real animator ([`Animator`]) fed a short scripted timeline of
 //! movement and combat state, exactly as the demo feeds it from `Mover` and `CombatState`.
@@ -515,6 +517,90 @@ fn swim_shots(app: &mut App, camera: Entity, out: &Path, at: DVec3) {
     }
 }
 
+/// Play mode at `at`: the pilot faces a wall 14 m away (in the grapple's reach), then turns
+/// round to open ground (none in reach). Each shot is the pilot camera's view as played, and a
+/// close-up of the view's middle.
+fn reticle_shots(app: &mut App, camera: Entity, out: &Path, at: DVec3) {
+    use engine_world::physics::{Collider, RigidBody};
+    let world = &mut app.world;
+    world.spawn((
+        Transform::from_translation(at - DVec3::Y * 0.5),
+        RigidBody::fixed(),
+        Collider::cuboid(Vec3::new(200.0, 0.5, 200.0)),
+    ));
+    let wall = at + DVec3::new(0.0, 6.0, -16.0);
+    block(world, wall, [14.0, 12.0, 1.0], 0x7a746c);
+    world.spawn((
+        Transform::from_translation(wall),
+        RigidBody::fixed(),
+        Collider::cuboid(Vec3::new(7.0, 6.0, 0.5)),
+    ));
+    let mut paths = Vec::new();
+    for (name, toward) in [("in_reach", -1.0), ("out_of_reach", 1.0)] {
+        // Play starts facing the way the free camera looks.
+        point_camera(
+            &mut app.world,
+            camera,
+            at + DVec3::new(0.0, 2.0, 2.0 * -toward),
+            at + DVec3::new(0.0, 2.0, 10.0 * toward),
+            35.0,
+        );
+        app.update();
+        engine_movement::play::start(&mut app.world, Some(at)).expect("play mode");
+        for _ in 0..12 {
+            app.update();
+        }
+        // Aimed level, the way a player looks for something to hook.
+        let cam = app
+            .world
+            .resource::<engine_movement::Play>()
+            .camera
+            .unwrap();
+        app.world
+            .get_mut::<engine_movement::camera::PilotCamera>(cam)
+            .unwrap()
+            .pitch = 0.06;
+        // Settle the pilot camera behind the shoulder and let the reticle ease in.
+        for _ in 0..90 {
+            app.update();
+        }
+        let aim = *app.world.resource::<engine_movement::reticle::GrappleAim>();
+        println!("{name}: {aim:?}");
+        let path = out.join(format!("reticle_{name}.png"));
+        match capture_now(&mut app.world, &path) {
+            Ok(_) => println!("saved {}", path.display()),
+            Err(e) => eprintln!("{}: {e}", path.display()),
+        }
+        paths.push(path);
+    }
+    sheet(
+        &paths,
+        2,
+        WIDTH / 2,
+        HEIGHT / 2,
+        &out.join("reticle_sheet.png"),
+    );
+    // The middle, 4x.
+    let crops: Vec<PathBuf> = paths
+        .iter()
+        .map(|p| {
+            let img = image::open(p).expect("shot").to_rgba8();
+            let (w, h) = (160, 90);
+            let sub = image::imageops::crop_imm(&img, WIDTH / 2 - w / 2, HEIGHT / 2 - h / 2, w, h)
+                .to_image();
+            let big =
+                image::imageops::resize(&sub, w * 4, h * 4, image::imageops::FilterType::Nearest);
+            let c = p.with_file_name(format!(
+                "{}_middle.png",
+                p.file_stem().unwrap().to_string_lossy()
+            ));
+            big.save(&c).expect("crop");
+            c
+        })
+        .collect();
+    sheet(&crops, 2, 640, 360, &out.join("reticle_middle.png"));
+}
+
 fn v3(forward: f32, up: f32) -> Vec3 {
     Vec3::new(0.0, up, -forward)
 }
@@ -638,6 +724,10 @@ fn main() {
     }
     if std::env::args().nth(2).is_some_and(|a| a == "feet") {
         feet_shots(&mut app, camera, &out, stage(30));
+        return;
+    }
+    if std::env::args().nth(2).is_some_and(|a| a == "reticle") {
+        reticle_shots(&mut app, camera, &out, stage(30));
         return;
     }
     if std::env::args().nth(2).is_some_and(|a| a == "swim") {

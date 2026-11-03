@@ -246,9 +246,15 @@ fn unpark(world: &mut World, pilot: Entity, center: DVec3, facing: Vec3) {
         t.translation = center;
         t.rotation = rotation;
     }
-    // A fresh mover (adopted again from its profile next step): no speed, fall or wall run
-    // carried over from where it was parked.
-    e.remove::<Mover>();
+    // No speed, fall or wall run carried over from where it was parked. (Removing the mover
+    // would have it adopted again, with the human profile.)
+    if let Some(mut m) = e.get_mut::<Mover>() {
+        m.reset_motion();
+        m.facing = facing;
+        m.grounded = false;
+        m.fall_speed = 0.0;
+        m.air_secs = 0.0;
+    }
     if let Some(parked) = e.take::<Parked>() {
         e.insert((parked.controller, parked.player, Interactor, Perceiver));
         for m in parked.hidden {

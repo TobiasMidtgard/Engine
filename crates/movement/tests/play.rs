@@ -130,6 +130,10 @@ fn play_mode_brings_the_same_pilot_back_where_the_camera_is_now() {
     assert!(p.distance(DVec3::new(60.0, 0.9, 4.0)) < 0.3, "{p:?}");
     assert!(app.world.get::<Mover>(pilot).unwrap().grounded);
     assert_eq!(app.world.get::<Fighter>(pilot).unwrap().health, 40.0);
+    assert_eq!(
+        *app.world.get::<MovementProfile>(pilot).unwrap(),
+        MovementProfile::pilot()
+    );
     assert!(app.world.get::<Parked>(pilot).is_none());
     let (shown, all) = drawn_meshes(&mut app, pilot);
     assert_eq!(shown, all);
@@ -467,4 +471,50 @@ fn a_swing_out_of_a_sprint_keeps_its_momentum() {
     assert!(app.world.get::<CombatState>(f).unwrap().attack.is_some());
     let skid = (pos(&app, f) - start).x;
     assert!((1.8..3.5).contains(&skid), "skidded {skid:.2} m");
+}
+
+/// Playtest 2026-10-29 #19: the reticle's answer, in reach of a wall and turned away from it,
+/// across a restart of play mode.
+#[test]
+fn grapple_aim_is_ready_facing_a_wall_in_reach_and_not_facing_away() {
+    use engine_movement::camera::PilotCamera;
+    use engine_movement::reticle::GrappleAim;
+    let mut app = app();
+    block(
+        &mut app,
+        DVec3::new(0.0, -0.5, 0.0),
+        Vec3::new(30.0, 1.0, 30.0),
+    );
+    block(
+        &mut app,
+        DVec3::new(0.0, 6.0, -16.0),
+        Vec3::new(14.0, 12.0, 1.0),
+    );
+    let cam = app
+        .world
+        .spawn((Camera::default(), Transform::from_xyz(0.0, 2.0, 4.0)))
+        .id();
+    app.update();
+    // Play starts facing the way the free camera looks.
+    let aim_at = |app: &mut App, toward: f64| {
+        *app.world.get_mut::<Transform>(cam).unwrap() =
+            Transform::from_xyz(0.0, 2.0, 0.0).looking_at(DVec3::new(0.0, 2.0, toward), Vec3::Y);
+        app.update();
+        play::start(&mut app.world, Some(DVec3::ZERO)).unwrap();
+        run(app, 0.2);
+        let pc = app.world.resource::<Play>().camera.unwrap();
+        app.world.get_mut::<PilotCamera>(pc).unwrap().pitch = 0.06;
+        run(app, 1.0);
+        *app.world.resource::<GrappleAim>()
+    };
+    let near = aim_at(&mut app, -1.0);
+    assert!(near.active && near.ready, "{near:?}");
+    assert!((near.distance_m - 15.5).abs() < 1.0, "{near:?}");
+    let away = aim_at(&mut app, 1.0);
+    assert!(away.active && !away.ready, "{away:?}");
+    let _ = cam;
+
+    play::stop(&mut app.world);
+    app.update();
+    assert!(!app.world.resource::<GrappleAim>().active);
 }
