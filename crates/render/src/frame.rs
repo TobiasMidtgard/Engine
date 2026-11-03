@@ -709,7 +709,17 @@ pub fn build_view(
     // Point lights: nearest first.
     let mut lights: Vec<(f32, GpuPointLight)> = Vec::new();
     let mut q = world.query::<(&PointLight, &GlobalTransform)>();
-    let frustum = Frustum::from_view_proj(&unjittered_view_proj);
+    let mut frustum = Frustum::from_view_proj(&unjittered_view_proj);
+    // A mirror's view cuts away what lies under its plane (`clip_plane`), so what lies wholly
+    // under it (a lakebed, the underwater half of a pier) is culled too, by everything that
+    // culls against the view's frustum: the plane takes the slot of the infinite far plane,
+    // which is degenerate and skipped.
+    if let Some(m) =
+        camera_entity.and_then(|e| world.get::<crate::planar_reflection::MirrorCamera>(e))
+        && frustum.planes[4].normal.length_squared() < 0.5
+    {
+        frustum.planes[4] = engine_core::math::Plane::from_vec4(Vec4::from(m.clip_plane(origin)));
+    }
     for (light, gt) in q.iter(world) {
         let rel = (gt.translation() - origin).as_vec3();
         if !frustum.intersects_sphere(rel, light.range) {
