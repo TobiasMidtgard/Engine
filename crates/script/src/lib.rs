@@ -649,7 +649,12 @@ impl Plugin for ScriptPlugin {
                 .after(SimSet::Input)
                 .before(SimSet::Gameplay),
         )
-        .add_systems(FixedUpdate, run_fixed_scripts.in_set(SimSet::Gameplay))
+        .add_systems(
+            FixedUpdate,
+            scripts_want_fixed
+                .pipe(engine_core::schedule::queue_when(run_fixed_scripts))
+                .in_set(SimSet::Gameplay),
+        )
         .add_systems(
             Update,
             rewind::show_rewind
@@ -855,6 +860,12 @@ fn shift_scripts(
             rt.world_shift(world, shift, settings)
         });
     }
+}
+
+/// Does a script want this fixed step? A plain system, so steps without one don't wait for an
+/// idle pool for [`run_fixed_scripts`] (queued only when they do: engine_core's `queue_when`).
+fn scripts_want_fixed(held: Option<Res<ScriptsHeld>>, rt: Option<Res<ScriptRuntime>>) -> bool {
+    held.is_none() && rt.is_some_and(|rt| rt.wants_fixed())
 }
 
 fn run_fixed_scripts(world: &mut World) {

@@ -1127,6 +1127,11 @@ pub(crate) fn tick_stations(
     }
 }
 
+/// The piped system that queues [`replay_stations`]: order after this set to see a step's
+/// replays.
+#[derive(SystemSet, Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct StationReplays;
+
 /// Replay the stations [`tick_stations`] found due and hold the resting ones asleep; build
 /// the next station waiting its turn and apply finished settles.
 pub(crate) fn replay_stations(world: &mut World) {

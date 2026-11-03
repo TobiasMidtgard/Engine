@@ -179,14 +179,17 @@ impl Plugin for PhysicsPlugin {
             )
             .init_resource::<demo::StationWork>()
             .init_resource::<demo::FloatWork>()
-            // The replays take the whole world (they spawn and despawn stations), so they
-            // run only on the steps that have work: an exclusive system stops every other
-            // system of the step. The cycles tick in plain systems beside the others.
+            // The replays take the whole world (they spawn and despawn stations): plain
+            // systems check for work and queue them as commands on the steps that have some,
+            // as an exclusive system (even one with a run_if) waits for an idle pool every
+            // step (engine_core::schedule::queue_when). The cycles tick beside the others.
             .add_systems(
                 FixedUpdate,
                 (
                     demo::tick_stations,
-                    demo::replay_stations.run_if(demo::stations_have_work),
+                    demo::stations_have_work
+                        .pipe(engine_core::schedule::queue_when(demo::replay_stations))
+                        .in_set(demo::StationReplays),
                 )
                     .chain()
                     .in_set(SimSet::Gameplay),
@@ -195,13 +198,14 @@ impl Plugin for PhysicsPlugin {
                 FixedUpdate,
                 demo::jenga::drive_rods
                     .in_set(SimSet::Gameplay)
-                    .after(demo::replay_stations),
+                    .after(demo::StationReplays),
             )
             .add_systems(
                 FixedUpdate,
                 (
                     demo::tick_floaters,
-                    demo::replay_floaters.run_if(demo::floaters_have_work),
+                    demo::floaters_have_work
+                        .pipe(engine_core::schedule::queue_when(demo::replay_floaters)),
                 )
                     .chain()
                     .in_set(SimSet::Gameplay),

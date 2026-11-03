@@ -17,8 +17,8 @@ use engine_core::prelude::*;
 use engine_world::WeatherState;
 
 use crate::{
-    BodyKind, BodyState, HomeFrame, SpaceClock, SpaceFrame, SpaceSettings, anchor_index,
-    collect_bodies, dir_from_lat_lon, propagate,
+    BodyKind, BodyState, CelestialBody, HomeFrame, SpaceClock, SpaceFrame, SpaceSettings,
+    anchor_index, dir_from_lat_lon, propagate,
 };
 
 /// Days in the weather's year.
