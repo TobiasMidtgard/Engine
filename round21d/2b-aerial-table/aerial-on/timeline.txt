@@ -1,0 +1,15 @@
+05:40:30.898Z     0.04  mode stops quality ultra size '' spec 'overview:35,forest_overview:25'; idle before start 96,928 s; HEAD 1810b539
+05:40:31.486Z     0.62  started: showcase.exe --fly --profile --quality ultra  env ENGINE_AERIAL_TABLE=on
+05:40:37.963Z     7.10  window visible: client 1600x900, window 1616x939 at (156,156), maximized False
+05:40:37.982Z     7.12  bridge connected
+05:40:38.294Z     7.43  world built
+05:40:43.651Z    12.79  after build: working set 3,629 MB, private 6,978 MB; system free 33,784 of 65,277 MB
+05:40:43.781Z    12.92  AT overview: {"id":1,"jsonrpc":"2.0","result":{"place":"overview","position":[250.0,330.0,-1050.0]}}
+05:41:19.184Z    48.32  END overview: working set 4,848 MB, private 15,042 MB; system free 32,552 of 65,277 MB
+05:41:19.260Z    48.40  shot overview: {"id":4,"jsonrpc":"2.0","result":{"height":900,"path":"screenshots/r21d/overview.png","width":1600}}
+05:41:20.404Z    49.54  AT forest_overview: {"id":5,"jsonrpc":"2.0","result":{"place":"forest_overview","position":[-148.0,32.0,-78.0]}}
+05:41:46.108Z    75.25  END forest_overview: working set 4,908 MB, private 15,141 MB; system free 32,483 of 65,277 MB
+05:41:46.186Z    75.32  shot forest_overview: {"id":8,"jsonrpc":"2.0","result":{"height":900,"path":"screenshots/r21d/forest_overview.png","width":1600}}
+05:41:49.883Z    79.02  sampler job: Completed
+05:41:49.888Z    79.03  killing the game
+05:42:32.751Z   121.89  done

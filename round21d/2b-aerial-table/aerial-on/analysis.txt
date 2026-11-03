@@ -1,0 +1,26 @@
+﻿== overview: window 05:41:09-05:41:19 (25-35 s after arriving)
+fps 42.2, frame 23.7 ms, 1% low 34.6 (0.5 s samples), slowest 0.5 s sample 29 ms/frame, worst frame 112.2 ms (2 profiles), GPU busy 95%
+frame profile 05:41:19: 222 frames in 5.0 s: 22.6 ms per frame (44.3 fps), worst 112.2 ms
+  render_system (ms/frame, max, runs): 8.91 / 15.49 / 1.0
+  prepare meshes: 2.31 / 5.06 / 1.0
+  prepare on the render thread: 3.06 / 10.96 / 1.0
+  meshes: cull: 1.48 / 2.14 / 1.0
+  wait for the finishing threads: 0.54 / 3.00 / 1.0
+  meshes: shadow lists: 0.39 / 8.34 / 1.0
+  prepare terrain: 0.94 / 2.41 / 1.0
+render profile 05:41:18 (5 s avg): GPU 21.90 ms: scene: terrain 6.96, shadows (all cascades + far shadow, one timestamp) 0.75, sky occlusion 0.05, scene 12.74, scene: meshes 5.04, prepass 2.35; render CPU 19.16 ms; terrain draws 1216 (1612800 triangles) last frame
+mesh triangles 05:41:18: view 9.43 M + 5745 impostors, cascade 0 0.00 M + 0.00 M still (963 frames ago), cascade 1 0.00 M + 0.00 M still (963 frames ago), cascade 2 0.00 M + 0.00 M still (963 frames ago), cascade 3 0.03 M + 0.76 M still (631 frames ago), sky occlusion 0.00 M + 0.10 M still (510 frames ago), far shadow 0.01 M + 1.65 M still (11 frames ago); clusters 1.28 M
+at END: terrain.patches_resident 1671.0, patches_drawn 700.0, building 0.0, missing 0.0; render.gpu.scene: terrain 6.77 ms, gpu.shadows 0.76, gpu.sky occlusion 0.05, gpu_ms 20.43 (one frame)
+== forest_overview: window 05:41:36-05:41:46 (16-26 s after arriving)
+fps 40.3, frame 24.8 ms, 1% low 34.8 (0.5 s samples), slowest 0.5 s sample 29 ms/frame, worst frame 46.1 ms (1 profiles), GPU busy 84%
+frame profile 05:41:44: 198 frames in 5.0 s: 25.3 ms per frame (39.6 fps), worst 46.1 ms
+  render_system (ms/frame, max, runs): 8.84 / 13.77 / 1.0
+  prepare meshes: 2.83 / 3.92 / 1.0
+  prepare on the render thread: 2.24 / 5.68 / 1.0
+  meshes: cull: 1.22 / 1.92 / 1.0
+  wait for the finishing threads: 1.04 / 2.22 / 1.0
+  meshes: shadow lists: 0.42 / 3.58 / 1.0
+  prepare terrain: 1.19 / 2.46 / 1.0
+render profile 05:41:38 (5 s avg): GPU 20.51 ms: scene: terrain 2.23, shadows (all cascades + far shadow, one timestamp) 3.00, sky occlusion 0.24, scene 6.98, scene: meshes 4.26, prepass 2.82; render CPU 13.41 ms; terrain draws 1458 (1631232 triangles) last frame
+mesh triangles 05:41:38: view 6.20 M + 1013 impostors, cascade 0 0.32 M + 0.04 M still (2 frames ago), cascade 1 1.73 M + 1.01 M still (2 frames ago), cascade 2 1.43 M + 6.70 M still (2 frames ago), cascade 3 1.04 M + 10.12 M still (0 frames ago), sky occlusion 2.43 M + 2.89 M still (2 frames ago), far shadow 0.63 M + 4.57 M still (0 frames ago); clusters 0.38 M
+at END: terrain.patches_resident 1591.0, patches_drawn 708.0, building 0.0, missing 0.0; render.gpu.scene: terrain 2.22 ms, gpu.shadows 2.11, gpu.sky occlusion 0.17, gpu_ms 19.13 (one frame)
