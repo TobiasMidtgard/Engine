@@ -32,6 +32,7 @@ use engine_world::{
 use crate::meshgen::tree::cut_height;
 use crate::plant::{EcologySettings, FelledLog, Genes, Plant, PlantStage};
 use crate::species::{PlantLibrary, PlantSpecies, SpeciesId};
+use crate::squash::CrownSquash;
 use crate::visuals::{PlantPart, plant_pose};
 
 /// How a felled log lies and what it was: which way it fell (`yaw`, radians around +Y from
@@ -625,6 +626,13 @@ pub fn update_falling_trees(
         let impact = falling_transform(&f, pose, sp);
         *transform = impact;
         f.settle = Some((0.0, impact));
+        // From here the crown is pressed against the ground under the tree's weight.
+        if f.years_dead < LOG_BARE_YEARS {
+            let rest = log_rest_transform(ground, f.stump, pose, f.size, sp, f.years_dead, 0.0);
+            commands
+                .entity(entity)
+                .insert(crown_squash(rest, sp, f.size, &pose.genes));
+        }
         let dir = Vec3::new(pose.yaw.cos(), 0.0, pose.yaw.sin());
         let speed = f.speed * f.length;
         let crown_r = (sp.crown_radius_m * f.size * pose.genes.crown).max(1.0);
@@ -735,6 +743,11 @@ pub fn place_logs(
         );
         *t = rest;
         commands.entity(e).insert(LogPlaced);
+        if log.years < LOG_BARE_YEARS && !pose.charred {
+            commands
+                .entity(e)
+                .insert(crown_squash(rest, sp, log.size, &pose.genes));
+        }
         let reach = if log.years >= LOG_BARE_YEARS {
             0.32
         } else {
@@ -742,6 +755,15 @@ pub fn place_logs(
         };
         spawn_log_collider(&mut commands, e, &rest, sp, log.size, &pose.genes, reach);
     }
+}
+
+/// The crown of a log lying at `rest`, to press against the ground.
+fn crown_squash(rest: Transform, sp: &PlantSpecies, size: f32, genes: &Genes) -> CrownSquash {
+    CrownSquash::new(
+        rest,
+        (sp.trunk_radius_m * size * genes.crown).max(0.04),
+        sp.crown_radius_m * size * genes.crown,
+    )
 }
 
 /// A capsule along the log from its butt, `reach` of the trunk above the cut long.

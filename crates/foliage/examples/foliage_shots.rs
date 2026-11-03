@@ -478,6 +478,21 @@ fn main() {
             None => (eye, look - DVec3::Y * 5.0),
         };
         shot(&mut app, &out, "05_fallen", eye, target, view.hour);
+        if let Some((butt, axis)) = lying {
+            // Down at the crown from knee height, to see it pressed on the ground.
+            let crown = butt + axis * length * 0.8;
+            let across = DVec3::Y.cross(outward) * side;
+            let eye = (crown + across * 7.0 - axis * 2.0).with_y(crown.y + 0.2);
+            let eye = eye.with_y(eye.y.max(0.6));
+            shot(
+                &mut app,
+                &out,
+                "05_fallen_low",
+                eye,
+                crown.with_y(0.4),
+                view.hour,
+            );
+        }
     }
     take(&mut app, "06_spring", &by_name("forest_spring"));
     take(&mut app, "07_burn_scar", &by_name("forest_burn_scar"));

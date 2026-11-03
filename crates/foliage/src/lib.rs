@@ -24,6 +24,7 @@ pub mod shift;
 pub mod sim;
 pub mod solids;
 pub mod species;
+pub mod squash;
 pub mod visuals;
 
 use engine_assets::Assets;
@@ -230,6 +231,7 @@ impl Plugin for FoliagePlugin {
                         far_woods::fade_far_cells,
                         near_woods::stream_near_woods,
                         visuals::sync_log_visuals,
+                        squash::press_fallen_crowns,
                         shadow_standin::sync_shadow_standins,
                         visuals::update_glow_lights,
                         visuals::pulse_glow,
