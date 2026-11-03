@@ -244,6 +244,8 @@ struct Gpu {
     index: wgpu::Buffer,
     index_count: u32,
     instances: GrowBuffer,
+    /// Indirect arguments of every draw list, in [`DrawList`] order (multi-draw only).
+    draw_args: Option<GrowBuffer>,
     planets: GrowBuffer,
     maps: wgpu::Buffer,
     sampler: wgpu::Sampler,
@@ -466,6 +468,37 @@ struct Draw {
     instance: u32,
 }
 
+/// `draw_indexed_indirect` arguments (wgpu's `DrawIndexedIndirectArgs` layout).
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Pod, Zeroable)]
+struct DrawArgs {
+    index_count: u32,
+    instance_count: u32,
+    first_index: u32,
+    base_vertex: i32,
+    first_instance: u32,
+}
+
+/// The draw lists, in the order their indirect arguments are written.
+#[derive(Clone, Copy)]
+enum DrawList {
+    Scene,
+    Water,
+    Shadow(usize),
+    FarShadow,
+}
+
+impl DrawList {
+    fn index(self) -> usize {
+        match self {
+            DrawList::Scene => 0,
+            DrawList::Water => 1,
+            DrawList::Shadow(i) => 2 + i,
+            DrawList::FarShadow => 6,
+        }
+    }
+}
+
 /// Fixed-size vertex slots in a few large buffers.
 #[derive(Default)]
 struct SlotPool {
@@ -532,6 +565,14 @@ pub struct TerrainFeature {
     shadow_draws: [Vec<Draw>; 4],
     /// Patches drawn into the far shadow map (big shadows beyond the cascades).
     far_shadow_draws: Vec<Draw>,
+    /// Draw each list's runs of patches on one vertex page with one
+    /// `multi_draw_indexed_indirect` (`RenderSettings::multi_draw_indirect`, where the GPU
+    /// takes a first instance in indirect draws): a few commands a pass instead of one per
+    /// patch.
+    multi_draw: bool,
+    /// Where each [`DrawList`]'s arguments start in the indirect buffer.
+    list_args: [u32; 7],
+    args: Vec<DrawArgs>,
     deform_generation: u64,
     /// The footprint grid the texture holds ([`DeformationMap::epoch`]).
     deform_epoch: u64,
@@ -1475,23 +1516,30 @@ impl RenderFeature for TerrainFeature {
             bind_group_layouts: &[Some(&gpu.frame_layout), Some(&layout)],
             immediate_size: 0,
         });
+        // The scene pass shades only what the prepass drew: an equal depth test without depth
+        // writes or `discard`, so every GPU tests depth before shading (`discard` with depth
+        // writes forces the test after the shader on many) and nothing hidden is shaded.
+        //
         // Measuring the ground's pixel cost: `TERRAIN_SHADER_OFF=<bits>` switches parts of
-        // `fs_main` off (the `TERRAIN_OFF` bits in terrain.wgsl), `TERRAIN_DEPTH=equal` draws
-        // the scene pass on the prepass's depth with an equal test and no depth writes.
+        // `fs_main` off (the `TERRAIN_OFF` bits in terrain.wgsl), `TERRAIN_DEPTH=greater` draws
+        // the scene pass the old way (`GreaterEqual` with depth writes and the mirror's clip).
         let off: f64 = std::env::var("TERRAIN_SHADER_OFF")
             .ok()
             .and_then(|v| v.parse::<u32>().ok())
             .unwrap_or(0) as f64;
-        let constants = [("TERRAIN_OFF", off)];
-        let equal = std::env::var("TERRAIN_DEPTH").is_ok_and(|v| v == "equal");
-        let main_depth = if equal {
+        let greater = std::env::var("TERRAIN_DEPTH").is_ok_and(|v| v == "greater");
+        let constants = [
+            ("TERRAIN_OFF", off),
+            ("MIRROR_CLIP", if greater { 1.0 } else { 0.0 }),
+        ];
+        let main_depth = if greater {
+            gpu.depth_state(true)
+        } else {
             wgpu::DepthStencilState {
                 depth_write_enabled: Some(false),
                 depth_compare: Some(wgpu::CompareFunction::Equal),
                 ..gpu.depth_state(false)
             }
-        } else {
-            gpu.depth_state(true)
         };
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("terrain"),
@@ -1711,6 +1759,7 @@ impl RenderFeature for TerrainFeature {
                 wgpu::BufferUsages::VERTEX,
                 4096 * std::mem::size_of::<ChunkInstance>() as u64,
             ),
+            draw_args: None,
             planets: GrowBuffer::new(
                 device,
                 "terrain planets",
@@ -2245,13 +2294,21 @@ impl RenderFeature for TerrainFeature {
         self.built_last_frame = built_total;
         steps.mark("patches");
 
-        // Group draws by vertex page.
-        self.draws.sort_by_key(|d| d.slot / SLOTS_PER_PAGE);
+        // Group draws by vertex page (one multi-draw a page), the scene's and the water's
+        // nearest first within it, so the prepass's early depth test rejects most of what is
+        // behind (the scene pass then shades only what the prepass left: an equal test).
+        let page = |d: &Draw| d.slot / SLOTS_PER_PAGE;
+        let near =
+            |d: &Draw| Vec3::from_array(instances[d.instance as usize].origin).length_squared();
+        let front_to_back =
+            |a: &Draw, b: &Draw| page(a).cmp(&page(b)).then(near(a).total_cmp(&near(b)));
+        self.draws.sort_by(front_to_back);
+        self.water_draws.sort_by(front_to_back);
         for s in &mut self.shadow_draws {
-            s.sort_by_key(|d| d.slot / SLOTS_PER_PAGE);
+            s.sort_by_key(page);
         }
-        self.far_shadow_draws
-            .sort_by_key(|d| d.slot / SLOTS_PER_PAGE);
+        self.far_shadow_draws.sort_by_key(page);
+        self.write_draw_args(gpu_shared, render_settings);
 
         let mut maps = maps;
         maps.flags[2] = if settings.wireframe_lod { 1.0 } else { 0.0 };
@@ -2314,11 +2371,17 @@ impl RenderFeature for TerrainFeature {
     }
 
     fn draw(&self, phase: RenderPhase, pass: &mut wgpu::RenderPass<'_>, _ctx: &FrameContext) {
-        let (pipeline, draws, indices) = match phase {
-            RenderPhase::Opaque => (self.gpu.as_ref().map(|g| &g.pipeline), &self.draws, None),
+        let (pipeline, list, draws, indices) = match phase {
+            RenderPhase::Opaque => (
+                self.gpu.as_ref().map(|g| &g.pipeline),
+                DrawList::Scene,
+                &self.draws,
+                None,
+            ),
             // The water over the grid only (a skirt would hang a curtain of it).
             RenderPhase::Transparent => (
                 self.gpu.as_ref().map(|g| &g.water_pipeline),
+                DrawList::Water,
                 &self.water_draws,
                 Some((QUADS * QUADS * 6) as u32),
             ),
@@ -2341,7 +2404,7 @@ impl RenderFeature for TerrainFeature {
             };
             pass.set_bind_group(2, water, &[]);
         }
-        self.draw_indices(pass, gpu, draws, indices.unwrap_or(gpu.index_count));
+        self.draw_indices(pass, gpu, list, draws, indices.unwrap_or(gpu.index_count));
     }
 
     fn needs_scene_copy(&self) -> bool {
@@ -2399,7 +2462,7 @@ impl RenderFeature for TerrainFeature {
         };
         pass.set_pipeline(&gpu.prepass_pipeline);
         pass.set_bind_group(1, group, &[]);
-        self.draw_list(pass, gpu, &self.draws);
+        self.draw_list(pass, gpu, DrawList::Scene, &self.draws);
     }
 
     fn draw_shadow(&self, pass: &mut wgpu::RenderPass<'_>, cascade: usize, _ctx: &FrameContext) {
@@ -2414,7 +2477,12 @@ impl RenderFeature for TerrainFeature {
         };
         pass.set_pipeline(&gpu.shadow_pipeline);
         pass.set_bind_group(1, group, &[]);
-        self.draw_list(pass, gpu, &self.shadow_draws[cascade]);
+        self.draw_list(
+            pass,
+            gpu,
+            DrawList::Shadow(cascade),
+            &self.shadow_draws[cascade],
+        );
     }
 
     fn draw_far_shadow(&self, pass: &mut wgpu::RenderPass<'_>, _ctx: &FrameContext) {
@@ -2429,7 +2497,7 @@ impl RenderFeature for TerrainFeature {
         };
         pass.set_pipeline(&gpu.shadow_pipeline);
         pass.set_bind_group(1, group, &[]);
-        self.draw_list(pass, gpu, &self.far_shadow_draws);
+        self.draw_list(pass, gpu, DrawList::FarShadow, &self.far_shadow_draws);
     }
 
     fn stats(&self) -> FeatureStats {
@@ -2450,24 +2518,107 @@ impl RenderFeature for TerrainFeature {
 }
 
 impl TerrainFeature {
-    fn draw_list(&self, pass: &mut wgpu::RenderPass<'_>, gpu: &Gpu, draws: &[Draw]) {
-        self.draw_indices(pass, gpu, draws, gpu.index_count);
+    fn draw_list(
+        &self,
+        pass: &mut wgpu::RenderPass<'_>,
+        gpu: &Gpu,
+        list: DrawList,
+        draws: &[Draw],
+    ) {
+        self.draw_indices(pass, gpu, list, draws, gpu.index_count);
     }
 
     /// Draw the patches with the first `count` indices (the grid, then the skirts).
-    fn draw_indices(&self, pass: &mut wgpu::RenderPass<'_>, gpu: &Gpu, draws: &[Draw], count: u32) {
+    fn draw_indices(
+        &self,
+        pass: &mut wgpu::RenderPass<'_>,
+        gpu: &Gpu,
+        list: DrawList,
+        draws: &[Draw],
+        count: u32,
+    ) {
         pass.set_index_buffer(gpu.index.slice(..), wgpu::IndexFormat::Uint16);
         pass.set_vertex_buffer(1, gpu.instances.buffer.slice(..));
-        let mut page = u32::MAX;
-        for d in draws {
-            let p = d.slot / SLOTS_PER_PAGE;
-            if p != page {
-                page = p;
-                pass.set_vertex_buffer(0, self.pool.pages[p as usize].slice(..));
+        let indirect = gpu.draw_args.as_ref().filter(|_| self.multi_draw);
+        let first_arg = self.list_args[list.index()] as u64;
+        let mut i = 0;
+        while i < draws.len() {
+            let p = draws[i].slot / SLOTS_PER_PAGE;
+            let run = draws[i..]
+                .iter()
+                .take_while(|d| d.slot / SLOTS_PER_PAGE == p)
+                .count();
+            pass.set_vertex_buffer(0, self.pool.pages[p as usize].slice(..));
+            match indirect {
+                Some(args) => pass.multi_draw_indexed_indirect(
+                    &args.buffer,
+                    (first_arg + i as u64) * std::mem::size_of::<DrawArgs>() as u64,
+                    run as u32,
+                ),
+                None => {
+                    for d in &draws[i..i + run] {
+                        let base = ((d.slot % SLOTS_PER_PAGE) as usize * VERTS_PER_CHUNK) as i32;
+                        pass.draw_indexed(0..count, base, d.instance..d.instance + 1);
+                    }
+                }
             }
-            let base = ((d.slot % SLOTS_PER_PAGE) as usize * VERTS_PER_CHUNK) as i32;
-            pass.draw_indexed(0..count, base, d.instance..d.instance + 1);
+            i += run;
         }
+    }
+
+    /// The indirect arguments of every draw list (multi-draw only), in [`DrawList`] order.
+    fn write_draw_args(&mut self, gpu_shared: &GpuShared, settings: &RenderSettings) {
+        self.multi_draw = settings.multi_draw_indirect
+            && gpu_shared
+                .device
+                .features()
+                .contains(wgpu::Features::INDIRECT_FIRST_INSTANCE);
+        self.args.clear();
+        let Some(gpu) = self.gpu.as_mut() else {
+            return;
+        };
+        if !self.multi_draw {
+            return;
+        }
+        let water = (QUADS * QUADS * 6) as u32;
+        let lists = [
+            (DrawList::Scene, &self.draws, gpu.index_count),
+            (DrawList::Water, &self.water_draws, water),
+        ]
+        .into_iter()
+        .chain((0..4).map(|i| (DrawList::Shadow(i), &self.shadow_draws[i], gpu.index_count)))
+        .chain(std::iter::once((
+            DrawList::FarShadow,
+            &self.far_shadow_draws,
+            gpu.index_count,
+        )));
+        for (list, draws, count) in lists {
+            self.list_args[list.index()] = self.args.len() as u32;
+            self.args.extend(draws.iter().map(|d| DrawArgs {
+                index_count: count,
+                instance_count: 1,
+                first_index: 0,
+                base_vertex: ((d.slot % SLOTS_PER_PAGE) as usize * VERTS_PER_CHUNK) as i32,
+                first_instance: d.instance,
+            }));
+        }
+        if self.args.is_empty() {
+            return;
+        }
+        gpu.draw_args
+            .get_or_insert_with(|| {
+                GrowBuffer::new(
+                    &gpu_shared.device,
+                    "terrain draw arguments",
+                    wgpu::BufferUsages::INDIRECT,
+                    8192 * std::mem::size_of::<DrawArgs>() as u64,
+                )
+            })
+            .write(
+                &gpu_shared.device,
+                &gpu_shared.queue,
+                bytemuck::cast_slice(&self.args),
+            );
     }
 }
 

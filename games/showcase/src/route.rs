@@ -192,6 +192,9 @@ struct Route {
     /// Frames spent waiting at the start for the ground in view to fill in; `None` once the
     /// route is flying.
     settling: Option<u32>,
+    /// The camera has stood at the plaza again on the settled ground (it then waits once more
+    /// for what that view needs).
+    restood: bool,
     done_frames: u32,
 }
 
@@ -225,6 +228,7 @@ pub fn install(app: &mut App, which: Option<&str>) {
         rows: Vec::new(),
         started: false,
         settling: Some(0),
+        restood: false,
         done_frames: 0,
     });
     app.add_systems(Update, run.before(camera::fly));
@@ -248,14 +252,22 @@ fn run(world: &mut World) {
         let settling = world
             .get_resource::<crate::build::Uploads>()
             .is_some_and(|u| u.ground_settling());
-        if settling && waited < SETTLE_MAX_FRAMES {
+        // (A few frames first: the patch counts lag the camera by a frame or two.)
+        if (settling || waited < 4) && waited < SETTLE_MAX_FRAMES {
             world.resource_mut::<Route>().settling = Some(waited + 1);
             return;
         }
-        let plaza = places::find("plaza").expect("plaza");
-        camera::go_to(world, &plaza);
-        world.resource_mut::<Route>().settling = None;
-        engine::core::log::info!("route: the ground settled after {waited} frames");
+        let mut r = world.resource_mut::<Route>();
+        if !r.restood {
+            r.restood = true;
+            r.settling = Some(0);
+            let plaza = places::find("plaza").expect("plaza");
+            camera::go_to(world, &plaza);
+            engine::core::log::info!("route: the ground settled after {waited} frames");
+            return;
+        }
+        r.settling = None;
+        engine::core::log::info!("route: and the view from the plaza after {waited} more");
         return;
     }
     let dt = world.resource::<Time>().delta_secs();

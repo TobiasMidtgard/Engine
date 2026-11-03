@@ -360,9 +360,12 @@ the home pad for tuning shapes. Rivers and lakes from the bank and the air: `riv
 The ground's GPU cost: `ENGINE_PROFILE=1 GPU_FRAMES=8 terrain_shots <out> 640x360 <view>`
 prints the mean GPU times of the terrain's scene pass, the prepass and shadows. Parts of the
 ground shader switch off for comparison with `TERRAIN_SHADER_OFF=<bits>` (1 material
-textures, 2 rock's larger scales, 4 parallax relief, 16 lighting, 64 the mirror's clip; read
-when the pipeline is made, so in the showcase too), and `TERRAIN_DEPTH=equal` draws the scene
-pass with an equal depth test and no depth writes.
+textures, 2 rock's larger scales, 4 parallax relief, 16 lighting, 128 everything (a flat
+color), 256 everything after the material blend; read when the pipeline is made, so in the
+showcase too). The scene pass shades only the prepass's pixels (an equal depth test, no depth
+writes, no `discard`); `TERRAIN_DEPTH=greater` draws it the old way for comparison. Patches go
+out front to back, one `multi_draw_indexed_indirect` per vertex page and pass where the GPU
+supports it (`RenderSettings::multi_draw_indirect`).
 
 ## Test cases in the showcase
 
