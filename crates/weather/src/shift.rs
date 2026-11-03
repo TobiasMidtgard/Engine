@@ -27,14 +27,9 @@ pub(crate) fn shift_system(
     for s in shifts.read() {
         shifted = true;
         sim.frame.follow(s);
-        // The cloud systems' field until its writer republishes it.
-        if s.is_translation_only() {
-            if let Some(field) = &mut sim.cover_field {
-                field.origin += DVec2::new(s.translation.x, s.translation.z);
-            }
-        } else {
-            sim.cover_field = None;
-        }
+        // The planet's cloud systems stay where they were until their writer rebuilds the
+        // field on the new axes (dropping it moved every far cloud at once).
+        sim.field_moved = sim.field_moved.then(s);
         let focus = s.point(DVec3::new(sim.focus.x, 0.0, sim.focus.y));
         sim.focus = DVec2::new(focus.x, focus.z);
         for bolt in &mut bolts.bolts {
@@ -59,6 +54,8 @@ pub(crate) fn shift_system(
             for c in &mut cache.cells.data {
                 c.height += t.y as f32;
             }
+            // Roof lookups in flight were measured in the old frame.
+            cache.epoch += 1;
         } else {
             // The surface grid was resampled onto new axes: gather the ground facts again
             // (nearest the player first).
@@ -168,5 +165,98 @@ mod tests {
             wind.normalize().dot(expected.normalize()) > 0.99,
             "{wind} vs {expected}"
         );
+    }
+
+    fn shifting_app() -> App {
+        let mut app = App::new();
+        app.add_plugins((engine_world::WorldPlugin, WeatherPlugin));
+        app.world
+            .resource_mut::<Time>()
+            .set_source(engine_core::time::TimeSource::Manual { step_secs: 0.1 });
+        app.world.resource_mut::<Weather>().preset = WeatherPreset::PartlyCloudy;
+        // The player, who moves with the world.
+        app.world.spawn((
+            Transform::default(),
+            GlobalTransform::default(),
+            engine_world::SimulationFocus::default(),
+        ));
+        app.update_n(3);
+        app
+    }
+
+    #[test]
+    fn the_planets_cloud_systems_stay_put_through_a_turned_shift() {
+        let mut app = shifting_app();
+        // Systems laid out by the planet: cover rising from west to east, 128 km across.
+        let size = 128u32;
+        let coverage: Vec<u8> = (0..size * size).map(|i| ((i % size) * 2) as u8).collect();
+        let field = engine_world::CloudCoverMap {
+            origin: DVec2::splat(-64_000.0),
+            cell_m: 1000.0,
+            size,
+            coverage: coverage.into(),
+            background: 0.5,
+            revision: 7,
+            ..Default::default()
+        };
+        app.world
+            .insert_resource(engine_world::CloudCoverField(field));
+        app.update_n(2);
+        let far = [DVec2::new(45_000.0, 0.0), DVec2::new(-30_000.0, 35_000.0)];
+        let cover = |app: &App, p: DVec2| {
+            let sim = app.world.resource::<WeatherSim>();
+            sim.base_cover(sim.base.cloud_cover, p)
+        };
+        let before: Vec<f32> = far.iter().map(|p| cover(&app, *p)).collect();
+
+        // The writer hasn't rebuilt the field on the new axes yet.
+        let s = turned(1.1, DVec3::new(-9_000.0, 0.0, 4_000.0));
+        app.world.write_message(s);
+        app.update_n(3);
+        for (p, b) in far.iter().zip(&before) {
+            let moved = s.point(DVec3::new(p.x, 0.0, p.y));
+            let after = cover(&app, DVec2::new(moved.x, moved.z));
+            assert!((after - b).abs() < 0.02, "{p}: {after} vs {b}");
+        }
+
+        // Its rebuild is on today's axes: read as it is.
+        let mut rebuilt = app
+            .world
+            .resource::<engine_world::CloudCoverField>()
+            .0
+            .clone();
+        rebuilt.revision += 1;
+        app.world
+            .insert_resource(engine_world::CloudCoverField(rebuilt));
+        app.update();
+        assert_eq!(
+            app.world.resource::<WeatherSim>().field_moved,
+            WorldShift::IDENTITY
+        );
+    }
+
+    #[test]
+    fn a_rebuild_in_progress_never_lands_on_the_old_axes() {
+        let mut app = shifting_app();
+        let mut sign = 1.0;
+        // Shift at several points of the rebuild cycle.
+        for wait in [1, 2, 3, 5, 7] {
+            app.update_n(wait);
+            sign = -sign;
+            app.world
+                .write_message(WorldShift::translate(DVec3::new(sign * 40_000.0, 0.0, 0.0)));
+            for _ in 0..12 {
+                app.update();
+                let map = app.world.resource::<CloudMap>();
+                let sim = app.world.resource::<WeatherSim>();
+                let span = map.size as f64 * map.cell_m as f64;
+                let center = map.origin + DVec2::splat(span * 0.5);
+                assert!(
+                    (center - sim.focus).length() < span * 0.05,
+                    "map centered at {center}, focus {}",
+                    sim.focus
+                );
+            }
+        }
     }
 }

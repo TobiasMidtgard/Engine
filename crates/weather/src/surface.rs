@@ -165,7 +165,7 @@ pub struct GroundCache {
     band_credit: f32,
     ray_credit: f32,
     /// Counts the grid's moves: lookups started before a move are dropped.
-    epoch: u64,
+    pub(crate) epoch: u64,
     /// Lookups running off the frame.
     job: Option<LookupJob>,
     /// Cells covered by a [`WeatherShelter`] this update.

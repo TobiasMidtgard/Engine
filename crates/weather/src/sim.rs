@@ -10,7 +10,7 @@
 use engine_core::math::noise::fbm2;
 use engine_core::math::{DQuat, DVec2, DVec3, Rng, Vec2, Vec3, damp, smoothstep};
 use engine_core::prelude::*;
-use engine_world::{FocusPoints, PrecipitationKind, WeatherState};
+use engine_world::{FocusPoints, PrecipitationKind, WeatherState, WorldShift};
 
 use crate::climate::{self, Climate};
 use crate::presets::{Regime, WeatherPreset, cloud_thickness_m};
@@ -242,6 +242,9 @@ pub struct WeatherSim {
     /// The planet's cloud systems around the focus (`engine_world::CloudCoverField`), when a
     /// module draws them: the cover away from the player follows them.
     pub cover_field: Option<engine_world::CloudCoverMap>,
+    /// The world shifts since [`Self::cover_field`] was built: it stays laid out on the axes
+    /// it was built on until its writer rebuilds it, and is read through these.
+    pub field_moved: WorldShift,
     initialized: bool,
     /// The next step sets the air (temperature, humidity, pressure, cloud base) straight to
     /// the regime's instead of easing toward it: the weather was switched everywhere at once.
@@ -275,6 +278,7 @@ impl WeatherSim {
             rng: Rng::new(weather.seed),
             seed: weather.seed,
             cover_field: None,
+            field_moved: WorldShift::IDENTITY,
             initialized: false,
             snap_air: false,
         }
@@ -321,8 +325,12 @@ impl WeatherSim {
             return regime_cover;
         };
         let near = 1.0 - smoothstep(FIELD_NEAR_M, FIELD_FAR_M, (p - self.focus).length() as f32);
-        let offset = regime_cover - field.cover_at(self.focus);
-        (field.cover_at(p) + offset * near).clamp(0.0, 1.0)
+        let at = |p: DVec2| {
+            let q = self.field_moved.inverse_point(DVec3::new(p.x, 0.0, p.y));
+            field.cover_at(DVec2::new(q.x, q.z))
+        };
+        let offset = regime_cover - at(self.focus);
+        (at(p) + offset * near).clamp(0.0, 1.0)
     }
 
     /// How much front `f` has taken over at world X/Z `p` (see [`Front::weight`]).
@@ -738,6 +746,11 @@ pub(crate) fn weather_system(
 ) {
     let field = field.map(|f| f.0.clone());
     if sim.cover_field != field {
+        // A rebuilt field is laid out on today's axes; a drift update keeps the old layout.
+        let revision = |f: &Option<engine_world::CloudCoverMap>| f.as_ref().map(|f| f.revision);
+        if revision(&sim.cover_field) != revision(&field) {
+            sim.field_moved = WorldShift::IDENTITY;
+        }
         sim.cover_field = field;
     }
     let (hour, day) = (state.time_of_day_h, state.day_of_year);
