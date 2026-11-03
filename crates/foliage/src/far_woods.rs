@@ -216,6 +216,12 @@ pub(crate) fn cell_cards(
             if keep_out(flat) {
                 continue;
             }
+            // The lattice blurs a river, or a lake's edge, narrower than its step: woods on both
+            // banks would plant trees in the water (playtest 3, #24). A tree it keeps stands
+            // only where the cover itself has woods (none in water).
+            if lattice.is_some() && cover(flat).is_none_or(|(d, _)| h(2) >= d) {
+                continue;
+            }
             let Some(y) = ground(flat) else {
                 continue;
             };
@@ -1015,6 +1021,20 @@ mod tests {
         let meshes = cell_meshes(&cards);
         let tris: usize = meshes.iter().map(|(_, m)| m.triangle_count()).sum();
         assert_eq!(tris, cards.len() * 16);
+    }
+
+    #[test]
+    fn no_tree_stands_in_a_river_narrower_than_the_cover_lattice() {
+        // Closed woods with an 8 m river along x = 40..48 (the cover is none in the water).
+        let river = |p: DVec3| (!(40.0..48.0).contains(&p.x)).then_some((1.0, 0.0));
+        let flat = |_: DVec3| Some(0.0);
+        let cards = cell_cards(DVec3::ZERO, 128.0, 4.0, 5, &river, &flat, &|_| false);
+        assert!(cards.len() > 500, "{} trees", cards.len());
+        let wet: Vec<_> = cards
+            .iter()
+            .filter(|c| (40.0..48.0).contains(&c.foot.x))
+            .collect();
+        assert!(wet.is_empty(), "{} trees in the river", wet.len());
     }
 
     #[test]
