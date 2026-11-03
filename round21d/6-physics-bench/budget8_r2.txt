@@ -1,0 +1,4 @@
+﻿yard_bench: 1200 frames in 5.4 s; physics step ms mean 4.08 median 3.04 p95 8.72 p99 11.06 max 19.73; frame ms p95 8.96 max 20.15
+yard_bench: at the end, load level 0
+yard_bench: busiest step: 1492 awake of 1492 bodies, 3 regions, 2917 touching pairs, 9.55 ms
+yard_bench: slowest step: frame 11, 19.73 ms, 1397 awake, 2 regions, 3741 touching pairs, 17 fine, 1 substeps

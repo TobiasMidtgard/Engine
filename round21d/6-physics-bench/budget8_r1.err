@@ -1,0 +1,8 @@
+﻿cargo :     Finished `release` profile [optimized] target(s) in 0.24s
+At line:3 char:48
++ ... = Get-Date; cargo run --release -p engine_physics --example yard_benc ...
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (    Finished `r...get(s) in 0.24s:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+     Running `target\release\examples\yard_bench.exe 20`

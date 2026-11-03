@@ -1,0 +1,15 @@
+﻿cargo :    Compiling engine_core v0.1.0 (C:\Users\Tobit\Documents\ProgrammingProjects\Engine\crates\core)
+At line:3 char:18
++ ... = Get-Date; cargo run --release -p engine_physics --example yard_benc ...
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (   Compiling en...ne\crates\core):String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+   Compiling engine_world v0.1.0 (C:\Users\Tobit\Documents\ProgrammingProjects\Engine\crates\world)
+   Compiling engine_assets v0.1.0 (C:\Users\Tobit\Documents\ProgrammingProjects\Engine\crates\assets)
+   Compiling engine_input v0.1.0 (C:\Users\Tobit\Documents\ProgrammingProjects\Engine\crates\input)
+   Compiling engine_render v0.1.0 (C:\Users\Tobit\Documents\ProgrammingProjects\Engine\crates\render)
+   Compiling engine_debug v0.1.0 (C:\Users\Tobit\Documents\ProgrammingProjects\Engine\crates\debug)
+   Compiling engine_physics v0.1.0 (C:\Users\Tobit\Documents\ProgrammingProjects\Engine\crates\physics)
+    Finished `release` profile [optimized] target(s) in 46.00s
+     Running `target\release\examples\yard_bench.exe 20`
