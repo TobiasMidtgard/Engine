@@ -740,11 +740,12 @@ fn fs_env(in: FullscreenOut) -> @location(0) vec4<f32> {
 // (`frame.sun_dir`: the sun, or the moon at night). Relative to the dimming the weather already
 // gave that light for the deck at the player (`clouds.shadow.x`), so overcast isn't darkened
 // twice and the ground under a break in it stays at the dimmed sun.
-@fragment
-fn fs_cloud_shadow(in: FullscreenOut) -> @location(0) vec4<f32> {
+// Sunlight through the clouds at the cloud shadow map's `uv` (see the renderer's
+// cloud_shadows.rs).
+fn cloud_shadow_at(uv: vec2<f32>) -> vec4<f32> {
     let l = frame.sun_dir.xyz;
     if (l.y <= 0.0 || frame.planet.w <= 0.0) { return vec4<f32>(1.0); }
-    let start = cloud_shadow_plane_point(in.uv);
+    let start = cloud_shadow_plane_point(uv);
     // From where the ray enters the layer (the plane sits a little below a curved layer far
     // away) to the highest tops, at most 30 km along a low sun.
     let h = planet_height(start);
@@ -765,4 +766,37 @@ fn fs_cloud_shadow(in: FullscreenOut) -> @location(0) vec4<f32> {
     let through = max(exp(-od), 0.2 * exp(-0.3 * od));
     let t = saturate(through / max(clouds.shadow.x, 1e-4));
     return vec4<f32>(t, t, t, 1.0);
+}
+
+// The cloud shadow map is kept in a cache that stays put in the world (texel (x, y) of the
+// world's texel grid lives at (x, y) mod size), so the clouds' shadows are marched for a
+// quarter of its rows per frame (a band, scissored: skipping scattered pixels saves nothing on
+// a GPU, whose lanes wait for the busiest) and copied into the renderer's map, which is
+// cleared every frame. Clouds drift a few meters in the frames a texel waits; texels that
+// scroll in at the edge wait the same few frames inside the map's faded rim.
+struct ShadowCache {
+    min_index: vec4<i32>,  // the map's corner in world texels (x, z)
+    params: vec4<u32>,     // texels per side
+};
+@group(2) @binding(1) var<uniform> shadow_cache: ShadowCache;
+@group(2) @binding(2) var shadow_cached: texture_2d<f32>;
+
+fn wrap(i: vec2<i32>, n: i32) -> vec2<i32> {
+    return ((i % n) + n) % n;
+}
+
+@fragment
+fn fs_cloud_shadow_update(in: FullscreenOut) -> @location(0) vec4<f32> {
+    let n = i32(shadow_cache.params.x);
+    let m = shadow_cache.min_index.xy;
+    // The world texel this cache texel holds now.
+    let w = m + wrap(vec2<i32>(floor(in.position.xy)) - m, n);
+    return cloud_shadow_at((vec2<f32>(w - m) + 0.5) / f32(n));
+}
+
+@fragment
+fn fs_cloud_shadow_copy(in: FullscreenOut) -> @location(0) vec4<f32> {
+    let n = i32(shadow_cache.params.x);
+    let w = shadow_cache.min_index.xy + vec2<i32>(floor(in.position.xy));
+    return textureLoad(shadow_cached, wrap(w, n), 0);
 }

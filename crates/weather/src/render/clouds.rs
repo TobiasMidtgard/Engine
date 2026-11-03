@@ -125,6 +125,16 @@ struct Target {
 
 impl Target {
     fn new(device: &wgpu::Device, label: &str, width: u32, height: u32) -> Self {
+        Self::with_format(device, label, width, height, MARCH_FORMAT)
+    }
+
+    fn with_format(
+        device: &wgpu::Device,
+        label: &str,
+        width: u32,
+        height: u32,
+        format: wgpu::TextureFormat,
+    ) -> Self {
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some(label),
             size: wgpu::Extent3d {
@@ -135,7 +145,7 @@ impl Target {
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: MARCH_FORMAT,
+            format,
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
             view_formats: &[],
         });
@@ -195,6 +205,78 @@ struct ReprojectUniform {
 /// The pixel of each 2x2 block marched on each frame of four: diagonals first, so two frames
 /// already cover the block evenly.
 const BLOCK_ORDER: [(f32, f32); 4] = [(0.0, 0.0), (1.0, 1.0), (1.0, 0.0), (0.0, 1.0)];
+
+/// The cloud shadow map's world-anchored cache (see `fs_cloud_shadow_update`).
+struct ShadowCache {
+    size: u32,
+    map: Target,
+    uniform: wgpu::Buffer,
+    update_group: wgpu::BindGroup,
+    copy_group: wgpu::BindGroup,
+    frames: u32,
+    /// Rows to march this frame: all of them, or a quarter band.
+    rows: (u32, u32),
+    /// What the cache was last filled for: the map's corner (world texels), the world's
+    /// turn, the sun.
+    last: Option<([i64; 2], f32, Vec3)>,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable, Default)]
+struct ShadowCacheUniform {
+    min_index: [i32; 4],
+    params: [u32; 4],
+}
+
+impl ShadowCache {
+    fn new(device: &wgpu::Device, g: &Gpu, size: u32) -> Self {
+        let map = Target::with_format(
+            device,
+            "cloud shadow cache",
+            size,
+            size,
+            CLOUD_SHADOW_FORMAT,
+        );
+        let uniform = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("cloud shadow cache"),
+            size: std::mem::size_of::<ShadowCacheUniform>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let update_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("cloud shadow update"),
+            layout: &g.shadow_update_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 1,
+                resource: uniform.as_entire_binding(),
+            }],
+        });
+        let copy_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("cloud shadow copy"),
+            layout: &g.shadow_copy_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: uniform.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(&map.view),
+                },
+            ],
+        });
+        Self {
+            size,
+            map,
+            uniform,
+            update_group,
+            copy_group,
+            frames: 0,
+            rows: (0, size),
+            last: None,
+        }
+    }
+}
 
 /// One camera's cloud images.
 struct Targets {
@@ -314,7 +396,10 @@ struct Gpu {
     sky_replace: wgpu::RenderPipeline,
     sky_over: wgpu::RenderPipeline,
     geo: wgpu::RenderPipeline,
-    shadow: wgpu::RenderPipeline,
+    shadow_update: wgpu::RenderPipeline,
+    shadow_copy: wgpu::RenderPipeline,
+    shadow_update_layout: wgpu::BindGroupLayout,
+    shadow_copy_layout: wgpu::BindGroupLayout,
     composite_layout: wgpu::BindGroupLayout,
     slot_layout: wgpu::BindGroupLayout,
     reproject_layout: wgpu::BindGroupLayout,
@@ -336,6 +421,7 @@ pub struct CloudFeature {
     replace_sky: bool,
     top_m: f32,
     shadow_request: Option<CloudShadowRequest>,
+    shadow_cache: Option<ShadowCache>,
 }
 
 fn noise_texture(device: &wgpu::Device, label: &str, size: u32) -> wgpu::Texture {
@@ -638,15 +724,45 @@ impl RenderFeature for CloudFeature {
             &[Some(target(gpu.formats.env, None))],
             None,
         );
-        let shadow = fullscreen_pipeline(
-            gpu,
-            "cloud shadows",
-            &pipeline_layout,
-            &shader,
-            "vs_full",
-            "fs_cloud_shadow",
-            &[Some(target(CLOUD_SHADOW_FORMAT, None))],
-            None,
+        let shadow_update_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("cloud shadow update"),
+                entries: &[uniform_entry(1)],
+            });
+        let shadow_copy_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("cloud shadow copy"),
+                entries: &[
+                    uniform_entry(1),
+                    float_tex(2, wgpu::TextureViewDimension::D2),
+                ],
+            });
+        let shadow_pipeline = |name: &str, fs: &str, cache: &wgpu::BindGroupLayout| {
+            let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some(name),
+                bind_group_layouts: &[Some(&gpu.frame_layout), Some(&layout), Some(cache)],
+                immediate_size: 0,
+            });
+            fullscreen_pipeline(
+                gpu,
+                name,
+                &layout,
+                &shader,
+                "vs_full",
+                fs,
+                &[Some(target(CLOUD_SHADOW_FORMAT, None))],
+                None,
+            )
+        };
+        let shadow_update = shadow_pipeline(
+            "cloud shadow update",
+            "fs_cloud_shadow_update",
+            &shadow_update_layout,
+        );
+        let shadow_copy = shadow_pipeline(
+            "cloud shadow copy",
+            "fs_cloud_shadow_copy",
+            &shadow_copy_layout,
         );
 
         // Temporal reconstruction.
@@ -758,7 +874,10 @@ impl RenderFeature for CloudFeature {
             sky_replace,
             sky_over,
             geo,
-            shadow,
+            shadow_update,
+            shadow_copy,
+            shadow_update_layout,
+            shadow_copy_layout,
             composite_layout,
             slot_layout,
             reproject_layout,
@@ -766,6 +885,7 @@ impl RenderFeature for CloudFeature {
         });
         self.views.clear();
         self.current = None;
+        self.shadow_cache = None;
         self.noise_ready = false;
         self.map_revision = 0;
     }
@@ -936,6 +1056,51 @@ impl RenderFeature for CloudFeature {
                     outside: outside.min(1.0),
                 }
             });
+        if let (Some(request), Some(g)) = (&self.shadow_request, &self.gpu) {
+            let size = request.size.clamp(
+                engine_render::cloud_shadows::MIN_CLOUD_SHADOW_SIZE,
+                engine_render::cloud_shadows::MAX_CLOUD_SHADOW_SIZE,
+            );
+            if self.shadow_cache.as_ref().is_none_or(|c| c.size != size) {
+                self.shadow_cache = Some(ShadowCache::new(&gpu.device, g, size));
+            }
+            let cache = self.shadow_cache.as_mut().expect("just made");
+            // The map's corner in world texels, as the renderer places it.
+            let texel = request.extent.max(1.0) as f64 / size as f64;
+            let half = request.extent.max(1.0) as f64 * 0.5;
+            let corner = [
+                ((origin.x - half) / texel).round() as i64,
+                ((origin.z - half) / texel).round() as i64,
+            ];
+            let yaw = sim.frame.yaw as f32;
+            // Refresh all of it when it would show: a jump (a world shift, a teleport), the
+            // world turned, or the sun moved more than a few texels' worth of shadow.
+            let full = cache.last.is_none_or(|(c, y, sun)| {
+                let jump = (corner[0] - c[0]).abs().max((corner[1] - c[1]).abs());
+                jump > size as i64 / 8 || y != yaw || sun.dot(view.sun_dir) < 0.99999
+            });
+            if full {
+                cache.last = Some((corner, yaw, view.sun_dir));
+            } else if let Some(last) = &mut cache.last {
+                last.0 = corner;
+            }
+            let band = size.div_ceil(4);
+            cache.rows = if full {
+                (0, size)
+            } else {
+                let first = (cache.frames % 4) * band;
+                (first, band.min(size - first))
+            };
+            cache.frames = cache.frames.wrapping_add(1);
+            // Indices wrap in the shader; keep them in i32 (any world fits many times over).
+            let wrap = |i: i64| i.rem_euclid(size as i64 * 1024) as i32;
+            let u = ShadowCacheUniform {
+                min_index: [wrap(corner[0]), wrap(corner[1]), 0, 0],
+                params: [size, 0, 0, 0],
+            };
+            gpu.queue
+                .write_buffer(&cache.uniform, 0, bytemuck::bytes_of(&u));
+        }
 
         let flash = world
             .get_resource::<ActiveBolts>()
@@ -1071,24 +1236,54 @@ impl RenderFeature for CloudFeature {
             pass.dispatch_workgroups(n, n, n);
             self.noise_ready = true;
         }
-        if let Some(target) = &ctx.cloud_shadows {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("cloud shadows"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: target.view,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::WHITE),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                ..Default::default()
-            });
-            pass.set_pipeline(&g.shadow);
-            pass.set_bind_group(0, ctx.frame_group, &[]);
-            pass.set_bind_group(1, &g.group, &[]);
-            pass.draw(0..3, 0..1);
+        if let (Some(target), Some(cache)) = (&ctx.cloud_shadows, &self.shadow_cache) {
+            let pass = |encoder: &mut wgpu::CommandEncoder,
+                        label: &str,
+                        view: &wgpu::TextureView,
+                        load: wgpu::LoadOp<wgpu::Color>,
+                        pipeline: &wgpu::RenderPipeline,
+                        group: &wgpu::BindGroup,
+                        rows: Option<(u32, u32)>| {
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some(label),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view,
+                        depth_slice: None,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load,
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    ..Default::default()
+                });
+                pass.set_pipeline(pipeline);
+                pass.set_bind_group(0, ctx.frame_group, &[]);
+                pass.set_bind_group(1, &g.group, &[]);
+                pass.set_bind_group(2, group, &[]);
+                if let Some((first, count)) = rows {
+                    pass.set_scissor_rect(0, first, cache.size, count);
+                }
+                pass.draw(0..3, 0..1);
+            };
+            pass(
+                encoder,
+                "cloud shadow update",
+                &cache.map.view,
+                wgpu::LoadOp::Load,
+                &g.shadow_update,
+                &cache.update_group,
+                Some(cache.rows),
+            );
+            pass(
+                encoder,
+                "cloud shadows",
+                target.view,
+                wgpu::LoadOp::Clear(wgpu::Color::WHITE),
+                &g.shadow_copy,
+                &cache.copy_group,
+                None,
+            );
         }
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
