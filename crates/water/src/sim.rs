@@ -403,6 +403,9 @@ pub struct RipplesInFlight {
     ripple_spare: Option<crate::ripples::RippleField>,
 }
 
+/// Height above the ground, m, past which the ripple grid stops following the focus.
+pub const RIPPLES_SEEN_FROM_M: f64 = 250.0;
+
 /// Follow the focus and advance the interactive ripples, on a field taken out of the water
 /// (readers see a copy of it until [`publish_ripples_system`] puts it back).
 #[allow(clippy::too_many_arguments)]
@@ -431,13 +434,22 @@ pub fn ripple_system(
         book.since_rebuild = f32::INFINITY;
     }
     let f = focus_point(&focus, &cameras);
+    // High above the ground the grid (tens of meters of quarter-meter cells) is under a pixel
+    // or two: it stays where it is instead of following a fast flight and rebuilding every
+    // frame (18-39 ms a frame on the 2 km legs of the free-flight route, round 21d). Rings
+    // already on it still play out.
+    let aloft = state
+        .ground
+        .height(f)
+        .is_some_and(|h| f.y - h > RIPPLES_SEEN_FROM_M);
     let center = ripple_center(&state, f, state.ripples.size() * 0.5);
     book.since_rebuild += dt;
-    let rebuild = state.ripples.would_recenter(center)
-        || book.since_rebuild > 2.0
-        || still.unread > 0
-        || coarse.depths.unread > 0
-        || swash.unread() > 0;
+    let rebuild = !aloft
+        && (state.ripples.would_recenter(center)
+            || book.since_rebuild > 2.0
+            || still.unread > 0
+            || coarse.depths.unread > 0
+            || swash.unread() > 0);
     if !rebuild && !state.ripples.needs_step() {
         // Calm water: nothing to step, copy or upload.
         state.ripples.pending.clear();

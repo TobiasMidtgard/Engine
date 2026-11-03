@@ -52,8 +52,8 @@ impl GroundQuery for Land {
     }
 }
 
-#[test]
-fn the_ripple_grid_reads_the_lake_bed_once() {
+/// The valley with its lake and stream, a focus at `at`, and the terrain read counter.
+fn valley_app(at: DVec3) -> (App, Entity, Arc<AtomicUsize>) {
     let reads = Arc::new(AtomicUsize::new(0));
     let mut app = App::new();
     app.world.resource_mut::<EngineConfig>().headless = true;
@@ -83,11 +83,14 @@ fn the_ripple_grid_reads_the_lake_bed_once() {
     });
     let eye = app
         .world
-        .spawn((
-            Transform::from_translation(DVec3::new(0.0, 2.0, -30.0)),
-            SimulationFocus::default(),
-        ))
+        .spawn((Transform::from_translation(at), SimulationFocus::default()))
         .id();
+    (app, eye, reads)
+}
+
+#[test]
+fn the_ripple_grid_reads_the_lake_bed_once() {
+    let (mut app, eye, reads) = valley_app(DVec3::new(0.0, 2.0, -30.0));
     app.update_n(30);
     let cells = 256 * 256;
 
@@ -133,4 +136,40 @@ fn the_ripple_grid_reads_the_lake_bed_once() {
         "terrain reads: {still} in 7 s still, {moved} for a 20 m move, {jump} the frame after \
          a jump ({cells} cells)"
     );
+}
+
+/// Flying fast high over the lake (the free-flight route's 2 km legs), the ripple grid holds
+/// still instead of moving and re-reading the lake bed every frame; back down at the lake, it
+/// follows the focus again.
+#[test]
+fn the_ripple_grid_rests_while_the_focus_flies_high() {
+    let (mut app, eye, reads) = valley_app(DVec3::new(0.0, 2.0, -30.0));
+    app.update_n(60);
+    let cells = 256 * 256;
+
+    // 2 s at 2 km, crossing the lake back and forth at 120 m/s.
+    let before = reads.load(Ordering::Relaxed);
+    for i in 0..60 {
+        let x = -120.0 + (i % 30) as f64 * 8.0;
+        app.world.get_mut::<Transform>(eye).unwrap().translation = DVec3::new(x, 2000.0, 0.0);
+        app.update();
+    }
+    let high = reads.load(Ordering::Relaxed) - before;
+    // The shores and puddles around a moving focus read a few hundred a frame; a grid that
+    // followed the flight read about 300 000 in these 2 s.
+    assert!(
+        high < cells / 2,
+        "{high} terrain reads in 2 s of flight at 2 km ({cells} cells in the grid)"
+    );
+
+    // Down on the far shore: the grid comes there and reads the bed under it.
+    app.world.get_mut::<Transform>(eye).unwrap().translation = DVec3::new(-20.0, 2.0, 35.0);
+    let before = reads.load(Ordering::Relaxed);
+    app.update_n(30);
+    let low = reads.load(Ordering::Relaxed) - before;
+    assert!(
+        low > cells / 2,
+        "only {low} terrain reads in the second after landing by the lake"
+    );
+    println!("terrain reads: {high} in 2 s at 2 km, {low} in 1 s after landing");
 }
