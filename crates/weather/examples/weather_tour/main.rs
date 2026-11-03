@@ -331,6 +331,16 @@ fn shots() -> Vec<Shot> {
             frames: 24,
             face_moon: false,
         },
+        // Hanging still inside a heap near its edge, looking out: the eddies inside the
+        // cloud and its frayed edge, without the motion blur of the flight.
+        Shot {
+            name: "22_inside_a_heap",
+            setup: vec![set("partly_cloudy"), hour(11.0), advance(60.0)],
+            eye: DVec3::new(0.0, 2000.0, 400.0),
+            target: DVec3::new(0.0, 1900.0, -2600.0),
+            frames: 24,
+            face_moon: false,
+        },
     ]
 }
 
@@ -400,6 +410,39 @@ fn wait_for_cloud_shadows(app: &mut App, camera: Entity, eye: DVec3) {
         call_api(&mut app.world, "weather.advance", json!({"seconds": 60})).unwrap();
     }
     eprintln!("no cumulus over the valley found; shooting anyway");
+}
+
+/// Put the camera in the thick of a heap a few hundred meters from its edge, facing out.
+fn place_inside_a_heap(app: &mut App, camera: Entity, height: f64) {
+    let sim = app.world.resource::<engine_weather::WeatherSim>();
+    let mut best: Option<(f32, DVec3, DVec3)> = None;
+    for i in -20..=20 {
+        for j in -20..=20 {
+            let at = DVec2::new(i as f64 * 250.0, j as f64 * 250.0);
+            let here = sim.cell_at(at).coverage;
+            if here < 0.5 {
+                continue;
+            }
+            for k in 0..8 {
+                let a = k as f64 * std::f64::consts::FRAC_PI_4;
+                let d = DVec2::new(a.cos(), a.sin());
+                let out = sim.cell_at(at + d * 600.0).coverage;
+                let drop = here - out;
+                if best.is_none_or(|b| drop > b.0) {
+                    // Back from the edge into the cloud.
+                    let eye = DVec3::new(at.x - d.x * 250.0, height, at.y - d.y * 250.0);
+                    best = Some((drop, eye, eye + DVec3::new(d.x, 0.05, d.y) * 100.0));
+                }
+            }
+        }
+    }
+    match best {
+        Some((_, eye, target)) => {
+            *app.world.get_mut::<Transform>(camera).unwrap() =
+                Transform::from_translation(eye).looking_at(target, Vec3::Y)
+        }
+        None => eprintln!("no heap found; shooting anyway"),
+    }
 }
 
 fn main() {
@@ -503,6 +546,9 @@ fn main() {
         }
         if shot.name.contains("cloud_shadows") {
             wait_for_cloud_shadows(&mut app, camera, shot.eye);
+        }
+        if shot.name.contains("inside_a_heap") {
+            place_inside_a_heap(&mut app, camera, shot.eye.y);
         }
         if shot.face_moon {
             // Where the moon is at the time the setup chose (the lights catch up next frame).

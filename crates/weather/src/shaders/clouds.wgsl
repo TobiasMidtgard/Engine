@@ -136,11 +136,28 @@ fn cloud_density(p: vec3<f32>, h: f32, w: vec4<f32>, with_detail: bool) -> f32 {
     var d = saturate(remap(shape * profile, 1.0 - carved, 1.0, 0.0, 1.0)) * cov;
     if (d <= 0.0) { return 0.0; }
     if (with_detail) {
-        let dp = (p + clouds.detail.xyz) / clouds.params.y;
+        // The shape noise already sampled here swirls the detail noise around by up to ±40 m
+        // (Schneider 2015 uses a curl-noise texture "to fake the swirly distortions from
+        // atmospheric turbulence"; reusing this sample costs nothing). Without it the detail
+        // was the Worley cells' round pits, plain to see on a flight through.
+        let swirl = (s.gba - 0.5) * 0.12;
+        let dp = (p + clouds.detail.xyz) / clouds.params.y + swirl;
         let dn = textureSampleLevel(detail_noise, linear_repeat, dp, 0.0);
         let dfbm = dn.r * 0.625 + dn.g * 0.25 + dn.b * 0.125;
         // Wispy at the bottom, billowy at the top.
-        let m = mix(dfbm, 1.0 - dfbm, saturate(h01 * 5.0));
+        var m = mix(dfbm, 1.0 - dfbm, saturate(h01 * 5.0));
+        // Close by, a finer octave (an eighth of the tile: cells of 11 to 44 m) frays the
+        // edges and stirs the inside, which holds 50% more and less water from eddy to eddy.
+        // The coarse detail's smallest cells are 90 m, so a flight through a heap was one
+        // flat grey wall 12 m deep; now lumps and gaps rush past. Only near the camera: far
+        // away the octave is finer than a pixel and would only shimmer.
+        let close = 1.0 - smoothstep(250.0, 900.0, length(p));
+        if (close > 0.0) {
+            let fine_n = textureSampleLevel(detail_noise, linear_repeat, dp * 8.0 + swirl * 6.0, 0.0);
+            let ffbm = fine_n.r * 0.6 + fine_n.g * 0.3 + fine_n.b * 0.1;
+            m = mix(m, m * 0.6 + ffbm * 0.55, close);
+            d *= mix(1.0, 0.45 + 1.1 * ffbm, close);
+        }
         d = saturate(remap(d, m * 0.45, 1.0, 0.0, 1.0));
         // Real clouds end abruptly: droplets evaporate within meters of the edge. Lift the
         // thin fringe the noise leaves so billows get crisp outlines instead of a cotton-wool
