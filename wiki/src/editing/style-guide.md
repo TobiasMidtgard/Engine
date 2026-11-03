@@ -32,7 +32,7 @@ style guides of the best game wikis (listed at the end).
 
   ```text
   > [!WARNING]
-  > Spoilers for the Counterseal questline below.
+  > Spoilers for the thieves' guild questline below.
   ```
 
 ## Links and pictures

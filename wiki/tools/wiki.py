@@ -53,6 +53,12 @@ def esc(text):
     return html.escape(text, quote=True)
 
 
+def smart(escaped):
+    """Curly quotes and apostrophes in already-escaped text, like smart-punctuation in book.toml."""
+    escaped = re.sub(r"&quot;(?=\S)(.+?)(?<=\S)&quot;", "\u201c\\1\u201d", escaped)
+    return escaped.replace("&#x27;", "\u2019")
+
+
 def html_path(md_path):
     """creatures/wolf.md -> creatures/wolf.html, keeping any #anchor."""
     path, _, anchor = md_path.partition("#")
@@ -95,7 +101,7 @@ def image_path(value, from_page):
 
 def inline(text, page):
     """Inline Markdown for infobox values and card text: links, bold, italics and code."""
-    out = esc(text)
+    out = smart(esc(text))
 
     def link(m):
         label, url = m.group(1), html.unescape(m.group(2))
@@ -235,7 +241,8 @@ def discover(book, src_dir):
                     index = posixpath.join(child, "index.md")
                     if os.path.isfile(os.path.join(src_dir, index)) and index not in listed:
                         found.append(make_chapter(index, chapter))
-            found.sort(key=lambda c: c["name"].lower())
+            # Alphabetical, ignoring a leading "The" so "The Gilded Ascent" sorts under G.
+            found.sort(key=lambda c: re.sub(r"^the\s+", "", c["name"].lower()))
             # The sidebar nests chapters by their section number, so new pages continue the
             # parent's numbering (no-section-label in book.toml keeps the numbers hidden).
             if chapter.get("number"):
@@ -399,7 +406,7 @@ def card(info, page):
         src = img if is_external(img) else rel(img, page)
         picture = '<img class="wiki-card-img" src="%s" alt="" loading="lazy">' % esc(src)
     else:
-        initial = (plain(info["title"])[:1] or "?").upper()
+        initial = (re.sub(r"^the\s+", "", plain(info["title"]), flags=re.I)[:1] or "?").upper()
         picture = '<span class="wiki-card-img wiki-card-noimg" aria-hidden="true">%s</span>' % esc(
             initial
         )
@@ -409,11 +416,11 @@ def card(info, page):
             info["status"],
             STATUSES[info["status"]][0],
         )
-    summary = '<span class="wiki-card-text">%s</span>' % esc(info["summary"]) if info["summary"] else ""
+    summary = '<span class="wiki-card-text">%s</span>' % smart(esc(info["summary"])) if info["summary"] else ""
     return (
         '<a class="wiki-card" href="%s">%s%s<span class="wiki-card-body">'
         '<span class="wiki-card-title">%s</span>%s</span></a>'
-        % (esc(href), picture, badge, esc(plain(info["title"])), summary)
+        % (esc(href), picture, badge, smart(esc(plain(info["title"]))), summary)
     )
 
 
@@ -431,7 +438,7 @@ def table(columns, info, pages, page):
     head = "".join("<th>%s</th>" % esc(c) for c in ["Name"] + columns)
     body = []
     for r in rows:
-        cells = ['<td><a href="%s">%s</a></td>' % (esc(rel(html_path(r["path"]), page)), esc(plain(r["title"])))]
+        cells = ['<td><a href="%s">%s</a></td>' % (esc(rel(html_path(r["path"]), page)), smart(esc(plain(r["title"]))))]
         for c in columns:
             v = r["fields"].get(c.lower(), "")
             cells.append("<td>%s</td>" % (pips(v) or inline(v, page) or "—"))
@@ -460,7 +467,7 @@ def review_list(pages, page):
                 '<li><a href="%s">%s</a>%s</li>'
                 % (
                     esc(rel(html_path(i["path"]), page)),
-                    esc(plain(i["title"])),
+                    smart(esc(plain(i["title"]))),
                     ' <span class="wiki-muted">in %s</span>' % esc(where) if where else "",
                 )
             )

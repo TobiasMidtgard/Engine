@@ -25,6 +25,7 @@ it in a fixed place. How to add pages: editing/how-to-add-a-page.md.
 - [Controls](play/controls.md)
 - [Movement](play/movement.md)
 - [Combat](play/combat.md)
+- [Thievery](play/thievery.md)
 - [Progression](play/progression.md)
 - [Magic](magic/index.md)
   - [Classes and subclasses](magic/classes.md)
@@ -49,3 +50,4 @@ it in a fixed place. How to add pages: editing/how-to-add-a-page.md.
 - [Page templates](editing/templates.md)
 - [Style guide](editing/style-guide.md)
 - [Pages to review](editing/review.md)
+- [Open questions](editing/open-questions.md)
