@@ -314,26 +314,19 @@ fn frit_texture() -> Image {
     })
 }
 
-/// Insert a kit's meshes and images unless they are already there (cheap after the first
-/// car of a kind).
-fn ensure_kit(world: &mut World, probe: &str, make: fn() -> Kit) -> bool {
-    let Some(meshes) = world.get_resource::<Assets<Mesh>>() else {
-        return false;
-    };
-    if meshes.by_key(probe).is_some() {
-        return true;
-    }
-    let kit = make();
+/// Insert a kit's meshes and images (see [`super::deferred::after_assets`], which builds it
+/// once on a worker before the first car of a kind is drawn).
+fn install_kit(world: &mut World, kit: Kit) {
     if let Some(mut images) = world.get_resource_mut::<Assets<Image>>() {
         for (k, img) in kit.images {
             images.insert_keyed(&k, img);
         }
     }
-    let mut meshes = world.resource_mut::<Assets<Mesh>>();
-    for (k, m) in kit.meshes {
-        meshes.insert_keyed(&k, m);
+    if let Some(mut meshes) = world.get_resource_mut::<Assets<Mesh>>() {
+        for (k, m) in kit.meshes {
+            meshes.insert_keyed(&k, m);
+        }
     }
-    true
 }
 
 fn image(world: &World, key: &str) -> Option<Handle<Image>> {
@@ -494,97 +487,108 @@ pub fn sports_car_visuals(commands: &mut Commands, body: Entity, wheels: &Wheels
         .insert(nozzles(ExhaustKind::Tailpipe, &tips));
     let wheels = wheels.clone();
     commands.queue(move |world: &mut World| {
-        let p = sports_kit::PREFIX;
-        let k = |name: &str| key(p, name);
-        ensure_kit(world, &k("paint"), sports_car_kit);
-        let f = Finishes::new(world, p);
-        let mut paint_mat = StandardMaterial::hex(paint)
-            .with_metallic(0.35)
-            .with_roughness(0.14);
-        paint_mat.reflectance = 0.6;
-        if let Some(h) = image(world, &k("atlas_color")) {
-            paint_mat = paint_mat.with_base_color_texture(h);
-        }
-        if let Some(h) = image(world, &k("atlas_normal")) {
-            paint_mat = paint_mat.with_normal_texture(h);
-        }
-        let glass = glass_material(image(world, &k("frit")));
-        let at0 = Transform::default();
-        for (name, mat) in [
-            ("paint", paint_mat),
-            ("mirror_paint", paint_mat),
-            ("liner", f.liner),
-            ("lamp_housing", f.housing),
-            ("recess", f.recess),
-            ("trim", f.carbon),
-            ("carbon", f.carbon),
-            ("glass_front", glass),
-            ("glass_back", glass),
-            ("glass_left", glass),
-            ("glass_right", glass),
-            ("cabin", f.cabin),
-            ("head_lens", f.lens),
-            ("head_chrome", f.chrome),
-            ("head_projector", f.projector),
-            ("drl", f.drl),
-            ("amber", f.amber),
-            ("grille", f.gloss_black),
-            ("exhaust", f.exhaust),
-            ("mirror_black", f.satin_black),
-            ("mirror_glass", f.mirror_glass),
-            ("wipers", f.satin_black),
-            ("handles", f.satin_chrome),
-            ("chrome", f.chrome),
-            (
-                "enamel",
-                StandardMaterial::hex(0x0d2f7a).with_roughness(0.08),
-            ),
-            ("dash", f.dash),
-            ("screens", f.screen),
-            ("steering", f.leather),
-        ] {
-            spawn_part(world, body, &k(name), mat, at0);
-        }
-        spawn_lamp(world, body, &k("tail_red"), f.tail_off, f.tail_on, false);
-        spawn_lamp(
+        let guard = key(sports_kit::PREFIX, "paint");
+        super::deferred::after_assets(
             world,
-            body,
-            &k("tail_reverse"),
-            f.reverse_off,
-            f.reverse_on,
-            true,
-        );
-        for x in sports_kit::SEATS {
-            let at = Transform::from_xyz(
-                x as f64,
-                (sports_kit::SEAT_FLOOR - sports::GROUND) as f64,
-                sports_kit::SEAT_Z as f64,
-            );
-            spawn_part(world, body, &k("seat"), f.leather, at);
-        }
-        world.spawn((
-            Transform::from_xyz(0.0, 0.25, 0.75),
-            // Sky light comes in through the side glass (the doors below it are dark).
-            SkyLightVolume::new([0.74, 0.47, 0.88])
-                .with_sky_light(0.45)
-                .open(BoxFace::PosX)
-                .open(BoxFace::NegX)
-                .with_fade(0.8),
-            ChildOf(body),
-        ));
-        let rim = StandardMaterial::color(1.0, 1.0, 1.0)
-            .with_metallic(1.0)
-            .with_roughness(0.24);
-        let caliper = StandardMaterial::hex(0xc8102e).with_roughness(0.3);
-        let look = WheelLook::new(world, p, rim, caliper);
-        spawn_wheels(
-            world,
-            body,
-            p,
-            &wheels,
-            look,
-            sports::GROUND,
-            SPORTS_WHEEL.width,
+            guard,
+            sports_car_kit,
+            install_kit,
+            move |world: &mut World| {
+                if world.get_entity(body).is_err() {
+                    return;
+                }
+                let p = sports_kit::PREFIX;
+                let k = |name: &str| key(p, name);
+                let f = Finishes::new(world, p);
+                let mut paint_mat = StandardMaterial::hex(paint)
+                    .with_metallic(0.35)
+                    .with_roughness(0.14);
+                paint_mat.reflectance = 0.6;
+                if let Some(h) = image(world, &k("atlas_color")) {
+                    paint_mat = paint_mat.with_base_color_texture(h);
+                }
+                if let Some(h) = image(world, &k("atlas_normal")) {
+                    paint_mat = paint_mat.with_normal_texture(h);
+                }
+                let glass = glass_material(image(world, &k("frit")));
+                let at0 = Transform::default();
+                for (name, mat) in [
+                    ("paint", paint_mat),
+                    ("mirror_paint", paint_mat),
+                    ("liner", f.liner),
+                    ("lamp_housing", f.housing),
+                    ("recess", f.recess),
+                    ("trim", f.carbon),
+                    ("carbon", f.carbon),
+                    ("glass_front", glass),
+                    ("glass_back", glass),
+                    ("glass_left", glass),
+                    ("glass_right", glass),
+                    ("cabin", f.cabin),
+                    ("head_lens", f.lens),
+                    ("head_chrome", f.chrome),
+                    ("head_projector", f.projector),
+                    ("drl", f.drl),
+                    ("amber", f.amber),
+                    ("grille", f.gloss_black),
+                    ("exhaust", f.exhaust),
+                    ("mirror_black", f.satin_black),
+                    ("mirror_glass", f.mirror_glass),
+                    ("wipers", f.satin_black),
+                    ("handles", f.satin_chrome),
+                    ("chrome", f.chrome),
+                    (
+                        "enamel",
+                        StandardMaterial::hex(0x0d2f7a).with_roughness(0.08),
+                    ),
+                    ("dash", f.dash),
+                    ("screens", f.screen),
+                    ("steering", f.leather),
+                ] {
+                    spawn_part(world, body, &k(name), mat, at0);
+                }
+                spawn_lamp(world, body, &k("tail_red"), f.tail_off, f.tail_on, false);
+                spawn_lamp(
+                    world,
+                    body,
+                    &k("tail_reverse"),
+                    f.reverse_off,
+                    f.reverse_on,
+                    true,
+                );
+                for x in sports_kit::SEATS {
+                    let at = Transform::from_xyz(
+                        x as f64,
+                        (sports_kit::SEAT_FLOOR - sports::GROUND) as f64,
+                        sports_kit::SEAT_Z as f64,
+                    );
+                    spawn_part(world, body, &k("seat"), f.leather, at);
+                }
+                world.spawn((
+                    Transform::from_xyz(0.0, 0.25, 0.75),
+                    // Sky light comes in through the side glass (the doors below it are dark).
+                    SkyLightVolume::new([0.74, 0.47, 0.88])
+                        .with_sky_light(0.45)
+                        .open(BoxFace::PosX)
+                        .open(BoxFace::NegX)
+                        .with_fade(0.8),
+                    ChildOf(body),
+                ));
+                let rim = StandardMaterial::color(1.0, 1.0, 1.0)
+                    .with_metallic(1.0)
+                    .with_roughness(0.24);
+                let caliper = StandardMaterial::hex(0xc8102e).with_roughness(0.3);
+                let look = WheelLook::new(world, p, rim, caliper);
+                spawn_wheels(
+                    world,
+                    body,
+                    p,
+                    &wheels,
+                    look,
+                    sports::GROUND,
+                    SPORTS_WHEEL.width,
+                );
+            },
         );
     });
 }
@@ -599,146 +603,157 @@ pub fn rally_car_visuals(commands: &mut Commands, body: Entity, wheels: &Wheels)
         .insert(nozzles(ExhaustKind::Tailpipe, &tips));
     let wheels = wheels.clone();
     commands.queue(move |world: &mut World| {
-        let p = rally_kit::PREFIX;
-        let k = |name: &str| key(p, name);
-        ensure_kit(world, &k("paint"), rally_car_kit);
-        let f = Finishes::new(world, p);
-        let tex = |name: &str| image(world, &k(name));
-        // The livery atlas carries color, metallic and roughness.
-        let mut livery = StandardMaterial::color(1.0, 1.0, 1.0)
-            .with_metallic(1.0)
-            .with_roughness(1.0);
-        livery.reflectance = 0.55;
-        match (tex("atlas_color"), tex("atlas_mr")) {
-            (Some(c), Some(mr)) => {
-                livery = livery
-                    .with_base_color_texture(c)
-                    .with_metallic_roughness_texture(mr);
-            }
-            _ => {
-                livery = StandardMaterial::hex(0x1747a6)
-                    .with_metallic(0.5)
-                    .with_roughness(0.22);
-            }
-        }
-        if let Some(h) = tex("atlas_normal") {
-            livery = livery.with_normal_texture(h);
-        }
-        let textured = |name: &str, m: StandardMaterial| match tex(name) {
-            Some(h) => m.with_base_color_texture(h),
-            None => m,
-        };
-        let banner = textured(
-            "banner_tex",
-            StandardMaterial::color(1.0, 1.0, 1.0).with_roughness(0.4),
-        );
-        let plate = textured(
-            "plate_tex",
-            StandardMaterial::color(1.0, 1.0, 1.0).with_roughness(0.3),
-        );
-        let number = textured(
-            "number_tex",
-            StandardMaterial::color(1.0, 1.0, 1.0).with_roughness(0.35),
-        );
-        let flaps = textured(
-            "flap_tex",
-            StandardMaterial::color(1.0, 1.0, 1.0).with_roughness(0.78),
-        );
-        let mut skid = textured(
-            "brushed_color",
-            StandardMaterial::color(1.0, 1.0, 1.0)
-                .with_metallic(1.0)
-                .with_roughness(0.34)
-                .with_uv_scale(1.0, 1.0),
-        );
-        if let Some(h) = tex("brushed_normal") {
-            skid = skid.with_normal_texture(h);
-        }
-        let fabric = StandardMaterial::color(1.0, 1.0, 1.0).with_roughness(0.85);
-        let glass = glass_material(tex("frit"));
-        let at0 = Transform::default();
-        for (name, mat) in [
-            ("paint", livery),
-            ("mirror_paint", livery),
-            (
-                "liner",
-                StandardMaterial::hex(0x2e2924).with_roughness(0.95),
-            ),
-            ("lamp_housing", f.housing),
-            ("recess", f.recess),
-            ("glass_front", glass),
-            ("glass_back", glass),
-            ("glass_left", glass),
-            ("glass_right", glass),
-            ("banner", banner),
-            ("cabin", StandardMaterial::hex(0x8a8d91).with_roughness(0.7)),
-            ("head_lens", f.lens),
-            ("head_chrome", f.chrome),
-            ("head_projector", f.projector),
-            ("drl", f.drl),
-            ("amber", f.amber),
-            ("grille", f.satin_black),
-            ("wing", f.carbon),
-            ("wing_plate", plate),
-            ("number_plate", number),
-            ("flaps", flaps),
-            ("skid", skid),
-            ("exhaust", f.exhaust),
-            ("mirror_black", f.satin_black),
-            ("mirror_glass", f.mirror_glass),
-            ("wipers", f.satin_black),
-            ("chrome", f.chrome),
-            (
-                "enamel",
-                StandardMaterial::hex(0x0d2f7a).with_roughness(0.08),
-            ),
-            ("straps", fabric),
-            ("cage", StandardMaterial::hex(0xc4c6c9).with_roughness(0.42)),
-            ("dash", StandardMaterial::hex(0x18181a).with_roughness(0.9)),
-            ("screens", f.screen),
-            ("controls", f.leather),
-        ] {
-            spawn_part(world, body, &k(name), mat, at0);
-        }
-        spawn_lamp(world, body, &k("tail_red"), f.tail_off, f.tail_on, false);
-        spawn_lamp(
+        let guard = key(rally_kit::PREFIX, "paint");
+        super::deferred::after_assets(
             world,
-            body,
-            &k("tail_reverse"),
-            f.reverse_off,
-            f.reverse_on,
-            true,
-        );
-        for x in rally_kit::SEATS {
-            let at = Transform::from_xyz(
-                x as f64,
-                (rally_kit::SEAT_FLOOR - rally::GROUND) as f64,
-                rally_kit::SEAT_Z as f64,
-            );
-            spawn_part(world, body, &k("seat"), fabric, at);
-        }
-        world.spawn((
-            Transform::from_xyz(0.0, 0.38, 0.52),
-            SkyLightVolume::new([0.78, 0.57, 1.38])
-                .with_sky_light(0.6)
-                .open(BoxFace::PosX)
-                .open(BoxFace::NegX)
-                .with_fade(0.9),
-            ChildOf(body),
-        ));
-        let rim = StandardMaterial::hex(0xefefec).with_roughness(0.38);
-        let caliper = StandardMaterial::hex(0xd09a1c).with_roughness(0.35);
-        let mut look = WheelLook::new(world, p, rim, caliper);
-        look.tire.base_color = StandardMaterial::hex(0x3e3934).base_color;
-        look.tire.perceptual_roughness = 0.9;
-        spawn_wheels(
-            world,
-            body,
-            p,
-            &wheels,
-            look,
-            rally::GROUND,
-            RALLY_WHEEL.width,
+            guard,
+            rally_car_kit,
+            install_kit,
+            move |world: &mut World| {
+                if world.get_entity(body).is_err() {
+                    return;
+                }
+                let p = rally_kit::PREFIX;
+                let k = |name: &str| key(p, name);
+                let f = Finishes::new(world, p);
+                let tex = |name: &str| image(world, &k(name));
+                // The livery atlas carries color, metallic and roughness.
+                let mut livery = StandardMaterial::color(1.0, 1.0, 1.0)
+                    .with_metallic(1.0)
+                    .with_roughness(1.0);
+                livery.reflectance = 0.55;
+                match (tex("atlas_color"), tex("atlas_mr")) {
+                    (Some(c), Some(mr)) => {
+                        livery = livery
+                            .with_base_color_texture(c)
+                            .with_metallic_roughness_texture(mr);
+                    }
+                    _ => {
+                        livery = StandardMaterial::hex(0x1747a6)
+                            .with_metallic(0.5)
+                            .with_roughness(0.22);
+                    }
+                }
+                if let Some(h) = tex("atlas_normal") {
+                    livery = livery.with_normal_texture(h);
+                }
+                let textured = |name: &str, m: StandardMaterial| match tex(name) {
+                    Some(h) => m.with_base_color_texture(h),
+                    None => m,
+                };
+                let banner = textured(
+                    "banner_tex",
+                    StandardMaterial::color(1.0, 1.0, 1.0).with_roughness(0.4),
+                );
+                let plate = textured(
+                    "plate_tex",
+                    StandardMaterial::color(1.0, 1.0, 1.0).with_roughness(0.3),
+                );
+                let number = textured(
+                    "number_tex",
+                    StandardMaterial::color(1.0, 1.0, 1.0).with_roughness(0.35),
+                );
+                let flaps = textured(
+                    "flap_tex",
+                    StandardMaterial::color(1.0, 1.0, 1.0).with_roughness(0.78),
+                );
+                let mut skid = textured(
+                    "brushed_color",
+                    StandardMaterial::color(1.0, 1.0, 1.0)
+                        .with_metallic(1.0)
+                        .with_roughness(0.34)
+                        .with_uv_scale(1.0, 1.0),
+                );
+                if let Some(h) = tex("brushed_normal") {
+                    skid = skid.with_normal_texture(h);
+                }
+                let fabric = StandardMaterial::color(1.0, 1.0, 1.0).with_roughness(0.85);
+                let glass = glass_material(tex("frit"));
+                let at0 = Transform::default();
+                for (name, mat) in [
+                    ("paint", livery),
+                    ("mirror_paint", livery),
+                    (
+                        "liner",
+                        StandardMaterial::hex(0x2e2924).with_roughness(0.95),
+                    ),
+                    ("lamp_housing", f.housing),
+                    ("recess", f.recess),
+                    ("glass_front", glass),
+                    ("glass_back", glass),
+                    ("glass_left", glass),
+                    ("glass_right", glass),
+                    ("banner", banner),
+                    ("cabin", StandardMaterial::hex(0x8a8d91).with_roughness(0.7)),
+                    ("head_lens", f.lens),
+                    ("head_chrome", f.chrome),
+                    ("head_projector", f.projector),
+                    ("drl", f.drl),
+                    ("amber", f.amber),
+                    ("grille", f.satin_black),
+                    ("wing", f.carbon),
+                    ("wing_plate", plate),
+                    ("number_plate", number),
+                    ("flaps", flaps),
+                    ("skid", skid),
+                    ("exhaust", f.exhaust),
+                    ("mirror_black", f.satin_black),
+                    ("mirror_glass", f.mirror_glass),
+                    ("wipers", f.satin_black),
+                    ("chrome", f.chrome),
+                    (
+                        "enamel",
+                        StandardMaterial::hex(0x0d2f7a).with_roughness(0.08),
+                    ),
+                    ("straps", fabric),
+                    ("cage", StandardMaterial::hex(0xc4c6c9).with_roughness(0.42)),
+                    ("dash", StandardMaterial::hex(0x18181a).with_roughness(0.9)),
+                    ("screens", f.screen),
+                    ("controls", f.leather),
+                ] {
+                    spawn_part(world, body, &k(name), mat, at0);
+                }
+                spawn_lamp(world, body, &k("tail_red"), f.tail_off, f.tail_on, false);
+                spawn_lamp(
+                    world,
+                    body,
+                    &k("tail_reverse"),
+                    f.reverse_off,
+                    f.reverse_on,
+                    true,
+                );
+                for x in rally_kit::SEATS {
+                    let at = Transform::from_xyz(
+                        x as f64,
+                        (rally_kit::SEAT_FLOOR - rally::GROUND) as f64,
+                        rally_kit::SEAT_Z as f64,
+                    );
+                    spawn_part(world, body, &k("seat"), fabric, at);
+                }
+                world.spawn((
+                    Transform::from_xyz(0.0, 0.38, 0.52),
+                    SkyLightVolume::new([0.78, 0.57, 1.38])
+                        .with_sky_light(0.6)
+                        .open(BoxFace::PosX)
+                        .open(BoxFace::NegX)
+                        .with_fade(0.9),
+                    ChildOf(body),
+                ));
+                let rim = StandardMaterial::hex(0xefefec).with_roughness(0.38);
+                let caliper = StandardMaterial::hex(0xd09a1c).with_roughness(0.35);
+                let mut look = WheelLook::new(world, p, rim, caliper);
+                look.tire.base_color = StandardMaterial::hex(0x3e3934).base_color;
+                look.tire.perceptual_roughness = 0.9;
+                spawn_wheels(
+                    world,
+                    body,
+                    p,
+                    &wheels,
+                    look,
+                    rally::GROUND,
+                    RALLY_WHEEL.width,
+                );
+            },
         );
     });
 }
@@ -746,21 +761,32 @@ pub fn rally_car_visuals(commands: &mut Commands, body: Entity, wheels: &Wheels)
 /// Fit the rally car's hood light pod (four LED lamps, lit) to `body`.
 pub fn rally_light_pod(commands: &mut Commands, body: Entity) {
     commands.queue(move |world: &mut World| {
-        let p = rally_kit::PREFIX;
-        let k = |name: &str| key(p, name);
-        ensure_kit(world, &k("paint"), rally_car_kit);
-        let f = Finishes::new(world, p);
-        // The lamps are lit: a faint glow in the lenses around the bright LEDs.
-        let lens = f.lens.with_emissive([1.0, 0.97, 0.9], 30.0);
-        for (name, mat) in [
-            ("pod_shell", f.satin_black),
-            ("pod_chrome", f.chrome),
-            ("pod_reflector", f.housing),
-            ("pod_lens", lens),
-            ("pod_led", f.drl),
-        ] {
-            spawn_part(world, body, &k(name), mat, Transform::default());
-        }
+        let guard = key(rally_kit::PREFIX, "paint");
+        super::deferred::after_assets(
+            world,
+            guard,
+            rally_car_kit,
+            install_kit,
+            move |world: &mut World| {
+                if world.get_entity(body).is_err() {
+                    return;
+                }
+                let p = rally_kit::PREFIX;
+                let k = |name: &str| key(p, name);
+                let f = Finishes::new(world, p);
+                // The lamps are lit: a faint glow in the lenses around the bright LEDs.
+                let lens = f.lens.with_emissive([1.0, 0.97, 0.9], 30.0);
+                for (name, mat) in [
+                    ("pod_shell", f.satin_black),
+                    ("pod_chrome", f.chrome),
+                    ("pod_reflector", f.housing),
+                    ("pod_lens", lens),
+                    ("pod_led", f.drl),
+                ] {
+                    spawn_part(world, body, &k(name), mat, Transform::default());
+                }
+            },
+        );
     });
 }
 

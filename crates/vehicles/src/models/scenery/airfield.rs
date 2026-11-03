@@ -57,21 +57,44 @@ fn yellow() -> Vec4 {
 /// `demo::spawn_airfield`).
 pub fn spawn(commands: &mut Commands, start: DVec3, end: DVec3) {
     commands.queue(move |world: &mut World| {
-        build(world, start, end);
+        let mid = (start + end) * 0.5;
+        crate::models::deferred::at_anchor(
+            world,
+            "vehicles airfield scenery",
+            mid,
+            move || make(start, end),
+            move |world, moved, made| {
+                let Some((parts, hangar_lights)) = made else {
+                    return;
+                };
+                let started = Instant::now();
+                let (start, end) = (start + moved, end + moved);
+                let dir = ((end - start).with_y(0.0).normalize()).as_vec3();
+                let mid = (start + end) * 0.5;
+                parts.spawn_sliced(world, mid, facing(dir), "airfield", move |mut scene| {
+                    hangar_light(&mut scene, &hangar_lights);
+                    scene.finish("airfield", started);
+                });
+            },
+        );
     });
 }
 
 /// Build the airfield scenery now. `None` without a renderer.
 pub fn build(world: &mut World, start: DVec3, end: DVec3) -> Option<BuildStats> {
     let started = Instant::now();
+    place(world, start, end, make(start, end), started)
+}
+
+/// The airfield's meshes and hangar light spots (no world needed); `None` for a runway
+/// under 400 m.
+fn make(start: DVec3, end: DVec3) -> Option<(super::Finished, Vec<Vec3>)> {
     let along = (end - start).with_y(0.0);
     let length = along.length() as f32;
     if length < 400.0 {
         return None;
     }
     let dir = (along / along.length()).as_vec3();
-    let mid = (start + end) * 0.5;
-    let mut scene = Scene::new(world, mid, "airfield")?.rotated(facing(dir));
     // Magnetic heading of a take-off from `start`, degrees (0 = north = −Z).
     let heading = dir.x.atan2(-dir.z).to_degrees().rem_euclid(360.0);
     let n1 = designator(heading);
@@ -101,8 +124,29 @@ pub fn build(world: &mut World, start: DVec3, end: DVec3) -> Option<BuildStats> 
     papi(&f, &mut parts);
     signs(&f, &mut parts);
     let hangar_lights = buildings(&mut parts);
+    Some((parts.finish(), hangar_lights))
+}
+
+fn place(
+    world: &mut World,
+    start: DVec3,
+    end: DVec3,
+    made: Option<(super::Finished, Vec<Vec3>)>,
+    started: Instant,
+) -> Option<BuildStats> {
+    let (parts, hangar_lights) = made?;
+    let along = (end - start).with_y(0.0);
+    let dir = (along / along.length()).as_vec3();
+    let mid = (start + end) * 0.5;
+    let mut scene = Scene::new(world, mid, "airfield")?.rotated(facing(dir));
     parts.spawn(&mut scene, "airfield");
-    for p in hangar_lights.into_iter().take(2) {
+    hangar_light(&mut scene, &hangar_lights);
+    Some(scene.finish("airfield", started))
+}
+
+/// The two hangars' lights.
+fn hangar_light(scene: &mut Scene, hangar_lights: &[Vec3]) {
+    for p in hangar_lights.iter().take(2) {
         scene.light(
             p.as_dvec3(),
             engine_render::PointLight {
@@ -113,7 +157,6 @@ pub fn build(world: &mut World, start: DVec3, end: DVec3) -> Option<BuildStats> 
             },
         );
     }
-    Some(scene.finish("airfield", started))
 }
 
 /// The airfield's static collision shapes in its local frame (runway along z, `length`

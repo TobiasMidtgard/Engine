@@ -510,7 +510,27 @@ fn spawn_part(
 /// Spawn the sport plane's drawn parts under `body` (the vehicle carrying `aircraft` and
 /// `wheels`); the model's assets are built the first time.
 pub fn spawn(commands: &mut Commands, body: Entity, aircraft: &Aircraft, wheels: &Wheels) {
-    commands.queue(|world: &mut World| ensure(world, &key("body"), build));
+    let (aircraft, wheels) = (aircraft.clone(), wheels.clone());
+    commands.queue(move |world: &mut World| {
+        crate::models::deferred::after_assets(
+            world,
+            key("body"),
+            build,
+            |world, assets: ModelAssets| assets.install(world),
+            move |world: &mut World| {
+                if world.get_entity(body).is_err() {
+                    return;
+                }
+                let mut queue = bevy_ecs::world::CommandQueue::default();
+                let mut commands = Commands::new(&mut queue, world);
+                spawn_parts(&mut commands, body, &aircraft, &wheels);
+                queue.apply(world);
+            },
+        );
+    });
+}
+
+fn spawn_parts(commands: &mut Commands, body: Entity, aircraft: &Aircraft, wheels: &Wheels) {
     // The four exhaust stubs under the cowl, for the effects modules.
     commands
         .entity(body)

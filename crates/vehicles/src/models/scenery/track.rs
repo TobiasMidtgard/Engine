@@ -36,14 +36,31 @@ const DRIFT_RADIUS: f32 = 15.0;
 /// Queue the track scenery around a track centered on `center` (see `demo::spawn_track`).
 pub fn spawn(commands: &mut Commands, center: DVec3) {
     commands.queue(move |world: &mut World| {
-        build(world, center);
+        crate::models::deferred::at_anchor(world, "vehicles track scenery", center, make, {
+            move |world, moved, parts: super::Finished| {
+                let started = Instant::now();
+                parts.spawn_sliced(
+                    world,
+                    center + moved,
+                    Quat::IDENTITY,
+                    "track",
+                    move |scene| {
+                        scene.finish("track", started);
+                    },
+                );
+            }
+        });
     });
 }
 
 /// Build the track scenery now. `None` without a renderer.
 pub fn build(world: &mut World, center: DVec3) -> Option<BuildStats> {
     let started = Instant::now();
-    let mut scene = Scene::new(world, center, "track")?;
+    place(world, center, make(), started)
+}
+
+/// The track scenery's meshes (no world needed).
+fn make() -> super::Finished {
     let o = Oval::new();
     let mut parts = Parts::default();
     road(&o, &mut parts);
@@ -62,6 +79,16 @@ pub fn build(world: &mut World, center: DVec3) -> Option<BuildStats> {
     footbridge(&o, &mut parts);
     kicker(&o, &mut parts);
     drift_pad(&mut parts);
+    parts.finish()
+}
+
+fn place(
+    world: &mut World,
+    center: DVec3,
+    parts: super::Finished,
+    started: Instant,
+) -> Option<BuildStats> {
+    let mut scene = Scene::new(world, center, "track")?;
     parts.spawn(&mut scene, "track");
     Some(scene.finish("track", started))
 }

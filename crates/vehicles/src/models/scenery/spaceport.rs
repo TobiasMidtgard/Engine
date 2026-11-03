@@ -194,15 +194,37 @@ const BLAST_WALL_H: f32 = 3.8;
 /// Queue the spaceport scenery around the pad whose top center is `pad`.
 pub fn spawn(commands: &mut Commands, pad: DVec3, pad_radius: f32) {
     commands.queue(move |world: &mut World| {
-        build(world, pad, pad_radius);
+        crate::models::deferred::at_anchor(
+            world,
+            "vehicles spaceport scenery",
+            pad,
+            move || make(pad_radius),
+            move |world, moved, parts: super::Finished| {
+                let started = Instant::now();
+                let origin = pad + moved - DVec3::Y * PAD_THICK as f64;
+                parts.spawn_sliced(
+                    world,
+                    origin,
+                    Quat::IDENTITY,
+                    "spaceport",
+                    move |mut scene| {
+                        pad_lights_glow(&mut scene);
+                        scene.finish("spaceport", started);
+                    },
+                );
+            },
+        );
     });
 }
 
 /// Build the spaceport scenery now. `None` without a renderer.
 pub fn build(world: &mut World, pad: DVec3, pad_radius: f32) -> Option<BuildStats> {
     let started = Instant::now();
-    let origin = pad - DVec3::Y * PAD_THICK as f64;
-    let mut scene = Scene::new(world, origin, "spaceport")?;
+    place(world, pad, make(pad_radius), started)
+}
+
+/// The spaceport's meshes (no world needed).
+fn make(pad_radius: f32) -> super::Finished {
     let r = pad_radius;
     let mut parts = Parts::default();
     pad_surface(r, &mut parts);
@@ -224,8 +246,25 @@ pub fn build(world: &mut World, pad: DVec3, pad_radius: f32) -> Option<BuildStat
     }
     roads(r, &mut parts);
     camera_stands(&mut parts);
+    parts.finish()
+}
+
+fn place(
+    world: &mut World,
+    pad: DVec3,
+    parts: super::Finished,
+    started: Instant,
+) -> Option<BuildStats> {
+    let origin = pad - DVec3::Y * PAD_THICK as f64;
+    let mut scene = Scene::new(world, origin, "spaceport")?;
     parts.spawn(&mut scene, "spaceport");
-    // The pad's warm perimeter lights.
+    pad_lights_glow(&mut scene);
+    let _ = LAUNCH_TOWER;
+    Some(scene.finish("spaceport", started))
+}
+
+/// The pad's warm perimeter lights.
+fn pad_lights_glow(scene: &mut Scene) {
     for i in 0..12 {
         let a = i as f64 / 12.0 * std::f64::consts::TAU;
         scene.light(
@@ -238,8 +277,6 @@ pub fn build(world: &mut World, pad: DVec3, pad_radius: f32) -> Option<BuildStat
             },
         );
     }
-    let _ = LAUNCH_TOWER;
-    Some(scene.finish("spaceport", started))
 }
 
 /// A flat ring between radii `r0` and `r1` at height `y` from angle `a0` to `a1`, UVs = zone

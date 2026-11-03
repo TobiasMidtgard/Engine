@@ -4,4 +4,5 @@
 
 pub mod aircraft;
 pub mod cars;
+pub(crate) mod deferred;
 pub mod scenery;
