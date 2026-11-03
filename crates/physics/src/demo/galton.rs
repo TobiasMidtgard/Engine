@@ -17,6 +17,9 @@
 //! it.
 
 use std::f32::consts::FRAC_PI_2;
+use std::ops::Range;
+
+use bevy_ecs::prelude::{Entity, Resource, World};
 
 use engine_core::math::{DVec3, Quat, Vec2, Vec3};
 use engine_world::physics::{Collider, ColliderShape};
@@ -249,15 +252,7 @@ pub fn panes() -> [(Vec3, Vec3); 2] {
 
 /// The Galton board standing on the yard at `base`, its glass facing +Z, the hopper full.
 pub(super) fn galton_board(y: &mut Yard, base: DVec3) {
-    let steel = surface(y, "bearing_steel", || SurfaceMaterial {
-        name: "bearing_steel".into(),
-        friction: 0.25,
-        restitution: 0.5,
-        density: 7800.0,
-        footstep_sound: "footstep.metal".into(),
-        impact_effect: "impact.metal".into(),
-        ..Default::default()
-    });
+    let steel = steel(y);
     let glass = surface(y, "float_glass", || SurfaceMaterial {
         name: "float_glass".into(),
         friction: 0.1,
@@ -331,7 +326,41 @@ pub(super) fn galton_board(y: &mut Yard, base: DVec3) {
         },
     );
     y.scenery(base, Quat::IDENTITY, board);
-    for (i, (x, by)) in hopper().into_iter().enumerate() {
+    // The hopper fills from the bottom, [`POUR_BATCH`] balls a step ([`pour_on`]), when the
+    // board is a proving ground's station.
+    let first = match y.tag {
+        Some(tag) => {
+            let mut pours = y.world.get_resource_or_init::<GaltonPours>();
+            pours.0.retain(|p| p.0 != tag.ground);
+            if POUR_BATCH < BALLS {
+                pours.0.push((tag.ground, POUR_BATCH));
+            }
+            POUR_BATCH.min(BALLS)
+        }
+        None => BALLS,
+    };
+    balls(y, base, steel, 0..first);
+}
+
+/// Balls made a step while a board's hopper fills: five hundred new bodies packed within a
+/// contact's reach of each other cost one step 23 ms on the RTX 5080 PC (the yard bench's
+/// slowest step, round 21c); a fifth of them a step costs a fifth of that. The rows above
+/// arrive a step after the ones below have started down, a centimeter apart at most: the
+/// pour looks the same.
+pub const POUR_BATCH: usize = 100;
+
+/// Boards still filling their hoppers: the proving ground and how many balls it has.
+#[derive(Resource, Default)]
+pub(crate) struct GaltonPours(pub Vec<(Entity, usize)>);
+
+/// The hopper's balls `range` ([`hopper`]), on the board at `base`.
+fn balls(y: &mut Yard, base: DVec3, steel: engine_world::SurfaceId, range: Range<usize>) {
+    for (i, (x, by)) in hopper()
+        .into_iter()
+        .enumerate()
+        .take(range.end)
+        .skip(range.start)
+    {
         let parts = y.parts("galton_ball", [Mat::Chrome], || [art::ball(BALL)]);
         let c = Collider::sphere(BALL)
             .with_surface(steel)
@@ -341,6 +370,59 @@ pub(super) fn galton_board(y: &mut Yard, base: DVec3) {
         let ball = y.body(base + DVec3::new(x as f64, by as f64, 0.0), turn, c, parts);
         y.name(ball, "Galton ball");
     }
+}
+
+/// Make the next [`POUR_BATCH`] balls of every board still filling its hopper, or all it has
+/// left for the grounds in `flush` (a board about to rest or pause, so every ball is held).
+pub(super) fn pour_on(world: &mut World, flush: &[Entity]) {
+    let Some(mut pours) = world.get_resource_mut::<GaltonPours>() else {
+        return;
+    };
+    if pours.0.is_empty() {
+        return;
+    }
+    let list = std::mem::take(&mut pours.0);
+    let mut left = Vec::new();
+    for (ground, made) in list {
+        let Some(g) = world.get::<super::ProvingGround>(ground).cloned() else {
+            continue;
+        };
+        let end = if flush.contains(&ground) {
+            BALLS
+        } else {
+            (made + POUR_BATCH).min(BALLS)
+        };
+        let tag = super::StationPart {
+            ground,
+            station: super::Station::Galton,
+        };
+        let mut y = Yard::new(world, g.origin, g.surfaces, Some(tag));
+        let steel = steel(&mut y);
+        balls(&mut y, super::Station::Galton.base(), steel, made..end);
+        if end < BALLS {
+            left.push((ground, end));
+        }
+    }
+    world.resource_mut::<GaltonPours>().0.extend(left);
+}
+
+/// Whether a board is still filling its hopper.
+pub(super) fn pouring(world: &World) -> bool {
+    world
+        .get_resource::<GaltonPours>()
+        .is_some_and(|p| !p.0.is_empty())
+}
+
+fn steel(y: &mut Yard) -> engine_world::SurfaceId {
+    surface(y, "bearing_steel", || SurfaceMaterial {
+        name: "bearing_steel".into(),
+        friction: 0.25,
+        restitution: 0.5,
+        density: 7800.0,
+        footstep_sound: "footstep.metal".into(),
+        impact_effect: "impact.metal".into(),
+        ..Default::default()
+    })
 }
 
 fn surface(

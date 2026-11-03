@@ -21,6 +21,12 @@ fn app() -> App {
             step_secs: 1.0 / 60.0,
         });
     app.world.resource_mut::<FixedTime>().set_hz(60.0);
+    // The step budget's levels follow wall time, so tests run side by side on a busy machine
+    // would settle differently from run to run (a rock still rocking when the rockfall was
+    // checked): off here, as the yard bench and `budget.rs`'s own test measure it.
+    app.world
+        .resource_mut::<engine_physics::PhysicsSettings>()
+        .step_budget_ms = None;
     let mut commands = app.world.commands();
     demo::spawn_demo(&mut commands, DVec3::ZERO);
     app.world.flush();
@@ -36,6 +42,12 @@ fn named(app: &mut App, name: &str) -> Vec<Entity> {
         .collect()
 }
 
+/// Steps until the Galton board's hopper is full: it fills [`demo::galton::POUR_BATCH`] balls
+/// a step.
+fn filled() -> usize {
+    demo::galton::BALLS.div_ceil(demo::galton::POUR_BATCH)
+}
+
 fn bodies(app: &mut App) -> usize {
     app.world.query::<&RigidBody>().iter(&app.world).count()
 }
@@ -49,7 +61,8 @@ fn lean(app: &App, e: Entity) -> f32 {
 #[test]
 fn stations_replay_on_their_cycles() {
     let mut app = app();
-    app.update();
+    // (The Galton board's hopper fills over a few steps.)
+    app.update_n(filled());
     let total = bodies(&mut app);
     let first = named(&mut app, "First domino")[0];
     let cycle = Station::Dominoes.cycle_secs().unwrap();
@@ -371,7 +384,7 @@ fn the_break_scatters_the_rack_into_the_pockets_and_the_balls_stop() {
 fn the_galton_board_fills_its_bins_in_a_bell_curve() {
     use demo::galton;
     let mut app = app();
-    app.update();
+    app.update_n(filled());
     let origin = Station::Galton.base() + DVec3::Y * demo::SLAB_RISE;
     let balls = named(&mut app, "Galton ball");
     assert_eq!(balls.len(), galton::BALLS);
@@ -906,10 +919,6 @@ fn pressing_use_at_a_station_replays_it() {
 #[test]
 fn stations_nobody_looks_at_pause_and_go_on_when_looked_at() {
     let mut app = app();
-    // (The budget's levels follow wall time: off, so the test doesn't.)
-    app.world
-        .resource_mut::<engine_physics::PhysicsSettings>()
-        .step_budget_ms = None;
     let focus = app
         .world
         .spawn((
