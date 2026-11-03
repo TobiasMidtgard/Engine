@@ -1084,6 +1084,8 @@ pub struct MeshFeature {
     clustered: HashSet<u32>,
     /// Meshes uploaded since the diagnostics were last published.
     uploads: u32,
+    /// Of those, edits of meshes already on the GPU.
+    edits: u32,
     /// This frame's mesh and material lookups, by the handle indices entities name.
     mesh_frames: Vec<MeshFrame>,
     material_frames: Vec<MaterialFrame>,
@@ -1348,8 +1350,12 @@ impl MeshFeature {
     fn upload_mesh(&mut self, gpu: &GpuShared, index: u32, mesh: &Mesh, version: u64) {
         if let Some(old) = self.meshes.remove(&index) {
             old.free(&mut self.pool);
-            // A mesh edited in place: static shadow images may show its old shape.
-            self.static_dirty = [true; SHADOW_MAPS];
+            // A mesh edited in place: static shadow images may show its old shape, but only
+            // those drawn once it had been still long enough to join them (a mesh edited every
+            // frame casts as a moving caster and never redraws them).
+            for (dirty, &drawn) in self.static_dirty.iter_mut().zip(&self.image_frame) {
+                *dirty |= old.uploaded + STILL_FRAMES <= drawn;
+            }
         }
         if mesh.indices.is_empty() || mesh.vertices.is_empty() {
             return;
@@ -2832,6 +2838,7 @@ impl RenderFeature for MeshFeature {
                     )
                 {
                     self.uploads += 1;
+                    self.edits += resident.is_some() as u32;
                     self.upload_mesh(gpu, mesh.index, asset, mesh.version);
                     // Skinned meshes are drawn whole (`GpuSkin` requires `NoMeshLod`).
                     if lod_pixels > 0.0 && !self.skins.skins.contains_key(&mesh.index) {
@@ -3393,6 +3400,10 @@ impl RenderFeature for MeshFeature {
             d.set(
                 "render.meshes.uploads",
                 std::mem::take(&mut self.uploads) as f64,
+            );
+            d.set(
+                "render.meshes.edits",
+                std::mem::take(&mut self.edits) as f64,
             );
             // The shared vertex and index buffers: pages, MB reserved and MB in use.
             let (pages, reserved, used) = self.pool.usage();
