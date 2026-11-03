@@ -1,7 +1,7 @@
 # Page templates
 
 ```meta
-summary: Ready-made pages to copy: creature, city, district, place, planet, faction and more.
+summary: Ready-made pages to copy: creature, city, district, place, planet, quest, faction and more.
 ```
 
 Copy a template into a new file and fill it in (see [How to add a page](how-to-add-a-page.md)).
@@ -39,6 +39,14 @@ For a city with its own folder: `cities/<city>/<district>.md`.
 
 ````markdown
 {{#include ../../templates/planet.md}}
+````
+
+## Quest
+
+For a quest page in `quests/`. The `flow` block draws the ways a quest can go.
+
+````markdown
+{{#include ../../templates/quest.md}}
 ````
 
 ## Faction

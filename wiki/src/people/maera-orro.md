@@ -28,4 +28,4 @@ is really worth:
 
 ## Quests
 
-- **Before the First Bell**: Maera appraises every contestant's haul at dawn.
+- **[Before the First Bell](../quests/before-the-first-bell.md)**: Maera appraises every contestant's haul at dawn.

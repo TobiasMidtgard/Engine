@@ -88,4 +88,7 @@ Laurels and the Reed-Walker Tannery appear only as labels on the map, so their p
 - An early chat proposed more cities (Greywatch, Saltmere, Asterhold, Blackiron, Aldermere,
   Dunmar Charter) that never reached the world map. Should any of them become cities?
 - The guild's later heists (The Last Guest Wears It, One Crate, Thirty Sailors and The Founder's
-  Share) and the ten scores of its opening contest are not on the wiki yet.
+  Share) are not on the wiki yet; they came after the three jobs Tobias kept and were not confirmed.
+
+- [The Quests page](../quests/index.md) names the city quests that have no name in the design by
+  what happens in them ("The spring that may run dry"). Real names are welcome.

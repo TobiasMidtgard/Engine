@@ -3,7 +3,7 @@
 # main that changes wiki/. How to add pages: src/editing/how-to-add-a-page.md.
 
 [book]
-title = "Player Wiki"
+title = "The Codex"
 description = "The player's guide to the world, its creatures, cities, magic and machines."
 language = "en"
 src = "src"
@@ -17,11 +17,12 @@ create-missing = false
 command = "python3 tools/wiki.py"
 after = ["links"]
 
+# theme/index.hbs is the page frame, theme/wiki.css the look and theme/codex.js the sidebar,
+# tabs, side panel and search window.
 [output.html]
-default-theme = "light"
-preferred-dark-theme = "navy"
 site-url = "/Engine/"
 additional-css = ["theme/wiki.css"]
+additional-js = ["theme/codex.js"]
 no-section-label = true
 edit-url-template = "https://github.com/TobiasMidtgard/Engine/edit/main/wiki/{path}"
 smart-punctuation = true

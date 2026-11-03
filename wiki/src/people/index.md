@@ -1,4 +1,4 @@
-# People
+# Characters
 
 ```meta
 summary: Notable characters: rulers, traders, trainers, rivals and the people you will meet.
@@ -6,7 +6,7 @@ summary: Notable characters: rulers, traders, trainers, rivals and the people yo
 
 {{draft}}
 
-The notable people of the world: rulers, guild masters, traders, trainers, rivals and anyone
+The people of the world worth knowing: rulers, guild masters, traders, trainers, rivals and anyone
 worth looking for.
 
 {{cards}}

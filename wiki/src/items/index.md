@@ -1,4 +1,4 @@
-# Items
+# Items and equipment
 
 ```meta
 summary: Weapons, armour, potions, materials and the things you make, find and steal.

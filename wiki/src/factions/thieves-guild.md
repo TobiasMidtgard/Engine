@@ -105,18 +105,11 @@ The other hopefuls who start out with you, first as rivals and later as possible
 
 ## Joining
 
-> [!WARNING]
-> Spoilers for the guild's first quest below.
-
-**Before the First Bell.** At sunset, Ressa Vann gathers a handful of hopefuls in the Slipknot and
-sets two empty bowls on the counter: one for the single most valuable thing stolen, one for the
-greatest value in total. The deadline is the first bell at sunrise. Her rules: no killing, leave
-alone any door marked with the guild's black knot, and don't lead the guards back to the shop.
-
-There is no list of targets. You find your own by listening to conversations, earning the trust
-of the people who live under the bridges and following clues, while your rivals work their own
-jobs around you. At dawn, Maera weighs up what everyone brought back. Win or lose, everyone
-capable is offered work as an Outside Hand.
+You join through **[Before the First Bell](../quests/before-the-first-bell.md)**, a one-night
+contest. At sunset, Ressa Vann sets two empty bowls on the counter of the Slipknot: one for the
+single most valuable thing stolen, one for the greatest value in total. There is no list of
+targets, and the deadline is the first bell at sunrise. Win or lose, everyone capable is offered
+work as an Outside Hand.
 
 ## Questline
 
@@ -127,8 +120,7 @@ The first jobs are shared by everyone. After that, the story branches by whose w
 Ressa's **Ward Knots**, Tal and Jori's **Clean Work**, Sella's **Quiet Ledger** or Nilo's **Loose
 Water**. Every branch ends in the same great finale, **Steal the City Before Dawn**.
 
-- **The House Without Locks**: a wealthy broker hires the guild to steal his own insured
-  collection. The house is left open on purpose, some of the valuables are fakes, and the evidence
-  is staged to blame a servant.
-- **The bank that asked to be robbed**: a bank pays the guild to test its vault. You can leave a
-  weakness behind, but if you ever use it you become the first suspect.
+- **[The House Without Locks](../quests/the-house-without-locks.md)**: a wealthy broker hires the
+  guild to steal his own insured collection.
+- **[The Bank That Asked to Be Robbed](../quests/the-bank-that-asked-to-be-robbed.md)**: a bank
+  pays the guild to break into its own vault.

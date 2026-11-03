@@ -30,11 +30,6 @@ The bank stands on three closely joined rafts:
 
 ## Quests
 
-> [!WARNING]
-> Spoilers for the thieves' guild below.
-
-**The bank that asked to be robbed.** The bank hires the
-[thieves' guild](../../../factions/thieves-guild.md) to test its own defences. During the test you
-can find a real weakness in its maintenance and either report it or quietly leave it in place.
-The bank records everyone involved in the test, so using that weakness later makes you the
-first and obvious suspect.
+**[The Bank That Asked to Be Robbed](../../../quests/the-bank-that-asked-to-be-robbed.md)**: the
+bank hires the [thieves' guild](../../../factions/thieves-guild.md) to break into its own vault
+before it takes on a huge new collection of the city's debts.
