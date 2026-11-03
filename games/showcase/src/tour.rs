@@ -100,6 +100,7 @@ pub fn install(app: &mut App, only: Option<&str>) {
     if let Some(mut far) = app.world.get_resource_mut::<engine_foliage::FarWoods>() {
         far.background_builds = 4096;
         far.cells_per_frame = 256;
+        far.hold_loading = true;
     }
     if let Some(mut near) = app.world.get_resource_mut::<engine_foliage::NearWoods>() {
         near.cells_per_frame = u32::MAX;

@@ -50,6 +50,10 @@ pub struct FarWoods {
     /// Most cells built per frame when `background_builds` is 0, and most finished cells put
     /// in place per frame (nearest first) when it isn't.
     pub cells_per_frame: u32,
+    /// Cells building or waiting to build count as foliage loading
+    /// ([`crate::FoliageLoading::is_ready`]), for a tour that wants every wood in its shot.
+    /// Off in play, where the woods stream in on their own around a moving camera.
+    pub hold_loading: bool,
     /// More places far woods leave alone: no far woods within `radius` meters of `center`
     /// (world X/Z). Ground under [`SceneryTree`]s needs none: it is kept clear on its own.
     pub keep_clear: Vec<KeepClear>,
@@ -73,6 +77,7 @@ impl Default for FarWoods {
             min_spacing_m: 6.0,
             background_builds: 4,
             cells_per_frame: 6,
+            hold_loading: false,
             keep_clear: Vec::new(),
         }
     }
@@ -928,7 +933,11 @@ pub fn stream_far_woods(
         state.cells.insert(key, e);
     }
     if let Some(loading) = loading.as_mut() {
-        let building = state.pending.len() + backlog;
+        let building = if settings.hold_loading {
+            state.pending.len() + backlog
+        } else {
+            0
+        };
         if loading.far_building != building {
             loading.far_building = building;
         }
@@ -1141,6 +1150,7 @@ mod tests {
         // as foliage loading while they build.
         engine_core::tasks::init_task_pools();
         app.world.resource_mut::<FarWoods>().background_builds = 2;
+        app.world.resource_mut::<FarWoods>().hold_loading = true;
         app.update();
         assert!(!app.world.resource::<crate::FoliageLoading>().is_ready());
         let mut frames = 0;

@@ -61,6 +61,7 @@ fn main() {
     app.world.insert_resource(FarWoods {
         background_builds: builds,
         cells_per_frame: per_frame,
+        hold_loading: true,
         ..Default::default()
     });
     app.world
