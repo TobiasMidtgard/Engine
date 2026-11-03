@@ -267,6 +267,17 @@ impl ExposureMeter {
             });
     }
 
+    /// Whether a reading of the current view (since the last `restart`) is on its way.
+    pub fn in_flight(&self) -> bool {
+        self.readbacks.iter().any(|r| {
+            r.generation == self.generation
+                && matches!(
+                    r.state.load(Ordering::Acquire),
+                    IN_FLIGHT | MAPPING | MAPPED
+                )
+        })
+    }
+
     /// Collect finished readbacks (non-blocking) and update `measured_ev100`.
     pub fn collect(&mut self, device: &wgpu::Device) {
         let _ = device.poll(wgpu::PollType::Poll);

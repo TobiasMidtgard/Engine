@@ -1246,6 +1246,16 @@ impl Renderer {
         self.overlay_group = groups.overlay;
     }
 
+    /// After a camera cut auto exposure holds until the meter has read the new view, a frame
+    /// or two later, sooner or later with the machine's speed. A screenshot waits for that
+    /// reading when it is on its way, so it shows the new view's exposure on any machine.
+    fn settle_exposure(&mut self) {
+        if self.exposure.snap && self.meter.measured_ev100.is_none() && self.meter.in_flight() {
+            let _ = self.shared.device.poll(wgpu::PollType::wait_indefinitely());
+            self.meter.collect(&self.shared.device);
+        }
+    }
+
     /// Render a frame inline: extract, record and submit, then hand the results to the world.
     pub fn render(&mut self, world: &mut World) {
         let frame = self.extract(world);
@@ -3976,7 +3986,10 @@ pub fn capture_now(world: &mut World, path: impl Into<PathBuf>) -> Result<Screen
     world.get_resource_or_init::<Screenshots>().request(path);
     let before = world.resource::<Screenshots>().completed;
     // Inline even when pipelined, so the picture is this call's.
-    with_renderer(world, |renderer, world| renderer.render(world));
+    with_renderer(world, |renderer, world| {
+        renderer.settle_exposure();
+        renderer.render(world)
+    });
     let mut s = world.resource_mut::<Screenshots>();
     if s.completed > before {
         s.done

@@ -143,3 +143,32 @@ fn a_first_frame_with_a_broken_camera_keeps_a_finite_exposure() {
         "after a broken first frame the exposure is {later}, not {dim_ev}"
     );
 }
+
+#[test]
+fn a_screenshot_right_after_a_cut_has_the_new_views_exposure() {
+    let mut cut = walls_app(DVec3::ZERO);
+    cut.update_n(16);
+    if let Some(d) = cut.world.get_resource::<RenderDisabled>() {
+        eprintln!("skipping: no GPU ({})", d.0);
+        return;
+    }
+    let bright = cut.world.resource::<RenderStats>().ev100;
+    let cam = camera(&mut cut);
+    cut.world.get_mut::<Transform>(cam).unwrap().translation += HOP;
+    // One frame sees the cut and meters the new view; the screenshot comes next, before a
+    // slow machine has the reading back.
+    cut.update();
+    let path = std::env::temp_dir().join("engine-exposure-cut-shot.png");
+    engine_render::capture_now(&mut cut.world, &path).expect("screenshot");
+    let shot = cut.world.resource::<RenderStats>().ev100;
+
+    let mut dim = walls_app(HOP);
+    dim.update_n(16);
+    let dim_ev = dim.world.resource::<RenderStats>().ev100;
+    eprintln!("EV100: bright wall {bright}, the shot {shot}, dim wall {dim_ev}");
+    assert!(
+        (shot - dim_ev).abs() < 0.25,
+        "the screenshot after the cut has EV100 {shot}, the dim wall meters {dim_ev} (bright \
+         wall {bright})"
+    );
+}
