@@ -94,8 +94,30 @@ fn mix3(a: [f32; 3], b: [f32; 3], t: f32) -> [f32; 3] {
     ]
 }
 
+/// Below this detail a tree is drawn light: fewer, larger leaves of two triangles each, and no
+/// twigs thinner than [`LIGHT_TWIG_M`] (a grown oak of 24 years: 1.24 M triangles at full detail,
+/// about a tenth of that at 0.25).
+pub const LIGHT_TREE: f32 = 0.4;
+/// Twigs thinner than this (radius at their base, meters) are left out of a light tree: under a
+/// pixel from where it is drawn light, and its leaves hide them.
+pub const LIGHT_TWIG_M: f32 = 0.004;
+
+/// Share of a tree's leaves drawn at `detail`: all of them at `LIGHT_TREE` and up, down to 0.3.
+/// Survivors are scaled up so the crown covers as much.
+pub fn light_leaf_keep(detail: f32) -> f32 {
+    (detail / LIGHT_TREE).clamp(0.3, 1.0)
+}
+
+/// How one leaf is drawn: blade detail, the share of leaves kept, and whether as a plain card.
+#[derive(Clone, Copy)]
+struct LeafLod {
+    detail: f32,
+    keep: f32,
+    plain: bool,
+}
+
 /// The plant drawn on day `t` (from 0, the seed). `detail` scales tube sides and blade rows
-/// (1 near; 0.5 halves them).
+/// (1 near; 0.5 halves them; trees under [`LIGHT_TREE`] are drawn light).
 pub fn grow_meshes(graph: &PlantGraph, sk: &Skeleton, t: f32, detail: f32) -> GrownMeshes {
     let mut out = GrownMeshes::default();
     let n = sk.organs.len();
@@ -127,10 +149,14 @@ pub fn grow_meshes(graph: &PlantGraph, sk: &Skeleton, t: f32, detail: f32) -> Gr
     }
 
     let pipes = tree_radii(graph, sk, t);
-    // A tree's thousands of leaves are drawn plainer (lobes and teeth in the texture alone).
-    let leaf_detail = match graph.nodes.get(&graph.root) {
-        Some(Node::Tree(_)) => detail.min(0.25),
-        _ => detail,
+    // A tree's thousands of leaves are drawn plainer (lobes and teeth in the texture alone),
+    // and a light tree (detail under `LIGHT_TREE`) draws fewer, larger ones.
+    let is_tree = matches!(graph.nodes.get(&graph.root), Some(Node::Tree(_)));
+    let leaf_detail = if is_tree { detail.min(0.25) } else { detail };
+    let leaf_keep = if is_tree {
+        light_leaf_keep(detail)
+    } else {
+        1.0
     };
 
     let mut grown: Vec<Option<Grown>> = vec![None; n];
@@ -168,7 +194,14 @@ pub fn grow_meshes(graph: &PlantGraph, sk: &Skeleton, t: f32, detail: f32) -> Gr
                 let g = grow_shoot(tr, o, t, base, dir, side, &pipes[i], detail, &mut out.stems);
                 grown[i] = Some(g);
             }
-            Some(Node::Leaf(l)) => leaf(l, o, age, base, dir, side, leaf_detail, &mut out),
+            Some(Node::Leaf(l)) => {
+                let lod = LeafLod {
+                    detail: leaf_detail,
+                    keep: leaf_keep,
+                    plain: is_tree && detail < LIGHT_TREE,
+                };
+                leaf(l, o, age, base, dir, side, lod, &mut out)
+            }
             Some(Node::Flower(f)) => flower(f, o, age, base, dir, side, &mut out),
             Some(Node::Fruit(f)) => fruit(f, o, age, base, dir, side, &mut out),
             None => {}
@@ -376,7 +409,8 @@ fn grow_shoot(
     g.radii = (0..g.points.len())
         .map(|k| radii.get(k).copied().unwrap_or(tr.tip_radius_m))
         .collect();
-    if g.points.len() >= 2 {
+    let light = detail < LIGHT_TREE;
+    if g.points.len() >= 2 && !(light && g.radii[0] < LIGHT_TWIG_M) {
         let r0 = g.radii[0];
         let sides = if r0 > 0.05 {
             12
@@ -479,13 +513,68 @@ fn blade(
         }
     }
     let row = (2 * cols + 1) as u32;
+    // The blade comes to a point at its base and tip: there half of each quad is a sliver of no
+    // area (a third of a plain leaf's triangles), so it is left out.
+    let (pointed_base, pointed_tip) = (outline(l, 0.0) < 1e-4, outline(l, 1.0) < 1e-4);
     for i in 0..rows as u32 {
         for c in 0..row - 1 {
             let a = first + i * row + c;
-            b.tri(a, a + 1, a + row + 1);
-            b.tri(a, a + row + 1, a + row);
+            if !(i == 0 && pointed_base) {
+                b.tri(a, a + 1, a + row + 1);
+            }
+            if !(i + 1 == rows as u32 && pointed_tip) {
+                b.tri(a, a + row + 1, a + row);
+            }
         }
     }
+}
+
+/// A light tree's leaf: two triangles from the base to the tip through its widest point,
+/// folded along the midrib (the outline and veins left to the texture).
+#[allow(clippy::too_many_arguments)]
+fn card(
+    b: &mut MeshBuilder,
+    l: &Leaf,
+    base: Vec3,
+    dir: Vec3,
+    up: Vec3,
+    length: f32,
+    fold: f32,
+    color: [f32; 3],
+) {
+    if length < 1e-4 {
+        return;
+    }
+    let side = dir.cross(up).normalize_or(perpendicular(dir));
+    let up = side.cross(dir).normalize();
+    let widest = l.widest.clamp(0.1, 0.9);
+    // As much area as the blade: a diamond is half its box, a blade the mean of its outline.
+    let mean: f32 = (0..16)
+        .map(|i| outline(l, (i as f32 + 0.5) / 16.0))
+        .sum::<f32>()
+        / 16.0;
+    let w = l.width * length * mean;
+    let droop = UP * (l.droop * 0.35 * length);
+    let mid = base + dir * (widest * length) + up * (length * 0.08 * widest * (1.0 - widest))
+        - droop * (widest * widest);
+    let tip = base + dir * length - droop;
+    // Darker along the midrib, lighter at the edges, as the full blade.
+    let (c0, c1) = (Vec3::from(color) * 0.82, Vec3::from(color) * 1.04);
+    let first = b.vertices.len() as u32;
+    b.vertex(base, up, Vec2::new(0.5, 1.0), c0.extend(1.0));
+    b.vertex(tip, up, Vec2::new(0.5, 0.0), c0.extend(1.0));
+    for sign in [-1.0f32, 1.0] {
+        let lateral = side * (fold.cos() * sign) + up * fold.sin();
+        let n = (up * fold.cos() - side * (sign * fold.sin()) * 0.8 + up * 0.3).normalize();
+        b.vertex(
+            mid + lateral * w,
+            n,
+            Vec2::new(0.5 + 0.5 * sign, 1.0 - widest),
+            c1.extend(1.0),
+        );
+    }
+    b.tri(first, first + 1, first + 2);
+    b.tri(first, first + 3, first + 1);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -496,16 +585,24 @@ fn leaf(
     base: Vec3,
     dir: Vec3,
     side: Vec3,
-    detail: f32,
+    lod: LeafLod,
     out: &mut GrownMeshes,
 ) {
+    let detail = lod.detail;
     let u = age / l.grow_days.max(0.1);
     let g = hermite(u);
     if g < 0.01 {
         return;
     }
+    // A light tree keeps a share of its leaves (the same ones every rebuild), each larger.
+    if lod.keep < 1.0 {
+        let h = (o.seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 40) as f32 / (1u64 << 24) as f32;
+        if h >= lod.keep {
+            return;
+        }
+    }
     let mut rng = Rng::new(o.seed);
-    let s = o.scale * g;
+    let s = o.scale * g / lod.keep.sqrt();
     let petiole = rng.range(l.petiole_m.0, l.petiole_m.1.max(l.petiole_m.0)) * s;
     let blade_len = rng.range(l.blade_m.0, l.blade_m.1.max(l.blade_m.0)) * s;
     // Unfolds about the midrib early, then lies open.
@@ -545,7 +642,7 @@ fn leaf(
     let stalk = rgba(mix3([0.20, 0.28, 0.07], color, 0.3), 1.0);
     let sides = if detail >= 0.75 { 4 } else { 3 };
     // A short stalk on a plain leaf is too small to see.
-    if petiole > 0.002 && (detail >= 0.75 || petiole > 0.012) {
+    if !lod.plain && petiole > 0.002 && (detail >= 0.75 || petiole > 0.012) {
         out.stems
             .tube(&path, &radius, sides, 1.0, &|_, _| stalk, None, None);
     }
@@ -591,17 +688,22 @@ fn leaf(
             _ => tip,
         };
         let jitter = rng.range(0.92, 1.06);
-        blade(
-            &mut out.leaves,
-            l,
-            start,
-            d,
-            up,
-            blade_len * scale * jitter,
-            fold,
-            color,
-            detail,
-        );
+        let length = blade_len * scale * jitter;
+        if lod.plain {
+            card(&mut out.leaves, l, start, d, up, length, fold, color);
+        } else {
+            blade(
+                &mut out.leaves,
+                l,
+                start,
+                d,
+                up,
+                length,
+                fold,
+                color,
+                detail,
+            );
+        }
     }
     if rachis > 0.0 {
         out.stems.tube(

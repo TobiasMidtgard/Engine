@@ -455,7 +455,8 @@ pub struct GrowingPlant {
     pub days_per_second: f32,
     /// Start again from a seed when it reaches the end of its life (a showcase loop).
     pub repeat: bool,
-    /// Mesh detail: 1 full, lower for plants seen from further off.
+    /// Mesh detail near the camera: 1 full. Further off it is drawn at a share of this
+    /// ([`DETAIL_BANDS`]); a tree drops to its light version.
     pub detail: f32,
 }
 
@@ -540,6 +541,9 @@ pub struct GrowthState {
     meshes: [Handle<Mesh>; 4],
     /// Age the meshes show, and the age being built.
     shown_age: f32,
+    /// The distance band ([`DETAIL_BANDS`]) and the detail the meshes were last built for.
+    band: usize,
+    shown_detail: f32,
     building: Option<(f32, Arc<Mutex<Option<PlantParts>>>)>,
     /// How long the last build took, ms.
     pub last_build_ms: f32,
@@ -586,6 +590,16 @@ impl GrowthMaterials {
     }
 }
 
+/// Plants being developed off the frame: the source they were started from, and the graph and
+/// skeleton when done.
+type DevelopingPlants = std::collections::HashMap<
+    Entity,
+    (
+        (String, Option<PlantGraph>, u64),
+        Arc<Mutex<Option<(PlantGraph, Skeleton)>>>,
+    ),
+>;
+
 /// Plants further than this from the camera keep the meshes they have (meters).
 const HOLD_BEYOND_M: f64 = 80.0;
 /// Plants nearer than this rebuild at most every `NEAR_REBUILD_S` seconds, further ones every
@@ -595,6 +609,24 @@ const NEAR_REBUILD_S: f64 = 0.1;
 const FAR_REBUILD_S: f64 = 0.5;
 /// Rebuilds started in one frame at most, nearest first.
 const BUILDS_PER_FRAME: usize = 2;
+/// Up to these distances from the camera (meters), a growing plant is drawn at this share of
+/// its detail. A grown oak's crown is 14 m across: inside the first line the camera is under
+/// it; past it the oak is drawn light, which from 24 m looks the same (24 years: 0.9 M
+/// triangles near, 166k past 15 m, 102k past 60 m).
+pub const DETAIL_BANDS: [(f64, f32); 3] = [(15.0, 1.0), (60.0, 0.3), (f64::INFINITY, 0.12)];
+
+/// The distance band a plant at `distance` is drawn in, coming from band `current`: it moves
+/// to a nearer band only a tenth inside its line, so a camera standing at it does not flip it.
+fn detail_band(distance: f64, current: usize) -> usize {
+    let plain = DETAIL_BANDS
+        .iter()
+        .position(|&(d, _)| distance < d)
+        .unwrap_or(DETAIL_BANDS.len() - 1);
+    if current < DETAIL_BANDS.len() && plain < current && distance > DETAIL_BANDS[plain].0 * 0.9 {
+        return plain + 1;
+    }
+    plain
+}
 
 fn build(graph: &PlantGraph, sk: &Skeleton, age: f32, detail: f32) -> PlantParts {
     PlantParts::from_grown(grow_meshes(graph, sk, age, detail))
@@ -620,16 +652,19 @@ pub fn grow_plants(
     )>,
     cams: Query<(&engine_render::Camera, &GlobalTransform)>,
     mut renderers: Query<&mut MeshRenderer>,
+    mut developing: Local<DevelopingPlants>,
 ) {
     if plants.is_empty() {
+        developing.clear();
         return;
     }
+    developing.retain(|e, _| plants.contains(*e));
     let mats = mats.get_or_insert_with(|| GrowthMaterials::new(&mut materials, &mut images));
     let dt = time.delta_secs();
     let now = time.elapsed_secs_f64();
     let camera = crate::visuals::camera_position(&cams);
-    // Plants due a rebuild this frame: (distance, entity, age), the nearest started first.
-    let mut due: Vec<(f64, Entity, f32)> = Vec::new();
+    // Plants due a rebuild this frame: (distance, entity, age, detail band), the nearest first.
+    let mut due: Vec<(f64, Entity, f32, usize)> = Vec::new();
     for (e, mut plant, at, state) in &mut plants {
         if plant.days_per_second != 0.0 && dt > 0.0 {
             let mut age = plant.age_days + plant.days_per_second * dt;
@@ -642,17 +677,66 @@ pub fn grow_plants(
             plant.bypass_change_detection().age_days = age;
         }
         let source = (plant.preset.clone(), plant.graph.clone(), plant.seed);
+        let old_parts = state.as_ref().map(|s| (s.parts, s.meshes));
         let Some(mut state) = state.filter(|s| s.source == source) else {
-            // New, or its graph or seed changed: develop it again.
-            let graph = match plant.resolve() {
-                Ok(g) => g,
-                Err(err) => {
-                    tracing::warn!("foliage: growing plant {e}: {err}");
-                    commands.entity(e).remove::<GrowingPlant>();
-                    continue;
+            // New, or its graph or seed changed: develop it again (off the frame when it can: a
+            // 24-year oak takes 80 ms).
+            let developed = match developing.get(&e) {
+                Some((s, slot)) if *s == source => {
+                    match slot.lock().ok().and_then(|mut s| s.take()) {
+                        Some(done) => {
+                            developing.remove(&e);
+                            Some(done)
+                        }
+                        None => continue,
+                    }
+                }
+                _ => None,
+            };
+            let (graph, skeleton) = match developed {
+                Some(done) => done,
+                None => {
+                    let graph = match plant.resolve() {
+                        Ok(g) => g,
+                        Err(err) => {
+                            tracing::warn!("foliage: growing plant {e}: {err}");
+                            commands.entity(e).remove::<GrowingPlant>();
+                            continue;
+                        }
+                    };
+                    match AsyncComputeTaskPool::try_get().filter(|_| loading.background) {
+                        Some(pool) => {
+                            let slot = Arc::new(Mutex::new(None));
+                            let out = slot.clone();
+                            let seed = plant.seed;
+                            pool.spawn(async move {
+                                let skeleton = Skeleton::develop(&graph, seed);
+                                if let Ok(mut s) = out.lock() {
+                                    *s = Some((graph, skeleton));
+                                }
+                            })
+                            .detach();
+                            developing.insert(e, (source, slot));
+                            continue;
+                        }
+                        None => {
+                            let skeleton = Skeleton::develop(&graph, plant.seed);
+                            (graph, skeleton)
+                        }
+                    }
                 }
             };
-            let skeleton = Skeleton::develop(&graph, plant.seed);
+            // A changed plant drops the parts it showed.
+            if let Some((parts, handles)) = old_parts {
+                for part in parts {
+                    if let Ok(mut c) = commands.get_entity(part) {
+                        c.despawn();
+                    }
+                }
+                for h in handles {
+                    meshes.remove(h);
+                }
+            }
             let stems = graph
                 .bark_species
                 .as_deref()
@@ -676,6 +760,8 @@ pub fn grow_plants(
                     parts,
                     meshes: handles,
                     shown_age: f32::NAN,
+                    band: usize::MAX,
+                    shown_detail: f32::NAN,
                     building: None,
                     last_build_ms: 0.0,
                     built_at: f64::NEG_INFINITY,
@@ -694,30 +780,37 @@ pub fn grow_plants(
             state.building = None;
         }
         let age = plant.age_days;
-        if state.building.is_some() || state.shown_age == age {
+        let distance = camera.map_or(0.0, |c| c.distance(at.translation()));
+        let band = detail_band(distance, state.band);
+        // Into another band, or its detail was changed.
+        let moved = plant.detail * DETAIL_BANDS[band].1 != state.shown_detail;
+        if state.building.is_some() || (state.shown_age == age && !moved) {
             continue;
         }
-        // Far plants grow on in their data; their meshes catch up when they come near.
-        let distance = camera.map_or(0.0, |c| c.distance(at.translation()));
+        // Far plants grow on in their data; their meshes catch up when they come near (or
+        // cross into another detail band).
         let first = state.shown_age.is_nan();
         let wait = if distance > NEAR_M {
             FAR_REBUILD_S
         } else {
             NEAR_REBUILD_S
         };
-        if !first && (distance > HOLD_BEYOND_M || now - state.built_at < wait) {
+        if !first && !moved && (distance > HOLD_BEYOND_M || now - state.built_at < wait) {
             continue;
         }
         // A plant never shown yet goes first.
-        due.push((if first { -1.0 } else { distance }, e, age));
+        due.push((if first { -1.0 } else { distance }, e, age, band));
     }
     due.sort_by(|a, b| a.0.total_cmp(&b.0));
-    for &(_, e, age) in due.iter().take(BUILDS_PER_FRAME) {
+    for &(_, e, age, band) in due.iter().take(BUILDS_PER_FRAME) {
         let Ok((_, plant, _, Some(mut state))) = plants.get_mut(e) else {
             continue;
         };
         state.built_at = now;
-        let (graph, skeleton, detail) = (state.graph.clone(), state.skeleton.clone(), plant.detail);
+        state.band = band;
+        let detail = plant.detail * DETAIL_BANDS[band].1;
+        state.shown_detail = detail;
+        let (graph, skeleton) = (state.graph.clone(), state.skeleton.clone());
         let pool = AsyncComputeTaskPool::try_get();
         if !loading.background || pool.is_none() {
             let started = std::time::Instant::now();
@@ -765,6 +858,19 @@ fn put(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_plant_changes_detail_band_with_a_margin() {
+        assert_eq!(detail_band(10.0, usize::MAX), 0);
+        assert_eq!(detail_band(30.0, usize::MAX), 1);
+        assert_eq!(detail_band(500.0, usize::MAX), 2);
+        // Going out: at the line. Coming in: a tenth inside it.
+        assert_eq!(detail_band(16.0, 0), 1);
+        assert_eq!(detail_band(14.0, 1), 1);
+        assert_eq!(detail_band(13.0, 1), 0);
+        assert_eq!(detail_band(57.0, 2), 2);
+        assert_eq!(detail_band(53.0, 2), 1);
+    }
 
     #[test]
     fn presets_are_valid_and_round_trip_as_json() {

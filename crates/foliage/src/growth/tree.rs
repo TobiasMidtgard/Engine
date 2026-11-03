@@ -740,6 +740,56 @@ mod tests {
     }
 
     #[test]
+    fn a_light_oak_has_a_fraction_of_the_triangles_and_as_much_crown() {
+        let g = young_oak(10);
+        let sk = Skeleton::develop(&g, 3);
+        let t = 9.0 * YEAR + 200.0;
+        // Leaf area and how far out the crown reaches.
+        let crown = |m: &super::super::GrownMeshes| {
+            let p = |i: u32| Vec3::from(m.leaves.vertices[i as usize].position);
+            let area: f32 = m
+                .leaves
+                .indices
+                .chunks(3)
+                .map(|t| 0.5 * (p(t[1]) - p(t[0])).cross(p(t[2]) - p(t[0])).length())
+                .sum();
+            let reach = m
+                .leaves
+                .vertices
+                .iter()
+                .map(|v| v.position[0].hypot(v.position[2]))
+                .fold(0.0f32, f32::max);
+            (area, reach)
+        };
+        let full = grow_meshes(&g, &sk, t, 1.0);
+        let (full_area, full_reach) = crown(&full);
+        for detail in [0.3, 0.12] {
+            let light = grow_meshes(&g, &sk, t, detail);
+            let (area, reach) = crown(&light);
+            eprintln!(
+                "detail {detail}: {} of {} triangles, leaf area {area:.1} of {full_area:.1} m², \
+                 reach {reach:.2} of {full_reach:.2} m",
+                light.triangles(),
+                full.triangles()
+            );
+            assert!(
+                light.triangles() * 5 < full.triangles(),
+                "detail {detail}: {} of {} triangles",
+                light.triangles(),
+                full.triangles()
+            );
+            assert!(
+                (0.75..1.3).contains(&(area / full_area)),
+                "detail {detail}: leaf area {area:.1} of {full_area:.1} m²"
+            );
+            assert!(
+                (reach - full_reach).abs() < 0.15 * full_reach,
+                "detail {detail}: crown reaches {reach:.2} of {full_reach:.2} m"
+            );
+        }
+    }
+
+    #[test]
     fn a_tree_can_only_be_the_root() {
         let mut g = oak();
         g.root = "leaf".into();
