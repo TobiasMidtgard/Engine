@@ -1188,6 +1188,33 @@ fn unpark(world: &mut World, body: &str, at: (DVec3, DQuat)) {
 /// Once the world has shifted (after [`WorldShiftSet::Apply`]): move bodies along their orbits
 /// with the anchor fixed, land a [`travel_to`] trip, and drive gravity, the air, the sky and
 /// starlight.
+/// Moons narrower than this from the ground (degrees) aren't the night's moon: a bright dot,
+/// not a disc that lights the land.
+const MIN_MOON_DIAMETER_DEG: f64 = 0.1;
+
+/// The moon in the sky from `eye`: the body (not a star, not the anchor it stands on) that
+/// looks widest, if it is at least [`MIN_MOON_DIAMETER_DEG`] across. Its index, the unit
+/// direction to it and its apparent diameter (radians).
+fn moon_in_sky(
+    bodies: &[(Entity, CelestialBody)],
+    states: &[BodyState],
+    anchor: usize,
+    eye: DVec3,
+) -> Option<(usize, DVec3, f64)> {
+    bodies
+        .iter()
+        .zip(states)
+        .enumerate()
+        .filter(|(i, ((_, b), _))| b.kind != BodyKind::Star && *i != anchor)
+        .filter_map(|(i, (_, s))| {
+            let rel = s.world_position - eye;
+            let d = rel.length();
+            (d > s.radius_m).then(|| (i, rel / d, 2.0 * (s.radius_m / d).asin()))
+        })
+        .filter(|&(_, _, diameter)| diameter.to_degrees() >= MIN_MOON_DIAMETER_DEG)
+        .max_by(|a, b| a.2.total_cmp(&b.2))
+}
+
 pub fn update_space(world: &mut World) {
     let bodies = collect_bodies(world);
     if bodies.is_empty() {
@@ -1438,8 +1465,31 @@ pub fn update_space(world: &mut World) {
                 world.remove_resource::<engine_world::SunSource>();
             }
         }
+        // And the real moon, so the weather's moon light is the body the sky shows.
+        let moon = real_sun.and_then(|(to_star, _)| {
+            moon_in_sky(&bodies, &states, anchor, f).map(|(i, dir, diameter)| {
+                let look = &bodies[i].1.look;
+                engine_world::MoonSource {
+                    direction: dir.as_vec3(),
+                    lit_fraction: engine_world::MoonSource::lit_fraction_of(
+                        f,
+                        states[i].world_position,
+                        f + to_star,
+                    ),
+                    angular_diameter_deg: diameter.to_degrees() as f32,
+                    drawn_by_space: settings.draw_bodies && *look != BodyLook::None,
+                }
+            })
+        });
+        match moon {
+            Some(m) => world.insert_resource(m),
+            None => {
+                world.remove_resource::<engine_world::MoonSource>();
+            }
+        }
     } else {
         world.remove_resource::<engine_world::SunSource>();
+        world.remove_resource::<engine_world::MoonSource>();
     }
 
     let home_frame = world.get_resource::<HomeFrame>().map(|h| h.0.clone());

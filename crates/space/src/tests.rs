@@ -1411,3 +1411,52 @@ fn star_colors_run_from_red_to_blue() {
     assert_eq!(blue[2], 1.0);
     assert!(blue[0] < 0.9, "{blue:?}");
 }
+
+#[test]
+fn following_the_clock_tells_the_weather_where_the_moon_is() {
+    let mut app = app();
+    app.world.resource_mut::<SpaceSettings>().follow_world_clock = true;
+    let mut seen = 0;
+    for day in [80.0, 87.0, 95.0, 102.0] {
+        for hour in [0.0, 6.0, 12.0, 18.0] {
+            {
+                let mut w = app.world.resource_mut::<WeatherState>();
+                w.time_of_day_h = hour;
+                w.day_of_year = day;
+            }
+            for _ in 0..4 {
+                app.update();
+            }
+            let Some(m) = app
+                .world
+                .get_resource::<engine_world::MoonSource>()
+                .copied()
+            else {
+                continue;
+            };
+            seen += 1;
+            // The Moon from Earth's ground: about half a degree across.
+            assert!(
+                (0.45..0.6).contains(&m.angular_diameter_deg),
+                "{}",
+                m.angular_diameter_deg
+            );
+            assert!((m.direction.length() - 1.0).abs() < 1e-3);
+            // It points at the Moon body, lit as it stands from the star.
+            let eye = super::focus_position(&mut app.world).unwrap_or(DVec3::ZERO);
+            let moon = state(&app).body("Moon").unwrap().world_position;
+            let to_moon = (moon - eye).normalize();
+            assert!(degrees_apart(to_moon, m.direction) < 0.5);
+            let sun = app.world.resource::<engine_world::SunSource>().direction;
+            let elongation = sun.dot(m.direction).clamp(-1.0, 1.0);
+            // Seen from Earth, the lit fraction is (1 - cos elongation) / 2 within a percent.
+            let expected = 0.5 * (1.0 - elongation);
+            assert!(
+                (m.lit_fraction - expected).abs() < 0.01,
+                "lit {} vs {expected}",
+                m.lit_fraction
+            );
+        }
+    }
+    assert!(seen >= 8, "the Moon was in the sky data {seen} times of 16");
+}

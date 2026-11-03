@@ -280,9 +280,79 @@ impl<'a> NavCtx<'a> {
     }
 
     fn ensure_chunk(&mut self, key: (i32, i32)) {
-        if self.grid.chunks.contains_key(&key) {
+        self.ensure_chunks(&[key]);
+    }
+
+    /// Build every chunk in `keys` that isn't built yet. Several at once are built on their own
+    /// threads (a scoped thread each, not the compute pool: a pool scope opened inside a
+    /// system's task runs other systems while it waits): a search into new ground needs a
+    /// window of them, and built one after another they stalled a step for 150-415 ms on
+    /// Tobias's PC (round 23, `find path` arriving at the field and the plaza).
+    fn ensure_chunks(&mut self, keys: &[(i32, i32)]) {
+        let mut missing: Vec<(i32, i32)> = keys
+            .iter()
+            .copied()
+            .filter(|k| !self.grid.chunks.contains_key(k))
+            .collect();
+        missing.sort_unstable();
+        missing.dedup();
+        if missing.is_empty() {
             return;
         }
+        let below: Vec<Option<Vec<f64>>> = missing
+            .iter()
+            .map(|k| self.grid.ground_ready.remove(k))
+            .collect();
+        let threads = std::thread::available_parallelism()
+            .map_or(1, |n| n.get())
+            .saturating_sub(1)
+            .clamp(1, 16)
+            .min(missing.len());
+        let built: Vec<Chunk> = if threads <= 1 {
+            let mut scratch = std::mem::take(&mut self.grid.scratch);
+            let built = missing
+                .iter()
+                .zip(below)
+                .map(|(&key, below)| self.build_chunk(key, below, &mut scratch))
+                .collect();
+            self.grid.scratch = scratch;
+            built
+        } else {
+            let this = &*self;
+            let mut work: Vec<(_, _, Option<Chunk>)> = missing
+                .iter()
+                .zip(below)
+                .map(|(&key, below)| (key, below, None))
+                .collect();
+            let per = work.len().div_ceil(threads);
+            std::thread::scope(|scope| {
+                for part in work.chunks_mut(per) {
+                    scope.spawn(move || {
+                        let mut scratch = Vec::new();
+                        for (key, below, out) in part {
+                            *out = Some(this.build_chunk(*key, below.take(), &mut scratch));
+                        }
+                    });
+                }
+            });
+            work.into_iter()
+                .map(|(_, _, c)| c.expect("every chunk built"))
+                .collect()
+        };
+        for (key, chunk) in missing.into_iter().zip(built) {
+            self.grid.chunks.insert(key, chunk);
+            self.grid.chunks_built += 1;
+        }
+    }
+
+    /// Work out one chunk from the world (reads only): its cells' heights and which are
+    /// walkable. `below`: its ground heights when already sampled ([`warm_nav`]).
+    fn build_chunk(
+        &self,
+        key: (i32, i32),
+        below: Option<Vec<f64>>,
+        scratch: &mut Vec<u32>,
+    ) -> Chunk {
         let _span = tracing::info_span!("nav chunk").entered();
         let s = self.grid.settings;
         let margin = (s.agent_radius / s.cell).ceil() as i32;
@@ -290,8 +360,6 @@ impl<'a> NavCtx<'a> {
         let (cx0, cz0) = (key.0 * CHUNK - margin, key.1 * CHUNK - margin);
         let mut heights = vec![0.0f64; (side * side) as usize];
         let mut wet = vec![false; (side * side) as usize];
-        let mut scratch = std::mem::take(&mut self.grid.scratch);
-        let below = self.grid.ground_ready.remove(&key);
         for lz in 0..side {
             for lx in 0..side {
                 let (x, z) = self.cell_center(cx0 + lx, cz0 + lz);
@@ -302,14 +370,13 @@ impl<'a> NavCtx<'a> {
                 };
                 let h = self
                     .world
-                    .stacked_height_over(x, z, g, s.agent_height, &mut scratch);
+                    .stacked_height_over(x, z, g, s.agent_height, scratch);
                 heights[i] = h;
                 if let Some(w) = self.water.sample(DVec3::new(x, h, z)) {
                     wet[i] = w.surface_height - h > s.max_water_depth as f64;
                 }
             }
         }
-        self.grid.scratch = scratch;
         let base = heights[(margin * side + margin) as usize];
         let mut chunk = Chunk {
             base,
@@ -349,8 +416,7 @@ impl<'a> NavCtx<'a> {
                 chunk.walk[o] = ok;
             }
         }
-        self.grid.chunks.insert(key, chunk);
-        self.grid.chunks_built += 1;
+        chunk
     }
 
     /// Whether something stands in the way of a body at `p` (its feet): an obstacle side within
@@ -450,10 +516,15 @@ impl<'a> NavCtx<'a> {
             .min(a.1 - margin.min(d - 1));
         let mut h = vec![0.0; (w * d) as usize];
         let mut walk = vec![false; (w * d) as usize];
+        let (kx0, kx1) = (x0.div_euclid(CHUNK), (x0 + w - 1).div_euclid(CHUNK));
+        let (kz0, kz1) = (z0.div_euclid(CHUNK), (z0 + d - 1).div_euclid(CHUNK));
+        let keys: Vec<(i32, i32)> = (kz0..=kz1)
+            .flat_map(|kz| (kx0..=kx1).map(move |kx| (kx, kz)))
+            .collect();
+        self.ensure_chunks(&keys);
         // Copy chunk by chunk: one map lookup per chunk, not per cell.
-        for kz in z0.div_euclid(CHUNK)..=(z0 + d - 1).div_euclid(CHUNK) {
-            for kx in x0.div_euclid(CHUNK)..=(x0 + w - 1).div_euclid(CHUNK) {
-                self.ensure_chunk((kx, kz));
+        for kz in kz0..=kz1 {
+            for kx in kx0..=kx1 {
                 let chunk = &self.grid.chunks[&(kx, kz)];
                 let (cx, cz) = (kx * CHUNK, kz * CHUNK);
                 for z in cz.max(z0)..(cz + CHUNK).min(z0 + d) {
@@ -1073,6 +1144,39 @@ mod tests {
             p = q;
         }
         len
+    }
+
+    #[test]
+    fn chunks_built_together_match_chunks_built_one_by_one() {
+        // Walls across several chunks, so clearance and heights differ chunk to chunk.
+        let walls = (0..6)
+            .map(|i| {
+                wall(
+                    i + 1,
+                    DVec3::new(i as f64 * 13.0 - 30.0, 1.0, (i % 3) as f64 * 9.0 - 9.0),
+                    Vec3::new(3.0, 1.0 + i as f32 * 0.3, 0.4),
+                    Quat::from_rotation_y(i as f32 * 0.5),
+                )
+            })
+            .collect();
+        let world = TacticalWorld::from_obstacles(walls, &Ground::default());
+        let (ground, water) = (Ground::default(), Water::default());
+        let keys: Vec<(i32, i32)> = (-3..3).flat_map(|z| (-3..3).map(move |x| (x, z))).collect();
+        let mut together = NavGrid::default();
+        together.ctx(&world, &ground, &water).ensure_chunks(&keys);
+        let mut alone = NavGrid::default();
+        let mut ctx = alone.ctx(&world, &ground, &water);
+        for &key in &keys {
+            ctx.ensure_chunk(key);
+        }
+        assert_eq!(together.chunks_built, keys.len() as u64);
+        for key in &keys {
+            let (a, b) = (&together.chunks[key], &alone.chunks[key]);
+            assert_eq!(a.base, b.base, "{key:?}");
+            assert_eq!(a.h, b.h, "{key:?}");
+            assert_eq!(a.walk, b.walk, "{key:?}");
+        }
+        assert!(together.chunks.values().any(|c| c.walk.iter().any(|w| !w)));
     }
 
     #[test]
