@@ -2165,11 +2165,15 @@ pub fn spawn_farms(
 const WALL_CELLS: i32 = 17;
 /// Walls end here, m from the middle of the valley.
 const WALL_RADIUS: f64 = 700.0;
-/// The stones show within this distance, m (virtual geometry thins them out on the way).
-const WALL_STONES: f32 = 260.0;
+/// The stones show within this distance, m (times [`LodScale`]; virtual geometry thins them out
+/// on the way). Past it a 1.2 m wall is a few pixels tall and a stone about one, so the
+/// stone-colored core stands in, as Unreal's HLOD swaps a cluster of meshes for one proxy. It
+/// was 260 m (390 m scaled): the PC census (round 21d) had all 538 segments' stones in view
+/// from the overview, 39 M of its 51 M triangles before virtual geometry.
+const WALL_STONES: f32 = 120.0;
 /// The core turns stone-colored beyond this distance, m, where the chinks no longer show; past
 /// [`WALL_STONES`] it stands for the whole wall.
-const WALL_MID: f32 = 160.0;
+const WALL_MID: f32 = 100.0;
 /// Shorter runs of wall than this many segments are left out: stubs read as rubble.
 const WALL_MIN_RUN: usize = 3;
 /// Wall colliders exist within this distance of a focus point, m (and go beyond it plus

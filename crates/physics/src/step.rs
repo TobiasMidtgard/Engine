@@ -1542,6 +1542,25 @@ fn spin_drag(c: &rapier3d::geometry::Collider, spin: Vec3) -> Vec3 {
     rot * (reach * 2.0 * (rot.inverse() * spin))
 }
 
+/// Whether `r`'s Rapier step sweeps fast bodies (continuous collision detection): near a focus
+/// (tier 0), or for an awake body that asked for it (`engine_world::RigidBody::ccd`) anywhere.
+///
+/// Rapier sweeps every dynamic body that moves more than half its thinnest collider in a
+/// step against the fixed geometry around it. A boat's side walls are a few centimeters
+/// thick, so a boat doing more than about 1 m/s, or rocking, was swept every step against the
+/// terrain under the lake: 1.5-4 ms a step for the motorboat and rowboat 350 m from the plaza,
+/// most of the PC's slow second loop (round 21d). Past [`PhysicsSettings::coarse_beyond_m`]
+/// nobody sees a body poke into the ground for a step, and one that falls through is caught
+/// ([`crate::grounding`]).
+fn sweeps_wanted(r: &crate::sim::Region) -> bool {
+    r.tier == 0
+        || r.world
+            .islands
+            .active_bodies()
+            .filter_map(|h| r.world.bodies.get(h))
+            .any(|rb| rb.is_ccd_enabled())
+}
+
 /// A body whose far edge moves faster than this from turning alone, m/s, gets its contacts
 /// recomputed every step; below [`STILL_EDGE_SPEED`] Rapier may reuse them again.
 const TURNING_EDGE_SPEED: f32 = 0.02;
@@ -2029,6 +2048,7 @@ fn substep(
         r.world.integration_parameters.dt = p.sub_dt;
         r.world.integration_parameters.num_solver_iterations =
             crate::fine::iterations(shared.settings, r.fine, p.sub_dt);
+        r.world.integration_parameters.max_ccd_substeps = usize::from(sweeps_wanted(r));
         let collector = std::mem::take(&mut r.collector);
         let pool = match wide_pool() {
             Some(wide) if r.wide => Arc::clone(wide),

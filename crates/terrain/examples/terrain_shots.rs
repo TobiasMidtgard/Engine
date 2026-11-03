@@ -1050,6 +1050,44 @@ fn views() -> Vec<View> {
 }
 
 /// A point `above` meters over the ground at a latitude and longitude of the planet.
+/// See `FLY=n` in `main`.
+fn fly(app: &mut App, frames: usize, dir: DVec3) {
+    app.world
+        .resource_mut::<Time>()
+        .set_source(TimeSource::Manual {
+            step_secs: 1.0 / 60.0,
+        });
+    let speed: f64 = std::env::var("FLY_MPF")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(5.0);
+    let mut parts: std::collections::BTreeMap<String, (f64, f64)> = Default::default();
+    for _ in 0..frames {
+        let mut q = app
+            .world
+            .query_filtered::<&mut Transform, Or<(With<Camera>, With<SimulationFocus>)>>();
+        for mut tf in q.iter_mut(&mut app.world) {
+            tf.translation += dir * speed;
+        }
+        app.update();
+        let d = app
+            .world
+            .resource::<engine_core::diagnostics::Diagnostics>();
+        for (k, &v) in &d.metrics {
+            let ours = k.starts_with("render.cpu.") && k.contains("terrain")
+                || k.starts_with("terrain.patches_");
+            if ours {
+                let p = parts.entry(k.clone()).or_default();
+                *p = (p.0 + v, p.1.max(v));
+            }
+        }
+    }
+    println!("{frames} frames at {speed} m a frame (mean, worst):");
+    for (k, (sum, max)) in &parts {
+        println!("  {k:<44} {:>8.3} {max:>8.3}", sum / frames as f64);
+    }
+}
+
 fn on_ground(tf: &Transform, planet: &PlanetTerrain, [lat, lon, above]: [f64; 3]) -> DVec3 {
     let dir = engine_terrain::shape::dir_from_lat_lon(lat, lon);
     let mut ground = planet.shape.height(dir);
@@ -1557,6 +1595,19 @@ fn main() {
                 std::thread::sleep(std::time::Duration::from_millis(250));
             }
             app.update();
+        }
+        // `FLY=n` (with `ENGINE_PROFILE=1`): fly the camera and focus n frames toward the
+        // target, level, at `FLY_MPF` meters a frame (5: 300 m/s at 60 fps), and print the
+        // mean and worst of the terrain's CPU parts (`render.cpu.terrain: <part>`) meanwhile.
+        if let Some(n) = std::env::var("FLY")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+        {
+            fly(
+                &mut app,
+                n,
+                (target - eye).reject_from(DVec3::Y).normalize(),
+            );
         }
         let path = out.join(format!("{}.png", view.name));
         match capture_now(&mut app.world, &path) {

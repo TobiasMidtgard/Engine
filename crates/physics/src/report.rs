@@ -71,7 +71,11 @@ pub(crate) fn substep_parts(parts: [std::time::Duration; PARTS.len()]) {
 }
 
 /// Rapier's stages, in order, as its counters time them.
-const STAGES: [&str; 7] = [
+/// "final broad phase" is the end-of-step tree update (and the broad phase's deferred tree
+/// optimization, joined there), "positions" moving colliders to their bodies' new poses, and
+/// "whole step" Rapier's own clock: past it, our "Rapier" holds only the hand-off to the
+/// region's thread pool.
+const STAGES: [&str; 15] = [
     "broad phase",
     "narrow phase",
     "islands",
@@ -79,6 +83,14 @@ const STAGES: [&str; 7] = [
     "solving",
     "CCD",
     "user changes",
+    "final broad phase",
+    "positions",
+    "whole step",
+    "all collision detection",
+    "all solver",
+    "constraint collection",
+    "CCD sweeps",
+    "kinematic velocities",
 ];
 
 /// One Rapier step's stage times, read from its counters.
@@ -91,6 +103,14 @@ pub(crate) fn rapier_stages(c: &rapier3d::counters::Counters) {
         c.solver.velocity_resolution_time.time_ms(),
         c.stages.ccd_time.time_ms(),
         c.stages.user_changes.time_ms(),
+        c.cd.final_broad_phase_time.time_ms(),
+        c.stages.update_time.time_ms(),
+        c.step_time.time_ms(),
+        c.stages.collision_detection_time.time_ms(),
+        c.stages.solver_time.time_ms(),
+        c.stages.island_constraints_collection_time.time_ms(),
+        c.ccd.toi_computation_time.time_ms(),
+        c.custom.time_ms(),
     ];
     let mut t = totals().lock();
     for (i, v) in ms.iter().enumerate() {
