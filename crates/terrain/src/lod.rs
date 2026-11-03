@@ -44,6 +44,11 @@ pub struct SelectInput<'a> {
     /// Patches never split into children smaller than this (m across; 0 = down to the finest
     /// level). The far shadow map has texels of several meters, so its walk stops early.
     pub min_size: f64,
+    /// How much of the split distance holds for a patch at a distance with its terrain-local
+    /// bounding center (1 = all; less splits later). The view passes the air's transmittance
+    /// to it, so land deep in haze, whose detail the haze hides, stays coarser (Cesium's fog
+    /// raises tiles' allowed screen-space error the same way). `None` = 1 everywhere.
+    pub detail: Option<&'a dyn Fn(f64, DVec3) -> f64>,
 }
 
 /// Result of a walk.
@@ -56,6 +61,11 @@ pub struct Selection {
     pub missing: Vec<(f64, NodeKey)>,
     /// Nodes visited.
     pub visited: u32,
+    /// About how many patches `draw` would hold if `SelectInput::detail` were 1 everywhere:
+    /// each drawn patch counts 1 / detail², as the patch count grows with the square of the
+    /// split distance. The detail boost fills the budget against this, so what the haze saves
+    /// stays saved.
+    pub clear_count: f64,
 }
 
 /// Quadtree state of one terrain.
@@ -229,10 +239,11 @@ impl Lod {
                 continue;
             }
             let size = self.map.node_size(key.level);
+            let detail = input.detail.map_or(1.0, |d| d(dist, b.center));
             let factor = match input.merge_factor {
                 Some(m) if b.split => m.max(input.split_factor),
                 _ => input.split_factor,
-            };
+            } * detail;
             let split =
                 key.level < self.max_level && dist < factor * size && size * 0.5 >= input.min_size;
             if split {
@@ -271,6 +282,11 @@ impl Lod {
                 n.split = false;
             }
             out.draw.push(key);
+            out.clear_count += if key.level < self.max_level {
+                1.0 / detail.max(0.03)
+            } else {
+                1.0
+            };
         }
         out.missing
             .sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.level.cmp(&b.1.level)));
@@ -318,6 +334,7 @@ mod tests {
                 merge_factor: Some(3.0),
                 visible: &visible,
                 min_size: 0.0,
+                detail: None,
             });
             if sel.missing.is_empty() {
                 return sel;
@@ -375,6 +392,7 @@ mod tests {
             merge_factor: None,
             visible: &visible,
             min_size: 200.0,
+            detail: None,
         });
         assert_eq!(lod.frame, frame);
         // Coarser than the view's walk, so everything it wants is already built.
@@ -422,6 +440,7 @@ mod tests {
                 merge_factor: Some(split * 1.15),
                 visible: &visible,
                 min_size: 0.0,
+                detail: None,
             })
         };
         // A little less detail asked for: what is split stays split.

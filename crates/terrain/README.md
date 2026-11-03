@@ -24,7 +24,14 @@ everything else (streaming, LOD, colliders, ground queries, prints) follows the 
   view's resolution (about ×1.4 at 900 lines, ×2.2 at 1440; `MIN_QUAD_PX=` in
   `terrain_shots`): from low orbit at 1600x900 that is 245 patches instead of 690, the
   ground's scene pass 35% and its prepass 62% cheaper on lavapipe, with the same picture
-  (sub-pixel triangles cost whole 2×2 pixel quads each). Below High quality
+  (sub-pixel triangles cost whole 2×2 pixel quads each). Land the air hides splits later,
+  as Cesium's fog does: the split distance is multiplied by 1 / (1 + k (1 − T)²), with T the
+  transmittance of the air's gas and haze and the weather's height fog from the camera to the
+  patch (`TerrainSettings::haze_detail`, k = 3; `HAZE_DETAIL=` in `terrain_shots`), and the
+  boost above fills its budget against a haze-free estimate, so what the haze saves stays
+  saved. At 1600x900 on lavapipe: `farmland_3km` 648 to 355 patches (GPU 16% cheaper),
+  `earth_range` 733 to 562, `lake_shore` 754 to 584, `earth_leo` 245 to 196, with the same
+  picture (no pixel off by more than 16 in 255 at more than 0.06% of the view). Below High quality
   (`engine_world::Scalability::view_distance`) both shrink: Medium draws about a quarter fewer
   patches, Low half (`QUALITY=` and `SPLIT_FACTOR=`/`PATCH_BUDGET=` in `terrain_shots`).
   Patches also draw the renderer's depth prepass (depth, normal, motion; moving planets

@@ -1890,6 +1890,9 @@ impl RenderFeature for TerrainFeature {
 
         let mut entities: Vec<Entity> = terrains.entries.keys().copied().collect();
         entities.sort();
+        let atmosphere = world.get_resource::<engine_render::Atmosphere>().cloned();
+        let fog = world.get_resource::<engine_render::FogSettings>().copied();
+        let (atmosphere, fog) = (atmosphere.as_ref(), fog.as_ref());
         let city = world.get_resource::<CityLights>();
 
         // Looks from afar, uploaded to a layer of the map array as their planets are drawn.
@@ -1993,6 +1996,23 @@ impl RenderFeature for TerrainFeature {
                 frustum.intersects_sphere(rel, r as f32)
             };
             let split = settings.split_factor * t.config.detail.max(0.05) as f64 * state.boost;
+            // Land deep in the air's haze splits later (`TerrainSettings::haze_detail`).
+            let haze = (settings.haze_detail > 0.0 && src.map.is_sphere())
+                .then(|| Haze::new(atmosphere, fog, pos, src.map.radius))
+                .flatten();
+            let radius = src.map.radius;
+            let cam_alt = cam_local.length() - radius;
+            let haze_fn = haze.map(|h| {
+                move |dist: f64, center: DVec3| {
+                    h.detail(
+                        cam_alt,
+                        center.length() - radius,
+                        dist,
+                        settings.haze_detail,
+                    )
+                }
+            });
+            let haze_detail = haze_fn.as_ref().map(|f| f as &dyn Fn(f64, DVec3) -> f64);
 
             // Select, and ask the workers for what the view lacks, nearest first. Until the
             // patches are built their parents are drawn. After a jump (many patches missing),
@@ -2005,6 +2025,7 @@ impl RenderFeature for TerrainFeature {
                     merge_factor: None,
                     visible: &visible,
                     min_size: 0.0,
+                    detail: haze_detail,
                 })
             } else {
                 state.lod.select(&SelectInput {
@@ -2013,6 +2034,7 @@ impl RenderFeature for TerrainFeature {
                     merge_factor: Some(split * MERGE_HYSTERESIS),
                     visible: &visible,
                     min_size: 0.0,
+                    detail: haze_detail,
                 })
             };
             steps.mark("patches: select");
@@ -2055,6 +2077,7 @@ impl RenderFeature for TerrainFeature {
                         merge_factor: None,
                         visible: &visible,
                         min_size: 0.0,
+                        detail: haze_detail,
                     });
                     for &(dist, k) in &soon.missing {
                         wants.push((urgency(dist, k) + 1.0, k, false));
@@ -2088,7 +2111,7 @@ impl RenderFeature for TerrainFeature {
                     1.0
                 };
                 let budget = settings.patch_budget as f64 * share;
-                let needed = (sel.draw.len() + sel.missing.len()).max(1) as f64;
+                let needed = (sel.clear_count + sel.missing.len() as f64).max(1.0);
                 let base = needed / (state.boost * state.boost);
                 // No finer than the screen shows (`TerrainSettings::min_quad_px`): a patch's
                 // quads span 1 / (QUADS × split) radians at its split distance.
@@ -2130,6 +2153,7 @@ impl RenderFeature for TerrainFeature {
                         merge_factor: None,
                         visible: &far_visible,
                         min_size: far.texel() as f64 * 0.5 * crate::chunk::QUADS as f64,
+                        detail: None,
                     };
                     state.lod.walk(&input)
                 });
@@ -2709,6 +2733,89 @@ fn write_paint_rows(
     }
 }
 
+/// How the air hides land at a distance, for the quadtree walk (`SelectInput::detail`): its
+/// gas, its haze and the weather's height fog, each thinning exponentially with height above
+/// the planet's sea level, integrated along the straight path from the camera's height to the
+/// patch's (the renderer's own aerial perspective and `height_fog_optical_depth` in
+/// lib_frame.wgsl fade the land the same way).
+#[derive(Clone, Copy, Debug)]
+struct Haze {
+    /// Layers: extinction per meter at `base` (green), scale height (m), base height (m).
+    layers: [(f64, f64, f64); 3],
+    /// The fog never hides more than `FogSettings::max_opacity`.
+    fog_floor: f64,
+}
+
+impl Haze {
+    /// The haze around the planet at `position` (radius `radius`): the sky's air only if it is
+    /// this planet's, and the fog with it. None without either.
+    fn new(
+        atmosphere: Option<&engine_render::Atmosphere>,
+        fog: Option<&engine_render::FogSettings>,
+        position: DVec3,
+        radius: f64,
+    ) -> Option<Self> {
+        let a = atmosphere.filter(|a| {
+            a.enabled
+                && a.density_scale > 0.0
+                && (a.planet_center - position).length() < radius * 0.01 + 1000.0
+        })?;
+        let ds = a.density_scale as f64;
+        let gas = (
+            a.rayleigh_scattering[1] as f64 * ds,
+            a.rayleigh_scale_height as f64,
+            0.0,
+        );
+        let dust = (
+            (a.mie_scattering[1] + a.mie_absorption[1]) as f64 * ds,
+            a.mie_scale_height as f64,
+            0.0,
+        );
+        let mist = fog.map_or((0.0, 1.0, 0.0), |f| {
+            (
+                f.density.max(0.0) as f64,
+                1.0 / f.height_falloff.max(1e-5) as f64,
+                f.base_height as f64,
+            )
+        });
+        Some(Self {
+            layers: [gas, dust, mist],
+            fog_floor: fog.map_or(0.0, |f| 1.0 - f.max_opacity.clamp(0.0, 1.0) as f64),
+        })
+    }
+
+    /// Optical depth of layer `i` along `len` meters from height `h0` to `h1`.
+    fn depth(&self, i: usize, h0: f64, h1: f64, len: f64) -> f64 {
+        let (beta, scale, base) = self.layers[i];
+        if beta <= 0.0 {
+            return 0.0;
+        }
+        let e = |h: f64| (-((h - base).max(-100.0)) / scale).exp();
+        let dh = h1 - h0;
+        let mean = if dh.abs() > 0.01 {
+            scale * (e(h0) - e(h1)) / dh
+        } else {
+            e(h0)
+        };
+        beta * len * mean
+    }
+
+    /// The air's transmittance from the camera at height `h0` to land at `h1`, `len` away.
+    fn transmittance(&self, h0: f64, h1: f64, len: f64) -> f64 {
+        let air = (-(self.depth(0, h0, h1, len) + self.depth(1, h0, h1, len))).exp();
+        let fog = (-self.depth(2, h0, h1, len)).exp().max(self.fog_floor);
+        air * fog
+    }
+
+    /// The share of the split distance that holds there: 1 in clear air, 1 / (1 + k) where
+    /// the haze hides everything. The haze's share is squared, as Cesium's fog factor
+    /// `1 - exp(-(d ρ)²)` is, so land the air only veils keeps its detail.
+    fn detail(&self, h0: f64, h1: f64, len: f64, k: f64) -> f64 {
+        let hidden = 1.0 - self.transmittance(h0, h1, len);
+        1.0 / (1.0 + k * hidden * hidden)
+    }
+}
+
 /// The parts of [`TerrainFeature::prepare`], timed for the hitch lists (`render.cpu.terrain:
 /// <part>` in `Diagnostics`, under the renderer's own `prepare terrain`).
 struct Steps {
@@ -2973,6 +3080,46 @@ fn melt_latitude(c: &crate::shape::Climate) -> f32 {
 mod tests {
     use super::*;
     use engine_render::features::{compose_shader, validate_wgsl};
+
+    #[test]
+    fn haze_coarsens_only_land_the_air_hides() {
+        let radius = 6.36e6;
+        let mut air = engine_render::Atmosphere::earth();
+        air.planet_center = DVec3::ZERO;
+        air.planet_radius = radius;
+        // The terrain's position is its planet's center.
+        let at = DVec3::ZERO;
+        let clear = engine_render::FogSettings {
+            density: 0.0,
+            ..Default::default()
+        };
+        // Someone else's air, or none: no haze.
+        assert!(Haze::new(None, Some(&clear), at, radius).is_none());
+        let far = DVec3::new(0.0, 3.0 * radius, 0.0);
+        assert!(Haze::new(Some(&air), Some(&clear), far, radius).is_none());
+        let h = Haze::new(Some(&air), Some(&clear), at, radius).unwrap();
+        // Close land keeps its detail; detail falls with distance, never below 1 / (1 + k).
+        let d = |len: f64| h.detail(2.0, 0.0, len, 3.0);
+        assert!(d(50.0) > 0.99, "{}", d(50.0));
+        assert!(d(1000.0) > 0.99, "{}", d(1000.0));
+        assert!(d(20_000.0) < d(5_000.0));
+        assert!(d(1e7) >= 0.25 - 1e-9);
+        // Looking down from high up crosses less air than along the ground.
+        assert!(h.detail(30_000.0, 0.0, 30_000.0, 3.0) > d(30_000.0));
+        // Fog thickens the haze, but never hides more than its `max_opacity`.
+        let fog = engine_render::FogSettings {
+            density: 0.002,
+            max_opacity: 0.8,
+            ..Default::default()
+        };
+        let foggy = Haze::new(Some(&air), Some(&fog), at, radius).unwrap();
+        assert!(foggy.transmittance(2.0, 0.0, 2000.0) < h.transmittance(2.0, 0.0, 2000.0));
+        let (deep, air_only) = (
+            foggy.transmittance(2.0, 0.0, 1e5),
+            h.transmittance(2.0, 0.0, 1e5),
+        );
+        assert!(deep >= air_only * 0.2 * (1.0 - 1e-6), "{deep} {air_only}");
+    }
 
     #[test]
     fn shaders_validate() {
