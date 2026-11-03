@@ -1,0 +1,74 @@
+﻿==== frame profiles
+-- 05:45:11.069 19 frames in 5.0 s: 263.5 ms per frame (3.8 fps), worst 3908.3 ms
+   systems busy 259.6 ms per frame: 0.99 of 32 cores on average
+   schedules: First 105.83 x0.6, FixedUpdate 60.50 x1.9, Startup 57.93 x0.1, PostUpdate 17.00 x0.6, Update 7.24 x0.6, Last 1.26 x0.6, Extract 0.81 x0.6, FixedPostUpdate 0.59 x1.9, FixedPreUpdate 0.49 x1.9, PreUpdate 0.38 x0.6, Render 0.03 x0.6
+   physics_simulate (ms/frame, max ms, runs/frame): 0.73 / 8.23 / 1.9
+   ordering floor (longest before/after chain, ms per frame, of the schedule's ms)
+   First            105.45 of 105.83 (1 systems; heaviest: engine_movement::build_library 105.45)
+   Startup           55.96 of  57.93 (1 systems; heaviest: showcase::start 55.96)
+   FixedUpdate       41.58 of  60.50 (61 systems; heaviest: engine_water::ripple_system 25.21, engine_weather::ground_system 3.99, engine_vehicles::hold_seated 2.12, engine_physics::physics_sync 2.07, engine_npc::rebuild_world_model 1.70, engine_weather::weather_system 1.60, engine_softbody::animate_skeletons 1.49, engine_softbody::emit_outputs 0.90)
+     chain: engine_npc::request_appearances 0.11 -> engine_npc::rebuild_world_model 1.70 -> engine_vehicles::hold_seated 2.12 -> engine_softbody::drive_motion 0.71 -> engine_softbody::animate_skeletons 1.49 -> engine_softbody::fire_turrets 0.08 -> engine_movement::perceive 0.17 -> engine_physics::physics_sync 2.07 -> engine_water::ripple_system 25.21 -> engine_softbody::gather_loads 0.71 -> engine_softbody::emit_outputs 0.90 -> engine_weather::weather_system 1.60 -> engine_weather::cloud_map_system 0.31 -> engine_weather::ground_system 3.99 -> engine_weather::lightning_system 0.08
+   PostUpdate        13.26 of  17.00 (23 systems; heaviest: engine_terrain::update_colliders 11.57, engine_npc::shift_wildlife 0.61, engine_terrain::update_landmarks 0.57, engine_core::propagate_transforms_system 0.30, engine_space::reanchor 0.07, engine_space::update_space 0.07)
+     chain: engine_space::reanchor 0.07 -> engine_npc::shift_wildlife 0.61 -> engine_space::update_space 0.07 -> engine_core::propagate_transforms_system 0.30 -> engine_terrain::update_colliders 11.57 -> engine_terrain::update_landmarks 0.57
+   Update             1.12 of   7.24 (58 systems; heaviest: engine_foliage::grow_plants 0.65, engine_vehicles::make_boardable 0.14, engine_foliage::stream_far_woods 0.11, engine_foliage::sync_scenery_trees 0.07)
+     chain: engine_vehicles::make_boardable 0.14 -> engine_foliage::grow_plants 0.65 -> engine_foliage::sync_scenery_trees 0.07 -> engine_foliage::stream_far_woods 0.11
+   Last               0.79 of   1.26 (1 systems; heaviest: engine_core::profile_report_system 0.79)
+   FixedPostUpdate    0.52 of   0.59 (1 systems; heaviest: bevy_ecs::signal_message_update_system 0.52)
+   FixedPreUpdate     0.20 of   0.49 (2 systems; heaviest: engine_softbody::follow_surface 0.19)
+     chain: engine_softbody::follow_surface 0.19
+   Extract            0.15 of   0.81 (1 systems; heaviest: engine_render::resolve_mesh_renderers 0.15)
+   PreUpdate          0.06 of   0.38 (4 systems; heaviest: )
+     chain: 
+-- 05:45:16.109 8 frames in 5.0 s: 629.7 ms per frame (1.6 fps), worst 4030.4 ms
+   systems busy 516.1 ms per frame: 0.82 of 32 cores on average
+   schedules: Update 505.06 x1.6, FixedUpdate 9.63 x4.9, PostUpdate 3.63 x1.6, Extract 1.67 x1.6, Last 0.91 x1.6, First 0.59 x1.6, PreUpdate 0.32 x1.6, FixedPreUpdate 0.18 x4.9, FixedPostUpdate 0.15 x4.9, Render 0.05 x1.6
+   physics_simulate (ms/frame, max ms, runs/frame): 0.14 / 0.07 / 4.9
+   ordering floor (longest before/after chain, ms per frame, of the schedule's ms)
+   Update           501.02 of 505.06 (66 systems; heaviest: engine_foliage::stream_far_woods 499.97, engine_foliage::ensure_species_visuals 0.41, engine_foliage::sync_scenery_trees 0.36)
+     chain: engine_foliage::ensure_species_visuals 0.41 -> engine_foliage::sync_scenery_trees 0.36 -> engine_foliage::stream_far_woods 499.97
+   FixedUpdate        2.92 of   9.63 (86 systems; heaviest: engine_weather::ground_system 1.00, engine_weather::cloud_map_system 0.53, engine_physics::physics_sync 0.18, engine_physics::physics_simulate 0.14, engine_physics::physics_write_back 0.08, engine_weather::weather_system 0.08)
+     chain: engine_physics::physics_sync 0.18 -> engine_physics::physics_simulate 0.14 -> engine_physics::physics_write_back 0.08 -> engine_weather::weather_system 0.08 -> engine_weather::cloud_map_system 0.53 -> engine_weather::ground_system 1.00
+   PostUpdate         1.70 of   3.63 (27 systems; heaviest: engine_audio::water_ambience 0.91, engine_core::propagate_transforms_system 0.22, engine_space::reanchor 0.14, engine_space::update_space 0.11, engine_audio::vehicle_sounds 0.10, engine_audio::nature_ambience 0.05)
+     chain: engine_space::reanchor 0.14 -> engine_space::update_space 0.11 -> engine_core::propagate_transforms_system 0.22 -> engine_audio::water_ambience 0.91 -> engine_audio::nature_ambience 0.05 -> engine_audio::vehicle_sounds 0.10
+   Extract            1.28 of   1.67 (1 systems; heaviest: engine_render::resolve_mesh_renderers 1.28)
+   Last               0.44 of   0.91 (1 systems; heaviest: engine_core::profile_report_system 0.44)
+   First              0.40 of   0.59 (4 systems; heaviest: engine_core::frame_diagnostics_system 0.33, engine_ai_bridge::bridge_frame_start_system 0.05)
+     chain: engine_ai_bridge::bridge_frame_start_system 0.05 -> engine_core::frame_diagnostics_system 0.33
+   PreUpdate          0.08 of   0.32 (4 systems; heaviest: )
+     chain: 
+-- 05:45:21.118 91 frames in 5.0 s: 55.0 ms per frame (18.2 fps), worst 2481.3 ms
+   systems busy 58.4 ms per frame: 1.06 of 32 cores on average
+   schedules: Update 30.09 x0.7, Render 16.97 x0.7, FixedUpdate 7.78 x2.1, PostUpdate 2.09 x0.7, First 0.52 x0.7, Last 0.44 x0.7, FixedPreUpdate 0.42 x2.1, PreUpdate 0.39 x0.7, Extract 0.30 x0.7, FixedPostUpdate 0.11 x2.1
+   physics_simulate (ms/frame, max ms, runs/frame): 0.31 / 10.61 / 2.1
+   physics_simulate ran alone: 0.28
+   ordering floor (longest before/after chain, ms per frame, of the schedule's ms)
+   Update            27.56 of  30.09 (58 systems; heaviest: engine_foliage::stream_far_woods 27.07, engine_foliage::sync_scenery_trees 0.21, showcase::fly 0.08, engine_character::poll_pack 0.06)
+     chain: showcase::fly 0.08 -> engine_character::poll_pack 0.06 -> engine_foliage::sync_scenery_trees 0.21 -> engine_foliage::stream_far_woods 27.07
+   Render            16.93 of  16.97 (2 systems; heaviest: engine_render::render_system 16.93)
+     chain: engine_render::render_system 16.93
+   FixedUpdate        2.33 of   7.78 (72 systems; heaviest: engine_weather::ground_system 0.50, engine_physics::physics_simulate 0.31, engine_weather::cloud_map_system 0.26, engine_weather::sky_system 0.20, engine_softbody::gather_loads 0.14, engine_softbody::emit_outputs 0.14, engine_movement::adopt_characters 0.14, engine_movement::apply_damage 0.08)
+     chain: engine_movement::adopt_characters 0.14 -> engine_movement::resolve_attacks 0.06 -> engine_movement::apply_damage 0.08 -> engine_physics::physics_sync 0.06 -> engine_physics::physics_simulate 0.31 -> engine_softbody::gather_loads 0.14 -> engine_softbody::emit_outputs 0.14 -> engine_weather::sky_system 0.20 -> engine_weather::weather_system 0.06 -> engine_weather::cloud_map_system 0.26 -> engine_weather::ground_system 0.50
+   PostUpdate         0.87 of   2.09 (27 systems; heaviest: engine_audio::water_ambience 0.22, engine_audio::vehicle_sounds 0.13, engine_core::propagate_transforms_system 0.12, engine_softbody::follow_world_shift 0.06, engine_softbody::follow_world_shift 0.06)
+     chain: engine_softbody::follow_world_shift 0.06 -> engine_softbody::follow_world_shift 0.06 -> engine_core::propagate_transforms_system 0.12 -> engine_audio::water_ambience 0.22 -> engine_audio::vehicle_sounds 0.13
+   First              0.20 of   0.52 (4 systems; heaviest: engine_core::frame_diagnostics_system 0.17)
+     chain: engine_core::frame_diagnostics_system 0.17
+   Extract            0.18 of   0.30 (1 systems; heaviest: engine_render::resolve_mesh_renderers 0.18)
+   FixedPreUpdate     0.14 of   0.42 (1 systems; heaviest: engine_core::snapshot_interpolation_system 0.14)
+   PreUpdate          0.13 of   0.39 (4 systems; heaviest: engine_input::clear_input_system 0.07)
+     chain: engine_input::clear_input_system 0.07
+   Last               0.13 of   0.44 (1 systems; heaviest: engine::stream_system 0.13)
+==== physics.step_ms (sampled engine.stats, 2 Hz) and fixed steps per frame (engine.status)
+samples 11: physics.step_ms mean 0.05, median 0.05, p90 0.06, max 0.06; substeps 1.0; awake 0-0 of 0.0 bodies; regions 1.0; contacts 0-0
+per 5 s (mean / max physics.step_ms):
+  05:45:11  0.05 / 0.05  (1 samples)
+  05:45:15  0.05 / 0.06  (6 samples)
+  05:45:20  0.04 / 0.04  (4 samples)
+engine.status samples 11: frames 14-144, fixed ticks 42-432: 3.00 fixed steps a frame over the run; 20.0 fps
+per 5 s (fixed steps a frame, fps):
+  05:45:15  3.00 steps/frame, 20.0 fps
+  05:45:20  3.00 steps/frame, 20.0 fps
+==== physics reports (PHYSICS_REPORT)
+==== tour lines
+2026-11-03T05:45:15.196730 showcase::tour: tour 1/1: The market square and the village
+2026-11-03T05:45:21.712338 showcase::tour:   waited 6 s for meshes' clusters, terrain patches and foliage (0 not ready)
+2026-11-03T05:45:21.926773 showcase::tour:   exposure EV100 13.5 (metered 15.0)

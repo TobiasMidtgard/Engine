@@ -1,0 +1,13 @@
+05:45:05.353Z     0.04  mode tour quality ultra size '' spec 'plaza'; idle before start 97,202 s; HEAD 1810b539
+05:45:05.956Z     0.64  started: showcase.exe --tour plaza --fly --quality ultra  env PHYSICS_REPORT=600 ENGINE_PROFILE=1
+05:45:10.012Z     4.70  window visible: client 1600x900, window 1616x939 at (338,338), maximized False
+05:45:10.042Z     4.73  bridge connected
+05:45:10.568Z     5.25  world built
+05:45:11.146Z     5.83  after build: working set 2,095 MB, private 2,363 MB; system free 35,495 of 65,277 MB
+05:45:15.358Z    10.04  log: tour 1/1: The market square and the village
+05:45:21.634Z    16.32  mem: working set 2,903 MB, private 6,741 MB; system free 34,467 of 65,277 MB
+05:45:21.908Z    16.59  log:   waited 6 s for meshes' clusters, terrain patches and foliage (0 not ready)
+05:45:22.169Z    16.85  log:   exposure EV100 13.5 (metered 15.0)
+05:45:22.722Z    17.41  sampler job: Completed
+05:45:22.729Z    17.41  game exited by itself, code 0
+05:46:05.234Z    59.92  done
