@@ -1,0 +1,42 @@
+﻿== plaza: 05:57:33-05:57:58 (25 s, from 10 s after arriving to END)
+  render.gi.full_gather        mean     0.000  max     0.000  last     0.000  (50 samples, 0 nonzero)
+  render.gi.read               mean   170.080  max   256.000  last    77.000  (50 samples, 50 nonzero)
+  render.gi.changed            mean 5,095.080  max 17,099.000  last 5,405.000  (50 samples, 50 nonzero)
+  render.gi.rebuilt            mean     0.000  max     0.000  last     0.000  (50 samples, 0 nonzero)
+  render.gi.gathered           mean     0.000  max     0.000  last     0.000  (50 samples, 0 nonzero)
+  render.gi.building           mean     0.000  max     0.000  last     0.000  (50 samples, 0 nonzero)
+  render.gi.build_ms           mean     0.932  max     2.075  last     0.967  (50 samples, 50 nonzero)
+  render.gi.extract_ms         mean     1.195  max     2.400  last     1.251  (50 samples, 50 nonzero)
+  render.gi.probes_updated     mean 1,895.000  max 2,048.000  last 1,752.000  (50 samples, 50 nonzero)
+  render.gi.gpu_ms_per_kray    mean     0.015  max     0.030  last     0.017  (50 samples, 50 nonzero)
+  render.gi.instances          mean   332.000  max   332.000  last   332.000  (50 samples, 50 nonzero)
+  render.meshes.edits          mean     0.000  max     0.000  last     0.000  (50 samples, 0 nonzero)
+  render.meshes.uploads        mean    47.900  max   210.000  last    41.000  (50 samples, 50 nonzero)
+  render.meshes.dirty_slots    mean 4,833.980  max 8,895.000  last 4,204.000  (50 samples, 50 nonzero)
+  render profile 05:57:47 (5 s avg): probe gi CPU 1.33 ms, GPU 1.82 ms
+  render profile 05:57:57 (5 s avg): probe gi CPU 1.32 ms, GPU 1.80 ms
+  slow render frames in the stay: 2 (0 with probe gi first)
+    2026-11-03T05:57:51.965445 59 ms of render steps (usually 14.0): prepare character 29.5, wait for the finishing threads 17.6, prepare terrain 2.2, prepare on the render thread 2.1, prepare meshes 2.0, probe gi 1.2; GPU w
+    2026-11-03T05:57:58.897089 57 ms of render steps (usually 13.7): screenshot save 45.1, prepare meshes 2.0, prepare on the render thread 1.8, wait for the finishing threads 1.4, surface weather 1.2, prepare softbody 1.1; 
+== lake: 05:58:10-05:58:30 (21 s, from 10 s after arriving to END)
+  render.gi.full_gather        mean     0.000  max     0.000  last     0.000  (40 samples, 0 nonzero)
+  render.gi.read               mean   135.775  max   140.000  last   135.000  (40 samples, 40 nonzero)
+  render.gi.changed            mean 3,439.625  max 4,415.000  last 3,010.000  (40 samples, 40 nonzero)
+  render.gi.rebuilt            mean     0.075  max     1.000  last     0.000  (40 samples, 3 nonzero)
+  render.gi.gathered           mean     1.000  max     1.000  last     1.000  (40 samples, 40 nonzero)
+  render.gi.building           mean     0.050  max     1.000  last     0.000  (40 samples, 2 nonzero)
+  render.gi.build_ms           mean     0.891  max     5.647  last     0.702  (40 samples, 40 nonzero)
+  render.gi.extract_ms         mean     1.186  max     5.957  last     0.994  (40 samples, 40 nonzero)
+  render.gi.probes_updated     mean 2,048.000  max 2,048.000  last 2,048.000  (40 samples, 40 nonzero)
+  render.gi.gpu_ms_per_kray    mean     0.001  max     0.002  last     0.001  (40 samples, 40 nonzero)
+  render.gi.instances          mean   134.725  max   139.000  last   134.000  (40 samples, 40 nonzero)
+  render.meshes.edits          mean     0.000  max     0.000  last     0.000  (41 samples, 0 nonzero)
+  render.meshes.uploads        mean    41.000  max    41.000  last    41.000  (41 samples, 41 nonzero)
+  render.meshes.dirty_slots    mean     0.000  max     0.000  last     0.000  (41 samples, 0 nonzero)
+  render.extra_views           mean     1.000  max     1.000  last     1.000  (41 samples, 41 nonzero)
+  render.extra_views_ms        mean    11.653  max    14.958  last    12.118  (41 samples, 41 nonzero)
+  render.extra_views_gpu_ms    mean     8.931  max    10.019  last     8.631  (41 samples, 41 nonzero)
+  render profile 05:58:17 (5 s avg): probe gi CPU 1.20 ms, GPU 0.11 ms
+  render profile 05:58:27 (5 s avg): probe gi CPU 1.21 ms, GPU 0.11 ms
+  slow render frames in the stay: 1 (0 with probe gi first)
+    2026-11-03T05:58:30.752571 57 ms of render steps (usually 12.6): screenshot save 47.4, prepare on the render thread 1.8, prepare meshes 1.8, prepare softbody 1.1, wait for the finishing threads 0.9, submit 0.6; GPU work 

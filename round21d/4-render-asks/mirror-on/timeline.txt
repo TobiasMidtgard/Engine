@@ -1,0 +1,21 @@
+05:53:57.199Z     0.04  mode stops quality ultra size '' spec 'plaza:35,forest:30,forest_trail:25,lake:30'; idle before start 97,734 s; HEAD 1810b539
+05:53:57.832Z     0.67  started: showcase.exe --fly --profile --quality ultra  env ENGINE_MIRROR_SHARES_LIGHTING=on
+05:54:04.286Z     7.13  window visible: client 1600x900, window 1616x939 at (26,26), maximized False
+05:54:04.313Z     7.16  bridge connected
+05:54:04.631Z     7.47  world built
+05:54:10.040Z    12.88  after build: working set 3,621 MB, private 6,976 MB; system free 33,471 of 65,277 MB
+05:54:10.104Z    12.95  AT plaza: {"id":1,"jsonrpc":"2.0","result":{"place":"plaza","position":[10.0,4.5,16.0]}}
+05:54:45.487Z    48.33  END plaza: working set 4,943 MB, private 15,150 MB; system free 32,182 of 65,277 MB
+05:54:45.580Z    48.42  shot plaza: {"id":4,"jsonrpc":"2.0","result":{"height":900,"path":"screenshots/r21d/plaza.png","width":1600}}
+05:54:46.710Z    49.55  AT forest: {"id":5,"jsonrpc":"2.0","result":{"place":"forest","position":[-148.0,32.0,-78.0]}}
+05:55:17.120Z    79.96  END forest: working set 5,076 MB, private 15,254 MB; system free 32,129 of 65,277 MB
+05:55:17.205Z    80.05  shot forest: {"id":8,"jsonrpc":"2.0","result":{"height":900,"path":"screenshots/r21d/forest.png","width":1600}}
+05:55:18.337Z    81.18  AT forest_trail: {"id":9,"jsonrpc":"2.0","result":{"place":"forest_trail","position":[-184.0,1.7000000476837158,-133.5]}}
+05:55:43.842Z   106.68  END forest_trail: working set 5,323 MB, private 16,284 MB; system free 31,894 of 65,277 MB
+05:55:44.004Z   106.85  shot forest_trail: {"id":12,"jsonrpc":"2.0","result":{"height":900,"path":"screenshots/r21d/forest_trail.png","width":1600}}
+05:55:45.097Z   107.94  AT lake: {"id":13,"jsonrpc":"2.0","result":{"place":"lake","position":[160.0,6.0,-115.0]}}
+05:56:15.561Z   138.41  END lake: working set 5,145 MB, private 16,091 MB; system free 32,079 of 65,277 MB
+05:56:15.652Z   138.49  shot lake: {"id":16,"jsonrpc":"2.0","result":{"height":900,"path":"screenshots/r21d/lake.png","width":1600}}
+05:56:18.956Z   141.80  sampler job: Completed
+05:56:18.962Z   141.81  killing the game
+05:57:01.898Z   184.74  done
