@@ -88,6 +88,13 @@ impl Default for App {
     }
 }
 
+/// `ENGINE_FIXED_SYNC=sets`: the fixed step applies commands only at its [`SimSet`]
+/// boundaries (an experiment for the perf week's P2, engine-perf/fixed-step-chain.md).
+fn set_sync_points() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("ENGINE_FIXED_SYNC").is_ok_and(|v| v == "sets"))
+}
+
 const MAIN_SCHEDULES: &[fn() -> Schedule] = &[
     || Schedule::new(Startup),
     || Schedule::new(First),
@@ -120,6 +127,11 @@ impl App {
             if crate::profile::requested() {
                 let label = format!("{:?}", schedule.label());
                 schedule.add_build_pass(crate::profile::OrderPass { label });
+            }
+            if set_sync_points() && schedule.label() == FixedUpdate.intern() {
+                let mut settings = schedule.get_build_settings();
+                settings.auto_insert_apply_deferred = false;
+                schedule.set_build_settings(settings);
             }
             schedules.insert(schedule);
         }
@@ -176,6 +188,29 @@ impl App {
             PostUpdate,
             (UpdateSet::Propagate, UpdateSet::AfterPropagate).chain(),
         );
+        if set_sync_points() {
+            // One command sync point at each SimSet boundary instead of one wherever a system
+            // with commands has a later-ordered one (19 in the showcase). Commands queued in a
+            // set land before the next set; systems later in the same set see them next step.
+            use bevy_ecs::schedule::ApplyDeferred;
+            app.add_systems(
+                FixedUpdate,
+                (
+                    ApplyDeferred.after(SimSet::Input).before(SimSet::Gameplay),
+                    ApplyDeferred
+                        .after(SimSet::Gameplay)
+                        .before(SimSet::Physics)
+                        .before(SimSet::DuringPhysics),
+                    ApplyDeferred
+                        .after(SimSet::Physics)
+                        .after(SimSet::DuringPhysics)
+                        .before(SimSet::PostPhysics),
+                    ApplyDeferred
+                        .after(SimSet::PostPhysics)
+                        .before(SimSet::Environment),
+                ),
+            );
+        }
 
         app.add_systems(
             First,
