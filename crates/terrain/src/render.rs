@@ -1475,6 +1475,24 @@ impl RenderFeature for TerrainFeature {
             bind_group_layouts: &[Some(&gpu.frame_layout), Some(&layout)],
             immediate_size: 0,
         });
+        // Measuring the ground's pixel cost: `TERRAIN_SHADER_OFF=<bits>` switches parts of
+        // `fs_main` off (the `TERRAIN_OFF` bits in terrain.wgsl), `TERRAIN_DEPTH=equal` draws
+        // the scene pass on the prepass's depth with an equal test and no depth writes.
+        let off: f64 = std::env::var("TERRAIN_SHADER_OFF")
+            .ok()
+            .and_then(|v| v.parse::<u32>().ok())
+            .unwrap_or(0) as f64;
+        let constants = [("TERRAIN_OFF", off)];
+        let equal = std::env::var("TERRAIN_DEPTH").is_ok_and(|v| v == "equal");
+        let main_depth = if equal {
+            wgpu::DepthStencilState {
+                depth_write_enabled: Some(false),
+                depth_compare: Some(wgpu::CompareFunction::Equal),
+                ..gpu.depth_state(false)
+            }
+        } else {
+            gpu.depth_state(true)
+        };
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("terrain"),
             layout: Some(&pl),
@@ -1488,12 +1506,15 @@ impl RenderFeature for TerrainFeature {
                 cull_mode: Some(wgpu::Face::Back),
                 ..Default::default()
             },
-            depth_stencil: Some(gpu.depth_state(true)),
+            depth_stencil: Some(main_depth),
             multisample: Default::default(),
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
                 entry_point: Some("fs_main"),
-                compilation_options: Default::default(),
+                compilation_options: wgpu::PipelineCompilationOptions {
+                    constants: &constants,
+                    ..Default::default()
+                },
                 targets: &[Some(wgpu::ColorTargetState {
                     format: gpu.formats.hdr,
                     blend: None,

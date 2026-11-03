@@ -1481,6 +1481,11 @@ struct MatSample {
     occlusion: f32,
 };
 
+// Parts of `fs_main` switched off to measure what they cost (`TERRAIN_SHADER_OFF`, render.rs):
+// 1 material textures (their means instead), 2 rock's larger scales, 4 parallax relief,
+// 16 lighting (albedo only), 64 the mirror's clip.
+override TERRAIN_OFF: u32 = 0u;
+
 fn mat_tile(i: u32) -> f32 {
     return mats.info[i * 2u].w;
 }
@@ -1626,6 +1631,9 @@ fn sample_triplanar(i: u32, tp: vec3<f32>, n: vec3<f32>, dp1: vec3<f32>, dp2: ve
 // away (skipped up close, where the terrain's own shape takes over), blocks at 8×, then the
 // close-up texture.
 fn sample_rock(tp: vec3<f32>, n: vec3<f32>, dp1: vec3<f32>, dp2: vec3<f32>, pixel: f32) -> MatSample {
+    if ((TERRAIN_OFF & 2u) != 0u) {
+        return sample_triplanar(M_ROCK, tp, n, dp1, dp2, pixel, 1.0);
+    }
     var huge = mat_mean(M_ROCK, n);
     if (pixel > 0.1) {
         huge = sample_triplanar(M_ROCK, tp, n, dp1, dp2, pixel, 64.0);
@@ -1786,7 +1794,7 @@ fn fill_low(amount: f32, height: f32) -> f32 {
 
 @fragment
 fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
-    if (under_mirror(in.rel)) {
+    if ((TERRAIN_OFF & 64u) == 0u && under_mirror(in.rel)) {
         discard;
     }
     let planet = planets[in.planet];
@@ -2260,7 +2268,8 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     col[M_GRAVEL] *= bare_v;
 
     // ---- Parallax relief within a few meters (pixels under about 3–8 mm).
-    let relief_k = (1.0 - smoothstep(0.003, 0.008, tex_pixel)) * (1.0 - far) * mats.flags.x;
+    let relief_k = (1.0 - smoothstep(0.003, 0.008, tex_pixel)) * (1.0 - far) * mats.flags.x
+        * select(1.0, 0.0, (TERRAIN_OFF & 4u) != 0u);
     var rel_shift = Relief(vec2<f32>(0.0), 0.0);
     if (relief_k > 0.0) {
         rel_shift = relief(w, tp, in.rel, dp1, dp2, relief_k);
@@ -2273,7 +2282,11 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     var hmax = -10.0;
     for (var i = 0u; i < MAT_COUNT; i++) {
         if (w[i] > 0.003) {
-            ms[i] = sample_ground(i, tp_m, n_geo, dp1, dp2, tex_pixel);
+            if ((TERRAIN_OFF & 1u) != 0u) {
+                ms[i] = mat_mean(i, n_geo);
+            } else {
+                ms[i] = sample_ground(i, tp_m, n_geo, dp1, dp2, tex_pixel);
+            }
             // Natural woods from a distance are canopy, not leaf litter: no litter texture
             // there (painted leaves are a level's forest floor and keep theirs).
             if (i == M_FOREST) {
@@ -2848,7 +2861,10 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
         planet_lit = smoothstep(-dip - 0.015, -dip + 0.01, dot(up, to_sun));
     }
     planet_lit *= 1.0 - crater_shade;
-    var color = shade_surface_shadowed(s, in.rel, planet_lit);
+    var color = pre_expose(s.albedo);
+    if ((TERRAIN_OFF & 16u) == 0u) {
+        color = shade_surface_shadowed(s, in.rel, planet_lit);
+    }
     let glitter = ocean * (1.0 - foam);
     if (glitter > 0.0 && dot(n, to_sun) > 0.0 && planet_lit > 0.0) {
         let v = normalize(-in.rel);
