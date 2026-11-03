@@ -65,6 +65,7 @@ struct Frame {
     gi_grid: vec4<f32>,            // storage slot of the grid's first probe along x, y, z (scrolling); w = the probes' epoch (0 = off)
     clip_plane: vec4<f32>,         // a mirror's view (planar_reflection.rs): camera-relative plane n.xyz, d; kept where dot(n, rel) + d >= 0 (0 = none)
     aerial: vec4<f32>,             // aerial perspective table (aerial.rs): reach (m, 0 = off), 1 / depth scale (1/m), 1 / log2(1 + reach / depth scale), depth slices
+    shading: vec4<f32>,            // x = sun-shadow filter taps (RenderSettings::shadow_filter_taps); yzw unused
 };
 
 // An indoor space (`SkyLightVolume`): sky light comes in only through its open faces.
