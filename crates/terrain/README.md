@@ -369,6 +369,13 @@ writes, no `discard`); `TERRAIN_DEPTH=greater` draws it the old way for comparis
 out front to back, one `multi_draw_indexed_indirect` per vertex page and pass where the GPU
 supports it (`RenderSettings::multi_draw_indirect`).
 
+The ground's CPU cost per frame is in `Diagnostics` as `render.cpu.terrain: <part>` (maps,
+materials, far looks, uploads, then per planet `patches: select`, `look-ahead`, `far shadow`,
+`ask workers`, `recycle`, `draw lists`, `planet data`, and buffers), so the renderer's hitch
+lists say which part of `prepare terrain` spiked. `ENGINE_PROFILE=1 FLY=200 terrain_shots
+<out> 640x360 earth_range` flies the view level toward its target at `FLY_MPF` meters a frame
+(5 by default: 300 m/s) and prints each part's mean and worst.
+
 ## Test cases in the showcase
 
 `demo::spawn_demo` builds the Terrain lab: four 32 m strips of mud, snow, sand and grass with

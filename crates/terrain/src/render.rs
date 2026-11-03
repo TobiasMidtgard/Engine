@@ -1903,14 +1903,15 @@ impl RenderFeature for TerrainFeature {
         self.finished.extend(workers.take_done());
         let mut uploads = 0;
         let mut waiting = Vec::new();
+        let mut taken = Vec::new();
         let upload_started = std::time::Instant::now();
         for f in std::mem::take(&mut self.finished) {
             let Some(state) = self.planets.get_mut(&f.planet) else {
-                workers.taken(f.planet, f.mesh.key);
+                taken.push((f.planet, f.mesh.key));
                 continue;
             };
             if state.version != f.version {
-                workers.taken(f.planet, f.mesh.key);
+                taken.push((f.planet, f.mesh.key));
                 continue;
             }
             if uploads >= MAX_UPLOADS_PER_FRAME
@@ -1921,7 +1922,7 @@ impl RenderFeature for TerrainFeature {
                 continue;
             }
             let key = f.mesh.key;
-            workers.taken(f.planet, key);
+            taken.push((f.planet, key));
             upload(&mut self.pool, state, f.mesh, gpu_shared, max_slots);
             state.building.remove(&key);
             // How long patches take from being asked for to being drawn, for the look-ahead.
@@ -1932,6 +1933,7 @@ impl RenderFeature for TerrainFeature {
             uploads += 1;
         }
         self.finished = waiting;
+        workers.taken(&taken);
         built_total += uploads;
         steps.mark("uploads");
 
@@ -1998,6 +2000,7 @@ impl RenderFeature for TerrainFeature {
                     min_size: 0.0,
                 })
             };
+            steps.mark("patches: select");
             if mirror {
                 sel.missing.clear();
             }
@@ -2043,6 +2046,7 @@ impl RenderFeature for TerrainFeature {
                     }
                 }
             }
+            steps.mark("patches: look-ahead");
             // Edited patches, kept drawn meanwhile, queued until built (one being built waits
             // for that build before the next: the edit may have come after it started).
             let mut i = 0;
@@ -2105,6 +2109,7 @@ impl RenderFeature for TerrainFeature {
                     };
                     state.lod.walk(&input)
                 });
+            steps.mark("patches: far shadow");
             // (Its patches after the view's: the shadows of ridges far off can wait a little.)
             if let Some(far_sel) = &far_sel {
                 for &(dist, k) in &far_sel.missing {
@@ -2118,18 +2123,21 @@ impl RenderFeature for TerrainFeature {
                 let mut seen = HashSet::new();
                 wants.retain(|w| seen.insert(w.1));
                 wants.truncate(MAX_QUEUED.max(workers.threads() * 4));
-                let dropped = workers.request(*e, state.version, &src, &wants);
-                for k in dropped {
-                    state.building.remove(&k);
-                    state.asked.remove(&k);
-                }
-                for &(_, k, _) in &wants {
-                    if state.building.insert(k) {
-                        state.asked.insert(k, std::time::Instant::now());
+                // (None: a worker panicked holding the queue.)
+                if let Some(dropped) = workers.request(*e, state.version, &src, &wants) {
+                    for k in dropped {
+                        state.building.remove(&k);
+                        state.asked.remove(&k);
+                    }
+                    for &(_, k, _) in &wants {
+                        if state.building.insert(k) {
+                            state.asked.insert(k, std::time::Instant::now());
+                        }
                     }
                 }
             }
 
+            steps.mark("patches: ask workers");
             building_total += state.building.len();
             latency_ms = latency_ms.max(state.latency_s * 1000.0);
 
@@ -2143,6 +2151,7 @@ impl RenderFeature for TerrainFeature {
                 }
             }
 
+            steps.mark("patches: recycle");
             // Draw lists.
             let lamps = city
                 .and_then(|c| c.planets.get(e))
@@ -2219,6 +2228,7 @@ impl RenderFeature for TerrainFeature {
                 });
             }
 
+            steps.mark("patches: draw lists");
             let p = &t.config.palette;
             let col = |c: [f32; 3]| [c[0], c[1], c[2], 0.0];
             let center_rel = (pos - view.origin).as_vec3();
@@ -2300,7 +2310,7 @@ impl RenderFeature for TerrainFeature {
             });
         }
         self.built_last_frame = built_total;
-        steps.mark("patches");
+        steps.mark("patches: planet data");
 
         // Group draws by vertex page (one multi-draw a page), the scene's and the water's
         // nearest first within it, so the prepass's early depth test rejects most of what is
@@ -2687,9 +2697,13 @@ impl Steps {
     /// The part since the last mark is done.
     fn mark(&mut self, name: &'static str) {
         let now = std::time::Instant::now();
-        self.done
-            .push((name, now.duration_since(self.at).as_secs_f64() * 1000.0));
+        let ms = now.duration_since(self.at).as_secs_f64() * 1000.0;
         self.at = now;
+        // (A part done once a planet adds up over the planets.)
+        match self.done.iter_mut().find(|(n, _)| *n == name) {
+            Some(part) => part.1 += ms,
+            None => self.done.push((name, ms)),
+        }
     }
 
     fn publish(self, world: &mut World) {
@@ -2812,11 +2826,9 @@ impl PatchWorkers {
         version: u64,
         src: &ChunkSource,
         wants: &[Want],
-    ) -> Vec<NodeKey> {
+    ) -> Option<Vec<NodeKey>> {
         let (lock, ready) = &*self.queue;
-        let Ok(mut q) = lock.lock() else {
-            return Vec::new();
-        };
+        let mut q = lock.lock().ok()?;
         let wanted: HashSet<NodeKey> = wants.iter().map(|w| w.1).collect();
         let mut dropped = Vec::new();
         q.waiting.retain(|(p, k), job| {
@@ -2844,14 +2856,19 @@ impl PatchWorkers {
             }
         }
         ready.notify_all();
-        dropped
+        Some(dropped)
     }
 
-    /// The render step is done with a finished patch (uploaded or thrown away): it may be
-    /// built again when asked for.
-    fn taken(&self, planet: Entity, key: NodeKey) {
+    /// The render step is done with these finished patches (uploaded or thrown away): they may
+    /// be built again when asked for.
+    fn taken(&self, patches: &[(Entity, NodeKey)]) {
+        if patches.is_empty() {
+            return;
+        }
         if let Ok(mut q) = self.queue.0.lock() {
-            q.built.remove(&(planet, key));
+            for id in patches {
+                q.built.remove(id);
+            }
         }
     }
 
@@ -3031,9 +3048,13 @@ mod tests {
             }
             got
         };
+        let ask = |w: &PatchWorkers, p: Entity, v: u64, src: &ChunkSource, wants: &[Want]| {
+            w.request(p, v, src, wants).expect("the queue")
+        };
         // One thread: the order is the priority's, whatever the order asked in.
         let w = PatchWorkers::with_threads(1);
-        w.request(
+        ask(
+            &w,
             planet,
             1,
             &src,
@@ -3051,8 +3072,9 @@ mod tests {
         // (an edit).
         let w = PatchWorkers::with_threads(1);
         let many: Vec<Want> = (0..40).map(|i| (i as f64, key(i), i == 30)).collect();
-        w.request(planet, 1, &src, &many);
-        let dropped = w.request(
+        ask(&w, planet, 1, &src, &many);
+        let dropped = ask(
+            &w,
             planet,
             1,
             &src,
@@ -3072,16 +3094,16 @@ mod tests {
         // for again every frame: it is not built again until the render step has taken it
         // (rebuilding it every frame grew memory without bound at a slow stop).
         let w = PatchWorkers::with_threads(2);
-        w.request(planet, 1, &src, &[(0.0, key(7), false)]);
+        ask(&w, planet, 1, &src, &[(0.0, key(7), false)]);
         let first = wait_for(&w, 1);
         assert_eq!(first, [7]);
         for _ in 0..20 {
-            w.request(planet, 1, &src, &[(0.0, key(7), false)]);
+            ask(&w, planet, 1, &src, &[(0.0, key(7), false)]);
         }
         std::thread::sleep(std::time::Duration::from_millis(100));
         assert!(w.take_done().is_empty(), "built again before it was taken");
-        w.taken(planet, key(7));
-        w.request(planet, 1, &src, &[(0.0, key(7), false)]);
+        w.taken(&[(planet, key(7))]);
+        ask(&w, planet, 1, &src, &[(0.0, key(7), false)]);
         assert_eq!(wait_for(&w, 1), [7]);
     }
 
