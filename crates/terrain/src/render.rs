@@ -2090,7 +2090,16 @@ impl RenderFeature for TerrainFeature {
                 let budget = settings.patch_budget as f64 * share;
                 let needed = (sel.draw.len() + sel.missing.len()).max(1) as f64;
                 let base = needed / (state.boost * state.boost);
-                let want = (budget / base).sqrt().clamp(1.0, MAX_BOOST);
+                // No finer than the screen shows (`TerrainSettings::min_quad_px`): a patch's
+                // quads span 1 / (QUADS × split) radians at its split distance.
+                let cap = if settings.min_quad_px > 0.0 && view.fov_y > 0.0 {
+                    let px_per_rad = view.height as f64 / view.fov_y as f64;
+                    let unboosted = split / state.boost;
+                    px_per_rad / (QUADS as f64 * unboosted * settings.min_quad_px)
+                } else {
+                    MAX_BOOST
+                };
+                let want = (budget / base).sqrt().clamp(1.0, cap.clamp(1.0, MAX_BOOST));
                 // While much of the view is still streaming in (after a jump), its count falls
                 // short of what it needs: then the detail only eases down.
                 if want < state.boost || sel.missing.len() * 10 <= sel.draw.len() {

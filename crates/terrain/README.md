@@ -19,7 +19,12 @@ everything else (streaming, LOD, colliders, ground queries, prints) follows the 
   A planet that fills only part of the view gets finer patches in its share of the screen
   (up to 4× finer split distance, aiming at `TerrainSettings::patch_budget` patches for a
   planet that fills the view), so seen from orbit its canyons, volcanoes and coasts stay
-  sharp instead of dissolving into a few big patches. Below High quality
+  sharp instead of dissolving into a few big patches. That extra detail stops where quads
+  would be under `TerrainSettings::min_quad_px` (6) pixels on screen, so it follows the
+  view's resolution (about ×1.4 at 900 lines, ×2.2 at 1440; `MIN_QUAD_PX=` in
+  `terrain_shots`): from low orbit at 1600x900 that is 245 patches instead of 690, the
+  ground's scene pass 35% and its prepass 62% cheaper on lavapipe, with the same picture
+  (sub-pixel triangles cost whole 2×2 pixel quads each). Below High quality
   (`engine_world::Scalability::view_distance`) both shrink: Medium draws about a quarter fewer
   patches, Low half (`QUALITY=` and `SPLIT_FACTOR=`/`PATCH_BUDGET=` in `terrain_shots`).
   Patches also draw the renderer's depth prepass (depth, normal, motion; moving planets
