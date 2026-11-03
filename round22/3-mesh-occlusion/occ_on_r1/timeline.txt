@@ -1,0 +1,21 @@
+18:56:55.052Z     0.04  mode stops quality ultra size '' spec 'forest_trail:35,plaza:30,market:30,village_garden:30'; idle before start 144,711 s; HEAD 5de4f33e
+18:56:55.715Z     0.70  started: showcase.exe --fly --profile --quality ultra  env ENGINE_MESH_OCCLUSION=on
+18:57:02.198Z     7.19  window visible: client 1600x900, window 1616x939 at (156,156), maximized False
+18:57:02.220Z     7.21  bridge connected
+18:57:02.541Z     7.53  world built
+18:57:07.927Z    12.91  after build: working set 3,644 MB, private 7,003 MB; system free 34,010 of 65,277 MB
+18:57:08.065Z    13.05  AT forest_trail: {"id":1,"jsonrpc":"2.0","result":{"place":"forest_trail","position":[-184.0,1.7000000476837158,-133.5]}}
+18:57:43.407Z    48.39  END forest_trail: working set 5,662 MB, private 16,180 MB; system free 31,993 of 65,277 MB
+18:57:43.562Z    48.55  shot forest_trail: {"id":4,"jsonrpc":"2.0","result":{"height":900,"path":"screenshots/r22/forest_trail.png","width":1600}}
+18:57:44.673Z    49.66  AT plaza: {"id":5,"jsonrpc":"2.0","result":{"place":"plaza","position":[10.0,4.5,16.0]}}
+18:58:15.275Z    80.26  END plaza: working set 5,459 MB, private 15,962 MB; system free 32,165 of 65,277 MB
+18:58:15.339Z    80.33  shot plaza: {"id":8,"jsonrpc":"2.0","result":{"height":900,"path":"screenshots/r22/plaza.png","width":1600}}
+18:58:16.413Z    81.40  AT market: {"id":9,"jsonrpc":"2.0","result":{"place":"market","position":[87.0,3.2,54.0]}}
+18:58:46.849Z   111.84  END market: working set 5,429 MB, private 16,011 MB; system free 32,202 of 65,277 MB
+18:58:46.919Z   111.91  shot market: {"id":12,"jsonrpc":"2.0","result":{"height":900,"path":"screenshots/r22/market.png","width":1600}}
+18:58:47.966Z   112.95  AT village_garden: {"id":13,"jsonrpc":"2.0","result":{"place":"village_garden","position":[-35.0,3.900311416667616,-93.0]}}
+18:59:18.281Z   143.27  END village_garden: working set 5,556 MB, private 16,058 MB; system free 32,018 of 65,277 MB
+18:59:18.368Z   143.36  shot village_garden: {"id":16,"jsonrpc":"2.0","result":{"height":900,"path":"screenshots/r22/village_garden.png","width":1600}}
+18:59:21.647Z   146.63  sampler job: Completed
+18:59:21.653Z   146.64  killing the game
+19:00:04.672Z   189.66  done

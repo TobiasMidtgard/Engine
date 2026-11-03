@@ -1,0 +1,76 @@
+per stop and run: fps (last 10 s of the stay); GPU ms (the last render profile in the stay, 5 s average): total,
+scene: meshes, prepass, prepass: meshes, occlusion culling; engine.stats from 10 s after arriving to END, mean (min-max):
+render.meshes.occlusion_tested / occlusion_drawn / occlusion_triangles (there is no render.meshes.triangles key; the render
+profile's features row for meshes and the mesh_feature 'mesh triangles' line stand in)
+
+== forest_trail
+  occlusion on  s3_occ_on_r1   fps  33.6 | GPU total 26.84, scene: meshes 5.46, prepass 3.36, prepass: meshes 1.93, occlusion culling 0.14 (2 profiles)
+      tested 7,932 (6,774-9,600) / drawn 3,100 (1,950-6,252) / occlusion tris 6,230,493 (4,351,136-6,968,745)
+      render profile features (last frame): meshes: 268 draws, 8,669,367 triangles, 35939 culled; last 'mesh triangles' line: view 8.66 M + 3999 impostors
+      other mesh/prepass/occlusion GPU rows: compute meshes 1.73, prepass: grass 0.92, ambient occlusion 0.35, sky occlusion 0.34, prepass: foliage scenery 0.19, prepass: terrain 0.18, compute skinned meshes 0.11, prepass: character 0.05
+  occlusion off s3_occ_off_r1  fps  23.4 | GPU total 28.38, scene: meshes 5.53, prepass 3.66, prepass: meshes 2.23, occlusion culling 0.07 (2 profiles)
+      tested 0 (0-0) / drawn 0 (0-0) / occlusion tris 0 (0-0)
+      render profile features (last frame): meshes: 343 draws, 8,722,782 triangles, 35509 culled; last 'mesh triangles' line: view 8.71 M + 3903 impostors
+      other mesh/prepass/occlusion GPU rows: compute meshes 2.74, prepass: grass 0.92, sky occlusion 0.40, ambient occlusion 0.35, prepass: foliage scenery 0.19, prepass: terrain 0.18, compute skinned meshes 0.11, prepass: character 0.05
+  occlusion on  s3_occ_on_r2   fps  34.3 | GPU total 26.70, scene: meshes 5.53, prepass 3.26, prepass: meshes 1.83, occlusion culling 0.14 (2 profiles)
+      tested 7,839 (4,021-9,588) / drawn 3,136 (1,952-6,279) / occlusion tris 6,165,215 (2,345,407-6,930,719)
+      render profile features (last frame): meshes: 270 draws, 8,702,477 triangles, 35943 culled; last 'mesh triangles' line: view 8.69 M + 3992 impostors
+      other mesh/prepass/occlusion GPU rows: compute meshes 1.64, prepass: grass 0.92, ambient occlusion 0.35, sky occlusion 0.34, prepass: foliage scenery 0.20, prepass: terrain 0.18, compute skinned meshes 0.11, prepass: character 0.05
+  occlusion off s3_occ_off_r2  fps  33.9 | GPU total 27.48, scene: meshes 5.76, prepass 3.68, prepass: meshes 2.25, occlusion culling 0.07 (2 profiles)
+      tested 0 (0-0) / drawn 0 (0-0) / occlusion tris 0 (0-0)
+      render profile features (last frame): meshes: 265 draws, 8,665,999 triangles, 35966 culled; last 'mesh triangles' line: view 8.66 M + 3980 impostors
+      other mesh/prepass/occlusion GPU rows: compute meshes 1.70, prepass: grass 0.92, ambient occlusion 0.35, sky occlusion 0.34, prepass: foliage scenery 0.20, prepass: terrain 0.18, compute skinned meshes 0.11, prepass: character 0.05
+
+== plaza
+  occlusion on  s3_occ_on_r1   fps  38.3 | GPU total 18.25, scene: meshes 4.31, prepass 2.23, prepass: meshes 1.40, occlusion culling 0.13 (2 profiles)
+      tested 7,815 (7,740-8,257) / drawn 5,114 (5,011-5,313) / occlusion tris 5,003,211 (4,705,894-5,611,330)
+      render profile features (last frame): meshes: 346 draws, 5,895,110 triangles, 30719 culled; last 'mesh triangles' line: view 5.59 M + 2090 impostors
+      other mesh/prepass/occlusion GPU rows: prepass: grass 0.49, ambient occlusion 0.26, prepass: terrain 0.19, compute meshes 0.17, sky occlusion 0.14, compute skinned meshes 0.11, prepass: character 0.06, prepass: foliage scenery 0.02, prepass: vfx_particles 0.01
+  occlusion off s3_occ_off_r1  fps  34.1 | GPU total 18.69, scene: meshes 4.42, prepass 2.40, prepass: meshes 1.57, occlusion culling 0.07 (2 profiles)
+      tested 0 (0-0) / drawn 0 (0-0) / occlusion tris 0 (0-0)
+      render profile features (last frame): meshes: 336 draws, 6,724,171 triangles, 30245 culled; last 'mesh triangles' line: view 6.43 M + 2062 impostors
+      other mesh/prepass/occlusion GPU rows: prepass: grass 0.49, ambient occlusion 0.26, prepass: terrain 0.19, sky occlusion 0.17, compute skinned meshes 0.11, prepass: character 0.06, compute meshes 0.05, prepass: foliage scenery 0.02, prepass: vfx_particles 0.01
+  occlusion on  s3_occ_on_r2   fps  38.8 | GPU total 18.27, scene: meshes 4.34, prepass 2.21, prepass: meshes 1.38, occlusion culling 0.13 (2 profiles)
+      tested 7,785 (7,714-8,246) / drawn 5,109 (4,985-5,357) / occlusion tris 4,964,960 (4,708,686-5,579,771)
+      render profile features (last frame): meshes: 345 draws, 5,897,767 triangles, 30721 culled; last 'mesh triangles' line: view 5.59 M + 2116 impostors
+      other mesh/prepass/occlusion GPU rows: prepass: grass 0.48, ambient occlusion 0.26, compute meshes 0.20, prepass: terrain 0.19, sky occlusion 0.14, compute skinned meshes 0.11, prepass: character 0.06, prepass: foliage scenery 0.02, prepass: vfx_particles 0.01
+  occlusion off s3_occ_off_r2  fps  38.2 | GPU total 18.28, scene: meshes 4.43, prepass 2.35, prepass: meshes 1.52, occlusion culling 0.07 (2 profiles)
+      tested 0 (0-0) / drawn 0 (0-0) / occlusion tris 0 (0-0)
+      render profile features (last frame): meshes: 344 draws, 5,925,358 triangles, 30743 culled; last 'mesh triangles' line: view 5.62 M + 2093 impostors
+      other mesh/prepass/occlusion GPU rows: prepass: grass 0.49, ambient occlusion 0.26, prepass: terrain 0.19, sky occlusion 0.15, compute skinned meshes 0.11, compute meshes 0.10, prepass: character 0.06, prepass: foliage scenery 0.02, prepass: vfx_particles 0.01
+
+== market
+  occlusion on  s3_occ_on_r1   fps  33.7 | GPU total 21.88, scene: meshes 3.19, prepass 3.08, prepass: meshes 1.15, occlusion culling 0.15 (2 profiles)
+      tested 7,660 (7,628-7,692) / drawn 4,266 (4,104-4,393) / occlusion tris 4,245,584 (4,073,907-4,311,304)
+      render profile features (last frame): meshes: 346 draws, 5,973,942 triangles, 31840 culled; last 'mesh triangles' line: view 5.61 M + 1422 impostors
+      other mesh/prepass/occlusion GPU rows: prepass: grass 1.57, ambient occlusion 0.27, prepass: terrain 0.19, sky occlusion 0.13, compute skinned meshes 0.11, compute meshes 0.09, scene: skinned meshes 0.09, prepass: character 0.06, prepass: foliage scenery 0.02, prepass: vfx_particles 0.01
+  occlusion off s3_occ_off_r1  fps  31.9 | GPU total 22.23, scene: meshes 3.36, prepass 3.30, prepass: meshes 1.38, occlusion culling 0.07 (2 profiles)
+      tested 0 (0-0) / drawn 0 (0-0) / occlusion tris 0 (0-0)
+      render profile features (last frame): meshes: 330 draws, 5,945,694 triangles, 31439 culled; last 'mesh triangles' line: view 5.58 M + 1423 impostors
+      other mesh/prepass/occlusion GPU rows: prepass: grass 1.57, ambient occlusion 0.27, prepass: terrain 0.19, compute meshes 0.16, sky occlusion 0.13, compute skinned meshes 0.11, scene: skinned meshes 0.09, prepass: character 0.06, prepass: foliage scenery 0.02, prepass: vfx_particles 0.01
+  occlusion on  s3_occ_on_r2   fps  32.5 | GPU total 21.85, scene: meshes 3.23, prepass 3.06, prepass: meshes 1.13, occlusion culling 0.15 (2 profiles)
+      tested 7,661 (7,628-7,696) / drawn 4,249 (4,081-4,396) / occlusion tris 4,182,024 (4,022,483-4,262,388)
+      render profile features (last frame): meshes: 358 draws, 5,922,389 triangles, 31838 culled; last 'mesh triangles' line: view 5.57 M + 1423 impostors
+      other mesh/prepass/occlusion GPU rows: prepass: grass 1.58, ambient occlusion 0.27, prepass: terrain 0.19, sky occlusion 0.13, compute skinned meshes 0.11, scene: skinned meshes 0.09, compute meshes 0.06, prepass: character 0.06, prepass: foliage scenery 0.02, prepass: vfx_particles 0.01
+  occlusion off s3_occ_off_r2  fps  35.0 | GPU total 22.17, scene: meshes 3.37, prepass 3.31, prepass: meshes 1.38, occlusion culling 0.07 (2 profiles)
+      tested 0 (0-0) / drawn 0 (0-0) / occlusion tris 0 (0-0)
+      render profile features (last frame): meshes: 355 draws, 5,925,247 triangles, 31865 culled; last 'mesh triangles' line: view 5.57 M + 1424 impostors
+      other mesh/prepass/occlusion GPU rows: prepass: grass 1.58, ambient occlusion 0.27, prepass: terrain 0.19, sky occlusion 0.13, compute skinned meshes 0.11, scene: skinned meshes 0.09, prepass: character 0.06, compute meshes 0.05, prepass: foliage scenery 0.02, prepass: vfx_particles 0.01
+
+== village_garden
+  occlusion on  s3_occ_on_r1   fps  39.2 | GPU total 24.00, scene: meshes 2.74, prepass 2.78, prepass: meshes 0.44, occlusion culling 0.13 (1 profiles)
+      tested 4,860 (4,807-4,901) / drawn 693 (662-757) / occlusion tris 1,764,053 (1,729,496-1,814,237)
+      render profile features (last frame): meshes: 379 draws, 4,683,281 triangles, 33717 culled; last 'mesh triangles' line: view 4.62 M + 1568 impostors
+      other mesh/prepass/occlusion GPU rows: prepass: grass 2.02, ambient occlusion 0.46, prepass: terrain 0.16, sky occlusion 0.15, compute meshes 0.14, compute skinned meshes 0.11, scene: skinned meshes 0.09, prepass: character 0.06, prepass: foliage scenery 0.02, prepass: vfx_particles 0.01
+  occlusion off s3_occ_off_r1  fps  39.0 | GPU total 24.28, scene: meshes 3.10, prepass 3.12, prepass: meshes 0.96, occlusion culling 0.07 (2 profiles)
+      tested 0 (0-0) / drawn 0 (0-0) / occlusion tris 0 (0-0)
+      render profile features (last frame): meshes: 381 draws, 4,644,966 triangles, 33668 culled; last 'mesh triangles' line: view 4.58 M + 1569 impostors
+      other mesh/prepass/occlusion GPU rows: prepass: grass 1.84, ambient occlusion 0.46, prepass: terrain 0.16, sky occlusion 0.16, compute skinned meshes 0.11, scene: skinned meshes 0.09, prepass: character 0.06, compute meshes 0.04, prepass: foliage scenery 0.02, prepass: vfx_particles 0.01
+  occlusion on  s3_occ_on_r2   fps  40.1 | GPU total 23.65, scene: meshes 2.74, prepass 2.71, prepass: meshes 0.43, occlusion culling 0.13 (2 profiles)
+      tested 4,849 (4,808-4,881) / drawn 698 (656-757) / occlusion tris 1,745,558 (1,713,692-1,797,017)
+      render profile features (last frame): meshes: 384 draws, 4,666,513 triangles, 33680 culled; last 'mesh triangles' line: view 4.60 M + 1570 impostors
+      other mesh/prepass/occlusion GPU rows: prepass: grass 1.97, ambient occlusion 0.46, prepass: terrain 0.16, sky occlusion 0.16, compute skinned meshes 0.10, scene: skinned meshes 0.09, prepass: character 0.06, compute meshes 0.06, prepass: foliage scenery 0.02, prepass: vfx_particles 0.01
+  occlusion off s3_occ_off_r2  fps  38.8 | GPU total 24.62, scene: meshes 3.13, prepass 3.26, prepass: meshes 0.98, occlusion culling 0.07 (1 profiles)
+      tested 0 (0-0) / drawn 0 (0-0) / occlusion tris 0 (0-0)
+      render profile features (last frame): meshes: 384 draws, 4,747,516 triangles, 33687 culled; last 'mesh triangles' line: view 4.69 M + 1544 impostors
+      other mesh/prepass/occlusion GPU rows: prepass: grass 1.96, ambient occlusion 0.46, prepass: terrain 0.16, sky occlusion 0.16, compute skinned meshes 0.11, scene: skinned meshes 0.08, prepass: character 0.06, compute meshes 0.04, prepass: foliage scenery 0.02, prepass: vfx_particles 0.01

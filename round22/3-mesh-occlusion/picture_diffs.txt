@@ -1,0 +1,28 @@
+== forest_trail
+  s3_occ_on_r1 vs s3_occ_on_r2: mean abs diff 6.90, pixels off by >24: 14.05%
+  s3_occ_on_r1 vs s3_occ_off_r1: mean abs diff 8.65, pixels off by >24: 16.88%
+  s3_occ_on_r1 vs s3_occ_off_r2: mean abs diff 7.84, pixels off by >24: 16.90%
+  s3_occ_on_r2 vs s3_occ_off_r1: mean abs diff 8.49, pixels off by >24: 15.19%
+  s3_occ_on_r2 vs s3_occ_off_r2: mean abs diff 7.18, pixels off by >24: 14.73%
+  s3_occ_off_r1 vs s3_occ_off_r2: mean abs diff 7.65, pixels off by >24: 12.74%
+== plaza
+  s3_occ_on_r1 vs s3_occ_on_r2: mean abs diff 1.54, pixels off by >24: 0.51%
+  s3_occ_on_r1 vs s3_occ_off_r1: mean abs diff 1.72, pixels off by >24: 0.61%
+  s3_occ_on_r1 vs s3_occ_off_r2: mean abs diff 1.60, pixels off by >24: 0.54%
+  s3_occ_on_r2 vs s3_occ_off_r1: mean abs diff 1.70, pixels off by >24: 0.58%
+  s3_occ_on_r2 vs s3_occ_off_r2: mean abs diff 1.57, pixels off by >24: 0.51%
+  s3_occ_off_r1 vs s3_occ_off_r2: mean abs diff 1.72, pixels off by >24: 0.64%
+== market
+  s3_occ_on_r1 vs s3_occ_on_r2: mean abs diff 1.98, pixels off by >24: 0.30%
+  s3_occ_on_r1 vs s3_occ_off_r1: mean abs diff 2.73, pixels off by >24: 1.17%
+  s3_occ_on_r1 vs s3_occ_off_r2: mean abs diff 1.91, pixels off by >24: 0.33%
+  s3_occ_on_r2 vs s3_occ_off_r1: mean abs diff 2.48, pixels off by >24: 0.73%
+  s3_occ_on_r2 vs s3_occ_off_r2: mean abs diff 2.19, pixels off by >24: 0.74%
+  s3_occ_off_r1 vs s3_occ_off_r2: mean abs diff 2.76, pixels off by >24: 1.32%
+== village_garden
+  s3_occ_on_r1 vs s3_occ_on_r2: mean abs diff 7.45, pixels off by >24: 11.40%
+  s3_occ_on_r1 vs s3_occ_off_r1: mean abs diff 10.42, pixels off by >24: 21.10%
+  s3_occ_on_r1 vs s3_occ_off_r2: mean abs diff 8.44, pixels off by >24: 14.52%
+  s3_occ_on_r2 vs s3_occ_off_r1: mean abs diff 9.22, pixels off by >24: 16.99%
+  s3_occ_on_r2 vs s3_occ_off_r2: mean abs diff 9.98, pixels off by >24: 19.70%
+  s3_occ_off_r1 vs s3_occ_off_r2: mean abs diff 11.34, pixels off by >24: 24.43%

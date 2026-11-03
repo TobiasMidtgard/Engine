@@ -6,3 +6,4 @@ game's flags and bridge.
                            ripples, terrain colliders and the worst frames' terrain rows on the 2 km legs / 79 m-1 km
 2a-loops-ultra             loops x2 at Ultra with PHYSICS_REPORT=240: tables, per-pass GPU, physics reports
 2b-render-scale-0.7        the same loops at ENGINE_RENDER_SCALE=0.7: per-pass GPU 1.0 vs 0.7; round 2 physics (CCD sweeps)
+3-mesh-occlusion           ENGINE_MESH_OCCLUSION on/off x2 at forest_trail, plaza, market, village_garden (for 'town street')
