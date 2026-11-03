@@ -148,6 +148,7 @@ impl Target {
 }
 
 struct Targets {
+    camera: Option<Entity>,
     size: (u32, u32),
     color: Target,
     depth: Target,
@@ -175,7 +176,10 @@ struct Gpu {
 #[derive(Default)]
 pub struct CloudFeature {
     gpu: Option<Gpu>,
-    targets: Option<Targets>,
+    /// One set per camera, so a mirror or portal view doesn't recreate the main view's.
+    views: Vec<Targets>,
+    /// Index in `views` of the view being drawn.
+    current: Option<usize>,
     composite: Option<wgpu::BindGroup>,
     noise_ready: bool,
     map_revision: u64,
@@ -285,22 +289,40 @@ fn target(format: wgpu::TextureFormat, blend: Option<wgpu::BlendState>) -> wgpu:
 }
 
 impl CloudFeature {
-    fn ensure_targets(&mut self, device: &wgpu::Device, width: u32, height: u32, scale: f32) {
+    /// The most cameras whose targets are kept; the least recently used goes first.
+    const MAX_VIEWS: usize = 4;
+
+    fn ensure_targets(&mut self, device: &wgpu::Device, view: &ViewData, scale: f32) {
         let scale = scale.clamp(0.125, 1.0);
         let size = (
-            ((width as f32 * scale).round() as u32).max(1),
-            ((height as f32 * scale).round() as u32).max(1),
+            ((view.width as f32 * scale).round() as u32).max(1),
+            ((view.height as f32 * scale).round() as u32).max(1),
         );
-        if self.targets.as_ref().is_some_and(|t| t.size == size) {
-            return;
-        }
-        self.targets = Some(Targets {
-            size,
-            color: Target::new(device, "clouds color", size.0, size.1),
-            depth: Target::new(device, "clouds depth", size.0, size.1),
-            sky: Target::new(device, "clouds clear sky", size.0, size.1),
-        });
+        let found = self.views.iter().position(|t| t.camera == view.camera);
+        let targets = match found {
+            Some(i) if self.views[i].size == size => self.views.remove(i),
+            found => {
+                if let Some(i) = found {
+                    self.views.remove(i);
+                } else if self.views.len() >= Self::MAX_VIEWS {
+                    self.views.remove(0);
+                }
+                Targets {
+                    camera: view.camera,
+                    size,
+                    color: Target::new(device, "clouds color", size.0, size.1),
+                    depth: Target::new(device, "clouds depth", size.0, size.1),
+                    sky: Target::new(device, "clouds clear sky", size.0, size.1),
+                }
+            }
+        };
+        self.views.push(targets);
+        self.current = Some(self.views.len() - 1);
         self.composite = None;
+    }
+
+    fn targets(&self) -> Option<&Targets> {
+        self.current.and_then(|i| self.views.get(i))
     }
 }
 
@@ -570,12 +592,13 @@ impl RenderFeature for CloudFeature {
             return;
         }
         self.replace_sky = settings.replace_sky;
-        self.ensure_targets(
-            &gpu.device,
-            view.width,
-            view.height,
-            settings.resolution_scale,
-        );
+        // Reflections and insets are wavy or small: march them at half the scale.
+        let scale = if view.extra_view {
+            settings.resolution_scale * 0.5
+        } else {
+            settings.resolution_scale
+        };
+        self.ensure_targets(&gpu.device, view, scale);
         let Some(g) = &self.gpu else { return };
 
         let map = world.resource::<CloudMap>();
@@ -779,7 +802,7 @@ impl RenderFeature for CloudFeature {
         let moon_luminance = sky.moon_lux / moon_solid_angle * 0.55;
         let lat = climate.latitude_deg.to_radians();
         let sidereal = (state.time_of_day_h / 24.0 + state.day_of_year / climate.year_days) * TAU;
-        let size = self.targets.as_ref().map(|t| t.size).unwrap_or((1, 1));
+        let size = self.targets().map(|t| t.size).unwrap_or((1, 1));
         let c = CelestialUniform {
             sun: [sun_dir.x, sun_dir.y, sun_dir.z, sun_radius],
             sun_color: [sun_lux, sun_lux, sun_lux, sim.frame.yaw as f32],
@@ -811,7 +834,7 @@ impl RenderFeature for CloudFeature {
         if !self.active {
             return;
         }
-        let (Some(g), Some(t)) = (&self.gpu, &self.targets) else {
+        let (Some(g), Some(t)) = (&self.gpu, self.current.and_then(|i| self.views.get(i))) else {
             return;
         };
         if !self.noise_ready {
@@ -943,7 +966,7 @@ impl RenderFeature for CloudFeature {
     fn describe(&self) -> serde_json::Value {
         json!({
             "active": self.active,
-            "march_size": self.targets.as_ref().map(|t| [t.size.0, t.size.1]),
+            "march_size": self.targets().map(|t| [t.size.0, t.size.1]),
             "layer_thickness_m": self.top_m,
         })
     }
