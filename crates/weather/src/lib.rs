@@ -24,7 +24,7 @@ pub use cloudmap::CloudMap;
 pub use lightning::{ActiveBolts, Lightning};
 pub use presets::{Regime, WeatherPreset};
 pub use render::{CloudSettings, GroundEffectSettings, PrecipitationSettings};
-pub use sim::{ForecastStep, Weather, WeatherSim};
+pub use sim::{ForecastStep, Weather, WeatherSim, WeatherTweaks};
 pub use sky::{MoonLight, Sky, SkyLights, SunLight, spawn_sky_lights};
 pub use surface::{GroundPatch, GroundWeather, WeatherShelter};
 
@@ -230,6 +230,50 @@ mod tests {
                 .len()
                 == 9
         );
+    }
+
+    #[test]
+    fn hand_set_values_hold_over_the_weather_and_hand_back() {
+        let mut app = app();
+        app.update_n(2);
+        let w = &mut app.world;
+        call_api(
+            w,
+            "weather.set",
+            json!({"preset": "storm", "transition_s": 0}),
+        )
+        .unwrap();
+        call_api(w, "weather.advance", json!({"seconds": 60})).unwrap();
+        let panel = call_api(
+            w,
+            "weather.tune",
+            json!({"cloud_cover": 0.15, "temperature_c": -6.0, "precipitation_mm_h": 3.0}),
+        )
+        .unwrap();
+        let cover = &panel["tweaks"][0];
+        assert_eq!(cover["name"], "cloud_cover");
+        assert!(
+            (cover["set"].as_f64().unwrap() - 0.15).abs() < 1e-6,
+            "{cover}"
+        );
+        assert_eq!(panel["presets"].as_array().unwrap().len(), 9);
+        let out = call_api(w, "weather.advance", json!({"seconds": 60})).unwrap();
+        // The storm's preset is still in, but the sky and the air are as set.
+        assert_eq!(out["here"], "storm", "{out}");
+        assert!(out["cloud_cover"].as_f64().unwrap() < 0.35, "{out}");
+        assert!(
+            (out["temperature_c"].as_f64().unwrap() + 6.0).abs() < 0.5,
+            "{out}"
+        );
+        let err = call_api(w, "weather.tune", json!({"fog": "thick"})).unwrap_err();
+        assert!(err.contains("must be a number"), "{err}");
+
+        // Handed back, the storm's sky returns.
+        call_api(w, "weather.tune", json!({"reset": true})).unwrap();
+        let out = call_api(w, "weather.advance", json!({"seconds": 120})).unwrap();
+        assert!(out["cloud_cover"].as_f64().unwrap() > 0.6, "{out}");
+        let panel = call_api(w, "weather.panel", json!({})).unwrap();
+        assert!(panel["tweaks"][0]["set"].is_null(), "{panel}");
     }
 
     #[test]

@@ -60,6 +60,21 @@ impl WeatherPreset {
         }
     }
 
+    /// Name for people (`"Partly cloudy"`).
+    pub fn label(self) -> &'static str {
+        match self {
+            WeatherPreset::Clear => "Clear",
+            WeatherPreset::PartlyCloudy => "Partly cloudy",
+            WeatherPreset::Overcast => "Overcast",
+            WeatherPreset::Showers => "Showers",
+            WeatherPreset::Rain => "Rain",
+            WeatherPreset::Storm => "Thunderstorm",
+            WeatherPreset::Snow => "Snow",
+            WeatherPreset::Blizzard => "Blizzard",
+            WeatherPreset::Fog => "Fog",
+        }
+    }
+
     /// Parse a name as written by [`WeatherPreset::name`] (also accepts `PartlyCloudy`,
     /// `partly cloudy`, `thunderstorm`, …).
     pub fn from_name(name: &str) -> Option<WeatherPreset> {

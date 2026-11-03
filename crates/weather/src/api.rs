@@ -8,7 +8,7 @@ use serde_json::{Value, json};
 use crate::climate::Climate;
 use crate::lightning::StrikeRequests;
 use crate::presets::WeatherPreset;
-use crate::sim::{self, ForecastStep, Weather, WeatherSim};
+use crate::sim::{self, ForecastStep, Weather, WeatherSim, WeatherTweaks};
 use crate::sky::{Sky, SkyLights};
 use crate::surface::{self, GroundCache, GroundWeather};
 
@@ -63,6 +63,79 @@ pub fn describe(world: &World) -> Value {
         "sun_elevation_deg": lights.sun_elevation_deg,
         "sky_clock_drives_lights": lights.in_charge,
     })
+}
+
+/// What a weather panel shows: every control with its range and value now, and the weather
+/// it is producing.
+pub fn panel(world: &World) -> Value {
+    let weather = world.resource::<Weather>();
+    let sky = world.resource::<Sky>();
+    let t = &weather.tweaks;
+    // name, label, unit, min, max, step, hand-set value, value now
+    let state = world.resource::<WeatherState>();
+    let sim = world.resource::<WeatherSim>();
+    let local = sim.local_regime;
+    let slider =
+        |name: &str, label: &str, unit: &str, range: [f32; 3], set: Option<f32>, now: f32| {
+            json!({
+                "name": name, "label": label, "unit": unit,
+                "min": range[0], "max": range[1], "step": range[2],
+                "set": set, "now": now,
+            })
+        };
+    json!({
+        "presets": WeatherPreset::ALL.iter().map(|p| json!({
+            "name": p.name(), "label": p.label(),
+        })).collect::<Vec<_>>(),
+        "preset": weather.preset.name(),
+        "here": sim.preset_at(sim.focus).name(),
+        "transition_s": weather.transition_s,
+        "auto": weather.auto,
+        "tweaks": [
+            slider("cloud_cover", "Cloud cover", "", [0.0, 1.0, 0.05], t.cloud_cover, state.cloud_cover),
+            slider("cloud_type", "Cloud shape (sheet, heaps, towers)", "", [0.0, 1.0, 0.05], t.cloud_type, local.cloud_type),
+            slider("precipitation_mm_h", "Rain or snow", "mm/h", [0.0, 50.0, 0.5], t.precipitation_mm_h, state.precipitation_mm_h),
+            slider("wind_speed_m_s", "Wind", "m/s", [0.0, 40.0, 0.5], t.wind_speed_m_s, state.wind.length()),
+            slider("temperature_c", "Temperature", "°C", [-30.0, 45.0, 0.5], t.temperature_c, state.temperature_c),
+            slider("fog", "Fog", "", [0.0, 1.0, 0.05], t.fog, state.fog),
+        ],
+        "wind_from_deg": weather.wind_from_deg,
+        "time_scale": weather.time_scale,
+        "clock": {
+            "hour": sky.hour, "day_of_year": sky.day_of_year,
+            "hours_per_second": sky.hours_per_second, "moon_phase": sky.moon_phase,
+        },
+        "now": describe(world),
+    })
+}
+
+/// Set (a number), clear (null) or leave (absent) each of [`WeatherTweaks`]' values from
+/// `args`; `"reset": true` clears them all first.
+fn tune(t: &mut WeatherTweaks, args: &Value) -> Result<(), String> {
+    if args.get("reset").and_then(Value::as_bool) == Some(true) {
+        *t = WeatherTweaks::default();
+    }
+    let fields: [(&str, &mut Option<f32>); 6] = [
+        ("cloud_cover", &mut t.cloud_cover),
+        ("cloud_type", &mut t.cloud_type),
+        ("precipitation_mm_h", &mut t.precipitation_mm_h),
+        ("wind_speed_m_s", &mut t.wind_speed_m_s),
+        ("temperature_c", &mut t.temperature_c),
+        ("fog", &mut t.fog),
+    ];
+    for (key, field) in fields {
+        match args.get(key) {
+            None => {}
+            Some(Value::Null) => *field = None,
+            Some(v) => {
+                let v = v.as_f64().filter(|v| v.is_finite()).ok_or_else(|| {
+                    format!("\"{key}\" must be a number, or null to let the weather decide.")
+                })?;
+                *field = Some(v as f32);
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Fast-forward the weather (fronts, air, ground) by `seconds` of game time.
@@ -144,6 +217,42 @@ pub(crate) fn register(app: &mut App) {
             weather.preset = preset;
             weather.forecast.clear();
             Ok(json!({ "target": preset.name(), "arrives_in_s": weather.transition_s }))
+        },
+    )
+    .register_api(
+        "weather.panel",
+        "Everything a weather panel shows: the presets, each hand-settable value with its \
+         range, what it is set to (null = the weather decides) and what it is now, the wind \
+         direction, time scale and clock, and the weather now. Change it with weather.tune, \
+         weather.set and weather.time.",
+        "{}",
+        |world, _| Ok(panel(world)),
+    )
+    .register_api(
+        "weather.tune",
+        "Set weather values by hand over the presets: cloud_cover (0-1), cloud_type (0 sheet, \
+         0.5 heaps, 1 towers), precipitation_mm_h, wind_speed_m_s, temperature_c, fog (0-1); \
+         null hands one back to the weather, reset clears all. Also wind_from_deg, time_scale \
+         (weather runs this many times faster) and auto (pick new weather by itself).",
+        r#"{"cloud_cover": 0.8, "precipitation_mm_h": 4, "temperature_c": -3, "wind_speed_m_s": null, "wind_from_deg": 200, "time_scale": 1, "reset": false}"#,
+        |world, args| {
+            let mut weather = world.resource_mut::<Weather>();
+            let before = weather.tweaks.temperature_c;
+            tune(&mut weather.tweaks, &args)?;
+            if let Some(d) = f32_arg(&args, "wind_from_deg") {
+                weather.wind_from_deg = d.rem_euclid(360.0);
+            }
+            if let Some(s) = f32_arg(&args, "time_scale") {
+                weather.time_scale = s.clamp(0.0, 1000.0);
+            }
+            if let Some(a) = args.get("auto").and_then(Value::as_bool) {
+                weather.auto = a;
+            }
+            // A temperature set by hand holds at once; the air doesn't take 25 minutes.
+            if weather.tweaks.temperature_c != before {
+                world.resource_mut::<WeatherSim>().snap_air();
+            }
+            Ok(panel(world))
         },
     )
     .register_api(
