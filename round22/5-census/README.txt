@@ -4,7 +4,8 @@ and exited by itself, code 0; every stop's wait ended "0 not ready" (waited 7, 2
 terrain patches and foliage; the forest stop logged no wait). As in 21d, --tour loads only the six stops' zones
 (5 cells), not the full world.
 
-census.md (as written), with 21d's (main 1810b539) in brackets:
+census.md (as written); in the tris and draws columns 21d's values (main 1810b539) are in brackets; in the mesh
+entities and plants columns the brackets are the census's own (in view, growing):
 | Stop | Entities | Cells | Mesh entities (in view) | Raw tris in view | Raw tris casting | Drawn tris | Draws | Instances | Plants (growing) | Not ready |
 | overview | 126159 | 5 | 36847 (22531) | 16.1 M (50.7) | 0.2 M (0.2) | 7.3 M (7.7) | 1482 (1496) | 39933 | 9611 (3388) | 0 |
 | plaza    | 112684 | 5 | 31379 (9122)  |  7.0 M (20.0) | 6.4 M (7.0) | 8.0 M (9.3) | 1895 (1947) | 743018 | 9644 (3353) | 0 |
