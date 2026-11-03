@@ -413,7 +413,10 @@ impl Default for LodScale {
 
 /// Distance-based detail: beyond `switch` meters from the camera the entity shows `far` (or
 /// hides when there is none), and beyond `hide` it hides either way (both times [`LodScale`]).
+/// Its fade state ([`LodFade`], `DitherFade` at 0, which draws as without one) comes with it, so
+/// a change of detail writes values in place instead of adding and removing components.
 #[derive(Component, Debug, Clone, Copy)]
+#[require(LodFade, DitherFade)]
 pub struct Lod {
     pub near: Handle<Mesh>,
     pub far: Option<Handle<Mesh>>,
@@ -455,9 +458,12 @@ const LOD_FADE_SECS: f32 = 0.5;
 const LOD_JUMP_M: f64 = 30.0;
 
 /// A level-of-detail change fading through: the mesh it showed fades out on a `ghost` child
-/// while the new one fades in (or the entity fades out, then hides; or in, from hidden).
-#[derive(Component, Debug, Clone, Copy)]
+/// while the new one fades in (or the entity fades out, then hides; or in, from hidden). Idle
+/// unless `active`.
+#[derive(Component, Debug, Clone, Copy, Default)]
 pub struct LodFade {
+    /// Fading now.
+    pub active: bool,
     /// How far through, 0..=1.
     t: f32,
     ghost: Option<Entity>,
@@ -465,13 +471,36 @@ pub struct LodFade {
     hiding: bool,
 }
 
+/// Levels of detail look at their distance one frame in [`LOD_STRIDE`] each (a quarter of them
+/// a frame, staggered by entity), as Unreal's significance manager and HLOD updates spread
+/// their checks over frames: a change starts at most a few frames late and then fades over
+/// half a second anyway. Fades under way, new entities and jumps are handled every frame.
+const LOD_STRIDE: u32 = 4;
+
+/// Below this the camera hasn't moved (m since the last look): with no fade under way and
+/// nothing new, the pass is skipped.
+const LOD_STILL_M: f64 = 0.02;
+
+/// What [`update_lods`] keeps between frames.
+#[derive(Default)]
+pub struct LodPass {
+    frame: u32,
+    /// Where the camera was at the last pass, and whether any fade was under way after it.
+    eye: Option<DVec3>,
+    fading: bool,
+    /// How many levels of detail there were.
+    count: usize,
+}
+
 /// Swap meshes or hide entities by distance to the active camera, cross-fading the change
-/// over [`LOD_FADE_SECS`] with Rendering's [`engine::render::DitherFade`].
+/// over [`LOD_FADE_SECS`] with Rendering's [`engine::render::DitherFade`]. Round 1b profile:
+/// 4.2 ms a frame of scan plus 12 ms of commands adding and removing the fade components;
+/// now the fade state lives on the entity and the scan is staggered ([`LOD_STRIDE`]).
 #[allow(clippy::type_complexity)]
 pub fn update_lods(
     time: Res<Time>,
     scale: Option<Res<LodScale>>,
-    mut last_eye: Local<Option<DVec3>>,
+    mut pass: Local<LodPass>,
     cameras: Query<(&Camera, &GlobalTransform)>,
     par: ParallelCommands,
     mut q: Query<(
@@ -480,8 +509,8 @@ pub fn update_lods(
         &mut Lod,
         &mut MeshRenderer,
         Option<&HideWithin>,
-        Option<&mut LodFade>,
-        Option<&mut DitherFade>,
+        &mut LodFade,
+        &mut DitherFade,
     )>,
 ) {
     let Some(eye) = cameras
@@ -492,38 +521,53 @@ pub fn update_lods(
     else {
         return;
     };
-    let jumped = last_eye
-        .replace(eye)
-        .is_none_or(|p| p.distance(eye) > LOD_JUMP_M);
+    let moved = pass.eye.map_or(f64::INFINITY, |p| p.distance(eye));
+    // New levels of detail (a zone streaming in) change the count: they need their first look.
+    let count = q.iter().len();
+    if moved < LOD_STILL_M && !pass.fading && count == pass.count {
+        return;
+    }
+    pass.count = count;
+    let jumped = moved > LOD_JUMP_M;
+    pass.eye = Some(eye);
+    pass.frame = pass.frame.wrapping_add(1);
+    let turn = pass.frame % LOD_STRIDE;
     let step = time.real_delta_secs() / LOD_FADE_SECS;
     let k = scale.map_or(1.0, |s| s.0) as f64;
-    q.par_iter_mut()
-        .for_each(|(e, t, mut lod, mut renderer, within, fade, dither)| {
+    let fading = std::sync::atomic::AtomicBool::new(false);
+    q.par_iter_mut().for_each(
+        |(e, t, mut lod, mut renderer, within, mut fade, mut dither)| {
             // A fade under way runs to its end before the next change.
-            if let Some(mut fade) = fade {
+            if fade.active {
                 fade.t = (fade.t + step).min(1.0);
                 let done = fade.t >= 1.0 || jumped;
-                par.command_scope(|mut commands| {
-                    if done {
-                        if let Some(ghost) = fade.ghost {
+                if let Some(ghost) = fade.ghost {
+                    par.command_scope(|mut commands| {
+                        if done {
                             commands.entity(ghost).despawn();
+                        } else {
+                            commands.entity(ghost).insert(DitherFade::pair(fade.t).0);
                         }
-                        commands.entity(e).remove::<(LodFade, DitherFade)>();
-                    } else if let Some(ghost) = fade.ghost {
-                        commands.entity(ghost).insert(DitherFade::pair(fade.t).0);
-                    }
-                });
+                    });
+                }
                 if done {
                     if fade.hiding {
                         renderer.visible = false;
                     }
-                } else if let Some(mut dither) = dither {
-                    *dither = match (fade.hiding, fade.ghost) {
+                    *fade = LodFade::default();
+                    dither.set_if_neq(DitherFade(0.0));
+                } else {
+                    fading.store(true, std::sync::atomic::Ordering::Relaxed);
+                    dither.set_if_neq(match (fade.hiding, fade.ghost) {
                         (true, _) => DitherFade(fade.t),
                         (false, Some(_)) => DitherFade::pair(fade.t).1,
                         (false, None) => DitherFade(1.0 - fade.t),
-                    };
+                    });
                 }
+                return;
+            }
+            let new = lod.is_added();
+            if !new && !jumped && e.index_u32() % LOD_STRIDE != turn {
                 return;
             }
             let d2 = (t.translation() - eye).length_squared();
@@ -542,35 +586,34 @@ pub fn update_lods(
                 (true, None) => {}
             }
             // The first look and jumps switch at once.
-            if lod.is_added() || jumped {
+            if new || jumped {
                 renderer.visible = shown;
                 return;
             }
-            par.command_scope(|mut commands| match (was.0, shown) {
+            match (was.0, shown) {
                 (false, false) => {}
                 // Hiding: fade the mesh it showed out, then hide.
                 (true, false) => {
                     renderer.mesh = was.1.clone();
-                    commands.entity(e).insert((
-                        DitherFade(0.0),
-                        LodFade {
-                            t: 0.0,
-                            ghost: None,
-                            hiding: true,
-                        },
-                    ));
+                    *fade = LodFade {
+                        active: true,
+                        t: 0.0,
+                        ghost: None,
+                        hiding: true,
+                    };
+                    fading.store(true, std::sync::atomic::Ordering::Relaxed);
                 }
                 // Appearing: fade in from nothing.
                 (false, true) => {
                     renderer.visible = true;
-                    commands.entity(e).insert((
-                        DitherFade(1.0),
-                        LodFade {
-                            t: 0.0,
-                            ghost: None,
-                            hiding: false,
-                        },
-                    ));
+                    *dither = DitherFade(1.0);
+                    *fade = LodFade {
+                        active: true,
+                        t: 0.0,
+                        ghost: None,
+                        hiding: false,
+                    };
+                    fading.store(true, std::sync::atomic::Ordering::Relaxed);
                 }
                 // Swapping: the old mesh fades out on a ghost while the new one fades in.
                 (true, true) => {
@@ -578,28 +621,32 @@ pub fn update_lods(
                         return;
                     }
                     let (out, into) = DitherFade::pair(0.0);
-                    let ghost = commands
-                        .spawn((
-                            ChildOf(e),
-                            Transform::default(),
-                            MeshRenderer {
-                                mesh: was.1.clone(),
-                                ..renderer.clone()
-                            },
-                            out,
-                        ))
-                        .id();
-                    commands.entity(e).insert((
-                        into,
-                        LodFade {
-                            t: 0.0,
-                            ghost: Some(ghost),
-                            hiding: false,
-                        },
-                    ));
+                    let ghost = par.command_scope(|mut commands| {
+                        commands
+                            .spawn((
+                                ChildOf(e),
+                                Transform::default(),
+                                MeshRenderer {
+                                    mesh: was.1.clone(),
+                                    ..renderer.clone()
+                                },
+                                out,
+                            ))
+                            .id()
+                    });
+                    *dither = into;
+                    *fade = LodFade {
+                        active: true,
+                        t: 0.0,
+                        ghost: Some(ghost),
+                        hiding: false,
+                    };
+                    fading.store(true, std::sync::atomic::Ordering::Relaxed);
                 }
-            });
-        });
+            }
+        },
+    );
+    pass.fading = fading.into_inner();
 }
 
 fn place(land: &Landscape, x: f64, z: f64, sink: f64) -> DVec3 {
@@ -2707,7 +2754,7 @@ mod tests {
         // The first look switches at once: the far mesh, 25 m out.
         app.update();
         assert_eq!(mesh(&app), MeshRef::Handle(far));
-        assert!(app.world.get::<LodFade>(rock).is_none());
+        assert!(!app.world.get::<LodFade>(rock).unwrap().active);
         // Walking in to 15 m: the near mesh fades in while the far one fades out on a ghost.
         let walk_to = |app: &mut App, z: f64| {
             let t = Transform::from_translation(DVec3::new(0.0, 0.0, z));
@@ -2717,8 +2764,16 @@ mod tests {
             app.update();
         };
         walk_to(&mut app, 10.0);
+        // Each entity looks once in LOD_STRIDE frames.
+        for _ in 1..LOD_STRIDE {
+            if mesh(&app) == MeshRef::Handle(near) {
+                break;
+            }
+            app.update();
+        }
         assert_eq!(mesh(&app), MeshRef::Handle(near));
-        let fade = *app.world.get::<LodFade>(rock).expect("fading");
+        let fade = *app.world.get::<LodFade>(rock).unwrap();
+        assert!(fade.active, "fading");
         let ghost = fade.ghost.expect("a ghost with the far mesh");
         assert_eq!(
             app.world.get::<MeshRenderer>(ghost).unwrap().mesh,
@@ -2741,12 +2796,12 @@ mod tests {
             app.update();
         }
         assert!(app.world.get_entity(ghost).is_err());
-        assert!(app.world.get::<LodFade>(rock).is_none());
-        assert!(app.world.get::<DitherFade>(rock).is_none());
+        assert!(!app.world.get::<LodFade>(rock).unwrap().active);
+        assert_eq!(app.world.get::<DitherFade>(rock).unwrap().hidden(), 0.0);
         // A jump switches at once.
         walk_to(&mut app, -200.0);
         assert!(!app.world.get::<MeshRenderer>(rock).unwrap().visible);
-        assert!(app.world.get::<LodFade>(rock).is_none());
+        assert!(!app.world.get::<LodFade>(rock).unwrap().active);
     }
 
     #[test]

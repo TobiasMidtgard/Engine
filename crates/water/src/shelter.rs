@@ -129,14 +129,56 @@ pub fn build(body: &BodyState, wind_dir: Vec2, ground: &Ground) -> ShelterMask {
     }
 }
 
+/// Masks [`shelter_system`] keeps for lakes the camera went past, so walking back to one
+/// shows its mask again without a rebuild.
+const KEPT_MASKS: usize = 4;
+
+/// What [`shelter_system`] keeps between frames: a build running off the main thread and the
+/// last few lakes' masks.
+#[derive(Default)]
+pub struct ShelterBuilds {
+    running: Option<std::sync::mpsc::Receiver<ShelterMask>>,
+    kept: Vec<ShelterMask>,
+}
+
+/// The mask in `m` serves `body` with the wind toward `dir`.
+fn fits(m: &ShelterMask, body: &BodyState, dir: Vec2) -> bool {
+    let radius = body.body.extent.bounding_radius().min(MAX_RADIUS_M);
+    m.body == Some(body.entity)
+        && (m.level - body.center.y).abs() < 0.05
+        && (m.corner - (DVec2::new(body.center.x, body.center.z) - radius as f64)).length() < 0.5
+        && m.wind_dir.dot(dir) > REBUILD_DEG.to_radians().cos()
+}
+
 /// Keep the mask over the lake nearest the focus (else the camera) up to date with the wind.
+/// The mask is marched on the async pool (a 4096-cell march over the ground took 205-215 ms
+/// on the main thread walking the forest trail, round 21c on the PC); the old mask stays up
+/// until the new one is in, and the last few lakes' masks are kept to come back to.
 pub fn shelter_system(
     settings: Option<Res<crate::body::WaterSettings>>,
     shared: Res<SharedWater>,
     focus: Res<engine_world::FocusPoints>,
     cameras: Query<(&engine_render::Camera, &GlobalTransform), Without<engine_render::ExtraView>>,
     mut mask: ResMut<ShelterMask>,
+    mut builds: Local<ShelterBuilds>,
 ) {
+    let ShelterBuilds { running, kept } = &mut *builds;
+    // A finished build goes up (if it still serves the lake by then, checked below).
+    if let Some(rx) = running {
+        use std::sync::mpsc::TryRecvError;
+        match rx.try_recv() {
+            Ok(built) => {
+                *running = None;
+                kept.retain(|k| k.body != built.body);
+                kept.push(built);
+                if kept.len() > KEPT_MASKS {
+                    kept.remove(0);
+                }
+            }
+            Err(TryRecvError::Disconnected) => *running = None,
+            Err(TryRecvError::Empty) => {}
+        }
+    }
     let camera = || {
         cameras
             .iter()
@@ -182,25 +224,50 @@ pub fn shelter_system(
     let Some(dir) = wind.try_normalize() else {
         return;
     };
-    let radius = body.body.extent.bounding_radius().min(MAX_RADIUS_M);
-    let same = mask.body == Some(body.entity)
-        && (mask.level - body.center.y).abs() < 0.05
-        && (mask.corner - (DVec2::new(body.center.x, body.center.z) - radius as f64)).length()
-            < 0.5
-        && mask.wind_dir.dot(dir) > REBUILD_DEG.to_radians().cos();
-    if same {
+    if fits(&mask, body, dir) {
         return;
     }
-    let version = mask.version + 1;
-    *mask = ShelterMask {
-        version,
-        ..build(body, dir, &state.ground)
-    };
+    if let Some(k) = kept.iter().find(|k| fits(k, body, dir)) {
+        let version = mask.version + 1;
+        *mask = ShelterMask {
+            version,
+            ..k.clone()
+        };
+        return;
+    }
+    // One build at a time; the lake or wind it ends up serving is checked when it lands.
+    if running.is_some() {
+        return;
+    }
+    let (body, ground) = (body.clone(), state.ground.clone());
+    drop(state);
+    match engine_core::tasks::AsyncComputeTaskPool::try_get() {
+        Some(pool) => {
+            let (tx, rx) = std::sync::mpsc::channel();
+            pool.spawn(async move {
+                let _ = tx.send(build(&body, dir, &ground));
+            })
+            .detach();
+            *running = Some(rx);
+        }
+        None => {
+            let built = build(&body, dir, &ground);
+            kept.retain(|k| k.body != built.body);
+            kept.push(built.clone());
+            if kept.len() > KEPT_MASKS {
+                kept.remove(0);
+            }
+            let version = mask.version + 1;
+            *mask = ShelterMask { version, ..built };
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::state::WaterState;
+    use engine_core::math::Vec3;
 
     /// A lake at y = 0 from x = -30 to 30, banks 1.5 m high, and a 15 m crag beyond x = 30.
     fn ground(x: f64, _z: f64) -> f64 {
@@ -232,6 +299,62 @@ mod tests {
     fn open_water_has_all_the_wind() {
         let flat = |_x: f64, _z: f64| -5.0;
         assert!((exposure(DVec2::ZERO, 0.0, Vec2::X, &flat) - 1.0).abs() < 1e-3);
+    }
+
+    /// Two lakes 300 m apart, wind toward +x; the focus walks from one to the other and back.
+    /// Runs frames until the mask serves `want` (builds may run on the async pool).
+    fn run_focus(world: &mut World, schedule: &mut Schedule, x: f64, want: Entity) -> ShelterMask {
+        world.resource_mut::<engine_world::FocusPoints>().points = vec![DVec3::new(x, 1.0, 0.0)];
+        for _ in 0..5000 {
+            schedule.run(world);
+            if world.resource::<ShelterMask>().body == Some(want) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        world.resource::<ShelterMask>().clone()
+    }
+
+    #[test]
+    fn walking_back_to_a_lake_shows_its_mask_again_at_once() {
+        use crate::body::WaterBody;
+        let lake = |id: u32, x: f64| BodyState {
+            entity: Entity::from_raw_u32(id).unwrap(),
+            center: DVec3::new(x, 0.0, 0.0),
+            yaw: 0.0,
+            body: WaterBody {
+                extent: WaterExtent::Circle { radius: 30.0 },
+                ..WaterBody::default()
+            },
+            waves: Default::default(),
+            mean_depth: 3.0,
+            wind: Vec3::new(5.0, 0.0, 0.0),
+        };
+        let mut state = WaterState::new(8, 1.0);
+        state.bodies = vec![lake(1, 0.0), lake(2, 300.0)];
+        let mut world = World::new();
+        world.insert_resource(SharedWater::new(state));
+        world.insert_resource(engine_world::FocusPoints::default());
+        world.init_resource::<ShelterMask>();
+        let mut schedule = Schedule::default();
+        schedule.add_systems(shelter_system);
+        let (one, two) = (lake(1, 0.0).entity, lake(2, 0.0).entity);
+        let a = run_focus(&mut world, &mut schedule, 0.0, one);
+        assert_eq!(a.body, Some(one));
+        assert_eq!(a.exposure.len(), MASK_N * MASK_N);
+        let b = run_focus(&mut world, &mut schedule, 300.0, two);
+        assert_eq!(b.body, Some(two));
+        assert!(b.version > a.version);
+        // Back at the first lake: its kept mask in the same frame, new version for the upload.
+        world.resource_mut::<engine_world::FocusPoints>().points = vec![DVec3::new(0.0, 1.0, 0.0)];
+        schedule.run(&mut world);
+        let again = world.resource::<ShelterMask>().clone();
+        assert_eq!(again.body, a.body);
+        assert_eq!(again.exposure, a.exposure);
+        assert!(again.version > b.version);
+        // Standing still changes nothing.
+        let still = run_focus(&mut world, &mut schedule, 0.0, one);
+        assert_eq!(still.version, again.version);
     }
 
     #[test]

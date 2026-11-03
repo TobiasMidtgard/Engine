@@ -354,7 +354,18 @@ night (`earth_night_globe`, `earth_night_leo` from 420 km, `earth_night_high` fr
 `mars_valles`), Olympus Mons (`mars_olympus`), the north pole (`mars_pole`), and the floor and
 rim of Valles Marineris (`mars_canyon`, `mars_rim`))
 with the game's auto exposure, and `examples/terrain_map.rs` draws a relief map with rivers and lakes around
-the home pad for tuning shapes.
+the home pad for tuning shapes. Rivers and lakes from the bank and the air: `river_bank`,
+`lake_shore`, `lake_air`.
+
+The ground's GPU cost: `ENGINE_PROFILE=1 GPU_FRAMES=8 terrain_shots <out> 640x360 <view>`
+prints the mean GPU times of the terrain's scene pass, the prepass and shadows. Parts of the
+ground shader switch off for comparison with `TERRAIN_SHADER_OFF=<bits>` (1 material
+textures, 2 rock's larger scales, 4 parallax relief, 16 lighting, 128 everything (a flat
+color), 256 everything after the material blend; read when the pipeline is made, so in the
+showcase too). The scene pass shades only the prepass's pixels (an equal depth test, no depth
+writes, no `discard`); `TERRAIN_DEPTH=greater` draws it the old way for comparison. Patches go
+out front to back, one `multi_draw_indexed_indirect` per vertex page and pass where the GPU
+supports it (`RenderSettings::multi_draw_indirect`).
 
 ## Test cases in the showcase
 

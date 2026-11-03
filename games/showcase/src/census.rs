@@ -306,16 +306,20 @@ fn census(world: &mut World, stop: &str, first: bool) -> String {
         .collect();
     let m = |x: u64| x as f64 / 1e6;
 
+    // Meshes, terrain patches and foliage the stop's wait gave up on (a tour's cap).
+    let not_ready = world
+        .get_resource::<crate::tour::Tour>()
+        .map_or(0, |t| t.not_ready);
     let mut out = String::new();
     if first {
         let _ = writeln!(
             out,
-            "\n| Stop | Entities | Cells loaded | Mesh entities (in view) | Raw tris in view | Raw tris casting | Drawn tris | Draws | Instances | Plants (growing) |\n|---|---|---|---|---|---|---|---|---|---|"
+            "\n| Stop | Entities | Cells loaded | Mesh entities (in view) | Raw tris in view | Raw tris casting | Drawn tris | Draws | Instances | Plants (growing) | Not ready |\n|---|---|---|---|---|---|---|---|---|---|---|"
         );
     }
     let _ = writeln!(
         out,
-        "| {stop} | {entities} | {} | {} ({}) | {:.1} M | {:.1} M | {:.1} M | {draws:.0} | {instances:.0} | {plants} ({growing}) |",
+        "| {stop} | {entities} | {} | {} ({}) | {:.1} M | {:.1} M | {:.1} M | {draws:.0} | {instances:.0} | {plants} ({growing}) | {not_ready} |",
         loaded.len(),
         total.count,
         total.in_view,

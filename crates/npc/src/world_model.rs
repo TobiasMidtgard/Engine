@@ -1153,6 +1153,9 @@ fn entity_fingerprints(obstacles: &[Obstacle]) -> HashMap<Entity, u64> {
     out
 }
 
+/// The poll for moved static colliders looks at this many slices of them in turn.
+const POLL_SLICES: u32 = 8;
+
 /// A rebuild of the whole model running on the async task pool.
 #[derive(Default)]
 pub(crate) struct PendingBuild {
@@ -1182,6 +1185,7 @@ pub(crate) fn rebuild_world_model(
     time: Res<Time>,
     mut since_poll: Local<f32>,
     mut pending: Local<PendingBuild>,
+    mut slice: Local<u32>,
 ) {
     let mut regions: Vec<(DVec2, DVec2)> = terrain
         .read()
@@ -1196,8 +1200,13 @@ pub(crate) fn rebuild_world_model(
         model.forget_ground();
     }
     *since_poll += time.real_delta_secs().max(time.delta_secs());
-    let mut poll = *since_poll >= settings.poll_secs;
+    // The poll looks at one of POLL_SLICES slices of the colliders (by entity index) each
+    // poll_secs / POLL_SLICES, so every collider is looked at once per poll_secs, as before,
+    // without one frame doing them all (a 26-29 ms frame every second on the showcase).
+    let mut poll = *since_poll >= settings.poll_secs / POLL_SLICES as f32;
 
+    // After an async rebuild lands, the next poll looks at every collider at once.
+    let mut caught_up = true;
     if let Some(slot) = pending.slot.clone() {
         pending.regions.append(&mut regions);
         let Some(mut built) = slot.lock().ok().and_then(|mut s| s.take()) else {
@@ -1212,6 +1221,7 @@ pub(crate) fn rebuild_world_model(
             *model = built;
             regions = std::mem::take(&mut pending.regions);
             poll = true; // catch up with colliders that changed while it built
+            caught_up = false;
         }
     }
 
@@ -1251,7 +1261,15 @@ pub(crate) fn rebuild_world_model(
         // Every so often look at all of them, for static colliders moved without a change to
         // the collider itself (a parent moved, a transform set by hand).
         *since_poll = 0.0;
-        let all = collect_obstacles(&colliders, &bodies);
+        let _span = tracing::info_span!("world model poll").entered();
+        let phase = *slice % POLL_SLICES;
+        *slice = slice.wrapping_add(1);
+        let mine = |e: &Entity| !caught_up || e.index_u32() % POLL_SLICES == phase;
+        let changed_now = std::mem::take(&mut touched);
+        let mut all = Vec::new();
+        for item in colliders.iter().filter(|item| mine(&item.0)) {
+            push_collider(&mut all, item, &bodies);
+        }
         let now = entity_fingerprints(&all);
         touched = now
             .iter()
@@ -1261,10 +1279,24 @@ pub(crate) fn rebuild_world_model(
                 model
                     .per_entity
                     .keys()
-                    .filter(|e| !now.contains_key(e))
+                    .filter(|e| mine(e) && !now.contains_key(e))
                     .copied(),
             )
             .collect();
+        // Colliders changed this frame outside the slice, as between polls.
+        let mut extra = Vec::new();
+        for &e in changed_now.iter().filter(|e| !mine(e)) {
+            if let Ok(item) = colliders.get(e) {
+                push_collider(&mut extra, item, &bodies);
+            }
+        }
+        let extra_now = entity_fingerprints(&extra);
+        touched.extend(
+            changed_now
+                .into_iter()
+                .filter(|e| !mine(e) && extra_now.get(e) != model.per_entity.get(e)),
+        );
+        all.append(&mut extra);
         all.into_iter()
             .filter(|o| touched.contains(&o.entity))
             .collect()
@@ -1285,6 +1317,7 @@ pub(crate) fn rebuild_world_model(
     if touched.is_empty() && regions.is_empty() {
         return;
     }
+    let _span = tracing::info_span!("world model update").entered();
     model.update(&touched, fresh, &regions, &ground);
 }
 

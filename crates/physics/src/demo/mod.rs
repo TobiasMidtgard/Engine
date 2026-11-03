@@ -1019,6 +1019,7 @@ pub(crate) fn stations_have_work(
     work: Res<StationWork>,
     grounds: Query<&ProvingGround>,
     settling: Option<Res<settle::Settling>>,
+    pours: Option<Res<galton::GaltonPours>>,
 ) -> bool {
     !work.due.is_empty()
         || !work.rest.is_empty()
@@ -1026,6 +1027,7 @@ pub(crate) fn stations_have_work(
         || !work.resume.is_empty()
         || grounds.iter().any(|g| g.unbuilt.contains(&true))
         || settling.is_some_and(|s| s.any_done())
+        || pours.is_some_and(|p| !p.0.is_empty())
 }
 
 /// Run each proving ground's station cycles (world time, so slow motion slows the cycles
@@ -1140,6 +1142,17 @@ pub(crate) fn replay_stations(world: &mut World) {
             std::mem::take(&mut work.resume),
         )
     };
+    // Boards filling their hoppers get their next balls; one about to rest or pause gets all
+    // it has left, so every ball is held with it.
+    if galton::pouring(world) {
+        let flush: Vec<Entity> = rest
+            .iter()
+            .chain(&pause)
+            .filter(|(_, s)| *s == Station::Galton)
+            .map(|(g, _)| *g)
+            .collect();
+        galton::pour_on(world, &flush);
+    }
     // One station a step: a station is up to 500 new bodies (the Galton board), and all of
     // them waking together (someone walking in, the tour arriving) stepped 1,492 new bodies
     // at once, 48 ms on the RTX 5080 PC. The rest wait their turn, a step each.

@@ -19,8 +19,12 @@ const BUILD_STALL_SECS: f32 = 90.0;
 /// stop should do its long waiting there, where the clock hasn't started (a software renderer
 /// can take minutes over one stone).
 const ARRIVAL_STALL_SECS: f32 = 600.0;
-/// ...but never longer than this, wall-clock seconds.
+/// ...but never longer than this, wall-clock seconds, on a software renderer...
 const BUILD_WAIT_SECS: f32 = 900.0;
+/// ...or this on a GPU, where a stop that isn't ready in a minute won't be (round 21b: the
+/// PC census waited 600-730 s a stop on terrain patches that never all landed). What was still
+/// building is written into the census row instead.
+const GPU_BUILD_WAIT_SECS: f32 = 60.0;
 
 #[derive(Resource, Debug)]
 pub struct Tour {
@@ -31,6 +35,8 @@ pub struct Tour {
     /// While a stop waits for background builds: when it started, the meshes ready and terrain
     /// patches pending, and when those last changed.
     waiting: Option<(std::time::Instant, (u64, u64), std::time::Instant)>,
+    /// Meshes, terrain patches and foliage still building when the last wait ended.
+    pub not_ready: u64,
 }
 
 impl Tour {
@@ -44,6 +50,7 @@ impl Tour {
         Self {
             places: list,
             index: 0,
+            not_ready: 0,
             frames: 0,
             out_dir: "screenshots/tour".into(),
             waiting: None,
@@ -209,13 +216,18 @@ fn run(world: &mut World) {
 /// terrain its patches (on worker threads; it draws their parents meanwhile), so the picture
 /// shows the finished relief, not the smooth shapes drawn until it is ready.
 fn wait_for_builds(world: &mut World, stall_secs: f32) -> bool {
-    let Some(state) = with_renderer(world, |r, _| {
+    let Some((state, software)) = with_renderer(world, |r, _| {
         let describe = r.describe();
-        describe["features"]
+        let adapter = describe["adapter"].as_str().unwrap_or("").to_lowercase();
+        let software = ["llvmpipe", "lavapipe", "swiftshader"]
+            .iter()
+            .any(|s| adapter.contains(s));
+        let state = describe["features"]
             .as_array()
             .and_then(|f| f.iter().find(|f| f["name"] == "meshes"))
             .map(|f| f["state"]["virtual_geometry"].clone())
-            .unwrap_or_default()
+            .unwrap_or_default();
+        (state, software)
     }) else {
         return false;
     };
@@ -228,10 +240,16 @@ fn wait_for_builds(world: &mut World, stall_secs: f32) -> bool {
             )
         });
     let patches = (patches_building + patches_missing) as u64;
-    if patches_building > 0.0 {
-        // Let the workers get on with them before drawing another frame.
+    if patches_building > 0.0 && software {
+        // Let the workers get on with them before drawing another (slow) frame. Not on a GPU:
+        // there it held the game at 3 fps for the whole wait (round 21b).
         std::thread::sleep(std::time::Duration::from_millis(250));
     }
+    let (cap, stall_secs) = if software {
+        (BUILD_WAIT_SECS, stall_secs)
+    } else {
+        (GPU_BUILD_WAIT_SECS, stall_secs.min(GPU_BUILD_WAIT_SECS))
+    };
     // Foliage plants its regions and uploads its trees on workers, over frames.
     let foliage = world
         .get_resource::<engine_foliage::FoliageLoading>()
@@ -256,7 +274,8 @@ fn wait_for_builds(world: &mut World, stall_secs: f32) -> bool {
     let changed = if ready != last_ready { now } else { changed };
     let waited = now.duration_since(since).as_secs_f32();
     let stalled = now.duration_since(changed).as_secs_f32();
-    if building == 0 || waited > BUILD_WAIT_SECS || stalled > stall_secs {
+    if building == 0 || waited > cap || stalled > stall_secs {
+        tour.not_ready = building;
         if waited > 1.0 {
             engine::core::log::info!(
                 "  waited {waited:.0} s for meshes' clusters, terrain patches and foliage ({building} not ready)"

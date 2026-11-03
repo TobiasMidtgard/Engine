@@ -1481,6 +1481,17 @@ struct MatSample {
     occlusion: f32,
 };
 
+// Parts of `fs_main` switched off to measure what they cost (`TERRAIN_SHADER_OFF`, render.rs):
+// 1 material textures (their means instead), 2 rock's larger scales, 4 parallax relief,
+// 16 lighting (albedo only); 128 everything (a flat color: the floor), 256 everything after
+// the materials are blended.
+override TERRAIN_OFF: u32 = 0u;
+// The scene pass cuts the mirror's clip itself only when it tests depth `GreaterEqual`
+// (`TERRAIN_DEPTH=greater`): by default it shades exactly the prepass's pixels (an equal test,
+// no depth writes), which already left the clipped ones out, and a shader without `discard`
+// keeps the GPU's early depth test.
+override MIRROR_CLIP: bool = false;
+
 fn mat_tile(i: u32) -> f32 {
     return mats.info[i * 2u].w;
 }
@@ -1581,6 +1592,9 @@ fn sample_triplanar(i: u32, tp: vec3<f32>, n: vec3<f32>, dp1: vec3<f32>, dp2: ve
         return mat_mean(i, n);
     }
     var w = pow(abs(n), vec3<f32>(4.0));
+    // Two projections, not three: the weakest one's weight comes off all three, so it
+    // fades out as another overtakes it (biplanar mapping, Quilez 2020).
+    w = max(w - min(w.x, min(w.y, w.z)), vec3<f32>(0.0)) + w * 1e-3;
     w /= (w.x + w.y + w.z);
     let sg = select(vec3<f32>(-1.0), vec3<f32>(1.0), n >= vec3<f32>(0.0));
     let period = 4096.0 / tile;
@@ -1626,6 +1640,9 @@ fn sample_triplanar(i: u32, tp: vec3<f32>, n: vec3<f32>, dp1: vec3<f32>, dp2: ve
 // away (skipped up close, where the terrain's own shape takes over), blocks at 8×, then the
 // close-up texture.
 fn sample_rock(tp: vec3<f32>, n: vec3<f32>, dp1: vec3<f32>, dp2: vec3<f32>, pixel: f32) -> MatSample {
+    if ((TERRAIN_OFF & 2u) != 0u) {
+        return sample_triplanar(M_ROCK, tp, n, dp1, dp2, pixel, 1.0);
+    }
     var huge = mat_mean(M_ROCK, n);
     if (pixel > 0.1) {
         huge = sample_triplanar(M_ROCK, tp, n, dp1, dp2, pixel, 64.0);
@@ -1786,8 +1803,11 @@ fn fill_low(amount: f32, height: f32) -> f32 {
 
 @fragment
 fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
-    if (under_mirror(in.rel)) {
+    if (MIRROR_CLIP && under_mirror(in.rel)) {
         discard;
+    }
+    if ((TERRAIN_OFF & 128u) != 0u) {
+        return vec4<f32>(0.1, 0.2, 0.05, 1.0);
     }
     let planet = planets[in.planet];
     let up = normalize(in.up);
@@ -2260,20 +2280,56 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     col[M_GRAVEL] *= bare_v;
 
     // ---- Parallax relief within a few meters (pixels under about 3–8 mm).
-    let relief_k = (1.0 - smoothstep(0.003, 0.008, tex_pixel)) * (1.0 - far) * mats.flags.x;
+    let relief_k = (1.0 - smoothstep(0.003, 0.008, tex_pixel)) * (1.0 - far) * mats.flags.x
+        * select(1.0, 0.0, (TERRAIN_OFF & 4u) != 0u);
     var rel_shift = Relief(vec2<f32>(0.0), 0.0);
     if (relief_k > 0.0) {
         rel_shift = relief(w, tp, in.rel, dp1, dp2, relief_k);
     }
     let tp_m = tp + vec3<f32>(rel_shift.offset.x, 0.0, rel_shift.offset.y);
 
-    // ---- Sample the materials present and blend them by height.
+    // ---- Sample the materials present and blend them by height: the three strongest here
+    // (each material's weight less the fourth strongest's, so one fades out as another
+    // overtakes it, with no seam). A fourth, fifth.. at the corners of fields, roads and
+    // forest edges cost as much as the rest and hardly showed.
+    var top = vec4<f32>(0.0);
+    var wsum = 0.0;
+    for (var i = 0u; i < MAT_COUNT; i++) {
+        let v = w[i];
+        wsum += v;
+        if (v > top.w) {
+            if (v > top.x) {
+                top = vec4<f32>(v, top.xyz);
+            } else if (v > top.y) {
+                top = vec4<f32>(top.x, v, top.yz);
+            } else if (v > top.z) {
+                top = vec4<f32>(top.xy, v, top.z);
+            } else {
+                top.w = v;
+            }
+        }
+    }
+    var wt: array<f32, 9>;
+    var wt_sum = 0.0;
+    for (var i = 0u; i < MAT_COUNT; i++) {
+        // (A trace of each keeps a tie among four from leaving none.)
+        wt[i] = max(w[i] - top.w, 0.0) + w[i] * 1e-4;
+        wt_sum += wt[i];
+    }
+    let wt_scale = wsum / max(wt_sum, 1e-4);
+    for (var i = 0u; i < MAT_COUNT; i++) {
+        wt[i] *= wt_scale;
+    }
     var ms: array<MatSample, 9>;
     var bh: array<f32, 9>;
     var hmax = -10.0;
     for (var i = 0u; i < MAT_COUNT; i++) {
-        if (w[i] > 0.003) {
-            ms[i] = sample_ground(i, tp_m, n_geo, dp1, dp2, tex_pixel);
+        if (wt[i] > 0.003) {
+            if ((TERRAIN_OFF & 1u) != 0u) {
+                ms[i] = mat_mean(i, n_geo);
+            } else {
+                ms[i] = sample_ground(i, tp_m, n_geo, dp1, dp2, tex_pixel);
+            }
             // Natural woods from a distance are canopy, not leaf litter: no litter texture
             // there (painted leaves are a level's forest floor and keep theirs).
             if (i == M_FOREST) {
@@ -2331,7 +2387,7 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
             // into the turf: where growing and bare ground meet, the border wanders instead
             // of following the paint.
             let creep = select(-1.0, 1.0, i == M_GRASS || i == M_FOREST);
-            bh[i] = ms[i].height + w[i] + creep * (detail_n - 0.5) * 1.2 * fine_fade;
+            bh[i] = ms[i].height + wt[i] + creep * (detail_n - 0.5) * 1.2 * fine_fade;
             hmax = max(hmax, bh[i]);
         }
     }
@@ -2342,9 +2398,9 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     var ground_h = 0.0;
     var bsum = 0.0;
     for (var i = 0u; i < MAT_COUNT; i++) {
-        if (w[i] > 0.003) {
+        if (wt[i] > 0.003) {
             // From afar a pixel covers a mix of grounds in proportion to their weights.
-            let b = mix(max(bh[i] - hmax + 0.3, 0.0), w[i], far);
+            let b = mix(max(bh[i] - hmax + 0.3, 0.0), wt[i], far);
             albedo += col[i] * ms[i].detail * b;
             nsum += ms[i].normal * b;
             roughness += ms[i].roughness * b;
@@ -2363,6 +2419,9 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     occlusion *= inv_b;
     ground_h *= inv_b;
     var n = normalize(select(n_geo, nsum, bsum > 1e-4));
+    if ((TERRAIN_OFF & 256u) != 0u) {
+        return vec4<f32>(pre_expose(albedo * 0.3), 1.0);
+    }
     // Worn paths: beaten smooth, sunk a few centimeters below the ground beside them (deeper
     // in soft sand), rock polished by the feet.
     if (wear_raw > 0.003) {
@@ -2848,7 +2907,10 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
         planet_lit = smoothstep(-dip - 0.015, -dip + 0.01, dot(up, to_sun));
     }
     planet_lit *= 1.0 - crater_shade;
-    var color = shade_surface_shadowed(s, in.rel, planet_lit);
+    var color = pre_expose(s.albedo);
+    if ((TERRAIN_OFF & 16u) == 0u) {
+        color = shade_surface_shadowed(s, in.rel, planet_lit);
+    }
     let glitter = ocean * (1.0 - foam);
     if (glitter > 0.0 && dot(n, to_sun) > 0.0 && planet_lit > 0.0) {
         let v = normalize(-in.rel);

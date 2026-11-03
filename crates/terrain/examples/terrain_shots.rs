@@ -1550,6 +1550,53 @@ fn main() {
             }
             Err(e) => eprintln!("{}: {e}", view.name),
         }
+        // `GPU_FRAMES=n` (with `ENGINE_PROFILE=1`, which splits the scene pass by feature):
+        // draw n more frames of the same view and print the terrain's mean GPU times.
+        if let Some(n) = std::env::var("GPU_FRAMES")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+        {
+            let keys = [
+                "render.gpu_ms",
+                "render.gpu.prepass",
+                "render.gpu.scene",
+                "render.gpu.scene: terrain",
+                "render.gpu.shadows",
+            ];
+            let mut sums = vec![(0.0, 0usize); keys.len()];
+            for _ in 0..n {
+                app.update();
+                let d = app
+                    .world
+                    .resource::<engine_core::diagnostics::Diagnostics>();
+                for (k, s) in keys.iter().zip(&mut sums) {
+                    if let Some(v) = d.get(k) {
+                        *s = (s.0 + v, s.1 + 1);
+                    }
+                }
+            }
+            let line: Vec<String> = keys
+                .iter()
+                .zip(&sums)
+                .map(|(k, (sum, c))| format!("{k} {:.2}", sum / (*c).max(1) as f64))
+                .collect();
+            println!(
+                "{:<16} GPU ms over {n} frames: {}",
+                view.name,
+                line.join(", ")
+            );
+            let d = app
+                .world
+                .resource::<engine_core::diagnostics::Diagnostics>();
+            let mut passes: Vec<String> = d
+                .metrics
+                .iter()
+                .filter(|(k, _)| k.starts_with("render.gpu."))
+                .map(|(k, v)| format!("{}={v:.2}", &k["render.gpu.".len()..]))
+                .collect();
+            passes.sort();
+            println!("{:<16} last frame: {}", view.name, passes.join(" "));
+        }
         if std::env::var_os("FOREST_MASK").is_some() {
             let mask = out.join(format!("{}_forest.pgm", view.name));
             forest_mask(&app, &ground, (eye, target, up), view.fov, size, &mask);
