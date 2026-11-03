@@ -1,0 +1,56 @@
+﻿Round 21c step 8: cargo run -p engine_render --release --example lighting_cost -- 60 on render/gpu-round 1a80cfa5 (PR #569),
+Tobias's PC (RTX 5080), nothing else running. GPU pass ms, 60 frames averaged per configuration, 1600x900.
+Run 1 is the first run after the build. Its "defaults" row (total 6.12) is GPU warm-up: it ran first, and a second run 9 s
+later gives defaults 3.68. Every other row agrees between the runs within ~0.3 ms. Read run 2's defaults.
+
+=== run 1
+defaults               total    6.12  scene    1.37  prepass   0.09  shadows   0.38  sky occlusion  0.07  probe gi  0.24  world reflections  0.20  volumetric fog  1.32
+    scene                           1.37
+    volumetric fog                  1.32
+    environment                     0.80
+    bounce light                    0.70
+    shadows                         0.38
+    ambient occlusion               0.27
+    probe gi                        0.24
+    reflections                     0.21
+    world reflections               0.20
+    anti-aliasing                   0.19
+    prepass                         0.09
+    bloom                           0.08
+    sky occlusion                   0.07
+    atmosphere                      0.05
+no sky occlusion       total    2.42  scene    0.51  prepass   0.05  shadows   0.21  sky occlusion  0.01  probe gi  0.15  world reflections  0.19  volumetric fog  0.21
+no probe gi            total    3.22  scene    0.84  prepass   0.05  shadows   0.23  sky occlusion  0.04  probe gi  0.00  world reflections  0.00  volumetric fog  0.93
+hard shadows           total    3.66  scene    0.94  prepass   0.05  shadows   0.22  sky occlusion  0.04  probe gi  0.15  world reflections  0.20  volumetric fog  0.93
+no sun shadows         total    3.65  scene    0.93  prepass   0.05  shadows   0.21  sky occlusion  0.04  probe gi  0.17  world reflections  0.21  volumetric fog  0.94
+no screen-space gi     total    3.23  scene    0.95  prepass   0.05  shadows   0.24  sky occlusion  0.04  probe gi  0.14  world reflections  0.22  volumetric fog  0.93
+no reflections         total    3.33  scene    0.93  prepass   0.05  shadows   0.21  sky occlusion  0.04  probe gi  0.14  world reflections  0.00  volumetric fog  0.97
+no volumetric fog      total    2.65  scene    0.91  prepass   0.05  shadows   0.21  sky occlusion  0.04  probe gi  0.14  world reflections  0.18  volumetric fog  0.00
+no ambient occlusion   total    3.46  scene    0.93  prepass   0.05  shadows   0.22  sky occlusion  0.04  probe gi  0.17  world reflections  0.19  volumetric fog  0.93
+render scale 0.75      total    2.48  scene    0.56  prepass   0.04  shadows   0.21  sky occlusion  0.04  probe gi  0.15  world reflections  0.18  volumetric fog  0.57
+
+=== run 2 (defaults row re-measured warm)
+defaults               total    3.68  scene    0.93  prepass   0.05  shadows   0.22  sky occlusion  0.04  probe gi  0.19  world reflections  0.18  volumetric fog  0.95
+    volumetric fog                  0.95
+    scene                           0.93
+    bounce light                    0.45
+    ambient occlusion               0.24
+    shadows                         0.22
+    probe gi                        0.19
+    world reflections               0.18
+    reflections                     0.13
+    environment                     0.07
+    anti-aliasing                   0.07
+    prepass                         0.05
+    bloom                           0.04
+    sky occlusion                   0.04
+    tonemap                         0.04
+no sky occlusion       total    2.51  scene    0.50  prepass   0.05  shadows   0.22  sky occlusion  0.01  probe gi  0.17  world reflections  0.18  volumetric fog  0.21
+no probe gi            total    3.22  scene    0.84  prepass   0.05  shadows   0.22  sky occlusion  0.04  probe gi  0.00  world reflections  0.00  volumetric fog  0.93
+hard shadows           total    3.92  scene    0.93  prepass   0.05  shadows   0.29  sky occlusion  0.04  probe gi  0.27  world reflections  0.22  volumetric fog  0.93
+no sun shadows         total    3.66  scene    0.93  prepass   0.05  shadows   0.22  sky occlusion  0.04  probe gi  0.17  world reflections  0.19  volumetric fog  0.92
+no screen-space gi     total    3.20  scene    0.92  prepass   0.05  shadows   0.21  sky occlusion  0.04  probe gi  0.19  world reflections  0.18  volumetric fog  0.94
+no reflections         total    3.38  scene    0.93  prepass   0.05  shadows   0.22  sky occlusion  0.04  probe gi  0.17  world reflections  0.00  volumetric fog  0.93
+no volumetric fog      total    2.70  scene    0.92  prepass   0.05  shadows   0.21  sky occlusion  0.04  probe gi  0.17  world reflections  0.18  volumetric fog  0.00
+no ambient occlusion   total    3.45  scene    0.93  prepass   0.05  shadows   0.21  sky occlusion  0.04  probe gi  0.20  world reflections  0.20  volumetric fog  0.95
+render scale 0.75      total    2.49  scene    0.56  prepass   0.04  shadows   0.21  sky occlusion  0.04  probe gi  0.16  world reflections  0.19  volumetric fog  0.57
