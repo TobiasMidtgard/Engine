@@ -1,0 +1,30 @@
+06:09:23.460Z     0.04  mode tour quality ultra size '' spec 'overview,plaza,forest,lake,fortress,field'; idle before start 98,661 s; HEAD 1810b539
+06:09:24.101Z     0.68  started: showcase.exe --tour overview,plaza,forest,lake,fortress,field --profile --quality ultra  env SHOWCASE_CENSUS=census.md
+06:09:29.026Z     5.60  window visible: client 1600x900, window 1616x939 at (130,130), maximized False
+06:09:29.056Z     5.63  bridge connected
+06:09:29.547Z     6.13  world built
+06:09:30.018Z     6.60  after build: working set 2,515 MB, private 2,743 MB; system free 34,643 of 65,277 MB
+06:09:35.286Z    11.87  log: tour 1/6: The valley
+06:09:40.535Z    17.11  mem: working set 3,402 MB, private 5,531 MB; system free 33,567 of 65,277 MB
+06:09:45.049Z    21.63  log:   waited 7 s for meshes' clusters, terrain patches and foliage (0 not ready)
+06:09:45.051Z    21.63  log:   exposure EV100 13.0 (metered 14.5)
+06:09:45.060Z    21.64  log: tour 2/6: The market square and the village
+06:09:47.648Z    24.23  log:   waited 2 s for meshes' clusters, terrain patches and foliage (0 not ready)
+06:09:47.912Z    24.49  log:   exposure EV100 13.4 (metered 14.9)
+06:09:48.179Z    24.76  log: tour 3/6: Living forest
+06:09:49.236Z    25.81  log:   waited 1 s for meshes' clusters, terrain patches and foliage (0 not ready)
+06:09:49.501Z    26.08  log:   exposure EV100 11.3 (metered 12.8)
+06:09:49.503Z    26.08  log: tour 4/6: Lake
+06:09:51.048Z    27.63  mem: working set 3,239 MB, private 8,692 MB; system free 33,756 of 65,277 MB
+06:09:51.579Z    28.16  log:   waited 2 s for meshes' clusters, terrain patches and foliage (0 not ready)
+06:09:51.849Z    28.43  log:   exposure EV100 13.5 (metered 15.0)
+06:09:52.113Z    28.69  log: tour 5/6: Siege fortress on its hill
+06:09:58.450Z    35.03  log:   waited 6 s for meshes' clusters, terrain patches and foliage (0 not ready)
+06:09:58.713Z    35.29  log:   exposure EV100 12.1 (metered 13.6)
+06:09:58.715Z    35.29  log: tour 6/6: Grass field
+06:10:00.304Z    36.88  log:   waited 1 s for meshes' clusters, terrain patches and foliage (0 not ready)
+06:10:01.089Z    37.67  log:   exposure EV100 12.9 (metered 14.4)
+06:10:01.336Z    37.91  mem: working set 1,276 MB, private 2,129 MB; system free 36,430 of 65,277 MB
+06:10:01.644Z    38.22  sampler job: Completed
+06:10:01.651Z    38.23  game exited by itself, code 0
+06:10:44.542Z    81.12  done
