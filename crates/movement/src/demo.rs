@@ -45,7 +45,9 @@ use engine_core::time::LocalTimeScale;
 use engine_render::{Camera, MeshRenderer, StandardMaterial};
 use engine_world::animation::AnimationParams;
 use engine_world::locomotion::{Climbable, LocomotionMode, MoveIntent};
-use engine_world::physics::{CharacterController, Collider, PhysicsBackend, RigidBody, Velocity};
+use engine_world::physics::{
+    CharacterController, Collider, PhysicsBackend, PhysicsQueries, QueryFilter, RigidBody, Velocity,
+};
 use engine_world::{AttackEvent, AttackKind};
 
 use crate::afterimage::Afterimages;
@@ -456,6 +458,8 @@ pub struct Puppet {
     was_defeated: bool,
     /// The left hand as last posed (character space, feet at the capsule's bottom).
     hand_l: Xf,
+    /// The ankles as last posed (same space): where the feet probe the ground next.
+    ankles: [Vec3; 2],
 }
 
 impl Puppet {
@@ -466,6 +470,12 @@ impl Puppet {
     /// The left hand as last posed, relative to the character's transform.
     pub fn hand_l(&self) -> Xf {
         self.hand_l
+    }
+
+    /// The ankles as last posed (left, right), relative to the capsule's bottom in the
+    /// character's frame.
+    pub fn ankles(&self) -> [Vec3; 2] {
+        self.ankles
     }
 }
 
@@ -500,7 +510,7 @@ fn at(origin: DVec3, x: f64, y: f64, z: f64) -> DVec3 {
     origin + DVec3::new(x, y, z)
 }
 
-pub(crate) fn spawn_character(
+pub fn spawn_character(
     commands: &mut Commands,
     name: &str,
     pos: DVec3,
@@ -533,6 +543,7 @@ pub(crate) fn spawn_character(
         anim: Animator::new(style),
         was_defeated: false,
         hand_l: Xf::IDENTITY,
+        ankles: rig::Pose::BIND.ankle,
     });
     id
 }
@@ -2210,6 +2221,7 @@ fn think_attackers(
 fn animate_puppets(
     time: Res<Time>,
     mut puppets: Query<(
+        Entity,
         &mut Puppet,
         &Transform,
         &Mover,
@@ -2220,15 +2232,24 @@ fn animate_puppets(
         Option<&LocalTimeScale>,
     )>,
     mut bones: Query<&mut Transform, (With<PuppetPart>, Without<Puppet>)>,
+    queries: Res<PhysicsQueries>,
+    mut filter: Local<QueryFilter>,
 ) {
-    for (mut p, t, m, cc, cs, f, params, local) in &mut puppets {
+    for (entity, mut p, t, m, cc, cs, f, params, local) in &mut puppets {
         let defeated = cs.is_some_and(|c| c.defeated);
         if p.was_defeated && !defeated {
             // Revived: stand straight up instead of getting up through the blend.
             p.anim.reset();
         }
         p.was_defeated = defeated;
-        let input = anim_input(time.delta_for(local), t, m, cc, cs, f, params);
+        let mut input = anim_input(time.delta_for(local), t, m, cc, cs, f, params);
+        if m.grounded {
+            filter.exclude.clear();
+            filter.exclude.push(entity);
+            input.ground = p
+                .ankles
+                .map(|a| ground_under_foot(&queries, &filter, t, cc, a));
+        }
         let pose = p.anim.update(&input);
         let solved = rig::solve(&pose);
         let lift = -cc.height * 0.5;
@@ -2239,7 +2260,37 @@ fn animate_puppets(
         }
         let hand = solved[Bone::HandL.index()];
         p.hand_l = Xf::new(hand.pos + Vec3::Y * lift, hand.rot);
+        p.ankles = [
+            solved[Bone::FootL.index()].pos,
+            solved[Bone::FootR.index()].pos,
+        ];
     }
+}
+
+/// Above the capsule's bottom the ground probe under a foot starts, and how far below it
+/// looks, m.
+const FOOT_PROBE_UP: f32 = 0.55;
+const FOOT_PROBE_DOWN: f32 = 0.5;
+
+/// The ground under the ankle `ankle` (character space, the capsule's bottom at the origin),
+/// for the rig's foot placement: one ray straight down past the foot through the physics
+/// contract (terrain, colliders), walkable ground only.
+fn ground_under_foot(
+    queries: &PhysicsQueries,
+    filter: &QueryFilter,
+    t: &Transform,
+    cc: &CharacterController,
+    ankle: Vec3,
+) -> Option<rig::FootGround> {
+    let up = t.rotation * Vec3::Y;
+    let feet = t.translation - (up * (cc.height * 0.5)).as_dvec3();
+    let over = Vec3::new(ankle.x, FOOT_PROBE_UP, ankle.z);
+    let from = feet + (t.rotation * over).as_dvec3();
+    let hit = queries.raycast(from, -up, FOOT_PROBE_UP + FOOT_PROBE_DOWN, filter)?;
+    (hit.normal.dot(up) > 0.6).then(|| rig::FootGround {
+        height: FOOT_PROBE_UP - hit.distance,
+        normal: t.rotation.inverse() * hit.normal,
+    })
 }
 
 /// What the animation needs to know, in character space (feet at the origin, facing −Z).
@@ -2320,5 +2371,6 @@ fn anim_input(
         defeated: cs.is_some_and(|c| c.defeated),
         fighter: f.is_some(),
         effort: params.map_or(0.2, |p| p.get("effort")),
+        ground: [None; 2],
     }
 }

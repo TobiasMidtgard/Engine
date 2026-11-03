@@ -184,6 +184,7 @@ impl Plugin for MovementPlugin {
                     camera::follow_pilots.in_set(UpdateSet::Camera),
                     fx::camera_fx.after(UpdateSet::Camera),
                     lockon::place_markers.after(UpdateSet::Camera),
+                    look::effects::drive_effect_lights,
                 ),
             )
             .add_systems(PostUpdate, play::capture_mouse)
