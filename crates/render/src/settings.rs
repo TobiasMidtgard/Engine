@@ -337,6 +337,10 @@ pub struct RenderSettings {
     /// atmosphere march and 8 haze shadow samples. Off: every pixel marches.
     /// `ENGINE_AERIAL_TABLE=on|off` overrides it.
     pub aerial_table: bool,
+    /// Occlusion culling of the camera's instanced meshes on the GPU (`mesh_cull.rs`, two
+    /// phases against the depth: what hills, walls and trees hide isn't drawn, the picture is
+    /// the same). Needs `multi_draw_indirect`. `ENGINE_MESH_OCCLUSION=on|off` overrides it.
+    pub mesh_occlusion_culling: bool,
     /// The sky's own flat cloud layer (a 2D deck 1.5 km up whose cover follows
     /// `WeatherState::cloud_cover`), in the sky and in the environment map that lights the
     /// scene. Turn it off when a feature draws its own clouds over the sky (volumetric clouds):
@@ -530,6 +534,7 @@ impl Default for RenderSettings {
             environment_interval: 4,
             mirror_shares_lighting: true,
             aerial_table: true,
+            mesh_occlusion_culling: true,
             sky_cloud_layer: true,
             sky_occlusion: true,
             sky_occlusion_extent: 256.0,
@@ -591,6 +596,10 @@ pub(crate) fn effective(world: &World) -> RenderSettings {
     if let Some(on) = switch_from_env("ENGINE_AERIAL_TABLE", &AERIAL) {
         s.aerial_table = on;
     }
+    static OCCLUSION: std::sync::OnceLock<Option<bool>> = std::sync::OnceLock::new();
+    if let Some(on) = switch_from_env("ENGINE_MESH_OCCLUSION", &OCCLUSION) {
+        s.mesh_occlusion_culling = on;
+    }
     // `ENGINE_RENDER_SCALE=<0.25..2>` multiplies the internal resolution: a pass whose GPU time
     // halves at 0.7 pays per pixel, one that doesn't per vertex or per dispatch.
     static SCALE: std::sync::OnceLock<Option<f32>> = std::sync::OnceLock::new();
@@ -614,7 +623,8 @@ pub(crate) fn effective(world: &World) -> RenderSettings {
 /// `<name>=on|off`, when set, overrides a setting (to compare the two on one build, in any
 /// game): `ENGINE_PROBE_GI` (`RenderSettings::probe_gi`), `ENGINE_MIRROR_SHARES_LIGHTING`
 /// (`RenderSettings::mirror_shares_lighting`), `ENGINE_AERIAL_TABLE`
-/// (`RenderSettings::aerial_table`). Read once.
+/// (`RenderSettings::aerial_table`), `ENGINE_MESH_OCCLUSION`
+/// (`RenderSettings::mesh_occlusion_culling`). Read once.
 fn switch_from_env(name: &str, cell: &'static std::sync::OnceLock<Option<bool>>) -> Option<bool> {
     *cell.get_or_init(
         || match std::env::var(name).ok()?.to_ascii_lowercase().as_str() {
