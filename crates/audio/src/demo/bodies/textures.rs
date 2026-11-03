@@ -353,37 +353,92 @@ pub struct Textures {
     pub hair_cards: Option<Handle<Image>>,
 }
 
+/// A texture's asset key and the recipe that paints it.
+type Recipe = (&'static str, fn() -> Image);
+
+/// Every texture's asset key and recipe, in [`Textures`] field order.
+static RECIPES: [Recipe; 15] = [
+    ("audio/trail/ripstop", || weave(32, 8).normals(1.5)),
+    ("audio/trail/cordura", || weave(24, 0).normals(2.0)),
+    ("audio/trail/twill", || twill().normals(1.2)),
+    ("audio/trail/knit", || knit().normals(3.0)),
+    ("audio/trail/fur", || {
+        strands(900, 0.35, 1.3, 41).normals(2.5)
+    }),
+    ("audio/trail/fur_albedo", || {
+        strands(900, 0.35, 1.3, 41).albedo(0.62)
+    }),
+    ("audio/trail/coat", || coat_hair(43).normals(1.4)),
+    ("audio/trail/coat_albedo", || coat_hair(43).albedo(0.84)),
+    ("audio/trail/hair", || {
+        strands(1200, 0.6, 1.0, 47).normals(2.5)
+    }),
+    ("audio/trail/hair_albedo", || {
+        strands(1200, 0.6, 1.0, 47).albedo(0.55)
+    }),
+    ("audio/trail/leather", || leather().normals(1.2)),
+    ("audio/trail/sport_mesh", || sport_mesh().normals(1.5)),
+    ("audio/trail/skin", || skin().normals(0.6)),
+    ("audio/trail/locks", || locks(14, 3.0, 51)),
+    ("audio/trail/hair_cards", || hair_strands(700, 53)),
+];
+
 impl Textures {
     /// Make (or reuse) every texture.
     pub fn get(world: &mut World) -> Self {
         let Some(mut images) = world.get_resource_mut::<Assets<Image>>() else {
             return Self::default();
         };
-        let mut make = |key: &str, f: &dyn Fn() -> Image| Some(images.get_or_insert_keyed(key, f));
+        let mut h = RECIPES
+            .iter()
+            .map(|(key, make)| Some(images.get_or_insert_keyed(key, make)));
+        let mut next = || h.next().flatten();
         Self {
-            ripstop: make("audio/trail/ripstop", &|| weave(32, 8).normals(1.5)),
-            cordura: make("audio/trail/cordura", &|| weave(24, 0).normals(2.0)),
-            twill: make("audio/trail/twill", &|| twill().normals(1.2)),
-            knit: make("audio/trail/knit", &|| knit().normals(3.0)),
-            fur: make("audio/trail/fur", &|| {
-                strands(900, 0.35, 1.3, 41).normals(2.5)
-            }),
-            fur_albedo: make("audio/trail/fur_albedo", &|| {
-                strands(900, 0.35, 1.3, 41).albedo(0.62)
-            }),
-            coat: make("audio/trail/coat", &|| coat_hair(43).normals(1.4)),
-            coat_albedo: make("audio/trail/coat_albedo", &|| coat_hair(43).albedo(0.84)),
-            hair: make("audio/trail/hair", &|| {
-                strands(1200, 0.6, 1.0, 47).normals(2.5)
-            }),
-            hair_albedo: make("audio/trail/hair_albedo", &|| {
-                strands(1200, 0.6, 1.0, 47).albedo(0.55)
-            }),
-            leather: make("audio/trail/leather", &|| leather().normals(1.2)),
-            sport: make("audio/trail/sport_mesh", &|| sport_mesh().normals(1.5)),
-            skin: make("audio/trail/skin", &|| skin().normals(0.6)),
-            locks: make("audio/trail/locks", &|| locks(14, 3.0, 51)),
-            hair_cards: make("audio/trail/hair_cards", &|| hair_strands(700, 53)),
+            ripstop: next(),
+            cordura: next(),
+            twill: next(),
+            knit: next(),
+            fur: next(),
+            fur_albedo: next(),
+            coat: next(),
+            coat_albedo: next(),
+            hair: next(),
+            hair_albedo: next(),
+            leather: next(),
+            sport: next(),
+            skin: next(),
+            locks: next(),
+            hair_cards: next(),
+        }
+    }
+
+    /// The asset keys of the textures `world` doesn't have yet.
+    pub fn missing(world: &World) -> Vec<&'static str> {
+        let Some(images) = world.get_resource::<Assets<Image>>() else {
+            return Vec::new();
+        };
+        RECIPES
+            .iter()
+            .filter(|(key, _)| images.by_key(key).is_none())
+            .map(|(key, _)| *key)
+            .collect()
+    }
+
+    /// Make the textures under `keys` without the world (on a worker), for [`Self::install`].
+    pub fn bake(keys: &[&'static str]) -> Vec<(&'static str, Image)> {
+        RECIPES
+            .iter()
+            .filter(|(key, _)| keys.contains(key))
+            .map(|(key, make)| (*key, make()))
+            .collect()
+    }
+
+    /// Add baked textures the world doesn't have yet.
+    pub fn install(world: &mut World, baked: Vec<(&'static str, Image)>) {
+        if let Some(mut images) = world.get_resource_mut::<Assets<Image>>() {
+            for (key, image) in baked {
+                images.get_or_insert_keyed(key, || image);
+            }
         }
     }
 }

@@ -53,6 +53,9 @@ fn pool_sizes(cores: usize) -> (usize, usize) {
 }
 
 /// Run `f(chunk_index, chunk)` over `data` split into `chunk_size` pieces on the compute pool.
+///
+/// Called from an async worker (an [`off_frame`] build), the chunks run on the async pool
+/// instead, so a background build never takes the compute threads the frame's systems need.
 pub fn par_chunks_mut<T: Send>(
     data: &mut [T],
     chunk_size: usize,
@@ -64,7 +67,14 @@ pub fn par_chunks_mut<T: Send>(
         return;
     }
     let f = &f;
-    ComputeTaskPool::get().scope(|scope| {
+    let on_async = std::thread::current()
+        .name()
+        .is_some_and(|n| n.starts_with("async"));
+    let pool: &TaskPool = match on_async.then(AsyncComputeTaskPool::try_get).flatten() {
+        Some(pool) => pool,
+        None => ComputeTaskPool::get(),
+    };
+    pool.scope(|scope| {
         for (i, chunk) in data.chunks_mut(chunk_size).enumerate() {
             scope.spawn(async move { f(i, chunk) });
         }
@@ -218,6 +228,26 @@ mod tests {
         assert_eq!(pool_sizes(4), (2, 1));
         assert_eq!(pool_sizes(8), (6, 2));
         assert_eq!(pool_sizes(32), (30, 4));
+    }
+
+    #[test]
+    fn par_chunks_from_an_async_worker_stay_off_the_compute_pool() {
+        init_task_pools();
+        let names = AsyncComputeTaskPool::get().spawn(async {
+            let caller = std::thread::current().name().map(str::to_owned);
+            let mut seen: Vec<Option<String>> = vec![None; 16];
+            par_chunks_mut(&mut seen, 1, |_, s| {
+                std::thread::sleep(std::time::Duration::from_millis(2));
+                s[0] = std::thread::current().name().map(str::to_owned);
+            });
+            (caller, seen)
+        });
+        let (caller, seen) = bevy_tasks::block_on(names);
+        if caller.is_some_and(|n| n.starts_with("async")) {
+            for name in seen.into_iter().flatten() {
+                assert!(!name.starts_with("compute"), "chunk ran on {name}");
+            }
+        }
     }
     use std::sync::atomic::{AtomicUsize, Ordering};
 

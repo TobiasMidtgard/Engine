@@ -18,6 +18,7 @@
 
 use engine_assets::{Assets, Handle};
 use engine_core::math::{DVec3, Quat, Vec3};
+use engine_core::off_frame::off_frame;
 use engine_core::prelude::*;
 use engine_core::tasks::par_chunks_mut;
 use engine_render::{
@@ -234,65 +235,129 @@ pub(super) fn spawn(commands: &mut Commands, origin: DVec3) {
         if !renders {
             return;
         }
-        if !world.contains_resource::<TrailGroundCache>() {
-            let cache = build(world);
-            world.insert_resource(cache);
+        if world.contains_resource::<TrailGroundCache>() {
+            place(world, origin);
+            return;
         }
-        let cache = world.resource::<TrailGroundCache>().clone();
-        world.spawn_batch(cache.items.into_iter().map(
-            move |(mesh, material, at, rot, scale, shadows)| {
-                (
-                    Transform::from_translation(origin + at.as_dvec3())
-                        .with_rotation(rot)
-                        .with_scale(scale),
-                    MeshRenderer {
-                        mesh: MeshRef::Handle(mesh),
-                        material: MaterialRef::Handle(material),
-                        cast_shadows: shadows,
-                        visible: true,
-                    },
-                )
-            },
-        ));
-        for (at, light) in cache.lights {
-            world.spawn((
-                Name::new("Underpass lamp"),
-                light,
-                Transform::from_translation(origin + at.as_dvec3()),
-            ));
-        }
-        if let Some(grass) = cache.grass {
-            world.spawn((
-                Name::new("Trail verge grass"),
-                grass,
+        // Paint and build on a worker; an anchor stands at the origin meanwhile, so a world
+        // shift during the build moves the trail's ground with everything else.
+        let anchor = world
+            .spawn((
                 Transform::from_translation(origin),
-            ));
-        }
+                Name::new("Trail ground (building)"),
+            ))
+            .id();
+        let missing = missing_textures(world);
+        off_frame(
+            world,
+            "audio trail ground",
+            move || make(&missing),
+            move |world, made| {
+                let Some(at) = world.get::<Transform>(anchor).map(|t| t.translation) else {
+                    return;
+                };
+                world.despawn(anchor);
+                if !world.contains_resource::<TrailGroundCache>() {
+                    let cache = register(world, made);
+                    world.insert_resource(cache);
+                }
+                place(world, at);
+            },
+        );
     });
 }
 
-/// Paint the textures and build every mesh (both in parallel), then register them.
-fn build(world: &mut World) -> TrailGroundCache {
-    // Textures, biggest first so the threads finish together.
-    let mut slots: Vec<(usize, Option<procgen::TexSet>)> =
-        (0..textures::RECIPES.len()).map(|i| (i, None)).collect();
-    {
-        let images = world.resource::<Assets<Image>>();
-        for slot in &mut slots {
-            let key = textures::RECIPES[slot.0].0;
-            if images.by_key(&format!("trail:{key}:albedo")).is_some() {
-                slot.0 = usize::MAX;
-            }
-        }
+/// Spawn the cached ground round `origin`.
+fn place(world: &mut World, origin: DVec3) {
+    let cache = world.resource::<TrailGroundCache>().clone();
+    world.spawn_batch(cache.items.into_iter().map(
+        move |(mesh, material, at, rot, scale, shadows)| {
+            (
+                Transform::from_translation(origin + at.as_dvec3())
+                    .with_rotation(rot)
+                    .with_scale(scale),
+                MeshRenderer {
+                    mesh: MeshRef::Handle(mesh),
+                    material: MaterialRef::Handle(material),
+                    cast_shadows: shadows,
+                    visible: true,
+                },
+            )
+        },
+    ));
+    for (at, light) in cache.lights {
+        world.spawn((
+            Name::new("Underpass lamp"),
+            light,
+            Transform::from_translation(origin + at.as_dvec3()),
+        ));
     }
-    slots.retain(|s| s.0 != usize::MAX);
+    if let Some(grass) = cache.grass {
+        world.spawn((
+            Name::new("Trail verge grass"),
+            grass,
+            Transform::from_translation(origin),
+        ));
+    }
+}
+
+/// The ground's textures, meshes and meadow, made without the world (on a worker).
+struct Made {
+    sets: Vec<(usize, procgen::TexSet)>,
+    out: Out,
+    grass: engine_render::GrassField,
+}
+
+/// The texture recipes whose images aren't in the world yet.
+fn missing_textures(world: &World) -> Vec<usize> {
+    let images = world.resource::<Assets<Image>>();
+    (0..textures::RECIPES.len())
+        .filter(|&i| {
+            let key = textures::RECIPES[i].0;
+            images.by_key(&format!("trail:{key}:albedo")).is_none()
+        })
+        .collect()
+}
+
+/// Paint the `missing` textures and build every mesh, both in parallel.
+fn make(missing: &[usize]) -> Made {
+    let mut slots: Vec<(usize, Option<procgen::TexSet>)> =
+        missing.iter().map(|&i| (i, None)).collect();
     par_chunks_mut(&mut slots, 1, |_, s| {
         s[0].1 = Some((textures::RECIPES[s[0].0].1)());
     });
+    let jobs = dress::jobs();
+    let mut results: Vec<(usize, Option<Out>)> = (0..jobs.len()).map(|i| (i, None)).collect();
+    par_chunks_mut(&mut results, 1, |_, r| {
+        r[0].1 = Some((jobs[r[0].0])());
+    });
+    let mut out = Out::default();
+    for (_, o) in results {
+        if let Some(o) = o {
+            out.add(o);
+        }
+    }
+    Made {
+        sets: slots
+            .into_iter()
+            .filter_map(|(i, set)| set.map(|set| (i, set)))
+            .collect(),
+        out,
+        grass: dress::meadow(),
+    }
+}
+
+/// Register what [`make`] made (images, meshes, materials) and resolve every part to handles.
+fn register(world: &mut World, made: Made) -> TrailGroundCache {
+    let Made {
+        sets,
+        out: all,
+        grass,
+    } = made;
     let mut images = world.resource_mut::<Assets<Image>>();
-    for (i, set) in slots {
+    for (i, set) in sets {
         let key = textures::RECIPES[i].0;
-        if let Some(set) = set {
+        if images.by_key(&format!("trail:{key}:albedo")).is_none() {
             images.insert_keyed(&format!("trail:{key}:albedo"), set.albedo);
             images.insert_keyed(&format!("trail:{key}:normal"), set.normal);
             images.insert_keyed(&format!("trail:{key}:orm"), set.orm);
@@ -306,19 +371,6 @@ fn build(world: &mut World) -> TrailGroundCache {
     let mut cache_tex = std::collections::HashMap::new();
     for (name, _) in textures::RECIPES {
         cache_tex.insert(*name, tex(name));
-    }
-
-    // Meshes.
-    let jobs = dress::jobs();
-    let mut results: Vec<(usize, Option<Out>)> = (0..jobs.len()).map(|i| (i, None)).collect();
-    par_chunks_mut(&mut results, 1, |_, r| {
-        r[0].1 = Some((jobs[r[0].0])());
-    });
-    let mut all = Out::default();
-    for (_, out) in results {
-        if let Some(out) = out {
-            all.add(out);
-        }
     }
 
     let mut meshes = world.resource_mut::<Assets<Mesh>>();
@@ -357,7 +409,7 @@ fn build(world: &mut World) -> TrailGroundCache {
     TrailGroundCache {
         items,
         lights: all.lights,
-        grass: Some(dress::meadow()),
+        grass: Some(grass),
     }
 }
 

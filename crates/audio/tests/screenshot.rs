@@ -45,7 +45,10 @@ fn the_trail_renders() {
             Transform::from_xyz(0.0, 34.0, 30.0).looking_at(DVec3::ZERO, Vec3::Y),
         ));
     });
-    app.update_n(20);
+    app.update_n(2);
+    // The trail's art builds on workers: wait for all of it, then let it settle.
+    engine_core::off_frame::finish(&mut app.world, None);
+    app.update_n(18);
     if let Some(d) = app.world.get_resource::<RenderDisabled>() {
         eprintln!("skipping: no GPU ({})", d.0);
         return;
