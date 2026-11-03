@@ -368,6 +368,11 @@ showcase too). The scene pass shades only the prepass's pixels (an equal depth t
 writes, no `discard`); `TERRAIN_DEPTH=greater` draws it the old way for comparison. Patches go
 out front to back, one `multi_draw_indexed_indirect` per vertex page and pass where the GPU
 supports it (`RenderSettings::multi_draw_indirect`).
+Extra views (a lake's mirror, a portal) draw the ground with a lighter variant of the same
+shader (`EXTRA_VIEW_OFF` in render.rs: material means instead of textures, no parallax, no
+rock's larger scales; about 11% of the ground's pixel cost at `lake_shore` on lavapipe):
+reflections are half resolution and rippled, as Unreal's reflection captures and HDRP's
+planar probes strip features.
 
 The ground's CPU cost per frame is in `Diagnostics` as `render.cpu.terrain: <part>` (maps,
 materials, far looks, uploads, then per planet `patches: select`, `look-ahead`, `far shadow`,

@@ -49,6 +49,12 @@ const UPLOAD_BUDGET_MS: f64 = 1.5;
 const MIN_UPLOADS_PER_FRAME: usize = 8;
 /// Patches a planet keeps queued for the workers at most (the most urgent).
 const MAX_QUEUED: usize = 256;
+
+/// The `TERRAIN_OFF` parts extra views leave out (a lake's mirror is drawn at half resolution
+/// and rippled; Unreal's reflection captures and HDRP's planar probes strip the same way):
+/// 1 material textures (each material's mean color and roughness instead: about a ninth of
+/// the ground's pixel cost at the lake shore), 2 rock's larger scales, 4 parallax relief.
+const EXTRA_VIEW_OFF: u32 = 1 | 2 | 4;
 /// A drawn patch's children replace it at `split_factor` patch sizes; it takes over from
 /// them again only past this many times that, so the detail doesn't flicker back and forth
 /// at the boundary (or a patch budget easing up and down).
@@ -231,6 +237,9 @@ fn contact_code(k: engine_world::ContactKind) -> f32 {
 
 struct Gpu {
     pipeline: wgpu::RenderPipeline,
+    /// The scene pass for extra views (a lake's mirror, a portal): without the parts a
+    /// half-resolution, rippled picture can't show ([`EXTRA_VIEW_OFF`]).
+    extra_view_pipeline: wgpu::RenderPipeline,
     /// Depth, normals and motion for ambient occlusion, contact shadows and anti-aliasing.
     prepass_pipeline: wgpu::RenderPipeline,
     shadow_pipeline: wgpu::RenderPipeline,
@@ -1528,10 +1537,6 @@ impl RenderFeature for TerrainFeature {
             .and_then(|v| v.parse::<u32>().ok())
             .unwrap_or(0) as f64;
         let greater = std::env::var("TERRAIN_DEPTH").is_ok_and(|v| v == "greater");
-        let constants = [
-            ("TERRAIN_OFF", off),
-            ("MIRROR_CLIP", if greater { 1.0 } else { 0.0 }),
-        ];
         let main_depth = if greater {
             gpu.depth_state(true)
         } else {
@@ -1541,37 +1546,46 @@ impl RenderFeature for TerrainFeature {
                 ..gpu.depth_state(false)
             }
         };
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("terrain"),
-            layout: Some(&pl),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_main"),
-                compilation_options: Default::default(),
-                buffers: &buffers,
-            },
-            primitive: wgpu::PrimitiveState {
-                cull_mode: Some(wgpu::Face::Back),
-                ..Default::default()
-            },
-            depth_stencil: Some(main_depth),
-            multisample: Default::default(),
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_main"),
-                compilation_options: wgpu::PipelineCompilationOptions {
-                    constants: &constants,
+        let scene_pipeline = |label: &str, off: f64| {
+            let constants = [
+                ("TERRAIN_OFF", off),
+                ("MIRROR_CLIP", if greater { 1.0 } else { 0.0 }),
+            ];
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some(label),
+                layout: Some(&pl),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("vs_main"),
+                    compilation_options: Default::default(),
+                    buffers: &buffers,
+                },
+                primitive: wgpu::PrimitiveState {
+                    cull_mode: Some(wgpu::Face::Back),
                     ..Default::default()
                 },
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: gpu.formats.hdr,
-                    blend: None,
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            multiview_mask: None,
-            cache: None,
-        });
+                depth_stencil: Some(main_depth.clone()),
+                multisample: Default::default(),
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some("fs_main"),
+                    compilation_options: wgpu::PipelineCompilationOptions {
+                        constants: &constants,
+                        ..Default::default()
+                    },
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: gpu.formats.hdr,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                multiview_mask: None,
+                cache: None,
+            })
+        };
+        let pipeline = scene_pipeline("terrain", off);
+        let extra_view_pipeline =
+            scene_pipeline("terrain extra view", (off as u32 | EXTRA_VIEW_OFF) as f64);
         // Same vertices as the scene pass (the clip position is invariant), so its depth test
         // passes exactly where the prepass drew.
         let prepass_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -1744,6 +1758,7 @@ impl RenderFeature for TerrainFeature {
         });
         self.gpu = Some(Gpu {
             pipeline,
+            extra_view_pipeline,
             prepass_pipeline,
             shadow_pipeline,
             water_pipeline,
@@ -2388,10 +2403,16 @@ impl RenderFeature for TerrainFeature {
         steps.publish(world);
     }
 
-    fn draw(&self, phase: RenderPhase, pass: &mut wgpu::RenderPass<'_>, _ctx: &FrameContext) {
+    fn draw(&self, phase: RenderPhase, pass: &mut wgpu::RenderPass<'_>, ctx: &FrameContext) {
         let (pipeline, list, draws, indices) = match phase {
             RenderPhase::Opaque => (
-                self.gpu.as_ref().map(|g| &g.pipeline),
+                self.gpu.as_ref().map(|g| {
+                    if ctx.view.extra_view {
+                        &g.extra_view_pipeline
+                    } else {
+                        &g.pipeline
+                    }
+                }),
                 DrawList::Scene,
                 &self.draws,
                 None,
