@@ -23,7 +23,7 @@ fn app() -> App {
     app.world.resource_mut::<FixedTime>().set_hz(60.0);
     // The step budget's levels follow wall time, so tests run side by side on a busy machine
     // would settle differently from run to run (a rock still rocking when the rockfall was
-    // checked): off here, as the yard bench and `budget.rs`'s own test measure it.
+    // checked): off here (as by default), whatever the default becomes.
     app.world
         .resource_mut::<engine_physics::PhysicsSettings>()
         .step_budget_ms = None;

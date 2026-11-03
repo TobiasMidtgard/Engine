@@ -23,6 +23,11 @@
 //! jittered awake and stepped twice as slowly, and launched a body at 100 m/s. A level is taken
 //! after the step's smoothed time stays over budget, and given back after it stays well under
 //! for two seconds, so a level doesn't flicker; `PhysicsStats::load_level` shows it.
+//!
+//! Off by default (round 21c, RTX 5080 PC): the yard's busiest step is near 4 ms there, and
+//! runs that sat at levels 1-3 spent 10-12 ms a frame in physics against 2 ms at level 0. Those
+//! levels were taken on the step's span, which held the frame's other systems running beside
+//! it; the budget now reads the step's own work (`PhysicsStats::step_ms`).
 
 /// Highest level.
 pub const MAX_LEVEL: u8 = 3;

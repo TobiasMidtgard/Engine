@@ -54,7 +54,8 @@ pub struct PhysicsStats {
     pub regions: usize,
     /// Collider pairs touching.
     pub touching: usize,
-    /// Time the last step took, milliseconds.
+    /// Time the last step's own work took (sync, simulate, write back), milliseconds; not
+    /// what ran beside it.
     pub step_ms: f64,
     /// How far big simulations are degraded to keep steps within
     /// [`PhysicsSettings::step_budget_ms`]: 0 (not at all) to 3.
