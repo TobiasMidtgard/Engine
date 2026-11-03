@@ -570,6 +570,8 @@ pub(crate) struct PerfLog {
     gpu_passes: Vec<(Label, f32)>,
     /// `gpu_passes` arrived in the latest `frame` call.
     gpu_fresh: bool,
+    /// The `Diagnostics` keys the latest `publish` set.
+    published: std::collections::HashSet<String>,
     /// Each feature's draws and triangles in the latest frame, for the profile table.
     features: Vec<(String, crate::FeatureStats)>,
     /// When a slow frame was last logged.
@@ -597,6 +599,7 @@ impl PerfLog {
             cpu_steps: Vec::new(),
             inner_steps: Vec::new(),
             gpu_passes: Vec::new(),
+            published: Default::default(),
             gpu_fresh: false,
             features: Vec::new(),
             last_slow: None,
@@ -867,20 +870,24 @@ impl PerfLog {
     }
 
     /// The latest step and pass times into `Diagnostics` (`render.cpu.<step>`,
-    /// `render.gpu.<pass>`).
-    pub fn publish(&self, d: &mut Diagnostics) {
-        let mut key = String::new();
+    /// `render.gpu.<pass>`). A step or pass the frame before had and this one hasn't (a map
+    /// drawn every few frames) reads 0, so the passes always add up to this frame.
+    pub fn publish(&mut self, d: &mut Diagnostics) {
+        let mut now = std::collections::HashSet::with_capacity(self.published.len());
         for (prefix, rows) in [
             ("render.cpu.", &self.cpu_steps),
             ("render.gpu.", &self.gpu_passes),
         ] {
             for (name, ms) in rows {
-                key.clear();
-                key.push_str(prefix);
-                key.push_str(name);
+                let key = format!("{prefix}{name}");
                 d.set(&key, *ms as f64);
+                now.insert(key);
             }
         }
+        for gone in self.published.difference(&now) {
+            d.set(gone, 0.0);
+        }
+        self.published = now;
     }
 }
 

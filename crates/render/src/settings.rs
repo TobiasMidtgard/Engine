@@ -319,8 +319,18 @@ pub struct RenderSettings {
     /// system's CPU time and its wait for the window image, everything else's CPU time, the
     /// GPU's time and memory (see `perf.rs`). 0 = never.
     pub perf_log_secs: f32,
-    /// Re-render the sky environment map every N frames (1 = every frame).
+    /// Re-render the sky environment map (the sky light and its reflections) every N frames
+    /// (1 = every frame), and at once after a camera cut, when the sun turns 0.2° or the camera
+    /// travels 50 m. The sky changes slowly, so 4 looks the same as 1 for a quarter of the cost
+    /// (Unreal's real-time sky light capture is time-sliced the same way).
     pub environment_interval: u32,
+    /// A mirror's view ([`crate::PlanarReflection`]) lights the reflected scene with the main
+    /// view's last sun shadow maps, sky occlusion, environment, cloud shadow and surface
+    /// weather maps instead of drawing its own: all of them are centered on the camera's
+    /// position, which a horizontal mirror's camera shares (Unreal's planar reflections and
+    /// HDRP's planar probe likewise skip shadow maps of their own). Off: the mirror draws its
+    /// own every frame. `ENGINE_MIRROR_SHARES_LIGHTING=on|off` overrides it.
+    pub mirror_shares_lighting: bool,
     /// The sky's own flat cloud layer (a 2D deck 1.5 km up whose cover follows
     /// `WeatherState::cloud_cover`), in the sky and in the environment map that lights the
     /// scene. Turn it off when a feature draws its own clouds over the sky (volumetric clouds):
@@ -511,7 +521,8 @@ impl Default for RenderSettings {
             max_point_lights: 256,
             debug_view: DebugView::None,
             perf_log_secs: 10.0,
-            environment_interval: 1,
+            environment_interval: 4,
+            mirror_shares_lighting: true,
             sky_cloud_layer: true,
             sky_occlusion: true,
             sky_occlusion_extent: 256.0,
@@ -561,30 +572,31 @@ pub(crate) fn effective(world: &World) -> RenderSettings {
         Some(quality) => settings.scaled(quality),
         None => settings.clone(),
     };
-    if let Some(on) = probe_gi_from_env() {
+    static PROBE_GI: std::sync::OnceLock<Option<bool>> = std::sync::OnceLock::new();
+    if let Some(on) = switch_from_env("ENGINE_PROBE_GI", &PROBE_GI) {
         s.probe_gi = on;
+    }
+    static MIRROR: std::sync::OnceLock<Option<bool>> = std::sync::OnceLock::new();
+    if let Some(on) = switch_from_env("ENGINE_MIRROR_SHARES_LIGHTING", &MIRROR) {
+        s.mirror_shares_lighting = on;
     }
     s
 }
 
-/// `ENGINE_PROBE_GI=on|off`, when set, overrides `RenderSettings::probe_gi` (to compare the
-/// two on one build, in any game).
-fn probe_gi_from_env() -> Option<bool> {
-    static ON: std::sync::OnceLock<Option<bool>> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| {
-        match std::env::var("ENGINE_PROBE_GI")
-            .ok()?
-            .to_ascii_lowercase()
-            .as_str()
-        {
+/// `<name>=on|off`, when set, overrides a setting (to compare the two on one build, in any
+/// game): `ENGINE_PROBE_GI` (`RenderSettings::probe_gi`), `ENGINE_MIRROR_SHARES_LIGHTING`
+/// (`RenderSettings::mirror_shares_lighting`). Read once.
+fn switch_from_env(name: &str, cell: &'static std::sync::OnceLock<Option<bool>>) -> Option<bool> {
+    *cell.get_or_init(
+        || match std::env::var(name).ok()?.to_ascii_lowercase().as_str() {
             "off" | "0" => Some(false),
             "on" | "1" => Some(true),
             other => {
-                tracing::warn!("ENGINE_PROBE_GI={other} is not on or off");
+                tracing::warn!("{name}={other} is not on or off");
                 None
             }
-        }
-    })
+        },
+    )
 }
 
 impl RenderSettings {
