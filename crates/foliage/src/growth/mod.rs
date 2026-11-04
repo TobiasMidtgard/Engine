@@ -400,19 +400,25 @@ pub fn oak() -> PlantGraph {
                 Node::Tree(Tree {
                     years: 25,
                     // An open-grown oak: limbs spread out low and wide, side light reaches
-                    // the lower crown, and leafy spurs fill it (foliage-research.md, 10).
+                    // the lower crown, and leafy spurs fill it (foliage-research.md, 10). Room
+                    // for 100k metamers (40k stopped its growth at about 20 years, leaving a
+                    // thin umbrella), nodes leafing 10 years, and its leaves drawn as the
+                    // species' twig sprays, five leaves to a card (section 13).
                     light_seeking: 0.12,
                     plagiotropism: 0.14,
                     shadow_spread: 0.5,
                     shed_light: 0.06,
                     leaves_per_node: 10,
-                    leaf_years: 6,
+                    leaf_years: 10,
                     spur_vigor: 0.2,
                     spur_light: 0.4,
-                    bud_years: 6.0,
+                    bud_years: 10.0,
+                    shadow: 0.035,
+                    max_metamers: 100_000,
                     wander_deg: 12.0,
                     wood_color: OAK_BARK,
                     leaf: Some("leaf".into()),
+                    leaf_sprays: 5,
                     ..Default::default()
                 }),
             ),
@@ -511,9 +517,12 @@ impl GrowingPlant {
     }
 }
 
+/// Parts a growing plant is drawn in: stems, leaves, petals, fruit, and leaf sprays.
+const PARTS: usize = 5;
+
 /// Engine meshes from what [`grow_meshes`] built (none for an empty part).
 pub struct PlantParts {
-    pub meshes: [Option<Mesh>; 4],
+    pub meshes: [Option<Mesh>; PARTS],
     pub triangles: usize,
     /// How long building them took, ms.
     pub ms: f32,
@@ -524,7 +533,13 @@ impl PlantParts {
         let triangles = g.triangles();
         let mesh = |b: crate::meshgen::MeshBuilder| (!b.is_empty()).then(|| b.finish());
         Self {
-            meshes: [mesh(g.stems), mesh(g.leaves), mesh(g.petals), mesh(g.fruit)],
+            meshes: [
+                mesh(g.stems),
+                mesh(g.leaves),
+                mesh(g.petals),
+                mesh(g.fruit),
+                mesh(g.sprays),
+            ],
             triangles,
             ms: 0.0,
         }
@@ -536,9 +551,9 @@ impl PlantParts {
 pub struct GrowthState {
     graph: Arc<PlantGraph>,
     skeleton: Arc<Skeleton>,
-    /// Stems, leaves, petals, fruit (child entities).
-    parts: [Entity; 4],
-    meshes: [Handle<Mesh>; 4],
+    /// Stems, leaves, petals, fruit, sprays (child entities).
+    parts: [Entity; PARTS],
+    meshes: [Handle<Mesh>; PARTS],
     /// Age the meshes show, and the age being built.
     shown_age: f32,
     /// The distance band ([`DETAIL_BANDS`]) and the detail the meshes were last built for.
@@ -610,9 +625,9 @@ const FAR_REBUILD_S: f64 = 0.5;
 /// Rebuilds started in one frame at most, nearest first.
 const BUILDS_PER_FRAME: usize = 2;
 /// Up to these distances from the camera (meters), a growing plant is drawn at this share of
-/// its detail. A grown oak's crown is 14 m across: inside the first line the camera is under
-/// it; past it the oak is drawn light, which from 24 m looks the same (24 years: 0.9 M
-/// triangles near, 166k past 15 m, 102k past 60 m).
+/// its detail. A grown oak's crown is 15 m across: inside the first line the camera is under
+/// it; past it the oak is drawn light, which from 24 m looks the same (24 years: 647k
+/// triangles near, 192k past 15 m, 88k past 60 m).
 pub const DETAIL_BANDS: [(f64, f32); 3] = [(15.0, 1.0), (60.0, 0.3), (f64::INFINITY, 0.12)];
 
 /// The distance band a plant at `distance` is drawn in, coming from band `current`: it moves
@@ -726,6 +741,21 @@ pub fn grow_plants(
                     }
                 }
             };
+            // Its species' visuals still being built (its bark and sprays): wait for them.
+            if graph
+                .bark_species
+                .as_deref()
+                .and_then(|n| library.id(n))
+                .is_some_and(|id| {
+                    visuals
+                        .species
+                        .get(id.0 as usize)
+                        .is_none_or(|v| v.is_none())
+                })
+            {
+                developing.insert(e, (source, Arc::new(Mutex::new(Some((graph, skeleton))))));
+                continue;
+            }
             // A changed plant drops the parts it showed.
             if let Some((parts, handles)) = old_parts {
                 for part in parts {
@@ -737,16 +767,21 @@ pub fn grow_plants(
                     meshes.remove(h);
                 }
             }
-            let stems = graph
+            let species = graph
                 .bark_species
                 .as_deref()
                 .and_then(|n| library.id(n))
-                .and_then(|id| visuals.species.get(id.0 as usize)?.as_ref())
-                .map_or(mats.stems, |v| v.bark);
-            let materials = [stems, mats.leaves, mats.petals, mats.fruit];
-            let handles: [Handle<Mesh>; 4] =
+                .and_then(|id| visuals.species.get(id.0 as usize)?.as_ref());
+            let stems = species.map_or(mats.stems, |v| v.bark);
+            // Sprays in the species' own spray atlas, on a copy of its leaf material (the
+            // seasons recolor the species' material; a growing tree keeps its own calendar).
+            let sprays = species
+                .and_then(|v| materials.get(v.leaves[0]).cloned())
+                .map_or(mats.leaves, |m| materials.add(m));
+            let materials = [stems, mats.leaves, mats.petals, mats.fruit, sprays];
+            let handles: [Handle<Mesh>; PARTS] =
                 std::array::from_fn(|_| meshes.add(Mesh::new(Vec::new(), Vec::new())));
-            let parts: [Entity; 4] = std::array::from_fn(|i| {
+            let parts: [Entity; PARTS] = std::array::from_fn(|i| {
                 let mut r = MeshRenderer::new(handles[i], materials[i]);
                 r.visible = false;
                 commands

@@ -543,6 +543,7 @@ fn write_organs(
             bends: vec![(0.0, 0.0); s.metamers.len()],
             dirs: s.metamers.iter().map(|m| m.dir).collect(),
             node_days: s.metamers.iter().map(|m| m.day).collect(),
+            back: 0.0,
             recur: None,
         });
         sk.children.push(Vec::new());
@@ -573,6 +574,12 @@ fn write_organs(
             (birth + 30.0 <= s.death).then_some((y, birth))
         })
     }
+    // A crown drawn in sprays has one organ per spray, standing for `leaf_sprays` leaves.
+    let per_node = if tree.leaf_sprays > 0 {
+        tree.leaves_per_node.div_ceil(tree.leaf_sprays)
+    } else {
+        tree.leaves_per_node
+    };
     // Over the cap, every node keeps the same share of its leaves (not the oldest shoots all).
     let wanted: usize = shoots
         .iter()
@@ -584,7 +591,7 @@ fn write_organs(
                 .map(move |m| usize::from(seasons(tree, years, s, m).next().is_some()))
         })
         .sum::<usize>()
-        * tree.leaves_per_node as usize;
+        * per_node as usize;
     let keep = (MAX_LEAVES as f64 / wanted.max(1) as f64).min(1.0);
     for (si, s) in shoots.iter().enumerate() {
         let Some(parent) = organ_of[si] else { continue };
@@ -595,7 +602,7 @@ fn write_organs(
                 continue;
             };
             let last = springs.last().map_or(first, |(_, b)| b);
-            for i in 0..tree.leaves_per_node {
+            for i in 0..per_node {
                 let ls = mix_seed(s.seed, ((y0 as u64) << 40) | ((k as u64) << 8) | i as u64);
                 if keep < 1.0 && (ls & 0xffff) as f64 >= keep * 65536.0 {
                     continue;
@@ -618,6 +625,12 @@ fn write_organs(
                     bends: Vec::new(),
                     dirs: Vec::new(),
                     node_days: Vec::new(),
+                    // Spread along the metamer (it stands for several of the oak's short
+                    // internodes), crowded toward its tip as on an oak's annual shoot.
+                    back: 0.85
+                        * ((i as f32 + 0.5 + jitter) / per_node as f32)
+                            .clamp(0.0, 1.0)
+                            .powf(1.4),
                     recur: Some((YEAR, lasts)),
                 });
                 sk.children.push(Vec::new());
@@ -651,7 +664,7 @@ mod tests {
             .map(|p| (p[0] * p[0] + p[2] * p[2]).sqrt())
             .fold(0.0f32, f32::max);
         let width = m
-            .leaves
+            .sprays
             .vertices
             .iter()
             .map(|v| (v.position[0] * v.position[0] + v.position[2] * v.position[2]).sqrt())
@@ -744,17 +757,17 @@ mod tests {
         let g = young_oak(10);
         let sk = Skeleton::develop(&g, 3);
         let t = 9.0 * YEAR + 200.0;
-        // Leaf area and how far out the crown reaches.
+        // Leaf area (spray cards, both faces) and how far out the crown reaches.
         let crown = |m: &super::super::GrownMeshes| {
-            let p = |i: u32| Vec3::from(m.leaves.vertices[i as usize].position);
+            let p = |i: u32| Vec3::from(m.sprays.vertices[i as usize].position);
             let area: f32 = m
-                .leaves
+                .sprays
                 .indices
                 .chunks(3)
                 .map(|t| 0.5 * (p(t[1]) - p(t[0])).cross(p(t[2]) - p(t[0])).length())
                 .sum();
             let reach = m
-                .leaves
+                .sprays
                 .vertices
                 .iter()
                 .map(|v| v.position[0].hypot(v.position[2]))
@@ -773,7 +786,7 @@ mod tests {
                 full.triangles()
             );
             assert!(
-                light.triangles() * 5 < full.triangles(),
+                light.triangles() * 5 < full.triangles() * 2,
                 "detail {detail}: {} of {} triangles",
                 light.triangles(),
                 full.triangles()

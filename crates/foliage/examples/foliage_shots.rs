@@ -332,6 +332,7 @@ fn main() {
     take(&mut app, "01_forest", &by_name("forest_overview"));
     take(&mut app, "02_trail", &by_name("forest_trail"));
     take(&mut app, "03_clearing", &by_name("forest_clearing"));
+    take(&mut app, "03_old_oak", &by_name("forest_old_oak"));
 
     // Fell a big tree at the edge of the clear-cut into the open, and photograph it coming
     // down from beside its path.

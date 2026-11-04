@@ -201,6 +201,9 @@ pub struct Tree {
     pub leaf_years: u32,
     /// Day of the year the leaves come out.
     pub leaf_day: f32,
+    /// Leaves each spray card stands for (the species' twig sprays, as the library trees and
+    /// SpeedTree draw crowns); 0 draws each leaf.
+    pub leaf_sprays: u32,
 }
 
 impl Default for Tree {
@@ -242,6 +245,7 @@ impl Default for Tree {
             leaf_angle_deg: 50.0,
             leaf_years: 4,
             leaf_day: 118.0,
+            leaf_sprays: 0,
         }
     }
 }
