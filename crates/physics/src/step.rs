@@ -1723,8 +1723,9 @@ pub(crate) fn sweeps_wanted(r: &crate::sim::Region, dt: f32) -> bool {
         if part(moving, along) + part(spinning, thinnest) <= 1.0 {
             return None;
         }
-        // Colliders made or moved since the last step aren't in the query tree yet.
-        if r.stale_all || !r.fresh.is_empty() {
+        // Colliders made or moved since the last step aren't in the query tree yet: a few are
+        // looked at as the tree's are below, many (a region made or re-anchored) count as near.
+        if r.stale_all || r.fresh.len() > FRESH_LOOKED_AT {
             return Some((rb.user_data, "new colliders near", None));
         }
         // Where it is and where it is going this substep, and a little more (the solve
@@ -1742,21 +1743,33 @@ pub(crate) fn sweeps_wanted(r: &crate::sim::Region, dt: f32) -> bool {
         path.mins -= Vec3::splat(step + BULLET_MARGIN_M);
         path.maxs += Vec3::splat(step + BULLET_MARGIN_M);
         let bullet = rb.is_ccd_enabled();
+        // (A body's box in the tree holds its own travel; a fresh one's is measured here.)
+        let in_path = |co: &rapier3d::prelude::Collider, measure: bool| {
+            let parent = co.parent().and_then(|p| w.bodies.get(p));
+            if parent.is_none_or(|b| b.is_fixed()) {
+                reaches_into(co, &swept)
+            } else {
+                // Rapier sweeps a body that didn't ask for it against fixed geometry only (and
+                // soft bodies' meshes, which Rapier gives no parent).
+                (bullet || soft) && (!measure || co.compute_aabb().intersects(&path))
+            }
+        };
+        let fresh = r
+            .fresh
+            .iter()
+            .filter_map(|c| w.colliders.get(*c))
+            .filter(|co| co.parent() != Some(h) && !co.is_sensor())
+            .find(|co| in_path(co, true))
+            .map(|co| (rb.user_data, "new colliders near", Some(co.user_data)));
+        if fresh.is_some() {
+            return fresh;
+        }
         let filter = rapier3d::prelude::QueryFilter::default()
             .exclude_rigid_body(h)
             .exclude_sensors();
         w.query_pipeline_with_filter(filter)
             .intersect_aabb_conservative(path)
-            .find(|(_, co)| {
-                let parent = co.parent().and_then(|p| w.bodies.get(p));
-                if parent.is_none_or(|b| b.is_fixed()) {
-                    reaches_into(co, &swept)
-                } else {
-                    // Rapier sweeps a body that didn't ask for it against fixed geometry only
-                    // (and soft bodies' meshes, which Rapier gives no parent).
-                    bullet || soft
-                }
-            })
+            .find(|(_, co)| in_path(co, false))
             .map(|(_, co)| (rb.user_data, "something in its path", Some(co.user_data)))
     });
     if let Some((user, why, what)) = found
@@ -1886,6 +1899,9 @@ const BULLET_MARGIN_M: f32 = 0.5;
 /// Beyond where a fast body is and will be this substep, how near fixed geometry must reach for
 /// its region to sweep, meters (a quarter of its step more: the solve changes its velocity).
 const SWEEP_SLACK_M: f32 = 0.1;
+/// Colliders made or moved since the last step that a fast body's path is checked against one
+/// by one; past this many, it counts as having something near.
+const FRESH_LOOKED_AT: usize = 256;
 
 /// A body whose far edge moves faster than this from turning alone, m/s, gets its contacts
 /// recomputed every step; below [`STILL_EDGE_SPEED`] Rapier may reuse them again.

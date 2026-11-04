@@ -3454,8 +3454,14 @@ mod tests {
     /// corner, but no triangle comes near its path); at a wall ahead, it is.
     #[test]
     fn a_car_rolling_over_mesh_ground_is_not_swept() {
+        #[derive(PartialEq, Clone, Copy)]
+        enum Wall {
+            None,
+            Old,
+            New,
+        }
         let dt = 1.0 / 120.0;
-        let swept = |shape: ColliderBuilder, y: f32, velocity: Vec3, wall: bool| {
+        let swept = |shape: ColliderBuilder, y: f32, velocity: Vec3, wall: Wall| {
             let mut r = Region::new(DVec3::ZERO, &PhysicsSettings::default());
             let w = &mut r.world;
             // 40 x 40 m of 1 m cells at y = 0, one far corner raised 6 m.
@@ -3476,12 +3482,12 @@ mod tests {
                 }
             }
             w.insert_collider(ColliderBuilder::trimesh(vertices, indices).unwrap(), None);
-            if wall {
+            let board = || {
                 let at = Vec3::new(0.0, 1.0, 2.5);
-                w.insert_collider(
-                    ColliderBuilder::cuboid(2.0, 1.0, 0.05).translation(at),
-                    None,
-                );
+                ColliderBuilder::cuboid(2.0, 1.0, 0.05).translation(at)
+            };
+            if wall == Wall::Old {
+                w.insert_collider(board(), None);
             }
             let at = Vec3::new(0.0, y, 0.0);
             let body = w.insert_body(
@@ -3496,29 +3502,46 @@ mod tests {
             rb.set_translation(at, true);
             rb.set_linvel(velocity, true);
             rb.set_angvel(Vec3::ZERO, true);
+            if wall == Wall::New {
+                // Made since the step: not in the query tree yet.
+                let h = w.insert_collider(board(), None);
+                r.fresh.push(h);
+            }
             crate::step::sweeps_wanted(&r, dt)
         };
         let car = || ColliderBuilder::cuboid(0.88, 0.32, 2.2);
         let ahead = Vec3::new(0.0, 0.0, 25.0);
         assert!(
-            !swept(car(), 0.57, ahead, false),
+            !swept(car(), 0.57, ahead, Wall::None),
             "swept rolling over the ground"
         );
         assert!(
-            !swept(car(), 0.57, ahead, true),
+            !swept(car(), 0.57, ahead, Wall::Old),
             "swept rolling at a wall 0.2 m a substep"
         );
         let falling = Vec3::new(0.0, -30.0, 0.0);
         assert!(
-            swept(car(), 0.57, falling, false),
+            swept(car(), 0.57, falling, Wall::None),
             "not swept falling at the ground"
         );
         let shot = || ColliderBuilder::ball(0.02);
         let fast = Vec3::new(0.0, 0.0, 300.0);
         assert!(
-            !swept(shot(), 1.0, fast, false),
+            !swept(shot(), 1.0, fast, Wall::None),
             "a shot swept for the ground beside its path"
         );
-        assert!(swept(shot(), 1.0, fast, true), "a shot not swept at a wall");
+        assert!(
+            swept(shot(), 1.0, fast, Wall::Old),
+            "a shot not swept at a wall"
+        );
+        assert!(
+            swept(shot(), 1.0, fast, Wall::New),
+            "a shot not swept at a new wall"
+        );
+        let away = Vec3::new(0.0, 0.0, -300.0);
+        assert!(
+            !swept(shot(), 1.0, away, Wall::New),
+            "a shot swept for a new wall behind it"
+        );
     }
 }
