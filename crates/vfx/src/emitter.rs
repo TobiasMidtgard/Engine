@@ -744,6 +744,7 @@ pub fn tick_effects(
     let mut stats = VfxStats::default();
     let mut seen: HashSet<Entity> = HashSet::with_capacity(runtime.instances.len());
 
+    let span = tracing::info_span!("vfx: effects").entered();
     for (entity, effect, gt, local, has_trail) in &effects {
         seen.insert(entity);
         let Some((desc, version)) = library.get_versioned(&effect.effect) else {
@@ -862,6 +863,8 @@ pub fn tick_effects(
         );
     }
 
+    drop(span);
+    let span = tracing::info_span!("vfx: orphans").entered();
     // Effects whose entity is gone (or lost its ParticleEffect) stop emitting and fade out.
     let gone: Vec<Entity> = runtime
         .instances
@@ -890,6 +893,8 @@ pub fn tick_effects(
         );
     }
 
+    drop(span);
+    let _span = tracing::info_span!("vfx: lights and frame").entered();
     // Lights, finished effects and the GPU frame.
     let mut finished_entities = Vec::new();
     for inst in runtime

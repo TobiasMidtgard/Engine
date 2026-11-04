@@ -207,20 +207,18 @@ pub struct GrassBurn {
     pub ground: Vec<f32>,
     /// Different for every sampling of `ground`.
     pub ground_id: u64,
-    /// The fire-field tiles under the map (key, version) when every cell last reached its
-    /// target with all of them at rest: while they stay so, the map can't change and isn't
-    /// walked (a 120 m meadow is 14 k cells a frame).
-    pub settled: Option<Vec<(IVec2, u64)>>,
+    /// The fire-field tiles under the map when every cell last reached its target: while
+    /// none of them is stepped or changed, the map can't change and isn't walked (a 120 m
+    /// meadow is 14 k cells a frame).
+    pub settled: Option<Vec<TileMark>>,
 }
 
-/// The tiles under a map (key and version, `u64::MAX` where there is none), or `None` while
-/// any of them simulates something.
-fn resting_tiles(
-    field: &FireField,
-    min: DVec2,
-    size: [u32; 2],
-    cell_m: f32,
-) -> Option<Vec<(IVec2, u64)>> {
+/// A fire-field tile as a grass map last saw it: key, serial, version and steps (zeros where
+/// there was none).
+pub type TileMark = (IVec2, u64, u64, u64);
+
+/// The tiles under a map as they are now.
+fn tiles_under(field: &FireField, min: DVec2, size: [u32; 2], cell_m: f32) -> Vec<TileMark> {
     let max = min + DVec2::new(size[0] as f64, size[1] as f64) * cell_m as f64;
     let (lo, _) = FireField::split(field.cell_coord(DVec3::new(min.x, 0.0, min.y)));
     let (hi, _) = FireField::split(field.cell_coord(DVec3::new(max.x, 0.0, max.y)));
@@ -228,14 +226,13 @@ fn resting_tiles(
     for y in lo.y..=hi.y {
         for x in lo.x..=hi.x {
             let key = IVec2::new(x, y);
-            match field.tile(key) {
-                Some(t) if t.active => return None,
-                Some(t) => out.push((key, t.version)),
-                None => out.push((key, u64::MAX)),
-            }
+            out.push(match field.tile(key) {
+                Some(t) => (key, t.serial, t.version, t.steps),
+                None => (key, 0, 0, 0),
+            });
         }
     }
-    Some(out)
+    out
 }
 
 impl GrassBurn {
@@ -285,8 +282,8 @@ pub fn update_grass(
                 Some(mut b)
                     if b.size == size && b.min == min && b.cell_m == cell_m && b.base_y == c.y =>
                 {
-                    let resting = resting_tiles(&field, min, size, cell_m);
-                    if resting.is_some() && b.settled == resting {
+                    let under = tiles_under(&field, min, size, cell_m);
+                    if b.settled.as_ref() == Some(&under) {
                         continue;
                     }
                     let mut changed = false;
@@ -309,7 +306,7 @@ pub fn update_grass(
                     if changed {
                         b.version += 1;
                     }
-                    b.settled = if settled { resting } else { None };
+                    b.settled = settled.then_some(under);
                 }
                 _ => {
                     // New (or resized) map: start at the targets, so a fire that was
@@ -1301,8 +1298,8 @@ mod tests {
     use crate::fuel::CellFuel;
     use engine_render::{compose_shader, validate_wgsl};
 
-    /// A meadow over fire tiles at rest, every cell on its target, isn't walked each frame;
-    /// once the tiles under it change it is again.
+    /// A meadow whose cells sit on their targets isn't walked each frame while the fire tiles
+    /// under it aren't stepped or changed; once they are, it is again.
     #[test]
     fn a_settled_meadow_over_resting_fire_is_left_alone() {
         engine_core::tasks::init_task_pools();

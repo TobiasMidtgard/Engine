@@ -9,7 +9,7 @@ use engine_core::math::{DVec3, UVec3};
 use engine_core::prelude::*;
 use engine_world::{Obscurance, ObscuranceQuery};
 
-use crate::domain::{Domain, clip_box};
+use crate::domain::{Domain, Voxel, clip_box};
 use crate::settings::SmokeSettings;
 use crate::sim::SmokeDomains;
 
@@ -26,13 +26,27 @@ struct Frozen {
     density: Vec<f32>,
 }
 
+/// The voxels' densities, a few layers per task: a big volume holds a few hundred thousand
+/// voxels, and copying it on one thread held up the frame (0.22 ms alone on the PC plaza).
+fn densities(voxels: &[Voxel], dims: UVec3) -> Vec<f32> {
+    let mut out = vec![0.0; voxels.len()];
+    let slab = ((dims.x * dims.y) as usize * 8).max(1);
+    engine_core::tasks::par_chunks_mut(&mut out, slab, |i, chunk| {
+        let from = &voxels[i * slab..i * slab + chunk.len()];
+        for (o, v) in chunk.iter_mut().zip(from) {
+            *o = v.density;
+        }
+    });
+    out
+}
+
 impl Frozen {
     fn of(d: &Domain) -> Self {
         Self {
             origin: d.origin,
             cell: d.cell,
             dims: d.dims,
-            density: d.voxels.iter().map(|v| v.density).collect(),
+            density: densities(&d.voxels, d.dims),
         }
     }
 

@@ -38,6 +38,7 @@
 //! rays' scene yet, and rays that miss see the environment map's ground below the horizon.
 
 mod bvh;
+mod schedule;
 
 use std::collections::{HashMap, HashSet};
 
@@ -408,6 +409,8 @@ impl Grid {
 /// What `encode` records this frame.
 struct Work {
     probes: u32,
+    /// Probes written empty after the traced ones (they scrolled in and wait for a trace).
+    cleared: u32,
     rays: u32,
     /// Atlas tile rows written, as (first, count) ranges.
     rows: Vec<(u32, u32)>,
@@ -482,11 +485,8 @@ pub(crate) struct ProbeGi {
     ms_per_kray: f32,
     rays_lately: f32,
     grid: Option<Grid>,
-    /// Bumped when every probe's history is void (a jump, a new grid): `probe_gi` ignores probes
-    /// last written in another epoch.
-    epoch: u32,
-    /// The next slot the round robin updates.
-    cursor: u32,
+    /// Which probes trace each frame, and the epoch (schedule.rs).
+    schedule: schedule::Schedule,
     frame: u64,
     work: Option<Work>,
     stats: Stats,
@@ -495,6 +495,9 @@ pub(crate) struct ProbeGi {
 #[derive(Default, Clone, Copy)]
 struct Stats {
     probes: u32,
+    /// Probes that scrolled in this frame, and those cleared to wait for their first trace.
+    scrolled_in: u32,
+    cleared: u32,
     instances: u32,
     meshes: u32,
     built_triangles: u32,
@@ -642,8 +645,7 @@ impl ProbeGi {
             ms_per_kray: 0.0,
             rays_lately: 0.0,
             grid: None,
-            epoch: 1,
-            cursor: 0,
+            schedule: schedule::Schedule::new(),
             frame: 0,
             work: None,
             stats: Stats::default(),
@@ -1252,38 +1254,21 @@ impl ProbeGi {
         let per_frame = self.probes_this_frame(shared, settings, count);
         let rays = settings.gi_rays_per_probe.clamp(16, MAX_RAYS);
 
-        // Probes that scrolled in go first, then the rest in turn.
-        let mut updates: Vec<u32> = Vec::with_capacity(per_frame as usize);
-        match self.grid {
-            Some(old) if old.dims == dims && old.spacing == spacing => {
-                if old.origin != origin {
-                    for z in 0..dims.z {
-                        for y in 0..dims.y {
-                            for x in 0..dims.x {
-                                let g = UVec3::new(x, y, z);
-                                if !old.contains(origin + g.as_ivec3()) {
-                                    updates.push(grid.slot(g));
-                                }
-                            }
-                        }
-                    }
-                    if updates.len() > per_frame as usize {
-                        // A jump: every probe starts over.
-                        updates.clear();
-                        self.epoch += 1;
-                    }
-                }
-            }
-            _ => self.epoch += 1,
-        }
-        if self.epoch >= 2048 {
-            self.epoch = 1;
-        }
+        // Probes that scrolled in go first, then the rest in turn; those that scrolled in and
+        // wait are cleared after them.
+        static QUEUE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        let queue = *QUEUE.get_or_init(|| {
+            !matches!(
+                std::env::var("ENGINE_GI_SCROLL_QUEUE").as_deref(),
+                Ok("off" | "0")
+            )
+        });
+        let plan = self.schedule.plan(self.grid, grid, per_frame, queue);
         self.grid = Some(grid);
-        while updates.len() < per_frame as usize {
-            updates.push(self.cursor % count);
-            self.cursor = (self.cursor + 1) % count;
-        }
+        let traced = plan.traced.len() as u32;
+        let cleared = plan.cleared.len() as u32;
+        let mut updates = plan.traced;
+        updates.extend_from_slice(&plan.cleared);
 
         // Hierarchies the workers finished: the entities waiting on them are pending.
         let limit = shared.device.limits().max_storage_buffer_binding_size;
@@ -1606,10 +1591,10 @@ impl ProbeGi {
             .write(device, queue, bytemuck::cast_slice(&updates));
         regroup |= active
             .rays
-            .reserve(device, updates.len() as u64 * rays as u64 * 16);
+            .reserve(device, traced.max(1) as u64 * rays as u64 * 16);
         let r = rotation(self.frame);
         let pass = GiPass {
-            counts: [updates.len() as u32, rays, 0, count],
+            counts: [traced, rays, cleared, count],
             rotation: [0, 1, 2].map(|i| r.row(i).extend(0.0).to_array()),
             params: [
                 settings.gi_hysteresis.clamp(0.0, 0.995),
@@ -1681,7 +1666,8 @@ impl ProbeGi {
             }
         }
         self.work = Some(Work {
-            probes: updates.len() as u32,
+            probes: traced,
+            cleared,
             rays,
             rows: ranges,
         });
@@ -1694,15 +1680,17 @@ impl ProbeGi {
             spacing as f32,
         ];
         uniform.gi_size = [dims.x as f32, dims.y as f32, dims.z as f32, 1.0];
-        uniform.gi_grid = [offset.x, offset.y, offset.z, self.epoch as f32];
-        let rays_now = (updates.len() as u32 * rays) as f32;
+        uniform.gi_grid = [offset.x, offset.y, offset.z, self.schedule.epoch as f32];
+        let rays_now = (traced * rays) as f32;
         self.rays_lately = if self.rays_lately > 0.0 {
             self.rays_lately * 0.7 + rays_now * 0.3
         } else {
             rays_now
         };
         self.stats = Stats {
-            probes: updates.len() as u32,
+            probes: traced,
+            scrolled_in: plan.scrolled_in,
+            cleared,
             instances: instance_count,
             meshes: self.meshes.len() as u32,
             built_triangles: built as u32,
@@ -1740,7 +1728,7 @@ impl ProbeGi {
             pass.set_pipeline(&active.trace);
             pass.dispatch_workgroups((work.probes * work.rays).div_ceil(64), 1, 1);
             pass.set_pipeline(&active.update);
-            pass.dispatch_workgroups(work.probes, 1, 1);
+            pass.dispatch_workgroups(work.probes + work.cleared, 1, 1);
         }
         let size = TEXELS * TILES_X;
         for (first, n) in work.rows {
@@ -1827,6 +1815,10 @@ impl ProbeGi {
         }
         let s = self.stats;
         d.set("render.gi.probes_updated", s.probes as f64);
+        d.set("render.gi.scrolled_in", s.scrolled_in as f64);
+        d.set("render.gi.cleared", s.cleared as f64);
+        d.set("render.gi.pending", self.schedule.pending() as f64);
+        d.set("render.gi.resets", self.schedule.resets as f64);
         d.set(
             "render.gi.probes",
             self.grid.map_or(0, |g| g.count()) as f64,

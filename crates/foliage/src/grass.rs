@@ -129,33 +129,7 @@ pub fn floor_maps(
     let step = Vec2::new(size.x / (rx - 1) as f32, size.y / (rz - 1) as f32);
     let corner = -size * 0.5;
     let n = (rx * rz) as usize;
-    // How closed the canopy is over each point, and how much of it is broadleaved.
-    let mut canopy = vec![0.0f32; n];
-    let mut broad = vec![0.0f32; n];
-    for c in crowns {
-        let reach = c.radius.max(step.x.max(step.y));
-        let ci = ((c.pos.x - corner.x) / step.x).round() as i64;
-        let cj = ((c.pos.y - corner.y) / step.y).round() as i64;
-        let (si, sj) = (
-            (reach / step.x).ceil() as i64,
-            (reach / step.y).ceil() as i64,
-        );
-        for j in (cj - sj).max(0)..=(cj + sj).min(rz as i64 - 1) {
-            for i in (ci - si).max(0)..=(ci + si).min(rx as i64 - 1) {
-                let q = corner + Vec2::new(i as f32 * step.x, j as f32 * step.y);
-                let d = q.distance(c.pos) / reach;
-                if d >= 1.0 {
-                    continue;
-                }
-                let f = (1.0 - d * d) * c.leafy;
-                let k = (j as u32 * rx + i as u32) as usize;
-                canopy[k] += f;
-                if c.broadleaf {
-                    broad[k] += f;
-                }
-            }
-        }
-    }
+    let (canopy, broad) = canopy_maps(region, resolution, crowns);
     let bare = bare_mask(region, resolution, covers);
     let mut herbs = (Vec::with_capacity(n), Vec::with_capacity(n));
     let mut litter = (Vec::with_capacity(n), Vec::with_capacity(n));
@@ -219,6 +193,99 @@ pub fn floor_maps(
         }
     }
     [herbs, litter]
+}
+
+/// How closed the canopy is over each grid point, and how much of it is broadleaved.
+fn canopy_maps(
+    region: &EcologyRegion,
+    resolution: [u32; 2],
+    crowns: &[Crown],
+) -> (Vec<f32>, Vec<f32>) {
+    let [rx, rz] = resolution;
+    let size = Vec2::new(region.half_extents[0] * 2.0, region.half_extents[1] * 2.0);
+    let step = Vec2::new(size.x / (rx - 1) as f32, size.y / (rz - 1) as f32);
+    let corner = -size * 0.5;
+    let n = (rx * rz) as usize;
+    let mut canopy = vec![0.0f32; n];
+    let mut broad = vec![0.0f32; n];
+    for c in crowns {
+        let reach = c.radius.max(step.x.max(step.y));
+        let ci = ((c.pos.x - corner.x) / step.x).round() as i64;
+        let cj = ((c.pos.y - corner.y) / step.y).round() as i64;
+        let (si, sj) = (
+            (reach / step.x).ceil() as i64,
+            (reach / step.y).ceil() as i64,
+        );
+        for j in (cj - sj).max(0)..=(cj + sj).min(rz as i64 - 1) {
+            for i in (ci - si).max(0)..=(ci + si).min(rx as i64 - 1) {
+                let q = corner + Vec2::new(i as f32 * step.x, j as f32 * step.y);
+                let d = q.distance(c.pos) / reach;
+                if d >= 1.0 {
+                    continue;
+                }
+                let f = (1.0 - d * d) * c.leafy;
+                let k = (j as u32 * rx + i as u32) as usize;
+                canopy[k] += f;
+                if c.broadleaf {
+                    broad[k] += f;
+                }
+            }
+        }
+    }
+    (canopy, broad)
+}
+
+/// Which grass grows at each grid point ([`crate::meadow`]): from the soil's water, the
+/// canopy's shade and its edge, trampling and the verges of the paths kept clear, and ground
+/// opened by fire or rotting wood.
+pub fn grass_kinds(
+    region: &EcologyRegion,
+    soil: &Soil,
+    center: DVec3,
+    resolution: [u32; 2],
+    crowns: &[Crown],
+) -> Vec<u8> {
+    let [rx, rz] = resolution;
+    let size = [region.half_extents[0] * 2.0, region.half_extents[1] * 2.0];
+    let (canopy, _) = canopy_maps(region, resolution, crowns);
+    let origin = [
+        center.x - size[0] as f64 * 0.5,
+        center.z - size[1] as f64 * 0.5,
+    ];
+    let mut k = 0usize;
+    crate::meadow::paint_kinds(resolution, size, origin, region.seed, |x, z| {
+        let at = k;
+        k += 1;
+        let q = Vec2::new(x - size[0] * 0.5, z - size[1] * 0.5);
+        let world = center + DVec3::new(q.x as f64, 0.0, q.y as f64);
+        if !soil.contains(world) {
+            return None;
+        }
+        let i = soil.index(world);
+        // A path's verge: trodden turf a few meters either side of a cleared circle's edge.
+        let verge = region
+            .keep_clear
+            .iter()
+            .chain(&region.corridors)
+            .map(|c| {
+                let d = q.distance(Vec2::new(c[0], c[1])) - c[2];
+                1.0 - smoothstep(0.0, 3.5, d.abs())
+            })
+            .fold(0.0f32, f32::max);
+        let shade = canopy.get(at).copied().unwrap_or(0.0).min(1.0);
+        Some(crate::meadow::Site {
+            water: soil.water[i],
+            shade,
+            slope: 0.0,
+            sunny: 0.0,
+            wear: soil.trample[i].max(verge),
+            edge: smoothstep(0.05, 0.3, shade) * (1.0 - smoothstep(0.55, 0.9, shade)),
+            opened: smoothstep(0.4, 0.6, soil.bonus[i]),
+        })
+    })
+    .into_iter()
+    .take((rx * rz) as usize)
+    .collect()
 }
 
 /// A ground cover's surface as the floor fields see it: its grid of heights and painted layers.
@@ -342,8 +409,11 @@ pub fn region_style(library: &PlantLibrary, region: &EcologyRegion) -> Option<Gr
         dry_color: dry,
         dryness: 0.2,
         wind_response: 1.0,
-        draw_distance: 65.0,
+        // To 150 m: the survivors of the thinning widen to keep the cover (Ghost of
+        // Tsushima's grass; engine-design/fields-and-forests-look.md, 4.1).
+        draw_distance: 150.0,
         shadow_distance: 18.0,
+        clump_size: 0.6,
         ..Default::default()
     })
 }
@@ -465,6 +535,9 @@ pub struct GrassBuild {
 struct BuiltGrass {
     /// Each field's layer, look, density and dryness.
     layers: Vec<(FloorLayer, GrassStyle, Vec<f32>, Vec<f32>)>,
+    /// The meadow's kinds of grass and their looks (`GrassField::kinds`, `styles`).
+    kinds: Vec<u8>,
+    kind_styles: Vec<GrassStyle>,
     /// Rebuilt only on the first build and after the terrain changed: the grass's (on the
     /// ground) and the floor layers' (on the forest floor's surface).
     heights: Option<Vec<f32>>,
@@ -573,6 +646,10 @@ pub fn sync_region_grass(
                     field.density = density;
                     field.dryness = dryness;
                     field.style = style;
+                    if layer == FloorLayer::Grass {
+                        field.kinds = built.kinds.clone();
+                        field.styles = built.kind_styles.clone();
+                    }
                     if t.translation != field_at.translation {
                         *t = field_at;
                     }
@@ -598,6 +675,16 @@ pub fn sync_region_grass(
                         density,
                         dryness,
                         style,
+                        kinds: if layer == FloorLayer::Grass {
+                            built.kinds.clone()
+                        } else {
+                            Vec::new()
+                        },
+                        styles: if layer == FloorLayer::Grass {
+                            built.kind_styles.clone()
+                        } else {
+                            Vec::new()
+                        },
                     };
                     let e = commands
                         .spawn((field_at, field, GrassOf(region_e), layer))
@@ -657,6 +744,7 @@ pub fn sync_region_grass(
     }
     let relief = std::mem::take(&mut *relief_due);
     let season_dry = grass_dryness(season.day_of_year);
+    let day = season.day_of_year;
     for (region_e, region, state, linked, floor, build) in &regions {
         let styles = if settings.gpu_grass {
             floor_styles(&library, region)
@@ -802,6 +890,11 @@ pub fn sync_region_grass(
                     &region, &soil, center, res, &density, &crowns, &covers, &grids, season_dry,
                 )
             });
+            let kinds = grass_kinds(&region, &soil, center, res, &crowns);
+            let kind_styles = styles
+                .iter()
+                .find(|(l, _)| *l == FloorLayer::Grass)
+                .map_or_else(Vec::new, |(_, s)| crate::meadow::palette(s, day));
             let heights = ground.map(|g| heights(g.as_ref(), center, &region, res));
             let floor_heights = heights
                 .as_ref()
@@ -822,6 +915,8 @@ pub fn sync_region_grass(
                 .collect();
             BuiltGrass {
                 layers,
+                kinds,
+                kind_styles,
                 heights,
                 floor_heights,
                 resolution: res,

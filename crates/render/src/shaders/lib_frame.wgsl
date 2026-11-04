@@ -495,7 +495,9 @@ fn probe_gi_texel(g: vec3<u32>, dir: vec3<f32>) -> vec2<f32> {
 
 // Irradiance (rgb, lux-like: diffuse light is albedo / PI times it) at camera-relative `rel`
 // with normal `n`, seen along `v` (toward the viewer), and in alpha how much the probes cover
-// the point (0 outside the grid or with probe GI off, fading in over the outermost probes).
+// the point: 0 outside the grid or with probe GI off, fading in over the outermost probes (up
+// to 3 a side, an eighth of the grid), and less by the share of probes around it that wait for
+// their first trace (they scrolled in, or every probe started over).
 fn probe_gi(rel: vec3<f32>, n: vec3<f32>, v: vec3<f32>) -> vec4<f32> {
     if (frame.gi_grid.w < 0.5) { return vec4<f32>(0.0); }
     let spacing = frame.gi_volume.w;
@@ -506,8 +508,10 @@ fn probe_gi(rel: vec3<f32>, n: vec3<f32>, v: vec3<f32>) -> vec4<f32> {
     let local = (p - frame.gi_volume.xyz) / spacing;
     let base = floor(local);
     if (any(base < vec3<f32>(0.0)) || any(base + 1.0 >= size)) { return vec4<f32>(0.0); }
-    let edge = min(min(local, size - 1.0 - local), vec3<f32>(1.0));
-    let cover = saturate(min(edge.x, min(edge.y, edge.z)));
+    let fade = clamp(size / 8.0, vec3<f32>(1.0), vec3<f32>(3.0));
+    let edge = min(local, size - 1.0 - local) / fade;
+    var cover = saturate(min(edge.x, min(edge.y, edge.z)));
+    var unlit = 0.0;
     let alpha = local - base;
     let atlas = vec2<f32>(textureDimensions(gi_atlas));
     // By an indoor volume, probes behind its closed faces see nothing of this side: a probe
@@ -528,8 +532,13 @@ fn probe_gi(rel: vec3<f32>, n: vec3<f32>, v: vec3<f32>) -> vec4<f32> {
         var w = sq((dot(dir, n) + 1.0) * 0.5) + 0.2;
         // Chebyshev: how likely the probe sees this point, from the distances it sees.
         let m = textureSampleLevel(gi_atlas, linear_clamp, probe_gi_texel(gu, -dir) / atlas, 1, 0.0);
-        // Inactive (stuck in something), or not written since every probe started over.
-        if (m.z < 0.5 || abs(m.w - frame.gi_grid.w) > 0.5) { continue; }
+        // Not lit yet (written in another epoch, or cleared as it scrolled in).
+        if (abs(m.w - frame.gi_grid.w) > 0.5) {
+            unlit += tri.x * tri.y * tri.z;
+            continue;
+        }
+        // Inactive: stuck in something.
+        if (m.z < 0.5) { continue; }
         if (dist > m.x) {
             let variance = abs(m.y - m.x * m.x);
             let d = dist - m.x;
@@ -545,6 +554,7 @@ fn probe_gi(rel: vec3<f32>, n: vec3<f32>, v: vec3<f32>) -> vec4<f32> {
         weights += w;
     }
     if (weights <= 1e-9) { return vec4<f32>(0.0); }
+    cover *= saturate(1.0 - unlit);
     return vec4<f32>(sum / weights * (PI / PROBE_GI_SCALE), cover);
 }
 

@@ -11,8 +11,12 @@
 //! paler sky), `path` (a footpath worn through the meadow: `GrassWear`), `snow` (the meadow
 //! under 12 cm of fresh snow), `herbs` and `litter` (a forest floor's shade herbs and fallen
 //! leaves on humus; `herbs_close` and `litter_close` from knee height), `field` (the showcase's
-//! meadow: drawn out to 120 m, shadows to 22 m, standing in it and looking out over it). Each
-//! biome is its own field 1 km from the others, on ground of its own color.
+//! meadow: drawn out to 120 m, shadows to 22 m, standing in it and looking out over it),
+//! `communities` (a 300 m meadow growing `engine_foliage::meadow`'s kinds of grass, painted
+//! from a made-up site: a wet hollow and creek, a footpath, a wood's edge along one side, a
+//! burnt patch and a parched rise; drawn to 150 m; `communities_low` at knee height in a flower
+//! drift, `communities_rise` from 4 m up). Each biome is its own field 1 km from the others,
+//! on ground of its own color.
 //!
 //! `LOOKDEV_PERF=1` (with `ENGINE_PROFILE=1`) also prints, for each shot, what the grass costs:
 //! the GPU passes and triangles with the grass drawn and without it (`grass_density` 0).
@@ -60,7 +64,70 @@ fn biomes() -> Vec<Biome> {
             ..GrassStyle::meadow()
         },
     );
+    add(
+        "communities",
+        GrassStyle {
+            draw_distance: 150.0,
+            shadow_distance: 22.0,
+            ..GrassStyle::meadow()
+        },
+    );
     out
+}
+
+/// The made-up site under the `communities` field (field-local meters, 300 m across): a
+/// wet hollow draining into a creek along z = 210, a footpath along x = 150, a wood's edge
+/// along x = 40, a burnt patch, and a parched rise in the far corner.
+fn site(x: f32, z: f32) -> engine_foliage::meadow::Site {
+    use engine_core::math::smoothstep;
+    let n = |s: f64, seed| {
+        engine_core::math::noise::fbm2(x as f64 / s, z as f64 / s, seed, 3, 2.0, 0.5) as f32
+    };
+    let creek = 1.0 - smoothstep(2.0, 9.0, (z - 210.0 - 6.0 * (x * 0.03).sin()).abs());
+    let hollow = 1.0
+        - smoothstep(
+            10.0,
+            45.0,
+            ((x - 200.0).powi(2) + (z - 180.0).powi(2)).sqrt(),
+        );
+    let rise = 1.0
+        - smoothstep(
+            40.0,
+            90.0,
+            ((x - 260.0).powi(2) + (z - 50.0).powi(2)).sqrt(),
+        );
+    let water =
+        (0.48 + 0.12 * n(60.0, 3) + 0.45 * creek.max(hollow * 0.7) - 0.35 * rise).clamp(0.0, 1.0);
+    let path = 1.0 - smoothstep(0.8, 3.5, (x - 150.0 - 3.0 * (z * 0.05).sin()).abs());
+    let edge = 1.0 - smoothstep(0.0, 22.0, (x - 40.0 + 6.0 * n(25.0, 9)).abs());
+    let burn = 1.0 - smoothstep(12.0, 22.0, ((x - 90.0).powi(2) + (z - 70.0).powi(2)).sqrt());
+    engine_foliage::meadow::Site {
+        water,
+        shade: 0.5 * edge * smoothstep(40.0, 10.0, x),
+        slope: 0.4 * rise,
+        sunny: rise,
+        wear: path,
+        edge,
+        opened: burn,
+    }
+}
+
+/// The `communities` field: the kinds painted from [`site`], density and dryness as `field`.
+fn communities(style: GrassStyle) -> GrassField {
+    let size = 300.0;
+    let mut f = field(style, size);
+    f.kinds = engine_foliage::meadow::paint_kinds(f.resolution, [size; 2], [0.0; 2], 21, |x, z| {
+        Some(site(x, z))
+    });
+    // Midsummer: the flowers out.
+    f.styles = engine_foliage::meadow::palette(&style, 175.0);
+    // Dry where it is parched, fresh by the water.
+    for (k, d) in f.dryness.iter_mut().enumerate() {
+        let (i, j) = (k as u32 % f.resolution[0], k as u32 / f.resolution[0]);
+        let s = site(i as f32, j as f32);
+        *d = (*d + 0.5 * (0.35 - s.water).max(0.0)).clamp(0.0, 1.0);
+    }
+    f
 }
 
 /// Patches: thicker and fresher in hollows, thinner and drier on rises.
@@ -239,7 +306,11 @@ fn main() {
             .world
             .spawn((
                 Transform::from_translation(at),
-                field(b.style, if b.name == "field" { 300.0 } else { 160.0 }),
+                if b.name == "communities" {
+                    communities(b.style)
+                } else {
+                    field(b.style, if b.name == "field" { 300.0 } else { 160.0 })
+                },
             ))
             .id();
         if b.name == "path" {
@@ -360,6 +431,43 @@ fn main() {
                     "field",
                     eye,
                     eye + DVec3::new(10.0, -0.9, -14.0),
+                    side_sun,
+                );
+            }
+        } else if b.name == "communities" {
+            // The field's -x -z corner is 150 m from its center.
+            let c = |x: f64, y: f64, z: f64| o + DVec3::new(x - 150.0, y, z - 150.0);
+            if wanted("communities") {
+                // On the path, looking up it past the hollow toward the creek.
+                let eye = c(152.0, 1.7, 120.0);
+                shot(
+                    &mut app,
+                    &out,
+                    "communities",
+                    eye,
+                    c(175.0, 0.4, 190.0),
+                    side_sun,
+                );
+            }
+            if wanted("communities_low") {
+                let eye = c(120.0, 0.6, 140.0);
+                shot(
+                    &mut app,
+                    &out,
+                    "communities_low",
+                    eye,
+                    c(126.0, 0.1, 147.0),
+                    side_sun,
+                );
+            }
+            if wanted("communities_rise") {
+                let eye = c(255.0, 4.0, 60.0);
+                shot(
+                    &mut app,
+                    &out,
+                    "communities_rise",
+                    eye,
+                    c(150.0, 0.0, 200.0),
                     side_sun,
                 );
             }

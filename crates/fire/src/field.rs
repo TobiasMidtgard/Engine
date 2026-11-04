@@ -310,8 +310,18 @@ pub struct Tile {
     pub version: u64,
     /// Heat release of the tile, W.
     pub hrr_w: f64,
+    /// Steps it has been simulated (a tile far from everyone keeps its cells as they are),
+    /// and a number no other tile ever had: with `version`, readers can tell its cells are
+    /// exactly as they last saw them.
+    pub steps: u64,
+    pub serial: u64,
     /// Kernel used for this tile in the last step (depends on the local wind).
     kernel: Vec<f32>,
+}
+
+fn next_serial() -> u64 {
+    static SERIAL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    SERIAL.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
 impl Tile {
@@ -520,6 +530,8 @@ impl FireField {
             active: false,
             version: 1,
             hrr_w: 0.0,
+            steps: 0,
+            serial: next_serial(),
             kernel: vec![0.0; KERNEL_LEN],
         });
         self.map.insert(key, i);
@@ -984,6 +996,7 @@ impl FireField {
                     if !process[i] {
                         continue;
                     }
+                    tile.steps += 1;
                     update_tile(tile, &incoming[i], input, cell, field_origin);
                 }
             });
@@ -1200,6 +1213,8 @@ impl FireField {
                 cells,
                 active: true,
                 version,
+                steps: 0,
+                serial: next_serial(),
                 kernel: vec![0.0; KERNEL_LEN],
             });
         }
