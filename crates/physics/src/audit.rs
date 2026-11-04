@@ -5,14 +5,17 @@
 //!
 //! Each mesh is probed with a box a quarter of its size at the middle of its upper half: a
 //! rock sitting on the terrain has its lower half in the ground's collider, its upper half
-//! only in its own. Left out: meshes with a body, a collider or a character on them or an
-//! ancestor (a vehicle, cloth or a tree whose collider is a smaller stand-in on purpose), the
-//! kinds [`SKIPPED`] names (foliage parts, LOD ghosts, NPC stand-ins, debris) plus those
-//! `PHYSICS_COLLIDER_AUDIT_SKIP` names (comma separated type names), and meshes farther than
+//! only in its own. A hollow one (a hall) counts as covered if a ray from above or from one
+//! of its four sides in towards that middle meets a collider.
+//!
+//! Left out: meshes with a body, a collider or a character on them or an ancestor (a vehicle,
+//! cloth, a tree whose collider is a smaller stand-in on purpose); the kinds and names
+//! [`SKIPPED`] lists (foliage parts, LOD ghosts, NPC stand-ins, debris, far stand-ins) plus
+//! those `PHYSICS_COLLIDER_AUDIT_SKIP` lists (comma separated); and meshes farther than
 //! [`NEAR_M`] from every character (colliders streamed in near the action). What it can't
-//! tell: an arch or a ring (its middle is empty), and meshes nothing should collide with (sky,
-//! water), so it lists candidates for a person to look over, grouped by mesh: the same rock
-//! placed 40 times is one row.
+//! tell is a mesh nothing should collide with (sky, water), so it lists candidates for a
+//! person to look over, grouped by mesh: the same rock placed 40 times is one row.
+//!
 //! Playtests 2 (#15) and 3 (#13) asked for it: the waterfall's rocks, the scarp and the
 //! valley's small boulders had no collider.
 
@@ -39,7 +42,7 @@ pub const NEAR_M: f64 = 30.0;
 pub const EVERY_S: f64 = 10.0;
 /// Meshes listed in the log per zone (the file has all).
 const LOGGED: usize = 15;
-/// Component types (the last part of their names) whose meshes are left out: drawn parts with
+/// Component types (the last part of their names), or entity names, whose meshes are left out: drawn parts with
 /// their own way of colliding, or none on purpose (foliage parts and shadow stand-ins, LOD
 /// fade ghosts, NPC stand-ins and flickering lights, falling debris).
 pub const SKIPPED: &[&str] = &[
@@ -49,6 +52,8 @@ pub const SKIPPED: &[&str] = &[
     "StandInPart",
     "Flicker",
     "Debris",
+    // Named: the showcase's far stand-ins for whole districts (HLOD).
+    "hlod proxy",
 ];
 
 /// Every mesh found so far, by (zone, item, mesh, place to a decimetre): where it is, its size.
@@ -144,7 +149,21 @@ pub fn uncovered_meshes(world: &World) -> Vec<Uncovered> {
         };
         hits.clear();
         queries.overlap(&probe, probe_at, Quat::IDENTITY, &filter, &mut hits);
-        if !hits.is_empty() || physical(world, e) || of_skipped_kind(world, e, &skipped) {
+        // A hollow mesh (a hall, a tower) has nothing at its middle: rays from just outside
+        // its box in towards that point, from above and the four sides, meet its walls.
+        let walled = || {
+            [DVec3::Y, DVec3::X, DVec3::NEG_X, DVec3::Z, DVec3::NEG_Z]
+                .iter()
+                .any(|side| {
+                    let reach = (*side * (half + DVec3::splat(0.05))).length();
+                    let from = probe_at + *side * reach;
+                    queries
+                        .raycast(from, (-*side).as_vec3(), reach as f32, &filter)
+                        .is_some()
+                })
+        };
+        if !hits.is_empty() || physical(world, e) || of_skipped_kind(world, e, &skipped) || walled()
+        {
             continue;
         }
         out.push(Uncovered {
@@ -199,8 +218,13 @@ fn physical(world: &World, e: Entity) -> bool {
     }
 }
 
-/// Has `e` a component whose type name ends in one of `skipped`?
+/// Is `e` named one of `skipped`, or has it a component whose type name ends in one?
 fn of_skipped_kind(world: &World, e: Entity, skipped: &[String]) -> bool {
+    if let Some(name) = world.get::<Name>(e)
+        && skipped.iter().any(|s| s == name.as_str())
+    {
+        return true;
+    }
     let Ok(components) = world.inspect_entity(e) else {
         return false;
     };
