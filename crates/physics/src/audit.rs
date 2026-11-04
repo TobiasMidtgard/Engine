@@ -12,7 +12,7 @@
 //! cloth, a tree whose collider is a smaller stand-in on purpose); the kinds and names
 //! [`SKIPPED`] lists (foliage parts, LOD ghosts, NPC stand-ins, debris, far stand-ins) plus
 //! those `PHYSICS_COLLIDER_AUDIT_SKIP` lists (comma separated); and meshes farther than
-//! [`NEAR_M`] from every character (colliders streamed in near the action). What it can't
+//! [`NEAR_M`] from every focus point (colliders streamed in near the action). What it can't
 //! tell is a mesh nothing should collide with (sky, water), so it lists candidates for a
 //! person to look over, grouped by mesh: the same rock placed 40 times is one row.
 //!
@@ -39,17 +39,18 @@ const SAMPLES: usize = 24;
 /// A point of the surface is solid if a collider is this close (m): a hull round a rock's far
 /// mesh, a box round a wall, sit this near what is drawn.
 const TOUCH_M: f32 = 0.2;
-/// Meshes farther than this (m) from every character are not looked at: showcase scenery gets
-/// its colliders only near a focus point (`NearSolid`, within 70 m), as streaming worlds do.
-/// With no character in the world, every mesh is.
+/// Meshes farther than this (m) from every focus point (`engine_world::FocusPoints`, else every
+/// character) are not looked at: showcase scenery gets its colliders only near a focus point
+/// (`NearSolid`, within 70 m), as streaming worlds do. With neither, every mesh is.
 pub const NEAR_M: f64 = 30.0;
 /// Seconds between looks.
 pub const EVERY_S: f64 = 10.0;
 /// Meshes listed in the log per zone (the file has all).
 const LOGGED: usize = 15;
-/// Component types (the last part of their names), or entity names, whose meshes are left out: drawn parts with
-/// their own way of colliding, or none on purpose (foliage parts and shadow stand-ins, LOD
-/// fade ghosts, NPC stand-ins and flickering lights, falling debris).
+/// Component types (the last part of their names), or entity names, whose meshes are left
+/// out: drawn parts with their own way of colliding, or none on purpose (foliage parts and
+/// shadow stand-ins, LOD fade ghosts, NPC stand-ins and flickering lights, falling debris,
+/// shadow-only meshes, far stand-ins).
 pub const SKIPPED: &[&str] = &[
     "PlantPart",
     "ShadowStandIn",
@@ -57,6 +58,7 @@ pub const SKIPPED: &[&str] = &[
     "StandInPart",
     "Flicker",
     "Debris",
+    "ShadowOnly",
     // Named: the showcase's far stand-ins for whole districts (HLOD).
     "hlod proxy",
 ];
@@ -107,10 +109,14 @@ pub fn uncovered_meshes(world: &World) -> Vec<Uncovered> {
                 .filter(|s| !s.is_empty()),
         );
     }
-    let focus: Vec<DVec3> = world
-        .try_query::<(&CharacterController, &GlobalTransform)>()
-        .map(|mut q| q.iter(world).map(|(_, g)| g.translation()).collect())
-        .unwrap_or_default();
+    // Where colliders are streamed in around (the player, the camera); with none, characters.
+    let focus: Vec<DVec3> = match world.get_resource::<engine_world::FocusPoints>() {
+        Some(f) if !f.points.is_empty() => f.points.clone(),
+        _ => world
+            .try_query::<(&CharacterController, &GlobalTransform)>()
+            .map(|mut q| q.iter(world).map(|(_, g)| g.translation()).collect())
+            .unwrap_or_default(),
+    };
     let mut out = Vec::new();
     let mut hits = Vec::new();
     for (e, renderer, global) in q.iter(world) {
