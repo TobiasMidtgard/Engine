@@ -199,7 +199,7 @@ fn hull(points: &[Vec3]) -> Option<ColliderShape> {
     let (corners, _) = rapier3d::parry::transformation::try_convex_hull(&to_parry(points)).ok()?;
     let corners = from_parry(&corners);
     (corners.len() >= 4).then(|| ColliderShape::ConvexHull {
-        points: spread(&corners, MAX_HULL_POINTS),
+        points: spread(&corners, MAX_HULL_POINTS).into(),
     })
 }
 
@@ -251,8 +251,8 @@ fn named_shape(part: &Part, kind: Named) -> Option<(Vec3, Quat, ColliderShape)> 
                     Vec3::ZERO,
                     Quat::IDENTITY,
                     ColliderShape::TriMesh {
-                        vertices: part.points.clone(),
-                        indices: part.triangles.clone(),
+                        vertices: part.points.clone().into(),
+                        indices: part.triangles.clone().into(),
                     },
                 )
             });
@@ -321,8 +321,8 @@ pub fn fit(world: &mut World, root: Entity, key: &str, kind: &str) -> Option<Col
             "mesh" => {
                 let (vertices, triangles) = merged(render());
                 (!triangles.is_empty()).then_some(ColliderShape::TriMesh {
-                    vertices,
-                    indices: triangles,
+                    vertices: vertices.into(),
+                    indices: triangles.into(),
                 })
             }
             _ => None,

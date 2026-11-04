@@ -1526,7 +1526,10 @@ fn build_cell(source: &ChunkSource, field: &LandmarkField, key: NodeKey, seed: u
                     .map(|t| [start + t[0], start + t[1], start + t[2]]),
             );
         }
-        ColliderShape::TriMesh { vertices, indices }
+        ColliderShape::TriMesh {
+            vertices: vertices.into(),
+            indices: indices.into(),
+        }
     });
     CellMesh {
         origin,

@@ -126,7 +126,10 @@ fn mesh_ball(app: &mut App, levels: u32, center: DVec3, radius: f32) -> Entity {
         .spawn((
             Transform::from_translation(center).with_scale(Vec3::splat(radius)),
             Collider {
-                shape: ColliderShape::TriMesh { vertices, indices },
+                shape: ColliderShape::TriMesh {
+                    vertices: vertices.into(),
+                    indices: indices.into(),
+                },
                 ..Default::default()
             },
         ))

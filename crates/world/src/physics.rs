@@ -160,14 +160,16 @@ pub enum ColliderShape {
         radius: f32,
         half_height: f32,
     },
-    /// Convex hull of points.
+    /// Convex hull of points. Shared (`Arc`), so a backend's off-frame build and every copy
+    /// of the shape read the same points instead of copying them (`vec.into()` makes one).
     ConvexHull {
-        points: Vec<Vec3>,
+        points: std::sync::Arc<[Vec3]>,
     },
-    /// Triangle mesh (static geometry; dynamic bodies should use hulls or compounds).
+    /// Triangle mesh (static geometry; dynamic bodies should use hulls or compounds). Shared
+    /// like [`ColliderShape::ConvexHull`]'s points.
     TriMesh {
-        vertices: Vec<Vec3>,
-        indices: Vec<[u32; 3]>,
+        vertices: std::sync::Arc<[Vec3]>,
+        indices: std::sync::Arc<[[u32; 3]]>,
     },
     /// Height grid centered on the collider, `rows × cols` samples spanning `size` (x, z).
     Heightfield {

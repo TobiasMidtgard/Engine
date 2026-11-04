@@ -188,7 +188,7 @@ fn shape_bounds(shape: &ColliderShape, at: Vec3, rot: Quat, min: &mut Vec3, max:
             half_height,
         } => corners(Vec3::new(*radius, half_height + radius, *radius)),
         ColliderShape::ConvexHull { points } => {
-            for p in points {
+            for p in points.iter() {
                 let p = at + rot * *p;
                 *min = min.min(p);
                 *max = max.max(p);

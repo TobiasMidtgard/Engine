@@ -76,7 +76,13 @@ fn ground_of(app: &mut App, kind: Ground, surface: &str) {
                     indices.extend([[a, b, c], [c, b, d]]);
                 }
             }
-            (0.0, ColliderShape::TriMesh { vertices, indices })
+            (
+                0.0,
+                ColliderShape::TriMesh {
+                    vertices: vertices.into(),
+                    indices: indices.into(),
+                },
+            )
         }
     };
     app.world.spawn((

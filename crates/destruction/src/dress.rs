@@ -167,7 +167,13 @@ fn solid_of(
         .iter()
         .max_by_key(|(_, mb)| mb.indices.len())
         .map_or(DestructibleMaterial::Stone, |(m, _)| *m);
-    (ColliderShape::TriMesh { vertices, indices }, material)
+    (
+        ColliderShape::TriMesh {
+            vertices: vertices.into(),
+            indices: indices.into(),
+        },
+        material,
+    )
 }
 
 /// Prop models being built on the bake threads ([`crate::assets::bake_pool`]), by the

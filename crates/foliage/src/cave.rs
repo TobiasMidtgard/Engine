@@ -425,7 +425,7 @@ pub fn cave_chamber_collider(c: &CaveChamber) -> ColliderShape {
             .iter()
             .map(|v| Vec3::from_array(v.position))
             .collect(),
-        indices: mesh.indices.as_chunks::<3>().0.to_vec(),
+        indices: mesh.indices.as_chunks::<3>().0.to_vec().into(),
     }
 }
 
@@ -594,7 +594,7 @@ mod tests {
             panic!("not a triangle mesh");
         };
         let mut edges = std::collections::HashMap::new();
-        for t in &indices {
+        for t in indices.iter() {
             assert!(
                 t[0] != t[1] && t[1] != t[2] && t[0] != t[2],
                 "degenerate {t:?}"

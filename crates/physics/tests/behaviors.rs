@@ -611,7 +611,12 @@ fn characters_keep_sliding_along_moving_walls_they_press_into() {
         .collect();
     for (name, shape) in [
         ("box", ColliderShape::Cuboid { half_extents: half }),
-        ("hull", ColliderShape::ConvexHull { points: corners }),
+        (
+            "hull",
+            ColliderShape::ConvexHull {
+                points: corners.into(),
+            },
+        ),
     ] {
         for wall_speed in [0.0, 3.0] {
             for climb in [0.0, 6.5] {
@@ -1531,8 +1536,9 @@ fn fire_at(wall: &str, speed: f32, ccd: bool) -> (f64, f64) {
                 Transform::from_xyz(wall_x, 1.0, 0.0),
                 Collider {
                     shape: ColliderShape::TriMesh {
-                        vertices: vec![v(-2.0, -2.0), v(-2.0, 2.0), v(2.0, 2.0), v(2.0, -2.0)],
-                        indices: vec![[0, 1, 2], [0, 2, 3]],
+                        vertices: vec![v(-2.0, -2.0), v(-2.0, 2.0), v(2.0, 2.0), v(2.0, -2.0)]
+                            .into(),
+                        indices: vec![[0, 1, 2], [0, 2, 3]].into(),
                     },
                     ..Default::default()
                 },
@@ -1606,8 +1612,8 @@ fn thin_tiles_dropped_on_a_mesh_floor_land_on_it() {
         Transform::default(),
         Collider {
             shape: ColliderShape::TriMesh {
-                vertices: vec![v(-5.0, -5.0), v(-5.0, 5.0), v(5.0, 5.0), v(5.0, -5.0)],
-                indices: vec![[0, 1, 2], [0, 2, 3]],
+                vertices: vec![v(-5.0, -5.0), v(-5.0, 5.0), v(5.0, 5.0), v(5.0, -5.0)].into(),
+                indices: vec![[0, 1, 2], [0, 2, 3]].into(),
             },
             ..Default::default()
         },
@@ -1657,7 +1663,10 @@ fn big_mesh_floor(app: &mut App) -> Entity {
         .spawn((
             Transform::default(),
             Collider {
-                shape: ColliderShape::TriMesh { vertices, indices },
+                shape: ColliderShape::TriMesh {
+                    vertices: vertices.into(),
+                    indices: indices.into(),
+                },
                 ..Default::default()
             },
         ))
@@ -1759,9 +1768,7 @@ fn a_big_static_mesh_changed_under_a_body_takes_its_new_shape() {
     if let ColliderShape::TriMesh { vertices, .. } =
         &mut app.world.get_mut::<Collider>(floor).unwrap().shape
     {
-        for v in vertices.iter_mut() {
-            v.y -= 0.5;
-        }
+        *vertices = vertices.iter().map(|v| *v - Vec3::Y * 0.5).collect();
     }
     app.update_n(90);
     let y = pos(&app, ball).y;

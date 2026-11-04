@@ -184,7 +184,7 @@ fn hull(points: &[Vec3]) -> Option<ColliderShape> {
     let (corners, _) = rapier3d::parry::transformation::try_convex_hull(&to_parry(points)).ok()?;
     let corners = from_parry(&corners);
     (corners.len() >= 4).then(|| ColliderShape::ConvexHull {
-        points: spread(&corners, MAX_HULL_POINTS),
+        points: spread(&corners, MAX_HULL_POINTS).into(),
     })
 }
 
@@ -237,8 +237,8 @@ pub fn fit_points(points: &[Vec3], triangles: &[[u32; 3]], fit: Fit) -> Option<C
             })
         }
         Fit::Mesh => (!triangles.is_empty()).then(|| ColliderShape::TriMesh {
-            vertices: points.to_vec(),
-            indices: triangles.to_vec(),
+            vertices: points.to_vec().into(),
+            indices: triangles.to_vec().into(),
         }),
     }
 }

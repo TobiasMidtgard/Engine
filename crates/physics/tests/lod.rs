@@ -61,7 +61,9 @@ fn rock(app: &mut App, at: DVec3, rnd: &mut impl FnMut() -> f32) -> Entity {
             Transform::from_translation(at).with_rotation(Quat::from_rotation_y(rnd() * 6.0)),
             RigidBody::dynamic(),
             Collider {
-                shape: ColliderShape::ConvexHull { points },
+                shape: ColliderShape::ConvexHull {
+                    points: points.into(),
+                },
                 ..Collider::cuboid(Vec3::ONE)
             }
             .with_density(2700.0),

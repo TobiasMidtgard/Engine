@@ -54,7 +54,7 @@ pub fn shape(shape: &ColliderShape, scale: Vec3) -> Option<SharedShape> {
             let verts: Vec<Vec3> = vertices.iter().map(|p| *p * scale).collect();
             SharedShape::trimesh_with_flags(
                 verts,
-                indices.clone(),
+                indices.to_vec(),
                 TriMeshFlags::FIX_INTERNAL_EDGES | TriMeshFlags::MERGE_DUPLICATE_VERTICES,
             )
             .ok()
@@ -519,7 +519,15 @@ mod tests {
         .unwrap();
         let c = s.as_cuboid().unwrap();
         assert_eq!(c.half_extents, Vec3::new(2.0, 2.0, 1.5));
-        assert!(shape(&ColliderShape::ConvexHull { points: vec![] }, Vec3::ONE).is_none());
+        assert!(
+            shape(
+                &ColliderShape::ConvexHull {
+                    points: vec![].into()
+                },
+                Vec3::ONE
+            )
+            .is_none()
+        );
     }
 
     #[test]

@@ -670,7 +670,9 @@ pub fn spawn_debris_system(
                     ..RigidBody::default()
                 },
                 Collider {
-                    shape: ColliderShape::ConvexHull { points: hull },
+                    shape: ColliderShape::ConvexHull {
+                        points: hull.into(),
+                    },
                     surface,
                     density: props.density,
                     ..Collider::default()
