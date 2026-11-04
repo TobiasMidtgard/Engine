@@ -12,7 +12,9 @@ use engine_world::LoadingBudget;
 #[derive(Resource, Debug, Clone)]
 pub struct FoliageLoading {
     /// Build on worker threads and put the results in place over frames (true), or build
-    /// everything in the frame that needs it (tests, tools that want it at once).
+    /// everything in the frame that needs it (tests, tools that want it at once). Also where
+    /// the regions' live ecology steps run: on a worker, or at once in the tick (both land at
+    /// the next fixed tick, so the forest grows the same either way).
     pub background: bool,
     /// Most milliseconds a frame spends putting finished builds into the world during play.
     /// While a loading screen is up (`engine_world::LoadingBudget` present) its budget
