@@ -116,10 +116,16 @@ pub struct FrameUniform {
     /// The aerial perspective table (`aerial::frame_params`): its reach (m, 0 = off: every
     /// pixel marches), 1 / depth scale (1/m), 1 / log2(1 + reach / depth scale), depth slices.
     pub aerial: [f32; 4],
-    /// Shading knobs: sun-shadow filter taps (`RenderSettings::shadow_filter_taps`), unused,
-    /// unused, unused.
+    /// Shading knobs: sun-shadow filter taps (`RenderSettings::shadow_filter_taps`), the
+    /// [`crate::GrassBender`]s in `benders`, unused, unused.
     pub shading: [f32; 4],
+    /// The [`crate::GrassBender`]s nearest the camera ([`ViewData::benders`]): camera-relative
+    /// center xyz, radius (m); `shading.y` of them are set. Swaying meshes bend away from them.
+    pub benders: [[f32; 4]; MAX_BENDERS],
 }
+
+/// Most [`crate::GrassBender`]s that push grass and swaying plants aside (nearest the camera).
+pub const MAX_BENDERS: usize = 16;
 
 /// Most [`SkyLightVolume`]s shaded per frame (nearest the camera first).
 pub const MAX_SKY_VOLUMES: usize = 16;
@@ -257,6 +263,9 @@ pub struct ViewData {
     pub debug_view: DebugView,
     /// Angular radius of the sun disc, radians.
     pub sun_angular_radius: f32,
+    /// The [`crate::GrassBender`]s nearest the camera (at most [`MAX_BENDERS`], nearest
+    /// first): camera-relative center xyz, radius (m).
+    pub benders: Vec<[f32; 4]>,
 }
 
 impl ViewData {
@@ -706,6 +715,24 @@ pub fn build_view(
         .or_else(|| world.get_resource::<WeatherState>().map(|w| w.wind))
         .unwrap_or(Vec3::ZERO);
 
+    // Grass benders: nearest first.
+    let mut benders: Vec<[f32; 4]> = world
+        .query::<(&crate::GrassBender, &GlobalTransform)>()
+        .iter(world)
+        .filter(|(b, _)| b.radius > 0.0)
+        .map(|(b, gt)| {
+            (gt.translation() - origin)
+                .as_vec3()
+                .extend(b.radius)
+                .to_array()
+        })
+        .collect();
+    benders.sort_by(|a, b| {
+        let d = |s: &[f32; 4]| s[0] * s[0] + s[1] * s[1] + s[2] * s[2];
+        d(a).total_cmp(&d(b))
+    });
+    benders.truncate(MAX_BENDERS);
+
     // Point lights: nearest first.
     let mut lights: Vec<(f32, GpuPointLight)> = Vec::new();
     let mut q = world.query::<(&PointLight, &GlobalTransform)>();
@@ -825,6 +852,7 @@ pub fn build_view(
         sky_volumes: volumes.into_iter().map(|(_, v)| v).collect(),
         debug_view: settings.debug_view,
         sun_angular_radius,
+        benders,
     }
 }
 
@@ -1052,11 +1080,20 @@ pub fn frame_uniform(world: &World, v: &ViewData) -> FrameUniform {
         aerial: crate::aerial::frame_params(settings, v),
         shading: [
             settings.shadow_filter_taps.clamp(1, 64) as f32,
-            0.0,
+            v.benders.len().min(MAX_BENDERS) as f32,
             0.0,
             0.0,
         ],
+        benders: gpu_benders(&v.benders),
     }
+}
+
+/// [`ViewData::benders`] as the uniforms carry them (unset ones zero).
+pub fn gpu_benders(benders: &[[f32; 4]]) -> [[f32; 4]; MAX_BENDERS] {
+    let mut out = [[0.0; 4]; MAX_BENDERS];
+    let n = benders.len().min(MAX_BENDERS);
+    out[..n].copy_from_slice(&benders[..n]);
+    out
 }
 
 #[cfg(test)]
@@ -1112,7 +1149,7 @@ mod tests {
         // screen-space block (mat4 + 4 vec4), volumetric fog (vec4), far shadow (mat4 + vec4),
         // sky (vec4), surface weather (2 vec4), cloud shadows (mat4 + 2 vec4), the air (5 vec4),
         // the window (vec4), probe GI (3 vec4), the clip plane (vec4), the aerial table (vec4),
-        // shading knobs (vec4).
+        // shading knobs (vec4), benders.
         assert_eq!(
             std::mem::size_of::<FrameUniform>(),
             7 * 64
@@ -1137,6 +1174,7 @@ mod tests {
                 + 16
                 + 16
                 + 16
+                + MAX_BENDERS * 16
         );
         assert_eq!(std::mem::size_of::<GpuSkyVolume>(), 80);
         assert_eq!(std::mem::size_of::<GpuPointLight>(), 32);

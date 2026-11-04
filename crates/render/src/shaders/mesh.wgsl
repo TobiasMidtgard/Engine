@@ -94,12 +94,14 @@ struct VertexOut {
 
 // Wind sway of a vertex (meters, camera-relative): the material's `wind_sway` times the vertex
 // color's alpha, its wind weight (0 = still, such as a trunk's base; 1 = full sway, the default
-// of meshes without vertex colors), growing with height in the mesh.
+// of meshes without vertex colors), growing with height in the mesh. Benders push the same
+// vertices aside by that weight.
 fn vertex_wind(in: VertexIn, rel: vec3<f32>) -> vec3<f32> {
     let sway = materials[in.extra.x].params2.y * saturate(in.color.a);
     if (sway <= 0.0) { return vec3<f32>(0.0); }
     let h01 = saturate((in.position.y - bitcast<f32>(in.extra.z)) / max(bitcast<f32>(in.extra.w), 1e-3));
-    return wind_offset(rel, h01, sway);
+    // Pushed aside by the benders (characters, vehicles) near the camera, as grass is.
+    return wind_offset(rel, h01, sway) + bender_offset(rel, h01, in.color.a);
 }
 
 // The model's scale along each object axis.

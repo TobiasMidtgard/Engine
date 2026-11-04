@@ -3313,7 +3313,9 @@ impl RenderFeature for MeshFeature {
                     let min_size = if c < MAX_CASCADES {
                         min_caster_texels
                     } else {
-                        min_pixels
+                        // The far and sky maps: under two texels a caster is a speck no filter
+                        // keeps (pebbles and cones in the half-meter sky map).
+                        min_pixels.max(2.0)
                     };
                     if !inside || 2.0 * item.radius < min_size * texel {
                         continue;

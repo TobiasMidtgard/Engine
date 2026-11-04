@@ -10,6 +10,8 @@ struct ShadowView {
     wind: vec4<f32>,         // wind velocity xyz
     time: vec4<f32>,         // world seconds, real seconds, delta, w: 1 = sway at rest
     camera_frac: vec4<f32>,  // camera position modulo 4096 (tiling coordinates)
+    bend: vec4<f32>,         // x: benders set (none where swaying rests, time.w 1)
+    benders: array<vec4<f32>, 16>, // as Frame.benders (camera-relative center xyz, radius)
 };
 
 // Must match `struct Material` in mesh.wgsl and `GpuMaterial` in material.rs.
@@ -66,7 +68,12 @@ fn shadow_clip(in: VertexIn) -> vec4<f32> {
     let sway = materials[in.extra.x].params2.y * saturate(in.color.a);
     if (sway > 0.0) {
         let h01 = saturate((in.position.y - bitcast<f32>(in.extra.z)) / max(bitcast<f32>(in.extra.w), 1e-3));
-        rel += shadow_wind(rel, h01, sway);
+        // Pushed aside by the benders as in the scene (`bender_offset` in lib_frame.wgsl).
+        var bend = vec3<f32>(0.0);
+        for (var i = 0u; i < min(u32(shadow_view.bend.x), 16u); i++) {
+            bend += bender_push(rel, shadow_view.benders[i], h01, in.color.a);
+        }
+        rel += shadow_wind(rel, h01, sway) + bender_limit(bend);
     }
     var clip = shadow_view.view_proj * vec4<f32>(rel, 1.0);
     // Pancake casters behind the near plane onto it so they still cast shadows.

@@ -638,6 +638,11 @@ pub struct ShadowViewUniform {
     pub wind: [f32; 4],
     pub time: [f32; 4],
     pub camera_frac: [f32; 4],
+    /// x: the benders set in `benders` (only while swaying moves, `time.w` 0), yzw unused.
+    pub bend: [f32; 4],
+    /// [`crate::frame::FrameUniform::benders`]: swaying casters bend away from them as in the
+    /// scene, so their shadows match.
+    pub benders: [[f32; 4]; crate::frame::MAX_BENDERS],
 }
 
 /// Shadow map texels (meters) from which swaying leaves are drawn at rest: one pose that

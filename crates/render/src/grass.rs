@@ -31,7 +31,7 @@ use serde::{Deserialize, Serialize};
 use crate::features::{
     FeatureStats, FrameContext, GpuShared, GrowBuffer, PrepareOut, RenderFeature, RenderPhase,
 };
-use crate::frame::ViewData;
+use crate::frame::{MAX_BENDERS, ViewData};
 use crate::renderer::layout_entry;
 use crate::settings::RenderSettings;
 use crate::shadows::MAX_CASCADES;
@@ -41,7 +41,6 @@ const TILE: f32 = 8.0;
 /// Instance index bits for the blade within its tile.
 const BLADE_BITS: u32 = 16;
 const MAX_BLADES_PER_TILE: u32 = (1 << BLADE_BITS) - 1;
-const MAX_BENDERS: usize = 16;
 const MAX_BLADES_PER_M2: f32 = 1000.0;
 /// Blades a cull job covers (`@workgroup_size` in grass_cull.wgsl).
 const CULL_CHUNK: u32 = 64;
@@ -454,6 +453,8 @@ impl GrassStyle {
 
 /// Pushes grass aside and flattens it: a character's feet or body, a rolling boulder, a
 /// landing ship. A sphere of `radius` meters around the entity; the 16 nearest the camera act.
+/// Swaying meshes (`StandardMaterial::wind_sway`: bushes, ferns, crops) give way to the same
+/// spheres, by their vertices' wind weight, in the scene and in the near shadows.
 #[derive(Component, Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[require(Transform)]
 #[serde(default)]
@@ -925,7 +926,6 @@ pub struct GrassFeature {
     wind: SteadyWind,
     /// Made in `prepare_serial`, read in `prepare_shared`.
     fields_query: Option<FieldsQuery>,
-    benders_query: Option<QueryState<(&'static GrassBender, &'static GlobalTransform)>>,
     /// Thinned this frame to fit the records binding (warned once per stretch).
     thinned_to_fit: bool,
 }
@@ -1228,9 +1228,6 @@ impl RenderFeature for GrassFeature {
         if self.fields_query.is_none() {
             self.fields_query = Some(world.query());
         }
-        if self.benders_query.is_none() {
-            self.benders_query = Some(world.query());
-        }
     }
 
     fn prepare_shared(
@@ -1269,9 +1266,7 @@ impl RenderFeature for GrassFeature {
         }
         let gust = self.wind.uniform(view.time);
         let mut seen = Vec::new();
-        let (Some(fields_query), Some(benders_query)) =
-            (&mut self.fields_query, &mut self.benders_query)
-        else {
+        let Some(fields_query) = &mut self.fields_query else {
             return;
         };
         for (entity, field, gt, wear) in fields_query.iter(world) {
@@ -1437,24 +1432,12 @@ impl RenderFeature for GrassFeature {
         }
         self.maps.retain(|e, _| seen.contains(e));
 
-        // Benders nearest the camera.
-        let mut benders: Vec<[f32; 4]> = benders_query
-            .iter(world)
-            .map(|(b, gt)| {
-                view.relative(gt.translation())
-                    .extend(b.radius.max(0.0))
-                    .to_array()
-            })
-            .filter(|s| s[3] > 0.0)
-            .collect();
-        benders.sort_by(|a, b| {
-            let d = |s: &[f32; 4]| s[0] * s[0] + s[1] * s[1] + s[2] * s[2];
-            d(a).total_cmp(&d(b))
-        });
-        benders.truncate(MAX_BENDERS);
+        // Benders nearest the camera (gathered with the view; swaying meshes bend away from
+        // the same ones).
         let mut gpu_benders = GpuBenders::zeroed();
-        gpu_benders.count[0] = benders.len() as u32;
-        gpu_benders.spheres[..benders.len()].copy_from_slice(&benders);
+        let n = view.benders.len().min(MAX_BENDERS);
+        gpu_benders.count[0] = n as u32;
+        gpu_benders.spheres[..n].copy_from_slice(&view.benders[..n]);
 
         // Upload.
         if self.order.is_empty() {
