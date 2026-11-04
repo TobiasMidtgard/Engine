@@ -55,6 +55,7 @@ struct Globals {
     waterline: vec4<f32>,  // the camera at the waterline: split per pixel (1/0), lens dome radius (m), lens wetness 0..1, seconds since it surfaced
     waterline2: vec4<f32>, // meters of the dome per pixel, drop seed, unused, unused
     trail: vec4<f32>,      // the ripple grid's trail (`trail.rs`): corner rel camera x, z, size (m), on
+    falls: vec4<f32>,      // where the falls' strips were built relative to, rel camera xyz; unused
 };
 
 struct WaterUniform {
@@ -1632,6 +1633,11 @@ struct FallOut {
 fn vs_falls(v: FallIn, @builtin(instance_index) layer: u32) -> FallOut {
     var out: FallOut;
     out.rel = v.rel_q.xyz;
+    // Curtains, spray and wet rock are built once relative to where the camera was then;
+    // spray clouds and splashes are built for this view.
+    if (v.uv_speed.w < 0.5) {
+        out.rel += water.g.falls.xyz;
+    }
     out.uv = v.uv_speed.xy;
     if (layer == 1u) {
         // A falling jet is a body of water, not one sheet: a second sheet of it behind the

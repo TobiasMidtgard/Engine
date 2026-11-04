@@ -59,6 +59,9 @@ const ROCK_KIND: f32 = 0.45;
 const MAX_LIPS: usize = 1024;
 /// Lips further than this from the camera aren't drawn, meters.
 const FALLS_REACH: f64 = 1500.0;
+/// The falls' strips are built again once the camera is this far from where they were built
+/// (which lips are near enough to draw changes, and the strips are relative to it in f32).
+const FALLS_REANCHOR_M: f64 = 64.0;
 
 /// One vertex of a falling curtain (see `vs_falls`).
 #[repr(C)]
@@ -436,6 +439,9 @@ struct Globals {
     /// The trail of foam and bubbles round the ripple grid (`crate::trail`): corner rel camera
     /// x, z, size (m), anything on it (1/0).
     trail: [f32; 4],
+    /// The falls' strips (`Gpu::fall_strips`): where they were built relative to, rel this
+    /// camera xyz (`vs_falls` moves them by it), unused.
+    falls: [f32; 4],
 }
 
 #[repr(C)]
@@ -588,11 +594,17 @@ struct Gpu {
     /// Vertices the buffer holds, and how many to draw this frame.
     fall_capacity: usize,
     fall_count: u32,
-    /// The falls' rock and curtains as the main view last built them, relative to its camera
-    /// at `fall_origin` (`None` before the first): extra views (the lake mirror) shift these
-    /// instead of tracing every lip again.
+    /// The falls' rock and curtains as last built, relative to `fall_origin` (`None` before
+    /// the first): every view draws them moved to its own camera in `vs_falls`, and they are
+    /// built and uploaded again only when the falls change or the camera has gone
+    /// [`FALLS_REANCHOR_M`] from where they were built. (Traced again for every frame they
+    /// cost 0.53 ms of the prepare at the fortress, round 29.)
     fall_strips: Vec<FallVertex>,
     fall_origin: Option<DVec3>,
+    /// The falls the strips were built from (`Falls` addresses, one per visible flow).
+    fall_key: Vec<usize>,
+    /// Whether the buffer holds `fall_strips` as they are.
+    fall_uploaded: bool,
     /// The fine wind waves' tiles.
     detail: detail::DetailGpu,
     /// The dispersive ripples over the ripple grid.
@@ -1203,6 +1215,8 @@ impl WaterFeature {
             fall_count: 0,
             fall_strips: Vec::new(),
             fall_origin: None,
+            fall_key: Vec::new(),
+            fall_uploaded: false,
             detail,
             surface,
             swash,
@@ -1227,22 +1241,21 @@ impl WaterFeature {
         state: &WaterState,
         view: &ViewData,
         plunges: &[(DVec3, Vec2, f32)],
-    ) {
-        // The falls as the flow step last worked them out (not traced again each frame). An
-        // extra view takes the main view's strips of last frame, moved to its own camera.
-        let reused = view.extra_view && gpu.fall_origin.is_some();
-        let mut shifted = Vec::new();
-        let strips = if let Some(o) = gpu.fall_origin.filter(|_| reused) {
-            let d = (o - view.origin).as_vec3();
-            shifted.extend(gpu.fall_strips.iter().map(|v| {
-                let mut v = *v;
-                v.rel_q[0] += d.x;
-                v.rel_q[1] += d.y;
-                v.rel_q[2] += d.z;
-                v
-            }));
-            &shifted
-        } else {
+    ) -> [f32; 4] {
+        // The falls as the flow step last worked them out (a few times a second while the
+        // water moves), built once for every view and frame until they change.
+        let key: Vec<usize> = state
+            .flows
+            .iter()
+            .filter(|sim| sim.visible)
+            .map(|sim| sim.falls() as *const crate::flow::Falls as usize)
+            .collect();
+        let stale = gpu.fall_key != key
+            || gpu
+                .fall_origin
+                .is_none_or(|o| o.distance(view.origin) > FALLS_REANCHOR_M);
+        // An extra view (the lake mirror, drawn first) keeps the main view's strips.
+        if stale && (!view.extra_view || gpu.fall_origin.is_none()) {
             type Drawn<'a> = (
                 f64,
                 &'a crate::flow::Lip,
@@ -1280,11 +1293,14 @@ impl WaterFeature {
             }
             // The wet rock first, under the curtains; spray clouds last, over their feet.
             vertices.append(&mut curtains);
-            if !view.extra_view {
-                gpu.fall_origin = Some(view.origin);
-            }
-            &gpu.fall_strips
-        };
+            gpu.fall_origin = Some(view.origin);
+            gpu.fall_key = key;
+            gpu.fall_uploaded = false;
+        }
+        let shift = gpu.fall_origin.map_or([0.0; 4], |o| {
+            (o - view.origin).as_vec3().extend(0.0).to_array()
+        });
+        let strips = &gpu.fall_strips;
         let mut puffs = Vec::new();
         if !strips.is_empty() {
             let (right, up) = (view.rotation * Vec3::X, view.rotation * Vec3::Y);
@@ -1303,22 +1319,27 @@ impl WaterFeature {
         let count = strips.len() + puffs.len();
         gpu.fall_count = count as u32;
         if count == 0 {
-            return;
+            return shift;
         }
         if count > gpu.fall_capacity {
             gpu.fall_capacity = count.next_power_of_two();
             gpu.fall_buffer = Self::fall_buffer(&shared.device, gpu.fall_capacity);
+            gpu.fall_uploaded = false;
         }
-        let strips = if reused { &shifted } else { &gpu.fall_strips };
-        shared
-            .queue
-            .write_buffer(&gpu.fall_buffer, 0, bytemuck::cast_slice(strips));
+        let strips = &gpu.fall_strips;
+        if !gpu.fall_uploaded {
+            shared
+                .queue
+                .write_buffer(&gpu.fall_buffer, 0, bytemuck::cast_slice(strips));
+            gpu.fall_uploaded = true;
+        }
         if !puffs.is_empty() {
             let at = (strips.len() * std::mem::size_of::<FallVertex>()) as u64;
             shared
                 .queue
                 .write_buffer(&gpu.fall_buffer, at, bytemuck::cast_slice(&puffs));
         }
+        shift
     }
 
     /// Fill one body's uniform and decide which grid bands to draw.
@@ -2208,6 +2229,11 @@ impl RenderFeature for WaterFeature {
             0.0,
             0.0,
         ];
+        drop(span);
+        let span = tracing::info_span!("water", name = "falls upload").entered();
+        g.falls = Self::upload_falls(gpu, shared, &state, view, &plunges);
+        drop(span);
+        let span = tracing::info_span!("water", name = "uniform").entered();
         uniform.g = g;
         shared
             .queue
@@ -2223,9 +2249,6 @@ impl RenderFeature for WaterFeature {
         drop(span);
         let span = tracing::info_span!("water", name = "flow upload").entered();
         Self::upload_flows(gpu, shared, &state, view);
-        drop(span);
-        let span = tracing::info_span!("water", name = "falls upload").entered();
-        Self::upload_falls(gpu, shared, &state, view, &plunges);
         drop(span);
 
         // Stats.
@@ -2453,11 +2476,12 @@ mod tests {
     #[test]
     fn uniform_layout_matches_the_shader() {
         // WGSL: Globals 10 vec4 + 4 showers + 8 plunges + the mirror's matrix and 2 vec4 +
-        // the shelter mask's + the swash's 2 + the waterline's 2 + the trail's; GpuBody 11 vec4
+        // the shelter mask's + the swash's 2 + the waterline's 2 + the trail's + the falls';
+        // GpuBody 11 vec4
         // + 24 waves of 2 vec4.
         assert_eq!(
             std::mem::size_of::<Globals>(),
-            (10 + 4 + 8 + 4 + 2 + 1 + 2 + 2 + 1) * 16
+            (10 + 4 + 8 + 4 + 2 + 1 + 2 + 2 + 1 + 1) * 16
         );
         assert_eq!(std::mem::size_of::<GpuBody>(), (11 + MAX_WAVES * 2) * 16);
         assert_eq!(
