@@ -40,7 +40,7 @@ const SAMPLES: usize = 24;
 /// mesh, a box round a wall, sit this near what is drawn.
 const TOUCH_M: f32 = 0.2;
 /// Meshes farther than this (m) from every focus point (`engine_world::FocusPoints`, else every
-/// character) are not looked at: showcase scenery gets its colliders only near a focus point
+/// character, plus active cameras) are not looked at: showcase scenery gets its colliders only near a focus point
 /// (`NearSolid`, within 70 m), as streaming worlds do. With neither, every mesh is.
 pub const NEAR_M: f64 = 30.0;
 /// Seconds between looks.
@@ -80,7 +80,7 @@ pub struct Uncovered {
     pub zone: String,
     /// The nearest name on it or an ancestor.
     pub item: String,
-    /// The mesh: its asset path, or its handle.
+    /// The mesh: its asset path or handle, its vertex count and its own size.
     pub mesh: String,
     pub center: DVec3,
     /// Its largest extent, m.
@@ -110,13 +110,21 @@ pub fn uncovered_meshes(world: &World) -> Vec<Uncovered> {
         );
     }
     // Where colliders are streamed in around (the player, the camera); with none, characters.
-    let focus: Vec<DVec3> = match world.get_resource::<engine_world::FocusPoints>() {
+    // Active cameras count too, so a camera flying a tour audits each stop it shows.
+    let mut focus: Vec<DVec3> = match world.get_resource::<engine_world::FocusPoints>() {
         Some(f) if !f.points.is_empty() => f.points.clone(),
         _ => world
             .try_query::<(&CharacterController, &GlobalTransform)>()
             .map(|mut q| q.iter(world).map(|(_, g)| g.translation()).collect())
             .unwrap_or_default(),
     };
+    if let Some(mut q) = world.try_query::<(&engine_render::Camera, &GlobalTransform)>() {
+        focus.extend(
+            q.iter(world)
+                .filter(|(c, _)| c.active)
+                .map(|(_, g)| g.translation()),
+        );
+    }
     let mut out = Vec::new();
     let mut hits = Vec::new();
     for (e, renderer, global) in q.iter(world) {
@@ -176,10 +184,17 @@ pub fn uncovered_meshes(world: &World) -> Vec<Uncovered> {
             entity: e,
             zone: zone_of(world, e),
             item: kind(crate::report::label(world, e)),
-            mesh: match &renderer.mesh {
-                MeshRef::Asset(key) => key.to_string(),
-                _ => handle.map_or_else(String::new, |h| format!("{h:?}")),
-            },
+            mesh: format!(
+                "{} ({} vertices, {:.1}x{:.1}x{:.1} m)",
+                match &renderer.mesh {
+                    MeshRef::Asset(key) => key.to_string(),
+                    _ => handle.map_or_else(String::new, |h| format!("{h:?}")),
+                },
+                mesh.vertices.len(),
+                aabb.max.x - aabb.min.x,
+                aabb.max.y - aabb.min.y,
+                aabb.max.z - aabb.min.z,
+            ),
             center,
             size,
         });
@@ -259,7 +274,7 @@ fn zone_of(world: &World, e: Entity) -> String {
 }
 
 /// Every [`EVERY_S`] seconds: log what [`uncovered_meshes`] finds, and write the file
-/// (module docs). Added only when `PHYSICS_COLLIDER_AUDIT` is set.
+/// (module docs). Added only when `PHYSICS_COLLIDER_AUDIT` is set, after transforms settle.
 pub(crate) fn audit_colliders(world: &mut World, mut state: Local<AuditState>) {
     if state
         .last

@@ -232,7 +232,12 @@ impl Plugin for PhysicsPlugin {
             .add_systems(Last, step::note_removals);
         // Only asked for (it reads every drawn mesh): `audit` module docs.
         if std::env::var_os("PHYSICS_COLLIDER_AUDIT").is_some() {
-            app.add_systems(Update, audit::audit_colliders);
+            // After transforms settle: a mesh spawned this frame (a streamed cell, a LOD ghost)
+            // still has an identity transform before then, and would be judged at the origin.
+            app.add_systems(
+                PostUpdate,
+                audit::audit_colliders.in_set(engine_core::schedule::UpdateSet::AfterPropagate),
+            );
         }
         api::register(app);
     }
