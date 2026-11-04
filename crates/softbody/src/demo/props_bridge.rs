@@ -616,7 +616,12 @@ pub(super) fn stone_pier(
             hull.push(Vec3::new(x * h, y, z * h));
         }
     }
-    colliders.push(part(Vec3::ZERO, ColliderShape::ConvexHull { points: hull }));
+    colliders.push(part(
+        Vec3::ZERO,
+        ColliderShape::ConvexHull {
+            points: hull.into(),
+        },
+    ));
     colliders.push(part(
         Vec3::Y * (top + 0.1),
         box_shape(Vec3::new(1.86, 0.2, 1.86)),

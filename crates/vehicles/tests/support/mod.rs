@@ -181,7 +181,7 @@ fn expand(shape: &ColliderShape, offset: Vec3, rot: Quat, out: &mut Vec<(Vec3, Q
         }
         ColliderShape::ConvexHull { points } => {
             let (mut lo, mut hi) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
-            for p in points {
+            for p in points.iter() {
                 lo = lo.min(*p);
                 hi = hi.max(*p);
             }

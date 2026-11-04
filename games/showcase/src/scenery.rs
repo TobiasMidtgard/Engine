@@ -1357,7 +1357,7 @@ pub fn spawn_cliffs_and_stream(
                         .iter()
                         .map(|v| Vec3::from(v.position))
                         .collect(),
-                    indices: ch.far.indices.as_chunks::<3>().0.to_vec(),
+                    indices: ch.far.indices.as_chunks::<3>().0.to_vec().into(),
                 },
                 reach: CLIFF_SOLID_REACH + b.min.abs().max(b.max.abs()).length(),
             },
@@ -1566,7 +1566,9 @@ pub fn house_solid(parts: &[(Part, Mesh)]) -> Option<ColliderShape> {
         (
             Vec3::ZERO,
             Quat::IDENTITY,
-            ColliderShape::ConvexHull { points: prism },
+            ColliderShape::ConvexHull {
+                points: prism.into(),
+            },
         ),
     ]))
 }

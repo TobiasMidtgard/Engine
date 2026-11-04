@@ -413,7 +413,10 @@ fn mesh_chunk(state: &VoxelState, look: &VoxelLook, ci: usize, physics: bool) ->
             );
         }
         Collider {
-            shape: ColliderShape::TriMesh { vertices, indices },
+            shape: ColliderShape::TriMesh {
+                vertices: vertices.into(),
+                indices: indices.into(),
+            },
             ..Collider::default()
         }
     });

@@ -186,7 +186,7 @@ fn hull_collider() -> engine_world::physics::Collider {
                 Vec3::ZERO,
                 Quat::IDENTITY,
                 ColliderShape::ConvexHull {
-                    points: super::floating_hull_points(dims::MASS_KG / 1000.0),
+                    points: super::floating_hull_points(dims::MASS_KG / 1000.0).into(),
                 },
             ),
             (

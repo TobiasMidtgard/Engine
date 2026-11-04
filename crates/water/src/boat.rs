@@ -330,7 +330,7 @@ pub fn hull_collider(parts: &[Part], cut: HullCut) -> (Collider, Interior) {
             pieces.push((
                 Vec3::ZERO,
                 Quat::IDENTITY,
-                ColliderShape::ConvexHull { points: pts },
+                ColliderShape::ConvexHull { points: pts.into() },
             ));
         }
     };

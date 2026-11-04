@@ -2206,7 +2206,10 @@ fn barrel_run(y: &mut Yard, base: DVec3) {
     let deck = y.fixed(
         base,
         Quat::IDENTITY,
-        ColliderShape::TriMesh { vertices, indices },
+        ColliderShape::TriMesh {
+            vertices: vertices.into(),
+            indices: indices.into(),
+        },
         y.concrete,
     );
     y.name(deck, "Barrel run");
@@ -2406,7 +2409,7 @@ fn rockfall(y: &mut Yard, base: DVec3) {
         );
         let c = Collider {
             shape: ColliderShape::ConvexHull {
-                points: props::rock_points(shape),
+                points: props::rock_points(shape).into(),
             },
             surface: rock,
             density: 2600.0,
