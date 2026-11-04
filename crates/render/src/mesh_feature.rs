@@ -1062,7 +1062,16 @@ pub struct MeshFeature {
     texture_sets: Vec<Option<TextureSet>>,
     texture_set_ids: HashMap<TextureSetKey, u32>,
     free_set_ids: Vec<u32>,
+    /// The renderer's frame (`ViewData::frame_index` + 1), shared by all the views of a frame:
+    /// slots' change and move frames, fades and the keep counts are in frames, not views.
     frame: u64,
+    /// The frame and the dense-mesh threshold (`virtual_geometry_min_triangles`) the frame's
+    /// tables (sync, skins, mesh and material tables) were built for: a later view of the same
+    /// frame (the main view after a mirror) builds none of them again, as Unreal updates its
+    /// scene once a frame and each view only finds what it sees.
+    tables: Option<(u64, usize)>,
+    /// The frame and cluster path setting `deferred` was classified for.
+    classified: Option<(u64, bool)>,
     opaque: Vec<Batch>,
     transparent: Vec<Batch>,
     /// The moving casters drawn into each shadow map every frame (`draw_shadow`): the
@@ -2579,7 +2588,11 @@ impl RenderFeature for MeshFeature {
         if self.shader.is_none() {
             return;
         }
-        self.frame += 1;
+        // Every view of a frame shares its number, so a slot moved this frame keeps its
+        // previous transform (motion vectors) in the main view after a mirror's view synced it.
+        self.frame = view.frame_index + 1;
+        let min_triangles = (settings.virtual_geometry_min_triangles as usize).max(1);
+        let new_tables = self.tables != Some((self.frame, min_triangles));
         // Until this view's batches are ready for it.
         if let Some(culling) = &mut self.culling {
             culling.deactivate();
@@ -2615,8 +2628,10 @@ impl RenderFeature for MeshFeature {
         self.clustered.clear();
         let frame = self.frame;
         let mut scene = std::mem::take(&mut self.scene);
-        scene.sync(world, frame);
-        self.shadow_changes.extend_from_slice(&scene.changes);
+        if new_tables {
+            scene.sync(world, frame);
+            self.shadow_changes.extend_from_slice(&scene.changes);
+        }
         if !view.extra_view {
             self.check_static_images(view);
         }
@@ -2646,12 +2661,15 @@ impl RenderFeature for MeshFeature {
         let default_material = StandardMaterial::default();
 
         self.items.clear();
-        self.material_data.clear();
-        self.material_index.clear();
+        if new_tables {
+            // Material slots stay for the frame's later views (their tables keep them).
+            self.material_data.clear();
+            self.material_index.clear();
+        }
         let mut culled = 0u32;
         let shadows = view.sun_shadows || view.sky_occlusion.enabled;
         let lod_pixels = settings.mesh_lod_pixels.max(0.0);
-        if let Some(meshes) = world.get_resource::<Assets<Mesh>>() {
+        if new_tables && let Some(meshes) = world.get_resource::<Assets<Mesh>>() {
             self.collect_lods(&gpu.queue, meshes);
         }
 
@@ -2685,135 +2703,148 @@ impl RenderFeature for MeshFeature {
 
         steps.step("meshes: skins");
         // Skinned meshes: changed poses' bones written, bounds posed (before the tables below
-        // take the bounds).
-        for (skin, resolved) in skin_query.iter(world_ref) {
-            let handle = mesh_assets.canonical(resolved.mesh);
-            let Some(asset) = mesh_assets.get(handle) else {
-                continue;
-            };
-            if let Some((center, half)) =
-                self.skins.prepare(gpu, handle.index(), asset, skin, frame)
-                && let Some(g) = self.meshes.get_mut(&handle.index())
-            {
-                g.center = center;
-                g.half_extents = half;
-                g.min_y = center.y - half.y;
-                g.height = (2.0 * half.y).max(1e-3);
+        // take the bounds). Once a frame.
+        if new_tables {
+            for (skin, resolved) in skin_query.iter(world_ref) {
+                let handle = mesh_assets.canonical(resolved.mesh);
+                let Some(asset) = mesh_assets.get(handle) else {
+                    continue;
+                };
+                if let Some((center, half)) =
+                    self.skins.prepare(gpu, handle.index(), asset, skin, frame)
+                    && let Some(g) = self.meshes.get_mut(&handle.index())
+                {
+                    g.center = center;
+                    g.half_extents = half;
+                    g.min_y = center.y - half.y;
+                    g.height = (2.0 * half.y).max(1e-3);
+                }
             }
+            self.skins.evict(frame, SKIN_EVICT_FRAMES);
         }
         self.skin_query = Some(skin_query);
-        self.skins.evict(frame, SKIN_EVICT_FRAMES);
 
         steps.step("meshes: gather");
-        // This frame's tables of the meshes and materials the scene uses.
-        let min_triangles = (settings.virtual_geometry_min_triangles as usize).max(1);
-        for raw in scene.meshes_used() {
-            // Key GPU caches by the slot that holds the value, so aliases share uploads.
-            let handle = mesh_assets.canonical(Handle::from_index(raw));
-            let version = mesh_assets.version(handle);
-            let triangles = mesh_assets.get(handle).map(|m| m.indices.len() / 3);
-            let mut entry = MeshFrame {
-                index: handle.index(),
-                version,
-                exists: triangles.is_some(),
-                dense: triangles.is_some_and(|t| t >= min_triangles),
-                small: triangles.unwrap_or(0) < SMALL_BUILD_TRIANGLES,
-                ..Default::default()
-            };
-            if let Some(gpu_mesh) = self.meshes.get(&handle.index())
-                && gpu_mesh.version == version
-            {
-                entry.set_uploaded(
-                    gpu_mesh,
-                    self.lod_jobs.contains_key(&handle.index()),
-                    self.skins.skins.contains_key(&handle.index()),
-                );
-            }
-            let i = raw as usize;
-            if i >= self.mesh_frames.len() {
-                self.mesh_frames.resize(i + 1, MeshFrame::default());
-            }
-            self.mesh_frames[i] = entry;
-        }
-        for raw in scene.materials_used() {
-            let handle = Handle::from_index(raw);
-            let handle = material_assets.map_or(handle, |m| m.canonical(handle));
-            let loaded = material_assets.and_then(|m| m.get(handle));
-            let material = loaded.unwrap_or(&default_material);
-            let impostor_key = loaded.map(|m| {
-                use std::hash::{Hash, Hasher};
-                let mut h = std::collections::hash_map::DefaultHasher::new();
-                // What it looks like, not its version: a material written to every frame
-                // with the same values keeps its impostors.
-                bytemuck::bytes_of(&m.to_gpu()).hash(&mut h);
-                for image in m.textures().into_iter().flatten() {
-                    image.index().hash(&mut h);
-                    image_assets.map(|a| a.version(image)).hash(&mut h);
+        // This frame's tables of the meshes and materials the scene uses, once a frame (their
+        // `clusters` and `checked` entries are once a frame too).
+        if new_tables {
+            for raw in scene.meshes_used() {
+                // Key GPU caches by the slot that holds the value, so aliases share uploads.
+                let handle = mesh_assets.canonical(Handle::from_index(raw));
+                let version = mesh_assets.version(handle);
+                let triangles = mesh_assets.get(handle).map(|m| m.indices.len() / 3);
+                let mut entry = MeshFrame {
+                    index: handle.index(),
+                    version,
+                    exists: triangles.is_some(),
+                    dense: triangles.is_some_and(|t| t >= min_triangles),
+                    small: triangles.unwrap_or(0) < SMALL_BUILD_TRIANGLES,
+                    ..Default::default()
+                };
+                if let Some(gpu_mesh) = self.meshes.get(&handle.index())
+                    && gpu_mesh.version == version
+                {
+                    entry.set_uploaded(
+                        gpu_mesh,
+                        self.lod_jobs.contains_key(&handle.index()),
+                        self.skins.skins.contains_key(&handle.index()),
+                    );
                 }
-                (h.finish() << 32) | handle.index() as u64
-            });
-            let i = raw as usize;
-            if i >= self.material_frames.len() {
-                self.material_frames.resize(i + 1, MaterialFrame::default());
+                let i = raw as usize;
+                if i >= self.mesh_frames.len() {
+                    self.mesh_frames.resize(i + 1, MeshFrame::default());
+                }
+                self.mesh_frames[i] = entry;
             }
-            self.material_frames[i] = MaterialFrame {
-                index: handle.index(),
-                blend: material.alpha_mode == AlphaMode::Blend,
-                masked: matches!(material.alpha_mode, AlphaMode::Mask(_)),
-                double_sided: material.double_sided,
-                glows: material.emissive_strength > 0.0
-                    && material.emissive.iter().any(|&c| c > 0.0),
-                still_opaque: material.alpha_mode == AlphaMode::Opaque && material.wind_sway <= 0.0,
-                sways: material.wind_sway > 0.0,
-                slot: None,
-                impostor_key,
-            };
+            for raw in scene.materials_used() {
+                let handle = Handle::from_index(raw);
+                let handle = material_assets.map_or(handle, |m| m.canonical(handle));
+                let loaded = material_assets.and_then(|m| m.get(handle));
+                let material = loaded.unwrap_or(&default_material);
+                let impostor_key = loaded.map(|m| {
+                    use std::hash::{Hash, Hasher};
+                    let mut h = std::collections::hash_map::DefaultHasher::new();
+                    // What it looks like, not its version: a material written to every frame
+                    // with the same values keeps its impostors.
+                    bytemuck::bytes_of(&m.to_gpu()).hash(&mut h);
+                    for image in m.textures().into_iter().flatten() {
+                        image.index().hash(&mut h);
+                        image_assets.map(|a| a.version(image)).hash(&mut h);
+                    }
+                    (h.finish() << 32) | handle.index() as u64
+                });
+                let i = raw as usize;
+                if i >= self.material_frames.len() {
+                    self.material_frames.resize(i + 1, MaterialFrame::default());
+                }
+                self.material_frames[i] = MaterialFrame {
+                    index: handle.index(),
+                    blend: material.alpha_mode == AlphaMode::Blend,
+                    masked: matches!(material.alpha_mode, AlphaMode::Mask(_)),
+                    double_sided: material.double_sided,
+                    glows: material.emissive_strength > 0.0
+                        && material.emissive.iter().any(|&c| c > 0.0),
+                    still_opaque: material.alpha_mode == AlphaMode::Opaque
+                        && material.wind_sway <= 0.0,
+                    sways: material.wind_sway > 0.0,
+                    slot: None,
+                    impostor_key,
+                };
+            }
+            self.tables = Some((frame, min_triangles));
+            // The scene may have changed under the list.
+            self.classified = None;
         }
 
         steps.step("meshes: classify");
         // 1. Which slots the serial pass looks at first: cluster candidates and meshes not
         //    uploaded yet (a quick parallel scan; the cull comes after the serial pass).
         let clusters_on = settings.virtual_geometry && self.clusters.is_some();
-        let threads = gather_threads(scene.hot.len());
-        let mut chunks = std::mem::take(&mut self.gather_scratch);
-        chunks.resize_with(threads, Default::default);
-        for out in &mut chunks {
-            out.deferred.clear();
-        }
-        {
-            let (mesh_frames, material_frames) = (&self.mesh_frames, &self.material_frames);
-            let classify = |base: usize, hot: &[Hot], out: &mut GatherChunk| {
-                for (k, h) in hot.iter().enumerate() {
-                    if h.flags & mesh_scene::VISIBLE == 0 {
-                        continue;
-                    }
-                    let mesh = &mesh_frames[h.mesh as usize];
-                    if mesh.version == 0 {
-                        continue;
-                    }
-                    let mat = &material_frames[h.material as usize];
-                    if !mesh.ready || (clusters_on && cluster_candidate(h, mesh, mat)) {
-                        out.deferred.push((base + k) as u32);
-                    }
-                }
-            };
-            let per = scene.hot.len().div_ceil(threads).max(1);
-            let classify = &classify;
-            run_jobs(
-                scene
-                    .hot
-                    .chunks(per)
-                    .zip(chunks.iter_mut())
-                    .enumerate()
-                    .map(|(k, (hot, out))| move || classify(k * per, hot, out)),
-            );
-        }
         let mut deferred = std::mem::take(&mut self.deferred);
-        deferred.clear();
-        for chunk in &chunks {
-            deferred.extend_from_slice(&chunk.deferred);
+        // A later view of the frame takes the first one's list: slots uploaded since are
+        // `checked` and pass through the serial pass to the cull.
+        if self.classified != Some((frame, clusters_on)) {
+            let threads = gather_threads(scene.hot.len());
+            let mut chunks = std::mem::take(&mut self.gather_scratch);
+            chunks.resize_with(threads, Default::default);
+            for out in &mut chunks {
+                out.deferred.clear();
+            }
+            {
+                let (mesh_frames, material_frames) = (&self.mesh_frames, &self.material_frames);
+                let classify = |base: usize, hot: &[Hot], out: &mut GatherChunk| {
+                    for (k, h) in hot.iter().enumerate() {
+                        if h.flags & mesh_scene::VISIBLE == 0 {
+                            continue;
+                        }
+                        let mesh = &mesh_frames[h.mesh as usize];
+                        if mesh.version == 0 {
+                            continue;
+                        }
+                        let mat = &material_frames[h.material as usize];
+                        if !mesh.ready || (clusters_on && cluster_candidate(h, mesh, mat)) {
+                            out.deferred.push((base + k) as u32);
+                        }
+                    }
+                };
+                let per = scene.hot.len().div_ceil(threads).max(1);
+                let classify = &classify;
+                run_jobs(
+                    scene
+                        .hot
+                        .chunks(per)
+                        .zip(chunks.iter_mut())
+                        .enumerate()
+                        .map(|(k, (hot, out))| move || classify(k * per, hot, out)),
+                );
+            }
+            deferred.clear();
+            for chunk in &chunks {
+                deferred.extend_from_slice(&chunk.deferred);
+            }
+            self.gather_scratch = chunks;
+            self.classified = Some((frame, clusters_on));
         }
-        self.gather_scratch = chunks;
         self.cluster_slots.clear();
         self.cluster_slots.resize(scene.hot.len().div_ceil(64), 0);
 
