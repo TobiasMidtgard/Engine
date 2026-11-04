@@ -13,7 +13,9 @@ use std::f64::consts::TAU;
 use bytemuck::{Pod, Zeroable};
 use engine_core::math::{DVec2, DVec3};
 use engine_core::prelude::*;
-use engine_render::features::{FeatureStats, FrameContext, GpuShared, RenderFeature, RenderPhase};
+use engine_render::features::{
+    FeatureStats, FrameContext, GpuShared, PrepareOut, RenderFeature, RenderPhase,
+};
 use engine_render::texture::f32_to_f16;
 use engine_render::{RenderSettings, ViewData};
 use engine_world::{Ground, SurfaceLayers, WeatherState};
@@ -1668,12 +1670,31 @@ impl RenderFeature for WaterFeature {
         }
     }
 
-    fn prepare(
+    // Beside the other features (Rendering's shared prepare, render-perf/shared-prepare.md):
+    // the water only reads the world while it prepares.
+    fn prepares_shared(&self) -> bool {
+        true
+    }
+
+    fn prepare_serial(
         &mut self,
         world: &mut World,
+        _gpu: &GpuShared,
+        _view: &ViewData,
+        _settings: &RenderSettings,
+    ) {
+        if self.showers.is_none() {
+            self.showers = Some(world.query());
+        }
+    }
+
+    fn prepare_shared(
+        &mut self,
+        world: &World,
         shared: &GpuShared,
         view: &ViewData,
         _settings: &RenderSettings,
+        _out: &mut PrepareOut,
     ) {
         self.bodies.clear();
         self.underwater = false;
@@ -1689,10 +1710,13 @@ impl RenderFeature for WaterFeature {
             return;
         };
         // Local rain (showers).
-        let showers_q = self.showers.get_or_insert_with(|| world.query());
         let cam = view.origin;
-        let mut showers: Vec<(f64, [f32; 4])> = showers_q
-            .iter(world)
+        let mut showers: Vec<(f64, [f32; 4])> = self
+            .showers
+            .as_mut()
+            .map(|q| q.iter(world).collect::<Vec<_>>())
+            .unwrap_or_default()
+            .into_iter()
             .map(|(g, s)| {
                 let p = g.translation();
                 let d = DVec2::new(p.x - cam.x, p.z - cam.z).length() - s.radius_m as f64;
