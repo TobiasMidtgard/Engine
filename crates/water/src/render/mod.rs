@@ -546,6 +546,22 @@ struct FlowGpu {
     /// The bed the triangles were laid out for.
     bed_version: u64,
     drawn: bool,
+    /// Frames the texture has held an older step of the water (see [`flow_refresh_frames`]).
+    behind: u32,
+}
+
+/// How many frames a flow region's texture may lag its water, by how far the camera is from
+/// its edge (`gap`, m): every frame near it; far off, where a cell is a pixel or less, every
+/// few frames. Writing every region's texels each frame took 0.30 ms of the prepare at the
+/// fortress (round 29). Its waves move in the shader all the same.
+fn flow_refresh_frames(gap: f64) -> u32 {
+    if gap < 60.0 {
+        1
+    } else if gap < 200.0 {
+        3
+    } else {
+        6
+    }
 }
 
 struct Gpu {
@@ -1624,6 +1640,7 @@ impl WaterFeature {
                         version: u64::MAX,
                         bed_version: sim.bed_version,
                         drawn: false,
+                        behind: 0,
                     });
                     gpu.flows.len() - 1
                 }
@@ -1650,8 +1667,16 @@ impl WaterFeature {
             shared
                 .queue
                 .write_buffer(&f.uniform, 0, bytemuck::bytes_of(&u));
-            if f.version != sim.version {
+            let (center, radius) = sim.bounds();
+            let gap = center.distance(view.origin) - radius;
+            if f.version != sim.version && !view.extra_view {
+                f.behind += 1;
+            }
+            if f.version != sim.version
+                && (f.version == u64::MAX || f.behind >= flow_refresh_frames(gap))
+            {
                 f.version = sim.version;
+                f.behind = 0;
                 let data = flow_texels(sim);
                 write_texture(
                     &shared.queue,
@@ -2672,6 +2697,18 @@ mod tests {
         for f in &v {
             assert_eq!(f.uv_speed[3], 1.0);
             assert!((pos(f).z - foot.z).abs() < 1e-4, "not facing the camera");
+        }
+    }
+
+    #[test]
+    fn far_streams_refresh_their_water_every_few_frames() {
+        assert_eq!(flow_refresh_frames(-5.0), 1, "inside it");
+        assert_eq!(flow_refresh_frames(30.0), 1);
+        let mut last = 1;
+        for gap in [100.0, 500.0, 2000.0] {
+            let n = flow_refresh_frames(gap);
+            assert!(n >= last && n > 1 && n <= 8, "{gap}: {n}");
+            last = n;
         }
     }
 
