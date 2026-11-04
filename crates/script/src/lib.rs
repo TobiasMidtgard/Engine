@@ -623,26 +623,7 @@ impl Plugin for ScriptPlugin {
              call), memory_limit_mb (per VM), debug_port (the debugger's, for VS Code), \
              parallel_vms (actor VMs for parallel_update; null: cores - 1).",
         )
-        .add_systems(Update, run_scripts.in_set(UpdateSet::Logic))
-        .add_systems(Update, preview_scripts.in_set(UpdateSet::Logic))
-        .add_systems(
-            Update,
-            cutscene::run_cutscenes
-                .in_set(UpdateSet::Logic)
-                .after(run_scripts),
-        )
-        .add_systems(
-            Update,
-            story::run_story
-                .in_set(UpdateSet::Logic)
-                .after(run_scripts),
-        )
-        .add_systems(
-            Update,
-            spots::run_spots
-                .in_set(UpdateSet::Logic)
-                .after(story::run_story),
-        )
+        .add_systems(Update, script_frame_system.in_set(UpdateSet::Logic))
         .add_systems(
             FixedUpdate,
             spots::spare_choosers
@@ -657,11 +638,9 @@ impl Plugin for ScriptPlugin {
         )
         .add_systems(
             Update,
-            rewind::show_rewind
-                .after(run_scripts)
-                .after(preview_scripts),
+            rewind::show_rewind.after(script_frame_system),
         )
-        .add_systems(Update, board::draw_boards.after(run_scripts))
+        .add_systems(Update, board::draw_boards.after(script_frame_system))
         .add_systems(
             Update,
             board::draw_profile_boards.after(board::draw_boards),
@@ -776,6 +755,32 @@ pub(crate) fn with_runtime<R>(
         world.resource_scope(|world, mut rt: Mut<ScriptRuntime>| f(world, &mut rt, &settings));
     world.remove_resource::<ScriptsRunning>();
     Ok(out)
+}
+
+/// The scripts' frame in one exclusive system: the scripts, the editor's preview, then
+/// cutscenes, story and spots (in the order they were chained). Bevy waits for the whole pool
+/// to go idle before each exclusive system, so one costs one wait a frame instead of five
+/// (round 24 on Tobias's PC, engine-perf/update-exclusives.md). `run_system_cached` keeps each
+/// one's own state from frame to frame.
+fn script_frame_system(world: &mut World) {
+    macro_rules! run {
+        ($($name:literal => $system:path),* $(,)?) => {$(
+            {
+                let _span = tracing::info_span!($name).entered();
+                if let Err(e) = world.run_system_cached($system) {
+                    static WARNED: std::sync::Once = std::sync::Once::new();
+                    WARNED.call_once(|| tracing::warn!("script: {} did not run: {e}", $name));
+                }
+            }
+        )*};
+    }
+    run!(
+        "run scripts" => run_scripts,
+        "preview scripts" => preview_scripts,
+        "cutscenes" => cutscene::run_cutscenes,
+        "story" => story::run_story,
+        "spots" => spots::run_spots,
+    );
 }
 
 fn run_scripts(world: &mut World) {

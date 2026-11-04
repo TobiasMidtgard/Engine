@@ -190,7 +190,9 @@ impl Plugin for MovementPlugin {
                 (
                     fx::update_slow_motion_fx,
                     player::sprint_boost,
-                    play::toggle.before(UpdateSet::Camera),
+                    play::toggle_pressed
+                        .pipe(engine_core::schedule::queue_when(play::toggle))
+                        .before(UpdateSet::Camera),
                     camera::follow_pilots.in_set(UpdateSet::Camera),
                     fx::camera_fx.after(UpdateSet::Camera),
                     lockon::place_markers.after(UpdateSet::Camera),

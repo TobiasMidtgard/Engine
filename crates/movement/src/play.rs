@@ -322,6 +322,15 @@ fn landing(world: &World, p: DVec3, up: Vec3) -> Option<DVec3> {
 }
 
 /// The `pilot` action switches play mode where [`PlayToggle`] is present (`Update`).
+/// Was the play toggle pressed this frame? A plain system, so frames without the press don't
+/// wait for an idle pool for [`toggle`] (queued only when pressed: engine_core's `queue_when`).
+pub(crate) fn toggle_pressed(
+    toggle: Option<Res<PlayToggle>>,
+    actions: Option<Res<ActionState>>,
+) -> bool {
+    toggle.is_some() && actions.is_some_and(|a| a.just_pressed("pilot"))
+}
+
 pub(crate) fn toggle(world: &mut World) {
     if !world.contains_resource::<PlayToggle>() {
         return;
