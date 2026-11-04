@@ -33,7 +33,7 @@ struct Totals {
     /// The step's own parts outside the regions' jobs, by name, ms ([`part_ms`]).
     outside: Vec<(&'static str, f64)>,
     /// Pieces of those parts, by name: their sum and their worst step, ms ([`piece_ms`]).
-    pieces: Vec<(&'static str, f64, f64)>,
+    pieces: Vec<PieceTotal>,
     /// Bodies that made a region's substep sweep for fast motion (CCD), and why: their count.
     sweepers: HashMap<Sweeper, usize>,
 }
@@ -146,32 +146,61 @@ pub(crate) fn part_ms(name: &'static str, ms: f64) {
     }
 }
 
-/// A piece of one of the step's own parts took `ms` this step (reported per step, with the
-/// worst step: a part's spikes are usually one piece).
-pub(crate) fn piece_ms(name: &'static str, ms: f64) {
+/// A piece's totals: its time in all, its worst run, and how much of that run its thread
+/// spent on the CPU (a worst run far longer than its CPU time waited: for a lock, for other
+/// threads, or for a core, as the VM's four cores often make it).
+struct PieceTotal {
+    name: &'static str,
+    ms: f64,
+    worst: f64,
+    worst_cpu: Option<f64>,
+}
+
+/// A piece of one of the step's own parts took `ms` this step, `cpu_ms` of it on its thread's
+/// CPU (reported per step, with the worst step: a part's spikes are usually one piece).
+pub(crate) fn piece_ms(name: &'static str, ms: f64, cpu_ms: Option<f64>) {
     let mut t = totals().lock();
-    match t.pieces.iter_mut().find(|c| c.0 == name) {
+    match t.pieces.iter_mut().find(|c| c.name == name) {
         Some(c) => {
-            c.1 += ms;
-            c.2 = c.2.max(ms);
+            c.ms += ms;
+            if ms > c.worst {
+                c.worst = ms;
+                c.worst_cpu = cpu_ms;
+            }
         }
-        None => t.pieces.push((name, ms, ms)),
+        None => t.pieces.push(PieceTotal {
+            name,
+            ms,
+            worst: ms,
+            worst_cpu: cpu_ms,
+        }),
     }
 }
 
 /// Times a piece of a part while it lives ([`piece_ms`]), when a report is wanted.
-pub(crate) struct Piece(&'static str, Option<Instant>);
+pub(crate) struct Piece(
+    &'static str,
+    Option<(Instant, Option<cpu_time::ThreadTime>)>,
+);
 
 impl Piece {
     pub(crate) fn start(name: &'static str) -> Self {
-        Self(name, wanted().then(Instant::now))
+        Self(
+            name,
+            wanted().then(|| (Instant::now(), cpu_time::ThreadTime::try_now().ok())),
+        )
     }
 }
 
 impl Drop for Piece {
     fn drop(&mut self) {
-        if let Some(t) = self.1 {
-            piece_ms(self.0, t.elapsed().as_secs_f64() * 1000.0);
+        if let Some((t, cpu)) = self.1 {
+            let cpu = cpu.and_then(|c| c.try_elapsed().ok());
+            piece_ms(
+                self.0,
+                t.elapsed().as_secs_f64() * 1000.0,
+                cpu.map(|c| c.as_secs_f64() * 1000.0),
+            );
         }
     }
 }
@@ -255,7 +284,13 @@ pub(crate) fn step_done(world: &World, sim: &Simulation, foci: &[DVec3], started
         let pieces: Vec<String> = t
             .pieces
             .iter()
-            .map(|(name, ms, worst)| format!("{name} {:.2} (worst {worst:.2})", ms / steps))
+            .map(|p| {
+                let cpu = p
+                    .worst_cpu
+                    .map(|c| format!(", {c:.2} on the CPU"))
+                    .unwrap_or_default();
+                format!("{} {:.2} (worst {:.2}{cpu})", p.name, p.ms / steps, p.worst)
+            })
             .collect();
         out += &format!("; their pieces ({})", pieces.join(", "));
     }

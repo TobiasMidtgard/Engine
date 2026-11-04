@@ -20,6 +20,8 @@ serde_json.workspace = true
 # PHYSICS_REPORT.
 rapier3d = { workspace = true, features = ["parallel", "profiler"] }
 rayon = "1"
+# Thread CPU time of the report's pieces (PHYSICS_REPORT), as engine_render's frame stats use.
+cpu-time = "1"
 parking_lot.workspace = true
 tracing.workspace = true
 

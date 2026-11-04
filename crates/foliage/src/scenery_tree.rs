@@ -267,6 +267,50 @@ mod tests {
         app
     }
 
+    /// A spruce's limbs hide under its needle shelves: near, middle and far it casts its
+    /// trunk-only far wood into every map, through one stand-in (or itself, far off).
+    #[test]
+    fn a_spruce_casts_its_trunk_alone() {
+        use crate::shadow_standin::{CoarseStandIn, StandIn};
+        use engine_render::ShadowTexelRange;
+        let mut app = app();
+        let all = PlantLibrary::default();
+        let spruce = all.get(all.id("spruce").unwrap()).clone();
+        app.world.insert_resource(PlantLibrary {
+            species: vec![spruce],
+        });
+        let library = app.world.resource::<PlantLibrary>().clone();
+        let tree = SceneryTree::new(&library, "spruce", 3).unwrap();
+        app.world
+            .spawn((Camera::default(), Transform::from_translation(DVec3::ZERO)));
+        let at = |d: f64| Transform::from_translation(DVec3::new(d, 0.0, 0.0));
+        let trees = [10.0, 60.0, 150.0].map(|d| app.world.spawn((at(d), tree)).id());
+        app.update_n(SLICES as usize + 3);
+        let vis = app
+            .world
+            .resource::<FoliageVisuals>()
+            .get(tree.species)
+            .unwrap();
+        let v = vis.variants[tree.genes.variant as usize % crate::assets::VARIANTS].clone();
+        let lod = engine_render::MeshRef::Handle(v.wood_lod.unwrap());
+        for (i, t) in trees.into_iter().enumerate() {
+            let p = app.world.get::<SceneryTreeVisual>(t).unwrap().parts[1];
+            assert!(app.world.get::<CoarseStandIn>(p).is_none(), "tree {i}");
+            let caster = app.world.get::<StandIn>(p).map_or(p, |s| s.0);
+            let r = app.world.get::<MeshRenderer>(caster).unwrap();
+            assert!(r.cast_shadows && r.visible, "tree {i}");
+            assert_eq!(r.mesh, lod, "tree {i}");
+            assert_eq!(
+                app.world
+                    .get::<ShadowTexelRange>(caster)
+                    .copied()
+                    .unwrap_or_default(),
+                ShadowTexelRange::default(),
+                "tree {i}"
+            );
+        }
+    }
+
     /// The meshes a scenery tree's parts show.
     fn shown(app: &App, tree: Entity) -> [Option<Handle<Mesh>>; 3] {
         let parts = app.world.get::<SceneryTreeVisual>(tree).unwrap().parts;
@@ -370,18 +414,35 @@ mod tests {
                 ShadowTexelRange::finer_than(COARSE_TEXEL_M)
             );
         }
-        // The far tree casts itself into every map.
+        // The far tree casts its middle level into the finest maps, through a stand-in, and
+        // itself into the others: its shadow keeps its shape as the view switches level.
+        let far_casts = |app: &App, t: Entity| {
+            let p = app.world.get::<SceneryTreeVisual>(t).unwrap().parts[1];
+            let r = app.world.get::<MeshRenderer>(p).unwrap();
+            assert!(r.cast_shadows);
+            let own = app.world.get::<ShadowTexelRange>(p).copied();
+            let s = app.world.get::<StandIn>(p).expect("a fine stand-in").0;
+            assert!(app.world.get::<engine_render::ShadowOnly>(s).is_some());
+            let fine = app.world.get::<MeshRenderer>(s).unwrap().mesh.clone();
+            (r.mesh.clone(), own, fine, fine_range(app, t))
+        };
+        use crate::shadow_standin::FAR_FINE_TEXEL_M;
+        let far = (
+            handle(v.wood_lod).unwrap(),
+            Some(ShadowTexelRange::from_texels(FAR_FINE_TEXEL_M)),
+            handle(v.wood_mid).unwrap(),
+            ShadowTexelRange::finer_than(FAR_FINE_TEXEL_M),
+        );
         assert_eq!(coarse(&app, trees[2]), None);
-        assert_eq!(fine_range(&app, trees[2]), ShadowTexelRange::default());
+        assert_eq!(far_casts(&app, trees[2]), far);
         // The camera walks up to the far tree: it draws in full detail within a few frames.
         app.world.get_mut::<Transform>(cam).unwrap().translation = DVec3::new(140.0, 0.0, 0.0);
         app.update_n(SLICES as usize + 1);
         assert_eq!(shown(&app, trees[2]), [v.base, v.wood, v.foliage]);
         assert_eq!(casts(&app, trees[2]), handle(v.wood_mid));
-        // The tree left behind casts its far level itself, its stand-ins gone.
-        assert_eq!(casts(&app, trees[0]), handle(v.wood_lod));
+        // The tree left behind casts like the far one did, its coarse stand-in gone.
         assert_eq!(coarse(&app, trees[0]), None);
-        assert_eq!(fine_range(&app, trees[0]), ShadowTexelRange::default());
+        assert_eq!(far_casts(&app, trees[0]), far);
         // Not plants: nothing grows them, and the ecology never sees them.
         let mut plants = app.world.query::<&Plant>();
         assert_eq!(plants.iter(&app.world).count(), 0);

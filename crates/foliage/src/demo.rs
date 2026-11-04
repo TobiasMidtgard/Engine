@@ -1222,7 +1222,18 @@ mod tests {
                 }
             }
             app.update_n(5);
-            let left = (parts(&mut app), app.world.entities().len());
+            // Live entities, less the far and near woods' cells (streamed around the camera
+            // whatever the zone does) and the pooled glow lights.
+            let live = app
+                .world
+                .query_filtered::<(), (
+                    Without<crate::far_woods::FarWoodCell>,
+                    Without<crate::near_woods::NearWoodsCell>,
+                    Without<crate::visuals::GlowLight>,
+                )>()
+                .iter(&app.world)
+                .count();
+            let left = (parts(&mut app), live);
             assert_eq!(
                 left.0, 0,
                 "visit {visit} ({drawn} parts drawn) left parts behind"

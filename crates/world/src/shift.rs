@@ -37,7 +37,10 @@ use crate::physics::{
     ApplyImpulse, CharacterMove, CharacterState, ContactEvent, ExternalForce, Joint, Velocity,
 };
 use crate::terrain::{EditShape, TerrainChanged, TerrainEdit};
-use crate::{FocusPoints, Gravity, Grid2, HeatField, SurfaceLayers, WeatherState, WindField};
+use crate::{
+    FarSurface, FocusPoints, Gravity, Grid2, GroundCover, HeatField, SurfaceLayers, WeatherState,
+    WindField,
+};
 
 /// The world moved to a new reference frame this frame: a point at `old` is now at
 /// `rotation * old + translation`, and the old frame moves with `velocity` and spins at
@@ -442,6 +445,7 @@ fn shift_entities_system(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn shift_resources_system(
     mut shifts: MessageReader<WorldShift>,
     mut gravity: ResMut<Gravity>,
@@ -450,6 +454,8 @@ fn shift_resources_system(
     mut heat: ResMut<HeatField>,
     mut wind: ResMut<WindField>,
     mut weather: ResMut<WeatherState>,
+    mut far: ResMut<FarSurface>,
+    mut cover: ResMut<GroundCover>,
 ) {
     let Some(s) = combined(&mut shifts) else {
         return;
@@ -466,11 +472,23 @@ fn shift_resources_system(
     }
     wind.prevailing = s.direction(wind.prevailing);
     wind.gust_origin = s.point(wind.gust_origin);
+    // Gust fronts turn with the world (the weather points them down the wind again next step).
+    let waves = &mut wind.waves;
+    for wave in [&mut waves.broad, &mut waves.fine] {
+        let d = s.direction(Vec3::new(wave.dir.x, 0.0, wave.dir.y));
+        let flat = engine_core::math::Vec2::new(d.x, d.z);
+        if flat.length_squared() > 1e-6 {
+            wave.dir = flat.normalize();
+        }
+    }
     if s.is_translation_only() {
         // Exact: the grids keep their data and move their origin.
         let xz = DVec2::new(s.translation.x, s.translation.z);
         surface.grid.origin += xz;
         heat.grid.origin += xz;
+        far.grid.origin += xz;
+        far.snow_line_m += s.translation.y;
+        cover.grid.origin += xz;
         wind.local.origin += s.translation;
     } else {
         // A horizontal grid can't turn with the world: resample it around the focus, or
@@ -482,6 +500,12 @@ fn shift_resources_system(
         };
         surface.grid = resampled(&surface.grid, &s, center);
         heat.grid = resampled(&heat.grid, &s, center);
+        far.grid = resampled(&far.grid, &s, center);
+        if !cover.grid.is_empty() {
+            cover.grid = resampled(&cover.grid, &s, center);
+        }
+        // The snow line is a height in the old frame; after a turned shift (a new planet's
+        // frame) the weather works it out again.
         // Gusts are short-lived: start the local wind afresh, as recentering does.
         let size = DVec3::from_array(wind.local.dims.map(|d| d as f64)) * wind.local.cell as f64;
         wind.local = crate::Grid3::new(
