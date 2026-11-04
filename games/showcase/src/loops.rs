@@ -81,7 +81,7 @@ fn run(world: &mut World) {
         return;
     }
     let counts = census(world);
-    let entities = world.entities().count_spawned();
+    let entities = engine::core::diagnostics::spawned_entities(world);
     let profile = world
         .get_resource::<engine::core::profile::ProfileSnapshot>()
         .filter(|p| !p.systems.is_empty())

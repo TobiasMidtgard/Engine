@@ -40,7 +40,7 @@ impl Diagnostics {
 pub fn frame_diagnostics_system(
     time: Res<Time>,
     mut diag: ResMut<Diagnostics>,
-    entities: &bevy_ecs::entity::Entities,
+    archetypes: &bevy_ecs::archetype::Archetypes,
 ) {
     let dt = time.real_delta_secs() as f64;
     if dt > 0.0 {
@@ -53,12 +53,23 @@ pub fn frame_diagnostics_system(
         diag.fps = 1000.0 / diag.frame_ms.max(1e-6);
     }
     diag.frame = time.frame_count();
-    diag.entities = entities.count_spawned();
+    diag.entities = spawned_in(archetypes);
     if diag.frame.is_multiple_of(15)
         && let Some(mb) = sampled_ram_mb()
     {
         diag.set(PROCESS_RAM_MB, mb);
     }
+}
+
+/// Entities spawned in `world`, summed over its archetypes (a few thousand of them) rather
+/// than with `Entities::count_spawned`, which walks every entity slot ever allocated: 0.3-0.4
+/// ms a frame on the PC's showcase (round 29b), every frame in `frame_diagnostics_system`.
+pub fn spawned_entities(world: &bevy_ecs::world::World) -> u32 {
+    spawned_in(world.archetypes())
+}
+
+fn spawned_in(archetypes: &bevy_ecs::archetype::Archetypes) -> u32 {
+    archetypes.iter().map(|a| a.len()).sum()
 }
 
 /// The [`Diagnostics`] metric with the process's resident memory, MB (refreshed every 15
@@ -103,6 +114,30 @@ pub fn sampled_ram_mb() -> Option<f64> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn spawned_entities_count_what_count_spawned_does() {
+        use bevy_ecs::prelude::*;
+        #[derive(Component)]
+        struct A;
+        #[derive(Component)]
+        struct B;
+        let mut world = World::new();
+        let fresh = super::spawned_entities(&world);
+        let a: Vec<Entity> = (0..50).map(|_| world.spawn(A).id()).collect();
+        for _ in 0..30 {
+            world.spawn((A, B));
+        }
+        world.spawn_empty();
+        for e in &a[..20] {
+            world.despawn(*e);
+        }
+        assert_eq!(
+            super::spawned_entities(&world),
+            world.entities().count_spawned()
+        );
+        assert_eq!(super::spawned_entities(&world), fresh + 61);
+    }
+
     #[test]
     fn the_process_ram_reads() {
         let mb = super::process_ram_mb().expect("supported on every target we ship");
