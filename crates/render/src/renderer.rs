@@ -3094,7 +3094,12 @@ impl Renderer {
             rotation: view.rotation,
         });
         self.last_view = Some(view);
-        self.frame_index += 1;
+        // Frames, not views: every view of a frame shares its number, so with a mirror the
+        // main view still steps through the whole jitter sequence and the environment map
+        // keeps its interval.
+        if !extra {
+            self.frame_index += 1;
+        }
     }
 
     /// Hand the last recorded frame's results to the world (main thread): screenshots,

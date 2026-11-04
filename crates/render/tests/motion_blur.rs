@@ -279,8 +279,29 @@ fn slow_motion_blurs_less() {
 /// A checkerboard wall 10 m away, a bright bar in front of it and the camera still: `moving`
 /// drives the bar sideways at `speed` m/s (2 m in front of the wall).
 fn object_scene(blur: Option<MotionBlur>, speed: f64, name: &str) -> Option<RgbaImage> {
+    object_scene_with(blur, speed, false, name)
+}
+
+/// `extra_view`: a second camera renders into an image before the main view each frame, as a
+/// lake's mirror does.
+fn object_scene_with(
+    blur: Option<MotionBlur>,
+    speed: f64,
+    extra_view: bool,
+    name: &str,
+) -> Option<RgbaImage> {
     let mut app = app(1.0 / 60.0, 1.0, AntiAliasing::None);
     camera(&mut app, blur, 0.0);
+    if extra_view {
+        let picture = app
+            .world
+            .resource_mut::<engine_assets::Assets<Image>>()
+            .add(Image::render_target(UVec2::new(96, 54)));
+        let second = camera(&mut app, None, 0.3);
+        app.world
+            .entity_mut(second)
+            .insert(ExtraView::image(picture, UVec2::new(96, 54)));
+    }
     let image = app
         .world
         .resource_mut::<engine_assets::Assets<Image>>()
@@ -443,5 +464,36 @@ fn the_frame_after_a_camera_cut_is_not_blurred() {
     assert!(
         worst <= 2,
         "the frame after the cut was blurred: it differs by up to {worst} levels"
+    );
+}
+
+/// A view rendered before the main one in the same frame (a mirror, a monitor) leaves the
+/// main view's motion vectors as they are: the moving bar streaks just as far. The meshes'
+/// moves are synced once a frame, by whichever view comes first, and both views read them as
+/// this frame's.
+#[test]
+fn an_extra_view_before_the_main_one_keeps_its_motion_vectors() {
+    let speed = 30.0 / px_per_rad() * 8.0 / EXPOSURE;
+    let Some(alone) = object_scene(Some(MotionBlur::default()), speed, "object") else {
+        return;
+    };
+    let with_extra = object_scene_with(
+        Some(MotionBlur::default()),
+        speed,
+        true,
+        "object_extra_view",
+    )
+    .unwrap();
+    let bright = |img: &RgbaImage| {
+        (H / 2 - 20..H / 2 + 20)
+            .map(|y| (0..W).filter(|&x| luma(img, x, y) > 230.0).count() as f64)
+            .sum::<f64>()
+            / 40.0
+    };
+    let (a, b) = (bright(&alone), bright(&with_extra));
+    eprintln!("bar streak: {a:.1} px alone, {b:.1} px with an extra view");
+    assert!(
+        (a - b).abs() < 3.0,
+        "an extra view changed the moving bar's streak: {b:.1} px (alone {a:.1})"
     );
 }
