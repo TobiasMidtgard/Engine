@@ -25,6 +25,8 @@ pub const MEADOW_HALF: f32 = 400.0;
 const EDGE: f32 = 1.15;
 /// The banks rise this steeply from the water's edge (rise over run).
 const BANK: f32 = 0.8;
+/// A levee's crest over the water beside it, meters, where the meadow lies lower.
+const LEVEE_M: f32 = 0.8;
 /// Size of the cells the creeks' segments are filed under, meters.
 const CELL: f32 = 16.0;
 /// Points along each creek are this far apart, meters.
@@ -229,7 +231,7 @@ impl Meadow {
 
     /// Ground height at `x`, `z`, the creeks' channels carved in.
     pub fn height(&self, x: f32, z: f32) -> f32 {
-        let base = meadow_base(x, z);
+        let mut base = meadow_base(x, z);
         let mut cut = f32::MAX;
         let mut width = 1.0f32;
         let wobble = noise::fbm2(x as f64 * 0.08, z as f64 * 0.08, 0xBA4C, 2, 2.0, 0.5) * 1.6;
@@ -244,6 +246,13 @@ impl Meadow {
             let (y, depth) = course.surface(s, x);
             p.at.y = y;
             p.depth_m = depth;
+            // Where the meadow lies lower than the water beside it, a levee holds the creek in
+            // (as floods build them along lowland streams): a crest over its surface at the
+            // water's edge, falling away into the meadow over a few meters.
+            let edge = 0.5 * p.width_m * EDGE;
+            let levee = y as f32 + LEVEE_M - (d - edge).max(0.0) * 0.12;
+            let hold = 1.0 - smoothstep(edge + 3.0, edge + 8.5, d);
+            base = base.max(base + hold * (levee - base).max(0.0));
             let c = channel(&p, d, wobble.clamp(-1.0, 1.0));
             if c < cut {
                 cut = c;
@@ -331,9 +340,9 @@ impl Default for Meadow {
     }
 }
 
-/// How far from a creek's line its channel reaches, meters.
+/// How far from a creek's line its channel (and levee) reaches, meters.
 fn carve_reach(p: &CreekPoint) -> f32 {
-    0.5 * p.width_m * EDGE + 3.0 / BANK + 2.0
+    0.5 * p.width_m * EDGE + (3.0 / BANK + 2.0).max(9.0)
 }
 
 /// The channel's ground at `d` meters from a creek's line: a bed sunk `depth` under the water
@@ -348,6 +357,11 @@ fn channel(p: &CreekPoint, d: f32, wobble: f32) -> f32 {
     } else {
         surface - 0.02 + (d - edge) * BANK * (1.0 + 0.45 * wobble)
     }
+}
+
+fn smoothstep(e0: f32, e1: f32, x: f32) -> f32 {
+    let t = ((x - e0) / (e1 - e0)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
 }
 
 /// `a.min(b)`, rounded over a band `k` wide where the two are close (the bank's top edge).

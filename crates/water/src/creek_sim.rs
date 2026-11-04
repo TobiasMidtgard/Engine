@@ -148,19 +148,37 @@ pub fn cell_for(width: f32) -> f32 {
     (0.25 * width).clamp(0.3, 0.75)
 }
 
+/// A stretch stops this far short of its reach's mouth, meters: there the creek runs into
+/// another, whose channel crosses the grid, and the water leaving the stretch would spill
+/// over the ground beside it (the ribbons draw the last meters).
+const MOUTH_M: f32 = 14.0;
+
+/// A reach's length in plan, meters.
+fn length_of(points: &[CreekPoint]) -> f32 {
+    points.windows(2).fold(0.0f32, |s, w| {
+        s + DVec2::new(w[1].at.x - w[0].at.x, w[1].at.z - w[0].at.z).length() as f32
+    })
+}
+
+/// Where a stretch may end on a reach `total` meters long ([`MOUTH_M`] short of its mouth).
+fn stretch_end(total: f32) -> f32 {
+    (total - MOUTH_M).max(0.0)
+}
+
 /// The stretch of `reach` (world points) to simulate round `at` meters along it: (from, to)
 /// meters along, about 40% upstream and 60% down, as long as its width calls for and its grid
-/// allows.
+/// allows, and short of its mouth.
 pub fn stretch_of(points: &[CreekPoint], at: f32) -> Option<(f32, f32)> {
-    let total = points.windows(2).fold(0.0f32, |s, w| {
-        s + DVec2::new(w[1].at.x - w[0].at.x, w[1].at.z - w[0].at.z).length() as f32
-    });
+    let end = stretch_end(length_of(points));
+    if end < 20.0 {
+        return None;
+    }
     let width = points.iter().map(|p| p.width_m).sum::<f32>() / points.len().max(1) as f32;
     let cell = cell_for(width) as f64;
-    let mut length = (50.0 * width).clamp(60.0, 140.0).min(total);
+    let mut length = (50.0 * width).clamp(60.0, 140.0).min(end);
     for _ in 0..8 {
-        let from = (at - 0.4 * length).clamp(0.0, (total - length).max(0.0));
-        let to = (from + length).min(total);
+        let from = (at - 0.4 * length).clamp(0.0, (end - length).max(0.0));
+        let to = (from + length).min(end);
         let course = sub_course(points, from, to);
         if course.len() >= 2 && cells_over(&course, cell) <= MOST_CELLS {
             return Some((from, to));
@@ -188,6 +206,35 @@ pub fn plan_stretch(
     };
     let base = course.iter().map(|p| p.at.y).fold(f64::MAX, f64::min) - 6.0;
     let (corner, mut region) = stream_region_cells(&stream, base, ground, cell_for(width))?;
+    // The springs on the creek's own line: the stream's search for the lowest ground near its
+    // course can land beside a creek running along a slope, below its bed, and flood the
+    // grass there. And no hollows filled to the brim (the brim of a pool can be that open
+    // ground too): the priming springs fill the pools as the creek would.
+    let on_line = |at: [f32; 2]| -> [f32; 2] {
+        let p = DVec2::new(corner.x + at[0] as f64, corner.z + at[1] as f64);
+        let mut best = (f64::MAX, p);
+        for w in course.windows(2) {
+            let a = DVec2::new(w[0].at.x, w[0].at.z);
+            let b = DVec2::new(w[1].at.x, w[1].at.z);
+            let ab = b - a;
+            let t = ((p - a).dot(ab) / ab.length_squared().max(1e-9)).clamp(0.0, 1.0);
+            let q = a + ab * t;
+            if q.distance(p) < best.0 {
+                best = (q.distance(p), q);
+            }
+        }
+        [(best.1.x - corner.x) as f32, (best.1.y - corner.z) as f32]
+    };
+    if let Some(first) = region.sources.first_mut() {
+        first.at = [
+            (course[0].at.x - corner.x) as f32,
+            (course[0].at.z - corner.z) as f32,
+        ];
+    }
+    for p in &mut region.priming {
+        p.at = on_line(p.at);
+    }
+    region.fills.clear();
     let stones = stream_stones(&stream, ground);
     region.rocks = stones.iter().map(|s| s.rock(corner)).collect();
     Some(StretchPlan {
@@ -347,7 +394,7 @@ pub fn creek_sim_system(
     };
     // Still round the middle of the stretch running (or about to) on this reach, or toward
     // the end of the reach it reaches: nothing to do.
-    let total = along_line(&reach.points, DVec2::splat(1e12)).0;
+    let total = length_of(&reach.points);
     let covered = sims.stretches.iter().any(|st| {
         let (from, to) = (st.cut.from_m, st.cut.to_m);
         let len = to - from;
@@ -356,7 +403,7 @@ pub fn creek_sim_system(
             && st.cut.reach == reach.id
             && ((at - mid).abs() < RECENTER_SHARE * len
                 || (from <= 0.0 && at <= mid)
-                || (to >= total - 0.01 && at >= mid))
+                || (to >= stretch_end(total) - 0.01 && at >= mid))
     });
     if covered {
         return;
@@ -405,7 +452,7 @@ mod tests {
         let m = meadow();
         for order in [1u8, 2, 3] {
             let reach = m.reaches.iter().find(|r| r.order == order).expect("reach");
-            let total = along_line(&reach.points, DVec2::splat(1e6)).0;
+            let total = length_of(&reach.points);
             let (from, to) = stretch_of(&reach.points, 0.5 * total).expect("stretch");
             assert!(to > from + 30.0, "order {order}: {from}..{to}");
             let course = sub_course(&reach.points, from, to);
@@ -415,6 +462,9 @@ mod tests {
             let first = DVec2::new(course[0].at.x, course[0].at.z);
             let (s, d) = along_line(&reach.points, first);
             assert!(d < 0.01 && (s - from).abs() < 0.01, "{s} {d}");
+            // Short of the mouth, where the creek runs into another.
+            let (_, to_end) = stretch_of(&reach.points, total).expect("stretch at the mouth");
+            assert!(to_end <= total - MOUTH_M + 0.01, "{to_end} {total}");
         }
     }
 
@@ -422,7 +472,7 @@ mod tests {
     fn a_planned_stretch_runs_down_its_creek_with_stones() {
         let m = meadow();
         let reach = m.reaches.iter().find(|r| r.order == 2).expect("reach");
-        let total = along_line(&reach.points, DVec2::splat(1e6)).0;
+        let total = length_of(&reach.points);
         let (from, to) = stretch_of(&reach.points, 0.5 * total).expect("stretch");
         let course = sub_course(&reach.points, from, to);
         let height = |x: f64, z: f64| m.height(x as f32, z as f32) as f64;
