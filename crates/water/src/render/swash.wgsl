@@ -436,7 +436,15 @@ fn after(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_id) l: 
             let o = water[nb[m]];
             if (o.x > DRY_M) { best = max(best, o.x + ground[nb[m]].x); }
         }
-        level = select(g.x - 0.05, best - 0.01, best > NONE);
+        // Never above the still water, though: the mesh between cell centers is a straight
+        // chord, and up a bank steeper than the cells (a crag's foot, a river's cut bank) a
+        // chord from the waterline to a dry cell drawn just under its own ground runs out of
+        // the slope, glassy shards metres above the water (playtest 2026-11-01 item 6). Held
+        // under the still level the sheet stays inside the bank, and the ground's depth test
+        // still draws the waterline.
+        var dry = g.x - 0.05;
+        if (g.y > NONE) { dry = min(dry, g.y - 0.05); }
+        level = select(dry, best - 0.01, best > NONE);
     }
     sand[k] = s;
     let p = vec2<i32>(w.i, w.j);
