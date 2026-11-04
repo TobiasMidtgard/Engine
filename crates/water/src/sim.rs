@@ -466,6 +466,30 @@ pub struct StillDepths {
     /// it read the whole grid in one 202 ms step at the overview (round 25, under the loading
     /// screen). Headless runs read it at once.
     pub spread_first: bool,
+    /// Read on a worker (in a game): the cells are handed to a job and their depths taken
+    /// in when it is done, a step or a few later, never read in the frame. On arriving at
+    /// the lake these reads still took 1.75 ms a step over 33 steps on the PC (round 26).
+    /// Headless runs read in the step, as before.
+    pub off_frame: bool,
+    /// The cells being read on a worker, for the grid (`at`) they were asked for.
+    job: Option<(StillKey, Task<StillRead>)>,
+}
+
+/// (grid corner, cells, cell size, `SimBook::layout`): what a [`StillDepths`] read is for.
+type StillKey = (DVec2, usize, f32, u64);
+
+/// What a worker read: (depth, cell index) per cell.
+type StillRead = Vec<(f32, usize)>;
+
+/// Depth of the still water of `bodies` at `p` (the deepest one), NaN where there is none,
+/// never infinite (that marks an unread cell).
+fn still_depth_at(bodies: &[BodyState], ground: &Ground, p: DVec3) -> f32 {
+    let d = bodies
+        .iter()
+        .filter_map(|b| b.depth_at(p, ground))
+        .fold(f32::NAN, f32::max);
+    // A body that reads infinitely deep would never count as read.
+    if d == f32::INFINITY { f32::MAX } else { d }
 }
 
 /// Cells read a step after the lakes changed under the grid (a lake streaming in), nearest
@@ -484,7 +508,7 @@ impl StillDepths {
     /// unlocked: it goes wide when much is new.
     fn read(
         &mut self,
-        at: (DVec2, usize, f32, u64),
+        at: StillKey,
         bodies: &[BodyState],
         ground: &Ground,
         level_y: f64,
@@ -531,12 +555,31 @@ impl StillDepths {
             self.unread = depth.iter().filter(|d| **d == f32::INFINITY).count();
             self.depth = depth;
             self.at = Some(at);
+            // (A read under way is for the old grid: dropped, it stops.)
+            self.job = None;
+        }
+        if self.off_frame
+            && let Some((key, task)) = &mut self.job
+        {
+            let Some(got) = check_ready(task) else {
+                return;
+            };
+            let key = *key;
+            self.job = None;
+            if key == at {
+                for (d, idx) in got {
+                    if self.depth[idx] == f32::INFINITY {
+                        self.depth[idx] = d;
+                        self.unread -= 1;
+                    }
+                }
+            }
         }
         if self.unread == 0 {
             self.prior.clear();
             return;
         }
-        if self.at == Some(at) && !self.prior.is_empty() {
+        if (self.at == Some(at) && !self.prior.is_empty()) || self.off_frame {
             budget = budget.max(RELAYOUT_READS);
         }
         // The unread cells nearest the focus first.
@@ -555,15 +598,25 @@ impl StillDepths {
             todo.select_nth_unstable_by(budget, |a, b| a.0.total_cmp(&b.0));
             todo.truncate(budget);
         }
-        let read = |idx: usize| {
+        let point = move |idx: usize| {
             let p =
                 origin + DVec2::new((idx % n) as f64 + 0.5, (idx / n) as f64 + 0.5) * cell as f64;
-            let p3 = DVec3::new(p.x, level_y, p.y);
-            bodies
-                .iter()
-                .filter_map(|b| b.depth_at(p3, ground))
-                .fold(f32::NAN, f32::max)
+            DVec3::new(p.x, level_y, p.y)
         };
+        if self.off_frame {
+            let (bodies, ground) = (bodies.to_vec(), ground.clone());
+            let task = AsyncComputeTaskPool::get().spawn(async move {
+                let _span = tracing::info_span!("water", name = "still depths").entered();
+                let mut got = todo;
+                for c in &mut got {
+                    c.0 = still_depth_at(&bodies, &ground, point(c.1));
+                }
+                got
+            });
+            self.job = Some((at, task));
+            return;
+        }
+        let read = |idx: usize| still_depth_at(bodies, ground, point(idx));
         let mut got: Vec<(f32, usize)> = todo;
         if got.len() > 4 * n {
             engine_core::tasks::par_chunks_mut(&mut got, n * 8, |_, chunk| {
@@ -577,8 +630,7 @@ impl StillDepths {
             }
         }
         for (d, idx) in got {
-            // A body that reads infinitely deep would never count as read.
-            self.depth[idx] = if d == f32::INFINITY { f32::MAX } else { d };
+            self.depth[idx] = d;
             self.unread -= 1;
         }
         if self.unread == 0 {
@@ -728,6 +780,8 @@ pub fn ripple_system(
     let dt = time.delta_secs();
     swash.off_frame = !config.headless;
     still.spread_first = !config.headless;
+    still.off_frame = !config.headless;
+    coarse.depths.off_frame = !config.headless;
     let mut state = shared.0.write();
     let dims = (
         settings.ripple_cells.clamp(16, 1024),
@@ -1798,5 +1852,63 @@ mod tests {
         assert_eq!(steps, (n * n).div_ceil(RELAYOUT_READS));
         assert_eq!(still.at_cell(0), 5.0);
         assert!(still.prior.is_empty());
+    }
+
+    /// In a game the depths are read on a worker: no step reads any itself, the old depths
+    /// show until the job is in, and once all are in they are what a read in the step finds.
+    #[test]
+    fn in_a_game_still_depths_are_read_on_workers_with_the_same_result() {
+        engine_core::tasks::init_task_pools();
+        let (n, cell) = (128usize, 0.25f32);
+        let origin = DVec2::splat(-16.0);
+        let ground = Ground::default();
+        let lakes = vec![lake(0.0, 100.0, 3.0), lake(-30.0, 25.0, 6.0)];
+        let mut here = StillDepths::default();
+        here.read((origin, n, cell, 1), &lakes, &ground, 0.0, DVec2::ZERO);
+        assert_eq!(here.unread, 0);
+        let mut game = StillDepths {
+            off_frame: true,
+            spread_first: true,
+            ..Default::default()
+        };
+        game.read((origin, n, cell, 1), &lakes, &ground, 0.0, DVec2::ZERO);
+        assert_eq!(game.unread, n * n, "nothing read in the step");
+        assert!(game.at_cell(0).is_nan());
+        let mut steps = 0;
+        while game.unread > 0 {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+            game.read((origin, n, cell, 1), &lakes, &ground, 0.0, DVec2::ZERO);
+            steps += 1;
+            assert!(steps < 10_000, "the job never came in");
+        }
+        for k in 0..n * n {
+            let (a, b) = (here.at_cell(k), game.at_cell(k));
+            assert!(a == b || (a.is_nan() && b.is_nan()), "{k}: {a} {b}");
+        }
+        // The grid moves while a read is under way: that read is dropped, and the new grid's
+        // cells come in all the same.
+        let moved = origin + DVec2::new(8.0, 0.0);
+        game.read((moved, n, cell, 1), &lakes, &ground, 0.0, DVec2::ZERO);
+        game.read(
+            (moved + DVec2::X, n, cell, 1),
+            &lakes,
+            &ground,
+            0.0,
+            DVec2::ZERO,
+        );
+        let mut steps = 0;
+        while game.unread > 0 {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+            game.read(
+                (moved + DVec2::X, n, cell, 1),
+                &lakes,
+                &ground,
+                0.0,
+                DVec2::ZERO,
+            );
+            steps += 1;
+            assert!(steps < 10_000, "the job never came in");
+        }
+        assert_eq!(game.at, Some((moved + DVec2::X, n, cell, 1)));
     }
 }
