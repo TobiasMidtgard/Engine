@@ -300,6 +300,8 @@ pub struct PlantSpecies {
     pub accent_color: [f32; 3],
     /// Wind sway at the top of a mature plant, meters.
     pub wind_sway_m: f32,
+    /// How it moves in the wind and carries rain and snow ([`crate::wind`]).
+    pub wind: crate::wind::PlantWind,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub glow: Option<Glow>,
     /// Deciduous: leafs out, turns and drops its leaves through the year. None = evergreen.
@@ -344,6 +346,7 @@ impl Default for PlantSpecies {
             leaf_color: srgb(0x4a6b2a),
             accent_color: srgb(0x7d8f2e),
             wind_sway_m: 0.25,
+            wind: Default::default(),
             glow: None,
             seasons: None,
             shape: PlantShape::default(),
@@ -1014,6 +1017,7 @@ pub fn builtin_species() -> Vec<PlantSpecies> {
     ];
     // (Appended, so the ids above stay as they were.)
     all.extend(stand_trees());
+    crate::wind::fill(&mut all);
     all
 }
 

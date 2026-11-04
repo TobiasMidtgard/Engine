@@ -29,6 +29,7 @@ pub mod squash;
 pub mod stands;
 pub mod visuals;
 pub mod walkers;
+pub mod wind;
 
 use engine_assets::Assets;
 use engine_core::prelude::*;

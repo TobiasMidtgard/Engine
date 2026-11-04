@@ -51,6 +51,13 @@ fn grass_surface(in: GrassOut, front: bool) -> Surface {
     s.roughness = mix(0.7, 0.36, in.gloss * mid);
     s.reflectance = 0.35;
     s.subsurface = 0.5;
+    // Wet: blades are waxy and shed water, so rain leaves a film and beads that gloss them
+    // (smoother, a little more reflective) and darken them only slightly, unlike soil, which
+    // soaks it up (Lagarde, "Water drop 2b", 2013: non-porous surfaces keep their albedo).
+    let wet = saturate(surface_weather(in.rel).x);
+    s.albedo *= 1.0 - 0.12 * wet;
+    s.roughness = mix(s.roughness, 0.16, wet * 0.85);
+    s.reflectance = mix(s.reflectance, 0.5, wet);
     return s;
 }
 

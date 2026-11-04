@@ -477,6 +477,7 @@ fn scene_source() -> String {
 
 fn cull_source() -> String {
     [
+        engine_world::gusts::GUST_WAVES_WGSL,
         include_str!("shaders/grass_common.wgsl"),
         include_str!("shaders/grass_cull.wgsl"),
     ]
@@ -653,6 +654,12 @@ impl GpuField {
 struct GpuBenders {
     count: [u32; 4],
     spheres: [[f32; 4]; MAX_BENDERS],
+    /// The weather's gust fronts (`engine_world::GustWaves::to_gpu`): every blade leans into
+    /// the same fronts the trees and the rest of the world feel.
+    waves: [[f32; 4]; 4],
+    /// xy: the camera's place in the fronts' frame (world X, Z meters from
+    /// `WindField::gust_origin`, taken in f64), z: wind speed the fronts move at (m/s).
+    gust_camera: [f32; 4],
 }
 
 /// One field's map on the GPU and what culling needs to know about it.
@@ -936,6 +943,18 @@ type FieldsQuery = QueryState<(
     &'static GlobalTransform,
     Option<Ref<'static, GrassWear>>,
 )>;
+
+/// The wind the meadow around the camera leans in: the prevailing wind at blade height plus
+/// local disturbances (rotor wash, blasts), but not the gusts at the camera's own spot. The
+/// gust fronts reach each blade where it stands (`grass_wind`), so a front passing the camera
+/// no longer makes the whole meadow pulse at once.
+fn meadow_wind(world: &World, view: &ViewData) -> Vec3 {
+    match world.get_resource::<engine_world::WindField>() {
+        // `WindField::sample`'s height profile at about 1.7 m: (1.7 / 10)^0.14.
+        Some(w) => w.prevailing * 0.78 + w.local.sample(view.origin),
+        None => view.wind,
+    }
+}
 
 /// The wind the blades sway in, kept steady. The frame's wind (sampled where the camera is,
 /// so it changes with every gust and step) is eased toward over about a second, and the
@@ -1265,7 +1284,8 @@ impl RenderFeature for GrassFeature {
             .get_resource::<engine_world::SurfaceLayers>()
             .map_or(0.0, |l| l.grid.sample(view.origin).snow_m.max(0.0));
         if !view.extra_view {
-            self.wind.update(view.wind, view.time, view.delta);
+            self.wind
+                .update(meadow_wind(world, view), view.time, view.delta);
         }
         let gust = self.wind.uniform(view.time);
         let mut seen = Vec::new();
@@ -1455,6 +1475,11 @@ impl RenderFeature for GrassFeature {
         let mut gpu_benders = GpuBenders::zeroed();
         gpu_benders.count[0] = benders.len() as u32;
         gpu_benders.spheres[..benders.len()].copy_from_slice(&benders);
+        if let Some(wind) = world.get_resource::<engine_world::WindField>() {
+            gpu_benders.waves = wind.waves.to_gpu();
+            let at = view.origin - wind.gust_origin;
+            gpu_benders.gust_camera = [at.x as f32, at.z as f32, self.wind.wind.length(), 0.0];
+        }
 
         // Upload.
         if self.order.is_empty() {
