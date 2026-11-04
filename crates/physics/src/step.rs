@@ -2413,11 +2413,6 @@ fn run_substeps(mut jobs: Vec<Job>, shared: &SubstepShared) -> Vec<SubstepOut> {
     }
 }
 
-/// The Rapier shapes of `wanted`'s colliders. A tile of terrain or a big scenery mesh takes a
-/// few milliseconds to build (its BVH, or a convex hull), and a batch arriving together (a zone
-/// streaming in) took 10-40 ms of one sync on 4 cores; batches with some size spread over
-/// [`region_pool`], whose tasks never wait on anything, so the simulation's lock held here is
-/// safe (AGENTS.md: no pool scope that may run another module's work under a lock).
 /// Place the static shapes built off the frame that are done, and finish on the spot the ones
 /// something moving came near or that waited too long ([`crate::shape_jobs`]).
 fn place_pending_statics(world: &World, sim: &mut Simulation) {
@@ -2450,7 +2445,7 @@ fn place_pending_statics(world: &World, sim: &mut Simulation) {
         let shape = if pose.scale == p.scale {
             shape
         } else {
-            convert::shape(&p.desc.shape, pose.scale)
+            convert::shape_cached(&p.desc.shape, pose.scale)
         };
         let Some(shape) = shape else {
             engine_core::log::warn!(
@@ -2491,9 +2486,15 @@ fn place_pending_statics(world: &World, sim: &mut Simulation) {
     }
 }
 
+/// The Rapier shapes of `wanted`'s colliders. A tile of terrain or a big scenery mesh takes a
+/// few milliseconds to build (its BVH, or a convex hull), and a batch arriving together (a zone
+/// streaming in) took 10-40 ms of one sync on 4 cores; batches with some size spread over
+/// [`region_pool`], whose tasks never wait on anything, so the simulation's lock held here is
+/// safe (AGENTS.md: no pool scope that may run another module's work under a lock).
 fn build_shapes(wanted: &[(Entity, Collider, Transform)]) -> Vec<Option<SharedShape>> {
-    let build =
-        |(_, desc, pose): &(Entity, Collider, Transform)| convert::shape(&desc.shape, pose.scale);
+    let build = |(_, desc, pose): &(Entity, Collider, Transform)| {
+        convert::shape_cached(&desc.shape, pose.scale)
+    };
     // Points across the batch: a box or a capsule is next to nothing to build.
     let weight: usize = wanted.iter().map(|w| shape_points(&w.1.shape)).sum();
     match region_pool() {

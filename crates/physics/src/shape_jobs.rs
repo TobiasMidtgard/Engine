@@ -10,7 +10,7 @@
 //! The guard: a job is finished on the spot (waited for, or built here if no worker has taken
 //! it yet) the step an awake body or a character comes near it, or after [`MAX_WAIT_STEPS`]
 //! steps whatever is near. So no body ever meets a missing static, and a query for one waits
-//! a few seconds at most. A collider whose shape changes (a voxel cliff's chunk remeshed where
+//! half a second at most. A collider whose shape changes (a voxel cliff's chunk remeshed where
 //! it was dug) keeps its old shape while the new one builds, even with something moving near,
 //! for [`MAX_REPLACE_STEPS`] steps at most.
 
@@ -25,9 +25,10 @@ use rapier3d::prelude::SharedShape;
 /// Vertices a static mesh (or hull) needs before it is built off the frame: smaller ones cost
 /// less than a hand-off.
 pub(crate) const OFF_FRAME_POINTS: usize = 512;
-/// Steps a job may wait before it is finished on the spot (so a query for it waits at most
-/// this long).
-pub(crate) const MAX_WAIT_STEPS: u32 = 240;
+/// Steps a job may wait before it is finished on the spot, so a ray or overlap (an NPC's sight
+/// line through a building just streamed in) misses it half a second at most. On their own
+/// threads jobs take milliseconds, so this is only reached when those threads fall behind.
+pub(crate) const MAX_WAIT_STEPS: u32 = 30;
 /// Steps the old shape of a collider changed near something moving stands in for the new one
 /// (a voxel cliff's chunk remeshed as debris falls off it) before the new one is finished on
 /// the spot.
@@ -88,7 +89,7 @@ impl Job {
                     }
                 }
             };
-            let built = crate::convert::shape(&shape, scale);
+            let built = crate::convert::shape_cached(&shape, scale);
             let mut s = worker.state.lock();
             if matches!(*s, State::Building) {
                 *s = State::Done(built);
@@ -118,7 +119,7 @@ impl Job {
             match std::mem::replace(&mut *s, State::Taken) {
                 State::Queued(shape, scale) => {
                     drop(s);
-                    return crate::convert::shape(&shape, scale);
+                    return crate::convert::shape_cached(&shape, scale);
                 }
                 State::Building => {
                     *s = State::Building;
