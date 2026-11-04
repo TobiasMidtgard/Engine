@@ -208,7 +208,7 @@ pub(crate) fn perceive(
     settings: Res<TimePerception>,
     mut dilation: ResMut<TimeDilation>,
     mut status: ResMut<PerceptionStatus>,
-    mut diagnostics: Option<ResMut<Diagnostics>>,
+    diagnostics: Option<Res<Metrics>>,
     mut attacks: MessageReader<AttackEvent>,
     mut damage: MessageReader<DamageEvent>,
     perceivers: Query<(Entity, &Transform, Option<&Tempo>, Has<PlayerControlled>), With<Perceiver>>,
@@ -322,7 +322,7 @@ pub(crate) fn perceive(
         }
     }
 
-    if let Some(d) = diagnostics.as_deref_mut() {
+    if let Some(d) = diagnostics.as_deref() {
         d.set("movement.time_scale", time.scale() as f64);
         d.set(
             "movement.focus",

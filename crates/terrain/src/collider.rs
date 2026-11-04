@@ -220,7 +220,7 @@ pub fn update_colliders(
     range: Option<Res<SimulationRange>>,
     time: Option<Res<Time>>,
     mut state: ResMut<TerrainColliders>,
-    diagnostics: Option<ResMut<engine_core::diagnostics::Diagnostics>>,
+    diagnostics: Option<Res<Metrics>>,
 ) {
     let dt = time.map_or(0.0, |t| t.delta_secs_f64());
     state.frames += 1;
@@ -508,7 +508,7 @@ pub fn update_colliders(
             .expect("spawn a terrain collider thread");
         state.building.insert(k, handle);
     }
-    if let Some(mut d) = diagnostics {
+    if let Some(d) = diagnostics {
         d.set("terrain.collider_bodies", body_count as f64);
         d.set("terrain.collider_tiles", state.tiles.len() as f64);
         d.set("terrain.collider_builds", state.built as f64);

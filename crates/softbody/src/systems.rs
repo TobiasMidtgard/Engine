@@ -1234,8 +1234,8 @@ pub fn step_bodies(
     scales: Query<&'static LocalTimeScale>,
     mut bodies: Query<(Entity, &mut SoftBodySim)>,
     names: Query<&Name>,
-    (mut diagnostics, mut slowest_body, beside): (
-        ResMut<Diagnostics>,
+    (diagnostics, mut slowest_body, beside): (
+        Res<Metrics>,
         ResMut<SlowestBody>,
         Res<BesidePhysics>,
     ),
