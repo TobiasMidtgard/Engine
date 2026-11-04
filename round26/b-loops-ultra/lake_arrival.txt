@@ -1,0 +1,202 @@
+﻿lake arrival (the forest's loop line): 06:35:52.204627 UTC
+
+-- fast.jsonl around the arrival (t = s after the loop line; ms; new.* parts only when they change)
+frame_ms is the engine's smoothed frame time; interval = wall time since the previous answer / frames since it (one answer a frame, so about each frame's own time)
+t s     frame    frame_ms  interval  views  views_ms  views_gpu_ms  new_ms  new_compiled  new parts
+ -1.48     4578      19.2      17.7      -         -             -       -             -  
+ -1.46     4579      19.1      21.3      -         -             -       -             -  
+ -1.44     4580      19.2      18.9      -         -             -       -             -  
+ -1.43     4581      19.2      16.4      -         -             -       -             -  
+ -1.41     4582      19.1      17.7      -         -             -       -             -  
+ -1.39     4583      19.0      18.4      -         -             -       -             -  
+ -1.37     4584      19.0      16.5      -         -             -       -             -  
+ -1.36     4585      18.9      18.5      -         -             -       -             -  
+ -1.34     4586      18.9      18.5      -         -             -       -             -  
+ -1.32     4587      18.8      16.6      -         -             -       -             -  
+ -1.30     4588      18.7      16.7      -         -             -       -             -  
+ -1.29     4589      18.6      18.3      -         -             -       -             -  
+ -1.27     4590      18.6      17.0      -         -             -       -             -  
+ -1.25     4591      18.6      16.5      -         -             -       -             -  
+ -1.23     4592      18.4      19.2      -         -             -       -             -  
+ -1.21     4593      18.4      20.7      -         -             -       -             -  
+ -1.19     4594      18.6      18.2      -         -             -       -             -  
+ -1.18     4595      18.5      17.8      -         -             -       -             -  
+ -1.16     4596      18.5      16.8      -         -             -       -             -  
+ -1.14     4597      18.4      18.3      -         -             -       -             -  
+ -1.12     4598      18.5      18.5      -         -             -       -             -  
+ -1.11     4599      18.4      17.1      -         -             -       -             -  
+ -1.09     4600      18.3      18.7      -         -             -       -             -  
+ -1.07     4601      18.4      17.1      -         -             -       -             -  
+ -1.05     4602      18.3      17.1      -         -             -       -             -  
+ -1.03     4603      18.2      18.3      -         -             -       -             -  
+ -1.01     4604      18.3      21.0      -         -             -       -             -  
+ -0.99     4605      18.4      18.2      -         -             -       -             -  
+ -0.98     4606      18.3      16.0      -         -             -       -             -  
+ -0.96     4607      18.3      18.1      -         -             -       -             -  
+ -0.94     4608      18.2      17.0      -         -             -       -             -  
+ -0.93     4609      18.2      18.4      -         -             -       -             -  
+ -0.91     4610      18.2      18.6      -         -             -       -             -  
+ -0.89     4611      18.2      19.0      -         -             -       -             -  
+ -0.87     4612      18.2      17.1      -         -             -       -             -  
+ -0.85     4613      18.2      17.0      -         -             -       -             -  
+ -0.84     4614      18.1      17.4      -         -             -       -             -  
+ -0.82     4615      18.1      17.1      -         -             -       -             -  
+ -0.80     4616      18.1      17.1      -         -             -       -             -  
+ -0.78     4617      18.0      18.3      -         -             -       -             -  
+ -0.77     4618      18.0      17.1      -         -             -       -             -  
+ -0.75     4619      18.0      21.3      -         -             -       -             -  
+ -0.73     4620      18.1      16.7      -         -             -       -             -  
+ -0.71     4621      18.1      18.3      -         -             -       -             -  
+ -0.69     4622      18.1      18.7      -         -             -       -             -  
+ -0.67     4623      18.1      18.1      -         -             -       -             -  
+ -0.65     4624      18.1      19.0      -         -             -       -             -  
+ -0.63     4625      18.2      20.0      -         -             -       -             -  
+ -0.62     4626      18.3      17.8      -         -             -       -             -  
+ -0.60     4627      18.2      18.1      -         -             -       -             -  
+ -0.57     4628      18.2      23.8      -         -             -       -             -  
+ -0.56     4629      18.5      17.9      -         -             -       -             -  
+ -0.54     4630      18.4      18.1      -         -             -       -             -  
+ -0.52     4631      18.5      17.9      -         -             -       -             -  
+ -0.50     4632      18.4      17.5      -         -             -       -             -  
+ -0.48     4633      18.3      19.8      -         -             -       -             -  
+ -0.47     4634      18.5      18.4      -         -             -       -             -  
+ -0.44     4635      18.5      23.2      -         -             -       -             -  
+ -0.42     4636      18.7      17.2      -         -             -       -             -  
+ -0.41     4637      18.6      19.5      -         -             -       -             -  
+ -0.39     4638      18.7      19.6      -         -             -       -             -  
+ -0.36     4639      18.7      21.0      -         -             -       -             -  
+ -0.34     4640      18.8      25.6      -         -             -       -             -  
+ -0.32     4641      19.2      19.5      -         -             -       -             -  
+ -0.30     4642      19.2      19.6      -         -             -       -             -  
+ -0.27     4643      19.2      29.8      -         -             -       -             -  
+ -0.25     4644      19.7      20.7      -         -             -       -             -  
+ -0.22     4645      19.8      28.9      -         -             -       -             -  
+ -0.20     4646      20.2      19.9      -         -             -       -             -  
+ -0.18     4647      20.2      21.1      -         -             -       -             -  
+ -0.15     4648      20.2      25.3      -         -             -       -             -  
+ -0.13     4649      20.5      19.8      -         -             -       -             -  
+ -0.11     4650      20.5      19.9      -         -             -       -             -  
+ -0.09     4651      20.5      24.3      -         -             -       -             -  
+ -0.07     4652      20.6      16.7      -         -             -       -             -  
+ -0.06     4653      20.5      18.5      -         -             -       -             -  
+ -0.03     4654      20.4      21.8      -         -             -       -             -  
+ -0.01     4655      20.4      18.4      -         -             -       -             -  
+  0.01     4656      20.3      22.9      -         -             -       -             -  
+  0.06     4657      20.5      54.1      1     20.38          0.00    1.67             0  targets 0.8, shadow maps 0.4, volumetrics 0.1, sky occlusion 0.1, environment 0.1, screen effects 0.1, post 0.1, frame groups 0.0, atmosphere 0.0, the rest 0.0, exposure meter 0.0
+  0.16     4658      22.1      97.7      1     18.65          5.07    1.67             0  
+  0.23     4659      25.9      71.8      1     14.05          4.30    1.67             0  
+  0.31     4660      28.2      75.4      1     13.10          4.42    1.67             0  
+  0.38     4661      30.6      77.2      1     15.48          4.43    1.67             0  
+  0.46     4662      32.9      77.3      1     16.40          4.57    1.67             0  
+  0.54     4663      35.1      82.2      1     11.35          4.50    1.67             0  
+  0.61     4664      37.4      70.3      1     14.29          4.51    1.67             0  
+  0.68     4665      39.1      65.1      1      9.67          4.59    1.67             0  
+  0.75     4666      40.4      69.1      1     13.90          4.65    1.67             0  
+  0.82     4667      41.9      75.6      1     14.29          4.54    1.67             0  
+  0.90     4668      43.5      75.9      1     11.41          4.65    1.67             0  
+  0.97     4669      45.1      73.3      1     10.28          4.70    1.67             0  
+  1.05     4670      46.5      79.3      1     16.80          4.75    1.67             0  
+  1.13     4671      48.2      75.8      1     12.89          4.71    1.67             0  
+  1.19     4672      49.6      66.6      1     14.50          4.84    1.67             0  
+  1.26     4673      50.4      64.2      1     10.99          4.84    1.67             0  
+  1.32     4674      51.1      64.2      1     11.00          4.81    1.67             0  
+  1.39     4675      51.8      68.6      1     10.64          4.86    1.67             0  
+  1.45     4676      52.6      54.4      1     11.07          4.85    1.67             0  
+  1.49     4677      52.7      47.6      1     12.42          4.91    1.67             0  
+  1.54     4678      52.5      44.3      1      8.93          4.84    1.67             0  
+  1.59     4679      52.0      49.9      1      9.06          4.72    1.67             0  
+  1.63     4680      51.9      47.2      1      9.27          4.85    1.67             0  
+  1.68     4681      51.7      46.4      1      8.76          4.87    1.67             0  
+  1.71     4682      51.4      33.1      1      8.95          4.85    1.67             0  
+  1.75     4683      50.5      36.1      1      8.88          4.85    1.67             0  
+  1.79     4684      49.8      42.9      1      9.29          4.81    1.67             0  
+  1.83     4685      49.4      38.1      1     10.59          4.76    1.67             0  
+  1.87     4686      48.9      41.4      1      9.34          4.81    1.67             0  
+  1.91     4687      48.5      42.2      1      9.00          4.79    1.67             0  
+  1.95     4688      48.2      35.4      1      9.64          4.81    1.67             0  
+  1.99     4689      47.6      44.2      1      9.02          4.84    1.67             0  
+  2.03     4690      47.4      35.0      1      9.54          4.77    1.67             0  
+  2.06     4691      46.7      34.3      1      9.21          4.81    1.67             0  
+  2.11     4692      46.1      41.2      1     11.14          4.74    1.67             0  
+  2.15     4693      45.9      41.1      1      8.91          4.80    1.67             0  
+  2.18     4694      45.6      35.8      1      8.90          4.79    1.67             0  
+  2.22     4695      45.1      37.2      1      9.57          4.84    1.67             0  
+  2.26     4696      44.8      42.2      1      9.29          4.78    1.67             0  
+  2.30     4697      44.6      35.6      1      9.71          4.81    1.67             0  
+  2.33     4698      44.2      36.6      1      9.42          4.79    1.67             0  
+  2.38     4699      43.8      45.3      1     10.24          4.75    1.67             0  
+  2.42     4700      43.9      38.7      1     11.39          4.77    1.67             0  
+  2.46     4701      43.6      45.7      1      9.32          4.84    1.67             0  
+  2.50     4702      43.7      40.7      1      9.33          4.82    1.67             0  
+  2.55     4703      43.6      41.3      1      9.08          4.87    1.67             0  
+  2.58     4704      43.4      33.9      1      8.45          4.83    1.67             0  
+  2.61     4705      43.0      31.7      1      7.56          4.86    1.67             0  
+  2.64     4706      42.4      33.4      1     10.64          4.74    1.67             0  
+  2.68     4707      42.0      34.9      1      8.59          4.77    1.67             0  
+  2.71     4708      41.6      32.3      1      8.26          4.80    1.67             0  
+  2.74     4709      41.1      32.6      1      9.07          4.79    1.67             0  
+  2.78     4710      40.7      35.3      1     10.36          4.77    1.67             0  
+  2.82     4711      40.5      35.5      1      8.52          4.76    1.67             0  
+  2.85     4712      40.2      35.1      1      9.27          4.84    1.67             0  
+  2.89     4713      40.0      40.4      1      8.38          4.78    1.67             0  
+  2.92     4714      40.0      33.9      1      9.51          4.79    1.67             0  
+  2.96     4715      39.7      33.4      1      8.03          4.74    1.67             0  
+  2.99     4716      39.3      33.7      1      8.71          4.81    1.67             0  
+  3.03     4717      39.1      34.4      1      8.05          4.74    1.67             0  
+  3.06     4718      38.8      33.4      1     10.02          4.79    1.67             0  
+  3.09     4719      38.6      34.2      1      8.32          4.72    1.67             0  
+  3.12     4720      38.3      30.8      1      7.94          4.82    1.67             0  
+  3.16     4721      38.0      32.2      1      8.14          4.72    1.67             0  
+  3.19     4722      37.7      37.8      1     10.74          4.73    1.67             0  
+  3.23     4723      37.7      33.5      1      8.66          4.76    1.67             0  
+  3.26     4724      37.5      34.2      1      9.33          4.78    1.67             0  
+  3.30     4725      37.3      36.8      1      8.64          4.81    1.67             0  
+  3.33     4726      37.3      34.6      1     11.17          4.78    1.67             0  
+  3.37     4727      37.2      39.6      1      8.38          4.78    1.67             0  
+  3.41     4728      37.3      33.3      1      8.52          4.78    1.67             0  
+  3.45     4729      37.1      41.1      1     11.42          4.80    1.67             0  
+  3.48     4730      37.3      36.9      1      9.29          4.73    1.67             0  
+  3.53     4731      37.3      42.5      1      8.42          4.80    1.67             0  
+  3.56     4732      37.5      33.4      1      8.98          4.82    1.67             0  
+  3.60     4733      37.3      36.9      1     10.43          4.83    1.67             0  
+  3.63     4734      37.3      35.1      1      9.01          4.83    1.67             0  
+  3.66     4735      37.2      31.6      1      8.10          4.78    1.67             0  
+  3.70     4736      36.9      35.2      1      8.59          4.77    1.67             0  
+  3.74     4737      36.8      40.2      1     10.38          4.77    1.67             0  
+  3.78     4738      37.0      39.6      1      8.88          4.79    1.67             0  
+  3.82     4739      37.2      37.2      1      9.40          4.82    1.67             0  
+  3.85     4740      37.1      37.5      1      8.19          4.95    1.67             0  
+  3.89     4741      37.1      37.5      1      7.66          4.78    1.67             0  
+  3.92     4742      37.2      30.3      1      7.78          4.85    1.67             0  
+  3.95     4743      36.8      33.2      1      7.54          4.79    1.67             0  
+  3.99     4744      36.6      30.6      1      7.62          4.73    1.67             0  
+  4.01     4745      36.4      29.2      1      7.42          4.74    1.67             0  
+  4.04     4746      36.0      23.0      1      6.91          4.70    1.67             0  
+  4.07     4747      35.4      34.0      1      7.80          4.74    1.67             0  
+slowest answers' frame_ms (ms, s after the loop line, frame): 52.7 (1.49 s, 4677); 52.6 (1.45 s, 4676); 52.5 (1.54 s, 4678); 52.0 (1.59 s, 4679); 51.9 (1.63 s, 4680); 51.8 (1.39 s, 4675); 51.7 (1.68 s, 4681); 51.4 (1.71 s, 4682)
+last answer's keys: render.extra_views 1.00, render.extra_views_cpu.aerial perspective 0.00, render.extra_views_cpu.ambient occlusion 0.00, render.extra_views_cpu.anti-aliasing 0.00, render.extra_views_cpu.atmosphere 0.01, render.extra_views_cpu.bloom 0.00, render.extra_views_cpu.bounce light 0.00, render.extra_views_cpu.cloud shadows 0.00, render.extra_views_cpu.compute character 0.00, render.extra_views_cpu.compute debug_lines 0.00, render.extra_views_cpu.compute fire 0.00, render.extra_views_cpu.compute fire haze 0.00, render.extra_views_cpu.compute foliage scenery 0.00, render.extra_views_cpu.compute grass 0.00, render.extra_views_cpu.compute meshes 0.02, render.extra_views_cpu.compute movement_effects 0.00, render.extra_views_cpu.compute movement_grapple_reticle 0.00, render.extra_views_cpu.compute movement_slow_motion 0.00, render.extra_views_cpu.compute painted ground 0.00, render.extra_views_cpu.compute perf_overlay 0.01, render.extra_views_cpu.compute portals 0.00, render.extra_views_cpu.compute skinned meshes 0.00, render.extra_views_cpu.compute sky 0.00, render.extra_views_cpu.compute smoke 0.00, render.extra_views_cpu.compute softbody 0.00, render.extra_views_cpu.compute space bodies 0.00, render.extra_views_cpu.compute sprites 0.00, render.extra_views_cpu.compute terrain 0.00, render.extra_views_cpu.compute ui 0.00, render.extra_views_cpu.compute vfx_marks 0.01, render.extra_views_cpu.compute vfx_particles 0.02, render.extra_views_cpu.compute water 0.00, render.extra_views_cpu.compute weather clouds 0.01, render.extra_views_cpu.compute weather ground 0.01, render.extra_views_cpu.compute weather precipitation 0.00, render.extra_views_cpu.depth of field 0.00, render.extra_views_cpu.exposure meter 0.00, render.extra_views_cpu.finish commands 0.13, render.extra_views_cpu.frame setup 0.41, render.extra_views_cpu.meshes: begin frame 0.11, render.extra_views_cpu.meshes: classify 0.17, render.extra_views_cpu.meshes: clusters 0.04, render.extra_views_cpu.meshes: cull 0.58, render.extra_views_cpu.meshes: gather 0.66, render.extra_views_cpu.meshes: materials 0.23, render.extra_views_cpu.meshes: pipelines 0.00, render.extra_views_cpu.meshes: shadow lists 0.01, render.extra_views_cpu.meshes: skins 0.02, render.extra_views_cpu.meshes: sort and batch 0.12, render.extra_views_cpu.meshes: sync 1.40, render.extra_views_cpu.meshes: upload 0.34, render.extra_views_cpu.meshes: upload materials 0.01, render.extra_views_cpu.motion blur 0.00, render.extra_views_cpu.occlusion culling 0.06, render.extra_views_cpu.overlay debug_lines 0.00, render.extra_views_cpu.prepare character 0.39, render.extra_views_cpu.prepare debug_lines 0.00, render.extra_views_cpu.prepare fire 0.08, render.extra_views_cpu.prepare fire haze 0.00, render.extra_views_cpu.prepare foliage scenery 0.08, render.extra_views_cpu.prepare grass 0.19, render.extra_views_cpu.prepare meshes 3.26, render.extra_views_cpu.prepare movement_effects 0.01, render.extra_views_cpu.prepare movement_grapple_reticle 0.00, render.extra_views_cpu.prepare movement_slow_motion 0.01, render.extra_views_cpu.prepare on the render thread 0.54, render.extra_views_cpu.prepare painted ground 0.09, render.extra_views_cpu.prepare perf_overlay 0.00, render.extra_views_cpu.prepare portals 0.00, render.extra_views_cpu.prepare results 0.03, render.extra_views_cpu.prepare serial 0.01, render.extra_views_cpu.prepare side by side 3.32, render.extra_views_cpu.prepare skinned meshes 0.02, render.extra_views_cpu.prepare sky 0.00, render.extra_views_cpu.prepare smoke 0.00, render.extra_views_cpu.prepare softbody 0.21, render.extra_views_cpu.prepare space bodies 0.04, render.extra_views_cpu.prepare sprites 0.00, render.extra_views_cpu.prepare terrain 1.06, render.extra_views_cpu.prepare ui 0.00, render.extra_views_cpu.prepare vfx_marks 0.00, render.extra_views_cpu.prepare vfx_particles 0.08, render.extra_views_cpu.prepare water 0.85, render.extra_views_cpu.prepare weather clouds 0.01, render.extra_views_cpu.prepare weather ground 0.00, render.extra_views_cpu.prepare weather precipitation 0.00, render.extra_views_cpu.prepass: character 0.01, render.extra_views_cpu.prepass: debug_lines 0.00, render.extra_views_cpu.prepass: fire 0.00, render.extra_views_cpu.prepass: fire haze 0.00, render.extra_views_cpu.prepass: foliage scenery 0.01, render.extra_views_cpu.prepass: grass 0.00, render.extra_views_cpu.prepass: meshes 0.04, render.extra_views_cpu.prepass: movement_effects 0.00, render.extra_views_cpu.prepass: movement_grapple_reticle 0.00, render.extra_views_cpu.prepass: movement_slow_motion 0.00, render.extra_views_cpu.prepass: painted ground 0.00, render.extra_views_cpu.prepass: perf_overlay 0.00, render.extra_views_cpu.prepass: portals 0.00, render.extra_views_cpu.prepass: skinned meshes 0.00, render.extra_views_cpu.prepass: sky 0.00, render.extra_views_cpu.prepass: smoke 0.00, render.extra_views_cpu.prepass: softbody 0.00, render.extra_views_cpu.prepass: space bodies 0.00, render.extra_views_cpu.prepass: sprites 0.00, render.extra_views_cpu.prepass: terrain 0.01, render.extra_views_cpu.prepass: ui 0.00, render.extra_views_cpu.prepass: vfx_marks 0.00, render.extra_views_cpu.prepass: vfx_particles 0.00, render.extra_views_cpu.prepass: water 0.00, render.extra_views_cpu.prepass: weather clouds 0.00, render.extra_views_cpu.prepass: weather ground 0.00, render.extra_views_cpu.prepass: weather precipitation 0.00, render.extra_views_cpu.reflections 0.01, render.extra_views_cpu.scene copies 0.00, render.extra_views_cpu.scene: character 0.00, render.extra_views_cpu.scene: debug_lines 0.00, render.extra_views_cpu.scene: fire 0.00, render.extra_views_cpu.scene: fire haze 0.00, render.extra_views_cpu.scene: foliage scenery 0.00, render.extra_views_cpu.scene: grass 0.00, render.extra_views_cpu.scene: meshes 0.02, render.extra_views_cpu.scene: movement_effects 0.01, render.extra_views_cpu.scene: movement_grapple_reticle 0.00, render.extra_views_cpu.scene: movement_slow_motion 0.00, render.extra_views_cpu.scene: painted ground 0.00, render.extra_views_cpu.scene: perf_overlay 0.00, render.extra_views_cpu.scene: portals 0.00, render.extra_views_cpu.scene: skinned meshes 0.00, render.extra_views_cpu.scene: sky 0.00, render.extra_views_cpu.scene: sky phase 0.00, render.extra_views_cpu.scene: smoke 0.00, render.extra_views_cpu.scene: softbody 0.00, render.extra_views_cpu.scene: space bodies 0.00, render.extra_views_cpu.scene: sprites 0.00, render.extra_views_cpu.scene: terrain 0.00, render.extra_views_cpu.scene: ui 0.00, render.extra_views_cpu.scene: vfx_marks 0.00, render.extra_views_cpu.scene: vfx_particles 0.00, render.extra_views_cpu.scene: water 0.00, render.extra_views_cpu.scene: weather clouds 0.00, render.extra_views_cpu.scene: weather ground 0.00, render.extra_views_cpu.scene: weather precipitation 0.00, render.extra_views_cpu.screenshot copy 0.00, render.extra_views_cpu.shadow views 0.00, render.extra_views_cpu.sky occlusion 0.01, render.extra_views_cpu.stats 0.00, render.extra_views_cpu.submit 0.66, render.extra_views_cpu.subsurface scattering 0.01, render.extra_views_cpu.surface weather 0.00, render.extra_views_cpu.tonemap 0.00, render.extra_views_cpu.transparent 0.01, render.extra_views_cpu.uniforms and lights 0.00, render.extra_views_cpu.view 0.04, render.extra_views_cpu.volumetric fog 0.00, render.extra_views_cpu.volumetrics prepare 0.01, render.extra_views_cpu.wait for the finishing threads 1.57, render.extra_views_gpu.aerial perspective 0.41, render.extra_views_gpu.ambient occlusion 0.04, render.extra_views_gpu.anti-aliasing 0.02, render.extra_views_gpu.atmosphere 0.02, render.extra_views_gpu.bloom 0.00, render.extra_views_gpu.bounce light 0.10, render.extra_views_gpu.compute character 0.00, render.extra_views_gpu.compute debug_lines 0.00, render.extra_views_gpu.compute fire 0.00, render.extra_views_gpu.compute fire haze 0.00, render.extra_views_gpu.compute foliage scenery 0.00, render.extra_views_gpu.compute grass 0.00, render.extra_views_gpu.compute meshes 0.07, render.extra_views_gpu.compute movement_effects 0.00, render.extra_views_gpu.compute movement_grapple_reticle 0.00, render.extra_views_gpu.compute movement_slow_motion 0.00, render.extra_views_gpu.compute painted ground 0.00, render.extra_views_gpu.compute perf_overlay 0.00, render.extra_views_gpu.compute portals 0.00, render.extra_views_gpu.compute skinned meshes 0.00, render.extra_views_gpu.compute sky 0.00, render.extra_views_gpu.compute smoke 0.00, render.extra_views_gpu.compute softbody 0.18, render.extra_views_gpu.compute space bodies 0.00, render.extra_views_gpu.compute sprites 0.00, render.extra_views_gpu.compute terrain 0.00, render.extra_views_gpu.compute ui 0.00, render.extra_views_gpu.compute vfx_marks 0.00, render.extra_views_gpu.compute vfx_particles 0.05, render.extra_views_gpu.compute water 0.00, render.extra_views_gpu.compute weather clouds 0.55, render.extra_views_gpu.compute weather ground 0.00, render.extra_views_gpu.compute weather precipitation 0.00, render.extra_views_gpu.depth of field 0.00, render.extra_views_gpu.exposure meter 0.01, render.extra_views_gpu.motion blur 0.00, render.extra_views_gpu.occlusion culling 0.11, render.extra_views_gpu.overlay debug_lines 0.00, render.extra_views_gpu.prepass 0.63, render.extra_views_gpu.prepass: character 0.06, render.extra_views_gpu.prepass: debug_lines 0.00, render.extra_views_gpu.prepass: fire 0.00, render.extra_views_gpu.prepass: fire haze 0.00, render.extra_views_gpu.prepass: foliage scenery 0.02, render.extra_views_gpu.prepass: grass 0.09, render.extra_views_gpu.prepass: meshes 0.24, render.extra_views_gpu.prepass: movement_effects 0.00, render.extra_views_gpu.prepass: movement_grapple_reticle 0.00, render.extra_views_gpu.prepass: movement_slow_motion 0.00, render.extra_views_gpu.prepass: painted ground 0.00, render.extra_views_gpu.prepass: perf_overlay 0.00, render.extra_views_gpu.prepass: portals 0.00, render.extra_views_gpu.prepass: skinned meshes 0.00, render.extra_views_gpu.prepass: sky 0.00, render.extra_views_gpu.prepass: smoke 0.00, render.extra_views_gpu.prepass: softbody 0.00, render.extra_views_gpu.prepass: space bodies 0.00, render.extra_views_gpu.prepass: sprites 0.00, render.extra_views_gpu.prepass: terrain 0.14, render.extra_views_gpu.prepass: ui 0.00, render.extra_views_gpu.prepass: vfx_marks 0.00, render.extra_views_gpu.prepass: vfx_particles 0.00, render.extra_views_gpu.prepass: water 0.00, render.extra_views_gpu.prepass: weather clouds 0.00, render.extra_views_gpu.prepass: weather ground 0.00, render.extra_views_gpu.prepass: weather precipitation 0.00, render.extra_views_gpu.reflections 0.04, render.extra_views_gpu.scene 2.08, render.extra_views_gpu.scene copies 0.01, render.extra_views_gpu.scene: character 0.09, render.extra_views_gpu.scene: debug_lines 0.00, render.extra_views_gpu.scene: fire 0.00, render.extra_views_gpu.scene: fire haze 0.00, render.extra_views_gpu.scene: foliage scenery 0.02, render.extra_views_gpu.scene: grass 0.06, render.extra_views_gpu.scene: meshes 0.82, render.extra_views_gpu.scene: movement_effects 0.00, render.extra_views_gpu.scene: movement_grapple_reticle 0.00, render.extra_views_gpu.scene: movement_slow_motion 0.00, render.extra_views_gpu.scene: painted ground 0.00, render.extra_views_gpu.scene: perf_overlay 0.00, render.extra_views_gpu.scene: portals 0.00, render.extra_views_gpu.scene: skinned meshes 0.00, render.extra_views_gpu.scene: sky 0.00, render.extra_views_gpu.scene: sky phase 0.05, render.extra_views_gpu.scene: smoke 0.00, render.extra_views_gpu.scene: softbody 0.07, render.extra_views_gpu.scene: space bodies 0.00, render.extra_views_gpu.scene: sprites 0.00, render.extra_views_gpu.scene: terrain 0.92, render.extra_views_gpu.scene: ui 0.00, render.extra_views_gpu.scene: vfx_marks 0.00, render.extra_views_gpu.scene: vfx_particles 0.00, render.extra_views_gpu.scene: water 0.00, render.extra_views_gpu.scene: weather clouds 0.00, render.extra_views_gpu.scene: weather ground 0.00, render.extra_views_gpu.scene: weather precipitation 0.00, render.extra_views_gpu.screenshot copy 0.00, render.extra_views_gpu.sky occlusion 0.04, render.extra_views_gpu.subsurface scattering 0.06, render.extra_views_gpu.tonemap 0.00, render.extra_views_gpu.transparent 0.15, render.extra_views_gpu.volumetric fog 0.10, render.extra_views_gpu_ms 4.74, render.extra_views_ms 7.80, render.extra_views_new.atmosphere 0.04, render.extra_views_new.environment 0.08, render.extra_views_new.exposure meter 0.01, render.extra_views_new.frame groups 0.04, render.extra_views_new.post 0.06, render.extra_views_new.screen effects 0.07, render.extra_views_new.shadow maps 0.40, render.extra_views_new.sky occlusion 0.09, render.extra_views_new.targets 0.75, render.extra_views_new.the rest 0.01, render.extra_views_new.volumetrics 0.13, render.extra_views_new_compiled 0.00, render.extra_views_new_ms 1.67, render.extra_views_shared_lighting 1.00
+
+-- log lines from 1 s before to 6 s after the arrival (renderer / extra views / WARN / hitch-like)
+  0.00 s   INFO showcase::loops: loop 1/1 at forest: 128430 entities (SceneryTree 11566, SceneryTreeVisual 11566, NearWoodsTree 524, Plant 9639, PlantVisual 9639, PlantPart 63919, MeshRenderer 97476); 18 ms a frame, systems 21.3 ms: engine_render::render_system 4.6, engine_script::script_frame_system 1.3, engine_script::run_scripts 1.3, engine_physics::physics_simulate 1.3, engine_vfx::tick_effects 0.7, engine_fire::update_grass 0.6, engine_water::ripple_system 0.5, engine_anim::demo_path_system 0.4; since the last visit: (first visit)
+  0.02 s   INFO engine_render::renderer: renderer: a new extra view's state in 1.7 ms, 0 new shaders, layouts and pipelines (targets 0.8, shadow maps 0.4, environment 0.1, sky occlusion 0.1, volumetrics 0.1, atmosphere 0.0, frame groups 0.0, post 0.1, screen effects 0.1, exposure meter 0.0, the rest 0.0)
+  0.04 s   INFO engine_render::renderer: extra views: 1 (1 sharing the main view's lighting), CPU 20.14 ms: prepare space bodies 7.02, prepare side by side 3.85, prepare meshes 3.81, prepare terrain 2.28, wait for the finishing threads 2.04, meshes: sync 1.94, submit 1.06, prepare serial 0.80, meshes: cull 0.79, prepare character 0.69, prepare water 0.69, prepare on the render thread 0.68, meshes: gather 0.49, subsurface scattering 0.45, meshes: upload 0.45, meshes: materials 0.27, prepare softbody 0.25, meshes: classify 0.21, finish commands 0.19, prepare grass 0.18, meshes: sort and batch 0.13, prepar
+
+-- the 5 s frame profile covering the arrival
+06:35:54 (2.38 s after the arrival): 184 frames in 5.0 s: 27.2 ms per frame (36.7 fps), worst 97.9 ms | systems busy 32.3 ms per frame: 1.18 of 32 cores on average | one system at a time 18.8 ms per frame, no system 2.6 ms, several at once 5.8 ms | systems ran on: compute 19.8 ms on 23 threads, main 12.3 ms, render 0.1 ms
+   schedule FixedUpdate 9.85 1.5
+   schedule Render 7.16 1.2
+   schedule Update 4.91 1.2
+   schedule PostUpdate 3.62 1.2
+   engine_render::render_system: 7.10 ms a frame, max 39.63, 1.2 runs a frame
+   engine_script::script_frame_system: 1.64 ms a frame, max 14.66, 1.2 runs a frame
+   engine_script::run_scripts: 1.57 ms a frame, max 14.55, 1.2 runs a frame
+   engine_water::ripple_system: 1.25 ms a frame, max 17.68, 1.5 runs a frame
+   engine_physics::physics_sync: 0.55 ms a frame, max 12.69, 1.5 runs a frame
+   in engine_render: prepare side by side: 4.26 ms a frame, max 17.02, 1.3 runs a frame
+   in engine_render: prepare meshes: 3.85 ms a frame, max 10.07, 1.3 runs a frame
+   in engine_render: probe gi: 2.38 ms a frame, max 16.96, 2.3 runs a frame
+   in engine_render: acquire window image: 1.85 ms a frame, max 11.08, 1.2 runs a frame
+   in engine_script: run scripts: 1.58 ms a frame, max 14.56, 1.2 runs a frame
+   in engine_npc: nav chunk: 0.75 ms a frame, max 15.94, 0.1 runs a frame
+   in engine_physics: sync from world: 0.54 ms a frame, max 12.68, 1.5 runs a frame
+   in engine_water: ripples: rebuild: 0.47 ms a frame, max 17.31, 1.5 runs a frame

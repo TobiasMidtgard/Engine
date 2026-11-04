@@ -1,0 +1,44 @@
+06:33:52.484Z     0.03  mode loops quality ultra size '' spec 'overview,plaza,market,forest,lake,fortress,field,orbit:1'; idle before start 29,422 s; HEAD d3cf57ad
+06:33:52.822Z     0.37  started: showcase.exe --loops overview,plaza,market,forest,lake,fortress,field,orbit:1 --profile --quality ultra  env PHYSICS_REPORT=240 RUST_LOG=info
+06:33:59.242Z     6.79  window visible: client 1600x900, window 1616x939 at (104,104), maximized False
+06:33:59.248Z     6.79  bridge connected
+06:33:59.520Z     7.07  fast sampler started (render.extra_views -> fast.jsonl)
+06:33:59.531Z     7.08  world built
+06:33:59.934Z     7.48  after build: working set 3,044 MB, private 5,854 MB; system free 34,784 of 65,277 MB
+06:33:59.938Z     7.48  window: client 1600x900, window 1616x939 at (104,104), maximized False
+06:34:07.345Z    14.89  frames running
+06:34:26.571Z    34.12  shot 01-overview: {"id":3,"jsonrpc":"2.0","result":{"height":900,"path":"screenshots/r26/01-overview.png","width":1600}}
+06:34:37.182Z    44.73  loop line: 1 overview (logged 06:34:37.103Z)
+06:34:47.142Z    54.69  trace trace_plaza (60 frames): {"id":4,"jsonrpc":"2.0","result":{"frames":60,"recording":"C:/Users/Tobit/AppData/Local/Temp/claude/C--Users-Tobit-Documents-ProgrammingProjects/a9b51fd2-8307-4505-9047-44a5b14953cc/scratchpad/r26/b_loops/trace_plaza.json"}}
+06:34:48.276Z    55.82  trace written: 60 frames to trace_plaza.json at 06:34:48.239591Z in the log (read 1.1 s after the ask)
+06:34:57.316Z    64.86  shot 02-plaza: {"id":7,"jsonrpc":"2.0","result":{"height":900,"path":"screenshots/r26/02-plaza.png","width":1600}}
+06:35:02.161Z    69.71  loop line: 1 plaza (logged 06:35:02.130Z)
+06:35:12.177Z    79.72  trace trace_market (60 frames): {"id":8,"jsonrpc":"2.0","result":{"frames":60,"recording":"C:/Users/Tobit/AppData/Local/Temp/claude/C--Users-Tobit-Documents-ProgrammingProjects/a9b51fd2-8307-4505-9047-44a5b14953cc/scratchpad/r26/b_loops/trace_market.json"}}
+06:35:13.503Z    81.05  trace written: 60 frames to trace_market.json at 06:35:13.454775Z in the log (read 1.3 s after the ask)
+06:35:22.362Z    89.91  shot 03-market: {"id":11,"jsonrpc":"2.0","result":{"height":900,"path":"screenshots/r26/03-market.png","width":1600}}
+06:35:27.222Z    94.77  loop line: 1 market (logged 06:35:27.163Z)
+06:35:27.224Z    94.77  arrival trace for lake armed for 06:35:52.123Z
+06:35:47.341Z   114.89  shot 04-forest: {"id":14,"jsonrpc":"2.0","result":{"height":900,"path":"screenshots/r26/04-forest.png","width":1600}}
+06:35:47.344Z   114.89  fast samplers go (after the forest picture)
+06:35:52.149Z   119.69  trace trace_lake_arrival (30 frames): {"id":15,"jsonrpc":"2.0","result":{"frames":30,"recording":"C:/Users/Tobit/AppData/Local/Temp/claude/C--Users-Tobit-Documents-ProgrammingProjects/a9b51fd2-8307-4505-9047-44a5b14953cc/scratchpad/r26/b_loops/trace_lake_arrival.json"}}
+06:35:52.231Z   119.78  loop line: 1 forest (logged 06:35:52.204Z)
+06:35:54.072Z   121.62  trace written: 30 frames to trace_lake_arrival.json at 06:35:54.014668Z in the log (read 1.9 s after the ask)
+06:35:56.260Z   123.81  fast samplers halted
+06:36:02.275Z   129.82  trace trace_lake (60 frames): {"id":16,"jsonrpc":"2.0","result":{"frames":60,"recording":"C:/Users/Tobit/AppData/Local/Temp/claude/C--Users-Tobit-Documents-ProgrammingProjects/a9b51fd2-8307-4505-9047-44a5b14953cc/scratchpad/r26/b_loops/trace_lake.json"}}
+06:36:03.979Z   131.53  trace written: 60 frames to trace_lake.json at 06:36:03.933089Z in the log (read 1.7 s after the ask)
+06:36:12.389Z   139.94  shot 05-lake: {"id":19,"jsonrpc":"2.0","result":{"height":900,"path":"screenshots/r26/05-lake.png","width":1600}}
+06:36:17.247Z   144.79  loop line: 1 lake (logged 06:36:17.224Z)
+06:36:27.275Z   154.82  trace trace_fortress (60 frames): {"id":20,"jsonrpc":"2.0","result":{"frames":60,"recording":"C:/Users/Tobit/AppData/Local/Temp/claude/C--Users-Tobit-Documents-ProgrammingProjects/a9b51fd2-8307-4505-9047-44a5b14953cc/scratchpad/r26/b_loops/trace_fortress.json"}}
+06:36:29.247Z   156.79  trace written: 60 frames to trace_fortress.json at 06:36:29.246553Z in the log (read 2.0 s after the ask)
+06:36:37.418Z   164.96  shot 06-fortress: {"id":23,"jsonrpc":"2.0","result":{"height":900,"path":"screenshots/r26/06-fortress.png","width":1600}}
+06:36:42.335Z   169.88  loop line: 1 fortress (logged 06:36:42.273Z)
+06:37:02.538Z   190.08  shot 07-field: {"id":26,"jsonrpc":"2.0","result":{"height":900,"path":"screenshots/r26/07-field.png","width":1600}}
+06:37:07.384Z   194.93  loop line: 1 field (logged 06:37:07.322Z)
+06:37:27.491Z   215.04  shot 08-orbit: {"id":29,"jsonrpc":"2.0","result":{"height":900,"path":"screenshots/r26/08-orbit.png","width":1600}}
+06:37:32.368Z   219.91  loop line: 1 orbit (logged 06:37:32.356Z)
+06:37:32.369Z   219.92  all rounds done
+06:37:34.265Z   221.81  end: working set 1,793 MB, private 2,062 MB; system free 37,762 of 65,277 MB
+06:37:34.268Z   221.81  sampler job: Completed
+06:37:34.274Z   221.82  fast sampler job 1: Completed
+06:37:34.280Z   221.83  game exited by itself, code 0
+06:38:16.890Z   264.44  done
