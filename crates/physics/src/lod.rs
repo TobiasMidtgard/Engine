@@ -254,6 +254,7 @@ impl Simulation {
             .range
             .map(|r| (r.active_m * (1.0 + r.hysteresis), r.active_m));
         let look = self.lod_clock.is_multiple_of(LOD_EVERY);
+        let asked = std::cell::Cell::new(0usize);
         for (id, r) in self.regions.iter_mut().enumerate() {
             let Some(r) = r else {
                 continue;
@@ -291,9 +292,11 @@ impl Simulation {
                 // (The ground is asked every few steps, and only out there: it isn't cheap.)
                 let nearest = r.nearest_mover(foci);
                 if look {
+                    let _piece = crate::report::Piece::start("upkeep: tiers: lost bodies");
                     let out_there = rest.is_some_and(|(enter, _)| nearest > enter * KEEP);
                     let ground = self.ground.as_ref();
                     let lost = |p: DVec3| {
+                        asked.set(asked.get() + 1);
                         ground
                             .and_then(|g| g.height(p + DVec3::Y * GROUND_PROBE_M))
                             .is_some_and(|h| p.y < h - LOST_BELOW_M)
@@ -308,6 +311,9 @@ impl Simulation {
                 tier_for(nearest, r.tier, &settings, characters, rest)
             };
             r.tier = tier;
+        }
+        if asked.get() > 0 && crate::report::wanted() {
+            crate::report::count("ground heights asked for tiers", asked.get());
         }
     }
 
