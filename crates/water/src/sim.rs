@@ -365,10 +365,30 @@ pub fn focus_point(focus: &FocusPoints, cameras: &Query<(&GlobalTransform, &Came
 /// more slowly): the waves take on the new sea state at once.
 const WIND_JUMP: f32 = 4.0;
 
+/// The ripple grid moves over a lake whose edge is at most this far from the focus, meters
+/// (otherwise it stays round the focus, where there is no water to step): farther, rain, spray
+/// and drifting floats ring it a few pixels wide. Round 26 on the PC, the fortress stop stepped
+/// the test area's tarn 66-120 m behind the camera at 1.8 ms a frame (this was 150 m for all).
+const LAKE_REACH_M: f64 = 40.0;
+/// ... and over one with a boat on it in front of the camera at most this far: a hull's wake
+/// stays in sight far off.
+const HULL_LAKE_REACH_M: f64 = 150.0;
+/// "In front of the camera": the cosine of the widest angle, on the ground, between where it
+/// looks and the lake's nearest edge (70°: wider than a 16:9 view's half width).
+const IN_VIEW_COS: f64 = 0.34;
+/// A hull this long or longer (its half length, m) is a boat ([`Disturbance::keel`]).
+const BOAT_HALF_LENGTH_M: f32 = 1.0;
+
 /// Where the ripple grid goes: on the focus when it is over interactive water or near a
-/// stream, else over the nearest interactive water within 150 m (so a camera on the shore
-/// sees wakes on the lake).
-fn ripple_center(state: &WaterState, focus: DVec3, half: f64) -> DVec2 {
+/// stream, else over the nearest interactive water within [`LAKE_REACH_M`] (so a camera on the
+/// shore sees wakes on the lake), or [`HULL_LAKE_REACH_M`] when a boat is on it and `view`
+/// (the camera's eye and forward) looks its way.
+fn ripple_center(
+    state: &WaterState,
+    focus: DVec3,
+    half: f64,
+    view: Option<(DVec3, Vec3)>,
+) -> DVec2 {
     let p = DVec2::new(focus.x, focus.z);
     // Over or beside a stream: follow the focus (rings, wakes and foam show on the stream
     // round it).
@@ -381,6 +401,14 @@ fn ripple_center(state: &WaterState, focus: DVec3, half: f64) -> DVec2 {
         return p;
     }
     let mut best: Option<(f64, DVec2)> = None;
+    // Boats pushing the water this step.
+    let boats: Vec<DVec2> = state
+        .ripples
+        .pending
+        .iter()
+        .filter(|d| d.keel.length() >= BOAT_HALF_LENGTH_M)
+        .map(|d| d.pos)
+        .collect();
     for b in state.bodies.iter().filter(|b| b.body.interactive) {
         let inset = b.body.extent.inset(b.local(focus)) as f64;
         if inset >= 0.0 {
@@ -388,7 +416,24 @@ fn ripple_center(state: &WaterState, focus: DVec3, half: f64) -> DVec2 {
         }
         let gap = -inset;
         let to_center = DVec2::new(b.center.x, b.center.z) - p;
-        if gap > 150.0 || best.is_some_and(|(g, _)| g <= gap) {
+        let edge = p + to_center.normalize_or_zero() * gap;
+        let seen = view.is_none_or(|(eye, forward)| {
+            let to = edge - DVec2::new(eye.x, eye.z);
+            let ahead = DVec2::new(forward.x as f64, forward.z as f64).normalize_or_zero();
+            to.length() < 1.0 || to.normalize().dot(ahead) > IN_VIEW_COS
+        });
+        let boat = boats.iter().any(|h| {
+            b.body
+                .extent
+                .inset(b.local(DVec3::new(h.x, b.center.y, h.y)))
+                > -1.0
+        });
+        let reach = if boat && seen {
+            HULL_LAKE_REACH_M
+        } else {
+            LAKE_REACH_M
+        };
+        if gap > reach || best.is_some_and(|(g, _)| g <= gap) {
             continue;
         }
         let reach = (gap + half * 0.5).min(to_center.length());
@@ -695,6 +740,7 @@ pub fn ripple_system(
         book.since_rebuild = f32::INFINITY;
     }
     let f = focus_point(&focus, &cameras);
+    state.ripples.focus = Some(DVec2::new(f.x, f.z));
     // High above the ground the grid (tens of meters of quarter-meter cells) is under a pixel
     // or two: it stays where it is instead of following a fast flight and rebuilding every
     // frame (18-39 ms a frame on the 2 km legs of the free-flight route, round 21d). Rings
@@ -703,7 +749,12 @@ pub fn ripple_system(
         .ground
         .height(f)
         .is_some_and(|h| f.y - h > RIPPLES_SEEN_FROM_M);
-    let center = ripple_center(&state, f, state.ripples.size() * 0.5);
+    let view = cameras
+        .iter()
+        .filter(|(_, c)| c.active)
+        .max_by_key(|(_, c)| c.order)
+        .map(|(g, _)| (g.translation(), g.forward()));
+    let center = ripple_center(&state, f, state.ripples.size() * 0.5, view);
     book.since_rebuild += dt;
     // A lake under the grid still having its bed read on a worker: the grid waits for it
     // (reading tens of thousands of cells from the terrain instead cost 77 ms in a frame on
@@ -1678,6 +1729,42 @@ mod tests {
             wind: Vec3::ZERO,
             bed: None,
         }
+    }
+
+    /// The ripple grid goes over a lake whose edge is near, or farther only for a boat the
+    /// camera looks toward (round 26: the fortress stepped a tarn 66 m behind the camera).
+    #[test]
+    fn the_grid_goes_to_a_far_lake_only_for_a_boat_in_view() {
+        let mut state = WaterState::new(64, 0.5);
+        // Its edge 70 m off.
+        state.bodies.push(lake(100.0, 30.0, 3.0));
+        let (focus, half) = (DVec3::ZERO, 32.0);
+        assert_eq!(
+            ripple_center(&state, focus, half, None),
+            DVec2::ZERO,
+            "a lake 70 m off with nothing on it"
+        );
+        state.bodies.push(lake(-60.0, 30.0, 3.0));
+        let c = ripple_center(&state, focus, half, None);
+        assert!(c.x < -20.0, "a lake 30 m off: {c}");
+        state.bodies.pop();
+        // A motorboat under way on the far one.
+        state.ripples.pending.push(crate::ripples::Disturbance {
+            pos: DVec2::new(100.0, 0.0),
+            radius: 0.8,
+            depth: 0.07,
+            press: 0.05,
+            keel: Vec2::new(2.3, 0.0),
+            ..Default::default()
+        });
+        let looking = |x: f32| Some((DVec3::new(0.0, 2.0, 0.0), Vec3::new(x, -0.1, 0.0)));
+        let c = ripple_center(&state, focus, half, looking(1.0));
+        assert!(c.x > 50.0, "looking at the boat: {c}");
+        assert_eq!(
+            ripple_center(&state, focus, half, looking(-1.0)),
+            DVec2::ZERO,
+            "looking away from it"
+        );
     }
 
     /// A lake streaming in under a grid that stays put is read over a few steps, nearest the
