@@ -765,7 +765,8 @@ fn a_large_mesh_builds_on_a_worker_and_then_blocks_the_sky() {
 /// A [`WorldShift`](engine_world::WorldShift) (a floating-origin move, or a jump that
 /// re-anchors the world) moves every root transform, so every mesh entity's change ticks move.
 /// The gather moves its cached boxes with the shift instead of reading them all again: only an
-/// entity that also moved on its own is refreshed. After the shift the closed room still keeps
+/// entity that also moved on its own is refreshed. Transforms written without a change aren't
+/// refreshed either. After the shift the closed room still keeps
 /// the noon sky out, as before it. Run for a plain move and for one that also turns the world
 /// (re-homing on a planet).
 #[test]
@@ -823,6 +824,24 @@ fn a_world_shift_moves_the_gather_without_reading_every_entity() {
         };
         let instances = diag(&app, "render.gi.instances");
         let before = brightness(&mut app, &format!("shift_{name}_before.png"), UPPER);
+
+        // Transforms written without changing (as some systems do every frame): nothing to
+        // refresh either.
+        for &e in &far {
+            app.world
+                .get_mut::<GlobalTransform>(e)
+                .expect("crate")
+                .set_changed();
+        }
+        app.update();
+        assert_eq!(
+            (
+                diag(&app, "render.gi.unchanged"),
+                diag(&app, "render.gi.changed")
+            ),
+            (2000.0, 0.0),
+            "{name}: transforms written unchanged"
+        );
 
         // The shift, as `engine_world` applies it: every root transform moves.
         let mut roots = app.world.query::<&mut Transform>();

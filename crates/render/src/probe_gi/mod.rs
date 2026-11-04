@@ -97,10 +97,10 @@ const UNMEASURED_PROBES_PER_FRAME: u32 = 512;
 const REBUILD_AFTER_FRAMES: u64 = 30;
 /// Frames a mesh's hierarchy stays after its last use.
 const KEEP_UNUSED_FRAMES: u64 = 600;
-/// How close (meters, and per matrix element) a transform must be to its cached one moved by a
-/// [`WorldShift`] to count as moved by the shift alone (the shift and the transform propagation
-/// round differently).
-const SHIFT_MATCH: f64 = 1e-6;
+/// How close (meters, and per matrix element) a transform must be to its cached one (moved by a
+/// [`WorldShift`]) to count as unmoved (the shift and the transform propagation round
+/// differently).
+const UNMOVED: f64 = 1e-6;
 
 /// `GiPass` in probe_gi.wgsl.
 #[repr(C)]
@@ -488,6 +488,8 @@ struct Stats {
     changed: u32,
     /// Mesh entities a [`WorldShift`] alone moved this frame (their entries moved with it).
     shifted: u32,
+    /// Mesh entities whose change ticks moved with nothing the gather reads changed.
+    unchanged: u32,
     rebuilt: bool,
     build_ms: f32,
     extract_ms: f32,
@@ -1285,6 +1287,7 @@ impl ProbeGi {
         }
         let mut changed: Vec<Entity> = Vec::new();
         let mut shifted = 0u32;
+        let mut unchanged = 0u32;
         let entities = match self.tick {
             Some(tick) => {
                 let mut n = 0usize;
@@ -1302,13 +1305,19 @@ impl ProbeGi {
                     if !renderer.visible && cached.is_none() {
                         continue;
                     }
-                    // Moved by the shift alone: its cached box moved with it.
-                    if shift.is_some()
-                        && !renderer_changed
-                        && !resolved_changed
-                        && cached.is_some_and(|c| c.affine.abs_diff_eq(transform.0, SHIFT_MATCH))
+                    // Its transform is its cached one (moved by the shift, if any), it is still
+                    // visible and names the same mesh and material: nothing the gather reads
+                    // changed. Systems that write a transform or renderer every frame without
+                    // changing it mark thousands like this at the lake on Tobias's PC.
+                    if !resolved_changed
+                        && renderer.visible
+                        && cached.is_some_and(|c| c.affine.abs_diff_eq(transform.0, UNMOVED))
                     {
-                        shifted += 1;
+                        if shift.is_some() {
+                            shifted += 1;
+                        } else {
+                            unchanged += 1;
+                        }
                         continue;
                     }
                     changed.push(entity);
@@ -1654,6 +1663,7 @@ impl ProbeGi {
             read: dirty.len() as u32,
             changed: changed.len() as u32,
             shifted,
+            unchanged,
             rebuilt: rebuild,
             build_ms,
             extract_ms: started.elapsed().as_secs_f32() * 1000.0,
@@ -1780,6 +1790,7 @@ impl ProbeGi {
         d.set("render.gi.read", s.read as f64);
         d.set("render.gi.changed", s.changed as f64);
         d.set("render.gi.shifted", s.shifted as f64);
+        d.set("render.gi.unchanged", s.unchanged as f64);
         d.set("render.gi.rebuilt", s.rebuilt as u8 as f64);
         d.set("render.gi.gpu_ms_per_kray", self.ms_per_kray as f64);
         d.set("render.gi.build_ms", s.build_ms as f64);
