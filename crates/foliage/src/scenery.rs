@@ -3207,6 +3207,21 @@ struct CoverBuilt {
     ms: f32,
 }
 
+/// Whether [`build_scenery`] has anything to do: a rebuild to put in, a cover to build or
+/// rebuild, or a rock to settle (it is queued only then: an exclusive system waits for the
+/// frame's other systems each time it is scheduled).
+pub fn scenery_due(
+    builds: Option<Res<SceneryBuilds>>,
+    covers: Query<(&GroundCover, Option<&GroundSurface>)>,
+    rocks: Query<&Rock>,
+) -> bool {
+    builds.is_some_and(|b| !b.pending.is_empty())
+        || covers
+            .iter()
+            .any(|(c, s)| s.is_none_or(|s| &s.built_from != c))
+        || rocks.iter().any(|r| !r.settled)
+}
+
 /// Cover rebuilds running off the frame, by cover entity.
 #[derive(Resource, Default)]
 pub struct SceneryBuilds {

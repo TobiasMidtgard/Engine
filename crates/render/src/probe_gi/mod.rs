@@ -1031,9 +1031,19 @@ impl ProbeGi {
     /// The main view's half on the main thread: place the grid, gather the instances near it,
     /// build what hierarchies are missing, upload, and fill the frame uniform's probe fields.
     /// Returns true when the atlas was recreated (rebuild the frame groups).
+    /// Make the query [`extract`](Self::extract) reads with (registering its components):
+    /// before it, with the world borrowed mutably.
+    pub fn ensure_query(&mut self, world: &mut World) {
+        if self.query.is_none() {
+            self.query = Some(world.query_filtered());
+        }
+    }
+
+    /// Reads the world shared, so it runs beside the features' shared prepares; call
+    /// [`ensure_query`](Self::ensure_query) first.
     pub fn extract(
         &mut self,
-        world: &mut World,
+        world: &World,
         shared: &GpuShared,
         view: &ViewData,
         settings: &RenderSettings,
@@ -1123,27 +1133,32 @@ impl ProbeGi {
         let hi = ((first_probe + (dims - 1).as_dvec3() * spacing + margin) / REGION_SNAP).ceil();
         let region_abs = (lo * REGION_SNAP, hi * REGION_SNAP);
         // Which mesh entities changed, from their change ticks alone.
-        let mut query = self.query.take().unwrap_or_else(|| world.query_filtered());
+        let mut query = self
+            .query
+            .take()
+            .or_else(|| world.try_query_filtered())
+            .expect("ProbeGi::ensure_query runs before extract");
         let mut changed: Vec<Entity> = Vec::new();
         let entities = match self.tick {
-            Some(tick) => world.last_change_tick_scope(tick, |w| {
+            Some(tick) => {
                 let mut n = 0usize;
-                for (entity, transform, renderer, resolved) in query.iter(w) {
+                for (entity, transform, renderer, resolved) in
+                    crate::features::iter_since(&mut query, world, tick)
+                {
                     n += 1;
                     if transform.is_changed() || renderer.is_changed() || resolved.is_changed() {
                         changed.push(entity);
                     }
                 }
                 n
-            }),
+            }
             None => {
                 changed.extend(query.iter(world).map(|q| q.0));
                 changed.len()
             }
         };
         // Changes from here on get a newer tick, so the next frame finds them.
-        self.tick = Some(world.increment_change_tick());
-        let world: &World = world;
+        self.tick = Some(crate::features::take_change_tick(world));
         let meshes = world.get_resource::<Assets<Mesh>>();
         let materials = world.get_resource::<Assets<StandardMaterial>>();
 

@@ -85,98 +85,105 @@ impl engine_world::FollowsWorldShift for ChoppedSpots {
 const AIM_HEIGHT_M: f32 = 1.1;
 
 /// Where the player is: the body that uses things, or the active camera without one.
-fn player_position(world: &mut World) -> Option<DVec3> {
-    let mut q = world.query_filtered::<&GlobalTransform, With<Interactor>>();
-    if let Some(t) = q.iter(world).next() {
+fn player_position(
+    players: &Query<&GlobalTransform, With<Interactor>>,
+    cams: &Query<(&Camera, &GlobalTransform)>,
+) -> Option<DVec3> {
+    if let Some(t) = players.iter().next() {
         return Some(t.translation());
     }
-    let mut cams = world.query::<(&Camera, &GlobalTransform)>();
-    cams.iter(world)
+    cams.iter()
         .filter(|(c, _)| c.active)
         .max_by_key(|(c, _)| c.order)
         .map(|(_, t)| t.translation())
 }
 
 /// Put "Chop" on grown trees near the player and take it off the rest; keep each prompt showing
-/// how far its cut has gone.
-pub fn offer_chops(world: &mut World) {
-    let Some(settings) = world.get_resource::<HandFelling>().cloned() else {
+/// how far its cut has gone. A plain system (it runs every frame; as an exclusive one it held
+/// up the frame's other systems each time).
+#[allow(clippy::type_complexity, clippy::too_many_arguments)]
+pub fn offer_chops(
+    mut commands: Commands,
+    settings: Option<Res<HandFelling>>,
+    library: Option<Res<PlantLibrary>>,
+    players: Query<&GlobalTransform, With<Interactor>>,
+    cams: Query<(&Camera, &GlobalTransform)>,
+    plants: Query<(Entity, &Plant, &GlobalTransform, Has<OffersChop>)>,
+    trees: Query<(Entity, &SceneryTree, &GlobalTransform, Has<OffersChop>)>,
+    mut prompts: Query<&mut Interactable, With<OffersChop>>,
+) {
+    let (Some(settings), Some(library)) = (settings, library) else {
         return;
     };
     let player = if settings.enabled {
-        player_position(world)
+        player_position(&players, &cams)
     } else {
         None
     };
-    let Some(library) = world.get_resource::<PlantLibrary>() else {
-        return;
-    };
-    let woody: Vec<bool> = library.species.iter().map(|sp| sp.is_tree()).collect();
     let near = |p: DVec3| {
         player.is_some_and(|me| {
             let d = p - me;
             d.x * d.x + d.z * d.z < (settings.offer_radius_m as f64).powi(2) && d.y.abs() < 20.0
         })
     };
-    let is_tree = |species: usize| woody.get(species).copied().unwrap_or(false);
-
-    // Plants: grown trees standing (alive, dead or burnt), not stumps.
-    let mut add = Vec::new();
-    let mut remove = Vec::new();
-    let mut verbs = Vec::new();
-    let mut q = world.query::<(Entity, &Plant, &GlobalTransform, Has<OffersChop>)>();
-    for (e, plant, gt, offered) in q.iter(world) {
-        let can = is_tree(plant.species.0 as usize)
-            && plant.size >= 0.2
-            && !matches!(plant.stage, PlantStage::Stump { .. })
-            && near(gt.translation());
-        if can && !offered {
-            add.push((e, plant.size));
-        } else if !can && offered {
-            remove.push(e);
-        } else if can {
-            verbs.push((e, plant.species, plant.size, plant.chop_damage));
-        }
-    }
-    let mut q = world.query::<(Entity, &SceneryTree, &GlobalTransform, Has<OffersChop>)>();
-    for (e, tree, gt, offered) in q.iter(world) {
-        let can = is_tree(tree.species.0 as usize) && tree.size >= 0.2 && near(gt.translation());
-        if can && !offered {
-            add.push((e, tree.size));
-        } else if !can && offered {
-            remove.push(e);
-        }
-    }
-
-    for (e, size) in add {
+    let is_tree = |species: usize| library.species.get(species).is_some_and(|sp| sp.is_tree());
+    let offer = |commands: &mut Commands, e: Entity, size: f32| {
         let reach = 1.8 + 0.4 * size;
-        world.entity_mut(e).insert((
+        commands.entity(e).insert((
             Interactable::new(settings.verb.clone())
                 .reach(reach)
                 .at(Vec3::Y * AIM_HEIGHT_M),
             OffersChop,
         ));
-    }
-    for e in remove {
-        world.entity_mut(e).remove::<(Interactable, OffersChop)>();
-    }
-    for (e, species, size, damage) in verbs {
-        let threshold = {
-            let library = world.resource::<PlantLibrary>();
-            fell_threshold(library.get(species), size)
-        };
-        let verb = if damage > 0.0 {
-            let blows = settings.blows_for(size);
-            let done = ((damage / threshold) * blows as f32).round() as u32;
-            format!("{} ({}/{})", settings.verb, done.min(blows - 1), blows)
-        } else {
-            settings.verb.clone()
-        };
-        if let Some(mut i) = world.get_mut::<Interactable>(e)
-            && i.verb != verb
-        {
-            i.verb = verb;
+    };
+
+    // Plants: grown trees standing (alive, dead or burnt), not stumps.
+    for (e, plant, gt, offered) in &plants {
+        let can = is_tree(plant.species.0 as usize)
+            && plant.size >= 0.2
+            && !matches!(plant.stage, PlantStage::Stump { .. })
+            && near(gt.translation());
+        if can && !offered {
+            offer(&mut commands, e, plant.size);
+        } else if !can && offered {
+            commands.entity(e).remove::<(Interactable, OffersChop)>();
+        } else if can {
+            let damage = plant.chop_damage;
+            let verb = if damage > 0.0 {
+                let threshold = fell_threshold(library.get(plant.species), plant.size);
+                let blows = settings.blows_for(plant.size);
+                let done = ((damage / threshold) * blows as f32).round() as u32;
+                format!("{} ({}/{})", settings.verb, done.min(blows - 1), blows)
+            } else {
+                settings.verb.clone()
+            };
+            if let Ok(mut i) = prompts.get_mut(e)
+                && i.verb != verb
+            {
+                i.verb = verb;
+            }
         }
+    }
+    for (e, tree, gt, offered) in &trees {
+        let can = is_tree(tree.species.0 as usize) && tree.size >= 0.2 && near(gt.translation());
+        if can && !offered {
+            offer(&mut commands, e, tree.size);
+        } else if !can && offered {
+            commands.entity(e).remove::<(Interactable, OffersChop)>();
+        }
+    }
+}
+
+/// Whether anyone pressed interact since the last look (for [`chop_on_interact`], queued only
+/// then: an exclusive system waits for the frame's other systems each time it is scheduled).
+pub fn chop_pressed(mut presses: MessageReader<Interact>) -> bool {
+    presses.read().count() > 0
+}
+
+/// [`chop_on_interact`] as queued work (its own message cursor kept between runs).
+pub fn chop_work(world: &mut World) {
+    if let Err(err) = world.run_system_cached(chop_on_interact) {
+        tracing::warn!("foliage: chop_on_interact: {err}");
     }
 }
 

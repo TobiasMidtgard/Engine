@@ -92,6 +92,7 @@ pub mod motion_blur;
 mod perf;
 pub mod planar_reflection;
 pub mod portal;
+mod prepare;
 mod probe_gi;
 pub mod renderer;
 pub mod rock;
@@ -124,9 +125,9 @@ pub use components::{
 };
 pub use depth_of_field::DepthOfField;
 pub use features::{
-    FeatureStats, FrameContext, GpuShared, GrowBuffer, RenderAppExt, RenderFeature, RenderPhase,
-    SHADER_LIB_ATMOSPHERE, SHADER_LIB_FRAME, SHADER_LIB_TYPES, UploadBudget, compose_shader,
-    validate_wgsl,
+    FeatureStats, FrameContext, GpuShared, GrowBuffer, PrepareOut, RenderAppExt, RenderFeature,
+    RenderPhase, SHADER_LIB_ATMOSPHERE, SHADER_LIB_FRAME, SHADER_LIB_TYPES, UploadBudget,
+    compose_shader, iter_since, take_change_tick, validate_wgsl,
 };
 pub use frame::ViewData;
 pub use gltf_loader::{
