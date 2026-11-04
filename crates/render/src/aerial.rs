@@ -78,7 +78,7 @@ pub(crate) struct AerialTable {
 impl AerialTable {
     pub fn new(shared: &GpuShared) -> Self {
         let device = &shared.device;
-        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        let layout = shared.bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("aerial perspective"),
             entries: &[wgpu::BindGroupLayoutEntry {
                 binding: 0,
@@ -96,12 +96,12 @@ impl AerialTable {
             include_str!("shaders/aerial.wgsl"),
             true,
         );
-        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        let pipeline_layout = shared.pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("aerial perspective"),
             bind_group_layouts: &[Some(&shared.frame_layout), Some(&layout)],
             immediate_size: 0,
         });
-        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        let pipeline = shared.compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("aerial perspective"),
             layout: Some(&pipeline_layout),
             module: &module,

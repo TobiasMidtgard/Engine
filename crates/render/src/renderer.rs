@@ -455,6 +455,20 @@ impl ViewState {
         surface: Option<wgpu::TextureFormat>,
         gi_atlas: &wgpu::TextureView,
     ) -> Self {
+        Self::new_timed(shared, settings, width, height, surface, gi_atlas).0
+    }
+
+    /// [`new`](Self::new), with the milliseconds each part took (a new extra view's first
+    /// frame: `render.extra_views_new.*`).
+    fn new_timed(
+        shared: &GpuShared,
+        settings: &RenderSettings,
+        width: u32,
+        height: u32,
+        surface: Option<wgpu::TextureFormat>,
+        gi_atlas: &wgpu::TextureView,
+    ) -> (Self, Vec<(&'static str, f32)>) {
+        let mut laps = Laps::default();
         let device = &shared.device;
         let targets = Targets::new(
             device,
@@ -463,6 +477,7 @@ impl ViewState {
             height,
             UVec2::new(width, height),
         );
+        laps.lap("targets");
         let frame_uniform_buffer = |label: &str| {
             device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some(label),
@@ -484,7 +499,9 @@ impl ViewState {
             settings.shadow_map_size.clamp(256, 8192),
             settings.sky_occlusion_size.clamp(64, 4096),
         );
+        laps.lap("shadow maps");
         let environment = EnvironmentMaps::new(shared);
+        laps.lap("environment");
         let mut sky_camera = crate::sky_occlusion::SkyCamera::new(shared);
         sky_camera.set_inputs(
             shared,
@@ -492,9 +509,12 @@ impl ViewState {
             &shadow.occlusion,
             shadow.occlusion_size,
         );
+        laps.lap("sky occlusion");
         let volumetrics = crate::volumetrics::Volumetrics::new(shared, &targets);
         let screen_stand_ins = ScreenMaps::stand_ins(shared, &volumetrics);
+        laps.lap("volumetrics");
         let atmosphere = AtmosphereLuts::new(shared, &frame_buffer);
+        laps.lap("atmosphere");
         let surface_weather = crate::surface_weather::SurfaceWeatherMap::new(shared);
         let cloud_shadows = CloudShadowMap::new(device);
         let groups = FrameGroups::new(
@@ -512,12 +532,16 @@ impl ViewState {
             gi_atlas,
             None,
         );
+        laps.lap("frame groups");
         let post = create_post(shared, &targets, surface);
+        laps.lap("post");
         let effects = ScreenEffects::new(shared, &targets);
+        laps.lap("screen effects");
         let mut meter = crate::exposure::ExposureMeter::new(shared);
         meter.set_source(device, &targets.hdr.view);
+        laps.lap("exposure meter");
         let perf = crate::perf::PerfLog::new(device, &shared.queue);
-        Self {
+        let view = Self {
             targets,
             frame_buffer,
             overlay_frame_buffer,
@@ -551,7 +575,34 @@ impl ViewState {
             last_view: None,
             last_cloud_area: None,
             borrowed: None,
+        };
+        laps.lap("the rest");
+        (view, laps.done)
+    }
+}
+
+/// Milliseconds of consecutive parts of some work.
+struct Laps {
+    since: Instant,
+    done: Vec<(&'static str, f32)>,
+}
+
+impl Default for Laps {
+    fn default() -> Self {
+        Self {
+            since: Instant::now(),
+            done: Vec::new(),
         }
+    }
+}
+
+impl Laps {
+    /// The part since the last lap is done.
+    fn lap(&mut self, name: &'static str) {
+        let now = Instant::now();
+        self.done
+            .push((name, (now - self.since).as_secs_f32() * 1000.0));
+        self.since = now;
     }
 }
 
@@ -1006,6 +1057,7 @@ impl Renderer {
             warm_pipelines: settings.pipeline_warmup.on(headless),
             prepare_steps: Default::default(),
             mips: Default::default(),
+            cache: Default::default(),
         };
 
         if shared.warm_pipelines {
@@ -1483,17 +1535,36 @@ impl Renderer {
             };
             let mut state = match self.extra_views.remove(&camera) {
                 Some(state) => state,
-                None => ExtraViewState {
-                    view: ViewState::new(
+                None => {
+                    let made = self.shared.cache.made();
+                    let (view, laps) = ViewState::new_timed(
                         &self.shared,
                         &settings,
                         size.x,
                         size.y,
                         None,
                         self.probe_gi.atlas_view(),
-                    ),
-                    image: None,
-                },
+                    );
+                    let total: f32 = laps.iter().map(|l| l.1).sum();
+                    // Shader modules, layouts and pipelines the main view didn't have yet.
+                    let compiled = self.shared.cache.made() - made;
+                    tracing::info!(
+                        "renderer: a new extra view's state in {total:.1} ms, {compiled} new \
+                         shaders, layouts and pipelines ({})",
+                        laps.iter()
+                            .map(|(name, ms)| format!("{name} {ms:.1}"))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    );
+                    if let Some(mut d) = world.get_resource_mut::<Diagnostics>() {
+                        d.set("render.extra_views_new_ms", total as f64);
+                        d.set("render.extra_views_new_compiled", compiled as f64);
+                        for (name, ms) in laps {
+                            d.set(&format!("render.extra_views_new.{name}"), ms as f64);
+                        }
+                    }
+                    ExtraViewState { view, image: None }
+                }
             };
             // A new view's image shows its (still black) picture from the start: the scene
             // this view draws may show it too.
@@ -3662,40 +3733,36 @@ pub(crate) fn fullscreen_pipeline(
     blend: Option<wgpu::BlendState>,
 ) -> wgpu::RenderPipeline {
     let layouts: Vec<Option<&wgpu::BindGroupLayout>> = layouts.iter().map(|l| Some(*l)).collect();
-    let pipeline_layout = shared
-        .device
-        .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some(label),
-            bind_group_layouts: &layouts,
-            immediate_size: 0,
-        });
-    shared
-        .device
-        .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some(label),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module,
-                entry_point: Some(vs),
-                compilation_options: Default::default(),
-                buffers: &[],
-            },
-            primitive: wgpu::PrimitiveState::default(),
-            depth_stencil: None,
-            multisample: Default::default(),
-            fragment: Some(wgpu::FragmentState {
-                module,
-                entry_point: Some(fs),
-                compilation_options: Default::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format,
-                    blend,
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            multiview_mask: None,
-            cache: None,
-        })
+    let pipeline_layout = shared.pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some(label),
+        bind_group_layouts: &layouts,
+        immediate_size: 0,
+    });
+    shared.render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some(label),
+        layout: Some(&pipeline_layout),
+        vertex: wgpu::VertexState {
+            module,
+            entry_point: Some(vs),
+            compilation_options: Default::default(),
+            buffers: &[],
+        },
+        primitive: wgpu::PrimitiveState::default(),
+        depth_stencil: None,
+        multisample: Default::default(),
+        fragment: Some(wgpu::FragmentState {
+            module,
+            entry_point: Some(fs),
+            compilation_options: Default::default(),
+            targets: &[Some(wgpu::ColorTargetState {
+                format,
+                blend,
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+        }),
+        multiview_mask: None,
+        cache: None,
+    })
 }
 
 /// The sun's glare in the tonemap (`sun_glare` in post.wgsl): where the sun is in the image and
@@ -3731,7 +3798,7 @@ fn sun_glare_params(
 }
 
 fn texture_sampler_layout(
-    device: &wgpu::Device,
+    shared: &GpuShared,
     label: &str,
     with_uniform: bool,
     with_second_texture: bool,
@@ -3775,7 +3842,7 @@ fn texture_sampler_layout(
             },
         ));
     }
-    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+    shared.bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some(label),
         entries: &entries,
     })
@@ -3787,9 +3854,9 @@ fn create_post(
     surface_format: Option<wgpu::TextureFormat>,
 ) -> PostResources {
     let device = &shared.device;
-    let tonemap_layout = texture_sampler_layout(device, "tonemap layout", true, true);
-    let bloom_layout = texture_sampler_layout(device, "bloom layout", true, false);
-    let blit_layout = texture_sampler_layout(device, "blit layout", false, false);
+    let tonemap_layout = texture_sampler_layout(shared, "tonemap layout", true, true);
+    let bloom_layout = texture_sampler_layout(shared, "bloom layout", true, false);
+    let blit_layout = texture_sampler_layout(shared, "blit layout", false, false);
 
     let post_module = shared.shader("post", include_str!("shaders/post.wgsl"), false);
     let bloom_module = shared.shader("bloom", include_str!("shaders/bloom.wgsl"), false);

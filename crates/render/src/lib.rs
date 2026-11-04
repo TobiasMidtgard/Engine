@@ -75,6 +75,7 @@ pub(crate) mod finish;
 pub mod frame;
 pub mod gltf_loader;
 pub mod gpu;
+mod gpu_cache;
 pub mod grass;
 pub mod image_cache;
 mod impostor;

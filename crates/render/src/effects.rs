@@ -121,11 +121,11 @@ impl ScreenEffects {
                 },
             )
         };
-        let ao_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        let ao_layout = shared.bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("ambient occlusion inputs"),
             entries: &[float_tex(0), float_tex(1), depth_tex(2)],
         });
-        let ssr_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        let ssr_layout = shared.bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("screen-space reflection inputs"),
             entries: &[
                 float_tex(0),
@@ -136,7 +136,7 @@ impl ScreenEffects {
                 float_tex(5),
             ],
         });
-        let chain_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        let chain_layout = shared.bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("reflection chain input"),
             entries: &[
                 float_tex(0),
@@ -147,7 +147,7 @@ impl ScreenEffects {
                 ),
             ],
         });
-        let gi_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        let gi_layout = shared.bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("screen-space gi inputs"),
             entries: &[
                 float_tex(0),
@@ -158,7 +158,7 @@ impl ScreenEffects {
                 float_tex(5),
             ],
         });
-        let taa_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        let taa_layout = shared.bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("taa inputs"),
             entries: &[
                 float_tex(0),
@@ -177,7 +177,7 @@ impl ScreenEffects {
                 float_tex(5),
             ],
         });
-        let reactive_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        let reactive_layout = shared.bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("taa reactive inputs"),
             entries: &[float_tex(0), float_tex(1)],
         });

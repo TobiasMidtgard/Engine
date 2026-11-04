@@ -270,7 +270,7 @@ impl Volumetrics {
                 },
             )
         };
-        let scatter_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        let scatter_layout = shared.bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("volumetric fog scatter"),
             entries: &[
                 uniform,
@@ -314,7 +314,7 @@ impl Volumetrics {
                 ),
             ],
         });
-        let integrate_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        let integrate_layout = shared.bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("volumetric fog integrate"),
             entries: &[uniform, volume_texture(4), volume_output(5)],
         });
@@ -324,12 +324,12 @@ impl Volumetrics {
             true,
         );
         let pipeline = |label: &str, entry: &str, layout: &wgpu::BindGroupLayout| {
-            let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            let layout = shared.pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some(label),
                 bind_group_layouts: &[Some(&shared.frame_layout), Some(layout)],
                 immediate_size: 0,
             });
-            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            shared.compute_pipeline(&wgpu::ComputePipelineDescriptor {
                 label: Some(label),
                 layout: Some(&layout),
                 module: &module,

@@ -51,7 +51,7 @@ impl SkyCamera {
             ty,
             count: None,
         };
-        let input_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        let input_layout = shared.bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("sky camera input"),
             entries: &[
                 entry(
@@ -77,7 +77,7 @@ impl SkyCamera {
                 entry(25, cover_binding()),
             ],
         });
-        let output_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        let output_layout = shared.bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("sky camera output"),
             entries: &[entry(
                 0,
@@ -105,13 +105,13 @@ impl SkyCamera {
                 resource: buffer.as_entire_binding(),
             }],
         });
-        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        let layout = shared.pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("sky camera"),
             bind_group_layouts: &[Some(&input_layout), Some(&output_layout)],
             immediate_size: 0,
         });
         let module = shared.shader("sky camera", include_str!("shaders/sky_camera.wgsl"), true);
-        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        let pipeline = shared.compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("sky camera"),
             layout: Some(&layout),
             module: &module,
@@ -128,7 +128,7 @@ impl SkyCamera {
                 view_dimension: wgpu::TextureViewDimension::D2,
             },
         );
-        let first_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        let first_layout = shared.bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("sky cover first"),
             entries: &[
                 entry(
@@ -142,19 +142,19 @@ impl SkyCamera {
                 storage,
             ],
         });
-        let level_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        let level_layout = shared.bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("sky cover level"),
             entries: &[entry(1, cover_binding()), storage],
         });
         let cover_module =
             shared.shader("sky cover", include_str!("shaders/sky_cover.wgsl"), false);
         let cover_pipeline = |layout: &wgpu::BindGroupLayout, entry: &str| {
-            let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            let pipeline_layout = shared.pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("sky cover"),
                 bind_group_layouts: &[Some(layout)],
                 immediate_size: 0,
             });
-            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            shared.compute_pipeline(&wgpu::ComputePipelineDescriptor {
                 label: Some(entry),
                 layout: Some(&pipeline_layout),
                 module: &cover_module,
