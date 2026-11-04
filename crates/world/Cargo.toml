@@ -10,3 +10,6 @@ engine_core.workspace = true
 bevy_ecs.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+
+[dev-dependencies]
+naga = { version = "30.0.1", features = ["wgsl-in"] }

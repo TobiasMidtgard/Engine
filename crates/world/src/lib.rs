@@ -3,12 +3,15 @@
 //! Weather, water, fire, smoke, foliage, terrain, destruction, vehicles and AI never call each
 //! other directly. They meet here:
 //!
-//! * **Fields** ([`environment`]): wind, weather, ground wetness/snow/scorch, heat. One owner
-//!   writes each; anyone reads. Sample them through [`Env`], a system parameter.
+//! * **Fields** ([`environment`]): wind (with [`gusts`], fronts every shader evaluates alike),
+//!   weather, ground wetness/snow/scorch near and far ([`FarSurface`]), heat, and the grass and
+//!   low plants on the ground ([`cover`]). One owner writes each; anyone reads. Sample them
+//!   through [`Env`], a system parameter.
 //! * **Queries** ([`physical`]): [`Gravity`], [`Ground`], [`GroundWear`], [`Water`] and
-//!   [`ForestCover`] answer "what is at this point" for any implementation (heightmap, voxel,
-//!   planet; worn paths; lake, ocean, river; painted woods), and [`Obscurance`] answers "how
-//!   much smoke, fog or dust is between these two points".
+//!   [`ForestCover`] (with its stand mix) answer "what is at this point" for any implementation
+//!   (heightmap, voxel, planet; worn paths; lake, ocean, river; painted woods), [`Creeks`] where
+//!   the terrain's streams run, and [`Obscurance`] answers "how much smoke, fog or dust is
+//!   between these two points".
 //! * **Air** ([`air`]): density, pressure, temperature, speed of sound and wind anywhere,
 //!   per planet (`Env::air`).
 //! * **Materials** ([`SurfaceMaterials`]): one table of friction, fuel, deformation, sounds.
@@ -35,9 +38,11 @@
 pub mod air;
 pub mod animation;
 pub mod character;
+pub mod cover;
 pub mod environment;
 pub mod events;
 pub mod grid;
+pub mod gusts;
 pub mod interact;
 pub mod locomotion;
 pub mod physical;
@@ -52,9 +57,11 @@ pub use character::{
     Appearance, AppearanceBodies, AppearanceRequest, BodyFit, CharacterQuality, FaceControls,
     HairGuide, HairGuides, HairGuidesPosed, HandControls, Outfit, draws_appearances,
 };
+pub use cover::{CoverCell, CoverKind, GroundCover};
 pub use environment::*;
 pub use events::*;
 pub use grid::{Blend, Grid2, Grid3};
+pub use gusts::{GUST_WAVES_WGSL, GustWave, GustWaves};
 pub use interact::{Interact, InteractTarget, Interactable, Interactor, Readouts, Using};
 pub use locomotion::{
     ClimbLine, Climbable, EngineKind, EngineState, Exhaust, ExhaustEffects, ExhaustKind, Exhausts,
@@ -67,7 +74,10 @@ pub use stream::{
     CellDelta, CellId, CellMember, CellMemory, CellState, PersistentId, StreamFrame,
     StreamPlacement, StreamedCells, StreamingSource,
 };
-pub use terrain::{EditOp, EditShape, TerrainChanged, TerrainEdit};
+pub use terrain::{
+    CreekPoint, CreekQuery, CreekReach, CreekSample, Creeks, EditOp, EditShape, TerrainChanged,
+    TerrainEdit,
+};
 
 use engine_core::math::{DVec2, DVec3, Vec3};
 use engine_core::prelude::*;
@@ -288,6 +298,8 @@ impl Plugin for WorldPlugin {
             .init_resource::<WindField>()
             .init_resource::<WindOverride>()
             .init_resource::<SurfaceLayers>()
+            .init_resource::<FarSurface>()
+            .init_resource::<GroundCover>()
             .init_resource::<HeatField>()
             .init_resource::<Gravity>()
             .init_resource::<Atmospheres>()
@@ -449,6 +461,72 @@ mod tests {
             g.up_at(DVec3::new(6.371e6, 0.0, 0.0))
                 .abs_diff_eq(Vec3::X, 1e-5)
         );
+    }
+
+    #[test]
+    fn a_forest_provider_that_knows_only_conifers_implies_a_stand_mix() {
+        struct Woods;
+        impl ForestQuery for Woods {
+            fn sample(&self, _p: DVec3) -> Option<ForestSample> {
+                Some(ForestSample {
+                    density: 0.8,
+                    conifer: 0.75,
+                })
+            }
+        }
+        let cover = ForestCover(std::sync::Arc::new(Woods));
+        let s = cover.stands(DVec3::ZERO).unwrap();
+        assert_eq!(s.forest, cover.sample(DVec3::ZERO).unwrap());
+        assert!((s.mix.0.iter().sum::<f32>() - 1.0).abs() < 1e-6);
+        assert!((s.mix.conifer() - 0.75).abs() < 1e-6);
+        assert_eq!(s.mix.dominant(), Some(StandKind::SpruceForest));
+        assert_eq!(StandMix::only(StandKind::AlderCarr).conifer(), 0.0);
+        assert_eq!(StandMix::default().dominant(), None);
+        assert_eq!(StandMix::default().normalized(), StandMix::default());
+        assert_eq!(StandKind::ALL.len(), StandKind::MountainBirch as usize + 1);
+    }
+
+    #[test]
+    fn snow_lies_above_the_snow_line_far_away() {
+        let mut far = FarSurface::default();
+        let low = DVec3::new(2000.0, 300.0, -4000.0);
+        let high = DVec3::new(2000.0, 1500.0, -4000.0);
+        assert_eq!(far.sample(high).snow_cover, 0.0, "no line, no snow");
+        far.snow_line_m = 1000.0;
+        assert_eq!(far.sample(low).snow_cover, 0.0);
+        assert_eq!(far.sample(high).snow_cover, 1.0);
+        let at = far.sample(DVec3::new(2000.0, 1000.0, -4000.0)).snow_cover;
+        assert!((at - 0.5).abs() < 1e-3, "{at}");
+        let c = far.grid.cell_at(low);
+        far.grid.set(
+            c,
+            FarSurfaceCell {
+                wet_share: 0.4,
+                snow_cover: 0.9,
+            },
+        );
+        let s = far.grid.cell_center3(c, 300.0);
+        assert_eq!(
+            far.sample(s).snow_cover,
+            0.9,
+            "snow that fell below the line"
+        );
+    }
+
+    #[test]
+    fn gust_fronts_add_to_the_wind_only_when_they_blow() {
+        let mut wind = WindField {
+            gustiness: 0.0,
+            ..Default::default()
+        };
+        let p = DVec3::new(12.0, 30.0, 4.0);
+        let calm = wind.sample(p);
+        wind.waves.broad.strength = 0.5;
+        let fronts: Vec<f32> = (0..200)
+            .map(|i| wind.sample(p + DVec3::X * i as f64).length() / calm.length())
+            .collect();
+        assert!(fronts.iter().all(|r| (1.0 - 1e-4..=1.5 + 1e-4).contains(r)));
+        assert!(fronts.iter().any(|r| *r > 1.3), "fronts blow harder");
     }
 
     #[test]
