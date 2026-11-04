@@ -191,6 +191,10 @@ pub(crate) struct MeshScene {
     tick: Option<Tick>,
     /// Slots rewritten by the latest sync.
     pub dirty: u32,
+    /// Entities the latest sync found changed whose slot already held exactly what they
+    /// draw: a transform or renderer written without changing (left alone, so static shadow
+    /// images keep them and nothing is uploaded again).
+    pub unchanged: u32,
     /// Slots rewritten or dropped by the latest sync, as they were before (static shadow
     /// images that hold them must be drawn again).
     pub changes: Vec<SlotChange>,
@@ -231,6 +235,7 @@ impl MeshScene {
     /// [`ensure_query`](Self::ensure_query).
     pub fn sync(&mut self, world: &World, frame: u64) {
         self.dirty = 0;
+        self.unchanged = 0;
         self.changes.clear();
         if self.query.is_none() {
             // `None` while a component of the query was never registered.
@@ -456,17 +461,23 @@ impl MeshScene {
                     && hot.flags & !MIRRORED == flags
                     && self.cold[s].transform.0.matrix3 == transform.0.matrix3
                 {
+                    let delta = transform.0.translation - self.cold[s].transform.0.translation;
+                    if delta == DVec3::ZERO {
+                        // Written but not changed (systems that set a transform or a renderer
+                        // every frame): nothing to do. Marking it changed would keep it out of
+                        // the static shadow images and draw those again (`changes`), as Unreal
+                        // updates a primitive's render state only when its transform moved.
+                        self.unchanged += 1;
+                        return;
+                    }
                     self.note_change(s);
                     let cold = &mut self.cold[s];
                     cold.changed = frame;
-                    let delta = transform.0.translation - cold.transform.0.translation;
-                    if delta != DVec3::ZERO {
-                        cold.previous = cold.transform;
-                        cold.previous_rows = cold.rows;
-                        cold.moved = frame;
-                        cold.transform = *transform;
-                        self.hot[s].center += delta;
-                    }
+                    cold.previous = cold.transform;
+                    cold.previous_rows = cold.rows;
+                    cold.moved = frame;
+                    cold.transform = *transform;
+                    self.hot[s].center += delta;
                     self.dirty += 1;
                     return;
                 }
@@ -677,6 +688,15 @@ mod tests {
         assert_eq!((scene.hot.len(), scene.dirty), (2, 2));
         scene.sync(&world, 2);
         assert_eq!(scene.dirty, 0, "nothing changed");
+        // Written without changing (change ticks moved, values the same): left alone, so
+        // static shadow images keep them.
+        world.get_mut::<GlobalTransform>(a).unwrap().set_changed();
+        world.get_mut::<MeshRenderer>(b).unwrap().set_changed();
+        scene.sync(&world, 3);
+        assert_eq!((scene.dirty, scene.unchanged), (0, 2));
+        assert!(scene.changes.is_empty());
+        assert_eq!(scene.cold[slot(&scene, a)].changed, 1);
+        assert_eq!(scene.cold[slot(&scene, b)].changed, 1);
 
         // A move: rewritten, and last frame's transform kept for motion vectors.
         world.get_mut::<GlobalTransform>(a).unwrap().0.translation.x = 5.0;
