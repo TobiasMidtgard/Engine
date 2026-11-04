@@ -296,6 +296,42 @@ pub struct Lip {
     pub drop: f32,
     /// Length of the edge, meters.
     pub width: f32,
+    /// Angle below level the water leaves at, radians: 0 off a level brink, the chute's
+    /// slope off a sloped one (a jet is thrown down and out along it, Castillo et al.).
+    pub launch: f32,
+    /// Turbulence of the water leaving: the share of its speed that wanders across. A smooth
+    /// level brink about 0.012 (Castillo et al. 2015, dams); rapids and rough rock several
+    /// times that. It spreads the jet (spread angle arctan(0.38 Tu)) and breaks it up.
+    pub turbulence: f32,
+}
+
+impl Lip {
+    /// Velocity the water leaves at (world, m/s).
+    pub fn launch_velocity(&self) -> Vec3 {
+        let (s, c) = self.launch.sin_cos();
+        Vec3::new(self.dir.x * c, -s, self.dir.y * c) * self.speed
+    }
+
+    /// Thickness of the falling water's solid core `drop` meters down, meters: q over the
+    /// speed it has reached (B_g = q / sqrt(2 g H) once the lip's own speed is small beside it).
+    pub fn core_thickness(&self, drop: f32) -> f32 {
+        let v = (self.speed * self.speed + 2.0 * 9.81 * drop.max(0.0)).sqrt();
+        self.q / v.max(0.3)
+    }
+
+    /// How far the jet falls before it has broken up into clumps and spray, meters: L_b =
+    /// 6 q^0.32 (Horeni 1956, fitted for q < 0.25 m²/s; extended past that), shorter the more
+    /// turbulent it leaves.
+    pub fn break_up(&self) -> f32 {
+        6.0 * self.q.max(1e-4).powf(0.32) * (0.03 / self.turbulence.max(0.012)).powf(0.25)
+    }
+}
+
+/// Turbulence of water leaving a brink at Froude number `froude` over its approach: a calm
+/// pool's smooth spill, or rapids (Fr > 1) tumbling over rough rock.
+pub fn brink_turbulence(froude: f32) -> f32 {
+    let rough = ((froude - 0.6) / 1.2).clamp(0.0, 1.0);
+    0.03 + 0.15 * rough * rough * (3.0 - 2.0 * rough)
 }
 
 /// A point down a falling curtain (see [`FlowSim::fall_path`]).
@@ -818,8 +854,18 @@ impl FlowSim {
                 } else {
                     (i as i64, j as i64 - dir.y.signum() as i64)
                 };
-                let approach = at(back.0, back.1).map_or(0.0, |b| self.vel[b].dot(dir));
+                let behind = at(back.0, back.1);
+                let approach = behind.map_or(0.0, |b| self.vel[b].dot(dir));
                 let speed = (1.4 * (9.81 * q).cbrt()).max(approach).clamp(0.3, 12.0);
+                // The chute's slope down to the brink: water off a sloped one is thrown down
+                // along it.
+                let chute = behind.map_or(0.0, |b| (self.bed[b] - self.bed[idx]) / self.cell);
+                let launch = chute.max(0.0).atan().min(1.0);
+                // Rapids tumbling into the brink leave it turbulent; a still pool spills
+                // smoothly.
+                let froude = behind.map_or(0.0, |b| {
+                    self.vel[b].length() / (9.81 * self.depth[b].max(0.01)).sqrt()
+                });
                 out.push(Lip {
                     top: self.world((edge * self.cell).as_dvec2(), top as f64),
                     dir: self.world_dir(dir),
@@ -827,6 +873,8 @@ impl FlowSim {
                     q,
                     drop: drop / flux,
                     width,
+                    launch,
+                    turbulence: brink_turbulence(froude),
                 });
             }
         }
@@ -874,10 +922,11 @@ impl FlowSim {
         };
         let start = self.local(lip.top).as_vec2();
         let top_y = (lip.top.y - self.origin.y) as f32;
-        let flat = to_local(lip.dir) * lip.speed;
+        let (sin, cos) = lip.launch.sin_cos();
+        let flat = to_local(lip.dir) * lip.speed * cos;
         let (mut p, mut v) = (
             Vec3::new(start.x, top_y, start.y),
-            Vec3::new(flat.x, 0.0, flat.y),
+            Vec3::new(flat.x, -lip.speed * sin, flat.y),
         );
         let mut rock = Vec3::ZERO;
         let mut t = 0.0;
@@ -1673,6 +1722,72 @@ mod tests {
         );
         // Gentle slopes have none.
         assert!(sim.lips(4.5).is_empty());
+    }
+
+    #[test]
+    fn a_sloped_chute_throws_its_jet_down_and_out() {
+        // A shelf at 6 m whose last 2 m slope down to 5 m (a chute, 1 in 2) before the
+        // cliff, over a flat floor; cells are 0.5 m.
+        let mut bed = vec![0.0f32; 40 * 6];
+        for j in 0..6 {
+            for i in 0..10 {
+                bed[j * 40 + i] = if i < 6 {
+                    6.0
+                } else {
+                    6.0 - 0.25 * (i - 5) as f32
+                };
+            }
+        }
+        let r = FlowRegion {
+            cells: [40, 6],
+            cell_m: 0.5,
+            sources: vec![FlowSource {
+                at: [1.0, 1.5],
+                radius_m: 0.6,
+                rate_m3_s: 0.1,
+            }],
+            open_edges: false,
+            ..Default::default()
+        };
+        let mut sim = FlowSim::new(Entity::PLACEHOLDER, DVec3::ZERO, &r, bed);
+        for _ in 0..30 * 20 {
+            sim.step(1.0 / 30.0);
+        }
+        let lips = sim.lips(1.0);
+        assert!(!lips.is_empty(), "no lip");
+        for lip in &lips {
+            // Down the chute's slope (atan 0.5 = 0.46 rad), not level.
+            assert!(lip.launch > 0.3 && lip.launch < 0.6, "{lip:?}");
+            assert!(lip.launch_velocity().y < -0.25 * lip.speed, "{lip:?}");
+            let path = sim.fall_path(lip, FALL_POINTS);
+            assert!(path[1].vel.y < -0.25 * lip.speed, "{:?}", path[1]);
+            // The jet's core thins as it speeds up, and it breaks up a few meters down.
+            assert!(lip.core_thickness(4.0) < 0.5 * lip.core_thickness(0.0));
+            assert!(lip.break_up() > 0.5 && lip.break_up() < 8.0, "{lip:?}");
+        }
+    }
+
+    #[test]
+    fn rapids_leave_a_brink_rougher_than_a_still_pool() {
+        assert!(brink_turbulence(0.2) < 0.035);
+        assert!(brink_turbulence(2.0) > 0.15);
+        let lip = |turbulence| Lip {
+            top: DVec3::ZERO,
+            dir: Vec2::X,
+            speed: 2.0,
+            q: 0.5,
+            drop: 10.0,
+            width: 1.0,
+            launch: 0.0,
+            turbulence,
+        };
+        // A rough jet breaks up sooner; a big flow later than a small one.
+        assert!(lip(0.18).break_up() < lip(0.03).break_up());
+        let big = Lip {
+            q: 4.0,
+            ..lip(0.03)
+        };
+        assert!(big.break_up() > 1.8 * lip(0.03).break_up());
     }
 
     #[test]

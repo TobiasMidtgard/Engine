@@ -285,8 +285,10 @@ fn lake_water<'a>(z: &Zone, ground: &'a dyn Fn(f64, f64) -> f64) -> engine_water
         streams: &[engine_water::demo::ValleyStream {
             path: &STREAM,
             width_m: 5.0,
-            // Enough to fill the brink across: at 1 m³/s the falls split into two thin strands.
-            flow_m3_s: 2.0,
+            // A river's worth over the 20 m cliff: a full, thick curtain that stays glassy for
+            // its first meters and comes down white (at 1 m³/s the falls split into two thin
+            // strands).
+            flow_m3_s: 5.0,
         }],
         ground,
         jetty_bearing: Some(std::f64::consts::PI * 0.9),
@@ -1608,11 +1610,13 @@ pub fn landscape(seed: u64) -> Landscape {
         patches: Vec::new(),
         painters: vec![footstep_trail, footprint_lab],
         fields: Vec::new(),
-        // A cliff south of the lake, with the land behind it raised 9 m.
+        // A cliff south of the lake, with the land behind it raised 20 m: high enough that
+        // the stream's falls break up into white water and throw a cloud of spray (Water,
+        // 2026-11-04; it was 9 m).
         scarps: vec![Scarp {
             a: DVec2::new(300.0, -300.0),
             b: DVec2::new(150.0, -300.0),
-            height: 9.0,
+            height: 20.0,
             reach: 400.0,
             notch: None,
         }],
@@ -1731,7 +1735,8 @@ mod tests {
                 width as f32 + 0.1,
             );
         });
-        app.update_n(30 * 10);
+        // (Since the stream carries 5 m³/s its reach there takes longer to fill up to depth.)
+        app.update_n(30 * 40);
 
         // The stream runs deep and steady there, down this reach, as high as the bed suggests.
         let w = app.world.resource::<Water>().0.sample(at + DVec3::Y * 10.0);

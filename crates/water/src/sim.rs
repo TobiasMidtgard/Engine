@@ -1301,8 +1301,10 @@ pub fn flow_step_system(
         }
         if spray {
             for &(foot, v, power) in &sim.falls().plunges {
-                // About 1 kg of spray per second per 2 kW of falling water.
-                let mass = power * 5e-4 * SPRAY_PERIOD;
+                // About 1 kg of spray per second per 2 kW of falling water, as mist: never
+                // the 50 kg and more an effects module reads as a column of water thrown up
+                // by a blast (a 1 MW fall drew one standing over its curtain, a grey T).
+                let mass = (power * 5e-4 * SPRAY_PERIOD).min(45.0);
                 if mass < 0.02 {
                     continue;
                 }

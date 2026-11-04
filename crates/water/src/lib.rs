@@ -10,6 +10,7 @@ pub mod drops;
 pub mod flow;
 pub mod interact;
 pub mod mirror;
+pub mod mist;
 pub mod puddles;
 pub mod render;
 pub mod ripples;
@@ -158,7 +159,7 @@ impl Plugin for WaterPlugin {
                     .chain()
                     .in_set(SimSet::Gameplay),
             )
-            .add_systems(Update, boat::boat_bodies_system)
+            .add_systems(Update, (boat::boat_bodies_system, mist::falls_mist_system))
             .add_systems(Extract, mirror::lake_mirror_system)
             .add_systems(
                 PreUpdate,

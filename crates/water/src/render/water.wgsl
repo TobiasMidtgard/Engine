@@ -1627,6 +1627,7 @@ struct FallOut {
     @location(4) look: vec4<f32>,        // q, frac, side, lip speed
     @location(5) kind: f32,              // 2 splash clump; 1 spray cloud; -1 spray round a curtain; -2 wet rock under it; under a half a curtain, 0.45 where it slides down rock
     @location(6) edge: f32,              // 1 toward a side where the fall ends
+    @location(7) jet: vec3<f32>,         // break-up length L_b (m), drop here (m), lip turbulence
 };
 
 @vertex
@@ -1657,6 +1658,7 @@ fn vs_falls(v: FallIn, @builtin(instance_index) layer: u32) -> FallOut {
     out.look = vec4<f32>(v.rel_q.w, v.normal_frac.w, v.across_side.w, v.uv_speed.z);
     out.kind = v.uv_speed.w;
     out.edge = v.edge.x;
+    out.jet = v.edge.yzw;
     if (out.kind > 1.5) {
         // A splash clump flies on its arc and falls back, over and over (`splash_crown`):
         // thrown at `across_side.xyz` m/s, landing again after `uv_speed.y` seconds, each at
@@ -1759,7 +1761,7 @@ fn fall_mist(in: FallOut) -> vec4<f32> {
     // Light diffuses through the cloud, so a shadow edge on it is soft, never the shadow
     // map's line drawn across a flat card (the hard dark arc at the falls' foot).
     let sun = water_sun(in.rel) * mix(shadow_factor(in.rel, l), 1.0, 0.55);
-    let phase = 0.3 + 1.6 * pow(saturate(dot(-v, l)), 6.0);
+    let phase = 0.5 + 1.6 * pow(saturate(dot(-v, l)), 6.0);
     let out_dir = normalize(vec3<f32>(v.x, 0.0, v.z) + vec3<f32>(0.0, 1e-3, 0.0));
     let n = normalize(out_dir + vec3<f32>(0.0, 0.7, 0.0));
     // A dense cloud scatters many times over: the blue of the sky light washes out to grey.
@@ -1818,13 +1820,19 @@ fn fall_streaks(u: f32, t0: f32, fine: f32) -> f32 {
     return smoothstep(0.25, 0.75, mix(raw, raw * 0.7 + thread * 0.3, fine));
 }
 
-// How broken up a free-falling jet of `q` m²/s is, `tau` seconds after it left the brink:
-// compact and glassy at first, broken into clumps and spray past its break-up length
-// L_b = 6 q^0.32 (Horeni 1956; rectangular jets break up at 0.5-3 L_b, Castillo et al.), 0..1.
-fn fall_broken(q: f32, tau: f32) -> f32 {
-    let drop = 0.5 * 9.81 * tau * tau;
-    let lb = 6.0 * pow(max(q, 1e-4), 0.32);
-    return smoothstep(0.3, 1.4, drop / lb);
+// How broken up a free-falling jet is (`jet`: its break-up length L_b, how far it has fallen
+// here, its turbulence): compact and glassy at first, its aeration growing from about 0.3 L_b
+// to broken clumps and spray by L_b (L_b = 6 q^0.32, Horeni 1956; rectangular jets break up
+// at 0.5-3 L_b, Castillo et al.), 0..1. A tall fall of little water is white nearly all the
+// way down; a thick nappe stays glassy and green for meters.
+fn fall_broken(jet: vec3<f32>) -> f32 {
+    return smoothstep(0.3, 1.0, max(jet.y, 0.0) / max(jet.x, 0.1));
+}
+
+// How rough the water leaving the lip is, 0 a smooth spill .. 1 rapids over rough rock: its
+// surface is torn white from the brink on.
+fn fall_rough(jet: vec3<f32>) -> f32 {
+    return saturate((jet.z - 0.02) / 0.13);
 }
 
 // Aerated water lit like froth: the sun wrapping round it and glowing through it with the
@@ -1851,7 +1859,7 @@ fn fall_shell(in: FallOut) -> vec4<f32> {
     let tau = in.uv.y;
     let u = in.uv.x;
     let v = -in.rel / max(length(in.rel), 1e-4);
-    let broken = fall_broken(q, tau);
+    let broken = max(fall_broken(in.jet), fall_rough(in.jet) * 0.35 * smoothstep(0.05, 0.4, tau));
     if (broken < 0.01) { discard; }
     let t0 = time_s() - tau;
     let fine = saturate(1.5 - footprint(in.rel).across * 40.0);
@@ -1908,8 +1916,12 @@ fn fs_falls(in: FallOut) -> @location(0) vec4<f32> {
     // behind or below, the churned water under the tongue shows.
     let front = dot(in.normal, v) >= 0.0;
     // Past its break-up length the core is no longer a sheet but clumps of white water.
-    let broken = fall_broken(in.look.x, max(tau, 0.0));
-    var aerated = max(smoothstep(0.03, 0.22, tau + (s - 0.5) * 0.1), select(0.6, 0.0, front));
+    let broken = fall_broken(in.jet);
+    // A rough lip's surface is torn white within tenths of a second; a smooth spill's
+    // fingers stay glassy until the jet itself breaks up.
+    let rough = fall_rough(in.jet);
+    let torn = smoothstep(0.03, 0.22, tau + (s - 0.5) * 0.1) * mix(0.25, 1.0, rough);
+    var aerated = max(torn, select(0.6, 0.0, front));
     aerated = max(aerated, broken);
     // Sliding down rock (`ROCK_KIND`), the sheet tumbles over every bump: white in its
     // streaks, glassier between them.
@@ -1951,7 +1963,8 @@ fn fs_falls(in: FallOut) -> @location(0) vec4<f32> {
     // water, opaque in its middle and eroded only at its edges (a jet loses its solid core
     // past L_b = 6 q^0.32, yet its body stays dense; games draw it as an opaque, masked
     // white sheet, waterfall-research.md). Thin threads were all the showcase falls showed.
-    let core = body * smoothstep(0.08, 0.35, tau) * (1.0 - rock * 0.45)
+    let whitens = max(smoothstep(0.15, 0.8, max(in.jet.y, 0.0) / max(in.jet.x, 0.1)), rough * smoothstep(0.08, 0.35, tau));
+    let core = body * whitens * (1.0 - rock * 0.45)
         * (1.0 - smoothstep(0.3, 0.85, edge_x + (s - 0.5) * 0.3)) * mix(0.7, 1.0, tongue)
         * (1.0 - smoothstep(0.08, 0.3, -tau * in.look.w));
     alpha = max(alpha, core * smoothstep(0.12, 0.45, s * 0.7 + packets * 0.3) * 0.95);
@@ -2004,7 +2017,9 @@ fn fs_falls(in: FallOut) -> @location(0) vec4<f32> {
     let thick = clamp(q / max(in.look.w, 0.3), 0.01, 0.5);
     let path = thick / max(n_dot_v, 0.05);
     let tint = exp(-vec3<f32>(0.5, 0.11, 0.08) * path * 6.0 - path * 5.0);
-    let stirred = froth * vec3<f32>(0.3, 0.38, 0.36);
+    // Stirred water seen through a thick nappe: the green of a deep river (fine sediment and
+    // the water's own red absorption), greyer through a thin film.
+    let stirred = froth * mix(vec3<f32>(0.3, 0.38, 0.36), vec3<f32>(0.1, 0.4, 0.29), saturate(thick * 4.0));
     // From below (its underside) it reflects the dark water and rock under it, not the sky.
     let fresnel = (0.02 + 0.98 * pow(1.0 - n_dot_v, 5.0)) * select(0.2, 1.0, front);
     let r = reflect(-v, n);
@@ -2024,6 +2039,184 @@ fn fs_falls(in: FallOut) -> @location(0) vec4<f32> {
     // Over the lip the tongue is unbroken: `glass` already lets what's behind show through.
     alpha = mix(max(alpha, body * keep), alpha, aerated);
     color = apply_fog(color, in.rel);
+    return vec4<f32>(color * alpha, alpha);
+}
+
+// ---------------------------------------------------------------- the jets' aerated bodies
+// A falling jet is a body of water, not a sheet: past its brink it tears into clumps of white
+// water that stream down with it, spreading as they fall (the jet's turbulent spread and,
+// once broken up, the spray thrown off its clumps; `jet_spread`). Each stretch of a jet
+// (`FallSeg`) carries up to BODY_PER_SEG clumps; where each is follows from a seed and the
+// time alone, so nothing is simulated. A clump rides from the stretch's top to its bottom
+// along the jet's path (a cubic through both ends and their velocities, exact for a free
+// fall), past both ends by a quarter, fading in and out over that overlap so the stretches
+// join seamlessly. It is drawn as a camera-facing card stretched along its velocity (the
+// motion blur of a falling clump), lit as froth.
+struct BodyIn {
+    @location(0) p0: vec4<f32>,
+    @location(1) p1: vec4<f32>,
+    @location(2) v0: vec4<f32>,
+    @location(3) v1: vec4<f32>,
+    @location(4) across: vec4<f32>,
+    @location(5) shape: vec4<f32>,
+    @location(6) misc: vec4<f32>,
+    @location(7) foot: vec4<f32>,
+};
+
+struct BodyClumpOut {
+    @builtin(position) clip: vec4<f32>,
+    @location(0) rel: vec3<f32>,
+    @location(1) corner: vec2<f32>,      // -1..1 across, along the card
+    @location(2) look: vec4<f32>,        // density, radius (m), seed, how stretched (length / width)
+    @location(3) light: vec4<f32>,       // across axis xyz, self-shadow
+    @location(4) foot: f32,              // the pool's height: no clump under it
+};
+
+fn fall_hash(x: f32) -> f32 {
+    return fract(sin(x * 12.9898) * 43758.547);
+}
+
+// Clumps are drawn in full out to this distance, meters; further out fewer, larger ones
+// (the same cover). As `BODY_LOD_M` in mod.rs.
+const BODY_LOD_M: f32 = 45.0;
+const BODY_PER_SEG: u32 = 64u;
+
+@vertex
+fn vs_fall_body(s: BodyIn, @builtin(vertex_index) vid: u32) -> BodyClumpOut {
+    var out: BodyClumpOut;
+    out.clip = vec4<f32>(0.0, 0.0, -1.0, 1.0);
+    let k = vid / 6u;
+    let shift = water.g.falls.xyz;
+    let mid = 0.5 * (s.p0.xyz + s.p1.xyz) + shift;
+    // Thinned for distance when built (`thin_body`), and further as the camera goes away.
+    let lod = min(clamp(BODY_LOD_M / max(length(mid), 1.0), 0.2, 1.0) / max(s.foot.w, 0.01), 1.0);
+    let count = s.misc.z * lod;
+    if (f32(k) >= ceil(count)) { return out; }
+    let seed = s.foot.y + f32(k) * 7.13;
+    let h0 = fall_hash(seed);
+    let h1 = fall_hash(seed + 1.37);
+    let h2 = fall_hash(seed + 2.71);
+    let h3 = fall_hash(seed + 3.97);
+    let h4 = fall_hash(seed + 5.23);
+    let h5 = fall_hash(seed + 6.61);
+    let h6 = fall_hash(seed + 8.11);
+    let dt = max(s.p1.w - s.p0.w, 1e-3);
+    // From a quarter before the top to a quarter past the bottom, at the water's own pace.
+    let phase = fract(time_s() / (1.5 * dt) + h0);
+    let x = -0.25 + 1.5 * phase;
+    let fade = saturate((x + 0.25) / 0.5) * saturate((1.25 - x) / 0.5);
+    // Hermite through both ends: a parabola, as the jet falls free.
+    let x2 = x * x;
+    let x3 = x2 * x;
+    let m0 = s.v0.xyz * dt;
+    let m1 = s.v1.xyz * dt;
+    var pos = (2.0 * x3 - 3.0 * x2 + 1.0) * s.p0.xyz + (x3 - 2.0 * x2 + x) * m0
+        + (-2.0 * x3 + 3.0 * x2) * s.p1.xyz + (x3 - x2) * m1;
+    let vel = ((6.0 * x2 - 6.0 * x) * s.p0.xyz + (3.0 * x2 - 4.0 * x + 1.0) * m0
+        + (-6.0 * x2 + 6.0 * x) * s.p1.xyz + (3.0 * x2 - 2.0 * x) * m1) / dt;
+    let xc = saturate(x);
+    let half = mix(s.shape.x, s.shape.y, xc);
+    let reach = mix(s.shape.z, s.shape.w, xc);
+    let drop = mix(s.misc.x, s.misc.y, x);
+    let across = s.across.xyz;
+    let speed = max(length(vel), 0.1);
+    let dir = vel / speed;
+    let normal = normalize(cross(across, dir) + vec3<f32>(0.0, 1e-4, 0.0));
+    let flags = u32(s.foot.z + 0.5);
+    let on_rock = (flags & 1u) != 0u;
+    // Across the sheet, frayed where the fall ends (fewer clumps strayed past its edge);
+    // in and out of it, thickest in the middle (a sum of three is near a bell).
+    var u = h1 * 2.0 - 1.0;
+    let open = select(0.0, 1.0, (u < 0.0 && (flags & 2u) != 0u) || (u > 0.0 && (flags & 4u) != 0u));
+    var o = (h2 + h3 + h4) / 1.5 - 1.0;
+    // On rock the white water tumbles over the sheet, never into the rock.
+    if (on_rock) { o = abs(o) * 0.6; }
+    // A fifth of them are drops and small clumps flung out of the jet: a ragged halo of
+    // spray round its body, not a slab with a ruled surface.
+    let flung = select(1.0, 1.8 + 1.2 * h6, h6 > 0.8);
+    // Each clump wanders a little as it falls (the jet's eddies).
+    let wobble = time_s() * 0.9 + h5 * 6.28;
+    pos += across * (u * (half + reach * 0.8 * flung) + sin(wobble) * reach * 0.15)
+        + normal * (o * reach * flung + cos(wobble * 1.3) * reach * 0.1);
+    let rel = pos + shift;
+    // How broken up the jet is here, and how many clumps its turbulence tears off the surface
+    // before that.
+    let lb = max(s.v1.w, 0.1);
+    let broken = smoothstep(0.3, 1.0, drop / lb);
+    let torn = min(s.across.w * 3.0, 0.5);
+    var density = fade * mix(torn, 1.0, broken) * (1.0 - open * smoothstep(0.6, 1.0, abs(u)) * 0.7);
+    // Clumps behind the jet's core, seen through it once it is white, are hidden by it.
+    let to_eye = -rel / max(length(rel), 1e-3);
+    let behind = select(0.0, 1.0, o * dot(normal, to_eye) < 0.0) * (1.0 - smoothstep(0.0, 0.4, abs(o)) * 0.5);
+    density *= 1.0 - behind * broken * 0.85;
+    // A thin trickle is a few threads.
+    density *= saturate(s.v0.w * 6.0 + 0.2) * select(1.0, 0.7, on_rock);
+    // Clumps grow as the jet breaks up and falls; fewer, larger ones far off.
+    let r = clamp(0.05 + 0.035 * sqrt(max(drop, 0.0)) * (0.5 + broken), 0.04, 1.0)
+        * (0.7 + 0.6 * h5) * s.misc.w * inverseSqrt(lod) * select(1.0, 0.6, flung > 1.0);
+    density *= select(1.0, 0.6, flung > 1.0);
+    if (density < 0.01) { return out; }
+    // Stretched along the velocity on screen (the motion blur of a 50th of a second).
+    let side = normalize(cross(dir, to_eye) + vec3<f32>(1e-4, 0.0, 0.0));
+    let up = normalize(cross(to_eye, side));
+    let len = r + speed * 0.02;
+    let corners = array<vec2<f32>, 6>(
+        vec2<f32>(-1.0, -1.0), vec2<f32>(1.0, -1.0), vec2<f32>(-1.0, 1.0),
+        vec2<f32>(-1.0, 1.0), vec2<f32>(1.0, -1.0), vec2<f32>(1.0, 1.0),
+    );
+    let c = corners[vid % 6u];
+    out.rel = rel + side * (c.x * r) + up * (c.y * len);
+    out.clip = frame.view_proj * vec4<f32>(out.rel, 1.0);
+    out.corner = c;
+    out.look = vec4<f32>(density, r, h5 * 31.0 + f32(k), len / r);
+    // Light reaches the sunny face of the jet; clumps deep inside it or on its far side are
+    // shaded by the water between.
+    let l = frame.sun_dir.xyz;
+    let sunward = o * sign(dot(normal, l));
+    let shade = mix(0.7, 1.0, saturate(0.55 + 0.45 * sunward)) * mix(1.0, 0.88, broken * (1.0 - abs(o)));
+    out.light = vec4<f32>(side, shade);
+    out.foot = s.foot.x + shift.y;
+    return out;
+}
+
+@fragment
+fn fs_fall_body(in: BodyClumpOut) -> @location(0) vec4<f32> {
+    let e = in.look.w;
+    let c = in.corner;
+    // A capsule: round at its ends, as long as the clump's blur.
+    let along = max(abs(c.y) * e - (e - 1.0), 0.0);
+    let seed = in.look.z;
+    let wisp = fbm2(vec2<f32>(c.x * 1.3 + seed, c.y * e * 0.8 - seed * 0.37), 3) / 0.875;
+    let d = length(vec2<f32>(c.x, along)) + (wisp - 0.5) * 0.8;
+    if (d >= 1.0) { discard; }
+    var alpha = (1.0 - smoothstep(0.3, 0.95, d)) * in.look.x * 0.7;
+    // Torn into drops at its rim.
+    let drops = value_noise2(vec2<f32>(c.x * 6.0 + seed * 1.7, c.y * e * 3.0));
+    alpha = max(alpha, smoothstep(0.75, 0.9, drops) * smoothstep(1.0, 0.6, d) * in.look.x * 0.5);
+    // Soft against the rock and ground behind, and gone into the pool's surface.
+    let size = vec2<f32>(textureDimensions(scene_color));
+    let pix = vec2<i32>(clamp(in.clip.xy, vec2<f32>(0.0), size - 1.0));
+    let z_scene = linear_depth(textureLoad(scene_depth, pix, 0));
+    alpha *= saturate((z_scene - max(view_depth(in.rel), 1e-3)) / max(in.look.y * 0.8, 0.05));
+    alpha *= smoothstep(in.foot - 0.1, in.foot + max(in.look.y, 0.2), in.rel.y);
+    alpha = min(alpha, 0.9);
+    if (alpha < 0.004) { discard; }
+    let v = -in.rel / max(length(in.rel), 1e-4);
+    // Round: lit as a lump of froth facing us, its rim turning away.
+    let rim = sqrt(max(1.0 - d * d, 0.05));
+    let up = normalize(cross(v, in.light.xyz));
+    let n = normalize(v * rim + in.light.xyz * c.x * 0.7 + up * clamp(c.y, -1.0, 1.0) * 0.4);
+    // Lit as froth, but light diffuses through a cloud of spray, so a rock's shadow falls on it
+    // softly, never as the shadow map's outline traced across each card.
+    let l = frame.sun_dir.xyz;
+    let shadow = mix(shadow_factor(in.rel, n), 1.0, 0.45);
+    let sky = sky_ambient(n) * sky_visibility(in.rel, n) * PI;
+    let up_light = mix(sky, vec3<f32>(dot(sky, vec3<f32>(0.2126, 0.7152, 0.0722))), 0.5);
+    let wrap = saturate(dot(n, l) * 0.6 + 0.4);
+    let through = pow(saturate(dot(-v, l)), 4.0) * 0.8;
+    let lit = pre_expose(0.9 * (water_sun(in.rel) * shadow * (wrap + through) + up_light) * INV_PI) * in.light.w;
+    let grey = vec3<f32>(dot(lit, vec3<f32>(0.2126, 0.7152, 0.0722)));
+    let color = apply_fog(mix(lit, grey, 0.25) * (1.0 + 0.3 * wisp), in.rel);
     return vec4<f32>(color * alpha, alpha);
 }
 
