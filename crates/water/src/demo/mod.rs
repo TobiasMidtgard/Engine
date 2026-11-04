@@ -21,6 +21,7 @@
 
 pub mod art;
 pub mod crag;
+pub mod creeks;
 pub mod materials;
 pub mod pools;
 pub mod props;
