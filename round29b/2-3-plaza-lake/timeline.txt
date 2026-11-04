@@ -1,0 +1,21 @@
+11:10:58.826Z     0.04  mode stops quality ultra size '' spec 'plaza:75,arrive-lake:15'; idle before start 46,048 s; HEAD 4c164e62
+11:10:59.908Z     1.12  started: showcase.exe --fly --profile --quality ultra  env ENGINE_PROFILE=1
+11:11:12.720Z    13.94  window visible: client 1600x900, window 1616x939 at (286,286), maximized False
+11:11:12.758Z    13.97  bridge connected
+11:11:13.190Z    14.41  world built
+11:11:18.711Z    19.93  after build: working set 4,721 MB, private 8,937 MB; system free 32,619 of 65,277 MB
+11:11:18.741Z    19.96  AT plaza: {"id":1,"jsonrpc":"2.0","result":{"place":"plaza","position":[10.0,4.5,16.0]}}
+11:11:58.834Z    60.05  trace trace_plaza (120 frames): {"id":10,"jsonrpc":"2.0","result":{"frames":120,"recording":"C:/Users/Tobit/AppData/Local/Temp/claude/C--Users-Tobit-Documents-ProgrammingProjects/a9b51fd2-8307-4505-9047-44a5b14953cc/scratchpad/r29b/s23_plaza_lake/trace_plaza.json"}}
+11:12:03.952Z    65.17  trace written: 120 frames to trace_plaza.json at 11:12:01.180037Z in the log (read 5.1 s after the ask)
+11:12:34.199Z    95.41  END plaza: working set 5,419 MB, private 15,826 MB; system free 31,853 of 65,277 MB
+11:12:34.282Z    95.50  shot plaza: {"id":20,"jsonrpc":"2.0","result":{"height":900,"path":"screenshots/r29b/plaza.png","width":1600}}
+11:12:36.675Z    97.89  ARRIVE: 20 engine.stats "render.cpu.meshes" answers on a second connection -> arrival_stats2.jsonl
+11:12:36.680Z    97.90  ARRIVE trace_lake_arrival (20 frames): {"id":21,"jsonrpc":"2.0","result":{"frames":20,"recording":"C:/Users/Tobit/AppData/Local/Temp/claude/C--Users-Tobit-Documents-ProgrammingProjects/a9b51fd2-8307-4505-9047-44a5b14953cc/scratchpad/r29b/s23_plaza_lake/trace_lake_arrival.json"}}
+11:12:36.689Z    97.90  AT lake (goto answered 11:12:35.348Z): {"id":22,"jsonrpc":"2.0","result":{"place":"lake","position":[160.0,6.0,-115.0]}}
+11:12:36.695Z    97.91  ARRIVE: 20 engine.stats "render.gi" answers -> arrival_stats.jsonl, the last at 11:12:36.693Z
+11:12:50.544Z   111.76  trace written: 20 frames to trace_lake_arrival.json at 11:12:36.683268Z in the log (read 15.2 s after the ask)
+11:12:50.885Z   112.10  END lake: working set 5,613 MB, private 16,009 MB; system free 31,636 of 65,277 MB
+11:12:50.949Z   112.16  shot lake: {"id":45,"jsonrpc":"2.0","result":{"height":900,"path":"screenshots/r29b/lake.png","width":1600}}
+11:12:54.580Z   115.80  sampler job: Completed
+11:12:54.582Z   115.80  killing the game
+11:13:37.289Z   158.50  done

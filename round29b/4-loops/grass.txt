@@ -1,0 +1,23 @@
+# s4_market_field: stands from 5 s after arriving to END
+== market: 11:13:55-11:14:10 UTC, 25.4 fps (engine.status), 1 render profiles
+   profile UTC  GPU total           compute grass           overlay grass          prepass: grass            scene: grass                 shadows
+   11:14:03         20.39                    0.08                    0.00                    0.12                    1.21                    2.07
+   mean             20.39                    0.08                    0.00                    0.12                    1.21                    2.07
+   every grass row summed (mean): 1.41 ms
+== field: 11:14:16-11:14:32 UTC, 49.2 fps (engine.status), 1 render profiles
+   profile UTC  GPU total           compute grass           overlay grass          prepass: grass            scene: grass                 shadows
+   11:14:23         18.89                    0.04                    0.00                    0.02                    0.10                    1.21
+   mean             18.89                    0.04                    0.00                    0.02                    0.10                    1.21
+   every grass row summed (mean): 0.16 ms
+
+# s4b_loops: --loops stops, the last 20 s before each loop line
+== market (loops): 11:17:41-11:18:01 UTC, 44.7 fps (engine.status), 1 render profiles
+   profile UTC  GPU total           compute grass           overlay grass          prepass: grass            scene: grass                 shadows
+   11:17:54         17.90                    0.08                    0.00                    0.12                    1.31                    1.61
+   mean             17.90                    0.08                    0.00                    0.12                    1.31                    1.61
+   every grass row summed (mean): 1.51 ms
+== field (loops): 11:19:21-11:19:41 UTC, 51.0 fps (engine.status), 1 render profiles
+   profile UTC  GPU total           compute grass           overlay grass          prepass: grass            scene: grass                 shadows
+   11:19:34         17.95                    0.04                    0.00                    0.02                    0.10                    1.28
+   mean             17.95                    0.04                    0.00                    0.02                    0.10                    1.28
+   every grass row summed (mean): 0.16 ms

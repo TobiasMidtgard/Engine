@@ -1,0 +1,15 @@
+11:13:37.364Z     0.03  mode stops quality ultra size '' spec 'market:20,field:20'; idle before start 46,207 s; HEAD 4c164e62
+11:13:37.682Z     0.35  started: showcase.exe --fly --profile --quality ultra  env ENGINE_PROFILE=1
+11:13:44.055Z     6.72  window visible: client 1600x900, window 1616x939 at (26,26), maximized False
+11:13:44.074Z     6.74  bridge connected
+11:13:44.225Z     6.89  world built
+11:13:49.874Z    12.56  after build: working set 4,540 MB, private 8,788 MB; system free 32,603 of 65,277 MB
+11:13:50.024Z    12.69  AT market: {"id":1,"jsonrpc":"2.0","result":{"place":"market","position":[87.0,3.2,54.0]}}
+11:14:10.495Z    33.16  END market: working set 5,215 MB, private 15,908 MB; system free 32,103 of 65,277 MB
+11:14:10.569Z    33.24  shot market: {"id":4,"jsonrpc":"2.0","result":{"height":900,"path":"screenshots/r29b/market.png","width":1600}}
+11:14:11.676Z    34.34  AT field: {"id":5,"jsonrpc":"2.0","result":{"place":"field","position":[125.0,3.0,140.0]}}
+11:14:32.146Z    54.81  END field: working set 5,267 MB, private 15,937 MB; system free 31,968 of 65,277 MB
+11:14:32.253Z    54.92  shot field: {"id":8,"jsonrpc":"2.0","result":{"height":900,"path":"screenshots/r29b/field.png","width":1600}}
+11:14:35.822Z    58.49  sampler job: Completed
+11:14:35.827Z    58.49  killing the game
+11:15:18.451Z   101.12  done
