@@ -12,27 +12,21 @@ struct GrassOut {
     @location(7) glow: f32,
 };
 
-// On screen every blade drawn is kept (for `grass_blade`).
-fn grass_pass_keep(f: GrassField, d: f32) -> f32 {
-    return 1.0;
-}
+// The blades the cull pass (grass_cull.wgsl) kept this frame, grouped by segments. A group's
+// draw starts at vertex 16 x its first record, so vertex index / 16 + instance is the record
+// and vertex index % 16 the vertex along the blade (grass_shadow.wgsl reads them the same way).
+@group(1) @binding(4) var<storage, read> grass_records: array<GrassRecord>;
 
-// Snow depth (m) on the ground at camera-relative `rel` (for `grass_blade`).
-fn grass_snow_depth(f: GrassField, rel: vec3<f32>) -> f32 {
-    // The ground's snow is stored up to SURFACE_SNOW_SCALE_M; deeper snow reads as full, so
-    // there take the depth by the camera (exact) when it is deeper.
-    let snow = surface_weather(rel).z * SURFACE_SNOW_SCALE_M;
-    return select(snow, max(snow, f.look.w), snow > 0.95 * SURFACE_SNOW_SCALE_M);
+fn grass_record(instance: u32, vertex: u32) -> BladeShape {
+    return grass_unpack(grass_records[(vertex >> 4u) + instance]);
 }
-
-// Collapses an invisible blade to a point outside the view.
-const GRASS_HIDDEN: vec4<f32> = vec4<f32>(0.0, 0.0, -2.0, 1.0);
 
 @vertex
 fn vs_main(@builtin(instance_index) instance: u32, @builtin(vertex_index) vertex: u32) -> GrassOut {
     var out: GrassOut;
-    let b = grass_blade(instance, vertex, frame.time.x, frame.camera_world_frac.xyz);
-    out.clip = select(GRASS_HIDDEN, frame.view_proj * vec4<f32>(b.rel, 1.0), b.visible);
+    let s = grass_record(instance, vertex);
+    let b = grass_vertex(s, vertex & 15u, frame.time.x, s.tip);
+    out.clip = frame.view_proj * vec4<f32>(b.rel, 1.0);
     out.rel = b.rel;
     out.normal = b.normal;
     out.albedo = b.albedo;
@@ -105,11 +99,12 @@ struct GrassPrepassOut {
 @vertex
 fn vs_prepass(@builtin(instance_index) instance: u32, @builtin(vertex_index) vertex: u32) -> GrassPrepassOut {
     var out: GrassPrepassOut;
-    let b = grass_blade(instance, vertex, frame.time.x, frame.camera_world_frac.xyz);
-    out.clip = select(GRASS_HIDDEN, frame.view_proj * vec4<f32>(b.rel, 1.0), b.visible);
+    let s = grass_record(instance, vertex);
+    let b = grass_vertex(s, vertex & 15u, frame.time.x, s.tip);
+    out.clip = frame.view_proj * vec4<f32>(b.rel, 1.0);
     out.normal = b.normal;
     // Where the blade was last frame: same root, last frame's wind.
-    let p = grass_blade(instance, vertex, frame.time.x - frame.time.z, frame.camera_world_frac.xyz);
+    let p = grass_vertex(s, vertex & 15u, frame.time.x - frame.time.z, s.tip_prev);
     out.motion_now = motion_clip(b.rel);
     out.motion_prev = prev_motion_clip(static_prev_rel(p.rel));
     return out;

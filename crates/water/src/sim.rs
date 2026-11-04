@@ -365,10 +365,30 @@ pub fn focus_point(focus: &FocusPoints, cameras: &Query<(&GlobalTransform, &Came
 /// more slowly): the waves take on the new sea state at once.
 const WIND_JUMP: f32 = 4.0;
 
+/// The ripple grid moves over a lake whose edge is at most this far from the focus, meters
+/// (otherwise it stays round the focus, where there is no water to step): farther, rain, spray
+/// and drifting floats ring it a few pixels wide. Round 26 on the PC, the fortress stop stepped
+/// the test area's tarn 66-120 m behind the camera at 1.8 ms a frame (this was 150 m for all).
+const LAKE_REACH_M: f64 = 40.0;
+/// ... and over one with a boat on it in front of the camera at most this far: a hull's wake
+/// stays in sight far off.
+const HULL_LAKE_REACH_M: f64 = 150.0;
+/// "In front of the camera": the cosine of the widest angle, on the ground, between where it
+/// looks and the lake's nearest edge (70°: wider than a 16:9 view's half width).
+const IN_VIEW_COS: f64 = 0.34;
+/// A hull this long or longer (its half length, m) is a boat ([`Disturbance::keel`]).
+const BOAT_HALF_LENGTH_M: f32 = 1.0;
+
 /// Where the ripple grid goes: on the focus when it is over interactive water or near a
-/// stream, else over the nearest interactive water within 150 m (so a camera on the shore
-/// sees wakes on the lake).
-fn ripple_center(state: &WaterState, focus: DVec3, half: f64) -> DVec2 {
+/// stream, else over the nearest interactive water within [`LAKE_REACH_M`] (so a camera on the
+/// shore sees wakes on the lake), or [`HULL_LAKE_REACH_M`] when a boat is on it and `view`
+/// (the camera's eye and forward) looks its way.
+fn ripple_center(
+    state: &WaterState,
+    focus: DVec3,
+    half: f64,
+    view: Option<(DVec3, Vec3)>,
+) -> DVec2 {
     let p = DVec2::new(focus.x, focus.z);
     // Over or beside a stream: follow the focus (rings, wakes and foam show on the stream
     // round it).
@@ -381,6 +401,14 @@ fn ripple_center(state: &WaterState, focus: DVec3, half: f64) -> DVec2 {
         return p;
     }
     let mut best: Option<(f64, DVec2)> = None;
+    // Boats pushing the water this step.
+    let boats: Vec<DVec2> = state
+        .ripples
+        .pending
+        .iter()
+        .filter(|d| d.keel.length() >= BOAT_HALF_LENGTH_M)
+        .map(|d| d.pos)
+        .collect();
     for b in state.bodies.iter().filter(|b| b.body.interactive) {
         let inset = b.body.extent.inset(b.local(focus)) as f64;
         if inset >= 0.0 {
@@ -388,7 +416,24 @@ fn ripple_center(state: &WaterState, focus: DVec3, half: f64) -> DVec2 {
         }
         let gap = -inset;
         let to_center = DVec2::new(b.center.x, b.center.z) - p;
-        if gap > 150.0 || best.is_some_and(|(g, _)| g <= gap) {
+        let edge = p + to_center.normalize_or_zero() * gap;
+        let seen = view.is_none_or(|(eye, forward)| {
+            let to = edge - DVec2::new(eye.x, eye.z);
+            let ahead = DVec2::new(forward.x as f64, forward.z as f64).normalize_or_zero();
+            to.length() < 1.0 || to.normalize().dot(ahead) > IN_VIEW_COS
+        });
+        let boat = boats.iter().any(|h| {
+            b.body
+                .extent
+                .inset(b.local(DVec3::new(h.x, b.center.y, h.y)))
+                > -1.0
+        });
+        let reach = if boat && seen {
+            HULL_LAKE_REACH_M
+        } else {
+            LAKE_REACH_M
+        };
+        if gap > reach || best.is_some_and(|(g, _)| g <= gap) {
             continue;
         }
         let reach = (gap + half * 0.5).min(to_center.length());
@@ -421,6 +466,30 @@ pub struct StillDepths {
     /// it read the whole grid in one 202 ms step at the overview (round 25, under the loading
     /// screen). Headless runs read it at once.
     pub spread_first: bool,
+    /// Read on a worker (in a game): the cells are handed to a job and their depths taken
+    /// in when it is done, a step or a few later, never read in the frame. On arriving at
+    /// the lake these reads still took 1.75 ms a step over 33 steps on the PC (round 26).
+    /// Headless runs read in the step, as before.
+    pub off_frame: bool,
+    /// The cells being read on a worker, for the grid (`at`) they were asked for.
+    job: Option<(StillKey, Task<StillRead>)>,
+}
+
+/// (grid corner, cells, cell size, `SimBook::layout`): what a [`StillDepths`] read is for.
+type StillKey = (DVec2, usize, f32, u64);
+
+/// What a worker read: (depth, cell index) per cell.
+type StillRead = Vec<(f32, usize)>;
+
+/// Depth of the still water of `bodies` at `p` (the deepest one), NaN where there is none,
+/// never infinite (that marks an unread cell).
+fn still_depth_at(bodies: &[BodyState], ground: &Ground, p: DVec3) -> f32 {
+    let d = bodies
+        .iter()
+        .filter_map(|b| b.depth_at(p, ground))
+        .fold(f32::NAN, f32::max);
+    // A body that reads infinitely deep would never count as read.
+    if d == f32::INFINITY { f32::MAX } else { d }
 }
 
 /// Cells read a step after the lakes changed under the grid (a lake streaming in), nearest
@@ -439,7 +508,7 @@ impl StillDepths {
     /// unlocked: it goes wide when much is new.
     fn read(
         &mut self,
-        at: (DVec2, usize, f32, u64),
+        at: StillKey,
         bodies: &[BodyState],
         ground: &Ground,
         level_y: f64,
@@ -486,12 +555,31 @@ impl StillDepths {
             self.unread = depth.iter().filter(|d| **d == f32::INFINITY).count();
             self.depth = depth;
             self.at = Some(at);
+            // (A read under way is for the old grid: dropped, it stops.)
+            self.job = None;
+        }
+        if self.off_frame
+            && let Some((key, task)) = &mut self.job
+        {
+            let Some(got) = check_ready(task) else {
+                return;
+            };
+            let key = *key;
+            self.job = None;
+            if key == at {
+                for (d, idx) in got {
+                    if self.depth[idx] == f32::INFINITY {
+                        self.depth[idx] = d;
+                        self.unread -= 1;
+                    }
+                }
+            }
         }
         if self.unread == 0 {
             self.prior.clear();
             return;
         }
-        if self.at == Some(at) && !self.prior.is_empty() {
+        if (self.at == Some(at) && !self.prior.is_empty()) || self.off_frame {
             budget = budget.max(RELAYOUT_READS);
         }
         // The unread cells nearest the focus first.
@@ -510,15 +598,25 @@ impl StillDepths {
             todo.select_nth_unstable_by(budget, |a, b| a.0.total_cmp(&b.0));
             todo.truncate(budget);
         }
-        let read = |idx: usize| {
+        let point = move |idx: usize| {
             let p =
                 origin + DVec2::new((idx % n) as f64 + 0.5, (idx / n) as f64 + 0.5) * cell as f64;
-            let p3 = DVec3::new(p.x, level_y, p.y);
-            bodies
-                .iter()
-                .filter_map(|b| b.depth_at(p3, ground))
-                .fold(f32::NAN, f32::max)
+            DVec3::new(p.x, level_y, p.y)
         };
+        if self.off_frame {
+            let (bodies, ground) = (bodies.to_vec(), ground.clone());
+            let task = AsyncComputeTaskPool::get().spawn(async move {
+                let _span = tracing::info_span!("water", name = "still depths").entered();
+                let mut got = todo;
+                for c in &mut got {
+                    c.0 = still_depth_at(&bodies, &ground, point(c.1));
+                }
+                got
+            });
+            self.job = Some((at, task));
+            return;
+        }
+        let read = |idx: usize| still_depth_at(bodies, ground, point(idx));
         let mut got: Vec<(f32, usize)> = todo;
         if got.len() > 4 * n {
             engine_core::tasks::par_chunks_mut(&mut got, n * 8, |_, chunk| {
@@ -532,8 +630,7 @@ impl StillDepths {
             }
         }
         for (d, idx) in got {
-            // A body that reads infinitely deep would never count as read.
-            self.depth[idx] = if d == f32::INFINITY { f32::MAX } else { d };
+            self.depth[idx] = d;
             self.unread -= 1;
         }
         if self.unread == 0 {
@@ -683,6 +780,8 @@ pub fn ripple_system(
     let dt = time.delta_secs();
     swash.off_frame = !config.headless;
     still.spread_first = !config.headless;
+    still.off_frame = !config.headless;
+    coarse.depths.off_frame = !config.headless;
     let mut state = shared.0.write();
     let dims = (
         settings.ripple_cells.clamp(16, 1024),
@@ -695,6 +794,7 @@ pub fn ripple_system(
         book.since_rebuild = f32::INFINITY;
     }
     let f = focus_point(&focus, &cameras);
+    state.ripples.focus = Some(DVec2::new(f.x, f.z));
     // High above the ground the grid (tens of meters of quarter-meter cells) is under a pixel
     // or two: it stays where it is instead of following a fast flight and rebuilding every
     // frame (18-39 ms a frame on the 2 km legs of the free-flight route, round 21d). Rings
@@ -703,7 +803,12 @@ pub fn ripple_system(
         .ground
         .height(f)
         .is_some_and(|h| f.y - h > RIPPLES_SEEN_FROM_M);
-    let center = ripple_center(&state, f, state.ripples.size() * 0.5);
+    let view = cameras
+        .iter()
+        .filter(|(_, c)| c.active)
+        .max_by_key(|(_, c)| c.order)
+        .map(|(g, _)| (g.translation(), g.forward()));
+    let center = ripple_center(&state, f, state.ripples.size() * 0.5, view);
     book.since_rebuild += dt;
     // A lake under the grid still having its bed read on a worker: the grid waits for it
     // (reading tens of thousands of cells from the terrain instead cost 77 ms in a frame on
@@ -732,6 +837,7 @@ pub fn ripple_system(
     // for it there may pick up another system that reads the water, which would wait for
     // this lock forever. The field steps aside, and readers see a copy of what it held until
     // it is put back.
+    let hand_over = tracing::info_span!("water", name = "ripples: hand over").entered();
     let mut field = flight
         .ripple_spare
         .take()
@@ -742,6 +848,7 @@ pub fn ripple_system(
     }
     state.ripples.copy_view_from(&field);
     state.ripples.pending.clear();
+    drop(hand_over);
     let span = tracing::info_span!("water", name = "ripples: rebuild").entered();
     if rebuild {
         let moved = field.recenter(center);
@@ -1168,6 +1275,7 @@ pub fn flow_step_system(
     // Step with the water unlocked (AGENTS.md, "Performance rules"): the step goes wide on
     // the compute pool, and a thread waiting there runs other modules' tasks, such as fire
     // sampling `Water`, which would wait for this lock forever.
+    let views = tracing::info_span!("water", name = "flows: views").entered();
     let mut flows = std::mem::take(&mut state.flows);
     let mut view = std::mem::take(&mut flight.views);
     view.truncate(flows.len());
@@ -1183,7 +1291,9 @@ pub fn flow_step_system(
     }
     state.flows = view;
     drop(state);
+    drop(views);
 
+    let _span = tracing::info_span!("water", name = "flows: step").entered();
     for sim in flows.iter_mut().filter(|sim| !sim.resting) {
         // A dozing stream holds still but its falls still throw spray.
         if !sim.dozing {
@@ -1680,6 +1790,42 @@ mod tests {
         }
     }
 
+    /// The ripple grid goes over a lake whose edge is near, or farther only for a boat the
+    /// camera looks toward (round 26: the fortress stepped a tarn 66 m behind the camera).
+    #[test]
+    fn the_grid_goes_to_a_far_lake_only_for_a_boat_in_view() {
+        let mut state = WaterState::new(64, 0.5);
+        // Its edge 70 m off.
+        state.bodies.push(lake(100.0, 30.0, 3.0));
+        let (focus, half) = (DVec3::ZERO, 32.0);
+        assert_eq!(
+            ripple_center(&state, focus, half, None),
+            DVec2::ZERO,
+            "a lake 70 m off with nothing on it"
+        );
+        state.bodies.push(lake(-60.0, 30.0, 3.0));
+        let c = ripple_center(&state, focus, half, None);
+        assert!(c.x < -20.0, "a lake 30 m off: {c}");
+        state.bodies.pop();
+        // A motorboat under way on the far one.
+        state.ripples.pending.push(crate::ripples::Disturbance {
+            pos: DVec2::new(100.0, 0.0),
+            radius: 0.8,
+            depth: 0.07,
+            press: 0.05,
+            keel: Vec2::new(2.3, 0.0),
+            ..Default::default()
+        });
+        let looking = |x: f32| Some((DVec3::new(0.0, 2.0, 0.0), Vec3::new(x, -0.1, 0.0)));
+        let c = ripple_center(&state, focus, half, looking(1.0));
+        assert!(c.x > 50.0, "looking at the boat: {c}");
+        assert_eq!(
+            ripple_center(&state, focus, half, looking(-1.0)),
+            DVec2::ZERO,
+            "looking away from it"
+        );
+    }
+
     /// A lake streaming in under a grid that stays put is read over a few steps, nearest the
     /// focus first, and the cells not read again yet keep their old depths meanwhile.
     #[test]
@@ -1711,5 +1857,63 @@ mod tests {
         assert_eq!(steps, (n * n).div_ceil(RELAYOUT_READS));
         assert_eq!(still.at_cell(0), 5.0);
         assert!(still.prior.is_empty());
+    }
+
+    /// In a game the depths are read on a worker: no step reads any itself, the old depths
+    /// show until the job is in, and once all are in they are what a read in the step finds.
+    #[test]
+    fn in_a_game_still_depths_are_read_on_workers_with_the_same_result() {
+        engine_core::tasks::init_task_pools();
+        let (n, cell) = (128usize, 0.25f32);
+        let origin = DVec2::splat(-16.0);
+        let ground = Ground::default();
+        let lakes = vec![lake(0.0, 100.0, 3.0), lake(-30.0, 25.0, 6.0)];
+        let mut here = StillDepths::default();
+        here.read((origin, n, cell, 1), &lakes, &ground, 0.0, DVec2::ZERO);
+        assert_eq!(here.unread, 0);
+        let mut game = StillDepths {
+            off_frame: true,
+            spread_first: true,
+            ..Default::default()
+        };
+        game.read((origin, n, cell, 1), &lakes, &ground, 0.0, DVec2::ZERO);
+        assert_eq!(game.unread, n * n, "nothing read in the step");
+        assert!(game.at_cell(0).is_nan());
+        let mut steps = 0;
+        while game.unread > 0 {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+            game.read((origin, n, cell, 1), &lakes, &ground, 0.0, DVec2::ZERO);
+            steps += 1;
+            assert!(steps < 10_000, "the job never came in");
+        }
+        for k in 0..n * n {
+            let (a, b) = (here.at_cell(k), game.at_cell(k));
+            assert!(a == b || (a.is_nan() && b.is_nan()), "{k}: {a} {b}");
+        }
+        // The grid moves while a read is under way: that read is dropped, and the new grid's
+        // cells come in all the same.
+        let moved = origin + DVec2::new(8.0, 0.0);
+        game.read((moved, n, cell, 1), &lakes, &ground, 0.0, DVec2::ZERO);
+        game.read(
+            (moved + DVec2::X, n, cell, 1),
+            &lakes,
+            &ground,
+            0.0,
+            DVec2::ZERO,
+        );
+        let mut steps = 0;
+        while game.unread > 0 {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+            game.read(
+                (moved + DVec2::X, n, cell, 1),
+                &lakes,
+                &ground,
+                0.0,
+                DVec2::ZERO,
+            );
+            steps += 1;
+            assert!(steps < 10_000, "the job never came in");
+        }
+        assert_eq!(game.at, Some((moved + DVec2::X, n, cell, 1)));
     }
 }

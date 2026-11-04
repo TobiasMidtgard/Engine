@@ -44,21 +44,29 @@ pub struct HouseHandles {
     pub solid: Option<ColliderShape>,
 }
 
-/// A prop: one mesh per material.
+/// Meshes, one per material.
 pub type PropHandles = Vec<(Part, Handle<Mesh>)>;
 
-/// Street lamp meshes: (iron, glass), near and far.
+/// A prop: one mesh per material, and a hull round them all to collide with
+/// ([`crate::solids`]).
+pub struct Prop {
+    pub parts: PropHandles,
+    pub solid: Option<ColliderShape>,
+}
+
+/// Street lamp meshes: (iron, glass), near and far, and a hull round the near ones.
 pub struct LampHandles {
     pub near: (Handle<Mesh>, Handle<Mesh>),
     pub far: (Handle<Mesh>, Handle<Mesh>),
+    pub solid: Option<ColliderShape>,
 }
 
 /// Street furniture variants.
 pub struct Props {
-    pub bench: PropHandles,
-    pub barrels: Vec<PropHandles>,
-    pub wood_piles: Vec<PropHandles>,
-    pub cart: PropHandles,
+    pub bench: Prop,
+    pub barrels: Vec<Prop>,
+    pub wood_piles: Vec<Prop>,
+    pub cart: Prop,
 }
 
 /// Every procedural mesh and material, built once at startup.
@@ -345,13 +353,21 @@ fn add_parts(
             far: add_parts(far.parts),
         })
         .collect();
+    let mut add_prop = |parts: Vec<(Part, Mesh)>| -> Prop {
+        let solid = crate::solids::hull_of(parts.iter().map(|(_, m)| m), Vec3::ONE);
+        Prop {
+            parts: add_parts(parts),
+            solid,
+        }
+    };
     let props = Props {
-        bench: add_parts(bench.parts),
-        barrels: barrels.into_iter().map(|b| add_parts(b.parts)).collect(),
-        wood_piles: wood_piles.into_iter().map(|b| add_parts(b.parts)).collect(),
-        cart: add_parts(cart.parts),
+        bench: add_prop(bench.parts),
+        barrels: barrels.into_iter().map(|b| add_prop(b.parts)).collect(),
+        wood_piles: wood_piles.into_iter().map(|b| add_prop(b.parts)).collect(),
+        cart: add_prop(cart.parts),
     };
     let lamp = LampHandles {
+        solid: crate::solids::hull_of([&lamp.0.0, &lamp.0.1], Vec3::ONE),
         near: (meshes.add(lamp.0.0), meshes.add(lamp.0.1)),
         far: (meshes.add(lamp.1.0), meshes.add(lamp.1.1)),
     };
@@ -1501,8 +1517,9 @@ fn house_transform(pos: DVec3, facing: f32, look: &HouseLook) -> Transform {
 
 /// A house's collider in its build frame (y up from the ground under its middle, ridge along
 /// Z), from its near meshes: a box round the walls' plaster up to the eaves (jettied floors
-/// included) and the roof as a prism from the eaves to the ridge. Chimneys, door steps, sills
-/// and flower boxes are left out.
+/// included), the roof as the hull of its own tiles (overhangs, thickness and dormers, so a
+/// wall run or a jump lands on what is drawn), and the chimney stacks above the ridge. Door
+/// steps, sills and flower boxes are left out.
 pub fn house_solid(parts: &[(Part, Mesh)]) -> Option<ColliderShape> {
     let points = |want: &[Part]| -> Vec<Vec3> {
         parts
@@ -1534,6 +1551,31 @@ pub fn house_solid(parts: &[(Part, Mesh)]) -> Option<ColliderShape> {
     }
     let walls_lo = Vec3::new(wlo.x, wlo.y, wlo.z);
     let walls_hi = Vec3::new(whi.x, eaves, whi.z);
+    // Chimney stacks (brick, stone caps, pots) where they rise above the ridge, each reaching
+    // a meter down into the roof's hull: clustered by where they stand along the ridge.
+    let mut stacks: Vec<Vec<Vec3>> = Vec::new();
+    for p in parts
+        .iter()
+        .filter(|(p, _)| !matches!(p, Part::Roof | Part::Plants | Part::Glass))
+        .flat_map(|(_, m)| m.vertices.iter().map(|v| Vec3::from(v.position)))
+        .filter(|p| p.y > rhi.y + 0.05)
+    {
+        match stacks
+            .iter_mut()
+            .find(|s| s.iter().any(|q| (*q - p).length_squared() < 1.5 * 1.5))
+        {
+            Some(s) => s.push(p),
+            None => stacks.push(vec![p]),
+        }
+    }
+    let stacks: Vec<(Vec3, Quat, ColliderShape)> = stacks
+        .into_iter()
+        .filter_map(|mut s| {
+            let down: Vec<Vec3> = s.iter().map(|p| Vec3::new(p.x, rhi.y - 1.0, p.z)).collect();
+            s.extend(down);
+            crate::solids::hull(&s).map(|h| (Vec3::ZERO, Quat::IDENTITY, h))
+        })
+        .collect();
     // The ridge runs along Z, or along X on houses turned eaves to the street: the way the
     // roof's top spreads out.
     let (tlo, thi) = roof.iter().filter(|p| p.y > rhi.y - 0.4).fold(
@@ -1555,7 +1597,11 @@ pub fn house_solid(parts: &[(Part, Mesh)]) -> Option<ColliderShape> {
         prism.push(Vec3::new(rlo.x, rhi.y, mid.z));
         prism.push(Vec3::new(rhi.x, rhi.y, mid.z));
     }
-    Some(ColliderShape::Compound(vec![
+    // The roof's own hull; the prism between the eaves and the ridge if it has none.
+    let roof = crate::solids::hull(&roof).unwrap_or(ColliderShape::ConvexHull {
+        points: prism.into(),
+    });
+    let mut shapes = vec![
         (
             (walls_lo + walls_hi) * 0.5,
             Quat::IDENTITY,
@@ -1563,14 +1609,10 @@ pub fn house_solid(parts: &[(Part, Mesh)]) -> Option<ColliderShape> {
                 half_extents: (walls_hi - walls_lo) * 0.5,
             },
         ),
-        (
-            Vec3::ZERO,
-            Quat::IDENTITY,
-            ColliderShape::ConvexHull {
-                points: prism.into(),
-            },
-        ),
-    ]))
+        (Vec3::ZERO, Quat::IDENTITY, roof),
+    ];
+    shapes.extend(stacks);
+    Some(ColliderShape::Compound(shapes))
 }
 
 /// `shape` mirrored across its local X (for houses built mirrored).
@@ -1640,12 +1682,21 @@ pub fn spawn_house(
 pub(crate) fn spawn_prop(
     commands: &mut Commands,
     lib: &Library,
-    prop: &PropHandles,
+    prop: &Prop,
     pos: DVec3,
     yaw: f32,
     timber: usize,
 ) {
     let tf = Transform::from_translation(pos).with_rotation(Quat::from_rotation_y(yaw));
+    if let Some(shape) = &prop.solid {
+        commands.spawn((
+            tf,
+            NearSolid {
+                shape: shape.clone(),
+                reach: SMALL_SOLID_REACH,
+            },
+        ));
+    }
     let look = HouseLook {
         plaster: 0,
         timber,
@@ -1653,7 +1704,7 @@ pub(crate) fn spawn_prop(
         roof: 0,
         mirror: false,
     };
-    for (part, mesh) in prop {
+    for (part, mesh) in &prop.parts {
         commands.spawn((
             tf,
             MeshRenderer::new(*mesh, village_material(lib, *part, &look)),
@@ -1665,7 +1716,19 @@ pub(crate) fn spawn_prop(
 /// A street lamp with a warm point light (lumens).
 pub fn spawn_lamp(commands: &mut Commands, lib: &Library, pos: DVec3) {
     let tf = Transform::from_translation(pos);
-    NearSolid::upright(commands, pos, 0.12, 4.1);
+    // The post, the bracket and the lantern (a post-sized capsule left the lantern open).
+    match &lib.lamp.solid {
+        Some(shape) => {
+            commands.spawn((
+                tf,
+                NearSolid {
+                    shape: shape.clone(),
+                    reach: SMALL_SOLID_REACH,
+                },
+            ));
+        }
+        None => NearSolid::upright(commands, pos, 0.12, 4.1),
+    }
     let vm = &lib.mats.village;
     let (near, far) = (lib.lamp.near, lib.lamp.far);
     commands.spawn((
@@ -2848,13 +2911,32 @@ mod tests {
             };
             let ridge = points.iter().map(|p| p.y).fold(f32::MIN, f32::max);
             assert!(ridge > wall_top + 2.0, "house {}: ridge {ridge}", spec.seed);
-            let top: Vec<_> = points.iter().filter(|p| p.y == ridge).collect();
-            let along_x = (top[0].x - top[1].x).abs() > (top[0].z - top[1].z).abs();
+            // The ridge runs the long way of the roof's top.
+            let (lo, hi) = points.iter().filter(|p| p.y > ridge - 0.3).fold(
+                (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN)),
+                |(lo, hi), &p| (lo.min(p), hi.max(p)),
+            );
+            let along_x = hi.x - lo.x > hi.z - lo.z;
             assert_eq!(
                 along_x, spec.eaves_front,
-                "house {}: ridge {top:?}",
+                "house {}: ridge from {lo} to {hi}",
                 spec.seed
             );
+            // The chimney stands above the ridge and reaches down into the roof.
+            assert!(parts.len() >= 3, "house {}: no chimney", spec.seed);
+            for (_, _, stack) in &parts[2..] {
+                let ColliderShape::ConvexHull { points } = stack else {
+                    panic!("chimney isn't a hull");
+                };
+                let (lo, hi) = points.iter().fold((f32::MAX, f32::MIN), |(lo, hi), p| {
+                    (lo.min(p.y), hi.max(p.y))
+                });
+                assert!(
+                    hi > ridge && lo < ridge - 0.5,
+                    "house {}: stack {lo}..{hi}",
+                    spec.seed
+                );
+            }
         }
     }
 

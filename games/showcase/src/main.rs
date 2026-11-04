@@ -44,6 +44,7 @@ mod rock_textures;
 mod rocks;
 mod route;
 mod scenery;
+mod solids;
 mod spawn_costs;
 mod texgen;
 mod tour;
@@ -235,6 +236,14 @@ fn main() {
             num("--fps", 30.0),
             follow,
         );
+    }
+    // `SHOWCASE_COLLIDERS=1`: Physics' collider wireframes over the scene, to see what you
+    // can stand on and run along (playtest 3 item 13).
+    if std::env::var_os("SHOWCASE_COLLIDERS").is_some()
+        && let Some(mut debug) = app.world.get_resource_mut::<engine_physics::PhysicsDebug>()
+    {
+        debug.colliders = true;
+        debug.radius_m = 60.0;
     }
     app.run();
 }

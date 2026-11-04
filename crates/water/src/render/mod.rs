@@ -72,7 +72,7 @@ struct FallVertex {
     across_side: [f32; 4],
     /// Meters across (continuous between neighboring strips), seconds since the water left
     /// the lip, speed it left at (m/s), and 0 (a curtain; 1 is a spray cloud, see
-    /// [`mist_puff`]).
+    /// [`mist_puff`]; 2 a splash clump, [`splash_crown`]).
     uv_speed: [f32; 4],
     /// 1 on a strip's side where the fall ends (no neighboring lip carries the sheet on: its
     /// edge frays there), 0 inside it; then unused.
@@ -279,6 +279,89 @@ fn mist_puff(
             across_side: [0.0; 4],
             uv_speed: [seed + k as f32 * 13.7, 0.0, 0.0, 1.0],
             // The pool's surface (camera-relative height): the cloud fades out into it.
+            edge: [rel.y, 0.0, 0.0, 0.0],
+        };
+        out.extend_from_slice(&[
+            corner(-1.0, -1.0),
+            corner(1.0, -1.0),
+            corner(-1.0, 1.0),
+            corner(-1.0, 1.0),
+            corner(1.0, -1.0),
+            corner(1.0, 1.0),
+        ]);
+    }
+}
+
+/// `FallVertex::uv_speed.w` on a clump of white water thrown up where a fall lands (see
+/// `fall_splash`).
+const SPLASH_KIND: f32 = 2.0;
+/// Clumps in the splash where each fall lands.
+const SPLASH_CLUMPS: usize = 14;
+
+/// A repeatable pseudo-random number in 0..1 from `x`.
+fn hash01(x: f32) -> f32 {
+    ((x * 12.9898).sin() * 43_758.547).rem_euclid(1.0)
+}
+
+/// The splash where a fall of `power` watts lands at `foot` (world; `rel` relative to the
+/// camera): clumps of white water thrown up and out of the pool, mostly away from the rock
+/// the water came down (`away`, its horizontal velocity there), each falling back and thrown
+/// up again on its own cycle (`vs_falls` flies them). A fall landing without one is a sheet
+/// laid on the water (playtest 2026-11-01 item 34; games give the impact its own element,
+/// waterfall-research.md). Camera-facing cards (`right`, `up`): corners in
+/// `normal_frac.xy`, radius in `.z`, density in `.w`; thrown velocity (m/s) and phase in
+/// `across_side`; seed and flight time (s) in `uv_speed.xy`.
+fn splash_crown(
+    foot: DVec3,
+    rel: Vec3,
+    power: f32,
+    away: Vec2,
+    right: Vec3,
+    up: Vec3,
+    out: &mut Vec<FallVertex>,
+) {
+    // Flow times drop (m⁴/s), as for the mist: about 1.3 for a small stream falling 8 m.
+    let size = (power / 9810.0).max(0.0).sqrt();
+    if size < 0.05 {
+        return;
+    }
+    // The water lands at sqrt(2 g h), several meters a second, and throws a crown of drops up
+    // a fraction of the drop: tens of centimeters under a small fall, a couple of meters
+    // under a big one.
+    let height = (0.3 + 0.45 * size).min(2.5);
+    let reach = boil_radius(power);
+    let outward = Vec3::new(away.x, 0.0, away.y).normalize_or_zero();
+    let across = if outward == Vec3::ZERO {
+        Vec3::X
+    } else {
+        Vec3::new(-outward.z, 0.0, outward.x)
+    };
+    let seed = (foot.x * 0.37 + foot.z * 0.61).rem_euclid(97.0) as f32;
+    for k in 0..SPLASH_CLUMPS {
+        let h = |n: f32| hash01(seed + k as f32 * 7.31 + n * 3.17);
+        // Along the line the curtain lands on, a little out from the rock.
+        let at = rel + across * ((h(1.0) - 0.5) * reach * 0.9) + outward * (reach * 0.15);
+        let rise = height * (0.35 + 0.65 * h(2.0));
+        // Flight time, slowed by the air from the 2 sqrt(2 h / g) of a free throw.
+        let period = 2.3 * (2.0 * rise / 9.81).sqrt();
+        // Peak height is thrown.y * period / 4 (see `vs_falls`).
+        let vy = 4.0 * rise / period;
+        // Mostly out over the pool (behind is the rock), some to the sides.
+        let angle = (h(3.0) - 0.5) * std::f32::consts::PI * 1.4;
+        let dir = if outward == Vec3::ZERO {
+            Vec3::new(angle.cos(), 0.0, angle.sin())
+        } else {
+            outward * angle.cos() + across * angle.sin()
+        };
+        let out_m = reach * (0.2 + 0.4 * h(4.0));
+        let thrown = dir * (out_m / period) + Vec3::Y * vy;
+        let r = (0.18 + 0.14 * size).min(0.9) * (0.7 + 0.6 * h(5.0));
+        let corner = |cx: f32, cy: f32| FallVertex {
+            rel_q: (at + (right * cx + up * cy) * r).extend(0.0).to_array(),
+            normal_frac: [cx, cy, r, 0.85],
+            across_side: thrown.extend(h(6.0)).to_array(),
+            uv_speed: [seed + k as f32 * 13.7, period, 0.0, SPLASH_KIND],
+            // The pool's surface (camera-relative height): no clump under it.
             edge: [rel.y, 0.0, 0.0, 0.0],
         };
         out.extend_from_slice(&[
@@ -505,6 +588,11 @@ struct Gpu {
     /// Vertices the buffer holds, and how many to draw this frame.
     fall_capacity: usize,
     fall_count: u32,
+    /// The falls' rock and curtains as the main view last built them, relative to its camera
+    /// at `fall_origin` (`None` before the first): extra views (the lake mirror) shift these
+    /// instead of tracing every lip again.
+    fall_strips: Vec<FallVertex>,
+    fall_origin: Option<DVec3>,
     /// The fine wind waves' tiles.
     detail: detail::DetailGpu,
     /// The dispersive ripples over the ripple grid.
@@ -1113,6 +1201,8 @@ impl WaterFeature {
             fall_buffer,
             fall_capacity,
             fall_count: 0,
+            fall_strips: Vec::new(),
+            fall_origin: None,
             detail,
             surface,
             swash,
@@ -1138,15 +1228,28 @@ impl WaterFeature {
         view: &ViewData,
         plunges: &[(DVec3, Vec2, f32)],
     ) {
-        // The falls as the flow step last worked them out (not traced again each frame).
-        type Drawn<'a> = (
-            f64,
-            &'a crate::flow::Lip,
-            &'a [crate::flow::FallPoint],
-            [bool; 2],
-        );
-        let mut lips: Vec<Drawn> =
-            state
+        // The falls as the flow step last worked them out (not traced again each frame). An
+        // extra view takes the main view's strips of last frame, moved to its own camera.
+        let reused = view.extra_view && gpu.fall_origin.is_some();
+        let mut shifted = Vec::new();
+        let strips = if let Some(o) = gpu.fall_origin.filter(|_| reused) {
+            let d = (o - view.origin).as_vec3();
+            shifted.extend(gpu.fall_strips.iter().map(|v| {
+                let mut v = *v;
+                v.rel_q[0] += d.x;
+                v.rel_q[1] += d.y;
+                v.rel_q[2] += d.z;
+                v
+            }));
+            &shifted
+        } else {
+            type Drawn<'a> = (
+                f64,
+                &'a crate::flow::Lip,
+                &'a [crate::flow::FallPoint],
+                [bool; 2],
+            );
+            let mut lips: Vec<Drawn> = state
                 .flows
                 .iter()
                 .filter(|sim| sim.visible)
@@ -1160,42 +1263,62 @@ impl WaterFeature {
                 })
                 .filter(|(d, ..)| *d < FALLS_REACH)
                 .collect();
-        lips.sort_by(|a, b| a.0.total_cmp(&b.0));
-        lips.truncate(MAX_LIPS);
-        let mut vertices = Vec::with_capacity(lips.len() * crate::flow::FALL_POINTS * 24);
-        let mut curtains = Vec::with_capacity(lips.len() * crate::flow::FALL_POINTS * 18);
-        for (_, lip, path, sides) in &lips {
-            fall_strip(
-                lip,
-                path,
-                *sides,
-                |p| view.relative(p),
-                &mut curtains,
-                &mut vertices,
-            );
-        }
-        // The wet rock first, under the curtains; spray clouds last, over their feet.
-        vertices.append(&mut curtains);
-        if !lips.is_empty() {
+            lips.sort_by(|a, b| a.0.total_cmp(&b.0));
+            lips.truncate(MAX_LIPS);
+            let vertices = &mut gpu.fall_strips;
+            vertices.clear();
+            let mut curtains = Vec::with_capacity(lips.len() * crate::flow::FALL_POINTS * 18);
+            for (_, lip, path, sides) in &lips {
+                fall_strip(
+                    lip,
+                    path,
+                    *sides,
+                    |p| view.relative(p),
+                    &mut curtains,
+                    vertices,
+                );
+            }
+            // The wet rock first, under the curtains; spray clouds last, over their feet.
+            vertices.append(&mut curtains);
+            if !view.extra_view {
+                gpu.fall_origin = Some(view.origin);
+            }
+            &gpu.fall_strips
+        };
+        let mut puffs = Vec::new();
+        if !strips.is_empty() {
             let (right, up) = (view.rotation * Vec3::X, view.rotation * Vec3::Y);
             for &(foot, away, power) in plunges {
-                if foot.distance(view.origin) < FALLS_REACH {
+                let far = foot.distance(view.origin);
+                if far < FALLS_REACH {
                     let rel = view.relative(foot);
-                    mist_puff(foot, rel, power, away, right, up, &mut vertices);
+                    mist_puff(foot, rel, power, away, right, up, &mut puffs);
+                    // (Drawn over the mist: the white clumps in front of the cloud.)
+                    if far < PLUNGE_REACH {
+                        splash_crown(foot, rel, power, away, right, up, &mut puffs);
+                    }
                 }
             }
         }
-        gpu.fall_count = vertices.len() as u32;
-        if vertices.is_empty() {
+        let count = strips.len() + puffs.len();
+        gpu.fall_count = count as u32;
+        if count == 0 {
             return;
         }
-        if vertices.len() > gpu.fall_capacity {
-            gpu.fall_capacity = vertices.len().next_power_of_two();
+        if count > gpu.fall_capacity {
+            gpu.fall_capacity = count.next_power_of_two();
             gpu.fall_buffer = Self::fall_buffer(&shared.device, gpu.fall_capacity);
         }
+        let strips = if reused { &shifted } else { &gpu.fall_strips };
         shared
             .queue
-            .write_buffer(&gpu.fall_buffer, 0, bytemuck::cast_slice(&vertices));
+            .write_buffer(&gpu.fall_buffer, 0, bytemuck::cast_slice(strips));
+        if !puffs.is_empty() {
+            let at = (strips.len() * std::mem::size_of::<FallVertex>()) as u64;
+            shared
+                .queue
+                .write_buffer(&gpu.fall_buffer, at, bytemuck::cast_slice(&puffs));
+        }
     }
 
     /// Fill one body's uniform and decide which grid bands to draw.
@@ -1537,6 +1660,15 @@ impl WaterFeature {
         };
         let grid = &layers.grid;
         let w = &mut self.puddles;
+        // Extra views (the lake mirror) draw the main view's window as it stands.
+        if view.extra_view && w.cell > 0.0 {
+            let o = view.relative(DVec3::new(w.origin.x, 0.0, w.origin.y));
+            return (
+                [o.x, o.z, w.cell, PUDDLE_N as f32],
+                [(w.base - view.origin.y) as f32, 0.0, 0.0, 0.0],
+                w.wet,
+            );
+        }
         let cell = grid.cell;
         let n = PUDDLE_N as usize;
         // Window snapped to the grid's cells around the camera.
@@ -1811,7 +1943,10 @@ impl RenderFeature for WaterFeature {
             gpu.shelter_version = mask.version;
         }
 
+        let lock = tracing::info_span!("water", name = "prepare: lock").entered();
         let state = water.0.read();
+        drop(lock);
+        let bodies_span = tracing::info_span!("water", name = "prepare: bodies").entered();
         let hidden_below = hidden
             .and_then(|e| state.bodies.iter().find(|b| b.entity == e))
             .map(|b| b.center.y + 0.1);
@@ -1897,6 +2032,7 @@ impl RenderFeature for WaterFeature {
             self.bodies.push(draw);
         }
 
+        drop(bodies_span);
         let r = &state.ripples;
         let ripple_rel = view.relative(DVec3::new(r.origin.x, 0.0, r.origin.y));
         let mut g = Globals::zeroed();
@@ -2088,7 +2224,9 @@ impl RenderFeature for WaterFeature {
         let span = tracing::info_span!("water", name = "flow upload").entered();
         Self::upload_flows(gpu, shared, &state, view);
         drop(span);
+        let span = tracing::info_span!("water", name = "falls upload").entered();
         Self::upload_falls(gpu, shared, &state, view, &plunges);
+        drop(span);
 
         // Stats.
         let flows = gpu.flows.iter().filter(|f| f.drawn);
@@ -2268,7 +2406,8 @@ impl RenderFeature for WaterFeature {
         if gpu.fall_count > 0 {
             pass.set_pipeline(&gpu.falls);
             pass.set_vertex_buffer(0, gpu.fall_buffer.slice(..));
-            pass.draw(0..gpu.fall_count, 0..1);
+            // Two instances: the second is a sheet behind each falling curtain (`vs_falls`).
+            pass.draw(0..gpu.fall_count, 0..2);
         }
         if self.lens_on {
             pass.set_pipeline(&gpu.lens);
@@ -2510,6 +2649,58 @@ mod tests {
             assert_eq!(f.uv_speed[3], 1.0);
             assert!((pos(f).z - foot.z).abs() < 1e-4, "not facing the camera");
         }
+    }
+
+    #[test]
+    fn a_fall_throws_up_a_splash_out_over_its_pool() {
+        let (right, up) = (Vec3::X, Vec3::Y);
+        let mut v = Vec::new();
+        let foot = Vec3::new(0.0, -5.0, -20.0);
+        // The small stream falling 8 m (about 16 kW), landing toward +x.
+        let away = Vec2::new(3.0, 0.0);
+        splash_crown(
+            DVec3::new(3.0, 1.0, 4.0),
+            foot,
+            16_000.0,
+            away,
+            right,
+            up,
+            &mut v,
+        );
+        assert_eq!(v.len(), SPLASH_CLUMPS * 6);
+        let reach = boil_radius(16_000.0);
+        let mut out = 0.0;
+        for clump in v.chunks(6) {
+            let f = clump[0];
+            assert_eq!(f.uv_speed[3], SPLASH_KIND);
+            assert!(
+                clump
+                    .iter()
+                    .all(|c| c.across_side == f.across_side && c.uv_speed == f.uv_speed)
+            );
+            let center = clump
+                .iter()
+                .map(|c| Vec3::from_slice(&c.rel_q[..3]))
+                .sum::<Vec3>()
+                / 6.0;
+            // Thrown from the line it lands on, at the pool's surface, facing the camera.
+            assert!((center.y - foot.y).abs() < 1e-4 && (center.z - foot.z).abs() < reach);
+            assert!(clump.iter().all(|c| (c.rel_q[2] - center.z).abs() < 1e-4));
+            // Up tens of centimeters to a meter or so (peak thrown.y * period / 4), back down
+            // within about a second, and not past the boil.
+            let (thrown, period) = (Vec3::from_slice(&f.across_side[..3]), f.uv_speed[1]);
+            let peak = thrown.y * period / 4.0;
+            assert!((0.25..1.2).contains(&peak), "{peak}");
+            assert!((0.3..1.5).contains(&period), "{period}");
+            assert!(thrown.with_y(0.0).length() * period < reach * 0.7);
+            out += thrown.x;
+        }
+        // Out over the pool more than back toward the rock.
+        assert!(out > 0.0);
+        // A trickle throws up nothing.
+        let mut none = Vec::new();
+        splash_crown(DVec3::ZERO, foot, 10.0, away, right, up, &mut none);
+        assert!(none.is_empty());
     }
 
     #[test]

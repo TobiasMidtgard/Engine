@@ -194,6 +194,46 @@ fn plunge_flow(rel: vec3<f32>) -> vec2<f32> {
     return v;
 }
 
+// Where a fall lands in running water (`vel`, m/s), its froth doesn't stay round the foot:
+// white where the falling water drives in, then swept downstream in a trail of torn froth
+// that widens and thins as its bubbles rise and burst, a few boil radii long, longer the
+// faster the current. The froth rides the current. Foam, 0..~1.3.
+fn plunge_trail(rel: vec3<f32>, vel: vec2<f32>) -> f32 {
+    var out = 0.0;
+    let speed = length(vel);
+    let dir = vel / max(speed, 1e-3);
+    for (var i = 0u; i < min(water.g.counts.w, 8u); i++) {
+        let p = water.g.plunges[i];
+        let d = rel.xz - p.xz;
+        let along = dot(d, dir);
+        let across = abs(d.x * dir.y - d.y * dir.x);
+        // How far the current carries the froth in the few seconds its bubbles last.
+        let reach = p.w * (1.0 + 1.5 * min(speed, 3.0));
+        if (along < -p.w * 1.5 || along > reach + p.w || across > p.w * 2.0
+            || abs(rel.y - p.y) > 1.5) { continue; }
+        let wp = tiling_pos(rel).xz;
+        let t = time_s();
+        // Carried with the current: two copies cross-faded, as the stream's own lumps.
+        let ph0 = fract(t * 0.5);
+        let ph1 = fract(t * 0.5 + 0.5);
+        let w = abs(ph0 - 0.5) * 2.0;
+        let q0 = wp - vel * ph0 * 2.0;
+        let q1 = wp - vel * ph1 * 2.0 + vec2<f32>(5.3, 1.7);
+        let n = mix(froth_noise(q0), froth_noise(q1), w);
+        let lace = mix(value_noise2(q0 * 11.0), value_noise2(q1 * 11.0), w) * 0.5
+            + value_noise2(wp * 23.0 + vec2<f32>(t * 0.7, 1.3)) * 0.5;
+        let core = 1.0 - smoothstep(0.05, 0.55, length(d) / p.w + (n - 0.5) * 0.5);
+        let down = saturate(along / reach);
+        let width = p.w * (0.6 + 0.6 * down);
+        let trail = (1.0 - smoothstep(0.5, 1.0, across / width + (n - 0.5) * 0.4))
+            * (1.0 - smoothstep(0.3, 1.0, down)) * smoothstep(-0.6, 0.1, along / p.w);
+        let patches = smoothstep(0.4 + 0.25 * down, 0.7 + 0.2 * down, n);
+        let holes = smoothstep(0.1 + 0.3 * down, 0.45 + 0.3 * down, lace);
+        out = max(out, (core * 1.3 + trail * patches * 0.9) * mix(0.5, 1.0, holes));
+    }
+    return out;
+}
+
 // A pixel's footprint on a level surface at camera-relative `rel`: `across` the view (meters)
 // and stretched `stretch` times along the horizontal view direction `view`, where at grazing
 // angles a pixel covers a long strip of water.
@@ -1544,9 +1584,13 @@ fn fs_flow(in: FlowOut, @builtin(front_facing) front: bool) -> @location(0) vec4
     let flecks = smoothstep(0.45, 0.7, flow_streaks(wp, in.vel, vec2<f32>(0.7, 6.0), t) / 0.875);
     foam += smoothstep(0.8, 2.5, abs(in.shear)) * smoothstep(0.2, 0.6, speed) * flecks * 0.45;
     foam *= saturate(in.depth * 30.0);
-    // Only a pool boils where a fall lands: on running water the current sweeps the froth
-    // downstream in the lumps above.
-    foam += rp.y * 1.2 + boil.x * (1.0 - smoothstep(0.3, 0.8, speed));
+    // A pool boils round where a fall lands; running water sweeps that froth downstream.
+    let running = smoothstep(0.3, 0.8, speed);
+    var white = boil.x * (1.0 - running);
+    if (running > 0.0) {
+        white += plunge_trail(in.rel, in.vel) * running;
+    }
+    foam += rp.y * 1.2 + white;
     let lap = 0.5 + 0.5 * sin(t * 1.3 + value_noise2(wp * 0.7) * 6.0);
     foam += (1.0 - smoothstep(0.002, 0.01, in.depth)) * lap * 0.5;
     var color: vec3<f32>;
@@ -1580,21 +1624,46 @@ struct FallOut {
     @location(2) across: vec3<f32>,
     @location(3) uv: vec2<f32>,
     @location(4) look: vec4<f32>,        // q, frac, side, lip speed
-    @location(5) kind: f32,              // 1 spray cloud; -1 spray round a curtain; -2 wet rock under it; under a half a curtain, 0.45 where it slides down rock
+    @location(5) kind: f32,              // 2 splash clump; 1 spray cloud; -1 spray round a curtain; -2 wet rock under it; under a half a curtain, 0.45 where it slides down rock
     @location(6) edge: f32,              // 1 toward a side where the fall ends
 };
 
 @vertex
-fn vs_falls(v: FallIn) -> FallOut {
+fn vs_falls(v: FallIn, @builtin(instance_index) layer: u32) -> FallOut {
     var out: FallOut;
     out.rel = v.rel_q.xyz;
+    out.uv = v.uv_speed.xy;
+    if (layer == 1u) {
+        // A falling jet is a body of water, not one sheet: a second sheet of it behind the
+        // first, its streaks elsewhere, fills the gaps between the first's (games layer
+        // curtain cards the same way, waterfall-research.md). It stands further back as the
+        // jet spreads. Only a curtain falling free has one: everything else is dropped.
+        if (v.uv_speed.w != 0.0) {
+            out.clip = vec4<f32>(0.0, 0.0, -1.0, 1.0);
+            return out;
+        }
+        out.rel -= v.normal_frac.xyz * (0.08 + 0.3 * v.normal_frac.w);
+        out.uv.x += 23.7;
+    }
     out.clip = frame.view_proj * vec4<f32>(out.rel, 1.0);
     out.normal = v.normal_frac.xyz;
     out.across = v.across_side.xyz;
-    out.uv = v.uv_speed.xy;
     out.look = vec4<f32>(v.rel_q.w, v.normal_frac.w, v.across_side.w, v.uv_speed.z);
     out.kind = v.uv_speed.w;
     out.edge = v.edge.x;
+    if (out.kind > 1.5) {
+        // A splash clump flies on its arc and falls back, over and over (`splash_crown`):
+        // thrown at `across_side.xyz` m/s, landing again after `uv_speed.y` seconds, each at
+        // its own point of the cycle (`across_side.w`). Its height is v t (1 - t / T), so it
+        // falls slower than freely (the air holds its drops back).
+        let period = v.uv_speed.y;
+        let life = fract(time_s() / period + v.across_side.w);
+        let tt = life * period;
+        let thrown = v.across_side.xyz;
+        out.rel += vec3<f32>(thrown.x * tt, thrown.y * tt * (1.0 - life), thrown.z * tt);
+        out.clip = frame.view_proj * vec4<f32>(out.rel, 1.0);
+        out.look = vec4<f32>(life, v.normal_frac.w, 0.0, 0.0);
+    }
     return out;
 }
 
@@ -1694,6 +1763,44 @@ fn fall_mist(in: FallOut) -> vec4<f32> {
     return vec4<f32>(color * alpha, alpha);
 }
 
+// A clump of white water thrown up where a fall lands (`splash_crown`): a camera-facing card
+// (corner -1..1 in `normal.xy`, radius `normal.z`, seed `uv.x`, how far through its flight
+// `look.x`, density `look.y`) drawn as lumps of froth torn into drops, spreading as it flies
+// and thinning as it falls back.
+fn fall_splash(in: FallOut) -> vec4<f32> {
+    let life = in.look.x;
+    let grow = 0.5 + 0.5 * sqrt(life);
+    let c = in.normal.xy / grow;
+    let seed = in.uv.x;
+    let p = c * 2.2 + vec2<f32>(seed, seed * 0.37);
+    let wisp = fbm2(p + vec2<f32>(0.0, life * 1.3), 3) / 0.875;
+    // A ragged outline, never a disc.
+    let r = length(c) + (wisp - 0.5) * 0.5;
+    if (r >= 1.0) { discard; }
+    let shape = 1.0 - smoothstep(0.0, 1.0, r);
+    // Torn froth at first, flying apart into drops: a soft spray, and the drops in it.
+    let spray = smoothstep(0.3, 0.8, wisp * 0.5 + shape * 0.6) * (0.55 - 0.3 * life);
+    let drops = value_noise2(p * 7.0 + vec2<f32>(seed * 1.7, life * 3.0));
+    var alpha = max(spray, smoothstep(0.7, 0.85, drops) * smoothstep(0.0, 0.4, shape) * 0.8);
+    alpha *= in.look.y * smoothstep(0.0, 0.06, life) * (1.0 - smoothstep(0.7, 1.0, life));
+    // Soft against the rock behind, and gone under the pool's surface (`edge`).
+    let size = vec2<f32>(textureDimensions(scene_color));
+    let pix = vec2<i32>(clamp(in.clip.xy, vec2<f32>(0.0), size - 1.0));
+    let z_scene = linear_depth(textureLoad(scene_depth, pix, 0));
+    alpha *= saturate((z_scene - max(view_depth(in.rel), 1e-3)) / max(in.normal.z * 0.5, 0.05));
+    alpha *= smoothstep(in.edge - 0.03, in.edge + 0.06, in.rel.y);
+    alpha = min(alpha, 0.95);
+    if (alpha < 0.004) { discard; }
+    let v = -in.rel / max(length(in.rel), 1e-4);
+    // Froth flying in the open is lit by the whole sky over it, not a wall of it.
+    let n = normalize(v * 0.4 + vec3<f32>(0.0, 1.0, 0.0));
+    // White: light bounces many times among the drops, washing out the sky's blue.
+    let lit = froth_light(in.rel, n, v);
+    let grey = vec3<f32>(dot(lit, vec3<f32>(0.2126, 0.7152, 0.0722)));
+    let color = apply_fog(mix(lit, grey, 0.6) * 1.1, in.rel);
+    return vec4<f32>(color * alpha, alpha);
+}
+
 // Streaks of the curtain at `u` meters across for water that left the lip at time `t0`:
 // fingers about a meter apart that come and go as the flow over the lip pulses, with finer
 // threads in them (`fine` fades those out where a pixel is wider than a thread), 0..1.
@@ -1769,6 +1876,7 @@ fn fall_shell(in: FallOut) -> vec4<f32> {
 
 @fragment
 fn fs_falls(in: FallOut) -> @location(0) vec4<f32> {
+    if (in.kind > 1.5) { return fall_splash(in); }
     if (in.kind > 0.5) { return fall_mist(in); }
     if (in.kind < -1.5) { return fall_wet(in); }
     if (in.kind < -0.5) { return fall_shell(in); }
@@ -1855,6 +1963,12 @@ fn fs_falls(in: FallOut) -> @location(0) vec4<f32> {
     alpha *= saturate((z_scene - z_frag) / mix(0.15, 0.03, rock));
     let stray = in.edge * smoothstep(0.75, 1.0, edge_x) * (1.0 - smoothstep(0.88, 1.0, abs(side)));
     alpha = max(alpha, stray * body * 0.7 * smoothstep(0.62, 0.9, s) * saturate((z_scene - z_frag) / 0.03));
+    // Where it plunges in, the curtain vanishes into its own splash and boil, raggedly: the
+    // water writes no depth to fade it against, and a ruled line there reads as a sheet
+    // stopping short in the air.
+    if (rock < 0.5) {
+        alpha *= 1.0 - 0.75 * smoothstep(0.88, 1.0, frac + (s - 0.5) * 0.12 + (packets - 0.5) * 0.06);
+    }
     if (alpha < 0.004) { discard; }
 
     // Streak relief: each finger is rounded across, and the surges in it ripple the tongue.

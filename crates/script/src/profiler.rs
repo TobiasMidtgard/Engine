@@ -358,7 +358,10 @@ impl Profiler {
             .spawn(move || {
                 let mut last = Instant::now();
                 while !clock.stop.load(Ordering::Relaxed) {
-                    std::thread::sleep(period);
+                    // Parked rather than asleep, so `halt` wakes it at once: on Windows a
+                    // sleep lasts a timer tick (1-16 ms), and stopping the 9 VMs' profilers
+                    // one after another held a frame 12.7 ms.
+                    std::thread::park_timeout(period);
                     let now = Instant::now();
                     let dt = (now - last).as_nanos() as u64;
                     last = now;
@@ -385,6 +388,7 @@ impl Profiler {
             return false;
         };
         self.clock.stop.store(true, Ordering::Relaxed);
+        timer.thread().unpark();
         let _ = timer.join();
         self.clock.due.store(false, Ordering::Relaxed);
         RECORDING.fetch_sub(1, Ordering::Relaxed);

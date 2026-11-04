@@ -3,16 +3,22 @@
 //!
 //! A [`GrassField`] covers a rectangle of ground on its entity's local x/z plane (the entity's
 //! rotation tilts it, for example onto a planet's surface) and carries a map of ground height,
-//! density and dryness on a grid. Nothing per blade is stored: the vertex shader grows every
-//! blade from its tile's grid coordinates and its index (`shaders/grass_common.wgsl`), so a
-//! field of millions of blades costs a small texture. Blades go into the depth prepass (so
-//! ambient occlusion, bounce light and anti-aliasing see them), the scene and, near the camera,
-//! the sun's shadow cascades.
+//! density and dryness on a grid. Nothing per blade is kept between frames: a compute pass
+//! (`shaders/grass_cull.wgsl`) grows every blade of the tiles around the camera from its
+//! tile's grid coordinates and its index, once a frame, so the same blade grows in the same
+//! spot every frame and a field of millions of blades costs a small texture. It drops blades
+//! thinned out by distance or outside the view and writes one 64-byte record per kept blade;
+//! the depth prepass (so ambient occlusion, bounce light and anti-aliasing see them), the
+//! scene and, near the camera, the sun's shadow cascades draw the records with indirect draws,
+//! their vertex shaders only bending each blade along its curve (`shaders/grass_common.wgsl`).
 //!
 //! ```text
 //! prepare: fields → map textures (on change); tiles around the camera → cull (view frustum,
-//!          cascades) → blade count from the nearest point's LOD → tile list + draw list
-//! draw:    one instanced triangle-strip draw per tile (instance = tile << 16 | blade)
+//!          cascades) → blade count from the nearest point's LOD → tiles, cull jobs (64 blades
+//!          each) and the draw groups' sizes
+//! compute: one thread a blade → grown, culled, its tip in the wind → record in its group
+//! draw:    one indirect triangle-strip draw per group: the screen's by segments (1-6), each
+//!          cascade's by segments (1-2)
 //! ```
 
 use std::collections::HashMap;
@@ -37,6 +43,18 @@ const BLADE_BITS: u32 = 16;
 const MAX_BLADES_PER_TILE: u32 = (1 << BLADE_BITS) - 1;
 const MAX_BENDERS: usize = 16;
 const MAX_BLADES_PER_M2: f32 = 1000.0;
+/// Blades a cull job covers (`@workgroup_size` in grass_cull.wgsl).
+const CULL_CHUNK: u32 = 64;
+/// Bytes of one blade's record (`GrassRecord` in grass_common.wgsl).
+const RECORD_BYTES: u64 = 64;
+/// Indirect draws of the blades kept for the screen: one for each count of segments, 1..=6.
+const SCREEN_GROUPS: usize = 6;
+/// Segments a shadow caster can have (`shadow_segments_at`).
+const SHADOW_SEGMENTS: usize = 2;
+/// Indirect draws: the screen's, then each cascade's by segments.
+const GROUPS: usize = SCREEN_GROUPS + MAX_CASCADES * SHADOW_SEGMENTS;
+/// A dispatch's workgroups along x at most (the rest go along y).
+const MAX_GROUPS_X: u32 = 65535;
 
 /// A meadow: grass blades over a rectangle of ground.
 ///
@@ -426,6 +444,14 @@ fn scene_source() -> String {
     .join("\n")
 }
 
+fn cull_source() -> String {
+    [
+        include_str!("shaders/grass_common.wgsl"),
+        include_str!("shaders/grass_cull.wgsl"),
+    ]
+    .join("\n")
+}
+
 fn shadow_source() -> String {
     [
         include_str!("shaders/grass_common.wgsl"),
@@ -478,6 +504,35 @@ fn shadow_segments_at(d: f32) -> u32 {
     if d < 8.0 { 2 } else { 1 }
 }
 
+/// The draw group of cascade `cascade`'s blades of `segments` (1 or 2) quads, after the
+/// screen's six (`grass_emit` in grass_cull.wgsl).
+fn shadow_group(cascade: usize, segments: u32) -> usize {
+    SCREEN_GROUPS + cascade * SHADOW_SEGMENTS + segments.clamp(1, SHADOW_SEGMENTS as u32) as usize
+        - 1
+}
+
+/// Quads per blade in draw group `g`.
+fn group_segments(g: usize) -> u32 {
+    if g < SCREEN_GROUPS {
+        g as u32 + 1
+    } else {
+        ((g - SCREEN_GROUPS) % SHADOW_SEGMENTS) as u32 + 1
+    }
+}
+
+/// Cull jobs for `count` blades from instance `first`, 64 a job: first and end instance, what
+/// for (`mode`: bit 0 the screen, bits 1-4 the cascades) and the segments to draw them with.
+fn push_jobs(jobs: &mut Vec<[u32; 4]>, first: u32, count: u32, mode: u32, segments: u32) {
+    for start in (0..count).step_by(CULL_CHUNK as usize) {
+        jobs.push([
+            first + start,
+            first + (start + CULL_CHUNK).min(count),
+            mode,
+            segments,
+        ]);
+    }
+}
+
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
 struct GpuTile {
@@ -517,6 +572,9 @@ struct GpuBenders {
 /// One field's map on the GPU and what culling needs to know about it.
 struct FieldMap {
     group: wgpu::BindGroup,
+    /// This field's chunks in the cull pass's job list: first, count (`grass_cull` in
+    /// grass_cull.wgsl).
+    cull: wgpu::Buffer,
     resolution: [u32; 2],
     tiles: [u32; 2],
     /// Per tile: lowest and highest ground, highest density.
@@ -586,7 +644,13 @@ impl FieldMap {
             },
         );
         let view = texture.create_view(&Default::default());
-        let group = map_group(gpu, layout, &view, no_wear);
+        let cull = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("grass cull"),
+            size: 16,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let group = map_group(gpu, layout, &view, no_wear, &cull);
 
         // Tile bounds from the grid points that fall in or next to each tile.
         let size = [field.size[0].max(0.01), field.size[1].max(0.01)];
@@ -619,6 +683,7 @@ impl FieldMap {
         }
         Self {
             group,
+            cull,
             resolution: [rx, rz],
             tiles,
             tile_bounds,
@@ -653,7 +718,13 @@ impl FieldMap {
             .worn
             .as_ref()
             .map(|(t, _)| t.create_view(&Default::default()));
-        self.group = map_group(gpu, layout, &self.view, view.as_ref().unwrap_or(no_wear));
+        self.group = map_group(
+            gpu,
+            layout,
+            &self.view,
+            view.as_ref().unwrap_or(no_wear),
+            &self.cull,
+        );
     }
 
     /// Placement of the worn ground's map for `GpuField::wear` (w = 0: none).
@@ -667,6 +738,7 @@ fn map_group(
     layout: &wgpu::BindGroupLayout,
     map: &wgpu::TextureView,
     wear: &wgpu::TextureView,
+    cull: &wgpu::Buffer,
 ) -> wgpu::BindGroup {
     gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("grass map"),
@@ -680,8 +752,19 @@ fn map_group(
                 binding: 1,
                 resource: wgpu::BindingResource::TextureView(wear),
             },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: cull.as_entire_binding(),
+            },
         ],
     })
+}
+
+fn entry(binding: u32, buffer: &wgpu::Buffer) -> wgpu::BindGroupEntry<'_> {
+    wgpu::BindGroupEntry {
+        binding,
+        resource: buffer.as_entire_binding(),
+    }
 }
 
 /// A worn-ground map: one byte per point, 0 untouched .. 255 bare.
@@ -714,19 +797,25 @@ fn wear_texture(gpu: &GpuShared, size: [u32; 2], texels: &[u8]) -> wgpu::Texture
     texture
 }
 
-#[derive(Debug, Clone, Copy)]
-struct Draw {
-    /// Index into `FieldMap`s drawn this frame (`GrassFeature::order`).
-    field: usize,
-    segments: u32,
-    first: u32,
-    count: u32,
-}
-
 /// Draws every [`GrassField`]. Added by `RenderPlugin`.
 #[derive(Default)]
 pub struct GrassFeature {
-    data_layout: Option<wgpu::BindGroupLayout>,
+    cull_layout: Option<wgpu::BindGroupLayout>,
+    records_layout: Option<wgpu::BindGroupLayout>,
+    cull_pipeline: Option<wgpu::ComputePipeline>,
+    /// Chunks of blades for the cull pass, field by field (first and end instance).
+    jobs_buffer: Option<GrowBuffer>,
+    /// The blades the cull pass keeps, one `GrassRecord` each, by segment group.
+    records_buffer: Option<GrowBuffer>,
+    /// The kept blades' indirect draws, one per segment group.
+    args_buffer: Option<wgpu::Buffer>,
+    cull_group: Option<wgpu::BindGroup>,
+    records_group: Option<wgpu::BindGroup>,
+    jobs: Vec<[u32; 4]>,
+    /// Per field drawn (`order`): its jobs, first and count.
+    field_jobs: Vec<(usize, u32, u32)>,
+    /// Draw groups with blades this frame.
+    groups: [bool; GROUPS],
     map_layout: Option<wgpu::BindGroupLayout>,
     pipeline: Option<wgpu::RenderPipeline>,
     prepass_pipeline: Option<wgpu::RenderPipeline>,
@@ -734,7 +823,6 @@ pub struct GrassFeature {
     tiles_buffer: Option<GrowBuffer>,
     fields_buffer: Option<GrowBuffer>,
     benders_buffer: Option<wgpu::Buffer>,
-    data_group: Option<wgpu::BindGroup>,
     maps: HashMap<Entity, FieldMap>,
     /// Bound as the worn ground of fields that have none (one untouched point).
     no_wear: Option<(wgpu::Texture, wgpu::TextureView)>,
@@ -742,8 +830,6 @@ pub struct GrassFeature {
     order: Vec<Entity>,
     tiles: Vec<GpuTile>,
     fields: Vec<GpuField>,
-    draws: Vec<Draw>,
-    shadow_draws: [Vec<Draw>; MAX_CASCADES],
     stats: FeatureStats,
     wind: SteadyWind,
     /// Made in `prepare_serial`, read in `prepare_shared`.
@@ -804,21 +890,23 @@ impl SteadyWind {
 }
 
 impl GrassFeature {
-    fn draw_list(&self, pass: &mut wgpu::RenderPass<'_>, draws: &[Draw]) {
-        let Some(group) = &self.data_group else {
+    /// The blades the cull pass kept in draw `groups`: one indirect draw each.
+    fn draw_kept(
+        &self,
+        pass: &mut wgpu::RenderPass<'_>,
+        pipeline: &wgpu::RenderPipeline,
+        groups: std::ops::Range<usize>,
+    ) {
+        let (Some(group), Some(args)) = (&self.records_group, &self.args_buffer) else {
             return;
         };
+        if self.field_jobs.is_empty() {
+            return;
+        }
+        pass.set_pipeline(pipeline);
         pass.set_bind_group(1, group, &[]);
-        let mut bound = usize::MAX;
-        for d in draws {
-            if d.field != bound {
-                let Some(map) = self.maps.get(&self.order[d.field]) else {
-                    continue;
-                };
-                pass.set_bind_group(2, &map.group, &[]);
-                bound = d.field;
-            }
-            pass.draw(0..2 * d.segments + 1, d.first..d.first + d.count);
+        for g in groups.filter(|&g| self.groups[g]) {
+            pass.draw_indirect(args, g as u64 * 16);
         }
     }
 }
@@ -835,25 +923,25 @@ impl RenderFeature for GrassFeature {
     fn init(&mut self, gpu: &GpuShared) {
         use wgpu::ShaderStages as S;
         let device = &gpu.device;
-        let storage = |binding| {
+        let texture = |binding| {
             layout_entry(
                 binding,
-                S::VERTEX,
-                wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Storage { read_only: true },
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
+                S::VERTEX | S::COMPUTE,
+                wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
                 },
             )
         };
-        let data_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("grass data"),
+        let map_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("grass map"),
             entries: &[
-                storage(0),
-                storage(1),
+                texture(0),
+                texture(1),
                 layout_entry(
                     2,
-                    S::VERTEX,
+                    S::COMPUTE,
                     wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
                         has_dynamic_offset: false,
@@ -862,38 +950,64 @@ impl RenderFeature for GrassFeature {
                 ),
             ],
         });
-        let map_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("grass map"),
-            entries: &[0, 1].map(|binding| {
-                layout_entry(
-                    binding,
-                    S::VERTEX,
-                    wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                )
-            }),
+        let buffer = |binding, stages, ty| {
+            layout_entry(
+                binding,
+                stages,
+                wgpu::BindingType::Buffer {
+                    ty,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+            )
+        };
+        let read = wgpu::BufferBindingType::Storage { read_only: true };
+        let write = wgpu::BufferBindingType::Storage { read_only: false };
+        let cull_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("grass cull"),
+            entries: &[
+                buffer(0, S::COMPUTE, read),
+                buffer(1, S::COMPUTE, read),
+                buffer(2, S::COMPUTE, wgpu::BufferBindingType::Uniform),
+                buffer(3, S::COMPUTE, read),
+                buffer(4, S::COMPUTE, write),
+                buffer(5, S::COMPUTE, write),
+            ],
         });
-        let shader = gpu.shader("grass", &scene_source(), true);
-        let shadow_shader = gpu.shader("grass shadow", &shadow_source(), false);
-        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("grass"),
+        let records_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("grass records"),
+            entries: &[buffer(1, S::VERTEX, read), buffer(4, S::VERTEX, read)],
+        });
+        let cull_shader = gpu.shader("grass cull", &cull_source(), true);
+        let cull_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("grass cull"),
             bind_group_layouts: &[
                 Some(&gpu.frame_layout),
-                Some(&data_layout),
+                Some(&cull_layout),
                 Some(&map_layout),
             ],
             immediate_size: 0,
         });
+        self.cull_pipeline = Some(device.create_compute_pipeline(
+            &wgpu::ComputePipelineDescriptor {
+                label: Some("grass cull"),
+                layout: Some(&cull_pipeline_layout),
+                module: &cull_shader,
+                entry_point: Some("cs_cull"),
+                compilation_options: Default::default(),
+                cache: None,
+            },
+        ));
+        let shader = gpu.shader("grass", &scene_source(), true);
+        let shadow_shader = gpu.shader("grass shadow", &shadow_source(), false);
+        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("grass"),
+            bind_group_layouts: &[Some(&gpu.frame_layout), Some(&records_layout)],
+            immediate_size: 0,
+        });
         let shadow_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("grass shadow"),
-            bind_group_layouts: &[
-                Some(&gpu.shadow_view_layout),
-                Some(&data_layout),
-                Some(&map_layout),
-            ],
+            bind_group_layouts: &[Some(&gpu.shadow_view_layout), Some(&records_layout)],
             immediate_size: 0,
         });
         let primitive = wgpu::PrimitiveState {
@@ -973,13 +1087,34 @@ impl RenderFeature for GrassFeature {
             wgpu::BufferUsages::STORAGE,
             4 * std::mem::size_of::<GpuField>() as u64,
         ));
+        self.jobs_buffer = Some(GrowBuffer::new(
+            device,
+            "grass jobs",
+            wgpu::BufferUsages::STORAGE,
+            1024 * 8,
+        ));
+        self.records_buffer = Some(GrowBuffer::new(
+            device,
+            "grass records",
+            wgpu::BufferUsages::STORAGE,
+            4096 * RECORD_BYTES,
+        ));
+        self.args_buffer = Some(device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("grass draws"),
+            size: (GROUPS * 16) as u64,
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::INDIRECT
+                | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        }));
+        self.cull_layout = Some(cull_layout);
+        self.records_layout = Some(records_layout);
         self.benders_buffer = Some(device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("grass benders"),
             size: std::mem::size_of::<GpuBenders>() as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         }));
-        self.data_layout = Some(data_layout);
         self.map_layout = Some(map_layout);
         let none = wear_texture(gpu, [1, 1], &[0]);
         let view = none.create_view(&Default::default());
@@ -1016,10 +1151,10 @@ impl RenderFeature for GrassFeature {
         self.order.clear();
         self.tiles.clear();
         self.fields.clear();
-        self.draws.clear();
-        for d in &mut self.shadow_draws {
-            d.clear();
-        }
+        self.jobs.clear();
+        self.field_jobs.clear();
+        self.groups = [false; GROUPS];
+        let mut group_blades = [0u64; GROUPS];
         self.stats = FeatureStats::default();
         let (Some(map_layout), Some((_, no_wear))) = (&self.map_layout, &self.no_wear) else {
             return;
@@ -1080,6 +1215,7 @@ impl RenderFeature for GrassFeature {
             let blade_top = style.height * (1.0 + style.height_variation.max(0.0));
 
             let field_index = self.order.len();
+            let first_job = self.jobs.len() as u32;
             let mut drew = false;
             let tx0 = ((cam.x - far) / TILE).floor().max(0.0) as u32;
             let tz0 = ((cam.z - far) / TILE).floor().max(0.0) as u32;
@@ -1137,14 +1273,12 @@ impl RenderFeature for GrassFeature {
                         blades: max_blades,
                         _pad: [0; 3],
                     });
-                    let draw = Draw {
-                        field: field_index,
-                        segments,
-                        first: tile_index << BLADE_BITS,
-                        count,
-                    };
+                    // The cull pass grows these blades, in chunks: for the screen, and
+                    // (fewer, further out) for the cascades they cast into.
+                    let first = tile_index << BLADE_BITS;
                     if visible {
-                        self.draws.push(draw);
+                        push_jobs(&mut self.jobs, first, count, 1, segments);
+                        group_blades[segments as usize - 1] += count as u64;
                         self.stats.instances += count;
                         self.stats.triangles += count as u64 * (2 * segments as u64 - 1);
                     }
@@ -1154,13 +1288,12 @@ impl RenderFeature for GrassFeature {
                         * b[2])
                         .ceil()
                         .min(count as f32) as u32;
-                    if shadow_count > 0 {
+                    if shadow_count > 0 && !in_cascade.is_empty() {
+                        let segments = shadow_segments_at(d);
+                        let mask = in_cascade.iter().fold(0, |m, &c| m | 2 << c);
+                        push_jobs(&mut self.jobs, first, shadow_count, mask, segments);
                         for c in in_cascade {
-                            self.shadow_draws[c].push(Draw {
-                                segments: shadow_segments_at(d),
-                                count: shadow_count,
-                                ..draw
-                            });
+                            group_blades[shadow_group(c, segments)] += shadow_count as u64;
                         }
                     }
                     drew = true;
@@ -1168,6 +1301,10 @@ impl RenderFeature for GrassFeature {
             }
             if !drew {
                 continue;
+            }
+            let jobs = self.jobs.len() as u32 - first_job;
+            if jobs > 0 {
+                self.field_jobs.push((field_index, first_job, jobs));
             }
             let seed = (entity.to_bits() as u32)
                 ^ ((entity.to_bits() >> 32) as u32).wrapping_mul(0x9e37_79b9);
@@ -1225,7 +1362,6 @@ impl RenderFeature for GrassFeature {
             });
         }
         self.maps.retain(|e, _| seen.contains(e));
-        self.stats.draw_calls = self.draws.len() as u32;
 
         // Benders nearest the camera.
         let mut benders: Vec<[f32; 4]> = benders_query
@@ -1252,63 +1388,129 @@ impl RenderFeature for GrassFeature {
         }
         let device = &gpu.device;
         let queue = &gpu.queue;
-        let (Some(tiles), Some(fields), Some(benders_buffer), Some(data_layout)) = (
+        let (Some(tiles), Some(fields), Some(benders_buffer)) = (
             &mut self.tiles_buffer,
             &mut self.fields_buffer,
             &self.benders_buffer,
-            &self.data_layout,
         ) else {
             return;
         };
         let grown_tiles = tiles.write(device, queue, bytemuck::cast_slice(&self.tiles));
         let grown_fields = fields.write(device, queue, bytemuck::cast_slice(&self.fields));
         queue.write_buffer(benders_buffer, 0, bytemuck::bytes_of(&gpu_benders));
-        if grown_tiles || grown_fields || self.data_group.is_none() {
-            self.data_group = Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("grass data"),
-                layout: data_layout,
+
+        // The cull pass: its jobs, each field's share of them, and the six draws it fills in,
+        // each group's records after the last's (a draw's first vertex is 16 x its first
+        // record: grass.wgsl).
+        let mut args = [[0u32; 4]; GROUPS];
+        let mut records = 0u64;
+        for (g, blades) in group_blades.into_iter().enumerate() {
+            if blades > 0 {
+                args[g] = [2 * group_segments(g) + 1, 0, (records * 16) as u32, 0];
+                self.groups[g] = true;
+                self.stats.draw_calls += 1;
+                records += blades;
+            }
+        }
+        let limit = device.limits().max_storage_buffer_binding_size;
+        if records * 16 > u32::MAX as u64 || records * RECORD_BYTES > limit / 2 {
+            self.groups = [false; GROUPS];
+            self.field_jobs.clear();
+        }
+        for &(field, first, count) in &self.field_jobs {
+            if let Some(map) = self.maps.get(&self.order[field]) {
+                queue.write_buffer(&map.cull, 0, bytemuck::cast_slice(&[first, count, 0, 0]));
+            }
+        }
+        let (
+            Some(jobs),
+            Some(records_buffer),
+            Some(args_buffer),
+            Some(cull_layout),
+            Some(records_layout),
+        ) = (
+            &mut self.jobs_buffer,
+            &mut self.records_buffer,
+            &self.args_buffer,
+            &self.cull_layout,
+            &self.records_layout,
+        )
+        else {
+            return;
+        };
+        queue.write_buffer(args_buffer, 0, bytemuck::cast_slice(&args));
+        let grown_jobs =
+            !self.jobs.is_empty() && jobs.write(device, queue, bytemuck::cast_slice(&self.jobs));
+        let grown_records = records_buffer.reserve(device, records.max(1) * RECORD_BYTES);
+        if grown_tiles
+            || grown_fields
+            || grown_jobs
+            || grown_records
+            || self.cull_group.is_none()
+            || self.records_group.is_none()
+        {
+            self.cull_group = Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("grass cull"),
+                layout: cull_layout,
                 entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: tiles.buffer.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: fields.buffer.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 2,
-                        resource: benders_buffer.as_entire_binding(),
-                    },
+                    entry(0, &tiles.buffer),
+                    entry(1, &fields.buffer),
+                    entry(2, benders_buffer),
+                    entry(3, &jobs.buffer),
+                    entry(4, &records_buffer.buffer),
+                    entry(5, args_buffer),
                 ],
+            }));
+            self.records_group = Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("grass records"),
+                layout: records_layout,
+                entries: &[entry(1, &fields.buffer), entry(4, &records_buffer.buffer)],
             }));
         }
     }
 
+    fn compute(&mut self, encoder: &mut wgpu::CommandEncoder, ctx: &FrameContext) {
+        let (Some(pipeline), Some(group)) = (&self.cull_pipeline, &self.cull_group) else {
+            return;
+        };
+        if self.field_jobs.is_empty() {
+            return;
+        }
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("grass cull"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(pipeline);
+        pass.set_bind_group(0, ctx.frame_group, &[]);
+        pass.set_bind_group(1, group, &[]);
+        for &(field, _, jobs) in &self.field_jobs {
+            let Some(map) = self.maps.get(&self.order[field]) else {
+                continue;
+            };
+            pass.set_bind_group(2, &map.group, &[]);
+            pass.dispatch_workgroups(jobs.min(MAX_GROUPS_X), jobs.div_ceil(MAX_GROUPS_X), 1);
+        }
+    }
+
     fn draw_prepass(&self, pass: &mut wgpu::RenderPass<'_>, _ctx: &FrameContext) {
-        if let (Some(pipeline), false) = (&self.prepass_pipeline, self.draws.is_empty()) {
-            pass.set_pipeline(pipeline);
-            self.draw_list(pass, &self.draws);
+        if let Some(pipeline) = &self.prepass_pipeline {
+            self.draw_kept(pass, pipeline, 0..SCREEN_GROUPS);
         }
     }
 
     fn draw(&self, phase: RenderPhase, pass: &mut wgpu::RenderPass<'_>, _ctx: &FrameContext) {
-        if phase != RenderPhase::Opaque || self.draws.is_empty() {
+        if phase != RenderPhase::Opaque {
             return;
         }
         if let Some(pipeline) = &self.pipeline {
-            pass.set_pipeline(pipeline);
-            self.draw_list(pass, &self.draws);
+            self.draw_kept(pass, pipeline, 0..SCREEN_GROUPS);
         }
     }
 
     fn draw_shadow(&self, pass: &mut wgpu::RenderPass<'_>, cascade: usize, _ctx: &FrameContext) {
-        let Some(draws) = self.shadow_draws.get(cascade) else {
-            return;
-        };
-        if let (Some(pipeline), false) = (&self.shadow_pipeline, draws.is_empty()) {
-            pass.set_pipeline(pipeline);
-            self.draw_list(pass, draws);
+        if let (Some(pipeline), true) = (&self.shadow_pipeline, cascade < MAX_CASCADES) {
+            let first = shadow_group(cascade, 1);
+            self.draw_kept(pass, pipeline, first..first + SHADOW_SEGMENTS);
         }
     }
 
@@ -1320,9 +1522,9 @@ impl RenderFeature for GrassFeature {
         serde_json::json!({
             "fields": self.order.len(),
             "tiles": self.tiles.len(),
-            "draws": self.draws.len(),
+            "cull_jobs": self.jobs.len(),
             "blades": self.stats.instances,
-            "shadow_draws": self.shadow_draws.iter().map(|d| d.len()).collect::<Vec<_>>(),
+            "draw_groups": self.groups.iter().filter(|g| **g).count(),
         })
     }
 }
@@ -1335,6 +1537,7 @@ mod tests {
     fn grass_shaders_compile() {
         use crate::features::{compose_shader, validate_wgsl};
         validate_wgsl("grass", &compose_shader(&scene_source(), true)).unwrap();
+        validate_wgsl("grass cull", &compose_shader(&cull_source(), true)).unwrap();
         validate_wgsl("grass shadow", &compose_shader(&shadow_source(), false)).unwrap();
     }
 

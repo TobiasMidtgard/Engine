@@ -145,6 +145,9 @@ impl GroundQuery for AreaGround {
 const VIEWS: &[(&str, [f64; 3], [f64; 3])] = &[
     ("overview", [62.0, 18.0, 66.0], [0.0, 4.0, 0.0]),
     ("falls", [34.5, 3.6, 33.0], [27.0, 4.2, 27.4]),
+    // Close by the falls' foot, where the curtain lands in the stream (playtest 2026-11-01
+    // item 34).
+    ("plunge", [31.5, 3.8, 30.8], [27.0, 3.6, 27.4]),
     ("shore", [-1.5, 7.3, 30.5], [-2.0, 5.0, 0.0]),
     // Down at the waterline of the near beach, where the waves run up the sand.
     ("swash", [-1.0, 7.0, 31.0], [-3.0, 5.2, 21.0]),

@@ -85,7 +85,13 @@ struct Piece {
     at: Transform,
     material: MaterialRef,
     hide: f32,
+    /// Collides: a hull round the mesh ([`crate::solids`]) near the action.
+    solid: bool,
 }
+
+/// Hulls of the solid pieces' meshes, by key (unscaled), made once per mesh.
+#[derive(Resource, Default)]
+struct PlazaHulls(HashMap<&'static str, Option<ColliderShape>>);
 
 #[derive(Default)]
 struct Pieces(Vec<Piece>);
@@ -105,7 +111,23 @@ impl Pieces {
             at,
             material: material.into(),
             hide,
+            solid: false,
         });
+    }
+
+    /// As [`Pieces::add`], and it collides (a hull round its mesh).
+    fn add_solid(
+        &mut self,
+        key: &'static str,
+        build: fn() -> Mesh,
+        at: Transform,
+        material: impl Into<MaterialRef>,
+        hide: f32,
+    ) {
+        self.add(key, build, at, material, hide);
+        if let Some(p) = self.0.last_mut() {
+            p.solid = true;
+        }
     }
 
     /// Build what isn't built yet and spawn every piece (nothing without a renderer).
@@ -131,6 +153,35 @@ impl Pieces {
                 let mut e = world.spawn((p.at, MeshRenderer::new(mesh, p.material)));
                 if p.hide.is_finite() {
                     e.insert(Lod::hide_beyond(mesh, p.hide));
+                }
+                if p.solid {
+                    let scaled = p.at.scale != Vec3::ONE;
+                    let known = (!scaled)
+                        .then(|| world.get_resource::<PlazaHulls>()?.0.get(p.key).cloned())
+                        .flatten();
+                    let shape = known.unwrap_or_else(|| {
+                        let shape = world
+                            .resource::<Assets<Mesh>>()
+                            .get(mesh)
+                            .and_then(|m| crate::solids::hull_of([m], p.at.scale));
+                        if !scaled {
+                            world
+                                .get_resource_or_init::<PlazaHulls>()
+                                .0
+                                .insert(p.key, shape.clone());
+                        }
+                        shape
+                    });
+                    if let Some(shape) = shape {
+                        world.spawn((
+                            Transform::from_translation(p.at.translation)
+                                .with_rotation(p.at.rotation),
+                            NearSolid {
+                                shape,
+                                reach: scenery::SMALL_SOLID_REACH,
+                            },
+                        ));
+                    }
                 }
             }
         });
@@ -970,6 +1021,23 @@ pub fn build_art() -> Art {
     Art { parts, looks }
 }
 
+/// The fountain's collider at `scale`: the basin's rim as a ring of blocks (a hull would fill
+/// in the water) and the baluster column with its bowl, from Particles' court fountain profile
+/// (`engine_vfx::demo::art::props::water::fountain`: rim 2.23-2.47 m out and 0.6 m high, the
+/// bowl 0.6 m out at about 1 m).
+fn fountain_solid(scale: f32) -> ColliderShape {
+    let mut shapes = crate::solids::ring(2.23 * scale, 2.47 * scale, 0.0, 0.6 * scale, 24);
+    shapes.push((
+        Vec3::Y * 0.49 * scale,
+        Quat::IDENTITY,
+        ColliderShape::Cylinder {
+            radius: 0.6 * scale,
+            half_height: 0.49 * scale,
+        },
+    ));
+    ColliderShape::Compound(shapes)
+}
+
 impl Art {
     fn spawn(self, commands: &mut Commands, at: Transform) {
         commands.queue(move |world: &mut World| {
@@ -1046,9 +1114,11 @@ pub fn spawn(commands: &mut Commands, lib: &Library, z: &Zone, part: usize, art:
             if i % 8 == 0 {
                 continue;
             }
-            commands.spawn((
+            let tf =
                 Transform::from_translation(c + DVec3::new(a.cos() * 31.0, 0.35, a.sin() * 31.0))
-                    .with_rotation(Quat::from_rotation_y(-(a as f32) + FRAC_PI_2)),
+                    .with_rotation(Quat::from_rotation_y(-(a as f32) + FRAC_PI_2));
+            commands.spawn((
+                tf,
                 MeshRenderer::new(
                     Shape::Cuboid {
                         size: [6.2, 0.55, 0.6],
@@ -1056,12 +1126,28 @@ pub fn spawn(commands: &mut Commands, lib: &Library, z: &Zone, part: usize, art:
                     wall,
                 ),
             ));
+            commands.spawn((
+                tf,
+                NearSolid {
+                    shape: ColliderShape::Cuboid {
+                        half_extents: Vec3::new(3.1, 0.275, 0.3),
+                    },
+                    reach: scenery::SMALL_SOLID_REACH,
+                },
+            ));
         }
         // A carved fountain in the middle of the marble (Particles' court fountain, a third bigger),
         // its jets falling into the basin.
         let fountain = 1.3;
         let at = Transform::from_translation(c + DVec3::new(0.0, 0.2, 0.0))
             .with_scale(Vec3::splat(fountain));
+        commands.spawn((
+            Transform::from_translation(at.translation),
+            NearSolid {
+                shape: fountain_solid(fountain),
+                reach: scenery::SMALL_SOLID_REACH,
+            },
+        ));
         match art.take() {
             // Made on a worker while the square was wanted ([`build_art`]): only the uploads
             // are left for the frame.
@@ -1110,18 +1196,11 @@ pub fn spawn(commands: &mut Commands, lib: &Library, z: &Zone, part: usize, art:
                 Transform::from_translation(local(p))
                     .with_rotation(rot * Quat::from_rotation_y(yaw))
             };
-            pieces.add("stall_frame", stall_frame, tf, vm.timber[2], STALL_HIDE);
-            pieces.add("awning_a", || awning(false), tf, canvas(color), STALL_HIDE);
+            // The frame's hull (posts, counter, shelves) and the awning's over it: the awning
+            // overhangs the frame, and is what a jump from the square lands on.
+            pieces.add_solid("stall_frame", stall_frame, tf, vm.timber[2], STALL_HIDE);
+            pieces.add_solid("awning_a", || awning(false), tf, canvas(color), STALL_HIDE);
             pieces.add("awning_b", || awning(true), tf, cream, STALL_HIDE);
-            commands.spawn((
-                Transform::from_translation(pos + DVec3::Y * 1.4).with_rotation(rot),
-                NearSolid {
-                    shape: ColliderShape::Cuboid {
-                        half_extents: Vec3::new(STALL_HALF.x + 0.05, 1.4, STALL_HALF.y + 0.05),
-                    },
-                    reach: 70.0,
-                },
-            ));
             // A lantern on the front-left post, lit.
             let lamp = Vec3::new(-STALL_HALF.x, 1.85, STALL_HALF.y + 0.3);
             pieces.add(
@@ -1218,7 +1297,7 @@ pub fn spawn(commands: &mut Commands, lib: &Library, z: &Zone, part: usize, art:
                     ] {
                         let p = counter(x, 0.58) + Vec3::Y * 0.05;
                         let t = Transform::from_translation(local(p)).with_rotation(rot * tip);
-                        pieces.add("crate", crate_box, t, painted, WARES_HIDE);
+                        pieces.add_solid("crate", crate_box, t, painted, WARES_HIDE);
                         pieces.add(
                             wares.0,
                             wares.1,
@@ -1231,7 +1310,7 @@ pub fn spawn(commands: &mut Commands, lib: &Library, z: &Zone, part: usize, art:
                     }
                     for (x, yaw) in [(-0.9f32, 0.3f32), (0.6, -0.2)] {
                         let t = at(Vec3::new(x, 0.57, -0.72), yaw);
-                        pieces.add("crate", crate_box, t, painted, WARES_HIDE);
+                        pieces.add_solid("crate", crate_box, t, painted, WARES_HIDE);
                         pieces.add(
                             "onions",
                             onions,
@@ -1274,7 +1353,7 @@ pub fn spawn(commands: &mut Commands, lib: &Library, z: &Zone, part: usize, art:
                     }
                 }
                 Trade::Baker => {
-                    pieces.add("baskets", baskets, tf, painted, WARES_HIDE);
+                    pieces.add_solid("baskets", baskets, tf, painted, WARES_HIDE);
                     pieces.add(
                         "breads",
                         breads,
@@ -1308,7 +1387,7 @@ pub fn spawn(commands: &mut Commands, lib: &Library, z: &Zone, part: usize, art:
                 if trade == Trade::Greengrocer && k == 2 {
                     continue;
                 }
-                pieces.add(
+                pieces.add_solid(
                     "crate",
                     crate_box,
                     at(
@@ -1321,7 +1400,7 @@ pub fn spawn(commands: &mut Commands, lib: &Library, z: &Zone, part: usize, art:
             }
             if trade == Trade::Greengrocer || trade == Trade::Baker {
                 for (dx, dz, yaw) in [(0.3f32, 1.25f32, 0.3f32), (0.75, 1.4, 1.9)] {
-                    pieces.add(
+                    pieces.add_solid(
                         "sack",
                         sack,
                         at(Vec3::new(side * (STALL_HALF.x - dx), 0.0, dz), yaw),
@@ -1340,14 +1419,14 @@ pub fn spawn(commands: &mut Commands, lib: &Library, z: &Zone, part: usize, art:
         let (ma, mr) = MAYPOLE;
         let foot = round(ma, mr);
         let pole = Transform::from_translation(foot).with_rotation(Quat::from_rotation_y(0.35));
-        pieces.add(
+        pieces.add_solid(
             "maypole_pole",
             maypole_pole,
             pole,
             StandardMaterial::color(1.0, 1.0, 1.0).with_roughness(0.45),
             f32::INFINITY,
         );
-        pieces.add("maypole_foot", maypole_foot, pole, vm.stone, STALL_HIDE);
+        pieces.add_solid("maypole_foot", maypole_foot, pole, vm.stone, STALL_HIDE);
         let spruce = StandardMaterial::hex(0x2c4a26)
             .with_roughness(0.9)
             .with_subsurface(0.4)
@@ -1357,21 +1436,11 @@ pub fn spawn(commands: &mut Commands, lib: &Library, z: &Zone, part: usize, art:
         pieces.add("maypole_iron", maypole_iron, pole, vm.iron, STALL_HIDE);
         pieces.add("maypole_signs", maypole_signs, pole, painted, STALL_HIDE);
         pieces.add("maypole_ribbons", maypole_ribbons, pole, fabric, STALL_HIDE);
-        commands.spawn((
-            Transform::from_translation(foot + DVec3::Y * 1.5),
-            NearSolid {
-                shape: ColliderShape::Capsule {
-                    radius: 0.5,
-                    half_height: 1.0,
-                },
-                reach: 70.0,
-            },
-        ));
     }
     if part == 3 {
         // The village oak in its bed of grass, a round bench under it.
         let oak = round(135.0, 21.0);
-        pieces.add(
+        pieces.add_solid(
             "tree_curb",
             tree_curb,
             Transform::from_translation(oak),
@@ -1401,14 +1470,16 @@ pub fn spawn(commands: &mut Commands, lib: &Library, z: &Zone, part: usize, art:
             .nth(1)
             .expect("oak");
         scenery::spawn_tree(commands, t, oak, 0.9, 1.2);
+        // The trunk and the bench round it, out to the seat's outer edge (a capsule left the
+        // bench's rim open).
         commands.spawn((
             Transform::from_translation(oak + DVec3::Y * 1.5),
             NearSolid {
-                shape: ColliderShape::Capsule {
-                    radius: 1.45,
-                    half_height: 0.1,
+                shape: ColliderShape::Cylinder {
+                    radius: 1.47,
+                    half_height: 1.5,
                 },
-                reach: 70.0,
+                reach: scenery::SMALL_SOLID_REACH,
             },
         ));
         // Oaks in planters at the other three corners.
@@ -1425,6 +1496,13 @@ pub fn spawn(commands: &mut Commands, lib: &Library, z: &Zone, part: usize, art:
                     },
                     wall,
                 ),
+                NearSolid {
+                    shape: ColliderShape::Cylinder {
+                        radius: 2.0,
+                        half_height: 0.4,
+                    },
+                    reach: scenery::SMALL_SOLID_REACH,
+                },
             ));
             let t = lib
                 .trees_of(crate::meshgen::TreeKind::Oak)
@@ -1447,7 +1525,7 @@ pub fn spawn(commands: &mut Commands, lib: &Library, z: &Zone, part: usize, art:
         for road in 0..4 {
             for side in [-1.0f64, 1.0] {
                 let a = road as f64 * 90.0 + side * 4.5;
-                pieces.add(
+                pieces.add_solid(
                     "bollard",
                     bollard,
                     Transform::from_translation(round(a, 30.0)),
