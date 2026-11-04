@@ -121,7 +121,7 @@ impl Finisher {
     ) {
         let new =
             device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some(next) });
-        self.send(*part, std::mem::replace(encoder, new));
+        self.send(part, std::mem::replace(encoder, new));
         *part = next;
     }
 
@@ -168,11 +168,12 @@ mod tests {
                 return;
             }
         };
-        for threads in [0, 2] {
+        for threads in [0, 2, THREADS] {
             let mut f = Finisher::new(threads);
             for round in 0..3 {
-                for i in 0..5 {
+                for (i, part) in PARTS.into_iter().take(5).enumerate() {
                     f.send(
+                        part,
                         gpu.device
                             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                                 label: Some(&format!("{round} {i}")),
