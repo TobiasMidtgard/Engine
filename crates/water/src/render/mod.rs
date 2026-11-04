@@ -505,6 +505,11 @@ struct Gpu {
     /// Vertices the buffer holds, and how many to draw this frame.
     fall_capacity: usize,
     fall_count: u32,
+    /// The falls' rock and curtains as the main view last built them, relative to its camera
+    /// at `fall_origin` (`None` before the first): extra views (the lake mirror) shift these
+    /// instead of tracing every lip again.
+    fall_strips: Vec<FallVertex>,
+    fall_origin: Option<DVec3>,
     /// The fine wind waves' tiles.
     detail: detail::DetailGpu,
     /// The dispersive ripples over the ripple grid.
@@ -1113,6 +1118,8 @@ impl WaterFeature {
             fall_buffer,
             fall_capacity,
             fall_count: 0,
+            fall_strips: Vec::new(),
+            fall_origin: None,
             detail,
             surface,
             swash,
@@ -1138,15 +1145,28 @@ impl WaterFeature {
         view: &ViewData,
         plunges: &[(DVec3, Vec2, f32)],
     ) {
-        // The falls as the flow step last worked them out (not traced again each frame).
-        type Drawn<'a> = (
-            f64,
-            &'a crate::flow::Lip,
-            &'a [crate::flow::FallPoint],
-            [bool; 2],
-        );
-        let mut lips: Vec<Drawn> =
-            state
+        // The falls as the flow step last worked them out (not traced again each frame). An
+        // extra view takes the main view's strips of last frame, moved to its own camera.
+        let reused = view.extra_view && gpu.fall_origin.is_some();
+        let mut shifted = Vec::new();
+        let strips = if let Some(o) = gpu.fall_origin.filter(|_| reused) {
+            let d = (o - view.origin).as_vec3();
+            shifted.extend(gpu.fall_strips.iter().map(|v| {
+                let mut v = *v;
+                v.rel_q[0] += d.x;
+                v.rel_q[1] += d.y;
+                v.rel_q[2] += d.z;
+                v
+            }));
+            &shifted
+        } else {
+            type Drawn<'a> = (
+                f64,
+                &'a crate::flow::Lip,
+                &'a [crate::flow::FallPoint],
+                [bool; 2],
+            );
+            let mut lips: Vec<Drawn> = state
                 .flows
                 .iter()
                 .filter(|sim| sim.visible)
@@ -1160,42 +1180,57 @@ impl WaterFeature {
                 })
                 .filter(|(d, ..)| *d < FALLS_REACH)
                 .collect();
-        lips.sort_by(|a, b| a.0.total_cmp(&b.0));
-        lips.truncate(MAX_LIPS);
-        let mut vertices = Vec::with_capacity(lips.len() * crate::flow::FALL_POINTS * 24);
-        let mut curtains = Vec::with_capacity(lips.len() * crate::flow::FALL_POINTS * 18);
-        for (_, lip, path, sides) in &lips {
-            fall_strip(
-                lip,
-                path,
-                *sides,
-                |p| view.relative(p),
-                &mut curtains,
-                &mut vertices,
-            );
-        }
-        // The wet rock first, under the curtains; spray clouds last, over their feet.
-        vertices.append(&mut curtains);
-        if !lips.is_empty() {
+            lips.sort_by(|a, b| a.0.total_cmp(&b.0));
+            lips.truncate(MAX_LIPS);
+            let vertices = &mut gpu.fall_strips;
+            vertices.clear();
+            let mut curtains = Vec::with_capacity(lips.len() * crate::flow::FALL_POINTS * 18);
+            for (_, lip, path, sides) in &lips {
+                fall_strip(
+                    lip,
+                    path,
+                    *sides,
+                    |p| view.relative(p),
+                    &mut curtains,
+                    vertices,
+                );
+            }
+            // The wet rock first, under the curtains; spray clouds last, over their feet.
+            vertices.append(&mut curtains);
+            if !view.extra_view {
+                gpu.fall_origin = Some(view.origin);
+            }
+            &gpu.fall_strips
+        };
+        let mut puffs = Vec::new();
+        if !strips.is_empty() {
             let (right, up) = (view.rotation * Vec3::X, view.rotation * Vec3::Y);
             for &(foot, away, power) in plunges {
                 if foot.distance(view.origin) < FALLS_REACH {
                     let rel = view.relative(foot);
-                    mist_puff(foot, rel, power, away, right, up, &mut vertices);
+                    mist_puff(foot, rel, power, away, right, up, &mut puffs);
                 }
             }
         }
-        gpu.fall_count = vertices.len() as u32;
-        if vertices.is_empty() {
+        let count = strips.len() + puffs.len();
+        gpu.fall_count = count as u32;
+        if count == 0 {
             return;
         }
-        if vertices.len() > gpu.fall_capacity {
-            gpu.fall_capacity = vertices.len().next_power_of_two();
+        if count > gpu.fall_capacity {
+            gpu.fall_capacity = count.next_power_of_two();
             gpu.fall_buffer = Self::fall_buffer(&shared.device, gpu.fall_capacity);
         }
+        let strips = if reused { &shifted } else { &gpu.fall_strips };
         shared
             .queue
-            .write_buffer(&gpu.fall_buffer, 0, bytemuck::cast_slice(&vertices));
+            .write_buffer(&gpu.fall_buffer, 0, bytemuck::cast_slice(strips));
+        if !puffs.is_empty() {
+            let at = (strips.len() * std::mem::size_of::<FallVertex>()) as u64;
+            shared
+                .queue
+                .write_buffer(&gpu.fall_buffer, at, bytemuck::cast_slice(&puffs));
+        }
     }
 
     /// Fill one body's uniform and decide which grid bands to draw.
@@ -1537,6 +1572,15 @@ impl WaterFeature {
         };
         let grid = &layers.grid;
         let w = &mut self.puddles;
+        // Extra views (the lake mirror) draw the main view's window as it stands.
+        if view.extra_view && w.cell > 0.0 {
+            let o = view.relative(DVec3::new(w.origin.x, 0.0, w.origin.y));
+            return (
+                [o.x, o.z, w.cell, PUDDLE_N as f32],
+                [(w.base - view.origin.y) as f32, 0.0, 0.0, 0.0],
+                w.wet,
+            );
+        }
         let cell = grid.cell;
         let n = PUDDLE_N as usize;
         // Window snapped to the grid's cells around the camera.
@@ -1811,7 +1855,10 @@ impl RenderFeature for WaterFeature {
             gpu.shelter_version = mask.version;
         }
 
+        let lock = tracing::info_span!("water", name = "prepare: lock").entered();
         let state = water.0.read();
+        drop(lock);
+        let bodies_span = tracing::info_span!("water", name = "prepare: bodies").entered();
         let hidden_below = hidden
             .and_then(|e| state.bodies.iter().find(|b| b.entity == e))
             .map(|b| b.center.y + 0.1);
@@ -1897,6 +1944,7 @@ impl RenderFeature for WaterFeature {
             self.bodies.push(draw);
         }
 
+        drop(bodies_span);
         let r = &state.ripples;
         let ripple_rel = view.relative(DVec3::new(r.origin.x, 0.0, r.origin.y));
         let mut g = Globals::zeroed();
@@ -2088,7 +2136,9 @@ impl RenderFeature for WaterFeature {
         let span = tracing::info_span!("water", name = "flow upload").entered();
         Self::upload_flows(gpu, shared, &state, view);
         drop(span);
+        let span = tracing::info_span!("water", name = "falls upload").entered();
         Self::upload_falls(gpu, shared, &state, view, &plunges);
+        drop(span);
 
         // Stats.
         let flows = gpu.flows.iter().filter(|f| f.drawn);
