@@ -811,6 +811,18 @@ pub fn ripple_system(
             if !full {
                 break 'full;
             }
+            // The cells this grid held at the last pass with every depth read keep what it
+            // found (moved along by the recenter), unless the lakes changed since or the streams
+            // are due: only the strip a move uncovered is worked out.
+            let kept = match streams.complete_for {
+                Some((o, cn, cb, lay))
+                    if !periodic && cn == n && cb == cell.to_bits() && lay == book.layout =>
+                {
+                    let d = ((origin - o) / cell as f64).round();
+                    Some((d.x as i64, d.y as i64))
+                }
+                _ => None,
+            };
             if complete {
                 streams.complete_for = Some(key);
             }
@@ -866,13 +878,17 @@ pub fn ripple_system(
             // Lakes and streams: footsteps, cloth and swimmers ring both.
             let _part = tracing::info_span!("water", name = "ripples: speeds").entered();
             let still = &*still;
-            field.rebuild_speeds(settings.ripple_speed, |p| {
-                let k = index(p);
-                let d = still.at_cell(k).max(stream[k].0);
-                (!d.is_nan()).then_some(d)
-            });
+            field.rebuild_speeds_kept(
+                settings.ripple_speed,
+                |p| {
+                    let k = index(p);
+                    let d = still.at_cell(k).max(stream[k].0);
+                    (!d.is_nan()).then_some(d)
+                },
+                kept,
+            );
             // Streams carry their rings and foam downstream.
-            field.rebuild_drift(|p| stream[index(p)].1);
+            field.rebuild_drift_kept(|p| stream[index(p)].1, kept);
             streams.any = streams.mask.wet.iter().any(|w| *w);
         }
     } else {
