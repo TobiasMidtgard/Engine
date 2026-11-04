@@ -113,6 +113,30 @@ pub struct Disturbance {
     pub keel: Vec2,
 }
 
+/// Pushes at most this wide (Gaussian radius, m) and this deep are small: raindrops, landing
+/// spray, a stone's plop, a float or a duck bobbing and drifting.
+const SMALL_PUSH_M: f32 = 0.6;
+const SMALL_PUSH_DEPTH_M: f32 = 0.05;
+/// Small pushes farther than this from the focus aren't put on the grid, meters: their rings
+/// span a few pixels there, and the water shader draws rain's rings itself. Hulls (pressing
+/// the water, their wakes) and anything foaming or turning the water count wherever they are.
+/// Round 26 on the PC: showers and drifting floats on the test area's tarn, 66-90 m behind the
+/// camera at the fortress stop (the grid sits at the nearest lake), kept the grid stepping at
+/// 1.8 ms a frame.
+pub const SMALL_PUSH_REACH_M: f64 = 40.0;
+
+impl Disturbance {
+    /// A raindrop, a landing spray drop, a small float drifting: no hull, spin or real foam.
+    pub fn is_small(&self) -> bool {
+        self.radius <= SMALL_PUSH_M
+            && self.depth.abs() <= SMALL_PUSH_DEPTH_M
+            && self.foam <= 0.2
+            && self.spin == 0.0
+            && self.press == 0.0
+            && self.keel == Vec2::ZERO
+    }
+}
+
 /// The interactive surface at a point (see [`RippleField::sample`]).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct RippleSample {
@@ -170,6 +194,9 @@ pub struct RippleField {
     pub medium_version: u64,
     /// Any wet cell in the grid.
     pub has_water: bool,
+    /// Where the camera (or other focus) stands, x/z: small pushes far from it are left out
+    /// ([`SMALL_PUSH_REACH_M`]). `None`: every push is taken.
+    pub focus: Option<DVec2>,
     /// How fast currents (and the swirls in them) die out, 1/s. Waves also lose what
     /// `damping` in [`step`](Self::step) asks for beyond this.
     pub current_damping: f32,
@@ -752,6 +779,7 @@ impl RippleField {
             version: 0,
             medium_version: 0,
             has_water: false,
+            focus: None,
             current_damping: 0.12,
             swirl: 0.5,
             moving: vec![false; tiles],
@@ -1019,6 +1047,7 @@ impl RippleField {
         self.version = other.version;
         self.medium_version = other.medium_version;
         self.has_water = other.has_water;
+        self.focus = other.focus;
         self.h.clone_from(&other.h);
         self.vel.clone_from(&other.vel);
         self.foam.clone_from(&other.foam);
@@ -1072,8 +1101,15 @@ impl RippleField {
                 || self.bubbly.iter().any(|b| *b))
     }
 
-    /// Queue a push on the surface.
+    /// Queue a push on the surface. Small pushes (rain, spray, a drifting float) farther than
+    /// [`SMALL_PUSH_REACH_M`] from the focus are left out.
     pub fn disturb(&mut self, d: Disturbance) {
+        if self
+            .focus
+            .is_some_and(|f| d.is_small() && f.distance(d.pos) > SMALL_PUSH_REACH_M)
+        {
+            return;
+        }
         if self.pending.len() < 4096 {
             self.pending.push(d);
         }
@@ -1799,6 +1835,33 @@ impl RippleField {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Rain and spray far from the focus are left to the shader; a boat's push counts
+    /// wherever it is.
+    #[test]
+    fn small_pushes_far_from_the_focus_are_left_out() {
+        let mut f = RippleField::new(32, 0.25);
+        f.focus = Some(DVec2::ZERO);
+        let drop = |x: f64| Disturbance {
+            pos: DVec2::new(x, 0.0),
+            ..drop_at(0.0, 0.0, 0.14, 0.01, 0.0)
+        };
+        f.disturb(drop(10.0));
+        f.disturb(drop(60.0));
+        f.disturb(Disturbance {
+            pos: DVec2::new(60.0, 0.0),
+            radius: 0.8,
+            depth: 0.07,
+            press: 0.05,
+            keel: Vec2::new(2.3, 0.0),
+            ..Default::default()
+        });
+        let at: Vec<f64> = f.pending.iter().map(|d| d.pos.x).collect();
+        assert_eq!(at, vec![10.0, 60.0], "the near drop and the boat");
+        f.focus = None;
+        f.disturb(drop(60.0));
+        assert_eq!(f.pending.len(), 3, "without a focus every push counts");
+    }
 
     fn pond() -> RippleField {
         let mut f = RippleField::new(128, 0.25);
