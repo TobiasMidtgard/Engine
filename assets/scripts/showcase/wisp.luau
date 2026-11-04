@@ -6,6 +6,10 @@
 
 local Wisp = {}
 
+-- Too small to see from much farther: beyond 80 m from the player (or the simulation range)
+-- the swarm rests where it is and takes up its orbit again on the way back.
+Wisp.far = 80
+
 Wisp.props = {
 	seed = 1, -- which wisp: where it starts on its orbit and how it drifts
 	radius = 5, -- meters from the orrery's axis

@@ -5741,3 +5741,60 @@ fn logs(app: &mut App) -> Vec<String> {
         .map(|a| a.iter().map(|l| l.to_string()).collect())
         .unwrap_or_default()
 }
+
+#[test]
+fn far_rest_scripts_stop_updating_beyond_their_distance_and_wake_on_return() {
+    const BOB: &str = r#"
+local Bob = {}
+Bob.far = 50
+
+function Bob:update(dt)
+	local p = self.entity.position
+	self.entity.position = vec3(p.x, p.y + 1, p.z)
+end
+
+function Bob:parallel_update(dt)
+	local p = self.entity.position
+	self.entity.position = vec3(p.x, p.y, p.z + 1)
+end
+
+return Bob
+"#;
+    let folder = Folder::new();
+    folder.write("bob.luau", BOB);
+    let mut app = app_with_vms(&folder.0, 2);
+    let at = |x: f64| engine_core::math::DVec3::new(x, 0.0, 0.0);
+    let near = spawn_script(&mut app, "near", "bob");
+    let far = spawn_script(&mut app, "far", "bob");
+    app.world.get_mut::<Transform>(far).unwrap().translation = at(500.0);
+    app.world.init_resource::<engine_world::FocusPoints>();
+    let focus = |app: &mut App, x: f64| {
+        let mut f = app.world.resource_mut::<engine_world::FocusPoints>();
+        f.points.clear();
+        f.points.push(engine_core::math::DVec3::new(x, 0.0, 0.0));
+    };
+    focus(&mut app, 0.0);
+    app.update_n(3);
+    let moved = |app: &App, e| {
+        let t = app.world.get::<Transform>(e).unwrap().translation;
+        (t.y, t.z)
+    };
+    let (far0, near0) = (moved(&app, far), moved(&app, near));
+    app.update_n(10);
+    assert!(errors(&mut app).is_empty(), "{:?}", errors(&mut app));
+    assert_eq!(moved(&app, far), far0, "500 m off it should rest");
+    let near1 = moved(&app, near);
+    assert_eq!(
+        (near1.0 - near0.0, near1.1 - near0.1),
+        (10.0, 10.0),
+        "the near one runs update and parallel_update every frame"
+    );
+    // The player walks over: it takes up where it left off.
+    focus(&mut app, 480.0);
+    app.update_n(10);
+    let far1 = moved(&app, far);
+    assert!(
+        far1.0 - far0.0 >= 9.0 && far1.1 - far0.1 >= 9.0,
+        "back in range it runs again: {far0:?} -> {far1:?}"
+    );
+}

@@ -138,6 +138,12 @@
 //! new defaults (state belongs in `self` fields). `reload = "restart"` on a class restarts its
 //! instances instead. Editing a `require`d module reloads its users.
 //!
+//! `far = "rest"` on a class rests its instances beyond the simulation range
+//! (`engine_world::SimulationRange`, from every focus point): their `update`, `fixed_update` and
+//! `parallel_update` don't run, while tasks and messages still do. `far = 80` rests them beyond
+//! 80 m (or the simulation range if nearer). For what is only seen up close: the courtyard's
+//! swarm of 320 wisps cost about 1.2 ms a frame on the PC wherever the player was.
+//!
 //! ## Parallel scripts
 //!
 //! `parallel_update(dt)` runs every frame like `update`, but on several cores at once: scripts
