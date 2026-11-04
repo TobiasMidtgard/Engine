@@ -1118,14 +1118,19 @@ pub fn build_system(
             if !b.active || dir == Vec3::ZERO {
                 return (None, None);
             }
+            let aim = tracing::info_span!("build: aim at ground and rock").entered();
             let surface = surface_hit(ground, &volumes, origin, dir, b.reach_m);
+            drop(aim);
             let Some(hit) = nearest_hit(scene, origin, dir, b.reach_m, surface) else {
                 return (None, None);
             };
             let target = hit
                 .piece
                 .filter(|p| scene.iter().any(|s| s.entity == *p && s.built));
+            let snap = tracing::info_span!("build: snap and support").entered();
             let mut p = plan(b.kind, b.yaw, &hit, scene, &ground_height, &table);
+            drop(snap);
+            let _overlap = tracing::info_span!("build: occupied").entered();
             if p.valid() && occupied(&p) {
                 p.problem = Some(BuildProblem::Occupied);
             }
