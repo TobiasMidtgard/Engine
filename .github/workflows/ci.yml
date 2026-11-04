@@ -28,12 +28,14 @@ env:
 
 jobs:
   check:
-    # The tests run in two halves side by side. In one job `cargo test --workspace` took 45 to
+    # The tests run in shards side by side. In one job `cargo test --workspace` took 45 to
     # 60 minutes on 2026-10-19 (8 minutes building, the rest running ~130 test binaries one
     # after another, most of them rendering on lavapipe), so a slow runner hit the timeout.
     # `heavy` holds the crates with the longest-running tests (NPC art renders alone took 20
     # minutes); `rest` is every other crate plus format and lint. Move a crate across when one
-    # half grows much longer than the other.
+    # half grows much longer than the other. By 2026-11-04 `rest` ran 62-75 minutes (32 of
+    # its 48 test minutes were engine_render's renders on lavapipe) and hit the timeout, so
+    # engine_render has its own shard.
     name: Tests (${{ matrix.shard }})
     runs-on: ubuntu-latest
     timeout-minutes: 75
@@ -44,8 +46,11 @@ jobs:
           - shard: heavy
             packages: -p engine_npc -p engine_softbody -p engine_vehicles
             lint: false
+          - shard: render
+            packages: -p engine_render
+            lint: false
           - shard: rest
-            packages: --workspace --exclude engine_npc --exclude engine_softbody --exclude engine_vehicles
+            packages: --workspace --exclude engine_npc --exclude engine_softbody --exclude engine_vehicles --exclude engine_render
             lint: true
     steps:
       - name: Free disk space
@@ -81,12 +86,12 @@ jobs:
           du -sh target 2>/dev/null || true
 
   result:
-    # One check under the name pull requests and merge scripts wait for: green only when both
-    # halves passed.
+    # One check under the name pull requests and merge scripts wait for: green only when every
+    # shard passed.
     name: Format, lint and test
     needs: check
     if: always()
     runs-on: ubuntu-latest
     steps:
-      - name: Both halves passed
+      - name: Every shard passed
         run: test "${{ needs.check.result }}" = success
