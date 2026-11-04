@@ -93,6 +93,12 @@ pub struct Region {
     pub collector: Collector,
     /// Local bounds of every collider here, refreshed after each step (scene-query culling).
     pub bounds: Option<(Vec3, Vec3)>,
+    /// Steps until [`Self::follow_bounds`] measures every collider again.
+    pub bounds_clock: u32,
+    /// What [`Self::refresh_queries`] took in before the step ended
+    /// ([`Self::changes_since_step`]).
+    came: Vec<ColliderHandle>,
+    came_stale: bool,
     /// Colliders added or moved since the last step, not yet in the query tree.
     pub fresh: Vec<ColliderHandle>,
     /// Everything moved (the region was re-anchored): refresh the whole query tree.
@@ -190,6 +196,9 @@ impl Region {
             links: Default::default(),
             load_lines: Vec::new(),
             hull_bounds: Vec::new(),
+            bounds_clock: 0,
+            came: Vec::new(),
+            came_stale: false,
             touch_marks: Vec::new(),
             touch_stamp: 0,
             pending_marks: Vec::new(),
@@ -433,6 +442,11 @@ impl Region {
         } else {
             std::mem::take(&mut self.fresh)
         };
+        // (The step's end still learns of them: [`Self::changes_since_step`].)
+        self.came_stale |= self.stale_all;
+        if !self.stale_all {
+            self.came.extend_from_slice(&handles);
+        }
         for h in handles {
             if let Some(c) = w.colliders.get(h) {
                 let aabb = c.compute_broad_phase_aabb(&params, &w.bodies);
@@ -440,6 +454,16 @@ impl Region {
             }
         }
         self.queries_refreshed();
+    }
+
+    /// Colliders that came (or moved) in since the last step ended, and whether the region was
+    /// re-anchored, including those [`Self::refresh_queries`] already put in the query tree;
+    /// forgotten as they are told.
+    pub fn changes_since_step(&mut self) -> (bool, Vec<ColliderHandle>) {
+        let mut came = std::mem::take(&mut self.came);
+        came.extend_from_slice(&self.fresh);
+        let stale = std::mem::take(&mut self.came_stale) || self.stale_all;
+        (stale, came)
     }
 
     /// The query tree is up to date (after a step or a refresh).
@@ -460,6 +484,30 @@ impl Region {
                 });
             }
         }
+    }
+
+    /// After a step: grow [`Self::bounds`] by what moved in it (the awake bodies' colliders) and
+    /// by `fresh`, the colliders that came in, and recompute them from every collider only every
+    /// [`BOUNDS_EVERY`] steps or after the region was re-anchored (`stale`). Walking all of a
+    /// region's ~1,600 colliders every step (the terrain tiles and scenery are most of them,
+    /// and never move) was 0.5-0.8 ms a step on 4 cores. In between they only err wide, which
+    /// culling errs safe on, as Rapier's own broad phase keeps loose boxes.
+    pub fn follow_bounds(&mut self, stale: bool, fresh: &[ColliderHandle]) {
+        if stale || self.bounds.is_none() || self.bounds_clock == 0 {
+            self.bounds_clock = BOUNDS_EVERY;
+            self.update_bounds();
+            return;
+        }
+        self.bounds_clock -= 1;
+        let moved: Vec<ColliderHandle> = self
+            .world
+            .islands
+            .active_bodies()
+            .filter_map(|h| self.world.bodies.get(h))
+            .flat_map(|rb| rb.colliders().iter().copied())
+            .chain(fresh.iter().copied())
+            .collect();
+        self.extend_bounds(&moved);
     }
 
     /// Recompute [`Self::bounds`] from the colliders.
@@ -492,6 +540,9 @@ impl Region {
         });
     }
 }
+
+/// Steps between [`Region::follow_bounds`]'s full measures of a region's colliders.
+pub const BOUNDS_EVERY: u32 = 30;
 
 /// Collects Rapier collision events during a step.
 #[derive(Default)]
@@ -667,6 +718,9 @@ pub struct CharacterEntry {
     /// The world's time step, for the platform under the character.
     pub world_dt: f32,
     pub state: engine_world::physics::CharacterState,
+    /// Standing still on fixed ground where its last full move left it: that place, and the
+    /// steps it may skip its move before it looks again ([`crate::character`]).
+    pub rest: Option<(Vec3, u8)>,
 }
 
 /// What the step produced for one body, to write back into the ECS.
@@ -2310,6 +2364,7 @@ impl Simulation {
                 dt: 0.0,
                 world_dt: 0.0,
                 state: Default::default(),
+                rest: None,
             },
         );
     }
@@ -2368,6 +2423,7 @@ impl Simulation {
         self.lod_clock += 1;
         // Bodies asking for fine steps keep to regions of their own (`crate::fine`).
         let splits = tracing::info_span!("region splits").entered();
+        let piece = crate::report::Piece::start("upkeep: splits");
         let newly_mixed = self.update_fine();
         self.wake_dormant();
         if self.lod_clock.is_multiple_of(crate::lod::LOD_EVERY) {
@@ -2382,10 +2438,13 @@ impl Simulation {
             self.split_fine(dt);
         }
         self.update_fine();
+        drop(piece);
         let tiers = tracing::info_span!("region tiers").entered();
+        let piece = crate::report::Piece::start("upkeep: tiers");
         self.update_tiers(foci);
-        drop(tiers);
+        drop((tiers, piece));
         drop(splits);
+        let piece = crate::report::Piece::start("upkeep: movers");
 
         let mut bounds: Vec<(RegionId, DVec3, DVec3)> = Vec::new();
         for id in self.live_region_ids() {
@@ -2434,7 +2493,9 @@ impl Simulation {
         // Merge regions whose movers could touch (if the result still fits). Regions of
         // different tiers lie inside each other's boxes (one holds the movers around the focus,
         // the other the far ones), so for them the movers themselves are compared.
+        drop(piece);
         let _merges = tracing::info_span!("region merges").entered();
+        let _piece = crate::report::Piece::start("upkeep: merges");
         let look_closer = self.lod_clock.is_multiple_of(crate::lod::CLOSE_EVERY);
         for i in 0..bounds.len() {
             for j in (i + 1)..bounds.len() {

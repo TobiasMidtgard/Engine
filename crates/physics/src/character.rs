@@ -61,11 +61,95 @@ pub fn find_platforms(sim: &mut Simulation, region_id: RegionId, gravity: &Gravi
 }
 
 /// After the region stepped: carry every character in `region_id` with its platform, move it
-/// by its desired velocity and fill in its [`CharacterState`].
-pub fn move_characters(sim: &mut Simulation, region_id: RegionId, gravity: &Gravity) {
+/// by its desired velocity and fill in its [`CharacterState`]. `changed`: colliders came or
+/// went in the region this step, so no character may [rest](REST_STEPS) on what it knew.
+pub fn move_characters(
+    sim: &mut Simulation,
+    region_id: RegionId,
+    gravity: &Gravity,
+    changed: bool,
+) -> usize {
+    let mut resting = 0;
     for e in characters_in(sim, region_id) {
+        if !changed && rests(sim, region_id, e) {
+            resting += 1;
+            continue;
+        }
         move_one(sim, region_id, e, gravity);
     }
+    resting
+}
+
+/// Steps a character standing still on fixed ground skips its move between full ones: its
+/// sweeps would find the same floor and move it nowhere. Unreal's walking mode likewise
+/// skips its floor search while a pawn neither moves nor has its base move
+/// (`UCharacterMovementComponent::PhysWalking`, "bForceNextFloorCheck"). Every NPC standing
+/// at a stall cost a move's four sweeps and contact tests each step (0.2-0.4 ms a step on
+/// the PC for a region's dozen, round 23). A full move every [`REST_STEPS`] catches the
+/// floor going (a crater, a door swinging under it), as do colliders coming or going in the
+/// region and anything awake coming near.
+pub(crate) const REST_STEPS: u8 = 8;
+
+/// Whether character `e` may skip this step's move, standing still where its last full move
+/// left it ([`REST_STEPS`]).
+fn rests(sim: &mut Simulation, region_id: RegionId, e: Entity) -> bool {
+    let entry = &sim.characters[&e];
+    let Some((at, left)) = entry.rest else {
+        return false;
+    };
+    let (body, collider) = (entry.body, entry.collider);
+    let region = sim.region(region_id);
+    let world = &region.world;
+    let still = left > 0
+        && entry.platform.is_none()
+        && entry.state.grounded
+        // Its floor is still there (a collider removed leaves nothing fresh behind).
+        && entry
+            .state
+            .ground_entity
+            .is_some_and(|g| sim.colliders.contains_key(&g))
+        && world
+            .bodies
+            .get(body)
+            .is_some_and(|rb| rb.translation() == at)
+        && {
+            // Wanting to go nowhere but down (gravity's pull on the floor).
+            let down = world.gravity.normalize_or(-Vec3::Y);
+            let d = entry.desired;
+            (d - down * d.dot(down)).length_squared() < 1.0e-8 && d.dot(down) >= -1.0e-6
+        }
+        && !awake_near(world, body, collider);
+    let entry = sim.characters.get_mut(&e).unwrap();
+    if still {
+        entry.rest = Some((at, left - 1));
+        entry.state.velocity = Vec3::ZERO;
+    } else {
+        entry.rest = None;
+    }
+    still
+}
+
+/// Something awake (a body that may move into the capsule, or carry what it stands on)
+/// within half a meter of the character's capsule.
+fn awake_near(world: &PhysicsWorld, body: RigidBodyHandle, collider: ColliderHandle) -> bool {
+    let Some(c) = world.colliders.get(collider) else {
+        return true;
+    };
+    let aabb = c.compute_aabb().loosened(0.5);
+    let queries = capsule_box::dispatcher();
+    let qp = world.broad_phase.as_query_pipeline(
+        &queries,
+        &world.bodies,
+        &world.colliders,
+        QueryFilter::new()
+            .exclude_rigid_body(body)
+            .exclude_sensors(),
+    );
+    qp.intersect_aabb_conservative(aabb).any(|(_, c)| {
+        c.parent()
+            .and_then(|b| world.bodies.get(b))
+            .is_some_and(|rb| !rb.is_fixed() && !rb.is_sleeping())
+    })
 }
 
 fn walkable(desc: &CharacterController, normal: Vec3, up: Vec3) -> bool {
@@ -442,5 +526,13 @@ fn move_one(sim: &mut Simulation, region_id: RegionId, e: Entity, gravity: &Grav
         }
     }
     state.wall_normal = best_wall.map(|(_, n)| n);
-    sim.characters.get_mut(&e).unwrap().state = state;
+    // Standing still on fixed ground: the next steps may skip the move ([`REST_STEPS`]).
+    let on_fixed =
+        stands_on.is_none_or(|(b, _)| world.bodies.get(b).is_none_or(|rb| rb.is_fixed()));
+    let rest =
+        (state.grounded && platform.is_none() && on_fixed && moved.length_squared() < 1.0e-10)
+            .then_some((end, REST_STEPS));
+    let entry = sim.characters.get_mut(&e).unwrap();
+    entry.state = state;
+    entry.rest = rest;
 }
