@@ -604,11 +604,12 @@ fn falls_view() -> (DVec3, DVec3) {
     let foot = st.path[bottom];
     let downstream = (foot - lip).normalize_or(DVec2::Y);
     let side = DVec2::new(-downstream.y, downstream.x);
-    let eye = foot + downstream * 26.0 + side * 9.0;
+    // Far enough back to see the whole 20 m drop, looking at its middle.
+    let eye = foot + downstream * 34.0 + side * 11.0;
     let ground = land.height(eye.x, eye.y).max(crate::landscape::LAKE_LEVEL);
     (
         DVec3::new(eye.x, ground + 3.0, eye.y),
-        DVec3::new(lip.x, st.bed[top] - 1.5, lip.y),
+        DVec3::new(lip.x, 0.5 * (st.bed[top] + st.bed[bottom]) + 1.0, lip.y),
     )
 }
 

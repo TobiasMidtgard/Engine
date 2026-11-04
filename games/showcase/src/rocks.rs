@@ -1984,6 +1984,12 @@ mod tests {
         let st = &land.streams[0];
         let (top, bottom) = st.falls().unwrap();
         for i in top.saturating_sub(10)..bottom + 6 {
+            // Between the lip and the pool the water falls free, clear of the face, not at
+            // the stepped bed's level (which, on the face itself, is rock: since the cliff
+            // is 20 m, its foot reaches out under the jet).
+            if i > top && i < bottom {
+                continue;
+            }
             let p = st.path[i];
             let level = st.bed[i] + st.depth * 0.55;
             let (u, s) = f.scarp.frame(p, land.seed);

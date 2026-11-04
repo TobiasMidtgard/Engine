@@ -77,15 +77,62 @@ struct FallVertex {
     /// the lip, speed it left at (m/s), and 0 (a curtain; 1 is a spray cloud, see
     /// [`mist_puff`]; 2 a splash clump, [`splash_crown`]).
     uv_speed: [f32; 4],
-    /// 1 on a strip's side where the fall ends (no neighboring lip carries the sheet on: its
-    /// edge frays there), 0 inside it; then unused.
+    /// On a curtain, its spray and wet rock: 1 on a strip's side where the fall ends (no
+    /// neighboring lip carries the sheet on: its edge frays there), 0 inside it; the jet's
+    /// break-up length (m, [`Lip::break_up`](crate::flow::Lip::break_up)); how far the water
+    /// has fallen here (m); and the lip's turbulence. On mist and splashes, the pool's height.
     edge: [f32; 4],
 }
 
-/// Turbulence of the water leaving a natural brink (rough rock, a ragged lip, a stream
-/// already white above it): the share of its speed that wanders across. Laboratory spillways
-/// run 1-5% (Castillo et al. 2015); a rough mountain brink several times that.
-const FALL_TURBULENCE: f32 = 0.18;
+/// One stretch of a falling jet between two points of its path, where the aerated body's
+/// clumps of white water ride down (see `vs_fall_body`): each instance draws up to
+/// [`BODY_PER_SEG`] camera-facing clumps, placed by a seed and the time alone, so nothing is
+/// simulated or uploaded per frame. Positions are relative to where the falls were built
+/// (`Gpu::fall_origin`), as the strips.
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct FallSeg {
+    /// Its top: position, and seconds since the water left the lip.
+    p0: [f32; 4],
+    /// Its bottom: the same.
+    p1: [f32; 4],
+    /// Velocity at the top (m/s), and the water over the lip per meter of it (m²/s).
+    v0: [f32; 4],
+    /// Velocity at the bottom, and the jet's break-up length (m).
+    v1: [f32; 4],
+    /// Horizontal direction across the jet, and the lip's turbulence.
+    across: [f32; 4],
+    /// Half the sheet's width at the top and bottom (m), and how far the aerated water
+    /// reaches out from the middle of the sheet there (its core plus the jet's spread, m).
+    shape: [f32; 4],
+    /// How far the water has fallen at the top and bottom (m), how many clumps ride this
+    /// stretch, and how much bigger each is drawn (a stretch with more than [`BODY_PER_SEG`]
+    /// draws that many, larger).
+    misc: [f32; 4],
+    /// Height of the foot (where the jet lands, relative as `p0`), a seed, 1 on rock (+2 / +4
+    /// where the fall ends to the -across / +across side), and the share of its clumps kept
+    /// for its distance when built (`thin_body`).
+    foot: [f32; 4],
+}
+
+/// A point down a jet as `fall_strip` builds it: position (relative), velocity, seconds
+/// since the lip, half the sheet's width, reach of the aerated water, drop, on rock.
+type JetPoint = (Vec3, Vec3, f32, f32, f32, f32, bool);
+
+/// Most clumps of white water drawn down one stretch of one lip's jet (`FallSeg`).
+const BODY_PER_SEG: u32 = 64;
+/// Clumps per square meter of falling sheet, once broken up (see `fall_strip`).
+const BODY_DENSITY: f32 = 40.0;
+/// Clumps are drawn in full out to this distance, meters; further out fewer, larger ones
+/// with the same cover (`BODY_LOD_M` in water.wgsl).
+const BODY_LOD_M: f32 = 45.0;
+/// Jets further than this from the camera have no aerated body (their curtains alone read
+/// as white water from there), meters.
+const BODY_REACH_M: f32 = 600.0;
+/// Stretches carrying at most this many clumps once thinned for distance go in a second,
+/// cheaper draw (`Gpu::body_split`).
+const BODY_FEW: u32 = 16;
+
 /// `FallVertex::uv_speed.w` on the aerated spray round a falling curtain (see `fall_shell`).
 const SHELL_KIND: f32 = -1.0;
 /// `FallVertex::uv_speed.w` on the wet rock under a sheet sliding down it (see `fall_wet`).
@@ -94,18 +141,16 @@ const WET_KIND: f32 = -2.0;
 /// (glassy, bending down), so a fall doesn't begin at a ruled line.
 const APPROACH_M: f32 = 0.35;
 
-/// How far a free-falling jet of `q` m²/s that left its brink at `speed` m/s has spread to
-/// each side of its core after falling `drop` meters: the turbulent spreading of a
-/// rectangular jet, ξ = 2φ √h₀ (√H − √h₀) with φ = 1.07 Tu, h₀ the brink's velocity head
-/// and H = h₀ + drop (Castillo, Carrillo & Sordo-Ward 2015); plus, once it has broken up
-/// (past its break-up length L_b = 6 q^0.32, Horeni 1956), the spray thrown off its broken
-/// clumps.
-fn jet_spread(q: f32, speed: f32, drop: f32) -> f32 {
-    let h0 = speed * speed / (2.0 * 9.81);
-    let phi = 1.07 * FALL_TURBULENCE;
+/// How far the free-falling jet over `lip` has spread to each side of its core after falling
+/// `drop` meters: the turbulent spreading of a rectangular jet, ξ = 2φ √h₀ (√H − √h₀) with
+/// φ = 1.07 Tu (the lip's turbulence), h₀ the brink's velocity head and H = h₀ + drop
+/// (Castillo, Carrillo & Sordo-Ward 2015); plus, once it has broken up (past its break-up
+/// length, [`Lip::break_up`](crate::flow::Lip::break_up)), the spray thrown off its clumps.
+fn jet_spread(lip: &crate::flow::Lip, drop: f32) -> f32 {
+    let h0 = lip.speed * lip.speed / (2.0 * 9.81);
+    let phi = 1.07 * lip.turbulence;
     let turbulent = 2.0 * phi * h0.sqrt() * ((h0 + drop.max(0.0)).sqrt() - h0.sqrt());
-    let break_up = 6.0 * q.max(1e-4).powf(0.32);
-    turbulent + 0.06 * (drop - 0.5 * break_up).max(0.0)
+    turbulent + 0.12 * (drop - 0.5 * lip.break_up()).max(0.0)
 }
 
 /// The curtain of water over `lip` as triangles down its `path` (see
@@ -123,8 +168,12 @@ fn fall_strip(
     rel: impl Fn(DVec3) -> Vec3,
     out: &mut Vec<FallVertex>,
     wet: &mut Vec<FallVertex>,
+    body: &mut Vec<FallSeg>,
 ) {
     let across = Vec3::new(-lip.dir.y, 0.0, lip.dir.x);
+    let break_up = lip.break_up();
+    let foot_y = path.last().map_or(0.0, |p| rel(p.pos).y);
+    let mut seg_top: Option<JetPoint> = None;
     // Across coordinate from world x/z, so strips side by side share one pattern.
     let u0 = (lip.top.x * across.x as f64 + lip.top.z * across.z as f64).rem_euclid(4096.0) as f32;
     let last = path.len().saturating_sub(1).max(1);
@@ -157,10 +206,17 @@ fn fall_strip(
         }
         let half = lip.width * (0.66 + 0.3 * frac + spread.min(0.35));
         let drop = (lip.top.y - point.pos.y) as f32;
-        let jet = jet_spread(lip.q, lip.speed, drop);
+        let jet = jet_spread(lip, drop);
         // The core's own thickness: the water over the brink at the speed it falls.
-        let core = (0.5 * lip.q / point.vel.length().max(0.3)).clamp(0.003, 0.3);
+        let core = (0.5 * lip.core_thickness(drop)).clamp(0.003, 0.5);
         let p = rel(point.pos);
+        if k > 0 || approach.is_none() {
+            let here = (p, point.vel, point.t, half, core + jet, drop, on_rock);
+            if let Some(top) = seg_top {
+                body.extend(body_segment(lip, top, here, sides, foot_y, u0 + k as f32));
+            }
+            seg_top = Some(here);
+        }
         let layers = [
             (p, normal, half, 0.0, if on_rock { ROCK_KIND } else { 0.0 }),
             // On rock the spray lies over the sheet; falling free it surrounds the core.
@@ -207,7 +263,7 @@ fn fall_strip(
                     normal_frac: n.extend(frac).to_array(),
                     across_side: across.extend(side).to_array(),
                     uv_speed: [u0 + du + w * side, point.t, lip.speed, kind],
-                    edge: [open as u8 as f32, 0.0, 0.0, 0.0],
+                    edge: [open as u8 as f32, break_up, drop, lip.turbulence],
                 }
             });
             if let Some(before) = prev[layer] {
@@ -220,10 +276,85 @@ fn fall_strip(
     }
 }
 
+/// The stretch of `lip`'s jet from `top` to `bottom` (position, velocity, time, half width,
+/// reach of the aerated water, drop, on rock) as a [`FallSeg`]: how many clumps ride it,
+/// from its area and how broken up the jet is there (a glassy jet carries few: only what
+/// its turbulence tears off its surface). None where it carries none.
+fn body_segment(
+    lip: &crate::flow::Lip,
+    top: JetPoint,
+    bottom: JetPoint,
+    sides: [bool; 2],
+    foot_y: f32,
+    seed: f32,
+) -> Option<FallSeg> {
+    let (p0, v0, t0, half0, reach0, drop0, rock0) = top;
+    let (p1, v1, t1, half1, reach1, drop1, rock1) = bottom;
+    if t1 <= t0 {
+        return None;
+    }
+    let break_up = lip.break_up();
+    let mid_drop = 0.5 * (drop0 + drop1);
+    let broken = smoothstep(0.3, 1.0, mid_drop / break_up.max(0.1));
+    let on_rock = rock0 && rock1;
+    // A thin trickle is a few threads, not a body of white water.
+    let water = (lip.q * 6.0 + 0.2).clamp(0.0, 1.0);
+    let torn = (lip.turbulence * 3.0).min(0.5);
+    let fill = (torn + (1.0 - torn) * broken) * water * if on_rock { 0.6 } else { 1.0 };
+    let reach = 0.5 * (reach0 + reach1);
+    let area = p0.distance(p1) * 2.0 * (0.5 * (half0 + half1) + reach);
+    // A thicker jet is deeper: more clumps behind one another.
+    let deep = (1.0 + reach / 0.6).min(3.0);
+    let want = BODY_DENSITY * area * fill * deep;
+    if want < 0.5 {
+        return None;
+    }
+    let count = want.min(BODY_PER_SEG as f32).round();
+    let flags =
+        on_rock as u8 as f32 + 2.0 * (!sides[0]) as u8 as f32 + 4.0 * (!sides[1]) as u8 as f32;
+    let across = Vec3::new(-lip.dir.y, 0.0, lip.dir.x);
+    Some(FallSeg {
+        p0: p0.extend(t0).to_array(),
+        p1: p1.extend(t1).to_array(),
+        v0: v0.extend(lip.q).to_array(),
+        v1: v1.extend(break_up).to_array(),
+        across: across.extend(lip.turbulence).to_array(),
+        shape: [half0, half1, reach0, reach1],
+        misc: [drop0, drop1, count, (want / count).sqrt().max(1.0)],
+        foot: [foot_y, hash01(seed * 0.731 + 0.17) * 97.0, flags, 1.0],
+    })
+}
+
+/// Thin the jets' bodies `segs` (relative to where they were built) for distance: drop those
+/// past [`BODY_REACH_M`], draw fewer, larger clumps down those far off (the camera may come up
+/// to [`FALLS_REANCHOR_M`] closer before they are built again, so they are thinned as if it
+/// had; `vs_fall_body` thins them further as it goes away), and put those carrying at most
+/// [`BODY_FEW`] last. Returns where they start.
+fn thin_body(segs: &mut Vec<FallSeg>) -> usize {
+    segs.retain(|s| Vec3::from_slice(&s.p0[..3]).length() < BODY_REACH_M);
+    for s in segs.iter_mut() {
+        let d = Vec3::from_slice(&s.p0[..3]).length() - FALLS_REANCHOR_M as f32;
+        let built = (BODY_LOD_M / d.max(1.0)).clamp(0.2, 1.0);
+        s.misc[2] = (s.misc[2] * built).ceil().min(BODY_PER_SEG as f32);
+        s.misc[3] /= built.sqrt();
+        s.foot[3] = built;
+    }
+    segs.sort_by_key(|s| s.misc[2] as u32 <= BODY_FEW);
+    segs.iter()
+        .take_while(|s| s.misc[2] as u32 > BODY_FEW)
+        .count()
+}
+
+fn smoothstep(e0: f32, e1: f32, x: f32) -> f32 {
+    let t = ((x - e0) / (e1 - e0)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
 /// Radius of the white boil where a fall of `power` watts lands, meters: about 2 m under a
-/// 5 m fall of 0.2 m³/s, growing with the root of flow times drop.
+/// 5 m fall of 0.2 m³/s, growing with the root of flow times drop (about 10 m under 5 m³/s
+/// falling 20 m).
 fn boil_radius(power: f32) -> f32 {
-    (0.8 + 1.2 * (power / 9810.0).max(0.0).sqrt()).min(6.0)
+    (0.8 + 1.0 * (power / 9810.0).max(0.0).sqrt()).min(12.0)
 }
 
 /// The cloud of spray where a fall of `power` watts lands at `foot` (world; `rel` relative
@@ -243,13 +374,15 @@ fn mist_puff(
 ) {
     // Flow times drop (m⁴/s), as for the spray particles: bigger falls make bigger clouds.
     let size = (power / 9810.0).max(0.0).sqrt();
-    let radius = (0.8 + size * 0.9).min(8.0);
-    let strength = (0.45 + size * 0.2).min(1.0);
+    // (The cloud a big fall stands in is volumetric fog, `crate::mist`: these cards are only
+    // the billows boiling off the pool.)
+    let radius = (0.8 + size * 0.9).min(4.5);
+    let strength = (0.45 + size * 0.2).min(0.85);
     // Each cloud billows differently.
     let seed = (foot.x * 0.37 + foot.z * 0.61).rem_euclid(97.0) as f32;
     // (height over the foot, radius, density) in units of the foot cloud's radius: its lower
     // half is under the pool; the plume above it rises with the falls' power.
-    let rise = (0.5 + size * 0.2).min(1.4);
+    let rise = (0.5 + size * 0.2).min(0.9);
     let outward = Vec3::new(away.x, 0.0, away.y).normalize_or_zero();
     let layers = [
         (0.1, 1.0, 1.0),
@@ -271,7 +404,14 @@ fn mist_puff(
                 (k + 6, spread, lift * 1.1, scale * 0.45, density * 0.4),
             ]
         });
+    // Over a big fall the plume is the volumetric cloud (`crate::mist`): cards standing in
+    // front of its curtain read as grey blots on it, so only the boil on the pool is kept.
+    let plume = 1.0 - smoothstep(1.5, 4.0, size);
     for (k, offset, lift, scale, density) in puffs {
+        let density = if k % 3 == 0 { density } else { density * plume };
+        if density < 0.01 {
+            continue;
+        }
         let r = radius * scale;
         // Out from the rock the water came down (where it lands against a wall the cloud
         // would be all but hidden in it) and up.
@@ -298,7 +438,7 @@ fn mist_puff(
 /// `FallVertex::uv_speed.w` on a clump of white water thrown up where a fall lands (see
 /// `fall_splash`).
 const SPLASH_KIND: f32 = 2.0;
-/// Clumps in the splash where each fall lands.
+/// Clumps in the splash where a small fall lands; a big one throws more (see `splash_crown`).
 const SPLASH_CLUMPS: usize = 14;
 
 /// A repeatable pseudo-random number in 0..1 from `x`.
@@ -331,7 +471,7 @@ fn splash_crown(
     // The water lands at sqrt(2 g h), several meters a second, and throws a crown of drops up
     // a fraction of the drop: tens of centimeters under a small fall, a couple of meters
     // under a big one.
-    let height = (0.3 + 0.45 * size).min(2.5);
+    let height = (0.3 + 0.45 * size).min(6.0);
     let reach = boil_radius(power);
     let outward = Vec3::new(away.x, 0.0, away.y).normalize_or_zero();
     let across = if outward == Vec3::ZERO {
@@ -340,7 +480,8 @@ fn splash_crown(
         Vec3::new(-outward.z, 0.0, outward.x)
     };
     let seed = (foot.x * 0.37 + foot.z * 0.61).rem_euclid(97.0) as f32;
-    for k in 0..SPLASH_CLUMPS {
+    let clumps = (SPLASH_CLUMPS as f32 + 3.0 * size).min(48.0) as usize;
+    for k in 0..clumps {
         let h = |n: f32| hash01(seed + k as f32 * 7.31 + n * 3.17);
         // Along the line the curtain lands on, a little out from the rock.
         let at = rel + across * ((h(1.0) - 0.5) * reach * 0.9) + outward * (reach * 0.15);
@@ -358,7 +499,7 @@ fn splash_crown(
         };
         let out_m = reach * (0.2 + 0.4 * h(4.0));
         let thrown = dir * (out_m / period) + Vec3::Y * vy;
-        let r = (0.18 + 0.14 * size).min(0.9) * (0.7 + 0.6 * h(5.0));
+        let r = (0.18 + 0.14 * size).min(1.6) * (0.7 + 0.6 * h(5.0));
         let corner = |cx: f32, cy: f32| FallVertex {
             rel_q: (at + (right * cx + up * cy) * r).extend(0.0).to_array(),
             normal_frac: [cx, cy, r, 0.85],
@@ -621,6 +762,16 @@ struct Gpu {
     fall_key: Vec<usize>,
     /// Whether the buffer holds `fall_strips` as they are.
     fall_uploaded: bool,
+    /// The jets' aerated bodies: clumps of white water riding down each stretch of each jet
+    /// (`FallSeg`), built with the strips.
+    fall_body: wgpu::RenderPipeline,
+    body_buffer: wgpu::Buffer,
+    body_capacity: usize,
+    body_segs: Vec<FallSeg>,
+    /// `body_segs` before this carry up to [`BODY_PER_SEG`] clumps; from it on, up to
+    /// [`BODY_FEW`].
+    body_split: usize,
+    body_uploaded: bool,
     /// The fine wind waves' tiles.
     detail: detail::DetailGpu,
     /// The dispersive ripples over the ripple grid.
@@ -1122,6 +1273,46 @@ impl WaterFeature {
         });
         let fall_capacity = 64 * FALL_SEGMENTS * 6;
         let fall_buffer = Self::fall_buffer(device, fall_capacity);
+        // The jets' aerated bodies: camera-facing clumps, instanced per stretch of each jet,
+        // drawn over the curtains with the same blend.
+        let fall_body = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("water fall body"),
+            layout: Some(&layout1),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_fall_body"),
+                compilation_options: Default::default(),
+                buffers: &[Some(wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<FallSeg>() as u64,
+                    step_mode: wgpu::VertexStepMode::Instance,
+                    attributes: &wgpu::vertex_attr_array![
+                        0 => Float32x4, 1 => Float32x4, 2 => Float32x4, 3 => Float32x4,
+                        4 => Float32x4, 5 => Float32x4, 6 => Float32x4, 7 => Float32x4
+                    ],
+                })],
+            },
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                cull_mode: None,
+                ..Default::default()
+            },
+            depth_stencil: Some(gpu.depth_state(false)),
+            multisample: Default::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_fall_body"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: gpu.formats.hdr,
+                    blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+        let body_capacity = 256;
+        let body_buffer = Self::body_buffer(device, body_capacity);
 
         use wgpu::util::DeviceExt;
         let uniform = device.create_buffer(&wgpu::BufferDescriptor {
@@ -1233,6 +1424,12 @@ impl WaterFeature {
             fall_origin: None,
             fall_key: Vec::new(),
             fall_uploaded: false,
+            fall_body,
+            body_buffer,
+            body_capacity,
+            body_segs: Vec::new(),
+            body_split: 0,
+            body_uploaded: false,
             detail,
             surface,
             swash,
@@ -1243,6 +1440,15 @@ impl WaterFeature {
         device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("water falls"),
             size: (vertices * std::mem::size_of::<FallVertex>()) as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        })
+    }
+
+    fn body_buffer(device: &wgpu::Device, segs: usize) -> wgpu::Buffer {
+        device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("water fall body"),
+            size: (segs * std::mem::size_of::<FallSeg>()) as u64,
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         })
@@ -1296,6 +1502,7 @@ impl WaterFeature {
             lips.truncate(MAX_LIPS);
             let vertices = &mut gpu.fall_strips;
             vertices.clear();
+            gpu.body_segs.clear();
             let mut curtains = Vec::with_capacity(lips.len() * crate::flow::FALL_POINTS * 18);
             for (_, lip, path, sides) in &lips {
                 fall_strip(
@@ -1305,6 +1512,7 @@ impl WaterFeature {
                     |p| view.relative(p),
                     &mut curtains,
                     vertices,
+                    &mut gpu.body_segs,
                 );
             }
             // The wet rock first, under the curtains; spray clouds last, over their feet.
@@ -1312,6 +1520,18 @@ impl WaterFeature {
             gpu.fall_origin = Some(view.origin);
             gpu.fall_key = key;
             gpu.fall_uploaded = false;
+            gpu.body_split = thin_body(&mut gpu.body_segs);
+            gpu.body_uploaded = false;
+        }
+        if !gpu.body_uploaded && !gpu.body_segs.is_empty() {
+            if gpu.body_segs.len() > gpu.body_capacity {
+                gpu.body_capacity = gpu.body_segs.len().next_power_of_two();
+                gpu.body_buffer = Self::body_buffer(&shared.device, gpu.body_capacity);
+            }
+            shared
+                .queue
+                .write_buffer(&gpu.body_buffer, 0, bytemuck::cast_slice(&gpu.body_segs));
+            gpu.body_uploaded = true;
         }
         let shift = gpu.fall_origin.map_or([0.0; 4], |o| {
             (o - view.origin).as_vec3().extend(0.0).to_array()
@@ -2283,7 +2503,8 @@ impl RenderFeature for WaterFeature {
             + puddles_on as u32
             + self.underwater as u32
             + self.lens_on as u32
-            + (gpu.fall_count > 0) as u32;
+            + (gpu.fall_count > 0) as u32
+            + !gpu.body_segs.is_empty() as u32;
         self.stats.instances = self.bodies.len() as u32;
         self.stats.triangles = self
             .bodies
@@ -2292,6 +2513,11 @@ impl RenderFeature for WaterFeature {
             .sum::<u64>()
             + flows.map(|f| f.index_count as u64 / 3).sum::<u64>()
             + gpu.fall_count as u64 / 3
+            + gpu
+                .body_segs
+                .iter()
+                .map(|s| s.misc[2] as u64 * 2)
+                .sum::<u64>()
             + if puddles_on {
                 ((PUDDLE_N - 1) * (PUDDLE_N - 1) * 2) as u64
             } else {
@@ -2457,6 +2683,19 @@ impl RenderFeature for WaterFeature {
             // Two instances: the second is a sheet behind each falling curtain (`vs_falls`).
             pass.draw(0..gpu.fall_count, 0..2);
         }
+        if !gpu.body_segs.is_empty() {
+            // Each instance a stretch of a jet, up to `BODY_PER_SEG` clumps down it; the
+            // far ones, thinned, up to `BODY_FEW`.
+            pass.set_pipeline(&gpu.fall_body);
+            pass.set_vertex_buffer(0, gpu.body_buffer.slice(..));
+            let (split, len) = (gpu.body_split as u32, gpu.body_segs.len() as u32);
+            if split > 0 {
+                pass.draw(0..BODY_PER_SEG * 6, 0..split);
+            }
+            if len > split {
+                pass.draw(0..BODY_FEW * 6, split..len);
+            }
+        }
         if self.lens_on {
             pass.set_pipeline(&gpu.lens);
             pass.draw(0..3, 0..1);
@@ -2535,6 +2774,8 @@ mod tests {
             q: 0.2,
             drop: 8.0,
             width: 0.75,
+            launch: 0.0,
+            turbulence: 0.18,
         };
         // Its free-fall arc down 8.4 m (as `FlowSim::fall_path` gives it, evenly in time here).
         let t_end = (2.0 * 8.4f32 / 9.81).sqrt();
@@ -2549,7 +2790,7 @@ mod tests {
                 }
             })
             .collect();
-        let (mut v, mut wet) = (Vec::new(), Vec::new());
+        let (mut v, mut wet, mut body) = (Vec::new(), Vec::new(), Vec::new());
         let camera = DVec3::new(9.0, 7.0, -3.0);
         fall_strip(
             &lip,
@@ -2558,9 +2799,33 @@ mod tests {
             |p| (p - camera).as_vec3(),
             &mut v,
             &mut wet,
+            &mut body,
         );
         // Falling free it wets no rock.
         assert!(wet.is_empty());
+        // Its aerated body rides down it end to end (from where its turbulence starts tearing
+        // its surface), with more clumps once it has broken up; all fray toward the -across
+        // side.
+        assert!(
+            body.len() > FALL_SEGMENTS / 2 && body.len() <= FALL_SEGMENTS,
+            "{}",
+            body.len()
+        );
+        for pair in body.windows(2) {
+            assert_eq!(pair[0].p1, pair[1].p0);
+        }
+        let (top, foot) = (body.first().unwrap(), body.last().unwrap());
+        assert!(
+            foot.misc[2] > top.misc[2] * 1.5,
+            "{} {}",
+            top.misc[2],
+            foot.misc[2]
+        );
+        assert!(
+            body.iter()
+                .all(|s| s.foot[2] == 2.0 && s.misc[2] <= BODY_PER_SEG as f32)
+        );
+        assert!((foot.foot[0] - (path.last().unwrap().pos - camera).y as f32).abs() < 1e-4);
         // The core (from a little before the brink), and the spray in front of and behind it.
         assert_eq!(v.len(), (FALL_SEGMENTS + 1) * 6 + FALL_SEGMENTS * 6 * 2);
         let (core, shells): (Vec<FallVertex>, Vec<FallVertex>) =
@@ -2623,6 +2888,8 @@ mod tests {
             q: 0.05,
             drop: 4.0,
             width: 0.5,
+            launch: 0.0,
+            turbulence: 0.18,
         };
         // Down a 60° slab facing +x.
         let rock = Vec3::new(0.866, 0.5, 0.0);
@@ -2637,8 +2904,18 @@ mod tests {
                 }
             })
             .collect();
-        let (mut v, mut wet) = (Vec::new(), Vec::new());
-        fall_strip(&lip, &path, [true, true], |p| p.as_vec3(), &mut v, &mut wet);
+        let (mut v, mut wet, mut body) = (Vec::new(), Vec::new(), Vec::new());
+        fall_strip(
+            &lip,
+            &path,
+            [true, true],
+            |p| p.as_vec3(),
+            &mut v,
+            &mut wet,
+            &mut body,
+        );
+        // The white water tumbling down it is marked as on rock (it lies over the sheet).
+        assert!(body.iter().skip(1).all(|s| s.foot[2] == 1.0));
         assert_eq!(wet.len(), (FALL_SEGMENTS - 1) * 6);
         assert!(
             wet.iter()
@@ -2713,6 +2990,35 @@ mod tests {
     }
 
     #[test]
+    fn far_jets_carry_fewer_larger_clumps_and_the_farthest_none() {
+        let seg = |x: f32| FallSeg {
+            p0: [x, 10.0, 0.0, 0.0],
+            misc: [0.0, 1.0, 40.0, 1.0],
+            foot: [0.0, 0.0, 0.0, 1.0],
+            ..Zeroable::zeroed()
+        };
+        let mut segs = vec![seg(400.0), seg(10.0), seg(900.0), seg(150.0)];
+        let split = thin_body(&mut segs);
+        assert_eq!(segs.len(), 3);
+        assert_eq!(split, 2);
+        // Near: all of them; further: fewer, each larger by the root, so they cover as much.
+        assert_eq!(segs[0].misc[2], 40.0);
+        let mid = segs.iter().find(|s| s.p0[0] == 150.0).unwrap();
+        assert!(
+            mid.misc[2] < 40.0 && mid.misc[2] > BODY_FEW as f32,
+            "{:?}",
+            mid.misc
+        );
+        let far = &segs[2];
+        assert!(
+            far.misc[2] <= BODY_FEW as f32 && far.misc[3] > 2.0,
+            "{:?}",
+            far.misc
+        );
+        assert!((far.misc[2] * far.misc[3] * far.misc[3] - 40.0).abs() < 8.0);
+    }
+
+    #[test]
     fn a_fall_throws_up_a_splash_out_over_its_pool() {
         let (right, up) = (Vec3::X, Vec3::Y);
         let mut v = Vec::new();
@@ -2728,7 +3034,8 @@ mod tests {
             up,
             &mut v,
         );
-        assert_eq!(v.len(), SPLASH_CLUMPS * 6);
+        // A few more clumps than the least, as it is a small fall.
+        assert_eq!(v.len(), (SPLASH_CLUMPS + 3) * 6);
         let reach = boil_radius(16_000.0);
         let mut out = 0.0;
         for clump in v.chunks(6) {
