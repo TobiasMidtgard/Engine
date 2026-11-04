@@ -950,6 +950,11 @@ impl Sight<'_> {
 pub struct WorldModelSettings {
     /// Seconds between checks for moved static colliders.
     pub poll_secs: f32,
+    /// Changed colliders are gathered for this long and the model is updated once for all of
+    /// them. A building going up or a wall falling changes a few pieces nearly every step, and
+    /// each update makes the cover around them again (90-200 obstacles at the showcase
+    /// fortress, 1.8 ms a frame on the PC when done every step). 0 updates every step.
+    pub update_secs: f32,
     /// A rebuild of more obstacles than this runs on the async task pool, and the old model
     /// stays in use until it is ready, so a big world never stalls a step.
     pub async_above: usize,
@@ -959,6 +964,7 @@ impl Default for WorldModelSettings {
     fn default() -> Self {
         Self {
             poll_secs: 1.0,
+            update_secs: 0.2,
             async_above: 1500,
         }
     }
@@ -1166,6 +1172,15 @@ pub(crate) struct PendingBuild {
     regions: Vec<(DVec2, DVec2)>,
 }
 
+/// Changes gathered for the next update (see [`WorldModelSettings::update_secs`]).
+#[derive(Default)]
+pub(crate) struct Gathered {
+    touched: HashSet<Entity>,
+    regions: Vec<(DVec2, DVec2)>,
+    /// Seconds since the last update.
+    since: f32,
+}
+
 /// Keeps [`TacticalWorld`] in step with the static colliders and the ground.
 ///
 /// Only colliders that changed are looked at, and only the cover near them is made again,
@@ -1186,6 +1201,7 @@ pub(crate) fn rebuild_world_model(
     mut since_poll: Local<f32>,
     mut pending: Local<PendingBuild>,
     mut slice: Local<u32>,
+    mut gathered: Local<Gathered>,
 ) {
     let mut regions: Vec<(DVec2, DVec2)> = terrain
         .read()
@@ -1199,7 +1215,8 @@ pub(crate) fn rebuild_world_model(
     if ground.is_changed() {
         model.forget_ground();
     }
-    *since_poll += time.real_delta_secs().max(time.delta_secs());
+    let dt = time.real_delta_secs().max(time.delta_secs());
+    *since_poll += dt;
     // The poll looks at one of POLL_SLICES slices of the colliders (by entity index) each
     // poll_secs / POLL_SLICES, so every collider is looked at once per poll_secs, as before,
     // without one frame doing them all (a 26-29 ms frame every second on the showcase).
@@ -1227,6 +1244,7 @@ pub(crate) fn rebuild_world_model(
 
     if model.generation == 0 || model.rebuild {
         *since_poll = 0.0;
+        *gathered = Gathered::default(); // a whole rebuild sees every change
         let obstacles = collect_obstacles(&colliders, &bodies);
         let generation = model.generation + 1;
         let epoch = model.epoch;
@@ -1256,6 +1274,17 @@ pub(crate) fn rebuild_world_model(
         model.epoch = epoch;
         return;
     }
+
+    // Gather changes and update for all of them at once every `update_secs` (and on a poll).
+    gathered.touched.extend(touched.drain());
+    gathered.regions.append(&mut regions);
+    gathered.since += dt;
+    if !poll && gathered.since < settings.update_secs {
+        return;
+    }
+    gathered.since = 0.0;
+    let mut touched = std::mem::take(&mut gathered.touched);
+    let regions = std::mem::take(&mut gathered.regions);
 
     let fresh = if poll {
         // Every so often look at all of them, for static colliders moved without a change to

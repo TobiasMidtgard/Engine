@@ -2255,7 +2255,9 @@ fn animate_puppets(
         let lift = -cc.height * 0.5;
         for (i, &e) in p.bones.iter().enumerate() {
             if let Ok(mut bt) = bones.get_mut(e) {
-                *bt = fighter::bone_transform(solved[i], lift);
+                // A puppet standing still keeps its pose: no write, so the renderer and
+                // transform propagation leave its bones alone.
+                bt.set_if_neq(fighter::bone_transform(solved[i], lift));
             }
         }
         let hand = solved[Bone::HandL.index()];
