@@ -319,9 +319,33 @@ struct GpuMeshes {
     /// Its hair's fringe pass is drawn (close enough for single hairs to show).
     fringe: bool,
     strands: Vec<GpuStrands>,
-    /// Last frame's model matrix (camera-relative), for motion vectors.
-    last_model: Option<(Mat4, DVec3)>,
+    /// Where it was drawn, for motion vectors.
+    placement: Placement,
     seen: bool,
+}
+
+/// A character's model matrix (camera-relative) and position, this frame's and the last
+/// frame's. Every view of a frame (a lake mirror before the main view) reads the last frame's:
+/// rolling it once a view, the main view's "last frame" was the mirror's placement this frame,
+/// so characters had no motion vectors at the lake.
+#[derive(Default, Clone, Copy)]
+struct Placement {
+    /// The frame (`ViewData::frame_index`) `now` was placed in.
+    frame: Option<u64>,
+    now: Option<(Mat4, DVec3)>,
+    before: Option<(Mat4, DVec3)>,
+}
+
+impl Placement {
+    /// The placement before frame `frame`, after placing it at `model` and `at`.
+    fn place(&mut self, frame: u64, model: Mat4, at: DVec3) -> Option<(Mat4, DVec3)> {
+        if self.frame != Some(frame) {
+            self.before = self.now;
+            self.frame = Some(frame);
+        }
+        self.now = Some((model, at));
+        self.before
+    }
 }
 
 impl GpuMeshes {
@@ -1096,7 +1120,7 @@ impl CharacterFeature {
             coarse_count: m.skin.coarse_indices.len() as u32,
             coarse: false,
             strands,
-            last_model: None,
+            placement: Placement::default(),
             seen: true,
             scatter: false,
             fringe: false,
@@ -1317,9 +1341,9 @@ impl RenderFeature for CharacterFeature {
                             c.seen = true;
                             continue;
                         }
-                        let last = c.last_model;
+                        let placement = c.placement;
                         *c = Self::upload(p, gpu, &built.meshes, built.version);
-                        c.last_model = last;
+                        c.placement = placement;
                         uploaded = true;
                     }
                     c
@@ -1338,7 +1362,7 @@ impl RenderFeature for CharacterFeature {
             let model =
                 Mat4::from_scale_rotation_translation(transform.scale(), transform.rotation(), rel);
             // Last frame's placement relative to last frame's camera.
-            let prev_model = match c.last_model {
+            let prev_model = match c.placement.place(view.frame_index, model, world_pos) {
                 Some((m, at)) => Mat4::from_cols(
                     m.x_axis,
                     m.y_axis,
@@ -1351,7 +1375,6 @@ impl RenderFeature for CharacterFeature {
                     (world_pos - view.prev_origin).as_vec3(),
                 ),
             };
-            c.last_model = Some((model, world_pos));
             // The pass blurs a face only where the skin's reach covers pixels; farther away the
             // shader's imitation costs less than drawing the skin's color for it.
             c.scatter = subsurface
@@ -1534,6 +1557,17 @@ mod tests {
             validate_wgsl(label, &compose_shader(&src, with_frame))
                 .unwrap_or_else(|e| panic!("{label}: {e}"));
         }
+    }
+
+    #[test]
+    fn every_view_of_a_frame_reads_the_last_frames_placement() {
+        let at = |x: f64| (Mat4::IDENTITY, DVec3::new(x, 0.0, 0.0));
+        let mut p = Placement::default();
+        assert!(p.place(1, at(1.0).0, at(1.0).1).is_none());
+        // Frame 2: the mirror, then the main view, both see frame 1's.
+        assert_eq!(p.place(2, at(2.0).0, at(2.0).1).unwrap().1.x, 1.0);
+        assert_eq!(p.place(2, at(2.0).0, at(2.0).1).unwrap().1.x, 1.0);
+        assert_eq!(p.place(3, at(3.0).0, at(3.0).1).unwrap().1.x, 2.0);
     }
 
     #[test]
