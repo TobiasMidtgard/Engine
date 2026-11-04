@@ -97,6 +97,13 @@ const UNMEASURED_PROBES_PER_FRAME: u32 = 512;
 const REBUILD_AFTER_FRAMES: u64 = 30;
 /// Frames a mesh's hierarchy stays after its last use.
 const KEEP_UNUSED_FRAMES: u64 = 600;
+/// The extract's parts, timed as `render.gi.ms_<part>`: placing the grid, collecting the
+/// workers' builds, following shifts and reading change ticks; refreshing the changed entities'
+/// boxes and checking a share again; the region, entity count, asset and recheck lists; reading
+/// the dirty entities; building the small meshes they asked for and reading their entities
+/// again; uploading and the instance hierarchy.
+const PARTS: [&str; 6] = ["changes", "refresh", "lists", "read", "builds", "upload"];
+
 /// How close (meters, and per matrix element) a transform must be to its cached one (moved by a
 /// [`WorldShift`]) to count as unmoved (the shift and the transform propagation round
 /// differently).
@@ -493,6 +500,8 @@ struct Stats {
     rebuilt: bool,
     build_ms: f32,
     extract_ms: f32,
+    /// Milliseconds in each of [`PARTS`].
+    parts: [f32; PARTS.len()],
 }
 
 fn atlas_texture(device: &wgpu::Device, size: u32, usage: wgpu::TextureUsages) -> wgpu::Texture {
@@ -1336,6 +1345,14 @@ impl ProbeGi {
 
         // The entities whose instance must be read again.
         let build_started = std::time::Instant::now();
+        let mut parts = [0.0f32; PARTS.len()];
+        parts[0] = (build_started - started).as_secs_f32() * 1000.0;
+        let mut lap = build_started;
+        let mut part = |i: usize| {
+            let now = std::time::Instant::now();
+            parts[i] = (now - lap).as_secs_f32() * 1000.0;
+            lap = now;
+        };
         let mut dirty: Vec<Entity> = Vec::new();
         if let Some(meshes) = meshes {
             // The cache: the changed entities, then a share of the rest checked again.
@@ -1367,6 +1384,7 @@ impl ProbeGi {
             }
             self.revalidate_at = end;
         }
+        part(1);
         if self.region != Some(region_abs) {
             // The camera crossed a snap cell: which cached boxes are in the new region; those
             // that entered or left are read again.
@@ -1435,6 +1453,7 @@ impl ProbeGi {
             dirty.extend(self.in_region.iter().copied());
             self.gathered = Some(key);
         }
+        part(2);
         dirty.sort_unstable();
         dirty.dedup();
 
@@ -1458,6 +1477,7 @@ impl ProbeGi {
             }
             // The small meshes the reads asked for, built side by side; then the entities
             // waiting on them read again, so they're in this frame's scene.
+            part(3);
             if !builds.queued.is_empty() {
                 let done = build_small(meshes, &builds.queued);
                 for (key, version, bvh) in done {
@@ -1480,6 +1500,7 @@ impl ProbeGi {
                 }
             }
         }
+        part(4);
         let built = builds.triangles;
         self.query = Some(query);
         let build_ms = build_started.elapsed().as_secs_f32() * 1000.0;
@@ -1550,6 +1571,7 @@ impl ProbeGi {
                 }
             }
         }
+        part(5);
         let gathered = rebuild || !moved.is_empty();
         let instance_count = placed.instances.len() as u32;
         regroup |= active
@@ -1666,6 +1688,7 @@ impl ProbeGi {
             unchanged,
             rebuilt: rebuild,
             build_ms,
+            parts,
             extract_ms: started.elapsed().as_secs_f32() * 1000.0,
         };
         recreated
@@ -1794,6 +1817,9 @@ impl ProbeGi {
         d.set("render.gi.rebuilt", s.rebuilt as u8 as f64);
         d.set("render.gi.gpu_ms_per_kray", self.ms_per_kray as f64);
         d.set("render.gi.build_ms", s.build_ms as f64);
+        for (name, ms) in PARTS.iter().zip(s.parts) {
+            d.set(&format!("render.gi.ms_{name}"), ms as f64);
+        }
         d.set("render.gi.extract_ms", s.extract_ms as f64);
     }
 }
