@@ -1,0 +1,133 @@
+Round 24 step a: plaza 75 s stand, plain (a1) against ENGINE_FIXED_SYNC=sets (a2). ab24.py over two windows: 25-75 s after
+AT plaza (round 23 step 1's steady window) and 30-75 s (the plain run's first 25-75 s profile holds a 25-30 s dip the sets
+run's profiles miss, so 30-75 s compares like with like). One run each.
+
+===== A/B, 25-75 s after AT plaza: means over the profiles reporting in it (range in brackets); 10 / 9 profiles
+                                 | a1_plaza_plain               | a2_plaza_sets
+frame ms (profiles)              | 25.32 (24.10-30.70)          | 26.07 (24.80-26.90)
+fps (engine.status)              | 39.67                        | 37.85
+fixed steps a frame              | 1.512                        | 1.584
+FixedUpdate ms/frame             | 8.77 (7.85-12.40)            | 9.27 (8.43-10.19)
+FixedUpdate runs/frame           | 1.52 (1.40-1.80)             | 1.57 (1.50-1.60)
+FixedUpdate ms a run             | 5.74 (5.30-6.89)             | 5.92 (5.59-6.37)
+FixedUpdate ordering floor       | 5.01 (4.50-6.67)             | 5.77 (5.33-6.50)
+FixedUpdate floor a run          | 3.29 (3.09-3.71)             | 3.68 (3.49-4.06)
+FixedUpdate systems (floor line) | 68.90 (67.00-73.00)          | 51.44 (50.00-53.00)
+Render ms/frame                  | 8.65 (8.23-9.40)             | 8.79 (8.47-9.03)
+Update ms/frame                  | 3.70 (3.45-4.28)             | 3.75 (3.59-3.87)
+PostUpdate ms/frame              | 3.06 (2.92-3.36)             | 3.12 (2.98-3.55)
+systems busy ms/frame            | 26.95 (25.50-32.80)          | 28.48 (27.10-29.30)
+cores busy                       | 1.06 (1.06-1.08)             | 1.09 (1.08-1.10)
+one system at a time ms          | 20.36 (19.20-24.80)          | 20.89 (19.90-21.80)
+no system ms                     | 2.11 (2.00-2.60)             | 1.93 (1.90-2.00)
+several at once ms               | 2.82 (2.50-3.40)             | 3.26 (3.00-3.70)
+worst frame ms                   | 46.58 (39.20-59.20)          | 51.20 (39.20-64.90)
+render.wait_ms (samples)         | 0.01 (p90 0.01, max 0.01)    | 0.01 (p90 0.01, max 0.03)
+render.extract_ms (samples)      | 8.54 (p90 9.61, max 14.00)   | 8.87 (p90 9.79, max 15.33)
+render.record_total_ms (samples) | 6.20 (p90 7.10, max 8.16)    | 6.19 (p90 6.84, max 7.83)
+render.record_cpu_ms (samples)   | 3.01 (p90 4.30, max 5.08)    | 3.18 (p90 4.22, max 5.07)
+render.cpu_ms (samples)          | 11.64 (p90 12.91, max 17.11) | 11.96 (p90 13.09, max 18.36)
+
+render.cpu.* mean of the 5 s dumps at 25-75 s (ms), A / B (steps at 0.05 ms or more in either; every step in each run's analysis.txt):
+  prepare meshes                                       2.36 /   2.56
+  prepare on the render thread                         2.25 /   2.33
+  wait for the finishing threads                       1.90 /   1.73
+  meshes: sync                                         1.22 /   1.23
+  meshes: cull                                         1.20 /   1.19
+  prepare softbody                                     1.18 /   1.07
+  prepare terrain                                      1.17 /   1.30
+  submit                                               0.68 /   0.57
+  meshes: gather                                       0.65 /   0.67
+  terrain: patches: draw lists                         0.57 /   0.61
+  prepare water                                        0.56 /   0.54
+  meshes: upload                                       0.46 /   0.50
+  finish commands                                      0.46 /   0.40
+  meshes: shadow lists                                 0.34 /   0.37
+  meshes: materials                                    0.29 /   0.30
+  prepare character                                    0.28 /   0.27
+  terrain: patches: select                             0.27 /   0.26
+  surface weather                                      0.20 /   0.30
+  meshes: classify                                     0.19 /   0.19
+  terrain: maps: weather                               0.19 /   0.16
+  prepare fire                                         0.18 /   0.14
+  meshes: begin frame                                  0.17 /   0.09
+  meshes: sort and batch                               0.17 /   0.17
+  prepare foliage scenery                              0.10 /   0.10
+  occlusion culling                                    0.10 /   0.09
+  prepare vfx_particles                                0.09 /   0.08
+  present                                              0.09 /   0.08
+  prepare weather ground                               0.08 /   0.09
+  terrain: patches: far shadow                         0.08 /   0.08
+  prepare grass                                        0.08 /   0.12
+  prepare skinned meshes                               0.07 /   0.07
+  prepare movement_effects                             0.06 /   0.04
+  prepass: meshes                                      0.06 /   0.07
+  terrain: patches: ask workers                        0.05 /   0.05
+  shadows                                              0.05 /   0.05
+  frame setup                                          0.05 /   0.13
+  meshes: clusters                                     0.05 /   0.08
+
+===== A/B, 30-75 s after AT plaza: means over the profiles reporting in it (range in brackets); 9 / 8 profiles
+                                 | a1_plaza_plain               | a2_plaza_sets
+frame ms (profiles)              | 24.72 (24.10-26.00)          | 26.12 (24.80-26.90)
+fps (engine.status)              | 40.48                        | 38.35
+fixed steps a frame              | 1.482                        | 1.564
+FixedUpdate ms/frame             | 8.37 (7.85-9.83)             | 9.27 (8.43-10.19)
+FixedUpdate runs/frame           | 1.49 (1.40-1.60)             | 1.58 (1.50-1.60)
+FixedUpdate ms a run             | 5.62 (5.30-6.14)             | 5.88 (5.59-6.37)
+FixedUpdate ordering floor       | 4.83 (4.50-5.31)             | 5.78 (5.33-6.50)
+FixedUpdate floor a run          | 3.24 (3.09-3.50)             | 3.67 (3.49-4.06)
+FixedUpdate systems (floor line) | 69.11 (68.00-73.00)          | 51.25 (50.00-52.00)
+Render ms/frame                  | 8.57 (8.23-8.77)             | 8.82 (8.66-9.03)
+Update ms/frame                  | 3.63 (3.45-3.83)             | 3.75 (3.59-3.87)
+PostUpdate ms/frame              | 3.02 (2.92-3.25)             | 3.13 (2.98-3.55)
+systems busy ms/frame            | 26.30 (25.50-27.80)          | 28.55 (27.10-29.30)
+cores busy                       | 1.06 (1.06-1.08)             | 1.09 (1.08-1.10)
+one system at a time ms          | 19.87 (19.20-20.90)          | 20.93 (19.90-21.80)
+no system ms                     | 2.06 (2.00-2.10)             | 1.92 (1.90-2.00)
+several at once ms               | 2.76 (2.50-3.00)             | 3.27 (3.00-3.70)
+worst frame ms                   | 45.18 (39.20-53.30)          | 52.70 (44.70-64.90)
+render.wait_ms (samples)         | 0.01 (p90 0.01, max 0.01)    | 0.01 (p90 0.01, max 0.03)
+render.extract_ms (samples)      | 8.52 (p90 9.61, max 14.00)   | 8.83 (p90 9.77, max 15.33)
+render.record_total_ms (samples) | 6.23 (p90 7.10, max 8.16)    | 6.21 (p90 6.83, max 7.83)
+render.record_cpu_ms (samples)   | 3.07 (p90 4.30, max 5.08)    | 3.18 (p90 4.22, max 5.07)
+render.cpu_ms (samples)          | 11.63 (p90 12.91, max 17.11) | 11.94 (p90 13.09, max 18.36)
+
+render.cpu.* mean of the 5 s dumps at 30-75 s (ms), A / B (steps at 0.05 ms or more in either; every step in each run's analysis.txt):
+  prepare meshes                                       2.39 /   2.62
+  prepare on the render thread                         2.27 /   2.38
+  wait for the finishing threads                       1.91 /   1.73
+  meshes: cull                                         1.22 /   1.23
+  meshes: sync                                         1.21 /   1.25
+  prepare softbody                                     1.19 /   1.07
+  prepare terrain                                      1.16 /   1.31
+  meshes: gather                                       0.66 /   0.68
+  submit                                               0.66 /   0.52
+  terrain: patches: draw lists                         0.57 /   0.61
+  prepare water                                        0.56 /   0.54
+  meshes: upload                                       0.47 /   0.50
+  finish commands                                      0.46 /   0.40
+  meshes: shadow lists                                 0.33 /   0.38
+  prepare character                                    0.31 /   0.30
+  meshes: materials                                    0.29 /   0.30
+  terrain: patches: select                             0.26 /   0.26
+  meshes: classify                                     0.19 /   0.19
+  prepare fire                                         0.19 /   0.15
+  terrain: maps: weather                               0.18 /   0.16
+  meshes: sort and batch                               0.17 /   0.17
+  meshes: begin frame                                  0.15 /   0.10
+  surface weather                                      0.11 /   0.33
+  prepare foliage scenery                              0.10 /   0.10
+  occlusion culling                                    0.10 /   0.09
+  prepare weather ground                               0.09 /   0.09
+  present                                              0.09 /   0.08
+  prepare vfx_particles                                0.09 /   0.08
+  prepare grass                                        0.08 /   0.13
+  terrain: patches: far shadow                         0.08 /   0.08
+  prepare skinned meshes                               0.07 /   0.07
+  prepass: meshes                                      0.06 /   0.07
+  prepare movement_effects                             0.06 /   0.04
+  frame setup                                          0.05 /   0.10
+  terrain: patches: ask workers                        0.05 /   0.05
+  shadows                                              0.05 /   0.06
+  meshes: clusters                                     0.04 /   0.07

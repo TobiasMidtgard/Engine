@@ -1,0 +1,32 @@
+== h2_5_lake: clock hour 2.50, day 80.0, moon phase 0.420; sun elevation (weather) -37.8; camera at (160, 6, -115) looking elevation  -3.0, bearing 232.1
+   space Moon : elevation  37.5, bearing 244.1; pixel (991, -305) - outside the picture
+   space Sun  : elevation -37.8, bearing  50.4; behind the camera
+   stand-in moon (opposite the space Sun): elevation  37.8, bearing 230.4; pixel (773, -297) - outside the picture
+   clock moon (round 23's weather moon, not expected now): elevation  19.5, bearing 256.3; pixel (1196, 61)
+   Moon from the camera: elongation from the Sun 169.2 deg, phase angle 10.8 deg, lit fraction 0.991, apparent diameter 0.527 deg
+   space.bodies Moon: {"altitude_m": 375955940.230212, "distance_m": 377693340.230212, "kind": "Moon", "radius_m": 1737400.0, "sphere_of_influence_m": 66194095.39239908}
+   weather.panel moon fields: clock.moon_phase = 0.41999998688697815
+== h2_5_sunset: clock hour 2.50, day 80.0, moon phase 0.420; sun elevation (weather) -37.8; camera at (-40, 5, 20) looking elevation   0.5, bearing 248.2
+   space Moon : elevation  37.5, bearing 244.1; pixel (738, -202) - outside the picture
+   space Sun  : elevation -37.8, bearing  50.4; behind the camera
+   stand-in moon (opposite the space Sun): elevation  37.8, bearing 230.4; pixel (525, -241) - outside the picture
+   clock moon (round 23's weather moon, not expected now): elevation  19.5, bearing 256.3; pixel (922, 150)
+   Moon from the camera: elongation from the Sun 169.2 deg, phase angle 10.8 deg, lit fraction 0.991, apparent diameter 0.527 deg
+   space.bodies Moon: {"altitude_m": 375956130.3626576, "distance_m": 377693530.3626576, "kind": "Moon", "radius_m": 1737400.0, "sphere_of_influence_m": 66194095.39239908}
+   weather.panel moon fields: clock.moon_phase = 0.41999998688697815
+== h3_5_lake: clock hour 3.50, day 80.0, moon phase 0.420; sun elevation (weather) -28.1; camera at (160, 6, -115) looking elevation  -3.0, bearing 232.1
+   space Moon : elevation  26.8, bearing 255.7; pixel (1190, -89) - outside the picture
+   space Sun  : elevation -28.1, bearing  64.1; behind the camera
+   stand-in moon (opposite the space Sun): elevation  28.1, bearing 244.1; pixel (989, -83) - outside the picture
+   clock moon (round 23's weather moon, not expected now): elevation   7.4, bearing 265.4; pixel (1372, 269)
+   Moon from the camera: elongation from the Sun 169.6 deg, phase angle 10.4 deg, lit fraction 0.992, apparent diameter 0.525 deg
+   space.bodies Moon: {"altitude_m": 377150591.7100916, "distance_m": 378887991.7100916, "kind": "Moon", "radius_m": 1737400.0, "sphere_of_influence_m": 66194095.39239908}
+   weather.panel moon fields: clock.moon_phase = 0.41999998688697815
+== h3_5_sunset: clock hour 3.50, day 80.0, moon phase 0.420; sun elevation (weather) -28.1; camera at (-40, 5, 20) looking elevation   0.5, bearing 248.2
+   space Moon : elevation  26.8, bearing 255.7; pixel (914, 19)
+   space Sun  : elevation -28.1, bearing  64.1; behind the camera
+   stand-in moon (opposite the space Sun): elevation  28.1, bearing 244.1; pixel (738, -3) - outside the picture
+   clock moon (round 23's weather moon, not expected now): elevation   7.4, bearing 265.4; pixel (1067, 341)
+   Moon from the camera: elongation from the Sun 169.6 deg, phase angle 10.4 deg, lit fraction 0.992, apparent diameter 0.525 deg
+   space.bodies Moon: {"altitude_m": 377150832.2665484, "distance_m": 378888232.2665484, "kind": "Moon", "radius_m": 1737400.0, "sphere_of_influence_m": 66194095.39239908}
+   weather.panel moon fields: clock.moon_phase = 0.41999998688697815

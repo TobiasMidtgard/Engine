@@ -1,0 +1,6 @@
+space_moon_h3_5_sunset: h3_5_sunset box (866,0)-(962,64) x5; brightest pixel (915, 22) rgb-sum 762; the space Moon, predicted (914, 19)
+old_clock_moon_spot_h3_5_sunset: h3_5_sunset box (1019,309)-(1115,373) x5; brightest pixel (1100, 354) rgb-sum 180; where round 23's weather moon stood (behind the tree)
+old_clock_moon_spot_h2_5_lake: h2_5_lake box (1148,29)-(1244,93) x5; brightest pixel (1234, 92) rgb-sum 249; where round 23's full disc was; the Moon is now above the frame at (991, -305)
+top_edge_below_moon_h2_5_lake: h2_5_lake box (911,0)-(1071,64) x4; brightest pixel (1001, 61) rgb-sum 179; the top edge under the space Moon (above the frame)
+top_edge_below_moon_h3_5_lake: h3_5_lake box (1110,0)-(1270,64) x4; brightest pixel (1269, 10) rgb-sum 297; the top edge under the space Moon, predicted (1190, -89)
+green_slab_h2_5_lake: h2_5_lake box (0,720)-(960,900) x1; brightest pixel (623, 833) rgb-sum 765; the bright green wedge on the water, bottom left (not a moon)

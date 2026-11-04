@@ -1,0 +1,382 @@
+== round 1 overview (23:50:59-23:51:24 UTC)
+  profile 23:51:03 (73 frames, 68.9 ms a frame, worst 1513.9 ms)
+    think_and_act          1.23 / max 63.02 / 1.7 runs (count 124)
+    ripple_system          1.00 / max 30.60 / 1.7 runs (count 124)
+    flow_bed_system        -
+    step_beside_physics    10.13 / max 14.56 / 1.7 runs (count 124)
+    in find path           1.22 / max 62.98 / 0.0 runs (count 0)
+    in nav chunk           12.30 / max 25.10 / 1.2 runs (count 88)
+    in ripples: step       -
+    in ripples: rebuild    0.93 / max 30.26 / 0.1 runs (count 7)
+  profile 23:51:08 (165 frames, 30.3 ms a frame, worst 67.6 ms)
+    think_and_act          -
+    ripple_system          -
+    flow_bed_system        -
+    step_beside_physics    6.72 / max 9.86 / 1.8 runs (count 297)
+    in find path           -
+    in nav chunk           -
+    in ripples: step       -
+    in ripples: rebuild    -
+  profile 23:51:13 (188 frames, 26.7 ms a frame, worst 163.9 ms)
+    think_and_act          -
+    ripple_system          -
+    flow_bed_system        -
+    step_beside_physics    0.39 / max 1.10 / 1.6 runs (count 301)
+    in find path           -
+    in nav chunk           -
+    in ripples: step       -
+    in ripples: rebuild    -
+  profile 23:51:18 (205 frames, 24.4 ms a frame, worst 35.0 ms)
+    think_and_act          -
+    ripple_system          -
+    flow_bed_system        -
+    step_beside_physics    0.38 / max 0.74 / 1.4 runs (count 287)
+    in find path           -
+    in nav chunk           -
+    in ripples: step       -
+    in ripples: rebuild    -
+  profile 23:51:23 (201 frames, 24.9 ms a frame, worst 54.8 ms)
+    think_and_act          -
+    ripple_system          -
+    flow_bed_system        -
+    step_beside_physics    2.34 / max 9.29 / 1.5 runs (count 302)
+    in find path           -
+    in nav chunk           -
+    in ripples: step       -
+    in ripples: rebuild    -
+== round 1 plaza (23:51:24-23:51:49 UTC)
+  profile 23:51:28 (175 frames, 28.6 ms a frame, worst 186.7 ms)
+    think_and_act          0.22 / max 12.87 / 1.6 runs (count 280)
+    ripple_system          -
+    flow_bed_system        -
+    step_beside_physics    1.18 / max 8.45 / 1.6 runs (count 280)
+    in find path           -
+    in nav chunk           -
+    in ripples: step       -
+    in ripples: rebuild    -
+  profile 23:51:33 (212 frames, 23.6 ms a frame, worst 40.9 ms)
+    think_and_act          0.13 / max 5.04 / 1.4 runs (count 297)
+    ripple_system          -
+    flow_bed_system        -
+    step_beside_physics    0.50 / max 2.68 / 1.4 runs (count 297)
+    in find path           -
+    in nav chunk           -
+    in ripples: step       -
+    in ripples: rebuild    -
+  profile 23:51:38 (214 frames, 23.4 ms a frame, worst 41.8 ms)
+    think_and_act          0.11 / max 4.46 / 1.4 runs (count 300)
+    ripple_system          -
+    flow_bed_system        -
+    step_beside_physics    0.47 / max 0.69 / 1.4 runs (count 300)
+    in find path           -
+    in nav chunk           -
+    in ripples: step       -
+    in ripples: rebuild    -
+  profile 23:51:43 (209 frames, 24.0 ms a frame, worst 52.9 ms)
+    think_and_act          0.14 / max 7.22 / 1.4 runs (count 293)
+    ripple_system          0.32 / max 10.48 / 1.4 runs (count 293)
+    flow_bed_system        -
+    step_beside_physics    0.56 / max 10.51 / 1.4 runs (count 293)
+    in find path           -
+    in nav chunk           -
+    in ripples: step       -
+    in ripples: rebuild    0.28 / max 10.29 / 0.1 runs (count 21)
+  profile 23:51:48 (209 frames, 24.0 ms a frame, worst 92.8 ms)
+    think_and_act          0.10 / max 2.54 / 1.4 runs (count 293)
+    ripple_system          -
+    flow_bed_system        -
+    step_beside_physics    0.45 / max 1.01 / 1.4 runs (count 293)
+    in find path           -
+    in nav chunk           -
+    in ripples: step       -
+    in ripples: rebuild    -
+== round 1 market (23:51:49-23:52:14 UTC)
+  profile 23:51:53 (164 frames, 30.5 ms a frame, worst 80.9 ms)
+    think_and_act          -
+    ripple_system          0.82 / max 8.55 / 1.8 runs (count 295)
+    flow_bed_system        -
+    step_beside_physics    1.16 / max 3.84 / 1.8 runs (count 295)
+    in find path           -
+    in nav chunk           -
+    in ripples: step       -
+    in ripples: rebuild    0.72 / max 8.13 / 0.2 runs (count 33)
+  profile 23:51:58 (157 frames, 31.9 ms a frame, worst 48.9 ms)
+    think_and_act          0.30 / max 10.01 / 1.9 runs (count 298)
+    ripple_system          -
+    flow_bed_system        -
+    step_beside_physics    5.89 / max 5.02 / 1.9 runs (count 298)
+    in find path           0.14 / max 7.89 / 0.2 runs (count 31)
+    in nav chunk           -
+    in ripples: step       -
+    in ripples: rebuild    -
+  profile 23:52:03 (152 frames, 32.9 ms a frame, worst 61.7 ms)
+    think_and_act          0.36 / max 6.04 / 2.0 runs (count 304)
+    ripple_system          0.44 / max 9.10 / 2.0 runs (count 304)
+    flow_bed_system        -
+    step_beside_physics    7.28 / max 7.11 / 2.0 runs (count 304)
+    in find path           0.22 / max 3.71 / 0.3 runs (count 46)
+    in nav chunk           -
+    in ripples: step       -
+    in ripples: rebuild    0.38 / max 8.76 / 0.1 runs (count 15)
+  profile 23:52:08 (160 frames, 31.4 ms a frame, worst 52.7 ms)
+    think_and_act          0.29 / max 4.00 / 1.9 runs (count 304)
+    ripple_system          -
+    flow_bed_system        -
+    step_beside_physics    6.69 / max 4.87 / 1.9 runs (count 304)
+    in find path           0.16 / max 2.37 / 0.2 runs (count 32)
+    in nav chunk           -
+    in ripples: step       -
+    in ripples: rebuild    -
+  profile 23:52:13 (148 frames, 33.9 ms a frame, worst 107.2 ms)
+    think_and_act          0.32 / max 4.22 / 2.0 runs (count 296)
+    ripple_system          -
+    flow_bed_system        -
+    step_beside_physics    7.25 / max 6.63 / 2.0 runs (count 296)
+    in find path           0.20 / max 2.44 / 0.3 runs (count 44)
+    in nav chunk           -
+    in ripples: step       -
+    in ripples: rebuild    -
+== round 1 forest (23:52:14-23:52:39 UTC)
+  profile 23:52:18 (100 frames, 50.6 ms a frame, worst 114.7 ms)
+    think_and_act          0.26 / max 4.02 / 2.8 runs (count 280)
+    ripple_system          3.46 / max 22.39 / 2.8 runs (count 280)
+    flow_bed_system        0.44 / max 0.43 / 2.8 runs (count 280)
+    step_beside_physics    3.61 / max 4.74 / 2.8 runs (count 280)
+    in find path           -
+    in nav chunk           -
+    in ripples: step       0.31 / max 0.46 / 1.9 runs (count 190)
+    in ripples: rebuild    2.47 / max 21.83 / 1.9 runs (count 190)
+  profile 23:52:23 (90 frames, 55.6 ms a frame, worst 78.7 ms)
+    think_and_act          -
+    ripple_system          1.61 / max 2.00 / 3.1 runs (count 279)
+    flow_bed_system        0.74 / max 0.35 / 3.1 runs (count 279)
+    step_beside_physics    0.90 / max 0.75 / 3.1 runs (count 279)
+    in find path           -
+    in nav chunk           -
+    in ripples: step       0.77 / max 0.49 / 3.1 runs (count 279)
+    in ripples: rebuild    -
+  profile 23:52:28 (170 frames, 29.5 ms a frame, worst 65.7 ms)
+    think_and_act          -
+    ripple_system          1.39 / max 17.71 / 1.8 runs (count 306)
+    flow_bed_system        0.32 / max 0.37 / 1.8 runs (count 306)
+    step_beside_physics    0.41 / max 1.09 / 1.8 runs (count 306)
+    in find path           -
+    in nav chunk           -
+    in ripples: step       0.24 / max 0.40 / 1.8 runs (count 306)
+    in ripples: rebuild    0.78 / max 17.33 / 1.8 runs (count 306)
+  profile 23:52:33 (192 frames, 26.1 ms a frame, worst 68.3 ms)
+    think_and_act          -
+    ripple_system          1.77 / max 23.39 / 1.6 runs (count 307)
+    flow_bed_system        0.29 / max 0.46 / 1.6 runs (count 307)
+    step_beside_physics    0.38 / max 0.61 / 1.6 runs (count 307)
+    in find path           -
+    in nav chunk           -
+    in ripples: step       0.22 / max 0.43 / 1.6 runs (count 307)
+    in ripples: rebuild    1.19 / max 22.86 / 1.6 runs (count 307)
+  profile 23:52:38 (209 frames, 24.0 ms a frame, worst 86.0 ms)
+    think_and_act          -
+    ripple_system          0.60 / max 1.79 / 1.4 runs (count 293)
+    flow_bed_system        0.27 / max 0.37 / 1.4 runs (count 293)
+    step_beside_physics    0.63 / max 1.97 / 1.4 runs (count 293)
+    in find path           -
+    in nav chunk           -
+    in ripples: step       0.25 / max 0.48 / 1.4 runs (count 293)
+    in ripples: rebuild    -
+== round 1 lake (23:52:39-23:53:04 UTC)
+  profile 23:52:43 (100 frames, 50.3 ms a frame, worst 168.6 ms)
+    think_and_act          -
+    ripple_system          2.81 / max 10.98 / 2.6 runs (count 260)
+    flow_bed_system        0.44 / max 0.40 / 2.6 runs (count 260)
+    step_beside_physics    3.47 / max 5.50 / 2.6 runs (count 260)
+    in find path           -
+    in nav chunk           -
+    in ripples: step       0.40 / max 0.33 / 2.6 runs (count 260)
+    in ripples: rebuild    1.46 / max 10.28 / 2.6 runs (count 260)
+  profile 23:52:48 (127 frames, 39.6 ms a frame, worst 58.2 ms)
+    think_and_act          -
+    ripple_system          1.15 / max 1.88 / 2.3 runs (count 292)
+    flow_bed_system        0.44 / max 0.35 / 2.3 runs (count 292)
+    step_beside_physics    2.74 / max 2.64 / 2.3 runs (count 292)
+    in find path           -
+    in nav chunk           -
+    in ripples: step       0.32 / max 0.38 / 2.3 runs (count 292)
+    in ripples: rebuild    -
+  profile 23:52:53 (134 frames, 37.5 ms a frame, worst 49.7 ms)
+    think_and_act          -
+    ripple_system          1.12 / max 1.89 / 2.3 runs (count 308)
+    flow_bed_system        0.42 / max 0.44 / 2.3 runs (count 308)
+    step_beside_physics    3.12 / max 4.55 / 2.3 runs (count 308)
+    in find path           -
+    in nav chunk           -
+    in ripples: step       0.31 / max 0.26 / 2.3 runs (count 308)
+    in ripples: rebuild    -
+  profile 23:52:59 (137 frames, 36.6 ms a frame, worst 46.7 ms)
+    think_and_act          -
+    ripple_system          1.09 / max 2.67 / 2.2 runs (count 301)
+    flow_bed_system        0.41 / max 0.36 / 2.2 runs (count 301)
+    step_beside_physics    2.56 / max 2.30 / 2.2 runs (count 301)
+    in find path           -
+    in nav chunk           -
+    in ripples: step       0.30 / max 0.39 / 2.2 runs (count 301)
+    in ripples: rebuild    -
+  profile 23:53:04 (137 frames, 36.6 ms a frame, worst 108.5 ms)
+    think_and_act          -
+    ripple_system          1.09 / max 2.49 / 2.2 runs (count 301)
+    flow_bed_system        0.42 / max 0.37 / 2.2 runs (count 301)
+    step_beside_physics    3.06 / max 4.98 / 2.2 runs (count 301)
+    in find path           -
+    in nav chunk           -
+    in ripples: step       0.29 / max 0.34 / 2.2 runs (count 301)
+    in ripples: rebuild    -
+== round 1 fortress (23:53:04-23:53:29 UTC)
+  profile 23:53:09 (85 frames, 59.7 ms a frame, worst 153.5 ms)
+    think_and_act          0.32 / max 20.57 / 2.9 runs (count 246)
+    ripple_system          10.04 / max 32.92 / 2.9 runs (count 246)
+    flow_bed_system        0.64 / max 0.41 / 2.9 runs (count 246)
+    step_beside_physics    2.05 / max 5.30 / 2.9 runs (count 246)
+    in find path           -
+    in nav chunk           0.56 / max 20.53 / 0.5 runs (count 42)
+    in ripples: step       2.06 / max 2.30 / 2.9 runs (count 246)
+    in ripples: rebuild    6.63 / max 31.17 / 2.9 runs (count 246)
+  profile 23:53:14 (94 frames, 53.6 ms a frame, worst 95.6 ms)
+    think_and_act          -
+    ripple_system          13.70 / max 36.41 / 3.0 runs (count 282)
+    flow_bed_system        0.61 / max 0.36 / 3.0 runs (count 282)
+    step_beside_physics    1.03 / max 6.05 / 3.0 runs (count 282)
+    in find path           -
+    in nav chunk           -
+    in ripples: step       2.46 / max 2.60 / 3.0 runs (count 282)
+    in ripples: rebuild    9.75 / max 34.62 / 3.0 runs (count 282)
+  profile 23:53:19 (91 frames, 55.3 ms a frame, worst 106.6 ms)
+    think_and_act          -
+    ripple_system          12.04 / max 38.76 / 2.9 runs (count 264)
+    flow_bed_system        0.61 / max 0.45 / 2.9 runs (count 264)
+    step_beside_physics    0.84 / max 3.94 / 2.9 runs (count 264)
+    in find path           -
+    in nav chunk           -
+    in ripples: step       2.41 / max 1.91 / 2.9 runs (count 264)
+    in ripples: rebuild    8.25 / max 36.41 / 2.9 runs (count 264)
+  profile 23:53:24 (99 frames, 50.8 ms a frame, worst 92.3 ms)
+    think_and_act          -
+    ripple_system          12.14 / max 37.02 / 2.8 runs (count 277)
+    flow_bed_system        0.56 / max 0.38 / 2.8 runs (count 277)
+    step_beside_physics    1.00 / max 4.56 / 2.8 runs (count 277)
+    in find path           -
+    in nav chunk           -
+    in ripples: step       2.82 / max 4.53 / 2.8 runs (count 277)
+    in ripples: rebuild    7.93 / max 35.21 / 2.8 runs (count 277)
+  profile 23:53:29 (104 frames, 48.3 ms a frame, worst 119.7 ms)
+    think_and_act          -
+    ripple_system          5.14 / max 30.11 / 2.8 runs (count 291)
+    flow_bed_system        0.55 / max 0.37 / 2.8 runs (count 291)
+    step_beside_physics    0.79 / max 4.87 / 2.8 runs (count 291)
+    in find path           -
+    in nav chunk           -
+    in ripples: step       2.83 / max 8.76 / 2.8 runs (count 291)
+    in ripples: rebuild    1.24 / max 28.06 / 2.8 runs (count 291)
+== round 1 field (23:53:29-23:53:54 UTC)
+  profile 23:53:34 (183 frames, 27.4 ms a frame, worst 83.5 ms)
+    think_and_act          0.14 / max 12.43 / 1.6 runs (count 293)
+    ripple_system          1.23 / max 9.03 / 1.6 runs (count 293)
+    flow_bed_system        -
+    step_beside_physics    0.95 / max 3.49 / 1.6 runs (count 293)
+    in find path           -
+    in nav chunk           0.17 / max 12.39 / 0.2 runs (count 37)
+    in ripples: step       0.29 / max 1.50 / 0.5 runs (count 92)
+    in ripples: rebuild    0.72 / max 8.67 / 0.5 runs (count 92)
+  profile 23:53:39 (218 frames, 23.0 ms a frame, worst 49.3 ms)
+    think_and_act          -
+    ripple_system          -
+    flow_bed_system        -
+    step_beside_physics    0.46 / max 0.75 / 1.4 runs (count 305)
+    in find path           -
+    in nav chunk           -
+    in ripples: step       -
+    in ripples: rebuild    -
+  profile 23:53:44 (214 frames, 23.4 ms a frame, worst 54.2 ms)
+    think_and_act          -
+    ripple_system          0.33 / max 10.70 / 1.4 runs (count 300)
+    flow_bed_system        -
+    step_beside_physics    0.51 / max 1.99 / 1.4 runs (count 300)
+    in find path           -
+    in nav chunk           -
+    in ripples: step       -
+    in ripples: rebuild    0.28 / max 10.53 / 0.1 runs (count 21)
+  profile 23:53:49 (218 frames, 23.0 ms a frame, worst 40.1 ms)
+    think_and_act          -
+    ripple_system          -
+    flow_bed_system        -
+    step_beside_physics    0.43 / max 0.85 / 1.4 runs (count 305)
+    in find path           -
+    in nav chunk           -
+    in ripples: step       -
+    in ripples: rebuild    -
+  profile 23:53:54 (221 frames, 22.7 ms a frame, worst 95.4 ms)
+    think_and_act          -
+    ripple_system          -
+    flow_bed_system        -
+    step_beside_physics    0.47 / max 2.82 / 1.4 runs (count 309)
+    in find path           -
+    in nav chunk           -
+    in ripples: step       -
+    in ripples: rebuild    -
+== round 1 orbit (23:53:54-23:54:19 UTC)
+  profile 23:53:59 (304 frames, 16.5 ms a frame, worst 39.3 ms)
+    think_and_act          -
+    ripple_system          -
+    flow_bed_system        -
+    step_beside_physics    0.24 / max 3.70 / 1.0 runs (count 304)
+    in find path           -
+    in nav chunk           -
+    in ripples: step       -
+    in ripples: rebuild    -
+  profile 23:54:04 (322 frames, 15.6 ms a frame, worst 29.4 ms)
+    think_and_act          -
+    ripple_system          -
+    flow_bed_system        -
+    step_beside_physics    0.19 / max 1.82 / 0.9 runs (count 290)
+    in find path           -
+    in nav chunk           -
+    in ripples: step       -
+    in ripples: rebuild    -
+  profile 23:54:09 (329 frames, 15.2 ms a frame, worst 21.5 ms)
+    think_and_act          -
+    ripple_system          -
+    flow_bed_system        -
+    step_beside_physics    0.18 / max 0.36 / 0.9 runs (count 296)
+    in find path           -
+    in nav chunk           -
+    in ripples: step       -
+    in ripples: rebuild    -
+  profile 23:54:14 (334 frames, 15.0 ms a frame, worst 28.7 ms)
+    think_and_act          -
+    ripple_system          -
+    flow_bed_system        -
+    step_beside_physics    0.18 / max 0.38 / 0.9 runs (count 301)
+    in find path           -
+    in nav chunk           -
+    in ripples: step       -
+    in ripples: rebuild    -
+  profile 23:54:19 (339 frames, 14.8 ms a frame, worst 53.6 ms)
+    think_and_act          -
+    ripple_system          -
+    flow_bed_system        -
+    step_beside_physics    0.18 / max 0.41 / 0.9 runs (count 305)
+    in find path           -
+    in nav chunk           -
+    in ripples: step       -
+    in ripples: rebuild    -
+
+== worst single runs over every profile of the run (max ms of a run; profile time; stop; that profile's worst frame)
+engine_npc::think_and_act: 63.0 (23:51:03, r1 overview, worst frame 1513.9); 20.6 (23:53:09, r1 fortress, worst frame 153.5); 12.9 (23:51:28, r1 plaza, worst frame 186.7); 12.4 (23:53:34, r1 field, worst frame 83.5); 10.0 (23:51:58, r1 market, worst frame 48.9); 7.2 (23:51:43, r1 plaza, worst frame 52.9); 6.0 (23:52:03, r1 market, worst frame 61.7); 5.0 (23:51:33, r1 plaza, worst frame 40.9); 4.5 (23:51:38, r1 plaza, worst frame 41.8); 4.2 (23:52:13, r1 market, worst frame 107.2)
+engine_water::ripple_system: 38.8 (23:53:19, r1 fortress, worst frame 106.6); 37.0 (23:53:24, r1 fortress, worst frame 92.3); 36.4 (23:53:14, r1 fortress, worst frame 95.6); 32.9 (23:53:09, r1 fortress, worst frame 153.5); 30.6 (23:51:03, r1 overview, worst frame 1513.9); 30.1 (23:53:29, r1 fortress, worst frame 119.7); 28.1 (23:50:52, start, worst frame 449.0); 23.4 (23:52:33, r1 forest, worst frame 68.3); 22.4 (23:52:18, r1 forest, worst frame 114.7); 17.7 (23:52:28, r1 forest, worst frame 65.7)
+engine_npc: find path: 63.0 (23:51:03, r1 overview, worst frame 1513.9); 7.9 (23:51:58, r1 market, worst frame 48.9); 3.7 (23:52:03, r1 market, worst frame 61.7); 2.4 (23:52:13, r1 market, worst frame 107.2); 2.4 (23:52:08, r1 market, worst frame 52.7)
+engine_npc: nav chunk: 25.1 (23:51:03, r1 overview, worst frame 1513.9); 20.5 (23:53:09, r1 fortress, worst frame 153.5); 12.4 (23:53:34, r1 field, worst frame 83.5)
+engine_water: ripples: step: 8.8 (23:53:29, r1 fortress, worst frame 119.7); 4.5 (23:53:24, r1 fortress, worst frame 92.3); 2.6 (23:53:14, r1 fortress, worst frame 95.6); 2.3 (23:53:09, r1 fortress, worst frame 153.5); 1.9 (23:53:19, r1 fortress, worst frame 106.6); 1.5 (23:53:34, r1 field, worst frame 83.5); 0.5 (23:52:23, r1 forest, worst frame 78.7); 0.5 (23:52:38, r1 forest, worst frame 86.0); 0.5 (23:52:18, r1 forest, worst frame 114.7); 0.4 (23:52:33, r1 forest, worst frame 68.3)
+
+nav chunk: listed in 3 of 43 profiles, about 167 chunks built over them; max single chunk 25.10 ms
+per profile it is listed in (time, stop, count, max ms, ms a frame):
+  23:51:03 r1 overview  count    88  max  25.10  12.30 ms a frame
+  23:53:09 r1 fortress  count    42  max  20.53  0.56 ms a frame
+  23:53:34 r1 field     count    37  max  12.39  0.17 ms a frame
+find path: listed in 5 of 43 profiles, about 153 runs over them
