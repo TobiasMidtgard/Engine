@@ -1391,6 +1391,44 @@ mod tests {
     }
 
     #[test]
+    fn a_height_query_never_asks_the_hand_made_grounds_paint() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static PAINTS: AtomicUsize = AtomicUsize::new(0);
+        let mut app = App::new();
+        app.add_plugins(engine_world::WorldPlugin)
+            .add_plugins(TerrainPlugin);
+        let pad = FlatPad::default();
+        let t = PlanetTerrain::earthlike(3)
+            .with_pad(pad)
+            .with_overlay(300.0, 100.0, |x, z| {
+                2.0 + (x * 0.05).sin() + (z * 0.03).cos()
+            })
+            .with_overlay_paint(|_, _| {
+                PAINTS.fetch_add(1, Ordering::Relaxed);
+                None
+            });
+        let tf = t.home_transform(pad);
+        app.world.spawn((tf, t));
+        app.update_n(2);
+        let g = app.world.resource::<engine_world::Ground>().clone();
+        let points: Vec<DVec3> = (0..50)
+            .map(|i| DVec3::new(i as f64 * 7.0 - 175.0, 2000.0, i as f64 * 3.0 - 75.0))
+            .collect();
+        let full: Vec<_> = points
+            .iter()
+            .map(|&p| g.sample(p).map(|s| s.height))
+            .collect();
+        let before = PAINTS.load(Ordering::Relaxed);
+        let alone: Vec<_> = points.iter().map(|&p| g.height(p)).collect();
+        assert_eq!(
+            PAINTS.load(Ordering::Relaxed),
+            before,
+            "height alone asked the paint"
+        );
+        assert_eq!(full, alone, "height alone differs from the full sample");
+    }
+
+    #[test]
     fn height_alone_matches_the_full_sample() {
         let mut app = app_with_planet();
         app.update_n(2);

@@ -1415,7 +1415,7 @@ type Buffers = (Vec<Vertex>, Vec<u32>);
 /// The ground's terrain-local point and up under terrain-local point `local`.
 fn ground_at(source: &ChunkSource, local: DVec3) -> Option<(DVec3, DVec3)> {
     let (dir, up, base) = source.map.locate(local)?;
-    Some((base + up * source.sample(base, up, dir, 0.0).height, up))
+    Some((base + up * source.ground_height(base, up, dir, 0.0), up))
 }
 
 /// The ground's point and up at the middle of a quadtree cell, and the rotation from +Y to
@@ -2203,7 +2203,7 @@ mod tests {
         // On the ground.
         let source = crate::TerrainRuntime::new(&t, Default::default(), 1).source;
         let (dir, up, base) = source.map.locate(first.position).unwrap();
-        let g = source.sample(base, up, dir, 0.0).height;
+        let g = source.ground_height(base, up, dir, 0.0);
         assert!(((first.position.length() - r) - g).abs() < 0.5);
     }
 
