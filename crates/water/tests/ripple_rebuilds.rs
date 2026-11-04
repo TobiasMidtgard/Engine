@@ -122,3 +122,35 @@ fn a_lake_bed_that_really_changed_is_read_in() {
         "deeper by a metre: {before} -> {after}"
     );
 }
+
+#[test]
+fn walking_along_a_lake_rebuilds_the_grid_where_it_moves() {
+    let mut app = app();
+    app.update_n(3 * 60);
+    let focus = app
+        .world
+        .query_filtered::<Entity, With<SimulationFocus>>()
+        .single(&app.world)
+        .expect("one focus");
+    let (before, mut moves, mut origin) = (
+        rebuilds(&app),
+        0,
+        app.world.resource::<SharedWater>().0.read().ripples.origin,
+    );
+    // Across the lake at a run, 6 m/s for 15 s: the grid follows every few meters.
+    for k in 0..15 * 60 {
+        let x = -40.0 + k as f64 * 0.1;
+        app.world.get_mut::<Transform>(focus).unwrap().translation = DVec3::new(x, 1.7, 2.0);
+        app.update();
+        let now = app.world.resource::<SharedWater>().0.read().ripples.origin;
+        if now != origin {
+            moves += 1;
+            origin = now;
+        }
+    }
+    let more = rebuilds(&app) - before;
+    println!("{moves} moves, {more} rebuilds");
+    assert!(moves >= 5, "the grid followed: {moves} moves");
+    // Each move rebuilds, and again once its reads are in; not at every step of the reads.
+    assert!(more <= 2 * moves + 2, "{more} rebuilds for {moves} moves");
+}

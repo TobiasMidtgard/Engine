@@ -341,7 +341,8 @@ struct Globals {
     /// or -1 (-2: shelter and slicks off).
     shelter: [f32; 4],
     /// The swash (`render/swash.rs`): corner rel camera x, z, size (m), on (1/0); its datum rel
-    /// camera y, cell (m), false colour on (`ENGINE_WATER_SWASH_DEBUG`), unused.
+    /// camera y, cell (m), false colour on (`ENGINE_WATER_SWASH_DEBUG`), reflection sources in
+    /// false colour (`ENGINE_WATER_REFLECT_DEBUG`).
     swash: [f32; 4],
     swash2: [f32; 4],
     /// The camera at the waterline (`waterline.rs`): split per pixel (1/0), the lens's dome
@@ -741,6 +742,14 @@ fn plain_shore() -> bool {
 fn plain_waterline() -> bool {
     static PLAIN: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *PLAIN.get_or_init(|| std::env::var_os("ENGINE_WATER_PLAIN_WATERLINE").is_some())
+}
+
+/// `ENGINE_WATER_REFLECT_DEBUG` set: the water shows where its reflection comes from (the lake
+/// mirror's picture red, screen-space reflections green, the sky blue; darker in the sun's
+/// shadow).
+fn reflect_debug() -> bool {
+    static DEBUG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *DEBUG.get_or_init(|| std::env::var_os("ENGINE_WATER_REFLECT_DEBUG").is_some())
 }
 
 /// `ENGINE_WATER_SWASH_DEBUG` set: the sand in false colour (depth red, damp green, sheen blue).
@@ -1986,6 +1995,7 @@ impl RenderFeature for WaterFeature {
             let debug = if swash_debug() { 1.0 } else { 0.0 };
             g.swash2 = [rel.y, f.size / crate::swash::N as f32, debug, 0.0];
         }
+        g.swash2[3] = if reflect_debug() { 1.0 } else { 0.0 };
         // The ripples' heights come from the dispersive surface while it runs.
         g.detail[3] = if gpu.surface.drawn() { 1.0 } else { 0.0 };
         if let Some((corner, size)) = gpu.surface.coarse_drawn() {
