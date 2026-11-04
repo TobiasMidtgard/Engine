@@ -767,6 +767,10 @@ pub struct Contacts {
     pub hitting: BTreeMap<(Entity, Entity), RegionId>,
     /// Pairs gone pending this substep, before [`Region::touches`] could see them.
     pub fresh: Vec<(Entity, Entity)>,
+    /// Colliders rebuilt since their pairs were last looked at
+    /// ([`Simulation::tidy_rebuilt_contacts`]): a zone's 700 statics placed again each scanned
+    /// every pair (7,000 touching in the proving ground's region), 5-50 ms of a sync.
+    pub rebuilt: EntityHashSet,
 }
 
 /// An articulated group counts as this much nearer when the articulation budget ranks groups
@@ -1596,8 +1600,60 @@ impl Simulation {
     /// Forget a collider. With `user_removed`, contacts it had end now (the game removed it);
     /// otherwise it is being rebuilt and its contacts are re-checked after the next step.
     pub fn remove_collider(&mut self, entity: Entity, user_removed: bool) {
-        if !self.colliders.contains_key(&entity) {
+        if user_removed {
+            self.remove_colliders(&[entity]);
+        } else if self.drop_collider(entity) {
+            self.contacts.rebuilt.insert(entity);
+        }
+    }
+
+    /// Forget colliders the game removed; the contacts they had end now. One look over the
+    /// pairs for them all.
+    pub fn remove_colliders(&mut self, entities: &[Entity]) {
+        let gone: EntityHashSet = entities
+            .iter()
+            .copied()
+            .filter(|e| self.drop_collider(*e))
+            .collect();
+        if gone.is_empty() {
             return;
+        }
+        let pairs = self.forget_pairs(&gone);
+        for k in pairs {
+            let (a, b, sensor) = self.contacts.touching.remove(&k).unwrap();
+            self.contacts.out.push(ended(a, b, sensor));
+        }
+    }
+
+    /// Look once over the pairs of the colliders rebuilt since the last look: pending ones
+    /// are dropped (their handles are gone) and touching ones re-checked after the next step.
+    /// Runs before every step.
+    pub fn tidy_rebuilt_contacts(&mut self) {
+        if self.contacts.rebuilt.is_empty() {
+            return;
+        }
+        let rebuilt = std::mem::take(&mut self.contacts.rebuilt);
+        let pairs = self.forget_pairs(&rebuilt);
+        self.contacts.recheck.extend(pairs);
+    }
+
+    /// Drop the pending pairs of `gone` and return their touching pairs.
+    fn forget_pairs(&mut self, gone: &EntityHashSet) -> Vec<(Entity, Entity)> {
+        self.contacts
+            .pending
+            .retain(|k, _| !gone.contains(&k.0) && !gone.contains(&k.1));
+        self.contacts
+            .touching
+            .keys()
+            .filter(|k| gone.contains(&k.0) || gone.contains(&k.1))
+            .copied()
+            .collect()
+    }
+
+    /// Remove a collider from the simulation, its pairs left for the caller. Was it there?
+    fn drop_collider(&mut self, entity: Entity) -> bool {
+        if !self.colliders.contains_key(&entity) {
+            return false;
         }
         self.remove_collider_handles(entity);
         let c = self.colliders.remove(&entity).unwrap();
@@ -1609,24 +1665,7 @@ impl Simulation {
         if let Some(body) = c.body {
             self.fix_mass(body);
         }
-        self.contacts
-            .pending
-            .retain(|k, _| k.0 != entity && k.1 != entity);
-        let pairs: Vec<(Entity, Entity)> = self
-            .contacts
-            .touching
-            .keys()
-            .filter(|k| k.0 == entity || k.1 == entity)
-            .copied()
-            .collect();
-        if user_removed {
-            for k in pairs {
-                let (a, b, sensor) = self.contacts.touching.remove(&k).unwrap();
-                self.contacts.out.push(ended(a, b, sensor));
-            }
-        } else {
-            self.contacts.recheck.extend(pairs);
-        }
+        true
     }
 
     /// Update a static collider's pose after gameplay moved it.

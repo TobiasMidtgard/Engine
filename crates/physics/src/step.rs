@@ -237,12 +237,13 @@ pub(crate) fn physics_sync(world: &mut World, mut q: Local<Option<StepQueries>>)
         gone.extend(ch.read());
     }
     let mut dirty_colliders: Vec<Entity> = Vec::new();
+    let mut removed: Vec<Entity> = Vec::new();
     for e in gone {
         if world.get::<RigidBody>(e).is_none() {
             dirty_colliders.extend(sim.forget_body(e));
         }
         if world.get::<Collider>(e).is_none() && sim.colliders.contains_key(&e) {
-            sim.remove_collider(e, true);
+            removed.push(e);
         }
         if world.get::<Collider>(e).is_none() {
             sim.pending_statics.remove(&e);
@@ -254,6 +255,7 @@ pub(crate) fn physics_sync(world: &mut World, mut q: Local<Option<StepQueries>>)
             sim.remove_character(e);
         }
     }
+    sim.remove_colliders(&removed);
 
     drop((_part, _piece));
     // ---------------------------------------------------------------- bodies
@@ -431,6 +433,7 @@ pub(crate) fn physics_sync(world: &mut World, mut q: Local<Option<StepQueries>>)
     }
     let statics_ms = placed_started.elapsed().as_secs_f64() * 1000.0;
     let (pending_placed, waited_ms, pending_ms) = place_pending_statics(world, &mut sim);
+    sim.tidy_rebuilt_contacts();
     let total_ms = colliders_started.elapsed().as_secs_f64() * 1000.0;
     if total_ms > 5.0 && crate::report::wanted() {
         engine_core::log::info!(
