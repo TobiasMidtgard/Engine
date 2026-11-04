@@ -1,0 +1,14 @@
+07:44:17.817Z     0.03  mode stops quality ultra size '' spec 'plaza:75'; idle before start 33,647 s; HEAD ced07d57
+07:44:18.155Z     0.37  started: showcase.exe --fly --profile --quality ultra  env ENGINE_EXECUTOR=single:Update,PostUpdate,First,Last,PreUpdate,FixedPreUpdate,FixedPostUpdate ENGINE_PROFILE=1
+07:44:24.636Z     6.85  window visible: client 1600x900, window 1616x939 at (26,26), maximized False
+07:44:24.646Z     6.86  bridge connected
+07:44:24.783Z     7.00  world built
+07:44:30.548Z    12.76  after build: working set 4,706 MB, private 8,944 MB; system free 32,660 of 65,277 MB
+07:44:30.632Z    12.85  AT plaza: {"id":1,"jsonrpc":"2.0","result":{"place":"plaza","position":[10.0,4.5,16.0]}}
+07:45:10.770Z    52.98  trace trace_plaza (120 frames): {"id":10,"jsonrpc":"2.0","result":{"frames":120,"recording":"C:/Users/Tobit/AppData/Local/Temp/claude/C--Users-Tobit-Documents-ProgrammingProjects/a9b51fd2-8307-4505-9047-44a5b14953cc/scratchpad/r27/a3_single_but_fixed/trace_plaza.json"}}
+07:45:15.857Z    58.07  trace written: 120 frames to trace_plaza.json at 07:45:13.404231Z in the log (read 5.1 s after the ask)
+07:45:46.058Z    88.27  END plaza: working set 5,270 MB, private 15,924 MB; system free 32,169 of 65,277 MB
+07:45:46.133Z    88.35  shot plaza: {"id":20,"jsonrpc":"2.0","result":{"height":900,"path":"screenshots/r27/plaza.png","width":1600}}
+07:45:49.479Z    91.69  sampler job: Completed
+07:45:49.484Z    91.70  killing the game
+07:46:32.101Z   134.32  done

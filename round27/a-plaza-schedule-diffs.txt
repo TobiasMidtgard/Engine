@@ -1,0 +1,196 @@
+== A a1_plain, B a2_single
+First: wall 0.30 ms a frame (1.00 runs) in A, 0.28 (1.00 runs) in B; systems' sum 0.21 / 0.25
+   A ms    B ms    B-A  system (ms a frame)
+   0.165   0.208  +0.043  engine_core::frame_diagnostics_system
+   0.003   0.001  -0.002  engine::clear_readouts_system
+   0.003   0.001  -0.002  engine_foliage::measure_frames
+   0.020   0.020  +0.001  engine_ai_bridge::bridge_frame_start_system
+   0.002   0.002  -0.001  engine_debug::perf_overlay_system
+   0.008   0.009  +0.001  bevy_ecs::message_update_system
+   0.002   0.001  -0.000  engine_debug::begin_frame_system
+   0.001   0.001  -0.000  engine_movement::build_library (commands)
+   0.002   0.002  -0.000  engine_core::time_system
+   0.002   0.002  +0.000  engine_vehicles::apply_baked
+   0.001   0.001  +0.000  engine_core::apply_off_frame_system
+   0.001   0.001  +0.000  engine_core::off_frame_due
+
+== A a1_plain, B a3_single_but_fixed
+First: wall 0.30 ms a frame (1.00 runs) in A, 0.27 (1.00 runs) in B; systems' sum 0.21 / 0.24
+   A ms    B ms    B-A  system (ms a frame)
+   0.165   0.196  +0.031  engine_core::frame_diagnostics_system
+   0.003   0.001  -0.002  engine::clear_readouts_system
+   0.003   0.001  -0.002  engine_foliage::measure_frames
+   0.020   0.021  +0.001  engine_ai_bridge::bridge_frame_start_system
+   0.008   0.008  -0.000  bevy_ecs::message_update_system
+   0.002   0.001  -0.000  engine_debug::begin_frame_system
+   0.002   0.002  -0.000  engine_core::time_system
+   0.001   0.001  -0.000  engine_movement::build_library (commands)
+   0.002   0.002  -0.000  engine_debug::perf_overlay_system
+   0.002   0.002  +0.000  engine_vehicles::apply_baked
+   0.001   0.001  +0.000  engine_core::off_frame_due
+   0.002   0.002  -0.000  engine_movement::build_library
+
+== A a1_plain, B a2_single
+PreUpdate: wall 0.13 ms a frame (1.00 runs) in A, 0.09 (1.00 runs) in B; systems' sum 0.07 / 0.06
+   A ms    B ms    B-A  system (ms a frame)
+   0.002   0.001  -0.001  engine_input::clear_input_system
+   0.002   0.001  -0.001  engine_world::apply_scalability
+   0.002   0.001  -0.001  engine_input::apply_input_events_system
+   0.002   0.001  -0.001  engine_softbody::follow_scalability
+   0.002   0.001  -0.001  engine_foliage::assign_regions
+   0.002   0.001  -0.001  engine_water::finish_demo_art_system
+   0.001   0.001  -0.001  engine_anim::prefetch_pending
+   0.001   0.000  -0.001  engine_foliage::assign_regions (commands)
+   0.002   0.002  -0.001  engine_foliage::apply_new_sources
+   0.014   0.014  +0.000  engine_input::update_actions_system
+   0.002   0.002  -0.000  engine_assets::apply_loaded_assets
+   0.002   0.002  -0.000  engine_water::start_demo_art_system
+
+== A a1_plain, B a3_single_but_fixed
+PreUpdate: wall 0.13 ms a frame (1.00 runs) in A, 0.09 (1.00 runs) in B; systems' sum 0.07 / 0.06
+   A ms    B ms    B-A  system (ms a frame)
+   0.019   0.018  -0.001  engine_ui::ui_input_system
+   0.002   0.001  -0.001  engine_input::clear_input_system
+   0.002   0.001  -0.001  engine_foliage::assign_regions
+   0.002   0.001  -0.001  engine_water::finish_demo_art_system
+   0.002   0.001  -0.001  engine_world::apply_scalability
+   0.002   0.002  -0.001  engine_foliage::apply_new_sources
+   0.002   0.001  -0.001  engine_input::apply_input_events_system
+   0.002   0.001  -0.001  engine_softbody::follow_scalability
+   0.001   0.000  -0.000  engine_foliage::assign_regions (commands)
+   0.002   0.001  -0.000  engine_water::start_demo_art_system
+   0.012   0.011  -0.000  engine_foliage::init_regions
+   0.001   0.001  -0.000  engine_anim::prefetch_pending
+
+== A a1_plain, B a2_single
+FixedUpdate: wall 6.64 ms a frame (1.14 runs) in A, 9.26 (1.36 runs) in B; systems' sum 7.63 / 8.77
+   A ms    B ms    B-A  system (ms a frame)
+   0.248   0.796  +0.548  engine_npc::think_and_act
+   1.118   1.459  +0.340  engine_smoke::step
+   0.484   0.172  -0.312  engine_fire::step_field
+   0.233   0.370  +0.137  engine_movement::step_movers
+   0.006   0.096  +0.090  engine_vehicles::engine_events_system
+   0.217   0.291  +0.074  engine_smoke::publish
+   1.006   1.079  +0.073  engine_physics::physics_simulate
+   0.461   0.395  -0.067  engine_softbody::step_beside_physics
+   0.015   0.079  +0.064  engine_foliage::ecology_step
+   0.126   0.159  +0.033  engine_vehicles::wheels_system
+   0.289   0.321  +0.031  engine_softbody::gather_colliders
+   0.180   0.204  +0.024  engine_npc::fallback_move
+
+== A a1_plain, B a3_single_but_fixed
+FixedUpdate: wall 6.64 ms a frame (1.14 runs) in A, 8.03 (1.28 runs) in B; systems' sum 7.63 / 8.89
+   A ms    B ms    B-A  system (ms a frame)
+   1.118   1.641  +0.523  engine_smoke::step
+   0.248   0.727  +0.479  engine_npc::think_and_act
+   0.484   0.298  -0.187  engine_fire::step_field
+   0.217   0.334  +0.117  engine_smoke::publish
+   0.289   0.333  +0.044  engine_softbody::gather_colliders
+   0.461   0.424  -0.037  engine_softbody::step_beside_physics
+   0.645   0.680  +0.036  engine_softbody::step_bodies
+   0.180   0.216  +0.035  engine_npc::fallback_move
+   0.233   0.265  +0.031  engine_movement::step_movers
+   0.325   0.297  -0.028  engine_physics::physics_sync
+   0.198   0.225  +0.026  engine_weather::ground_system
+   0.137   0.156  +0.018  engine_water::boat_air_system
+
+== A a1_plain, B a2_single
+Update: wall 3.55 ms a frame (1.00 runs) in A, 3.91 (1.00 runs) in B; systems' sum 5.16 / 4.79
+   A ms    B ms    B-A  system (ms a frame)
+   0.479   0.365  -0.114  engine_fire::update_grass
+   0.349   0.315  -0.033  engine_anim::demo_path_system
+   0.107   0.076  -0.031  engine_foliage::offer_chops
+   0.131   0.160  +0.029  engine_movement::animate_puppets
+   0.067   0.089  +0.022  engine_foliage::sync_plant_visuals
+   0.072   0.055  -0.017  engine_anim::shuttle_system
+   0.078   0.093  +0.015  engine_anim::evaluate_animators
+   0.058   0.045  -0.013  engine_anim::stunt_system
+   0.029   0.016  -0.013  showcase::stream_wall_heroes
+   0.049   0.040  -0.009  engine_foliage::sync_tree_colliders
+   0.010   0.004  -0.006  engine_core::{{closure}}
+   0.062   0.057  -0.005  engine_vfx::react_to_world
+
+== A a1_plain, B a3_single_but_fixed
+Update: wall 3.55 ms a frame (1.00 runs) in A, 3.84 (1.00 runs) in B; systems' sum 5.16 / 4.71
+   A ms    B ms    B-A  system (ms a frame)
+   0.479   0.350  -0.128  engine_fire::update_grass
+   0.107   0.076  -0.031  engine_foliage::offer_chops
+   0.349   0.329  -0.020  engine_anim::demo_path_system
+   0.072   0.052  -0.020  engine_anim::shuttle_system
+   0.078   0.097  +0.019  engine_anim::evaluate_animators
+   0.058   0.040  -0.018  engine_anim::stunt_system
+   0.131   0.113  -0.018  engine_movement::animate_puppets
+   0.029   0.017  -0.013  showcase::stream_wall_heroes
+   0.049   0.039  -0.010  engine_foliage::sync_tree_colliders
+   0.010   0.004  -0.006  engine_core::{{closure}}
+   0.046   0.041  -0.005  engine_script::draw_graph_boards
+   0.025   0.020  -0.005  engine_anim::run_attacks
+
+== A a1_plain, B a2_single
+PostUpdate: wall 2.92 ms a frame (1.00 runs) in A, 3.76 (1.00 runs) in B; systems' sum 3.61 / 3.52
+   A ms    B ms    B-A  system (ms a frame)
+   0.315   0.411  +0.096  engine_anim::foot_ik_system
+   0.201   0.169  -0.032  engine_anim::gait_system
+   0.028   0.049  +0.022  engine_audio::occlusion
+   0.031   0.050  +0.020  engine_anim::warp_system
+   0.063   0.047  -0.015  engine_space::update_space
+   0.058   0.043  -0.015  engine_audio::water_ambience
+   0.079   0.093  +0.014  engine_terrain::deform_from_contacts
+   0.073   0.086  +0.013  engine_terrain::wear_from_contacts
+   0.013   0.003  -0.010  engine_foliage::follow_world_shift
+   0.069   0.059  -0.010  engine_anim::ragdoll_system
+   0.174   0.164  -0.010  engine_terrain::update_landmarks
+   0.151   0.142  -0.009  engine_anim::vehicle_rig_system
+
+== A a1_plain, B a3_single_but_fixed
+PostUpdate: wall 2.92 ms a frame (1.00 runs) in A, 3.83 (1.00 runs) in B; systems' sum 3.61 / 3.57
+   A ms    B ms    B-A  system (ms a frame)
+   0.058   0.152  +0.094  engine_audio::water_ambience
+   0.315   0.380  +0.064  engine_anim::foot_ik_system
+   0.201   0.163  -0.038  engine_anim::gait_system
+   0.028   0.055  +0.027  engine_audio::occlusion
+   0.031   0.050  +0.020  engine_anim::warp_system
+   0.069   0.052  -0.017  engine_anim::ragdoll_system
+   0.063   0.047  -0.016  engine_space::update_space
+   0.405   0.390  -0.015  engine_core::propagate_transforms_system
+   0.079   0.092  +0.014  engine_terrain::deform_from_contacts
+   0.073   0.086  +0.012  engine_terrain::wear_from_contacts
+   0.013   0.003  -0.010  engine_foliage::follow_world_shift
+   0.012   0.003  -0.009  engine_softbody::follow_world_shift
+
+== A a1_plain, B a2_single
+Last: wall 0.31 ms a frame (1.00 runs) in A, 0.20 (1.00 runs) in B; systems' sum 0.25 / 0.18
+   A ms    B ms    B-A  system (ms a frame)
+   0.209   0.162  -0.047  engine::stream_system
+   0.017   0.007  -0.010  engine_core::profile_report_system
+   0.007   0.001  -0.006  engine_script::free_own_materials
+   0.008   0.004  -0.004  engine_audio::drive_output
+   0.005   0.003  -0.003  engine_physics::note_removals
+   0.001   0.001  -0.001  engine_core::enabled
+   0.002   0.001  -0.000  engine_ai_bridge::bridge_frame_end_system
+   0.001   0.001  +0.000  engine_core::parallelism_report_system
+
+== A a1_plain, B a3_single_but_fixed
+Last: wall 0.31 ms a frame (1.00 runs) in A, 0.24 (1.00 runs) in B; systems' sum 0.25 / 0.21
+   A ms    B ms    B-A  system (ms a frame)
+   0.209   0.188  -0.021  engine::stream_system
+   0.007   0.003  -0.005  engine_script::free_own_materials
+   0.017   0.012  -0.004  engine_core::profile_report_system
+   0.008   0.004  -0.004  engine_audio::drive_output
+   0.005   0.002  -0.003  engine_physics::note_removals
+   0.001   0.001  -0.001  engine_core::enabled
+   0.002   0.002  +0.000  engine_ai_bridge::bridge_frame_end_system
+   0.001   0.001  +0.000  engine_core::parallelism_report_system
+
+== A a1_plain, B a2_single
+Render: wall 4.79 ms a frame (1.00 runs) in A, 4.72 (1.00 runs) in B; systems' sum 4.75 / 4.71
+   A ms    B ms    B-A  system (ms a frame)
+   4.743   4.714  -0.029  engine_render::render_system
+   0.004   0.001  -0.003  engine_debug::end_frame_system
+
+== A a1_plain, B a3_single_but_fixed
+Render: wall 4.79 ms a frame (1.00 runs) in A, 4.76 (1.00 runs) in B; systems' sum 4.75 / 4.72
+   A ms    B ms    B-A  system (ms a frame)
+   4.743   4.716  -0.027  engine_render::render_system
+   0.004   0.004  -0.001  engine_debug::end_frame_system
+
