@@ -1135,7 +1135,9 @@ impl Landscape {
         half as f32 - 0.2 + self.track_ragged(x, z) * 0.6
     }
 
-    /// What covers the ground at (x, z), from the height and slope there.
+    /// What covers the ground at (x, z), from the height and slope there (the ground query
+    /// works these out once for its sample and calls [`Self::cover`]).
+    #[cfg(test)]
     pub fn cover_at(&self, x: f64, z: f64) -> Cover {
         let h = self.height(x, z);
         let n = self.normal(x, z, 0.5);
@@ -1191,10 +1193,14 @@ fn gravel() -> SurfaceMaterial {
 impl GroundQuery for LandscapeGround {
     fn sample(&self, p: DVec3) -> Option<GroundSample> {
         let l = &self.land;
+        // Height and normal once, for the sample and for the cover (working them out again
+        // for the cover took twice the height taps).
+        let height = l.height(p.x, p.z);
+        let normal = l.normal(p.x, p.z, 0.5);
         Some(GroundSample {
-            height: l.height(p.x, p.z),
-            normal: l.normal(p.x, p.z, 0.5),
-            surface: self.surface_ids[l.cover_at(p.x, p.z) as usize],
+            height,
+            normal,
+            surface: self.surface_ids[l.cover(p.x, p.z, height, normal) as usize],
         })
     }
 

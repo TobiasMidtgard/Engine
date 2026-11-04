@@ -1849,6 +1849,24 @@ mod tests {
         assert_eq!(Some(painted.surface), mud);
         let pit = g.sample(DVec3::new(30.0, 5.0, -30.0)).unwrap();
         assert!(pit.height < -3.0, "pit floor {}", pit.height);
+        // The override's quick path (height without the full sample) finds the same ground
+        // as the height query and as the terrain itself, on the pad, in the pit and over paint.
+        for p in [
+            DVec3::new(10.0, 5.0, -20.0),
+            DVec3::new(30.0, 5.0, -30.0),
+            DVec3::new(31.5, 5.0, -29.0),
+            DVec3::new(20.0, 5.0, 20.0),
+            DVec3::new(-10.0, 5.0, -20.0),
+        ] {
+            let s = g.sample(p).unwrap();
+            assert_eq!(Some(s.height), g.height(p), "at {p}");
+            assert!(s.normal.y > 0.5, "normal {} at {p}", s.normal);
+        }
+        let rim = g.sample(DVec3::new(33.5, 5.0, -30.0)).unwrap();
+        assert_eq!(
+            rim.surface, sand,
+            "a dug (unpainted) pit keeps the override's name"
+        );
     }
 
     #[test]

@@ -705,6 +705,24 @@ fn flow_refresh_frames(gap: f64) -> u32 {
     }
 }
 
+/// GPU resources of the creeks' ribbons ([`crate::creeks::CreekRibbons`]).
+struct CreeksGpu {
+    pipeline: wgpu::RenderPipeline,
+    uniform: wgpu::Buffer,
+    /// Group 2 for them: the uniform and a texel standing in for a flow grid's.
+    group: wgpu::BindGroup,
+    vertices: Option<wgpu::Buffer>,
+    indices: Option<wgpu::Buffer>,
+    /// Vertices and indices the buffers have room for.
+    capacity: (usize, usize),
+    index_count: u32,
+    /// The ribbons' version uploaded.
+    version: u64,
+    /// The ribbons' anchor (world).
+    anchor: DVec3,
+    drawn: bool,
+}
+
 struct Gpu {
     body: wgpu::RenderPipeline,
     flow: wgpu::RenderPipeline,
@@ -772,6 +790,8 @@ struct Gpu {
     /// [`BODY_FEW`].
     body_split: usize,
     body_uploaded: bool,
+    /// Creeks drawn without simulation (`crate::creeks`): their ribbons as last uploaded.
+    creeks: CreeksGpu,
     /// The fine wind waves' tiles.
     detail: detail::DetailGpu,
     /// The dispersive ripples over the ripple grid.
@@ -1177,6 +1197,84 @@ impl WaterFeature {
             "fs_flow",
             gpu.depth_state(true),
         );
+        // Creeks' ribbons: the flow grids' shading on vertices of their own.
+        let creek_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("water creeks"),
+            layout: Some(&layout2),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_creek"),
+                compilation_options: Default::default(),
+                buffers: &[Some(wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<crate::creeks::CreekVertex>() as u64,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &wgpu::vertex_attr_array![
+                        0 => Float32x4, 1 => Float32x4, 2 => Float32x4
+                    ],
+                })],
+            },
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                cull_mode: None,
+                ..Default::default()
+            },
+            depth_stencil: Some(gpu.depth_state(true)),
+            multisample: Default::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_creek"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: gpu.formats.hdr,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+        let creeks = {
+            let uniform = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("water creeks"),
+                size: std::mem::size_of::<FlowUniform>() as u64,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            let texel = create_texture(
+                device,
+                "water creeks",
+                1,
+                1,
+                wgpu::TextureFormat::Rgba32Float,
+            );
+            let view = texel.create_view(&Default::default());
+            let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("water creeks"),
+                layout: &group2_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: uniform.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::TextureView(&view),
+                    },
+                ],
+            });
+            CreeksGpu {
+                pipeline: creek_pipeline,
+                uniform,
+                group,
+                vertices: None,
+                indices: None,
+                capacity: (0, 0),
+                index_count: 0,
+                version: u64::MAX,
+                anchor: DVec3::ZERO,
+                drawn: false,
+            }
+        };
         let puddle = pipeline(
             "water puddles",
             &layout1,
@@ -1425,6 +1523,7 @@ impl WaterFeature {
             fall_key: Vec::new(),
             fall_uploaded: false,
             fall_body,
+            creeks,
             body_buffer,
             body_capacity,
             body_segs: Vec::new(),
@@ -1908,6 +2007,74 @@ impl WaterFeature {
                 );
             }
         }
+    }
+
+    /// The creeks' ribbons ([`crate::creeks::CreekRibbons`]): uploaded when rebuilt, placed
+    /// for this view. Returns the triangles drawn.
+    fn upload_creeks(gpu: &mut Gpu, shared: &GpuShared, world: &World, view: &ViewData) -> u32 {
+        let c = &mut gpu.creeks;
+        c.drawn = false;
+        let Some(ribbons) = world.get_resource::<crate::creeks::CreekRibbons>() else {
+            return 0;
+        };
+        if ribbons.version != c.version {
+            c.version = ribbons.version;
+            c.anchor = ribbons.anchor;
+            c.index_count = ribbons.indices.len() as u32;
+            if !ribbons.indices.is_empty() {
+                let device = &shared.device;
+                let (nv, ni) = (ribbons.vertices.len(), ribbons.indices.len());
+                if c.vertices.is_none() || nv > c.capacity.0 || ni > c.capacity.1 {
+                    // With room to grow, so a walk doesn't make new buffers every rebuild.
+                    let (cv, ci) = (
+                        (nv + nv / 2).max(c.capacity.0).max(1024),
+                        (ni + ni / 2).max(c.capacity.1).max(4096),
+                    );
+                    c.vertices = Some(device.create_buffer(&wgpu::BufferDescriptor {
+                        label: Some("water creek vertices"),
+                        size: (cv * std::mem::size_of::<crate::creeks::CreekVertex>()) as u64,
+                        usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                        mapped_at_creation: false,
+                    }));
+                    c.indices = Some(device.create_buffer(&wgpu::BufferDescriptor {
+                        label: Some("water creek indices"),
+                        size: (ci * 4) as u64,
+                        usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
+                        mapped_at_creation: false,
+                    }));
+                    c.capacity = (cv, ci);
+                }
+                if let (Some(v), Some(i)) = (&c.vertices, &c.indices) {
+                    shared
+                        .queue
+                        .write_buffer(v, 0, bytemuck::cast_slice(&ribbons.vertices));
+                    shared
+                        .queue
+                        .write_buffer(i, 0, bytemuck::cast_slice(&ribbons.indices));
+                }
+            }
+        } else if ribbons.anchor != c.anchor {
+            // Moved by a world shift, not yet rebuilt.
+            c.anchor = ribbons.anchor;
+        }
+        if c.index_count == 0 {
+            return 0;
+        }
+        c.drawn = true;
+        let o = view.relative(c.anchor);
+        let optics = WaterOptics::stream();
+        let (absorb, scatter) = optics_vectors(&optics);
+        let u = FlowUniform {
+            origin: [o.x, o.y, o.z, 1.0],
+            dims: [0.0, 0.0, 1.0, 0.0],
+            absorb,
+            scatter,
+            look: [optics.foam, optics.caustics, optics.refraction, 0.0],
+        };
+        shared
+            .queue
+            .write_buffer(&c.uniform, 0, bytemuck::bytes_of(&u));
+        c.index_count / 3
     }
 
     /// Standing water near the camera from `SurfaceLayers`. Returns the uniform's
@@ -2494,6 +2661,7 @@ impl RenderFeature for WaterFeature {
         drop(span);
         let span = tracing::info_span!("water", name = "flow upload").entered();
         Self::upload_flows(gpu, shared, &state, view);
+        let creek_triangles = Self::upload_creeks(gpu, shared, world, view);
         drop(span);
 
         // Stats.
@@ -2504,7 +2672,8 @@ impl RenderFeature for WaterFeature {
             + self.underwater as u32
             + self.lens_on as u32
             + (gpu.fall_count > 0) as u32
-            + !gpu.body_segs.is_empty() as u32;
+            + !gpu.body_segs.is_empty() as u32
+            + gpu.creeks.drawn as u32;
         self.stats.instances = self.bodies.len() as u32;
         self.stats.triangles = self
             .bodies
@@ -2513,6 +2682,7 @@ impl RenderFeature for WaterFeature {
             .sum::<u64>()
             + flows.map(|f| f.index_count as u64 / 3).sum::<u64>()
             + gpu.fall_count as u64 / 3
+            + creek_triangles as u64
             + gpu
                 .body_segs
                 .iter()
@@ -2665,6 +2835,15 @@ impl RenderFeature for WaterFeature {
                 pass.draw_indexed(0..f.index_count, 0, 0..1);
             }
         }
+        if let (true, Some(v), Some(i)) =
+            (gpu.creeks.drawn, &gpu.creeks.vertices, &gpu.creeks.indices)
+        {
+            pass.set_pipeline(&gpu.creeks.pipeline);
+            pass.set_bind_group(2, &gpu.creeks.group, &[]);
+            pass.set_vertex_buffer(0, v.slice(..));
+            pass.set_index_buffer(i.slice(..), wgpu::IndexFormat::Uint32);
+            pass.draw_indexed(0..gpu.creeks.index_count, 0, 0..1);
+        }
         if !self.bodies.is_empty() {
             pass.set_pipeline(&gpu.body);
             pass.set_index_buffer(gpu.grid_index.slice(..), wgpu::IndexFormat::Uint32);
@@ -2707,7 +2886,10 @@ impl RenderFeature for WaterFeature {
             || self.lens_on
             || self.puddles.wet
             || self.gpu.as_ref().is_some_and(|g| {
-                g.fall_count > 0 || g.flows.iter().any(|f| f.drawn) || g.swash.frame().is_some()
+                g.fall_count > 0
+                    || g.flows.iter().any(|f| f.drawn)
+                    || g.creeks.drawn
+                    || g.swash.frame().is_some()
             })
     }
 

@@ -1414,13 +1414,18 @@ impl Client {
         crate::dap::read_message(&mut self.reader).expect("the debugger went away")
     }
 
-    /// Sends a request and returns its response's body (panics when it failed).
-    fn request(&mut self, command: &str, arguments: Value) -> Value {
+    /// Sends a request without waiting for its response (which lands in `events`).
+    fn send(&mut self, command: &str, arguments: Value) {
         use std::io::Write;
         self.seq += 1;
         let message = json!({"seq": self.seq, "type": "request", "command": command,
             "arguments": arguments});
         self.stream.write_all(&crate::dap::frame(&message)).unwrap();
+    }
+
+    /// Sends a request and returns its response's body (panics when it failed).
+    fn request(&mut self, command: &str, arguments: Value) -> Value {
+        self.send(command, arguments);
         loop {
             let m = self.read();
             if m["type"] == "response" && m["request_seq"] == self.seq {
@@ -1670,6 +1675,13 @@ return Waiter
             n,
             "stopped before the loop counted again"
         );
+        // A pause sent right behind a continue, before its answer (the two read in one
+        // frame, as a client that doesn't wait sends them), pauses: it used to be taken as a
+        // request to the stop that was ending, and dropped (CI, now and then).
+        c.send("continue", json!({"threadId": 1}));
+        c.request("pause", json!({"threadId": 1}));
+        assert_eq!(c.event("stopped")["reason"], json!("pause"));
+        // And one sent once the continue was answered.
         c.request("continue", json!({"threadId": 1}));
         c.request("pause", json!({"threadId": 1}));
         assert_eq!(c.event("stopped")["reason"], json!("pause"));

@@ -56,6 +56,7 @@ fn pool_sizes(cores: usize) -> (usize, usize) {
 ///
 /// Called from an async worker (an [`off_frame`] build), the chunks run on the async pool
 /// instead, so a background build never takes the compute threads the frame's systems need.
+/// With no pool set up (a plain unit test) the chunks run in order on the calling thread.
 pub fn par_chunks_mut<T: Send>(
     data: &mut [T],
     chunk_size: usize,
@@ -70,9 +71,16 @@ pub fn par_chunks_mut<T: Send>(
     let on_async = std::thread::current()
         .name()
         .is_some_and(|n| n.starts_with("async"));
-    let pool: &TaskPool = match on_async.then(AsyncComputeTaskPool::try_get).flatten() {
-        Some(pool) => pool,
-        None => ComputeTaskPool::get(),
+    let pool: Option<&TaskPool> = match on_async.then(AsyncComputeTaskPool::try_get).flatten() {
+        Some(pool) => Some(pool),
+        None => ComputeTaskPool::try_get().map(|p| &**p),
+    };
+    // Without pools (a plain unit test, a tool), the chunks run one after another.
+    let Some(pool) = pool else {
+        for (i, chunk) in data.chunks_mut(chunk_size).enumerate() {
+            f(i, chunk);
+        }
+        return;
     };
     pool.scope(|scope| {
         for (i, chunk) in data.chunks_mut(chunk_size).enumerate() {
