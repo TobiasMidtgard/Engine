@@ -209,7 +209,10 @@ lighting (8K only for a visible backdrop). JPG or PNG for color, HDR or EXR only
   clash. `ENGINE_PROFILE=1` prints "one system at a time / no system / several at once"
   and a "ran alone" list every report, and once, at frame 30, a "schedule parallelism" list
   of each schedule's exclusive systems and the data most systems fight over. Fix what is
-  heavy in "ran alone" first; a cheap system that runs alone costs little. So:
+  heavy in "ran alone" first; a cheap system that runs alone costs little.
+  `ENGINE_TRACE=trace.json` (with `ENGINE_TRACE_AT=<s>`, `ENGINE_TRACE_FRAMES=<n>`) records
+  every span of a few frames for <https://ui.perfetto.dev>, and `scripts/trace-summary.py`
+  names what ran alone in which schedule and what each idle gap waited between. So:
   - A `&mut World` system runs with nothing beside it, and the executor can only start it
     (or skip it on its `run_if`) once nothing else is running, and systems ordered after it
     wait for that too. Keep heavy work out of them (take the queries you need in a normal

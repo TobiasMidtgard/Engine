@@ -8,6 +8,12 @@
 //! modules can add their own spans inside a system (any `tracing` span whose target starts
 //! with `engine_`, e.g. `info_span!("shadow pass")` or `info_span!("render_step", name = "submit")`
 //! in `engine_render`; a `name` field, when there is one, names the row), listed separately.
+//!
+//! `ENGINE_TRACE=<file.json>` also turns it on and writes every span of a few frames to that
+//! file in the Chrome trace format (open it in <https://ui.perfetto.dev>, or summarize it with
+//! `scripts/trace-summary.py`): `ENGINE_TRACE_AT` seconds after the first frame (default 30),
+//! for `ENGINE_TRACE_FRAMES` frames (default 60). It shows, frame by frame, which system each
+//! thread ran and where every thread waited, which the 5 s averages can't.
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
@@ -50,6 +56,7 @@ pub fn enabled() -> bool {
 pub(crate) fn requested() -> bool {
     std::env::args().any(|a| a == "--profile")
         || std::env::var("ENGINE_PROFILE").is_ok_and(|v| !v.is_empty() && v != "0")
+        || trace::config().is_some()
 }
 
 pub(crate) fn enable() {
@@ -63,6 +70,7 @@ static FRAMES: AtomicU64 = AtomicU64::new(0);
 /// A frame finished.
 pub(crate) fn frame_done() {
     FRAMES.fetch_add(1, Ordering::Relaxed);
+    trace::frame_done();
 }
 
 /// A frame stuck this long is reported as a hang.
@@ -352,6 +360,224 @@ where
         stat.total += elapsed;
         stat.calls += 1;
         stat.max = stat.max.max(elapsed);
+        drop(totals);
+        trace::span(key, start, elapsed);
+    }
+}
+
+/// Every span of a few frames, for `ENGINE_TRACE` (see the module docs).
+mod trace {
+    use super::*;
+
+    pub(super) struct Config {
+        path: std::path::PathBuf,
+        after: Duration,
+        frames: u32,
+    }
+
+    pub(super) fn config() -> Option<&'static Config> {
+        static CONFIG: OnceLock<Option<Config>> = OnceLock::new();
+        CONFIG
+            .get_or_init(|| {
+                let path = std::env::var_os("ENGINE_TRACE").filter(|p| !p.is_empty())?;
+                let number = |name: &str, default: f64| {
+                    std::env::var(name)
+                        .ok()
+                        .and_then(|v| v.trim().parse::<f64>().ok())
+                        .filter(|v| v.is_finite() && *v >= 0.0)
+                        .unwrap_or(default)
+                };
+                Some(Config {
+                    path: path.into(),
+                    after: Duration::from_secs_f64(number("ENGINE_TRACE_AT", 30.0)),
+                    frames: number("ENGINE_TRACE_FRAMES", 60.0).max(1.0) as u32,
+                })
+            })
+            .as_ref()
+    }
+
+    /// Recording now (checked on every span exit, so an atomic, not the lock).
+    static RECORDING: AtomicBool = AtomicBool::new(false);
+
+    struct Event {
+        name: String,
+        thread: u32,
+        start: Instant,
+        dur: Duration,
+    }
+
+    #[derive(Default)]
+    struct Capture {
+        first_frame: Option<Instant>,
+        /// When each recorded frame ended; the first is when recording started.
+        frame_ends: Vec<Instant>,
+        events: Vec<Event>,
+        done: bool,
+    }
+
+    fn capture() -> &'static Mutex<Capture> {
+        static CAPTURE: OnceLock<Mutex<Capture>> = OnceLock::new();
+        CAPTURE.get_or_init(Default::default)
+    }
+
+    fn thread_names() -> &'static Mutex<Vec<String>> {
+        static NAMES: OnceLock<Mutex<Vec<String>>> = OnceLock::new();
+        NAMES.get_or_init(Default::default)
+    }
+
+    /// This thread's number in the trace, given on its first span.
+    fn thread_number() -> u32 {
+        thread_local! {
+            static NUMBER: u32 = {
+                let thread = std::thread::current();
+                let name = thread.name().map_or_else(|| format!("{:?}", thread.id()), str::to_string);
+                let mut names = thread_names().lock();
+                names.push(name);
+                names.len() as u32
+            };
+        }
+        NUMBER.with(|n| *n)
+    }
+
+    pub(super) fn span(key: &str, start: Instant, dur: Duration) {
+        if !RECORDING.load(Ordering::Relaxed) {
+            return;
+        }
+        let event = Event {
+            name: key.to_string(),
+            thread: thread_number(),
+            start,
+            dur,
+        };
+        capture().lock().events.push(event);
+    }
+
+    pub(super) fn frame_done() {
+        let Some(config) = config() else {
+            return;
+        };
+        let now = Instant::now();
+        let mut capture = capture().lock();
+        if capture.done {
+            return;
+        }
+        let first = *capture.first_frame.get_or_insert(now);
+        if !RECORDING.load(Ordering::Relaxed) {
+            if now.duration_since(first) >= config.after {
+                capture.frame_ends.push(now);
+                RECORDING.store(true, Ordering::Relaxed);
+            }
+            return;
+        }
+        capture.frame_ends.push(now);
+        if capture.frame_ends.len() as u32 > config.frames {
+            RECORDING.store(false, Ordering::Relaxed);
+            capture.done = true;
+            let taken = std::mem::take(&mut *capture);
+            drop(capture);
+            let names = thread_names().lock().clone();
+            let path = config.path.clone();
+            // Off the frame: tens of thousands of events take a moment to format.
+            let spawned = std::thread::Builder::new()
+                .name("engine trace writer".into())
+                .spawn(move || match write(&path, &taken, &names) {
+                    Ok(()) => tracing::info!(
+                        "trace of {} frames written to {}",
+                        taken.frame_ends.len() - 1,
+                        path.display()
+                    ),
+                    Err(e) => tracing::warn!("trace not written to {}: {e}", path.display()),
+                });
+            if let Err(e) = spawned {
+                tracing::warn!("trace not written ({e})");
+            }
+        }
+    }
+
+    /// The Chrome trace event format: complete (`X`) events in microseconds, a `frame` mark at
+    /// the end of each frame, and the threads' names.
+    fn write(path: &std::path::Path, capture: &Capture, names: &[String]) -> std::io::Result<()> {
+        use std::io::Write;
+        let Some(&origin) = capture.frame_ends.first() else {
+            return Ok(());
+        };
+        let us = |at: Instant| {
+            if at >= origin {
+                at.duration_since(origin).as_secs_f64() * 1e6
+            } else {
+                -(origin.duration_since(at).as_secs_f64() * 1e6)
+            }
+        };
+        let mut out = std::io::BufWriter::new(std::fs::File::create(path)?);
+        write!(out, "{{\"traceEvents\":[")?;
+        let mut first = true;
+        let mut sep = |out: &mut std::io::BufWriter<std::fs::File>| -> std::io::Result<()> {
+            if !std::mem::take(&mut first) {
+                writeln!(out, ",")?;
+            }
+            Ok(())
+        };
+        for (i, name) in names.iter().enumerate() {
+            sep(&mut out)?;
+            write!(
+                out,
+                "{{\"ph\":\"M\",\"name\":\"thread_name\",\"pid\":1,\"tid\":{},\"args\":{{\"name\":{}}}}}",
+                i + 1,
+                serde_json::to_string(name).unwrap_or_default()
+            )?;
+        }
+        for (i, &end) in capture.frame_ends.iter().enumerate().skip(1) {
+            sep(&mut out)?;
+            write!(
+                out,
+                "{{\"ph\":\"i\",\"s\":\"g\",\"name\":\"frame {i}\",\"cat\":\"frame\",\"pid\":1,\"tid\":0,\"ts\":{:.1}}}",
+                us(end)
+            )?;
+        }
+        for e in &capture.events {
+            let (cat, name) = if let Some(rest) = e.name.strip_prefix(INNER) {
+                ("span", rest)
+            } else if let Some(rest) = e.name.strip_prefix("schedule ") {
+                ("schedule", rest)
+            } else {
+                ("system", e.name.as_str())
+            };
+            sep(&mut out)?;
+            write!(
+                out,
+                "{{\"ph\":\"X\",\"cat\":\"{cat}\",\"name\":{},\"pid\":1,\"tid\":{},\"ts\":{:.1},\"dur\":{:.1}}}",
+                serde_json::to_string(name).unwrap_or_default(),
+                e.thread,
+                us(e.start),
+                e.dur.as_secs_f64() * 1e6
+            )?;
+        }
+        write!(out, "]}}")?;
+        out.flush()
+    }
+
+    #[cfg(test)]
+    pub(super) fn write_for_test(
+        path: &std::path::Path,
+        frame_ends: Vec<Instant>,
+        events: Vec<(String, u32, Instant, Duration)>,
+        names: &[String],
+    ) -> std::io::Result<()> {
+        let capture = Capture {
+            first_frame: frame_ends.first().copied(),
+            frame_ends,
+            events: events
+                .into_iter()
+                .map(|(name, thread, start, dur)| Event {
+                    name,
+                    thread,
+                    start,
+                    dur,
+                })
+                .collect(),
+            done: true,
+        };
+        write(path, &capture, names)
     }
 }
 
@@ -1307,5 +1533,48 @@ mod tests {
             ),
             "{text}"
         );
+    }
+
+    #[test]
+    fn traces_are_chrome_trace_json_with_frames_threads_and_spans() {
+        let dir = std::env::temp_dir().join(format!("engine-trace-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("trace.json");
+        let t0 = Instant::now();
+        let ms = Duration::from_millis;
+        let events = vec![
+            ("schedule Update".to_string(), 1, t0, ms(10)),
+            ("game::move_\"it\"".to_string(), 2, t0 + ms(1), ms(3)),
+            (
+                format!("{INNER}engine_render: submit"),
+                2,
+                t0 + ms(2),
+                ms(1),
+            ),
+        ];
+        super::trace::write_for_test(
+            &path,
+            vec![t0, t0 + ms(16)],
+            events,
+            &["main".to_string(), "compute (0)".to_string()],
+        )
+        .unwrap();
+        let json: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let events = json["traceEvents"].as_array().unwrap();
+        let named = |ph: &'static str| events.iter().filter(move |e| e["ph"] == ph);
+        assert_eq!(named("M").count(), 2, "both threads named");
+        assert_eq!(named("i").count(), 1, "one frame mark");
+        let spans: Vec<_> = named("X").collect();
+        assert_eq!(spans.len(), 3);
+        assert_eq!(spans[0]["cat"], "schedule");
+        assert_eq!(spans[0]["name"], "Update");
+        assert_eq!(spans[1]["name"], "game::move_\"it\"");
+        assert_eq!(spans[1]["tid"], 2);
+        assert!((spans[1]["ts"].as_f64().unwrap() - 1000.0).abs() < 1.0);
+        assert!((spans[1]["dur"].as_f64().unwrap() - 3000.0).abs() < 1.0);
+        assert_eq!(spans[2]["cat"], "span");
+        assert_eq!(spans[2]["name"], "engine_render: submit");
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
