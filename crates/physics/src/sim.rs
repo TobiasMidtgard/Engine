@@ -878,6 +878,9 @@ pub struct Simulation {
     /// Held bodies (`resting`, `ungrounded`) whose gravity is off while held, given back once
     /// they are let go (`step::hold_resting`).
     pub weightless: EntityHashSet,
+    /// Bodies whose mass may have changed since the last write back (their
+    /// `BodyEntry::mass_dirty` set), so it looks at these, not every body.
+    pub(crate) mass_changed: Vec<Entity>,
     /// Static colliders whose shape is being built off the frame ([`crate::shape_jobs`]).
     pub(crate) pending_statics: crate::shape_jobs::PendingStatics,
     /// Bodies and characters near a static still being built, held until it is there
@@ -1175,6 +1178,7 @@ impl Simulation {
                 fine: None,
             },
         );
+        self.mass_changed.push(entity);
     }
 
     /// Update damping, gravity scale, CCD, sleeping and locks without recreating the body.
@@ -1306,6 +1310,8 @@ impl Simulation {
             return;
         };
         entry.mass_dirty = true;
+        self.mass_changed.push(entity);
+        let entry = &self.bodies[&entity];
         let (region, handle) = (entry.region, entry.handle);
         let desc = entry.desc.clone();
         // Start from the densities the colliders ask for (an earlier override may have scaled
@@ -2514,6 +2520,7 @@ impl Simulation {
         self.wake_dormant();
         drop(piece);
         let piece = crate::report::Piece::start("upkeep: splits: splits");
+        let splitting = newly_mixed || self.lod_clock.is_multiple_of(crate::lod::LOD_EVERY);
         if self.lod_clock.is_multiple_of(crate::lod::LOD_EVERY) {
             let _far = tracing::info_span!("split far").entered();
             self.split_far(foci, margin * 1.25);
@@ -2521,14 +2528,18 @@ impl Simulation {
             let _dormant = tracing::info_span!("split dormant").entered();
             self.split_dormant(margin * 2.0);
         }
-        if newly_mixed || self.lod_clock.is_multiple_of(crate::lod::LOD_EVERY) {
+        if splitting {
             let _fine = tracing::info_span!("split fine").entered();
             self.split_fine(dt);
         }
         drop(piece);
-        let piece = crate::report::Piece::start("upkeep: splits: fine steps again");
-        self.update_fine();
-        drop(piece);
+        // Only splits move bodies between here and the first look (merges, after, keep the
+        // finest of the two).
+        if splitting {
+            let piece = crate::report::Piece::start("upkeep: splits: fine steps again");
+            self.update_fine();
+            drop(piece);
+        }
         let tiers = tracing::info_span!("region tiers").entered();
         let piece = crate::report::Piece::start("upkeep: tiers");
         self.update_tiers(foci);
