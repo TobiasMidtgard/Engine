@@ -13,6 +13,8 @@
 //! and the view origin is subtracted when culling, so moving the origin dirties nothing.
 
 use bevy_ecs::change_detection::Tick;
+use bevy_ecs::lifecycle::RemovedComponentEntity;
+use bevy_ecs::message::MessageCursor;
 use engine_core::prelude::*;
 
 use crate::components::{
@@ -121,6 +123,32 @@ fn with_translation(mut rows: [[f32; 4]; 3], t: DVec3) -> [[f32; 4]; 3] {
     rows
 }
 
+/// What a change to which [`MeshScene::sync`] rewrites a slot (removals come as messages).
+type SceneChanged = Or<(
+    Changed<GlobalTransform>,
+    Changed<MeshRenderer>,
+    Changed<ResolvedMesh>,
+    Changed<MaxDrawDistance>,
+    Changed<DitherFade>,
+    Added<NoVirtualGeometry>,
+    Added<Displacement>,
+    Added<NoMeshLod>,
+    Added<ShadowOnly>,
+)>;
+
+type SceneItem<'w> = (
+    Entity,
+    Ref<'w, GlobalTransform>,
+    Ref<'w, MeshRenderer>,
+    Ref<'w, ResolvedMesh>,
+    Option<Ref<'w, MaxDrawDistance>>,
+    Option<Ref<'w, DitherFade>>,
+    bool,
+    bool,
+    bool,
+    bool,
+);
+
 type SceneQuery = (
     Entity,
     Ref<'static, GlobalTransform>,
@@ -149,6 +177,11 @@ pub(crate) struct MeshScene {
     mesh_users: Vec<u32>,
     material_users: Vec<u32>,
     query: Option<QueryState<SceneQuery>>,
+    /// The same, only for the entities changed since the last sync.
+    changed_query: Option<QueryState<SceneQuery, SceneChanged>>,
+    /// Where the removal messages of the query's components were last read (in
+    /// `read_removals`' order).
+    removal_cursors: [MessageCursor<RemovedComponentEntity>; 9],
     /// The world's change tick at the last sync (changes after it are new).
     tick: Option<Tick>,
     /// Slots rewritten by the latest sync.
@@ -174,10 +207,20 @@ impl MeshScene {
         if self.query.is_none() {
             self.query = Some(world.query::<SceneQuery>());
         }
+        if self.changed_query.is_none() {
+            self.changed_query = Some(world.query_filtered::<SceneQuery, SceneChanged>());
+        }
     }
 
     /// Bring the slots up to date with the world: rewrite those whose components changed since
     /// the last sync, add new entities, drop the ones gone.
+    ///
+    /// After the first sync only what changed is visited, as Bevy's retained render world
+    /// extracts only changed meshes: the entities a change-filtered query finds (moved,
+    /// renderer or mesh changed, added, a marker added) and those removal messages name (a
+    /// component removed, despawned). A full sweep of every entity, dropping the slots of
+    /// those no longer found, runs first, when removal messages were missed (the renderer
+    /// paused for a while) and whenever the slot count disagrees with the query's.
     ///
     /// Reads the world shared (beside other features' prepares); make the query first with
     /// [`ensure_query`](Self::ensure_query).
@@ -188,44 +231,128 @@ impl MeshScene {
             // `None` while a component of the query was never registered.
             self.query = world.try_query::<SceneQuery>();
         }
-        if let Some(mut query) = self.query.take() {
-            self.sweep(&mut query, world, self.tick, frame);
+        if self.changed_query.is_none() {
+            self.changed_query = world.try_query_filtered::<SceneQuery, SceneChanged>();
+        }
+        let (removed, missed) = self.read_removals(world);
+        let mut full = self.tick.is_none() || missed || self.changed_query.is_none();
+        if !full
+            && let (Some(mut query), Some(mut changed)) =
+                (self.query.take(), self.changed_query.take())
+        {
+            // Removals first: a despawned entity's index may already hold a new entity.
+            query.update_archetypes(world);
+            for entity in removed {
+                let Some(s) = self.slot_of_entity(entity) else {
+                    continue;
+                };
+                match query.get_manual(world, entity) {
+                    // Still drawn (a marker or an optional component went): rewritten.
+                    Ok(item) => self.write(item, frame, true),
+                    Err(_) => self.drop_slot(s),
+                }
+            }
+            let since = self.tick.expect("not a full sync");
+            for item in crate::features::iter_since(&mut changed, world, since) {
+                self.write(item, frame, true);
+            }
+            // Anything missed shows as a count that disagrees: sweep everything.
+            let matched: usize = query
+                .matched_archetypes()
+                .filter_map(|id| world.archetypes().get(id))
+                .map(|a| a.len() as usize)
+                .sum();
+            full = matched != self.hot.len();
+            if full {
+                tracing::debug!(
+                    "mesh scene: {} slots for {matched} entities, sweeping them all",
+                    self.hot.len()
+                );
+            }
             self.query = Some(query);
+            self.changed_query = Some(changed);
+        }
+        if full {
+            if let Some(mut query) = self.query.take() {
+                self.sweep(&mut query, world, self.tick, frame);
+                self.query = Some(query);
+            }
+            // Entities no longer found: their slots go (the last slot moves into the gap).
+            let mut s = 0;
+            while s < self.hot.len() {
+                if self.seen[s] == frame {
+                    s += 1;
+                } else {
+                    self.drop_slot(s);
+                }
+            }
         }
         // Changes from here on (even later in this system) get a newer tick than the one the
         // sweep saw, so the next sync finds them.
         self.tick = Some(crate::features::take_change_tick(world));
-        // Entities no longer found: their slots go (the last slot moves into the gap).
-        let mut s = 0;
-        while s < self.hot.len() {
-            if self.seen[s] == frame {
-                s += 1;
+    }
+
+    /// The entities removal messages named since the last sync (a component of the query
+    /// removed, or despawned), and whether some were missed (their messages already dropped).
+    fn read_removals(&mut self, world: &World) -> (Vec<Entity>, bool) {
+        let components = world.components();
+        let ids = [
+            components.valid_component_id::<GlobalTransform>(),
+            components.valid_component_id::<MeshRenderer>(),
+            components.valid_component_id::<ResolvedMesh>(),
+            components.valid_component_id::<MaxDrawDistance>(),
+            components.valid_component_id::<DitherFade>(),
+            components.valid_component_id::<NoVirtualGeometry>(),
+            components.valid_component_id::<Displacement>(),
+            components.valid_component_id::<NoMeshLod>(),
+            components.valid_component_id::<ShadowOnly>(),
+        ];
+        let mut removed = Vec::new();
+        let mut missed = false;
+        for (id, cursor) in ids.into_iter().zip(&mut self.removal_cursors) {
+            let Some(messages) = id.and_then(|id| world.removed_components().get(id)) else {
                 continue;
-            }
-            self.release(s);
-            self.note_change(s);
-            let entity = self.cold[s].entity;
-            if let Some(e) = self.slot_of.get_mut(entity.index_u32() as usize)
-                && e.0 == entity
+            };
+            missed |= cursor.missed_messages(messages) > 0;
+            removed.extend(cursor.read(messages).cloned().map(Entity::from));
+        }
+        (removed, missed)
+    }
+
+    /// The slot of `entity` (not of another entity on its index).
+    fn slot_of_entity(&self, entity: Entity) -> Option<usize> {
+        match self.slot_of.get(entity.index_u32() as usize) {
+            Some(&(e, s)) if e == entity && s != NO_SLOT => Some(s as usize),
+            _ => None,
+        }
+    }
+
+    /// Drop slot `s` (its entity draws no more): the last slot moves into the gap.
+    fn drop_slot(&mut self, s: usize) {
+        self.release(s);
+        self.note_change(s);
+        let entity = self.cold[s].entity;
+        if let Some(e) = self.slot_of.get_mut(entity.index_u32() as usize)
+            && e.0 == entity
+        {
+            *e = (Entity::PLACEHOLDER, NO_SLOT);
+        }
+        self.hot.swap_remove(s);
+        self.cold.swap_remove(s);
+        self.seen.swap_remove(s);
+        if s < self.hot.len() {
+            // The moved slot may be another gone entity's whose index a new one holds now.
+            let moved = self.cold[s].entity;
+            if let Some(e) = self.slot_of.get_mut(moved.index_u32() as usize)
+                && e.0 == moved
             {
-                *e = (Entity::PLACEHOLDER, NO_SLOT);
-            }
-            self.hot.swap_remove(s);
-            self.cold.swap_remove(s);
-            self.seen.swap_remove(s);
-            if s < self.hot.len() {
-                // The moved slot may be another gone entity's whose index a new one holds now.
-                let moved = self.cold[s].entity;
-                if let Some(e) = self.slot_of.get_mut(moved.index_u32() as usize)
-                    && e.0 == moved
-                {
-                    e.1 = s as u32;
-                }
+                e.1 = s as u32;
             }
         }
     }
 
-    /// `since`: the tick of the last sync (`None`: everything is new).
+    /// Every entity of the query: unchanged ones are only marked seen (the slots of those not
+    /// seen are dropped after). `since`: the tick of the last sync (`None`: everything is new).
     fn sweep(
         &mut self,
         query: &mut QueryState<SceneQuery>,
@@ -235,7 +362,15 @@ impl MeshScene {
     ) {
         let all = since.is_none();
         let last_run = since.unwrap_or_else(|| world.last_change_tick());
-        for (
+        for item in crate::features::iter_since(query, world, last_run) {
+            self.write(item, frame, all);
+        }
+    }
+
+    /// Bring one entity's slot up to date (a new slot for a new entity), when it changed since
+    /// the last sync or `force`; marks it seen this frame either way.
+    fn write(&mut self, item: SceneItem<'_>, frame: u64, force: bool) {
+        let (
             entity,
             transform,
             renderer,
@@ -246,120 +381,118 @@ impl MeshScene {
             displaced,
             full_detail,
             shadow_only,
-        ) in crate::features::iter_since(query, world, last_run)
-        {
-            let index = entity.index_u32() as usize;
-            if index >= self.slot_of.len() {
-                self.slot_of
-                    .resize(index + 1, (Entity::PLACEHOLDER, NO_SLOT));
-            }
-            let existing = match self.slot_of[index] {
-                (e, s) if e == entity && s != NO_SLOT => Some(s as usize),
-                _ => None,
-            };
-            // Archetype flags: no per-entity reads.
-            let kind = if instanced_only { INSTANCED_ONLY } else { 0 }
-                | if displaced { DISPLACED } else { 0 }
-                | if full_detail { FULL_DETAIL } else { 0 }
-                | if shadow_only { SHADOW_ONLY } else { 0 };
-            let s = match existing {
-                Some(s) => {
-                    self.seen[s] = frame;
-                    // Unchanged entities read only change ticks.
-                    let hot = &self.hot[s];
-                    let changed = all
-                        || transform.is_changed()
-                        || renderer.is_changed()
-                        || resolved.is_changed()
-                        || hot.flags & KINDS != kind
-                        || match &max_distance {
-                            Some(m) => m.is_changed(),
-                            None => hot.max_distance != f32::MAX,
-                        }
-                        || match &dither {
-                            Some(d) => d.is_changed(),
-                            None => hot.dither != 0.0,
-                        };
-                    if !changed {
-                        continue;
-                    }
-                    self.release(s);
-                    self.note_change(s);
-                    let cold = &mut self.cold[s];
-                    cold.changed = frame;
-                    if cold.transform != *transform {
-                        cold.previous = cold.transform;
-                        cold.previous_rows = cold.rows;
-                        cold.moved = frame;
-                        set_transform(cold, *transform);
-                    }
-                    s
-                }
-                None => {
-                    let s = self.hot.len();
-                    self.slot_of[index] = (entity, s as u32);
-                    let mut cold = Cold {
-                        entity,
-                        transform: *transform,
-                        previous: *transform,
-                        moved: 0,
-                        changed: frame,
-                        normal: [[0.0; 4]; 3],
-                        rows: [[0.0; 4]; 3],
-                        previous_rows: [[0.0; 4]; 3],
-                    };
-                    set_transform(&mut cold, *transform);
-                    self.cold.push(cold);
-                    self.seen.push(frame);
-                    self.hot.push(Hot {
-                        center: DVec3::ZERO,
-                        radius: 0.0,
-                        scale: 1.0,
-                        max_distance: f32::MAX,
-                        dither: 0.0,
-                        mesh: 0,
-                        material: 0,
-                        mesh_version: u64::MAX,
-                        flags: 0,
-                        lod: LOD_UNSET,
-                        lod_from: LOD_UNSET,
-                        lod_frame: 0,
-                    });
-                    s
-                }
-            };
-            self.dirty += 1;
-            let max = max_distance.as_ref().map_or(f32::MAX, |m| m.0);
-            let flags = if renderer.visible { VISIBLE } else { 0 }
-                | if renderer.cast_shadows { CASTS } else { 0 }
-                | kind;
-            let mirrored = transform.0.matrix3.determinant() < 0.0;
-            self.hot[s] = Hot {
-                scale: max_scale(&transform),
-                max_distance: max,
-                dither: dither.as_ref().map_or(0.0, |d| {
-                    if d.0.is_finite() {
-                        d.0.clamp(-1.0, 1.0)
-                    } else {
-                        0.0
-                    }
-                }),
-                mesh: resolved.mesh.index(),
-                material: resolved.material.index(),
-                // Bounds again, from the mesh, when next culled.
-                mesh_version: u64::MAX,
-                flags: flags | if mirrored { MIRRORED } else { 0 },
-                // Another mesh has other levels: start over without a fade.
-                lod: if self.hot[s].mesh == resolved.mesh.index() {
-                    self.hot[s].lod
-                } else {
-                    LOD_UNSET
-                },
-                ..self.hot[s]
-            };
-            count(&mut self.mesh_users, resolved.mesh.index(), 1);
-            count(&mut self.material_users, resolved.material.index(), 1);
+        ) = item;
+        let index = entity.index_u32() as usize;
+        if index >= self.slot_of.len() {
+            self.slot_of
+                .resize(index + 1, (Entity::PLACEHOLDER, NO_SLOT));
         }
+        let existing = match self.slot_of[index] {
+            (e, s) if e == entity && s != NO_SLOT => Some(s as usize),
+            _ => None,
+        };
+        // Archetype flags: no per-entity reads.
+        let kind = if instanced_only { INSTANCED_ONLY } else { 0 }
+            | if displaced { DISPLACED } else { 0 }
+            | if full_detail { FULL_DETAIL } else { 0 }
+            | if shadow_only { SHADOW_ONLY } else { 0 };
+        let s = match existing {
+            Some(s) => {
+                self.seen[s] = frame;
+                // Unchanged entities read only change ticks.
+                let hot = &self.hot[s];
+                let changed = force
+                    || transform.is_changed()
+                    || renderer.is_changed()
+                    || resolved.is_changed()
+                    || hot.flags & KINDS != kind
+                    || match &max_distance {
+                        Some(m) => m.is_changed(),
+                        None => hot.max_distance != f32::MAX,
+                    }
+                    || match &dither {
+                        Some(d) => d.is_changed(),
+                        None => hot.dither != 0.0,
+                    };
+                if !changed {
+                    return;
+                }
+                self.release(s);
+                self.note_change(s);
+                let cold = &mut self.cold[s];
+                cold.changed = frame;
+                if cold.transform != *transform {
+                    cold.previous = cold.transform;
+                    cold.previous_rows = cold.rows;
+                    cold.moved = frame;
+                    set_transform(cold, *transform);
+                }
+                s
+            }
+            None => {
+                let s = self.hot.len();
+                self.slot_of[index] = (entity, s as u32);
+                let mut cold = Cold {
+                    entity,
+                    transform: *transform,
+                    previous: *transform,
+                    moved: 0,
+                    changed: frame,
+                    normal: [[0.0; 4]; 3],
+                    rows: [[0.0; 4]; 3],
+                    previous_rows: [[0.0; 4]; 3],
+                };
+                set_transform(&mut cold, *transform);
+                self.cold.push(cold);
+                self.seen.push(frame);
+                self.hot.push(Hot {
+                    center: DVec3::ZERO,
+                    radius: 0.0,
+                    scale: 1.0,
+                    max_distance: f32::MAX,
+                    dither: 0.0,
+                    mesh: 0,
+                    material: 0,
+                    mesh_version: u64::MAX,
+                    flags: 0,
+                    lod: LOD_UNSET,
+                    lod_from: LOD_UNSET,
+                    lod_frame: 0,
+                });
+                s
+            }
+        };
+        self.dirty += 1;
+        let max = max_distance.as_ref().map_or(f32::MAX, |m| m.0);
+        let flags = if renderer.visible { VISIBLE } else { 0 }
+            | if renderer.cast_shadows { CASTS } else { 0 }
+            | kind;
+        let mirrored = transform.0.matrix3.determinant() < 0.0;
+        self.hot[s] = Hot {
+            scale: max_scale(&transform),
+            max_distance: max,
+            dither: dither.as_ref().map_or(0.0, |d| {
+                if d.0.is_finite() {
+                    d.0.clamp(-1.0, 1.0)
+                } else {
+                    0.0
+                }
+            }),
+            mesh: resolved.mesh.index(),
+            material: resolved.material.index(),
+            // Bounds again, from the mesh, when next culled.
+            mesh_version: u64::MAX,
+            flags: flags | if mirrored { MIRRORED } else { 0 },
+            // Another mesh has other levels: start over without a fade.
+            lod: if self.hot[s].mesh == resolved.mesh.index() {
+                self.hot[s].lod
+            } else {
+                LOD_UNSET
+            },
+            ..self.hot[s]
+        };
+        count(&mut self.mesh_users, resolved.mesh.index(), 1);
+        count(&mut self.material_users, resolved.material.index(), 1);
     }
 
     /// Remember slot `s` as it is, before it is rewritten or dropped (if it was ever placed).
@@ -531,6 +664,34 @@ mod tests {
         scene.sync(&world, 6);
         assert_eq!(scene.dirty, 1);
         assert_eq!(scene.hot[slot(&scene, a)].max_distance, f32::MAX);
+        // A marker removed (a removal message, no change tick) rewrites it too.
+        world.entity_mut(a).remove::<NoMeshLod>();
+        scene.sync(&world, 7);
+        assert_eq!(scene.dirty, 1);
+        assert_eq!(scene.hot[slot(&scene, a)].flags & FULL_DETAIL, 0);
+        // And a renderer removed drops the slot, as despawning does.
+        world.entity_mut(b).remove::<MeshRenderer>();
+        scene.sync(&world, 8);
+        assert_eq!(scene.hot.len(), 1);
+        assert_eq!(scene.cold[0].entity, a);
+    }
+
+    #[test]
+    fn missed_removal_messages_fall_back_to_a_full_sweep() {
+        // The renderer paused over two updates: the despawn's message is dropped before the
+        // next sync reads it, and the sweep still finds the entity gone.
+        let mut world = World::new();
+        let a = spawn(&mut world, 1.0, 0, 0);
+        let b = spawn(&mut world, 2.0, 1, 0);
+        let mut scene = MeshScene::default();
+        scene.ensure_query(&mut world);
+        scene.sync(&world, 1);
+        world.despawn(a);
+        world.clear_trackers();
+        world.clear_trackers();
+        scene.sync(&world, 2);
+        assert_eq!(scene.hot.len(), 1);
+        assert_eq!(scene.cold[0].entity, b);
     }
 
     #[test]
