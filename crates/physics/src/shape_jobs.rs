@@ -33,8 +33,10 @@ use parking_lot::{Condvar, Mutex};
 use rapier3d::prelude::SharedShape;
 
 /// Vertices a static mesh (or hull) needs before it is built off the frame: smaller ones cost
-/// less than a hand-off.
-pub(crate) const OFF_FRAME_POINTS: usize = 512;
+/// less than a hand-off. A hull costs about 1 µs a point, and zones streaming in bring dozens
+/// of 150-500 point hulls at once (14,000-25,000 points, 17-21 ms of one sync on the VM loops,
+/// round 10), so from 128.
+pub(crate) const OFF_FRAME_POINTS: usize = 128;
 /// Steps a job may wait before it is finished on the spot, so a ray or overlap (an NPC's sight
 /// line through a building just streamed in) misses it half a second at most. On their own
 /// threads jobs take milliseconds, so this is only reached when those threads fall behind.
