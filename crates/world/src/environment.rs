@@ -174,6 +174,10 @@ pub struct WindField {
     pub gust_origin: DVec3,
     /// Local disturbances added on top, m/s. Decays toward zero.
     pub local: Grid3<Vec3>,
+    /// Wind fronts crossing the land, which every shader moving something in the wind
+    /// evaluates the same way (see [`crate::gusts`]). The weather writes and advances them;
+    /// with strength 0 they add nothing.
+    pub waves: crate::gusts::GustWaves,
 }
 
 impl Default for WindField {
@@ -189,6 +193,7 @@ impl Default for WindField {
                 [32, 12, 32],
                 Vec3::ZERO,
             ),
+            waves: Default::default(),
         }
     }
 }
@@ -206,7 +211,10 @@ impl WindField {
             q.z * 0.02 - self.time as f64 * 0.2,
             0xA11CE,
         );
-        let gust = 1.0 + g * self.gustiness;
+        let waves = self
+            .waves
+            .value(engine_core::math::Vec2::new(q.x as f32, q.z as f32));
+        let gust = 1.0 + g * self.gustiness + waves;
         self.prevailing * profile * gust + self.local.sample(p)
     }
 
@@ -294,6 +302,64 @@ impl SurfaceLayers {
         if let Some(cell) = self.grid.get_mut(c) {
             f(cell);
         }
+    }
+}
+
+/// Ground surface state far away, on a coarse grid to the horizon: how much of the ground
+/// is wet and how much under snow, so a snowfall whitens the whole valley and the hills and
+/// not only the [`SurfaceLayers`] around the player.
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+pub struct FarSurfaceCell {
+    /// Share of the ground in the cell that is wet, 0..1.
+    pub wet_share: f32,
+    /// Share of the ground in the cell under snow, 0..1 (before the snow line, which
+    /// [`FarSurface::sample`] adds).
+    pub snow_cover: f32,
+}
+
+impl crate::grid::Blend for FarSurfaceCell {
+    fn blend(a: Self, b: Self, t: f32) -> Self {
+        Self {
+            wet_share: a.wet_share + (b.wet_share - a.wet_share) * t,
+            snow_cover: a.snow_cover + (b.snow_cover - a.snow_cover) * t,
+        }
+    }
+}
+
+/// [`FarSurfaceCell`]s to the horizon, and the snow line. Written by the weather (wet share
+/// and snow cover from where it has rained and snowed, the line from temperature and lapse
+/// rate); read by terrain, foliage and water for what is past the near layers. Readers blend
+/// it under [`SurfaceLayers`] where those end.
+#[derive(Resource, Debug, Clone)]
+pub struct FarSurface {
+    /// 16 km at 64 m by default, centered on the focus by its writer.
+    pub grid: Grid2<FarSurfaceCell>,
+    /// World height above which the ground lies under snow, meters (infinite: no snow line).
+    pub snow_line_m: f64,
+    /// How far below and above the line the snow thins out and thickens, meters.
+    pub snow_line_fade_m: f32,
+}
+
+impl Default for FarSurface {
+    fn default() -> Self {
+        Self {
+            grid: Grid2::centered(DVec2::ZERO, 16_384.0, 64.0, FarSurfaceCell::default()),
+            snow_line_m: f64::INFINITY,
+            snow_line_fade_m: 150.0,
+        }
+    }
+}
+
+impl FarSurface {
+    /// The cell at world `p` (bilinear), with snow above the snow line at `p`'s height.
+    pub fn sample(&self, p: DVec3) -> FarSurfaceCell {
+        let mut c = self.grid.sample(p);
+        if self.snow_line_m.is_finite() {
+            let fade = self.snow_line_fade_m.max(1.0) as f64;
+            let t = ((p.y - (self.snow_line_m - fade)) / (2.0 * fade)).clamp(0.0, 1.0) as f32;
+            c.snow_cover = c.snow_cover.max(t * t * (3.0 - 2.0 * t));
+        }
+        c
     }
 }
 

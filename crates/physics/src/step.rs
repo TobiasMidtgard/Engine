@@ -2624,13 +2624,31 @@ fn place_pending_statics(world: &World, sim: &mut Simulation) -> (usize, f64, f6
                 waits = true;
             }
         }
-        if (p.replacing && p.waited >= crate::shape_jobs::MAX_REPLACE_STEPS)
+        // (An old shape standing in waits on a while for a shape thread building the new.)
+        let replaced = p.replacing
+            && p.waited >= crate::shape_jobs::MAX_REPLACE_STEPS
+            && (p.waited > crate::shape_jobs::MAX_HOLD_STEPS || !p.job.building());
+        if replaced
             || p.waited >= crate::shape_jobs::MAX_WAIT_STEPS
             || p.held > crate::shape_jobs::MAX_HOLD_STEPS
         {
             let t = Instant::now();
             ready.push((*e, p.job.finish(), true));
-            waited += t.elapsed();
+            let took = t.elapsed();
+            waited += took;
+            if took.as_secs_f64() > 0.002 && crate::report::wanted() {
+                engine_core::log::info!(
+                    "physics: waited {:.1} ms for the shape of {e} ({})",
+                    took.as_secs_f64() * 1000.0,
+                    if replaced {
+                        "its old shape stood in long enough"
+                    } else if p.held > crate::shape_jobs::MAX_HOLD_STEPS {
+                        "it held something long enough"
+                    } else {
+                        "queued long enough"
+                    }
+                );
+            }
         } else if waits {
             hold.extend(close);
         }

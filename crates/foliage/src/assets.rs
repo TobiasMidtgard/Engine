@@ -514,7 +514,7 @@ pub fn ensure_species_visuals(
                         &mut materials,
                         &mut images,
                     );
-                    visuals.standins.add(&visual);
+                    visuals.standins.add(&sp, &visual);
                     visuals.species[i] = Some(visual);
                     loading.species_building = loading.species_building.saturating_sub(1);
                     tracing::debug!("foliage: built visuals for {}", sp.name);

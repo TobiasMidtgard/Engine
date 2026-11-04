@@ -315,11 +315,134 @@ pub struct ForestSample {
     pub conifer: f32,
 }
 
+/// The kinds of woodland foliage grows as stands, each with the floor that goes with it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[repr(u8)]
+pub enum StandKind {
+    /// Norway spruce over moss and blueberry: dark, dense, cool and damp.
+    SpruceForest,
+    /// Scots pine over lichen and heather: open, dry, sandy or rocky ground.
+    PineHeath,
+    /// Birch and aspen over grass and bracken: pioneers on clearings, burns and edges.
+    BirchAspen,
+    /// Oak with hazel and rowan over herbs: warm, fertile lowland.
+    OakHazel,
+    /// Alder and willow over sedge: wet ground along creeks and lakes.
+    AlderCarr,
+    /// Beech hall over bare leaf litter: deep soil, shade so dense little grows below.
+    BeechHall,
+    /// Low, crooked mountain birch at the tree line.
+    MountainBirch,
+}
+
+impl StandKind {
+    pub const COUNT: usize = 7;
+    pub const ALL: [StandKind; StandKind::COUNT] = [
+        StandKind::SpruceForest,
+        StandKind::PineHeath,
+        StandKind::BirchAspen,
+        StandKind::OakHazel,
+        StandKind::AlderCarr,
+        StandKind::BeechHall,
+        StandKind::MountainBirch,
+    ];
+
+    /// Whether its trees are conifers.
+    pub fn conifer(self) -> bool {
+        matches!(self, StandKind::SpruceForest | StandKind::PineHeath)
+    }
+}
+
+/// How much of each [`StandKind`] grows at a spot: weights that sum to 1 (or are all 0).
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+pub struct StandMix(pub [f32; StandKind::COUNT]);
+
+impl StandMix {
+    /// All of one kind.
+    pub fn only(kind: StandKind) -> Self {
+        let mut w = [0.0; StandKind::COUNT];
+        w[kind as usize] = 1.0;
+        Self(w)
+    }
+
+    /// The mix a provider that only knows the conifer share implies: conifers split between
+    /// spruce and pine, broadleaves between birch and oak.
+    pub fn from_conifer(conifer: f32) -> Self {
+        let c = conifer.clamp(0.0, 1.0);
+        let mut w = [0.0; StandKind::COUNT];
+        w[StandKind::SpruceForest as usize] = 0.6 * c;
+        w[StandKind::PineHeath as usize] = 0.4 * c;
+        w[StandKind::BirchAspen as usize] = 0.5 * (1.0 - c);
+        w[StandKind::OakHazel as usize] = 0.5 * (1.0 - c);
+        Self(w)
+    }
+
+    pub fn weight(&self, kind: StandKind) -> f32 {
+        self.0[kind as usize]
+    }
+
+    /// Scaled to sum to 1 (all 0 stays all 0).
+    pub fn normalized(self) -> Self {
+        let total: f32 = self.0.iter().map(|w| w.max(0.0)).sum();
+        if total <= 0.0 {
+            return Self::default();
+        }
+        Self(self.0.map(|w| w.max(0.0) / total))
+    }
+
+    /// The kind that grows most, `None` when the mix is empty.
+    pub fn dominant(&self) -> Option<StandKind> {
+        StandKind::ALL
+            .into_iter()
+            .filter(|k| self.weight(*k) > 0.0)
+            .max_by(|a, b| self.weight(*a).total_cmp(&self.weight(*b)))
+    }
+
+    /// Share of conifers in the mix.
+    pub fn conifer(&self) -> f32 {
+        let n = self.normalized();
+        StandKind::ALL
+            .into_iter()
+            .filter(|k| k.conifer())
+            .map(|k| n.weight(k))
+            .sum()
+    }
+}
+
+/// A [`ForestSample`] with what kind of woodland it is and how old.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ForestStands {
+    pub forest: ForestSample,
+    /// Which stands grow here (sums to 1).
+    pub mix: StandMix,
+    /// How old the woods are, 0 (young regrowth, saplings and poles) .. 1 (old growth with
+    /// veterans, snags and fallen logs). 0.6 is an ordinary mature wood.
+    pub age: f32,
+}
+
+impl ForestStands {
+    /// What a provider that only answers [`ForestQuery::sample`] implies.
+    pub fn from_sample(forest: ForestSample) -> Self {
+        Self {
+            forest,
+            mix: StandMix::from_conifer(forest.conifer),
+            age: 0.6,
+        }
+    }
+}
+
 /// Implemented by the terrain module (its painted far woods and climate belts). Lets foliage
 /// grow trees where the terrain paints woods, without depending on how terrain works.
 pub trait ForestQuery: Send + Sync + 'static {
     /// Woods at world position `p` (the ground below it), `None` where none are painted.
     fn sample(&self, p: DVec3) -> Option<ForestSample>;
+
+    /// [`sample`](Self::sample) with the stand mix and age (from climate, soil, moisture and
+    /// altitude). Providers that know only density and the conifer share keep the default,
+    /// which splits it as [`StandMix::from_conifer`]; `forest` must equal `sample(p)`.
+    fn stands(&self, p: DVec3) -> Option<ForestStands> {
+        self.sample(p).map(ForestStands::from_sample)
+    }
 }
 
 /// The active forest provider. Defaults to no woods anywhere.
@@ -342,6 +465,10 @@ impl Default for ForestCover {
 impl ForestCover {
     pub fn sample(&self, p: DVec3) -> Option<ForestSample> {
         self.0.sample(p)
+    }
+
+    pub fn stands(&self, p: DVec3) -> Option<ForestStands> {
+        self.0.stands(p)
     }
 }
 

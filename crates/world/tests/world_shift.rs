@@ -486,3 +486,51 @@ fn wheel_contacts_move_with_the_world() {
     let w = app.world.get::<WheelContacts>(car).unwrap();
     assert!((w.wheels[0].position - s.point(at)).length() < 1e-6);
 }
+
+#[test]
+fn ground_cover_the_far_surface_and_gust_fronts_follow_a_shift() {
+    let mut app = app();
+    let spot = DVec3::new(20.5, 0.0, -7.5);
+    let tall = CoverCell {
+        kind: CoverKind::TallGrass,
+        height_m: 1.0,
+        density: 0.8,
+        ..Default::default()
+    };
+    {
+        let mut cover = app.world.resource_mut::<GroundCover>();
+        *cover = GroundCover::around(DVec2::ZERO, 128.0, 1.0);
+        let c = cover.grid.cell_at(spot);
+        cover.grid.set(c, tall);
+        let mut far = app.world.resource_mut::<FarSurface>();
+        let c = far.grid.cell_at(spot);
+        far.grid.set(
+            c,
+            FarSurfaceCell {
+                wet_share: 0.7,
+                snow_cover: 0.0,
+            },
+        );
+        far.snow_line_m = 900.0;
+        let mut wind = app.world.resource_mut::<WindField>();
+        wind.waves.broad.dir = engine_core::math::Vec2::X;
+    }
+    app.update();
+    let s = WorldShift::translate(DVec3::new(-640.25, 30.0, 211.0));
+    app.world.write_message(s);
+    app.update();
+    let moved = s.point(spot);
+    assert_eq!(app.world.resource::<GroundCover>().cell(moved), Some(tall));
+    let far = app.world.resource::<FarSurface>();
+    assert_eq!(far.grid.sample_nearest(moved).wet_share, 0.7);
+    assert_eq!(far.snow_line_m, 930.0, "the snow line is a height");
+
+    // A turned shift turns the fronts with the world.
+    let t = turned();
+    app.world.write_message(t);
+    app.update();
+    let d = app.world.resource::<WindField>().waves.broad.dir;
+    let want = t.direction(Vec3::X);
+    let want = engine_core::math::Vec2::new(want.x, want.z).normalize();
+    assert!((d - want).length() < 1e-4, "{d} {want}");
+}

@@ -11,6 +11,13 @@
 //! `FOLIAGE_FROZEN=1` keeps the live ecology still, so two runs show the same forest, and
 //! `FOLIAGE_EV=<ev100>` fixes the exposure: for before/after comparisons.
 //!
+//! `FOLIAGE_QUALITY=ultra` renders at the Ultra preset with the showcase's shadow reach (the
+//! fine shadow cascades reach about 190 m instead of 50 m).
+//!
+//! Shot `11_switch` photographs the clearing twice from one spot, every tree past its middle
+//! level first drawn at its middle level and then at its far level: the shadows on the ground
+//! should not change between them.
+//!
 //! `FOLIAGE_CENSUS=1` also prints, for each shot, the plant parts' triangles by level of detail:
 //! in view (a cone a little wider than the camera's) and casting shadows (within 350 m).
 //!
@@ -182,6 +189,14 @@ fn census(app: &mut App, name: &str) {
             e.1 += tris;
         }
     }
+    {
+        let mut q = app.world.query_filtered::<&MeshRenderer, With<PlantPart>>();
+        let (all, hidden) = q
+            .iter(&app.world)
+            .fold((0u32, 0u32), |(a, h), r| (a + 1, h + u32::from(!r.visible)));
+        let plants = app.world.query::<&Plant>().iter(&app.world).count();
+        println!("census {name}: {plants} plants, {all} plant parts, {hidden} of them hidden");
+    }
     let show = |m: &BTreeMap<&str, (u32, u64)>| {
         let total: u64 = m.values().map(|v| v.1).sum();
         let parts: Vec<String> = m
@@ -283,6 +298,13 @@ fn main() {
             "cascades" => DebugView::Cascades,
             other => panic!("unknown debug view {other}"),
         };
+    }
+    if std::env::var("FOLIAGE_QUALITY").is_ok_and(|q| q == "ultra") {
+        app.world.insert_resource(engine_world::Scalability::preset(
+            engine_world::QualityPreset::Ultra,
+        ));
+        let mut settings = app.world.resource_mut::<RenderSettings>();
+        settings.shadow_distance = settings.shadow_distance.max(400.0);
     }
     app.world.resource_mut::<Atmosphere>().ground_color = [0.09, 0.18, 0.04];
     app.world.spawn((
@@ -386,6 +408,29 @@ fn main() {
     take(&mut app, "02_trail", &by_name("forest_trail"));
     take(&mut app, "03_clearing", &by_name("forest_clearing"));
     take(&mut app, "03_old_oak", &by_name("forest_old_oak"));
+    if wanted("11_switch") {
+        // Same spot, same frame count: only the trees' level changes (switched at once).
+        let v = by_name("forest_clearing");
+        app.world
+            .resource_mut::<engine_foliage::lod_fade::LodFades>()
+            .enabled = false;
+        let (lod, mid) = {
+            let s = app.world.resource::<engine_foliage::EcologySettings>();
+            (s.tree_lod_distance_m, s.tree_mid_distance_m)
+        };
+        for (file, far_from) in [("11_switch_mid", 1.0e4), ("11_switch_far", mid)] {
+            app.world
+                .resource_mut::<engine_foliage::EcologySettings>()
+                .tree_lod_distance_m = far_from;
+            shot(&mut app, &out, file, v.eye, v.target, v.hour);
+        }
+        app.world
+            .resource_mut::<engine_foliage::EcologySettings>()
+            .tree_lod_distance_m = lod;
+        app.world
+            .resource_mut::<engine_foliage::lod_fade::LodFades>()
+            .enabled = true;
+    }
 
     // Fell a big tree at the edge of the clear-cut into the open, and photograph it coming
     // down from beside its path.

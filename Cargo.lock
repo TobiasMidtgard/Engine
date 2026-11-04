@@ -1316,6 +1316,7 @@ dependencies = [
  "image",
  "serde",
  "serde_json",
+ "tracing",
 ]
 
 [[package]]
@@ -1534,6 +1535,7 @@ name = "engine_physics"
 version = "0.1.0"
 dependencies = [
  "bevy_ecs",
+ "cpu-time",
  "engine_assets",
  "engine_core",
  "engine_debug",
@@ -1666,6 +1668,7 @@ dependencies = [
  "image",
  "serde",
  "serde_json",
+ "tracing",
  "wgpu",
 ]
 
@@ -1760,6 +1763,7 @@ version = "0.1.0"
 dependencies = [
  "bevy_ecs",
  "engine_core",
+ "naga",
  "serde",
  "serde_json",
 ]

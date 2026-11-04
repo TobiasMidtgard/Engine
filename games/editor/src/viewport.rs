@@ -1111,7 +1111,7 @@ fn overlays(ui: &mut egui::Ui, world: &mut World, editor: &mut Editor, pane: egu
     }
 
     // Stats.
-    let entities = world.entities().count_spawned();
+    let entities = engine::core::diagnostics::spawned_entities(world);
     let mut scene_q = world.query_filtered::<(), With<InScene>>();
     let in_scene = scene_q.iter(world).count();
     let fps = 1.0 / editor.frame_secs.max(1e-4);

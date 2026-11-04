@@ -226,6 +226,7 @@ pub fn update_colliders(
     state.frames += 1;
     let mut moving: HashMap<(Entity, usize), (DVec3, DVec3)> = HashMap::new();
     let range = range.map(|r| *r).unwrap_or_default();
+    let gather = tracing::info_span!("terrain colliders: wanted tiles").entered();
     let body_points: Vec<DVec3> = bodies
         .iter()
         .filter(|(_, b)| b.kind == BodyKind::Dynamic)
@@ -234,21 +235,26 @@ pub fn update_colliders(
     if focus.points.is_empty() && body_points.is_empty() {
         return;
     }
+    let body_count = body_points.len();
     // Wanted tiles in build order: around the focus points first, then under bodies.
     let mut wanted: Vec<(Entity, NodeKey)> = Vec::new();
     let mut wanted_set: HashSet<(Entity, NodeKey)> = HashSet::new();
-    let mut body_tiles: Vec<(f64, (Entity, NodeKey))> = Vec::new();
+    // Each tile under bodies once, at its nearest body's distance (a pile of debris shares one).
+    let mut body_tiles: HashMap<(Entity, NodeKey), f64> = HashMap::new();
     // The tiles right under the focus points and under bodies in the simulated range: built on
     // the spot when missing, so nothing falls through.
     let mut underfoot: Vec<(Entity, NodeKey)> = Vec::new();
+    let mut underfoot_set: HashSet<(Entity, NodeKey)> = HashSet::new();
     for (&e, t) in &terrains.entries {
         if !t.config.colliders {
             continue;
         }
         let level = tile_level(t, settings.collider_tile_m);
         let size = t.source.map.node_size(level);
-        // Only near the surface (within 2 km).
-        let near = |p: DVec3| t.altitude_hint(p).abs() <= 2_000.0 + t.config.height_range().1;
+        // Only near the surface (within 2 km). (The shape's height range is worked out once:
+        // it walks every landform, and this runs for every dynamic body every frame.)
+        let top = t.config.height_range().1;
+        let near = |p: DVec3| t.altitude_hint(p).abs() <= 2_000.0 + top;
         for (i, &p) in focus.points.iter().enumerate().filter(|(_, p)| near(**p)) {
             let local = t.to_local(p);
             // How fast it moves over the terrain (terrain-local, so world shifts and the
@@ -303,12 +309,21 @@ pub fn update_colliders(
                 }
             }
         }
-        for &p in body_points.iter().filter(|&&p| near(p)) {
+        for &p in &body_points {
+            let altitude = t.altitude_hint(p);
+            if altitude.abs() > 2_000.0 + top {
+                continue;
+            }
             if let Some(k) = t.source.map.node_at(t.to_local(p), level) {
-                body_tiles.push((focus.distance(p), (e, k)));
+                let d = focus.distance(p);
+                body_tiles
+                    .entry((e, k))
+                    .and_modify(|n| *n = n.min(d))
+                    .or_insert(d);
                 // (Well above the highest ground it can't be standing on it.)
-                let high = t.altitude_hint(p) > t.config.height_range().1 + UNDERFOOT_CLEARANCE_M;
-                if range.is_active(&focus, p) && !high {
+                let high = altitude > top + UNDERFOOT_CLEARANCE_M;
+                if !high && !underfoot_set.contains(&(e, k)) && range.is_active(&focus, p) {
+                    underfoot_set.insert((e, k));
                     underfoot.push((e, k));
                 }
             }
@@ -335,7 +350,10 @@ pub fn update_colliders(
         }
     }
     state.motion = moving;
-    body_tiles.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let mut body_tiles: Vec<(f64, (Entity, NodeKey))> =
+        body_tiles.into_iter().map(|(k, d)| (d, k)).collect();
+    // Nearest first; equal distances by key, so the order (and the cap) is the same every run.
+    body_tiles.sort_by(|a, b| a.0.total_cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
     let mut extra = 0;
     for (_, k) in body_tiles {
         if extra >= MAX_BODY_TILES {
@@ -367,6 +385,7 @@ pub fn update_colliders(
             state.queue.push(*k);
         }
     }
+    drop(gather);
     let ids = SurfaceIds::new(&materials);
     // Put finished tiles in place (or drop them, if no longer wanted).
     let done: Vec<_> = state
@@ -401,6 +420,7 @@ pub fn update_colliders(
         missing.push(k);
     }
     if !missing.is_empty() {
+        let _span = tracing::info_span!("terrain colliders: build underfoot").entered();
         if state.frames > 1 {
             state.waits += missing.len() as u64;
         }
@@ -458,6 +478,7 @@ pub fn update_colliders(
         state.building.insert(k, handle);
     }
     if let Some(mut d) = diagnostics {
+        d.set("terrain.collider_bodies", body_count as f64);
         d.set("terrain.collider_tiles", state.tiles.len() as f64);
         d.set("terrain.collider_builds", state.built as f64);
         d.set("terrain.collider_waits", state.waits as f64);

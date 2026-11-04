@@ -60,6 +60,12 @@ pub(crate) struct Hooks {
     pub draw_gizmos_selected: bool,
     /// A `timelines` table: the engine plays them (`timelines.luau`).
     pub timelines: bool,
+    /// `far = "rest"`: beyond the simulation range its `update`, `fixed_update` and
+    /// `parallel_update` don't run (its tasks and messages still do), like the other modules'
+    /// far bodies, volumes and animals. `far = 80`: the same beyond 80 m (or the simulation
+    /// range if that is nearer). For what is only seen up close (a swarm, a sway): meters
+    /// (0 = the simulation range), `None` = always runs.
+    pub rest_far: Option<u32>,
 }
 
 impl Hooks {
@@ -86,6 +92,12 @@ impl Hooks {
             draw_gizmos: has("draw_gizmos"),
             draw_gizmos_selected: has("draw_gizmos_selected"),
             timelines: matches!(class.raw_get::<Value>("timelines"), Ok(Value::Table(_))),
+            rest_far: match class.raw_get::<Value>("far") {
+                Ok(Value::String(s)) if s.to_str().is_ok_and(|s| &*s == "rest") => Some(0),
+                Ok(Value::Integer(m)) if m > 0 => Some(m.min(u32::MAX as i64) as u32),
+                Ok(Value::Number(m)) if m >= 1.0 => Some(m.min(u32::MAX as f64) as u32),
+                _ => None,
+            },
         }
     }
 }
@@ -225,6 +237,8 @@ pub(crate) struct Instance {
     pub errors: u32,
     /// Milliseconds spent in this script last frame (smoothed).
     pub ms: f32,
+    /// Resting beyond the simulation range (see [`Hooks::rest_far`]).
+    pub resting: bool,
 }
 
 /// A script's stand-in in the editor's edit mode, where scripts don't run: a `self` with its
@@ -655,6 +669,10 @@ impl ScriptRuntime {
         }
         self.route_messages();
         self.sync_breaks(world, settings);
+        self.rest_far_instances(world);
+        for actor in &mut self.actors {
+            actor.rest_far_instances(world);
+        }
         {
             let _span = tracing::info_span!("scripts: serial").entered();
             self.run_serial(world, settings);
@@ -685,6 +703,43 @@ impl ScriptRuntime {
             actor.profiler.frame(&actor.lua);
         }
         self.frame_ms = started.elapsed().as_secs_f32() * 1000.0;
+    }
+
+    /// Which `far = "rest"` instances rest this frame: beyond the shared simulation range from
+    /// every focus point (waking a little nearer than they fell asleep, so one at the edge
+    /// doesn't flicker).
+    fn rest_far_instances(&mut self, world: &World) {
+        if !self
+            .instances
+            .values()
+            .any(|i| i.hooks.rest_far.is_some() || i.resting)
+        {
+            return;
+        }
+        let focus = world.get_resource::<engine_world::FocusPoints>();
+        let shared = world
+            .get_resource::<engine_world::SimulationRange>()
+            .copied()
+            .unwrap_or_default();
+        for (e, i) in &mut self.instances {
+            let at = world
+                .get::<engine_core::transform::GlobalTransform>(*e)
+                .map(|g| g.translation());
+            i.resting = match (i.hooks.rest_far, focus, at) {
+                (Some(m), Some(focus), Some(at)) => {
+                    let mut range = shared;
+                    if m > 0 {
+                        range.active_m = range.active_m.min(m as f64);
+                    }
+                    if i.resting {
+                        !range.is_active(focus, at)
+                    } else {
+                        range.is_resting(focus, at)
+                    }
+                }
+                _ => false,
+            };
+        }
     }
 
     /// The debugger's DAP client: what it sent since last frame. Console code it sends runs
@@ -789,7 +844,10 @@ impl ScriptRuntime {
             .instances
             .iter()
             .filter(|(_, i)| {
-                i.enabled && i.started && (i.hooks.update || i.hooks.states || i.hooks.timelines)
+                i.enabled
+                    && i.started
+                    && !i.resting
+                    && (i.hooks.update || i.hooks.states || i.hooks.timelines)
             })
             .map(|(e, _)| *e)
             .collect();
@@ -924,7 +982,7 @@ impl ScriptRuntime {
     fn wants_parallel(&self) -> bool {
         self.instances
             .values()
-            .any(|i| i.enabled && i.started && i.hooks.parallel_update)
+            .any(|i| i.enabled && i.started && !i.resting && i.hooks.parallel_update)
     }
 
     /// The parallel phase: every VM runs its `parallel_update`s on its own thread (the compute
@@ -980,7 +1038,7 @@ impl ScriptRuntime {
         let ids: Vec<Entity> = self
             .instances
             .iter()
-            .filter(|(_, i)| i.enabled && i.started && i.hooks.parallel_update)
+            .filter(|(_, i)| i.enabled && i.started && !i.resting && i.hooks.parallel_update)
             .map(|(e, _)| *e)
             .collect();
         let _lent = lend_world_parallel(&self.lua, world);
@@ -1182,7 +1240,7 @@ impl ScriptRuntime {
         let fixed: Vec<Entity> = self
             .instances
             .iter()
-            .filter(|(_, i)| i.enabled && i.started && i.hooks.fixed_update)
+            .filter(|(_, i)| i.enabled && i.started && !i.resting && i.hooks.fixed_update)
             .map(|(e, _)| *e)
             .collect();
         for e in fixed {
@@ -1373,6 +1431,7 @@ impl ScriptRuntime {
                         last_error: None,
                         errors: 0,
                         ms: 0.0,
+                        resting: false,
                     },
                 );
                 self.start_instance(e, settings);
@@ -1407,6 +1466,7 @@ impl ScriptRuntime {
             last_error: Some(err.to_string()),
             errors: 1,
             ms: 0.0,
+            resting: false,
         }
     }
 

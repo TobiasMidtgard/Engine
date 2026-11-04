@@ -174,8 +174,14 @@ fn timed(meta: &tracing::Metadata<'_>) -> bool {
     if meta.target().starts_with("bevy_ecs") {
         matches!(meta.name(), "system" | "system_commands" | "schedule")
     } else {
-        // A module's own spans inside its systems (render passes, sim stages).
-        meta.target().starts_with("engine_")
+        // A module's own spans inside its systems (render passes, sim stages), the engine
+        // crate's (streaming) and the games'.
+        let t = meta.target();
+        t.starts_with("engine_")
+            || t == "engine"
+            || t.starts_with("engine::")
+            || t == "showcase"
+            || t.starts_with("showcase::")
     }
 }
 
