@@ -7,11 +7,10 @@ use std::sync::mpsc::{Receiver, channel};
 use std::sync::{Arc, Condvar, Mutex};
 
 use bytemuck::{Pod, Zeroable};
-use engine_core::diagnostics::Diagnostics;
 use engine_core::math::{DQuat, DVec3, IVec2, Mat3, UVec2, Vec3};
 use engine_core::prelude::*;
 use engine_render::features::{
-    FeatureStats, FrameContext, GpuShared, GrowBuffer, RenderFeature, RenderPhase,
+    FeatureStats, FrameContext, GpuShared, GrowBuffer, PrepareOut, RenderFeature, RenderPhase,
 };
 use engine_render::frame::ViewData;
 use engine_render::settings::RenderSettings;
@@ -607,6 +606,15 @@ pub struct TerrainFeature {
     workers: Option<PatchWorkers>,
     /// Patches built and waiting for an upload slot in a later frame.
     finished: Vec<FinishedPatch>,
+    /// This frame's view is an extra one (a mirror, a portal): set in `prepare_serial`.
+    extra_view: bool,
+    /// The lamps, for where the renderer's own lights hand over to the lamp pages (made in
+    /// `prepare_serial`, read in `prepare_shared`).
+    lamps: Option<QueryState<(&'static engine_render::PointLight, &'static GlobalTransform)>>,
+    /// What `prepare_serial` uploaded from resources it changes (the footprints and the worn
+    /// paths take their dirty tiles): the maps so far, whether the bind group must be made
+    /// again, and the steps timed.
+    serial: Option<(MapsGpu, bool, Steps)>,
 }
 
 /// How wet and snowy the ground is beyond the weather's grid around the player: like the open
@@ -1229,13 +1237,16 @@ impl TerrainFeature {
     }
 
     /// Upload changed parts of the footprint grid and the weather surface layers.
-    fn upload_maps(
+    /// The maps whose uploads change the world's resources (the footprints' and the worn
+    /// paths' dirty tiles are taken as they are sent), in `prepare_serial`: the maps so far,
+    /// and whether the bind group must be made again.
+    fn upload_maps_serial(
         &mut self,
         world: &mut World,
         gpu_shared: &GpuShared,
         view: &ViewData,
         steps: &mut Steps,
-    ) -> MapsGpu {
+    ) -> (MapsGpu, bool) {
         let mut maps = MapsGpu::default();
         let mut recreate = false;
         let gpu = self.gpu.as_mut().expect("gpu");
@@ -1391,6 +1402,23 @@ impl TerrainFeature {
             maps.flags[0] = 1.0;
         }
         steps.mark("maps: footprints");
+        recreate |= self.upload_wear(world, gpu_shared, view, &mut maps);
+        steps.mark("maps: worn paths");
+        (maps, recreate)
+    }
+
+    /// The rest of the maps, reading the world shared (after [`Self::upload_maps_serial`],
+    /// whose `maps` and `recreate` it finishes), and the bind group.
+    fn upload_maps(
+        &mut self,
+        world: &World,
+        gpu_shared: &GpuShared,
+        view: &ViewData,
+        steps: &mut Steps,
+        mut maps: MapsGpu,
+        mut recreate: bool,
+    ) -> MapsGpu {
+        let gpu = self.gpu.as_mut().expect("gpu");
         // Wetness, puddles, snow and scorch from the weather (every few frames).
         if let Some(layers) = world.get_resource::<SurfaceLayers>() {
             let g = &layers.grid;
@@ -1435,8 +1463,6 @@ impl TerrainFeature {
             ];
         }
         steps.mark("maps: weather");
-        recreate |= self.upload_wear(world, gpu_shared, view, &mut maps);
-        steps.mark("maps: worn paths");
         recreate |= self.upload_paint_map(world, gpu_shared, view, &mut maps);
         steps.mark("maps: paint");
         let gpu = self.gpu.as_mut().expect("gpu");
@@ -1958,30 +1984,62 @@ impl RenderFeature for TerrainFeature {
         });
     }
 
-    fn prepare(
+    fn prepares_shared(&self) -> bool {
+        true
+    }
+
+    /// The short part that changes the world: the footprints' and worn paths' dirty tiles are
+    /// taken as they are sent. Everything else prepares in [`Self::prepare_shared`], beside the
+    /// other features.
+    fn prepare_serial(
         &mut self,
         world: &mut World,
         gpu_shared: &GpuShared,
         view: &ViewData,
-        render_settings: &RenderSettings,
+        _render_settings: &RenderSettings,
     ) {
         // An extra view (a lake mirror, a portal, a picture-in-picture) draws what is built from
         // its own camera but leaves the quadtree, the builds and the frame count to the main
         // view: a camera a few meters under the lake would split and merge patches against it
         // every frame, and one elsewhere would replace the main view's wanted patches with its
         // own each frame.
-        let mirror = view.extra_view || engine_render::rendering_reflection(world).is_some();
-        if !mirror {
+        self.extra_view = view.extra_view || engine_render::rendering_reflection(world).is_some();
+        if !self.extra_view {
             self.frame += 1;
         }
+        if self.lamps.is_none() {
+            self.lamps = Some(world.query());
+        }
+        self.serial = None;
+        if self.gpu.is_none() {
+            return;
+        }
+        let mut steps = Steps::start();
+        let (maps, recreate) = self.upload_maps_serial(world, gpu_shared, view, &mut steps);
+        self.serial = Some((maps, recreate, steps));
+    }
+
+    fn prepare_shared(
+        &mut self,
+        world: &World,
+        gpu_shared: &GpuShared,
+        view: &ViewData,
+        render_settings: &RenderSettings,
+        out: &mut PrepareOut,
+    ) {
+        let mirror = self.extra_view;
         self.draws.clear();
         self.water_draws.clear();
-        let lamp_handoff =
-            crate::lights::handoff_distance(world, view, render_settings.max_point_lights);
+        let lamp_handoff = self.lamps.as_mut().map_or(0.0, |lamps| {
+            crate::lights::handoff_distance(world, lamps, view, render_settings.max_point_lights)
+        });
         for s in &mut self.shadow_draws {
             s.clear();
         }
         self.far_shadow_draws.clear();
+        let Some((maps, recreate, mut steps)) = self.serial.take() else {
+            return;
+        };
         if self.gpu.is_none() {
             return;
         }
@@ -1997,8 +2055,9 @@ impl RenderFeature for TerrainFeature {
             .map_or(1.0, |s| s.view_distance.clamp(0.25, 1.0) as f64);
         settings.split_factor *= reach.sqrt();
         settings.patch_budget = (settings.patch_budget as f64 * reach).round() as usize;
-        let mut steps = Steps::start();
-        let maps = self.upload_maps(world, gpu_shared, view, &mut steps);
+        // (The other features' serial parts ran since `prepare_serial`'s last step.)
+        steps.resume();
+        let maps = self.upload_maps(world, gpu_shared, view, &mut steps, maps, recreate);
         steps.mark("maps: bind group");
         let Some(terrains) = world.get_resource::<Terrains>() else {
             return;
@@ -2012,10 +2071,8 @@ impl RenderFeature for TerrainFeature {
             .gpu
             .as_ref()
             .map_or((false, 0), |g| (g.mat_size > 0, g.mat_scanned));
-        if let Some(mut d) = world.get_resource_mut::<Diagnostics>() {
-            d.set("terrain.materials_ready", materials_ready as u32 as f64);
-            d.set("terrain.scanned_materials", scanned as f64);
-        }
+        out.set("terrain.materials_ready", materials_ready as u32 as f64);
+        out.set("terrain.scanned_materials", scanned as f64);
         let Some(terrains) = world.get_resource::<Terrains>() else {
             return;
         };
@@ -2568,30 +2625,28 @@ impl RenderFeature for TerrainFeature {
             triangles: self.draws.len() as u64 * tris_per_patch,
             culled: 0,
         };
-        if let Some(mut d) = world.get_resource_mut::<Diagnostics>() {
-            d.set("terrain.patches_drawn", self.draws.len() as f64);
-            d.set(
-                "terrain.far_shadow_patches",
-                self.far_shadow_draws.len() as f64,
+        out.set("terrain.patches_drawn", self.draws.len() as f64);
+        out.set(
+            "terrain.far_shadow_patches",
+            self.far_shadow_draws.len() as f64,
+        );
+        out.set("terrain.patches_resident", self.pool.used() as f64);
+        out.set("terrain.patches_built", built_total as f64);
+        out.set("terrain.patches_missing", missing_total as f64);
+        out.set("terrain.patches_building", building_total as f64);
+        out.set("terrain.patch_latency_ms", latency_ms);
+        out.set("terrain.detail_boost", max_boost);
+        if let Some(gpu) = &self.gpu {
+            // The hand-made ground's paint map is still baking: until it lands, that ground
+            // is painted from its patches' vertices only (a loading screen waits for it).
+            out.set(
+                "terrain.paint_map_baking",
+                (gpu.paint_bake.is_some() || gpu.paint_upload.is_some()) as u32 as f64,
             );
-            d.set("terrain.patches_resident", self.pool.used() as f64);
-            d.set("terrain.patches_built", built_total as f64);
-            d.set("terrain.patches_missing", missing_total as f64);
-            d.set("terrain.patches_building", building_total as f64);
-            d.set("terrain.patch_latency_ms", latency_ms);
-            d.set("terrain.detail_boost", max_boost);
-            if let Some(gpu) = &self.gpu {
-                // The hand-made ground's paint map is still baking: until it lands, that ground
-                // is painted from its patches' vertices only (a loading screen waits for it).
-                d.set(
-                    "terrain.paint_map_baking",
-                    (gpu.paint_bake.is_some() || gpu.paint_upload.is_some()) as u32 as f64,
-                );
-                d.set("terrain.night_pages", gpu.night.resident() as f64);
-            }
+            out.set("terrain.night_pages", gpu.night.resident() as f64);
         }
         steps.mark("buffers");
-        steps.publish(world);
+        steps.publish(out);
     }
 
     fn draw(&self, phase: RenderPhase, pass: &mut wgpu::RenderPass<'_>, ctx: &FrameContext) {
@@ -2974,7 +3029,7 @@ impl Haze {
     }
 }
 
-/// The parts of [`TerrainFeature::prepare`], timed for the hitch lists (`render.cpu.terrain:
+/// The parts of [`TerrainFeature`]'s prepare, timed for the hitch lists (`render.cpu.terrain:
 /// <part>` in `Diagnostics`, under the renderer's own `prepare terrain`).
 struct Steps {
     at: std::time::Instant,
@@ -3001,11 +3056,14 @@ impl Steps {
         }
     }
 
-    fn publish(self, world: &mut World) {
-        if let Some(mut d) = world.get_resource_mut::<Diagnostics>() {
-            for (name, ms) in self.done {
-                d.set(&format!("render.cpu.terrain: {name}"), ms);
-            }
+    /// Start the next part now (time spent outside the prepare is nobody's part).
+    fn resume(&mut self) {
+        self.at = std::time::Instant::now();
+    }
+
+    fn publish(self, out: &mut PrepareOut) {
+        for (name, ms) in self.done {
+            out.set(format!("render.cpu.terrain: {name}"), ms);
         }
     }
 }

@@ -658,15 +658,19 @@ impl NightPages {
 /// Distance from the camera (m) beyond which lamps glow from their pages: where the renderer
 /// stops drawing lights itself (it draws the nearest `max_lights` in view), but no farther
 /// than [`HANDOFF_MAX_M`], where its pools of light shrink toward a pixel. 0 with no lamps.
-pub(crate) fn handoff_distance(world: &mut World, view: &ViewData, max_lights: u32) -> f32 {
+pub(crate) fn handoff_distance(
+    world: &World,
+    lamps: &mut QueryState<(&'static PointLight, &'static GlobalTransform)>,
+    view: &ViewData,
+    max_lights: u32,
+) -> f32 {
     if !world
         .get_resource::<CityLights>()
         .is_some_and(|c| c.planets.values().any(|p| !p.is_empty()))
     {
         return 0.0;
     }
-    let mut q = world.query::<(&PointLight, &GlobalTransform)>();
-    let mut d2: Vec<f32> = q
+    let mut d2: Vec<f32> = lamps
         .iter(world)
         .filter_map(|(l, gt)| {
             let rel = (gt.translation() - view.origin).as_vec3();

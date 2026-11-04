@@ -23,7 +23,7 @@ use bevy_ecs::prelude::*;
 use bytemuck::{Pod, Zeroable};
 use engine_core::prelude::*;
 use engine_render::features::{
-    FeatureStats, FrameContext, GpuShared, RenderFeature, RenderPhase, compose_shader,
+    FeatureStats, FrameContext, GpuShared, PrepareOut, RenderFeature, RenderPhase, compose_shader,
 };
 use engine_render::frame::ViewData;
 use engine_render::settings::RenderSettings;
@@ -1233,12 +1233,16 @@ impl RenderFeature for CharacterFeature {
         self.layouts = Some(layouts);
     }
 
-    fn prepare(
+    fn prepares_shared(&self) -> bool {
+        true
+    }
+
+    fn prepare_serial(
         &mut self,
         world: &mut World,
-        gpu: &GpuShared,
-        view: &ViewData,
-        settings: &RenderSettings,
+        _gpu: &GpuShared,
+        _view: &ViewData,
+        _settings: &RenderSettings,
     ) {
         if self.pipelines.is_none()
             && let Some(slot) = &self.compiling
@@ -1251,6 +1255,19 @@ impl RenderFeature for CharacterFeature {
         if self.pipelines.is_some() && !world.contains_resource::<CharacterPipelinesReady>() {
             world.insert_resource(CharacterPipelinesReady);
         }
+        if self.query.is_none() {
+            self.query = Some(world.query());
+        }
+    }
+
+    fn prepare_shared(
+        &mut self,
+        world: &World,
+        gpu: &GpuShared,
+        view: &ViewData,
+        settings: &RenderSettings,
+        _out: &mut PrepareOut,
+    ) {
         // Uploads go ahead while the pipelines compile, so people show the frame they are done.
         let Some(p) = &self.layouts else {
             return;
@@ -1283,7 +1300,9 @@ impl RenderFeature for CharacterFeature {
             });
         let started = std::time::Instant::now();
         let mut uploaded = false;
-        let query = self.query.get_or_insert_with(|| world.query());
+        let Some(query) = self.query.as_mut() else {
+            return;
+        };
         for c in self.characters.values_mut() {
             c.seen = false;
         }
