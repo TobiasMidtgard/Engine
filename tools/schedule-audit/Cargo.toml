@@ -28,3 +28,4 @@ engine_audio.workspace = true
 engine_softbody.workspace = true
 engine_character.workspace = true
 engine_script.workspace = true
+serde_json.workspace = true

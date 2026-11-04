@@ -4387,6 +4387,7 @@ dependencies = [
  "engine_vfx",
  "engine_water",
  "engine_weather",
+ "serde_json",
 ]
 
 [[package]]

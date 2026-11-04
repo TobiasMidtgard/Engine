@@ -1182,7 +1182,7 @@ pub(crate) fn parallelism_report(world: &World) -> String {
 
 /// What the systems of one schedule may touch: for tests that keep the frame running side by
 /// side (a new exclusive system or a new writer of a contested component shows up here).
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, serde::Serialize)]
 pub struct ScheduleAccess {
     /// The schedule's label, as `{:?}` prints it.
     pub schedule: String,
@@ -1190,6 +1190,22 @@ pub struct ScheduleAccess {
     pub exclusive: Vec<String>,
     /// Per component or resource (short name), the systems that write it (short names, sorted).
     pub writers: std::collections::BTreeMap<String, Vec<String>>,
+    /// Every system with what it reads and writes, in the schedule's order (for joining with a
+    /// trace: which shared data kept a system that ran alone from running beside the next).
+    pub systems: Vec<SystemAccess>,
+}
+
+/// One system's data access (short names), as [`ScheduleAccess::systems`] lists it.
+#[derive(Debug, Default, Clone, serde::Serialize)]
+pub struct SystemAccess {
+    pub name: String,
+    /// `&mut World` (or `apply_deferred`): runs with nothing beside it.
+    pub exclusive: bool,
+    /// Reads or writes every component or resource (a `FilteredEntityRef`-style query), so the
+    /// lists below are empty.
+    pub unbounded: bool,
+    pub reads: Vec<String>,
+    pub writes: Vec<String>,
 }
 
 /// Builds every schedule as its first run would (without running anything) and lists, per
@@ -1225,27 +1241,48 @@ pub fn schedule_access(world: &mut World) -> Vec<ScheduleAccess> {
         };
         for (_, s) in systems {
             let name = short_name(&s.system().name().to_string());
+            let mut entry = SystemAccess {
+                name: name.clone(),
+                ..Default::default()
+            };
             if s.access().is_exclusive() {
                 access.exclusive.push(name);
+                entry.exclusive = true;
+                access.systems.push(entry);
                 continue;
             }
             let set = s.access().to_filtered_access_set();
             let Ok(kinds) = set.combined_access().try_iter_access() else {
+                entry.unbounded = true;
+                access.systems.push(entry);
                 continue;
             };
+            let name_of = |id| {
+                world
+                    .components()
+                    .get_name(id)
+                    .map_or_else(|| format!("{id:?}"), |n| n.shortname().to_string())
+            };
             for kind in kinds {
-                if let ComponentAccessKind::Exclusive(id) = kind {
-                    let written = world
-                        .components()
-                        .get_name(id)
-                        .map_or_else(|| format!("{id:?}"), |n| n.shortname().to_string());
-                    access
-                        .writers
-                        .entry(written)
-                        .or_default()
-                        .push(name.clone());
+                match kind {
+                    ComponentAccessKind::Exclusive(id) => {
+                        let written = name_of(id);
+                        entry.writes.push(written.clone());
+                        access
+                            .writers
+                            .entry(written)
+                            .or_default()
+                            .push(name.clone());
+                    }
+                    ComponentAccessKind::Shared(id) => entry.reads.push(name_of(id)),
+                    _ => {}
                 }
             }
+            entry.reads.sort();
+            entry.reads.dedup();
+            entry.writes.sort();
+            entry.writes.dedup();
+            access.systems.push(entry);
         }
         access.exclusive.sort();
         for w in access.writers.values_mut() {
