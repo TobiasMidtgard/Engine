@@ -616,6 +616,20 @@ pub(crate) fn effective(world: &World) -> RenderSettings {
     if let Some(on) = switch_from_env("ENGINE_MESH_OCCLUSION", &OCCLUSION) {
         s.mesh_occlusion_culling = on;
     }
+    // `ENGINE_GI_PROBES_PER_FRAME=<n>` caps the probes traced a frame (as a GPU budget does), to
+    // see on a software GPU how the probes keep up with a moving camera.
+    static GI_PROBES: std::sync::OnceLock<Option<u32>> = std::sync::OnceLock::new();
+    let gi_probes = GI_PROBES.get_or_init(|| {
+        let text = std::env::var("ENGINE_GI_PROBES_PER_FRAME").ok()?;
+        let n = text.parse::<u32>().ok().filter(|n| *n > 0);
+        if n.is_none() {
+            tracing::warn!("ENGINE_GI_PROBES_PER_FRAME={text} is not a positive whole number");
+        }
+        n
+    });
+    if let Some(n) = gi_probes {
+        s.gi_probes_per_frame = s.gi_probes_per_frame.min(*n);
+    }
     // `ENGINE_RENDER_SCALE=<0.25..2>` multiplies the internal resolution: a pass whose GPU time
     // halves at 0.7 pays per pixel, one that doesn't per vertex or per dispatch.
     static SCALE: std::sync::OnceLock<Option<f32>> = std::sync::OnceLock::new();

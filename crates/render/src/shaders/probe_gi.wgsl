@@ -10,7 +10,8 @@
 // rest of the time. `probe_state.w` is 1 for an awake probe, 2 + turns slept for a sleeping one.
 
 struct GiPass {
-    // probes updated this frame, rays per probe, unused, probes in the grid
+    // probes traced this frame, rays per probe, probes cleared after them (they scrolled in and
+    // wait for a trace), probes in the grid
     counts: vec4<u32>,
     // rows of this frame's random rotation of the ray directions
     rotation_x: vec4<f32>,
@@ -50,8 +51,8 @@ struct Instance {
 @group(1) @binding(5) var<storage, read_write> rays: array<vec4<f32>>;
 @group(1) @binding(6) var<storage, read_write> probe_state: array<vec4<i32>>;
 @group(1) @binding(7) var atlas_out: texture_storage_2d_array<rgba16float, write>;
-// The storage slots updated this frame: probes that just scrolled into the grid, then a share
-// of the rest in turn.
+// The storage slots updated this frame: the traced ones (probes that scrolled into the grid
+// first, then a share of the rest in turn), then the cleared ones.
 @group(1) @binding(8) var<storage, read> updates: array<u32>;
 
 const STACK: u32 = 48u;
@@ -365,6 +366,20 @@ fn cs_update(@builtin(workgroup_id) group: vec3<u32>, @builtin(local_invocation_
     let probe = group.x;
     let rays_per_probe = min(pass_.counts.y, MAX_RAYS);
     let slot = updated_slot(probe);
+    if (probe >= pass_.counts.x) {
+        // Scrolled in, not traced yet: written empty and in no epoch, so `probe_gi` skips it
+        // (fading toward the sky guess by its share) rather than reading the probe that
+        // scrolled out of the far side; its first trace starts it fresh.
+        let tile = vec2<u32>(slot % PROBE_GI_TILES_X, slot / PROBE_GI_TILES_X) * PROBE_GI_TEXELS;
+        let texel = vec2<i32>(tile + local.xy);
+        textureStore(atlas_out, texel, 0, vec4<f32>(0.0, 0.0, 0.0, 1.0));
+        textureStore(atlas_out, texel, 1, vec4<f32>(0.0, 0.0, 0.0, -1.0));
+        if (thread == 0u) {
+            let g = slot_grid(slot);
+            probe_state[slot] = vec4<i32>(pass_.world_origin.xyz + vec3<i32>(g), 0);
+        }
+        return;
+    }
     for (var r = thread; r < rays_per_probe; r += 64u) {
         shared_rays[r] = rays[probe * pass_.counts.y + r];
         shared_dirs[r] = ray_direction(r, pass_.counts.y);
