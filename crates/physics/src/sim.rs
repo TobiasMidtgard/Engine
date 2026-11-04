@@ -881,6 +881,9 @@ pub struct Simulation {
     /// Bodies whose mass may have changed since the last write back (their
     /// `BodyEntry::mass_dirty` set), so it looks at these, not every body.
     pub(crate) mass_changed: Vec<Entity>,
+    /// Bodies the next write back looks at besides each region's awake ones: those awake at
+    /// the last write back (to write them once more as they fall asleep) and new ones.
+    pub(crate) write_next: Vec<Entity>,
     /// Static colliders whose shape is being built off the frame ([`crate::shape_jobs`]).
     pub(crate) pending_statics: crate::shape_jobs::PendingStatics,
     /// Bodies and characters near a static still being built, held until it is there
@@ -1179,6 +1182,7 @@ impl Simulation {
             },
         );
         self.mass_changed.push(entity);
+        self.write_next.push(entity);
     }
 
     /// Update damping, gravity scale, CCD, sleeping and locks without recreating the body.

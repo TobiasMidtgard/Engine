@@ -2879,7 +2879,30 @@ fn break_joints(sim: &mut Simulation, rid: RegionId, sub_dt: f32) {
 fn collect_writes(sim: &mut Simulation) {
     let mut writes = std::mem::take(&mut sim.writes);
     writes.clear();
-    for (e, b) in sim.bodies.iter_mut() {
+    // Only bodies that can have moved: each region's awake ones, those awake at the last
+    // write back and new ones (`Simulation::write_next`). A sleeping body written asleep
+    // stays where it was written; walking all of them was most of the write back with
+    // thousands asleep (Jolt and PhysX hand back their active bodies alone).
+    let mut looked = engine_core::ecs::entity::EntityHashSet::default();
+    let mut candidates = std::mem::take(&mut sim.write_next);
+    for (_, r) in sim.live_regions() {
+        let w = &r.world;
+        candidates.extend(
+            w.islands
+                .active_bodies()
+                .filter_map(|h| w.bodies.get(h))
+                .map(|rb| crate::convert::entity_of(rb.user_data)),
+        );
+    }
+    let mut awake_now = Vec::new();
+    for e in candidates {
+        if !looked.insert(e) {
+            continue;
+        }
+        let Some(b) = sim.bodies.get_mut(&e) else {
+            continue;
+        };
+        let e = &e;
         let Some(Some(region)) = sim.regions.get(b.region as usize) else {
             continue;
         };
@@ -2898,6 +2921,9 @@ fn collect_writes(sim: &mut Simulation) {
             continue;
         }
         b.was_sleeping = sleeping;
+        if !sleeping {
+            awake_now.push(*e);
+        }
         let p = rb.position();
         let velocity = if b.kind == BodyKind::Kinematic {
             b.written_velocity.unwrap_or_default()
@@ -2926,6 +2952,7 @@ fn collect_writes(sim: &mut Simulation) {
             velocity,
         });
     }
+    sim.write_next = awake_now;
     sim.writes = writes;
 }
 
