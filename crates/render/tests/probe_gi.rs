@@ -5,7 +5,8 @@
 //! no mesh does (rock drawn by another feature); a mirror reflects what is behind the camera
 //! through world reflections; a still scene isn't gathered again every frame, moving entities
 //! far from the grid don't gather it again, a near one moving updates only its own instance and
-//! the rays see it where it went, and a large mesh builds on a worker before the rays see it. Needs a GPU or lavapipe; passes with a note when
+//! the rays see it where it went, a large mesh builds on a worker before the rays see it, and a
+//! world shift moves the gather without reading every entity again. Needs a GPU or lavapipe; passes with a note when
 //! neither is available.
 
 use engine_core::prelude::*;
@@ -163,6 +164,18 @@ fn shoot(mut app: App, frames: usize, name: &str, rect: [f32; 4]) -> Option<f32>
         eprintln!("skipping: no GPU ({})", d.0);
         return None;
     }
+    let mean = brightness(&mut app, name, rect);
+    let d = app.world.resource::<Diagnostics>();
+    eprintln!(
+        "{name}: {mean:.1} (probes {:?}, instances {:?})",
+        d.get("render.gi.probes_updated"),
+        d.get("render.gi.instances")
+    );
+    Some(mean)
+}
+
+/// Mean brightness of `rect` (as [`shoot`]) now, keeping the app.
+fn brightness(app: &mut App, name: &str, rect: [f32; 4]) -> f32 {
     let dir = std::env::temp_dir().join("engine-probe-gi");
     let _ = std::fs::create_dir_all(&dir);
     let path = dir.join(name);
@@ -180,14 +193,7 @@ fn shoot(mut app: App, frames: usize, name: &str, rect: [f32; 4]) -> Option<f32>
             sum += (p[0] as f32 + p[1] as f32 + p[2] as f32) / 3.0;
         }
     }
-    let d = app.world.resource::<Diagnostics>();
-    eprintln!(
-        "{name}: {:.1} (probes {:?}, instances {:?})",
-        sum / ((x1 - x0) * (y1 - y0)) as f32,
-        d.get("render.gi.probes_updated"),
-        d.get("render.gi.instances")
-    );
-    Some(sum / ((x1 - x0) * (y1 - y0)) as f32)
+    sum / ((x1 - x0) * (y1 - y0)) as f32
 }
 
 /// Looking at the far wall and the ceiling from near the back wall.
@@ -754,4 +760,126 @@ fn a_large_mesh_builds_on_a_worker_and_then_blocks_the_sky() {
         on < off * 0.7,
         "inside the sphere: {on:.1}, {off:.1} without probes"
     );
+}
+
+/// A [`WorldShift`](engine_world::WorldShift) (a floating-origin move, or a jump that
+/// re-anchors the world) moves every root transform, so every mesh entity's change ticks move.
+/// The gather moves its cached boxes with the shift instead of reading them all again: only an
+/// entity that also moved on its own is refreshed. Transforms written without a change aren't
+/// refreshed either. After the shift the closed room still keeps
+/// the noon sky out, as before it. Run for a plain move and for one that also turns the world
+/// (re-homing on a planet).
+#[test]
+fn a_world_shift_moves_the_gather_without_reading_every_entity() {
+    // Whole meters and a quarter turn: the walls stay on whole meters, between the probes.
+    let turn = DQuat::from_rotation_y(std::f64::consts::FRAC_PI_2);
+    for (name, shift) in [
+        (
+            "move",
+            engine_world::WorldShift::translate(DVec3::new(3000.0, 0.0, -1700.0)),
+        ),
+        (
+            "turn",
+            engine_world::WorldShift {
+                rotation: turn,
+                ..engine_world::WorldShift::translate(DVec3::new(-850.0, 0.0, 420.0))
+            },
+        ),
+    ] {
+        let mut app = app(true);
+        app.add_message::<engine_world::WorldShift>();
+        let w = &mut app.world;
+        room(w, DVec3::ZERO, 0.7, 0.5, None);
+        sun(w, 110_000.0, DVec3::new(0.3, -1.0, -0.4));
+        camera(w, EYE, TARGET, 12.0);
+        let crate_at = |w: &mut World, at: DVec3| {
+            w.spawn((
+                Transform::from_translation(at),
+                MeshRenderer::new(
+                    Shape::Cuboid {
+                        size: [0.5, 1.0, 0.5],
+                    },
+                    StandardMaterial::color(0.5, 0.5, 0.5),
+                ),
+            ))
+            .id()
+        };
+        // 2000 crates 1-2 km away, and one that also moves on the shift's frame.
+        let far: Vec<Entity> = (0..2000)
+            .map(|i| {
+                let (x, z) = ((i % 50) as f64, (i / 50) as f64);
+                crate_at(w, DVec3::new(1000.0 + 20.0 * x, 0.5, 20.0 * z))
+            })
+            .collect();
+        app.update_n(16);
+        if app.world.get_resource::<RenderDisabled>().is_some() {
+            eprintln!("skipping: no GPU");
+            return;
+        }
+        let diag = |app: &App, name: &str| {
+            app.world
+                .resource::<Diagnostics>()
+                .get(name)
+                .unwrap_or(-1.0)
+        };
+        let instances = diag(&app, "render.gi.instances");
+        let before = brightness(&mut app, &format!("shift_{name}_before.png"), UPPER);
+
+        // Transforms written without changing (as some systems do every frame): nothing to
+        // refresh either.
+        for &e in &far {
+            app.world
+                .get_mut::<GlobalTransform>(e)
+                .expect("crate")
+                .set_changed();
+        }
+        app.update();
+        assert_eq!(
+            (
+                diag(&app, "render.gi.unchanged"),
+                diag(&app, "render.gi.changed")
+            ),
+            (2000.0, 0.0),
+            "{name}: transforms written unchanged"
+        );
+
+        // The shift, as `engine_world` applies it: every root transform moves.
+        let mut roots = app.world.query::<&mut Transform>();
+        for mut t in roots.iter_mut(&mut app.world) {
+            *t = shift.transform(&t);
+        }
+        app.world
+            .get_mut::<Transform>(far[7])
+            .expect("crate")
+            .translation
+            .y += 1.0;
+        app.world.write_message(shift);
+        app.update();
+        let (shifted, changed) = (
+            diag(&app, "render.gi.shifted"),
+            diag(&app, "render.gi.changed"),
+        );
+        eprintln!(
+            "{name}: shifted {shifted}, changed {changed}, extract {:.2} ms",
+            diag(&app, "render.gi.extract_ms")
+        );
+        assert!(
+            shifted >= 2000.0,
+            "{name}: {shifted} mesh entities taken as moved by the shift"
+        );
+        assert_eq!(changed, 1.0, "{name}: only the crate that moved itself");
+        assert_eq!(diag(&app, "render.gi.full_gather"), 1.0);
+        assert_eq!(diag(&app, "render.gi.instances"), instances, "{name}");
+
+        // The probes start over after the jump; light that came in through the first frames'
+        // guesses bounces out over a few dozen frames (as after any jump).
+        app.update_n(60);
+        assert_eq!(diag(&app, "render.gi.instances"), instances, "{name}");
+        let after = brightness(&mut app, &format!("shift_{name}_after.png"), UPPER);
+        eprintln!("{name}: the room {before:.1} before the shift, {after:.1} after");
+        assert!(
+            (after - before).abs() <= before * 0.15 + 2.0,
+            "{name}: the room {before:.1} before the shift, {after:.1} after"
+        );
+    }
 }
