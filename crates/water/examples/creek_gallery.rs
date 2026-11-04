@@ -8,6 +8,7 @@
 //! `views` is a comma-separated subset of: creek_bank, creek_brook, creek_main, creek_mid,
 //! creek_valley. `GALLERY_NO_CREEKS=1` leaves the creeks out (the dry channels, to compare);
 //! `GALLERY_NO_SIM=1` draws the creek nearest the camera as a ribbon too, not simulated;
+//! `GALLERY_NO_STONES=1` leaves the creeks' stones out;
 //! `GALLERY_FRAMES=n` draws n frames a view (for `ENGINE_PROFILE=1`).
 
 use std::sync::Arc;
@@ -18,6 +19,7 @@ use engine_render::prelude::*;
 use engine_render::{RenderDisabled, capture_now};
 use engine_water::WaterPlugin;
 use engine_water::creek_sim::CreekSims;
+use engine_water::creek_stones::CreekStones;
 use engine_water::creeks::{CreekRibbons, LocalCreeks, build_ribbons};
 use engine_water::demo::creeks::{Meadow, meadow};
 use engine_water::demo::materials::Surface;
@@ -161,6 +163,8 @@ fn main() {
         .id();
     // `GALLERY_NO_SIM=1`: every creek a ribbon, none simulated.
     app.world.resource_mut::<CreekSims>().off = std::env::var_os("GALLERY_NO_SIM").is_some();
+    // `GALLERY_NO_STONES=1`: no stones in the creeks.
+    app.world.resource_mut::<CreekStones>().off = std::env::var_os("GALLERY_NO_STONES").is_some();
     app.update_n(2);
 
     for (key, eye, target) in views(&m) {
@@ -178,13 +182,19 @@ fn main() {
         app.update_n(30);
         for _ in 0..600 {
             app.update_n(1);
+            let stones = app.world.resource::<CreekStones>();
             if !app.world.resource::<CreekSims>().pending()
-                && app.world.resource::<CreekRibbons>().settled()
+                && stones.settled()
+                && app.world.resource::<CreekRibbons>().settled_with(stones)
             {
                 break;
             }
         }
         app.update_n(frames);
+        eprintln!(
+            "{key}: {} stone props within 30 m",
+            app.world.resource::<CreekStones>().props_near(eye, 30.0)
+        );
         if let Some(d) = app.world.get_resource::<RenderDisabled>() {
             eprintln!("no GPU: {}", d.0);
             return;
@@ -206,9 +216,10 @@ fn main() {
         let path = format!("{out}/{key}.png");
         match capture_now(&mut app.world, &path) {
             Ok(_) => eprintln!(
-                "{path} ({:.1} s; {} simulated, {reaches} creeks drawn, {vertices} vertices, {triangles} triangles, laid in {laid:.2} ms)",
+                "{path} ({:.1} s; {} simulated, {reaches} creeks drawn, {} stone props, {vertices} vertices, {triangles} triangles, laid in {laid:.2} ms)",
                 started.elapsed().as_secs_f32(),
-                app.world.resource::<CreekSims>().live()
+                app.world.resource::<CreekSims>().live(),
+                app.world.resource::<CreekStones>().props()
             ),
             Err(e) => eprintln!("{path}: {e}"),
         }
