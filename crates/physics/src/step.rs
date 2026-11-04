@@ -642,6 +642,15 @@ pub(crate) fn physics_simulate(
     // region pool, between passes that touch the shared books (forces, kinematics, contact
     // events, joints) one region at a time. A region's substeps run in order as before, so it
     // steps exactly as it would alone.
+    // The kinematic and time-scaled bodies, by region, in one walk of the books (walking them
+    // once per region was most of the plans' 0.1-0.2 ms a step: ~3,000 bodies, ~10 regions).
+    let mut special_in: HashMap<RegionId, Vec<Entity>> = HashMap::new();
+    for (e, b) in &sim.bodies {
+        if b.kind == BodyKind::Kinematic || (b.time_factor - 1.0).abs() > 1e-3 {
+            special_in.entry(b.region).or_default().push(*e);
+        }
+    }
+    let mut cones_in = crate::cones::cones_by_region(&sim);
     let mut plans: Vec<Plan> = Vec::new();
     for rid in region_ids.iter().copied() {
         let region_started = Instant::now();
@@ -734,22 +743,14 @@ pub(crate) fn physics_simulate(
             character::find_platforms(&mut sim, rid, &gravity);
         }
         // The kinematic and time-scaled bodies here, found once for all substeps.
-        let special: Vec<Entity> = sim
-            .bodies
-            .iter()
-            .filter(|(_, b)| {
-                b.region == rid
-                    && (b.kind == BodyKind::Kinematic || (b.time_factor - 1.0).abs() > 1e-3)
-            })
-            .map(|(e, _)| *e)
-            .collect();
+        let special: Vec<Entity> = special_in.remove(&rid).unwrap_or_default();
         plans.push(Plan {
             rid,
             substeps,
             sub_dt,
             scaled: time_scaled(&sim, rid, &special),
             decks: decks(&sim, rid, &special),
-            cones: crate::cones::cones(&sim, rid),
+            cones: cones_in.remove(&rid).unwrap_or_default(),
             special,
             ms: region_started.elapsed().as_secs_f64() * 1000.0,
         });

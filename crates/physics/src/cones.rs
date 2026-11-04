@@ -27,10 +27,13 @@ const STOP_FRICTION: f32 = 0.5;
 /// A cone-limited joint: its Rapier joint and rest pose.
 pub(crate) type Cone = (ImpulseJointHandle, Quat);
 
-/// The cone-limited joints in region `rid` (found once a step: joints are made and dropped
-/// between steps; one broken meanwhile is no longer found in the world).
-pub(crate) fn cones(sim: &Simulation, rid: RegionId) -> Vec<Cone> {
-    sim.joints
+/// The cone-limited joints, by region (found once a step: joints are made and dropped
+/// between steps; one broken meanwhile is no longer found in the world). One walk of the joints
+/// for every region, not one per region: a dozen ragdolls' joints times a dozen regions.
+pub(crate) fn cones_by_region(sim: &Simulation) -> std::collections::HashMap<RegionId, Vec<Cone>> {
+    let mut by: std::collections::HashMap<RegionId, Vec<Cone>> = Default::default();
+    for (region, cone) in sim
+        .joints
         .values()
         .filter(|j| {
             matches!(
@@ -46,9 +49,12 @@ pub(crate) fn cones(sim: &Simulation, rid: RegionId) -> Vec<Cone> {
                 JointHandle::Impulse(h) => h,
                 JointHandle::Articulated { cone, .. } => cone?,
             };
-            (region == rid).then_some((cone, j.rest.unwrap_or(Quat::IDENTITY)))
+            Some((region, (cone, j.rest.unwrap_or(Quat::IDENTITY))))
         })
-        .collect()
+    {
+        by.entry(region).or_default().push(cone);
+    }
+    by
 }
 
 /// Turn the frames of every cone-limited joint `cones` to the limb's swing plane.

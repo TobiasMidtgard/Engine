@@ -154,8 +154,6 @@ mod tests {
                 "engine_foliage::chop_on_interact",
                 "engine_foliage::offer_chops",
                 "engine_movement::toggle",
-                "engine_physics::finish_art",
-                "engine_physics::fit_colliders",
                 "engine_script::draw_state_boards",
                 "engine_script::preview_scripts",
                 "engine_script::run_cutscenes",
