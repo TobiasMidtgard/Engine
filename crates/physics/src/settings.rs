@@ -91,6 +91,10 @@ pub struct PhysicsSettings {
     /// constraint joint opens on a hard landing are about a pixel at 1080p, so the cost buys
     /// nothing anyone sees. Infinite = only `max_articulated` limits it.
     pub articulate_within_m: f32,
+    /// Build big static meshes and hulls (512+ points) on the async pool, placing each when it
+    /// is ready or the step something moving comes near it (`crate::shape_jobs`). Off = every
+    /// shape is built in the step that finds it, as before.
+    pub static_meshes_off_frame: bool,
 }
 
 impl Default for PhysicsSettings {
@@ -117,6 +121,7 @@ impl Default for PhysicsSettings {
             articulated_joints: true,
             max_articulated: 4,
             articulate_within_m: 20.0,
+            static_meshes_off_frame: true,
         }
     }
 }
