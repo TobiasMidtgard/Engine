@@ -32,6 +32,8 @@ struct Totals {
     regions: HashMap<RegionId, (f64, u32)>,
     /// The step's own parts outside the regions' jobs, by name, ms ([`part_ms`]).
     outside: Vec<(&'static str, f64)>,
+    /// Pieces of those parts, by name: their sum and their worst step, ms ([`piece_ms`]).
+    pieces: Vec<(&'static str, f64, f64)>,
 }
 
 fn totals() -> &'static Mutex<Totals> {
@@ -129,6 +131,36 @@ pub(crate) fn part_ms(name: &'static str, ms: f64) {
     }
 }
 
+/// A piece of one of the step's own parts took `ms` this step (reported per step, with the
+/// worst step: a part's spikes are usually one piece).
+pub(crate) fn piece_ms(name: &'static str, ms: f64) {
+    let mut t = totals().lock();
+    match t.pieces.iter_mut().find(|c| c.0 == name) {
+        Some(c) => {
+            c.1 += ms;
+            c.2 = c.2.max(ms);
+        }
+        None => t.pieces.push((name, ms, ms)),
+    }
+}
+
+/// Times a piece of a part while it lives ([`piece_ms`]), when a report is wanted.
+pub(crate) struct Piece(&'static str, Option<Instant>);
+
+impl Piece {
+    pub(crate) fn start(name: &'static str) -> Self {
+        Self(name, wanted().then(Instant::now))
+    }
+}
+
+impl Drop for Piece {
+    fn drop(&mut self) {
+        if let Some(t) = self.1 {
+            piece_ms(self.0, t.elapsed().as_secs_f64() * 1000.0);
+        }
+    }
+}
+
 /// Count `n` of something this substep (reported as an average per substep).
 pub(crate) fn count(name: &'static str, n: usize) {
     let mut t = totals().lock();
@@ -204,6 +236,14 @@ pub(crate) fn step_done(world: &World, sim: &Simulation, foci: &[DVec3], started
         outside.join(", "),
         (t.step_ms - own).max(0.0) / steps
     );
+    if !t.pieces.is_empty() {
+        let pieces: Vec<String> = t
+            .pieces
+            .iter()
+            .map(|(name, ms, worst)| format!("{name} {:.2} (worst {worst:.2})", ms / steps))
+            .collect();
+        out += &format!("; their pieces ({})", pieces.join(", "));
+    }
     let stages: Vec<String> = STAGES
         .iter()
         .zip(t.stages)
@@ -308,10 +348,61 @@ pub(crate) fn step_done(world: &World, sim: &Simulation, foci: &[DVec3], started
                     at.x, at.y, at.z
                 );
             }
+            out += &why_awake(world, w);
         }
     }
     engine_core::log::info!("{out}");
     *t = Totals::default();
+}
+
+/// Why a region's awake bodies are awake: moving, resting but not for long enough yet, resting
+/// long enough but kept up by their island (Rapier sleeps whole islands), never allowed to sleep,
+/// or kinematic; with the names of the last three, which are the ones to look at.
+fn why_awake(world: &World, w: &rapier3d::prelude::PhysicsWorld) -> String {
+    let (mut moving, mut settling, mut kept, mut never, mut kin_moving, mut kin_still) =
+        (0, 0, 0, 0, 0, 0);
+    let mut names: Vec<(u8, Entity)> = Vec::new();
+    for rb in w.islands.active_bodies().filter_map(|h| w.bodies.get(h)) {
+        let e = crate::convert::entity_of(rb.user_data);
+        let a = rb.activation();
+        if rb.is_kinematic() {
+            if rb.linvel().length() > 0.01 || rb.angvel().length() > 0.01 {
+                kin_moving += 1;
+            } else {
+                kin_still += 1;
+                names.push((2, e));
+            }
+        } else if a.normalized_linear_threshold < 0.0 || a.angular_threshold < 0.0 {
+            never += 1;
+            names.push((0, e));
+        } else if rb.linvel().length() > a.normalized_linear_threshold
+            || rb.angvel().length() > a.angular_threshold
+        {
+            moving += 1;
+        } else if a.time_since_can_sleep < a.time_until_sleep {
+            settling += 1;
+        } else {
+            kept += 1;
+            names.push((1, e));
+        }
+    }
+    let mut out = format!(
+        "\n    why awake: {moving} moving, {settling} settling, {kept} at rest but kept up by their \
+         island, {never} never sleep, kinematic {kin_moving} moving and {kin_still} still"
+    );
+    names.sort_by_key(|n| n.0);
+    for (what, list) in [(0, "never sleep"), (1, "kept up"), (2, "still kinematic")] {
+        let mine: Vec<String> = names
+            .iter()
+            .filter(|n| n.0 == what)
+            .take(6)
+            .map(|n| label(world, n.1))
+            .collect();
+        if !mine.is_empty() {
+            out += &format!("; {list}: {}", mine.join(", "));
+        }
+    }
+    out
 }
 
 /// What to call a body in the report: its name or its nearest named ancestor's, or else its

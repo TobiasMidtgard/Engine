@@ -18,7 +18,7 @@ use std::sync::atomic::{AtomicU8, Ordering};
 use bytemuck::{Pod, Zeroable};
 use engine_core::prelude::*;
 use engine_render::shadows::{MAX_CASCADES, SKY_OCCLUSION_VIEW};
-use engine_render::{GpuShared, GrowBuffer, ViewData, wgpu};
+use engine_render::{GpuShared, GrowBuffer, PrepareOut, ViewData, wgpu};
 use engine_world::{Gravity, HeatField, WeatherState, WindField, WorldShift};
 
 use crate::cloth::{Cloth, ClothPins};
@@ -305,6 +305,8 @@ pub struct GpuCloths {
     index_data: Vec<u32>,
     layouts: HashMap<[u32; 2], Range<u32>>,
     query: Option<QueryState<(Entity, &'static Cloth, &'static GlobalTransform)>>,
+    /// The world shift taken in [`Self::prepare_serial`], for this frame's [`Self::prepare`].
+    shift: Option<WorldShift>,
     slots: HashMap<Entity, Slot>,
     /// Unused particle ranges (first, count).
     free: Vec<(u32, u32)>,
@@ -377,6 +379,7 @@ impl GpuCloths {
             index_data: Vec::new(),
             layouts: HashMap::new(),
             query: None,
+            shift: None,
             slots: HashMap::new(),
             free: Vec::new(),
             used: 0,
@@ -460,18 +463,35 @@ impl GpuCloths {
         r
     }
 
+    /// What [`Self::prepare`] needs the world mutably for, in the render feature's
+    /// `prepare_serial`: the probe's readback, the frame's world shift and the query.
+    pub fn prepare_serial(&mut self, world: &mut World, gpu: &GpuShared) {
+        self.read_probe(world, gpu);
+        if self.query.is_none() {
+            self.query = Some(world.query::<(Entity, &Cloth, &GlobalTransform)>());
+        }
+        let enabled = world
+            .get_resource::<SoftBodyConfig>()
+            .is_none_or(|c| c.enabled);
+        if enabled {
+            self.shift = world
+                .get_resource_mut::<GpuClothShift>()
+                .and_then(|mut s| s.0.take());
+        }
+    }
+
     /// Gather this frame's GPU cloths: slots, parameters, materials (appended to
-    /// `materials`) and draws.
+    /// `materials`) and draws, reading the world shared (after [`Self::prepare_serial`]).
     pub fn prepare(
         &mut self,
-        world: &mut World,
+        world: &World,
         gpu: &GpuShared,
         view: &ViewData,
         materials: &mut Vec<GpuSoftMaterial>,
+        out: &mut PrepareOut,
     ) {
         self.frame.clear();
         self.draws.clear();
-        self.read_probe(world, gpu);
         if let Some(timer) = self.timer.as_mut() {
             timer.collect(&gpu.device);
         }
@@ -490,9 +510,7 @@ impl GpuCloths {
         let probe = world.get_resource::<GpuClothProbe>().and_then(|p| p.entity);
         // A world shift moves the anchors and turns the kept state; the frame's velocity
         // doesn't reach the cloth (flags are tied to the ground, which moves with them).
-        let shift = world
-            .get_resource_mut::<GpuClothShift>()
-            .and_then(|mut s| s.0.take());
+        let shift = self.shift.take();
         let turn = shift.map_or(Quat::IDENTITY, |s| s.rotation.as_quat());
         if let Some(s) = &shift {
             for slot in self.slots.values_mut() {
@@ -500,9 +518,9 @@ impl GpuCloths {
             }
         }
         self.probe = None;
-        let query = self
-            .query
-            .get_or_insert_with(|| world.query::<(Entity, &Cloth, &GlobalTransform)>());
+        let Some(query) = self.query.as_mut() else {
+            return;
+        };
         let mut found: Vec<(Entity, Cloth, GlobalTransform)> = Vec::new();
         for (e, spec, t) in query.iter(world) {
             if runs_on_gpu(spec) {
@@ -650,10 +668,12 @@ impl GpuCloths {
                 });
             }
         }
-        if let Some(wet) = probe_wet
-            && let Some(mut p) = world.get_resource_mut::<GpuClothProbe>()
-        {
-            p.wet = wet;
+        if let Some(wet) = probe_wet {
+            out.defer(move |world| {
+                if let Some(mut p) = world.get_resource_mut::<GpuClothProbe>() {
+                    p.wet = wet;
+                }
+            });
         }
         // Slots of cloths that are gone (or moved to the CPU) become free.
         let gone: Vec<Entity> = self

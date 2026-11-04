@@ -21,8 +21,8 @@ use bytemuck::{Pod, Zeroable};
 use engine_core::prelude::*;
 use engine_render::shadows::{MAX_CASCADES, SKY_OCCLUSION_VIEW};
 use engine_render::{
-    FeatureStats, FrameContext, GpuShared, GrowBuffer, RenderFeature, RenderPhase, RenderSettings,
-    ViewData, wgpu,
+    FeatureStats, FrameContext, GpuShared, GrowBuffer, PrepareOut, RenderFeature, RenderPhase,
+    RenderSettings, ViewData, wgpu,
 };
 
 use crate::body::{SoftBodySim, SoftKind, Surface, Tube};
@@ -1110,12 +1110,32 @@ impl RenderFeature for SoftBodyFeature {
         self.cloths = Some(GpuCloths::new(gpu));
     }
 
-    fn prepare(
+    fn prepares_shared(&self) -> bool {
+        true
+    }
+
+    fn prepare_serial(
         &mut self,
         world: &mut World,
         gpu: &GpuShared,
+        _view: &ViewData,
+        _settings: &RenderSettings,
+    ) {
+        if self.query.is_none() {
+            self.query = Some(world.query::<&SoftBodySim>());
+        }
+        if let Some(cloths) = self.cloths.as_mut() {
+            cloths.prepare_serial(world, gpu);
+        }
+    }
+
+    fn prepare_shared(
+        &mut self,
+        world: &World,
+        gpu: &GpuShared,
         view: &ViewData,
         _settings: &RenderSettings,
+        out: &mut PrepareOut,
     ) {
         let Some(g) = self.gpu.as_mut() else {
             return;
@@ -1128,9 +1148,9 @@ impl RenderFeature for SoftBodyFeature {
         let thin = world
             .get_resource::<engine_world::Scalability>()
             .map_or(1.0, |s| s.density.clamp(0.1, 2.0));
-        let query = self
-            .query
-            .get_or_insert_with(|| world.query::<&SoftBodySim>());
+        let Some(query) = self.query.as_mut() else {
+            return;
+        };
 
         // Which bodies the camera or a shadow map can see.
         struct Seen<'a> {
@@ -1283,7 +1303,7 @@ impl RenderFeature for SoftBodyFeature {
             + self.draws.hair.iter().filter(|h| h.in_view).count())
             as u32;
         if let Some(cloths) = self.cloths.as_mut() {
-            cloths.prepare(world, gpu, view, &mut geo.materials);
+            cloths.prepare(world, gpu, view, &mut geo.materials, out);
             for d in cloths.draws.iter().filter(|d| d.in_view) {
                 self.stats.triangles += (d.indices.len() / 3) as u64;
                 self.stats.draw_calls += 1;

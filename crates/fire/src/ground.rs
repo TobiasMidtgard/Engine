@@ -18,8 +18,8 @@ use engine_core::math::{DVec2, DVec3, Vec2};
 use engine_core::prelude::*;
 use engine_render::wgpu;
 use engine_render::{
-    FeatureStats, FrameContext, GpuShared, Image, RenderFeature, RenderPhase, RenderSettings,
-    ViewData,
+    FeatureStats, FrameContext, GpuShared, Image, PrepareOut, RenderFeature, RenderPhase,
+    RenderSettings, ViewData,
 };
 
 use engine_world::Ground;
@@ -245,6 +245,8 @@ fn scorch_texels(field: &FireField, min: DVec2, size: [u32; 2], cell: f64) -> Ve
 /// Draws every [`PaintedGround`] (added by `FirePlugin`).
 #[derive(Default)]
 pub struct GroundFeature {
+    /// Made in `prepare_serial`, read in `prepare_shared`.
+    query: Option<QueryState<(Entity, &'static PaintedGround, &'static GlobalTransform)>>,
     pipeline: Option<wgpu::RenderPipeline>,
     layout: Option<wgpu::BindGroupLayout>,
     sampler: Option<wgpu::Sampler>,
@@ -531,16 +533,35 @@ impl RenderFeature for GroundFeature {
         self.layout = Some(layout);
     }
 
-    fn prepare(
+    fn prepares_shared(&self) -> bool {
+        true
+    }
+
+    fn prepare_serial(
         &mut self,
         world: &mut World,
+        _gpu: &GpuShared,
+        _view: &ViewData,
+        _settings: &RenderSettings,
+    ) {
+        if self.query.is_none() {
+            self.query = Some(world.query());
+        }
+    }
+
+    fn prepare_shared(
+        &mut self,
+        world: &World,
         gpu: &GpuShared,
         view: &ViewData,
         _settings: &RenderSettings,
+        _out: &mut PrepareOut,
     ) {
         self.stats = FeatureStats::default();
-        let mut q = world.query::<(Entity, &PaintedGround, &GlobalTransform)>();
-        let grounds: Vec<(Entity, PaintedGround, DVec3)> = q
+        let Some(query) = self.query.as_mut() else {
+            return;
+        };
+        let grounds: Vec<(Entity, PaintedGround, DVec3)> = query
             .iter(world)
             .map(|(e, g, t)| (e, g.clone(), t.translation()))
             .collect();

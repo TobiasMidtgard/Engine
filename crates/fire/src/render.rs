@@ -8,8 +8,8 @@ use engine_core::math::{DVec2, DVec3, IVec2, Vec3};
 use engine_core::prelude::*;
 use engine_render::wgpu;
 use engine_render::{
-    FeatureStats, FrameContext, GpuShared, GrowBuffer, RenderFeature, RenderPhase, RenderSettings,
-    ViewData,
+    FeatureStats, FrameContext, GpuShared, GrowBuffer, PrepareOut, RenderFeature, RenderPhase,
+    RenderSettings, ViewData,
 };
 use engine_world::{Combustible, WindField};
 
@@ -66,8 +66,21 @@ struct HazeDraw {
     count: u32,
 }
 
+/// Something burning, as `FireFeature` reads it.
+type BurningItem = (
+    Entity,
+    &'static GlobalTransform,
+    &'static Combustible,
+    &'static Burning,
+    Option<&'static FlameShape>,
+);
+
 #[derive(Default)]
 pub struct FireFeature {
+    /// What burns (made in `prepare_serial`, read in `prepare_shared`).
+    burning_query: Option<QueryState<BurningItem>>,
+    /// Painted grounds, charred where they lie.
+    grounds_query: Option<QueryState<(&'static PaintedGround, &'static GlobalTransform)>>,
     flame_pipeline: Option<wgpu::RenderPipeline>,
     haze_pipeline: Option<wgpu::RenderPipeline>,
     /// The flame flipbook (made on a worker thread at startup, uploaded when first needed).
@@ -104,15 +117,11 @@ impl FireFeature {
         }
     }
 
-    fn build_instances(&mut self, world: &mut World, view: &ViewData) {
+    fn build_instances(&mut self, world: &World, view: &ViewData) {
         self.scratch.clear();
-        let mut q = world.query::<(
-            Entity,
-            &GlobalTransform,
-            &Combustible,
-            &Burning,
-            Option<&FlameShape>,
-        )>();
+        let Some(q) = self.burning_query.as_mut() else {
+            return;
+        };
         let objects: Vec<(u32, DVec3, f32, Burning, Option<FlameShape>)> = q
             .iter(world)
             .filter(|(.., b, _)| b.intensity > 0.02)
@@ -697,12 +706,32 @@ impl RenderFeature for FireFeature {
         self.scorch_group = None;
     }
 
-    fn prepare(
+    fn prepares_shared(&self) -> bool {
+        true
+    }
+
+    fn prepare_serial(
         &mut self,
         world: &mut World,
+        _gpu: &GpuShared,
+        _view: &ViewData,
+        _settings: &RenderSettings,
+    ) {
+        if self.burning_query.is_none() {
+            self.burning_query = Some(world.query());
+        }
+        if self.grounds_query.is_none() {
+            self.grounds_query = Some(world.query());
+        }
+    }
+
+    fn prepare_shared(
+        &mut self,
+        world: &World,
         gpu: &GpuShared,
         view: &ViewData,
         _settings: &RenderSettings,
+        out: &mut PrepareOut,
     ) {
         self.stats = FeatureStats::default();
         self.count = 0;
@@ -740,8 +769,8 @@ impl RenderFeature for FireFeature {
             );
             let mut self_charred = [[0.0; 4]; MAX_SELF_CHARRED];
             let mut count = 0;
-            let mut q = world.query::<(&PaintedGround, &GlobalTransform)>();
-            for (g, t) in q.iter(world).take(MAX_SELF_CHARRED) {
+            let grounds = self.grounds_query.as_mut().into_iter();
+            for (g, t) in grounds.flat_map(|q| q.iter(world)).take(MAX_SELF_CHARRED) {
                 // Inside its frayed edge, where the terrain under it no longer shows.
                 let at = t.translation() - view.origin;
                 let half = DVec2::new(
@@ -775,9 +804,7 @@ impl RenderFeature for FireFeature {
         }
         self.stats.instances = self.count;
         self.stats.draw_calls = self.count.min(1) + self.map_valid as u32;
-        if let Some(mut d) = world.get_resource_mut::<Diagnostics>() {
-            d.set("fire.sprites", self.count as f64);
-        }
+        out.set("fire.sprites", self.count as f64);
     }
 
     fn compute(&mut self, _encoder: &mut wgpu::CommandEncoder, ctx: &FrameContext) {

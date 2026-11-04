@@ -224,6 +224,7 @@ pub(crate) fn physics_sync(world: &mut World, mut q: Local<Option<StepQueries>>)
 
     // ---------------------------------------------------------------- removals
     let _part = tracing::info_span!("sync removals").entered();
+    let _piece = crate::report::Piece::start("sync: removals");
     let mut gone: Vec<Entity> = std::mem::take(&mut world.resource_mut::<PendingRemovals>().0);
     {
         let Ok((mut rb, mut co, mut jo, mut ch)) = q.removed.get_mut(world) else {
@@ -250,9 +251,10 @@ pub(crate) fn physics_sync(world: &mut World, mut q: Local<Option<StepQueries>>)
         }
     }
 
-    drop(_part);
+    drop((_part, _piece));
     // ---------------------------------------------------------------- bodies
     let _part = tracing::info_span!("sync bodies").entered();
+    let _piece = crate::report::Piece::start("sync: bodies");
     let changed: Vec<Entity> = q.changed_bodies.iter(world).collect();
     let mut inserts: Vec<Entity> = Vec::new();
     for e in changed {
@@ -286,9 +288,10 @@ pub(crate) fn physics_sync(world: &mut World, mut q: Local<Option<StepQueries>>)
         inserts.push(e);
     }
 
-    drop(_part);
+    drop((_part, _piece));
     // ---------------------------------------------------------------- colliders
     let _part = tracing::info_span!("sync colliders").entered();
+    let _piece = crate::report::Piece::start("sync: colliders");
     dirty_colliders.extend(q.changed_colliders.iter(world));
     for e in q.moved_colliders.iter(world) {
         match sim.colliders.get(&e) {
@@ -308,14 +311,13 @@ pub(crate) fn physics_sync(world: &mut World, mut q: Local<Option<StepQueries>>)
     }
     dirty_colliders.sort();
     dirty_colliders.dedup();
-    for e in dirty_colliders {
-        let Some(desc) = world.get::<Collider>(e).cloned() else {
-            continue;
-        };
-        let Some(pose) = world_pose(world, e) else {
-            continue;
-        };
-        let Some(shape) = convert::shape(&desc.shape, pose.scale) else {
+    let wanted: Vec<(Entity, Collider, Transform)> = dirty_colliders
+        .into_iter()
+        .filter_map(|e| Some((e, world.get::<Collider>(e).cloned()?, world_pose(world, e)?)))
+        .collect();
+    let shapes = build_shapes(&wanted);
+    for ((e, desc, pose), shape) in wanted.into_iter().zip(shapes) {
+        let Some(shape) = shape else {
             engine_core::log::warn!(
                 "physics: collider on {e} has a shape that can't be built ({:?}); skipped",
                 std::mem::discriminant(&desc.shape)
@@ -345,9 +347,10 @@ pub(crate) fn physics_sync(world: &mut World, mut q: Local<Option<StepQueries>>)
         }
     }
 
-    drop(_part);
+    drop((_part, _piece));
     // ---------------------------------------------------------------- joints
     let _part = tracing::info_span!("sync joints and characters").entered();
+    let _piece = crate::report::Piece::start("sync: joints and characters");
     for e in q.changed_joints.iter(world).collect::<Vec<_>>() {
         let desc = world.get::<Joint>(e).unwrap().clone();
         // A world shift moves world anchors in the cache too.
@@ -430,9 +433,10 @@ pub(crate) fn physics_sync(world: &mut World, mut q: Local<Option<StepQueries>>)
         }
     }
 
-    drop(_part);
+    drop((_part, _piece));
     // ---------------------------------------------------------------- gameplay inputs
     let _part = tracing::info_span!("sync inputs").entered();
+    let _piece = crate::report::Piece::start("sync: inputs");
     let inputs: Vec<(Entity, Transform, Option<Velocity>, Option<ExternalForce>)> = q
         .body_inputs
         .iter(world)
@@ -526,8 +530,9 @@ pub(crate) fn physics_sync(world: &mut World, mut q: Local<Option<StepQueries>>)
             }
         }
     }
-    drop(_part);
+    drop((_part, _piece));
     let _part = tracing::info_span!("sync water and holds").entered();
+    let piece = crate::report::Piece::start("sync: water");
     sim.water_clock += 1;
     if sim.water_clock >= WATER_LOOK_EVERY {
         sim.water_clock = 0;
@@ -538,11 +543,15 @@ pub(crate) fn physics_sync(world: &mut World, mut q: Local<Option<StepQueries>>)
         }
     }
 
+    drop(piece);
+    let piece = crate::report::Piece::start("sync: holds: ungrounded");
     crate::grounding::hold_ungrounded(&mut sim, &foci);
+    drop(piece);
+    let _piece = crate::report::Piece::start("sync: holds: resting");
     if !sim.resting.is_empty() || !sim.ungrounded.is_empty() || !sim.weightless.is_empty() {
         hold_resting(&mut sim);
     }
-    drop(_part);
+    drop((_part, _piece));
     drop(sync);
     drop(sim);
     if crate::report::wanted() {
@@ -607,7 +616,9 @@ pub(crate) fn physics_simulate(
         })
         .fold(0.0f32, f32::max) as f64
         * dt as f64;
+    let piece = crate::report::Piece::start("upkeep: regions");
     sim.maintain_regions(&foci, max_step, dt as f64);
+    drop(piece);
 
     // ---------------------------------------------------------------- step
     let substeps = if dt > 0.0 {
@@ -635,6 +646,15 @@ pub(crate) fn physics_simulate(
     // region pool, between passes that touch the shared books (forces, kinematics, contact
     // events, joints) one region at a time. A region's substeps run in order as before, so it
     // steps exactly as it would alone.
+    // The kinematic and time-scaled bodies, by region, in one walk of the books (walking them
+    // once per region was most of the plans' 0.1-0.2 ms a step: ~3,000 bodies, ~10 regions).
+    let mut special_in: HashMap<RegionId, Vec<Entity>> = HashMap::new();
+    for (e, b) in &sim.bodies {
+        if b.kind == BodyKind::Kinematic || (b.time_factor - 1.0).abs() > 1e-3 {
+            special_in.entry(b.region).or_default().push(*e);
+        }
+    }
+    let mut cones_in = crate::cones::cones_by_region(&sim);
     let mut plans: Vec<Plan> = Vec::new();
     for rid in region_ids.iter().copied() {
         let region_started = Instant::now();
@@ -658,9 +678,7 @@ pub(crate) fn physics_simulate(
         };
         let Some((substeps, sub_dt)) = plan else {
             place_kinematics(&mut sim, rid);
-            let s = &mut *sim;
-            let no_contact = &s.no_contact;
-            let r = s.regions[rid as usize].as_mut().expect("live region");
+            let r = sim.regions[rid as usize].as_mut().expect("live region");
             if r.needs_refresh {
                 let _refresh = tracing::info_span!("refresh resting region").entered();
                 // Only the query tree learns of the changes now (rays and overlaps see the new
@@ -668,29 +686,14 @@ pub(crate) fn physics_simulate(
                 // real step, as it does any change made between steps. What doesn't step
                 // needs no contacts: a zero-length step here walked all of a resting yard's
                 // 40,000 pairs for one fresh collider, 9-19 ms four times a second.
-                // (A dynamic body woken here, one just made or moved in, joins Rapier's active
-                // set only in a step, and the tiers look there for what is travelling: take one
-                // of no length for it, once.)
+                // (A body woken here, one just made or moved in, joins Rapier's active set only
+                // in a step; the tiers look past that set in a region at rest, `update_tiers`.
+                // A zero-length step here brought such bodies in: it walked every pair, 2-57 ms
+                // a time, round 4 on the VM.)
                 let t0 = Instant::now();
                 let (fresh, stale) = (r.fresh.len(), r.stale_all);
                 let added = r.fresh.clone();
-                let active: HashSet<_> = r.world.islands.active_bodies().collect();
-                let woke = r
-                    .world
-                    .bodies
-                    .iter()
-                    .find(|(h, rb)| rb.is_dynamic() && !rb.is_sleeping() && !active.contains(h))
-                    .map(|(_, rb)| crate::convert::entity_of(rb.user_data));
-                let awake = woke.is_some();
-                if awake {
-                    r.world.integration_parameters.dt = 0.0;
-                    let filter = ContactFilter {
-                        no_contact,
-                        dt: 0.0,
-                    };
-                    r.world.step_with_events(&filter, &());
-                    r.queries_refreshed();
-                } else if r.stale_all || !r.fresh.is_empty() {
+                if r.stale_all || !r.fresh.is_empty() {
                     r.refresh_queries();
                 }
                 let t1 = Instant::now();
@@ -699,13 +702,15 @@ pub(crate) fn physics_simulate(
                 } else {
                     r.extend_bounds(&added);
                 }
+                // (Its bounds are up to date with them already.)
+                let _ = r.changes_since_step();
                 r.needs_refresh = false;
                 let ms = t0.elapsed().as_secs_f64() * 1000.0;
                 if ms > 2.0 && report {
                     engine_core::log::info!(
                         "physics regions: refreshing resting region {rid} ({} bodies, {} \
-                         colliders, {fresh} fresh, stale {stale}, awake {woke:?}) took {ms:.1} \
-                         ms, bounds {:.1}",
+                         colliders, {fresh} fresh, stale {stale}) took {ms:.1} ms, bounds \
+                         {:.1}",
                         r.world.bodies.len(),
                         r.world.colliders.len(),
                         t1.elapsed().as_secs_f64() * 1000.0
@@ -725,22 +730,14 @@ pub(crate) fn physics_simulate(
             character::find_platforms(&mut sim, rid, &gravity);
         }
         // The kinematic and time-scaled bodies here, found once for all substeps.
-        let special: Vec<Entity> = sim
-            .bodies
-            .iter()
-            .filter(|(_, b)| {
-                b.region == rid
-                    && (b.kind == BodyKind::Kinematic || (b.time_factor - 1.0).abs() > 1e-3)
-            })
-            .map(|(e, _)| *e)
-            .collect();
+        let special: Vec<Entity> = special_in.remove(&rid).unwrap_or_default();
         plans.push(Plan {
             rid,
             substeps,
             sub_dt,
             scaled: time_scaled(&sim, rid, &special),
             decks: decks(&sim, rid, &special),
-            cones: crate::cones::cones(&sim, rid),
+            cones: cones_in.remove(&rid).unwrap_or_default(),
             special,
             ms: region_started.elapsed().as_secs_f64() * 1000.0,
         });
@@ -886,9 +883,18 @@ pub(crate) fn physics_simulate(
     let finish = tracing::info_span!("characters and bounds").entered();
     for p in &plans {
         let t = Instant::now();
+        let (stale, fresh) = sim.region_mut(p.rid).changes_since_step();
+        let changed = stale || !fresh.is_empty();
         sim.region_mut(p.rid).queries_refreshed();
-        character::move_characters(&mut sim, p.rid, &gravity);
-        sim.region_mut(p.rid).update_bounds();
+        let piece = crate::report::Piece::start("characters: move");
+        let resting = character::move_characters(&mut sim, p.rid, &gravity, changed);
+        drop(piece);
+        if report && resting > 0 {
+            crate::report::count("characters resting", resting);
+        }
+        let piece = crate::report::Piece::start("characters: bounds");
+        sim.region_mut(p.rid).follow_bounds(stale, &fresh);
+        drop(piece);
         if report {
             let ms = p.ms + t.elapsed().as_secs_f64() * 1000.0;
             crate::report::region_ms(p.rid, ms);
@@ -1557,44 +1563,57 @@ fn spin_drag(c: &rapier3d::geometry::Collider, spin: Vec3) -> Vec3 {
     rot * (reach * 2.0 * (rot.inverse() * spin))
 }
 
-/// Whether `r`'s Rapier step sweeps fast bodies (continuous collision detection): near a focus
-/// (tier 0), or anywhere while a body that asked for it (`engine_world::RigidBody::ccd`) moves
-/// more than [`BULLET_STEP_M`] a substep with something within reach of its path. Rapier's
-/// switch is the whole world's: every car and plane asks for it, so a parked car, or the
-/// circuit's planes 145 m up with nothing near them, kept the lake's boats beside them swept
-/// (8 ms a step at the field in the loops' second round, 1.4-4 ms on the PC).
+/// Whether `r`'s Rapier step sweeps fast bodies (continuous collision detection) this substep:
+/// only while a body moves more than [`BULLET_STEP_M`] a substep (its fastest point, spin
+/// included) with something within reach of its path, and, past full detail (tier 0), only a
+/// body that asked for it (`engine_world::RigidBody::ccd`). Rapier's switch is the whole
+/// world's: every car and plane asks for it, so a parked car, or the circuit's planes 145 m up
+/// with nothing near them, kept the lake's boats beside them swept (8 ms a step at the field in
+/// the loops' second round, 1.4-4 ms on the PC).
 ///
 /// Rapier sweeps every dynamic body that moves more than half its thinnest collider in a
 /// step against the fixed geometry around it. A boat's side walls are a few centimeters
 /// thick, so a boat doing more than about 1 m/s, or rocking, was swept every step against the
 /// terrain under the lake: 1.5-4 ms a step for the motorboat and rowboat 350 m from the plaza,
-/// most of the PC's slow second loop (round 21d). Past [`PhysicsSettings::coarse_beyond_m`]
-/// nobody sees a body poke into the ground for a step, and one that falls through is caught
-/// ([`crate::grounding`]).
+/// most of the PC's slow second loop (round 21d), and near the player the moat's motorboat
+/// and the fortress's settling debris, about half of that region's Rapier step (round 23).
+/// Slower than [`BULLET_STEP_M`], a thin body has speculative contacts instead
+/// ([`speculate_thin`], `soft_ccd_prediction`): contacts made as far ahead as it moves, which stop it
+/// at the surface with no sweep, as Jolt's discrete bodies, Box2D v3's and PhysX's speculative
+/// CCD do; the sweep (Jolt's `LinearCast`, PhysX's swept CCD) is kept for what moves faster.
+/// Past [`PhysicsSettings::coarse_beyond_m`] nobody sees a body poke into the ground for a step,
+/// and one that falls through is caught ([`crate::grounding`]).
 fn sweeps_wanted(r: &crate::sim::Region, dt: f32) -> bool {
     use rapier3d::parry::bounding_volume::BoundingVolume;
-    if r.tier == 0 {
-        return true;
-    }
     let w = &r.world;
-    w.islands.active_bodies().any(|h| {
-        let Some(rb) = w.bodies.get(h) else {
-            return false;
-        };
-        let step = rb.linvel().length() * dt;
-        if !rb.is_ccd_enabled() || step <= BULLET_STEP_M {
+    // Every body awake, not only Rapier's active set: one woken or made since the last step
+    // (a shot just fired) joins that set only inside the step.
+    w.bodies.iter().any(|(h, rb)| {
+        if !rb.is_dynamic() || rb.is_sleeping() || (r.tier > 0 && !rb.is_ccd_enabled()) {
             return false;
         }
-        // Its path this substep, and a margin: anything there it could pass through?
-        let Some(mut path) = rb
-            .colliders()
-            .iter()
-            .filter_map(|c| w.colliders.get(*c))
+        let colliders = || rb.colliders().iter().filter_map(|c| w.colliders.get(*c));
+        let Some(mut path) = colliders()
             .map(|c| c.compute_aabb())
             .reduce(|a, b| a.merged(&b))
         else {
             return false;
         };
+        // Its fastest point's travel this substep.
+        let reach = (path.center() - rb.center_of_mass()).length() + path.half_extents().length();
+        let step = (rb.linvel().length() + rb.angvel().length() * reach) * dt;
+        if step <= BULLET_STEP_M {
+            return false;
+        }
+        // Rapier's own test for the bodies that didn't ask: faster than half its thinnest part.
+        if !rb.is_ccd_enabled() && step <= 0.5 * thickness(colliders().map(|c| c.shape())) {
+            return false;
+        }
+        // Colliders made or moved since the last step aren't in the query tree yet.
+        if r.stale_all || !r.fresh.is_empty() {
+            return true;
+        }
+        // Its path this substep, and a margin: anything there it could pass through?
         path.mins -= Vec3::splat(step + BULLET_MARGIN_M);
         path.maxs += Vec3::splat(step + BULLET_MARGIN_M);
         let filter = rapier3d::prelude::QueryFilter::default()
@@ -1607,9 +1626,69 @@ fn sweeps_wanted(r: &crate::sim::Region, dt: f32) -> bool {
     })
 }
 
-/// How far a body that asked for continuous collision detection must move in a substep for a
-/// region past full detail to sweep, meters (6 m/s at 60 Hz).
-const BULLET_STEP_M: f32 = 0.1;
+/// A body's thinnest part as Rapier's sweeps judge it: the least `ccd_thickness` of its
+/// shapes, leaving out those it never sweeps (meshes, heightfields, polylines, voxels).
+pub(crate) fn thickness<'a>(
+    shapes: impl Iterator<Item = &'a dyn rapier3d::parry::shape::Shape>,
+) -> f32 {
+    use rapier3d::parry::shape::TypedShape;
+    shapes
+        .filter(|s| {
+            !matches!(
+                s.as_typed_shape(),
+                TypedShape::TriMesh(_)
+                    | TypedShape::Polyline(_)
+                    | TypedShape::HeightField(_)
+                    | TypedShape::Voxels(_)
+            )
+        })
+        .map(|s| s.ccd_thickness())
+        .fold(f32::MAX, f32::min)
+}
+
+/// Near a focus (tier 0), give the awake dynamic bodies that move more than half their
+/// thinnest part this substep, but less than [`BULLET_STEP_M`], speculative contacts reaching as
+/// far as they move (Rapier's `soft_ccd_prediction`), and take them away again once they are
+/// slower: they then stop at a surface without being swept ([`sweeps_wanted`]). Only while they
+/// are that fast: kept on, the farther contacts kept settling piles and jointed chains from
+/// coming to rest as before.
+fn speculate_thin(r: &mut crate::sim::Region, dt: f32) {
+    if r.tier > 0 {
+        return;
+    }
+    let w = &mut r.world;
+    let mut changes: Vec<(rapier3d::prelude::RigidBodyHandle, f32)> = Vec::new();
+    for h in w.islands.active_bodies() {
+        let Some(rb) = w.bodies.get(h) else {
+            continue;
+        };
+        if !rb.is_dynamic() {
+            continue;
+        }
+        let step = rb.linvel().length() * dt;
+        let thin = step <= BULLET_STEP_M
+            && step
+                > 0.5
+                    * thickness(
+                        rb.colliders()
+                            .iter()
+                            .filter_map(|c| w.colliders.get(*c))
+                            .map(|c| c.shape()),
+                    );
+        let want = if thin { BULLET_STEP_M } else { 0.0 };
+        if rb.soft_ccd_prediction() != want {
+            changes.push((h, want));
+        }
+    }
+    for (h, want) in changes {
+        if let Some(rb) = w.bodies.get_mut(h) {
+            rb.set_soft_ccd_prediction(want);
+        }
+    }
+}
+
+/// How far a body must move in a substep for its region to sweep, meters (6 m/s at 60 Hz).
+pub(crate) const BULLET_STEP_M: f32 = 0.1;
 /// Beyond its path, how near something must be to a fast body for its region to sweep, m.
 const BULLET_MARGIN_M: f32 = 0.5;
 
@@ -2100,6 +2179,7 @@ fn substep(
         r.world.integration_parameters.dt = p.sub_dt;
         r.world.integration_parameters.num_solver_iterations =
             crate::fine::iterations(shared.settings, r.fine, p.sub_dt);
+        speculate_thin(r, p.sub_dt);
         r.world.integration_parameters.max_ccd_substeps = usize::from(sweeps_wanted(r, p.sub_dt));
         let collector = std::mem::take(&mut r.collector);
         let pool = match wide_pool() {
@@ -2247,6 +2327,47 @@ fn run_substeps(mut jobs: Vec<Job>, shared: &SubstepShared) -> Vec<SubstepOut> {
             .collect(),
     }
 }
+
+/// The Rapier shapes of `wanted`'s colliders. A tile of terrain or a big scenery mesh takes a
+/// few milliseconds to build (its BVH, or a convex hull), and a batch arriving together (a zone
+/// streaming in) took 10-40 ms of one sync on 4 cores; batches with some size spread over
+/// [`region_pool`], whose tasks never wait on anything, so the simulation's lock held here is
+/// safe (AGENTS.md: no pool scope that may run another module's work under a lock).
+fn build_shapes(wanted: &[(Entity, Collider, Transform)]) -> Vec<Option<SharedShape>> {
+    let build =
+        |(_, desc, pose): &(Entity, Collider, Transform)| convert::shape(&desc.shape, pose.scale);
+    // Points across the batch: a box or a capsule is next to nothing to build.
+    let weight: usize = wanted.iter().map(|w| shape_points(&w.1.shape)).sum();
+    match region_pool() {
+        Some(pool) if wanted.len() > 1 && weight >= BUILD_SPREAD_POINTS => {
+            let chunk = wanted.len().div_ceil(pool.thread_num().max(1)).max(1);
+            pool.scope(|scope| {
+                for part in wanted.chunks(chunk) {
+                    scope.spawn(async move { part.iter().map(build).collect::<Vec<_>>() });
+                }
+            })
+            .into_iter()
+            .flatten()
+            .collect()
+        }
+        _ => wanted.iter().map(build).collect(),
+    }
+}
+
+/// Vertices a collider's shape is built from (0 for primitives).
+fn shape_points(shape: &engine_world::physics::ColliderShape) -> usize {
+    use engine_world::physics::ColliderShape as S;
+    match shape {
+        S::TriMesh { vertices, .. } => vertices.len(),
+        S::ConvexHull { points } => points.len(),
+        S::Heightfield { heights, .. } => heights.len(),
+        S::Compound(parts) => parts.iter().map(|(_, _, s)| shape_points(s)).sum(),
+        _ => 0,
+    }
+}
+
+/// Points a batch of new shapes must hold before [`build_shapes`] spreads it over threads.
+const BUILD_SPREAD_POINTS: usize = 4096;
 
 /// Remove joints whose constraint force went over their `break_force`.
 fn break_joints(sim: &mut Simulation, rid: RegionId, sub_dt: f32) {

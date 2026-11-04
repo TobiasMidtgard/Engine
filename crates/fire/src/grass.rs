@@ -24,7 +24,8 @@ use engine_core::prelude::*;
 use engine_render::shadows::{MAX_CASCADES, SKY_OCCLUSION_VIEW};
 use engine_render::wgpu;
 use engine_render::{
-    FeatureStats, FrameContext, GpuShared, RenderFeature, RenderPhase, RenderSettings, ViewData,
+    FeatureStats, FrameContext, GpuShared, PrepareOut, RenderFeature, RenderPhase, RenderSettings,
+    ViewData,
 };
 
 use engine_world::Ground;
@@ -560,9 +561,20 @@ struct GrassDraw {
     instances: std::ops::Range<u32>,
 }
 
+/// A meadow as `GrassFeature` reads it.
+type MeadowItem = (
+    Entity,
+    &'static GrassMeadow,
+    &'static GlobalTransform,
+    Option<&'static GrassBurn>,
+);
+
 /// Draws every [`GrassMeadow`] (added by `FirePlugin`).
 #[derive(Default)]
 pub struct GrassFeature {
+    /// Made in `prepare_serial`, read in `prepare_shared`.
+    meadows_query: Option<QueryState<MeadowItem>>,
+    patches_query: Option<QueryState<&'static FuelPatch>>,
     pipeline: Option<wgpu::RenderPipeline>,
     shadow_pipeline: Option<wgpu::RenderPipeline>,
     layout: Option<wgpu::BindGroupLayout>,
@@ -1029,12 +1041,32 @@ impl RenderFeature for GrassFeature {
         self.layout = Some(layout);
     }
 
-    fn prepare(
+    fn prepares_shared(&self) -> bool {
+        true
+    }
+
+    fn prepare_serial(
         &mut self,
         world: &mut World,
+        _gpu: &GpuShared,
+        _view: &ViewData,
+        _settings: &RenderSettings,
+    ) {
+        if self.meadows_query.is_none() {
+            self.meadows_query = Some(world.query());
+        }
+        if self.patches_query.is_none() {
+            self.patches_query = Some(world.query());
+        }
+    }
+
+    fn prepare_shared(
+        &mut self,
+        world: &World,
         gpu: &GpuShared,
         view: &ViewData,
         _settings: &RenderSettings,
+        out: &mut PrepareOut,
     ) {
         self.draws.clear();
         for d in &mut self.shadow_draws {
@@ -1051,8 +1083,12 @@ impl RenderFeature for GrassFeature {
         if self.layout.is_none() {
             return;
         }
-        let mut q = world.query::<(Entity, &GrassMeadow, &GlobalTransform, Option<&GrassBurn>)>();
-        let meadows: Vec<(Entity, GrassMeadow, DVec3, Option<GrassBurn>)> = q
+        let (Some(meadows_query), Some(patches_query)) =
+            (&mut self.meadows_query, &mut self.patches_query)
+        else {
+            return;
+        };
+        let meadows: Vec<(Entity, GrassMeadow, DVec3, Option<GrassBurn>)> = meadows_query
             .iter(world)
             .map(|(e, m, gt, b)| (e, m.clone(), gt.translation(), b.cloned()))
             .collect();
@@ -1064,7 +1100,7 @@ impl RenderFeature for GrassFeature {
             return;
         }
         // Wait until the fuel patches are indexed, so roads and fire pits stay bare.
-        let patch_count = world.query::<&FuelPatch>().iter(world).count();
+        let patch_count = patches_query.iter(world).count();
         let patches = world
             .get_resource::<FirePatches>()
             .map(|p| p.list.clone())
@@ -1151,9 +1187,7 @@ impl RenderFeature for GrassFeature {
         }
         self.meadows.retain(|m| m.seen);
         self.stats.draw_calls = self.draws.len() as u32;
-        if let Some(mut d) = world.get_resource_mut::<Diagnostics>() {
-            d.set("fire.grass_blades", self.stats.instances as f64);
-        }
+        out.set("fire.grass_blades", self.stats.instances as f64);
     }
 
     fn draw_shadow(&self, pass: &mut wgpu::RenderPass<'_>, cascade: usize, _ctx: &FrameContext) {

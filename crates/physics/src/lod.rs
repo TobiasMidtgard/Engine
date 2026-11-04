@@ -62,7 +62,7 @@ const SPLIT: f64 = 1.1;
 pub const REST: u8 = 3;
 
 /// A region with a body faster than this (m/s) doesn't rest: it is travelling, not settling.
-const REST_SPEED: f32 = 3.0;
+pub(crate) const REST_SPEED: f32 = 3.0;
 
 /// A body this far below the ground's surface (meters) fell through it, and doesn't count as
 /// travelling.
@@ -267,8 +267,24 @@ impl Simulation {
                 let fast = |rb: &&rapier3d::prelude::RigidBody| {
                     rb.linvel().length_squared() > REST_SPEED * REST_SPEED
                 };
-                let mut moving = w.islands.active_bodies().filter_map(|h| w.bodies.get(h));
-                let travelling = moving.any(|rb| fast(&rb));
+                // What is awake: Rapier's active set, but a region at rest doesn't step, so
+                // its set never learns of a body woken or moved in since; there every body is
+                // looked at (it was a zero-length step of the whole region instead, to bring
+                // such a body in: 2-57 ms, every pair walked, round 4 on the VM).
+                let stale_set = r.tier >= REST;
+                let awake = || -> Box<dyn Iterator<Item = &rapier3d::prelude::RigidBody> + '_> {
+                    if stale_set {
+                        Box::new(
+                            w.bodies
+                                .iter()
+                                .map(|(_, rb)| rb)
+                                .filter(|rb| rb.is_dynamic() && !rb.is_sleeping()),
+                        )
+                    } else {
+                        Box::new(w.islands.active_bodies().filter_map(|h| w.bodies.get(h)))
+                    }
+                };
+                let travelling = awake().any(|rb| fast(&rb));
                 // A body far below the ground fell through it (out there its colliders may
                 // not be loaded): it isn't going anywhere, so it doesn't keep its region up.
                 // (The ground is asked every few steps, and only out there: it isn't cheap.)
@@ -283,9 +299,7 @@ impl Simulation {
                     };
                     r.lost = out_there
                         && travelling
-                        && w.islands
-                            .active_bodies()
-                            .filter_map(|h| w.bodies.get(h))
+                        && awake()
                             .filter(fast)
                             .all(|rb| lost(r.global(rb.translation())));
                 }
@@ -592,6 +606,35 @@ impl Simulation {
                 .filter(|(_, d)| *d <= join)
                 .min_by(|a, b| a.1.total_cmp(&b.1))
                 .map(|(r, _)| r);
+            // With no dormant region to join and the sleepers most of this one, they stay and
+            // the rest (the awake few, the characters, small sleeping clusters) leave: the same
+            // two regions either way, but the yard's 1,490 sleepers moving out cost 3.5-10.6 ms
+            // a time (round 4, VM), and a merge with the movers beside them brought them back.
+            let rest: Vec<usize> = {
+                let mut left = vec![true; members.len()];
+                for &i in &leaving {
+                    left[i] = false;
+                }
+                (0..members.len()).filter(|&i| left[i]).collect()
+            };
+            if target.is_none() && leaving.len() > rest.len() {
+                let at = rest.iter().map(|i| members[*i].at).sum::<DVec3>() / rest.len() as f64;
+                let bodies: Vec<Entity> = rest.iter().filter_map(|i| members[*i].body).collect();
+                let characters: Vec<Entity> =
+                    rest.iter().filter_map(|i| members[*i].character).collect();
+                let fine = self.region(id).fine;
+                let t = self.create_region(at);
+                // Start it as it will be, so the merge pass this step keeps it apart.
+                let r = self.region_mut(t);
+                r.tier = tier;
+                r.fine = fine;
+                self.migrate_bodies(&bodies, t);
+                for e in characters {
+                    self.migrate_character(e, t);
+                }
+                self.region_mut(id).dormant = true;
+                return;
+            }
             let target = target.unwrap_or_else(|| self.create_region(at));
             let r = self.region_mut(target);
             r.dormant = true;

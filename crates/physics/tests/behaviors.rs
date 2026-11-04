@@ -1595,6 +1595,46 @@ fn fast_bodies_with_ccd_never_pass_through_thin_walls() {
     );
 }
 
+/// Thin pieces falling at a few m/s (debris shards, a tile, a boat's side wall) are no longer
+/// swept near the player: they get speculative contacts while that fast. They must still land
+/// on a mesh floor, which has no inside to push them back out of.
+#[test]
+fn thin_tiles_dropped_on_a_mesh_floor_land_on_it() {
+    let mut app = app();
+    let v = |x: f32, z: f32| Vec3::new(x, 0.0, z);
+    app.world.spawn((
+        Transform::default(),
+        Collider {
+            shape: ColliderShape::TriMesh {
+                vertices: vec![v(-5.0, -5.0), v(-5.0, 5.0), v(5.0, 5.0), v(5.0, -5.0)],
+                indices: vec![[0, 1, 2], [0, 2, 3]],
+            },
+            ..Default::default()
+        },
+    ));
+    // 1 cm tiles from 0.3 m to 1.5 m up: 2.4-5.4 m/s at the floor, 4-9 cm a step, past half
+    // their thickness every step of the fall.
+    let tiles: Vec<Entity> = [0.3f64, 0.8, 1.5]
+        .iter()
+        .enumerate()
+        .map(|(i, &h)| {
+            app.world
+                .spawn((
+                    Transform::from_xyz(i as f64 * 2.0 - 2.0, h, 0.0),
+                    RigidBody::dynamic(),
+                    Collider::cuboid(Vec3::new(0.2, 0.005, 0.2)).with_density(2000.0),
+                    Velocity::default(),
+                ))
+                .id()
+        })
+        .collect();
+    app.update_n(90);
+    for t in tiles {
+        let y = pos(&app, t).y;
+        assert!((0.0..0.05).contains(&y), "a tile ended at y = {y:.3}");
+    }
+}
+
 #[test]
 fn blasts_throw_nearby_bodies_away() {
     let mut app = app();

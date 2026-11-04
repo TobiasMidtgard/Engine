@@ -210,9 +210,17 @@ impl Plugin for PhysicsPlugin {
                     .chain()
                     .in_set(SimSet::Gameplay),
             )
-            .add_systems(Update, demo::finish_art.run_if(demo::art_busy))
+            // Exclusive work queued as a command on the frames that have some: with `run_if`,
+            // each would still wait for an idle pool every frame (`queue_when`).
+            .add_systems(
+                Update,
+                demo::art_busy.pipe(engine_core::schedule::queue_when(demo::finish_art)),
+            )
             .add_systems(Update, demo::use_stations)
-            .add_systems(Update, fit::fit_colliders.run_if(fit::fits_waiting))
+            .add_systems(
+                Update,
+                fit::fits_waiting.pipe(engine_core::schedule::queue_when(fit::fit_colliders)),
+            )
             .add_systems(
                 PostUpdate,
                 (shift::shift_simulation, demo::follow_world_shift)

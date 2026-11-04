@@ -344,6 +344,41 @@ fn falling_crates_land_on_characters() {
     );
 }
 
+/// A character standing still on fixed ground skips most of its moves; it still walks off the
+/// moment it is told to, and falls as soon as the floor is gone.
+#[test]
+fn characters_standing_still_walk_and_fall_at_once() {
+    let mut app = app();
+    let floor = app
+        .world
+        .spawn((
+            Transform::from_xyz(0.0, -0.5, 0.0),
+            RigidBody::fixed(),
+            Collider::cuboid(Vec3::new(10.0, 0.5, 10.0)),
+        ))
+        .id();
+    let ch = character(&mut app, DVec3::new(0.0, 0.92, 0.0), -Vec3::Y);
+    app.update_n(60);
+    let rest = pos(&app, ch);
+    assert!(state(&app, ch).grounded);
+    app.update_n(30);
+    assert!((pos(&app, ch) - rest).length() < 1.0e-4, "it crept");
+    // Told to walk: it goes the same step.
+    app.world.get_mut::<CharacterMove>(ch).unwrap().velocity = Vec3::new(2.0, -1.0, 0.0);
+    app.update();
+    let walked = pos(&app, ch).x - rest.x;
+    assert!(walked > 0.02, "it walked {walked:.3} m in its first step");
+    app.world.get_mut::<CharacterMove>(ch).unwrap().velocity = -Vec3::Y;
+    app.update_n(30);
+    // The floor goes: it falls within a step or two.
+    app.world.despawn(floor);
+    let before = pos(&app, ch).y;
+    app.update_n(3);
+    let st = state(&app, ch);
+    assert!(!st.grounded, "still standing on nothing: {st:?}");
+    assert!(pos(&app, ch).y < before - 0.01, "it didn't fall");
+}
+
 #[test]
 fn rays_find_bodies_moving_at_orbital_speed() {
     for speed in [300.0f32, 7_800.0, 30_000.0] {
