@@ -102,6 +102,34 @@ fn a_collider_moving_past_wakes_a_sleeping_curtain() {
 }
 
 #[test]
+fn something_moving_a_few_metres_off_doesnt_keep_it_awake() {
+    // A person walking past the yard's jellies 4 m off kept them stepping for good: the
+    // colliders gathered for a step reach as far as the body could move in it, and any of
+    // them moving kept it awake, though only one within reach of its bounds wakes it.
+    let mut app = app();
+    let e = curtain(&mut app);
+    let ball = app
+        .world
+        .spawn((
+            Transform::from_xyz(0.0, 2.3, 2.0),
+            Collider {
+                shape: ColliderShape::Sphere { radius: 0.2 },
+                ..Collider::default()
+            },
+        ))
+        .id();
+    for k in 0..360 {
+        let x = (k as f64 * 0.05).sin();
+        app.world.get_mut::<Transform>(ball).unwrap().translation.x = x;
+        app.update();
+    }
+    assert!(
+        asleep(&app, e),
+        "a ball moving 2 m off shouldn't keep a still curtain awake"
+    );
+}
+
+#[test]
 fn a_far_cloth_that_collides_with_itself_rests() {
     let mut app = app();
     let plain = curtain(&mut app);
