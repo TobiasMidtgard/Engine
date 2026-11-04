@@ -126,6 +126,14 @@ pub struct RippleSample {
     pub current: Vec2,
 }
 
+/// Cell (`i`, `j`) of an `n`-cell grid was inside it when it stood `kept` cells back (x, z).
+fn was_inside(n: usize, kept: Option<(i64, i64)>, i: usize, j: usize) -> bool {
+    kept.is_some_and(|(dx, dz)| {
+        let (oi, oj) = (i as i64 + dx, j as i64 + dz);
+        oi >= 0 && oj >= 0 && oi < n as i64 && oj < n as i64
+    })
+}
+
 /// Ripple heights, currents and foam on a square grid.
 #[derive(Debug, Clone)]
 pub struct RippleField {
@@ -888,6 +896,12 @@ impl RippleField {
             moved(&mut self.vel, n, sx, sz);
             moved(&mut self.foam, n, sx, sz);
             moved(&mut self.bubbles, n, sx, sz);
+            // The medium too, so a rebuild can keep what it found for the cells it kept
+            // ([`rebuild_speeds_kept`](Self::rebuild_speeds_kept)).
+            moved(&mut self.speed2, n, sx, sz);
+            moved(&mut self.depth, n, sx, sz);
+            moved(&mut self.absorb, n, sx, sz);
+            moved(&mut self.drift, n, sx, sz);
             self.wake_all();
         }
         self.version += 1;
@@ -896,15 +910,29 @@ impl RippleField {
 
     /// Set the wave speed of every cell from the water depth there (`None` = dry).
     pub fn rebuild_speeds(&mut self, speed: f32, depth_at: impl Fn(DVec2) -> Option<f32>) {
+        self.rebuild_speeds_kept(speed, depth_at, None);
+    }
+
+    /// [`rebuild_speeds`](Self::rebuild_speeds), keeping what a rebuild found for the cells
+    /// the grid has held since: `kept` is how many cells (x, z) the grid has moved since then
+    /// (the cells that were inside it keep their speeds, which [`recenter`](Self::recenter)
+    /// moved along). After a step of the grid that is all but a strip at its edge.
+    pub fn rebuild_speeds_kept(
+        &mut self,
+        speed: f32,
+        depth_at: impl Fn(DVec2) -> Option<f32>,
+        kept: Option<(i64, i64)>,
+    ) {
         let n = self.n;
-        let mut any = false;
         let mut changed = false;
         for j in 0..n {
             for i in 0..n {
+                if was_inside(n, kept, i, j) {
+                    continue;
+                }
                 let d = depth_at(self.cell_center(i, j)).filter(|d| *d > 0.02);
                 let c2 = match d {
                     Some(d) => {
-                        any = true;
                         let shallow = G * d;
                         (speed * speed).min(shallow)
                     }
@@ -918,6 +946,7 @@ impl RippleField {
                 self.absorb[k] = absorb;
             }
         }
+        let any = self.speed2.iter().any(|c2| *c2 > 0.0);
         self.has_water = any;
         if changed {
             self.medium_version += 1;
@@ -931,12 +960,33 @@ impl RippleField {
     /// Set the flow the ripples ride on at every cell (`None` = still water): a stream's
     /// current carries rings and foam downstream.
     pub fn rebuild_drift(&mut self, drift_at: impl Fn(DVec2) -> Option<Vec2>) {
+        self.rebuild_drift_kept(drift_at, None);
+    }
+
+    /// [`rebuild_drift`](Self::rebuild_drift), keeping the cells the grid has held since the
+    /// rebuild `kept` cells ago (as [`rebuild_speeds_kept`](Self::rebuild_speeds_kept)).
+    pub fn rebuild_drift_kept(
+        &mut self,
+        drift_at: impl Fn(DVec2) -> Option<Vec2>,
+        kept: Option<(i64, i64)>,
+    ) {
         let (n, t) = (self.n, self.tiles());
         let mut changed = false;
         self.drifting.fill(false);
         for j in 0..n {
             for i in 0..n {
                 let idx = j * n + i;
+                if was_inside(n, kept, i, j) {
+                    // (Dry since: no drift.)
+                    if self.speed2[idx] <= 0.0 && self.drift[idx] != Vec2::ZERO {
+                        self.drift[idx] = Vec2::ZERO;
+                        changed = true;
+                    }
+                    if self.drift[idx].length_squared() > 0.05 * 0.05 {
+                        self.drifting[(j / TILE) * t + i / TILE] = true;
+                    }
+                    continue;
+                }
                 let v = if self.speed2[idx] > 0.0 {
                     drift_at(self.cell_center(i, j)).unwrap_or(Vec2::ZERO)
                 } else {
@@ -2130,5 +2180,39 @@ mod tests {
         let v = f.version;
         f.step(1.0 / 60.0, 0.35, 1.0);
         assert_eq!(f.version, v, "a still pond needs no upload");
+    }
+
+    #[test]
+    fn a_step_of_the_grid_keeps_the_speeds_it_found() {
+        // Depth by world position: a slope with a dry corner and a stream patch.
+        let depth = |p: DVec2| {
+            let d = 0.8 + 0.05 * p.x as f32 - 0.03 * p.y as f32;
+            (d > 0.0).then_some(d)
+        };
+        let drift = |p: DVec2| (p.x > 10.0).then_some(Vec2::new(0.4, 0.1));
+        let mut moved = RippleField::new(64, 0.5);
+        moved.recenter(DVec2::new(3.0, -2.0));
+        moved.rebuild_speeds(1.3, depth);
+        moved.rebuild_drift(drift);
+        let before = moved.origin;
+        assert!(moved.recenter(DVec2::new(14.0, 5.0)));
+        let kept = ((moved.origin - before) / 0.5).round();
+        let kept = Some((kept.x as i64, kept.y as i64));
+        moved.rebuild_speeds_kept(1.3, depth, kept);
+        moved.rebuild_drift_kept(drift, kept);
+        // The same as a grid that worked out every cell where it stands now.
+        let mut fresh = RippleField::new(64, 0.5);
+        fresh.recenter(DVec2::new(14.0, 5.0));
+        assert_eq!(fresh.origin, moved.origin);
+        fresh.rebuild_speeds(1.3, depth);
+        fresh.rebuild_drift(drift);
+        assert_eq!(moved.speed2, fresh.speed2);
+        assert_eq!(moved.depth, fresh.depth);
+        assert_eq!(moved.absorb, fresh.absorb);
+        assert_eq!(moved.drift, fresh.drift);
+        assert_eq!(moved.faces, fresh.faces);
+        assert_eq!(moved.wet, fresh.wet);
+        assert_eq!(moved.drifting, fresh.drifting);
+        assert_eq!(moved.has_water, fresh.has_water);
     }
 }

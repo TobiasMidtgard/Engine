@@ -100,7 +100,7 @@ impl Solid {
                     Vec3::new(h.x * s(0), h.y * s(1), h.z * s(2))
                 })
                 .collect(),
-            ColliderShape::ConvexHull { points } => points.clone(),
+            ColliderShape::ConvexHull { points } => points.to_vec(),
             ColliderShape::Cylinder {
                 radius,
                 half_height,

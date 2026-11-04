@@ -85,7 +85,9 @@ fn rock(rng: &mut Rng, size: f32) -> Collider {
         }
     }
     Collider {
-        shape: ColliderShape::ConvexHull { points },
+        shape: ColliderShape::ConvexHull {
+            points: points.into(),
+        },
         density: 2600.0,
         ..Collider::default()
     }

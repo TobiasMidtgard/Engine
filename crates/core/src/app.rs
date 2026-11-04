@@ -97,6 +97,28 @@ pub fn set_sync_points() -> bool {
     *ON.get_or_init(|| std::env::var("ENGINE_FIXED_SYNC").is_ok_and(|v| v == "sets"))
 }
 
+/// `ENGINE_EXECUTOR=single` runs every main schedule's systems one after another on the main
+/// thread (Bevy's single-threaded executor); `single:Update,PostUpdate` only those schedules.
+/// An experiment for the PC: most frames keep about one core busy anyway, and each of the
+/// ~1000 systems a frame then skips the pool's hand-off (waking a worker, reporting back).
+/// Systems that split their own work over the pool (`par_iter`, `par_chunks_mut`) still do.
+fn single_threaded(label: &str) -> bool {
+    static SCHEDULES: std::sync::OnceLock<Option<Vec<String>>> = std::sync::OnceLock::new();
+    SCHEDULES
+        .get_or_init(|| {
+            let v = std::env::var("ENGINE_EXECUTOR").ok()?;
+            let v = v.trim();
+            if v == "single" {
+                Some(Vec::new())
+            } else {
+                let list = v.strip_prefix("single:")?;
+                Some(list.split(',').map(|s| s.trim().to_string()).collect())
+            }
+        })
+        .as_ref()
+        .is_some_and(|list| list.is_empty() || list.iter().any(|s| s == label))
+}
+
 const MAIN_SCHEDULES: &[fn() -> Schedule] = &[
     || Schedule::new(Startup),
     || Schedule::new(First),
@@ -129,6 +151,9 @@ impl App {
             if crate::profile::requested() {
                 let label = format!("{:?}", schedule.label());
                 schedule.add_build_pass(crate::profile::OrderPass { label });
+            }
+            if single_threaded(&format!("{:?}", schedule.label())) {
+                schedule.set_executor(bevy_ecs::schedule::SingleThreadedExecutor::new());
             }
             if set_sync_points() && schedule.label() == FixedUpdate.intern() {
                 let mut settings = schedule.get_build_settings();

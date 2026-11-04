@@ -417,6 +417,10 @@ pub struct StillDepths {
     /// After the lakes changed under a grid that stayed put: the depths read before, which
     /// cells not read again yet keep showing.
     prior: Vec<f32>,
+    /// Spread the first read over steps too ([`RELAYOUT_READS`] a step): in the game, where
+    /// it read the whole grid in one 202 ms step at the overview (round 25, under the loading
+    /// screen). Headless runs read it at once.
+    pub spread_first: bool,
 }
 
 /// Cells read a step after the lakes changed under the grid (a lake streaming in), nearest
@@ -472,8 +476,9 @@ impl StillDepths {
                         }
                     }
                 }
-                // The first read: all at once (the loading screen covers it).
-                None if !self.patient => budget = usize::MAX,
+                // The first read: all at once headless; in the game over a few steps.
+                None if !self.patient && !self.spread_first => budget = usize::MAX,
+                None if !self.patient => budget = RELAYOUT_READS,
                 // Moved and the lakes changed too: over a few steps, nearest first.
                 Some(_) if !self.patient => budget = RELAYOUT_READS,
                 _ => {}
@@ -677,6 +682,7 @@ pub fn ripple_system(
 ) {
     let dt = time.delta_secs();
     swash.off_frame = !config.headless;
+    still.spread_first = !config.headless;
     let mut state = shared.0.write();
     let dims = (
         settings.ripple_cells.clamp(16, 1024),
@@ -741,8 +747,14 @@ pub fn ripple_system(
         let moved = field.recenter(center);
         // Every 2 s the streams' depths and currents are read again (they rise and fall, and
         // one may come into view); with none in view nothing changes, so nothing is redone.
-        let periodic =
-            book.since_rebuild > 2.0 && (streams.any || state.flows.iter().any(|f| f.visible));
+        // (Round 25 on the PC: every stop with water rebuilt 2-3 times per 5 s standing still.)
+        let (lo, hi) = (field.origin, field.origin + DVec2::splat(field.size()));
+        let periodic = book.since_rebuild > 2.0
+            && (streams.any
+                || state.flows.iter().filter(|f| f.visible).any(|f| {
+                    let (c, r) = f.bounds();
+                    c.x + r >= lo.x && c.x - r <= hi.x && c.z + r >= lo.y && c.z - r <= hi.y
+                }));
         book.since_rebuild = 0.0;
         // The lakes under the grid, read with the water unlocked (AGENTS.md, "Performance
         // rules"): only cells the grid newly covers, or all of them when the lakes change.
@@ -811,6 +823,18 @@ pub fn ripple_system(
             if !full {
                 break 'full;
             }
+            // The cells this grid held at the last pass with every depth read keep what it
+            // found (moved along by the recenter), unless the lakes changed since or the streams
+            // are due: only the strip a move uncovered is worked out.
+            let kept = match streams.complete_for {
+                Some((o, cn, cb, lay))
+                    if !periodic && cn == n && cb == cell.to_bits() && lay == book.layout =>
+                {
+                    let d = ((origin - o) / cell as f64).round();
+                    Some((d.x as i64, d.y as i64))
+                }
+                _ => None,
+            };
             if complete {
                 streams.complete_for = Some(key);
             }
@@ -866,13 +890,17 @@ pub fn ripple_system(
             // Lakes and streams: footsteps, cloth and swimmers ring both.
             let _part = tracing::info_span!("water", name = "ripples: speeds").entered();
             let still = &*still;
-            field.rebuild_speeds(settings.ripple_speed, |p| {
-                let k = index(p);
-                let d = still.at_cell(k).max(stream[k].0);
-                (!d.is_nan()).then_some(d)
-            });
+            field.rebuild_speeds_kept(
+                settings.ripple_speed,
+                |p| {
+                    let k = index(p);
+                    let d = still.at_cell(k).max(stream[k].0);
+                    (!d.is_nan()).then_some(d)
+                },
+                kept,
+            );
             // Streams carry their rings and foam downstream.
-            field.rebuild_drift(|p| stream[index(p)].1);
+            field.rebuild_drift_kept(|p| stream[index(p)].1, kept);
             streams.any = streams.mask.wet.iter().any(|w| *w);
         }
     } else {

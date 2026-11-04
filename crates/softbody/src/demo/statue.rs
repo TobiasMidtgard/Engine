@@ -632,7 +632,10 @@ pub fn cast_statues(
             .insert((
                 RigidBody::fixed(),
                 Collider {
-                    shape: ColliderShape::TriMesh { vertices, indices },
+                    shape: ColliderShape::TriMesh {
+                        vertices,
+                        indices: indices.into(),
+                    },
                     ..Collider::default()
                 },
             ))

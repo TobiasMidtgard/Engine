@@ -1056,6 +1056,7 @@ pub fn build_system(
 ) {
     let requests: Vec<BuildRequest> = requests.read().copied().collect();
     let range = range.map_or_else(engine_world::SimulationRange::default, |r| *r);
+    let builders_span = tracing::info_span!("build: builders").entered();
     // A piece can't go where a player or a creature stands: it would trap them in its collider.
     let occupied = |p: &Placement| {
         let Some(q) = queries.as_deref() else {
@@ -1109,8 +1110,10 @@ pub fn build_system(
             }
         }
         let (origin, dir) = aim_ray(&b, gt);
+        let near_span = tracing::info_span!("build: pieces near").entered();
         let mut scene = scene_near(pieces.iter(), origin, b.reach_m as f64 + 6.0);
         scene.retain(|p| !removed.contains(&p.entity));
+        drop(near_span);
         let plan_now = |b: &Builder, scene: &[ScenePiece]| {
             if !b.active || dir == Vec3::ZERO {
                 return (None, None);
@@ -1181,7 +1184,9 @@ pub fn build_system(
                 }
             }
         }
+        let plan_span = tracing::info_span!("build: plan").entered();
         let (placement, target) = plan_now(&b, &scene);
+        drop(plan_span);
         preview.placement = placement;
         preview.target = target;
         if b.active && b.show_support {
@@ -1218,6 +1223,8 @@ pub fn build_system(
             }
         }
     }
+    drop(builders_span);
+    let _rest = tracing::info_span!("build: ghosts and support").entered();
     // Ghosts whose builder is gone go too.
     for (g, look, _) in &ghosts {
         if builders.get(look.builder).is_err() {

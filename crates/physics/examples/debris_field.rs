@@ -99,7 +99,9 @@ fn pit(rocks: usize) -> App {
             })
             .collect();
         let collider = Collider {
-            shape: ColliderShape::ConvexHull { points },
+            shape: ColliderShape::ConvexHull {
+                points: points.into(),
+            },
             ..Collider::cuboid(Vec3::ONE)
         }
         .with_density(2700.0);
