@@ -908,11 +908,11 @@ pub struct SwashReader {
     /// What was last handed out.
     built: Option<(DVec2, u64, usize)>,
     version: u64,
-    /// Beds are built on a worker (a 512² bed took 15 ms on the VM, at every step of the grid):
-    /// off in headless runs, which build them in place.
+    /// Beds are built on a worker (a 512² bed took 15 ms on the VM, at every step of the grid),
+    /// from ground read there too: off in headless runs, which read and build them in place.
     pub off_frame: bool,
     /// The bed being built, for (window corner, layout).
-    job: Option<((DVec2, u64), Task<SwashBed>)>,
+    job: Option<((DVec2, u64), Task<ReadOut>)>,
 }
 
 impl SwashReader {
@@ -964,6 +964,10 @@ impl SwashReader {
             self.samples = samples;
             self.at = Some(at);
         }
+        if self.off_frame {
+            return self
+                .read_off_frame(origin, size, layout, bodies, beaches, ground, focus, stream);
+        }
         if self.unread > 0 {
             let _part = tracing::info_span!("water", name = "swash: ground").entered();
             let at_sample = |idx: usize| {
@@ -1000,20 +1004,94 @@ impl SwashReader {
                 stream: stream.clone(),
                 version: self.version,
             };
-            if !self.off_frame {
-                let _part = tracing::info_span!("water", name = "swash: bed").entered();
-                self.job = None;
-                return Some(Arc::new(job.build()));
-            }
+            let _part = tracing::info_span!("water", name = "swash: bed").entered();
+            self.job = None;
+            return Some(Arc::new(job.build()));
+        }
+        None
+    }
+
+    /// [`read`](Self::read) in a game: the ground under a new window is read on a worker with
+    /// the bed built from it (on the PC a jump to the lake read 16 000 samples in the frame,
+    /// 12.7 ms, round 26), and both come back together.
+    #[allow(clippy::too_many_arguments)]
+    fn read_off_frame(
+        &mut self,
+        origin: DVec2,
+        size: f64,
+        layout: u64,
+        bodies: &[BodyState],
+        beaches: &[(DVec3, BeachGround)],
+        ground: &Ground,
+        focus: DVec3,
+        stream: &StreamMask,
+    ) -> Option<Arc<SwashBed>> {
+        let m = (size / SAMPLE_M as f64).round() as usize + 1;
+        if !self
+            .built
+            .is_some_and(|b| b.0 == origin && b.1 == layout && b.2 == 0)
+        {
+            self.built = Some((origin, layout, 0));
+            self.version += 1;
+            let job = ReadJob {
+                bed: BedJob {
+                    samples: self.samples.clone(),
+                    origin,
+                    size,
+                    m,
+                    level_y: focus.y,
+                    stream: stream.clone(),
+                    version: self.version,
+                },
+                bodies: bodies.to_vec(),
+                beaches: beaches.to_vec(),
+                ground: ground.clone(),
+            };
             // (Replacing a job still running drops it: its window is gone.)
-            let task = AsyncComputeTaskPool::get().spawn(async move { job.build() });
+            let task = AsyncComputeTaskPool::get().spawn(async move { job.run() });
             self.job = Some(((origin, layout), task));
         }
         let (at, task) = self.job.as_mut()?;
-        let bed = check_ready(task)?;
+        let (samples, bed) = check_ready(task)?;
         let at = *at;
         self.job = None;
-        (at == (origin, layout)).then(|| Arc::new(bed))
+        if at != (origin, layout) || self.at != Some((origin, m, layout)) {
+            return None;
+        }
+        self.samples = samples;
+        self.unread = 0;
+        Some(Arc::new(bed))
+    }
+}
+
+/// The samples a [`ReadJob`] read, with the bed built from them.
+type ReadOut = (Vec<(f64, f64)>, SwashBed);
+
+/// Read the ground a new window lacks, then build its bed (on a worker).
+struct ReadJob {
+    bed: BedJob,
+    bodies: Vec<BodyState>,
+    beaches: Vec<(DVec3, BeachGround)>,
+    ground: Ground,
+}
+
+impl ReadJob {
+    fn run(mut self) -> ReadOut {
+        let b = &mut self.bed;
+        let (origin, m, level_y) = (b.origin, b.m, b.level_y);
+        {
+            let _part = tracing::info_span!("water", name = "swash: ground").entered();
+            for (idx, s) in b.samples.iter_mut().enumerate() {
+                if s.0 == f64::INFINITY {
+                    let p =
+                        origin + DVec2::new((idx % m) as f64, (idx / m) as f64) * SAMPLE_M as f64;
+                    *s = sample(p, &self.bodies, &self.beaches, &self.ground, level_y);
+                }
+            }
+        }
+        let _part = tracing::info_span!("water", name = "swash: bed").entered();
+        let bed = self.bed.build();
+        (self.bed.samples, bed)
     }
 }
 
@@ -1029,7 +1107,7 @@ struct BedJob {
 }
 
 impl BedJob {
-    fn build(self) -> SwashBed {
+    fn build(&self) -> SwashBed {
         let Self {
             samples,
             origin,
@@ -1039,6 +1117,7 @@ impl BedJob {
             stream,
             version,
         } = self;
+        let (origin, size, m, level_y, version) = (*origin, *size, *m, *level_y, *version);
         let n = ((size / CELL_M as f64).round() as usize).max(TILE) / TILE * TILE;
         let cell = (size / n as f64) as f32;
         let datum = level_y.round();

@@ -669,12 +669,17 @@ impl ScriptRuntime {
         }
         self.route_messages();
         let _span = tracing::info_span!("scripts: draw and profile").entered();
+        let draw = tracing::info_span!("scripts: draw").entered();
         self.drawn = crate::draw::flush(world, &self.lua);
         for actor in &self.actors {
             let more = crate::draw::flush(world, &actor.lua);
             self.drawn.extend(more);
         }
+        drop(draw);
+        let debugger = tracing::info_span!("scripts: debugger output").entered();
         self.debugger.flush(&self.lua);
+        drop(debugger);
+        let _profile = tracing::info_span!("scripts: profiler").entered();
         self.profiler.frame(&self.lua);
         for actor in &mut self.actors {
             actor.profiler.frame(&actor.lua);

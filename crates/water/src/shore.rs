@@ -11,8 +11,11 @@
 //! (from the ground's slope) decides whether any of it reaches the water, so a narrow band on a
 //! steep beach still wets every cell it touches.
 
+use bevy_tasks::Task;
+use bevy_tasks::futures::check_ready;
 use engine_core::math::{DVec2, DVec3, Vec2, smoothstep};
 use engine_core::prelude::*;
+use engine_core::tasks::AsyncComputeTaskPool;
 use engine_render::Camera;
 use engine_world::{FocusPoints, Ground, SurfaceLayers, TerrainChanged};
 
@@ -57,6 +60,8 @@ const UNDER_M: f32 = 0.05;
 const MAX_SLOPE: f32 = 3.0;
 /// Cells without ground are sampled again this often, seconds (a terrain that arrives late).
 const RETRY_S: f32 = 30.0;
+/// A cell's height while a worker samples it ([`ShoreCache::job`]).
+const ASKED: f64 = f64::MAX;
 
 /// Keeps the ground under it dry of lake, stream and spray water: a jetty's deck, a boathouse,
 /// a quay. A rectangle in the entity's own x/z (meters, turned with it). Rain still falls on
@@ -99,6 +104,11 @@ pub struct ShoreCache {
     /// Per cell: the highest a wake or ring has run up there since its row was last visited,
     /// meters above the still level ([`RUNUP_PER_CREST`]).
     runup: Vec<f32>,
+    /// In a game the ground is sampled on a worker (round 26 on the PC: 2.19 ms a step for 8 s
+    /// after arriving at the lake, 3-4 steps a frame): cells to sample next, and the job
+    /// sampling the last of them, giving (cell, height, spread).
+    asked: Vec<(usize, DVec3)>,
+    job: Option<Task<Vec<(usize, f64, f32)>>>,
 }
 
 impl ShoreCache {
@@ -119,6 +129,9 @@ impl ShoreCache {
             phase: self.phase,
             ground_changed: false,
             since_retry: 0.0,
+            // (A job still running is dropped: its cells were for the old grid.)
+            asked: Vec::new(),
+            job: None,
         };
     }
 
@@ -171,6 +184,7 @@ pub fn shore_wetness_system(
     shared: Res<SharedWater>,
     cameras: Query<(&GlobalTransform, &Camera)>,
     covers: Query<(&GlobalTransform, &ShoreCover)>,
+    config: Res<EngineConfig>,
     mut changes: MessageReader<TerrainChanged>,
     mut surface: ResMut<SurfaceLayers>,
     mut cache: Local<ShoreCache>,
@@ -227,6 +241,17 @@ pub fn shore_wetness_system(
             *h = f64::NAN;
         }
     }
+    // Heights a worker sampled since (cells forgotten meanwhile are asked again).
+    if let Some(done) = cache.job.as_mut().and_then(check_ready) {
+        cache.job = None;
+        for (idx, h, spread) in done {
+            if cache.heights.get(idx) == Some(&ASKED) {
+                cache.heights[idx] = h;
+                cache.spread[idx] = spread;
+            }
+        }
+    }
+    let off_frame = !config.headless;
     let phase = cache.phase;
     cache.phase = (phase + 1) % STRIDE;
     note_runup(&mut cache, &state.ripples, origin, cell, (width, height));
@@ -263,6 +288,11 @@ pub fn shore_wetness_system(
                 continue;
             }
             let idx = j * width + i;
+            if cache.heights[idx].is_nan() && off_frame {
+                cache.heights[idx] = ASKED;
+                cache.asked.push((idx, p));
+                continue;
+            }
             if cache.heights[idx].is_nan() {
                 if budget == 0 {
                     continue;
@@ -271,20 +301,12 @@ pub fn shore_wetness_system(
                 if budget.is_multiple_of(16) && started.elapsed() > SAMPLE_TIME {
                     budget = 0;
                 }
-                let (h, spread) = match ground.sample(p) {
-                    Some(g) => {
-                        let n = g.normal.normalize_or(Vec3::Y);
-                        let slope = (1.0 - n.y * n.y).max(0.0).sqrt() / n.y.max(1e-3);
-                        // Half the cell's diagonal up and down from its center.
-                        (g.height, 0.71 * cell as f32 * slope.min(MAX_SLOPE))
-                    }
-                    None => (f64::INFINITY, 0.0),
-                };
+                let (h, spread) = ground_cell(&ground, p, cell);
                 cache.heights[idx] = h;
                 cache.spread[idx] = spread;
             }
             let h = cache.heights[idx];
-            if h.is_infinite() {
+            if h.is_infinite() || h == ASKED {
                 continue;
             }
             let spread = cache.spread[idx];
@@ -333,11 +355,39 @@ pub fn shore_wetness_system(
             }
         }
     }
+    if cache.job.is_none() && !cache.asked.is_empty() {
+        let asked = std::mem::take(&mut cache.asked);
+        let ground = (*ground).clone();
+        cache.job = Some(AsyncComputeTaskPool::get().spawn(async move {
+            let _span = tracing::info_span!("water", name = "shore ground").entered();
+            asked
+                .into_iter()
+                .map(|(idx, p)| {
+                    let (h, spread) = ground_cell(&ground, p, cell);
+                    (idx, h, spread)
+                })
+                .collect()
+        }));
+    }
     if !writes.is_empty() {
         let grid = &mut surface.grid;
         for (idx, w) in writes {
             grid.data[idx].wetness = w.min(1.0);
         }
+    }
+}
+
+/// The ground under a cell `cell` m wide at `p` (probing down from its y): its height, and half
+/// its height spread from the slope (infinite height where there is none).
+fn ground_cell(ground: &Ground, p: DVec3, cell: f64) -> (f64, f32) {
+    match ground.sample(p) {
+        Some(g) => {
+            let n = g.normal.normalize_or(Vec3::Y);
+            let slope = (1.0 - n.y * n.y).max(0.0).sqrt() / n.y.max(1e-3);
+            // Half the cell's diagonal up and down from its center.
+            (g.height, 0.71 * cell as f32 * slope.min(MAX_SLOPE))
+        }
+        None => (f64::INFINITY, 0.0),
     }
 }
 
