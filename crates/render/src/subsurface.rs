@@ -140,7 +140,7 @@ impl SubsurfacePass {
     pub fn new(shared: &GpuShared) -> Self {
         use wgpu::ShaderStages as S;
         let device = &shared.device;
-        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        let layout = shared.bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("subsurface"),
             entries: &[
                 layout_entry(

@@ -119,6 +119,8 @@ pub struct GpuShared {
     pub(crate) prepare_steps: std::sync::Mutex<Vec<(&'static str, f32)>>,
     /// Mip chains drawn on the GPU for large images (`mipmaps`).
     pub(crate) mips: crate::mipmaps::MipGenerator,
+    /// Shader modules, layouts and pipelines by description (`crate::gpu_cache`).
+    pub(crate) cache: crate::gpu_cache::GpuCache,
 }
 
 /// See [`GpuShared::side_commands`].
@@ -327,14 +329,46 @@ impl GpuShared {
         std::mem::take(&mut *self.side_commands.lock().unwrap_or_else(|e| e.into_inner()))
     }
 
-    /// Compile WGSL composed as `lib_types` (+ `lib_frame` when `with_frame`) + `source`.
+    /// Compile WGSL composed as `lib_types` (+ `lib_frame` when `with_frame`) + `source`. The
+    /// same label and source give the module compiled the first time (`crate::gpu_cache`).
     pub fn shader(&self, label: &str, source: &str, with_frame: bool) -> wgpu::ShaderModule {
-        let code = compose_shader(source, with_frame);
-        self.device
-            .create_shader_module(wgpu::ShaderModuleDescriptor {
-                label: Some(label),
-                source: wgpu::ShaderSource::Wgsl(code.into()),
-            })
+        self.cache.shader(label, source, with_frame, || {
+            let code = compose_shader(source, with_frame);
+            self.device
+                .create_shader_module(wgpu::ShaderModuleDescriptor {
+                    label: Some(label),
+                    source: wgpu::ShaderSource::Wgsl(code.into()),
+                })
+        })
+    }
+
+    /// `device.create_bind_group_layout`, or the layout made before with the same description
+    /// (`crate::gpu_cache`): pipelines made from it are shared too.
+    pub fn bind_group_layout(
+        &self,
+        desc: &wgpu::BindGroupLayoutDescriptor,
+    ) -> wgpu::BindGroupLayout {
+        self.cache.bind_group_layout(&self.device, desc)
+    }
+
+    /// `device.create_pipeline_layout`, or the one made before with the same description.
+    pub fn pipeline_layout(&self, desc: &wgpu::PipelineLayoutDescriptor) -> wgpu::PipelineLayout {
+        self.cache.pipeline_layout(&self.device, desc)
+    }
+
+    /// `device.create_render_pipeline`, or the pipeline made before with the same description
+    /// (same modules and layout handles, from [`shader`](Self::shader) and
+    /// [`pipeline_layout`](Self::pipeline_layout)): a second view compiles nothing.
+    pub fn render_pipeline(&self, desc: &wgpu::RenderPipelineDescriptor) -> wgpu::RenderPipeline {
+        self.cache.render_pipeline(&self.device, desc)
+    }
+
+    /// `device.create_compute_pipeline`, or the pipeline made before with the same description.
+    pub fn compute_pipeline(
+        &self,
+        desc: &wgpu::ComputePipelineDescriptor,
+    ) -> wgpu::ComputePipeline {
+        self.cache.compute_pipeline(&self.device, desc)
     }
 
     /// The GPU-resident textures of a material preset at `size`² texels (a power of two,

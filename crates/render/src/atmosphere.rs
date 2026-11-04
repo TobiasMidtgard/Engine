@@ -54,7 +54,7 @@ impl AtmosphereLuts {
         );
 
         use wgpu::ShaderStages as S;
-        let output_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        let output_layout = shared.bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("atmosphere table output"),
             entries: &[layout_entry(
                 0,
@@ -107,7 +107,7 @@ impl AtmosphereLuts {
                     resource: wgpu::BindingResource::TextureView(&tex.view),
                 });
             }
-            let input_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            let input_layout = shared.bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some(label),
                 entries: &layout_entries,
             });
@@ -124,12 +124,12 @@ impl AtmosphereLuts {
                     resource: wgpu::BindingResource::TextureView(&writes.view),
                 }],
             });
-            let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            let layout = shared.pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some(label),
                 bind_group_layouts: &[Some(&input_layout), Some(&output_layout)],
                 immediate_size: 0,
             });
-            let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            let pipeline = shared.compute_pipeline(&wgpu::ComputePipelineDescriptor {
                 label: Some(label),
                 layout: Some(&layout),
                 module: &module,

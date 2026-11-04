@@ -87,7 +87,7 @@ impl ExposureMeter {
             include_str!("shaders/exposure.wgsl"),
             false,
         );
-        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        let layout = shared.bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("exposure meter"),
             entries: &[
                 wgpu::BindGroupLayoutEntry {
@@ -122,12 +122,12 @@ impl ExposureMeter {
                 },
             ],
         });
-        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        let pipeline_layout = shared.pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("exposure meter"),
             bind_group_layouts: &[Some(&layout)],
             immediate_size: 0,
         });
-        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        let pipeline = shared.compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("exposure histogram"),
             layout: Some(&pipeline_layout),
             module: &module,

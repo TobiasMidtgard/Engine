@@ -111,7 +111,7 @@ impl EnvironmentMaps {
             format: FORMAT,
             view_dimension: wgpu::TextureViewDimension::D2,
         };
-        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        let layout = shared.bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("environment filter"),
             entries: &[
                 layout_entry(0, S::COMPUTE, input),
@@ -123,7 +123,7 @@ impl EnvironmentMaps {
                 layout_entry(2, S::COMPUTE, output),
             ],
         });
-        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        let pipeline_layout = shared.pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("environment filter"),
             bind_group_layouts: &[Some(&layout)],
             immediate_size: 0,
@@ -134,7 +134,7 @@ impl EnvironmentMaps {
             false,
         );
         let pipeline = |entry: &str| {
-            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            shared.compute_pipeline(&wgpu::ComputePipelineDescriptor {
                 label: Some(entry),
                 layout: Some(&pipeline_layout),
                 module: &module,
