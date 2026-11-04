@@ -159,6 +159,8 @@ fn main() {
         .world
         .spawn((Camera::default(), Transform::default()))
         .id();
+    // `GALLERY_NO_SIM=1`: every creek a ribbon, none simulated.
+    app.world.resource_mut::<CreekSims>().off = std::env::var_os("GALLERY_NO_SIM").is_some();
     app.update_n(2);
 
     for (key, eye, target) in views(&m) {
