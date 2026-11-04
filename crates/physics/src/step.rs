@@ -1685,9 +1685,10 @@ fn spin_drag(c: &rapier3d::geometry::Collider, spin: Vec3) -> Vec3 {
 /// CCD do; the sweep (Jolt's `LinearCast`, PhysX's swept CCD) is kept for what moves faster.
 /// Past [`PhysicsSettings::coarse_beyond_m`] nobody sees a body poke into the ground for a step,
 /// and one that falls through is caught ([`crate::grounding`]).
-fn sweeps_wanted(r: &crate::sim::Region, dt: f32) -> bool {
-    use rapier3d::parry::bounding_volume::BoundingVolume;
+pub(crate) fn sweeps_wanted(r: &crate::sim::Region, dt: f32) -> bool {
+    use rapier3d::parry::bounding_volume::{Aabb, BoundingVolume};
     let w = &r.world;
+    let soft = w.soft_bodies.iter().next().is_some();
     // Every body awake, not only Rapier's active set: one woken or made since the last step
     // (a shot just fired) joins that set only inside the step.
     let found = w.bodies.iter().find_map(|(h, rb)| {
@@ -1704,31 +1705,117 @@ fn sweeps_wanted(r: &crate::sim::Region, dt: f32) -> bool {
         if step <= BULLET_STEP_M {
             return None;
         }
-        // Rapier's own test for the bodies that didn't ask: faster than half its thinnest part.
-        if !rb.is_ccd_enabled() && step <= 0.5 * thickness(colliders().map(|c| c.shape())) {
+        // Rapier's own test (faster than half its thinnest part), but along the way it goes:
+        // what moves less than half its own depth that way a substep can't pass through
+        // anything, its contacts push it back out. That holds for a body that asked to be swept
+        // too: a car's 4.4 m box rolling forward 0.2 m a substep was swept every substep
+        // against the road under it (round 11), and is now only falling at it fast.
+        let (moving, spinning) = (rb.linvel().length() * dt, rb.angvel().length() * reach * dt);
+        let along = thickness_along(colliders(), rb.linvel().normalize_or_zero());
+        let thinnest = thickness(colliders().map(|c| c.shape()));
+        let part = |travel: f32, depth: f32| {
+            if travel > 0.0 {
+                travel / (0.5 * depth)
+            } else {
+                0.0
+            }
+        };
+        if part(moving, along) + part(spinning, thinnest) <= 1.0 {
             return None;
         }
         // Colliders made or moved since the last step aren't in the query tree yet.
         if r.stale_all || !r.fresh.is_empty() {
-            return Some((rb.user_data, "new colliders near"));
+            return Some((rb.user_data, "new colliders near", None));
         }
-        // Its path this substep, and a margin: anything there it could pass through?
+        // Where it is and where it is going this substep, and a little more (the solve
+        // changes its velocity): the box Rapier's sweep looks in. Fixed geometry must reach
+        // into it, down to the triangles of a mesh or heightfield, as Rapier's own sweep looks:
+        // the ground a car rolls on fills the box of every ground chunk under it, but its
+        // triangles lie a wheel's travel below the body (the AI rally car was swept every
+        // substep for that, round 11).
+        let travel = rb.linvel() * dt;
+        let slack = Vec3::splat(rb.angvel().length() * reach * dt + 0.25 * step + SWEEP_SLACK_M);
+        let mut swept = path.merged(&Aabb::new(path.mins + travel, path.maxs + travel));
+        swept.mins -= slack;
+        swept.maxs += slack;
+        // Bodies move too: for them, its path this substep and a margin all round.
         path.mins -= Vec3::splat(step + BULLET_MARGIN_M);
         path.maxs += Vec3::splat(step + BULLET_MARGIN_M);
+        let bullet = rb.is_ccd_enabled();
         let filter = rapier3d::prelude::QueryFilter::default()
             .exclude_rigid_body(h)
             .exclude_sensors();
         w.query_pipeline_with_filter(filter)
             .intersect_aabb_conservative(path)
-            .next()
-            .map(|_| (rb.user_data, "something in its path"))
+            .find(|(_, co)| {
+                let parent = co.parent().and_then(|p| w.bodies.get(p));
+                if parent.is_none_or(|b| b.is_fixed()) {
+                    reaches_into(co, &swept)
+                } else {
+                    // Rapier sweeps a body that didn't ask for it against fixed geometry only
+                    // (and soft bodies' meshes, which Rapier gives no parent).
+                    bullet || soft
+                }
+            })
+            .map(|(_, co)| (rb.user_data, "something in its path", Some(co.user_data)))
     });
-    if let Some((user, why)) = found
+    if let Some((user, why, what)) = found
         && crate::report::wanted()
     {
-        crate::report::sweeper(Entity::from_bits(user as u64), why);
+        let what = what.and_then(|u| Entity::try_from_bits(u as u64));
+        crate::report::sweeper(Entity::from_bits(user as u64), why, what);
     }
     found.is_some()
+}
+
+/// Does fixed collider `co` reach into `path` (a box in its region's frame)? A mesh,
+/// heightfield or compound only where one of its triangles or parts does: their own boxes
+/// span a whole ground chunk.
+fn reaches_into(
+    co: &rapier3d::prelude::Collider,
+    path: &rapier3d::parry::bounding_volume::Aabb,
+) -> bool {
+    use rapier3d::parry::bounding_volume::BoundingVolume;
+    use rapier3d::parry::shape::TypedShape;
+    if !co.compute_aabb().intersects(path) {
+        return false;
+    }
+    let local = path.transform_by(&co.position().inverse());
+    match co.shape().as_typed_shape() {
+        TypedShape::TriMesh(m) => m.bvh().intersect_aabb(&local).next().is_some(),
+        TypedShape::Compound(c) => c.bvh().intersect_aabb(&local).next().is_some(),
+        TypedShape::HeightField(f) => {
+            let mut any = false;
+            f.map_elements_in_local_aabb(&local, &mut |_, t| {
+                any = any || t.local_aabb().intersects(&local);
+            });
+            any
+        }
+        _ => true,
+    }
+}
+
+/// A body's depth along unit direction `d` (in its region's frame), as half a width, the way
+/// Rapier's `ccd_thickness` measures: the least of its swept shapes', a box's, ball's or
+/// capsule's exactly along `d`, any other's its thinnest part.
+fn thickness_along<'a>(
+    colliders: impl Iterator<Item = &'a rapier3d::prelude::Collider>,
+    d: Vec3,
+) -> f32 {
+    use rapier3d::parry::shape::TypedShape;
+    colliders
+        .map(|c| {
+            let local = c.position().rotation.inverse() * d;
+            match c.shape().as_typed_shape() {
+                TypedShape::Cuboid(b) => (local.abs() * b.half_extents).element_sum(),
+                TypedShape::Ball(b) => b.radius,
+                TypedShape::Capsule(k) => {
+                    k.radius + 0.5 * (k.segment.b - k.segment.a).dot(local).abs()
+                }
+                _ => thickness(std::iter::once(c.shape())),
+            }
+        })
+        .fold(f32::MAX, f32::min)
 }
 
 /// A body's thinnest part as Rapier's sweeps judge it: the least `ccd_thickness` of its
@@ -1796,6 +1883,9 @@ fn speculate_thin(r: &mut crate::sim::Region, dt: f32) {
 pub(crate) const BULLET_STEP_M: f32 = 0.1;
 /// Beyond its path, how near something must be to a fast body for its region to sweep, m.
 const BULLET_MARGIN_M: f32 = 0.5;
+/// Beyond where a fast body is and will be this substep, how near fixed geometry must reach for
+/// its region to sweep, meters (a quarter of its step more: the solve changes its velocity).
+const SWEEP_SLACK_M: f32 = 0.1;
 
 /// A body whose far edge moves faster than this from turning alone, m/s, gets its contacts
 /// recomputed every step; below [`STILL_EDGE_SPEED`] Rapier may reuse them again.

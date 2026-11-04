@@ -35,7 +35,7 @@ struct Totals {
     /// Pieces of those parts, by name: their sum and their worst step, ms ([`piece_ms`]).
     pieces: Vec<(&'static str, f64, f64)>,
     /// Bodies that made a region's substep sweep for fast motion (CCD), and why: their count.
-    sweepers: HashMap<(Entity, &'static str), usize>,
+    sweepers: HashMap<(Entity, &'static str, Option<Entity>), usize>,
 }
 
 fn totals() -> &'static Mutex<Totals> {
@@ -124,9 +124,14 @@ pub(crate) fn rapier_stages(c: &rapier3d::counters::Counters) {
     }
 }
 
-/// `body` made a region's substep run Rapier's sweeps (CCD), for `why`.
-pub(crate) fn sweeper(body: Entity, why: &'static str) {
-    *totals().lock().sweepers.entry((body, why)).or_default() += 1;
+/// `body` made a region's substep run Rapier's sweeps (CCD), for `why` (and `what` it could
+/// pass through).
+pub(crate) fn sweeper(body: Entity, why: &'static str, what: Option<Entity>) {
+    *totals()
+        .lock()
+        .sweepers
+        .entry((body, why, what))
+        .or_default() += 1;
 }
 
 /// `ms` of the step's own work went to `name` (sync, upkeep, write back...).
@@ -264,13 +269,16 @@ pub(crate) fn step_done(world: &World, sim: &Simulation, foci: &[DVec3], started
         );
     }
     if !t.sweepers.is_empty() {
-        let mut by: Vec<(&(Entity, &str), &usize)> = t.sweepers.iter().collect();
+        let mut by: Vec<(&(Entity, &str, Option<Entity>), &usize)> = t.sweepers.iter().collect();
         by.sort_by(|a, b| b.1.cmp(a.1));
         let total: usize = by.iter().map(|(_, n)| **n).sum();
         let shown: Vec<String> = by
             .iter()
             .take(TOP)
-            .map(|((e, why), n)| format!("{} ({why}) {n}", label(world, *e)))
+            .map(|((e, why, what), n)| match what {
+                Some(w) => format!("{} ({why}: {}) {n}", label(world, *e), label(world, *w)),
+                None => format!("{} ({why}) {n}", label(world, *e)),
+            })
             .collect();
         out += &format!(
             "; {total} region substeps swept for fast bodies, set off by {}",
