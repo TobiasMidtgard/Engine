@@ -837,6 +837,7 @@ pub fn ripple_system(
     // for it there may pick up another system that reads the water, which would wait for
     // this lock forever. The field steps aside, and readers see a copy of what it held until
     // it is put back.
+    let hand_over = tracing::info_span!("water", name = "ripples: hand over").entered();
     let mut field = flight
         .ripple_spare
         .take()
@@ -847,6 +848,7 @@ pub fn ripple_system(
     }
     state.ripples.copy_view_from(&field);
     state.ripples.pending.clear();
+    drop(hand_over);
     let span = tracing::info_span!("water", name = "ripples: rebuild").entered();
     if rebuild {
         let moved = field.recenter(center);
@@ -1273,6 +1275,7 @@ pub fn flow_step_system(
     // Step with the water unlocked (AGENTS.md, "Performance rules"): the step goes wide on
     // the compute pool, and a thread waiting there runs other modules' tasks, such as fire
     // sampling `Water`, which would wait for this lock forever.
+    let views = tracing::info_span!("water", name = "flows: views").entered();
     let mut flows = std::mem::take(&mut state.flows);
     let mut view = std::mem::take(&mut flight.views);
     view.truncate(flows.len());
@@ -1288,7 +1291,9 @@ pub fn flow_step_system(
     }
     state.flows = view;
     drop(state);
+    drop(views);
 
+    let _span = tracing::info_span!("water", name = "flows: step").entered();
     for sim in flows.iter_mut().filter(|sim| !sim.resting) {
         // A dozing stream holds still but its falls still throw spray.
         if !sim.dozing {
