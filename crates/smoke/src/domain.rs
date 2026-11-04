@@ -1265,14 +1265,25 @@ impl Domain {
     /// Make this a copy of `other`'s air (same box), reusing this one's memory: what a step
     /// reads, not its scratch space.
     pub fn copy_from(&mut self, other: &Domain) {
-        if self.dims != other.dims {
+        if self.dims != other.dims
+            || self.voxels.len() != other.voxels.len()
+            || self.pressure.len() != other.pressure.len()
+        {
             *self = other.clone();
             return;
         }
         self.origin = other.origin;
         self.cell = other.cell;
-        self.voxels.clone_from(&other.voxels);
-        self.pressure.clone_from(&other.pressure);
+        // Slabs at a time on the compute threads: a big volume's air is megabytes, and this
+        // runs on the frame.
+        let slab = (self.dims.x * self.dims.y) as usize * 8;
+        let (voxels, pressure) = (&other.voxels, &other.pressure);
+        par_chunks_mut(&mut self.voxels, slab, |i, c| {
+            c.copy_from_slice(&voxels[i * slab..i * slab + c.len()]);
+        });
+        par_chunks_mut(&mut self.pressure, slab, |i, c| {
+            c.copy_from_slice(&pressure[i * slab..i * slab + c.len()]);
+        });
         self.floor.clone_from(&other.floor);
         self.floor_stale = other.floor_stale;
         self.expansions.clone_from(&other.expansions);

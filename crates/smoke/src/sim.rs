@@ -303,13 +303,14 @@ impl SmokeDomain {
         true
     }
 
-    /// Step a copy of the air in the wind sampled now, on `pool`; it lands at a later
-    /// [`land`](Self::land).
+    /// Step a copy of the air on `pool`, in `wind` (a snapshot of the wind as it is now: the
+    /// task samples it, which cost the frame more than copying the air did); it lands at a
+    /// later [`land`](Self::land).
     fn start(
         &mut self,
         pool: &AsyncComputeTaskPool,
         params: StepParams,
-        wind: &(dyn Fn(DVec3) -> Vec3 + Sync),
+        wind: impl Fn(DVec3) -> Vec3 + Send + Sync + 'static,
     ) {
         let mut work = match self.background.spare.take() {
             Some(mut w) => {
@@ -318,10 +319,10 @@ impl SmokeDomain {
             }
             None => self.domain.clone(),
         };
-        work.sample_wind(wind);
         self.background.dt = params.dt;
         let (tx, rx) = mpsc::channel();
         pool.spawn(async move {
+            work.sample_wind(&wind);
             work.step_sampled(&params);
             let _ = tx.send(work);
         })
@@ -865,6 +866,10 @@ pub fn step(
         range.map_or((f64::INFINITY, 0.25), |r| (r.active_m, r.hysteresis));
     let active_m = active_m.min(settings.sim_radius_m as f64);
     let wind_fn = |p: DVec3| turbulent_wind(&wind, p, settings.turbulence, wind.time as f64);
+    // The wind as it is now, for the volumes stepping in the background (copied once a tick,
+    // when one starts).
+    let mut wind_now: Option<std::sync::Arc<WindField>> = None;
+    let turbulence = settings.turbulence;
     let pool = AsyncComputeTaskPool::try_get().filter(|_| settings.background);
     let started = std::time::Instant::now();
     let mut stepped = 0;
@@ -909,7 +914,15 @@ pub fn step(
         d.stride = d.next_stride(step);
         match pool {
             // Fog settles every frame, so it steps on the spot.
-            Some(pool) if !d.domain.fog => d.start(pool, params, &wind_fn),
+            Some(pool) if !d.domain.fog => {
+                let w = wind_now
+                    .get_or_insert_with(|| std::sync::Arc::new(wind.clone()))
+                    .clone();
+                let time = w.time as f64;
+                d.start(pool, params, move |p| {
+                    turbulent_wind(&w, p, turbulence, time)
+                });
+            }
             _ => {
                 d.domain.step(&params, &wind_fn);
                 d.shown(params.dt);
@@ -1003,6 +1016,31 @@ mod tests {
         assert_eq!(d.next_stride(tick), 1);
     }
 
+    /// The copy a background step works on is the air exactly, slab by slab.
+    #[test]
+    fn a_volume_copies_its_air_exactly() {
+        engine_core::tasks::init_task_pools();
+        let mut a = Domain::new(DVec3::ZERO, 0.5, UVec3::new(24, 20, 40));
+        a.set_floor(|_, _| Some(0.0));
+        let mut b = a.clone();
+        for (i, x) in [1.0, 5.0, 9.0].into_iter().enumerate() {
+            a.apply(&Change::Splat {
+                at: DVec3::new(x, 4.0, 3.0 + 6.0 * i as f64),
+                radius: 1.5,
+                mass_kg: 0.3,
+                heat_c: 200.0,
+                vel: Vec3::Y,
+                albedo: Vec3::splat(0.4),
+            });
+        }
+        a.step(&SmokeSettings::default().step_params(0.05, 15.0), &|_| {
+            Vec3::new(1.0, 0.0, 0.5)
+        });
+        b.copy_from(&a);
+        assert!(a.voxels == b.voxels, "voxels differ");
+        assert_eq!(a.mass_kg, b.mass_kg);
+    }
+
     #[test]
     fn a_background_step_lands_with_what_was_done_meanwhile() {
         engine_core::tasks::init_task_pools();
@@ -1024,7 +1062,7 @@ mod tests {
         let mut on_the_spot = d.domain.clone();
         let params = SmokeSettings::default().step_params(0.05, 15.0);
         let wind = |_: DVec3| Vec3::new(2.0, 0.0, 0.0);
-        d.start(pool, params, &wind);
+        d.start(pool, params, wind);
         // The air shows as it was until the step lands, plus what is done to it.
         d.change(puff(3.0));
         assert!(d.background.running());
