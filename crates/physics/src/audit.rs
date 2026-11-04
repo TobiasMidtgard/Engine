@@ -18,7 +18,9 @@ use engine_assets::Assets;
 use engine_core::math::{DVec3, Quat, Vec3};
 use engine_core::prelude::*;
 use engine_render::{Mesh, MeshRef, MeshRenderer};
-use engine_world::physics::{ColliderShape, PhysicsQuery, QueryFilter};
+use engine_world::physics::{
+    CharacterController, Collider, ColliderShape, FitCollider, PhysicsQuery, QueryFilter, RigidBody,
+};
 
 use crate::SharedSimulation;
 
@@ -28,12 +30,25 @@ pub const MIN_SIZE_M: f64 = 0.3;
 pub const EVERY_S: f64 = 10.0;
 /// Meshes listed in the log per zone (the file has all).
 const LOGGED: usize = 15;
+/// Component types (the last part of their names) whose meshes are left out: drawn parts with
+/// their own way of colliding, or none on purpose (foliage parts and shadow stand-ins, LOD
+/// fade ghosts, NPC stand-ins and flickering lights, falling debris).
+pub const SKIPPED: &[&str] = &[
+    "PlantPart",
+    "ShadowStandIn",
+    "FadeGhost",
+    "StandInPart",
+    "Flicker",
+    "Debris",
+];
 
-/// What the audit found: zone → (item, where, size) keyed by item and place.
+/// Every mesh found so far, by (zone, item, mesh, place to a decimetre): where it is, its size.
+type Found = BTreeMap<(String, String, String, [i64; 3]), (DVec3, f64)>;
+
 #[derive(Default)]
 pub(crate) struct AuditState {
     last: Option<Instant>,
-    found: BTreeMap<(String, String, [i64; 3]), (DVec3, f64)>,
+    found: Found,
 }
 
 /// One drawn mesh without a collider over it.
@@ -44,6 +59,8 @@ pub struct Uncovered {
     pub zone: String,
     /// The nearest name on it or an ancestor.
     pub item: String,
+    /// The mesh: its asset path, or its handle.
+    pub mesh: String,
     pub center: DVec3,
     /// Its largest extent, m.
     pub size: f64,
@@ -62,6 +79,15 @@ pub fn uncovered_meshes(world: &World) -> Vec<Uncovered> {
         return Vec::new();
     };
     let filter = QueryFilter::default();
+    let mut skipped: Vec<String> = SKIPPED.iter().map(|s| s.to_string()).collect();
+    if let Some(more) = std::env::var_os("PHYSICS_COLLIDER_AUDIT_SKIP") {
+        skipped.extend(
+            more.to_string_lossy()
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty()),
+        );
+    }
     let mut out = Vec::new();
     let mut hits = Vec::new();
     for (e, renderer, global) in q.iter(world) {
@@ -101,19 +127,55 @@ pub fn uncovered_meshes(world: &World) -> Vec<Uncovered> {
         };
         hits.clear();
         queries.overlap(&probe, probe_at, Quat::IDENTITY, &filter, &mut hits);
-        if !hits.is_empty() {
+        if !hits.is_empty() || physical(world, e) || of_skipped_kind(world, e, &skipped) {
             continue;
         }
         out.push(Uncovered {
             entity: e,
             zone: zone_of(world, e),
             item: crate::report::label(world, e),
+            mesh: match &renderer.mesh {
+                MeshRef::Asset(key) => key.to_string(),
+                _ => handle.map_or_else(String::new, |h| format!("{h:?}")),
+            },
             center,
             size,
         });
     }
     out.sort_by(|a, b| a.zone.cmp(&b.zone).then(b.size.total_cmp(&a.size)));
     out
+}
+
+/// Does `e` or an ancestor have a body, a collider or a character on it?
+fn physical(world: &World, e: Entity) -> bool {
+    let mut cur = e;
+    loop {
+        let r = world.entity(cur);
+        if r.contains::<RigidBody>()
+            || r.contains::<Collider>()
+            || r.contains::<FitCollider>()
+            || r.contains::<CharacterController>()
+        {
+            return true;
+        }
+        match world.get::<ChildOf>(cur) {
+            Some(p) => cur = p.parent(),
+            None => return false,
+        }
+    }
+}
+
+/// Has `e` a component whose type name ends in one of `skipped`?
+fn of_skipped_kind(world: &World, e: Entity, skipped: &[String]) -> bool {
+    let Ok(components) = world.inspect_entity(e) else {
+        return false;
+    };
+    components.into_iter().any(|(_, info)| {
+        let name = info.name().to_string();
+        let path = name.split('<').next().unwrap_or(&name);
+        let ty = path.rsplit("::").next().unwrap_or(path);
+        skipped.iter().any(|s| s == ty)
+    })
 }
 
 /// The topmost named ancestor of `e` (its zone in the showcase), or "(no zone)".
@@ -144,42 +206,47 @@ pub(crate) fn audit_colliders(world: &mut World, mut state: Local<AuditState>) {
     state.last = Some(Instant::now());
     let started = Instant::now();
     let found = uncovered_meshes(world);
-    let mut by_zone: BTreeMap<&str, Vec<&Uncovered>> = BTreeMap::new();
-    for u in &found {
-        by_zone.entry(&u.zone).or_default().push(u);
+    let count = found.len();
+    for u in found {
+        let key = (
+            u.zone,
+            u.item,
+            u.mesh,
+            (u.center * 10.0).round().as_i64vec3().to_array(),
+        );
+        state.found.insert(key, (u.center, u.size));
+    }
+    let groups = grouped(&state.found);
+    let mut by_zone: BTreeMap<&str, Vec<&Group>> = BTreeMap::new();
+    for g in &groups {
+        by_zone.entry(&g.zone).or_default().push(g);
     }
     for (zone, list) in &by_zone {
         let shown: Vec<String> = list
             .iter()
             .take(LOGGED)
-            .map(|u| {
+            .map(|g| {
                 format!(
-                    "{} {:.1} m at ({:.0} {:.0} {:.0})",
-                    u.item, u.size, u.center.x, u.center.y, u.center.z
+                    "{} x{} {:.1} m at ({:.0} {:.0} {:.0})",
+                    g.item, g.count, g.max, g.at.x, g.at.y, g.at.z
                 )
             })
             .collect();
         engine_core::log::info!(
-            "collider audit: {zone}: {} drawn meshes of {MIN_SIZE_M} m or more with no collider \
-             over them; biggest: {}",
+            "collider audit: {zone}: {} kinds of drawn mesh of {MIN_SIZE_M} m or more with no \
+             collider over them ({} placed); biggest: {}",
             list.len(),
+            list.iter().map(|g| g.count).sum::<usize>(),
             shown.join(", ")
         );
     }
     engine_core::log::info!(
-        "collider audit: {} meshes without a collider in {} zones ({:.1} ms)",
-        found.len(),
+        "collider audit: {count} meshes without a collider in view now, {} kinds in {} zones \
+         so far ({:.1} ms)",
+        groups.len(),
         by_zone.len(),
         started.elapsed().as_secs_f64() * 1000.0
     );
-    for u in found {
-        let key = (
-            u.zone,
-            u.item,
-            (u.center * 10.0).round().as_i64vec3().to_array(),
-        );
-        state.found.insert(key, (u.center, u.size));
-    }
     let Some(path) = std::env::var_os("PHYSICS_COLLIDER_AUDIT") else {
         return;
     };
@@ -187,20 +254,63 @@ pub(crate) fn audit_colliders(world: &mut World, mut state: Local<AuditState>) {
     if path.extension().is_none_or(|x| x != "csv") {
         return;
     }
-    let mut csv = String::from("zone,item,x,y,z,size_m\n");
-    for ((zone, item, _), (c, size)) in &state.found {
-        let clean = |s: &str| s.replace([',', '\n'], " ");
+    let clean = |s: &str| s.replace([',', '\n'], " ");
+    let mut csv = String::from("zone,item,mesh,count,min_size_m,max_size_m,x,y,z\n");
+    for g in &groups {
         csv.push_str(&format!(
-            "{},{},{:.2},{:.2},{:.2},{:.2}\n",
-            clean(zone),
-            clean(item),
-            c.x,
-            c.y,
-            c.z,
-            size
+            "{},{},{},{},{:.2},{:.2},{:.2},{:.2},{:.2}\n",
+            clean(&g.zone),
+            clean(&g.item),
+            clean(&g.mesh),
+            g.count,
+            g.min,
+            g.max,
+            g.at.x,
+            g.at.y,
+            g.at.z
         ));
     }
     if let Err(err) = std::fs::write(&path, csv) {
         engine_core::log::warn!("collider audit: can't write {}: {err}", path.display());
     }
+}
+
+/// The meshes found of one kind in one zone: the same item drawn with the same mesh.
+struct Group {
+    zone: String,
+    item: String,
+    mesh: String,
+    count: usize,
+    min: f64,
+    max: f64,
+    /// Where the biggest one is.
+    at: DVec3,
+}
+
+/// `found` grouped by zone, item and mesh: by zone, then biggest first.
+fn grouped(found: &Found) -> Vec<Group> {
+    let mut groups: Vec<Group> = Vec::new();
+    for ((zone, item, mesh, _), &(at, size)) in found {
+        match groups.last_mut() {
+            Some(g) if g.zone == *zone && g.item == *item && g.mesh == *mesh => {
+                g.count += 1;
+                g.min = g.min.min(size);
+                if size > g.max {
+                    g.max = size;
+                    g.at = at;
+                }
+            }
+            _ => groups.push(Group {
+                zone: zone.clone(),
+                item: item.clone(),
+                mesh: mesh.clone(),
+                count: 1,
+                min: size,
+                max: size,
+                at,
+            }),
+        }
+    }
+    groups.sort_by(|a, b| a.zone.cmp(&b.zone).then(b.max.total_cmp(&a.max)));
+    groups
 }

@@ -113,7 +113,8 @@ fn a_moving_model_gets_convex_parts_not_triangles() {
 }
 
 /// The collider audit (`engine_physics::audit`) lists a drawn rock with no collider on the
-/// ground, not one with its own collider, nor a pebble too small to matter.
+/// ground, not one with its own collider, nor a pebble too small to matter, nor a sail whose
+/// mast has a collider of its own.
 #[test]
 fn the_collider_audit_lists_drawn_rocks_nothing_collides_with() {
     let mut app = app();
@@ -142,6 +143,17 @@ fn the_collider_audit_lists_drawn_rocks_nothing_collides_with() {
         .entity_mut(solid)
         .insert((RigidBody::fixed(), Collider::cuboid(Vec3::splat(0.5))));
     drawn(&mut app, Vec3::new(0.0, 0.1, 3.0), 0.2, "pebble");
+    // A drawn sail on a mast whose collider is only a pole, on purpose.
+    let mast = app
+        .world
+        .spawn((
+            Transform::from_xyz(0.0, 0.0, -3.0),
+            RigidBody::fixed(),
+            Collider::cuboid(Vec3::new(0.05, 2.0, 0.05)),
+        ))
+        .id();
+    let sail = drawn(&mut app, Vec3::new(0.0, 2.0, -3.0), 1.5, "sail");
+    app.world.entity_mut(sail).insert(ChildOf(mast));
     app.update_n(3);
     let found = engine_physics::audit::uncovered_meshes(&app.world);
     let names: Vec<&str> = found.iter().map(|u| u.item.as_str()).collect();
