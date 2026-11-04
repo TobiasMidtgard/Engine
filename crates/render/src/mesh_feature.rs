@@ -194,8 +194,9 @@ struct GpuMesh {
     height: f32,
     /// Last frame the instanced path drew it.
     last_used: u64,
-    /// The frame it was uploaded (static shadow images hold it from `STILL_FRAMES` later).
-    uploaded: u64,
+    /// The frame from which static shadow images may hold it: `STILL_FRAMES` after an edit
+    /// in place, `SPAWN_STILL_FRAMES` after its first upload.
+    still_from: u64,
     /// Coarser levels of detail, finest first (empty until built, or for small meshes).
     lods: Vec<GpuLod>,
 }
@@ -391,10 +392,11 @@ struct Item {
     fade: f32,
     /// `DitherFade` (0 without one).
     dither: f32,
-    /// The frame from which static shadow images may hold it: `STILL_FRAMES` after its slot
-    /// last changed or its mesh was uploaded (`u64::MAX`: never, skinned or dithering).
+    /// The frame from which static shadow images may hold it (`Cold::still_from`,
+    /// `GpuMesh::still_from`; `u64::MAX`: never, skinned or dithering).
     since: u64,
-    /// Its material sways in the wind: the near cascades draw it every frame.
+    /// Its material sways in the wind: maps fine enough to show it move draw it every frame
+    /// (`crate::shadows::sway_moves`).
     sways: bool,
     /// The sun's shadow maps it casts into, by texel size (`ShadowTexelRange`).
     cast_texels: crate::ShadowTexelRange,
@@ -430,8 +432,8 @@ struct MeshFrame {
     impostor: bool,
     /// Skinned on the GPU (`GpuSkin`): never in static shadow images.
     skinned: bool,
-    /// The frame its upload was made (`GpuMesh::uploaded`).
-    uploaded: u64,
+    /// `GpuMesh::still_from`.
+    still_from: u64,
     /// Whether its clusters are ready, once asked this frame (undisplaced instances).
     clusters: Option<bool>,
 }
@@ -451,7 +453,7 @@ impl MeshFrame {
             // A skinned mesh's pose changes: no bake can show it.
             impostor: coarsest >= crate::impostor::MIN_TRIANGLES && !building_levels && !skinned,
             skinned,
-            uploaded: gpu_mesh.uploaded,
+            still_from: gpu_mesh.still_from,
             ..*self
         };
     }
@@ -505,9 +507,9 @@ struct CasterList {
 #[derive(Default)]
 struct MapCasters {
     moving: CasterList,
+    /// Every still caster when the map's static image is drawn again; else those that turned
+    /// still since it last took casters in, which join it (`RenderFeature::draw_shadow_join`).
     still: CasterList,
-    waiting: u32,
-    oldest: u64,
 }
 
 impl MapCasters {
@@ -517,8 +519,6 @@ impl MapCasters {
             list.keys.clear();
             list.impostors.clear();
         }
-        self.waiting = 0;
-        self.oldest = u64::MAX;
     }
 }
 
@@ -799,7 +799,7 @@ impl Cull<'_> {
             since: if mesh.skinned || hot.dither != 0.0 {
                 u64::MAX
             } else {
-                cold.changed.max(mesh.uploaded) + STILL_FRAMES
+                cold.still_from().max(mesh.still_from)
             },
             sways: mat.sways,
             cast_texels: hot.cast_texels,
@@ -1083,12 +1083,18 @@ pub struct MeshFeature {
     /// The still casters drawn into each map's static image, on the frames it is drawn again
     /// (`draw_shadow_static`).
     shadow_static: [Vec<Batch>; SHADOW_MAPS],
-    /// Per map: the frame its static image was last drawn (it holds the casters still since
-    /// then: `Item::since`), whether a caster in it changed so it must be drawn again, and
-    /// whether still casters wait to join it.
+    /// Per map: the frame its static image last took casters in, drawn again or joined (it
+    /// holds the casters still by then: `Item::since`), the frame it was last drawn again, and
+    /// whether a caster in it changed so it must be drawn again.
     image_frame: [u64; SHADOW_MAPS],
+    redrawn_frame: [u64; SHADOW_MAPS],
     static_dirty: [bool; SHADOW_MAPS],
-    static_waiting: [bool; SHADOW_MAPS],
+    /// The textures each alpha-masked material cuts its outline with, as last bound (its image
+    /// bound or still loading, whole or virtual): when they change, casters in the static
+    /// shadow images may show the old outline (a solid card while the image loaded).
+    outlines: HashMap<u64, [u32; 3]>,
+    /// Casters and triangles that joined each map's static image this frame.
+    joined: [(u32, u64); SHADOW_MAPS],
     /// Triangles in each map's static image when it was last drawn (for the report).
     static_triangles: [u64; SHADOW_MAPS],
     /// Slots changed or dropped since the main view last checked them against the static
@@ -1177,10 +1183,10 @@ const SHADOW_MASKED: u8 = 1;
 /// Frames a caster stays unchanged (unmoved, its mesh uploaded) before static shadow images
 /// may hold it (`RenderFeature::draw_shadow_static`); until then it is drawn every frame.
 pub(crate) const STILL_FRAMES: u64 = 90;
-/// Still casters waiting to join a map's static image (drawn every frame meanwhile): the image
-/// is drawn again once this many wait, or one has waited `JOIN_FRAMES`.
-const JOIN_COUNT: u32 = 64;
-const JOIN_FRAMES: u64 = 60;
+/// The same for a young slot that never moved, and a mesh's first upload: a tree streamed in
+/// joins the static images two frames later, not after `STILL_FRAMES` (a shadow popping in
+/// a second or more after its tree on a fast fly).
+pub(crate) const SPAWN_STILL_FRAMES: u64 = 2;
 /// Radius (far map texels) from which a caster that isn't still is drawn into the far map every
 /// frame; smaller ones (down to `FarShadowView::min_caster_radius`) cast from its static image.
 const FAR_MOVING_CASTER_TEXELS: f32 = 2.0;
@@ -1389,13 +1395,14 @@ impl MeshFeature {
     /// Put `mesh` on the GPU as mesh `index`, replacing its old copy. False when it can't go
     /// there (no triangles, or too large): it is then left off until it changes.
     fn upload_mesh(&mut self, gpu: &GpuShared, index: u32, mesh: &Mesh, version: u64) -> bool {
+        let edit = self.meshes.contains_key(&index);
         if let Some(old) = self.meshes.remove(&index) {
             old.free(&mut self.pool);
             // A mesh edited in place: static shadow images may show its old shape, but only
             // those drawn once it had been still long enough to join them (a mesh edited every
             // frame casts as a moving caster and never redraws them).
             for (dirty, &drawn) in self.static_dirty.iter_mut().zip(&self.image_frame) {
-                *dirty |= old.uploaded + STILL_FRAMES <= drawn;
+                *dirty |= old.still_from <= drawn;
             }
         }
         if mesh.indices.is_empty() || mesh.vertices.is_empty() {
@@ -1424,7 +1431,12 @@ impl MeshFeature {
                 min_y: aabb.min.y,
                 height: (aabb.max.y - aabb.min.y).max(1e-3),
                 last_used: self.frame,
-                uploaded: self.frame,
+                still_from: self.frame
+                    + if edit {
+                        STILL_FRAMES
+                    } else {
+                        SPAWN_STILL_FRAMES
+                    },
                 lods: Vec::new(),
             },
         );
@@ -1438,7 +1450,7 @@ impl MeshFeature {
         for change in self.shadow_changes.drain(..) {
             let center = (change.center - view.origin).as_vec3();
             for map in 0..SHADOW_MAPS {
-                if self.static_dirty[map] || change.changed + STILL_FRAMES > self.image_frame[map] {
+                if self.static_dirty[map] || change.still_from > self.image_frame[map] {
                     continue;
                 }
                 self.static_dirty[map] = map_holds(view, map, center, change.radius);
@@ -1724,6 +1736,13 @@ impl MeshFeature {
         gpu_material.flags[0] = (gpu_material.flags[0] & !TEXTURE_FLAGS) | bound;
         gpu_material.flags[1] = vt_low;
         gpu_material.flags[2] = vt_high;
+        if matches!(material.alpha_mode, AlphaMode::Mask(_))
+            && let Some(old) = self.outlines.insert(handle, [bound, vt_low, vt_high])
+            && old != [bound, vt_low, vt_high]
+        {
+            // Rare (an image finishing its load): every static image is drawn again.
+            self.static_dirty = [true; SHADOW_MAPS];
+        }
         let slot = self.material_data.len() as u32;
         self.material_data.push(gpu_material);
         self.material_index.insert(handle, (slot, textures));
@@ -1762,7 +1781,7 @@ impl MeshFeature {
                     ", {name} {:.2} M + {:.2} M still ({} frames ago)",
                     sum(s) as f64 / 1e6,
                     self.static_triangles[c] as f64 / 1e6,
-                    self.frame.saturating_sub(self.image_frame[c])
+                    self.frame.saturating_sub(self.redrawn_frame[c])
                 );
             }
         }
@@ -3239,6 +3258,7 @@ impl RenderFeature for MeshFeature {
             let mut lists = std::mem::take(&mut self.shadow_scratch);
             lists.resize_with(maps.len(), Default::default);
             let (items, casters, meshes) = (&self.items, &self.casters, &self.meshes);
+            let material_data = &self.material_data;
             let image_frame = self.image_frame;
             let fill = |c: usize, out: &mut MapCasters| {
                 out.clear();
@@ -3250,20 +3270,39 @@ impl RenderFeature for MeshFeature {
                     _ => 2.0 * view.cascades.half_extent[c] / view.cascades.map_size.max(1) as f32,
                 };
                 let redraw = static_redraw(view, c);
-                // Casters still since this frame are in the image when it is drawn again.
+                // Casters still since this frame are in the image when it is drawn again; the
+                // main view's other frames, those that turned still since it last took casters
+                // in join it (extra views draw everything straight in).
+                let join = !redraw && !view.extra_view;
                 let image = if redraw { frame } else { image_frame[c] };
+                // Swaying leaves rest only in maps too coarse to show them move, in one pose.
+                let sway_moves = crate::shadows::sway_moves(texel);
                 for &n in casters {
                     let item = &items[n as usize];
                     // A caster with a stand-in for other maps (`ShadowTexelRange`).
                     if !item.cast_texels.casts_at(texel) {
                         continue;
                     }
-                    // Swaying leaves move in the near cascades' shadows: never still there.
-                    let can_rest = !(item.sways && c < 2);
-                    let in_image = can_rest && item.since <= image;
+                    let can_rest = !(item.sways && sway_moves);
+                    // A cutout streamed tile by tile (a virtual base color) sharpens over the
+                    // frames after it appears: it waits the full still time, so the static
+                    // image doesn't keep its first, coarse outline.
+                    let streams = item.masked
+                        && material_data
+                            .get(item.material_slot as usize)
+                            .is_some_and(|m| m.flags[1] != 0);
+                    let since = if streams {
+                        item.since.saturating_add(STILL_FRAMES)
+                    } else {
+                        item.since
+                    };
+                    let in_image = can_rest && since <= image;
                     if in_image && !redraw {
                         continue;
                     }
+                    // Still since the image last took casters in: it joins now.
+                    let joins = join && can_rest && since <= frame;
+                    let in_image = in_image || joins;
                     let inside = if in_image {
                         map_holds(view, c, item.center, item.radius)
                     } else {
@@ -3278,10 +3317,6 @@ impl RenderFeature for MeshFeature {
                     };
                     if !inside || 2.0 * item.radius < min_size * texel {
                         continue;
-                    }
-                    if !in_image && can_rest && item.since <= frame {
-                        out.waiting += 1;
-                        out.oldest = out.oldest.min(item.since);
                     }
                     // Past the cascades only big casters are drawn every frame; mid-size ones
                     // cast once still, from the static image.
@@ -3319,7 +3354,6 @@ impl RenderFeature for MeshFeature {
             } else {
                 jobs.for_each(|(&c, list)| fill(c, list));
             }
-            let mut join = None;
             for (&c, lists) in maps.iter().zip(&lists) {
                 for (list, still) in [(&lists.moving, false), (&lists.still, true)] {
                     let first = self.layout.len();
@@ -3343,32 +3377,28 @@ impl RenderFeature for MeshFeature {
                 if view.extra_view {
                     continue;
                 }
+                // The image now holds what was still this frame: drawn again, or with this
+                // frame's joins drawn into it.
+                let triangles: u64 = self.shadow_static[c]
+                    .iter()
+                    .map(|b| {
+                        meshes
+                            .get(&b.key.mesh)
+                            .map_or(0, |m| m.level(b.key.lod).1 / 3) as u64
+                            * b.count as u64
+                    })
+                    .sum();
+                self.image_frame[c] = frame;
                 if static_redraw(view, c) {
-                    // The image now holds what was still this frame.
-                    self.image_frame[c] = frame;
+                    self.redrawn_frame[c] = frame;
                     self.static_dirty[c] = false;
-                    self.static_waiting[c] = false;
-                    self.static_triangles[c] = self.shadow_static[c]
-                        .iter()
-                        .map(|b| {
-                            meshes
-                                .get(&b.key.mesh)
-                                .map_or(0, |m| m.level(b.key.lod).1 / 3)
-                                as u64
-                                * b.count as u64
-                        })
-                        .sum();
+                    self.static_triangles[c] = triangles;
+                    self.joined[c] = (0, 0);
+                } else {
+                    let casters = lists.still.picked.len() + lists.still.impostors.len();
+                    self.joined[c] = (casters as u32, triangles);
+                    self.static_triangles[c] += triangles;
                 }
-                // Still casters waiting to join: one map a frame asks for its image again.
-                let due = lists.waiting >= JOIN_COUNT
-                    || (lists.waiting > 0 && lists.oldest + JOIN_FRAMES <= frame);
-                self.static_waiting[c] = false;
-                if due && join.is_none() {
-                    join = Some(c);
-                }
-            }
-            if let Some(c) = join {
-                self.static_waiting[c] = true;
             }
             self.shadow_scratch = lists;
         }
@@ -3571,6 +3601,13 @@ impl RenderFeature for MeshFeature {
                 triangles += (level / 3) as u64 * b.count as u64;
             }
             d.set("render.meshes.cascade_instances", instances as f64);
+            // Static images drawn again this frame, and casters that joined one instead.
+            let redrawn = (0..SHADOW_MAPS)
+                .filter(|&c| self.redrawn_frame[c] == self.frame && self.frame > 0)
+                .count();
+            let joined: u32 = self.joined.iter().map(|j| j.0).sum();
+            d.set("render.meshes.static_redrawn", redrawn as f64);
+            d.set("render.meshes.shadow_joined", joined as f64);
             d.set("render.meshes.cascade_triangles", triangles as f64);
             // Meshes (re)uploaded this frame: new ones, and edits of resident ones.
             d.set(
@@ -3829,7 +3866,15 @@ impl RenderFeature for MeshFeature {
 
     fn shadow_static_changed(&self, map: usize) -> bool {
         self.static_dirty.get(map).copied().unwrap_or(false)
-            || self.static_waiting.get(map).copied().unwrap_or(false)
+    }
+
+    fn shadow_joins(&self, map: usize) -> bool {
+        self.joined.get(map).is_some_and(|j| j.0 > 0)
+    }
+
+    fn draw_shadow_join(&self, pass: &mut wgpu::RenderPass<'_>, map: usize, ctx: &FrameContext) {
+        // On frames the image isn't drawn again its static lists hold the joins.
+        self.draw_shadow_static(pass, map, ctx);
     }
 
     fn stats(&self) -> FeatureStats {

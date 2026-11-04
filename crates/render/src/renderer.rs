@@ -246,6 +246,16 @@ fn copy_layer(
 }
 
 /// A depth-only pass into `target`, cleared to 1 or loaded.
+/// `ShadowViewUniform::time.w` for a shadow map of `texel` meters: 1 where swaying leaves
+/// are drawn at rest (`shadows::sway_moves`).
+fn sway_rest(texel: f32) -> f32 {
+    if crate::shadows::sway_moves(texel) {
+        0.0
+    } else {
+        1.0
+    }
+}
+
 fn depth_pass<'e>(
     encoder: &'e mut wgpu::CommandEncoder,
     label: &str,
@@ -2005,10 +2015,12 @@ impl Renderer {
         let queue = &self.shared.queue;
         if view.sun_shadows {
             for i in 0..view.cascades.count as usize {
+                let texel =
+                    2.0 * view.cascades.half_extent[i] / view.cascades.map_size.max(1) as f32;
                 let u = ShadowViewUniform {
                     view_proj: view.cascades.view_proj[i].to_cols_array_2d(),
                     wind: [view.wind.x, view.wind.y, view.wind.z, 0.0],
-                    time: [view.time, view.real_time, view.delta, 0.0],
+                    time: [view.time, view.real_time, view.delta, sway_rest(texel)],
                     camera_frac: uniform.camera_world_frac,
                 };
                 queue.write_buffer(&self.shadow.view_buffers[i], 0, bytemuck::bytes_of(&u));
@@ -2018,7 +2030,12 @@ impl Renderer {
             let u = ShadowViewUniform {
                 view_proj: view.far_shadow.view_proj.to_cols_array_2d(),
                 wind: [view.wind.x, view.wind.y, view.wind.z, 0.0],
-                time: [view.time, view.real_time, view.delta, 0.0],
+                time: [
+                    view.time,
+                    view.real_time,
+                    view.delta,
+                    sway_rest(view.far_shadow.texel()),
+                ],
                 camera_frac: uniform.camera_world_frac,
             };
             queue.write_buffer(
@@ -2028,10 +2045,11 @@ impl Renderer {
             );
         }
         if view.sky_occlusion.enabled {
+            let texel = view.sky_occlusion.extent / view.sky_occlusion.map_size.max(1) as f32;
             let u = ShadowViewUniform {
                 view_proj: view.sky_occlusion.view_proj.to_cols_array_2d(),
                 wind: [view.wind.x, view.wind.y, view.wind.z, 0.0],
-                time: [view.time, view.real_time, view.delta, 0.0],
+                time: [view.time, view.real_time, view.delta, sway_rest(texel)],
                 camera_frac: uniform.camera_world_frac,
             };
             queue.write_buffer(
@@ -2378,6 +2396,18 @@ impl Renderer {
                         true,
                     );
                     draw_still(&mut pass);
+                } else if self.features.iter().any(|f| f.shadow_joins(map)) {
+                    // Casters that turned still go into the image on top of what it holds.
+                    let mut pass = depth_pass(
+                        &mut encoder,
+                        "shadow static join",
+                        &statics.layers[layer],
+                        false,
+                    );
+                    pass.set_bind_group(0, group, &[]);
+                    for f in &self.features {
+                        f.draw_shadow_join(&mut pass, map, &ctx);
+                    }
                 }
                 copy_layer(
                     &mut encoder,
@@ -2434,6 +2464,21 @@ impl Renderer {
                         pass.set_bind_group(0, group, &[]);
                         for f in &self.features {
                             f.draw_shadow_static(&mut pass, SKY_OCCLUSION_VIEW, &ctx);
+                        }
+                    } else if self
+                        .features
+                        .iter()
+                        .any(|f| f.shadow_joins(SKY_OCCLUSION_VIEW))
+                    {
+                        let mut pass = depth_pass(
+                            &mut encoder,
+                            "sky occlusion static join",
+                            &statics.occlusion.1,
+                            false,
+                        );
+                        pass.set_bind_group(0, group, &[]);
+                        for f in &self.features {
+                            f.draw_shadow_join(&mut pass, SKY_OCCLUSION_VIEW, &ctx);
                         }
                     }
                     copy_layer(

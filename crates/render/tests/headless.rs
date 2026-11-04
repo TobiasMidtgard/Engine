@@ -106,7 +106,9 @@ fn renders_a_lit_scene_to_png() {
     );
 
     let stats = app.world.resource::<engine_render::RenderStats>();
-    assert!(stats.draw_calls >= 4, "{stats:?}");
+    // All four meshes drawn (in one multi-draw call or more; their shadows come from the
+    // static images once they hold still, two frames after they appear).
+    assert!(stats.draw_calls >= 1 && stats.instances >= 4, "{stats:?}");
     eprintln!(
         "rendered on {} ({}): {:?} -> {}",
         stats.adapter,

@@ -640,6 +640,17 @@ pub struct ShadowViewUniform {
     pub camera_frac: [f32; 4],
 }
 
+/// Shadow map texels (meters) from which swaying leaves are drawn at rest: one pose that
+/// doesn't change with time (`ShadowViewUniform::time.w` 1), and held by the map's static image
+/// like any still caster. Finer maps show their motion and draw them every frame. Unreal stops
+/// world position offset in distant shadows the same way (Nanite foliage's animation cutoff).
+pub const SWAY_MOVING_TEXEL_M: f32 = 0.03;
+
+/// Whether a shadow map of `texel` meters draws swaying leaves moving (else at rest).
+pub fn sway_moves(texel: f32) -> bool {
+    texel < SWAY_MOVING_TEXEL_M
+}
+
 /// Cascade split distances: blend of logarithmic and uniform (`lambda` 1 = log).
 pub fn split_distances(near: f32, far: f32, count: usize, lambda: f32) -> [f32; 4] {
     let mut out = [far; 4];
