@@ -108,14 +108,26 @@ pub fn follow_exhausts(mut commands: Commands, owners: Query<Owner>, mut nozzles
         if effect.effect != name {
             effect.effect = name.to_string();
         }
-        *tr = Transform::from_translation(n.position.as_dvec3()).with_rotation(
-            Quat::from_rotation_arc(Vec3::Y, n.direction.normalize_or(Vec3::Z)),
+        // A parked or idling vehicle's nozzles stay as they are: no write, so transform
+        // propagation, the renderer and the effect step leave them alone.
+        tr.set_if_neq(
+            Transform::from_translation(n.position.as_dvec3()).with_rotation(
+                Quat::from_rotation_arc(Vec3::Y, n.direction.normalize_or(Vec3::Z)),
+            ),
         );
         let level = shown_level(&n, engine);
-        effect.scale = (n.radius / radius).max(0.01);
-        effect.intensity = level;
-        effect.rate = rate_at(level);
-        effect.playing = true;
+        let size = (n.radius / radius).max(0.01);
+        let rate = rate_at(level);
+        if effect.scale != size
+            || effect.intensity != level
+            || effect.rate != rate
+            || !effect.playing
+        {
+            effect.scale = size;
+            effect.intensity = level;
+            effect.rate = rate;
+            effect.playing = true;
+        }
         match (time, scale) {
             (Some(t), s) if s != Some(t) => {
                 commands.entity(entity).insert(*t);

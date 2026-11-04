@@ -258,7 +258,10 @@ pub fn aircraft_visuals(
         let Some(e) = p.engines.get(vis.index) else {
             continue;
         };
-        t.rotation = vis.base * Quat::from_rotation_z(e.spin_angle);
+        let rotation = vis.base * Quat::from_rotation_z(e.spin_angle);
+        if t.rotation != rotation {
+            t.rotation = rotation; // a stopped engine's propeller is left alone
+        }
     }
     for (pivot, part, mut t) in &mut parts {
         let Ok(body) = pivots.get(pivot.parent()) else {

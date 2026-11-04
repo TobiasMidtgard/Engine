@@ -186,9 +186,13 @@ pub(crate) fn draw_ziplines(
             let d = (b - a).as_vec3();
             let len = d.length().max(1e-4);
             if let Ok(mut pt) = parts.get_mut(e) {
-                pt.translation = a;
-                pt.rotation = Quat::from_rotation_arc(Vec3::Y, d / len);
-                pt.scale = Vec3::new(1.0, len, 1.0);
+                // A cable nobody rides keeps its pieces: no write, so the renderer and
+                // transform propagation leave them alone.
+                pt.set_if_neq(Transform {
+                    translation: a,
+                    rotation: Quat::from_rotation_arc(Vec3::Y, d / len),
+                    scale: Vec3::new(1.0, len, 1.0),
+                });
             }
         }
     }
