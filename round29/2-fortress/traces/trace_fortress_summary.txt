@@ -1,0 +1,401 @@
+60 frames, 33.23 ms a frame
+  idle 3.17 ms, alone 25.12 ms, several 4.94 ms; 1.10 threads busy on average
+
+schedules (ms a frame, threads busy on average):
+    16.59  1.17  FixedUpdate
+     6.55  0.99  Render
+     4.67  1.03  Update
+     3.80  1.21  PostUpdate
+     0.55  0.85  First
+     0.43  0.84  Last
+     0.21  0.93  Extract
+     0.20  0.80  FixedPreUpdate
+     0.16  0.49  PreUpdate
+     0.05  0.16  FixedPostUpdate
+     0.02  0.00  -
+
+ran alone (ms a frame):
+    6.490  Render           engine_render::render_system
+    1.754  FixedUpdate      engine_physics::physics_simulate
+    1.416  Update           engine_script::run_scripts
+    1.124  FixedUpdate      engine_npc::think_and_act
+    1.119  FixedUpdate      engine_destruction::simulate_debris_system
+    0.807  FixedUpdate      engine_smoke::step
+    0.680  FixedUpdate      engine_physics::physics_sync
+    0.527  PostUpdate       engine_core::propagate_transforms_system
+    0.511  FixedUpdate      engine_water::puddle_system
+    0.440  FixedUpdate      engine_npc::rebuild_world_model
+    0.388  FixedUpdate      engine_movement::step_movers
+    0.379  First            engine_core::frame_diagnostics_system
+    0.365  FixedUpdate      engine_npc::fallback_move
+    0.351  PostUpdate       engine_vfx::tick_effects
+    0.322  FixedUpdate      engine_weather::ground_system
+    0.317  Last             engine::stream_system
+    0.299  FixedUpdate      engine_water::splash_drops_system
+    0.295  FixedUpdate      engine_npc::warm_nav
+    0.277  PostUpdate       engine_terrain::update_colliders
+    0.257  FixedUpdate      engine_npc::pose_stand_ins
+    0.253  FixedUpdate      engine_water::flow_bed_system
+    0.237  FixedUpdate      engine_destruction::apply_hits_system
+    0.228  FixedUpdate      engine_physics::physics_write_back
+    0.195  Update           engine_foliage::sync_scenery_trees
+    0.184  FixedUpdate      engine_water::boat_air_system
+
+idle gaps (ms a frame): after -> before
+    0.047  FixedPreUpdate   engine_core::snapshot_interpolation_system -> engine_movement::drive_shuttles
+    0.040  FixedUpdate      engine_weather::lightning_system (commands) -> engine_input::consume_fixed_presses_system
+    0.035  Render           engine_debug::end_frame_system -> engine_core::enabled
+    0.032  FixedUpdate      engine_physics::physics_write_back -> engine_vehicles::carry_seated
+    0.028  FixedUpdate      engine_foliage::run_demo_felling -> engine_npc::fallback_move
+    0.027  FixedUpdate      engine_physics::physics_sync -> engine_water::flow_step_system
+    0.026  FixedUpdate      engine_softbody::burn_and_restore (commands) -> engine_physics::drive_rods
+    0.024  FixedUpdate      engine_foliage::follow_terrain (commands) -> engine_weather::ground_system
+    0.023  Render           engine_render::render_system -> engine_debug::end_frame_system
+    0.022  FixedUpdate      engine_foliage::apply_damage -> engine_foliage::update_falling_trees
+    0.021  FixedUpdate      engine_water::boat_air_system -> engine_foliage::run_demo_felling
+    0.021  FixedUpdate      engine_foliage::update_falling_trees -> engine_npc::build_stand_ins (commands)
+    0.021  -                frame start -> engine::clear_readouts_system
+    0.020  FixedPostUpdate  bevy_ecs::signal_message_update_system -> engine_softbody::follow_surface_anchors
+    0.019  FixedUpdate      engine_physics::physics_simulate -> engine_physics::physics_write_back
+    0.019  FixedUpdate      engine_destruction::place_debris_system -> engine_physics::physics_sync
+    0.018  FixedUpdate      engine_destruction::structure_system (commands) -> engine_foliage::release_grass_presses
+    0.018  Update           engine_movement::place_markers (commands) -> engine_softbody::prepare_bodies
+    0.018  FixedUpdate      engine_npc::build_posts (commands) -> engine_npc::pose_posts
+    0.017  PostUpdate       engine_softbody::offer_handholds (commands) -> engine_debug::environment_views_system
+    0.017  FixedUpdate      engine_softbody::burn_and_restore -> engine_core::{{closure}} (commands)
+    0.017  FixedUpdate      engine_npc::seed_bodies (commands) -> engine_npc::request_appearances
+    0.016  FixedUpdate      engine_vehicles::apply_forces (commands) -> engine_vehicles::telemetry_system
+    0.016  PreUpdate        engine_water::finish_demo_art_system (commands) -> engine_softbody::follow_surface_anchors
+    0.016  FixedUpdate      engine_movement::step_movers -> engine_movement::resolve_attacks
+
+threads (ms of systems a frame):
+    10.20  main
+     1.86  compute (7)
+     1.82  compute (16)
+     1.76  compute (28)
+     1.67  compute (3)
+     1.51  compute (12)
+     1.40  compute (18)
+     1.40  compute (23)
+     1.39  compute (14)
+     1.34  compute (19)
+     1.29  compute (0)
+     1.28  compute (15)
+     1.25  compute (26)
+     1.24  compute (24)
+     1.22  compute (17)
+     1.19  compute (22)
+     1.01  compute (29)
+     0.99  compute (5)
+     0.95  compute (13)
+     0.90  compute (1)
+     0.34  compute (25)
+     0.32  compute (2)
+     0.20  compute (27)
+     0.07  render
+
+frames: wall idle alone several (ms)
+     0   33.88   2.48  25.20   6.21
+     1   27.79   2.27  22.06   3.46
+     2   28.44   1.90  21.96   4.58
+     3   22.96   2.43  17.21   3.33
+     4   21.44   2.03  15.95   3.46
+     5   45.97   2.52  40.04   3.41
+     6   29.29   2.87  21.32   5.10
+     7   44.46   3.08  36.01   5.37
+     8   58.54   4.58  48.14   5.82
+     9   58.62   4.92  45.51   8.20
+    10   54.02   5.38  39.89   8.76
+    11   60.30   4.03  49.29   6.98
+    12   55.51   4.81  41.06   9.64
+    13   42.50   4.00  31.69   6.81
+    14   38.23   3.74  28.32   6.17
+    15   28.75   2.90  21.67   4.18
+    16   31.70   3.68  23.14   4.89
+    17   33.81   3.77  24.28   5.76
+    18   31.67   2.89  25.22   3.56
+    19   41.36   4.67  30.14   6.54
+    20   44.51   4.76  32.12   7.63
+    21   48.92   4.43  37.86   6.63
+    22   39.53   3.89  29.07   6.57
+    23   26.66   3.46  19.33   3.87
+    24   29.80   3.55  21.51   4.75
+    25   21.06   2.35  15.98   2.73
+    26   29.37   2.60  22.27   4.50
+    27   19.44   2.17  14.11   3.16
+    28   36.63   2.43  29.91   4.28
+    29   36.84   2.69  28.49   5.67
+    30   24.57   2.71  18.51   3.35
+    31   26.10   2.16  20.38   3.55
+    32   22.73   2.64  16.62   3.47
+    33   23.42   2.09  18.15   3.19
+    34   25.23   2.87  19.23   3.13
+    35   36.80   3.15  27.54   6.11
+    36   38.18   4.16  29.34   4.68
+    37   48.78   3.75  38.84   6.19
+    38   35.46   3.59  25.73   6.14
+    39   27.10   2.84  19.18   5.08
+    40   19.39   1.88  14.56   2.95
+    41   24.29   2.50  17.53   4.25
+    42   20.94   2.14  15.97   2.83
+    43   26.86   2.05  20.54   4.26
+    44   25.03   2.63  18.01   4.39
+    45   27.17   2.31  19.78   5.08
+    46   26.50   2.51  20.31   3.68
+    47   30.30   3.01  22.76   4.53
+    48   19.75   1.79  14.76   3.20
+    49   31.88   3.98  22.50   5.40
+    50   31.94   3.68  22.06   6.20
+    51   26.15   3.12  19.82   3.21
+    52   35.50   3.67  25.85   5.98
+    53   35.46   4.54  26.13   4.79
+    54   37.30   3.36  28.13   5.80
+    55   34.93   3.91  25.13   5.88
+    56   32.33   2.92  23.51   5.90
+    57   28.36   3.35  21.12   3.89
+    58   25.52   2.80  19.13   3.58
+    59   24.10   2.65  17.60   3.86
+
+frame 11: 60.30 ms (us from frame start, thread, ms)
+        111 compute (26)      0.43  engine_core::frame_diagnostics_system
+        962 compute (13)      0.44  engine_npc::warm_nav
+       1539 compute (18)      0.47  engine_movement::step_movers
+       2132 compute (26)      0.15  engine_water::boat_air_system
+       2314 compute (26)      0.17  engine_npc::fallback_move
+       2804 compute (26)      0.11  engine_vehicles::wheels_system
+       3199 compute (13)      0.49  engine_destruction::simulate_debris_system
+       3724 main              0.86  engine_physics::physics_sync
+       4598 compute (13)      0.25  engine_water::flow_step_system
+       4604 compute (26)      1.84  engine_physics::physics_simulate
+       4620 compute (0)       0.33  engine_softbody::step_beside_physics
+       4626 compute (2)       5.20  engine_smoke::step
+       9847 main              0.19  engine_physics::physics_write_back
+      10075 compute (2)       0.28  engine_destruction::apply_hits_system
+      10424 compute (2)       0.13  engine_npc::pose_stand_ins
+      10862 compute (26)      0.13  engine_space::follow_world_clock
+      11027 compute (12)      0.28  engine_water::flow_bed_system
+      11347 compute (12)      0.19  engine_water::splash_drops_system
+      11545 compute (2)       0.10  engine_water::shore_wetness_system
+      11760 compute (12)      0.52  engine_weather::ground_system
+      11795 compute (28)      0.55  engine_smoke::publish
+      12364 main              7.98  engine_foliage::ecology_step
+      20680 compute (14)      0.49  engine_npc::warm_nav
+      21270 compute (12)      0.27  engine_movement::step_movers
+      21757 compute (12)      0.17  engine_npc::fallback_move
+      22419 compute (3)       0.49  engine_destruction::simulate_debris_system
+      22939 main              0.27  engine_physics::physics_sync
+      23224 compute (3)       0.24  engine_water::flow_step_system
+      23230 compute (14)      1.48  engine_physics::physics_simulate
+      23252 compute (17)      0.20  engine_softbody::step_beside_physics
+      24722 main              0.10  engine_physics::physics_write_back
+      24858 compute (0)       0.28  engine_destruction::apply_hits_system
+      25218 compute (18)      0.15  engine_npc::pose_stand_ins
+      25546 compute (18)      0.10  engine_terrain::walk
+      25565 compute (12)      0.13  engine_space::follow_world_clock
+      25746 compute (18)      0.19  engine_water::flow_bed_system
+      25975 compute (18)      0.18  engine_water::splash_drops_system
+      26280 compute (18)      0.30  engine_weather::ground_system
+      26869 compute (17)      0.45  engine_npc::warm_nav
+      27351 compute (18)      1.72  engine_npc::perceive
+      29160 compute (3)       0.27  engine_movement::step_movers
+      29659 compute (18)      0.16  engine_npc::fallback_move
+      30067 compute (14)      0.10  engine_vehicles::wheels_system
+      30349 compute (3)       0.51  engine_destruction::simulate_debris_system
+      30885 main              0.20  engine_physics::physics_sync
+      31099 compute (3)       0.32  engine_water::flow_step_system
+      31105 compute (19)      2.34  engine_physics::physics_simulate
+      31110 compute (17)      0.71  engine_fire::step_field
+      31122 compute (18)      0.20  engine_softbody::step_beside_physics
+      33458 main              0.12  engine_physics::physics_write_back
+      33610 compute (19)      0.27  engine_destruction::apply_hits_system
+      33939 compute (19)      0.13  engine_npc::pose_stand_ins
+      34236 compute (19)      0.14  engine_fire::stamp_scorch
+      34364 compute (5)       0.18  engine_water::flow_bed_system
+      34395 compute (13)      0.40  engine_fire::step_objects
+      34576 compute (5)       0.17  engine_water::splash_drops_system
+      34799 compute (13)      0.14  engine_fire::emit_outputs
+      35017 compute (17)      0.34  engine_weather::ground_system
+      35516 compute (3)       0.48  engine_fire::update_grass
+      35669 compute (24)      0.24  engine_anim::demo_path_system
+      36074 main              1.72  engine_script::script_frame_system
+      36087 main              1.67  engine_script::run_scripts
+      37862 compute (13)      0.10  engine_movement::animate_puppets
+      38011 main              0.13  engine_ui::ui_screens_system
+      38323 compute (28)      0.11  engine_foliage::offer_chops
+      38387 compute (18)      2.59  engine_foliage::sync_plant_visuals
+      41023 main              0.19  engine_foliage::sync_plant_visuals (commands)
+      41295 compute (28)      0.37  engine_destruction::rebuild_walls_system
+      41726 compute (18)      0.20  engine_foliage::sync_scenery_trees
+      42092 compute (29)      0.16  engine_foliage::stream_far_woods
+      42295 compute (13)      0.24  engine_destruction::build_system
+      42982 main              0.11  engine_destruction::support_tint_system (commands)
+      43601 compute (29)      0.11  engine_anim::evaluate_animators
+      43799 compute (29)      0.19  engine_terrain::deform_from_contacts
+      43992 compute (29)      0.19  engine_terrain::wear_from_contacts
+      44531 compute (24)      2.05  engine_core::propagate_transforms_system
+      46611 compute (13)      0.14  engine_anim::gait_system
+      46625 compute (23)      2.18  engine_vfx::tick_effects
+      46804 compute (24)      0.23  engine_audio::water_ambience
+      47045 compute (14)      0.30  engine_audio::vehicle_sounds
+      47370 compute (24)      0.18  engine_audio::occlusion
+      48903 compute (24)      0.31  engine_terrain::update_colliders
+      49256 main              0.14  engine_ui::ui_layout_system
+      49543 compute (23)      0.18  engine_terrain::update_landmarks
+      49586 compute (22)      0.31  engine_anim::foot_ik_system
+      50333 compute (22)      0.54  engine_render::resolve_mesh_renderers
+      50946 main              8.83  engine_render::render_system
+      60018 main              0.27  engine::stream_system
+
+frame 9: 58.62 ms (us from frame start, thread, ms)
+        120 compute (14)      0.63  engine_core::frame_diagnostics_system
+       1454 compute (13)      0.94  engine_npc::warm_nav
+       2648 compute (13)      0.47  engine_movement::step_movers
+       3295 compute (12)      0.15  engine_water::boat_air_system
+       3485 compute (12)      0.31  engine_npc::fallback_move
+       4129 compute (12)      0.32  engine_softbody::snapshot_frames
+       4197 compute (13)      0.22  engine_vehicles::wheels_system
+       4756 compute (12)      0.75  engine_destruction::simulate_debris_system
+       5561 main              1.76  engine_physics::physics_sync
+       7346 compute (12)      0.42  engine_water::flow_step_system
+       7351 compute (29)      4.14  engine_physics::physics_simulate
+       7364 compute (5)       0.20  engine_water::ripple_system
+       7384 compute (7)       0.34  engine_softbody::step_beside_physics
+       7386 compute (3)       5.76  engine_smoke::step
+      13172 main              0.24  engine_physics::physics_write_back
+      13468 compute (12)      0.40  engine_destruction::apply_hits_system
+      13971 compute (12)      0.22  engine_npc::pose_stand_ins
+      14646 compute (12)      0.13  engine_space::follow_world_clock
+      14858 compute (7)       0.33  engine_water::flow_bed_system
+      15249 compute (7)       0.36  engine_water::splash_drops_system
+      15613 compute (7)       4.81  engine_water::puddle_system
+      20703 compute (7)       0.64  engine_weather::ground_system
+      20716 compute (12)      0.10  engine_foliage::grow_plants
+      20808 compute (3)       0.52  engine_smoke::publish
+      21779 compute (7)       4.17  engine_npc::rebuild_world_model
+      26013 compute (5)       0.48  engine_npc::warm_nav
+      26693 compute (5)       0.57  engine_movement::step_movers
+      27452 compute (5)       0.15  engine_water::boat_air_system
+      27653 compute (5)       0.31  engine_npc::fallback_move
+      28339 compute (12)      0.32  engine_softbody::snapshot_frames
+      28416 compute (3)       0.15  engine_vehicles::wheels_system
+      28961 compute (12)      1.49  engine_destruction::simulate_debris_system
+      30498 main              0.66  engine_physics::physics_sync
+      31190 compute (12)      0.39  engine_water::flow_step_system
+      31201 compute (19)      2.85  engine_physics::physics_simulate
+      31221 compute (28)      0.28  engine_softbody::step_beside_physics
+      31236 compute (7)       0.13  engine_water::ripple_system
+      34073 main              0.14  engine_physics::physics_write_back
+      34283 compute (29)      0.50  engine_destruction::apply_hits_system
+      34888 compute (29)      0.20  engine_npc::pose_stand_ins
+      35460 compute (29)      0.13  engine_space::follow_world_clock
+      35652 compute (29)      0.30  engine_water::flow_bed_system
+      36012 compute (29)      0.38  engine_water::splash_drops_system
+      36597 compute (25)      0.44  engine_weather::ground_system
+      37179 compute (7)       0.47  engine_fire::update_grass
+      37282 compute (12)      0.17  engine_foliage::stream_scenery_tree_solids
+      37416 compute (0)       0.19  engine_anim::demo_path_system
+      37703 compute (25)      0.12  showcase::fly
+      37897 main              2.07  engine_script::script_frame_system
+      37909 main              1.78  engine_script::run_scripts
+      39717 main              0.23  engine_script::run_story
+      40060 compute (12)      0.17  engine_movement::animate_puppets
+      40290 main              0.22  engine_ui::ui_screens_system
+      40781 compute (0)       0.18  engine_foliage::offer_chops
+      40876 compute (12)      0.13  engine_foliage::sync_plant_visuals
+      41074 compute (25)      0.69  engine_destruction::rebuild_walls_system
+      41888 compute (25)      0.34  engine_foliage::sync_scenery_trees
+      42280 compute (25)      0.18  engine_destruction::age_debris_system
+      42564 compute (12)      0.29  engine_foliage::stream_far_woods
+      42910 compute (12)      0.22  engine_destruction::build_system
+      43342 compute (12)      0.11  engine_foliage::sync_shadow_standins
+      44125 compute (13)      0.18  engine_anim::evaluate_animators
+      44429 compute (13)      0.19  engine_terrain::deform_from_contacts
+      44627 compute (13)      0.29  engine_terrain::wear_from_contacts
+      45322 compute (13)      0.62  engine_core::propagate_transforms_system
+      45983 compute (13)      1.87  engine_anim::gait_system
+      45991 compute (13)      1.85  engine_vfx::tick_effects
+      47920 compute (13)      0.14  engine_anim::vehicle_rig_system
+      48062 compute (29)      0.64  engine_audio::nature_ambience
+      48716 compute (29)      0.54  engine_audio::vehicle_sounds
+      48718 compute (7)       0.30  engine_terrain::update_colliders
+      49324 main              0.24  engine_ui::ui_layout_system
+      49625 compute (7)       0.30  engine_audio::occlusion
+      50022 compute (25)      0.12  engine_anim::flinch_system
+      50191 compute (25)      0.32  engine_terrain::update_landmarks
+      50291 compute (7)       0.44  engine_anim::foot_ik_system
+      51249 compute (5)       0.28  engine_render::resolve_mesh_renderers
+      51582 main              6.68  engine_render::render_system
+      58400 main              0.21  engine::stream_system
+
+frame 8: 58.54 ms (us from frame start, thread, ms)
+        148 render            0.32  engine_core::frame_diagnostics_system
+       1168 compute (28)      0.50  engine_movement::step_movers
+       1786 render            0.13  engine_water::buoyancy_system
+       2062 compute (5)       0.32  engine_npc::fallback_move
+       2845 compute (23)      0.21  engine_vehicles::wheels_system
+       3391 compute (7)       1.61  engine_destruction::simulate_debris_system
+       5038 main              1.20  engine_physics::physics_sync
+       6259 compute (7)       0.43  engine_water::flow_step_system
+       6268 compute (3)       7.05  engine_physics::physics_simulate
+       6296 compute (28)      0.35  engine_softbody::step_beside_physics
+      13353 main              0.27  engine_physics::physics_write_back
+      13682 compute (3)       0.58  engine_destruction::apply_hits_system
+      14383 compute (7)       0.22  engine_npc::pose_stand_ins
+      14838 compute (3)       0.16  engine_destruction::spawn_debris_system
+      15218 compute (7)       0.13  engine_space::follow_world_clock
+      15473 compute (7)       0.32  engine_water::flow_bed_system
+      15858 compute (18)      0.33  engine_water::splash_drops_system
+      16199 compute (18)      0.30  engine_water::shore_wetness_system
+      16592 compute (18)      0.44  engine_weather::ground_system
+      17571 compute (7)       0.91  engine_npc::warm_nav
+      18612 compute (18)      0.51  engine_movement::step_movers
+      19165 compute (23)      0.10  engine_water::buoyancy_system
+      19302 compute (28)      0.15  engine_water::boat_air_system
+      19503 compute (28)      0.31  engine_npc::fallback_move
+      20118 compute (28)      0.13  engine_vehicles::wheels_system
+      20614 compute (23)      1.96  engine_destruction::simulate_debris_system
+      22623 main              0.46  engine_physics::physics_sync
+      23105 compute (18)      0.43  engine_water::flow_step_system
+      23125 compute (3)       9.04  engine_physics::physics_simulate
+      23136 compute (23)      1.06  engine_fire::step_field
+      23150 compute (19)      0.34  engine_softbody::step_beside_physics
+      23193 compute (19)      0.11  engine_water::ripple_system
+      32193 main              0.29  engine_physics::physics_write_back
+      32558 compute (15)      0.46  engine_destruction::apply_hits_system
+      33120 compute (15)      0.20  engine_npc::pose_stand_ins
+      33684 compute (15)      0.12  engine_space::follow_world_clock
+      33730 compute (23)      0.27  engine_fire::stamp_scorch
+      33898 compute (15)      0.30  engine_water::flow_bed_system
+      34039 compute (3)       0.76  engine_fire::step_objects
+      34259 compute (15)      0.34  engine_water::splash_drops_system
+      34608 compute (15)      0.10  engine_water::shore_wetness_system
+      34806 compute (3)       0.26  engine_fire::emit_outputs
+      35178 compute (3)       0.44  engine_weather::ground_system
+      35768 compute (19)      0.47  engine_fire::update_grass
+      36018 compute (14)      0.25  engine_anim::demo_path_system
+      36307 compute (18)      0.30  engine_foliage::sync_region_grass
+      36857 main              1.90  engine_script::script_frame_system
+      36871 main              1.84  engine_script::run_scripts
+      38876 compute (7)       0.17  engine_movement::animate_puppets
+      39130 main              0.19  engine_ui::ui_screens_system
+      39585 compute (7)       0.17  engine_foliage::offer_chops
+      39833 compute (18)      0.48  engine_destruction::rebuild_walls_system
+      40424 compute (18)      0.33  engine_foliage::sync_scenery_trees
+      40941 compute (14)      0.17  engine_foliage::stream_far_woods
+      41168 compute (14)      0.13  engine_destruction::build_system
+      42257 compute (14)      0.13  engine_terrain::deform_from_contacts
+      42390 compute (14)      0.12  engine_terrain::wear_from_contacts
+      42948 compute (29)      0.66  engine_core::propagate_transforms_system
+      43663 compute (29)      0.16  engine_anim::gait_system
+      43690 compute (16)      2.39  engine_vfx::tick_effects
+      43922 compute (19)      0.19  engine_audio::water_ambience
+      44127 compute (29)      0.55  engine_audio::vehicle_sounds
+      44705 compute (29)      0.34  engine_audio::occlusion
+      46149 compute (29)      0.54  engine_terrain::update_colliders
+      46748 main              0.22  engine_ui::ui_layout_system
+      47258 compute (19)      0.32  engine_terrain::update_landmarks
+      47340 compute (16)      0.34  engine_anim::foot_ik_system
+      47764 compute (29)      0.12  engine_anim::ragdoll_system
+      48334 compute (29)      0.31  engine_render::resolve_mesh_renderers
+      48745 main              9.28  engine_render::render_system
+      58127 main              0.39  engine::stream_system

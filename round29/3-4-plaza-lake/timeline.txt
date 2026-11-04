@@ -1,0 +1,20 @@
+10:31:43.834Z     0.03  mode stops quality ultra size '' spec 'plaza:75,arrive-lake:15'; idle before start 43,693 s; HEAD 94ab0ecc
+10:31:44.136Z     0.33  started: showcase.exe --fly --profile --quality ultra  env ENGINE_PROFILE=1
+10:31:50.787Z     6.98  window visible: client 1600x900, window 1616x939 at (338,338), maximized False
+10:31:50.792Z     6.99  bridge connected
+10:31:50.915Z     7.11  world built
+10:31:56.687Z    12.88  after build: working set 4,682 MB, private 8,909 MB; system free 32,206 of 65,277 MB
+10:31:56.710Z    12.91  AT plaza: {"id":1,"jsonrpc":"2.0","result":{"place":"plaza","position":[10.0,4.5,16.0]}}
+10:32:36.840Z    53.04  trace trace_plaza (120 frames): {"id":10,"jsonrpc":"2.0","result":{"frames":120,"recording":"C:/Users/Tobit/AppData/Local/Temp/claude/C--Users-Tobit-Documents-ProgrammingProjects/a9b51fd2-8307-4505-9047-44a5b14953cc/scratchpad/r29/s34_plaza_lake/trace_plaza.json"}}
+10:32:41.946Z    58.14  trace written: 120 frames to trace_plaza.json at 10:32:39.261531Z in the log (read 5.1 s after the ask)
+10:33:12.111Z    88.31  END plaza: working set 5,522 MB, private 15,926 MB; system free 31,272 of 65,277 MB
+10:33:12.182Z    88.38  shot plaza: {"id":20,"jsonrpc":"2.0","result":{"height":900,"path":"screenshots/r29/plaza.png","width":1600}}
+10:33:14.587Z    90.78  ARRIVE trace_lake_arrival (20 frames): {"id":21,"jsonrpc":"2.0","result":{"frames":20,"recording":"C:/Users/Tobit/AppData/Local/Temp/claude/C--Users-Tobit-Documents-ProgrammingProjects/a9b51fd2-8307-4505-9047-44a5b14953cc/scratchpad/r29/s34_plaza_lake/trace_lake_arrival.json"}}
+10:33:14.594Z    90.79  AT lake (goto answered 10:33:13.270Z): {"id":22,"jsonrpc":"2.0","result":{"place":"lake","position":[160.0,6.0,-115.0]}}
+10:33:14.597Z    90.79  ARRIVE: 20 engine.stats "render.gi" answers -> arrival_stats.jsonl, the last at 10:33:14.597Z
+10:33:28.306Z   104.50  trace written: 20 frames to trace_lake_arrival.json at 10:33:14.598603Z in the log (read 15.1 s after the ask)
+10:33:28.646Z   104.84  END lake: working set 5,530 MB, private 15,910 MB; system free 31,257 of 65,277 MB
+10:33:28.713Z   104.91  shot lake: {"id":45,"jsonrpc":"2.0","result":{"height":900,"path":"screenshots/r29/lake.png","width":1600}}
+10:33:32.154Z   108.35  sampler job: Completed
+10:33:32.155Z   108.35  killing the game
+10:34:14.820Z   151.02  done

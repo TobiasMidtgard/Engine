@@ -1,0 +1,51 @@
+Round 29 step 3: diff27.py, round 28's plaza trace (A) against this round's (B), per schedule.
+FixedUpdate: wall 8.22 ms a frame (1.23 runs) in A, 7.24 (1.18 runs) in B; systems' sum 9.12 / 7.85
+   A ms    B ms    B-A  system (ms a frame)
+   1.545   1.185  -0.359  engine_smoke::step
+   0.635   0.303  -0.332  engine_movement::step_movers
+   0.236   0.091  -0.144  engine_fire::step_field
+   1.157   1.043  -0.115  engine_physics::physics_simulate
+   0.504   0.431  -0.073  engine_npc::think_and_act
+   0.080   0.039  -0.041  engine_fire::stamp_scorch
+   0.322   0.285  -0.037  engine_smoke::publish
+   0.331   0.299  -0.032  engine_physics::physics_sync
+   0.444   0.418  -0.027  engine_softbody::step_beside_physics
+   0.122   0.147  +0.024  engine_vehicles::wheels_system
+   0.224   0.204  -0.020  engine_weather::ground_system
+   0.213   0.197  -0.015  engine_npc::fallback_move
+
+Render: wall 4.43 ms a frame (1.00 runs) in A, 4.39 (1.00 runs) in B; systems' sum 4.39 / 4.34
+   A ms    B ms    B-A  system (ms a frame)
+   4.391   4.338  -0.053  engine_render::render_system
+   0.004   0.004  +0.000  engine_debug::end_frame_system
+
+Update: wall 3.64 ms a frame (1.00 runs) in A, 3.81 (1.00 runs) in B; systems' sum 5.30 / 5.53
+   A ms    B ms    B-A  system (ms a frame)
+   0.029   0.128  +0.099  engine_movement::animate_puppets
+   1.260   1.331  +0.071  engine_script::script_frame_system
+   1.205   1.274  +0.069  engine_script::run_scripts
+   0.095   0.050  -0.044  engine_script::draw_graph_boards
+   0.315   0.339  +0.024  engine_anim::demo_path_system
+   0.484   0.474  -0.011  engine_fire::update_grass
+   0.062   0.071  +0.009  engine_anim::shuttle_system
+   0.055   0.060  +0.004  engine_anim::stunt_system
+   0.148   0.151  +0.003  engine_foliage::sync_scenery_trees
+   0.066   0.064  -0.002  showcase::fly
+   0.104   0.106  +0.002  engine_foliage::stream_far_woods
+   0.092   0.090  -0.002  engine_foliage::sync_plant_visuals
+
+PostUpdate: wall 3.07 ms a frame (1.00 runs) in A, 3.09 (1.00 runs) in B; systems' sum 3.77 / 3.79
+   A ms    B ms    B-A  system (ms a frame)
+   0.306   0.336  +0.029  engine_anim::foot_ik_system
+   0.199   0.228  +0.029  engine_anim::gait_system
+   0.093   0.078  -0.015  engine_terrain::wear_from_contacts
+   0.102   0.087  -0.015  engine_terrain::deform_from_contacts
+   0.024   0.035  +0.011  engine_audio::occlusion
+   0.143   0.153  +0.010  engine_anim::vehicle_rig_system
+   0.421   0.415  -0.006  engine_core::propagate_transforms_system
+   0.013   0.018  +0.005  engine_audio::weather_ambience
+   0.266   0.261  -0.004  engine_audio::vehicle_sounds
+   0.146   0.150  +0.004  engine_ui::ui_layout_system
+   0.041   0.038  -0.003  engine_anim::flinch_system
+   0.019   0.016  -0.003  engine_audio::nature_ambience
+

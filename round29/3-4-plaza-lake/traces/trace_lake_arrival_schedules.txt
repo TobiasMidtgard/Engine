@@ -1,0 +1,93 @@
+Round 29 step 4: the lake arrival trace per frame (sched26.py; frame 0 is the goto's), then FixedUpdate's systems in frames 2-17 here and in round 28's arrival (top26.py).
+frame  wall | FixedUpdate runs ms (max) | Render runs ms (max) | Update runs ms (max) | PostUpdate runs ms (max) | engine_render::render_system runs ms (max) | engine_water::ripple_system runs ms (max) | engine_water::shore_wetness_system runs ms (max) | engine_softbody::step_beside_physics runs ms (max) | engine_script::run_scripts runs ms (max)
+    0   46.9 |  1   5.46 ( 5.46) |  1  31.18 (31.18) |  1   4.42 ( 4.42) |  1   3.89 ( 3.89) |  1  31.13 (31.13) |  1   0.02 ( 0.02) |  1   0.03 ( 0.03) |  1   0.32 ( 0.32) |  1   2.00 ( 2.00)
+    1   74.5 |  3  32.71 (14.12) |  1  27.39 (27.39) |  1   8.07 ( 8.07) |  1   4.44 ( 4.44) |  1  27.23 (27.23) |  3  12.47 ( 6.22) |  3   0.75 ( 0.64) |  3   6.40 ( 2.35) |  1   1.71 ( 1.71)
+    2   81.3 |  3  36.66 (18.73) |  1  23.25 (23.25) |  1   7.56 ( 7.56) |  1  11.70 (11.70) |  1  23.19 (23.19) |  3   8.67 ( 3.02) |  3   0.24 ( 0.10) |  3   6.96 ( 2.74) |  1   1.62 ( 1.62)
+    3   63.3 |  4  34.47 (10.07) |  1  14.46 (14.46) |  1   6.99 ( 6.99) |  1   4.92 ( 4.92) |  1  14.41 (14.41) |  4   8.92 ( 2.85) |  4   0.28 ( 0.08) |  4   9.38 ( 2.53) |  1   1.59 ( 1.59)
+    4   72.3 |  4  35.44 ( 9.81) |  1  18.47 (18.47) |  1   8.87 ( 8.87) |  1   7.28 ( 7.28) |  1  18.42 (18.42) |  4   9.48 ( 2.85) |  4   0.28 ( 0.08) |  4   9.37 ( 2.50) |  1   2.86 ( 2.86)
+    5   62.4 |  3  34.40 (12.65) |  1  14.56 (14.56) |  1   7.08 ( 7.08) |  1   4.61 ( 4.61) |  1  14.44 (14.44) |  3   7.13 ( 2.53) |  3   0.37 ( 0.22) |  3  12.67 ( 5.76) |  1   1.67 ( 1.67)
+    6   86.4 |  4  39.35 (12.62) |  1  19.92 (19.92) |  1  19.99 (19.99) |  1   4.87 ( 4.87) |  1  19.86 (19.86) |  4   8.11 ( 2.16) |  4   0.29 ( 0.10) |  4  14.22 ( 4.85) |  1  14.53 (14.53)
+    7   74.2 |  4  41.92 (12.86) |  1  15.91 (15.91) |  1   8.10 ( 8.10) |  1   5.15 ( 5.15) |  1  15.86 (15.86) |  4   7.68 ( 2.12) |  4   0.24 ( 0.09) |  4  15.54 ( 6.09) |  1   1.75 ( 1.75)
+    8   78.3 |  4  43.62 (12.04) |  1  18.87 (18.87) |  1   8.34 ( 8.34) |  1   5.19 ( 5.19) |  1  18.83 (18.83) |  4   5.84 ( 1.84) |  4   0.26 ( 0.07) |  4  17.25 ( 6.53) |  1   2.93 ( 2.93)
+    9   72.2 |  4  42.51 (12.34) |  1  14.74 (14.74) |  1   7.33 ( 7.33) |  1   5.32 ( 5.32) |  1  14.70 (14.70) |  4   6.10 ( 3.02) |  4   0.26 ( 0.12) |  4  15.79 ( 6.82) |  1   2.02 ( 2.02)
+   10   74.6 |  4  41.71 (11.84) |  1  17.53 (17.53) |  1   7.19 ( 7.19) |  1   6.12 ( 6.12) |  1  17.47 (17.47) |  4   2.20 ( 0.60) |  4   0.29 ( 0.11) |  4  15.63 ( 5.72) |  1   1.86 ( 1.86)
+   11   72.7 |  4  43.63 (11.66) |  1  14.80 (14.80) |  1   7.33 ( 7.33) |  1   4.52 ( 4.52) |  1  14.73 (14.73) |  4   2.22 ( 0.73) |  4   0.16 ( 0.05) |  4  16.46 ( 6.43) |  1   1.82 ( 1.82)
+   12   73.6 |  4  42.09 (12.30) |  1  17.16 (17.16) |  1   7.49 ( 7.49) |  1   4.62 ( 4.62) |  1  17.10 (17.10) |  4   2.94 ( 0.88) |  4   0.50 ( 0.16) |  4  16.76 ( 6.83) |  1   3.14 ( 3.14)
+   13   76.3 |  4  44.37 (12.74) |  1  17.19 (17.19) |  1   6.63 ( 6.63) |  1   5.99 ( 5.99) |  1  17.13 (17.13) |  4   3.11 ( 0.85) |  4   0.64 ( 0.18) |  4  18.41 ( 6.81) |  1   1.64 ( 1.64)
+   14   70.3 |  4  41.72 (11.78) |  1  15.33 (15.33) |  1   6.10 ( 6.10) |  1   4.70 ( 4.70) |  1  15.28 (15.28) |  4   2.99 ( 0.98) |  4   0.41 ( 0.17) |  4  14.70 ( 5.21) |  1   1.64 ( 1.64)
+   15   64.1 |  4  38.99 (10.24) |  1  12.14 (12.14) |  1   6.73 ( 6.73) |  1   3.88 ( 3.88) |  1  12.10 (12.10) |  4   2.23 ( 0.71) |  4   0.54 ( 0.17) |  4  14.58 ( 5.60) |  1   1.77 ( 1.77)
+   16   66.0 |  4  42.06 (12.53) |  1  12.80 (12.80) |  1   5.82 ( 5.82) |  1   3.54 ( 3.54) |  1  12.77 (12.77) |  4   2.86 ( 0.90) |  4   0.52 ( 0.20) |  4  18.02 ( 6.68) |  1   1.87 ( 1.87)
+   17   45.9 |  4  27.56 ( 7.95) |  1  10.27 (10.27) |  1   3.40 ( 3.40) |  1   3.11 ( 3.11) |  1  10.24 (10.24) |  4   2.37 ( 0.87) |  4   0.39 ( 0.12) |  4  12.42 ( 4.52) |  1   1.29 ( 1.29)
+   18   31.5 |  2  11.32 ( 6.76) |  1  12.44 (12.44) |  1   3.73 ( 3.73) |  1   2.72 ( 2.72) |  1  12.37 (12.37) |  2   0.79 ( 0.43) |  2   0.20 ( 0.11) |  2   2.93 ( 1.57) |  1   1.47 ( 1.47)
+   19   29.5 |  2  12.57 ( 7.49) |  1   9.85 ( 9.85) |  1   3.37 ( 3.37) |  1   2.61 ( 2.61) |  1   9.82 ( 9.82) |  2   0.90 ( 0.51) |  2   0.18 ( 0.09) |  2   3.39 ( 1.88) |  1   0.97 ( 0.97)
+a frame  | 3.50 runs  34.63 ms, 9.89 a run, max 18.73 | 1.00 runs  16.91 ms, 16.91 a run, max 31.18 | 1.00 runs   7.23 ms, 7.23 a run, max 19.99 | 1.00 runs   4.96 ms, 4.96 a run, max 11.70 | 1.00 runs  16.85 ms, 16.85 a run, max 31.13 | 3.50 runs   4.85 ms, 1.39 a run, max 6.22 | 3.50 runs   0.34 ms, 0.10 a run, max 0.64 | 3.50 runs  12.06 ms, 3.45 a run, max 6.83 | 1.00 runs   2.51 ms, 2.51 a run, max 14.53
+
+systems in FixedUpdate, frames 2-17 (3.88 FixedUpdate runs a frame): ms a frame / runs a frame / ms a run / max
+    14.26  3.88   3.68   6.83  engine_softbody::step_beside_physics
+     5.99  3.88   1.55   2.97  engine_physics::physics_simulate
+     5.18  3.88   1.34   3.02  engine_water::ripple_system
+     3.59  3.88   0.93   3.90  engine_smoke::step
+     3.02  3.88   0.78   1.59  engine_softbody::step_bodies
+     1.91  3.88   0.49   1.35  engine_water::flow_step_system
+     1.87  3.81   0.49   8.59  engine_movement::step_movers
+     1.77  3.88   0.46   0.68  engine_softbody::gather_colliders
+     1.56  3.88   0.40   2.41  engine_physics::physics_sync
+     1.37  3.88   0.35   0.50  engine_smoke::disturb
+     1.25  3.88   0.32   0.46  engine_weather::ground_system
+     1.07  3.81   0.28   0.35  engine_softbody::snapshot_frames
+     0.94  3.88   0.24   0.41  engine_water::flow_bed_system
+     0.85  3.88   0.22   0.25  engine_softbody::write_posed_guides
+     0.75  3.81   0.20   0.24  engine_water::boat_air_system
+     0.66  3.88   0.17   1.26  engine_fire::step_field
+spans in FixedUpdate, frames 2-17 (3.88 FixedUpdate runs a frame): ms a frame / runs a frame / ms a run / max
+    48.67  1.00  48.67  65.21  engine_water: shore ground
+     4.63  1.75   2.65   8.30  engine_smoke: smoke advect
+     3.94  1.94   2.03  11.23  engine_smoke: smoke pressure
+     2.97  3.88   0.77   2.55  engine_water: ripples: rebuild
+     2.85 16.94   0.17   1.81  engine_physics: rapier step
+     2.76  1.81   1.52   2.51  engine_water: ripples: depths
+     2.49  1.94   1.29   3.36  engine_smoke: smoke forces
+     2.10 16.94   0.12   0.79  engine_physics: substep upkeep
+     1.50  3.88   0.39   2.40  engine_physics: sync from world
+     0.84  3.88   0.22   0.84  engine_physics: region upkeep
+     0.58  3.88   0.15   0.50  engine_physics: sync water and holds
+     0.49  3.88   0.13   0.83  engine_physics: region splits
+     0.45  1.31   0.34   1.11  engine_fire: fire spread
+     0.43  3.88   0.11   0.21  engine_physics: region plans
+     0.35  3.88   0.09   0.28  engine_physics: characters and bounds
+     0.33  3.88   0.09   0.24  engine_water: ripples: step
+== round 28
+systems in FixedUpdate, frames 2-17 (3.12 FixedUpdate runs a frame): ms a frame / runs a frame / ms a run / max
+    10.51  3.12   3.36   6.63  engine_softbody::step_beside_physics
+     6.56  3.12   2.10   2.51  engine_water::shore_wetness_system
+     5.15  3.12   1.65   2.78  engine_physics::physics_simulate
+     5.03  3.12   1.61   4.16  engine_water::ripple_system
+     2.78  3.12   0.89   3.88  engine_smoke::step
+     2.60  3.12   0.83   5.92  engine_movement::step_movers
+     2.38  3.12   0.76   1.55  engine_softbody::step_bodies
+     1.51  3.12   0.48   0.69  engine_softbody::gather_colliders
+     1.46  3.12   0.47   1.27  engine_water::flow_step_system
+     1.35  3.12   0.43   2.98  engine_physics::physics_sync
+     1.12  3.12   0.36   0.60  engine_weather::ground_system
+     1.10  3.12   0.35   0.42  engine_smoke::disturb
+     0.84  3.12   0.27   0.35  engine_softbody::snapshot_frames
+     0.82  3.12   0.26   0.34  engine_water::flow_bed_system
+     0.67  3.12   0.21   0.25  engine_softbody::write_posed_guides
+     0.64  3.06   0.21   0.24  engine_water::boat_air_system
+spans in FixedUpdate, frames 2-17 (3.12 FixedUpdate runs a frame): ms a frame / runs a frame / ms a run / max
+     3.97  1.62   2.44   6.54  engine_smoke: smoke advect
+     3.24  3.12   1.04   3.57  engine_water: ripples: rebuild
+     2.95  1.88   1.57   2.45  engine_water: ripples: depths
+     2.73 15.06   0.18   1.10  engine_physics: rapier step
+     2.07 15.06   0.14   0.70  engine_physics: substep upkeep
+     2.04  1.62   1.25   2.99  engine_smoke: smoke pressure
+     1.92  1.62   1.18   2.19  engine_smoke: smoke forces
+     1.30  3.12   0.42   2.97  engine_physics: sync from world
+     0.59  3.12   0.19   1.14  engine_physics: region upkeep
+     0.46  3.12   0.15   1.13  engine_physics: region splits
+     0.45  3.12   0.14   0.38  engine_physics: sync water and holds
+     0.31  3.12   0.10   0.78  engine_physics: region plans
+     0.26  3.12   0.08   2.47  engine_physics: sync removals
+     0.23  3.12   0.07   0.30  engine_water: ripples: step
+     0.22  3.12   0.07   0.11  engine_physics: write back
+     0.22  1.06   0.20   0.30  engine_fire: fire grow

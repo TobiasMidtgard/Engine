@@ -1,0 +1,79 @@
+===== s2_fortress: started: showcase.exe --fly --profile --quality ultra  env ENGINE_PROFILE=1
+AT fortress 10:29:56.780000 UTC; steady window 25-60 s after it (10:30:21-10:30:56 UTC)
+
+6 frame profiles report inside the window (each covers the 5 s before it):
+time UTC | frames | ms/frame | fps | worst | systems busy ms | cores | one at a time | no system | several at once | FixedUpdate ms/frame (runs) | FixedUpdate floor | Render | Update | PostUpdate
+10:30:29 | 177 | 28.3 | 35.4 | 67.7 | 33.5 | 1.19 | 19.8 | 2.4 | 6.1 | 13.65 (x1.7) | 7.18 of 13.65 (75 systems) | 5.76 | 3.97 | 3.29
+10:30:34 | 193 | 25.9 | 38.6 | 90.3 | 30.6 | 1.18 | 18.1 | 2.4 | 5.4 | 11.19 (x1.6) | 6.32 of 11.19 (89 systems) | 5.73 | 4.26 | 3.25
+10:30:39 | 187 | 26.8 | 37.4 | 62.7 | 31.3 | 1.17 | 19.0 | 2.4 | 5.3 | 12.44 (x1.6) | 7.29 of 12.44 (76 systems) | 5.73 | 4.04 | 3.17
+10:30:44 | 165 | 30.4 | 32.9 | 59.8 | 35.3 | 1.16 | 21.2 | 2.7 | 6.4 | 14.31 (x1.8) | 7.42 of 14.31 (88 systems) | 6.23 | 4.39 | 3.56
+10:30:49 | 166 | 30.1 | 33.2 | 65.0 | 35.2 | 1.17 | 21.5 | 2.6 | 6.0 | 15.06 (x1.8) | 8.6 of 15.06 (89 systems) | 6.3 | 4.03 | 3.3
+10:30:54 | 198 | 25.4 | 39.4 | 52.2 | 29.6 | 1.17 | 18.0 | 2.2 | 5.2 | 11.09 (x1.5) | 5.76 of 11.09 (88 systems) | 5.7 | 4.05 | 2.97
+
+Each profile's ordering floors (schedule: floor of schedule ms) and the FixedUpdate chain:
+-- 10:30:29: FixedUpdate 7.18 of 13.65, Render 5.71 of 5.76, PostUpdate 2.05 of 3.29, Update 1.56 of 3.97, First 0.44 of 0.54, Last 0.23 of 0.37, Extract 0.16 of 0.19, FixedPreUpdate 0.14 of 0.18
+   systems ran on: compute 23.3 ms on 19 threads, main 10.2 ms, render 0.1 ms
+   FixedUpdate chain: engine_npc::rebuild_world_model 0.18 -> engine_npc::think_and_act 0.52 -> engine_movement::step_movers 0.32 -> engine_vehicles::wheels_system 0.19 -> engine_physics::physics_sync 0.51 -> engine_softbody::step_beside_physics 3.39 -> engine_softbody::gather_colliders 0.20 -> engine_softbody::write_posed_guides 0.11 -> engine_water::sync_bodies_system 0.09 -> engine_water::flow_bed_system 0.33 -> engine_water::splash_drops_system 0.30 -> engine_water::puddle_system 0.41 -> engine_water::shore_wetness_system 0.07
+-- 10:30:34: FixedUpdate 6.32 of 11.19, Render 5.68 of 5.73, PostUpdate 2.06 of 3.25, Update 1.69 of 4.26, First 0.47 of 0.57, Last 0.25 of 0.39, Extract 0.18 of 0.21, FixedPreUpdate 0.12 of 0.16
+   systems ran on: compute 20.2 ms on 20 threads, main 10.3 ms, render 0.1 ms
+   FixedUpdate chain: engine_npc::rebuild_world_model 0.15 -> engine_npc::warm_nav 0.11 -> engine_npc::think_and_act 1.09 -> engine_movement::step_movers 0.35 -> engine_vehicles::wheels_system 0.17 -> engine_physics::physics_sync 0.45 -> engine_physics::physics_simulate 1.83 -> engine_physics::physics_write_back 0.15 -> engine_foliage::update_falling_trees 0.12 -> engine_npc::pose_stand_ins 0.21 -> engine_water::sync_bodies_system 0.09 -> engine_water::flow_bed_system 0.33 -> engine_water::splash_drops_system 0.31 -> engine_water::puddle_system 0.37 -> engine_water::shore_wetness_system 0.07
+-- 10:30:39: FixedUpdate 7.29 of 12.44, Render 5.68 of 5.73, PostUpdate 2.01 of 3.17, Update 1.57 of 4.04, First 0.44 of 0.54, Last 0.24 of 0.36, Extract 0.16 of 0.19, FixedPreUpdate 0.13 of 0.17
+   systems ran on: compute 21.1 ms on 21 threads, main 10.1 ms, render 0.1 ms
+   FixedUpdate chain: engine_npc::rebuild_world_model 0.25 -> engine_npc::perceive 0.05 -> engine_npc::think_and_act 1.77 -> engine_movement::step_movers 0.35 -> engine_vehicles::wheels_system 0.19 -> engine_physics::physics_sync 0.49 -> engine_physics::physics_simulate 1.97 -> engine_physics::physics_write_back 0.16 -> engine_softbody::gather_colliders 0.07 -> engine_softbody::write_posed_guides 0.21 -> engine_water::sync_bodies_system 0.09 -> engine_water::flow_bed_system 0.35 -> engine_water::splash_drops_system 0.32 -> engine_water::puddle_system 0.43 -> engine_water::shore_wetness_system 0.09
+-- 10:30:44: FixedUpdate 7.42 of 14.31, Render 6.18 of 6.23, PostUpdate 2.27 of 3.56, Update 1.73 of 4.39, First 0.47 of 0.58, Last 0.24 of 0.38, Extract 0.16 of 0.20, FixedPreUpdate 0.15 of 0.20
+   systems ran on: compute 24.1 ms on 24 threads, main 11.1 ms, render 0.1 ms
+   FixedUpdate chain: engine_npc::rebuild_world_model 0.39 -> engine_npc::perceive 0.09 -> engine_npc::think_and_act 0.81 -> engine_movement::step_movers 0.42 -> engine_vehicles::wheels_system 0.24 -> engine_physics::physics_sync 0.60 -> engine_smoke::step 2.42 -> engine_destruction::structure_system 0.45 -> engine_water::sync_bodies_system 0.11 -> engine_water::flow_bed_system 0.39 -> engine_water::splash_drops_system 0.34 -> engine_water::puddle_system 0.45 -> engine_water::shore_wetness_system 0.10
+-- 10:30:49: FixedUpdate 8.60 of 15.06, Render 6.24 of 6.30, PostUpdate 2.16 of 3.30, Update 1.58 of 4.03, First 0.44 of 0.55, Last 0.25 of 0.37, Extract 0.16 of 0.19, FixedPreUpdate 0.13 of 0.17
+   systems ran on: compute 24.3 ms on 21 threads, main 10.8 ms, render 0.1 ms
+   FixedUpdate chain: engine_npc::rebuild_world_model 0.26 -> engine_npc::warm_nav 0.06 -> engine_npc::perceive 0.08 -> engine_npc::think_and_act 0.99 -> engine_movement::step_movers 0.44 -> engine_vehicles::wheels_system 0.24 -> engine_physics::physics_sync 0.58 -> engine_physics::physics_simulate 3.01 -> engine_physics::physics_write_back 0.20 -> engine_destruction::apply_hits_system 0.10 -> engine_destruction::structure_system 0.64 -> engine_water::sync_bodies_system 0.11 -> engine_water::flow_bed_system 0.39 -> engine_water::splash_drops_system 0.38 -> engine_water::puddle_system 0.45 -> engine_water::shore_wetness_system 0.10
+-- 10:30:54: FixedUpdate 5.76 of 11.09, Render 5.66 of 5.70, PostUpdate 1.90 of 2.97, Update 1.44 of 4.05, First 0.41 of 0.51, Last 0.24 of 0.34, Extract 0.16 of 0.19, FixedPreUpdate 0.12 of 0.15
+   systems ran on: compute 19.7 ms on 23 threads, main 9.8 ms, render 0.1 ms
+   FixedUpdate chain: engine_npc::rebuild_world_model 0.22 -> engine_npc::perceive 0.05 -> engine_npc::think_and_act 0.65 -> engine_movement::step_movers 0.32 -> engine_vehicles::wheels_system 0.20 -> engine_physics::physics_sync 0.46 -> engine_smoke::step 1.95 -> engine_foliage::update_falling_trees 0.10 -> engine_npc::pose_stand_ins 0.20 -> engine_water::sync_bodies_system 0.09 -> engine_water::flow_bed_system 0.31 -> engine_water::splash_drops_system 0.27 -> engine_water::puddle_system 0.38 -> engine_water::shore_wetness_system 0.07
+
+Hitches in the window's profiles (worst frame over 60 ms): the systems and inner spans with a run over 30 ms:
+  10:30:29 worst 67.7 ms: in engine_character: character upload 35.0
+  10:30:34 worst 90.3 ms: engine_npc::think_and_act 51.4, in engine_npc: find path 50.1
+  10:30:39 worst 62.7 ms: (none listed over 30 ms)
+  10:30:49 worst 65.0 ms: engine_physics::physics_simulate 32.2, engine_npc::think_and_act 33.9
+
+Render thread keys, 68 engine.stats "render." samples in the window:
+  frame_ms                 mean 27.98, median 27.41, p90 33.90, min 21.94, max 40.18 (n 68)
+  render.wait_ms           mean 0.01, median 0.01, p90 0.01, min 0.01, max 0.07 (n 68)
+  render.extract_ms        mean 6.31, median 5.91, p90 8.01, min 3.49, max 22.41 (n 68)
+  render.extract_wait_ms   mean 0.00, median 0.00, p90 0.00, min 0.00, max 0.00 (n 68)
+  render.record_ms         mean 3.53, median 3.48, p90 4.15, min 2.89, max 4.73 (n 68)
+  render.record_total_ms   mean 6.84, median 6.70, p90 7.79, min 5.87, max 8.10 (n 68)
+  render.record_cpu_ms     mean 3.52, median 3.47, p90 5.56, min 1.17, max 5.86 (n 68)
+  render.cpu_ms            mean 9.92, median 9.84, p90 12.33, min 6.88, max 26.00 (n 68)
+  render.prepare_shared_ms mean 12.06, median 11.41, p90 14.46, min 9.43, max 22.92 (n 68)
+  record_total_ms / frame_ms mean 0.25, median 0.25, p90 0.30, min 0.17, max 0.34 (n 68)
+
+engine.status over the window: 36.67 fps, 1.629 fixed steps a frame (1255 frames, 2045 fixed steps, 34.2 s)
+per 5 s after AT fortress (fps, fixed steps a frame):
+    0-  5 s    8.7 fps  2.26 steps/frame
+    5- 10 s   15.3 fps  2.66 steps/frame
+   10- 15 s   15.4 fps  3.23 steps/frame
+   15- 20 s   24.9 fps  2.41 steps/frame
+   20- 25 s   31.3 fps  1.90 steps/frame
+   25- 30 s   41.3 fps  1.45 steps/frame
+   30- 35 s   37.9 fps  1.57 steps/frame
+   35- 40 s   36.6 fps  1.64 steps/frame
+   40- 45 s   36.4 fps  1.65 steps/frame
+   45- 50 s   33.5 fps  1.77 steps/frame
+   50- 55 s   35.6 fps  1.68 steps/frame
+   55- 60 s   39.7 fps  1.50 steps/frame
+
+===== s2_fortress: render.cpu.prepare rows, the dumps at 25-60 s (mean (min-max) of 0 dumps; each is one frame's latest step time)
+  render.cpu.prepare side by side             n/a
+  render.cpu.prepare serial                   n/a
+  render.cpu.prepare results                  n/a
+  render.cpu.prepare meshes                   n/a
+  render.cpu.prepare terrain                  n/a
+  render.cpu.prepare softbody                 n/a
+  render.cpu.prepare water                    n/a
+  render.cpu.prepare grass                    n/a
+  render.cpu.prepare character                n/a
+  render.cpu.prepare fire                     n/a
+  render.cpu.probe gi                         n/a
+  render.prepare_shared_ms (samples)     mean 12.06, median 11.41, p90 14.46, min 9.43, max 22.92 (n 68)
+  every render.cpu.prepare key in the dumps: 
