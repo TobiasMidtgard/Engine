@@ -134,4 +134,8 @@ function Keeper:update(dt: number)
 	self.light:set("PointLight", { intensity_lm = 160 + 2400 * self.flare })
 end
 
+-- Only seen up close: beyond 80 m from the player (or the simulation range) `update` rests;
+-- tasks and messages still run.
+Keeper.far = 80
+
 return Keeper

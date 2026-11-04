@@ -106,4 +106,8 @@ function Patrol:draw_gizmos_selected()
 	end
 end
 
+-- Only seen up close: beyond 80 m from the player (or the simulation range) `update` rests;
+-- tasks and messages still run.
+Patrol.far = 80
+
 return Patrol
