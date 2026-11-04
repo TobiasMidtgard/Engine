@@ -2,6 +2,7 @@
 
 mod api;
 mod articulation;
+pub mod audit;
 mod budget;
 mod buoyancy;
 mod capsule_box;
@@ -229,6 +230,10 @@ impl Plugin for PhysicsPlugin {
             )
             .add_systems(PostUpdate, debug::draw_physics_debug)
             .add_systems(Last, step::note_removals);
+        // Only asked for (it reads every drawn mesh): `audit` module docs.
+        if std::env::var_os("PHYSICS_COLLIDER_AUDIT").is_some() {
+            app.add_systems(Update, audit::audit_colliders);
+        }
         api::register(app);
     }
 }
