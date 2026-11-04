@@ -300,6 +300,13 @@ pub struct Renderer {
     surface: Option<SurfaceState>,
     pub targets: Targets,
     features: Vec<Box<dyn RenderFeature>>,
+    /// Per feature (same order): whether it prepares shared this frame, what its shared prepare
+    /// left for the world, and its time last frame (`crate::prepare`).
+    prepare_shared: Vec<bool>,
+    prepare_outs: Vec<crate::PrepareOut>,
+    prepare_ms: Vec<f32>,
+    /// The probe GI gather's time last frame (ms), to order the shared prepares.
+    gi_ms: f32,
     /// Frame uniform as rasterized (TAA-jittered).
     frame_buffer: wgpu::Buffer,
     /// The same without the jitter, for overlays drawn on the final image.
@@ -1029,6 +1036,10 @@ impl Renderer {
             surface,
             targets: view.targets,
             features: Vec::new(),
+            prepare_shared: Vec::new(),
+            prepare_outs: Vec::new(),
+            prepare_ms: Vec::new(),
+            gi_ms: 0.0,
             frame_buffer: view.frame_buffer,
             overlay_frame_buffer: view.overlay_frame_buffer,
             lights: view.lights,
@@ -1158,6 +1169,11 @@ impl Renderer {
             self.features.push(feature);
         }
         self.features.sort_by_key(|f| f.order());
+        // Times by index no longer match: they come back after a frame.
+        self.prepare_ms.clear();
+        self.prepare_ms.resize(self.features.len(), 0.0);
+        self.prepare_outs
+            .resize_with(self.features.len(), Default::default);
         times
     }
 
@@ -1826,14 +1842,48 @@ impl Renderer {
         if !gi {
             uniform.reflections[3] = 0.0;
         }
-        cpu.step("probe gi");
+        // The features that only read the world prepare side by side, with the probe GI's
+        // gather (`crate::prepare`); the others prepare after the frame's uniforms, as before.
+        cpu.step("prepare serial");
         if !is_extra && let Some(ms) = self.perf.fresh_gpu_pass("probe gi") {
             self.probe_gi.measured(ms);
         }
-        let gi_atlas_moved = !is_extra
-            && self
-                .probe_gi
-                .extract(world, &self.shared, &view, &settings, &mut uniform);
+        if !is_extra {
+            self.probe_gi.ensure_query(world);
+        }
+        self.prepare_shared.clear();
+        self.prepare_shared
+            .extend(self.features.iter().map(|f| f.prepares_shared()));
+        self.prepare_outs
+            .resize_with(self.features.len(), Default::default);
+        self.prepare_ms.resize(self.features.len(), 0.0);
+        for (f, _) in self
+            .features
+            .iter_mut()
+            .zip(&self.prepare_shared)
+            .filter(|(_, on)| **on)
+        {
+            f.prepare_serial(world, &self.shared, &view, &settings);
+        }
+        cpu.step("prepare side by side");
+        let gi_done = crate::prepare::run(
+            &mut self.features,
+            &self.prepare_shared,
+            &mut self.prepare_outs,
+            &mut self.prepare_ms,
+            (!is_extra).then_some(crate::prepare::GiJob {
+                gi: &mut self.probe_gi,
+                uniform: &mut uniform,
+                last_ms: self.gi_ms,
+            }),
+            world,
+            &self.shared,
+            &view,
+            &settings,
+        );
+        cpu.step("prepare results");
+        let gi_atlas_moved = gi_done.atlas_moved;
+        self.apply_shared_prepares(world, &mut cpu, (!is_extra).then_some(gi_done.ms));
         let queue = &self.shared.queue;
         queue.write_buffer(&self.frame_buffer, 0, bytemuck::bytes_of(&uniform));
         let mut overlay_uniform = uniform;
@@ -1922,8 +1972,13 @@ impl Renderer {
         let sun_camera = Vec3::from_slice(&uniform.sun_camera[..3]);
         self.write_post_params(&settings, &view, taa, sun_camera);
 
-        // Prepare features.
-        for f in &mut self.features {
+        // Prepare the features that don't prepare shared.
+        for (f, _) in self
+            .features
+            .iter_mut()
+            .zip(&self.prepare_shared)
+            .filter(|(_, shared)| !**shared)
+        {
             cpu.step(format!("prepare {}", f.name()));
             f.prepare(world, &self.shared, &view, &settings);
             cpu.inner(std::mem::take(
@@ -2010,6 +2065,48 @@ impl Renderer {
             cloud_area,
             screenshots,
         }
+    }
+
+    /// What the shared prepares left (`crate::prepare`), applied in feature order: their
+    /// `PrepareOut`s, and each one's time as `render.cpu.prepare <name>` (`render.cpu.probe gi`
+    /// for the probe GI's gather, `gi_ms`) and as an inner step of "prepare side by side",
+    /// followed by the steps it timed itself. `render.prepare_shared_ms` is their sum: against
+    /// the wall time of "prepare side by side", what running them side by side saved.
+    fn apply_shared_prepares(
+        &mut self,
+        world: &mut World,
+        cpu: &mut crate::perf::CpuSteps,
+        gi_ms: Option<f32>,
+    ) {
+        let mut inner = Vec::new();
+        let mut metrics = Vec::new();
+        let mut sum = 0.0;
+        if let Some(ms) = gi_ms {
+            self.gi_ms = ms;
+            inner.push(("probe gi", ms));
+            metrics.push(("render.cpu.probe gi".to_string(), ms));
+            sum += ms;
+        }
+        for ((f, out), _) in self
+            .features
+            .iter()
+            .zip(&mut self.prepare_outs)
+            .zip(&self.prepare_shared)
+            .filter(|(_, shared)| **shared)
+        {
+            let name = format!("prepare {}", f.name());
+            inner.push((crate::prepare::static_label(&name), out.ms));
+            metrics.push((format!("render.cpu.{name}"), out.ms));
+            sum += out.ms;
+            inner.extend(out.apply(world));
+        }
+        if let Some(mut d) = world.get_resource_mut::<Diagnostics>() {
+            for (key, ms) in metrics {
+                d.set(&key, ms as f64);
+            }
+            d.set("render.prepare_shared_ms", sum as f64);
+        }
+        cpu.inner(inner);
     }
 
     /// The world-free half of a frame: record the passes, submit and present (on the render

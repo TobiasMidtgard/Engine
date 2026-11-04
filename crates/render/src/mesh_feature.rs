@@ -51,7 +51,7 @@ use engine_assets::{Assets, Handle};
 use engine_core::prelude::*;
 
 use crate::features::{
-    FeatureStats, FrameContext, GpuShared, GrowBuffer, RenderFeature, RenderPhase,
+    FeatureStats, FrameContext, GpuShared, GrowBuffer, PrepareOut, RenderFeature, RenderPhase,
 };
 use crate::frame::ViewData;
 use crate::image_cache::{ImageTexture, TextureUse, upload_image};
@@ -967,6 +967,15 @@ impl PrepareSteps {
             drop(span);
             self.done
                 .push((name, started.elapsed().as_secs_f32() * 1000.0));
+        }
+    }
+
+    /// Into a shared prepare's `out` (as `render.cpu.<step>` and its inner steps).
+    fn publish_out(mut self, out: &mut PrepareOut) {
+        self.finish();
+        for (name, ms) in self.done {
+            out.set(format!("render.cpu.{name}"), ms as f64);
+            out.step(name, ms);
         }
     }
 
@@ -2539,12 +2548,33 @@ impl RenderFeature for MeshFeature {
         self.build_default_set(device);
     }
 
-    fn prepare(
+    fn prepares_shared(&self) -> bool {
+        true
+    }
+
+    fn prepare_serial(
         &mut self,
         world: &mut World,
+        _gpu: &GpuShared,
+        _view: &ViewData,
+        _settings: &RenderSettings,
+    ) {
+        if self.shader.is_none() {
+            return;
+        }
+        self.scene.ensure_query(world);
+        if self.skin_query.is_none() {
+            self.skin_query = Some(world.query());
+        }
+    }
+
+    fn prepare_shared(
+        &mut self,
+        world: &World,
         gpu: &GpuShared,
         view: &ViewData,
         settings: &RenderSettings,
+        out: &mut PrepareOut,
     ) {
         if self.shader.is_none() {
             return;
@@ -2564,8 +2594,13 @@ impl RenderFeature for MeshFeature {
         if let Some(vt) = &mut self.vt {
             vt.begin_frame(gpu, settings);
             let generation = vt.bind_generation();
-            if let Some(stats) = world.get_resource_mut::<VirtualTextureStats>() {
-                stats.into_inner().clone_from(vt.stats());
+            if world.contains_resource::<VirtualTextureStats>() {
+                let stats = vt.stats().clone();
+                out.defer(move |world| {
+                    if let Some(mut s) = world.get_resource_mut::<VirtualTextureStats>() {
+                        *s = stats;
+                    }
+                });
             }
             if self
                 .texture_sets
@@ -2585,7 +2620,11 @@ impl RenderFeature for MeshFeature {
         if !view.extra_view {
             self.check_static_images(view);
         }
-        let mut skin_query = self.skin_query.take().unwrap_or_else(|| world.query());
+        let Some(mut skin_query) = self.skin_query.take() else {
+            // Made in `prepare_serial`.
+            self.scene = scene;
+            return;
+        };
         let world_ref: &World = world;
         let Some(mesh_assets) = world_ref.get_resource::<Assets<Mesh>>() else {
             self.scene = scene;
@@ -2996,8 +3035,7 @@ impl RenderFeature for MeshFeature {
             .get_resource::<EngineConfig>()
             .is_none_or(|c| c.headless);
         self.prepared = true;
-        let mut diagnostics = world.get_resource_mut::<Diagnostics>();
-        steps.publish(diagnostics.as_deref_mut(), gpu);
+        steps.publish_out(out);
     }
 
     fn prepare_frame(

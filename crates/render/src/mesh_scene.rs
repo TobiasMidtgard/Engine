@@ -169,25 +169,32 @@ pub(crate) struct SlotChange {
 }
 
 impl MeshScene {
+    /// Make the query [`sync`](Self::sync) reads with (registering its components).
+    pub fn ensure_query(&mut self, world: &mut World) {
+        if self.query.is_none() {
+            self.query = Some(world.query::<SceneQuery>());
+        }
+    }
+
     /// Bring the slots up to date with the world: rewrite those whose components changed since
     /// the last sync, add new entities, drop the ones gone.
-    pub fn sync(&mut self, world: &mut World, frame: u64) {
-        let mut query = self
-            .query
-            .take()
-            .unwrap_or_else(|| world.query::<SceneQuery>());
+    ///
+    /// Reads the world shared (beside other features' prepares); make the query first with
+    /// [`ensure_query`](Self::ensure_query).
+    pub fn sync(&mut self, world: &World, frame: u64) {
         self.dirty = 0;
         self.changes.clear();
-        match self.tick {
-            Some(tick) => {
-                world.last_change_tick_scope(tick, |w| self.sweep(&mut query, w, frame, false))
-            }
-            None => self.sweep(&mut query, world, frame, true),
+        if self.query.is_none() {
+            // `None` while a component of the query was never registered.
+            self.query = world.try_query::<SceneQuery>();
         }
-        self.query = Some(query);
+        if let Some(mut query) = self.query.take() {
+            self.sweep(&mut query, world, self.tick, frame);
+            self.query = Some(query);
+        }
         // Changes from here on (even later in this system) get a newer tick than the one the
         // sweep saw, so the next sync finds them.
-        self.tick = Some(world.increment_change_tick());
+        self.tick = Some(crate::features::take_change_tick(world));
         // Entities no longer found: their slots go (the last slot moves into the gap).
         let mut s = 0;
         while s < self.hot.len() {
@@ -218,7 +225,16 @@ impl MeshScene {
         }
     }
 
-    fn sweep(&mut self, query: &mut QueryState<SceneQuery>, world: &World, frame: u64, all: bool) {
+    /// `since`: the tick of the last sync (`None`: everything is new).
+    fn sweep(
+        &mut self,
+        query: &mut QueryState<SceneQuery>,
+        world: &World,
+        since: Option<Tick>,
+        frame: u64,
+    ) {
+        let all = since.is_none();
+        let last_run = since.unwrap_or_else(|| world.last_change_tick());
         for (
             entity,
             transform,
@@ -230,7 +246,7 @@ impl MeshScene {
             displaced,
             full_detail,
             shadow_only,
-        ) in query.iter(world)
+        ) in crate::features::iter_since(query, world, last_run)
         {
             let index = entity.index_u32() as usize;
             if index >= self.slot_of.len() {
@@ -443,7 +459,8 @@ mod tests {
         let mut world = World::new();
         let gone: Vec<Entity> = (0..3).map(|i| spawn(&mut world, i as f64, i, 0)).collect();
         let mut scene = MeshScene::default();
-        scene.sync(&mut world, 1);
+        scene.ensure_query(&mut world);
+        scene.sync(&world, 1);
         world.despawn(gone[0]);
         world.despawn(gone[1]);
         // The next generation of the last one's index, as the allocator hands it out later.
@@ -464,8 +481,8 @@ mod tests {
             .id();
         assert_eq!(new.index(), gone[2].index());
         assert_ne!(new, gone[2]);
-        scene.sync(&mut world, 2);
-        scene.sync(&mut world, 3);
+        scene.sync(&world, 2);
+        scene.sync(&world, 3);
         assert_eq!(scene.hot.len(), 1);
         assert_eq!(scene.cold[0].entity, new);
         assert_eq!(scene.slot_of[new.index_u32() as usize], (new, 0));
@@ -477,14 +494,15 @@ mod tests {
         let a = spawn(&mut world, 1.0, 0, 0);
         let b = spawn(&mut world, 2.0, 1, 0);
         let mut scene = MeshScene::default();
-        scene.sync(&mut world, 1);
+        scene.ensure_query(&mut world);
+        scene.sync(&world, 1);
         assert_eq!((scene.hot.len(), scene.dirty), (2, 2));
-        scene.sync(&mut world, 2);
+        scene.sync(&world, 2);
         assert_eq!(scene.dirty, 0, "nothing changed");
 
         // A move: rewritten, and last frame's transform kept for motion vectors.
         world.get_mut::<GlobalTransform>(a).unwrap().0.translation.x = 5.0;
-        scene.sync(&mut world, 3);
+        scene.sync(&world, 3);
         assert_eq!(scene.dirty, 1);
         let cold = &scene.cold[slot(&scene, a)];
         assert_eq!(cold.previous_at(3).0.translation.x, 1.0);
@@ -494,7 +512,7 @@ mod tests {
 
         // Visibility, an added marker and a removed draw distance each dirty their slot.
         world.get_mut::<MeshRenderer>(b).unwrap().visible = false;
-        scene.sync(&mut world, 4);
+        scene.sync(&world, 4);
         assert_eq!(scene.dirty, 1);
         assert_eq!(scene.hot[slot(&scene, b)].flags & VISIBLE, 0);
         world.entity_mut(a).insert((
@@ -503,14 +521,14 @@ mod tests {
             ShadowOnly,
             MaxDrawDistance(50.0),
         ));
-        scene.sync(&mut world, 5);
+        scene.sync(&world, 5);
         let hot = scene.hot[slot(&scene, a)];
         assert_eq!((scene.dirty, hot.max_distance), (1, 50.0));
         assert_ne!(hot.flags & INSTANCED_ONLY, 0);
         assert_ne!(hot.flags & FULL_DETAIL, 0);
         assert_ne!(hot.flags & SHADOW_ONLY, 0);
         world.entity_mut(a).remove::<MaxDrawDistance>();
-        scene.sync(&mut world, 6);
+        scene.sync(&world, 6);
         assert_eq!(scene.dirty, 1);
         assert_eq!(scene.hot[slot(&scene, a)].max_distance, f32::MAX);
     }
@@ -522,14 +540,15 @@ mod tests {
             .map(|i| spawn(&mut world, i as f64, i % 2, 7))
             .collect();
         let mut scene = MeshScene::default();
-        scene.sync(&mut world, 1);
+        scene.ensure_query(&mut world);
+        scene.sync(&world, 1);
         assert_eq!(scene.meshes_used().collect::<Vec<_>>(), [0, 1]);
         assert_eq!(scene.materials_used().collect::<Vec<_>>(), [7]);
 
         // The first slot goes; the last moves into it and keeps its own data.
         world.despawn(entities[0]);
         world.despawn(entities[2]);
-        scene.sync(&mut world, 2);
+        scene.sync(&world, 2);
         assert_eq!(scene.hot.len(), 2);
         assert_eq!(scene.meshes_used().collect::<Vec<_>>(), [1]);
         for &e in &[entities[1], entities[3]] {
@@ -541,14 +560,14 @@ mod tests {
 
         // A new entity, possibly on a freed index, gets a fresh slot.
         let c = spawn(&mut world, 9.0, 3, 7);
-        scene.sync(&mut world, 3);
+        scene.sync(&world, 3);
         assert_eq!((scene.hot.len(), scene.dirty), (3, 1));
         assert_eq!(scene.cold[slot(&scene, c)].transform.0.translation.x, 9.0);
         assert_eq!(scene.meshes_used().collect::<Vec<_>>(), [1, 3]);
 
         // A changed mesh moves its use.
         world.get_mut::<ResolvedMesh>(c).unwrap().mesh = Handle::from_index(1);
-        scene.sync(&mut world, 4);
+        scene.sync(&world, 4);
         assert_eq!(scene.meshes_used().collect::<Vec<_>>(), [1]);
     }
 }
