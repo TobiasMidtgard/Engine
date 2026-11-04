@@ -1635,6 +1635,109 @@ fn thin_tiles_dropped_on_a_mesh_floor_land_on_it() {
     }
 }
 
+/// A 41 x 41 vertex mesh floor 40 m across at y = 0: big enough to be built off the frame.
+fn big_mesh_floor(app: &mut App) -> Entity {
+    let n = 40usize;
+    let mut vertices = Vec::new();
+    let mut indices = Vec::new();
+    for z in 0..=n {
+        for x in 0..=n {
+            vertices.push(Vec3::new(x as f32 - 20.0, 0.0, z as f32 - 20.0));
+        }
+    }
+    let r = (n + 1) as u32;
+    for z in 0..n as u32 {
+        for x in 0..n as u32 {
+            let i = z * r + x;
+            indices.push([i, i + r, i + 1]);
+            indices.push([i + 1, i + r, i + r + 1]);
+        }
+    }
+    app.world
+        .spawn((
+            Transform::default(),
+            Collider {
+                shape: ColliderShape::TriMesh { vertices, indices },
+                ..Default::default()
+            },
+        ))
+        .id()
+}
+
+#[test]
+fn big_static_meshes_built_off_the_frame_still_catch_what_falls_on_them() {
+    // Already falling fast from high up when the floor appears, then one dropped after it.
+    let mut app = app();
+    let falling = app
+        .world
+        .spawn((
+            Transform::from_xyz(5.0, 30.0, 0.0),
+            RigidBody::dynamic(),
+            Collider::sphere(0.25),
+            Velocity {
+                linear: Vec3::new(0.0, -20.0, 0.0),
+                ..Default::default()
+            },
+        ))
+        .id();
+    big_mesh_floor(&mut app);
+    app.update_n(2);
+    let dropped = app
+        .world
+        .spawn((
+            Transform::from_xyz(-5.0, 1.0, 0.0),
+            RigidBody::dynamic(),
+            Collider::sphere(0.25),
+            Velocity::default(),
+        ))
+        .id();
+    app.update_n(120);
+    for (name, e) in [("falling", falling), ("dropped", dropped)] {
+        let y = pos(&app, e).y;
+        assert!(
+            (0.2..0.3).contains(&y),
+            "the {name} ball ended at y = {y:.3}"
+        );
+    }
+}
+
+#[test]
+fn a_big_static_mesh_changed_under_a_body_takes_its_new_shape() {
+    // Dug half a meter down under a resting ball (a voxel cliff remeshed where it was dug):
+    // the old floor holds it while the new one builds, then it settles on the new one.
+    let mut app = app();
+    let floor = big_mesh_floor(&mut app);
+    app.update_n(10);
+    let ball = app
+        .world
+        .spawn((
+            Transform::from_xyz(0.3, 0.5, 0.3),
+            RigidBody::dynamic(),
+            Collider::sphere(0.25),
+            Velocity::default(),
+        ))
+        .id();
+    app.update_n(60);
+    let y = pos(&app, ball).y;
+    assert!(
+        (0.2..0.3).contains(&y),
+        "the ball rested at y = {y:.3} on the first floor"
+    );
+    if let ColliderShape::TriMesh { vertices, .. } =
+        &mut app.world.get_mut::<Collider>(floor).unwrap().shape
+    {
+        for v in vertices.iter_mut() {
+            v.y -= 0.5;
+        }
+    }
+    app.update_n(90);
+    let y = pos(&app, ball).y;
+    assert!(
+        (-0.3..-0.2).contains(&y),
+        "the ball ended at y = {y:.3} after the dig"
+    );
+}
+
 #[test]
 fn blasts_throw_nearby_bodies_away() {
     let mut app = app();

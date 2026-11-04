@@ -408,7 +408,7 @@ fn why_awake(world: &World, w: &rapier3d::prelude::PhysicsWorld) -> String {
 /// What to call a body in the report: its name or its nearest named ancestor's, or else its
 /// id and the components that say who made it (those outside the core, the world contracts
 /// and physics), as `crate::Type`.
-fn label(world: &World, e: Entity) -> String {
+pub(crate) fn label(world: &World, e: Entity) -> String {
     let mut cur = e;
     loop {
         if let Some(name) = world.get::<Name>(cur) {

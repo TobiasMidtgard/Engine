@@ -874,6 +874,8 @@ pub struct Simulation {
     /// Held bodies (`resting`, `ungrounded`) whose gravity is off while held, given back once
     /// they are let go (`step::hold_resting`).
     pub weightless: EntityHashSet,
+    /// Static colliders whose shape is being built off the frame ([`crate::shape_jobs`]).
+    pub(crate) pending_statics: crate::shape_jobs::PendingStatics,
 }
 
 /// Rapier hooks: drop the contacts listed in [`Simulation::no_contact`], and keep round bodies
@@ -1062,6 +1064,7 @@ impl Simulation {
             }
         };
         // Copy in every static collider it can touch.
+        let started = std::time::Instant::now();
         let reach = self.static_reach();
         let statics: Vec<Entity> = self
             .colliders
@@ -1071,8 +1074,19 @@ impl Simulation {
             })
             .map(|(e, _)| *e)
             .collect();
+        let found = started.elapsed();
+        let copies = statics.len();
         for e in statics {
             self.insert_static_copy(e, id);
+        }
+        let ms = started.elapsed().as_secs_f64() * 1000.0;
+        if ms > 1.0 && crate::report::wanted() {
+            engine_core::log::info!(
+                "physics regions: new region {id} copied {copies} statics of {} in {ms:.1} ms \
+                 (finding them {:.1})",
+                self.colliders.len(),
+                found.as_secs_f64() * 1000.0
+            );
         }
         id
     }
@@ -2463,7 +2477,18 @@ impl Simulation {
             let center = (lo + hi) * 0.5;
             // Re-center when the movers drifted away from the anchor.
             if center.distance(self.region(id).anchor) > radius * 0.25 {
+                let started = std::time::Instant::now();
                 self.rebase(id, center);
+                let ms = started.elapsed().as_secs_f64() * 1000.0;
+                if ms > 1.0 && crate::report::wanted() {
+                    let r = self.region(id);
+                    engine_core::log::info!(
+                        "physics regions: re-centering region {id} ({} bodies, {} colliders) \
+                         took {ms:.1} ms",
+                        r.world.bodies.len(),
+                        r.world.colliders.len()
+                    );
+                }
             }
             // Movers far outside the radius leave for another region (only possible when the
             // box around them reaches that far, so most steps there are none to look for).

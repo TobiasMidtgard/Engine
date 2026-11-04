@@ -18,6 +18,7 @@ mod queries;
 mod report;
 mod rolling;
 mod settings;
+mod shape_jobs;
 mod shift;
 mod sim;
 mod step;
