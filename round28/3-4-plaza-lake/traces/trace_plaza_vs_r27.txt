@@ -1,0 +1,51 @@
+Round 28 step 3: diff27.py, round 27 a1's plaza trace (A, ced07d57) against this round's (B, 6da6a069), per schedule.
+FixedUpdate: wall 6.64 ms a frame (1.14 runs) in A, 8.22 (1.23 runs) in B; systems' sum 7.63 / 9.12
+   A ms    B ms    B-A  system (ms a frame)
+   1.118   1.545  +0.427  engine_smoke::step
+   0.233   0.635  +0.402  engine_movement::step_movers
+   0.248   0.504  +0.256  engine_npc::think_and_act
+   0.484   0.236  -0.249  engine_fire::step_field
+   1.006   1.157  +0.151  engine_physics::physics_simulate
+   0.217   0.322  +0.105  engine_smoke::publish
+   0.015   0.080  +0.065  engine_foliage::ecology_step
+   0.289   0.335  +0.046  engine_softbody::gather_colliders
+   0.180   0.213  +0.032  engine_npc::fallback_move
+   0.198   0.224  +0.026  engine_weather::ground_system
+   0.097   0.122  +0.025  engine_physics::physics_write_back
+   0.137   0.156  +0.019  engine_water::boat_air_system
+
+Render: wall 4.79 ms a frame (1.00 runs) in A, 4.43 (1.00 runs) in B; systems' sum 4.75 / 4.39
+   A ms    B ms    B-A  system (ms a frame)
+   4.743   4.391  -0.352  engine_render::render_system
+   0.004   0.004  -0.000  engine_debug::end_frame_system
+
+Update: wall 3.55 ms a frame (1.00 runs) in A, 3.64 (1.00 runs) in B; systems' sum 5.16 / 5.30
+   A ms    B ms    B-A  system (ms a frame)
+   0.131   0.029  -0.102  engine_movement::animate_puppets
+   1.191   1.260  +0.069  engine_script::script_frame_system
+   1.139   1.205  +0.066  engine_script::run_scripts
+   0.046   0.095  +0.048  engine_script::draw_graph_boards
+   0.349   0.315  -0.033  engine_anim::demo_path_system
+   0.067   0.092  +0.025  engine_foliage::sync_plant_visuals
+   0.072   0.062  -0.010  engine_anim::shuttle_system
+   0.097   0.104  +0.008  engine_foliage::stream_far_woods
+   0.141   0.148  +0.007  engine_foliage::sync_scenery_trees
+   0.128   0.135  +0.006  engine_ui::ui_screens_system
+   0.107   0.113  +0.006  engine_foliage::offer_chops
+   0.479   0.484  +0.006  engine_fire::update_grass
+
+PostUpdate: wall 2.92 ms a frame (1.00 runs) in A, 3.07 (1.00 runs) in B; systems' sum 3.61 / 3.77
+   A ms    B ms    B-A  system (ms a frame)
+   0.476   0.504  +0.028  engine_vfx::tick_effects
+   0.079   0.102  +0.023  engine_terrain::deform_from_contacts
+   0.073   0.093  +0.020  engine_terrain::wear_from_contacts
+   0.405   0.421  +0.016  engine_core::propagate_transforms_system
+   0.324   0.338  +0.014  engine_terrain::update_colliders
+   0.032   0.041  +0.010  engine_anim::flinch_system
+   0.256   0.266  +0.009  engine_audio::vehicle_sounds
+   0.315   0.306  -0.009  engine_anim::foot_ik_system
+   0.064   0.073  +0.009  engine_space::reanchor
+   0.151   0.143  -0.008  engine_anim::vehicle_rig_system
+   0.139   0.146  +0.007  engine_ui::ui_layout_system
+   0.002   0.007  +0.005  engine_anim::ragdoll_impacts
+

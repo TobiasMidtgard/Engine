@@ -1,0 +1,51 @@
+Round 28 step 2: diff27.py, the round 27 fortress trace (A, main ced07d57) against this round's (B, 6da6a069), per schedule.
+Update: wall 8.17 ms a frame (1.00 runs) in A, 5.41 (1.00 runs) in B; systems' sum 9.89 / 7.02
+   A ms    B ms    B-A  system (ms a frame)
+   3.647   1.039  -2.608  engine_destruction::build_system
+   1.508   1.415  -0.093  engine_script::script_frame_system
+   1.438   1.355  -0.083  engine_script::run_scripts
+   0.070   0.046  -0.025  engine_vfx::react_to_world
+   0.283   0.263  -0.020  engine_destruction::rebuild_walls_system
+   0.094   0.077  -0.017  engine_destruction::age_debris_system
+   0.218   0.234  +0.016  engine_anim::demo_path_system
+   0.136   0.151  +0.016  engine_foliage::stream_far_woods
+   0.331   0.321  -0.010  engine_fire::update_grass
+   0.030   0.021  -0.009  engine_script::run_story
+   0.193   0.185  -0.008  engine_foliage::sync_scenery_trees
+   0.008   0.015  +0.007  engine_foliage::stream_far_woods (commands)
+
+FixedUpdate: wall 23.79 ms a frame (2.80 runs) in A, 19.67 (2.22 runs) in B; systems' sum 31.79 / 25.72
+   A ms    B ms    B-A  system (ms a frame)
+   5.023   3.782  -1.241  engine_physics::physics_simulate
+   3.782   3.118  -0.664  engine_water::ripple_system
+   2.827   2.372  -0.454  engine_smoke::step
+   2.328   1.909  -0.418  engine_npc::rebuild_world_model
+   0.847   0.514  -0.333  engine_softbody::step_beside_physics
+   0.960   0.700  -0.259  engine_fire::step_field
+   1.481   1.245  -0.236  engine_destruction::simulate_debris_system
+   0.824   0.614  -0.210  engine_water::flow_step_system
+   0.954   0.778  -0.176  engine_physics::physics_sync
+   0.706   0.547  -0.159  engine_water::puddle_system
+   0.529   0.390  -0.140  engine_npc::fallback_move
+   1.708   1.569  -0.139  engine_npc::think_and_act
+
+Render: wall 10.30 ms a frame (1.00 runs) in A, 7.00 (1.00 runs) in B; systems' sum 10.25 / 6.94
+   A ms    B ms    B-A  system (ms a frame)
+  10.243   6.938  -3.305  engine_render::render_system
+   0.004   0.004  -0.000  engine_debug::end_frame_system
+
+PostUpdate: wall 3.87 ms a frame (1.00 runs) in A, 3.92 (1.00 runs) in B; systems' sum 4.83 / 4.88
+   A ms    B ms    B-A  system (ms a frame)
+   0.327   0.646  +0.318  engine_terrain::update_colliders
+   1.125   0.961  -0.164  engine_vfx::tick_effects
+   0.243   0.212  -0.031  engine_anim::gait_system
+   0.213   0.185  -0.028  engine_audio::water_ambience
+   0.108   0.132  +0.023  engine_anim::spring_chain_system
+   0.133   0.112  -0.020  engine_terrain::deform_from_contacts
+   0.126   0.107  -0.018  engine_terrain::wear_from_contacts
+   0.299   0.281  -0.018  engine_audio::vehicle_sounds
+   0.018   0.034  +0.016  engine_anim::flinch_system
+   0.043   0.027  -0.016  engine_audio::nature_ambience
+   0.486   0.474  -0.012  engine_core::propagate_transforms_system
+   0.117   0.129  +0.012  engine_audio::occlusion
+

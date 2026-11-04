@@ -1,0 +1,14 @@
+08:25:14.555Z     0.04  mode stops quality ultra size '' spec 'fortress:60'; idle before start 36,104 s; HEAD 6da6a069
+08:25:15.602Z     1.08  started: showcase.exe --fly --profile --quality ultra  env ENGINE_PROFILE=1
+08:25:22.255Z     7.73  window visible: client 1600x900, window 1616x939 at (78,78), maximized False
+08:25:22.277Z     7.76  bridge connected
+08:25:22.745Z     8.23  world built
+08:25:28.361Z    13.84  after build: working set 4,660 MB, private 8,929 MB; system free 32,608 of 65,277 MB
+08:25:28.495Z    13.98  AT fortress: {"id":1,"jsonrpc":"2.0","result":{"place":"fortress","position":[-334.0,36.0,128.0]}}
+08:25:48.699Z    34.18  trace trace_fortress (60 frames): {"id":2,"jsonrpc":"2.0","result":{"frames":60,"recording":"C:/Users/Tobit/AppData/Local/Temp/claude/C--Users-Tobit-Documents-ProgrammingProjects/a9b51fd2-8307-4505-9047-44a5b14953cc/scratchpad/r28/s2_fortress/trace_fortress.json"}}
+08:26:28.686Z    74.17  trace written: 60 frames to trace_fortress.json at 08:25:51.028077Z in the log (read 40.0 s after the ask)
+08:26:28.976Z    74.46  END fortress: working set 5,121 MB, private 15,764 MB; system free 32,093 of 65,277 MB
+08:26:29.061Z    74.54  shot fortress: {"id":5,"jsonrpc":"2.0","result":{"height":900,"path":"screenshots/r28/fortress.png","width":1600}}
+08:26:32.304Z    77.78  sampler job: Completed
+08:26:32.307Z    77.79  killing the game
+08:27:14.980Z   120.46  done
