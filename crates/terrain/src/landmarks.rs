@@ -1740,7 +1740,7 @@ pub fn update_landmarks(
     surfaces: Option<Res<SurfaceMaterials>>,
     mut state: ResMut<LandmarkCells>,
     mut renderers: Query<&mut MeshRenderer>,
-    diagnostics: Option<ResMut<engine_core::diagnostics::Diagnostics>>,
+    diagnostics: Option<Res<Metrics>>,
 ) {
     let (Some(mut meshes), Some(mut materials)) = (meshes, materials) else {
         return;
@@ -2050,7 +2050,7 @@ pub fn update_landmarks(
             std::thread::spawn(move || build_far_cell(&source, &field, key, seed)),
         );
     }
-    if let Some(mut d) = diagnostics {
+    if let Some(d) = diagnostics {
         d.set("terrain.landmark_far", state.far_shown() as f64);
         d.set("terrain.landmark_cells", state.drawn() as f64);
         d.set("terrain.landmark_builds", state.building.len() as f64);

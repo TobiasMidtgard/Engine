@@ -623,7 +623,7 @@ fn sync_terrains(
     mut forest: ResMut<engine_world::ForestCover>,
     water: Option<ResMut<engine_world::Water>>,
     mut water_installed: Local<water::Installed>,
-    diagnostics: Option<ResMut<Diagnostics>>,
+    diagnostics: Option<Res<Metrics>>,
     focus: Option<Res<engine_world::FocusPoints>>,
     // Whether a provider is installed, and how many times one was (a diagnostic: the ground
     // is rebuilt only when a terrain is added, removed or moved).
@@ -731,7 +731,7 @@ fn sync_terrains(
         *ground = engine_world::Ground(provider);
         installed.0 = true;
         installed.1 += 1;
-        if let Some(mut d) = diagnostics {
+        if let Some(d) = diagnostics {
             d.set("terrain.ground_installs", installed.1 as f64);
         }
     }

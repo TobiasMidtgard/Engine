@@ -28,6 +28,7 @@ pub mod species;
 pub mod squash;
 pub mod stands;
 pub mod visuals;
+pub mod walkers;
 
 use engine_assets::Assets;
 use engine_core::prelude::*;
@@ -220,6 +221,7 @@ impl Plugin for FoliagePlugin {
                     solids::stream_scenery_tree_solids,
                     season::follow_weather_calendar,
                     (grass::sync_region_grass, grass_wear::wear_grass).chain(),
+                    (walkers::bend_grass_for_walkers, walkers::leave_grass_wakes).chain(),
                     felling::remove_orphan_colliders,
                     ecology::drop_unloaded_regions,
                     scenery::drop_unloaded_covers,

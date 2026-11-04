@@ -181,6 +181,7 @@ impl App {
             .init_resource::<TypeRegistry>()
             .init_resource::<ApiRegistry>()
             .init_resource::<Diagnostics>()
+            .init_resource::<crate::diagnostics::Metrics>()
             .init_resource::<crate::off_frame::OffFrameJobs>()
             .init_resource::<crate::off_frame::OffFrameSettings>()
             .init_resource::<crate::profile::ProfileWindow>()
@@ -250,13 +251,15 @@ impl App {
                 .chain(),
         )
         .add_systems(FixedPreUpdate, transform::snapshot_interpolation_system)
+        .add_systems(Last, diagnostics::publish_metrics_system.in_set(MetricsSet))
         .add_systems(
             Last,
             (
                 crate::profile::profile_report_system,
                 crate::profile::parallelism_report_system,
             )
-                .run_if(crate::profile::enabled),
+                .run_if(crate::profile::enabled)
+                .after(MetricsSet),
         )
         .add_systems(FixedPostUpdate, signal_message_update_system)
         .add_systems(

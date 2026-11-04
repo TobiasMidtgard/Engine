@@ -216,7 +216,7 @@ pub fn update_rocks(
     materials: Option<ResMut<Assets<StandardMaterial>>>,
     surfaces: Option<Res<SurfaceMaterials>>,
     mut state: ResMut<RockCells>,
-    diagnostics: Option<ResMut<engine_core::diagnostics::Diagnostics>>,
+    diagnostics: Option<Res<Metrics>>,
 ) {
     let (Some(mut meshes), Some(mut materials)) = (meshes, materials) else {
         return;
@@ -461,7 +461,7 @@ pub fn update_rocks(
             }),
         );
     }
-    if let Some(mut d) = diagnostics {
+    if let Some(d) = diagnostics {
         d.set("terrain.rock_cells", state.drawn() as f64);
         d.set("terrain.rock_builds", state.building.len() as f64);
         d.set("terrain.rock_hulls", rock_hulls as f64);

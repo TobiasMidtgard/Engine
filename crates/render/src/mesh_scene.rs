@@ -82,8 +82,10 @@ pub(crate) struct Cold {
     /// The frame the transform last changed.
     pub moved: u64,
     /// The frame the slot was last written: added, moved, or any of its components changed.
-    /// Static shadow images hold slots unchanged for a while (`mesh_feature::STILL_FRAMES`).
+    /// Static shadow images hold slots unchanged for a while ([`Cold::still_from`]).
     pub changed: u64,
+    /// The frame the slot was added.
+    pub born: u64,
     /// The normal matrix's rows (`MeshInstance::n`).
     pub normal: [[f32; 4]; 3],
     /// The rows of the transform's linear part, `f32` (translations are added per view, from
@@ -93,6 +95,19 @@ pub(crate) struct Cold {
 }
 
 impl Cold {
+    /// The frame from which static shadow images may hold the slot: `STILL_FRAMES` after it
+    /// last changed, or `SPAWN_STILL_FRAMES` for a young slot that never moved (a tree streamed
+    /// in, its mesh resolved or its material set after it was added), so new casters join the
+    /// shadows at once instead of popping in seconds later.
+    pub fn still_from(&self) -> u64 {
+        use crate::mesh_feature::{SPAWN_STILL_FRAMES, STILL_FRAMES};
+        if self.moved == 0 && self.changed < self.born + STILL_FRAMES {
+            self.changed + SPAWN_STILL_FRAMES
+        } else {
+            self.changed + STILL_FRAMES
+        }
+    }
+
     /// Last frame's transform.
     pub fn previous_at(&self, frame: u64) -> &GlobalTransform {
         if self.moved == frame {
@@ -206,8 +221,8 @@ pub(crate) struct SlotChange {
     /// World-space bounds.
     pub center: DVec3,
     pub radius: f32,
-    /// `Cold::changed` before.
-    pub changed: u64,
+    /// `Cold::still_from` before.
+    pub still_from: u64,
 }
 
 impl MeshScene {
@@ -502,6 +517,7 @@ impl MeshScene {
                     previous: *transform,
                     moved: 0,
                     changed: frame,
+                    born: frame,
                     normal: [[0.0; 4]; 3],
                     rows: [[0.0; 4]; 3],
                     previous_rows: [[0.0; 4]; 3],
@@ -558,7 +574,7 @@ impl MeshScene {
             self.changes.push(SlotChange {
                 center: hot.center,
                 radius: hot.radius,
-                changed: self.cold[s].changed,
+                still_from: self.cold[s].still_from(),
             });
         }
     }

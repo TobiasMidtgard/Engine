@@ -216,6 +216,9 @@ fn register_apis(app: &mut App) {
                         "voxels": d.domain.dims.to_array(),
                         "mass_kg": d.domain.mass_kg,
                         "max_density": d.domain.max_density,
+                        "fog": d.domain.fog,
+                        "resting": d.resting,
+                        "stride": d.stride,
                     })
                 })
                 .collect();
