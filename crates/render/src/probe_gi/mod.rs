@@ -348,6 +348,18 @@ type GatherQuery = (
 );
 /// Skinned meshes are left out (the rays would see their bind pose), and shadow-only stand-ins.
 type GatherFilter = (Without<crate::GpuSkin>, Without<crate::ShadowOnly>);
+/// [`GatherFilter`]'s entities whose transform, renderer or resolved mesh changed: the change
+/// pass reads only these (a walk of every entity's change ticks took 0.6-2.4 ms a frame at the
+/// lake on Tobias's PC, ~90k mesh entities).
+type ChangeFilter = (
+    Without<crate::GpuSkin>,
+    Without<crate::ShadowOnly>,
+    Or<(
+        Changed<GlobalTransform>,
+        Changed<crate::MeshRenderer>,
+        Changed<crate::ResolvedMesh>,
+    )>,
+);
 
 /// A mesh entity as the gather last saw it: its world box (absolute), its transform (to tell a
 /// [`WorldShift`]'s move from its own) and its mesh's version.
@@ -449,6 +461,7 @@ pub(crate) struct ProbeGi {
     /// The mesh and material assets' latest versions and removals at the last check.
     asset_marks: ((u64, u64), (u64, u64)),
     query: Option<QueryState<GatherQuery, GatherFilter>>,
+    changes: Option<QueryState<GatherQuery, ChangeFilter>>,
     /// The world's change tick at the last gather check, and the mesh entities it found.
     tick: Option<Tick>,
     entities: usize,
@@ -617,6 +630,7 @@ impl ProbeGi {
             recheck_at: 0,
             asset_marks: ((0, 0), (0, 0)),
             query: None,
+            changes: None,
             tick: None,
             entities: 0,
             cache: EntityHashMap::default(),
@@ -1189,6 +1203,9 @@ impl ProbeGi {
         if self.query.is_none() {
             self.query = Some(world.query_filtered());
         }
+        if self.changes.is_none() {
+            self.changes = Some(world.query_filtered());
+        }
     }
 
     /// Reads the world shared, so it runs beside the features' shared prepares; call
@@ -1299,11 +1316,14 @@ impl ProbeGi {
         let mut unchanged = 0u32;
         let entities = match self.tick {
             Some(tick) => {
-                let mut n = 0usize;
+                let mut changes = self
+                    .changes
+                    .take()
+                    .or_else(|| world.try_query_filtered())
+                    .expect("ProbeGi::ensure_query runs before extract");
                 for (entity, transform, renderer, resolved) in
-                    crate::features::iter_since(&mut query, world, tick)
+                    crate::features::iter_since(&mut changes, world, tick)
                 {
-                    n += 1;
                     let renderer_changed = renderer.is_changed();
                     let resolved_changed = resolved.is_changed();
                     if !transform.is_changed() && !renderer_changed && !resolved_changed {
@@ -1331,7 +1351,14 @@ impl ProbeGi {
                     }
                     changed.push(entity);
                 }
-                n
+                self.changes = Some(changes);
+                // The filter is by archetype alone, so every entity of a matched archetype is one.
+                query.update_archetypes(world);
+                query
+                    .matched_archetypes()
+                    .filter_map(|id| world.archetypes().get(id))
+                    .map(|a| a.len() as usize)
+                    .sum()
             }
             None => {
                 changed.extend(query.iter(world).map(|q| q.0));
