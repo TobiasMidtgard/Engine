@@ -1690,30 +1690,27 @@ fn sweeps_wanted(r: &crate::sim::Region, dt: f32) -> bool {
     let w = &r.world;
     // Every body awake, not only Rapier's active set: one woken or made since the last step
     // (a shot just fired) joins that set only inside the step.
-    w.bodies.iter().any(|(h, rb)| {
+    let found = w.bodies.iter().find_map(|(h, rb)| {
         if !rb.is_dynamic() || rb.is_sleeping() || (r.tier > 0 && !rb.is_ccd_enabled()) {
-            return false;
+            return None;
         }
         let colliders = || rb.colliders().iter().filter_map(|c| w.colliders.get(*c));
-        let Some(mut path) = colliders()
+        let mut path = colliders()
             .map(|c| c.compute_aabb())
-            .reduce(|a, b| a.merged(&b))
-        else {
-            return false;
-        };
+            .reduce(|a, b| a.merged(&b))?;
         // Its fastest point's travel this substep.
         let reach = (path.center() - rb.center_of_mass()).length() + path.half_extents().length();
         let step = (rb.linvel().length() + rb.angvel().length() * reach) * dt;
         if step <= BULLET_STEP_M {
-            return false;
+            return None;
         }
         // Rapier's own test for the bodies that didn't ask: faster than half its thinnest part.
         if !rb.is_ccd_enabled() && step <= 0.5 * thickness(colliders().map(|c| c.shape())) {
-            return false;
+            return None;
         }
         // Colliders made or moved since the last step aren't in the query tree yet.
         if r.stale_all || !r.fresh.is_empty() {
-            return true;
+            return Some((rb.user_data, "new colliders near"));
         }
         // Its path this substep, and a margin: anything there it could pass through?
         path.mins -= Vec3::splat(step + BULLET_MARGIN_M);
@@ -1724,8 +1721,14 @@ fn sweeps_wanted(r: &crate::sim::Region, dt: f32) -> bool {
         w.query_pipeline_with_filter(filter)
             .intersect_aabb_conservative(path)
             .next()
-            .is_some()
-    })
+            .map(|_| (rb.user_data, "something in its path"))
+    });
+    if let Some((user, why)) = found
+        && crate::report::wanted()
+    {
+        crate::report::sweeper(Entity::from_bits(user as u64), why);
+    }
+    found.is_some()
 }
 
 /// A body's thinnest part as Rapier's sweeps judge it: the least `ccd_thickness` of its
@@ -2287,8 +2290,13 @@ fn substep(
         r.world.integration_parameters.dt = p.sub_dt;
         r.world.integration_parameters.num_solver_iterations =
             crate::fine::iterations(shared.settings, r.fine, p.sub_dt);
+        let piece = crate::report::Piece::start("substeps: thin bodies");
         speculate_thin(r, p.sub_dt);
+        drop(piece);
+        let piece = crate::report::Piece::start("substeps: sweeps wanted");
         r.world.integration_parameters.max_ccd_substeps = usize::from(sweeps_wanted(r, p.sub_dt));
+        drop(piece);
+        let piece = crate::report::Piece::start("substeps: before Rapier");
         let collector = std::mem::take(&mut r.collector);
         let pool = match wide_pool() {
             Some(wide) if r.wide => Arc::clone(wide),
@@ -2299,13 +2307,18 @@ fn substep(
         if shared.settings.contact_events {
             r.note_velocities();
         }
+        drop(piece);
+        let piece = crate::report::Piece::start("substeps: Rapier's step");
         r.world.step_with_events(&filter, &collector);
+        drop(piece);
+        let piece = crate::report::Piece::start("substeps: after Rapier");
         if crate::report::wanted() {
             crate::report::rapier_stages(&r.world.physics_pipeline.counters);
         }
         crate::articulation::after_step(&mut r.world, &mut r.links);
         r.collector = collector;
         r.needs_refresh = false;
+        drop(piece);
     }
     scale_time(&mut r.world, &p.scaled, false);
     carry_on_decks(&mut r.world, &p.decks, p.sub_dt);
@@ -2335,6 +2348,9 @@ type Job<'a> = (
     &'a HashSet<(ColliderHandle, ColliderHandle)>,
 );
 
+/// The name [`region_pool`]'s threads go by (and start with).
+const REGION_THREADS: &str = "physics regions";
+
 /// Threads that step regions side by side, a pool of their own: [`physics_simulate`] is a
 /// plain system, so it runs on a compute-pool thread, and a scope opened there would run
 /// other systems' tasks while it waits (one that asks the locked simulation anything would
@@ -2346,7 +2362,7 @@ fn region_pool() -> Option<&'static TaskPool> {
         (threads > 1).then(|| {
             TaskPoolBuilder::new()
                 .num_threads((threads / 2).max(2))
-                .thread_name("physics regions".into())
+                .thread_name(REGION_THREADS.into())
                 .build()
         })
     })
@@ -2390,15 +2406,34 @@ fn wide_pool() -> Option<&'static Arc<rayon::ThreadPool>> {
 }
 
 /// A one-thread pool for a region stepping on its own: Rapier's parallel passes then run in
-/// line on it, sharing nothing with other regions.
+/// line, sharing nothing with other regions. On physics's own threads ([`region_pool`]) its
+/// one thread is the calling thread itself (rayon's `use_current_thread`), so Rapier's
+/// `install` runs the step right there: a pool of its own thread handed every substep over and
+/// back, and on a busy machine waking it cost more than the step (2.2 ms of a substep's
+/// Rapier part against 0.7 ms of Rapier's own work, VM loops, round 11). Other threads (the
+/// schedule's, which run other modules' rayon work too and must stay out of a physics pool)
+/// get a thread of their own, as before.
 fn lane() -> Arc<rayon::ThreadPool> {
     thread_local! {
         static LANE: Arc<rayon::ThreadPool> = Arc::new(
-            rayon::ThreadPoolBuilder::new()
-                .num_threads(1)
-                .thread_name(|_| "physics lane".into())
-                .build()
-                .expect("a one-thread pool"),
+            std::thread::current()
+                .name()
+                .is_some_and(|n| n.starts_with(REGION_THREADS))
+                .then(|| {
+                    rayon::ThreadPoolBuilder::new()
+                        .num_threads(1)
+                        .use_current_thread()
+                        .build()
+                        .ok()
+                })
+                .flatten()
+                .unwrap_or_else(|| {
+                    rayon::ThreadPoolBuilder::new()
+                        .num_threads(1)
+                        .thread_name(|_| "physics lane".into())
+                        .build()
+                        .expect("a one-thread pool")
+                }),
         );
     }
     LANE.with(Arc::clone)

@@ -34,6 +34,8 @@ struct Totals {
     outside: Vec<(&'static str, f64)>,
     /// Pieces of those parts, by name: their sum and their worst step, ms ([`piece_ms`]).
     pieces: Vec<(&'static str, f64, f64)>,
+    /// Bodies that made a region's substep sweep for fast motion (CCD), and why: their count.
+    sweepers: HashMap<(Entity, &'static str), usize>,
 }
 
 fn totals() -> &'static Mutex<Totals> {
@@ -120,6 +122,11 @@ pub(crate) fn rapier_stages(c: &rapier3d::counters::Counters) {
     for (i, v) in ms.iter().enumerate() {
         t.stages[i] += v;
     }
+}
+
+/// `body` made a region's substep run Rapier's sweeps (CCD), for `why`.
+pub(crate) fn sweeper(body: Entity, why: &'static str) {
+    *totals().lock().sweepers.entry((body, why)).or_default() += 1;
 }
 
 /// `ms` of the step's own work went to `name` (sync, upkeep, write back...).
@@ -254,6 +261,20 @@ pub(crate) fn step_done(world: &World, sim: &Simulation, foci: &[DVec3], started
         out += &format!(
             ", {:.0} {name} per substep",
             *sum as f64 / (*n).max(1) as f64
+        );
+    }
+    if !t.sweepers.is_empty() {
+        let mut by: Vec<(&(Entity, &str), &usize)> = t.sweepers.iter().collect();
+        by.sort_by(|a, b| b.1.cmp(a.1));
+        let total: usize = by.iter().map(|(_, n)| **n).sum();
+        let shown: Vec<String> = by
+            .iter()
+            .take(TOP)
+            .map(|((e, why), n)| format!("{} ({why}) {n}", label(world, *e)))
+            .collect();
+        out += &format!(
+            "; {total} region substeps swept for fast bodies, set off by {}",
+            shown.join(", ")
         );
     }
     for (id, ms, n) in rows.into_iter().take(TOP) {
