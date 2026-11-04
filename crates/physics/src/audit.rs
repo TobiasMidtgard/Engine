@@ -3,10 +3,10 @@
 //! overlaps (a rock you walk through, a wall you can see through), by zone, biggest first;
 //! `PHYSICS_COLLIDER_AUDIT=<file>.csv` also writes all of them found so far to that file.
 //!
-//! Each mesh is probed with a box a quarter of its size at the middle of its upper half: a
-//! rock sitting on the terrain has its lower half in the ground's collider, its upper half
-//! only in its own. A hollow one (a hall) counts as covered if a ray from above or from one
-//! of its four sides in towards that middle meets a collider.
+//! Each mesh is probed at up to [`SAMPLES`] points of its drawn surface in its upper half
+//! (the lower half of a rock is in the ground's collider): it counts as covered if a collider
+//! comes within [`TOUCH_M`] of half of them or more. So a hall colliding through its walls, a
+//! mesh merged from many masts, or an arch, are judged by where they are drawn.
 //!
 //! Left out: meshes with a body, a collider or a character on them or an ancestor (a vehicle,
 //! cloth, a tree whose collider is a smaller stand-in on purpose); the kinds and names
@@ -34,6 +34,11 @@ use crate::SharedSimulation;
 
 /// Meshes smaller than this across (m) are left out (pebbles, props you may walk over).
 pub const MIN_SIZE_M: f64 = 0.3;
+/// Points of a mesh's surface looked at, at most.
+const SAMPLES: usize = 24;
+/// A point of the surface is solid if a collider is this close (m): a hull round a rock's far
+/// mesh, a box round a wall, sit this near what is drawn.
+const TOUCH_M: f32 = 0.2;
 /// Meshes farther than this (m) from every character are not looked at: showcase scenery gets
 /// its colliders only near a focus point (`NearSolid`, within 70 m), as streaming worlds do.
 /// With no character in the world, every mesh is.
@@ -141,29 +146,24 @@ pub fn uncovered_meshes(world: &World) -> Vec<Uncovered> {
         if !focus.is_empty() && !focus.iter().any(near) {
             continue;
         }
-        let half = (hi - lo) * 0.5;
         let center = (lo + hi) * 0.5;
-        let probe_at = center + DVec3::Y * half.y * 0.5;
-        let probe = ColliderShape::Cuboid {
-            half_extents: (half * 0.25).as_vec3().max(Vec3::splat(0.02)),
-        };
-        hits.clear();
-        queries.overlap(&probe, probe_at, Quat::IDENTITY, &filter, &mut hits);
-        // A hollow mesh (a hall, a tower) has nothing at its middle: rays from just outside
-        // its box in towards that point, from above and the four sides, meet its walls.
-        let walled = || {
-            [DVec3::Y, DVec3::X, DVec3::NEG_X, DVec3::Z, DVec3::NEG_Z]
-                .iter()
-                .any(|side| {
-                    let reach = (*side * (half + DVec3::splat(0.05))).length();
-                    let from = probe_at + *side * reach;
-                    queries
-                        .raycast(from, (-*side).as_vec3(), reach as f32, &filter)
-                        .is_some()
-                })
-        };
-        if !hits.is_empty() || physical(world, e) || of_skipped_kind(world, e, &skipped) || walled()
-        {
+        // Points of the drawn surface in its upper half, spread over the mesh.
+        let upper: Vec<DVec3> = mesh
+            .vertices
+            .iter()
+            .map(|v| global.0.transform_point3(Vec3::from(v.position).as_dvec3()))
+            .filter(|p| p.y >= center.y)
+            .collect();
+        let stride = upper.len().div_ceil(SAMPLES).max(1);
+        let ball = ColliderShape::Sphere { radius: TOUCH_M };
+        let (mut tried, mut touched) = (0, 0);
+        for p in upper.iter().step_by(stride) {
+            hits.clear();
+            queries.overlap(&ball, *p, Quat::IDENTITY, &filter, &mut hits);
+            tried += 1;
+            touched += usize::from(!hits.is_empty());
+        }
+        if touched * 2 >= tried || physical(world, e) || of_skipped_kind(world, e, &skipped) {
             continue;
         }
         out.push(Uncovered {
