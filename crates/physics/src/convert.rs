@@ -6,7 +6,7 @@
 use engine_core::math::{Quat, Vec3};
 use engine_core::prelude::*;
 use engine_world::SurfaceId;
-use engine_world::physics::{ColliderShape, CollisionLayers, JointKind, JointMotor};
+use engine_world::physics::{Collider, ColliderShape, CollisionLayers, JointKind, JointMotor};
 use rapier3d::parry::shape::{HeightFieldFlags, TriMeshFlags};
 use rapier3d::parry::utils::Array2;
 use rapier3d::prelude::*;
@@ -417,6 +417,42 @@ mod tests {
     }
 
     #[test]
+    fn the_cache_forgets_only_shapes_nothing_uses() {
+        let hull = |i: usize| ColliderShape::ConvexHull {
+            points: (0..CACHE_MAX_POINTS / 4)
+                .map(|k| {
+                    let a = k as f32 * 0.37 + i as f32;
+                    Vec3::new(a.cos(), (k % 7) as f32 * 0.1, a.sin())
+                })
+                .collect(),
+        };
+        let (kept, dropped) = (hull(101), hull(102));
+        let held = shape_cached(&kept, Vec3::ONE).unwrap();
+        drop(shape_cached(&dropped, Vec3::ONE));
+        // Fill well past the cap with shapes nothing holds.
+        for i in 0..6 {
+            drop(shape_cached(&hull(200 + i), Vec3::ONE));
+        }
+        let again = shape_cached(&kept, Vec3::ONE).unwrap();
+        assert!(
+            std::sync::Arc::ptr_eq(&held.0, &again.0),
+            "a shape in use was forgotten"
+        );
+        let c = cache().lock();
+        assert!(!c.shapes.contains_key(&shape_key(&dropped, Vec3::ONE)));
+        let idle: usize = c
+            .shapes
+            .values()
+            .filter(|(s, _)| std::sync::Arc::strong_count(&s.0) == 1)
+            .map(|(_, p)| *p)
+            .sum();
+        assert!(
+            idle <= CACHE_MAX_POINTS,
+            "{idle} points of unused shapes kept"
+        );
+    }
+
+    #[test]
     fn damping_matches_fraction_lost_per_second() {
         // Losing half the speed in a second: v(1) = e^-c = 0.5.
         let c = damping(0.5);
@@ -475,10 +511,27 @@ mod tests {
     }
 }
 
-/// Shapes of this many points or more are kept in [`shape_cached`]'s cache.
-const CACHE_MIN_POINTS: usize = 512;
-/// Points the cache holds at most (about 30 MB of meshes); the oldest go first.
-const CACHE_MAX_POINTS: usize = 500_000;
+/// `desc` without its shape, for what keeps a collider's settings beside its built shape (the
+/// simulation's entries, a job's): a big mesh's points copied for each cost as much as
+/// building it.
+pub(crate) fn shapeless(desc: &Collider) -> Collider {
+    Collider {
+        shape: ColliderShape::default(),
+        surface: desc.surface,
+        density: desc.density,
+        sensor: desc.sensor,
+        layers: desc.layers,
+    }
+}
+
+/// Shapes of this many points or more are kept in [`shape_cached`]'s cache: hashing one costs
+/// about a microsecond per 100 points, building it 50-500 (a debris hull of 176 points took
+/// 0.5 ms, and a zone's 302 of them 155 ms in one sync on the VM).
+const CACHE_MIN_POINTS: usize = 64;
+/// Points of shapes no collider uses the cache keeps at most (about 30 MB of meshes); the
+/// oldest go first. Shapes in use cost nothing to keep (their colliders hold them anyway), so
+/// they stay, and a zone streaming back in finds its shapes.
+const CACHE_MAX_POINTS: usize = if cfg!(test) { 4_000 } else { 500_000 };
 
 /// The points a shape is built from, if it is cached ([`CACHE_MIN_POINTS`]).
 fn cache_points(shape: &ColliderShape) -> usize {
@@ -556,6 +609,40 @@ struct ShapeCache {
     points: usize,
 }
 
+impl ShapeCache {
+    /// Forget the oldest shapes no collider uses until those left unused hold at most
+    /// three quarters of [`CACHE_MAX_POINTS`] (so a sweep isn't needed on every insert).
+    fn evict(&mut self) {
+        // (The cache's own handle is the only one of a shape nothing uses.)
+        let unused = |s: &SharedShape| std::sync::Arc::strong_count(&s.0) == 1;
+        let mut idle: usize = self
+            .shapes
+            .values()
+            .filter(|(s, _)| unused(s))
+            .map(|(_, p)| *p)
+            .sum();
+        let goal = CACHE_MAX_POINTS * 3 / 4;
+        let shapes = &mut self.shapes;
+        let mut freed = 0;
+        self.order.retain(|k| {
+            if idle <= goal {
+                return true;
+            }
+            match shapes.get(k) {
+                Some((s, p)) if unused(s) => {
+                    idle -= p;
+                    freed += p;
+                    shapes.remove(k);
+                    false
+                }
+                Some(_) => true,
+                None => false,
+            }
+        });
+        self.points -= freed;
+    }
+}
+
 fn cache() -> &'static parking_lot::Mutex<ShapeCache> {
     static CACHE: std::sync::OnceLock<parking_lot::Mutex<ShapeCache>> = std::sync::OnceLock::new();
     CACHE.get_or_init(Default::default)
@@ -580,13 +667,8 @@ pub fn shape_cached(shape_desc: &ColliderShape, scale: Vec3) -> Option<SharedSha
         c.shapes.insert(key, (built.clone(), points));
         c.order.push_back(key);
         c.points += points;
-        while c.points > CACHE_MAX_POINTS {
-            let Some(old) = c.order.pop_front() else {
-                break;
-            };
-            if let Some((_, p)) = c.shapes.remove(&old) {
-                c.points -= p;
-            }
+        if c.points > CACHE_MAX_POINTS {
+            c.evict();
         }
     }
     Some(built)

@@ -1702,6 +1702,39 @@ fn big_static_meshes_built_off_the_frame_still_catch_what_falls_on_them() {
 }
 
 #[test]
+fn a_body_over_a_big_static_mesh_still_being_built_waits_for_it_and_goes_on_as_it_was() {
+    // Rolling just above where a big floor streams in: held where it is while the floor is
+    // built off the frame, never dropping through, then let go at the speed it had.
+    let mut app = app();
+    let ball = app
+        .world
+        .spawn((
+            Transform::from_xyz(0.0, 0.3, 0.0),
+            RigidBody::dynamic(),
+            Collider::sphere(0.25),
+            Velocity {
+                linear: Vec3::new(2.0, 0.0, 0.0),
+                ..Default::default()
+            },
+        ))
+        .id();
+    big_mesh_floor(&mut app);
+    let mut lowest = f64::INFINITY;
+    for _ in 0..60 {
+        app.update();
+        lowest = lowest.min(pos(&app, ball).y);
+    }
+    let at = pos(&app, ball);
+    assert!(lowest > 0.2, "the ball sank to y = {lowest:.3}");
+    assert!(
+        (0.2..0.3).contains(&at.y),
+        "the ball ended at y = {:.3}",
+        at.y
+    );
+    assert!(at.x > 1.0, "the ball lost its speed: x = {:.2}", at.x);
+}
+
+#[test]
 fn a_big_static_mesh_changed_under_a_body_takes_its_new_shape() {
     // Dug half a meter down under a resting ball (a voxel cliff remeshed where it was dug):
     // the old floor holds it while the new one builds, then it settles on the new one.

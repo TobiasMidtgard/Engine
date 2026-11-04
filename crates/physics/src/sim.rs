@@ -876,6 +876,10 @@ pub struct Simulation {
     pub weightless: EntityHashSet,
     /// Static colliders whose shape is being built off the frame ([`crate::shape_jobs`]).
     pub(crate) pending_statics: crate::shape_jobs::PendingStatics,
+    /// Bodies and characters near a static still being built, held until it is there
+    /// ([`crate::shape_jobs`]), with the velocity (linear, angular) each had, given back when
+    /// let go.
+    pub(crate) held_for_shapes: EntityHashMap<(Vec3, Vec3)>,
 }
 
 /// Rapier hooks: drop the contacts listed in [`Simulation::no_contact`], and keep round bodies
@@ -1233,6 +1237,7 @@ impl Simulation {
     pub fn forget_body(&mut self, entity: Entity) -> Vec<Entity> {
         self.resting.remove(&entity);
         self.ungrounded.remove(&entity);
+        self.held_for_shapes.remove(&entity);
         self.weightless.remove(&entity);
         self.remove_body(entity)
     }
@@ -1261,6 +1266,31 @@ impl Simulation {
             {
                 rb.wake_up(true);
             }
+        }
+    }
+
+    /// Wake a body or a character's body where it is (no longer held), moving as it was.
+    pub(crate) fn wake(&mut self, e: Entity, velocity: (Vec3, Vec3)) {
+        let Some((region, handle)) = self
+            .bodies
+            .get(&e)
+            .map(|b| (b.region, b.handle))
+            .or_else(|| self.characters.get(&e).map(|c| (c.region, c.body)))
+        else {
+            return;
+        };
+        if let Some(rb) = self
+            .regions
+            .get_mut(region as usize)
+            .and_then(|r| r.as_mut())
+            .and_then(|r| r.world.bodies.get_mut(handle))
+            && !rb.is_fixed()
+        {
+            if rb.is_dynamic() {
+                rb.set_linvel(velocity.0, false);
+                rb.set_angvel(velocity.1, false);
+            }
+            rb.wake_up(true);
         }
     }
 
@@ -1432,7 +1462,7 @@ impl Simulation {
             entity,
             ColliderEntry {
                 body: Some(body),
-                desc: desc.clone(),
+                desc: convert::shapeless(desc),
                 shape,
                 world_pose: (DVec3::ZERO, Quat::IDENTITY),
                 radius: 0.0,
@@ -1460,7 +1490,7 @@ impl Simulation {
             entity,
             ColliderEntry {
                 body: None,
-                desc: desc.clone(),
+                desc: convert::shapeless(desc),
                 shape,
                 world_pose: pose,
                 radius,
@@ -2384,6 +2414,7 @@ impl Simulation {
     }
 
     pub fn remove_character(&mut self, entity: Entity) {
+        self.held_for_shapes.remove(&entity);
         if let Some(c) = self.characters.remove(&entity) {
             let region = self.region_mut(c.region);
             region.world.remove_body(c.body);

@@ -27,6 +27,7 @@ use crate::convert;
 use crate::settings::PhysicsSettings;
 use crate::sim::{BodyWrite, ContactFilter, MaterialCache, RegionId, Simulation};
 use crate::{FineSteps, PhysicsStats, SharedSimulation};
+use engine_core::ecs::entity::EntityHashMap;
 
 /// World pose (translation, rotation, scale) of `e`, composing `Transform`s up the hierarchy.
 /// `GlobalTransform` is only updated in `PostUpdate`, so the step computes poses itself.
@@ -319,15 +320,21 @@ pub(crate) fn physics_sync(world: &mut World, mut q: Local<Option<StepQueries>>)
     }
     dirty_colliders.sort();
     dirty_colliders.dedup();
-    let mut wanted: Vec<(Entity, Collider, Transform)> = dirty_colliders
+    let dirty_ms = colliders_started.elapsed().as_secs_f64() * 1000.0;
+    // Read in place, not copied: a copy of a big mesh (and freeing it after) cost 10-50 ms of
+    // a sync on the VM while zones were loading, about as much as building it.
+    let read: &World = world;
+    let mut wanted: Vec<(Entity, &Collider, Transform)> = dirty_colliders
         .into_iter()
-        .filter_map(|e| Some((e, world.get::<Collider>(e).cloned()?, world_pose(world, e)?)))
+        .filter_map(|e| Some((e, read.get::<Collider>(e)?, world_pose(read, e)?)))
         .collect();
+    let read_ms = colliders_started.elapsed().as_secs_f64() * 1000.0 - dirty_ms;
     // Big static meshes go off the frame unless something moving is near them already
     // (`crate::shape_jobs`).
-    let (mut off_frame, mut kept_near) = (0usize, 0usize);
+    let (mut off_frame, mut held_near) = (0usize, 0usize);
+    let mut copy_ms = 0.0;
     if settings.static_meshes_off_frame {
-        let mut movers: Option<Vec<(DVec3, f64)>> = None;
+        let mut movers: Option<Vec<crate::shape_jobs::Mover>> = None;
         wanted.retain(|(e, desc, pose)| {
             // A changed collider's earlier job is dropped either way.
             sim.pending_statics.remove(e);
@@ -344,28 +351,31 @@ pub(crate) fn physics_sync(world: &mut World, mut q: Local<Option<StepQueries>>)
                 pose.rotation,
                 pose.scale,
             );
-            // A changed shape near something moving: the old one stands in while the new one
-            // is built (a few steps at most); a new one is built now.
+            // Near something moving it goes first: a changed shape's old one stands in while
+            // the new one is built (a few steps at most), and what is near a new one waits
+            // for it, held (`place_pending_statics`).
             let movers = movers.get_or_insert_with(|| crate::shape_jobs::movers(&sim));
             let replacing = sim.colliders.get(e).is_some_and(|c| c.body.is_none());
             let near = crate::shape_jobs::near(movers, lo, hi);
-            if near && !replacing {
-                kept_near += 1;
-                return true;
-            }
-            let Some(job) = crate::shape_jobs::Job::spawn(desc.shape.clone(), pose.scale) else {
+            // (The job's own copy of the points: 24 ms for a zone's 54 meshes on the VM.)
+            let t = Instant::now();
+            let shape = desc.shape.clone();
+            copy_ms += t.elapsed().as_secs_f64() * 1000.0;
+            let Some(job) = crate::shape_jobs::Job::spawn(shape, pose.scale, near) else {
                 return true;
             };
+            held_near += usize::from(near && !replacing);
             sim.pending_statics.insert(
                 *e,
                 crate::shape_jobs::Pending {
                     job,
-                    desc: desc.clone(),
+                    desc: convert::shapeless(desc),
                     scale: pose.scale,
                     lo,
                     hi,
                     waited: 0,
-                    replacing: near,
+                    held: 0,
+                    replacing: near && replacing,
                 },
             );
             off_frame += 1;
@@ -404,14 +414,14 @@ pub(crate) fn physics_sync(world: &mut World, mut q: Local<Option<StepQueries>>)
                     inv * pose.rotation,
                 );
                 let (f, r) = sim.materials.get(desc.surface);
-                sim.attach_collider(e, body, &desc, shape, local, f, r);
+                sim.attach_collider(e, body, desc, shape, local, f, r);
                 attached += 1;
             }
             None => {
                 sim.add_static(
                     e,
                     found.map(|(b, _)| b),
-                    &desc,
+                    desc,
                     shape,
                     (pose.translation, pose.rotation),
                 );
@@ -419,15 +429,17 @@ pub(crate) fn physics_sync(world: &mut World, mut q: Local<Option<StepQueries>>)
             }
         }
     }
-    place_pending_statics(world, &mut sim);
+    let statics_ms = placed_started.elapsed().as_secs_f64() * 1000.0;
+    let (pending_placed, waited_ms, pending_ms) = place_pending_statics(world, &mut sim);
     let total_ms = colliders_started.elapsed().as_secs_f64() * 1000.0;
     if total_ms > 5.0 && crate::report::wanted() {
         engine_core::log::info!(
             "physics: syncing colliders took {total_ms:.1} ms: {moved_statics} statics moved \
-             ({moved_ms:.1} ms with the dirty list); {wanted_n} built ({points} points, \
-             {built_ms:.1} ms); {attached} attached, {statics} static placed ({:.1} ms); {off_frame} queued off the frame, {kept_near} built now for movers near; \
-             {} pending",
-            placed_started.elapsed().as_secs_f64() * 1000.0,
+             ({moved_ms:.1} ms: dirty list {dirty_ms:.1}, reading {read_ms:.1}); {wanted_n} built \
+             ({points} points, {built_ms:.1} ms); {attached} attached, {statics} static placed \
+             ({statics_ms:.1} ms); {off_frame} queued off the frame ({held_near} with movers \
+             near, {copy_ms:.1} ms copying their points); {pending_placed} placed from off the frame ({pending_ms:.1} ms, \
+             {waited_ms:.1} of it waiting), {} pending",
             sim.pending_statics.len()
         );
     }
@@ -633,7 +645,11 @@ pub(crate) fn physics_sync(world: &mut World, mut q: Local<Option<StepQueries>>)
     crate::grounding::hold_ungrounded(&mut sim, &foci);
     drop(piece);
     let _piece = crate::report::Piece::start("sync: holds: resting");
-    if !sim.resting.is_empty() || !sim.ungrounded.is_empty() || !sim.weightless.is_empty() {
+    if !sim.resting.is_empty()
+        || !sim.ungrounded.is_empty()
+        || !sim.held_for_shapes.is_empty()
+        || !sim.weightless.is_empty()
+    {
         hold_resting(&mut sim);
     }
     drop((_part, _piece));
@@ -2067,7 +2083,8 @@ fn idle(r: &crate::sim::Region) -> bool {
 }
 
 /// Hold the bodies told to rest asleep ([`Simulation::resting`]), and those waiting for their
-/// ground to load ([`Simulation::ungrounded`]): wake-ups from their
+/// ground to load ([`Simulation::ungrounded`]) or for a static near them to be built
+/// ([`Simulation::held_for_shapes`]): wake-ups from their
 /// neighbours, from gameplay writing to them, or bodies made since they were told, go back to
 /// sleep, still. Every one is looked at, not only Rapier's active ones: a body woken since the
 /// last step joins them only as the next one starts, and wakes all it touches.
@@ -2084,6 +2101,7 @@ fn hold_resting(sim: &mut Simulation) {
     let Simulation {
         resting,
         ungrounded,
+        held_for_shapes,
         weightless,
         bodies,
         characters,
@@ -2092,7 +2110,7 @@ fn hold_resting(sim: &mut Simulation) {
     } = sim;
     // Let go since the last step: their weight back.
     weightless.retain(|e| {
-        if resting.contains(e) || ungrounded.contains(e) {
+        if resting.contains(e) || ungrounded.contains(e) || held_for_shapes.contains_key(e) {
             return true;
         }
         if let Some(b) = bodies.get(e)
@@ -2106,7 +2124,11 @@ fn hold_resting(sim: &mut Simulation) {
         false
     });
     let mut held = 0;
-    for e in resting.iter().chain(ungrounded.iter()) {
+    for e in resting
+        .iter()
+        .chain(ungrounded.iter())
+        .chain(held_for_shapes.keys())
+    {
         // (A character told to rest stands still: its body sleeps too.)
         let Some((region, handle)) = bodies
             .get(e)
@@ -2413,24 +2435,80 @@ fn run_substeps(mut jobs: Vec<Job>, shared: &SubstepShared) -> Vec<SubstepOut> {
     }
 }
 
-/// Place the static shapes built off the frame that are done, and finish on the spot the ones
-/// something moving came near or that waited too long ([`crate::shape_jobs`]).
-fn place_pending_statics(world: &World, sim: &mut Simulation) {
-    if sim.pending_statics.is_empty() {
-        return;
+/// Place the static shapes built off the frame that are ready, finish on the spot those that
+/// waited too long, and hold what is near the others until they are there
+/// ([`crate::shape_jobs`]). Returns how many were placed, the time (ms) spent waiting for or
+/// finishing jobs, and the whole time (ms).
+fn place_pending_statics(world: &World, sim: &mut Simulation) -> (usize, f64, f64) {
+    if sim.pending_statics.is_empty() && sim.held_for_shapes.is_empty() {
+        return (0, 0.0, 0.0);
     }
+    let started = Instant::now();
+    let mut waited = std::time::Duration::ZERO;
     let movers = crate::shape_jobs::movers(sim);
     let mut ready: Vec<(Entity, Option<SharedShape>, bool)> = Vec::new();
-    for (e, p) in sim.pending_statics.iter_mut() {
+    let mut hold: Vec<Entity> = Vec::new();
+    let Simulation {
+        pending_statics,
+        colliders,
+        ..
+    } = sim;
+    for (e, p) in pending_statics.iter_mut() {
         p.waited += 1;
         if let Some(shape) = p.job.poll() {
             ready.push((*e, shape, false));
-        } else if (p.replacing && p.waited >= crate::shape_jobs::MAX_REPLACE_STEPS)
-            || p.waited >= crate::shape_jobs::MAX_WAIT_STEPS
-            || (!p.replacing && crate::shape_jobs::near(&movers, p.lo, p.hi))
-        {
-            ready.push((*e, p.job.finish(), true));
+            continue;
         }
+        let close: Vec<Entity> = movers
+            .iter()
+            .filter(|m| m.near(p.lo, p.hi))
+            .map(|m| m.entity)
+            .collect();
+        let mut waits = false;
+        if !close.is_empty() {
+            p.job.hurry();
+            // (An older shape of it stands in: nothing waits.)
+            if colliders.get(e).is_some_and(|c| c.body.is_none()) {
+                p.replacing = true;
+            } else {
+                p.held += 1;
+                waits = true;
+            }
+        }
+        if (p.replacing && p.waited >= crate::shape_jobs::MAX_REPLACE_STEPS)
+            || p.waited >= crate::shape_jobs::MAX_WAIT_STEPS
+            || p.held > crate::shape_jobs::MAX_HOLD_STEPS
+        {
+            let t = Instant::now();
+            ready.push((*e, p.job.finish(), true));
+            waited += t.elapsed();
+        } else if waits {
+            hold.extend(close);
+        }
+    }
+    // Held from now on: how each was moving, given back when it goes on.
+    let mut held: EntityHashMap<(Vec3, Vec3)> = EntityHashMap::default();
+    for e in hold {
+        let velocity = sim.held_for_shapes.get(&e).copied().or_else(|| {
+            let b = sim.bodies.get(&e)?;
+            let rb = sim.region(b.region).world.bodies.get(b.handle)?;
+            Some((rb.linvel(), rb.angvel()))
+        });
+        held.insert(e, velocity.unwrap_or_default());
+    }
+    // What was held near a static now placed (or one it moved away from) goes on.
+    let let_go: Vec<(Entity, (Vec3, Vec3))> = sim
+        .held_for_shapes
+        .iter()
+        .filter(|(e, _)| !held.contains_key(*e))
+        .map(|(e, v)| (*e, *v))
+        .collect();
+    if crate::report::wanted() && !held.is_empty() {
+        crate::report::count("bodies held for a static shape being built", held.len());
+    }
+    sim.held_for_shapes = held;
+    for (e, velocity) in let_go {
+        sim.wake(e, velocity);
     }
     ready.sort_by_key(|r| r.0);
     let (mut placed, mut finished) = (0usize, 0usize);
@@ -2445,7 +2523,9 @@ fn place_pending_statics(world: &World, sim: &mut Simulation) {
         let shape = if pose.scale == p.scale {
             shape
         } else {
-            convert::shape_cached(&p.desc.shape, pose.scale)
+            world
+                .get::<Collider>(e)
+                .and_then(|c| convert::shape_cached(&c.shape, pose.scale))
         };
         let Some(shape) = shape else {
             engine_core::log::warn!(
@@ -2484,6 +2564,11 @@ fn place_pending_statics(world: &World, sim: &mut Simulation) {
             crate::report::count("static shapes finished on the spot", finished);
         }
     }
+    (
+        placed,
+        waited.as_secs_f64() * 1000.0,
+        started.elapsed().as_secs_f64() * 1000.0,
+    )
 }
 
 /// The Rapier shapes of `wanted`'s colliders. A tile of terrain or a big scenery mesh takes a
@@ -2491,8 +2576,8 @@ fn place_pending_statics(world: &World, sim: &mut Simulation) {
 /// streaming in) took 10-40 ms of one sync on 4 cores; batches with some size spread over
 /// [`region_pool`], whose tasks never wait on anything, so the simulation's lock held here is
 /// safe (AGENTS.md: no pool scope that may run another module's work under a lock).
-fn build_shapes(wanted: &[(Entity, Collider, Transform)]) -> Vec<Option<SharedShape>> {
-    let build = |(_, desc, pose): &(Entity, Collider, Transform)| {
+fn build_shapes(wanted: &[(Entity, &Collider, Transform)]) -> Vec<Option<SharedShape>> {
+    let build = |(_, desc, pose): &(Entity, &Collider, Transform)| {
         convert::shape_cached(&desc.shape, pose.scale)
     };
     // Points across the batch: a box or a capsule is next to nothing to build.
