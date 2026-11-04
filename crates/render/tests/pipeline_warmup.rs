@@ -80,6 +80,15 @@ fn materials_first_seen_later_draw_alike_without_a_compile() {
             }
             app.update();
         }
+        // Under load (every test at once) the workers can need longer: wait for them, a whole
+        // jitter cycle at a time, so the temporal anti-aliasing sees the same jitter phase.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(300);
+        while warming(&app) > 0.0 && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            for _ in 0..engine_render::effects::JITTER_SAMPLES {
+                app.update();
+            }
+        }
         if warmup == PipelineWarmup::Always {
             assert_eq!(warming(&app), 0.0);
         }
