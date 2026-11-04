@@ -267,7 +267,10 @@ impl Plugin for AiBridgePlugin {
                 First,
                 bridge_frame_start_system.before(engine_core::time::time_system),
             )
-            .add_systems(Last, bridge_frame_end_system);
+            .add_systems(
+                Last,
+                bridge_frame_end_system.after(engine_core::schedule::MetricsSet),
+            );
         register_api(app);
         let launched = self.read_env && env_flag(ENV_EXIT_ON_STDIN_EOF);
         if launched {

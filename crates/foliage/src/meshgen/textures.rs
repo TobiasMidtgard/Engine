@@ -1,7 +1,8 @@
 //! Procedural leaf textures: per-species atlases of leaf and needle sprays (lobed oak leaves,
-//! small serrated birch leaves, rounded toothed hazel leaves, long pine needles in brushes,
-//! short dense spruce needles), plus fern fronds, painted on the CPU into RGBA images with
-//! alpha cut-outs and matching tangent-space normal maps.
+//! small serrated birch leaves, rounded toothed hazel leaves, oval beech leaves in flat rows,
+//! round long-stalked aspen leaves, compound rowan leaves, long pine needles in brushes, short
+//! dense spruce needles, soft larch needles in rosettes), plus fern fronds, painted on the CPU
+//! into RGBA images with alpha cut-outs and matching tangent-space normal maps.
 //!
 //! Trees and shrubs use an atlas of [`ATLAS_CELLS`]² cells: different twig sprays, plus one
 //! compact cluster seen from the shoot tip ([`CLUSTER_CELL`]: a rosette of leaves or a tuft
@@ -43,6 +44,19 @@ pub enum LeafKind {
     Frond,
     /// Deeply lobed leaves crowded at the shoot tips (oak).
     Lobed,
+    /// Oval leaves with straight parallel side veins and a wavy, finely toothed edge, in flat
+    /// rows along zigzag twigs (beech; goat willow's broader leaves, more of them showing
+    /// their silvery underside).
+    Oval,
+    /// Nearly round, coarsely round-toothed leaves on long petioles, turned every which way
+    /// (aspen, alder).
+    Round,
+    /// Compound leaves: pairs of narrow toothed leaflets along a reddish stalk, fanning from
+    /// the twig tips (rowan).
+    Pinnate,
+    /// Soft short needles in rosettes on spur shoots along drooping twigs, single needles on
+    /// the young shoots (larch).
+    SoftNeedles,
 }
 
 /// The texture kind a species' leaf style is painted as.
@@ -55,6 +69,10 @@ pub fn kind_of(style: crate::species::LeafStyle) -> LeafKind {
         LeafStyle::ShortNeedles => LeafKind::ShortNeedles,
         LeafStyle::Frond => LeafKind::Frond,
         LeafStyle::Lobed => LeafKind::Lobed,
+        LeafStyle::Oval => LeafKind::Oval,
+        LeafStyle::Round => LeafKind::Round,
+        LeafStyle::Pinnate => LeafKind::Pinnate,
+        LeafStyle::SoftNeedles => LeafKind::SoftNeedles,
     }
 }
 
@@ -65,9 +83,12 @@ impl LeafKind {
         self != LeafKind::Frond
     }
 
-    /// Pine and spruce needles.
+    /// Pine, spruce and larch needles.
     pub fn is_needles(self) -> bool {
-        matches!(self, LeafKind::LongNeedles | LeafKind::ShortNeedles)
+        matches!(
+            self,
+            LeafKind::LongNeedles | LeafKind::ShortNeedles | LeafKind::SoftNeedles
+        )
     }
 }
 
@@ -651,14 +672,26 @@ struct LeafShape {
     teeth: f32,
     tooth_depth: f32,
     fine_teeth: f32,
+    /// Tooth profile: 0 sharp, saw-like teeth pointing to the tip; 1 rounded scallops
+    /// (crenate: aspen, alder).
+    crenate: f32,
+    /// Where along the midrib (0 base .. 1 tip) the teeth start (rowan's leaflets are entire
+    /// near their base).
+    teeth_from: f32,
+    /// One small tooth where each side vein meets the edge instead of `teeth` per side
+    /// (beech's wavy edge).
+    teeth_at_veins: bool,
     /// Rounded lobes per side and the depth of the sinuses between them (oak).
     lobes: f32,
     lobe_depth: f32,
     /// Ear-like lobes at the base (oak).
     auricle: f32,
-    /// Side veins per side, and how far they sweep toward the tip across the blade.
+    /// Side veins per side, how far they sweep toward the tip across the blade, and how they
+    /// curve doing it (1: straight, as beech's; more: leaving the midrib squarer and bending
+    /// toward the tip at the edge).
     veins: f32,
     vein_sweep: f32,
+    vein_curve: f32,
     /// Fold along the midrib (slope of each half), and the blistered relief between veins.
     fold: f32,
     blister: f32,
@@ -705,10 +738,21 @@ impl Blade {
             w = w.max(s.auricle * (PI * u / 0.16).sin());
         }
         if s.teeth > 0.0 {
-            let ramp = smoothstep(0.08, 0.25, u) * (1.0 - smoothstep(0.92, 1.0, u));
-            let f = (u * s.teeth + self.phase * 3.1 + side * 0.25).fract();
+            let ramp =
+                smoothstep(s.teeth_from, s.teeth_from + 0.17, u) * (1.0 - smoothstep(0.92, 1.0, u));
             let g = (u * s.teeth * 3.0 + self.phase * 7.3).fract();
-            w *= 1.0 - ramp * (s.tooth_depth * (1.0 - f.powf(1.4)) + s.fine_teeth * (1.0 - g));
+            let notch = if s.teeth_at_veins {
+                // The side veins reach the edge where their phase is whole (see `point`): a
+                // small point there, the edge sagging gently in between.
+                let f = (u * s.veins + self.phase * 0.5).fract();
+                (PI * f).sin().max(0.0).powf(1.5)
+            } else {
+                let f = (u * s.teeth + self.phase * 3.1 + side * 0.25).fract();
+                let saw = 1.0 - f.powf(1.4);
+                let scallop = 1.0 - (PI * f).sin().max(0.0).powf(0.6);
+                saw + (scallop - saw) * s.crenate
+            };
+            w *= 1.0 - ramp * (s.tooth_depth * notch + s.fine_teeth * (1.0 - g));
         }
         w.max(0.0)
     }
@@ -741,7 +785,7 @@ impl Blade {
         // the middle of a lobe.
         let mid_w = (1.6 * px * (1.0 - 0.65 * u)).max(0.7);
         let mid = (-(v / mid_w) * (v / mid_w)).exp();
-        let sweep = s.vein_sweep * (across.abs().powf(1.3) - 1.0);
+        let sweep = s.vein_sweep * (across.abs().powf(s.vein_curve) - 1.0);
         let phase = if s.lobes > 0.0 {
             (u - sweep) * s.lobes + self.phase + if side > 0.0 { 0.0 } else { 0.45 } - 0.5
         } else {
@@ -836,9 +880,26 @@ struct BroadStyle {
     aspect: f32,
     /// Petiole length as a fraction of the leaf length.
     petiole: f32,
+    /// Petiole (rowan: leaf stalk) color and its width at the twig and at the blade, canvas
+    /// units of a spray.
+    stalk: [f32; 3],
+    stalk_width: (f32, f32),
     /// Base colors (linear, near neutral).
     green: [f32; 3],
+    /// Share of leaves showing their underside, the color it is paler toward and how far.
+    under_share: f32,
+    underside: ([f32; 3], f32),
+    /// How far a leaf may turn on its petiole, edge-on to the viewer (its painted width shrinks
+    /// by up to this fraction), and its tilt out of the card plane (normal-map slope).
+    turn: f32,
+    tilt: f32,
 }
+
+/// Leaflets of a compound (rowan) leaf: width as a fraction of their length.
+const PINNA_ASPECT: f32 = 0.3;
+
+/// Rowan's leaf stalk: reddish.
+const RACHIS: [f32; 3] = [0.5, 0.31, 0.26];
 
 fn broad_style(kind: LeafKind) -> BroadStyle {
     match kind {
@@ -850,18 +911,28 @@ fn broad_style(kind: LeafKind) -> BroadStyle {
                 teeth: 0.0,
                 tooth_depth: 0.0,
                 fine_teeth: 0.0,
+                crenate: 0.0,
+                teeth_from: 0.08,
+                teeth_at_veins: false,
                 lobes: 5.2,
                 lobe_depth: 0.45,
                 auricle: 0.32,
                 veins: 4.6,
                 vein_sweep: 0.12,
+                vein_curve: 1.3,
                 fold: 0.28,
                 blister: 0.5,
             },
             length: (0.14, 0.19),
             aspect: 0.62,
             petiole: 0.05,
+            stalk: TWIG,
+            stalk_width: (0.0045, 0.0035),
             green: [0.76, 0.9, 0.74],
+            under_share: 0.16,
+            underside: PALE_UNDERSIDE,
+            turn: 0.0,
+            tilt: 0.55,
         },
         LeafKind::Small => BroadStyle {
             shape: LeafShape {
@@ -871,20 +942,142 @@ fn broad_style(kind: LeafKind) -> BroadStyle {
                 teeth: 11.0,
                 tooth_depth: 0.09,
                 fine_teeth: 0.035,
+                crenate: 0.0,
+                teeth_from: 0.08,
+                teeth_at_veins: false,
                 lobes: 0.0,
                 lobe_depth: 0.0,
                 auricle: 0.0,
                 veins: 6.5,
                 vein_sweep: 0.2,
+                vein_curve: 1.3,
                 fold: 0.22,
                 blister: 0.2,
             },
             length: (0.075, 0.1),
             aspect: 0.78,
             petiole: 0.35,
+            stalk: TWIG,
+            stalk_width: (0.0045, 0.0035),
             green: [0.8, 0.92, 0.72],
+            under_share: 0.16,
+            underside: PALE_UNDERSIDE,
+            turn: 0.0,
+            tilt: 0.55,
         },
-        _ => BroadStyle {
+        LeafKind::Oval => BroadStyle {
+            // Beech: elliptic, widest at the middle with a short point; a wavy edge with a
+            // tiny tooth at each vein end; 7-ish straight parallel vein pairs; smooth and
+            // glossy, so little blistering. Goat willow shares it (broader, wrinkled).
+            shape: LeafShape {
+                a: 0.6,
+                b: 0.62,
+                tip: 0.22,
+                teeth: 7.5,
+                tooth_depth: 0.045,
+                fine_teeth: 0.0,
+                crenate: 0.0,
+                teeth_from: 0.12,
+                teeth_at_veins: true,
+                lobes: 0.0,
+                lobe_depth: 0.0,
+                auricle: 0.0,
+                veins: 7.5,
+                vein_sweep: 0.2,
+                vein_curve: 1.0,
+                fold: 0.26,
+                blister: 0.55,
+            },
+            length: (0.125, 0.16),
+            aspect: 0.62,
+            petiole: 0.08,
+            stalk: TWIG,
+            stalk_width: (0.0045, 0.0035),
+            green: [0.8, 0.92, 0.62],
+            // Many leaves show an underside paler mostly in blue: under a saturated green
+            // (beech) it barely shows, under a grey-green (goat willow) it reads as the felted
+            // silver underside, so the species color decides how silvery the crown is.
+            under_share: 0.3,
+            underside: ([0.94, 1.0, 1.16], 0.5),
+            turn: 0.15,
+            tilt: 0.45,
+        },
+        LeafKind::Round => BroadStyle {
+            // Aspen, alder: a round blade, coarse rounded teeth (with finer ones between:
+            // alder's double teeth), a blunt tip, 5-6 vein pairs, on a long thin petiole.
+            shape: LeafShape {
+                a: 0.5,
+                b: 0.46,
+                tip: 0.08,
+                teeth: 9.0,
+                tooth_depth: 0.075,
+                fine_teeth: 0.018,
+                crenate: 1.0,
+                teeth_from: 0.1,
+                teeth_at_veins: false,
+                lobes: 0.0,
+                lobe_depth: 0.0,
+                auricle: 0.0,
+                veins: 5.5,
+                vein_sweep: 0.3,
+                vein_curve: 1.3,
+                fold: 0.2,
+                blister: 0.5,
+            },
+            length: (0.1, 0.13),
+            aspect: 0.94,
+            petiole: 0.75,
+            stalk: TWIG,
+            stalk_width: (0.0032, 0.0026),
+            green: [0.8, 0.92, 0.7],
+            // Hanging loosely and turning in the wind: more undersides, many leaves seen
+            // edge-on or tipped well out of the card.
+            under_share: 0.24,
+            underside: PALE_UNDERSIDE,
+            turn: 0.5,
+            tilt: 0.9,
+        },
+        LeafKind::Pinnate => BroadStyle {
+            // Rowan: one "leaf" is a whole compound leaf (see `pinnate_leaf`); `shape` is its
+            // leaflets' (narrow oblong, a sharp point, sharply toothed in the outer two
+            // thirds), `aspect` the width of the whole leaf.
+            shape: LeafShape {
+                a: 0.55,
+                b: 0.6,
+                tip: 0.35,
+                teeth: 10.0,
+                tooth_depth: 0.13,
+                fine_teeth: 0.0,
+                crenate: 0.0,
+                teeth_from: 0.3,
+                teeth_at_veins: false,
+                lobes: 0.0,
+                lobe_depth: 0.0,
+                auricle: 0.0,
+                veins: 9.0,
+                vein_sweep: 0.25,
+                vein_curve: 1.3,
+                fold: 0.3,
+                blister: 0.25,
+            },
+            length: (0.3, 0.38),
+            aspect: 0.5,
+            petiole: 0.12,
+            stalk: RACHIS,
+            stalk_width: (0.0058, 0.0046),
+            green: [0.78, 0.9, 0.7],
+            under_share: 0.16,
+            underside: PALE_UNDERSIDE,
+            turn: 0.25,
+            tilt: 0.5,
+        },
+        // Needles and fronds have no blades: hazel's numbers only keep the single-leaf
+        // helpers ([`hero_leaf_frame`]) defined for every kind.
+        LeafKind::Broad
+        | LeafKind::LongNeedles
+        | LeafKind::ShortNeedles
+        | LeafKind::SoftNeedles
+        | LeafKind::Frond => BroadStyle {
             shape: LeafShape {
                 a: 0.42,
                 b: 0.62,
@@ -892,25 +1085,39 @@ fn broad_style(kind: LeafKind) -> BroadStyle {
                 teeth: 13.0,
                 tooth_depth: 0.06,
                 fine_teeth: 0.04,
+                crenate: 0.0,
+                teeth_from: 0.08,
+                teeth_at_veins: false,
                 lobes: 0.0,
                 lobe_depth: 0.0,
                 auricle: 0.0,
                 veins: 7.0,
                 vein_sweep: 0.22,
+                vein_curve: 1.3,
                 fold: 0.3,
                 blister: 0.9,
             },
             length: (0.13, 0.17),
             aspect: 0.86,
             petiole: 0.12,
+            stalk: TWIG,
+            stalk_width: (0.0045, 0.0035),
             green: [0.78, 0.9, 0.72],
+            under_share: 0.16,
+            underside: PALE_UNDERSIDE,
+            turn: 0.0,
+            tilt: 0.55,
         },
     }
 }
 
+/// The paler, greyer, matte underside of most leaves, and how far toward it they go.
+const PALE_UNDERSIDE: ([f32; 3], f32) = ([0.95, 1.0, 0.88], 0.32);
+
 /// A leaf's color: per-leaf brightness and hue, some older yellower leaves, some showing
 /// their paler underside.
-fn leaf_color(rng: &mut Rng, green: [f32; 3], under: bool) -> [f32; 3] {
+fn leaf_color(rng: &mut Rng, st: &BroadStyle, under: bool) -> [f32; 3] {
+    let green = st.green;
     let lum = rng.range(0.74, 1.04);
     let warm = rng.range(-1.0, 1.0);
     let mut c = [
@@ -923,8 +1130,7 @@ fn leaf_color(rng: &mut Rng, green: [f32; 3], under: bool) -> [f32; 3] {
         c = [c[0] * 1.18, c[1] * 1.04, c[2] * 0.55];
     }
     if under {
-        // Paler, greyer, matte.
-        c = mix3(c, [0.95, 1.0, 0.88], 0.32);
+        c = mix3(c, st.underside.0, st.underside.1);
     }
     c
 }
@@ -953,7 +1159,7 @@ fn push_leaf(
             .iter()
             .all(|p| p.x > 0.012 && p.y > 0.012 && p.x < 0.988 && p.y < 0.988);
         if inside {
-            let under = rng.chance(0.16);
+            let under = rng.chance(st.under_share);
             let spots = if rng.chance(0.1) {
                 [
                     (
@@ -975,10 +1181,10 @@ fn push_leaf(
                 base,
                 dir,
                 length,
-                width: length * st.aspect * rng.range(0.9, 1.1),
-                color: leaf_color(rng, st.green, under),
+                width: length * st.aspect * rng.range(0.9, 1.1) * turned(rng, st),
+                color: leaf_color(rng, st, under),
                 under,
-                tilt: Vec2::new(rng.range(-0.55, 0.55), rng.range(-0.55, 0.55)),
+                tilt: Vec2::new(rng.range(-st.tilt, st.tilt), rng.range(-st.tilt, st.tilt)),
                 phase: rng.range(0.0, 1.0),
                 spots,
                 seed: rng.next_u64(),
@@ -986,6 +1192,16 @@ fn push_leaf(
             return;
         }
         length *= 0.82;
+    }
+}
+
+/// How much narrower a leaf turned on its petiole looks (1 for kinds whose leaves lie flat).
+fn turned(rng: &mut Rng, st: &BroadStyle) -> f32 {
+    if st.turn > 0.0 {
+        // Most leaves face the viewer more or less; a few are nearly edge-on.
+        1.0 - st.turn * rng.range(0.0, 1.0).powi(2)
+    } else {
+        1.0
     }
 }
 
@@ -1017,27 +1233,127 @@ const TWIG: [f32; 3] = [0.36, 0.3, 0.24];
 /// Twigs of a spray: each a path (canvas units) and its width at the base.
 type Twigs = Vec<(Vec<Vec2>, f32)>;
 
-/// A twig spray of broad leaves (oak, hazel, birch), growing up from the bottom center.
+/// A twig spray of broad leaves (oak, hazel, birch, beech, aspen, rowan), growing up from
+/// the bottom center.
 fn broad_spray(cv: &mut Canvas, kind: LeafKind, rng: &mut Rng) {
     let (leaves, twigs) = broad_spray_layout(kind, rng);
+    let st = broad_style(kind);
     for (path, w) in &twigs {
         cv.stem_path(path, *w, *w * 0.45, TWIG);
     }
     // Petioles, then the leaves (in growth order: later ones overlap earlier ones).
     for l in &leaves {
-        let at = l.base - l.dir * l.length * broad_style(kind).petiole;
+        let at = l.base - l.dir * l.length * st.petiole;
         cv.stem(
             at,
             l.base + l.dir * l.length * 0.04,
-            0.0045,
-            0.0035,
-            TWIG,
-            mix3(TWIG, l.color, 0.5),
+            st.stalk_width.0,
+            st.stalk_width.1,
+            st.stalk,
+            mix3(st.stalk, l.color, 0.5),
         );
     }
     for l in &leaves {
-        cv.blade(l);
+        paint_leaf(cv, kind, l);
     }
+}
+
+/// Paint one leaf of a layout: a blade, or for rowan a whole compound leaf.
+fn paint_leaf(cv: &mut Canvas, kind: LeafKind, l: &Blade) {
+    match kind {
+        LeafKind::Pinnate => pinnate_leaf(cv, l),
+        LeafKind::Broad
+        | LeafKind::Small
+        | LeafKind::Lobed
+        | LeafKind::Oval
+        | LeafKind::Round
+        | LeafKind::LongNeedles
+        | LeafKind::ShortNeedles
+        | LeafKind::SoftNeedles
+        | LeafKind::Frond => cv.blade(l),
+    }
+}
+
+/// A compound leaf (rowan) in the frame of `l`: a reddish stalk from `l.base` along `l.dir`
+/// with 5-8 opposite pairs of narrow leaflets and one at the end, the whole leaf `l.length`
+/// long and about `l.width` wide. Its leaflets share `l`'s color, face and tilt, each a
+/// little different; everything else follows from `l.seed`.
+fn pinnate_leaf(cv: &mut Canvas, l: &Blade) {
+    let mut rng = Rng::new(l.seed ^ 0x9177);
+    let pairs = rng.range_i32(5, 9);
+    let pinna = l.width * 0.55;
+    let terminal = (pinna * 0.92).min(l.length * 0.3);
+    // The stalk arches a little and runs to the end leaflet's base.
+    let rachis = shoot(
+        l.base,
+        l.dir,
+        l.length - terminal,
+        rng.range(-0.22, 0.22),
+        6,
+    );
+    let leaflet = |rng: &mut Rng, at: Vec2, dir: Vec2, length: f32| {
+        let lum = rng.range(0.92, 1.07);
+        let warm = rng.range(-0.04, 0.04);
+        Blade {
+            shape: l.shape,
+            base: at,
+            dir,
+            length,
+            width: length * PINNA_ASPECT * rng.range(0.88, 1.1),
+            color: [
+                l.color[0] * lum * (1.0 + warm),
+                l.color[1] * lum,
+                l.color[2] * lum * (1.0 - warm),
+            ],
+            under: l.under,
+            tilt: l.tilt * 0.7 + Vec2::new(rng.range(-0.25, 0.25), rng.range(-0.25, 0.25)),
+            phase: rng.range(0.0, 1.0),
+            spots: if l.spots[0].2 > 0.0 && rng.chance(0.3) {
+                l.spots
+            } else {
+                [(0.0, 0.0, 0.0); 2]
+            },
+            seed: rng.next_u64(),
+        }
+    };
+    let mut leaflets = Vec::new();
+    for k in 0..pairs {
+        let t = 0.04 + 0.94 * k as f32 / pairs as f32;
+        let (p, d) = along(&rachis, t);
+        // Leaflets lean further forward toward the tip, and are a little shorter at both ends.
+        let size = (0.8 + 0.2 * (PI * t).sin()) * rng.range(0.92, 1.06);
+        for side in [-1.0f32, 1.0] {
+            let a = side * rng.range(1.05, 1.3) * (1.0 - 0.22 * t);
+            let dir = rot(d, a);
+            leaflets.push(leaflet(
+                &mut rng,
+                p + dir * 0.002 * l.length,
+                dir,
+                pinna * size,
+            ));
+        }
+    }
+    let (end, d) = along(&rachis, 1.0);
+    leaflets.push(leaflet(&mut rng, end, d, terminal));
+    for b in &leaflets {
+        cv.blade(b);
+    }
+    // The stalk on top of the leaflets' bases.
+    let w = l.length * 0.018;
+    cv.stem_path(&rachis, w, w * 0.45, RACHIS);
+}
+
+/// A zigzag shoot (beech): it turns a little at every node, alternately one way and the other,
+/// while bending by `bend` overall. The nodes are its points.
+fn zigzag(start: Vec2, dir: Vec2, length: f32, bend: f32, segs: usize, zig: f32) -> Vec<Vec2> {
+    let mut pts = vec![start];
+    for k in 0..segs {
+        let f = (k as f32 + 0.5) / segs as f32;
+        let z = if k % 2 == 0 { zig } else { -zig };
+        let d = rot(dir, bend * f + z);
+        pts.push(*pts.last().unwrap() + d * length / segs as f32);
+    }
+    pts
 }
 
 /// Where the leaves and twigs of a broadleaf spray go (see [`broad_spray`]).
@@ -1142,7 +1458,147 @@ fn broad_spray_layout(kind: LeafKind, rng: &mut Rng) -> (Vec<Blade>, Twigs) {
                 twigs.push((s, 0.006));
             }
         }
-        _ => {
+        LeafKind::Oval => {
+            // Beech (and goat willow): zigzag shoots turning at every leaf, the leaves
+            // alternating in two flat rows nearly square to the shoot, each on the outside of
+            // its bend, so a spray is a flat plate of leaves.
+            let up_dir = rot(up, rng.range(-0.1, 0.1));
+            let main = zigzag(
+                base,
+                up_dir,
+                rng.range(0.82, 0.9),
+                rng.range(-0.3, 0.3),
+                8,
+                0.17,
+            );
+            let mut shoots = vec![(main.clone(), 0.011)];
+            let flip = if rng.chance(0.5) { 1.0 } else { -1.0 };
+            for (k, node) in [2usize, 3, 5, 6].iter().enumerate() {
+                let p = main[*node];
+                let d = (main[node + 1] - main[node - 1]).normalize_or(up);
+                let sgn = flip * if k % 2 == 0 { 1.0 } else { -1.0 };
+                let len = rng.range(0.34, 0.44) * (1.0 - 0.18 * k as f32);
+                let segs = 6 - k / 2;
+                shoots.push((
+                    zigzag(
+                        p,
+                        rot(d, sgn * rng.range(0.7, 0.95)),
+                        len,
+                        -sgn * 0.3,
+                        segs,
+                        0.2,
+                    ),
+                    0.007,
+                ));
+            }
+            for (s, w) in &shoots {
+                let n = s.len() - 1;
+                for j in 1..n {
+                    let d = (s[j + 1] - s[j - 1]).normalize_or(up);
+                    // The shoot turns away from each leaf.
+                    let sgn = if j % 2 == 0 { -1.0 } else { 1.0 };
+                    let t = j as f32 / n as f32;
+                    let ld = rot(d, sgn * rng.range(0.95, 1.3));
+                    push_leaf(&mut leaves, rng, &st, s[j], ld, 1.0 - 0.3 * t);
+                }
+                let (tip, d) = along(s, 1.0);
+                push_leaf(&mut leaves, rng, &st, tip, d, 0.7);
+                twigs.push((s.clone(), *w));
+            }
+        }
+        LeafKind::Round => {
+            // Aspen, alder: a shoot with two side shoots, the leaves on long petioles turned
+            // every which way (some hanging back past their twig), crowding at the tips.
+            let main = shoot(
+                base,
+                rot(up, rng.range(-0.15, 0.15)),
+                rng.range(0.6, 0.72),
+                rng.range(-0.3, 0.3),
+                6,
+            );
+            let mut shoots = vec![(main.clone(), 0.011)];
+            let flip = if rng.chance(0.5) { 1.0 } else { -1.0 };
+            for (k, t) in [0.35f32, 0.6].iter().enumerate() {
+                let (p, d) = along(&main, *t);
+                let sgn = flip * if k % 2 == 0 { 1.0 } else { -1.0 };
+                shoots.push((
+                    shoot(
+                        p,
+                        rot(d, sgn * rng.range(0.6, 0.95)),
+                        rng.range(0.3, 0.4),
+                        -sgn * 0.2,
+                        4,
+                    ),
+                    0.007,
+                ));
+            }
+            for (s, w) in &shoots {
+                let steps = 6;
+                for j in 1..=steps {
+                    let t = j as f32 / steps as f32 * 0.78 + 0.06;
+                    let (p, d) = along(s, t);
+                    let sgn = if j % 2 == 0 { 1.0 } else { -1.0 };
+                    let ld = rot(d, sgn * rng.range(0.5, 2.3));
+                    let size = rng.range(0.8, 1.05);
+                    push_leaf(&mut leaves, rng, &st, p, ld, size);
+                }
+                let (tip, d) = along(s, 1.0);
+                let k = rng.range_i32(4, 6);
+                for j in 0..k {
+                    let a = (j as f32 / (k - 1) as f32 - 0.5) * rng.range(2.4, 3.2)
+                        + rng.range(-0.2, 0.2);
+                    let size = rng.range(0.75, 1.0);
+                    push_leaf(&mut leaves, rng, &st, tip, rot(d, a), size);
+                }
+                twigs.push((s.clone(), *w));
+            }
+        }
+        LeafKind::Pinnate => {
+            // Rowan: a stout twig whose tip and short side shoots each hold a fan of compound
+            // leaves; the leader's fan on top.
+            let main = shoot(
+                base,
+                rot(up, rng.range(-0.12, 0.12)),
+                rng.range(0.4, 0.5),
+                rng.range(-0.25, 0.25),
+                4,
+            );
+            let mut tips = vec![along(&main, 1.0)];
+            let flip = if rng.chance(0.5) { 1.0 } else { -1.0 };
+            for (k, t) in [0.4f32, 0.7].iter().enumerate() {
+                let (p, d) = along(&main, *t);
+                let sgn = flip * if k % 2 == 0 { 1.0 } else { -1.0 };
+                let s = shoot(
+                    p,
+                    rot(d, sgn * rng.range(0.8, 1.1)),
+                    rng.range(0.16, 0.22),
+                    -sgn * 0.3,
+                    3,
+                );
+                tips.push(along(&s, 1.0));
+                twigs.push((s, 0.009));
+            }
+            twigs.push((main, 0.014));
+            for (i, (tip, d)) in tips.iter().enumerate().rev() {
+                let k = if i == 0 {
+                    rng.range_i32(3, 6)
+                } else {
+                    rng.range_i32(2, 4)
+                };
+                for j in 0..k {
+                    let a = (j as f32 / (k - 1) as f32 - 0.5) * rng.range(2.0, 2.7)
+                        + rng.range(-0.15, 0.15);
+                    let size = rng.range(0.85, 1.05);
+                    push_leaf(&mut leaves, rng, &st, *tip, rot(*d, a), size);
+                }
+            }
+        }
+        // Needles and fronds are not painted as broadleaf sprays.
+        LeafKind::LongNeedles
+        | LeafKind::ShortNeedles
+        | LeafKind::SoftNeedles
+        | LeafKind::Frond => {}
+        LeafKind::Broad => {
             // Hazel: arching shoots with leaves alternating in two flat rows.
             let main = shoot(
                 base,
@@ -1187,8 +1643,34 @@ fn broad_spray_layout(kind: LeafKind, rng: &mut Rng) -> (Vec<Blade>, Twigs) {
 
 /// A cluster of shoot tips seen from outside the crown: rosettes of leaves filling a disc.
 fn broad_cluster(cv: &mut Canvas, kind: LeafKind, rng: &mut Rng) {
-    for l in &broad_cluster_layout(kind, rng) {
-        cv.blade(l);
+    let leaves = broad_cluster_layout(kind, rng);
+    let st = broad_style(kind);
+    // Long stalks show between the rosettes' leaves (aspen's petioles, rowan's leaf stalks).
+    let stalks = match kind {
+        LeafKind::Round | LeafKind::Pinnate => true,
+        LeafKind::Broad
+        | LeafKind::Small
+        | LeafKind::Lobed
+        | LeafKind::Oval
+        | LeafKind::LongNeedles
+        | LeafKind::ShortNeedles
+        | LeafKind::SoftNeedles
+        | LeafKind::Frond => false,
+    };
+    if stalks {
+        for l in &leaves {
+            cv.stem(
+                l.base - l.dir * l.length * st.petiole,
+                l.base + l.dir * l.length * 0.04,
+                st.stalk_width.0,
+                st.stalk_width.1,
+                st.stalk,
+                mix3(st.stalk, l.color, 0.5),
+            );
+        }
+    }
+    for l in &leaves {
+        paint_leaf(cv, kind, l);
     }
 }
 
@@ -1197,22 +1679,35 @@ fn broad_cluster_layout(kind: LeafKind, rng: &mut Rng) -> Vec<Blade> {
     let st = broad_style(kind);
     let center = Vec2::splat(0.5);
     let mut leaves = Vec::new();
-    let rosettes = if kind == LeafKind::Small { 7 } else { 5 };
+    // Rosettes, leaves in each (and one more in the middle one), their size, and how far the
+    // outer rosettes sit from the middle.
+    let (rosettes, per, middle, size, reach) = match kind {
+        LeafKind::Small => (7, 6, 0, 1.1, (0.16, 0.24)),
+        LeafKind::Broad | LeafKind::Lobed => (5, 6, 1, 0.95, (0.16, 0.24)),
+        // Beech: smaller leaves in more, flatter rosettes.
+        LeafKind::Oval => (6, 6, 1, 1.0, (0.16, 0.24)),
+        // Aspen: long petioles spread each rosette wide.
+        LeafKind::Round => (6, 5, 1, 0.95, (0.17, 0.25)),
+        // Rowan: a few big rosettes of compound leaves, foreshortened toward the viewer.
+        LeafKind::Pinnate => (4, 5, 1, 0.78, (0.12, 0.18)),
+        // Needles and fronds have no leaf rosettes.
+        LeafKind::LongNeedles
+        | LeafKind::ShortNeedles
+        | LeafKind::SoftNeedles
+        | LeafKind::Frond => {
+            return leaves;
+        }
+    };
     let mut centers = vec![center];
     for k in 1..rosettes {
         let a = k as f32 * 2.4 + rng.range(-0.3, 0.3);
-        centers.push(center + Vec2::new(a.cos(), a.sin()) * rng.range(0.16, 0.24));
+        centers.push(center + Vec2::new(a.cos(), a.sin()) * rng.range(reach.0, reach.1));
     }
     for (i, c) in centers.iter().enumerate().rev() {
-        let k = if kind == LeafKind::Small {
-            6
-        } else {
-            6 + (i == 0) as i32
-        };
+        let k = per + middle * (i == 0) as i32;
         let a0 = rng.range(0.0, TAU);
         for j in 0..k {
             let a = a0 + j as f32 / k as f32 * TAU + rng.range(-0.25, 0.25);
-            let size = if kind == LeafKind::Small { 1.1 } else { 0.95 };
             push_leaf(&mut leaves, rng, &st, *c, Vec2::new(a.cos(), a.sin()), size);
         }
     }
@@ -1524,13 +2019,177 @@ fn needle_tuft(cv: &mut Canvas, rng: &mut Rng, long: bool) {
     }
 }
 
+const LARCH_NEEDLE: [f32; 3] = [0.8, 0.94, 0.68];
+
+/// How long a larch needle is on a spray card (canvas units): a card spans about a meter of
+/// branch, and a European larch's needles are 2-4 cm; drawn about twice as long (as spruce's
+/// are) so the rosettes read as soft tufts covering the twigs rather than specks on a pole.
+const LARCH_NEEDLE_LENGTH: f32 = 0.058;
+
+/// How wide a larch needle is painted (canvas units): softer and finer than spruce's.
+const LARCH_NEEDLE_WIDTH: f32 = 0.0027;
+
+/// A larch spur shoot at `at`: 25-40 soft needles splaying from a knob, around `dir` and up to
+/// `spread` radians either side of it (π: a rosette seen face-on, splayed all round).
+fn larch_rosette(cv: &mut Canvas, rng: &mut Rng, at: Vec2, dir: Vec2, spread: f32) {
+    let n = rng.range_i32(25, 41);
+    let fresh = rng.range(0.1, 0.6);
+    for _ in 0..n {
+        let nd = rot(dir, rng.range(-spread, spread));
+        // Needles pointing toward or away from the viewer look shorter.
+        let l = LARCH_NEEDLE_LENGTH * rng.range(0.65, 1.15) * rng.range(0.4, 1.0);
+        let bend = rot(nd, rng.range(-0.3, 0.3));
+        let c = needle_color(rng, LARCH_NEEDLE, fresh);
+        let p = at + nd * rng.range(0.0, 0.003);
+        let Some(k) = cv.needle_width(LARCH_NEEDLE_WIDTH, l) else {
+            continue;
+        };
+        let (w, mid) = (LARCH_NEEDLE_WIDTH * k, p + nd * l * 0.5);
+        cv.stem(p, mid, w, w * 0.9, scale3(c, 0.8), c);
+        cv.stem(mid, mid + bend * l * 0.5, w * 0.9, w * 0.4, c, c);
+    }
+    // The spur: a dark knob the needles spring from.
+    cv.stem(
+        at - dir * 0.003,
+        at + dir * 0.002,
+        0.0075,
+        0.0065,
+        [0.3, 0.24, 0.18],
+        [0.38, 0.3, 0.22],
+    );
+}
+
+/// Larch spur shoots along `path` from `t0` to `t1`, about `step` (canvas units) apart on
+/// alternating sides: most rosettes splay out sideways, some face the viewer.
+fn larch_spurs(cv: &mut Canvas, rng: &mut Rng, path: &[Vec2], t0: f32, t1: f32, step: f32) {
+    let total = path_length(path);
+    let n = ((total * (t1 - t0)) / step).round().max(1.0) as usize;
+    for i in 0..n {
+        let t = t0 + (t1 - t0) * (i as f32 + rng.range(0.2, 0.8)) / n as f32;
+        let (p, d) = along(path, t);
+        let sgn = if i % 2 == 0 { 1.0 } else { -1.0 };
+        let out = rot(d, sgn * rng.range(0.5, 1.1));
+        let spread = if rng.chance(0.3) {
+            PI
+        } else {
+            rng.range(0.9, 1.4)
+        };
+        let at = p + out * rng.range(0.003, 0.007);
+        larch_rosette(cv, rng, at, out, spread);
+    }
+}
+
+/// Single needles spiralling round the last stretch of a young long shoot, from `t0` to its
+/// tip.
+fn larch_long_shoot(cv: &mut Canvas, rng: &mut Rng, path: &[Vec2], t0: f32) {
+    needle_brush(
+        cv,
+        rng,
+        path,
+        t0,
+        LARCH_NEEDLE_LENGTH * 0.75,
+        (0.45, 1.0),
+        LARCH_NEEDLE_WIDTH,
+        0.0085,
+        LARCH_NEEDLE,
+        0.5,
+    );
+}
+
+/// Larch: a branch end of thin twigs drooping from a leader, spur shoots with their rosettes
+/// of needles spaced along the older wood and single needles on the young tips; far more
+/// sky shows through than through a spruce spray.
+fn larch_spray(cv: &mut Canvas, rng: &mut Rng) {
+    let base = Vec2::new(0.5, 0.995);
+    let main = shoot(
+        base,
+        rot(Vec2::NEG_Y, rng.range(-0.12, 0.12)),
+        rng.range(0.82, 0.9),
+        rng.range(-0.3, 0.3),
+        8,
+    );
+    let mut shoots: Vec<Vec<Vec2>> = Vec::new();
+    let n = rng.range_i32(7, 10);
+    let flip = if rng.chance(0.5) { 1.0 } else { -1.0 };
+    for k in 0..n {
+        let t = 0.1 + 0.74 * (k as f32 + rng.range(0.0, 0.5)) / n as f32;
+        let (p, d) = along(&main, t);
+        let sgn = flip * if k % 2 == 0 { 1.0 } else { -1.0 };
+        let l = rng.range(0.3, 0.42) * (1.0 - 0.35 * t);
+        // Side twigs leave the leader at a wide angle and droop, hanging like a curtain, with
+        // a fine branchlet or two hanging from them.
+        let s = shoot(
+            p,
+            rot(d, sgn * rng.range(0.6, 0.95)),
+            l,
+            sgn * rng.range(1.0, 1.6),
+            6,
+        );
+        for _ in 0..rng.range_i32(1, 4) {
+            let (q, e) = along(&s, rng.range(0.25, 0.7));
+            let b = shoot(q, rot(e, sgn * rng.range(0.6, 1.0)), l * 0.4, sgn * 0.5, 3);
+            shoots.push(b);
+        }
+        shoots.push(s);
+    }
+    cv.stem_path(&main, 0.011, 0.004, TWIG);
+    for s in &shoots {
+        cv.stem_path(s, 0.0055, 0.0025, TWIG);
+    }
+    shoots.push(main);
+    for s in &shoots {
+        // The last 8 cm or so grew this year: single needles; spurs on the wood behind.
+        let young = (1.0 - 0.08 / path_length(s).max(1e-3)).clamp(0.4, 0.9);
+        larch_spurs(cv, rng, s, 0.06, young, 0.023);
+        larch_long_shoot(cv, rng, s, young);
+    }
+}
+
+/// A larch branch end seen from its tip: twigs radiating from the middle with spurs along
+/// them, rosettes seen face-on between them and one in the middle.
+fn larch_tuft(cv: &mut Canvas, rng: &mut Rng) {
+    let c = Vec2::splat(0.5);
+    let k = rng.range_i32(7, 11);
+    let a0 = rng.range(0.0, TAU);
+    let shoots: Vec<_> = (0..k)
+        .map(|i| {
+            let a = a0 + i as f32 / k as f32 * TAU + rng.range(-0.25, 0.25);
+            shoot(
+                c,
+                Vec2::new(a.cos(), a.sin()),
+                rng.range(0.26, 0.38),
+                rng.range(-0.4, 0.4),
+                4,
+            )
+        })
+        .collect();
+    for s in &shoots {
+        cv.stem_path(s, 0.007, 0.003, TWIG);
+    }
+    for s in &shoots {
+        larch_spurs(cv, rng, s, 0.12, 0.8, 0.022);
+        larch_long_shoot(cv, rng, s, 0.8);
+    }
+    for _ in 0..rng.range_i32(14, 22) {
+        let a = rng.range(0.0, TAU);
+        let at = c + Vec2::new(a.cos(), a.sin()) * rng.range(0.08, 0.3);
+        larch_rosette(cv, rng, at, Vec2::new(a.cos(), a.sin()), PI);
+    }
+    larch_rosette(cv, rng, c, Vec2::NEG_Y, PI);
+}
+
 /// Paint one cell of an atlas (or the whole frond image) on its own canvas.
 fn paint_cell(kind: LeafKind, cell: usize, size: u32, seed: u64, min_needle_px: f32) -> Canvas {
     let mut cv = Canvas::new(size);
     cv.min_needle_px = min_needle_px;
     let mut rng = cell_rng(seed, cell);
     match kind {
-        LeafKind::Broad | LeafKind::Small | LeafKind::Lobed => {
+        LeafKind::Broad
+        | LeafKind::Small
+        | LeafKind::Lobed
+        | LeafKind::Oval
+        | LeafKind::Round
+        | LeafKind::Pinnate => {
             if cell == CLUSTER_CELL {
                 broad_cluster(&mut cv, kind, &mut rng);
             } else {
@@ -1545,6 +2204,13 @@ fn paint_cell(kind: LeafKind, cell: usize, size: u32, seed: u64, min_needle_px: 
                 pine_spray(&mut cv, &mut rng);
             } else {
                 spruce_spray(&mut cv, &mut rng);
+            }
+        }
+        LeafKind::SoftNeedles => {
+            if cell == CLUSTER_CELL {
+                larch_tuft(&mut cv, &mut rng);
+            } else {
+                larch_spray(&mut cv, &mut rng);
             }
         }
         LeafKind::Frond => {
@@ -1619,8 +2285,19 @@ pub struct SprayLayout {
 /// ([`leaf_textures`]), for building the same spray from single leaves
 /// ([`hero_leaf_textures`]). `None` for needles and fronds.
 pub fn spray_layout(kind: LeafKind, cell: usize, seed: u64) -> Option<SprayLayout> {
-    if !matches!(kind, LeafKind::Broad | LeafKind::Small | LeafKind::Lobed) {
-        return None;
+    match kind {
+        LeafKind::Broad
+        | LeafKind::Small
+        | LeafKind::Lobed
+        | LeafKind::Oval
+        | LeafKind::Round
+        | LeafKind::Pinnate => {}
+        LeafKind::LongNeedles
+        | LeafKind::ShortNeedles
+        | LeafKind::SoftNeedles
+        | LeafKind::Frond => {
+            return None;
+        }
     }
     let mut rng = cell_rng(seed, cell % (ATLAS_CELLS * ATLAS_CELLS) as usize);
     let (blades, twigs) = if cell % (ATLAS_CELLS * ATLAS_CELLS) as usize == CLUSTER_CELL {
@@ -1693,7 +2370,8 @@ pub fn atlas_seed(style: crate::species::LeafStyle) -> u64 {
 
 /// An atlas of single leaves, [`HERO_CELLS`]² cells, each one leaf of the kind's spray
 /// painting (shape, color, spots) upright on its petiole ([`hero_leaf_frame`]); the last
-/// cell is solid twig. For crowns built leaf by leaf up close.
+/// cell is solid twig. For crowns built leaf by leaf up close. A rowan "leaf" is a whole
+/// compound leaf, as in its sprays' layouts ([`spray_layout`]).
 pub fn hero_leaf_textures(kind: LeafKind, size: u32, seed: u64) -> LeafTextures {
     let n = HERO_CELLS;
     let cs = (size / n).max(1);
@@ -1710,14 +2388,16 @@ pub fn hero_leaf_textures(kind: LeafKind, size: u32, seed: u64) -> LeafTextures 
                         cv.line(Vec2::new(0.5, 1.0), Vec2::new(0.5, 0.0), 0.9, 0.9, TWIG);
                         return cv;
                     }
-                    let under = c % 6 == 5;
+                    // Every n-th leaf shows its underside, as often as in the sprays.
+                    let every = (1.0 / st.under_share).round().max(1.0) as usize;
+                    let under = c % every == every - 1;
                     let blade = Blade {
                         shape: st.shape,
                         base: Vec2::new(0.5, base_y),
                         dir: Vec2::NEG_Y,
                         length,
                         width: length * st.aspect * rng.range(0.92, 1.08),
-                        color: leaf_color(&mut rng, st.green, under),
+                        color: leaf_color(&mut rng, st, under),
                         under,
                         tilt: Vec2::ZERO,
                         phase: rng.range(0.0, 1.0),
@@ -1731,15 +2411,29 @@ pub fn hero_leaf_textures(kind: LeafKind, size: u32, seed: u64) -> LeafTextures 
                         },
                         seed: rng.next_u64(),
                     };
+                    let (w0, w1) = match kind {
+                        // Running on into the compound leaf's stalk (see `pinnate_leaf`).
+                        LeafKind::Pinnate => (length * 0.024, length * 0.019),
+                        // Long and thin.
+                        LeafKind::Round => (0.014, 0.011),
+                        LeafKind::Broad
+                        | LeafKind::Small
+                        | LeafKind::Lobed
+                        | LeafKind::Oval
+                        | LeafKind::LongNeedles
+                        | LeafKind::ShortNeedles
+                        | LeafKind::SoftNeedles
+                        | LeafKind::Frond => (0.02, 0.015),
+                    };
                     cv.stem(
                         Vec2::new(0.5, HERO_PETIOLE_Y),
                         blade.base + blade.dir * length * 0.04,
-                        0.02,
-                        0.015,
-                        TWIG,
-                        mix3(TWIG, blade.color, 0.5),
+                        w0,
+                        w1,
+                        st.stalk,
+                        mix3(st.stalk, blade.color, 0.5),
                     );
-                    cv.blade(&blade);
+                    paint_leaf(&mut cv, kind, &blade);
                     cv
                 })
             })
@@ -1874,9 +2568,13 @@ fn mass_cell(kind: LeafKind, cell: usize, cs: u32, seed: u64, min_px: f32) -> Ca
     let leaf = match kind {
         LeafKind::Lobed => 0.07,
         LeafKind::Broad => 0.06,
+        LeafKind::Oval => 0.055,
+        LeafKind::Round => 0.05,
         LeafKind::Small => 0.04,
+        // The leaflets.
+        LeafKind::Pinnate => 0.04,
         LeafKind::LongNeedles => 0.035,
-        LeafKind::ShortNeedles | LeafKind::Frond => 0.03,
+        LeafKind::ShortNeedles | LeafKind::SoftNeedles | LeafKind::Frond => 0.03,
     } * cs as f32;
     let edge = (0.04 * cs as f32).max(1.0);
     let cell_seed = seed ^ (cell as u64).wrapping_mul(0x51ed_270b) ^ 0x3a55;
@@ -1988,8 +2686,12 @@ mod tests {
             LeafKind::Broad,
             LeafKind::Small,
             LeafKind::Lobed,
+            LeafKind::Oval,
+            LeafKind::Round,
+            LeafKind::Pinnate,
             LeafKind::LongNeedles,
             LeafKind::ShortNeedles,
+            LeafKind::SoftNeedles,
             LeafKind::Frond,
         ] {
             let img = leaf_texture(kind, 128, 7);
@@ -2036,8 +2738,12 @@ mod tests {
             LeafKind::Broad,
             LeafKind::Small,
             LeafKind::Lobed,
+            LeafKind::Oval,
+            LeafKind::Round,
+            LeafKind::Pinnate,
             LeafKind::LongNeedles,
             LeafKind::ShortNeedles,
+            LeafKind::SoftNeedles,
         ] {
             let leaves = leaf_textures(kind, 256, 7).color;
             let mass = mass_textures(kind, 256, 7).color;
@@ -2058,7 +2764,11 @@ mod tests {
                 .count() as f32
                 / (data.len() / 4) as f32
         };
-        for kind in [LeafKind::LongNeedles, LeafKind::ShortNeedles] {
+        for kind in [
+            LeafKind::LongNeedles,
+            LeafKind::ShortNeedles,
+            LeafKind::SoftNeedles,
+        ] {
             let img = leaf_texture(kind, 256, 7);
             let c0 = opaque(&img.data);
             for (i, mip) in img.mips.iter().enumerate().take(5) {
@@ -2112,6 +2822,59 @@ mod tests {
             }
             assert!(bumpy > 150 && flat > 200, "{kind:?} {bumpy} {flat}");
         }
+    }
+
+    #[test]
+    fn every_leaf_style_has_its_own_kind() {
+        use crate::species::LeafStyle;
+        let styles = [
+            LeafStyle::Broad,
+            LeafStyle::Small,
+            LeafStyle::LongNeedles,
+            LeafStyle::ShortNeedles,
+            LeafStyle::Frond,
+            LeafStyle::Lobed,
+            LeafStyle::Oval,
+            LeafStyle::Round,
+            LeafStyle::Pinnate,
+            LeafStyle::SoftNeedles,
+        ];
+        let kinds: std::collections::HashSet<_> = styles.iter().map(|s| kind_of(*s)).collect();
+        assert_eq!(kinds.len(), styles.len());
+        assert!(kind_of(LeafStyle::SoftNeedles).is_needles());
+    }
+
+    #[test]
+    fn new_broadleaf_kinds_lay_out_sprays_and_single_leaves() {
+        for kind in [LeafKind::Oval, LeafKind::Round, LeafKind::Pinnate] {
+            for cell in 0..(ATLAS_CELLS * ATLAS_CELLS) as usize {
+                let layout = spray_layout(kind, cell, 7).expect("broadleaf layout");
+                assert!(layout.leaves.len() >= 4, "{kind:?} cell {cell}");
+                assert_eq!(layout.twigs.is_empty(), cell == CLUSTER_CELL, "{kind:?}");
+                for l in &layout.leaves {
+                    for p in [l.at, l.base, l.base + l.dir * l.length] {
+                        assert!(p.cmpge(Vec2::ZERO).all() && p.cmple(Vec2::ONE).all());
+                    }
+                }
+            }
+            // Each single leaf stays inside the part of its cell the meshes draw.
+            let t = hero_leaf_textures(kind, 256, 7);
+            let (r0, r1) = hero_leaf_rect(kind);
+            let cs = 256 / HERO_CELLS;
+            let mut inside = 0;
+            for (i, p) in t.color.data.as_chunks::<4>().0.iter().enumerate() {
+                let (x, y) = (i as u32 % 256, i as u32 / 256);
+                if (y / cs) * HERO_CELLS + x / cs == HERO_TWIG_CELL as u32 || p[3] < 128 {
+                    continue;
+                }
+                let q = Vec2::new((x % cs) as f32 + 0.5, (y % cs) as f32 + 0.5) / cs as f32;
+                let ok = q.cmpge(r0 - 0.02).all() && q.cmple(r1 + 0.02).all();
+                assert!(ok, "{kind:?} leaf texel {q} outside {r0}..{r1}");
+                inside += 1;
+            }
+            assert!(inside > 256 * 256 / 20, "{kind:?} {inside}");
+        }
+        assert!(spray_layout(LeafKind::SoftNeedles, 0, 7).is_none());
     }
 
     #[test]

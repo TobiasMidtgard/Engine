@@ -19,11 +19,11 @@ use engine_assets::{Assets, Handle};
 use engine_core::prelude::*;
 use engine_core::tasks::AsyncComputeTaskPool;
 use engine_render::{Camera, DitherFade, Mesh, MeshRenderer, NoVirtualGeometry, StandardMaterial};
-use engine_world::{ForestCover, Ground, WorldShift};
+use engine_world::{ForestCover, Ground, StandMix, WorldShift};
 
 use crate::assets::FoliageVisuals;
 use crate::meshgen::MeshBuilder;
-use crate::meshgen::textures::{CLUSTER_CELL, LeafKind, atlas_cell};
+use crate::meshgen::textures::{CLUSTER_CELL, LeafKind, atlas_cell, kind_of};
 use crate::near_woods::NearWoodsTree;
 use crate::scenery_tree::SceneryTree;
 use crate::species::PlantLibrary;
@@ -90,10 +90,25 @@ pub(crate) enum FarTree {
     Pine,
     Oak,
     Birch,
+    Beech,
+    Larch,
+    Alder,
+    Aspen,
+    MountainBirch,
 }
 
 impl FarTree {
-    const ALL: [FarTree; 4] = [FarTree::Spruce, FarTree::Pine, FarTree::Oak, FarTree::Birch];
+    pub(crate) const ALL: [FarTree; 9] = [
+        FarTree::Spruce,
+        FarTree::Pine,
+        FarTree::Oak,
+        FarTree::Birch,
+        FarTree::Beech,
+        FarTree::Larch,
+        FarTree::Alder,
+        FarTree::Aspen,
+        FarTree::MountainBirch,
+    ];
 
     pub(crate) fn species(self) -> &'static str {
         match self {
@@ -101,16 +116,30 @@ impl FarTree {
             FarTree::Pine => "pine",
             FarTree::Oak => "oak",
             FarTree::Birch => "birch",
+            FarTree::Beech => "beech",
+            FarTree::Larch => "larch",
+            FarTree::Alder => "alder",
+            FarTree::Aspen => "aspen",
+            FarTree::MountainBirch => "mountain birch",
         }
     }
 
     fn kind(self) -> LeafKind {
-        match self {
-            FarTree::Spruce => LeafKind::ShortNeedles,
-            FarTree::Pine => LeafKind::LongNeedles,
-            FarTree::Oak => LeafKind::Lobed,
-            FarTree::Birch => LeafKind::Small,
-        }
+        use crate::species::LeafStyle;
+        kind_of(match self {
+            FarTree::Spruce => LeafStyle::ShortNeedles,
+            FarTree::Pine => LeafStyle::LongNeedles,
+            FarTree::Oak => LeafStyle::Lobed,
+            FarTree::Birch | FarTree::MountainBirch => LeafStyle::Small,
+            FarTree::Beech => LeafStyle::Oval,
+            FarTree::Larch => LeafStyle::SoftNeedles,
+            FarTree::Alder | FarTree::Aspen => LeafStyle::Round,
+        })
+    }
+
+    /// Needle trees: their cards stand as the tall spray cells, a spire on top.
+    fn conifer(self) -> bool {
+        matches!(self, FarTree::Spruce | FarTree::Pine | FarTree::Larch)
     }
 
     /// Height range (m), and the crown: where it starts (share of the height) and how wide
@@ -121,6 +150,11 @@ impl FarTree {
             FarTree::Pine => ((17.0, 26.0), 0.55, 0.42),
             FarTree::Oak => ((15.0, 24.0), 0.3, 0.8),
             FarTree::Birch => ((14.0, 22.0), 0.35, 0.45),
+            FarTree::Beech => ((16.0, 26.0), 0.3, 0.75),
+            FarTree::Larch => ((18.0, 28.0), 0.2, 0.34),
+            FarTree::Alder => ((12.0, 20.0), 0.28, 0.45),
+            FarTree::Aspen => ((14.0, 22.0), 0.45, 0.32),
+            FarTree::MountainBirch => ((5.0, 9.0), 0.2, 0.75),
         }
     }
 }
@@ -150,7 +184,7 @@ pub(crate) fn cell_cards(
     cell_m: f32,
     spacing: f32,
     seed: u64,
-    cover: &dyn Fn(DVec3) -> Option<(f32, f32)>,
+    cover: &dyn Fn(DVec3) -> Option<(f32, StandMix)>,
     ground: &dyn Fn(DVec3) -> Option<f64>,
     keep_out: &dyn Fn(DVec3) -> bool,
 ) -> Vec<FarCard> {
@@ -164,8 +198,10 @@ pub(crate) fn cell_cards(
     if !wooded {
         return Vec::new();
     }
-    // Density and conifer share (weighted by density) at a cell-local X/Z.
-    let lattice: Option<(usize, Vec<(f32, f32)>)> = (spacing < COVER_STEP_M).then(|| {
+    // Density and stand mix (weighted by density) at a cell-local X/Z.
+    type Woods = (f32, StandMix);
+    let weigh = |(d, m): Woods| (d, StandMix(m.normalized().0.map(|w| w * d)));
+    let lattice: Option<(usize, Vec<Woods>)> = (spacing < COVER_STEP_M).then(|| {
         let n = (cell_m / COVER_STEP_M).ceil() as usize + 1;
         let values = (0..n * n)
             .map(|k| {
@@ -173,29 +209,34 @@ pub(crate) fn cell_cards(
                     (k % n) as f32 * COVER_STEP_M,
                     (k / n) as f32 * COVER_STEP_M,
                 ));
-                c.map_or((0.0, 0.0), |(d, c)| (d, c * d))
+                c.map_or((0.0, StandMix::default()), weigh)
             })
             .collect();
         (n, values)
     });
-    let woods_at = |x: f32, z: f32| -> (f32, f32) {
+    let woods_at = |x: f32, z: f32| -> Woods {
         match &lattice {
             Some((n, v)) => {
                 let (fx, fz) = (x / COVER_STEP_M, z / COVER_STEP_M);
                 let (ix, iz) = ((fx as usize).min(n - 2), (fz as usize).min(n - 2));
                 let (tx, tz) = (fx - ix as f32, fz - iz as f32);
                 let g = |i: usize, j: usize| v[j * n + i];
-                let lerp = |a: (f32, f32), b: (f32, f32), t: f32| {
-                    (a.0 + (b.0 - a.0) * t, a.1 + (b.1 - a.1) * t)
+                let lerp = |a: Woods, b: Woods, t: f32| {
+                    (
+                        a.0 + (b.0 - a.0) * t,
+                        StandMix(std::array::from_fn(|k| {
+                            a.1.0[k] + (b.1.0[k] - a.1.0[k]) * t
+                        })),
+                    )
                 };
-                let (d, c) = lerp(
+                let (d, m) = lerp(
                     lerp(g(ix, iz), g(ix + 1, iz), tx),
                     lerp(g(ix, iz + 1), g(ix + 1, iz + 1), tx),
                     tz,
                 );
-                (d, if d > 0.0 { c / d } else { 0.0 })
+                (d, m.normalized())
             }
-            None => cover(at(x, z)).unwrap_or((0.0, 0.0)),
+            None => cover(at(x, z)).unwrap_or((0.0, StandMix::default())),
         }
     };
     let n = (cell_m / spacing).ceil().max(1.0) as i64;
@@ -208,7 +249,7 @@ pub(crate) fn cell_cards(
             if x >= cell_m || z >= cell_m {
                 continue;
             }
-            let (density, conifer) = woods_at(x, z);
+            let (density, mix) = woods_at(x, z);
             if h(2) >= density.clamp(0.0, 1.0) {
                 continue;
             }
@@ -225,18 +266,7 @@ pub(crate) fn cell_cards(
             let Some(y) = ground(flat) else {
                 continue;
             };
-            let pick = h(3);
-            let tree = if h(4) < conifer.clamp(0.0, 1.0) {
-                if pick < 0.6 {
-                    FarTree::Spruce
-                } else {
-                    FarTree::Pine
-                }
-            } else if pick < 0.7 {
-                FarTree::Oak
-            } else {
-                FarTree::Birch
-            };
+            let tree = crate::stands::pick(&mix, flat.x, flat.z, h(4), h(3));
             let ((lo, hi), _, wide) = tree.shape();
             let height = lo + (hi - lo) * h(5);
             cards.push(FarCard {
@@ -259,7 +289,7 @@ pub(crate) fn cell_meshes(cards: &[FarCard]) -> Vec<(FarTree, Mesh)> {
         let b = builders.entry(c.tree).or_default();
         let ((_, _), base, _) = c.tree.shape();
         let kind = c.tree.kind();
-        let conifer = matches!(c.tree, FarTree::Spruce | FarTree::Pine);
+        let conifer = c.tree.conifer();
         // Conifers stand as the tall spray cells, broad crowns as the round cluster.
         let cell = if conifer {
             if c.shade > 0.73 { 1 } else { 0 }
@@ -316,7 +346,7 @@ pub(crate) fn cell_meshes(cards: &[FarCard]) -> Vec<(FarTree, Mesh)> {
             // crowns reach a little wider than their upright cards, over the gaps their round
             // outlines leave; a spruce's spire is a narrow one.
             let (uv0, uv1) = atlas_cell(kind, CLUSTER_CELL);
-            let (from, reach) = if matches!(c.tree, FarTree::Spruce) {
+            let (from, reach) = if matches!(c.tree, FarTree::Spruce | FarTree::Larch) {
                 (0.35, 0.6)
             } else {
                 (0.5, 1.25)
@@ -528,7 +558,7 @@ impl CellJob {
             Some(g) => g.height(DVec3::new(p.x, self.cam.y + 10_000.0, p.z)),
             None => Some(0.0),
         };
-        let cover_at = |p: DVec3| self.cover.sample(p).map(|s| (s.density, s.conifer));
+        let cover_at = |p: DVec3| self.cover.stands(p).map(|s| (s.forest.density, s.mix));
         let cards = cell_cards(
             self.origin,
             self.cell_m,
@@ -746,6 +776,22 @@ pub fn stream_far_woods(
         }
         if state.materials.is_empty() {
             return;
+        }
+    }
+    // The cards take their species' leaf color as the seasons turn it (a larch's gold, an
+    // oak's russet), and lose it with the leaves.
+    for (t, h) in &state.materials {
+        let Some(vis) = library.id(t.species()).and_then(|id| visuals.get(id)) else {
+            continue;
+        };
+        let Some(color) = materials.get(vis.leaves_far[0]).map(|m| m.base_color) else {
+            continue;
+        };
+        if let Some(m) = materials.get(*h)
+            && m.base_color != color
+            && let Some(m) = materials.get_mut(*h)
+        {
+            m.base_color = color;
         }
     }
     let cell_m = settings.cell_m.max(16.0);
@@ -994,25 +1040,22 @@ mod tests {
     #[test]
     fn cards_follow_the_cover_and_close_the_canopy() {
         let o = DVec3::new(1000.0, 0.0, 0.0);
-        let full = |_: DVec3| Some((1.0, 1.0));
+        let full = |_: DVec3| Some((1.0, StandMix::from_conifer(1.0)));
         let cards = cell_cards(o, 128.0, 8.0, 3, &full, &flat, &|_| false);
         // A card on every candidate: a closed wood.
         assert!(cards.len() > 220 && cards.len() <= 256, "{}", cards.len());
-        assert!(
-            cards
-                .iter()
-                .all(|c| matches!(c.tree, FarTree::Spruce | FarTree::Pine))
-        );
+        // Conifer woods: spruce and pine with a little birch and larch among them.
+        let needles = cards.iter().filter(|c| c.tree.conifer()).count();
+        assert!(needles as f32 > 0.85 * cards.len() as f32, "{needles}");
+        assert!(cards.iter().all(|c| c.tree != FarTree::Oak));
         assert!(cards.iter().all(|c| c.width >= 8.0 * 1.15));
         assert!(cards.iter().all(|c| (0.0..128.0).contains(&c.foot.x)));
-        let broad = |_: DVec3| Some((0.5, 0.0));
+        let broad = |_: DVec3| Some((0.5, StandMix::from_conifer(0.0)));
         let half = cell_cards(o, 128.0, 8.0, 3, &broad, &flat, &|_| false);
         let share = half.len() as f32 / cards.len() as f32;
         assert!((0.35..0.65).contains(&share), "{share}");
-        assert!(
-            half.iter()
-                .all(|c| matches!(c.tree, FarTree::Oak | FarTree::Birch))
-        );
+        let broadleaf = half.iter().filter(|c| !c.tree.conifer()).count();
+        assert!(broadleaf as f32 > 0.85 * half.len() as f32, "{broadleaf}");
         // Kept-clear places get none.
         let west = cell_cards(o, 128.0, 8.0, 3, &full, &flat, &|p| p.x < 1064.0);
         assert!(!west.is_empty() && west.iter().all(|c| c.foot.x >= 64.0));
@@ -1026,7 +1069,8 @@ mod tests {
     #[test]
     fn no_tree_stands_in_a_river_narrower_than_the_cover_lattice() {
         // Closed woods with an 8 m river along x = 40..48 (the cover is none in the water).
-        let river = |p: DVec3| (!(40.0..48.0).contains(&p.x)).then_some((1.0, 0.0));
+        let river =
+            |p: DVec3| (!(40.0..48.0).contains(&p.x)).then_some((1.0, StandMix::from_conifer(0.0)));
         let flat = |_: DVec3| Some(0.0);
         let cards = cell_cards(DVec3::ZERO, 128.0, 4.0, 5, &river, &flat, &|_| false);
         assert!(cards.len() > 500, "{} trees", cards.len());

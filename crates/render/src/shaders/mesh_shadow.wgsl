@@ -8,7 +8,7 @@
 struct ShadowView {
     view_proj: mat4x4<f32>,  // camera-relative -> light clip
     wind: vec4<f32>,         // wind velocity xyz
-    time: vec4<f32>,         // world seconds
+    time: vec4<f32>,         // world seconds, real seconds, delta, w: 1 = sway at rest
     camera_frac: vec4<f32>,  // camera position modulo 4096 (tiling coordinates)
 };
 
@@ -50,7 +50,10 @@ fn shadow_wind(rel: vec3<f32>, height01: f32, sway: f32) -> vec3<f32> {
     let p = rel + shadow_view.camera_frac.xyz;
     let t = shadow_view.time.x;
     let phase = dot(p.xz, vec2(0.13, 0.17));
-    let gust = 0.6 + 0.4 * sin(t * 0.7 + phase * 0.3) * sin(t * 1.9 + phase);
+    var gust = 0.6 + 0.4 * sin(t * 0.7 + phase * 0.3) * sin(t * 1.9 + phase);
+    // At rest (maps too coarse to show the motion, `shadows::sway_moves`): the mean lean, the
+    // same every frame, so a static image drawn again matches the one before.
+    if (shadow_view.time.w > 0.5) { gust = 0.6; }
     let dir = select(vec3(1.0, 0.0, 0.0), w / max(speed, 1e-3), speed > 0.01);
     let strength = sway * height01 * height01 * min(speed / 10.0, 1.5);
     return dir * strength * gust;

@@ -1162,7 +1162,12 @@ impl Session {
                     self.errors_seen = shared(lua).errors_total;
                 }
                 Incoming::Closed => self.detach(lua),
-                Incoming::Request(request) if self.stop.is_some() => {
+                // Once a continue or a step has been taken, the stop is over for the client
+                // even though the runtime ends it only after this poll: what comes behind it
+                // in the same frame (a `pause` sent right after `continue`) is for the running
+                // scripts. Taken as a request to a stop, that pause was answered and dropped,
+                // and the client waited for a stop that never came.
+                Incoming::Request(request) if self.stop.is_some() && !self.go => {
                     if self.handle_stopped(lua, &request) {
                         self.go = true;
                     }

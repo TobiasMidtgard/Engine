@@ -36,6 +36,38 @@ impl Diagnostics {
     }
 }
 
+/// Metrics published by systems that run side by side: `Res<Metrics>` and [`Metrics::set`]
+/// need only read access. Publishing through `ResMut<Diagnostics>` made every publisher
+/// conflict with every other, so no two of them ever ran at once (the schedule audit found
+/// six in the fixed step and seven after the update, among them the softbody step, smoke and
+/// terrain colliders). What is set here lands in [`Diagnostics`] at the start of `Last`
+/// ([`publish_metrics_system`]), before the bridge and the profiler read it.
+#[derive(Resource, Debug, Default)]
+pub struct Metrics(std::sync::Mutex<BTreeMap<String, (f64, bool)>>);
+
+impl Metrics {
+    pub fn set(&self, name: &str, value: f64) {
+        let mut m = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        match m.get_mut(name) {
+            Some(v) => *v = (value, true),
+            None => {
+                m.insert(name.to_string(), (value, true));
+            }
+        }
+    }
+}
+
+/// Engine system (`Last`, before anything else there): the [`Metrics`] set this frame go into
+/// [`Diagnostics`].
+pub fn publish_metrics_system(metrics: Res<Metrics>, mut diag: ResMut<Diagnostics>) {
+    let mut m = metrics.0.lock().unwrap_or_else(|e| e.into_inner());
+    for (name, (value, fresh)) in m.iter_mut() {
+        if std::mem::take(fresh) {
+            diag.set(name, *value);
+        }
+    }
+}
+
 /// Engine system (`First`): update frame timing.
 pub fn frame_diagnostics_system(
     time: Res<Time>,
@@ -114,6 +146,35 @@ pub fn sampled_ram_mb() -> Option<f64> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn metrics_reach_the_diagnostics_once_the_frame_ends() {
+        use crate::app::App;
+        use crate::prelude::*;
+        fn publish(metrics: Res<super::Metrics>) {
+            metrics.set("test.side_by_side", 3.0);
+        }
+        let mut app = App::new();
+        app.add_systems(Update, publish);
+        app.update();
+        let d = app.world.resource::<Diagnostics>();
+        assert_eq!(d.get("test.side_by_side"), Some(3.0));
+        // A value set once stays, as with `Diagnostics::set`.
+        app.world
+            .resource_mut::<Diagnostics>()
+            .set("test.side_by_side", 1.0);
+        app.world
+            .resource::<super::Metrics>()
+            .set("test.other", 2.0);
+        app.update();
+        let d = app.world.resource::<Diagnostics>();
+        assert_eq!(
+            d.get("test.side_by_side"),
+            Some(3.0),
+            "set again this frame"
+        );
+        assert_eq!(d.get("test.other"), Some(2.0));
+    }
+
     #[test]
     fn spawned_entities_count_what_count_spawned_does() {
         use bevy_ecs::prelude::*;

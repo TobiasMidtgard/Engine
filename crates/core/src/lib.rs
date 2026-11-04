@@ -40,13 +40,13 @@ pub use glam;
 pub mod prelude {
     pub use crate::app::{App, AppExit, Plugin, PluginGroup, PluginGroupBuilder};
     pub use crate::config::EngineConfig;
-    pub use crate::diagnostics::Diagnostics;
+    pub use crate::diagnostics::{Diagnostics, Metrics};
     pub use crate::math::*;
     pub use crate::registry::{ApiRegistry, TypeRegistry};
     pub use crate::scene::{EntityDoc, SceneDoc};
     pub use crate::schedule::{
-        Extract, First, FixedPostUpdate, FixedPreUpdate, FixedUpdate, Last, PostUpdate, PreUpdate,
-        Render, SimSet, Startup, Update, UpdateSet,
+        Extract, First, FixedPostUpdate, FixedPreUpdate, FixedUpdate, Last, MetricsSet, PostUpdate,
+        PreUpdate, Render, SimSet, Startup, Update, UpdateSet,
     };
     pub use crate::time::{FixedTime, LocalTimeScale, Time, TimeDilation};
     pub use crate::transform::{GlobalTransform, Transform, TransformInterpolation};

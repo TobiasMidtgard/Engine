@@ -1253,7 +1253,7 @@ pub(crate) fn step_effects(
     settings: Res<EffectSettings>,
     gravity: Option<Res<Gravity>>,
     mut fx: ResMut<Effects>,
-    mut diagnostics: Option<ResMut<Diagnostics>>,
+    diagnostics: Option<Res<Metrics>>,
 ) {
     fx.now = time.elapsed_secs_f64();
     fx.real_now = time.real_elapsed_secs_f64();
@@ -1274,7 +1274,7 @@ pub(crate) fn step_effects(
     fx.step(time.delta_secs(), g);
     let max = fx.max_particles;
     fx.particles.truncate(max);
-    if let Some(d) = diagnostics.as_deref_mut() {
+    if let Some(d) = diagnostics.as_deref() {
         d.set("movement.effects.particles", fx.particles.len() as f64);
         d.set("movement.effects.trails", fx.trails.len() as f64);
     }

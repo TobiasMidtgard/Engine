@@ -173,6 +173,15 @@ pub enum LeafStyle {
     Frond,
     /// Deeply lobed leaves crowded at the shoot tips (oak).
     Lobed,
+    /// Oval leaves with straight parallel side veins and a wavy edge, held in flat layers
+    /// (beech; goat willow's are broader and wrinkled with a silvery underside).
+    Oval,
+    /// Round leaves on long petioles, coarsely toothed (aspen, alder).
+    Round,
+    /// Compound leaves: pairs of narrow toothed leaflets along a stalk (rowan).
+    Pinnate,
+    /// Soft short needles in rosettes on spur shoots (larch).
+    SoftNeedles,
 }
 
 /// How the bark is colored along the trunk.
@@ -185,6 +194,10 @@ pub enum BarkStyle {
     Birch,
     /// Gray-brown at the foot, glowing orange higher up.
     Pine,
+    /// Smooth thin bark, gray to gray-green, with pale lenticels (beech, rowan, aspen).
+    Smooth,
+    /// Scaly plates, reddish-brown where they flake, the same color all the way up (larch).
+    Scaly,
 }
 
 /// The shape knobs of the mesh generator (per species; each plant also varies by its genes and
@@ -497,7 +510,7 @@ impl PlantLibrary {
 /// The built-in species.
 pub fn builtin_species() -> Vec<PlantSpecies> {
     let t = Tolerance::new;
-    vec![
+    let mut all = vec![
         PlantSpecies {
             name: "oak".into(),
             form: PlantForm::Broadleaf,
@@ -996,6 +1009,405 @@ pub fn builtin_species() -> Vec<PlantSpecies> {
             fuel_kg: 6.0,
             ignition_c: 320.0,
             toughness: 8.0,
+            ..Default::default()
+        },
+    ];
+    // (Appended, so the ids above stay as they were.)
+    all.extend(stand_trees());
+    all
+}
+
+/// The trees and shrubs that make the stands of a northern landscape besides oak, birch, pine,
+/// spruce and hazel (engine_world::StandKind): heights about two thirds of the real ones, as
+/// the trees above are. Colors are the leaf's mean upper-side albedo (field-guide photos
+/// against a grey card, and the PROSPECT range for green leaves: 0.04-0.06 in red and blue,
+/// 0.08-0.13 in green).
+fn stand_trees() -> Vec<PlantSpecies> {
+    let t = Tolerance::new;
+    vec![
+        PlantSpecies {
+            // Downy birch at the tree line: low, crooked, often leaning, the crown starting
+            // low, its branches level or rising (not weeping like a silver birch's); greyer bark.
+            name: "mountain birch".into(),
+            form: PlantForm::Broadleaf,
+            layer: Layer::Canopy,
+            max_height_m: 7.0,
+            crown_radius_m: 2.6,
+            trunk_radius_m: 0.14,
+            years_to_mature: 18.0,
+            lifespan_years: 90.0,
+            canopy_density: 0.5,
+            water: t(0.15, 0.35, 0.95, 1.01),
+            light: t(0.25, 0.55, 1.0, 1.01),
+            nutrients: t(-0.2, 0.0, 1.0, 1.01),
+            temperature_c: t(-50.0, -12.0, 18.0, 30.0),
+            uptake: 0.5,
+            seeds_per_year: 10.0,
+            seed_range_m: 18.0,
+            wind_dispersal: 0.8,
+            establishment: 0.1,
+            min_spacing_m: 1.8,
+            resprouts: true,
+            bark_color: srgb(0xd3cfc5),
+            leaf_color: srgb(0x4f6b35),
+            accent_color: srgb(0x637a3a),
+            wind_sway_m: 0.3,
+            // Late out, early gold at the tree line.
+            seasons: Some(Seasons {
+                leaf_out_day: 135.0,
+                turn_day: 248.0,
+                bare_day: 285.0,
+                autumn_color: srgb(0xd2a234),
+            }),
+            shape: PlantShape {
+                crown_base: 0.18,
+                branches: 12,
+                angle_low_deg: 66.0,
+                angle_high_deg: 32.0,
+                tip_bend: 0.15,
+                gnarl: 0.8,
+                leaf_size_m: 0.85,
+                leaf_density: 0.9,
+                leaf: LeafStyle::Small,
+                bark: BarkStyle::Birch,
+            },
+            fuel_kg: 90.0,
+            toughness: 45.0,
+            ..Default::default()
+        },
+        PlantSpecies {
+            // Aspen: a narrow oval crown high on a smooth grey-green stem; the leaves tremble
+            // on their flat stalks in the lightest air. Spreads by suckers into clonal groves.
+            name: "aspen".into(),
+            form: PlantForm::Broadleaf,
+            layer: Layer::Canopy,
+            max_height_m: 16.0,
+            crown_radius_m: 2.5,
+            trunk_radius_m: 0.22,
+            years_to_mature: 16.0,
+            lifespan_years: 90.0,
+            canopy_density: 0.6,
+            water: t(0.2, 0.38, 0.92, 1.0),
+            light: t(0.3, 0.6, 1.0, 1.01),
+            nutrients: t(0.0, 0.2, 1.0, 1.01),
+            temperature_c: t(-45.0, -8.0, 24.0, 34.0),
+            uptake: 0.7,
+            seeds_per_year: 12.0,
+            seed_range_m: 25.0,
+            wind_dispersal: 0.9,
+            establishment: 0.07,
+            min_spacing_m: 1.8,
+            resprouts: true,
+            bark_color: srgb(0x80846f),
+            leaf_color: srgb(0x4d6a30),
+            accent_color: srgb(0x6a7f45),
+            wind_sway_m: 0.5,
+            // Turns gold to orange, some clones red.
+            seasons: Some(Seasons {
+                leaf_out_day: 124.0,
+                turn_day: 266.0,
+                bare_day: 300.0,
+                autumn_color: srgb(0xd6962a),
+            }),
+            shape: PlantShape {
+                crown_base: 0.45,
+                branches: 12,
+                angle_low_deg: 52.0,
+                angle_high_deg: 22.0,
+                tip_bend: 0.1,
+                gnarl: 0.2,
+                leaf_size_m: 0.9,
+                leaf_density: 0.9,
+                leaf: LeafStyle::Round,
+                bark: BarkStyle::Smooth,
+            },
+            fuel_kg: 280.0,
+            toughness: 70.0,
+            ..Default::default()
+        },
+        PlantSpecies {
+            // Rowan: a small open tree of edges and clearings with feathery leaves, red in
+            // autumn; birds carry its berries far.
+            name: "rowan".into(),
+            form: PlantForm::Broadleaf,
+            layer: Layer::Understory,
+            max_height_m: 8.0,
+            crown_radius_m: 2.4,
+            trunk_radius_m: 0.13,
+            years_to_mature: 12.0,
+            lifespan_years: 90.0,
+            canopy_density: 0.5,
+            water: t(0.1, 0.3, 0.85, 1.0),
+            light: t(0.12, 0.4, 1.0, 1.01),
+            nutrients: t(-0.05, 0.15, 1.0, 1.01),
+            temperature_c: t(-45.0, -8.0, 24.0, 34.0),
+            uptake: 0.35,
+            seeds_per_year: 3.0,
+            seed_range_m: 30.0,
+            wind_dispersal: 0.0,
+            establishment: 0.06,
+            min_spacing_m: 2.0,
+            resprouts: true,
+            bark_color: srgb(0x8b857b),
+            leaf_color: srgb(0x48682c),
+            accent_color: srgb(0x5e7a34),
+            wind_sway_m: 0.3,
+            seasons: Some(Seasons {
+                leaf_out_day: 112.0,
+                turn_day: 255.0,
+                bare_day: 295.0,
+                autumn_color: srgb(0xb5421f),
+            }),
+            shape: PlantShape {
+                crown_base: 0.3,
+                branches: 9,
+                angle_low_deg: 48.0,
+                angle_high_deg: 20.0,
+                tip_bend: 0.25,
+                gnarl: 0.35,
+                leaf_size_m: 1.0,
+                leaf_density: 0.8,
+                leaf: LeafStyle::Pinnate,
+                bark: BarkStyle::Smooth,
+            },
+            fuel_kg: 80.0,
+            toughness: 40.0,
+            ..Default::default()
+        },
+        PlantSpecies {
+            // Alder: dark, roughly conical, along water; stays green late and drops its
+            // leaves green-brown.
+            name: "alder".into(),
+            form: PlantForm::Broadleaf,
+            layer: Layer::Canopy,
+            max_height_m: 14.0,
+            crown_radius_m: 3.0,
+            trunk_radius_m: 0.25,
+            years_to_mature: 18.0,
+            lifespan_years: 100.0,
+            canopy_density: 0.9,
+            water: t(0.35, 0.55, 1.0, 1.05),
+            light: t(0.15, 0.45, 1.0, 1.01),
+            nutrients: t(-0.05, 0.15, 1.0, 1.01),
+            uptake: 0.8,
+            seeds_per_year: 10.0,
+            seed_range_m: 16.0,
+            wind_dispersal: 0.5,
+            establishment: 0.12,
+            min_spacing_m: 2.2,
+            resprouts: true,
+            bark_color: srgb(0x4b4541),
+            leaf_color: srgb(0x324c27),
+            accent_color: srgb(0x3f5c2d),
+            wind_sway_m: 0.25,
+            seasons: Some(Seasons {
+                leaf_out_day: 118.0,
+                turn_day: 298.0,
+                bare_day: 318.0,
+                autumn_color: srgb(0x5d5a2e),
+            }),
+            shape: PlantShape {
+                crown_base: 0.28,
+                branches: 12,
+                angle_low_deg: 74.0,
+                angle_high_deg: 34.0,
+                tip_bend: 0.05,
+                gnarl: 0.3,
+                leaf_size_m: 1.0,
+                leaf_density: 1.0,
+                leaf: LeafStyle::Round,
+                bark: BarkStyle::Plain,
+            },
+            fuel_kg: 300.0,
+            toughness: 80.0,
+            ..Default::default()
+        },
+        PlantSpecies {
+            // Beech: smooth silver-grey stems under a dense dome that shades out almost
+            // everything below; the leaves hold copper-brown into winter.
+            name: "beech".into(),
+            form: PlantForm::Broadleaf,
+            layer: Layer::Canopy,
+            max_height_m: 19.0,
+            crown_radius_m: 6.0,
+            trunk_radius_m: 0.4,
+            years_to_mature: 40.0,
+            lifespan_years: 250.0,
+            canopy_density: 1.6,
+            water: t(0.26, 0.42, 0.8, 0.95),
+            light: t(0.01, 0.12, 1.0, 1.01),
+            nutrients: t(0.15, 0.4, 1.0, 1.01),
+            temperature_c: t(-30.0, 0.0, 24.0, 36.0),
+            uptake: 1.0,
+            seeds_per_year: 5.0,
+            seed_range_m: 10.0,
+            wind_dispersal: 0.0,
+            establishment: 0.25,
+            min_spacing_m: 3.4,
+            bark_color: srgb(0x77746c),
+            leaf_color: srgb(0x3e5a24),
+            accent_color: srgb(0x556f2c),
+            wind_sway_m: 0.22,
+            seasons: Some(Seasons {
+                leaf_out_day: 122.0,
+                turn_day: 284.0,
+                bare_day: 322.0,
+                autumn_color: srgb(0xa5602a),
+            }),
+            shape: PlantShape {
+                crown_base: 0.3,
+                branches: 10,
+                angle_low_deg: 64.0,
+                angle_high_deg: 30.0,
+                tip_bend: 0.2,
+                gnarl: 0.25,
+                leaf_size_m: 1.35,
+                leaf_density: 1.0,
+                leaf: LeafStyle::Oval,
+                bark: BarkStyle::Smooth,
+            },
+            fuel_kg: 950.0,
+            toughness: 150.0,
+            ..Default::default()
+        },
+        PlantSpecies {
+            // European larch: a soft open cone of level branches with hanging twigs, light
+            // green in spring, gold in autumn and bare in winter.
+            name: "larch".into(),
+            form: PlantForm::Conifer,
+            layer: Layer::Canopy,
+            max_height_m: 20.0,
+            crown_radius_m: 3.8,
+            trunk_radius_m: 0.3,
+            years_to_mature: 25.0,
+            lifespan_years: 250.0,
+            canopy_density: 0.55,
+            water: t(0.1, 0.3, 0.85, 0.97),
+            light: t(0.4, 0.7, 1.0, 1.01),
+            nutrients: t(-0.05, 0.15, 1.0, 1.01),
+            temperature_c: t(-45.0, -10.0, 22.0, 32.0),
+            uptake: 0.7,
+            seeds_per_year: 10.0,
+            seed_range_m: 20.0,
+            wind_dispersal: 0.7,
+            establishment: 0.08,
+            min_spacing_m: 2.4,
+            bark_color: srgb(0x4e4440),
+            leaf_color: srgb(0x5a7c34),
+            accent_color: srgb(0x72903e),
+            wind_sway_m: 0.3,
+            seasons: Some(Seasons {
+                leaf_out_day: 108.0,
+                turn_day: 284.0,
+                bare_day: 318.0,
+                autumn_color: srgb(0xd09c30),
+            }),
+            shape: PlantShape {
+                crown_base: 0.22,
+                branches: 6,
+                angle_low_deg: 92.0,
+                angle_high_deg: 62.0,
+                tip_bend: 0.3,
+                gnarl: 0.15,
+                leaf_size_m: 1.2,
+                leaf_density: 0.9,
+                leaf: LeafStyle::SoftNeedles,
+                bark: BarkStyle::Scaly,
+            },
+            fuel_kg: 600.0,
+            ignition_c: 270.0,
+            toughness: 105.0,
+            ..Default::default()
+        },
+        PlantSpecies {
+            // Goat willow: a big rounded shrub of wet margins, grey-green leaves with silvery
+            // undersides.
+            name: "goat willow".into(),
+            form: PlantForm::Shrub,
+            layer: Layer::Understory,
+            max_height_m: 6.0,
+            crown_radius_m: 2.8,
+            trunk_radius_m: 0.09,
+            years_to_mature: 8.0,
+            lifespan_years: 60.0,
+            canopy_density: 0.8,
+            water: t(0.3, 0.5, 1.0, 1.03),
+            light: t(0.2, 0.5, 1.0, 1.01),
+            nutrients: t(0.0, 0.2, 1.0, 1.01),
+            uptake: 0.4,
+            seeds_per_year: 12.0,
+            seed_range_m: 25.0,
+            wind_dispersal: 0.9,
+            establishment: 0.1,
+            min_spacing_m: 2.2,
+            resprouts: true,
+            bark_color: srgb(0x6f6b61),
+            leaf_color: srgb(0x56664b),
+            accent_color: srgb(0x7e8c72),
+            wind_sway_m: 0.3,
+            seasons: Some(Seasons {
+                leaf_out_day: 108.0,
+                turn_day: 280.0,
+                bare_day: 310.0,
+                autumn_color: srgb(0xb7a03e),
+            }),
+            shape: PlantShape {
+                crown_base: 0.15,
+                branches: 9,
+                angle_low_deg: 42.0,
+                angle_high_deg: 14.0,
+                tip_bend: 0.0,
+                gnarl: 0.4,
+                leaf_size_m: 0.9,
+                leaf_density: 1.0,
+                leaf: LeafStyle::Oval,
+                bark: BarkStyle::Plain,
+            },
+            fuel_kg: 70.0,
+            toughness: 30.0,
+            ..Default::default()
+        },
+        PlantSpecies {
+            // Juniper: grey-blue columns and sprawling bushes of pine heaths and rocky
+            // pasture; reddish shredding bark.
+            name: "juniper".into(),
+            form: PlantForm::Conifer,
+            layer: Layer::Understory,
+            max_height_m: 4.5,
+            crown_radius_m: 0.8,
+            trunk_radius_m: 0.09,
+            years_to_mature: 25.0,
+            lifespan_years: 300.0,
+            canopy_density: 1.2,
+            water: t(-0.05, 0.1, 0.7, 0.9),
+            light: t(0.35, 0.65, 1.0, 1.01),
+            nutrients: t(-0.2, 0.0, 1.0, 1.01),
+            temperature_c: t(-50.0, -10.0, 26.0, 38.0),
+            uptake: 0.2,
+            seeds_per_year: 4.0,
+            seed_range_m: 25.0,
+            wind_dispersal: 0.0,
+            establishment: 0.08,
+            min_spacing_m: 1.4,
+            bark_color: srgb(0x6b4b3c),
+            leaf_color: srgb(0x394f45),
+            accent_color: srgb(0x52665d),
+            wind_sway_m: 0.12,
+            shape: PlantShape {
+                crown_base: 0.02,
+                branches: 8,
+                angle_low_deg: 40.0,
+                angle_high_deg: 18.0,
+                tip_bend: 0.4,
+                gnarl: 0.3,
+                leaf_size_m: 0.7,
+                leaf_density: 1.1,
+                leaf: LeafStyle::ShortNeedles,
+                bark: BarkStyle::Scaly,
+            },
+            fuel_kg: 40.0,
+            ignition_c: 250.0,
+            toughness: 30.0,
             ..Default::default()
         },
     ]

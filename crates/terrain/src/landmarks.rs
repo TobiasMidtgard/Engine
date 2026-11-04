@@ -1621,9 +1621,25 @@ pub struct LandmarkCells {
     far: HashMap<CellKey, FarCell>,
     far_building: HashMap<CellKey, JoinHandle<FarMesh>>,
     terrains: HashMap<Entity, TerrainLandmarks>,
+    /// The cells around each focus point on each terrain, as last worked out.
+    around: HashMap<(Entity, usize), Around>,
     /// Cells put in place since startup.
     pub placed: u64,
 }
+
+/// The cells around one focus point on one terrain (each with its distance), kept while the
+/// point stays within [`AROUND_SLACK_M`] of where they were worked out: finding them samples
+/// a grid of a few hundred spots near and far, which was most of the system's frame time.
+struct Around {
+    at: DVec3,
+    version: u64,
+    near: Option<Vec<(f64, NodeKey)>>,
+    far: Option<Vec<(f64, NodeKey)>>,
+}
+
+/// How far a focus point moves before its cells are worked out again, m (cells are 1.5 km
+/// and more; a distance off by this much changes nothing).
+const AROUND_SLACK_M: f64 = 1.0;
 
 struct TerrainLandmarks {
     rock: Handle<StandardMaterial>,
@@ -1724,7 +1740,7 @@ pub fn update_landmarks(
     surfaces: Option<Res<SurfaceMaterials>>,
     mut state: ResMut<LandmarkCells>,
     mut renderers: Query<&mut MeshRenderer>,
-    diagnostics: Option<ResMut<engine_core::diagnostics::Diagnostics>>,
+    diagnostics: Option<Res<Metrics>>,
 ) {
     let (Some(mut meshes), Some(mut materials)) = (meshes, materials) else {
         return;
@@ -1777,21 +1793,35 @@ pub fn update_landmarks(
         }
         let level = level_for(&t.source.map);
         let far_level = level.saturating_sub(FAR_LEVELS_UP);
-        for &p in &focus.points {
+        for (i, &p) in focus.points.iter().enumerate() {
             let altitude = t.altitude_hint(p) - t.config.height_range().1;
             if altitude > field.far_m.max(REACH_M) {
                 continue;
             }
             let local = t.to_local(p);
-            if field.far_m > REACH_M {
-                for (d, key) in cells_around(&t.source.map, local, far_level, field.far_m) {
-                    wanted_far.push((d, (e, key)));
-                }
+            let want_far = field.far_m > REACH_M;
+            let want_near = altitude <= REACH_M;
+            let around = state.around.entry((e, i)).or_insert(Around {
+                at: local,
+                version: t.version.wrapping_sub(1),
+                near: None,
+                far: None,
+            });
+            if around.version != t.version
+                || around.at.distance(local) > AROUND_SLACK_M
+                || around.far.is_some() != want_far
+                || around.near.is_some() != want_near
+            {
+                around.at = local;
+                around.version = t.version;
+                around.far =
+                    want_far.then(|| cells_around(&t.source.map, local, far_level, field.far_m));
+                around.near = want_near.then(|| cells_around(&t.source.map, local, level, REACH_M));
             }
-            if altitude > REACH_M {
-                continue;
+            for &(d, key) in around.far.iter().flatten() {
+                wanted_far.push((d, (e, key)));
             }
-            for (d, key) in cells_around(&t.source.map, local, level, REACH_M) {
+            for &(d, key) in around.near.iter().flatten() {
                 wanted.push((d, (e, key)));
             }
         }
@@ -1799,6 +1829,10 @@ pub fn update_landmarks(
     state
         .terrains
         .retain(|e, _| terrains.entries.contains_key(e));
+    let points = focus.points.len();
+    state
+        .around
+        .retain(|(e, i), _| *i < points && terrains.entries.contains_key(e));
     wanted.sort_by(|a, b| a.0.total_cmp(&b.0));
     // Each wanted cell's distance from the nearest focus.
     let mut nearest: HashMap<CellKey, f64> = HashMap::new();
@@ -2016,7 +2050,7 @@ pub fn update_landmarks(
             std::thread::spawn(move || build_far_cell(&source, &field, key, seed)),
         );
     }
-    if let Some(mut d) = diagnostics {
+    if let Some(d) = diagnostics {
         d.set("terrain.landmark_far", state.far_shown() as f64);
         d.set("terrain.landmark_cells", state.drawn() as f64);
         d.set("terrain.landmark_builds", state.building.len() as f64);

@@ -220,13 +220,14 @@ pub fn update_colliders(
     range: Option<Res<SimulationRange>>,
     time: Option<Res<Time>>,
     mut state: ResMut<TerrainColliders>,
-    diagnostics: Option<ResMut<engine_core::diagnostics::Diagnostics>>,
+    diagnostics: Option<Res<Metrics>>,
 ) {
     let dt = time.map_or(0.0, |t| t.delta_secs_f64());
     state.frames += 1;
     let mut moving: HashMap<(Entity, usize), (DVec3, DVec3)> = HashMap::new();
     let range = range.map(|r| *r).unwrap_or_default();
     let gather = tracing::info_span!("terrain colliders: wanted tiles").entered();
+    let listing = tracing::info_span!("terrain colliders: dynamic bodies").entered();
     let body_points: Vec<DVec3> = bodies
         .iter()
         .filter(|(_, b)| b.kind == BodyKind::Dynamic)
@@ -236,6 +237,7 @@ pub fn update_colliders(
         return;
     }
     let body_count = body_points.len();
+    drop(listing);
     // Wanted tiles in build order: around the focus points first, then under bodies.
     let mut wanted: Vec<(Entity, NodeKey)> = Vec::new();
     let mut wanted_set: HashSet<(Entity, NodeKey)> = HashSet::new();
@@ -309,25 +311,52 @@ pub fn update_colliders(
                 }
             }
         }
-        for &p in &body_points {
-            let altitude = t.altitude_hint(p);
-            if altitude.abs() > 2_000.0 + top {
-                continue;
+        let _tiles = tracing::info_span!("terrain colliders: body tiles").entered();
+        // Each body's tile, its distance from the focus and whether it needs the tile at once,
+        // side by side (1,500 bodies at the showcase plaza), then merged in body order.
+        const BODIES_PER_TASK: usize = 128;
+        let mut placed: Vec<Option<(NodeKey, f64, bool)>> = vec![None; body_points.len()];
+        engine_core::tasks::par_chunks_mut(&mut placed, BODIES_PER_TASK, |i, chunk| {
+            let points = &body_points[i * BODIES_PER_TASK..];
+            for (out, &p) in chunk.iter_mut().zip(points) {
+                let altitude = t.altitude_hint(p);
+                if altitude.abs() > 2_000.0 + top {
+                    continue;
+                }
+                if let Some(k) = t.source.map.node_at(t.to_local(p), level) {
+                    // (Well above the highest ground it can't be standing on it.)
+                    let high = altitude > top + UNDERFOOT_CLEARANCE_M;
+                    *out = Some((k, focus.distance(p), !high && range.is_active(&focus, p)));
+                }
             }
-            if let Some(k) = t.source.map.node_at(t.to_local(p), level) {
-                let d = focus.distance(p);
+        });
+        // Bodies next to each other mostly share a tile: a run on one tile is merged at once.
+        let mut run: Option<(NodeKey, f64)> = None;
+        let flush = |run: Option<(NodeKey, f64)>, body_tiles: &mut HashMap<_, f64>| {
+            if let Some((k, d)) = run {
                 body_tiles
                     .entry((e, k))
-                    .and_modify(|n| *n = n.min(d))
+                    .and_modify(|n: &mut f64| *n = n.min(d))
                     .or_insert(d);
-                // (Well above the highest ground it can't be standing on it.)
-                let high = altitude > top + UNDERFOOT_CLEARANCE_M;
-                if !high && !underfoot_set.contains(&(e, k)) && range.is_active(&focus, p) {
-                    underfoot_set.insert((e, k));
+            }
+        };
+        let mut last_needed = None;
+        for &(k, d, needs_now) in placed.iter().flatten() {
+            match &mut run {
+                Some((rk, rd)) if *rk == k => *rd = rd.min(d),
+                _ => {
+                    flush(run.take(), &mut body_tiles);
+                    run = Some((k, d));
+                }
+            }
+            if needs_now && last_needed != Some(k) {
+                last_needed = Some(k);
+                if underfoot_set.insert((e, k)) {
                     underfoot.push((e, k));
                 }
             }
         }
+        flush(run, &mut body_tiles);
         // Rebuild tiles touched by new edits.
         let seen = state.seen_edits.get(&e).copied().unwrap_or(0);
         if seen < t.edit_log.len() {
@@ -349,6 +378,7 @@ pub fn update_colliders(
             state.seen_edits.insert(e, t.edit_log.len());
         }
     }
+    let _rest = tracing::info_span!("terrain colliders: stale and queue").entered();
     state.motion = moving;
     let mut body_tiles: Vec<(f64, (Entity, NodeKey))> =
         body_tiles.into_iter().map(|(k, d)| (d, k)).collect();
@@ -385,6 +415,7 @@ pub fn update_colliders(
             state.queue.push(*k);
         }
     }
+    drop(_rest);
     drop(gather);
     let ids = SurfaceIds::new(&materials);
     // Put finished tiles in place (or drop them, if no longer wanted).
@@ -477,7 +508,7 @@ pub fn update_colliders(
             .expect("spawn a terrain collider thread");
         state.building.insert(k, handle);
     }
-    if let Some(mut d) = diagnostics {
+    if let Some(d) = diagnostics {
         d.set("terrain.collider_bodies", body_count as f64);
         d.set("terrain.collider_tiles", state.tiles.len() as f64);
         d.set("terrain.collider_builds", state.built as f64);

@@ -640,8 +640,7 @@ impl Plugin for SpacePlugin {
                 (
                     look::spawn_impostors,
                     tag_stream_frames,
-                    update_space,
-                    rails::fly,
+                    place_and_fly,
                     look::scale_impostors,
                 )
                     .chain()
@@ -1213,6 +1212,17 @@ fn moon_in_sky(
         })
         .filter(|&(_, _, diameter)| diameter.to_degrees() >= MIN_MOON_DIAMETER_DEG)
         .max_by(|a, b| a.2.total_cmp(&b.2))
+}
+
+/// [`update_space`] then [`rails::fly`], as one exclusive system: the pool goes idle once
+/// before them instead of twice (perf week, the lead's mechanical edit).
+fn place_and_fly(world: &mut World) {
+    {
+        let _span = tracing::info_span!("space: update").entered();
+        update_space(world);
+    }
+    let _span = tracing::info_span!("space: fly").entered();
+    rails::fly(world);
 }
 
 pub fn update_space(world: &mut World) {

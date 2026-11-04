@@ -742,20 +742,31 @@ pub(crate) fn physics_simulate(
     let upkept = mark.elapsed();
     let report = crate::report::wanted();
     let planning = tracing::info_span!("region plans").entered();
-    let busy = busy_regions(&sim);
+    // The kinematic and time-scaled bodies, and those gliding to a goal, by region, in one
+    // walk of the books (walking them once per region was most of the plans' 0.1-0.2 ms a
+    // step: ~3,000 bodies, ~10 regions; by region index, as hashing each body's region cost
+    // as much again, round 15).
+    let n_regions = sim.regions.len();
+    let mut special_in: Vec<Vec<Entity>> = vec![Vec::new(); n_regions];
+    let mut goals_in: Vec<Vec<Entity>> = vec![Vec::new(); n_regions];
+    for (e, b) in &sim.bodies {
+        let i = b.region as usize;
+        if i >= n_regions {
+            continue;
+        }
+        if b.kind == BodyKind::Kinematic || (b.time_factor - 1.0).abs() > 1e-3 {
+            special_in[i].push(*e);
+        }
+        if b.kinematic_goal.is_some() {
+            goals_in[i].push(*e);
+        }
+    }
+    let busy = busy_regions(&sim, &goals_in);
     // Regions step side by side (Jolt and PhysX solve islands as parallel jobs; regions are
     // islands that share nothing): each substep's own work runs as one job per region on the
     // region pool, between passes that touch the shared books (forces, kinematics, contact
     // events, joints) one region at a time. A region's substeps run in order as before, so it
     // steps exactly as it would alone.
-    // The kinematic and time-scaled bodies, by region, in one walk of the books (walking them
-    // once per region was most of the plans' 0.1-0.2 ms a step: ~3,000 bodies, ~10 regions).
-    let mut special_in: HashMap<RegionId, Vec<Entity>> = HashMap::new();
-    for (e, b) in &sim.bodies {
-        if b.kind == BodyKind::Kinematic || (b.time_factor - 1.0).abs() > 1e-3 {
-            special_in.entry(b.region).or_default().push(*e);
-        }
-    }
     let mut cones_in = crate::cones::cones_by_region(&sim);
     let mut plans: Vec<Plan> = Vec::new();
     for rid in region_ids.iter().copied() {
@@ -779,7 +790,11 @@ pub(crate) fn physics_simulate(
             plan
         };
         let Some((substeps, sub_dt)) = plan else {
-            place_kinematics(&mut sim, rid);
+            place_kinematics(
+                &mut sim,
+                rid,
+                goals_in.get(rid as usize).map_or(&[], |v| v.as_slice()),
+            );
             let r = sim.regions[rid as usize].as_mut().expect("live region");
             if r.needs_refresh {
                 let _refresh = tracing::info_span!("refresh resting region").entered();
@@ -832,7 +847,10 @@ pub(crate) fn physics_simulate(
             character::find_platforms(&mut sim, rid, &gravity);
         }
         // The kinematic and time-scaled bodies here, found once for all substeps.
-        let special: Vec<Entity> = special_in.remove(&rid).unwrap_or_default();
+        let special: Vec<Entity> = special_in
+            .get_mut(rid as usize)
+            .map(std::mem::take)
+            .unwrap_or_default();
         plans.push(Plan {
             rid,
             substeps,
@@ -856,14 +874,17 @@ pub(crate) fn physics_simulate(
     // The bodies with forces of their own, by region, once a step: `forced` holds those of
     // every region (1,500 at the plaza, the proving ground's bodies moved to a dormant
     // region), and walking it in every region's every substep was about 0.15 ms each.
-    let mut forced_in: HashMap<RegionId, Vec<Entity>> = HashMap::new();
+    // (By region index: hashing each body's region was a tenth of an idle scene's step.)
+    let mut forced_in: Vec<Vec<Entity>> = vec![Vec::new(); sim.regions.len()];
     {
         let Simulation { forced, bodies, .. } = &mut *sim;
         forced.retain(|e| {
             let Some(entry) = bodies.get(e) else {
                 return false;
             };
-            forced_in.entry(entry.region).or_default().push(*e);
+            if let Some(list) = forced_in.get_mut(entry.region as usize) {
+                list.push(*e);
+            }
             true
         });
     }
@@ -887,7 +908,7 @@ pub(crate) fn physics_simulate(
                 water.as_ref(),
                 settings.buoyancy,
                 &foci,
-                forced_in.get(&p.rid).map_or(&[], |v| v.as_slice()),
+                forced_in.get(p.rid as usize).map_or(&[], |v| v.as_slice()),
             );
             let t0b = Instant::now();
             drive_kinematics(&mut sim, p.rid, &p.special, p.sub_dt, p.substeps - sub);
@@ -1069,13 +1090,14 @@ pub(crate) fn physics_write_back(world: &mut World) {
         }
     }
     // Mass properties.
-    let masses: Vec<(Entity, MassProperties)> = sim
-        .bodies
-        .iter_mut()
-        .filter(|(_, b)| b.mass_dirty)
-        .map(|(e, b)| {
+    // (Those marked since the last write back, not a walk of every body.)
+    let marked = std::mem::take(&mut sim.mass_changed);
+    let masses: Vec<(Entity, MassProperties)> = marked
+        .into_iter()
+        .filter_map(|e| {
+            let b = sim.bodies.get_mut(&e).filter(|b| b.mass_dirty)?;
             b.mass_dirty = false;
-            (*e, (b.region, b.handle))
+            Some((e, (b.region, b.handle)))
         })
         .collect::<Vec<_>>()
         .into_iter()
@@ -2156,17 +2178,18 @@ fn drive_kinematics(
 
 /// The regions with something to move though their bodies sleep: a character that isn't
 /// resting, or a kinematic body gliding to a goal.
-fn busy_regions(sim: &Simulation) -> HashSet<RegionId> {
+/// (`goals_in`: the bodies gliding to a goal, by region index.)
+fn busy_regions(sim: &Simulation, goals_in: &[Vec<Entity>]) -> HashSet<RegionId> {
     let characters = sim
         .characters
         .iter()
         .filter(|(e, _)| !sim.resting.contains(*e))
         .map(|(_, c)| c.region);
-    let gliding = sim
-        .bodies
-        .values()
-        .filter(|b| b.kinematic_goal.is_some())
-        .map(|b| b.region);
+    let gliding = goals_in
+        .iter()
+        .enumerate()
+        .filter(|(_, list)| !list.is_empty())
+        .map(|(i, _)| i as RegionId);
     characters.chain(gliding).collect()
 }
 
@@ -2279,13 +2302,19 @@ fn hold_resting(sim: &mut Simulation) {
 
 /// Kinematic bodies put somewhere through their `Transform` in a region that doesn't step
 /// (asleep, out of reach or paused): place them there now.
-fn place_kinematics(sim: &mut Simulation, rid: RegionId) {
-    let placed: Vec<(rapier3d::prelude::RigidBodyHandle, Pose)> = sim
-        .bodies
-        .values_mut()
-        .filter(|b| b.region == rid)
-        .filter_map(|b| b.kinematic_goal.take().map(|g| (b.handle, g)))
-        .collect();
+/// (`gliding`: the region's bodies with a goal, from this step's walk of the books.)
+fn place_kinematics(sim: &mut Simulation, rid: RegionId, gliding: &[Entity]) {
+    if gliding.is_empty() {
+        return;
+    }
+    let mut placed: Vec<(rapier3d::prelude::RigidBodyHandle, Pose)> = Vec::new();
+    for e in gliding {
+        if let Some(b) = sim.bodies.get_mut(e).filter(|b| b.region == rid)
+            && let Some(g) = b.kinematic_goal.take()
+        {
+            placed.push((b.handle, g));
+        }
+    }
     if placed.is_empty() {
         return;
     }
@@ -2850,7 +2879,30 @@ fn break_joints(sim: &mut Simulation, rid: RegionId, sub_dt: f32) {
 fn collect_writes(sim: &mut Simulation) {
     let mut writes = std::mem::take(&mut sim.writes);
     writes.clear();
-    for (e, b) in sim.bodies.iter_mut() {
+    // Only bodies that can have moved: each region's awake ones, those awake at the last
+    // write back and new ones (`Simulation::write_next`). A sleeping body written asleep
+    // stays where it was written; walking all of them was most of the write back with
+    // thousands asleep (Jolt and PhysX hand back their active bodies alone).
+    let mut looked = engine_core::ecs::entity::EntityHashSet::default();
+    let mut candidates = std::mem::take(&mut sim.write_next);
+    for (_, r) in sim.live_regions() {
+        let w = &r.world;
+        candidates.extend(
+            w.islands
+                .active_bodies()
+                .filter_map(|h| w.bodies.get(h))
+                .map(|rb| crate::convert::entity_of(rb.user_data)),
+        );
+    }
+    let mut awake_now = Vec::new();
+    for e in candidates {
+        if !looked.insert(e) {
+            continue;
+        }
+        let Some(b) = sim.bodies.get_mut(&e) else {
+            continue;
+        };
+        let e = &e;
         let Some(Some(region)) = sim.regions.get(b.region as usize) else {
             continue;
         };
@@ -2869,6 +2921,9 @@ fn collect_writes(sim: &mut Simulation) {
             continue;
         }
         b.was_sleeping = sleeping;
+        if !sleeping {
+            awake_now.push(*e);
+        }
         let p = rb.position();
         let velocity = if b.kind == BodyKind::Kinematic {
             b.written_velocity.unwrap_or_default()
@@ -2897,6 +2952,7 @@ fn collect_writes(sim: &mut Simulation) {
             velocity,
         });
     }
+    sim.write_next = awake_now;
     sim.writes = writes;
 }
 

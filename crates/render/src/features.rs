@@ -763,6 +763,18 @@ pub trait RenderFeature: Send + Sync + 'static {
         false
     }
 
+    /// Whether casters that turned still join `map`'s static image this frame, drawn into it
+    /// with [`draw_shadow_join`](Self::draw_shadow_join) on top of what it holds, rather than
+    /// the whole image drawn again. Asked after `prepare_frame`, on frames it isn't drawn again.
+    fn shadow_joins(&self, map: usize) -> bool {
+        false
+    }
+
+    /// Draw the casters joining `map`'s static image (see
+    /// [`shadow_joins`](Self::shadow_joins)), as [`draw_shadow_static`](Self::draw_shadow_static)
+    /// would draw them.
+    fn draw_shadow_join(&self, pass: &mut wgpu::RenderPass<'_>, map: usize, ctx: &FrameContext) {}
+
     /// Draw the depth prepass: opaque geometry with depth writes, returning `PrepassOutput`
     /// (world normal, roughness, motion) into [`GpuShared::prepass_targets`]. Use the same
     /// vertex math as the opaque draw and mark the clip position `@invariant`, so the opaque

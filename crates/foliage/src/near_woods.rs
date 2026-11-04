@@ -104,7 +104,7 @@ impl CellJob {
             Some(g) => g.height(DVec3::new(p.x, self.cam_y + 10_000.0, p.z)),
             None => Some(0.0),
         };
-        let cover_at = |p: DVec3| self.cover.sample(p).map(|s| (s.density, s.conifer));
+        let cover_at = |p: DVec3| self.cover.stands(p).map(|s| (s.forest.density, s.mix));
         let keep_out = |p: DVec3| {
             self.occupied.holds(self.occupied_origin, p)
                 || self.keep_clear.iter().any(|k| {

@@ -1003,7 +1003,7 @@ pub fn meadow_grass(land: &Landscape) -> GrassField {
     let t0 = std::time::Instant::now();
     // A million grid points: sampled a band of rows per core.
     let n = MEADOW_GRID as usize;
-    let mut maps = vec![(0.0f32, 0.0f32, 0.0f32); n * n];
+    let mut maps = vec![(0.0f32, 0.0f32, 0.0f32, 0u8); n * n];
     let threads = std::thread::available_parallelism().map_or(4, |c| c.get());
     let rows_per = n.div_ceil(threads);
     std::thread::scope(|scope| {
@@ -1014,19 +1014,25 @@ pub fn meadow_grass(land: &Landscape) -> GrassField {
                     let x = (i as f64 / (n - 1) as f64 - 0.5) * MEADOW_SIZE as f64;
                     let z = (j as f64 / (n - 1) as f64 - 0.5) * MEADOW_SIZE as f64;
                     let (density, dryness) = meadow_cover(land, x, z);
+                    let kind = if density > 0.0 {
+                        meadow_kind(land, x, z, dryness)
+                    } else {
+                        0
+                    };
                     // Roots a touch into the ground, so the terrain's coarser rows far off
                     // don't leave blades hanging.
-                    *out = (land.height(x, z) as f32 - 0.03, density, dryness);
+                    *out = (land.height(x, z) as f32 - 0.03, density, dryness, kind);
                 }
             });
         }
     });
-    let field = GrassField {
+    let mut field = GrassField {
         size: [MEADOW_SIZE; 2],
         resolution: [MEADOW_GRID; 2],
         heights: maps.iter().map(|m| m.0).collect(),
         density: maps.iter().map(|m| m.1).collect(),
         dryness: maps.iter().map(|m| m.2).collect(),
+        kinds: maps.iter().map(|m| m.3).collect(),
         ..Default::default()
     }
     .with_style(GrassStyle {
@@ -1044,6 +1050,9 @@ pub fn meadow_grass(land: &Landscape) -> GrassField {
         shadow_distance: 22.0,
         ..Default::default()
     });
+    // The other grasses and the flowers (engine_foliage::meadow), in their season.
+    field.styles =
+        engine_foliage::meadow::palette(&field.style, engine_weather::Sky::default().day_of_year);
     let covered = field.density.iter().filter(|&&d| d > 0.05).count();
     engine::core::log::info!(
         "scenery: GPU meadow {:.0} m across, grass on {:.0}% of it, mapped in {:.2} s",
@@ -1052,6 +1061,38 @@ pub fn meadow_grass(land: &Landscape) -> GrassField {
         t0.elapsed().as_secs_f32()
     );
     field
+}
+
+/// Which grass grows at (x, z) (an `engine_foliage::meadow::GrassKind`): sedge by the streams
+/// and the lake, turf and clover along the roads and on steep banks, tall grass at wood and
+/// field edges, dry grass, yarrow and heather where the meadow yellows, flowers in drifts.
+fn meadow_kind(land: &Landscape, x: f64, z: f64, dryness: f32) -> u8 {
+    use engine::core::math::smoothstep;
+    let n = land.normal(x, z, 1.5);
+    let by_stream = land
+        .stream_at(x, z)
+        .map_or(0.0, |(d, _)| 1.0 - smoothstep(2.0, 14.0, d as f32));
+    let by_lake = 1.0 - smoothstep(1.05, 1.35, land.lake_t(x, z) as f32);
+    let wet = by_stream.max(by_lake);
+    // Roads wear their verges short: the road's own weight a few meters to either side.
+    let verge = [(3.0, 0.0), (-3.0, 0.0), (0.0, 3.0), (0.0, -3.0)]
+        .iter()
+        .map(|(dx, dz)| land.road_weight(x + dx, z + dz) as f32)
+        .fold(0.0, f32::max);
+    let woods = land.woodland(x, z) as f32;
+    let margin = land
+        .field_at(x, z)
+        .map_or(0.0, |(_, edge)| 1.0 - smoothstep(1.5, 5.0, edge as f32));
+    let site = engine_foliage::meadow::Site {
+        water: (0.48 - 0.32 * dryness + 0.5 * wet).clamp(0.0, 1.0),
+        shade: smoothstep(0.35, 0.8, woods) * 0.7,
+        slope: ((1.0 - n.y) / 0.29).clamp(0.0, 1.0),
+        sunny: 0.0,
+        wear: verge * 0.9,
+        edge: (smoothstep(0.2, 0.4, woods) * (1.0 - smoothstep(0.55, 0.8, woods))).max(margin),
+        opened: 0.0,
+    };
+    engine_foliage::meadow::community(&site, x, z, land.seed ^ 0x6d34) as u8
 }
 
 /// Near a scarp, where the cliff builds its own rock face and talus.

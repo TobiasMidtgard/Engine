@@ -817,7 +817,7 @@ pub fn watch(
     domains: Res<SmokeDomains>,
     focus: Res<FocusPoints>,
     cameras: Query<(&Camera, &GlobalTransform)>,
-    mut diagnostics: ResMut<Diagnostics>,
+    diagnostics: Res<Metrics>,
 ) {
     let clock = &mut *clock;
     clock.points.clear();

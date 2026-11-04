@@ -347,7 +347,7 @@ pub(crate) fn spawn_afterimages(
 /// Age afterimages and return faded ones to the pool (PostUpdate).
 pub(crate) fn fade_afterimages(
     time: Res<Time>,
-    mut diagnostics: Option<ResMut<Diagnostics>>,
+    diagnostics: Option<Res<Metrics>>,
     mut q: Query<&mut Afterimage>,
 ) {
     let real = time.real_delta_secs();
@@ -364,7 +364,7 @@ pub(crate) fn fade_afterimages(
         }
         count += 1;
     }
-    if let Some(d) = diagnostics.as_deref_mut() {
+    if let Some(d) = diagnostics.as_deref() {
         d.set("movement.afterimages", count as f64);
     }
 }

@@ -118,16 +118,9 @@ mod tests {
             6,
             &[
                 "engine_script::shift_scripts",
-                "engine_space::fly",
                 "engine_space::reanchor",
-                "engine_space::update_space",
-                "engine_ui::bars_system",
-                "engine_ui::cooldowns_system",
-                "engine_ui::key_hints_system",
-                "engine_ui::sliders_system",
-                "engine_ui::toasts_system",
-                "engine_ui::toggles_system",
-                "engine_ui::ui_layout_system",
+                "engine_space::place_and_fly",
+                "engine_ui::ui_frame_system",
             ],
         ),
         (

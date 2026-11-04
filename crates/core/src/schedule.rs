@@ -94,6 +94,12 @@ pub enum UpdateSet {
     AfterPropagate,
 }
 
+/// The `Last` system that moves [`Metrics`](crate::diagnostics::Metrics) into
+/// [`Diagnostics`](crate::diagnostics::Diagnostics). Anything in `Last` that reads the
+/// diagnostics for this frame (profile reports, the AI bridge) runs after it.
+#[derive(SystemSet, Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct MetricsSet;
+
 /// The second half of `due.pipe(queue_when(work))`: a plain system that checks for work (`due`,
 /// any read-only system returning `bool`) and, on the steps that have some, queues the
 /// exclusive `work` as a command, so it runs at the next sync point that is already there.
