@@ -3,15 +3,19 @@
 //! Since wgpu 27 the work of encoding (validation, resource tracking, the backend's commands)
 //! happens in `CommandEncoder::finish`, not as passes are recorded, so one encoder for the whole
 //! frame does it all on the render thread at the end. The renderer instead splits the frame into
-//! a few encoders (before the shadows, the shadow maps, the scene, the post chain) and hands each
-//! finished part to a worker here while it records the next; the buffers come back in the order
-//! they were handed in, for one ordered submit. bevy's parallel encoding (one task per pass and
+//! a few encoders (before the shadows, the shadow maps, the depth prepass, the lighting inputs,
+//! the opaque scene, the transparent phase, the post chain) and hands each finished part to a
+//! worker here while it records the next; the buffers come back in the order they were handed
+//! in, for one ordered submit (Unreal translates command lists in parallel the same way and keeps
+//! "the order of submission of commands to the GPU ... unchanged"). With the scene in one encoder
+//! a mirror view's main thread waited 4.1 ms a frame for it at the lake on Tobias's PC (round 29b),
+//! after recording it in under 1 ms. bevy's parallel encoding (one task per pass and
 //! view, `finish` on the pool) cut its render-thread time by 26 to 45%
 //! (bevyengine/bevy#9172); wgpu supports several encoders on several threads.
 
 use std::sync::{Arc, Mutex, mpsc};
 
-type Job = (usize, wgpu::CommandEncoder);
+type Job = (usize, &'static str, wgpu::CommandEncoder);
 
 pub(crate) struct Finisher {
     jobs: Option<mpsc::Sender<Job>>,
@@ -22,6 +26,34 @@ pub(crate) struct Finisher {
     /// Encoders handed in since the last `collect`.
     sent: usize,
     workers: Vec<std::thread::JoinHandle<()>>,
+}
+
+/// The parts a frame's commands are split into, in order.
+pub const PARTS: [&str; 7] = [
+    "frame",
+    "shadows",
+    "prepass",
+    "lighting",
+    "scene",
+    "transparent",
+    "post",
+];
+
+/// Workers finishing encoders: enough for the parts recorded while earlier ones finish.
+pub const THREADS: usize = 4;
+
+/// `encoder.finish()` inside a span naming its part, so traces show what each part costs.
+fn finish_traced(part: &str, encoder: wgpu::CommandEncoder) -> wgpu::CommandBuffer {
+    let _span = match part {
+        "frame" => tracing::info_span!("render: finish frame").entered(),
+        "shadows" => tracing::info_span!("render: finish shadows").entered(),
+        "prepass" => tracing::info_span!("render: finish prepass").entered(),
+        "lighting" => tracing::info_span!("render: finish lighting").entered(),
+        "scene" => tracing::info_span!("render: finish scene").entered(),
+        "transparent" => tracing::info_span!("render: finish transparent").entered(),
+        _ => tracing::info_span!("render: finish post").entered(),
+    };
+    encoder.finish()
 }
 
 impl Finisher {
@@ -40,10 +72,11 @@ impl Finisher {
                         loop {
                             // Wait for a job, then let the next worker wait while this one works.
                             let job = queue.lock().unwrap_or_else(|e| e.into_inner()).recv();
-                            let Ok((n, encoder)) = job else {
+                            let Ok((n, part, encoder)) = job else {
                                 break;
                             };
-                            if finished.send((n, encoder.finish())).is_err() {
+                            let buffer = finish_traced(part, encoder);
+                            if finished.send((n, buffer)).is_err() {
                                 break;
                             }
                         }
@@ -60,21 +93,36 @@ impl Finisher {
         }
     }
 
-    /// Finish `encoder` on a worker (or here, without one).
-    pub fn send(&mut self, encoder: wgpu::CommandEncoder) {
+    /// Finish `encoder` (the frame's part `part`, one of [`PARTS`]) on a worker (or here,
+    /// without one).
+    pub fn send(&mut self, part: &'static str, encoder: wgpu::CommandEncoder) {
         let n = self.sent;
         self.sent += 1;
         let encoder = match &self.jobs {
-            Some(jobs) => match jobs.send((n, encoder)) {
+            Some(jobs) => match jobs.send((n, part, encoder)) {
                 Ok(()) => return,
-                Err(mpsc::SendError((_, encoder))) => {
+                Err(mpsc::SendError((_, _, encoder))) => {
                     self.jobs = None;
                     encoder
                 }
             },
             None => encoder,
         };
-        self.inline.push((n, encoder.finish()));
+        self.inline.push((n, finish_traced(part, encoder)));
+    }
+
+    /// Hand `encoder` (part `*part`) in and go on recording into a new one for part `next`.
+    pub fn hand_off(
+        &mut self,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        part: &mut &'static str,
+        next: &'static str,
+    ) {
+        let new =
+            device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some(next) });
+        self.send(*part, std::mem::replace(encoder, new));
+        *part = next;
     }
 
     /// Every buffer handed in since the last call, in the order handed in (waits for the

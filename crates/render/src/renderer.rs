@@ -1133,7 +1133,7 @@ impl Renderer {
             main_thread_submit_ms: 0.0,
             probe_gi,
             static_requests: [false; SHADOW_MAPS],
-            finisher: crate::finish::Finisher::new(2),
+            finisher: crate::finish::Finisher::new(crate::finish::THREADS),
             world_reflection_written: false,
         })
     }
@@ -2312,13 +2312,11 @@ impl Renderer {
         }
         let frame_group = &self.frame_group;
         // The frame so far is finished on a worker while the rest is recorded (`finish.rs`).
-        let new_encoder = |label| {
-            device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some(label) })
-        };
         let parallel = settings.parallel_encoding;
+        let mut part = crate::finish::PARTS[0];
         if parallel {
             self.finisher
-                .send(std::mem::replace(&mut encoder, new_encoder("shadows")));
+                .hand_off(device, &mut encoder, &mut part, "shadows");
         }
 
         // Shadows: each map's static image (drawn again only when due, `ShadowCache`) copied
@@ -2458,7 +2456,7 @@ impl Renderer {
         }
         if parallel {
             self.finisher
-                .send(std::mem::replace(&mut encoder, new_encoder("scene")));
+                .hand_off(device, &mut encoder, &mut part, "prepass");
         }
         self.sky_camera.encode(&mut encoder);
         if !extra {
@@ -2546,6 +2544,10 @@ impl Renderer {
                 depth_or_array_layers: 1,
             },
         );
+        if parallel {
+            self.finisher
+                .hand_off(device, &mut encoder, &mut part, "lighting");
+        }
         // Volumetric fog: needs the shadow cascades, the sky occlusion map, the sky light and
         // the prepass depth; shading reads it from frame binding 19 (a stand-in in the prepass
         // group).
@@ -2605,6 +2607,10 @@ impl Renderer {
             self.effects.skip_gi();
         }
 
+        if parallel {
+            self.finisher
+                .hand_off(device, &mut encoder, &mut part, "scene");
+        }
         // Scene: opaque + sky (on the prepass depth). With the frame profiler on, each feature's
         // opaque draws get a pass of their own (`render.gpu.scene: <feature>`), then the sky.
         if engine_core::profile::enabled() {
@@ -2692,6 +2698,10 @@ impl Renderer {
             );
         }
 
+        if parallel {
+            self.finisher
+                .hand_off(device, &mut encoder, &mut part, "transparent");
+        }
         // Transparent.
         self.perf.pass(&mut cpu, &mut encoder, "transparent");
         {
@@ -2728,7 +2738,7 @@ impl Renderer {
 
         if parallel {
             self.finisher
-                .send(std::mem::replace(&mut encoder, new_encoder("post")));
+                .hand_off(device, &mut encoder, &mut part, "post");
         }
 
         // Depth of field, on the scene before TAA (see depth_of_field.rs).
