@@ -209,6 +209,7 @@ pub struct FixedTime {
     world_step: f64,
     alpha: f32,
     tick: u64,
+    dropped_secs: f64,
 }
 
 impl Default for FixedTime {
@@ -217,12 +218,18 @@ impl Default for FixedTime {
             hz: 60.0,
             accumulator: 0.0,
             max_steps: 8,
-            budget_secs: 1.0 / 30.0,
+            // `ENGINE_STEP_BUDGET_MS` overrides it (A/B runs on the PC; `time.set_step_budget`
+            // at run time).
+            budget_secs: std::env::var("ENGINE_STEP_BUDGET_MS")
+                .ok()
+                .and_then(|v| v.parse::<f64>().ok())
+                .map_or(1.0 / 30.0, |ms| (ms / 1000.0).max(0.0)),
             steps: 0,
             current_step: 0,
             world_step: 1.0 / 60.0,
             alpha: 0.0,
             tick: 0,
+            dropped_secs: 0.0,
         }
     }
 }
@@ -286,13 +293,20 @@ impl FixedTime {
         self.budget_secs = secs.max(0.0);
     }
 
+    /// Real seconds of fixed steps dropped since start (the step budget or the step cap cut a
+    /// frame's catch-up short): how long the world has run slower than real time.
+    pub fn dropped_secs(&self) -> f64 {
+        self.dropped_secs
+    }
+
     /// The frame loop ran only `ran` of this frame's steps: drop the rest and the backlog.
     pub(crate) fn stop_early(&mut self, ran: u32) {
         if ran >= self.steps {
             return;
         }
-        self.steps = ran;
         let step = self.step_real_secs();
+        self.dropped_secs += (self.steps - ran) as f64 * step + (self.accumulator - step).max(0.0);
+        self.steps = ran;
         self.accumulator = self.accumulator.min(step);
         self.alpha = (self.accumulator / step).clamp(0.0, 1.0) as f32;
     }
@@ -305,6 +319,7 @@ impl FixedTime {
         self.accumulator -= self.steps as f64 * step;
         if due > self.max_steps {
             // Drop the backlog rather than trying to catch up forever.
+            self.dropped_secs += (self.accumulator - step).max(0.0);
             self.accumulator = self.accumulator.min(step);
         }
         self.world_step = step * scale;
@@ -558,8 +573,25 @@ pub(crate) fn register_api(app: &mut App) {
                 "base_scale": time.base_scale(),
                 "paused": time.is_paused(),
                 "fixed_hz": fixed.hz(),
+                "fixed_steps_this_frame": fixed.steps_this_frame(),
+                "step_budget_ms": fixed.step_budget_secs() * 1000.0,
+                "dropped_step_secs": fixed.dropped_secs(),
                 "dilation": dil.requests(),
             }))
+        },
+    )
+    .register_api(
+        "time.set_step_budget",
+        "Wall-clock ms the fixed steps of one frame may take before the rest are dropped (the \
+         world then runs slower than real time instead of the frame rate falling); default 33.3, \
+         ENGINE_STEP_BUDGET_MS at start.",
+        r#"{"ms": 16.7}"#,
+        |world, args| {
+            let ms = args["ms"].as_f64().ok_or("missing number 'ms'")?;
+            world
+                .resource_mut::<FixedTime>()
+                .set_step_budget_secs(ms / 1000.0);
+            Ok(serde_json::json!({"ok": true}))
         },
     )
     .register_api(
@@ -630,6 +662,9 @@ mod tests {
         let fixed = app.world.resource::<FixedTime>();
         assert_eq!(fixed.steps_this_frame(), 1);
         assert!(fixed.alpha() <= 1.0);
+        // All but that step and what is left toward the next: about 0.18 s the world lost.
+        let lost = fixed.dropped_secs();
+        assert!((0.15..0.2).contains(&lost), "dropped {lost} s");
     }
 
     #[test]
