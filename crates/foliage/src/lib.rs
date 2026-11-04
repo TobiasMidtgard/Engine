@@ -13,6 +13,7 @@ pub mod growth;
 pub mod hand_felling;
 pub mod loading;
 pub mod lod_fade;
+pub mod meadow;
 pub mod meshgen;
 pub mod near_woods;
 pub mod plant;

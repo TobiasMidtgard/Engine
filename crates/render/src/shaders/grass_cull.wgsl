@@ -180,7 +180,17 @@ struct BladeSeed {
     snowed: f32,
     albedo: vec3<f32>,   // before the tip tint, snow and shade along the blade
     clump: vec2<f32>,    // the clump's own numbers that tilt its far normal (0..1)
+    flower: f32,         // 1: a flowering stem
 };
+
+// The kind of grass (0..kinds-1) at the map point nearest field-local `p` (meters).
+fn grass_kind_at(f: GrassField, p: vec2<f32>) -> u32 {
+    let size = vec2<f32>(f.axis_x.w, f.axis_y.w);
+    let res = vec2<i32>(f.grid.xy);
+    let g = clamp(p / size, vec2<f32>(0.0), vec2<f32>(1.0)) * vec2<f32>(res - 1);
+    let k = u32(round(textureLoad(grass_map, vec2<i32>(round(g)), 0).w));
+    return min(k, max(f.grid.z, 1u) - 1u);
+}
 
 
 // Blade `instance` (tile << 16 | blade): where it grows and how, or not visible when thinned
@@ -192,7 +202,7 @@ fn grass_seed(instance: u32, shadow: bool) -> BladeSeed {
     let tile = grass_tiles[instance >> GRASS_BLADE_BITS];
     let index = instance & ((1u << GRASS_BLADE_BITS) - 1u);
     out.field = tile.field;
-    let f = grass_fields[tile.field];
+    var f = grass_fields[tile.field];
     let key = vec2<i32>(round(tile.corner / GRASS_TILE));
     let r0 = grass_random(key, index, f.grid.w);
     let r1 = grass_random(key, index, f.grid.w ^ 0x9e3779b9u);
@@ -204,6 +214,14 @@ fn grass_seed(instance: u32, shadow: bool) -> BladeSeed {
     let level = flat_rel - f.axis_y.xyz * dot(flat_rel, f.axis_y.xyz);
     let nearest = max(length(level) - 2.0 * f.clump.x, 0.0);
     if (rank >= grass_lod(f, nearest) * grass_keep(f, nearest, shadow)) { return out; }
+    // Its kind: the nearest map point to a spot about a meter around it, so kinds meet in
+    // ragged drifts. Its entry has the same placement and distances, its kind's look.
+    let r2 = grass_random(key, index, f.grid.w ^ 0x2545f491u);
+    if (f.grid.z > 1u) {
+        let kind = grass_kind_at(f, local + (r2.xy - 0.5) * 1.6);
+        out.field = tile.field + kind;
+        f = grass_fields[out.field];
+    }
     // The clump: blades crowd in toward its center.
     var clump: GrassClump;
     clump.center = local;
@@ -228,7 +246,7 @@ fn grass_seed(instance: u32, shadow: bool) -> BladeSeed {
     // Worn ground: the blades trodden flat first, then fewer of them, none on a bare path.
     let worn = grass_wear_at(f, local);
     let trodden = smoothstep(0.03, 0.5, worn);
-    let keep = m.y * lod * grass_keep(f, d, shadow) * (1.0 - smoothstep(0.2, 0.95, worn));
+    let keep = m.y * lod * grass_keep(f, d, shadow) * (1.0 - smoothstep(0.2, 0.95, worn)) * f.kind.y;
     if (rank >= keep) { return out; }
     // Shrink into the ground just before being thinned out, and at thin edges of the meadow.
     let fade = saturate((keep - rank) * 10.0);
@@ -240,11 +258,21 @@ fn grass_seed(instance: u32, shadow: bool) -> BladeSeed {
     // Snow buries the lower part of a blade (the ground's snow is drawn on the ground, so what
     // stands out of it is drawn from the ground up).
     let snow = max(grass_snow_depth(f, root), 0.0);
-    let height = grown - snow;
+    // Flowering stems stand a little taller and straighter (BLOOM_RISE in grass.rs), above
+    // the blades around them.
+    let flower = r2.z < f.bloom.w;
+    let height = grown * select(1.0, 1.15, flower) - snow;
     if (height < 0.008) { return out; }
     let leaf = f.lush.w;
     // Thinned out, the survivors widen to keep the cover (leaves less: they'd turn into plates).
-    out.width = f.shape.z * (0.75 + 0.5 * r1.x) * clamp(pow(max(lod, 1e-3), -0.6), 1.0, mix(4.0, 1.5, leaf));
+    // (Out to 8 times as wide: Ghost of Tsushima keeps a quarter of the blades, twice as wide,
+    // at each doubling of the distance, so a meadow keeps its cover to 150 m.)
+    let widen = clamp(pow(max(lod, 1e-3), -0.6), 1.0, mix(8.0, 1.5, leaf));
+    out.width = f.shape.z * (0.75 + 0.5 * r1.x) * widen;
+    if (flower) {
+        // A flowering stem's width is its head's (the stem a tenth of it).
+        out.width = f.kind.x * (0.8 + 0.4 * r1.x) * widen;
+    }
 
     // Blade frame: facing its own way, or fanning out from its clump's center; leaning over
     // toward it, the clump's outer blades the most.
@@ -256,7 +284,8 @@ fn grass_seed(instance: u32, shadow: bool) -> BladeSeed {
     let fanned = face2 + (normalize(fan) - face2) * f.clump.z;
     face2 = select(face2, normalize(fanned), dot(fanned, fanned) > 1e-6);
     let facing = f.axis_x.xyz * face2.x + f.axis_z.xyz * face2.y;
-    let lean = f.shape.w * (0.2 + 0.8 * r1.z) * mix(1.0, 0.55 + 1.1 * clump.dist, f.clump.z);
+    let lean = f.shape.w * (0.2 + 0.8 * r1.z) * mix(1.0, 0.55 + 1.1 * clump.dist, f.clump.z)
+        * select(1.0, 0.4, flower);
 
     // Color: fresh to dry by the map, the clump and per blade.
     let cc = f.look.x;
@@ -278,6 +307,7 @@ fn grass_seed(instance: u32, shadow: bool) -> BladeSeed {
     out.snowed = smoothstep(0.0, 0.06, snow);
     out.albedo = albedo;
     out.clump = clump.hash.xy;
+    out.flower = select(0.0, 1.0, flower);
     out.visible = true;
     return out;
 }
@@ -331,6 +361,7 @@ fn grass_shape(s: BladeSeed, tip: vec3<f32>, tip_prev: vec3<f32>, segments: u32)
     out.snowed = s.snowed;
     out.albedo = s.albedo;
     out.clump = s.clump;
+    out.flower = s.flower;
     return out;
 }
 

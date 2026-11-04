@@ -77,7 +77,19 @@ pub struct GrassField {
     /// 0 = fresh green .. 1 = dry straw at each grid point.
     pub dryness: Vec<f32>,
     pub style: GrassStyle,
+    /// Which grass grows at each grid point: 0 `style`, `k` `styles[k - 1]` (empty: `style`
+    /// everywhere). A blade takes the kind of the point nearest a spot about a meter around
+    /// it, so kinds meet in ragged drifts rather than along the grid; all kinds grow in the
+    /// same pass. A meadow of turf, tall grass, sedge and flowers is one field (Ghost of
+    /// Tsushima's grass-type map).
+    pub kinds: Vec<u8>,
+    /// The other kinds' looks (at most [`MAX_GRASS_KINDS`] - 1). Each keeps its own
+    /// `blades_per_m2`; the field's draw and shadow distances are `style`'s.
+    pub styles: Vec<GrassStyle>,
 }
+
+/// Kinds of grass one [`GrassField`] can grow: its `style` and up to 15 `styles`.
+pub const MAX_GRASS_KINDS: usize = 16;
 
 impl Default for GrassField {
     fn default() -> Self {
@@ -88,6 +100,8 @@ impl Default for GrassField {
             density: Vec::new(),
             dryness: Vec::new(),
             style: GrassStyle::default(),
+            kinds: Vec::new(),
+            styles: Vec::new(),
         }
     }
 }
@@ -130,6 +144,11 @@ impl GrassField {
     pub fn with_style(mut self, style: GrassStyle) -> Self {
         self.style = style;
         self
+    }
+
+    /// Every kind's look: `style`, then `styles` (at most [`MAX_GRASS_KINDS`]).
+    pub fn palette(&self) -> impl Iterator<Item = &GrassStyle> {
+        std::iter::once(&self.style).chain(self.styles.iter().take(MAX_GRASS_KINDS - 1))
     }
 }
 
@@ -202,6 +221,13 @@ pub struct GrassStyle {
     /// 0..1: leaves lie flat on the ground in their own direction, some curling up at the tip:
     /// fallen leaves ([`GrassStyle::leaf_litter`]).
     pub lying: f32,
+    /// 0..1: share of the blades that are flowering stems: a little taller and straighter than
+    /// the blades, a head of `bloom_color` at the top (buttercups, daisies, clover heads).
+    pub bloom: f32,
+    /// Albedo (linear RGB) of the flower heads.
+    pub bloom_color: [f32; 3],
+    /// Width of a flower head, meters.
+    pub bloom_size: f32,
 }
 
 impl Default for GrassStyle {
@@ -229,6 +255,9 @@ impl Default for GrassStyle {
             leaf: 0.0,
             stalk: 0.0,
             lying: 0.0,
+            bloom: 0.0,
+            bloom_color: [0.8, 0.7, 0.1],
+            bloom_size: 0.025,
         }
     }
 }
@@ -260,6 +289,7 @@ impl GrassStyle {
             leaf: 1.0,
             stalk: 0.4,
             lying: 0.0,
+            ..Default::default()
         }
     }
 
@@ -288,6 +318,7 @@ impl GrassStyle {
             leaf: 1.0,
             stalk: 0.08,
             lying: 1.0,
+            ..Default::default()
         }
     }
 
@@ -472,6 +503,9 @@ fn lod_factor(d: f32, full: f32, far: f32) -> f32 {
     thin * (1.0 - t * t * (3.0 - 2.0 * t))
 }
 
+/// How much taller a flowering stem stands than its kind's blades (must match `grass_seed`).
+const BLOOM_RISE: f32 = 1.15;
+
 /// Full density out to this distance. Past it the survivors widen, and seen at a glancing
 /// angle a few meters of meadow still cover the ground.
 fn full_density_distance(draw_distance: f32) -> f32 {
@@ -560,6 +594,58 @@ struct GpuField {
     tip: [f32; 4],
     wear: [f32; 4],
     gust: [f32; 4],
+    /// Flower heads: albedo (linear), w: share of blades flowering.
+    bloom: [f32; 4],
+    /// x: flower head width (m), y: this kind's blades as a share of the field's most.
+    kind: [f32; 4],
+}
+
+impl GpuField {
+    /// Set what `style` decides (shape, colors, clumps, flowers), leaving the field's own
+    /// placement, distances and wind as they are.
+    fn set_style(&mut self, style: &GrassStyle, share: f32) {
+        self.shape = [
+            style.height.max(0.0),
+            style.height_variation.clamp(0.0, 0.95),
+            style.width.max(0.0),
+            style.bend.clamp(0.0, 2.0),
+        ];
+        self.lush = [
+            style.lush_color[0],
+            style.lush_color[1],
+            style.lush_color[2],
+            style.leaf.clamp(0.0, 1.0),
+        ];
+        self.dry = [
+            style.dry_color[0],
+            style.dry_color[1],
+            style.dry_color[2],
+            style.wind_response.max(0.0),
+        ];
+        self.lod[2] = style.lying.clamp(0.0, 1.0);
+        self.clump = [
+            style.clump_size.max(0.0),
+            style.clump_pull.clamp(0.0, 0.95),
+            style.clump_fan.clamp(0.0, 1.0),
+            style.clump_height.clamp(0.0, 0.9),
+        ];
+        self.look[0] = style.clump_color.clamp(0.0, 0.5);
+        self.look[1] = style.droop.clamp(0.0, 1.0);
+        self.look[2] = style.gloss.clamp(0.0, 1.0);
+        self.tip = [
+            style.tip_tint[0].max(0.0),
+            style.tip_tint[1].max(0.0),
+            style.tip_tint[2].max(0.0),
+            style.stalk.clamp(0.0, 0.8),
+        ];
+        self.bloom = [
+            style.bloom_color[0],
+            style.bloom_color[1],
+            style.bloom_color[2],
+            style.bloom.clamp(0.0, 1.0),
+        ];
+        self.kind = [style.bloom_size.max(0.0), share.clamp(0.0, 1.0), 0.0, 0.0];
+    }
 }
 
 #[repr(C)]
@@ -605,13 +691,18 @@ impl FieldMap {
         let get = |v: &Vec<f32>, i: usize, default: f32| {
             if v.len() == n { v[i] } else { default }
         };
+        let last_kind = field.styles.len().min(MAX_GRASS_KINDS - 1) as u8;
         let texels: Vec<[f32; 4]> = (0..n)
             .map(|i| {
                 [
                     get(&field.heights, i, 0.0),
                     get(&field.density, i, 1.0).clamp(0.0, 1.0),
                     get(&field.dryness, i, field.style.dryness).clamp(0.0, 1.0),
-                    0.0,
+                    if field.kinds.len() == n {
+                        field.kinds[i].min(last_kind) as f32
+                    } else {
+                        0.0
+                    },
                 ]
             })
             .collect();
@@ -1198,7 +1289,11 @@ impl RenderFeature for GrassFeature {
             }
             let map = &*map;
             let style = &field.style;
-            let per_m2 = (style.blades_per_m2 * scale).clamp(0.0, MAX_BLADES_PER_M2);
+            let most_per_m2 = field
+                .palette()
+                .map(|s| s.blades_per_m2.max(0.0))
+                .fold(0.0f32, f32::max);
+            let per_m2 = (most_per_m2 * scale).clamp(0.0, MAX_BLADES_PER_M2);
             let far = style.draw_distance.max(1.0);
             if per_m2 <= 0.0 || field.size[0] <= 0.0 || field.size[1] <= 0.0 {
                 continue;
@@ -1212,9 +1307,14 @@ impl RenderFeature for GrassFeature {
             let origin = view.relative(corner);
             // The camera in field-local coordinates.
             let cam = rotation.inverse() * -origin;
-            let blade_top = style.height * (1.0 + style.height_variation.max(0.0));
+            let blade_top = field
+                .palette()
+                .map(|s| s.height * (1.0 + s.height_variation.max(0.0)) * BLOOM_RISE)
+                .fold(0.0f32, f32::max);
 
             let field_index = self.order.len();
+            // The field's first entry in the fields buffer: one for each kind it grows.
+            let gpu_index = self.fields.len() as u32;
             let first_job = self.jobs.len() as u32;
             let mut drew = false;
             let tx0 = ((cam.x - far) / TILE).floor().max(0.0) as u32;
@@ -1268,7 +1368,7 @@ impl RenderFeature for GrassFeature {
                     let segments = segments_at(d);
                     self.tiles.push(GpuTile {
                         corner: [lo.x, lo.z],
-                        field: field_index as u32,
+                        field: gpu_index,
                         segments,
                         blades: max_blades,
                         _pad: [0; 3],
@@ -1309,57 +1409,29 @@ impl RenderFeature for GrassFeature {
             let seed = (entity.to_bits() as u32)
                 ^ ((entity.to_bits() >> 32) as u32).wrapping_mul(0x9e37_79b9);
             self.order.push(entity);
-            self.fields.push(GpuField {
+            let kinds = field.palette().count() as u32;
+            let mut base = GpuField {
                 origin: origin.extend(0.0).to_array(),
                 axis_x: ax.extend(field.size[0]).to_array(),
                 axis_y: ay.extend(field.size[1]).to_array(),
                 axis_z: az.extend(0.0).to_array(),
-                grid: [map.resolution[0], map.resolution[1], 0, seed],
-                shape: [
-                    style.height.max(0.0),
-                    style.height_variation.clamp(0.0, 0.95),
-                    style.width.max(0.0),
-                    style.bend.clamp(0.0, 2.0),
-                ],
-                lush: [
-                    style.lush_color[0],
-                    style.lush_color[1],
-                    style.lush_color[2],
-                    style.leaf.clamp(0.0, 1.0),
-                ],
-                dry: [
-                    style.dry_color[0],
-                    style.dry_color[1],
-                    style.dry_color[2],
-                    style.wind_response.max(0.0),
-                ],
-                lod: [
-                    full,
-                    far,
-                    style.lying.clamp(0.0, 1.0),
-                    style.shadow_distance.max(0.0),
-                ],
-                clump: [
-                    style.clump_size.max(0.0),
-                    style.clump_pull.clamp(0.0, 0.95),
-                    style.clump_fan.clamp(0.0, 1.0),
-                    style.clump_height.clamp(0.0, 0.9),
-                ],
-                look: [
-                    style.clump_color.clamp(0.0, 0.5),
-                    style.droop.clamp(0.0, 1.0),
-                    style.gloss.clamp(0.0, 1.0),
-                    snow_here,
-                ],
-                tip: [
-                    style.tip_tint[0].max(0.0),
-                    style.tip_tint[1].max(0.0),
-                    style.tip_tint[2].max(0.0),
-                    style.stalk.clamp(0.0, 0.8),
-                ],
+                grid: [map.resolution[0], map.resolution[1], kinds, seed],
+                lod: [full, far, 0.0, style.shadow_distance.max(0.0)],
+                look: [0.0, 0.0, 0.0, snow_here],
                 wear: map.wear_params(),
                 gust,
-            });
+                ..GpuField::zeroed()
+            };
+            // One entry for each kind: the same field, each kind's look.
+            for kind in field.palette() {
+                let share = if most_per_m2 > 0.0 {
+                    kind.blades_per_m2.max(0.0) / most_per_m2
+                } else {
+                    1.0
+                };
+                base.set_style(kind, share);
+                self.fields.push(base);
+            }
         }
         self.maps.retain(|e, _| seen.contains(e));
 
@@ -1559,8 +1631,8 @@ mod tests {
 
     #[test]
     fn gpu_field_matches_the_shader_struct() {
-        // Fourteen vec4s, as `GrassField` in grass_common.wgsl.
-        assert_eq!(std::mem::size_of::<GpuField>(), 14 * 16);
+        // Sixteen vec4s, as `GrassField` in grass_common.wgsl.
+        assert_eq!(std::mem::size_of::<GpuField>(), 16 * 16);
     }
 
     /// The run the shader sees (`gust.w + speed x t`) at frame time `t`.

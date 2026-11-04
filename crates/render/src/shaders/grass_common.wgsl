@@ -31,7 +31,12 @@ struct GrassField {
     tip: vec4<f32>,     // tip tint (rgb, x the blade's color), w: a leaf's stalk (fraction of its length)
     wear: vec4<f32>,    // worn-ground map: first point (field-local m, xz), points per m, 1 = present
     gust: vec4<f32>,    // steady wind (m/s, xyz), w: the wind's run (m) less speed x time
+    bloom: vec4<f32>,   // flower heads' albedo (linear), w: share of blades flowering
+    kind: vec4<f32>,    // flower head width (m; a flowering stem's record width is its head's), this kind's blades as a share of the field's most
 };
+// A field growing several kinds of grass has one entry for each, one after the other: the
+// same placement, distances and wind, each kind's look (`grid.z` of the first: how many). A
+// blade's record names its kind's entry.
 
 
 @group(1) @binding(1) var<storage, read> grass_fields: array<GrassField>;
@@ -65,6 +70,7 @@ struct BladeShape {
     snowed: f32,
     albedo: vec3<f32>,
     clump: vec2<f32>,
+    flower: f32,         // 1: a flowering stem with a head at its top
 };
 
 // One blade packed in 64 bytes: the root in full (camera-relative, so precise near the
@@ -73,7 +79,7 @@ struct GrassRecord {
     root: vec4<u32>,  // root xyz (f32 bits), field
     tips: vec4<u32>,  // tip xy, tip z + prev x, prev yz, facing
     look: vec4<u32>,  // height + width, albedo rg, albedo b + snowed, clump (unorm)
-    more: vec4<u32>,  // ripple + rise (unorm), segments, unused
+    more: vec4<u32>,  // ripple + rise (unorm), segments, flowering (1), unused
 };
 
 fn grass_pack(s: BladeShape) -> GrassRecord {
@@ -91,7 +97,7 @@ fn grass_pack(s: BladeShape) -> GrassRecord {
         pack2x16float(vec2<f32>(s.albedo.b, s.snowed)),
         pack2x16unorm(s.clump),
     );
-    r.more = vec4<u32>(pack2x16unorm(vec2<f32>(s.ripple, s.rise)), s.segments, 0u, 0u);
+    r.more = vec4<u32>(pack2x16unorm(vec2<f32>(s.ripple, s.rise)), s.segments, u32(s.flower > 0.5), 0u);
     return r;
 }
 
@@ -117,6 +123,7 @@ fn grass_unpack(r: GrassRecord) -> BladeShape {
     s.ripple = rr.x;
     s.rise = rr.y;
     s.segments = r.more.y;
+    s.flower = f32(r.more.z);
     return s;
 }
 
@@ -166,12 +173,18 @@ fn grass_vertex(s: BladeShape, vertex: u32, t: f32, tip_dir: vec3<f32>) -> Blade
     // Vertex: two per row, then the tip; rows closer together toward the tip, where it bends.
     let segments = max(s.segments, 1u);
     var sgn = f32(vertex & 1u) * 2.0 - 1.0;
-    var u = f32(vertex / 2u) / f32(segments);
+    let flower = s.flower > 0.5;
+    let row = f32(vertex / 2u);
+    var u = row / f32(segments);
+    // A flowering stem's rows run evenly up its stalk to just under the head, the last one
+    // across the head (its widest part), so the head stays a short round dot, not a spike.
+    let last = f32(segments - 1u);
+    let flower_u = select(0.9 * row / max(last - 1.0, 1.0), 0.95, row >= last && segments > 1u);
+    u = select(1.0 - pow(1.0 - u, 1.35), flower_u, flower);
     if (vertex >= 2u * segments) {
         u = 1.0;
         sgn = 0.0;
     }
-    u = 1.0 - pow(1.0 - u, 1.35);
     let q = 1.0 - u;
     var pos = q * q * q * p0 + 3.0 * q * q * u * p1 + 3.0 * q * u * u * p2 + u * u * u * p3;
     let tangent = normalize(3.0 * q * q * (p1 - p0) + 6.0 * q * u * (p2 - p1) + 3.0 * u * u * (p3 - p2) + up * 1e-4);
@@ -186,7 +199,12 @@ fn grass_vertex(s: BladeShape, vertex: u32, t: f32, tip_dir: vec3<f32>) -> Blade
     let stalk = f.tip.w;
     let x = saturate((u - stalk) / max(1.0 - stalk, 0.05));
     let leaf_shape = select(0.1, max(pow(sin(PI * pow(x, 0.8)), 0.7), 0.1), u > stalk);
-    let half_width = 0.5 * s.width * mix(pow(q, 0.6), leaf_shape, leaf);
+    var half_width = 0.5 * s.width * mix(pow(q, 0.6), leaf_shape, leaf);
+    // A flowering stem: thin, then its head (a disc seen edge-on is still a few petals wide).
+    let head = smoothstep(0.91, 0.94, u);
+    if (flower) {
+        half_width = mix(0.05 * s.width, 0.5 * s.width, head);
+    }
     // Seen edge-on a blade is widened across the view, so the field keeps its cover (from a
     // few meters out: close up it would read as a broad ribbon). Leaves aren't: they lie open.
     let v = normalize(-pos);
@@ -215,6 +233,9 @@ fn grass_vertex(s: BladeShape, vertex: u32, t: f32, tip_dir: vec3<f32>) -> Blade
 
     // Color: tips tinted, snow caught on the blades (most on their arched upper parts).
     var albedo = mix(s.albedo, s.albedo * f.tip.rgb, u * u);
+    if (flower) {
+        albedo = mix(albedo, f.bloom.rgb, head);
+    }
     albedo = mix(albedo, vec3<f32>(0.82, 0.85, 0.88), s.snowed * (0.25 + 0.45 * u));
     // Darker low down, as the shade (`out.shade`) is darker there.
     out.albedo = albedo * mix(mix(mix(0.7, 1.0, u), mix(0.8, 1.0, u), leaf), 0.95 + 0.05 * u, lying);
