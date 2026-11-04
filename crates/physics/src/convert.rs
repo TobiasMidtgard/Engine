@@ -391,7 +391,10 @@ mod tests {
                 indices.push([i, i + n + 1, i + 1]);
             }
         }
-        let mesh = ColliderShape::TriMesh { vertices, indices };
+        let mesh = ColliderShape::TriMesh {
+            vertices: vertices.into(),
+            indices: indices.into(),
+        };
         let a = shape_cached(&mesh, Vec3::ONE).unwrap();
         let b = shape_cached(&mesh, Vec3::ONE).unwrap();
         let scaled = shape_cached(&mesh, Vec3::splat(2.0)).unwrap();
@@ -404,7 +407,7 @@ mod tests {
             "another scale shared the shape"
         );
         let small = ColliderShape::ConvexHull {
-            points: vec![Vec3::ZERO, Vec3::X, Vec3::Y, Vec3::Z],
+            points: vec![Vec3::ZERO, Vec3::X, Vec3::Y, Vec3::Z].into(),
         };
         let (c, d) = (
             shape_cached(&small, Vec3::ONE).unwrap(),
@@ -427,7 +430,10 @@ mod tests {
             })
             .collect();
         for scale in [Vec3::new(0.4, 0.3, 0.37), Vec3::new(-0.5, 0.3, 0.6)] {
-            let fast = hull_scaled(&rock, scale).unwrap();
+            let desc = ColliderShape::ConvexHull {
+                points: rock.clone().into(),
+            };
+            let fast = hull_scaled(&desc, scale).unwrap();
             let pts: Vec<Vec3> = rock.iter().map(|p| *p * scale).collect();
             let slow = SharedShape::convex_hull(&pts).unwrap();
             for k in 0..200 {
@@ -610,7 +616,7 @@ fn shape_key(shape: &ColliderShape, scale: Vec3) -> u64 {
                 h.word(1);
                 h.word(vertices.len() as u32);
                 vertices.iter().for_each(|v| h.vec(*v));
-                for t in indices {
+                for t in indices.iter() {
                     t.iter().for_each(|i| h.word(*i));
                 }
             }
@@ -699,7 +705,10 @@ fn cache() -> &'static parking_lot::Mutex<ShapeCache> {
 /// a quarter of the cost of finding it. (Parry's `ConvexPolyhedron::scaled` turns face normals
 /// by the scale, not its inverse, wrong for a scale that isn't uniform, so the scaled points
 /// are joined again by the unscaled hull's triangles.)
-fn hull_scaled(points: &[Vec3], scale: Vec3) -> Option<SharedShape> {
+fn hull_scaled(hull_desc: &ColliderShape, scale: Vec3) -> Option<SharedShape> {
+    let ColliderShape::ConvexHull { points } = hull_desc else {
+        return None;
+    };
     type Hull = std::sync::Arc<(Vec<Vec3>, Vec<[u32; 3]>)>;
     static HULLS: std::sync::OnceLock<parking_lot::Mutex<std::collections::HashMap<u64, Hull>>> =
         std::sync::OnceLock::new();
@@ -708,12 +717,7 @@ fn hull_scaled(points: &[Vec3], scale: Vec3) -> Option<SharedShape> {
     if scale.min_element().abs() < 1e-6 || !scale.is_finite() {
         return None;
     }
-    let key = shape_key(
-        &ColliderShape::ConvexHull {
-            points: points.to_vec(),
-        },
-        Vec3::ONE,
-    );
+    let key = shape_key(hull_desc, Vec3::ONE);
     let hulls = HULLS.get_or_init(Default::default);
     let found = hulls.lock().get(&key).cloned();
     let hull = match found {
@@ -755,8 +759,8 @@ pub fn shape_cached(shape_desc: &ColliderShape, scale: Vec3) -> Option<SharedSha
         return Some(s.clone());
     }
     let built = match shape_desc {
-        ColliderShape::ConvexHull { points } => {
-            hull_scaled(points, scale).or_else(|| shape(shape_desc, scale))
+        ColliderShape::ConvexHull { .. } => {
+            hull_scaled(shape_desc, scale).or_else(|| shape(shape_desc, scale))
         }
         _ => shape(shape_desc, scale),
     }?;

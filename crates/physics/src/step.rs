@@ -334,7 +334,6 @@ pub(crate) fn physics_sync(world: &mut World, mut q: Local<Option<StepQueries>>)
     // Big static meshes go off the frame unless something moving is near them already
     // (`crate::shape_jobs`).
     let (mut off_frame, mut held_near) = (0usize, 0usize);
-    let mut copy_ms = 0.0;
     if settings.static_meshes_off_frame {
         let mut movers: Option<Vec<crate::shape_jobs::Mover>> = None;
         wanted.retain(|(e, desc, pose)| {
@@ -359,11 +358,10 @@ pub(crate) fn physics_sync(world: &mut World, mut q: Local<Option<StepQueries>>)
             let movers = movers.get_or_insert_with(|| crate::shape_jobs::movers(&sim));
             let replacing = sim.colliders.get(e).is_some_and(|c| c.body.is_none());
             let near = crate::shape_jobs::near(movers, lo, hi);
-            // (The job's own copy of the points: 24 ms for a zone's 54 meshes on the VM.)
-            let t = Instant::now();
-            let shape = desc.shape.clone();
-            copy_ms += t.elapsed().as_secs_f64() * 1000.0;
-            let Some(job) = crate::shape_jobs::Job::spawn(shape, pose.scale, near) else {
+            // (Its points are shared, not copied: copies took 24-48 ms for a zone's 54-89
+            // meshes on the VM.)
+            let Some(job) = crate::shape_jobs::Job::spawn(desc.shape.clone(), pose.scale, near)
+            else {
                 return true;
             };
             held_near += usize::from(near && !replacing);
@@ -441,7 +439,7 @@ pub(crate) fn physics_sync(world: &mut World, mut q: Local<Option<StepQueries>>)
              ({moved_ms:.1} ms: dirty list {dirty_ms:.1}, reading {read_ms:.1}); {wanted_n} built \
              ({points} points, {built_ms:.1} ms); {attached} attached, {statics} static placed \
              ({statics_ms:.1} ms); {off_frame} queued off the frame ({held_near} with movers \
-             near, {copy_ms:.1} ms copying their points); {pending_placed} placed from off the frame ({pending_ms:.1} ms, \
+             near); {pending_placed} placed from off the frame ({pending_ms:.1} ms, \
              {waited_ms:.1} of it waiting), {} pending",
             sim.pending_statics.len()
         );
