@@ -46,6 +46,8 @@ pub struct RegionState {
     pub catch_up: Option<(u32, f32)>,
     /// The step gathered last fixed tick, running on a worker; written back at the next.
     step: Option<StepInFlight>,
+    /// Due this tick with this many years ([`advance_regions`]); 0 for a catch-up's next step.
+    due: Option<f32>,
 }
 
 impl RegionState {
@@ -528,12 +530,30 @@ fn build_region(
             stats: RegionStats::default(),
             catch_up: None,
             step: None,
+            due: None,
         },
         grew: (plants.len(), logs.len()),
         plants,
         logs,
         ms: start.elapsed().as_secs_f32() * 1000.0,
     }
+}
+
+/// Whether [`init_regions`] has work: a region not yet built, or one still building or
+/// planting. Pipe it into `queue_when(init_regions)`, so the exclusive system runs only then.
+#[allow(clippy::type_complexity)]
+pub fn regions_to_build(
+    new: Query<
+        (),
+        (
+            With<EcologyRegion>,
+            Without<RegionState>,
+            Without<RegionBuild>,
+        ),
+    >,
+    building: Query<(), With<RegionBuild>>,
+) -> bool {
+    !new.is_empty() || !building.is_empty()
 }
 
 /// Build regions that haven't run yet: soil, then their history (prewarm), then spawn the
@@ -1211,6 +1231,58 @@ pub fn grow_plants(
     });
 }
 
+/// Count each region's simulated years and mark the ones due a step (a plain system, so the
+/// fixed step's other systems run beside it); true when [`ecology_step`] has work: a region
+/// due, or a step to write back. Pipe it into `queue_when(ecology_step)`.
+pub fn advance_regions(
+    time: Res<Time>,
+    settings: Option<Res<EcologySettings>>,
+    focus: Option<Res<FocusPoints>>,
+    range: Option<Res<SimulationRange>>,
+    mut regions: Query<(&EcologyRegion, &mut RegionState)>,
+) -> bool {
+    let settings = settings.map(|s| s.clone()).unwrap_or_default();
+    let focus = focus.map(|f| f.clone()).unwrap_or_default();
+    let dt = time.delta_secs();
+    let mut work = false;
+    for (region, mut state) in &mut regions {
+        work |= state.step.is_some();
+        if settings.paused || dt <= 0.0 {
+            continue;
+        }
+        let years = dt * settings.years_per_second * region.time_scale.max(0.0);
+        let near = (focus.points.is_empty()
+            || focus.distance(state.center)
+                < (region.active_radius_m + region.half_extents[0].max(region.half_extents[1]))
+                    as f64)
+            && !region_resting(range.as_deref(), &focus, region, state.center);
+        if !near {
+            state.pending_years = (state.pending_years + years).min(settings.max_catch_up_years);
+            continue;
+        }
+        state.accum_years += years + std::mem::take(&mut state.pending_years);
+        if state.catch_up.is_some() {
+            // Its next coarse step (the years since keep gathering for after).
+            state.due = Some(0.0);
+            work = true;
+        } else if state.accum_years >= region.step_years {
+            state.due = Some(std::mem::take(&mut state.accum_years));
+            work = true;
+        }
+    }
+    work
+}
+
+/// One fixed tick of the ecology as the schedule runs it: [`advance_regions`], then
+/// [`ecology_step`] (for tests and tools driving the world by hand).
+pub fn tick_ecology(world: &mut World) {
+    match world.run_system_cached(advance_regions) {
+        Ok(true) => ecology_step(world),
+        Ok(false) => {}
+        Err(err) => tracing::warn!("foliage: advance_regions: {err}"),
+    }
+}
+
 /// Step every region that has simulated enough time since its last step. The tick gathers
 /// the region's plants and hands the step to a worker; the next tick writes it back (see
 /// `StepInFlight`), so the frame thread pays for the gather and the write-back only (a
@@ -1218,44 +1290,12 @@ pub fn grow_plants(
 pub fn ecology_step(world: &mut World) {
     // Last tick's steps first, whatever this tick does: they were gathered then and land now.
     finish_steps(world);
-    let dt = world.resource::<Time>().delta_secs();
-    let settings = world
-        .get_resource::<EcologySettings>()
-        .cloned()
-        .unwrap_or_default();
-    if settings.paused || dt <= 0.0 {
-        return;
-    }
-    let focus = world
-        .get_resource::<FocusPoints>()
-        .cloned()
-        .unwrap_or_default();
-    let range = world.get_resource::<SimulationRange>().cloned();
-    let years = dt * settings.years_per_second;
-
-    // Which regions are due, and with how many years.
+    // The regions [`advance_regions`] found due.
     let mut due: Vec<(Entity, f32)> = Vec::new();
-    let mut q = world.query::<(Entity, &EcologyRegion, &mut RegionState)>();
-    for (e, region, mut state) in q.iter_mut(world) {
-        let near = (focus.points.is_empty()
-            || focus.distance(state.center)
-                < (region.active_radius_m + region.half_extents[0].max(region.half_extents[1]))
-                    as f64)
-            && !region_resting(range.as_ref(), &focus, region, state.center);
-        if !near {
-            state.pending_years = (state.pending_years + years * region.time_scale.max(0.0))
-                .min(settings.max_catch_up_years);
-            continue;
-        }
-        let years = years * region.time_scale.max(0.0);
-        state.accum_years += years + std::mem::take(&mut state.pending_years);
-        if state.catch_up.is_some() {
-            // Its next coarse step (the years since keep gathering for after).
-            due.push((e, 0.0));
-        } else if state.accum_years >= region.step_years {
-            let take = state.accum_years;
-            state.accum_years = 0.0;
-            due.push((e, take));
+    let mut q = world.query::<(Entity, &mut RegionState)>();
+    for (e, mut state) in q.iter_mut(world) {
+        if let Some(years) = state.due.take() {
+            due.push((e, years));
         }
     }
     if due.is_empty() {
@@ -1763,7 +1803,7 @@ mod tests {
             .get_mut::<RegionState>(region)
             .unwrap()
             .accum_years = 0.25;
-        ecology_step(&mut app.world);
+        tick_ecology(&mut app.world);
         assert!(app.world.get::<RegionState>(region).unwrap().stepping());
         // Burnt and trampled while the step runs.
         app.world.get_mut::<Plant>(target).unwrap().stage = PlantStage::Burnt { years: 0.0 };
@@ -1772,7 +1812,7 @@ mod tests {
             .get_mut::<RegionState>(region)
             .unwrap()
             .edit_soil(SoilEdit::Trample { at, kg: 4000.0 });
-        ecology_step(&mut app.world);
+        tick_ecology(&mut app.world);
         let state = app.world.get::<RegionState>(region).unwrap();
         assert!(!state.stepping());
         assert!(state.stats.years > 0.0, "the step was written back");
@@ -1805,7 +1845,7 @@ mod tests {
                     .get_mut::<RegionState>(region)
                     .unwrap()
                     .accum_years = 0.25;
-                ecology_step(&mut app.world);
+                tick_ecology(&mut app.world);
                 if let Some(s) = &shift {
                     // What the world's shift does to foliage's roots and state.
                     let mut q = app.world.query::<&mut Transform>();
@@ -1814,7 +1854,7 @@ mod tests {
                     }
                     app.world.get_mut::<RegionState>(region).unwrap().follow(s);
                 }
-                ecology_step(&mut app.world);
+                tick_ecology(&mut app.world);
                 let mut q = app.world.query::<(Entity, &Transform, &Plant)>();
                 for (e, t, _) in q.iter(&app.world) {
                     if !before.contains(&e) {

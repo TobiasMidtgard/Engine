@@ -164,19 +164,25 @@ impl Plugin for FoliagePlugin {
         app.add_systems(First, loading::measure_frames)
             .add_systems(
                 PreUpdate,
+                // Unordered: plants a build spawns carry their region already, and a build
+                // counts every source there is. The build is queued only while there is one
+                // (it lands at the schedule's end).
                 (
                     api::apply_new_sources,
-                    ecology::init_regions,
+                    ecology::regions_to_build
+                        .pipe(engine_core::schedule::queue_when(ecology::init_regions)),
                     ecology::assign_regions,
-                )
-                    .chain(),
+                ),
             )
             .add_systems(
                 FixedUpdate,
                 (
-                    demo::run_demo_felling.in_set(SimSet::Gameplay),
+                    demo::demo_felling_due
+                        .pipe(engine_core::schedule::queue_when(demo::run_demo_felling))
+                        .in_set(SimSet::Gameplay),
                     (
-                        felling::apply_damage,
+                        felling::damage_due
+                            .pipe(engine_core::schedule::queue_when(felling::damage_work)),
                         felling::update_falling_trees,
                         felling::place_logs,
                         felling::release_grass_presses,
@@ -189,7 +195,8 @@ impl Plugin for FoliagePlugin {
                         ecology::trample,
                         ecology::follow_terrain,
                         ecology::grow_plants,
-                        ecology::ecology_step,
+                        ecology::advance_regions
+                            .pipe(engine_core::schedule::queue_when(ecology::ecology_step)),
                     )
                         .chain()
                         .in_set(SimSet::Environment),

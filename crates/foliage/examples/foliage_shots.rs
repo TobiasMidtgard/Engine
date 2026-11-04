@@ -199,6 +199,22 @@ fn census(app: &mut App, name: &str) {
     );
     let d = app.world.resource::<Diagnostics>();
     let ms = |k: &str| d.get(k).unwrap_or(f64::NAN);
+    // The renderer's CPU side: what the plant parts and their shadow stand-ins cost to prepare.
+    let cpu: Vec<String> = d
+        .metrics
+        .iter()
+        .filter(|(k, v)| k.starts_with("render.cpu.") && **v >= 0.3)
+        .map(|(k, v)| format!("{} {v:.1}", &k["render.cpu.".len()..]))
+        .collect();
+    println!(
+        "census {name}: {} entities; mesh slots {}, cascade instances {}, cascade triangles {:.2} M; CPU ms {:.1}: {}",
+        d.entities,
+        ms("render.meshes.slots"),
+        ms("render.meshes.cascade_instances"),
+        ms("render.meshes.cascade_triangles") / 1e6,
+        ms("render.cpu_ms"),
+        cpu.join(", ")
+    );
     println!(
         "census {name}: drawn {:.2} M triangles in {} draws; GPU {:.0} ms: shadows {:.0}, prepass {:.0}, scene: meshes {:.0}, scene: grass {:.0}",
         ms("render.triangles") / 1e6,

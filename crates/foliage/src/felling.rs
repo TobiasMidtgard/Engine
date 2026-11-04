@@ -502,6 +502,25 @@ pub fn release_grass_presses(
     }
 }
 
+/// Whether any damage or blast arrived since the last step, so [`apply_damage`] (exclusive: it
+/// fells through the world) is queued only then ([`damage_work`]).
+pub fn damage_due(
+    hits: Option<Res<Messages<DamageEvent>>>,
+    blasts: Option<Res<Messages<WorldImpulse>>>,
+    mut cursors: Local<(MessageCursor<DamageEvent>, MessageCursor<WorldImpulse>)>,
+) -> bool {
+    let hit = hits.is_some_and(|m| cursors.0.read(&m).count() > 0);
+    let blast = blasts.is_some_and(|m| cursors.1.read(&m).filter(|b| b.energy_j > 0.0).count() > 0);
+    hit || blast
+}
+
+/// [`apply_damage`] as queued work (its own message cursors kept between runs).
+pub fn damage_work(world: &mut World) {
+    if let Err(err) = world.run_system_cached(apply_damage) {
+        tracing::warn!("foliage: apply_damage: {err}");
+    }
+}
+
 /// Read blows and blasts and chop whatever they hit.
 pub fn apply_damage(
     world: &mut World,
