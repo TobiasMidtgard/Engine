@@ -46,6 +46,27 @@ const GROUND_PROBE_M: f64 = 2000.0;
 const FAR_EVERY: u32 = 4;
 
 /// Is there a fixed or kinematic collider within [`PROBE_M`] below `local`?
+/// The world `Ground`'s height under `p` (the first surface below it). A slow answer is
+/// logged when a report is wanted: most take microseconds, but one now and then took 5-9 ms
+/// of a step (round 13 on the VM, the CPU busy throughout).
+pub(crate) fn height(ground: &engine_world::Ground, p: DVec3) -> Option<f64> {
+    if !crate::report::wanted() {
+        return ground.height(p);
+    }
+    let started = std::time::Instant::now();
+    let h = ground.height(p);
+    let ms = started.elapsed().as_secs_f64() * 1000.0;
+    if ms > 1.0 {
+        engine_core::log::info!(
+            "physics: the ground took {ms:.1} ms for its height at ({:.0} {:.0} {:.0})",
+            p.x,
+            p.y,
+            p.z
+        );
+    }
+    h
+}
+
 fn floor_below(r: &Region, local: Vec3) -> bool {
     let down = r.world.gravity.normalize_or(Vec3::NEG_Y);
     let ray = Ray::new(local, down);
@@ -92,9 +113,7 @@ pub(crate) fn hold_ungrounded(sim: &mut Simulation, foci: &[DVec3]) {
             let at = r.global(local);
             let mut under = || {
                 asked += 1;
-                ground
-                    .height(at + DVec3::Y * GROUND_PROBE_M)
-                    .is_some_and(|h| at.y < h - UNDER_M)
+                height(&ground, at + DVec3::Y * GROUND_PROBE_M).is_some_and(|h| at.y < h - UNDER_M)
             };
             if floor_below(r, local) || (near(at) && !under()) {
                 sim.ungrounded.remove(&e);
@@ -135,7 +154,7 @@ pub(crate) fn hold_ungrounded(sim: &mut Simulation, foci: &[DVec3]) {
                 continue;
             }
             asked += 1;
-            let Some(h) = ground.height(at + DVec3::Y * GROUND_PROBE_M) else {
+            let Some(h) = height(&ground, at + DVec3::Y * GROUND_PROBE_M) else {
                 continue;
             };
             let out_of_world = at.y < h - UNDER_M;

@@ -298,7 +298,9 @@ impl Simulation {
                     let lost = |p: DVec3| {
                         asked.set(asked.get() + 1);
                         ground
-                            .and_then(|g| g.height(p + DVec3::Y * GROUND_PROBE_M))
+                            .and_then(|g| {
+                                crate::grounding::height(g, p + DVec3::Y * GROUND_PROBE_M)
+                            })
                             .is_some_and(|h| p.y < h - LOST_BELOW_M)
                     };
                     r.lost = out_there
