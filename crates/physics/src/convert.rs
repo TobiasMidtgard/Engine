@@ -417,6 +417,44 @@ mod tests {
     }
 
     #[test]
+    fn a_hull_scaled_from_its_unscaled_hull_is_the_hull_of_the_scaled_points() {
+        let rock: Vec<Vec3> = (0..120)
+            .map(|k| {
+                let (a, b) = (k as f32 * 2.399_963, (k as f32 + 0.5) / 120.0);
+                let y = 1.0 - 2.0 * b;
+                let r = (1.0 - y * y).sqrt();
+                Vec3::new(a.cos() * r, y, a.sin() * r) * (0.8 + 0.2 * (k as f32 * 7.3).sin())
+            })
+            .collect();
+        for scale in [Vec3::new(0.4, 0.3, 0.37), Vec3::new(-0.5, 0.3, 0.6)] {
+            let fast = hull_scaled(&rock, scale).unwrap();
+            let pts: Vec<Vec3> = rock.iter().map(|p| *p * scale).collect();
+            let slow = SharedShape::convex_hull(&pts).unwrap();
+            for k in 0..200 {
+                let (a, b) = (k as f32 * 0.731, k as f32 * 1.917);
+                let p = Vec3::new(a.cos() * b.sin(), b.cos(), a.sin() * b.sin()) * 0.45;
+                let pose = Pose::IDENTITY;
+                assert_eq!(
+                    fast.contains_point(&pose, p),
+                    slow.contains_point(&pose, p),
+                    "{p} at scale {scale}"
+                );
+                // Normals point out: a ray from outside toward the center meets the surface.
+                let from = p.normalize_or(Vec3::Y) * 2.0;
+                let ray = rapier3d::prelude::Ray::new(from, -from.normalize());
+                let (hit_fast, hit_slow) = (
+                    fast.cast_ray_and_get_normal(&pose, &ray, 10.0, true)
+                        .unwrap(),
+                    slow.cast_ray_and_get_normal(&pose, &ray, 10.0, true)
+                        .unwrap(),
+                );
+                assert!((hit_fast.time_of_impact - hit_slow.time_of_impact).abs() < 1e-4);
+                assert!(hit_fast.normal.dot(hit_slow.normal) > 0.999, "{scale}");
+            }
+        }
+    }
+
+    #[test]
     fn the_cache_forgets_only_shapes_nothing_uses() {
         let hull = |i: usize| ColliderShape::ConvexHull {
             points: (0..CACHE_MAX_POINTS / 4)
@@ -648,6 +686,53 @@ fn cache() -> &'static parking_lot::Mutex<ShapeCache> {
     CACHE.get_or_init(Default::default)
 }
 
+/// A hull of `points` at `scale`, from the hull of the unscaled points worked out once: rocks
+/// are a few shapes each scaled its own way (the rockfall's 300 are 8), and scaling a hull is
+/// a quarter of the cost of finding it. (Parry's `ConvexPolyhedron::scaled` turns face normals
+/// by the scale, not its inverse, wrong for a scale that isn't uniform, so the scaled points
+/// are joined again by the unscaled hull's triangles.)
+fn hull_scaled(points: &[Vec3], scale: Vec3) -> Option<SharedShape> {
+    type Hull = std::sync::Arc<(Vec<Vec3>, Vec<[u32; 3]>)>;
+    static HULLS: std::sync::OnceLock<parking_lot::Mutex<std::collections::HashMap<u64, Hull>>> =
+        std::sync::OnceLock::new();
+    /// Hulls kept at most (a few MB); all are forgotten when there are more.
+    const MAX_HULLS: usize = 4096;
+    if scale.min_element().abs() < 1e-6 || !scale.is_finite() {
+        return None;
+    }
+    let key = shape_key(
+        &ColliderShape::ConvexHull {
+            points: points.to_vec(),
+        },
+        Vec3::ONE,
+    );
+    let hulls = HULLS.get_or_init(Default::default);
+    let found = hulls.lock().get(&key).cloned();
+    let hull = match found {
+        Some(h) => h,
+        None => {
+            let (vertices, indices) =
+                rapier3d::parry::transformation::try_convex_hull(points).ok()?;
+            let h: Hull = std::sync::Arc::new((vertices, indices));
+            let mut map = hulls.lock();
+            if map.len() >= MAX_HULLS {
+                map.clear();
+            }
+            map.insert(key, h.clone());
+            h
+        }
+    };
+    let (vertices, indices) = &*hull;
+    let scaled: Vec<Vec3> = vertices.iter().map(|p| *p * scale).collect();
+    // A mirroring scale turns the triangles inside out: wind them back.
+    if scale.x * scale.y * scale.z < 0.0 {
+        let flipped: Vec<[u32; 3]> = indices.iter().map(|t| [t[0], t[2], t[1]]).collect();
+        SharedShape::convex_mesh(scaled, &flipped)
+    } else {
+        SharedShape::convex_mesh(scaled, indices)
+    }
+}
+
 /// [`shape`], with big meshes, hulls and compounds shared: the same mesh at the same scale is
 /// built once (a zone's jetty each time the zone streams back in, a building's repeated walls).
 /// Parry shapes are immutable, so colliders can share one, as Jolt and PhysX share a mesh
@@ -661,7 +746,12 @@ pub fn shape_cached(shape_desc: &ColliderShape, scale: Vec3) -> Option<SharedSha
     if let Some((s, _)) = cache().lock().shapes.get(&key) {
         return Some(s.clone());
     }
-    let built = shape(shape_desc, scale)?;
+    let built = match shape_desc {
+        ColliderShape::ConvexHull { points } => {
+            hull_scaled(points, scale).or_else(|| shape(shape_desc, scale))
+        }
+        _ => shape(shape_desc, scale),
+    }?;
     let mut c = cache().lock();
     if !c.shapes.contains_key(&key) && points <= CACHE_MAX_POINTS {
         c.shapes.insert(key, (built.clone(), points));
