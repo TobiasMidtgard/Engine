@@ -84,14 +84,23 @@ pub struct StandIns {
 
 impl StandIns {
     /// Add a species' stand-ins.
-    pub fn add(&mut self, vis: &SpeciesVisual) {
+    pub fn add(&mut self, sp: &crate::species::PlantSpecies, vis: &SpeciesVisual) {
+        // A spruce's limbs hide under its needle shelves (its far level draws its trunk alone):
+        // its shadows cast that trunk at every level, from 500 triangles instead of 6,000.
+        let limbs_hidden = sp.form == crate::species::PlantForm::Conifer
+            && sp.shape.bark != crate::species::BarkStyle::Pine;
         for v in &vis.variants {
             let mut map = |from: Option<Handle<Mesh>>, to: Option<Handle<Mesh>>| {
                 if let (Some(from), Some(to)) = (from, to) {
                     self.meshes.insert(from.index(), to);
                 }
             };
-            map(v.wood, v.wood_mid.or(v.wood_lod));
+            if limbs_hidden && v.wood_lod.is_some() {
+                map(v.wood, v.wood_lod);
+                map(v.wood_mid, v.wood_lod);
+            } else {
+                map(v.wood, v.wood_mid.or(v.wood_lod));
+            }
             map(v.foliage, v.foliage_mid);
             map(v.foliage_hero, v.foliage_mid);
             for (from, to) in v.foliage_thin.iter().zip(&v.foliage_mid_thin) {
@@ -122,7 +131,9 @@ impl StandIns {
                     self.finer_meshes.insert(from.index(), to);
                 }
             };
-            finer(v.wood_lod, v.wood_mid);
+            if !limbs_hidden {
+                finer(v.wood_lod, v.wood_mid);
+            }
             finer(v.foliage_lod, v.foliage_mid);
             for (from, to) in v.foliage_lod_thin.iter().zip(&v.foliage_mid_thin) {
                 finer(Some(*from), Some(*to));
@@ -230,9 +241,11 @@ pub fn sync_shadow_standins(
         let fine = wants
             .then(|| visuals.standins.get(&r.mesh, &r.material))
             .flatten();
+        // The same caster for both (a spruce's trunk): one stand-in into every map.
         let coarse = wants
             .then(|| visuals.standins.coarse(&r.mesh, &r.material))
-            .flatten();
+            .flatten()
+            .filter(|c| Some(c) != fine.as_ref());
         // A far tree casts its middle level into the fine maps (through a stand-in) and itself
         // into the coarse ones: so its shadow doesn't change as the view switches it between
         // middle and far, only at a cascade's edge.
