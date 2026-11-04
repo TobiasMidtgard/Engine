@@ -585,8 +585,8 @@ pub fn box_hit(obb: &Obb, origin: DVec3, dir: Vec3, max: f32) -> Option<(f32, Ve
     Some((t, obb.rotation * n))
 }
 
-/// Where a ray meets the ground (`ground` gives height and normal at a point), marching in
-/// 10 cm steps and then bisecting.
+/// Where a ray meets the ground (`ground` gives height and normal at a point), marching (see
+/// [`ground_march`]) and then bisecting.
 pub fn ground_hit(
     ground: &dyn Fn(DVec3) -> Option<(f64, Vec3)>,
     origin: DVec3,
@@ -606,7 +606,10 @@ pub fn ground_hit_on(ground: &Ground, origin: DVec3, dir: Vec3, max: f32) -> Opt
 }
 
 /// How far along a ray it first meets the ground (`height` gives the ground under a point):
-/// 10 cm steps, then 14 bisections.
+/// steps of at least 10 cm, then 14 bisections. Each step is a third of the height above the
+/// ground: over a stride `s` the ray drops at most `s` and ground no steeper than 2:1 (63°)
+/// rises at most `2s`, so no crossing is skipped. A ray high above the ground (an idle
+/// builder aiming at the sky) takes a few steps instead of one every 10 cm.
 fn ground_march(
     height: &dyn Fn(DVec3) -> Option<f64>,
     origin: DVec3,
@@ -617,14 +620,16 @@ fn ground_march(
         let p = origin + (dir * t).as_dvec3();
         height(p).map(|h| p.y - h)
     };
-    if above(0.0)? < 0.0 {
+    let mut clearance = above(0.0)?;
+    if clearance < 0.0 {
         return None;
     }
-    let step = 0.1;
+    let stride = |clearance: f64| (clearance as f32 / 3.0).max(0.1);
     let mut prev = 0.0;
-    let mut t = step;
-    while t <= max + 1e-4 {
-        if above(t)? <= 0.0 {
+    let mut t = stride(clearance).min(max);
+    loop {
+        clearance = above(t)?;
+        if clearance <= 0.0 {
             let (mut a, mut b) = (prev, t);
             for _ in 0..14 {
                 let m = 0.5 * (a + b);
@@ -636,10 +641,12 @@ fn ground_march(
             }
             return Some(b);
         }
+        if t >= max {
+            return None;
+        }
         prev = t;
-        t += step;
+        t = (t + stride(clearance)).min(max);
     }
-    None
 }
 
 /// Nearest of the pieces' hits and another surface's (rock, ground).
@@ -1560,6 +1567,37 @@ mod tests {
         assert!((supports[0].0 - 35.0).abs() < 1e-3, "{supports:?}");
         assert_eq!(supports[0].1, None);
         assert_eq!(supports[1].1, Some(BuildProblem::TooWeak), "{supports:?}");
+    }
+
+    #[test]
+    fn the_ground_march_strides_high_above_and_still_finds_slopes() {
+        use std::cell::Cell;
+        let asked = Cell::new(0);
+        // Flat ground 20 m below, aimed at the sky: a few heights, not one every 10 cm.
+        let flat = |_: DVec3| {
+            asked.set(asked.get() + 1);
+            Some(0.0)
+        };
+        assert_eq!(ground_march(&flat, DVec3::Y * 20.0, Vec3::Y, 6.0), None);
+        assert!(
+            asked.get() <= 3,
+            "{} heights for a ray into the sky",
+            asked.get()
+        );
+        // A 2:1 hillside rising ahead of a level ray 3 m up meets it 1.5 m out, as a 1 cm
+        // march would find it.
+        let hill = |p: DVec3| Some((p.x * 2.0).max(0.0));
+        let t = ground_march(&hill, DVec3::new(-1.0, 3.0, 0.0), Vec3::X, 8.0).unwrap();
+        assert!((t - 2.5).abs() < 1e-3, "{t}");
+        // A 45° slope down to a ray falling towards it.
+        let slope = |p: DVec3| Some(-p.x);
+        let dir = Vec3::new(1.0, -2.0, 0.0).normalize();
+        let t = ground_march(&slope, DVec3::new(0.0, 5.0, 0.0), dir, 20.0).unwrap();
+        let p = DVec3::new(0.0, 5.0, 0.0) + (dir * t).as_dvec3();
+        assert!(
+            (p.y + p.x).abs() < 1e-3 && (p.x - 5.0).abs() < 1e-3,
+            "{p:?}"
+        );
     }
 
     #[test]
