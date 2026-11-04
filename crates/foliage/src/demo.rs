@@ -627,7 +627,7 @@ pub fn spawn_demo(commands: &mut Commands, center: DVec3) {
             outer_m: CLEARING[2] + 9.0,
             timer: 0.5,
             max_trees: 60,
-            felled: 0,
+            ..Default::default()
         },
     ));
 }
@@ -907,6 +907,9 @@ pub struct DemoFelling {
     /// Stop after this many.
     pub max_trees: u32,
     pub felled: u32,
+    /// Its timer ran out this step: [`run_demo_felling`] fells one.
+    #[serde(skip)]
+    pub(crate) due: bool,
 }
 
 impl Default for DemoFelling {
@@ -918,25 +921,40 @@ impl Default for DemoFelling {
             timer: 5.0,
             max_trees: 20,
             felled: 0,
+            due: false,
         }
     }
 }
 
-/// Run [`DemoFelling`] entities.
-pub fn run_demo_felling(world: &mut World) {
-    let dt = world.resource::<Time>().delta_secs();
+/// Count down the [`DemoFelling`] timers; true when one ran out this step, so
+/// [`run_demo_felling`] (exclusive: it fells through the world) is queued only then, and the
+/// fixed step's other systems don't wait for an idle pool every step for it.
+pub fn demo_felling_due(time: Res<Time>, mut fellings: Query<&mut DemoFelling>) -> bool {
+    let dt = time.delta_secs();
     if dt <= 0.0 {
-        return;
+        return false;
     }
-    let mut q = world.query::<(Entity, &mut DemoFelling, &Transform)>();
-    let mut due = Vec::new();
-    for (e, mut d, t) in q.iter_mut(world) {
+    let mut any = false;
+    for mut d in &mut fellings {
         if d.felled >= d.max_trees {
             continue;
         }
         d.timer -= dt;
         if d.timer <= 0.0 {
             d.timer = d.every_secs;
+            d.due = true;
+            any = true;
+        }
+    }
+    any
+}
+
+/// Fell a tree for each [`DemoFelling`] whose timer ran out ([`demo_felling_due`]).
+pub fn run_demo_felling(world: &mut World) {
+    let mut q = world.query::<(Entity, &mut DemoFelling, &Transform)>();
+    let mut due = Vec::new();
+    for (e, mut d, t) in q.iter_mut(world) {
+        if std::mem::take(&mut d.due) {
             due.push((e, t.translation, d.inner_m as f64, d.outer_m as f64));
         }
     }
@@ -1215,5 +1233,46 @@ mod tests {
                 "visit {visit} left entities behind"
             );
         }
+    }
+
+    #[test]
+    fn the_demo_fells_a_tree_when_its_timer_runs_out_and_not_before() {
+        let mut app = App::new();
+        app.world
+            .resource_mut::<Time>()
+            .set_source(engine_core::time::TimeSource::Manual {
+                step_secs: 1.0 / 60.0,
+            });
+        app.add_plugins(engine_world::WorldPlugin);
+        app.add_plugins(crate::FoliagePlugin);
+        app.world
+            .resource_mut::<crate::plant::EcologySettings>()
+            .paused = true;
+        crate::api::spawn_plant(&mut app.world, "oak", DVec3::new(15.0, 0.0, 0.0), 0.8, None)
+            .unwrap();
+        let demo = app
+            .world
+            .spawn((
+                Transform::default(),
+                DemoFelling {
+                    every_secs: 100.0,
+                    timer: 0.5,
+                    max_trees: 1,
+                    ..Default::default()
+                },
+            ))
+            .id();
+        let falling = |app: &mut App| {
+            app.world
+                .query_filtered::<(), With<crate::felling::FallingTree>>()
+                .iter(&app.world)
+                .count()
+        };
+        app.update_n(10);
+        assert_eq!(falling(&mut app), 0, "felled before its timer ran out");
+        app.update_n(40);
+        assert_eq!(falling(&mut app), 1);
+        assert_eq!(app.world.get::<DemoFelling>(demo).unwrap().felled, 1);
+        assert!(!app.world.get::<DemoFelling>(demo).unwrap().due);
     }
 }

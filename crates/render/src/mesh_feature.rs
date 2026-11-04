@@ -396,6 +396,8 @@ struct Item {
     since: u64,
     /// Its material sways in the wind: the near cascades draw it every frame.
     sways: bool,
+    /// The sun's shadow maps it casts into, by texel size (`ShadowTexelRange`).
+    cast_texels: crate::ShadowTexelRange,
 }
 
 /// What the gather needs of a mesh, looked up once a frame for the meshes the scene uses (by
@@ -800,6 +802,7 @@ impl Cull<'_> {
                 cold.changed.max(mesh.uploaded) + STILL_FRAMES
             },
             sways: mat.sways,
+            cast_texels: hot.cast_texels,
         })
     }
 }
@@ -3251,6 +3254,10 @@ impl RenderFeature for MeshFeature {
                 let image = if redraw { frame } else { image_frame[c] };
                 for &n in casters {
                     let item = &items[n as usize];
+                    // A caster with a stand-in for other maps (`ShadowTexelRange`).
+                    if !item.cast_texels.casts_at(texel) {
+                        continue;
+                    }
                     // Swaying leaves move in the near cascades' shadows: never still there.
                     let can_rest = !(item.sways && c < 2);
                     let in_image = can_rest && item.since <= image;
@@ -3542,6 +3549,11 @@ impl RenderFeature for MeshFeature {
             let d = &mut *diagnostics;
             d.set("render.meshes.slots", self.scene.hot.len() as f64);
             d.set("render.meshes.dirty_slots", self.scene.dirty as f64);
+            // Found changed by their ticks, but holding what their slot did: left alone.
+            d.set(
+                "render.meshes.unchanged_writes",
+                self.scene.unchanged as f64,
+            );
             // Slots the serial pass took (cluster path and first uploads).
             d.set("render.meshes.serial_slots", self.deferred.len() as f64);
             // Sun cascade casters drawn this frame: the moving ones, and the still ones of the

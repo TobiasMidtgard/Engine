@@ -404,7 +404,7 @@ pub fn build_chunk(src: &ChunkSource, key: NodeKey) -> ChunkMesh {
                     let b = lo.y + (fj as f64 - 2.0) * step;
                     map.base(key.face, a, b)
                 };
-                let h = src.sample(base, up, dir, min_wavelength * 2.0).height;
+                let h = src.ground_height(base, up, dir, min_wavelength * 2.0);
                 parent[pj * PS + pi] = base + up * shown(src, h);
                 parent_up[pj * PS + pi] = up;
             }

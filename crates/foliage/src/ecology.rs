@@ -3,12 +3,12 @@
 
 use std::collections::HashMap;
 use std::f32::consts::{FRAC_PI_2, PI, TAU};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 
 use engine_core::prelude::*;
 use engine_core::tasks::AsyncComputeTaskPool;
 use engine_world::{
-    BurnState, Combustible, FocusPoints, Ground, HeatField, SimulationRange, SurfaceLayers,
+    BurnState, Combustible, FocusPoints, Grid2, Ground, HeatField, SimulationRange, SurfaceLayers,
     SurfaceMaterials, Water, WeatherState, WindField, WorldShift,
 };
 
@@ -44,6 +44,209 @@ pub struct RegionState {
     pub stats: RegionStats,
     /// A catch-up under way, one coarse step a frame: steps left and years each.
     pub catch_up: Option<(u32, f32)>,
+    /// The step gathered last fixed tick, running on a worker; written back at the next.
+    step: Option<StepInFlight>,
+    /// Due this tick with this many years ([`advance_regions`]); 0 for a catch-up's next step.
+    due: Option<f32>,
+}
+
+impl RegionState {
+    /// Change the soil (trampling, ash, a new spring). A step running meanwhile has its own
+    /// copy, so the change is also kept to make again on the soil it hands back.
+    pub(crate) fn edit_soil(&mut self, edit: SoilEdit) {
+        edit.apply(&mut self.sim.soil);
+        if let Some(step) = &mut self.step {
+            step.edits.push(edit);
+        }
+    }
+
+    /// Follow a world shift: the soil and center now, a step still running when it is
+    /// written back.
+    pub(crate) fn follow(&mut self, s: &WorldShift) {
+        let center = self.center;
+        self.sim.shift(s, center);
+        self.center = s.point(center);
+        if let Some(step) = &mut self.step {
+            step.shift = Some(step.shift.map_or(*s, |a| a.then(s)));
+            for e in &mut step.edits {
+                e.follow(s);
+            }
+        }
+    }
+
+    /// Whether a step is running on a worker (written back at the next fixed tick).
+    pub fn stepping(&self) -> bool {
+        self.step.is_some()
+    }
+}
+
+/// A change to a region's soil made in the world (see [`RegionState::edit_soil`]).
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum SoilEdit {
+    /// Feet, hooves or wheels pressed `kg` here.
+    Trample { at: DVec3, kg: f32 },
+    /// Ash or rot fed the soil within `radius`.
+    Enrich { at: DVec3, radius: f32, amount: f32 },
+    /// A new spring or mineral seam.
+    Source(SimSource),
+}
+
+impl SoilEdit {
+    fn apply(&self, soil: &mut Soil) {
+        match *self {
+            SoilEdit::Trample { at, kg } => soil.trample(at, kg),
+            SoilEdit::Enrich { at, radius, amount } => soil.enrich(at, radius, amount),
+            SoilEdit::Source(s) => soil.add_source(&s),
+        }
+    }
+
+    fn follow(&mut self, s: &WorldShift) {
+        match self {
+            SoilEdit::Trample { at, .. } | SoilEdit::Enrich { at, .. } => *at = s.point(*at),
+            SoilEdit::Source(src) => src.pos = s.point(src.pos),
+        }
+    }
+}
+
+/// A region step running on a worker: gathered at one fixed tick and written back at the
+/// next, always the next, so the forest grows the same on every run whatever the thread
+/// timing (Unity's "schedule early, complete at a fixed point").
+struct StepInFlight {
+    done: Arc<StepSlot>,
+    /// The region's center when gathered (the step's frame).
+    center: DVec3,
+    years: f32,
+    catch_up: bool,
+    log_ids: Vec<Entity>,
+    /// World shifts since the gather, applied to the result.
+    shift: Option<WorldShift>,
+    /// Soil changes since the gather, made again on the step's soil.
+    edits: Vec<SoilEdit>,
+}
+
+/// Where the worker leaves its result (or its panic) and wakes the waiter.
+#[derive(Default)]
+struct StepSlot {
+    result: Mutex<Option<std::thread::Result<StepDone>>>,
+    ready: Condvar,
+}
+
+impl StepSlot {
+    fn put(&self, r: std::thread::Result<StepDone>) {
+        if let Ok(mut slot) = self.result.lock() {
+            *slot = Some(r);
+        }
+        self.ready.notify_all();
+    }
+
+    /// The result, waiting for the worker if it isn't done (it re-raises a panic of the
+    /// step). Returns the time waited too.
+    fn wait(&self) -> (StepDone, f32) {
+        let start = std::time::Instant::now();
+        let mut slot = self.result.lock().unwrap_or_else(|e| e.into_inner());
+        loop {
+            if let Some(r) = slot.take() {
+                let waited = start.elapsed().as_secs_f32() * 1000.0;
+                match r {
+                    Ok(done) => return (done, waited),
+                    Err(panic) => std::panic::resume_unwind(panic),
+                }
+            }
+            slot = self.ready.wait(slot).unwrap_or_else(|e| e.into_inner());
+        }
+    }
+}
+
+/// What a step needs, owned, to run on a worker.
+struct StepJob {
+    sim: RegionSim,
+    plants: Vec<SimPlant>,
+    logs: Vec<SimLog>,
+    region: EcologyRegion,
+    center: DVec3,
+    rain: Vec<SpeciesId>,
+    library: Arc<PlantLibrary>,
+    env: EnvSnapshot,
+    dt: f32,
+    catch_up: bool,
+}
+
+/// What a step hands back.
+struct StepDone {
+    sim: RegionSim,
+    plants: Vec<SimPlant>,
+    logs: Vec<SimLog>,
+    /// Each plant's stage when gathered: one the world changed meanwhile (burnt, felled)
+    /// keeps the world's.
+    before: Vec<PlantStage>,
+    out: StepOutput,
+    ms: f32,
+}
+
+impl StepJob {
+    fn run(self) -> StepDone {
+        let _span =
+            tracing::info_span!(target: "engine_foliage", "ecology step (worker)").entered();
+        let start = std::time::Instant::now();
+        let StepJob {
+            mut sim,
+            mut plants,
+            mut logs,
+            region,
+            center,
+            rain,
+            library,
+            env,
+            dt,
+            catch_up,
+        } = self;
+        // In a fixed order (not the order the ECS happens to store them in, which moves with
+        // whatever else was added to them), so the same forest grows the same way every run.
+        let key = |p: DVec3| (p.x.to_bits(), p.z.to_bits(), p.y.to_bits());
+        plants.sort_by_key(|p| (key(p.pos), p.plant.species.0));
+        logs.sort_by_key(|l| key(l.pos));
+        let before = plants.iter().map(|p| p.plant.stage).collect();
+        let mut out = StepOutput::default();
+        let view = env.view();
+        let ctx = StepContext {
+            library: &library,
+            region: &region,
+            center,
+            rain_species: &rain,
+            env: &view,
+        };
+        sim.step(&ctx, &mut plants, &mut logs, dt, catch_up, &mut out);
+        crate::sim::brush(&ctx, &mut plants);
+        StepDone {
+            sim,
+            plants,
+            logs,
+            before,
+            out,
+            ms: start.elapsed().as_secs_f32() * 1000.0,
+        }
+    }
+}
+
+impl StepDone {
+    /// Move into the frame after world shift `s`; `center` is the region's center before it.
+    fn follow(&mut self, s: &WorldShift, center: DVec3) {
+        self.sim.shift(s, center);
+        follow_plants_and_logs(s, &mut self.plants, &mut self.logs);
+        follow_plants_and_logs(s, &mut self.out.births, &mut []);
+    }
+}
+
+fn follow_plants_and_logs(s: &WorldShift, plants: &mut [SimPlant], logs: &mut [SimLog]) {
+    for p in plants {
+        p.pos = s.point(p.pos);
+    }
+    // Yaw is measured from +X toward +Z, the opposite sense to a turn about +Y.
+    let yaw = s.yaw();
+    for l in logs {
+        l.pos = s.point(l.pos);
+        l.yaw = (l.yaw - yaw).rem_euclid(TAU);
+    }
 }
 
 /// Counters from the last step, for `foliage.stats` and diagnostics.
@@ -194,6 +397,34 @@ impl EnvSnapshot {
         }
     }
 
+    /// The environment around one region: the surface and heat grids cut to the region and
+    /// a margin (they cover 512 m around the focus, ~5 MB to copy whole), the rest whole.
+    /// Samples inside the cut read exactly what the whole grids would.
+    fn around(world: &World, region: &EcologyRegion, center: DVec3) -> Self {
+        const MARGIN_M: f64 = 32.0;
+        let half = DVec2::new(
+            region.half_extents[0] as f64 + MARGIN_M,
+            region.half_extents[1] as f64 + MARGIN_M,
+        );
+        let c = DVec2::new(center.x, center.z);
+        let (min, max) = (c - half, c + half);
+        Self {
+            surface: world
+                .get_resource::<SurfaceLayers>()
+                .and_then(|s| crop(&s.grid, min, max))
+                .map(|grid| SurfaceLayers { grid }),
+            heat: world
+                .get_resource::<HeatField>()
+                .and_then(|h| crop(&h.grid, min, max))
+                .map(|grid| HeatField { grid }),
+            weather: world.get_resource().cloned(),
+            wind: world.get_resource().cloned(),
+            ground: world.get_resource().cloned(),
+            water: world.get_resource().cloned(),
+            materials: world.get_resource().cloned(),
+        }
+    }
+
     fn view(&self) -> EnvView<'_> {
         EnvView {
             weather: self.weather.as_ref(),
@@ -205,6 +436,35 @@ impl EnvSnapshot {
             materials: self.materials.as_ref(),
         }
     }
+}
+
+/// The cells of `grid` covering `min..max` (world X/Z), as a grid of their own with the same
+/// cell size and default; `None` when none do (every sample there is the default anyway).
+fn crop<T: Copy>(grid: &Grid2<T>, min: DVec2, max: DVec2) -> Option<Grid2<T>> {
+    let cell = grid.cell as f64;
+    let lo = ((min - grid.origin) / cell).floor();
+    let hi = ((max - grid.origin) / cell).ceil();
+    let x0 = lo.x.clamp(0.0, grid.width as f64) as u32;
+    let y0 = lo.y.clamp(0.0, grid.height as f64) as u32;
+    let x1 = hi.x.clamp(0.0, grid.width as f64) as u32;
+    let y1 = hi.y.clamp(0.0, grid.height as f64) as u32;
+    if x1 <= x0 || y1 <= y0 {
+        return None;
+    }
+    let (w, h) = (x1 - x0, y1 - y0);
+    let mut data = Vec::with_capacity((w * h) as usize);
+    for y in y0..y1 {
+        let row = (y * grid.width) as usize;
+        data.extend_from_slice(&grid.data[row + x0 as usize..row + x1 as usize]);
+    }
+    Some(Grid2 {
+        origin: grid.origin + DVec2::new(x0 as f64, y0 as f64) * cell,
+        cell: grid.cell,
+        width: w,
+        height: h,
+        data,
+        default: grid.default,
+    })
 }
 
 /// A region's soil and history, worked out.
@@ -241,18 +501,8 @@ impl RegionBuild {
 
 impl BuiltRegion {
     fn follow(&mut self, s: &WorldShift) {
-        let center = self.state.center;
-        self.state.sim.shift(s, center);
-        self.state.center = s.point(center);
-        for p in &mut self.plants {
-            p.pos = s.point(p.pos);
-        }
-        // Yaw is measured from +X toward +Z, the opposite sense to a turn about +Y.
-        let yaw = s.yaw();
-        for l in &mut self.logs {
-            l.pos = s.point(l.pos);
-            l.yaw = (l.yaw - yaw).rem_euclid(TAU);
-        }
+        self.state.follow(s);
+        follow_plants_and_logs(s, &mut self.plants, &mut self.logs);
     }
 }
 
@@ -279,12 +529,31 @@ fn build_region(
             center,
             stats: RegionStats::default(),
             catch_up: None,
+            step: None,
+            due: None,
         },
         grew: (plants.len(), logs.len()),
         plants,
         logs,
         ms: start.elapsed().as_secs_f32() * 1000.0,
     }
+}
+
+/// Whether [`init_regions`] has work: a region not yet built, or one still building or
+/// planting. Pipe it into `queue_when(init_regions)`, so the exclusive system runs only then.
+#[allow(clippy::type_complexity)]
+pub fn regions_to_build(
+    new: Query<
+        (),
+        (
+            With<EcologyRegion>,
+            Without<RegionState>,
+            Without<RegionBuild>,
+        ),
+    >,
+    building: Query<(), With<RegionBuild>>,
+) -> bool {
+    !new.is_empty() || !building.is_empty()
 }
 
 /// Build regions that haven't run yet: soil, then their history (prewarm), then spawn the
@@ -962,57 +1231,84 @@ pub fn grow_plants(
     });
 }
 
-/// Step every region that has simulated enough time since its last step.
-pub fn ecology_step(world: &mut World) {
-    let dt = world.resource::<Time>().delta_secs();
-    let settings = world
-        .get_resource::<EcologySettings>()
-        .cloned()
-        .unwrap_or_default();
-    if settings.paused || dt <= 0.0 {
-        return;
-    }
-    let focus = world
-        .get_resource::<FocusPoints>()
-        .cloned()
-        .unwrap_or_default();
-    let range = world.get_resource::<SimulationRange>().cloned();
-    let years = dt * settings.years_per_second;
-
-    // Which regions are due, and with how many years.
-    let mut due: Vec<(Entity, f32)> = Vec::new();
-    let mut q = world.query::<(Entity, &EcologyRegion, &mut RegionState)>();
-    for (e, region, mut state) in q.iter_mut(world) {
+/// Count each region's simulated years and mark the ones due a step (a plain system, so the
+/// fixed step's other systems run beside it); true when [`ecology_step`] has work: a region
+/// due, or a step to write back. Pipe it into `queue_when(ecology_step)`.
+pub fn advance_regions(
+    time: Res<Time>,
+    settings: Option<Res<EcologySettings>>,
+    focus: Option<Res<FocusPoints>>,
+    range: Option<Res<SimulationRange>>,
+    mut regions: Query<(&EcologyRegion, &mut RegionState)>,
+) -> bool {
+    let settings = settings.map(|s| s.clone()).unwrap_or_default();
+    let focus = focus.map(|f| f.clone()).unwrap_or_default();
+    let dt = time.delta_secs();
+    let mut work = false;
+    for (region, mut state) in &mut regions {
+        work |= state.step.is_some();
+        if settings.paused || dt <= 0.0 {
+            continue;
+        }
+        let years = dt * settings.years_per_second * region.time_scale.max(0.0);
         let near = (focus.points.is_empty()
             || focus.distance(state.center)
                 < (region.active_radius_m + region.half_extents[0].max(region.half_extents[1]))
                     as f64)
-            && !region_resting(range.as_ref(), &focus, region, state.center);
+            && !region_resting(range.as_deref(), &focus, region, state.center);
         if !near {
-            state.pending_years = (state.pending_years + years * region.time_scale.max(0.0))
-                .min(settings.max_catch_up_years);
+            state.pending_years = (state.pending_years + years).min(settings.max_catch_up_years);
             continue;
         }
-        let years = years * region.time_scale.max(0.0);
         state.accum_years += years + std::mem::take(&mut state.pending_years);
         if state.catch_up.is_some() {
             // Its next coarse step (the years since keep gathering for after).
-            due.push((e, 0.0));
+            state.due = Some(0.0);
+            work = true;
         } else if state.accum_years >= region.step_years {
-            let take = state.accum_years;
-            state.accum_years = 0.0;
-            due.push((e, take));
+            state.due = Some(std::mem::take(&mut state.accum_years));
+            work = true;
+        }
+    }
+    work
+}
+
+/// One fixed tick of the ecology as the schedule runs it: [`advance_regions`], then
+/// [`ecology_step`] (for tests and tools driving the world by hand).
+pub fn tick_ecology(world: &mut World) {
+    match world.run_system_cached(advance_regions) {
+        Ok(true) => ecology_step(world),
+        Ok(false) => {}
+        Err(err) => tracing::warn!("foliage: advance_regions: {err}"),
+    }
+}
+
+/// Step every region that has simulated enough time since its last step. The tick gathers
+/// the region's plants and hands the step to a worker; the next tick writes it back (see
+/// `StepInFlight`), so the frame thread pays for the gather and the write-back only (a
+/// forest step went from ~9.5 ms on the frame to ~0.7 + ~1.3 ms, foliage-research.md §16).
+pub fn ecology_step(world: &mut World) {
+    // Last tick's steps first, whatever this tick does: they were gathered then and land now.
+    finish_steps(world);
+    // The regions [`advance_regions`] found due.
+    let mut due: Vec<(Entity, f32)> = Vec::new();
+    let mut q = world.query::<(Entity, &mut RegionState)>();
+    for (e, mut state) in q.iter_mut(world) {
+        if let Some(years) = state.due.take() {
+            due.push((e, years));
         }
     }
     if due.is_empty() {
         return;
     }
 
-    let library = world
-        .get_resource::<PlantLibrary>()
-        .cloned()
-        .unwrap_or_default();
-    // Gather plants and logs per due region.
+    let library = Arc::new(
+        world
+            .get_resource::<PlantLibrary>()
+            .cloned()
+            .unwrap_or_default(),
+    );
+    // Gather plants and logs per due region (the worker sorts them).
     let mut groups: HashMap<Entity, (Vec<SimPlant>, Vec<SimLog>)> = due
         .iter()
         .map(|(e, _)| (*e, (Vec::new(), Vec::new())))
@@ -1057,27 +1353,27 @@ pub fn ecology_step(world: &mut World) {
         }
     }
 
-    // In a fixed order (not the order the ECS happens to store them in, which moves with
-    // whatever else was added to them), so the same forest grows the same way every run.
-    let key = |p: DVec3| (p.x.to_bits(), p.z.to_bits(), p.y.to_bits());
-    for (plants, logs) in groups.values_mut() {
-        plants.sort_by_key(|p| (key(p.pos), p.plant.species.0));
-        logs.sort_by_key(|l| key(l.pos));
-    }
+    let pool = AsyncComputeTaskPool::try_get().filter(|_| {
+        world
+            .get_resource::<FoliageLoading>()
+            .is_none_or(|l| l.background)
+    });
     for (region_entity, years) in due {
-        let Some(mut state) = world.entity_mut(region_entity).take::<RegionState>() else {
+        let Some(region) = world.get::<EcologyRegion>(region_entity).cloned() else {
             continue;
         };
-        let region = world
-            .get::<EcologyRegion>(region_entity)
-            .cloned()
-            .unwrap_or_default();
-        let (mut plants, mut logs) = groups.remove(&region_entity).unwrap_or_default();
-        let log_ids: Vec<Entity> = logs.iter().filter_map(|l| l.entity).collect();
-        let start = std::time::Instant::now();
-        let mut out = StepOutput::default();
-        // Long catch-ups run in coarse steps, one a frame (all at once they took over 100 ms on
-        // coming back to the forest); a step's worth (and the frame that tipped it over) is
+        let (plants, logs) = groups.remove(&region_entity).unwrap_or_default();
+        let env = {
+            let Some(center) = world.get::<RegionState>(region_entity).map(|s| s.center) else {
+                continue;
+            };
+            EnvSnapshot::around(world, &region, center)
+        };
+        let Some(mut state) = world.get_mut::<RegionState>(region_entity) else {
+            continue;
+        };
+        // Long catch-ups run in coarse steps, one a tick (all at once they took over 100 ms
+        // on coming back to the forest); a step's worth (and the tick that tipped it over) is
         // one step.
         let (dt, catch_up) = match state.catch_up.take() {
             Some((left, dt)) => {
@@ -1095,31 +1391,115 @@ pub fn ecology_step(world: &mut World) {
                 (dt, steps > 1.0)
             }
         };
-        let years = dt;
-        {
-            let env = EnvView::from_world(world);
-            let ctx = StepContext {
-                library: &library,
-                region: &region,
-                center: state.center,
-                rain_species: &state.rain_species,
-                env: &env,
-            };
-            state
-                .sim
-                .step(&ctx, &mut plants, &mut logs, dt, catch_up, &mut out);
-            crate::sim::brush(&ctx, &mut plants);
+        let log_ids: Vec<Entity> = logs.iter().filter_map(|l| l.entity).collect();
+        let job = StepJob {
+            sim: state.sim.fork(),
+            plants,
+            logs,
+            region,
+            center: state.center,
+            rain: state.rain_species.clone(),
+            library: library.clone(),
+            env,
+            dt,
+            catch_up,
+        };
+        let done = Arc::new(StepSlot::default());
+        // On a worker while the rest of the tick and the next frame go on; without a pool
+        // (unit tests) at once, landing at the next tick all the same.
+        match pool {
+            Some(pool) => {
+                let slot = done.clone();
+                pool.spawn(async move {
+                    slot.put(std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+                        || job.run(),
+                    )));
+                })
+                .detach();
+            }
+            None => done.put(Ok(job.run())),
         }
+        state.step = Some(StepInFlight {
+            done,
+            center: state.center,
+            years: dt,
+            catch_up,
+            log_ids,
+            shift: None,
+            edits: Vec::new(),
+        });
+    }
+}
+
+/// Write back the region steps gathered last tick, waiting for any still running (normally
+/// done long since: they had the rest of a frame).
+fn finish_steps(world: &mut World) {
+    let mut q = world.query::<(Entity, &RegionState)>();
+    let running: Vec<Entity> = q
+        .iter(world)
+        .filter(|(_, s)| s.step.is_some())
+        .map(|(e, _)| e)
+        .collect();
+    if running.is_empty() {
+        return;
+    }
+    let focus = world
+        .get_resource::<FocusPoints>()
+        .cloned()
+        .unwrap_or_default();
+    let library = world
+        .get_resource::<PlantLibrary>()
+        .cloned()
+        .unwrap_or_default();
+    let mut waited_ms = 0.0;
+    for region_entity in running {
+        let Some(mut state) = world.entity_mut(region_entity).take::<RegionState>() else {
+            continue;
+        };
+        let Some(step) = state.step.take() else {
+            world.entity_mut(region_entity).insert(state);
+            continue;
+        };
+        let (mut done, waited) = {
+            let _span =
+                tracing::info_span!(target: "engine_foliage", "ecology step wait").entered();
+            step.done.wait()
+        };
+        waited_ms += waited;
+        if let Some(s) = &step.shift {
+            done.follow(s, step.center);
+        }
+        for e in &step.edits {
+            e.apply(&mut done.sim.soil);
+        }
+        state.sim = done.sim;
+        let region = world
+            .get::<EcologyRegion>(region_entity)
+            .cloned()
+            .unwrap_or_default();
+        let catch_up = step.catch_up;
+        let (plants, logs, out) = (done.plants, done.logs, done.out);
         let mut stats = RegionStats {
-            years,
+            years: step.years,
             births: out.births.len() as u32,
             seeds_tried: out.seeds_tried,
-            step_ms: start.elapsed().as_secs_f32() * 1000.0,
+            step_ms: done.ms,
             ..Default::default()
         };
         let mut toppling = Vec::new();
-        for p in &plants {
+        for (p, before) in plants.iter().zip(&done.before) {
             let Some(e) = p.entity else { continue };
+            // Burnt, felled, scorched or gone since the gather: the world's news wins, and
+            // the next step sees it.
+            let Some(now) = world.get::<Plant>(e) else {
+                continue;
+            };
+            if now.stage != *before {
+                if now.stage.is_alive() {
+                    stats.alive[library.get(now.species).layer.index()] += 1;
+                }
+                continue;
+            }
             if p.removed {
                 // In live play a big snag comes down whole and its stump stays a while; in a
                 // catch-up it came down while nobody was near (see the new logs below).
@@ -1159,7 +1539,7 @@ pub fn ecology_step(world: &mut World) {
             }
         }
         // Logs that rotted away.
-        for e in log_ids {
+        for &e in &step.log_ids {
             if !logs.iter().any(|l| l.entity == Some(e))
                 && let Ok(ent) = world.get_entity_mut(e)
             {
@@ -1200,6 +1580,9 @@ pub fn ecology_step(world: &mut World) {
             d.set("foliage.plants", total as f64);
         }
     }
+    if let Some(mut d) = world.get_resource_mut::<Diagnostics>() {
+        d.set("foliage.ecology_wait_ms", waited_ms as f64);
+    }
 }
 
 /// Plants react to fire: burnt plants become charred snags (or vanish).
@@ -1219,7 +1602,10 @@ pub fn trample(
     for c in contacts.read() {
         for (region, mut state) in &mut regions {
             if region_contains(region, state.center, c.position) {
-                state.sim.soil.trample(c.position, c.load_kg);
+                state.edit_soil(SoilEdit::Trample {
+                    at: c.position,
+                    kg: c.load_kg,
+                });
             }
         }
     }
@@ -1334,6 +1720,168 @@ mod tests {
             plants.retain(|p| !p.removed);
             plants.extend(out.births);
         }
+    }
+
+    /// An app with the small test forest grown and a focus on it, ticking 1/60 s.
+    fn live_forest(loading: crate::FoliageLoading) -> (App, Entity) {
+        let mut app = App::new();
+        app.world
+            .resource_mut::<Time>()
+            .set_source(engine_core::time::TimeSource::Manual {
+                step_secs: 1.0 / 60.0,
+            });
+        app.add_plugins(engine_world::WorldPlugin);
+        app.add_plugins(crate::FoliagePlugin);
+        app.world.insert_resource(loading);
+        app.world.resource_mut::<EcologySettings>().paused = true;
+        // Steady wind: gusts follow the clock, and the two loading modes take a different
+        // number of frames to build the region.
+        app.world.resource_mut::<WeatherState>().gustiness = 0.0;
+        let region = app.world.spawn((Transform::default(), forest())).id();
+        let start = std::time::Instant::now();
+        app.update();
+        while app.world.get::<RegionState>(region).is_none() && start.elapsed().as_secs() < 60 {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            app.update();
+        }
+        app.world.resource_mut::<EcologySettings>().paused = false;
+        (app, region)
+    }
+
+    fn forest_of(app: &mut App) -> Vec<(u16, [i64; 3], u32)> {
+        let mut q = app.world.query::<(&Plant, &Transform)>();
+        let mut plants: Vec<(u16, [i64; 3], u32)> = q
+            .iter(&app.world)
+            .map(|(p, t)| {
+                (
+                    p.species.0,
+                    t.translation.to_array().map(|v| (v * 1e3) as i64),
+                    (p.health * 1e4) as u32,
+                )
+            })
+            .collect();
+        plants.sort();
+        plants
+    }
+
+    #[test]
+    fn steps_on_a_worker_grow_the_same_forest_as_steps_in_the_tick() {
+        engine_core::tasks::init_task_pools();
+        let grow = |loading: crate::FoliageLoading| {
+            let (mut app, region) = live_forest(loading);
+            let mut steps = 0;
+            for _ in 0..12 {
+                app.world
+                    .get_mut::<RegionState>(region)
+                    .unwrap()
+                    .accum_years = 0.25;
+                app.update();
+                steps += app.world.get::<RegionState>(region).unwrap().stats.births;
+            }
+            assert!(steps > 0, "no seedlings in 12 steps");
+            forest_of(&mut app)
+        };
+        let in_tick = grow(crate::FoliageLoading::in_frame());
+        let worker = grow(crate::FoliageLoading::default());
+        assert!(in_tick.len() > 100, "{} plants", in_tick.len());
+        assert_eq!(in_tick, worker);
+    }
+
+    #[test]
+    fn a_step_lands_at_the_next_tick_and_what_happened_meanwhile_wins() {
+        let (mut app, region) = live_forest(crate::FoliageLoading::in_frame());
+        let lib = PlantLibrary::default();
+        let fern = lib.id("fern").unwrap();
+        // A fern that the step is about to touch.
+        let mut q = app.world.query::<(Entity, &Plant, &InRegion)>();
+        let target = q
+            .iter(&app.world)
+            .find(|(_, p, r)| p.species == fern && p.stage.is_alive() && r.0 == Some(region))
+            .map(|(e, _, _)| e)
+            .unwrap();
+        app.world
+            .get_mut::<RegionState>(region)
+            .unwrap()
+            .accum_years = 0.25;
+        tick_ecology(&mut app.world);
+        assert!(app.world.get::<RegionState>(region).unwrap().stepping());
+        // Burnt and trampled while the step runs.
+        app.world.get_mut::<Plant>(target).unwrap().stage = PlantStage::Burnt { years: 0.0 };
+        let at = DVec3::new(3.0, 0.0, -2.0);
+        app.world
+            .get_mut::<RegionState>(region)
+            .unwrap()
+            .edit_soil(SoilEdit::Trample { at, kg: 4000.0 });
+        tick_ecology(&mut app.world);
+        let state = app.world.get::<RegionState>(region).unwrap();
+        assert!(!state.stepping());
+        assert!(state.stats.years > 0.0, "the step was written back");
+        assert!(
+            matches!(
+                app.world.get::<Plant>(target).map(|p| p.stage),
+                Some(PlantStage::Burnt { .. })
+            ),
+            "the step put a burnt fern back"
+        );
+        let soil = &state.sim.soil;
+        assert!(
+            soil.trample[soil.index(at)] > 0.99,
+            "the trampling was lost: {}",
+            soil.trample[soil.index(at)]
+        );
+    }
+
+    #[test]
+    fn a_world_shift_while_a_step_runs_moves_its_seedlings() {
+        let grow = |shift: Option<WorldShift>| {
+            let (mut app, region) = live_forest(crate::FoliageLoading::in_frame());
+            let mut seedlings = Vec::new();
+            for _ in 0..4 {
+                let before: std::collections::HashSet<Entity> = {
+                    let mut q = app.world.query_filtered::<Entity, With<Plant>>();
+                    q.iter(&app.world).collect()
+                };
+                app.world
+                    .get_mut::<RegionState>(region)
+                    .unwrap()
+                    .accum_years = 0.25;
+                tick_ecology(&mut app.world);
+                if let Some(s) = &shift {
+                    // What the world's shift does to foliage's roots and state.
+                    let mut q = app.world.query::<&mut Transform>();
+                    for mut t in q.iter_mut(&mut app.world) {
+                        t.translation = s.point(t.translation);
+                    }
+                    app.world.get_mut::<RegionState>(region).unwrap().follow(s);
+                }
+                tick_ecology(&mut app.world);
+                let mut q = app.world.query::<(Entity, &Transform, &Plant)>();
+                for (e, t, _) in q.iter(&app.world) {
+                    if !before.contains(&e) {
+                        let p = shift.map_or(t.translation, |s| s.inverse_point(t.translation));
+                        seedlings.push(p.to_array().map(|v| (v * 100.0).round() as i64));
+                    }
+                }
+                if let Some(s) = &shift {
+                    // Back, so the next step starts where the plain run's does.
+                    let back = WorldShift::translate(-s.translation);
+                    let mut q = app.world.query::<&mut Transform>();
+                    for mut t in q.iter_mut(&mut app.world) {
+                        t.translation = back.point(t.translation);
+                    }
+                    app.world
+                        .get_mut::<RegionState>(region)
+                        .unwrap()
+                        .follow(&back);
+                }
+            }
+            seedlings.sort();
+            seedlings
+        };
+        let plain = grow(None);
+        let shifted = grow(Some(WorldShift::translate(DVec3::new(-120.0, 0.0, 45.0))));
+        assert!(!plain.is_empty(), "no seedlings");
+        assert_eq!(plain, shifted);
     }
 
     fn count(plants: &[SimPlant], lib: &PlantLibrary, name: &str, min_size: f32) -> usize {

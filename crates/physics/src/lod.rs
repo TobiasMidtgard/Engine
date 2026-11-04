@@ -222,7 +222,8 @@ impl Simulation {
                     // (Held ones are put back to sleep before the step.)
                     awake: !rb.is_sleeping()
                         && !self.resting.contains(e)
-                        && !self.ungrounded.contains(e),
+                        && !self.ungrounded.contains(e)
+                        && !self.held_for_shapes.contains_key(e),
                 })
             })
             .collect();
@@ -530,7 +531,9 @@ impl Simulation {
             // moved its 1500 bodies out and back in, 10-30 ms a move.
             let held = |rb: &rapier3d::prelude::RigidBody| {
                 let e = crate::convert::entity_of(rb.user_data);
-                self.resting.contains(&e) || self.ungrounded.contains(&e)
+                self.resting.contains(&e)
+                    || self.ungrounded.contains(&e)
+                    || self.held_for_shapes.contains_key(&e)
             };
             let woke = r
                 .world

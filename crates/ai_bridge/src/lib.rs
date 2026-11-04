@@ -421,7 +421,7 @@ pub fn call_method(world: &mut World, method: &str, params: Value) -> RpcResult 
 }
 
 fn status(world: &mut World) -> Value {
-    let entities = world.entities().count_spawned();
+    let entities = engine_core::diagnostics::spawned_entities(world);
     let time = world.resource::<Time>();
     let fixed = world.resource::<FixedTime>();
     let diagnostics = world.resource::<Diagnostics>();

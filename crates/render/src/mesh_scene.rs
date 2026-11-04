@@ -19,7 +19,7 @@ use engine_core::prelude::*;
 
 use crate::components::{
     DitherFade, MaxDrawDistance, MeshRenderer, NoMeshLod, NoVirtualGeometry, ResolvedMesh,
-    ShadowOnly,
+    ShadowOnly, ShadowTexelRange,
 };
 use crate::mesh_feature::max_scale;
 use crate::virtual_geometry::Displacement;
@@ -54,6 +54,8 @@ pub(crate) struct Hot {
     pub max_distance: f32,
     /// `DitherFade` (0 without one).
     pub dither: f32,
+    /// `ShadowTexelRange` (any texel without one).
+    pub cast_texels: ShadowTexelRange,
     /// Mesh and material handle indices, as the entity names them (not canonical).
     pub mesh: u32,
     pub material: u32,
@@ -130,6 +132,7 @@ type SceneChanged = Or<(
     Changed<ResolvedMesh>,
     Changed<MaxDrawDistance>,
     Changed<DitherFade>,
+    Changed<ShadowTexelRange>,
     Added<NoVirtualGeometry>,
     Added<Displacement>,
     Added<NoMeshLod>,
@@ -143,6 +146,7 @@ type SceneItem<'w> = (
     Ref<'w, ResolvedMesh>,
     Option<Ref<'w, MaxDrawDistance>>,
     Option<Ref<'w, DitherFade>>,
+    Option<Ref<'w, ShadowTexelRange>>,
     bool,
     bool,
     bool,
@@ -156,6 +160,7 @@ type SceneQuery = (
     Ref<'static, ResolvedMesh>,
     Option<Ref<'static, MaxDrawDistance>>,
     Option<Ref<'static, DitherFade>>,
+    Option<Ref<'static, ShadowTexelRange>>,
     Has<NoVirtualGeometry>,
     Has<Displacement>,
     Has<NoMeshLod>,
@@ -181,11 +186,15 @@ pub(crate) struct MeshScene {
     changed_query: Option<QueryState<SceneQuery, SceneChanged>>,
     /// Where the removal messages of the query's components were last read (in
     /// `read_removals`' order).
-    removal_cursors: [MessageCursor<RemovedComponentEntity>; 9],
+    removal_cursors: [MessageCursor<RemovedComponentEntity>; 10],
     /// The world's change tick at the last sync (changes after it are new).
     tick: Option<Tick>,
     /// Slots rewritten by the latest sync.
     pub dirty: u32,
+    /// Entities the latest sync found changed whose slot already held exactly what they
+    /// draw: a transform or renderer written without changing (left alone, so static shadow
+    /// images keep them and nothing is uploaded again).
+    pub unchanged: u32,
     /// Slots rewritten or dropped by the latest sync, as they were before (static shadow
     /// images that hold them must be drawn again).
     pub changes: Vec<SlotChange>,
@@ -226,6 +235,7 @@ impl MeshScene {
     /// [`ensure_query`](Self::ensure_query).
     pub fn sync(&mut self, world: &World, frame: u64) {
         self.dirty = 0;
+        self.unchanged = 0;
         self.changes.clear();
         if self.query.is_none() {
             // `None` while a component of the query was never registered.
@@ -302,6 +312,7 @@ impl MeshScene {
             components.valid_component_id::<ResolvedMesh>(),
             components.valid_component_id::<MaxDrawDistance>(),
             components.valid_component_id::<DitherFade>(),
+            components.valid_component_id::<ShadowTexelRange>(),
             components.valid_component_id::<NoVirtualGeometry>(),
             components.valid_component_id::<Displacement>(),
             components.valid_component_id::<NoMeshLod>(),
@@ -377,6 +388,7 @@ impl MeshScene {
             resolved,
             max_distance,
             dither,
+            texels,
             instanced_only,
             displaced,
             full_detail,
@@ -391,12 +403,17 @@ impl MeshScene {
             (e, s) if e == entity && s != NO_SLOT => Some(s as usize),
             _ => None,
         };
-        // Archetype flags: no per-entity reads.
-        let kind = if instanced_only { INSTANCED_ONLY } else { 0 }
-            | if displaced { DISPLACED } else { 0 }
+        // Archetype flags: no per-entity reads. A texel range keeps a caster instanced (the
+        // cluster path draws its shadows without one).
+        let kind = if instanced_only || texels.is_some() {
+            INSTANCED_ONLY
+        } else {
+            0
+        } | if displaced { DISPLACED } else { 0 }
             | if full_detail { FULL_DETAIL } else { 0 }
             | if shadow_only { SHADOW_ONLY } else { 0 };
         let max = max_distance.as_ref().map_or(f32::MAX, |m| m.0);
+        let cast_texels = texels.as_deref().copied().unwrap_or_default();
         let fade = dither.as_ref().map_or(0.0, |d| {
             if d.0.is_finite() {
                 d.0.clamp(-1.0, 1.0)
@@ -424,6 +441,10 @@ impl MeshScene {
                     || match &dither {
                         Some(d) => d.is_changed(),
                         None => hot.dither != 0.0,
+                    }
+                    || match &texels {
+                        Some(t) => t.is_changed(),
+                        None => hot.cast_texels != ShadowTexelRange::default(),
                     };
                 if !changed {
                     return;
@@ -436,20 +457,27 @@ impl MeshScene {
                     && hot.material == resolved.material.index()
                     && hot.max_distance == max
                     && hot.dither == fade
+                    && hot.cast_texels == cast_texels
                     && hot.flags & !MIRRORED == flags
                     && self.cold[s].transform.0.matrix3 == transform.0.matrix3
                 {
+                    let delta = transform.0.translation - self.cold[s].transform.0.translation;
+                    if delta == DVec3::ZERO {
+                        // Written but not changed (systems that set a transform or a renderer
+                        // every frame): nothing to do. Marking it changed would keep it out of
+                        // the static shadow images and draw those again (`changes`), as Unreal
+                        // updates a primitive's render state only when its transform moved.
+                        self.unchanged += 1;
+                        return;
+                    }
                     self.note_change(s);
                     let cold = &mut self.cold[s];
                     cold.changed = frame;
-                    let delta = transform.0.translation - cold.transform.0.translation;
-                    if delta != DVec3::ZERO {
-                        cold.previous = cold.transform;
-                        cold.previous_rows = cold.rows;
-                        cold.moved = frame;
-                        cold.transform = *transform;
-                        self.hot[s].center += delta;
-                    }
+                    cold.previous = cold.transform;
+                    cold.previous_rows = cold.rows;
+                    cold.moved = frame;
+                    cold.transform = *transform;
+                    self.hot[s].center += delta;
                     self.dirty += 1;
                     return;
                 }
@@ -487,6 +515,7 @@ impl MeshScene {
                     scale: 1.0,
                     max_distance: f32::MAX,
                     dither: 0.0,
+                    cast_texels: ShadowTexelRange::default(),
                     mesh: 0,
                     material: 0,
                     mesh_version: u64::MAX,
@@ -504,6 +533,7 @@ impl MeshScene {
             scale: max_scale(&transform),
             max_distance: max,
             dither: fade,
+            cast_texels,
             mesh: resolved.mesh.index(),
             material: resolved.material.index(),
             // Bounds again, from the mesh, when next culled.
@@ -658,6 +688,15 @@ mod tests {
         assert_eq!((scene.hot.len(), scene.dirty), (2, 2));
         scene.sync(&world, 2);
         assert_eq!(scene.dirty, 0, "nothing changed");
+        // Written without changing (change ticks moved, values the same): left alone, so
+        // static shadow images keep them.
+        world.get_mut::<GlobalTransform>(a).unwrap().set_changed();
+        world.get_mut::<MeshRenderer>(b).unwrap().set_changed();
+        scene.sync(&world, 3);
+        assert_eq!((scene.dirty, scene.unchanged), (0, 2));
+        assert!(scene.changes.is_empty());
+        assert_eq!(scene.cold[slot(&scene, a)].changed, 1);
+        assert_eq!(scene.cold[slot(&scene, b)].changed, 1);
 
         // A move: rewritten, and last frame's transform kept for motion vectors.
         world.get_mut::<GlobalTransform>(a).unwrap().0.translation.x = 5.0;
@@ -695,9 +734,29 @@ mod tests {
         scene.sync(&world, 7);
         assert_eq!(scene.dirty, 1);
         assert_eq!(scene.hot[slot(&scene, a)].flags & FULL_DETAIL, 0);
+        // A shadow texel range: added, changed and removed, each rewrites the slot; with one
+        // the slot stays on the instanced path.
+        world
+            .entity_mut(b)
+            .insert(ShadowTexelRange::finer_than(0.1));
+        scene.sync(&world, 9);
+        let hot = scene.hot[slot(&scene, b)];
+        assert_eq!((scene.dirty, hot.cast_texels.max), (1, 0.1));
+        assert_ne!(hot.flags & INSTANCED_ONLY, 0);
+        *world.get_mut::<ShadowTexelRange>(b).unwrap() = ShadowTexelRange::from_texels(0.1);
+        scene.sync(&world, 10);
+        let hot = scene.hot[slot(&scene, b)];
+        assert_eq!((scene.dirty, hot.cast_texels.min), (1, 0.1));
+        assert!(hot.cast_texels.casts_at(0.1) && !hot.cast_texels.casts_at(0.05));
+        world.entity_mut(b).remove::<ShadowTexelRange>();
+        scene.sync(&world, 11);
+        let hot = scene.hot[slot(&scene, b)];
+        assert_eq!(scene.dirty, 1);
+        assert_eq!(hot.cast_texels, ShadowTexelRange::default());
+        assert_eq!(hot.flags & INSTANCED_ONLY, 0);
         // And a renderer removed drops the slot, as despawning does.
         world.entity_mut(b).remove::<MeshRenderer>();
-        scene.sync(&world, 8);
+        scene.sync(&world, 12);
         assert_eq!(scene.hot.len(), 1);
         assert_eq!(scene.cold[0].entity, a);
     }

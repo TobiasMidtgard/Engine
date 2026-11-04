@@ -8,6 +8,9 @@
 //! `FOLIAGE_DEBUG_VIEW=sky|reflections|gi|normals|cascades` shows a renderer debug view instead
 //! (on the ground and rocks, `cascades` shows where the sun reaches, tinted by shadow cascade).
 //!
+//! `FOLIAGE_FROZEN=1` keeps the live ecology still, so two runs show the same forest, and
+//! `FOLIAGE_EV=<ev100>` fixes the exposure: for before/after comparisons.
+//!
 //! `FOLIAGE_CENSUS=1` also prints, for each shot, the plant parts' triangles by level of detail:
 //! in view (a cone a little wider than the camera's) and casting shadows (within 350 m).
 //!
@@ -25,7 +28,9 @@ use engine_foliage::{
 };
 use engine_foliage::{demo, season};
 use engine_render::prelude::*;
-use engine_render::{DebugView, Exposure, RenderDisabled, RenderSettings, Screenshots};
+use engine_render::{
+    DebugView, Exposure, RenderDisabled, RenderSettings, Screenshots, ShadowTexelRange,
+};
 use engine_world::WeatherState;
 
 const FOREST: DVec3 = DVec3::new(0.0, 0.0, 0.0);
@@ -129,14 +134,17 @@ fn census(app: &mut App, name: &str) {
     };
     let mut view: BTreeMap<&str, (u32, u64)> = BTreeMap::new();
     let mut cast: BTreeMap<&str, (u32, u64)> = BTreeMap::new();
+    let mut fine: BTreeMap<&str, (u32, u64)> = BTreeMap::new();
+    let mut coarse: BTreeMap<&str, (u32, u64)> = BTreeMap::new();
     let mut q = app.world.query::<(
         &MeshRenderer,
         &GlobalTransform,
         Option<&PlantPart>,
         Option<&ShadowStandIn>,
+        Option<&ShadowTexelRange>,
     )>();
     let meshes = app.world.resource::<Assets<Mesh>>();
-    for (r, gt, part, standin) in q.iter(&app.world) {
+    for (r, gt, part, standin, maps) in q.iter(&app.world) {
         if part.is_none() && standin.is_none() {
             continue;
         }
@@ -160,10 +168,27 @@ fn census(app: &mut App, name: &str) {
             }
         }
         if r.cast_shadows && d < 350.0 {
-            let e = cast.entry(lvl).or_default();
+            // Into which maps: the fine ones only, the coarse ones only, or all.
+            let maps = maps.copied().unwrap_or_default();
+            let to = if maps.max.is_finite() {
+                &mut fine
+            } else if maps.min > 0.0 {
+                &mut coarse
+            } else {
+                &mut cast
+            };
+            let e = to.entry(lvl).or_default();
             e.0 += 1;
             e.1 += tris;
         }
+    }
+    {
+        let mut q = app.world.query_filtered::<&MeshRenderer, With<PlantPart>>();
+        let (all, hidden) = q
+            .iter(&app.world)
+            .fold((0u32, 0u32), |(a, h), r| (a + 1, h + u32::from(!r.visible)));
+        let plants = app.world.query::<&Plant>().iter(&app.world).count();
+        println!("census {name}: {plants} plants, {all} plant parts, {hidden} of them hidden");
     }
     let show = |m: &BTreeMap<&str, (u32, u64)>| {
         let total: u64 = m.values().map(|v| v.1).sum();
@@ -174,9 +199,30 @@ fn census(app: &mut App, name: &str) {
         format!("{:.2} M ({})", total as f64 / 1e6, parts.join(", "))
     };
     println!("census {name}: in view {}", show(&view));
-    println!("census {name}: casting {}", show(&cast));
+    println!("census {name}: casting into every map {}", show(&cast));
+    println!("census {name}: casting into fine maps only {}", show(&fine));
+    println!(
+        "census {name}: casting into coarse maps only {}",
+        show(&coarse)
+    );
     let d = app.world.resource::<Diagnostics>();
     let ms = |k: &str| d.get(k).unwrap_or(f64::NAN);
+    // The renderer's CPU side: what the plant parts and their shadow stand-ins cost to prepare.
+    let cpu: Vec<String> = d
+        .metrics
+        .iter()
+        .filter(|(k, v)| k.starts_with("render.cpu.") && **v >= 0.3)
+        .map(|(k, v)| format!("{} {v:.1}", &k["render.cpu.".len()..]))
+        .collect();
+    println!(
+        "census {name}: {} entities; mesh slots {}, cascade instances {}, cascade triangles {:.2} M; CPU ms {:.1}: {}",
+        d.entities,
+        ms("render.meshes.slots"),
+        ms("render.meshes.cascade_instances"),
+        ms("render.meshes.cascade_triangles") / 1e6,
+        ms("render.cpu_ms"),
+        cpu.join(", ")
+    );
     println!(
         "census {name}: drawn {:.2} M triangles in {} draws; GPU {:.0} ms: shadows {:.0}, prepass {:.0}, scene: meshes {:.0}, scene: grass {:.0}",
         ms("render.triangles") / 1e6,
@@ -274,9 +320,16 @@ fn main() {
         },
         Transform::default(),
     ));
+    // `FOLIAGE_EV=<ev100>`: a fixed exposure, so two builds' shots differ only where the
+    // pictures do (auto exposure carries any change in brightness to every pixel).
+    let fixed_ev: Option<f32> = std::env::var("FOLIAGE_EV")
+        .ok()
+        .and_then(|v| v.parse().ok());
     let mut cams = app.world.query::<&mut Camera>();
     for mut cam in cams.iter_mut(&mut app.world) {
-        if let Exposure::Auto { speed, .. } = &mut cam.exposure {
+        if let Some(ev100) = fixed_ev {
+            cam.exposure = Exposure::Manual { ev100 };
+        } else if let Exposure::Auto { speed, .. } = &mut cam.exposure {
             *speed = 40.0;
         }
     }
@@ -291,6 +344,14 @@ fn main() {
     let mut felling = app.world.query::<&mut demo::DemoFelling>();
     for mut d in felling.iter_mut(&mut app.world) {
         d.max_trees = 0;
+    }
+    // `FOLIAGE_FROZEN=1`: no live ecology, so every run shows the same forest (how many frames
+    // the loading below takes depends on the machine, and the forest steps meanwhile): for
+    // before/after comparisons of how it is drawn.
+    if std::env::var("FOLIAGE_FROZEN").is_ok_and(|v| v == "1") {
+        app.world
+            .resource_mut::<engine_foliage::EcologySettings>()
+            .paused = true;
     }
     let started = std::time::Instant::now();
     app.update();

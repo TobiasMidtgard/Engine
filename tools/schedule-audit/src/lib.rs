@@ -100,9 +100,6 @@ mod tests {
             "FixedUpdate",
             19,
             &[
-                "engine_foliage::apply_damage",
-                "engine_foliage::ecology_step",
-                "engine_foliage::run_demo_felling",
                 "engine_physics::physics_sync",
                 "engine_physics::physics_write_back",
             ],
@@ -139,7 +136,6 @@ mod tests {
             &[
                 "engine_assets::apply_loaded_assets",
                 "engine_destruction::ensure_assets",
-                "engine_foliage::init_regions",
                 "engine_ui::ui_input_system",
             ],
         ),

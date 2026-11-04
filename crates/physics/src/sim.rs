@@ -767,6 +767,10 @@ pub struct Contacts {
     pub hitting: BTreeMap<(Entity, Entity), RegionId>,
     /// Pairs gone pending this substep, before [`Region::touches`] could see them.
     pub fresh: Vec<(Entity, Entity)>,
+    /// Colliders rebuilt since their pairs were last looked at
+    /// ([`Simulation::tidy_rebuilt_contacts`]): a zone's 700 statics placed again each scanned
+    /// every pair (7,000 touching in the proving ground's region), 5-50 ms of a sync.
+    pub rebuilt: EntityHashSet,
 }
 
 /// An articulated group counts as this much nearer when the articulation budget ranks groups
@@ -876,6 +880,10 @@ pub struct Simulation {
     pub weightless: EntityHashSet,
     /// Static colliders whose shape is being built off the frame ([`crate::shape_jobs`]).
     pub(crate) pending_statics: crate::shape_jobs::PendingStatics,
+    /// Bodies and characters near a static still being built, held until it is there
+    /// ([`crate::shape_jobs`]), with the velocity (linear, angular) each had, given back when
+    /// let go.
+    pub(crate) held_for_shapes: EntityHashMap<(Vec3, Vec3)>,
 }
 
 /// Rapier hooks: drop the contacts listed in [`Simulation::no_contact`], and keep round bodies
@@ -1233,6 +1241,7 @@ impl Simulation {
     pub fn forget_body(&mut self, entity: Entity) -> Vec<Entity> {
         self.resting.remove(&entity);
         self.ungrounded.remove(&entity);
+        self.held_for_shapes.remove(&entity);
         self.weightless.remove(&entity);
         self.remove_body(entity)
     }
@@ -1261,6 +1270,31 @@ impl Simulation {
             {
                 rb.wake_up(true);
             }
+        }
+    }
+
+    /// Wake a body or a character's body where it is (no longer held), moving as it was.
+    pub(crate) fn wake(&mut self, e: Entity, velocity: (Vec3, Vec3)) {
+        let Some((region, handle)) = self
+            .bodies
+            .get(&e)
+            .map(|b| (b.region, b.handle))
+            .or_else(|| self.characters.get(&e).map(|c| (c.region, c.body)))
+        else {
+            return;
+        };
+        if let Some(rb) = self
+            .regions
+            .get_mut(region as usize)
+            .and_then(|r| r.as_mut())
+            .and_then(|r| r.world.bodies.get_mut(handle))
+            && !rb.is_fixed()
+        {
+            if rb.is_dynamic() {
+                rb.set_linvel(velocity.0, false);
+                rb.set_angvel(velocity.1, false);
+            }
+            rb.wake_up(true);
         }
     }
 
@@ -1432,7 +1466,7 @@ impl Simulation {
             entity,
             ColliderEntry {
                 body: Some(body),
-                desc: desc.clone(),
+                desc: convert::shapeless(desc),
                 shape,
                 world_pose: (DVec3::ZERO, Quat::IDENTITY),
                 radius: 0.0,
@@ -1460,7 +1494,7 @@ impl Simulation {
             entity,
             ColliderEntry {
                 body: None,
-                desc: desc.clone(),
+                desc: convert::shapeless(desc),
                 shape,
                 world_pose: pose,
                 radius,
@@ -1566,8 +1600,60 @@ impl Simulation {
     /// Forget a collider. With `user_removed`, contacts it had end now (the game removed it);
     /// otherwise it is being rebuilt and its contacts are re-checked after the next step.
     pub fn remove_collider(&mut self, entity: Entity, user_removed: bool) {
-        if !self.colliders.contains_key(&entity) {
+        if user_removed {
+            self.remove_colliders(&[entity]);
+        } else if self.drop_collider(entity) {
+            self.contacts.rebuilt.insert(entity);
+        }
+    }
+
+    /// Forget colliders the game removed; the contacts they had end now. One look over the
+    /// pairs for them all.
+    pub fn remove_colliders(&mut self, entities: &[Entity]) {
+        let gone: EntityHashSet = entities
+            .iter()
+            .copied()
+            .filter(|e| self.drop_collider(*e))
+            .collect();
+        if gone.is_empty() {
             return;
+        }
+        let pairs = self.forget_pairs(&gone);
+        for k in pairs {
+            let (a, b, sensor) = self.contacts.touching.remove(&k).unwrap();
+            self.contacts.out.push(ended(a, b, sensor));
+        }
+    }
+
+    /// Look once over the pairs of the colliders rebuilt since the last look: pending ones
+    /// are dropped (their handles are gone) and touching ones re-checked after the next step.
+    /// Runs before every step.
+    pub fn tidy_rebuilt_contacts(&mut self) {
+        if self.contacts.rebuilt.is_empty() {
+            return;
+        }
+        let rebuilt = std::mem::take(&mut self.contacts.rebuilt);
+        let pairs = self.forget_pairs(&rebuilt);
+        self.contacts.recheck.extend(pairs);
+    }
+
+    /// Drop the pending pairs of `gone` and return their touching pairs.
+    fn forget_pairs(&mut self, gone: &EntityHashSet) -> Vec<(Entity, Entity)> {
+        self.contacts
+            .pending
+            .retain(|k, _| !gone.contains(&k.0) && !gone.contains(&k.1));
+        self.contacts
+            .touching
+            .keys()
+            .filter(|k| gone.contains(&k.0) || gone.contains(&k.1))
+            .copied()
+            .collect()
+    }
+
+    /// Remove a collider from the simulation, its pairs left for the caller. Was it there?
+    fn drop_collider(&mut self, entity: Entity) -> bool {
+        if !self.colliders.contains_key(&entity) {
+            return false;
         }
         self.remove_collider_handles(entity);
         let c = self.colliders.remove(&entity).unwrap();
@@ -1579,24 +1665,7 @@ impl Simulation {
         if let Some(body) = c.body {
             self.fix_mass(body);
         }
-        self.contacts
-            .pending
-            .retain(|k, _| k.0 != entity && k.1 != entity);
-        let pairs: Vec<(Entity, Entity)> = self
-            .contacts
-            .touching
-            .keys()
-            .filter(|k| k.0 == entity || k.1 == entity)
-            .copied()
-            .collect();
-        if user_removed {
-            for k in pairs {
-                let (a, b, sensor) = self.contacts.touching.remove(&k).unwrap();
-                self.contacts.out.push(ended(a, b, sensor));
-            }
-        } else {
-            self.contacts.recheck.extend(pairs);
-        }
+        true
     }
 
     /// Update a static collider's pose after gameplay moved it.
@@ -2384,6 +2453,7 @@ impl Simulation {
     }
 
     pub fn remove_character(&mut self, entity: Entity) {
+        self.held_for_shapes.remove(&entity);
         if let Some(c) = self.characters.remove(&entity) {
             let region = self.region_mut(c.region);
             region.world.remove_body(c.body);
@@ -3376,5 +3446,102 @@ mod tests {
         w.integration_parameters.dt = 1.0 / 60.0;
         w.step();
         assert_eq!(w.bodies.len(), 15);
+    }
+
+    /// A car (a box over raycast wheels) doing 25 m/s over a mesh ground isn't swept: it moves
+    /// a fraction of its length a substep. Falling at the ground fast, it is. A bullet flying
+    /// level over the ground isn't either (the ground's box holds it, a hill at the chunk's
+    /// corner, but no triangle comes near its path); at a wall ahead, it is.
+    #[test]
+    fn a_car_rolling_over_mesh_ground_is_not_swept() {
+        #[derive(PartialEq, Clone, Copy)]
+        enum Wall {
+            None,
+            Old,
+            New,
+        }
+        let dt = 1.0 / 120.0;
+        let swept = |shape: ColliderBuilder, y: f32, velocity: Vec3, wall: Wall| {
+            let mut r = Region::new(DVec3::ZERO, &PhysicsSettings::default());
+            let w = &mut r.world;
+            // 40 x 40 m of 1 m cells at y = 0, one far corner raised 6 m.
+            let n = 40u32;
+            let mut vertices = Vec::new();
+            for z in 0..=n {
+                for x in 0..=n {
+                    let y = if x == n && z == n { 6.0 } else { 0.0 };
+                    vertices.push(Vec3::new(x as f32 - 20.0, y, z as f32 - 20.0));
+                }
+            }
+            let mut indices = Vec::new();
+            for z in 0..n {
+                for x in 0..n {
+                    let i = z * (n + 1) + x;
+                    indices.push([i, i + n + 1, i + 1]);
+                    indices.push([i + 1, i + n + 1, i + n + 2]);
+                }
+            }
+            w.insert_collider(ColliderBuilder::trimesh(vertices, indices).unwrap(), None);
+            let board = || {
+                let at = Vec3::new(0.0, 1.0, 2.5);
+                ColliderBuilder::cuboid(2.0, 1.0, 0.05).translation(at)
+            };
+            if wall == Wall::Old {
+                w.insert_collider(board(), None);
+            }
+            let at = Vec3::new(0.0, y, 0.0);
+            let body = w.insert_body(
+                RigidBodyBuilder::dynamic()
+                    .translation(at)
+                    .ccd_enabled(true),
+            );
+            w.insert_collider(shape, Some(body));
+            w.integration_parameters.dt = dt;
+            w.step();
+            let rb = &mut w.bodies[body];
+            rb.set_translation(at, true);
+            rb.set_linvel(velocity, true);
+            rb.set_angvel(Vec3::ZERO, true);
+            if wall == Wall::New {
+                // Made since the step: not in the query tree yet.
+                let h = w.insert_collider(board(), None);
+                r.fresh.push(h);
+            }
+            crate::step::sweeps_wanted(&r, dt)
+        };
+        let car = || ColliderBuilder::cuboid(0.88, 0.32, 2.2);
+        let ahead = Vec3::new(0.0, 0.0, 25.0);
+        assert!(
+            !swept(car(), 0.57, ahead, Wall::None),
+            "swept rolling over the ground"
+        );
+        assert!(
+            !swept(car(), 0.57, ahead, Wall::Old),
+            "swept rolling at a wall 0.2 m a substep"
+        );
+        let falling = Vec3::new(0.0, -30.0, 0.0);
+        assert!(
+            swept(car(), 0.57, falling, Wall::None),
+            "not swept falling at the ground"
+        );
+        let shot = || ColliderBuilder::ball(0.02);
+        let fast = Vec3::new(0.0, 0.0, 300.0);
+        assert!(
+            !swept(shot(), 1.0, fast, Wall::None),
+            "a shot swept for the ground beside its path"
+        );
+        assert!(
+            swept(shot(), 1.0, fast, Wall::Old),
+            "a shot not swept at a wall"
+        );
+        assert!(
+            swept(shot(), 1.0, fast, Wall::New),
+            "a shot not swept at a new wall"
+        );
+        let away = Vec3::new(0.0, 0.0, -300.0);
+        assert!(
+            !swept(shot(), 1.0, away, Wall::New),
+            "a shot swept for a new wall behind it"
+        );
     }
 }

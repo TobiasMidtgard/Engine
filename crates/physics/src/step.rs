@@ -27,6 +27,7 @@ use crate::convert;
 use crate::settings::PhysicsSettings;
 use crate::sim::{BodyWrite, ContactFilter, MaterialCache, RegionId, Simulation};
 use crate::{FineSteps, PhysicsStats, SharedSimulation};
+use engine_core::ecs::entity::EntityHashMap;
 
 /// World pose (translation, rotation, scale) of `e`, composing `Transform`s up the hierarchy.
 /// `GlobalTransform` is only updated in `PostUpdate`, so the step computes poses itself.
@@ -236,12 +237,13 @@ pub(crate) fn physics_sync(world: &mut World, mut q: Local<Option<StepQueries>>)
         gone.extend(ch.read());
     }
     let mut dirty_colliders: Vec<Entity> = Vec::new();
+    let mut removed: Vec<Entity> = Vec::new();
     for e in gone {
         if world.get::<RigidBody>(e).is_none() {
             dirty_colliders.extend(sim.forget_body(e));
         }
         if world.get::<Collider>(e).is_none() && sim.colliders.contains_key(&e) {
-            sim.remove_collider(e, true);
+            removed.push(e);
         }
         if world.get::<Collider>(e).is_none() {
             sim.pending_statics.remove(&e);
@@ -253,6 +255,7 @@ pub(crate) fn physics_sync(world: &mut World, mut q: Local<Option<StepQueries>>)
             sim.remove_character(e);
         }
     }
+    sim.remove_colliders(&removed);
 
     drop((_part, _piece));
     // ---------------------------------------------------------------- bodies
@@ -319,15 +322,20 @@ pub(crate) fn physics_sync(world: &mut World, mut q: Local<Option<StepQueries>>)
     }
     dirty_colliders.sort();
     dirty_colliders.dedup();
-    let mut wanted: Vec<(Entity, Collider, Transform)> = dirty_colliders
+    let dirty_ms = colliders_started.elapsed().as_secs_f64() * 1000.0;
+    // Read in place, not copied: a copy of a big mesh (and freeing it after) cost 10-50 ms of
+    // a sync on the VM while zones were loading, about as much as building it.
+    let read: &World = world;
+    let mut wanted: Vec<(Entity, &Collider, Transform)> = dirty_colliders
         .into_iter()
-        .filter_map(|e| Some((e, world.get::<Collider>(e).cloned()?, world_pose(world, e)?)))
+        .filter_map(|e| Some((e, read.get::<Collider>(e)?, world_pose(read, e)?)))
         .collect();
+    let read_ms = colliders_started.elapsed().as_secs_f64() * 1000.0 - dirty_ms;
     // Big static meshes go off the frame unless something moving is near them already
     // (`crate::shape_jobs`).
-    let (mut off_frame, mut kept_near) = (0usize, 0usize);
+    let (mut off_frame, mut held_near) = (0usize, 0usize);
     if settings.static_meshes_off_frame {
-        let mut movers: Option<Vec<(DVec3, f64)>> = None;
+        let mut movers: Option<Vec<crate::shape_jobs::Mover>> = None;
         wanted.retain(|(e, desc, pose)| {
             // A changed collider's earlier job is dropped either way.
             sim.pending_statics.remove(e);
@@ -344,28 +352,30 @@ pub(crate) fn physics_sync(world: &mut World, mut q: Local<Option<StepQueries>>)
                 pose.rotation,
                 pose.scale,
             );
-            // A changed shape near something moving: the old one stands in while the new one
-            // is built (a few steps at most); a new one is built now.
+            // Near something moving it goes first: a changed shape's old one stands in while
+            // the new one is built (a few steps at most), and what is near a new one waits
+            // for it, held (`place_pending_statics`).
             let movers = movers.get_or_insert_with(|| crate::shape_jobs::movers(&sim));
             let replacing = sim.colliders.get(e).is_some_and(|c| c.body.is_none());
             let near = crate::shape_jobs::near(movers, lo, hi);
-            if near && !replacing {
-                kept_near += 1;
-                return true;
-            }
-            let Some(job) = crate::shape_jobs::Job::spawn(desc.shape.clone(), pose.scale) else {
+            // (Its points are shared, not copied: copies took 24-48 ms for a zone's 54-89
+            // meshes on the VM.)
+            let Some(job) = crate::shape_jobs::Job::spawn(desc.shape.clone(), pose.scale, near)
+            else {
                 return true;
             };
+            held_near += usize::from(near && !replacing);
             sim.pending_statics.insert(
                 *e,
                 crate::shape_jobs::Pending {
                     job,
-                    desc: desc.clone(),
+                    desc: convert::shapeless(desc),
                     scale: pose.scale,
                     lo,
                     hi,
                     waited: 0,
-                    replacing: near,
+                    held: 0,
+                    replacing: near && replacing,
                 },
             );
             off_frame += 1;
@@ -404,14 +414,14 @@ pub(crate) fn physics_sync(world: &mut World, mut q: Local<Option<StepQueries>>)
                     inv * pose.rotation,
                 );
                 let (f, r) = sim.materials.get(desc.surface);
-                sim.attach_collider(e, body, &desc, shape, local, f, r);
+                sim.attach_collider(e, body, desc, shape, local, f, r);
                 attached += 1;
             }
             None => {
                 sim.add_static(
                     e,
                     found.map(|(b, _)| b),
-                    &desc,
+                    desc,
                     shape,
                     (pose.translation, pose.rotation),
                 );
@@ -419,15 +429,18 @@ pub(crate) fn physics_sync(world: &mut World, mut q: Local<Option<StepQueries>>)
             }
         }
     }
-    place_pending_statics(world, &mut sim);
+    let statics_ms = placed_started.elapsed().as_secs_f64() * 1000.0;
+    let (pending_placed, waited_ms, pending_ms) = place_pending_statics(world, &mut sim);
+    sim.tidy_rebuilt_contacts();
     let total_ms = colliders_started.elapsed().as_secs_f64() * 1000.0;
     if total_ms > 5.0 && crate::report::wanted() {
         engine_core::log::info!(
             "physics: syncing colliders took {total_ms:.1} ms: {moved_statics} statics moved \
-             ({moved_ms:.1} ms with the dirty list); {wanted_n} built ({points} points, \
-             {built_ms:.1} ms); {attached} attached, {statics} static placed ({:.1} ms); {off_frame} queued off the frame, {kept_near} built now for movers near; \
-             {} pending",
-            placed_started.elapsed().as_secs_f64() * 1000.0,
+             ({moved_ms:.1} ms: dirty list {dirty_ms:.1}, reading {read_ms:.1}); {wanted_n} built \
+             ({points} points, {built_ms:.1} ms); {attached} attached, {statics} static placed \
+             ({statics_ms:.1} ms); {off_frame} queued off the frame ({held_near} with movers \
+             near); {pending_placed} placed from off the frame ({pending_ms:.1} ms, \
+             {waited_ms:.1} of it waiting), {} pending",
             sim.pending_statics.len()
         );
     }
@@ -633,7 +646,11 @@ pub(crate) fn physics_sync(world: &mut World, mut q: Local<Option<StepQueries>>)
     crate::grounding::hold_ungrounded(&mut sim, &foci);
     drop(piece);
     let _piece = crate::report::Piece::start("sync: holds: resting");
-    if !sim.resting.is_empty() || !sim.ungrounded.is_empty() || !sim.weightless.is_empty() {
+    if !sim.resting.is_empty()
+        || !sim.ungrounded.is_empty()
+        || !sim.held_for_shapes.is_empty()
+        || !sim.weightless.is_empty()
+    {
         hold_resting(&mut sim);
     }
     drop((_part, _piece));
@@ -1668,47 +1685,150 @@ fn spin_drag(c: &rapier3d::geometry::Collider, spin: Vec3) -> Vec3 {
 /// CCD do; the sweep (Jolt's `LinearCast`, PhysX's swept CCD) is kept for what moves faster.
 /// Past [`PhysicsSettings::coarse_beyond_m`] nobody sees a body poke into the ground for a step,
 /// and one that falls through is caught ([`crate::grounding`]).
-fn sweeps_wanted(r: &crate::sim::Region, dt: f32) -> bool {
-    use rapier3d::parry::bounding_volume::BoundingVolume;
+pub(crate) fn sweeps_wanted(r: &crate::sim::Region, dt: f32) -> bool {
+    use rapier3d::parry::bounding_volume::{Aabb, BoundingVolume};
     let w = &r.world;
+    let soft = w.soft_bodies.iter().next().is_some();
     // Every body awake, not only Rapier's active set: one woken or made since the last step
     // (a shot just fired) joins that set only inside the step.
-    w.bodies.iter().any(|(h, rb)| {
+    let found = w.bodies.iter().find_map(|(h, rb)| {
         if !rb.is_dynamic() || rb.is_sleeping() || (r.tier > 0 && !rb.is_ccd_enabled()) {
-            return false;
+            return None;
         }
         let colliders = || rb.colliders().iter().filter_map(|c| w.colliders.get(*c));
-        let Some(mut path) = colliders()
+        let mut path = colliders()
             .map(|c| c.compute_aabb())
-            .reduce(|a, b| a.merged(&b))
-        else {
-            return false;
-        };
+            .reduce(|a, b| a.merged(&b))?;
         // Its fastest point's travel this substep.
         let reach = (path.center() - rb.center_of_mass()).length() + path.half_extents().length();
         let step = (rb.linvel().length() + rb.angvel().length() * reach) * dt;
         if step <= BULLET_STEP_M {
-            return false;
+            return None;
         }
-        // Rapier's own test for the bodies that didn't ask: faster than half its thinnest part.
-        if !rb.is_ccd_enabled() && step <= 0.5 * thickness(colliders().map(|c| c.shape())) {
-            return false;
+        // Rapier's own test (faster than half its thinnest part), but along the way it goes:
+        // what moves less than half its own depth that way a substep can't pass through
+        // anything, its contacts push it back out. That holds for a body that asked to be swept
+        // too: a car's 4.4 m box rolling forward 0.2 m a substep was swept every substep
+        // against the road under it (round 11), and is now only falling at it fast.
+        let (moving, spinning) = (rb.linvel().length() * dt, rb.angvel().length() * reach * dt);
+        let along = thickness_along(colliders(), rb.linvel().normalize_or_zero());
+        let thinnest = thickness(colliders().map(|c| c.shape()));
+        let part = |travel: f32, depth: f32| {
+            if travel > 0.0 {
+                travel / (0.5 * depth)
+            } else {
+                0.0
+            }
+        };
+        if part(moving, along) + part(spinning, thinnest) <= 1.0 {
+            return None;
         }
-        // Colliders made or moved since the last step aren't in the query tree yet.
-        if r.stale_all || !r.fresh.is_empty() {
-            return true;
+        // Colliders made or moved since the last step aren't in the query tree yet: a few are
+        // looked at as the tree's are below, many (a region made or re-anchored) count as near.
+        if r.stale_all || r.fresh.len() > FRESH_LOOKED_AT {
+            return Some((rb.user_data, "new colliders near", None));
         }
-        // Its path this substep, and a margin: anything there it could pass through?
+        // Where it is and where it is going this substep, and a little more (the solve
+        // changes its velocity): the box Rapier's sweep looks in. Fixed geometry must reach
+        // into it, down to the triangles of a mesh or heightfield, as Rapier's own sweep looks:
+        // the ground a car rolls on fills the box of every ground chunk under it, but its
+        // triangles lie a wheel's travel below the body (the AI rally car was swept every
+        // substep for that, round 11).
+        let travel = rb.linvel() * dt;
+        let slack = Vec3::splat(rb.angvel().length() * reach * dt + 0.25 * step + SWEEP_SLACK_M);
+        let mut swept = path.merged(&Aabb::new(path.mins + travel, path.maxs + travel));
+        swept.mins -= slack;
+        swept.maxs += slack;
+        // Bodies move too: for them, its path this substep and a margin all round.
         path.mins -= Vec3::splat(step + BULLET_MARGIN_M);
         path.maxs += Vec3::splat(step + BULLET_MARGIN_M);
+        let bullet = rb.is_ccd_enabled();
+        // (A body's box in the tree holds its own travel; a fresh one's is measured here.)
+        let in_path = |co: &rapier3d::prelude::Collider, measure: bool| {
+            let parent = co.parent().and_then(|p| w.bodies.get(p));
+            if parent.is_none_or(|b| b.is_fixed()) {
+                reaches_into(co, &swept)
+            } else {
+                // Rapier sweeps a body that didn't ask for it against fixed geometry only (and
+                // soft bodies' meshes, which Rapier gives no parent).
+                (bullet || soft) && (!measure || co.compute_aabb().intersects(&path))
+            }
+        };
+        let fresh = r
+            .fresh
+            .iter()
+            .filter_map(|c| w.colliders.get(*c))
+            .filter(|co| co.parent() != Some(h) && !co.is_sensor())
+            .find(|co| in_path(co, true))
+            .map(|co| (rb.user_data, "new colliders near", Some(co.user_data)));
+        if fresh.is_some() {
+            return fresh;
+        }
         let filter = rapier3d::prelude::QueryFilter::default()
             .exclude_rigid_body(h)
             .exclude_sensors();
         w.query_pipeline_with_filter(filter)
             .intersect_aabb_conservative(path)
-            .next()
-            .is_some()
-    })
+            .find(|(_, co)| in_path(co, false))
+            .map(|(_, co)| (rb.user_data, "something in its path", Some(co.user_data)))
+    });
+    if let Some((user, why, what)) = found
+        && crate::report::wanted()
+    {
+        let what = what.and_then(|u| Entity::try_from_bits(u as u64));
+        crate::report::sweeper(Entity::from_bits(user as u64), why, what);
+    }
+    found.is_some()
+}
+
+/// Does fixed collider `co` reach into `path` (a box in its region's frame)? A mesh,
+/// heightfield or compound only where one of its triangles or parts does: their own boxes
+/// span a whole ground chunk.
+fn reaches_into(
+    co: &rapier3d::prelude::Collider,
+    path: &rapier3d::parry::bounding_volume::Aabb,
+) -> bool {
+    use rapier3d::parry::bounding_volume::BoundingVolume;
+    use rapier3d::parry::shape::TypedShape;
+    if !co.compute_aabb().intersects(path) {
+        return false;
+    }
+    let local = path.transform_by(&co.position().inverse());
+    match co.shape().as_typed_shape() {
+        TypedShape::TriMesh(m) => m.bvh().intersect_aabb(&local).next().is_some(),
+        TypedShape::Compound(c) => c.bvh().intersect_aabb(&local).next().is_some(),
+        TypedShape::HeightField(f) => {
+            let mut any = false;
+            f.map_elements_in_local_aabb(&local, &mut |_, t| {
+                any = any || t.local_aabb().intersects(&local);
+            });
+            any
+        }
+        _ => true,
+    }
+}
+
+/// A body's depth along unit direction `d` (in its region's frame), as half a width, the way
+/// Rapier's `ccd_thickness` measures: the least of its swept shapes', a box's, ball's or
+/// capsule's exactly along `d`, any other's its thinnest part.
+fn thickness_along<'a>(
+    colliders: impl Iterator<Item = &'a rapier3d::prelude::Collider>,
+    d: Vec3,
+) -> f32 {
+    use rapier3d::parry::shape::TypedShape;
+    colliders
+        .map(|c| {
+            let local = c.position().rotation.inverse() * d;
+            match c.shape().as_typed_shape() {
+                TypedShape::Cuboid(b) => (local.abs() * b.half_extents).element_sum(),
+                TypedShape::Ball(b) => b.radius,
+                TypedShape::Capsule(k) => {
+                    k.radius + 0.5 * (k.segment.b - k.segment.a).dot(local).abs()
+                }
+                _ => thickness(std::iter::once(c.shape())),
+            }
+        })
+        .fold(f32::MAX, f32::min)
 }
 
 /// A body's thinnest part as Rapier's sweeps judge it: the least `ccd_thickness` of its
@@ -1776,6 +1896,12 @@ fn speculate_thin(r: &mut crate::sim::Region, dt: f32) {
 pub(crate) const BULLET_STEP_M: f32 = 0.1;
 /// Beyond its path, how near something must be to a fast body for its region to sweep, m.
 const BULLET_MARGIN_M: f32 = 0.5;
+/// Beyond where a fast body is and will be this substep, how near fixed geometry must reach for
+/// its region to sweep, meters (a quarter of its step more: the solve changes its velocity).
+const SWEEP_SLACK_M: f32 = 0.1;
+/// Colliders made or moved since the last step that a fast body's path is checked against one
+/// by one; past this many, it counts as having something near.
+const FRESH_LOOKED_AT: usize = 256;
 
 /// A body whose far edge moves faster than this from turning alone, m/s, gets its contacts
 /// recomputed every step; below [`STILL_EDGE_SPEED`] Rapier may reuse them again.
@@ -2067,7 +2193,8 @@ fn idle(r: &crate::sim::Region) -> bool {
 }
 
 /// Hold the bodies told to rest asleep ([`Simulation::resting`]), and those waiting for their
-/// ground to load ([`Simulation::ungrounded`]): wake-ups from their
+/// ground to load ([`Simulation::ungrounded`]) or for a static near them to be built
+/// ([`Simulation::held_for_shapes`]): wake-ups from their
 /// neighbours, from gameplay writing to them, or bodies made since they were told, go back to
 /// sleep, still. Every one is looked at, not only Rapier's active ones: a body woken since the
 /// last step joins them only as the next one starts, and wakes all it touches.
@@ -2084,6 +2211,7 @@ fn hold_resting(sim: &mut Simulation) {
     let Simulation {
         resting,
         ungrounded,
+        held_for_shapes,
         weightless,
         bodies,
         characters,
@@ -2092,7 +2220,7 @@ fn hold_resting(sim: &mut Simulation) {
     } = sim;
     // Let go since the last step: their weight back.
     weightless.retain(|e| {
-        if resting.contains(e) || ungrounded.contains(e) {
+        if resting.contains(e) || ungrounded.contains(e) || held_for_shapes.contains_key(e) {
             return true;
         }
         if let Some(b) = bodies.get(e)
@@ -2106,7 +2234,11 @@ fn hold_resting(sim: &mut Simulation) {
         false
     });
     let mut held = 0;
-    for e in resting.iter().chain(ungrounded.iter()) {
+    for e in resting
+        .iter()
+        .chain(ungrounded.iter())
+        .chain(held_for_shapes.keys())
+    {
         // (A character told to rest stands still: its body sleeps too.)
         let Some((region, handle)) = bodies
             .get(e)
@@ -2264,8 +2396,13 @@ fn substep(
         r.world.integration_parameters.dt = p.sub_dt;
         r.world.integration_parameters.num_solver_iterations =
             crate::fine::iterations(shared.settings, r.fine, p.sub_dt);
+        let piece = crate::report::Piece::start("substeps: thin bodies");
         speculate_thin(r, p.sub_dt);
+        drop(piece);
+        let piece = crate::report::Piece::start("substeps: sweeps wanted");
         r.world.integration_parameters.max_ccd_substeps = usize::from(sweeps_wanted(r, p.sub_dt));
+        drop(piece);
+        let piece = crate::report::Piece::start("substeps: before Rapier");
         let collector = std::mem::take(&mut r.collector);
         let pool = match wide_pool() {
             Some(wide) if r.wide => Arc::clone(wide),
@@ -2276,13 +2413,18 @@ fn substep(
         if shared.settings.contact_events {
             r.note_velocities();
         }
+        drop(piece);
+        let piece = crate::report::Piece::start("substeps: Rapier's step");
         r.world.step_with_events(&filter, &collector);
+        drop(piece);
+        let piece = crate::report::Piece::start("substeps: after Rapier");
         if crate::report::wanted() {
             crate::report::rapier_stages(&r.world.physics_pipeline.counters);
         }
         crate::articulation::after_step(&mut r.world, &mut r.links);
         r.collector = collector;
         r.needs_refresh = false;
+        drop(piece);
     }
     scale_time(&mut r.world, &p.scaled, false);
     carry_on_decks(&mut r.world, &p.decks, p.sub_dt);
@@ -2312,6 +2454,9 @@ type Job<'a> = (
     &'a HashSet<(ColliderHandle, ColliderHandle)>,
 );
 
+/// The name [`region_pool`]'s threads go by (and start with).
+const REGION_THREADS: &str = "physics regions";
+
 /// Threads that step regions side by side, a pool of their own: [`physics_simulate`] is a
 /// plain system, so it runs on a compute-pool thread, and a scope opened there would run
 /// other systems' tasks while it waits (one that asks the locked simulation anything would
@@ -2323,7 +2468,7 @@ fn region_pool() -> Option<&'static TaskPool> {
         (threads > 1).then(|| {
             TaskPoolBuilder::new()
                 .num_threads((threads / 2).max(2))
-                .thread_name("physics regions".into())
+                .thread_name(REGION_THREADS.into())
                 .build()
         })
     })
@@ -2367,15 +2512,34 @@ fn wide_pool() -> Option<&'static Arc<rayon::ThreadPool>> {
 }
 
 /// A one-thread pool for a region stepping on its own: Rapier's parallel passes then run in
-/// line on it, sharing nothing with other regions.
+/// line, sharing nothing with other regions. On physics's own threads ([`region_pool`]) its
+/// one thread is the calling thread itself (rayon's `use_current_thread`), so Rapier's
+/// `install` runs the step right there: a pool of its own thread handed every substep over and
+/// back, and on a busy machine waking it cost more than the step (2.2 ms of a substep's
+/// Rapier part against 0.7 ms of Rapier's own work, VM loops, round 11). Other threads (the
+/// schedule's, which run other modules' rayon work too and must stay out of a physics pool)
+/// get a thread of their own, as before.
 fn lane() -> Arc<rayon::ThreadPool> {
     thread_local! {
         static LANE: Arc<rayon::ThreadPool> = Arc::new(
-            rayon::ThreadPoolBuilder::new()
-                .num_threads(1)
-                .thread_name(|_| "physics lane".into())
-                .build()
-                .expect("a one-thread pool"),
+            std::thread::current()
+                .name()
+                .is_some_and(|n| n.starts_with(REGION_THREADS))
+                .then(|| {
+                    rayon::ThreadPoolBuilder::new()
+                        .num_threads(1)
+                        .use_current_thread()
+                        .build()
+                        .ok()
+                })
+                .flatten()
+                .unwrap_or_else(|| {
+                    rayon::ThreadPoolBuilder::new()
+                        .num_threads(1)
+                        .thread_name(|_| "physics lane".into())
+                        .build()
+                        .expect("a one-thread pool")
+                }),
         );
     }
     LANE.with(Arc::clone)
@@ -2396,16 +2560,23 @@ fn assign_pools(jobs: &mut [Job]) {
     }
 }
 
-/// Run the regions' substep `jobs` side by side on [`region_pool`] (in place when there is
-/// one, or a single thread); the results come back in the jobs' order.
+/// Run the regions' substep `jobs` side by side on [`region_pool`] and the calling thread
+/// ([`spread`]; in place when there is one, or a single thread); the results come back in the
+/// jobs' order.
 fn run_substeps(mut jobs: Vec<Job>, shared: &SubstepShared) -> Vec<SubstepOut> {
     assign_pools(&mut jobs);
     match region_pool() {
-        Some(pool) if jobs.len() > 1 => pool.scope(|scope| {
-            for (r, p, pending) in jobs {
-                scope.spawn(async move { substep(r, p, pending, shared) });
-            }
-        }),
+        Some(pool) if jobs.len() > 1 => {
+            let n = jobs.len();
+            let jobs: Vec<parking_lot::Mutex<Option<Job>>> = jobs
+                .into_iter()
+                .map(|j| parking_lot::Mutex::new(Some(j)))
+                .collect();
+            spread(pool, n, n - 1, |i| {
+                let (r, p, pending) = jobs[i].lock().take().expect("each job runs once");
+                substep(r, p, pending, shared)
+            })
+        }
         _ => jobs
             .into_iter()
             .map(|(r, p, pending)| substep(r, p, pending, shared))
@@ -2413,29 +2584,80 @@ fn run_substeps(mut jobs: Vec<Job>, shared: &SubstepShared) -> Vec<SubstepOut> {
     }
 }
 
-/// The Rapier shapes of `wanted`'s colliders. A tile of terrain or a big scenery mesh takes a
-/// few milliseconds to build (its BVH, or a convex hull), and a batch arriving together (a zone
-/// streaming in) took 10-40 ms of one sync on 4 cores; batches with some size spread over
-/// [`region_pool`], whose tasks never wait on anything, so the simulation's lock held here is
-/// safe (AGENTS.md: no pool scope that may run another module's work under a lock).
-/// Place the static shapes built off the frame that are done, and finish on the spot the ones
-/// something moving came near or that waited too long ([`crate::shape_jobs`]).
-fn place_pending_statics(world: &World, sim: &mut Simulation) {
-    if sim.pending_statics.is_empty() {
-        return;
+/// Place the static shapes built off the frame that are ready, finish on the spot those that
+/// waited too long, and hold what is near the others until they are there
+/// ([`crate::shape_jobs`]). Returns how many were placed, the time (ms) spent waiting for or
+/// finishing jobs, and the whole time (ms).
+fn place_pending_statics(world: &World, sim: &mut Simulation) -> (usize, f64, f64) {
+    if sim.pending_statics.is_empty() && sim.held_for_shapes.is_empty() {
+        return (0, 0.0, 0.0);
     }
+    let started = Instant::now();
+    let mut waited = std::time::Duration::ZERO;
     let movers = crate::shape_jobs::movers(sim);
     let mut ready: Vec<(Entity, Option<SharedShape>, bool)> = Vec::new();
-    for (e, p) in sim.pending_statics.iter_mut() {
+    let mut hold: Vec<Entity> = Vec::new();
+    let Simulation {
+        pending_statics,
+        colliders,
+        ..
+    } = sim;
+    for (e, p) in pending_statics.iter_mut() {
         p.waited += 1;
         if let Some(shape) = p.job.poll() {
             ready.push((*e, shape, false));
-        } else if (p.replacing && p.waited >= crate::shape_jobs::MAX_REPLACE_STEPS)
-            || p.waited >= crate::shape_jobs::MAX_WAIT_STEPS
-            || (!p.replacing && crate::shape_jobs::near(&movers, p.lo, p.hi))
-        {
-            ready.push((*e, p.job.finish(), true));
+            continue;
         }
+        let close: Vec<Entity> = movers
+            .iter()
+            .filter(|m| m.near(p.lo, p.hi))
+            .map(|m| m.entity)
+            .collect();
+        let mut waits = false;
+        if !close.is_empty() {
+            p.job.hurry();
+            // (An older shape of it stands in: nothing waits.)
+            if colliders.get(e).is_some_and(|c| c.body.is_none()) {
+                p.replacing = true;
+            } else {
+                p.held += 1;
+                waits = true;
+            }
+        }
+        if (p.replacing && p.waited >= crate::shape_jobs::MAX_REPLACE_STEPS)
+            || p.waited >= crate::shape_jobs::MAX_WAIT_STEPS
+            || p.held > crate::shape_jobs::MAX_HOLD_STEPS
+        {
+            let t = Instant::now();
+            ready.push((*e, p.job.finish(), true));
+            waited += t.elapsed();
+        } else if waits {
+            hold.extend(close);
+        }
+    }
+    // Held from now on: how each was moving, given back when it goes on.
+    let mut held: EntityHashMap<(Vec3, Vec3)> = EntityHashMap::default();
+    for e in hold {
+        let velocity = sim.held_for_shapes.get(&e).copied().or_else(|| {
+            let b = sim.bodies.get(&e)?;
+            let rb = sim.region(b.region).world.bodies.get(b.handle)?;
+            Some((rb.linvel(), rb.angvel()))
+        });
+        held.insert(e, velocity.unwrap_or_default());
+    }
+    // What was held near a static now placed (or one it moved away from) goes on.
+    let let_go: Vec<(Entity, (Vec3, Vec3))> = sim
+        .held_for_shapes
+        .iter()
+        .filter(|(e, _)| !held.contains_key(*e))
+        .map(|(e, v)| (*e, *v))
+        .collect();
+    if crate::report::wanted() && !held.is_empty() {
+        crate::report::count("bodies held for a static shape being built", held.len());
+    }
+    sim.held_for_shapes = held;
+    for (e, velocity) in let_go {
+        sim.wake(e, velocity);
     }
     ready.sort_by_key(|r| r.0);
     let (mut placed, mut finished) = (0usize, 0usize);
@@ -2450,7 +2672,9 @@ fn place_pending_statics(world: &World, sim: &mut Simulation) {
         let shape = if pose.scale == p.scale {
             shape
         } else {
-            convert::shape(&p.desc.shape, pose.scale)
+            world
+                .get::<Collider>(e)
+                .and_then(|c| convert::shape_cached(&c.shape, pose.scale))
         };
         let Some(shape) = shape else {
             engine_core::log::warn!(
@@ -2489,24 +2713,27 @@ fn place_pending_statics(world: &World, sim: &mut Simulation) {
             crate::report::count("static shapes finished on the spot", finished);
         }
     }
+    (
+        placed,
+        waited.as_secs_f64() * 1000.0,
+        started.elapsed().as_secs_f64() * 1000.0,
+    )
 }
 
-fn build_shapes(wanted: &[(Entity, Collider, Transform)]) -> Vec<Option<SharedShape>> {
-    let build =
-        |(_, desc, pose): &(Entity, Collider, Transform)| convert::shape(&desc.shape, pose.scale);
+/// The Rapier shapes of `wanted`'s colliders. A tile of terrain or a big scenery mesh takes a
+/// few milliseconds to build (its BVH, or a convex hull), and a batch arriving together (a zone
+/// streaming in) took 10-40 ms of one sync on 4 cores; batches with some size spread over
+/// [`region_pool`], whose tasks never wait on anything, so the simulation's lock held here is
+/// safe (AGENTS.md: no pool scope that may run another module's work under a lock).
+fn build_shapes(wanted: &[(Entity, &Collider, Transform)]) -> Vec<Option<SharedShape>> {
+    let build = |(_, desc, pose): &(Entity, &Collider, Transform)| {
+        convert::shape_cached(&desc.shape, pose.scale)
+    };
     // Points across the batch: a box or a capsule is next to nothing to build.
     let weight: usize = wanted.iter().map(|w| shape_points(&w.1.shape)).sum();
     match region_pool() {
         Some(pool) if wanted.len() > 1 && weight >= BUILD_SPREAD_POINTS => {
-            let chunk = wanted.len().div_ceil(pool.thread_num().max(1)).max(1);
-            pool.scope(|scope| {
-                for part in wanted.chunks(chunk) {
-                    scope.spawn(async move { part.iter().map(build).collect::<Vec<_>>() });
-                }
-            })
-            .into_iter()
-            .flatten()
-            .collect()
+            spread(pool, wanted.len(), pool.thread_num(), |i| build(&wanted[i]))
         }
         _ => wanted.iter().map(build).collect(),
     }
@@ -2522,6 +2749,44 @@ fn shape_points(shape: &engine_world::physics::ColliderShape) -> usize {
         S::Compound(parts) => parts.iter().map(|(_, _, s)| shape_points(s)).sum(),
         _ => 0,
     }
+}
+
+/// `work(0..n)`, results in order, shared out one index at a time between the calling thread
+/// and up to `helpers` tasks on `pool`. The caller works too, so when the pool's threads are
+/// slow to start (a zone loading on every core) it does it all itself and waits only for the
+/// items a helper already took: an even split waited for the slowest thread instead, 43-55 ms
+/// for a batch the caller alone builds in 2-9 ms (VM loops, round 10). The same work-sharing
+/// as Rayon's `join`, where the caller runs one half itself.
+fn spread<R: Send>(
+    pool: &TaskPool,
+    n: usize,
+    helpers: usize,
+    work: impl Fn(usize) -> R + Sync,
+) -> Vec<R> {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let next = AtomicUsize::new(0);
+    let out: Vec<parking_lot::Mutex<Option<R>>> =
+        (0..n).map(|_| parking_lot::Mutex::new(None)).collect();
+    let take = || {
+        loop {
+            let i = next.fetch_add(1, Ordering::Relaxed);
+            if i >= n {
+                break;
+            }
+            let r = work(i);
+            *out[i].lock() = Some(r);
+        }
+    };
+    let take = &take;
+    pool.scope(|scope| {
+        for _ in 0..helpers.min(n.saturating_sub(1)) {
+            scope.spawn(async move { take() });
+        }
+        take();
+    });
+    out.into_iter()
+        .map(|r| r.into_inner().expect("every index was worked"))
+        .collect()
 }
 
 /// Points a batch of new shapes must hold before [`build_shapes`] spreads it over threads.

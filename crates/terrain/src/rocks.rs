@@ -541,7 +541,7 @@ fn build_cell(
     let (lo, s) = key.face_rect();
     let ground = |local: DVec3| -> Option<(DVec3, DVec3)> {
         let (dir, up, base) = map.locate(local)?;
-        Some((base + up * source.sample(base, up, dir, 0.0).height, up))
+        Some((base + up * source.ground_height(base, up, dir, 0.0), up))
     };
     let center = map.position(key.face, lo.x + s * 0.5, lo.y + s * 0.5, 0.0);
     let (origin, up) = ground(center).unwrap_or((center, center.normalize()));

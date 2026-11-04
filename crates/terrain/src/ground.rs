@@ -72,12 +72,14 @@ impl GroundTerrain {
     }
 
     /// World point of the surface along the local vertical through `p`: what [`Self::surface`]
-    /// finds, without the normal's two extra samples or the surface material.
+    /// finds, without the normal's two extra samples, the surface material or the paint. A
+    /// hand-made ground's paint can cost far more than its height: the showcase bakes a tile
+    /// of it the first time it is asked near a spot, 6-20 ms for one height query.
     pub fn surface_point(&self, p: DVec3) -> Option<DVec3> {
         let local = self.rotation.inverse() * (p - self.position);
         let (dir, up, base) = self.source.map.locate(local)?;
-        let s = self.source.sample(base, up, dir, 0.0);
-        Some(self.position + self.rotation * (base + up * s.height))
+        let height = self.source.ground_height(base, up, dir, 0.0);
+        Some(self.position + self.rotation * (base + up * height))
     }
 
     /// Terrain-local ground normal at `point_local` (the surface over `base`), from two
@@ -95,7 +97,7 @@ impl GroundTerrain {
         let probe = |offset: DVec3| -> DVec3 {
             let q = base + offset;
             match self.source.map.locate(q) {
-                Some((d, u, b)) => b + u * self.source.sample(b, u, d, min_wavelength).height,
+                Some((d, u, b)) => b + u * self.source.ground_height(b, u, d, min_wavelength),
                 None => q,
             }
         };

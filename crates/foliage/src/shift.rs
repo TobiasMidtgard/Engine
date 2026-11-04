@@ -47,9 +47,7 @@ pub fn follow_world_shift(
         return;
     };
     for mut state in &mut regions {
-        let center = state.center;
-        state.sim.shift(&s, center);
-        state.center = s.point(center);
+        state.follow(&s);
     }
     for mut b in &mut builds {
         b.follow(&s);

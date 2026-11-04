@@ -34,7 +34,12 @@ struct Totals {
     outside: Vec<(&'static str, f64)>,
     /// Pieces of those parts, by name: their sum and their worst step, ms ([`piece_ms`]).
     pieces: Vec<(&'static str, f64, f64)>,
+    /// Bodies that made a region's substep sweep for fast motion (CCD), and why: their count.
+    sweepers: HashMap<Sweeper, usize>,
 }
+
+/// A body that set off a sweep, why, and what was in its path.
+type Sweeper = (Entity, &'static str, Option<Entity>);
 
 fn totals() -> &'static Mutex<Totals> {
     static T: OnceLock<Mutex<Totals>> = OnceLock::new();
@@ -120,6 +125,16 @@ pub(crate) fn rapier_stages(c: &rapier3d::counters::Counters) {
     for (i, v) in ms.iter().enumerate() {
         t.stages[i] += v;
     }
+}
+
+/// `body` made a region's substep run Rapier's sweeps (CCD), for `why` (and `what` it could
+/// pass through).
+pub(crate) fn sweeper(body: Entity, why: &'static str, what: Option<Entity>) {
+    *totals()
+        .lock()
+        .sweepers
+        .entry((body, why, what))
+        .or_default() += 1;
 }
 
 /// `ms` of the step's own work went to `name` (sync, upkeep, write back...).
@@ -256,6 +271,23 @@ pub(crate) fn step_done(world: &World, sim: &Simulation, foci: &[DVec3], started
             *sum as f64 / (*n).max(1) as f64
         );
     }
+    if !t.sweepers.is_empty() {
+        let mut by: Vec<(&Sweeper, &usize)> = t.sweepers.iter().collect();
+        by.sort_by(|a, b| b.1.cmp(a.1));
+        let total: usize = by.iter().map(|(_, n)| **n).sum();
+        let shown: Vec<String> = by
+            .iter()
+            .take(TOP)
+            .map(|((e, why, what), n)| match what {
+                Some(w) => format!("{} ({why}: {}) {n}", label(world, *e), label(world, *w)),
+                None => format!("{} ({why}) {n}", label(world, *e)),
+            })
+            .collect();
+        out += &format!(
+            "; {total} region substeps swept for fast bodies, set off by {}",
+            shown.join(", ")
+        );
+    }
     for (id, ms, n) in rows.into_iter().take(TOP) {
         let Some(Some(r)) = sim.regions.get(id as usize) else {
             continue;
@@ -269,7 +301,11 @@ pub(crate) fn step_done(world: &World, sim: &Simulation, foci: &[DVec3], started
             .active_bodies()
             .filter_map(|h| w.bodies.get(h))
             .map(|rb| crate::convert::entity_of(rb.user_data))
-            .filter(|e| sim.resting.contains(e) || sim.ungrounded.contains(e))
+            .filter(|e| {
+                sim.resting.contains(e)
+                    || sim.ungrounded.contains(e)
+                    || sim.held_for_shapes.contains_key(e)
+            })
             .count();
         let pairs = w.narrow_phase.contact_pairs().count();
         let touching = w

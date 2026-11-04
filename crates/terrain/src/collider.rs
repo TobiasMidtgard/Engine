@@ -273,7 +273,7 @@ pub fn update_colliders(
             let fwd = up.cross(side);
             // Its height above the ground (one coarse sample; ridges finer than 10 m don't
             // matter at the clearance).
-            let clearance = (local - base).dot(up) - t.source.sample(base, up, dir, 10.0).height;
+            let clearance = (local - base).dot(up) - t.source.ground_height(base, up, dir, 10.0);
             let descent = (-v.dot(up)).max(0.0);
             if clearance < UNDERFOOT_CLEARANCE_M + descent
                 && let Some(k) = t.source.map.node_at(local, level)
