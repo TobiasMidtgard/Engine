@@ -49,6 +49,23 @@ impl GroundTerrain {
         let inv = self.rotation.inverse();
         let local = inv * (p - self.position);
         let (dir, up, base) = self.source.map.locate(local)?;
+        if let Some(o) = &self.surface_override {
+            // The override names the ground, so the column needs only its height: the full
+            // sample's moisture, temperature and hand-made paint feed only the palette, and
+            // on the showcase's painted ground they cost more than the height and normal
+            // together (foot IK and particle effects ask this every frame).
+            let height = self.source.ground_height(base, up, dir, 0.0);
+            let point_local = base + up * height;
+            let under_sea = height < 0.0 && self.source.shape.ocean;
+            if !under_sea && !self.edit_painted(base, up, dir, point_local) {
+                let world_point = self.position + self.rotation * point_local;
+                if let Some(g) = o.0.sample(world_point + self.rotation * up * 0.5) {
+                    let n = self.local_normal(base, up, point_local, 0.5, 0.0);
+                    let world_normal = (self.rotation * n).as_vec3();
+                    return Some((world_point, world_normal, g.surface, height));
+                }
+            }
+        }
         // Solid ground, also under the sea (the sea itself is the water module's `Water`).
         let s = self.source.sample(base, up, dir, 0.0);
         let point_local = base + up * s.height;
@@ -62,13 +79,18 @@ impl GroundTerrain {
         // (a dug pit or a mud splash is newer than the landscape's materials).
         if let Some(o) = &self.surface_override
             && !under_sea
-            && !(self.source.edits.touches(point_local, 0.5)
-                && self.source.edit_paint(base, up, dir).1 > 0.5)
+            && !self.edit_painted(base, up, dir, point_local)
             && let Some(g) = o.0.sample(world_point + self.rotation * up * 0.5)
         {
             surface = g.surface;
         }
         Some((world_point, world_normal, surface, s.height))
+    }
+
+    /// An edit painted a layer at the surface point over `base` (newer than the landscape's
+    /// materials, so it wins over a [`GroundSurface`] override).
+    fn edit_painted(&self, base: DVec3, up: DVec3, dir: DVec3, point_local: DVec3) -> bool {
+        self.source.edits.touches(point_local, 0.5) && self.source.edit_paint(base, up, dir).1 > 0.5
     }
 
     /// World point of the surface along the local vertical through `p`: what [`Self::surface`]
