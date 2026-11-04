@@ -68,8 +68,10 @@ impl Schedule {
         self.queue.len() as u32
     }
 
-    /// Plan `per_frame` traces for `grid`, which was `old` last frame.
-    pub fn plan(&mut self, old: Option<Grid>, grid: Grid, per_frame: u32) -> Plan {
+    /// Plan `per_frame` traces for `grid`, which was `old` last frame. `queue` false is the old
+    /// way, to compare (`ENGINE_GI_SCROLL_QUEUE=off`): more probes scrolled in than the budget
+    /// start every probe over, relit in storage order.
+    pub fn plan(&mut self, old: Option<Grid>, grid: Grid, per_frame: u32, queue: bool) -> Plan {
         self.frame += 1;
         let count = grid.count();
         let per_frame = per_frame.clamp(1, count) as usize;
@@ -96,7 +98,12 @@ impl Schedule {
                         }
                     }
                     plan.scrolled_in = scrolled.len() as u32;
-                    if scrolled.len() as u32 > count / 2 {
+                    if !queue && scrolled.len() > per_frame {
+                        scrolled.clear();
+                        self.restart();
+                        self.queue.clear();
+                        self.queued.fill(false);
+                    } else if scrolled.len() as u32 > count / 2 {
                         scrolled.clear();
                         self.reset(grid);
                     } else {
@@ -117,7 +124,7 @@ impl Schedule {
 
         // The queue first: all the budget while much of the grid waits, else three quarters,
         // so the probes already lit keep following the scene.
-        let share = if self.queue.len() > count as usize / 4 {
+        let share = if !queue || self.queue.len() > count as usize / 4 {
             per_frame
         } else {
             (per_frame * 3 / 4).max(1)
@@ -153,11 +160,7 @@ impl Schedule {
 
     /// Every probe starts over: a new epoch, and all of them queued nearest the center first.
     fn reset(&mut self, grid: Grid) {
-        self.epoch += 1;
-        if self.epoch >= 2048 {
-            self.epoch = 1;
-        }
-        self.resets += 1;
+        self.restart();
         if self.nearest.0 != grid.dims {
             self.nearest = (grid.dims, nearest_first(grid.dims));
         }
@@ -174,6 +177,17 @@ impl Schedule {
             self.queued[s as usize] = true;
             self.queue.push_back(s);
         }
+    }
+}
+
+impl Schedule {
+    /// A new epoch: every probe's history is void.
+    fn restart(&mut self) {
+        self.epoch += 1;
+        if self.epoch >= 2048 {
+            self.epoch = 1;
+        }
+        self.resets += 1;
     }
 }
 
@@ -217,7 +231,7 @@ mod tests {
         let mut s = Schedule::new();
         let a = grid(IVec3::ZERO);
         // The first frame is a reset: every probe queued, nearest the center first.
-        let first = s.plan(None, a, 16);
+        let first = s.plan(None, a, 16, true);
         assert_eq!((s.epoch, s.resets), (2, 1));
         assert_eq!(first.traced.len(), 16);
         let center = a.dims.as_vec3() * 0.5 - 0.5;
@@ -230,12 +244,12 @@ mod tests {
         assert!(first.traced.iter().all(|&t| far(t) < 1.8), "nearest first");
         // Drain it.
         while s.pending() > 0 {
-            assert_distinct(&s.plan(Some(a), a, 16));
+            assert_distinct(&s.plan(Some(a), a, 16, true));
         }
 
         // A step along x brings in one plane (4 x 8 = 32 probes), over a budget of 16.
         let b = grid(IVec3::X);
-        let step = s.plan(Some(a), b, 16);
+        let step = s.plan(Some(a), b, 16, true);
         assert_eq!((s.epoch, s.resets), (2, 1), "no reset for a step");
         assert_eq!(step.scrolled_in, 32);
         // Three quarters of the budget go to the queue, the rest round robin.
@@ -253,7 +267,7 @@ mod tests {
         // Standing still, the queue drains and every one of them is traced once.
         let mut traced: Vec<u32> = step.traced[..12].to_vec();
         while s.pending() > 0 {
-            let p = s.plan(Some(b), b, 16);
+            let p = s.plan(Some(b), b, 16, true);
             assert!(p.cleared.is_empty());
             assert_distinct(&p);
             traced.extend(p.traced.iter().filter(|t| plane.contains(t)));
@@ -268,10 +282,10 @@ mod tests {
     fn a_jump_starts_every_probe_over_nearest_first() {
         let mut s = Schedule::new();
         let a = grid(IVec3::ZERO);
-        s.plan(None, a, 64);
+        s.plan(None, a, 64, true);
         // Half the box along x: more than half the grid is new.
         let b = grid(IVec3::new(5, 0, 0));
-        let p = s.plan(Some(a), b, 64);
+        let p = s.plan(Some(a), b, 64, true);
         assert_eq!((s.epoch, s.resets), (3, 2));
         assert!(p.cleared.is_empty(), "the new epoch voids them all");
         assert_eq!(p.traced.len(), 64);
@@ -287,13 +301,13 @@ mod tests {
     fn steps_faster_than_the_queue_drains_keep_each_slot_queued_once() {
         let mut s = Schedule::new();
         let mut old = grid(IVec3::ZERO);
-        s.plan(None, old, 256);
+        s.plan(None, old, 256, true);
         while s.pending() > 0 {
-            s.plan(Some(old), old, 256);
+            s.plan(Some(old), old, 256, true);
         }
         for i in 1..=3 {
             let g = grid(IVec3::new(i, 0, 0));
-            let p = s.plan(Some(old), g, 8);
+            let p = s.plan(Some(old), g, 8, true);
             assert_distinct(&p);
             old = g;
         }
@@ -305,5 +319,19 @@ mod tests {
         queue.sort_unstable();
         queue.dedup();
         assert_eq!(queue.len() as u32, s.pending());
+    }
+
+    #[test]
+    fn without_the_queue_a_step_over_the_budget_starts_every_probe_over() {
+        let mut s = Schedule::new();
+        let a = grid(IVec3::ZERO);
+        s.plan(None, a, 256, false);
+        let p = s.plan(Some(a), grid(IVec3::X), 16, false);
+        assert_eq!((s.epoch, s.resets), (3, 2));
+        assert_eq!(s.pending(), 0);
+        assert!(p.cleared.is_empty());
+        // Within the budget the plane is traced that frame, as before.
+        let p = s.plan(Some(grid(IVec3::X)), grid(IVec3::new(2, 0, 0)), 64, false);
+        assert_eq!((s.resets, p.traced.len(), s.pending()), (2, 64, 0));
     }
 }

@@ -1256,7 +1256,14 @@ impl ProbeGi {
 
         // Probes that scrolled in go first, then the rest in turn; those that scrolled in and
         // wait are cleared after them.
-        let plan = self.schedule.plan(self.grid, grid, per_frame);
+        static QUEUE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        let queue = *QUEUE.get_or_init(|| {
+            !matches!(
+                std::env::var("ENGINE_GI_SCROLL_QUEUE").as_deref(),
+                Ok("off" | "0")
+            )
+        });
+        let plan = self.schedule.plan(self.grid, grid, per_frame, queue);
         self.grid = Some(grid);
         let traced = plan.traced.len() as u32;
         let cleared = plan.cleared.len() as u32;
