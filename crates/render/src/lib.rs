@@ -122,7 +122,8 @@ pub use cloud_shadows::{
 pub use components::{
     AmbientLight, BoxFace, Camera, DirectionalLight, DitherFade, Exposure, ExtraView, FogShape,
     FogVolume, MaterialRef, MaxDrawDistance, MeshRef, MeshRenderer, NoMeshLod, NoVirtualGeometry,
-    PointLight, Projection, ResolvedMesh, ShadowOnly, SkyLightVolume, ViewTarget, Viewport,
+    PointLight, Projection, ResolvedMesh, ShadowOnly, ShadowTexelRange, SkyLightVolume, ViewTarget,
+    Viewport,
 };
 pub use depth_of_field::DepthOfField;
 pub use features::{
@@ -176,11 +177,11 @@ pub mod prelude {
         GrassField, GrassStyle, Image, MaterialPreset, MaterialRef, MaxDrawDistance, Mesh, MeshRef,
         MeshRenderer, MotionBlur, NoMeshLod, NoVirtualGeometry, Parallax, PixelPerfect, PixelSnap,
         PointLight, Portal, Projection, RenderAppExt, RenderFeature, RenderPhase, RenderPlugin,
-        RenderSettings, Screenshots, ShadowOnly, Shape, SkyLightVolume, Sprite, SpriteAlpha,
-        SpriteAnimation, SpriteAnimationMode, SpriteAtlas, SpriteFilter, StandardMaterial,
-        StoneKind, TextureCompression, TextureMapping, TileMap, TileSource, Tonemapper, ViewTarget,
-        Viewport, VirtualTextures, VolumetricQuality, WallStone, spawn_gltf_scene,
-        spawn_gltf_scene_deferred,
+        RenderSettings, Screenshots, ShadowOnly, ShadowTexelRange, Shape, SkyLightVolume, Sprite,
+        SpriteAlpha, SpriteAnimation, SpriteAnimationMode, SpriteAtlas, SpriteFilter,
+        StandardMaterial, StoneKind, TextureCompression, TextureMapping, TileMap, TileSource,
+        Tonemapper, ViewTarget, Viewport, VirtualTextures, VolumetricQuality, WallStone,
+        spawn_gltf_scene, spawn_gltf_scene_deferred,
     };
 }
 
@@ -248,6 +249,9 @@ impl Plugin for RenderPlugin {
             )
             .register_component::<ShadowOnly>(
                 "Marker: draws this entity's MeshRenderer into shadow maps only, never in a view: a cheap stand-in caster for a detailed mesh that casts no shadow itself.",
+            )
+            .register_component::<ShadowTexelRange>(
+                "Which of the sun's shadow maps this entity's MeshRenderer casts into, by their texel size in meters: only those with min <= texel < max (cascades, far shadow map, sky occlusion; the view is unaffected). A detailed caster with max = t and a ShadowOnly stand-in with min = t cast once in each map (a tree's full crown near, its far crown cards in the far cascades).",
             )
             .register_component::<DitherFade>(
                 "Fades this entity's MeshRenderer out with a stable screen dither, for levels of detail a game swaps itself: 0 drawn, 1 gone; a negative value hides that share with the opposite pattern, so DitherFade(t) on the old mesh and DitherFade(-(1 - t)) on the new one cover every pixel once. Casts its shadow while at least half shows.",
