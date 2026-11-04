@@ -6,7 +6,7 @@
 use engine_core::math::{Quat, Vec3};
 use engine_core::prelude::*;
 use engine_world::SurfaceId;
-use engine_world::physics::{ColliderShape, CollisionLayers, JointKind, JointMotor};
+use engine_world::physics::{Collider, ColliderShape, CollisionLayers, JointKind, JointMotor};
 use rapier3d::parry::shape::{HeightFieldFlags, TriMeshFlags};
 use rapier3d::parry::utils::Array2;
 use rapier3d::prelude::*;
@@ -376,6 +376,127 @@ mod tests {
     use super::*;
 
     #[test]
+    fn big_meshes_of_the_same_points_and_scale_share_one_shape() {
+        let n = 30u32;
+        let mut vertices = Vec::new();
+        let mut indices = Vec::new();
+        for z in 0..=n {
+            for x in 0..=n {
+                vertices.push(Vec3::new(x as f32, (x * z) as f32 * 0.001, z as f32));
+            }
+        }
+        for z in 0..n {
+            for x in 0..n {
+                let i = z * (n + 1) + x;
+                indices.push([i, i + n + 1, i + 1]);
+            }
+        }
+        let mesh = ColliderShape::TriMesh {
+            vertices: vertices.into(),
+            indices: indices.into(),
+        };
+        let a = shape_cached(&mesh, Vec3::ONE).unwrap();
+        let b = shape_cached(&mesh, Vec3::ONE).unwrap();
+        let scaled = shape_cached(&mesh, Vec3::splat(2.0)).unwrap();
+        assert!(
+            std::sync::Arc::ptr_eq(&a.0, &b.0),
+            "the same mesh was built twice"
+        );
+        assert!(
+            !std::sync::Arc::ptr_eq(&a.0, &scaled.0),
+            "another scale shared the shape"
+        );
+        let small = ColliderShape::ConvexHull {
+            points: vec![Vec3::ZERO, Vec3::X, Vec3::Y, Vec3::Z].into(),
+        };
+        let (c, d) = (
+            shape_cached(&small, Vec3::ONE).unwrap(),
+            shape_cached(&small, Vec3::ONE).unwrap(),
+        );
+        assert!(
+            !std::sync::Arc::ptr_eq(&c.0, &d.0),
+            "small shapes aren't cached"
+        );
+    }
+
+    #[test]
+    fn a_hull_scaled_from_its_unscaled_hull_is_the_hull_of_the_scaled_points() {
+        let rock: Vec<Vec3> = (0..120)
+            .map(|k| {
+                let (a, b) = (k as f32 * 2.399_963, (k as f32 + 0.5) / 120.0);
+                let y = 1.0 - 2.0 * b;
+                let r = (1.0 - y * y).sqrt();
+                Vec3::new(a.cos() * r, y, a.sin() * r) * (0.8 + 0.2 * (k as f32 * 7.3).sin())
+            })
+            .collect();
+        for scale in [Vec3::new(0.4, 0.3, 0.37), Vec3::new(-0.5, 0.3, 0.6)] {
+            let desc = ColliderShape::ConvexHull {
+                points: rock.clone().into(),
+            };
+            let fast = hull_scaled(&desc, scale).unwrap();
+            let pts: Vec<Vec3> = rock.iter().map(|p| *p * scale).collect();
+            let slow = SharedShape::convex_hull(&pts).unwrap();
+            for k in 0..200 {
+                let (a, b) = (k as f32 * 0.731, k as f32 * 1.917);
+                let p = Vec3::new(a.cos() * b.sin(), b.cos(), a.sin() * b.sin()) * 0.45;
+                let pose = Pose::IDENTITY;
+                assert_eq!(
+                    fast.contains_point(&pose, p),
+                    slow.contains_point(&pose, p),
+                    "{p} at scale {scale}"
+                );
+                // Normals point out: a ray from outside toward the center meets the surface.
+                let from = p.normalize_or(Vec3::Y) * 2.0;
+                let ray = rapier3d::prelude::Ray::new(from, -from.normalize());
+                let (hit_fast, hit_slow) = (
+                    fast.cast_ray_and_get_normal(&pose, &ray, 10.0, true)
+                        .unwrap(),
+                    slow.cast_ray_and_get_normal(&pose, &ray, 10.0, true)
+                        .unwrap(),
+                );
+                assert!((hit_fast.time_of_impact - hit_slow.time_of_impact).abs() < 1e-4);
+                assert!(hit_fast.normal.dot(hit_slow.normal) > 0.999, "{scale}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_cache_forgets_only_shapes_nothing_uses() {
+        let hull = |i: usize| ColliderShape::ConvexHull {
+            points: (0..CACHE_MAX_POINTS / 4)
+                .map(|k| {
+                    let a = k as f32 * 0.37 + i as f32;
+                    Vec3::new(a.cos(), (k % 7) as f32 * 0.1, a.sin())
+                })
+                .collect(),
+        };
+        let (kept, dropped) = (hull(101), hull(102));
+        let held = shape_cached(&kept, Vec3::ONE).unwrap();
+        drop(shape_cached(&dropped, Vec3::ONE));
+        // Fill well past the cap with shapes nothing holds.
+        for i in 0..6 {
+            drop(shape_cached(&hull(200 + i), Vec3::ONE));
+        }
+        let again = shape_cached(&kept, Vec3::ONE).unwrap();
+        assert!(
+            std::sync::Arc::ptr_eq(&held.0, &again.0),
+            "a shape in use was forgotten"
+        );
+        let c = cache().lock();
+        assert!(!c.shapes.contains_key(&shape_key(&dropped, Vec3::ONE)));
+        let idle: usize = c
+            .shapes
+            .values()
+            .filter(|(s, _)| std::sync::Arc::strong_count(&s.0) == 1)
+            .map(|(_, p)| *p)
+            .sum();
+        assert!(
+            idle <= CACHE_MAX_POINTS,
+            "{idle} points of unused shapes kept"
+        );
+    }
+
+    #[test]
     fn damping_matches_fraction_lost_per_second() {
         // Losing half the speed in a second: v(1) = e^-c = 0.5.
         let c = damping(0.5);
@@ -440,4 +561,217 @@ mod tests {
         assert!(height_at(0.95) > 4.0, "{}", height_at(0.95));
         assert!(height_at(-0.95) < 0.1, "{}", height_at(-0.95));
     }
+}
+
+/// `desc` without its shape, for what keeps a collider's settings beside its built shape (the
+/// simulation's entries, a job's): a big mesh's points copied for each cost as much as
+/// building it.
+pub(crate) fn shapeless(desc: &Collider) -> Collider {
+    Collider {
+        shape: ColliderShape::default(),
+        surface: desc.surface,
+        density: desc.density,
+        sensor: desc.sensor,
+        layers: desc.layers,
+    }
+}
+
+/// Shapes of this many points or more are kept in [`shape_cached`]'s cache: hashing one costs
+/// about a microsecond per 100 points, building it 50-500 (a debris hull of 176 points took
+/// 0.5 ms, and a zone's 302 of them 155 ms in one sync on the VM).
+const CACHE_MIN_POINTS: usize = 64;
+/// Points of shapes no collider uses the cache keeps at most (about 30 MB of meshes); the
+/// oldest go first. Shapes in use cost nothing to keep (their colliders hold them anyway), so
+/// they stay, and a zone streaming back in finds its shapes.
+const CACHE_MAX_POINTS: usize = if cfg!(test) { 4_000 } else { 500_000 };
+
+/// The points a shape is built from, if it is cached ([`CACHE_MIN_POINTS`]).
+fn cache_points(shape: &ColliderShape) -> usize {
+    match shape {
+        ColliderShape::TriMesh { vertices, .. } => vertices.len(),
+        ColliderShape::ConvexHull { points } => points.len(),
+        ColliderShape::Compound(parts) => parts.iter().map(|(_, _, s)| cache_points(s)).sum(),
+        _ => 0,
+    }
+}
+
+/// A 64-bit hash of a shape and its scale (vertex bits, indices, offsets).
+fn shape_key(shape: &ColliderShape, scale: Vec3) -> u64 {
+    // FNV-1a over 32-bit words, finished with a 64-bit mix: fast enough to hash a 40,000
+    // vertex mesh in well under a millisecond.
+    struct H(u64);
+    impl H {
+        fn word(&mut self, w: u32) {
+            self.0 = (self.0 ^ w as u64).wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        fn vec(&mut self, v: Vec3) {
+            self.word(v.x.to_bits());
+            self.word(v.y.to_bits());
+            self.word(v.z.to_bits());
+        }
+    }
+    fn go(h: &mut H, shape: &ColliderShape) {
+        match shape {
+            ColliderShape::TriMesh { vertices, indices } => {
+                h.word(1);
+                h.word(vertices.len() as u32);
+                vertices.iter().for_each(|v| h.vec(*v));
+                for t in indices.iter() {
+                    t.iter().for_each(|i| h.word(*i));
+                }
+            }
+            ColliderShape::ConvexHull { points } => {
+                h.word(2);
+                h.word(points.len() as u32);
+                points.iter().for_each(|v| h.vec(*v));
+            }
+            ColliderShape::Compound(parts) => {
+                h.word(3);
+                h.word(parts.len() as u32);
+                for (offset, rotation, part) in parts {
+                    h.vec(*offset);
+                    for c in rotation.to_array() {
+                        h.word(c.to_bits());
+                    }
+                    go(h, part);
+                }
+            }
+            other => {
+                // (Primitives are never cached; hash their debug form to stay total.)
+                for b in format!("{other:?}").bytes() {
+                    h.word(b as u32);
+                }
+            }
+        }
+    }
+    let mut h = H(0xcbf2_9ce4_8422_2325);
+    h.vec(scale);
+    go(&mut h, shape);
+    let mut x = h.0;
+    x ^= x >> 33;
+    x = x.wrapping_mul(0xff51_afd7_ed55_8ccd);
+    x ^= x >> 33;
+    x
+}
+
+#[derive(Default)]
+struct ShapeCache {
+    shapes: std::collections::HashMap<u64, (SharedShape, usize)>,
+    order: std::collections::VecDeque<u64>,
+    points: usize,
+}
+
+impl ShapeCache {
+    /// Forget the oldest shapes no collider uses until those left unused hold at most
+    /// three quarters of [`CACHE_MAX_POINTS`] (so a sweep isn't needed on every insert).
+    fn evict(&mut self) {
+        // (The cache's own handle is the only one of a shape nothing uses.)
+        let unused = |s: &SharedShape| std::sync::Arc::strong_count(&s.0) == 1;
+        let mut idle: usize = self
+            .shapes
+            .values()
+            .filter(|(s, _)| unused(s))
+            .map(|(_, p)| *p)
+            .sum();
+        let goal = CACHE_MAX_POINTS * 3 / 4;
+        let shapes = &mut self.shapes;
+        let mut freed = 0;
+        self.order.retain(|k| {
+            if idle <= goal {
+                return true;
+            }
+            match shapes.get(k) {
+                Some((s, p)) if unused(s) => {
+                    idle -= p;
+                    freed += p;
+                    shapes.remove(k);
+                    false
+                }
+                Some(_) => true,
+                None => false,
+            }
+        });
+        self.points -= freed;
+    }
+}
+
+fn cache() -> &'static parking_lot::Mutex<ShapeCache> {
+    static CACHE: std::sync::OnceLock<parking_lot::Mutex<ShapeCache>> = std::sync::OnceLock::new();
+    CACHE.get_or_init(Default::default)
+}
+
+/// A hull of `points` at `scale`, from the hull of the unscaled points worked out once: rocks
+/// are a few shapes each scaled its own way (the rockfall's 300 are 8), and scaling a hull is
+/// a quarter of the cost of finding it. (Parry's `ConvexPolyhedron::scaled` turns face normals
+/// by the scale, not its inverse, wrong for a scale that isn't uniform, so the scaled points
+/// are joined again by the unscaled hull's triangles.)
+fn hull_scaled(hull_desc: &ColliderShape, scale: Vec3) -> Option<SharedShape> {
+    let ColliderShape::ConvexHull { points } = hull_desc else {
+        return None;
+    };
+    type Hull = std::sync::Arc<(Vec<Vec3>, Vec<[u32; 3]>)>;
+    static HULLS: std::sync::OnceLock<parking_lot::Mutex<std::collections::HashMap<u64, Hull>>> =
+        std::sync::OnceLock::new();
+    /// Hulls kept at most (a few MB); all are forgotten when there are more.
+    const MAX_HULLS: usize = 4096;
+    if scale.min_element().abs() < 1e-6 || !scale.is_finite() {
+        return None;
+    }
+    let key = shape_key(hull_desc, Vec3::ONE);
+    let hulls = HULLS.get_or_init(Default::default);
+    let found = hulls.lock().get(&key).cloned();
+    let hull = match found {
+        Some(h) => h,
+        None => {
+            let (vertices, indices) =
+                rapier3d::parry::transformation::try_convex_hull(points).ok()?;
+            let h: Hull = std::sync::Arc::new((vertices, indices));
+            let mut map = hulls.lock();
+            if map.len() >= MAX_HULLS {
+                map.clear();
+            }
+            map.insert(key, h.clone());
+            h
+        }
+    };
+    let (vertices, indices) = &*hull;
+    let scaled: Vec<Vec3> = vertices.iter().map(|p| *p * scale).collect();
+    // A mirroring scale turns the triangles inside out: wind them back.
+    if scale.x * scale.y * scale.z < 0.0 {
+        let flipped: Vec<[u32; 3]> = indices.iter().map(|t| [t[0], t[2], t[1]]).collect();
+        SharedShape::convex_mesh(scaled, &flipped)
+    } else {
+        SharedShape::convex_mesh(scaled, indices)
+    }
+}
+
+/// [`shape`], with big meshes, hulls and compounds shared: the same mesh at the same scale is
+/// built once (a zone's jetty each time the zone streams back in, a building's repeated walls).
+/// Parry shapes are immutable, so colliders can share one, as Jolt and PhysX share a mesh
+/// between the bodies that use it.
+pub fn shape_cached(shape_desc: &ColliderShape, scale: Vec3) -> Option<SharedShape> {
+    let points = cache_points(shape_desc);
+    if points < CACHE_MIN_POINTS {
+        return shape(shape_desc, scale);
+    }
+    let key = shape_key(shape_desc, scale);
+    if let Some((s, _)) = cache().lock().shapes.get(&key) {
+        return Some(s.clone());
+    }
+    let built = match shape_desc {
+        ColliderShape::ConvexHull { .. } => {
+            hull_scaled(shape_desc, scale).or_else(|| shape(shape_desc, scale))
+        }
+        _ => shape(shape_desc, scale),
+    }?;
+    let mut c = cache().lock();
+    if !c.shapes.contains_key(&key) && points <= CACHE_MAX_POINTS {
+        c.shapes.insert(key, (built.clone(), points));
+        c.order.push_back(key);
+        c.points += points;
+        if c.points > CACHE_MAX_POINTS {
+            c.evict();
+        }
+    }
+    Some(built)
 }

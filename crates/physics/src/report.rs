@@ -269,7 +269,11 @@ pub(crate) fn step_done(world: &World, sim: &Simulation, foci: &[DVec3], started
             .active_bodies()
             .filter_map(|h| w.bodies.get(h))
             .map(|rb| crate::convert::entity_of(rb.user_data))
-            .filter(|e| sim.resting.contains(e) || sim.ungrounded.contains(e))
+            .filter(|e| {
+                sim.resting.contains(e)
+                    || sim.ungrounded.contains(e)
+                    || sim.held_for_shapes.contains_key(e)
+            })
             .count();
         let pairs = w.narrow_phase.contact_pairs().count();
         let touching = w

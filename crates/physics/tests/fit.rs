@@ -111,3 +111,74 @@ fn a_moving_model_gets_convex_parts_not_triangles() {
         "{shape:?}"
     );
 }
+
+/// The collider audit (`engine_physics::audit`) lists a drawn rock or box with no collider on the
+/// ground, not one with its own collider, nor a pebble too small to matter, nor a sail whose
+/// mast has a collider of its own, nor a hall whose roof collides, nor one far from the player.
+#[test]
+fn the_collider_audit_lists_drawn_rocks_nothing_collides_with() {
+    let mut app = app();
+    let rock = app
+        .world
+        .resource_mut::<Assets<Mesh>>()
+        .add(engine_render::mesh::cuboid(Vec3::ONE));
+    let drawn = |app: &mut App, at: Vec3, scale: f32, name: &'static str| {
+        app.world
+            .spawn((
+                Name::new(name),
+                Transform::from_translation(at.as_dvec3()).with_scale(Vec3::splat(scale)),
+                MeshRenderer::new(rock, engine_render::MaterialRef::default()),
+            ))
+            .id()
+    };
+    // The ground: a slab with its top at y = 0.
+    app.world.spawn((
+        Transform::from_xyz(0.0, -0.5, 0.0),
+        RigidBody::fixed(),
+        Collider::cuboid(Vec3::new(20.0, 0.5, 20.0)),
+    ));
+    drawn(&mut app, Vec3::new(-3.0, 0.5, 0.0), 1.0, "bare rock");
+    let solid = drawn(&mut app, Vec3::new(3.0, 0.5, 0.0), 1.0, "solid rock");
+    app.world
+        .entity_mut(solid)
+        .insert((RigidBody::fixed(), Collider::cuboid(Vec3::splat(0.5))));
+    drawn(&mut app, Vec3::new(0.0, 0.1, 3.0), 0.2, "pebble");
+    // A drawn sail on a mast whose collider is only a pole, on purpose.
+    let mast = app
+        .world
+        .spawn((
+            Transform::from_xyz(0.0, 0.0, -3.0),
+            RigidBody::fixed(),
+            Collider::cuboid(Vec3::new(0.05, 2.0, 0.05)),
+        ))
+        .id();
+    let sail = drawn(&mut app, Vec3::new(0.0, 2.0, -3.0), 1.5, "sail");
+    app.world.entity_mut(sail).insert(ChildOf(mast));
+    // A hall: drawn as one mesh, colliding through a roof of its own (hollow inside).
+    drawn(&mut app, Vec3::new(0.0, 3.0, 12.0), 6.0, "hall");
+    app.world.spawn((
+        Transform::from_xyz(0.0, 5.9, 12.0),
+        RigidBody::fixed(),
+        Collider::cuboid(Vec3::new(3.0, 0.1, 3.0)),
+    ));
+    // A box drawn as a built-in shape, with nothing to collide with.
+    app.world.spawn((
+        Name::new("shape box"),
+        Transform::from_xyz(-6.0, 0.5, 0.0),
+        MeshRenderer::new(
+            engine_render::mesh::Shape::Cuboid { size: [1.0; 3] },
+            engine_render::MaterialRef::default(),
+        ),
+    ));
+    // Far from the player: scenery there gets its collider only once someone comes near.
+    drawn(&mut app, Vec3::new(100.0, 0.5, 0.0), 1.0, "far rock");
+    app.world.spawn((
+        Transform::from_xyz(0.0, 1.0, 0.0),
+        engine_world::physics::CharacterController::default(),
+    ));
+    app.update_n(3);
+    let found = engine_physics::audit::uncovered_meshes(&app.world);
+    let names: Vec<&str> = found.iter().map(|u| u.item.as_str()).collect();
+    assert_eq!(names, ["bare rock", "shape box"], "{found:?}");
+    assert!((found[0].size - 1.0).abs() < 1e-3);
+}
