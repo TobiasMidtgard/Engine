@@ -35,8 +35,11 @@ struct Totals {
     /// Pieces of those parts, by name: their sum and their worst step, ms ([`piece_ms`]).
     pieces: Vec<(&'static str, f64, f64)>,
     /// Bodies that made a region's substep sweep for fast motion (CCD), and why: their count.
-    sweepers: HashMap<(Entity, &'static str, Option<Entity>), usize>,
+    sweepers: HashMap<Sweeper, usize>,
 }
+
+/// A body that set off a sweep, why, and what was in its path.
+type Sweeper = (Entity, &'static str, Option<Entity>);
 
 fn totals() -> &'static Mutex<Totals> {
     static T: OnceLock<Mutex<Totals>> = OnceLock::new();
@@ -269,7 +272,7 @@ pub(crate) fn step_done(world: &World, sim: &Simulation, foci: &[DVec3], started
         );
     }
     if !t.sweepers.is_empty() {
-        let mut by: Vec<(&(Entity, &str, Option<Entity>), &usize)> = t.sweepers.iter().collect();
+        let mut by: Vec<(&Sweeper, &usize)> = t.sweepers.iter().collect();
         by.sort_by(|a, b| b.1.cmp(a.1));
         let total: usize = by.iter().map(|(_, n)| **n).sum();
         let shown: Vec<String> = by
