@@ -402,9 +402,18 @@ fn a_crate_with_no_ground_loaded_under_it_waits_for_it() {
         .single(&app.world)
         .unwrap();
     app.world.get_mut::<Transform>(focus).unwrap().translation = DVec3::new(300.0, 2.0, 0.0);
-    app.update_n(90);
-    assert_eq!(stats(&app).ungrounded, 0);
-    assert!(position(&app, crate_).y < 0.0, "the crate was never let go");
+    // (Each held body looks again on steps of its own: let go within a look's steps, it
+    // falls, and may be held again under the ground before these frames are over.)
+    let mut let_go = false;
+    for _ in 0..90 {
+        app.update();
+        let_go |= stats(&app).ungrounded == 0 && position(&app, crate_).y < y - 0.1;
+    }
+    assert!(let_go, "the crate was never let go");
+    assert!(
+        position(&app, crate_).y < 0.0,
+        "the crate didn't fall when let go"
+    );
     // Under the ground, out of the world, it is held again, though the focus is near (as
     // Unreal's kill height stops what falls out of the level).
     app.update_n(120);

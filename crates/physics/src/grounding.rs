@@ -41,8 +41,32 @@ const BELOW_M: f64 = 50.0;
 const UNDER_M: f64 = 3.0;
 /// The ground is asked for from this high above a body (the first surface below is returned).
 const GROUND_PROBE_M: f64 = 2000.0;
+/// Steps between two looks at a body falling past the simulation range (each on steps of its
+/// own): falling 25 m/s, it drops 1.7 m in between, well inside [`ABOVE_M`].
+const FAR_EVERY: u32 = 4;
 
 /// Is there a fixed or kinematic collider within [`PROBE_M`] below `local`?
+/// The world `Ground`'s height under `p` (the first surface below it). A slow answer is
+/// logged when a report is wanted: most take microseconds, but one now and then took 5-9 ms
+/// of a step (round 13 on the VM, the CPU busy throughout).
+pub(crate) fn height(ground: &engine_world::Ground, p: DVec3) -> Option<f64> {
+    if !crate::report::wanted() {
+        return ground.height(p);
+    }
+    let started = std::time::Instant::now();
+    let h = ground.height(p);
+    let ms = started.elapsed().as_secs_f64() * 1000.0;
+    if ms > 1.0 {
+        engine_core::log::info!(
+            "physics: the ground took {ms:.1} ms for its height at ({:.0} {:.0} {:.0})",
+            p.x,
+            p.y,
+            p.z
+        );
+    }
+    h
+}
+
 fn floor_below(r: &Region, local: Vec3) -> bool {
     let down = r.world.gravity.normalize_or(Vec3::NEG_Y);
     let ray = Ray::new(local, down);
@@ -61,10 +85,20 @@ pub(crate) fn hold_ungrounded(sim: &mut Simulation, foci: &[DVec3]) {
         return;
     }
     let near = |p: DVec3| foci.iter().any(|f| f.distance(p) <= range.active_m);
-    let look = sim.lod_clock.is_multiple_of(crate::lod::LOD_EVERY);
+    // Each body is looked at on steps of its own, not all on the same step: a collapse's
+    // hundreds of falling pieces asked the ground for its height all at once, 9 ms of one step
+    // (round 13 on the VM; the ground's height walks roads, streams and cliffs).
+    let clock = sim.lod_clock;
+    let turn = |e: Entity, every: u32| (e.index_u32().wrapping_add(clock)).is_multiple_of(every);
+    let mut asked = 0usize;
     // Let go.
-    if !sim.ungrounded.is_empty() && look {
-        let held: Vec<Entity> = sim.ungrounded.iter().copied().collect();
+    if !sim.ungrounded.is_empty() {
+        let held: Vec<Entity> = sim
+            .ungrounded
+            .iter()
+            .copied()
+            .filter(|e| turn(*e, crate::lod::LOD_EVERY))
+            .collect();
         for e in held {
             let Some((rid, handle)) = sim.bodies.get(&e).map(|b| (b.region, b.handle)) else {
                 sim.ungrounded.remove(&e);
@@ -77,10 +111,9 @@ pub(crate) fn hold_ungrounded(sim: &mut Simulation, foci: &[DVec3]) {
             };
             let local = rb.translation();
             let at = r.global(local);
-            let under = || {
-                ground
-                    .height(at + DVec3::Y * GROUND_PROBE_M)
-                    .is_some_and(|h| at.y < h - UNDER_M)
+            let mut under = || {
+                asked += 1;
+                height(&ground, at + DVec3::Y * GROUND_PROBE_M).is_some_and(|h| at.y < h - UNDER_M)
             };
             if floor_below(r, local) || (near(at) && !under()) {
                 sim.ungrounded.remove(&e);
@@ -106,20 +139,33 @@ pub(crate) fn hold_ungrounded(sim: &mut Simulation, foci: &[DVec3]) {
         {
             let local = rb.translation();
             let at = r.global(local);
-            // Near a focus only out-of-world falls are looked for, every few steps.
+            // Near a focus only out-of-world falls are looked for, every few steps; past it,
+            // falls onto ground not loaded yet too, every [`FAR_EVERY`] steps.
             let close = near(at);
-            if close && !look {
+            let e = crate::convert::entity_of(rb.user_data);
+            if !turn(
+                e,
+                if close {
+                    crate::lod::LOD_EVERY
+                } else {
+                    FAR_EVERY
+                },
+            ) {
                 continue;
             }
-            let Some(h) = ground.height(at + DVec3::Y * GROUND_PROBE_M) else {
+            asked += 1;
+            let Some(h) = height(&ground, at + DVec3::Y * GROUND_PROBE_M) else {
                 continue;
             };
             let out_of_world = at.y < h - UNDER_M;
             let unloaded = !close && at.y < h + ABOVE_M && at.y > h - BELOW_M;
             if (out_of_world || unloaded) && !floor_below(r, local) {
-                hold.push(crate::convert::entity_of(rb.user_data));
+                hold.push(e);
             }
         }
     }
     sim.ungrounded.extend(hold);
+    if asked > 0 && crate::report::wanted() {
+        crate::report::count("ground heights asked for holds", asked);
+    }
 }
