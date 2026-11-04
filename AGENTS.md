@@ -210,7 +210,8 @@ lighting (8K only for a visible backdrop). JPG or PNG for color, HDR or EXR only
   and a "ran alone" list every report, and once, at frame 30, a "schedule parallelism" list
   of each schedule's exclusive systems and the data most systems fight over. Fix what is
   heavy in "ran alone" first; a cheap system that runs alone costs little.
-  `ENGINE_TRACE=trace.json` (with `ENGINE_TRACE_AT=<s>`, `ENGINE_TRACE_FRAMES=<n>`) records
+  `ENGINE_TRACE=trace.json` (with `ENGINE_TRACE_AT=<s>`, `ENGINE_TRACE_FRAMES=<n>`), or the
+  bridge's `engine.trace {"path", "frames"}` under `--profile`, records
   every span of a few frames for <https://ui.perfetto.dev>, and `scripts/trace-summary.py`
   names what ran alone in which schedule and what each idle gap waited between. So:
   - A `&mut World` system runs with nothing beside it, and the executor can only start it

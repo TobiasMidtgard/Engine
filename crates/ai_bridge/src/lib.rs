@@ -515,6 +515,23 @@ fn register_api(app: &mut App) {
          render.cpu.submit, physics.bodies, ...). `prefix` keeps only metrics starting with it.",
         r#"{"prefix": "render."}"#,
         |world, args| Ok(stats(world, args.get("prefix").and_then(Value::as_str))),
+    )
+    .register_api(
+        "engine.trace",
+        "Record every system and span of the next `frames` frames (default 60) to `path` as a \
+         Chrome trace (ui.perfetto.dev, scripts/trace-summary.py). Needs --profile; the file is \
+         written a moment after the last frame.",
+        r#"{"path": "trace.json", "frames": 60}"#,
+        |_, args| {
+            let path = args
+                .get("path")
+                .and_then(Value::as_str)
+                .filter(|p| !p.is_empty())
+                .ok_or("give a `path`")?;
+            let frames = args.get("frames").and_then(Value::as_u64).unwrap_or(60);
+            engine_core::profile::start_trace(path, frames.min(u32::MAX as u64) as u32)?;
+            Ok(json!({"recording": path, "frames": frames}))
+        },
     );
 }
 
@@ -549,6 +566,17 @@ mod tests {
             });
         app.add_plugins(AiBridgePlugin::default().without_env());
         app
+    }
+
+    #[test]
+    fn traces_need_a_path_and_the_profiler() {
+        let mut app = app();
+        let no_path = call_api(&mut app.world, "engine.trace", json!({}));
+        assert!(no_path.is_err_and(|e| e.contains("path")));
+        if !engine_core::profile::enabled() {
+            let off = call_api(&mut app.world, "engine.trace", json!({"path": "t.json"}));
+            assert!(off.is_err_and(|e| e.contains("--profile")));
+        }
     }
 
     #[test]

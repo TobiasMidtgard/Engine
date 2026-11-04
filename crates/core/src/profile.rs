@@ -365,7 +365,14 @@ where
     }
 }
 
-/// Every span of a few frames, for `ENGINE_TRACE` (see the module docs).
+/// Record every span of the next `frames` frames to `path` as a Chrome trace (what
+/// `ENGINE_TRACE` does at a set time; the bridge's `engine.trace` calls this). Needs the
+/// profiler on, and one trace at a time.
+pub fn start_trace(path: impl Into<std::path::PathBuf>, frames: u32) -> Result<(), String> {
+    trace::start(path.into(), frames)
+}
+
+/// Every span of a few frames, for `ENGINE_TRACE` and [`start_trace`] (see the module docs).
 mod trace {
     use super::*;
 
@@ -375,6 +382,7 @@ mod trace {
         frames: u32,
     }
 
+    /// `ENGINE_TRACE`, `ENGINE_TRACE_AT` and `ENGINE_TRACE_FRAMES`.
     pub(super) fn config() -> Option<&'static Config> {
         static CONFIG: OnceLock<Option<Config>> = OnceLock::new();
         CONFIG
@@ -406,18 +414,46 @@ mod trace {
         dur: Duration,
     }
 
+    /// A trace asked for: where it goes, how many frames, and when it starts (`None`: at the
+    /// end of the next frame).
+    struct Plan {
+        path: std::path::PathBuf,
+        frames: u32,
+        at: Option<Instant>,
+    }
+
     #[derive(Default)]
     struct Capture {
-        first_frame: Option<Instant>,
+        env_read: bool,
+        plan: Option<Plan>,
         /// When each recorded frame ended; the first is when recording started.
         frame_ends: Vec<Instant>,
         events: Vec<Event>,
-        done: bool,
     }
 
     fn capture() -> &'static Mutex<Capture> {
         static CAPTURE: OnceLock<Mutex<Capture>> = OnceLock::new();
         CAPTURE.get_or_init(Default::default)
+    }
+
+    /// Record the next `frames` frames to `path` (see [`super::start_trace`]).
+    pub(super) fn start(path: std::path::PathBuf, frames: u32) -> Result<(), String> {
+        if !enabled() {
+            return Err("the profiler is off: start the game with --profile".into());
+        }
+        let mut capture = capture().lock();
+        if let Some(plan) = &capture.plan {
+            return Err(format!(
+                "a trace to {} is still being recorded",
+                plan.path.display()
+            ));
+        }
+        capture.plan = Some(Plan {
+            path,
+            frames: frames.max(1),
+            at: None,
+        });
+        Ok(())
     }
 
     fn thread_names() -> &'static Mutex<Vec<String>> {
@@ -453,44 +489,55 @@ mod trace {
     }
 
     pub(super) fn frame_done() {
-        let Some(config) = config() else {
-            return;
-        };
         let now = Instant::now();
         let mut capture = capture().lock();
-        if capture.done {
-            return;
+        if !capture.env_read {
+            capture.env_read = true;
+            if let Some(config) = config() {
+                capture.plan = Some(Plan {
+                    path: config.path.clone(),
+                    frames: config.frames,
+                    at: Some(now + config.after),
+                });
+            }
         }
-        let first = *capture.first_frame.get_or_insert(now);
+        let Some((at, frames)) = capture.plan.as_ref().map(|p| (p.at, p.frames)) else {
+            return;
+        };
         if !RECORDING.load(Ordering::Relaxed) {
-            if now.duration_since(first) >= config.after {
+            if at.is_none_or(|at| now >= at) {
                 capture.frame_ends.push(now);
                 RECORDING.store(true, Ordering::Relaxed);
             }
             return;
         }
         capture.frame_ends.push(now);
-        if capture.frame_ends.len() as u32 > config.frames {
-            RECORDING.store(false, Ordering::Relaxed);
-            capture.done = true;
-            let taken = std::mem::take(&mut *capture);
-            drop(capture);
-            let names = thread_names().lock().clone();
-            let path = config.path.clone();
-            // Off the frame: tens of thousands of events take a moment to format.
-            let spawned = std::thread::Builder::new()
-                .name("engine trace writer".into())
-                .spawn(move || match write(&path, &taken, &names) {
-                    Ok(()) => tracing::info!(
-                        "trace of {} frames written to {}",
-                        taken.frame_ends.len() - 1,
-                        path.display()
-                    ),
-                    Err(e) => tracing::warn!("trace not written to {}: {e}", path.display()),
-                });
-            if let Err(e) = spawned {
-                tracing::warn!("trace not written ({e})");
-            }
+        if capture.frame_ends.len() as u32 <= frames {
+            return;
+        }
+        RECORDING.store(false, Ordering::Relaxed);
+        let path = capture.plan.take().map(|p| p.path).unwrap_or_default();
+        let taken = Capture {
+            env_read: true,
+            plan: None,
+            frame_ends: std::mem::take(&mut capture.frame_ends),
+            events: std::mem::take(&mut capture.events),
+        };
+        drop(capture);
+        let names = thread_names().lock().clone();
+        // Off the frame: tens of thousands of events take a moment to format.
+        let spawned = std::thread::Builder::new()
+            .name("engine trace writer".into())
+            .spawn(move || match write(&path, &taken, &names) {
+                Ok(()) => tracing::info!(
+                    "trace of {} frames written to {}",
+                    taken.frame_ends.len() - 1,
+                    path.display()
+                ),
+                Err(e) => tracing::warn!("trace not written to {}: {e}", path.display()),
+            });
+        if let Err(e) = spawned {
+            tracing::warn!("trace not written ({e})");
         }
     }
 
@@ -564,7 +611,8 @@ mod trace {
         names: &[String],
     ) -> std::io::Result<()> {
         let capture = Capture {
-            first_frame: frame_ends.first().copied(),
+            env_read: true,
+            plan: None,
             frame_ends,
             events: events
                 .into_iter()
@@ -575,7 +623,6 @@ mod trace {
                     dur,
                 })
                 .collect(),
-            done: true,
         };
         write(path, &capture, names)
     }
