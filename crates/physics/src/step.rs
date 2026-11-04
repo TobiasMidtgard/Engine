@@ -532,7 +532,7 @@ pub(crate) fn physics_sync(world: &mut World, mut q: Local<Option<StepQueries>>)
     }
     drop((_part, _piece));
     let _part = tracing::info_span!("sync water and holds").entered();
-    let _piece = crate::report::Piece::start("sync: water and holds");
+    let piece = crate::report::Piece::start("sync: water");
     sim.water_clock += 1;
     if sim.water_clock >= WATER_LOOK_EVERY {
         sim.water_clock = 0;
@@ -543,7 +543,11 @@ pub(crate) fn physics_sync(world: &mut World, mut q: Local<Option<StepQueries>>)
         }
     }
 
+    drop(piece);
+    let piece = crate::report::Piece::start("sync: holds: ungrounded");
     crate::grounding::hold_ungrounded(&mut sim, &foci);
+    drop(piece);
+    let _piece = crate::report::Piece::start("sync: holds: resting");
     if !sim.resting.is_empty() || !sim.ungrounded.is_empty() || !sim.weightless.is_empty() {
         hold_resting(&mut sim);
     }
@@ -674,9 +678,7 @@ pub(crate) fn physics_simulate(
         };
         let Some((substeps, sub_dt)) = plan else {
             place_kinematics(&mut sim, rid);
-            let s = &mut *sim;
-            let no_contact = &s.no_contact;
-            let r = s.regions[rid as usize].as_mut().expect("live region");
+            let r = sim.regions[rid as usize].as_mut().expect("live region");
             if r.needs_refresh {
                 let _refresh = tracing::info_span!("refresh resting region").entered();
                 // Only the query tree learns of the changes now (rays and overlaps see the new
@@ -684,29 +686,14 @@ pub(crate) fn physics_simulate(
                 // real step, as it does any change made between steps. What doesn't step
                 // needs no contacts: a zero-length step here walked all of a resting yard's
                 // 40,000 pairs for one fresh collider, 9-19 ms four times a second.
-                // (A dynamic body woken here, one just made or moved in, joins Rapier's active
-                // set only in a step, and the tiers look there for what is travelling: take one
-                // of no length for it, once.)
+                // (A body woken here, one just made or moved in, joins Rapier's active set only
+                // in a step; the tiers look past that set in a region at rest, `update_tiers`.
+                // A zero-length step here brought such bodies in: it walked every pair, 2-57 ms
+                // a time, round 4 on the VM.)
                 let t0 = Instant::now();
                 let (fresh, stale) = (r.fresh.len(), r.stale_all);
                 let added = r.fresh.clone();
-                let active: HashSet<_> = r.world.islands.active_bodies().collect();
-                let woke = r
-                    .world
-                    .bodies
-                    .iter()
-                    .find(|(h, rb)| rb.is_dynamic() && !rb.is_sleeping() && !active.contains(h))
-                    .map(|(_, rb)| crate::convert::entity_of(rb.user_data));
-                let awake = woke.is_some();
-                if awake {
-                    r.world.integration_parameters.dt = 0.0;
-                    let filter = ContactFilter {
-                        no_contact,
-                        dt: 0.0,
-                    };
-                    r.world.step_with_events(&filter, &());
-                    r.queries_refreshed();
-                } else if r.stale_all || !r.fresh.is_empty() {
+                if r.stale_all || !r.fresh.is_empty() {
                     r.refresh_queries();
                 }
                 let t1 = Instant::now();
@@ -722,8 +709,8 @@ pub(crate) fn physics_simulate(
                 if ms > 2.0 && report {
                     engine_core::log::info!(
                         "physics regions: refreshing resting region {rid} ({} bodies, {} \
-                         colliders, {fresh} fresh, stale {stale}, awake {woke:?}) took {ms:.1} \
-                         ms, bounds {:.1}",
+                         colliders, {fresh} fresh, stale {stale}) took {ms:.1} ms, bounds \
+                         {:.1}",
                         r.world.bodies.len(),
                         r.world.colliders.len(),
                         t1.elapsed().as_secs_f64() * 1000.0

@@ -2423,9 +2423,13 @@ impl Simulation {
         self.lod_clock += 1;
         // Bodies asking for fine steps keep to regions of their own (`crate::fine`).
         let splits = tracing::info_span!("region splits").entered();
-        let piece = crate::report::Piece::start("upkeep: splits");
+        let piece = crate::report::Piece::start("upkeep: splits: fine steps");
         let newly_mixed = self.update_fine();
+        drop(piece);
+        let piece = crate::report::Piece::start("upkeep: splits: dormant wakes");
         self.wake_dormant();
+        drop(piece);
+        let piece = crate::report::Piece::start("upkeep: splits: splits");
         if self.lod_clock.is_multiple_of(crate::lod::LOD_EVERY) {
             let _far = tracing::info_span!("split far").entered();
             self.split_far(foci, margin * 1.25);
@@ -2437,6 +2441,8 @@ impl Simulation {
             let _fine = tracing::info_span!("split fine").entered();
             self.split_fine(dt);
         }
+        drop(piece);
+        let piece = crate::report::Piece::start("upkeep: splits: fine steps again");
         self.update_fine();
         drop(piece);
         let tiers = tracing::info_span!("region tiers").entered();
