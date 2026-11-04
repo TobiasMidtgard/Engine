@@ -1477,7 +1477,12 @@ fn vs_flow(@builtin(vertex_index) vid: u32) -> FlowOut {
     let vb = select(s.ba, b.ba, b.g > 0.003);
     let vt = select(s.ba, t.ba, t.g > 0.003);
     out.shear = ((vr.y - vl.y) - (vt.x - vb.x)) / (2.0 * cell);
-    out.white = 0.0;
+    // A hydraulic jump: water running faster than a wave can (Froude number near or over 1)
+    // brought up short, where it runs into slower, deeper water below a step or a stone. It
+    // boils white there (Grant and Mizuyama 1991: a jump below each step of a step-pool creek).
+    let squeeze = -((vr.x - vl.x) + (vt.y - vb.y)) / (2.0 * cell);
+    let froude = length(s.ba) / sqrt(9.81 * max(s.g, 0.005));
+    out.white = smoothstep(0.8, 2.5, squeeze) * smoothstep(0.6, 1.1, froude) * saturate(s.g * 20.0);
     return out;
 }
 

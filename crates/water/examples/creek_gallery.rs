@@ -7,6 +7,7 @@
 //!
 //! `views` is a comma-separated subset of: creek_bank, creek_brook, creek_main, creek_mid,
 //! creek_valley. `GALLERY_NO_CREEKS=1` leaves the creeks out (the dry channels, to compare);
+//! `GALLERY_NO_SIM=1` draws the creek nearest the camera as a ribbon too, not simulated;
 //! `GALLERY_FRAMES=n` draws n frames a view (for `ENGINE_PROFILE=1`).
 
 use std::sync::Arc;
@@ -16,6 +17,7 @@ use engine_core::time::TimeSource;
 use engine_render::prelude::*;
 use engine_render::{RenderDisabled, capture_now};
 use engine_water::WaterPlugin;
+use engine_water::creek_sim::CreekSims;
 use engine_water::creeks::{CreekRibbons, LocalCreeks, build_ribbons};
 use engine_water::demo::creeks::{Meadow, meadow};
 use engine_water::demo::materials::Surface;
@@ -170,6 +172,16 @@ fn main() {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(8);
+        // The creek nearest a near view runs on a flow grid (`creek_sim`): let it settle in.
+        app.update_n(30);
+        for _ in 0..600 {
+            app.update_n(1);
+            if !app.world.resource::<CreekSims>().pending()
+                && app.world.resource::<CreekRibbons>().settled()
+            {
+                break;
+            }
+        }
         app.update_n(frames);
         if let Some(d) = app.world.get_resource::<RenderDisabled>() {
             eprintln!("no GPU: {}", d.0);
@@ -192,8 +204,9 @@ fn main() {
         let path = format!("{out}/{key}.png");
         match capture_now(&mut app.world, &path) {
             Ok(_) => eprintln!(
-                "{path} ({:.1} s; {reaches} creeks drawn, {vertices} vertices, {triangles} triangles, laid in {laid:.2} ms)",
-                started.elapsed().as_secs_f32()
+                "{path} ({:.1} s; {} simulated, {reaches} creeks drawn, {vertices} vertices, {triangles} triangles, laid in {laid:.2} ms)",
+                started.elapsed().as_secs_f32(),
+                app.world.resource::<CreekSims>().live()
             ),
             Err(e) => eprintln!("{path}: {e}"),
         }

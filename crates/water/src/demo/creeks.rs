@@ -17,6 +17,8 @@ use engine_core::math::{DVec2, DVec3, Vec2, Vec3};
 use engine_render::{Mesh, Vertex};
 use engine_world::terrain::{CreekPoint, CreekQuery, CreekReach, CreekSample};
 
+use crate::creeks::StepCourse;
+
 /// Half the side of the valley, meters from its center.
 pub const MEADOW_HALF: f32 = 400.0;
 /// The water's edge as a share of a creek's half-width (as the ribbons draw it).
@@ -35,6 +37,8 @@ pub struct Meadow {
     bounds: Vec<(Vec2, Vec2)>,
     /// Segments by cell: (reach, first point).
     cells: HashMap<(i32, i32), Vec<(u32, u32)>>,
+    /// Each reach's surface with its steps and pools, and meters from its source at each point.
+    courses: Vec<(StepCourse, Vec<f32>)>,
 }
 
 /// The ground before the creeks cut it: falling gently down the valley (+x) and rising to
@@ -155,9 +159,21 @@ impl Meadow {
                 .collect();
             push(&mut reaches, 2, points);
         }
+        let courses = reaches
+            .iter()
+            .map(|r| {
+                let mut along = vec![0.0f32];
+                for w in r.points.windows(2) {
+                    let d = DVec2::new(w[1].at.x - w[0].at.x, w[1].at.z - w[0].at.z).length();
+                    along.push(along.last().copied().unwrap_or(0.0) + d as f32);
+                }
+                (StepCourse::new(r.points.clone()), along)
+            })
+            .collect();
         let mut meadow = Self {
             bounds: Vec::new(),
             cells: HashMap::new(),
+            courses,
             reaches,
         };
         for (r, reach) in meadow.reaches.iter().enumerate() {
@@ -189,7 +205,7 @@ impl Meadow {
     }
 
     /// The segments filed at `x`, `z`, and each one's nearest point: (reach, segment, share
-    /// along it, distance).
+    /// along it, distance; negative to the right of the creek looking downstream).
     fn near(&self, x: f32, z: f32) -> impl Iterator<Item = (usize, usize, f32, f32)> + '_ {
         let key = ((x / CELL).floor() as i32, (z / CELL).floor() as i32);
         let p = Vec2::new(x, z);
@@ -206,7 +222,8 @@ impl Meadow {
                 );
                 let ab = b - a;
                 let t = ((p - a).dot(ab) / ab.length_squared().max(1e-6)).clamp(0.0, 1.0);
-                (r as usize, k as usize, t, (a + ab * t).distance(p))
+                let side = if ab.perp_dot(p - a) < 0.0 { -1.0 } else { 1.0 };
+                (r as usize, k as usize, t, side * (a + ab * t).distance(p))
             })
     }
 
@@ -216,8 +233,17 @@ impl Meadow {
         let mut cut = f32::MAX;
         let mut width = 1.0f32;
         let wobble = noise::fbm2(x as f64 * 0.08, z as f64 * 0.08, 0xBA4C, 2, 2.0, 0.5) * 1.6;
-        for (r, k, t, d) in self.near(x, z) {
-            let p = lerp_point(&self.reaches[r].points, k, t);
+        for (r, k, t, signed) in self.near(x, z) {
+            let mut p = lerp_point(&self.reaches[r].points, k, t);
+            let d = signed.abs();
+            // The water's surface as the creek's ribbon draws it, steps and pools and all, so
+            // its bed steps with it.
+            let (course, along) = &self.courses[r];
+            let s = along[k] + t * (along[k + 1] - along[k]);
+            let x = (signed / (0.5 * p.width_m * EDGE)).clamp(-1.0, 1.0);
+            let (y, depth) = course.surface(s, x);
+            p.at.y = y;
+            p.depth_m = depth;
             let c = channel(&p, d, wobble.clamp(-1.0, 1.0));
             if c < cut {
                 cut = c;
@@ -235,6 +261,7 @@ impl Meadow {
     fn wetness(&self, x: f32, z: f32) -> f32 {
         let mut wet = 0.0f32;
         for (r, k, t, d) in self.near(x, z) {
+            let d = d.abs();
             let p = lerp_point(&self.reaches[r].points, k, t);
             let edge = 0.5 * p.width_m * EDGE;
             let w = if d < edge {
@@ -483,11 +510,23 @@ mod tests {
                 "reach {} climbs",
                 reach.id
             );
-            // Its water sits in its channel: under the ground beside it, over its bed.
-            let mid = &reach.points[reach.points.len() / 2];
+            // Its water sits in its channel, steps and pools and all: the bed under the
+            // surface its ribbon draws there by that surface's depth, the ground beside it
+            // over it.
+            let k = reach.points.len() / 2;
+            let mid = &reach.points[k];
             let (x, z) = (mid.at.x as f32, mid.at.z as f32);
-            assert!(m.height(x, z) < mid.at.y as f32);
-            assert!(m.height(x, z) > mid.at.y as f32 - mid.depth_m - 0.1);
+            let (course, along) = &m.courses[(reach.id - 1) as usize];
+            let (y, depth) = course.surface(along[k], 0.0);
+            let bed = m.height(x, z);
+            assert!((bed - (y as f32 - depth)).abs() < 0.1, "{bed} {y} {depth}");
+            let side = Vec2::new(
+                -(reach.points[k + 1].at.z - mid.at.z) as f32,
+                (reach.points[k + 1].at.x - mid.at.x) as f32,
+            )
+            .normalize();
+            let bank = Vec2::new(x, z) + side * mid.width_m;
+            assert!(m.height(bank.x, bank.y) > y as f32);
         }
         // The query finds the main stream from its bank, and nothing far from any creek.
         let x = 37.0;

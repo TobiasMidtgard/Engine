@@ -131,7 +131,7 @@ fn spawn_lake(commands: &mut Commands, valley: &Valley) -> Entity {
 }
 
 /// A stretch of stones: its origin, the merged parts, and a sphere per stone (center, radius).
-type StoneStretch = (DVec3, Vec<Part>, Vec<(DVec3, f32)>);
+pub(crate) type StoneStretch = (DVec3, Vec<Part>, Vec<(DVec3, f32)>);
 
 /// What [`spawn_valley`] puts in round the lake, worked out from the ground and made
 /// beforehand ([`plan_valley`]), so placing it ([`place_valley`]) asks the ground nothing.
@@ -415,7 +415,7 @@ pub fn stream_stones(stream: &ValleyStream, ground: &dyn Fn(f64, f64) -> f64) ->
 
 /// Stones in a merged mesh per stretch of stream (so stretches out of view are culled), each
 /// with a sphere to stand on: (origin, merged parts, spheres).
-fn plan_stones(stones: &[StreamStone]) -> Vec<StoneStretch> {
+pub(crate) fn plan_stones(stones: &[StreamStone]) -> Vec<StoneStretch> {
     let rocks = super::art::rocks();
     stones
         .chunks(16)
@@ -574,6 +574,16 @@ pub fn stream_region(
     base: f64,
     ground: &dyn Fn(f64, f64) -> f64,
 ) -> Option<(DVec3, FlowRegion)> {
+    stream_region_cells(stream, base, ground, STREAM_CELL)
+}
+
+/// [`stream_region`] on cells `cell` meters across (finer for a narrow creek).
+pub fn stream_region_cells(
+    stream: &ValleyStream,
+    base: f64,
+    ground: &dyn Fn(f64, f64) -> f64,
+    cell_m: f32,
+) -> Option<(DVec3, FlowRegion)> {
     let first = stream.path.first()?;
     let reach = stream.width_m as f64 * 0.5 + 4.0;
     let channel = |p: DVec2| in_channel(p, reach, ground);
@@ -585,7 +595,7 @@ pub fn stream_region(
     }
     lo -= DVec2::splat(margin);
     hi += DVec2::splat(margin);
-    let cell = STREAM_CELL as f64;
+    let cell = cell_m as f64;
     let cells = ((hi - lo) / cell).ceil();
     let length: f64 = stream
         .path
@@ -615,7 +625,7 @@ pub fn stream_region(
             let p = channel(a.lerp(b, (next - along) / len)) - lo;
             priming.push(FlowSource {
                 at: [p.x as f32, p.y as f32],
-                radius_m: (stream.width_m * 0.4).max(STREAM_CELL),
+                radius_m: (stream.width_m * 0.4).max(cell_m),
                 rate_m3_s: stream.flow_m3_s,
             });
             next += PRIMING_STEP;
@@ -626,11 +636,11 @@ pub fn stream_region(
         DVec3::new(lo.x, base, lo.y),
         FlowRegion {
             cells: [cells.x as u32, cells.y as u32],
-            cell_m: STREAM_CELL,
+            cell_m,
             bed: FlowBed::Ground,
             sources: vec![FlowSource {
                 at: [spring.x as f32, spring.y as f32],
-                radius_m: (stream.width_m * 0.4).max(STREAM_CELL),
+                radius_m: (stream.width_m * 0.4).max(cell_m),
                 rate_m3_s: stream.flow_m3_s,
             }],
             fills,

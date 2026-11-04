@@ -67,6 +67,10 @@ pub struct CreekRibbons {
     since: f32,
     /// Ribbons being laid on a worker.
     job: Option<Task<Laid>>,
+    /// Stretches simulated near the camera, left out of the ribbons
+    /// ([`crate::creek_sim`] keeps them), and those the ribbons were last laid without.
+    pub cuts: Vec<Cut>,
+    cuts_laid: Vec<Cut>,
 }
 
 /// Reaches are asked for within this distance of the camera (X and Z), meters.
@@ -85,6 +89,8 @@ const LEAST_RANGE_M: f32 = 150.0;
 const EDGE: f32 = 1.15;
 /// Fastest current drawn, m/s.
 const MOST_SPEED: f32 = 6.0;
+/// A ribbon reaches this far into a stretch a simulation draws, meters.
+pub const SKIP_OVERLAP_M: f32 = 2.0;
 /// Within this distance the rings follow each step's chute and pool, meters.
 const STEP_DETAIL_M: f32 = 120.0;
 /// Phase of the step layout is integrated from the source in steps this long, meters, so it
@@ -271,6 +277,28 @@ impl Course {
     }
 }
 
+/// A reach's water surface with its steps and pools, as the ribbons draw it: for a terrain
+/// (or a demo) to carve a bed that matches, so a simulation of the creek steps and pools too.
+pub struct StepCourse(Course);
+
+impl StepCourse {
+    /// The reach's points, upstream first.
+    pub fn new(points: Vec<CreekPoint>) -> Self {
+        Self(Course::new(points))
+    }
+
+    /// The surface's height and the depth in the middle, `s` meters from the source and `x`
+    /// across it (-1 .. 1, bank to bank, positive to the left looking downstream).
+    pub fn surface(&self, s: f32, x: f32) -> (f64, f32) {
+        let st = self.0.station(s.clamp(0.0, self.0.length()));
+        let (_, amount) = step_spacing(st.slope);
+        self.0.surface(&Station {
+            phase: st.phase + step_skew(x, st.phase) * amount,
+            ..st
+        })
+    }
+}
+
 fn horizontal(a: DVec3, b: DVec3) -> f32 {
     DVec2::new(b.x - a.x, b.z - a.z).length() as f32
 }
@@ -351,6 +379,20 @@ pub fn lay_ribbon(
     vertices: &mut Vec<CreekVertex>,
     indices: &mut Vec<u32>,
 ) -> bool {
+    lay_ribbon_around(points, camera, anchor, None, vertices, indices)
+}
+
+/// [`lay_ribbon`], leaving out the stretch `skip` (meters from the source, from .. to) where
+/// a simulation draws the water ([`crate::creek_sim`]); the ribbon reaches
+/// [`SKIP_OVERLAP_M`] into it at either end, so no gap opens between the two.
+pub fn lay_ribbon_around(
+    points: Vec<CreekPoint>,
+    camera: DVec3,
+    anchor: DVec3,
+    skip: Option<(f32, f32)>,
+    vertices: &mut Vec<CreekVertex>,
+    indices: &mut Vec<u32>,
+) -> bool {
     if points.len() < 2 {
         return false;
     }
@@ -381,6 +423,14 @@ pub fn lay_ribbon(
             }
             // Skip ahead, out of range: nothing here can come into range sooner.
             s = (s + (d - range).max(spacing)).min(length);
+            continue;
+        }
+        if let Some((a, b)) = skip
+            && s > a + SKIP_OVERLAP_M
+            && s < b - SKIP_OVERLAP_M
+        {
+            last = None;
+            s = (b - SKIP_OVERLAP_M).min(length);
             continue;
         }
         let dir = st.dir;
@@ -481,8 +531,59 @@ pub struct Laid {
 /// A creek provider and where its space sits in the world.
 pub type Provider = (Arc<dyn CreekQuery>, DVec3);
 
+/// A provider's identity: its address (the same provider keeps it while it lives).
+pub fn provider_key(p: &Arc<dyn CreekQuery>) -> usize {
+    Arc::as_ptr(p) as *const () as usize
+}
+
+/// A stretch of a reach the ribbons leave out: a simulation draws the water there.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Cut {
+    /// [`provider_key`] of its provider.
+    pub provider: usize,
+    /// The reach's id.
+    pub reach: u64,
+    /// Meters from the reach's source, from .. to.
+    pub from_m: f32,
+    pub to_m: f32,
+}
+
+/// Every provider of creeks in the world: the terrain's, and each [`LocalCreeks`] where its
+/// entity stands.
+pub fn gather_providers(
+    creeks: Option<&Creeks>,
+    locals: &Query<(&LocalCreeks, &GlobalTransform)>,
+) -> Vec<Provider> {
+    let mut providers: Vec<Provider> = Vec::new();
+    if let Some(c) = creeks {
+        providers.push((c.0.clone(), DVec3::ZERO));
+    }
+    for (local, g) in locals {
+        providers.push((local.0.clone(), g.translation()));
+    }
+    providers
+}
+
+/// Where the main camera is (else the first focus point).
+pub fn main_camera(
+    cameras: &Query<(&engine_render::Camera, &GlobalTransform), Without<engine_render::ExtraView>>,
+    focus: &engine_world::FocusPoints,
+) -> Option<DVec3> {
+    cameras
+        .iter()
+        .filter(|(c, _)| c.active)
+        .max_by_key(|(c, _)| c.order)
+        .map(|(_, g)| g.translation())
+        .or_else(|| focus.points.first().copied())
+}
+
 /// Lay the ribbons of every reach within reach of `camera`.
 pub fn lay_ribbons(providers: &[Provider], camera: DVec3) -> Laid {
+    lay_ribbons_cut(providers, camera, &[])
+}
+
+/// [`lay_ribbons`], leaving out the `cuts`.
+pub fn lay_ribbons_cut(providers: &[Provider], camera: DVec3, cuts: &[Cut]) -> Laid {
     let _span = tracing::info_span!("water", name = "creek ribbons").entered();
     let anchor = (camera / 16.0).round() * 16.0;
     let mut laid = Laid {
@@ -493,12 +594,17 @@ pub fn lay_ribbons(providers: &[Provider], camera: DVec3) -> Laid {
     };
     let mut reaches: Vec<CreekReach> = Vec::new();
     for (provider, offset) in providers {
+        let key = provider_key(provider);
         reaches.clear();
         let c = camera - *offset;
         let lo = DVec2::new(c.x - QUERY_M, c.z - QUERY_M);
         let hi = DVec2::new(c.x + QUERY_M, c.z + QUERY_M);
         provider.reaches(lo, hi, &mut reaches);
         for reach in reaches.drain(..) {
+            let skip = cuts
+                .iter()
+                .find(|c| c.provider == key && c.reach == reach.id)
+                .map(|c| (c.from_m, c.to_m));
             let points = reach
                 .points
                 .into_iter()
@@ -507,10 +613,11 @@ pub fn lay_ribbons(providers: &[Provider], camera: DVec3) -> Laid {
                     ..p
                 })
                 .collect();
-            if lay_ribbon(
+            if lay_ribbon_around(
                 points,
                 camera,
                 anchor,
+                skip,
                 &mut laid.vertices,
                 &mut laid.indices,
             ) {
@@ -522,6 +629,11 @@ pub fn lay_ribbons(providers: &[Provider], camera: DVec3) -> Laid {
 }
 
 impl CreekRibbons {
+    /// Laid as they stand: nothing being laid, and laid without every stretch simulated now.
+    pub fn settled(&self) -> bool {
+        self.job.is_none() && self.cuts == self.cuts_laid
+    }
+
     fn install(&mut self, laid: Laid) {
         self.anchor = laid.anchor;
         self.vertices = laid.vertices;
@@ -566,39 +678,33 @@ pub fn creek_ribbons_system(
         return;
     }
     ribbons.since = 0.0;
-    let Some(camera) = cameras
-        .iter()
-        .filter(|(c, _)| c.active)
-        .max_by_key(|(c, _)| c.order)
-        .map(|(_, g)| g.translation())
-        .or_else(|| focus.points.first().copied())
-    else {
+    let Some(camera) = main_camera(&cameras, &focus) else {
         return;
     };
-    let mut providers: Vec<Provider> = Vec::new();
-    if let Some(c) = &creeks {
-        providers.push((c.0.clone(), DVec3::ZERO));
-    }
-    for (local, g) in &locals {
-        providers.push((local.0.clone(), g.translation()));
-    }
+    let providers = gather_providers(creeks.as_deref(), &locals);
     let keys: Vec<(usize, DVec3)> = providers
         .iter()
-        .map(|(p, at)| (Arc::as_ptr(p) as *const () as usize, *at))
+        .map(|(p, at)| (provider_key(p), *at))
         .collect();
     let moved = ribbons
         .built_at
         .is_none_or(|b| b.distance(camera) > REBUILD_M);
-    if !moved && keys == ribbons.providers {
+    if !moved && keys == ribbons.providers && ribbons.cuts == ribbons.cuts_laid {
         return;
     }
     ribbons.built_at = Some(camera);
     ribbons.providers = keys;
+    ribbons.cuts_laid = ribbons.cuts.clone();
+    let cuts = ribbons.cuts.clone();
     match AsyncComputeTaskPool::try_get() {
         Some(pool) => {
-            ribbons.job = Some(pool.spawn(async move { lay_ribbons(&providers, camera) }));
+            ribbons.job =
+                Some(pool.spawn(async move { lay_ribbons_cut(&providers, camera, &cuts) }));
         }
-        None => build_ribbons(&providers, camera, &mut ribbons),
+        None => {
+            let laid = lay_ribbons_cut(&providers, camera, &cuts);
+            ribbons.install(laid);
+        }
     }
 }
 
