@@ -182,6 +182,14 @@ fn census(app: &mut App, name: &str) {
             e.1 += tris;
         }
     }
+    {
+        let mut q = app.world.query_filtered::<&MeshRenderer, With<PlantPart>>();
+        let (all, hidden) = q
+            .iter(&app.world)
+            .fold((0u32, 0u32), |(a, h), r| (a + 1, h + u32::from(!r.visible)));
+        let plants = app.world.query::<&Plant>().iter(&app.world).count();
+        println!("census {name}: {plants} plants, {all} plant parts, {hidden} of them hidden");
+    }
     let show = |m: &BTreeMap<&str, (u32, u64)>| {
         let total: u64 = m.values().map(|v| v.1).sum();
         let parts: Vec<String> = m

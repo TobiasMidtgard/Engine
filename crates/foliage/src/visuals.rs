@@ -25,11 +25,23 @@ use crate::season::{FoliageSeason, Leafing, shift_days};
 use crate::species::{Layer, PlantForm, PlantLibrary, PlantSpecies};
 
 /// The drawn parts of a plant (child entities) and what they currently show.
+///
+/// A slot gets its entity the first time it shows something, and loses it again after
+/// [`PART_DROP_PASSES`] full passes hidden: meadow grass, small plants beyond their draw
+/// distance and bare winter crowns keep no entity, as Unreal's instanced foliage keeps no
+/// object for an instance it culls. Before, every plant had three parts and two in three of
+/// them were hidden: half of the forest's entities, walked every frame for nothing.
 #[derive(Component, Debug, Clone)]
 pub struct PlantVisual {
-    pub parts: [Entity; 3],
+    pub parts: [Option<Entity>; 3],
     shown: [Option<(Handle<Mesh>, Handle<StandardMaterial>)>; 3],
+    /// Full passes each slot's entity has been hidden and idle.
+    hidden: [u8; 3],
 }
+
+/// Full passes (one every 8 frames) a hidden part waits before its entity goes: about four
+/// seconds at 60 fps, so a camera turning back and forth over a draw distance doesn't churn.
+pub const PART_DROP_PASSES: u8 = 32;
 
 /// Marks the child entities that draw a plant.
 #[derive(Component, Debug, Clone, Copy)]
@@ -316,7 +328,14 @@ pub fn sync_plant_visuals(
         Option<&PlantBase>,
         Option<&InRegion>,
     )>,
-    mut parts: Query<(&mut MeshRenderer, crate::lod_fade::Busy), With<PlantPart>>,
+    mut parts: Query<
+        (
+            &mut MeshRenderer,
+            crate::lod_fade::Busy,
+            Has<crate::lod_fade::PartFade>,
+        ),
+        With<PlantPart>,
+    >,
     mut fades: ResMut<crate::lod_fade::LodFades>,
     meadows: Query<(), With<RegionGrass>>,
 ) {
@@ -401,7 +420,7 @@ pub fn sync_plant_visuals(
         };
         match fungi {
             Some(mut fungi) if fungi.shown != want_fungi => {
-                if let Ok((mut r, _)) = parts.get_mut(fungi.part) {
+                if let Ok((mut r, _, _)) = parts.get_mut(fungi.part) {
                     apply(&mut r, want_fungi);
                 }
                 fungi.shown = want_fungi;
@@ -417,6 +436,9 @@ pub fn sync_plant_visuals(
         }
         match visual {
             Some(mut visual) => {
+                if full_pass {
+                    drop_idle_parts(&mut commands, &mut visual, &want, &parts);
+                }
                 if visual.shown == want {
                     continue;
                 }
@@ -424,42 +446,141 @@ pub fn sync_plant_visuals(
                     if visual.shown[i] == *part {
                         continue;
                     }
-                    if let Ok((mut r, busy)) = parts.get_mut(visual.parts[i]) {
-                        crate::lod_fade::swap(
-                            &mut commands,
-                            &mut fades,
-                            entity,
-                            visual.parts[i],
-                            Transform::default(),
-                            &mut r,
-                            visual.shown[i],
-                            *part,
-                            busy,
-                        );
+                    match visual.parts[i] {
+                        Some(e) => {
+                            if let Ok((mut r, busy, _)) = parts.get_mut(e) {
+                                crate::lod_fade::swap(
+                                    &mut commands,
+                                    &mut fades,
+                                    entity,
+                                    e,
+                                    Transform::default(),
+                                    &mut r,
+                                    visual.shown[i],
+                                    *part,
+                                    busy,
+                                );
+                            }
+                        }
+                        // Shown for the first time (or again after its entity went): it
+                        // dithers in like any other level.
+                        None => {
+                            visual.parts[i] = Some(spawn_part_fading(
+                                &mut commands,
+                                &mut fades,
+                                entity,
+                                *part,
+                                shadows,
+                            ));
+                        }
                     }
                 }
                 visual.shown = want;
             }
             None => {
-                let parts =
-                    std::array::from_fn(|i| spawn_part(&mut commands, entity, want[i], shadows));
-                commands
-                    .entity(entity)
-                    .insert(PlantVisual { parts, shown: want });
+                let parts = std::array::from_fn(|i| {
+                    want[i]
+                        .is_some()
+                        .then(|| spawn_part(&mut commands, entity, want[i], shadows))
+                });
+                commands.entity(entity).insert(PlantVisual {
+                    parts,
+                    shown: want,
+                    hidden: [0; 3],
+                });
             }
         }
     }
     loading.bypass_change_detection().plants_waiting = skipped;
 }
 
-/// A child entity of `parent` drawing `part`.
-fn spawn_part(commands: &mut Commands, parent: Entity, part: Part, shadows: bool) -> Entity {
+/// Count the full passes each hidden, settled part of `visual` has waited, and despawn the ones
+/// that have waited long enough (and won't show anything this pass either).
+#[allow(clippy::type_complexity)]
+fn drop_idle_parts(
+    commands: &mut Commands,
+    visual: &mut PlantVisual,
+    want: &[Part; 3],
+    parts: &Query<
+        (
+            &mut MeshRenderer,
+            crate::lod_fade::Busy,
+            Has<crate::lod_fade::PartFade>,
+        ),
+        With<PlantPart>,
+    >,
+) {
+    for (i, want) in want.iter().enumerate() {
+        let Some(e) = visual.parts[i] else {
+            continue;
+        };
+        // A fade still running (or a ghost still going out, timed on this part) keeps it.
+        let settled = visual.shown[i].is_none()
+            && want.is_none()
+            && parts
+                .get(e)
+                .is_ok_and(|(r, busy, fading)| !r.visible && !busy && !fading);
+        if !settled {
+            visual.hidden[i] = 0;
+            continue;
+        }
+        visual.hidden[i] = visual.hidden[i].saturating_add(1);
+        if visual.hidden[i] >= PART_DROP_PASSES {
+            if let Ok(mut c) = commands.get_entity(e) {
+                c.despawn();
+            }
+            visual.parts[i] = None;
+            visual.hidden[i] = 0;
+        }
+    }
+}
+
+/// A child entity of `parent` dithering in to show `part`.
+fn spawn_part_fading(
+    commands: &mut Commands,
+    fades: &mut crate::lod_fade::LodFades,
+    parent: Entity,
+    part: Part,
+    shadows: bool,
+) -> Entity {
+    let mut r = part_renderer(None, shadows);
+    let e = commands
+        .spawn((
+            Transform::default(),
+            ChildOf(parent),
+            PlantPart,
+            crate::shadow_standin::CastsShadow(shadows),
+        ))
+        .id();
+    crate::lod_fade::swap(
+        commands,
+        fades,
+        parent,
+        e,
+        Transform::default(),
+        &mut r,
+        None,
+        part,
+        false,
+    );
+    commands.entity(e).insert(r);
+    e
+}
+
+/// A part's renderer showing `part`.
+fn part_renderer(part: Part, shadows: bool) -> MeshRenderer {
     let mut r = MeshRenderer::new(
         engine_render::Shape::Cuboid { size: [0.01; 3] },
         StandardMaterial::default(),
     );
     r.cast_shadows = shadows;
     apply(&mut r, part);
+    r
+}
+
+/// A child entity of `parent` drawing `part`.
+fn spawn_part(commands: &mut Commands, parent: Entity, part: Part, shadows: bool) -> Entity {
+    let r = part_renderer(part, shadows);
     commands
         .spawn((
             Transform::default(),
@@ -837,6 +958,81 @@ mod tests {
         assert!(up.x > 0.0 && (15.0..25.0).contains(&lean), "{up} {lean}");
     }
 
+    /// A plant keeps an entity only for a slot that shows something: none while it is too far
+    /// off to draw, one dithering in as the camera walks up, and none again a while after the
+    /// camera has walked away.
+    #[test]
+    fn plant_parts_exist_only_while_something_is_drawn() {
+        use engine_assets::Assets;
+        use engine_render::Camera;
+        let mut app = App::new();
+        app.world
+            .resource_mut::<Time>()
+            .set_source(engine_core::time::TimeSource::Manual {
+                step_secs: 1.0 / 30.0,
+            });
+        app.add_plugins(engine_world::WorldPlugin);
+        app.init_resource::<Assets<Mesh>>()
+            .init_resource::<Assets<StandardMaterial>>()
+            .init_resource::<Assets<engine_render::Image>>()
+            .add_plugins(crate::FoliagePlugin);
+        app.world.insert_resource(crate::FoliageLoading::in_frame());
+        app.world.resource_mut::<EcologySettings>().paused = true;
+        let far = DVec3::new(0.0, 1.7, 2000.0);
+        let cam = app
+            .world
+            .spawn((Camera::default(), Transform::from_translation(far)))
+            .id();
+        // The camera's world transform is in place before the fern comes.
+        app.update();
+        let fern =
+            crate::api::spawn_plant(&mut app.world, "fern", DVec3::new(0.0, 0.0, 2.5), 0.9, None)
+                .unwrap();
+        let part_count = |app: &mut App| {
+            app.world
+                .query_filtered::<(), With<PlantPart>>()
+                .iter(&app.world)
+                .count()
+        };
+        app.update_n(4);
+        let visual = app
+            .world
+            .get::<PlantVisual>(fern)
+            .expect("a visual far off");
+        assert_eq!(visual.parts, [None; 3], "parts spawned for a fern 2 km off");
+        assert_eq!(part_count(&mut app), 0);
+
+        app.world.get_mut::<Transform>(cam).unwrap().translation = DVec3::new(0.0, 1.7, 6.0);
+        app.update_n(20);
+        let parts = app.world.get::<PlantVisual>(fern).unwrap().parts;
+        let shown: Vec<Entity> = parts.iter().flatten().copied().collect();
+        assert!(!shown.is_empty(), "nothing drawn up close");
+        for &e in &shown {
+            assert!(app.world.get::<MeshRenderer>(e).unwrap().visible);
+        }
+        assert_eq!(part_count(&mut app), shown.len());
+
+        // Walked away: hidden at once, gone once the drop wait has passed.
+        app.world.get_mut::<Transform>(cam).unwrap().translation = far;
+        app.update_n(30);
+        assert_eq!(app.world.get::<PlantVisual>(fern).unwrap().parts, parts);
+        for &e in &shown {
+            assert!(!app.world.get::<MeshRenderer>(e).unwrap().visible);
+        }
+        app.update_n(8 * PART_DROP_PASSES as usize + 16);
+        assert_eq!(app.world.get::<PlantVisual>(fern).unwrap().parts, [None; 3]);
+        for &e in &shown {
+            assert!(app.world.get_entity(e).is_err(), "hidden part kept");
+        }
+        assert_eq!(part_count(&mut app), 0);
+
+        // And back again.
+        app.world.get_mut::<Transform>(cam).unwrap().translation = DVec3::new(0.0, 1.7, 6.0);
+        app.update_n(20);
+        let back = app.world.get::<PlantVisual>(fern).unwrap().parts;
+        assert_eq!(back.map(|p| p.is_some()), parts.map(|p| p.is_some()));
+    }
+
     /// A fern up close draws its withered frond (where it has one) with the dead-leaf
     /// material, beside its living fronds.
     #[test]
@@ -903,11 +1099,12 @@ mod tests {
         for (v, e) in ferns.into_iter().enumerate() {
             let Some(mesh) = dead[v] else { continue };
             let parts = app.world.get::<PlantVisual>(e).expect("fern parts").parts;
-            let r = app.world.get::<MeshRenderer>(parts[0]).unwrap();
+            let frond = parts[0].expect("a dead frond part");
+            let r = app.world.get::<MeshRenderer>(frond).unwrap();
             assert!(r.visible, "variant {v}: dead frond hidden");
             assert!(
                 app.world
-                    .get::<engine_render::DitherFade>(parts[0])
+                    .get::<engine_render::DitherFade>(frond)
                     .is_none_or(|d| d.0 == 0.0),
                 "variant {v}: dead frond dithered out"
             );
