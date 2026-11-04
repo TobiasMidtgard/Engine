@@ -880,11 +880,14 @@ const CRUISE_REACH_M: f64 = 1000.0;
 
 /// `Last`: queue, build, load, fade and unload cells.
 pub fn stream_system(world: &mut World) {
+    let span = tracing::info_span!("stream: sources and grid").entered();
     measure_sources(world);
     crate::stream_grid::update(world);
     if world.resource::<StreamedCells>().cells.is_empty() {
         return;
     }
+    drop(span);
+    let span = tracing::info_span!("stream: decide").entered();
     let poses = follow_frames(world);
     let sources = sources(world);
     let budget = *world.resource::<StreamingBudget>();
@@ -1005,6 +1008,8 @@ pub fn stream_system(world: &mut World) {
             unload(world, i);
         }
     }
+    drop(span);
+    let span = tracing::info_span!("stream: load and leave").entered();
     leave(world, &budget);
     want.retain(|w| !leaving.contains(&w.1));
     want.sort_by(|a, b| a.0.total_cmp(&b.0));
@@ -1047,6 +1052,8 @@ pub fn stream_system(world: &mut World) {
         }
     }
     fade(world, &budget);
+    drop(span);
+    let _span = tracing::info_span!("stream: hlod").entered();
     let configs: Vec<ProxyConfig> = world
         .resource::<CellHooks>()
         .0

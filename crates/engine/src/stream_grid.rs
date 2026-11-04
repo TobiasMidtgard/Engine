@@ -251,7 +251,15 @@ struct Grid {
     made: u64,
     retired: u64,
     warned: bool,
+    /// The sources (grid-local) when cells near them were last asked for, out to
+    /// [`NEAR_SLACK`] cells past their reach: until one moves that far, nothing new can be
+    /// in reach and the walk over every cell around them is skipped.
+    checked: Vec<(DVec3, f64)>,
 }
+
+/// How far past their reach sources ask for cells, in cells, so they can move that far before
+/// asking again.
+const NEAR_SLACK: f64 = 0.5;
 
 /// The procedural grids ([`StreamGridsExt::stream_grid`]).
 #[derive(Resource, Default)]
@@ -327,6 +335,7 @@ impl StreamGridsExt for World {
             made: 0,
             retired: 0,
             warned: false,
+            checked: Vec::new(),
         });
         self
     }
@@ -451,9 +460,20 @@ pub(crate) fn update(world: &mut World) {
             .iter()
             .map(|(p, scale)| (back * (*p - g.origin), *scale))
             .collect();
-        make_near(world, g, &local);
+        let slack = NEAR_SLACK * g.spec.cell_m;
+        let still = g.checked.len() == local.len()
+            && g.checked
+                .iter()
+                .zip(&local)
+                .all(|(a, b)| a.1 == b.1 && a.0.distance(b.0) < slack);
+        if !still {
+            make_near(world, g, &local, slack);
+            g.checked = local.clone();
+        }
         if g.frames % RETIRE_EVERY == 0 {
             retire_far(world, g, &local);
+            // What was let go is asked about afresh.
+            g.checked.clear();
         }
     }
     let mut res = world.resource_mut::<StreamGrids>();
@@ -462,11 +482,11 @@ pub(crate) fn update(world: &mut World) {
 }
 
 /// Asks the maker for every cell within load distance of a source not asked yet.
-fn make_near(world: &mut World, g: &mut Grid, local: &[(DVec3, f64)]) {
+fn make_near(world: &mut World, g: &mut Grid, local: &[(DVec3, f64)], slack: f64) {
     let s = g.spec.cell_m;
     let r = g.spec.cell_radius();
     for &(q, scale) in local {
-        let reach = g.spec.load_m * scale;
+        let reach = g.spec.load_m * scale + slack;
         let lo = ((q - DVec3::splat(reach + r)) / s).floor();
         let hi = ((q + DVec3::splat(reach + r)) / s).floor();
         let (y0, y1) = if g.spec.vertical {
@@ -679,6 +699,35 @@ mod tests {
         let g = report(&app);
         assert!(g.made > 100 && g.retired > 80, "{g:?}");
         assert!(g.known < 200, "{g:?}");
+    }
+
+    /// A source standing still (or shuffling within half a cell) isn't asked about every cell
+    /// around it each frame; one that walks on gets the cells ahead.
+    #[test]
+    fn a_still_source_does_not_ask_about_its_cells_again() {
+        let mut app = app();
+        let player = source(&mut app, DVec3::ZERO);
+        let asked = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let count = asked.clone();
+        app.world
+            .stream_grid(StreamGrid::new("tally", 100.0, 100.0), move |_| {
+                count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                None
+            });
+        app.update();
+        let first = asked.load(std::sync::atomic::Ordering::Relaxed);
+        assert!(first > 4, "{first}");
+        let checks = |app: &App| app.world.resource::<StreamGrids>().grids[0].checked.len();
+        assert_eq!(checks(&app), 1);
+        // A few frames shuffling about: no walk, no new cells (the retire pass clears the
+        // check, and the walk after it finds every cell known).
+        for x in [5.0, -10.0, 20.0, 0.0] {
+            go(&mut app, player, DVec3::new(x, 0.0, 0.0));
+        }
+        assert_eq!(asked.load(std::sync::atomic::Ordering::Relaxed), first);
+        // Walking a cell on asks about the new row ahead.
+        go(&mut app, player, DVec3::new(160.0, 0.0, 0.0));
+        assert!(asked.load(std::sync::atomic::Ordering::Relaxed) > first);
     }
 
     #[test]

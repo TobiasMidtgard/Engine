@@ -396,6 +396,24 @@ type MovedChildQuery<'w, 's> = Query<
     )>,
 >;
 
+/// Children found moved by one batch of the parallel scan, added to the walk's queue when the
+/// batch is done.
+struct Found<'a> {
+    local: Vec<(Entity, ParentWorld)>,
+    into: &'a std::sync::Mutex<Vec<(Entity, ParentWorld)>>,
+}
+
+impl Drop for Found<'_> {
+    fn drop(&mut self) {
+        if self.local.is_empty() {
+            return;
+        }
+        if let Ok(mut all) = self.into.lock() {
+            all.append(&mut self.local);
+        }
+    }
+}
+
 /// Where a queued child finds its parent's world transform.
 #[doc(hidden)]
 #[derive(Clone, Copy)]
@@ -444,6 +462,7 @@ pub fn propagate_transforms_system(
     changed_roots: Local<std::sync::Mutex<Vec<(Entity, GlobalTransform)>>>,
 ) {
     let alpha = fixed.alpha();
+    let span = tracing::info_span!("propagate: roots").entered();
     roots
         .p0()
         .par_iter_mut()
@@ -465,6 +484,8 @@ pub fn propagate_transforms_system(
             }
         });
 
+    drop(span);
+    let span = tracing::info_span!("propagate: find moved children").entered();
     let mut roots = roots.p1();
     stack.clear();
     for entity in unparented.read() {
@@ -486,11 +507,20 @@ pub fn propagate_transforms_system(
             }
         }
     }
-    stack.extend(
-        moved
-            .iter()
-            .map(|(e, c)| (e, ParentWorld::Read(c.parent()))),
+    // The scan over every child's change ticks runs on the compute threads (most children
+    // haven't moved), each batch handing what it found over when done. Their order doesn't
+    // matter: a child whose parent changes later in the walk is walked again from it.
+    let found = std::sync::Mutex::new(std::mem::take(&mut *stack));
+    moved.par_iter().for_each_init(
+        || Found {
+            local: Vec::new(),
+            into: &found,
+        },
+        |f, (e, c)| f.local.push((e, ParentWorld::Read(c.parent()))),
     );
+    *stack = found.into_inner().unwrap_or_else(|e| e.into_inner());
+    drop(span);
+    let _span = tracing::info_span!("propagate: walk").entered();
 
     while let Some((entity, parent)) = stack.pop() {
         let parent = match parent {

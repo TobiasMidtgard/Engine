@@ -289,6 +289,17 @@ impl GroundProbe<'_> {
     /// Highest surface under `p` that is at most `above` meters above it (so feet can step up
     /// onto things) and at most `below` meters below it.
     pub fn probe(&self, p: DVec3, above: f32, below: f32) -> Option<GroundHit> {
+        self.find(p, above, below, false)
+    }
+
+    /// Only the height of [`probe`](Self::probe), for walkers that follow the ground: the
+    /// terrain answers it without its normal and surface lookups (on the showcase's painted
+    /// ground those were most of a probe's cost). Equal to `probe(..)?.height`.
+    pub fn height(&self, p: DVec3, above: f32, below: f32) -> Option<f64> {
+        self.find(p, above, below, true).map(|h| h.height)
+    }
+
+    fn find(&self, p: DVec3, above: f32, below: f32, height_only: bool) -> Option<GroundHit> {
         let top = p.y + above as f64;
         let bottom = p.y - below as f64;
         let mut best: Option<GroundHit> = None;
@@ -300,7 +311,16 @@ impl GroundProbe<'_> {
                 best = Some(h);
             }
         };
-        if let Some(s) = self.ground.sample(DVec3::new(p.x, top, p.z)) {
+        let at = DVec3::new(p.x, top, p.z);
+        if height_only {
+            if let Some(height) = self.ground.height(at) {
+                consider(GroundHit {
+                    height,
+                    normal: Vec3::Y,
+                    surface: SurfaceId::default(),
+                });
+            }
+        } else if let Some(s) = self.ground.sample(at) {
             consider(GroundHit {
                 height: s.height,
                 normal: s.normal,
@@ -1117,6 +1137,17 @@ mod tests {
         assert!(beside.height.abs() < 1e-6);
         // Too high to step onto: falls back to the ground.
         let low = probe.probe(DVec3::new(0.0, 0.0, 0.0), 0.3, 1.0).unwrap();
+        // The height-only probe finds the same heights.
+        for (p, above, below) in [
+            (DVec3::new(0.0, 0.1, 0.0), 0.5, 0.5),
+            (DVec3::new(3.0, 0.1, 0.0), 0.5, 0.5),
+            (DVec3::new(0.0, 0.0, 0.0), 0.3, 1.0),
+        ] {
+            assert_eq!(
+                probe.height(p, above, below),
+                probe.probe(p, above, below).map(|h| h.height)
+            );
+        }
         assert!(low.height.abs() < 1e-6);
     }
 

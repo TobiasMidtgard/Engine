@@ -102,8 +102,10 @@ fn flatten_compound(
         let pose = parent * Pose::from_parts(*offset * scale, *rotation);
         match part {
             ColliderShape::Compound(inner) => flatten_compound(inner, pose, scale, out),
+            // (Cached: a scaled hull reuses its unscaled one's triangles, and identical parts
+            // of many compounds, a rock kit's few hulls, are built once.)
             _ => {
-                if let Some(s) = shape(part, scale) {
+                if let Some(s) = shape_cached(part, scale) {
                     out.push((pose, s));
                 }
             }

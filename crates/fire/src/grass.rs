@@ -19,7 +19,7 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
 use bytemuck::{Pod, Zeroable};
-use engine_core::math::{DVec2, DVec3, Rng, Vec2, Vec3};
+use engine_core::math::{DVec2, DVec3, IVec2, Rng, Vec2, Vec3};
 use engine_core::prelude::*;
 use engine_render::shadows::{MAX_CASCADES, SKY_OCCLUSION_VIEW};
 use engine_render::wgpu;
@@ -174,6 +174,15 @@ impl GrassCell {
         }
     }
 
+    /// Within half a texel of `t` in every channel.
+    fn near(&self, t: &GrassCell) -> bool {
+        let e = 0.5 / 255.0;
+        (self.height - t.height).abs() < e
+            && (self.char - t.char).abs() < e
+            && (self.glow - t.glow).abs() < e
+            && (self.green - t.green).abs() < e
+    }
+
     fn texel(&self) -> [u8; 4] {
         let q = |v: f32| (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
         [q(self.height), q(self.char), q(self.glow), q(self.green)]
@@ -198,6 +207,35 @@ pub struct GrassBurn {
     pub ground: Vec<f32>,
     /// Different for every sampling of `ground`.
     pub ground_id: u64,
+    /// The fire-field tiles under the map (key, version) when every cell last reached its
+    /// target with all of them at rest: while they stay so, the map can't change and isn't
+    /// walked (a 120 m meadow is 14 k cells a frame).
+    pub settled: Option<Vec<(IVec2, u64)>>,
+}
+
+/// The tiles under a map (key and version, `u64::MAX` where there is none), or `None` while
+/// any of them simulates something.
+fn resting_tiles(
+    field: &FireField,
+    min: DVec2,
+    size: [u32; 2],
+    cell_m: f32,
+) -> Option<Vec<(IVec2, u64)>> {
+    let max = min + DVec2::new(size[0] as f64, size[1] as f64) * cell_m as f64;
+    let (lo, _) = FireField::split(field.cell_coord(DVec3::new(min.x, 0.0, min.y)));
+    let (hi, _) = FireField::split(field.cell_coord(DVec3::new(max.x, 0.0, max.y)));
+    let mut out = Vec::new();
+    for y in lo.y..=hi.y {
+        for x in lo.x..=hi.x {
+            let key = IVec2::new(x, y);
+            match field.tile(key) {
+                Some(t) if t.active => return None,
+                Some(t) => out.push((key, t.version)),
+                None => out.push((key, u64::MAX)),
+            }
+        }
+    }
+    Some(out)
 }
 
 impl GrassBurn {
@@ -247,18 +285,31 @@ pub fn update_grass(
                 Some(mut b)
                     if b.size == size && b.min == min && b.cell_m == cell_m && b.base_y == c.y =>
                 {
+                    let resting = resting_tiles(&field, min, size, cell_m);
+                    if resting.is_some() && b.settled == resting {
+                        continue;
+                    }
                     let mut changed = false;
+                    let mut settled = true;
                     for (i, cell) in b.cells.iter_mut().enumerate() {
                         let Some(target) = grass_target(at(i as u32)) else {
                             continue;
                         };
                         let before = cell.texel();
                         cell.advance(target, dt);
+                        // The last half texel of the way is taken at once, so a settled
+                        // cell sits exactly on its target and stays there.
+                        if cell.near(&target) {
+                            *cell = target;
+                        } else {
+                            settled = false;
+                        }
                         changed |= cell.texel() != before;
                     }
                     if changed {
                         b.version += 1;
                     }
+                    b.settled = if settled { resting } else { None };
                 }
                 _ => {
                     // New (or resized) map: start at the targets, so a fire that was
@@ -291,6 +342,7 @@ pub fn update_grass(
                         base_y: c.y,
                         ground,
                         ground_id: GROUND_IDS.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+                        settled: None,
                     });
                 }
             }
@@ -1248,6 +1300,44 @@ mod tests {
     use super::*;
     use crate::fuel::CellFuel;
     use engine_render::{compose_shader, validate_wgsl};
+
+    /// A meadow over fire tiles at rest, every cell on its target, isn't walked each frame;
+    /// once the tiles under it change it is again.
+    #[test]
+    fn a_settled_meadow_over_resting_fire_is_left_alone() {
+        engine_core::tasks::init_task_pools();
+        let mut world = World::new();
+        world.insert_resource(FireField::new(1.0));
+        world.insert_resource(Time::default());
+        let meadow = world
+            .spawn((
+                GrassMeadow {
+                    half_extents: [20.0, 12.0],
+                    ..Default::default()
+                },
+                GlobalTransform::from(Transform::from_xyz(5.0, 0.0, -3.0)),
+            ))
+            .id();
+        let mut schedule = Schedule::default();
+        schedule.add_systems(update_grass);
+        schedule.run(&mut world);
+        schedule.run(&mut world);
+        let burn = world.get::<GrassBurn>(meadow).unwrap();
+        assert!(burn.settled.is_some(), "no fire, every cell on target");
+        let version = burn.version;
+        // Something odd in a settled map stays put: the map isn't walked.
+        world.get_mut::<GrassBurn>(meadow).unwrap().cells[7].height = 0.2;
+        schedule.run(&mut world);
+        let burn = world.get::<GrassBurn>(meadow).unwrap();
+        assert_eq!(burn.cells[7].height, 0.2);
+        assert_eq!(burn.version, version);
+        // The tiles under it changed (here: as if they had): walked again, and the odd cell
+        // (which a frame of no time can't move) keeps it from counting as settled.
+        world.get_mut::<GrassBurn>(meadow).unwrap().settled = Some(Vec::new());
+        schedule.run(&mut world);
+        let burn = world.get::<GrassBurn>(meadow).unwrap();
+        assert_eq!(burn.settled, None);
+    }
 
     #[test]
     fn a_world_shift_keeps_the_blades() {

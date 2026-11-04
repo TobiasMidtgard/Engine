@@ -3146,15 +3146,13 @@ fn demo_path_system(
         let mut pos = path.origin + DVec3::new(p.x as f64, 0.0, p.y as f64);
         pos.y = t.translation.y;
         let target_y = probe
-            .probe(DVec3::new(pos.x, pos.y + 0.3, pos.z), 0.7, 3.0)
-            .map_or(path.origin.y, |h| h.height);
+            .height(DVec3::new(pos.x, pos.y + 0.3, pos.z), 0.7, 3.0)
+            .unwrap_or(path.origin.y);
         // The slope of the ground over the next and last half meter, for the `grade` posture
         // (stairs average out into their pitch).
         let ground_at = |d: f32| {
             let q = pos + DVec3::new((dir.x * d) as f64, 0.0, (dir.y * d) as f64);
-            probe
-                .probe(DVec3::new(q.x, pos.y + 0.3, q.z), 0.7, 3.0)
-                .map(|h| h.height)
+            probe.height(DVec3::new(q.x, pos.y + 0.3, q.z), 0.7, 3.0)
         };
         // The grade is smoothed over a fifth of a second: measuring it every fourth frame
         // (staggered across walkers) is plenty.
