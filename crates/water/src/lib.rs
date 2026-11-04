@@ -4,6 +4,7 @@ pub mod api;
 pub mod boat;
 pub mod body;
 pub mod buoyancy;
+pub mod creeks;
 pub mod demo;
 pub mod detail;
 pub mod drops;
@@ -83,6 +84,7 @@ impl Plugin for WaterPlugin {
             .init_resource::<sim::BedJobs>()
             .init_resource::<WaterLoading>()
             .init_resource::<shelter::ShelterMask>()
+            .init_resource::<creeks::CreekRibbons>()
             .register_resource::<WaterSettings>(
                 "Water quality and behavior: ripple grid size (cells, meters), ripple speed (m/s) \
                  and damping (1/s), foam life (s), raindrops per m² per mm/h, puddles on/off, \
@@ -159,7 +161,14 @@ impl Plugin for WaterPlugin {
                     .chain()
                     .in_set(SimSet::Gameplay),
             )
-            .add_systems(Update, (boat::boat_bodies_system, mist::falls_mist_system))
+            .add_systems(
+                Update,
+                (
+                    boat::boat_bodies_system,
+                    mist::falls_mist_system,
+                    creeks::creek_ribbons_system,
+                ),
+            )
             .add_systems(Extract, mirror::lake_mirror_system)
             .add_systems(
                 PreUpdate,

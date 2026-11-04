@@ -1431,6 +1431,8 @@ struct FlowOut {
     @location(3) normal: vec3<f32>,
     // How fast the current turns here (1/s): eddy lines behind stones and along the banks.
     @location(4) shear: f32,
+    // White water a creek's ribbon marks itself (`creeks.rs`): the jump below each step.
+    @location(5) white: f32,
 };
 
 fn flow_load(i: i32, j: i32) -> vec4<f32> {
@@ -1475,6 +1477,7 @@ fn vs_flow(@builtin(vertex_index) vid: u32) -> FlowOut {
     let vb = select(s.ba, b.ba, b.g > 0.003);
     let vt = select(s.ba, t.ba, t.g > 0.003);
     out.shear = ((vr.y - vl.y) - (vt.x - vb.x)) / (2.0 * cell);
+    out.white = 0.0;
     return out;
 }
 
@@ -1512,6 +1515,39 @@ fn fs_flow(in: FlowOut, @builtin(front_facing) front: bool) -> @location(0) vec4
     // Triangles touching water are drawn whole: the terrain hides the parts under it, so
     // the waterline follows the ground rather than the grid.
     if (in.depth < 0.0005) { discard; }
+    return shade_stream(in, front);
+}
+
+// Creeks drawn without simulation (`creeks.rs`): a ribbon along each, carrying the depth and
+// current a flow grid would, so they shade as the simulated streams do.
+struct CreekIn {
+    @location(0) pos_depth: vec4<f32>, // relative to the ribbons' anchor (flow.origin), depth
+    @location(1) vel_shear: vec4<f32>, // current x, z (m/s), shear (1/s), meters from the source
+    @location(2) normal: vec4<f32>,    // w: white water (0..1)
+};
+
+@vertex
+fn vs_creek(v: CreekIn) -> FlowOut {
+    var out: FlowOut;
+    out.rel = flow.origin.xyz + v.pos_depth.xyz;
+    out.clip = frame.view_proj * vec4<f32>(out.rel, 1.0);
+    out.depth = v.pos_depth.w;
+    out.vel = v.vel_shear.xy;
+    out.normal = v.normal.xyz;
+    out.shear = v.vel_shear.z;
+    out.white = v.normal.w;
+    return out;
+}
+
+@fragment
+fn fs_creek(in: FlowOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
+    if (clip_plane_distance(in.rel) < 0.0) { discard; }
+    if (in.depth < 0.0005) { discard; }
+    return shade_stream(in, front);
+}
+
+// Running water's colour: a flow grid's (`fs_flow`) or a creek's ribbon (`fs_creek`).
+fn shade_stream(in: FlowOut, front: bool) -> vec4<f32> {
     let look = flow_look();
     let pixel = pixel_footprint(in.rel);
     let speed = length(in.vel);
@@ -1592,6 +1628,12 @@ fn fs_flow(in: FlowOut, @builtin(front_facing) front: bool) -> @location(0) vec4
         white += plunge_trail(in.rel, in.vel) * running;
     }
     foam += rp.y * 1.2 + white;
+    // A creek's steps: the jump at each one's foot boils white, torn into lumps carried off
+    // down the pool, and the chute above it runs aerated.
+    // Torn into froth and darker gaps, fewer gaps where it boils hardest.
+    let raw = mix(l0, l1, wgt) / 0.875;
+    let froth = smoothstep(0.55 - 0.35 * in.white, 0.8 - 0.25 * in.white, raw);
+    foam += in.white * froth * 0.8;
     let lap = 0.5 + 0.5 * sin(t * 1.3 + value_noise2(wp * 0.7) * 6.0);
     foam += (1.0 - smoothstep(0.002, 0.01, in.depth)) * lap * 0.5;
     var color: vec3<f32>;
