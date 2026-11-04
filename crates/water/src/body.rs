@@ -599,6 +599,11 @@ pub struct WaterSettings {
     pub mirror_reflections: bool,
     /// The mirror's picture against the pixels the water covers on screen (0.05..2).
     pub mirror_resolution: f32,
+    /// The most the mirror's reflected view draws at (a game at a lower preset keeps its own;
+    /// `None`: the game's): the reflection, seen blurred and through the waves, skips the
+    /// costliest Ultra effects, as Unreal's planar reflections render with their own
+    /// show-flags and HDRP's planar probes with their own frame settings.
+    pub mirror_quality: Option<engine_world::QualityPreset>,
     /// The wind roughens a lake only where it reaches the water: calm in the lee of banks and
     /// crags, rougher downwind ([`crate::shelter`]).
     pub wind_shelter: bool,
@@ -626,6 +631,7 @@ impl Default for WaterSettings {
             cpu_surface: false,
             mirror_reflections: lake,
             mirror_resolution: 0.5,
+            mirror_quality: Some(engine_world::QualityPreset::High),
             wind_shelter: lake,
         }
     }

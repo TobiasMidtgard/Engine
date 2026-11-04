@@ -74,6 +74,7 @@ impl Plugin for WaterPlugin {
         app.insert_resource(Water(Arc::new(state::WaterProvider(shared.0.clone()))))
             .insert_resource(shared)
             .init_resource::<sim::SimBook>()
+            .init_resource::<mirror::LakeMirror>()
             .init_resource::<sim::RipplesInFlight>()
             .init_resource::<drops::SplashDrops>()
             .init_resource::<surface::CpuSurface>()

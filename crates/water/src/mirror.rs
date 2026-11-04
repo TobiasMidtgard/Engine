@@ -11,7 +11,8 @@
 
 use engine_core::math::DVec2;
 use engine_core::prelude::*;
-use engine_render::PlanarReflection;
+use engine_render::{Camera, PlanarReflection};
+use engine_world::{QualityPreset, Scalability};
 
 use crate::body::{WaterExtent, WaterSettings};
 use crate::state::{BodyState, SharedWater};
@@ -45,17 +46,49 @@ pub(crate) fn mirror_range(b: &BodyState, eye: DVec3) -> Option<f64> {
     (d < REACH_M).then_some(d.max(0.0))
 }
 
+/// The cameras the mirror may follow: the active one of highest order that isn't an extra
+/// view (as `engine_render::frame::active_camera` picks for the main view).
+type Cameras<'w, 's> = Query<
+    'w,
+    's,
+    (
+        &'static Camera,
+        &'static GlobalTransform,
+        Has<engine_render::ExtraView>,
+    ),
+>;
+
+/// The mirror entity's parts the system keeps in step.
+type MirrorParts<'w, 's> = Query<
+    'w,
+    's,
+    (
+        &'static mut PlanarReflection,
+        &'static mut Transform,
+        &'static mut GlobalTransform,
+    ),
+    Without<Camera>,
+>;
+
 /// Put the mirror on the nearest body that can have one (Extract, before the renderer places
-/// the mirror's view), or take it away.
-pub(crate) fn lake_mirror_system(world: &mut World) {
-    let on = world
-        .get_resource::<WaterSettings>()
-        .is_none_or(|s| s.mirror_reflections);
-    let resolution = world
-        .get_resource::<WaterSettings>()
-        .map_or(0.5, |s| s.mirror_resolution);
-    let eye = engine_render::frame::active_camera(world).map(|(_, _, gt)| gt.translation());
-    let best = match (on, eye, world.get_resource::<SharedWater>()) {
+/// the mirror's view), or take it away. Not exclusive, and it writes the mirror only when its
+/// body, place or settings change, so its change ticks don't fire every frame.
+pub(crate) fn lake_mirror_system(
+    settings: Option<Res<WaterSettings>>,
+    scalability: Option<Res<Scalability>>,
+    water: Option<Res<SharedWater>>,
+    cameras: Cameras,
+    mut mirrors: MirrorParts,
+    mut lake: ResMut<LakeMirror>,
+    mut commands: Commands,
+) {
+    let settings = settings.as_deref().cloned().unwrap_or_default();
+    let eye = cameras
+        .iter()
+        .filter(|(c, _, extra)| c.active && !extra)
+        .max_by_key(|(c, _, _)| c.order)
+        .map(|(_, gt, _)| gt.translation());
+    let best = match (settings.mirror_reflections, eye, water) {
         (true, Some(eye), Some(water)) => {
             let state = water.0.read();
             state
@@ -67,35 +100,57 @@ pub(crate) fn lake_mirror_system(world: &mut World) {
         }
         _ => None,
     };
-    let mut mirror = world
-        .get_resource::<LakeMirror>()
-        .copied()
-        .unwrap_or_default();
-    match best {
-        Some((body, center, radius)) => {
-            let at = GlobalTransform::from_translation_rotation(center, Quat::IDENTITY);
-            let reflection =
-                PlanarReflection::new(Vec2::splat(radius * 2.0)).with_resolution(resolution);
-            let entity = mirror
-                .entity
-                .filter(|e| world.get_entity(*e).is_ok())
-                .unwrap_or_else(|| world.spawn(Name::new("Lake mirror")).id());
-            world
-                .entity_mut(entity)
-                .insert((reflection, at.to_transform(), at));
-            mirror = LakeMirror {
-                entity: Some(entity),
-                body: Some(body),
-            };
+    let Some((body, center, radius)) = best else {
+        // Switched off, not despawned: its view's state (built in the frame it first renders,
+        // 121 ms of the lake arrival on the PC, round 24) waits for the next lake.
+        if let Some((mut r, _, _)) = lake.entity.and_then(|e| mirrors.get_mut(e).ok())
+            && r.on
+        {
+            r.on = false;
         }
+        if lake.body.is_some() {
+            lake.body = None;
+        }
+        return;
+    };
+    let at = GlobalTransform::from_translation_rotation(center, Quat::IDENTITY);
+    let mut reflection = PlanarReflection::new(Vec2::splat(radius * 2.0))
+        .with_resolution(settings.mirror_resolution);
+    if let Some(cap) = mirror_quality(settings.mirror_quality, scalability.as_deref()) {
+        reflection = reflection.with_quality(cap);
+    }
+    match lake.entity.and_then(|e| mirrors.get_mut(e).ok()) {
+        Some((mut r, mut tf, mut gt)) => {
+            r.set_if_neq(reflection);
+            tf.set_if_neq(at.to_transform());
+            gt.set_if_neq(at);
+        }
+        // Spawned with the rest of the frame's commands: the mirror's view starts a frame
+        // later.
+        None if lake.entity.is_none() => {
+            let e = commands
+                .spawn((Name::new("Lake mirror"), reflection, at.to_transform(), at))
+                .id();
+            lake.entity = Some(e);
+        }
+        // Spawned last frame and not in yet, or gone: wait, or spawn again.
         None => {
-            if let Some(e) = mirror.entity.take() {
-                world.despawn(e);
+            if lake.entity.is_some_and(|e| commands.get_entity(e).is_err()) {
+                lake.entity = None;
             }
-            mirror.body = None;
         }
     }
-    world.insert_resource(mirror);
+    if lake.body != Some(body) {
+        lake.body = Some(body);
+    }
+}
+
+/// The reflected view's quality: the game's, held to `cap` when the game draws above it.
+fn mirror_quality(cap: Option<QualityPreset>, game: Option<&Scalability>) -> Option<Scalability> {
+    let cap = cap?;
+    let rank = |p: QualityPreset| QualityPreset::ALL.iter().position(|q| *q == p);
+    let game = game.map_or(QualityPreset::default(), |s| s.preset);
+    (rank(game) > rank(cap)).then(|| Scalability::preset(cap))
 }
 
 #[cfg(test)]

@@ -476,6 +476,38 @@ fn the_mirrors_numbers_go_to_zero_once_it_is_gone() {
     }
 }
 
+/// A mirror switched off and on again starts its view where it left it: same camera, same
+/// picture targets, not built anew (a lake mirror moves from lake to lake that way).
+#[test]
+fn a_mirror_switched_off_and_on_keeps_its_view() {
+    let mut app = wall_app(true);
+    app.update_n(3);
+    if let Some(d) = app.world.get_resource::<RenderDisabled>() {
+        eprintln!("skipping: no GPU ({})", d.0);
+        return;
+    }
+    let mirror = app
+        .world
+        .query_filtered::<Entity, With<PlanarReflection>>()
+        .single(&app.world)
+        .unwrap();
+    let picture = |app: &App| planar_reflection_picture(&app.world, mirror).cloned();
+    let before = picture(&app).expect("a picture while on");
+    app.world.get_mut::<PlanarReflection>(mirror).unwrap().on = false;
+    app.update_n(3);
+    assert!(picture(&app).is_none(), "no picture while off");
+    let get = |app: &App, key: &str| app.world.resource::<Diagnostics>().get(key).unwrap_or(-1.0);
+    assert_eq!(get(&app, "render.extra_views_ms"), 0.0, "no view while off");
+    app.world.get_mut::<PlanarReflection>(mirror).unwrap().on = true;
+    app.update_n(3);
+    let after = picture(&app).expect("a picture once on again");
+    assert_eq!(after.camera, before.camera, "the same view camera");
+    assert!(
+        after.depth == before.depth,
+        "the same depth target, not built anew"
+    );
+}
+
 /// Where the sun's light travels: down, away from the camera and a little to the right.
 const SUN_TRAVEL: DVec3 = DVec3::new(0.3, -0.5, -0.8);
 /// The wall's front face and the post in front of it.

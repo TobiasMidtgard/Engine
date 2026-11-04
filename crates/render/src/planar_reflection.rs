@@ -51,6 +51,10 @@ pub struct PlanarReflection {
     pub resolution: f32,
     /// Quality of the reflected view instead of the game's (`Scalability`).
     pub quality: Option<engine_world::Scalability>,
+    /// Off: no view or picture, as while the camera doesn't see it, but the view's state (its
+    /// targets) is kept, so turning it on again doesn't build it anew (a mirror that moves
+    /// from lake to lake is switched off between them rather than despawned).
+    pub on: bool,
 }
 
 impl Default for PlanarReflection {
@@ -59,6 +63,7 @@ impl Default for PlanarReflection {
             size: Vec2::splat(10.0),
             resolution: 0.5,
             quality: None,
+            on: true,
         }
     }
 }
@@ -339,9 +344,12 @@ pub(crate) fn place_reflection_views(world: &mut World) {
         .unwrap_or(UVec2::ONE);
     let (_, viewport) = crate::frame::camera_viewport(world, window);
     for (entity, mirror, at) in mirrors {
-        let placed = main.as_ref().and_then(|(_, camera, eye)| {
-            place(&mirror, &at, camera, eye, viewport).map(|p| (p, *camera))
-        });
+        let placed = main
+            .as_ref()
+            .filter(|_| mirror.on)
+            .and_then(|(_, camera, eye)| {
+                place(&mirror, &at, camera, eye, viewport).map(|p| (p, *camera))
+            });
         let camera = *views.0.entry(entity).or_insert_with(|| {
             world
                 .spawn((

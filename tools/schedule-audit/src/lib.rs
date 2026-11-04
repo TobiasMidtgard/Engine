@@ -83,7 +83,7 @@ mod tests {
     /// "Let systems run side by side": a `Query`/`Res` system, or a `run_if` so it runs only
     /// when it has work).
     const EXCLUSIVE: &[(&str, usize, &[&str])] = &[
-        ("Extract", 0, &["engine_water::lake_mirror_system"]),
+        ("Extract", 0, &[]),
         (
             "First",
             0,

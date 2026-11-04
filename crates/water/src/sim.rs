@@ -24,6 +24,8 @@ pub struct SimBook {
     pub layout: u64,
     /// Seconds since the ripple speeds were last rebuilt.
     pub since_rebuild: f32,
+    /// Ripple grid rebuilds so far (a diagnostic: `water.ripple_rebuilds`).
+    pub rebuilds: u64,
     /// Ripple grid settings in use (cells, cell size).
     pub ripple_dims: (u32, f32),
 }
@@ -137,8 +139,9 @@ pub fn sync_bodies_system(
     let changes: Vec<_> = changes.read().copied().collect();
     let builds = keep_beds(&mut state, &mut beds, &changes);
     // A lake's bed grid coming in changes the layout too: what waited for it reads it then.
+    // A grid read again that came back the same doesn't.
     for b in &state.bodies {
-        b.bed.is_some().hash(&mut hasher);
+        b.bed.as_ref().map(|r| r.rev).hash(&mut hasher);
     }
     let layout = hasher.finish();
     if layout != book.layout {
@@ -188,6 +191,8 @@ pub struct BedJobs {
     pub jobs: Vec<(BedAsk, Task<BedCache>)>,
     /// The ground provider they were read from (an address; a new provider reads them anew).
     ground: usize,
+    /// Lakes whose grid is read again (the ground provider changed with no edit to say where).
+    stale: Vec<Entity>,
 }
 
 impl BedJobs {
@@ -212,12 +217,37 @@ fn install_bed(state: &mut WaterState, ask: BedAsk, grid: BedCache) {
     if let Some(b) = state.bodies.iter_mut().find(|b| b.entity == ask.entity)
         && same_place((b.center, b.yaw), (ask.center, ask.yaw))
     {
+        let rev = match &b.bed {
+            // Read again after the ground provider changed: the same bed keeps its revision.
+            Some(old) if same_place((old.center, old.yaw), (ask.center, ask.yaw)) => {
+                if same_bed(&old.grid, &grid) {
+                    return;
+                }
+                old.rev.wrapping_add(1)
+            }
+            Some(old) => old.rev.wrapping_add(1),
+            None => 0,
+        };
         b.bed = Some(crate::state::BedRef {
             center: ask.center,
             yaw: ask.yaw,
             grid: std::sync::Arc::new(grid),
+            rev,
         });
     }
+}
+
+/// Bed heights that differ by less than this, m, are the same bed.
+const SAME_BED_M: f32 = 0.01;
+
+/// Two reads of a lake's bed that found the same ground.
+fn same_bed(a: &BedCache, b: &BedCache) -> bool {
+    a.n == b.n
+        && a.half == b.half
+        && a.rel
+            .iter()
+            .zip(&b.rel)
+            .all(|(x, y)| (x.is_nan() && y.is_nan()) || (x - y).abs() < SAME_BED_M)
 }
 
 /// Keep each ground-bedded lake's bed grid in step with it: put in the finished reads, drop
@@ -228,12 +258,23 @@ fn keep_beds(
     beds: &mut BedJobs,
     changes: &[engine_world::TerrainChanged],
 ) -> Vec<BedAsk> {
+    // A new ground provider (the terrain installs one for every edit, and when a planet comes
+    // near or moves): the grids read so far stay in use, so what depends on them (the ripple
+    // grid's depths, the streams' reservoirs) isn't rebuilt each time, as streaming engines
+    // keep the old LOD showing until the new one is in. Edits come with their own
+    // `TerrainChanged`, read into the grids below; a new provider with none is read again
+    // in the background, and only a read that comes back different replaces the old.
     let ground = std::sync::Arc::as_ptr(&state.ground.0) as *const () as usize;
     if beds.ground != ground {
         beds.ground = ground;
-        beds.jobs.clear();
-        for b in &mut state.bodies {
-            b.bed = None;
+        if changes.is_empty() {
+            beds.jobs.clear();
+            beds.stale = state
+                .bodies
+                .iter()
+                .filter(|b| b.bed.is_some())
+                .map(|b| b.entity)
+                .collect();
         }
     }
     // Finished reads.
@@ -285,13 +326,18 @@ fn keep_beds(
                 && j.half == half
                 && same_place((j.center, j.yaw), (b.center, b.yaw))
         });
-        if b.bed.is_none() && !asked {
+        let stale = beds.stale.contains(&b.entity);
+        if (b.bed.is_none() || stale) && !asked {
             beds.jobs.retain(|(j, _)| j.entity != b.entity);
             builds.push(ask);
+        }
+        if stale {
+            beds.stale.retain(|e| *e != b.entity);
         }
     }
     beds.jobs
         .retain(|(j, _)| state.bodies.iter().any(|b| b.entity == j.entity));
+    beds.stale.clear();
     builds
 }
 
@@ -490,6 +536,12 @@ impl StillDepths {
         }
     }
 
+    /// Read again after the lakes changed under a grid that stayed put, and not finished:
+    /// what isn't read yet shows the depths from before.
+    fn catching_up(&self) -> bool {
+        self.unread > 0 && !self.prior.is_empty()
+    }
+
     /// Depth under cell `idx`: NaN where there is no still water or it isn't read yet.
     fn at_cell(&self, idx: usize) -> f32 {
         let d = match self.depth[idx] {
@@ -544,6 +596,10 @@ impl CoarseStill {
         };
         self.depths
             .read((origin, N, cell, layout), bodies, ground, level_y, focus);
+        // Read again under the same cells: the old bed stays until the read is through.
+        if self.depths.catching_up() && field.coarse.as_ref().is_some_and(|b| b.origin == origin) {
+            return;
+        }
         let (mut sum, mut count) = (0.0f64, 0usize);
         let mut absorb = vec![0.0; N * N];
         let mut depths = vec![0.0; N * N];
@@ -678,7 +734,7 @@ pub fn ripple_system(
     state.ripples.pending.clear();
     let span = tracing::info_span!("water", name = "ripples: rebuild").entered();
     if rebuild {
-        field.recenter(center);
+        let moved = field.recenter(center);
         book.since_rebuild = 0.0;
         // The lakes under the grid, read with the water unlocked (AGENTS.md, "Performance
         // rules"): only cells the grid newly covers, or all of them when the lakes change.
@@ -701,56 +757,67 @@ pub fn ripple_system(
             f.y,
             DVec2::new(f.x, f.z),
         );
-        state = shared.0.write();
-        let (origin, n, cell) = (field.origin, field.n, field.cell);
-        // Streams, cell by cell only where each one lies (cheap: a grid lookup).
-        let mut stream = vec![(f32::NAN, None::<Vec2>); n * n];
-        for sim in state.flows.iter().filter(|f| f.visible) {
-            let (c, radius) = sim.bounds();
-            let lo = ((DVec2::new(c.x, c.z) - DVec2::splat(radius) - origin) / cell as f64)
-                .floor()
-                .max(DVec2::ZERO);
-            let hi = ((DVec2::new(c.x, c.z) + DVec2::splat(radius) - origin) / cell as f64)
-                .ceil()
-                .min(DVec2::splat(n as f64));
-            for j in lo.y as usize..hi.y as usize {
-                for i in lo.x as usize..hi.x as usize {
-                    let p = origin + DVec2::new(i as f64 + 0.5, j as f64 + 0.5) * cell as f64;
-                    if let Some((_, depth, v)) = sim.sample(DVec3::new(p.x, sim.origin.y, p.y)) {
-                        let s = &mut stream[j * n + i];
-                        s.0 = s.0.max(depth);
-                        s.1 = s.1.or(Some(v));
+        // The lakes read again under a grid that stayed put (one came in or changed): the
+        // cells not read yet keep their old depths, so the speeds, streams and swash wait for
+        // the whole read rather than being rebuilt at every step of it (each rebuild is a pass
+        // over every cell; at the fortress they ran every step, 28-36 ms, round 24).
+        'full: {
+            if !moved && still.catching_up() {
+                break 'full;
+            }
+            book.rebuilds += 1;
+            state = shared.0.write();
+            let (origin, n, cell) = (field.origin, field.n, field.cell);
+            // Streams, cell by cell only where each one lies (cheap: a grid lookup).
+            let mut stream = vec![(f32::NAN, None::<Vec2>); n * n];
+            for sim in state.flows.iter().filter(|f| f.visible) {
+                let (c, radius) = sim.bounds();
+                let lo = ((DVec2::new(c.x, c.z) - DVec2::splat(radius) - origin) / cell as f64)
+                    .floor()
+                    .max(DVec2::ZERO);
+                let hi = ((DVec2::new(c.x, c.z) + DVec2::splat(radius) - origin) / cell as f64)
+                    .ceil()
+                    .min(DVec2::splat(n as f64));
+                for j in lo.y as usize..hi.y as usize {
+                    for i in lo.x as usize..hi.x as usize {
+                        let p = origin + DVec2::new(i as f64 + 0.5, j as f64 + 0.5) * cell as f64;
+                        if let Some((_, depth, v)) = sim.sample(DVec3::new(p.x, sim.origin.y, p.y))
+                        {
+                            let s = &mut stream[j * n + i];
+                            s.0 = s.0.max(depth);
+                            s.1 = s.1.or(Some(v));
+                        }
                     }
                 }
             }
+            drop(state);
+            let index = |p: DVec2| {
+                let g = ((p - origin) / cell as f64 - DVec2::splat(0.5)).round();
+                (g.y as usize * n + g.x as usize).min(n * n - 1)
+            };
+            // The beaches under the grid, for the swash (none over streams: they run their own).
+            if let Some(bed) = swash.read(
+                origin,
+                field.size(),
+                book.layout,
+                &bodies,
+                &beaches,
+                &ground,
+                f,
+                &|p| !stream[index(p)].0.is_nan(),
+            ) {
+                field.swash = bed.any().then_some(bed);
+            }
+            // Lakes and streams: footsteps, cloth and swimmers ring both.
+            let still = &*still;
+            field.rebuild_speeds(settings.ripple_speed, |p| {
+                let k = index(p);
+                let d = still.at_cell(k).max(stream[k].0);
+                (!d.is_nan()).then_some(d)
+            });
+            // Streams carry their rings and foam downstream.
+            field.rebuild_drift(|p| stream[index(p)].1);
         }
-        drop(state);
-        let index = |p: DVec2| {
-            let g = ((p - origin) / cell as f64 - DVec2::splat(0.5)).round();
-            (g.y as usize * n + g.x as usize).min(n * n - 1)
-        };
-        // The beaches under the grid, for the swash (none over streams: they run their own).
-        if let Some(bed) = swash.read(
-            origin,
-            field.size(),
-            book.layout,
-            &bodies,
-            &beaches,
-            &ground,
-            f,
-            &|p| !stream[index(p)].0.is_nan(),
-        ) {
-            field.swash = bed.any().then_some(bed);
-        }
-        // Lakes and streams: footsteps, cloth and swimmers ring both.
-        let still = &*still;
-        field.rebuild_speeds(settings.ripple_speed, |p| {
-            let k = index(p);
-            let d = still.at_cell(k).max(stream[k].0);
-            (!d.is_nan()).then_some(d)
-        });
-        // Streams carry their rings and foam downstream.
-        field.rebuild_drift(|p| stream[index(p)].1);
     } else {
         drop(state);
     }
@@ -1125,9 +1192,14 @@ impl FlowJob {
 const SPRAY_PERIOD: f32 = 0.25;
 
 /// Publish counters for `engine.describe` / `render.stats`.
-pub fn diagnostics_system(shared: Res<SharedWater>, mut diagnostics: ResMut<Diagnostics>) {
+pub fn diagnostics_system(
+    shared: Res<SharedWater>,
+    book: Res<SimBook>,
+    mut diagnostics: ResMut<Diagnostics>,
+) {
     let state = shared.0.read();
     diagnostics.set("water.bodies", state.bodies.len() as f64);
+    diagnostics.set("water.ripple_rebuilds", book.rebuilds as f64);
     diagnostics.set("water.flow_regions", state.flows.len() as f64);
     let energy = if state.ripples.has_water {
         state.ripples.energy() as f64

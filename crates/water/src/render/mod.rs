@@ -251,17 +251,33 @@ fn mist_puff(
         (0.55 * rise, 1.3, 0.3),
         (1.1 * rise, 1.6, 0.12),
     ];
-    for (k, (lift, scale, density)) in layers.into_iter().enumerate() {
+    // Each layer is a cluster of overlapping puffs, not one disc: one big flat card reads as
+    // a sheet hung in the air (playtest 2026-11-01 item 34; games build waterfall mist from
+    // many soft particles faded against what they meet, NVIDIA's soft particles).
+    let side = right.normalize_or_zero();
+    let puffs = layers
+        .into_iter()
+        .enumerate()
+        .flat_map(|(k, (lift, scale, density))| {
+            let spread = radius * scale * 0.75;
+            [
+                (k, 0.0, lift, scale * 0.8, density),
+                (k + 3, -spread, lift * 0.85, scale * 0.5, density * 0.5),
+                (k + 6, spread, lift * 1.1, scale * 0.45, density * 0.4),
+            ]
+        });
+    for (k, offset, lift, scale, density) in puffs {
         let r = radius * scale;
         // Out from the rock the water came down (where it lands against a wall the cloud
         // would be all but hidden in it) and up.
-        let center = rel + outward * (radius * 0.6) + Vec3::Y * (radius * lift);
+        let center = rel + outward * (radius * 0.6) + Vec3::Y * (radius * lift) + side * offset;
         let corner = |cx: f32, cy: f32| FallVertex {
             rel_q: (center + (right * cx + up * cy) * r).extend(0.0).to_array(),
             normal_frac: [cx, cy, r, strength * density],
             across_side: [0.0; 4],
             uv_speed: [seed + k as f32 * 13.7, 0.0, 0.0, 1.0],
-            edge: [0.0; 4],
+            // The pool's surface (camera-relative height): the cloud fades out into it.
+            edge: [rel.y, 0.0, 0.0, 0.0],
         };
         out.extend_from_slice(&[
             corner(-1.0, -1.0),
@@ -539,7 +555,19 @@ pub struct WaterFeature {
     extra_view: bool,
     /// The lake mirror's picture this view samples (color, depth).
     mirror: Option<(wgpu::TextureView, wgpu::TextureView)>,
+    /// The body the mirror reflects for, how many frames in a row it has had a picture there
+    /// (the main view samples it only after [`MIRROR_SETTLE_FRAMES`]), and the eye last frame.
+    mirror_age: (Option<Entity>, u32, DVec3),
 }
+
+/// Frames a lake mirror's picture is left to settle before the water shows it, after the
+/// mirror comes on or moves to another body: its first pictures after loading (the view's
+/// first frame, a camera that just jumped there) put a bright straight-edged wedge on the
+/// night lake (round 24 on the PC). Screen-space reflections stand in meanwhile.
+const MIRROR_SETTLE_FRAMES: u32 = 8;
+
+/// A camera that moved farther than this in a frame, m, jumped.
+const MIRROR_JUMP_M: f64 = 30.0;
 
 fn create_texture(
     device: &wgpu::Device,
@@ -1702,11 +1730,24 @@ impl RenderFeature for WaterFeature {
             .entity
             .filter(|e| engine_render::rendering_reflection(world) == Some(*e))
             .and(lake.body);
-        let picture = lake
+        let mut picture = lake
             .entity
             .filter(|_| !view.extra_view)
             .and_then(|e| engine_render::planar_reflection_picture(world, e))
             .cloned();
+        if !view.extra_view {
+            let age = &mut self.mirror_age;
+            // A camera that jumped (a tour stop, a teleport) starts the count again.
+            let jumped = age.2.distance(view.origin) > MIRROR_JUMP_M;
+            *age = match (&picture, age.0 == lake.body && !jumped) {
+                (Some(_), true) => (lake.body, age.1.saturating_add(1), view.origin),
+                (Some(_), false) => (lake.body, 1, view.origin),
+                (None, _) => (lake.body, 0, view.origin),
+            };
+            if age.1 < MIRROR_SETTLE_FRAMES {
+                picture = None;
+            }
+        }
         let shelter = world.get_resource::<crate::shelter::ShelterMask>();
         let shelter_body = shelter.and_then(|m| m.body);
         let shelter_place = shelter.map(|m| (m.corner, m.cell));
@@ -2414,19 +2455,23 @@ mod tests {
             up,
             &mut v,
         );
-        // The cloud on the pool and two layers of plume over it, each rising and spreading.
-        assert_eq!(v.len(), 18);
+        // The cloud on the pool and two layers of plume over it, each rising and spreading,
+        // each a cluster of three puffs: a big one over the foot and smaller ones either side.
+        assert_eq!(v.len(), 3 * 3 * 6);
         let pos = |f: &FallVertex| Vec3::from_slice(&f.rel_q[..3]);
+        let center = |puff: &[FallVertex]| puff.iter().map(pos).sum::<Vec3>() / 6.0;
         let mut below = (foot.y, 0.0);
-        for layer in v.chunks(6) {
-            let center = layer.iter().map(pos).sum::<Vec3>() / 6.0;
-            let radius = layer[0].normal_frac[2];
-            assert!(center.y > below.0 && radius > below.1, "{center} {radius}");
-            assert!((center.with_y(0.0) - foot.with_y(0.0)).length() < 1e-4);
-            below = (center.y, radius);
+        for layer in v.chunks(18) {
+            let (main, left, right_puff) = (&layer[..6], &layer[6..12], &layer[12..]);
+            let (c, radius) = (center(main), main[0].normal_frac[2]);
+            assert!(c.y > below.0 && radius > below.1, "{c} {radius}");
+            assert!((c.with_y(0.0) - foot.with_y(0.0)).length() < 1e-4);
+            assert!(center(left).x < c.x && center(right_puff).x > c.x);
+            assert!(left[0].normal_frac[2] < radius && right_puff[0].normal_frac[2] < radius);
+            below = (c.y, radius);
         }
         let radius = v[0].normal_frac[2];
-        assert!((1.5..3.0).contains(&radius), "{radius}");
+        assert!((1.2..2.5).contains(&radius), "{radius}");
         for f in &v {
             assert_eq!(f.uv_speed[3], 1.0);
             assert!((pos(f).z - foot.z).abs() < 1e-4, "not facing the camera");

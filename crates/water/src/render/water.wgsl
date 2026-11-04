@@ -1662,11 +1662,16 @@ fn fall_mist(in: FallOut) -> vec4<f32> {
     let pix = vec2<i32>(clamp(in.clip.xy, vec2<f32>(0.0), size - 1.0));
     let z_scene = linear_depth(textureLoad(scene_depth, pix, 0));
     alpha *= saturate((z_scene - max(view_depth(in.rel), 1e-3)) / (in.normal.z * 0.35));
+    // ...and into the pool's surface, which writes no depth (`edge` holds its height): no
+    // cloud under the water, and no hard line where a card meets it.
+    alpha *= smoothstep(in.edge - 0.05, in.edge + max(in.normal.z * 0.3, 0.4), in.rel.y);
     if (alpha < 0.003) { discard; }
     // Fine droplets: bright toward the sun, lit by the open sky in front of the cliff.
     let v = -in.rel / max(length(in.rel), 1e-4);
     let l = frame.sun_dir.xyz;
-    let sun = water_sun(in.rel) * shadow_factor(in.rel, l);
+    // Light diffuses through the cloud, so a shadow edge on it is soft, never the shadow
+    // map's line drawn across a flat card (the hard dark arc at the falls' foot).
+    let sun = water_sun(in.rel) * mix(shadow_factor(in.rel, l), 1.0, 0.55);
     let phase = 0.3 + 1.6 * pow(saturate(dot(-v, l)), 6.0);
     let out_dir = normalize(vec3<f32>(v.x, 0.0, v.z) + vec3<f32>(0.0, 1e-3, 0.0));
     let n = normalize(out_dir + vec3<f32>(0.0, 0.7, 0.0));
@@ -1814,16 +1819,28 @@ fn fs_falls(in: FallOut) -> @location(0) vec4<f32> {
     // Sheets from neighboring lips overlap where they spread over rock: each is a thin film
     // there, so together they still read as one lacy veil and not an opaque white slab.
     alpha *= mix(1.0, 0.55, rock);
-    // Between the tongues only the strongest streaks pour, as threads.
-    alpha *= mix(smoothstep(0.55, 0.85, s) * 0.85, 1.0, tongue);
+    // Between the tongues the flow is thinner and streakier, still water.
+    alpha *= mix(0.35 + 0.6 * smoothstep(0.3, 0.8, s), 1.0, tongue);
+    // The aerated core: past its glassy first tenths of a second a falling jet is white
+    // water, opaque in its middle and eroded only at its edges (a jet loses its solid core
+    // past L_b = 6 q^0.32, yet its body stays dense; games draw it as an opaque, masked
+    // white sheet, waterfall-research.md). Thin threads were all the showcase falls showed.
+    let core = body * smoothstep(0.08, 0.35, tau) * (1.0 - rock * 0.45)
+        * (1.0 - smoothstep(0.3, 0.85, edge_x + (s - 0.5) * 0.3)) * mix(0.7, 1.0, tongue)
+        * (1.0 - smoothstep(0.08, 0.3, -tau * in.look.w));
+    alpha = max(alpha, core * smoothstep(0.12, 0.45, s * 0.7 + packets * 0.3) * 0.95);
+    // ...and white with air.
+    aerated = max(aerated, core * 0.9);
     // Soft where it meets the rock behind it and the pool it lands in.
     let size = vec2<f32>(textureDimensions(scene_color));
     let pix = vec2<i32>(clamp(in.clip.xy, vec2<f32>(0.0), size - 1.0));
     let z_scene = linear_depth(textureLoad(scene_depth, pix, 0));
     let z_frag = max(view_depth(in.rel), 1e-3);
     // (A sheet on the rock lies a few centimeters off it: soft over far less.)
-    keep *= saturate((z_scene - z_frag) / mix(0.5, 0.03, rock));
-    alpha *= saturate((z_scene - z_frag) / mix(0.5, 0.03, rock));
+    // (Free falling, over 15 cm: a curtain a hand's width off the cliff is still a full
+    // curtain, not half see-through as with a fade over half a meter.)
+    keep *= saturate((z_scene - z_frag) / mix(0.15, 0.03, rock));
+    alpha *= saturate((z_scene - z_frag) / mix(0.15, 0.03, rock));
     let stray = in.edge * smoothstep(0.75, 1.0, edge_x) * (1.0 - smoothstep(0.88, 1.0, abs(side)));
     alpha = max(alpha, stray * body * 0.7 * smoothstep(0.62, 0.9, s) * saturate((z_scene - z_frag) / 0.03));
     if (alpha < 0.004) { discard; }

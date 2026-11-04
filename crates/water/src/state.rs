@@ -37,6 +37,9 @@ pub struct BedRef {
     pub center: DVec3,
     pub yaw: f32,
     pub grid: Arc<BedCache>,
+    /// Counts the reads of it that came back different (a read again after the ground provider
+    /// changed that found the same bed keeps it, so what depends on the bed isn't rebuilt).
+    pub rev: u32,
 }
 
 impl BodyState {
@@ -449,6 +452,7 @@ mod tests {
                     45.0,
                     ground,
                 )),
+                rev: 0,
             }),
         }
     }
