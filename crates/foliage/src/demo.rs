@@ -329,6 +329,15 @@ pub fn forest_region() -> EcologyRegion {
             "grass",
             "wildflowers",
             "bluebell",
+            // The stands' other trees: aspen and rowan in the clearings, alder and willow by
+            // the spring, beech and larch among the oaks, juniper on the dry ridge.
+            "aspen",
+            "rowan",
+            "alder",
+            "goat willow",
+            "beech",
+            "larch",
+            "juniper",
         ]
         .map(String::from)
         .to_vec(),
@@ -1123,7 +1132,12 @@ mod tests {
                     "pine young",
                     "spruce young",
                     "birch",
-                    "hazel"
+                    "hazel",
+                    "aspen",
+                    "aspen young",
+                    "rowan young",
+                    "larch young",
+                    "beech young"
                 ]
             ) >= 5,
             "{clearing:?}"

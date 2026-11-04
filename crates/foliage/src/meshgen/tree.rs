@@ -1335,6 +1335,13 @@ fn moss_foot(mesh: &mut engine_render::Mesh, seed: u64) {
 const TRUNK_SIDES: u32 = 14;
 
 /// Vertex color for bark at height `y` and `around` (0..1) the stem.
+/// A spruce's (or juniper's) limbs hide under its needle shelves: past the middle level only
+/// its trunk shows, and its shadows cast the trunk alone. A pine's or a larch's limbs show
+/// through its airy crown.
+pub fn limbs_hidden(sp: &PlantSpecies) -> bool {
+    sp.form == PlantForm::Conifer && sp.shape.leaf == LeafStyle::ShortNeedles
+}
+
 fn bark_color(sp: &PlantSpecies, y: f32, h: f32, ring: usize, around: f32, seed: u64) -> Vec4 {
     let n = engine_core::math::hash01(ring as i64, 0, 0, seed);
     let base = Vec3::from(sp.bark_color);
@@ -1359,6 +1366,17 @@ fn bark_color(sp: &PlantSpecies, y: f32, h: f32, ring: usize, around: f32, seed:
             let moss = Vec3::new(0.06, 0.09, 0.025);
             base.lerp(moss, (1.0 - (y / 0.9).min(1.0)).powi(2) * 0.6) * (0.8 + 0.3 * n)
         }
+        BarkStyle::Smooth => {
+            // Thin bark barely changes up the stem; green algae climb a little way from the
+            // foot.
+            let algae = Vec3::new(0.07, 0.09, 0.04);
+            base.lerp(algae, (1.0 - (y / 1.4).min(1.0)).powi(2) * 0.45) * (0.9 + 0.15 * n)
+        }
+        BarkStyle::Scaly => {
+            // Grayer and darker plates at the foot, the reddish scales above.
+            let foot = base * Vec3::new(0.62, 0.62, 0.68);
+            foot.lerp(base, smoothstep(0.0, 0.25 * h, y)) * (0.85 + 0.25 * n)
+        }
     };
     let ao = 0.55 + 0.45 * smoothstep(0.0, 0.7, y);
     (c * ao * bark_weathering(sp.shape.bark, y, around, seed)).extend(1.0)
@@ -1373,6 +1391,9 @@ fn bark_weathering(style: BarkStyle, y: f32, around: f32, seed: u64) -> Vec3 {
         BarkStyle::Plain => (0.85, 0.42, 0.08),
         BarkStyle::Pine => (0.4, 0.3, 0.05),
         BarkStyle::Birch => (0.3, 0.15, 0.0),
+        // Beech and rowan bark carries algae and crustose lichen in big patches.
+        BarkStyle::Smooth => (0.75, 0.35, 0.06),
+        BarkStyle::Scaly => (0.35, 0.25, 0.04),
     };
     let patch = 0.65 * bark::periodic_noise(around * 3.0, y * 0.8, 3, 1 << 12, seed ^ 0x1c4e)
         + 0.35 * bark::periodic_noise(around * 6.0, y * 1.6, 6, 1 << 13, seed ^ 0x51a7);
@@ -1412,7 +1433,7 @@ fn add_branches(
     let lod = matches!(detail, Detail::Far | Detail::Distant);
     let mid = detail == Detail::Mid;
     let many = branches.iter().filter(|b| b.level == 1).count() > 30;
-    let spruce_like = sp.form == PlantForm::Conifer && sp.shape.bark != BarkStyle::Pine;
+    let spruce_like = limbs_hidden(sp);
     for (bi, br) in branches.iter().enumerate() {
         // The trunk is drawn by the caller (split at the cut). Further off twigs vanish (they
         // are lost among the cards, as a spruce's inner branches are under its needle

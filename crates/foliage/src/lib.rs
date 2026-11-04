@@ -26,6 +26,7 @@ pub mod sim;
 pub mod solids;
 pub mod species;
 pub mod squash;
+pub mod stands;
 pub mod visuals;
 
 use engine_assets::Assets;

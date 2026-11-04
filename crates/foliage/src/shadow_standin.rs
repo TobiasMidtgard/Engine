@@ -87,8 +87,7 @@ impl StandIns {
     pub fn add(&mut self, sp: &crate::species::PlantSpecies, vis: &SpeciesVisual) {
         // A spruce's limbs hide under its needle shelves (its far level draws its trunk alone):
         // its shadows cast that trunk at every level, from 500 triangles instead of 6,000.
-        let limbs_hidden = sp.form == crate::species::PlantForm::Conifer
-            && sp.shape.bark != crate::species::BarkStyle::Pine;
+        let limbs_hidden = crate::meshgen::tree::limbs_hidden(sp);
         for v in &vis.variants {
             let mut map = |from: Option<Handle<Mesh>>, to: Option<Handle<Mesh>>| {
                 if let (Some(from), Some(to)) = (from, to) {

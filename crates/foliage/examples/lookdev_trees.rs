@@ -12,7 +12,7 @@
 //! birch and hazel, the pine's crown from below, a small mixed grove from 40 m and from
 //! 150 m, and a wood of 12,000 scenery trees from a hill (with and without the distant level). Name shots after the directory to render
 //! only those (`lineup`, `lineup_near`, `lineup_mid`, `lineup_lod`, `lineup_distant`, `roots`, `crown_front`,
-//! `leaves_close`, `crown_back`, `conifers`, `pine_crown`, `birch_hazel`, `grove`,
+//! `leaves_close`, `crown_back`, `conifers`, `lineup_stands` (the stands' other eight trees), `pine_crown`, `birch_hazel`, `grove`,
 //! `grove_far`, `valley`, `valley_far`, `far_woods`, `far_woods_off`), `textures`
 //! to save the leaf atlases, their normal maps, three of their mip levels and the mass atlases far
 //! crowns draw with instead, or `stats` to print triangle counts.
@@ -27,6 +27,19 @@ use engine_render::{Exposure, Screenshots};
 use engine_world::WeatherState;
 
 const STEP: f64 = 1.0 / 30.0;
+
+/// The trees the stands add (engine_foliage::stands), left to right along x.
+const STAND_LINEUP: [(&str, f64); 8] = [
+    ("beech", -44.0),
+    ("alder", -28.0),
+    ("aspen", -17.0),
+    ("larch", -6.0),
+    ("mountain birch", 5.0),
+    ("rowan", 15.0),
+    ("goat willow", 25.0),
+    ("juniper", 34.0),
+];
+const STAND_LINEUP_Z: f64 = 200.0;
 
 /// Point the sun so it shines along `-to_sun` (`to_sun` points from the ground to the sun).
 fn set_sun(world: &mut World, to_sun: Vec3) {
@@ -72,6 +85,10 @@ fn save_textures(out: &str) {
         ("birch", LeafKind::Small),
         ("pine", LeafKind::LongNeedles),
         ("spruce", LeafKind::ShortNeedles),
+        ("beech", LeafKind::Oval),
+        ("aspen", LeafKind::Round),
+        ("rowan", LeafKind::Pinnate),
+        ("larch", LeafKind::SoftNeedles),
     ] {
         let started = std::time::Instant::now();
         let t = leaf_textures(kind, 1024, 0x1eaf);
@@ -114,7 +131,10 @@ fn save_textures(out: &str) {
 fn print_stats() {
     use engine_foliage::meshgen::tree::woody;
     let library = engine_foliage::PlantLibrary::default();
-    for name in ["oak", "birch", "hazel", "pine", "spruce"] {
+    let names = ["oak", "birch", "hazel", "pine", "spruce"]
+        .into_iter()
+        .chain(STAND_LINEUP.map(|(n, _)| n));
+    for name in names {
         let sp = library.get(library.id(name).unwrap());
         let tris = |m: &Option<engine_render::Mesh>| m.as_ref().map_or(0, |m| m.triangle_count());
         let (mut near, mut mid, mut far, mut distant, mut leaves, mut hero) = (0, 0, 0, 0, 0, 0);
@@ -128,7 +148,7 @@ fn print_stats() {
             hero += tris(&m.foliage_hero);
         }
         println!(
-            "{name:7} near {:6} (leaves {:6})  leaf by leaf {:6}  mid {:5}  far {:5}  distant {:4}",
+            "{name:14} near {:6} (leaves {:6})  leaf by leaf {:6}  mid {:5}  far {:5}  distant {:4}",
             near / 4,
             leaves / 4,
             hero / 4,
@@ -241,6 +261,20 @@ fn main() {
         )
         .unwrap();
     }
+    // The stands' other trees, in a second lineup 200 m behind the camera's side.
+    for (name, x) in STAND_LINEUP {
+        if only_sp.as_deref().is_some_and(|o| o != name) {
+            continue;
+        }
+        spawn_plant(
+            &mut app.world,
+            name,
+            DVec3::new(x, 0.0, STAND_LINEUP_Z),
+            1.0,
+            genes(0, 0.0),
+        )
+        .unwrap();
+    }
     // A grove 300 m away: mixed species, varied genes.
     let grove = DVec3::new(0.0, 0.0, -300.0);
     let mut rng = Rng::new(11);
@@ -288,6 +322,16 @@ fn main() {
             "lineup",
             DVec3::new(-5.0, 4.0, 52.0),
             DVec3::new(-5.0, 8.0, 0.0),
+            front_sun,
+        );
+    }
+    if wanted("lineup_stands") {
+        shot(
+            &mut app,
+            &out,
+            "lineup_stands",
+            DVec3::new(-4.0, 4.0, STAND_LINEUP_Z + 52.0),
+            DVec3::new(-4.0, 7.0, STAND_LINEUP_Z),
             front_sun,
         );
     }

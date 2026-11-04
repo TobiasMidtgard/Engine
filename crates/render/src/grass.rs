@@ -926,6 +926,8 @@ pub struct GrassFeature {
     /// Made in `prepare_serial`, read in `prepare_shared`.
     fields_query: Option<FieldsQuery>,
     benders_query: Option<QueryState<(&'static GrassBender, &'static GlobalTransform)>>,
+    /// Thinned this frame to fit the records binding (warned once per stretch).
+    thinned_to_fit: bool,
 }
 
 type FieldsQuery = QueryState<(
@@ -1474,6 +1476,45 @@ impl RenderFeature for GrassFeature {
         // The cull pass: its jobs, each field's share of them, and the six draws it fills in,
         // each group's records after the last's (a draw's first vertex is 16 x its first
         // record: grass.wgsl).
+        // More blades than one binding of records holds (a wide meadow at a long draw distance
+        // on a GPU with small bindings): thin every chunk alike rather than drop the meadow. A
+        // chunk keeps its first blades, as distance thinning does, and blades are placed by
+        // hashing their index, so what stays is an even sample.
+        let limit = device.limits().max_storage_buffer_binding_size;
+        let budget = (limit / 2 / RECORD_BYTES).min(u32::MAX as u64 / 16);
+        let wanted: u64 = group_blades.iter().sum();
+        if wanted > budget {
+            let keep = budget as f64 / wanted as f64 * 0.98;
+            group_blades = [0; GROUPS];
+            self.stats.instances = 0;
+            self.stats.triangles = 0;
+            for job in &mut self.jobs {
+                let kept = ((job[1] - job[0]) as f64 * keep) as u32;
+                job[1] = job[0] + kept;
+                let (mode, segments) = (job[2], job[3]);
+                if mode == 1 {
+                    group_blades[segments as usize - 1] += kept as u64;
+                    self.stats.instances += kept;
+                    self.stats.triangles += kept as u64 * (2 * segments as u64 - 1);
+                } else {
+                    for c in 0..MAX_CASCADES {
+                        if mode & (2 << c) != 0 {
+                            group_blades[shadow_group(c, segments)] += kept as u64;
+                        }
+                    }
+                }
+            }
+            if !self.thinned_to_fit {
+                tracing::warn!(
+                    "grass: {wanted} blades would overflow the {} MB records binding; thinned to {:.0}%",
+                    limit / (1 << 20),
+                    keep * 100.0
+                );
+            }
+            self.thinned_to_fit = true;
+        } else {
+            self.thinned_to_fit = false;
+        }
         let mut args = [[0u32; 4]; GROUPS];
         let mut records = 0u64;
         for (g, blades) in group_blades.into_iter().enumerate() {
@@ -1484,7 +1525,6 @@ impl RenderFeature for GrassFeature {
                 records += blades;
             }
         }
-        let limit = device.limits().max_storage_buffer_binding_size;
         if records * 16 > u32::MAX as u64 || records * RECORD_BYTES > limit / 2 {
             self.groups = [false; GROUPS];
             self.field_jobs.clear();

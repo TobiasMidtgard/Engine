@@ -18,6 +18,9 @@
 //! level first drawn at its middle level and then at its far level: the shadows on the ground
 //! should not change between them.
 //!
+//! `FOLIAGE_GRASS_STATS=1` prints what each grass and floor field holds once the forest has
+//! grown (texels on, heights, kinds); name no shot that exists to print only that.
+//!
 //! `FOLIAGE_CENSUS=1` also prints, for each shot, the plant parts' triangles by level of detail:
 //! in view (a cone a little wider than the camera's) and casting shadows (within 350 m).
 //!
@@ -396,6 +399,40 @@ fn main() {
         engine_core::registry::call_api(&mut app.world, "foliage.stats", serde_json::json!({}));
     println!("{}", serde_json::to_string_pretty(&stats.unwrap()).unwrap());
 
+    // `FOLIAGE_GRASS_STATS=1`: what each grass and floor field holds.
+    if std::env::var("FOLIAGE_GRASS_STATS").is_ok_and(|v| v == "1") {
+        let mut q = app.world.query::<(
+            &engine_render::GrassField,
+            Option<&engine_foliage::grass::FloorLayer>,
+        )>();
+        for (f, layer) in q.iter(&app.world) {
+            let on = f.density.iter().filter(|d| **d > 0.0).count();
+            let mut kinds = [0usize; 16];
+            for k in &f.kinds {
+                kinds[(*k as usize).min(15)] += 1;
+            }
+            let nan = f.heights.iter().filter(|h| !h.is_finite()).count();
+            let (lo, hi) = f
+                .heights
+                .iter()
+                .filter(|h| h.is_finite())
+                .fold((f32::MAX, f32::MIN), |(a, b), h| (a.min(*h), b.max(*h)));
+            let dn = f.density.iter().filter(|d| !d.is_finite()).count();
+            println!(
+                "  heights {lo}..{hi}, {nan} not finite; density {dn} not finite; style {:?}",
+                f.style
+            );
+            println!(
+                "grass field {layer:?}: {:?} m at {:?}, {} of {} texels on, heights {}, {} styles, kinds {kinds:?}",
+                f.size,
+                f.resolution,
+                on,
+                f.density.len(),
+                f.heights.len(),
+                f.styles.len()
+            );
+        }
+    }
     let forest = demo::forest_viewpoints(FOREST);
     let cave = demo::cave_viewpoints(CAVE);
     let take = |app: &mut App, file: &str, v: &demo::Viewpoint| {
