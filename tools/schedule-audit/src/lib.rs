@@ -150,9 +150,6 @@ mod tests {
             16,
             &[
                 "engine_fire::run_demos",
-                "engine_foliage::build_scenery",
-                "engine_foliage::chop_on_interact",
-                "engine_foliage::offer_chops",
                 "engine_movement::toggle",
                 "engine_physics::finish_art",
                 "engine_physics::fit_colliders",

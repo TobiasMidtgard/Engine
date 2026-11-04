@@ -214,10 +214,16 @@ impl Plugin for FoliagePlugin {
                     felling::remove_orphan_colliders,
                     ecology::drop_unloaded_regions,
                     scenery::drop_unloaded_covers,
-                    (hand_felling::chop_on_interact, hand_felling::offer_chops).chain(),
+                    (
+                        hand_felling::chop_pressed
+                            .pipe(engine_core::schedule::queue_when(hand_felling::chop_work)),
+                        hand_felling::offer_chops,
+                    )
+                        .chain(),
                     cave::sync_chamber_colliders,
                     (
-                        scenery::build_scenery,
+                        scenery::scenery_due
+                            .pipe(engine_core::schedule::queue_when(scenery::build_scenery)),
                         scenery::cull_debris,
                         assets::ensure_species_visuals,
                         season::apply_season_colors,
