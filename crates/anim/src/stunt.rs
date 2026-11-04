@@ -254,8 +254,8 @@ pub(crate) fn stunt_system(
         };
         let ground_at = |p: DVec3| {
             probe
-                .probe(DVec3::new(p.x, p.y + 0.4, p.z), 0.8, 3.0)
-                .map_or(p.y, |h| h.height)
+                .height(DVec3::new(p.x, p.y + 0.4, p.z), 0.8, 3.0)
+                .unwrap_or(p.y)
         };
         match stunt.phase {
             StuntPhase::Run | StuntPhase::Back => {

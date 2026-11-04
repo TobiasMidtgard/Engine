@@ -670,17 +670,27 @@ pub(crate) struct VehicleVoices {
     seen: bool,
 }
 
+/// What makes vehicle sounds: anything with an engine or wheels.
+type VehicleQuery<'w, 's> = Query<
+    'w,
+    's,
+    (
+        Entity,
+        &'static GlobalTransform,
+        Option<&'static EngineState>,
+        Option<&'static WheelContacts>,
+    ),
+    Or<(With<EngineState>, With<WheelContacts>)>,
+>;
+
 /// Engines and tyres of every vehicle near the listener, from the `EngineState` and
 /// `WheelContacts` the vehicles module writes.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn vehicle_sounds(
     mut audio: ResMut<Audio>,
-    vehicles: Query<(
-        Entity,
-        &GlobalTransform,
-        Option<&EngineState>,
-        Option<&WheelContacts>,
-    )>,
+    // Only what has an engine or wheels: without the filter this walked every entity with a
+    // transform (100 k at the plaza, 0.26 ms a frame on Tobias's PC).
+    vehicles: VehicleQuery,
     env: Env,
     surfaces: Res<FootstepSurfaces>,
     settings: Res<AudioSettings>,

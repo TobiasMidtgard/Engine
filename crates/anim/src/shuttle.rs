@@ -240,8 +240,8 @@ pub(crate) fn shuttle_system(
         };
         let mut pos = shuttle.origin + DVec3::new(at.x as f64, 0.0, at.y as f64);
         pos.y = probe
-            .probe(DVec3::new(pos.x, t.translation.y + 0.3, pos.z), 0.7, 3.0)
-            .map_or(shuttle.origin.y, |h| h.height);
+            .height(DVec3::new(pos.x, t.translation.y + 0.3, pos.z), 0.7, 3.0)
+            .unwrap_or(shuttle.origin.y);
         t.translation = pos;
         t.rotation = Quat::from_rotation_y(yaw);
         if dt > 0.0 {
