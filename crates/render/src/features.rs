@@ -2,7 +2,9 @@
 //!
 //! A [`RenderFeature`] owns its GPU resources and hooks into fixed points of the frame:
 //!
-//! 1. `prepare` — read the world, cull, upload buffers (CPU side, `&mut World` access).
+//! 1. `prepare` — read the world, cull, upload buffers (CPU side, `&mut World` access). A
+//!    feature that only reads the world prepares in `prepare_shared` instead, beside the other
+//!    such features on other threads (see [`RenderFeature::prepares_shared`]).
 //! 2. `compute` — record compute or offscreen passes (particles, simulation, clouds). A feature
 //!    that asked for the cloud shadow map ([`RenderFeature::cloud_shadows`]) draws it here.
 //! 3. `draw_environment` — draw into the sky environment map (ambient light + reflections).
@@ -437,6 +439,47 @@ impl GpuShared {
     }
 }
 
+/// Iterate a read-only query over a shared world, counting as changed what changed since
+/// `last_run` (a tick the caller keeps, from [`take_change_tick`]) rather than since the
+/// world's last change tick: what `World::last_change_tick_scope` does, without `&mut World`,
+/// for [`RenderFeature::prepare_shared`].
+pub fn iter_since<'w, 's, D, F>(
+    query: &'s mut QueryState<D, F>,
+    world: &'w World,
+    last_run: bevy_ecs::change_detection::Tick,
+) -> bevy_ecs::query::QueryIter<'w, 's, D::ReadOnly, F>
+where
+    D: bevy_ecs::query::QueryData,
+    D::ReadOnly: bevy_ecs::query::IterQueryData,
+    F: bevy_ecs::query::QueryFilter,
+{
+    // Also checks that the query belongs to this world.
+    query.update_archetypes(world);
+    let this_run = world.read_change_tick();
+    // SAFETY: the query is made read-only (`as_readonly`) and reads through a shared borrow of
+    // the whole world for `'w`, so nothing writes what it reads; `update_archetypes` checked
+    // the world is the query's.
+    unsafe {
+        query
+            .as_readonly()
+            .query_unchecked_manual_with_ticks(
+                world.as_unsafe_world_cell_readonly(),
+                last_run,
+                this_run,
+            )
+            .into_iter()
+    }
+}
+
+/// The world's change tick, moved on by one (what `World::increment_change_tick` does, from a
+/// shared borrow): changes from here on get a newer tick, so a later
+/// [`iter_since`] with the returned tick finds them.
+pub fn take_change_tick(world: &World) -> bevy_ecs::change_detection::Tick {
+    world
+        .as_unsafe_world_cell_readonly()
+        .increment_change_tick()
+}
+
 /// Build the full WGSL source for a feature shader.
 pub fn compose_shader(source: &str, with_frame: bool) -> String {
     let mut code = String::with_capacity(
@@ -497,6 +540,56 @@ pub struct FrameContext<'a> {
     pub cloud_shadows: Option<CloudShadowTarget<'a>>,
 }
 
+/// A change to the world left by a shared prepare ([`PrepareOut::defer`]).
+type WorldChange = Box<dyn FnOnce(&mut World) + Send + Sync>;
+
+/// What a feature's [`RenderFeature::prepare_shared`] leaves for the world, applied after
+/// every feature's shared prepare has finished, in feature order: `Diagnostics` values,
+/// changes to resources, and the steps it timed.
+#[derive(Default)]
+pub struct PrepareOut {
+    metrics: Vec<(String, f64)>,
+    steps: Vec<(&'static str, f32)>,
+    deferred: Vec<WorldChange>,
+    /// Wall time of the feature's `prepare_shared` (milliseconds), set by the renderer.
+    pub(crate) ms: f32,
+}
+
+impl PrepareOut {
+    /// Set `Diagnostics` value `key` once the shared prepares are done.
+    pub fn set(&mut self, key: impl Into<String>, value: f64) {
+        self.metrics.push((key.into(), value));
+    }
+
+    /// Change the world once the shared prepares are done (insert or update a resource).
+    pub fn defer(&mut self, change: impl FnOnce(&mut World) + Send + Sync + 'static) {
+        self.deferred.push(Box::new(change));
+    }
+
+    /// A step the feature timed inside its prepare ("meshes: gather"), for the slow-frame log
+    /// and `render.extra_views_cpu.*`.
+    pub fn step(&mut self, name: &'static str, ms: f32) {
+        self.steps.push((name, ms));
+    }
+
+    /// Apply to the world; returns the timed steps. Leaves `self` empty for the next frame
+    /// (its allocations kept).
+    pub(crate) fn apply(&mut self, world: &mut World) -> std::vec::Drain<'_, (&'static str, f32)> {
+        if !self.metrics.is_empty()
+            && let Some(mut d) = world.get_resource_mut::<Diagnostics>()
+        {
+            for (key, value) in self.metrics.drain(..) {
+                d.set(&key, value);
+            }
+        }
+        self.metrics.clear();
+        for change in self.deferred.drain(..) {
+            change(world);
+        }
+        self.steps.drain(..)
+    }
+}
+
 /// Counters a feature reports for `render.stats`.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct FeatureStats {
@@ -530,6 +623,46 @@ pub trait RenderFeature: Send + Sync + 'static {
         gpu: &GpuShared,
         view: &ViewData,
         settings: &RenderSettings,
+    ) {
+    }
+
+    /// Whether this feature prepares in [`prepare_serial`](Self::prepare_serial) and
+    /// [`prepare_shared`](Self::prepare_shared) instead of [`prepare`](Self::prepare). Asked
+    /// every frame.
+    ///
+    /// The shared prepares of all features that say so run at the same time, on several
+    /// threads, each with the world borrowed shared: the frame's preparation takes about as
+    /// long as the slowest of them instead of their sum (as Unreal calls its scene proxies'
+    /// `GetDynamicMeshElements` in parallel, `IsParallelGatherDynamicMeshElementsEnabled`).
+    fn prepares_shared(&self) -> bool {
+        false
+    }
+
+    /// The short part of a shared prepare that needs the world mutably, run first, one
+    /// feature after another: create `QueryState`s (`world.query()`) and resources. Keep it
+    /// short; the work goes in [`prepare_shared`](Self::prepare_shared).
+    fn prepare_serial(
+        &mut self,
+        world: &mut World,
+        gpu: &GpuShared,
+        view: &ViewData,
+        settings: &RenderSettings,
+    ) {
+    }
+
+    /// Gather and upload this frame's data, reading the world shared, beside the other features
+    /// that prepare shared (on another thread). Iterate queries made in
+    /// [`prepare_serial`](Self::prepare_serial) with `QueryState::iter(world)` (or
+    /// [`crate::features::iter_since`] for change ticks of the feature's own); what the world
+    /// should get (diagnostics, resources) goes in `out`, applied after all of them finish.
+    /// `gpu` is shared by all of them at once: its caches and the upload budget lock inside.
+    fn prepare_shared(
+        &mut self,
+        world: &World,
+        gpu: &GpuShared,
+        view: &ViewData,
+        settings: &RenderSettings,
+        out: &mut PrepareOut,
     ) {
     }
 

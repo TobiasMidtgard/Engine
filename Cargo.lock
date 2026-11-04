@@ -1577,6 +1577,7 @@ dependencies = [
  "miniz_oxide 0.8.9",
  "pollster",
  "raw-window-handle",
+ "rayon",
  "serde",
  "serde_json",
  "sha2",

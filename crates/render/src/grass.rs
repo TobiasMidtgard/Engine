@@ -23,7 +23,7 @@ use engine_core::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::features::{
-    FeatureStats, FrameContext, GpuShared, GrowBuffer, RenderFeature, RenderPhase,
+    FeatureStats, FrameContext, GpuShared, GrowBuffer, PrepareOut, RenderFeature, RenderPhase,
 };
 use crate::frame::ViewData;
 use crate::renderer::layout_entry;
@@ -746,7 +746,17 @@ pub struct GrassFeature {
     shadow_draws: [Vec<Draw>; MAX_CASCADES],
     stats: FeatureStats,
     wind: SteadyWind,
+    /// Made in `prepare_serial`, read in `prepare_shared`.
+    fields_query: Option<FieldsQuery>,
+    benders_query: Option<QueryState<(&'static GrassBender, &'static GlobalTransform)>>,
 }
+
+type FieldsQuery = QueryState<(
+    Entity,
+    Ref<'static, GrassField>,
+    &'static GlobalTransform,
+    Option<Ref<'static, GrassWear>>,
+)>;
 
 /// The wind the blades sway in, kept steady. The frame's wind (sampled where the camera is,
 /// so it changes with every gust and step) is eased toward over about a second, and the
@@ -976,12 +986,32 @@ impl RenderFeature for GrassFeature {
         self.no_wear = Some((none, view));
     }
 
-    fn prepare(
+    fn prepares_shared(&self) -> bool {
+        true
+    }
+
+    fn prepare_serial(
         &mut self,
         world: &mut World,
+        _gpu: &GpuShared,
+        _view: &ViewData,
+        _settings: &RenderSettings,
+    ) {
+        if self.fields_query.is_none() {
+            self.fields_query = Some(world.query());
+        }
+        if self.benders_query.is_none() {
+            self.benders_query = Some(world.query());
+        }
+    }
+
+    fn prepare_shared(
+        &mut self,
+        world: &World,
         gpu: &GpuShared,
         view: &ViewData,
         settings: &RenderSettings,
+        _out: &mut PrepareOut,
     ) {
         self.order.clear();
         self.tiles.clear();
@@ -1011,13 +1041,12 @@ impl RenderFeature for GrassFeature {
         }
         let gust = self.wind.uniform(view.time);
         let mut seen = Vec::new();
-        let mut q = world.query::<(
-            Entity,
-            Ref<GrassField>,
-            &GlobalTransform,
-            Option<Ref<GrassWear>>,
-        )>();
-        for (entity, field, gt, wear) in q.iter(world) {
+        let (Some(fields_query), Some(benders_query)) =
+            (&mut self.fields_query, &mut self.benders_query)
+        else {
+            return;
+        };
+        for (entity, field, gt, wear) in fields_query.iter(world) {
             seen.push(entity);
             let fresh = field.is_changed() || !self.maps.contains_key(&entity);
             if fresh {
@@ -1199,8 +1228,7 @@ impl RenderFeature for GrassFeature {
         self.stats.draw_calls = self.draws.len() as u32;
 
         // Benders nearest the camera.
-        let mut benders: Vec<[f32; 4]> = world
-            .query::<(&GrassBender, &GlobalTransform)>()
+        let mut benders: Vec<[f32; 4]> = benders_query
             .iter(world)
             .map(|(b, gt)| {
                 view.relative(gt.translation())
