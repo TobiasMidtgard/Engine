@@ -112,7 +112,7 @@ fn a_moving_model_gets_convex_parts_not_triangles() {
     );
 }
 
-/// The collider audit (`engine_physics::audit`) lists a drawn rock with no collider on the
+/// The collider audit (`engine_physics::audit`) lists a drawn rock or box with no collider on the
 /// ground, not one with its own collider, nor a pebble too small to matter, nor a sail whose
 /// mast has a collider of its own, nor a hall whose roof collides, nor one far from the player.
 #[test]
@@ -161,6 +161,15 @@ fn the_collider_audit_lists_drawn_rocks_nothing_collides_with() {
         RigidBody::fixed(),
         Collider::cuboid(Vec3::new(3.0, 0.1, 3.0)),
     ));
+    // A box drawn as a built-in shape, with nothing to collide with.
+    app.world.spawn((
+        Name::new("shape box"),
+        Transform::from_xyz(-6.0, 0.5, 0.0),
+        MeshRenderer::new(
+            engine_render::mesh::Shape::Cuboid { size: [1.0; 3] },
+            engine_render::MaterialRef::default(),
+        ),
+    ));
     // Far from the player: scenery there gets its collider only once someone comes near.
     drawn(&mut app, Vec3::new(100.0, 0.5, 0.0), 1.0, "far rock");
     app.world.spawn((
@@ -170,6 +179,6 @@ fn the_collider_audit_lists_drawn_rocks_nothing_collides_with() {
     app.update_n(3);
     let found = engine_physics::audit::uncovered_meshes(&app.world);
     let names: Vec<&str> = found.iter().map(|u| u.item.as_str()).collect();
-    assert_eq!(names, ["bare rock"], "{found:?}");
+    assert_eq!(names, ["bare rock", "shape box"], "{found:?}");
     assert!((found[0].size - 1.0).abs() < 1e-3);
 }

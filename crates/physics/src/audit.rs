@@ -14,7 +14,9 @@
 //! those `PHYSICS_COLLIDER_AUDIT_SKIP` lists (comma separated); and meshes farther than
 //! [`NEAR_M`] from every focus point (colliders streamed in near the action). What it can't
 //! tell is a mesh nothing should collide with (sky, water), so it lists candidates for a
-//! person to look over, grouped by mesh: the same rock placed 40 times is one row.
+//! person to look over, grouped by mesh: the same rock placed 40 times is one row. Built-in
+//! shapes (`MeshRef::Shape`) are looked at as the mesh they draw, and a mesh a later look finds
+//! covered (its collider streamed in after the stop loaded) leaves the list.
 //!
 //! Playtests 2 (#15) and 3 (#13) asked for it: the waterfall's rocks, the scarp and the
 //! valley's small boulders had no collider.
@@ -63,13 +65,18 @@ pub const SKIPPED: &[&str] = &[
     "hlod proxy",
 ];
 
-/// Every mesh found so far, by (zone, item, mesh, place to a decimetre): where it is, its size.
+/// Meshes found, by (zone, item, mesh, place to a decimetre): where each is, its size.
 type Found = BTreeMap<(String, String, String, [i64; 3]), (DVec3, f64)>;
+
+/// Where a mesh was last seen uncovered: its row's key, where it is, its size.
+type Seen = ((String, String, String, [i64; 3]), DVec3, f64);
 
 #[derive(Default)]
 pub(crate) struct AuditState {
     last: Option<Instant>,
-    found: Found,
+    /// Each mesh as its latest look saw it uncovered; one a later look finds covered (its
+    /// collider streamed in after the stop loaded) is dropped.
+    found: engine_core::ecs::entity::EntityHashMap<Seen>,
 }
 
 /// One drawn mesh without a collider over it.
@@ -89,15 +96,26 @@ pub struct Uncovered {
 
 /// The drawn meshes of [`MIN_SIZE_M`] or more that no collider covers (module docs).
 pub fn uncovered_meshes(world: &World) -> Vec<Uncovered> {
+    look(world).uncovered
+}
+
+/// One look: the meshes found uncovered, and those looked at and found covered.
+#[derive(Default)]
+struct Look {
+    uncovered: Vec<Uncovered>,
+    covered: Vec<Entity>,
+}
+
+fn look(world: &World) -> Look {
     let (Some(meshes), Some(sim)) = (
         world.get_resource::<Assets<Mesh>>(),
         world.get_resource::<SharedSimulation>(),
     ) else {
-        return Vec::new();
+        return Look::default();
     };
     let queries = crate::queries::RapierQueries(sim.0.clone());
     let Some(mut q) = world.try_query::<(Entity, &MeshRenderer, &GlobalTransform)>() else {
-        return Vec::new();
+        return Look::default();
     };
     let filter = QueryFilter::default();
     let mut skipped: Vec<String> = SKIPPED.iter().map(|s| s.to_string()).collect();
@@ -125,8 +143,9 @@ pub fn uncovered_meshes(world: &World) -> Vec<Uncovered> {
                 .map(|(_, g)| g.translation()),
         );
     }
-    let mut out = Vec::new();
+    let mut out = Look::default();
     let mut hits = Vec::new();
+    let mut shapes: std::collections::HashMap<String, Mesh> = Default::default();
     for (e, renderer, global) in q.iter(world) {
         if !renderer.visible {
             continue;
@@ -136,8 +155,13 @@ pub fn uncovered_meshes(world: &World) -> Vec<Uncovered> {
             MeshRef::Asset(key) => meshes.loaded_by_key(&engine_assets::normalize_path(key)),
             MeshRef::Shape(_) => None,
         };
-        let Some(mesh) = handle.and_then(|h| meshes.get(h)) else {
-            continue;
+        let mesh = match &renderer.mesh {
+            // A built-in shape (a box, a cylinder) is built here once per look.
+            MeshRef::Shape(shape) => &*shapes.entry(shape.key()).or_insert_with(|| shape.mesh()),
+            _ => match handle.and_then(|h| meshes.get(h)) {
+                Some(m) => m,
+                None => continue,
+            },
         };
         let aabb = mesh.aabb();
         // World bounds of the mesh's box.
@@ -178,9 +202,10 @@ pub fn uncovered_meshes(world: &World) -> Vec<Uncovered> {
             touched += usize::from(!hits.is_empty());
         }
         if touched * 2 >= tried || physical(world, e) || of_skipped_kind(world, e, &skipped) {
+            out.covered.push(e);
             continue;
         }
-        out.push(Uncovered {
+        out.uncovered.push(Uncovered {
             entity: e,
             zone: zone_of(world, e),
             item: kind(crate::report::label(world, e)),
@@ -188,6 +213,7 @@ pub fn uncovered_meshes(world: &World) -> Vec<Uncovered> {
                 "{} ({} vertices, {:.1}x{:.1}x{:.1} m)",
                 match &renderer.mesh {
                     MeshRef::Asset(key) => key.to_string(),
+                    MeshRef::Shape(shape) => shape.key(),
                     _ => handle.map_or_else(String::new, |h| format!("{h:?}")),
                 },
                 mesh.vertices.len(),
@@ -199,7 +225,8 @@ pub fn uncovered_meshes(world: &World) -> Vec<Uncovered> {
             size,
         });
     }
-    out.sort_by(|a, b| a.zone.cmp(&b.zone).then(b.size.total_cmp(&a.size)));
+    out.uncovered
+        .sort_by(|a, b| a.zone.cmp(&b.zone).then(b.size.total_cmp(&a.size)));
     out
 }
 
@@ -284,18 +311,26 @@ pub(crate) fn audit_colliders(world: &mut World, mut state: Local<AuditState>) {
     }
     state.last = Some(Instant::now());
     let started = Instant::now();
-    let found = uncovered_meshes(world);
-    let count = found.len();
-    for u in found {
+    let seen = look(world);
+    let count = seen.uncovered.len();
+    for e in seen.covered {
+        state.found.remove(&e);
+    }
+    for u in seen.uncovered {
         let key = (
             u.zone,
             u.item,
             u.mesh,
             (u.center * 10.0).round().as_i64vec3().to_array(),
         );
-        state.found.insert(key, (u.center, u.size));
+        state.found.insert(u.entity, (key, u.center, u.size));
     }
-    let groups = grouped(&state.found);
+    let rows: Found = state
+        .found
+        .values()
+        .map(|(key, at, size)| (key.clone(), (*at, *size)))
+        .collect();
+    let groups = grouped(&rows);
     let mut by_zone: BTreeMap<&str, Vec<&Group>> = BTreeMap::new();
     for g in &groups {
         by_zone.entry(&g.zone).or_default().push(g);
