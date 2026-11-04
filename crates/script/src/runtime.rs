@@ -655,15 +655,20 @@ impl ScriptRuntime {
         }
         self.route_messages();
         self.sync_breaks(world, settings);
-        self.run_serial(world, settings);
-        self.hand_over_hits(world);
-        for actor in &mut self.actors {
-            actor.run_serial(world, settings);
+        {
+            let _span = tracing::info_span!("scripts: serial").entered();
+            self.run_serial(world, settings);
+            self.hand_over_hits(world);
+            for actor in &mut self.actors {
+                actor.run_serial(world, settings);
+            }
         }
         if !self.debugger.stopped() {
+            let _span = tracing::info_span!("scripts: parallel").entered();
             self.run_parallel(world, settings);
         }
         self.route_messages();
+        let _span = tracing::info_span!("scripts: draw and profile").entered();
         self.drawn = crate::draw::flush(world, &self.lua);
         for actor in &self.actors {
             let more = crate::draw::flush(world, &actor.lua);
@@ -954,6 +959,7 @@ impl ScriptRuntime {
             self.actors = actors;
         }
         self.parallel_ms = t0.elapsed().as_secs_f32() * 1000.0;
+        let _apply = tracing::info_span!("scripts: apply parallel").entered();
         self.apply_parallel(world);
         for actor in &mut self.actors {
             actor.apply_parallel(world);

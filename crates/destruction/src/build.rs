@@ -593,28 +593,48 @@ pub fn ground_hit(
     dir: Vec3,
     max: f32,
 ) -> Option<(f32, Vec3)> {
+    let t = ground_march(&|p| ground(p).map(|(h, _)| h), origin, dir, max)?;
+    Some((t, ground(origin + (dir * t).as_dvec3())?.1))
+}
+
+/// [`ground_hit`] on the world's [`Ground`]: the march asks only heights (several times cheaper
+/// than a full sample, which adds the normal's taps and the cover), and the normal is sampled
+/// once, where the ray lands.
+pub fn ground_hit_on(ground: &Ground, origin: DVec3, dir: Vec3, max: f32) -> Option<(f32, Vec3)> {
+    let t = ground_march(&|p| ground.height(p), origin, dir, max)?;
+    Some((t, ground.sample(origin + (dir * t).as_dvec3())?.normal))
+}
+
+/// How far along a ray it first meets the ground (`height` gives the ground under a point):
+/// 10 cm steps, then 14 bisections.
+fn ground_march(
+    height: &dyn Fn(DVec3) -> Option<f64>,
+    origin: DVec3,
+    dir: Vec3,
+    max: f32,
+) -> Option<f32> {
     let above = |t: f32| {
         let p = origin + (dir * t).as_dvec3();
-        ground(p).map(|(h, n)| (p.y - h, n))
+        height(p).map(|h| p.y - h)
     };
-    if above(0.0)?.0 < 0.0 {
+    if above(0.0)? < 0.0 {
         return None;
     }
     let step = 0.1;
     let mut prev = 0.0;
     let mut t = step;
     while t <= max + 1e-4 {
-        if above(t)?.0 <= 0.0 {
+        if above(t)? <= 0.0 {
             let (mut a, mut b) = (prev, t);
             for _ in 0..14 {
                 let m = 0.5 * (a + b);
-                if above(m)?.0 > 0.0 {
+                if above(m)? > 0.0 {
                     a = m;
                 } else {
                     b = m;
                 }
             }
-            return Some((b, above(b)?.1));
+            return Some(b);
         }
         prev = t;
         t += step;
@@ -962,14 +982,7 @@ fn surface_hit(
     dir: Vec3,
     reach: f32,
 ) -> Option<(f32, Vec3)> {
-    let mut best = ground.and_then(|g| {
-        ground_hit(
-            &|p| g.sample(p).map(|s| (s.height, s.normal)),
-            origin,
-            dir,
-            reach,
-        )
-    });
+    let mut best = ground.and_then(|g| ground_hit_on(g, origin, dir, reach));
     for (gt, state) in volumes {
         let o = gt.affine().inverse().transform_point3(origin).as_vec3();
         let d = gt.rotation().inverse() * dir;
@@ -1056,6 +1069,7 @@ pub fn build_system(
 ) {
     let requests: Vec<BuildRequest> = requests.read().copied().collect();
     let range = range.map_or_else(engine_world::SimulationRange::default, |r| *r);
+    let builders_span = tracing::info_span!("build: builders").entered();
     // A piece can't go where a player or a creature stands: it would trap them in its collider.
     let occupied = |p: &Placement| {
         let Some(q) = queries.as_deref() else {
@@ -1109,20 +1123,27 @@ pub fn build_system(
             }
         }
         let (origin, dir) = aim_ray(&b, gt);
+        let near_span = tracing::info_span!("build: pieces near").entered();
         let mut scene = scene_near(pieces.iter(), origin, b.reach_m as f64 + 6.0);
         scene.retain(|p| !removed.contains(&p.entity));
+        drop(near_span);
         let plan_now = |b: &Builder, scene: &[ScenePiece]| {
             if !b.active || dir == Vec3::ZERO {
                 return (None, None);
             }
+            let aim = tracing::info_span!("build: aim at ground and rock").entered();
             let surface = surface_hit(ground, &volumes, origin, dir, b.reach_m);
+            drop(aim);
             let Some(hit) = nearest_hit(scene, origin, dir, b.reach_m, surface) else {
                 return (None, None);
             };
             let target = hit
                 .piece
                 .filter(|p| scene.iter().any(|s| s.entity == *p && s.built));
+            let snap = tracing::info_span!("build: snap and support").entered();
             let mut p = plan(b.kind, b.yaw, &hit, scene, &ground_height, &table);
+            drop(snap);
+            let _overlap = tracing::info_span!("build: occupied").entered();
             if p.valid() && occupied(&p) {
                 p.problem = Some(BuildProblem::Occupied);
             }
@@ -1181,7 +1202,9 @@ pub fn build_system(
                 }
             }
         }
+        let plan_span = tracing::info_span!("build: plan").entered();
         let (placement, target) = plan_now(&b, &scene);
+        drop(plan_span);
         preview.placement = placement;
         preview.target = target;
         if b.active && b.show_support {
@@ -1218,6 +1241,8 @@ pub fn build_system(
             }
         }
     }
+    drop(builders_span);
+    let _rest = tracing::info_span!("build: ghosts and support").entered();
     // Ghosts whose builder is gone go too.
     for (g, look, _) in &ghosts {
         if builders.get(look.builder).is_err() {
@@ -1279,14 +1304,9 @@ pub fn plan_in_world(
     )>();
     let scene = scene_near(q.iter(world), origin, reach as f64 + 6.0);
     let ground = world.get_resource::<Ground>().cloned();
-    let mut surface = ground.as_ref().and_then(|g| {
-        ground_hit(
-            &|p| g.sample(p).map(|s| (s.height, s.normal)),
-            origin,
-            dir,
-            reach,
-        )
-    });
+    let mut surface = ground
+        .as_ref()
+        .and_then(|g| ground_hit_on(g, origin, dir, reach));
     let mut vq = world.query::<(&GlobalTransform, &VoxelState)>();
     for (gt, state) in vq.iter(world) {
         let o = gt.affine().inverse().transform_point3(origin).as_vec3();
