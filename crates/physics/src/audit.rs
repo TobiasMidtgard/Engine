@@ -5,9 +5,14 @@
 //!
 //! Each mesh is probed with a box a quarter of its size at the middle of its upper half: a
 //! rock sitting on the terrain has its lower half in the ground's collider, its upper half
-//! only in its own. What it can't tell: an arch or a ring (its middle is empty), a mesh whose
-//! collider is a smaller stand-in on purpose (foliage, cloth), and meshes nothing should
-//! collide with (sky, water, particles), so it lists candidates for a person to look over.
+//! only in its own. Left out: meshes with a body, a collider or a character on them or an
+//! ancestor (a vehicle, cloth or a tree whose collider is a smaller stand-in on purpose), the
+//! kinds [`SKIPPED`] names (foliage parts, LOD ghosts, NPC stand-ins, debris) plus those
+//! `PHYSICS_COLLIDER_AUDIT_SKIP` names (comma separated type names), and meshes farther than
+//! [`NEAR_M`] from every character (colliders streamed in near the action). What it can't
+//! tell: an arch or a ring (its middle is empty), and meshes nothing should collide with (sky,
+//! water), so it lists candidates for a person to look over, grouped by mesh: the same rock
+//! placed 40 times is one row.
 //! Playtests 2 (#15) and 3 (#13) asked for it: the waterfall's rocks, the scarp and the
 //! valley's small boulders had no collider.
 
