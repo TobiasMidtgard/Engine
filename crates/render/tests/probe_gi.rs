@@ -5,9 +5,10 @@
 //! no mesh does (rock drawn by another feature); a mirror reflects what is behind the camera
 //! through world reflections; a still scene isn't gathered again every frame, moving entities
 //! far from the grid don't gather it again, a near one moving updates only its own instance and
-//! the rays see it where it went, a large mesh builds on a worker before the rays see it, and a
-//! world shift moves the gather without reading every entity again. Needs a GPU or lavapipe; passes with a note when
-//! neither is available.
+//! the rays see it where it went, a large mesh builds on a worker before the rays see it, a
+//! world shift moves the gather without reading every entity again, and walking with a budget
+//! smaller than a plane of probes never starts them all over. Needs a GPU or lavapipe; passes
+//! with a note when neither is available.
 
 use engine_core::prelude::*;
 use engine_render::prelude::*;
@@ -882,4 +883,80 @@ fn a_world_shift_moves_the_gather_without_reading_every_entity() {
             "{name}: the room {before:.1} before the shift, {after:.1} after"
         );
     }
+}
+
+/// Walking with a budget smaller than one plane of probes never starts every probe over: the
+/// probes that scroll in wait in a queue, cleared so they light nothing, while those already
+/// lit keep lighting. A closed room stays as dark as when standing still (it used to flash to
+/// the sky guess with every step, then relight in rows: playtests 2 and 3).
+#[test]
+fn walking_with_a_small_budget_never_relights_the_room_in_rows() {
+    const STEP: f64 = 0.5;
+    const STEPS: usize = 4;
+    let scene = |eye: DVec3| {
+        let mut app = app(true);
+        // One plane across x is 8 x 16 = 128 probes.
+        app.world
+            .resource_mut::<RenderSettings>()
+            .gi_probes_per_frame = 64;
+        let w = &mut app.world;
+        room(w, DVec3::ZERO, 0.7, 0.5, None);
+        ground(w);
+        sun(w, 110_000.0, DVec3::new(0.3, -1.0, -0.4));
+        camera(w, eye, eye + (TARGET - EYE), 12.0);
+        app
+    };
+    let diag = |app: &App, name: &str| {
+        app.world
+            .resource::<Diagnostics>()
+            .get(&format!("render.gi.{name}"))
+            .unwrap_or(-1.0)
+    };
+    let end = EYE + DVec3::X * STEP * STEPS as f64;
+    let mut walk = scene(EYE);
+    // 2048 probes at 64 a frame, then a few turns of history.
+    walk.update_n(90);
+    if walk.world.get_resource::<RenderDisabled>().is_some() {
+        eprintln!("skipping: no GPU");
+        return;
+    }
+    assert_eq!(diag(&walk, "pending"), 0.0, "the first lighting drained");
+    let resets = diag(&walk, "resets");
+    let before = brightness(&mut walk, "walk_before.png", UPPER);
+    let mut scrolled = 0.0;
+    let mut cleared = 0.0;
+    for i in 1..=STEPS {
+        let eye = EYE + DVec3::X * STEP * i as f64;
+        let mut q = walk.world.query_filtered::<&mut Transform, With<Camera>>();
+        for mut t in q.iter_mut(&mut walk.world) {
+            *t = Transform::from_translation(eye).looking_at(eye + (TARGET - EYE), Vec3::Y);
+        }
+        walk.update();
+        scrolled += diag(&walk, "scrolled_in");
+        cleared += diag(&walk, "cleared");
+    }
+    let walking = brightness(&mut walk, "walk_walking.png", UPPER);
+    let pending = diag(&walk, "pending");
+    assert_eq!(
+        diag(&walk, "resets"),
+        resets,
+        "a walk started every probe over"
+    );
+    walk.update_n(8);
+    assert_eq!(
+        diag(&walk, "pending"),
+        0.0,
+        "the queue drains standing still"
+    );
+    let still = shoot(scene(end), 90, "walk_still.png", UPPER).expect("GPU");
+    eprintln!(
+        "closed room: {before:.1} before, {walking:.1} walking, {still:.1} standing there; \
+         scrolled in {scrolled}, cleared {cleared}, pending after the walk {pending}"
+    );
+    assert_eq!(scrolled, 2.0 * 128.0, "two steps of one plane each");
+    assert!(cleared > 0.0, "some waited for a trace");
+    assert!(
+        (walking - still).abs() < still * 0.25 + 3.0,
+        "walking {walking:.1}, standing there {still:.1}"
+    );
 }
