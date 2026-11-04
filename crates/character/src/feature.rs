@@ -409,6 +409,7 @@ struct GpuStrandParams {
 }
 
 /// Bind group layouts and the sampler (made at once in `init`; uploads only need these).
+#[derive(Clone)]
 struct Layouts {
     char_layout: wgpu::BindGroupLayout,
     strand_layout: wgpu::BindGroupLayout,
@@ -669,6 +670,8 @@ pub struct CharacterFeature {
     /// Filled by the thread compiling [`Pipelines`] (started in `init`).
     compiling: Option<Arc<Mutex<Option<Pipelines>>>>,
     characters: HashMap<Entity, GpuMeshes>,
+    /// Uploads on threads of their own (`upload_off_frame`), by character.
+    uploads: HashMap<Entity, PendingUpload>,
     query: Option<QueryState<CharacterItem>>,
     stats: FeatureStats,
     /// Scratch for this frame's bone matrices and pose buffer bytes.
@@ -678,6 +681,75 @@ pub struct CharacterFeature {
     /// Skin scatters light through the renderer's subsurface pass this frame (people drawn and
     /// the pass on); otherwise the skin shader imitates it on its own.
     subsurface: bool,
+}
+
+/// A character's meshes being uploaded on a thread of its own: one person's skin, eyes and
+/// hair took up to 30 ms (round 25 on Tobias's PC, a new face at the plaza), all of it in the
+/// frame. Buffers and bind groups can be made on any thread (wgpu's `Device` is `Sync`), as
+/// Unreal streams a skeletal mesh's render data in off the game thread.
+struct PendingUpload {
+    version: u64,
+    done: Arc<Mutex<Option<GpuMeshes>>>,
+}
+
+/// Uploads on their own threads at once, at most (the rest start as these finish).
+const UPLOADS_IN_FLIGHT: usize = 4;
+
+/// The upload of `meshes` at `version` for `entity`: `Some` once done. Starts it when none is
+/// on its way (and fewer than [`UPLOADS_IN_FLIGHT`] are); a new version replaces an older one.
+fn upload_off_frame(
+    uploads: &mut HashMap<Entity, PendingUpload>,
+    entity: Entity,
+    version: u64,
+    layouts: &Layouts,
+    gpu: &GpuShared,
+    meshes: &Arc<CharacterMeshes>,
+) -> Option<GpuMeshes> {
+    if let Some(u) = uploads.get(&entity) {
+        if u.version == version {
+            let done = u.done.lock().unwrap_or_else(|e| e.into_inner()).take();
+            if done.is_some() {
+                uploads.remove(&entity);
+            }
+            return done;
+        }
+        // (An older version's thread finishes into a slot nobody reads.)
+        uploads.remove(&entity);
+    }
+    if uploads.len() >= UPLOADS_IN_FLIGHT {
+        return None;
+    }
+    let done = Arc::new(Mutex::new(None));
+    let (slot, l, device, queue, m) = (
+        done.clone(),
+        layouts.clone(),
+        gpu.device.clone(),
+        gpu.queue.clone(),
+        meshes.clone(),
+    );
+    let spawned = std::thread::Builder::new()
+        .name("character upload".into())
+        .spawn(move || {
+            let _span = tracing::info_span!("character upload").entered();
+            let gpu = CharacterFeature::upload(&l, &device, &queue, &m, version);
+            *slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(gpu);
+        });
+    match spawned {
+        Ok(_) => {
+            uploads.insert(entity, PendingUpload { version, done });
+            None
+        }
+        Err(e) => {
+            tracing::warn!("could not start a character upload thread: {e}");
+            Some(CharacterFeature::upload(
+                layouts,
+                &gpu.device,
+                &gpu.queue,
+                meshes,
+                version,
+            ))
+        }
+    }
 }
 
 type CharacterItem = (
@@ -811,8 +883,13 @@ fn storage_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
 }
 
 impl CharacterFeature {
-    fn upload(p: &Layouts, gpu: &GpuShared, m: &CharacterMeshes, version: u64) -> GpuMeshes {
-        let device = &gpu.device;
+    fn upload(
+        p: &Layouts,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        m: &CharacterMeshes,
+        version: u64,
+    ) -> GpuMeshes {
         let n_skin = m.skin.skin_vertices();
         let part = |i: usize| {
             i.checked_sub(n_skin)
@@ -885,7 +962,7 @@ impl CharacterFeature {
             None => ([1, 1, 1], &[0u8, 0][..]),
         };
         let shadow_texture = device.create_texture_with_data(
-            &gpu.queue,
+            queue,
             &wgpu::TextureDescriptor {
                 label: Some("character hair shadow"),
                 size: wgpu::Extent3d {
@@ -1324,36 +1401,84 @@ impl RenderFeature for CharacterFeature {
             });
         let started = std::time::Instant::now();
         let mut uploaded = false;
+        // Headless runs (tests, screenshots) upload in the frame, so a picture shows everyone
+        // it is asked for.
+        let off_frame = world
+            .get_resource::<engine_core::config::EngineConfig>()
+            .is_some_and(|c| !c.headless);
         let Some(query) = self.query.as_mut() else {
             return;
         };
         for c in self.characters.values_mut() {
             c.seen = false;
         }
+        let mut present = Vec::new();
         for (entity, transform, built, skeleton, face, hands, guides, posed) in query.iter(world) {
+            present.push(entity);
             let entry = self.characters.entry(entity);
             let full = uploaded && started.elapsed().as_secs_f64() * 1000.0 >= upload_budget;
             let c = match entry {
                 std::collections::hash_map::Entry::Occupied(o) => {
                     let c = o.into_mut();
                     if c.version != built.version {
-                        if full {
+                        let new = if off_frame {
+                            upload_off_frame(
+                                &mut self.uploads,
+                                entity,
+                                built.version,
+                                p,
+                                gpu,
+                                &built.meshes,
+                            )
+                        } else if full {
+                            None
+                        } else {
+                            uploaded = true;
+                            Some(Self::upload(
+                                p,
+                                &gpu.device,
+                                &gpu.queue,
+                                &built.meshes,
+                                built.version,
+                            ))
+                        };
+                        // Until it is in, the old look stays as it was last drawn.
+                        let Some(new) = new else {
                             c.seen = true;
                             continue;
-                        }
+                        };
                         let placement = c.placement;
-                        *c = Self::upload(p, gpu, &built.meshes, built.version);
+                        *c = new;
                         c.placement = placement;
-                        uploaded = true;
                     }
                     c
                 }
                 std::collections::hash_map::Entry::Vacant(v) => {
-                    if full {
+                    let new = if off_frame {
+                        upload_off_frame(
+                            &mut self.uploads,
+                            entity,
+                            built.version,
+                            p,
+                            gpu,
+                            &built.meshes,
+                        )
+                    } else if full {
+                        None
+                    } else {
+                        uploaded = true;
+                        Some(Self::upload(
+                            p,
+                            &gpu.device,
+                            &gpu.queue,
+                            &built.meshes,
+                            built.version,
+                        ))
+                    };
+                    let Some(new) = new else {
                         continue;
-                    }
-                    uploaded = true;
-                    v.insert(Self::upload(p, gpu, &built.meshes, built.version))
+                    };
+                    v.insert(new)
                 }
             };
             c.seen = true;
@@ -1406,6 +1531,11 @@ impl RenderFeature for CharacterFeature {
             self.stats.draw_calls += 2 + c.strands.iter().filter(|s| s.drawn > 0).count() as u32;
         }
         self.characters.retain(|_, c| c.seen);
+        // Uploads of people gone (their threads finish into slots nobody reads).
+        if !self.uploads.is_empty() {
+            present.sort_unstable();
+            self.uploads.retain(|e, _| present.binary_search(e).is_ok());
+        }
         self.subsurface = self.characters.values().any(|c| c.scatter);
     }
 

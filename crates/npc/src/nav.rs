@@ -283,6 +283,25 @@ impl<'a> NavCtx<'a> {
         self.ensure_chunks(&[key]);
     }
 
+    /// Build, side by side, every chunk within `radius` meters of any of `points` that isn't
+    /// built yet, so the [`sample`](Self::sample)s and
+    /// [`nearest_walkable`](Self::nearest_walkable)s that follow don't build them one after
+    /// another (`tactics::choose_position` weighs up to ~100 spots around an enemy: arriving at
+    /// the fortress, one look built their chunks in a row for 102 ms, round 25 on Tobias's PC).
+    pub fn ensure_around(&mut self, points: impl IntoIterator<Item = DVec3>, radius: f64) {
+        let mut keys = Vec::new();
+        for p in points {
+            let (x0, z0) = self.cell_of(p - DVec3::new(radius, 0.0, radius));
+            let (x1, z1) = self.cell_of(p + DVec3::new(radius, 0.0, radius));
+            for kz in z0.div_euclid(CHUNK)..=z1.div_euclid(CHUNK) {
+                for kx in x0.div_euclid(CHUNK)..=x1.div_euclid(CHUNK) {
+                    keys.push((kx, kz));
+                }
+            }
+        }
+        self.ensure_chunks(&keys);
+    }
+
     /// Build every chunk in `keys` that isn't built yet. Several at once are built on their own
     /// threads (a scoped thread each, not the compute pool: a pool scope opened inside a
     /// system's task runs other systems while it waits): a search into new ground needs a
@@ -1177,6 +1196,32 @@ mod tests {
             assert_eq!(a.walk, b.walk, "{key:?}");
         }
         assert!(together.chunks.values().any(|c| c.walk.iter().any(|w| !w)));
+    }
+
+    #[test]
+    fn ground_around_spots_is_built_before_they_are_sampled() {
+        let world = TacticalWorld::from_obstacles(Vec::new(), &Ground::default());
+        let (ground, water) = (Ground::default(), Water::default());
+        let mut grid = NavGrid::default();
+        let mut ctx = grid.ctx(&world, &ground, &water);
+        let span = CHUNK as f64 * ctx.grid.settings.cell as f64;
+        // Spots in three chunks, one beside a chunk edge (its reach crosses into the next).
+        let spots = [
+            DVec3::new(span * 0.5, 0.0, span * 0.5),
+            DVec3::new(span * 2.5, 0.0, span * 0.5),
+            DVec3::new(span - 0.5, 0.0, span * 4.5),
+        ];
+        ctx.ensure_around(spots, 1.5);
+        let built = ctx.grid.chunks_built;
+        assert_eq!(built, 4);
+        for p in spots {
+            ctx.sample(p);
+            ctx.nearest_walkable(p, 1.2);
+        }
+        assert_eq!(
+            ctx.grid.chunks_built, built,
+            "nothing left to build one by one"
+        );
     }
 
     #[test]

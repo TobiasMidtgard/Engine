@@ -253,6 +253,9 @@ pub fn choose_position(
         let _ = found;
     }
 
+    // The ground under every spot, worked out at once (snapping each below would build its
+    // chunk alone, one after another), with the snap's reach around it.
+    ctx.nav.ensure_around(raw.iter().map(|r| r.0), 1.5);
     let mut spots: Vec<Spot> = Vec::with_capacity(raw.len());
     let target_eye = q.target_pos + DVec3::Y * 1.6;
     let target_chest = q.target_pos + DVec3::Y * 1.2;
