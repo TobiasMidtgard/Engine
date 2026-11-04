@@ -117,14 +117,21 @@ impl Simulation {
     /// Give every region the shortest substep its bodies ask for. Returns whether a region
     /// came to hold bodies with fine steps and others since the last look.
     pub(crate) fn update_fine(&mut self) -> bool {
-        let mut fine: HashMap<RegionId, (f32, u32)> = HashMap::new();
-        let mut reach: HashMap<RegionId, f64> = HashMap::new();
+        // By region index, not in maps: this walks every body twice a step, and hashing each
+        // one's region was most of an idle scene's region upkeep (3,000 resting crates: 0.18
+        // ms a step on the VM, round 15).
+        let n = self.regions.len();
+        let mut fine: Vec<Option<(f32, u32)>> = vec![None; n];
+        let mut reach: Vec<f64> = vec![0.0; n];
         for (e, b) in &self.bodies {
-            let r = reach.entry(b.region).or_insert(0.0);
-            *r = r.max(b.reach as f64);
+            let i = b.region as usize;
+            if i >= n {
+                continue;
+            }
+            reach[i] = reach[i].max(b.reach as f64);
             // (A body told to rest is held asleep: it needs no steps, fine or not.)
             if let Some(f) = b.fine.filter(|_| !self.resting.contains(e)) {
-                let e = fine.entry(b.region).or_insert((f, 0));
+                let e = fine[i].get_or_insert((f, 0));
                 e.0 = e.0.min(f);
                 e.1 += 1;
             }
@@ -134,8 +141,8 @@ impl Simulation {
             let Some(r) = r else {
                 continue;
             };
-            r.reach = reach.get(&(id as RegionId)).copied().unwrap_or(0.0);
-            let here = fine.get(&(id as RegionId));
+            r.reach = reach[id];
+            let here = fine[id].as_ref();
             r.fine = here.map(|f| f.0);
             let mixed = here.is_some_and(|f| f.1 < r.movers);
             newly_mixed |= mixed && !r.mixed;
