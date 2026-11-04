@@ -1534,6 +1534,7 @@ name = "engine_physics"
 version = "0.1.0"
 dependencies = [
  "bevy_ecs",
+ "cpu-time",
  "engine_assets",
  "engine_core",
  "engine_debug",
