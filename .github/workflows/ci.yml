@@ -35,7 +35,10 @@ jobs:
     # minutes); `rest` is every other crate plus format and lint. Move a crate across when one
     # half grows much longer than the other. By 2026-11-04 `rest` ran 62-75 minutes (32 of
     # its 48 test minutes were engine_render's renders on lavapipe) and hit the timeout, so
-    # engine_render has its own shard.
+    # engine_render has its own shard. That shard then took 42 minutes (40 of them its 64 test
+    # binaries, one after another) while `heavy` took 14, so engine_render's tests are split in
+    # two by `scripts/ci-render-tests` (its longest binaries, then the rest) and engine_physics
+    # (proving_ground alone ran 5 minutes) moved from `rest` to `heavy`.
     name: Tests (${{ matrix.shard }})
     runs-on: ubuntu-latest
     timeout-minutes: 75
@@ -44,13 +47,17 @@ jobs:
       matrix:
         include:
           - shard: heavy
-            packages: -p engine_npc -p engine_softbody -p engine_vehicles
+            packages: -p engine_npc -p engine_softbody -p engine_vehicles -p engine_physics
             lint: false
           - shard: render
-            packages: -p engine_render
+            packages: -p engine_render $(scripts/ci-render-tests slow)
+            after: -p engine_render --doc
+            lint: false
+          - shard: render-other
+            packages: -p engine_render $(scripts/ci-render-tests other)
             lint: false
           - shard: rest
-            packages: --workspace --exclude engine_npc --exclude engine_softbody --exclude engine_vehicles --exclude engine_render
+            packages: --workspace --exclude engine_npc --exclude engine_softbody --exclude engine_vehicles --exclude engine_physics --exclude engine_render
             lint: true
     steps:
       - name: Free disk space
@@ -78,7 +85,9 @@ jobs:
         if: matrix.lint
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Test
-        run: cargo test ${{ matrix.packages }}
+        run: |
+          cargo test ${{ matrix.packages }}
+          if [ -n "${{ matrix.after }}" ]; then cargo test ${{ matrix.after }}; fi
       - name: Disk left
         if: always()
         run: |
