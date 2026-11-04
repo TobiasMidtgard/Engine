@@ -220,8 +220,8 @@ impl Drop for Pending {
     }
 }
 
-/// Is a shape built off the frame: a mesh or a hull of [`OFF_FRAME_POINTS`] or more, or a
-/// compound whose meshes and hulls have that many points in all (a rock of a few hulls, a
+/// Is a shape built off the frame: a mesh, hull or height grid of [`OFF_FRAME_POINTS`] or
+/// more points, or a compound whose parts have that many in all (a rock of a few hulls, a
 /// tree's trunk and boughs, a fitted building's dozens of hulls: 15,000-18,000 points of
 /// compounds built in one sync, 8 ms on the VM loops, round 13).
 pub(crate) fn heavy(shape: &ColliderShape) -> bool {
@@ -229,6 +229,9 @@ pub(crate) fn heavy(shape: &ColliderShape) -> bool {
         match shape {
             ColliderShape::TriMesh { vertices, .. } => vertices.len(),
             ColliderShape::ConvexHull { points } => points.len(),
+            // (Parry works out every cell's edges to fix internal ones: 2.8 ms for a terrain
+            // tile's 65 x 65 samples on the VM, round 14.)
+            ColliderShape::Heightfield { heights, .. } => heights.len(),
             ColliderShape::Compound(parts) => parts.iter().map(|(_, _, s)| points(s)).sum(),
             _ => 0,
         }
@@ -406,6 +409,15 @@ mod tests {
             "two half-size hulls add up to an off-frame build"
         );
         assert!(!heavy(&hull(half, 0.0)));
+        let tile = ColliderShape::Heightfield {
+            heights: vec![0.0; 65 * 65],
+            rows: 65,
+            cols: 65,
+            size: [64.0, 64.0],
+        };
+        assert!(heavy(&tile), "a terrain tile's height grid");
+        let (lo, hi) = world_bounds(&tile, DVec3::ZERO, Quat::IDENTITY, Vec3::ONE);
+        assert!(lo.x == -32.0 && hi.z == 32.0, "{lo} {hi}");
         assert!(!heavy(&ColliderShape::Compound(vec![(
             Vec3::ZERO,
             Quat::IDENTITY,
