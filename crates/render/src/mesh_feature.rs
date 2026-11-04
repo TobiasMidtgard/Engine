@@ -1089,6 +1089,10 @@ pub struct MeshFeature {
     image_frame: [u64; SHADOW_MAPS],
     redrawn_frame: [u64; SHADOW_MAPS],
     static_dirty: [bool; SHADOW_MAPS],
+    /// The textures each alpha-masked material cuts its outline with, as last bound (its image
+    /// bound or still loading, whole or virtual): when they change, casters in the static
+    /// shadow images may show the old outline (a solid card while the image loaded).
+    outlines: HashMap<u64, [u32; 3]>,
     /// Casters and triangles that joined each map's static image this frame.
     joined: [(u32, u64); SHADOW_MAPS],
     /// Triangles in each map's static image when it was last drawn (for the report).
@@ -1732,6 +1736,13 @@ impl MeshFeature {
         gpu_material.flags[0] = (gpu_material.flags[0] & !TEXTURE_FLAGS) | bound;
         gpu_material.flags[1] = vt_low;
         gpu_material.flags[2] = vt_high;
+        if matches!(material.alpha_mode, AlphaMode::Mask(_))
+            && let Some(old) = self.outlines.insert(handle, [bound, vt_low, vt_high])
+            && old != [bound, vt_low, vt_high]
+        {
+            // Rare (an image finishing its load): every static image is drawn again.
+            self.static_dirty = [true; SHADOW_MAPS];
+        }
         let slot = self.material_data.len() as u32;
         self.material_data.push(gpu_material);
         self.material_index.insert(handle, (slot, textures));
@@ -3247,6 +3258,7 @@ impl RenderFeature for MeshFeature {
             let mut lists = std::mem::take(&mut self.shadow_scratch);
             lists.resize_with(maps.len(), Default::default);
             let (items, casters, meshes) = (&self.items, &self.casters, &self.meshes);
+            let material_data = &self.material_data;
             let image_frame = self.image_frame;
             let fill = |c: usize, out: &mut MapCasters| {
                 out.clear();
@@ -3272,12 +3284,24 @@ impl RenderFeature for MeshFeature {
                         continue;
                     }
                     let can_rest = !(item.sways && sway_moves);
-                    let in_image = can_rest && item.since <= image;
+                    // A cutout streamed tile by tile (a virtual base color) sharpens over the
+                    // frames after it appears: it waits the full still time, so the static
+                    // image doesn't keep its first, coarse outline.
+                    let streams = item.masked
+                        && material_data
+                            .get(item.material_slot as usize)
+                            .is_some_and(|m| m.flags[1] != 0);
+                    let since = if streams {
+                        item.since.saturating_add(STILL_FRAMES)
+                    } else {
+                        item.since
+                    };
+                    let in_image = can_rest && since <= image;
                     if in_image && !redraw {
                         continue;
                     }
                     // Still since the image last took casters in: it joins now.
-                    let joins = join && can_rest && item.since <= frame;
+                    let joins = join && can_rest && since <= frame;
                     let in_image = in_image || joins;
                     let inside = if in_image {
                         map_holds(view, c, item.center, item.radius)
