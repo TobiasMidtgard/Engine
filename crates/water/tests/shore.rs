@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use engine_core::prelude::*;
 use engine_core::time::TimeSource;
-use engine_water::{WaterBed, WaterBody, WaterPlugin};
+use engine_water::{SharedWater, WaterBed, WaterBody, WaterPlugin};
 use engine_world::{
     Ground, GroundQuery, GroundSample, SurfaceId, SurfaceLayers, TerrainChanged, WorldPlugin,
 };
@@ -52,8 +52,38 @@ fn wet(app: &App, x: f64, z: f64) -> f32 {
 
 #[test]
 fn the_sea_wets_its_beach_not_the_plain_behind() {
+    wets_the_beach(true);
+}
+
+/// In a game the ground under the shore and the swash is read on workers (round 26 on the PC:
+/// 12.7 + 7.2 ms in the frame on arriving at the lake, then 2.2 ms a step for 8 s): the same
+/// beach gets wet, and the swash gets its bed.
+#[test]
+fn in_a_game_the_ground_is_read_on_workers_with_the_same_result() {
+    let (headless, game) = (wets_the_beach(true), wets_the_beach(false));
+    let (a, b) = (
+        headless.expect("a bed headless"),
+        game.expect("a bed in a game"),
+    );
+    assert_eq!(a.origin, b.origin);
+    assert!(
+        a.bed == b.bed && a.still.len() == b.still.len(),
+        "the same ground"
+    );
+    assert!(
+        a.still
+            .iter()
+            .zip(&b.still)
+            .all(|(x, y)| x == y || x.is_nan() && y.is_nan()),
+        "the same still water"
+    );
+    assert_eq!(a.band, b.band);
+}
+
+/// Run the coast (headless or as a game); the swash bed the ripple grid ended up with.
+fn wets_the_beach(headless: bool) -> Option<Arc<engine_water::swash::SwashBed>> {
     let mut app = App::new();
-    app.world.resource_mut::<EngineConfig>().headless = true;
+    app.world.resource_mut::<EngineConfig>().headless = headless;
     app.world
         .resource_mut::<Time>()
         .set_source(TimeSource::Manual {
@@ -91,4 +121,6 @@ fn the_sea_wets_its_beach_not_the_plain_behind() {
         "sandbar {}",
         wet(&app, -10.5, 0.5)
     );
+    let state = app.world.resource::<SharedWater>().0.read();
+    state.ripples.swash.clone()
 }
