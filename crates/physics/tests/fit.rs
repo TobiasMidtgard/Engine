@@ -114,7 +114,7 @@ fn a_moving_model_gets_convex_parts_not_triangles() {
 
 /// The collider audit (`engine_physics::audit`) lists a drawn rock with no collider on the
 /// ground, not one with its own collider, nor a pebble too small to matter, nor a sail whose
-/// mast has a collider of its own.
+/// mast has a collider of its own, nor one far from the player.
 #[test]
 fn the_collider_audit_lists_drawn_rocks_nothing_collides_with() {
     let mut app = app();
@@ -154,6 +154,12 @@ fn the_collider_audit_lists_drawn_rocks_nothing_collides_with() {
         .id();
     let sail = drawn(&mut app, Vec3::new(0.0, 2.0, -3.0), 1.5, "sail");
     app.world.entity_mut(sail).insert(ChildOf(mast));
+    // Far from the player: scenery there gets its collider only once someone comes near.
+    drawn(&mut app, Vec3::new(100.0, 0.5, 0.0), 1.0, "far rock");
+    app.world.spawn((
+        Transform::from_xyz(0.0, 1.0, 0.0),
+        engine_world::physics::CharacterController::default(),
+    ));
     app.update_n(3);
     let found = engine_physics::audit::uncovered_meshes(&app.world);
     let names: Vec<&str> = found.iter().map(|u| u.item.as_str()).collect();

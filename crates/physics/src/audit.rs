@@ -26,6 +26,10 @@ use crate::SharedSimulation;
 
 /// Meshes smaller than this across (m) are left out (pebbles, props you may walk over).
 pub const MIN_SIZE_M: f64 = 0.3;
+/// Meshes farther than this (m) from every character are not looked at: showcase scenery gets
+/// its colliders only near a focus point (`NearSolid`, within 70 m), as streaming worlds do.
+/// With no character in the world, every mesh is.
+pub const NEAR_M: f64 = 30.0;
 /// Seconds between looks.
 pub const EVERY_S: f64 = 10.0;
 /// Meshes listed in the log per zone (the file has all).
@@ -88,6 +92,10 @@ pub fn uncovered_meshes(world: &World) -> Vec<Uncovered> {
                 .filter(|s| !s.is_empty()),
         );
     }
+    let focus: Vec<DVec3> = world
+        .try_query::<(&CharacterController, &GlobalTransform)>()
+        .map(|mut q| q.iter(world).map(|(_, g)| g.translation()).collect())
+        .unwrap_or_default();
     let mut out = Vec::new();
     let mut hits = Vec::new();
     for (e, renderer, global) in q.iter(world) {
@@ -119,6 +127,10 @@ pub fn uncovered_meshes(world: &World) -> Vec<Uncovered> {
         if !size.is_finite() || size < MIN_SIZE_M {
             continue;
         }
+        let near = |p: &DVec3| p.clamp(lo, hi).distance(*p) <= NEAR_M;
+        if !focus.is_empty() && !focus.iter().any(near) {
+            continue;
+        }
         let half = (hi - lo) * 0.5;
         let center = (lo + hi) * 0.5;
         let probe_at = center + DVec3::Y * half.y * 0.5;
@@ -133,7 +145,7 @@ pub fn uncovered_meshes(world: &World) -> Vec<Uncovered> {
         out.push(Uncovered {
             entity: e,
             zone: zone_of(world, e),
-            item: crate::report::label(world, e),
+            item: kind(crate::report::label(world, e)),
             mesh: match &renderer.mesh {
                 MeshRef::Asset(key) => key.to_string(),
                 _ => handle.map_or_else(String::new, |h| format!("{h:?}")),
@@ -144,6 +156,23 @@ pub fn uncovered_meshes(world: &World) -> Vec<Uncovered> {
     }
     out.sort_by(|a, b| a.zone.cmp(&b.zone).then(b.size.total_cmp(&a.size)));
     out
+}
+
+/// A label without the entity id an unnamed one starts with, so like meshes group together.
+fn kind(label: String) -> String {
+    let first = label.split(' ').next().unwrap_or("");
+    let is_id = first.split_once('v').is_some_and(|(i, g)| {
+        !i.is_empty() && !g.is_empty() && (i.to_owned() + g).bytes().all(|b| b.is_ascii_digit())
+    });
+    if !is_id {
+        return label;
+    }
+    let rest = label[first.len()..].trim();
+    if rest.is_empty() {
+        "(unnamed)".into()
+    } else {
+        rest.into()
+    }
 }
 
 /// Does `e` or an ancestor have a body, a collider or a character on it?
