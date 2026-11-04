@@ -10,8 +10,8 @@ minute later.
 
 ## Change a page
 
-1. Open the page on the wiki and tap the **pencil** at the top right. It opens the page's file
-   on GitHub.
+1. Open the page on the wiki and tap the **pencil** at the top right, beside **History**. It
+   opens the page's file on GitHub.
 2. Tap the pencil on GitHub (**Edit this file**), make your change and tap
    **Commit changes**.
 
@@ -24,7 +24,8 @@ minute later.
    | Creatures | `wiki/src/creatures/` |
    | Cities and towns | `wiki/src/cities/` |
    | Factions | `wiki/src/factions/` |
-   | People | `wiki/src/people/` |
+   | Characters | `wiki/src/people/` |
+   | Quests | `wiki/src/quests/` |
    | Planets | `wiki/src/world/planets/` |
    | Regions | `wiki/src/world/regions/` |
    | Landmarks | `wiki/src/world/landmarks/` |
@@ -60,8 +61,8 @@ Anywhere else in a page, use a normal Markdown picture, with a path from the pag
 
 ## The infobox
 
-The box at the top right of a page. One `Key: value` per line; a line starting with `##` starts
-a new group.
+The **At a glance** panel beside the page (above the text on a phone). One `Key: value` per
+line; a line starting with `##` starts a new group.
 
 ````text
 ```infobox
@@ -69,6 +70,7 @@ image: creatures/wolf.jpg
 caption: A wolf stalking through the grass.
 summary: One sentence for the card on the section page.
 status: draft
+tags: Pack hunter, Night
 Type: Beast
 Danger: 3/5
 ## Combat
@@ -76,10 +78,13 @@ Attacks: Bite, lunge
 ```
 ````
 
-- `image`, `caption`, `summary` and `status` are special: the picture, its caption, the text on
-  the page's card, and the page's status. Leave out the image and the box shows an empty
-  picture slot.
-- Any other key becomes a row, in the order you write them.
+- `summary` is the line under the page's title, and the text on its card.
+- `image` is the big picture behind the title, and the picture on its card. Leave it out and the
+  title gets its section's emblem instead.
+- `caption` is the small text on the picture.
+- `Type` and `tags` (a comma-separated list) become the small chips under the title.
+- `status` marks the page as a draft or a stub (see below).
+- Any other key becomes a row of the panel, in the order you write them.
 - A value like `3/5` shows as dots, for danger or difficulty.
 - Links work inside values: `[Home world](../world/planets/home-world.md)`.
 
@@ -89,12 +94,34 @@ Mark a page that isn't settled yet, so readers know:
 
 | Write | Shows |
 |---|---|
-| `status: draft` in the infobox, or `{{draft}}` on its own line | A **Draft** banner: names and details may change |
-| `status: stub`, or `{{stub}}` | A **Stub** banner: the page is only a start |
-| `{{draft: your own note}}` | The banner with your own words |
+| `status: draft` in the infobox, or `{{draft}}` on its own line | A **Draft** chip by the title: names and details may change |
+| `status: stub`, or `{{stub}}` | A **Stub** chip: the page is only a start |
+| `{{draft: your own note}}` | The chip, and your own words under the title |
 
 Remove the line when the page is right. [Pages to review](review.md) lists every page still
 marked.
+
+## Easy to read
+
+The wiki breaks long pages up by itself, so write plain sections and let it do the rest:
+
+- **Tabs**: a page with three or more `##` sections and more than about 500 words shows one tab
+  per section, plus **Full page**. Put `tabs: no` in the page's `meta` or `infobox` block to keep
+  it as one long page.
+- **Cards**: a list where every line starts with a bold name, like `- **The Iron Anchor**:
+  soldiers and engineers`, shows as a grid of small cards.
+- **Quotes**: a one-paragraph `>` quote shows large, as a quote.
+- **Spoilers**: start a section's secret part with these two lines, and the rest of the section
+  is hidden behind a **Show** cover. Readers can show every spoiler at once with the switch beside
+  the page.
+
+  ```text
+  > [!WARNING]
+  > Spoilers for the guild questline below.
+  ```
+
+- **Quest routes**: a `flow` block draws how a quest can go: where it starts, the ways in side by
+  side, where they meet and how it can end. The [quest template](templates.md#quest) has one.
 
 ## Section pages
 
@@ -104,6 +131,8 @@ A section's own page (its `index.md`) can show its pages for you:
 |---|---|
 | `{{cards}}` | A picture card for every page in the section |
 | `{{table: Type, Habitat, Danger}}` | A table of the section's pages with those infobox rows |
+| A `cards` block with one page path per line | Cards for just those pages, from anywhere in the wiki |
+| A `list` block with one page path per line | The same pages as rows with an icon and their summary |
 
 A `meta` block sets the picture and text of a page's own card without showing an infobox:
 

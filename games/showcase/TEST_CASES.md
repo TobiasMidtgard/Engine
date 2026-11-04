@@ -56,7 +56,7 @@ are built, nothing simulates yet) · ⬜ not visible yet
 
 | # | Test case | Zone / viewpoint | Owner | Status |
 |---|---|---|---|---|
-| 20 | Procedural plants that differ by species variables | `forest`, the whole valley | Foliage and ecology | ✅ `forest`: oak, birch, pine, spruce, hazel, ferns, grass and flowers, each plant shaped by inherited genes; the valley's own trees switch over next |
+| 20 | Procedural plants that differ by species variables | `forest`, the whole valley; `forest_old_oak` | Foliage and ecology | ✅ `forest`: oak, birch, pine, spruce, hazel, ferns, grass and flowers, each plant shaped by inherited genes; the valley's own trees switch over next; an oak grown 24 years from buds and light stands on the burn scar (drawn light past 15 m) |
 | 21 | Chop a tree; new ones grow where water, sun and soil allow | `forest_clearing` (walk the trail: `forest_trail`, `forest_spring`, `forest_burn_scar`, `forest_dry_ridge`) | Foliage and ecology | ✅ a tree at the clearing's edge falls every 25 s and rots into the soil; the clear-cut regrows, the burn scar recovers, ferns crowd the spring, pines win the dry ridge |
 | 22 | Plants that need other resources (mineral water) and glowing cave mushrooms | `cave`, `cave_fungi`, `cave_pool` | Foliage and ecology | ✅ glowcaps and lantern caps grow only where the mineral pool and seep reach, glow brighter the better fed they are, and light the cave |
 | 23 | Grass that moves in the wind | everywhere | Foliage and ecology (strands: Rendering and lighting) | 🟨 grass patches sway |

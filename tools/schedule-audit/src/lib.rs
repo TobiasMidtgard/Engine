@@ -105,10 +105,6 @@ mod tests {
                 "engine_foliage::run_demo_felling",
                 "engine_physics::physics_sync",
                 "engine_physics::physics_write_back",
-                "engine_physics::replay_floaters",
-                "engine_physics::replay_stations",
-                "engine_script::run_fixed_scripts",
-                "engine_space::follow_world_clock",
             ],
         ),
         (
@@ -206,7 +202,7 @@ mod tests {
     fn fix(what: &str, extra: &BTreeSet<&str>, gone: &BTreeSet<&str>) -> String {
         format!(
             "{what} changed.\n  new: {extra:?}\n  gone: {gone:?}\nA new one: make it run beside \
-             the rest (a Query/Res system, or run_if so it only runs with work), or add it here \
+             the rest (a Query/Res system, or a plain work check piped into engine_core::schedule::queue_when; a run_if doesn't help), or add it here \
              on purpose. One gone: take it off the list here. `cargo run -p schedule-audit` \
              prints the whole report."
         )

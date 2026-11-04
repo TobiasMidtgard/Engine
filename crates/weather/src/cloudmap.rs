@@ -2,7 +2,11 @@
 //! density) that the volumetric clouds are carved from. Built on the CPU from the same
 //! function that decides whether it rains at the player, so what you see is what falls.
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use engine_core::math::{DVec2, Vec4};
+use engine_core::off_frame::OffFrameCommands;
 use engine_core::prelude::*;
 
 use engine_world::CloudCoverMap;
@@ -55,6 +59,16 @@ fn unorm(v: f32) -> u8 {
     (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8
 }
 
+fn texel(sim: &WeatherSim, p: DVec2) -> [u8; 4] {
+    let c = sim.cell_at(p);
+    [
+        unorm(c.coverage),
+        unorm(c.cloud_type),
+        unorm(c.precipitation_mm_h / MAP_PRECIP_SCALE),
+        unorm(c.density),
+    ]
+}
+
 /// Rebuild the map centered on the player.
 pub fn build(map: &mut CloudMap, sim: &WeatherSim) {
     let mut next = Rebuild::start(map, sim);
@@ -75,10 +89,6 @@ pub(crate) struct Rebuild {
     after: u64,
 }
 
-/// Rows of the map built per tick: the whole map in 8 ticks, well inside the half second
-/// between rebuilds.
-const ROWS_PER_TICK: usize = 16;
-
 impl Rebuild {
     /// Start a rebuild centered on the player, at the weather as it is now.
     fn start(map: &CloudMap, sim: &WeatherSim) -> Self {
@@ -96,10 +106,6 @@ impl Rebuild {
         }
     }
 
-    fn done(&self, size: usize) -> bool {
-        self.next_row >= size
-    }
-
     /// Fill the next `rows` rows.
     fn rows(&mut self, sim: &WeatherSim, rows: usize) {
         let size = (self.texels.len() as f64).sqrt() as usize;
@@ -112,32 +118,51 @@ impl Rebuild {
             for (i, t) in texels.iter_mut().enumerate() {
                 let index = first * size + chunk * size * 4 + i;
                 let (x, y) = ((index % size) as f64, (index / size) as f64);
-                let p = origin + DVec2::new(x + 0.5, y + 0.5) * cell;
-                let c = sim.cell_at(p);
-                *t = [
-                    unorm(c.coverage),
-                    unorm(c.cloud_type),
-                    unorm(c.precipitation_mm_h / MAP_PRECIP_SCALE),
-                    unorm(c.density),
-                ];
+                *t = texel(sim, origin + DVec2::new(x + 0.5, y + 0.5) * cell);
             }
         });
     }
 
+    /// Fill every row left on this thread (a worker's: no fan-out to the frame's pool).
+    fn rows_serial(&mut self, sim: &WeatherSim, size: usize) {
+        let (origin, cell) = (self.origin, MAP_CELL_M as f64);
+        for (index, t) in self
+            .texels
+            .iter_mut()
+            .enumerate()
+            .skip(self.next_row * size)
+        {
+            let (x, y) = ((index % size) as f64, (index / size) as f64);
+            *t = texel(sim, origin + DVec2::new(x + 0.5, y + 0.5) * cell);
+        }
+        self.next_row = size;
+    }
+
+    /// The weather beyond the map.
+    fn background(&self, sim: &WeatherSim, size: usize) -> Vec4 {
+        let b = sim.base;
+        Vec4::new(
+            background_cover(sim, self.origin, size as f64 * MAP_CELL_M as f64),
+            b.cloud_type,
+            b.precipitation_mm_h / MAP_PRECIP_SCALE,
+            b.cloud_density,
+        )
+    }
+
     /// Hand the finished texels to the map.
-    fn finish(self, map: &mut CloudMap, sim: &WeatherSim) {
+    fn install(self, map: &mut CloudMap, background: Vec4) {
         map.origin = self.origin;
         map.drift_at_build = self.drift;
         map.built_at_s = self.time_s;
         map.texels = self.texels;
-        let b = sim.base;
-        map.background = Vec4::new(
-            background_cover(sim, self.origin, map.size as f64 * map.cell_m as f64),
-            b.cloud_type,
-            b.precipitation_mm_h / MAP_PRECIP_SCALE,
-            b.cloud_density,
-        );
+        map.background = background;
         map.revision += 1;
+    }
+
+    /// Hand the finished texels to the map.
+    fn finish(self, map: &mut CloudMap, sim: &WeatherSim) {
+        let background = self.background(sim, map.size as usize);
+        self.install(map, background);
     }
 }
 
@@ -162,35 +187,70 @@ fn background_cover(sim: &WeatherSim, origin: DVec2, span: f64) -> f32 {
 }
 
 /// FixedUpdate: rebuild the map twice per second of weather time, or when the player has
-/// moved far from its center. A rebuild is spread over a few ticks; the first map, a jump
-/// in weather time and a move past the map's edge are built at once.
+/// moved far from its center. The first map is built at once; every later one is built whole
+/// on a worker (off the frame) from a copy of the weather and swapped in when done. Built on
+/// the frame, a rebuild after a jump in weather time or a long move held one fixed step for
+/// 9-15 ms on the PC (round 23), and spreading it over ticks still cost 0.5 ms a tick.
 pub(crate) fn cloud_map_system(
+    mut commands: Commands,
     sim: Res<WeatherSim>,
     mut map: ResMut<CloudMap>,
-    mut pending: Local<Option<Rebuild>>,
+    busy: Local<Arc<AtomicBool>>,
 ) {
-    let size = map.size as usize;
-    let span = size as f64 * map.cell_m as f64;
-    let center = map.origin + DVec2::splat(span * 0.5);
-    let off = (center - sim.focus).abs().max_element();
-    let since = (sim.time_s - map.built_at_s).abs();
-    if pending.as_ref().is_some_and(|p| p.after != map.revision) {
-        *pending = None;
-    }
-    if map.revision == 0 || off > span * 0.4 || since > 5.0 {
-        *pending = None;
+    if map.revision == 0 {
         build(&mut map, &sim);
         return;
     }
-    if pending.is_none() && (since >= 0.5 || off > span * 0.1) {
-        *pending = Some(Rebuild::start(&map, &sim));
+    if busy.load(Ordering::Acquire) {
+        return;
     }
-    if let Some(next) = pending.as_mut() {
-        next.rows(&sim, ROWS_PER_TICK);
-        if next.done(size)
-            && let Some(next) = pending.take()
-        {
-            next.finish(&mut map, &sim);
+    let span = map.size as f64 * map.cell_m as f64;
+    let center = map.origin + DVec2::splat(span * 0.5);
+    let off = (center - sim.focus).abs().max_element();
+    let since = (sim.time_s - map.built_at_s).abs();
+    if since < 0.5 && off <= span * 0.1 {
+        return;
+    }
+    busy.store(true, Ordering::Release);
+    let mut next = Rebuild::start(&map, &sim);
+    let size = map.size as usize;
+    let sim = sim.clone();
+    // Clears the flag if the build never runs or panics; the apply clears it otherwise.
+    let guard = Busy {
+        flag: busy.clone(),
+        done: false,
+    };
+    let flag = busy.clone();
+    commands.off_frame(
+        "weather cloud map",
+        move || {
+            let mut guard = guard;
+            next.rows_serial(&sim, size);
+            let background = next.background(&sim, size);
+            guard.done = true;
+            (next, background)
+        },
+        move |world: &mut World, (next, background): (Rebuild, Vec4)| {
+            flag.store(false, Ordering::Release);
+            let mut map = world.resource_mut::<CloudMap>();
+            // A map built meanwhile (at once, after a world shift) is on newer axes.
+            if map.revision == next.after {
+                next.install(&mut map, background);
+            }
+        },
+    );
+}
+
+/// See [`cloud_map_system`].
+struct Busy {
+    flag: Arc<AtomicBool>,
+    done: bool,
+}
+
+impl Drop for Busy {
+    fn drop(&mut self) {
+        if !self.done {
+            self.flag.store(false, Ordering::Release);
         }
     }
 }
@@ -303,5 +363,90 @@ mod tests {
         assert!((moved.length() - 1000.0).abs() < 1e-3, "{moved}");
         let after = cover.cover_at(DVec2::new(1500.0, -2500.0) + moved);
         assert!((after - before).abs() < 1e-3, "{before} vs {after}");
+    }
+}
+
+#[cfg(test)]
+mod off_frame_tests {
+    use super::*;
+    use crate::presets::WeatherPreset;
+    use crate::sim::Weather;
+    use engine_core::off_frame::{OffFrameJobs, OffFrameSettings};
+
+    #[test]
+    fn rebuilds_run_off_the_frame_and_a_shift_drops_a_stale_one() {
+        engine_core::tasks::init_task_pools();
+        let mut app = App::new();
+        app.add_plugins((engine_world::WorldPlugin, crate::WeatherPlugin));
+        app.world.init_resource::<OffFrameJobs>();
+        app.world.insert_resource(OffFrameSettings {
+            inline: false,
+            ..Default::default()
+        });
+        app.world
+            .resource_mut::<Time>()
+            .set_source(engine_core::time::TimeSource::Manual { step_secs: 0.1 });
+        app.world.resource_mut::<Weather>().preset = WeatherPreset::PartlyCloudy;
+        app.update_n(2);
+        let first = app.world.resource::<CloudMap>().revision;
+        assert!(first > 0, "the first map is built at once");
+        // A long jump in weather time: the next map comes from a worker, not this frame.
+        app.world.resource_mut::<WeatherSim>().time_s += 600.0;
+        app.update();
+        let jobs = app.world.resource::<OffFrameJobs>().pending(None);
+        assert!(jobs > 0, "a rebuild is queued off the frame");
+        engine_core::off_frame::finish(&mut app.world, None);
+        let map = app.world.resource::<CloudMap>();
+        assert!(map.revision > first);
+        let built = map.built_at_s;
+        let now = app.world.resource::<WeatherSim>().time_s;
+        assert!((now - built).abs() < 1.0, "built at {built}, now {now}");
+        // A job started before a map built at once (as a world shift does) is dropped.
+        app.world.resource_mut::<WeatherSim>().time_s += 600.0;
+        app.update();
+        let before = {
+            let sim = app.world.resource::<WeatherSim>().clone();
+            let mut map = app.world.resource_mut::<CloudMap>();
+            build(&mut map, &sim);
+            (map.revision, map.origin)
+        };
+        engine_core::off_frame::finish(&mut app.world, None);
+        let map = app.world.resource::<CloudMap>();
+        assert_eq!((map.revision, map.origin), before);
+    }
+}
+
+#[cfg(test)]
+mod spike_bench {
+    use super::*;
+    use crate::sim::Weather;
+
+    #[test]
+    #[ignore]
+    fn time_the_cloud_map() {
+        engine_core::tasks::init_task_pools();
+        let sim = WeatherSim::new(&Weather::default());
+        let mut map = CloudMap::default();
+        for _ in 0..3 {
+            let t = std::time::Instant::now();
+            build(&mut map, &sim);
+            eprintln!(
+                "cloud map build (parallel): {:.2} ms",
+                t.elapsed().as_secs_f64() * 1e3
+            );
+        }
+        let t = std::time::Instant::now();
+        let mut n = 0.0;
+        for y in 0..128 {
+            for x in 0..128 {
+                n += sim
+                    .cell_at(DVec2::new(x as f64 * 1000.0, y as f64 * 1000.0))
+                    .coverage;
+            }
+        }
+        eprintln!(
+            "serial 16384 cells: {:.2} ms ({n})",
+            t.elapsed().as_secs_f64() * 1e3
+        );
     }
 }

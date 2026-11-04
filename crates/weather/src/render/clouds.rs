@@ -1182,9 +1182,21 @@ impl RenderFeature for CloudFeature {
         } else {
             0.0
         };
-        let moon_radius = MOON_RADIUS * settings.moon_scale.clamp(0.25, 8.0);
+        // The real moon's size when known (MoonSource), else the clock's; drawn bigger than in a
+        // photo, as the eye sees it. No disc at all when the space module draws the body.
+        let real = if lights.in_charge && lights.moon_radius > 0.0 {
+            lights.moon_radius
+        } else {
+            MOON_RADIUS
+        };
+        let moon_radius = real * settings.moon_scale.clamp(0.25, 8.0);
         let moon_solid_angle = PI * moon_radius * moon_radius;
         let moon_luminance = sky.moon_lux / moon_solid_angle * 0.55;
+        let moon_radius = if lights.in_charge && lights.moon_drawn_elsewhere {
+            0.0
+        } else {
+            moon_radius
+        };
         let lat = climate.latitude_deg.to_radians();
         let sidereal = (state.time_of_day_h / 24.0 + state.day_of_year / climate.year_days) * TAU;
         let size = self.targets().map(|t| t.size).unwrap_or((1, 1));

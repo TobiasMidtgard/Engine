@@ -40,6 +40,12 @@ pub const BURN: [f32; 3] = [-34.0, 52.0, 17.0];
 pub const POND: [f32; 3] = [-10.0, 10.0, 4.5];
 /// A garden bed by the trail in the clearing, growing in time-lapse (x, z, radius).
 pub const GARDEN: [f32; 3] = [48.0, 21.0, 1.9];
+/// An oak that came through the fire (thick bark shrugs off a ground fire), grown in the growth
+/// tool from buds and light, on the burn scar's open ground (x, z, radius kept clear round its
+/// trunk). Drawn light past 15 m.
+pub const OLD_OAK: [f32; 3] = [-21.0, 50.0, 2.5];
+/// The old oak's age, years.
+pub const OLD_OAK_YEARS: f32 = 24.0;
 /// Dry ridge (x, z, radius).
 pub const RIDGE: [f32; 3] = [-55.0, -40.0, 26.0];
 /// Height of the pond's water above the ground, meters (its shore sinks to meet it).
@@ -179,6 +185,16 @@ pub fn forest_viewpoints(center: DVec3) -> Vec<Viewpoint> {
             [GARDEN[0] + 0.45, 0.62, GARDEN[1] + 1.15],
             [GARDEN[0] - 0.05, 0.1, GARDEN[1] - 0.2],
             10.0,
+        ),
+        view(
+            center,
+            (
+                "forest_old_oak",
+                "An oak that came through the fire, grown 24 years from buds and light",
+            ),
+            [-19.5, 1.7, 29.0],
+            [OLD_OAK[0], 6.0, OLD_OAK[1]],
+            10.5,
         ),
         view(
             center,
@@ -324,7 +340,7 @@ pub fn forest_region() -> EcologyRegion {
         max_plants: [700, 600, 14000],
         step_years: 0.25,
         time_scale: 30.0,
-        keep_clear: [vec![POND, GARDEN], trail_clearance()].concat(),
+        keep_clear: [vec![POND, GARDEN, OLD_OAK], trail_clearance()].concat(),
         sight_lines: lens_clearance(),
         corridors: trail_corridor(),
         history: RegionHistory {
@@ -574,6 +590,13 @@ pub fn spawn_demo(commands: &mut Commands, center: DVec3) {
     ));
     spawn_rocks(commands, center, rocks);
     spawn_garden(commands, local(center, GARDEN[0], GARDEN[1]));
+    // Midsummer, holding still.
+    commands.spawn((
+        Name::new("old oak"),
+        Transform::from_translation(local(center, OLD_OAK[0], OLD_OAK[1]) - DVec3::Y * 0.05)
+            .with_rotation(Quat::from_rotation_y(2.4)),
+        crate::growth::GrowingPlant::new("oak", 3).aged(OLD_OAK_YEARS * 365.0 + 200.0),
+    ));
     // Leaf litter, needles, moss, ash and packed earth under the trees.
     commands.spawn((
         Transform::from_translation(center),

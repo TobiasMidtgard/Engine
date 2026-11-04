@@ -20,6 +20,9 @@ pub struct Organ {
     pub parent: Option<u32>,
     /// The node of the parent axis it grows at (its tip for an apex).
     pub at_node: u32,
+    /// How far back from that node it sits, as a share of the internode below it (0: at the
+    /// node). A tree's metamer stands for several real nodes, so its leaves spread along it.
+    pub back: f32,
     /// Turn around the parent axis and angle out of it, radians.
     pub roll: f32,
     pub angle: f32,
@@ -152,6 +155,7 @@ impl Skeleton {
                 bends: Vec::new(),
                 dirs: Vec::new(),
                 node_days: Vec::new(),
+                back: 0.0,
                 recur: None,
             };
             match generator {

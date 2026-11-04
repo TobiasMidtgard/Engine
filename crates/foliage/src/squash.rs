@@ -11,9 +11,11 @@
 //! copies are freed when the log loses its crown or goes.
 
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 use engine_assets::{Assets, Handle};
 use engine_core::prelude::*;
+use engine_core::tasks::AsyncComputeTaskPool;
 use engine_render::{Mesh, MeshRef, MeshRenderer};
 use engine_world::Ground;
 
@@ -28,8 +30,13 @@ const CLEARANCE_M: f32 = 0.03;
 /// How far crushed limbs splay out sideways, per meter they were pressed up.
 const SPLAY: f32 = 0.35;
 
+/// A pressed copy being made on the task pool.
+type PressSlot = Arc<Mutex<Option<Mesh>>>;
+
 /// On a fallen tree whose crown rests on the ground: the pose it lies in and the pressed copies
-/// of the meshes its parts have shown (keyed by the original mesh).
+/// of the meshes its parts have shown (keyed by the original mesh), and those being made (off
+/// the frame: a crown has tens of thousands of vertices and the ground under it is sampled
+/// hundreds of times; on the PC one press took 107 ms in the frame).
 #[derive(Component, Debug, Clone)]
 pub struct CrownSquash {
     /// The log's transform at rest.
@@ -39,6 +46,7 @@ pub struct CrownSquash {
     /// How far below its axis the crown hangs at most, meters (world).
     pub crown_r: f32,
     pressed: HashMap<u32, Handle<Mesh>>,
+    pressing: HashMap<u32, PressSlot>,
 }
 
 impl CrownSquash {
@@ -48,6 +56,7 @@ impl CrownSquash {
             trunk_r,
             crown_r,
             pressed: HashMap::new(),
+            pressing: HashMap::new(),
         }
     }
 
@@ -171,6 +180,7 @@ pub fn press_fallen_crowns(
             for (_, h) in squash.pressed.drain() {
                 meshes.remove(h);
             }
+            squash.pressing.clear();
             commands.entity(entity).remove::<CrownSquash>();
             continue;
         }
@@ -182,23 +192,60 @@ pub fn press_fallen_crowns(
             if !r.visible || squash.is_pressed(h) {
                 continue;
             }
-            let pressed = match squash.pressed.get(&h.index()) {
-                Some(p) => *p,
-                None => {
-                    let Some(mesh) = meshes.get(h) else { continue };
-                    let m = press_crown(
-                        mesh,
-                        &squash.rest,
-                        squash.trunk_r,
-                        squash.crown_r,
-                        ground.as_deref(),
-                    );
-                    let p = meshes.add(m);
-                    squash.pressed.insert(h.index(), p);
-                    p
-                }
+            let key = h.index();
+            let pressed = match squash.pressed.get(&key) {
+                Some(p) => Some(*p),
+                None => match squash.pressing.get(&key) {
+                    // Done: it goes in.
+                    Some(slot) => match slot.lock().ok().and_then(|mut s| s.take()) {
+                        Some(m) => {
+                            squash.pressing.remove(&key);
+                            let p = meshes.add(m);
+                            squash.pressed.insert(key, p);
+                            Some(p)
+                        }
+                        None => None,
+                    },
+                    None => {
+                        let Some(mesh) = meshes.get(h) else { continue };
+                        let (rest, trunk_r, crown_r) =
+                            (squash.rest, squash.trunk_r, squash.crown_r);
+                        match AsyncComputeTaskPool::try_get() {
+                            Some(pool) => {
+                                let (mesh, ground) = (mesh.clone(), ground.as_deref().cloned());
+                                let slot: PressSlot = Arc::new(Mutex::new(None));
+                                let out = slot.clone();
+                                pool.spawn(async move {
+                                    let m = press_crown(
+                                        &mesh,
+                                        &rest,
+                                        trunk_r,
+                                        crown_r,
+                                        ground.as_ref(),
+                                    );
+                                    if let Ok(mut s) = out.lock() {
+                                        *s = Some(m);
+                                    }
+                                })
+                                .detach();
+                                squash.pressing.insert(key, slot);
+                                None
+                            }
+                            None => {
+                                let m =
+                                    press_crown(mesh, &rest, trunk_r, crown_r, ground.as_deref());
+                                let p = meshes.add(m);
+                                squash.pressed.insert(key, p);
+                                Some(p)
+                            }
+                        }
+                    }
+                },
             };
-            r.mesh = MeshRef::Handle(pressed);
+            // Until its copy is made, the part shows as it is (a frame or few after impact).
+            if let Some(p) = pressed {
+                r.mesh = MeshRef::Handle(p);
+            }
         }
         orphans.retain(|(e, _)| *e != entity);
         orphans.push((entity, squash.pressed.values().copied().collect()));

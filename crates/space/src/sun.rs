@@ -17,8 +17,8 @@ use engine_core::prelude::*;
 use engine_world::WeatherState;
 
 use crate::{
-    BodyKind, BodyState, HomeFrame, SpaceClock, SpaceFrame, SpaceSettings, anchor_index,
-    collect_bodies, dir_from_lat_lon, propagate,
+    BodyKind, BodyState, CelestialBody, HomeFrame, SpaceClock, SpaceFrame, SpaceSettings,
+    anchor_index, dir_from_lat_lon, propagate,
 };
 
 /// Days in the weather's year.
@@ -145,26 +145,37 @@ pub(crate) fn write_weather_sun(
 /// the home spot (the [`HomeFrame`]'s) the real sun stands at `WeatherState::time_of_day_h`
 /// local solar time on `day_of_year`. Small steps from the current clock keep it continuous,
 /// so the Moon and planets carry on along their orbits as the weather's clock runs.
-pub(crate) fn follow_world_clock(world: &mut World) {
-    if !world.resource::<SpaceSettings>().follow_world_clock {
+///
+/// A plain system, not an exclusive one: an exclusive system in FixedUpdate waits for an idle
+/// pool every step, even when the setting is off (fixed-step-chain.md, round 22).
+pub(crate) fn follow_world_clock(
+    settings: Res<SpaceSettings>,
+    weather: Option<Res<WeatherState>>,
+    bodies: Query<(Entity, &CelestialBody)>,
+    home: Option<Res<HomeFrame>>,
+    frame: Option<Res<SpaceFrame>>,
+    mut clock: ResMut<SpaceClock>,
+) {
+    if !settings.follow_world_clock {
         return;
     }
-    let Some(w) = world.get_resource::<WeatherState>() else {
+    let Some(w) = weather else {
         return;
     };
     let hour = w.time_of_day_h as f64;
     // The weather's date turns at local midnight; the season runs on through the day.
     let target_day = w.day_of_year as f64 + hour / 24.0;
-    let bodies = collect_bodies(world);
+    let bodies: Vec<(Entity, CelestialBody)> = bodies.iter().map(|(e, b)| (e, b.clone())).collect();
     if bodies.is_empty() {
         return;
     }
-    let home = match world.get_resource::<HomeFrame>() {
-        Some(h) => h.0.clone(),
-        None => world.resource::<SpaceFrame>().clone(),
+    let home = match (home, frame) {
+        (Some(h), _) => h.0.clone(),
+        (None, Some(f)) => f.clone(),
+        (None, None) => return,
     };
     let spot = dir_from_lat_lon(home.home_lat_deg, home.home_lon_deg);
-    let mut t = world.resource::<SpaceClock>().seconds;
+    let mut t = clock.seconds;
     // Hour, whole days toward the season, hour again.
     for step in 0..3 {
         let states = propagate(&bodies, t);
@@ -181,7 +192,9 @@ pub(crate) fn follow_world_clock(world: &mut World) {
             wrap(hour - sky.hour, 24.0) / 24.0 * sky.solar_day_s
         };
     }
-    world.resource_mut::<SpaceClock>().seconds = t;
+    if clock.seconds != t {
+        clock.seconds = t;
+    }
 }
 
 #[cfg(test)]

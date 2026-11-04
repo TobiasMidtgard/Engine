@@ -146,16 +146,33 @@ impl<T: Copy> Grid2<T> {
             self.origin = new_origin;
             return true;
         }
-        let (dx, dy) = (shift.x as i32, shift.y as i32);
-        let mut next = vec![self.default; self.data.len()];
-        for y in 0..self.height as i32 {
-            for x in 0..self.width as i32 {
-                if let Some(v) = self.get(IVec2::new(x + dx, y + dy)) {
-                    next[(y as u32 * self.width + x as u32) as usize] = v;
-                }
+        // In place, a row at a time: new cell (x, y) is old cell (x + dx, y + dy), and rows are
+        // walked so each is read before it is overwritten. The cell-by-cell copy into a fresh
+        // grid cost ~4.5 ms every 64 m for the surface layers (Weather's measurement,
+        // 2026-11-04; its `surface::shift_to` is the same walk).
+        let (w, h) = (self.width as i64, self.height as i64);
+        let (dx, dy) = (shift.x as i64, shift.y as i64);
+        let (x0, x1) = ((-dx).max(0), (w - dx).min(w));
+        let n = (x1 - x0) as usize;
+        let default = self.default;
+        let data = &mut self.data;
+        let mut row = |y: i64| {
+            let to = (y * w) as usize;
+            let src = y + dy;
+            if (0..h).contains(&src) {
+                let from = (src * w + x0 + dx) as usize;
+                data.copy_within(from..from + n, to + x0 as usize);
+                data[to..to + x0 as usize].fill(default);
+                data[to + x1 as usize..to + w as usize].fill(default);
+            } else {
+                data[to..to + w as usize].fill(default);
             }
+        };
+        if dy >= 0 {
+            (0..h).for_each(&mut row);
+        } else {
+            (0..h).rev().for_each(&mut row);
         }
-        self.data = next;
         self.origin = new_origin;
         true
     }
@@ -285,6 +302,38 @@ mod tests {
         g.set(IVec2::new(1, 0), 1.0);
         let v = g.sample(DVec3::new(1.0, 0.0, 0.5));
         assert!((v - 0.5).abs() < 1e-5, "{v}");
+    }
+
+    #[test]
+    fn recenter_in_place_keeps_what_a_fresh_copy_keeps() {
+        for (dx, dy) in [
+            (3, 0),
+            (-3, 0),
+            (0, 4),
+            (0, -4),
+            (5, -2),
+            (-7, 6),
+            (9, 9),
+            (-9, -1),
+        ] {
+            let mut g = Grid2::centered(DVec2::ZERO, 10.0, 1.0, -1.0f32);
+            for (i, v) in g.data.iter_mut().enumerate() {
+                *v = i as f32;
+            }
+            let before = g.clone();
+            let center = DVec2::new(dx as f64, dy as f64);
+            assert!(g.recenter(center));
+            for y in 0..g.height as i32 {
+                for x in 0..g.width as i32 {
+                    let want = before.get(IVec2::new(x + dx, y + dy)).unwrap_or(-1.0);
+                    assert_eq!(
+                        g.get(IVec2::new(x, y)),
+                        Some(want),
+                        "shift {dx},{dy} at {x},{y}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

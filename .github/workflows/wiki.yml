@@ -29,7 +29,12 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
+      # The whole history (without file contents) for the Recent changes page and each page's
+      # "Updated" date.
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          filter: blob:none
       - name: Install mdBook
         run: |
           curl -fsSL -o "$RUNNER_TEMP/mdbook.tgz" \

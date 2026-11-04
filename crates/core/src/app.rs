@@ -90,7 +90,9 @@ impl Default for App {
 
 /// `ENGINE_FIXED_SYNC=sets`: the fixed step applies commands only at its [`SimSet`]
 /// boundaries (an experiment for the perf week's P2, engine-perf/fixed-step-chain.md).
-fn set_sync_points() -> bool {
+/// Modules that need a sync point inside their own sets under it add one only when this is on
+/// (by default Bevy inserts them where commands need them, and an extra one is a barrier).
+pub fn set_sync_points() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var("ENGINE_FIXED_SYNC").is_ok_and(|v| v == "sets"))
 }

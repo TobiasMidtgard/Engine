@@ -16,13 +16,17 @@ use crate::meshgen::MeshBuilder;
 
 const UP: Vec3 = Vec3::Y;
 
-/// The meshes of a plant at one age, by material (stems, leaves and sepals, petals, fruit).
+/// The meshes of a plant at one age, by material (stems, leaves and sepals, petals, fruit, and
+/// a tree's leaf sprays, drawn with its species' spray atlas).
 #[derive(Default)]
 pub struct GrownMeshes {
     pub stems: MeshBuilder,
     pub leaves: MeshBuilder,
     pub petals: MeshBuilder,
     pub fruit: MeshBuilder,
+    pub sprays: MeshBuilder,
+    /// Sprays placed while the plant is walked, drawn once its crown's extent is known.
+    pending: Vec<Spray>,
 }
 
 impl GrownMeshes {
@@ -30,8 +34,111 @@ impl GrownMeshes {
         (self.stems.indices.len()
             + self.leaves.indices.len()
             + self.petals.indices.len()
-            + self.fruit.indices.len())
+            + self.fruit.indices.len()
+            + self.sprays.indices.len())
             / 3
+    }
+}
+
+/// One leaf spray card: from `base` along `dir`, its face toward `up`.
+#[derive(Debug, Clone, Copy)]
+struct Spray {
+    base: Vec3,
+    dir: Vec3,
+    up: Vec3,
+    length: f32,
+    color: [f32; 3],
+    seed: u64,
+}
+
+/// Leaf sprays on a crown's outside face out from it: each card's normal leans toward the
+/// direction out of the crown (an ellipsoid round its leaves), so the crown shades as one
+/// mass, lit on its sunny side and dark inside, as the library trees' cards are.
+const SPRAY_CROWN_NORMAL: f32 = 0.65;
+/// Width of a spray card over its length.
+const SPRAY_ASPECT: f32 = 0.8;
+/// Share of a spray card's cell the painted leaves cover.
+const SPRAY_COVER: f32 = 0.22;
+/// The atlas cells holding twig sprays (the third holds a rosette seen end on).
+const SPRAY_CELLS: [usize; 3] = [0, 1, 3];
+
+/// Draw the sprays `out` collected, shaded against the crown they make up.
+fn draw_sprays(out: &mut GrownMeshes, near: bool) {
+    let sprays = std::mem::take(&mut out.pending);
+    if sprays.is_empty() {
+        return;
+    }
+    let (mut lo, mut hi) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
+    for s in &sprays {
+        let tip = s.base + s.dir * s.length;
+        lo = lo.min(s.base.min(tip));
+        hi = hi.max(s.base.max(tip));
+    }
+    let center = (lo + hi) * 0.5;
+    let half = ((hi - lo) * 0.5).max(Vec3::splat(0.3));
+    let kind = crate::meshgen::textures::LeafKind::Lobed;
+    // Near: folded across (three columns) and drooping (a bend at the middle row's ends).
+    let (cols, rows) = if near { (3u32, 2u32) } else { (2, 2) };
+    for s in &sprays {
+        let g = s.dir.normalize_or(UP);
+        let face = (s.up - g * s.up.dot(g)).normalize_or(perpendicular(g));
+        let u = g.cross(face);
+        let w = s.length * SPRAY_ASPECT;
+        let cell = SPRAY_CELLS[(s.seed >> 20) as usize % SPRAY_CELLS.len()];
+        let (uv0, uv1) = crate::meshgen::textures::atlas_cell(kind, cell);
+        let mirror = (s.seed >> 30) & 1 == 1;
+        // A gentle fold along the twig and droop toward the tip, near.
+        let (fold, droop) = (0.18 * w, 0.12 * s.length);
+        let mut pts = Vec::with_capacity((cols * rows) as usize);
+        for r in 0..rows {
+            let t = r as f32 / (rows - 1) as f32;
+            for k in 0..cols {
+                let x = k as f32 / (cols - 1) as f32 - 0.5;
+                let bend = if near {
+                    droop * t * t + fold * x.abs()
+                } else {
+                    0.0
+                };
+                let p = s.base + g * (s.length * (t - 0.06)) + u * (w * x) - face * bend;
+                let su = if mirror { 0.5 - x } else { x + 0.5 };
+                let uv = Vec2::new(
+                    uv0.x + (uv1.x - uv0.x) * su,
+                    uv0.y + (uv1.y - uv0.y) * (1.0 - t),
+                );
+                let out_dir = ((p - center) / half).normalize_or(UP);
+                // The twig end sits deeper in the foliage than the tip.
+                let shade = 0.82 + 0.2 * t;
+                pts.push((p, uv, out_dir, shade));
+            }
+        }
+        let color = Vec3::from(s.color);
+        for side in [face, -face] {
+            let first = out.sprays.vertices.len() as u32;
+            for &(p, uv, out_dir, shade) in &pts {
+                let mut n = (side * (1.0 - SPRAY_CROWN_NORMAL) + out_dir * SPRAY_CROWN_NORMAL)
+                    .normalize_or(side);
+                // Never facing away from whoever sees this side.
+                let d = n.dot(side);
+                if d < 0.25 {
+                    n = (n + side * (0.25 - d)).normalize_or(side);
+                }
+                out.sprays.vertex(p, n, uv, (color * shade).extend(1.0));
+            }
+            let front = side == face;
+            for r in 0..rows - 1 {
+                for k in 0..cols - 1 {
+                    let a = first + r * cols + k;
+                    let (b, c, d) = (a + 1, a + cols + 1, a + cols);
+                    if front {
+                        out.sprays.tri(a, b, c);
+                        out.sprays.tri(a, c, d);
+                    } else {
+                        out.sprays.tri(a, c, b);
+                        out.sprays.tri(a, d, c);
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -67,6 +174,24 @@ impl Grown {
             self.radii[i],
         )
     }
+
+    /// As [`Self::at`], `back` of the way down the internode below the node.
+    fn at_back(&self, node: u32, back: f32) -> (Vec3, Vec3, Vec3, f32) {
+        let i = (node as usize).min(self.points.len().saturating_sub(1));
+        if back <= 0.0 || i == 0 {
+            return self.at(node);
+        }
+        let (j, t) = (i - 1, back.min(1.0));
+        let n = self.normals[i].lerp(self.normals[j], t);
+        (
+            self.points[i].lerp(self.points[j], t),
+            self.tangents[i]
+                .lerp(self.tangents[j], t)
+                .normalize_or(self.tangents[i]),
+            n.normalize_or(self.normals[i]),
+            self.radii[i] + (self.radii[j] - self.radii[i]) * t,
+        )
+    }
 }
 
 /// Any vector at right angles to `v`.
@@ -94,8 +219,33 @@ fn mix3(a: [f32; 3], b: [f32; 3], t: f32) -> [f32; 3] {
     ]
 }
 
+/// Below this detail a tree is drawn light: fewer, larger leaves of two triangles each, and no
+/// twigs thinner than [`LIGHT_TWIG_M`] (a grown oak of 24 years in sprays: 647k triangles at
+/// full detail, 192k at 0.3).
+pub const LIGHT_TREE: f32 = 0.4;
+/// Twigs thinner than this (radius at their base, meters) are left out of a light tree at
+/// [`LIGHT_TREE`] (thicker ones further off): under a pixel from where it is drawn light, and its
+/// leaves hide them.
+pub const LIGHT_TWIG_M: f32 = 0.004;
+
+/// Share of a tree's leaves drawn at `detail`: all of them at `LIGHT_TREE` and up, down to 0.3.
+/// Survivors are scaled up so the crown covers as much.
+pub fn light_leaf_keep(detail: f32) -> f32 {
+    (detail / LIGHT_TREE).clamp(0.3, 1.0)
+}
+
+/// How one leaf is drawn: blade detail, the share of leaves kept, whether as a plain card,
+/// and, for a tree with [`Tree::leaf_sprays`], how many leaves each spray card stands for.
+#[derive(Clone, Copy)]
+struct LeafLod {
+    detail: f32,
+    keep: f32,
+    plain: bool,
+    spray: u32,
+}
+
 /// The plant drawn on day `t` (from 0, the seed). `detail` scales tube sides and blade rows
-/// (1 near; 0.5 halves them).
+/// (1 near; 0.5 halves them; trees under [`LIGHT_TREE`] are drawn light).
 pub fn grow_meshes(graph: &PlantGraph, sk: &Skeleton, t: f32, detail: f32) -> GrownMeshes {
     let mut out = GrownMeshes::default();
     let n = sk.organs.len();
@@ -127,10 +277,18 @@ pub fn grow_meshes(graph: &PlantGraph, sk: &Skeleton, t: f32, detail: f32) -> Gr
     }
 
     let pipes = tree_radii(graph, sk, t);
-    // A tree's thousands of leaves are drawn plainer (lobes and teeth in the texture alone).
-    let leaf_detail = match graph.nodes.get(&graph.root) {
-        Some(Node::Tree(_)) => detail.min(0.25),
-        _ => detail,
+    // A tree's thousands of leaves are drawn plainer (lobes and teeth in the texture alone),
+    // and a light tree (detail under `LIGHT_TREE`) draws fewer, larger ones.
+    let is_tree = matches!(graph.nodes.get(&graph.root), Some(Node::Tree(_)));
+    let spray = match graph.nodes.get(&graph.root) {
+        Some(Node::Tree(tr)) => tr.leaf_sprays,
+        _ => 0,
+    };
+    let leaf_detail = if is_tree { detail.min(0.25) } else { detail };
+    let leaf_keep = if is_tree {
+        light_leaf_keep(detail)
+    } else {
+        1.0
     };
 
     let mut grown: Vec<Option<Grown>> = vec![None; n];
@@ -147,7 +305,7 @@ pub fn grow_meshes(graph: &PlantGraph, sk: &Skeleton, t: f32, detail: f32) -> Gr
                 let Some(g) = &grown[p as usize] else {
                     continue;
                 };
-                let (pos, tangent, normal, radius) = g.at(o.at_node);
+                let (pos, tangent, normal, radius) = g.at_back(o.at_node, o.back);
                 let binormal = tangent.cross(normal);
                 let side = normal * o.roll.cos() + binormal * o.roll.sin();
                 if o.upright {
@@ -168,12 +326,21 @@ pub fn grow_meshes(graph: &PlantGraph, sk: &Skeleton, t: f32, detail: f32) -> Gr
                 let g = grow_shoot(tr, o, t, base, dir, side, &pipes[i], detail, &mut out.stems);
                 grown[i] = Some(g);
             }
-            Some(Node::Leaf(l)) => leaf(l, o, age, base, dir, side, leaf_detail, &mut out),
+            Some(Node::Leaf(l)) => {
+                let lod = LeafLod {
+                    detail: leaf_detail,
+                    keep: leaf_keep,
+                    plain: is_tree && detail < LIGHT_TREE,
+                    spray,
+                };
+                leaf(l, o, age, base, dir, side, lod, &mut out)
+            }
             Some(Node::Flower(f)) => flower(f, o, age, base, dir, side, &mut out),
             Some(Node::Fruit(f)) => fruit(f, o, age, base, dir, side, &mut out),
             None => {}
         }
     }
+    draw_sprays(&mut out, detail >= LIGHT_TREE);
     out
 }
 
@@ -376,7 +543,11 @@ fn grow_shoot(
     g.radii = (0..g.points.len())
         .map(|k| radii.get(k).copied().unwrap_or(tr.tip_radius_m))
         .collect();
-    if g.points.len() >= 2 {
+    let light = detail < LIGHT_TREE;
+    // Light: the thinnest twigs go (more of them the further off), and thin limbs keep every
+    // other node of their tube (their branches still grow from every node).
+    let twig = LIGHT_TWIG_M * (LIGHT_TREE / detail.max(0.05)).sqrt();
+    if g.points.len() >= 2 && !(light && g.radii[0] < twig) {
         let r0 = g.radii[0];
         let sides = if r0 > 0.05 {
             12
@@ -398,14 +569,22 @@ fn grow_shoot(
                 rgba(mix3(tr.color, tr.wood_color, woody), sway)
             })
             .collect();
+        let last = g.points.len() - 1;
+        let keep: Vec<usize> = if light && r0 < 0.02 {
+            (0..last).step_by(2).chain([last]).collect()
+        } else {
+            (0..=last).collect()
+        };
+        let path: Vec<Vec3> = keep.iter().map(|&k| g.points[k]).collect();
+        let radii: Vec<f32> = keep.iter().map(|&k| g.radii[k]).collect();
         stems.tube(
-            &g.points,
-            &g.radii,
+            &path,
+            &radii,
             sides,
             1.0,
-            &|k, _| colors[k],
+            &|k, _| colors[keep[k]],
             None,
-            Some(&|_| colors[colors.len() - 1]),
+            Some(&|_| colors[last]),
         );
     }
     g
@@ -479,13 +658,68 @@ fn blade(
         }
     }
     let row = (2 * cols + 1) as u32;
+    // The blade comes to a point at its base and tip: there half of each quad is a sliver of no
+    // area (a third of a plain leaf's triangles), so it is left out.
+    let (pointed_base, pointed_tip) = (outline(l, 0.0) < 1e-4, outline(l, 1.0) < 1e-4);
     for i in 0..rows as u32 {
         for c in 0..row - 1 {
             let a = first + i * row + c;
-            b.tri(a, a + 1, a + row + 1);
-            b.tri(a, a + row + 1, a + row);
+            if !(i == 0 && pointed_base) {
+                b.tri(a, a + 1, a + row + 1);
+            }
+            if !(i + 1 == rows as u32 && pointed_tip) {
+                b.tri(a, a + row + 1, a + row);
+            }
         }
     }
+}
+
+/// A light tree's leaf: two triangles from the base to the tip through its widest point,
+/// folded along the midrib (the outline and veins left to the texture).
+#[allow(clippy::too_many_arguments)]
+fn card(
+    b: &mut MeshBuilder,
+    l: &Leaf,
+    base: Vec3,
+    dir: Vec3,
+    up: Vec3,
+    length: f32,
+    fold: f32,
+    color: [f32; 3],
+) {
+    if length < 1e-4 {
+        return;
+    }
+    let side = dir.cross(up).normalize_or(perpendicular(dir));
+    let up = side.cross(dir).normalize();
+    let widest = l.widest.clamp(0.1, 0.9);
+    // As much area as the blade: a diamond is half its box, a blade the mean of its outline.
+    let mean: f32 = (0..16)
+        .map(|i| outline(l, (i as f32 + 0.5) / 16.0))
+        .sum::<f32>()
+        / 16.0;
+    let w = l.width * length * mean;
+    let droop = UP * (l.droop * 0.35 * length);
+    let mid = base + dir * (widest * length) + up * (length * 0.08 * widest * (1.0 - widest))
+        - droop * (widest * widest);
+    let tip = base + dir * length - droop;
+    // Darker along the midrib, lighter at the edges, as the full blade.
+    let (c0, c1) = (Vec3::from(color) * 0.82, Vec3::from(color) * 1.04);
+    let first = b.vertices.len() as u32;
+    b.vertex(base, up, Vec2::new(0.5, 1.0), c0.extend(1.0));
+    b.vertex(tip, up, Vec2::new(0.5, 0.0), c0.extend(1.0));
+    for sign in [-1.0f32, 1.0] {
+        let lateral = side * (fold.cos() * sign) + up * fold.sin();
+        let n = (up * fold.cos() - side * (sign * fold.sin()) * 0.8 + up * 0.3).normalize();
+        b.vertex(
+            mid + lateral * w,
+            n,
+            Vec2::new(0.5 + 0.5 * sign, 1.0 - widest),
+            c1.extend(1.0),
+        );
+    }
+    b.tri(first, first + 1, first + 2);
+    b.tri(first, first + 3, first + 1);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -496,16 +730,24 @@ fn leaf(
     base: Vec3,
     dir: Vec3,
     side: Vec3,
-    detail: f32,
+    lod: LeafLod,
     out: &mut GrownMeshes,
 ) {
+    let detail = lod.detail;
     let u = age / l.grow_days.max(0.1);
     let g = hermite(u);
     if g < 0.01 {
         return;
     }
+    // A light tree keeps a share of its leaves (the same ones every rebuild), each larger.
+    if lod.keep < 1.0 {
+        let h = (o.seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 40) as f32 / (1u64 << 24) as f32;
+        if h >= lod.keep {
+            return;
+        }
+    }
     let mut rng = Rng::new(o.seed);
-    let s = o.scale * g;
+    let s = o.scale * g / lod.keep.sqrt();
     let petiole = rng.range(l.petiole_m.0, l.petiole_m.1.max(l.petiole_m.0)) * s;
     let blade_len = rng.range(l.blade_m.0, l.blade_m.1.max(l.blade_m.0)) * s;
     // Unfolds about the midrib early, then lies open.
@@ -545,7 +787,7 @@ fn leaf(
     let stalk = rgba(mix3([0.20, 0.28, 0.07], color, 0.3), 1.0);
     let sides = if detail >= 0.75 { 4 } else { 3 };
     // A short stalk on a plain leaf is too small to see.
-    if petiole > 0.002 && (detail >= 0.75 || petiole > 0.012) {
+    if lod.spray == 0 && !lod.plain && petiole > 0.002 && (detail >= 0.75 || petiole > 0.012) {
         out.stems
             .tube(&path, &radius, sides, 1.0, &|_, _| stalk, None, None);
     }
@@ -591,17 +833,39 @@ fn leaf(
             _ => tip,
         };
         let jitter = rng.range(0.92, 1.06);
-        blade(
-            &mut out.leaves,
-            l,
-            start,
-            d,
-            up,
-            blade_len * scale * jitter,
-            fold,
-            color,
-            detail,
-        );
+        let length = blade_len * scale * jitter;
+        if lod.spray > 0 {
+            // A card as big as the leaves it stands for, over the share of it they cover.
+            let mean: f32 = (0..16)
+                .map(|i| outline(l, (i as f32 + 0.5) / 16.0))
+                .sum::<f32>()
+                / 16.0;
+            let area = lod.spray as f32 * l.width * length * length * mean / SPRAY_COVER;
+            out.pending.push(Spray {
+                base: start,
+                dir: d,
+                up,
+                length: (area / SPRAY_ASPECT).sqrt(),
+                // The atlas is painted in summer green: the card is tinted by how far the
+                // leaf has turned from it (young, yellowing, brown).
+                color: std::array::from_fn(|i| color[i] / l.color[i].max(0.01)),
+                seed: o.seed,
+            });
+        } else if lod.plain {
+            card(&mut out.leaves, l, start, d, up, length, fold, color);
+        } else {
+            blade(
+                &mut out.leaves,
+                l,
+                start,
+                d,
+                up,
+                length,
+                fold,
+                color,
+                detail,
+            );
+        }
     }
     if rachis > 0.0 {
         out.stems.tube(

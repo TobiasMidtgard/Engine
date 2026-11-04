@@ -149,12 +149,13 @@ ropes strung between buildings, or jump across the boats passing in the channels
 > [!WARNING]
 > Spoilers for the thieves' guild below.
 
-- **Before the First Bell**: the [thieves' guild](../../factions/thieves-guild.md) recruits by
-  contest. Starting and ending in Knot Square, a handful of hopefuls have one night to steal the
+- **[Before the First Bell](../../quests/before-the-first-bell.md)**: the
+  [thieves' guild](../../factions/thieves-guild.md) recruits by contest. Starting and ending in Knot Square, a handful of hopefuls have one night to steal the
   most valuable thing they can find.
-- **The bank that asked to be robbed**: [the Gilded Ledger](knot-square/the-gilded-ledger.md)
-  hires thieves to test its own vault.
-- **The House Without Locks**: a wealthy broker wants his own insured collection stolen.
+- **[The Bank That Asked to Be Robbed](../../quests/the-bank-that-asked-to-be-robbed.md)**:
+  [the Gilded Ledger](knot-square/the-gilded-ledger.md) hires thieves to test its own vault.
+- **[The House Without Locks](../../quests/the-house-without-locks.md)**: a wealthy broker wants
+  his own insured collection stolen.
 - **Fixing the tables** at [the Seven Lanterns](lantern-ward/seven-lanterns.md).
 - **Burgling [The Vale](argent-heights/the-vale.md)** through its balconies, cranes and
   trellises.

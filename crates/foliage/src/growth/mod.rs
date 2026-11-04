@@ -400,19 +400,25 @@ pub fn oak() -> PlantGraph {
                 Node::Tree(Tree {
                     years: 25,
                     // An open-grown oak: limbs spread out low and wide, side light reaches
-                    // the lower crown, and leafy spurs fill it (foliage-research.md, 10).
+                    // the lower crown, and leafy spurs fill it (foliage-research.md, 10). Room
+                    // for 100k metamers (40k stopped its growth at about 20 years, leaving a
+                    // thin umbrella), nodes leafing 10 years, and its leaves drawn as the
+                    // species' twig sprays, five leaves to a card (section 13).
                     light_seeking: 0.12,
                     plagiotropism: 0.14,
                     shadow_spread: 0.5,
                     shed_light: 0.06,
                     leaves_per_node: 10,
-                    leaf_years: 6,
+                    leaf_years: 10,
                     spur_vigor: 0.2,
                     spur_light: 0.4,
-                    bud_years: 6.0,
+                    bud_years: 10.0,
+                    shadow: 0.035,
+                    max_metamers: 100_000,
                     wander_deg: 12.0,
                     wood_color: OAK_BARK,
                     leaf: Some("leaf".into()),
+                    leaf_sprays: 5,
                     ..Default::default()
                 }),
             ),
@@ -455,7 +461,8 @@ pub struct GrowingPlant {
     pub days_per_second: f32,
     /// Start again from a seed when it reaches the end of its life (a showcase loop).
     pub repeat: bool,
-    /// Mesh detail: 1 full, lower for plants seen from further off.
+    /// Mesh detail near the camera: 1 full. Further off it is drawn at a share of this
+    /// ([`DETAIL_BANDS`]); a tree drops to its light version.
     pub detail: f32,
 }
 
@@ -510,9 +517,12 @@ impl GrowingPlant {
     }
 }
 
+/// Parts a growing plant is drawn in: stems, leaves, petals, fruit, and leaf sprays.
+const PARTS: usize = 5;
+
 /// Engine meshes from what [`grow_meshes`] built (none for an empty part).
 pub struct PlantParts {
-    pub meshes: [Option<Mesh>; 4],
+    pub meshes: [Option<Mesh>; PARTS],
     pub triangles: usize,
     /// How long building them took, ms.
     pub ms: f32,
@@ -523,7 +533,13 @@ impl PlantParts {
         let triangles = g.triangles();
         let mesh = |b: crate::meshgen::MeshBuilder| (!b.is_empty()).then(|| b.finish());
         Self {
-            meshes: [mesh(g.stems), mesh(g.leaves), mesh(g.petals), mesh(g.fruit)],
+            meshes: [
+                mesh(g.stems),
+                mesh(g.leaves),
+                mesh(g.petals),
+                mesh(g.fruit),
+                mesh(g.sprays),
+            ],
             triangles,
             ms: 0.0,
         }
@@ -535,11 +551,14 @@ impl PlantParts {
 pub struct GrowthState {
     graph: Arc<PlantGraph>,
     skeleton: Arc<Skeleton>,
-    /// Stems, leaves, petals, fruit (child entities).
-    parts: [Entity; 4],
-    meshes: [Handle<Mesh>; 4],
+    /// Stems, leaves, petals, fruit, sprays (child entities).
+    parts: [Entity; PARTS],
+    meshes: [Handle<Mesh>; PARTS],
     /// Age the meshes show, and the age being built.
     shown_age: f32,
+    /// The distance band ([`DETAIL_BANDS`]) and the detail the meshes were last built for.
+    band: usize,
+    shown_detail: f32,
     building: Option<(f32, Arc<Mutex<Option<PlantParts>>>)>,
     /// How long the last build took, ms.
     pub last_build_ms: f32,
@@ -586,6 +605,16 @@ impl GrowthMaterials {
     }
 }
 
+/// Plants being developed off the frame: the source they were started from, and the graph and
+/// skeleton when done.
+type DevelopingPlants = std::collections::HashMap<
+    Entity,
+    (
+        (String, Option<PlantGraph>, u64),
+        Arc<Mutex<Option<(PlantGraph, Skeleton)>>>,
+    ),
+>;
+
 /// Plants further than this from the camera keep the meshes they have (meters).
 const HOLD_BEYOND_M: f64 = 80.0;
 /// Plants nearer than this rebuild at most every `NEAR_REBUILD_S` seconds, further ones every
@@ -595,6 +624,24 @@ const NEAR_REBUILD_S: f64 = 0.1;
 const FAR_REBUILD_S: f64 = 0.5;
 /// Rebuilds started in one frame at most, nearest first.
 const BUILDS_PER_FRAME: usize = 2;
+/// Up to these distances from the camera (meters), a growing plant is drawn at this share of
+/// its detail. A grown oak's crown is 15 m across: inside the first line the camera is under
+/// it; past it the oak is drawn light, which from 24 m looks the same (24 years: 647k
+/// triangles near, 192k past 15 m, 88k past 60 m).
+pub const DETAIL_BANDS: [(f64, f32); 3] = [(15.0, 1.0), (60.0, 0.3), (f64::INFINITY, 0.12)];
+
+/// The distance band a plant at `distance` is drawn in, coming from band `current`: it moves
+/// to a nearer band only a tenth inside its line, so a camera standing at it does not flip it.
+fn detail_band(distance: f64, current: usize) -> usize {
+    let plain = DETAIL_BANDS
+        .iter()
+        .position(|&(d, _)| distance < d)
+        .unwrap_or(DETAIL_BANDS.len() - 1);
+    if current < DETAIL_BANDS.len() && plain < current && distance > DETAIL_BANDS[plain].0 * 0.9 {
+        return plain + 1;
+    }
+    plain
+}
 
 fn build(graph: &PlantGraph, sk: &Skeleton, age: f32, detail: f32) -> PlantParts {
     PlantParts::from_grown(grow_meshes(graph, sk, age, detail))
@@ -620,16 +667,19 @@ pub fn grow_plants(
     )>,
     cams: Query<(&engine_render::Camera, &GlobalTransform)>,
     mut renderers: Query<&mut MeshRenderer>,
+    mut developing: Local<DevelopingPlants>,
 ) {
     if plants.is_empty() {
+        developing.clear();
         return;
     }
+    developing.retain(|e, _| plants.contains(*e));
     let mats = mats.get_or_insert_with(|| GrowthMaterials::new(&mut materials, &mut images));
     let dt = time.delta_secs();
     let now = time.elapsed_secs_f64();
     let camera = crate::visuals::camera_position(&cams);
-    // Plants due a rebuild this frame: (distance, entity, age), the nearest started first.
-    let mut due: Vec<(f64, Entity, f32)> = Vec::new();
+    // Plants due a rebuild this frame: (distance, entity, age, detail band), the nearest first.
+    let mut due: Vec<(f64, Entity, f32, usize)> = Vec::new();
     for (e, mut plant, at, state) in &mut plants {
         if plant.days_per_second != 0.0 && dt > 0.0 {
             let mut age = plant.age_days + plant.days_per_second * dt;
@@ -642,27 +692,96 @@ pub fn grow_plants(
             plant.bypass_change_detection().age_days = age;
         }
         let source = (plant.preset.clone(), plant.graph.clone(), plant.seed);
+        let old_parts = state.as_ref().map(|s| (s.parts, s.meshes));
         let Some(mut state) = state.filter(|s| s.source == source) else {
-            // New, or its graph or seed changed: develop it again.
-            let graph = match plant.resolve() {
-                Ok(g) => g,
-                Err(err) => {
-                    tracing::warn!("foliage: growing plant {e}: {err}");
-                    commands.entity(e).remove::<GrowingPlant>();
-                    continue;
+            // New, or its graph or seed changed: develop it again (off the frame when it can: a
+            // 24-year oak takes 80 ms).
+            let developed = match developing.get(&e) {
+                Some((s, slot)) if *s == source => {
+                    match slot.lock().ok().and_then(|mut s| s.take()) {
+                        Some(done) => {
+                            developing.remove(&e);
+                            Some(done)
+                        }
+                        None => continue,
+                    }
+                }
+                _ => None,
+            };
+            let (graph, skeleton) = match developed {
+                Some(done) => done,
+                None => {
+                    let graph = match plant.resolve() {
+                        Ok(g) => g,
+                        Err(err) => {
+                            tracing::warn!("foliage: growing plant {e}: {err}");
+                            commands.entity(e).remove::<GrowingPlant>();
+                            continue;
+                        }
+                    };
+                    match AsyncComputeTaskPool::try_get().filter(|_| loading.background) {
+                        Some(pool) => {
+                            let slot = Arc::new(Mutex::new(None));
+                            let out = slot.clone();
+                            let seed = plant.seed;
+                            pool.spawn(async move {
+                                let skeleton = Skeleton::develop(&graph, seed);
+                                if let Ok(mut s) = out.lock() {
+                                    *s = Some((graph, skeleton));
+                                }
+                            })
+                            .detach();
+                            developing.insert(e, (source, slot));
+                            continue;
+                        }
+                        None => {
+                            let skeleton = Skeleton::develop(&graph, plant.seed);
+                            (graph, skeleton)
+                        }
+                    }
                 }
             };
-            let skeleton = Skeleton::develop(&graph, plant.seed);
-            let stems = graph
+            // Its species' visuals still being built (its bark and sprays): wait for them.
+            if graph
                 .bark_species
                 .as_deref()
                 .and_then(|n| library.id(n))
-                .and_then(|id| visuals.species.get(id.0 as usize)?.as_ref())
-                .map_or(mats.stems, |v| v.bark);
-            let materials = [stems, mats.leaves, mats.petals, mats.fruit];
-            let handles: [Handle<Mesh>; 4] =
+                .is_some_and(|id| {
+                    visuals
+                        .species
+                        .get(id.0 as usize)
+                        .is_none_or(|v| v.is_none())
+                })
+            {
+                developing.insert(e, (source, Arc::new(Mutex::new(Some((graph, skeleton))))));
+                continue;
+            }
+            // A changed plant drops the parts it showed.
+            if let Some((parts, handles)) = old_parts {
+                for part in parts {
+                    if let Ok(mut c) = commands.get_entity(part) {
+                        c.despawn();
+                    }
+                }
+                for h in handles {
+                    meshes.remove(h);
+                }
+            }
+            let species = graph
+                .bark_species
+                .as_deref()
+                .and_then(|n| library.id(n))
+                .and_then(|id| visuals.species.get(id.0 as usize)?.as_ref());
+            let stems = species.map_or(mats.stems, |v| v.bark);
+            // Sprays in the species' own spray atlas, on a copy of its leaf material (the
+            // seasons recolor the species' material; a growing tree keeps its own calendar).
+            let sprays = species
+                .and_then(|v| materials.get(v.leaves[0]).cloned())
+                .map_or(mats.leaves, |m| materials.add(m));
+            let materials = [stems, mats.leaves, mats.petals, mats.fruit, sprays];
+            let handles: [Handle<Mesh>; PARTS] =
                 std::array::from_fn(|_| meshes.add(Mesh::new(Vec::new(), Vec::new())));
-            let parts: [Entity; 4] = std::array::from_fn(|i| {
+            let parts: [Entity; PARTS] = std::array::from_fn(|i| {
                 let mut r = MeshRenderer::new(handles[i], materials[i]);
                 r.visible = false;
                 commands
@@ -676,6 +795,8 @@ pub fn grow_plants(
                     parts,
                     meshes: handles,
                     shown_age: f32::NAN,
+                    band: usize::MAX,
+                    shown_detail: f32::NAN,
                     building: None,
                     last_build_ms: 0.0,
                     built_at: f64::NEG_INFINITY,
@@ -694,30 +815,37 @@ pub fn grow_plants(
             state.building = None;
         }
         let age = plant.age_days;
-        if state.building.is_some() || state.shown_age == age {
+        let distance = camera.map_or(0.0, |c| c.distance(at.translation()));
+        let band = detail_band(distance, state.band);
+        // Into another band, or its detail was changed.
+        let moved = plant.detail * DETAIL_BANDS[band].1 != state.shown_detail;
+        if state.building.is_some() || (state.shown_age == age && !moved) {
             continue;
         }
-        // Far plants grow on in their data; their meshes catch up when they come near.
-        let distance = camera.map_or(0.0, |c| c.distance(at.translation()));
+        // Far plants grow on in their data; their meshes catch up when they come near (or
+        // cross into another detail band).
         let first = state.shown_age.is_nan();
         let wait = if distance > NEAR_M {
             FAR_REBUILD_S
         } else {
             NEAR_REBUILD_S
         };
-        if !first && (distance > HOLD_BEYOND_M || now - state.built_at < wait) {
+        if !first && !moved && (distance > HOLD_BEYOND_M || now - state.built_at < wait) {
             continue;
         }
         // A plant never shown yet goes first.
-        due.push((if first { -1.0 } else { distance }, e, age));
+        due.push((if first { -1.0 } else { distance }, e, age, band));
     }
     due.sort_by(|a, b| a.0.total_cmp(&b.0));
-    for &(_, e, age) in due.iter().take(BUILDS_PER_FRAME) {
+    for &(_, e, age, band) in due.iter().take(BUILDS_PER_FRAME) {
         let Ok((_, plant, _, Some(mut state))) = plants.get_mut(e) else {
             continue;
         };
         state.built_at = now;
-        let (graph, skeleton, detail) = (state.graph.clone(), state.skeleton.clone(), plant.detail);
+        state.band = band;
+        let detail = plant.detail * DETAIL_BANDS[band].1;
+        state.shown_detail = detail;
+        let (graph, skeleton) = (state.graph.clone(), state.skeleton.clone());
         let pool = AsyncComputeTaskPool::try_get();
         if !loading.background || pool.is_none() {
             let started = std::time::Instant::now();
@@ -765,6 +893,19 @@ fn put(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_plant_changes_detail_band_with_a_margin() {
+        assert_eq!(detail_band(10.0, usize::MAX), 0);
+        assert_eq!(detail_band(30.0, usize::MAX), 1);
+        assert_eq!(detail_band(500.0, usize::MAX), 2);
+        // Going out: at the line. Coming in: a tenth inside it.
+        assert_eq!(detail_band(16.0, 0), 1);
+        assert_eq!(detail_band(14.0, 1), 1);
+        assert_eq!(detail_band(13.0, 1), 0);
+        assert_eq!(detail_band(57.0, 2), 2);
+        assert_eq!(detail_band(53.0, 2), 1);
+    }
 
     #[test]
     fn presets_are_valid_and_round_trip_as_json() {

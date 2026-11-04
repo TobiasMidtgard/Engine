@@ -139,19 +139,6 @@ below and walk home. Its crews say: "The mission ends when the last harness is h
 
 ## Quests and rumours
 
-> [!WARNING]
-> Spoilers below.
-
-**Operation Second Spring.** Kestrel Vale, a farming region nearby, hired Orravell's companies for a
-long war and now owes them heavily for troops, equipment and loans. As an armistice approaches,
-Orravell offers to stay on as a temporary guarantor of security. In secret, the Crown has already
-decided to take the valley for good: its grain, river tolls, mills, workshops and government.
-Hushwing Station's glider teams have sealed orders to seize key officials and the original
-financial records when it begins. **Captain Sera Noll** insists on bringing her crews home; she can
-be principled about how her people are treated and still help conquer another country.
-
-You can find the evidence: a public protection contract with an end date; factory contracts that
-treat the valley's future output as Orravell's; appointments to offices Orravell doesn't yet hold;
-transfer papers naming people who never agreed to move. You can support the campaign, expose it,
-protect particular people, negotiate limited terms or simply finish the job you were paid for.
-Exposing it raises the political cost; it doesn't magically stop an army.
+**[Operation Second Spring](../quests/operation-second-spring.md)**: Orravell's mercenaries are about
+to make peace with Kestrel Vale, a farming region nearby, but the Crown has already decided to
+keep it.

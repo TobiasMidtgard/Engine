@@ -10,7 +10,8 @@
 //! strawberry growing, `film/NNNNN.png`; `LOOKDEV_FRAMES` frames, default 120, over 130 days),
 //! `oak_row` (an oak at six ages, 2 to 24 years, in midsummer), `oak` (the 24-year-old, and from
 //! under its crown), `oak_seasons` (a 20-year-old in spring, summer, autumn and winter) and
-//! `oak_film` (an oak growing from an acorn for 25 years, `oak_film/NNNNN.png`, 300 frames).
+//! `oak_film` (an oak growing from an acorn for 25 years, `oak_film/NNNNN.png`, 300 frames),
+//! `oak_light` (the 24-year-old at full detail and drawn light, from 24 m and from under it).
 //! 1280x720 unless `LOOKDEV_SIZE=WxH`.
 
 use engine_core::prelude::*;
@@ -268,6 +269,24 @@ fn main() {
             p + DVec3::new(0.0, 5.0, 0.0),
             sun,
         );
+    }
+    if wanted("oak_light") {
+        // On its own, so the row's oaks stay out of the frame.
+        let p = DVec3::new(0.0, 0.0, -800.0);
+        let oak = spawn(&mut app, p, "oak", 3, 24.0 * 365.0 + 200.0);
+        for (name, detail) in [("full", 1.0), ("light", 0.3)] {
+            app.world.get_mut::<GrowingPlant>(oak).unwrap().detail = detail;
+            for (view, eye) in [
+                ("", p + DVec3::new(9.0, 3.0, 22.0)),
+                ("_under", p + DVec3::new(2.5, 1.6, 4.0)),
+            ] {
+                let target = p + DVec3::new(0.0, if view.is_empty() { 6.5 } else { 5.0 }, 0.0);
+                aim(&mut app.world, eye, target);
+                set_sun(&mut app.world, sun);
+                // Long enough for the rebuild at the new detail to land.
+                capture(&mut app, &format!("{out}/oak_light{view}_{name}.png"), 40);
+            }
+        }
     }
     if wanted("oak_seasons") {
         shot(

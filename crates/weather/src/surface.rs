@@ -222,10 +222,7 @@ impl GroundCache {
             self.epoch += 1;
         } else if self.cells.origin != surface.origin {
             let old = self.cells.origin;
-            let half =
-                DVec2::new(surface.width as f64, surface.height as f64) * surface.cell as f64 * 0.5;
-            self.cells.recenter(surface.origin + half);
-            self.cells.origin = surface.origin;
+            shift_to(&mut self.cells, surface.origin);
             self.cursor = 0;
             self.complete = false;
             self.epoch += 1;
@@ -235,6 +232,44 @@ impl GroundCache {
         self.sheltered.resize(self.cells.len(), false);
         None
     }
+}
+
+/// Move `grid` to `origin` (whole cells from where it is), keeping what overlaps: whole rows
+/// at a time. `Grid2::recenter` copies cell by cell with a bounds check each, which on the
+/// 512² ground grid cost 4.5 ms of the frame every 64 m the player went (PC round 23 spikes).
+fn shift_to<T: Copy>(grid: &mut Grid2<T>, origin: DVec2) {
+    let shift = ((origin - grid.origin) / grid.cell as f64).round();
+    let (w, h) = (grid.width as i64, grid.height as i64);
+    let (dx, dy) = (shift.x as i64, shift.y as i64);
+    if dx.abs() >= w || dy.abs() >= h || !shift.is_finite() {
+        grid.data.fill(grid.default);
+    } else if dx != 0 || dy != 0 {
+        // In place (a fresh 6 MB grid each move cost more in page faults than the copy). New
+        // cell (x, y) is old cell (x + dx, y + dy); rows are walked so that a row is read
+        // before it is overwritten.
+        let (x0, x1) = ((-dx).max(0), (w - dx).min(w));
+        let n = (x1 - x0) as usize;
+        let default = grid.default;
+        let data = &mut grid.data;
+        let mut row = |y: i64| {
+            let to = (y * w) as usize;
+            let src = y + dy;
+            if (0..h).contains(&src) {
+                let from = (src * w + x0 + dx) as usize;
+                data.copy_within(from..from + n, to + x0 as usize);
+                data[to..to + x0 as usize].fill(default);
+                data[to + x1 as usize..to + w as usize].fill(default);
+            } else {
+                data[to..to + w as usize].fill(default);
+            }
+        };
+        if dy >= 0 {
+            (0..h).for_each(&mut row);
+        } else {
+            (0..h).rev().for_each(&mut row);
+        }
+    }
+    grid.origin = origin;
 }
 
 /// The cells a moving grid uncovers start out bare. Give them the wetness and snow of the
@@ -247,17 +282,22 @@ fn seed_uncovered(
     old_origin: DVec2,
 ) {
     let (origin, cell, width) = (surface.origin, surface.cell as f64, surface.width as usize);
-    let size = DVec2::new(width as f64, surface.height as f64) * cell;
-    let kept = |i: usize| {
-        let xz = origin + (DVec2::new((i % width) as f64, (i / width) as f64) + 0.5) * cell;
-        let rel = xz - old_origin;
-        rel.x >= 0.0 && rel.y >= 0.0 && rel.x < size.x && rel.y < size.y
-    };
+    // The kept cells are one rectangle, in this grid's cells.
+    let height = surface.height as i64;
+    let first = ((old_origin - origin) / cell).round();
+    let (kx0, ky0) = (first.x as i64, first.y as i64);
+    let (kx1, ky1) = (kx0 + width as i64, ky0 + height);
+    let w = width as i64;
+    let (left, right) = (kx0.clamp(0, w) as usize, kx1.clamp(0, w) as usize);
+    let (top, bottom) = (ky0.clamp(0, height) as usize, ky1.clamp(0, height) as usize);
     let (mut wet, mut snow) = (Vec::new(), Vec::new());
-    for i in (0..surface.data.len()).step_by(7) {
-        if kept(i) && cache.exposure(i) >= 0.5 {
-            wet.push(surface.data[i].wetness);
-            snow.push(surface.data[i].snow_m);
+    for y in (top..bottom).step_by(3) {
+        for x in (left..right).step_by(3) {
+            let i = y * width + x;
+            if cache.exposure(i) >= 0.5 {
+                wet.push(surface.data[i].wetness);
+                snow.push(surface.data[i].snow_m);
+            }
         }
     }
     if wet.is_empty() {
@@ -271,22 +311,50 @@ fn seed_uncovered(
     if wetness <= 0.0 && snow_m <= 0.0 {
         return;
     }
-    for i in 0..surface.data.len() {
-        if !kept(i) {
-            let c = &mut surface.data[i];
+    // Walk the rows and touch only what lies outside the kept rectangle.
+    let seed = |cells: &mut [engine_world::SurfaceCell]| {
+        for c in cells {
             c.wetness = c.wetness.max(wetness);
             c.snow_m = c.snow_m.max(snow_m);
+        }
+    };
+    for y in 0..height {
+        let row = &mut surface.data[y as usize * width..(y as usize + 1) * width];
+        if y < ky0 || y >= ky1 {
+            seed(row);
+        } else {
+            seed(&mut row[..left]);
+            seed(&mut row[right..]);
         }
     }
 }
 
+/// Cell indices by distance from the center, in rings a quarter cell wide: a counting sort,
+/// since a comparison sort of the 512² grid took 41 ms in one frame when the grid was made.
 fn near_first_order(w: u32, h: u32) -> Vec<u32> {
-    let mut order: Vec<u32> = (0..w * h).collect();
     let (cx, cy) = (w as f32 * 0.5, h as f32 * 0.5);
-    order.sort_by_key(|&i| {
+    let ring = |i: u32| {
         let (x, y) = ((i % w) as f32 + 0.5 - cx, (i / w) as f32 + 0.5 - cy);
-        ((x * x + y * y) * 16.0) as u32
-    });
+        ((x * x + y * y).sqrt() * 4.0) as usize
+    };
+    let rings = ring(0)
+        .max(ring(w * h - 1))
+        .max(ring(w - 1))
+        .max(ring(w * (h - 1)))
+        + 1;
+    let mut start = vec![0usize; rings + 1];
+    for i in 0..w * h {
+        start[ring(i) + 1] += 1;
+    }
+    for r in 0..rings {
+        start[r + 1] += start[r];
+    }
+    let mut order = vec![0u32; (w * h) as usize];
+    for i in 0..w * h {
+        let r = ring(i);
+        order[start[r]] = i;
+        start[r] += 1;
+    }
     order
 }
 
@@ -1277,6 +1345,40 @@ mod tests {
     }
 
     #[test]
+    fn the_fast_grid_shift_keeps_what_recenter_keeps() {
+        let mut a = Grid2::new(DVec2::new(-8.0, -6.0), 1.0, 16, 12, -1i32);
+        for (i, v) in a.data.iter_mut().enumerate() {
+            *v = i as i32;
+        }
+        for to in [
+            DVec2::new(3.0, 0.0),
+            DVec2::new(-5.0, 7.0),
+            DVec2::new(15.0, -11.0),
+            DVec2::new(40.0, 0.0),
+        ] {
+            let (mut fast, mut slow) = (a.clone(), a.clone());
+            let half = DVec2::new(16.0, 12.0) * 0.5;
+            slow.recenter(a.origin + to + half);
+            shift_to(&mut fast, a.origin + to);
+            assert_eq!(fast.origin, slow.origin, "{to}");
+            assert_eq!(fast.data, slow.data, "{to}");
+        }
+        // The order lists every cell once, nearest the center first.
+        let order = near_first_order(16, 12);
+        let mut seen = order.clone();
+        seen.sort_unstable();
+        assert_eq!(seen, (0..16 * 12).collect::<Vec<u32>>());
+        let d = |i: u32| ((i % 16) as f32 + 0.5 - 8.0).hypot((i / 16) as f32 + 0.5 - 6.0);
+        assert!(order.windows(2).all(|p| d(p[0]) <= d(p[1]) + 0.25));
+        // Shifted back the same distance, the kept middle is where it was.
+        let mut there = a.clone();
+        shift_to(&mut there, a.origin + DVec2::new(2.0, 1.0));
+        shift_to(&mut there, a.origin);
+        assert_eq!(there.data[5 * 16 + 5], a.data[5 * 16 + 5]);
+        a.data.fill(0);
+    }
+
+    #[test]
     fn sheltered_ground_stays_dry() {
         let (mut surface, mut cache, params) = setup();
         let center = surface.grid.cell_at(DVec3::ZERO);
@@ -1285,5 +1387,51 @@ mod tests {
         run(&mut surface, &cache, &params, &rain(10.0, 12.0), 600.0);
         assert_eq!(surface.grid.data[i].wetness, 0.0);
         assert!(surface.grid.data[i + 5].wetness > 0.9);
+    }
+}
+
+#[cfg(test)]
+mod spike_bench {
+    use super::*;
+
+    /// `cargo test -p engine_weather --release spike_bench -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn time_the_ground_grid_moves() {
+        engine_core::tasks::init_task_pools();
+        let mut surface = SurfaceLayers::default();
+        let mut cache = GroundCache::default();
+        let t = std::time::Instant::now();
+        cache.align(&surface.grid);
+        eprintln!(
+            "first align (order sort): {:.2} ms",
+            t.elapsed().as_secs_f64() * 1e3
+        );
+        for c in &mut surface.grid.data {
+            c.wetness = 0.5;
+        }
+        let mut worst = (0.0f64, 0.0f64, 0.0f64);
+        for k in 1..20 {
+            surface.grid.recenter(DVec2::new(70.0 * k as f64, 0.0));
+            let t = std::time::Instant::now();
+            let old = cache.align(&surface.grid).expect("moved");
+            let a = t.elapsed().as_secs_f64() * 1e3;
+            let t = std::time::Instant::now();
+            seed_uncovered(&mut surface.grid, &cache, old);
+            let s = t.elapsed().as_secs_f64() * 1e3;
+            let t = std::time::Instant::now();
+            let picked = pick(&mut cache, 400);
+            let p = t.elapsed().as_secs_f64() * 1e3;
+            assert!(!picked.is_empty());
+            worst = (worst.0.max(a), worst.1.max(s), worst.2.max(p));
+        }
+        eprintln!(
+            "per move, worst: align {:.2} ms, seed {:.2} ms, pick {:.2} ms",
+            worst.0, worst.1, worst.2
+        );
+        let t = std::time::Instant::now();
+        let mut sheltered = vec![false; cache.cells.len()];
+        sheltered.fill(false);
+        eprintln!("fill: {:.3} ms", t.elapsed().as_secs_f64() * 1e3);
     }
 }

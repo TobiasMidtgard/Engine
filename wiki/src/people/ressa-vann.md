@@ -26,6 +26,6 @@ Persuasion, reputation, neighbourhood support and safehouses.
 
 ## Quests
 
-- **Before the First Bell**: the contest that brings you into the guild (see
-  [the Tangle](../factions/thieves-guild.md#joining)).
+- **[Before the First Bell](../quests/before-the-first-bell.md)**: the contest that brings you into
+  the guild.
 - The **Ward Knots** branch of the guild questline.

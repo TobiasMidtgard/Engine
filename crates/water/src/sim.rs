@@ -368,7 +368,15 @@ pub struct StillDepths {
     /// Never read more than [`STILL_READS`] a step, even the first time (the coarse level,
     /// whose water can come in over a few steps).
     patient: bool,
+    /// After the lakes changed under a grid that stayed put: the depths read before, which
+    /// cells not read again yet keep showing.
+    prior: Vec<f32>,
 }
+
+/// Cells read a step after the lakes changed under the grid (a lake streaming in), nearest
+/// the focus first: reading all 65 536 at once cost 105 ms in a frame on arriving at the lake
+/// on the PC (round 23).
+const RELAYOUT_READS: usize = 8192;
 
 /// Cells of the ripple grid whose still depth is read per step after a jump (on four cores
 /// about 2 ms of terrain samples).
@@ -391,7 +399,18 @@ impl StillDepths {
         let mut budget = STILL_READS;
         if self.at != Some(at) {
             let mut depth = vec![f32::INFINITY; n * n];
+            self.prior.clear();
             match self.at {
+                // Only the lakes changed: read again over a few steps, showing what was read
+                // before meanwhile.
+                Some((old, old_n, old_cell, old_layout))
+                    if (old, old_n, old_cell) == (origin, n, cell)
+                        && old_layout != layout
+                        && self.depth.len() == n * n =>
+                {
+                    self.prior = std::mem::take(&mut self.depth);
+                    budget = RELAYOUT_READS;
+                }
                 Some((old, old_n, old_cell, old_layout))
                     if (old_n, old_cell, old_layout) == (n, cell, layout)
                         && self.depth.len() == n * n =>
@@ -407,9 +426,10 @@ impl StillDepths {
                         }
                     }
                 }
-                // The first read, or the lakes changed: all at once (the loading screen
-                // covers it).
-                _ if !self.patient => budget = usize::MAX,
+                // The first read: all at once (the loading screen covers it).
+                None if !self.patient => budget = usize::MAX,
+                // Moved and the lakes changed too: over a few steps, nearest first.
+                Some(_) if !self.patient => budget = RELAYOUT_READS,
                 _ => {}
             }
             self.unread = depth.iter().filter(|d| **d == f32::INFINITY).count();
@@ -417,7 +437,11 @@ impl StillDepths {
             self.at = Some(at);
         }
         if self.unread == 0 {
+            self.prior.clear();
             return;
+        }
+        if self.at == Some(at) && !self.prior.is_empty() {
+            budget = budget.max(RELAYOUT_READS);
         }
         // The unread cells nearest the focus first.
         let mut todo: Vec<(f32, usize)> = self
@@ -461,11 +485,17 @@ impl StillDepths {
             self.depth[idx] = if d == f32::INFINITY { f32::MAX } else { d };
             self.unread -= 1;
         }
+        if self.unread == 0 {
+            self.prior.clear();
+        }
     }
 
     /// Depth under cell `idx`: NaN where there is no still water or it isn't read yet.
     fn at_cell(&self, idx: usize) -> f32 {
-        let d = self.depth[idx];
+        let d = match self.depth[idx] {
+            f32::INFINITY => self.prior.get(idx).copied().unwrap_or(f32::NAN),
+            d => d,
+        };
         if d == f32::INFINITY { f32::NAN } else { d }
     }
 }
@@ -1458,5 +1488,59 @@ pub fn flow_bed_system(
                 sim.set_standing(k, rel);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn lake(x: f64, radius: f32, depth: f32) -> BodyState {
+        BodyState {
+            entity: Entity::PLACEHOLDER,
+            center: DVec3::new(x, 0.0, 0.0),
+            yaw: 0.0,
+            body: WaterBody {
+                bed: WaterBed::Flat { depth_m: depth },
+                ..WaterBody::lake(radius)
+            },
+            waves: WaveSet::default(),
+            mean_depth: depth,
+            wind: Vec3::ZERO,
+            bed: None,
+        }
+    }
+
+    /// A lake streaming in under a grid that stays put is read over a few steps, nearest the
+    /// focus first, and the cells not read again yet keep their old depths meanwhile.
+    #[test]
+    fn a_lake_streaming_in_is_read_over_a_few_steps() {
+        engine_core::tasks::init_task_pools();
+        let (n, cell) = (256usize, 0.25f32);
+        let origin = DVec2::splat(-32.0);
+        let ground = Ground::default();
+        let mut still = StillDepths::default();
+        let old = vec![lake(0.0, 100.0, 3.0)];
+        still.read((origin, n, cell, 1), &old, &ground, 0.0, DVec2::ZERO);
+        assert_eq!(still.unread, 0, "the first read is whole");
+        // A deeper lake comes in over it.
+        let new = vec![lake(0.0, 100.0, 3.0), lake(0.0, 100.0, 5.0)];
+        still.read((origin, n, cell, 2), &new, &ground, 0.0, DVec2::ZERO);
+        assert_eq!(still.unread, n * n - RELAYOUT_READS);
+        let middle = (n / 2) * n + n / 2;
+        assert_eq!(still.at_cell(middle), 5.0, "nearest the focus first");
+        assert_eq!(
+            still.at_cell(0),
+            3.0,
+            "a far corner keeps its old depth meanwhile"
+        );
+        let mut steps = 1;
+        while still.unread > 0 {
+            still.read((origin, n, cell, 2), &new, &ground, 0.0, DVec2::ZERO);
+            steps += 1;
+        }
+        assert_eq!(steps, (n * n).div_ceil(RELAYOUT_READS));
+        assert_eq!(still.at_cell(0), 5.0);
+        assert!(still.prior.is_empty());
     }
 }

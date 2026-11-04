@@ -145,13 +145,5 @@ to divert a shipment; an artificer can build new pattern chains; a mage can trac
 signals running through a wall. Cutting one route might open a vault, but it might also shut down
 a clinic nearby or flood a courtyard of homes.
 
-> [!WARNING]
-> Spoilers for Tessara's main quest below.
-
-**The Black Pattern.** Tessara's public network is nearly full. One of the Closed Kilns has made
-black-glazed plates powerful enough to modernise the whole city, and offers Ison a far more
-capable computing core whose workings are sealed, but only that house can make, inspect or repair
-them. You can protect the open system and accept slower progress, back the Closed Kiln, steal and
-publish the pattern, help the Menders build an imperfect open copy, or split the city into two
-networks that cannot talk to each other. Whatever you choose changes how the city looks, as
-colourful public mosaics, black sealed bands or improvised patchwork spread across its walls.
+Tessara's central quest is **[The Black Pattern](../quests/the-black-pattern.md)**: the open
+machine is nearly full, and a private workshop offers a way out that only it can repair.

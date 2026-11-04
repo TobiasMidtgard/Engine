@@ -533,3 +533,60 @@ pub struct SunSource {
     /// Unit vector toward the star, world space.
     pub direction: Vec3,
 }
+
+/// The real moon this frame: the body the night sky shows, so the moon the weather lights the
+/// night with is that body, where it stands and as full as it is (round 23 on Tobias's PC found
+/// two moons: the weather's own and the space module's, 18-19 degrees apart).
+///
+/// The writer (the space module, next to [`SunSource`]) inserts it every frame it knows a moon
+/// in the sky (the non-star body that looks largest from the ground, other than the one under
+/// it) and removes it when there is none. Readers (the weather's moon light) aim at
+/// `direction`, scale their light by `lit_fraction`, and draw no disc of their own when
+/// `drawn_by_space` (the body is drawn already); without the resource they keep their own
+/// formula.
+#[derive(Resource, Debug, Clone, Copy, PartialEq)]
+pub struct MoonSource {
+    /// Unit vector toward the moon's center, world space.
+    pub direction: Vec3,
+    /// Fraction of its disc the star lights as seen from here: 0 new, 1 full.
+    pub lit_fraction: f32,
+    /// Its apparent diameter from here, degrees (the Moon from Earth: about 0.52).
+    pub angular_diameter_deg: f32,
+    /// The space module draws the body (lit, with its phase): draw no disc for it.
+    pub drawn_by_space: bool,
+}
+
+impl MoonSource {
+    /// The lit fraction of a sphere at `moon` seen from `eye` with its star at `star` (any one
+    /// frame, any units): `(1 + cos(phase angle)) / 2`, the phase angle being the angle at the
+    /// moon between the star and the eye.
+    pub fn lit_fraction_of(eye: DVec3, moon: DVec3, star: DVec3) -> f32 {
+        let (to_star, to_eye) = (
+            (star - moon).normalize_or_zero(),
+            (eye - moon).normalize_or_zero(),
+        );
+        (0.5 * (1.0 + to_star.dot(to_eye))).clamp(0.0, 1.0) as f32
+    }
+}
+
+#[cfg(test)]
+mod moon_source_tests {
+    use super::*;
+
+    #[test]
+    fn a_moon_opposite_the_star_is_full_and_one_beside_it_new() {
+        let eye = DVec3::ZERO;
+        let star = DVec3::new(1.5e11, 0.0, 0.0);
+        let full = MoonSource::lit_fraction_of(eye, DVec3::new(-3.8e8, 0.0, 0.0), star);
+        assert!(full > 0.999, "{full}");
+        let new = MoonSource::lit_fraction_of(eye, DVec3::new(3.8e8, 0.0, 0.0), star);
+        assert!(new < 0.001, "{new}");
+        // 170 degrees from the star (round 23's night): nearly full, not a crescent.
+        let a = 170f64.to_radians();
+        let m = DVec3::new(a.cos(), a.sin(), 0.0) * 3.8e8;
+        let k = MoonSource::lit_fraction_of(eye, m, star);
+        assert!(k > 0.99, "{k}");
+        let quarter = MoonSource::lit_fraction_of(eye, DVec3::new(0.0, 3.8e8, 0.0), star);
+        assert!((quarter - 0.5).abs() < 0.01, "{quarter}");
+    }
+}

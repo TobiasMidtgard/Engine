@@ -1,0 +1,210 @@
+<!DOCTYPE HTML>
+<html lang="{{ language }}" class="cx-dark" dir="{{ text_direction }}">
+<head>
+    <!-- The Codex: the player wiki's own page template (mdBook 0.5). theme/codex.js builds the
+         sidebar, breadcrumbs, tabs and side panel; theme/wiki.css is the whole look. -->
+    <meta charset="UTF-8">
+    <title>{{ title }}</title>
+    {{#if is_print }}
+    <meta name="robots" content="noindex">
+    {{/if}}
+    {{#if base_url}}
+    <base href="{{ base_url }}">
+    {{/if}}
+    <meta name="description" content="{{ description }}">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#111317">
+    {{#if favicon_svg}}
+    <link rel="icon" href="{{ resource "favicon.svg" }}">
+    {{/if}}
+    {{#if favicon_png}}
+    <link rel="shortcut icon" href="{{ resource "favicon.png" }}">
+    {{/if}}
+    <link rel="stylesheet" href="{{ resource "fonts/fonts.css" }}">
+    {{#each additional_css}}
+    <link rel="stylesheet" href="{{ resource this }}">
+    {{/each}}
+    <script>
+        const path_to_root = "{{ path_to_root }}";
+        {{#if search_js}}
+        window.path_to_searchindex_js = "{{ resource "searchindex.js" }}";
+        {{/if}}
+        // Dark is the Codex's own look; a reader can switch to the light parchment theme.
+        (function () {
+            var theme = null;
+            try { theme = localStorage.getItem("codex-theme"); } catch (e) { }
+            var html = document.documentElement;
+            html.classList.add("js");
+            if (theme === "light") { html.classList.remove("cx-dark"); html.classList.add("cx-light"); }
+            var spoilers = null;
+            try { spoilers = localStorage.getItem("codex-spoilers"); } catch (e) { }
+            if (spoilers === "shown") { html.classList.add("cx-spoilers-shown"); }
+        })();
+    </script>
+    <!-- The chapter list, loaded once for every page; codex.js turns it into the sidebar. -->
+    <script src="{{ resource "toc.js" }}"></script>
+</head>
+<body data-path="{{ path }}" data-edit="{{ git_repository_edit_url }}">
+<svg xmlns="http://www.w3.org/2000/svg" style="display:none">
+    <!-- Hand-drawn line icons, 24 x 24, stroked with currentColor. -->
+    <symbol id="i-logo" viewBox="0 0 24 24"><path d="M12 .8l1.7 9.5 9.5 1.7-9.5 1.7L12 23.2l-1.7-9.5L.8 12l9.5-1.7z" fill="currentColor"/><path d="M12 12l5.2-5.2M12 12l5.2 5.2M12 12l-5.2 5.2M12 12L6.8 6.8" stroke="currentColor" stroke-width="1.1" stroke-linecap="round"/><circle cx="12" cy="12" r="1.6" fill="var(--bg-2, #111)"/></symbol>
+    <symbol id="i-home" viewBox="0 0 24 24"><path d="M3.5 11L12 4l8.5 7M6 9.5V20h4.5v-5.5h3V20H18V9.5"/></symbol>
+    <symbol id="i-map" viewBox="0 0 24 24"><path d="M3 6.5l6-2.3 6 2.3 6-2.3v13.3l-6 2.3-6-2.3-6 2.3zM9 4.2v13.3M15 6.5v13.3"/></symbol>
+    <symbol id="i-pin" viewBox="0 0 24 24"><path d="M12 21s-6.5-6.4-6.5-11.2a6.5 6.5 0 0113 0C18.5 14.6 12 21 12 21z"/><circle cx="12" cy="9.8" r="2.4"/></symbol>
+    <symbol id="i-castle" viewBox="0 0 24 24"><path d="M3 20.5h18M4.5 20.5V9h2v2h2V9h2v11.5M13.5 20.5V9h2v2h2V9h2v11.5M10.5 14h3M10.5 20.5v-3a1.5 1.5 0 013 0v3M7.5 9V5.5l1.5-1.5 1.5 1.5V9"/></symbol>
+    <symbol id="i-person" viewBox="0 0 24 24"><circle cx="12" cy="8" r="3.8"/><path d="M4.5 20.5c.6-4 3.6-6.3 7.5-6.3s6.9 2.3 7.5 6.3"/></symbol>
+    <symbol id="i-shield" viewBox="0 0 24 24"><path d="M12 3l7.5 2.8V11c0 4.8-3.2 8.3-7.5 10-4.3-1.7-7.5-5.2-7.5-10V5.8z"/><path d="M9 10.5l3 3 3-3M12 13.5V7.5"/></symbol>
+    <symbol id="i-scroll" viewBox="0 0 24 24"><path d="M7 4h11a2 2 0 012 2v1.5h-4M7 4a2 2 0 00-2 2v12M16 4.2V18a2 2 0 01-2 2H5a2 2 0 01-2-2v-1.5h11V18a2 2 0 004 0"/><path d="M8.5 8.5h4.5M8.5 12h4.5"/></symbol>
+    <symbol id="i-book" viewBox="0 0 24 24"><path d="M12 6.3C10 4.8 7 4.3 3.5 4.7v14c3.5-.4 6.5.1 8.5 1.6 2-1.5 5-2 8.5-1.6v-14c-3.5-.4-6.5.1-8.5 1.6zM12 6.3v14"/></symbol>
+    <symbol id="i-paw" viewBox="0 0 24 24"><circle cx="6.5" cy="10" r="1.7"/><circle cx="10" cy="6.3" r="1.7"/><circle cx="14" cy="6.3" r="1.7"/><circle cx="17.5" cy="10" r="1.7"/><path d="M12 11.8c-2.6 0-5 3.1-5 5.3 0 1.8 1.6 2.7 3 2.2 1.3-.4 2.7-.4 4 0 1.4.5 3-.4 3-2.2 0-2.2-2.4-5.3-5-5.3z"/></symbol>
+    <symbol id="i-sword" viewBox="0 0 24 24"><path d="M20 4l-1 4-9.2 9.2-3-3L16 5zM6.2 12.6l5.2 5.2M8.4 16.6L4.5 20.5M3.5 19.5l1 1"/></symbol>
+    <symbol id="i-spark" viewBox="0 0 24 24"><path d="M12 3c.6 4.9 4.1 8.4 9 9-4.9.6-8.4 4.1-9 9-.6-4.9-4.1-8.4-9-9 4.9-.6 8.4-4.1 9-9z"/><path d="M19 3.5v3M17.5 5h3"/></symbol>
+    <symbol id="i-compass" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M15.5 8.5l-2 5-5 2 2-5z"/></symbol>
+    <symbol id="i-guide" viewBox="0 0 24 24"><path d="M6 3.5h9l3.5 3.5v13.5H6z"/><path d="M14.5 3.5v4h4M9 11h6.5M9 14.5h6.5M9 18h4"/></symbol>
+    <symbol id="i-rocket" viewBox="0 0 24 24"><path d="M12 2.8c2.9 2.4 4 5.8 4 9.7l-1.8 3.2H9.8L8 12.5c0-3.9 1.1-7.3 4-9.7z"/><circle cx="12" cy="9.3" r="1.6"/><path d="M8 12.5l-2.5 3 2.6 1.4M16 12.5l2.5 3-2.6 1.4M10.8 18.6L12 21.2l1.2-2.6"/></symbol>
+    <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.2V12l3.3 2.1"/></symbol>
+    <symbol id="i-help" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M9.6 9.6a2.5 2.5 0 114 2c-.9.6-1.6 1.1-1.6 2.2"/><circle cx="12" cy="16.9" r=".5" fill="currentColor"/></symbol>
+    <symbol id="i-pen" viewBox="0 0 24 24"><path d="M4.5 19.5l.6-3.6L15.6 5.4a2 2 0 012.9 0l.1.1a2 2 0 010 2.9L8.1 18.9zM14 7l3 3"/></symbol>
+    <symbol id="i-search" viewBox="0 0 24 24"><circle cx="10.8" cy="10.8" r="6.3"/><path d="M15.5 15.5l5 5"/></symbol>
+    <symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3.8"/><path d="M12 2.5v2.2M12 19.3v2.2M2.5 12h2.2M19.3 12h2.2M5.3 5.3l1.6 1.6M17.1 17.1l1.6 1.6M5.3 18.7l1.6-1.6M17.1 6.9l1.6-1.6"/></symbol>
+    <symbol id="i-moon" viewBox="0 0 24 24"><path d="M19.5 14.6A8 8 0 019.4 4.5a8 8 0 1010.1 10.1z"/></symbol>
+    <symbol id="i-menu" viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h16"/></symbol>
+    <symbol id="i-close" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></symbol>
+    <symbol id="i-chev" viewBox="0 0 24 24"><path d="M7 9.5l5 5 5-5"/></symbol>
+    <symbol id="i-next" viewBox="0 0 24 24"><path d="M9.5 6.5l5.5 5.5-5.5 5.5"/></symbol>
+    <symbol id="i-arrow" viewBox="0 0 24 24"><path d="M5 12h13.5M13 6.5l5.5 5.5-5.5 5.5"/></symbol>
+    <symbol id="i-back" viewBox="0 0 24 24"><path d="M19 12H5.5M11 6.5L5.5 12l5.5 5.5"/></symbol>
+    <symbol id="i-eye" viewBox="0 0 24 24"><path d="M2.5 12C5 7.3 8.3 5.2 12 5.2s7 2.1 9.5 6.8c-2.5 4.7-5.8 6.8-9.5 6.8S5 16.7 2.5 12z"/><circle cx="12" cy="12" r="2.8"/></symbol>
+    <symbol id="i-eye-off" viewBox="0 0 24 24"><path d="M2.5 12C5 7.3 8.3 5.2 12 5.2s7 2.1 9.5 6.8c-2.5 4.7-5.8 6.8-9.5 6.8S5 16.7 2.5 12z"/><circle cx="12" cy="12" r="2.8"/><path d="M4 4l16 16"/></symbol>
+    <symbol id="i-list" viewBox="0 0 24 24"><path d="M9 6.5h11M9 12h11M9 17.5h11M4.5 6.5h.01M4.5 12h.01M4.5 17.5h.01" stroke-width="2"/></symbol>
+    <symbol id="i-globe" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M3.5 12h17M12 3.5c2.4 2.4 3.5 5.2 3.5 8.5s-1.1 6.1-3.5 8.5c-2.4-2.4-3.5-5.2-3.5-8.5s1.1-6.1 3.5-8.5z"/></symbol>
+    <symbol id="i-people" viewBox="0 0 24 24"><circle cx="9" cy="8.5" r="3.2"/><path d="M3 19.5c.5-3.4 2.9-5.3 6-5.3s5.5 1.9 6 5.3"/><circle cx="16.5" cy="7.5" r="2.6"/><path d="M16.5 13.2c2.5 0 4.2 1.6 4.6 4.3"/></symbol>
+    <symbol id="i-leaf" viewBox="0 0 24 24"><path d="M5 19c0-8.5 5-13.5 14.5-14 .3 9.6-4.7 14.5-14 14zM5 19l7.5-7.5"/></symbol>
+    <symbol id="i-planet" viewBox="0 0 24 24"><circle cx="12" cy="12" r="5.6"/><ellipse cx="12" cy="12" rx="10" ry="3.4" transform="rotate(-22 12 12)"/></symbol>
+    <symbol id="i-mountain" viewBox="0 0 24 24"><path d="M2.5 19.5L9.3 7.5l4.4 7.3 2.4-3.6 5.4 8.3zM7.6 10.5l1.7 1.3 1.5-1.2"/></symbol>
+    <symbol id="i-tower" viewBox="0 0 24 24"><path d="M8 20.5l1.5-12h5l1.5 12zM7 8.5h10M8 5h8v3.5H8zM10 5V3.5M14 5V3.5M5 20.5h14M12 12v2"/></symbol>
+    <symbol id="i-key" viewBox="0 0 24 24"><circle cx="8" cy="15.5" r="3.8"/><path d="M10.7 12.8L19.5 4M15.8 7.7l2.6 2.6M13.6 9.9l2 2"/></symbol>
+    <symbol id="i-dot" viewBox="0 0 24 24"><circle cx="12" cy="12" r="2.5"/></symbol>
+    <symbol id="i-link" viewBox="0 0 24 24"><path d="M10 14a4 4 0 005.7 0l3.1-3.1a4 4 0 00-5.7-5.7L11.6 6.7M14 10a4 4 0 00-5.7 0l-3.1 3.1a4 4 0 005.7 5.7l1.5-1.5"/></symbol>
+    <symbol id="i-warn" viewBox="0 0 24 24"><path d="M12 4l9 16H3zM12 10v4.5"/><circle cx="12" cy="17.2" r=".5" fill="currentColor"/></symbol>
+</svg>
+
+<a class="cx-skip" href="#mdbook-content">Skip to the page</a>
+
+<header class="cx-top">
+    <button id="cx-menu" class="cx-iconbtn cx-menu" type="button" aria-label="Open the menu" aria-controls="cx-side" aria-expanded="false"><svg class="cx-i"><use href="#i-menu"/></svg></button>
+    <a class="cx-brand" href="{{ path_to_root }}index.html" aria-label="{{ book_title }}, home">
+        <svg class="cx-brand-mark" aria-hidden="true"><use href="#i-logo"/></svg>
+        <span class="cx-brand-text"><span class="cx-brand-name">{{ book_title }}</span><span class="cx-brand-sub">World wiki</span></span>
+    </a>
+    {{#if search_enabled}}
+    <button id="mdbook-search-toggle" class="cx-searchbtn" type="button" aria-expanded="false" aria-controls="mdbook-searchbar" aria-keyshortcuts="Control+K / s" title="Search (Ctrl K)">
+        <svg class="cx-i" aria-hidden="true"><use href="#i-search"/></svg>
+        <span class="cx-searchbtn-text">Search the wiki…</span>
+        <kbd class="cx-kbd">Ctrl K</kbd>
+    </button>
+    {{/if}}
+    <div class="cx-top-actions">
+        <button id="cx-theme" class="cx-iconbtn" type="button" aria-label="Switch between dark and light" title="Dark or light">
+            <svg class="cx-i cx-show-dark"><use href="#i-sun"/></svg><svg class="cx-i cx-show-light"><use href="#i-moon"/></svg>
+        </button>
+        <a class="cx-topbtn" href="{{ path_to_root }}editing/index.html"><svg class="cx-i" aria-hidden="true"><use href="#i-pen"/></svg><span>Contribute</span></a>
+    </div>
+</header>
+
+{{#if search_enabled}}
+<div id="mdbook-search-wrapper" class="cx-search hidden">
+    <div class="cx-search-backdrop" data-close-search></div>
+    <div class="cx-search-panel" role="dialog" aria-label="Search the wiki">
+        <form id="mdbook-searchbar-outer" class="cx-search-form" role="search">
+            <svg class="cx-i" aria-hidden="true"><use href="#i-search"/></svg>
+            <input type="search" id="mdbook-searchbar" name="searchbar" placeholder="Search places, people, creatures, quests…" autocomplete="off" aria-controls="mdbook-searchresults-outer" aria-describedby="mdbook-searchresults-header">
+            <span class="cx-search-spinner" aria-hidden="true"></span>
+            <kbd class="cx-kbd">Esc</kbd>
+        </form>
+        <div id="mdbook-searchresults-outer" class="cx-search-results hidden">
+            <div id="mdbook-searchresults-header" class="cx-search-header"></div>
+            <ul id="mdbook-searchresults"></ul>
+        </div>
+        <p class="cx-search-hint"><kbd class="cx-kbd">↑</kbd> <kbd class="cx-kbd">↓</kbd> to choose, <kbd class="cx-kbd">Enter</kbd> to open</p>
+    </div>
+</div>
+{{/if}}
+
+<div class="cx-shell">
+    <nav id="cx-side" class="cx-side" aria-label="Sections">
+        <div id="cx-nav" class="cx-nav"></div>
+        <noscript><p class="cx-noscript"><a href="{{ path_to_root }}toc.html">All pages</a></p></noscript>
+    </nav>
+    <div class="cx-side-backdrop" data-close-nav></div>
+
+    <div class="cx-page">
+        <div id="mdbook-content" class="cx-content">
+            <main id="cx-page-main">
+                {{{ content }}}
+            </main>
+            <nav class="cx-prevnext" aria-label="Previous and next page">
+                {{#if previous}}
+                <a rel="prev" class="cx-pn cx-pn-prev" href="{{ path_to_root }}{{ previous.link }}"><svg class="cx-i" aria-hidden="true"><use href="#i-back"/></svg><span><small>Previous</small>{{ previous.title }}</span></a>
+                {{/if}}
+                {{#if next}}
+                <a rel="next prefetch" class="cx-pn cx-pn-next" href="{{ path_to_root }}{{ next.link }}"><span><small>Next</small>{{ next.title }}</span><svg class="cx-i" aria-hidden="true"><use href="#i-arrow"/></svg></a>
+                {{/if}}
+            </nav>
+        </div>
+        <footer class="cx-foot">
+            <span class="cx-foot-motto">Knowledge endures.</span>
+            <span class="cx-foot-links">
+                <a href="{{ path_to_root }}world/index.html">Explore</a>
+                <a href="{{ path_to_root }}play/index.html">Learn</a>
+                <a href="{{ path_to_root }}editing/index.html">Contribute</a>
+                <a href="{{ path_to_root }}recent.html">Recent changes</a>
+            </span>
+        </footer>
+    </div>
+</div>
+
+<!-- The chapter list (filled in by toc.js); codex.js reads it and never shows it. -->
+<mdbook-sidebar-scrollbox id="cx-toc" hidden></mdbook-sidebar-scrollbox>
+
+{{#if live_reload_endpoint}}
+<script>
+    const wsProtocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const wsAddress = wsProtocol + "//" + location.host + "/" + "{{{live_reload_endpoint}}}";
+    const socket = new WebSocket(wsAddress);
+    socket.onmessage = function (event) {
+        if (event.data === "reload") {
+            socket.close();
+            location.reload();
+        }
+    };
+    window.onbeforeunload = function () { socket.close(); };
+</script>
+{{/if}}
+
+{{#if search_js}}
+<script src="{{ resource "elasticlunr.min.js" }}"></script>
+<script src="{{ resource "mark.min.js" }}"></script>
+{{/if}}
+{{#each additional_js}}
+<script src="{{ resource this }}"></script>
+{{/each}}
+{{#if search_js}}
+<script src="{{ resource "searcher.js" }}"></script>
+{{/if}}
+<script>window.codexAfterSearch && window.codexAfterSearch();</script>
+
+{{#if fragment_map}}
+<script>
+    document.addEventListener('DOMContentLoaded', function () {
+        const fragmentMap = {{{fragment_map}}};
+        const target = fragmentMap[window.location.hash];
+        if (target) {
+            let url = new URL(target, window.location.href);
+            window.location.replace(url.href);
+        }
+    });
+</script>
+{{/if}}
+</body>
+</html>

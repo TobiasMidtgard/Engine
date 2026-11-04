@@ -1,42 +1,58 @@
-<div class="wiki-hero">
-<img src="images/home/plaza.jpg" alt="A village square at midday: a fountain, market stalls and timbered houses below snowy mountains">
-<div class="wiki-hero-text">
-<p class="wiki-hero-title">Player Wiki</p>
-<p class="wiki-hero-sub">The world, its cities and creatures, its magic, and the machines that carry you between the stars.</p>
-</div>
-</div>
-
-Start as an ordinary person who has trouble with a house rat. Grow, level by level, past every
-limit a mortal has, and ascend until you can stand against the gods themselves. This wiki is
-your guide to the world you will cross on the way.
-
-<p class="wiki-eyebrow">Explore</p>
-
-```cards
-world/index.md
-cities/index.md
-creatures/index.md
-factions/index.md
-magic/index.md
-play/combat.md
-vehicles/index.md
-lore/timeline.md
+```hero
+title: A world worth knowing.
+tagline: Explore its places, people and possibilities.
+image: home/plaza.jpg
+caption: A village square, from the current test build
+button: Start exploring | world/index.md
+button: Open the city map | world/index.md#the-world-map
 ```
 
-## New here?
+```columns
+## The world | globe
+Lands, cities and hidden places.
+- [Regions](world/regions/index.md)
+- [Cities and towns](cities/index.md)
+- [Landmarks](world/landmarks/index.md)
 
-- [Getting started](play/getting-started.md): your first hour.
-- [Controls](play/controls.md): every key in one place.
-- [Movement](play/movement.md): running on walls, slowing time.
-- [Progression](play/progression.md): from a rat to the gods.
+## People and stories | people
+Those who shape the world.
+- [Characters](people/index.md)
+- [Factions](factions/index.md)
+- [Quests](quests/index.md)
 
-## About this wiki
+## Power and craft | spark
+Magic, gear and the machines that carry you.
+- [Magic](magic/index.md)
+- [Items and equipment](items/index.md)
+- [Vehicles](vehicles/index.md)
 
-The game is still being made, and this wiki grows with it. Pages marked
-<span class="wiki-badge wiki-badge-draft">Draft</span> were written from early design notes,
-so names and numbers may still change. Pages marked
-<span class="wiki-badge wiki-badge-stub">Stub</span> are only a start. Pictures come from the
-game's current test builds.
+## Life and mastery | leaf
+Creatures, and the paths of growth.
+- [Creatures](creatures/index.md)
+- [Skills and progression](play/progression.md)
+- [Guides and mechanics](play/index.md)
+```
 
-Want to help? [How to add a page](editing/how-to-add-a-page.md) takes two minutes, from a
-phone or a computer.
+## Inside the codex
+
+<div class="cx-split">
+<div>
+
+```cards
+cities/vantress/index.md
+quests/the-bank-that-asked-to-be-robbed.md
+play/progression.md
+```
+
+</div>
+<div>
+
+```list
+play/getting-started.md
+lore/index.md
+recent.md
+editing/index.md
+```
+
+</div>
+</div>
