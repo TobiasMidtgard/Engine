@@ -20,7 +20,7 @@
 //! waits for streaming before a teleported pawn moves on; Jolt adds a body only once its shape
 //! is built). A collider whose shape changes (a voxel cliff's chunk remeshed where it was dug)
 //! keeps its old shape while the new one builds, even with something moving near, for
-//! [`MAX_REPLACE_STEPS`] steps at most.
+//! [`MAX_REPLACE_STEPS`] steps at most ([`MAX_HOLD_STEPS`] while a shape thread builds it).
 
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -43,7 +43,9 @@ pub(crate) const OFF_FRAME_POINTS: usize = 128;
 pub(crate) const MAX_WAIT_STEPS: u32 = 30;
 /// Steps the old shape of a collider changed near something moving stands in for the new one
 /// (a voxel cliff's chunk remeshed as debris falls off it) before the new one is finished on
-/// the spot.
+/// the spot, unless a shape thread is building it then: that gets until [`MAX_HOLD_STEPS`].
+/// Waiting for it on the frame was 23 ms at the fortress (round 12 on the VM), while the old
+/// shape stood in anyway. (Not longer: debris dug out of a cliff starts inside its old shape.)
 pub(crate) const MAX_REPLACE_STEPS: u32 = 3;
 /// Steps a job may hold what is near it (bodies and characters waiting for it) before it is
 /// finished on the spot: a tenth of a second at 60 Hz, as long as a 50,000 vertex mesh takes
@@ -180,6 +182,11 @@ impl Job {
                 State::Taken => return None,
             }
         }
+    }
+
+    /// Is a shape thread building it now?
+    pub(crate) fn building(&self) -> bool {
+        matches!(*self.state.lock(), State::Building)
     }
 
     /// Forget it (a worker that hasn't started skips it).
