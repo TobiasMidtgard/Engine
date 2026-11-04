@@ -1,11 +1,12 @@
 //! Features that prepare shared (`RenderFeature::prepares_shared`) run side by side: four that
-//! each take 2 ms take about as long as one, what they leave in their `PrepareOut` reaches the
-//! world, and a feature that prepares the old way still prepares. Needs a GPU or lavapipe;
+//! each sleep 2 ms overlap in time, what they leave in their `PrepareOut` reaches the world, and a
+//! feature that prepares the old way still prepares. (Overlap rather than a time limit: the
+//! test may share the cores with other test processes.) Needs a GPU or lavapipe;
 //! passes with a note when neither is available.
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use bevy_ecs::prelude::*;
 use engine_core::prelude::*;
@@ -20,8 +21,11 @@ const SLEEPERS: usize = 4;
 #[derive(Resource, Default)]
 struct Seen(u32);
 
+/// When each sleeper's shared prepares ran: (sleeper, start, end).
+type Runs = Arc<Mutex<Vec<(usize, Instant, Instant)>>>;
+
 /// Sleeps in its shared prepare and counts, through a deferred change, how often it ran.
-struct Sleeper(usize);
+struct Sleeper(usize, Runs);
 
 impl RenderFeature for Sleeper {
     fn name(&self) -> &str {
@@ -54,7 +58,9 @@ impl RenderFeature for Sleeper {
             world.contains_resource::<Seen>(),
             "prepare_serial ran first"
         );
+        let start = Instant::now();
         std::thread::sleep(SLEEP);
+        self.1.lock().unwrap().push((self.0, start, Instant::now()));
         out.set(format!("test.{}", self.name()), 1.0);
         out.defer(|world| world.resource_mut::<Seen>().0 += 1);
     }
@@ -90,8 +96,9 @@ fn shared_prepares_run_side_by_side() {
         w.height = 36;
     }
     app.add_plugins(RenderPlugin);
+    let runs = Runs::default();
     for i in 0..SLEEPERS {
-        app.add_render_feature(Sleeper(i));
+        app.add_render_feature(Sleeper(i, runs.clone()));
     }
     let plain = Arc::new(AtomicU32::new(0));
     app.add_render_feature(Plain(plain.clone()));
@@ -126,7 +133,7 @@ fn shared_prepares_run_side_by_side() {
         "the plain feature prepared every frame"
     );
 
-    // The best frame: a busy test machine can stall any one.
+    // The best frame, for the log: a busy test machine can stall any one.
     let (wall, sum) = walls
         .iter()
         .zip(&sums)
@@ -135,13 +142,10 @@ fn shared_prepares_run_side_by_side() {
         .unwrap();
     eprintln!("side by side: {wall:.2} ms for {sum:.2} ms of prepares");
     assert!(sum >= 8.0, "the prepares took {sum:.2} ms");
-    let threads = std::thread::available_parallelism().map_or(1, |n| n.get());
-    if threads >= 4 {
-        assert!(wall < 4.0, "{wall:.2} ms for 4 x 2 ms side by side");
-    } else if threads >= 2 {
-        assert!(
-            wall < 0.75 * sum,
-            "{wall:.2} ms for {sum:.2} ms side by side"
-        );
-    }
+    // Two different sleepers ran at the same time.
+    let runs = runs.lock().unwrap();
+    let overlapped = runs
+        .iter()
+        .any(|a| runs.iter().any(|b| a.0 != b.0 && a.1 < b.2 && b.1 < a.2));
+    assert!(overlapped, "no two shared prepares ran at once");
 }
