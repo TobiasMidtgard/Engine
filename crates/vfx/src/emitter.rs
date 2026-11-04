@@ -1102,8 +1102,11 @@ fn update_light(
     };
     match inst.light.and_then(|e| lights.get_mut(e).ok()) {
         Some((mut at, mut l)) => {
-            at.0 = pos;
-            *l = light;
+            // A light that stays put is not moved again (see `place_lights`).
+            if at.0 != pos {
+                at.0 = pos;
+            }
+            l.set_if_neq(light);
         }
         None if inst.light.is_none() && inst.started => {
             let t = Transform::from_translation(pos);

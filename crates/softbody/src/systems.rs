@@ -2078,7 +2078,10 @@ pub fn drive_planks(
             continue;
         };
         for ((plank, _, _), &(pos, rot)) in bridge.planks.iter().zip(&bridge.plank_poses) {
-            if let Ok((_, mut t, _)) = planks.get_mut(*plank) {
+            // A deck at rest leaves its planks alone (no write for physics and the renderer).
+            if let Ok((_, mut t, _)) = planks.get_mut(*plank)
+                && (t.translation != pos || t.rotation != rot)
+            {
                 t.translation = pos;
                 t.rotation = rot;
             }

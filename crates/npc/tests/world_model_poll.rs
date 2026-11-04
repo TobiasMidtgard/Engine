@@ -72,3 +72,47 @@ fn walls_moved_by_hand_are_seen_within_a_poll_period() {
         "old places forgotten"
     );
 }
+
+/// A wall going up piece by piece (one new piece a step) updates the model once for the
+/// pieces of `update_secs`, not once a step, and every piece is in soon after.
+#[test]
+fn pieces_placed_step_after_step_are_gathered_into_one_update() {
+    let mut app = app();
+    for i in 0..8 {
+        app.world.spawn((
+            Transform::from_translation(wall_at(i)),
+            Collider::cuboid(Vec3::new(1.5, 1.0, 0.3)),
+        ));
+    }
+    for _ in 0..90 {
+        app.update(); // built, and past the first poll
+    }
+    let generation = |app: &App| app.world.resource::<TacticalWorld>().generation;
+    let before = generation(&app);
+    // 12 pieces, one a step: 0.2 s at 60 steps a second.
+    let piece_at = |k: usize| DVec3::new(k as f64 * 3.0, 1.0, 30.0);
+    for k in 0..12 {
+        app.world.spawn((
+            Transform::from_translation(piece_at(k)),
+            Collider::cuboid(Vec3::new(1.5, 1.0, 0.3)),
+        ));
+        app.update();
+    }
+    for _ in 0..12 {
+        app.update();
+    }
+    let updates = generation(&app) - before;
+    assert!(
+        (1..=3).contains(&updates),
+        "{updates} updates for 12 pieces placed over 0.2 s"
+    );
+    let w = app.world.resource::<TacticalWorld>();
+    let missing: Vec<usize> = (0..12)
+        .filter(|&k| {
+            !w.obstacles
+                .iter()
+                .any(|o| (o.center - piece_at(k)).length() < 0.05)
+        })
+        .collect();
+    assert!(missing.is_empty(), "pieces not in the model: {missing:?}");
+}
