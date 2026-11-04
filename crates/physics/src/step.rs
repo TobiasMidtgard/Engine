@@ -339,15 +339,15 @@ pub(crate) fn physics_sync(world: &mut World, mut q: Local<Option<StepQueries>>)
         wanted.retain(|(e, desc, pose)| {
             // A changed collider's earlier job is dropped either way.
             sim.pending_statics.remove(e);
-            let Some(points) = crate::shape_jobs::heavy_points(&desc.shape) else {
+            if !crate::shape_jobs::heavy(&desc.shape) {
                 return true;
-            };
+            }
             let found = owning_body(world, *e);
             if found.is_some_and(|(b, k)| k != BodyKind::Static && sim.bodies.contains_key(&b)) {
                 return true;
             }
             let (lo, hi) = crate::shape_jobs::world_bounds(
-                points,
+                &desc.shape,
                 pose.translation,
                 pose.rotation,
                 pose.scale,

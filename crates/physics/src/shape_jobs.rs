@@ -220,29 +220,97 @@ impl Drop for Pending {
     }
 }
 
-/// Points a shape is built from, if it is one built off the frame (a mesh or a hull).
-pub(crate) fn heavy_points(shape: &ColliderShape) -> Option<&[Vec3]> {
-    match shape {
-        ColliderShape::TriMesh { vertices, .. } if vertices.len() >= OFF_FRAME_POINTS => {
-            Some(vertices)
+/// Is a shape built off the frame: a mesh or a hull of [`OFF_FRAME_POINTS`] or more, or a
+/// compound whose meshes and hulls have that many points in all (a rock of a few hulls, a
+/// tree's trunk and boughs, a fitted building's dozens of hulls: 15,000-18,000 points of
+/// compounds built in one sync, 8 ms on the VM loops, round 13).
+pub(crate) fn heavy(shape: &ColliderShape) -> bool {
+    fn points(shape: &ColliderShape) -> usize {
+        match shape {
+            ColliderShape::TriMesh { vertices, .. } => vertices.len(),
+            ColliderShape::ConvexHull { points } => points.len(),
+            ColliderShape::Compound(parts) => parts.iter().map(|(_, _, s)| points(s)).sum(),
+            _ => 0,
         }
-        ColliderShape::ConvexHull { points } if points.len() >= OFF_FRAME_POINTS => Some(points),
-        _ => None,
     }
+    points(shape) >= OFF_FRAME_POINTS
 }
 
-/// World bounds of `points` scaled, turned and placed by a pose.
+/// World bounds of `shape` scaled, turned and placed by a pose (a compound's parts each
+/// placed in it; a primitive part by a box around it).
 pub(crate) fn world_bounds(
-    points: &[Vec3],
+    shape: &ColliderShape,
     translation: DVec3,
     rotation: Quat,
     scale: Vec3,
 ) -> (DVec3, DVec3) {
+    fn grow(
+        shape: &ColliderShape,
+        at: Vec3,
+        rotation: Quat,
+        scale: Vec3,
+        lo: &mut Vec3,
+        hi: &mut Vec3,
+    ) {
+        let mut add = |p: Vec3| {
+            let q = at + rotation * (p * scale);
+            *lo = lo.min(q);
+            *hi = hi.max(q);
+        };
+        let corners = |add: &mut dyn FnMut(Vec3), h: Vec3| {
+            for i in 0..8 {
+                let sign = Vec3::new(
+                    if i & 1 == 0 { -1.0 } else { 1.0 },
+                    if i & 2 == 0 { -1.0 } else { 1.0 },
+                    if i & 4 == 0 { -1.0 } else { 1.0 },
+                );
+                add(h * sign);
+            }
+        };
+        match shape {
+            ColliderShape::TriMesh {
+                vertices: points, ..
+            }
+            | ColliderShape::ConvexHull { points } => {
+                points.iter().for_each(|p| add(*p));
+            }
+            ColliderShape::Compound(parts) => {
+                for (offset, turn, part) in parts {
+                    grow(
+                        part,
+                        at + rotation * (*offset * scale),
+                        rotation * *turn,
+                        scale,
+                        lo,
+                        hi,
+                    );
+                }
+            }
+            ColliderShape::Sphere { radius } => corners(&mut add, Vec3::splat(*radius)),
+            ColliderShape::Cuboid { half_extents } => corners(&mut add, *half_extents),
+            ColliderShape::Capsule {
+                radius,
+                half_height,
+            }
+            | ColliderShape::Cylinder {
+                radius,
+                half_height,
+            } => {
+                corners(&mut add, Vec3::new(*radius, half_height + radius, *radius));
+            }
+            ColliderShape::Heightfield { heights, size, .. } => {
+                let (min, max) = heights
+                    .iter()
+                    .fold((0.0f32, 0.0f32), |(a, b), h| (a.min(*h), b.max(*h)));
+                add(Vec3::new(-size[0] * 0.5, min, -size[1] * 0.5));
+                add(Vec3::new(size[0] * 0.5, max, size[1] * 0.5));
+            }
+        }
+    }
     let (mut lo, mut hi) = (Vec3::splat(f32::INFINITY), Vec3::splat(f32::NEG_INFINITY));
-    for p in points {
-        let q = rotation * (*p * scale);
-        lo = lo.min(q);
-        hi = hi.max(q);
+    grow(shape, Vec3::ZERO, rotation, scale, &mut lo, &mut hi);
+    if !lo.is_finite() || !hi.is_finite() {
+        return (translation, translation);
     }
     (translation + lo.as_dvec3(), translation + hi.as_dvec3())
 }
@@ -307,3 +375,61 @@ pub(crate) fn movers(sim: &crate::sim::Simulation) -> Vec<Mover> {
 
 /// Entities whose static shape is still being built.
 pub(crate) type PendingStatics = EntityHashMap<Pending>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn hull(n: usize, at: f32) -> ColliderShape {
+        ColliderShape::ConvexHull {
+            points: (0..n)
+                .map(|i| Vec3::new(at + (i % 2) as f32, (i % 3) as f32 * 0.5, 0.0))
+                .collect::<Vec<_>>()
+                .into(),
+        }
+    }
+
+    #[test]
+    fn a_compound_of_hulls_is_heavy_and_bounded_by_its_parts() {
+        let half = OFF_FRAME_POINTS / 2;
+        let rock = ColliderShape::Compound(vec![
+            (Vec3::ZERO, Quat::IDENTITY, hull(half, 0.0)),
+            (Vec3::new(10.0, 0.0, 0.0), Quat::IDENTITY, hull(half, 0.0)),
+            (
+                Vec3::new(0.0, 5.0, 0.0),
+                Quat::IDENTITY,
+                ColliderShape::Sphere { radius: 1.0 },
+            ),
+        ]);
+        assert!(
+            heavy(&rock),
+            "two half-size hulls add up to an off-frame build"
+        );
+        assert!(!heavy(&hull(half, 0.0)));
+        assert!(!heavy(&ColliderShape::Compound(vec![(
+            Vec3::ZERO,
+            Quat::IDENTITY,
+            hull(half, 0.0)
+        )])));
+
+        // Scaled by 2 and placed at (100, 0, 0): the second hull reaches x = 100 + 2 * 11, the
+        // sphere (radius 2) x = 98 and y = 2 * 6.
+        let (lo, hi) = world_bounds(
+            &rock,
+            DVec3::new(100.0, 0.0, 0.0),
+            Quat::IDENTITY,
+            Vec3::splat(2.0),
+        );
+        assert!((lo - DVec3::new(98.0, 0.0, -2.0)).length() < 1e-4, "{lo}");
+        assert!((hi - DVec3::new(122.0, 12.0, 2.0)).length() < 1e-4, "{hi}");
+
+        // Turned a quarter about Y, the parts' offsets turn with it.
+        let (lo, hi) = world_bounds(
+            &rock,
+            DVec3::ZERO,
+            Quat::from_rotation_y(std::f32::consts::FRAC_PI_2),
+            Vec3::ONE,
+        );
+        assert!(lo.z < -10.5 && hi.x < 1.5, "{lo} {hi}");
+    }
+}
