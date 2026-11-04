@@ -396,6 +396,8 @@ struct Item {
     since: u64,
     /// Its material sways in the wind: the near cascades draw it every frame.
     sways: bool,
+    /// The sun's shadow maps it casts into, by texel size (`ShadowTexelRange`).
+    cast_texels: crate::ShadowTexelRange,
 }
 
 /// What the gather needs of a mesh, looked up once a frame for the meshes the scene uses (by
@@ -800,6 +802,7 @@ impl Cull<'_> {
                 cold.changed.max(mesh.uploaded) + STILL_FRAMES
             },
             sways: mat.sways,
+            cast_texels: hot.cast_texels,
         })
     }
 }
@@ -3251,6 +3254,10 @@ impl RenderFeature for MeshFeature {
                 let image = if redraw { frame } else { image_frame[c] };
                 for &n in casters {
                     let item = &items[n as usize];
+                    // A caster with a stand-in for other maps (`ShadowTexelRange`).
+                    if !item.cast_texels.casts_at(texel) {
+                        continue;
+                    }
                     // Swaying leaves move in the near cascades' shadows: never still there.
                     let can_rest = !(item.sways && c < 2);
                     let in_image = can_rest && item.since <= image;

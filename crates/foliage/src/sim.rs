@@ -461,6 +461,26 @@ impl RegionSim {
         }
     }
 
+    /// A copy to step on a worker: the soil and the random sequence, the state that carries
+    /// from one step to the next. The neighbor index is left empty, as every step rebuilds it
+    /// from the plants it is given.
+    pub fn fork(&self) -> Self {
+        let extent = Vec2::new(
+            self.soil.width as f32 * self.soil.cell,
+            self.soil.height as f32 * self.soil.cell,
+        );
+        Self {
+            soil: self.soil.clone(),
+            rng: self.rng.clone(),
+            by_layer: BUCKET_CELL.map(|c| Buckets::new(self.soil.origin, extent, c)),
+            cached: Vec::new(),
+            positions: Vec::new(),
+            species_of: Vec::new(),
+            sizes: Vec::new(),
+            crown_reach: [0.0; 3],
+        }
+    }
+
     /// Move the soil and the neighbor grids into a new reference frame ([`crate::shift`]);
     /// `center` is the region's center in the old frame.
     pub fn shift(&mut self, s: &WorldShift, center: DVec3) {
