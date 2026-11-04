@@ -2419,16 +2419,23 @@ fn assign_pools(jobs: &mut [Job]) {
     }
 }
 
-/// Run the regions' substep `jobs` side by side on [`region_pool`] (in place when there is
-/// one, or a single thread); the results come back in the jobs' order.
+/// Run the regions' substep `jobs` side by side on [`region_pool`] and the calling thread
+/// ([`spread`]; in place when there is one, or a single thread); the results come back in the
+/// jobs' order.
 fn run_substeps(mut jobs: Vec<Job>, shared: &SubstepShared) -> Vec<SubstepOut> {
     assign_pools(&mut jobs);
     match region_pool() {
-        Some(pool) if jobs.len() > 1 => pool.scope(|scope| {
-            for (r, p, pending) in jobs {
-                scope.spawn(async move { substep(r, p, pending, shared) });
-            }
-        }),
+        Some(pool) if jobs.len() > 1 => {
+            let n = jobs.len();
+            let jobs: Vec<parking_lot::Mutex<Option<Job>>> = jobs
+                .into_iter()
+                .map(|j| parking_lot::Mutex::new(Some(j)))
+                .collect();
+            spread(pool, n, n - 1, |i| {
+                let (r, p, pending) = jobs[i].lock().take().expect("each job runs once");
+                substep(r, p, pending, shared)
+            })
+        }
         _ => jobs
             .into_iter()
             .map(|(r, p, pending)| substep(r, p, pending, shared))
@@ -2585,15 +2592,7 @@ fn build_shapes(wanted: &[(Entity, &Collider, Transform)]) -> Vec<Option<SharedS
     let weight: usize = wanted.iter().map(|w| shape_points(&w.1.shape)).sum();
     match region_pool() {
         Some(pool) if wanted.len() > 1 && weight >= BUILD_SPREAD_POINTS => {
-            let chunk = wanted.len().div_ceil(pool.thread_num().max(1)).max(1);
-            pool.scope(|scope| {
-                for part in wanted.chunks(chunk) {
-                    scope.spawn(async move { part.iter().map(build).collect::<Vec<_>>() });
-                }
-            })
-            .into_iter()
-            .flatten()
-            .collect()
+            spread(pool, wanted.len(), pool.thread_num(), |i| build(&wanted[i]))
         }
         _ => wanted.iter().map(build).collect(),
     }
@@ -2609,6 +2608,44 @@ fn shape_points(shape: &engine_world::physics::ColliderShape) -> usize {
         S::Compound(parts) => parts.iter().map(|(_, _, s)| shape_points(s)).sum(),
         _ => 0,
     }
+}
+
+/// `work(0..n)`, results in order, shared out one index at a time between the calling thread
+/// and up to `helpers` tasks on `pool`. The caller works too, so when the pool's threads are
+/// slow to start (a zone loading on every core) it does it all itself and waits only for the
+/// items a helper already took: an even split waited for the slowest thread instead, 43-55 ms
+/// for a batch the caller alone builds in 2-9 ms (VM loops, round 10). The same work-sharing
+/// as Rayon's `join`, where the caller runs one half itself.
+fn spread<R: Send>(
+    pool: &TaskPool,
+    n: usize,
+    helpers: usize,
+    work: impl Fn(usize) -> R + Sync,
+) -> Vec<R> {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let next = AtomicUsize::new(0);
+    let out: Vec<parking_lot::Mutex<Option<R>>> =
+        (0..n).map(|_| parking_lot::Mutex::new(None)).collect();
+    let take = || {
+        loop {
+            let i = next.fetch_add(1, Ordering::Relaxed);
+            if i >= n {
+                break;
+            }
+            let r = work(i);
+            *out[i].lock() = Some(r);
+        }
+    };
+    let take = &take;
+    pool.scope(|scope| {
+        for _ in 0..helpers.min(n.saturating_sub(1)) {
+            scope.spawn(async move { take() });
+        }
+        take();
+    });
+    out.into_iter()
+        .map(|r| r.into_inner().expect("every index was worked"))
+        .collect()
 }
 
 /// Points a batch of new shapes must hold before [`build_shapes`] spreads it over threads.
