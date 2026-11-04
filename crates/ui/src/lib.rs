@@ -221,24 +221,7 @@ impl Plugin for UiPlugin {
             PreUpdate,
             input::ui_input_system.after(engine_input::update_actions_system),
         )
-        .add_systems(
-            Update,
-            (
-                inventory::inventory_screen_system,
-                shop::shop_screen_system,
-                dialogue::dialogue_system,
-                hud::hud_system,
-                map::map_system,
-                quests::quests_system,
-                wheel::wheel_system,
-                skills::skills_system,
-                crafting::crafting_system,
-                saves::saves_system,
-                title::title_system,
-                loading::loading_system,
-                menus::menus_system,
-            ),
-        )
+        .add_systems(Update, ui_screens_system)
         .add_systems(
             PostUpdate,
             (
@@ -375,5 +358,39 @@ fn register_types(app: &mut App) {
     )
     .register_resource::<UiInputCapture>(
         "Whether the UI owns the pointer / keyboard this frame and whether something is dragged.",
+    );
+}
+
+/// The screens' and the HUD's exclusive systems, one after another inside one exclusive
+/// system: Bevy waits for the whole pool to go idle before each exclusive system, so thirteen of
+/// them in Update cost thirteen waits every frame, and one costs one (round 24 on Tobias's PC,
+/// engine-perf/update-exclusives.md). `run_system_cached` keeps each one's own state (its
+/// `Local` message cursor) from frame to frame, as when it ran as a system of its own.
+pub fn ui_screens_system(world: &mut World) {
+    macro_rules! run {
+        ($($name:literal => $system:path),* $(,)?) => {$(
+            {
+                let _span = tracing::info_span!($name).entered();
+                if let Err(e) = world.run_system_cached($system) {
+                    static WARNED: std::sync::Once = std::sync::Once::new();
+                    WARNED.call_once(|| tracing::warn!("ui: {} did not run: {e}", $name));
+                }
+            }
+        )*};
+    }
+    run!(
+        "inventory screen" => inventory::inventory_screen_system,
+        "shop screen" => shop::shop_screen_system,
+        "dialogue" => dialogue::dialogue_system,
+        "hud" => hud::hud_system,
+        "map" => map::map_system,
+        "quests" => quests::quests_system,
+        "wheel" => wheel::wheel_system,
+        "skills" => skills::skills_system,
+        "crafting" => crafting::crafting_system,
+        "saves" => saves::saves_system,
+        "title" => title::title_system,
+        "loading" => loading::loading_system,
+        "menus" => menus::menus_system,
     );
 }

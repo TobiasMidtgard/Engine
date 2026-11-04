@@ -103,8 +103,13 @@ impl Plugin for SmokePlugin {
                 Update,
                 (
                     sim::age_tunnels,
-                    demo::land_range_art.run_if(resource_exists::<demo::RangeArt>),
-                    (demo::tick_demos, demo::run_demos.run_if(demo::demos_due)).chain(),
+                    resource_exists::<demo::RangeArt>
+                        .pipe(engine_core::schedule::queue_when(demo::land_range_art)),
+                    (
+                        demo::tick_demos,
+                        demo::demos_due.pipe(engine_core::schedule::queue_when(demo::run_demos)),
+                    )
+                        .chain(),
                     demo::age_tracers,
                     (demo::drive_carts, demo::turn_wheels).chain(),
                     demo::spin_rotors,

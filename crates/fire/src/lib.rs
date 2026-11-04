@@ -128,10 +128,15 @@ impl Plugin for FirePlugin {
                     sim::sync_lights,
                     sim::apply_charring,
                     props::burn_foliage,
-                    // Nothing waits on the whole-world demo runner, and it runs only when a
-                    // demo has work: a `&mut World` system waits for every other one to
-                    // finish, even when its run condition then says no.
-                    (demo::tick_demos, demo::run_demos.run_if(demo::demos_due)).chain(),
+                    // Nothing waits on the whole-world demo runner, and it is queued only when
+                    // a demo has work: a `&mut World` system waits for every other one to
+                    // finish, even when its run condition then says no
+                    // (engine_core::schedule::queue_when).
+                    (
+                        demo::tick_demos,
+                        demo::demos_due.pipe(engine_core::schedule::queue_when(demo::run_demos)),
+                    )
+                        .chain(),
                     demo::contain_demos,
                     grass::update_grass,
                 ),

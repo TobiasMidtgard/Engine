@@ -134,7 +134,17 @@ pub struct ChaseCamera {
 pub(crate) fn register(app: &mut App) {
     app.add_systems(
         Update,
-        (make_boardable, board, prompts, drive_controls, readouts)
+        (
+            make_boardable,
+            // Queued only on frames with a press: a `&mut World` system waits for an idle
+            // pool every frame (engine_core::schedule::queue_when).
+            pressed.pipe(engine_core::schedule::queue_when(|world| {
+                let _ = world.run_system_cached(board);
+            })),
+            prompts,
+            drive_controls,
+            readouts,
+        )
             .chain()
             .in_set(UpdateSet::Logic),
     )
@@ -235,6 +245,11 @@ fn make_boardable(mut commands: Commands, q: Query<NewVehicle, Without<Boardable
 }
 
 /// Gets in and out on E.
+/// Any interaction pressed this frame (for [`board`]).
+fn pressed(mut presses: MessageReader<Interact>) -> bool {
+    presses.read().count() > 0
+}
+
 fn board(world: &mut World, mut cursor: Local<bevy_ecs::message::MessageCursor<Interact>>) {
     let presses: Vec<Interact> = {
         let messages = world.resource::<bevy_ecs::message::Messages<Interact>>();
