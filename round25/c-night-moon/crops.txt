@@ -1,0 +1,10 @@
+near_water_h2_5_lake_1x: h2_5_lake box (0,720)-(960,900) x1; brightest pixel (956, 885) rgb (217, 217, 216); greenest (241, 867) rgb (5, 19, 28); mean rgb (13, 20, 29); round 24's green-wedge box (bottom left), 1x
+near_shore_h2_5_lake_1x: h2_5_lake box (0,640)-(1600,900) x1; brightest pixel (1047, 883) rgb (252, 252, 252); greenest (241, 867) rgb (5, 19, 28); mean rgb (19, 27, 37); the whole near water and shore, 1x
+near_water_left_h2_5_lake_x4: h2_5_lake box (60,760)-(300,900) x4; brightest pixel (230, 887) rgb (63, 73, 93); greenest (241, 867) rgb (5, 19, 28); mean rgb (7, 14, 21); where the wedge's wide end was
+near_water_mid_h2_5_lake_x4: h2_5_lake box (420,730)-(660,870) x4; brightest pixel (442, 867) rgb (27, 37, 47); greenest (449, 852) rgb (4, 17, 25); mean rgb (4, 11, 19); the wedge's middle
+near_water_tip_h2_5_lake_x4: h2_5_lake box (760,700)-(1000,840) x4; brightest pixel (988, 795) rgb (202, 203, 203); greenest (791, 834) rgb (4, 17, 26); mean rgb (28, 38, 49); the wedge's tip (round 24 ~(960, 750))
+near_shore_right_h2_5_lake_x4: h2_5_lake box (1000,780)-(1240,900) x4; brightest pixel (1047, 883) rgb (252, 252, 252); greenest (1015, 782) rgb (8, 20, 29); mean rgb (41, 50, 62); the near beach and the water's edge, right
+near_shore_far_right_h2_5_lake_x4: h2_5_lake box (1340,760)-(1600,880) x4; brightest pixel (1364, 846) rgb (81, 91, 114); greenest (1348, 836) rgb (9, 21, 30); mean rgb (33, 40, 52); the near beach, far right
+far_shore_waterfall_h2_5_lake_x6: h2_5_lake box (260,400)-(420,470) x6; brightest pixel (315, 400) rgb (95, 107, 130); greenest (266, 425) rgb (10, 26, 30); mean rgb (31, 40, 52); the far shore under the waterfall
+moon_h3_5_sunset_x6: h3_5_sunset box (866,0)-(962,51) x6; brightest pixel (914, 23) rgb (254, 254, 254); greenest (914, 12) rgb (187, 180, 165); mean rgb (24, 29, 39); the space Moon, predicted (914, 19)
+moon_h3_5_sunset_x12: h3_5_sunset box (894,4)-(934,34) x12; brightest pixel (914, 23) rgb (254, 254, 254); greenest (914, 12) rgb (187, 180, 165); mean rgb (35, 41, 51); the space Moon, closer

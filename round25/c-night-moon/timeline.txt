@@ -1,0 +1,23 @@
+05:19:58.954Z     0.03  mode night quality ultra size '' spec 'lake,sunset'; idle before start 24,988 s; HEAD e11f16aa
+05:19:59.283Z     0.36  started: showcase.exe --fly --profile --quality ultra
+05:20:05.724Z     6.80  window visible: client 1600x900, window 1616x939 at (234,234), maximized False
+05:20:05.737Z     6.81  bridge connected
+05:20:05.874Z     6.95  world built
+05:20:11.777Z    12.85  after build: working set 4,831 MB, private 9,072 MB; system free 32,817 of 65,277 MB
+05:20:13.352Z    14.43  TIME 2.5: {"id":4,"jsonrpc":"2.0","result":{"hour":2.5,"hours_per_second":0.0}}
+05:20:13.458Z    14.53  AT lake at 2.5 h: {"id":5,"jsonrpc":"2.0","result":{"place":"lake","position":[160.0,6.0,-115.0]}}
+05:20:25.823Z    26.90  shot h2_5_lake: {"id":9,"jsonrpc":"2.0","result":{"height":900,"path":"screenshots/r25/h2_5_lake.png","width":1600}}
+05:20:26.077Z    27.15  END h2_5_lake: working set 7,084 MB, private 15,433 MB; system free 30,728 of 65,277 MB
+05:20:27.131Z    28.21  AT sunset at 2.5 h: {"id":10,"jsonrpc":"2.0","result":{"place":"sunset","position":[-40.0,5.0,20.0]}}
+05:20:39.543Z    40.62  shot h2_5_sunset: {"id":14,"jsonrpc":"2.0","result":{"height":900,"path":"screenshots/r25/h2_5_sunset.png","width":1600}}
+05:20:39.803Z    40.88  END h2_5_sunset: working set 5,059 MB, private 15,499 MB; system free 32,724 of 65,277 MB
+05:20:40.899Z    41.97  TIME 3.5: {"id":15,"jsonrpc":"2.0","result":{"hour":3.5,"hours_per_second":0.0}}
+05:20:40.962Z    42.04  AT lake at 3.5 h: {"id":16,"jsonrpc":"2.0","result":{"place":"lake","position":[160.0,6.0,-115.0]}}
+05:20:53.312Z    54.39  shot h3_5_lake: {"id":20,"jsonrpc":"2.0","result":{"height":900,"path":"screenshots/r25/h3_5_lake.png","width":1600}}
+05:20:53.600Z    54.68  END h3_5_lake: working set 5,163 MB, private 15,559 MB; system free 32,620 of 65,277 MB
+05:20:54.741Z    55.82  AT sunset at 3.5 h: {"id":21,"jsonrpc":"2.0","result":{"place":"sunset","position":[-40.0,5.0,20.0]}}
+05:21:06.951Z    68.03  shot h3_5_sunset: {"id":25,"jsonrpc":"2.0","result":{"height":900,"path":"screenshots/r25/h3_5_sunset.png","width":1600}}
+05:21:07.240Z    68.32  END h3_5_sunset: working set 5,155 MB, private 15,805 MB; system free 32,620 of 65,277 MB
+05:21:10.969Z    72.05  sampler job: Completed
+05:21:10.973Z    72.05  killing the game
+05:21:53.678Z   114.75  done

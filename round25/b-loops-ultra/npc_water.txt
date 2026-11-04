@@ -1,0 +1,635 @@
+== round 1 overview (05:15:53-05:16:18 UTC)
+  profile 05:15:56 (64 frames, 78.2 ms a frame, worst 1493.9 ms)
+    think_and_act          0.77 / max 17.49 / 2.5 runs (count 160)
+    ripple_system          3.54 / max 201.96 / 2.5 runs (count 160)
+    press_fallen_crowns    -
+    flow_bed_system        -
+    step_beside_physics    17.79 / max 18.97 / 2.5 runs (count 160)
+    in find path           0.41 / max 13.68 / 0.2 runs (count 13)
+    in nav chunk           0.39 / max 11.56 / 0.4 runs (count 26)
+    in ripples: rebuild    3.42 / max 201.76 / 0.1 runs (count 6)
+    in ripples: depths     3.34 / max 201.74 / 0.1 runs (count 6)
+    in ripples: streams    -
+    in ripples: swash      -
+    in ripples: speeds     -
+    in ripples: step       -
+  profile 05:16:01 (188 frames, 26.6 ms a frame, worst 56.0 ms)
+    think_and_act          -
+    ripple_system          -
+    press_fallen_crowns    -
+    flow_bed_system        -
+    step_beside_physics    4.36 / max 7.95 / 1.4 runs (count 263)
+    in find path           -
+    in nav chunk           -
+    in ripples: rebuild    -
+    in ripples: depths     -
+    in ripples: streams    -
+    in ripples: swash      -
+    in ripples: speeds     -
+    in ripples: step       -
+  profile 05:16:06 (198 frames, 25.3 ms a frame, worst 38.2 ms)
+    think_and_act          -
+    ripple_system          -
+    press_fallen_crowns    -
+    flow_bed_system        -
+    step_beside_physics    0.38 / max 0.74 / 1.5 runs (count 297)
+    in find path           -
+    in nav chunk           -
+    in ripples: rebuild    -
+    in ripples: depths     -
+    in ripples: streams    -
+    in ripples: swash      -
+    in ripples: speeds     -
+    in ripples: step       -
+  profile 05:16:11 (205 frames, 24.5 ms a frame, worst 159.9 ms)
+    think_and_act          -
+    ripple_system          -
+    press_fallen_crowns    -
+    flow_bed_system        -
+    step_beside_physics    0.39 / max 0.76 / 1.5 runs (count 308)
+    in find path           -
+    in nav chunk           -
+    in ripples: rebuild    -
+    in ripples: depths     -
+    in ripples: streams    -
+    in ripples: swash      -
+    in ripples: speeds     -
+    in ripples: step       -
+  profile 05:16:16 (224 frames, 22.4 ms a frame, worst 50.5 ms)
+    think_and_act          -
+    ripple_system          -
+    press_fallen_crowns    -
+    flow_bed_system        -
+    step_beside_physics    0.35 / max 0.91 / 1.3 runs (count 291)
+    in find path           -
+    in nav chunk           -
+    in ripples: rebuild    -
+    in ripples: depths     -
+    in ripples: streams    -
+    in ripples: swash      -
+    in ripples: speeds     -
+    in ripples: step       -
+== round 1 plaza (05:16:18-05:16:43 UTC)
+  profile 05:16:21 (209 frames, 24.0 ms a frame, worst 99.7 ms)
+    think_and_act          0.14 / max 13.50 / 1.4 runs (count 293)
+    ripple_system          -
+    press_fallen_crowns    -
+    flow_bed_system        -
+    step_beside_physics    2.65 / max 9.14 / 1.4 runs (count 293)
+    in find path           -
+    in nav chunk           -
+    in ripples: rebuild    -
+    in ripples: depths     -
+    in ripples: streams    -
+    in ripples: swash      -
+    in ripples: speeds     -
+    in ripples: step       -
+  profile 05:16:26 (274 frames, 18.3 ms a frame, worst 36.6 ms)
+    think_and_act          0.22 / max 35.39 / 1.1 runs (count 301)
+    ripple_system          -
+    press_fallen_crowns    -
+    flow_bed_system        -
+    step_beside_physics    0.45 / max 3.65 / 1.1 runs (count 301)
+    in find path           0.15 / max 35.37 / 0.1 runs (count 27)
+    in nav chunk           1.11 / max 17.26 / 0.1 runs (count 27)
+    in ripples: rebuild    -
+    in ripples: depths     -
+    in ripples: streams    -
+    in ripples: swash      -
+    in ripples: speeds     -
+    in ripples: step       -
+  profile 05:16:31 (266 frames, 18.8 ms a frame, worst 33.6 ms)
+    think_and_act          -
+    ripple_system          -
+    press_fallen_crowns    -
+    flow_bed_system        -
+    step_beside_physics    0.41 / max 0.76 / 1.1 runs (count 293)
+    in find path           -
+    in nav chunk           -
+    in ripples: rebuild    -
+    in ripples: depths     -
+    in ripples: streams    -
+    in ripples: swash      -
+    in ripples: speeds     -
+    in ripples: step       -
+  profile 05:16:36 (283 frames, 17.7 ms a frame, worst 39.1 ms)
+    think_and_act          0.11 / max 4.45 / 1.1 runs (count 311)
+    ripple_system          -
+    press_fallen_crowns    -
+    flow_bed_system        -
+    step_beside_physics    0.41 / max 3.66 / 1.1 runs (count 311)
+    in find path           -
+    in nav chunk           -
+    in ripples: rebuild    -
+    in ripples: depths     -
+    in ripples: streams    -
+    in ripples: swash      -
+    in ripples: speeds     -
+    in ripples: step       -
+  profile 05:16:41 (271 frames, 18.5 ms a frame, worst 78.6 ms)
+    think_and_act          0.15 / max 14.79 / 1.1 runs (count 298)
+    ripple_system          -
+    press_fallen_crowns    -
+    flow_bed_system        -
+    step_beside_physics    0.39 / max 1.00 / 1.1 runs (count 298)
+    in find path           -
+    in nav chunk           0.30 / max 13.48 / 0.0 runs (count 0)
+    in ripples: rebuild    -
+    in ripples: depths     -
+    in ripples: streams    -
+    in ripples: swash      -
+    in ripples: speeds     -
+    in ripples: step       -
+== round 1 market (05:16:43-05:17:08 UTC)
+  profile 05:16:46 (219 frames, 22.9 ms a frame, worst 98.1 ms)
+    think_and_act          0.43 / max 57.09 / 1.4 runs (count 307)
+    ripple_system          0.62 / max 8.87 / 1.4 runs (count 307)
+    press_fallen_crowns    -
+    flow_bed_system        -
+    step_beside_physics    1.18 / max 5.40 / 1.4 runs (count 307)
+    in find path           0.35 / max 54.48 / 0.1 runs (count 22)
+    in nav chunk           1.35 / max 25.62 / 0.1 runs (count 22)
+    in ripples: rebuild    0.55 / max 8.40 / 0.2 runs (count 44)
+    in ripples: depths     0.19 / max 2.09 / 0.2 runs (count 44)
+    in ripples: streams    -
+    in ripples: swash      -
+    in ripples: speeds     0.26 / max 2.16 / 0.2 runs (count 44)
+    in ripples: step       -
+  profile 05:16:51 (215 frames, 23.3 ms a frame, worst 50.0 ms)
+    think_and_act          -
+    ripple_system          -
+    press_fallen_crowns    -
+    flow_bed_system        -
+    step_beside_physics    4.53 / max 5.09 / 1.4 runs (count 301)
+    in find path           -
+    in nav chunk           -
+    in ripples: rebuild    -
+    in ripples: depths     -
+    in ripples: streams    -
+    in ripples: swash      -
+    in ripples: speeds     -
+    in ripples: step       -
+  profile 05:16:56 (204 frames, 24.6 ms a frame, worst 45.0 ms)
+    think_and_act          -
+    ripple_system          -
+    press_fallen_crowns    -
+    flow_bed_system        -
+    step_beside_physics    5.45 / max 6.30 / 1.5 runs (count 306)
+    in find path           -
+    in nav chunk           -
+    in ripples: rebuild    -
+    in ripples: depths     -
+    in ripples: streams    -
+    in ripples: swash      -
+    in ripples: speeds     -
+    in ripples: step       -
+  profile 05:17:01 (213 frames, 23.5 ms a frame, worst 44.6 ms)
+    think_and_act          -
+    ripple_system          -
+    press_fallen_crowns    -
+    flow_bed_system        -
+    step_beside_physics    5.10 / max 5.03 / 1.4 runs (count 298)
+    in find path           -
+    in nav chunk           -
+    in ripples: rebuild    -
+    in ripples: depths     -
+    in ripples: streams    -
+    in ripples: swash      -
+    in ripples: speeds     -
+    in ripples: step       -
+  profile 05:17:06 (211 frames, 23.8 ms a frame, worst 109.2 ms)
+    think_and_act          0.14 / max 4.39 / 1.4 runs (count 295)
+    ripple_system          -
+    press_fallen_crowns    -
+    flow_bed_system        -
+    step_beside_physics    5.21 / max 6.47 / 1.4 runs (count 295)
+    in find path           -
+    in nav chunk           -
+    in ripples: rebuild    -
+    in ripples: depths     -
+    in ripples: streams    -
+    in ripples: swash      -
+    in ripples: speeds     -
+    in ripples: step       -
+== round 1 forest (05:17:08-05:17:33 UTC)
+  profile 05:17:11 (181 frames, 27.7 ms a frame, worst 89.9 ms)
+    think_and_act          -
+    ripple_system          1.05 / max 9.26 / 1.6 runs (count 290)
+    press_fallen_crowns    -
+    flow_bed_system        -
+    step_beside_physics    4.04 / max 5.24 / 1.6 runs (count 290)
+    in find path           -
+    in nav chunk           -
+    in ripples: rebuild    0.83 / max 8.80 / 0.5 runs (count 90)
+    in ripples: depths     0.34 / max 2.72 / 0.2 runs (count 36)
+    in ripples: streams    -
+    in ripples: swash      -
+    in ripples: speeds     0.30 / max 1.92 / 0.2 runs (count 36)
+    in ripples: step       -
+  profile 05:17:16 (135 frames, 37.2 ms a frame, worst 75.8 ms)
+    think_and_act          0.21 / max 18.74 / 2.2 runs (count 297)
+    ripple_system          1.14 / max 3.22 / 2.2 runs (count 297)
+    press_fallen_crowns    -
+    flow_bed_system        0.48 / max 0.45 / 2.2 runs (count 297)
+    step_beside_physics    0.62 / max 2.49 / 2.2 runs (count 297)
+    in find path           -
+    in nav chunk           -
+    in ripples: rebuild    -
+    in ripples: depths     -
+    in ripples: streams    -
+    in ripples: swash      -
+    in ripples: speeds     -
+    in ripples: step       0.50 / max 0.49 / 2.2 runs (count 297)
+  profile 05:17:21 (205 frames, 24.4 ms a frame, worst 45.7 ms)
+    think_and_act          -
+    ripple_system          0.58 / max 2.22 / 1.5 runs (count 308)
+    press_fallen_crowns    -
+    flow_bed_system        0.28 / max 0.39 / 1.5 runs (count 308)
+    step_beside_physics    0.39 / max 2.71 / 1.5 runs (count 308)
+    in find path           -
+    in nav chunk           -
+    in ripples: rebuild    -
+    in ripples: depths     -
+    in ripples: streams    -
+    in ripples: swash      -
+    in ripples: speeds     -
+    in ripples: step       0.23 / max 0.47 / 1.5 runs (count 308)
+  profile 05:17:26 (235 frames, 21.3 ms a frame, worst 60.4 ms)
+    think_and_act          -
+    ripple_system          0.47 / max 1.71 / 1.3 runs (count 306)
+    press_fallen_crowns    -
+    flow_bed_system        0.24 / max 0.37 / 1.3 runs (count 306)
+    step_beside_physics    0.32 / max 0.92 / 1.3 runs (count 306)
+    in find path           -
+    in nav chunk           -
+    in ripples: rebuild    -
+    in ripples: depths     -
+    in ripples: streams    -
+    in ripples: swash      -
+    in ripples: speeds     -
+    in ripples: step       0.18 / max 0.51 / 1.3 runs (count 306)
+  profile 05:17:31 (249 frames, 20.1 ms a frame, worst 96.0 ms)
+    think_and_act          -
+    ripple_system          0.59 / max 1.84 / 1.2 runs (count 299)
+    press_fallen_crowns    -
+    flow_bed_system        0.24 / max 0.38 / 1.2 runs (count 299)
+    step_beside_physics    0.33 / max 0.54 / 1.2 runs (count 299)
+    in find path           -
+    in nav chunk           -
+    in ripples: rebuild    -
+    in ripples: depths     -
+    in ripples: streams    -
+    in ripples: swash      -
+    in ripples: speeds     -
+    in ripples: step       0.24 / max 0.51 / 1.2 runs (count 299)
+== round 1 lake (05:17:33-05:17:58 UTC)
+  profile 05:17:36 (181 frames, 27.6 ms a frame, worst 91.8 ms)
+    think_and_act          -
+    ripple_system          1.64 / max 11.69 / 1.5 runs (count 272)
+    press_fallen_crowns    -
+    flow_bed_system        0.25 / max 0.38 / 1.5 runs (count 272)
+    step_beside_physics    0.96 / max 2.78 / 1.5 runs (count 272)
+    in find path           -
+    in nav chunk           -
+    in ripples: rebuild    0.79 / max 11.24 / 1.5 runs (count 272)
+    in ripples: depths     0.31 / max 2.87 / 0.2 runs (count 36)
+    in ripples: streams    -
+    in ripples: swash      -
+    in ripples: speeds     0.27 / max 1.96 / 0.2 runs (count 36)
+    in ripples: step       0.31 / max 0.53 / 1.5 runs (count 272)
+  profile 05:17:41 (153 frames, 32.8 ms a frame, worst 41.6 ms)
+    think_and_act          -
+    ripple_system          1.00 / max 2.83 / 2.0 runs (count 306)
+    press_fallen_crowns    -
+    flow_bed_system        0.37 / max 0.47 / 2.0 runs (count 306)
+    step_beside_physics    2.22 / max 2.49 / 2.0 runs (count 306)
+    in find path           -
+    in nav chunk           -
+    in ripples: rebuild    -
+    in ripples: depths     -
+    in ripples: streams    -
+    in ripples: swash      -
+    in ripples: speeds     -
+    in ripples: step       0.28 / max 0.29 / 2.0 runs (count 306)
+  profile 05:17:46 (179 frames, 28.1 ms a frame, worst 45.3 ms)
+    think_and_act          -
+    ripple_system          0.87 / max 2.00 / 1.7 runs (count 304)
+    press_fallen_crowns    -
+    flow_bed_system        0.32 / max 0.38 / 1.7 runs (count 304)
+    step_beside_physics    2.36 / max 5.02 / 1.7 runs (count 304)
+    in find path           -
+    in nav chunk           -
+    in ripples: rebuild    -
+    in ripples: depths     -
+    in ripples: streams    -
+    in ripples: swash      -
+    in ripples: speeds     -
+    in ripples: step       0.23 / max 1.02 / 1.7 runs (count 304)
+  profile 05:17:51 (181 frames, 27.6 ms a frame, worst 37.4 ms)
+    think_and_act          -
+    ripple_system          0.85 / max 1.95 / 1.7 runs (count 308)
+    press_fallen_crowns    -
+    flow_bed_system        0.32 / max 0.39 / 1.7 runs (count 308)
+    step_beside_physics    2.14 / max 4.35 / 1.7 runs (count 308)
+    in find path           -
+    in nav chunk           -
+    in ripples: rebuild    -
+    in ripples: depths     -
+    in ripples: streams    -
+    in ripples: swash      -
+    in ripples: speeds     -
+    in ripples: step       0.23 / max 0.37 / 1.7 runs (count 308)
+  profile 05:17:56 (178 frames, 28.2 ms a frame, worst 103.1 ms)
+    think_and_act          -
+    ripple_system          0.90 / max 2.14 / 1.7 runs (count 303)
+    press_fallen_crowns    -
+    flow_bed_system        0.33 / max 0.44 / 1.7 runs (count 303)
+    step_beside_physics    2.16 / max 4.46 / 1.7 runs (count 303)
+    in find path           -
+    in nav chunk           -
+    in ripples: rebuild    -
+    in ripples: depths     -
+    in ripples: streams    -
+    in ripples: swash      -
+    in ripples: speeds     -
+    in ripples: step       0.24 / max 0.28 / 1.7 runs (count 303)
+== round 1 fortress (05:17:58-05:18:23 UTC)
+  profile 05:18:01 (143 frames, 35.2 ms a frame, worst 187.3 ms)
+    think_and_act          0.93 / max 121.38 / 1.9 runs (count 272)
+    ripple_system          2.43 / max 11.93 / 1.9 runs (count 272)
+    press_fallen_crowns    -
+    flow_bed_system        0.39 / max 0.39 / 1.9 runs (count 272)
+    step_beside_physics    2.05 / max 6.19 / 1.9 runs (count 272)
+    in find path           -
+    in nav chunk           0.92 / max 15.89 / 0.2 runs (count 29)
+    in ripples: rebuild    1.15 / max 10.91 / 1.9 runs (count 272)
+    in ripples: depths     0.37 / max 2.46 / 0.2 runs (count 29)
+    in ripples: streams    -
+    in ripples: swash      -
+    in ripples: speeds     0.36 / max 2.56 / 0.2 runs (count 29)
+    in ripples: step       0.54 / max 1.50 / 1.9 runs (count 272)
+  profile 05:18:06 (156 frames, 32.1 ms a frame, worst 60.8 ms)
+    think_and_act          0.49 / max 27.73 / 1.9 runs (count 296)
+    ripple_system          2.67 / max 4.04 / 1.9 runs (count 296)
+    press_fallen_crowns    -
+    flow_bed_system        0.39 / max 0.42 / 1.9 runs (count 296)
+    step_beside_physics    0.64 / max 3.81 / 1.9 runs (count 296)
+    in find path           0.26 / max 21.01 / 0.1 runs (count 16)
+    in nav chunk           -
+    in ripples: rebuild    -
+    in ripples: depths     -
+    in ripples: streams    -
+    in ripples: swash      -
+    in ripples: speeds     -
+    in ripples: step       1.83 / max 3.00 / 1.9 runs (count 296)
+  profile 05:18:11 (158 frames, 31.7 ms a frame, worst 62.0 ms)
+    think_and_act          0.28 / max 7.85 / 1.9 runs (count 300)
+    ripple_system          2.52 / max 4.35 / 1.9 runs (count 300)
+    press_fallen_crowns    -
+    flow_bed_system        0.40 / max 0.49 / 1.9 runs (count 300)
+    step_beside_physics    0.49 / max 1.15 / 1.9 runs (count 300)
+    in find path           -
+    in nav chunk           -
+    in ripples: rebuild    -
+    in ripples: depths     -
+    in ripples: streams    -
+    in ripples: swash      -
+    in ripples: speeds     -
+    in ripples: step       1.66 / max 1.82 / 1.9 runs (count 300)
+  profile 05:18:16 (159 frames, 31.5 ms a frame, worst 64.0 ms)
+    think_and_act          0.31 / max 7.36 / 1.9 runs (count 302)
+    ripple_system          2.61 / max 5.67 / 1.9 runs (count 302)
+    press_fallen_crowns    -
+    flow_bed_system        0.37 / max 0.36 / 1.9 runs (count 302)
+    step_beside_physics    0.57 / max 3.93 / 1.9 runs (count 302)
+    in find path           -
+    in nav chunk           -
+    in ripples: rebuild    -
+    in ripples: depths     -
+    in ripples: streams    -
+    in ripples: swash      -
+    in ripples: speeds     -
+    in ripples: step       1.79 / max 3.36 / 1.9 runs (count 302)
+  profile 05:18:21 (119 frames, 42.1 ms a frame, worst 111.1 ms)
+    think_and_act          0.28 / max 6.27 / 2.5 runs (count 298)
+    ripple_system          3.51 / max 4.03 / 2.5 runs (count 298)
+    press_fallen_crowns    -
+    flow_bed_system        0.49 / max 0.54 / 2.5 runs (count 298)
+    step_beside_physics    0.65 / max 5.10 / 2.5 runs (count 298)
+    in find path           -
+    in nav chunk           -
+    in ripples: rebuild    -
+    in ripples: depths     -
+    in ripples: streams    -
+    in ripples: swash      -
+    in ripples: speeds     -
+    in ripples: step       2.42 / max 2.55 / 2.5 runs (count 298)
+== round 1 field (05:18:23-05:18:48 UTC)
+  profile 05:18:26 (160 frames, 31.3 ms a frame, worst 80.6 ms)
+    think_and_act          0.33 / max 16.72 / 1.8 runs (count 288)
+    ripple_system          2.57 / max 7.65 / 1.8 runs (count 288)
+    press_fallen_crowns    -
+    flow_bed_system        0.22 / max 0.34 / 1.8 runs (count 288)
+    step_beside_physics    0.80 / max 4.20 / 1.8 runs (count 288)
+    in find path           -
+    in nav chunk           0.40 / max 16.02 / 0.4 runs (count 64)
+    in ripples: rebuild    0.82 / max 7.28 / 1.4 runs (count 224)
+    in ripples: depths     0.38 / max 3.08 / 0.2 runs (count 32)
+    in ripples: streams    -
+    in ripples: swash      -
+    in ripples: speeds     0.31 / max 2.02 / 0.2 runs (count 32)
+    in ripples: step       1.18 / max 3.78 / 1.4 runs (count 224)
+  profile 05:18:31 (240 frames, 20.8 ms a frame, worst 38.3 ms)
+    think_and_act          -
+    ripple_system          -
+    press_fallen_crowns    -
+    flow_bed_system        -
+    step_beside_physics    0.59 / max 1.52 / 1.2 runs (count 288)
+    in find path           -
+    in nav chunk           -
+    in ripples: rebuild    -
+    in ripples: depths     -
+    in ripples: streams    -
+    in ripples: swash      -
+    in ripples: speeds     -
+    in ripples: step       -
+  profile 05:18:36 (239 frames, 21.0 ms a frame, worst 37.8 ms)
+    think_and_act          0.25 / max 13.43 / 1.3 runs (count 311)
+    ripple_system          -
+    press_fallen_crowns    -
+    flow_bed_system        -
+    step_beside_physics    0.46 / max 2.56 / 1.3 runs (count 311)
+    in find path           -
+    in nav chunk           0.27 / max 10.48 / 0.0 runs (count 0)
+    in ripples: rebuild    -
+    in ripples: depths     -
+    in ripples: streams    -
+    in ripples: swash      -
+    in ripples: speeds     -
+    in ripples: step       -
+  profile 05:18:41 (224 frames, 22.4 ms a frame, worst 42.5 ms)
+    think_and_act          0.34 / max 19.18 / 1.3 runs (count 291)
+    ripple_system          -
+    press_fallen_crowns    -
+    flow_bed_system        -
+    step_beside_physics    0.45 / max 0.72 / 1.3 runs (count 291)
+    in find path           0.15 / max 14.21 / 0.1 runs (count 22)
+    in nav chunk           0.18 / max 11.95 / 0.0 runs (count 0)
+    in ripples: rebuild    -
+    in ripples: depths     -
+    in ripples: streams    -
+    in ripples: swash      -
+    in ripples: speeds     -
+    in ripples: step       -
+  profile 05:18:46 (221 frames, 22.7 ms a frame, worst 159.7 ms)
+    think_and_act          -
+    ripple_system          -
+    press_fallen_crowns    -
+    flow_bed_system        -
+    step_beside_physics    0.51 / max 2.72 / 1.4 runs (count 309)
+    in find path           -
+    in nav chunk           -
+    in ripples: rebuild    -
+    in ripples: depths     -
+    in ripples: streams    -
+    in ripples: swash      -
+    in ripples: speeds     -
+    in ripples: step       -
+== round 1 orbit (05:18:48-05:19:13 UTC)
+  profile 05:18:51 (293 frames, 17.1 ms a frame, worst 45.2 ms)
+    think_and_act          -
+    ripple_system          -
+    press_fallen_crowns    -
+    flow_bed_system        -
+    step_beside_physics    0.32 / max 3.89 / 1.0 runs (count 293)
+    in find path           -
+    in nav chunk           -
+    in ripples: rebuild    -
+    in ripples: depths     -
+    in ripples: streams    -
+    in ripples: swash      -
+    in ripples: speeds     -
+    in ripples: step       -
+  profile 05:18:56 (406 frames, 12.3 ms a frame, worst 23.2 ms)
+    think_and_act          -
+    ripple_system          -
+    press_fallen_crowns    -
+    flow_bed_system        -
+    step_beside_physics    0.15 / max 1.89 / 0.7 runs (count 284)
+    in find path           -
+    in nav chunk           -
+    in ripples: rebuild    -
+    in ripples: depths     -
+    in ripples: streams    -
+    in ripples: swash      -
+    in ripples: speeds     -
+    in ripples: step       -
+  profile 05:19:01 (415 frames, 12.1 ms a frame, worst 20.9 ms)
+    think_and_act          -
+    ripple_system          -
+    press_fallen_crowns    -
+    flow_bed_system        -
+    step_beside_physics    0.15 / max 0.47 / 0.7 runs (count 290)
+    in find path           -
+    in nav chunk           -
+    in ripples: rebuild    -
+    in ripples: depths     -
+    in ripples: streams    -
+    in ripples: swash      -
+    in ripples: speeds     -
+    in ripples: step       -
+  profile 05:19:06 (422 frames, 11.9 ms a frame, worst 25.5 ms)
+    think_and_act          -
+    ripple_system          -
+    press_fallen_crowns    -
+    flow_bed_system        -
+    step_beside_physics    0.15 / max 2.69 / 0.7 runs (count 295)
+    in find path           -
+    in nav chunk           -
+    in ripples: rebuild    -
+    in ripples: depths     -
+    in ripples: streams    -
+    in ripples: swash      -
+    in ripples: speeds     -
+    in ripples: step       -
+  profile 05:19:11 (428 frames, 11.7 ms a frame, worst 49.2 ms)
+    think_and_act          -
+    ripple_system          -
+    press_fallen_crowns    -
+    flow_bed_system        -
+    step_beside_physics    0.14 / max 0.36 / 0.7 runs (count 300)
+    in find path           -
+    in nav chunk           -
+    in ripples: rebuild    -
+    in ripples: depths     -
+    in ripples: streams    -
+    in ripples: swash      -
+    in ripples: speeds     -
+    in ripples: step       -
+
+== worst single runs over every profile of the run (max ms of a run; profile time; stop; that profile's worst frame)
+engine_npc::think_and_act: 121.4 (05:18:01, r1 fortress, worst frame 187.3); 57.1 (05:16:46, r1 market, worst frame 98.1); 55.0 (05:15:51, start, worst frame 1351.7); 35.4 (05:16:26, r1 plaza, worst frame 36.6); 27.7 (05:18:06, r1 fortress, worst frame 60.8); 19.2 (05:18:41, r1 field, worst frame 42.5); 18.7 (05:17:16, r1 forest, worst frame 75.8); 17.5 (05:15:56, r1 overview, worst frame 1493.9); 16.7 (05:18:26, r1 field, worst frame 80.6); 14.8 (05:16:41, r1 plaza, worst frame 78.6)
+engine_water::ripple_system: 202.0 (05:15:56, r1 overview, worst frame 1493.9); 12.7 (05:15:46, start, worst frame 474.7); 11.9 (05:18:01, r1 fortress, worst frame 187.3); 11.7 (05:17:36, r1 lake, worst frame 91.8); 9.3 (05:17:11, r1 forest, worst frame 89.9); 8.9 (05:16:46, r1 market, worst frame 98.1); 7.8 (05:15:51, start, worst frame 1351.7); 7.7 (05:18:26, r1 field, worst frame 80.6); 5.7 (05:18:16, r1 fortress, worst frame 64.0); 4.3 (05:18:11, r1 fortress, worst frame 62.0)
+engine_foliage::press_fallen_crowns: in no profile's list
+engine_npc: find path: 54.9 (05:15:51, start, worst frame 1351.7); 54.5 (05:16:46, r1 market, worst frame 98.1); 35.4 (05:16:26, r1 plaza, worst frame 36.6); 21.0 (05:18:06, r1 fortress, worst frame 60.8); 14.2 (05:18:41, r1 field, worst frame 42.5); 13.7 (05:15:56, r1 overview, worst frame 1493.9)
+engine_npc: nav chunk: 25.6 (05:16:46, r1 market, worst frame 98.1); 19.8 (05:15:51, start, worst frame 1351.7); 17.3 (05:16:26, r1 plaza, worst frame 36.6); 16.0 (05:18:26, r1 field, worst frame 80.6); 15.9 (05:18:01, r1 fortress, worst frame 187.3); 13.5 (05:16:41, r1 plaza, worst frame 78.6); 11.9 (05:18:41, r1 field, worst frame 42.5); 11.6 (05:15:56, r1 overview, worst frame 1493.9); 10.5 (05:18:36, r1 field, worst frame 37.8)
+engine_water: ripples: rebuild: 201.8 (05:15:56, r1 overview, worst frame 1493.9); 11.2 (05:17:36, r1 lake, worst frame 91.8); 10.9 (05:18:01, r1 fortress, worst frame 187.3); 9.4 (05:15:46, start, worst frame 474.7); 8.8 (05:17:11, r1 forest, worst frame 89.9); 8.4 (05:16:46, r1 market, worst frame 98.1); 7.5 (05:15:51, start, worst frame 1351.7); 7.3 (05:18:26, r1 field, worst frame 80.6)
+engine_water: ripples: depths: 201.7 (05:15:56, r1 overview, worst frame 1493.9); 3.1 (05:18:26, r1 field, worst frame 80.6); 3.0 (05:15:51, start, worst frame 1351.7); 2.9 (05:17:36, r1 lake, worst frame 91.8); 2.7 (05:17:11, r1 forest, worst frame 89.9); 2.7 (05:15:46, start, worst frame 474.7); 2.5 (05:18:01, r1 fortress, worst frame 187.3); 2.1 (05:16:46, r1 market, worst frame 98.1)
+engine_water: ripples: streams: in no profile's list
+engine_water: ripples: swash: 4.7 (05:15:46, start, worst frame 474.7)
+engine_water: ripples: speeds: 2.6 (05:18:01, r1 fortress, worst frame 187.3); 2.2 (05:16:46, r1 market, worst frame 98.1); 2.0 (05:18:26, r1 field, worst frame 80.6); 2.0 (05:17:36, r1 lake, worst frame 91.8); 1.9 (05:17:11, r1 forest, worst frame 89.9)
+
+nav chunk: listed in 9 of 43 profiles, about 232 chunks built over them; max single chunk 25.62 ms
+per profile it is listed in (time, stop, count, max ms, ms a frame):
+  05:15:51 start        count    65  max  19.82  24.40 ms a frame
+  05:15:56 r1 overview  count    26  max  11.56  0.39 ms a frame
+  05:16:26 r1 plaza     count    27  max  17.26  1.11 ms a frame
+  05:16:41 r1 plaza     count     0  max  13.48  0.30 ms a frame
+  05:16:46 r1 market    count    22  max  25.62  1.35 ms a frame
+  05:18:01 r1 fortress  count    29  max  15.89  0.92 ms a frame
+  05:18:26 r1 field     count    64  max  16.02  0.40 ms a frame
+  05:18:36 r1 field     count     0  max  10.48  0.27 ms a frame
+  05:18:41 r1 field     count     0  max  11.95  0.18 ms a frame
+find path: listed in 6 of 43 profiles, about 107 runs over them
+
+water.ripple_rebuilds (running count, 409 samples twice a second): per stop's 25 s dwell, the count at the last sample before it and at its end, and the rebuilds in between; then the 5 s windows that rebuilt
+  overview       4 ->      4:    0 rebuilds over 976 frames (0.00 a frame)
+  plaza          4 ->     17:   13 rebuilds over 1327 frames (0.01 a frame)
+      05:16:18-05:16:23: 3
+      05:16:23-05:16:28: 2
+      05:16:28-05:16:33: 3
+      05:16:33-05:16:38: 2
+      05:16:38-05:16:43: 3
+  market        17 ->     61:   44 rebuilds over 1038 frames (0.04 a frame)
+      05:16:43-05:16:48: 34
+      05:16:48-05:16:53: 2
+      05:16:53-05:16:58: 2
+      05:16:58-05:17:03: 3
+      05:17:03-05:17:08: 3
+  forest        61 ->    106:   45 rebuilds over 1024 frames (0.04 a frame)
+      05:17:08-05:17:13: 35
+      05:17:13-05:17:18: 3
+      05:17:18-05:17:23: 2
+      05:17:23-05:17:28: 3
+      05:17:28-05:17:33: 2
+  lake         106 ->    149:   43 rebuilds over 816 frames (0.05 a frame)
+      05:17:33-05:17:38: 33
+      05:17:38-05:17:43: 3
+      05:17:43-05:17:48: 2
+      05:17:48-05:17:53: 3
+      05:17:53-05:17:58: 2
+  fortress     149 ->    192:   43 rebuilds over 692 frames (0.06 a frame)
+      05:17:58-05:18:03: 33
+      05:18:03-05:18:08: 3
+      05:18:08-05:18:13: 2
+      05:18:13-05:18:18: 3
+      05:18:18-05:18:23: 2
+  field        192 ->    235:   43 rebuilds over 1121 frames (0.04 a frame)
+      05:18:23-05:18:28: 33
+      05:18:28-05:18:33: 3
+      05:18:33-05:18:38: 2
+      05:18:38-05:18:43: 3
+      05:18:43-05:18:48: 2
+  orbit        235 ->    236:    1 rebuilds over 2042 frames (0.00 a frame)
+      05:18:48-05:18:53: 1
+  whole run: 2 -> 236

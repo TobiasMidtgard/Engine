@@ -1,0 +1,20 @@
+﻿-- physics_simulate in each 5 s frame profile inside the stop's window (ms/frame, max ms, runs/frame)
+round 1 overview : 0.62 / 1.26 / 1.5 | 0.59 / 1.39 / 1.5 | 0.57 / 1.41 / 1.3
+round 1 plaza    : 0.98 / 1.50 / 1.1 | 0.79 / 1.33 / 1.1 | 0.91 / 1.90 / 1.1
+round 1 market   : 1.34 / 3.30 / 1.5 | 1.20 / 2.57 / 1.4 | 1.35 / 2.38 / 1.4
+round 1 forest   : 2.98 / 4.60 / 1.5 | 1.99 / 3.38 / 1.3 | 1.56 / 2.74 / 1.2
+round 1 lake     : 2.57 / 2.40 / 1.7 | 2.45 / 2.26 / 1.7 | 2.63 / 2.71 / 1.7
+round 1 fortress : 2.63 / 2.51 / 1.9 | 2.83 / 2.47 / 1.9 | 3.07 / 2.19 / 2.5
+round 1 field    : 0.98 / 1.47 / 1.3 | 0.96 / 1.31 / 1.3 | 1.22 / 2.00 / 1.4
+round 1 orbit    : 0.12 / 0.28 / 0.7 | 0.12 / 0.34 / 0.7 | 0.12 / 0.34 / 0.7
+-- softbody yard
+engine_softbody::demo::kit: softbody yard: made 27 materials (62.0 MB of textures) in 0.25 s
+-- per stop (engine.stats at 20 s into round 1's dwell; overview's in round 2)
+overview : prepare terrain 1.98 ms (inside: buffers 0.08, far looks 0.02, maps: weather 0.26, materials 0.01, patches: ask workers 0.15, patches: draw lists 0.80, patches: far shadow 0.14, patches: select 0.46, uploads: free stale 0.01); GPU scene: terrain 7.44 ms; extra views  (0.00 ms CPU, 0.00 ms GPU); patches drawn 533.0, resident 1398.0, building 0.0, missing 0.0
+plaza    : prepare terrain 1.65 ms (inside: buffers 0.05, far looks 0.01, maps: weather 0.25, materials 0.01, patches: ask workers 0.07, patches: draw lists 0.74, patches: far shadow 0.09, patches: select 0.40); GPU scene: terrain 1.84 ms; extra views  (0.00 ms CPU, 0.00 ms GPU); patches drawn 548.0, resident 1333.0, building 0.0, missing 0.0
+market   : prepare terrain 1.51 ms (inside: buffers 0.07, far looks 0.01, maps: weather 0.37, patches: ask workers 0.06, patches: draw lists 0.54, patches: far shadow 0.09, patches: select 0.32); GPU scene: terrain 3.66 ms; extra views  (0.00 ms CPU, 0.00 ms GPU); patches drawn 563.0, resident 1334.0, building 0.0, missing 0.0
+forest   : prepare terrain 1.29 ms (inside: buffers 0.05, maps: weather 0.18, maps: worn paths 0.07, materials 0.01, patches: ask workers 0.07, patches: draw lists 0.40, patches: far shadow 0.12, patches: select 0.43); GPU scene: terrain 2.27 ms; extra views  (0.00 ms CPU, 0.00 ms GPU); patches drawn 552.0, resident 1329.0, building 0.0, missing 0.0
+lake     : prepare terrain 2.28 ms (inside: buffers 0.07, far looks 0.01, maps: weather 0.60, materials 0.01, patches: ask workers 0.12, patches: draw lists 0.70, patches: far shadow 0.17, patches: select 0.56); GPU scene: terrain 6.40 ms; extra views 1.0 (9.48 ms CPU, 4.70 ms GPU); patches drawn 562.0, resident 1359.0, building 0.0, missing 0.0
+fortress : prepare terrain 1.26 ms (inside: buffers 0.13, far looks 0.01, maps: weather 0.34, materials 0.01, patches: ask workers 0.09, patches: draw lists 0.17, patches: far shadow 0.11, patches: select 0.38); GPU scene: terrain 4.33 ms; extra views 0.0 (0.00 ms CPU, 0.00 ms GPU); patches drawn 570.0, resident 1376.0, building 0.0, missing 0.0
+field    : prepare terrain 0.85 ms (inside: buffers 0.06, far looks 0.01, maps: weather 0.20, materials 0.01, patches: ask workers 0.05, patches: draw lists 0.13, patches: far shadow 0.09, patches: select 0.29); GPU scene: terrain 2.80 ms; extra views 0.0 (0.00 ms CPU, 0.00 ms GPU); patches drawn 566.0, resident 1356.0, building 0.0, missing 0.0
+orbit    : prepare terrain 0.44 ms (inside: buffers 0.02, far looks 0.01, maps: weather 0.18, materials 0.01, patches: ask workers 0.05, patches: draw lists 0.03, patches: far shadow 0.01, patches: select 0.13); GPU scene: terrain 3.60 ms; extra views 0.0 (0.00 ms CPU, 0.00 ms GPU); patches drawn 153.0, resident 363.0, building 0.0, missing 0.0

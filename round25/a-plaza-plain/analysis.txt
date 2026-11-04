@@ -1,0 +1,304 @@
+===== a_plaza_plain: started: showcase.exe --fly --profile --quality ultra  env ENGINE_PROFILE=1
+AT plaza 05:13:32.505000 UTC; steady window 25-75 s after it (05:13:57-05:14:47 UTC)
+
+9 frame profiles report inside the window (each covers the 5 s before it):
+time UTC | frames | ms/frame | fps | worst | systems busy ms | cores | one at a time | no system | several at once | FixedUpdate ms/frame (runs) | FixedUpdate floor | Render | Update | PostUpdate
+05:14:02 | 217 | 23.2 | 43.1 | 62.1 | 26.7 | 1.15 | 16.3 | 2.2 | 4.7 | 9.67 (x1.4) | 5.2 of 9.67 (71 systems) | 5.1 | 4.05 | 3.17
+05:14:08 | 256 | 19.6 | 51.1 | 43.8 | 22.7 | 1.16 | 13.8 | 1.8 | 4.0 | 7.93 (x1.2) | 4.33 of 7.93 (72 systems) | 4.47 | 3.37 | 2.81
+05:14:13 | 265 | 18.9 | 52.9 | 51.9 | 21.7 | 1.15 | 13.3 | 1.8 | 3.8 | 6.84 (x1.1) | 3.95 of 6.84 (71 systems) | 4.61 | 3.5 | 2.84
+05:14:18 | 264 | 19.0 | 52.8 | 40.2 | 21.7 | 1.15 | 13.5 | 1.8 | 3.6 | 6.91 (x1.1) | 4.15 of 6.91 (71 systems) | 4.74 | 3.42 | 2.88
+05:14:23 | 272 | 18.4 | 54.4 | 42.5 | 21.2 | 1.15 | 13.0 | 1.8 | 3.6 | 6.21 (x1.1) | 3.7 of 6.21 (72 systems) | 4.78 | 3.54 | 2.86
+05:14:28 | 264 | 19.0 | 52.7 | 40.3 | 21.6 | 1.14 | 13.2 | 1.8 | 3.9 | 6.55 (x1.1) | 3.81 of 6.55 (71 systems) | 4.62 | 3.65 | 2.95
+05:14:33 | 262 | 19.1 | 52.2 | 31.1 | 22.3 | 1.17 | 13.3 | 1.9 | 4.0 | 7.05 (x1.2) | 4.27 of 7.05 (72 systems) | 4.46 | 3.67 | 2.99
+05:14:38 | 271 | 18.5 | 54.0 | 37.1 | 21.2 | 1.14 | 12.8 | 1.8 | 3.9 | 6.03 (x1.1) | 3.39 of 6.03 (72 systems) | 4.55 | 3.69 | 3.09
+05:14:43 | 255 | 19.7 | 50.8 | 44.8 | 22.8 | 1.16 | 13.7 | 1.9 | 4.0 | 7.04 (x1.2) | 4.21 of 7.04 (72 systems) | 4.61 | 3.82 | 3.22
+
+Each profile's ordering floors (schedule: floor of schedule ms) and the FixedUpdate chain:
+-- 05:14:02: FixedUpdate 5.20 of 9.67, Render 5.05 of 5.10, PostUpdate 1.95 of 3.17, Update 1.68 of 4.05, First 0.23 of 0.32, Last 0.21 of 0.32, Extract 0.16 of 0.19, FixedPreUpdate 0.09 of 0.12
+   systems ran on: compute 17.2 ms on 21 threads, main 9.4 ms, render 0.0 ms
+   FixedUpdate chain: engine_npc::rebuild_world_model 0.07 -> engine_npc::think_and_act 0.49 -> engine_movement::step_movers 0.34 -> engine_vehicles::wheels_system 0.14 -> engine_physics::physics_sync 0.36 -> engine_softbody::step_beside_physics 1.65 -> engine_softbody::gather_colliders 0.39 -> engine_softbody::step_bodies 0.82 -> engine_smoke::disturb 0.17 -> engine_smoke::publish 0.31
+-- 05:14:08: Render 4.43 of 4.47, FixedUpdate 4.33 of 7.93, PostUpdate 1.74 of 2.81, Update 1.41 of 3.37, First 0.19 of 0.27, Last 0.19 of 0.28, Extract 0.14 of 0.16, FixedPreUpdate 0.08 of 0.11
+   systems ran on: compute 14.5 ms on 30 threads, main 8.1 ms, render 0.0 ms
+   FixedUpdate chain: engine_npc::rebuild_world_model 0.06 -> engine_npc::think_and_act 0.47 -> engine_movement::step_movers 0.22 -> engine_vehicles::wheels_system 0.12 -> engine_physics::physics_sync 0.29 -> engine_physics::physics_simulate 1.26 -> engine_physics::physics_write_back 0.10 -> engine_softbody::gather_colliders 0.31 -> engine_softbody::step_bodies 0.66 -> engine_softbody::write_posed_guides 0.14 -> engine_smoke::disturb 0.13 -> engine_smoke::publish 0.23
+-- 05:14:13: Render 4.57 of 4.61, FixedUpdate 3.95 of 6.84, PostUpdate 1.69 of 2.84, Update 1.49 of 3.50, First 0.20 of 0.29, Last 0.20 of 0.29, Extract 0.14 of 0.17, FixedPreUpdate 0.08 of 0.10
+   systems ran on: compute 13.2 ms on 21 threads, main 8.4 ms, render 0.0 ms
+   FixedUpdate chain: engine_npc::rebuild_world_model 0.07 -> engine_npc::think_and_act 0.47 -> engine_movement::step_movers 0.21 -> engine_vehicles::wheels_system 0.11 -> engine_physics::physics_sync 0.27 -> engine_smoke::step 1.20 -> engine_softbody::gather_colliders 0.29 -> engine_softbody::step_bodies 0.62 -> engine_softbody::write_posed_guides 0.13 -> engine_smoke::publish 0.26
+-- 05:14:18: Render 4.70 of 4.74, FixedUpdate 4.15 of 6.91, PostUpdate 1.71 of 2.88, Update 1.40 of 3.42, First 0.20 of 0.28, Last 0.20 of 0.30, Extract 0.14 of 0.17, FixedPreUpdate 0.08 of 0.10
+   systems ran on: compute 13.3 ms on 22 threads, main 8.4 ms, render 0.1 ms
+   FixedUpdate chain: engine_npc::rebuild_world_model 0.05 -> engine_npc::think_and_act 0.53 -> engine_movement::step_movers 0.25 -> engine_vehicles::wheels_system 0.12 -> engine_physics::physics_sync 0.28 -> engine_smoke::step 1.29 -> engine_softbody::gather_colliders 0.29 -> engine_softbody::step_bodies 0.63 -> engine_softbody::write_posed_guides 0.13 -> engine_smoke::publish 0.26
+-- 05:14:23: Render 4.74 of 4.78, FixedUpdate 3.70 of 6.21, PostUpdate 1.71 of 2.86, Update 1.44 of 3.54, Last 0.21 of 0.30, First 0.20 of 0.29, Extract 0.14 of 0.17, FixedPreUpdate 0.08 of 0.10
+   systems ran on: compute 12.6 ms on 24 threads, main 8.5 ms, render 0.1 ms
+   FixedUpdate chain: engine_npc::rebuild_world_model 0.06 -> engine_npc::think_and_act 0.45 -> engine_movement::step_movers 0.21 -> engine_vehicles::wheels_system 0.12 -> engine_physics::physics_sync 0.28 -> engine_physics::physics_simulate 0.98 -> engine_physics::physics_write_back 0.08 -> engine_softbody::gather_colliders 0.28 -> engine_softbody::step_bodies 0.61 -> engine_softbody::write_posed_guides 0.13 -> engine_smoke::publish 0.18
+-- 05:14:28: Render 4.58 of 4.62, FixedUpdate 3.81 of 6.55, PostUpdate 1.80 of 2.95, Update 1.46 of 3.65, First 0.22 of 0.31, Last 0.20 of 0.30, Extract 0.15 of 0.18, FixedPreUpdate 0.08 of 0.10
+   systems ran on: compute 13.2 ms on 20 threads, main 8.4 ms, render 0.1 ms
+   FixedUpdate chain: engine_npc::rebuild_world_model 0.06 -> engine_npc::think_and_act 0.34 -> engine_movement::step_movers 0.21 -> engine_vehicles::wheels_system 0.12 -> engine_physics::physics_sync 0.28 -> engine_smoke::step 1.15 -> engine_softbody::gather_colliders 0.30 -> engine_softbody::step_bodies 0.63 -> engine_softbody::write_posed_guides 0.13 -> engine_smoke::publish 0.26
+-- 05:14:33: Render 4.42 of 4.46, FixedUpdate 4.27 of 7.05, PostUpdate 1.82 of 2.99, Update 1.51 of 3.67, First 0.21 of 0.29, Last 0.20 of 0.29, Extract 0.15 of 0.17, FixedPreUpdate 0.08 of 0.11
+   systems ran on: compute 13.9 ms on 22 threads, main 8.4 ms, render 0.1 ms
+   FixedUpdate chain: engine_npc::rebuild_world_model 0.07 -> engine_npc::think_and_act 0.35 -> engine_movement::step_movers 0.26 -> engine_vehicles::wheels_system 0.13 -> engine_physics::physics_sync 0.32 -> engine_physics::physics_simulate 1.32 -> engine_physics::physics_write_back 0.10 -> engine_softbody::gather_colliders 0.33 -> engine_softbody::step_bodies 0.65 -> engine_softbody::write_posed_guides 0.13 -> engine_smoke::publish 0.26
+-- 05:14:38: Render 4.51 of 4.55, FixedUpdate 3.39 of 6.03, PostUpdate 1.83 of 3.09, Update 1.46 of 3.69, First 0.21 of 0.29, Last 0.20 of 0.29, Extract 0.15 of 0.18, FixedPreUpdate 0.08 of 0.10
+   systems ran on: compute 12.9 ms on 20 threads, main 8.3 ms, render 0.1 ms
+   FixedUpdate chain: engine_npc::rebuild_world_model 0.05 -> engine_npc::think_and_act 0.14 -> engine_movement::step_movers 0.23 -> engine_vehicles::wheels_system 0.12 -> engine_physics::physics_sync 0.25 -> engine_physics::physics_simulate 0.88 -> engine_physics::physics_write_back 0.09 -> engine_softbody::gather_colliders 0.30 -> engine_softbody::step_bodies 0.64 -> engine_softbody::write_posed_guides 0.13 -> engine_smoke::publish 0.23
+-- 05:14:43: Render 4.56 of 4.61, FixedUpdate 4.21 of 7.04, PostUpdate 1.94 of 3.22, Update 1.54 of 3.82, First 0.21 of 0.30, Last 0.20 of 0.29, Extract 0.15 of 0.18, FixedPreUpdate 0.08 of 0.11
+   systems ran on: compute 14.2 ms on 20 threads, main 8.5 ms, render 0.1 ms
+   FixedUpdate chain: engine_npc::rebuild_world_model 0.06 -> engine_npc::think_and_act 0.48 -> engine_movement::step_movers 0.24 -> engine_vehicles::wheels_system 0.14 -> engine_physics::physics_sync 0.30 -> engine_physics::physics_simulate 1.16 -> engine_physics::physics_write_back 0.10 -> engine_softbody::gather_colliders 0.33 -> engine_softbody::step_bodies 0.66 -> engine_softbody::write_posed_guides 0.14 -> engine_smoke::publish 0.25
+
+Hitches in the window's profiles (worst frame over 60 ms): the systems and inner spans with a run over 30 ms:
+  05:14:02 worst 62.1 ms: engine_render::render_system 32.0, engine_npc::think_and_act 33.1, in engine_render: prepare side by side 30.5, in engine_render: prepare character 30.4
+
+Render thread keys, 98 engine.stats "render." samples in the window:
+  frame_ms                 mean 19.73, median 19.17, p90 21.46, min 16.97, max 27.36 (n 98)
+  render.wait_ms           mean 0.02, median 0.01, p90 0.01, min 0.01, max 1.00 (n 98)
+  render.extract_ms        mean 4.69, median 4.38, p90 5.87, min 3.42, max 10.40 (n 98)
+  render.extract_wait_ms   mean 0.00, median 0.00, p90 0.00, min 0.00, max 0.00 (n 98)
+  render.record_ms         mean 2.98, median 2.88, p90 3.50, min 2.46, max 4.35 (n 98)
+  render.record_total_ms   mean 6.38, median 6.20, p90 7.34, min 5.09, max 13.50 (n 98)
+  render.record_cpu_ms     mean 3.21, median 3.26, p90 4.29, min 0.87, max 5.10 (n 98)
+  render.cpu_ms            mean 7.85, median 7.43, p90 9.01, min 6.31, max 15.45 (n 98)
+  render.prepare_shared_ms mean 10.69, median 10.44, p90 12.22, min 8.94, max 16.67 (n 98)
+  record_total_ms / frame_ms mean 0.33, median 0.33, p90 0.38, min 0.21, max 0.75 (n 98)
+
+engine.status over the window: 51.19 fps, 1.172 fixed steps a frame (2541 frames, 2977 fixed steps, 49.6 s)
+per 5 s after AT plaza (fps, fixed steps a frame):
+    0-  5 s    9.0 fps  1.89 steps/frame
+    5- 10 s   15.9 fps  2.85 steps/frame
+   10- 15 s   25.7 fps  2.29 steps/frame
+   15- 20 s   44.5 fps  1.35 steps/frame
+   20- 25 s   46.4 fps  1.30 steps/frame
+   25- 30 s   43.8 fps  1.37 steps/frame
+   30- 35 s   49.5 fps  1.21 steps/frame
+   35- 40 s   52.3 fps  1.15 steps/frame
+   40- 45 s   52.7 fps  1.14 steps/frame
+   45- 50 s   54.6 fps  1.10 steps/frame
+   50- 55 s   53.8 fps  1.11 steps/frame
+   55- 60 s   52.1 fps  1.15 steps/frame
+   60- 65 s   55.4 fps  1.08 steps/frame
+   65- 70 s   51.3 fps  1.17 steps/frame
+   70- 75 s   48.4 fps  1.24 steps/frame
+
+render.cpu.* every 5 s of the stand (15 dumps; s after AT plaza; frame; ms, sorted by mean; each dump is one frame's latest step times):
+key                                               5     10     15     20     25     30     35     40     45     50     55     60     65     70     75   mean
+(frame)                                          81    136    270    486    719    933   1187   1441   1709   1984   2245   2511   2778   3039   3279
+prepare meshes                                12.61   5.06   6.21   3.90   3.62   3.12   3.00   3.24   2.98   2.97   3.22   3.92   2.84   3.34   3.32   4.22
+prepare side by side                           9.27   5.16   5.25   3.17   4.06   3.05   3.01   2.96   3.10   2.82   3.39   3.00   2.94   3.34   3.38   3.86
+probe gi                                       6.58   1.51   1.54   2.21   2.50   1.69   1.77   6.53   1.72   2.08   1.91   1.77   1.69   1.82   1.80   2.47
+prepare on the render thread                   2.22   2.21   2.40   2.12   2.38   1.83   5.68   2.18   1.94   2.33   2.20   2.17   1.95   2.06   2.92   2.44
+prepare character                             24.49   0.05   0.05   0.27   0.14   0.87   0.78   0.55   0.53   0.48   0.58   0.57   0.49   1.00   0.65   2.10
+meshes: sync                                   1.81   1.32   1.60   2.40   2.43   1.81   1.75   1.84   1.73   1.76   1.82   2.13   1.71   2.02   2.03   1.88
+wait for the finishing threads                 1.75   1.55   1.60   2.02   1.99   1.72   1.65   1.82   2.02   1.88   2.16   2.31   1.61   1.89   1.90   1.86
+prepare terrain                                2.20   1.82   1.48   2.05   1.99   1.55   1.55   1.65   1.56   1.50   1.67   1.60   2.09   1.59   1.55   1.72
+prepare softbody                               2.03   1.63   1.49   1.43   1.74   1.57   1.54   1.55   1.45   1.44   1.50   1.43   1.48   1.67   1.47   1.56
+meshes: cull                                   1.03   1.21   1.46   1.10   1.28   0.93   0.91   1.25   0.89   0.95   1.15   1.17   0.99   1.08   1.77   1.15
+prepare water                                  0.89   1.33   0.69   0.98   1.07   0.83   0.80   0.90   0.79   0.83   0.84   0.86   0.86   1.04   0.90   0.91
+submit                                         0.52   0.42   1.10   1.15   1.05   0.50   0.91   0.76   0.52   0.61   1.02   1.11   0.37   0.83   1.51   0.82
+meshes: materials                              0.45   3.00   3.92   0.33   0.32   0.29   0.28   0.31   0.29   0.41   0.34   0.49   0.30   0.30   0.32   0.76
+terrain: patches: draw lists                   1.17   0.69   0.62   0.68   0.78   0.64   0.73   0.64   0.65   0.69   0.63   0.69   0.85   0.73   0.66   0.72
+meshes: gather                                 0.28   0.46   0.44   0.59   0.48   0.67   0.70   0.79   0.71   0.55   0.70   0.89   0.55   0.62   0.60   0.60
+meshes: shadow lists                           0.40   0.41   0.31   0.29   0.38   0.28   3.81   0.28   0.42   0.50   0.30   0.29   0.30   0.31   0.33   0.57
+prepare fire                                   0.26   0.53   0.55   0.79   1.43   0.42   0.33   0.81   0.34   0.12   0.29   0.13   0.79   0.55   0.26   0.51
+meshes: upload                                 0.52   0.36   0.40   0.46   0.48   0.39   0.68   0.40   0.40   0.63   0.50   0.46   0.42   0.44   0.54   0.47
+finish commands                                0.78   0.31   0.39   0.56   0.45   0.52   0.38   0.41   0.37   0.35   0.41   0.64   0.35   0.45   0.61   0.47
+meshes: clusters                               5.82   0.04   0.03   0.20   0.08   0.06   0.04   0.04   0.04   0.03   0.05   0.10   0.04   0.13   0.08   0.45
+terrain: patches: select                       0.45   0.36   0.34   0.38   0.55   0.39   0.35   0.35   0.38   0.38   0.38   0.39   0.56   0.40   0.41   0.40
+terrain: maps: weather                         0.26   0.47   0.29   0.66   0.26   0.22   0.20   0.42   0.25   0.19   0.41   0.22   0.26   0.18   0.21   0.30
+meshes: begin frame                            4.04   0.02   0.02   0.03   0.02   0.01   0.02   0.01   0.01   0.02   0.02   0.02   0.02   0.02   0.02   0.29
+surface weather                                1.53   0.00   0.00   0.00   0.00   1.08   0.00   0.00   0.00   0.00   0.00   1.07   0.00   0.00   0.00   0.25
+frame setup                                    1.09   0.59   0.01   0.01   0.01   0.41   0.01   0.01   0.01   0.41   0.51   0.45   0.01   0.01   0.01   0.24
+meshes: classify                               0.14   0.17   0.17   0.31   0.25   0.24   0.19   0.20   0.18   0.16   0.25   0.24   0.17   0.20   0.24   0.21
+prepare painted ground                         0.37   0.34   0.27   0.39   0.30   0.02   0.10   0.14   0.01   0.03   0.03   0.03   0.18   0.17   0.03   0.16
+prepare grass                                  0.05   0.24   0.08   0.09   0.13   0.81   0.07   0.05   0.04   0.09   0.06   0.07   0.05   0.51   0.06   0.16
+meshes: sort and batch                         0.15   0.15   0.14   0.16   0.15   0.15   0.15   0.15   0.15   0.15   0.16   0.16   0.15   0.15   0.16   0.15
+terrain: patches: far shadow                   0.15   0.09   0.09   0.10   0.15   0.09   0.10   0.09   0.09   0.09   0.10   0.10   0.16   0.09   0.10   0.11
+present                                        0.11   0.08   0.09   0.11   0.16   0.08   0.10   0.08   0.08   0.09   0.12   0.14   0.07   0.09   0.14   0.10
+prepare foliage scenery                        0.10   0.12   0.09   0.10   0.10   0.09   0.08   0.09   0.10   0.08   0.10   0.09   0.09   0.10   0.11   0.10
+occlusion culling                              0.11   0.09   0.10   0.09   0.09   0.08   0.09   0.08   0.11   0.11   0.08   0.08   0.09   0.08   0.10   0.09
+prepare vfx_particles                          0.09   0.10   0.07   0.10   0.09   0.09   0.09   0.08   0.08   0.08   0.08   0.10   0.08   0.09   0.10   0.09
+terrain: patches: ask workers                  0.05   0.06   0.05   0.12   0.10   0.10   0.07   0.06   0.07   0.06   0.05   0.05   0.18   0.07   0.08   0.08
+prepare skinned meshes                         0.02   0.03   0.02   0.08   0.09   0.07   0.07   0.06   0.08   0.07   0.08   0.07   0.07   0.07   0.08   0.06
+prepass: meshes                                0.05   0.08   0.05   0.07   0.06   0.06   0.07   0.06   0.06   0.09   0.06   0.06   0.06   0.06   0.06   0.06
+terrain: buffers                               0.06   0.05   0.07   0.06   0.05   0.07   0.05   0.05   0.05   0.05   0.05   0.05   0.04   0.08   0.05   0.06
+shadows                                        0.06   0.07   0.06   0.06   0.05   0.04   0.07   0.04   0.04   0.07   0.04   0.04   0.04   0.05   0.05   0.05
+prepare space bodies                           0.05   0.07   0.05   0.05   0.05   0.04   0.04   0.04   0.04   0.04   0.05   0.04   0.04   0.05   0.05   0.05
+acquire window image                           0.07   0.03   0.06   0.04   0.04   0.06   0.03   0.04   0.04   0.04   0.04   0.05   0.03   0.03   0.07   0.05
+view                                           0.07   0.05   0.04   0.04   0.04   0.04   0.03   0.03   0.03   0.04   0.04   0.04   0.03   0.03   0.03   0.04
+prepare movement_effects                       0.00   0.12   0.01   0.02   0.09   0.01   0.02   0.06   0.06   0.05   0.03   0.01   0.07   0.03   0.01   0.04
+transparent                                    0.03   0.03   0.03   0.05   0.04   0.03   0.04   0.06   0.06   0.03   0.05   0.03   0.03   0.04   0.02   0.04
+prepare serial                                 0.01   0.01   0.13   0.13   0.02   0.01   0.01   0.01   0.01   0.01   0.01   0.01   0.09   0.01   0.01   0.03
+scene: meshes                                  0.03   0.03   0.04   0.03   0.03   0.03   0.03   0.03   0.03   0.04   0.03   0.03   0.03   0.03   0.03   0.03
+compute weather clouds                         0.04   0.03   0.03   0.04   0.03   0.03   0.03   0.03   0.02   0.03   0.03   0.03   0.03   0.03   0.05   0.03
+terrain: maps: worn paths                      0.16   0.00   0.00   0.00   0.00   0.07   0.00   0.08   0.05   0.00   0.06   0.00   0.00   0.00   0.00   0.03
+prepare results                                0.03   0.05   0.03   0.03   0.04   0.02   0.03   0.02   0.03   0.02   0.03   0.03   0.02   0.03   0.03   0.03
+prepare ui                                     0.02   0.02   0.02   0.02   0.02   0.02   0.02   0.02   0.02   0.02   0.02   0.02   0.02   0.02   0.02   0.02
+meshes: skins                                  0.02   0.03   0.02   0.02   0.02   0.02   0.01   0.02   0.01   0.02   0.02   0.01   0.02   0.02   0.02   0.02
+sky occlusion                                  0.03   0.03   0.02   0.02   0.01   0.01   0.02   0.01   0.02   0.02   0.01   0.01   0.01   0.01   0.01   0.02
+prepare weather clouds                         0.02   0.03   0.01   0.02   0.02   0.03   0.01   0.01   0.01   0.02   0.02   0.02   0.01   0.01   0.02   0.02
+compute meshes                                 0.03   0.02   0.02   0.03   0.02   0.01   0.02   0.01   0.01   0.01   0.02   0.02   0.01   0.02   0.01   0.02
+shadow views                                   0.01   0.02   0.01   0.01   0.01   0.01   0.01   0.02   0.02   0.01   0.01   0.02   0.02   0.02   0.02   0.01
+bloom                                          0.02   0.01   0.01   0.01   0.01   0.02   0.01   0.01   0.01   0.01   0.01   0.02   0.01   0.01   0.01   0.01
+subsurface scattering                           nan   0.01   0.02   0.01   0.01   0.01   0.01   0.01   0.01   0.01   0.01   0.01   0.01   0.01   0.01   0.01
+meshes: upload materials                       0.01   0.01   0.01   0.01   0.01   0.01   0.01   0.01   0.01   0.01   0.01   0.01   0.01   0.01   0.01   0.01
+terrain: materials                             0.01   0.01   0.01   0.01   0.01   0.01   0.01   0.01   0.01   0.01   0.01   0.07   0.01   0.00   0.01   0.01
+world reflections                              0.02   0.01   0.01   0.01   0.01   0.01   0.01   0.01   0.02   0.01   0.01   0.01   0.01   0.01   0.01   0.01
+compute foliage scenery                        0.00   0.10   0.00   0.01   0.01   0.00   0.00   0.00   0.00   0.01   0.00   0.00   0.00   0.00   0.00   0.01
+atmosphere                                     0.01   0.01   0.01   0.01   0.01   0.01   0.01   0.01   0.01   0.01   0.01   0.01   0.01   0.01   0.01   0.01
+reflections                                    0.02   0.01   0.01   0.01   0.01   0.01   0.01   0.01   0.01   0.01   0.01   0.01   0.01   0.01   0.01   0.01
+compute water                                  0.01   0.01   0.01   0.01   0.01   0.01   0.01   0.01   0.01   0.01   0.01   0.01   0.01   0.01   0.01   0.01
+scene: weather precipitation                   0.02   0.01   0.01   0.01   0.01   0.01   0.00   0.01   0.01   0.01   0.01   0.01   0.00   0.01   0.01   0.01
+prepare movement_slow_motion                   0.01   0.01   0.01   0.01   0.01   0.01   0.01   0.01   0.01   0.01   0.01   0.01   0.01   0.01   0.01   0.01
+meshes: pipelines                              0.01   0.01   0.01   0.01   0.01   0.01   0.01   0.01   0.01   0.01   0.01   0.01   0.01   0.01   0.01   0.01
+terrain: far looks                             0.01   0.01   0.01   0.01   0.01   0.01   0.01   0.01   0.01   0.01   0.01   0.01   0.00   0.01   0.01   0.01
+compute vfx_particles                          0.02   0.01   0.01   0.01   0.01   0.00   0.01   0.01   0.01   0.00   0.01   0.01   0.01   0.01   0.01   0.01
+cloud shadows                                  0.00   0.01   0.02   0.01   0.01   0.01   0.01   0.01   0.01   0.01   0.00   0.01   0.01   0.01   0.01   0.01
+compute perf_overlay                           0.00   0.01   0.01   0.01   0.01   0.00   0.01   0.00   0.00   0.01   0.00   0.01   0.01   0.01   0.01   0.01
+window blit                                    0.01   0.01   0.01   0.01   0.01   0.01   0.01   0.01   0.00   0.01   0.01   0.01   0.00   0.01   0.01   0.01
+volumetrics prepare                            0.01   0.01   0.01   0.00   0.01   0.00   0.00   0.00   0.01   0.01   0.01   0.01   0.00   0.01   0.01   0.01
+bounce light                                   0.01   0.00   0.01   0.01   0.01   0.01   0.00   0.01   0.01   0.01   0.00   0.01   0.00   0.01   0.01   0.01
+anti-aliasing                                  0.02   0.00   0.01   0.01   0.00   0.01   0.00   0.01   0.01   0.00   0.00   0.01   0.00   0.00   0.00   0.01
+stats                                          0.01   0.01   0.01   0.01   0.00   0.01   0.00   0.00   0.01   0.00   0.00   0.01   0.00   0.00   0.01   0.01
+prepare smoke                                  0.00   0.01   0.01   0.01   0.01   0.01   0.00   0.00   0.00   0.01   0.01   0.01   0.01   0.00   0.01   0.01
+exposure meter                                 0.01   0.00   0.01   0.00   0.00   0.01   0.00   0.01   0.01   0.00   0.00   0.01   0.00   0.00   0.00   0.01
+ambient occlusion                              0.01   0.00   0.01   0.00   0.00   0.00   0.00   0.00   0.01   0.01   0.00   0.01   0.00   0.00   0.01   0.01
+compute skinned meshes                         0.00   0.00   0.00   0.01   0.01   0.01   0.01   0.00   0.01   0.01   0.00   0.01   0.00   0.01   0.01   0.00
+scene: character                               0.00   0.00   0.01   0.00   0.01   0.01   0.00   0.00   0.00   0.00   0.00   0.01   0.00   0.00   0.00   0.00
+prepass: foliage scenery                       0.00   0.00   0.00   0.01   0.00   0.00   0.00   0.00   0.00   0.01   0.00   0.01   0.00   0.00   0.00   0.00
+prepass: grass                                 0.01   0.00   0.01   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.01   0.00   0.00   0.00   0.00
+compute softbody                               0.01   0.00   0.00   0.01   0.00   0.00   0.00   0.00   0.00   0.01   0.00   0.00   0.00   0.00   0.01   0.00
+prepare vfx_marks                              0.00   0.01   0.00   0.00   0.01   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.01   0.00   0.00   0.00
+environment filter                             0.02   0.00   0.00   0.00   0.00   0.01   0.00   0.01   0.01   0.00   0.01   0.00   0.00   0.00   0.00   0.00
+prepare weather precipitation                  0.00   0.01   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.01   0.00   0.00   0.00
+scene: grass                                   0.01   0.00   0.01   0.00   0.00   0.01   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00
+scene: vfx_marks                               0.01   0.00   0.03   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00
+prepass: character                             0.00   0.01   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.01   0.00   0.00   0.00   0.00   0.00   0.00
+prepass: fire haze                             0.00   0.01   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.01   0.00   0.00   0.00   0.00
+scene: terrain                                 0.01   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00
+prepass: terrain                               0.00   0.01   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.01   0.00   0.00   0.00   0.00   0.00
+volumetric fog                                 0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00
+scene: foliage scenery                         0.00   0.00   0.01   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00
+prepass: softbody                              0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00
+scene: sky phase                               0.01   0.00   0.01   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00
+prepass: weather ground                        0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.01   0.00   0.00   0.00   0.00   0.00
+terrain: uploads: free stale                   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00
+prepare weather ground                         0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00
+prepare debug_lines                            0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00
+scene: softbody                                0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00
+terrain: maps: paint                           0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00
+compute terrain                                0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00
+terrain: maps: footprints                      0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00
+scene: vfx_particles                           0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00
+prepass: vfx_particles                         0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00
+prepass: portals                               0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00
+prepass: weather clouds                        0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00
+scene: fire haze                               0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00
+aerial perspective                             0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00
+overlay painted ground                         0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00
+compute fire haze                              0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00
+scene: fire                                    0.00   0.00   0.01   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00
+scene: painted ground                          0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00
+tonemap                                        0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00
+compute grass                                  0.00   0.01   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00
+prepass: vfx_marks                             0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00
+terrain: uploads                               0.00   0.01   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00
+scene: weather ground                          0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00
+scene: movement_effects                        0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00
+scene: skinned meshes                          0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00
+scene: space bodies                            0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00
+scene: water                                   0.01   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00
+prepare sprites                                0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00
+scene: sky                                     0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00
+scene: smoke                                   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00
+scene: sprites                                 0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.01   0.00   0.00   0.00
+prepass: space bodies                          0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00
+prepass: sky                                   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00
+scene: portals                                 0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00
+prepare perf_overlay                           0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00
+scene: weather clouds                          0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00
+prepass: water                                 0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00
+prepass: painted ground                        0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00
+compute fire                                   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00
+compute weather ground                         0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00
+scene: movement_slow_motion                    0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00
+scene: ui                                      0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00
+prepass: sprites                               0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00
+prepass: movement_effects                      0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00
+prepass: skinned meshes                        0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00
+prepass: perf_overlay                          0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00
+prepass: fire                                  0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00
+prepare movement_grapple_reticle               0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00
+overlay movement_slow_motion                   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00
+prepass: weather precipitation                 0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00
+prepass: debug_lines                           0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00
+prepass: movement_grapple_reticle              0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00
+compute movement_grapple_reticle               0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.01   0.00   0.00   0.00   0.00
+compute vfx_marks                              0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00
+prepass: movement_slow_motion                  0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00
+scene: movement_grapple_reticle                0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00
+prepass: ui                                    0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00
+prepare portals                                0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00
+prepass: smoke                                 0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00
+compute smoke                                  0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00
+scene: debug_lines                             0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00
+compute space bodies                           0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00
+scene copies                                   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00
+compute movement_effects                       0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00
+compute weather precipitation                  0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00
+overlay movement_grapple_reticle               0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00
+prepare fire haze                              0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00
+overlay ui                                     0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00
+depth of field                                 0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00
+compute sprites                                0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00
+scene: perf_overlay                            0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00
+compute character                              0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00
+compute debug_lines                            0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00
+compute painted ground                         0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00
+compute ui                                     0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00
+compute sky                                    0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00
+overlay perf_overlay                           0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00
+overlay fire haze                              0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00
+terrain: patches: look-ahead                   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00
+overlay debug_lines                            0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00
+compute movement_slow_motion                   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00
+prepare sky                                    0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00
+overlay weather ground                         0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00
+environment                                    0.01   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00
+overlay water                                  0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00
+motion blur                                    0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00
+overlay weather clouds                         0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00
+compute portals                                0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00
+overlay terrain                                0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00
+overlay vfx_marks                              0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00
+overlay movement_effects                       0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00
+overlay fire                                   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00
+overlay foliage scenery                        0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00
+overlay meshes                                 0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00
+overlay skinned meshes                         0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00
+overlay sprites                                0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00
+overlay softbody                               0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00
+overlay space bodies                           0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00
+overlay weather precipitation                  0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00
+overlay sky                                    0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00
+overlay smoke                                  0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00
+overlay vfx_particles                          0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00
+overlay character                              0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00
+overlay portals                                0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00
+terrain: patches: planet data                  0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00
+screenshot copy                                0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00
+overlay grass                                  0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00
+uniforms and lights                            0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00
+terrain: maps: bind group                      0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00
+terrain: patches: recycle                      0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00
+terrain: uploads: new page                     0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.00
+
+===== a_plaza_plain: render.cpu.prepare rows, the dumps at 25-75 s (mean (min-max) of 11 dumps; each is one frame's latest step time)
+  render.cpu.prepare side by side             3.19 (2.82-4.06)
+  render.cpu.prepare serial                   0.02 (0.01-0.09)
+  render.cpu.prepare results                  0.03 (0.02-0.04)
+  render.cpu.prepare meshes                   3.23 (2.84-3.92)
+  render.cpu.prepare terrain                  1.66 (1.50-2.09)
+  render.cpu.prepare softbody                 1.53 (1.43-1.74)
+  render.cpu.prepare water                    0.88 (0.79-1.07)
+  render.cpu.prepare grass                    0.18 (0.04-0.81)
+  render.cpu.prepare character                0.60 (0.14-1.00)
+  render.cpu.prepare fire                     0.50 (0.12-1.43)
+  render.cpu.probe gi                         2.30 (1.69-6.53)
+  render.prepare_shared_ms (samples)     mean 10.69, median 10.44, p90 12.22, min 8.94, max 16.67 (n 98)
+  side by side wall 3.19 ms against the jobs' sum 10.69 ms: 7.50 ms saved (3.35x)
+  every render.cpu.prepare key in the dumps: prepare character, prepare debug_lines, prepare fire, prepare fire haze, prepare foliage scenery, prepare grass, prepare meshes, prepare movement_effects, prepare movement_grapple_reticle, prepare movement_slow_motion, prepare on the render thread, prepare painted ground, prepare perf_overlay, prepare portals, prepare results, prepare serial, prepare side by side, prepare skinned meshes, prepare sky, prepare smoke, prepare softbody, prepare space bodies, prepare sprites, prepare terrain, prepare ui, prepare vfx_marks, prepare vfx_particles, prepare water, prepare weather clouds, prepare weather ground, prepare weather precipitation
