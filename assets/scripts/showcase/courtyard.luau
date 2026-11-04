@@ -247,4 +247,9 @@ function Courtyard:build()
 	end
 end
 
+-- The lantern wave and the orrery are only seen from the courtyard: beyond 80 m from the
+-- player they hold still (the ritual, a task, still plays when the lever is pulled). Set
+-- here at the end so the live-value demo's logpoint lines above stay put (script/demo.rs).
+Courtyard.far = 80
+
 return Courtyard
