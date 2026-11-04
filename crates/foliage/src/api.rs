@@ -247,7 +247,11 @@ pub fn register(app: &mut App) {
             if mode == "burn" {
                 let mut rq = world.query::<&mut RegionState>();
                 for mut state in rq.iter_mut(world) {
-                    state.sim.soil.enrich(at, radius as f32, 0.15);
+                    state.edit_soil(crate::ecology::SoilEdit::Enrich {
+                        at,
+                        radius: radius as f32,
+                        amount: 0.15,
+                    });
                 }
             }
             Ok(json!({"plants": hits.len()}))
@@ -488,7 +492,7 @@ pub fn apply_new_sources(
             minerals: s.minerals,
         };
         for mut state in &mut regions {
-            state.sim.soil.add_source(&sim);
+            state.edit_soil(crate::ecology::SoilEdit::Source(sim));
         }
         commands.entity(e).insert(crate::ecology::SourceApplied);
     }

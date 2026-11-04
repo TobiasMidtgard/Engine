@@ -1024,6 +1024,8 @@ pub(crate) const SLEEP_SPEED: f32 = 0.01;
 pub(crate) const SLEEP_STEPS: u32 = 60;
 /// Change of wind (m/s) that wakes a sleeping body.
 const SLEEP_WIND: f32 = 0.5;
+/// How near a moving collider's bounds come to a body's (m) to keep it awake or wake it.
+const WAKE_REACH: f64 = 0.5;
 /// How far a particle of a big body moves before the ground under it is asked again, m.
 const GROUND_MOVE: f64 = 0.3;
 /// Side of the patch of ground its particles share a question about, m.
@@ -1677,9 +1679,12 @@ fn step_one(entity: Entity, body: &mut SoftBodySim, ctx: &StepContext) {
         && rain == 0.0
         && b.sim.water.is_none()
         && b.wet.iter().all(|w| *w == 0.0)
+        // Only what could wake it keeps it awake: the colliders gathered for the step reach
+        // as far as the body could move in it (metres at a coarse step), so a person walking
+        // past the jellies 4 m off kept them stepping for good.
         && local
             .iter()
-            .all(|c| c.from_pos == c.to_pos && c.from_rot == c.to_rot);
+            .all(|c| !moves_near(b, &ctx.colliders.list[c.id as usize]));
     b.calm = if quiet { b.calm + 1 } else { 0 };
     if b.asleep() {
         (b.sleep_wind, b.sleep_topology) = (wind_here, b.topology_version);
@@ -1946,16 +1951,22 @@ fn disturbed(b: &SoftBodySim, ctx: &StepContext, wind: Vec3) -> bool {
     {
         return true;
     }
-    let reach = b.radius as f64 + 0.5;
+    let reach = b.radius as f64 + WAKE_REACH;
     ctx.loads
         .iter()
         .any(|(feet, _, _)| (*feet - b.center).length() < reach)
-        || ctx.colliders.list.iter().any(|c| {
-            (c.pos - b.center).length() < reach + c.bound()
-                && !b.ignore.contains(&c.entity)
-                && ((c.pos - c.prev_pos).length_squared() > 1e-8
-                    || c.rot.angle_between(c.prev_rot) > 1e-4)
-        })
+        || ctx
+            .colliders
+            .list
+            .iter()
+            .any(|c| !b.ignore.contains(&c.entity) && moves_near(b, c))
+}
+
+/// Whether `c` moved this step within [`WAKE_REACH`] of the body's bounds: what keeps a body
+/// awake, and wakes it asleep.
+fn moves_near(b: &SoftBodySim, c: &WorldCollider) -> bool {
+    (c.pos - b.center).length() < b.radius as f64 + WAKE_REACH + c.bound()
+        && ((c.pos - c.prev_pos).length_squared() > 1e-8 || c.rot.angle_between(c.prev_rot) > 1e-4)
 }
 
 fn ground_plane(env: &Env, at: DVec3, origin: DVec3) -> [f32; 4] {

@@ -298,6 +298,54 @@ pub struct NoMeshLod;
 #[derive(Component, Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
 pub struct ShadowOnly;
 
+/// Which of the sun's shadow maps this entity's [`MeshRenderer`] casts into, by the size of their
+/// texels (meters): only those with `min <= texel < max` (the cascades, the far shadow map and
+/// the sky occlusion map; the view is unaffected). A detailed caster limited to the fine maps
+/// with [`ShadowTexelRange::finer_than`] and a cheap [`ShadowOnly`] stand-in limited to the coarse
+/// ones with [`ShadowTexelRange::from_texels`] at the same size cast exactly once in each map: a
+/// tree's leaf-by-leaf crown near the camera, its few big cards in the far cascades, where a
+/// texel is already tens of centimeters. Horizon Zero Dawn draws its vegetation's shadows from
+/// separate meshes per cascade; Unreal's `bCastFarShadow` turns the far cascades on or off. A
+/// caster switches only at a cascade's edge, inside the cascades' dithered blend. Always on the
+/// instanced path.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct ShadowTexelRange {
+    pub min: f32,
+    pub max: f32,
+}
+
+impl Default for ShadowTexelRange {
+    fn default() -> Self {
+        Self {
+            min: 0.0,
+            max: f32::INFINITY,
+        }
+    }
+}
+
+impl ShadowTexelRange {
+    /// Casts into maps whose texels are smaller than `texel` meters.
+    pub fn finer_than(texel: f32) -> Self {
+        Self {
+            max: texel,
+            ..Self::default()
+        }
+    }
+
+    /// Casts into maps whose texels are `texel` meters or larger.
+    pub fn from_texels(texel: f32) -> Self {
+        Self {
+            min: texel,
+            ..Self::default()
+        }
+    }
+
+    /// Whether it casts into a map with texels of `texel` meters.
+    pub fn casts_at(&self, texel: f32) -> bool {
+        self.min <= texel && texel < self.max
+    }
+}
+
 /// Farthest distance from the camera, in meters, at which this entity's [`MeshRenderer`] is
 /// drawn (with its shadow): small props, clutter and details nobody sees from afar. Measured to
 /// the mesh's bounding sphere, so a large mesh disappears when all of it is farther. The default
