@@ -154,3 +154,17 @@ fn walking_along_a_lake_rebuilds_the_grid_where_it_moves() {
     // Each move rebuilds, and again once its reads are in; not at every step of the reads.
     assert!(more <= 2 * moves + 2, "{more} rebuilds for {moves} moves");
 }
+
+#[test]
+fn standing_by_a_still_lake_rebuilds_nothing() {
+    let mut app = app();
+    app.update_n(3 * 60);
+    let before = rebuilds(&app);
+    app.update_n(10 * 60);
+    // (Round 25 on the PC: 2-3 rebuilds per 5 s at every stop with water.)
+    assert_eq!(
+        rebuilds(&app),
+        before,
+        "no streams under the grid, nothing moved"
+    );
+}
