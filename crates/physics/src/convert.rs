@@ -376,6 +376,47 @@ mod tests {
     use super::*;
 
     #[test]
+    fn big_meshes_of_the_same_points_and_scale_share_one_shape() {
+        let n = 30u32;
+        let mut vertices = Vec::new();
+        let mut indices = Vec::new();
+        for z in 0..=n {
+            for x in 0..=n {
+                vertices.push(Vec3::new(x as f32, (x * z) as f32 * 0.001, z as f32));
+            }
+        }
+        for z in 0..n {
+            for x in 0..n {
+                let i = z * (n + 1) + x;
+                indices.push([i, i + n + 1, i + 1]);
+            }
+        }
+        let mesh = ColliderShape::TriMesh { vertices, indices };
+        let a = shape_cached(&mesh, Vec3::ONE).unwrap();
+        let b = shape_cached(&mesh, Vec3::ONE).unwrap();
+        let scaled = shape_cached(&mesh, Vec3::splat(2.0)).unwrap();
+        assert!(
+            std::sync::Arc::ptr_eq(&a.0, &b.0),
+            "the same mesh was built twice"
+        );
+        assert!(
+            !std::sync::Arc::ptr_eq(&a.0, &scaled.0),
+            "another scale shared the shape"
+        );
+        let small = ColliderShape::ConvexHull {
+            points: vec![Vec3::ZERO, Vec3::X, Vec3::Y, Vec3::Z],
+        };
+        let (c, d) = (
+            shape_cached(&small, Vec3::ONE).unwrap(),
+            shape_cached(&small, Vec3::ONE).unwrap(),
+        );
+        assert!(
+            !std::sync::Arc::ptr_eq(&c.0, &d.0),
+            "small shapes aren't cached"
+        );
+    }
+
+    #[test]
     fn damping_matches_fraction_lost_per_second() {
         // Losing half the speed in a second: v(1) = e^-c = 0.5.
         let c = damping(0.5);
@@ -432,4 +473,121 @@ mod tests {
         assert!(height_at(0.95) > 4.0, "{}", height_at(0.95));
         assert!(height_at(-0.95) < 0.1, "{}", height_at(-0.95));
     }
+}
+
+/// Shapes of this many points or more are kept in [`shape_cached`]'s cache.
+const CACHE_MIN_POINTS: usize = 512;
+/// Points the cache holds at most (about 30 MB of meshes); the oldest go first.
+const CACHE_MAX_POINTS: usize = 500_000;
+
+/// The points a shape is built from, if it is cached ([`CACHE_MIN_POINTS`]).
+fn cache_points(shape: &ColliderShape) -> usize {
+    match shape {
+        ColliderShape::TriMesh { vertices, .. } => vertices.len(),
+        ColliderShape::ConvexHull { points } => points.len(),
+        ColliderShape::Compound(parts) => parts.iter().map(|(_, _, s)| cache_points(s)).sum(),
+        _ => 0,
+    }
+}
+
+/// A 64-bit hash of a shape and its scale (vertex bits, indices, offsets).
+fn shape_key(shape: &ColliderShape, scale: Vec3) -> u64 {
+    // FNV-1a over 32-bit words, finished with a 64-bit mix: fast enough to hash a 40,000
+    // vertex mesh in well under a millisecond.
+    struct H(u64);
+    impl H {
+        fn word(&mut self, w: u32) {
+            self.0 = (self.0 ^ w as u64).wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        fn vec(&mut self, v: Vec3) {
+            self.word(v.x.to_bits());
+            self.word(v.y.to_bits());
+            self.word(v.z.to_bits());
+        }
+    }
+    fn go(h: &mut H, shape: &ColliderShape) {
+        match shape {
+            ColliderShape::TriMesh { vertices, indices } => {
+                h.word(1);
+                h.word(vertices.len() as u32);
+                vertices.iter().for_each(|v| h.vec(*v));
+                for t in indices {
+                    t.iter().for_each(|i| h.word(*i));
+                }
+            }
+            ColliderShape::ConvexHull { points } => {
+                h.word(2);
+                h.word(points.len() as u32);
+                points.iter().for_each(|v| h.vec(*v));
+            }
+            ColliderShape::Compound(parts) => {
+                h.word(3);
+                h.word(parts.len() as u32);
+                for (offset, rotation, part) in parts {
+                    h.vec(*offset);
+                    for c in rotation.to_array() {
+                        h.word(c.to_bits());
+                    }
+                    go(h, part);
+                }
+            }
+            other => {
+                // (Primitives are never cached; hash their debug form to stay total.)
+                for b in format!("{other:?}").bytes() {
+                    h.word(b as u32);
+                }
+            }
+        }
+    }
+    let mut h = H(0xcbf2_9ce4_8422_2325);
+    h.vec(scale);
+    go(&mut h, shape);
+    let mut x = h.0;
+    x ^= x >> 33;
+    x = x.wrapping_mul(0xff51_afd7_ed55_8ccd);
+    x ^= x >> 33;
+    x
+}
+
+#[derive(Default)]
+struct ShapeCache {
+    shapes: std::collections::HashMap<u64, (SharedShape, usize)>,
+    order: std::collections::VecDeque<u64>,
+    points: usize,
+}
+
+fn cache() -> &'static parking_lot::Mutex<ShapeCache> {
+    static CACHE: std::sync::OnceLock<parking_lot::Mutex<ShapeCache>> = std::sync::OnceLock::new();
+    CACHE.get_or_init(Default::default)
+}
+
+/// [`shape`], with big meshes, hulls and compounds shared: the same mesh at the same scale is
+/// built once (a zone's jetty each time the zone streams back in, a building's repeated walls).
+/// Parry shapes are immutable, so colliders can share one, as Jolt and PhysX share a mesh
+/// between the bodies that use it.
+pub fn shape_cached(shape_desc: &ColliderShape, scale: Vec3) -> Option<SharedShape> {
+    let points = cache_points(shape_desc);
+    if points < CACHE_MIN_POINTS {
+        return shape(shape_desc, scale);
+    }
+    let key = shape_key(shape_desc, scale);
+    if let Some((s, _)) = cache().lock().shapes.get(&key) {
+        return Some(s.clone());
+    }
+    let built = shape(shape_desc, scale)?;
+    let mut c = cache().lock();
+    if !c.shapes.contains_key(&key) && points <= CACHE_MAX_POINTS {
+        c.shapes.insert(key, (built.clone(), points));
+        c.order.push_back(key);
+        c.points += points;
+        while c.points > CACHE_MAX_POINTS {
+            let Some(old) = c.order.pop_front() else {
+                break;
+            };
+            if let Some((_, p)) = c.shapes.remove(&old) {
+                c.points -= p;
+            }
+        }
+    }
+    Some(built)
 }
