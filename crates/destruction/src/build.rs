@@ -593,28 +593,48 @@ pub fn ground_hit(
     dir: Vec3,
     max: f32,
 ) -> Option<(f32, Vec3)> {
+    let t = ground_march(&|p| ground(p).map(|(h, _)| h), origin, dir, max)?;
+    Some((t, ground(origin + (dir * t).as_dvec3())?.1))
+}
+
+/// [`ground_hit`] on the world's [`Ground`]: the march asks only heights (several times cheaper
+/// than a full sample, which adds the normal's taps and the cover), and the normal is sampled
+/// once, where the ray lands.
+pub fn ground_hit_on(ground: &Ground, origin: DVec3, dir: Vec3, max: f32) -> Option<(f32, Vec3)> {
+    let t = ground_march(&|p| ground.height(p), origin, dir, max)?;
+    Some((t, ground.sample(origin + (dir * t).as_dvec3())?.normal))
+}
+
+/// How far along a ray it first meets the ground (`height` gives the ground under a point):
+/// 10 cm steps, then 14 bisections.
+fn ground_march(
+    height: &dyn Fn(DVec3) -> Option<f64>,
+    origin: DVec3,
+    dir: Vec3,
+    max: f32,
+) -> Option<f32> {
     let above = |t: f32| {
         let p = origin + (dir * t).as_dvec3();
-        ground(p).map(|(h, n)| (p.y - h, n))
+        height(p).map(|h| p.y - h)
     };
-    if above(0.0)?.0 < 0.0 {
+    if above(0.0)? < 0.0 {
         return None;
     }
     let step = 0.1;
     let mut prev = 0.0;
     let mut t = step;
     while t <= max + 1e-4 {
-        if above(t)?.0 <= 0.0 {
+        if above(t)? <= 0.0 {
             let (mut a, mut b) = (prev, t);
             for _ in 0..14 {
                 let m = 0.5 * (a + b);
-                if above(m)?.0 > 0.0 {
+                if above(m)? > 0.0 {
                     a = m;
                 } else {
                     b = m;
                 }
             }
-            return Some((b, above(b)?.1));
+            return Some(b);
         }
         prev = t;
         t += step;
@@ -962,14 +982,7 @@ fn surface_hit(
     dir: Vec3,
     reach: f32,
 ) -> Option<(f32, Vec3)> {
-    let mut best = ground.and_then(|g| {
-        ground_hit(
-            &|p| g.sample(p).map(|s| (s.height, s.normal)),
-            origin,
-            dir,
-            reach,
-        )
-    });
+    let mut best = ground.and_then(|g| ground_hit_on(g, origin, dir, reach));
     for (gt, state) in volumes {
         let o = gt.affine().inverse().transform_point3(origin).as_vec3();
         let d = gt.rotation().inverse() * dir;
@@ -1291,14 +1304,9 @@ pub fn plan_in_world(
     )>();
     let scene = scene_near(q.iter(world), origin, reach as f64 + 6.0);
     let ground = world.get_resource::<Ground>().cloned();
-    let mut surface = ground.as_ref().and_then(|g| {
-        ground_hit(
-            &|p| g.sample(p).map(|s| (s.height, s.normal)),
-            origin,
-            dir,
-            reach,
-        )
-    });
+    let mut surface = ground
+        .as_ref()
+        .and_then(|g| ground_hit_on(g, origin, dir, reach));
     let mut vq = world.query::<(&GlobalTransform, &VoxelState)>();
     for (gt, state) in vq.iter(world) {
         let o = gt.affine().inverse().transform_point3(origin).as_vec3();
