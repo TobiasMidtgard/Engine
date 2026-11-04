@@ -748,6 +748,8 @@ pub fn ripple_system(
         let ground = state.ground.clone();
         let beaches = state.beaches.clone();
         drop(state);
+        // Each part of a rebuild under its own span, for the PC profiles.
+        let part = tracing::info_span!("water", name = "ripples: depths").entered();
         still.read(at, &bodies, &ground, f.y, DVec2::new(f.x, f.z));
         coarse.read(
             &mut field,
@@ -757,6 +759,7 @@ pub fn ripple_system(
             f.y,
             DVec2::new(f.x, f.z),
         );
+        drop(part);
         // The lakes read again under a grid that stayed put (one came in or changed): the
         // cells not read yet keep their old depths, so the speeds, streams and swash wait for
         // the whole read rather than being rebuilt at every step of it (each rebuild is a pass
@@ -766,11 +769,13 @@ pub fn ripple_system(
                 break 'full;
             }
             book.rebuilds += 1;
-            state = shared.0.write();
+            let part = tracing::info_span!("water", name = "ripples: streams").entered();
+            // Read only: other readers of the water go on meanwhile.
+            let water = shared.0.read();
             let (origin, n, cell) = (field.origin, field.n, field.cell);
             // Streams, cell by cell only where each one lies (cheap: a grid lookup).
             let mut stream = vec![(f32::NAN, None::<Vec2>); n * n];
-            for sim in state.flows.iter().filter(|f| f.visible) {
+            for sim in water.flows.iter().filter(|f| f.visible) {
                 let (c, radius) = sim.bounds();
                 let lo = ((DVec2::new(c.x, c.z) - DVec2::splat(radius) - origin) / cell as f64)
                     .floor()
@@ -790,12 +795,14 @@ pub fn ripple_system(
                     }
                 }
             }
-            drop(state);
+            drop(water);
+            drop(part);
             let index = |p: DVec2| {
                 let g = ((p - origin) / cell as f64 - DVec2::splat(0.5)).round();
                 (g.y as usize * n + g.x as usize).min(n * n - 1)
             };
             // The beaches under the grid, for the swash (none over streams: they run their own).
+            let part = tracing::info_span!("water", name = "ripples: swash").entered();
             if let Some(bed) = swash.read(
                 origin,
                 field.size(),
@@ -808,7 +815,9 @@ pub fn ripple_system(
             ) {
                 field.swash = bed.any().then_some(bed);
             }
+            drop(part);
             // Lakes and streams: footsteps, cloth and swimmers ring both.
+            let _part = tracing::info_span!("water", name = "ripples: speeds").entered();
             let still = &*still;
             field.rebuild_speeds(settings.ripple_speed, |p| {
                 let k = index(p);
