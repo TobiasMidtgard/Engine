@@ -672,8 +672,11 @@ pub fn ripple_system(
     mut still: Local<StillDepths>,
     mut coarse: Local<CoarseStill>,
     mut swash: Local<crate::swash::SwashReader>,
+    mut streams: Local<StreamCells>,
+    config: Res<EngineConfig>,
 ) {
     let dt = time.delta_secs();
+    swash.off_frame = !config.headless;
     let mut state = shared.0.write();
     let dims = (
         settings.ripple_cells.clamp(16, 1024),
@@ -712,7 +715,8 @@ pub fn ripple_system(
             || book.since_rebuild > 2.0
             || still.unread > 0
             || coarse.depths.unread > 0
-            || swash.unread() > 0);
+            || swash.unread() > 0
+            || swash.busy());
     if !rebuild && !state.ripples.needs_step() {
         // Calm water: nothing to step, copy or upload.
         state.ripples.pending.clear();
@@ -735,6 +739,10 @@ pub fn ripple_system(
     let span = tracing::info_span!("water", name = "ripples: rebuild").entered();
     if rebuild {
         let moved = field.recenter(center);
+        // Every 2 s the streams' depths and currents are read again (they rise and fall, and
+        // one may come into view); with none in view nothing changes, so nothing is redone.
+        let periodic =
+            book.since_rebuild > 2.0 && (streams.any || state.flows.iter().any(|f| f.visible));
         book.since_rebuild = 0.0;
         // The lakes under the grid, read with the water unlocked (AGENTS.md, "Performance
         // rules"): only cells the grid newly covers, or all of them when the lakes change.
@@ -760,19 +768,56 @@ pub fn ripple_system(
             DVec2::new(f.x, f.z),
         );
         drop(part);
-        // The lakes read again under a grid that stayed put (one came in or changed): the
-        // cells not read yet keep their old depths, so the speeds, streams and swash wait for
-        // the whole read rather than being rebuilt at every step of it (each rebuild is a pass
-        // over every cell; at the fortress they ran every step, 28-36 ms, round 24).
+        // The whole pass (streams, speeds and drift over every cell) runs when the grid moved,
+        // every 2 s over streams, and once the lakes' depths under where it stands are all in.
+        // Not at every step of a read spread over several (the lakes read again under a grid
+        // that stayed put, the swash's ground after a move): cells not read yet keep their old
+        // depths meanwhile. Each pass is a sweep over all 65 536 cells; at the fortress they ran
+        // every step (28-36 ms, round 24), and walking along a lake 5 or 6 times per move.
+        let complete = still.unread == 0 && coarse.depths.unread == 0;
+        let key = (field.origin, field.n, field.cell.to_bits(), book.layout);
+        let full = moved || periodic || (complete && streams.complete_for != Some(key));
+        let (origin, n, cell) = (field.origin, field.n, field.cell);
+        let index = |p: DVec2| {
+            let g = ((p - origin) / cell as f64 - DVec2::splat(0.5)).round();
+            (g.y as usize * n + g.x as usize).min(n * n - 1)
+        };
+        if !full {
+            // The swash's ground read goes on, with the streams as last found.
+            if swash.unread() > 0 || swash.busy() {
+                let part = tracing::info_span!("water", name = "ripples: swash").entered();
+                let none = crate::swash::StreamMask::default();
+                let mask = if streams.mask.origin == origin && streams.mask.n == n {
+                    &streams.mask
+                } else {
+                    &none
+                };
+                if let Some(bed) = swash.read(
+                    origin,
+                    field.size(),
+                    book.layout,
+                    &bodies,
+                    &beaches,
+                    &ground,
+                    f,
+                    mask,
+                ) {
+                    field.swash = bed.any().then_some(bed);
+                }
+                drop(part);
+            }
+        }
         'full: {
-            if !moved && still.catching_up() {
+            if !full {
                 break 'full;
+            }
+            if complete {
+                streams.complete_for = Some(key);
             }
             book.rebuilds += 1;
             let part = tracing::info_span!("water", name = "ripples: streams").entered();
             // Read only: other readers of the water go on meanwhile.
             let water = shared.0.read();
-            let (origin, n, cell) = (field.origin, field.n, field.cell);
             // Streams, cell by cell only where each one lies (cheap: a grid lookup).
             let mut stream = vec![(f32::NAN, None::<Vec2>); n * n];
             for sim in water.flows.iter().filter(|f| f.visible) {
@@ -797,12 +842,14 @@ pub fn ripple_system(
             }
             drop(water);
             drop(part);
-            let index = |p: DVec2| {
-                let g = ((p - origin) / cell as f64 - DVec2::splat(0.5)).round();
-                (g.y as usize * n + g.x as usize).min(n * n - 1)
-            };
             // The beaches under the grid, for the swash (none over streams: they run their own).
             let part = tracing::info_span!("water", name = "ripples: swash").entered();
+            streams.mask = crate::swash::StreamMask {
+                origin,
+                n,
+                cell,
+                wet: std::sync::Arc::new(stream.iter().map(|s| !s.0.is_nan()).collect()),
+            };
             if let Some(bed) = swash.read(
                 origin,
                 field.size(),
@@ -811,7 +858,7 @@ pub fn ripple_system(
                 &beaches,
                 &ground,
                 f,
-                &|p| !stream[index(p)].0.is_nan(),
+                &streams.mask,
             ) {
                 field.swash = bed.any().then_some(bed);
             }
@@ -826,6 +873,7 @@ pub fn ripple_system(
             });
             // Streams carry their rings and foam downstream.
             field.rebuild_drift(|p| stream[index(p)].1);
+            streams.any = streams.mask.wet.iter().any(|w| *w);
         }
     } else {
         drop(state);
@@ -838,6 +886,18 @@ pub fn ripple_system(
         field.step(dt, settings.ripple_damping, settings.foam_life_s);
     }
     flight.ripples = Some(field);
+}
+
+/// Where the streams under the ripple grid ran when the last whole rebuild looked, for the
+/// swash's reads in between.
+#[derive(Default)]
+pub struct StreamCells {
+    mask: crate::swash::StreamMask,
+    /// Any stream under the grid: its depths are read again every 2 s.
+    any: bool,
+    /// Where the grid stood (corner, cells, cell size bits, layout) when a whole rebuild last
+    /// ran with every lake depth under it read.
+    complete_for: Option<(DVec2, usize, u32, u64)>,
 }
 
 /// Put the ripple field stepped beside the physics step back where readers see it.

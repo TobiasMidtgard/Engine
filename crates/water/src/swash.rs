@@ -40,6 +40,10 @@
 
 use std::sync::Arc;
 
+use bevy_tasks::Task;
+use bevy_tasks::futures::check_ready;
+use engine_core::tasks::AsyncComputeTaskPool;
+
 use engine_core::math::{DVec2, DVec3, Vec2};
 use engine_core::prelude::*;
 use engine_world::Ground;
@@ -867,8 +871,30 @@ pub const BEACH_M: f32 = 4.0;
 /// The ground is read this far apart and smoothed in between, meters (the drawn waterline
 /// comes from the real ground, so this only moves where the water flows).
 pub const SAMPLE_M: f32 = 0.5;
-/// Ground samples read per step after a jump.
-const SAMPLE_READS: usize = 2048;
+/// Ground samples read per step after a jump. A step of the grid (8 m of 0.5 m samples across a
+/// 64 m window, about 2 100) is read in one go: ~0.2 ms on the VM, under the grid's ground cache.
+const SAMPLE_READS: usize = 8192;
+
+/// Where streams run under the ripple grid (no swash there): its corner, cells per side, cell
+/// size, and per cell whether a stream runs there. Empty: none known.
+#[derive(Clone, Default)]
+pub struct StreamMask {
+    pub origin: DVec2,
+    pub n: usize,
+    pub cell: f32,
+    pub wet: Arc<Vec<bool>>,
+}
+
+impl StreamMask {
+    /// A stream runs at world x/z `p` (the cell holding it, clamped into the grid).
+    pub fn at(&self, p: DVec2) -> bool {
+        if self.wet.len() != self.n * self.n || self.n == 0 {
+            return false;
+        }
+        let g = ((p - self.origin) / self.cell as f64 - DVec2::splat(0.5)).round();
+        self.wet[(g.y as usize * self.n + g.x as usize).min(self.n * self.n - 1)]
+    }
+}
 
 /// Reads the ground and the still water under the swash grid, like the ripple grid's still
 /// depths ([`crate::sim`]): only the samples the window newly covers, nearest the focus first.
@@ -882,12 +908,22 @@ pub struct SwashReader {
     /// What was last handed out.
     built: Option<(DVec2, u64, usize)>,
     version: u64,
+    /// Beds are built on a worker (a 512² bed took 15 ms on the VM, at every step of the grid):
+    /// off in headless runs, which build them in place.
+    pub off_frame: bool,
+    /// The bed being built, for (window corner, layout).
+    job: Option<((DVec2, u64), Task<SwashBed>)>,
 }
 
 impl SwashReader {
     /// Samples still to read.
     pub fn unread(&self) -> usize {
         self.unread
+    }
+
+    /// A bed is being built on a worker: keep calling [`read`](Self::read) to collect it.
+    pub fn busy(&self) -> bool {
+        self.job.is_some()
     }
 
     /// Read the ground under a window `size` m wide from `origin` (the ripple grid's), and
@@ -902,7 +938,7 @@ impl SwashReader {
         beaches: &[(DVec3, BeachGround)],
         ground: &Ground,
         focus: DVec3,
-        stream: &dyn Fn(DVec2) -> bool,
+        stream: &StreamMask,
     ) -> Option<Arc<SwashBed>> {
         let m = (size / SAMPLE_M as f64).round() as usize + 1;
         let at = (origin, m, layout);
@@ -929,6 +965,7 @@ impl SwashReader {
             self.at = Some(at);
         }
         if self.unread > 0 {
+            let _part = tracing::info_span!("water", name = "swash: ground").entered();
             let at_sample = |idx: usize| {
                 origin + DVec2::new((idx % m) as f64, (idx / m) as f64) * SAMPLE_M as f64
             };
@@ -948,25 +985,60 @@ impl SwashReader {
         }
         // Hand out a bed once the samples near the focus are in, and again when all are.
         let key = (origin, layout, self.unread);
-        if self
+        if !self
             .built
             .is_some_and(|b| b.0 == origin && b.1 == layout && (b.2 == 0 || self.unread > 0))
         {
-            return None;
+            self.built = Some(key);
+            self.version += 1;
+            let job = BedJob {
+                samples: self.samples.clone(),
+                origin,
+                size,
+                m,
+                level_y: focus.y,
+                stream: stream.clone(),
+                version: self.version,
+            };
+            if !self.off_frame {
+                let _part = tracing::info_span!("water", name = "swash: bed").entered();
+                self.job = None;
+                return Some(Arc::new(job.build()));
+            }
+            // (Replacing a job still running drops it: its window is gone.)
+            let task = AsyncComputeTaskPool::get().spawn(async move { job.build() });
+            self.job = Some(((origin, layout), task));
         }
-        self.built = Some(key);
-        self.version += 1;
-        Some(Arc::new(self.build(origin, size, m, focus.y, stream)))
+        let (at, task) = self.job.as_mut()?;
+        let bed = check_ready(task)?;
+        let at = *at;
+        self.job = None;
+        (at == (origin, layout)).then(|| Arc::new(bed))
     }
+}
 
-    fn build(
-        &self,
-        origin: DVec2,
-        size: f64,
-        m: usize,
-        level_y: f64,
-        stream: &dyn Fn(DVec2) -> bool,
-    ) -> SwashBed {
+/// A swash bed to build from the samples read (on a worker, or in place).
+struct BedJob {
+    samples: Vec<(f64, f64)>,
+    origin: DVec2,
+    size: f64,
+    m: usize,
+    level_y: f64,
+    stream: StreamMask,
+    version: u64,
+}
+
+impl BedJob {
+    fn build(self) -> SwashBed {
+        let Self {
+            samples,
+            origin,
+            size,
+            m,
+            level_y,
+            stream,
+            version,
+        } = self;
         let n = ((size / CELL_M as f64).round() as usize).max(TILE) / TILE * TILE;
         let cell = (size / n as f64) as f32;
         let datum = level_y.round();
@@ -981,7 +1053,7 @@ impl SwashReader {
                     (g.y.floor() as usize).min(m - 2),
                 );
                 let (fx, fz) = (g.x - i0 as f64, g.y - j0 as f64);
-                let s = |a: usize, b: usize| self.samples[b * m + a];
+                let s = |a: usize, b: usize| samples[b * m + a];
                 let corners = [s(i0, j0), s(i0 + 1, j0), s(i0, j0 + 1), s(i0 + 1, j0 + 1)];
                 if corners.iter().any(|c| !c.0.is_finite()) {
                     continue;
@@ -999,7 +1071,7 @@ impl SwashReader {
                 let levels = corners.iter().filter(|c| !c.1.is_nan());
                 let level = levels.clone().map(|c| c.1).fold(f64::NAN, f64::max);
                 let p = origin + DVec2::new(i as f64 + 0.5, j as f64 + 0.5) * cell as f64;
-                if levels.count() == 4 && !stream(p) {
+                if levels.count() == 4 && !stream.at(p) {
                     still[k] = (level - datum) as f32;
                 }
             }
@@ -1013,7 +1085,7 @@ impl SwashReader {
             bed,
             still,
             band: vec![false; tiles * tiles],
-            version: self.version,
+            version,
         };
         out.band = (0..tiles * tiles).map(|t| out.tile_in_band(t)).collect();
         out

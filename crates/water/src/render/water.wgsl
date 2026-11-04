@@ -51,7 +51,7 @@ struct Globals {
     mirror2: vec4<f32>,  // the mirrored eye rel camera xyz, the plane's y rel camera
     shelter: vec4<f32>,  // wind exposure mask (crate::shelter): corner rel camera x, z, size (m), body slot (-1 none)
     swash: vec4<f32>,    // the swash (render/swash.rs): corner rel camera x, z, size (m), on (1/0)
-    swash2: vec4<f32>,   // its datum rel camera y, cell (m), unused, unused
+    swash2: vec4<f32>,   // its datum rel camera y, cell (m), swash debug, reflection debug
     waterline: vec4<f32>,  // the camera at the waterline: split per pixel (1/0), lens dome radius (m), lens wetness 0..1, seconds since it surfaced
     waterline2: vec4<f32>, // meters of the dome per pixel, drop seed, unused, unused
     trail: vec4<f32>,      // the ripple grid's trail (`trail.rs`): corner rel camera x, z, size (m), on
@@ -940,11 +940,23 @@ fn shade_water(rel: vec3<f32>, n_in: vec3<f32>, look: WaterLook, foam_in: f32, c
     // it doesn't.
     var mirrored = vec4<f32>(0.0);
     if (use_mirror) { mirrored = mirror_reflection(rel, r, rough); }
+    var ssr_a = 0.0;
     if (mirrored.a < 0.999) {
         let ssr = trace_reflection(rel, r, size, rough);
         refl = mix(refl, ssr.rgb, ssr.a);
+        ssr_a = ssr.a;
     }
     refl = mix(refl, mirrored.rgb, mirrored.a);
+    if (water.g.swash2.w > 0.5) {
+        // Debug (ENGINE_WATER_REFLECT_DEBUG): where each reflection comes from. Red: the lake
+        // mirror's picture; green: screen-space reflections; blue: the sky. Darker where the
+        // sun's shadow lies.
+        let from_ssr = (1.0 - mirrored.a) * ssr_a;
+        let from_sky = (1.0 - mirrored.a) * (1.0 - ssr_a);
+        let lit = shadow_factor(rel, n);
+        // (Pre-exposed output: these land mid-bright on screen.)
+        return vec3<f32>(mirrored.a, from_ssr, from_sky) * (0.3 + 0.5 * lit);
+    }
 
     // ---- sun glitter
     let l = frame.sun_dir.xyz;
