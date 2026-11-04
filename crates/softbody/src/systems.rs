@@ -4,6 +4,7 @@
 use std::collections::HashMap;
 use std::time::Instant;
 
+use engine_core::ecs::entity::EntityHashMap;
 use engine_core::prelude::*;
 use engine_core::tasks::ComputeTaskPool;
 use engine_world::animation::SkeletonPose;
@@ -101,6 +102,21 @@ impl ColliderWorld {
         }
         self.seen.insert(key, (c.pos, c.rot));
         self.list.push(c);
+    }
+}
+
+/// One thread's share of a side-by-side gather, handed over when the thread is done.
+struct Gathered<'a, T> {
+    local: Vec<T>,
+    into: &'a std::sync::Mutex<Vec<T>>,
+}
+
+impl<T> Drop for Gathered<'_, T> {
+    fn drop(&mut self) {
+        if !self.local.is_empty() {
+            let mut all = self.into.lock().unwrap_or_else(|e| e.into_inner());
+            all.append(&mut self.local);
+        }
     }
 }
 
@@ -287,7 +303,7 @@ pub fn gather_colliders(
     ),
     mut shapes: Local<Vec<(LocalShape, Vec3, Quat)>>,
     mut bone_shapes: Local<Vec<(LocalShape, DVec3, Quat)>>,
-    mut reaches: Local<HashMap<Entity, f32>>,
+    mut reaches: Local<EntityHashMap<f32>>,
     mut shifts: MessageReader<WorldShift>,
 ) {
     // Re-anchored this frame: last frame's transforms are far off.
@@ -316,31 +332,59 @@ pub fn gather_colliders(
                 .iter()
                 .any(|(b, body_reach)| (p - *b).length() < reach + body_reach)
     };
-    for (entity, collider, parent) in &colliders {
-        if collider.sensor || near_bodies.is_empty() {
-            continue;
+    // Most of the world's colliders are far from every awake body: they are passed over side
+    // by side, by their reach (kept by entity until the shape changes) around last frame's
+    // transform (with room for a frame's motion), before working out where their parents are
+    // now. The few near ones go on in entity order, so the list doesn't depend on threads.
+    let mut candidates = Vec::new();
+    if !near_bodies.is_empty() {
+        let found = std::sync::Mutex::new(Vec::new());
+        let cached = &*reaches;
+        colliders.par_iter().for_each_init(
+            || Gathered {
+                local: Vec::new(),
+                into: &found,
+            },
+            |g, (entity, collider, _)| {
+                if collider.sensor {
+                    return;
+                }
+                let (reach, fresh) = match cached.get(&entity) {
+                    Some(r) if !collider.is_changed() => (*r, false),
+                    _ => (shape_reach(&collider.shape), true),
+                };
+                let near_last = transforms.get(entity).is_ok_and(|(last, ..)| {
+                    shifted
+                        || near(
+                            last.translation(),
+                            reach as f64 * last.scale().max_element() as f64 + STALE_SLACK,
+                        )
+                });
+                if near_last || fresh {
+                    g.local.push((entity, reach, fresh, near_last));
+                }
+            },
+        );
+        candidates = found.into_inner().unwrap_or_else(|e| e.into_inner());
+        candidates.sort_unstable_by_key(|c| c.0);
+    }
+    for &(entity, reach, fresh, _) in &candidates {
+        if fresh {
+            reaches.insert(entity, reach);
         }
-        let reach = match reaches.get(&entity) {
-            Some(r) if !collider.is_changed() => *r,
-            _ => {
-                let r = shape_reach(&collider.shape);
-                reaches.insert(entity, r);
-                r
-            }
-        } as f64;
-        // Far by last frame's transform (with room for a frame's motion): skipped before
-        // working out where its parents are now.
-        let Ok((last, ..)) = transforms.get(entity) else {
+    }
+    // Despawned colliders' reaches go once they are most of the map.
+    if reaches.len() > 2 * colliders.iter().len() + 1024 {
+        reaches.retain(|e, _| colliders.contains(*e));
+    }
+    for (entity, reach, _, near_last) in candidates {
+        let Ok((entity, collider, parent)) = colliders.get(entity) else {
             continue;
         };
-        if !shifted
-            && !near(
-                last.translation(),
-                reach * last.scale().max_element() as f64 + STALE_SLACK,
-            )
-        {
+        if !near_last {
             continue;
         }
+        let reach = reach as f64;
         let Some(t) = world_transform(entity, &transforms) else {
             continue;
         };
