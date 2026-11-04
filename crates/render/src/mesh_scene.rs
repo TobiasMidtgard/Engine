@@ -396,6 +396,17 @@ impl MeshScene {
             | if displaced { DISPLACED } else { 0 }
             | if full_detail { FULL_DETAIL } else { 0 }
             | if shadow_only { SHADOW_ONLY } else { 0 };
+        let max = max_distance.as_ref().map_or(f32::MAX, |m| m.0);
+        let fade = dither.as_ref().map_or(0.0, |d| {
+            if d.0.is_finite() {
+                d.0.clamp(-1.0, 1.0)
+            } else {
+                0.0
+            }
+        });
+        let flags = if renderer.visible { VISIBLE } else { 0 }
+            | if renderer.cast_shadows { CASTS } else { 0 }
+            | kind;
         let s = match existing {
             Some(s) => {
                 self.seen[s] = frame;
@@ -415,6 +426,31 @@ impl MeshScene {
                         None => hot.dither != 0.0,
                     };
                 if !changed {
+                    return;
+                }
+                // Moved without turning or scaling, the rest as it was (a world shift moves
+                // every slot this way, and so do most movers): its bounds move with it, and
+                // its mesh's users and levels stay.
+                let hot = self.hot[s];
+                if hot.mesh == resolved.mesh.index()
+                    && hot.material == resolved.material.index()
+                    && hot.max_distance == max
+                    && hot.dither == fade
+                    && hot.flags & !MIRRORED == flags
+                    && self.cold[s].transform.0.matrix3 == transform.0.matrix3
+                {
+                    self.note_change(s);
+                    let cold = &mut self.cold[s];
+                    cold.changed = frame;
+                    let delta = transform.0.translation - cold.transform.0.translation;
+                    if delta != DVec3::ZERO {
+                        cold.previous = cold.transform;
+                        cold.previous_rows = cold.rows;
+                        cold.moved = frame;
+                        cold.transform = *transform;
+                        self.hot[s].center += delta;
+                    }
+                    self.dirty += 1;
                     return;
                 }
                 self.release(s);
@@ -463,21 +499,11 @@ impl MeshScene {
             }
         };
         self.dirty += 1;
-        let max = max_distance.as_ref().map_or(f32::MAX, |m| m.0);
-        let flags = if renderer.visible { VISIBLE } else { 0 }
-            | if renderer.cast_shadows { CASTS } else { 0 }
-            | kind;
         let mirrored = transform.0.matrix3.determinant() < 0.0;
         self.hot[s] = Hot {
             scale: max_scale(&transform),
             max_distance: max,
-            dither: dither.as_ref().map_or(0.0, |d| {
-                if d.0.is_finite() {
-                    d.0.clamp(-1.0, 1.0)
-                } else {
-                    0.0
-                }
-            }),
+            dither: fade,
             mesh: resolved.mesh.index(),
             material: resolved.material.index(),
             // Bounds again, from the mesh, when next culled.
@@ -674,6 +700,57 @@ mod tests {
         scene.sync(&world, 8);
         assert_eq!(scene.hot.len(), 1);
         assert_eq!(scene.cold[0].entity, a);
+    }
+
+    /// A slot that only moved (no turn, no scale, nothing else changed: what a world shift does
+    /// to every slot) keeps its bounds, moved by the same offset, and its level of detail; one
+    /// that turned or changed mesh has them computed again.
+    #[test]
+    fn a_slot_that_only_moved_keeps_its_bounds_and_level() {
+        let mut world = World::new();
+        let a = spawn(&mut world, 1.0, 0, 0);
+        let b = spawn(&mut world, 2.0, 1, 0);
+        let mut scene = MeshScene::default();
+        scene.ensure_query(&mut world);
+        scene.sync(&world, 1);
+        // As a cull leaves them: bounds for the mesh's version, a level.
+        for hot in &mut scene.hot {
+            hot.mesh_version = 3;
+            hot.center = DVec3::new(hot.center.x + 10.0, 0.5, 0.0);
+            hot.lod = 2;
+        }
+        let shift = DVec3::new(-3000.0, 0.0, 250.0);
+        for e in [a, b] {
+            world.get_mut::<GlobalTransform>(e).unwrap().0.translation += shift;
+        }
+        world.get_mut::<GlobalTransform>(b).unwrap().0.matrix3 = DMat3::from_rotation_y(0.5);
+        scene.sync(&world, 2);
+        assert_eq!(scene.dirty, 2);
+        let (sa, sb) = (slot(&scene, a), slot(&scene, b));
+        let moved = scene.hot[sa];
+        assert_eq!(
+            (moved.mesh_version, moved.lod, moved.center),
+            (3, 2, DVec3::new(10.0, 0.5, 0.0) + shift),
+            "moved only"
+        );
+        let cold = &scene.cold[sa];
+        assert_eq!(cold.previous_at(2).0.translation.x, 1.0);
+        assert_eq!(
+            cold.transform.0.translation,
+            DVec3::new(1.0, 0.0, 0.0) + shift
+        );
+        assert_eq!((cold.moved, cold.changed), (2, 2));
+        assert_eq!(cold.rows(cold.transform.0.translation)[0][3], 0.0);
+        // Turned: computed again at the next cull.
+        assert_eq!(scene.hot[sb].mesh_version, u64::MAX);
+        // A new mesh on a slot that didn't move goes the full way too.
+        world.get_mut::<ResolvedMesh>(a).unwrap().mesh = Handle::from_index(5);
+        scene.sync(&world, 3);
+        let hot = scene.hot[slot(&scene, a)];
+        assert_eq!(
+            (hot.mesh, hot.mesh_version, hot.lod),
+            (5, u64::MAX, LOD_UNSET)
+        );
     }
 
     #[test]

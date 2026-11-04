@@ -21,7 +21,10 @@
 //! changed. They stay relative to an anchor that moves in 64 m steps, so a moving camera
 //! leaves them as they are; only the anchor's step or moved hierarchies read them all again.
 //! A share of them is checked again each frame (textures whose mean color arrived). Hierarchies of
-//! all but small meshes build on worker threads. The hierarchies are packed in one
+//! all but small meshes build on worker threads; the small ones a frame asks for build side by
+//! side on the render prepare threads. A [`WorldShift`] (a floating-origin move, a jump that
+//! re-anchors the world) moves the cached boxes with it instead of refreshing every mesh entity
+//! its new transform marks changed. The hierarchies are packed in one
 //! store that only appends what's new. Each frame traces the probes that fit
 //! `RenderSettings::gi_budget_ms` at the cost per ray timestamps measured, and probes with
 //! nothing near sleep (Majercik et al. 2021).
@@ -39,6 +42,8 @@ mod bvh;
 use std::collections::{HashMap, HashSet};
 
 use bevy_ecs::change_detection::Tick;
+use bevy_ecs::entity::{EntityHashMap, EntityHashSet};
+use bevy_ecs::message::{MessageCursor, Messages};
 use bytemuck::{Pod, Zeroable};
 use engine_core::prelude::*;
 
@@ -48,6 +53,7 @@ use crate::material::{AlphaMode, StandardMaterial};
 use crate::mesh::Mesh;
 use crate::settings::RenderSettings;
 use engine_assets::{Assets, Handle};
+use engine_world::WorldShift;
 
 /// Texels along a probe's tile side (`PROBE_GI_TEXELS` in lib_frame.wgsl).
 const TEXELS: u32 = 8;
@@ -91,6 +97,10 @@ const UNMEASURED_PROBES_PER_FRAME: u32 = 512;
 const REBUILD_AFTER_FRAMES: u64 = 30;
 /// Frames a mesh's hierarchy stays after its last use.
 const KEEP_UNUSED_FRAMES: u64 = 600;
+/// How close (meters, and per matrix element) a transform must be to its cached one moved by a
+/// [`WorldShift`] to count as moved by the shift alone (the shift and the transform propagation
+/// round differently).
+const SHIFT_MATCH: f64 = 1e-6;
 
 /// `GiPass` in probe_gi.wgsl.
 #[repr(C)]
@@ -268,7 +278,7 @@ struct Placed {
     entities: Vec<Entity>,
     instances: Vec<GpuInstance>,
     boxes: Vec<(Vec3, Vec3)>,
-    slot_of: HashMap<Entity, u32>,
+    slot_of: EntityHashMap<u32>,
     tlas: Vec<bvh::Node>,
     /// Refits since it was built.
     refits: u32,
@@ -283,6 +293,34 @@ enum Read {
     Entry(Entry, bool),
 }
 
+/// The small meshes this frame's reads asked to have built (`BUILD_TRIANGLES_PER_FRAME`).
+#[derive(Default)]
+struct Builds {
+    /// Mesh index, version and handle of each.
+    queued: Vec<(u32, u64, Handle<Mesh>)>,
+    triangles: usize,
+    /// Built: later reads this frame ask for nothing more.
+    closed: bool,
+}
+
+/// Build the hierarchies of `queued` side by side on the render prepare threads (on Tobias's PC
+/// a jump's frames each built up to 8000 triangles one mesh after another).
+fn build_small(
+    meshes: &Assets<Mesh>,
+    queued: &[(u32, u64, Handle<Mesh>)],
+) -> Vec<(u32, u64, bvh::MeshBvh)> {
+    use rayon::prelude::*;
+    let build = |&(key, version, handle): &(u32, u64, Handle<Mesh>)| {
+        let mesh = meshes.get(handle)?;
+        let positions: Vec<[f32; 3]> = mesh.vertices.iter().map(|v| v.position).collect();
+        Some((key, version, bvh::build_mesh(&positions, &mesh.indices)))
+    };
+    if queued.len() == 1 {
+        return queued.iter().filter_map(build).collect();
+    }
+    crate::prepare::pool().install(|| queued.par_iter().filter_map(build).collect())
+}
+
 /// What reading entities needs from the world.
 struct Look<'a> {
     world: &'a World,
@@ -292,7 +330,6 @@ struct Look<'a> {
     shared: &'a GpuShared,
     default_material: &'a StandardMaterial,
     anchor: DVec3,
-    limit: u64,
 }
 
 /// What the instance gather reads; only change ticks while nothing changed.
@@ -305,11 +342,13 @@ type GatherQuery = (
 /// Skinned meshes are left out (the rays would see their bind pose), and shadow-only stand-ins.
 type GatherFilter = (Without<crate::GpuSkin>, Without<crate::ShadowOnly>);
 
-/// A mesh entity as the gather last saw it: its world box (absolute) and its mesh's version.
+/// A mesh entity as the gather last saw it: its world box (absolute), its transform (to tell a
+/// [`WorldShift`]'s move from its own) and its mesh's version.
 #[derive(Clone, Copy)]
 struct Cached {
     lo: DVec3,
     hi: DVec3,
+    affine: DAffine3,
     mesh: u32,
     version: u64,
 }
@@ -393,7 +432,7 @@ pub(crate) struct ProbeGi {
     /// What the instances were read for (`None`: read them all next frame).
     gathered: Option<GatherKey>,
     /// Every entity in the region as last read, and the instances on the GPU.
-    entries: HashMap<Entity, Entry>,
+    entries: EntityHashMap<Entry>,
     placed: Placed,
     /// Entities waiting on their mesh's hierarchy.
     pending: Vec<Entity>,
@@ -409,13 +448,15 @@ pub(crate) struct ProbeGi {
     /// Every visible mesh entity's world box, updated only for those whose change ticks moved
     /// (Unreal caches static ray-tracing instances the same way): a frame reads the change
     /// ticks of all and the components of only what changed.
-    cache: HashMap<Entity, Cached>,
+    cache: EntityHashMap<Cached>,
     /// The cached entities whose box overlaps the gather region, and that region (absolute).
-    in_region: HashSet<Entity>,
+    in_region: EntityHashSet,
     region: Option<(DVec3, DVec3)>,
     /// The cache's entities in the order `REVALIDATE_PER_FRAME` walks them.
     revalidate: Vec<Entity>,
     revalidate_at: usize,
+    /// Where the [`WorldShift`] messages were read up to.
+    shifts: MessageCursor<WorldShift>,
     /// Measured GPU milliseconds per thousand probe rays (0: not yet), and rays traced a frame
     /// lately (a moving average, as the measurements arrive a few frames late).
     ms_per_kray: f32,
@@ -445,6 +486,8 @@ struct Stats {
     /// Entities read, and mesh entities whose change ticks moved.
     read: u32,
     changed: u32,
+    /// Mesh entities a [`WorldShift`] alone moved this frame (their entries moved with it).
+    shifted: u32,
     rebuilt: bool,
     build_ms: f32,
     extract_ms: f32,
@@ -499,7 +542,11 @@ fn world_box(local: (Vec3, Vec3), affine: &DAffine3, origin: DVec3) -> (Vec3, Ve
 
 /// The world box of a mesh's local box under `affine` (absolute).
 fn world_box_abs(local: (Vec3, Vec3), affine: &DAffine3) -> (DVec3, DVec3) {
-    let (lo, hi) = (local.0.as_dvec3(), local.1.as_dvec3());
+    box_under(local.0.as_dvec3(), local.1.as_dvec3(), affine)
+}
+
+/// The box around box `lo`..`hi` under `affine`.
+fn box_under(lo: DVec3, hi: DVec3, affine: &DAffine3) -> (DVec3, DVec3) {
     let center = affine.transform_point3((lo + hi) * 0.5);
     let half = (hi - lo) * 0.5;
     let m = affine.matrix3;
@@ -552,7 +599,7 @@ impl ProbeGi {
             bounds: HashMap::new(),
             left_out_warned: false,
             gathered: None,
-            entries: HashMap::new(),
+            entries: EntityHashMap::default(),
             placed: Placed::default(),
             pending: Vec::new(),
             recheck: Vec::new(),
@@ -561,8 +608,9 @@ impl ProbeGi {
             query: None,
             tick: None,
             entities: 0,
-            cache: HashMap::new(),
-            in_region: HashSet::new(),
+            cache: EntityHashMap::default(),
+            in_region: EntityHashSet::default(),
+            shifts: MessageCursor::default(),
             region: None,
             revalidate: Vec::new(),
             revalidate_at: 0,
@@ -804,6 +852,7 @@ impl ProbeGi {
                     Cached {
                         lo,
                         hi,
+                        affine: transform.0,
                         mesh: handle.index(),
                         version: meshes.version(handle),
                     }
@@ -822,6 +871,47 @@ impl ProbeGi {
             self.in_region.insert(entity);
         }
         was_in || is_in
+    }
+
+    /// This frame's [`WorldShift`]s combined (none without the world module).
+    fn read_shifts(&mut self, world: &World) -> Option<WorldShift> {
+        let messages = world.get_resource::<Messages<WorldShift>>()?;
+        // Shifts missed (frames the renderer skipped) only cost refreshes: an entity is taken
+        // as shifted only where its transform is its cached one moved by the shifts read.
+        self.shifts
+            .read(messages)
+            .copied()
+            .reduce(|acc, next| acc.then(&next))
+    }
+
+    /// The world moved to a new frame (a floating-origin move, or a jump that re-anchors it):
+    /// move every cached box and transform with it. A shift moves every root transform, so the
+    /// change ticks name every mesh entity in the world (big_space: recentering "triggers change
+    /// detection even for objects that did not move"); refreshing them all took 17 ms on
+    /// Tobias's PC when a jump re-anchored the showcase at the lake. Unreal's scene instead
+    /// "shifts primitive position and all relevant data" by the offset (`ApplyWorldOffset`);
+    /// here an entity whose transform is its cached one moved by the shift keeps its entry.
+    /// The instances are read again (the anchor moved under them).
+    fn follow_shift(&mut self, s: &WorldShift) {
+        let affine = DAffine3::from_rotation_translation(s.rotation, s.translation);
+        let translation_only = s.is_translation_only();
+        let bounds = &self.bounds;
+        for c in self.cache.values_mut() {
+            if translation_only {
+                c.affine.translation += s.translation;
+                c.lo += s.translation;
+                c.hi += s.translation;
+            } else {
+                c.affine = affine * c.affine;
+                (c.lo, c.hi) = match bounds.get(&c.mesh) {
+                    Some(&(v, local)) if v == c.version => world_box_abs(local, &c.affine),
+                    _ => box_under(c.lo, c.hi, &affine),
+                };
+            }
+        }
+        // Which boxes are in the region, and every instance, again.
+        self.region = None;
+        self.gathered = None;
     }
 
     /// Store the hierarchies the workers finished; true when any did.
@@ -910,6 +1000,53 @@ impl ProbeGi {
         }
     }
 
+    /// Read `entity` again and update its entry and instance; true when instances came or went
+    /// (the instance hierarchy is built again). Instances that changed in place go in `moved`.
+    fn gather_one(
+        &mut self,
+        look: &Look,
+        query: &mut QueryState<GatherQuery, GatherFilter>,
+        entity: Entity,
+        builds: &mut Builds,
+        moved: &mut Vec<u32>,
+    ) -> bool {
+        let read = if self.in_region.contains(&entity) {
+            self.read(look, query, entity, builds)
+        } else {
+            Read::Gone
+        };
+        let (old, new) = match read {
+            Read::Gone => {
+                // Gone from the world (one that only left the region stays cached).
+                if self.in_region.remove(&entity) {
+                    self.cache.remove(&entity);
+                }
+                (self.entries.remove(&entity), None)
+            }
+            Read::Entry(entry, waiting) => {
+                if waiting {
+                    self.pending.push(entity);
+                }
+                let record = entry.record;
+                (self.entries.insert(entity, entry), record)
+            }
+        };
+        match (old.and_then(|e| e.record), new) {
+            (None, None) => false,
+            (Some(a), Some(b)) if a == b => false,
+            (Some(_), Some(b)) => match self.placed.slot_of.get(&entity) {
+                Some(&slot) => {
+                    self.placed.instances[slot as usize] = b.instance;
+                    self.placed.boxes[slot as usize] = b.bounds;
+                    moved.push(slot);
+                    false
+                }
+                None => true,
+            },
+            _ => true,
+        }
+    }
+
     /// Read `entity`'s instance: its mesh's hierarchy (built here when small and the frame's
     /// budget allows, on a worker when large), its transform and its material's light.
     fn read(
@@ -917,7 +1054,7 @@ impl ProbeGi {
         look: &Look,
         query: &mut QueryState<GatherQuery, GatherFilter>,
         entity: Entity,
-        built: &mut usize,
+        builds: &mut Builds,
     ) -> Read {
         let Ok((_, transform, renderer, resolved)) = query.get(look.world, entity) else {
             return Read::Gone;
@@ -977,11 +1114,15 @@ impl ProbeGi {
                             Err(e) => tracing::warn!("probe GI: no worker for a mesh: {e}"),
                         }
                     }
-                } else if *built == 0 || *built + triangles <= BUILD_TRIANGLES_PER_FRAME {
-                    *built += triangles;
-                    let bvh = bvh::build_mesh(&positions(), &mesh.indices);
-                    self.add_mesh(key, version, bvh, look.limit);
-                    waiting = false;
+                } else if builds.queued.iter().any(|q| q.0 == key) {
+                    // Already asked for this frame.
+                } else if !builds.closed
+                    && (builds.triangles == 0
+                        || builds.triangles + triangles <= BUILD_TRIANGLES_PER_FRAME)
+                {
+                    // Built after the reads, side by side with the frame's others.
+                    builds.triangles += triangles;
+                    builds.queued.push((key, version, handle));
                 }
             }
         }
@@ -1138,7 +1279,12 @@ impl ProbeGi {
             .take()
             .or_else(|| world.try_query_filtered())
             .expect("ProbeGi::ensure_query runs before extract");
+        let shift = self.read_shifts(world);
+        if let Some(s) = &shift {
+            self.follow_shift(s);
+        }
         let mut changed: Vec<Entity> = Vec::new();
+        let mut shifted = 0u32;
         let entities = match self.tick {
             Some(tick) => {
                 let mut n = 0usize;
@@ -1146,9 +1292,26 @@ impl ProbeGi {
                     crate::features::iter_since(&mut query, world, tick)
                 {
                     n += 1;
-                    if transform.is_changed() || renderer.is_changed() || resolved.is_changed() {
-                        changed.push(entity);
+                    let renderer_changed = renderer.is_changed();
+                    let resolved_changed = resolved.is_changed();
+                    if !transform.is_changed() && !renderer_changed && !resolved_changed {
+                        continue;
                     }
+                    let cached = self.cache.get(&entity);
+                    // Hidden and not cached: a refresh would find nothing to do.
+                    if !renderer.visible && cached.is_none() {
+                        continue;
+                    }
+                    // Moved by the shift alone: its cached box moved with it.
+                    if shift.is_some()
+                        && !renderer_changed
+                        && !resolved_changed
+                        && cached.is_some_and(|c| c.affine.abs_diff_eq(transform.0, SHIFT_MATCH))
+                    {
+                        shifted += 1;
+                        continue;
+                    }
+                    changed.push(entity);
                 }
                 n
             }
@@ -1207,9 +1370,9 @@ impl ProbeGi {
                     .map(|(e, _)| *e),
             );
             let entries = &self.entries;
-            dirty.extend(self.in_region.iter().filter(|e| !entries.contains_key(e)));
+            dirty.extend(self.in_region.iter().filter(|e| !entries.contains_key(*e)));
             let in_region = &self.in_region;
-            dirty.extend(entries.keys().filter(|e| !in_region.contains(e)));
+            dirty.extend(entries.keys().filter(|e| !in_region.contains(*e)));
         }
         if entities != self.entities {
             // Some went (or came, and those changed): the entries whose entity is gone.
@@ -1266,7 +1429,7 @@ impl ProbeGi {
         dirty.sort_unstable();
         dirty.dedup();
 
-        let mut built = 0usize;
+        let mut builds = Builds::default();
         // Instances came or went (the hierarchy is built again), or changed in place.
         let mut membership = full;
         let mut moved: Vec<u32> = Vec::new();
@@ -1280,45 +1443,35 @@ impl ProbeGi {
                 shared,
                 default_material: &default_material,
                 anchor,
-                limit,
             };
             for &entity in &dirty {
-                let read = if self.in_region.contains(&entity) {
-                    self.read(&look, &mut query, entity, &mut built)
-                } else {
-                    Read::Gone
-                };
-                let (old, new) = match read {
-                    Read::Gone => {
-                        // Gone from the world (one that only left the region stays cached).
-                        if self.in_region.remove(&entity) {
-                            self.cache.remove(&entity);
-                        }
-                        (self.entries.remove(&entity), None)
-                    }
-                    Read::Entry(entry, waiting) => {
-                        if waiting {
-                            self.pending.push(entity);
-                        }
-                        let record = entry.record;
-                        (self.entries.insert(entity, entry), record)
-                    }
-                };
-                match (old.and_then(|e| e.record), new) {
-                    (None, None) => {}
-                    (Some(a), Some(b)) if a == b => {}
-                    (Some(_), Some(b)) => match self.placed.slot_of.get(&entity) {
-                        Some(&slot) => {
-                            self.placed.instances[slot as usize] = b.instance;
-                            self.placed.boxes[slot as usize] = b.bounds;
-                            moved.push(slot);
-                        }
-                        None => membership = true,
-                    },
-                    _ => membership = true,
+                membership |= self.gather_one(&look, &mut query, entity, &mut builds, &mut moved);
+            }
+            // The small meshes the reads asked for, built side by side; then the entities
+            // waiting on them read again, so they're in this frame's scene.
+            if !builds.queued.is_empty() {
+                let done = build_small(meshes, &builds.queued);
+                for (key, version, bvh) in done {
+                    self.add_mesh(key, version, bvh, limit);
+                }
+                let keys: HashSet<u32> = builds.queued.iter().map(|q| q.0).collect();
+                let entries = &self.entries;
+                let (again, rest): (Vec<Entity>, Vec<Entity>) = std::mem::take(&mut self.pending)
+                    .into_iter()
+                    .partition(|e| {
+                        entries
+                            .get(e)
+                            .is_some_and(|entry| keys.contains(&entry.mesh.index()))
+                    });
+                self.pending = rest;
+                builds.closed = true;
+                for entity in again {
+                    membership |=
+                        self.gather_one(&look, &mut query, entity, &mut builds, &mut moved);
                 }
             }
         }
+        let built = builds.triangles;
         self.query = Some(query);
         let build_ms = build_started.elapsed().as_secs_f32() * 1000.0;
 
@@ -1500,6 +1653,7 @@ impl ProbeGi {
             full,
             read: dirty.len() as u32,
             changed: changed.len() as u32,
+            shifted,
             rebuilt: rebuild,
             build_ms,
             extract_ms: started.elapsed().as_secs_f32() * 1000.0,
@@ -1625,6 +1779,7 @@ impl ProbeGi {
         d.set("render.gi.full_gather", s.full as u8 as f64);
         d.set("render.gi.read", s.read as f64);
         d.set("render.gi.changed", s.changed as f64);
+        d.set("render.gi.shifted", s.shifted as f64);
         d.set("render.gi.rebuilt", s.rebuilt as u8 as f64);
         d.set("render.gi.gpu_ms_per_kray", self.ms_per_kray as f64);
         d.set("render.gi.build_ms", s.build_ms as f64);

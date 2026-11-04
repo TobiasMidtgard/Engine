@@ -32,7 +32,7 @@ use crate::settings::RenderSettings;
 const MAX_THREADS: usize = 8;
 
 /// The pool the shared prepares run on (made on first use).
-fn pool() -> &'static rayon::ThreadPool {
+pub(crate) fn pool() -> &'static rayon::ThreadPool {
     static POOL: OnceLock<rayon::ThreadPool> = OnceLock::new();
     POOL.get_or_init(|| {
         let threads = std::thread::available_parallelism()
