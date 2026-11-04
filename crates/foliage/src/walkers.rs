@@ -72,6 +72,22 @@ pub fn bender_radius(kind: ContactKind, size: [f32; 2]) -> f32 {
     }
 }
 
+/// The second sphere over a walker's feet, at its legs and hips: how far above the foot
+/// sphere's center and how wide, meters. Mesh plants part from it up to about its radius plus
+/// 0.3 m above its center (Rendering's mesh push), so a person moves hazel and bracken up to
+/// chest height and a horse up to its belly.
+pub fn body_reach(kind: ContactKind) -> Option<(f32, f32)> {
+    match kind {
+        ContactKind::Foot => Some((0.75, 0.38)),
+        ContactKind::Hoof => Some((0.8, 0.6)),
+        _ => None,
+    }
+}
+
+/// The leg-and-hip sphere riding on a walker's foot [`WalkerBender`] ([`body_reach`]).
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BodyBender;
+
 fn foot_like(kind: ContactKind) -> bool {
     matches!(
         kind,
@@ -157,6 +173,16 @@ pub fn bend_grass_for_walkers(
                         ChildOf(walker),
                     ))
                     .id();
+                // Legs and hips: a second sphere higher up moves the shrubs, ferns and low
+                // branches a walker wades through (grass only bends at the feet).
+                if let Some((rise, r)) = body_reach(c.kind) {
+                    commands.spawn((
+                        Transform::from_translation((Vec3::Y * rise / scale).as_dvec3()),
+                        GrassBender { radius: r },
+                        BodyBender,
+                        ChildOf(bender),
+                    ));
+                }
                 list.push((bender, at));
             }
             None => {}
@@ -287,6 +313,15 @@ mod tests {
         // Centered a little above the soles, so the blades under the body lie down.
         assert!(p.y > 5.1 && p.y < 5.5, "{p}");
         assert!((r - 0.45).abs() < 1e-6);
+        // And one at the legs and hips, for the shrubs and ferns it wades through.
+        let body: Vec<DVec3> = app
+            .world
+            .query_filtered::<&GlobalTransform, With<BodyBender>>()
+            .iter(&app.world)
+            .map(|g| g.translation())
+            .collect();
+        assert_eq!(body.len(), 1);
+        assert!((body[0].y - p.y - 0.75).abs() < 1e-3, "{body:?} over {p}");
 
         // It rides along: walk 3 m and jump.
         app.world.get_mut::<Transform>(walker).unwrap().translation += DVec3::new(3.0, 1.5, 0.0);
