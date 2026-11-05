@@ -17,9 +17,11 @@ use bevy_ecs::lifecycle::RemovedComponentEntity;
 use bevy_ecs::message::MessageCursor;
 use engine_core::prelude::*;
 
+use std::sync::Arc;
+
 use crate::components::{
-    DitherFade, MaxDrawDistance, MeshRenderer, NoMeshLod, NoVirtualGeometry, ResolvedMesh,
-    ShadowOnly, ShadowTexelRange,
+    DitherFade, InstanceRow, MaxDrawDistance, MeshInstances, MeshRenderer, NoMeshLod,
+    NoVirtualGeometry, ResolvedMesh, ShadowOnly, ShadowTexelRange,
 };
 use crate::mesh_feature::max_scale;
 use crate::virtual_geometry::Displacement;
@@ -38,8 +40,10 @@ pub(crate) const DISPLACED: u8 = 16;
 pub(crate) const FULL_DETAIL: u8 = 32;
 /// Has `ShadowOnly`: drawn into shadow maps, never in a view.
 pub(crate) const SHADOW_ONLY: u8 = 64;
+/// Has `MeshInstances`: its mesh is drawn once per row (`MeshScene::rows`).
+pub(crate) const ROWS: u8 = 128;
 /// The flags that come from marker components (the entity's archetype).
-const KINDS: u8 = INSTANCED_ONLY | DISPLACED | FULL_DETAIL | SHADOW_ONLY;
+const KINDS: u8 = INSTANCED_ONLY | DISPLACED | FULL_DETAIL | SHADOW_ONLY | ROWS;
 
 /// What the cull reads of a slot.
 #[derive(Clone, Copy, Debug)]
@@ -132,6 +136,34 @@ impl Cold {
     }
 }
 
+/// A [`MeshInstances`] row's own model matrix: the entity's transform `transform` applied to
+/// the row's placement (`R_yaw · s` about its position), relative to `origin`; and its normal
+/// matrix's columns (`MeshInstance::n`).
+pub(crate) fn row_matrices(
+    transform: &GlobalTransform,
+    row: &InstanceRow,
+    origin: DVec3,
+) -> ([[f32; 4]; 3], [[f32; 4]; 3]) {
+    let entity = transform.0.matrix3.as_mat3();
+    let turn = Mat3::from_rotation_y(row.yaw);
+    let scale = row.scale.abs().max(1e-6);
+    let linear = entity * turn * scale;
+    let t = (transform.0.transform_point3(row.position.as_dvec3()) - origin).as_vec3();
+    let m = [
+        linear.row(0).extend(t.x).to_array(),
+        linear.row(1).extend(t.y).to_array(),
+        linear.row(2).extend(t.z).to_array(),
+    ];
+    // The inverse transpose of `E · R · s` is `E⁻ᵀ · R / s` (R is a rotation).
+    let normal = entity.inverse().transpose() * turn * (1.0 / scale);
+    let n = [
+        normal.x_axis.extend(0.0).to_array(),
+        normal.y_axis.extend(0.0).to_array(),
+        normal.z_axis.extend(0.0).to_array(),
+    ];
+    (m, n)
+}
+
 fn with_translation(mut rows: [[f32; 4]; 3], t: DVec3) -> [[f32; 4]; 3] {
     let t = t.as_vec3();
     rows[0][3] = t.x;
@@ -148,6 +180,7 @@ type SceneChanged = Or<(
     Changed<MaxDrawDistance>,
     Changed<DitherFade>,
     Changed<ShadowTexelRange>,
+    Changed<MeshInstances>,
     Added<NoVirtualGeometry>,
     Added<Displacement>,
     Added<NoMeshLod>,
@@ -162,6 +195,7 @@ type SceneItem<'w> = (
     Option<Ref<'w, MaxDrawDistance>>,
     Option<Ref<'w, DitherFade>>,
     Option<Ref<'w, ShadowTexelRange>>,
+    Option<Ref<'w, MeshInstances>>,
     bool,
     bool,
     bool,
@@ -176,6 +210,7 @@ type SceneQuery = (
     Option<Ref<'static, MaxDrawDistance>>,
     Option<Ref<'static, DitherFade>>,
     Option<Ref<'static, ShadowTexelRange>>,
+    Option<Ref<'static, MeshInstances>>,
     Has<NoVirtualGeometry>,
     Has<Displacement>,
     Has<NoMeshLod>,
@@ -189,6 +224,8 @@ const NO_SLOT: u32 = u32::MAX;
 pub(crate) struct MeshScene {
     pub hot: Vec<Hot>,
     pub cold: Vec<Cold>,
+    /// Each slot's `MeshInstances` rows (`None`: the entity draws its mesh once).
+    pub rows: Vec<Option<Arc<[InstanceRow]>>>,
     /// The frame each slot's entity was last found.
     seen: Vec<u64>,
     /// Slot by entity index, with the entity (a reused index belongs to another entity).
@@ -201,7 +238,7 @@ pub(crate) struct MeshScene {
     changed_query: Option<QueryState<SceneQuery, SceneChanged>>,
     /// Where the removal messages of the query's components were last read (in
     /// `read_removals`' order).
-    removal_cursors: [MessageCursor<RemovedComponentEntity>; 10],
+    removal_cursors: [MessageCursor<RemovedComponentEntity>; 11],
     /// The world's change tick at the last sync (changes after it are new).
     tick: Option<Tick>,
     /// Slots rewritten by the latest sync.
@@ -332,6 +369,7 @@ impl MeshScene {
             components.valid_component_id::<Displacement>(),
             components.valid_component_id::<NoMeshLod>(),
             components.valid_component_id::<ShadowOnly>(),
+            components.valid_component_id::<MeshInstances>(),
         ];
         let mut removed = Vec::new();
         let mut missed = false;
@@ -365,6 +403,7 @@ impl MeshScene {
         }
         self.hot.swap_remove(s);
         self.cold.swap_remove(s);
+        self.rows.swap_remove(s);
         self.seen.swap_remove(s);
         if s < self.hot.len() {
             // The moved slot may be another gone entity's whose index a new one holds now.
@@ -404,6 +443,7 @@ impl MeshScene {
             max_distance,
             dither,
             texels,
+            instances,
             instanced_only,
             displaced,
             full_detail,
@@ -419,14 +459,16 @@ impl MeshScene {
             _ => None,
         };
         // Archetype flags: no per-entity reads. A texel range keeps a caster instanced (the
-        // cluster path draws its shadows without one).
-        let kind = if instanced_only || texels.is_some() {
+        // cluster path draws its shadows without one), and so do rows.
+        let kind = if instanced_only || texels.is_some() || instances.is_some() {
             INSTANCED_ONLY
         } else {
             0
         } | if displaced { DISPLACED } else { 0 }
             | if full_detail { FULL_DETAIL } else { 0 }
-            | if shadow_only { SHADOW_ONLY } else { 0 };
+            | if shadow_only { SHADOW_ONLY } else { 0 }
+            | if instances.is_some() { ROWS } else { 0 };
+        let rows = instances.as_ref().map(|i| i.rows.clone());
         let max = max_distance.as_ref().map_or(f32::MAX, |m| m.0);
         let cast_texels = texels.as_deref().copied().unwrap_or_default();
         let fade = dither.as_ref().map_or(0.0, |d| {
@@ -460,10 +502,16 @@ impl MeshScene {
                     || match &texels {
                         Some(t) => t.is_changed(),
                         None => hot.cast_texels != ShadowTexelRange::default(),
-                    };
+                    }
+                    || instances.as_ref().is_some_and(|i| i.is_changed());
                 if !changed {
                     return;
                 }
+                let same_rows = match (&self.rows[s], &rows) {
+                    (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+                    (None, None) => true,
+                    _ => false,
+                };
                 // Moved without turning or scaling, the rest as it was (a world shift moves
                 // every slot this way, and so do most movers): its bounds move with it, and
                 // its mesh's users and levels stay.
@@ -474,6 +522,7 @@ impl MeshScene {
                     && hot.dither == fade
                     && hot.cast_texels == cast_texels
                     && hot.flags & !MIRRORED == flags
+                    && same_rows
                     && self.cold[s].transform.0.matrix3 == transform.0.matrix3
                 {
                     let delta = transform.0.translation - self.cold[s].transform.0.translation;
@@ -524,6 +573,7 @@ impl MeshScene {
                 };
                 set_transform(&mut cold, *transform);
                 self.cold.push(cold);
+                self.rows.push(None);
                 self.seen.push(frame);
                 self.hot.push(Hot {
                     center: DVec3::ZERO,
@@ -544,6 +594,7 @@ impl MeshScene {
             }
         };
         self.dirty += 1;
+        self.rows[s] = rows;
         let mirrored = transform.0.matrix3.determinant() < 0.0;
         self.hot[s] = Hot {
             scale: max_scale(&transform),
@@ -882,5 +933,108 @@ mod tests {
         world.get_mut::<ResolvedMesh>(c).unwrap().mesh = Handle::from_index(1);
         scene.sync(&world, 4);
         assert_eq!(scene.meshes_used().collect::<Vec<_>>(), [1]);
+    }
+
+    #[test]
+    fn a_region_of_rows_is_one_slot_rewritten_once() {
+        let mut world = World::new();
+        let rows: Vec<InstanceRow> = (0..1000)
+            .map(|i| InstanceRow::at(Vec3::new(i as f32, 0.0, 0.0)))
+            .collect();
+        let region = spawn(&mut world, 0.0, 0, 0);
+        world
+            .entity_mut(region)
+            .insert(MeshInstances::new(rows.clone()));
+        let mut scene = MeshScene::default();
+        scene.ensure_query(&mut world);
+        scene.sync(&world, 1);
+        assert_eq!((scene.hot.len(), scene.dirty), (1, 1));
+        let s = slot(&scene, region);
+        assert_ne!(scene.hot[s].flags & ROWS, 0);
+        assert_ne!(
+            scene.hot[s].flags & INSTANCED_ONLY,
+            0,
+            "rows stay off the cluster path"
+        );
+        assert_eq!(scene.rows[s].as_deref().map(<[_]>::len), Some(1000));
+
+        // Touched with the same rows: left alone.
+        world
+            .get_mut::<MeshInstances>(region)
+            .unwrap()
+            .set_changed();
+        scene.sync(&world, 2);
+        assert_eq!(scene.dirty, 0);
+
+        // New rows: the one slot is rewritten (bounds again when next culled).
+        world.get_mut::<MeshInstances>(region).unwrap().rows = rows[..10].into();
+        scene.sync(&world, 3);
+        assert_eq!(scene.dirty, 1);
+        assert_eq!(scene.rows[s].as_deref().map(<[_]>::len), Some(10));
+        assert_eq!(scene.hot[s].mesh_version, u64::MAX);
+        assert_eq!(scene.cold[s].changed, 3);
+
+        // Rows gone: a plain entity again.
+        world.entity_mut(region).remove::<MeshInstances>();
+        scene.sync(&world, 4);
+        let s = slot(&scene, region);
+        assert!(scene.rows[s].is_none());
+        assert_eq!(scene.hot[s].flags & ROWS, 0);
+
+        // Slots dropped in the middle keep each slot's rows with it.
+        let a = spawn(&mut world, 5.0, 1, 0);
+        world
+            .entity_mut(a)
+            .insert(MeshInstances::new(rows[..3].to_vec()));
+        scene.sync(&world, 5);
+        world.despawn(region);
+        scene.sync(&world, 6);
+        assert_eq!(scene.hot.len(), 1);
+        assert_eq!(
+            scene.rows[slot(&scene, a)].as_deref().map(<[_]>::len),
+            Some(3)
+        );
+    }
+
+    #[test]
+    fn a_row_is_placed_by_the_entity_then_its_own_turn_and_scale() {
+        let transform = GlobalTransform::from(
+            Transform::from_xyz(100.0, 2.0, 0.0).with_rotation(Quat::from_rotation_y(0.5)),
+        );
+        let row = InstanceRow {
+            position: Vec3::new(1.0, 0.0, 2.0),
+            yaw: 0.25,
+            scale: 2.0,
+            ..Default::default()
+        };
+        let origin = DVec3::new(100.0, 0.0, 0.0);
+        let (m, n) = row_matrices(&transform, &row, origin);
+        let point = Vec3::new(0.3, 1.0, -0.2);
+        let placed = Vec3::new(
+            Vec4::from(m[0]).dot(point.extend(1.0)),
+            Vec4::from(m[1]).dot(point.extend(1.0)),
+            Vec4::from(m[2]).dot(point.extend(1.0)),
+        );
+        let local = row.position + Quat::from_rotation_y(row.yaw) * point * row.scale;
+        let expect = (transform.transform_point(local.as_dvec3()) - origin).as_vec3();
+        assert!(placed.distance(expect) < 1e-4, "{placed} vs {expect}");
+        // Normals turn with the row (both yaws) and keep their length up to the scale.
+        let normal = Mat3::from_cols(
+            Vec4::from(n[0]).truncate(),
+            Vec4::from(n[1]).truncate(),
+            Vec4::from(n[2]).truncate(),
+        ) * Vec3::X;
+        let turned = Quat::from_rotation_y(0.75) * Vec3::X;
+        assert!(
+            normal.normalize().distance(turned) < 1e-5,
+            "{normal} vs {turned}"
+        );
+        assert_eq!(row.packed_tint(), 0.0);
+        let tinted = InstanceRow {
+            tint: [0.5, 1.0, 2.0],
+            ..row
+        };
+        let v = tinted.packed_tint() as u32 - 1;
+        assert_eq!((v & 255, v >> 8 & 255, v >> 16), (64, 128, 255));
     }
 }

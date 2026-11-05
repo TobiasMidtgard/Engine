@@ -412,6 +412,71 @@ impl MeshRenderer {
     }
 }
 
+/// Many copies of this entity's [`MeshRenderer`] mesh, one per row, without an entity each:
+/// shrubs, saplings and other small plants a region holds by the thousand. The entity is the
+/// region's anchor (its transform places every row); each row is drawn as the mesh would be on
+/// an entity of its own, with its shadows, motion vectors and bone wind, and culled on its own
+/// against the view. The rows share the entity's material, `DitherFade`, `MaxDrawDistance` and
+/// `ShadowTexelRange`, and are drawn at the level of detail their size on screen picks (without
+/// a cross-fade) and never as impostors: keep one entity per region and level.
+///
+/// Change the rows by replacing the whole set (cheap: the slice is shared): the region is
+/// rewritten once, and static shadow images that held it redraw it.
+#[derive(Component, Debug, Clone, Default)]
+pub struct MeshInstances {
+    pub rows: std::sync::Arc<[InstanceRow]>,
+}
+
+impl MeshInstances {
+    pub fn new(rows: impl Into<std::sync::Arc<[InstanceRow]>>) -> Self {
+        Self { rows: rows.into() }
+    }
+}
+
+/// One copy in [`MeshInstances`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct InstanceRow {
+    /// Where its origin is, in the entity's space.
+    pub position: Vec3,
+    /// Turn about the entity's up axis (radians).
+    pub yaw: f32,
+    /// Uniform scale (on top of the entity's).
+    pub scale: f32,
+    /// Multiplies the mesh's surface color (0..2 per channel, 1 = unchanged; 1/128 steps).
+    pub tint: [f32; 3],
+}
+
+impl Default for InstanceRow {
+    fn default() -> Self {
+        Self {
+            position: Vec3::ZERO,
+            yaw: 0.0,
+            scale: 1.0,
+            tint: [1.0; 3],
+        }
+    }
+}
+
+impl InstanceRow {
+    pub fn at(position: Vec3) -> Self {
+        Self {
+            position,
+            ..Default::default()
+        }
+    }
+
+    /// The tint as the instance carries it (`MeshInstance::n[1][3]`): 0 for none, else
+    /// `1 + r + 256 g + 65536 b` with each channel in 128ths (exact in an `f32`).
+    pub(crate) fn packed_tint(&self) -> f32 {
+        if self.tint == [1.0; 3] {
+            return 0.0;
+        }
+        let q = |c: f32| (c.clamp(0.0, 2.0) * 127.5).round() as u32;
+        let [r, g, b] = self.tint.map(q);
+        (1 + r + (g << 8) + (b << 16)) as f32
+    }
+}
+
 /// Handles resolved from a [`MeshRenderer`] (managed by the engine).
 #[derive(Component, Debug, Clone, Copy, PartialEq)]
 pub struct ResolvedMesh {
