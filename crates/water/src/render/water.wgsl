@@ -1768,7 +1768,20 @@ fn shade_stream(in: FlowOut, front: bool) -> vec4<f32> {
     // down the pool, and the chute above it runs aerated.
     // Torn into froth and darker gaps, fewer gaps where it boils hardest.
     let raw = mix(l0, l1, wgt) / 0.875;
-    let froth = smoothstep(0.55 - 0.35 * in.white, 0.8 - 0.25 * in.white, raw);
+    var froth = smoothstep(0.55 - 0.35 * in.white, 0.8 - 0.25 * in.white, raw);
+    // Froth is bubbles: mottled at a hand's size and drawn out along the current, not one
+    // flat sheet of white (fine detail fades out where a pixel spans it).
+    let fine_on = 1.0 - smoothstep(0.02, 0.06, pixel);
+    if (fine_on > 0.0) {
+        let along = normalize(in.vel + vec2<f32>(1e-4, 0.0));
+        let across = vec2<f32>(-along.y, along.x);
+        let q = vec2<f32>(dot(wp, along) * 2.5, dot(wp, across) * 7.0);
+        let qs = vec2<f32>(length(shift), 0.0) * 2.5;
+        let m0 = fbm2(q - qs * phase0, 2);
+        let m1 = fbm2(q - qs * phase1 + vec2<f32>(3.3, 1.7), 2);
+        let mottle = smoothstep(0.25, 0.7, mix(m0, m1, wgt) / 0.75);
+        froth *= mix(1.0, mix(0.35, 1.0, mottle), fine_on * (1.0 - 0.5 * in.white));
+    }
     foam += in.white * froth * 0.8;
     let lap = 0.5 + 0.5 * sin(t * 1.3 + value_noise2(wp * 0.7) * 6.0);
     foam += (1.0 - smoothstep(0.002, 0.01, in.depth)) * lap * 0.5;

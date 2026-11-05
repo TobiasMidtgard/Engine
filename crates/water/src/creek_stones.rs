@@ -32,6 +32,7 @@ use crate::creeks::{
 use crate::demo::props::Part;
 use crate::demo::scenery::{merged, spawn_prop};
 use crate::demo::valley::StreamStone;
+use crate::flow::{FALL_POINTS, FallPoint, Lip};
 
 /// Big stones are drawn this far from the camera, meters.
 pub const STONES_M: f64 = 150.0;
@@ -49,7 +50,7 @@ const HYSTERESIS_M: f64 = 20.0;
 const PERIOD_S: f32 = 0.25;
 /// Where along a step's surface its lip runs (`step_profile`: the pool's end, the chute's
 /// start), and a little into the chute.
-const LIP: f32 = 0.84;
+const LIP: f32 = crate::creeks::STEP_POOL;
 
 /// A reach's stones, in the order they lie down it.
 #[derive(Debug, Default)]
@@ -57,7 +58,33 @@ pub struct ReachStones {
     pub stones: Vec<StreamStone>,
     /// Meters from the reach's source to each stone.
     pub along: Vec<f32>,
+    /// Where water pours off a step's lip and falls free into the pool below, in the order
+    /// they lie down the reach ([`PourOver`]).
+    pub pours: Vec<PourOver>,
 }
+
+/// Water pouring off a stretch of a step's lip into the pool below: the lip, its path down
+/// and whether the sheet carries on past either end (as [`crate::flow::Falls`] holds them,
+/// so the waterfalls' renderer draws it).
+///
+/// On stepped beds the water leaves each step as a free jet (nappe or tumbling flow) while
+/// the critical depth d_c = (q²/g)^(1/3) is under about (1.2 − 0.325 h/l) times the step's
+/// drop h (l its length); above that it skims over the steps (Chanson, stepped chutes). Natural
+/// step-pool creeks run tumbling at all but high flows (Comiti et al. 2007). At the brink the
+/// water is about 0.715 d_c deep (Rouse 1936), so it leaves at q / 0.715 d_c.
+#[derive(Debug, Clone)]
+pub struct PourOver {
+    /// Meters from the reach's source to the lip.
+    pub along: f32,
+    pub lip: Lip,
+    pub path: Vec<FallPoint>,
+    pub sides: [bool; 2],
+}
+
+/// Pour-overs are drawn this far from the camera, meters.
+pub const POURS_M: f64 = 60.0;
+/// Steps that drop less than this pour as a ripple over the lip rather than a fall, meters.
+const LEAST_POUR_M: f32 = 0.15;
 
 impl ReachStones {
     /// The stones between `from` and `to` meters down the reach (indices).
@@ -199,10 +226,203 @@ pub fn lay_reach_stones(
         s += (width * rng.range(1.2, 2.6)).max(rng.range(1.2, 2.5));
     }
     out.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let pours = lay_pours(&course, ground, &out, &mut rng);
     ReachStones {
         along: out.iter().map(|o| o.0).collect(),
         stones: out.into_iter().map(|o| o.1).collect(),
+        pours,
     }
+}
+
+/// The pour-overs of every step down `course` (see [`PourOver`]): each lip in tumbling flow cut
+/// into strips a few tens of centimeters wide across the bed, following its crooked line.
+fn lay_pours(
+    course: &Course,
+    ground: &dyn Fn(f64, f64) -> f64,
+    stones: &[(f32, StreamStone)],
+    rng: &mut Rng,
+) -> Vec<PourOver> {
+    let length = course.length();
+    let last = course.phase.last().copied().unwrap_or(0.0);
+    let mut out: Vec<PourOver> = Vec::new();
+    let mut n = 0.0f32;
+    while n + LIP < last {
+        let lip = n + LIP;
+        n += 1.0;
+        let Some(s) = course.at_phase(lip) else {
+            continue;
+        };
+        if s < 2.0 || s > length - 2.0 {
+            continue;
+        }
+        let st = course.station(s);
+        let (widths, amount) = step_spacing(st.slope);
+        if amount < 0.1 {
+            continue;
+        }
+        let width = st.width.max(0.4);
+        let half = 0.5 * width;
+        let q_mean = st.flow / width;
+        let step_length = widths * width;
+        // Strips about 0.3 m wide over the wet middle of the bed (the edges are too shallow
+        // to pour).
+        let strips = ((1.7 * half / 0.3).round() as usize).clamp(3, 10);
+        let strip = 1.7 * half / strips as f32;
+        let mut joined = false;
+        for k in 0..strips {
+            let x = -0.85 + (k as f32 + 0.5) * 1.7 / strips as f32;
+            let skew = step_skew(x, lip) * amount;
+            let Some(at) = course.at_phase(lip - skew) else {
+                continue;
+            };
+            // (`n` already counts on to the next step: its start is this step's foot.)
+            let Some(foot_at) = course.at_phase(n - skew) else {
+                continue;
+            };
+            let here = course.station(at);
+            let side = Vec2::new(-here.dir.y, here.dir.x);
+            let off = side * (x * half);
+            let top_y = course.surface(&Station { phase: lip, ..here }).0;
+            let foot_y = course
+                .surface(&Station {
+                    phase: n,
+                    ..course.station(foot_at)
+                })
+                .0;
+            let drop = (top_y - foot_y) as f32;
+            // Water over a meter of lip here: the parabolic section carries more mid-bed.
+            let q = (q_mean * 1.5 * (1.0 - x * x)).max(0.005);
+            let critical = (q * q / 9.81).cbrt();
+            let skims = critical / drop.max(1e-3) > 1.2 - 0.325 * drop / step_length.max(0.1);
+            if drop < LEAST_POUR_M * (0.8 + 0.4 * rng.f32()) || skims {
+                // A break in the sheet: the strips either side end here.
+                if joined && let Some(prev) = out.last_mut() {
+                    prev.sides[1] = false;
+                }
+                joined = false;
+                continue;
+            }
+            let lip = Lip {
+                top: DVec3::new(here.at.x + off.x as f64, top_y, here.at.z + off.y as f64),
+                dir: here.dir,
+                speed: (q / (0.715 * critical)).clamp(0.3, 4.0),
+                q,
+                drop,
+                width: strip,
+                launch: 0.0,
+                // Rough rock lips: several times a smooth weir's 0.012.
+                turbulence: 0.05,
+            };
+            let path = pour_path(&lip, foot_y, ground);
+            // No water where a boulder stands well out of it (the lip's own stones, a hand
+            // over the water, are what it pours between and over).
+            let blocked = stones.iter().any(|(along, stone)| {
+                (along - at).abs() < 4.0
+                    && stone.at.y + stone.height as f64 > top_y + 0.15
+                    && path.iter().step_by(2).any(|f| {
+                        DVec2::new(f.pos.x - stone.at.x, f.pos.z - stone.at.z).length()
+                            < (0.85 * stone.radius()) as f64
+                    })
+            });
+            if blocked {
+                if joined && let Some(prev) = out.last_mut() {
+                    prev.sides[1] = false;
+                }
+                joined = false;
+                continue;
+            }
+            out.push(PourOver {
+                along: at,
+                lip,
+                path,
+                sides: [joined, true],
+            });
+            joined = true;
+        }
+        if joined && let Some(last) = out.last_mut() {
+            last.sides[1] = false;
+        }
+    }
+    out.sort_by(|a, b| a.along.total_cmp(&b.along));
+    out
+}
+
+/// The path of water poured off `lip` (see [`crate::flow::FlowSim::fall_path`]): free fall,
+/// and where it meets the face of the step (the bed from `ground`), sliding down it until it
+/// reaches the pool's surface at `pool`. [`FALL_POINTS`] segments, evenly spaced.
+fn pour_path(lip: &Lip, pool: f64, ground: &dyn Fn(f64, f64) -> f64) -> Vec<FallPoint> {
+    const G: f32 = 9.81;
+    const H: f32 = 1.0 / 240.0;
+    // The sheet's thickness on the rock.
+    const SHEET: f32 = 0.04;
+    let normal_at = |x: f64, z: f64| {
+        let e = 0.05;
+        let dx = (ground(x + e, z) - ground(x - e, z)) / (2.0 * e);
+        let dz = (ground(x, z + e) - ground(x, z - e)) / (2.0 * e);
+        Vec3::new(-dx as f32, 1.0, -dz as f32).normalize()
+    };
+    let mut p = lip.top;
+    let mut v = Vec3::new(lip.dir.x * lip.speed, 0.0, lip.dir.y * lip.speed);
+    let mut rock = Vec3::ZERO;
+    let mut t = 0.0f32;
+    let mut path = vec![(p, v, t, rock)];
+    while t < 1.5 {
+        t += H;
+        if rock == Vec3::ZERO {
+            v.y -= G * H;
+        } else {
+            let down = Vec3::new(0.0, -G, 0.0);
+            v += (down - rock * down.dot(rock)) * H;
+            v *= 1.0 - 1.2 * H;
+        }
+        p += (v * H).as_dvec3();
+        let bed = ground(p.x, p.z);
+        if p.y <= pool {
+            p.y = pool;
+            path.push((p, v, t, rock));
+            break;
+        }
+        if rock != Vec3::ZERO && p.y > bed + (SHEET + 0.1) as f64 {
+            // The face drops away under it: it leaves the rock.
+            rock = Vec3::ZERO;
+        } else if p.y <= bed + SHEET as f64 {
+            if rock == Vec3::ZERO {
+                // Hitting the face throws off some of its speed.
+                v *= 0.7;
+            }
+            rock = normal_at(p.x, p.z);
+            p.y = bed + SHEET as f64;
+            let into = v.dot(rock);
+            if into < 0.0 {
+                v -= rock * into;
+            }
+        }
+        path.push((p, v, t, rock));
+    }
+    // Even spacing along the path.
+    let mut along = vec![0.0f64; path.len()];
+    for k in 1..path.len() {
+        along[k] = along[k - 1] + path[k].0.distance(path[k - 1].0);
+    }
+    let total = along.last().copied().unwrap_or(0.0).max(1e-4);
+    let mut k = 0;
+    (0..=FALL_POINTS)
+        .map(|i| {
+            let want = total * i as f64 / FALL_POINTS as f64;
+            while k + 2 < path.len() && along[k + 1] < want {
+                k += 1;
+            }
+            let (a, b) = (path[k], path[(k + 1).min(path.len() - 1)]);
+            let span = (along[(k + 1).min(path.len() - 1)] - along[k]).max(1e-9);
+            let f = ((want - along[k]) / span).clamp(0.0, 1.0);
+            FallPoint {
+                pos: a.0.lerp(b.0, f),
+                vel: a.1.lerp(b.1, f as f32),
+                t: a.2 + (b.2 - a.2) * f as f32,
+                rock: if f < 0.5 { a.3 } else { b.3 },
+            }
+        })
+        .collect()
 }
 
 /// The current round a stone (seen from above), for a point of the water near it: the
@@ -642,6 +862,48 @@ mod tests {
         // On the ground the meadow carved.
         for s in &stones.stones {
             assert!((s.at.y - m.height(s.at.x as f32, s.at.z as f32) as f64).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn water_pours_off_the_steps_at_normal_flow_and_skims_in_a_flood() {
+        // A bed under every step's water.
+        let bed = |x: f64, _: f64| -0.05 * x - 0.4;
+        let steep = lay_reach_stones(&straight(200.0, 0.05, 2.0), &bed, 7);
+        let gentle = lay_reach_stones(&straight(200.0, 0.005, 2.0), &flat, 7);
+        let mut flood = straight(200.0, 0.05, 2.0);
+        for p in &mut flood {
+            p.flow_m3_s = 12.0;
+        }
+        let flood = lay_reach_stones(&flood, &bed, 7);
+        assert!(steep.pours.len() > 30, "{}", steep.pours.len());
+        assert!(gentle.pours.is_empty() && flood.pours.is_empty());
+        for p in &steep.pours {
+            // Off the lip and down, a drop's worth, landing beyond the lip.
+            let (first, last) = (p.path[0], p.path[p.path.len() - 1]);
+            assert!((first.pos.y - p.lip.top.y).abs() < 1e-6);
+            let fell = (first.pos.y - last.pos.y) as f32;
+            assert!((fell - p.lip.drop).abs() < 0.02, "{fell} {}", p.lip.drop);
+            assert!(last.pos.x > first.pos.x);
+            assert!(p.path.windows(2).all(|w| w[1].pos.y <= w[0].pos.y + 1e-6));
+        }
+        // Each lip's sheet has two ends.
+        let ends = steep.pours.iter().filter(|p| !p.sides[0]).count();
+        assert_eq!(ends, steep.pours.iter().filter(|p| !p.sides[1]).count());
+    }
+
+    #[test]
+    fn the_meadow_steps_pour_down_their_carved_faces() {
+        let m = meadow();
+        let reach = m.reaches.iter().find(|r| r.order == 1).expect("brook");
+        let ground = |x: f64, z: f64| m.height(x as f32, z as f32) as f64;
+        let stones = lay_reach_stones(&reach.points, &ground, reach_seed(reach));
+        assert!(!stones.pours.is_empty());
+        for p in &stones.pours {
+            // Never through the bed.
+            for f in &p.path {
+                assert!(f.pos.y >= ground(f.pos.x, f.pos.z) - 0.02, "{f:?}");
+            }
         }
     }
 }
