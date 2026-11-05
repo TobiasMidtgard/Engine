@@ -902,7 +902,8 @@ fn topple_direction(focus: &FocusPoints, pos: DVec3, height: f32, e: Entity) -> 
     Vec3::new(yaw.cos(), 0.0, yaw.sin())
 }
 
-/// Whether a log lies across one of the region's keep-clear circles.
+/// Whether a log lies across one of the region's keep-clear circles or sight lines (a trunk
+/// across a view's lens would fill it, and so would the dead crown a fresh one still carries).
 fn blocks_keep_clear(
     region: &EcologyRegion,
     center: DVec3,
@@ -910,10 +911,16 @@ fn blocks_keep_clear(
     library: &PlantLibrary,
 ) -> bool {
     let span = LogSpan::of(center, log, library);
-    region
-        .keep_clear
-        .iter()
-        .any(|c| span.distance_to(Vec2::new(c[0], c[1])) < c[2] + span.radius)
+    let crown = if log.years < crate::felling::LOG_BARE_YEARS {
+        0.7 * library.get(log.species).crown_radius_m * log.size
+    } else {
+        0.0
+    };
+    let near = |c: &[f32; 3], spread: f32| {
+        span.distance_to(Vec2::new(c[0], c[1])) < c[2] + span.radius + spread
+    };
+    region.keep_clear.iter().any(|c| near(c, 0.0))
+        || region.sight_lines.iter().any(|c| near(c, crown))
 }
 
 /// A log's footprint on the ground: butt to tip in region-local X/Z, and its thickness.
@@ -1022,6 +1029,7 @@ fn disturb(
                         years: 0.0,
                         rot_years: 8.0 + 10.0 * p.plant.size,
                         genes: p.plant.genes,
+                        uprooted: false,
                     });
                 } else if sim.rng.chance(0.7) {
                     // Crushed by the logging.
@@ -1045,10 +1053,11 @@ fn disturb(
                     continue;
                 }
                 let sp = library.get(p.plant.species);
-                if sp.is_tree() && p.plant.stage.is_alive() && p.plant.size > 0.35 {
+                if sp.is_tree() && p.plant.stage.is_alive() && p.plant.size > 0.3 {
                     if sim.rng.chance(0.15) {
                         continue;
                     }
+                    let uprooted = sim.rng.chance(0.65);
                     logs.push(SimLog {
                         entity: None,
                         pos: p.pos,
@@ -1058,8 +1067,9 @@ fn disturb(
                         years: years_ago - years_since,
                         rot_years: 15.0 + 20.0 * p.plant.size,
                         genes: p.plant.genes,
+                        uprooted,
                     });
-                    if sim.rng.chance(0.65) {
+                    if uprooted {
                         p.removed = true;
                     } else {
                         p.plant.stage = PlantStage::Stump { years: 0.0 };
@@ -1169,6 +1179,7 @@ pub fn spawn_log(world: &mut World, log: &SimLog) -> Entity {
                 years: log.years,
                 rot_years: log.rot_years,
                 size: log.size,
+                uprooted: log.uprooted,
             },
             crate::felling::LogPose {
                 yaw: log.yaw,
@@ -1399,6 +1410,7 @@ pub fn ecology_step(world: &mut World) {
                 years: log.years,
                 rot_years: log.rot_years,
                 genes: pose.genes,
+                uprooted: log.uprooted,
             });
         }
     }
@@ -1961,6 +1973,7 @@ mod tests {
             years: 0.0,
             rot_years: 10.0,
             genes: Genes::default(),
+            uprooted: false,
         };
         // Falling toward +Z, the trunk reaches across the clearing at (0, 5).
         assert!(blocks_keep_clear(
@@ -1997,6 +2010,7 @@ mod tests {
             years: 0.0,
             rot_years: 10.0,
             genes: Genes::default(),
+            uprooted: false,
         };
         // One lies along +X from the origin; the new one came down across it.
         let lying = [log(0.0, 0.0, 0.0)];

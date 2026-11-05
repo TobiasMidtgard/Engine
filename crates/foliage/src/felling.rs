@@ -621,6 +621,7 @@ pub fn update_falling_trees(
                             years: f.years_dead,
                             rot_years: 8.0 + 10.0 * f.size,
                             size: f.size,
+                            uprooted: false,
                         },
                         LogPlaced,
                     ));
@@ -741,13 +742,28 @@ pub fn update_falling_trees(
     }
 }
 
+/// Root plate meshes (a few shapes, each scaled to its tree) and their earth material.
+pub struct RootPlates {
+    meshes: Vec<engine_assets::Handle<engine_render::Mesh>>,
+    material: engine_assets::Handle<engine_render::StandardMaterial>,
+}
+
+/// Root plate shapes to choose from.
+const ROOT_PLATE_SHAPES: u64 = 4;
+
 /// Lay logs that appeared without falling (a region's history, scenes, the API) on the ground.
+/// A log the wind threw roots and all stands its root plate up at its butt.
 pub fn place_logs(
     mut commands: Commands,
     library: Res<PlantLibrary>,
     ground: Option<Res<Ground>>,
     mut logs: Query<(Entity, &FelledLog, &LogPose, &mut Transform), Without<LogPlaced>>,
+    meshes: Option<ResMut<engine_assets::Assets<engine_render::Mesh>>>,
+    materials: Option<ResMut<engine_assets::Assets<engine_render::StandardMaterial>>>,
+    mut plates: Local<Option<RootPlates>>,
 ) {
+    // Without the renderer's assets (headless tests) logs lie without their plates.
+    let mut assets = meshes.zip(materials);
     for (e, log, pose, mut t) in &mut logs {
         let sp = library.get(log.species);
         let rot = log.years / log.rot_years.max(0.1);
@@ -762,6 +778,24 @@ pub fn place_logs(
         );
         *t = rest;
         commands.entity(e).insert(LogPlaced);
+        if let Some((meshes, materials)) = assets.as_mut().filter(|_| log.uprooted && !pose.charred)
+        {
+            let plates = plates.get_or_insert_with(|| RootPlates {
+                meshes: (0..ROOT_PLATE_SHAPES)
+                    .map(|k| meshes.add(crate::meshgen::root_plate::root_plate(k)))
+                    .collect(),
+                material: materials.add(
+                    engine_render::StandardMaterial::color(1.0, 1.0, 1.0).with_roughness(0.95),
+                ),
+            });
+            let shape = (pose.genes.hue.to_bits() as u64) % ROOT_PLATE_SHAPES;
+            let local = root_plate_transform(ground.as_deref(), &rest, sp, log.size, &pose.genes);
+            commands.spawn((
+                local,
+                engine_render::MeshRenderer::new(plates.meshes[shape as usize], plates.material),
+                ChildOf(e),
+            ));
+        }
         if log.years < LOG_BARE_YEARS && !pose.charred {
             commands
                 .entity(e)
@@ -773,6 +807,34 @@ pub fn place_logs(
             0.7
         };
         spawn_log_collider(&mut commands, e, &rest, sp, log.size, &pose.genes, reach);
+    }
+}
+
+/// Where a thrown tree's root plate stands, in its log's frame (`rest`): on edge at the butt, the
+/// trunk growing out of its forest-floor face, about two thirds of it above the ground.
+fn root_plate_transform(
+    ground: Option<&Ground>,
+    rest: &Transform,
+    sp: &PlantSpecies,
+    size: f32,
+    genes: &Genes,
+) -> Transform {
+    let (_, cut) = model_heights(sp);
+    let r = (sp.trunk_radius_m * size * genes.crown).max(0.04);
+    let (radius, _) = crate::meshgen::root_plate::plate_size(r);
+    let axis = (rest.rotation * Vec3::Y).as_dvec3();
+    let butt = rest.transform_point(DVec3::new(0.0, cut as f64, 0.0));
+    let mut center = butt - axis * (0.12 * radius) as f64;
+    let floor = ground_y(ground, center);
+    center.y = center.y.max(floor + 0.55 * radius as f64);
+    let translation = rest.to_affine().inverse().transform_point3(center);
+    // The log's frame is scaled (girth across, height along): undo it, so the plate keeps its
+    // own proportions. Its turn about the trunk's axis varies tree to tree.
+    let scale = Vec3::splat(radius) / rest.scale.max(Vec3::splat(1e-3));
+    Transform {
+        translation,
+        rotation: Quat::from_rotation_y(genes.lean_dir * 2.3),
+        scale,
     }
 }
 
