@@ -44,7 +44,7 @@ struct Globals {
     under2: vec4<f32>,   // underwater scatter color rgb, surface level rel camera y
     detail: vec4<f32>,   // fine waves: 1/tile size (1/m) x, y; streams' amplitude scale; ripples from surface_tex (1/0)
     detail2: vec4<f32>,  // fine waves: tiles' wind direction x, z; on (1/0), unused
-    plunges: array<vec4<f32>, 8>, // where falls land: foot rel camera xyz, boil radius (m)
+    plunges: array<vec4<f32>, 16>, // where falls land: foot rel camera xyz, boil radius (m; negative under a creek's step, which spreads no plume)
     coarse: vec4<f32>,   // dispersive ripples' coarse level: corner rel camera x, z, size (m), drawn (1/0)
     mirror_vp: mat4x4<f32>, // the lake mirror's picture: view-projection of camera-relative points
     mirror: vec4<f32>,   // its exposure / ours, near plane (m), mips, body slot (-1 none)
@@ -158,11 +158,12 @@ fn flood_plume(look: WaterLook, rel: vec3<f32>) -> WaterLook {
     if (pl.y < 0.001) { return look; }
     let wp = tiling_pos(rel).xz;
     var p = 0.0;
-    for (var i = 0u; i < min(water.g.counts.w, 8u); i++) {
+    for (var i = 0u; i < min(water.g.counts.w, 16u); i++) {
         // A plume's area goes with the water coming in: its radius with √power, from the
         // boil's radius (`boil_radius`: 0.8 + √(power / 9.81 kW)), full by ~100 kW (1 m³/s
         // falling 10 m).
         let pg = water.g.plunges[i];
+        if (pg.w < 0.0) { continue; }
         let share = clamp((pg.w - 0.8) / 3.2, 0.3, 1.0);
         p = max(p, plume_from(pg.xyz, share, rel, wp, f32(i)));
     }
@@ -218,8 +219,9 @@ fn plunge_boil(rel: vec3<f32>) -> vec3<f32> {
     var out = vec3<f32>(0.0);
     let wp = tiling_pos(rel).xz;
     let t = time_s();
-    for (var i = 0u; i < min(water.g.counts.w, 8u); i++) {
-        let p = water.g.plunges[i];
+    for (var i = 0u; i < min(water.g.counts.w, 16u); i++) {
+        var p = water.g.plunges[i];
+        p.w = abs(p.w);
         let d = rel.xz - p.xz;
         let r = length(d);
         if (r > p.w * 2.5 || abs(rel.y - p.y) > 1.5) { continue; }
@@ -252,8 +254,9 @@ fn plunge_boil(rel: vec3<f32>) -> vec3<f32> {
 // The boil's outflow at `rel` (m/s, x and z): radially out from the nearest plunge.
 fn plunge_flow(rel: vec3<f32>) -> vec2<f32> {
     var v = vec2<f32>(0.0);
-    for (var i = 0u; i < min(water.g.counts.w, 8u); i++) {
-        let p = water.g.plunges[i];
+    for (var i = 0u; i < min(water.g.counts.w, 16u); i++) {
+        var p = water.g.plunges[i];
+        p.w = abs(p.w);
         let d = rel.xz - p.xz;
         let r = length(d);
         if (r > p.w * 2.5 || abs(rel.y - p.y) > 1.5) { continue; }
@@ -270,8 +273,9 @@ fn plunge_trail(rel: vec3<f32>, vel: vec2<f32>) -> f32 {
     var out = 0.0;
     let speed = length(vel);
     let dir = vel / max(speed, 1e-3);
-    for (var i = 0u; i < min(water.g.counts.w, 8u); i++) {
-        let p = water.g.plunges[i];
+    for (var i = 0u; i < min(water.g.counts.w, 16u); i++) {
+        var p = water.g.plunges[i];
+        p.w = abs(p.w);
         let d = rel.xz - p.xz;
         let along = dot(d, dir);
         let across = abs(d.x * dir.y - d.y * dir.x);
