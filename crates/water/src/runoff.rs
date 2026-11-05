@@ -50,12 +50,12 @@ const RIM_CELLS: usize = 3;
 /// as a film).
 const CELL_AREA_M2: f32 = 4.0;
 /// Least land behind a thread (its rim cells gathered), m².
-const LEAST_AREA_M2: f32 = 15.0;
+const LEAST_AREA_M2: f32 = 8.0;
 /// Rims with more land behind them than this carry a stream all year; the stream's own flow
 /// draws that one, m².
 const MOST_AREA_M2: f32 = 20_000.0;
 /// Rims closer than this along the edge pour as one thread, meters.
-const MERGE_M: f64 = 4.0;
+const MERGE_M: f64 = 3.0;
 /// Rims this close to a simulated stream's lip (past its half width) are the stream's, meters.
 const STREAM_CLEAR_M: f64 = 6.0;
 /// Most threads drawn round the camera.
@@ -66,8 +66,9 @@ const WETTING_S: f32 = 180.0;
 const HEAVY_RAIN_MM_H: f32 = 10.0;
 /// Share of the rain that runs off wet rock and thin soil above a cliff.
 const SHED: f32 = 0.8;
-/// Least flow over a rim worth drawing, m³/s.
-const LEAST_FLOW: f32 = 0.0004;
+/// Least flow over a rim worth drawing, m³/s: a downpour (28 mm/h) gives it off 16 m² of
+/// wet rock, so every gully down a cliff carries its thread.
+const LEAST_FLOW: f32 = 0.0001;
 /// Rain shed per m² the paths are traced for (25 mm/h on wet rock), m/s.
 const NOMINAL_SHED: f32 = 25.0 / 3.6e6 * SHED;
 /// Water sliding down rock rides this far off it, meters.
@@ -317,32 +318,50 @@ fn top_at(physics: &dyn PhysicsQuery, ground: &dyn GroundQuery, x: f64, z: f64, 
     g.max(hit)
 }
 
-/// Trace the water over `rim`: find the true edge (walking on along its way until the top
-/// drops away) and the path down the face. `None` where no edge is found or the drop is too
-/// small to be a fall.
-pub fn trace(physics: &dyn PhysicsQuery, ground: &dyn GroundQuery, rim: &Rim) -> Option<Thread> {
+/// Ledges a thread steps down past its first drop.
+const MAX_TIERS: usize = 4;
+/// How far across a ledge a thread runs to find its edge, meters (a wider ledge holds it).
+const LEDGE_M: f64 = 6.0;
+
+/// The edge ahead of `from` along `dir` within `reach` meters: where the top of whatever
+/// stands there (rock, a prop, the ground) drops by over 0.6 m within a step and stays down a
+/// meter on. Its top, at the brink.
+fn edge_ahead(
+    physics: &dyn PhysicsQuery,
+    ground: &dyn GroundQuery,
+    from: DVec3,
+    dir: Vec2,
+    reach: f64,
+) -> Option<DVec3> {
     const STEP: f64 = 0.25;
-    const G: f32 = 9.81;
-    const H: f32 = 1.0 / 90.0;
-    let dir = DVec2::new(rim.dir.x as f64, rim.dir.y as f64);
-    let above = rim.at.y + 40.0;
-    // The edge: the top drops by over 0.6 m within a step and stays down a meter on.
-    let mut prev = top_at(physics, ground, rim.at.x, rim.at.z, above);
-    let mut edge = None;
-    for s in 1..=48 {
-        let p = DVec2::new(rim.at.x, rim.at.z) + dir * (s as f64 * STEP);
+    let dir = DVec2::new(dir.x as f64, dir.y as f64);
+    let above = from.y + 40.0;
+    let mut prev = top_at(physics, ground, from.x, from.z, above);
+    for s in 1..=(reach / STEP) as usize {
+        let p = DVec2::new(from.x, from.z) + dir * (s as f64 * STEP);
         let top = top_at(physics, ground, p.x, p.y, above);
         if top < prev - 0.6 {
             let on = p + dir;
             if top_at(physics, ground, on.x, on.y, above) < prev - 0.6 {
                 let back = p - dir * STEP;
-                edge = Some(DVec3::new(back.x, prev, back.y));
-                break;
+                return Some(DVec3::new(back.x, prev, back.y));
             }
         }
         prev = top;
     }
-    let edge = edge?;
+    None
+}
+
+/// Trace the water over `rim`: find the true edge (walking on along its way until the top
+/// drops away) and the path down the face. `None` where no edge is found or the drop is too
+/// small to be a fall.
+pub fn trace(physics: &dyn PhysicsQuery, ground: &dyn GroundQuery, rim: &Rim) -> Option<Thread> {
+    const G: f32 = 9.81;
+    const H: f32 = 1.0 / 90.0;
+    let edge = edge_ahead(physics, ground, rim.at, rim.dir, 12.0)?;
+    let mut tiers = 0;
+    // The top of the drop the water is falling down now.
+    let mut brink = edge.y;
     let way = Vec3::new(rim.dir.x, 0.0, rim.dir.y);
     // A rill's speed at the flow a downpour gives (Govers 1992: u = 3.52 Q^0.294). Slow,
     // thin water clings to the rock and slides; only a fast one leaps clear of the face.
@@ -354,7 +373,7 @@ pub fn trace(physics: &dyn PhysicsQuery, ground: &dyn GroundQuery, rim: &Rim) ->
     let mut t = 0.0f32;
     let mut path = vec![(p, v, t, rock)];
     let mut landed = false;
-    while t < 6.0 {
+    while t < 12.0 {
         t += H;
         if rock == Vec3::ZERO {
             v.y -= G * H;
@@ -377,9 +396,32 @@ pub fn trace(physics: &dyn PhysicsQuery, ground: &dyn GroundQuery, rim: &Rim) ->
                     .then(|| (DVec3::new(next.x, g.height, next.z), g.normal))
             });
         if let Some((point, normal)) = hit {
-            if normal.y > 0.75 && edge.y - point.y > 1.0 {
+            if normal.y > 0.75 && brink - point.y > 1.0 {
                 p = point + normal.as_dvec3() * SHEET as f64;
                 path.push((p, v, t, rock));
+                // A ledge part way down: the water runs on across it and over its edge (a
+                // storm's threads step down a banded cliff tier by tier to its foot).
+                // (On along its way over the ledge; sliding down a face it has next to none
+                // of its own, and runs away from the face the way the land falls.)
+                let flat = Vec2::new(v.x, v.z);
+                let heading = if flat.length() > 0.3 && flat.dot(rim.dir) > 0.0 {
+                    flat.normalize()
+                } else {
+                    rim.dir
+                };
+                if tiers < MAX_TIERS
+                    && let Some(next_edge) = edge_ahead(physics, ground, p, heading, LEDGE_M)
+                {
+                    tiers += 1;
+                    let run = (next_edge - p).length() as f32;
+                    t += run / speed;
+                    p = next_edge + DVec3::Y * SHEET as f64;
+                    brink = next_edge.y;
+                    v = Vec3::new(heading.x, 0.0, heading.y) * speed;
+                    rock = Vec3::ZERO;
+                    path.push((p, v, t, normal));
+                    continue;
+                }
                 landed = true;
                 break;
             }
@@ -534,7 +576,7 @@ pub fn falls_for(threads: &[Thread], shed: f32) -> Falls {
         let width = thread_width(q);
         let mut lip = t.lip;
         lip.width = width;
-        lip.q = (q / width).max(THREAD_COVER_Q * (q / 0.0005).min(1.0));
+        lip.q = (q / width).max(THREAD_COVER_Q * (q / 0.0003).min(1.0));
         falls.lips.push(lip);
         falls.paths.push(t.path.clone());
         falls.sides.push([false, false]);
@@ -790,6 +832,77 @@ mod tests {
             area: 400.0,
         };
         assert!(trace(&Cliff, &Flat, &flat).is_none());
+    }
+
+    /// [`Cliff`] with a 3 m ledge half way down.
+    struct Banded;
+    impl PhysicsQuery for Banded {
+        fn raycast(&self, o: DVec3, d: Vec3, max: f32, _: &QueryFilter) -> Option<Hit> {
+            let solid =
+                |p: DVec3| p.y < 0.0 || (p.x < 40.0 && p.y < 20.0) || (p.x < 43.0 && p.y < 10.0);
+            let d = d.as_dvec3();
+            let mut prev = o;
+            for k in 1..=(max * 100.0) as usize {
+                let p = o + d * (k as f64 * 0.01);
+                if solid(p) {
+                    let face = (prev.x >= 40.0 && p.x < 40.0 && p.y > 10.0)
+                        || (prev.x >= 43.0 && p.x < 43.0 && p.y > 0.0);
+                    return Some(Hit {
+                        entity: Entity::PLACEHOLDER,
+                        point: prev,
+                        normal: if face { Vec3::X } else { Vec3::Y },
+                        distance: k as f32 * 0.01,
+                        surface: Default::default(),
+                    });
+                }
+                prev = p;
+            }
+            None
+        }
+        fn shapecast(
+            &self,
+            _: &engine_world::physics::ColliderShape,
+            _: DVec3,
+            _: engine_core::math::Quat,
+            _: Vec3,
+            _: f32,
+            _: &QueryFilter,
+        ) -> Option<Hit> {
+            None
+        }
+        fn overlap(
+            &self,
+            _: &engine_world::physics::ColliderShape,
+            _: DVec3,
+            _: engine_core::math::Quat,
+            _: &QueryFilter,
+            _: &mut Vec<Entity>,
+        ) {
+        }
+        fn closest_point(&self, _: DVec3, _: f32, _: &QueryFilter) -> Option<Hit> {
+            None
+        }
+    }
+
+    #[test]
+    fn a_thread_steps_down_a_ledge_to_the_foot() {
+        let rim = Rim {
+            at: DVec3::new(37.0, 20.0, 5.0),
+            dir: Vec2::X,
+            area: 400.0,
+        };
+        let t = trace(&Banded, &Flat, &rim).expect("a thread");
+        // It lands on the ledge, runs across it and falls on to the ground at the cliff's foot.
+        assert!((t.lip.drop - 20.0).abs() < 0.5, "{}", t.lip.drop);
+        let foot = t.path.last().unwrap().pos;
+        assert!(foot.y < 0.5 && foot.x > 43.0, "{foot:?}");
+        assert!(
+            t.path
+                .iter()
+                .any(|p| (p.pos.y - 10.0).abs() < 0.5 && p.pos.x < 43.2),
+            "{:?}",
+            t.path
+        );
     }
 
     #[test]
