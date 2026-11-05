@@ -1600,6 +1600,7 @@ impl WaterFeature {
         view: &ViewData,
         plunges: &[(DVec3, Vec2, f32)],
         extra: &[&crate::flow::Falls],
+        feet: &[(DVec3, Vec2, f32)],
     ) -> [f32; 4] {
         // The falls as the flow step last worked them out (a few times a second while the
         // water moves), built once for every view and frame until they change; and the
@@ -1693,6 +1694,13 @@ impl WaterFeature {
                     if far < PLUNGE_REACH {
                         splash_crown(foot, rel, power, away, right, up, &mut puffs);
                     }
+                }
+            }
+            // Storm threads landing on the ground: a crown of drops, no cloud.
+            for &(foot, away, power) in feet {
+                if foot.distance(view.origin) < PLUNGE_REACH {
+                    let rel = view.relative(foot);
+                    splash_crown(foot, rel, power, away, right, up, &mut puffs);
                 }
             }
         }
@@ -2762,7 +2770,10 @@ impl RenderFeature for WaterFeature {
             .flatten()
             .filter(|f| !f.lips.is_empty())
             .collect();
-        g.falls = Self::upload_falls(gpu, shared, &state, view, &plunges, &extra);
+        let feet = storm_falls
+            .as_deref()
+            .map_or(&[][..], |f| f.plunges.as_slice());
+        g.falls = Self::upload_falls(gpu, shared, &state, view, &plunges, &extra, feet);
         drop(span);
         let span = tracing::info_span!("water", name = "uniform").entered();
         uniform.g = g;
