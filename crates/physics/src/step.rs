@@ -2489,11 +2489,36 @@ fn substep(
         }
         drop(piece);
         let piece = crate::report::Piece::start("substeps: Rapier's step");
+        let cpu = crate::report::wanted()
+            .then(|| cpu_time::ThreadTime::try_now().ok())
+            .flatten();
         r.world.step_with_events(&filter, &collector);
+        let cpu_ms = cpu
+            .and_then(|c| c.try_elapsed().ok())
+            .map_or(0.0, |c| c.as_secs_f64() * 1000.0);
         drop(piece);
         let piece = crate::report::Piece::start("substeps: after Rapier");
         if crate::report::wanted() {
-            crate::report::rapier_stages(&r.world.physics_pipeline.counters);
+            let c = &r.world.physics_pipeline.counters;
+            crate::report::rapier_stages(c);
+            if cpu_ms > 3.0 {
+                engine_core::log::info!(
+                    "physics: a Rapier step took {:.1} ms ({cpu_ms:.1} on the CPU; {} bodies, \
+                     {} colliders, {} fresh): \
+                     broad {:.1}, narrow {:.1}, islands {:.1}, solver {:.1}, user changes {:.1}, \
+                     final broad {:.1}",
+                    c.step_time.time_ms(),
+                    r.world.bodies.len(),
+                    r.world.colliders.len(),
+                    r.fresh.len(),
+                    c.cd.broad_phase_time.time_ms(),
+                    c.cd.narrow_phase_time.time_ms(),
+                    c.stages.island_construction_time.time_ms(),
+                    c.stages.solver_time.time_ms(),
+                    c.stages.user_changes.time_ms(),
+                    c.cd.final_broad_phase_time.time_ms()
+                );
+            }
         }
         crate::articulation::after_step(&mut r.world, &mut r.links);
         r.collector = collector;
