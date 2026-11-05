@@ -523,6 +523,10 @@ pub struct Audio {
     recording: Option<Recording>,
     capture: Option<Receiver<Vec<f32>>>,
     scratch: Vec<f32>,
+    /// Offline output under a real clock: a worker renders the mix as time passes, as a sound
+    /// card's thread would (on the frame it took 12-25 ms a frame on the session VM's route
+    /// runs, which the game on a sound card never pays). Off while recording.
+    offline_worker: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 }
 
 impl Audio {
@@ -549,6 +553,7 @@ impl Audio {
             recording: None,
             capture: None,
             scratch: Vec::new(),
+            offline_worker: None,
         }
     }
 
@@ -595,7 +600,7 @@ impl Audio {
     fn start_offline(&mut self, rx: Receiver<Command>, etx: Sender<MixerEvent>) {
         self.sample_rate = 48_000.0;
         let mixer = Mixer::new(self.sample_rate, rx, etx);
-        self.backend = Some(Backend::Offline(Box::new(Mutex::new(mixer))));
+        self.backend = Some(Backend::Offline(std::sync::Arc::new(Mutex::new(mixer))));
     }
 
     /// Mixer sample rate, Hz. Pass it to sound constructors.
@@ -614,6 +619,14 @@ impl Audio {
 
     pub fn is_offline(&self) -> bool {
         matches!(self.backend, Some(Backend::Offline(_)))
+    }
+
+    /// Offline output rendered by a worker as wall-clock time passes (a real clock, not
+    /// recording) rather than a frame at a time.
+    pub fn offline_on_a_worker(&self) -> bool {
+        self.offline_worker
+            .as_ref()
+            .is_some_and(|f| f.load(std::sync::atomic::Ordering::Relaxed))
     }
 
     /// Voices playing (or waiting to start) right now.
@@ -804,8 +817,9 @@ impl Audio {
         }
     }
 
-    /// Advance: read mixer events, render offline output up to `until_secs` of real time.
-    fn drive(&mut self, until_secs: f64) {
+    /// Advance: read mixer events, render offline output up to `until_secs` of real time
+    /// (`realtime`: the clock is the wall clock, so a worker may render it instead).
+    fn drive(&mut self, until_secs: f64, realtime: bool) {
         while let Ok(e) = self.events.try_recv() {
             match e {
                 MixerEvent::Finished(id) => {
@@ -821,6 +835,19 @@ impl Audio {
             }
         }
         if let Some(Backend::Offline(mixer)) = &self.backend {
+            if realtime {
+                let on = self.recording.is_none();
+                match &self.offline_worker {
+                    Some(flag) => flag.store(on, std::sync::atomic::Ordering::Relaxed),
+                    None if on => {
+                        self.offline_worker = start_offline_worker(mixer, until_secs);
+                    }
+                    None => {}
+                }
+                if on && self.offline_worker.is_some() {
+                    return;
+                }
+            }
             let mut mixer = mixer.lock().unwrap_or_else(|e| e.into_inner());
             let target = (until_secs * mixer.sample_rate() as f64).round() as u64;
             let frames = target
@@ -874,6 +901,41 @@ impl Drop for Audio {
             engine_core::log::warn!("audio: {e}");
         }
     }
+}
+
+/// Render `mixer` on a thread as wall-clock time passes from `now_secs` (the real clock's
+/// elapsed seconds now), while the returned flag is set; it ends with the mixer.
+fn start_offline_worker(
+    mixer: &std::sync::Arc<Mutex<mixer::Mixer>>,
+    now_secs: f64,
+) -> Option<std::sync::Arc<std::sync::atomic::AtomicBool>> {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let flag = std::sync::Arc::new(AtomicBool::new(true));
+    let (weak, on) = (std::sync::Arc::downgrade(mixer), flag.clone());
+    let start = std::time::Instant::now();
+    std::thread::Builder::new()
+        .name("audio offline".into())
+        .spawn(move || {
+            let mut buf = Vec::new();
+            while let Some(mixer) = weak.upgrade() {
+                if on.load(Ordering::Relaxed) {
+                    let mut mixer = mixer.lock().unwrap_or_else(|e| e.into_inner());
+                    let until = now_secs + start.elapsed().as_secs_f64();
+                    let target = (until * mixer.sample_rate() as f64).round() as u64;
+                    let frames = target
+                        .saturating_sub(mixer.clock())
+                        .min(mixer.sample_rate() as u64 * 2);
+                    if frames > 0 {
+                        buf.resize(frames as usize * 2, 0.0);
+                        mixer.process(&mut buf, 2);
+                    }
+                }
+                drop(mixer);
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        })
+        .ok()?;
+    Some(flag)
 }
 
 /// Write `samples` (interleaved stereo at `fs`) to `path` (helper for tools).

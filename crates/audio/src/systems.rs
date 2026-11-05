@@ -681,7 +681,8 @@ pub(crate) fn drive_output(
     mut exits: MessageReader<AppExit>,
     diagnostics: Option<Res<Metrics>>,
 ) {
-    audio.drive(time.real_elapsed_secs_f64());
+    let realtime = !matches!(time.source(), engine_core::time::TimeSource::Manual { .. });
+    audio.drive(time.real_elapsed_secs_f64(), realtime);
     if exits.read().next().is_some()
         && audio.is_recording()
         && let Err(e) = audio.stop_recording()

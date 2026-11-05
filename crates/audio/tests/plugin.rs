@@ -1002,3 +1002,26 @@ fn recorded_takes_play_where_there_are_some_and_the_synthesis_everywhere_else() 
         "{hoof} vs {hoof_synth}"
     );
 }
+
+#[test]
+fn under_a_real_clock_offline_sound_is_mixed_on_a_worker_and_still_plays_out() {
+    let mut app = app();
+    app.world
+        .resource_mut::<Time>()
+        .set_source(TimeSource::Realtime);
+    app.world
+        .spawn((AudioListener::default(), Transform::from_xyz(0.0, 1.7, 0.0)));
+    app.update();
+    step_on(&mut app, "gravel", DVec3::new(1.0, 0.0, 0.0));
+    app.update();
+    assert!(app.world.resource::<Audio>().offline_on_a_worker());
+    // The worker mixes as time passes, between frames: the step is heard.
+    for _ in 0..60 {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        app.update();
+        if app.world.resource::<Audio>().meters().master_peak > 0.001 {
+            return;
+        }
+    }
+    panic!("the footstep was never heard");
+}
