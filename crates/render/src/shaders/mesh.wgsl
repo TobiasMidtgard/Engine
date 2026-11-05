@@ -180,6 +180,16 @@ fn vertex_plant(in: VertexIn, entry: u32, base: vec3<f32>, prev: bool) -> Winded
     return plant_wind(in.position, in.normal, in.color.a, entry, dir, air);
 }
 
+// A `MeshInstances` row's tint (`InstanceRow::packed_tint`, in the normal matrix's second
+// spare lane): 0 for none, else `1 + r + 256 g + 65536 b` in 128ths.
+fn instance_tint(in: VertexIn) -> vec3<f32> {
+    if (in.n1.w < 0.5) {
+        return vec3<f32>(1.0);
+    }
+    let v = u32(in.n1.w - 0.5);
+    return vec3<f32>(f32(v & 255u), f32((v >> 8u) & 255u), f32(v >> 16u)) / 127.5;
+}
+
 // This frame's `Placed` of a vertex: bone plants on their bones, other meshes with the legacy
 // sway (`vertex_wind`).
 fn vertex_placed(in: VertexIn) -> Placed {
@@ -193,10 +203,12 @@ fn vertex_placed(in: VertexIn) -> Placed {
         let rel = vec3<f32>(dot(in.m0, q), dot(in.m1, q), dot(in.m2, q));
         let bend = bender_offset(rel, vertex_height01(in), w.tip);
         let gain = plant_underside_gain(entry, w.underside);
-        return Placed(rel + bend, normalize(normals * w.normal), vec4<f32>(in.color.rgb * gain, 1.0), bend);
+        return Placed(rel + bend, normalize(normals * w.normal),
+            vec4<f32>(in.color.rgb * gain * instance_tint(in), 1.0), bend);
     }
-    return Placed(base + vertex_wind(in, base), normalize(normals * in.normal), vertex_surface_color(in),
-        vec3<f32>(0.0));
+    let color = vertex_surface_color(in);
+    return Placed(base + vertex_wind(in, base), normalize(normals * in.normal),
+        vec4<f32>(color.rgb * instance_tint(in), color.a), vec3<f32>(0.0));
 }
 
 @vertex

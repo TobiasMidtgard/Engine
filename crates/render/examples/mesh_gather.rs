@@ -10,7 +10,9 @@
 //!
 //! A third number sets the frames run before timing (60), a fourth the number of distinct meshes
 //! (200; thousands make a draw-heavy scene like the showcase fortress). `--single-draws` turns multi-draw
-//! off (`RenderSettings::multi_draw_indirect`), for a before and after.
+//! off (`RenderSettings::multi_draw_indirect`), for a before and after. A fifth number sets the
+//! number of materials (20). `--rows` draws the still three quarters as `MeshInstances` regions
+//! (one entity per mesh, material and 150 m cell) instead of an entity each: the same picture.
 
 use std::collections::BTreeMap;
 
@@ -24,6 +26,8 @@ use engine_render::{Mesh, RenderDisabled, RenderStats};
 const MESHES: usize = 200;
 const MATERIALS: usize = 20;
 const EXTENT: f64 = 600.0;
+/// `--rows`: the side of a region's cell, meters.
+const REGION: f64 = 150.0;
 
 /// Turns a little every frame (a quarter of the entities).
 #[derive(Component)]
@@ -48,6 +52,8 @@ fn main() {
     let frames = args.next().unwrap_or(300);
     let settle = args.next().unwrap_or(60);
     let mesh_count = args.next().unwrap_or(MESHES).max(1);
+    let material_count = args.next().unwrap_or(MATERIALS).max(1);
+    let as_rows = std::env::args().any(|a| a == "--rows");
     engine_core::log::init("warn");
 
     let mut app = App::new();
@@ -83,7 +89,7 @@ fn main() {
     };
     let materials: Vec<Handle<StandardMaterial>> = {
         let mut assets = app.world.resource_mut::<Assets<StandardMaterial>>();
-        (0..MATERIALS)
+        (0..material_count)
             .map(|i| {
                 let c = 0x404040 + (i as u32 * 0x0a0703);
                 assets.add(StandardMaterial::hex(c).with_roughness(0.4 + 0.02 * i as f32))
@@ -98,6 +104,13 @@ fn main() {
         x ^= x >> 29;
         (x >> 11) as f64 / (1u64 << 53) as f64
     };
+    // `--rows`: the still ones by mesh, material and cell, each region at its cell's center.
+    type Region = (
+        Handle<Mesh>,
+        Handle<StandardMaterial>,
+        (DVec3, Vec<InstanceRow>),
+    );
+    let mut regions: BTreeMap<(u32, u32, i64, i64), Region> = BTreeMap::new();
     for i in 0..count as u64 {
         let x = (hash(i, 1) - 0.5) * EXTENT;
         let z = (hash(i, 2) - 0.5) * EXTENT;
@@ -105,7 +118,25 @@ fn main() {
             hash(i, 3) as f32 * std::f32::consts::TAU,
         ));
         let mesh = meshes[(hash(i, 4) * mesh_count as f64) as usize % mesh_count];
-        let material = materials[(hash(i, 5) * MATERIALS as f64) as usize % MATERIALS];
+        let material = materials[(hash(i, 5) * material_count as f64) as usize % material_count];
+        if as_rows && i % 4 != 0 {
+            let cell = |v: f64| (v / REGION).floor() as i64;
+            let key = (mesh.index(), material.index(), cell(x), cell(z));
+            let anchor = DVec3::new(
+                (key.2 as f64 + 0.5) * REGION,
+                1.0,
+                (key.3 as f64 + 0.5) * REGION,
+            );
+            let (_, _, rows) = regions
+                .entry(key)
+                .or_insert_with(|| (mesh, material, (anchor, Vec::new())));
+            rows.1.push(InstanceRow {
+                position: (transform.translation - anchor).as_vec3(),
+                yaw: transform.rotation.to_euler(EulerRot::YXZ).0,
+                ..Default::default()
+            });
+            continue;
+        }
         let mut e = app
             .world
             .spawn((transform, MeshRenderer::new(mesh, material)));
@@ -113,6 +144,27 @@ fn main() {
             e.insert(Spin(0.5 + hash(i, 6) as f32));
         }
     }
+    let region_count = regions.len();
+    for (mesh, material, (anchor, rows)) in regions.into_values() {
+        app.world.spawn((
+            Transform::from_translation(anchor),
+            MeshRenderer::new(mesh, material),
+            MeshInstances::new(rows),
+        ));
+    }
+    let entities = app
+        .world
+        .query_filtered::<(), With<MeshRenderer>>()
+        .iter(&app.world)
+        .count();
+    println!(
+        "{entities} mesh entities{}",
+        if as_rows {
+            format!(" ({region_count} of them MeshInstances regions)")
+        } else {
+            String::new()
+        }
+    );
     app.world.spawn((
         Transform::from_xyz(0.0, 0.0, -1.0),
         MeshRenderer::new(

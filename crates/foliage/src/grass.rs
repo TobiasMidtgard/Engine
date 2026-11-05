@@ -177,6 +177,7 @@ pub fn herb_styles_on(day: f32) -> (GrassStyle, Vec<GrassStyle>) {
         }
     }
     let k = DWARF_SHRUB_KIND as usize - 1;
+    let ripe = crate::season::berries_ripe(day);
     if let Some(b) = kinds.get_mut(k) {
         // Crimson in autumn, then bare.
         let red = crate::season::bilberry_red(day);
@@ -194,12 +195,16 @@ pub fn herb_styles_on(day: f32) -> (GrassStyle, Vec<GrassStyle>) {
         b.lush_color = mix3(b.lush_color, twig, bare);
         b.dry_color = mix3(b.dry_color, twig, bare);
         b.tip_tint = mix3(b.tip_tint, [1.0, 1.0, 1.0], bare);
+        // Blue-black berries hanging among the leaves in July and August.
+        b.bloom = 0.22 * ripe[0] * (1.0 - bare);
         if bare > 0.5 {
-            b.pinnae = 0.0;
+            b.alternate_leaves = 0.0;
             b.bloom = 0.0;
         }
     }
     if let Some(l) = kinds.get_mut(k + 1) {
+        // Red berries at the shoots' tips from August, many through the winter.
+        l.bloom = 0.09 * ripe[1];
         l.lush_color = mix3(l.lush_color, [0.03, 0.06, 0.02], winter);
         l.dry_color = mix3(l.dry_color, [0.045, 0.06, 0.025], winter);
     }
@@ -1527,11 +1532,11 @@ mod tests {
         let (_, jul) = herb_styles_on(july);
         let (_, jan) = herb_styles_on(january);
         assert!(
-            jul[b].pinnae > 0.0 && jul[b].width > 0.05,
-            "bilberry in leaf in July"
+            jul[b].alternate_leaves > 0.0 && jul[b].width > 0.05 && jul[b].bloom > 0.03,
+            "bilberry in leaf and berry in July"
         );
         assert!(
-            jan[b].pinnae == 0.0 && jan[b].width < 0.01,
+            jan[b].alternate_leaves == 0.0 && jan[b].width < 0.01 && jan[b].bloom == 0.0,
             "bare twigs in January"
         );
         assert!(
@@ -1541,7 +1546,7 @@ mod tests {
         let (_, oct) = herb_styles_on(285.0);
         let c = oct[b].lush_color;
         assert!(
-            c[0] > 3.0 * c[1] && oct[b].pinnae > 0.0,
+            c[0] > 3.0 * c[1] && oct[b].alternate_leaves > 0.0,
             "crimson leaves in October"
         );
         assert!(crate::season::bracken_brown(285.0) > 0.6);
@@ -1562,6 +1567,12 @@ mod tests {
         );
         assert!(anemone_season(110.0) > 2.0 && anemone_season(190.0) < 0.2);
         assert_eq!(anemone_season(150.0), 1.0);
+        assert!(
+            jan[b + 1].bloom > 0.02
+                && oct[b + 1].bloom > jan[b + 1].bloom
+                && jul[b + 1].bloom == 0.0,
+            "lingonberries red from August, some through winter"
+        );
         let (_, aug) = herb_styles_on(225.0);
         let mauve = |c: [f32; 3]| c[2] / c[0];
         assert!(

@@ -37,9 +37,24 @@ pub struct MovementProfile {
     // ------------------------------------------------------------ air
     /// Air acceleration toward the stick direction, m/s².
     pub air_accel: f32,
-    /// Air control only accelerates up to this speed along the stick direction, m/s; faster
-    /// momentum is kept, never killed.
+    /// Air control speeds up to the larger of this and the speed taken into the air, m/s;
+    /// faster momentum is kept, never killed, but the stick can turn and slow it.
     pub air_speed: f32,
+    /// Slowing down in the air with the stick held against the motion, m/s².
+    pub air_brake: f32,
+    /// Slowing down in the air with the stick let go, m/s² (light: momentum carries).
+    pub air_drag: f32,
+    /// Gravity while rising, as a multiple of the world's (Titanfall's pilots fall at about
+    /// 1.5 g: a snappier arc than the world's).
+    pub rise_gravity: f32,
+    /// Gravity while falling, as a multiple of the world's.
+    pub fall_gravity: f32,
+    /// Near the top of a jump (vertical speed under 1.5 m/s) with jump still held, gravity is
+    /// this fraction of the rising gravity: a short hang at the apex (Celeste).
+    pub apex_gravity: f32,
+    /// Letting go of jump while still rising multiplies the rising gravity by this: a tap
+    /// jumps low, a hold jumps high.
+    pub jump_cut_gravity: f32,
     /// Height of a jump from the ground, m.
     pub jump_height: f32,
     /// Extra jumps in the air (double jump = 1). Refilled on the ground and on walls.
@@ -198,9 +213,15 @@ impl MovementProfile {
             ground_brake: 40.0,
             overspeed_brake: 7.0,
             turn_rate: 14.0,
-            air_accel: 14.0,
-            air_speed: 4.0,
-            jump_height: 1.25,
+            air_accel: 17.0,
+            air_speed: 5.0,
+            air_brake: 12.0,
+            air_drag: 0.5,
+            rise_gravity: 1.5,
+            fall_gravity: 2.1,
+            apex_gravity: 0.5,
+            jump_cut_gravity: 2.4,
+            jump_height: 1.35,
             air_jumps: 1,
             air_jump_height: 1.0,
             air_jump_redirect: 0.75,
@@ -310,6 +331,32 @@ impl MovementProfile {
     pub fn launch_speed(height: f32, g: f32) -> f32 {
         (2.0 * g.max(0.0) * height.max(0.0)).sqrt()
     }
+
+    /// Upward speed that jumps `height` meters under this profile's rising gravity, with the
+    /// world's gravity `g`.
+    pub fn jump_speed(&self, height: f32, g: f32) -> f32 {
+        Self::launch_speed(height, g * self.rise_gravity.max(0.0))
+    }
+
+    /// Upward speed for a held jump (from the ground, coyote time or the double jump) that
+    /// peaks at `height` meters: under the rising gravity until the last
+    /// [`APEX_BAND`](Self::APEX_BAND) m/s, then the softer `apex_gravity`.
+    pub fn held_jump_speed(&self, height: f32, g: f32) -> f32 {
+        let rise = g * self.rise_gravity.max(0.0);
+        let apex = rise * self.apex_gravity.clamp(0.05, 1.0);
+        if rise <= 0.0 {
+            return 0.0;
+        }
+        let band = Self::APEX_BAND;
+        let in_band = band * band / (2.0 * apex);
+        if height <= in_band {
+            return Self::launch_speed(height, apex);
+        }
+        (2.0 * rise * (height - in_band) + band * band).sqrt()
+    }
+
+    /// Below this upward speed, m/s, a held jump is at its apex (see `apex_gravity`).
+    pub const APEX_BAND: f32 = 1.5;
 
     /// Dash speed in m/s (own time).
     pub fn dash_speed(&self) -> f32 {

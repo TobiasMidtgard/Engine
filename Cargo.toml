@@ -1,6 +1,9 @@
 [workspace]
 resolver = "3"
 members = ["crates/*", "games/*", "tools/*"]
+# Vendored crates (`third_party/`) are path patches, not members: not formatted, linted or
+# tested with the workspace.
+exclude = ["third_party"]
 
 [workspace.package]
 version = "0.1.0"
@@ -84,3 +87,8 @@ opt-level = 3
 [profile.release]
 lto = "thin"
 codegen-units = 16
+
+# Rapier 0.36.1 as published on crates.io, with the small fixes listed in
+# third_party/rapier3d/PATCHES.md. Delete this entry (and the folder) to go back to stock.
+[patch.crates-io]
+rapier3d = { path = "third_party/rapier3d" }

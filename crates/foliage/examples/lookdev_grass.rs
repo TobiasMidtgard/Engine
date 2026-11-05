@@ -69,8 +69,15 @@ fn biomes() -> Vec<Biome> {
         engine_foliage::grass::herb_styles_on(110.0).1[2],
     );
     add("ferns", GrassStyle::fern());
-    add("bilberry", GrassStyle::bilberry());
-    add("lingonberry", GrassStyle::lingonberry());
+    // In berry: bilberry in late July, lingonberry in September.
+    add(
+        "bilberry",
+        engine_foliage::grass::herb_styles_on(205.0).1[3],
+    );
+    add(
+        "lingonberry",
+        engine_foliage::grass::herb_styles_on(260.0).1[4],
+    );
     add("heather", GrassStyle::heather());
     add("litter", GrassStyle::leaf_litter());
     add("twigs", GrassStyle::twigs());
@@ -770,7 +777,7 @@ fn main() {
                 sun,
             );
             let close = format!("{}_close", b.name);
-            if b.style.leaf > 0.0 && wanted(&close) {
+            if (b.style.leaf > 0.0 || b.style.alternate_leaves > 0.0) && wanted(&close) {
                 let eye = o + DVec3::new(-10.0, 0.6, 10.0);
                 shot(
                     &mut app,

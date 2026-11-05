@@ -31,8 +31,9 @@ use engine_core::tasks::AsyncComputeTaskPool;
 use engine_render::shadows::{MAX_CASCADES, SKY_OCCLUSION_VIEW};
 use engine_render::wgpu;
 use engine_render::{
-    AlphaMode, FeatureStats, FrameContext, GpuShared, GrowBuffer, Image, Mesh, MeshRenderer,
-    RenderFeature, RenderPhase, RenderSettings, StandardMaterial, ViewData,
+    AlphaMode, FeatureStats, FrameContext, GpuShared, GrowBuffer, Image, InstanceRow,
+    MaxDrawDistance, Mesh, MeshInstances, MeshRenderer, RenderFeature, RenderPhase, RenderSettings,
+    StandardMaterial, ViewData,
 };
 use engine_world::Ground;
 
@@ -3571,11 +3572,21 @@ impl PlacedDebris {
         self.pieces.len() + self.pebbles.len()
     }
 
+    /// Pieces of one kind and variant share a mesh: each such group is one entity drawing
+    /// them all as instance rows ([`LitterRows`]), each row culled on its own past its draw
+    /// distance (a cover scatters thousands: one entity each cost the frame's bookkeeping
+    /// more than their drawing).
     fn spawn(self, world: &mut World, assets: &SceneryAssets, cover: Entity) {
-        let batch: Vec<_> = self
-            .pieces
+        let mut groups: HashMap<(DebrisKind, usize), Vec<Transform>> = HashMap::new();
+        for (t, kind, v) in self.pieces {
+            groups.entry((kind, v)).or_default().push(t);
+        }
+        // Spawned in a fixed order, whatever the map's.
+        let mut groups: Vec<_> = groups.into_iter().collect();
+        groups.sort_by_key(|((kind, v), _)| (*kind as u8, *v));
+        let batch: Vec<_> = groups
             .into_iter()
-            .map(|(t, kind, v)| {
+            .map(|((kind, v), pieces)| {
                 let (mesh, material, shadows, distance) = match kind {
                     DebrisKind::Twig => (assets.twigs[v], assets.bark, true, 30.0),
                     DebrisKind::Branch => (assets.branches[v], assets.bark, true, 70.0),
@@ -3588,11 +3599,25 @@ impl PlacedDebris {
                 };
                 let mut renderer = MeshRenderer::new(mesh, material);
                 renderer.cast_shadows = shadows;
+                // Anchored at the first piece; every piece turns about the vertical only and
+                // scales evenly (`place_debris`), as a row can.
+                let anchor = Transform::from_translation(pieces[0].translation);
+                let rows: Vec<InstanceRow> = pieces
+                    .iter()
+                    .map(|t| InstanceRow {
+                        position: (t.translation - anchor.translation).as_vec3(),
+                        yaw: litter_yaw(t.rotation),
+                        scale: t.scale.x,
+                        tint: [1.0; 3],
+                    })
+                    .collect();
                 (
-                    t,
+                    anchor,
                     renderer,
-                    LitterPiece {
-                        draw_distance_m: distance,
+                    MeshInstances::new(rows),
+                    MaxDrawDistance(distance),
+                    LitterRows {
+                        pieces: pieces.len() as u32,
                     },
                     CoverPiece(cover),
                 )
@@ -3605,6 +3630,20 @@ impl PlacedDebris {
                 .map(|(t, rock)| (t, rock, CoverPiece(cover))),
         );
     }
+}
+
+/// The turn about the vertical of a rotation that has no other (a litter piece's).
+fn litter_yaw(rotation: Quat) -> f32 {
+    let x = rotation * Vec3::X;
+    (-x.z).atan2(x.x)
+}
+
+/// A ground cover's scattered pieces of one kind and variant, drawn as the instance rows of
+/// one entity ([`MeshInstances`]), each hidden past the kind's draw distance
+/// ([`MaxDrawDistance`]).
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LitterRows {
+    pub pieces: u32,
 }
 
 /// Litter and pebbles a ground cover scattered (world roots, gone with the cover).
@@ -5318,11 +5357,12 @@ mod tests {
                 .clone();
             let settled = *app.world.get::<Transform>(rock).unwrap();
             assert!(app.world.get::<Rock>(rock).unwrap().settled);
-            let debris = app
+            let debris: u32 = app
                 .world
-                .query_filtered::<(), With<LitterPiece>>()
+                .query::<&LitterRows>()
                 .iter(&app.world)
-                .count();
+                .map(|r| r.pieces)
+                .sum();
             (
                 surface.vertices.len(),
                 surface.indices.clone(),

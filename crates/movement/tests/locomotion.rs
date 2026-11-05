@@ -1697,14 +1697,16 @@ fn a_running_jump_vaults_and_a_run_into_it_does_not() {
 
 #[test]
 fn a_jump_too_early_for_the_vault_vaults_out_of_the_air() {
+    // (Early enough to come down short of the top: the 2026-11-05 jump arc hangs at its apex,
+    // so a jump from half a meter on lands on top of it instead.)
     let mut app = app();
     barrier(&mut app, 1.3, 0.6);
     let c = runner(&mut app, true);
     run_until(&mut app, 2.0, |w| {
-        w.get::<Transform>(c).unwrap().translation.x > 0.5
+        w.get::<Transform>(c).unwrap().translation.x > 0.1
     });
     tap_jump(&mut app, c);
-    run(&mut app, 1.5);
+    run(&mut app, 2.0);
     assert_eq!(triggered(&app, c, "jump"), 1);
     assert_eq!(triggered(&app, c, "vault"), 1);
     let p = pos(&app, c);

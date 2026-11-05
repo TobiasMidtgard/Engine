@@ -304,7 +304,7 @@ fn ride(
     if jump_pressed {
         let_go(m, b, out, "jump");
         // A jump off the line, like one off the ground: the speed along it stays.
-        let launch = MovementProfile::launch_speed(p.jump_height, b.g);
+        let launch = p.jump_speed(p.jump_height, b.g);
         return flat(moving, up) + up * launch.max(moving.dot(up));
     }
     if crouch_pressed {

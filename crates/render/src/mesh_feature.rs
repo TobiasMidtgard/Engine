@@ -342,6 +342,8 @@ struct Batch {
 }
 
 const NO_ARGS: u32 = u32::MAX;
+/// `Item::row` of an entity's own instance (not a `MeshInstances` row).
+const NO_ROW: u32 = u32::MAX;
 
 /// `wgpu::util::DrawIndexedIndirectArgs`, as plain data for one upload of a frame's batches.
 #[repr(C)]
@@ -358,6 +360,8 @@ struct DrawArgs {
 struct Item {
     /// Its slot in the mesh scene.
     slot: u32,
+    /// Its row in the slot's `MeshInstances` (`NO_ROW`: the slot's entity itself).
+    row: u32,
     /// The mesh's GPU cache index (its canonical handle index).
     mesh: u32,
     /// Its mesh pool page (sorted before the mesh, so multi-draw runs aren't split by pages).
@@ -808,6 +812,7 @@ impl Cull<'_> {
         };
         Some(Item {
             slot,
+            row: NO_ROW,
             mesh: mesh.index,
             page: mesh.page,
             lod,
@@ -839,6 +844,161 @@ impl Cull<'_> {
             sways: mat.sways,
             cast_texels: hot.cast_texels,
         })
+    }
+}
+
+impl Cull<'_> {
+    /// A [`crate::MeshInstances`] slot: its region (all rows' bounds) is culled first, then
+    /// each row as an instance of its own, pushed to `out`. Rows take the level their size on
+    /// screen picks (no hysteresis or cross-fade: they keep no state) and are never impostors.
+    /// Returns how many rows are left out.
+    #[allow(clippy::too_many_arguments)]
+    fn rows(
+        &self,
+        slot: u32,
+        hot: &mut Hot,
+        cold: &Cold,
+        mesh: &MeshFrame,
+        mat: &MaterialFrame,
+        rows: &[crate::InstanceRow],
+        out: &mut Vec<Item>,
+    ) -> u32 {
+        if hot.mesh_version != mesh.version {
+            // The region's bounds, in the entity's space: around the rows' spheres.
+            let sphere = |r: &crate::InstanceRow| {
+                let s = r.scale.abs();
+                (
+                    r.position + engine_core::glam::Quat::from_rotation_y(r.yaw) * mesh.center * s,
+                    mesh.radius * s,
+                )
+            };
+            let (lo, hi) = rows.iter().fold(
+                (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN)),
+                |(lo, hi), r| {
+                    let (c, _) = sphere(r);
+                    (lo.min(c), hi.max(c))
+                },
+            );
+            let center = if rows.is_empty() {
+                Vec3::ZERO
+            } else {
+                (lo + hi) * 0.5
+            };
+            let radius = rows
+                .iter()
+                .map(|r| {
+                    let (c, rad) = sphere(r);
+                    c.distance(center) + rad
+                })
+                .fold(0.0f32, f32::max);
+            hot.center = cold.transform.transform_point(center.as_dvec3());
+            hot.radius = radius * hot.scale;
+            hot.mesh_version = mesh.version;
+        }
+        let view = self.p.view;
+        let region = (hot.center - view.origin).as_vec3();
+        let region_distance = region.length();
+        let rows_n = rows.len() as u32;
+        if rows.is_empty()
+            || region_distance - hot.radius > hot.max_distance
+            || hot.dither.abs() >= 1.0
+        {
+            return rows_n;
+        }
+        let dither_casts = if hot.dither >= 0.0 {
+            hot.dither < 0.5
+        } else {
+            hot.dither >= -0.5
+        };
+        let casts =
+            self.p.shadows && hot.flags & mesh_scene::CASTS != 0 && !mat.blend && dither_casts;
+        let shown = hot.flags & mesh_scene::SHADOW_ONLY == 0
+            && view.frustum.intersects_sphere(region, hot.radius);
+        if !shown && !casts {
+            return rows_n;
+        }
+        let full_detail = hot.flags & mesh_scene::FULL_DETAIL != 0;
+        let levels = self
+            .meshes
+            .get(&mesh.index)
+            .filter(|_| self.p.lod_pixels > 0.0 && !full_detail);
+        let pipeline = if mat.blend { PIPE_BLEND } else { 0 }
+            | if mat.double_sided { PIPE_DOUBLE } else { 0 }
+            | if hot.flags & mesh_scene::MIRRORED != 0 {
+                PIPE_MIRROR
+            } else {
+                0
+            };
+        let since = if mesh.skinned || hot.dither != 0.0 {
+            u64::MAX
+        } else {
+            cold.still_from().max(mesh.still_from)
+        };
+        // Rows are placed in f32 relative to the view: the region's anchor is near them.
+        let anchor = (cold.transform.0.translation - view.origin).as_vec3();
+        let linear = cold.transform.0.matrix3.as_mat3();
+        let mut left_out = 0;
+        for (k, r) in rows.iter().enumerate() {
+            let s = r.scale.abs();
+            let local =
+                r.position + engine_core::glam::Quat::from_rotation_y(r.yaw) * mesh.center * s;
+            let center = anchor + linear * local;
+            let scale = s * hot.scale;
+            let radius = mesh.radius * scale;
+            let size_radius = (radius - mesh.wind_reach * scale).max(radius * 0.25);
+            let distance = center.length();
+            if distance - radius > hot.max_distance {
+                left_out += 1;
+                continue;
+            }
+            let meters_per_pixel = self
+                .p
+                .pixel_meters
+                .map(|k| k * (distance - radius).max(view.near));
+            let big_enough =
+                meters_per_pixel.is_none_or(|m| 2.0 * size_radius >= self.p.min_pixels * m);
+            let visible = shown && big_enough && view.frustum.intersects_sphere(center, radius);
+            if !visible && !casts {
+                left_out += 1;
+                continue;
+            }
+            let lod = match (meters_per_pixel, levels) {
+                (Some(m), Some(g)) => {
+                    crate::mesh_lod::pick(g.errors(), scale, self.p.lod_pixels * m)
+                }
+                _ => 0,
+            };
+            out.push(Item {
+                slot,
+                row: k as u32,
+                mesh: mesh.index,
+                page: mesh.page,
+                lod,
+                lod_from: lod,
+                lod_fade: 0.0,
+                scale,
+                full_detail,
+                impostor: crate::impostor::NONE,
+                pipeline,
+                textures: 0,
+                masked: mat.masked,
+                visible,
+                casts,
+                center,
+                radius,
+                dist2: distance * distance,
+                material: hot.material,
+                material_slot: 0,
+                impostor_ok: false,
+                impostor_size: false,
+                fade: 0.0,
+                dither: hot.dither,
+                since,
+                sways: mat.sways,
+                cast_texels: hot.cast_texels,
+            });
+        }
+        left_out
     }
 }
 
@@ -1611,7 +1771,11 @@ impl MeshFeature {
                 meshes: &self.meshes,
                 impostors: self.impostors.as_ref(),
             };
-            let gather = |base: usize, hot: &mut [Hot], cold: &[Cold], out: &mut GatherChunk| {
+            let gather = |base: usize,
+                          hot: &mut [Hot],
+                          cold: &[Cold],
+                          rows: &[Option<Arc<[crate::InstanceRow]>>],
+                          out: &mut GatherChunk| {
                 for (k, (h, c)) in hot.iter_mut().zip(cold).enumerate() {
                     if h.flags & mesh_scene::VISIBLE == 0 {
                         continue;
@@ -1629,6 +1793,11 @@ impl MeshFeature {
                     }
                     let mat = &material_frames[h.material as usize];
                     set_bit(&mut out.instanced, h.mesh);
+                    if h.flags & mesh_scene::ROWS != 0 {
+                        let rows = rows.get(k).and_then(Option::as_deref).unwrap_or(&[]);
+                        out.culled += cull.rows(slot as u32, h, c, mesh, mat, rows, &mut out.items);
+                        continue;
+                    }
                     match cull.item(slot as u32, h, c, mesh, mat) {
                         Some(item) => out.items.push(item),
                         None => out.culled += 1,
@@ -1638,13 +1807,14 @@ impl MeshFeature {
             let scene = &mut self.scene;
             let per = scene.hot.len().div_ceil(threads).max(1);
             let gather = &gather;
-            let parts = scene.hot.chunks_mut(per).zip(scene.cold.chunks(per));
-            run_jobs(
-                parts
-                    .zip(chunks.iter_mut())
-                    .enumerate()
-                    .map(|(k, ((hot, cold), out))| move || gather(k * per, hot, cold, out)),
-            );
+            let parts = scene
+                .hot
+                .chunks_mut(per)
+                .zip(scene.cold.chunks(per))
+                .zip(scene.rows.chunks(per));
+            run_jobs(parts.zip(chunks.iter_mut()).enumerate().map(
+                |(k, (((hot, cold), rows), out))| move || gather(k * per, hot, cold, rows, out),
+            ));
         }
         let mut culled = 0;
         let mut items = std::mem::take(&mut self.items);
@@ -3582,7 +3752,29 @@ impl RenderFeature for MeshFeature {
                 // `DitherFade` hides `|t|` of the pixels; in a cross-fade the mesh hides the
                 // `fade` share its impostor shows, and a new level shows the `lod_fade` share
                 // its old level hides.
-                let mut normal = cold.normal;
+                // A `MeshInstances` row: the entity's transform applied to the row's placement,
+                // its tint in the normal matrix's second spare lane.
+                let row = (item.row != NO_ROW)
+                    .then(|| scene.rows[s].as_deref()?.get(item.row as usize))
+                    .flatten();
+                let (m, mut normal, prev) = match row {
+                    Some(row) => {
+                        let (m, mut n) =
+                            crate::mesh_scene::row_matrices(&cold.transform, row, view.origin);
+                        let (prev, _) = crate::mesh_scene::row_matrices(
+                            cold.previous_at(frame),
+                            row,
+                            prev_origin,
+                        );
+                        n[1][3] = row.packed_tint();
+                        (m, n, prev)
+                    }
+                    None => (
+                        cold.rows(view.origin),
+                        cold.normal,
+                        cold.previous_rows(frame, prev_origin),
+                    ),
+                };
                 normal[0][3] = if item.dither > 0.0 {
                     item.dither
                 } else if item.dither < 0.0 {
@@ -3597,7 +3789,7 @@ impl RenderFeature for MeshFeature {
                     item.fade
                 };
                 bytemuck::cast::<MeshInstance, [u8; SIZE]>(MeshInstance {
-                    m: cold.rows(view.origin),
+                    m,
                     n: normal,
                     extra: [
                         item.material_slot,
@@ -3605,7 +3797,7 @@ impl RenderFeature for MeshFeature {
                         mesh.min_y.to_bits(),
                         mesh.height.to_bits(),
                     ],
-                    prev: cold.previous_rows(frame, prev_origin),
+                    prev,
                 })
             };
             // One staging write per chunk, each filled on its own worker.

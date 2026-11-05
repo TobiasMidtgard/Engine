@@ -36,8 +36,7 @@ fn vs_main(@builtin(instance_index) instance: u32, @builtin(vertex_index) vertex
     out.gloss = b.gloss;
     out.shade = b.shade;
     out.glow = b.glow;
-    // (A flowering stem is a plain stem and its head, not cut into leaflets.)
-    out.pinnae = select(grass_fields[s.field].kind.z, 0.0, s.flower > 0.5);
+    out.pinnae = grass_flower_cut(grass_fields[s.field].kind.z, s.flower);
     return out;
 }
 
@@ -142,8 +141,7 @@ fn vs_prepass(@builtin(instance_index) instance: u32, @builtin(vertex_index) ver
     out.motion_now = motion_clip(b.rel);
     out.motion_prev = prev_motion_clip(static_prev_rel(p.rel));
     out.cut = vec2<f32>(b.along, b.across);
-    // (A flowering stem is a plain stem and its head, not cut into leaflets.)
-    out.pinnae = select(grass_fields[s.field].kind.z, 0.0, s.flower > 0.5);
+    out.pinnae = grass_flower_cut(grass_fields[s.field].kind.z, s.flower);
     return out;
 }
 
@@ -155,11 +153,31 @@ fn fs_prepass(in: GrassPrepassOut, @builtin(front_facing) front: bool) -> Prepas
     return prepass_output(n, 0.65, in.motion_now, in.motion_prev);
 }
 
+// How a blade is cut (`grass_cut`): as its kind's leaves, but a flowering stem is a plain stem
+// and its head, and a shrub's berry (a flowering stem among twigs) is cut round.
+const BERRY_CUT: f32 = 50.0;
+
+fn grass_flower_cut(cut: f32, flower: f32) -> f32 {
+    if (flower < 0.5) {
+        return cut;
+    }
+    return select(0.0, BERRY_CUT, cut > 99.5);
+}
+
 // A fern's frond cut into pinnae (the cut pipelines only: a discard anywhere in a shader costs
 // every fragment its early depth test, so whole blades never pay for it). `pinnae` pairs of
 // leaflets down the frond, each sweeping toward the tip and narrowing to its own point,
 // either side of the rachis, which always stays.
 fn grass_cut(along: f32, across: f32, pinnae: f32) -> bool {
+    if (pinnae == BERRY_CUT) {
+        // A berry on its thin stalk: the head (widest at 0.95 up the stem) cut to a round
+        // dot, not the diamond its two rows make.
+        let du = (along - 0.95) / 0.03;
+        return along > 0.9 && du * du + across * across > 1.0;
+    }
+    if (pinnae > 99.5) {
+        return grass_twig_cut(along, across, pinnae - 100.0);
+    }
     if (pinnae < 0.0) {
         return grass_leaflet_edge(along, across, pinnae) > 1.0;
     }
@@ -177,6 +195,44 @@ fn grass_cut(along: f32, across: f32, pinnae: f32) -> bool {
     let teeth = 0.06 * abs(sin(a * 48.0));
     let fill = 0.7 * (1.0 - 0.75 * a * a) - teeth;
     return abs(t - 0.5) * 2.0 > fill;
+}
+
+// A dwarf shrub's twig (bilberry, lingonberry): `n` leaves set alternately up a thin stem, one
+// every 1/n of its length, on the left then the right, each a small oval on a short petiole
+// angled up and out to the blade's edge, its margin finely toothed. One leaf's slot along the
+// twig is about as long as half the blade is wide (`GrassStyle::alternate_leaves`), so the ovals
+// keep their shape; up the tapering tip they get smaller, as a shoot's young leaves do.
+fn grass_twig_cut(along: f32, across: f32, n: f32) -> bool {
+    let a = abs(across);
+    // The stem stays.
+    if (a < 0.07) {
+        return false;
+    }
+    // Leaves on the right sit at even slots, on the left at odd ones: two slots apart on a side.
+    let parity = select(1.0, 0.0, across > 0.0);
+    let x = along * n;
+    let first = floor((x - parity) * 0.5) * 2.0 + parity;
+    // Each leaf: its stalk leaves the stem a little above its slot's start; the oval leans
+    // out at about 50 degrees from the stem, 1.2 slots long, half as wide.
+    let axis = vec2<f32>(0.62, 0.78);
+    for (var k = 0; k < 2; k++) {
+        let base = first - 2.0 * f32(k) + 0.1;
+        let d = vec2<f32>(x - base, a - 0.05);
+        let s = dot(d, axis);
+        let t = abs(d.x * axis.y - d.y * axis.x);
+        // Ovate: widest a little below the middle, coming to a blunt point.
+        let f = s / 1.2;
+        if (f > 0.08 && f < 1.0) {
+            let half = 0.3 * pow(sin(PI * pow(f, 0.85)), 0.8) - 0.02 * abs(sin(f * 40.0));
+            if (t < half) {
+                return false;
+            }
+        } else if (f > -0.05 && f <= 0.08 && t < 0.05) {
+            // The leaf's short stalk.
+            return false;
+        }
+    }
+    return true;
 }
 
 // A compound leaf of leaflets radiating from its stalk's top, `code` = -(leaflets + stalk)

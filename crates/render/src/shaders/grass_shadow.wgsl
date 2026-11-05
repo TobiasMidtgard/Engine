@@ -15,10 +15,12 @@ struct ShadowView {
 @vertex
 fn vs_shadow(@builtin(instance_index) instance: u32, @builtin(vertex_index) vertex: u32) -> @builtin(position) vec4<f32> {
     var s = grass_unpack(grass_records[(vertex >> 4u) + instance]);
-    // A compound leaf is drawn whole and its leaflets cut out of it on screen only (a discard
+    // A compound leaf (or a shrub's twig) is drawn whole and its leaflets cut out of it on
+    // screen only (a discard
     // would cost the cascades their early depth test): its shadow is a smaller whole leaf,
     // about as much shade as the leaflets give.
-    if (grass_fields[s.field].kind.z < 0.0 && s.flower < 0.5) {
+    let cut = grass_fields[s.field].kind.z;
+    if ((cut < 0.0 || cut > 99.5) && s.flower < 0.5) {
         s.width *= 0.6;
     }
     let b = grass_vertex(s, vertex & 15u, shadow_view.time.x, s.tip);

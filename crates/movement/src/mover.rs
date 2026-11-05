@@ -70,6 +70,10 @@ pub struct Hang {
     /// way (`.1`), so holding one direction carries on around.
     #[serde(default)]
     pub carry: Option<(Vec3, Vec3)>,
+    /// On the way to this hold (a hop up, down or across to another ledge, or a drop from
+    /// the edge above): pulled straight there, ignoring the stick, until it arrives.
+    #[serde(default)]
+    pub transit: bool,
 }
 
 impl Hang {
@@ -80,8 +84,41 @@ impl Hang {
             on,
             corner: None,
             carry: None,
+            transit: false,
         }
     }
+}
+
+/// Running up a wall (Assassin's Creed's wall run-up): sprinting straight into a wall too
+/// high to climb onto carries a few steps up its face, reaching for a ledge.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct RunUp {
+    /// Out of the wall, horizontal unit.
+    pub normal: Vec3,
+    /// Rising speed at the start, m/s.
+    pub speed: f32,
+    /// Own seconds up the wall.
+    pub secs: f32,
+}
+
+/// Holding a hanging rope ([`crate::ClimbRope`]): where along it, and its swing.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct RopeHold {
+    /// The rope's entity.
+    #[serde(skip)]
+    pub rope: Option<Entity>,
+    /// The hands' distance down the rope from its anchor, m.
+    pub s: f32,
+    /// From the anchor toward the hands, unit (straight down at rest).
+    pub dir: Vec3,
+    /// The hands' velocity, m/s (the swing).
+    pub swing: Vec3,
+    /// Hand over hand climbed so far, m (drives the climbing animation).
+    pub climbed: f32,
+    /// Climbing speed this step, m/s (up positive).
+    pub speed: f32,
+    /// Own seconds on the rope.
+    pub secs: f32,
 }
 
 /// Going around a corner of a ledge: the body follows a curve from the hold on the face hung
@@ -297,6 +334,10 @@ pub struct Mover {
     pub ladder: Option<Ladder>,
     /// The obstacle vaulted (mode [`LocomotionMode::Mantle`]).
     pub vault: Option<Vault>,
+    /// Running up a wall.
+    pub runup: Option<RunUp>,
+    /// On a hanging rope.
+    pub rope: Option<RopeHold>,
     /// The capsule is shrunk (crouching or sliding).
     pub crouched: bool,
     /// Remaining dodge invulnerability, s (own time).
@@ -319,6 +360,15 @@ pub struct Mover {
 
     pub(crate) coyote: f32,
     pub(crate) jump_buffer: f32,
+    /// Rising from a jump the player can cut short by letting go (see
+    /// `MovementProfile::jump_cut_gravity`).
+    pub(crate) jumping: bool,
+    /// Jumps follow how long jump is held (players). Brains tap jump for one step and get
+    /// the full jump.
+    pub variable_jump: bool,
+    /// Fastest horizontal speed air control may reach this flight, m/s: the speed taken into
+    /// the air (or the profile's `air_speed`), lowered when the stick brakes.
+    pub(crate) air_cap: f32,
     pub(crate) slide_cooldown: f32,
     /// No ledge grabs until this runs out (after letting go or kicking off), s.
     pub(crate) grab_cooldown: f32,
@@ -334,6 +384,12 @@ pub struct Mover {
     /// The ladder last kicked off: not grabbed again before touching the ground.
     #[serde(skip)]
     pub(crate) ladder_last: Option<Entity>,
+    /// After letting go of a rope, no catching it again for this long, s.
+    #[serde(skip)]
+    pub(crate) rope_cooldown: f32,
+    /// The rope let go of last: not caught again before the feet touch the ground.
+    #[serde(skip)]
+    pub(crate) rope_last: Option<Entity>,
     pub(crate) last_wall: Option<WallContact>,
     pub(crate) stand_height: f32,
     pub(crate) stride: f32,
@@ -386,6 +442,8 @@ impl Default for Mover {
             zip: None,
             ladder: None,
             vault: None,
+            runup: None,
+            rope: None,
             crouched: false,
             evade_secs: 0.0,
             disabled: false,
@@ -396,6 +454,9 @@ impl Default for Mover {
             platform: None,
             coyote: 0.0,
             jump_buffer: 0.0,
+            jumping: false,
+            variable_jump: false,
+            air_cap: 0.0,
             slide_cooldown: 0.0,
             grab_cooldown: 0.0,
             grapple_cooldown: 0.0,
@@ -403,6 +464,8 @@ impl Default for Mover {
             zip_last: None,
             ladder_cooldown: 0.0,
             ladder_last: None,
+            rope_cooldown: 0.0,
+            rope_last: None,
             last_wall: None,
             stand_height: 0.0,
             stride: 0.0,
@@ -484,6 +547,10 @@ impl Mover {
         self.ladder_cooldown = 0.0;
         self.vault = None;
         self.ladder_last = None;
+        self.runup = None;
+        self.rope = None;
+        self.rope_cooldown = 0.0;
+        self.rope_last = None;
         self.wall = None;
         self.last_wall = None;
         self.pending_dash = None;
@@ -496,6 +563,10 @@ impl Mover {
         if self.mode != mode {
             self.mode = mode;
             self.mode_secs = 0.0;
+        }
+        if mode != LocomotionMode::Air {
+            // Set again from the speed taken into the next flight.
+            self.air_cap = 0.0;
         }
     }
 }
