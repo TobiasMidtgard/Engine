@@ -18,6 +18,7 @@
 
 use crate::scenery::{self, Library, Lod, NearSolid};
 use crate::zones::Zone;
+use engine::core::off_frame;
 use engine::prelude::*;
 use engine::render::{MaterialRef, Vertex};
 use engine::world::physics::ColliderShape;
@@ -131,61 +132,173 @@ impl Pieces {
     }
 
     /// Build what isn't built yet and spawn every piece (nothing without a renderer).
+    ///
+    /// The meshes and hulls not made yet are made on a worker ([`off_frame`]; a square's
+    /// stalls and maypole took 16-37 ms of their frames on the session VM), then the pieces
+    /// are placed in a later apply of the cell's art, moved with any world shift since.
     fn spawn(self, commands: &mut Commands) {
         commands.queue(move |world: &mut World| {
             if !world.contains_resource::<Assets<Mesh>>() {
                 return;
             }
             world.init_resource::<PlazaMeshes>();
-            for p in self.0 {
-                // A square that streamed out with its assets released built its meshes again.
-                let known = world
-                    .resource::<PlazaMeshes>()
-                    .0
-                    .get(p.key)
-                    .copied()
-                    .filter(|h| world.resource::<Assets<Mesh>>().contains(*h));
-                let mesh = known.unwrap_or_else(|| {
-                    let h = world.resource_mut::<Assets<Mesh>>().add((p.build)());
-                    world.resource_mut::<PlazaMeshes>().0.insert(p.key, h);
-                    h
-                });
-                let mut e = world.spawn((p.at, MeshRenderer::new(mesh, p.material)));
-                if p.hide.is_finite() {
-                    e.insert(Lod::hide_beyond(mesh, p.hide));
-                }
-                if p.solid {
-                    let scaled = p.at.scale != Vec3::ONE;
-                    let known = (!scaled)
-                        .then(|| world.get_resource::<PlazaHulls>()?.0.get(p.key).cloned())
-                        .flatten();
-                    let shape = known.unwrap_or_else(|| {
-                        let shape = world
-                            .resource::<Assets<Mesh>>()
-                            .get(mesh)
-                            .and_then(|m| crate::solids::hull_of([m], p.at.scale));
-                        if !scaled {
-                            world
-                                .get_resource_or_init::<PlazaHulls>()
-                                .0
-                                .insert(p.key, shape.clone());
-                        }
-                        shape
-                    });
-                    if let Some(shape) = shape {
-                        world.spawn((
-                            Transform::from_translation(p.at.translation)
-                                .with_rotation(p.at.rotation),
-                            NearSolid {
-                                shape,
-                                reach: scenery::SMALL_SOLID_REACH,
-                            },
-                        ));
-                    }
-                }
-            }
+            world.init_resource::<PlazaHulls>();
+            let asks = self.asks(world);
+            // Follows world shifts until the pieces are placed (a cell member, so it goes
+            // with the square).
+            let anchor = world.spawn(Transform::default()).id();
+            off_frame::off_frame(
+                world,
+                "plaza pieces",
+                move || make(asks),
+                move |world, made| {
+                    let Some(moved) = world.get::<Transform>(anchor).map(|t| t.translation) else {
+                        return;
+                    };
+                    world.despawn(anchor);
+                    self.place(world, made, moved);
+                },
+            );
         });
     }
+
+    /// What the worker makes: every key whose mesh isn't in the store, and the hulls not made
+    /// yet (by key when unscaled, else for that piece).
+    fn asks(&self, world: &World) -> Vec<Ask> {
+        let meshes = world.resource::<PlazaMeshes>();
+        let hulls = world.resource::<PlazaHulls>();
+        let store = world.resource::<Assets<Mesh>>();
+        let mut asks: Vec<Ask> = Vec::new();
+        for (i, p) in self.0.iter().enumerate() {
+            let mesh = !meshes.0.get(p.key).is_some_and(|h| store.contains(*h));
+            let scaled = p.at.scale != Vec3::ONE;
+            let hull = p.solid && (scaled || !hulls.0.contains_key(p.key));
+            // An earlier ask for the key covers this piece unless it wants its own hull.
+            let covered =
+                |a: &Ask| a.key == p.key && (!hull || (!scaled && a.hull == Some(Vec3::ONE)));
+            if (mesh || hull) && !asks.iter().any(covered) {
+                asks.push(Ask {
+                    piece: i,
+                    key: p.key,
+                    build: p.build,
+                    hull: hull.then_some(p.at.scale),
+                });
+            }
+        }
+        asks
+    }
+
+    /// Add what the worker made and spawn every piece, `moved` by the world's shift since.
+    fn place(self, world: &mut World, made: Made, moved: DVec3) {
+        let Made { meshes, hulls } = made;
+        for (key, mesh) in meshes {
+            let known = world
+                .resource::<PlazaMeshes>()
+                .0
+                .get(key)
+                .is_some_and(|h| world.resource::<Assets<Mesh>>().contains(*h));
+            if !known {
+                let h = world.resource_mut::<Assets<Mesh>>().add(mesh);
+                world.resource_mut::<PlazaMeshes>().0.insert(key, h);
+            }
+        }
+        let mut by_piece: HashMap<usize, Option<ColliderShape>> = HashMap::new();
+        for (piece, key, scaled, shape) in hulls {
+            if scaled {
+                by_piece.insert(piece, shape);
+            } else {
+                world
+                    .resource_mut::<PlazaHulls>()
+                    .0
+                    .entry(key)
+                    .or_insert(shape);
+            }
+        }
+        for (i, p) in self.0.into_iter().enumerate() {
+            let mut at = p.at;
+            at.translation += moved;
+            let known = world
+                .resource::<PlazaMeshes>()
+                .0
+                .get(p.key)
+                .copied()
+                .filter(|h| world.resource::<Assets<Mesh>>().contains(*h));
+            // Released between the ask and now: made here, as before.
+            let mesh = known.unwrap_or_else(|| {
+                let h = world.resource_mut::<Assets<Mesh>>().add((p.build)());
+                world.resource_mut::<PlazaMeshes>().0.insert(p.key, h);
+                h
+            });
+            let mut e = world.spawn((at, MeshRenderer::new(mesh, p.material)));
+            if p.hide.is_finite() {
+                e.insert(Lod::hide_beyond(mesh, p.hide));
+            }
+            if !p.solid {
+                continue;
+            }
+            let scaled = at.scale != Vec3::ONE;
+            let known = if scaled {
+                by_piece.remove(&i)
+            } else {
+                world.resource::<PlazaHulls>().0.get(p.key).cloned()
+            };
+            let shape = known.unwrap_or_else(|| {
+                let shape = world
+                    .resource::<Assets<Mesh>>()
+                    .get(mesh)
+                    .and_then(|m| crate::solids::hull_of([m], at.scale));
+                if !scaled {
+                    world
+                        .resource_mut::<PlazaHulls>()
+                        .0
+                        .insert(p.key, shape.clone());
+                }
+                shape
+            });
+            if let Some(shape) = shape {
+                world.spawn((
+                    Transform::from_translation(at.translation).with_rotation(at.rotation),
+                    NearSolid {
+                        shape,
+                        reach: scenery::SMALL_SOLID_REACH,
+                    },
+                ));
+            }
+        }
+    }
+}
+
+/// A mesh (and maybe its hull) for the worker to make ([`Pieces::asks`]).
+struct Ask {
+    piece: usize,
+    key: &'static str,
+    build: fn() -> Mesh,
+    /// The hull's scale, when one is wanted.
+    hull: Option<Vec3>,
+}
+
+/// What the worker made: meshes by key, and hulls (piece, key, scaled, shape).
+#[derive(Default)]
+struct Made {
+    meshes: Vec<(&'static str, Mesh)>,
+    hulls: Vec<(usize, &'static str, bool, Option<ColliderShape>)>,
+}
+
+/// Make the asked meshes and hulls (world-free; runs on a worker).
+fn make(asks: Vec<Ask>) -> Made {
+    let mut made = Made::default();
+    for a in asks {
+        let at = made.meshes.iter().position(|(k, _)| *k == a.key);
+        let at = at.unwrap_or_else(|| {
+            made.meshes.push((a.key, (a.build)()));
+            made.meshes.len() - 1
+        });
+        if let Some(scale) = a.hull {
+            let shape = crate::solids::hull_of([&made.meshes[at].1], scale);
+            made.hulls.push((a.piece, a.key, scale != Vec3::ONE, shape));
+        }
+    }
+    made
 }
 
 /// Linear color from sRGB hex (for vertex colors, which are linear).
@@ -1559,6 +1672,67 @@ pub const COPPERSMITH: usize = 2;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pieces_are_made_on_a_worker_shared_and_follow_a_shift() {
+        engine::core::tasks::init_task_pools();
+        let mut world = World::new();
+        world.init_resource::<off_frame::OffFrameJobs>();
+        world.init_resource::<off_frame::OffFrameSettings>();
+        world.insert_resource(Assets::<Mesh>::default());
+        let place = |world: &mut World| {
+            let mut pieces = Pieces::default();
+            let at = Transform::from_translation(DVec3::new(10.0, 0.0, 0.0));
+            let big = at.with_scale(Vec3::splat(2.0));
+            let stone = StandardMaterial::default();
+            pieces.add_solid("bollard", bollard, at, stone, WARES_HIDE);
+            pieces.add_solid("bollard", bollard, at, stone, WARES_HIDE);
+            pieces.add_solid("bollard", bollard, big, stone, WARES_HIDE);
+            pieces.add("tree_curb", tree_curb, at, stone, f32::INFINITY);
+            let mut c = world.commands();
+            pieces.spawn(&mut c);
+            world.flush();
+        };
+        place(&mut world);
+        let placed = |world: &mut World| world.query::<&MeshRenderer>().iter(world).count();
+        assert_eq!(placed(&mut world), 0, "placed in a later apply");
+        // The world shifts before the first square's pieces are in.
+        for mut t in world.query::<&mut Transform>().iter_mut(&mut world) {
+            t.translation.x -= 100.0;
+        }
+        off_frame::finish(&mut world, None);
+        place(&mut world);
+        off_frame::finish(&mut world, None);
+        let mut xs: Vec<f64> = world
+            .query_filtered::<&Transform, With<MeshRenderer>>()
+            .iter(&world)
+            .map(|t| t.translation.x)
+            .collect();
+        xs.sort_by(f64::total_cmp);
+        assert_eq!(xs, [-90.0, -90.0, -90.0, -90.0, 10.0, 10.0, 10.0, 10.0]);
+        assert_eq!(world.resource::<Assets<Mesh>>().len(), 2, "one mesh a key");
+        let solids: Vec<(f64, f32)> = world
+            .query::<(&Transform, &NearSolid)>()
+            .iter(&world)
+            .map(|(t, s)| match &s.shape {
+                ColliderShape::ConvexHull { points } => (
+                    t.translation.x,
+                    points.iter().map(|p| p.y).fold(0.0, f32::max),
+                ),
+                other => panic!("a hull, not {other:?}"),
+            })
+            .collect();
+        assert_eq!(solids.len(), 6);
+        assert!(solids.iter().all(|&(x, top)| {
+            let scaled = top > 1.0;
+            (x == -90.0 || x == 10.0) && (top - if scaled { 1.6 } else { 0.8 }).abs() < 1e-3
+        }));
+        assert_eq!(solids.iter().filter(|s| s.1 > 1.0).count(), 2);
+        assert!(
+            world.query::<&Transform>().iter(&world).count() == 14,
+            "no anchors left"
+        );
+    }
 
     #[test]
     fn the_stalls_keep_clear_of_the_roads_the_trees_and_the_spawn() {
