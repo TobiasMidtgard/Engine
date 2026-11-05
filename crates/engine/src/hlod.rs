@@ -177,9 +177,14 @@ pub struct Proxies {
     baked_out: Vec<String>,
     /// Bake mode: every versioned cell has its proxy.
     pub baked: bool,
+    /// In play, kept proxies read from disk on a worker: (cell, its mesh if it was there).
+    reads: Option<(mpsc::Sender<ReadProxy>, Mutex<Receiver<ReadProxy>>)>,
     /// Far groups of cells whose proxies merge into one.
     groups: groups::Groups,
 }
+
+/// A kept proxy read on a worker: its cell, and its mesh if it was there.
+type ReadProxy = (usize, Option<Mesh>);
 
 #[derive(Default)]
 struct ProxySlot {
@@ -199,6 +204,8 @@ struct ProxySlot {
     /// Tried and found nothing to show (or the worker failed): don't capture again.
     empty: bool,
     loaded_from_disk: bool,
+    /// Its kept proxy is being read from disk on a worker ([`Proxies::reads`]).
+    reading: bool,
 }
 
 impl Proxies {
@@ -308,7 +315,18 @@ pub(crate) fn update(
             proxies.slots.resize_with(cells.len(), Default::default);
         }
     }
-    groups::update(world, configs, sources, &settings);
+    {
+        let _span = tracing::info_span!("hlod: groups").entered();
+        groups::update(world, configs, sources, &settings);
+    }
+    // In play, kept proxies are read from disk on a worker (each was 5-45 ms on the session
+    // VM, and every zone's at once 91 ms on the first streaming frame); with a manual clock
+    // (tests, tours) at once.
+    let in_play = !world
+        .get_resource::<engine_core::time::Time>()
+        .is_none_or(|t| matches!(t.source(), engine_core::time::TimeSource::Manual { .. }));
+    receive_reads(world);
+    let mut to_read: Vec<(usize, std::path::PathBuf)> = Vec::new();
     for (i, (key, center, state)) in cells.iter().enumerate() {
         let config = configs.get(i).copied().unwrap_or_default();
         if !config.enabled {
@@ -320,7 +338,12 @@ pub(crate) fn update(
             world.resource_mut::<Proxies>().slots[i].frame =
                 Some(Transform::from_translation(*center));
             if let Some(version) = config.version {
-                load_from_disk(world, i, key, version, &settings);
+                if in_play {
+                    to_read.push((i, cache_path(&settings, key, version)));
+                    world.resource_mut::<Proxies>().slots[i].reading = true;
+                } else {
+                    load_from_disk(world, i, key, version, &settings);
+                }
             }
         }
         if let Some(Some(pose)) = poses.get(i) {
@@ -329,7 +352,7 @@ pub(crate) fn update(
         collect(world, i, key, config, &settings);
         let fading_in = fading.contains(&id);
         let slot = &world.resource::<Proxies>().slots[i];
-        let (mesh, entity, empty) = (slot.mesh, slot.entity, slot.empty);
+        let (mesh, entity, empty) = (slot.mesh, slot.entity, slot.empty || slot.reading);
         match state {
             CellState::Loaded if !fading_in => {
                 // The cell is in and shown: its proxy goes (the fade took it, or there was none).
@@ -363,7 +386,54 @@ pub(crate) fn update(
             }
         }
     }
+    if !to_read.is_empty() {
+        start_reads(world, to_read);
+    }
     bake(world, configs, &cells, &settings);
+}
+
+/// Read `cells`' kept proxies on a worker; [`receive_reads`] stores them as they come.
+fn start_reads(world: &mut World, cells: Vec<(usize, std::path::PathBuf)>) {
+    let mut proxies = world.resource_mut::<Proxies>();
+    let (tx, _) = proxies.reads.get_or_insert_with(|| {
+        let (tx, rx) = mpsc::channel();
+        (tx, Mutex::new(rx))
+    });
+    let tx = tx.clone();
+    let fallback = tx.clone();
+    let paths: Vec<usize> = cells.iter().map(|(i, _)| *i).collect();
+    let spawned = std::thread::Builder::new()
+        .name("hlod reads".into())
+        .spawn(move || {
+            for (i, path) in cells {
+                let _ = tx.send((i, read_mesh(&path).ok()));
+            }
+        });
+    if spawned.is_err() {
+        // No thread: they capture instead.
+        for i in paths {
+            let _ = fallback.send((i, None));
+        }
+    }
+}
+
+/// Store the kept proxies [`start_reads`] read so far.
+fn receive_reads(world: &mut World) {
+    let got: Vec<ReadProxy> = match &world.resource::<Proxies>().reads {
+        Some((_, rx)) => rx
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .try_iter()
+            .collect(),
+        None => return,
+    };
+    for (i, mesh) in got {
+        world.resource_mut::<Proxies>().slots[i].reading = false;
+        if let Some(mesh) = mesh {
+            store(world, i, mesh);
+            world.resource_mut::<Proxies>().slots[i].loaded_from_disk = true;
+        }
+    }
 }
 
 /// Keeps cell `i`'s proxy where its [`StreamFrame`](engine_world::StreamFrame) (now at `pose`) carries it.
@@ -1296,7 +1366,14 @@ mod tests {
         app.stream_cell(cell());
         let player = app.world.spawn(StreamingSource::default()).id();
         place(&mut app, player, 0.0);
-        app.update();
+        // In play it is read on a worker, so it comes a few frames later.
+        for _ in 0..500 {
+            app.update();
+            if !proxies(&mut app).is_empty() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
         assert_eq!(
             proxies(&mut app).len(),
             1,
@@ -1307,12 +1384,28 @@ mod tests {
             CellState::Unloaded
         );
 
+        // With a manual clock (tests, tours) it is read at once.
+        let mut app = self::app(&dir);
+        app.world
+            .resource_mut::<engine_core::time::Time>()
+            .set_source(engine_core::time::TimeSource::Manual {
+                step_secs: 1.0 / 60.0,
+            });
+        app.stream_cell(cell());
+        let player = app.world.spawn(StreamingSource::default()).id();
+        place(&mut app, player, 0.0);
+        app.update();
+        assert_eq!(proxies(&mut app).len(), 1, "a manual clock reads at once");
+
         // Another version is another cell's content: no proxy until it loads.
         let mut app = self::app(&dir);
         app.stream_cell(cell().proxy_version(8));
         let player = app.world.spawn(StreamingSource::default()).id();
         place(&mut app, player, 0.0);
-        app.update();
+        for _ in 0..20 {
+            app.update();
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
         assert!(proxies(&mut app).is_empty());
         let _ = std::fs::remove_dir_all(dir);
     }
