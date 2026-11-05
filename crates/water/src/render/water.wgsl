@@ -60,6 +60,7 @@ struct Globals {
     flood_absorb: vec4<f32>,  // flood water's absorption rgb (1/m), scattering (1/m)
     flood_scatter: vec4<f32>, // its scatter color rgb, roughness
     mouths: array<vec4<f32>, 4>, // where streams run into lakes: plume middle rel camera xyz, share of the radius
+    plunge_dirs: array<vec4<f32>, 16>, // each plunge's way on (world xz, unit), landing speed (m/s)
 };
 
 struct WaterUniform {
@@ -221,10 +222,16 @@ fn plunge_boil(rel: vec3<f32>) -> vec3<f32> {
     let t = time_s();
     for (var i = 0u; i < min(water.g.counts.w, 16u); i++) {
         var p = water.g.plunges[i];
+        let step = p.w < 0.0;
         p.w = abs(p.w);
         let d = rel.xz - p.xz;
         let r = length(d);
         if (r > p.w * 2.5 || abs(rel.y - p.y) > 1.5) { continue; }
+        let way = water.g.plunge_dirs[i];
+        if (step && dot(way.xy, way.xy) > 0.5) {
+            out = max_foam(out, step_roller(d, p.w, way, wp, t));
+            continue;
+        }
         let x = r / p.w;
         let dir = d / max(r, 1e-3);
         // The foam rides the outflow (about 1 m/s): two copies carried outward, cross-faded.
@@ -249,6 +256,53 @@ fn plunge_boil(rel: vec3<f32>) -> vec3<f32> {
         out = vec3<f32>(out.x, out.yz + g * 0.06 * churn);
     }
     return out;
+}
+
+// The larger foam of two, adding their slopes.
+fn max_foam(a: vec3<f32>, b: vec3<f32>) -> vec3<f32> {
+    return vec3<f32>(max(a.x, b.x), a.yz + b.yz);
+}
+
+// Under a creek's step the falling sheet drives into the pool as a submerged hydraulic jump
+// (Carrillo et al. 2021, after Beiqing et al. 1998): a bright line across the sheet where it
+// plunges in (the toe), and behind it a roller about six downstream depths long whose surface
+// runs back toward the toe (Ervine et al. 1997: ~0.035 of the jet's speed, but it boils), white
+// where it breaks the surface and glassy between; past it the froth goes on downstream
+// (`plunge_trail`). `d`: from the foot (m, xz); `radius`: the step's boil radius, about the
+// sheet's half-width; `way`: the way on (xy) and the landing speed (z).
+fn step_roller(d: vec2<f32>, radius: f32, way: vec4<f32>, wp: vec2<f32>, t: f32) -> vec3<f32> {
+    let along = dot(d, way.xy);
+    let across = abs(d.x * way.y - d.y * way.x);
+    let span = 2.2 * radius;
+    if (along < -radius || along > span * 1.3 || across > radius * 1.4) {
+        return vec3<f32>(0.0);
+    }
+    let jitter = value_noise2(wp * 7.0 + vec2<f32>(t * 1.3, 0.0)) - 0.5;
+    let inside = 1.0 - smoothstep(0.7, 1.15, across / radius + jitter * 0.3);
+    // The toe: where the sheet goes in, white and churning.
+    let toe = 1.0 - smoothstep(0.0, 0.22 * radius, abs(along + 0.05 * radius) + jitter * 0.1 * radius);
+    // The roller's froth drifts back up to the toe, two copies cross-faded.
+    let back = 0.25 + 0.035 * way.z;
+    let ph0 = fract(t * 0.4);
+    let ph1 = fract(t * 0.4 + 0.5);
+    let w = abs(ph0 - 0.5) * 2.0;
+    let n0 = froth_noise((wp + way.xy * ph0 * back * 2.5) * 1.8);
+    let n1 = froth_noise((wp + way.xy * ph1 * back * 2.5) * 1.8 + vec2<f32>(5.3, 1.7));
+    let patches = mix(n0, n1, w);
+    let lace = value_noise2(wp * 13.0 + way.xy * ph0 * 3.0) * 0.5
+        + value_noise2(wp * 27.0 + vec2<f32>(t * 0.9, 2.1)) * 0.5;
+    let x = saturate(along / span);
+    let roller = smoothstep(0.3 + 0.25 * x, 0.55 + 0.2 * x, patches)
+        * smoothstep(-0.15, 0.1, along / radius) * (1.0 - smoothstep(0.55, 1.0, x));
+    let holes = smoothstep(0.15 + 0.2 * x, 0.5 + 0.2 * x, lace);
+    let foam = (toe * 1.5 + roller * 0.9 * holes) * inside;
+    // The roller heaves; the toe churns hardest.
+    let e = 0.05;
+    let q = wp * 4.0 + vec2<f32>(t * 2.3, -t * 1.9);
+    let h = value_noise2(q);
+    let g = vec2<f32>(value_noise2(q + vec2<f32>(e, 0.0)) - h, value_noise2(q + vec2<f32>(0.0, e)) - h) / e;
+    let churn = saturate(toe + (1.0 - x) * 0.6) * inside;
+    return vec3<f32>(foam, g * 0.05 * churn);
 }
 
 // The boil's outflow at `rel` (m/s, x and z): radially out from the nearest plunge.
