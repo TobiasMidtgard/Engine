@@ -22,6 +22,12 @@ use crate::utils::DotProduct;
 /// deliberately ~10x under the fallback's cost (1024 expansions ≈ 10k edges vs ~200k for a global split of a big pile). Real cases settle in a couple of hops (5,411/5,412 on the 43k pyramid).
 const SEARCH_BUDGET: usize = 1024;
 
+/// Engine patch (third_party/rapier3d/PATCHES.md, 1): the most searches one step runs. The
+/// rest of the step's removals are left to the global split, as an over-budget search's is.
+/// Resting contacts in a big pile flicker on and off: one step lost 1,872 of them, 93% still
+/// connected, and searching them all took up to 23 ms.
+pub(crate) const MAX_SEARCHES_PER_STEP: usize = 32;
+
 /// An island link incident to a body, in the form needed to relocate it.
 #[derive(Copy, Clone)]
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
@@ -232,6 +238,7 @@ impl PersistentIslands {
 
         let journal = core::mem::take(&mut self.removal_journal);
         let mut workspace = core::mem::take(&mut self.local_split);
+        let mut searched = 0;
 
         for removal in &journal {
             let graph = IslandGraph {
@@ -291,6 +298,12 @@ impl PersistentIslands {
                 self.islands[island1 as usize].constraint_remove_count += 1;
                 continue;
             }
+
+            if searched >= MAX_SEARCHES_PER_STEP {
+                self.islands[island1 as usize].constraint_remove_count += 1;
+                continue;
+            }
+            searched += 1;
 
             match search(&graph, &mut workspace, island1, removal) {
                 Verdict::Connected => {}
