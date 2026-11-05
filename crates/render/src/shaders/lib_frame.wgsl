@@ -711,18 +711,27 @@ const CANOPY_RING_WEIGHT: vec3<f32> = vec3<f32>(0.178, 0.514, 0.308);
 // `canopy_visibility` of the last `sky_visibility` this invocation ran (1 before any).
 var<private> canopy_last_visibility: f32 = 1.0;
 
-// What the leaves of a canopy scatter in the visible, reflected and let through together: a
-// green leaf reflects and transmits about a tenth of red and blue and a quarter of green.
-const CANOPY_LEAF_ALBEDO: vec3<f32> = vec3<f32>(0.12, 0.25, 0.07);
+// What a green leaf scatters (reflects and lets through together) of red, green and blue light:
+// about a tenth of red and blue and a quarter of green.
+const CANOPY_LEAF_SCATTERING: vec3<f32> = vec3<f32>(0.12, 0.25, 0.07);
 
-// Radiance of the leaf layer seen from inside or under it (cd/m², not pre-exposed): its leaves
-// lit by about a quarter of the sun (the sunlit share inside a crown, through gaps and through
-// the leaves above) and of the sky. Under a canopy the light that doesn't come through from
-// the sky comes, greener and dimmer, from the leaves themselves.
-fn canopy_leaf_radiance() -> vec3<f32> {
+// Radiance of the leaf layer seen from inside or under it (cd/m², not pre-exposed), filling
+// the share of the sky the leaves hide where `through` of it shows (`canopy_visibility`, or a
+// ray's `canopy_ray_transmittance`). The light under a canopy, sky through its gaps and light
+// the leaves scatter together, falls off as exp(-k sqrt(1 - s) L) where the sky alone falls
+// off as exp(-k L) (Goudriaan 1977; de Pury and Farquhar 1997, "Simple scaling of
+// photosynthesis from leaves to canopies", with s the leaf's scattering): `through` raised to
+// sqrt(1 - s) per channel. The leaves bring what that adds to the gaps' share. Under a closed
+// canopy (through 0.02) that is about 1.4 % of the light above in green and a quarter of that in
+// blue: the leaves glow dim green, and the gaps' sky keeps the shade near neutral, as forest
+// shade measures (Endler 1993, "The color of light in forests"), not the lime a quarter of the
+// light above would give.
+fn canopy_leaf_radiance(through: f32) -> vec3<f32> {
     let sun = frame.sun_color.rgb * saturate(frame.sun_dir.y);
     let sky = sky_ambient(vec3<f32>(0.0, 1.0, 0.0)) * PI;
-    return CANOPY_LEAF_ALBEDO * INV_PI * (sun + sky) * 0.25;
+    let v = clamp(through, 1e-4, 0.999);
+    let reach = pow(vec3<f32>(v), sqrt(vec3<f32>(1.0) - CANOPY_LEAF_SCATTERING));
+    return (sun + sky) * INV_PI * (reach - v) / (1.0 - v);
 }
 
 // Share of the sky a ray from camera-relative `origin` along `dir` (unit) sees past the leaves
@@ -1329,7 +1338,7 @@ fn shade_surface_sides(s: Surface, rel: vec3<f32>, sun_visibility: f32, face: ve
     var irradiance = ((sky_light - fill) * sky_vis + fill) * PI;
     // Under leaves, the light they hold back comes from them instead (the probes' rays see the
     // same, `canopy_ray_transmittance`).
-    irradiance += canopy_leaf_radiance() * (PI * (1.0 - canopy_last_visibility));
+    irradiance += canopy_leaf_radiance(canopy_last_visibility) * (PI * (1.0 - canopy_last_visibility));
     // Where the probes cover, their light instead: the sky through whatever openings their rays
     // find, and light bounced off everything around, on screen or not.
     let probes = probe_gi(rel, smooth_n, v);
