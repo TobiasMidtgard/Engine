@@ -679,7 +679,7 @@ pub(crate) fn drive_output(
     mut audio: ResMut<Audio>,
     time: Res<Time>,
     mut exits: MessageReader<AppExit>,
-    diagnostics: Option<ResMut<Diagnostics>>,
+    diagnostics: Option<Res<Metrics>>,
 ) {
     audio.drive(time.real_elapsed_secs_f64());
     if exits.read().next().is_some()
@@ -688,7 +688,7 @@ pub(crate) fn drive_output(
     {
         engine_core::log::warn!("audio: {e}");
     }
-    if let Some(mut d) = diagnostics {
+    if let Some(d) = diagnostics {
         let m = audio.meters();
         d.set("audio.voices", audio.voice_count() as f64);
         d.set("audio.peak_db", to_db(m.master_peak) as f64);

@@ -241,7 +241,9 @@ lighting (8K only for a visible backdrop). JPG or PNG for color, HDR or EXR only
     the report.
 - GPU: instance everything; one storage buffer per kind of data; avoid per-object bind
   groups; compute shaders for anything with more than ~10k elements (particles, fluids).
-- Measure: `Diagnostics::set("module.metric", v)` shows up in `engine.describe`.
+- Measure: `metrics.set("module.metric", v)` with `metrics: Res<Metrics>` shows up in `engine.describe`
+  (and `Diagnostics` from the start of `Last`). Don't take `ResMut<Diagnostics>` in a system just to
+  publish: every such system conflicts with every other, so they never run side by side.
 
 ## Style
 

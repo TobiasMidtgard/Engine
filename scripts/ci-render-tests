@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+# Prints the `cargo test` target flags for one half of engine_render's tests, for CI's two
+# render shards (.github/workflows/ci.yml). engine_render's ~64 test binaries each render on
+# lavapipe and run one after another: 40 of the one render shard's 42 minutes on 2026-11-04.
+#
+#   scripts/ci-render-tests slow    the longest binaries (about half the time)
+#   scripts/ci-render-tests other   the library's tests and every other binary
+#
+# A new tests/*.rs lands in `other` on its own; move it to SLOW when that half grows longer.
+set -euo pipefail
+SLOW=(virtual_texturing impostors image_memory probe_gi shadow_cache virtual_geometry texture_compression)
+cd "$(dirname "$0")/../crates/render/tests"
+case "${1:-}" in
+  slow)
+    for t in "${SLOW[@]}"; do
+      [ -f "$t.rs" ] || { echo "ci-render-tests: tests/$t.rs is gone; update SLOW" >&2; exit 1; }
+      printf -- '--test %s ' "$t"
+    done
+    ;;
+  other)
+    printf -- '--lib '
+    for f in *.rs; do
+      t="${f%.rs}"
+      [[ " ${SLOW[*]} " == *" $t "* ]] || printf -- '--test %s ' "$t"
+    done
+    ;;
+  *)
+    echo "usage: scripts/ci-render-tests slow|other" >&2
+    exit 2
+    ;;
+esac
+echo

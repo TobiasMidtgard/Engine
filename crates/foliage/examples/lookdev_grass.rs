@@ -18,6 +18,15 @@
 //! drift, `communities_rise` from 4 m up). Each biome is its own field 1 km from the others,
 //! on ground of its own color.
 //!
+//! `walkers` and `walkers_off`: someone walking through the meadow, with the grass parting
+//! around their legs and standing back up behind them (`engine_foliage::walkers`, fed the
+//! same `GroundContact`s movement writes), and the same walk with no contacts (blades through
+//! the legs, as before).
+//!
+//! `gale` and `gale_even`: the showcase meadow in a gale with and without the weather's gust
+//! fronts (`engine_world::GustWaves`), from 8 m up with the sun behind; `wet`: the `field` view
+//! after rain (`SurfaceLayers` wetness 1).
+//!
 //! `LOOKDEV_PERF=1` (with `ENGINE_PROFILE=1`) also prints, for each shot, what the grass costs:
 //! the GPU passes and triangles with the grass drawn and without it (`grass_density` 0).
 
@@ -207,6 +216,71 @@ fn shot(app: &mut App, out: &str, name: &str, eye: DVec3, target: DVec3, to_sun:
     }
 }
 
+/// Steps 3 s in a few long frames, so the grass's steady wind (eased toward the weather's over
+/// most of a second) has caught up with a change of wind.
+fn settle_wind(app: &mut App) {
+    let mut time = app.world.resource_mut::<Time>();
+    time.set_source(TimeSource::Manual { step_secs: 0.25 });
+    app.update_n(12);
+    app.world
+        .resource_mut::<Time>()
+        .set_source(TimeSource::Manual { step_secs: STEP });
+}
+
+/// Someone walks 7 m through the meadow at `at` and is photographed from above and behind as
+/// they stop; with `contacts`, their feet write `GroundContact`s as movement's do.
+fn walk_through(app: &mut App, out: &str, name: &str, at: DVec3, contacts: bool) {
+    let walker = app
+        .world
+        .spawn((
+            Transform::from_translation(at + DVec3::new(-7.0, 0.9, 0.0)),
+            MeshRenderer::new(
+                Shape::Capsule {
+                    radius: 0.24,
+                    height: 1.8,
+                    segments: 16,
+                },
+                StandardMaterial::color(0.18, 0.2, 0.26).with_roughness(0.8),
+            ),
+        ))
+        .id();
+    // 1.4 m/s, a step every 0.35 s.
+    let frames = (7.0 / 1.4 / STEP) as usize;
+    for i in 0..=frames {
+        let x = -7.0 + 7.0 * i as f64 / frames as f64;
+        let body = at + DVec3::new(x, 0.9, 0.0);
+        app.world.get_mut::<Transform>(walker).unwrap().translation = body;
+        let step = (i as f64 * STEP / 0.35) as i64;
+        if contacts && (i as f64 * STEP / 0.35).fract() < STEP / 0.35 {
+            let side = if step % 2 == 0 { 0.12 } else { -0.12 };
+            app.world.write_message(engine_world::GroundContact {
+                position: at + DVec3::new(x, 0.0, side),
+                normal: Vec3::Y,
+                size: [0.11, 0.28],
+                yaw: engine_world::GroundContact::yaw_of(Vec3::X),
+                load_kg: 40.0,
+                speed: 1.4,
+                kind: engine_world::ContactKind::Foot,
+                surface: None,
+                entity: Some(walker),
+            });
+        }
+        app.update();
+    }
+    // From above and behind to one side: the swath they walked and where they stand.
+    let eye = at + DVec3::new(-4.2, 2.7, 3.0);
+    shot(
+        app,
+        out,
+        name,
+        eye,
+        at + DVec3::new(-1.0, 0.1, 0.0),
+        Vec3::new(0.3, 0.6, 0.75),
+    );
+    app.world.entity_mut(walker).despawn();
+    app.update_n(60);
+}
+
 /// The GPU passes (ms, averaged over frames) and triangles, with and without the grass.
 fn perf(app: &mut App, name: &str) {
     let measure = |app: &mut App| {
@@ -279,7 +353,16 @@ fn main() {
         .resource_mut::<Time>()
         .set_source(TimeSource::Manual { step_secs: STEP });
     app.add_plugins(engine_world::WorldPlugin)
-        .add_plugins(RenderPlugin);
+        .add_plugins(RenderPlugin)
+        .add_message::<engine_world::GroundContact>()
+        .add_systems(
+            Update,
+            (
+                engine_foliage::walkers::bend_grass_for_walkers,
+                engine_foliage::walkers::leave_grass_wakes,
+            )
+                .chain(),
+        );
     // A fresh breeze, so the blades lean and the gusts show.
     app.world.resource_mut::<WeatherState>().wind = Vec3::new(4.0, 0.0, 1.5);
     app.world.resource_mut::<Atmosphere>().ground_color = [0.09, 0.14, 0.05];
@@ -382,6 +465,17 @@ fn main() {
                     side_sun,
                 );
             }
+            for (name, contacts) in [("walkers_off", false), ("walkers", true)] {
+                if wanted(name) {
+                    walk_through(
+                        &mut app,
+                        &out,
+                        name,
+                        o + DVec3::new(-30.0, 0.0, -30.0),
+                        contacts,
+                    );
+                }
+            }
             if wanted("meadow_back") {
                 let eye = o + DVec3::new(-10.0, 1.0, 10.0);
                 let toward = Vec3::new(0.6, 0.2, -0.75);
@@ -422,6 +516,63 @@ fn main() {
                 app.world.remove_resource::<engine_world::SurfaceLayers>();
             }
         } else if b.name == "field" {
+            // A gale (Beaufort 8 at 10 m) over the meadow, from 8 m up with the sun behind: with
+            // the weather's gust fronts the grass lies flat in bands that roll across it; without
+            // them it leans evenly. Then the same meadow after rain, glossy.
+            for (name, fronts) in [("gale_even", false), ("gale", true)] {
+                if wanted(name) {
+                    let gale = Vec3::new(17.0, 0.0, 6.0);
+                    app.world.resource_mut::<WeatherState>().wind = gale;
+                    {
+                        let mut wind = app.world.resource_mut::<engine_world::WindField>();
+                        wind.waves.broad.strength = if fronts { 0.55 } else { 0.0 };
+                        wind.waves.fine.strength = if fronts { 0.3 } else { 0.0 };
+                        wind.waves.advance(3.0, gale);
+                    }
+                    // Let the meadow's steady wind (eased over most of a second) catch up.
+                    settle_wind(&mut app);
+                    let eye = o + DVec3::new(-60.0, 8.0, 45.0);
+                    // Sun over the shoulder: flattened blades turn their lit faces up.
+                    let behind = Vec3::new(-0.45, 0.5, 0.75);
+                    shot(&mut app, &out, name, eye, o, behind);
+                    app.world.resource_mut::<WeatherState>().wind = Vec3::new(4.0, 0.0, 1.5);
+                    let mut wind = app.world.resource_mut::<engine_world::WindField>();
+                    wind.waves.broad.strength = 0.0;
+                    wind.waves.fine.strength = 0.0;
+                    settle_wind(&mut app);
+                }
+            }
+            if wanted("wet") {
+                let before = app.world.remove_resource::<engine_world::SurfaceLayers>();
+                let mut layers = engine_world::SurfaceLayers {
+                    grid: engine_world::Grid2::centered(
+                        DVec2::new(o.x, o.z),
+                        200.0,
+                        1.0,
+                        Default::default(),
+                    ),
+                };
+                layers.grid.fill(engine_world::SurfaceCell {
+                    wetness: 1.0,
+                    ..Default::default()
+                });
+                app.world.insert_resource(layers);
+                let eye = o + DVec3::new(0.0, 1.7, 0.0);
+                shot(
+                    &mut app,
+                    &out,
+                    "wet",
+                    eye,
+                    eye + DVec3::new(10.0, -0.9, -14.0),
+                    side_sun,
+                );
+                match before {
+                    Some(b) => app.world.insert_resource(b),
+                    None => {
+                        app.world.remove_resource::<engine_world::SurfaceLayers>();
+                    }
+                }
+            }
             if wanted("field") {
                 // Standing in the meadow's middle, looking out over it toward the horizon.
                 let eye = o + DVec3::new(0.0, 1.7, 0.0);

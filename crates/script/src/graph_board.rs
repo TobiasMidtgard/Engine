@@ -872,14 +872,31 @@ pub(crate) fn draw_graph_boards(
                 }
             }
         }
+        // Out of reading range nobody sees its lights or values, and its logpoints cost the
+        // graph's every run (the courtyard crystal's were 40% of all script time at the
+        // showcase plaza, 140 m away): they come off until a camera is near again.
+        let near = match at {
+            Some(g) => spots.is_empty() || in_view(&spots, g.translation(), BOARD_RANGE_M),
+            None => true,
+        };
+        if !near
+            && d.watched.take().is_some()
+            && let Some(rt) = runtime.as_deref()
+        {
+            rt.debugger.clear_logpoints(&rt.lua, Some(&path));
+        }
         // Watch it while it runs: the logpoints go on the version the runtime loaded.
-        let mut running = false;
+        let running = board.live
+            && runtime
+                .as_deref()
+                .zip(d.compiled.as_ref())
+                .is_some_and(|(rt, c)| graph::loaded_in(rt, &path, c).is_some());
         if board.live
+            && near
             && let Some(rt) = runtime.as_deref()
             && let Some(c) = &d.compiled
             && let Some(version) = graph::loaded_in(rt, &path, c)
         {
-            running = true;
             let lost = rt.debugger.line_hits(&path).is_empty() && !c.node_lines.is_empty();
             if d.watched != Some(version) || lost {
                 graph::watch_in(rt, &path, c);
@@ -921,10 +938,6 @@ pub(crate) fn draw_graph_boards(
         }
         // Out of reading range it keeps its picture (but always gets a first one), and one
         // drawing runs at a time; it stays dirty until it can draw.
-        let near = match at {
-            Some(g) => spots.is_empty() || in_view(&spots, g.translation(), BOARD_RANGE_M),
-            None => true,
-        };
         if d.image.is_some() && !near || d.painter.as_mut().is_some_and(Painter::busy) {
             continue;
         }

@@ -278,7 +278,7 @@ pub fn rebuild_walls_system(
     mut walls: Query<(Entity, &DestructibleWall, &mut WallState)>,
     tiles: Query<&WallTile>,
     mut renderers: Query<&mut MeshRenderer, With<WallTile>>,
-    mut diagnostics: ResMut<Diagnostics>,
+    diagnostics: Res<Metrics>,
     mut stats: ResMut<DestructionStats>,
 ) {
     let (Some(assets), Some(mut meshes)) = (assets, meshes) else {
@@ -463,7 +463,7 @@ pub fn rebuild_voxels_system(
     mut volumes: Query<(Entity, &VoxelVolume, &mut VoxelState)>,
     chunks: Query<&VoxelChunk>,
     mut renderers: Query<&mut MeshRenderer, With<VoxelLayer>>,
-    mut diagnostics: ResMut<Diagnostics>,
+    diagnostics: Res<Metrics>,
     mut stats: ResMut<DestructionStats>,
 ) {
     let (Some(assets), Some(mut meshes)) = (assets, meshes) else {

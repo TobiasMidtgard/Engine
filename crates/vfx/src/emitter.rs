@@ -732,7 +732,7 @@ pub fn tick_effects(
     effects: EffectQuery,
     mut lights: Query<(&mut VfxLightAt, &mut PointLight), With<VfxLight>>,
     mut marks: Option<ResMut<Marks>>,
-    mut diagnostics: Option<ResMut<Diagnostics>>,
+    diagnostics: Option<Res<Metrics>>,
     range: Option<Res<SimulationRange>>,
 ) {
     let runtime = &mut *runtime;
@@ -939,7 +939,7 @@ pub fn tick_effects(
     frame.pool_high_water = runtime.pool.high_water();
     frame.pool_limit = limit;
     runtime.stats = stats;
-    if let Some(d) = diagnostics.as_deref_mut() {
+    if let Some(d) = diagnostics.as_deref() {
         d.set("vfx.effects", stats.effects as f64);
         d.set("vfx.emitters", stats.emitters as f64);
         d.set("vfx.spawned", stats.spawned_this_frame as f64);

@@ -95,6 +95,9 @@ pub struct PlantMeshes {
     /// What the tree collides with: capsules over its trunk and its thickest limbs (same
     /// model space as `wood`; see [`collision_capsules`]).
     pub collision: Vec<CollisionCapsule>,
+    /// The bones the shared plant wind bends (all levels of detail share them):
+    /// [`super::wind_bones`]. Trees and shrubs.
+    pub wind: Option<std::sync::Arc<super::wind_bones::WindSkeleton>>,
 }
 
 /// A capsule of a tree's collision, from `a` to `b` in model space.
@@ -183,6 +186,36 @@ fn collision_capsules(branches: &[Branch]) -> Vec<CollisionCapsule> {
         }
     }
     out
+}
+
+/// The wind bones of a tree grown as `crowns` on `trunk` (mesh space).
+fn wind_skeleton(
+    trunk: &[Vec3],
+    crowns: &Crowns,
+    h: f32,
+    seed: u64,
+) -> super::wind_bones::WindSkeleton {
+    use super::wind_bones::{BranchRef, CardRef, WindSkeleton};
+    let branches: Vec<BranchRef<'_>> = crowns
+        .branches
+        .iter()
+        .map(|b| BranchRef {
+            path: &b.path,
+            base_radius: b.radius.first().copied().unwrap_or(0.01),
+            level: b.level,
+        })
+        .collect();
+    let cards: Vec<CardRef> = crowns
+        .cards
+        .iter()
+        .map(|c| CardRef {
+            base: c.base,
+            dir: c.dir,
+            face: c.face,
+            length: c.length,
+        })
+        .collect();
+    WindSkeleton::build(trunk, &branches, &cards, h, seed).skeleton
 }
 
 /// A branch of the skeleton. Level 0 is the trunk, 1 the limbs, 2 branches, 3 twigs.
@@ -1820,6 +1853,9 @@ fn assemble(
         height: top,
         cut_height: cut,
         collision: collision_capsules(&crowns.branches),
+        wind: Some(std::sync::Arc::new(wind_skeleton(
+            trunk_path, &crowns, h, seed,
+        ))),
         ..Default::default()
     };
     let branches = &crowns.branches;
@@ -2857,9 +2893,12 @@ fn shrub(sp: &PlantSpecies, seed: u64) -> PlantMeshes {
     let per_m2 = 2.2 * density * sp.canopy_density.clamp(0.4, 1.5) / (leaf * leaf);
     cr.fill_shell(&mut rng, per_m2, false);
     let top = h * 1.05;
+    // A shrub has no trunk: its stems hang from a stiff root bone at its foot.
+    let foot = [Vec3::ZERO, Vec3::Y * h * 0.2];
     let mut out = PlantMeshes {
         height: top,
         cut_height: 0.0,
+        wind: Some(std::sync::Arc::new(wind_skeleton(&foot, &cr, h, seed))),
         ..Default::default()
     };
     let kind = kind_of(sh.leaf);
@@ -2953,6 +2992,72 @@ mod tests {
                 t(&m.wood_distant),
                 t(&m.foliage_distant),
                 t(&m.foliage_hero)
+            );
+        }
+    }
+
+    #[test]
+    fn every_tree_and_shrub_carries_a_wind_skeleton() {
+        let lib = PlantLibrary::default();
+        for sp in lib
+            .species
+            .iter()
+            .filter(|s| s.is_tree() || s.form == PlantForm::Shrub)
+        {
+            let started = std::time::Instant::now();
+            let m = woody(sp, 1, false);
+            let built = started.elapsed();
+            let s = m.wind.as_ref().unwrap_or_else(|| panic!("{}", sp.name));
+            let n = s.bones.len();
+            assert!(
+                (2..super::super::wind_bones::MAX_BONES).contains(&n),
+                "{}: {n}",
+                sp.name
+            );
+            let mut levels = [0usize; 4];
+            for (i, b) in s.bones.iter().enumerate() {
+                levels[b.level as usize] += 1;
+                if let Some(p) = b.parent {
+                    let parent = &s.bones[p as usize];
+                    assert!((p as usize) < i && parent.level < b.level, "{}", sp.name);
+                    // A bone starts on (or close to) the one it hangs from.
+                    let to = b.pivot - parent.pivot;
+                    let along = to.dot(parent.axis).clamp(0.0, parent.length);
+                    let off = (to - parent.axis * along).length();
+                    let slack = if parent.level == 0 {
+                        0.6 * sp.max_height_m
+                    } else {
+                        // Sprays ride out along twigs the skeleton has no bones for.
+                        parent.length + 1.0
+                    };
+                    assert!(
+                        off < slack,
+                        "{} bone {i} (level {}, parent level {}, parent {:.2} m long) is {off:.2} m off its parent",
+                        sp.name,
+                        b.level,
+                        parent.level,
+                        parent.length
+                    );
+                }
+                assert!(s.chain(i as u16).count() <= 4, "{}", sp.name);
+            }
+            // Limbs and sprays, and branches where the crown has them.
+            assert!(levels[1] > 0 && levels[3] > 0, "{}: {levels:?}", sp.name);
+            let leaves: f32 = s
+                .bones
+                .iter()
+                .filter(|b| b.level == 1)
+                .map(|b| b.drag_share)
+                .sum();
+            assert!(
+                leaves > 0.5 && leaves < 1.0 + 1e-3,
+                "{}: limbs carry {leaves}",
+                sp.name
+            );
+            eprintln!(
+                "{:14} bones {levels:?} reach in a gale {:.2} m, with meshes in {built:?}",
+                sp.name,
+                s.max_offset_m([0.08, 0.15, 0.6], 0.03 * sp.max_height_m)
             );
         }
     }

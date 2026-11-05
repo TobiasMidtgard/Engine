@@ -224,18 +224,7 @@ impl Plugin for UiPlugin {
         .add_systems(Update, ui_screens_system)
         .add_systems(
             PostUpdate,
-            (
-                (
-                    widgets::bars_system,
-                    widgets::cooldowns_system,
-                    widgets::key_hints_system,
-                    widgets::sliders_system,
-                    widgets::toggles_system,
-                    toast::toasts_system,
-                ),
-                layout::ui_layout_system,
-                input::log_events_system,
-            )
+            (ui_frame_system, input::log_events_system)
                 .chain()
                 .in_set(UpdateSet::AfterPropagate),
         )
@@ -392,5 +381,33 @@ pub fn ui_screens_system(world: &mut World) {
         "title" => title::title_system,
         "loading" => loading::loading_system,
         "menus" => menus::menus_system,
+    );
+}
+
+/// The widgets' exclusive systems (bars, cooldowns, key hints, sliders, toggles, toasts) and
+/// the layout pass after them, in one exclusive system for the same reason as
+/// [`ui_screens_system`]: seven of them in `PostUpdate` made the pool go idle seven times a
+/// frame (`scripts/trace-blockers.py` on round 29's plaza trace put 0.6 ms a frame of work
+/// running alone before them). The widgets run in the order they are listed, then the layout.
+pub fn ui_frame_system(world: &mut World) {
+    macro_rules! run {
+        ($($name:literal => $system:path),* $(,)?) => {$(
+            {
+                let _span = tracing::info_span!($name).entered();
+                if let Err(e) = world.run_system_cached($system) {
+                    static WARNED: std::sync::Once = std::sync::Once::new();
+                    WARNED.call_once(|| tracing::warn!("ui: {} did not run: {e}", $name));
+                }
+            }
+        )*};
+    }
+    run!(
+        "bars" => widgets::bars_system,
+        "cooldowns" => widgets::cooldowns_system,
+        "key hints" => widgets::key_hints_system,
+        "sliders" => widgets::sliders_system,
+        "toggles" => widgets::toggles_system,
+        "toasts" => toast::toasts_system,
+        "layout" => layout::ui_layout_system,
     );
 }

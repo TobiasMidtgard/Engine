@@ -222,4 +222,8 @@ function Seal:enter_closing()
 	self:move_to(0)
 end
 
+-- Only seen up close: beyond 80 m from the player (or the simulation range) `update` rests;
+-- tasks and messages still run.
+Seal.far = 80
+
 return Seal

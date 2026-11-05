@@ -713,7 +713,7 @@ pub fn emit_outputs(
         Option<&FlameShape>,
         Option<&ContainedFire>,
     )>,
-    mut diagnostics: ResMut<Diagnostics>,
+    diagnostics: Res<Metrics>,
 ) {
     let dt = clock.stepped;
     if dt <= 0.0 {
