@@ -156,12 +156,29 @@ pub fn spawn_sailboat(commands: &mut Commands, home: DVec3, range: f32) -> Entit
     boat
 }
 
-/// The modeled hull, rig and rudder.
+/// The modeled hull, rig and rudder, hung on the boat's parts once their meshes are built
+/// (on a worker the first time; the boat sails meanwhile, undrawn but for its sail).
 fn dress(commands: &mut Commands, boat: Entity, rig: Entity, rudder: Entity) {
-    let models = super::boat_models(commands);
-    models.hull.attach(commands, boat, Transform::default());
-    models.rig.attach(commands, rig, Transform::default());
-    models.rudder.attach(commands, rudder, Transform::default());
+    commands.queue(move |world: &mut World| {
+        super::props_boat::with_boat_models(world, move |world, models| {
+            if [boat, rig, rudder]
+                .iter()
+                .any(|&e| world.get_entity(e).is_err())
+            {
+                return;
+            }
+            let mut queue = bevy_ecs::world::CommandQueue::default();
+            let mut commands = Commands::new(&mut queue, world);
+            models
+                .hull
+                .attach(&mut commands, boat, Transform::default());
+            models.rig.attach(&mut commands, rig, Transform::default());
+            models
+                .rudder
+                .attach(&mut commands, rudder, Transform::default());
+            queue.apply(world);
+        });
+    });
 }
 
 /// Cream sailcloth: smooth, a little sheen, glowing when the sun is behind it.
@@ -362,6 +379,45 @@ pub fn sail_boats(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// In a world that draws, the boat and its sail stand at once; the hull, rig and rudder
+    /// meshes are built on a worker and hung on the boat's parts once in.
+    #[test]
+    fn the_dinghy_is_dressed_once_its_meshes_are_built_off_the_frame() {
+        use engine_assets::Assets;
+        use engine_render::{Image, Mesh, MeshRenderer, StandardMaterial};
+        let mut app = App::new();
+        app.insert_resource(Assets::<Image>::default());
+        app.insert_resource(Assets::<StandardMaterial>::default());
+        app.insert_resource(Assets::<Mesh>::default());
+        let boat = {
+            let mut commands = app.world.commands();
+            spawn_sailboat(&mut commands, DVec3::new(10.0, 0.0, 20.0), 30.0)
+        };
+        app.world.flush();
+        let parts = |world: &mut World| world.query::<&MeshRenderer>().iter(world).count();
+        assert!(app.world.get_entity(boat).is_ok());
+        assert_eq!(
+            parts(&mut app.world),
+            0,
+            "dressed only once the meshes are in"
+        );
+        engine_core::off_frame::finish(&mut app.world, None);
+        let n = parts(&mut app.world);
+        assert!(n > 5, "only {n} parts");
+        let mats = app.world.resource::<Assets<StandardMaterial>>();
+        assert!(
+            mats.loaded_by_key(&super::super::kit::Mat::Varnish.key())
+                .is_some()
+        );
+        // A second boat is dressed at once.
+        {
+            let mut commands = app.world.commands();
+            spawn_sailboat(&mut commands, DVec3::new(60.0, 0.0, 20.0), 30.0);
+        }
+        app.world.flush();
+        assert_eq!(parts(&mut app.world), 2 * n);
+    }
 
     #[test]
     fn steers_across_the_wind_and_gybes_through_downwind() {

@@ -258,6 +258,8 @@ fn main() {
     let mut render = Some(swap_render(&mut app, Schedule::new(Render)));
     // The demo lights its first fire (fast-forwarded by its warm-up) on the third frame.
     app.update_n(4);
+    // The props' meshes and textures are made on a worker: have them in for every picture.
+    engine_core::off_frame::finish(&mut app.world, None);
     eprintln!("built the demo in {:.1} s", started.elapsed().as_secs_f32());
 
     // Stops: (view, seconds into the fire, file name).

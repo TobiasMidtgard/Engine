@@ -204,10 +204,15 @@ pub fn spawn_demo(commands: &mut Commands, origin: DVec3) {
         let demo = world
             .spawn((UiDemo, Transform::from_translation(origin)))
             .id();
+        // The paving's heights are asked on the worker too, from the ground as it is now.
+        let ground = world
+            .get_resource::<engine_world::Ground>()
+            .cloned()
+            .unwrap_or_default();
         engine_core::off_frame::off_frame(
             world,
             "ui market textures",
-            market::bake_market,
+            move || market::bake_market_over(ground, origin),
             move |world, textures| {
                 let Some(origin) = world.get::<Transform>(demo).map(|t| t.translation) else {
                     return;

@@ -170,21 +170,30 @@ const PAINTS: [[f32; 3]; 3] = [
     [0.24, 0.04, 0.025],
 ];
 
-/// Make the yard's textures and materials (once per world; later calls return at once).
-/// Does nothing without a renderer (`Assets<Image>` missing).
-pub fn ensure_materials(world: &mut World) {
-    if !world.contains_resource::<Assets<Image>>()
-        || !world.contains_resource::<Assets<StandardMaterial>>()
-    {
-        return;
-    }
-    if world
-        .resource::<Assets<StandardMaterial>>()
-        .loaded_by_key(&Mat::Timber.key())
-        .is_some()
-    {
-        return;
-    }
+/// The yard's textures, made without touching the world ([`bake`], on a worker for
+/// [`with_materials`]); [`install`] uploads them and makes the materials.
+pub struct Baked {
+    wood: TexSet,
+    paint_albedos: Vec<Image>,
+    paint_normal: Image,
+    paint_orm: Image,
+    galv: TexSet,
+    iron: TexSet,
+    metal: TexSet,
+    stone: TexSet,
+    concrete: TexSet,
+    rope: TexSet,
+    varnish: TexSet,
+    enamel: TexSet,
+    antifoul: TexSet,
+    marble: TexSet,
+    bamboo: TexSet,
+    bytes: usize,
+    secs: f64,
+}
+
+/// Make the yard's textures (pure CPU work, no world).
+pub fn bake() -> Baked {
     let start = std::time::Instant::now();
     // The generators are independent and pure CPU work: run them side by side on scoped
     // threads instead of one after another (the serial build was a 7.4 s load hitch on
@@ -243,7 +252,77 @@ pub fn ensure_materials(world: &mut World) {
     .map(|t| t.bytes())
     .sum();
     bytes += (paint_albedos.len() + 2) * (SIZE * SIZE * 4) as usize * 4 / 3;
+    Baked {
+        wood,
+        paint_albedos,
+        paint_normal,
+        paint_orm,
+        galv,
+        iron,
+        metal,
+        stone,
+        concrete,
+        rope,
+        varnish,
+        enamel,
+        antifoul,
+        marble,
+        bamboo,
+        bytes,
+        secs: start.elapsed().as_secs_f64(),
+    }
+}
 
+/// The world draws (has the asset stores the materials go in).
+fn has_renderer(world: &World) -> bool {
+    world.contains_resource::<Assets<Image>>()
+        && world.contains_resource::<Assets<StandardMaterial>>()
+}
+
+/// The yard's materials are in this world.
+fn made(world: &World) -> bool {
+    world
+        .resource::<Assets<StandardMaterial>>()
+        .loaded_by_key(&Mat::Timber.key())
+        .is_some()
+}
+
+/// A bake of the yard's textures in flight on a worker: alive while its job is queued
+/// (a job dropped with an unloaded cell drops it, and the next yard bakes again).
+#[derive(Resource)]
+struct Baking(std::sync::Weak<()>);
+
+fn baking(world: &World) -> bool {
+    world
+        .get_resource::<Baking>()
+        .is_some_and(|b| b.0.strong_count() > 0)
+}
+
+/// Upload baked textures and make the yard's materials (unless this world has them).
+pub fn install(world: &mut World, baked: Baked) {
+    if !has_renderer(world) || made(world) {
+        return;
+    }
+    let Baked {
+        wood,
+        paint_albedos,
+        paint_normal,
+        paint_orm,
+        galv,
+        iron,
+        metal,
+        stone,
+        concrete,
+        rope,
+        varnish,
+        enamel,
+        antifoul,
+        marble,
+        bamboo,
+        bytes,
+        secs,
+    } = baked;
+    let start = std::time::Instant::now();
     let mut images = world.resource_mut::<Assets<Image>>();
     let wood = add_set(&mut images, wood);
     let paint_normal = images.add(paint_normal);
@@ -319,11 +398,79 @@ pub fn ensure_materials(world: &mut World) {
         mats.insert_keyed(&m.key(), material);
     }
     engine_core::log::info!(
-        "softbody yard: made {} materials ({:.1} MB of textures) in {:.2} s",
+        "softbody yard: made {} materials ({:.1} MB of textures) in {:.2} s, {:.1} ms of it \
+         installing",
         Mat::ALL.len(),
         bytes as f64 / 1e6,
-        start.elapsed().as_secs_f64()
+        secs + start.elapsed().as_secs_f64(),
+        start.elapsed().as_secs_f64() * 1000.0
     );
+}
+
+/// Make the yard's textures and materials here and now (once per world; later calls, and
+/// calls while [`with_materials`] bakes them on a worker, return at once). Does nothing
+/// without a renderer (`Assets<Image>` missing).
+pub fn ensure_materials(world: &mut World) {
+    if !has_renderer(world) || made(world) || baking(world) {
+        return;
+    }
+    install(world, bake());
+}
+
+/// Run `place` with the anchor's position once the yard's materials exist: at once when
+/// they do (or the world doesn't draw); else after their textures are baked on a worker
+/// ([`engine_core::off_frame`], so a streamed cell stays loading until then and the frame
+/// never waits for them: 3.8 s on the session VM, inside one frame). The anchor (a still
+/// root that world shifts move) says where the props go by then; with the anchor gone,
+/// nothing is placed. Props of other scenes that need the materials meanwhile refer to
+/// their keys, reserved here, and show the default material until the bake lands.
+pub fn with_materials(
+    commands: &mut Commands,
+    anchor: Entity,
+    place: impl FnOnce(&mut Commands, DVec3) + Send + 'static,
+) {
+    commands.queue(move |world: &mut World| {
+        let Some(token) = claim_bake(world) else {
+            place_at(world, anchor, place);
+            return;
+        };
+        engine_core::off_frame::off_frame(
+            world,
+            "softbody yard materials",
+            bake,
+            move |world: &mut World, baked| {
+                install(world, baked);
+                drop(token);
+                place_at(world, anchor, place);
+            },
+        );
+    });
+}
+
+/// When this world draws, lacks the yard's materials and nobody is baking them: marks a bake
+/// as in flight (until the returned token is dropped, with its job's apply or with the job)
+/// and reserves the material keys, so props spawned meanwhile refer to them without the
+/// asset server looking for files. The caller bakes ([`bake`]) and installs ([`install`]).
+pub(super) fn claim_bake(world: &mut World) -> Option<std::sync::Arc<()>> {
+    if !has_renderer(world) || made(world) || baking(world) {
+        return None;
+    }
+    let token = std::sync::Arc::new(());
+    world.insert_resource(Baking(std::sync::Arc::downgrade(&token)));
+    let mut mats = world.resource_mut::<Assets<StandardMaterial>>();
+    for m in Mat::ALL {
+        mats.reserve_keyed(&m.key());
+    }
+    Some(token)
+}
+
+fn place_at(world: &mut World, anchor: Entity, place: impl FnOnce(&mut Commands, DVec3)) {
+    let Some(at) = world.get::<Transform>(anchor).map(|t| t.translation) else {
+        return;
+    };
+    let mut queue = bevy_ecs::world::CommandQueue::default();
+    place(&mut Commands::new(&mut queue, world), at);
+    queue.apply(world);
 }
 
 /// Register `mesh` under `key` (once) when the world has a renderer.
@@ -542,6 +689,60 @@ mod tests {
             .iter(&world)
             .count();
         assert!(solids > 70, "only {solids} solid props");
+    }
+
+    /// In a world that draws, the yard's anchor stands at once while its textures bake on a
+    /// worker; the props come once the bake is in, where the anchor stands by then (it was
+    /// moved meanwhile, as a world shift would), and a second yard doesn't bake again.
+    #[test]
+    fn the_yard_waits_for_its_textures_off_the_frame_then_stands_at_its_anchor() {
+        let mut app = App::new();
+        app.insert_resource(Assets::<Image>::default());
+        app.insert_resource(Assets::<StandardMaterial>::default());
+        app.insert_resource(Assets::<Mesh>::default());
+        {
+            let mut commands = app.world.commands();
+            super::super::spawn_demo(&mut commands, DVec3::ZERO);
+        }
+        app.world.flush();
+        let solids = |world: &mut World| world.query::<&RigidBody>().iter(world).count();
+        let anchor = app
+            .world
+            .query::<(Entity, &Name)>()
+            .iter(&app.world)
+            .find(|(_, n)| n.as_str() == "Yard anchor")
+            .map(|(e, _)| e)
+            .expect("the anchor stands at once");
+        assert_eq!(solids(&mut app.world), 0, "props wait for the bake");
+        let mats = app.world.resource::<Assets<StandardMaterial>>();
+        assert!(mats.by_key(&Mat::Timber.key()).is_some(), "keys reserved");
+        assert!(mats.loaded_by_key(&Mat::Timber.key()).is_none());
+        // A world shift while it bakes.
+        let shift = DVec3::new(100.0, 0.0, -50.0);
+        app.world.get_mut::<Transform>(anchor).unwrap().translation += shift;
+        engine_core::off_frame::finish(&mut app.world, None);
+        let mats = app.world.resource::<Assets<StandardMaterial>>();
+        for m in Mat::ALL {
+            assert!(mats.loaded_by_key(&m.key()).is_some(), "{m:?} missing");
+        }
+        let made = mats.len();
+        let n = solids(&mut app.world);
+        assert!(n > 70, "only {n} solid props");
+        let far = app
+            .world
+            .query_filtered::<&Transform, With<RigidBody>>()
+            .iter(&app.world)
+            .filter(|t| (t.translation - shift).length() > 60.0)
+            .count();
+        assert_eq!(far, 0, "props stand around the moved anchor");
+        // A second yard: placed at once, with the same materials.
+        {
+            let mut commands = app.world.commands();
+            super::super::spawn_demo(&mut commands, DVec3::new(0.0, 0.0, 500.0));
+        }
+        app.world.flush();
+        assert_eq!(solids(&mut app.world), 2 * n);
+        assert_eq!(app.world.resource::<Assets<StandardMaterial>>().len(), made);
     }
 
     /// The yard's materials are all made in one go (their textures built side by side)

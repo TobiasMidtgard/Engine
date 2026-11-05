@@ -65,7 +65,8 @@ struct Frame {
     gi_grid: vec4<f32>,            // storage slot of the grid's first probe along x, y, z (scrolling); w = the probes' epoch (0 = off)
     clip_plane: vec4<f32>,         // a mirror's view (planar_reflection.rs): camera-relative plane n.xyz, d; kept where dot(n, rel) + d >= 0 (0 = none)
     aerial: vec4<f32>,             // aerial perspective table (aerial.rs): reach (m, 0 = off), 1 / depth scale (1/m), 1 / log2(1 + reach / depth scale), depth slices
-    shading: vec4<f32>,            // x = sun-shadow filter taps (RenderSettings::shadow_filter_taps); yzw unused
+    shading: vec4<f32>,            // x = sun-shadow filter taps (RenderSettings::shadow_filter_taps), y = benders set; zw unused
+    benders: array<vec4<f32>, 16>, // GrassBenders nearest the camera: camera-relative center xyz, radius (m) (frame.rs MAX_BENDERS)
 };
 
 // An indoor space (`SkyLightVolume`): sky light comes in only through its open faces.
@@ -251,4 +252,36 @@ fn fullscreen_vertex(index: u32, depth: f32) -> FullscreenOut {
     out.position = vec4<f32>(uv * vec2(2.0, -2.0) + vec2(-1.0, 1.0), depth, 1.0);
     out.uv = uv;
     return out;
+}
+
+// ---------------------------------------------------------------- benders
+// How far beyond a bender's radius swaying plants give way (m).
+const BENDER_REACH: f32 = 0.3;
+// The most a plant's vertex gives way to all benders together (m).
+const BENDER_MAX_PUSH: f32 = 1.5;
+
+// How a swaying plant's vertex at camera-relative `rel` gives way to a bender (`GrassBender`;
+// `b`: camera-relative center xyz, radius w): pushed sideways out of the sphere's way and
+// pressed down a little, not at all at its root (`height01` 0) and most at its top, times the
+// vertex's wind weight. Where every vertex gives way fully it ends just outside the reach, and
+// the push never folds the plant over (a vertex further out stays further out). A vertex above
+// the sphere lets go, so a crown overhead stays put. Unreal's interactive foliage (a sphere
+// mask on world position offset) and Ghost of Tsushima's grass (tilted away from characters)
+// work the same way.
+fn bender_push(rel: vec3<f32>, b: vec4<f32>, height01: f32, weight: f32) -> vec3<f32> {
+    let to = rel - b.xyz;
+    let reach = b.w + BENDER_REACH;
+    let flat = vec2<f32>(to.x, to.z);
+    let dist = length(flat);
+    if (dist >= reach || to.y > reach || to.y < -b.w - 4.0) { return vec3<f32>(0.0); }
+    let under = 1.0 - smoothstep(b.w * 0.5, reach, to.y);
+    let k = (reach - dist) * under * saturate(weight) * sqrt(saturate(height01));
+    let away = select(vec2<f32>(1.0, 0.0), flat / max(dist, 1e-6), dist > 1e-3);
+    return vec3<f32>(away.x * k, -0.35 * k, away.y * k);
+}
+
+// The sum of `bender_push`es, at most `BENDER_MAX_PUSH` long.
+fn bender_limit(o: vec3<f32>) -> vec3<f32> {
+    let l = length(o);
+    return select(o, o * (BENDER_MAX_PUSH / max(l, 1e-6)), l > BENDER_MAX_PUSH);
 }

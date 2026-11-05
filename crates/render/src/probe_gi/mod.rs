@@ -347,6 +347,12 @@ type GatherQuery = (
     Ref<'static, crate::MeshRenderer>,
     Ref<'static, crate::ResolvedMesh>,
 );
+/// Instances smaller than this (half their box's diagonal, meters) are left out of the probes'
+/// scene: next to the default 0.75 m probe spacing they change little of what a probe sees, but
+/// cost every ray that passes their box. Assassin's Creed Shadows leaves small objects out of its
+/// GI rays the same way.
+pub const MIN_INSTANCE_RADIUS_M: f64 = 0.3;
+
 /// Skinned meshes are left out (the rays would see their bind pose), and shadow-only stand-ins.
 type GatherFilter = (Without<crate::GpuSkin>, Without<crate::ShadowOnly>);
 /// [`GatherFilter`]'s entities whose transform, renderer or resolved mesh changed: the change
@@ -874,15 +880,17 @@ impl ProbeGi {
         let new = match query.get(world, entity) {
             Ok((_, transform, renderer, resolved)) if renderer.visible => {
                 let handle = meshes.canonical(resolved.mesh);
-                self.local_bounds(meshes, handle).map(|local| {
+                self.local_bounds(meshes, handle).and_then(|local| {
                     let (lo, hi) = world_box_abs(local, &transform.0);
-                    Cached {
+                    // Too small to change what a probe sees (pebbles, cones, small props): left
+                    // out of the rays' scene; screen-space AO darkens around them.
+                    ((hi - lo).length() >= 2.0 * MIN_INSTANCE_RADIUS_M).then_some(Cached {
                         lo,
                         hi,
                         affine: transform.0,
                         mesh: handle.index(),
                         version: meshes.version(handle),
-                    }
+                    })
                 })
             }
             _ => None,

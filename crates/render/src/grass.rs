@@ -31,7 +31,7 @@ use serde::{Deserialize, Serialize};
 use crate::features::{
     FeatureStats, FrameContext, GpuShared, GrowBuffer, PrepareOut, RenderFeature, RenderPhase,
 };
-use crate::frame::ViewData;
+use crate::frame::{MAX_BENDERS, ViewData};
 use crate::renderer::layout_entry;
 use crate::settings::RenderSettings;
 use crate::shadows::MAX_CASCADES;
@@ -41,14 +41,20 @@ const TILE: f32 = 8.0;
 /// Instance index bits for the blade within its tile.
 const BLADE_BITS: u32 = 16;
 const MAX_BLADES_PER_TILE: u32 = (1 << BLADE_BITS) - 1;
-const MAX_BENDERS: usize = 16;
 const MAX_BLADES_PER_M2: f32 = 1000.0;
 /// Blades a cull job covers (`@workgroup_size` in grass_cull.wgsl).
 const CULL_CHUNK: u32 = 64;
 /// Bytes of one blade's record (`GrassRecord` in grass_common.wgsl).
 const RECORD_BYTES: u64 = 64;
-/// Indirect draws of the blades kept for the screen: one for each count of segments, 1..=6.
-const SCREEN_GROUPS: usize = 6;
+/// Indirect draws of the blades kept for the screen: one for each count of segments, 1..=6,
+/// then the fronds cut into pinnae ([`CUT_GROUP`]).
+const SCREEN_GROUPS: usize = 7;
+/// The screen's draw of fronds cut into pinnae (`GrassStyle::pinnae`, ferns): drawn by their
+/// own pipelines, whose discard would otherwise cost every blade its early depth test.
+const CUT_GROUP: usize = 6;
+/// A cull job's mode bit: the field grows cut fronds, so its screen blades may go to
+/// [`CUT_GROUP`].
+const MODE_CUT: u32 = 1 << 5;
 /// Segments a shadow caster can have (`shadow_segments_at`).
 const SHADOW_SEGMENTS: usize = 2;
 /// Indirect draws: the screen's, then each cascade's by segments.
@@ -228,6 +234,16 @@ pub struct GrassStyle {
     pub bloom_color: [f32; 3],
     /// Width of a flower head, meters.
     pub bloom_size: f32,
+    /// Blades stay at full density out to this distance, meters (0: chosen from the draw
+    /// distance). Big plants (ferns) want more than blades, which a screen pixel can hold many
+    /// of further out.
+    pub full_density_m: f32,
+    /// 0..1: how upright a leaf's stalk carries it (with `leaf`): 0 a rosette's leaves spread
+    /// low, 1 a fern's fronds rising from the crown like a shuttlecock before arching over.
+    pub leaf_rise: f32,
+    /// Pairs of leaflets a leaf is cut into, down its length: 0 a whole leaf or blade, 15-25 a
+    /// fern's frond (with `leaf` 1: a stalk rising from the crown, the frond arching out).
+    pub pinnae: f32,
 }
 
 impl Default for GrassStyle {
@@ -258,6 +274,9 @@ impl Default for GrassStyle {
             bloom: 0.0,
             bloom_color: [0.8, 0.7, 0.1],
             bloom_size: 0.025,
+            full_density_m: 0.0,
+            leaf_rise: 0.0,
+            pinnae: 0.0,
         }
     }
 }
@@ -289,6 +308,40 @@ impl GrassStyle {
             leaf: 1.0,
             stalk: 0.4,
             lying: 0.0,
+            ..Default::default()
+        }
+    }
+
+    /// Woodland ferns (male and lady fern): crowns of fronds a meter long, each a stalk
+    /// rising from the crown into a lance-shaped blade cut into pinnae, arching out and over;
+    /// rust brown when dry (autumn), and still in all but a gale.
+    pub fn fern() -> Self {
+        Self {
+            blades_per_m2: 20.0,
+            height: 1.0,
+            height_variation: 0.3,
+            width: 0.26,
+            bend: 0.7,
+            lush_color: [0.065, 0.16, 0.035],
+            dry_color: [0.27, 0.13, 0.045],
+            dryness: 0.1,
+            wind_response: 0.25,
+            draw_distance: 55.0,
+            full_density_m: 28.0,
+            shadow_distance: 14.0,
+            clump_size: 1.1,
+            clump_pull: 0.97,
+            clump_fan: 1.0,
+            clump_height: 0.35,
+            clump_color: 0.12,
+            droop: 0.35,
+            gloss: 0.3,
+            tip_tint: [1.12, 1.1, 0.85],
+            leaf: 1.0,
+            leaf_rise: 0.8,
+            stalk: 0.22,
+            lying: 0.0,
+            pinnae: 22.0,
             ..Default::default()
         }
     }
@@ -454,6 +507,8 @@ impl GrassStyle {
 
 /// Pushes grass aside and flattens it: a character's feet or body, a rolling boulder, a
 /// landing ship. A sphere of `radius` meters around the entity; the 16 nearest the camera act.
+/// Swaying meshes (`StandardMaterial::wind_sway`: bushes, ferns, crops) give way to the same
+/// spheres, by their vertices' wind weight, in the scene and in the near shadows.
 #[derive(Component, Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[require(Transform)]
 #[serde(default)]
@@ -473,6 +528,19 @@ fn scene_source() -> String {
         include_str!("shaders/grass.wgsl"),
     ]
     .join("\n")
+}
+
+/// [`scene_source`] for fronds cut into pinnae: the same shaders with the cut switched on.
+fn cut_source() -> String {
+    scene_source()
+        .replace(
+            "// GRASS_CUT main",
+            "if (grass_cut(in.along, in.across, in.pinnae)) { discard; }",
+        )
+        .replace(
+            "// GRASS_CUT prepass",
+            "if (grass_cut(in.cut.x, in.cut.y, in.pinnae)) { discard; }",
+        )
 }
 
 fn cull_source() -> String {
@@ -548,7 +616,9 @@ fn shadow_group(cascade: usize, segments: u32) -> usize {
 
 /// Quads per blade in draw group `g`.
 fn group_segments(g: usize) -> u32 {
-    if g < SCREEN_GROUPS {
+    if g == CUT_GROUP {
+        6
+    } else if g < SCREEN_GROUPS {
         g as u32 + 1
     } else {
         ((g - SCREEN_GROUPS) % SHADOW_SEGMENTS) as u32 + 1
@@ -556,7 +626,8 @@ fn group_segments(g: usize) -> u32 {
 }
 
 /// Cull jobs for `count` blades from instance `first`, 64 a job: first and end instance, what
-/// for (`mode`: bit 0 the screen, bits 1-4 the cascades) and the segments to draw them with.
+/// for (`mode`: bit 0 the screen, bits 1-4 the cascades, [`MODE_CUT`]) and the segments to
+/// draw them with.
 fn push_jobs(jobs: &mut Vec<[u32; 4]>, first: u32, count: u32, mode: u32, segments: u32) {
     for start in (0..count).step_by(CULL_CHUNK as usize) {
         jobs.push([
@@ -597,7 +668,8 @@ struct GpuField {
     gust: [f32; 4],
     /// Flower heads: albedo (linear), w: share of blades flowering.
     bloom: [f32; 4],
-    /// x: flower head width (m), y: this kind's blades as a share of the field's most.
+    /// x: flower head width (m), y: this kind's blades as a share of the field's most, z: pinnae,
+    /// w: how upright leaves rise.
     kind: [f32; 4],
 }
 
@@ -645,7 +717,12 @@ impl GpuField {
             style.bloom_color[2],
             style.bloom.clamp(0.0, 1.0),
         ];
-        self.kind = [style.bloom_size.max(0.0), share.clamp(0.0, 1.0), 0.0, 0.0];
+        self.kind = [
+            style.bloom_size.max(0.0),
+            share.clamp(0.0, 1.0),
+            style.pinnae.max(0.0),
+            style.leaf_rise.clamp(0.0, 1.0),
+        ];
     }
 }
 
@@ -917,6 +994,9 @@ pub struct GrassFeature {
     map_layout: Option<wgpu::BindGroupLayout>,
     pipeline: Option<wgpu::RenderPipeline>,
     prepass_pipeline: Option<wgpu::RenderPipeline>,
+    /// The scene and prepass pipelines of fronds cut into pinnae ([`CUT_GROUP`]).
+    cut_pipeline: Option<wgpu::RenderPipeline>,
+    cut_prepass_pipeline: Option<wgpu::RenderPipeline>,
     shadow_pipeline: Option<wgpu::RenderPipeline>,
     tiles_buffer: Option<GrowBuffer>,
     fields_buffer: Option<GrowBuffer>,
@@ -932,7 +1012,6 @@ pub struct GrassFeature {
     wind: SteadyWind,
     /// Made in `prepare_serial`, read in `prepare_shared`.
     fields_query: Option<FieldsQuery>,
-    benders_query: Option<QueryState<(&'static GrassBender, &'static GlobalTransform)>>,
     /// Thinned this frame to fit the records binding (warned once per stretch).
     thinned_to_fit: bool,
 }
@@ -1111,6 +1190,7 @@ impl RenderFeature for GrassFeature {
             },
         ));
         let shader = gpu.shader("grass", &scene_source(), true);
+        let cut_shader = gpu.shader("grass cut", &cut_source(), true);
         let shadow_shader = gpu.shader("grass shadow", &shadow_source(), false);
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("grass"),
@@ -1127,41 +1207,57 @@ impl RenderFeature for GrassFeature {
             cull_mode: None,
             ..Default::default()
         };
-        let scene_pipeline = |label, vs, fs, targets: &[Option<wgpu::ColorTargetState>]| {
-            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some(label),
-                layout: Some(&layout),
-                vertex: wgpu::VertexState {
-                    module: &shader,
-                    entry_point: Some(vs),
-                    compilation_options: Default::default(),
-                    buffers: &[],
-                },
-                primitive,
-                depth_stencil: Some(gpu.depth_state(true)),
-                multisample: Default::default(),
-                fragment: Some(wgpu::FragmentState {
-                    module: &shader,
-                    entry_point: Some(fs),
-                    compilation_options: Default::default(),
-                    targets,
-                }),
-                multiview_mask: None,
-                cache: None,
-            })
-        };
-        self.pipeline = Some(scene_pipeline(
-            "grass",
-            "vs_main",
-            "fs_main",
-            &[Some(wgpu::ColorTargetState {
-                format: gpu.formats.hdr,
-                blend: None,
-                write_mask: wgpu::ColorWrites::ALL,
-            })],
-        ));
+        let scene_pipeline =
+            |label,
+             shader: &wgpu::ShaderModule,
+             vs,
+             fs,
+             targets: &[Option<wgpu::ColorTargetState>]| {
+                device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                    label: Some(label),
+                    layout: Some(&layout),
+                    vertex: wgpu::VertexState {
+                        module: shader,
+                        entry_point: Some(vs),
+                        compilation_options: Default::default(),
+                        buffers: &[],
+                    },
+                    primitive,
+                    depth_stencil: Some(gpu.depth_state(true)),
+                    multisample: Default::default(),
+                    fragment: Some(wgpu::FragmentState {
+                        module: shader,
+                        entry_point: Some(fs),
+                        compilation_options: Default::default(),
+                        targets,
+                    }),
+                    multiview_mask: None,
+                    cache: None,
+                })
+            };
+        let hdr = [Some(wgpu::ColorTargetState {
+            format: gpu.formats.hdr,
+            blend: None,
+            write_mask: wgpu::ColorWrites::ALL,
+        })];
+        self.pipeline = Some(scene_pipeline("grass", &shader, "vs_main", "fs_main", &hdr));
         self.prepass_pipeline = Some(scene_pipeline(
             "grass prepass",
+            &shader,
+            "vs_prepass",
+            "fs_prepass",
+            &gpu.prepass_targets(),
+        ));
+        self.cut_pipeline = Some(scene_pipeline(
+            "grass cut",
+            &cut_shader,
+            "vs_main",
+            "fs_main",
+            &hdr,
+        ));
+        self.cut_prepass_pipeline = Some(scene_pipeline(
+            "grass cut prepass",
+            &cut_shader,
             "vs_prepass",
             "fs_prepass",
             &gpu.prepass_targets(),
@@ -1247,9 +1343,6 @@ impl RenderFeature for GrassFeature {
         if self.fields_query.is_none() {
             self.fields_query = Some(world.query());
         }
-        if self.benders_query.is_none() {
-            self.benders_query = Some(world.query());
-        }
     }
 
     fn prepare_shared(
@@ -1289,9 +1382,7 @@ impl RenderFeature for GrassFeature {
         }
         let gust = self.wind.uniform(view.time);
         let mut seen = Vec::new();
-        let (Some(fields_query), Some(benders_query)) =
-            (&mut self.fields_query, &mut self.benders_query)
-        else {
+        let Some(fields_query) = &mut self.fields_query else {
             return;
         };
         for (entity, field, gt, wear) in fields_query.iter(world) {
@@ -1320,7 +1411,16 @@ impl RenderFeature for GrassFeature {
             if per_m2 <= 0.0 || field.size[0] <= 0.0 || field.size[1] <= 0.0 {
                 continue;
             }
-            let full = full_density_distance(far);
+            let full = if style.full_density_m > 0.0 {
+                style.full_density_m.min(far)
+            } else {
+                full_density_distance(far)
+            };
+            let cut_mode = if field.palette().any(|s| s.pinnae > 0.0) {
+                MODE_CUT
+            } else {
+                0
+            };
             let max_blades = ((per_m2 * TILE * TILE).ceil() as u32).clamp(1, MAX_BLADES_PER_TILE);
             let rotation = gt.rotation();
             let [ax, ay, az] = [Vec3::X, Vec3::Y, Vec3::Z].map(|a| rotation * a);
@@ -1399,8 +1499,12 @@ impl RenderFeature for GrassFeature {
                     // (fewer, further out) for the cascades they cast into.
                     let first = tile_index << BLADE_BITS;
                     if visible {
-                        push_jobs(&mut self.jobs, first, count, 1, segments);
+                        push_jobs(&mut self.jobs, first, count, 1 | cut_mode, segments);
                         group_blades[segments as usize - 1] += count as u64;
+                        if cut_mode != 0 {
+                            // Any of them may be a frond: room for all in either draw.
+                            group_blades[CUT_GROUP] += count as u64;
+                        }
                         self.stats.instances += count;
                         self.stats.triangles += count as u64 * (2 * segments as u64 - 1);
                     }
@@ -1457,24 +1561,12 @@ impl RenderFeature for GrassFeature {
         }
         self.maps.retain(|e, _| seen.contains(e));
 
-        // Benders nearest the camera.
-        let mut benders: Vec<[f32; 4]> = benders_query
-            .iter(world)
-            .map(|(b, gt)| {
-                view.relative(gt.translation())
-                    .extend(b.radius.max(0.0))
-                    .to_array()
-            })
-            .filter(|s| s[3] > 0.0)
-            .collect();
-        benders.sort_by(|a, b| {
-            let d = |s: &[f32; 4]| s[0] * s[0] + s[1] * s[1] + s[2] * s[2];
-            d(a).total_cmp(&d(b))
-        });
-        benders.truncate(MAX_BENDERS);
+        // Benders nearest the camera (gathered with the view; swaying meshes bend away from
+        // the same ones).
         let mut gpu_benders = GpuBenders::zeroed();
-        gpu_benders.count[0] = benders.len() as u32;
-        gpu_benders.spheres[..benders.len()].copy_from_slice(&benders);
+        let n = view.benders.len().min(MAX_BENDERS);
+        gpu_benders.count[0] = n as u32;
+        gpu_benders.spheres[..n].copy_from_slice(&view.benders[..n]);
         if let Some(wind) = world.get_resource::<engine_world::WindField>() {
             gpu_benders.waves = wind.waves.to_gpu();
             let at = view.origin - wind.gust_origin;
@@ -1517,8 +1609,11 @@ impl RenderFeature for GrassFeature {
                 let kept = ((job[1] - job[0]) as f64 * keep) as u32;
                 job[1] = job[0] + kept;
                 let (mode, segments) = (job[2], job[3]);
-                if mode == 1 {
+                if mode & 1 != 0 {
                     group_blades[segments as usize - 1] += kept as u64;
+                    if mode & MODE_CUT != 0 {
+                        group_blades[CUT_GROUP] += kept as u64;
+                    }
                     self.stats.instances += kept;
                     self.stats.triangles += kept as u64 * (2 * segments as u64 - 1);
                 } else {
@@ -1631,7 +1726,10 @@ impl RenderFeature for GrassFeature {
 
     fn draw_prepass(&self, pass: &mut wgpu::RenderPass<'_>, _ctx: &FrameContext) {
         if let Some(pipeline) = &self.prepass_pipeline {
-            self.draw_kept(pass, pipeline, 0..SCREEN_GROUPS);
+            self.draw_kept(pass, pipeline, 0..CUT_GROUP);
+        }
+        if let Some(pipeline) = &self.cut_prepass_pipeline {
+            self.draw_kept(pass, pipeline, CUT_GROUP..CUT_GROUP + 1);
         }
     }
 
@@ -1640,7 +1738,10 @@ impl RenderFeature for GrassFeature {
             return;
         }
         if let Some(pipeline) = &self.pipeline {
-            self.draw_kept(pass, pipeline, 0..SCREEN_GROUPS);
+            self.draw_kept(pass, pipeline, 0..CUT_GROUP);
+        }
+        if let Some(pipeline) = &self.cut_pipeline {
+            self.draw_kept(pass, pipeline, CUT_GROUP..CUT_GROUP + 1);
         }
     }
 
@@ -1674,6 +1775,13 @@ mod tests {
     fn grass_shaders_compile() {
         use crate::features::{compose_shader, validate_wgsl};
         validate_wgsl("grass", &compose_shader(&scene_source(), true)).unwrap();
+        let cut = cut_source();
+        assert_eq!(
+            cut.matches("discard;").count(),
+            scene_source().matches("discard;").count() + 2,
+            "both cut markers replaced"
+        );
+        validate_wgsl("grass cut", &compose_shader(&cut, true)).unwrap();
         validate_wgsl("grass cull", &compose_shader(&cull_source(), true)).unwrap();
         validate_wgsl("grass shadow", &compose_shader(&shadow_source(), false)).unwrap();
     }

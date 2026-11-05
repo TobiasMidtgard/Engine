@@ -96,6 +96,9 @@ pub struct MarketBake {
     chalkboard: TexImages,
     canvases: Vec<TexImages>,
     stalls: Vec<stall::Parts>,
+    /// The paving's ground heights above the origin, asked on the worker
+    /// ([`bake_market_over`]), row by row as [`square`] lays its vertices.
+    paving: Option<Vec<f64>>,
 }
 
 /// Bake every texture and stall the market uses (see [`place_market`]).
@@ -125,8 +128,44 @@ pub fn bake_market() -> MarketBake {
                 })
             })
             .collect(),
+        paving: None,
     }
 }
+
+/// [`bake_market`], plus the paving's ground heights around `origin` (5,329 of them: 194 ms
+/// of a 314 ms apply frame on the session VM when asked on the main thread). The heights
+/// are kept relative to `origin`, so a world shift before the apply changes nothing.
+pub fn bake_market_over(ground: Ground, origin: DVec3) -> MarketBake {
+    let mut bake = bake_market();
+    let (n, r_out) = paving_grid();
+    let mut heights = Vec::with_capacity(((n + 1) * (n + 1)) as usize);
+    for k in 0..=n {
+        for i in 0..=n {
+            let (x, z) = paving_vertex(i, k, r_out);
+            let w = DVec3::new(origin.x + x as f64, origin.y, origin.z + z as f64);
+            heights.push(ground.height(w).unwrap_or(origin.y) - origin.y);
+        }
+    }
+    bake.paving = Some(heights);
+    bake
+}
+
+/// The paving's vertices per side minus one, and its half width (m).
+fn paving_grid() -> (i32, f32) {
+    let r_out = SQUARE_M + 3.5;
+    ((2.0 * r_out / PAVING_CELL_M).ceil() as i32, r_out)
+}
+
+/// The paving's vertex `i` across and `k` along, from the middle (m).
+fn paving_vertex(i: i32, k: i32, r_out: f32) -> (f32, f32) {
+    (
+        -r_out + i as f32 * PAVING_CELL_M,
+        -r_out + k as f32 * PAVING_CELL_M,
+    )
+}
+
+/// The paving's vertex spacing (m).
+const PAVING_CELL_M: f32 = 0.5;
 
 impl Mats {
     fn new(world: &mut World, tex: &mut MarketBake) -> Self {
@@ -288,10 +327,25 @@ pub fn spawn_market(world: &mut World, origin: DVec3) {
 /// Spawns the market around `origin` with the art from [`bake_market`].
 pub fn place_market(world: &mut World, origin: DVec3, mut tex: MarketBake) {
     let ground = world.get_resource::<Ground>().cloned().unwrap_or_default();
-    let ground_y = |p: DVec3| ground.height(p).unwrap_or(origin.y);
+    let started = std::time::Instant::now();
+    let asked = std::cell::Cell::new((0u32, 0.0f64));
+    let ground_y = |p: DVec3| {
+        let t = std::time::Instant::now();
+        let y = ground.height(p).unwrap_or(origin.y);
+        let (n, ms) = asked.get();
+        asked.set((n + 1, ms + t.elapsed().as_secs_f64() * 1000.0));
+        y
+    };
+    // The straw asks for thousands of heights over a few meters: it reads them off the
+    // lattice the paving is built on, asked once a corner.
+    let lattice = GroundLattice::new(&ground_y, origin);
+    if let Some(heights) = tex.paving.take() {
+        lattice.fill_paving(&heights, origin.y);
+    }
+    let fine = |p: DVec3| lattice.height(p);
     let mats = Mats::new(world, &mut tex);
     let mut stalls = std::mem::take(&mut tex.stalls).into_iter();
-    square(world, &mats, origin, &ground_y);
+    square(world, &mats, origin, &fine);
     let mut fronts = Vec::new();
     for i in 0..STALLS.len() {
         let (p, yaw) = stall_place(i);
@@ -368,8 +422,79 @@ pub fn place_market(world: &mut World, origin: DVec3, mut tex: MarketBake) {
         })
         .collect();
     spots.push((cart, -0.6, Vec2::new(1.6, 1.4), 45));
-    straw(world, &mats, origin, &ground_y, &spots, &mut rng);
+    straw(world, &mats, origin, &fine, &spots, &mut rng);
     ale_corner(world, &mats, origin, &ground_y, &mut rng);
+    let (n, ms) = asked.get();
+    engine_core::log::info!(
+        "ui market: placed in {:.1} ms, {n} ground heights asked ({ms:.1} ms of it)",
+        started.elapsed().as_secs_f64() * 1000.0
+    );
+}
+
+/// Ground heights on a lattice of [`GroundLattice::CELL_M`] around the square's middle,
+/// each corner asked once and read between them bilinearly. The paving's vertices are its
+/// corners, so the straw lies on the heights the paving was built from.
+struct GroundLattice<'a> {
+    ask: &'a dyn Fn(DVec3) -> f64,
+    origin: DVec3,
+    corners: std::cell::RefCell<std::collections::HashMap<(i64, i64), f64>>,
+}
+
+impl<'a> GroundLattice<'a> {
+    const CELL_M: f64 = PAVING_CELL_M as f64;
+
+    fn new(ask: &'a dyn Fn(DVec3) -> f64, origin: DVec3) -> Self {
+        Self {
+            ask,
+            origin,
+            corners: Default::default(),
+        }
+    }
+
+    /// Corners from heights the bake asked ([`bake_market_over`]), above `base_y`.
+    fn fill_paving(&self, heights: &[f64], base_y: f64) {
+        let (n, r_out) = paving_grid();
+        let first = (-r_out / PAVING_CELL_M).round() as i64;
+        let mut corners = self.corners.borrow_mut();
+        for (j, h) in heights.iter().enumerate() {
+            let (i, k) = (j as i64 % (n as i64 + 1), j as i64 / (n as i64 + 1));
+            corners.insert((first + i, first + k), base_y + h);
+        }
+    }
+
+    fn height(&self, p: DVec3) -> f64 {
+        // A point on a corner (a paving vertex) reads that corner alone.
+        let snap = |f: f64| {
+            if (f - f.round()).abs() < 1e-6 {
+                f.round()
+            } else {
+                f
+            }
+        };
+        let fx = snap((p.x - self.origin.x) / Self::CELL_M);
+        let fz = snap((p.z - self.origin.z) / Self::CELL_M);
+        let (i, k) = (fx.floor(), fz.floor());
+        let (tx, tz) = (fx - i, fz - k);
+        let (i, k) = (i as i64, k as i64);
+        let mut corners = self.corners.borrow_mut();
+        let mut at = |di: i64, dk: i64| {
+            *corners.entry((i + di, k + dk)).or_insert_with(|| {
+                (self.ask)(DVec3::new(
+                    self.origin.x + (i + di) as f64 * Self::CELL_M,
+                    p.y,
+                    self.origin.z + (k + dk) as f64 * Self::CELL_M,
+                ))
+            })
+        };
+        let a = at(0, 0);
+        if tx == 0.0 && tz == 0.0 {
+            return a;
+        }
+        let (b, c, d) = (at(1, 0), at(0, 1), at(1, 1));
+        let near = a + (b - a) * tx;
+        let far = c + (d - c) * tx;
+        near + (far - near) * tz
+    }
 }
 
 /// The open side of the square, between the smith and the produce stall: a corner for a
@@ -984,16 +1109,13 @@ fn spawn(world: &mut World, mesh: Mesh, mat: Handle<StandardMaterial>, t: Transf
 /// The cobbled square: a disc of setts following the ground, fraying out stone by stone into
 /// the grass at its edge.
 fn square(world: &mut World, mats: &Mats, origin: DVec3, ground_y: &dyn Fn(DVec3) -> f64) {
-    let cell = 0.5f32;
-    let r_out = SQUARE_M + 3.5;
-    let n = (2.0 * r_out / cell).ceil() as i32;
+    let (n, r_out) = paving_grid();
     let base_y = origin.y;
     let mut m = Mesh::default();
     let row = (n + 1) as u32;
     for k in 0..=n {
         for i in 0..=n {
-            let x = -r_out + i as f32 * cell;
-            let z = -r_out + k as f32 * cell;
+            let (x, z) = paving_vertex(i, k, r_out);
             let d = (x * x + z * z).sqrt();
             let ragged = SQUARE_M + 2.2 * noise::fbm(x * 0.18, z * 0.18, 4, 351);
             let a = sat((ragged - d) / 2.5 + 0.55);
@@ -1736,4 +1858,47 @@ fn clutter(world: &mut World, mats: &Mats, at: DVec3, rng: &mut Rng) {
     spawn(world, wood, mats.wood, t);
     spawn(world, iron, mats.iron, t);
     spawn(world, burlap, mats.burlap, t);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Heights the bake asked for the paving are what the apply reads at the paving's
+    /// vertices and between them (the straw), without asking the ground again, wherever the
+    /// world has shifted the origin to by then.
+    #[test]
+    fn the_paving_heights_from_the_bake_are_read_without_asking_the_ground() {
+        let slope = |p: DVec3| 0.05 * p.x - 0.02 * p.z;
+        let baked_at = DVec3::new(1000.25, 40.0, -300.75);
+        let (n, r_out) = paving_grid();
+        let mut heights = Vec::new();
+        for k in 0..=n {
+            for i in 0..=n {
+                let (x, z) = paving_vertex(i, k, r_out);
+                let w = baked_at + DVec3::new(x as f64, 0.0, z as f64);
+                // The ground stands at baked_at.y + slope; the bake keeps it above the origin.
+                heights.push(slope(w));
+            }
+        }
+        // Shifted before the apply.
+        let shift = DVec3::new(-1000.0, -40.0, 300.0);
+        let origin = baked_at + shift;
+        let ask = |_: DVec3| -> f64 { panic!("asked the ground") };
+        let lattice = GroundLattice::new(&ask, origin);
+        lattice.fill_paving(&heights, origin.y);
+        // The ground is linear, so reading between corners is exact.
+        for (x, z) in [
+            (0.0, 0.0),
+            (-18.0, -18.0),
+            (18.0, 17.5),
+            (3.3, -7.9),
+            (-12.11, 4.04),
+        ] {
+            let p = origin + DVec3::new(x, 0.0, z);
+            let want = origin.y + slope(p - shift);
+            let got = lattice.height(p);
+            assert!((got - want).abs() < 1e-9, "{x},{z}: {got} vs {want}");
+        }
+    }
 }

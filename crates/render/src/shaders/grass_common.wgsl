@@ -32,7 +32,7 @@ struct GrassField {
     wear: vec4<f32>,    // worn-ground map: first point (field-local m, xz), points per m, 1 = present
     gust: vec4<f32>,    // steady wind (m/s, xyz), w: the wind's run (m) less speed x time
     bloom: vec4<f32>,   // flower heads' albedo (linear), w: share of blades flowering
-    kind: vec4<f32>,    // flower head width (m; a flowering stem's record width is its head's), this kind's blades as a share of the field's most
+    kind: vec4<f32>,    // flower head width (m; a flowering stem's record width is its head's), this kind's blades as a share of the field's most, pinnae pairs, leaf rise (0..1)
 };
 // A field growing several kinds of grass has one entry for each, one after the other: the
 // same placement, distances and wind, each kind's look (`grid.z` of the first: how many). A
@@ -153,8 +153,9 @@ fn grass_vertex(s: BladeShape, vertex: u32, t: f32, tip_dir: vec3<f32>) -> Blade
         // A leaf on a stalk: the stalk rises, the blade spreads out flat from its top (leaning
         // with the wind and away from benders) and droops a little at the tip.
         let spread = normalize(facing + over * 0.8);
-        let rise = height * (0.25 + 0.25 * s.rise);
-        let reach = height * 0.75;
+        let upright = f.kind.w;
+        let rise = height * mix(0.25 + 0.25 * s.rise, 0.5 + 0.25 * s.rise, upright);
+        let reach = height * (0.75 - 0.2 * upright);
         p1 = mix(p1, root + up * rise, leaf);
         p2 = mix(p2, root + up * (rise * 1.15) + spread * (reach * 0.45), leaf);
         p3 = mix(p3, root + up * (rise * (1.0 - 0.6 * f.look.y)) + spread * reach, leaf);

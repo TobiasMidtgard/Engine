@@ -35,12 +35,23 @@ pub(crate) struct Hull {
     pub volume: f32,
     /// The same hull with fewer triangles, for bodies far from every focus ([`Hull::at`]).
     coarse: Option<Box<Hull>>,
+    /// A finely detailed hull with a few hundred triangles, for bodies near a focus.
+    near: Option<Box<Hull>>,
 }
 
 /// Hulls with more triangles than this get a coarse copy for far bodies.
 const COARSE_ABOVE: usize = 160;
 /// Cells across the coarse copy's vertex grid, along each axis.
 const COARSE_CELLS: f32 = 5.0;
+/// Hulls with more triangles than this float near a focus on a copy merged on a
+/// [`NEAR_CELLS`]-across grid. A boat's render-detail hull (about 1,300 triangles at the lake)
+/// was pressed on triangle by triangle every substep, most of the lake stop's buoyancy time
+/// (round 19); boat buoyancy is usually worked out on a simplified hull of a few hundred
+/// triangles (Kerner, "Water interaction model for boats in video games", 2015).
+const NEAR_ABOVE: usize = 512;
+/// Cells across the near copy's vertex grid, along each axis: a 5 m boat's cells are 0.5 m
+/// long, its 1 m depth's 10 cm.
+const NEAR_CELLS: f32 = 10.0;
 
 impl Hull {
     /// The mesh of `shape`, or `None` for shapes floated by their bounding box.
@@ -51,6 +62,7 @@ impl Hull {
             tris,
             volume: 0.0,
             coarse: None,
+            near: None,
         };
         let (volume, centroid) = hull.volume_and_centroid();
         if volume.abs() < 1e-9 {
@@ -73,41 +85,44 @@ impl Hull {
             hull.volume = real;
         }
         if hull.tris.len() > COARSE_ABOVE {
-            hull.coarse = hull.decimated().map(Box::new);
+            hull.coarse = hull.decimated(COARSE_CELLS).map(Box::new);
+        }
+        if hull.tris.len() > NEAR_ABOVE {
+            hull.near = hull.decimated(NEAR_CELLS).map(Box::new);
         }
         Some(hull)
     }
 
-    /// This hull, or its coarse copy when the water is looked at on less than the full grid
-    /// (`cells` below [`MAX_CELLS`]: the body is far from every focus). Pressing on every
-    /// triangle of a boat's hull was most of the buoyancy's time at the plaza, for boats 300 m
-    /// away on the lake.
+    /// This hull's copy for the water looked at on `cells` across: the coarse one on less
+    /// than the full grid (`cells` below [`MAX_CELLS`]: the body is far from every focus;
+    /// pressing on every triangle of a boat's hull was most of the buoyancy's time at the
+    /// plaza, for boats 300 m away on the lake), else the near one ([`NEAR_ABOVE`]), else
+    /// this.
     pub fn at(&self, cells: usize) -> &Hull {
-        match &self.coarse {
-            Some(c) if cells < MAX_CELLS => c,
+        match (&self.coarse, &self.near) {
+            (Some(c), _) if cells < MAX_CELLS => c,
+            (_, Some(n)) => n,
             _ => self,
         }
     }
 
-    /// The hull with its vertices merged on a [`COARSE_CELLS`]-across grid (vertex clustering,
-    /// Rossignac and Borrel 1993): triangles that collapse are dropped, and the rest scaled
-    /// about the centroid to the same volume, so it floats as deep. `None` if too little is
-    /// left.
-    fn decimated(&self) -> Option<Hull> {
+    /// The hull with its vertices merged on a grid `across` cells along each axis (vertex
+    /// clustering, Rossignac and Borrel 1993): triangles that collapse are dropped, and the
+    /// rest scaled about the centroid to the same volume, so it floats as deep. `None` if too
+    /// little is left.
+    fn decimated(&self, across: f32) -> Option<Hull> {
         let (lo, hi) = self.verts.iter().fold(
             (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN)),
             |(lo, hi), v| (lo.min(*v), hi.max(*v)),
         );
-        let cell = ((hi - lo) / COARSE_CELLS).max(Vec3::splat(1e-4));
+        let cell = ((hi - lo) / across).max(Vec3::splat(1e-4));
         let mut index: HashMap<(i32, i32, i32), u32> = HashMap::new();
         let (mut sums, mut counts): (Vec<Vec3>, Vec<f32>) = (Vec::new(), Vec::new());
         let map: Vec<u32> = self
             .verts
             .iter()
             .map(|v| {
-                let k = ((*v - lo) / cell)
-                    .floor()
-                    .min(Vec3::splat(COARSE_CELLS - 1.0));
+                let k = ((*v - lo) / cell).floor().min(Vec3::splat(across - 1.0));
                 let key = (k.x as i32, k.y as i32, k.z as i32);
                 let i = *index.entry(key).or_insert_with(|| {
                     sums.push(Vec3::ZERO);
@@ -140,6 +155,7 @@ impl Hull {
             tris,
             volume: 0.0,
             coarse: None,
+            near: None,
         };
         let (volume, centroid) = coarse.volume_and_centroid();
         if volume < self.volume * 0.5 {
@@ -332,14 +348,18 @@ impl HullCache {
 /// `Water::sample` is 5-35 us (every lake's waves, its depth from the ground, ripples, flows),
 /// and every floating collider asked for up to 26 of them every substep, at points that moved
 /// with it. The water stands still through a step (its systems run between steps), so a node
-/// asked once is shared by every substep, collider and body over it. A node near a focus is
-/// asked again each step; farther out the waves are followed less often ([`node_steps`]):
-/// at the plaza the lake's boats, 300-500 m off, were most of the step's water work, and in
-/// four steps (1/15 s) a wave there rises a few centimeters. Aged by [`WaterCache::next_step`].
+/// asked once is shared by every substep, collider and body over it. A node is asked again
+/// every second step near a focus, every fourth to [`MID_CELLS_M`] and every eighth past it
+/// ([`node_steps`]), and between its asks it follows the surface at the rate it rose or fell
+/// between its last two (first-order dead reckoning, as networked games carry a position
+/// forward between updates). For a wave a meter high every 4 s that is within a
+/// millimeter near a focus, 4 mm to [`MID_CELLS_M`] and 2 cm past it, where holding a node
+/// still for the 3 steps it was kept there was up to 4 cm off; and the lake's boats ask for
+/// half as many samples (53 a step near them, 0.34 ms on the VM, round 18).
+/// Aged by [`WaterCache::next_step`].
 #[derive(Default)]
 pub(crate) struct WaterCache {
-    /// Value and the step it expires at.
-    nodes: HashMap<(u8, i64, i64), (Node, u64)>,
+    nodes: HashMap<(u8, i64, i64), Kept>,
     step: u64,
     asked: usize,
 }
@@ -347,24 +367,48 @@ pub(crate) struct WaterCache {
 /// A lattice node: the surface height (world) and current there, if there is water.
 type Node = Option<(f64, Vec3)>;
 
-/// Steps a lattice node is kept, by the grid cells its collider asked for ([`cells_at`]): every
-/// step near a focus, every second to [`MID_CELLS_M`], every fourth past it.
-fn node_steps(cells: usize) -> u64 {
-    if cells >= MAX_CELLS {
-        1
-    } else if cells > FAR_CELLS {
-        2
-    } else {
-        4
+/// A node's last answer: when it was asked, how fast its surface was rising then (meters a
+/// step, from the answer before), and the step it is asked again at.
+#[derive(Clone, Copy)]
+struct Kept {
+    node: Node,
+    asked_at: u64,
+    rate: f64,
+    until: u64,
+}
+
+impl Kept {
+    /// The node `step`s on: its surface moved on at its rate.
+    fn at(&self, step: u64) -> Node {
+        let ahead = step.saturating_sub(self.asked_at) as f64;
+        self.node.map(|(h, v)| (h + self.rate * ahead, v))
     }
 }
 
+/// Steps a lattice node is kept, by the grid cells its collider asked for ([`cells_at`]): two
+/// near a focus, four to [`MID_CELLS_M`], eight past it.
+fn node_steps(cells: usize) -> u64 {
+    if cells >= MAX_CELLS {
+        2
+    } else if cells > FAR_CELLS {
+        4
+    } else {
+        8
+    }
+}
+
+/// The fastest a node's surface is taken to rise or fall, meters a step: past it the two
+/// answers aren't the same wave (a stream turned on, a lake streamed in) and the node is held.
+const MAX_RATE_M: f64 = 0.25;
+
 impl WaterCache {
-    /// Starts a step: forgets the nodes due to be asked again.
+    /// Starts a step. A node due to be asked again stays one more of its spans, so its next
+    /// answer can give its rate; past that it is forgotten.
     pub fn next_step(&mut self) {
         self.step += 1;
         let now = self.step;
-        self.nodes.retain(|_, (_, until)| *until > now);
+        self.nodes
+            .retain(|_, k| k.until + (k.until - k.asked_at) > now);
         self.asked = 0;
     }
 
@@ -388,15 +432,40 @@ impl WaterCache {
         iz: i64,
         keep: u64,
     ) -> Option<(f64, Vec3)> {
-        if let Some((n, _)) = self.nodes.get(&(level, ix, iz)) {
-            return *n;
+        let before = self.nodes.get(&(level, ix, iz)).copied();
+        if let Some(k) = before
+            && k.until > self.step
+        {
+            return k.at(self.step);
         }
         self.asked += 1;
         let s = spacing(level) as f64;
         let n = water
             .sample(DVec3::new(ix as f64 * s, 0.0, iz as f64 * s))
             .map(|w| (w.surface_height, w.velocity));
-        self.nodes.insert((level, ix, iz), (n, self.step + keep));
+        let rate = match (before, n) {
+            (
+                Some(Kept {
+                    node: Some((h0, _)),
+                    asked_at,
+                    ..
+                }),
+                Some((h, _)),
+            ) if asked_at < self.step => {
+                let r = (h - h0) / (self.step - asked_at) as f64;
+                if r.abs() <= MAX_RATE_M { r } else { 0.0 }
+            }
+            _ => 0.0,
+        };
+        self.nodes.insert(
+            (level, ix, iz),
+            Kept {
+                node: n,
+                asked_at: self.step,
+                rate,
+                until: self.step + keep,
+            },
+        );
         n
     }
 
@@ -665,6 +734,68 @@ mod tests {
         }
     }
 
+    /// A detailed hull floats near a focus on a copy with a fraction of its triangles that
+    /// floats as deep and rights itself as hard: a boat-like ellipsoid of about 1,200
+    /// triangles, level and tipped, half and mostly under.
+    #[test]
+    fn near_hulls_float_like_the_full_ones() {
+        use rapier3d::parry::shape::ConvexPolyhedron;
+        let mut points = Vec::new();
+        for i in 0..30 {
+            let v = std::f32::consts::PI * (i as f32 + 0.5) / 30.0;
+            for j in 0..20 {
+                let u = std::f32::consts::TAU * j as f32 / 20.0;
+                points.push(Vec3::new(
+                    2.5 * v.sin() * u.cos(),
+                    0.6 * v.cos(),
+                    1.0 * v.sin() * u.sin(),
+                ));
+            }
+        }
+        let shape = ConvexPolyhedron::from_convex_hull(&points).unwrap();
+        let hull = Hull::of(&shape).unwrap();
+        let near = hull.at(MAX_CELLS);
+        assert!(
+            hull.tris.len() > NEAR_ABOVE,
+            "{} triangles",
+            hull.tris.len()
+        );
+        assert!(
+            near.tris.len() * 2 < hull.tris.len(),
+            "{} of {} triangles",
+            near.tris.len(),
+            hull.tris.len()
+        );
+        assert!(std::ptr::eq(hull.at(FAR_CELLS), hull.at(1)));
+        for (depth, tip) in [(0.0, 0.0), (0.3, 0.0), (0.0, 0.3), (0.2, 0.5)] {
+            let pose = Pose::from_parts(
+                Vec3::new(0.0, -depth, 0.0),
+                engine_core::math::Quat::from_rotation_x(tip),
+            );
+            let lift = |h: &Hull| {
+                h.immerse(
+                    &pose,
+                    &Surface::flat(0.0),
+                    G,
+                    pose.translation,
+                    Vec3::ZERO,
+                    Vec3::ZERO,
+                )
+            };
+            let (fine, rough) = (lift(&hull), lift(near));
+            assert!(
+                (rough.volume - fine.volume).abs() < 0.02 * fine.volume,
+                "at {depth} m, {tip} rad: {rough:?} vs {fine:?}"
+            );
+            if tip > 0.0 {
+                assert!(
+                    (rough.torque - fine.torque).length() < 0.1 * fine.torque.length(),
+                    "at {depth} m, {tip} rad: {rough:?} vs {fine:?}"
+                );
+            }
+        }
+    }
+
     /// Half under water, a box tipped about a long axis is pushed back level.
     #[test]
     fn tipped_boxes_are_righted() {
@@ -712,6 +843,59 @@ mod tests {
                 "draft {h}: {} vs {want}",
                 w.volume
             );
+        }
+    }
+
+    /// A surface rising steadily, one centimeter a step ([`Rising::step`] moves it on).
+    struct Rising(std::sync::atomic::AtomicU64, std::sync::atomic::AtomicUsize);
+
+    impl Rising {
+        fn step(&self) {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    impl engine_world::WaterQuery for Rising {
+        fn sample(&self, _: DVec3) -> Option<engine_world::WaterSample> {
+            self.1.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let k = self.0.load(std::sync::atomic::Ordering::Relaxed);
+            Some(engine_world::WaterSample {
+                surface_height: 0.01 * k as f64,
+                depth: 5.0,
+                velocity: Vec3::ZERO,
+                normal: Vec3::Y,
+            })
+        }
+    }
+
+    /// Between its asks a node follows the surface at the rate it moved between the last two:
+    /// a steadily rising surface is read exactly every step, near a focus asked every second
+    /// step, far off every eighth.
+    #[test]
+    fn kept_water_nodes_follow_the_surface_between_asks() {
+        let rising = Arc::new(Rising(Default::default(), Default::default()));
+        let water = Water(rising.clone());
+        for (cells, every) in [(MAX_CELLS, 2), (FAR_CELLS, 8)] {
+            let mut cache = WaterCache::default();
+            rising.1.store(0, std::sync::atomic::Ordering::Relaxed);
+            let steps = 64;
+            for _ in 0..steps {
+                rising.step();
+                cache.next_step();
+                let now = rising.0.load(std::sync::atomic::Ordering::Relaxed);
+                // Past the first two asks (the rate needs two answers).
+                let (h, _) = cache.node(&water, 0, 3, -2, node_steps(cells)).unwrap();
+                if cache.step > 2 * every {
+                    assert!(
+                        (h - 0.01 * now as f64).abs() < 1e-9,
+                        "{cells} cells, step {}: {h} vs {}",
+                        cache.step,
+                        0.01 * now as f64
+                    );
+                }
+            }
+            let asked = rising.1.load(std::sync::atomic::Ordering::Relaxed);
+            assert_eq!(asked as u64, steps / every, "{cells} cells");
         }
     }
 }

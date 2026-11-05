@@ -38,11 +38,12 @@ use crate::grass::{GrassBurn, GrassMeadow};
 use crate::ground::{GroundKind, GroundPaint, PaintedGround};
 use crate::objects::{Burning, Charring, ContainedFire, FlameShape};
 use crate::props::{
-    Foliage, SHED_ROOF_TILT, SHED_ROOF_Y, TreeParams, campfire_stones, campfire_wood, grow_tree,
-    hay_bale, prop_materials, shed_roof, shed_wall, shed_wall_frame,
+    Foliage, SHED_ROOF_TILT, SHED_ROOF_Y, TreeMesh, TreeParams, campfire_stones, campfire_wood,
+    grow_tree, hay_bale, prop_materials, register_set, shed_roof, shed_wall, shed_wall_frame,
 };
 use crate::settings::FireSettings;
 use crate::sim::{self, CharBase, FireClock, FirePatches, WorldFuel};
+use crate::textures::TexSet;
 
 /// Half extents of the meadow (m).
 const MEADOW: [f32; 2] = [28.0, 18.0];
@@ -539,7 +540,7 @@ pub fn spawn_demo(commands: &mut Commands, origin: DVec3) {
         ))
         .id();
     props.push((wood, Prop::Firewood));
-    commands.queue(move |world: &mut World| dress_props(world, &props));
+    commands.queue(move |world: &mut World| dress_props(world, props));
     commands.spawn((
         Name::new("Fire demo: campfire"),
         Transform::from_translation(at(camp.0, 0.05, camp.1)),
@@ -580,63 +581,146 @@ enum Prop {
 
 /// Give the demo's props their meshes and materials (generated once and shared by key).
 /// Does nothing without asset stores (headless tests).
-fn dress_props(world: &mut World, props: &[(Entity, Prop)]) {
+fn dress_props(world: &mut World, props: Vec<(Entity, Prop)>) {
     if !world.contains_resource::<Assets<Image>>() || !world.contains_resource::<Assets<Mesh>>() {
         return;
     }
+    // What this world lacks is made on a worker (`engine_core::off_frame`): the textures
+    // when the loading-time prefetch has been used up (a second load, after the first went
+    // with its cell) and the meshes, which held the field's load frame (125-178 ms on the
+    // session VM). The props are dressed once both are in.
+    let sets: Vec<&'static str> = {
+        let images = world.resource::<Assets<Image>>();
+        crate::props::PROP_SETS
+            .into_iter()
+            .filter(|name| !crate::props::has_set(images, name))
+            .collect()
+    };
+    let meshes: Vec<(String, Prop)> = {
+        let assets = world.resource::<Assets<Mesh>>();
+        let mut missing: Vec<(String, Prop)> = Vec::new();
+        for &(_, prop) in &props {
+            let key = prop_key(prop);
+            if assets.loaded_by_key(&key).is_none() && !missing.iter().any(|(k, _)| *k == key) {
+                missing.push((key, prop));
+            }
+        }
+        missing
+    };
+    engine_core::off_frame::off_frame(
+        world,
+        "fire demo props",
+        move || {
+            let sets: Vec<(&'static str, TexSet)> = sets
+                .into_iter()
+                .map(|name| {
+                    let set = crate::props::take_prefetched(name)
+                        .unwrap_or_else(|| crate::props::make_set(name));
+                    (name, set)
+                })
+                .collect();
+            // Each tree is grown once for its wood and its leaves.
+            let mut grown: Vec<(u64, u32, TreeMesh)> = Vec::new();
+            let meshes: Vec<(String, Mesh)> = meshes
+                .into_iter()
+                .map(|(key, prop)| (key, prop_mesh(prop, &mut grown)))
+                .collect();
+            (sets, meshes)
+        },
+        move |world: &mut World, (sets, meshes)| {
+            {
+                let mut images = world.resource_mut::<Assets<Image>>();
+                for (name, set) in sets {
+                    register_set(&mut images, name, || set);
+                }
+            }
+            {
+                let mut assets = world.resource_mut::<Assets<Mesh>>();
+                for (key, mesh) in meshes {
+                    assets.get_or_insert_keyed(&key, || mesh);
+                }
+            }
+            place_props(world, &props);
+        },
+    );
+}
+
+/// The asset key of a prop's mesh.
+fn prop_key(prop: Prop) -> String {
+    match prop {
+        Prop::TreeWood { tree, .. } | Prop::TreeLeaves { tree, .. } => {
+            let part = if matches!(prop, Prop::TreeWood { .. }) {
+                "wood"
+            } else {
+                "leaves"
+            };
+            format!(
+                "fire/tree/{}/{}/{part}",
+                tree.seed,
+                (tree.height * 100.0).round()
+            )
+        }
+        Prop::ShedWall(i) => format!("fire/shed/wall{i}"),
+        Prop::ShedRoof => "fire/shed/roof".into(),
+        Prop::Bale(v) => format!("fire/bale/{v}"),
+        Prop::Stones => "fire/campfire/stones".into(),
+        Prop::Firewood => "fire/campfire/wood".into(),
+    }
+}
+
+/// A prop's mesh (pure: no world). Trees grown before are taken from `grown`.
+fn prop_mesh(prop: Prop, grown: &mut Vec<(u64, u32, TreeMesh)>) -> Mesh {
+    match prop {
+        Prop::TreeWood { tree, foot } | Prop::TreeLeaves { tree, foot } => {
+            let id = (tree.seed, tree.height.to_bits());
+            let k = match grown.iter().position(|(s, h, _)| (*s, *h) == id) {
+                Some(k) => k,
+                None => {
+                    grown.push((id.0, id.1, grow_tree(&tree)));
+                    grown.len() - 1
+                }
+            };
+            let g = &grown[k].2;
+            let (mut m, y) = if matches!(prop, Prop::TreeWood { .. }) {
+                (g.wood.clone(), foot)
+            } else {
+                (g.leaves.clone(), g.crown_center.y + foot)
+            };
+            m.transform(&Mat4::from_translation(Vec3::new(0.0, y, 0.0)));
+            m
+        }
+        Prop::ShedWall(i) => {
+            let (center, ..) = shed_wall_frame(i);
+            let mut m = shed_wall(i);
+            m.transform(&Mat4::from_translation(-(center + Vec3::Y * 1.2)));
+            m
+        }
+        Prop::ShedRoof => shed_roof(),
+        Prop::Bale(v) => hay_bale(0xBA1E + v),
+        Prop::Stones => campfire_stones(0.8, 13, 0x570E),
+        Prop::Firewood => campfire_wood(0x10C5),
+    }
+}
+
+/// Give the props their renderers, from the textures and meshes in the world (made here
+/// and now, as before, for any that are still missing).
+fn place_props(world: &mut World, props: &[(Entity, Prop)]) {
     let mats =
         world.resource_scope(|_, mut images: Mut<Assets<Image>>| prop_materials(&mut images));
     let mut renderers = Vec::with_capacity(props.len());
     {
         let mut meshes = world.resource_mut::<Assets<Mesh>>();
-        let mut keyed =
-            |key: String, make: &dyn Fn() -> Mesh| meshes.get_or_insert_keyed(&key, make);
+        let mut grown = Vec::new();
         for &(entity, prop) in props {
-            let (mesh, material) = match prop {
-                Prop::TreeWood { tree, foot } | Prop::TreeLeaves { tree, foot } => {
-                    let wood = matches!(prop, Prop::TreeWood { .. });
-                    let part = if wood { "wood" } else { "leaves" };
-                    let key = format!(
-                        "fire/tree/{}/{}/{part}",
-                        tree.seed,
-                        (tree.height * 100.0).round()
-                    );
-                    let mesh = keyed(key, &|| {
-                        let grown = grow_tree(&tree);
-                        let (mut m, y) = if wood {
-                            (grown.wood, foot)
-                        } else {
-                            (grown.leaves, grown.crown_center.y + foot)
-                        };
-                        m.transform(&Mat4::from_translation(Vec3::new(0.0, y, 0.0)));
-                        m
-                    });
-                    (mesh, if wood { mats.bark } else { mats.leaves })
-                }
-                Prop::ShedWall(i) => {
-                    let mesh = keyed(format!("fire/shed/wall{i}"), &|| {
-                        let (center, ..) = shed_wall_frame(i);
-                        let mut m = shed_wall(i);
-                        m.transform(&Mat4::from_translation(-(center + Vec3::Y * 1.2)));
-                        m
-                    });
-                    (mesh, mats.planks)
-                }
-                Prop::ShedRoof => (keyed("fire/shed/roof".into(), &shed_roof), mats.metal),
-                Prop::Bale(v) => (
-                    keyed(format!("fire/bale/{v}"), &|| hay_bale(0xBA1E + v)),
-                    mats.straw,
-                ),
-                Prop::Stones => (
-                    keyed("fire/campfire/stones".into(), &|| {
-                        campfire_stones(0.8, 13, 0x570E)
-                    }),
-                    mats.granite,
-                ),
-                Prop::Firewood => (
-                    keyed("fire/campfire/wood".into(), &|| campfire_wood(0x10C5)),
-                    mats.firewood,
-                ),
+            let mesh = meshes.get_or_insert_keyed(&prop_key(prop), || prop_mesh(prop, &mut grown));
+            let material = match prop {
+                Prop::TreeWood { .. } => mats.bark,
+                Prop::TreeLeaves { .. } => mats.leaves,
+                Prop::ShedWall(_) => mats.planks,
+                Prop::ShedRoof => mats.metal,
+                Prop::Bale(_) => mats.straw,
+                Prop::Stones => mats.granite,
+                Prop::Firewood => mats.firewood,
             };
             renderers.push((entity, MeshRenderer::new(mesh, material)));
         }
@@ -1227,6 +1311,39 @@ mod tests {
 
     /// Behind a loading screen the fire's warm-up runs a budget's worth a frame (here one step),
     /// not all in its first frame, and `loading` holds until it is done.
+    /// In a world that draws, the props stand at once and get their meshes and textures
+    /// once those are made on a worker; a second demo is dressed at once from the same keys.
+    #[test]
+    fn the_props_are_dressed_once_their_art_is_made_off_the_frame() {
+        let mut app = App::new();
+        app.insert_resource(Assets::<Image>::default());
+        app.insert_resource(Assets::<Mesh>::default());
+        app.insert_resource(Assets::<engine_render::StandardMaterial>::default());
+        let dressed = |world: &mut World| world.query::<&MeshRenderer>().iter(world).count();
+        {
+            let mut commands = app.world.commands();
+            spawn_demo(&mut commands, DVec3::ZERO);
+        }
+        app.world.flush();
+        assert_eq!(
+            dressed(&mut app.world),
+            0,
+            "dressed only once the art is in"
+        );
+        engine_core::off_frame::finish(&mut app.world, None);
+        let n = dressed(&mut app.world);
+        assert!(n >= 14, "only {n} props dressed");
+        let meshes = app.world.resource::<Assets<Mesh>>().len();
+        {
+            let mut commands = app.world.commands();
+            spawn_demo(&mut commands, DVec3::new(500.0, 0.0, 0.0));
+        }
+        app.world.flush();
+        engine_core::off_frame::finish(&mut app.world, None);
+        assert_eq!(dressed(&mut app.world), 2 * n);
+        assert_eq!(app.world.resource::<Assets<Mesh>>().len(), meshes);
+    }
+
     #[test]
     fn behind_a_loading_screen_the_warm_up_is_spread_over_frames() {
         let mut app = App::new();

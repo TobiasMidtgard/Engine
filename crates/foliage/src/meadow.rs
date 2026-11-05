@@ -272,6 +272,8 @@ pub fn palette(meadow: &GrassStyle, day_of_year: f32) -> Vec<GrassStyle> {
         Bracken,
         GrassStyle {
             blades_per_m2: 14.0,
+            // Bracken's fronds are cut into pinnae too, coarser.
+            pinnae: 14.0,
             height: 0.85,
             height_variation: 0.35,
             width: 0.32,

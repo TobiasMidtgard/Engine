@@ -404,6 +404,9 @@ pub struct EcologySettings {
     /// Draw each region's grass as GPU blades (`engine_render::GrassField`, fed from the
     /// ecology) instead of one mesh per tuft.
     pub gpu_grass: bool,
+    /// With `gpu_grass`, draw a region's ferns as GPU fronds in a floor layer of their own
+    /// (`grass::FloorLayer::Ferns`) instead of a mesh and an entity each.
+    pub gpu_ferns: bool,
 }
 
 impl Default for EcologySettings {
@@ -422,6 +425,7 @@ impl Default for EcologySettings {
             tree_solid_distance_m: 80.0,
             max_catch_up_years: 40.0,
             gpu_grass: true,
+            gpu_ferns: true,
         }
     }
 }

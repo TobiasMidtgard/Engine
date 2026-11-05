@@ -61,6 +61,9 @@ pub enum FloorLayer {
     Herbs,
     /// Fallen leaves ([`GrassStyle::leaf_litter`]).
     Litter,
+    /// Fern crowns where the region's fern plants grow ([`GrassStyle::fern`]): fronds on the
+    /// GPU instead of a mesh and an entity each.
+    Ferns,
 }
 
 /// On a region: the entities drawing its forest floor's herbs and fallen leaves.
@@ -68,6 +71,7 @@ pub enum FloorLayer {
 pub struct RegionFloor {
     pub herbs: Option<Entity>,
     pub litter: Option<Entity>,
+    pub ferns: Option<Entity>,
 }
 
 /// The fields a region draws and how each looks: grass where it has a grass species, and in a
@@ -94,6 +98,9 @@ pub fn floor_styles(
     }
     if forms.contains(&PlantForm::Broadleaf) {
         out.push((FloorLayer::Litter, GrassStyle::leaf_litter()));
+    }
+    if forms.contains(&PlantForm::Fern) {
+        out.push((FloorLayer::Ferns, GrassStyle::fern()));
     }
     out
 }
@@ -432,6 +439,69 @@ pub struct Cover {
     pub radius: f32,
 }
 
+/// Fern cover above which a map point grows the meadow's fern kind.
+const FERN_COVER: f32 = 0.3;
+
+/// How thickly `plants` (position from the region's center, cover radius, vigor, health)
+/// cover each map point: each adds up to its vigor at its middle, falling to 0 at 1.4 times
+/// its radius, as [`grass_maps`] counts tufts.
+pub fn plant_cover(
+    region: &EcologyRegion,
+    resolution: [u32; 2],
+    plants: &[(Vec2, f32, f32, f32)],
+) -> Vec<f32> {
+    let [rx, rz] = resolution;
+    let size = Vec2::new(region.half_extents[0] * 2.0, region.half_extents[1] * 2.0);
+    let step = Vec2::new(size.x / (rx - 1) as f32, size.y / (rz - 1) as f32);
+    let corner = -size * 0.5;
+    let mut cover = vec![0.0f32; (rx * rz) as usize];
+    for &(p, r, vigor, _) in plants {
+        let reach = (r * 1.4).max(step.x.max(step.y));
+        let ci = ((p.x - corner.x) / step.x).round() as i64;
+        let cj = ((p.y - corner.y) / step.y).round() as i64;
+        let (si, sj) = (
+            (reach / step.x).ceil() as i64,
+            (reach / step.y).ceil() as i64,
+        );
+        for j in (cj - sj).max(0)..=(cj + sj).min(rz as i64 - 1) {
+            for i in (ci - si).max(0)..=(ci + si).min(rx as i64 - 1) {
+                let q = corner + Vec2::new(i as f32 * step.x, j as f32 * step.y);
+                let d = q.distance(p) / reach;
+                if d < 1.0 {
+                    cover[(j as u32 * rx + i as u32) as usize] += (1.0 - d * d) * vigor;
+                }
+            }
+        }
+    }
+    cover
+}
+
+/// Density and dryness maps of a region's fern layer: thick where crowns crowd, none on paths
+/// and under logs and rocks, rust brown as the season turns (`season_dry`).
+pub fn fern_maps(
+    region: &EcologyRegion,
+    resolution: [u32; 2],
+    ferns: &[(Vec2, f32, f32, f32)],
+    covers: &[Cover],
+    season_dry: f32,
+) -> (Vec<f32>, Vec<f32>) {
+    let cover = plant_cover(region, resolution, ferns);
+    let bare = bare_mask(region, resolution, covers);
+    let density = cover
+        .iter()
+        .zip(&bare)
+        .map(|(&c, &b)| {
+            if b || c < FERN_COVER {
+                0.0
+            } else {
+                smoothstep(FERN_COVER, 1.0, c).max(0.25)
+            }
+        })
+        .collect();
+    let dryness = vec![0.08 + 0.92 * season_dry; cover.len()];
+    (density, dryness)
+}
+
 /// Density (0..1) and dryness (0..1) maps for a region from its grass plants, soil and what
 /// covers the ground. `plants` are (position from the region's center, cover radius,
 /// vigor 0..1, health 0..1) of living grass.
@@ -608,7 +678,7 @@ pub fn sync_region_grass(
         }
         let field_at = Transform::from_translation(built.center);
         let mut floor = floor.copied().unwrap_or_default();
-        let had_floor = floor.herbs.is_some() || floor.litter.is_some();
+        let had_floor = floor.herbs.is_some() || floor.litter.is_some() || floor.ferns.is_some();
         // A new field takes the grass field's heights when the build didn't bring them.
         let grass_heights = || {
             linked
@@ -617,12 +687,13 @@ pub fn sync_region_grass(
         };
         let known_heights = built.heights.clone().or_else(grass_heights);
         let known_floor = built.floor_heights.clone().or_else(grass_heights);
-        let mut wanted = [false; 2];
+        let mut wanted = [false; 3];
         for (layer, style, density, dryness) in built.layers {
             let slot = match layer {
                 FloorLayer::Grass => None,
                 FloorLayer::Herbs => Some(0),
                 FloorLayer::Litter => Some(1),
+                FloorLayer::Ferns => Some(2),
             };
             if let Some(i) = slot {
                 wanted[i] = true;
@@ -630,7 +701,8 @@ pub fn sync_region_grass(
             let existing = match slot {
                 None => linked.map(|g| g.0),
                 Some(0) => floor.herbs,
-                Some(_) => floor.litter,
+                Some(1) => floor.litter,
+                Some(_) => floor.ferns,
             };
             match existing.and_then(|e| fields.get_mut(e).ok()) {
                 Some((mut field, mut t, _)) => {
@@ -694,13 +766,14 @@ pub fn sync_region_grass(
                             commands.entity(region_e).insert(RegionGrass(e));
                         }
                         Some(0) => floor.herbs = Some(e),
-                        Some(_) => floor.litter = Some(e),
+                        Some(1) => floor.litter = Some(e),
+                        Some(_) => floor.ferns = Some(e),
                     }
                 }
             }
         }
         // Layers the region no longer draws.
-        for (i, slot) in [&mut floor.herbs, &mut floor.litter]
+        for (i, slot) in [&mut floor.herbs, &mut floor.litter, &mut floor.ferns]
             .into_iter()
             .enumerate()
         {
@@ -710,7 +783,7 @@ pub fn sync_region_grass(
                 commands.entity(e).despawn();
             }
         }
-        if floor.herbs.is_some() || floor.litter.is_some() || had_floor {
+        if floor.herbs.is_some() || floor.litter.is_some() || floor.ferns.is_some() || had_floor {
             commands.entity(region_e).insert(floor);
         }
     }
@@ -747,7 +820,9 @@ pub fn sync_region_grass(
     let day = season.day_of_year;
     for (region_e, region, state, linked, floor, build) in &regions {
         let styles = if settings.gpu_grass {
-            floor_styles(&library, region)
+            let mut styles = floor_styles(&library, region);
+            styles.retain(|(l, _)| settings.gpu_ferns || *l != FloorLayer::Ferns);
+            styles
         } else {
             Vec::new()
         };
@@ -757,7 +832,7 @@ pub fn sync_region_grass(
                 commands.entity(region_e).remove::<RegionGrass>();
             }
             if let Some(f) = floor {
-                for e in [f.herbs, f.litter].into_iter().flatten() {
+                for e in [f.herbs, f.litter, f.ferns].into_iter().flatten() {
                     commands.entity(e).despawn();
                 }
                 commands.entity(region_e).remove::<RegionFloor>();
@@ -832,6 +907,20 @@ pub fn sync_region_grass(
                 )
             })
             .collect();
+        let ferns: Vec<_> = plants
+            .iter()
+            .filter(|(p, _, r)| r.0 == Some(region_e) && p.stage.is_alive())
+            .filter(|(p, _, _)| library.get(p.species).form == PlantForm::Fern)
+            .map(|(p, t, _)| {
+                let sp = library.get(p.species);
+                (
+                    local(t),
+                    p.crown_radius(sp),
+                    (0.35 + 0.65 * p.size).min(1.0),
+                    p.health,
+                )
+            })
+            .collect();
         // A log's transform sits at its butt (the model's base); the trunk runs up its axis.
         let mut covers: Vec<Cover> = logs
             .iter()
@@ -866,6 +955,7 @@ pub fn sync_region_grass(
         let need_heights =
             relief || existing.is_none_or(|(f, _, _)| f.heights.is_empty() || f.resolution != res);
         let shades = shades_floor(&styles);
+        let ferns_layer = styles.iter().any(|(l, _)| *l == FloorLayer::Ferns);
         let ground = need_heights.then(|| ground.as_deref().cloned());
         let grids: Vec<CoverGrid> = if shades_floor(&styles) {
             surfaces
@@ -879,6 +969,10 @@ pub fn sync_region_grass(
         let soil = state.sim.soil.clone();
         let build = spawn_build(move || {
             let (density, mut dryness) = grass_maps(&region, &soil, center, res, &grass, &covers);
+            // Fern crowns grow as their own floor layer: fronds drawn on the GPU, not a mesh
+            // and an entity each (`visuals` draws none for ferns where a region has it).
+            let mut ferns =
+                ferns_layer.then(|| fern_maps(&region, res, &ferns, &covers, season_dry));
             // Autumn browns the meadow and winter leaves it straw, wherever it grows.
             for d in &mut dryness {
                 *d += (1.0 - *d) * season_dry;
@@ -909,6 +1003,7 @@ pub fn sync_region_grass(
                         FloorLayer::Grass => maps.take()?,
                         FloorLayer::Herbs => floor.as_mut()?[0].take()?,
                         FloorLayer::Litter => floor.as_mut()?[1].take()?,
+                        FloorLayer::Ferns => ferns.take()?,
                     };
                     Some((layer, style, d, w))
                 })
@@ -1141,7 +1236,16 @@ mod tests {
             .expect("a forest floor");
         let mut q = app.world.query::<(&GrassField, &FloorLayer, &GrassOf)>();
         let layers: Vec<FloorLayer> = q.iter(&app.world).map(|(_, l, _)| *l).collect();
-        assert_eq!(layers.len(), 3, "{layers:?}");
+        assert_eq!(layers.len(), 4, "{layers:?}");
+        // The forest's ferns grow as fronds in a layer of their own, where its fern plants are.
+        let (f, l, _) = q
+            .get(&app.world, floor.ferns.expect("a fern layer"))
+            .unwrap();
+        assert_eq!(*l, FloorLayer::Ferns);
+        let on = f.density.iter().filter(|d| **d > 0.0).count() as f32;
+        let share = on / f.density.len() as f32;
+        assert!((0.005..0.8).contains(&share), "ferns cover {share}");
+        assert_eq!(f.heights.len(), f.density.len());
         for (e, layer) in [
             (floor.herbs, FloorLayer::Herbs),
             (floor.litter, FloorLayer::Litter),

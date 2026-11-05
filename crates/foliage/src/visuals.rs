@@ -338,6 +338,7 @@ pub fn sync_plant_visuals(
     >,
     mut fades: ResMut<crate::lod_fade::LodFades>,
     meadows: Query<(), With<RegionGrass>>,
+    floors: Query<&crate::grass::RegionFloor>,
 ) {
     *frame = frame.wrapping_add(1);
     let full_pass =
@@ -393,11 +394,16 @@ pub fn sync_plant_visuals(
         let distance = cam
             .map(|c| c.distance(transform.translation) as f32)
             .unwrap_or(0.0);
-        // Grass under a region's GPU meadow is drawn as blades there.
-        let meadow = sp.form == PlantForm::Grass
-            && region
-                .and_then(|r| r.0)
-                .is_some_and(|r| meadows.contains(r));
+        // Grass under a region's GPU meadow is drawn as blades there, and ferns as fronds in
+        // its fern layer (`grass::sync_region_grass`).
+        let region_e = region.and_then(|r| r.0);
+        let meadow = match sp.form {
+            PlantForm::Grass => region_e.is_some_and(|r| meadows.contains(r)),
+            PlantForm::Fern => {
+                region_e.is_some_and(|r| floors.get(r).is_ok_and(|f| f.ferns.is_some()))
+            }
+            _ => false,
+        };
         let pick = |d: f32| {
             if meadow {
                 [None, None, None]
@@ -437,7 +443,10 @@ pub fn sync_plant_visuals(
         match visual {
             Some(mut visual) => {
                 if full_pass {
-                    drop_idle_parts(&mut commands, &mut visual, &want, &parts);
+                    // Under a meadow that draws them, parts never show again: let them go as
+                    // soon as they've faded.
+                    let patience = if meadow { 1 } else { PART_DROP_PASSES };
+                    drop_idle_parts(&mut commands, &mut visual, &want, &parts, patience);
                 }
                 if visual.shown == want {
                     continue;
@@ -495,7 +504,7 @@ pub fn sync_plant_visuals(
 }
 
 /// Count the full passes each hidden, settled part of `visual` has waited, and despawn the ones
-/// that have waited long enough (and won't show anything this pass either).
+/// that have waited `patience` passes (and won't show anything this pass either).
 #[allow(clippy::type_complexity)]
 fn drop_idle_parts(
     commands: &mut Commands,
@@ -509,6 +518,7 @@ fn drop_idle_parts(
         ),
         With<PlantPart>,
     >,
+    patience: u8,
 ) {
     for (i, want) in want.iter().enumerate() {
         let Some(e) = visual.parts[i] else {
@@ -525,7 +535,7 @@ fn drop_idle_parts(
             continue;
         }
         visual.hidden[i] = visual.hidden[i].saturating_add(1);
-        if visual.hidden[i] >= PART_DROP_PASSES {
+        if visual.hidden[i] >= patience {
             if let Ok(mut c) = commands.get_entity(e) {
                 c.despawn();
             }
