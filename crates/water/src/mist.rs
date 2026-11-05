@@ -83,7 +83,10 @@ pub fn mist_clouds((foot, away, power): Plunge) -> [(DVec3, Quat, FogVolume); 2]
     let radius = (1.5 + 0.55 * size).clamp(2.0, 40.0);
     let height = (1.0 + 0.3 * size).clamp(1.5, 25.0);
     let cloud = FogVolume::ellipsoid([radius, height, radius])
-        .with_density((0.02 + 0.003 * size).min(0.06))
+        // Thin enough that the falls read white through it: about 0.6 of extinction across
+        // its middle however big it grows (a flood's cloud is wider, not denser to the eye;
+        // a fixed density let a flash flood's grey it out behind 1.7 and read as the weaker fall).
+        .with_density((0.02 + 0.003 * size).min(0.3 / radius))
         .with_albedo(SPRAY_ALBEDO)
         .with_edge_falloff(0.5 * radius)
         .with_noise(0.8, (0.3 * radius).clamp(1.0, 8.0))
@@ -91,7 +94,7 @@ pub fn mist_clouds((foot, away, power): Plunge) -> [(DVec3, Quat, FogVolume); 2]
     // The veil, longer downstream (local z) than across.
     let (wide, high) = (2.2 * radius, 1.6 * height);
     let veil = FogVolume::ellipsoid([wide * 0.8, high, wide * 1.2])
-        .with_density((0.004 + 0.0006 * size).min(0.012))
+        .with_density((0.004 + 0.0006 * size).min(0.012).min(0.06 / wide))
         .with_albedo(SPRAY_ALBEDO)
         .with_edge_falloff(0.6 * wide)
         .with_noise(0.7, (0.3 * wide).clamp(2.0, 12.0))
@@ -187,6 +190,11 @@ mod tests {
         let small = mist_clouds((DVec3::ZERO, Vec2::X, 9810.0 * 0.2 * 3.0));
         assert!(big[0].2.half_extents[0] > 3.0 * small[0].2.half_extents[0]);
         assert!(big[0].2.density > small[0].2.density);
+        // A flash flood (six times that) stands in a wider cloud, no harder to see through.
+        let flood = mist_clouds((DVec3::ZERO, Vec2::X, 9810.0 * 30.0 * 20.0));
+        let across = |c: &FogVolume| 2.0 * c.half_extents[0] * c.density;
+        assert!(flood[0].2.half_extents[0] > big[0].2.half_extents[0] * 1.5);
+        assert!(across(&flood[0].2) < 0.61 && across(&big[0].2) < 0.61);
         // The veil drifts off downstream (+x here), thinner and wider than the cloud.
         assert!(big[1].0.x > big[0].0.x + 5.0);
         assert!(big[1].2.density < big[0].2.density * 0.5);
