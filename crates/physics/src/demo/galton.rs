@@ -320,7 +320,7 @@ pub(super) fn galton_board(y: &mut Yard, base: DVec3) {
             Mat::Glass,
             Mat::Lacquer(art::CURVE),
         ],
-        || {
+        move || {
             let b = art::board();
             [b.wood, b.board, b.pins, b.dividers, b.glass, b.curve]
         },
@@ -361,7 +361,7 @@ fn balls(y: &mut Yard, base: DVec3, steel: engine_world::SurfaceId, range: Range
         .take(range.end)
         .skip(range.start)
     {
-        let parts = y.parts("galton_ball", [Mat::Chrome], || [art::ball(BALL)]);
+        let parts = y.parts("galton_ball", [Mat::Chrome], move || [art::ball(BALL)]);
         let c = Collider::sphere(BALL)
             .with_surface(steel)
             .with_density(7800.0);

@@ -13,7 +13,7 @@ use std::thread::JoinHandle;
 use engine_core::ecs::entity::EntityHashSet;
 use engine_core::math::{DVec3, Quat, Vec3};
 use engine_core::prelude::*;
-use engine_world::physics::{BodyKind, Collider, Joint, RigidBody};
+use engine_world::physics::{BodyKind, Collider, ColliderShape, Joint, RigidBody};
 use engine_world::{Gravity, WorldShift};
 use rapier3d::prelude::{ColliderBuilder, PhysicsWorld, Pose, RigidBodyBuilder};
 
@@ -95,11 +95,10 @@ pub(crate) fn start(world: &mut World, origin: DVec3, bodies: &[Entity]) {
         if !near(pose.translation) {
             continue;
         }
-        let Some(shape) = crate::convert::shape(&c.shape, pose.scale) else {
-            continue;
-        };
+        // Shapes are made on the settle's thread: hulls and meshes built here were 10-14 ms
+        // of the frame a station came to rest on.
         let body = owner(world, e).filter(|b| loose.contains(b));
-        parts.push((body, pose, shape, c.density));
+        parts.push((body, pose, c.shape, c.density));
     }
     let mut movers = Vec::new();
     for &e in &loose {
@@ -124,12 +123,7 @@ pub(crate) fn start(world: &mut World, origin: DVec3, bodies: &[Entity]) {
     }
 }
 
-type Part = (
-    Option<Entity>,
-    Transform,
-    rapier3d::prelude::SharedShape,
-    f32,
-);
+type Part = (Option<Entity>, Transform, ColliderShape, f32);
 
 fn settle(
     origin: DVec3,
@@ -155,6 +149,9 @@ fn settle(
         handles.insert(e, (w.insert_body(b), at, rot));
     }
     for (body, pose, shape, density) in parts {
+        let Some(shape) = crate::convert::shape(&shape, pose.scale) else {
+            continue;
+        };
         let (parent, at) = match body.and_then(|b| handles.get(&b)) {
             Some((h, at, rot)) => {
                 let rel = Pose::from_parts(
