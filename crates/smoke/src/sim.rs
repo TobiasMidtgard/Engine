@@ -1,7 +1,6 @@
 //! Smoke systems: volumes, sources, everything that pushes smoke around, and the step.
 
 use engine_core::math::{DVec2, DVec3, UVec3, Vec3};
-use engine_core::off_frame::OffFrameCommands;
 use engine_core::prelude::*;
 use engine_render::Camera;
 use engine_world::{
@@ -450,16 +449,34 @@ fn ground_floor(ground: &Ground) -> impl Fn(f64, f64) -> Option<f64> + Sync + '_
     move |x, z| ground.height(DVec3::new(x, 1.0e5, z))
 }
 
-/// Volumes whose air is being made on a worker: the entity and the box it will fill. Smoke
-/// released in one meanwhile is let go rather than given a volume of its own.
-#[derive(Resource, Default, Debug)]
-pub struct VolumesMaking(pub Vec<(Entity, DVec3, DVec3)>);
+/// Volumes whose air is being made on a worker, with the box each will fill. Smoke released
+/// in one meanwhile is let go rather than given a volume of its own.
+#[derive(Resource, Default)]
+pub struct VolumesMaking(Vec<Making>);
+
+struct Making {
+    owner: Entity,
+    origin: DVec3,
+    cell: f32,
+    dims: UVec3,
+    made: Mutex<mpsc::Receiver<Domain>>,
+}
 
 impl VolumesMaking {
+    /// Volumes still being made.
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
     fn covers(&self, p: DVec3) -> bool {
-        self.0
-            .iter()
-            .any(|(_, o, size)| p.cmpge(*o).all() && p.cmplt(*o + *size).all())
+        self.0.iter().any(|m| {
+            let size = m.dims.as_dvec3() * m.cell as f64;
+            p.cmpge(m.origin).all() && p.cmplt(m.origin + size).all()
+        })
     }
 }
 
@@ -481,9 +498,8 @@ fn volume_box(v: &SmokeVolume, gt: &GlobalTransform) -> (DVec3, f32, UVec3) {
 /// volumes the world turned.
 ///
 /// A new volume's air and floor (a ground query per column: 0.55 s for the smoke range's
-/// 6,700 columns on the session VM, as the range streamed in) are made on a worker in play;
-/// with a manual clock (tests, tours) at once, so the next step already has them.
-#[allow(clippy::too_many_arguments)]
+/// 6,700 columns on the session VM, as the range streamed in) are made on a worker in play
+/// and land at a later step; with a manual clock (tests, tours) or no worker pool, at once.
 pub fn sync_volumes(
     q: Query<(Entity, &SmokeVolume, &GlobalTransform)>,
     mut removed: RemovedComponents<SmokeVolume>,
@@ -491,11 +507,10 @@ pub fn sync_volumes(
     mut making: ResMut<VolumesMaking>,
     ground: Res<Ground>,
     time: Res<Time>,
-    mut commands: Commands,
 ) {
     for e in removed.read() {
         domains.list.retain(|d| d.owner != Some(e));
-        making.0.retain(|m| m.0 != e);
+        making.0.retain(|m| m.owner != e);
     }
     for d in &mut domains.list {
         if d.domain.floor_stale {
@@ -504,57 +519,63 @@ pub fn sync_volumes(
             d.domain.floor_stale = false;
         }
     }
+    // Volumes made since the last step, if still wanted where they were made (one that moved
+    // meanwhile, by a world shift or a turn, is made again below).
+    let wanted: Vec<(Entity, DVec3, f32, UVec3)> = q
+        .iter()
+        .map(|(e, v, gt)| {
+            let (o, c, d) = volume_box(v, gt);
+            (e, o, c, d)
+        })
+        .collect();
+    making.0.retain(|m| {
+        let Ok(domain) = m.made.lock().unwrap().try_recv() else {
+            return true;
+        };
+        let still = wanted.iter().any(|&(e, o, c, d)| {
+            e == m.owner && c == m.cell && d == m.dims && o.distance_squared(m.origin) < 1e-6
+        });
+        if still {
+            domains.list.retain(|d| d.owner != Some(m.owner));
+            domains.add(Some(m.owner), domain);
+        }
+        false
+    });
     let manual = matches!(time.source(), engine_core::time::TimeSource::Manual { .. });
-    for (e, v, gt) in &q {
-        let (origin, cell, dims) = volume_box(v, gt);
+    let pool = AsyncComputeTaskPool::try_get().filter(|_| !manual);
+    for (e, origin, cell, dims) in wanted {
         let same = domains.list.iter().any(|d| {
             d.owner == Some(e)
                 && d.domain.dims == dims
                 && d.domain.cell == cell
                 && d.domain.origin.distance_squared(origin) < 1e-6
         });
-        if same || making.0.iter().any(|m| m.0 == e) {
+        if same || making.0.iter().any(|m| m.owner == e) {
             continue;
         }
-        if manual {
+        let Some(pool) = pool else {
             domains.list.retain(|d| d.owner != Some(e));
             let mut domain = Domain::new(origin, cell, dims);
             domain.set_floor(ground_floor(&ground));
             domains.add(Some(e), domain);
             continue;
-        }
-        making.0.push((e, origin, dims.as_dvec3() * cell as f64));
+        };
         let ground = ground.clone();
-        commands.off_frame(
-            "smoke volume",
-            move || {
-                let mut domain = Domain::new(origin, cell, dims);
-                domain.set_floor(ground_floor(&ground));
-                domain
-            },
-            move |world: &mut World, domain: Domain| {
-                world.resource_mut::<VolumesMaking>().0.retain(|m| m.0 != e);
-                // Still wanted where it was made? A volume that moved meanwhile (a world
-                // shift, a turn) is made again at the next step.
-                let wanted = world
-                    .get_entity(e)
-                    .ok()
-                    .and_then(|w| {
-                        Some(volume_box(
-                            w.get::<SmokeVolume>()?,
-                            w.get::<GlobalTransform>()?,
-                        ))
-                    })
-                    .is_some_and(|(o, c, d)| {
-                        c == cell && d == dims && o.distance_squared(origin) < 1e-6
-                    });
-                if wanted {
-                    let mut domains = world.resource_mut::<SmokeDomains>();
-                    domains.list.retain(|d| d.owner != Some(e));
-                    domains.add(Some(e), domain);
-                }
-            },
-        );
+        let (tx, rx) = mpsc::channel();
+        pool.spawn(async move {
+            let _span = tracing::info_span!("smoke: make a volume").entered();
+            let mut domain = Domain::new(origin, cell, dims);
+            domain.set_floor(ground_floor(&ground));
+            let _ = tx.send(domain);
+        })
+        .detach();
+        making.0.push(Making {
+            owner: e,
+            origin,
+            cell,
+            dims,
+            made: Mutex::new(rx),
+        });
     }
 }
 
