@@ -174,6 +174,67 @@ pub struct Declared {
 #[derive(Resource, Default)]
 pub struct PropsReader {
     read: HashMap<String, (Stamp, Result<Declared, String>)>,
+    /// In play, a fresh VM made on a worker for the next file to read ([`ready`]): making one
+    /// on the frame took ~45 ms on the session VM, three of them 154 ms as the script zone's
+    /// state boards first drew.
+    spare: Option<ScriptRuntime>,
+    making: Option<std::sync::Mutex<std::sync::mpsc::Receiver<ScriptRuntime>>>,
+}
+
+/// Whether [`declared`] can answer `path` now without making a VM on the frame: it is read
+/// already (and unchanged), the clock is manual (tests, tours), or a VM made on a worker is
+/// waiting. Otherwise it starts making one and says no; ask again next frame.
+pub(crate) fn ready(world: &mut World, path: &str) -> bool {
+    let path = normalize(path);
+    let stamp = file_stamp(&crate::scripts_root(world).join(&path));
+    let in_play = !world
+        .get_resource::<engine_core::prelude::Time>()
+        .is_none_or(|t| matches!(t.source(), engine_core::time::TimeSource::Manual { .. }));
+    let Some(pool) = engine_core::tasks::AsyncComputeTaskPool::try_get().filter(|_| in_play) else {
+        return true;
+    };
+    let settings = world
+        .get_resource::<crate::ScriptSettings>()
+        .cloned()
+        .unwrap_or_default();
+    let api = world
+        .get_resource::<engine_core::prelude::ApiRegistry>()
+        .cloned()
+        .unwrap_or_default();
+    let root = crate::scripts_root(world);
+    let mut reader = world.get_resource_or_insert_with(PropsReader::default);
+    if reader.read.get(&path).is_some_and(|(s, _)| *s == stamp) {
+        return true;
+    }
+    if reader.spare.is_none()
+        && let Some(making) = &reader.making
+    {
+        let got = making.lock().unwrap_or_else(|e| e.into_inner()).try_recv();
+        match got {
+            Ok(vm) => {
+                reader.spare = Some(vm);
+                reader.making = None;
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => return false,
+            // It failed to start: read the old way.
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                reader.making = None;
+                return true;
+            }
+        }
+    }
+    if reader.spare.is_some() {
+        return true;
+    }
+    let (tx, rx) = std::sync::mpsc::channel();
+    pool.spawn(async move {
+        if let Ok(vm) = ScriptRuntime::new(&api, root, &settings) {
+            let _ = tx.send(vm);
+        }
+    })
+    .detach();
+    reader.making = Some(std::sync::Mutex::new(rx));
+    false
 }
 
 /// A file's modified time and length.
@@ -225,7 +286,13 @@ fn read(world: &mut World, path: &str) -> Result<Declared, String> {
         .get_resource::<engine_core::prelude::ApiRegistry>()
         .cloned()
         .unwrap_or_default();
-    let mut rt = ScriptRuntime::new(&api, root, &settings).map_err(|e| e.to_string())?;
+    let spare = world
+        .get_resource_mut::<PropsReader>()
+        .and_then(|mut r| r.spare.take());
+    let mut rt = match spare {
+        Some(rt) => rt,
+        None => ScriptRuntime::new(&api, root, &settings).map_err(|e| e.to_string())?,
+    };
     rt.ensure_loaded(world, path)?;
     let class = rt
         .class(path)

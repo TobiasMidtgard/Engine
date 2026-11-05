@@ -901,6 +901,12 @@ pub(crate) fn draw_state_boards(world: &mut World, mut state: Local<StateBoards>
             .iter(world)
             .find(|(_, n, _)| n.as_str() == board.target)
             .map(|(t, _, s)| (t, s.path.clone()));
+        // In play a file not read yet waits for a VM made off the frame.
+        if let Some((_, path)) = &target
+            && !crate::props::ready(world, path)
+        {
+            continue;
+        }
         let (machine, live, path) = match target {
             None => (
                 Err(format!("Nothing named \"{}\" runs a script.", board.target)),
