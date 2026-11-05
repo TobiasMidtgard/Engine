@@ -319,6 +319,41 @@ impl WindSkeleton {
     }
 }
 
+impl WindSkeleton {
+    /// Write every vertex's word ([`pack`]) into the alpha of `mesh`'s vertex colors: the bone
+    /// nearest it (any level for `leaves`, the trunk, limbs and branches for wood, since twigs
+    /// ride their branch), how far out along that bone it sits (its tip weight), how far off
+    /// the bone's line (a leaf's edge flutters most) and, for leaves, whether it faces away
+    /// from its spray's card (its underside). Found by position alone, so every level of
+    /// detail of a tree, whichever builder made it, rides the same bones the same way.
+    pub fn bake(&self, mesh: &mut engine_render::Mesh, leaves: bool) {
+        if self.bones.is_empty() {
+            return;
+        }
+        let mut grid = Grid::default();
+        for (i, b) in self.bones.iter().enumerate() {
+            grid.add_path(&[b.pivot, b.pivot + b.axis * b.length], i as u16, b.level);
+        }
+        let below = if leaves { 4 } else { 3 };
+        for v in &mut mesh.vertices {
+            let p = Vec3::from(v.position);
+            let bone = grid.nearest(p, below, 4).unwrap_or(0);
+            let b = &self.bones[bone as usize];
+            let to = p - b.pivot;
+            let along = to.dot(b.axis);
+            let tip = (along / b.length.max(1e-3)).clamp(0.0, 1.0);
+            let off = (to - b.axis * along.clamp(0.0, b.length)).length();
+            let edge = if leaves {
+                (off / (0.35 * b.length + 0.05)).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            let underside = leaves && b.level == 3 && Vec3::from(v.normal).dot(b.face) < 0.0;
+            v.color[3] = pack(bone, tip, edge, underside);
+        }
+    }
+}
+
 /// The vertex word: bone (14 bits), tip weight 0..1 (5 bits), edge 0..1 (4 bits) and whether
 /// the vertex is on a leaf card's underside (1 bit), as an integer an f32 holds exactly
 /// (below 2^24), for the vertex color's alpha. Rendering's `plant_wind` decodes it.

@@ -56,7 +56,7 @@ struct Globals {
     waterline2: vec4<f32>, // meters of the dome per pixel, drop seed, unused, unused
     trail: vec4<f32>,      // the ripple grid's trail (`trail.rs`): corner rel camera x, z, size (m), on
     falls: vec4<f32>,      // where the falls' strips were built relative to, rel camera xyz; unused
-    plume: vec4<f32>,      // a flood's plume round the plunges and stream mouths in a lake: radius (m), strength, mouths, unused
+    plume: vec4<f32>,      // a flood's plume round the plunges and stream mouths in a lake: radius (m), strength, mouths; the streams' mud 0..1
     flood_absorb: vec4<f32>,  // flood water's absorption rgb (1/m), scattering (1/m)
     flood_scatter: vec4<f32>, // its scatter color rgb, roughness
     mouths: array<vec4<f32>, 4>, // where streams run into lakes: plume middle rel camera xyz, share of the radius
@@ -138,7 +138,10 @@ fn plume_from(foot: vec3<f32>, share: f32, rel: vec3<f32>, wp: vec2<f32>, seed: 
     let pl = water.g.plume;
     if (abs(foot.y - rel.y) > 3.0) { return 0.0; }
     let radius = pl.x * share;
-    let d = length(rel.xz - foot.xz);
+    // The wind drives the surface water and carries the plume off downwind (a lake's wind
+    // drift is a few percent of the wind's speed, so in minutes it moves tens of meters).
+    let drift = select(vec2<f32>(0.0), water.g.detail2.xy * 0.3 * radius, water.g.detail2.z > 0.5);
+    let d = length(rel.xz - foot.xz - drift);
     if (d > radius * 1.4) { return 0.0; }
     let t = time_s();
     // A billowing edge, and fine wisps along it.
@@ -175,6 +178,19 @@ fn flood_plume(look: WaterLook, rel: vec3<f32>) -> WaterLook {
     let scat = exp(log(max(look.scattering, 1e-4)) * (1.0 - p) + log(max(fa.w, 1e-4)) * p);
     return WaterLook(exp(ln_mix), scat, mix(look.scatter_color, fs.rgb, p), look.roughness,
                      look.foam, mix(look.caustics, 0.15, p), mix(look.refraction, 0.3, p));
+}
+
+// Foam on turbid water takes the color of what is in it: a flood's froth is beige, not
+// white (the silt and the humic matter that make it foam), and duller. Tan at most: it is
+// still froth, mostly air; in full sun white froth clips to white, so the tint dims it too. `scattering` 0.2 /m is a clear stream, 8-15 /m a brown flood.
+fn foam_tint(look: WaterLook) -> vec3<f32> {
+    let hue = look.scatter_color / max(max(look.scatter_color.r, max(look.scatter_color.g, look.scatter_color.b)), 1e-6);
+    return mix(vec3<f32>(1.0), hue * 0.75, 0.6 * smoothstep(1.0, 8.0, look.scattering));
+}
+
+// The same for the falls, from how muddy the streams run (`crate::freshet`, `plume.w`).
+fn flood_froth() -> vec3<f32> {
+    return mix(vec3<f32>(1.0), vec3<f32>(0.75, 0.52, 0.29), 0.6 * saturate(water.g.plume.w));
 }
 
 fn flow_look() -> WaterLook {
@@ -1135,7 +1151,7 @@ fn shade_water(rel: vec3<f32>, n_in: vec3<f32>, look: WaterLook, foam_in: f32, c
         // Foam is a dense froth: light gets through it, so it glows even with the sun behind.
         // Its albedo is well under snow's (whitecaps reflect at most about 55%, Whitlock 1982;
         // ours is brighter, fresh froth on fresh water), and thin lace lets the water through.
-        let foam_col = pre_expose(0.75 * (sun * shadow * max(dot(n, l) * 0.6 + 0.4, 0.0) + up) * INV_PI);
+        let foam_col = pre_expose(0.75 * (sun * shadow * max(dot(n, l) * 0.6 + 0.4, 0.0) + up) * INV_PI) * foam_tint(look);
         color = mix(color, foam_col * mix(1.0, 0.82 + 0.36 * fizz, bubbly), cover * mix(0.8, 0.95, saturate(foam * 2.0)));
     }
     let ground = textureSampleLevel(scene_color, linear_clamp, uv0, 0.0).rgb * wet_bed;
@@ -2249,7 +2265,7 @@ fn fs_falls(in: FallOut) -> @location(0) vec4<f32> {
     let up = sky_ambient(n) * sky_vis * PI;
     let wrap = saturate(dot(n, l) * 0.6 + 0.4);
     let through = pow(saturate(dot(-v, l)), 4.0) * 0.8;
-    let froth = pre_expose(0.9 * (sun * shadow * (wrap + through) + up) * INV_PI);
+    let froth = pre_expose(0.9 * (sun * shadow * (wrap + through) + up) * INV_PI) * flood_froth();
 
     // The glassy tongue: what is behind it, bent and dimmed by the water it passes through
     // (a long way at a glancing look, where the stirred water's own color takes over), plus
@@ -2262,7 +2278,9 @@ fn fs_falls(in: FallOut) -> @location(0) vec4<f32> {
     let tint = exp(-vec3<f32>(0.5, 0.11, 0.08) * path * 6.0 - path * 5.0);
     // Stirred water seen through a thick nappe: the green of a deep river (fine sediment and
     // the water's own red absorption), greyer through a thin film.
-    let stirred = froth * mix(vec3<f32>(0.3, 0.38, 0.36), vec3<f32>(0.1, 0.4, 0.29), saturate(thick * 4.0));
+    // In a flood it is the brown of the silt it carries (`plume.w`; `froth` is beige then).
+    let stirred_clear = mix(vec3<f32>(0.3, 0.38, 0.36), vec3<f32>(0.1, 0.4, 0.29), saturate(thick * 4.0));
+    let stirred = froth * mix(stirred_clear, vec3<f32>(0.62, 0.5, 0.36), saturate(water.g.plume.w));
     // From below (its underside) it reflects the dark water and rock under it, not the sky.
     let fresnel = (0.02 + 0.98 * pow(1.0 - n_dot_v, 5.0)) * select(0.2, 1.0, front);
     let r = reflect(-v, n);
@@ -2459,7 +2477,7 @@ fn fs_fall_body(in: BodyClumpOut) -> @location(0) vec4<f32> {
     let through = pow(saturate(dot(-v, l)), 4.0) * 0.8;
     let lit = pre_expose(0.9 * (water_sun(in.rel) * shadow * (wrap + through) + up_light) * INV_PI) * in.light.w;
     let grey = vec3<f32>(dot(lit, vec3<f32>(0.2126, 0.7152, 0.0722)));
-    let color = apply_fog(mix(lit, grey, 0.25) * (1.0 + 0.3 * wisp), in.rel);
+    let color = apply_fog(mix(lit, grey, 0.25) * (1.0 + 0.3 * wisp) * flood_froth(), in.rel);
     return vec4<f32>(color * alpha, alpha);
 }
 

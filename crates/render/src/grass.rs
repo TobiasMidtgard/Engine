@@ -235,6 +235,9 @@ pub struct GrassStyle {
     pub bloom_color: [f32; 3],
     /// Width of a flower head, meters.
     pub bloom_size: f32,
+    /// 0: flower heads are round (buttercups, daisies); over 0 they are grass seed heads, a
+    /// spike or plume this fraction of the stem long (timothy, foxtail, about 0.1-0.2).
+    pub bloom_length: f32,
     /// Blades stay at full density out to this distance, meters (0: chosen from the draw
     /// distance). Big plants (ferns) want more than blades, which a screen pixel can hold many
     /// of further out.
@@ -280,6 +283,7 @@ impl Default for GrassStyle {
             bloom: 0.0,
             bloom_color: [0.8, 0.7, 0.1],
             bloom_size: 0.025,
+            bloom_length: 0.0,
             full_density_m: 0.0,
             leaf_rise: 0.0,
             pinnae: 0.0,
@@ -862,6 +866,7 @@ impl GpuField {
             style.bloom_color[2],
             style.bloom.clamp(0.0, 1.0),
         ];
+        self.axis_z[3] = style.bloom_length.clamp(0.0, 0.5);
         self.kind = [
             style.bloom_size.max(0.0),
             share.clamp(0.0, 1.0),

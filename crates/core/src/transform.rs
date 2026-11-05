@@ -353,9 +353,14 @@ impl TransformInterpolation {
 }
 
 /// Engine system (`FixedPreUpdate`): remember where interpolated entities started this step.
+///
+/// One thread: a copy per entity is far less work than a parallel scope, and a scope's thread
+/// can pick up other compute-pool work while it waits (the session VM's climb route showed
+/// this two-line system at 20-508 ms in some frames).
 pub fn snapshot_interpolation_system(mut q: Query<(&Transform, &mut TransformInterpolation)>) {
-    q.par_iter_mut()
-        .for_each(|(t, mut i)| i.previous = Some(*t));
+    for (t, mut i) in &mut q {
+        i.previous = Some(*t);
+    }
 }
 
 type RootQuery<'w, 's> = Query<

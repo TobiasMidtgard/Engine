@@ -678,7 +678,10 @@ pub fn lay_ribbons_swollen(
                 .iter()
                 .find(|c| c.provider == key && c.reach == reach.id)
                 .map(|c| (c.from_m, c.to_m));
+            // At a station a river's width, depth and speed go about as Q^0.26, Q^0.40 and
+            // Q^0.34 (Leopold & Maddock 1953): a flood runs deeper, a little wider and faster.
             let deeper = swell.powf(0.4);
+            let wider = swell.powf(0.26);
             let points = reach
                 .points
                 .into_iter()
@@ -686,7 +689,7 @@ pub fn lay_ribbons_swollen(
                     at: p.at + *offset,
                     flow_m3_s: p.flow_m3_s * swell,
                     depth_m: p.depth_m * deeper,
-                    ..p
+                    width_m: p.width_m * wider,
                 })
                 .collect();
             let reach_stones = stones.get(&(key, reach.id)).map(|s| &**s);

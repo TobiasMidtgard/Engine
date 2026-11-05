@@ -181,6 +181,7 @@ pub fn palette(meadow: &GrassStyle, day_of_year: f32) -> Vec<GrassStyle> {
         bloom: share * bloom,
         bloom_color: color,
         bloom_size: size * 1.3,
+        bloom_length: 0.0,
         ..base
     };
     // (No kind outnumbers the meadow's own blades: the field's most sets how many threads
@@ -207,12 +208,14 @@ pub fn palette(meadow: &GrassStyle, day_of_year: f32) -> Vec<GrassStyle> {
         lush_color: scaled(mixed(lush, [0.07, 0.15, 0.06], 0.4), 0.95),
         clump_size: 0.9,
         clump_pull: 0.3,
-        // Seed heads: pale straw tips standing above the blades, from early summer.
-        bloom: 0.16
+        // Seed heads: pale spikes and plumes (timothy, foxtail, cocksfoot) standing above
+        // the blades, from early summer, bleaching to straw.
+        bloom: 0.18
             * smoothstep(140.0, 170.0, day_of_year)
             * (1.0 - smoothstep(290.0, 330.0, day_of_year)),
-        bloom_color: mixed(dry, [0.45, 0.38, 0.22], 0.5),
-        bloom_size: 0.014,
+        bloom_color: mixed(dry, [0.42, 0.44, 0.24], 0.5),
+        bloom_size: 0.016,
+        bloom_length: 0.16,
         ..*meadow
     };
     let parched = GrassStyle {
@@ -222,6 +225,13 @@ pub fn palette(meadow: &GrassStyle, day_of_year: f32) -> Vec<GrassStyle> {
         lush_color: mixed(lush, dry, 0.55),
         dry_color: scaled(dry, 1.1),
         bend: 0.5,
+        // Dry grass heads early and sparsely (bent and fescue panicles), straw coloured.
+        bloom: 0.12
+            * smoothstep(130.0, 160.0, day_of_year)
+            * (1.0 - smoothstep(280.0, 320.0, day_of_year)),
+        bloom_color: mixed(dry, [0.55, 0.48, 0.32], 0.5),
+        bloom_size: 0.016,
+        bloom_length: 0.12,
         ..*meadow
     };
     let mut kinds = vec![GrassStyle::default(); KINDS - 1];
@@ -335,6 +345,8 @@ pub fn palette(meadow: &GrassStyle, day_of_year: f32) -> Vec<GrassStyle> {
             0.03,
         ),
     );
+    // Fireweed flowers up a tall spike.
+    kinds[Fireweed as usize - 1].bloom_length = 0.22;
     kinds
 }
 
