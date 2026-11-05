@@ -162,6 +162,11 @@ pub(crate) fn ordered(h1: ColliderHandle, h2: ColliderHandle) -> (ColliderHandle
 impl Region {
     fn new(anchor: DVec3, settings: &PhysicsSettings) -> Self {
         let mut world = PhysicsWorld::new();
+        if crate::mesh_contacts::enabled() {
+            world.narrow_phase = rapier3d::geometry::NarrowPhase::with_query_dispatcher(
+                crate::mesh_contacts::MeshContacts,
+            );
+        }
         world.gravity = Vec3::ZERO;
         settings.apply_to(&mut world.integration_parameters);
         let ground = world.insert_body(RigidBodyBuilder::fixed());
