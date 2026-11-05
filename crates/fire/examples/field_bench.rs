@@ -49,6 +49,8 @@ fn main() {
     let dt = 1.0 / 20.0;
     let steps = (secs / dt) as usize;
     let mut times = Vec::with_capacity(steps);
+    let (mut made, mut pruned, mut remade) = (0usize, 0usize, 0usize);
+    let mut gone = std::collections::HashSet::new();
     for _ in 0..steps {
         let input = StepInput {
             dt,
@@ -61,7 +63,20 @@ fn main() {
             near: None,
         };
         let t = std::time::Instant::now();
+        let before = field.tiles.len();
         field.step(&input, &mut fuel);
+        made += field.tiles.len() - before;
+        for t in &field.tiles[before..] {
+            remade += gone.contains(&t.key) as usize;
+        }
+        // As `sim::step_field` does.
+        if field.steps.is_multiple_of(200) {
+            let n = field.tiles.len();
+            let had: Vec<_> = field.tiles.iter().map(|t| t.key).collect();
+            field.prune();
+            gone.extend(had.into_iter().filter(|k| field.tile_index(*k).is_none()));
+            pruned += n - field.tiles.len();
+        }
         times.push(t.elapsed().as_secs_f64() * 1000.0);
     }
     let late = &times[steps / 2..];
@@ -79,7 +94,7 @@ fn main() {
     let s = &field.stats;
     println!(
         "field_bench: {secs} s, mean step {mean:.2} ms, worst {worst:.2} ms over the second \
-         half; tiles {} (active {}), burning {:.0} m2, cells {sum:016x}",
+         half; tiles {} (active {}), burning {:.0} m2, cells {sum:016x}; tiles made {made} ({remade} of them pruned before), pruned {pruned}",
         s.tiles, s.active_tiles, s.burning_m2
     );
 }

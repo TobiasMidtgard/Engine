@@ -1087,7 +1087,7 @@ impl FireField {
     /// Drop tiles with nothing left to show or simulate (no fire, coals, scorch or regrowth),
     /// keeping memory proportional to what has burned. Cheap; call now and then.
     pub fn prune(&mut self) {
-        let keep: Vec<bool> = self
+        let mut keep: Vec<bool> = self
             .tiles
             .iter()
             .map(|t| {
@@ -1098,6 +1098,21 @@ impl FireField {
                         .any(|c| c.scorch > 0.0 || c.glow > 0.0 || c.temp > 1.0 || c.heat > 0.0)
             })
             .collect();
+        // The tiles around a burning or heated one stay: the next step would only make them
+        // again (asking the world for 1,024 cells' fuel each, the fortress's grass fire spent
+        // ~25 ms a step for seconds after every prune remaking them).
+        for t in &self.tiles {
+            if t.burning == 0 && !t.heated {
+                continue;
+            }
+            for dy in -1..=1 {
+                for dx in -1..=1 {
+                    if let Some(&j) = self.map.get(&(t.key + IVec2::new(dx, dy))) {
+                        keep[j] = true;
+                    }
+                }
+            }
+        }
         if keep.iter().all(|k| *k) {
             return;
         }
