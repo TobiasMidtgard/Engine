@@ -317,6 +317,12 @@ pub struct Tile {
     pub serial: u64,
     /// Kernel used for this tile in the last step (depends on the local wind).
     kernel: Vec<f32>,
+    /// The ground's slope under the tile ([`ground_slope`]), worked out once its cells' ground
+    /// heights are set; `None` after they change.
+    slope: Option<Vec2>,
+    /// Some cell got [`FireField::add_external`] heat since the tile last stepped (cleared with
+    /// the cells' `external`), so growing doesn't scan every tile's cells for it.
+    heated: bool,
 }
 
 fn next_serial() -> u64 {
@@ -395,6 +401,8 @@ pub struct FireField {
     /// They get their fuel from the world at the next step, once the world answers in the new
     /// frame.
     unfueled: Vec<(IVec2, Vec<u16>)>,
+    /// Set while [`Self::add_external`] visits its disc, so the tiles it heats are marked.
+    marking_heat: bool,
 }
 
 /// Where the fuel for a new cell comes from: `(fuel, ground height)` at a world X/Z (the `y`
@@ -432,6 +440,7 @@ impl FireField {
             wanted: Vec::new(),
             incoming: Vec::new(),
             unfueled: Vec::new(),
+            marking_heat: false,
         }
     }
 
@@ -544,6 +553,8 @@ impl FireField {
             steps: 0,
             serial: next_serial(),
             kernel: vec![0.0; KERNEL_LEN],
+            slope: None,
+            heated: false,
         });
         self.map.insert(key, i);
         Some(i)
@@ -631,6 +642,7 @@ impl FireField {
             if touched {
                 tile.version += 1;
                 tile.active = true;
+                tile.slope = None;
             }
         }
         changed
@@ -805,6 +817,7 @@ impl FireField {
     ) {
         let lo = self.cell_coord(p - DVec3::splat(radius as f64));
         let hi = self.cell_coord(p + DVec3::splat(radius as f64));
+        let heat = self.marking_heat;
         for cy in lo.y..=hi.y {
             for cx in lo.x..=hi.x {
                 let c = IVec2::new(cx, cy);
@@ -823,6 +836,7 @@ impl FireField {
                 let tile = &mut self.tiles[i];
                 f(tile.cell_mut(local), d);
                 tile.active = true;
+                tile.heated |= heat;
                 tile.version += 1;
             }
         }
@@ -863,9 +877,11 @@ impl FireField {
         // Within the step's tile budget: a tile it can't make yet is made at the next step and
         // heated from then on.
         let r = radius.max(self.cell_m * 0.5);
+        self.marking_heat = watts_m2 > 0.0;
         self.visit_disc(p, r, Reach::Budgeted(fuel), &mut |c, _| {
             c.external += watts_m2;
         });
+        self.marking_heat = false;
     }
 
     /// Advance the field by `input.dt` seconds.
@@ -887,7 +903,7 @@ impl FireField {
         let grow_span = tracing::info_span!("fire grow").entered();
         let mut grow = Vec::new();
         for t in &self.tiles {
-            if t.burning == 0 && !t.cells.iter().any(|c| c.external > 0.0) {
+            if t.burning == 0 && !t.heated {
                 continue;
             }
             for dy in -1..=1 {
@@ -956,21 +972,27 @@ impl FireField {
         let kernel_span = tracing::info_span!("fire kernels").entered();
         let cell = self.cell_m;
         let field_origin = self.origin;
-        for (i, t) in self.tiles.iter_mut().enumerate() {
-            if !process[i] {
-                continue;
-            }
-            let half = TILE as f64 * cell as f64 * 0.5;
-            let c = tile_origin(field_origin, cell, t.key) + DVec2::splat(half);
-            let w = (input.wind)(DVec3::new(c.x, t.base_y + 2.0, c.y));
-            let slope = ground_slope(&t.cells, cell);
-            build_kernel(
-                &mut t.kernel,
-                Vec2::new(w.x, w.z),
-                slope,
-                cell,
-                &input.params,
-            );
+        {
+            let process = &process;
+            engine_core::tasks::par_chunks_mut(&mut self.tiles, 8, |chunk_index, chunk| {
+                for (k, t) in chunk.iter_mut().enumerate() {
+                    if !process[chunk_index * 8 + k] {
+                        continue;
+                    }
+                    let half = TILE as f64 * cell as f64 * 0.5;
+                    let c = tile_origin(field_origin, cell, t.key) + DVec2::splat(half);
+                    let w = (input.wind)(DVec3::new(c.x, t.base_y + 2.0, c.y));
+                    // The ground under a tile only changes when its cells are refuelled.
+                    let slope = *t.slope.get_or_insert_with(|| ground_slope(&t.cells, cell));
+                    build_kernel(
+                        &mut t.kernel,
+                        Vec2::new(w.x, w.z),
+                        slope,
+                        cell,
+                        &input.params,
+                    );
+                }
+            });
         }
 
         drop(kernel_span);
@@ -1008,6 +1030,7 @@ impl FireField {
                         continue;
                     }
                     tile.steps += 1;
+                    tile.heated = false;
                     update_tile(tile, &incoming[i], input, cell, field_origin);
                 }
             });
@@ -1227,6 +1250,8 @@ impl FireField {
                 steps: 0,
                 serial: next_serial(),
                 kernel: vec![0.0; KERNEL_LEN],
+                slope: None,
+                heated: false,
             });
         }
         // Cells still owed fuel from an earlier turn are owed it where they went.
@@ -1282,6 +1307,7 @@ impl FireField {
             }
             tile.active = true;
             tile.version += 1;
+            tile.slope = None;
             if !rest.is_empty() {
                 self.unfueled.push((key, rest));
             }
@@ -1428,8 +1454,9 @@ fn gather_tile(
     transfer: f32,
 ) {
     let tile = &tiles[i];
-    padded.fill(0.0);
-    let mut any = false;
+    // `padded` comes in all zeros (each call zeroes what it wrote). The box around the hot
+    // cells it holds: only cells whose kernel window reaches into it gather anything.
+    let (mut lo, mut hi) = ((PADDED, PADDED), (-1, -1));
     for dy in -1..=1 {
         for dx in -1..=1 {
             let Some(&j) = map.get(&(tile.key + IVec2::new(dx, dy))) else {
@@ -1453,7 +1480,8 @@ fn gather_tile(
                     let h = t.cells[(ly * TILE + lx) as usize].hrr;
                     if h > 0.0 {
                         padded[(py * PADDED + px) as usize] = h;
-                        any = true;
+                        lo = (lo.0.min(px), lo.1.min(py));
+                        hi = (hi.0.max(px), hi.1.max(py));
                     }
                 }
             }
@@ -1462,12 +1490,16 @@ fn gather_tile(
     for (idx, out) in incoming.iter_mut().enumerate() {
         *out = tile.cells[idx].external;
     }
-    if !any {
+    if hi.0 < 0 {
         return;
     }
+    // Cell (lx, ly) reads padded rows ly..=ly + 2 REACH and columns lx..=lx + 2 REACH; outside
+    // these ranges its window holds only zeros, so it would add exactly nothing.
     let k = &tile.kernel;
-    for ly in 0..TILE {
-        for lx in 0..TILE {
+    let rows = (lo.1 - 2 * REACH).max(0)..=hi.1.min(TILE - 1);
+    let cols = (lo.0 - 2 * REACH).max(0)..=hi.0.min(TILE - 1);
+    for ly in rows {
+        for lx in cols.clone() {
             let idx = (ly * TILE + lx) as usize;
             if !tile.cells[idx].is_intact() {
                 continue;
@@ -1482,6 +1514,11 @@ fn gather_tile(
             }
             incoming[idx] += q * transfer;
         }
+    }
+    // Leave it zeroed for the next tile.
+    for py in lo.1..=hi.1 {
+        let row = (py * PADDED) as usize;
+        padded[row + lo.0 as usize..=row + hi.0 as usize].fill(0.0);
     }
 }
 
