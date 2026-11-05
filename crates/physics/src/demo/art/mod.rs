@@ -142,15 +142,15 @@ type Meshing = (Vec<Handle<Mesh>>, Job<Vec<Mesh>>);
 /// Something a worker makes: `None` until it is done; `Err` if it panicked.
 type Slot<T> = Arc<Mutex<Option<std::thread::Result<T>>>>;
 
-struct Job<T>(Slot<T>);
+pub(crate) struct Job<T>(Slot<T>);
 
 impl<T> Job<T> {
-    fn done(&self) -> bool {
+    pub(crate) fn done(&self) -> bool {
         self.0.lock().is_some()
     }
 
     /// What it made (waiting for it); `None` if it panicked.
-    fn take(self) -> Option<T> {
+    pub(crate) fn take(self) -> Option<T> {
         loop {
             if let Some(r) = self.0.lock().take() {
                 return r.ok();
@@ -169,15 +169,14 @@ fn workers() -> Option<&'static Mutex<mpsc::Sender<Work>>> {
     POOL.get_or_init(|| {
         let (tx, rx) = mpsc::channel::<Work>();
         let rx = Arc::new(Mutex::new(rx));
-        let n = std::thread::available_parallelism()
-            .map_or(2, |n| n.get() / 2)
-            .max(1);
+        let n = worker_count();
         let mut started = 0;
         for i in 0..n {
             let rx = rx.clone();
             let spawned = std::thread::Builder::new()
                 .name(format!("proving ground art {i}"))
                 .spawn(move || {
+                    textures::share_cores(worker_share());
                     loop {
                         let next = rx.lock().recv();
                         match next {
@@ -193,8 +192,28 @@ fn workers() -> Option<&'static Mutex<mpsc::Sender<Work>>> {
     .as_ref()
 }
 
+/// The art workers: half the cores.
+fn worker_count() -> usize {
+    std::thread::available_parallelism()
+        .map_or(2, |n| n.get() / 2)
+        .max(1)
+}
+
+/// Threads one texture made on an art worker may fan out over: its share of all the cores but
+/// two, so the art (with the other workers) leaves the frame's thread and the render thread a
+/// core each. Each worker's texture took every core, 8 busy threads on the VM's 4 cores and
+/// 16 x 16 on a 32-core PC, and the frame's own work as the yard streamed in (a station's
+/// colliders, 7.7 ms on the CPU) took 29 ms of wall time. Elsewhere (a screenshot waiting for
+/// the art, no workers), textures use every core.
+fn worker_share() -> usize {
+    let cores = std::thread::available_parallelism().map_or(4, |n| n.get());
+    (cores.saturating_sub(2) / worker_count()).clamp(1, 16)
+}
+
 /// Run `make` on a worker, or here (`Err`) where there are none.
-fn on_worker<T: Send + 'static>(make: impl FnOnce() -> T + Send + 'static) -> Result<Job<T>, T> {
+pub(crate) fn on_worker<T: Send + 'static>(
+    make: impl FnOnce() -> T + Send + 'static,
+) -> Result<Job<T>, T> {
     let Some(pool) = workers() else {
         return Err(make());
     };

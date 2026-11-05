@@ -1882,9 +1882,23 @@ impl<const K: usize> Field<K> {
 // =============================================================================================
 
 fn threads() -> usize {
-    std::thread::available_parallelism()
-        .map_or(4, |n| n.get())
-        .clamp(1, 16)
+    match SHARE.get() {
+        0 => std::thread::available_parallelism()
+            .map_or(4, |n| n.get())
+            .clamp(1, 16),
+        n => n,
+    }
+}
+
+thread_local! {
+    /// The threads a texture made on this thread fans out over; 0: every core.
+    static SHARE: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Make textures on this thread fan out over at most `n` threads (an art worker's share).
+#[allow(dead_code)] // (The `art_textures` example includes this file and has no workers.)
+pub(crate) fn share_cores(n: usize) {
+    SHARE.set(n.max(1));
 }
 
 /// Run `f(first_row, chunk)` over chunks of `rows_per` rows of a row-major buffer on all cores.
