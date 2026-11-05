@@ -409,10 +409,12 @@ impl GrassStyle {
     pub fn bilberry() -> Self {
         Self {
             blades_per_m2: 480.0,
-            height: 0.34,
+            height: 0.38,
             height_variation: 0.35,
             width: 0.075,
-            bend: 0.5,
+            bend: 0.25,
+            // Mostly a stem (upright twigs), not a leaf spread from a stalk.
+            leaf: 0.25,
             lush_color: [0.075, 0.2, 0.03],
             dry_color: [0.24, 0.08, 0.035],
             wind_response: 0.35,
@@ -472,11 +474,11 @@ impl GrassStyle {
     /// spike of small purple flowers in late summer.
     pub fn heather() -> Self {
         Self {
-            blades_per_m2: 900.0,
-            height: 0.36,
-            height_variation: 0.3,
-            width: 0.009,
-            bend: 0.3,
+            blades_per_m2: 1100.0,
+            height: 0.32,
+            height_variation: 0.2,
+            width: 0.012,
+            bend: 0.75,
             lush_color: [0.04, 0.065, 0.025],
             // Old, drought-browned shoots go grey-brown, not straw.
             dry_color: [0.09, 0.075, 0.05],
@@ -485,20 +487,20 @@ impl GrassStyle {
             draw_distance: 45.0,
             full_density_m: 16.0,
             shadow_distance: 12.0,
-            clump_size: 0.4,
-            clump_pull: 0.6,
+            clump_size: 0.5,
+            clump_pull: 0.75,
             clump_fan: 1.0,
-            clump_height: 0.45,
+            clump_height: 0.55,
             clump_color: 0.1,
             droop: 0.05,
             gloss: 0.15,
             tip_tint: [1.1, 1.0, 1.05],
             leaf: 0.0,
             stalk: 0.0,
-            bloom: 0.3,
-            bloom_color: [0.2, 0.085, 0.17],
+            bloom: 0.12,
+            bloom_color: [0.16, 0.07, 0.14],
             bloom_size: 0.011,
-            bloom_length: 0.3,
+            bloom_length: 0.35,
             leaf_rise: 0.0,
             ..Self::forest_herbs()
         }

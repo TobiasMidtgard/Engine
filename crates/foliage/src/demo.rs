@@ -231,7 +231,7 @@ pub fn forest_viewpoints(center: DVec3) -> Vec<Viewpoint> {
             ),
             [-49.0, 1.9, -27.0],
             [-56.0, 1.2, -50.0],
-            16.0,
+            10.5,
         ),
     ]
 }

@@ -585,6 +585,7 @@ fn main() {
             };
             let eye = DVec3::new(v[0], ground(v[0], v[2]) + v[1], v[2]);
             let at = DVec3::new(v[3], ground(v[3], v[5]) + v[4], v[5]);
+            println!("look {n}: eye {eye:.2} at {at:.2}");
             shot(&mut app, &out, &format!("99_look_{n}"), eye, at, 10.0);
         }
     }
