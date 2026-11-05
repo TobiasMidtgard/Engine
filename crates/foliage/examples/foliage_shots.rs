@@ -453,7 +453,13 @@ fn main() {
                 "{out}/field_{n}_{layer:?}_{:.0}_{:.0}.pgm",
                 at.translation.x, at.translation.z
             );
-            let _ = std::fs::write(name, pgm);
+            let _ = std::fs::write(&name, pgm);
+            // And which kind grows where (the kind's index as its grey level).
+            if f.kinds.len() == f.density.len() {
+                let mut pgm = format!("P5 {w} {h} 255\n").into_bytes();
+                pgm.extend(f.kinds.iter().copied());
+                let _ = std::fs::write(name.replace(".pgm", "_kinds.pgm"), pgm);
+            }
             let on = f.density.iter().filter(|d| **d > 0.0).count();
             let mut kinds = [0usize; 16];
             for k in &f.kinds {
