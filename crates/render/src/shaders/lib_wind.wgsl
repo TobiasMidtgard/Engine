@@ -15,7 +15,8 @@
 //   onsets (trunk, limb, branch, leaves; m/s), ramp ends, the most each level turns (limb, branch,
 //   spray, radians, already divided by the species' stiffness) and the flutter (m), the spray
 //   flip (onset, full m/s, most radians) and the underside's albedo gain, and the trunk (f0 Hz,
-//   overshoot exp(-pi zeta), lean per drag per meter of height) and the sway share;
+//   overshoot exp(-pi zeta), lean per drag per meter of height) and the sway share, and the
+//   snow it holds (`snow_hold`, then 3 unused);
 // - per mesh entry: first bone (u32 bits), species slot, deepest level drawn, reach (m);
 // - per bone, 2 words: pivot xyz and length (mesh space, m); axis and face (octahedral snorm
 //   pairs), parent (bits 0-15, 0xffff none) and level (bits 16-17), phase and stiffness / 4
@@ -28,7 +29,7 @@ fn plant_word(i: u32) -> vec4<f32> {
     return bitcast<vec4<f32>>(plant_wind_words[i]);
 }
 
-const PLANT_SPECIES_WORDS: u32 = 8u;
+const PLANT_SPECIES_WORDS: u32 = 9u;
 const PLANT_TAU: f32 = 6.28318530718;
 // Drag (`plant_drag`) at which a level reaches its most bend: a gale, 15 m/s.
 const PLANT_DRAG_FULL: f32 = 10.714;
@@ -250,6 +251,11 @@ fn plant_wind_dir(n0: vec3<f32>, n1: vec3<f32>, n2: vec3<f32>, wind: vec4<f32>) 
 
 // A bone plant vertex's albedo multiplier: its species' underside gain on a leaf's underside
 // (paler: silvery aspen, grey-felted willow), so undersides flash pale as sprays flip.
+// The share of the ground's snow mesh table entry `entry`'s species holds on its crown.
+fn plant_snow_hold(entry: u32) -> f32 {
+    return plant_word(plant_species(plant_mesh(entry).y) + 8u).x;
+}
+
 fn plant_underside_gain(entry: u32, underside: f32) -> f32 {
     let sp = plant_species(plant_mesh(entry).y);
     return mix(1.0, plant_word(sp + 6u).w, underside);
