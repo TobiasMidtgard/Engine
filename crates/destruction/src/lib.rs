@@ -309,6 +309,7 @@ impl Plugin for DestructionPlugin {
                         collapse::voxel_support_system,
                         collapse::shatter_system,
                         debris::spawn_debris_system,
+                        debris::release_from_rock_system,
                     )
                         .chain()
                         .in_set(SimSet::PostPhysics),

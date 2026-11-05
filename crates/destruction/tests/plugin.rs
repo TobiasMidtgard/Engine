@@ -9,8 +9,8 @@ use engine_core::time::TimeSource;
 use engine_destruction::*;
 use engine_render::{Mesh, StandardMaterial};
 use engine_world::physics::{
-    BodyKind, CharacterController, Collider, ColliderShape, PhysicsBackend, PhysicsQueries,
-    PhysicsQuery, QueryFilter, RigidBody,
+    BodyKind, CharacterController, Collider, ColliderShape, CollisionLayers, PhysicsBackend,
+    PhysicsQueries, PhysicsQuery, QueryFilter, RigidBody, Velocity,
 };
 use engine_world::{
     DamageEvent, DamageKind, EditOp, EditShape, Interact, Interactable, NoiseEvent,
@@ -977,6 +977,125 @@ fn digging_under_an_overhang_drops_it_with(at_once: bool) {
         "the unsupported rock above broke off: {stats:?}"
     );
     assert!(stats.chunks_spawned > 0);
+}
+
+/// Rock cut loose from a voxel cliff starts where the rock was, inside chunk colliders that
+/// hold the old rock until they are remeshed (on the bake threads): physics bodies cut from
+/// rock skip voxel rock until the chunks around them are rebuilt. In the showcase they were
+/// pressed up to 0.6 m into it, meeting 300-860 triangles each, and stalled physics 7-17 ms a
+/// step.
+#[test]
+fn boulders_cut_from_a_cliff_wait_until_its_rock_is_remeshed() {
+    let mut app = app();
+    app.world.remove_resource::<LoadAtOnce>();
+    app.insert_resource(PhysicsBackend {
+        name: "test".into(),
+    });
+    let mut cliff = VoxelVolume::cliff(8.0, 6.0, 5.0, 0.25);
+    cliff.overhang = 1.5;
+    let e = app.world.spawn((Transform::default(), cliff)).id();
+    app.update();
+    while engine_destruction::is_loading(&app.world) {
+        app.update();
+    }
+    // The rock's colliders don't collide with pieces leaving it.
+    let mut chunks = app
+        .world
+        .query_filtered::<&Collider, With<engine_destruction::sync::VoxelChunk>>();
+    let layers: Vec<CollisionLayers> = chunks.iter(&app.world).map(|c| c.layers).collect();
+    assert!(!layers.is_empty(), "the cliff has chunk colliders");
+    for l in &layers {
+        assert_eq!(l.collides_with & debris::LEAVING_ROCK, 0, "{l:?}");
+        assert!(l.interacts(&CollisionLayers::default()));
+        assert!(!l.interacts(&debris::LeavingRock::LAYERS));
+    }
+    // Which chunks a piece waits for is read by place, and by the numbered meshes of each.
+    {
+        let gt = *app.world.get::<GlobalTransform>(e).unwrap();
+        let mut state = app.world.get_mut::<VoxelState>(e).unwrap();
+        let o = state.origin.as_dvec3();
+        let at = |m: f64| (o + DVec3::splat(m), o + DVec3::splat(m + 0.2));
+        let (lo, hi) = at(0.3);
+        assert_eq!(
+            engine_destruction::sync::chunks_in(&state, &gt, lo, hi),
+            vec![0]
+        );
+        let (lo, hi) = at(4.5);
+        assert!(!engine_destruction::sync::chunks_in(&state, &gt, lo, hi).contains(&0));
+        assert_eq!(state.mesh_wait(0), None, "loaded");
+        state.chunk_dirty[0] = true;
+        let wait = state.mesh_wait(0).unwrap();
+        assert!(!state.meshed(0, wait));
+        state.chunk_dirty[0] = false;
+        let seq = state.start_mesh(0);
+        assert_eq!(seq, wait);
+        assert_eq!(state.mesh_wait(0), Some(seq), "meshing");
+        // Dirty again while that mesh bakes: what it waited for still comes with it.
+        state.chunk_dirty[0] = true;
+        assert!(state.mesh_landed(0, seq));
+        assert!(state.meshed(0, wait));
+        assert!(!state.mesh_landed(0, seq - 1), "an older mesh is dropped");
+        state.chunk_dirty[0] = false;
+    }
+    // Mine a wide cave into the face: the rock above breaks off as boulders with bodies.
+    for x in [-2.4, -1.2, 0.0, 1.2, 2.4] {
+        for z in [-2.6, -1.5, -0.4, 0.6] {
+            for y in [0.9, 2.0] {
+                app.world.write_message(TerrainEdit {
+                    center: DVec3::new(x, y, z),
+                    shape: EditShape::Sphere { radius: 0.9 },
+                    op: EditOp::Remove,
+                    surface: None,
+                    source: None,
+                });
+            }
+        }
+    }
+    let mut held = 0;
+    for _ in 0..90 {
+        app.update();
+        let mut q = app
+            .world
+            .query::<(&debris::LeavingRock, &Collider, &RigidBody, &Velocity)>();
+        for (l, c, b, v) in q.iter(&app.world) {
+            // Boulders break off at rest: they are held still, meeting no rock, rather than
+            // let fall into the old rock under them.
+            let Some(go) = l.held else {
+                assert_eq!(c.layers, debris::LeavingRock::LAYERS, "{l:?}");
+                continue;
+            };
+            assert_eq!(b.kind, BodyKind::Kinematic, "{l:?}");
+            assert_eq!(*v, Velocity::default());
+            assert!(go.linear.length() < 1.0, "{go:?}");
+            // The rock it was cut from is remeshed on the frame (`VoxelState::urge_dirty`),
+            // so it waits only while physics swaps the new triangles in.
+            assert!(l.age <= debris::LEAVE_CLEAN_STEPS + 2, "{l:?}");
+            assert!(l.waits.is_some());
+            held += 1;
+        }
+    }
+    assert!(held > 0, "no boulder was cut from the rock with a body");
+    // Once the rock is rebuilt they all fall and collide with it again.
+    run_secs(&mut app, 1.5);
+    let mut q = app.world.query::<&debris::LeavingRock>();
+    assert_eq!(
+        q.iter(&app.world).count(),
+        0,
+        "pieces still wait for the rock"
+    );
+    let mut bodies = app
+        .world
+        .query_filtered::<(&Collider, &RigidBody), With<Debris>>();
+    let all: Vec<(CollisionLayers, BodyKind)> = bodies
+        .iter(&app.world)
+        .map(|(c, b)| (c.layers, b.kind))
+        .collect();
+    assert!(!all.is_empty());
+    assert!(
+        all.iter()
+            .all(|(l, k)| *l == CollisionLayers::default() && *k == BodyKind::Dynamic),
+        "{all:?}"
+    );
 }
 
 #[test]

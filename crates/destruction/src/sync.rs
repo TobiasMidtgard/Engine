@@ -10,11 +10,11 @@ use bevy_tasks::{Task, block_on, poll_once};
 
 use bevy_ecs::change_detection::Tick;
 use engine_assets::{Assets, Handle};
-use engine_core::math::{Quat, Vec2, Vec3};
+use engine_core::math::{DVec3, Quat, Vec2, Vec3};
 use engine_core::prelude::*;
 use engine_render::{MaterialRef, Mesh, MeshRef, MeshRenderer};
 use engine_world::SurfaceMaterials;
-use engine_world::physics::{Collider, ColliderShape, PhysicsBackend};
+use engine_world::physics::{Collider, ColliderShape, CollisionLayers, PhysicsBackend};
 
 use crate::DestructionStats;
 use crate::assets::{DestructionAssets, bake_pool};
@@ -386,14 +386,25 @@ pub fn rebuild_walls_system(
 /// each swapped in when done, so no frame takes all of their meshes and colliders at once.
 pub const VOXEL_BULK_CHUNKS: usize = 8;
 
+/// Most urgent chunks ([`VoxelState::urge_dirty`]) remeshed on the frame in one frame (about
+/// 1.6 ms each on the 4-core VM, half that on the PC); the rest go to the bake threads.
+pub const URGENT_CHUNKS_PER_FRAME: usize = 6;
+
 /// A dirty chunk's new meshes (one per surface layer) and collider.
 struct ChunkMesh {
     chunk: usize,
+    /// Its number among the chunk's meshes ([`VoxelState::start_mesh`]).
+    seq: u32,
     layers: Vec<(u8, MeshBuilder)>,
     collider: Option<Collider>,
 }
 
-fn mesh_chunk(state: &VoxelState, look: &VoxelLook, ci: usize, physics: bool) -> ChunkMesh {
+fn mesh_chunk(
+    state: &VoxelState,
+    look: &VoxelLook,
+    (ci, seq): (usize, u32),
+    physics: bool,
+) -> ChunkMesh {
     let [cx_n, cy_n, _] = state.chunks;
     let (cx, cy, cz) = (ci % cx_n, (ci / cx_n) % cy_n, ci / (cx_n * cy_n));
     let layers = mesh_chunk_layers(state, look, [cx, cy, cz]);
@@ -417,11 +428,17 @@ fn mesh_chunk(state: &VoxelState, look: &VoxelLook, ci: usize, physics: bool) ->
                 vertices: vertices.into(),
                 indices: indices.into(),
             },
+            // Pieces cut from the rock fall out of their place before they meet it again.
+            layers: CollisionLayers {
+                collides_with: !crate::debris::LEAVING_ROCK,
+                ..CollisionLayers::default()
+            },
             ..Collider::default()
         }
     });
     ChunkMesh {
         chunk: ci,
+        seq,
         layers,
         collider,
     }
@@ -441,6 +458,51 @@ impl VoxelMeshJobs {
     pub fn remaining(&self) -> usize {
         self.pending.values().map(Vec::len).sum()
     }
+}
+
+/// The chunks of `state` (placed by `gt`) that overlap the world bounds `lo`..`hi`, by index.
+pub fn chunks_in(state: &VoxelState, gt: &GlobalTransform, lo: DVec3, hi: DVec3) -> Vec<usize> {
+    let mut out = Vec::new();
+    if state.chunk_dirty.is_empty() || state.size <= 0.0 {
+        return out;
+    }
+    let inv = gt.affine().inverse();
+    let (mut a, mut b) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
+    for k in 0..8 {
+        let c = DVec3::new(
+            if k & 1 == 0 { lo.x } else { hi.x },
+            if k & 2 == 0 { lo.y } else { hi.y },
+            if k & 4 == 0 { lo.z } else { hi.z },
+        );
+        let p = inv.transform_point3(c).as_vec3();
+        a = a.min(p);
+        b = b.max(p);
+    }
+    let [nx, ny, nz] = state.chunks;
+    let chunk_m = state.size * crate::voxel::CHUNK as f32;
+    let range = |lo: f32, hi: f32, n: usize| -> Option<(usize, usize)> {
+        let (l, h) = ((lo / chunk_m).floor(), (hi / chunk_m).floor());
+        if h < 0.0 || l >= n as f32 {
+            return None;
+        }
+        Some((l.max(0.0) as usize, (h as usize).min(n - 1)))
+    };
+    let (a, b) = (a - state.origin, b - state.origin);
+    let (Some(x), Some(y), Some(z)) = (
+        range(a.x, b.x, nx),
+        range(a.y, b.y, ny),
+        range(a.z, b.z, nz),
+    ) else {
+        return out;
+    };
+    for cz in z.0..=z.1 {
+        for cy in y.0..=y.1 {
+            for cx in x.0..=x.1 {
+                out.push((cz * ny + cy) * nx + cx);
+            }
+        }
+    }
+    out
 }
 
 struct MeshJob {
@@ -496,35 +558,66 @@ pub fn rebuild_voxels_system(
             .flatten()
             .flat_map(|j| j.chunks.iter().copied())
             .collect();
+        // (An urgent chunk still on the bake threads is remeshed on the frame too: the older
+        // mesh is dropped when it comes, `VoxelState::mesh_landed`.)
         let dirty: Vec<usize> = (0..state.chunk_dirty.len())
-            .filter(|ci| state.chunk_dirty[*ci] && !busy.contains(ci))
+            .filter(|ci| state.chunk_dirty[*ci] && (!busy.contains(ci) || state.urgent(*ci)))
             .collect();
         if !dirty.is_empty() {
             let look = VoxelLook::new(volume, &table).with_layers(assets.textured);
             for ci in &dirty {
                 state.chunk_dirty[*ci] = false;
             }
+            // Rock just cut loose or blasted away: those chunks on the frame, a few a frame,
+            // so their colliders are right soon after the pieces cut from them spawn
+            // (`VoxelState::urge_dirty`).
+            let (urgent, dirty): (Vec<usize>, Vec<usize>) = if at_once.is_some() {
+                (Vec::new(), dirty)
+            } else {
+                let mut n = 0;
+                dirty.into_iter().partition(|ci| {
+                    let now = state.urgent(*ci) && n < URGENT_CHUNKS_PER_FRAME;
+                    n += usize::from(now);
+                    now
+                })
+            };
+            for ci in urgent.iter().chain(&dirty) {
+                if let Some(u) = state.chunk_urgent.get_mut(*ci) {
+                    *u = false;
+                }
+            }
+            let urgent: Vec<(usize, u32)> = urgent
+                .into_iter()
+                .map(|ci| (ci, state.start_mesh(ci)))
+                .collect();
+            let dirty: Vec<(usize, u32)> = dirty
+                .into_iter()
+                .map(|ci| (ci, state.start_mesh(ci)))
+                .collect();
+            for job in urgent {
+                done.push(mesh_chunk(&state, &look, job, physics));
+            }
             if at_once.is_some() {
                 done.extend(
                     dirty
                         .iter()
-                        .map(|ci| mesh_chunk(&state, &look, *ci, physics)),
+                        .map(|job| mesh_chunk(&state, &look, *job, physics)),
                 );
-            } else {
+            } else if !dirty.is_empty() {
                 // One copy of the voxels for all of this frame's jobs (a hill's is about 1 MB).
                 let snapshot = Arc::new(state.mesh_snapshot());
                 let look = Arc::new(look);
                 let list = jobs.pending.entry(e).or_default();
                 for group in dirty.chunks(VOXEL_BULK_CHUNKS) {
                     let (snapshot, look, group) = (snapshot.clone(), look.clone(), group.to_vec());
-                    let chunks = group.clone();
+                    let chunks = group.iter().map(|(ci, _)| *ci).collect();
                     list.push(MeshJob {
                         layout: state.chunks,
                         chunks,
                         task: bake_pool().spawn(async move {
                             group
                                 .iter()
-                                .map(|ci| mesh_chunk(&snapshot, &look, *ci, physics))
+                                .map(|job| mesh_chunk(&snapshot, &look, *job, physics))
                                 .collect()
                         }),
                     });
@@ -569,9 +662,14 @@ fn apply_chunk(
 ) {
     let ChunkMesh {
         chunk: ci,
+        seq,
         layers,
         collider,
     } = made;
+    if !state.mesh_landed(ci, seq) {
+        // A newer mesh of it is in already (remeshed on the frame while this one baked).
+        return;
+    }
     let empty = layers.iter().all(|(_, m)| m.is_empty());
     let existing = state.chunk_entities[ci].and_then(|c| chunks.get(c).ok().map(|v| (c, v)));
     let (ce, mut chunk) = match existing {
