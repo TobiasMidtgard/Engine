@@ -2997,6 +2997,46 @@ mod tests {
     }
 
     #[test]
+    fn every_vertex_rides_a_bone_near_it() {
+        use super::super::wind_bones::unpack;
+        let lib = PlantLibrary::default();
+        for name in ["oak", "birch", "spruce", "hazel"] {
+            let sp = lib.get(lib.id(name).unwrap());
+            let mut m = woody(sp, 3, false);
+            let s = m.wind.clone().unwrap();
+            for (mesh, leaves) in [
+                (m.foliage.as_mut(), true),
+                (m.foliage_lod.as_mut(), true),
+                (m.wood.as_mut(), false),
+                (m.wood_distant.as_mut(), false),
+            ] {
+                let Some(mesh) = mesh else { continue };
+                s.bake(mesh, leaves);
+                let mut far = 0usize;
+                for v in &mesh.vertices {
+                    let (bone, tip, edge, _) = unpack(v.color[3]);
+                    let b = &s.bones[bone as usize];
+                    assert!((0.0..=1.0).contains(&tip) && (0.0..=1.0).contains(&edge));
+                    if !leaves {
+                        assert!(b.level < 3, "{name}: wood on a spray");
+                    }
+                    let p = Vec3::from(v.position);
+                    let along = (p - b.pivot).dot(b.axis).clamp(0.0, b.length);
+                    if (p - (b.pivot + b.axis * along)).length() > 0.25 * sp.max_height_m {
+                        far += 1;
+                    }
+                }
+                // Nearly every vertex sits close to its bone.
+                assert!(
+                    far * 50 <= mesh.vertices.len(),
+                    "{name}: {far} of {} far from their bones",
+                    mesh.vertices.len()
+                );
+            }
+        }
+    }
+
+    #[test]
     fn every_tree_and_shrub_carries_a_wind_skeleton() {
         let lib = PlantLibrary::default();
         for sp in lib

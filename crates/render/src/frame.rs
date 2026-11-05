@@ -122,6 +122,19 @@ pub struct FrameUniform {
     /// The [`crate::GrassBender`]s nearest the camera ([`ViewData::benders`]): camera-relative
     /// center xyz, radius (m); `shading.y` of them are set. Swaying meshes bend away from them.
     pub benders: [[f32; 4]; MAX_BENDERS],
+    /// The wind plants sway in ([`PlantWind`]): the prevailing wind smoothed over seconds
+    /// (xyz, m/s; w its speed), not the wind at the camera, so plants don't all pulse as a
+    /// gust passes the camera.
+    pub plant_wind: [f32; 4],
+    /// The same, last frame (motion vectors).
+    pub plant_wind_prev: [f32; 4],
+    /// The gust fronts ([`engine_world::GustWaves::to_gpu`]) this frame and last.
+    pub gusts: [[f32; 4]; 4],
+    pub gusts_prev: [[f32; 4]; 4],
+    /// Gust coordinates of the camera (meters from `WindField::gust_origin`, world x and z):
+    /// this frame (xy) and last frame's camera last frame (zw). A camera-relative point's are
+    /// `rel.xz + gust_offset.xy`.
+    pub gust_offset: [f32; 4],
 }
 
 /// Most [`crate::GrassBender`]s that push grass and swaying plants aside (nearest the camera).
@@ -266,6 +279,86 @@ pub struct ViewData {
     /// The [`crate::GrassBender`]s nearest the camera (at most [`MAX_BENDERS`], nearest
     /// first): camera-relative center xyz, radius (m).
     pub benders: Vec<[f32; 4]>,
+    /// The wind plants sway in, this frame and last ([`PlantWind`]).
+    pub plant_wind: PlantWind,
+}
+
+/// The wind swaying plants read, the same for every view of a frame: the prevailing wind
+/// smoothed over seconds (its speed over about 2 s, its direction over about 6 s, as trees
+/// answer the mean wind, not each eddy at the camera), and the gust fronts that carry the
+/// local gusts across the land ([`engine_world::GustWaves`]), now and last frame.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct PlantWind {
+    /// Smoothed prevailing wind (m/s) and its speed, this frame and last.
+    pub wind: Vec4,
+    pub wind_prev: Vec4,
+    pub gusts: [[f32; 4]; 4],
+    pub gusts_prev: [[f32; 4]; 4],
+    /// `WindField::gust_origin` this frame and last (it moves with world shifts).
+    pub gust_origin: DVec3,
+    pub gust_origin_prev: DVec3,
+}
+
+/// [`PlantWind`] carried between frames (advanced once a frame, whatever the views).
+#[derive(Resource, Debug, Clone, Copy, Default)]
+pub(crate) struct PlantWindState {
+    frame: Option<u64>,
+    speed: f32,
+    dir: Vec3,
+    wind: PlantWind,
+}
+
+/// Seconds over which plants' wind follows the prevailing wind's speed and its direction.
+pub const PLANT_WIND_SPEED_SECS: f32 = 2.0;
+pub const PLANT_WIND_DIRECTION_SECS: f32 = 6.0;
+
+impl PlantWindState {
+    /// Move on to frame `frame` (`dt` seconds later) with the prevailing wind `prevailing`
+    /// and the fronts `gusts`; a frame already advanced keeps its values.
+    fn advance(
+        &mut self,
+        frame: u64,
+        dt: f32,
+        prevailing: Vec3,
+        gusts: [[f32; 4]; 4],
+        gust_origin: DVec3,
+    ) -> PlantWind {
+        if self.frame == Some(frame) {
+            return self.wind;
+        }
+        let speed = prevailing.length();
+        let dir = if speed > 1e-3 {
+            prevailing / speed
+        } else {
+            self.dir
+        };
+        let first = self.frame.is_none();
+        let follow = |secs: f32| 1.0 - (-dt.max(0.0) / secs).exp();
+        if first {
+            self.speed = speed;
+            self.dir = if dir.length_squared() > 0.5 {
+                dir
+            } else {
+                Vec3::X
+            };
+        } else {
+            self.speed += (speed - self.speed) * follow(PLANT_WIND_SPEED_SECS);
+            let d = self.dir + (dir - self.dir) * follow(PLANT_WIND_DIRECTION_SECS);
+            self.dir = d.try_normalize().unwrap_or(self.dir);
+        }
+        let wind = (self.dir * self.speed).extend(self.speed);
+        let last = self.wind;
+        self.wind = PlantWind {
+            wind,
+            wind_prev: if first { wind } else { last.wind },
+            gusts,
+            gusts_prev: if first { gusts } else { last.gusts },
+            gust_origin,
+            gust_origin_prev: if first { gust_origin } else { last.gust_origin },
+        };
+        self.frame = Some(frame);
+        self.wind
+    }
 }
 
 impl ViewData {
@@ -277,6 +370,13 @@ impl ViewData {
     /// Distance from the camera along its view direction.
     pub fn view_depth(&self, rel: Vec3) -> f32 {
         -(self.view.transform_point3(rel)).z
+    }
+
+    /// [`FrameUniform::gust_offset`]: the camera's gust coordinates now and last frame's.
+    pub fn gust_offset(&self) -> [f32; 4] {
+        let now = self.origin - self.plant_wind.gust_origin;
+        let prev = self.prev_origin - self.plant_wind.gust_origin_prev;
+        [now.x as f32, now.z as f32, prev.x as f32, prev.z as f32]
     }
 
     /// Camera movement since the previous frame (current origin − previous origin), meters.
@@ -714,6 +814,13 @@ pub fn build_view(
         .map(|w| w.sample(origin))
         .or_else(|| world.get_resource::<WeatherState>().map(|w| w.wind))
         .unwrap_or(Vec3::ZERO);
+    let (prevailing, gusts, gust_origin) = match world.get_resource::<WindField>() {
+        Some(w) => (w.prevailing, w.waves.to_gpu(), w.gust_origin),
+        None => (wind, [[0.0; 4]; 4], DVec3::ZERO),
+    };
+    let plant_wind = world
+        .get_resource_or_insert_with(PlantWindState::default)
+        .advance(frame_index, delta, prevailing, gusts, gust_origin);
 
     // Grass benders: nearest first.
     let mut benders: Vec<[f32; 4]> = world
@@ -853,6 +960,7 @@ pub fn build_view(
         debug_view: settings.debug_view,
         sun_angular_radius,
         benders,
+        plant_wind,
     }
 }
 
@@ -1085,6 +1193,11 @@ pub fn frame_uniform(world: &World, v: &ViewData) -> FrameUniform {
             0.0,
         ],
         benders: gpu_benders(&v.benders),
+        plant_wind: v.plant_wind.wind.to_array(),
+        plant_wind_prev: v.plant_wind.wind_prev.to_array(),
+        gusts: v.plant_wind.gusts,
+        gusts_prev: v.plant_wind.gusts_prev,
+        gust_offset: v.gust_offset(),
     }
 }
 
@@ -1144,6 +1257,29 @@ mod tests {
     }
 
     #[test]
+    fn plants_follow_the_prevailing_wind_over_seconds_once_a_frame() {
+        let mut state = PlantWindState::default();
+        let gusts = [[0.0; 4]; 4];
+        let first = state.advance(0, 1.0 / 60.0, Vec3::new(4.0, 0.0, 0.0), gusts, DVec3::ZERO);
+        assert_eq!(first.wind, Vec4::new(4.0, 0.0, 0.0, 4.0));
+        assert_eq!(first.wind_prev, first.wind);
+        // A gust at the camera doubles the wind: plants take it up over seconds, not at once.
+        let next = state.advance(1, 1.0 / 60.0, Vec3::new(8.0, 0.0, 0.0), gusts, DVec3::ZERO);
+        assert!(next.wind.w > 4.0 && next.wind.w < 4.1, "{:?}", next.wind);
+        assert_eq!(next.wind_prev, first.wind);
+        // Another view of the same frame sees the same wind.
+        let again = state.advance(1, 1.0 / 60.0, Vec3::new(20.0, 0.0, 0.0), gusts, DVec3::ZERO);
+        assert_eq!(again, next);
+        // After a few seconds it has mostly followed; a turn of the wind follows slower.
+        let mut w = next;
+        for f in 2..360 {
+            w = state.advance(f, 1.0 / 60.0, Vec3::new(0.0, 0.0, 8.0), gusts, DVec3::ZERO);
+        }
+        assert!((w.wind.w - 8.0).abs() < 0.3, "{:?}", w.wind);
+        assert!(w.wind.z > w.wind.x && w.wind.x > 0.5, "{:?}", w.wind);
+    }
+
+    #[test]
     fn frame_uniform_matches_wgsl_size() {
         // 7 mat4 + 15 vec4 + 4 mat4 + 3 vec4 + ground, sky occlusion, volumes, then the
         // screen-space block (mat4 + 4 vec4), volumetric fog (vec4), far shadow (mat4 + vec4),
@@ -1175,6 +1311,9 @@ mod tests {
                 + 16
                 + 16
                 + MAX_BENDERS * 16
+                + 2 * 16
+                + 2 * 64
+                + 16
         );
         assert_eq!(std::mem::size_of::<GpuSkyVolume>(), 80);
         assert_eq!(std::mem::size_of::<GpuPointLight>(), 32);

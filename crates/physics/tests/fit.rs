@@ -112,6 +112,78 @@ fn a_moving_model_gets_convex_parts_not_triangles() {
     );
 }
 
+/// A finely cut floor (5,000 drawn triangles, as a render mesh's are) is fitted off the frame
+/// and collides as a few triangles on the same plane; two models of the same mesh share one
+/// fit, and a ball dropped on each rests on it.
+#[test]
+fn a_finely_drawn_floor_collides_as_a_few_triangles_fitted_off_the_frame() {
+    let mut app = app();
+    let floor = app
+        .world
+        .resource_mut::<Assets<Mesh>>()
+        .add(engine_render::mesh::plane(
+            engine_core::math::Vec2::splat(8.0),
+            49,
+        ));
+    let model = |app: &mut App, x: f64| {
+        let root = app
+            .world
+            .spawn((
+                Transform::from_xyz(x, 1.0, 0.0),
+                FitCollider::new(Fit::Mesh),
+            ))
+            .id();
+        app.world.spawn((
+            Transform::default(),
+            MeshRenderer::new(floor, engine_render::MaterialRef::default()),
+            ChildOf(root),
+        ));
+        root
+    };
+    let roots = [model(&mut app, 0.0), model(&mut app, 20.0)];
+    let mut frames = 0;
+    while roots
+        .iter()
+        .any(|r| app.world.get::<Collider>(*r).is_none())
+    {
+        app.update();
+        frames += 1;
+        assert!(frames < 600, "not fitted after {frames} frames");
+    }
+    for r in roots {
+        let shape = &app.world.get::<Collider>(r).unwrap().shape;
+        let ColliderShape::TriMesh { vertices, indices } = shape else {
+            panic!("{shape:?}");
+        };
+        assert!(indices.len() < 100, "{} triangles", indices.len());
+        assert!(
+            vertices.iter().all(|v| v.y.abs() < 1.0e-5),
+            "left the plane"
+        );
+    }
+    let balls: Vec<Entity> = [1.0, 21.0]
+        .into_iter()
+        .map(|x| {
+            app.world
+                .spawn((
+                    Transform::from_xyz(x, 3.0, 0.5),
+                    RigidBody::dynamic(),
+                    Collider::sphere(0.25),
+                    Velocity::default(),
+                ))
+                .id()
+        })
+        .collect();
+    app.update_n(180);
+    for b in balls {
+        let p = app.world.get::<Transform>(b).unwrap().translation;
+        assert!(
+            (p.y - 1.25).abs() < 0.05,
+            "the ball isn't resting on the floor: {p:?}"
+        );
+    }
+}
+
 /// The collider audit (`engine_physics::audit`) lists a drawn rock or box with no collider on the
 /// ground, not one with its own collider, nor a pebble too small to matter, nor a sail whose
 /// mast has a collider of its own, nor a hall whose roof collides, nor one far from the player.

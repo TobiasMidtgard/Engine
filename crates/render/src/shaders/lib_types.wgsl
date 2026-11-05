@@ -67,6 +67,11 @@ struct Frame {
     aerial: vec4<f32>,             // aerial perspective table (aerial.rs): reach (m, 0 = off), 1 / depth scale (1/m), 1 / log2(1 + reach / depth scale), depth slices
     shading: vec4<f32>,            // x = sun-shadow filter taps (RenderSettings::shadow_filter_taps), y = benders set; zw unused
     benders: array<vec4<f32>, 16>, // GrassBenders nearest the camera: camera-relative center xyz, radius (m) (frame.rs MAX_BENDERS)
+    plant_wind: vec4<f32>,         // the wind plants sway in (frame.rs PlantWind): smoothed prevailing xyz (m/s), w its speed
+    plant_wind_prev: vec4<f32>,    // the same last frame (motion vectors)
+    gusts: GustWaves,              // the gust fronts (engine_world::gusts) this frame
+    gusts_prev: GustWaves,         // and last frame
+    gust_offset: vec4<f32>,        // the camera's gust coordinates (m from the gust origin, world xz): now xy, last frame zw
 };
 
 // An indoor space (`SkyLightVolume`): sky light comes in only through its open faces.
@@ -252,6 +257,31 @@ fn fullscreen_vertex(index: u32, depth: f32) -> FullscreenOut {
     out.position = vec4<f32>(uv * vec2(2.0, -2.0) + vec2(-1.0, 1.0), depth, 1.0);
     out.uv = uv;
     return out;
+}
+
+// ---------------------------------------------------------------- plant sway
+// How a vertex of a swaying material (`StandardMaterial::wind_sway`, `sway` meters at its top)
+// moves in the wind: camera-relative `rel`, gust coordinates `at` (meters from the gust
+// origin, world xz), `height01` up the mesh. `wind`: the smoothed prevailing wind (xyz m/s, w
+// speed); `g`: the gust fronts, so a gust is seen rolling through a field of bushes into the
+// trees, as through the grass (Ghost of Tsushima's wind); `t`: world seconds. `rest`: one pose
+// that doesn't change with time (shadow maps too coarse to show motion). The scene, the
+// prepass (with last frame's inputs, for motion vectors) and the shadow maps all call this.
+fn plant_sway(at: vec2<f32>, height01: f32, sway: f32, wind: vec4<f32>, g: GustWaves, t: f32, rest: bool) -> vec3<f32> {
+    if (sway <= 0.0) { return vec3<f32>(0.0); }
+    let speed = wind.w;
+    let dir = select(vec3<f32>(1.0, 0.0, 0.0), wind.xyz / max(speed, 1e-3), speed > 0.01);
+    let phase = dot(at, vec2<f32>(0.13, 0.17));
+    var front = 0.0;
+    var motion = 0.6;
+    if (!rest) {
+        front = gust_waves(g, at);
+        // Slow sway, and a flutter that grows on a front.
+        motion = 0.6 + 0.4 * sin(t * 0.7 + phase * 0.3) * sin(t * 1.9 + phase)
+            + sin(t * 6.0 + phase * 3.0) * 0.15 * (1.0 + front);
+    }
+    let strength = sway * height01 * height01 * min(speed * (1.0 + front) / 10.0, 1.5);
+    return (dir + vec3<f32>(0.0, -0.1, 0.0)) * strength * motion;
 }
 
 // ---------------------------------------------------------------- benders

@@ -20,7 +20,7 @@ struct GrassField {
     origin: vec4<f32>,  // camera-relative position of the field's -x -z corner (xyz)
     axis_x: vec4<f32>,  // field x axis (unit, world), w: size along x (m)
     axis_y: vec4<f32>,  // field up, w: size along z (m)
-    axis_z: vec4<f32>,  // field z axis, w: unused
+    axis_z: vec4<f32>,  // field z axis, w: seed head length (fraction of the stem, 0 round heads)
     grid: vec4<u32>,    // map points along x and z, unused, seed
     shape: vec4<f32>,   // blade height (m), height variation, root width (m), bend
     lush: vec4<f32>,    // fresh albedo (linear), w: leaf amount (0 blades .. 1 leaves)
@@ -148,7 +148,9 @@ fn grass_vertex(s: BladeShape, vertex: u32, t: f32, tip_dir: vec3<f32>) -> Blade
     var p0 = root;
     var p1 = root + up * (height * 0.38);
     var p2 = root + up * (height * 0.74) + over * (height * 0.5);
-    var p3 = root + tip_dir * (height * (1.0 - 0.12 * leaning)) - up * (height * f.look.y * leaning * 0.8);
+    // (A seed head nods a little, not over: its stem is stiffer than a blade.)
+    let droop = f.look.y * select(1.0, 0.35, s.flower > 0.5 && f.axis_z.w > 0.0);
+    var p3 = root + tip_dir * (height * (1.0 - 0.12 * leaning)) - up * (height * droop * leaning * 0.8);
     if (leaf > 0.0 && lying < 1.0) {
         // A leaf on a stalk: the stalk rises, the blade spreads out flat from its top (leaning
         // with the wind and away from benders) and droops a little at the tip.
@@ -183,6 +185,18 @@ fn grass_vertex(s: BladeShape, vertex: u32, t: f32, tip_dir: vec3<f32>) -> Blade
     let last = f32(segments - 1u);
     let flower_u = select(0.9 * row / max(last - 1.0, 1.0), 0.95, row >= last && segments > 1u);
     u = select(1.0 - pow(1.0 - u, 1.35), flower_u, flower);
+    // A grass's seed head (`bloom_length`): a spike or plume the top part of the stem long.
+    // The root row, one up the stem (given three rows or more, so the stem bends smoothly
+    // into its head), then every other row inside the head, so even two segments show it.
+    let head_length = f.axis_z.w;
+    let spike = flower && head_length > 0.0;
+    if (spike) {
+        let first = select(1.0, 2.0, last >= 2.0);
+        let a = (row - first + 1.0) / (last - first + 2.0);
+        u = 1.0 - head_length * (1.0 - a);
+        u = select(u, 0.6 * (1.0 - head_length), row > 0.5 && row < first - 0.5);
+        u = select(u, 0.0, row < 0.5);
+    }
     if (vertex >= 2u * segments) {
         u = 1.0;
         sgn = 0.0;
@@ -207,8 +221,13 @@ fn grass_vertex(s: BladeShape, vertex: u32, t: f32, tip_dir: vec3<f32>) -> Blade
     let taper = mix(pow(q, 0.6), 1.0 - 0.55 * u, lying * (1.0 - leaf));
     var half_width = 0.5 * s.width * mix(taper, leaf_shape, leaf);
     // A flowering stem: thin, then its head (a disc seen edge-on is still a few petals wide).
-    let head = smoothstep(0.91, 0.94, u);
-    if (flower) {
+    var head = smoothstep(0.91, 0.94, u);
+    if (spike) {
+        // Spindle-shaped, widest a third of the way up, tapering to the tip.
+        let a = saturate((u - (1.0 - head_length)) / head_length);
+        head = smoothstep(0.0, 0.12, a);
+        half_width = 0.5 * s.width * max(pow(sin(PI * pow(a, 0.75)), 0.7), 0.06);
+    } else if (flower) {
         half_width = mix(0.05 * s.width, 0.5 * s.width, head);
     }
     // Seen edge-on a blade is widened across the view, so the field keeps its cover (from a

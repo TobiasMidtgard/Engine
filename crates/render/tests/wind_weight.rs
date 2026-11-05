@@ -21,6 +21,19 @@ fn render_post(
     alpha: Option<f32>,
     bender: Option<DVec3>,
 ) -> Option<RgbaImage> {
+    render_post_in(name, sway, alpha, bender, None)
+}
+
+/// [`render_post`], in a `WindField` blowing 6 m/s along +x whose broad gust fronts (strength
+/// 0.8, 60 m apart) are at `front_phase` (0: a front on the post, 0.5: midway between two),
+/// when given.
+fn render_post_in(
+    name: &str,
+    sway: f32,
+    alpha: Option<f32>,
+    bender: Option<DVec3>,
+    front_phase: Option<f32>,
+) -> Option<RgbaImage> {
     engine_core::log::init("error");
     let mut app = App::new();
     app.world.resource_mut::<EngineConfig>().headless = true;
@@ -40,6 +53,17 @@ fn render_post(
         wind: Vec3::new(15.0, 0.0, 0.0),
         ..Default::default()
     });
+    if let Some(phase) = front_phase {
+        let mut wind = engine_world::WindField {
+            prevailing: Vec3::new(6.0, 0.0, 0.0),
+            gustiness: 0.0,
+            ..Default::default()
+        };
+        wind.waves.broad.strength = 0.8;
+        wind.waves.broad.wavelength_m = 60.0;
+        wind.waves.broad.phase = phase;
+        app.world.insert_resource(wind);
+    }
     let mut mesh = Shape::Cuboid {
         size: [0.4, 6.0, 0.4],
     }
@@ -172,5 +196,26 @@ fn swaying_meshes_give_way_to_benders() {
     assert!(
         (mean_column(&c_zero) - mean_column(&c_still)).abs() < 0.5,
         "a post of wind weight 0 gave way to the bender"
+    );
+}
+
+/// Swaying meshes lean harder where a gust front (`WindField::waves`) crosses them, so a gust
+/// can be watched rolling through bushes as through the grass.
+#[test]
+fn gust_fronts_push_swaying_meshes_harder() {
+    let Some(between) = render_post_in("front_between", 1.5, None, None, Some(0.5)) else {
+        return;
+    };
+    let on = render_post_in("front_on", 1.5, None, None, Some(0.0)).expect("gpu");
+    let (c_between, c_on) = (red_columns_at_top(&between), red_columns_at_top(&on));
+    eprintln!(
+        "top of the post: between fronts {:.1}, on a front {:.1}",
+        mean_column(&c_between),
+        mean_column(&c_on)
+    );
+    assert!(!c_on.is_empty(), "the post's top is not in view");
+    assert!(
+        mean_column(&c_on) > mean_column(&c_between) + 2.0,
+        "a gust front didn't push the post further downwind"
     );
 }

@@ -99,9 +99,24 @@ struct VertexOut {
 fn vertex_wind(in: VertexIn, rel: vec3<f32>) -> vec3<f32> {
     let sway = materials[in.extra.x].params2.y * saturate(in.color.a);
     if (sway <= 0.0) { return vec3<f32>(0.0); }
-    let h01 = saturate((in.position.y - bitcast<f32>(in.extra.z)) / max(bitcast<f32>(in.extra.w), 1e-3));
+    let h01 = vertex_height01(in);
     // Pushed aside by the benders (characters, vehicles) near the camera, as grass is.
     return wind_offset(rel, h01, sway) + bender_offset(rel, h01, in.color.a);
+}
+
+// `vertex_wind` last frame for motion vectors: the wind at `prev_rel` (last frame's
+// camera-relative position of the unswayed vertex) with last frame's wind and fronts; the
+// benders' push as this frame's (at `rel`).
+fn vertex_wind_prev(in: VertexIn, rel: vec3<f32>, prev_rel: vec3<f32>) -> vec3<f32> {
+    let sway = materials[in.extra.x].params2.y * saturate(in.color.a);
+    if (sway <= 0.0) { return vec3<f32>(0.0); }
+    let h01 = vertex_height01(in);
+    return wind_offset_prev(prev_rel, h01, sway) + bender_offset(rel, h01, in.color.a);
+}
+
+// How far up its mesh a vertex is (0 at the bottom, 1 at the top).
+fn vertex_height01(in: VertexIn) -> f32 {
+    return saturate((in.position.y - bitcast<f32>(in.extra.z)) / max(bitcast<f32>(in.extra.w), 1e-3));
 }
 
 // The model's scale along each object axis.
@@ -1070,9 +1085,13 @@ fn vs_prepass(in: VertexIn) -> PrepassVertexOut {
 }
 
 fn standard_prepass_vertex(in: VertexIn) -> PrepassVertexOut {
-    let rel = vertex_rel(in);
     let p = vec4<f32>(in.position, 1.0);
-    let prev = vec3<f32>(dot(in.p0, p), dot(in.p1, p), dot(in.p2, p)) + (rel - vec3<f32>(dot(in.m0, p), dot(in.m1, p), dot(in.m2, p)));
+    let base = vec3<f32>(dot(in.m0, p), dot(in.m1, p), dot(in.m2, p));
+    let rel = base + vertex_wind(in, base);
+    // Last frame's position: last frame's transform and last frame's wind, so swaying leaves
+    // get their own motion and temporal filtering doesn't smear them.
+    let prev_base = vec3<f32>(dot(in.p0, p), dot(in.p1, p), dot(in.p2, p));
+    let prev = prev_base + vertex_wind_prev(in, base, prev_base);
     var out: PrepassVertexOut;
     out.rel = rel;
     out.normal = normalize(mat3x3<f32>(in.n0.xyz, in.n1.xyz, in.n2.xyz) * in.normal);

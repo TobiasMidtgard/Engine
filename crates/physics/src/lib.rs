@@ -22,6 +22,7 @@ mod settings;
 mod shape_jobs;
 mod shift;
 mod sim;
+mod simplify;
 mod step;
 
 use std::sync::Arc;

@@ -236,9 +236,13 @@ pub fn fit_points(points: &[Vec3], triangles: &[[u32; 3]], fit: Fit) -> Option<C
                 )
             })
         }
-        Fit::Mesh => (!triangles.is_empty()).then(|| ColliderShape::TriMesh {
-            vertices: points.to_vec().into(),
-            indices: triangles.to_vec().into(),
+        Fit::Mesh => (!triangles.is_empty()).then(|| {
+            // Drawn meshes are finer than colliding needs (crate::simplify).
+            let (vertices, indices) = crate::simplify::for_collision(points, triangles);
+            ColliderShape::TriMesh {
+                vertices: vertices.into(),
+                indices: indices.into(),
+            }
         }),
     }
 }
@@ -319,10 +323,25 @@ pub(crate) struct Fitted(HashMap<(Vec<PartKey>, Fit), Option<ColliderShape>>);
 /// A mesh and its placement in the model, bit for bit.
 type PartKey = (Handle<Mesh>, [u64; 12]);
 
-/// Give each [`FitCollider`] whose meshes have loaded its collider (`Update`).
+/// Fits being made off the frame, by key, and the models waiting for each.
+#[derive(Resource, Default)]
+struct FitsMaking(HashMap<(Vec<PartKey>, Fit), Vec<Entity>>);
+
+/// Models of more triangles than this are fitted off the frame (fewer fit in well under a
+/// millisecond, and are solid the frame their meshes are in).
+const OFF_FRAME_TRIANGLES: usize = crate::simplify::SIMPLIFY_ABOVE;
+
+/// On a model whose fit is being made off the frame ([`FitsMaking`]).
+#[derive(Component)]
+struct Fitting;
+
+/// Give each [`FitCollider`] whose meshes have loaded its collider (`Update`). A big fit not
+/// made before is made off the frame (`engine_core::off_frame`): fitting a jetty's 66,000 drawn
+/// triangles ([`crate::simplify`]) or V-HACD on a house takes from a tenth of a second to
+/// over one, and the model gets its collider once it is in.
 pub(crate) fn fit_colliders(world: &mut World) {
     let todo: Vec<(Entity, FitCollider)> = world
-        .query_filtered::<(Entity, &FitCollider), Without<Collider>>()
+        .query_filtered::<(Entity, &FitCollider), (Without<Collider>, Without<Fitting>)>()
         .iter(world)
         .map(|(e, f)| (e, *f))
         .collect();
@@ -340,25 +359,71 @@ pub(crate) fn fit_colliders(world: &mut World) {
             continue;
         };
         let key = (parts.iter().map(|p| p.key).collect::<Vec<_>>(), fit);
-        let cached = world
-            .get_resource::<Fitted>()
-            .and_then(|f| f.0.get(&key).cloned());
-        let (shape, hidden) = match cached {
-            Some(shape) => {
-                let hidden = parts
-                    .iter()
-                    .filter(|p| p.named.is_some())
-                    .map(|p| p.entity)
-                    .collect();
-                (shape, hidden)
-            }
-            None => {
-                let (shape, hidden) = fit_parts(&parts, fit);
+        let hidden: Vec<Entity> = parts
+            .iter()
+            .filter(|p| p.named.is_some())
+            .map(|p| p.entity)
+            .collect();
+        let cached = |world: &World| {
+            world
+                .get_resource::<Fitted>()
+                .and_then(|f| f.0.get(&key).cloned())
+        };
+        let triangles: usize = parts.iter().map(|p| p.triangles.len()).sum();
+        let heavy = fit != Fit::Box && triangles > OFF_FRAME_TRIANGLES;
+        let shape = match cached(world) {
+            Some(shape) => shape,
+            None if !heavy => {
+                let shape = fit_parts(&parts, fit).0;
                 world
                     .get_resource_or_init::<Fitted>()
                     .0
                     .insert(key, shape.clone());
-                (shape, hidden)
+                shape
+            }
+            None => {
+                let mut making = world.get_resource_or_init::<FitsMaking>();
+                let started = match making.0.get_mut(&key) {
+                    Some(waiting) => {
+                        waiting.push(e);
+                        true
+                    }
+                    None => {
+                        making.0.insert(key.clone(), vec![e]);
+                        false
+                    }
+                };
+                world.entity_mut(e).insert(Fitting);
+                if started {
+                    continue;
+                }
+                let made = key.clone();
+                engine_core::off_frame::off_frame(
+                    world,
+                    "physics fit",
+                    move || fit_parts(&parts, fit).0,
+                    move |world: &mut World, shape: Option<ColliderShape>| {
+                        world
+                            .get_resource_or_init::<Fitted>()
+                            .0
+                            .insert(made.clone(), shape);
+                        let waiting = world
+                            .get_resource_mut::<FitsMaking>()
+                            .and_then(|mut m| m.0.remove(&made))
+                            .unwrap_or_default();
+                        // (Fitted on their next look.)
+                        for w in waiting {
+                            if let Ok(mut ent) = world.get_entity_mut(w) {
+                                ent.remove::<Fitting>();
+                            }
+                        }
+                    },
+                );
+                // Made on the spot (no off-frame jobs here): fit it now.
+                match cached(world) {
+                    Some(shape) => shape,
+                    None => continue,
+                }
             }
         };
         for h in hidden {
