@@ -2,7 +2,7 @@
 //! renderer that advances one frame at a time with the game clock (headless runs, tests and
 //! recordings, so a recording made at any frame rate plays back in real time and in sync).
 
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use crossbeam_channel::{Receiver, Sender};
 
@@ -15,7 +15,7 @@ pub(crate) enum Backend {
         allow(dead_code)
     )]
     Device(DeviceOutput),
-    Offline(Box<Mutex<Mixer>>),
+    Offline(Arc<Mutex<Mixer>>),
 }
 
 impl Backend {

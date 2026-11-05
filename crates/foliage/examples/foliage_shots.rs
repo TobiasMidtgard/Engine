@@ -560,6 +560,28 @@ fn main() {
         shot(&mut app, &out, "02_trail_inner", eye, at, 10.5);
     }
     take(&mut app, "03_clearing", &by_name("forest_clearing"));
+    // `FOLIAGE_LOOK=x,y,z,tx,ty,tz[;...]`: shots `99_look_<n>` from those eyes (heights above
+    // the ground) toward those targets, at 10 h.
+    if let Ok(looks) = std::env::var("FOLIAGE_LOOK") {
+        for (n, look) in looks.split(';').enumerate() {
+            let v: Vec<f64> = look
+                .split(',')
+                .filter_map(|x| x.trim().parse().ok())
+                .collect();
+            if v.len() != 6 {
+                continue;
+            }
+            let ground = |x: f64, z: f64| {
+                app.world
+                    .get_resource::<engine_world::Ground>()
+                    .and_then(|g| g.height(DVec3::new(x, 0.0, z)))
+                    .unwrap_or(0.0)
+            };
+            let eye = DVec3::new(v[0], ground(v[0], v[2]) + v[1], v[2]);
+            let at = DVec3::new(v[3], ground(v[3], v[5]) + v[4], v[5]);
+            shot(&mut app, &out, &format!("99_look_{n}"), eye, at, 10.0);
+        }
+    }
     if wanted("03_windthrow") {
         // The `forest_windthrow` stop (by its place, so a build from before it has the shot).
         let ground = |x: f64, z: f64| {
@@ -568,8 +590,8 @@ fn main() {
                 .and_then(|g| g.height(DVec3::new(x, 0.0, z)))
                 .unwrap_or(0.0)
         };
-        let eye = DVec3::new(16.0, ground(16.0, 20.0) + 1.7, 20.0);
-        let at = DVec3::new(5.0, ground(5.0, 36.0) + 1.0, 36.0);
+        let eye = DVec3::new(-7.0, ground(-7.0, 29.0) + 2.6, 29.0);
+        let at = DVec3::new(3.0, ground(3.0, 38.0) + 0.8, 38.0);
         shot(&mut app, &out, "03_windthrow", eye, at, 10.0);
     }
     take(&mut app, "03_old_oak", &by_name("forest_old_oak"));

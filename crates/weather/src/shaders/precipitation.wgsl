@@ -154,7 +154,9 @@ fn vs_rain(@builtin(vertex_index) v: u32, @builtin(instance_index) i: u32) -> Pr
     let h = pcg3(vec3<u32>(i, i * 7u + 3u, 911u));
     let rel = drop_position(i, h);
     let fade = box_fade(rel);
-    if (fade <= 0.0 || covered(rel)) { return culled(); }
+    // Under tree crowns only the drops that find a gap get through (canopy map, exp(-LAI/2)).
+    let gap = pcg3(vec3<u32>(i, 29u, 401u)).x;
+    if (fade <= 0.0 || covered(rel) || gap > canopy_rain_through(rel)) { return culled(); }
     let speed = precip.wrap[i % SPEED_CLASSES].w;
     let vel = precip.velocity.xyz * vec3<f32>(1.0, speed, 1.0);
     let len = length(vel) * precip.area.w + precip.velocity.w;
@@ -195,7 +197,8 @@ fn vs_snow(@builtin(vertex_index) v: u32, @builtin(instance_index) i: u32) -> Pr
     let t = precip.look.w;
     rel += vec3<f32>(sin(t * (1.1 + h.x) + h.y * TAU), 0.0, cos(t * (0.9 + h.z) + h.x * TAU)) * 0.22;
     let fade = box_fade(rel);
-    if (fade <= 0.0 || covered(rel)) { return culled(); }
+    let gap = pcg3(vec3<u32>(i, 31u, 409u)).x;
+    if (fade <= 0.0 || covered(rel) || gap > canopy_rain_through(rel)) { return culled(); }
     let dist = length(rel);
     let to_eye = -rel / max(dist, 1e-3);
     let right = normalize(cross(vec3<f32>(0.0, 1.0, 0.0), to_eye) + vec3(1e-4, 0.0, 0.0));
@@ -243,6 +246,10 @@ fn vs_splash(@builtin(vertex_index) v: u32, @builtin(instance_index) i: u32) -> 
     let rel = vec3<f32>(xz.x, ground.x + 0.01, xz.y);
     let dist = length(rel);
     if (dist > radius) { return culled(); }
+    // On the floor under crowns, splash only where drops get through the leaves.
+    if (fract(h0.y + h.z * 7.31) > canopy_rain_through(vec3<f32>(xz.x, ground.x, xz.y))) {
+        return culled();
+    }
     let to_eye = -rel / max(dist, 1e-3);
     let right = normalize(cross(vec3<f32>(0.0, 1.0, 0.0), to_eye) + vec3(1e-4, 0.0, 0.0));
     let size = precip.splash.y * (0.7 + 0.6 * h.z);

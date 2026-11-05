@@ -401,24 +401,6 @@ type MovedChildQuery<'w, 's> = Query<
     )>,
 >;
 
-/// Children found moved by one batch of the parallel scan, added to the walk's queue when the
-/// batch is done.
-struct Found<'a> {
-    local: Vec<(Entity, ParentWorld)>,
-    into: &'a std::sync::Mutex<Vec<(Entity, ParentWorld)>>,
-}
-
-impl Drop for Found<'_> {
-    fn drop(&mut self) {
-        if self.local.is_empty() {
-            return;
-        }
-        if let Ok(mut all) = self.into.lock() {
-            all.append(&mut self.local);
-        }
-    }
-}
-
 /// Where a queued child finds its parent's world transform.
 #[doc(hidden)]
 #[derive(Clone, Copy)]
@@ -512,18 +494,16 @@ pub fn propagate_transforms_system(
             }
         }
     }
-    // The scan over every child's change ticks runs on the compute threads (most children
-    // haven't moved), each batch handing what it found over when done. Their order doesn't
-    // matter: a child whose parent changes later in the walk is walked again from it.
-    let found = std::sync::Mutex::new(std::mem::take(&mut *stack));
-    moved.par_iter().for_each_init(
-        || Found {
-            local: Vec::new(),
-            into: &found,
-        },
-        |f, (e, c)| f.local.push((e, ParentWorld::Read(c.parent()))),
+    // The scan over every child's change ticks is a plain loop: split over the compute
+    // threads it saved 0.03 ms on the VM plaza, but a frame thread waiting in that scope runs
+    // whole other systems meanwhile, and the route then showed this scan at up to 61 ms
+    // (see [`crate::tasks`] on nested scopes). Their order doesn't matter: a child whose
+    // parent changes later in the walk is walked again from it.
+    stack.extend(
+        moved
+            .iter()
+            .map(|(e, c)| (e, ParentWorld::Read(c.parent()))),
     );
-    *stack = found.into_inner().unwrap_or_else(|e| e.into_inner());
     drop(span);
     let _span = tracing::info_span!("propagate: walk").entered();
 

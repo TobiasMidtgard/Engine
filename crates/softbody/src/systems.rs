@@ -742,6 +742,9 @@ fn report(commands: &mut Commands, e: Entity, what: &str, result: Result<SoftBod
 
 type Unbuilt = (Without<SoftBodySim>, Without<SoftBodyFailed>);
 
+/// How long one frame may spend building new bodies under a real clock (at least one is built).
+pub const BUILD_BUDGET_MS: f32 = 3.0;
+
 /// Build simulations for new specs (after transforms propagate, so they start in place).
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub fn build_bodies(
@@ -757,7 +760,21 @@ pub fn build_bodies(
     all_transforms: Query<&GlobalTransform>,
     meshes: Option<Res<engine_assets::Assets<engine_render::Mesh>>>,
     skins: Option<Res<hair::MeshSkins>>,
+    time: Res<Time>,
 ) {
+    // Under a real clock a frame builds bodies until `BUILD_BUDGET_MS` have passed (at least
+    // one); the rest stay unbuilt and build on the next frames. A zone arriving with dozens of
+    // cloths, bridges and grooms built them all on one frame (up to 135 ms on the cloud VM).
+    let manual = matches!(time.source(), engine_core::time::TimeSource::Manual { .. });
+    let started = Instant::now();
+    let mut built = 0u32;
+    let mut over = move || {
+        let stop = !manual && built > 0 && started.elapsed().as_secs_f32() * 1e3 >= BUILD_BUDGET_MS;
+        if !stop {
+            built += 1;
+        }
+        stop
+    };
     for (e, spec, t) in &cloths {
         if crate::gpu_cloth::runs_on_gpu(spec) {
             continue; // simulated and drawn by the render feature
@@ -768,6 +785,10 @@ pub fn build_bodies(
         {
             continue; // the pose isn't evaluated yet
         }
+        if over() {
+            return;
+        }
+        let _span = tracing::info_span!("softbody: build cloth").entered();
         report(
             &mut commands,
             e,
@@ -782,6 +803,10 @@ pub fn build_bodies(
         );
     }
     for (e, spec, t) in &ropes {
+        if over() {
+            return;
+        }
+        let _span = tracing::info_span!("softbody: build rope").entered();
         let resolve = |other: Entity| all_transforms.get(other).ok().copied();
         report(
             &mut commands,
@@ -791,6 +816,10 @@ pub fn build_bodies(
         );
     }
     for (e, spec, t) in &bridges {
+        if over() {
+            return;
+        }
+        let _span = tracing::info_span!("softbody: build bridge").entered();
         let material = match &spec.plank_material {
             Some(key) => engine_render::MaterialRef::Asset(key.clone()),
             None => engine_render::MaterialRef::Inline(
@@ -853,6 +882,10 @@ pub fn build_bodies(
         report(&mut commands, e, "RopeBridge", result);
     }
     for (e, spec, t) in &volumes {
+        if over() {
+            return;
+        }
+        let _span = tracing::info_span!("softbody: build volume").entered();
         report(&mut commands, e, "SoftVolume", volume::build(spec, t));
     }
     let meshes = meshes.as_deref();
@@ -861,6 +894,10 @@ pub fn build_bodies(
         if skeleton.is_some_and(|s| s.2.bones.is_empty()) || spec.waiting_for_mesh(meshes) {
             continue; // the pose isn't evaluated (or the body mesh isn't built) yet
         }
+        if over() {
+            return;
+        }
+        let _span = tracing::info_span!("softbody: build hair").entered();
         report(
             &mut commands,
             e,

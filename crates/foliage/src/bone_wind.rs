@@ -52,6 +52,7 @@ pub fn species_wind(w: &PlantWind) -> PlantSpeciesWind {
         crown_ramp: w.crown_ramp,
         flip: w.flip,
         underside_gain: w.underside_gain,
+        snow_hold: w.snow_hold,
         ..PlantSpeciesWind::default()
     }
 }

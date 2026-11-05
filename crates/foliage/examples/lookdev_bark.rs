@@ -238,6 +238,7 @@ fn main() {
                 years: 3.0 + 3.0 * i as f32,
                 rot_years: 16.0,
                 size: 0.75,
+                uprooted: false,
             },
             LogPose {
                 yaw: 0.06 * i as f32,

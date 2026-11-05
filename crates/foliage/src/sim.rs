@@ -108,6 +108,8 @@ pub struct SimLog {
     pub years: f32,
     pub rot_years: f32,
     pub genes: Genes,
+    /// Thrown roots and all (its root plate stands up at the butt).
+    pub uprooted: bool,
 }
 
 /// A resource source in the step's terms (world position + effect).
@@ -746,6 +748,7 @@ impl RegionSim {
                                 years: 0.0,
                                 rot_years: 8.0 + 10.0 * size,
                                 genes: plants[i].plant.genes,
+                                uprooted: false,
                             });
                         }
                     }

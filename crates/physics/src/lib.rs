@@ -15,6 +15,7 @@ mod fine;
 pub mod fit;
 mod grounding;
 mod lod;
+mod mesh_contacts;
 mod queries;
 mod report;
 mod rolling;

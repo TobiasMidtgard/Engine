@@ -33,7 +33,7 @@ use crate::mesh::Mesh;
 pub const MAX_PLANT_BONES: usize = (1 << 14) - 1;
 
 /// Words per species slot in the shader's table (`PLANT_SPECIES_WORDS` in lib_wind.wgsl).
-const SPECIES_WORDS: usize = 8;
+const SPECIES_WORDS: usize = 9;
 
 /// One bone of a plant: a limb, branch or leaf spray turning about its pivot, or the trunk.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -131,6 +131,10 @@ pub struct PlantSpeciesWind {
     /// How far each bone sways about its bent pose, as a share of its bend (0: held still in
     /// the bent pose).
     pub sway: f32,
+    /// Share of the ground's snow the crown holds on the upper side of its sprays, cards,
+    /// branches and limbs (0: none). Dense conifers hold the most (spruce and fir about 1, pine
+    /// less), bare broadleaves only on their limbs (about 0.3), larch little.
+    pub snow_hold: f32,
 }
 
 impl Default for PlantSpeciesWind {
@@ -153,6 +157,7 @@ impl Default for PlantSpeciesWind {
             flutter_m: 0.02,
             gale_lean: 0.05,
             sway: 0.35,
+            snow_hold: 0.6,
         }
     }
 }
@@ -460,6 +465,7 @@ fn species_words(
             lean,
             sp.sway.max(0.0),
         ],
+        [sp.snow_hold.clamp(0.0, 1.0), 0.0, 0.0, 0.0],
     ]
 }
 

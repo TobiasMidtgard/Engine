@@ -82,6 +82,8 @@ struct ImpostorOut {
     @location(9) @interpolate(flat) ids: vec2<u32>,
     // Its dither (`n0.w`, `dither_keeps` in lib_frame.wgsl; 0: drawn whole).
     @location(10) @interpolate(flat) fade: f32,
+    // The snow a bone plant's species holds (`plant_snow_hold`; 0 for other meshes).
+    @location(11) @interpolate(flat) snow: f32,
 };
 
 fn impostor_corner(v: u32) -> vec2<f32> {
@@ -203,6 +205,7 @@ fn vs_impostor(input: ImpostorIn, @builtin(vertex_index) v: u32) -> ImpostorOut 
     out.moved = rows_apply(in.p0, in.p1, in.p2, vec4<f32>(sphere.xyz, 1.0)) - center;
     out.ids = in.extra.xy;
     out.fade = in.n0.w;
+    out.snow = select(0.0, plant_snow_hold(entry), entry != 0u);
     return out;
 }
 
@@ -281,6 +284,17 @@ fn fs_impostor(in: ImpostorOut) -> ImpostorColor {
     s.normal = surface.normal;
     s.smooth_normal = surface.normal;
     s.occlusion = surface.occlusion;
+    // Far crowns hold snow as their meshes do (mesh.wgsl): on the upper side, where the baked
+    // normal faces up.
+    if (in.snow > 0.0 && (mat.flags.x & 64u) != 0u) {
+        let fallen = saturate(surface_weather(surface.rel).z * SURFACE_SNOW_SCALE_M * 10.0);
+        let held = saturate(fallen * in.snow * smoothstep(-0.1, 0.5, surface.normal.y) * 1.6);
+        s.albedo = mix(s.albedo, vec3<f32>(0.9, 0.92, 0.95), held);
+        s.roughness = mix(s.roughness, 0.75, held);
+        s.subsurface = mix(s.subsurface, 0.3, held);
+        s.normal = normalize(mix(s.normal, vec3<f32>(0.0, 1.0, 0.0), held * 0.8));
+        s.smooth_normal = s.normal;
+    }
     var color: vec3<f32>;
     if ((mat.flags.x & 16u) != 0u) {
         color = s.albedo;

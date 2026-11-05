@@ -5851,3 +5851,74 @@ fn in_play_many_new_scripts_start_over_a_few_frames() {
     assert_eq!(instances(&app), 40, "the rest started at the next frames");
     assert!(errors(&mut app).is_empty(), "{:?}", errors(&mut app));
 }
+
+#[test]
+fn in_play_the_actor_vms_are_made_on_a_worker_and_parallel_scripts_wait_for_them() {
+    let folder = Folder::new();
+    folder.write("mote.luau", SWARM);
+    let mut app = app_with_vms(&folder.0, 3);
+    // The real clock, as in play.
+    app.world
+        .resource_mut::<Time>()
+        .set_source(TimeSource::Realtime);
+    let motes: Vec<Entity> = (0..12)
+        .map(|i| {
+            let e = spawn_script(&mut app, &format!("Mote {i}"), "mote");
+            app.world.get_mut::<Script>(e).unwrap().props =
+                json!({ "seed": i, "leader": format!("Mote {}", (i + 1) % 12) });
+            e
+        })
+        .collect();
+    app.update();
+    let placed = |app: &App| {
+        motes
+            .iter()
+            .filter(|&&e| app.world.get::<ScriptActor>(e).is_some())
+            .count()
+    };
+    assert_eq!(placed(&app), 0, "the first frame doesn't wait for the VMs");
+    assert!(app.world.resource::<ScriptRuntime>().actors.is_empty());
+    for _ in 0..2_000 {
+        if placed(&app) == motes.len() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        app.update();
+    }
+    assert_eq!(placed(&app), motes.len(), "every mote went to an actor VM");
+    app.update_n(5);
+    let used: std::collections::BTreeSet<u32> = motes
+        .iter()
+        .filter_map(|&e| app.world.get::<ScriptActor>(e).map(|a| a.0))
+        .collect();
+    assert_eq!(used.len(), 3, "every actor VM gets motes");
+    assert!(errors(&mut app).is_empty(), "{:?}", errors(&mut app));
+}
+
+#[test]
+fn in_play_a_class_is_read_for_its_board_with_a_vm_made_off_the_frame() {
+    let folder = Folder::new();
+    folder.write(
+        "lamp.luau",
+        "local Lamp = {}\nLamp.props = { watts = 40 }\nfunction Lamp:start() end\nreturn Lamp\n",
+    );
+    // A manual clock reads at once.
+    let mut app = app_in(&folder.0);
+    assert!(crate::props::ready(&mut app.world, "lamp.luau"));
+    // In play the first read waits for a VM made on a worker.
+    let mut app = app_in(&folder.0);
+    app.world
+        .resource_mut::<Time>()
+        .set_source(TimeSource::Realtime);
+    assert!(!crate::props::ready(&mut app.world, "lamp.luau"));
+    let mut waited = 0;
+    while !crate::props::ready(&mut app.world, "lamp.luau") {
+        assert!(waited < 2_000, "no VM came");
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        waited += 1;
+    }
+    let declared = crate::props::declared(&mut app.world, "lamp.luau").unwrap();
+    assert_eq!(declared.props.len(), 1);
+    // Read once, it answers at once from then on.
+    assert!(crate::props::ready(&mut app.world, "lamp.luau"));
+}

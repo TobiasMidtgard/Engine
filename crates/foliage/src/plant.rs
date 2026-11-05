@@ -462,6 +462,8 @@ pub struct FelledLog {
     pub rot_years: f32,
     /// Size of the tree when it fell (0..1).
     pub size: f32,
+    /// Thrown by the wind roots and all: its root plate stands up at the butt.
+    pub uprooted: bool,
 }
 
 impl Default for FelledLog {
@@ -471,6 +473,7 @@ impl Default for FelledLog {
             years: 0.0,
             rot_years: 12.0,
             size: 1.0,
+            uprooted: false,
         }
     }
 }
