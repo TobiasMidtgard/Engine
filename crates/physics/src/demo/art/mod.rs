@@ -142,15 +142,15 @@ type Meshing = (Vec<Handle<Mesh>>, Job<Vec<Mesh>>);
 /// Something a worker makes: `None` until it is done; `Err` if it panicked.
 type Slot<T> = Arc<Mutex<Option<std::thread::Result<T>>>>;
 
-struct Job<T>(Slot<T>);
+pub(crate) struct Job<T>(Slot<T>);
 
 impl<T> Job<T> {
-    fn done(&self) -> bool {
+    pub(crate) fn done(&self) -> bool {
         self.0.lock().is_some()
     }
 
     /// What it made (waiting for it); `None` if it panicked.
-    fn take(self) -> Option<T> {
+    pub(crate) fn take(self) -> Option<T> {
         loop {
             if let Some(r) = self.0.lock().take() {
                 return r.ok();
@@ -169,9 +169,7 @@ fn workers() -> Option<&'static Mutex<mpsc::Sender<Work>>> {
     POOL.get_or_init(|| {
         let (tx, rx) = mpsc::channel::<Work>();
         let rx = Arc::new(Mutex::new(rx));
-        let n = std::thread::available_parallelism()
-            .map_or(2, |n| n.get() / 2)
-            .max(1);
+        let n = worker_count();
         let mut started = 0;
         for i in 0..n {
             let rx = rx.clone();
@@ -193,8 +191,17 @@ fn workers() -> Option<&'static Mutex<mpsc::Sender<Work>>> {
     .as_ref()
 }
 
+/// The art workers: half the cores.
+fn worker_count() -> usize {
+    std::thread::available_parallelism()
+        .map_or(2, |n| n.get() / 2)
+        .max(1)
+}
+
 /// Run `make` on a worker, or here (`Err`) where there are none.
-fn on_worker<T: Send + 'static>(make: impl FnOnce() -> T + Send + 'static) -> Result<Job<T>, T> {
+pub(crate) fn on_worker<T: Send + 'static>(
+    make: impl FnOnce() -> T + Send + 'static,
+) -> Result<Job<T>, T> {
     let Some(pool) = workers() else {
         return Err(make());
     };
