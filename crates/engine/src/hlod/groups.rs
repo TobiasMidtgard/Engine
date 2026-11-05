@@ -254,55 +254,65 @@ fn build(world: &mut World, g: usize, configs: &[ProxyConfig], settings: &HlodSe
         group.frame = frame;
         group.radius = radius;
     }
-    let disk = versioned(world, g, configs);
-    if let Some((key, version)) = &disk
-        && let Ok(mesh) = read_mesh(&cache_path(settings, key, *version))
-    {
-        store(world, g, mesh);
-        return;
-    }
-    // Each member proxy as one source, placed in the group's space.
+    let disk =
+        versioned(world, g, configs).map(|(key, version)| cache_path(settings, &key, version));
+    // The members' meshes go to the worker, which takes the merge from disk when it is kept
+    // there, else places each proxy in the group's space and merges them: reading and copying
+    // them on the frame was 82-166 ms on the session VM as the route started.
     let inverse = frame.rotation.inverse();
-    let mut sources = Vec::new();
-    let mut instances = Vec::new();
-    {
+    let kept = disk.as_ref().is_some_and(|p| p.exists());
+    let parts: Vec<(Mesh, Mat4)> = if kept {
+        Vec::new()
+    } else {
         let assets = world.resource::<Assets<Mesh>>();
-        for (f, m) in &placed {
-            let Some(mesh) = assets.get(*m) else {
-                continue;
-            };
-            sources.push(Source {
-                positions: mesh
-                    .vertices
-                    .iter()
-                    .map(|v| Vec3::from(v.position))
-                    .collect(),
-                colors: mesh
-                    .vertices
-                    .iter()
-                    .map(|v| Vec3::new(v.color[0], v.color[1], v.color[2]))
-                    .collect(),
-                indices: mesh.indices.clone(),
-            });
-            instances.push(Instance {
-                source: sources.len() - 1,
-                matrix: Mat4::from_scale_rotation_translation(
+        placed
+            .iter()
+            .filter_map(|(f, m)| {
+                let mesh = assets.get(*m)?.clone();
+                let matrix = Mat4::from_scale_rotation_translation(
                     f.scale,
                     inverse * f.rotation,
                     inverse * (f.translation - frame.translation).as_vec3(),
-                ),
-                color: Vec4::ONE,
-            });
-        }
-    }
+                );
+                Some((mesh, matrix))
+            })
+            .collect()
+    };
     let budget = settings.group_triangles;
     let label = format!("{} cells", members.len());
-    let disk = disk.map(|(key, version)| cache_path(settings, &key, version));
     let (tx, rx) = mpsc::channel();
     let spawned = std::thread::Builder::new()
         .name("hlod group".into())
         .spawn(move || {
+            if let Some(path) = &disk
+                && let Ok(mesh) = read_mesh(path)
+            {
+                let _ = tx.send(Some(mesh));
+                return;
+            }
             let t = Instant::now();
+            let mut sources = Vec::with_capacity(parts.len());
+            let mut instances = Vec::with_capacity(parts.len());
+            for (mesh, matrix) in parts {
+                sources.push(Source {
+                    positions: mesh
+                        .vertices
+                        .iter()
+                        .map(|v| Vec3::from(v.position))
+                        .collect(),
+                    colors: mesh
+                        .vertices
+                        .iter()
+                        .map(|v| Vec3::new(v.color[0], v.color[1], v.color[2]))
+                        .collect(),
+                    indices: mesh.indices,
+                });
+                instances.push(Instance {
+                    source: sources.len() - 1,
+                    matrix,
+                    color: Vec4::ONE,
+                });
+            }
             let mesh = cluster(&sources, &instances, budget);
             if let Some((mesh, grid)) = &mesh {
                 engine_core::log::info!(
