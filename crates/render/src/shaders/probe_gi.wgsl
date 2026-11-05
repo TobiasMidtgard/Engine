@@ -296,7 +296,7 @@ fn cs_trace(@builtin(global_invocation_id) id: vec3<u32>) {
         // The sky and the ground beyond, blurred so the sun's disc doesn't flicker in.
         // Under a canopy, seen through its leaves, which glow in what they hold back.
         let through = canopy_ray_transmittance(origin, dir);
-        let sky = sample_env_rough(dir, 0.6) * through + canopy_leaf_radiance() * (1.0 - through);
+        let sky = sample_env_rough(dir, 0.6) * through + canopy_leaf_radiance(through) * (1.0 - through);
         rays[id.x] = vec4<f32>(sky * PROBE_GI_SCALE, t_max);
         return;
     }
@@ -330,13 +330,18 @@ fn shade_hit(origin: vec3<f32>, dir: vec3<f32>, hit: Hit, spacing: f32) -> vec4<
     let p = origin + dir * hit.t;
     let lift = p + n * max(0.002, hit.t * 1e-4);
     var light = vec3<f32>(0.0);
-    // Sun, through a shadow ray.
+    // Sun, through a shadow ray, and through the leaves above: leaf cards are not in the
+    // probes' scene when the canopy map is on, so without them every hit under the crowns read
+    // as sunlit and lit the trunks around it with sunny grass (most of their light, and
+    // green). The leaves let through the share the canopy map gives the sun's direction, as
+    // the probes' missed rays see the sky.
     let l = frame.sun_dir.xyz;
     let n_dot_l = dot(n, l);
     if (n_dot_l > 0.0 && dot(frame.sun_color.rgb, frame.sun_color.rgb) > 0.0) {
         if (trace_scene(lift, l, spacing * 256.0, true).instance == 0xffffffffu
             && sky_volume_wall(lift, l, spacing * 256.0) == NO_HIT) {
-            light += frame.sun_color.rgb * sun_transmittance(p) * cloud_shadow(p) * n_dot_l;
+            light += frame.sun_color.rgb * sun_transmittance(p) * cloud_shadow(p) * n_dot_l
+                * canopy_ray_transmittance(lift, l);
         }
     }
     // Point lights, the nearest few through shadow rays.
