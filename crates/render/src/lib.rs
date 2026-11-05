@@ -123,9 +123,9 @@ pub use cloud_shadows::{
 };
 pub use components::{
     AmbientLight, BoxFace, Camera, DirectionalLight, DitherFade, Exposure, ExtraView, FogShape,
-    FogVolume, MaterialRef, MaxDrawDistance, MeshRef, MeshRenderer, NoMeshLod, NoVirtualGeometry,
-    PointLight, Projection, ResolvedMesh, ShadowOnly, ShadowTexelRange, SkyLightVolume, ViewTarget,
-    Viewport,
+    FogVolume, InstanceRow, MaterialRef, MaxDrawDistance, MeshInstances, MeshRef, MeshRenderer,
+    NoMeshLod, NoVirtualGeometry, PointLight, Projection, ResolvedMesh, ShadowOnly,
+    ShadowTexelRange, SkyLightVolume, ViewTarget, Viewport,
 };
 pub use depth_of_field::DepthOfField;
 pub use features::{
@@ -180,14 +180,14 @@ pub mod prelude {
         AlphaMode, AmbientLight, AntiAliasing, Atmosphere, Billboard, BoxFace, Camera,
         DepthOfField, DirectionalLight, Displacement, DisplacementSource, DitherFade, Exposure,
         ExtraView, FogSettings, FogShape, FogVolume, GltfScene, GltfSceneSpawner, GrassBender,
-        GrassField, GrassStyle, Image, MaterialPreset, MaterialRef, MaxDrawDistance, Mesh, MeshRef,
-        MeshRenderer, MotionBlur, NoMeshLod, NoVirtualGeometry, Parallax, PixelPerfect, PixelSnap,
-        PointLight, Portal, Projection, RenderAppExt, RenderFeature, RenderPhase, RenderPlugin,
-        RenderSettings, Screenshots, ShadowOnly, ShadowTexelRange, Shape, SkyLightVolume, Sprite,
-        SpriteAlpha, SpriteAnimation, SpriteAnimationMode, SpriteAtlas, SpriteFilter,
-        StandardMaterial, StoneKind, TextureCompression, TextureMapping, TileMap, TileSource,
-        Tonemapper, ViewTarget, Viewport, VirtualTextures, VolumetricQuality, WallStone,
-        spawn_gltf_scene, spawn_gltf_scene_deferred,
+        GrassField, GrassStyle, Image, InstanceRow, MaterialPreset, MaterialRef, MaxDrawDistance,
+        Mesh, MeshInstances, MeshRef, MeshRenderer, MotionBlur, NoMeshLod, NoVirtualGeometry,
+        Parallax, PixelPerfect, PixelSnap, PointLight, Portal, Projection, RenderAppExt,
+        RenderFeature, RenderPhase, RenderPlugin, RenderSettings, Screenshots, ShadowOnly,
+        ShadowTexelRange, Shape, SkyLightVolume, Sprite, SpriteAlpha, SpriteAnimation,
+        SpriteAnimationMode, SpriteAtlas, SpriteFilter, StandardMaterial, StoneKind,
+        TextureCompression, TextureMapping, TileMap, TileSource, Tonemapper, ViewTarget, Viewport,
+        VirtualTextures, VolumetricQuality, WallStone, spawn_gltf_scene, spawn_gltf_scene_deferred,
     };
 }
 

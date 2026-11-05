@@ -355,14 +355,20 @@ type GatherQuery = (
 /// GI rays the same way.
 pub const MIN_INSTANCE_RADIUS_M: f64 = 0.3;
 
-/// Skinned meshes are left out (the rays would see their bind pose), and shadow-only stand-ins.
-type GatherFilter = (Without<crate::GpuSkin>, Without<crate::ShadowOnly>);
+/// Skinned meshes are left out (the rays would see their bind pose), shadow-only stand-ins, and
+/// `MeshInstances` regions (small plants, too small for the rays).
+type GatherFilter = (
+    Without<crate::GpuSkin>,
+    Without<crate::ShadowOnly>,
+    Without<crate::MeshInstances>,
+);
 /// [`GatherFilter`]'s entities whose transform, renderer or resolved mesh changed: the change
 /// pass reads only these (a walk of every entity's change ticks took 0.6-2.4 ms a frame at the
 /// lake on Tobias's PC, ~90k mesh entities).
 type ChangeFilter = (
     Without<crate::GpuSkin>,
     Without<crate::ShadowOnly>,
+    Without<crate::MeshInstances>,
     Or<(
         Changed<GlobalTransform>,
         Changed<crate::MeshRenderer>,
