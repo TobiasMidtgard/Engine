@@ -659,6 +659,9 @@ impl Cull<'_> {
         }
         let center = (hot.center - self.p.view.origin).as_vec3();
         let radius = hot.radius;
+        // A bone plant's bounds grow by how far it can bend (culling); its size on screen, which
+        // picks levels and impostors, is its mesh's.
+        let size_radius = (radius - mesh.wind_reach * hot.scale).max(radius * 0.25);
         let distance = center.length();
         if distance - radius > hot.max_distance || hot.dither.abs() >= 1.0 {
             self.unseen(hot);
@@ -669,7 +672,8 @@ impl Cull<'_> {
             .p
             .pixel_meters
             .map(|k| k * (distance - radius).max(self.p.view.near));
-        let big_enough = meters_per_pixel.is_none_or(|m| 2.0 * radius >= self.p.min_pixels * m);
+        let big_enough =
+            meters_per_pixel.is_none_or(|m| 2.0 * size_radius >= self.p.min_pixels * m);
         let visible = big_enough
             && hot.flags & mesh_scene::SHADOW_ONLY == 0
             && self.p.view.frustum.intersects_sphere(center, radius);
@@ -742,7 +746,7 @@ impl Cull<'_> {
         // Size on screen in units of the impostor threshold: from 1 down to `IMPOSTOR_FADE`
         // both are drawn (the cross-fade), under that the impostor alone.
         let size = meters_per_pixel.map_or(f32::INFINITY, |m| {
-            2.0 * radius / (self.p.impostor_pixels * m).max(f32::MIN_POSITIVE)
+            2.0 * size_radius / (self.p.impostor_pixels * m).max(f32::MIN_POSITIVE)
         });
         let impostor_size = size < 1.0;
         let impostor = self
@@ -3469,9 +3473,10 @@ impl RenderFeature for MeshFeature {
                 let s = item.slot as usize;
                 let cold = &scene.cold[s];
                 let mesh = &mesh_frames[scene.hot[s].mesh as usize];
-                // An impostor's layer, or a bone plant's wind table entry in bits 16-31.
+                // An impostor's layer (bits 0-15), and a bone plant's wind table entry in bits
+                // 16-31 (its impostor leans with its trunk).
                 let impostor = if n & AS_IMPOSTOR != 0 {
-                    item.impostor
+                    item.impostor | mesh.wind << 16
                 } else {
                     mesh.wind << 16
                 };

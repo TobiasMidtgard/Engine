@@ -8,8 +8,9 @@ use std::sync::Arc;
 use engine_core::prelude::*;
 use engine_render::prelude::*;
 use engine_render::{
-    PlantBone, PlantSkeleton, PlantSpeciesWind, PlantWindMesh, PlantWindMeshes, PlantWindSpecies,
-    RenderDisabled, capture_now, pack_plant_vertex,
+    NoMeshLod, PlantBone, PlantSkeleton, PlantSpeciesWind, PlantWindMesh, PlantWindMeshes,
+    PlantWindSpecies, RenderDisabled, RenderStats, TextureCompression, capture_now,
+    pack_plant_vertex,
 };
 use image::RgbaImage;
 
@@ -62,9 +63,47 @@ fn skeleton() -> PlantSkeleton {
     }
 }
 
+/// A 6 m post of 24 stacked blocks (288 triangles: enough to be drawn as an impostor far
+/// away), all riding the trunk bone.
+fn tall_post() -> Mesh {
+    let mut out = Mesh::default();
+    for i in 0..24 {
+        let mut block = Shape::Cuboid {
+            size: [0.4, 0.25, 0.4],
+        }
+        .mesh();
+        block.transform(&Mat4::from_translation(Vec3::new(
+            0.0,
+            0.125 + 0.25 * i as f32,
+            0.0,
+        )));
+        for v in &mut block.vertices {
+            v.color = [
+                1.0,
+                1.0,
+                1.0,
+                pack_plant_vertex(0, v.position[1] / 6.0, 0.0, false),
+            ];
+        }
+        out.merge(&block);
+    }
+    out
+}
+
 /// The post seen from the side in a steady wind of `speed` m/s along +x (no gust fronts), as
 /// a bone plant of species `species`.
 fn render_tree(name: &str, speed: f32, species: PlantSpeciesWind) -> Option<RgbaImage> {
+    render_tree_as(name, speed, species, false)
+}
+
+/// [`render_tree`], drawn as its impostor when `impostor` (the tall post, any size counting as
+/// far).
+fn render_tree_as(
+    name: &str,
+    speed: f32,
+    species: PlantSpeciesWind,
+    impostor: bool,
+) -> Option<RgbaImage> {
     engine_core::log::init("error");
     let mut app = App::new();
     app.world.resource_mut::<EngineConfig>().headless = true;
@@ -79,6 +118,10 @@ fn render_tree(name: &str, speed: f32, species: PlantSpeciesWind) -> Option<Rgba
         s.anti_aliasing = AntiAliasing::None;
         s.film_grain = 0.0;
         s.bloom_intensity = 0.0;
+        if impostor {
+            s.impostor_pixels = 4000.0;
+            s.texture_compression = TextureCompression::Off;
+        }
     }
     app.world.insert_resource(engine_world::WindField {
         prevailing: Vec3::new(speed, 0.0, 0.0),
@@ -88,7 +131,7 @@ fn render_tree(name: &str, speed: f32, species: PlantSpeciesWind) -> Option<Rgba
     let handle = app
         .world
         .resource_mut::<engine_assets::Assets<Mesh>>()
-        .add(post());
+        .add(if impostor { tall_post() } else { post() });
     let mut meshes = PlantWindMeshes::default();
     meshes.insert(
         handle,
@@ -117,11 +160,30 @@ fn render_tree(name: &str, speed: f32, species: PlantSpeciesWind) -> Option<Rgba
     let mut material = StandardMaterial::color(0.8, 0.2, 0.1);
     // Bone plants keep a sway so the passes treat them as moving; its value is unused.
     material.wind_sway = 1.0;
-    w.spawn((Transform::default(), MeshRenderer::new(handle, material)));
+    let tree = w
+        .spawn((Transform::default(), MeshRenderer::new(handle, material)))
+        .id();
+    if impostor {
+        w.entity_mut(tree).insert(NoMeshLod);
+    }
     app.update_n(3);
     if let Some(d) = app.world.get_resource::<RenderDisabled>() {
         eprintln!("skipping: no GPU ({})", d.0);
         return None;
+    }
+    if impostor {
+        // Until the impostor is baked and drawn alone (a quad's two triangles).
+        let start = std::time::Instant::now();
+        while start.elapsed().as_secs() < 120 && app.world.resource::<RenderStats>().triangles > 100
+        {
+            app.update();
+        }
+        let tris = app.world.resource::<RenderStats>().triangles;
+        assert!(
+            tris <= 100,
+            "the post should be an impostor: {tris} triangles"
+        );
+        app.update_n(2);
     }
     let path =
         std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("plant_bones_{name}.png"));
@@ -217,5 +279,34 @@ fn the_trunk_leans_with_the_wind_and_its_foot_stays() {
     assert!(
         (foot_gale - foot_still).abs() < 1.0,
         "its foot stays: {foot_still} -> {foot_gale}"
+    );
+}
+
+#[test]
+fn far_bone_trees_lean_as_impostors() {
+    let species = PlantSpeciesWind {
+        bend_deg: [0.0, 0.0, 0.0],
+        gale_lean: 0.15,
+        ..calm_species()
+    };
+    let Some(still) = render_tree_as("impostor_still", 0.0, species, true) else {
+        return;
+    };
+    let gale = render_tree_as("impostor_gale", 15.0, species, true).expect("gpu");
+    let (top_still, foot_still) = top_and_foot(&still);
+    let (top_gale, foot_gale) = top_and_foot(&gale);
+    eprintln!(
+        "impostor top {top_still:.1} -> {top_gale:.1} px, foot {foot_still:.1} -> {foot_gale:.1} px"
+    );
+    // The impostor tilts about the trunk's root so its top moves as the mesh's does (0.9 m,
+    // some 17 px). Tilted whole rather than bent, its foot moves a little (the lowest meter
+    // by 8.5 degrees, a pixel or two).
+    assert!(
+        top_gale - top_still > 10.0,
+        "the far tree should lean downwind: {top_still} -> {top_gale}"
+    );
+    assert!(
+        (foot_gale - foot_still).abs() < (top_gale - top_still) * 0.2,
+        "its foot stays nearly put: {foot_still} -> {foot_gale}"
     );
 }
