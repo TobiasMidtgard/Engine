@@ -212,14 +212,24 @@ pub fn sync_demos(world: &mut World) {
     }
 }
 
-/// Run a demo's spawn function and return the root entities it created.
+/// Run a demo's spawn function and return the root entities it created. Its art is made
+/// here and now, not on a worker (`OffFrameSettings::inline`), so everything it spawns is in
+/// the world by the diff: a demo whose props wait for art built off the frame (the softbody
+/// yard) would otherwise spawn them later, untagged, and leave them behind when moved.
 fn spawn_and_collect(world: &mut World, spawn: SpawnFn, at: DVec3) -> Vec<Entity> {
+    use engine::core::off_frame::OffFrameSettings;
     let before: HashSet<Entity> = world.iter_entities().map(|e| e.id()).collect();
+    let inline = world
+        .get_resource_mut::<OffFrameSettings>()
+        .map(|mut s| std::mem::replace(&mut s.inline, true));
     {
         let mut commands = world.commands();
         spawn(&mut commands, at);
     }
     world.flush();
+    if let (Some(was), Some(mut s)) = (inline, world.get_resource_mut::<OffFrameSettings>()) {
+        s.inline = was;
+    }
     let mut roots: Vec<Entity> = world
         .iter_entities()
         // Resources and message queues are entities too; only take things in the world.

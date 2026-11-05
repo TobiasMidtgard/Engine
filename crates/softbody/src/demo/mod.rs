@@ -369,14 +369,20 @@ pub const CURTAIN_BURNER: DVec3 = DVec3::new(-9.1, 0.0, 6.25);
 
 /// Build the whole yard around `origin` (ground level at `origin.y`).
 pub fn spawn_demo(commands: &mut Commands, origin: DVec3) {
-    let c = origin;
-    commands.spawn((
-        Name::new("Yard anchor"),
-        at(c),
-        crate::systems::SurfaceAnchor::default(),
-    ));
-    // Procedural textures and materials of the props (made once per world).
-    commands.queue(kit::ensure_materials);
+    let anchor = commands
+        .spawn((
+            Name::new("Yard anchor"),
+            at(origin),
+            crate::systems::SurfaceAnchor::default(),
+        ))
+        .id();
+    // The props wait for their procedural textures and materials (made once per world, on
+    // a worker), then stand around the anchor.
+    kit::with_materials(commands, anchor, place_yard);
+}
+
+/// The yard's props and soft bodies around `c`.
+fn place_yard(commands: &mut Commands, c: DVec3) {
     flags(commands, c);
     flag_field(commands, c + DVec3::new(19.0, 0.0, -16.0));
     curtains(commands, c + DVec3::new(-12.0, 0.0, 6.0));
