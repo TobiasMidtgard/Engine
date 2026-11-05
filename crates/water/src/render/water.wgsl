@@ -1894,7 +1894,10 @@ fn shade_stream(in: FlowOut, front: bool) -> vec4<f32> {
     let running = smoothstep(0.3, 0.8, speed);
     var white = boil.x * (1.0 - running);
     if (running > 0.0) {
-        white += plunge_trail(in.rel, in.vel) * running;
+        // Swept off the boil it rides the current in lumps with dark water between them, as
+        // the stream's own white water does: a flood's big boil swept one flat sheet of froth
+        // down its whole channel.
+        white += min(plunge_trail(in.rel, in.vel), 1.0) * running * mix(0.05, 0.9, lumps);
     }
     foam += rp.y * 1.2 + white;
     // A creek's steps: the jump at each one's foot boils white, torn into lumps carried off
