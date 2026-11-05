@@ -11,6 +11,7 @@ pub mod demo;
 pub mod detail;
 pub mod drops;
 pub mod flow;
+pub mod freshet;
 pub mod interact;
 pub mod mirror;
 pub mod mist;
@@ -89,6 +90,7 @@ impl Plugin for WaterPlugin {
             .init_resource::<creeks::CreekRibbons>()
             .init_resource::<creek_sim::CreekSims>()
             .init_resource::<creek_stones::CreekStones>()
+            .init_resource::<freshet::Freshet>()
             .register_resource::<WaterSettings>(
                 "Water quality and behavior: ripple grid size (cells, meters), ripple speed (m/s) \
                  and damping (1/s), foam life (s), raindrops per m² per mm/h, puddles on/off, \
@@ -171,6 +173,8 @@ impl Plugin for WaterPlugin {
                     boat::boat_bodies_system,
                     mist::falls_mist_system,
                     (
+                        freshet::freshet_system,
+                        freshet::freshet_regions_system,
                         creek_stones::creek_stones_system,
                         creek_sim::creek_sim_system,
                         creeks::creek_ribbons_system,

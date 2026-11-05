@@ -96,7 +96,7 @@ struct FlowGpu {
     dims: vec4<f32>,    // cells x, z, cos and sin of the grid's yaw
     absorb: vec4<f32>,
     scatter: vec4<f32>,
-    look: vec4<f32>,
+    look: vec4<f32>,    // foam, caustics, refraction, spate (0 usual .. 1 a stream in flood, crate::freshet)
 };
 @group(2) @binding(0) var<uniform> flow: FlowGpu;
 @group(2) @binding(1) var flow_tex: texture_2d<f32>;        // r surface (m above base), g depth, b vel x, a vel z
@@ -1708,7 +1708,9 @@ fn shade_stream(in: FlowOut, front: bool) -> vec4<f32> {
     let big = 2.5;
     var fp_big = fp;
     fp_big.across = fp.across / big;
-    let lively = (1.0 + speed * 0.5) * gusts(wp - shift * 0.5, wind_dir, 3.0 + speed);
+    // A stream in spate runs rough and confused: bigger boils, standing waves breaking white.
+    let spate = saturate(flow.look.w);
+    let lively = (1.0 + speed * 0.5) * gusts(wp - shift * 0.5, wind_dir, 3.0 + speed) * (1.0 + 1.5 * spate);
     let d0 = detail_at((wp - shift * phase0) / big, water.g.detail.z, turn, fp_big);
     let d1 = detail_at((wp - shift * phase1) / big + vec2<f32>(4.7, 1.3), water.g.detail.z, turn, fp_big);
     let wgt = abs(phase0 - 0.5) * 2.0;
@@ -1726,7 +1728,7 @@ fn shade_stream(in: FlowOut, front: bool) -> vec4<f32> {
     // Fast shallow water heaps up into standing waves over the stones of its bed, and breaks
     // white on their crests: chop big enough to see from afar, so rapids never mirror the sky
     // as a smooth sheet. The waves stand where the stones are, trembling.
-    let rapid = smoothstep(0.8, 2.6, speed) * saturate(in.depth * 20.0);
+    let rapid = saturate(smoothstep(0.8, 2.6, speed) + 0.7 * spate) * saturate(in.depth * 20.0);
     var crests = 0.0;
     if (rapid > 0.0) {
         // In fixed world axes: turned to the local current (which turns from place to place,
