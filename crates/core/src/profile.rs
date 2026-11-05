@@ -73,13 +73,23 @@ pub(crate) fn frame_done() {
     trace::frame_done();
 }
 
-/// A frame stuck this long is reported as a hang.
+/// A frame stuck this long is reported as a hang. `ENGINE_HANG_MS` sets another (700 reports
+/// what every thread was inside during a long hitch, not only a hang).
 const HANG_SECS: u64 = 20;
+
+fn hang_after() -> Duration {
+    std::env::var("ENGINE_HANG_MS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .map_or(Duration::from_secs(HANG_SECS), Duration::from_millis)
+}
 /// While it stays stuck, the report repeats this often.
 const HANG_REPEAT_SECS: u64 = 60;
 
 /// One thread's open (entered, not yet exited) timed spans, innermost last.
-type OpenSpans = Arc<Mutex<Vec<(String, Instant)>>>;
+/// Each with its span's id: a span entered on several threads at once (a system's span
+/// re-entered by its own parallel tasks) is timed per thread, from that thread's own entry.
+type OpenSpans = Arc<Mutex<Vec<(String, Instant, u64)>>>;
 
 /// Every thread that has entered a timed span, with its open spans.
 fn threads() -> &'static Mutex<Vec<(String, OpenSpans)>> {
@@ -108,10 +118,12 @@ fn start_watchdog() {
     let spawned = std::thread::Builder::new()
         .name("engine hang watchdog".into())
         .spawn(|| {
+            let after = hang_after();
+            let poll = (after / 4).clamp(Duration::from_millis(50), Duration::from_secs(1));
             let mut last = (FRAMES.load(Ordering::Relaxed), Instant::now());
             let mut reported: Option<Instant> = None;
             loop {
-                std::thread::sleep(Duration::from_secs(1));
+                std::thread::sleep(poll);
                 let frames = FRAMES.load(Ordering::Relaxed);
                 if frames != last.0 {
                     last = (frames, Instant::now());
@@ -120,7 +132,7 @@ fn start_watchdog() {
                 }
                 let stuck = last.1.elapsed();
                 let due = match reported {
-                    None => stuck.as_secs() >= HANG_SECS,
+                    None => stuck >= after,
                     Some(at) => at.elapsed().as_secs() >= HANG_REPEAT_SECS,
                 };
                 if due {
@@ -137,7 +149,7 @@ fn start_watchdog() {
 /// "Frame N has not finished for S s" and each busy thread's open spans, outermost first.
 fn hang_report(frames: u64, stuck: Duration) -> String {
     let mut out = format!(
-        "frame {} has not finished for {:.0} s (a hang); open spans per thread:",
+        "frame {} has not finished for {:.1} s; open spans per thread:",
         frames + 1,
         stuck.as_secs_f64()
     );
@@ -149,7 +161,7 @@ fn hang_report(frames: u64, stuck: Duration) -> String {
         }
         let spans: Vec<String> = open
             .iter()
-            .map(|(key, at)| {
+            .map(|(key, at, _)| {
                 format!(
                     "{} ({:.1} s)",
                     key.trim_start_matches(INNER),
@@ -269,8 +281,6 @@ impl<S> Filter<S> for ProfileFilter {
 
 /// The key a span's time is filed under, kept in the span's extensions.
 struct Key(String);
-/// When the span was entered.
-struct Entered(Instant);
 
 struct NameVisitor(Option<String>);
 
@@ -327,9 +337,8 @@ where
                 if is_system(&key) {
                     system_moved(&key, true, now);
                 }
-                OPEN.with(|open| open.lock().push((key, now)));
+                OPEN.with(|open| open.lock().push((key, now, id.into_u64())));
             }
-            ext.replace(Entered(now));
         }
     }
 
@@ -338,19 +347,21 @@ where
             return;
         };
         let mut ext = span.extensions_mut();
-        let Some(Entered(start)) = ext.remove::<Entered>() else {
-            return;
-        };
-        let elapsed = start.elapsed();
         let Some(Key(key)) = ext.get_mut::<Key>() else {
             return;
         };
-        OPEN.with(|open| {
+        // This thread's own entry: one span stored per span (as before) was overwritten when
+        // another thread entered it meanwhile, so the first exit took the other's start and
+        // the second found none and left its entry open for good.
+        let id = id.into_u64();
+        let Some(start) = OPEN.with(|open| {
             let mut open = open.lock();
-            if let Some(i) = open.iter().rposition(|(k, _)| k == key) {
-                open.remove(i);
-            }
-        });
+            let i = open.iter().rposition(|(_, _, s)| *s == id)?;
+            Some(open.remove(i).1)
+        }) else {
+            return;
+        };
+        let elapsed = start.elapsed();
         let mut totals = if is_system(key) {
             system_moved(key, false, start + elapsed);
             let mut totals = totals().lock();
@@ -1309,6 +1320,49 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_span_entered_on_two_threads_at_once_closes_on_both() {
+        use tracing_subscriber::layer::SubscriberExt;
+        let subscriber = std::sync::Arc::new(tracing_subscriber::registry().with(ProfileLayer));
+        let span = tracing::subscriber::with_default(subscriber.clone(), || {
+            tracing::info_span!("render_step", name = "shared across threads")
+        });
+        let (a_in, a_wait) = std::sync::mpsc::channel();
+        let (b_done, b_wait) = std::sync::mpsc::channel::<()>();
+        // This thread's entries for the span still open (the old code left the first
+        // thread's open for good: its exit found the other thread's start gone).
+        let open_after = |_: std::sync::Arc<_>, _: tracing::Span| {
+            OPEN.with(|o| o.lock().iter().filter(|e| e.0.contains("shared")).count())
+        };
+        let (s1, sp1) = (subscriber.clone(), span.clone());
+        let first = std::thread::spawn(move || {
+            tracing::subscriber::with_default(s1.clone(), || {
+                let entered = sp1.enter();
+                a_in.send(()).unwrap();
+                b_wait.recv().unwrap();
+                drop(entered);
+            });
+            open_after(s1, sp1)
+        });
+        a_wait.recv().unwrap();
+        let (s2, sp2) = (subscriber.clone(), span.clone());
+        let second = std::thread::spawn(move || {
+            tracing::subscriber::with_default(s2.clone(), || drop(sp2.enter()));
+            open_after(s2, sp2)
+        });
+        assert_eq!(
+            second.join().unwrap(),
+            0,
+            "the second thread's entry closed"
+        );
+        b_done.send(()).unwrap();
+        assert_eq!(
+            first.join().unwrap(),
+            0,
+            "the first thread's entry closed too"
+        );
+    }
+
+    #[test]
     fn hang_reports_name_each_threads_open_spans() {
         use tracing_subscriber::layer::SubscriberExt;
         let (entered, wait) = std::sync::mpsc::channel();
@@ -1330,7 +1384,7 @@ mod tests {
         release.send(()).unwrap();
         worker.join().unwrap();
         assert!(
-            report.starts_with("frame 42 has not finished for 25 s"),
+            report.starts_with("frame 42 has not finished for 25.0 s"),
             "{report}"
         );
         let line = report
