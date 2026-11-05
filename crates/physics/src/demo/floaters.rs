@@ -192,7 +192,7 @@ fn build(y: &mut Yard) {
     // a touch: it topples, and a half-density square beam floats on a corner (diamond-wise),
     // like the cube.
     let post_half = Vec3::new(0.125, 1.2, 0.125);
-    let parts = y.parts("float/post", [Mat::Timber], || {
+    let parts = y.parts("float/post", [Mat::Timber], move || {
         [timber::timber_beam(post_half, 3)]
     });
     let c = Collider::cuboid(post_half)
@@ -219,7 +219,7 @@ fn build(y: &mut Yard) {
             })
             .collect(),
     );
-    let parts = y.parts("float/raft", [Mat::Timber, Mat::Steel], || {
+    let parts = y.parts("float/raft", [Mat::Timber, Mat::Steel], move || {
         let r = timber::raft(beam, 5, 0.01, 0.8);
         [r.timber, r.steel]
     });
@@ -247,7 +247,7 @@ fn build(y: &mut Yard) {
 
     // A 2 m plank thrown in on its edge lands flat.
     let plank_half = Vec3::new(1.0, 0.03, 0.15);
-    let parts = y.parts("float/plank", [Mat::Timber], || {
+    let parts = y.parts("float/plank", [Mat::Timber], move || {
         [timber::timber_beam(plank_half, 11)]
     });
     let c = Collider::cuboid(plank_half)
@@ -279,7 +279,7 @@ fn build(y: &mut Yard) {
         density: 20.0 / (std::f32::consts::PI * r * r * 2.0 * hh),
         ..Default::default()
     };
-    let parts = y.parts("drum/2f5f9e", [Mat::Drum(0x2f5f9e)], || {
+    let parts = y.parts("drum/2f5f9e", [Mat::Drum(0x2f5f9e)], move || {
         [props::steel_drum(r, hh)]
     });
     let at = DVec3::new(COLUMNS[2], hh as f64 + DROP, FRONT);
@@ -287,7 +287,7 @@ fn build(y: &mut Yard) {
     y.name(drum, "Float test: drum");
 
     // A 50 cm steel ball sinks.
-    let parts = y.parts("steel_ball/0.25", [Mat::Steel], || [props::ball(0.25)]);
+    let parts = y.parts("steel_ball/0.25", [Mat::Steel], move || [props::ball(0.25)]);
     let steel = y.steel_ball(DVec3::new(COLUMNS[3], 0.25 + DROP, FRONT), 0.25, parts);
     y.name(steel, "Float test: steel ball");
 }

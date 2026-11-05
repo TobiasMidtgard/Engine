@@ -170,7 +170,7 @@ pub(super) fn jenga(y: &mut Yard, base: DVec3) {
                 half.z,
                 seed % 4
             );
-            let parts = y.parts(&key, [Mat::Oak], || [art::block(half, seed % 4)]);
+            let parts = y.parts(&key, [Mat::Oak], move || [art::block(half, seed % 4)]);
             let e = y.body(base + at.as_dvec3(), Quat::IDENTITY, c, parts);
             y.name(e, &format!("Jenga block {level} {slot}"));
         }
@@ -184,12 +184,12 @@ pub(super) fn jenga(y: &mut Yard, base: DVec3) {
             y.metal,
         );
     }
-    let frame = y.parts("jenga_rig", [Mat::Yellow], || [art::rig()]);
+    let frame = y.parts("jenga_rig", [Mat::Yellow], move || [art::rig()]);
     y.scenery(base, Quat::IDENTITY, frame);
 
     // The rod: a capsule along its body's Y, turned to lie along X.
     let along_x = Quat::from_rotation_z(-std::f32::consts::FRAC_PI_2);
-    let parts = y.parts("jenga_rod", [Mat::Steel, Mat::Yellow], || {
+    let parts = y.parts("jenga_rod", [Mat::Steel, Mat::Yellow], move || {
         let r = art::rod();
         [r.steel, r.carriage]
     });

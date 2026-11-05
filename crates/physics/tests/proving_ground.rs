@@ -958,3 +958,54 @@ fn stations_nobody_looks_at_pause_and_go_on_when_looked_at() {
         "the seesaw was rebuilt instead of going on"
     );
 }
+
+/// Under the wall clock a slow frame is followed by several catch-up steps; the stations are
+/// still built one a frame then, not one a step (the yard arriving at the village built
+/// several in one frame: 206 ms on the route, VM). A manual clock keeps one a step.
+#[test]
+fn stations_are_built_one_a_frame_on_the_wall_clock() {
+    for manual in [false, true] {
+        let mut app = App::new();
+        app.add_plugins(WorldPlugin);
+        app.add_plugins(PhysicsPlugin);
+        // As in the game: with meshes to make, stations are built over several frames.
+        app.world
+            .insert_resource(engine_assets::Assets::<engine_render::Mesh>::default());
+        app.world
+            .insert_resource(engine_assets::Assets::<engine_render::StandardMaterial>::default());
+        app.world
+            .insert_resource(engine_assets::Assets::<engine_render::Image>::default());
+        app.world.resource_mut::<FixedTime>().set_hz(60.0);
+        if manual {
+            // Three steps a frame.
+            app.world
+                .resource_mut::<Time>()
+                .set_source(TimeSource::Manual { step_secs: 0.05 });
+        }
+        app.world.spawn((
+            Transform::from_translation(DVec3::new(0.0, 1.7, 200.0)),
+            SimulationFocus::default(),
+        ));
+        app.update();
+        let mut commands = app.world.commands();
+        demo::spawn_demo(&mut commands, DVec3::ZERO);
+        app.world.flush();
+        let mut built = 0;
+        let mut most = 0;
+        for _ in 0..40 {
+            if !manual {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            app.update();
+            let now = demo::stations_built(&mut app.world);
+            most = most.max(now - built);
+            built = now;
+        }
+        assert_eq!(built, Station::ALL.len(), "manual {manual}: not all built");
+        if manual {
+            assert!(most > 1, "a manual clock builds one a step, {most} a frame");
+        } else {
+            assert_eq!(most, 1, "{most} stations built in one frame");
+        }
+    }
+}
