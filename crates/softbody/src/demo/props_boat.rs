@@ -204,7 +204,6 @@ pub struct BoatModels {
 /// The dinghy's models. Their meshes are registered under asset keys the first time a world
 /// needs them; later calls only check that and return the same models.
 pub fn boat_models(commands: &mut Commands) -> BoatModels {
-    static MODELS: OnceLock<BoatModels> = OnceLock::new();
     commands.queue(ensure_materials);
     if let Some(models) = MODELS.get() {
         let probe = models.hull.keys().next().unwrap_or_default().to_string();
@@ -226,6 +225,50 @@ pub fn boat_models(commands: &mut Commands) -> BoatModels {
     }
     MODELS.get_or_init(|| models).clone()
 }
+
+/// Run `then` with the dinghy's models once their meshes are in this world: at once when they
+/// are, else after they (and the yard's materials, when this world lacks them and no bake is
+/// in flight) are built on a worker ([`engine_core::off_frame`]): 0.22 s of the sailboat
+/// cell's 205 ms-plus load frame on the session VM was the meshes alone.
+pub fn with_boat_models(
+    world: &mut World,
+    then: impl FnOnce(&mut World, BoatModels) + Send + 'static,
+) {
+    let have = MODELS.get().cloned().filter(|models| {
+        let probe = models.hull.keys().next().unwrap_or_default();
+        world
+            .get_resource::<Assets<Mesh>>()
+            .is_none_or(|meshes| meshes.loaded_by_key(probe).is_some())
+    });
+    if let Some(models) = have {
+        ensure_materials(world);
+        then(world, models);
+        return;
+    }
+    let bake = super::kit::claim_bake(world);
+    let materials = bake.is_some();
+    engine_core::off_frame::off_frame(
+        world,
+        "softbody dinghy",
+        move || (build_boat(), materials.then(super::kit::bake)),
+        move |world: &mut World, ((models, meshes), baked)| {
+            if let Some(baked) = baked {
+                super::kit::install(world, baked);
+            }
+            drop(bake);
+            if let Some(mut assets) = world.get_resource_mut::<Assets<Mesh>>() {
+                for (key, mesh) in meshes {
+                    assets.get_or_insert_keyed(&key, || mesh);
+                }
+            }
+            let models = MODELS.get_or_init(|| models).clone();
+            then(world, models);
+        },
+    );
+}
+
+/// The dinghy's models, once built in this process ([`boat_models`], [`with_boat_models`]).
+static MODELS: OnceLock<BoatModels> = OnceLock::new();
 
 /// Points on the outer hull shell from the keel up to the sheer (both sides, stem and
 /// transom included), for a convex-hull collider. Boat frame.

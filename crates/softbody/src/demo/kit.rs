@@ -430,18 +430,10 @@ pub fn with_materials(
     place: impl FnOnce(&mut Commands, DVec3) + Send + 'static,
 ) {
     commands.queue(move |world: &mut World| {
-        if !has_renderer(world) || made(world) || baking(world) {
+        let Some(token) = claim_bake(world) else {
             place_at(world, anchor, place);
             return;
-        }
-        let token = std::sync::Arc::new(());
-        world.insert_resource(Baking(std::sync::Arc::downgrade(&token)));
-        {
-            let mut mats = world.resource_mut::<Assets<StandardMaterial>>();
-            for m in Mat::ALL {
-                mats.reserve_keyed(&m.key());
-            }
-        }
+        };
         engine_core::off_frame::off_frame(
             world,
             "softbody yard materials",
@@ -453,6 +445,23 @@ pub fn with_materials(
             },
         );
     });
+}
+
+/// When this world draws, lacks the yard's materials and nobody is baking them: marks a bake
+/// as in flight (until the returned token is dropped, with its job's apply or with the job)
+/// and reserves the material keys, so props spawned meanwhile refer to them without the
+/// asset server looking for files. The caller bakes ([`bake`]) and installs ([`install`]).
+pub(super) fn claim_bake(world: &mut World) -> Option<std::sync::Arc<()>> {
+    if !has_renderer(world) || made(world) || baking(world) {
+        return None;
+    }
+    let token = std::sync::Arc::new(());
+    world.insert_resource(Baking(std::sync::Arc::downgrade(&token)));
+    let mut mats = world.resource_mut::<Assets<StandardMaterial>>();
+    for m in Mat::ALL {
+        mats.reserve_keyed(&m.key());
+    }
+    Some(token)
 }
 
 fn place_at(world: &mut World, anchor: Entity, place: impl FnOnce(&mut Commands, DVec3)) {
