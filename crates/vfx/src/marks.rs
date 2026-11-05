@@ -1,5 +1,7 @@
 //! Marks effects leave on the ground and walls: charred scorches with cooling embers where
-//! spells hit, frost that melts, splashed stone that dries, and chips where shots hit stone.
+//! spells hit, frost that melts, splashed stone that dries, chips where shots hit stone, and
+//! the marks of the other elements: blood, blight's rot, shadow burned in, and lightning's
+//! branching burn.
 //!
 //! Marks are visual only and fade out. Footprints are not marks: the terrain module presses
 //! every `GroundContact` into its deformable ground, and burning leaves the fire module's own
@@ -31,6 +33,17 @@ pub enum MarkKind {
     Wet,
     /// A pock with cracks where something hit stone.
     Chip,
+    /// A splash of blood: dark red, glossy while wet, soaking in and dulling as it dries.
+    Blood,
+    /// Rot where blight struck: a sickly ooze that eats into the surface, dark and stained at
+    /// its heart, faintly glowing at first.
+    Rot,
+    /// Shadow burned into the surface: near-black at its heart, reaching out in cracks that
+    /// glow a cold violet for `glow_secs`.
+    Void,
+    /// The branching fern a lightning strike burns into a surface, glowing white-blue along its
+    /// branches for `glow_secs`.
+    Burn,
 }
 
 impl MarkKind {
@@ -41,6 +54,10 @@ impl MarkKind {
             MarkKind::Frost => 1.0,
             MarkKind::Wet => 2.0,
             MarkKind::Chip => 3.0,
+            MarkKind::Blood => 4.0,
+            MarkKind::Rot => 5.0,
+            MarkKind::Void => 6.0,
+            MarkKind::Burn => 7.0,
         }
     }
 
@@ -51,7 +68,7 @@ impl MarkKind {
 
     /// Marks that add light or a lit layer of their own (drawn blended over the scene).
     pub fn covers(self) -> bool {
-        matches!(self, MarkKind::Frost | MarkKind::Scorch)
+        !matches!(self, MarkKind::Wet | MarkKind::Chip)
     }
 }
 

@@ -87,9 +87,9 @@ pub struct GpuEmitter {
     /// Sub-emitters: emitter-table index + 1 of the layer fed when a particle hits something
     /// (x), dies (y) and flies (z), 0 for none; w unused.
     pub sub_target: [u32; 4],
-    /// Particles per hit and per death, and per second of flight; w unused.
+    /// Particles per hit and per death, and per second of flight; w erosion (0..1).
     pub sub_count: [f32; 4],
-    /// Chance that a hit, death or trail spawns anything; w unused.
+    /// Chance that a hit, death or trail spawns anything; w glow of the eroding edge (cd/m²).
     pub sub_chance: [f32; 4],
     /// Fraction of the particle's velocity the new ones keep, per kind; w unused.
     pub sub_keep: [f32; 4],
@@ -135,6 +135,9 @@ impl GpuEmitter {
                 sub_keep[k] = s.inherit_velocity.clamp(0.0, 1.0);
             }
         }
+        // The free fourth lanes carry the layer's erosion and its edge glow.
+        sub_count[3] = desc.erode.clamp(0.0, 1.0);
+        sub_chance[3] = desc.erode_glow.max(0.0);
         Self {
             origin: [0.0; 4],
             prev: [0.0, 0.0, 0.0, if desc.local_space { 1.0 } else { 0.0 }],

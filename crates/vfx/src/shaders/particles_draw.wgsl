@@ -32,6 +32,8 @@ struct VsOut {
     @location(12) eye: vec4<f32>,
     @location(13) at: vec3<f32>,
     @location(14) @interpolate(flat) quat: vec4<f32>,
+    // Erosion: xyz the eroding edge's glow (pre-exposed), w how far it is eaten away (0..1).
+    @location(15) erode: vec4<f32>,
 };
 
 // Narrowest a sprite is drawn, pixels.
@@ -137,13 +139,16 @@ fn vs_particle(@builtin(vertex_index) vi: u32, @builtin(instance_index) instance
     out.soft = e.shade.w;
     out.age = t;
     out.pixels = 2.0 * half.x * px_per_m;
+    // Eaten away over the second half of its life (none while young), fully by its end.
+    let eat = e.sub_count.w * smoothstep(0.15, 1.0, t);
+    out.erode = vec4<f32>(pre_expose(col.rgb * e.sub_chance.w) * fog.through, eat);
     if (e.shade.y > 0.0 && frame.sun_dir.y > -0.05) {
         // Smoke and dust read as volumes when their sun side is brighter (see `volume_shade`).
         let to_eye = -rel / max(length(rel), 1e-4);
         let l = frame.sun_dir.xyz;
         out.sun = vec3<f32>(dot(l, right), dot(l, up), dot(l, to_eye)) * saturate(frame.sun_dir.y * 8.0 + 0.4);
     }
-    if (out.sprite == 4u || out.sprite == 19u || out.sprite == 21u) {
+    if (out.sprite == 4u || out.sprite == 19u || out.sprite == 21u || out.sprite == 26u || out.sprite == 27u) {
         // Clear water mirrors the sky beyond it, just above the horizon.
         let ahead = normalize(vec3<f32>(rel.x, 0.0, rel.z) + vec3<f32>(1e-4, 0.0, 0.0));
         let sky = sample_env(normalize(ahead + vec3<f32>(0.0, 0.4, 0.0)));
@@ -784,6 +789,79 @@ fn vortex(in: VsOut, c: vec2<f32>, r: f32, jx: vec2<f32>, jy: vec2<f32>) -> vec4
     return vec4<f32>((world + glow) * a, a);
 }
 
+// ---------------------------------------------------------------- dark magic
+// A wisp of darkness: a ragged tongue of black smoke drawn up and torn by noise, its edges lit
+// by a thin rim of the layer's glow color. x: density, y: rim.
+fn wisp(c: vec2<f32>, seed: f32, age: f32) -> vec2<f32> {
+    let s = seed * 31.0;
+    let time = frame.time.x % 3600.0;
+    // Curling: the sprite is twisted by slow noise that grows toward its tip.
+    let up = saturate(c.y * 0.5 + 0.5);
+    let w = vec2<f32>(
+        fbm2(vec2<f32>(c.y * 1.3 + s, time * 0.35 + s), 2),
+        fbm2(vec2<f32>(c.x * 1.1 - s, time * 0.3 + s * 0.7), 2),
+    ) - 0.5;
+    let p = c + w * (0.5 + up * 0.9);
+    // A narrowing tongue, widest a third of the way up.
+    let hw = 0.62 * (1.0 - sq(saturate((p.y + 0.35) / 1.3))) * smoothstep(-1.0, -0.55, p.y);
+    let body = saturate(1.0 - abs(p.x) / max(hw, 1e-3)) * step(1e-3, hw);
+    let n = fbm2(vec2<f32>(p.x * 2.6 + s, p.y * 1.4 - time * 0.6 - age * 2.0), 4);
+    // It thins out from its edges as it ages (eroded, not faded).
+    let d = body * (0.45 + n * 1.2) - 0.25 - age * age * 0.55;
+    let density = smoothstep(0.0, 0.35, d);
+    // The rim: a thin band where the density just begins.
+    let rim = exp(-sq((d - 0.04) / 0.05)) * (0.4 + n);
+    return vec2<f32>(density, rim);
+}
+
+// A ball of darkness that eats light: an opaque black core with a ragged, boiling edge, and a
+// corona of the layer's color writhing round its rim. x: darkness, y: corona.
+fn void_orb(c: vec2<f32>, seed: f32) -> vec2<f32> {
+    let r = length(c);
+    let time = (frame.time.x % 3600.0) + seed * 53.0;
+    let ang = atan2(c.y, c.x);
+    let boil = fbm2(vec2<f32>(ang * 2.0 + time * 0.5, r * 3.0 - time * 1.1) + seed * 9.0, 4);
+    let edge = 0.5 + 0.12 * (boil - 0.5);
+    let dark = smoothstep(edge + 0.06, edge - 0.04, r);
+    // Flares licking outward from the rim, turning against the core.
+    let flare = fbm2(vec2<f32>(ang * 4.0 - time * 0.8, r * 2.0 - time * 1.6) + seed * 5.0, 3);
+    let reach = edge + 0.08 + 0.35 * flare * flare;
+    let corona = smoothstep(reach, edge, r) * smoothstep(edge - 0.08, edge + 0.02, r) * (0.3 + flare * 1.4);
+    // A faint halo of the color around it, so it reads at night as a hole rimmed with light.
+    let halo = exp(-sq((r - edge) / 0.18)) * 0.25;
+    return vec2<f32>(dark, corona + halo);
+}
+
+// A wobbling blob of thick liquid (blood, ichor, ooze): glossy, a bright highlight and a rim
+// mirroring the sky, its middle lit from within. x: shade, y: alpha, z: highlight.
+fn goo(c: vec2<f32>, seed: f32, age: f32) -> vec3<f32> {
+    let time = (frame.time.x % 3600.0) + seed * 41.0;
+    let ang = atan2(c.y, c.x);
+    let wobble = 0.08 * sin(ang * 3.0 + time * 5.0 + seed * 20.0) + 0.05 * sin(ang * 5.0 - time * 7.0);
+    let r = length(c) / (0.82 + wobble);
+    let a = smoothstep(1.0, 0.86, r);
+    let z = sqrt(saturate(1.0 - r * r));
+    let n = vec3<f32>(c / (0.82 + wobble), z);
+    let l = normalize(vec3<f32>(-0.45, 0.6, 0.65));
+    let h = normalize(l + vec3<f32>(0.0, 0.0, 1.0));
+    let spec = pow(saturate(dot(n, h)), 60.0) * 3.0;
+    // Darker toward the rim (thicker liquid seen edge-on), with a fresnel rim of sky.
+    let shade = mix(0.35, 1.0, z);
+    let fres = pow(1.0 - z, 4.0);
+    return vec3<f32>(shade, a, spec + fres * 0.6);
+}
+
+// A bubble rising out of an ooze: a thin skin with a highlight and a bright rim, that bursts
+// into a ring of spray in the last tenth of its life.
+fn bubble(c: vec2<f32>, r: f32, age: f32) -> f32 {
+    let pop = smoothstep(0.88, 1.0, age);
+    let skin = smoothstep(1.0, 0.9, r) * (0.18 + 0.82 * pow(r, 6.0));
+    let hl = exp(-dot(c - vec2<f32>(-0.35, 0.4), c - vec2<f32>(-0.35, 0.4)) * 30.0);
+    let whole = (skin + hl) * (1.0 - pop);
+    let burst = ring_line(r, 0.75 + pop * 0.5, 0.06) * pop * (1.0 - pop) * 4.0;
+    return saturate(whole + burst);
+}
+
 @fragment
 fn fs_particle(in: VsOut) -> @location(0) vec4<f32> {
     let c = in.uv * 2.0 - 1.0;
@@ -927,11 +1005,44 @@ fn fs_particle(in: VsOut) -> @location(0) vec4<f32> {
             let heat = saturate(base * (0.15 + n * 1.2 + cracks * 0.5) * 1.3 - in.age * 0.9);
             rgb = flame_shade(in.radiance, heat) * smoothstep(0.08, 0.7, heat) * 1.4 + in.radiance * 0.012;
         }
+        case 24u: { // wisp: a curling tongue of darkness rimmed with its glow color
+            let w = wisp(c, in.seed, in.age);
+            a = w.x;
+            rgb = in.radiance * (0.012 + w.y * 1.6 / max(a, 0.05));
+        }
+        case 25u: { // void: a ball of darkness with a writhing corona
+            let v = void_orb(c, in.seed);
+            a = saturate(v.x + v.y);
+            rgb = in.radiance * (v.y * 2.2 / max(a, 0.05) + 0.006);
+        }
+        case 26u: { // goo: a glossy blob of thick liquid lit from within
+            let k = goo(c, in.seed, in.age);
+            a = k.y;
+            rgb = in.radiance * k.x + in.glint * k.z + vec3<f32>(k.z * 0.08) * dot(in.radiance, vec3<f32>(0.3, 0.5, 0.2));
+        }
+        case 27u: { // bubble: a thin skin that bursts
+            a = bubble(c, r, in.age);
+            rgb = in.radiance * (0.7 + 0.6 * a) + in.glint * 0.5;
+        }
         default: { // glow: a soft orb with a hot center that keeps its color
             a = exp(-r * r * 4.5) * smoothstep(1.0, 0.85, r);
             let core = exp(-r * r * 18.0);
             rgb = mix(rgb, vec3<f32>(max(rgb.r, max(rgb.g, rgb.b))), core * 0.3) * (1.0 + core * 1.2);
         }
+    }
+
+    // Erosion: noise eats into the sprite from its thin parts as it ages, leaving wisps, with a
+    // glowing edge where it is being eaten (vfxdoc "Alpha erosion": smoothstep(t - f, t + f,
+    // mask) with the threshold spanning -f..1+f).
+    var edge = 0.0;
+    if (in.erode.w > 0.0 && a > 0.0) {
+        let n = fbm2(c * 2.7 + vec2<f32>(in.seed * 41.0, in.seed * 17.0), 3);
+        let mask = saturate(n * 0.75 + saturate(a) * 0.45);
+        let f = 0.08;
+        let t = in.erode.w * (1.0 + 2.0 * f) - f;
+        let keep = smoothstep(t - f, t + f, mask);
+        edge = (1.0 - keep) * smoothstep(t - 3.0 * f, t, mask) * step(0.001, t);
+        a *= keep;
     }
 
     // Soft particles: fade where the sprite meets the scene behind it.
@@ -944,8 +1055,9 @@ fn fs_particle(in: VsOut) -> @location(0) vec4<f32> {
             fade = saturate(behind / in.soft);
         }
     }
+    let burn = in.erode.xyz * (edge * in.coverage * fade);
     a = a * in.coverage * fade;
-    if (a <= 0.0005) { discard; }
+    if (a <= 0.0005 && edge <= 0.0) { discard; }
     let opaque = 1.0 - in.additive;
-    return vec4<f32>(rgb * a + in.inscatter * (a * opaque), a * opaque);
+    return vec4<f32>(rgb * a + burn + in.inscatter * (a * opaque), a * opaque);
 }

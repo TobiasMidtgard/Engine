@@ -1,7 +1,8 @@
 //! Built-in effects. `vfx.effects` lists them and `vfx.describe` prints any of them as JSON,
 //! which is the easiest starting point for a new effect.
 //!
-//! Naming: `spell.*` magic, `water.*` splashes and fountains, `impact.<surface>` hits on a
+//! Naming: `spell.*` magic (`spell.<element>.<role>` for the magic system's elements, see
+//! `elements`), `water.*` splashes and fountains, `impact.<surface>` hits on a
 //! surface material (the names `SurfaceMaterial::impact_effect` uses), `step.<surface>`
 //! footstep kicks, `impulse.*` ground shockwaves, `exhaust.*` engine flames and fumes, `fire.*`,
 //! `ambient.*`, `magic.*`.
@@ -12,6 +13,8 @@
 use crate::effect::*;
 use crate::marks::{MarkDesc, MarkKind};
 use crate::trail::{RibbonStyle, Trail};
+
+mod elements;
 
 fn em(name: &str) -> EmitterDesc {
     EmitterDesc {
@@ -151,6 +154,8 @@ fn smoke(name: &str, albedo: f32, peak: f32) -> EmitterDesc {
         turbulence_scale: 1.5,
         size_over_life: c(&[(0.0, 0.6), (1.0, 2.6)]),
         soft: 0.5,
+        // Thins into wisps and holes as it ages instead of fading evenly.
+        erode: 0.55,
         ..em(name)
     }
 }
@@ -369,6 +374,9 @@ pub fn all() -> Vec<EffectDesc> {
     v.extend(steps());
     v.extend(exhausts());
     v.extend(misc());
+    let named = elements::aliases(&v);
+    v.extend(named);
+    v.extend(elements::all());
     v
 }
 

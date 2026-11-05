@@ -37,8 +37,8 @@ struct Emitter {
     shade: vec4<f32>,      // emissive (cd/m^2), lit, additive, soft (m)
     look: vec4<f32>,       // stretch, translucency, size mult, opacity mult
     sub_target: vec4<u32>, // layer fed on hit, death, flight (table index + 1, 0 none)
-    sub_count: vec4<f32>,  // particles per hit, per death, per second of flight
-    sub_chance: vec4<f32>, // chance per hit, death, trail
+    sub_count: vec4<f32>,  // particles per hit, per death, per second of flight; w erosion
+    sub_chance: vec4<f32>, // chance per hit, death, trail; w eroding edge glow (cd/m^2)
     sub_keep: vec4<f32>,   // velocity kept per hit, death, trail
     ring: vec4<u32>,       // first slot, size, GPU spawn cursor (0xffffffff none), unused
     color: array<vec4<f32>, 16>,

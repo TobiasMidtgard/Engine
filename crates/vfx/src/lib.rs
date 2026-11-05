@@ -363,7 +363,7 @@ fn register_apis(app: &mut App) {
                 .map(|k| serde_json::from_value(k.clone()))
                 .transpose()
                 .map_err(|_| {
-                    "\"kind\" must be scorch, frost, wet or chip".to_string()
+                    "\"kind\" must be scorch, frost, wet, chip, blood, rot, void or burn".to_string()
                 })?
                 .unwrap_or(MarkKind::Scorch);
             let position = vec3_arg(&args, "position")?.ok_or("\"position\" is required")?;

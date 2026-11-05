@@ -341,6 +341,25 @@ pub enum Sprite {
     /// 1, a high `emissive` and a couple of overlapping long-lived particles (`local_space`,
     /// `steady`) so it never blinks.
     Plasma,
+    /// A curling wisp of darkness: a ragged tongue of black smoke twisted and torn by slow
+    /// noise, its edges lit by a thin rim of the layer's glow color; it thins away from its
+    /// edges as it ages instead of fading (shadow magic, curses, dark trails). Use with
+    /// `facing: camera` (or `axis` to stand it up), `additive` 0, a dark-tinted `color` and a
+    /// moderate `emissive`: the body stays near black and only the rim glows.
+    Wisp,
+    /// A ball of darkness that eats light: an opaque black core with a boiling edge and a
+    /// corona of the layer's color writhing round its rim (shadow bolts, voids, curse eyes).
+    /// Use with `facing: camera`, `additive` 0, `emissive` for the corona, and a couple of
+    /// overlapping long-lived particles (`local_space`, `steady`).
+    Void,
+    /// A wobbling glossy blob of thick liquid: darker toward its rim, a sharp highlight and a
+    /// rim mirroring the sky, its middle lit from within by any `emissive` (blood, ichor,
+    /// poison ooze). Use with `additive` 0, `lit` 1.
+    Goo,
+    /// A bubble on an ooze: a thin skin with a highlight and a bright rim that bursts into a
+    /// ring of spray in the last tenth of its life (poison pools, boiling blood, swamps). Use
+    /// with `additive` 0, `lit` 1 and a short rise.
+    Bubble,
 }
 
 impl Sprite {
@@ -362,7 +381,9 @@ impl Sprite {
             | Sprite::Blaze
             | Sprite::Veil
             | Sprite::Arc
-            | Sprite::Plasma => 0.0,
+            | Sprite::Plasma
+            | Sprite::Void
+            | Sprite::Goo => 0.0,
             _ => 0.6,
         }
     }
@@ -686,6 +707,14 @@ pub struct EmitterDesc {
     pub additive: f32,
     /// Fade out this close to scene geometry, meters (soft particles; 0 = hard edges).
     pub soft: f32,
+    /// Erosion: how far the particle is eaten away by noise over its life instead of fading
+    /// evenly (0 none .. 1 gone by the end), so smoke and mist thin into wisps and holes the way
+    /// film effects dissolve (alpha erosion: vfxdoc "Alpha erosion", realtimevfx erosion
+    /// workflows; engine-design/particles-research.md §2.2).
+    pub erode: f32,
+    /// Glow of the eroding edge: luminance for color 1.0, cd/m² (0 = no glow). With `erode`, a
+    /// burning edge eats through soot and paper; on dark magic a rim of light.
+    pub erode_glow: f32,
 }
 
 impl Default for EmitterDesc {
@@ -734,6 +763,8 @@ impl Default for EmitterDesc {
             lit: 0.0,
             additive: 0.0,
             soft: 0.2,
+            erode: 0.0,
+            erode_glow: 0.0,
         }
     }
 }

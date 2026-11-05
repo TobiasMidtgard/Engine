@@ -136,6 +136,7 @@ neither holds them up nor lets them sink.
 | Family | Effects |
 |---|---|
 | Spells | `spell.fireball`, `spell.fireball_impact`, `spell.frost_bolt`, `spell.frost_impact`, `spell.arcane_portal`, `spell.portal_gate`, `spell.heal_aura`, `spell.charge`, `spell.lightning_hit`, `spell.starburst`, `magic.orb` |
+| Elements | `spell.<element>.<role>` for the magic system's six elements (`fire`, `frost`, `storm`, `blood`, `blight`, `shadow`) and roles `bolt` (loops on a moving entity), `impact` (one shot, scale = blast radius / 2 m, leaves the element's mark) and `field` (a looping ground patch, scale = radius / 2 m). The clean elements glow; the dark ones are matter and absence: glossy blood, poison ooze with fumes, balls and wisps of darkness rimmed with violet light. |
 | Water | `water.splash`, `water.splash_small`, `water.fountain`, `water.column`, `water.bow_spray`, `water.mist` |
 | Impacts | `impact.<surface>` for every surface material (dirt, rock, concrete, wood, sand, grass, leaves, snow, mud, water, flesh, ice, glass, metal, default), `impact.sparks`, `impulse.dust`, `explosion.large` |
 | Footsteps | `step.dirt`, `step.sand`, `step.snow`, `step.mud`, `step.puddle`, `step.water`, `step.leaves`, `step.default` |
@@ -164,6 +165,12 @@ whatever is under them (terrain, walls, props), so nothing needs UVs:
 - **Frost**: a pale film with crystal feathers over the surface, melting back from its edges.
 - **Wet**: splashed stone that darkens and dries from the edges.
 - **Chip**: a pock with cracks and a dust ring where a shot hit stone or concrete.
+- **Blood**: a splash with flung fingers and drops, glossy while wet, drying from its edges.
+- **Rot**: blight's stain eating outward along veins, a dark ooze at its heart glowing green
+  for `glow_secs`.
+- **Void**: shadow burned in, black at its heart with dendrite cracks glowing violet for
+  `glow_secs`.
+- **Burn**: the branching fern lightning burns into a surface, white-blue for `glow_secs`.
 
 An effect leaves one with `mark` in its [`EffectDesc`] (`spell.fireball_impact`,
 `spell.frost_impact`, `impact.rock`, `impact.concrete`); games and scripts add their own with
@@ -200,7 +207,11 @@ and `VfxReactions`. Components: `ParticleEffect`, `Trail`, `Beam`.
   times), sky and point lights, refreshed every fourth frame. A last pass sorts each visible layer's
   particles by distance (a bitonic sort per run of 2048 slots), so nearer puffs of smoke
   cover farther ones. Sprites are procedural, drawn as one instanced quad per particle, layers
-  and particles far to near, softened against the scene depth.
+  and particles far to near, softened against the scene depth. A layer's `erode` eats its
+  particles away with noise as they age instead of fading them evenly (alpha erosion), with an
+  `erode_glow` edge where it bites: smoke thins into wisps, poison clouds burn away green.
+  Preparing the frame reads the world shared, beside the other features
+  (`RenderFeature::prepare_shared`).
 - **Debris** ([`debris`]): a `debris` layer draws each particle as a small flat-shaded mesh
   (four variants of each kind) tumbling about an axis of its own, in the depth prepass, the
   opaque pass and the two nearest shadow cascades, so chips are lit, shadowed and motion
@@ -222,10 +233,12 @@ Writes: rendering only (plus the point lights of effects). The showcase demo wri
 ## Showcase: the Spell court
 
 `demo::spawn_demo` builds the test area in the showcase's `magic` zone, and `demo::VIEWS` lists
-its tour stops (`magic_spells` at dusk, `magic_portal`, `magic_starburst`, `magic_splashes`,
+its tour stops (`magic_spells` at dusk, `magic_elements`, `magic_portal`, `magic_starburst`, `magic_splashes`,
 `magic_footsteps`, `magic_marks`, `magic_engine` and `magic_impacts`): an arcane portal with orbiting orbs before
 a gate whose arch holds a standing portal swirling the valley seen through it, a mortar firing
-starburst fireworks over the court, fireballs and frost bolts scorching and frosting a wall,
+starburst fireworks over the court, a caster firing each of the six elements in turn at a wall
+that keeps each one's mark, an element gallery in the north-east (a field of each element with
+its bolt circling over it),
 lightning between two obelisks, a healing aura, a fountain, an anvil throwing sparks that
 split as they skid, a pond with stones splashing in, a golem stomping over mud, snow, sand and
 water, shot impacts on six materials (chipping the rock), and braziers burning charcoal around

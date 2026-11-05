@@ -6,8 +6,8 @@ use engine_core::math::Vec3;
 use engine_core::prelude::*;
 use engine_render::wgpu;
 use engine_render::{
-    FeatureStats, FrameContext, GpuShared, GrowBuffer, RenderFeature, RenderPhase, RenderSettings,
-    ViewData,
+    FeatureStats, FrameContext, GpuShared, GrowBuffer, PrepareOut, RenderFeature, RenderPhase,
+    RenderSettings, ViewData,
 };
 
 use crate::emitter::VfxSettings;
@@ -260,12 +260,17 @@ impl RenderFeature for MarksFeature {
         }
     }
 
-    fn prepare(
+    fn prepares_shared(&self) -> bool {
+        true
+    }
+
+    fn prepare_shared(
         &mut self,
-        world: &mut World,
+        world: &World,
         gpu: &GpuShared,
         view: &ViewData,
         _settings: &RenderSettings,
+        _out: &mut PrepareOut,
     ) {
         self.instances.clear();
         self.shade = 0..0;

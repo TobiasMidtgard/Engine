@@ -27,6 +27,10 @@ const MARK_SCORCH: u32 = 0u;
 const MARK_FROST: u32 = 1u;
 const MARK_WET: u32 = 2u;
 const MARK_CHIP: u32 = 3u;
+const MARK_BLOOD: u32 = 4u;
+const MARK_ROT: u32 = 5u;
+const MARK_VOID: u32 = 6u;
+const MARK_BURN: u32 = 7u;
 // Marks fade out between these distances from the camera (m).
 const MARK_FADE_NEAR: f32 = 60.0;
 const MARK_FADE_FAR: f32 = 90.0;
@@ -158,6 +162,59 @@ fn mark_chip(m: MarkInstance, p: vec2<f32>) -> f32 {
     return max(pock * 0.75, cracks * 0.55) - dust * 0.12;
 }
 
+
+// ---------------------------------------------------------------- blood, rot, void, burn
+
+fn mark_age01(m: MarkInstance) -> f32 {
+    return saturate(m.life.x / max(m.life.y, 1e-3));
+}
+
+// A splash: a ragged pool with droplets flung out around it, 0..1.
+fn mark_splat(m: MarkInstance, p: vec2<f32>) -> f32 {
+    let pool = smoothstep(0.62, 0.48, mark_ragged_r(m, p * 1.1, 0.55));
+    let a = atan2(p.y, p.x);
+    let r = length(p);
+    // Fingers thrown outward, beaded at their ends.
+    let spokes = smoothstep(0.62, 0.9, value_noise2(vec2<f32>(a * 7.0, mark_seed(m).x)));
+    let finger = spokes * smoothstep(0.85, 0.5, r);
+    let drops = smoothstep(0.78, 0.86, value_noise2(p * 9.0 + mark_seed(m).yx)) * smoothstep(1.0, 0.55, r);
+    return max(pool, max(finger, drops));
+}
+
+// How wet a splash still is: it dries from its edges in.
+fn mark_wetness(m: MarkInstance, p: vec2<f32>) -> f32 {
+    return smoothstep(0.55, 0.15, length(p) + mark_age01(m) * 0.6);
+}
+
+// Rot: a stain eating outward along veins, 0..1 (x), and the ooze at its heart (y).
+fn mark_rot(m: MarkInstance, p: vec2<f32>) -> vec2<f32> {
+    let r = mark_ragged_r(m, p, 0.7);
+    let stain = smoothstep(1.0, 0.45, r);
+    let veins = smoothstep(0.08, 0.0, abs(fbm2(p * 5.0 + mark_seed(m), 4) - 0.5)) * smoothstep(1.05, 0.35, r);
+    let ooze = smoothstep(0.5, 0.25, r) * (0.6 + 0.4 * fbm2(p * 8.0 + mark_seed(m).yx, 3));
+    return vec2<f32>(max(stain * 0.75, veins), ooze);
+}
+
+// Cracks reaching out from a point, as dendrite branches: ridged noise in polar coordinates
+// that splits as it goes out. `p` in -1..1, `seed` per mark. 0..1.
+fn mark_branches(p: vec2<f32>, seed: vec2<f32>, sharp: f32) -> f32 {
+    let r = length(p);
+    let a = atan2(p.y, p.x);
+    // Each ring outward sees more, thinner branches.
+    var lines = 0.0;
+    var amp = 1.0;
+    var freq = 3.0;
+    for (var i = 0; i < 3; i++) {
+        let warp = fbm2(vec2<f32>(r * 4.0 * f32(i + 1), a * 2.0) + seed, 2) - 0.5;
+        let k = a * freq / 6.2832 + warp * 0.8 + seed.x * f32(i + 1);
+        let d = abs(fract(k) - 0.5) * 6.2832 * max(r, 0.05) / freq;
+        lines = max(lines, amp * smoothstep(sharp * amp, 0.0, d) * smoothstep(0.08 + f32(i) * 0.2, 0.2 + f32(i) * 0.25, r));
+        amp *= 0.7;
+        freq *= 2.1;
+    }
+    return lines * smoothstep(1.0, 0.5, r);
+}
+
 @fragment
 fn fs_mark_shade(in: MarkVs) -> @location(0) vec4<f32> {
     let m = marks[in.index];
@@ -176,6 +233,27 @@ fn fs_mark_shade(in: MarkVs) -> @location(0) vec4<f32> {
         }
         case MARK_CHIP: {
             ratio = vec3<f32>(1.0 - mark_chip(m, p));
+        }
+        case MARK_BLOOD: {
+            // Blood soaks in: deep red where it lies, browning as it dries.
+            let k = mark_splat(m, p);
+            let dried = mark_age01(m);
+            ratio = mix(vec3<f32>(1.0), mix(vec3<f32>(0.25, 0.02, 0.015), vec3<f32>(0.22, 0.08, 0.05), dried), k);
+        }
+        case MARK_ROT: {
+            let k = mark_rot(m, p);
+            ratio = mix(vec3<f32>(1.0), vec3<f32>(0.24, 0.27, 0.1), k.x) * mix(1.0, 0.3, k.y);
+        }
+        case MARK_VOID: {
+            // Shadow burned in: black at its heart, reaching out in dark cracks.
+            let heart = smoothstep(0.6, 0.15, mark_ragged_r(m, p, 0.5));
+            let cracks = mark_branches(p, mark_seed(m), 0.05);
+            ratio = vec3<f32>(1.0 - max(heart * 0.92, cracks * 0.8)) * vec3<f32>(0.95, 0.92, 1.0);
+        }
+        case MARK_BURN: {
+            let fern = mark_branches(p, mark_seed(m), 0.035);
+            let core = smoothstep(0.25, 0.0, length(p));
+            ratio = vec3<f32>(1.0 - max(fern * 0.8, core * 0.85));
         }
         default: { discard; }
     }
@@ -213,6 +291,40 @@ fn fs_mark_cover(in: MarkVs) -> @location(0) vec4<f32> {
         // Embers at about 1300 K cooling to 900 K; a few thousand cd/m² at their hottest.
         let color = mark_ember_color(mix(900.0, 1350.0, heat)) * 5000.0 * heat * hit.show;
         return vec4<f32>(pre_expose(color), 0.0);
+    }
+    if (kind == MARK_BURN || kind == MARK_VOID) {
+        let glow_s = m.extra.x;
+        if (glow_s <= 0.0) { discard; }
+        let cool = saturate(1.0 - m.life.x / glow_s);
+        let lines = mark_branches(p, mark_seed(m), select(0.05, 0.02, kind == MARK_BURN));
+        let heat = lines * cool * cool;
+        if (heat <= 0.002) { discard; }
+        // Burned branches glow white-blue a moment; shadow's cracks a cold violet longer.
+        let color = select(vec3<f32>(0.5, 0.2, 1.0) * 900.0, vec3<f32>(0.6, 0.75, 1.0) * 6000.0, kind == MARK_BURN);
+        return vec4<f32>(pre_expose(color * heat * hit.show), 0.0);
+    }
+    if (kind == MARK_BLOOD || kind == MARK_ROT) {
+        // A wet film over the stain: glossy blood, or rot's ooze with a sickly glow at first.
+        var cover = 0.0;
+        var s = default_surface();
+        s.normal = hit.n;
+        var glow = vec3<f32>(0.0);
+        if (kind == MARK_BLOOD) {
+            cover = mark_splat(m, p) * mark_wetness(m, p) * 0.85;
+            s.albedo = vec3<f32>(0.1, 0.004, 0.003);
+            s.roughness = 0.12;
+        } else {
+            let k = mark_rot(m, p);
+            cover = k.y * (1.0 - mark_age01(m) * 0.6);
+            s.albedo = vec3<f32>(0.055, 0.075, 0.012);
+            s.roughness = 0.2;
+            let fresh = saturate(1.0 - m.life.x / max(m.extra.x, 1e-3)) * step(1e-3, m.extra.x);
+            glow = vec3<f32>(0.45, 1.0, 0.15) * 120.0 * fresh * k.y;
+        }
+        cover *= hit.show;
+        if (cover <= 0.002) { discard; }
+        let color = apply_fog(shade_surface(s, hit.rel), hit.rel) + pre_expose(glow);
+        return vec4<f32>(color * cover, cover);
     }
     if (kind != MARK_FROST) { discard; }
     // Frost creeps out in a ragged patch and melts back from the edges as it ages.

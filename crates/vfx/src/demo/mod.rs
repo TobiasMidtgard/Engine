@@ -55,6 +55,14 @@ pub const VIEWS: &[DemoView] = &[
         warmup: 0.0,
     },
     DemoView {
+        key: "magic_elements",
+        name: "The six elements: fire, frost, storm, blood, blight and shadow",
+        eye: [3.6, 3.4, -0.8],
+        target: [11.6, 0.7, -10.2],
+        hour: 18.35,
+        warmup: 3.0,
+    },
+    DemoView {
         key: "magic_portal",
         name: "A standing portal swirling the valley behind it",
         eye: [3.2, 2.4, -7.5],
@@ -88,11 +96,11 @@ pub const VIEWS: &[DemoView] = &[
     },
     DemoView {
         key: "magic_marks",
-        name: "Scorch and frost marks on the target wall",
-        eye: [5.4, 1.9, -0.9],
-        target: [9.0, 1.5, -3.4],
+        name: "Each element's mark on the target wall",
+        eye: [4.4, 1.9, -0.4],
+        target: [9.0, 1.5, -3.5],
         hour: 18.1,
-        warmup: 7.4,
+        warmup: 10.5,
     },
     DemoView {
         key: "magic_engine",
@@ -118,7 +126,8 @@ pub struct DemoCaster {
     pub target: DVec3,
     /// (projectile effect, impact effect) pairs, cast in turn.
     pub spells: Vec<(String, String)>,
-    /// Spells land this far to either side of `target` in turn, so their marks sit side by side.
+    /// Spells land spread evenly up to this far to either side of `target`, one place each, so
+    /// their marks sit side by side.
     pub spread: DVec3,
     pub period: f32,
     pub speed: f32,
@@ -282,6 +291,18 @@ mod layout {
     pub const SHRUBS: [(f64, f64); 4] = [(-22.5, -7.5), (22.0, -10.0), (-20.5, 15.5), (22.5, 13.0)];
     /// The engine test stand, just outside the paved disc; it fires away from the court.
     pub const STAND: (f64, f64) = (17.85, -16.95);
+    /// The element gallery in the north-east: a field of each element with its bolt circling
+    /// over it, clean elements in the front row, dark ones behind.
+    pub const ELEMENTS: [(&str, (f64, f64)); 6] = [
+        ("fire", (7.5, -7.5)),
+        ("frost", (11.5, -7.5)),
+        ("storm", (15.5, -7.5)),
+        ("blood", (7.5, -12.0)),
+        ("blight", (11.5, -12.0)),
+        ("shadow", (15.5, -12.0)),
+    ];
+    /// Scale of the gallery's fields (radius / 2 m).
+    pub const FIELD_SCALE: f32 = 0.75;
 }
 
 /// The parts of the court floor left unpaved because a prop stands there.
@@ -392,13 +413,13 @@ pub fn spawn_demo(commands: &mut Commands, origin: DVec3) {
         ParticleEffect::new("spell.charge").with_scale(0.6),
         DemoCaster {
             target: wall + DVec3::new(0.0, 1.5, 0.0),
-            spells: vec![
-                ("spell.fireball".into(), "spell.fireball_impact".into()),
-                ("spell.frost_bolt".into(), "spell.frost_impact".into()),
-            ],
-            // Scorches to the left, frost to the right.
-            spread: DVec3::new(0.0, 0.0, 0.75),
-            period: 1.9,
+            // Every element in turn, landing side by side along the wall.
+            spells: ELEMENTS
+                .iter()
+                .map(|(e, _)| (format!("spell.{e}.bolt"), format!("spell.{e}.impact")))
+                .collect(),
+            spread: DVec3::new(0.0, 0.0, 1.9),
+            period: 1.6,
             speed: 15.0,
             timer: 1.0,
             next: 0,
@@ -454,6 +475,27 @@ pub fn spawn_demo(commands: &mut Commands, origin: DVec3) {
         at(dais + DVec3::new(0.0, props::water::DAIS_TOP as f64 + 0.012, 0.0)),
         ParticleEffect::new("spell.heal_aura"),
     ));
+
+    // North-east: the element gallery, each element's field with its bolt circling over it.
+    for (i, (element, spot)) in ELEMENTS.iter().enumerate() {
+        let field = ground(*spot);
+        commands.spawn((
+            at(field),
+            ParticleEffect::new(format!("spell.{element}.field")).with_scale(FIELD_SCALE),
+        ));
+        commands.spawn((
+            at(field + DVec3::new(1.2, 1.8, 0.0)),
+            ParticleEffect::new(format!("spell.{element}.bolt")).with_scale(0.8),
+            DemoOrbit {
+                center: field,
+                radius: 1.25,
+                speed: 2.6,
+                height: 1.75,
+                bob: 0.15,
+                phase: i as f64 * 1.1,
+            },
+        ));
+    }
 
     // East: a fountain and an anvil.
     let fountain = ground(FOUNTAIN);
@@ -765,10 +807,12 @@ pub fn run_casters(
         }
         caster.timer += caster.period.max(0.2);
         let (projectile, impact) = caster.spells[caster.next % caster.spells.len()].clone();
-        let side = if caster.next.is_multiple_of(2) {
-            -1.0
+        // Spread evenly from -spread to +spread, one place per spell.
+        let n = caster.spells.len();
+        let side = if n > 1 {
+            2.0 * (caster.next % n) as f64 / (n - 1) as f64 - 1.0
         } else {
-            1.0
+            0.0
         };
         let to = caster.target + caster.spread * side;
         caster.next += 1;
@@ -1112,10 +1156,20 @@ mod tests {
             seen.extend(q.iter(&app.world).map(|e| e.effect.clone()));
         }
         for name in [
-            "spell.fireball",
-            "spell.fireball_impact",
-            "spell.frost_bolt",
-            "spell.frost_impact",
+            "spell.fire.bolt",
+            "spell.fire.impact",
+            "spell.frost.bolt",
+            "spell.frost.impact",
+            "spell.storm.impact",
+            "spell.fire.field",
+            "spell.frost.field",
+            "spell.storm.field",
+            "spell.blood.field",
+            "spell.blight.field",
+            "spell.shadow.field",
+            "spell.blood.bolt",
+            "spell.blight.bolt",
+            "spell.shadow.bolt",
             "spell.lightning_hit",
             "water.splash",
             "step.mud",
@@ -1140,6 +1194,7 @@ mod tests {
                 .iter()
                 .any(|p| part.starts_with(p))
                 && !part.contains(' ')
+                && !part.contains('{')
                 && !part.ends_with('.');
             if is_effect {
                 assert!(lib.contains(part), "the demo uses a missing effect: {part}");

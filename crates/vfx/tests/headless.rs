@@ -1070,3 +1070,118 @@ fn marks_char_frost_and_wet_the_ground() {
     let aside = DVec3::new(0.0, 0.0, -2.5);
     assert!((at(&after, aside) - at(&before, aside)).abs() < 2.0);
 }
+
+#[test]
+fn a_void_orb_darkens_what_is_behind_it_and_glows_round_its_rim() {
+    // A ball of darkness 1.6 m across floating 1 m up in daylight: its heart is darker than
+    // the sunlit ground behind it, its corona brighter than its heart, and the air well
+    // beside it is untouched.
+    let mut app = app(DVec3::ZERO, 3000.0);
+    let Some(before) = shot(&mut app, "vfx_void_before.png") else {
+        return;
+    };
+    let void = EffectDesc {
+        name: "test.void".into(),
+        emitters: vec![EmitterDesc {
+            bursts: vec![engine_vfx::Burst {
+                count: 1,
+                ..Default::default()
+            }],
+            offset: [0.0, 1.0, 0.0],
+            speed: [0.0, 0.0],
+            lifetime: [2.0, 2.0],
+            size: [1.6, 1.6],
+            local_space: true,
+            sprite: Sprite::Void,
+            color: Gradient::constant([0.55, 0.22, 1.0, 1.0]),
+            emissive: 3000.0,
+            soft: 0.0,
+            wind: 0.0,
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    app.world
+        .resource_mut::<EffectLibrary>()
+        .insert(void)
+        .unwrap();
+    app.world.spawn((
+        Transform::from_translation(DVec3::ZERO),
+        ParticleEffect::new("test.void"),
+    ));
+    app.update_n(12);
+    let after = shot(&mut app, "vfx_void_after.png").unwrap();
+    let at = |img: &image::RgbaImage, x: f64| luma(img, project(DVec3::new(x, 1.0, 0.0)), 2);
+    let (heart_b, heart_a) = (at(&before, 0.0), at(&after, 0.0));
+    let rim = at(&after, 0.42);
+    let side = at(&after, 1.8) - at(&before, 1.8);
+    eprintln!("void: heart {heart_b} -> {heart_a}, rim {rim}, side {side}");
+    assert!(
+        heart_a < heart_b * 0.4,
+        "its heart should be dark: {heart_b} -> {heart_a}"
+    );
+    assert!(
+        rim > heart_a + 10.0,
+        "its rim should glow: heart {heart_a}, rim {rim}"
+    );
+    assert!(side.abs() < 2.0, "nothing beside it should change: {side}");
+}
+
+#[test]
+fn element_marks_stain_and_burn_the_ground() {
+    // Blood reddens the ground, rot stains it, shadow blackens it and a fresh lightning burn
+    // glows along its branches.
+    let mut app = app(DVec3::ZERO, 3000.0);
+    let spots = [
+        DVec3::new(-2.4, 0.0, 1.5),
+        DVec3::new(-0.8, 0.0, 1.5),
+        DVec3::new(0.8, 0.0, 1.5),
+        DVec3::new(2.4, 0.0, 1.5),
+    ];
+    let Some(before) = shot(&mut app, "vfx_element_marks_before.png") else {
+        return;
+    };
+    {
+        let mut marks = app.world.resource_mut::<Marks>();
+        let mark = |kind, at, r, glow| Mark {
+            life_secs: 600.0,
+            glow_secs: glow,
+            ..Mark::round(kind, at, Vec3::Y, r)
+        };
+        marks.add(mark(MarkKind::Blood, spots[0], 0.7, 0.0));
+        marks.add(mark(MarkKind::Rot, spots[1], 0.7, 0.0));
+        marks.add(mark(MarkKind::Void, spots[2], 0.7, 0.0));
+        marks.add(mark(MarkKind::Burn, spots[3], 0.7, 30.0));
+    }
+    let after = shot(&mut app, "vfx_element_marks_after.png").unwrap();
+    let px = |img: &image::RgbaImage, p: DVec3| {
+        let (x, y) = project(p);
+        img.get_pixel(x, y).0
+    };
+    let at = |img: &image::RgbaImage, p: DVec3| luma(img, project(p), 2);
+    let blood = px(&after, spots[0]);
+    assert!(
+        blood[0] as f32 > blood[1] as f32 * 1.6,
+        "blood should be red: {blood:?}"
+    );
+    let (b, a) = (at(&before, spots[1]), at(&after, spots[1]));
+    let rot = px(&after, spots[1]);
+    assert!(
+        a < b * 0.9 && rot[1] > rot[0] && rot[1] > rot[2],
+        "rot should stain the ground a sickly green: {b} -> {a}, {rot:?}"
+    );
+    let (b, a) = (at(&before, spots[2]), at(&after, spots[2]));
+    assert!(a < b * 0.4, "void: {b} -> {a}");
+    // The burn's branches: brightest somewhere within its reach.
+    let mut brightest: f32 = 0.0;
+    for k in 0..24 {
+        let ang = k as f64 * std::f64::consts::TAU / 24.0;
+        for r in [0.25, 0.4] {
+            let p = spots[3] + DVec3::new(ang.cos() * r, 0.0, ang.sin() * r);
+            brightest = brightest.max(at(&after, p) - at(&before, p));
+        }
+    }
+    assert!(brightest > 15.0, "a fresh burn should glow: {brightest}");
+    let aside = DVec3::new(0.0, 0.0, -2.5);
+    assert!((at(&after, aside) - at(&before, aside)).abs() < 2.0);
+}

@@ -23,12 +23,11 @@
 
 use bevy_ecs::prelude::*;
 use bytemuck::Zeroable;
-use engine_core::diagnostics::Diagnostics;
 use engine_core::math::{DVec3, Mat3, Vec3};
 use engine_render::wgpu;
 use engine_render::{
-    FeatureStats, FrameContext, GpuShared, GrowBuffer, RenderFeature, RenderPhase, RenderSettings,
-    ViewData,
+    FeatureStats, FrameContext, GpuShared, GrowBuffer, PrepareOut, RenderFeature, RenderPhase,
+    RenderSettings, ViewData,
 };
 
 use crate::debris;
@@ -179,6 +178,8 @@ pub struct ParticleFeature {
     ribbon_count: u32,
     last_frame: Option<u64>,
     last_origin: Option<DVec3>,
+    /// A re-anchor taken in `prepare_serial` for this frame's step.
+    reanchor: Option<engine_world::WorldShift>,
     /// Run the simulation in this frame's `compute` (false when re-rendering a frame).
     simulate: bool,
     soft: bool,
@@ -635,12 +636,37 @@ impl RenderFeature for ParticleFeature {
         }
     }
 
-    fn prepare(
+    fn prepares_shared(&self) -> bool {
+        true
+    }
+
+    fn prepare_serial(
         &mut self,
         world: &mut World,
+        _gpu: &GpuShared,
+        _view: &ViewData,
+        _settings: &RenderSettings,
+    ) {
+        // The only write: take a re-anchor the world left for the particles (read in
+        // `prepare_shared`, beside the other features).
+        if self.gpu.is_none() {
+            return;
+        }
+        let frame = world.get_resource::<ParticleFrame>().map(|f| f.frame);
+        if frame.is_some() && frame != self.last_frame {
+            self.reanchor = world
+                .get_resource_mut::<PendingShift>()
+                .and_then(|mut p| p.0.take());
+        }
+    }
+
+    fn prepare_shared(
+        &mut self,
+        world: &World,
         gpu: &GpuShared,
         view: &ViewData,
         _settings: &RenderSettings,
+        out: &mut PrepareOut,
     ) {
         self.stats = FeatureStats::default();
         self.simulate = false;
@@ -696,9 +722,7 @@ impl RenderFeature for ParticleFeature {
         self.simulate = true;
         // If the world re-anchored since the last step, the last camera origin moves with it
         // and the particles turn and pick up the old frame's motion.
-        let reanchor = world
-            .get_resource_mut::<PendingShift>()
-            .and_then(|mut p| p.0.take());
+        let reanchor = self.reanchor.take();
         let mut turn = None;
         if let (Some(s), Some(last)) = (reanchor, self.last_origin.as_mut()) {
             let old = *last;
@@ -941,11 +965,9 @@ impl RenderFeature for ParticleFeature {
         let slots = g.slots;
         self.fill_stats();
         let skipped = self.skipped;
-        if let Some(mut d) = world.get_resource_mut::<Diagnostics>() {
-            d.set("vfx.gpu_slots", slots as f64);
-            d.set("vfx.drawn_emitters", self.draws.len() as f64);
-            d.set("vfx.skipped_emitters", skipped as f64);
-        }
+        out.set("vfx.gpu_slots", slots as f64);
+        out.set("vfx.drawn_emitters", self.draws.len() as f64);
+        out.set("vfx.skipped_emitters", skipped as f64);
     }
 
     fn compute(&mut self, encoder: &mut wgpu::CommandEncoder, ctx: &FrameContext) {
