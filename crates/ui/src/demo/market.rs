@@ -327,11 +327,13 @@ pub fn spawn_market(world: &mut World, origin: DVec3) {
 /// Spawns the market around `origin` with the art from [`bake_market`], all at once.
 pub fn place_market(world: &mut World, origin: DVec3, tex: MarketBake) {
     place_market_first(world, origin, tex)
+        .props(world, origin)
         .stock(world, origin)
         .corner(world, origin);
 }
 
-/// What [`place_market_first`] leaves to place: the stock between the stalls and the straw
+/// What [`place_market_first`] leaves to place: the mast, lamps and other props
+/// ([`MarketRest::props`]), the stock between the stalls and the straw
 /// ([`MarketRest::stock`]), then the ale corner ([`MarketStock::corner`]). Each is a frame's
 /// work of its own when the demo places them one job after another (`demo::spawn_demo`);
 /// positions are taken from the origin each is given, so a world shift between them is fine.
@@ -339,6 +341,8 @@ pub struct MarketRest {
     mats: Mats,
     /// The paving's heights above the origin (from the bake), for the straw.
     paving: Option<Vec<f64>>,
+    /// The stalls' front beam tops, from the origin, for the bunting.
+    fronts: Vec<DVec3>,
 }
 
 /// The ale corner, left to place after the stock ([`MarketRest::stock`]).
@@ -392,46 +396,66 @@ pub fn place_market_first(world: &mut World, origin: DVec3, mut tex: MarketBake)
             fronts.push(t.transform_point(DVec3::new(x, 2.38, 1.0)));
         }
     }
-    mast_and_bunting(world, &mats, origin, ground_y(origin), &fronts);
-    for k in 0..4 {
-        let a = k as f64 / 4.0 * std::f64::consts::TAU + 0.35;
-        let p = origin + DVec3::new(a.cos() * 7.5, 0.0, a.sin() * 7.5);
-        lamp_post(world, &mats, DVec3::new(p.x, ground_y(p), p.z), -(a as f32));
-    }
-    let table = origin + DVec3::new(0.5, 0.0, 4.5);
-    map_table(
-        world,
-        &mats,
-        DVec3::new(table.x, ground_y(table), table.z),
-        0.0,
-    );
-    let cart = origin + CART;
-    handcart(
-        world,
-        &mats,
-        DVec3::new(cart.x, ground_y(cart), cart.z),
-        -0.6,
-    );
-    let well_at = origin + DVec3::new(-4.5, 0.0, -4.5);
-    well(
-        world,
-        &mats,
-        DVec3::new(well_at.x, ground_y(well_at), well_at.z),
-        0.5,
-    );
-    for (x, z, yaw) in [(4.0f64, -8.0f64, 0.9f32), (-7.5, 1.5, 1.4)] {
-        let p = origin + DVec3::new(x, 0.0, z);
-        bench(world, &mats, DVec3::new(p.x, ground_y(p), p.z), yaw);
-    }
     engine_core::log::debug!(
-        "ui market: square, stalls and props placed in {:.1} ms",
+        "ui market: square and stalls placed in {:.1} ms",
         started.elapsed().as_secs_f64() * 1000.0
     );
-    MarketRest { mats, paving }
+    let fronts = fronts.into_iter().map(|f| f - origin).collect();
+    MarketRest {
+        mats,
+        paving,
+        fronts,
+    }
 }
 
 /// Where the handcart stands, from the market's middle.
 const CART: DVec3 = DVec3::new(10.5, 0.0, -3.5);
+
+impl MarketRest {
+    /// The mast and bunting, lamps, map table, handcart, well and benches.
+    pub fn props(self, world: &mut World, origin: DVec3) -> MarketRest {
+        let started = std::time::Instant::now();
+        let ground_y = ground_at(world, origin);
+        let mats = &self.mats;
+        let fronts: Vec<DVec3> = self.fronts.iter().map(|f| origin + *f).collect();
+        mast_and_bunting(world, mats, origin, ground_y(origin), &fronts);
+        for k in 0..4 {
+            let a = k as f64 / 4.0 * std::f64::consts::TAU + 0.35;
+            let p = origin + DVec3::new(a.cos() * 7.5, 0.0, a.sin() * 7.5);
+            lamp_post(world, mats, DVec3::new(p.x, ground_y(p), p.z), -(a as f32));
+        }
+        let table = origin + DVec3::new(0.5, 0.0, 4.5);
+        map_table(
+            world,
+            mats,
+            DVec3::new(table.x, ground_y(table), table.z),
+            0.0,
+        );
+        let cart = origin + CART;
+        handcart(
+            world,
+            mats,
+            DVec3::new(cart.x, ground_y(cart), cart.z),
+            -0.6,
+        );
+        let well_at = origin + DVec3::new(-4.5, 0.0, -4.5);
+        well(
+            world,
+            mats,
+            DVec3::new(well_at.x, ground_y(well_at), well_at.z),
+            0.5,
+        );
+        for (x, z, yaw) in [(4.0f64, -8.0f64, 0.9f32), (-7.5, 1.5, 1.4)] {
+            let p = origin + DVec3::new(x, 0.0, z);
+            bench(world, mats, DVec3::new(p.x, ground_y(p), p.z), yaw);
+        }
+        engine_core::log::debug!(
+            "ui market: props placed in {:.1} ms",
+            started.elapsed().as_secs_f64() * 1000.0
+        );
+        self
+    }
+}
 
 impl MarketRest {
     /// Stock waiting to be shelved between the stalls, and the straw dropped where it is

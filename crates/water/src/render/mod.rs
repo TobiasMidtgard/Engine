@@ -38,6 +38,10 @@ pub const MAX_BODIES: usize = 16;
 const MAX_SHOWERS: usize = 4;
 /// Most plunge pools boiling under falls (nearest first).
 const MAX_PLUNGES: usize = 8;
+/// Most stream mouths a flood's plume spreads from.
+const MAX_MOUTHS: usize = 4;
+/// A stream bringing this much in (m³/s) spreads a plume of the full radius.
+const MOUTH_FULL_M3_S: f32 = 1.0;
 /// Plunge pools further than this from the camera don't boil, meters.
 const PLUNGE_REACH: f64 = 400.0;
 /// Grid points around each ring.
@@ -583,6 +587,17 @@ struct Globals {
     /// The falls' strips (`Gpu::fall_strips`): where they were built relative to, rel this
     /// camera xyz (`vs_falls` moves them by it), unused.
     falls: [f32; 4],
+    /// A flood's brown plume spreading round where the falls land in a lake
+    /// (`crate::freshet::Freshet::plume_m`): radius (m), strength 0..1, unused, unused.
+    plume: [f32; 4],
+    /// Flood water's absorption rgb and scattering, and scatter colour rgb (times
+    /// backscatter) and roughness, as `optics_vectors` gives them.
+    flood_absorb: [f32; 4],
+    flood_scatter: [f32; 4],
+    /// Where streams run into lakes, for the plume ([`crate::flow::Falls::mouths`]): the
+    /// plume's middle rel camera xyz (carried a little way out into the lake), its share of
+    /// the plume's radius. `plume[2]` counts them.
+    mouths: [[f32; 4]; MAX_MOUTHS],
 }
 
 #[repr(C)]
@@ -2526,6 +2541,31 @@ impl RenderFeature for WaterFeature {
             *dst = view.relative(*foot).extend(boil_radius(*power)).to_array();
         }
         g.counts[3] = near.len().min(MAX_PLUNGES) as u32;
+        // A flood browns the lake round where its falls come in (`crate::freshet`).
+        if let Some(f) = world.get_resource::<crate::freshet::Freshet>()
+            && f.plume_mud > 0.01
+            && f.plume_m > 1.0
+        {
+            // The nearest mouths; a trickle's plume is smaller than a stream's.
+            let mut mouths: Vec<(f64, DVec3, Vec2, f32)> = state
+                .flows
+                .iter()
+                .filter(|sim| sim.visible)
+                .flat_map(|sim| sim.falls().mouths.iter().copied())
+                .map(|(at, dir, q)| (at.distance(view.origin), at, dir, q))
+                .filter(|m| m.0 < PLUNGE_REACH + f.plume_m as f64)
+                .collect();
+            mouths.sort_by(|a, b| a.0.total_cmp(&b.0));
+            for (dst, (_, at, dir, q)) in g.mouths.iter_mut().zip(&mouths) {
+                let share = (q / MOUTH_FULL_M3_S).sqrt().clamp(0.3, 1.0);
+                let out = (dir * 0.35 * f.plume_m * share).as_dvec2();
+                let mid = *at + DVec3::new(out.x, 0.0, out.y);
+                *dst = view.relative(mid).extend(share).to_array();
+            }
+            let n = mouths.len().min(MAX_MOUTHS);
+            g.plume = [f.plume_m, f.plume_mud, n as f32, 0.0];
+            (g.flood_absorb, g.flood_scatter) = optics_vectors(&crate::freshet::flood_optics());
+        }
         let frame_wind = engine_core::math::Vec2::new(view.wind.x, view.wind.z);
         (g.detail, g.detail2) = gpu.detail.globals(frame_wind);
         let span = tracing::info_span!("water", name = "surface").entered();
@@ -2955,7 +2995,7 @@ mod tests {
         // + 24 waves of 2 vec4.
         assert_eq!(
             std::mem::size_of::<Globals>(),
-            (10 + 4 + 8 + 4 + 2 + 1 + 2 + 2 + 1 + 1) * 16
+            (10 + 4 + 8 + 4 + 2 + 1 + 2 + 2 + 1 + 1 + 3 + MAX_MOUTHS) * 16
         );
         assert_eq!(std::mem::size_of::<GpuBody>(), (11 + MAX_WAVES * 2) * 16);
         assert_eq!(

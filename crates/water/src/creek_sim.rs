@@ -18,7 +18,7 @@ use bevy_tasks::futures::check_ready;
 use engine_core::math::{DVec2, DVec3};
 use engine_core::prelude::*;
 use engine_core::tasks::AsyncComputeTaskPool;
-use engine_world::terrain::{CreekPoint, CreekReach, Creeks};
+use engine_world::terrain::{CreekPoint, CreekQuery, CreekReach, Creeks};
 use engine_world::{Ground, WorldShift};
 
 use crate::creek_stones::{CreekStones, ReachStones, lay_reach_stones, reach_seed};
@@ -26,7 +26,7 @@ use crate::creeks::{
     CreekRibbons, Cut, LocalCreeks, Provider, gather_providers, main_camera, provider_key,
 };
 use crate::demo::valley::{StreamStone, ValleyStream, stream_region_cells};
-use crate::flow::FlowRegion;
+use crate::flow::{FlowRegion, FlowSource};
 use crate::state::SharedWater;
 
 /// A creek this close to the camera is simulated, meters.
@@ -43,7 +43,14 @@ const RECENTER_SHARE: f32 = 0.3;
 
 /// A stretch being simulated.
 struct Stretch {
-    cut: Cut,
+    /// The meters of each reach it takes in (the ribbons leave them out).
+    cuts: Vec<Cut>,
+    /// Its provider ([`provider_key`]).
+    provider: usize,
+    /// The reaches of the creek it runs down, each with the meters along that creek where it
+    /// starts ([`Chain`]), and the stretch's from, to and the creek's length along it.
+    chain: Vec<(u64, f32)>,
+    span: (f32, f32, f32),
     /// Its course (world x, z), for how far the camera is from it.
     line: Vec<DVec2>,
     /// The flow region.
@@ -60,13 +67,25 @@ pub struct StretchPlan {
     region: FlowRegion,
 }
 
+/// A stretch being planned: what it will be once its region is in.
+struct Job {
+    cuts: Vec<Cut>,
+    provider: usize,
+    chain: Vec<(u64, f32)>,
+    span: (f32, f32, f32),
+    line: Vec<DVec2>,
+}
+
 /// The stretches of creek simulated near the camera (see the module docs).
 #[derive(Resource, Default)]
 pub struct CreekSims {
     /// Simulate no creek (draw them all as ribbons): for before pictures and comparisons.
     pub off: bool,
+    /// Keep each stretch to its own reach, short of junctions, without side creeks (as before
+    /// round 52): for comparisons.
+    pub one_reach: bool,
     stretches: Vec<Stretch>,
-    job: Option<(Cut, Vec<DVec2>, Task<Option<StretchPlan>>)>,
+    job: Option<(Job, Task<Option<StretchPlan>>)>,
     since: f32,
 }
 
@@ -188,10 +207,238 @@ pub fn stretch_of(points: &[CreekPoint], at: f32) -> Option<(f32, f32)> {
     None
 }
 
+/// One reach's end meets the next one's start within this, meters: the same creek going on.
+const JOINS_M: f64 = 1.0;
+/// A side creek whose mouth is within this of a stretch's banks joins it there, meters.
+const MOUTH_REACH_M: f64 = 12.0;
+/// The last meters of a side creek simulated with the creek it runs into.
+const TRIBUTARY_M: f32 = 30.0;
+/// Most reaches a [`Chain`] takes in either way from the camera's.
+const CHAIN_LINKS: usize = 3;
+/// A [`Chain`] runs on at least this far either way from the camera's reach, where the creek
+/// does, meters.
+const CHAIN_M: f32 = 150.0;
+
+/// A creek's reaches end to end through one of them: where one stops at a junction the
+/// creek runs on in the next, so a stretch can run across the junction rather than stop
+/// short of it. Upstream it follows the biggest of the reaches that meet there.
+pub struct Chain {
+    pub points: Vec<CreekPoint>,
+    /// Each reach in it, upstream first, and the meters along the chain where it starts.
+    pub parts: Vec<(CreekReach, f32)>,
+}
+
+fn flat(p: &CreekPoint) -> DVec2 {
+    DVec2::new(p.at.x, p.at.z)
+}
+
+/// The reaches of `query` that `pick` keeps near `p`, biggest by `flow` first.
+fn joining(
+    query: &dyn CreekQuery,
+    p: DVec2,
+    pick: impl Fn(&CreekReach) -> bool,
+    flow: impl Fn(&CreekReach) -> f32,
+) -> Option<CreekReach> {
+    let mut found = Vec::new();
+    query.reaches(p - DVec2::splat(2.0), p + DVec2::splat(2.0), &mut found);
+    found
+        .into_iter()
+        .filter(|r| r.points.len() >= 2 && pick(r))
+        .max_by(|a, b| flow(a).total_cmp(&flow(b)))
+}
+
+/// The [`Chain`] through `reach`.
+pub fn chain_of(query: &dyn CreekQuery, reach: &CreekReach) -> Chain {
+    let mut ups: Vec<CreekReach> = Vec::new();
+    let mut downs: Vec<CreekReach> = Vec::new();
+    let taken = |id: u64, ups: &[CreekReach], downs: &[CreekReach]| {
+        id == reach.id || ups.iter().chain(downs).any(|r| r.id == id)
+    };
+    let mut length = 0.0;
+    while ups.len() < CHAIN_LINKS && length < CHAIN_M {
+        let head = ups.last().unwrap_or(reach);
+        let start = flat(&head.points[0]);
+        let Some(prev) = joining(
+            query,
+            start,
+            |r| {
+                !taken(r.id, &ups, &downs)
+                    && flat(r.points.last().expect("points")).distance(start) < JOINS_M
+            },
+            |r| r.points.last().map_or(0.0, |p| p.flow_m3_s),
+        ) else {
+            break;
+        };
+        length += length_of(&prev.points);
+        ups.push(prev);
+    }
+    let mut length = 0.0;
+    while downs.len() < CHAIN_LINKS && length < CHAIN_M {
+        let tail = downs.last().unwrap_or(reach);
+        let end = flat(tail.points.last().expect("points"));
+        let Some(next) = joining(
+            query,
+            end,
+            |r| !taken(r.id, &ups, &downs) && flat(&r.points[0]).distance(end) < JOINS_M,
+            |r| r.points[0].flow_m3_s,
+        ) else {
+            break;
+        };
+        length += length_of(&next.points);
+        downs.push(next);
+    }
+    let mut points: Vec<CreekPoint> = Vec::new();
+    let mut parts = Vec::new();
+    for r in ups.into_iter().rev().chain([reach.clone()]).chain(downs) {
+        let start = length_of(&points);
+        let skip = usize::from(!points.is_empty());
+        points.extend(r.points.iter().skip(skip).copied());
+        parts.push((r, start));
+    }
+    Chain { points, parts }
+}
+
+/// The creek `reach` runs into at its mouth, and the meters down that one where it does:
+/// where a side creek doesn't go on in a reach of its own but ends by (or in) another.
+pub fn runs_into(query: &dyn CreekQuery, reach: &CreekReach) -> Option<(CreekReach, f32)> {
+    let mouth = flat(reach.points.last()?);
+    let mut found = Vec::new();
+    let r = DVec2::splat(MOUTH_REACH_M + 10.0);
+    query.reaches(mouth - r, mouth + r, &mut found);
+    if found
+        .iter()
+        .any(|o| o.id != reach.id && flat(&o.points[0]).distance(mouth) < JOINS_M)
+    {
+        // It goes on.
+        return None;
+    }
+    found
+        .into_iter()
+        .filter(|o| o.id != reach.id && o.points.len() >= 2)
+        .filter_map(|o| {
+            let (s, d) = along_line(&o.points, mouth);
+            let half = 0.5 * o.points[0].width_m as f64;
+            // Not one that ends here too (another side creek), nor beside its banks.
+            (s < length_of(&o.points) - JOINS_M as f32 && (d as f64) < half + MOUTH_REACH_M)
+                .then_some((o, s, d))
+        })
+        .min_by(|a, b| a.2.total_cmp(&b.2))
+        .map(|(o, s, _)| (o, s))
+}
+
+/// Where to simulate round a camera `at` meters down `reach` (provider-local): the stretch
+/// down its [`Chain`], and the side creeks running into it there.
+pub struct Placed {
+    /// The stretch's course, down the chain.
+    pub course: Vec<CreekPoint>,
+    /// The last meters of each side creek joining it.
+    pub tributaries: Vec<Vec<CreekPoint>>,
+    /// Every reach it takes in, with the meters of it (from, to).
+    pub cuts: Vec<(CreekReach, f32, f32)>,
+    /// The chain's reaches and where along it each starts.
+    pub chain: Vec<(u64, f32)>,
+    /// From, to and the chain's length, meters along the chain.
+    pub span: (f32, f32, f32),
+}
+
+impl Placed {
+    /// How many of [`Placed::cuts`] are down the chain (the side creeks' come after).
+    pub fn chain_cuts(&self) -> usize {
+        self.cuts.len() - self.tributaries.len()
+    }
+}
+
+/// Place a stretch round `at` meters down `reach` (see [`Placed`]).
+///
+/// `joined` false keeps it to `reach`, without side creeks.
+pub fn place_stretch(
+    query: &dyn CreekQuery,
+    reach: &CreekReach,
+    at: f32,
+    joined: bool,
+) -> Option<Placed> {
+    let chain = if joined {
+        chain_of(query, reach)
+    } else {
+        Chain {
+            points: reach.points.clone(),
+            parts: vec![(reach.clone(), 0.0)],
+        }
+    };
+    let start = chain.parts.iter().find(|p| p.0.id == reach.id)?.1;
+    let total = length_of(&chain.points);
+    let (from, to) = stretch_of(&chain.points, start + at)?;
+    let course = sub_course(&chain.points, from, to);
+    let mut cuts: Vec<(CreekReach, f32, f32)> = chain
+        .parts
+        .iter()
+        .filter_map(|(r, begin)| {
+            let len = length_of(&r.points);
+            let (a, b) = ((from - begin).max(0.0), (to - begin).min(len));
+            (b > a + 0.01).then(|| (r.clone(), a, b))
+        })
+        .collect();
+    // Side creeks running into it inside the stretch: their last meters run on its grid.
+    let width = course.iter().map(|p| p.width_m).sum::<f32>() / course.len().max(1) as f32;
+    let (mut lo, mut hi) = (DVec2::splat(f64::MAX), DVec2::splat(f64::MIN));
+    for p in &course {
+        lo = lo.min(flat(p));
+        hi = hi.max(flat(p));
+    }
+    let mut found = Vec::new();
+    let reach_m = 0.5 * width as f64 + MOUTH_REACH_M;
+    query.reaches(
+        lo - DVec2::splat(reach_m),
+        hi + DVec2::splat(reach_m),
+        &mut found,
+    );
+    let mut tributaries = Vec::new();
+    let length = to - from;
+    for r in found {
+        if !joined || r.points.len() < 2 || chain.parts.iter().any(|p| p.0.id == r.id) {
+            continue;
+        }
+        let mouth = flat(r.points.last().expect("points"));
+        let (s, d) = along_line(&course, mouth);
+        if d as f64 > reach_m || s < 5.0 || s > length - 5.0 {
+            continue;
+        }
+        let len = length_of(&r.points);
+        let a = (len - TRIBUTARY_M).max(0.0);
+        let line = sub_course(&r.points, a, len);
+        if line.len() < 2 {
+            continue;
+        }
+        tributaries.push(line);
+        cuts.push((r, a, len));
+    }
+    // Within the grid's budget, or without them.
+    let all: Vec<CreekPoint> = course
+        .iter()
+        .chain(tributaries.iter().flatten())
+        .copied()
+        .collect();
+    if !tributaries.is_empty() && cells_over(&all, cell_for(width) as f64) > MOST_CELLS * 1.15 {
+        cuts.truncate(cuts.len() - tributaries.len());
+        tributaries.clear();
+    }
+    Some(Placed {
+        course,
+        tributaries,
+        cuts,
+        chain: chain.parts.iter().map(|(r, s)| (r.id, *s)).collect(),
+        span: (from, to, total),
+    })
+}
+
 /// Plan a stretch's grid (world-free: runs on a worker), with `stones` (the reach's, laid by
 /// [`crate::creek_stones`]) standing in it. `ground` is the height of the ground at x, z.
+///
+/// `tributaries` are side creeks' last meters running into it (see [`place_stretch`]): the
+/// grid takes them in, with a spring at the head of each bringing its flow.
 pub fn plan_stretch(
     course: &[CreekPoint],
+    tributaries: &[Vec<CreekPoint>],
     ground: &dyn Fn(f64, f64) -> f64,
     stones: &[StreamStone],
 ) -> Option<StretchPlan> {
@@ -205,8 +452,38 @@ pub fn plan_stretch(
         width_m: width,
         flow_m3_s: course[0].flow_m3_s,
     };
-    let base = course.iter().map(|p| p.at.y).fold(f64::MAX, f64::min) - 6.0;
-    let (corner, mut region) = stream_region_cells(&stream, base, ground, cell_for(width))?;
+    let base = course
+        .iter()
+        .chain(tributaries.iter().flatten())
+        .map(|p| p.at.y)
+        .fold(f64::MAX, f64::min)
+        - 6.0;
+    let cell = cell_for(width);
+    let (mut corner, mut region) = stream_region_cells(&stream, base, ground, cell)?;
+    // Grown to take in the side creeks, their banks too.
+    if !tributaries.is_empty() {
+        let margin = width as f64 + 6.0;
+        let size = DVec2::new(
+            region.cells[0] as f64 * cell as f64,
+            region.cells[1] as f64 * cell as f64,
+        );
+        let (mut lo, mut hi) = (
+            DVec2::new(corner.x, corner.z),
+            DVec2::new(corner.x, corner.z) + size,
+        );
+        for p in tributaries.iter().flatten() {
+            let q = DVec2::new(p.at.x, p.at.z);
+            lo = lo.min(q - DVec2::splat(margin));
+            hi = hi.max(q + DVec2::splat(margin));
+        }
+        let shift = (DVec2::new(corner.x, corner.z) - lo).as_vec2().to_array();
+        for s in region.sources.iter_mut().chain(&mut region.priming) {
+            s.at = [s.at[0] + shift[0], s.at[1] + shift[1]];
+        }
+        let cells = ((hi - lo) / cell as f64).ceil();
+        region.cells = [cells.x as u32, cells.y as u32];
+        corner = DVec3::new(lo.x, corner.y, lo.y);
+    }
     // The springs on the creek's own line: the stream's search for the lowest ground near its
     // course can land beside a creek running along a slope, below its bed, and flood the
     // grass there. And no hollows filled to the brim (the brim of a pool can be that open
@@ -235,6 +512,21 @@ pub fn plan_stretch(
     for p in &mut region.priming {
         p.at = on_line(p.at);
     }
+    // Each side creek's spring at the head of its last meters, and one priming it halfway.
+    for t in tributaries {
+        let local = |p: &CreekPoint| [(p.at.x - corner.x) as f32, (p.at.z - corner.z) as f32];
+        let radius = (t[0].width_m * 0.4).max(cell);
+        region.sources.push(FlowSource {
+            at: local(&t[0]),
+            radius_m: radius,
+            rate_m3_s: t[0].flow_m3_s,
+        });
+        region.priming.push(FlowSource {
+            at: local(&t[t.len() / 2]),
+            radius_m: radius,
+            rate_m3_s: t[0].flow_m3_s,
+        });
+    }
     region.fills.clear();
     let size = DVec2::new(
         region.cells[0] as f64 * region.cell_m as f64,
@@ -243,14 +535,16 @@ pub fn plan_stretch(
     // The stones in the channel. Not the boulders along the banks: half up the bank, mostly
     // out of the water, a film the grid spread over their tops poured off their edges as
     // falls; the water runs round them under their mesh just as well.
+    // Off the line of the creek nearest, as a share of that creek's width.
     let off_line = |p: DVec2| {
-        course
-            .windows(2)
+        std::iter::once(course)
+            .chain(tributaries.iter().map(|t| &t[..]))
+            .flat_map(|line| line.windows(2))
             .map(|w| {
                 let a = DVec2::new(w[0].at.x, w[0].at.z);
                 let ab = DVec2::new(w[1].at.x, w[1].at.z) - a;
                 let t = ((p - a).dot(ab) / ab.length_squared().max(1e-9)).clamp(0.0, 1.0);
-                (a + ab * t).distance(p)
+                (a + ab * t).distance(p) / w[0].width_m.max(0.1) as f64
             })
             .fold(f64::MAX, f64::min)
     };
@@ -260,7 +554,7 @@ pub fn plan_stretch(
             let d = DVec2::new(s.at.x - corner.x, s.at.z - corner.z);
             d.x >= 0.0 && d.y >= 0.0 && d.x <= size.x && d.y <= size.y
         })
-        .filter(|s| off_line(DVec2::new(s.at.x, s.at.z)) < (0.42 * width) as f64)
+        .filter(|s| off_line(DVec2::new(s.at.x, s.at.z)) < 0.42)
         .map(|s| s.rock(corner))
         .collect();
     Some(StretchPlan { corner, region })
@@ -324,14 +618,14 @@ pub fn creek_sim_system(
         .stretches
         .iter()
         .filter(|s| s.live)
-        .map(|s| s.cut)
+        .flat_map(|s| s.cuts.iter().copied())
         .collect();
     if ribbons.cuts != cuts {
         ribbons.cuts = cuts;
     }
     // A planned stretch: put in.
-    if let Some(done) = sims.job.as_mut().and_then(|(_, _, t)| check_ready(t)) {
-        let (cut, line, _) = sims.job.take().expect("job");
+    if let Some(done) = sims.job.as_mut().and_then(|(_, t)| check_ready(t)) {
+        let (job, _) = sims.job.take().expect("job");
         if let Some(plan) = done {
             let region = commands
                 .spawn((
@@ -342,8 +636,11 @@ pub fn creek_sim_system(
                 .id();
             let entities = vec![region];
             sims.stretches.push(Stretch {
-                cut,
-                line,
+                cuts: job.cuts,
+                provider: job.provider,
+                chain: job.chain,
+                span: job.span,
+                line: job.line,
                 entities,
                 region,
                 live: false,
@@ -413,54 +710,93 @@ pub fn creek_sim_system(
     else {
         return;
     };
-    // Still round the middle of the stretch running (or about to) on this reach, or toward
-    // the end of the reach it reaches: nothing to do.
-    let total = length_of(&reach.points);
+    // By a side creek's mouth: simulated with the creek it runs into, from there.
+    let joined = !sims.one_reach;
+    let (reach, at) = if joined && length_of(&reach.points) - at <= TRIBUTARY_M {
+        runs_into(provider.as_ref(), &reach).unwrap_or((reach, at))
+    } else {
+        (reach, at)
+    };
+    // Still round the middle of a stretch running (or about to) down this creek, or toward
+    // an end of the creek it reaches, or by the mouth of a side creek it takes in: nothing to
+    // do.
     let covered = sims.stretches.iter().any(|st| {
-        let (from, to) = (st.cut.from_m, st.cut.to_m);
-        let len = to - from;
-        let mid = from + 0.4 * len;
-        st.cut.provider == key
-            && st.cut.reach == reach.id
-            && ((at - mid).abs() < RECENTER_SHARE * len
+        if st.provider != key {
+            return false;
+        }
+        if let Some(&(_, start)) = st.chain.iter().find(|c| c.0 == reach.id) {
+            let at = start + at;
+            let (from, to, total) = st.span;
+            let len = to - from;
+            let mid = from + 0.4 * len;
+            return (at - mid).abs() < RECENTER_SHARE * len
                 || (from <= 0.0 && at <= mid)
-                || (to >= stretch_end(total) - 0.01 && at >= mid))
+                || (to >= stretch_end(total) - 0.01 && at >= mid);
+        }
+        st.cuts
+            .iter()
+            .any(|c| c.reach == reach.id && at >= c.from_m - 5.0 && at <= c.to_m + 0.01)
     });
     if covered {
         return;
     }
-    let Some((from, to)) = stretch_of(&reach.points, at) else {
+    let Some(placed) = place_stretch(provider.as_ref(), &reach, at, joined) else {
         return;
     };
-    let course: Vec<CreekPoint> = sub_course(&reach.points, from, to)
-        .into_iter()
-        .map(|p| CreekPoint {
-            at: p.at + *offset,
-            ..p
-        })
+    let world = |line: &[CreekPoint]| -> Vec<CreekPoint> {
+        line.iter()
+            .map(|p| CreekPoint {
+                at: p.at + *offset,
+                ..*p
+            })
+            .collect()
+    };
+    let course = world(&placed.course);
+    let tributaries: Vec<Vec<CreekPoint>> = placed.tributaries.iter().map(|t| world(t)).collect();
+    let line: Vec<DVec2> = course
+        .iter()
+        .chain(tributaries.iter().flatten())
+        .map(|p| DVec2::new(p.at.x, p.at.z))
         .collect();
-    let line: Vec<DVec2> = course.iter().map(|p| DVec2::new(p.at.x, p.at.z)).collect();
-    let cut = Cut {
+    let job = Job {
+        cuts: placed
+            .cuts
+            .iter()
+            .map(|(r, from, to)| Cut {
+                provider: key,
+                reach: r.id,
+                from_m: *from,
+                to_m: *to,
+            })
+            .collect(),
         provider: key,
-        reach: reach.id,
-        from_m: from,
-        to_m: to,
+        chain: placed.chain.clone(),
+        span: placed.span,
+        line,
     };
     let Some(ground) = ground.map(|g| (*g).clone()) else {
         return;
     };
-    let probe = course.iter().map(|p| p.at.y).fold(f64::MIN, f64::max) + 50.0;
-    // The reach's stones: as laid for the rocks drawn (else laid here the same way); none when
-    // the stones are off.
-    let laid = stones.reach((key, reach.id));
-    let off = stones.off;
-    let seed = reach_seed(&reach);
-    let whole: Vec<CreekPoint> = reach
-        .points
+    let probe = course
         .iter()
-        .map(|p| CreekPoint {
-            at: p.at + *offset,
-            ..*p
+        .chain(tributaries.iter().flatten())
+        .map(|p| p.at.y)
+        .fold(f64::MIN, f64::max)
+        + 50.0;
+    // Each reach's stones: as laid for the rocks drawn (else laid here the same way); none
+    // when the stones are off.
+    let off = stones.off;
+    let parts: Vec<_> = placed
+        .cuts
+        .iter()
+        .map(|(r, from, to)| {
+            (
+                stones.reach((key, r.id)),
+                world(&r.points),
+                reach_seed(r),
+                *from,
+                *to,
+            )
         })
         .collect();
     let plan = move || {
@@ -469,17 +805,18 @@ pub fn creek_sim_system(
                 .height(DVec3::new(x, probe, z))
                 .unwrap_or(probe - 50.0)
         };
-        let in_it = if off {
-            Vec::new()
-        } else {
-            let all = laid.unwrap_or_else(|| Arc::new(lay_reach_stones(&whole, &height, seed)));
-            stones_between(&all, from, to)
-        };
-        plan_stretch(&course, &height, &in_it)
+        let mut in_it = Vec::new();
+        if !off {
+            for (laid, whole, seed, from, to) in parts {
+                let all = laid.unwrap_or_else(|| Arc::new(lay_reach_stones(&whole, &height, seed)));
+                in_it.extend(stones_between(&all, from, to));
+            }
+        }
+        plan_stretch(&course, &tributaries, &height, &in_it)
     };
     engine_core::tasks::init_task_pools();
     let task = AsyncComputeTaskPool::get().spawn(async move { plan() });
-    sims.job = Some((cut, line, task));
+    sims.job = Some((job, task));
 }
 
 #[cfg(test)]
@@ -518,10 +855,71 @@ mod tests {
         let height = |x: f64, z: f64| m.height(x as f32, z as f32) as f64;
         let stones = lay_reach_stones(&reach.points, &height, reach_seed(reach));
         let plan =
-            plan_stretch(&course, &height, &stones_between(&stones, from, to)).expect("plan");
+            plan_stretch(&course, &[], &height, &stones_between(&stones, from, to)).expect("plan");
         assert!(!plan.region.sources.is_empty());
         assert!(!plan.region.rocks.is_empty());
         let cells = plan.region.cells[0] as f64 * plan.region.cells[1] as f64;
         assert!(cells <= MOST_CELLS * 1.05, "{cells}");
+    }
+
+    #[test]
+    fn a_stretch_runs_on_across_a_junction_and_takes_in_the_side_creek() {
+        let m = meadow();
+        let id = |id: u64| m.reaches.iter().find(|r| r.id == id).expect("reach");
+        // The main stream's third reach, a few meters below where its second ends and a side
+        // creek (19) comes in.
+        let reach = id(3);
+        let placed = place_stretch(&*m, reach, 4.0, true).expect("placed");
+        // It runs down the main stream across the junction rather than starting at it.
+        let ids: Vec<u64> = placed.cuts.iter().map(|c| c.0.id).collect();
+        assert!(ids.contains(&2) && ids.contains(&3), "{ids:?}");
+        let (from, to, _) = placed.span;
+        let start = placed.chain.iter().find(|c| c.0 == 3).expect("in chain").1;
+        assert!(
+            from < start - 20.0 && to > start + 20.0,
+            "{from}..{to} ({start})"
+        );
+        // And the side creek's last meters run on its grid, cut from the ribbons.
+        assert!(ids.contains(&19), "{ids:?}");
+        let side = placed
+            .cuts
+            .iter()
+            .find(|c| c.0.id == 19)
+            .expect("side creek");
+        assert!((side.2 - length_of(&side.0.points)).abs() < 0.01);
+        assert!(side.2 - side.1 > 20.0, "{side:?}");
+        // Planned with both springs, inside its budget.
+        let height = |x: f64, z: f64| m.height(x as f32, z as f32) as f64;
+        let plan = plan_stretch(&placed.course, &placed.tributaries, &height, &[]).expect("plan");
+        assert_eq!(plan.region.sources.len(), 1 + placed.tributaries.len());
+        let main_q = placed.course[0].flow_m3_s;
+        let side_q = placed.tributaries[0][0].flow_m3_s;
+        assert!((plan.region.sources[1].rate_m3_s - side_q).abs() < 1e-6);
+        assert!(side_q < main_q);
+        let cells = plan.region.cells[0] as f64 * plan.region.cells[1] as f64;
+        assert!(cells <= MOST_CELLS * 1.3, "{cells}");
+        // The side creek's head is inside the grid.
+        let head = placed.tributaries[0][0].at;
+        let size = DVec2::new(
+            plan.region.cells[0] as f64 * plan.region.cell_m as f64,
+            plan.region.cells[1] as f64 * plan.region.cell_m as f64,
+        );
+        let d = DVec2::new(head.x - plan.corner.x, head.z - plan.corner.z);
+        assert!(
+            d.x > 0.0 && d.y > 0.0 && d.x < size.x && d.y < size.y,
+            "{d} {size}"
+        );
+    }
+
+    #[test]
+    fn a_side_creek_runs_into_the_main_stream() {
+        let m = meadow();
+        let id = |id: u64| m.reaches.iter().find(|r| r.id == id).expect("reach");
+        // Side creek 19 ends a few meters from the main stream, by its reaches 2 and 3.
+        let (into, at) = runs_into(&*m, id(19)).expect("runs into");
+        assert_eq!(into.order, 3);
+        assert!(at >= 0.0 && at <= length_of(&into.points), "{at}");
+        // A headwater going on in the creek below it doesn't.
+        assert!(runs_into(&*m, id(14)).is_none());
     }
 }

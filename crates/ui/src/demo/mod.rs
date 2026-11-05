@@ -218,40 +218,43 @@ pub fn spawn_demo(commands: &mut Commands, origin: DVec3) {
                 let Some(origin) = at(world) else {
                     return;
                 };
-                // One frame each: the square, stalls and props; the stock and straw; the ale
-                // corner and the markers (110 ms in one frame on the session VM).
+                // One frame each: the square and stalls; the props; the stock and straw; the
+                // ale corner and the markers (110 ms in one frame on the session VM).
                 let rest = market::place_market_first(world, origin, textures);
-                engine_core::off_frame::off_frame(
-                    world,
-                    "ui market stock",
-                    || (),
-                    move |world, ()| {
-                        let Some(origin) = at(world) else {
-                            return;
-                        };
+                after_a_frame(world, "ui market props", at, move |world, origin| {
+                    let rest = rest.props(world, origin);
+                    after_a_frame(world, "ui market stock", at, move |world, origin| {
                         let stock = rest.stock(world, origin);
-                        engine_core::off_frame::off_frame(
-                            world,
-                            "ui market ale corner",
-                            || (),
-                            move |world, ()| {
-                                let Some(origin) = at(world) else {
-                                    return;
-                                };
-                                stock.corner(world, origin);
-                                // Over Old Brannoc's stall, the middle one, in view of the
-                                // tour's UI stops.
-                                let (stall, _) = market::stall_place(2);
-                                crate::hud::spawn_world_markers(
-                                    world,
-                                    origin,
-                                    stall + DVec3::Y * 3.4,
-                                );
-                            },
-                        );
-                    },
-                );
+                        after_a_frame(world, "ui market ale corner", at, move |world, origin| {
+                            stock.corner(world, origin);
+                            // Over Old Brannoc's stall, the middle one, in view of the tour's
+                            // UI stops.
+                            let (stall, _) = market::stall_place(2);
+                            crate::hud::spawn_world_markers(world, origin, stall + DVec3::Y * 3.4);
+                        });
+                    });
+                });
             },
         );
     });
+}
+
+/// Run `place` in a later off-frame apply (in the current job's scope), at the anchor's
+/// position then (`at`), unless the anchor is gone.
+fn after_a_frame(
+    world: &mut World,
+    name: &'static str,
+    at: impl Fn(&World) -> Option<DVec3> + Send + 'static,
+    place: impl FnOnce(&mut World, DVec3) + Send + 'static,
+) {
+    engine_core::off_frame::off_frame(
+        world,
+        name,
+        || (),
+        move |world, ()| {
+            if let Some(origin) = at(world) {
+                place(world, origin);
+            }
+        },
+    );
 }

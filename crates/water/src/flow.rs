@@ -457,6 +457,8 @@ pub struct Falls {
     /// Per lip, whether the sheet carries on past its left and right ends (-across, +across:
     /// another lip along the same brink), so only a fall's outer edges fray.
     pub sides: Vec<[bool; 2]>,
+    /// Where the stream runs into still water ([`FlowSim::mouths`]).
+    pub mouths: Vec<(DVec3, Vec2, f32)>,
 }
 
 /// How often a flow checks whether its water still moves, seconds of flow.
@@ -553,11 +555,13 @@ impl FlowSim {
             .collect::<Vec<_>>();
         let plunges = self.plunges_of(&lips, &paths);
         let sides = lip_sides(&lips);
+        let mouths = self.mouths();
         self.falls = std::sync::Arc::new(Falls {
             lips,
             paths,
             plunges,
             sides,
+            mouths,
         });
         self.since_falls = 0.0;
     }
@@ -761,6 +765,71 @@ impl FlowSim {
     }
 
     /// [`FlowSim::plunges`] of `lips` falling down `paths`.
+    /// Where the water runs into a lake (a [`crate::WaterBody`] the region overlaps, its
+    /// [`FlowSim::reservoir`] cells): one mouth per square 8 m wide, at the inflow-weighted
+    /// middle of the lake's edge there, on the lake's surface, with the way the water comes in
+    /// (world, unit) and how much, m³/s. A flood's mud spreads into the lake from these
+    /// (`crate::freshet`).
+    pub fn mouths(&self) -> Vec<(DVec3, Vec2, f32)> {
+        const SQUARE_M: f64 = 8.0;
+        const LEAST_M3_S: f32 = 0.01;
+        let (nx, nz) = (self.nx, self.nz);
+        let mut buckets: Vec<((i64, i64), DVec3, Vec2, f32)> = Vec::new();
+        for j in 0..nz {
+            for i in 0..nx {
+                let idx = j * nx + i;
+                let level = self.reservoir[idx];
+                if !level.is_finite() {
+                    continue;
+                }
+                // What its neighbors off the lake pour into it, steadily.
+                let mut v = Vec2::ZERO;
+                let mut q = 0.0;
+                let mut from = |n: usize, side: usize, dir: Vec2| {
+                    if !self.reservoir[n].is_finite() {
+                        let f = self.steady[n][side].max(0.0);
+                        q += f;
+                        v += dir * f;
+                    }
+                };
+                if i > 0 {
+                    from(idx - 1, 1, Vec2::X);
+                }
+                if i + 1 < nx {
+                    from(idx + 1, 0, -Vec2::X);
+                }
+                if j > 0 {
+                    from(idx - nx, 3, Vec2::Y);
+                }
+                if j + 1 < nz {
+                    from(idx + nx, 2, -Vec2::Y);
+                }
+                if q <= 0.0 {
+                    continue;
+                }
+                let mut at = self.cell_center(i, j);
+                at.y += level as f64;
+                let key = (
+                    (at.x / SQUARE_M).floor() as i64,
+                    (at.z / SQUARE_M).floor() as i64,
+                );
+                match buckets.iter_mut().find(|b| b.0 == key) {
+                    Some(b) => {
+                        b.1 += at * q as f64;
+                        b.2 += v;
+                        b.3 += q;
+                    }
+                    None => buckets.push((key, at * q as f64, v, q)),
+                }
+            }
+        }
+        buckets
+            .into_iter()
+            .filter(|b| b.3 >= LEAST_M3_S)
+            .map(|(_, p, v, q)| (p / q as f64, self.world_dir(v.normalize_or_zero()), q))
+            .collect()
+    }
+
     fn plunges_of(&self, lips: &[Lip], paths: &[Vec<FallPoint>]) -> Vec<(DVec3, Vec2, f32)> {
         // Feet cluster into squares 8 cells wide, so a wide fall is one plunge, two falls two.
         let size = 8.0 * self.cell as f64;
@@ -1567,6 +1636,38 @@ mod tests {
             "{}",
             sim.depth[2 * 20 + 19]
         );
+    }
+
+    #[test]
+    fn a_stream_has_a_mouth_where_it_runs_into_the_lake() {
+        // A channel 20 m long falling 1 m toward +x, a spring at the top, a lake over the
+        // last 4 m.
+        let mut r = region(40, 6);
+        r.sources.push(FlowSource {
+            at: [1.0, 1.5],
+            radius_m: 0.5,
+            rate_m3_s: 0.2,
+        });
+        let bed: Vec<f32> = (0..40 * 6).map(|k| 1.0 - (k % 40) as f32 * 0.025).collect();
+        let mut sim = FlowSim::new(Entity::PLACEHOLDER, DVec3::ZERO, &r, bed);
+        for j in 0..6 {
+            for i in 32..40 {
+                sim.reservoir[j * 40 + i] = 0.3;
+            }
+        }
+        assert!(sim.mouths().is_empty());
+        for _ in 0..60 * 90 {
+            sim.step(1.0 / 60.0);
+        }
+        let mouths = sim.mouths();
+        assert_eq!(mouths.len(), 1, "{mouths:?}");
+        let (at, dir, q) = mouths[0];
+        // At the lake's edge, on its surface, coming in down the channel with about all
+        // the spring brings.
+        assert!((at.x - 16.25).abs() < 0.6, "{at}");
+        assert!((at.y - 0.3).abs() < 1e-3, "{at}");
+        assert!(dir.x > 0.9, "{dir}");
+        assert!((q - 0.2).abs() < 0.05, "{q}");
     }
 
     #[test]

@@ -164,7 +164,8 @@ fn grass_vertex(s: BladeShape, vertex: u32, t: f32, tip_dir: vec3<f32>) -> Blade
         // Lying on the ground along its own direction, just above it, some curling up at the
         // tip and a few cupped up along their length.
         let base = root + up * 0.004;
-        let curl = height * (0.04 + 0.3 * s.rise * s.rise);
+        // Stiff things (twigs: `bend` near 1) lie straight; leaves curl up.
+        let curl = height * (0.04 + 0.3 * s.rise * s.rise) * (1.0 - min(f.shape.w, 1.0));
         p0 = mix(p0, base, lying);
         p1 = mix(p1, base + facing * (height * 0.33) + up * (curl * 0.35), lying);
         p2 = mix(p2, base + facing * (height * 0.66) + up * (curl * 0.6), lying);
@@ -202,7 +203,9 @@ fn grass_vertex(s: BladeShape, vertex: u32, t: f32, tip_dir: vec3<f32>) -> Blade
     // A compound leaf's blade is drawn whole, its leaflets cut out of it (`grass_cut`).
     let whole = select(max(pow(sin(PI * pow(x, 0.8)), 0.7), 0.1), 1.0, f.kind.z < 0.0);
     let leaf_shape = select(select(0.1, 0.04, f.kind.z < 0.0), whole, u > stalk);
-    var half_width = 0.5 * s.width * mix(pow(q, 0.6), leaf_shape, leaf);
+    // A blade tapers to its tip; a stick lying on the ground (no leaf) only a little.
+    let taper = mix(pow(q, 0.6), 1.0 - 0.55 * u, lying * (1.0 - leaf));
+    var half_width = 0.5 * s.width * mix(taper, leaf_shape, leaf);
     // A flowering stem: thin, then its head (a disc seen edge-on is still a few petals wide).
     let head = smoothstep(0.91, 0.94, u);
     if (flower) {

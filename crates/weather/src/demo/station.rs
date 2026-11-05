@@ -142,6 +142,64 @@ struct Meshes {
     tufts: Handle<Mesh>,
 }
 
+impl Meshes {
+    /// The same meshes under other handles (`f` maps each).
+    fn remap(self, f: impl Fn(Handle<Mesh>) -> Handle<Mesh>) -> Self {
+        Self {
+            asphalt: f(self.asphalt),
+            patch: f(self.patch),
+            sealant: f(self.sealant),
+            lines_white: f(self.lines_white),
+            lines_yellow: f(self.lines_yellow),
+            lettering: f(self.lettering),
+            kerbs: f(self.kerbs),
+            pavers: f(self.pavers),
+            joint: f(self.joint),
+            setts: f(self.setts),
+            sand: f(self.sand),
+            sleepers: f(self.sleepers),
+            manhole_cover: f(self.manhole_cover),
+            manhole_ring: f(self.manhole_ring),
+            gully: f(self.gully),
+            gully_hole: f(self.gully_hole),
+            shelter: self.shelter.map(&f),
+            lamp: self.lamp.map(&f),
+            lamp_light: self.lamp_light,
+            bollard: f(self.bollard),
+            bollard_bands: f(self.bollard_bands),
+            plinth: f(self.plinth),
+            plinth_cup: f(self.plinth_cup),
+            ball: f(self.ball),
+            mast: self.mast.map(&f),
+            mast_points: self.mast_points,
+            rotor: f(self.rotor),
+            cups: f(self.cups),
+            vane: f(self.vane),
+            vane_nose: f(self.vane_nose),
+            sock_pole: f(self.sock_pole),
+            sock_frame: f(self.sock_frame),
+            sock_bands: self.sock_bands.into_iter().map(&f).collect(),
+            screen: f(self.screen),
+            screen_hw: f(self.screen_hw),
+            gauge: self.gauge.map(&f),
+            gauge_water: f(self.gauge_water),
+            stake: f(self.stake),
+            mound: f(self.mound),
+            thermo: self.thermo.map(&f),
+            thermo_column: f(self.thermo_column),
+            seg_h: f(self.seg_h),
+            seg_v: f(self.seg_v),
+            led_dot: f(self.led_dot),
+            fence: f(self.fence),
+            fence_hw: f(self.fence_hw),
+            sign: self.sign.map(&f),
+            flag: self.flag.map(&f),
+            leaves: f(self.leaves),
+            tufts: f(self.tufts),
+        }
+    }
+}
+
 const KEY: &str = "weather/station";
 
 // Layout (meters, station frame: +Z north, the cameras mostly look from +Z).
@@ -418,11 +476,12 @@ pub(crate) fn build(world: &mut World, origin: DVec3) {
         || {
             let started = std::time::Instant::now();
             let baked = bake_textures();
-            (baked, started.elapsed().as_secs_f64() * 1000.0)
+            let meshes = build_meshes();
+            (baked, meshes, started.elapsed().as_secs_f64() * 1000.0)
         },
-        |world: &mut World, (baked, bake_ms): (Baked, f64)| {
+        |world: &mut World, (baked, meshes, bake_ms): (Baked, BuiltMeshes, f64)| {
             let started = std::time::Instant::now();
-            let kit = make_kit(world, baked);
+            let kit = make_kit(world, baked, meshes);
             world.insert_resource(kit.clone());
             let roots = world
                 .remove_resource::<WaitingForKit>()
@@ -442,11 +501,34 @@ pub(crate) fn build(world: &mut World, origin: DVec3) {
     );
 }
 
-fn make_kit(world: &mut World, baked: Baked) -> StationKit {
+fn make_kit(world: &mut World, baked: Baked, built: BuiltMeshes) -> StationKit {
     let tex = install_textures(world, baked);
     let m = make_materials(world, &tex);
-    let mesh = make_meshes(world);
+    let mesh = adopt_meshes(world, built);
     StationKit { m, mesh }
+}
+
+/// The station's meshes made on a worker, in an asset store of their own.
+type BuiltMeshes = (Assets<Mesh>, Meshes);
+
+/// Make every mesh without the world (on a worker; about 17 ms).
+fn build_meshes() -> BuiltMeshes {
+    let mut store = Assets::<Mesh>::default();
+    let meshes = make_meshes(&mut store);
+    (store, meshes)
+}
+
+/// Move meshes made by [`build_meshes`] into the world's store, under the same keys.
+fn adopt_meshes(world: &mut World, (mut store, meshes): BuiltMeshes) -> Meshes {
+    let made: Vec<(String, Handle<Mesh>)> = store.keys().map(|(k, h)| (k.to_string(), h)).collect();
+    let mut assets = world.resource_mut::<Assets<Mesh>>();
+    let mut moved = std::collections::HashMap::new();
+    for (key, h) in made {
+        if let Some(mesh) = store.remove(h) {
+            moved.insert(h, assets.insert_keyed(&key, mesh));
+        }
+    }
+    meshes.remap(|h| moved.get(&h).copied().unwrap_or(h))
 }
 
 /// All the station's textures, generated in parallel the first time.
@@ -860,8 +942,7 @@ fn make_materials(world: &mut World, t: &Textures) -> Mats {
     }
 }
 
-fn make_meshes(world: &mut World) -> Meshes {
-    let mut meshes = world.resource_mut::<Assets<Mesh>>();
+fn make_meshes(meshes: &mut Assets<Mesh>) -> Meshes {
     let mut add = |name: &str, m: Mesh| meshes.insert_keyed(&format!("{KEY}/mesh/{name}"), m);
     // Ground.
     let (hx, hz) = YARD;
@@ -1581,6 +1662,36 @@ mod tests {
                 let y = yard_y(x, z);
                 assert!((0.0005..0.01).contains(&y), "{x},{z}: {y}");
             }
+        }
+    }
+
+    /// The meshes made on a worker land in the world's store under their keys, and every
+    /// part draws one of them.
+    #[test]
+    fn worker_made_meshes_are_the_ones_drawn() {
+        let mut world = World::new();
+        build(&mut world, DVec3::ZERO);
+        let meshes = world.resource::<Assets<Mesh>>();
+        let keyed = meshes
+            .keys()
+            .filter(|(k, _)| k.starts_with(&format!("{KEY}/mesh/")))
+            .count();
+        assert!(keyed > 50, "only {keyed} station meshes in the store");
+        let drawn: Vec<Handle<Mesh>> = world
+            .query::<&MeshRenderer>()
+            .iter(&world)
+            .filter_map(|r| match r.mesh {
+                MeshRef::Handle(h) => Some(h),
+                _ => None,
+            })
+            .collect();
+        assert!(!drawn.is_empty());
+        let meshes = world.resource::<Assets<Mesh>>();
+        for h in drawn {
+            assert!(
+                meshes.get(h).is_some(),
+                "a part draws a mesh not in the store"
+            );
         }
     }
 

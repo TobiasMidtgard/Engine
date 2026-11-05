@@ -126,6 +126,9 @@ pub struct FloorMaps {
     /// Which herb grows at each point (`GrassField::kinds` of the herbs' field, looks from
     /// [`herb_styles`]).
     pub herb_kinds: Vec<u8>,
+    /// What lies at each point of the litter: 0 fallen leaves, 1 twigs among them
+    /// ([`GrassStyle::twigs`]).
+    pub litter_kinds: Vec<u8>,
 }
 
 /// The forest floor's kinds of herb, in the order [`FloorMaps::herb_kinds`] names them:
@@ -191,6 +194,7 @@ pub fn floor_maps(
     let mut herbs = (Vec::with_capacity(n), Vec::with_capacity(n));
     let mut litter = (Vec::with_capacity(n), Vec::with_capacity(n));
     let mut herb_kinds = Vec::with_capacity(n);
+    let mut litter_kinds = Vec::with_capacity(n);
     for j in 0..rz {
         for i in 0..rx {
             let k = (j * rx + i) as usize;
@@ -252,6 +256,12 @@ pub fn floor_maps(
             };
             // Dryness picks the leaf's color, fresh brown to pale ochre, in patches.
             let hue = fbm2(x * 0.9, z * 0.9, region.seed ^ 0x2c3, 2, 2.0, 0.5);
+            // Twigs lie in spots among the leaves, more of them under a closed canopy (the
+            // crowns shed them: ref3_forest_floor's sticks).
+            let twig_spot = unit_hash(region.seed ^ 0x7719, i, j);
+            litter_kinds.push(u8::from(
+                leaves > 0.0 && twig_spot < 0.15 + 0.25 * canopy[k],
+            ));
             litter.0.push(leaves);
             litter
                 .1
@@ -262,7 +272,19 @@ pub fn floor_maps(
         herbs,
         litter,
         herb_kinds,
+        litter_kinds,
     }
+}
+
+/// A number in 0..1 that looks random, the same for the same `seed` and grid point.
+fn unit_hash(seed: u64, i: u32, j: u32) -> f32 {
+    let mut h = seed
+        ^ (i as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15)
+        ^ (j as u64).wrapping_mul(0xc2b2_ae3d_27d4_eb4f);
+    h ^= h >> 33;
+    h = h.wrapping_mul(0xff51_afd7_ed55_8ccd);
+    h ^= h >> 33;
+    (h >> 40) as f32 / (1u64 << 24) as f32
 }
 
 /// How closed the canopy is over each grid point, and how much of it is broadleaved.
@@ -665,14 +687,22 @@ pub struct GrassBuild {
 }
 
 /// What a build produces, and what it was built for.
-struct BuiltGrass {
-    /// Each field's layer, look, density and dryness.
-    layers: Vec<(FloorLayer, GrassStyle, Vec<f32>, Vec<f32>)>,
+/// The kinds maps of a region's fields.
+struct FloorKinds {
     /// The meadow's kinds of grass and their looks (`GrassField::kinds`, `styles`).
     kinds: Vec<u8>,
     kind_styles: Vec<GrassStyle>,
-    /// Which herb grows where on the forest floor (the herbs' field's `kinds`).
+    /// Which herb grows where on the forest floor (the herbs' field's `kinds`), and where
+    /// twigs lie among the fallen leaves (the litter's).
     herb_kinds: Vec<u8>,
+    litter_kinds: Vec<u8>,
+}
+
+struct BuiltGrass {
+    /// Each field's layer, look, density and dryness.
+    layers: Vec<(FloorLayer, GrassStyle, Vec<f32>, Vec<f32>)>,
+    /// What grows where in each layer.
+    floor_kinds: FloorKinds,
     /// Rebuilt only on the first build and after the terrain changed: the grass's (on the
     /// ground) and the floor layers' (on the forest floor's surface).
     heights: Option<Vec<f32>>,
@@ -783,8 +813,7 @@ pub fn sync_region_grass(
                     field.density = density;
                     field.dryness = dryness;
                     field.style = style;
-                    let (kinds, styles) =
-                        layer_kinds(layer, &built.kinds, &built.kind_styles, &built.herb_kinds);
+                    let (kinds, styles) = layer_kinds(layer, &built.floor_kinds);
                     field.kinds = kinds;
                     field.styles = styles;
                     if t.translation != field_at.translation {
@@ -801,8 +830,7 @@ pub fn sync_region_grass(
                             built.size[1],
                         );
                     }
-                    let (kinds, styles) =
-                        layer_kinds(layer, &built.kinds, &built.kind_styles, &built.herb_kinds);
+                    let (kinds, styles) = layer_kinds(layer, &built.floor_kinds);
                     let field = GrassField {
                         size: built.size,
                         resolution: built.resolution,
@@ -1059,6 +1087,10 @@ pub fn sync_region_grass(
                 .as_mut()
                 .filter(|_| herb_kinds_on)
                 .map_or_else(Vec::new, |f| std::mem::take(&mut f.herb_kinds));
+            let litter_kinds = floor
+                .as_mut()
+                .filter(|_| herb_kinds_on)
+                .map_or_else(Vec::new, |f| std::mem::take(&mut f.litter_kinds));
             let mut floor = floor.map(|f| [Some(f.herbs), Some(f.litter)]);
             let layers = styles
                 .into_iter()
@@ -1074,9 +1106,12 @@ pub fn sync_region_grass(
                 .collect();
             BuiltGrass {
                 layers,
-                kinds,
-                kind_styles,
-                herb_kinds,
+                floor_kinds: FloorKinds {
+                    kinds,
+                    kind_styles,
+                    herb_kinds,
+                    litter_kinds,
+                },
                 heights,
                 floor_heights,
                 resolution: res,
@@ -1089,15 +1124,15 @@ pub fn sync_region_grass(
 }
 
 /// A layer's kinds map and the other kinds' looks: the meadow's grasses, the floor's herbs.
-fn layer_kinds(
-    layer: FloorLayer,
-    grass_kinds: &[u8],
-    grass_styles: &[GrassStyle],
-    herb_kinds: &[u8],
-) -> (Vec<u8>, Vec<GrassStyle>) {
+fn layer_kinds(layer: FloorLayer, built: &FloorKinds) -> (Vec<u8>, Vec<GrassStyle>) {
     match layer {
-        FloorLayer::Grass => (grass_kinds.to_vec(), grass_styles.to_vec()),
-        FloorLayer::Herbs if !herb_kinds.is_empty() => (herb_kinds.to_vec(), herb_styles().1),
+        FloorLayer::Grass => (built.kinds.clone(), built.kind_styles.clone()),
+        FloorLayer::Herbs if !built.herb_kinds.is_empty() => {
+            (built.herb_kinds.clone(), herb_styles().1)
+        }
+        FloorLayer::Litter if !built.litter_kinds.is_empty() => {
+            (built.litter_kinds.clone(), vec![GrassStyle::twigs()])
+        }
         _ => (Vec::new(), Vec::new()),
     }
 }

@@ -1688,15 +1688,21 @@ fn step_one(entity: Entity, body: &mut SoftBodySim, ctx: &StepContext) {
     // settles only as it steps (settling there shows as a fast-forward).
     let loaded = !b.sim.loads.is_empty();
     let solving = Instant::now();
-    b.sim.step(dt, &local);
+    let work = b.sim.len() * b.sim.substeps_for(1.0 / 60.0) as usize;
+    let fits = (PREWARM_WORK / work.max(1)) as u32;
+    let least = u32::from(dist > ctx.config.lod_distance);
+    // Past the LOD distance, a settling body's first settling step stands in for the frame's
+    // own step: the two made one more full step a frame for each such body, side by side
+    // with the others (the PC's slowest body took 16.75 ms a frame on the climb, round 22).
+    // It settles in as many frames; that far off, the time it skips doesn't show.
+    let swap = least > 0 && b.pending_prewarm > 0;
+    // What it pushed on colliders and pulled frames with in the frame's step (the settling
+    // step's, when it stands in).
+    b.sim.step(if swap { 1.0 / 60.0 } else { dt }, &local);
     let impulses = b.sim.collider_impulses.clone();
     let pulls = b.sim.frame_impulses.clone();
-    let work = b.sim.len() * b.sim.substeps_for(1.0 / 60.0) as usize;
-    let least = u32::from(dist > ctx.config.lod_distance);
-    let runs = ((PREWARM_WORK / work.max(1)) as u32)
-        .max(least)
-        .min(b.pending_prewarm);
-    for _ in 0..runs {
+    let runs = fits.max(least).min(b.pending_prewarm);
+    for _ in u32::from(swap)..runs {
         b.sim.step(1.0 / 60.0, &local);
     }
     b.pending_prewarm -= runs;

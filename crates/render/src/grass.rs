@@ -187,7 +187,8 @@ pub struct GrassStyle {
     pub height_variation: f32,
     /// Blade width at the root, meters.
     pub width: f32,
-    /// How far blades lean over: 0 = straight up, 1 = about 45 degrees.
+    /// How far blades lean over: 0 = straight up, 1 = about 45 degrees. With `lying`, how
+    /// stiff they lie instead: 0 leaves curl up at the tip, 1 twigs lie straight.
     pub bend: f32,
     /// Albedo (linear RGB) of fresh blades.
     pub lush_color: [f32; 3],
@@ -460,6 +461,35 @@ impl GrassStyle {
         }
     }
 
+    /// Fallen twigs and sticks on a forest floor: lying straight, a finger thick and tapering,
+    /// grey-brown bark, a few in each patch of fallen leaves. A kind of the litter layer.
+    pub fn twigs() -> Self {
+        Self {
+            blades_per_m2: 30.0,
+            height: 0.5,
+            height_variation: 0.6,
+            width: 0.028,
+            bend: 0.9,
+            lush_color: [0.13, 0.105, 0.075],
+            dry_color: [0.26, 0.23, 0.19],
+            dryness: 0.5,
+            wind_response: 0.0,
+            draw_distance: 16.0,
+            shadow_distance: 0.0,
+            clump_size: 0.0,
+            clump_pull: 0.0,
+            clump_fan: 0.0,
+            clump_height: 0.0,
+            clump_color: 0.2,
+            droop: 0.0,
+            gloss: 0.05,
+            tip_tint: [1.1, 1.05, 1.0],
+            leaf: 0.0,
+            lying: 1.0,
+            ..Default::default()
+        }
+    }
+
     /// A temperate summer meadow: knee-high, fresh green, yellowing at the tips.
     pub fn meadow() -> Self {
         Self {
@@ -721,6 +751,25 @@ fn push_jobs(jobs: &mut Vec<[u32; 4]>, first: u32, count: u32, mode: u32, segmen
             segments,
         ]);
     }
+}
+
+/// A field's blade seed: from its world position (to the centimeter), size and look, so
+/// layers over the same ground (a forest floor's herbs, litter and ferns) differ.
+fn field_seed(at: DVec3, size: [f32; 2], style: &GrassStyle) -> u32 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for v in [
+        (at.x * 100.0).round() as i64 as u64,
+        (at.y * 100.0).round() as i64 as u64,
+        (at.z * 100.0).round() as i64 as u64,
+        size[0].to_bits() as u64,
+        size[1].to_bits() as u64,
+        style.height.to_bits() as u64,
+        style.blades_per_m2.to_bits() as u64,
+    ] {
+        h = (h ^ v).wrapping_mul(0x0100_0000_01b3);
+        h ^= h >> 29;
+    }
+    (h ^ (h >> 32)) as u32
 }
 
 /// How a style's leaves are cut (`GpuField::kind` z, read by `grass_cut`): its pinnae pairs
@@ -1628,8 +1677,9 @@ impl RenderFeature for GrassFeature {
             if jobs > 0 {
                 self.field_jobs.push((field_index, first_job, jobs));
             }
-            let seed = (entity.to_bits() as u32)
-                ^ ((entity.to_bits() >> 32) as u32).wrapping_mul(0x9e37_79b9);
+            // Seeded by where the field lies and what it grows, not by its entity: the same
+            // meadow grows the same blades every run, and again when it streams back in.
+            let seed = field_seed(gt.translation(), field.size, style);
             self.order.push(entity);
             let kinds = field.palette().count() as u32;
             let mut base = GpuField {
