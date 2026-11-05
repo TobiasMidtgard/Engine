@@ -3,6 +3,7 @@
 mod api;
 mod articulation;
 pub mod audit;
+mod breaking;
 mod budget;
 mod buoyancy;
 mod capsule_box;
@@ -33,6 +34,7 @@ use engine_world::physics::{self as contract, PhysicsQueries};
 use engine_world::{GroundContact, NoiseEvent, WorldImpulse};
 use parking_lot::RwLock;
 
+pub use breaking::BreakTorque;
 pub use debug::PhysicsDebug;
 pub use engine_world::physics::{Fit, FitCollider};
 pub use fine::FineSteps;

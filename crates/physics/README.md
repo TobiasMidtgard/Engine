@@ -63,7 +63,11 @@ changing that one plugin line.
   settled pile costs nothing here.
 - **Joints**: fixed, spherical (cone limit), revolute and prismatic (limits, motors), distance
   (rope), spring. `break_force` breaks a joint: the joint entity is despawned (or the `Joint`
-  removed from a body entity). With `collide_connected: false` the two never touch, also when
+  removed from a body entity). `engine_physics::BreakTorque` on the joint's entity breaks it on
+  bending too (as PhysX's and Unity's joints break on force or torque). A breakable fixed joint
+  gives way at its strength: stiff motors capped at its limits hold it instead of locked axes,
+  so a blow passes on at most what the joint carries and the rest moves the struck body
+  (`src/breaking.rs`). With `collide_connected: false` the two never touch, also when
   one side is a fixed body (a door hinged inside its frame, a lid on a static box). Angles count
   from the pose the bodies had when the joint was first made: a fixed joint welds them as they
   were, a hinge's limits and motor targets are relative to it.
@@ -295,8 +299,9 @@ simulated coarsely and at half rate.
 - `ColliderShape::Heightfield` heights are row-major, rows along Z and columns along X,
   centered on the collider, spanning `size = [x, z]`.
 - `ContactEvent::impulse` is the contact's total normal impulse in its first touching step.
-- Joint break force is the constraint force, N (Rapier reports impulses per solver iteration;
-  this crate converts).
+- Joint break force is the constraint force, N, and `BreakTorque` the constraint torque, N·m
+  (Rapier reports impulses per solver iteration; this crate converts). A breakable fixed joint
+  breaks when one axis's motor runs at 98% of its cap.
 - Joint angles count from the bodies' relative pose when the joint is first made (a fixed joint
   keeps it; revolute and prismatic limits and motor targets are relative to it), and that rest
   pose survives the joint being remade (region changes, `articulated_joints` toggled).
@@ -324,8 +329,11 @@ curve this board gives, σ ≈ 3.2 bins, wider than a coin tossed at every row w
 rocks, faceted convex hulls 30 to 55 cm across, pour out of a hopper, slide down a 40° steel chute
 and drop off its lip into a heap with a 35° face), a **counterweight catapult** (a 1.2 t
 iron-bound box of stone on the short end of a 5 m oak arm swings it up into a padded crossbar,
-and the 38 kg granite ball flies on out of its cup, 7.4 m up and 11 m down range, into the top of
-a five-course crate wall; the arm is one body with the oak's and the stone's masses set on it,
+and the 38 kg granite ball flies on out of its cup, 7.4 m up and 10 m down range, into the corner
+post of a **timber watchtower** (two 2.5 m lifts of four posts with rails, a plank deck with a
+railing and four crates of stores; 41 pine timbers, each its own body, pegged with breakable fixed
+joints that also break on bending): the pegs round the blow snap, the post is knocked in, and the
+deck, on three posts, leans and brings the tower down in its timbers; the arm is one body with the oak's and the stone's masses set on it,
 stopped by its hinge's limit where the crossbar stands, and nothing lets the ball go: the cup
 stops and it doesn't), a **giant Jenga** tower (54 oak blocks, 18 levels of three; a test rig's
 kinematic steel rod pokes the loose middle blocks, 3 mm thinner as in a real set, out of three
@@ -411,8 +419,9 @@ more than 12% more on one side); contacts on small bodies (`tests/contacts.rs`: 
 sliding off a 4 mm pin falls within 10 frames and 2 cm, and one dropped on one of two pins three
 ball widths apart drops through); the catapult (`tests/proving_ground.rs`: the arm stays on its
 axle and comes to rest against the crossbar, the ball leaves the cup at 95 to 101% of the speed
-the counterweight's fall gives it without losses (99%: 10.1 of 10.2 m/s), rises over 7 m and
-brings down at least four of the wall's crates, and no crate leaves the yard); Jenga
+the counterweight's fall gives it without losses (99%: 10.1 of 10.2 m/s), rises over 7 m,
+no peg breaks before the ball gets there, more than half the watchtower's timbers are knocked or
+fall, its deck comes down over 2 m, and no timber leaves the yard); Jenga
 (`tests/proving_ground.rs`: after three pokes the poked blocks lie on the slab past the tower
 and no other block moved 3 cm, and after the fourth the top level is on the slab and nothing
 lies over 6 m from the tower); a headless

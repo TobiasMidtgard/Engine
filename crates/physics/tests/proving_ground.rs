@@ -450,24 +450,39 @@ fn the_galton_board_fills_its_bins_in_a_bell_curve() {
 
 /// The catapult (`demo::catapult`): the counterweight swings the arm up into its crossbar, the
 /// ball leaves the cup at the speed the falling counterweight's energy gives it (less a little
-/// lost to the hinge and the cup), flies high over the frame and brings down the top of the
-/// crate wall down range, and the arm stays on its axle.
+/// lost to the hinge and the cup), flies high over the frame and brings down the watchtower
+/// down range (`demo::watchtower`): its pegged joints snap and most of its timbers end up on the
+/// ground, all of them in the yard; and the arm stays on its axle.
 #[test]
-fn the_catapult_throws_its_ball_into_the_crate_wall() {
-    use demo::catapult;
+fn the_catapult_throws_its_ball_and_brings_down_the_watchtower() {
+    use demo::{catapult, watchtower};
     let mut app = app();
     app.update();
     let base = Station::Catapult.base() + DVec3::Y * demo::SLAB_RISE;
     let axle = base + DVec3::Y * catapult::AXLE as f64;
     let ball = named(&mut app, "Catapult ball")[0];
     let arm = named(&mut app, "Catapult arm")[0];
-    let crates = named(&mut app, "Catapult target crate");
-    let start: Vec<DVec3> = crates
-        .iter()
-        .map(|&c| app.world.get::<Transform>(c).unwrap().translation)
+    let timbers: Vec<(String, Entity)> = watchtower::timbers()
+        .into_iter()
+        .map(|(name, ..)| {
+            let e = named(&mut app, &format!("Watchtower {name}"))[0];
+            (name, e)
+        })
         .collect();
+    let at = |app: &App, e: Entity| app.world.get::<Transform>(e).unwrap().translation;
+    let start: Vec<DVec3> = timbers.iter().map(|(_, e)| at(&app, *e)).collect();
+    let deck = named(&mut app, "Watchtower deck")[0];
+    let deck_start = at(&app, deck).y;
+    let joints = |app: &mut App| {
+        app.world
+            .query::<&engine_world::physics::Joint>()
+            .iter(&app.world)
+            .count()
+    };
+    let pegs = joints(&mut app);
     let (mut release, mut highest) = (0.0f32, f64::MIN);
-    for _ in 0..(8 * 60) {
+    let mut hit_at = None;
+    for step in 0..(10 * 60) {
         app.update();
         let p = app.world.get::<Transform>(ball).unwrap().translation - base;
         // Behind the axle the ball is in the cup or just out of it, climbing and slowing: its
@@ -475,6 +490,9 @@ fn the_catapult_throws_its_ball_into_the_crate_wall() {
         if p.x < 0.0 {
             let v = app.world.get::<Velocity>(ball).unwrap().linear.length();
             release = release.max(v);
+        }
+        if hit_at.is_none() && joints(&mut app) < pegs {
+            hit_at = Some((step, p));
         }
         highest = highest.max(p.y);
         let hub = app.world.get::<Transform>(arm).unwrap().translation;
@@ -499,22 +517,37 @@ fn the_catapult_throws_its_ball_into_the_crate_wall() {
         "the ball left at {release:.2} m/s; the counterweight's energy gives {ideal:.2} m/s"
     );
     assert!(highest > 7.0, "the ball only rose to {highest:.1} m");
-    let mut fell = 0;
-    for (&c, s) in crates.iter().zip(&start) {
-        let p = app.world.get::<Transform>(c).unwrap().translation;
+    // Nothing broke before the ball got there: standing, the pegs hold.
+    let (step, p) = hit_at.expect("no peg of the watchtower broke");
+    assert!(
+        p.x > catapult::WALL_RANGE as f64 - 2.5,
+        "a peg broke at {:.2} s, with the ball still {:.1} m short of the tower",
+        step as f32 / 60.0,
+        catapult::WALL_RANGE as f64 - p.x
+    );
+    let mut down = 0;
+    for ((name, e), s) in timbers.iter().zip(&start) {
+        let p = app.world.get::<Transform>(*e).unwrap().translation;
         // The yard is built around the origin here.
         assert!(
             p.x.abs() < demo::YARD_SIZE[0] * 0.5 && p.z.abs() < demo::YARD_SIZE[1] * 0.5,
-            "a crate left the yard: at {p}"
+            "the watchtower's {name} left the yard: at {p}"
         );
-        if s.y - p.y > 0.4 {
-            fell += 1;
+        if (p - *s).length() > 0.5 {
+            down += 1;
         }
     }
+    let broken = pegs - joints(&mut app);
     assert!(
-        fell >= 4,
-        "the ball brought down only {fell} of the wall's {} crates",
-        crates.len()
+        down * 2 > timbers.len(),
+        "only {down} of the watchtower's {} timbers were knocked or fell from where they stood \
+         ({broken} pegs broke)",
+        timbers.len()
+    );
+    let fell = deck_start - at(&app, deck).y;
+    assert!(
+        fell > 2.0,
+        "the watchtower's deck came down only {fell:.2} m ({broken} pegs broke)"
     );
 }
 
