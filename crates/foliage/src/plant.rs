@@ -333,6 +333,16 @@ pub enum Disturbance {
     ClearCut { center: [f32; 2], radius: f32 },
     /// Fire burnt everything within `radius`.
     Burn { center: [f32; 2], radius: f32 },
+    /// A storm threw down the big trees within `radius`: uprooted or snapped, their trunks
+    /// lying downwind (toward `toward_deg`, degrees from +X toward +Z) where they fell, the
+    /// canopy open above them. Its trunks lie as they would `years_ago` years after the storm
+    /// (under about a year: still in their branches), however long the region has grown since.
+    Windthrow {
+        center: [f32; 2],
+        radius: f32,
+        toward_deg: f32,
+        years_ago: f32,
+    },
     /// Several of the above.
     Many(Vec<Disturbance>),
 }

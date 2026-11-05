@@ -46,6 +46,9 @@ pub const GARDEN: [f32; 3] = [48.0, 21.0, 1.9];
 pub const OLD_OAK: [f32; 3] = [-21.0, 50.0, 2.5];
 /// The old oak's age, years.
 pub const OLD_OAK_YEARS: f32 = 24.0;
+/// A windthrow gap beside the trail: last winter a storm threw down the old trees here (x, z,
+/// radius, downwind direction in degrees from +X toward +Z).
+pub const WINDTHROW: [f32; 4] = [6.0, 36.0, 11.0, 200.0];
 /// Dry ridge (x, z, radius).
 pub const RIDGE: [f32; 3] = [-55.0, -40.0, 26.0];
 /// Height of the pond's water above the ground, meters (its shore sinks to meet it).
@@ -165,6 +168,16 @@ pub fn forest_viewpoints(center: DVec3) -> Vec<Viewpoint> {
             [6.0, 1.2, -24.0],
             [1.0, 0.0, -28.5],
             10.5,
+        ),
+        view(
+            center,
+            (
+                "forest_windthrow",
+                "Where a storm threw down the old trees: trunks lying one way, sun on the floor",
+            ),
+            [16.0, 1.7, 20.0],
+            [5.0, 1.0, 36.0],
+            10.0,
         ),
         view(
             center,
@@ -363,6 +376,12 @@ pub fn forest_region() -> EcologyRegion {
                 Disturbance::Burn {
                     center: [BURN[0], BURN[1]],
                     radius: BURN[2],
+                },
+                Disturbance::Windthrow {
+                    center: [WINDTHROW[0], WINDTHROW[1]],
+                    radius: WINDTHROW[2],
+                    toward_deg: WINDTHROW[3],
+                    years_ago: 0.8,
                 },
             ]),
             years_since: YEARS_SINCE,

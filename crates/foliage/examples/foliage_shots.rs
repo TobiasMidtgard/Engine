@@ -560,6 +560,18 @@ fn main() {
         shot(&mut app, &out, "02_trail_inner", eye, at, 10.5);
     }
     take(&mut app, "03_clearing", &by_name("forest_clearing"));
+    if wanted("03_windthrow") {
+        // The `forest_windthrow` stop (by its place, so a build from before it has the shot).
+        let ground = |x: f64, z: f64| {
+            app.world
+                .get_resource::<engine_world::Ground>()
+                .and_then(|g| g.height(DVec3::new(x, 0.0, z)))
+                .unwrap_or(0.0)
+        };
+        let eye = DVec3::new(16.0, ground(16.0, 20.0) + 1.7, 20.0);
+        let at = DVec3::new(5.0, ground(5.0, 36.0) + 1.0, 36.0);
+        shot(&mut app, &out, "03_windthrow", eye, at, 10.0);
+    }
     take(&mut app, "03_old_oak", &by_name("forest_old_oak"));
     if wanted("03_ferns") {
         // Into the thickest ferns within 40 m of the trail's viewpoint, from 5 m off.

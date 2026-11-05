@@ -800,7 +800,16 @@ pub fn play_history(
         h.grow_years,
         region.step_years.max(1.0),
     );
-    disturb(sim, &h.disturbance, center, library, &mut plants, &mut logs);
+    let since = h.years_since;
+    disturb(
+        sim,
+        &h.disturbance,
+        center,
+        since,
+        library,
+        &mut plants,
+        &mut logs,
+    );
     run(
         sim,
         &mut plants,
@@ -970,6 +979,7 @@ fn disturb(
     sim: &mut RegionSim,
     d: &Disturbance,
     center: DVec3,
+    years_since: f32,
     library: &PlantLibrary,
     plants: &mut [SimPlant],
     logs: &mut Vec<SimLog>,
@@ -981,7 +991,7 @@ fn disturb(
         Disturbance::None => {}
         Disturbance::Many(list) => {
             for d in list {
-                disturb(sim, d, center, library, plants, logs);
+                disturb(sim, d, center, years_since, library, plants, logs);
             }
         }
         Disturbance::ClearCut { center: c, radius } => {
@@ -1015,6 +1025,46 @@ fn disturb(
                     });
                 } else if sim.rng.chance(0.7) {
                     // Crushed by the logging.
+                    p.removed = true;
+                }
+            }
+        }
+        Disturbance::Windthrow {
+            center: c,
+            radius,
+            toward_deg,
+            years_ago,
+        } => {
+            // The tall trees catch the gust: most go down, uprooted (their root plates tip up
+            // and leave no stump) or snapped, lying downwind give or take a few tens of
+            // degrees; the young ones under them bend and spring back, some crushed by the
+            // falling trunks. Nobody hauls them away.
+            let downwind = toward_deg.to_radians();
+            for p in plants.iter_mut() {
+                if !within(p.pos, *c, *radius) || p.removed {
+                    continue;
+                }
+                let sp = library.get(p.plant.species);
+                if sp.is_tree() && p.plant.stage.is_alive() && p.plant.size > 0.35 {
+                    if sim.rng.chance(0.15) {
+                        continue;
+                    }
+                    logs.push(SimLog {
+                        entity: None,
+                        pos: p.pos,
+                        yaw: downwind + sim.rng.range(-0.3, 0.3),
+                        species: p.plant.species,
+                        size: p.plant.size,
+                        years: years_ago - years_since,
+                        rot_years: 15.0 + 20.0 * p.plant.size,
+                        genes: p.plant.genes,
+                    });
+                    if sim.rng.chance(0.65) {
+                        p.removed = true;
+                    } else {
+                        p.plant.stage = PlantStage::Stump { years: 0.0 };
+                    }
+                } else if sp.is_woody() && sim.rng.chance(0.3) {
                     p.removed = true;
                 }
             }
@@ -2330,6 +2380,53 @@ mod tests {
         assert!(
             young_trees_in_clearing > 3,
             "{young_trees_in_clearing} young trees"
+        );
+    }
+
+    #[test]
+    fn a_windthrow_lays_the_big_trees_down_one_way_in_their_branches() {
+        let lib = PlantLibrary::default();
+        let mut region = forest();
+        region.history.disturbance = Disturbance::Windthrow {
+            center: [0.0, 0.0],
+            radius: 15.0,
+            toward_deg: 90.0,
+            years_ago: 0.8,
+        };
+        region.history.years_since = 4.0;
+        let (plants, logs, _) = grow(&region, &[]);
+        // The storm's trunks (other logs are trees that died since), a year old: still in
+        // their branches.
+        let thrown: Vec<_> = logs
+            .iter()
+            .filter(|l| (l.years - 0.8).abs() < 0.3 && DVec2::new(l.pos.x, l.pos.z).length() < 15.0)
+            .collect();
+        assert!(thrown.len() > 3, "{} thrown trunks", thrown.len());
+        // Downwind (+Z) give or take; a few turned to fit beside a trunk still standing.
+        let downwind = thrown.iter().filter(|l| l.yaw.sin().abs() > 0.8).count();
+        assert!(
+            downwind * 10 >= thrown.len() * 7,
+            "{downwind} of {} lie downwind",
+            thrown.len()
+        );
+        let big_standing = |plants: &[SimPlant]| {
+            plants
+                .iter()
+                .filter(|p| {
+                    lib.get(p.plant.species).is_tree()
+                        && p.plant.stage.is_alive()
+                        && p.plant.size > 0.6
+                        && DVec2::new(p.pos.x, p.pos.z).length() < 12.0
+                })
+                .count()
+        };
+        region.history.disturbance = Disturbance::None;
+        let (calm, _, _) = grow(&region, &[]);
+        assert!(
+            big_standing(&plants) * 3 <= big_standing(&calm),
+            "{} big trees still standing, {} without the storm",
+            big_standing(&plants),
+            big_standing(&calm)
         );
     }
 
