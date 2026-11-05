@@ -5852,6 +5852,55 @@ fn in_play_many_new_scripts_start_over_a_few_frames() {
     assert!(errors(&mut app).is_empty(), "{:?}", errors(&mut app));
 }
 
+/// A script file whose loading is dear (a big module run at load): about a millisecond.
+const SLOW_LOAD: &str = r#"
+local t = os.clock()
+while os.clock() - t < 0.001 do end
+local Loaded = {}
+function Loaded:update(dt) end
+return Loaded
+"#;
+
+#[test]
+fn in_play_new_scripts_past_the_budget_wait_before_their_files_are_loaded() {
+    let folder = Folder::new();
+    for i in 0..40 {
+        folder.write(&format!("load{i}.luau"), SLOW_LOAD);
+    }
+    let mut app = app_in(&folder.0);
+    // The real clock, as in play.
+    app.world
+        .resource_mut::<Time>()
+        .set_source(TimeSource::Realtime);
+    for i in 0..40 {
+        spawn_script(&mut app, &format!("Load {i}"), &format!("load{i}"));
+    }
+    let loaded = |app: &App| {
+        let rt = app.world.resource::<ScriptRuntime>();
+        (0..40)
+            .filter(|i| {
+                rt.files()
+                    .map
+                    .contains_key(&crate::runtime::normalize(&format!("load{i}")))
+            })
+            .count()
+    };
+    app.update();
+    let first = loaded(&app);
+    assert!(
+        (1..40).contains(&first),
+        "{first} of 40 files were loaded in the first frame"
+    );
+    for _ in 0..200 {
+        if loaded(&app) == 40 {
+            break;
+        }
+        app.update();
+    }
+    assert_eq!(loaded(&app), 40, "the rest were loaded at the next frames");
+    assert!(errors(&mut app).is_empty(), "{:?}", errors(&mut app));
+}
+
 #[test]
 fn in_play_the_actor_vms_are_made_on_a_worker_and_parallel_scripts_wait_for_them() {
     let folder = Folder::new();

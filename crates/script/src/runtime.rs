@@ -1420,6 +1420,11 @@ impl ScriptRuntime {
         for (e, script, tick, placed) in seen {
             let Some(script) = script else { continue };
             let path = normalize(&script.path);
+            // A new one waits for a later frame once the budget is spent, before its file is
+            // even loaded (loading and compiling a script was the frame's cost).
+            if !self.instances.contains_key(&e) && over() {
+                continue;
+            }
             // A new `parallel_update` script goes to an actor VM (unless placed already).
             if self.role == 0
                 && !placed
