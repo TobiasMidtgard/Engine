@@ -184,6 +184,15 @@ fn main() {
     if let Some(flood) = engine_water::freshet::Freshet::from_env() {
         app.world.insert_resource(flood);
     }
+    // `GALLERY_RAIN=mm_h`: rain falling (rings on the water, riding the streams' current).
+    if let Some(rain) = std::env::var("GALLERY_RAIN")
+        .ok()
+        .and_then(|v| v.parse::<f32>().ok())
+    {
+        app.world
+            .resource_mut::<engine_world::WeatherState>()
+            .precipitation_mm_h = rain;
+    }
     app.world
         .insert_resource(Ground(Arc::new(MeadowGround(m.clone()))));
     let started = std::time::Instant::now();

@@ -666,8 +666,11 @@ fn capillary_gradient(p: vec2<f32>, wind_dir: vec2<f32>, wind: f32, fp: Footprin
     return g * (0.25 + 1.5 * smoothstep(0.3, 0.75, gust));
 }
 
-// Raindrop rings: gradient of expanding rings in a scattered grid of drop sites.
-fn rain_gradient(p: vec2<f32>, mm_h: f32, fade: f32) -> vec2<f32> {
+// Raindrop rings: gradient of expanding rings in a scattered grid of drop sites. On running
+// water (`vel`, m/s) each ring rides the current from where its drop fell, and rapids tear
+// rings up before they can spread (on white water a drop is lost in the chop).
+fn rain_gradient(p: vec2<f32>, mm_h: f32, fade_in: f32, vel: vec2<f32>) -> vec2<f32> {
+    let fade = fade_in * (1.0 - smoothstep(1.2, 3.0, length(vel)));
     if (mm_h <= 0.01 || fade <= 0.0) { return vec2<f32>(0.0); }
     let density = saturate(0.25 + mm_h * 0.06);
     var g = vec2<f32>(0.0);
@@ -684,7 +687,9 @@ fn rain_gradient(p: vec2<f32>, mm_h: f32, fade: f32) -> vec2<f32> {
                 if (h > density) { continue; }
                 let period = 0.7 + h * 0.8;
                 let life = fract(t / period + hash12(c + vec2<f32>(3.3, lf)));
-                let center = c + vec2<f32>(hash12(c + vec2<f32>(1.7, 0.2)), hash12(c + vec2<f32>(2.9, 5.1)));
+                // Carried downstream for as long as it has been spreading.
+                let center = c + vec2<f32>(hash12(c + vec2<f32>(1.7, 0.2)), hash12(c + vec2<f32>(2.9, 5.1)))
+                    + vel * (life * period * scale);
                 let d = q - center;
                 let r = length(d);
                 let x0 = r - life * 1.1;
@@ -1587,7 +1592,7 @@ fn fs_body(in: BodyOut) -> @location(0) vec4<f32> {
     // What the pixel can't resolve roughens it: waves faded for being too short to draw, fine
     // waves averaged away by the mips, and ripples under 2 cm.
     let slope_var = w.slope_var * tilt * tilt + (fine.variance * gust * gust + bd.w * calm * calm) * slick * slick;
-    g += rain_gradient(wp, rain_at(in.rest), saturate(1.0 - pixel / 0.02));
+    g += rain_gradient(wp, rain_at(in.rest), saturate(1.0 - pixel / 0.02), vec2<f32>(0.0));
     let boil = plunge_boil(in.rel);
     foam += boil.x;
     bubbles += boil.x * 0.8;
@@ -1784,7 +1789,7 @@ fn shade_stream(in: FlowOut, front: bool) -> vec4<f32> {
     // The current livens what can be seen; what a pixel can't is the breeze's alone, or
     // fast water would go milky with roughness.
     let slope_var = mix(d0.variance, d1.variance, wgt);
-    g += rain_gradient(wp, rain_at(in.rel.xz), saturate(1.0 - pixel / 0.02));
+    g += rain_gradient(wp, rain_at(in.rel.xz), saturate(1.0 - pixel / 0.02), in.vel);
     // Rings, wakes and foam from whatever moves through the stream (the interactive field
     // covers streams near the camera too).
     let rp = ripple_at(in.rel.xz);
@@ -2516,7 +2521,7 @@ fn fs_puddle(in: PuddleOut) -> @location(0) vec4<f32> {
     let v = -in.rel / max(dist, 1e-4);
     let pixel = pixel_footprint(in.rel);
     var g = capillary_gradient(wp, normalize(frame.wind.xz + vec2<f32>(1e-4)), length(frame.wind.xyz), footprint(in.rel)) * 0.35;
-    g += rain_gradient(wp, rain_at(in.rel.xz), saturate(1.0 - pixel / 0.02));
+    g += rain_gradient(wp, rain_at(in.rel.xz), saturate(1.0 - pixel / 0.02), vec2<f32>(0.0));
     let n = normalize(vec3<f32>(-g.x, 1.0, -g.y));
     let size = vec2<f32>(textureDimensions(scene_color));
     let ground = textureLoad(scene_color, vec2<i32>(in.clip.xy), 0).rgb;
