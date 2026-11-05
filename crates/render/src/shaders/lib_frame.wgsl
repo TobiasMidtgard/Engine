@@ -635,15 +635,12 @@ fn sky_view_factor(a: f32, b: f32, h: f32) -> f32 {
 }
 
 fn sky_visibility(rel: vec3<f32>, n: vec3<f32>) -> f32 {
-    // Leaf crowns are in the canopy map, not the occlusion map: their light comes through.
-    let leaves = canopy_visibility(rel + n * 0.2);
-    canopy_last_visibility = leaves;
     // The indoor volumes are read in the air in front of the surface (so walls just outside a
     // loosely fitted volume still count as inside), and a surface on or inside a volume's box
     // counts as inside even where that step along its normal crosses a face: a wall's edge
     // where bumps tilt its normal into the ceiling, the rounded foot of a chair leg on the
     // floor. (Those spots read the open sky through the volume's face otherwise.)
-    return leaves * sky_map_visibility(rel, n) * min(sky_volume_factor(rel + n * 0.2), sky_volume_factor_within(rel, 0.01));
+    return sky_map_visibility(rel, n) * min(sky_volume_factor(rel + n * 0.2), sky_volume_factor_within(rel, 0.01));
 }
 
 // ---------------------------------------------------------------- light through leaves
@@ -698,6 +695,22 @@ fn canopy_ray_transmittance(origin: vec3<f32>, dir: vec3<f32>) -> f32 {
     let t = canopy_tap(cross / (2.0 * c.w) + 0.5, max(2.0, h * 0.25));
     let above = t.r * canopy_share_above(t, y) * frame.canopy_params.x;
     return exp(-0.5 / sin_up * above);
+}
+
+// Share of rain falling straight down that gets past the leaves of the crowns above
+// camera-relative `rel`: exp(-G L), G = 0.5 for leaves at all angles, L the leaf area index
+// above it (the rest is caught by the leaves, and drips later). 1 in the open, off the map and
+// with the canopy off. For precipitation's shelter test: the sky occlusion map has no leaf
+// crowns in it.
+fn canopy_rain_through(rel: vec3<f32>) -> f32 {
+    let c = frame.canopy;
+    if (c.w <= 0.0) { return 1.0; }
+    let p = rel.xz - c.xy;
+    if (max(abs(p.x), abs(p.y)) >= c.w) { return 1.0; }
+    let t = canopy_tap(p / (2.0 * c.w) + 0.5, 1.0);
+    if (t.r < 1e-3) { return 1.0; }
+    let y = (rel.y - c.z) / CANOPY_HEIGHT_UNIT;
+    return exp(-0.5 * t.r * canopy_share_above(t, y) * frame.canopy_params.x);
 }
 
 // The canopy map's leaf area index and leaf height moments averaged over a square `width`
@@ -863,8 +876,18 @@ fn sky_cover_near(at: vec2<f32>, radius: f32, top: f32) -> bool {
     return textureLoad(sky_cover, block, i32(level)).r < top;
 }
 
-// Sky visibility from the top-down occlusion map alone.
+// Sky visibility from the top-down maps: the occlusion map's solid cover times the leaves of
+// the canopy map (leaf crowns are in the canopy map, not the occlusion map: their light comes
+// through). `sky_visibility` adds the indoor volumes; shaders outside the renderer (wet ground,
+// particles) and the fog read this.
 fn sky_map_visibility(rel: vec3<f32>, n: vec3<f32>) -> f32 {
+    let leaves = canopy_visibility(rel + n * 0.2);
+    canopy_last_visibility = leaves;
+    return leaves * sky_occluder_visibility(rel, n);
+}
+
+// Sky visibility from the top-down occlusion map alone (solid cover: roofs, rock, trunks).
+fn sky_occluder_visibility(rel: vec3<f32>, n: vec3<f32>) -> f32 {
     let params = frame.sky_occlusion_params;
     if (params.x < 0.5) { return 1.0; }
     let texel = params.z;
@@ -1006,7 +1029,7 @@ fn fog_sky_visibility(rel: vec3<f32>) -> f32 {
     var map = 1.0;
     let at_camera = sky_camera[0].x;
     if (frame.sky_occlusion_params.x > 0.5 && at_camera < 0.99) {
-        map = max(at_camera, sky_map_visibility(rel, vec3<f32>(0.0, 1.0, 0.0)));
+        map = max(at_camera, sky_occluder_visibility(rel, vec3<f32>(0.0, 1.0, 0.0)));
     }
     // The leaves over either end (crowns aren't in the occlusion map).
     if (frame.canopy.w > 0.0) {
