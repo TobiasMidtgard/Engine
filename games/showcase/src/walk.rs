@@ -96,6 +96,10 @@ pub struct Walk {
     clock: f32,
     /// Real seconds since the start screen opened (after the loading screen).
     open_secs: f32,
+    /// A streaming source on the walk's start while the start screen drifts high over the
+    /// valley, so the plaza's zones are in when Walk is pressed (they loaded on the walk's
+    /// first frames: the market's 0.28 s step, 189-375 ms frames on the session VM).
+    spawn_source: Option<Entity>,
 }
 
 /// The walk's systems and APIs; `start_screen` opens the start screen at once (the exe), else
@@ -185,6 +189,7 @@ fn run(world: &mut World, mut seen: Local<MessageCursor<UiEvent>>) {
             "walk.start" if walk.stage == Stage::Menu => start_walk(world, &mut walk, 0),
             "walk.fly" if walk.stage == Stage::Menu => {
                 screens::hide(world, "walk_menu", false);
+                release_spawn(world, &mut walk);
                 walk.stage = Stage::Free;
             }
             "walk.quit" => {
@@ -206,6 +211,7 @@ fn run(world: &mut World, mut seen: Local<MessageCursor<UiEvent>>) {
                 walk.open_secs += world.resource::<Time>().real_delta_secs();
             }
             if walk.drift {
+                hold_spawn(world, &mut walk);
                 walk.clock += world.resource::<Time>().real_delta_secs().min(0.1);
                 drift(world, walk.clock);
             }
@@ -243,9 +249,57 @@ pub fn fly_freely(world: &mut World) {
     let mut walk = world.remove_resource::<Walk>().expect("installed");
     if walk.stage == Stage::Menu {
         screens::hide(world, "walk_menu", false);
+        release_spawn(world, &mut walk);
         walk.stage = Stage::Free;
     }
     world.insert_resource(walk);
+}
+
+/// While the start screen is up, stream around the walk's start as well as the camera: a
+/// [`StreamingSource`] there and one on the camera (with any source, streaming follows the
+/// sources only; the camera's is what its focus asked for: range 1, 2 s ahead).
+fn hold_spawn(world: &mut World, walk: &mut Walk) {
+    if walk.spawn_source.is_some() {
+        return;
+    }
+    let mut q = world.query_filtered::<Entity, With<ShowcaseCamera>>();
+    let cameras: Vec<Entity> = q.iter(world).collect();
+    for cam in cameras {
+        world
+            .entity_mut(cam)
+            .insert(engine::world::StreamingSource::default());
+    }
+    let (feet, _) = leg(0);
+    let at = feet + DVec3::Y * 1.7;
+    let source = world
+        .spawn((
+            Name::new("walk start (streaming)"),
+            Transform::from_translation(at),
+            GlobalTransform::from_translation_rotation(at, Quat::IDENTITY),
+            engine::world::StreamingSource {
+                range_scale: 1.0,
+                lookahead_s: 0.0,
+            },
+        ))
+        .id();
+    walk.spawn_source = Some(source);
+}
+
+/// The start screen closed: streaming follows the camera and the player again.
+fn release_spawn(world: &mut World, walk: &mut Walk) {
+    let Some(source) = walk.spawn_source.take() else {
+        return;
+    };
+    if let Ok(e) = world.get_entity_mut(source) {
+        e.despawn();
+    }
+    let mut q = world.query_filtered::<Entity, With<ShowcaseCamera>>();
+    let cameras: Vec<Entity> = q.iter(world).collect();
+    for cam in cameras {
+        world
+            .entity_mut(cam)
+            .remove::<engine::world::StreamingSource>();
+    }
 }
 
 /// The camera drifts slowly round the valley behind the start screen.
@@ -423,6 +477,7 @@ fn show_menu(world: &mut World) -> Result<(), String> {
 /// before for the others (tours and agents start part way).
 fn start_walk(world: &mut World, walk: &mut Walk, i: usize) {
     screens::hide(world, "walk_menu", false);
+    release_spawn(world, walk);
     // Look from behind the start toward the stop, so the pilot starts facing it.
     let (feet, next) = leg(i);
     let back = (feet - next).with_y(0.0).normalize_or(DVec3::Z);
