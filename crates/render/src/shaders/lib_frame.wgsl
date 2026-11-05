@@ -222,17 +222,13 @@ fn prepass_output_subsurface(
 
 // Wind displacement for a vertex: `sway` meters at the top (`height01` = 1), none at the root.
 fn wind_offset(rel: vec3<f32>, height01: f32, sway: f32) -> vec3<f32> {
-    if (sway <= 0.0) { return vec3(0.0); }
-    let w = frame.wind.xyz;
-    let speed = length(w);
-    let p = tiling_pos(rel);
-    let t = frame.time.x;
-    let phase = dot(p.xz, vec2(0.13, 0.17));
-    let gust = 0.6 + 0.4 * sin(t * 0.7 + phase * 0.3) * sin(t * 1.9 + phase);
-    let flutter = sin(t * 6.0 + phase * 3.0) * 0.15;
-    let dir = select(vec3(1.0, 0.0, 0.0), w / max(speed, 1e-3), speed > 0.01);
-    let strength = sway * height01 * height01 * min(speed / 10.0, 1.5);
-    return dir * strength * (gust + flutter) + vec3(0.0, -0.1, 0.0) * strength * gust;
+    return plant_sway(rel.xz + frame.gust_offset.xy, height01, sway, frame.plant_wind, frame.gusts, frame.time.x, false);
+}
+
+// `wind_offset` last frame, at `prev_rel`, last frame's camera-relative position of the
+// unswayed vertex (motion vectors).
+fn wind_offset_prev(prev_rel: vec3<f32>, height01: f32, sway: f32) -> vec3<f32> {
+    return plant_sway(prev_rel.xz + frame.gust_offset.zw, height01, sway, frame.plant_wind_prev, frame.gusts_prev, frame.time.x - frame.time.z, false);
 }
 
 // How a swaying vertex at camera-relative `rel` gives way to the frame's benders

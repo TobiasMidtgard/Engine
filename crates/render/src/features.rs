@@ -45,7 +45,8 @@ use crate::material_library::{MaterialLibrary, MaterialMaps, MaterialPreset, Mat
 use crate::settings::RenderSettings;
 use crate::texture::Image;
 
-/// Shared types and pure functions (no bindings).
+/// Shared types and pure functions (no bindings). Requires `engine_world::GUST_WAVES_WGSL`
+/// before it ([`compose_shader`] puts it there).
 pub const SHADER_LIB_TYPES: &str = include_str!("shaders/lib_types.wgsl");
 /// Group 0 frame bindings, shadows, PBR shading and fog. Requires `SHADER_LIB_TYPES`.
 pub const SHADER_LIB_FRAME: &str = include_str!("shaders/lib_frame.wgsl");
@@ -517,12 +518,17 @@ pub fn take_change_tick(world: &World) -> bevy_ecs::change_detection::Tick {
 /// Build the full WGSL source for a feature shader.
 pub fn compose_shader(source: &str, with_frame: bool) -> String {
     let mut code = String::with_capacity(
-        SHADER_LIB_TYPES.len()
+        engine_world::GUST_WAVES_WGSL.len()
+            + SHADER_LIB_TYPES.len()
             + SHADER_LIB_FRAME.len()
             + SHADER_LIB_ATMOSPHERE.len()
             + source.len()
             + 3,
     );
+    // The gust fronts (`GustWaves`, `gust_waves`) that plants, grass and anything else moving
+    // in the wind evaluate the same way.
+    code.push_str(engine_world::GUST_WAVES_WGSL);
+    code.push('\n');
     code.push_str(SHADER_LIB_TYPES);
     code.push('\n');
     if with_frame {

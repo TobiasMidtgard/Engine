@@ -497,3 +497,56 @@ fn an_extra_view_before_the_main_one_keeps_its_motion_vectors() {
         "an extra view changed the moving bar's streak: {b:.1} px (alone {a:.1})"
     );
 }
+
+/// A thin bright swaying bar (`StandardMaterial::wind_sway`) in a gale under a still camera,
+/// shot after `frames` frames: its sway is in the motion vectors, so motion blur smears it
+/// (it used to be drawn as if it stood still, and temporal filtering smeared swaying leaves).
+fn swaying_bar(blur: Option<MotionBlur>, name: &str) -> Option<RgbaImage> {
+    let mut app = app(1.0 / 60.0, 1.0, AntiAliasing::None);
+    app.world.insert_resource(engine_world::WeatherState {
+        wind: Vec3::new(15.0, 0.0, 0.0),
+        ..Default::default()
+    });
+    camera(&mut app, blur, 0.0);
+    quad(
+        &mut app,
+        DVec3::new(0.0, 0.0, -30.0),
+        [80.0, 40.0],
+        unlit([0.0, 0.0, 0.0]),
+    );
+    // 7 m tall, its top 1 m over the middle rows: they sway at most of its top's reach.
+    let width = 2.0 * 10.0 / px_per_rad();
+    let mut material = unlit([1.0, 1.0, 1.0]).with_emissive([1.0, 1.0, 1.0], 60.0);
+    material.wind_sway = 6.0;
+    quad(
+        &mut app,
+        DVec3::new(0.0, -2.5, -10.0),
+        [width as f32, 7.0],
+        material,
+    );
+    app.update_n(20);
+    if gpu_missing(&app) {
+        return None;
+    }
+    Some(shoot(&mut app, name))
+}
+
+#[test]
+fn swaying_plants_smear_by_their_own_motion() {
+    let Some(off) = swaying_bar(None, "sway_off") else {
+        return;
+    };
+    let on = swaying_bar(Some(MotionBlur::default()), "sway_on").unwrap();
+    let lit = |img: &RgbaImage| {
+        (H / 2 - 20..H / 2 + 20)
+            .map(|y| (0..W).filter(|&x| luma(img, x, y) > 40.0).count() as f64)
+            .sum::<f64>()
+            / 40.0
+    };
+    let (sharp, smeared) = (lit(&off), lit(&on));
+    eprintln!("swaying bar: {sharp:.1} px sharp, {smeared:.1} px with motion blur");
+    assert!(
+        smeared > sharp + 2.0,
+        "a swaying bar isn't smeared by its sway: {smeared:.1} px (sharp {sharp:.1})"
+    );
+}
