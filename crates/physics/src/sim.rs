@@ -1079,6 +1079,7 @@ impl Simulation {
         };
         // Copy in every static collider it can touch.
         let started = std::time::Instant::now();
+        let cpu = cpu_time::ThreadTime::try_now().ok();
         let reach = self.static_reach();
         let statics: Vec<Entity> = self
             .colliders
@@ -1097,9 +1098,11 @@ impl Simulation {
         if ms > 1.0 && crate::report::wanted() {
             engine_core::log::info!(
                 "physics regions: new region {id} copied {copies} statics of {} in {ms:.1} ms \
-                 (finding them {:.1})",
+                 (finding them {:.1}; {:.1} ms on the CPU)",
                 self.colliders.len(),
-                found.as_secs_f64() * 1000.0
+                found.as_secs_f64() * 1000.0,
+                cpu.and_then(|c| c.try_elapsed().ok())
+                    .map_or(f64::NAN, |c| c.as_secs_f64() * 1000.0)
             );
         }
         id
@@ -2914,6 +2917,7 @@ impl Simulation {
             }
         }
         let started = std::time::Instant::now();
+        let cpu = cpu_time::ThreadTime::try_now().ok();
         let from = entities
             .first()
             .and_then(|e| self.bodies.get(e))
@@ -3027,9 +3031,12 @@ impl Simulation {
             .retain(|k, _| !moved.contains(&k.0) && !moved.contains(&k.1));
         if entities.len() >= 100 && crate::report::wanted() {
             engine_core::log::info!(
-                "physics regions: moved {} bodies from region {from:?} to {target} in {:.1} ms",
+                "physics regions: moved {} bodies from region {from:?} to {target} in {:.1} ms \
+                 ({:.1} on the CPU)",
                 entities.len(),
-                started.elapsed().as_secs_f64() * 1000.0
+                started.elapsed().as_secs_f64() * 1000.0,
+                cpu.and_then(|c| c.try_elapsed().ok())
+                    .map_or(f64::NAN, |c| c.as_secs_f64() * 1000.0)
             );
         }
     }
