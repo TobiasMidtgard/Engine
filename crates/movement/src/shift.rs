@@ -88,6 +88,13 @@ pub(crate) fn follow_world_shifts(
             v.plant = s.point(v.plant);
             v.forward = s.direction(v.forward);
         }
+        if let Some(r) = &mut m.runup {
+            r.normal = s.direction(r.normal);
+        }
+        if let Some(r) = &mut m.rope {
+            r.dir = s.direction(r.dir);
+            r.swing = s.direction(r.swing);
+        }
         if let Some(platform) = &mut m.platform {
             platform.shift(&s);
         }

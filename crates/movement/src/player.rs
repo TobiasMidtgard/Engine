@@ -90,6 +90,9 @@ pub(crate) fn player_intent(
         .map(|(_, t)| (t.translation(), t.forward()));
     let camera = view.map(|(_, f)| f);
     for (entity, t, mut m, p, pc, mut intent, lock) in &mut q {
+        if !m.variable_jump {
+            m.variable_jump = true;
+        }
         let up = m.up;
         if actions.pressed_since_tick("grapple") {
             m.pending_grapple = Some(grapple_aim(&queries, entity, t, &m, p, view));

@@ -1802,14 +1802,16 @@ fn run_rider(
                 (rel.z >= platform_edge - 0.35).then_some(Ride::Leap)
             }
             Ride::Leap => {
-                intent.direction = toward_car(0.35, 1.0);
+                // Diagonally at the car: held straight at it, air control would turn the
+                // leap square to its side and leave no speed along it to run on.
+                intent.direction = toward_car(1.0, 0.7);
                 intent.sprint = true;
                 intent.jump = *secs < 0.1;
                 (m.mode == LocomotionMode::WallRun).then_some(Ride::WallRun)
             }
             Ride::WallRun => {
                 intent.direction = Vec3::X;
-                (m.mode != LocomotionMode::WallRun || m.mode_secs >= 0.15).then_some(Ride::Climb)
+                (m.mode != LocomotionMode::WallRun || m.mode_secs >= 0.3).then_some(Ride::Climb)
             }
             Ride::Climb => {
                 intent.direction = toward_car(0.45, 1.0);
@@ -2351,11 +2353,22 @@ fn anim_input(
             let grip = Vec3::Y * (cc.height * (0.5 + crate::zipline::GRIP_ABOVE));
             (grip, inv * z.heading)
         }),
-        ladder: m.ladder.map(|l| rig::LadderAnim {
-            climbed: l.climbed,
-            speed: l.speed,
-            sliding: l.sliding,
-        }),
+        ladder: m
+            .ladder
+            .map(|l| rig::LadderAnim {
+                climbed: l.climbed,
+                speed: l.speed,
+                sliding: l.sliding,
+                rope: false,
+            })
+            .or_else(|| {
+                m.rope.map(|r| rig::LadderAnim {
+                    climbed: r.climbed,
+                    speed: r.speed,
+                    sliding: r.speed < -3.0,
+                    rope: true,
+                })
+            }),
         vault: m.vault.map(|v| {
             let left = m.up.cross(v.forward).normalize_or_zero();
             let hand = v.plant + (left * crate::vault::HAND_LEFT).as_dvec3();

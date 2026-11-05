@@ -16,7 +16,8 @@
 //! `movement.set_tempo` / `movement.perception` APIs change them from scripts or AI agents.
 
 use engine_core::prelude::*;
-use engine_world::{AttackEvent, DamageEvent};
+use engine_world::physics::CharacterController;
+use engine_world::{AttackEvent, DamageEvent, DamageKind};
 
 use crate::combat::CombatState;
 use crate::player::PlayerControlled;
@@ -25,6 +26,13 @@ use crate::player::PlayerControlled;
 pub const FOCUS_KEY: &str = "perception";
 /// `TimeDilation` key used by cinematic slow-motion beats.
 pub const CINEMATIC_KEY: &str = "cinematic";
+/// An untargeted attack threatens the perceiver only from within its reach plus this, m.
+const UNTARGETED_SLACK: f32 = 2.5;
+
+/// Damage that comes from a blow (a strike, a shot, a blast), not from the surroundings.
+fn is_blow(kind: DamageKind) -> bool {
+    !matches!(kind, DamageKind::Fire | DamageKind::Cold | DamageKind::Fall)
+}
 
 /// How fast a character acts (`speed`) and perceives (`reflexes`). 1 = an ordinary person.
 #[derive(Component, Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -213,6 +221,7 @@ pub(crate) fn perceive(
     mut damage: MessageReader<DamageEvent>,
     perceivers: Query<(Entity, &Transform, Option<&Tempo>, Has<PlayerControlled>), With<Perceiver>>,
     others: Query<(&Transform, Option<&Tempo>, Option<&CombatState>)>,
+    characters: Query<(), With<CharacterController>>,
 ) {
     // A player-controlled perceiver (play mode) comes first.
     let me = perceivers
@@ -250,7 +259,14 @@ pub(crate) fn perceive(
         let near = attacker.is_some_and(|(t, _, _)| {
             t.translation.distance(my_t.translation) <= settings.threat_radius as f64
         });
-        if ev.target != Some(me) && !(ev.target.is_none() && near) {
+        // Aimed at the perceiver, or untargeted from a fighter close enough to land it: a
+        // swing, a shot or a bite between others nearby (an NPC battle, wolves on a deer)
+        // isn't a threat, and slowing the world for it played as random slowdowns
+        // (playtest 2026-11-05).
+        let close = attacker.is_some_and(|(t, _, _)| {
+            t.translation.distance(my_t.translation) <= (ev.reach + UNTARGETED_SLACK) as f64
+        });
+        if ev.target != Some(me) && !(ev.target.is_none() && near && close) {
             continue;
         }
         if can_focus {
@@ -298,15 +314,23 @@ pub(crate) fn perceive(
     }
 
     for ev in damage.read() {
+        // Only blows trade beats: burning, freezing or a hard landing tick damage, and a
+        // beat on every tick slowed the world for no reason the player could see.
+        if !is_blow(ev.kind) {
+            continue;
+        }
         if ev.source == Some(me) && ev.target != me && ev.amount > 0.0 {
             let killed = others
                 .get(ev.target)
                 .ok()
                 .and_then(|(_, _, cs)| cs)
                 .is_some_and(|cs| cs.defeated);
+            // A blade through a fence, a crate or a tree isn't a duel's beat: only blows
+            // that land on someone are.
+            let on_fighter = characters.contains(ev.target);
             if killed {
                 beats.push(("player_kill", cine.player_kill));
-            } else {
+            } else if on_fighter {
                 beats.push(("player_hit", cine.player_hit));
             }
         } else if ev.target == me && ev.amount > 0.0 {

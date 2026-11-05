@@ -182,6 +182,7 @@ fn ladder_shots(app: &mut App, camera: Entity, out: &Path, at: DVec3) {
                 climbed: climbed - speed * (secs - t),
                 speed,
                 sliding,
+                rope: false,
             }),
             ..AnimInput::default()
         })
@@ -198,6 +199,7 @@ fn ladder_shots(app: &mut App, camera: Entity, out: &Path, at: DVec3) {
             climbed: 0.0,
             speed: 0.0,
             sliding: false,
+            rope: false,
         }),
         ..AnimInput::default()
     });

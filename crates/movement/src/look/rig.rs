@@ -665,6 +665,8 @@ pub struct LadderAnim {
     pub speed: f32,
     /// Sliding down on the rails.
     pub sliding: bool,
+    /// A rope, not a ladder: hands and feet together on it.
+    pub rope: bool,
 }
 
 /// A vault over an obstacle, as the animation sees it: the body takes off before it, is over
@@ -2147,7 +2149,7 @@ fn ladder_body(l: LadderAnim) -> Pose {
     let mut lift = [0.0; 2];
     for (i, pair) in [(0usize, 1usize), (1, 0)] {
         let (y, u) = rung_hold(l.climbed, pair);
-        let side = if i == 0 { -0.12 } else { 0.12 };
+        let side = if i == 0 { -0.12 } else { 0.12 } * if l.rope { 0.35 } else { 1.0 };
         let out = 0.12 * rung_clear(u);
         // The ball of the foot on the rung, the ankle behind it.
         p.ankle[i] = v3(side, y + a + 0.03 * rung_clear(u), rung_z + 0.1 + out);
@@ -2191,9 +2193,10 @@ fn ladder_arms(l: LadderAnim, torso: Xf) -> Pose {
         let reach = 5.0 * RUNG;
         let (yl, ul) = rung_hold(l.climbed, 0);
         let (yr, ur) = rung_hold(l.climbed, 1);
-        p.hand_l = fist(-0.17, yl + reach, 0.1 * rung_clear(ul), Vec3::X, grip_l());
+        let apart = if l.rope { 0.04 } else { 0.17 };
+        p.hand_l = fist(-apart, yl + reach, 0.1 * rung_clear(ul), Vec3::X, grip_l());
         p.hand_r = fist(
-            0.17,
+            apart,
             yr + reach,
             0.1 * rung_clear(ur),
             Vec3::NEG_X,
@@ -2880,6 +2883,7 @@ mod tests {
                 climbed: 1.0,
                 speed: 2.0,
                 sliding: false,
+                rope: false,
             }),
             ..Default::default()
         };
@@ -2898,6 +2902,7 @@ mod tests {
                 climbed,
                 speed: 2.0,
                 sliding: false,
+                rope: false,
             });
             let pose = anim.update(&input);
             let bones = solve(&pose);

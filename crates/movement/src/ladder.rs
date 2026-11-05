@@ -279,7 +279,7 @@ fn climb(
         let_go(m, b, out, "jump", true);
         out.noise(b.entity, b.pos, 6.0);
         let side = wish.dot(f.right).clamp(-1.0, 1.0);
-        let launch = MovementProfile::launch_speed(p.wall_jump_height, b.g);
+        let launch = p.jump_speed(p.wall_jump_height, b.g);
         return -f.facing * KICK_SPEED + f.right * (side * p.run_speed * 0.6) + up * launch;
     }
 

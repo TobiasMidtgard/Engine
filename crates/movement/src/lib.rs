@@ -3,6 +3,7 @@
 pub mod afterimage;
 mod api;
 pub mod camera;
+pub mod climbrope;
 pub mod combat;
 pub mod demo;
 mod fallback;
@@ -29,6 +30,7 @@ use engine_render::RenderAppExt;
 
 pub use afterimage::{Afterimage, Afterimages};
 pub use camera::PilotCamera;
+pub use climbrope::ClimbRope;
 pub use combat::{
     AttackPhase, AttackState, CombatLog, CombatRecord, CombatState, Fighter, Outcome,
 };
@@ -36,7 +38,8 @@ pub use fx::{CameraFx, SlowMotionFx};
 pub use lockon::LockOn;
 pub use look::effects::{EffectSettings, Effects};
 pub use mover::{
-    Corner, Dash, DashRequest, Grapple, Hang, Ladder, Mantle, Mover, Vault, WallContact, Zip,
+    Corner, Dash, DashRequest, Grapple, Hang, Ladder, Mantle, Mover, RopeHold, RunUp, Vault,
+    WallContact, Zip,
 };
 pub use play::{Play, PlayToggle};
 pub use player::PlayerControlled;
@@ -130,6 +133,11 @@ impl Plugin for MovementPlugin {
                 "A zip line from this entity (near anchor) to `to` (far anchor, m, in its frame), \
                  sagging `sag` m at mid-span; riders let go `end_clear` m before an anchor, \
                  lifted at `exit_hop` m/s. Characters catch it by jumping into it.",
+            )
+            .register_component::<ClimbRope>(
+                "A rope hanging from this entity (its anchor), `length` m long; characters jump \
+                 into it to catch it, climb it (forward up, back down, crouch slides), swing on \
+                 it and let go with jump. The hands stop `top_clear` m under the anchor.",
             )
             .register_resource::<TimePerception>(
                 "Reflex slow motion (min scale, blend in, linger, threat radius) and cinematic \
