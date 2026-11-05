@@ -496,6 +496,46 @@ fn main() {
         }
         simulate(&mut app, 240);
     }
+    // `FOLIAGE_SNOW=<m>`: the ground under that much fresh snow, everywhere, while it snows.
+    if let Some(s) = std::env::var("FOLIAGE_SNOW")
+        .ok()
+        .and_then(|v| v.parse::<f32>().ok())
+    {
+        let cell = engine_world::SurfaceCell {
+            wetness: 0.3,
+            snow_m: s,
+            ..Default::default()
+        };
+        app.world.insert_resource(engine_world::SurfaceLayers {
+            grid: engine_world::Grid2::centered(DVec2::ZERO, 512.0, 1.0, cell),
+        });
+        {
+            let mut w = app.world.resource_mut::<WeatherState>();
+            w.precipitation_kind = engine_world::PrecipitationKind::Snow;
+            w.precipitation_mm_h = 1.0;
+            w.temperature_c = -3.0;
+            w.cloud_cover = 0.5;
+        }
+        simulate(&mut app, 30);
+    }
+    // `FOLIAGE_DAY=<day of year>`: every shot in that season (winter: 20 or 345).
+    if let Some(day) = std::env::var("FOLIAGE_DAY")
+        .ok()
+        .and_then(|v| v.parse::<f32>().ok())
+    {
+        app.world.resource_mut::<FoliageSeason>().day_of_year = day;
+        simulate(&mut app, 30);
+        let mut q = app.world.query::<(
+            &engine_render::GrassField,
+            Option<&engine_foliage::grass::FloorLayer>,
+        )>();
+        for (f, layer) in q.iter(&app.world) {
+            println!(
+                "day {day}: {layer:?} lying {} height {}",
+                f.style.lying, f.style.height
+            );
+        }
+    }
     let forest = demo::forest_viewpoints(FOREST);
     let cave = demo::cave_viewpoints(CAVE);
     let take = |app: &mut App, file: &str, v: &demo::Viewpoint| {

@@ -148,6 +148,15 @@ pub fn grass_dryness(day: f32) -> f32 {
     0.8 * greening.max(browning)
 }
 
+/// How far the forest's ferns have collapsed on a day, 0 (standing) .. 1 (lying flat): bracken
+/// browns through October, its dead fronds fall over in November's frosts and lie flattened
+/// on the floor through winter, until the new fronds unfurl in May (Marrs & Watt 2006,
+/// "Biological Flora of the British Isles: *Pteridium aquilinum*").
+pub fn fern_collapse(day: f32) -> f32 {
+    let d = day.rem_euclid(YEAR_DAYS);
+    smoothstep(295.0, 330.0, d).max(1.0 - smoothstep(125.0, 150.0, d))
+}
+
 /// The leaf litter on a day: above 0 (up to 1) freshly fallen autumn leaves, from the first
 /// leaf fall in early October until they brown in late November; below 0 (down to −0.6) the
 /// dark, sodden litter of winter, drying out by late April.
@@ -242,6 +251,21 @@ mod tests {
     fn seasons(name: &str) -> Seasons {
         let lib = PlantLibrary::default();
         lib.get(lib.id(name).unwrap()).seasons.unwrap()
+    }
+
+    #[test]
+    fn ferns_stand_in_summer_and_lie_flat_through_winter() {
+        assert_eq!(fern_collapse(MIDSUMMER), 0.0, "July");
+        assert_eq!(fern_collapse(345.0), 1.0, "December");
+        assert_eq!(fern_collapse(20.0), 1.0, "January");
+        assert!(
+            fern_collapse(137.0) > 0.0 && fern_collapse(137.0) < 1.0,
+            "unfurling in May"
+        );
+        assert!(
+            fern_collapse(282.0) == 0.0,
+            "brown but standing in early October"
+        );
     }
 
     #[test]

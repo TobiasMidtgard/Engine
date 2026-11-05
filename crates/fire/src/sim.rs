@@ -325,6 +325,9 @@ pub fn index_patches(
     field.refuel(min, max, &contains, &mut fuel);
 }
 
+/// New fire tiles the commands of one step may make in play (see [`handle_ignition`]).
+pub const IGNITION_TILES_PER_STEP: usize = 2;
+
 /// Handle `IgniteRequest`, hot `WorldImpulse`s and API commands.
 #[allow(clippy::too_many_arguments)]
 pub fn handle_ignition(
@@ -339,6 +342,7 @@ pub fn handle_ignition(
     water: Res<Water>,
     materials: Res<SurfaceMaterials>,
     mut heat: ResMut<HeatField>,
+    time: Res<Time>,
 ) {
     let mut events: Vec<FireCommand> = std::mem::take(&mut commands_queue.0);
     for r in ignites.read() {
@@ -368,7 +372,31 @@ pub fn handle_ignition(
         patches: &patches.list,
         ground_fuel: settings.ground_fuel,
     };
-    for e in events {
+    // In play, the commands that need new tiles are spread over steps, a few tiles a step
+    // ([`IGNITION_TILES_PER_STEP`]): the meadow demo's line of fire made all its tiles at
+    // once, 420 ms in one step on the session VM. With a manual clock all land at once.
+    let manual = matches!(time.source(), engine_core::time::TimeSource::Manual { .. });
+    let mut made = 0;
+    let mut events = events.into_iter();
+    while let Some(e) = events.next() {
+        if !manual {
+            let need = match &e {
+                FireCommand::Ignite { at, radius, .. } => {
+                    field.tiles_missing(*at, radius.max(field.cell_m * 0.5))
+                }
+                FireCommand::Splash { at, radius, .. } => {
+                    field.tiles_missing(*at, radius.max(field.cell_m) * 1.6 + field.cell_m)
+                }
+                _ => 0,
+            };
+            if need > 0 && made > 0 && made + need > IGNITION_TILES_PER_STEP {
+                // This one and everything after it, in order, at the next step.
+                commands_queue.0.push(e);
+                commands_queue.0.extend(events);
+                break;
+            }
+            made += need;
+        }
         match e {
             FireCommand::Ignite {
                 at,

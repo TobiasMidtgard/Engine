@@ -284,6 +284,9 @@ const STEPS: [Step; 13] = [
         // Each zone is a streamed cell: in the exe it wakes when the player comes near (and
         // the placeholders' zones sleep again behind them), as Unreal's World Partition
         // streams runtime cells; tours, films and tools load every one at once, as before.
+        // The free-flight route streams them by distance too (`--route`), so its hitches are
+        // the ones a player flying that way meets, not every zone loading at once at the start.
+        let near = staged || world.contains_resource::<crate::route::Route>();
         let seed = world.resource::<EngineConfig>().seed;
         let lib = b.lib.clone().expect(LIB);
         for cell in zones::zone_cells(&b.land, only.as_ref()) {
@@ -305,7 +308,7 @@ const STEPS: [Step; 13] = [
                     part + 1 >= parts.len()
                 },
             )
-            .load_within(if staged { ZONE_LOAD_M } else { f64::INFINITY });
+            .load_within(if near { ZONE_LOAD_M } else { f64::INFINITY });
             if cell.keep_loaded {
                 streamed = streamed.keep_loaded();
             }

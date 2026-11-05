@@ -1311,6 +1311,8 @@ impl ScriptRuntime {
     // ------------------------------------------------------------------------- instances
 
     fn sync_instances(&mut self, world: &mut World, settings: &ScriptSettings) {
+        /// Milliseconds a frame for starting new script instances in play.
+        const START_BUDGET_MS: f64 = 3.0;
         let this_run = world.change_tick();
         let mut seen: Vec<(Entity, Option<Script>, Tick, bool)> = Vec::new();
         {
@@ -1342,6 +1344,15 @@ impl ScriptRuntime {
             self.destroy_instance(e, settings);
         }
         let mut planned = Vec::new();
+        // In play new instances start within a budget a frame and the rest at the next frames
+        // (a zone of 95 scripted entities streaming in held one frame 125-280 ms on the
+        // session VM); with a manual clock (tests, tours) all start at once.
+        let started = Instant::now();
+        let budgeted = !matches!(
+            world.resource::<Time>().source(),
+            engine_core::time::TimeSource::Manual { .. }
+        );
+        let over = || budgeted && started.elapsed().as_secs_f64() * 1000.0 > START_BUDGET_MS;
         for (e, script, tick, placed) in seen {
             let Some(script) = script else { continue };
             let path = normalize(&script.path);
@@ -1366,6 +1377,8 @@ impl ScriptRuntime {
                         }
                     }
                 }
+                // Waits for a later frame: it is still new (or changed) then.
+                _ if over() => {}
                 Some(_) => {
                     self.destroy_instance(e, settings);
                     self.create_instance(e, &script, tick, settings);
