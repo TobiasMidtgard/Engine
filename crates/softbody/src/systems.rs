@@ -1525,12 +1525,17 @@ fn rests(
     // A cloth that collides with itself rests from twice the LOD distance (a little nearer
     // waking): stepped coarsely there it folds through itself and comes back tangled, and
     // self-collision is most of its cost (the unveiling sheet balled up at the plaza).
-    // Hair and fur rest from there too, riding their bones: a few pixels across that far,
-    // their sway can't be seen, but stepped they cost as much as near (the dog's fur, the
-    // paddock people's hair seen from the plaza).
-    let far = 2.0 * config.lod_distance * if b.frozen { 0.9 } else { 1.0 };
-    let resting =
-        resting || ((b.sim.params.self_collide > 0.0 || b.strands.is_some()) && dist > far);
+    // Hair and fur rest from the LOD distance itself, riding their bones: a head is about
+    // seven pixels tall at 30 m (1600x900, 60 degrees), too small to see sway, but stepped
+    // they cost as much as near (the dog's fur, the paddock people's hair seen from the plaza;
+    // at the lake two people's hair 30-60 m off took 6-11 ms a step on the cloud VM). Unreal's
+    // groom LODs likewise turn the simulation off a short way out.
+    let hysteresis = if b.frozen { 0.9 } else { 1.0 };
+    let far = 2.0 * config.lod_distance * hysteresis;
+    let far_strands = config.lod_distance * hysteresis;
+    let resting = resting
+        || (b.sim.params.self_collide > 0.0 && dist > far)
+        || (b.strands.is_some() && dist > far_strands);
     // One still settling keeps going wherever it is, a budget a frame, so it is ready when
     // it is first seen up close.
     (resting || dist > config.freeze_distance) && b.pending_prewarm == 0
