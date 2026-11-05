@@ -18,6 +18,7 @@ pub mod mist;
 pub mod puddles;
 pub mod render;
 pub mod ripples;
+pub mod runoff;
 pub mod shelter;
 pub mod shift;
 pub mod shore;
@@ -91,6 +92,7 @@ impl Plugin for WaterPlugin {
             .init_resource::<creek_sim::CreekSims>()
             .init_resource::<creek_stones::CreekStones>()
             .init_resource::<freshet::Freshet>()
+            .init_resource::<runoff::StormRunoff>()
             .register_resource::<WaterSettings>(
                 "Water quality and behavior: ripple grid size (cells, meters), ripple speed (m/s) \
                  and damping (1/s), foam life (s), raindrops per m² per mm/h, puddles on/off, \
@@ -178,6 +180,7 @@ impl Plugin for WaterPlugin {
                         creek_stones::creek_stones_system,
                         creek_sim::creek_sim_system,
                         creeks::creek_ribbons_system,
+                        runoff::storm_runoff_system,
                     )
                         .chain(),
                 ),
