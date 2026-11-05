@@ -285,10 +285,11 @@ fn fs_impostor(in: ImpostorOut) -> ImpostorColor {
     s.smooth_normal = surface.normal;
     s.occlusion = surface.occlusion;
     // Far crowns hold snow as their meshes do (mesh.wgsl): on the upper side, where the baked
-    // normal faces up.
+    // normal faces up. A texel covers many of the meshes' clumps, so it takes their share of
+    // the surface (at most three quarters) rather than clumps of its own.
     if (in.snow > 0.0 && (mat.flags.x & 64u) != 0u) {
         let fallen = saturate(surface_weather(surface.rel).z * SURFACE_SNOW_SCALE_M * 10.0);
-        let held = saturate(fallen * in.snow * smoothstep(-0.1, 0.5, surface.normal.y) * 1.6);
+        let held = saturate(fallen * in.snow * smoothstep(0.05, 0.45, surface.normal.y) * 1.8) * 0.75;
         s.albedo = mix(s.albedo, vec3<f32>(0.9, 0.92, 0.95), held);
         s.roughness = mix(s.roughness, 0.75, held);
         s.subsurface = mix(s.subsurface, 0.3, held);

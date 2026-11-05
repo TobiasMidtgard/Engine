@@ -990,7 +990,9 @@ fn evaluate_material(si: SurfaceIn, shadows: bool) -> MaterialSample {
         let fallen = saturate(ground.z * SURFACE_SNOW_SCALE_M * 10.0);
         let snow_cover = fallen * smoothstep(0.35, 0.8, n_up);
         let snow_noise = value_noise2(tiling_pos(si.rel).xz * 1.7);
-        var snow = saturate(snow_cover * (0.75 + 0.5 * snow_noise));
+        // (A bone plant's leaves and sprays hold theirs in clumps below instead: a soft wash
+        // over their bent normals reads as a pale mint coat.)
+        var snow = select(saturate(snow_cover * (0.75 + 0.5 * snow_noise)), 0.0, si.snow > 0.0 && out.thin);
         // Bone plants hold snow where it lands on them: on what faces the sky through the leaves
         // above (the canopy map: falling snow is caught layer by layer as rain is, exp(-k L) of
         // the leaf area above, `canopy_rain_through`; a branch also holds what lands on it, so
@@ -1000,14 +1002,28 @@ fn evaluate_material(si: SurfaceIn, shadows: bool) -> MaterialSample {
         // green, a limb carries a white line along its top. Lumps in the plant's own space ride
         // with its sway. Conifers hold snow in shelves on every whorl (Hedstrom and Pomeroy
         // 1998: a spruce crown holds about 6 kg/m² per unit leaf area before it unloads).
+        //
+        // On leaves and sprays, held snow is clumps, not a wash: a pixel is snow or needles,
+        // never a pale mix of both (which reads as mint). Exposure and inclination set how much of a surface is covered
+        // (Ohlsson and Seipel 2004, "Real-time rendering of accumulated snow"), and a lumpy
+        // field in the plant's space picks which parts, with a sharp edge, so white clumps sit
+        // on the tops of the sprays with dark needle gaps between them.
         if (si.snow > 0.0 && fallen > 0.0) {
             let through = canopy_rain_through(si.rel + vec3<f32>(0.0, 0.3, 0.0));
             let exposed = si.snow * mix(0.45, 1.0, through);
-            let lumps = value_noise3(si.local * 2.3) * 0.65 + value_noise3(si.local * 7.1) * 0.35;
-            // Cards and sprays take it on any side that isn't their underside; bark (closed
-            // meshes) only on the tops of limbs and branches, not down a trunk's sides.
-            let up = select(smoothstep(0.3, 0.75, face.y), smoothstep(-0.15, 0.4, face.y), out.thin);
-            let held = saturate((exposed * up * 2.6 - 0.35 + 0.7 * lumps) * fallen);
+            let lumps = value_noise3(si.local * 3.1) * 0.6 + value_noise3(si.local * 9.3) * 0.4;
+            // Cards and sprays take it on the faces turned to the sky; bark (closed meshes) only
+            // on the tops of limbs and branches, not down a trunk's sides.
+            let up = select(smoothstep(0.3, 0.75, face.y), smoothstep(0.05, 0.45, face.y), out.thin);
+            // Share of the surface under snow (at most three quarters: gaps always show), then
+            // the clumps that make it up: the lumps above the matching level.
+            let cover = saturate(exposed * up * fallen * 1.8) * 0.75;
+            let level = 1.0 - cover;
+            let spread = smoothstep(0.25, 0.75, lumps);
+            let clumps = select(0.0, smoothstep(level - 0.03, level + 0.03, spread), cover > 0.02);
+            // Bark keeps a soft line of snow along the tops of limbs and twigs.
+            let line = saturate((exposed * up * 2.6 - 0.35 + 0.7 * lumps) * fallen);
+            let held = select(line, clumps, out.thin);
             if (held > snow) {
                 snow = held;
                 // The snow's own surface faces up, whatever the leaf under it does.
