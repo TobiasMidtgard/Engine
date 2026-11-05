@@ -332,14 +332,18 @@ impl HullCache {
 /// `Water::sample` is 5-35 us (every lake's waves, its depth from the ground, ripples, flows),
 /// and every floating collider asked for up to 26 of them every substep, at points that moved
 /// with it. The water stands still through a step (its systems run between steps), so a node
-/// asked once is shared by every substep, collider and body over it. A node near a focus is
-/// asked again each step; farther out the waves are followed less often ([`node_steps`]):
-/// at the plaza the lake's boats, 300-500 m off, were most of the step's water work, and in
-/// four steps (1/15 s) a wave there rises a few centimeters. Aged by [`WaterCache::next_step`].
+/// asked once is shared by every substep, collider and body over it. A node is asked again
+/// every second step near a focus, every fourth to [`MID_CELLS_M`] and every eighth past it
+/// ([`node_steps`]), and between its asks it follows the surface at the rate it rose or fell
+/// between its last two (first-order dead reckoning, as networked games carry a position
+/// forward between updates). For a wave a meter high every 4 s that is within a
+/// millimeter near a focus, 4 mm to [`MID_CELLS_M`] and 2 cm past it, where holding a node
+/// still for the 3 steps it was kept there was up to 4 cm off; and the lake's boats ask for
+/// half as many samples (53 a step near them, 0.34 ms on the VM, round 18).
+/// Aged by [`WaterCache::next_step`].
 #[derive(Default)]
 pub(crate) struct WaterCache {
-    /// Value and the step it expires at.
-    nodes: HashMap<(u8, i64, i64), (Node, u64)>,
+    nodes: HashMap<(u8, i64, i64), Kept>,
     step: u64,
     asked: usize,
 }
@@ -347,24 +351,48 @@ pub(crate) struct WaterCache {
 /// A lattice node: the surface height (world) and current there, if there is water.
 type Node = Option<(f64, Vec3)>;
 
-/// Steps a lattice node is kept, by the grid cells its collider asked for ([`cells_at`]): every
-/// step near a focus, every second to [`MID_CELLS_M`], every fourth past it.
-fn node_steps(cells: usize) -> u64 {
-    if cells >= MAX_CELLS {
-        1
-    } else if cells > FAR_CELLS {
-        2
-    } else {
-        4
+/// A node's last answer: when it was asked, how fast its surface was rising then (meters a
+/// step, from the answer before), and the step it is asked again at.
+#[derive(Clone, Copy)]
+struct Kept {
+    node: Node,
+    asked_at: u64,
+    rate: f64,
+    until: u64,
+}
+
+impl Kept {
+    /// The node `step`s on: its surface moved on at its rate.
+    fn at(&self, step: u64) -> Node {
+        let ahead = step.saturating_sub(self.asked_at) as f64;
+        self.node.map(|(h, v)| (h + self.rate * ahead, v))
     }
 }
 
+/// Steps a lattice node is kept, by the grid cells its collider asked for ([`cells_at`]): two
+/// near a focus, four to [`MID_CELLS_M`], eight past it.
+fn node_steps(cells: usize) -> u64 {
+    if cells >= MAX_CELLS {
+        2
+    } else if cells > FAR_CELLS {
+        4
+    } else {
+        8
+    }
+}
+
+/// The fastest a node's surface is taken to rise or fall, meters a step: past it the two
+/// answers aren't the same wave (a stream turned on, a lake streamed in) and the node is held.
+const MAX_RATE_M: f64 = 0.25;
+
 impl WaterCache {
-    /// Starts a step: forgets the nodes due to be asked again.
+    /// Starts a step. A node due to be asked again stays one more of its spans, so its next
+    /// answer can give its rate; past that it is forgotten.
     pub fn next_step(&mut self) {
         self.step += 1;
         let now = self.step;
-        self.nodes.retain(|_, (_, until)| *until > now);
+        self.nodes
+            .retain(|_, k| k.until + (k.until - k.asked_at) > now);
         self.asked = 0;
     }
 
@@ -388,15 +416,40 @@ impl WaterCache {
         iz: i64,
         keep: u64,
     ) -> Option<(f64, Vec3)> {
-        if let Some((n, _)) = self.nodes.get(&(level, ix, iz)) {
-            return *n;
+        let before = self.nodes.get(&(level, ix, iz)).copied();
+        if let Some(k) = before
+            && k.until > self.step
+        {
+            return k.at(self.step);
         }
         self.asked += 1;
         let s = spacing(level) as f64;
         let n = water
             .sample(DVec3::new(ix as f64 * s, 0.0, iz as f64 * s))
             .map(|w| (w.surface_height, w.velocity));
-        self.nodes.insert((level, ix, iz), (n, self.step + keep));
+        let rate = match (before, n) {
+            (
+                Some(Kept {
+                    node: Some((h0, _)),
+                    asked_at,
+                    ..
+                }),
+                Some((h, _)),
+            ) if asked_at < self.step => {
+                let r = (h - h0) / (self.step - asked_at) as f64;
+                if r.abs() <= MAX_RATE_M { r } else { 0.0 }
+            }
+            _ => 0.0,
+        };
+        self.nodes.insert(
+            (level, ix, iz),
+            Kept {
+                node: n,
+                asked_at: self.step,
+                rate,
+                until: self.step + keep,
+            },
+        );
         n
     }
 
@@ -712,6 +765,59 @@ mod tests {
                 "draft {h}: {} vs {want}",
                 w.volume
             );
+        }
+    }
+
+    /// A surface rising steadily, one centimeter a step ([`Rising::step`] moves it on).
+    struct Rising(std::sync::atomic::AtomicU64, std::sync::atomic::AtomicUsize);
+
+    impl Rising {
+        fn step(&self) {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    impl engine_world::WaterQuery for Rising {
+        fn sample(&self, _: DVec3) -> Option<engine_world::WaterSample> {
+            self.1.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let k = self.0.load(std::sync::atomic::Ordering::Relaxed);
+            Some(engine_world::WaterSample {
+                surface_height: 0.01 * k as f64,
+                depth: 5.0,
+                velocity: Vec3::ZERO,
+                normal: Vec3::Y,
+            })
+        }
+    }
+
+    /// Between its asks a node follows the surface at the rate it moved between the last two:
+    /// a steadily rising surface is read exactly every step, near a focus asked every second
+    /// step, far off every eighth.
+    #[test]
+    fn kept_water_nodes_follow_the_surface_between_asks() {
+        let rising = Arc::new(Rising(Default::default(), Default::default()));
+        let water = Water(rising.clone());
+        for (cells, every) in [(MAX_CELLS, 2), (FAR_CELLS, 8)] {
+            let mut cache = WaterCache::default();
+            rising.1.store(0, std::sync::atomic::Ordering::Relaxed);
+            let steps = 64;
+            for _ in 0..steps {
+                rising.step();
+                cache.next_step();
+                let now = rising.0.load(std::sync::atomic::Ordering::Relaxed);
+                // Past the first two asks (the rate needs two answers).
+                let (h, _) = cache.node(&water, 0, 3, -2, node_steps(cells)).unwrap();
+                if cache.step > 2 * every {
+                    assert!(
+                        (h - 0.01 * now as f64).abs() < 1e-9,
+                        "{cells} cells, step {}: {h} vs {}",
+                        cache.step,
+                        0.01 * now as f64
+                    );
+                }
+            }
+            let asked = rising.1.load(std::sync::atomic::Ordering::Relaxed);
+            assert_eq!(asked as u64, steps / every, "{cells} cells");
         }
     }
 }
