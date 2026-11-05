@@ -562,7 +562,7 @@ pub(crate) fn label(world: &World, e: Entity) -> String {
 
 /// A shape's kind and size for the report: a hull's points, a mesh's triangles, a
 /// heightfield's cells or a compound's parts.
-fn shape_size(s: &dyn rapier3d::parry::shape::Shape) -> String {
+pub(crate) fn shape_size(s: &dyn rapier3d::parry::shape::Shape) -> String {
     if let Some(h) = s.as_convex_polyhedron() {
         format!("hull of {} points", h.points().len())
     } else if let Some(m) = s.as_trimesh() {
@@ -574,4 +574,54 @@ fn shape_size(s: &dyn rapier3d::parry::shape::Shape) -> String {
     } else {
         format!("{:?}", s.shape_type())
     }
+}
+
+/// The `n` contact pairs of `world` with the most manifolds, by entity and shape, with their
+/// contacts and deepest penetration (for a slow step's log line, off the frame: no names).
+pub(crate) fn heavy_pairs(world: &rapier3d::prelude::PhysicsWorld, n: usize) -> String {
+    let mut heavy: Vec<_> = world
+        .narrow_phase
+        .contact_pairs()
+        .map(|p| {
+            let contacts: usize = p.manifolds().iter().map(|m| m.points.len()).sum();
+            let deepest = p
+                .manifolds()
+                .iter()
+                .flat_map(|m| m.points.iter())
+                .map(|c| -c.dist)
+                .fold(0.0f32, f32::max);
+            (
+                p.manifolds().len(),
+                contacts,
+                deepest,
+                p.collider1,
+                p.collider2,
+            )
+        })
+        .collect();
+    heavy.sort_by_key(|m| std::cmp::Reverse(m.0));
+    let what = |h: ColliderHandle| {
+        world.colliders.get(h).map_or_else(
+            || "?".into(),
+            |c| {
+                format!(
+                    "{} [{}]",
+                    crate::convert::entity_of(c.user_data),
+                    shape_size(c.shape())
+                )
+            },
+        )
+    };
+    heavy
+        .into_iter()
+        .take(n)
+        .map(|(m, k, d, a, b)| {
+            format!(
+                "{} on {} ({m} manifolds, {k} contacts, {d:.2} m deep)",
+                what(a),
+                what(b)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
 }

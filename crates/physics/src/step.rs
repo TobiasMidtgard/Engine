@@ -2518,6 +2518,10 @@ fn substep(
                     c.stages.user_changes.time_ms(),
                     c.cd.final_broad_phase_time.time_ms()
                 );
+                engine_core::log::info!(
+                    "physics: its heaviest pairs: {}",
+                    crate::report::heavy_pairs(&r.world, 4)
+                );
             }
         }
         crate::articulation::after_step(&mut r.world, &mut r.links);
