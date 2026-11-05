@@ -56,6 +56,19 @@ fn grass_surface(in: GrassOut, front: bool) -> Surface {
     // Wet: blades are waxy and shed water, so rain leaves a film and beads that gloss them
     // (smoother, a little more reflective) and darken them only slightly, unlike soil, which
     // soaks it up (Lagarde, "Water drop 2b", 2013: non-porous surfaces keep their albedo).
+    // A fern's frond: the rachis paler and yellower, each leaflet's midvein a pale line with
+    // the blade either side of it darker toward its edges (where it is thinnest and curls).
+    if (in.pinnae > 0.0) {
+        let a = abs(in.across);
+        let t = fract(in.along * in.pinnae - a * 0.55 + 0.25);
+        let edge = abs(t - 0.5) * 2.0 / max(0.7 * (1.0 - 0.75 * a * a), 0.05);
+        let vein = 1.0 - smoothstep(0.0, 0.14, edge);
+        let rachis = 1.0 - smoothstep(0.06, 0.12, a);
+        let tone = mix(1.0, 0.8, smoothstep(0.45, 1.0, edge)) + 0.12 * vein;
+        s.albedo *= tone;
+        s.albedo = mix(s.albedo, s.albedo * vec3<f32>(1.35, 1.3, 0.85), rachis);
+        s.roughness = mix(s.roughness, 0.42, vein);
+    }
     let wet = saturate(surface_weather(in.rel).x);
     s.albedo *= 1.0 - 0.12 * wet;
     s.roughness = mix(s.roughness, 0.16, wet * 0.85);
@@ -146,7 +159,9 @@ fn grass_cut(along: f32, across: f32, pinnae: f32) -> bool {
     }
     // Each pinna is a lobe one 1/pinnae of the frond long at the rachis, slanted forward.
     let t = fract(along * pinnae - a * 0.55 + 0.25);
-    // ...narrowing toward its tip at the frond's edge, with a gap to the next.
-    let fill = 0.7 * (1.0 - 0.75 * a * a);
+    // ...narrowing toward its tip at the frond's edge, with a gap to the next, its margin
+    // finely toothed.
+    let teeth = 0.06 * abs(sin(a * 48.0));
+    let fill = 0.7 * (1.0 - 0.75 * a * a) - teeth;
     return abs(t - 0.5) * 2.0 > fill;
 }
