@@ -1164,10 +1164,14 @@ fn builds(world: &mut World, want: &[(f64, usize, CellState)], at_once: usize) {
             continue;
         };
         let (tx, rx) = mpsc::channel();
-        // A thread of its own: a build may use the compute pool's scopes without waiting on
-        // the pool it runs in.
+        // A thread of its own: a build may open pool scopes without waiting on the pool it
+        // runs in. Named "async ..." so its `par_chunks_mut` splits run on the async pool, as
+        // an off-frame build's do: on the compute pool a frame thread waiting in any scope
+        // (a system's `par_iter`) picks up a build's chunk and the frame waits for it: on the
+        // session VM's route engine_anim::gait_system took 918 ms in one frame while the
+        // plaza built, and showcase::update_lods 1.2 s in another.
         let spawned = std::thread::Builder::new()
-            .name(format!("cell build {key}"))
+            .name(format!("async cell build {key}"))
             .spawn(move || {
                 let t = Instant::now();
                 let built = build();

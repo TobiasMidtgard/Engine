@@ -5810,3 +5810,44 @@ return Bob
         "back in range it runs again: {far0:?} -> {far1:?}"
     );
 }
+
+const SLOW_START: &str = r#"
+local Slow = {}
+
+function Slow:start()
+	-- A dear start (a script building its parts): about a millisecond.
+	local t = os.clock()
+	while os.clock() - t < 0.001 do end
+end
+
+return Slow
+"#;
+
+#[test]
+fn in_play_many_new_scripts_start_over_a_few_frames() {
+    let folder = Folder::new();
+    folder.write("slow.luau", SLOW_START);
+    let mut app = app_in(&folder.0);
+    // The real clock, as in play.
+    app.world
+        .resource_mut::<Time>()
+        .set_source(TimeSource::Realtime);
+    for i in 0..40 {
+        spawn_script(&mut app, &format!("Slow {i}"), "slow");
+    }
+    let instances = |app: &App| app.world.resource::<ScriptRuntime>().instances.len();
+    app.update();
+    let first = instances(&app);
+    assert!(
+        (1..40).contains(&first),
+        "{first} of 40 started in the first frame"
+    );
+    for _ in 0..200 {
+        if instances(&app) == 40 {
+            break;
+        }
+        app.update();
+    }
+    assert_eq!(instances(&app), 40, "the rest started at the next frames");
+    assert!(errors(&mut app).is_empty(), "{:?}", errors(&mut app));
+}

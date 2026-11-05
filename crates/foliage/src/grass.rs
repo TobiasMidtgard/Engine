@@ -643,6 +643,14 @@ pub fn plant_cover(
     cover
 }
 
+/// The fern layer's look on `day`: dead fronds fall over and lie on the floor from November
+/// to May ([`crate::season::fern_collapse`]), where snow buries them.
+pub fn winter_ferns(style: &mut GrassStyle, day: f32) {
+    let c = crate::season::fern_collapse(day);
+    style.lying = 0.85 * c;
+    style.height *= 1.0 - 0.2 * c;
+}
+
 /// Density and dryness maps of a region's fern layer: thick where crowns crowd, none on paths
 /// and under logs and rocks, rust brown as the season turns (`season_dry`).
 pub fn fern_maps(
@@ -1020,6 +1028,11 @@ pub fn sync_region_grass(
         let styles = if settings.gpu_grass {
             let mut styles = floor_styles(&library, region);
             styles.retain(|(l, _)| settings.gpu_ferns || *l != FloorLayer::Ferns);
+            for (l, style) in &mut styles {
+                if *l == FloorLayer::Ferns {
+                    winter_ferns(style, day);
+                }
+            }
             styles
         } else {
             Vec::new()

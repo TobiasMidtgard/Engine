@@ -54,8 +54,12 @@ fn pool_sizes(cores: usize) -> (usize, usize) {
 
 /// Run `f(chunk_index, chunk)` over `data` split into `chunk_size` pieces on the compute pool.
 ///
-/// Called from an async worker (an [`off_frame`] build), the chunks run on the async pool
-/// instead, so a background build never takes the compute threads the frame's systems need.
+/// Called from an async worker (an [`off_frame`] build, a cell build) or from a thread with no
+/// name (a module's own background thread), the chunks run on the async pool instead, so a
+/// background build never takes the compute threads the frame's systems need. A thread
+/// waiting in a compute scope also runs the frame's own system tasks: on the session VM's
+/// route an unnamed background thread held `engine_vehicles::prepare_frames` for 0.5 s that
+/// way while the frame waited.
 /// With no pool set up (a plain unit test) the chunks run in order on the calling thread.
 pub fn par_chunks_mut<T: Send>(
     data: &mut [T],
@@ -70,7 +74,7 @@ pub fn par_chunks_mut<T: Send>(
     let f = &f;
     let on_async = std::thread::current()
         .name()
-        .is_some_and(|n| n.starts_with("async"));
+        .is_none_or(|n| n.starts_with("async"));
     let pool: Option<&TaskPool> = match on_async.then(AsyncComputeTaskPool::try_get).flatten() {
         Some(pool) => Some(pool),
         None => ComputeTaskPool::try_get().map(|p| &**p),
