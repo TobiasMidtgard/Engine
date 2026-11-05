@@ -3,6 +3,7 @@
 pub mod afterimage;
 mod api;
 pub mod camera;
+pub mod city;
 pub mod climbrope;
 pub mod combat;
 pub mod demo;
@@ -137,7 +138,7 @@ impl Plugin for MovementPlugin {
             .register_component::<ClimbRope>(
                 "A rope hanging from this entity (its anchor), `length` m long; characters jump \
                  into it to catch it, climb it (forward up, back down, crouch slides), swing on \
-                 it and let go with jump. The hands stop `top_clear` m under the anchor.",
+                 it (the stick pumps) and let go with jump. The hands stop `top_clear` m under the anchor.",
             )
             .register_resource::<TimePerception>(
                 "Reflex slow motion (min scale, blend in, linger, threat radius) and cinematic \

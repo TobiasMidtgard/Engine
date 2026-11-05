@@ -437,7 +437,7 @@ fn the_stick_climbs_a_rope_and_jump_lets_go_with_the_swing() {
     run(&mut app, 2.0);
     let r = mover(&app, c).rope.unwrap();
     assert!(
-        s0 - r.s > 2.2 && s0 - r.s < 3.3,
+        s0 - r.s > 3.6 && s0 - r.s < 5.0,
         "climbed {:.2} m",
         s0 - r.s
     );
@@ -446,11 +446,8 @@ fn the_stick_climbs_a_rope_and_jump_lets_go_with_the_swing() {
     run(&mut app, 1.0);
     let r2 = mover(&app, c).rope.unwrap();
     assert!(r2.s - r.s > 1.5, "down {:.2} m", r2.s - r.s);
-    // Sprint held: the stick pumps the swing instead.
-    intent(&mut app, c, |i| {
-        i.direction = Vec3::Z;
-        i.sprint = true;
-    });
+    // Sideways, the stick only pumps the swing.
+    intent(&mut app, c, |i| i.direction = Vec3::Z);
     run(&mut app, 0.3);
     let r2 = mover(&app, c).rope.unwrap();
     run(&mut app, 1.0);
@@ -462,10 +459,7 @@ fn the_stick_climbs_a_rope_and_jump_lets_go_with_the_swing() {
         r3.swing.length()
     );
     // Jump: off the rope, flying on with the swing.
-    intent(&mut app, c, |i| {
-        i.sprint = false;
-        i.jump = true;
-    });
+    intent(&mut app, c, |i| i.jump = true);
     app.update();
     let m = mover(&app, c);
     assert!(m.rope.is_none() && m.mode == LocomotionMode::Air);

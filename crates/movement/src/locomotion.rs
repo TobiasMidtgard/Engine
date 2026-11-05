@@ -76,7 +76,7 @@ const HOP_UP: (f32, f32) = (0.7, 2.1);
 /// Ledges a drop reaches: this much lower than the one held, m.
 const HOP_DOWN: (f32, f32) = (0.7, 3.6);
 /// Ledges a leap across reaches: this far along the wall, m.
-const HOP_ACROSS: f32 = 2.6;
+const HOP_ACROSS: f32 = 3.5;
 /// Walking off an edge with crouch held catches it when the drop is deeper than this, m.
 const DROP_HANG_MIN: f32 = 1.5;
 /// Running up a wall: longest, s, and the fastest rise, m/s.
@@ -88,6 +88,9 @@ const RUNUP_MIN_SPEED: f32 = 4.0;
 const RUNUP_MAX_LEAN: f32 = 0.1;
 /// Falling, ledges this far below the hands are caught too, m.
 const LEDGE_MAGNET: f32 = 0.6;
+/// How far past the body a wall can be and still be run up, m: a sill or a band at the hips
+/// holds the body this far off the face.
+const RUNUP_REACH: f32 = 0.6;
 /// Longest hop between ledges before giving up (something in the way), s.
 const HOP_MAX_SECS: f32 = 0.9;
 
@@ -1898,6 +1901,8 @@ fn find_hop(b: &Body, probe: &Probe, top: DVec3, normal: Vec3, hop: Hop) -> Opti
                 Vec3::X * 1.0,
                 Vec3::X * 1.5,
                 Vec3::X * 2.0,
+                Vec3::X * 2.5,
+                Vec3::X * 3.0,
                 Vec3::X * HOP_ACROSS,
             ],
             0.5,
@@ -1924,7 +1929,11 @@ fn find_hop(b: &Body, probe: &Probe, top: DVec3, normal: Vec3, hop: Hop) -> Opti
         // Nothing in the way: overhead going up, along the wall going across.
         let clear = match hop {
             Hop::Up => probe.ray(b.pos, up, b.height * 0.5 + rise).is_none(),
-            Hop::Down => true,
+            // Not a hold whose feet would be on (or in) the ground: let go there instead.
+            Hop::Down => {
+                let hold = hold_at(b, probe, next, n);
+                probe.ray(hold, -up, b.height * 0.5 + 0.05).is_none()
+            }
             Hop::Across(side) => {
                 let chest = b.pos + (up * (b.height * 0.25)).as_dvec3();
                 probe
@@ -1932,7 +1941,12 @@ fn find_hop(b: &Body, probe: &Probe, top: DVec3, normal: Vec3, hop: Hop) -> Opti
                     .is_none()
             }
         };
-        if !clear {
+        // And a wall to hang on there (not past the end of the face, off the ledge's tip).
+        let hanging = Body {
+            pos: hold_at(b, probe, next, n),
+            ..*b
+        };
+        if !clear || chest_wall_within(&hanging, probe, -n, hang_reach(b)).is_none() {
             continue;
         }
         return Some(Hang {
@@ -2306,7 +2320,7 @@ fn start_run_up(b: &Body, probe: &Probe, v: Vec3, wish: Vec3) -> Option<RunUp> {
         return None;
     }
     let chest = b.pos + (up * (b.height * 0.25)).as_dvec3();
-    let hit = probe.ray(chest, dir, b.radius + 0.35)?;
+    let hit = probe.ray(chest, dir, b.radius + RUNUP_REACH)?;
     let normal = flat(hit.normal, up).normalize_or_zero();
     // An upright wall, head-on (not a steep hillside, nor one run along).
     if hit.distance <= 0.0 || hit.normal.dot(up).abs() > RUNUP_MAX_LEAN || normal.dot(dir) > -0.8 {
@@ -2341,7 +2355,7 @@ fn run_up(
     let up = b.up;
     r.secs += dt;
     let into = -r.normal;
-    let wall = chest_wall_within(b, probe, into, b.radius + 0.35)
+    let wall = chest_wall_within(b, probe, into, b.radius + RUNUP_REACH)
         .filter(|(_, n, _)| n.dot(r.normal) > 0.7);
     // A top in reach: climb onto it, or hang from it.
     let rising = up * 1.0;
@@ -2410,13 +2424,25 @@ pub(crate) fn step_off_rope(
         ..*p
     };
     for dir in [toward, right, -right, -toward] {
-        // Reaching over toward it, past the rope.
-        let leaning = Body {
-            pos: b.pos + (dir * 0.4).as_dvec3(),
+        // Reaching over toward it, past the rope: as far as what stands out of the wall in
+        // front (a cornice at the chest) lets the body lean, and square on to that wall.
+        let (dir, lean) = match probe.ray(b.pos, dir, b.radius + 1.0) {
+            Some(h) if h.distance > 0.0 => {
+                let n = flat(h.normal, up).normalize_or_zero();
+                let lean = (h.distance - b.radius - 0.02).clamp(0.0, 0.6);
+                if n.dot(dir) < -0.3 {
+                    (-n, dir * lean)
+                } else {
+                    (dir, dir * lean)
+                }
+            }
+            Some(_) => (dir, Vec3::ZERO),
+            None => (dir, dir * 0.4),
+        };
+        let on = &Body {
+            pos: b.pos + lean.as_dvec3(),
             ..*b
         };
-        let near = probe.ray(b.pos, dir, b.radius + 0.4).is_none();
-        let on = if near { &leaning } else { b };
         if let Some(mt) = find_ledge(&reach, on, probe, dir * 2.0, dir) {
             m.mantle = Some(Mantle {
                 exit_speed: p.run_speed * 0.5,

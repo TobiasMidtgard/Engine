@@ -15,9 +15,13 @@
 //! - [`rig`]: the fighters' skeleton, poses, two-bone IK and the procedural animator.
 //! - [`rope`]: the grapple's cable and hook.
 //! - [`zipline`]: zip line cables, dipping under their riders.
+//! - [`city`]: the climbing quarter's houses, roofs and street.
+//! - [`climbrope`]: hanging ropes, bent where they are held.
 //! - [`effects`]: blade trails, parry sparks, slash flashes, impact lights, dust and the
 //!   render feature that draws them and the afterimage ghosts.
 
+pub mod city;
+pub mod climbrope;
 pub mod course;
 pub mod effects;
 pub mod fighter;
@@ -82,6 +86,8 @@ pub const LIBRARY: &[Generator] = &[
     fighter::generate,
     rope::generate,
     zipline::generate,
+    city::generate,
+    climbrope::generate,
     crate::lockon::generate,
 ];
 
