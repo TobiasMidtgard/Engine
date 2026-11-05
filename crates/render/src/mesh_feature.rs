@@ -63,6 +63,7 @@ use crate::material_library::{MaterialPreset, MaterialTextures};
 use crate::mesh::{Mesh, Vertex};
 use crate::mesh_pool::{MeshPool, PoolMesh};
 use crate::mesh_scene::{self, Cold, Hot, LOD_UNSET, MeshScene, SlotChange};
+use crate::plant_wind::{PlantWindMeshes, PlantWindSpecies, PlantWindTable};
 use crate::settings::{RenderSettings, TextureCompression};
 use crate::shadows::{FAR_SHADOW_MAP, MAX_CASCADES, SHADOW_MAPS, SKY_OCCLUSION_VIEW};
 use crate::texture::Image;
@@ -436,6 +437,11 @@ struct MeshFrame {
     still_from: u64,
     /// Whether its clusters are ready, once asked this frame (undisplaced instances).
     clusters: Option<bool>,
+    /// Its entry + 1 in the plant wind table (0: not a bone plant), for instances' `extra.y`
+    /// bits 16-31 (`plant_wind_entry` in lib_wind.wgsl).
+    wind: u32,
+    /// How far a bone plant's points move at most (m, mesh space): its bounds grow by this.
+    wind_reach: f32,
 }
 
 impl MeshFrame {
@@ -446,7 +452,7 @@ impl MeshFrame {
             ready: true,
             page: gpu_mesh.pool.page,
             center: gpu_mesh.center,
-            radius: gpu_mesh.half_extents.length(),
+            radius: gpu_mesh.half_extents.length() + self.wind_reach,
             min_y: gpu_mesh.min_y,
             height: gpu_mesh.height,
             coarsest,
@@ -1047,6 +1053,9 @@ pub struct MeshFeature {
     default_textures: Vec<(wgpu::Texture, wgpu::TextureView)>,
     materials: Option<GrowBuffer>,
     material_group: Option<wgpu::BindGroup>,
+    /// Bone plants' table (`plant_wind_words`, group 1 binding 1 next to the materials).
+    plant_wind: PlantWindTable,
+    plant_wind_buffer: Option<GrowBuffer>,
     instances: Option<GrowBuffer>,
     /// GPU occlusion culling of the camera's opaque batches (`mesh_cull.rs`).
     culling: Option<crate::mesh_cull::MeshCulling>,
@@ -2431,18 +2440,23 @@ impl RenderFeature for MeshFeature {
 
     fn init(&mut self, gpu: &GpuShared) {
         let device = &gpu.device;
+        let storage = |binding, visibility| wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Storage { read_only: true },
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+            count: None,
+        };
         let material_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("mesh materials"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Storage { read_only: true },
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                count: None,
-            }],
+            entries: &[
+                storage(0, wgpu::ShaderStages::VERTEX_FRAGMENT),
+                // The plant wind table (lib_wind.wgsl).
+                storage(1, wgpu::ShaderStages::VERTEX),
+            ],
         });
         let mut texture_entries: Vec<wgpu::BindGroupLayoutEntry> = (0..TEXTURE_SLOTS as u32)
             .map(texture_layout_entry)
@@ -2540,6 +2554,13 @@ impl RenderFeature for MeshFeature {
             "mesh materials",
             wgpu::BufferUsages::STORAGE,
             64 * std::mem::size_of::<GpuMaterial>() as u64,
+        ));
+        self.plant_wind = PlantWindTable::default();
+        self.plant_wind_buffer = Some(GrowBuffer::new(
+            device,
+            "plant wind",
+            wgpu::BufferUsages::STORAGE,
+            64 * 16,
         ));
         self.instances = Some(GrowBuffer::new(
             device,
@@ -2750,12 +2771,25 @@ impl RenderFeature for MeshFeature {
         // This frame's tables of the meshes and materials the scene uses, once a frame (their
         // `clusters` and `checked` entries are once a frame too).
         if new_tables {
+            self.plant_wind.update(
+                world_ref.get_resource::<PlantWindMeshes>(),
+                world_ref.get_resource::<PlantWindSpecies>(),
+                view.plant_wind.seconds,
+                view.plant_wind.seconds_prev,
+            );
             for raw in scene.meshes_used() {
                 // Key GPU caches by the slot that holds the value, so aliases share uploads.
                 let handle = mesh_assets.canonical(Handle::from_index(raw));
                 let version = mesh_assets.version(handle);
                 let triangles = mesh_assets.get(handle).map(|m| m.indices.len() / 3);
+                // Bone plants: their table entry, and bounds grown by how far they bend.
+                let (wind, wind_reach) = match self.plant_wind.entry(raw) {
+                    (0, _) => self.plant_wind.entry(handle.index()),
+                    found => found,
+                };
                 let mut entry = MeshFrame {
+                    wind,
+                    wind_reach,
                     index: handle.index(),
                     version,
                     exists: triangles.is_some(),
@@ -3435,10 +3469,11 @@ impl RenderFeature for MeshFeature {
                 let s = item.slot as usize;
                 let cold = &scene.cold[s];
                 let mesh = &mesh_frames[scene.hot[s].mesh as usize];
+                // An impostor's layer, or a bone plant's wind table entry in bits 16-31.
                 let impostor = if n & AS_IMPOSTOR != 0 {
                     item.impostor
                 } else {
-                    0
+                    mesh.wind << 16
                 };
                 // The dither rides in the normal matrix's spare lane (0: drawn whole): a
                 // positive share hides the pixels whose noise is below it, a negative one keeps
@@ -3514,20 +3549,41 @@ impl RenderFeature for MeshFeature {
         }
         self.ensure_pipelines(gpu, settings.pipeline_warmup.on(self.headless));
         steps.step("meshes: upload materials");
-        let grown = self
+        let mut grown = self
             .materials
             .as_mut()
             .is_some_and(|m| m.write(device, queue, bytemuck::cast_slice(&self.material_data)));
+        // The plant wind table: all of it when its meshes changed, else the species' phases.
+        if let Some(buffer) = &mut self.plant_wind_buffer {
+            let words: &[u8] = bytemuck::cast_slice(&self.plant_wind.words);
+            if self.plant_wind.rebuilt || (words.len() as u64) > buffer.capacity() {
+                grown |= buffer.write(device, queue, words);
+                self.plant_wind.rebuilt = false;
+            } else {
+                let head = self.plant_wind.species_words() * 16;
+                queue.write_buffer(&buffer.buffer, 0, &words[..head.min(words.len())]);
+            }
+        }
         if (grown || self.material_group.is_none())
-            && let (Some(layout), Some(materials)) = (&self.material_layout, &self.materials)
+            && let (Some(layout), Some(materials), Some(plants)) = (
+                &self.material_layout,
+                &self.materials,
+                &self.plant_wind_buffer,
+            )
         {
             self.material_group = Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("mesh materials"),
                 layout,
-                entries: &[wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: materials.buffer.as_entire_binding(),
-                }],
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: materials.buffer.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: plants.buffer.as_entire_binding(),
+                    },
+                ],
             }));
         }
         if self.frame.is_multiple_of(120) {

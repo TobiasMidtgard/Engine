@@ -1329,20 +1329,23 @@ impl ShaderFeatures {
     }
 }
 
-/// `mesh.wgsl` with the virtual texture library in front of it.
+/// `mesh.wgsl` with the virtual texture library and the plant wind (`lib_wind.wgsl`) in front
+/// of it.
 pub fn mesh_source(feedback_writes: bool) -> String {
     format!(
-        "{}\n{}",
+        "{}\n{}\n{}",
         shader_source(feedback_writes),
+        include_str!("../shaders/lib_wind.wgsl"),
         include_str!("../shaders/mesh.wgsl")
     )
 }
 
-/// `mesh_shadow.wgsl` with the virtual texture library in front of it.
+/// `mesh_shadow.wgsl` with the virtual texture library and the plant wind in front of it.
 pub fn mesh_shadow_source(feedback_writes: bool) -> String {
     format!(
-        "{}\n{}",
+        "{}\n{}\n{}",
         shader_source(feedback_writes),
+        include_str!("../shaders/lib_wind.wgsl"),
         include_str!("../shaders/mesh_shadow.wgsl")
     )
 }

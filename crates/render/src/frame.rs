@@ -297,6 +297,10 @@ pub struct PlantWind {
     /// `WindField::gust_origin` this frame and last (it moves with world shifts).
     pub gust_origin: DVec3,
     pub gust_origin_prev: DVec3,
+    /// World seconds this frame and last, unwrapped: plants' sway phases
+    /// ([`crate::plant_wind`]) are taken from them in `f64`.
+    pub seconds: f64,
+    pub seconds_prev: f64,
 }
 
 /// [`PlantWind`] carried between frames (advanced once a frame, whatever the views).
@@ -313,12 +317,14 @@ pub const PLANT_WIND_SPEED_SECS: f32 = 2.0;
 pub const PLANT_WIND_DIRECTION_SECS: f32 = 6.0;
 
 impl PlantWindState {
-    /// Move on to frame `frame` (`dt` seconds later) with the prevailing wind `prevailing`
-    /// and the fronts `gusts`; a frame already advanced keeps its values.
+    /// Move on to frame `frame` (`dt` seconds later, at world time `seconds`) with the
+    /// prevailing wind `prevailing` and the fronts `gusts`; a frame already advanced keeps its
+    /// values.
     fn advance(
         &mut self,
         frame: u64,
         dt: f32,
+        seconds: f64,
         prevailing: Vec3,
         gusts: [[f32; 4]; 4],
         gust_origin: DVec3,
@@ -355,6 +361,12 @@ impl PlantWindState {
             gusts_prev: if first { gusts } else { last.gusts },
             gust_origin,
             gust_origin_prev: if first { gust_origin } else { last.gust_origin },
+            seconds,
+            seconds_prev: if first {
+                seconds - f64::from(dt)
+            } else {
+                last.seconds
+            },
         };
         self.frame = Some(frame);
         self.wind
@@ -820,7 +832,7 @@ pub fn build_view(
     };
     let plant_wind = world
         .get_resource_or_insert_with(PlantWindState::default)
-        .advance(frame_index, delta, prevailing, gusts, gust_origin);
+        .advance(frame_index, delta, elapsed, prevailing, gusts, gust_origin);
 
     // Grass benders: nearest first.
     let mut benders: Vec<[f32; 4]> = world
@@ -1260,20 +1272,48 @@ mod tests {
     fn plants_follow_the_prevailing_wind_over_seconds_once_a_frame() {
         let mut state = PlantWindState::default();
         let gusts = [[0.0; 4]; 4];
-        let first = state.advance(0, 1.0 / 60.0, Vec3::new(4.0, 0.0, 0.0), gusts, DVec3::ZERO);
+        let first = state.advance(
+            0,
+            1.0 / 60.0,
+            0.0,
+            Vec3::new(4.0, 0.0, 0.0),
+            gusts,
+            DVec3::ZERO,
+        );
         assert_eq!(first.wind, Vec4::new(4.0, 0.0, 0.0, 4.0));
         assert_eq!(first.wind_prev, first.wind);
         // A gust at the camera doubles the wind: plants take it up over seconds, not at once.
-        let next = state.advance(1, 1.0 / 60.0, Vec3::new(8.0, 0.0, 0.0), gusts, DVec3::ZERO);
+        let next = state.advance(
+            1,
+            1.0 / 60.0,
+            0.0,
+            Vec3::new(8.0, 0.0, 0.0),
+            gusts,
+            DVec3::ZERO,
+        );
         assert!(next.wind.w > 4.0 && next.wind.w < 4.1, "{:?}", next.wind);
         assert_eq!(next.wind_prev, first.wind);
         // Another view of the same frame sees the same wind.
-        let again = state.advance(1, 1.0 / 60.0, Vec3::new(20.0, 0.0, 0.0), gusts, DVec3::ZERO);
+        let again = state.advance(
+            1,
+            1.0 / 60.0,
+            0.0,
+            Vec3::new(20.0, 0.0, 0.0),
+            gusts,
+            DVec3::ZERO,
+        );
         assert_eq!(again, next);
         // After a few seconds it has mostly followed; a turn of the wind follows slower.
         let mut w = next;
         for f in 2..360 {
-            w = state.advance(f, 1.0 / 60.0, Vec3::new(0.0, 0.0, 8.0), gusts, DVec3::ZERO);
+            w = state.advance(
+                f,
+                1.0 / 60.0,
+                0.0,
+                Vec3::new(0.0, 0.0, 8.0),
+                gusts,
+                DVec3::ZERO,
+            );
         }
         assert!((w.wind.w - 8.0).abs() < 0.3, "{:?}", w.wind);
         assert!(w.wind.z > w.wind.x && w.wind.x > 0.5, "{:?}", w.wind);
