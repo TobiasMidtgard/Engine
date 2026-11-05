@@ -61,6 +61,8 @@ pub fn sync_bodies_system(
     config: Res<EngineConfig>,
     mut beds: ResMut<BedJobs>,
     mut changes: MessageReader<engine_world::TerrainChanged>,
+    focus: Res<FocusPoints>,
+    range: Res<SimulationRange>,
 ) {
     let dt = time.delta_secs();
     let mut state = shared.0.write();
@@ -82,11 +84,13 @@ pub fn sync_bodies_system(
         }
         format!("{:?}{:?}{}", body.extent, body.bed, body.interactive).hash(&mut hasher);
 
+        let span = tracing::info_span!("water", name = "bodies: depth and waves").entered();
         let depth = typical_depth(body, center, &state.ground);
         // The sea answers to the mean wind 10 m up, not to each passing gust (a storm's gusts
         // swing the wind by ±90%); local disturbances such as rotor wash still count.
         let w = wind.prevailing + wind.local.sample(center + DVec3::Y * 10.0);
         let target = build_waves(&body.waves, Vec2::new(w.x, w.z), depth);
+        drop(span);
         let idx = match state.bodies.iter().position(|b| b.entity == entity) {
             Some(i) => i,
             None => {
@@ -137,7 +141,9 @@ pub fn sync_bodies_system(
         state.beaches.push((at, beach.clone()));
     }
     let changes: Vec<_> = changes.read().copied().collect();
+    let span = tracing::info_span!("water", name = "bodies: keep beds").entered();
     let builds = keep_beds(&mut state, &mut beds, &changes);
+    drop(span);
     // A lake's bed grid coming in changes the layout too: what waited for it reads it then.
     // A grid read again that came back the same doesn't.
     for b in &state.bodies {
@@ -154,9 +160,16 @@ pub fn sync_bodies_system(
     // Read with the water unlocked (AGENTS.md, "Performance rules"): the read goes wide.
     let ground = state.ground.clone();
     drop(state);
-    if config.headless {
-        // Headless runs (tests, tours) read it there and then, so they see the same water.
-        let made: Vec<_> = builds
+    // Headless runs (tests, tours) read the lakes near a focus there and then, so they see
+    // the same water; lakes far off are read on workers as in a game (`flow_system`).
+    let (now, later): (Vec<BedAsk>, Vec<BedAsk>) = builds.into_iter().partition(|b| {
+        config.headless
+            && (focus.points.is_empty()
+                || range.is_active_sphere(&focus, b.center, b.half as f64 * 1.5))
+    });
+    if !now.is_empty() {
+        let _span = tracing::info_span!("water", name = "bodies: read beds here").entered();
+        let made: Vec<_> = now
             .into_iter()
             .map(|b| (b, BedCache::build(b.center, b.yaw, b.half, &ground)))
             .collect();
@@ -164,9 +177,10 @@ pub fn sync_bodies_system(
         for (b, grid) in made {
             install_bed(&mut state, b, grid);
         }
-    } else {
+    }
+    if !later.is_empty() {
         engine_core::tasks::init_task_pools();
-        for b in builds {
+        for b in later {
             let ground = ground.clone();
             let task = AsyncComputeTaskPool::get()
                 .spawn(async move { BedCache::build(b.center, b.yaw, b.half, &ground) });
@@ -1164,7 +1178,11 @@ pub fn flow_system(
                         ground: state.ground.clone(),
                         bodies: state.bodies.clone(),
                     };
-                    if config.headless {
+                    // Only near a focus, though: a region that streams in far off (the test
+                    // area coming into view on a climb, kilometers below) settles on a worker
+                    // as in a game, and a headless profile run sees the frames a player would
+                    // (it held one frame for seconds).
+                    if config.headless && within_reach(&range, &focus, origin, region) {
                         builds.push(job);
                         continue;
                     }
@@ -1225,6 +1243,20 @@ pub fn flow_system(
     drop(guard);
     let built: Vec<FlowSim> = builds.into_iter().map(FlowJob::build).collect();
     shared.0.write().flows.extend(built);
+}
+
+/// Is `region` (its grid corner at `origin`) within the `SimulationRange` of a focus, or is
+/// there no focus at all (tests, tools)? A sphere round the corner as wide as the grid's whole
+/// diagonal covers it at any yaw.
+fn within_reach(
+    range: &SimulationRange,
+    focus: &FocusPoints,
+    origin: DVec3,
+    region: &FlowRegion,
+) -> bool {
+    let c = region.cell_m as f64;
+    let (w, d) = (region.cells[0] as f64 * c, region.cells[1] as f64 * c);
+    focus.points.is_empty() || range.is_active_sphere(focus, origin, (w * w + d * d).sqrt())
 }
 
 /// Share of the `SimulationRange` within which a settled flow keeps stepping; past it (110 m
