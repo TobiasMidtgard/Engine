@@ -1311,6 +1311,23 @@ fn apply_aftermath(world: &mut World, ids: Aftermath) {
         return;
     }
     let _ = world.run_system_once(crate::sync::init_walls_system);
+    // The hits, and then the props, each in a later frame: the three together took 57 to
+    // 138 ms of the fortress cell's spawn on the session VM. Jobs keep the spawning cell
+    // loading until they are in (inline without off-frame jobs).
+    engine_core::off_frame::off_frame(
+        world,
+        "destruction aftermath hits",
+        || (),
+        move |world: &mut World, ()| aftermath_hits(world, ids),
+    );
+}
+
+/// Wreck the aftermath bays (their walls set up by [`apply_aftermath`]) and settle the
+/// rubble, then place the props in front of the live drywall a frame later.
+fn aftermath_hits(world: &mut World, ids: Aftermath) {
+    if world.get_entity(ids.demo).is_err() {
+        return;
+    }
     let mut rng = Rng::new(42);
     let mut hits = Vec::new();
     // Bay 1: three rifle bursts, a vault hole kicked through low down, a breach charge hole.
@@ -1347,6 +1364,7 @@ fn apply_aftermath(world: &mut World, ids: Aftermath) {
         center: wall_world(world, ids.a1, Vec3::new(-0.9, 0.9, 0.12)),
         energy_j: 1.6e5,
     });
+    let mut parts = vec![std::mem::take(&mut hits)];
     // Bay 2: the door barricade shot up and kicked open in the middle; the window one intact.
     let door_mid = Vec2::new(-0.8, 1.1);
     for k in 0..8 {
@@ -1383,6 +1401,7 @@ fn apply_aftermath(world: &mut World, ids: Aftermath) {
         melt: false,
         tip: Vec3::ZERO,
     });
+    parts.push(std::mem::take(&mut hits));
     // Bay 5: an explosive charge against reinforced concrete: the bars survive.
     hits.push(Hit::Blast {
         center: wall_world(world, ids.a4, Vec3::new(0.2, 1.3, 0.16)),
@@ -1403,6 +1422,7 @@ fn apply_aftermath(world: &mut World, ids: Aftermath) {
         center: wall_world(world, ids.a5, Vec3::new(0.6, 1.0, 0.35)),
         energy_j: 1.8e6,
     });
+    parts.push(std::mem::take(&mut hits));
     // The breach house's west roof bay: three bursts fired up through it from the room.
     let h = ids.origin + DVec3::from_array(HOUSE);
     for (cx, cz) in [(-2.6f64, -2.0f64), (-2.2, -0.4), (-2.5, 1.3)] {
@@ -1418,6 +1438,30 @@ fn apply_aftermath(world: &mut World, ids: Aftermath) {
             });
         }
     }
+    parts.push(hits);
+    // A bay (or two) a frame: the hits together took 61 ms of one frame on the session VM.
+    wreck_in_parts(world, ids, parts.into(), rng);
+}
+
+/// Apply the next part's hits, settle the rubble they leave, and queue the rest for a later
+/// frame; after the last, place the props.
+fn wreck_in_parts(
+    world: &mut World,
+    ids: Aftermath,
+    mut parts: std::collections::VecDeque<Vec<Hit>>,
+    mut rng: Rng,
+) {
+    let Some(hits) = parts.pop_front() else {
+        place_aftermath_props(world, ids);
+        return;
+    };
+    // Rubble an earlier part left that is not spawned yet is settled already.
+    let already = world
+        .get_resource_mut::<PendingDebris>()
+        .map_or(0, |mut p| {
+            p.finish_later();
+            p.items.len()
+        });
     world.resource_mut::<HitQueue>().hits.extend(hits);
     // The aftermath is old damage: its blasts' dust clouds and bangs are long gone, so only
     // what other systems wrote is kept (a cloud per wrecked bay hid the range on arrival).
@@ -1433,20 +1477,46 @@ fn apply_aftermath(world: &mut World, ids: Aftermath) {
     let mut pending = world.resource_mut::<PendingDebris>();
     pending.finish_later();
     pending.dust.clear();
-    pending
-        .items
-        .retain(|i| !matches!(i.look, crate::debris::DebrisLook::Spark { .. }));
-    for item in &mut pending.items {
+    let mut at = 0;
+    pending.items.retain(|i| {
+        at += 1;
+        at <= already || !matches!(i.look, crate::debris::DebrisLook::Spark { .. })
+    });
+    for item in pending.items.iter_mut().skip(already) {
         settle(item, &ground, &mut rng);
         item.lifetime = Some(FOREVER);
     }
+    engine_core::off_frame::off_frame(
+        world,
+        "destruction aftermath hits",
+        || (),
+        move |world: &mut World, ()| {
+            if world.get_entity(ids.demo).is_ok() {
+                wreck_in_parts(world, ids, parts, rng);
+            }
+        },
+    );
+}
+
+/// Crates and stone columns in front of the live drywall, once the aftermath is in.
+fn place_aftermath_props(world: &mut World, ids: Aftermath) {
     // Crates and stone columns in front of the live drywall (its charge shatters them),
     // placed after the aftermath blasts so those don't break them first.
-    let mut props = Vec::new();
-    run_commands(world, |commands| props = spawn_props(commands, ids.origin));
-    if let Some(mut d) = world.get_mut::<DestructionDemo>(ids.demo) {
-        d.targets.props = props;
-    }
+    engine_core::off_frame::off_frame(
+        world,
+        "destruction aftermath props",
+        || (),
+        move |world: &mut World, ()| {
+            if world.get_entity(ids.demo).is_err() {
+                return;
+            }
+            let mut props = Vec::new();
+            run_commands(world, |commands| props = spawn_props(commands, ids.origin));
+            if let Some(mut d) = world.get_mut::<DestructionDemo>(ids.demo) {
+                d.targets.props = props;
+            }
+        },
+    );
 }
 
 /// Take every pending `T` message out of `world`.

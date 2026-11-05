@@ -117,8 +117,58 @@ pub struct Crown {
     pub broadleaf: bool,
 }
 
-/// Herbs' and fallen leaves' density and dryness maps (in that order) over the same grid as
-/// [`grass_maps`], from the crowns overhead, the soil and the grass's own `grass` density.
+/// A forest floor's maps over the same grid as [`grass_maps`].
+pub struct FloorMaps {
+    /// Herbs' density and dryness.
+    pub herbs: (Vec<f32>, Vec<f32>),
+    /// Fallen leaves' density and dryness.
+    pub litter: (Vec<f32>, Vec<f32>),
+    /// Which herb grows at each point (`GrassField::kinds` of the herbs' field, looks from
+    /// [`herb_styles`]).
+    pub herb_kinds: Vec<u8>,
+}
+
+/// The forest floor's kinds of herb, in the order [`FloorMaps::herb_kinds`] names them:
+/// broad-leaved shade herbs, wood sorrel, sweet woodruff and wood anemone.
+pub fn herb_styles() -> (GrassStyle, Vec<GrassStyle>) {
+    (
+        GrassStyle::forest_herbs(),
+        vec![
+            GrassStyle::wood_sorrel(),
+            GrassStyle::woodruff(),
+            GrassStyle::wood_anemone(),
+        ],
+    )
+}
+
+/// Which herb takes a spot of forest floor, from how closed the `canopy` is over it, how much
+/// of that is broadleaved (`broad`), the soil's `water`, the needles painted on it and its
+/// colonies (`patch`: one noise per kind, about -1..1). The ground flora of European woods
+/// (Ellenberg's indicator values, e.g. https://en.wikipedia.org/wiki/Ellenberg%27s_indicator_values;
+/// Plantlife and Woodland Trust species notes): wood sorrel carpets deep moist shade under
+/// spruce and beech, on acid soil that needles make; woodruff grows in colonies on rich moist
+/// soil under beech and oak; wood anemone in lighter broadleaf woods; other broad shade herbs
+/// fill in between.
+pub fn herb_kind(canopy: f32, broad: f32, water: f32, needles: f32, patch: [f32; 4]) -> u8 {
+    let moist = smoothstep(0.2, 0.45, water);
+    let weights = [
+        0.45,
+        moist * (0.5 + 0.5 * canopy) * (0.6 + 0.6 * (1.0 - broad) + 0.4 * needles),
+        broad * smoothstep(0.25, 0.5, water) * canopy * (1.0 - needles) * 1.1,
+        broad * (1.2 - canopy) * 0.75,
+    ];
+    let mut best = (0u8, f32::MIN);
+    for (i, (w, n)) in weights.iter().zip(patch).enumerate() {
+        let w = w * (1.0 + 0.9 * n);
+        if w > best.1 {
+            best = (i as u8, w);
+        }
+    }
+    best.0
+}
+
+/// Herbs' and fallen leaves' maps over the same grid as [`grass_maps`], from the crowns
+/// overhead, the soil and the grass's own `grass` density, and which herb grows where.
 #[allow(clippy::too_many_arguments)]
 pub fn floor_maps(
     region: &EcologyRegion,
@@ -130,7 +180,7 @@ pub fn floor_maps(
     covers: &[Cover],
     surfaces: &[CoverGrid],
     season_dry: f32,
-) -> [(Vec<f32>, Vec<f32>); 2] {
+) -> FloorMaps {
     let [rx, rz] = resolution;
     let size = Vec2::new(region.half_extents[0] * 2.0, region.half_extents[1] * 2.0);
     let step = Vec2::new(size.x / (rx - 1) as f32, size.y / (rz - 1) as f32);
@@ -140,6 +190,7 @@ pub fn floor_maps(
     let bare = bare_mask(region, resolution, covers);
     let mut herbs = (Vec::with_capacity(n), Vec::with_capacity(n));
     let mut litter = (Vec::with_capacity(n), Vec::with_capacity(n));
+    let mut herb_kinds = Vec::with_capacity(n);
     for j in 0..rz {
         for i in 0..rx {
             let k = (j * rx + i) as usize;
@@ -174,6 +225,14 @@ pub fn floor_maps(
                 if d < 0.08 { 0.0 } else { d.min(1.0) }
             };
             let thirst = ((0.4 - water) / 0.3).clamp(0.0, 1.0);
+            // Each herb's colonies, some meters across.
+            let patch = [0x51u64, 0x52, 0x53, 0x54]
+                .map(|salt| fbm2(x * 0.09, z * 0.09, region.seed ^ (salt << 8), 2, 2.0, 0.5));
+            herb_kinds.push(if herb > 0.0 {
+                herb_kind(canopy[k], broad[k], water, needles, patch)
+            } else {
+                0
+            });
             herbs.0.push(herb);
             herbs
                 .1
@@ -199,7 +258,11 @@ pub fn floor_maps(
                 .push((0.25 + 0.5 * smoothstep(-0.35, 0.45, hue) + 0.2 * season_dry).min(1.0));
         }
     }
-    [herbs, litter]
+    FloorMaps {
+        herbs,
+        litter,
+        herb_kinds,
+    }
 }
 
 /// How closed the canopy is over each grid point, and how much of it is broadleaved.
@@ -608,6 +671,8 @@ struct BuiltGrass {
     /// The meadow's kinds of grass and their looks (`GrassField::kinds`, `styles`).
     kinds: Vec<u8>,
     kind_styles: Vec<GrassStyle>,
+    /// Which herb grows where on the forest floor (the herbs' field's `kinds`).
+    herb_kinds: Vec<u8>,
     /// Rebuilt only on the first build and after the terrain changed: the grass's (on the
     /// ground) and the floor layers' (on the forest floor's surface).
     heights: Option<Vec<f32>>,
@@ -718,10 +783,10 @@ pub fn sync_region_grass(
                     field.density = density;
                     field.dryness = dryness;
                     field.style = style;
-                    if layer == FloorLayer::Grass {
-                        field.kinds = built.kinds.clone();
-                        field.styles = built.kind_styles.clone();
-                    }
+                    let (kinds, styles) =
+                        layer_kinds(layer, &built.kinds, &built.kind_styles, &built.herb_kinds);
+                    field.kinds = kinds;
+                    field.styles = styles;
                     if t.translation != field_at.translation {
                         *t = field_at;
                     }
@@ -736,6 +801,8 @@ pub fn sync_region_grass(
                             built.size[1],
                         );
                     }
+                    let (kinds, styles) =
+                        layer_kinds(layer, &built.kinds, &built.kind_styles, &built.herb_kinds);
                     let field = GrassField {
                         size: built.size,
                         resolution: built.resolution,
@@ -747,16 +814,8 @@ pub fn sync_region_grass(
                         density,
                         dryness,
                         style,
-                        kinds: if layer == FloorLayer::Grass {
-                            built.kinds.clone()
-                        } else {
-                            Vec::new()
-                        },
-                        styles: if layer == FloorLayer::Grass {
-                            built.kind_styles.clone()
-                        } else {
-                            Vec::new()
-                        },
+                        kinds,
+                        styles,
                     };
                     let e = commands
                         .spawn((field_at, field, GrassOf(region_e), layer))
@@ -955,6 +1014,7 @@ pub fn sync_region_grass(
         let need_heights =
             relief || existing.is_none_or(|(f, _, _)| f.heights.is_empty() || f.resolution != res);
         let shades = shades_floor(&styles);
+        let herb_kinds_on = settings.herb_kinds;
         let ferns_layer = styles.iter().any(|(l, _)| *l == FloorLayer::Ferns);
         let ground = need_heights.then(|| ground.as_deref().cloned());
         let grids: Vec<CoverGrid> = if shades_floor(&styles) {
@@ -977,7 +1037,7 @@ pub fn sync_region_grass(
             for d in &mut dryness {
                 *d += (1.0 - *d) * season_dry;
             }
-            let floor = shades.then(|| {
+            let mut floor = shades.then(|| {
                 let mut covers = covers;
                 covers.extend(trunks);
                 floor_maps(
@@ -995,7 +1055,11 @@ pub fn sync_region_grass(
                 .filter(|_| shades)
                 .map(|h| onto_floor(h, &grids, center, &region, res));
             let mut maps = Some((density, dryness));
-            let mut floor = floor.map(|[h, l]| [Some(h), Some(l)]);
+            let herb_kinds = floor
+                .as_mut()
+                .filter(|_| herb_kinds_on)
+                .map_or_else(Vec::new, |f| std::mem::take(&mut f.herb_kinds));
+            let mut floor = floor.map(|f| [Some(f.herbs), Some(f.litter)]);
             let layers = styles
                 .into_iter()
                 .filter_map(|(layer, style)| {
@@ -1012,6 +1076,7 @@ pub fn sync_region_grass(
                 layers,
                 kinds,
                 kind_styles,
+                herb_kinds,
                 heights,
                 floor_heights,
                 resolution: res,
@@ -1020,6 +1085,20 @@ pub fn sync_region_grass(
             }
         });
         commands.entity(region_e).insert(build);
+    }
+}
+
+/// A layer's kinds map and the other kinds' looks: the meadow's grasses, the floor's herbs.
+fn layer_kinds(
+    layer: FloorLayer,
+    grass_kinds: &[u8],
+    grass_styles: &[GrassStyle],
+    herb_kinds: &[u8],
+) -> (Vec<u8>, Vec<GrassStyle>) {
+    match layer {
+        FloorLayer::Grass => (grass_kinds.to_vec(), grass_styles.to_vec()),
+        FloorLayer::Herbs if !herb_kinds.is_empty() => (herb_kinds.to_vec(), herb_styles().1),
+        _ => (Vec::new(), Vec::new()),
     }
 }
 
@@ -1080,6 +1159,21 @@ fn heights(
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn each_herb_takes_its_own_woods() {
+        let calm = [0.0; 4];
+        // Spruce over moist, needle-strewn ground: wood sorrel.
+        assert_eq!(herb_kind(0.9, 0.0, 0.5, 0.8, calm), 1);
+        // A beech hall on rich moist soil: woodruff.
+        assert_eq!(herb_kind(0.9, 1.0, 0.5, 0.0, calm), 2);
+        // A light, dry oak wood: wood anemone.
+        assert_eq!(herb_kind(0.4, 1.0, 0.15, 0.0, calm), 3);
+        // Dry shade under conifers: the broad shade herbs.
+        assert_eq!(herb_kind(0.7, 0.0, 0.1, 0.0, calm), 0);
+        // A colony of another herb can push into a wood that suits it less.
+        assert_eq!(herb_kind(0.9, 1.0, 0.5, 0.0, [-0.5, -0.8, -0.8, 0.9]), 3);
+    }
     use super::*;
     use crate::FoliageLoading;
     use crate::plant::{Genes, RegionHistory};
@@ -1372,7 +1466,11 @@ mod tests {
                 0.0,
             )
         };
-        let [(herbs, _), (litter, _)] = maps(0.0);
+        let FloorMaps {
+            herbs: (herbs, _),
+            litter: (litter, _),
+            ..
+        } = maps(0.0);
         let at =
             |m: &[f32], x: i32, z: i32| m[((z + 20) as u32 * res[0] + (x + 20) as u32) as usize];
         let mean = |m: &[f32], xs: std::ops::Range<i32>, zs: std::ops::Range<i32>| {
@@ -1414,7 +1512,7 @@ mod tests {
             assert_eq!(at(m, -10, -10), 0.0, "keep-clear");
         }
         // Thick grass crowds them out.
-        let [(herbs_in_grass, _), _] = maps(1.0);
+        let herbs_in_grass = maps(1.0).herbs.0;
         assert!(
             mean(&herbs_in_grass, oaks.0.clone(), oaks.1.clone())
                 < 0.3 * mean(&herbs, oaks.0.clone(), oaks.1.clone())

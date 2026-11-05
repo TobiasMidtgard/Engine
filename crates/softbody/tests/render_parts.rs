@@ -18,7 +18,10 @@ fn geometry_built_in_parts_joins_into_the_same_buffers() {
     app.add_systems(Startup, |mut commands: Commands| {
         demo::spawn_demo(&mut commands, DVec3::ZERO);
     });
-    app.update_n(2);
+    app.update();
+    // The yard stands a batch a frame (off-frame applies); have every batch in.
+    engine_core::off_frame::finish(&mut app.world, None);
+    app.update();
     let mut q = app.world.query::<&SoftBodySim>();
     let bodies: Vec<&SoftBodySim> = q.iter(&app.world).collect();
     assert!(

@@ -244,6 +244,11 @@ pub struct GrassStyle {
     /// Pairs of leaflets a leaf is cut into, down its length: 0 a whole leaf or blade, 15-25 a
     /// fern's frond (with `leaf` 1: a stalk rising from the crown, the frond arching out).
     pub pinnae: f32,
+    /// Leaflets a compound leaf spreads from its stalk's top (with `leaf` 1; 0 = none): 3 a
+    /// wood sorrel's heart-shaped trefoil, 5 an anemone's toothed segments, 6-12 a whorl of
+    /// narrow leaves (woodruff). The leaf's blade is drawn about as wide as it is long
+    /// (`width` about 1.2 x `height` x (1 - `stalk`)) and the leaflets cut out of it.
+    pub leaflets: f32,
 }
 
 impl Default for GrassStyle {
@@ -277,6 +282,7 @@ impl Default for GrassStyle {
             full_density_m: 0.0,
             leaf_rise: 0.0,
             pinnae: 0.0,
+            leaflets: 0.0,
         }
     }
 }
@@ -309,6 +315,85 @@ impl GrassStyle {
             stalk: 0.4,
             lying: 0.0,
             ..Default::default()
+        }
+    }
+
+    /// Wood sorrel (Oxalis acetosella): carpets of trefoil leaves on stalks a hand high, the
+    /// three leaflets heart-shaped and bright, in deep moist shade under spruce and beech;
+    /// small white flowers in spring. A kind of the forest floor's herbs.
+    pub fn wood_sorrel() -> Self {
+        Self {
+            blades_per_m2: 520.0,
+            height: 0.13,
+            height_variation: 0.3,
+            width: 0.085,
+            lush_color: [0.085, 0.2, 0.035],
+            dry_color: [0.2, 0.17, 0.06],
+            wind_response: 0.3,
+            clump_size: 0.22,
+            clump_pull: 0.6,
+            clump_height: 0.3,
+            droop: 0.15,
+            gloss: 0.3,
+            bloom: 0.03,
+            bloom_color: [0.75, 0.72, 0.7],
+            bloom_size: 0.018,
+            leaflets: 3.0,
+            stalk: 0.45,
+            leaf_rise: 0.7,
+            ..Self::forest_herbs()
+        }
+    }
+
+    /// Sweet woodruff (Galium odoratum): stems a hand and a half high carrying whorls of
+    /// eight narrow leaves, a dark glossy green, in colonies on rich moist soil under beech
+    /// and oak.
+    pub fn woodruff() -> Self {
+        Self {
+            blades_per_m2: 480.0,
+            height: 0.24,
+            height_variation: 0.35,
+            width: 0.086,
+            lush_color: [0.05, 0.13, 0.03],
+            dry_color: [0.18, 0.15, 0.05],
+            wind_response: 0.3,
+            clump_size: 0.25,
+            clump_pull: 0.5,
+            clump_height: 0.35,
+            droop: 0.1,
+            gloss: 0.55,
+            bloom: 0.04,
+            bloom_color: [0.82, 0.82, 0.78],
+            bloom_size: 0.015,
+            leaflets: 8.0,
+            stalk: 0.7,
+            leaf_rise: 0.9,
+            ..Self::forest_herbs()
+        }
+    }
+
+    /// Wood anemone (Anemone nemorosa): palmate leaves of five toothed segments on stalks,
+    /// in lighter broadleaf woods, with white flowers in spring.
+    pub fn wood_anemone() -> Self {
+        Self {
+            blades_per_m2: 320.0,
+            height: 0.2,
+            height_variation: 0.3,
+            width: 0.12,
+            lush_color: [0.07, 0.16, 0.035],
+            dry_color: [0.2, 0.16, 0.06],
+            wind_response: 0.4,
+            clump_size: 0.3,
+            clump_pull: 0.55,
+            droop: 0.25,
+            gloss: 0.3,
+            bloom: 0.05,
+            bloom_color: [0.8, 0.78, 0.8],
+            bloom_size: 0.025,
+            leaflets: 5.0,
+            stalk: 0.5,
+            leaf_rise: 0.75,
+            ..Self::forest_herbs()
         }
     }
 
@@ -639,6 +724,18 @@ fn push_jobs(jobs: &mut Vec<[u32; 4]>, first: u32, count: u32, mode: u32, segmen
     }
 }
 
+/// How a style's leaves are cut (`GpuField::kind` z, read by `grass_cut`): its pinnae pairs
+/// (ferns), or -(leaflets + stalk) for a compound leaf, or 0 for whole leaves and blades.
+fn style_cut(style: &GrassStyle) -> f32 {
+    if style.pinnae > 0.0 {
+        style.pinnae
+    } else if style.leaflets >= 2.5 && style.leaf > 0.0 {
+        -(style.leaflets.round().min(12.0) + style.stalk.clamp(0.0, 0.8))
+    } else {
+        0.0
+    }
+}
+
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
 struct GpuTile {
@@ -720,7 +817,7 @@ impl GpuField {
         self.kind = [
             style.bloom_size.max(0.0),
             share.clamp(0.0, 1.0),
-            style.pinnae.max(0.0),
+            style_cut(style),
             style.leaf_rise.clamp(0.0, 1.0),
         ];
     }
@@ -1416,7 +1513,7 @@ impl RenderFeature for GrassFeature {
             } else {
                 full_density_distance(far)
             };
-            let cut_mode = if field.palette().any(|s| s.pinnae > 0.0) {
+            let cut_mode = if field.palette().any(|s| style_cut(s) != 0.0) {
                 MODE_CUT
             } else {
                 0

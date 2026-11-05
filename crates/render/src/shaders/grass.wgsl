@@ -69,6 +69,14 @@ fn grass_surface(in: GrassOut, front: bool) -> Surface {
         s.albedo = mix(s.albedo, s.albedo * vec3<f32>(1.35, 1.3, 0.85), rachis);
         s.roughness = mix(s.roughness, 0.42, vein);
     }
+    // A compound leaf's leaflets (wood sorrel, anemone, a woodruff whorl): each paler along
+    // its midvein and darker toward its margin, a sorrel's leaflets folded along it.
+    if (in.pinnae < 0.0) {
+        let e = grass_leaflet_edge(in.along, in.across, in.pinnae);
+        let vein = 1.0 - smoothstep(0.0, 0.12, e);
+        s.albedo *= mix(1.04, 0.82, smoothstep(0.5, 1.0, e)) + 0.1 * vein;
+        s.roughness = mix(s.roughness, 0.4, vein);
+    }
     let wet = saturate(surface_weather(in.rel).x);
     s.albedo *= 1.0 - 0.12 * wet;
     s.roughness = mix(s.roughness, 0.16, wet * 0.85);
@@ -150,7 +158,10 @@ fn fs_prepass(in: GrassPrepassOut, @builtin(front_facing) front: bool) -> Prepas
 // leaflets down the frond, each sweeping toward the tip and narrowing to its own point,
 // either side of the rachis, which always stays.
 fn grass_cut(along: f32, across: f32, pinnae: f32) -> bool {
-    if (pinnae <= 0.0) {
+    if (pinnae < 0.0) {
+        return grass_leaflet_edge(along, across, pinnae) > 1.0;
+    }
+    if (pinnae == 0.0) {
         return false;
     }
     let a = abs(across);
@@ -164,4 +175,46 @@ fn grass_cut(along: f32, across: f32, pinnae: f32) -> bool {
     let teeth = 0.06 * abs(sin(a * 48.0));
     let fill = 0.7 * (1.0 - 0.75 * a * a) - teeth;
     return abs(t - 0.5) * 2.0 > fill;
+}
+
+// A compound leaf of leaflets radiating from its stalk's top, `code` = -(leaflets + stalk)
+// (`GrassStyle::leaflets`, `stalk`): where (`along`, `across`) lies in it, 0 on a leaflet's
+// midvein, 1 on its margin, over 1 outside (cut away). The leaf's blade (past the stalk) is
+// drawn as a square about as wide as it is long; the leaflets meet in its middle.
+// Three are a wood sorrel's: obcordate, widest at the tip with a notch in it, folding along
+// the midvein. More are lance-shaped: an anemone's five toothed segments, a woodruff's whorl
+// of eight narrow leaves.
+fn grass_leaflet_edge(along: f32, across: f32, code: f32) -> f32 {
+    let n = floor(-code);
+    let stalk = fract(-code);
+    let x = (along - stalk) / max(1.0 - stalk, 0.05);
+    if (x < 0.0) {
+        // The stalk itself stays.
+        return 0.0;
+    }
+    let q = vec2<f32>(x - 0.5, across * 0.5);
+    let r = length(q);
+    if (r < 0.035) {
+        return 0.0;
+    }
+    let sector = TAU / n;
+    let theta = atan2(q.y, q.x);
+    let delta = theta - round(theta / sector) * sector;
+    // Along and across the nearest leaflet, as fractions of its length.
+    let s = r * cos(delta) / 0.5;
+    let t = abs(r * sin(delta)) / 0.5;
+    if (s <= 0.0 || s >= 1.0) {
+        return 2.0;
+    }
+    if (n < 3.5) {
+        let half = 0.6 * pow(s, 0.7) * sqrt(max(1.0 - pow(s, 6.0), 0.0));
+        let notch = 1.0 - 0.2 * exp(-(t * t) / 0.012);
+        return max(t / max(half, 1e-3), s / notch);
+    }
+    // An anemone's segments are broader than a whorl's narrow leaves.
+    var half = (select(1.3, 0.95, n > 6.5) / n) * pow(sin(PI * pow(s, 0.7)), 0.8);
+    if (n < 6.5) {
+        half -= 0.035 * abs(sin(s * 38.0));
+    }
+    return t / max(half, 1e-3);
 }

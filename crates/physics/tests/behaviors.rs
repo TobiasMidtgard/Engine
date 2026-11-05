@@ -1743,6 +1743,58 @@ fn a_body_over_a_big_static_mesh_still_being_built_waits_for_it_and_goes_on_as_i
     assert!(at.x > 1.0, "the ball lost its speed: x = {:.2}", at.x);
 }
 
+/// A zone's worth of small statics streaming in at once: a floor of 1,024 tiles. They are
+/// placed over a few steps, not in one, and nothing on or over them falls through: a ball
+/// resting on the floor as it appears and balls dropped onto far tiles all end on top.
+#[test]
+fn many_small_statics_streaming_in_are_placed_over_a_few_steps_and_hold_what_is_on_them() {
+    let mut app = app();
+    let resting = app
+        .world
+        .spawn((
+            Transform::from_xyz(0.25, 0.25, 0.25),
+            RigidBody::dynamic(),
+            Collider::sphere(0.25),
+            Velocity::default(),
+        ))
+        .id();
+    for i in 0..32 {
+        for k in 0..32 {
+            app.world.spawn((
+                Transform::from_xyz(i as f64 - 15.5, -0.5, k as f64 - 15.5),
+                Collider::cuboid(Vec3::splat(0.5)),
+            ));
+        }
+    }
+    app.update();
+    let first = stats(&app).static_copies;
+    assert!(first < 1024, "{first} static copies after the first step");
+    let dropped: Vec<Entity> = [(-14.0, -14.0), (14.0, 13.0), (-12.0, 15.0)]
+        .into_iter()
+        .map(|(x, z)| {
+            app.world
+                .spawn((
+                    Transform::from_xyz(x, 3.0, z),
+                    RigidBody::dynamic(),
+                    Collider::sphere(0.25),
+                    Velocity::default(),
+                ))
+                .id()
+        })
+        .collect();
+    app.update_n(30);
+    assert!(
+        stats(&app).static_copies >= 1024,
+        "{} static copies after 31 steps",
+        stats(&app).static_copies
+    );
+    app.update_n(90);
+    for e in std::iter::once(resting).chain(dropped) {
+        let y = pos(&app, e).y;
+        assert!((0.2..0.3).contains(&y), "a ball ended at y = {y:.3}");
+    }
+}
+
 #[test]
 fn a_big_static_mesh_changed_under_a_body_takes_its_new_shape() {
     // Dug half a meter down under a resting ball (a voxel cliff remeshed where it was dug):
