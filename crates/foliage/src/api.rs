@@ -432,7 +432,8 @@ pub fn register(app: &mut App) {
         "Grow a plant from a growth graph at \"at\" (snapped to the ground): \"preset\" (see \
          foliage.growth_presets: strawberry, sapling) or a whole \"graph\" (stems, leaves, \
          flowers and fruit generators, as foliage.growth_presets prints them), \"age\" in \
-         days, \"days_per_second\" to watch it grow (a time-lapse), \"seed\". Returns its id; \
+         days, \"days_per_second\" to watch it grow (a time-lapse), \"seed\", \
+         \"calendar\": true to keep a held plant's leaves on the season's day. Returns its id; \
          change its GrowingPlant to age it or swap its graph.",
         r#"{"preset": "strawberry", "at": [0, 0, 2], "age": 20, "days_per_second": 2}"#,
         |world, args| {
@@ -460,6 +461,10 @@ pub fn register(app: &mut App) {
                 days_per_second: f32_arg(&args, "days_per_second", 0.0),
                 repeat: args.get("repeat").and_then(|r| r.as_bool()).unwrap_or(false),
                 detail: f32_arg(&args, "detail", 1.0).clamp(0.2, 1.0),
+                calendar: args
+                    .get("calendar")
+                    .and_then(|r| r.as_bool())
+                    .unwrap_or(false),
             };
             plant.resolve()?;
             let e = world

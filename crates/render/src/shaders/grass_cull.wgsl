@@ -326,6 +326,10 @@ fn grass_seed(instance: u32, shadow: bool) -> BladeSeed {
     // Snow buries the lower part of a blade (the ground's snow is drawn on the ground, so what
     // stands out of it is drawn from the ground up).
     let snow = max(grass_snow_depth(f, root), 0.0);
+    // What lies on the ground (fallen leaves, twigs, dead fronds) goes under a few
+    // centimeters of snow.
+    let buried = smoothstep(0.01, 0.05, snow) * smoothstep(0.3, 0.8, f.lod.z);
+    if (fract(r2.y * 7.31 + r0.z * 3.7) < buried) { return out; }
     // Flowering stems stand a little taller and straighter (BLOOM_RISE in grass.rs), above
     // the blades around them.
     let flower = r2.z < f.bloom.w;
