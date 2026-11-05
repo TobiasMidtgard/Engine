@@ -187,7 +187,8 @@ pub struct GrassStyle {
     pub height_variation: f32,
     /// Blade width at the root, meters.
     pub width: f32,
-    /// How far blades lean over: 0 = straight up, 1 = about 45 degrees.
+    /// How far blades lean over: 0 = straight up, 1 = about 45 degrees. With `lying`, how
+    /// stiff they lie instead: 0 leaves curl up at the tip, 1 twigs lie straight.
     pub bend: f32,
     /// Albedo (linear RGB) of fresh blades.
     pub lush_color: [f32; 3],
@@ -455,6 +456,35 @@ impl GrassStyle {
             tip_tint: [0.92, 0.85, 0.8],
             leaf: 1.0,
             stalk: 0.08,
+            lying: 1.0,
+            ..Default::default()
+        }
+    }
+
+    /// Fallen twigs and sticks on a forest floor: lying straight, a finger thick and tapering,
+    /// grey-brown bark, a few in each patch of fallen leaves. A kind of the litter layer.
+    pub fn twigs() -> Self {
+        Self {
+            blades_per_m2: 30.0,
+            height: 0.5,
+            height_variation: 0.6,
+            width: 0.028,
+            bend: 0.9,
+            lush_color: [0.13, 0.105, 0.075],
+            dry_color: [0.26, 0.23, 0.19],
+            dryness: 0.5,
+            wind_response: 0.0,
+            draw_distance: 16.0,
+            shadow_distance: 0.0,
+            clump_size: 0.0,
+            clump_pull: 0.0,
+            clump_fan: 0.0,
+            clump_height: 0.0,
+            clump_color: 0.2,
+            droop: 0.0,
+            gloss: 0.05,
+            tip_tint: [1.1, 1.05, 1.0],
+            leaf: 0.0,
             lying: 1.0,
             ..Default::default()
         }

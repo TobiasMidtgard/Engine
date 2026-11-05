@@ -335,7 +335,8 @@ fn grass_seed(instance: u32, shadow: bool) -> BladeSeed {
     // Thinned out, the survivors widen to keep the cover (leaves less: they'd turn into plates).
     // (Out to 8 times as wide: Ghost of Tsushima keeps a quarter of the blades, twice as wide,
     // at each doubling of the distance, so a meadow keeps its cover to 150 m.)
-    let widen = clamp(pow(max(lod, 1e-3), -0.6), 1.0, mix(8.0, 1.5, leaf));
+    // (Nor things lying on the ground: a twig would turn into a wedge.)
+    let widen = clamp(pow(max(lod, 1e-3), -0.6), 1.0, mix(8.0, 1.5, max(leaf, f.lod.z)));
     out.width = f.shape.z * (0.75 + 0.5 * r1.x) * widen;
     if (flower) {
         // A flowering stem's width is its head's (the stem a tenth of it).

@@ -408,7 +408,8 @@ pub struct EcologySettings {
     /// (`grass::FloorLayer::Ferns`) instead of a mesh and an entity each.
     pub gpu_ferns: bool,
     /// With `gpu_grass`, grow the forest floor's herbs as several kinds (wood sorrel, woodruff,
-    /// wood anemone, broad shade herbs; `grass::herb_kind`) instead of one.
+    /// wood anemone, broad shade herbs; `grass::herb_kind`) instead of one, and lay twigs
+    /// among its fallen leaves.
     pub herb_kinds: bool,
 }
 
