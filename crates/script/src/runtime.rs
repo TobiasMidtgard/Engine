@@ -1377,6 +1377,8 @@ impl ScriptRuntime {
     fn sync_instances(&mut self, world: &mut World, settings: &ScriptSettings) {
         /// Milliseconds a frame for starting new script instances in play.
         const START_BUDGET_MS: f64 = 3.0;
+        /// A start this slow is named in the log (in play), so its script can be split up.
+        const SLOW_START_MS: f64 = 15.0;
         let this_run = world.change_tick();
         let mut seen: Vec<(Entity, Option<Script>, Tick, bool)> = Vec::new();
         {
@@ -1404,9 +1406,11 @@ impl ScriptRuntime {
             .filter(|e| !live.contains(e))
             .copied()
             .collect();
+        let span = tracing::info_span!("scripts: stop gone").entered();
         for e in gone {
             self.destroy_instance(e, settings);
         }
+        drop(span);
         let mut planned = Vec::new();
         // In play new instances start within a budget a frame and the rest at the next frames
         // (a zone of 95 scripted entities streaming in held one frame 125-280 ms on the
@@ -1431,6 +1435,7 @@ impl ScriptRuntime {
                 && !self.instances.contains_key(&e)
                 && self.hooks_of(&path).is_some_and(|h| h.parallel_update)
             {
+                let _span = tracing::info_span!("scripts: pick an actor").entered();
                 match self.pick_actor(world, settings, &mut planned) {
                     Pick::Actor(k) => {
                         world.entity_mut(e).insert(ScriptActor(k));
@@ -1443,6 +1448,7 @@ impl ScriptRuntime {
             }
             match self.instances.get(&e) {
                 Some(i) if i.path == path => {
+                    let _span = tracing::info_span!("scripts: props").entered();
                     let props_changed = self.update_props(e, &script);
                     if let Some(i) = self.instances.get_mut(&e) {
                         i.enabled = script.enabled;
@@ -1455,10 +1461,22 @@ impl ScriptRuntime {
                 // Waits for a later frame: it is still new (or changed) then.
                 _ if over() => {}
                 Some(_) => {
+                    let _span = tracing::info_span!("scripts: restart").entered();
                     self.destroy_instance(e, settings);
                     self.create_instance(e, &script, tick, settings);
                 }
-                None => self.create_instance(e, &script, tick, settings),
+                None => {
+                    let _span = tracing::info_span!("scripts: create").entered();
+                    let t = Instant::now();
+                    self.create_instance(e, &script, tick, settings);
+                    let ms = t.elapsed().as_secs_f64() * 1000.0;
+                    if budgeted && ms > SLOW_START_MS {
+                        tracing::warn!(
+                            target: "script",
+                            "starting {path} on {e} took {ms:.1} ms on the frame"
+                        );
+                    }
+                }
             }
         }
     }
