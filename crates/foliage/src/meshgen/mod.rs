@@ -19,6 +19,7 @@ pub mod small;
 pub mod small_textures;
 pub mod textures;
 pub mod tree;
+pub mod wind_bones;
 
 use engine_core::math::{Vec2, Vec3, Vec4};
 use engine_render::{Mesh, Vertex};

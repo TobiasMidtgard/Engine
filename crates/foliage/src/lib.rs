@@ -3,6 +3,7 @@
 pub mod api;
 pub mod assets;
 pub mod cave;
+pub mod cover;
 pub mod demo;
 pub mod ecology;
 pub mod far_woods;
@@ -29,6 +30,7 @@ pub mod squash;
 pub mod stands;
 pub mod visuals;
 pub mod walkers;
+pub mod wind;
 
 use engine_assets::Assets;
 use engine_core::prelude::*;
@@ -65,6 +67,7 @@ impl Plugin for FoliagePlugin {
             .init_resource::<lod_fade::LodFades>()
             .init_resource::<visuals::GlowLights>()
             .init_resource::<FarWoods>()
+            .init_resource::<cover::CoverPainted>()
             .init_resource::<far_woods::FarWoodsState>()
             .init_resource::<NearWoods>()
             .init_resource::<near_woods::NearWoodsState>()
@@ -222,6 +225,10 @@ impl Plugin for FoliagePlugin {
                     season::follow_weather_calendar,
                     (grass::sync_region_grass, grass_wear::wear_grass).chain(),
                     (walkers::bend_grass_for_walkers, walkers::leave_grass_wakes).chain(),
+                    cover::paint_ground_cover
+                        .after(grass_wear::wear_grass)
+                        .run_if(resource_exists::<engine_world::GroundCover>)
+                        .run_if(resource_exists::<engine_world::FocusPoints>),
                     felling::remove_orphan_colliders,
                     ecology::drop_unloaded_regions,
                     scenery::drop_unloaded_covers,

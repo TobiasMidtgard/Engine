@@ -41,6 +41,8 @@ struct GrassTile {
 struct GrassBenders {
     count: vec4<u32>,
     spheres: array<vec4<f32>, 16>, // camera-relative center xyz, radius (m)
+    waves: GustWaves,              // the weather's gust fronts (engine_world::gusts)
+    gust_camera: vec4<f32>,        // xy: the camera in the fronts' frame (m), z: their wind speed
 };
 
 
@@ -145,6 +147,7 @@ fn grass_wind(p: vec3<f32>, t: f32, wind: vec3<f32>, run: f32, phase: f32) -> ve
     let dir = select(vec3<f32>(1.0, 0.0, 0.0), wind / max(speed, 1e-3), speed > 0.01);
     let along = dot(p, dir);
     let across = dot(p.xz, vec2<f32>(-dir.z, dir.x));
+
     // Gust fronts ride the air (about 35 m apart), bent into broken bands across it.
     let wave = (along - run) * 0.18 - t * 0.35 + 0.8 * sin(across * 0.07 + t * 0.21);
     let roll = pow(0.5 + 0.5 * sin(wave), 2.0);
@@ -160,6 +163,55 @@ fn grass_wind(p: vec3<f32>, t: f32, wind: vec3<f32>, run: f32, phase: f32) -> ve
     return dir * (strength * (0.2 + 0.8 * gust + flutter * (0.4 + gust)) + idle);
 }
 
+
+// The wind on a blade at camera-relative `rel` when the weather's gust fronts blow
+// (`grass_benders.waves`): the same fronts the trees and everything else feel, met where the
+// blade stands. As `grass_wind`, a push per meter of blade, added to the lean and normalized.
+//
+// - Drag grows as U^2 in a breeze and about as U in a gale (blades streamline):
+//   U^2 / (6 m/s + U).
+// - The lean saturates: fine grasses lie at most ~70 degrees (1 - exp(-drag / F) of it), F
+//   being the drag that flattens a blade 63%: about 12 / `response` (Vogel 1989; Py et al. 2006):
+//   a gale lays it at ~40 degrees between fronts and ~60 in them.
+// - Blades bow a little behind a front, overshoot as it passes and spring back after it (the
+//   honami of a wheat field): the lean follows the front now plus a share of how much stronger
+//   it is now than a moment ago, read upwind (the fronts ride the wind).
+// - Inside fronts, tall grass carries short waves (1.5-2 m apart at ~1.5 Hz, Py et al.).
+// `t` is this frame's time or the previous frame's (motion vectors): the fronts were then
+// upwind by the distance the wind has moved since.
+fn grass_front_wind(rel: vec3<f32>, t: f32, wind: vec3<f32>, phase: f32, height: f32, response: f32) -> vec3<f32> {
+    let speed = length(wind);
+    let dir = select(vec3<f32>(1.0, 0.0, 0.0), wind / max(speed, 1e-3), speed > 0.01);
+    let d2 = normalize(vec2<f32>(dir.x, dir.z) + vec2<f32>(1e-5, 0.0));
+    let back = frame.time.x - t;
+    let front_speed = max(grass_benders.gust_camera.z, speed);
+    let x = rel.xz + grass_benders.gust_camera.xy + d2 * front_speed * back;
+    let g0 = gust_waves(grass_benders.waves, x - d2 * speed * 0.15);
+    let g1 = gust_waves(grass_benders.waves, x - d2 * speed * 0.6);
+    let stiff = 12.0 / max(response, 0.05);
+    let lean0 = grass_lean(speed * (1.0 + g0), stiff);
+    let lean1 = grass_lean(speed * (1.0 + g1), stiff);
+    var lean = max(lean0 + 0.3 * (lean0 - lean1), 0.0);
+    // Short waves through tall grass, only inside the fronts.
+    let along = dot(x, d2);
+    let wave_m = mix(1.5, 2.2, saturate(speed / 15.0));
+    let canopy = 0.15 * lean * smoothstep(0.4, 0.8, height) * saturate(g0 * 3.0)
+        * sin(GUST_TAU * (along / wave_m - 1.5 * t) + phase * 0.6);
+    lean = min(lean + canopy, 1.35);
+    // Tufts still bob a little out of step, slowly, and stir in still air.
+    let flutter = 0.12 * sin(t * 1.6 + phase * 2.4 + along * 0.35) * smoothstep(3.0, 8.0, speed);
+    let idle = 0.03 * sin(t * 1.1 + phase * TAU);
+    // The push (per meter of blade) that leans a blade by `lean` radians: tan(lean) / 1.2
+    // (`grass_tip` adds 1.2 x the push to the lean).
+    return dir * (tan(lean) / 1.2 + flutter * min(speed / 9.0, 1.0)) + dir * idle;
+}
+
+// How far (radians) a blade leans in a steady wind of `u` m/s, `stiff` being the drag that
+// flattens it 63% of the way to 70 degrees.
+fn grass_lean(u: f32, stiff: f32) -> f32 {
+    let drag = u * u / (6.0 + u);
+    return 1.22 * (1.0 - exp(-drag / stiff));
+}
 
 // Everything about one blade that is the same at every vertex: where it grows, how tall and
 // wide, which way it faces and leans, its color. `grass_seed` works it out from the blade's
@@ -324,7 +376,12 @@ fn grass_tip(s: BladeSeed, t: f32, tiling: vec3<f32>) -> vec3<f32> {
     var tip_dir = s.lean;
     let wind = f.gust.xyz;
     let run = f.gust.w + length(wind) * t;
-    let w = grass_wind(root + tiling, t, wind, run, s.phase) * f.dry.w;
+    var w: vec3<f32>;
+    if (grass_benders.waves.broad_a.w > 0.0 || grass_benders.waves.fine_a.w > 0.0) {
+        w = grass_front_wind(root, t, wind, s.phase, height, f.dry.w);
+    } else {
+        w = grass_wind(root + tiling, t, wind, run, s.phase) * f.dry.w;
+    }
     tip_dir = normalize(tip_dir + (w - up * dot(w, up)) * 1.2);
     // Benders push blades away from their center and flatten them under it.
     for (var i = 0u; i < min(grass_benders.count.x, 16u); i++) {

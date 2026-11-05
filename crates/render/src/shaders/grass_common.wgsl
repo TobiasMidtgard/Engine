@@ -229,6 +229,18 @@ fn grass_vertex(s: BladeShape, vertex: u32, t: f32, tip_dir: vec3<f32>) -> Blade
     // through a leaf lying on the ground.
     out.shade = mix(mix(0.3, 1.0, sqrt(u)), mix(0.55, 1.0, u), leaf);
     out.shade = mix(out.shade, 0.85 + 0.15 * u, lying);
+    // Wind sheen, as in a striped lawn: a blade laid away from the eye shows its lit upper
+    // face, one laid toward it its shaded underside and the dark gaps at its foot. So where a
+    // gust front lays the grass over, the meadow pales (looking downwind) or darkens (upwind)
+    // in a band that rolls across it (the honami of a wheat field, which Py et al. 2006
+    // tracked by exactly this change of brightness), and the turned-up faces catch the sky's
+    // sheen far across the field.
+    let to_blade = root - up * dot(root, up);
+    let away = dot(over, to_blade / max(length(to_blade), 1e-3));
+    let blade_kind = (1.0 - lying) * (1.0 - leaf);
+    let laid = smoothstep(0.15, 0.8, away) * blade_kind;
+    let toward = smoothstep(0.15, 0.8, -away) * blade_kind;
+    out.shade = mix(out.shade, 0.85 + 0.15 * u, laid * 0.85) * (1.0 - 0.3 * toward);
     out.glow = u * u * (1.0 - lying);
 
     // Color: tips tinted, snow caught on the blades (most on their arched upper parts).
@@ -238,9 +250,10 @@ fn grass_vertex(s: BladeShape, vertex: u32, t: f32, tip_dir: vec3<f32>) -> Blade
     }
     albedo = mix(albedo, vec3<f32>(0.82, 0.85, 0.88), s.snowed * (0.25 + 0.45 * u));
     // Darker low down, as the shade (`out.shade`) is darker there.
-    out.albedo = albedo * mix(mix(mix(0.7, 1.0, u), mix(0.8, 1.0, u), leaf), 0.95 + 0.05 * u, lying);
+    let low = mix(mix(mix(0.7, 1.0, u), mix(0.8, 1.0, u), leaf), 0.95 + 0.05 * u, lying);
+    out.albedo = albedo * mix(low, 0.95 + 0.1 * u, laid * 0.85) * (1.0 - 0.2 * toward);
     // Glossy up close; far off the sheen would only sparkle.
-    out.gloss = f.look.z * (1.0 - smoothstep(8.0, 35.0, d));
+    out.gloss = f.look.z * (1.0 - smoothstep(8.0, 35.0, d) * (1.0 - 0.7 * laid));
     out.visible = true;
     return out;
 }

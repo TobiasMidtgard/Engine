@@ -23,6 +23,10 @@
 //! same `GroundContact`s movement writes), and the same walk with no contacts (blades through
 //! the legs, as before).
 //!
+//! `gale` and `gale_even`: the showcase meadow in a gale with and without the weather's gust
+//! fronts (`engine_world::GustWaves`), from 8 m up with the sun behind; `wet`: the `field` view
+//! after rain (`SurfaceLayers` wetness 1).
+//!
 //! `LOOKDEV_PERF=1` (with `ENGINE_PROFILE=1`) also prints, for each shot, what the grass costs:
 //! the GPU passes and triangles with the grass drawn and without it (`grass_density` 0).
 
@@ -210,6 +214,17 @@ fn shot(app: &mut App, out: &str, name: &str, eye: DVec3, target: DVec3, to_sun:
     if std::env::var("LOOKDEV_PERF").is_ok_and(|v| v == "1") {
         perf(app, name);
     }
+}
+
+/// Steps 3 s in a few long frames, so the grass's steady wind (eased toward the weather's over
+/// most of a second) has caught up with a change of wind.
+fn settle_wind(app: &mut App) {
+    let mut time = app.world.resource_mut::<Time>();
+    time.set_source(TimeSource::Manual { step_secs: 0.25 });
+    app.update_n(12);
+    app.world
+        .resource_mut::<Time>()
+        .set_source(TimeSource::Manual { step_secs: STEP });
 }
 
 /// Someone walks 7 m through the meadow at `at` and is photographed from above and behind as
@@ -501,6 +516,63 @@ fn main() {
                 app.world.remove_resource::<engine_world::SurfaceLayers>();
             }
         } else if b.name == "field" {
+            // A gale (Beaufort 8 at 10 m) over the meadow, from 8 m up with the sun behind: with
+            // the weather's gust fronts the grass lies flat in bands that roll across it; without
+            // them it leans evenly. Then the same meadow after rain, glossy.
+            for (name, fronts) in [("gale_even", false), ("gale", true)] {
+                if wanted(name) {
+                    let gale = Vec3::new(17.0, 0.0, 6.0);
+                    app.world.resource_mut::<WeatherState>().wind = gale;
+                    {
+                        let mut wind = app.world.resource_mut::<engine_world::WindField>();
+                        wind.waves.broad.strength = if fronts { 0.55 } else { 0.0 };
+                        wind.waves.fine.strength = if fronts { 0.3 } else { 0.0 };
+                        wind.waves.advance(3.0, gale);
+                    }
+                    // Let the meadow's steady wind (eased over most of a second) catch up.
+                    settle_wind(&mut app);
+                    let eye = o + DVec3::new(-60.0, 8.0, 45.0);
+                    // Sun over the shoulder: flattened blades turn their lit faces up.
+                    let behind = Vec3::new(-0.45, 0.5, 0.75);
+                    shot(&mut app, &out, name, eye, o, behind);
+                    app.world.resource_mut::<WeatherState>().wind = Vec3::new(4.0, 0.0, 1.5);
+                    let mut wind = app.world.resource_mut::<engine_world::WindField>();
+                    wind.waves.broad.strength = 0.0;
+                    wind.waves.fine.strength = 0.0;
+                    settle_wind(&mut app);
+                }
+            }
+            if wanted("wet") {
+                let before = app.world.remove_resource::<engine_world::SurfaceLayers>();
+                let mut layers = engine_world::SurfaceLayers {
+                    grid: engine_world::Grid2::centered(
+                        DVec2::new(o.x, o.z),
+                        200.0,
+                        1.0,
+                        Default::default(),
+                    ),
+                };
+                layers.grid.fill(engine_world::SurfaceCell {
+                    wetness: 1.0,
+                    ..Default::default()
+                });
+                app.world.insert_resource(layers);
+                let eye = o + DVec3::new(0.0, 1.7, 0.0);
+                shot(
+                    &mut app,
+                    &out,
+                    "wet",
+                    eye,
+                    eye + DVec3::new(10.0, -0.9, -14.0),
+                    side_sun,
+                );
+                match before {
+                    Some(b) => app.world.insert_resource(b),
+                    None => {
+                        app.world.remove_resource::<engine_world::SurfaceLayers>();
+                    }
+                }
+            }
             if wanted("field") {
                 // Standing in the meadow's middle, looking out over it toward the horizon.
                 let eye = o + DVec3::new(0.0, 1.7, 0.0);

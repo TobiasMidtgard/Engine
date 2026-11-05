@@ -110,4 +110,8 @@ function Rune:update(dt: number)
 	self.light:set("PointLight", { intensity_lm = 900 * self.level })
 end
 
+-- Only seen up close: beyond 80 m from the player (or the simulation range) `update` rests;
+-- tasks and messages still run.
+Rune.far = 80
+
 return Rune
