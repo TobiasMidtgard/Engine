@@ -22,6 +22,7 @@
 //! The water's edge runs 15% wider than the creek's width, with its depth falling to nothing,
 //! so the carved bank hides where the ribbon ends.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use bevy_tasks::Task;
@@ -32,6 +33,9 @@ use engine_core::prelude::*;
 use engine_core::tasks::AsyncComputeTaskPool;
 use engine_world::WorldShift;
 use engine_world::terrain::{CreekPoint, CreekQuery, CreekReach, Creeks};
+
+use crate::creek_stones::{CreekStones, ReachStones, STONES_M, StoneKey, around_stones};
+use crate::demo::valley::StreamStone;
 
 /// Creeks a demo or a level adds beside the terrain's own: a creek provider in its entity's
 /// space (the entity's translation is added to everything it reports).
@@ -71,6 +75,8 @@ pub struct CreekRibbons {
     /// ([`crate::creek_sim`] keeps them), and those the ribbons were last laid without.
     pub cuts: Vec<Cut>,
     cuts_laid: Vec<Cut>,
+    /// The stones' version the ribbons were last laid with ([`CreekStones::version`]).
+    stones_laid: u64,
 }
 
 /// Reaches are asked for within this distance of the camera (X and Z), meters.
@@ -143,26 +149,26 @@ pub fn step_profile(f: f32) -> (f32, f32) {
 
 /// A reach prepared for laying a ribbon: its points (world), meters from the source at each,
 /// and the step layout's phase at each.
-struct Course {
-    points: Vec<CreekPoint>,
-    along: Vec<f32>,
-    phase: Vec<f32>,
+pub(crate) struct Course {
+    pub(crate) points: Vec<CreekPoint>,
+    pub(crate) along: Vec<f32>,
+    pub(crate) phase: Vec<f32>,
 }
 
 /// What the ribbon needs at one place along a reach.
 #[derive(Debug, Clone, Copy)]
-struct Station {
-    at: DVec3,
-    dir: Vec2,
-    width: f32,
-    depth: f32,
-    flow: f32,
-    slope: f32,
-    phase: f32,
+pub(crate) struct Station {
+    pub(crate) at: DVec3,
+    pub(crate) dir: Vec2,
+    pub(crate) width: f32,
+    pub(crate) depth: f32,
+    pub(crate) flow: f32,
+    pub(crate) slope: f32,
+    pub(crate) phase: f32,
 }
 
 impl Course {
-    fn new(points: Vec<CreekPoint>) -> Self {
+    pub(crate) fn new(points: Vec<CreekPoint>) -> Self {
         let mut along = Vec::with_capacity(points.len());
         let mut s = 0.0f32;
         for (k, p) in points.iter().enumerate() {
@@ -196,7 +202,7 @@ impl Course {
         course
     }
 
-    fn length(&self) -> f32 {
+    pub(crate) fn length(&self) -> f32 {
         self.along.last().copied().unwrap_or(0.0)
     }
 
@@ -252,6 +258,18 @@ impl Course {
         }
     }
 
+    /// Meters from the source where the step layout's phase is `phase` (`None` off the reach).
+    pub(crate) fn at_phase(&self, phase: f32) -> Option<f32> {
+        let n = self.phase.len();
+        if n < 2 || phase < self.phase[0] || phase > self.phase[n - 1] {
+            return None;
+        }
+        let k = self.phase.partition_point(|p| *p <= phase).clamp(1, n - 1) - 1;
+        let span = (self.phase[k + 1] - self.phase[k]).max(1e-6);
+        let t = ((phase - self.phase[k]) / span).clamp(0.0, 1.0);
+        Some(self.along[k] + t * (self.along[k + 1] - self.along[k]))
+    }
+
     /// The surface's height on the even line at `s`.
     fn height(&self, s: f32) -> f64 {
         let (k, t) = self.locate(s.clamp(0.0, self.length()));
@@ -259,7 +277,7 @@ impl Course {
         a.at.y + (b.at.y - a.at.y) * t as f64
     }
 
-    fn station(&self, s: f32) -> Station {
+    pub(crate) fn station(&self, s: f32) -> Station {
         let (k, t) = self.locate(s);
         let mut st = self.raw(s);
         st.phase = lerp(self.phase[k], self.phase[k + 1], t);
@@ -267,7 +285,7 @@ impl Course {
     }
 
     /// The water's surface height and centre depth at `s`, steps and pools included.
-    fn surface(&self, st: &Station) -> (f64, f32) {
+    pub(crate) fn surface(&self, st: &Station) -> (f64, f32) {
         let (widths, amount) = step_spacing(st.slope);
         let (above, depth) = step_profile(st.phase.fract());
         let step_drop = st.slope * widths * st.width.max(0.3);
@@ -331,7 +349,7 @@ fn smoothstep(e0: f32, e1: f32, x: f32) -> f32 {
 /// How far each step's lip is moved along the creek at `x` across it (-1..1 bank to bank), in
 /// steps: a few tenths, different for every step (the steps are numbered from mid-pool, where
 /// moving between two numbers changes the surface least).
-fn step_skew(x: f32, phase: f32) -> f32 {
+pub(crate) fn step_skew(x: f32, phase: f32) -> f32 {
     let n = (phase + 0.6).floor();
     let h1 = (n * 12.9898).sin() * 43758.545;
     let h2 = (n * 78.233).sin() * 12543.27;
@@ -379,17 +397,19 @@ pub fn lay_ribbon(
     vertices: &mut Vec<CreekVertex>,
     indices: &mut Vec<u32>,
 ) -> bool {
-    lay_ribbon_around(points, camera, anchor, None, vertices, indices)
+    lay_ribbon_around(points, camera, anchor, None, None, vertices, indices)
 }
 
 /// [`lay_ribbon`], leaving out the stretch `skip` (meters from the source, from .. to) where
 /// a simulation draws the water ([`crate::creek_sim`]); the ribbon reaches
-/// [`SKIP_OVERLAP_M`] into it at either end, so no gap opens between the two.
+/// [`SKIP_OVERLAP_M`] into it at either end, so no gap opens between the two. The water parts
+/// round the reach's `stones` ([`crate::creek_stones`]).
 pub fn lay_ribbon_around(
     points: Vec<CreekPoint>,
     camera: DVec3,
     anchor: DVec3,
     skip: Option<(f32, f32)>,
+    stones: Option<&ReachStones>,
     vertices: &mut Vec<CreekVertex>,
     indices: &mut Vec<u32>,
 ) -> bool {
@@ -453,6 +473,11 @@ pub fn lay_ribbon_around(
         };
         let ring = across(d);
         let first = vertices.len() as u32;
+        // The stones near this ring (a stone's reach is a few of its radii).
+        let near: &[StreamStone] = match stones {
+            Some(r) if d < STONES_M as f32 + 20.0 => &r.stones[r.between(s - 4.0, s + 4.0)],
+            _ => &[],
+        };
         for &a in ring {
             let x = a / EDGE;
             // A step's lip runs across the bed crooked, from boulder to boulder.
@@ -474,18 +499,27 @@ pub fn lay_ribbon_around(
             );
             let depth = depth_c * (1.0 - x * x).max(0.0);
             let u = centre * (1.0 - a.abs().min(1.0).powi(4));
-            let shear = centre * 4.0 * a.abs().min(1.0).powi(3) / half.max(0.1) * a.signum();
+            let mut shear = centre * 4.0 * a.abs().min(1.0).powi(3) / half.max(0.1) * a.signum();
             let off = side * (a * half);
-            let p = DVec3::new(st.at.x + off.x as f64, y, st.at.z + off.y as f64) - anchor;
+            let (wx, wz) = (st.at.x + off.x as f64, st.at.z + off.y as f64);
+            let mut velocity = dir * u;
+            let mut y = y;
+            let mut white = white * (1.0 - 0.6 * x.powi(4));
+            if !near.is_empty() {
+                let parted = around_stones(near, DVec2::new(wx, wz), velocity, y, depth_c);
+                velocity += parted.velocity;
+                if velocity.length() > MOST_SPEED {
+                    velocity *= MOST_SPEED / velocity.length();
+                }
+                y += parted.rise as f64;
+                white = (white + parted.white).min(1.0);
+                shear += parted.shear;
+            }
+            let p = DVec3::new(wx, y, wz) - anchor;
             vertices.push(CreekVertex {
                 pos_depth: [p.x as f32, p.y as f32, p.z as f32, depth],
-                vel_shear: [dir.x * u, dir.y * u, shear, s],
-                normal: [
-                    normal.x,
-                    normal.y,
-                    normal.z,
-                    white * (1.0 - 0.6 * x.powi(4)),
-                ],
+                vel_shear: [velocity.x, velocity.y, shear, s],
+                normal: [normal.x, normal.y, normal.z, white],
             });
         }
         if let Some((prev, prev_n)) = last {
@@ -579,11 +613,16 @@ pub fn main_camera(
 
 /// Lay the ribbons of every reach within reach of `camera`.
 pub fn lay_ribbons(providers: &[Provider], camera: DVec3) -> Laid {
-    lay_ribbons_cut(providers, camera, &[])
+    lay_ribbons_cut(providers, camera, &[], &HashMap::new())
 }
 
-/// [`lay_ribbons`], leaving out the `cuts`.
-pub fn lay_ribbons_cut(providers: &[Provider], camera: DVec3, cuts: &[Cut]) -> Laid {
+/// [`lay_ribbons`], leaving out the `cuts`, the water parting round the reaches' `stones`.
+pub fn lay_ribbons_cut(
+    providers: &[Provider],
+    camera: DVec3,
+    cuts: &[Cut],
+    stones: &HashMap<StoneKey, Arc<ReachStones>>,
+) -> Laid {
     let _span = tracing::info_span!("water", name = "creek ribbons").entered();
     let anchor = (camera / 16.0).round() * 16.0;
     let mut laid = Laid {
@@ -618,6 +657,7 @@ pub fn lay_ribbons_cut(providers: &[Provider], camera: DVec3, cuts: &[Cut]) -> L
                 camera,
                 anchor,
                 skip,
+                stones.get(&(key, reach.id)).map(|s| &**s),
                 &mut laid.vertices,
                 &mut laid.indices,
             ) {
@@ -632,6 +672,11 @@ impl CreekRibbons {
     /// Laid as they stand: nothing being laid, and laid without every stretch simulated now.
     pub fn settled(&self) -> bool {
         self.job.is_none() && self.cuts == self.cuts_laid
+    }
+
+    /// [`Self::settled`], and laid with the stones as they stand.
+    pub fn settled_with(&self, stones: &CreekStones) -> bool {
+        self.settled() && self.stones_laid == stones.version
     }
 
     fn install(&mut self, laid: Laid) {
@@ -651,7 +696,7 @@ pub fn build_ribbons(providers: &[Provider], camera: DVec3, out: &mut CreekRibbo
 /// Keeps [`CreekRibbons`] laid around the camera (see the module docs). They are laid on a
 /// worker (10 to 25 ms for the demo meadow's 45 creeks on the cloud machine) and drawn where
 /// they were until the new ones land.
-#[allow(clippy::type_complexity)]
+#[allow(clippy::type_complexity, clippy::too_many_arguments)]
 pub fn creek_ribbons_system(
     time: Res<Time>,
     creeks: Option<Res<Creeks>>,
@@ -660,6 +705,7 @@ pub fn creek_ribbons_system(
     focus: Res<engine_world::FocusPoints>,
     mut shifts: MessageReader<WorldShift>,
     mut ribbons: ResMut<CreekRibbons>,
+    stones: Res<CreekStones>,
 ) {
     let shifted = shifts.read().copied().reduce(|a, next| a.then(&next));
     if let Some(s) = shifted {
@@ -689,20 +735,27 @@ pub fn creek_ribbons_system(
     let moved = ribbons
         .built_at
         .is_none_or(|b| b.distance(camera) > REBUILD_M);
-    if !moved && keys == ribbons.providers && ribbons.cuts == ribbons.cuts_laid {
+    if !moved
+        && keys == ribbons.providers
+        && ribbons.cuts == ribbons.cuts_laid
+        && stones.version == ribbons.stones_laid
+    {
         return;
     }
     ribbons.built_at = Some(camera);
     ribbons.providers = keys;
     ribbons.cuts_laid = ribbons.cuts.clone();
+    ribbons.stones_laid = stones.version;
     let cuts = ribbons.cuts.clone();
+    let stones = stones.all();
     match AsyncComputeTaskPool::try_get() {
         Some(pool) => {
-            ribbons.job =
-                Some(pool.spawn(async move { lay_ribbons_cut(&providers, camera, &cuts) }));
+            ribbons.job = Some(
+                pool.spawn(async move { lay_ribbons_cut(&providers, camera, &cuts, &stones) }),
+            );
         }
         None => {
-            let laid = lay_ribbons_cut(&providers, camera, &cuts);
+            let laid = lay_ribbons_cut(&providers, camera, &cuts, &stones);
             ribbons.install(laid);
         }
     }

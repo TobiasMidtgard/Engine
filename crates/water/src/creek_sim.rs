@@ -2,14 +2,16 @@
 //! "T0"). Up close a creek has to part round its stones, pile up in front of them and trail a
 //! wake and an eddy line behind, which a ribbon with an analytic current can't draw. So the
 //! stretch of the nearest creek within [`SIM_REACH_M`] runs on a flow grid of its own
-//! ([`FlowRegion`], the mountain streams' simulation), with its stones laid by its reach
-//! (`demo::valley::stream_stones`), and the ribbons ([`crate::creeks`]) leave that stretch out
+//! ([`FlowRegion`], the mountain streams' simulation), with the reach's stones standing in it
+//! (laid and drawn by [`crate::creek_stones`]), and the ribbons ([`crate::creeks`]) leave that stretch out
 //! once the simulation is running.
 //!
 //! The stretch is placed round the camera's nearest point on the creek, longer for a wider
 //! creek and within a cell budget, built and settled on a worker, and swapped in when ready:
 //! the ribbon draws the water until then, and the old stretch stays until the new one runs. It
 //! is dropped when the camera is [`DROP_M`] from it.
+
+use std::sync::Arc;
 
 use bevy_tasks::Task;
 use bevy_tasks::futures::check_ready;
@@ -19,13 +21,11 @@ use engine_core::tasks::AsyncComputeTaskPool;
 use engine_world::terrain::{CreekPoint, CreekReach, Creeks};
 use engine_world::{Ground, WorldShift};
 
+use crate::creek_stones::{CreekStones, ReachStones, lay_reach_stones, reach_seed};
 use crate::creeks::{
     CreekRibbons, Cut, LocalCreeks, Provider, gather_providers, main_camera, provider_key,
 };
-use crate::demo::scenery::spawn_prop;
-use crate::demo::valley::{
-    StoneStretch, ValleyStream, plan_stones, stream_region_cells, stream_stones,
-};
+use crate::demo::valley::{StreamStone, ValleyStream, stream_region_cells};
 use crate::flow::FlowRegion;
 use crate::state::SharedWater;
 
@@ -46,18 +46,18 @@ struct Stretch {
     cut: Cut,
     /// Its course (world x, z), for how far the camera is from it.
     line: Vec<DVec2>,
-    /// The flow region and the stones' props.
+    /// The flow region.
     entities: Vec<Entity>,
     region: Entity,
     /// Running: the ribbons leave it out.
     live: bool,
 }
 
-/// A stretch planned on a worker: its region's corner and settings, and its stones.
+/// A stretch planned on a worker: its region's corner and settings (its stones' rocks in
+/// it; [`crate::creek_stones`] draws them).
 pub struct StretchPlan {
     corner: DVec3,
     region: FlowRegion,
-    stones: Vec<StoneStretch>,
 }
 
 /// The stretches of creek simulated near the camera (see the module docs).
@@ -188,11 +188,12 @@ pub fn stretch_of(points: &[CreekPoint], at: f32) -> Option<(f32, f32)> {
     None
 }
 
-/// Plan a stretch's grid and stones (world-free: runs on a worker). `ground` is the height of
-/// the ground at x, z.
+/// Plan a stretch's grid (world-free: runs on a worker), with `stones` (the reach's, laid by
+/// [`crate::creek_stones`]) standing in it. `ground` is the height of the ground at x, z.
 pub fn plan_stretch(
     course: &[CreekPoint],
     ground: &dyn Fn(f64, f64) -> f64,
+    stones: &[StreamStone],
 ) -> Option<StretchPlan> {
     if course.len() < 2 {
         return None;
@@ -235,13 +236,25 @@ pub fn plan_stretch(
         p.at = on_line(p.at);
     }
     region.fills.clear();
-    let stones = stream_stones(&stream, ground);
-    region.rocks = stones.iter().map(|s| s.rock(corner)).collect();
-    Some(StretchPlan {
-        corner,
-        region,
-        stones: plan_stones(&stones),
-    })
+    let size = DVec2::new(
+        region.cells[0] as f64 * region.cell_m as f64,
+        region.cells[1] as f64 * region.cell_m as f64,
+    );
+    region.rocks = stones
+        .iter()
+        .filter(|s| {
+            let d = DVec2::new(s.at.x - corner.x, s.at.z - corner.z);
+            d.x >= 0.0 && d.y >= 0.0 && d.x <= size.x && d.y <= size.y
+        })
+        .map(|s| s.rock(corner))
+        .collect();
+    Some(StretchPlan { corner, region })
+}
+
+/// The stones of `reach` from `from` to `to` meters down it (and a couple of meters beyond),
+/// as laid for the whole reach.
+fn stones_between(stones: &ReachStones, from: f32, to: f32) -> Vec<StreamStone> {
+    stones.stones[stones.between(from - 2.0, to + 2.0)].to_vec()
 }
 
 /// Keeps the creek nearest the camera simulated (see the module docs).
@@ -258,6 +271,7 @@ pub fn creek_sim_system(
     mut shifts: MessageReader<WorldShift>,
     mut sims: ResMut<CreekSims>,
     mut ribbons: ResMut<CreekRibbons>,
+    stones: Res<CreekStones>,
 ) {
     if let Some(s) = shifts.read().copied().reduce(|a, next| a.then(&next)) {
         for st in &mut sims.stretches {
@@ -311,15 +325,7 @@ pub fn creek_sim_system(
                     plan.region,
                 ))
                 .id();
-            let mut entities = vec![region];
-            for (k, (origin, parts, _)) in plan.stones.into_iter().enumerate() {
-                entities.push(spawn_prop(
-                    &mut commands,
-                    &format!("Creek stones {k}"),
-                    Transform::from_translation(origin),
-                    parts,
-                ));
-            }
+            let entities = vec![region];
             sims.stretches.push(Stretch {
                 cut,
                 line,
@@ -429,13 +435,32 @@ pub fn creek_sim_system(
         return;
     };
     let probe = course.iter().map(|p| p.at.y).fold(f64::MIN, f64::max) + 50.0;
+    // The reach's stones: as laid for the rocks drawn (else laid here the same way); none when
+    // the stones are off.
+    let laid = stones.reach((key, reach.id));
+    let off = stones.off;
+    let seed = reach_seed(&reach);
+    let whole: Vec<CreekPoint> = reach
+        .points
+        .iter()
+        .map(|p| CreekPoint {
+            at: p.at + *offset,
+            ..*p
+        })
+        .collect();
     let plan = move || {
         let height = |x: f64, z: f64| {
             ground
                 .height(DVec3::new(x, probe, z))
                 .unwrap_or(probe - 50.0)
         };
-        plan_stretch(&course, &height)
+        let in_it = if off {
+            Vec::new()
+        } else {
+            let all = laid.unwrap_or_else(|| Arc::new(lay_reach_stones(&whole, &height, seed)));
+            stones_between(&all, from, to)
+        };
+        plan_stretch(&course, &height, &in_it)
     };
     engine_core::tasks::init_task_pools();
     let task = AsyncComputeTaskPool::get().spawn(async move { plan() });
@@ -476,7 +501,9 @@ mod tests {
         let (from, to) = stretch_of(&reach.points, 0.5 * total).expect("stretch");
         let course = sub_course(&reach.points, from, to);
         let height = |x: f64, z: f64| m.height(x as f32, z as f32) as f64;
-        let plan = plan_stretch(&course, &height).expect("plan");
+        let stones = lay_reach_stones(&reach.points, &height, reach_seed(reach));
+        let plan =
+            plan_stretch(&course, &height, &stones_between(&stones, from, to)).expect("plan");
         assert!(!plan.region.sources.is_empty());
         assert!(!plan.region.rocks.is_empty());
         let cells = plan.region.cells[0] as f64 * plan.region.cells[1] as f64;

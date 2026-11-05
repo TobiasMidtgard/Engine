@@ -89,6 +89,7 @@ var<private> wet_bed: f32 = 1.0;
 var<private> stream_bed: f32 = 0.0;
 var<private> stream_speed: f32 = 0.0;
 var<private> stream_depth: f32 = 0.0;
+var<private> stream_dir: vec2<f32> = vec2<f32>(0.0);
 
 struct FlowGpu {
     origin: vec4<f32>,  // corner rel camera x, base y, z, cell (m)
@@ -943,7 +944,14 @@ fn shade_water(rel: vec3<f32>, n_in: vec3<f32>, look: WaterLook, foam_in: f32, c
         let bent = refract(-v, vec3<f32>(0.0, 1.0, 0.0), 1.0 / 1.333);
         let bed_rel = rel + bent * (stream_depth / max(-bent.y, 0.25))
             + vec3<f32>(n.x, 0.0, n.z) * stream_depth * 0.35;
-        behind = mix(behind, river_stones(bed_rel, rel, stream_speed), stream_bed * smoothstep(0.0, 0.03, stream_depth));
+        // Only where what the view meets behind the surface is the bed: a stone, a leg or
+        // anything else standing in the water well above it is seen as it is.
+        var on_bed = 1.0;
+        if (rel.y < 0.0) {
+            let below = -rel.y * max(ratio - 1.0, 0.0);
+            on_bed = smoothstep(0.5, 0.85, below / max(stream_depth, 0.01));
+        }
+        behind = mix(behind, river_stones(bed_rel, rel, stream_speed, stream_dir, bent), stream_bed * on_bed * smoothstep(0.0, 0.03, stream_depth));
     }
     let sigma_t = look.absorb + vec3<f32>(look.scattering);
     // Light reaching the bottom lost depth_below on the way down, then `thick` back up to us.
@@ -1187,29 +1195,102 @@ fn stone_cell(q: vec2<f32>) -> StoneCell {
     return out;
 }
 
-// One stone's wet color: granite greys and rusty ochres, slate, the odd white quartz, each a
-// shade of its own; slow water films them green with algae.
-fn stone_albedo(id: vec2<f32>, speed: f32) -> vec3<f32> {
-    let h = hash12(id + vec2<f32>(3.3, 0.7));
-    let h2 = hash12(id + vec2<f32>(7.1, 5.9));
-    var albedo = mix(vec3<f32>(0.19, 0.18, 0.16), vec3<f32>(0.26, 0.20, 0.12), h);
-    albedo = mix(albedo, vec3<f32>(0.09, 0.10, 0.11), step(0.7, h2));
-    albedo = mix(albedo, vec3<f32>(0.45, 0.44, 0.41), step(0.95, h2));
-    albedo *= 0.6 + 0.8 * hash12(id + vec2<f32>(1.1, 9.3));
-    return albedo * mix(vec3<f32>(0.8, 0.95, 0.65), vec3<f32>(1.0), smoothstep(0.2, 0.8, speed));
+// The bed of a stream seen through its water: cobbles lying packed on it with pebbles and
+// sand in the gaps between them, wet, lit by the sun and sky through the water (the caller
+// adds the caustics and what the water absorbs).
+//
+// The cobbles stand up from the bed: a height field of flattened ellipsoids, one on each cell
+// of a jittered grid, each its own size, overlapping where they pack. The current lays them as
+// it does on any gravel bed: long axes across the flow, flat faces dipping upstream, each
+// shingled on the one below it (imbrication), and sorts them: it carries off whatever it can
+// lift (Shields 1936), so fast water runs over coarse cobbles, slow water over finer ones.
+// Near the camera the refracted view ray is marched through the cobbles' layer, so they hide
+// one another and their sides show (parallax occlusion mapping, Tatarchuk 2006), and a short
+// march toward the sun lets them shade each other; the gaps between them are dark. Each layer
+// fades to its mean where a pixel spans several of its stones.
+
+// Cobbles' grid, meters (one cobble a cell).
+const COBBLE_GRID: f32 = 0.34;
+// The cobbles' layer: the gap floor to the crowns of the biggest, meters.
+const COBBLE_LAYER: f32 = 0.18;
+
+// The top of a stone layer at a point: height over the gap floor (m), its slope (dh/dx,
+// dh/dz), the stone's cell (for its look; the floor's when there is none) and how far out
+// toward its rim the point is (0 middle .. 1 rim).
+struct BedTop {
+    h: f32,
+    grad: vec2<f32>,
+    id: vec2<f32>,
+    rim: f32,
+};
+
+// One layer of stones on a grid `grid` meters, `long` times longer across the current
+// (`flow`, a unit vector downstream) than along it; `coarse` 0..1 makes them bigger.
+fn stone_layer(p: vec2<f32>, grid: f32, long: f32, flow: vec2<f32>, coarse: f32) -> BedTop {
+    let q = p / grid;
+    let cell = floor(q);
+    var best = BedTop(0.0, vec2<f32>(0.0), vec2<f32>(-1.0), 1.0);
+    let across = vec2<f32>(-flow.y, flow.x);
+    for (var j = -1; j <= 1; j++) {
+        for (var i = -1; i <= 1; i++) {
+            let c = cell + vec2<f32>(f32(i), f32(j));
+            let h0 = hash12(c);
+            let h1 = hash12(c + vec2<f32>(19.7, 3.1));
+            let h2 = hash12(c + vec2<f32>(5.5, 2.2));
+            let h3 = hash12(c + vec2<f32>(8.3, 11.9));
+            let d = p - (c + vec2<f32>(h0, h1) * 0.8 + 0.1) * grid;
+            // Mostly middling, a few big ones (a skewed spread of sizes).
+            let s = grid * mix(0.8, 1.05, coarse) * (0.68 + 0.4 * h2 + 0.55 * h2 * h2 * h2 * h2);
+            // The long axis across the current, give or take 35 degrees.
+            let turn = (h3 - 0.5) * 1.2;
+            let ax = across * cos(turn) + flow * sin(turn);
+            let ay = vec2<f32>(-ax.y, ax.x);
+            let a = 0.36 * s * long;
+            let b = 0.36 * s;
+            let u = dot(d, ax) / a;
+            let v = dot(d, ay) / b;
+            let r2 = u * u + v * v;
+            if (r2 >= 1.0) { continue; }
+            let dome = sqrt(1.0 - r2);
+            // Flattened; partly sunk in the bed; tipped up at the downstream end.
+            let c_h = s * mix(0.3, 0.45, hash12(c + vec2<f32>(2.9, 6.1)));
+            let t = clamp(dot(d, flow) / b, -1.0, 1.0);
+            let sunk = 0.25 * hash12(c + vec2<f32>(4.4, 0.3));
+            let h = c_h * (dome * (1.0 + 0.3 * t) - sunk);
+            if (h > best.h) {
+                let dd = -(u * ax / a + v * ay / b) / max(dome, 0.2);
+                let grad = c_h * ((1.0 + 0.3 * t) * dd + 0.3 * dome * flow / b);
+                best = BedTop(h, grad, c, sqrt(r2));
+            }
+        }
+    }
+    return best;
 }
 
-// The bed of a stream seen through its water: rounded cobbles packed together with pebbles
-// in the gaps between them, wet, lit by the sun and sky through the water (the caller adds
-// the caustics and what the water absorbs). The current sorts them: it carries off whatever
-// it can lift (Shields 1936), so fast water runs over coarse cobbles, slow water over finer
-// ones. Each layer fades to its mean where a pixel spans several of its stones.
-fn river_stones(rel: vec3<f32>, surface_rel: vec3<f32>, speed: f32) -> vec3<f32> {
-    let wp = tiling_pos(rel).xz;
-    // One fixed grid: scaling it by the current (which changes from place to place) would
-    // smear the stones into contours. The current sorts them within it instead: big cobbles
-    // packed tight where it runs fast, smaller ones with pebbles between where it is slow.
-    let size = 0.45;
+// The cobbles alone (what the rays are marched through).
+fn cobble_height(p: vec2<f32>, flow: vec2<f32>, coarse: f32) -> f32 {
+    return stone_layer(p, COBBLE_GRID, 1.35, flow, coarse).h;
+}
+
+// One stone's wet colour by its rock: granite greys, rusty sandstone, near-black basalt,
+// green-grey schist and the odd white quartz, each a shade of its own, speckled with its
+// grain.
+fn stone_albedo(id: vec2<f32>, p: vec2<f32>) -> vec3<f32> {
+    let kind = hash12(id + vec2<f32>(7.1, 5.9));
+    var albedo = vec3<f32>(0.27, 0.26, 0.24);
+    if (kind > 0.45) { albedo = vec3<f32>(0.31, 0.23, 0.15); }
+    if (kind > 0.7) { albedo = vec3<f32>(0.075, 0.08, 0.085); }
+    if (kind > 0.84) { albedo = vec3<f32>(0.17, 0.19, 0.15); }
+    if (kind > 0.95) { albedo = vec3<f32>(0.55, 0.53, 0.49); }
+    albedo *= 0.7 + 0.6 * hash12(id + vec2<f32>(1.1, 9.3));
+    // Grain: crystals in the granites, mottling in the rest.
+    let grain = value_noise2(p * 61.0 + id * 7.0) * 0.6 + value_noise2(p * 13.0 + id * 3.0) * 0.4;
+    return albedo * (0.75 + 0.5 * grain);
+}
+
+fn river_stones(rel: vec3<f32>, surface_rel: vec3<f32>, speed: f32, flow_in: vec2<f32>, bent: vec3<f32>) -> vec3<f32> {
+    let p0 = tiling_pos(rel).xz;
+    let flow = select(vec2<f32>(1.0, 0.0), flow_in / max(length(flow_in), 1e-4), length(flow_in) > 1e-4);
     let coarse = smoothstep(0.3, 1.8, speed);
     let pixel = pixel_footprint(rel);
     let up = vec3<f32>(0.0, 1.0, 0.0);
@@ -1217,32 +1298,81 @@ fn river_stones(rel: vec3<f32>, surface_rel: vec3<f32>, speed: f32) -> vec3<f32>
     // Shadowed as the surface above it is: the bed itself lies under the shadow map's bias.
     let sun = water_sun(surface_rel) * max(frame.sun_dir.y, 0.0) * shadow_factor(surface_rel, up);
     let sky = sky_ambient(up) * sky_visibility(rel, up) * PI;
-
-    // Cobbles: domes filling most of their cells.
-    let c = stone_cell(wp / size);
-    let radius = mix(0.22, 0.36, coarse) + 0.12 * hash12(c.id + vec2<f32>(5.5, 2.2));
-    let r = c.d1 / radius;
-    let on = 1.0 - smoothstep(0.85, 1.0, r);
-    var slope = c.off / max(c.d1, 1e-4) * r / sqrt(max(1.0 - r * r, 0.05)) * 0.6;
-    // Pebbles: smaller stones packed into the gaps, half in the cobbles' shade.
-    let pq = wp / (size * 0.28) + vec2<f32>(31.7, 17.3);
-    let pc = stone_cell(pq);
-    let pr = saturate(pc.d1 / 0.42);
-    let pebble_fade = smoothstep(0.25, 0.8, pixel / (size * 0.28));
-    let p_slope = pc.off / max(pc.d1, 1e-4) * pr * 0.7 * (1.0 - pebble_fade);
-    slope = mix(p_slope, slope, on);
-    let p_alb = mix(stone_albedo(pc.id, speed) * mix(0.35, 1.0, smoothstep(1.0, 0.6, pr)), vec3<f32>(0.11, 0.10, 0.09), pebble_fade);
-    var albedo = mix(p_alb * 0.7, stone_albedo(c.id, speed), on);
-    let len = length(slope);
-    if (len > 2.0) { slope *= 2.0 / len; }
-    // Each stone's top tilts away from its middle.
-    let n = normalize(vec3<f32>(slope.x, 1.0, slope.y));
-    let grain = 0.85 + 0.3 * value_noise2(wp * 23.0);
-    var lit = albedo * grain * INV_PI
-        * (sun * max(dot(n, sun_in), 0.0) / max(sun_in.y, 0.2) + sky * (0.55 + 0.45 * n.y));
-    // Far off, where a pixel spans several cobbles, their mean.
-    let mean = vec3<f32>(0.15, 0.14, 0.12) * 0.85 * INV_PI * (sun + sky);
-    lit = mix(lit, mean, smoothstep(0.3, 1.0, pixel / size));
+    // Where a pixel spans several cobbles, their mean.
+    let mean = vec3<f32>(0.15, 0.14, 0.12) * 0.72 * INV_PI * (sun * 0.8 + sky * 0.75);
+    let far = smoothstep(0.3, 1.0, pixel / COBBLE_GRID);
+    if (far >= 1.0) {
+        return pre_expose(mean);
+    }
+    // March the view ray down from the crowns' plane (`rel` is where it meets it) to the gap
+    // floor; near, in more steps the more it slants.
+    let detail = 1.0 - smoothstep(0.05, 0.25, pixel / COBBLE_GRID);
+    let down = max(-bent.y, 0.3);
+    let travel = bent.xz / down * COBBLE_LAYER;
+    var t_hit = 0.5;
+    if (detail > 0.0) {
+        let steps = i32(round(mix(6.0, 16.0, 1.0 - down) * detail)) + 2;
+        var t_prev = 0.0;
+        var gap_prev = COBBLE_LAYER - cobble_height(p0, flow, coarse);
+        t_hit = 1.0;
+        if (gap_prev <= 0.0) {
+            t_hit = 0.0;
+        } else {
+            for (var i = 1; i <= steps; i++) {
+                let t = f32(i) / f32(steps);
+                let gap = COBBLE_LAYER * (1.0 - t) - cobble_height(p0 + travel * t, flow, coarse);
+                if (gap <= 0.0) {
+                    // Between the last two: where the ray crosses the stone's top.
+                    t_hit = t_prev + (t - t_prev) * saturate(gap_prev / max(gap_prev - gap, 1e-5));
+                    break;
+                }
+                t_prev = t;
+                gap_prev = gap;
+            }
+        }
+    }
+    let p = p0 + travel * t_hit;
+    var top = stone_layer(p, COBBLE_GRID, 1.35, flow, coarse);
+    // Pebbles and grit in the gaps (close up), half in the cobbles' shade.
+    let pebble_fade = smoothstep(0.2, 0.7, pixel / (COBBLE_GRID * 0.3));
+    var albedo = vec3<f32>(0.15, 0.13, 0.095);
+    if (top.h > 0.0) {
+        albedo = stone_albedo(top.id, p);
+    }
+    if (pebble_fade < 1.0) {
+        let pb = stone_layer(p + vec2<f32>(31.7, 17.3), COBBLE_GRID * 0.3, 1.2, flow, 0.5);
+        let ph = pb.h * 0.6;
+        if (ph > top.h) {
+            let alb = stone_albedo(pb.id + vec2<f32>(91.0, 13.0), p) * 0.85;
+            albedo = mix(alb, albedo, pebble_fade);
+            top = BedTop(ph, mix(pb.grad * 0.6, top.grad, pebble_fade), pb.id, pb.rim);
+        }
+    }
+    // Slow water films the stones' tops with algae.
+    let algae = (1.0 - smoothstep(0.2, 0.9, speed)) * smoothstep(0.02, 0.08, top.h);
+    albedo *= mix(vec3<f32>(1.0), vec3<f32>(0.62, 0.72, 0.42), algae * 0.6);
+    var g = top.grad;
+    let len = length(g);
+    if (len > 3.0) { g *= 3.0 / len; }
+    let n = normalize(vec3<f32>(-g.x, 1.0, -g.y));
+    // Each other's shade: from the hit, toward the sun, does a stone stand above the ray?
+    var lit_sun = 1.0;
+    if (detail > 0.0 && sun_in.y > 0.0 && top.h < COBBLE_LAYER) {
+        let run = sun_in.xz / max(sun_in.y, 0.25);
+        let rise = max(COBBLE_LAYER - top.h, 0.0);
+        for (var i = 1; i <= 6; i++) {
+            let k = f32(i) / 6.0;
+            let h_ray = top.h + rise * k;
+            let over = cobble_height(p + run * rise * k, flow, coarse) - h_ray;
+            lit_sun = min(lit_sun, saturate(1.0 - over / (0.01 + 0.3 * rise * k)));
+        }
+        lit_sun = mix(1.0, lit_sun, detail);
+    }
+    // Deep in a gap little sky reaches; nor under a stone's rolled-under rim.
+    let cavity = mix(0.3, 1.0, smoothstep(0.0, 0.07, top.h)) * (1.0 - 0.3 * smoothstep(0.75, 1.0, top.rim) * step(0.001, top.h));
+    var lit = albedo * INV_PI
+        * (sun * lit_sun * max(dot(n, sun_in), 0.0) / max(sun_in.y, 0.2) + sky * cavity * (0.55 + 0.45 * n.y));
+    lit = mix(lit, mean, far);
     return pre_expose(lit);
 }
 
@@ -1559,6 +1689,7 @@ fn shade_stream(in: FlowOut, front: bool) -> vec4<f32> {
     stream_bed = 1.0;
     stream_speed = speed;
     stream_depth = in.depth;
+    stream_dir = in.vel;
     let wp = tiling_pos(in.rel).xz;
     // Flow-mapped ripples: two copies of the pattern scrolled downstream, cross-faded.
     let t = time_s();
