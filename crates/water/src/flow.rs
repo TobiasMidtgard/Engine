@@ -1089,17 +1089,25 @@ impl FlowSim {
             return;
         }
         let max_d = self.depth.iter().copied().fold(0.05f32, f32::max);
-        let max_dt = 0.3 * self.cell / (9.81 * max_d).sqrt();
+        // The pipe model is stable to a Courant number of 1 (Mei, Decaudin & Hu 2007; outflow
+        // scaled to what a cell holds keeps depths positive past it): half that leaves room for
+        // the fastest water, and a deep plunge pool no longer doubles every region's substeps.
+        let max_dt = COURANT * self.cell / (9.81 * max_d).sqrt();
         let n = ((dt / max_dt).ceil() as u32).clamp(1, 16);
         let sdt = dt / n as f32;
-        for _ in 0..n {
-            self.substep(sdt);
+        {
+            let _s = tracing::info_span!("water", name = "flows: substeps").entered();
+            for _ in 0..n {
+                self.substep(sdt);
+            }
         }
         self.version += 1;
         self.since_falls += dt;
         if self.since_falls >= FALLS_PERIOD {
+            let _s = tracing::info_span!("water", name = "flows: falls").entered();
             self.refresh_falls();
         }
+        let _s = tracing::info_span!("water", name = "flows: steady").entered();
         self.watch_steady(dt);
     }
 
@@ -1333,15 +1341,26 @@ impl FlowSim {
     }
 }
 
-/// Bands of rows a region's step is split into: one per thread, or one for a small region
-/// (waking the pool costs more than its work).
+/// Bands of rows a region's step is split into: a few per thread, or one for a region small
+/// enough to step on the calling thread (waking the busy pool costs more than its work).
 fn bands(nx: usize, nz: usize) -> usize {
-    if nx * nz < 4096 {
+    if nx * nz < SERIAL_CELLS {
         1
     } else {
-        ComputeTaskPool::get().thread_num().clamp(1, nz)
+        // Several bands a thread: the water lies in a few of them (a river down a region
+        // mostly dry), and one band a thread left the others idle while the wet one ran.
+        (ComputeTaskPool::get().thread_num() * BANDS_PER_THREAD).clamp(1, nz)
     }
 }
+
+/// Regions of fewer cells step on the calling thread: a few tens of thousands of cells take
+/// a third of a millisecond alone, while going wide on the compute pool beside the physics
+/// step waited on its busy threads for 2-3 ms (the lake's river, 74 x 303 cells, 2026-11-05).
+const SERIAL_CELLS: usize = 65_536;
+/// Bands of rows each thread's share of a region's step is cut into (see [`bands`]).
+const BANDS_PER_THREAD: usize = 4;
+/// Courant number each substep keeps to: Δt ≤ COURANT · cell / √(g · deepest).
+const COURANT: f32 = 0.5;
 
 /// Run `f(band, item)` for each band of rows, one task each.
 fn par_bands<C: Send>(items: impl Iterator<Item = C>, f: impl Fn(usize, C) + Send + Sync) {
