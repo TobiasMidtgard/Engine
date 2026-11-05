@@ -377,43 +377,63 @@ pub fn spawn_demo(commands: &mut Commands, origin: DVec3) {
         ))
         .id();
     // The props wait for their procedural textures and materials (made once per world, on
-    // a worker), then stand around the anchor.
-    kit::with_materials(commands, anchor, place_yard);
+    // a worker), then stand around the anchor, a batch a frame (86 ms in one frame on the
+    // session VM).
+    kit::with_materials(commands, anchor, move |commands, c| {
+        let mut parts = yard_parts();
+        let (_, first) = parts.remove(0);
+        first(commands, c);
+        commands.queue(move |world: &mut World| kit::place_parts(world, anchor, parts));
+    });
 }
 
-/// The yard's props and soft bodies around `c`.
-fn place_yard(commands: &mut Commands, c: DVec3) {
-    flags(commands, c);
-    flag_field(commands, c + DVec3::new(19.0, 0.0, -16.0));
-    curtains(commands, c + DVec3::new(-12.0, 0.0, 6.0));
-    blanket_drop(commands, c + DVec3::new(-4.5, 0.0, 3.0));
-    bridges(commands, c);
-    bead_curtain(commands, c + DVec3::new(-3.0, 0.0, 9.0));
-    swing(commands, c + DVec3::new(15.0, 0.0, 4.0));
-    jelly_and_wrecking_ball(commands, c + DVec3::new(0.5, 0.0, -1.0));
-    clay_press(commands, c + DVec3::new(6.5, 0.0, 2.5));
-    mannequin(
-        commands,
-        c + DVec3::new(9.0, 0.0, -7.0),
-        2.6,
-        1.0,
-        "Mannequin",
-        ivory(),
-    );
-    mannequin(
-        commands,
-        c + DVec3::new(15.5, 0.0, -6.0),
-        2.0,
-        0.25,
-        "Slow-motion mannequin",
-        graphite(),
-    );
-    dog(commands, c + DVec3::new(-8.0, 0.0, -4.0));
-    statue::spawn_unveiling(
-        commands,
-        c + DVec3::new(-14.0, 0.0, -4.0),
-        Vec3::new(0.5, 0.0, -0.87),
-    );
+/// The yard's props and soft bodies, in batches placed around the anchor a frame apart.
+fn yard_parts() -> Vec<kit::Part> {
+    vec![
+        ("softbody yard flags", |commands, c| {
+            flags(commands, c);
+            flag_field(commands, c + DVec3::new(19.0, 0.0, -16.0));
+        }),
+        ("softbody yard curtains", |commands, c| {
+            curtains(commands, c + DVec3::new(-12.0, 0.0, 6.0));
+            blanket_drop(commands, c + DVec3::new(-4.5, 0.0, 3.0));
+            bead_curtain(commands, c + DVec3::new(-3.0, 0.0, 9.0));
+        }),
+        ("softbody yard bridges", |commands, c| {
+            bridges(commands, c);
+            swing(commands, c + DVec3::new(15.0, 0.0, 4.0));
+        }),
+        ("softbody yard jelly and clay", |commands, c| {
+            jelly_and_wrecking_ball(commands, c + DVec3::new(0.5, 0.0, -1.0));
+            clay_press(commands, c + DVec3::new(6.5, 0.0, 2.5));
+        }),
+        ("softbody yard mannequins", |commands, c| {
+            mannequin(
+                commands,
+                c + DVec3::new(9.0, 0.0, -7.0),
+                2.6,
+                1.0,
+                "Mannequin",
+                ivory(),
+            );
+            mannequin(
+                commands,
+                c + DVec3::new(15.5, 0.0, -6.0),
+                2.0,
+                0.25,
+                "Slow-motion mannequin",
+                graphite(),
+            );
+        }),
+        ("softbody yard dog and statue", |commands, c| {
+            dog(commands, c + DVec3::new(-8.0, 0.0, -4.0));
+            statue::spawn_unveiling(
+                commands,
+                c + DVec3::new(-14.0, 0.0, -4.0),
+                Vec3::new(0.5, 0.0, -0.87),
+            );
+        }),
+    ]
 }
 
 fn flags(commands: &mut Commands, c: DVec3) {
