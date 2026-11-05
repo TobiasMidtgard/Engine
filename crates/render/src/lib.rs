@@ -92,6 +92,7 @@ mod mipmaps;
 pub mod motion_blur;
 mod perf;
 pub mod planar_reflection;
+pub mod plant_wind;
 pub mod portal;
 mod prepare;
 mod probe_gi;
@@ -144,6 +145,10 @@ pub use mesh::{Mesh, Shape, Vertex};
 pub use motion_blur::MotionBlur;
 pub use planar_reflection::{
     PlanarReflection, PlanarReflectionPicture, planar_reflection_picture, rendering_reflection,
+};
+pub use plant_wind::{
+    MAX_PLANT_BONES, PlantBone, PlantSkeleton, PlantSpeciesWind, PlantWindMesh, PlantWindMeshes,
+    PlantWindSpecies, pack_plant_vertex,
 };
 pub use portal::Portal;
 pub use renderer::{

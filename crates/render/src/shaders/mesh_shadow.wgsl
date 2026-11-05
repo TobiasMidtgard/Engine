@@ -56,9 +56,38 @@ fn shadow_wind(rel: vec3<f32>, height01: f32, sway: f32) -> vec3<f32> {
     return plant_sway(rel.xz + shadow_view.gust_offset.xy, height01, sway, shadow_view.plant_wind, shadow_view.gusts, shadow_view.time.x, rest);
 }
 
+// The air of a bone plant's instance in the shadow maps (`PlantAir`, lib_wind.wgsl): branches
+// and limbs only (leaf flutter is finer than a shadow texel), and where swaying rests one pose
+// bent by the wind without gusts or sway.
+fn shadow_plant_air(in: VertexIn, base: vec3<f32>) -> PlantAir {
+    let rest = shadow_view.time.w > 0.5;
+    var gusts = shadow_view.gusts;
+    if (rest) {
+        gusts = GustWaves(vec4<f32>(0.0), vec4<f32>(0.0), vec4<f32>(0.0), vec4<f32>(0.0));
+    }
+    return PlantAir(shadow_view.plant_wind, gusts, vec2<f32>(in.m0.w, in.m2.w) + shadow_view.gust_offset.xy,
+        base.xz + shadow_view.gust_offset.xy, false, select(2u, 1u, rest), select(1.0, 0.0, rest));
+}
+
 fn shadow_clip(in: VertexIn) -> vec4<f32> {
     let p = vec4<f32>(in.position, 1.0);
     var rel = vec3<f32>(dot(in.m0, p), dot(in.m1, p), dot(in.m2, p));
+    let entry = plant_wind_entry(in.extra.y);
+    if (entry != 0u) {
+        let air = shadow_plant_air(in, rel);
+        let dir = plant_wind_dir(in.n0.xyz, in.n1.xyz, in.n2.xyz, air.wind);
+        let w = plant_wind(in.position, in.normal, in.color.a, entry, dir, air);
+        let q = vec4<f32>(w.pos, 1.0);
+        rel = vec3<f32>(dot(in.m0, q), dot(in.m1, q), dot(in.m2, q));
+        let h01 = saturate((in.position.y - bitcast<f32>(in.extra.z)) / max(bitcast<f32>(in.extra.w), 1e-3));
+        var bend = vec3<f32>(0.0);
+        for (var i = 0u; i < min(u32(shadow_view.bend.x), 16u); i++) {
+            bend += bender_push(rel, shadow_view.benders[i], h01, w.tip);
+        }
+        var clip = shadow_view.view_proj * vec4<f32>(rel + bender_limit(bend), 1.0);
+        clip.z = max(clip.z, 0.0);
+        return clip;
+    }
     // Wind weight in the vertex color's alpha, as in `vertex_wind` (mesh.wgsl).
     let sway = materials[in.extra.x].params2.y * saturate(in.color.a);
     if (sway > 0.0) {

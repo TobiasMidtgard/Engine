@@ -153,9 +153,48 @@ fn vertex_surface_color(in: VertexIn) -> vec4<f32> {
 }
 
 fn vertex_rel(in: VertexIn) -> vec3<f32> {
+    return vertex_placed(in).rel;
+}
+
+// Where a vertex is drawn (camera-relative), its world normal, its surface color, and the
+// benders' push in it.
+struct Placed {
+    rel: vec3<f32>,
+    normal: vec3<f32>,
+    color: vec4<f32>,
+    bend: vec3<f32>,
+};
+
+// A bone plant's vertex (`plant_wind`, lib_wind.wgsl) in this frame's air or last frame's, at
+// its unmoved camera-relative position `base` (last frame's for `prev`).
+fn vertex_plant(in: VertexIn, entry: u32, base: vec3<f32>, prev: bool) -> Winded {
+    var air = PlantAir(frame.plant_wind, frame.gusts, vec2<f32>(in.m0.w, in.m2.w) + frame.gust_offset.xy,
+        base.xz + frame.gust_offset.xy, false, 3u, 1.0);
+    if (prev) {
+        air = PlantAir(frame.plant_wind_prev, frame.gusts_prev, vec2<f32>(in.p0.w, in.p2.w) + frame.gust_offset.zw,
+            base.xz + frame.gust_offset.zw, true, 3u, 1.0);
+    }
+    let dir = plant_wind_dir(in.n0.xyz, in.n1.xyz, in.n2.xyz, air.wind);
+    return plant_wind(in.position, in.normal, in.color.a, entry, dir, air);
+}
+
+// This frame's `Placed` of a vertex: bone plants on their bones, other meshes with the legacy
+// sway (`vertex_wind`).
+fn vertex_placed(in: VertexIn) -> Placed {
     let p = vec4<f32>(in.position, 1.0);
-    let rel = vec3<f32>(dot(in.m0, p), dot(in.m1, p), dot(in.m2, p));
-    return rel + vertex_wind(in, rel);
+    let base = vec3<f32>(dot(in.m0, p), dot(in.m1, p), dot(in.m2, p));
+    let normals = mat3x3<f32>(in.n0.xyz, in.n1.xyz, in.n2.xyz);
+    let entry = plant_wind_entry(in.extra.y);
+    if (entry != 0u) {
+        let w = vertex_plant(in, entry, base, false);
+        let q = vec4<f32>(w.pos, 1.0);
+        let rel = vec3<f32>(dot(in.m0, q), dot(in.m1, q), dot(in.m2, q));
+        let bend = bender_offset(rel, vertex_height01(in), w.tip);
+        let gain = plant_underside_gain(entry, w.underside);
+        return Placed(rel + bend, normalize(normals * w.normal), vec4<f32>(in.color.rgb * gain, 1.0), bend);
+    }
+    return Placed(base + vertex_wind(in, base), normalize(normals * in.normal), vertex_surface_color(in),
+        vec3<f32>(0.0));
 }
 
 @vertex
@@ -165,12 +204,13 @@ fn vs_main(in: VertexIn) -> VertexOut {
 
 // The scene pass's vertex math, shared with the virtual geometry path (cluster.wgsl).
 fn standard_vertex(in: VertexIn) -> VertexOut {
-    let rel = vertex_rel(in);
+    let placed = vertex_placed(in);
+    let rel = placed.rel;
     var out: VertexOut;
     out.rel = rel;
-    out.normal = normalize(mat3x3<f32>(in.n0.xyz, in.n1.xyz, in.n2.xyz) * in.normal);
+    out.normal = placed.normal;
     out.uv = in.uv;
-    out.color = vertex_surface_color(in);
+    out.color = placed.color;
     out.material = in.extra.x;
     out.local = vertex_local(in);
     out.object_normal = vertex_object_normal(in);
@@ -1087,16 +1127,25 @@ fn vs_prepass(in: VertexIn) -> PrepassVertexOut {
 fn standard_prepass_vertex(in: VertexIn) -> PrepassVertexOut {
     let p = vec4<f32>(in.position, 1.0);
     let base = vec3<f32>(dot(in.m0, p), dot(in.m1, p), dot(in.m2, p));
-    let rel = base + vertex_wind(in, base);
+    let placed = vertex_placed(in);
+    let rel = placed.rel;
     // Last frame's position: last frame's transform and last frame's wind, so swaying leaves
     // get their own motion and temporal filtering doesn't smear them.
     let prev_base = vec3<f32>(dot(in.p0, p), dot(in.p1, p), dot(in.p2, p));
-    let prev = prev_base + vertex_wind_prev(in, base, prev_base);
+    var prev = prev_base;
+    let entry = plant_wind_entry(in.extra.y);
+    if (entry != 0u) {
+        let w = vertex_plant(in, entry, prev_base, true);
+        let q = vec4<f32>(w.pos, 1.0);
+        prev = vec3<f32>(dot(in.p0, q), dot(in.p1, q), dot(in.p2, q)) + placed.bend;
+    } else {
+        prev += vertex_wind_prev(in, base, prev_base);
+    }
     var out: PrepassVertexOut;
     out.rel = rel;
-    out.normal = normalize(mat3x3<f32>(in.n0.xyz, in.n1.xyz, in.n2.xyz) * in.normal);
+    out.normal = placed.normal;
     out.uv = in.uv;
-    out.color = vertex_surface_color(in);
+    out.color = placed.color;
     out.material = in.extra.x;
     out.clip = frame.view_proj * vec4<f32>(rel, 1.0);
     out.motion_now = motion_clip(rel);
