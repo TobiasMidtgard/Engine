@@ -788,6 +788,7 @@ pub fn build_bodies(
         if over() {
             return;
         }
+        let _span = tracing::info_span!("softbody: build cloth").entered();
         report(
             &mut commands,
             e,
@@ -805,6 +806,7 @@ pub fn build_bodies(
         if over() {
             return;
         }
+        let _span = tracing::info_span!("softbody: build rope").entered();
         let resolve = |other: Entity| all_transforms.get(other).ok().copied();
         report(
             &mut commands,
@@ -817,6 +819,7 @@ pub fn build_bodies(
         if over() {
             return;
         }
+        let _span = tracing::info_span!("softbody: build bridge").entered();
         let material = match &spec.plank_material {
             Some(key) => engine_render::MaterialRef::Asset(key.clone()),
             None => engine_render::MaterialRef::Inline(
@@ -882,6 +885,7 @@ pub fn build_bodies(
         if over() {
             return;
         }
+        let _span = tracing::info_span!("softbody: build volume").entered();
         report(&mut commands, e, "SoftVolume", volume::build(spec, t));
     }
     let meshes = meshes.as_deref();
@@ -893,6 +897,7 @@ pub fn build_bodies(
         if over() {
             return;
         }
+        let _span = tracing::info_span!("softbody: build hair").entered();
         report(
             &mut commands,
             e,

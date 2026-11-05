@@ -841,17 +841,23 @@ impl ScriptRuntime {
         if settings.hot_reload {
             let due = self.next_poll.is_none_or(|t| Instant::now() >= t);
             if due {
+                let _span = tracing::info_span!("scripts: poll files").entered();
                 self.next_poll =
                     Some(Instant::now() + std::time::Duration::from_secs_f32(settings.poll_secs));
                 self.poll_files(w(), settings);
             }
         }
+        let span = tracing::info_span!("scripts: start and stop").entered();
         self.sync_instances(w(), settings);
+        drop(span);
+        let span = tracing::info_span!("scripts: deliver").entered();
         self.advance_clocks(w());
         self.deliver_interactions(w(), settings);
         self.deliver_contacts(w(), settings);
         self.deliver_messages(settings);
         self.deliver_signals(w(), settings);
+        drop(span);
+        let updates = tracing::info_span!("scripts: updates").entered();
 
         let updating: Vec<Entity> = self
             .instances
@@ -895,6 +901,8 @@ impl ScriptRuntime {
                 i.ms = i.ms * 0.9 + ms * 0.1;
             }
         }
+        drop(updates);
+        let _span = tracing::info_span!("scripts: tweens, tasks and gizmos").entered();
         if !self.debugger.stopped() {
             self.run_tweens(w(), settings);
         }
