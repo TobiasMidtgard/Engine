@@ -10,7 +10,8 @@
 //! russet), `marsh` (tall, upright, dark), `alien` (a low-gravity world's violet grass under a
 //! paler sky), `path` (a footpath worn through the meadow: `GrassWear`), `snow` (the meadow
 //! under 12 cm of fresh snow), `herbs` and `litter` (a forest floor's shade herbs and fallen
-//! leaves on humus; `herbs_close` and `litter_close` from knee height), `field` (the showcase's
+//! leaves on humus; `herbs_close` and `litter_close` from knee height), `ferns` (woodland ferns,
+//! fronds cut into pinnae; `ferns_close`), `field` (the showcase's
 //! meadow: drawn out to 120 m, shadows to 22 m, standing in it and looking out over it),
 //! `communities` (a 300 m meadow growing `engine_foliage::meadow`'s kinds of grass, painted
 //! from a made-up site: a wet hollow and creek, a footpath, a wood's edge along one side, a
@@ -59,6 +60,7 @@ fn biomes() -> Vec<Biome> {
     add("path", GrassStyle::meadow());
     add("snow", GrassStyle::meadow());
     add("herbs", GrassStyle::forest_herbs());
+    add("ferns", GrassStyle::fern());
     add("litter", GrassStyle::leaf_litter());
     // games/showcase's `meadow_grass`.
     add(

@@ -10,6 +10,7 @@ struct GrassOut {
     @location(5) gloss: f32,
     @location(6) shade: f32,
     @location(7) glow: f32,
+    @location(8) @interpolate(flat) pinnae: f32,
 };
 
 // The blades the cull pass (grass_cull.wgsl) kept this frame, grouped by segments. A group's
@@ -35,6 +36,7 @@ fn vs_main(@builtin(instance_index) instance: u32, @builtin(vertex_index) vertex
     out.gloss = b.gloss;
     out.shade = b.shade;
     out.glow = b.glow;
+    out.pinnae = grass_fields[s.field].kind.z;
     return out;
 }
 
@@ -63,6 +65,7 @@ fn grass_surface(in: GrassOut, front: bool) -> Surface {
 
 @fragment
 fn fs_main(in: GrassOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
+    // GRASS_CUT main
     let s = grass_surface(in, front);
     // Debug views (RenderSettings.debug_view), as for meshes.
     switch frame.counts.z {
@@ -101,6 +104,8 @@ struct GrassPrepassOut {
     @location(0) normal: vec3<f32>,
     @location(1) motion_now: vec4<f32>,
     @location(2) motion_prev: vec4<f32>,
+    @location(3) cut: vec2<f32>,
+    @location(4) @interpolate(flat) pinnae: f32,
 };
 
 @vertex
@@ -114,12 +119,34 @@ fn vs_prepass(@builtin(instance_index) instance: u32, @builtin(vertex_index) ver
     let p = grass_vertex(s, vertex & 15u, frame.time.x - frame.time.z, s.tip_prev);
     out.motion_now = motion_clip(b.rel);
     out.motion_prev = prev_motion_clip(static_prev_rel(p.rel));
+    out.cut = vec2<f32>(b.along, b.across);
+    out.pinnae = grass_fields[s.field].kind.z;
     return out;
 }
 
 @fragment
 fn fs_prepass(in: GrassPrepassOut, @builtin(front_facing) front: bool) -> PrepassOutput {
+    // GRASS_CUT prepass
     var n = normalize(in.normal);
     if (!front) { n = -n; }
     return prepass_output(n, 0.65, in.motion_now, in.motion_prev);
+}
+
+// A fern's frond cut into pinnae (the cut pipelines only: a discard anywhere in a shader costs
+// every fragment its early depth test, so whole blades never pay for it). `pinnae` pairs of
+// leaflets down the frond, each sweeping toward the tip and narrowing to its own point,
+// either side of the rachis, which always stays.
+fn grass_cut(along: f32, across: f32, pinnae: f32) -> bool {
+    if (pinnae <= 0.0) {
+        return false;
+    }
+    let a = abs(across);
+    if (a < 0.1) {
+        return false;
+    }
+    // Each pinna is a lobe one 1/pinnae of the frond long at the rachis, slanted forward.
+    let t = fract(along * pinnae - a * 0.55 + 0.25);
+    // ...narrowing toward its tip at the frond's edge, with a gap to the next.
+    let fill = 0.7 * (1.0 - 0.75 * a * a);
+    return abs(t - 0.5) * 2.0 > fill;
 }
