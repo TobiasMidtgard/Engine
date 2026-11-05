@@ -35,12 +35,23 @@ pub(crate) struct Hull {
     pub volume: f32,
     /// The same hull with fewer triangles, for bodies far from every focus ([`Hull::at`]).
     coarse: Option<Box<Hull>>,
+    /// A finely detailed hull with a few hundred triangles, for bodies near a focus.
+    near: Option<Box<Hull>>,
 }
 
 /// Hulls with more triangles than this get a coarse copy for far bodies.
 const COARSE_ABOVE: usize = 160;
 /// Cells across the coarse copy's vertex grid, along each axis.
 const COARSE_CELLS: f32 = 5.0;
+/// Hulls with more triangles than this float near a focus on a copy merged on a
+/// [`NEAR_CELLS`]-across grid. A boat's render-detail hull (about 1,300 triangles at the lake)
+/// was pressed on triangle by triangle every substep, most of the lake stop's buoyancy time
+/// (round 19); boat buoyancy is usually worked out on a simplified hull of a few hundred
+/// triangles (Kerner, "Water interaction model for boats in video games", 2015).
+const NEAR_ABOVE: usize = 512;
+/// Cells across the near copy's vertex grid, along each axis: a 5 m boat's cells are 0.5 m
+/// long, its 1 m depth's 10 cm.
+const NEAR_CELLS: f32 = 10.0;
 
 impl Hull {
     /// The mesh of `shape`, or `None` for shapes floated by their bounding box.
@@ -51,6 +62,7 @@ impl Hull {
             tris,
             volume: 0.0,
             coarse: None,
+            near: None,
         };
         let (volume, centroid) = hull.volume_and_centroid();
         if volume.abs() < 1e-9 {
@@ -73,41 +85,44 @@ impl Hull {
             hull.volume = real;
         }
         if hull.tris.len() > COARSE_ABOVE {
-            hull.coarse = hull.decimated().map(Box::new);
+            hull.coarse = hull.decimated(COARSE_CELLS).map(Box::new);
+        }
+        if hull.tris.len() > NEAR_ABOVE {
+            hull.near = hull.decimated(NEAR_CELLS).map(Box::new);
         }
         Some(hull)
     }
 
-    /// This hull, or its coarse copy when the water is looked at on less than the full grid
-    /// (`cells` below [`MAX_CELLS`]: the body is far from every focus). Pressing on every
-    /// triangle of a boat's hull was most of the buoyancy's time at the plaza, for boats 300 m
-    /// away on the lake.
+    /// This hull's copy for the water looked at on `cells` across: the coarse one on less
+    /// than the full grid (`cells` below [`MAX_CELLS`]: the body is far from every focus;
+    /// pressing on every triangle of a boat's hull was most of the buoyancy's time at the
+    /// plaza, for boats 300 m away on the lake), else the near one ([`NEAR_ABOVE`]), else
+    /// this.
     pub fn at(&self, cells: usize) -> &Hull {
-        match &self.coarse {
-            Some(c) if cells < MAX_CELLS => c,
+        match (&self.coarse, &self.near) {
+            (Some(c), _) if cells < MAX_CELLS => c,
+            (_, Some(n)) => n,
             _ => self,
         }
     }
 
-    /// The hull with its vertices merged on a [`COARSE_CELLS`]-across grid (vertex clustering,
-    /// Rossignac and Borrel 1993): triangles that collapse are dropped, and the rest scaled
-    /// about the centroid to the same volume, so it floats as deep. `None` if too little is
-    /// left.
-    fn decimated(&self) -> Option<Hull> {
+    /// The hull with its vertices merged on a grid `across` cells along each axis (vertex
+    /// clustering, Rossignac and Borrel 1993): triangles that collapse are dropped, and the
+    /// rest scaled about the centroid to the same volume, so it floats as deep. `None` if too
+    /// little is left.
+    fn decimated(&self, across: f32) -> Option<Hull> {
         let (lo, hi) = self.verts.iter().fold(
             (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN)),
             |(lo, hi), v| (lo.min(*v), hi.max(*v)),
         );
-        let cell = ((hi - lo) / COARSE_CELLS).max(Vec3::splat(1e-4));
+        let cell = ((hi - lo) / across).max(Vec3::splat(1e-4));
         let mut index: HashMap<(i32, i32, i32), u32> = HashMap::new();
         let (mut sums, mut counts): (Vec<Vec3>, Vec<f32>) = (Vec::new(), Vec::new());
         let map: Vec<u32> = self
             .verts
             .iter()
             .map(|v| {
-                let k = ((*v - lo) / cell)
-                    .floor()
-                    .min(Vec3::splat(COARSE_CELLS - 1.0));
+                let k = ((*v - lo) / cell).floor().min(Vec3::splat(across - 1.0));
                 let key = (k.x as i32, k.y as i32, k.z as i32);
                 let i = *index.entry(key).or_insert_with(|| {
                     sums.push(Vec3::ZERO);
@@ -140,6 +155,7 @@ impl Hull {
             tris,
             volume: 0.0,
             coarse: None,
+            near: None,
         };
         let (volume, centroid) = coarse.volume_and_centroid();
         if volume < self.volume * 0.5 {
@@ -715,6 +731,68 @@ mod tests {
                 (rough.volume - fine.volume).abs() < 0.06 * fine.volume,
                 "at {depth} m, {tip} rad: {rough:?} vs {fine:?}"
             );
+        }
+    }
+
+    /// A detailed hull floats near a focus on a copy with a fraction of its triangles that
+    /// floats as deep and rights itself as hard: a boat-like ellipsoid of about 1,200
+    /// triangles, level and tipped, half and mostly under.
+    #[test]
+    fn near_hulls_float_like_the_full_ones() {
+        use rapier3d::parry::shape::ConvexPolyhedron;
+        let mut points = Vec::new();
+        for i in 0..30 {
+            let v = std::f32::consts::PI * (i as f32 + 0.5) / 30.0;
+            for j in 0..20 {
+                let u = std::f32::consts::TAU * j as f32 / 20.0;
+                points.push(Vec3::new(
+                    2.5 * v.sin() * u.cos(),
+                    0.6 * v.cos(),
+                    1.0 * v.sin() * u.sin(),
+                ));
+            }
+        }
+        let shape = ConvexPolyhedron::from_convex_hull(&points).unwrap();
+        let hull = Hull::of(&shape).unwrap();
+        let near = hull.at(MAX_CELLS);
+        assert!(
+            hull.tris.len() > NEAR_ABOVE,
+            "{} triangles",
+            hull.tris.len()
+        );
+        assert!(
+            near.tris.len() * 2 < hull.tris.len(),
+            "{} of {} triangles",
+            near.tris.len(),
+            hull.tris.len()
+        );
+        assert!(std::ptr::eq(hull.at(FAR_CELLS), hull.at(1)));
+        for (depth, tip) in [(0.0, 0.0), (0.3, 0.0), (0.0, 0.3), (0.2, 0.5)] {
+            let pose = Pose::from_parts(
+                Vec3::new(0.0, -depth, 0.0),
+                engine_core::math::Quat::from_rotation_x(tip),
+            );
+            let lift = |h: &Hull| {
+                h.immerse(
+                    &pose,
+                    &Surface::flat(0.0),
+                    G,
+                    pose.translation,
+                    Vec3::ZERO,
+                    Vec3::ZERO,
+                )
+            };
+            let (fine, rough) = (lift(&hull), lift(near));
+            assert!(
+                (rough.volume - fine.volume).abs() < 0.02 * fine.volume,
+                "at {depth} m, {tip} rad: {rough:?} vs {fine:?}"
+            );
+            if tip > 0.0 {
+                assert!(
+                    (rough.torque - fine.torque).length() < 0.1 * fine.torque.length(),
+                    "at {depth} m, {tip} rad: {rough:?} vs {fine:?}"
+                );
+            }
         }
     }
 
