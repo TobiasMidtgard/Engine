@@ -318,6 +318,9 @@ fn top_at(physics: &dyn PhysicsQuery, ground: &dyn GroundQuery, x: f64, z: f64, 
     g.max(hit)
 }
 
+/// Ground under this steep (the up component of its normal, about 20 degrees) stops a thread:
+/// on anything steeper, the scree and talus under a cliff, it tumbles on down as a cascade.
+const LAND_NORMAL_Y: f32 = 0.94;
 /// Ledges a thread steps down past its first drop.
 const MAX_TIERS: usize = 4;
 /// How far across a ledge a thread runs to find its edge, meters (a wider ledge holds it).
@@ -396,7 +399,7 @@ pub fn trace(physics: &dyn PhysicsQuery, ground: &dyn GroundQuery, rim: &Rim) ->
                     .then(|| (DVec3::new(next.x, g.height, next.z), g.normal))
             });
         if let Some((point, normal)) = hit {
-            if normal.y > 0.75 && brink - point.y > 1.0 {
+            if normal.y > LAND_NORMAL_Y && brink - point.y > 1.0 {
                 p = point + normal.as_dvec3() * SHEET as f64;
                 path.push((p, v, t, rock));
                 // A ledge part way down: the water runs on across it and over its edge (a
@@ -580,6 +583,14 @@ pub fn falls_for(threads: &[Thread], shed: f32) -> Falls {
         falls.lips.push(lip);
         falls.paths.push(t.path.clone());
         falls.sides.push([false, false]);
+        // Where it lands it splashes (`Falls::plunges`: the renderer throws a crown of drops
+        // there, no boil: it lands on ground).
+        if let Some(foot) = t.path.last() {
+            let away = Vec2::new(foot.vel.x, foot.vel.z);
+            falls
+                .plunges
+                .push((foot.pos, away, 9810.0 * q * t.lip.drop));
+        }
     }
     falls
 }
@@ -903,6 +914,44 @@ mod tests {
             "{:?}",
             t.path
         );
+    }
+
+    /// Scree at 45 degrees from half way down [`Cliff`]'s face out to 10 m from it.
+    struct Talus;
+    impl GroundQuery for Talus {
+        fn sample(&self, p: DVec3) -> Option<engine_world::GroundSample> {
+            let on = (40.0..50.0).contains(&p.x);
+            Some(engine_world::GroundSample {
+                height: if p.x < 40.0 {
+                    20.0
+                } else {
+                    (50.0 - p.x).clamp(0.0, 10.0)
+                },
+                normal: if on {
+                    Vec3::new(1.0, 1.0, 0.0).normalize()
+                } else {
+                    Vec3::Y
+                },
+                surface: Default::default(),
+            })
+        }
+    }
+
+    #[test]
+    fn a_thread_tumbles_down_the_scree_to_the_flat() {
+        let rim = Rim {
+            at: DVec3::new(37.0, 20.0, 5.0),
+            dir: Vec2::X,
+            area: 400.0,
+        };
+        let t = trace(&Cliff, &Talus, &rim).expect("a thread");
+        let foot = t.path.last().unwrap().pos;
+        assert!(foot.y < 0.5 && foot.x > 49.0, "{foot:?}");
+        assert!((t.lip.drop - 20.0).abs() < 0.5, "{}", t.lip.drop);
+        // And splashes where it lands.
+        let falls = falls_for(&[t], 0.0001);
+        assert_eq!(falls.plunges.len(), 1);
+        assert!(falls.plunges[0].0.distance(foot) < 1e-6 && falls.plunges[0].2 > 0.0);
     }
 
     #[test]
