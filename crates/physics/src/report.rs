@@ -32,6 +32,8 @@ struct Totals {
     regions: HashMap<RegionId, (f64, u32)>,
     /// Rapier's narrow phase by region, ms.
     narrow: HashMap<RegionId, f64>,
+    /// Rapier's narrow phase in this step so far, ms (for [`step_log`]).
+    step_narrow: f64,
     /// The step's own parts outside the regions' jobs, by name, ms ([`part_ms`]).
     outside: Vec<(&'static str, f64)>,
     /// Pieces of those parts, by name: their sum and their worst step, ms ([`piece_ms`]).
@@ -128,6 +130,7 @@ pub(crate) fn rapier_stages(rid: RegionId, c: &rapier3d::counters::Counters) {
         t.stages[i] += v;
     }
     *t.narrow.entry(rid).or_default() += ms[1];
+    t.step_narrow += ms[1];
 }
 
 /// `body` made a region's substep run Rapier's sweeps (CCD), for `why` (and `what` it could
@@ -235,8 +238,11 @@ fn every() -> u32 {
 /// The whole step is done: count it, and log the report every [`EVERY`] steps.
 pub(crate) fn step_done(world: &World, sim: &Simulation, foci: &[DVec3], started: Instant) {
     let mut t = totals().lock();
+    let ms = started.elapsed().as_secs_f64() * 1000.0;
     t.steps += 1;
-    t.step_ms += started.elapsed().as_secs_f64() * 1000.0;
+    t.step_ms += ms;
+    let narrow = std::mem::take(&mut t.step_narrow);
+    step_log(ms, narrow, sim, foci);
     if t.steps < every() {
         return;
     }
@@ -624,4 +630,40 @@ pub(crate) fn heavy_pairs(world: &rapier3d::prelude::PhysicsWorld, n: usize) -> 
         })
         .collect::<Vec<_>>()
         .join("; ")
+}
+
+/// With `PHYSICS_STEP_LOG=<file>` (and `PHYSICS_REPORT`), one line a step: seconds since the
+/// first step, the step's ms, its Rapier narrow phase ms, awake bodies and the first focus, for
+/// frame-time strips over a stop (round 23).
+fn step_log(ms: f64, narrow: f64, sim: &Simulation, foci: &[DVec3]) {
+    use std::io::Write;
+    static LOG: OnceLock<Option<(Mutex<std::io::BufWriter<std::fs::File>>, Instant)>> =
+        OnceLock::new();
+    let log = LOG.get_or_init(|| {
+        let path = std::env::var("PHYSICS_STEP_LOG")
+            .ok()
+            .filter(|p| !p.is_empty())?;
+        let file = std::fs::File::create(path).ok()?;
+        Some((Mutex::new(std::io::BufWriter::new(file)), Instant::now()))
+    });
+    let Some((file, t0)) = log else {
+        return;
+    };
+    let awake: usize = sim
+        .regions
+        .iter()
+        .flatten()
+        .map(|r| r.world.islands.active_bodies().count())
+        .sum();
+    let f = foci.first().copied().unwrap_or_default();
+    let mut file = file.lock();
+    let _ = writeln!(
+        file,
+        "{:.3} {ms:.3} {narrow:.3} {awake} {:.0} {:.0} {:.0}",
+        t0.elapsed().as_secs_f64(),
+        f.x,
+        f.y,
+        f.z
+    );
+    let _ = file.flush();
 }

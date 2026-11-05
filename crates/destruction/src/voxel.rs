@@ -176,6 +176,14 @@ pub struct VoxelState {
     pub chunks: [usize; 3],
     pub chunk_entities: Vec<Option<Entity>>,
     pub chunk_dirty: Vec<bool>,
+    /// Dirty chunks to remesh on the frame rather than on the bake threads ([`Self::urge_dirty`]):
+    /// rock that just broke off or was blasted away, so its collider is right soon after the
+    /// pieces cut from it spawn (empty: none).
+    pub chunk_urgent: Vec<bool>,
+    /// Meshes started for each chunk so far (on the frame or on the bake threads), and the
+    /// newest of them swapped in ([`Self::mesh_wait`]; empty: none yet).
+    pub chunk_started: Vec<u32>,
+    pub chunk_applied: Vec<u32>,
     pub support_dirty: bool,
     /// Edits that added rock so far: a support solve of an older snapshot is stale once this
     /// moved (the new rock may hold up what it found unsupported).
@@ -357,6 +365,9 @@ impl VoxelState {
             chunks,
             chunk_entities: vec![None; chunk_count],
             chunk_dirty: vec![true; chunk_count],
+            chunk_urgent: Vec::new(),
+            chunk_started: Vec::new(),
+            chunk_applied: Vec::new(),
             support_dirty: false,
             gains: 0,
             initial_volume: 0.0,
@@ -663,6 +674,65 @@ impl VoxelState {
             return 0.0;
         }
         (self.volume() / self.initial_volume).clamp(0.0, 1.0)
+    }
+
+    /// Remesh every chunk dirty now on the frame ([`Self::chunk_urgent`]). Rock cut loose or
+    /// blasted away leaves pieces where it was, and while its chunks wait for the bake threads
+    /// their colliders still fill that place: on the 4-core VM, under the fortress's load, the
+    /// wait often passed three quarters of a second, and the pieces waiting for it
+    /// ([`crate::debris::LeavingRock`]) either hung in the air that long or met hundreds of
+    /// triangles each (7-17 ms physics steps). Minecraft and Teardown change collision the
+    /// moment the voxels change for the same reason; only the drawn look may lag.
+    pub fn urge_dirty(&mut self) {
+        if self.chunk_urgent.len() != self.chunk_dirty.len() {
+            self.chunk_urgent = vec![false; self.chunk_dirty.len()];
+        }
+        for (u, d) in self.chunk_urgent.iter_mut().zip(&self.chunk_dirty) {
+            *u |= *d;
+        }
+    }
+
+    /// Is chunk `ci` to be remeshed on the frame ([`Self::urge_dirty`])?
+    pub fn urgent(&self, ci: usize) -> bool {
+        self.chunk_urgent.get(ci).copied().unwrap_or(false)
+    }
+
+    /// Start a mesh of chunk `ci` (it is no longer dirty): its number, for [`Self::mesh_landed`].
+    pub fn start_mesh(&mut self, ci: usize) -> u32 {
+        if self.chunk_started.len() <= ci {
+            self.chunk_started.resize(ci + 1, 0);
+        }
+        self.chunk_started[ci] += 1;
+        self.chunk_started[ci]
+    }
+
+    /// Mesh `seq` of chunk `ci` is done: swap it in? Not when a newer one already was (an
+    /// urgent chunk remeshed on the frame while the bake threads still had it).
+    pub fn mesh_landed(&mut self, ci: usize, seq: u32) -> bool {
+        if self.chunk_applied.len() <= ci {
+            self.chunk_applied.resize(ci + 1, 0);
+        }
+        let newer = seq > self.chunk_applied[ci];
+        if newer {
+            self.chunk_applied[ci] = seq;
+        }
+        newer
+    }
+
+    /// The mesh of chunk `ci` that shows the voxels as they are now, when that isn't swapped in
+    /// yet: wait until [`Self::meshed`] says so. Later edits don't move it.
+    pub fn mesh_wait(&self, ci: usize) -> Option<u32> {
+        let started = self.chunk_started.get(ci).copied().unwrap_or(0);
+        if self.chunk_dirty.get(ci).copied().unwrap_or(false) {
+            Some(started + 1)
+        } else {
+            (self.chunk_applied.get(ci).copied().unwrap_or(0) < started).then_some(started)
+        }
+    }
+
+    /// Has chunk `ci`'s mesh `seq` ([`Self::mesh_wait`]), or a newer one, been swapped in?
+    pub fn meshed(&self, ci: usize, seq: u32) -> bool {
+        self.chunk_applied.get(ci).copied().unwrap_or(0) >= seq
     }
 
     fn mark_chunk_dirty_around(&mut self, i: usize, j: usize, k: usize) {
@@ -1013,6 +1083,9 @@ impl VoxelState {
             }
             cut.push(group);
         }
+        if !cut.is_empty() {
+            self.urge_dirty();
+        }
         cut
     }
 
@@ -1164,6 +1237,9 @@ impl VoxelState {
             chunks: [1, 1, 1],
             chunk_entities: vec![None],
             chunk_dirty: vec![true],
+            chunk_urgent: Vec::new(),
+            chunk_started: Vec::new(),
+            chunk_applied: Vec::new(),
             support_dirty: false,
             gains: 0,
             initial_volume: 0.0,
