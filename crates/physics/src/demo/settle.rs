@@ -8,8 +8,6 @@
 //! still in that world. Angular damping stands in for rolling resistance, so drums and balls
 //! come to rest instead of rolling to the end of the settle.
 
-use std::thread::JoinHandle;
-
 use engine_core::ecs::entity::EntityHashSet;
 use engine_core::math::{DVec3, Quat, Vec3};
 use engine_core::prelude::*;
@@ -28,12 +26,12 @@ type Settled = Vec<(Entity, DVec3, Quat)>;
 /// Settles running on workers, each with the world shifts since it started (it works in the
 /// frame it started in).
 #[derive(Resource, Default)]
-pub(crate) struct Settling(Vec<(JoinHandle<Settled>, WorldShift)>);
+pub(crate) struct Settling(Vec<(super::art::Job<Settled>, WorldShift)>);
 
 impl Settling {
     /// Has a settle finished, for [`finish`] to apply?
     pub(crate) fn any_done(&self) -> bool {
-        self.0.iter().any(|(h, _)| h.is_finished())
+        self.0.iter().any(|(h, _)| h.done())
     }
 
     /// The world moved into the frame `s` leads to while these ran.
@@ -109,17 +107,16 @@ pub(crate) fn start(world: &mut World, origin: DVec3, bodies: &[Entity]) {
     let g = world
         .get_resource::<Gravity>()
         .map_or(Vec3::new(0.0, -9.81, 0.0), |g| g.at(origin));
-    let job = move || settle(origin, g, movers, parts);
-    let spawned = std::thread::Builder::new()
-        .name("station settle".into())
-        .spawn(job.clone());
-    match spawned {
-        Ok(handle) => world
+    // On the art workers, not a thread of its own: eighteen stations resting at once as the
+    // yard streamed in were eighteen settles side by side with the art, crowding out the
+    // frame's thread.
+    match super::art::on_worker(move || settle(origin, g, movers, parts)) {
+        Ok(job) => world
             .get_resource_or_insert_with(Settling::default)
             .0
-            .push((handle, WorldShift::IDENTITY)),
-        // No threads (or none left): settle here, behind the loading screen.
-        Err(_) => apply(world, job(), &WorldShift::IDENTITY),
+            .push((job, WorldShift::IDENTITY)),
+        // No workers: settle here, behind the loading screen.
+        Err(settled) => apply(world, settled, &WorldShift::IDENTITY),
     }
 }
 
@@ -208,10 +205,10 @@ pub(crate) fn finish(world: &mut World) {
     }
     let (done, running): (Vec<_>, Vec<_>) = std::mem::take(&mut s.0)
         .into_iter()
-        .partition(|(h, _)| h.is_finished());
+        .partition(|(h, _)| h.done());
     s.0 = running;
     for (h, since) in done {
-        if let Ok(settled) = h.join() {
+        if let Some(settled) = h.take() {
             apply(world, settled, &since);
         }
     }

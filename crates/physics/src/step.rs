@@ -2501,7 +2501,10 @@ fn substep(
         if crate::report::wanted() {
             let c = &r.world.physics_pipeline.counters;
             crate::report::rapier_stages(p.rid, c);
-            if cpu_ms > 3.0 {
+            // Slow on the wall clock too, not just on this thread's CPU: a step on the wide pool
+            // or a lane thread does its work elsewhere, and a starved one does almost none (the
+            // lead's village route: a 300 ms "rapier step" with no line under 3 ms of CPU).
+            if cpu_ms > 3.0 || c.step_time.time_ms() > 12.0 {
                 engine_core::log::info!(
                     "physics: a Rapier step took {:.1} ms ({cpu_ms:.1} on the CPU; {} bodies, \
                      {} colliders, {} fresh): \

@@ -29,6 +29,9 @@ fn main() {
         .and_then(|s| s.parse().ok())
         .unwrap_or(10.0);
     let manual = std::env::var_os("YARD_ARRIVAL_MANUAL").is_some_and(|v| v != "0");
+    if std::env::var_os("PHYSICS_REPORT").is_some() {
+        engine_core::log::init("info");
+    }
     let mut app = App::new();
     app.add_plugins(WorldPlugin);
     app.add_plugins(PhysicsPlugin);

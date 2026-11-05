@@ -165,6 +165,22 @@ pub fn bilberry_bare(day: f32) -> f32 {
     smoothstep(288.0, 308.0, d).max(1.0 - smoothstep(112.0, 132.0, d))
 }
 
+/// How far bracken has browned on a day, 0 (green) .. 1 (dead rust): its fronds yellow from
+/// late September and are rust brown by the end of October, staying so, lying, until the new
+/// fronds come in May (Marrs & Watt 2006, as for [`fern_collapse`]).
+pub fn bracken_brown(day: f32) -> f32 {
+    let d = day.rem_euclid(YEAR_DAYS);
+    smoothstep(258.0, 300.0, d).max(1.0 - smoothstep(122.0, 150.0, d))
+}
+
+/// How red bilberry's leaves are on a day, 0 .. 1: they turn crimson from mid-September,
+/// carpeting the floor of pine and spruce woods red through October until they fall
+/// ("ruska" in the Nordic woods; https://en.wikipedia.org/wiki/Vaccinium_myrtillus).
+pub fn bilberry_red(day: f32) -> f32 {
+    let d = day.rem_euclid(YEAR_DAYS);
+    smoothstep(245.0, 275.0, d) * (1.0 - smoothstep(305.0, 320.0, d))
+}
+
 /// How far the forest's ferns have collapsed on a day, 0 (standing) .. 1 (lying flat): bracken
 /// browns through October, its dead fronds fall over in November's frosts and lie flattened
 /// on the floor through winter, until the new fronds unfurl in May (Marrs & Watt 2006,
