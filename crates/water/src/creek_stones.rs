@@ -79,6 +79,10 @@ pub struct PourOver {
     pub lip: Lip,
     pub path: Vec<FallPoint>,
     pub sides: [bool; 2],
+    /// The critical depth over the lip at the usual flow, and the one past which its water
+    /// skims over the step instead (a creek swollen by rain), meters.
+    pub critical: f32,
+    pub skims_at: f32,
 }
 
 /// Pour-overs are drawn this far from the camera, meters.
@@ -293,7 +297,8 @@ fn lay_pours(
             // Water over a meter of lip here: the parabolic section carries more mid-bed.
             let q = (q_mean * 1.5 * (1.0 - x * x)).max(0.005);
             let critical = (q * q / 9.81).cbrt();
-            let skims = critical / drop.max(1e-3) > 1.2 - 0.325 * drop / step_length.max(0.1);
+            let skims_at = drop.max(1e-3) * (1.2 - 0.325 * drop / step_length.max(0.1));
+            let skims = critical > skims_at;
             if drop < LEAST_POUR_M * (0.8 + 0.4 * rng.f32()) || skims {
                 // A break in the sheet: the strips either side end here.
                 if joined && let Some(prev) = out.last_mut() {
@@ -336,6 +341,8 @@ fn lay_pours(
                 lip,
                 path,
                 sides: [joined, true],
+                critical,
+                skims_at,
             });
             joined = true;
         }

@@ -81,10 +81,14 @@ pub struct CreekRibbons {
     /// The water pouring off the steps near the camera, as the waterfalls' renderer draws it
     /// ([`crate::creek_stones::PourOver`]); a new `Arc` whenever the ribbons are rebuilt.
     pub falls: Arc<Falls>,
+    /// The swell the ribbons were last laid with ([`crate::freshet::Freshet::swell`]).
+    swell_laid: f32,
 }
 
 /// Reaches are asked for within this distance of the camera (X and Z), meters.
 const QUERY_M: f64 = 3000.0;
+/// The ribbons are laid again when the rain has swollen or the creeks fallen by this share.
+const SWELL_STEP: f32 = 0.1;
 /// The ribbons are rebuilt when the camera has moved this far, meters.
 const REBUILD_M: f64 = 48.0;
 /// How often the camera's move is checked, seconds.
@@ -638,6 +642,20 @@ pub fn lay_ribbons_cut(
     cuts: &[Cut],
     stones: &HashMap<StoneKey, Arc<ReachStones>>,
 ) -> Laid {
+    lay_ribbons_swollen(providers, camera, cuts, stones, 1.0)
+}
+
+/// [`lay_ribbons_cut`] with every creek carrying `swell` times its usual flow (rain,
+/// [`crate::freshet`]): deeper (depth about Q^0.4, Leopold and Maddock's hydraulic geometry;
+/// the current takes the rest), and steps that pour at the usual flow skimming once the
+/// critical depth passes their threshold.
+pub fn lay_ribbons_swollen(
+    providers: &[Provider],
+    camera: DVec3,
+    cuts: &[Cut],
+    stones: &HashMap<StoneKey, Arc<ReachStones>>,
+    swell: f32,
+) -> Laid {
     let _span = tracing::info_span!("water", name = "creek ribbons").entered();
     let anchor = (camera / 16.0).round() * 16.0;
     let mut laid = Laid {
@@ -660,11 +678,14 @@ pub fn lay_ribbons_cut(
                 .iter()
                 .find(|c| c.provider == key && c.reach == reach.id)
                 .map(|c| (c.from_m, c.to_m));
+            let deeper = swell.powf(0.4);
             let points = reach
                 .points
                 .into_iter()
                 .map(|p| CreekPoint {
                     at: p.at + *offset,
+                    flow_m3_s: p.flow_m3_s * swell,
+                    depth_m: p.depth_m * deeper,
                     ..p
                 })
                 .collect();
@@ -687,7 +708,18 @@ pub fn lay_ribbons_cut(
                 if horizontal(pour.lip.top, camera) as f64 > POURS_M + REBUILD_M {
                     continue;
                 }
-                laid.falls.lips.push(pour.lip);
+                let q = pour.lip.q * swell;
+                let critical = (q * q / 9.81).cbrt();
+                if critical > pour.skims_at {
+                    continue;
+                }
+                let mut lip = pour.lip;
+                if swell != 1.0 {
+                    // More water over the lip, thrown out faster (its path is kept).
+                    lip.speed *= (critical / pour.critical).clamp(1.0, 4.0);
+                    lip.q = q;
+                }
+                laid.falls.lips.push(lip);
                 laid.falls.paths.push(pour.path.clone());
                 laid.falls.sides.push(pour.sides);
             }
@@ -735,7 +767,9 @@ pub fn creek_ribbons_system(
     mut shifts: MessageReader<WorldShift>,
     mut ribbons: ResMut<CreekRibbons>,
     stones: Res<CreekStones>,
+    freshet: Option<Res<crate::freshet::Freshet>>,
 ) {
+    let swell = freshet.map_or(1.0, |f| f.swell);
     let shifted = shifts.read().copied().reduce(|a, next| a.then(&next));
     if let Some(s) = shifted {
         // Drawn where they were until laid again in the new frame, below; one being laid in
@@ -768,9 +802,11 @@ pub fn creek_ribbons_system(
         && keys == ribbons.providers
         && ribbons.cuts == ribbons.cuts_laid
         && stones.version == ribbons.stones_laid
+        && (swell - ribbons.swell_laid).abs() < SWELL_STEP * swell
     {
         return;
     }
+    ribbons.swell_laid = swell;
     ribbons.built_at = Some(camera);
     ribbons.providers = keys;
     ribbons.cuts_laid = ribbons.cuts.clone();
@@ -779,12 +815,12 @@ pub fn creek_ribbons_system(
     let stones = stones.all();
     match AsyncComputeTaskPool::try_get() {
         Some(pool) => {
-            ribbons.job = Some(
-                pool.spawn(async move { lay_ribbons_cut(&providers, camera, &cuts, &stones) }),
-            );
+            ribbons.job = Some(pool.spawn(async move {
+                lay_ribbons_swollen(&providers, camera, &cuts, &stones, swell)
+            }));
         }
         None => {
-            let laid = lay_ribbons_cut(&providers, camera, &cuts, &stones);
+            let laid = lay_ribbons_swollen(&providers, camera, &cuts, &stones, swell);
             ribbons.install(laid);
         }
     }

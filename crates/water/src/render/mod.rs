@@ -1895,7 +1895,13 @@ impl WaterFeature {
         );
     }
 
-    fn upload_flows(gpu: &mut Gpu, shared: &GpuShared, state: &WaterState, view: &ViewData) {
+    fn upload_flows(
+        gpu: &mut Gpu,
+        shared: &GpuShared,
+        state: &WaterState,
+        view: &ViewData,
+        spate: f32,
+    ) {
         let device = &shared.device;
         gpu.flows.retain(|f| {
             state.flows.iter().any(|s| {
@@ -1984,7 +1990,7 @@ impl WaterFeature {
                     sim.optics.foam,
                     sim.optics.caustics,
                     sim.optics.refraction,
-                    0.0,
+                    spate,
                 ],
             };
             shared
@@ -2066,14 +2072,19 @@ impl WaterFeature {
         }
         c.drawn = true;
         let o = view.relative(c.anchor);
-        let optics = WaterOptics::stream();
+        // Clear stream water, browned by a rain's mud (`crate::freshet`).
+        let (mud, spate) = world
+            .get_resource::<crate::freshet::Freshet>()
+            .map_or((0.0, 0.0), |f| (f.mud, f.spate()));
+        let optics =
+            crate::freshet::muddy(&WaterOptics::stream(), &crate::freshet::flood_optics(), mud);
         let (absorb, scatter) = optics_vectors(&optics);
         let u = FlowUniform {
             origin: [o.x, o.y, o.z, 1.0],
             dims: [0.0, 0.0, 1.0, 0.0],
             absorb,
             scatter,
-            look: [optics.foam, optics.caustics, optics.refraction, 0.0],
+            look: [optics.foam, optics.caustics, optics.refraction, spate],
         };
         shared
             .queue
@@ -2674,7 +2685,10 @@ impl RenderFeature for WaterFeature {
         }
         drop(span);
         let span = tracing::info_span!("water", name = "flow upload").entered();
-        Self::upload_flows(gpu, shared, &state, view);
+        let spate = world
+            .get_resource::<crate::freshet::Freshet>()
+            .map_or(0.0, |f| f.spate());
+        Self::upload_flows(gpu, shared, &state, view, spate);
         let creek_triangles = Self::upload_creeks(gpu, shared, world, view);
         drop(span);
 

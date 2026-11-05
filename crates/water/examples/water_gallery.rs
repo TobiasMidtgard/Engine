@@ -215,6 +215,10 @@ fn main() {
             step_secs: 1.0 / 30.0,
         });
     app.add_plugins((RenderPlugin, WorldPlugin, WaterPlugin));
+    // `GALLERY_FLOOD=swell,mud`: the streams swollen and browned by rain (`freshet`).
+    if let Some(flood) = engine_water::freshet::Freshet::from_env() {
+        app.world.insert_resource(flood);
+    }
     app.world.insert_resource(Ground(Arc::new(AreaGround)));
     app.world
         .resource_mut::<engine_water::WaterSettings>()
