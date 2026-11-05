@@ -1462,11 +1462,11 @@ fn bark_color(sp: &PlantSpecies, y: f32, h: f32, ring: usize, around: f32, seed:
 /// smooth round the stem (`around` 0..1 wraps) and along it.
 fn bark_weathering(style: BarkStyle, y: f32, around: f32, seed: u64) -> Vec3 {
     let (algae, wet, bleach) = match style {
-        BarkStyle::Plain => (0.85, 0.42, 0.08),
+        BarkStyle::Plain => (0.6, 0.42, 0.08),
         BarkStyle::Pine => (0.4, 0.3, 0.05),
         BarkStyle::Birch => (0.3, 0.15, 0.0),
         // Beech and rowan bark carries algae and crustose lichen in big patches.
-        BarkStyle::Smooth => (0.75, 0.35, 0.06),
+        BarkStyle::Smooth => (0.55, 0.35, 0.06),
         BarkStyle::Scaly => (0.35, 0.25, 0.04),
     };
     let patch = 0.65 * bark::periodic_noise(around * 3.0, y * 0.8, 3, 1 << 12, seed ^ 0x1c4e)
@@ -1474,7 +1474,9 @@ fn bark_weathering(style: BarkStyle, y: f32, around: f32, seed: u64) -> Vec3 {
     // Streaks run down: barely changing along the stem.
     let streak = bark::periodic_noise(around * 5.0, y * 0.15, 5, 1 << 10, seed ^ 0x7a1d);
     let side = (std::f32::consts::TAU * (around - engine_core::math::hash01(3, 0, 0, seed))).cos();
-    let lichen = Vec3::new(0.84, 1.06, 0.74);
+    // Crustose lichen and algae read grey-green on bark, not mint: a green that saturated
+    // turned every pale trunk mint in the forest shots.
+    let lichen = Vec3::new(0.9, 0.99, 0.84);
     Vec3::ONE.lerp(lichen, smoothstep(0.0, 0.45, patch) * algae)
         * (1.0 + 0.12 * patch)
         * (1.0 - wet * smoothstep(0.15, 0.6, streak))

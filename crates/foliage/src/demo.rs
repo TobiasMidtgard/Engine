@@ -233,8 +233,22 @@ pub fn forest_viewpoints(center: DVec3) -> Vec<Viewpoint> {
             [-56.0, 1.2, -50.0],
             10.5,
         ),
+        view(
+            center,
+            (
+                "forest_bilberry",
+                "Bilberry carpeting the acid floor under the pines",
+            ),
+            [31.0, 1.3, -12.0],
+            [35.0, 0.1, -7.0],
+            10.0,
+        ),
     ]
 }
+
+/// Stops looking down at the floor a few meters off: they need no lane kept clear of crowns
+/// (and keeping one would open the very canopy their floor grows under).
+const FLOOR_STOPS: [&str; 1] = ["forest_bilberry"];
 
 /// A corridor of open ground ahead of the forest's ground-level viewpoints, so no trunk or bush
 /// grows into the lens and crowns only frame the view from its sides (ferns and grass still
@@ -242,7 +256,7 @@ pub fn forest_viewpoints(center: DVec3) -> Vec<Viewpoint> {
 fn lens_clearance() -> Vec<[f32; 3]> {
     forest_viewpoints(DVec3::ZERO)
         .iter()
-        .filter(|v| v.eye.y < 5.0)
+        .filter(|v| v.eye.y < 5.0 && !FLOOR_STOPS.contains(&v.name))
         .flat_map(|v| {
             let eye = DVec2::new(v.eye.x, v.eye.z);
             let ahead = (DVec2::new(v.target.x, v.target.z) - eye).normalize();

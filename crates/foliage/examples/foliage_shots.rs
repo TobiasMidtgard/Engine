@@ -901,6 +901,7 @@ fn main() {
     take(&mut app, "06_spring", &by_name("forest_spring"));
     take(&mut app, "07_burn_scar", &by_name("forest_burn_scar"));
     take(&mut app, "08_dry_ridge", &by_name("forest_dry_ridge"));
+    take(&mut app, "09_bilberry", &by_name("forest_bilberry"));
 
     // The same clearing through the year: fresh leaves, autumn color, leaf fall, bare winter.
     for (file, day, view) in [

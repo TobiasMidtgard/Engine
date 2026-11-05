@@ -203,6 +203,9 @@ pub(crate) struct Route {
     wall: Option<std::time::Instant>,
 }
 
+/// Seconds the route leaves the exe's start screen up (`--exe`) before it flies.
+const START_SCREEN_S: f32 = 5.0;
+
 /// Frames the start waits at most for the ground (a wait that never ends goes on).
 const SETTLE_MAX_FRAMES: u32 = 1200;
 
@@ -248,6 +251,15 @@ pub fn install(app: &mut App, which: Option<&str>) {
 fn run(world: &mut World) {
     if world.get_resource::<crate::build::WorldBuild>().is_some() {
         return;
+    }
+    // With `--exe` the start screen opens after the loading screen: it stays up a while, as
+    // a player reads it, with the world running behind it, then the route flies freely.
+    if let Some(up) = crate::walk::start_screen_secs(world) {
+        if up < START_SCREEN_S {
+            return;
+        }
+        crate::walk::fly_freely(world);
+        engine::core::log::info!("route: left the start screen after {up:.1} s");
     }
     if !world.resource::<Route>().started {
         let plaza = places::find("plaza").expect("plaza");

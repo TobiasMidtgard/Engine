@@ -1102,7 +1102,8 @@ fn stand_trees() -> Vec<PlantSpecies> {
             establishment: 0.07,
             min_spacing_m: 1.8,
             resprouts: true,
-            bark_color: srgb(0x80846f),
+            // Greyish white with a faint green (aspen bark photosynthesises), not olive.
+            bark_color: srgb(0x93948a),
             leaf_color: srgb(0x4d6a30),
             accent_color: srgb(0x6a7f45),
             wind_sway_m: 0.5,
