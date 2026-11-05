@@ -1750,8 +1750,20 @@ fn sample_forest(cover: &GroundCover, inputs: &CoverInputs, local: Vec2) -> Cove
     w[SLOT_HUMUS] = 0.3 + 0.25 * smooth(0.5, 0.9, nutrients) + 0.2 * smooth(-0.2, 0.6, n2);
     w[SLOT_LITTER] = (0.1 + 1.0 * broad + 0.15 * n1).max(0.0) * (1.0 - 0.6 * dry);
     w[SLOT_NEEDLES] = (0.03 + 1.05 * conifer + 0.45 * dry + 0.1 * n2).max(0.0);
+    // Feather mosses (Hylocomium splendens, Pleurozium schreberi) carpet the floor of
+    // conifer woods on fresh soil, 50-90% of it under spruce and pine, but not under
+    // broadleaves, whose fallen leaves smother them each autumn (Kielland-Lund 1981 on
+    // Fennoscandian forest communities; Frego & Carleton 1995, Can. J. Bot. 73; Startsev et
+    // al. 2008, J. Veg. Sci. 19, on litter burial); elsewhere moss keeps to wet ground.
+    let carpet = smooth(0.15, 0.55, conifer)
+        * smooth(0.18, 0.34, water)
+        * (1.0 - 0.85 * smooth(0.2, 0.6, broad))
+        * smooth(-0.55, 0.1, n1 + 0.4 * n3);
     w[SLOT_MOSS] = smooth(0.45, 0.78, water + 0.15 * n1) * 0.9 * (1.0 - 0.5 * broad)
-        + 0.4 * smooth(0.25, 0.7, n3) * smooth(0.38, 0.6, water);
+        + 0.4 * smooth(0.25, 0.7, n3) * smooth(0.38, 0.6, water)
+        + 1.6 * carpet;
+    // Needles fall into the moss and are hidden in it.
+    w[SLOT_NEEDLES] *= 1.0 - 0.7 * carpet;
     // Dry ground: bedrock showing through, gravelly earth between.
     w[SLOT_ROCK] = dry * smooth(-0.1, 0.4, n1 + 0.35 * n3) * 1.4;
     w[SLOT_EARTH] = dry * 0.45 * smooth(-0.25, 0.3, n2 - 0.3 * n1);
