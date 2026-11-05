@@ -158,6 +158,24 @@ pub fn herb_styles() -> (GrassStyle, Vec<GrassStyle>) {
 pub fn herb_styles_on(day: f32) -> (GrassStyle, Vec<GrassStyle>) {
     let (base, mut kinds) = herb_styles();
     let winter = crate::season::winter_dormancy(day);
+    // Spring flowers: sorrel, woodruff, anemone (kinds 1-3).
+    let flowering = crate::season::herbs_flowering(day);
+    for ((style, f), most) in kinds.iter_mut().zip(flowering).zip([0.3, 0.35, 0.55]) {
+        style.bloom += (most - style.bloom).max(0.0) * f;
+        style.bloom_size *= 1.0 + 0.6 * f;
+    }
+    if let Some(a) = kinds.get_mut(2) {
+        // Each flowering shoot has its whorl of leaves under the flower too.
+        a.blades_per_m2 *= 1.0 + 0.4 * flowering[2];
+        // Wood anemone yellows in June and is gone till March.
+        let gone = crate::season::anemone_dormant(day);
+        a.lush_color = mix3(a.lush_color, [0.2, 0.17, 0.05], gone.min(1.0));
+        a.height *= 1.0 - 0.9 * gone;
+        a.width *= 1.0 - 0.6 * gone;
+        if gone > 0.9 {
+            a.bloom = 0.0;
+        }
+    }
     let k = DWARF_SHRUB_KIND as usize - 1;
     if let Some(b) = kinds.get_mut(k) {
         // Crimson in autumn, then bare.
@@ -222,14 +240,29 @@ fn mix3(a: [f32; 3], b: [f32; 3], t: f32) -> [f32; 3] {
 /// Plantlife and Woodland Trust species notes): wood sorrel carpets deep moist shade under
 /// spruce and beech, on acid soil that needles make; woodruff grows in colonies on rich moist
 /// soil under beech and oak; wood anemone in lighter broadleaf woods; other broad shade herbs
-/// fill in between.
-pub fn herb_kind(canopy: f32, broad: f32, water: f32, needles: f32, patch: [f32; 4]) -> u8 {
+/// fill in between. `anemone_season` ([`anemone_season`]) weighs wood anemone by the day: its
+/// carpets own the floor while it flowers and leave it to the others once it has gone to
+/// ground.
+pub fn herb_kind(
+    canopy: f32,
+    broad: f32,
+    water: f32,
+    needles: f32,
+    patch: [f32; 4],
+    anemone_season: f32,
+) -> u8 {
     let moist = smoothstep(0.2, 0.45, water);
     let weights = [
         0.45,
         moist * (0.5 + 0.5 * canopy) * (0.6 + 0.6 * (1.0 - broad) + 0.4 * needles),
         broad * smoothstep(0.25, 0.5, water) * canopy * (1.0 - needles) * 1.1,
-        broad * (1.2 - canopy) * 0.75,
+        // (Wood anemone flowers and leafs before the canopy closes: shade from above matters
+        // less to it than to the others, needles more.)
+        broad
+            * (1.0 - 0.35 * canopy)
+            * (0.6 + 0.4 * moist)
+            * (1.0 - 0.7 * needles)
+            * anemone_season,
     ];
     let mut best = (0u8, f32::MIN);
     for (i, (w, n)) in weights.iter().zip(patch).enumerate() {
@@ -239,6 +272,13 @@ pub fn herb_kind(canopy: f32, broad: f32, water: f32, needles: f32, patch: [f32;
         }
     }
     best.0
+}
+
+/// How much wood anemone's spots of floor show it on `day` (for [`herb_kind`]): 1 most of the
+/// spring, up to 2.5 while it flowers, 0.15 while it rests underground.
+pub fn anemone_season(day: f32) -> f32 {
+    let flowering = crate::season::herbs_flowering(day)[2];
+    (1.0 + 1.5 * flowering) * (1.0 - 0.85 * crate::season::anemone_dormant(day))
 }
 
 /// The first of the dwarf shrubs among [`herb_styles`]' kinds (bilberry, lingonberry, heather).
@@ -274,6 +314,7 @@ pub fn floor_maps(
     covers: &[Cover],
     surfaces: &[CoverGrid],
     season_dry: f32,
+    day: f32,
 ) -> FloorMaps {
     let [rx, rz] = resolution;
     let size = Vec2::new(region.half_extents[0] * 2.0, region.half_extents[1] * 2.0);
@@ -290,6 +331,7 @@ pub fn floor_maps(
     let mut herb_kinds = Vec::with_capacity(n);
     let mut shrubs = Vec::with_capacity(n);
     let mut litter_kinds = Vec::with_capacity(n);
+    let anemone = anemone_season(day);
     for j in 0..rz {
         for i in 0..rx {
             let k = (j * rx + i) as usize;
@@ -360,7 +402,7 @@ pub fn floor_maps(
             herb_kinds.push(if shrub_d > herb_d {
                 DWARF_SHRUB_KIND + shrub
             } else if herb > 0.0 {
-                herb_kind(canopy[k], broad[k], water, needles, patch)
+                herb_kind(canopy[k], broad[k], water, needles, patch, anemone)
             } else {
                 0
             });
@@ -975,7 +1017,8 @@ fn spawn_build(job: impl FnOnce() -> BuiltGrass + Send + 'static) -> GrassBuild 
 pub fn sync_region_grass(
     mut commands: Commands,
     mut timer: Local<f32>,
-    mut relief_due: Local<bool>,
+    // (Terrain relief changed; season or settings changed) since the last build started.
+    mut due: Local<(bool, bool)>,
     time: Res<Time>,
     settings: Res<EcologySettings>,
     season: Res<FoliageSeason>,
@@ -1114,9 +1157,9 @@ pub fn sync_region_grass(
         }
     }
 
-    *relief_due |= terrain.read().count() > 0;
+    due.0 |= terrain.read().count() > 0;
     // The forest floor's surface built or rebuilt: the floor layers stand on it.
-    *relief_due |= surfaces.iter().any(|(s, _)| s.is_changed());
+    due.0 |= surfaces.iter().any(|(s, _)| s.is_changed());
     *timer -= time.real_delta_secs();
     // A region that has just come in gets its fields at once, not at the next round (and
     // loading waits for them).
@@ -1131,7 +1174,10 @@ pub fn sync_region_grass(
             loading.floors_waiting = waiting;
         }
     }
-    if *timer > 0.0 && !fresh && !*relief_due && !settings.is_changed() && !season.is_changed() {
+    // A new season or settings restyle every region; one still building then picks it up
+    // when it is done (not at the next timed round, which a frozen clock never reaches).
+    due.1 |= settings.is_changed() || season.is_changed();
+    if *timer > 0.0 && !fresh && !due.0 && !due.1 {
         return;
     }
     *timer = REBUILD_SECS;
@@ -1141,7 +1187,8 @@ pub fn sync_region_grass(
             commands.entity(e).despawn();
         }
     }
-    let relief = std::mem::take(&mut *relief_due);
+    let relief = std::mem::take(&mut due.0);
+    let restyle = std::mem::take(&mut due.1);
     let season_dry = grass_dryness(season.day_of_year);
     // Bracken browns earlier and further than the meadow.
     let fern_dry = season_dry.max(crate::season::bracken_brown(season.day_of_year));
@@ -1174,7 +1221,8 @@ pub fn sync_region_grass(
         }
         if build.is_some() {
             // Still building: the next round picks up what changed meanwhile.
-            *relief_due |= relief;
+            due.0 |= relief;
+            due.1 |= restyle;
             continue;
         }
         let res = resolution(region.half_extents);
@@ -1316,6 +1364,7 @@ pub fn sync_region_grass(
                 covers.extend(trunks);
                 floor_maps(
                     &region, &soil, center, res, &density, &crowns, &covers, &grids, season_dry,
+                    day,
                 )
             });
             // Heath shrubs crowd the grass out where they carpet the ground.
@@ -1501,6 +1550,18 @@ mod tests {
             0.0,
             "bracken green in July"
         );
+        let (_, apr) = herb_styles_on(110.0);
+        assert!(apr[2].bloom > 0.4, "anemone carpets white in April");
+        assert!(
+            jul[2].height < 0.3 * apr[2].height,
+            "and is gone to ground by July"
+        );
+        assert!(
+            jul[0].bloom < 0.1 && apr[0].bloom > 0.15,
+            "sorrel flowers in spring"
+        );
+        assert!(anemone_season(110.0) > 2.0 && anemone_season(190.0) < 0.2);
+        assert_eq!(anemone_season(150.0), 1.0);
         let (_, aug) = herb_styles_on(225.0);
         let mauve = |c: [f32; 3]| c[2] / c[0];
         assert!(
@@ -1554,15 +1615,18 @@ mod tests {
     fn each_herb_takes_its_own_woods() {
         let calm = [0.0; 4];
         // Spruce over moist, needle-strewn ground: wood sorrel.
-        assert_eq!(herb_kind(0.9, 0.0, 0.5, 0.8, calm), 1);
+        assert_eq!(herb_kind(0.9, 0.0, 0.5, 0.8, calm, 1.0), 1);
         // A beech hall on rich moist soil: woodruff.
-        assert_eq!(herb_kind(0.9, 1.0, 0.5, 0.0, calm), 2);
+        assert_eq!(herb_kind(0.9, 1.0, 0.5, 0.0, calm, 1.0), 2);
         // A light, dry oak wood: wood anemone.
-        assert_eq!(herb_kind(0.4, 1.0, 0.15, 0.0, calm), 3);
+        assert_eq!(herb_kind(0.4, 1.0, 0.15, 0.0, calm, 1.0), 3);
         // Dry shade under conifers: the broad shade herbs.
-        assert_eq!(herb_kind(0.7, 0.0, 0.1, 0.0, calm), 0);
+        assert_eq!(herb_kind(0.7, 0.0, 0.1, 0.0, calm, 1.0), 0);
         // A colony of another herb can push into a wood that suits it less.
-        assert_eq!(herb_kind(0.9, 1.0, 0.5, 0.0, [-0.5, -0.8, -0.8, 0.9]), 3);
+        assert_eq!(
+            herb_kind(0.9, 1.0, 0.5, 0.0, [-0.5, -0.8, -0.8, 0.9], 1.0),
+            3
+        );
     }
     use super::*;
     use crate::FoliageLoading;
@@ -1854,6 +1918,8 @@ mod tests {
                 &[trunk],
                 &[],
                 0.0,
+                // Late May: wood anemone in leaf, done flowering (weighs as it always did).
+                150.0,
             )
         };
         let FloorMaps {
