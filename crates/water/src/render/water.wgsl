@@ -56,6 +56,10 @@ struct Globals {
     waterline2: vec4<f32>, // meters of the dome per pixel, drop seed, unused, unused
     trail: vec4<f32>,      // the ripple grid's trail (`trail.rs`): corner rel camera x, z, size (m), on
     falls: vec4<f32>,      // where the falls' strips were built relative to, rel camera xyz; unused
+    plume: vec4<f32>,      // a flood's plume round the plunges and stream mouths in a lake: radius (m), strength, mouths, unused
+    flood_absorb: vec4<f32>,  // flood water's absorption rgb (1/m), scattering (1/m)
+    flood_scatter: vec4<f32>, // its scatter color rgb, roughness
+    mouths: array<vec4<f32>, 4>, // where streams run into lakes: plume middle rel camera xyz, share of the radius
 };
 
 struct WaterUniform {
@@ -125,6 +129,52 @@ fn body_look(bi: u32) -> WaterLook {
     let s = water.bodies[bi].scatter;
     let l = water.bodies[bi].look;
     return WaterLook(b.rgb, b.w, s.rgb, s.w, l.x, l.y, l.z);
+}
+
+// A flood's brown plume in a lake round where its falls come in (`crate::freshet`): turbid
+// water spreading out from each plunge with a billowing, sharp-ish front (river plumes keep a
+// clear edge against the lake water they push into), browning `look` in log space.
+fn plume_from(foot: vec3<f32>, share: f32, rel: vec3<f32>, wp: vec2<f32>, seed: f32) -> f32 {
+    let pl = water.g.plume;
+    if (abs(foot.y - rel.y) > 3.0) { return 0.0; }
+    let radius = pl.x * share;
+    let d = length(rel.xz - foot.xz);
+    if (d > radius * 1.4) { return 0.0; }
+    let t = time_s();
+    // A billowing edge, and fine wisps along it.
+    let billow = fbm2(wp * (3.0 / max(radius, 4.0)) + vec2<f32>(seed * 7.3, t * 0.004), 3) / 0.875;
+    let fine = fbm2(wp * 0.6 + vec2<f32>(t * 0.01, seed), 2) / 0.75;
+    let edge = radius * (0.6 + 0.6 * billow) + 1.5 * (fine - 0.5);
+    return 1.0 - smoothstep(edge * 0.7, edge, d);
+}
+
+// A flood's mud spreading into a lake round where its falls come down and its streams come in
+// (`crate::freshet::Freshet::plume_m`).
+fn flood_plume(look: WaterLook, rel: vec3<f32>) -> WaterLook {
+    let pl = water.g.plume;
+    if (pl.y < 0.001) { return look; }
+    let wp = tiling_pos(rel).xz;
+    var p = 0.0;
+    for (var i = 0u; i < min(water.g.counts.w, 8u); i++) {
+        // A plume's area goes with the water coming in: its radius with √power, from the
+        // boil's radius (`boil_radius`: 0.8 + √(power / 9.81 kW)), full by ~100 kW (1 m³/s
+        // falling 10 m).
+        let pg = water.g.plunges[i];
+        let share = clamp((pg.w - 0.8) / 3.2, 0.3, 1.0);
+        p = max(p, plume_from(pg.xyz, share, rel, wp, f32(i)));
+    }
+    for (var i = 0u; i < min(u32(pl.z), 4u); i++) {
+        let m = water.g.mouths[i];
+        p = max(p, plume_from(m.xyz, m.w, rel, wp, f32(i) + 11.0));
+    }
+    p *= pl.y;
+    if (p <= 0.0) { return look; }
+    let fa = water.g.flood_absorb;
+    let fs = water.g.flood_scatter;
+    let ln_mix = (log(max(look.absorb, vec3<f32>(1e-4))) * (1.0 - p) + log(max(fa.rgb, vec3<f32>(1e-4))) * p);
+    let scat = exp(log(max(look.scattering, 1e-4)) * (1.0 - p) + log(max(fa.w, 1e-4)) * p);
+    return WaterLook(exp(ln_mix), scat, mix(look.scatter_color, fs.rgb, p), look.roughness,
+                     look.foam, mix(look.caustics, 0.15, p), mix(look.refraction, 0.3, p));
 }
 
 fn flow_look() -> WaterLook {
@@ -1445,7 +1495,7 @@ fn fs_body(in: BodyOut) -> @location(0) vec4<f32> {
     if (water.g.waterline.x > 0.5 && dot(in.rel, in.rel) < dome * dome) { discard; }
     use_mirror = i32(bi) == i32(water.g.mirror.w);
     wet_bed = mix(1.0, WET_SAND, sw.w);
-    let look = body_look(bi);
+    let look = flood_plume(body_look(bi), in.rel);
     let dist = length(in.rel);
     // Size of a pixel here, meters: drop detail finer than that.
     let pixel = pixel_footprint(in.rel);

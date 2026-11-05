@@ -5,11 +5,11 @@
 //! cargo run -p engine_water --example creek_gallery --release -- [out_dir] [views]
 //! ```
 //!
-//! `views` is a comma-separated subset of: creek_bank, creek_brook, creek_main, creek_mid,
+//! `views` is a comma-separated subset of: creek_bank, creek_brook, creek_main, creek_mid, creek_junction,
 //! creek_valley. `GALLERY_NO_CREEKS=1` leaves the creeks out (the dry channels, to compare);
 //! `GALLERY_NO_SIM=1` draws the creek nearest the camera as a ribbon too, not simulated;
 //! `GALLERY_NO_STONES=1` leaves the creeks' stones out; `GALLERY_NO_POURS=1` the water pouring
-//! off their steps;
+//! off their steps; `GALLERY_ONE_REACH=1` keeps the simulated stretch short of junctions;
 //! `GALLERY_FRAMES=n` draws n frames a view (for `ENGINE_PROFILE=1`).
 
 use std::sync::Arc;
@@ -73,6 +73,7 @@ fn on_reach(m: &Meadow, order: u8, nth: usize, share: f32) -> (DVec3, DVec3, f32
 fn views(m: &Meadow) -> Vec<(&'static str, DVec3, DVec3)> {
     let ground = |p: DVec3| p.with_y(m.height(p.x as f32, p.z as f32) as f64);
     let side = |d: DVec3| DVec3::new(-d.z, 0.0, d.x);
+    let side_of = side;
     let mut out = Vec::new();
     // Standing on the bank of a side creek near the valley floor, looking down it over its
     // steps and pools.
@@ -125,6 +126,20 @@ fn views(m: &Meadow) -> Vec<(&'static str, DVec3, DVec3)> {
     let (p, d, _) = on_reach(m, 2, 4, 0.95);
     let eye = ground(p - d * 60.0 + side(d) * 35.0) + DVec3::Y * 45.0;
     out.push(("creek_mid", eye, p + d * 10.0));
+    // Where a side creek runs into the main stream, from its bank just above, with the main
+    // stream beyond: the near simulation takes in both (round 52).
+    if let Some(side) = m
+        .reaches
+        .iter()
+        .find(|r| r.order == 2 && engine_water::creek_sim::runs_into(m, r).is_some())
+    {
+        let n = side.points.len();
+        let (a, b) = (side.points[n - 4].at, side.points[n - 1].at);
+        let d = (b - a).with_y(0.0).normalize();
+        let w = side.points[n - 1].width_m as f64;
+        let eye = ground(a - d * 4.0 + side_of(d) * (0.5 * w + 3.0)) + DVec3::Y * 2.6;
+        out.push(("creek_junction", eye, b + d * 4.0));
+    }
     // The whole valley from the air, up it: every creek in it.
     out.push((
         "creek_valley",
@@ -202,6 +217,9 @@ fn main() {
         .id();
     // `GALLERY_NO_SIM=1`: every creek a ribbon, none simulated.
     app.world.resource_mut::<CreekSims>().off = std::env::var_os("GALLERY_NO_SIM").is_some();
+    // `GALLERY_ONE_REACH=1`: the simulated stretch stops short of junctions (before round 52).
+    app.world.resource_mut::<CreekSims>().one_reach =
+        std::env::var_os("GALLERY_ONE_REACH").is_some();
     // `GALLERY_NO_STONES=1`: no stones in the creeks.
     app.world.resource_mut::<CreekStones>().off = std::env::var_os("GALLERY_NO_STONES").is_some();
     app.update_n(2);
