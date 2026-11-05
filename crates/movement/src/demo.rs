@@ -777,6 +777,9 @@ pub fn spawn_demo(commands: &mut Commands, origin: DVec3) {
             set_up: false,
         },
     ));
+
+    // North of the course: the climbing quarter.
+    crate::city::spawn_city(commands, origin);
 }
 
 /// Where grunt `i` waits in the stands.
@@ -821,6 +824,8 @@ pub(crate) fn register(app: &mut App) {
             crate::look::rope::drop_orphan_ropes,
             crate::look::zipline::draw_ziplines,
             crate::look::zipline::drop_orphan_cables,
+            crate::look::climbrope::draw_climb_ropes,
+            crate::look::climbrope::drop_orphan_climb_ropes,
         )
             .chain(),
     );

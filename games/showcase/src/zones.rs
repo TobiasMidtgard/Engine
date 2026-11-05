@@ -151,7 +151,8 @@ pub const ZONES: &[Zone] = &[
         key: "parkour",
         name: "Movement course (wall-run, slide, dash)",
         center: DVec3::new(-125.0, 0.0, 330.0),
-        radius: 45.0,
+        // The course and, north of it, the climbing quarter (z 44..80).
+        radius: 90.0,
         module: "movement",
     },
     Zone {
@@ -262,6 +263,8 @@ pub const BARE_FOOTPRINTS: &[(&str, [f64; 2], [f64; 2])] = &[
     ("parkour", [28.5, 39.0], [15.5, 26.0]),
     ("parkour", [-29.9, 2.4], [23.5, 32.6]),
     ("parkour", [-8.0, 8.0], [-22.0, -6.0]),
+    // The climbing quarter's cobbles (engine_movement::city, 62 m north of the course).
+    ("parkour", [-34.0, 28.0], [44.0, 80.0]),
 ];
 
 /// The stream's course (x, z), spring first: through the southern woods, over the cliff south
@@ -1072,6 +1075,18 @@ pub fn demo_views(z: &Zone) -> Vec<View> {
                 .warmup(1.65)
                 .on_arrive("movement.duel", &duel("Blink"))
                 .on_arrive("movement.rider", "{}")
+                .on_leave("movement.duel", cycle),
+                // The climbing quarter: down its street from the east end, the bell tower and
+                // its rope on the left, the townhouse's hoist rope and the plank bridge ahead.
+                View::new(
+                    "parkour_city",
+                    "Climbing quarter: houses with ledges every half storey, ropes and a zip line",
+                    [30.0, 12.0, 57.0],
+                    [0.0, 6.0, 64.0],
+                    16.0,
+                )
+                .warmup(1.0)
+                .on_arrive("movement.duel", &duel("Blink"))
                 .on_leave("movement.duel", cycle),
                 // Play mode (P): a pilot in front of the camera, locked onto the elite.
                 View::new(

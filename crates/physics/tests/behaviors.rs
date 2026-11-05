@@ -2075,3 +2075,65 @@ fn characters_stand_exactly_on_boxes_of_any_size() {
         }
     }
 }
+
+/// A pile of 216 boxes settles and falls asleep, wakes when a ball is thrown into it, and falls
+/// asleep again. Guards the vendored Rapier's cap on island searches a step
+/// (third_party/rapier3d/PATCHES.md, 1): the removals it leaves to the global split must not
+/// keep a pile awake or let a struck one sleep through the blow.
+#[test]
+fn a_pile_sleeps_wakes_and_sleeps_again_with_the_search_cap() {
+    let mut app = app();
+    ground(&mut app, DVec3::ZERO, 20.0);
+    let mut boxes = Vec::new();
+    for x in 0..6 {
+        for y in 0..6 {
+            for z in 0..6 {
+                let at = DVec3::new(
+                    x as f64 * 0.55 - 1.4 + y as f64 * 0.07,
+                    0.3 + y as f64 * 0.55,
+                    z as f64 * 0.55 - 1.4,
+                );
+                boxes.push(cube(&mut app, at, 0.25));
+            }
+        }
+    }
+    let settle = |app: &mut App, what: &str| {
+        for step in 0..(30 * 60) {
+            app.update();
+            if step > 30 && boxes.iter().all(|&e| asleep(app, e)) {
+                return step;
+            }
+        }
+        let awake = boxes.iter().filter(|&&e| !asleep(app, e)).count();
+        panic!(
+            "{what}: {awake} of {} boxes still awake after 30 s",
+            boxes.len()
+        );
+    };
+    settle(&mut app, "the dropped pile");
+    let ball = app
+        .world
+        .spawn((
+            Transform::from_translation(DVec3::new(-6.0, 0.8, 0.0)),
+            RigidBody::dynamic(),
+            Collider::sphere(0.4).with_density(7800.0),
+            Velocity {
+                linear: Vec3::new(14.0, 0.0, 0.0),
+                ..Default::default()
+            },
+        ))
+        .id();
+    let mut woke = 0;
+    for _ in 0..60 {
+        app.update();
+        woke = woke.max(boxes.iter().filter(|&&e| !asleep(&app, e)).count());
+    }
+    assert!(
+        woke > boxes.len() / 4,
+        "the ball woke only {woke} of {} boxes",
+        boxes.len()
+    );
+    let moved = pos(&app, ball).x > -3.0;
+    assert!(moved, "the ball never reached the pile");
+    settle(&mut app, "the struck pile");
+}

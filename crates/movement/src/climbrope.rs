@@ -11,9 +11,11 @@
 //!   swing, so a running jump into a rope swings out on it.
 //! * **Climbing.** The stick forward climbs ([`CLIMB_UP`]), back climbs down ([`CLIMB_DOWN`]);
 //!   holding crouch slides down ([`SLIDE_DOWN`]). At the top, pushing up steps off onto a
-//!   ledge in reach (the beam's roof). Off the bottom end, the climber drops.
-//! * **Swinging.** The rope and climber swing as a pendulum about the anchor. Sideways on the
-//!   stick, or any way with sprint held, pumps the swing.
+//!   ledge in reach (the beam's roof). Off the bottom end, the climber drops. Climbing, the
+//!   legs grip the rope and a swing dies down quickly ([`CLIMB_DAMPING`]).
+//! * **Swinging.** The rope and climber swing as a pendulum about the anchor. The stick
+//!   sideways pumps it; with sprint held the stick pumps it whichever way it points and
+//!   doesn't climb (Tomb Raider's hold-to-swing).
 //! * **Letting go.** Jump lets go with the swing's velocity and a hop, steered by the stick;
 //!   a hard hit or something in the way tears the climber off. A rope let go of isn't caught
 //!   again before the feet touch the ground.
@@ -32,8 +34,8 @@ pub const GRAB_RADIUS: f32 = 0.6;
 /// The rope runs this far in front of the climber's axis, m (between the hands).
 pub const ROPE_AHEAD: f32 = crate::ladder::RUNG_AHEAD;
 /// Climbing speeds, m/s (Assassin's Creed and Uncharted climb ropes at about these).
-pub const CLIMB_UP: f32 = 1.5;
-pub const CLIMB_DOWN: f32 = 2.5;
+pub const CLIMB_UP: f32 = 2.4;
+pub const CLIMB_DOWN: f32 = 3.5;
 /// Sliding down with crouch held, m/s.
 pub const SLIDE_DOWN: f32 = 5.0;
 /// How fast the climbing speed changes, m/s².
@@ -42,6 +44,8 @@ const CLIMB_ACCEL: f32 = 10.0;
 const PUMP: f32 = 4.5;
 /// Damping of the swing, 1/s.
 const SWING_DAMPING: f32 = 0.25;
+/// Damping of the swing while climbing (the legs grip the rope), 1/s.
+pub const CLIMB_DAMPING: f32 = 1.2;
 /// Widest swing from straight down, rad.
 const MAX_SWING: f32 = 1.2;
 /// A catch keeps this much of the speed across the rope as swing.
@@ -126,6 +130,7 @@ pub(crate) fn step(
 pub(crate) struct Held {
     pub jump_pressed: bool,
     pub crouch: bool,
+    /// Sprint held: the stick swings the rope instead of climbing it.
     pub sprint: bool,
     pub knocked: bool,
     /// The wall the body is pressed against, if any (it stops the swing).
@@ -193,7 +198,6 @@ fn hold(
         return v;
     };
     let facing = flat(m.facing, up).normalize_or(Vec3::NEG_Z);
-    let right = facing.cross(up);
     // The hands' velocity along the swing (the body follows them rigidly).
     let moving = r.swing;
 
@@ -211,7 +215,7 @@ fn hold(
         return v;
     }
 
-    // Climb (forward up, back down), or slide down with crouch.
+    // Climb (forward up, back down), or slide down with crouch; with sprint held, swing.
     let climb = if held.sprint { 0.0 } else { wish.dot(facing) };
     let want = if held.crouch {
         -SLIDE_DOWN
@@ -240,7 +244,7 @@ fn hold(
         r.s = rope.top_clear;
         r.speed = r.speed.min(0.0);
         // At the top, pushing on up: step off onto a ledge in reach.
-        if climb > 0.3 || held.sprint && wish.length() > 0.3 {
+        if climb > 0.3 {
             let toward = if wish.length() > 0.3 { wish } else { facing };
             if let Some(v) = crate::locomotion::step_off_rope(m, p, b, probe, toward, out) {
                 m.rope = None;
@@ -264,13 +268,14 @@ fn hold(
     }
 
     // The swing: a pendulum about the anchor, through the hands (Verlet on the sphere).
-    let pump = if held.sprint {
-        wish
+    let pump = flat(wish, up) - facing * climb;
+    let mut swing = r.swing + (-up * b.g + pump * PUMP) * dt;
+    let damping = if climb.abs() > 0.2 {
+        CLIMB_DAMPING
     } else {
-        right * wish.dot(right)
+        SWING_DAMPING
     };
-    let mut swing = r.swing + (-up * b.g + flat(pump, up) * PUMP) * dt;
-    swing *= 1.0 - (SWING_DAMPING * dt).min(1.0);
+    swing *= 1.0 - (damping * dt).min(1.0);
     let length = r.s.max(0.3);
     let hands = at + (r.dir * length).as_dvec3() + (swing * dt).as_dvec3();
     let mut dir = (hands - at).as_vec3().normalize_or(-up);

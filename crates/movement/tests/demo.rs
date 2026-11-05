@@ -557,11 +557,18 @@ fn the_demo_spawns_the_same_static_collider_boxes() {
     let mut app = app();
     let origin = DVec3::new(100.0, 0.0, -40.0);
     with_commands(&mut app, |c| demo::spawn_demo(c, origin));
-    let mut q = app.world.query::<(&Transform, &RigidBody, &Collider)>();
+    let mut q = app
+        .world
+        .query::<(&Transform, &RigidBody, &Collider, Option<&Name>)>();
+    // The climbing quarter beside the course is checked by its own tests (`city`).
     let mut boxes: Vec<([f64; 3], [f32; 3])> = q
         .iter(&app.world)
-        .filter(|(_, b, c)| b.kind == BodyKind::Static && !c.sensor)
-        .map(|(t, _, c)| {
+        .filter(|(_, b, c, n)| {
+            b.kind == BodyKind::Static
+                && !c.sensor
+                && n.is_none_or(|n| n.as_str() != engine_movement::city::NAME)
+        })
+        .map(|(t, _, c, _)| {
             assert_eq!(t.rotation, Quat::IDENTITY, "static boxes are axis aligned");
             let ColliderShape::Cuboid { half_extents } = c.shape else {
                 panic!("static collider that isn't a box: {:?}", c.shape);

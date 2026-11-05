@@ -359,7 +359,9 @@ pub fn floor_maps(
                 c.at(world).map(|(_, w)| {
                     let leafy = w(GroundLayer::Litter) + 0.6 * w(GroundLayer::Humus);
                     let hostile = w(GroundLayer::Mud) + w(GroundLayer::Rock) + w(GroundLayer::Ash);
-                    (leafy, hostile, w(GroundLayer::Needles))
+                    // A conifer wood's moss carpet lies on the same acid needle humus.
+                    let acid = w(GroundLayer::Needles) + 0.8 * w(GroundLayer::Moss);
+                    (leafy, hostile, acid.min(1.0))
                 })
             });
             let (leafy, hostile, needles) = painted.unwrap_or((1.0, 0.0, 0.0));

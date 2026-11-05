@@ -219,6 +219,19 @@ fn census(app: &mut App, name: &str) {
         }
         let total = app.world.entities().len();
         println!("census {name}: {total} entities; plants (parts) by form {forms:?}");
+        let (groups, pieces) = app
+            .world
+            .query::<&engine_foliage::scenery::LitterRows>()
+            .iter(&app.world)
+            .fold((0u32, 0u32), |(g, p), r| (g + 1, p + r.pieces));
+        let single = app
+            .world
+            .query::<&engine_foliage::scenery::LitterPiece>()
+            .iter(&app.world)
+            .count();
+        println!(
+            "census {name}: litter {pieces} pieces as rows of {groups} entities, {single} single"
+        );
     }
     let show = |m: &BTreeMap<&str, (u32, u64)>| {
         let total: u64 = m.values().map(|v| v.1).sum();

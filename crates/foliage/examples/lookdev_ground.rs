@@ -214,24 +214,56 @@ fn lay_out_debris(world: &mut World) {
     world.spawn_batch(batch);
 }
 
-/// Debris pieces shown (not culled by distance) and their triangles before frustum culling.
+/// Debris pieces shown (within their draw distance of the camera) and their triangles before
+/// frustum culling.
 fn debris_load(world: &mut World) -> (usize, usize) {
-    let mut q = world.query_filtered::<&MeshRenderer, With<scenery::LitterPiece>>();
-    let handles: Vec<_> = q
+    let eye = {
+        let mut q = world.query::<(&Camera, &GlobalTransform)>();
+        q.iter(world)
+            .find(|(c, _)| c.active)
+            .map_or(DVec3::ZERO, |(_, t)| t.translation())
+    };
+    let mut q = world.query_filtered::<(
+        &MeshRenderer,
+        &MeshInstances,
+        &MaxDrawDistance,
+        &GlobalTransform,
+    ), With<scenery::LitterRows>>();
+    let shown: Vec<_> = q
         .iter(world)
-        .filter(|r| r.visible)
-        .filter_map(|r| match &r.mesh {
-            MeshRef::Handle(h) => Some(*h),
+        .filter_map(|(r, rows, far, t)| match &r.mesh {
+            MeshRef::Handle(h) => {
+                let near = rows
+                    .rows
+                    .iter()
+                    .filter(|row| {
+                        t.transform_point(row.position.as_dvec3()).distance(eye) < far.0 as f64
+                    })
+                    .count();
+                Some((*h, near))
+            }
             _ => None,
         })
         .collect();
     let meshes = world.resource::<engine_assets::Assets<Mesh>>();
-    let tris = handles
+    let tris = shown
         .iter()
-        .filter_map(|h| meshes.get(*h))
-        .map(|m| m.indices.len() / 3)
+        .filter_map(|(h, n)| meshes.get(*h).map(|m| m.indices.len() / 3 * n))
         .sum();
-    (handles.len(), tris)
+    (shown.iter().map(|(_, n)| n).sum(), tris)
+}
+
+/// Every scattered debris piece's world position.
+fn litter_positions(world: &mut World) -> Vec<DVec3> {
+    let mut q = world.query_filtered::<(&MeshInstances, &Transform), With<scenery::LitterRows>>();
+    q.iter(world)
+        .flat_map(|(rows, t)| {
+            rows.rows
+                .iter()
+                .map(|r| t.translation + r.position.as_dvec3())
+                .collect::<Vec<_>>()
+        })
+        .collect()
 }
 
 fn main() {
@@ -378,16 +410,9 @@ fn main() {
         .map(|r| r.pos)
         .unwrap_or_default();
     // And at the ground where the most debris lies, off the trail.
-    let spots: Vec<Vec2> = app
-        .world
-        .query_filtered::<&Transform, With<scenery::LitterPiece>>()
-        .iter(&app.world)
-        .map(|t| {
-            Vec2::new(
-                (t.translation.x - FOREST.x) as f32,
-                (t.translation.z - FOREST.z) as f32,
-            )
-        })
+    let spots: Vec<Vec2> = litter_positions(&mut app.world)
+        .into_iter()
+        .map(|p| Vec2::new((p.x - FOREST.x) as f32, (p.z - FOREST.z) as f32))
         .filter(|p| p.length() < 70.0 && demo::polyline_distance(*p, &demo::TRAIL) > 4.0)
         .collect();
     let litter = spots
@@ -452,10 +477,6 @@ fn main() {
         println!("  scenery debris shown: {debris} pieces, {debris_tris} triangles");
     }
     let rocks = app.world.query::<&scenery::Rock>().iter(&app.world).count();
-    let debris = app
-        .world
-        .query::<&scenery::LitterPiece>()
-        .iter(&app.world)
-        .count();
+    let debris = litter_positions(&mut app.world).len();
     println!("scenery: {rocks} rocks (with pebbles), {debris} debris and reeds");
 }

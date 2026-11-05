@@ -69,6 +69,14 @@ pub const LACQUER: &str = "lacquer";
 pub const LACQUER_BLACK: &str = "lacquer_black";
 pub const PAPER: &str = "paper";
 pub const PAPER_LIT: &str = "paper_lit";
+/// The climbing quarter's houses: lime plaster in three washes, cobbles, zinc roofs, painted
+/// shutters and window glass.
+pub const PLASTER: [&str; 3] = ["plaster_cream", "plaster_ochre", "plaster_grey"];
+pub const COBBLES: &str = "cobbles";
+pub const ZINC: &str = "zinc";
+pub const SHUTTER: [&str; 3] = ["shutter_teal", "shutter_oxblood", "shutter_sage"];
+pub const GLASS: &str = "window_glass";
+pub const GLASS_LIT: &str = "window_glass_lit";
 
 /// Every material this module registers.
 pub const ALL: &[&str] = &[
@@ -103,6 +111,16 @@ pub const ALL: &[&str] = &[
     LACQUER_BLACK,
     PAPER,
     PAPER_LIT,
+    PLASTER[0],
+    PLASTER[1],
+    PLASTER[2],
+    COBBLES,
+    ZINC,
+    SHUTTER[0],
+    SHUTTER[1],
+    SHUTTER[2],
+    GLASS,
+    GLASS_LIT,
 ];
 
 /// Size of one `concrete_panel` tile, meters (U across a panel, V up the wall).
@@ -257,6 +275,126 @@ pub fn generate(lib: &mut Library) {
         .with_emissive([1.0, 0.55, 0.22], 220.0)
         .with_emissive_texture(paper_set.base);
     put(lib, PAPER_LIT, lit);
+
+    let plaster_set = Baked::add(lib, bake(full, 3.0, 1.0, plaster));
+    for (name, tint) in PLASTER
+        .into_iter()
+        .zip([hex(0xf0e6d2), hex(0xe2bf8a), hex(0xc9c6bd)])
+    {
+        put(lib, name, plaster_set.material(tint, [3.0, 3.0]));
+    }
+    let cobble_set = Baked::add(lib, bake(full, 2.0, 1.0, cobbles));
+    put(lib, COBBLES, cobble_set.material(Vec3::ONE, [2.0, 2.0]));
+    let zinc_set = Baked::add(lib, bake(half, 2.0, 1.0, zinc));
+    put(lib, ZINC, zinc_set.material(Vec3::ONE, [2.0, 2.0]));
+    for (name, tint) in SHUTTER
+        .into_iter()
+        .zip([hex(0x2f6a6a), hex(0x6e2a26), hex(0x7d8a6a)])
+    {
+        put(lib, name, wood_set.material(tint * 1.6, [1.0, 1.0]));
+    }
+    put(
+        lib,
+        GLASS,
+        StandardMaterial::hex(0x1c2228)
+            .with_roughness(0.08)
+            .with_metallic(0.0),
+    );
+    put(
+        lib,
+        GLASS_LIT,
+        StandardMaterial::hex(0x3a2a1a)
+            .with_roughness(0.2)
+            .with_emissive([1.0, 0.62, 0.3], 60.0),
+    );
+}
+
+/// Lime plaster over rubble (3 m tile): a trowelled, softly mottled render with hairline
+/// cracks, rain streaks running down, damp darkening toward the bottom of the tile and
+/// patches fallen off to the stone underneath.
+fn plaster(uv: Vec2) -> Surface {
+    let mottle = fbm(uv * 5.0, 5, 5, 0.55, 301);
+    let trowel = fbm(Vec2::new(uv.x * 18.0, uv.y * 9.0), 18, 3, 0.5, 302);
+    let grain = fbm(uv * 200.0, 200, 2, 0.5, 303);
+    // Rain streaks: narrow along U, long along V.
+    let streak = smoothstep(
+        0.25,
+        0.65,
+        fbm(Vec2::new(uv.x * 30.0, uv.y * 2.0), 30, 3, 0.5, 304),
+    );
+    let (c1, c2, _) = worley(uv * 6.0, 6, 305);
+    let crack =
+        smoothstep(0.025, 0.0, c2 - c1) * smoothstep(0.3, 0.6, fbm(uv * 3.0, 3, 3, 0.5, 306));
+    // Patches where the render fell off, showing the rubble stone.
+    let spall = smoothstep(0.58, 0.64, fbm(uv * 4.0, 4, 4, 0.55, 307));
+    let (s1, s2, sid) = worley(uv * 22.0, 22, 308);
+    let joint = smoothstep(0.06, 0.0, s2 - s1);
+    let rubble = hex(0x8e8678) * (0.8 + 0.3 * sid) * (1.0 - 0.5 * joint);
+    let base = Vec3::ONE * (0.93 + 0.07 * mottle) * (0.97 + 0.03 * trowel) * (0.97 + 0.03 * grain);
+    let mut albedo = base * (1.0 - 0.16 * streak) * (1.0 - 0.4 * crack);
+    albedo = mix3(albedo, rubble, spall);
+    Surface {
+        albedo,
+        height: 0.0015 * trowel + 0.0003 * grain
+            - 0.004 * spall
+            - 0.002 * spall * joint
+            - 0.0006 * crack,
+        roughness: (0.9 + 0.05 * grain - 0.1 * streak).clamp(0.6, 1.0),
+        metallic: 0.0,
+        ao: 1.0 - 0.35 * spall * joint - 0.4 * crack,
+    }
+}
+
+/// Cobbles (2 m tile): rounded setts in rows, mortar and dirt in the joints, worn tops.
+fn cobbles(uv: Vec2) -> Surface {
+    let rows = 16.0;
+    let rv = uv.y * rows;
+    let row = rv.floor();
+    let fv = rv - row;
+    let shift = rand2(row as i32, 0, 311) * 0.5 + 0.25;
+    let cols = 13.0;
+    let ru = uv.x * cols + shift + row * 0.5;
+    let col = ru.floor();
+    let fu = ru - col;
+    let id = rand2((col as i32).rem_euclid(cols as i32 * 2), row as i32, 312);
+    // Distance to the stone's edge, as a fraction of a stone.
+    let edge = (fu.min(1.0 - fu) * 1.3).min(fv.min(1.0 - fv));
+    let dome = smoothstep(0.0, 0.32, edge);
+    let joint = smoothstep(0.08, 0.0, edge);
+    let grain = fbm(uv * 220.0, 220, 2, 0.5, 313);
+    let wear = fbm(uv * 3.0, 3, 3, 0.5, 314);
+    let tone = 0.75 + 0.35 * id;
+    let stone = hex(0x7d7a75) * tone * (0.92 + 0.08 * grain) * (1.0 + 0.1 * wear);
+    let dirt = hex(0x3d3730);
+    Surface {
+        albedo: mix3(stone, dirt, joint),
+        height: 0.02 * dome + 0.0006 * grain,
+        roughness: (0.75 - 0.2 * dome * (0.5 + 0.5 * wear) + 0.2 * joint).clamp(0.35, 1.0),
+        metallic: 0.0,
+        ao: 0.55 + 0.45 * dome,
+    }
+}
+
+/// Roofing zinc (2 m tile): grey-blue sheet with standing seams every 0.5 m along V and a
+/// patina of white bloom and dark run-off.
+fn zinc(uv: Vec2) -> Surface {
+    let seam_u = (uv.x * 4.0).fract();
+    let seam = smoothstep(0.03, 0.0, seam_u.min(1.0 - seam_u));
+    let bloom = smoothstep(0.2, 0.7, fbm(uv * 5.0, 5, 4, 0.55, 321));
+    let run = smoothstep(
+        0.3,
+        0.7,
+        fbm(Vec2::new(uv.x * 24.0, uv.y * 3.0), 24, 3, 0.5, 322),
+    );
+    let base = hex(0x7d8790);
+    let albedo = mix3(base * (1.0 - 0.25 * run), hex(0xb9bec0), bloom * 0.45);
+    Surface {
+        albedo,
+        height: 0.01 * seam,
+        roughness: (0.45 + 0.3 * bloom + 0.1 * run).clamp(0.3, 0.9),
+        metallic: 0.65 - 0.3 * bloom,
+        ao: 1.0 - 0.3 * seam,
+    }
 }
 
 // ------------------------------------------------------------------------ noise helpers
@@ -848,7 +986,8 @@ mod tests {
             texture_size: 16,
         };
         generate(&mut lib);
-        for name in ALL {
+        // (Window glass is plain: smooth, untextured.)
+        for name in ALL.iter().filter(|n| ![GLASS, GLASS_LIT].contains(n)) {
             let h = materials
                 .by_key(&format!("movement/{}", key(name)))
                 .unwrap_or_else(|| panic!("{name} missing"));
