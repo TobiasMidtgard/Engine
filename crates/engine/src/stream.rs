@@ -35,7 +35,7 @@ use std::time::{Duration, Instant};
 use crate::cell_assets::{self, CellAssets, Marks};
 use crate::cell_memory;
 use crate::hlod::{self, ProxyConfig};
-use engine_core::diagnostics::{Diagnostics, PROCESS_RAM_MB, process_ram_mb};
+use engine_core::diagnostics::{Diagnostics, PROCESS_RAM_MB, sampled_ram_mb};
 use engine_core::ecs::resource::IsResource;
 use engine_core::math::DQuat;
 use engine_core::off_frame;
@@ -1010,10 +1010,10 @@ pub fn stream_system(world: &mut World) {
     }
     drop(span);
     let span = tracing::info_span!("stream: load and leave").entered();
-    leave(world, &budget);
+    tracing::info_span!("stream: leave").in_scope(|| leave(world, &budget));
     want.retain(|w| !leaving.contains(&w.1));
     want.sort_by(|a, b| a.0.total_cmp(&b.0));
-    builds(world, &want, budget.builds);
+    tracing::info_span!("stream: builds").in_scope(|| builds(world, &want, budget.builds));
     // Cells already loading go first, nearest first, then new ones in their turn.
     let start = Instant::now();
     let over = |start: Instant| start.elapsed().as_secs_f32() * 1000.0 > frame_ms;
@@ -1033,17 +1033,18 @@ pub fn stream_system(world: &mut World) {
                 continue;
             }
             started += 1;
-            begin(world, i, sources.is_some() && budget.fade_s > 0.0);
+            let fades = sources.is_some() && budget.fade_s > 0.0;
+            tracing::info_span!("stream: begin").in_scope(|| begin(world, i, fades));
         }
         loop {
             if stepped && over(start) {
                 break 'cells;
             }
             stepped = true;
-            match step(world, id) {
+            match tracing::info_span!("stream: step").in_scope(|| step(world, id)) {
                 Step::More => {}
                 Step::Done => {
-                    finish(world, i);
+                    tracing::info_span!("stream: finish").in_scope(|| finish(world, i));
                     break;
                 }
                 // Its art is still building: the next cell gets the time.
@@ -1051,7 +1052,7 @@ pub fn stream_system(world: &mut World) {
             }
         }
     }
-    fade(world, &budget);
+    tracing::info_span!("stream: fade").in_scope(|| fade(world, &budget));
     drop(span);
     let _span = tracing::info_span!("stream: hlod").entered();
     let configs: Vec<ProxyConfig> = world
@@ -1206,7 +1207,10 @@ fn begin(world: &mut World, i: usize, fade: bool) {
     slot.step = 0;
     slot.spawned = false;
     slot.secs = 0.0;
-    slot.ram = process_ram_mb();
+    // The sampled reading: reading it here took the address space's lock behind the workers
+    // building art, 240 ms a cell start on the session VM's route (and as long again in
+    // `finish`). A cell's RAM is the difference of two samples up to 100 ms old.
+    slot.ram = sampled_ram_mb();
     world.resource_mut::<StreamedCells>().cells[i].state = CellState::Loading;
     if fade {
         world.resource_mut::<Fades>().0.push(Fade {
@@ -1235,6 +1239,10 @@ enum Step {
 fn art_scope(id: CellId) -> off_frame::Scope {
     (1 << 32) | id.0 as u64
 }
+
+/// A single step slower than this is logged with its cell, so a profile's tall frame can be
+/// traced to the slice or art that made it.
+const SLOW_STEP_MS: f64 = 50.0;
 
 /// Runs one slice of the cell's spawn, or applies one piece of its off-frame art once the
 /// spawn has run, and tags what it spawned.
@@ -1294,6 +1302,12 @@ fn step(world: &mut World, id: CellId) -> Step {
         world.resource_mut::<CellHooks>().0[i].ids_seen = seen;
     }
     world.resource_mut::<CellHooks>().0[i].secs += t.elapsed().as_secs_f32();
+    let ms = t.elapsed().as_secs_f64() * 1000.0;
+    if ms > SLOW_STEP_MS {
+        let key = &world.resource::<StreamedCells>().cells[i].key;
+        let what = if spawned { "art or slice" } else { "slice" };
+        tracing::info!("streaming: a {what} of {key} took {ms:.1} ms");
+    }
     if !spawned || pending > 0 {
         Step::More
     } else {
@@ -1350,7 +1364,7 @@ fn finish(world: &mut World, i: usize) {
         .filter(|e| world.get_entity(*e).is_ok())
         .collect();
     let entities = tree(world, &roots).len() as u32;
-    let ram = process_ram_mb().zip(ram0).map(|(b, a)| (b - a) as f32);
+    let ram = sampled_ram_mb().zip(ram0).map(|(b, a)| (b - a) as f32);
     let (assets, asset_bytes) = world.resource::<CellHooks>().0[i].assets.footprint(world);
     let assets_mb = asset_bytes as f32 / (1 << 20) as f32;
     if let Some(fade) = world

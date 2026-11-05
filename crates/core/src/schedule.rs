@@ -110,14 +110,40 @@ pub struct MetricsSet;
 /// (bevy_ecs 0.20 multi_threaded.rs `can_run`; engine-perf/fixed-step-chain.md). Order other
 /// systems after the piped system through a [`SystemSet`] it is in, as the command's changes
 /// land only at the sync point Bevy puts after it.
-pub fn queue_when(
-    work: fn(&mut bevy_ecs::world::World),
-) -> impl FnMut(bevy_ecs::system::In<bool>, bevy_ecs::system::Commands) {
+///
+/// Every piped system shares one name in the profile ("engine_core::{{closure}} (commands)"),
+/// so the queued work runs inside a `queued` span named after `work`; the profile lists it
+/// under "inside systems" as "in engine_core: queued <crate>::<function>".
+pub fn queue_when<W>(work: W) -> impl FnMut(bevy_ecs::system::In<bool>, bevy_ecs::system::Commands)
+where
+    W: Fn(&mut bevy_ecs::world::World) + Copy + Send + Sync + 'static,
+{
+    let name = queued_name(std::any::type_name::<W>());
     move |bevy_ecs::system::In(due), mut commands| {
         if due {
-            commands.queue(work);
+            let name = name.clone();
+            commands.queue(move |world: &mut bevy_ecs::world::World| {
+                let _span = tracing::info_span!("queued", name = %name).entered();
+                work(world)
+            });
         }
     }
+}
+
+/// `engine_fire::demo::run_demos` -> `queued engine_fire::run_demos`; a closure keeps its
+/// enclosing function (`engine_vehicles::drive::plugin::{{closure}}` -> `queued
+/// engine_vehicles::plugin`).
+fn queued_name(type_name: &str) -> std::sync::Arc<str> {
+    let parts: Vec<&str> = type_name
+        .split("::")
+        .filter(|p| !p.starts_with("{{"))
+        .collect();
+    let name = match parts.as_slice() {
+        [] => type_name.to_string(),
+        [only] => only.to_string(),
+        [first, .., last] => format!("{first}::{last}"),
+    };
+    format!("queued {name}").into()
 }
 
 #[cfg(test)]
@@ -147,6 +173,19 @@ mod queue_when_tests {
 
     fn after(mut w: ResMut<Work>) {
         w.seen_after = w.ran;
+    }
+
+    #[test]
+    fn queued_work_is_named_after_its_function() {
+        assert_eq!(
+            queued_name("engine_fire::demo::run_demos"),
+            "queued engine_fire::run_demos".into()
+        );
+        assert_eq!(
+            queued_name("engine_vehicles::drive::plugin::{{closure}}"),
+            "queued engine_vehicles::plugin".into()
+        );
+        assert_eq!(queued_name("work"), "queued work".into());
     }
 
     #[test]

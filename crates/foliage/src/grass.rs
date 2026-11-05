@@ -190,7 +190,10 @@ pub fn floor_maps(
     let corner = -size * 0.5;
     let n = (rx * rz) as usize;
     let (canopy, broad) = canopy_maps(region, resolution, crowns);
-    let bare = bare_mask(region, resolution, covers);
+    let fall = leaf_fall_map(region, resolution, crowns);
+    let bare = bare_mask(region, resolution, covers, true);
+    // Leaves blow onto the cleared trail too: only logs, rocks and trunks keep them off.
+    let covered = bare_mask(region, resolution, covers, false);
     let mut herbs = (Vec::with_capacity(n), Vec::with_capacity(n));
     let mut litter = (Vec::with_capacity(n), Vec::with_capacity(n));
     let mut herb_kinds = Vec::with_capacity(n);
@@ -202,6 +205,13 @@ pub fn floor_maps(
             let world = center + DVec3::new(q.x as f64, 0.0, q.y as f64);
             let inside = soil.contains(world);
             let blocked = !inside || soil.blocked[soil.index(world)];
+            // On the trail's tread (its brushed corridor and the margin kept clear beside it)
+            // nothing roots, but leaves blow onto it.
+            let on_trail = inside
+                && region
+                    .corridors
+                    .iter()
+                    .any(|c| q.distance(Vec2::new(c[0], c[1])) < c[2] + 0.6);
             let water = if inside { soil.sample(world)[0] } else { 0.5 };
             let (x, z) = (q.x as f64, q.y as f64);
             let open = 1.0 - 0.85 * grass.get(k).copied().unwrap_or(0.0);
@@ -244,16 +254,23 @@ pub fn floor_maps(
             // Fallen leaves lie thickest under broadleaf crowns, drifted into patches, and
             // fewer where grass or herbs cover the ground.
             let drift = fbm2(x * 0.3, z * 0.3, region.seed ^ 0x1177, 3, 2.0, 0.5);
-            let leaves = if blocked || bare[k] {
-                0.0
-            } else {
-                let d = smoothstep(0.1, 0.7, broad[k])
-                    * (0.55 + 0.45 * smoothstep(-0.4, 0.4, drift))
-                    * open
-                    * (1.0 - 0.5 * herb)
-                    * smoothstep(0.15, 0.6, leafy);
-                if d < 0.06 { 0.0 } else { d.min(1.0) }
-            };
+            // Past a round forest's ragged edge nothing roots, but the edge trees' leaves
+            // blow out over the ground there too ([`leaf_fall_map`]).
+            let past_edge =
+                blocked && crate::sim::past_round_edge(region, center, world.x, world.z);
+            let leaves =
+                if (blocked && !on_trail && !past_edge) || covered[k] || (bare[k] && !on_trail) {
+                    0.0
+                } else {
+                    // Leaves fall where broadleaf crowns spread and drift a few meters past them
+                    // ([`leaf_fall_map`]), so an opening or a path among them is littered too.
+                    let d = smoothstep(0.1, 0.7, broad[k].max(fall[k]))
+                        * (0.55 + 0.45 * smoothstep(-0.4, 0.4, drift))
+                        * open
+                        * (1.0 - 0.5 * herb)
+                        * smoothstep(0.15, 0.6, leafy);
+                    if d < 0.06 { 0.0 } else { d.min(1.0) }
+                };
             // Dryness picks the leaf's color, fresh brown to pale ochre, in patches.
             let hue = fbm2(x * 0.9, z * 0.9, region.seed ^ 0x2c3, 2, 2.0, 0.5);
             // Twigs lie in spots among the leaves, more of them under a closed canopy (the
@@ -276,6 +293,27 @@ pub fn floor_maps(
     }
 }
 
+/// Whether `q` (meters from the region's center) lies on a trail's shoulder: beside its tread
+/// (a brushed corridor is the tread and a foot each side, [`EcologyRegion::corridors`]) and kept
+/// clear only by the trail's own circles, not by a pond's or a clearing's.
+fn trail_shoulder(region: &EcologyRegion, q: Vec2) -> bool {
+    let mut near = false;
+    for c in &region.corridors {
+        let d = q.distance(Vec2::new(c[0], c[1]));
+        if d < c[2] - 0.2 {
+            return false;
+        }
+        near |= d < c[2] + 0.6;
+    }
+    near && region.keep_clear.iter().all(|k| {
+        q.distance(Vec2::new(k[0], k[1])) >= k[2]
+            || region
+                .corridors
+                .iter()
+                .any(|c| (c[0] - k[0]).abs() < 1e-3 && (c[1] - k[1]).abs() < 1e-3)
+    })
+}
+
 /// A number in 0..1 that looks random, the same for the same `seed` and grid point.
 fn unit_hash(seed: u64, i: u32, j: u32) -> f32 {
     let mut h = seed
@@ -285,6 +323,43 @@ fn unit_hash(seed: u64, i: u32, j: u32) -> f32 {
     h = h.wrapping_mul(0xff51_afd7_ed55_8ccd);
     h ^= h >> 33;
     (h >> 40) as f32 / (1u64 << 24) as f32
+}
+
+/// Where broadleaf crowns drop their leaves: under each crown and drifting past its edge,
+/// fewer the further out (litterfall models spread each tree's leaves with a kernel that
+/// decays over meters beyond the crown: Ferrari and Sugita 1996; Staelens et al. 2004, mixed
+/// deciduous forest; Jonard et al. 2006, beech-oak mixtures). Out to 1.8 crown radii and
+/// 2 m more; under the crown as much as `canopy_maps`' broadleaf share.
+fn leaf_fall_map(region: &EcologyRegion, resolution: [u32; 2], crowns: &[Crown]) -> Vec<f32> {
+    let [rx, rz] = resolution;
+    let size = Vec2::new(region.half_extents[0] * 2.0, region.half_extents[1] * 2.0);
+    let step = Vec2::new(size.x / (rx - 1) as f32, size.y / (rz - 1) as f32);
+    let corner = -size * 0.5;
+    let mut fall = vec![0.0f32; (rx * rz) as usize];
+    for c in crowns.iter().filter(|c| c.broadleaf) {
+        let reach = (c.radius * 1.8 + 2.0).max(step.x.max(step.y));
+        let ci = ((c.pos.x - corner.x) / step.x).round() as i64;
+        let cj = ((c.pos.y - corner.y) / step.y).round() as i64;
+        let (si, sj) = (
+            (reach / step.x).ceil() as i64,
+            (reach / step.y).ceil() as i64,
+        );
+        for j in (cj - sj).max(0)..=(cj + sj).min(rz as i64 - 1) {
+            for i in (ci - si).max(0)..=(ci + si).min(rx as i64 - 1) {
+                let q = corner + Vec2::new(i as f32 * step.x, j as f32 * step.y);
+                let d = q.distance(c.pos);
+                if d >= reach {
+                    continue;
+                }
+                // The crown's own share under it, then the drift tailing off to `reach`.
+                let under = 1.0 - (d / c.radius.max(0.1)).powi(2);
+                let past = 1.0 - (d / reach);
+                let f = under.max(0.6 * past * past) * c.leafy;
+                fall[(j as u32 * rx + i as u32) as usize] += f;
+            }
+        }
+    }
+    fall
 }
 
 /// How closed the canopy is over each grid point, and how much of it is broadleaved.
@@ -354,14 +429,15 @@ pub fn grass_kinds(
             return None;
         }
         let i = soil.index(world);
-        // A path's verge: trodden turf a few meters either side of a cleared circle's edge.
+        // A path's verge: trodden turf a meter or so either side of a cleared circle's edge
+        // (people walk the tread, and step off it only so far).
         let verge = region
             .keep_clear
             .iter()
             .chain(&region.corridors)
             .map(|c| {
                 let d = q.distance(Vec2::new(c[0], c[1])) - c[2];
-                1.0 - smoothstep(0.0, 3.5, d.abs())
+                1.0 - smoothstep(0.0, 1.5, d.abs())
             })
             .fold(0.0f32, f32::max);
         let shade = canopy.get(at).copied().unwrap_or(0.0).min(1.0);
@@ -439,7 +515,12 @@ impl CoverGrid {
 }
 
 /// Grid points under keep-clear circles and covers.
-fn bare_mask(region: &EcologyRegion, resolution: [u32; 2], covers: &[Cover]) -> Vec<bool> {
+fn bare_mask(
+    region: &EcologyRegion,
+    resolution: [u32; 2],
+    covers: &[Cover],
+    clearings: bool,
+) -> Vec<bool> {
     let [rx, rz] = resolution;
     let size = Vec2::new(region.half_extents[0] * 2.0, region.half_extents[1] * 2.0);
     let step = Vec2::new(size.x / (rx - 1) as f32, size.y / (rz - 1) as f32);
@@ -456,6 +537,7 @@ fn bare_mask(region: &EcologyRegion, resolution: [u32; 2], covers: &[Cover]) -> 
     let shapes = region
         .keep_clear
         .iter()
+        .filter(|_| clearings)
         .map(|c| Cover {
             a: Vec2::new(c[0], c[1]),
             b: Vec2::new(c[0], c[1]),
@@ -571,7 +653,7 @@ pub fn fern_maps(
     season_dry: f32,
 ) -> (Vec<f32>, Vec<f32>) {
     let cover = plant_cover(region, resolution, ferns);
-    let bare = bare_mask(region, resolution, covers);
+    let bare = bare_mask(region, resolution, covers, true);
     let density = cover
         .iter()
         .zip(&bare)
@@ -636,7 +718,8 @@ pub fn grass_maps(
         }
     }
     // Keep-clear circles and covers.
-    let bare = bare_mask(region, resolution, covers);
+    let bare = bare_mask(region, resolution, covers, true);
+    let covered = bare_mask(region, resolution, covers, false);
     let mut density = Vec::with_capacity(n);
     let mut dryness = Vec::with_capacity(n);
     for j in 0..rz {
@@ -676,6 +759,34 @@ pub fn grass_maps(
             let parched = 0.12 * (1.0 - smoothstep(-0.6, 0.35, patch));
             dryness.push((0.1 + parched + 0.6 * thirst + 0.8 * ill).min(1.0));
         }
+    }
+    // The shoulders, where no tuft roots (`blocked`) but the sward beside them creeps over:
+    // short, dense trodden turf up to the tread's edge (`grass_kinds` makes it the Turf kind),
+    // as on a trail people walk, not a strip of bare soil.
+    let reach = (2.5 / step.x.min(step.y)).ceil() as i64;
+    let mut shoulders = Vec::new();
+    for j in 0..rz {
+        for i in 0..rx {
+            let q = corner + Vec2::new(i as f32 * step.x, j as f32 * step.y);
+            let k = (j * rx + i) as usize;
+            if !covered[k] && trail_shoulder(region, q) {
+                shoulders.push((i as i64, j as i64, k));
+            }
+        }
+    }
+    let lying = density.clone();
+    for (i, j, k) in shoulders {
+        let mut most = 0.0f32;
+        for dj in -reach..=reach {
+            for di in -reach..=reach {
+                let (a, b) = (i + di, j + dj);
+                if a < 0 || b < 0 || a >= rx as i64 || b >= rz as i64 {
+                    continue;
+                }
+                most = most.max(lying[(b as u32 * rx + a as u32) as usize]);
+            }
+        }
+        density[k] = density[k].max(0.85 * most);
     }
     (density, dryness)
 }
@@ -1194,6 +1305,22 @@ fn heights(
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_trails_shoulder_is_beside_its_tread_only() {
+        let region = EcologyRegion {
+            corridors: vec![[0.0, 0.0, 1.9]],
+            keep_clear: vec![[0.0, 0.0, 2.2], [0.0, 4.0, 2.0]],
+            ..EcologyRegion::default()
+        };
+        let at = |x: f32, z: f32| trail_shoulder(&region, Vec2::new(x, z));
+        // The tread itself, then its shoulder, then open ground.
+        assert!(!at(1.0, 0.0));
+        assert!(at(-2.0, 0.0));
+        assert!(!at(3.0, 0.0));
+        // Inside the pond's own keep-clear circle, beside the trail: not a shoulder.
+        assert!(!at(0.0, 2.4));
+    }
 
     #[test]
     fn each_herb_takes_its_own_woods() {

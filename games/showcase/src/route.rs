@@ -196,6 +196,9 @@ struct Route {
     /// for what that view needs).
     restood: bool,
     done_frames: u32,
+    /// When the last frame was recorded, for frame times on the wall clock (headless the
+    /// route runs on a manual clock: every frame 1/60 s of game time).
+    wall: Option<std::time::Instant>,
 }
 
 /// Frames the start waits at most for the ground (a wait that never ends goes on).
@@ -203,7 +206,12 @@ const SETTLE_MAX_FRAMES: u32 = 1200;
 
 /// `up` flies [`UP_LEGS`]; anything else the whole route.
 pub fn install(app: &mut App, which: Option<&str>) {
-    if app.world.resource::<EngineConfig>().headless {
+    // Headless the route flies on a manual clock (the same frames every run), unless
+    // `ENGINE_ROUTE_REALTIME=1` keeps the real clock, as in play: slow frames then skip game
+    // time the way they do for a player, and what the modules do only in play (budgeted
+    // catch-ups) shows.
+    let realtime = std::env::var("ENGINE_ROUTE_REALTIME").is_ok_and(|v| v == "1");
+    if app.world.resource::<EngineConfig>().headless && !realtime {
         app.world
             .resource_mut::<Time>()
             .set_source(engine::core::time::TimeSource::Manual {
@@ -230,6 +238,7 @@ pub fn install(app: &mut App, which: Option<&str>) {
         settling: Some(0),
         restood: false,
         done_frames: 0,
+        wall: None,
     });
     app.add_systems(Update, run.before(camera::fly));
 }
@@ -271,7 +280,13 @@ fn run(world: &mut World) {
         return;
     }
     let dt = world.resource::<Time>().delta_secs();
-    let real_ms = world.resource::<Time>().real_delta_secs() as f64 * 1000.0;
+    // Frame times on the wall clock: the clock's own deltas are a manual clock's steps
+    // headless, and capped in play.
+    let mut real_ms = world.resource::<Time>().real_delta_secs() as f64 * 1000.0;
+    let now = std::time::Instant::now();
+    if let Some(last) = world.resource_mut::<Route>().wall.replace(now) {
+        real_ms = now.duration_since(last).as_secs_f64() * 1000.0;
+    }
     let (pos, altitude) = {
         let mut q = world.query::<(&Transform, &ShowcaseCamera)>();
         let Some((t, cam)) = q.iter(world).next() else {

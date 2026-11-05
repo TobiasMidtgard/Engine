@@ -548,7 +548,7 @@ pub fn builtin_species() -> Vec<PlantSpecies> {
                 autumn_color: srgb(0xa8702c),
             }),
             shape: PlantShape {
-                crown_base: 0.26,
+                crown_base: 0.4,
                 branches: 9,
                 angle_low_deg: 78.0,
                 angle_high_deg: 38.0,
@@ -595,7 +595,7 @@ pub fn builtin_species() -> Vec<PlantSpecies> {
                 autumn_color: srgb(0xd8b13a),
             }),
             shape: PlantShape {
-                crown_base: 0.34,
+                crown_base: 0.55,
                 branches: 14,
                 angle_low_deg: 58.0,
                 angle_high_deg: 24.0,
@@ -1114,7 +1114,7 @@ fn stand_trees() -> Vec<PlantSpecies> {
                 autumn_color: srgb(0xd6962a),
             }),
             shape: PlantShape {
-                crown_base: 0.45,
+                crown_base: 0.6,
                 branches: 12,
                 angle_low_deg: 52.0,
                 angle_high_deg: 22.0,
@@ -1163,7 +1163,7 @@ fn stand_trees() -> Vec<PlantSpecies> {
                 autumn_color: srgb(0xb5421f),
             }),
             shape: PlantShape {
-                crown_base: 0.3,
+                crown_base: 0.4,
                 branches: 9,
                 angle_low_deg: 48.0,
                 angle_high_deg: 20.0,
@@ -1211,7 +1211,7 @@ fn stand_trees() -> Vec<PlantSpecies> {
                 autumn_color: srgb(0x5d5a2e),
             }),
             shape: PlantShape {
-                crown_base: 0.28,
+                crown_base: 0.45,
                 branches: 12,
                 angle_low_deg: 74.0,
                 angle_high_deg: 34.0,
@@ -1259,7 +1259,7 @@ fn stand_trees() -> Vec<PlantSpecies> {
                 autumn_color: srgb(0xa5602a),
             }),
             shape: PlantShape {
-                crown_base: 0.3,
+                crown_base: 0.4,
                 branches: 10,
                 angle_low_deg: 64.0,
                 angle_high_deg: 30.0,
@@ -1307,7 +1307,7 @@ fn stand_trees() -> Vec<PlantSpecies> {
                 autumn_color: srgb(0xd09c30),
             }),
             shape: PlantShape {
-                crown_base: 0.22,
+                crown_base: 0.45,
                 branches: 6,
                 angle_low_deg: 92.0,
                 angle_high_deg: 62.0,

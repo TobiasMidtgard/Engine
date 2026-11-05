@@ -1,6 +1,7 @@
 //! Smoke systems: volumes, sources, everything that pushes smoke around, and the step.
 
 use engine_core::math::{DVec2, DVec3, UVec3, Vec3};
+use engine_core::off_frame::OffFrameCommands;
 use engine_core::prelude::*;
 use engine_render::Camera;
 use engine_world::{
@@ -449,17 +450,52 @@ fn ground_floor(ground: &Ground) -> impl Fn(f64, f64) -> Option<f64> + Sync + '_
     move |x, z| ground.height(DVec3::new(x, 1.0e5, z))
 }
 
+/// Volumes whose air is being made on a worker: the entity and the box it will fill. Smoke
+/// released in one meanwhile is let go rather than given a volume of its own.
+#[derive(Resource, Default, Debug)]
+pub struct VolumesMaking(pub Vec<(Entity, DVec3, DVec3)>);
+
+impl VolumesMaking {
+    fn covers(&self, p: DVec3) -> bool {
+        self.0
+            .iter()
+            .any(|(_, o, size)| p.cmpge(*o).all() && p.cmplt(*o + *size).all())
+    }
+}
+
+/// The box a volume component asks for: origin, cell, voxels.
+fn volume_box(v: &SmokeVolume, gt: &GlobalTransform) -> (DVec3, f32, UVec3) {
+    let cell = v.cell_m.max(0.05);
+    let dims = (Vec3::from(v.size) / cell)
+        .ceil()
+        .as_uvec3()
+        .clamp(UVec3::splat(4), UVec3::splat(256));
+    let size = dims.as_dvec3() * cell as f64;
+    let base = gt.translation();
+    let origin = DVec3::new(base.x - size.x * 0.5, base.y, base.z - size.z * 0.5);
+    (origin, cell, dims)
+}
+
 /// Keep volumes in sync with `SmokeVolume` components (made again when one moves or changes;
 /// one a world shift moved along with its entity is kept), and measure the ground again under
 /// volumes the world turned.
+///
+/// A new volume's air and floor (a ground query per column: 0.55 s for the smoke range's
+/// 6,700 columns on the session VM, as the range streamed in) are made on a worker in play;
+/// with a manual clock (tests, tours) at once, so the next step already has them.
+#[allow(clippy::too_many_arguments)]
 pub fn sync_volumes(
     q: Query<(Entity, &SmokeVolume, &GlobalTransform)>,
     mut removed: RemovedComponents<SmokeVolume>,
     mut domains: ResMut<SmokeDomains>,
+    mut making: ResMut<VolumesMaking>,
     ground: Res<Ground>,
+    time: Res<Time>,
+    mut commands: Commands,
 ) {
     for e in removed.read() {
         domains.list.retain(|d| d.owner != Some(e));
+        making.0.retain(|m| m.0 != e);
     }
     for d in &mut domains.list {
         if d.domain.floor_stale {
@@ -468,28 +504,57 @@ pub fn sync_volumes(
             d.domain.floor_stale = false;
         }
     }
+    let manual = matches!(time.source(), engine_core::time::TimeSource::Manual { .. });
     for (e, v, gt) in &q {
-        let cell = v.cell_m.max(0.05);
-        let dims = (Vec3::from(v.size) / cell)
-            .ceil()
-            .as_uvec3()
-            .clamp(UVec3::splat(4), UVec3::splat(256));
-        let size = dims.as_dvec3() * cell as f64;
-        let base = gt.translation();
-        let origin = DVec3::new(base.x - size.x * 0.5, base.y, base.z - size.z * 0.5);
+        let (origin, cell, dims) = volume_box(v, gt);
         let same = domains.list.iter().any(|d| {
             d.owner == Some(e)
                 && d.domain.dims == dims
                 && d.domain.cell == cell
                 && d.domain.origin.distance_squared(origin) < 1e-6
         });
-        if same {
+        if same || making.0.iter().any(|m| m.0 == e) {
             continue;
         }
-        domains.list.retain(|d| d.owner != Some(e));
-        let mut domain = Domain::new(origin, cell, dims);
-        domain.set_floor(ground_floor(&ground));
-        domains.add(Some(e), domain);
+        if manual {
+            domains.list.retain(|d| d.owner != Some(e));
+            let mut domain = Domain::new(origin, cell, dims);
+            domain.set_floor(ground_floor(&ground));
+            domains.add(Some(e), domain);
+            continue;
+        }
+        making.0.push((e, origin, dims.as_dvec3() * cell as f64));
+        let ground = ground.clone();
+        commands.off_frame(
+            "smoke volume",
+            move || {
+                let mut domain = Domain::new(origin, cell, dims);
+                domain.set_floor(ground_floor(&ground));
+                domain
+            },
+            move |world: &mut World, domain: Domain| {
+                world.resource_mut::<VolumesMaking>().0.retain(|m| m.0 != e);
+                // Still wanted where it was made? A volume that moved meanwhile (a world
+                // shift, a turn) is made again at the next step.
+                let wanted = world
+                    .get_entity(e)
+                    .ok()
+                    .and_then(|w| {
+                        Some(volume_box(
+                            w.get::<SmokeVolume>()?,
+                            w.get::<GlobalTransform>()?,
+                        ))
+                    })
+                    .is_some_and(|(o, c, d)| {
+                        c == cell && d == dims && o.distance_squared(origin) < 1e-6
+                    });
+                if wanted {
+                    let mut domains = world.resource_mut::<SmokeDomains>();
+                    domains.list.retain(|d| d.owner != Some(e));
+                    domains.add(Some(e), domain);
+                }
+            },
+        );
     }
 }
 
@@ -505,6 +570,7 @@ pub fn release(
     weather: Res<WeatherState>,
     ground: Res<Ground>,
     (focus, range): (Res<FocusPoints>, Option<Res<SimulationRange>>),
+    making: Res<VolumesMaking>,
 ) {
     let mut list: Vec<Puff> = Vec::new();
     for e in emissions.read() {
@@ -533,6 +599,10 @@ pub fn release(
     {
         let far = range.active_m * (1.0 + range.hysteresis.max(0.0));
         list.retain(|(e, ..)| focus.distance(e.position) <= far);
+    }
+    // A volume still being made there takes the smoke once it is in.
+    if !making.0.is_empty() {
+        list.retain(|(e, ..)| !making.covers(e.position));
     }
     if settings.enabled {
         deposit(
