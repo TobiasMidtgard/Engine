@@ -181,6 +181,20 @@ pub fn bilberry_red(day: f32) -> f32 {
     smoothstep(245.0, 275.0, d) * (1.0 - smoothstep(305.0, 320.0, d))
 }
 
+/// How many of bilberry's and lingonberry's berries are ripe on a day, 0..1 each. Bilberries
+/// ripen blue-black from early July and are eaten or fallen by early September; lingonberries
+/// redden from mid-August and, sour and long-keeping, many hang on through the winter under
+/// the snow (Ritchie 1955, 1956, Biological Flora of the British Isles: Vaccinium
+/// vitis-idaea, J. Ecol. 43; V. myrtillus, J. Ecol. 44).
+pub fn berries_ripe(day: f32) -> [f32; 2] {
+    let d = day.rem_euclid(YEAR_DAYS);
+    let bilberry = smoothstep(178.0, 200.0, d) * (1.0 - smoothstep(235.0, 255.0, d));
+    let autumn = smoothstep(225.0, 250.0, d);
+    let winter = 1.0 - smoothstep(60.0, 120.0, d);
+    let lingonberry = autumn.max(0.4 * winter);
+    [bilberry, lingonberry]
+}
+
 /// The spring flowering of the forest floor's herbs on a day, 0..1 each: wood anemone
 /// carpets the floor white from late March into early May, before the canopy closes; wood
 /// sorrel flowers through April and May; woodruff's starry white heads open in May and June

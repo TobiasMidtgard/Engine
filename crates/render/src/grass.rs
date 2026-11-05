@@ -253,6 +253,14 @@ pub struct GrassStyle {
     /// narrow leaves (woodruff). The leaf's blade is drawn about as wide as it is long
     /// (`width` about 1.2 x `height` x (1 - `stalk`)) and the leaflets cut out of it.
     pub leaflets: f32,
+    /// Leaves set alternately up a woody twig, one every 1/`alternate_leaves` of its length,
+    /// on the left then the right (0 = none): small ovals on short petioles, angled up and
+    /// out, cut out of the blade (`width` about 2 x a leaf's length), the stem staying. A
+    /// dwarf shrub's shoot: about `height` / (`width` / 2), 10 a bilberry's.
+    pub alternate_leaves: f32,
+    /// Round heads only (`bloom_length` 0): over 0, the flowering stems stand this fraction
+    /// of the plant's height, not above it: berries hanging among a shrub's leaves.
+    pub bloom_height: f32,
 }
 
 impl Default for GrassStyle {
@@ -288,6 +296,8 @@ impl Default for GrassStyle {
             leaf_rise: 0.0,
             pinnae: 0.0,
             leaflets: 0.0,
+            alternate_leaves: 0.0,
+            bloom_height: 0.0,
         }
     }
 }
@@ -402,69 +412,82 @@ impl GrassStyle {
         }
     }
 
-    /// Bilberry (Vaccinium myrtillus): a knee-high carpet of bright green, angular twigs, each
-    /// with a few pairs of small oval leaves, under spruce and pine on acid soil where some
-    /// light gets through; blue-black berries in late summer, reddening when dry or in autumn.
-    /// A dwarf shrub of the forest floor's herbs.
+    /// Bilberry (Vaccinium myrtillus): a knee-high carpet of bright green, angular twigs
+    /// fanning out from each plant, leaves set alternately up them (small ovals 1-3 cm on
+    /// short stalks, finely toothed, a fresh light green), under spruce and pine on acid soil
+    /// where some light gets through; blue-black berries 6-9 mm hanging singly among the
+    /// leaves in late summer (Ritchie 1956, Biological Flora of the British Isles: Vaccinium
+    /// myrtillus, J. Ecol. 44; https://en.wikipedia.org/wiki/Vaccinium_myrtillus). A dwarf
+    /// shrub of the forest floor's herbs; its berries come with the season
+    /// (`engine_foliage::grass::herb_styles_on`).
     pub fn bilberry() -> Self {
         Self {
-            blades_per_m2: 480.0,
-            height: 0.38,
+            blades_per_m2: 850.0,
+            height: 0.32,
             height_variation: 0.35,
-            width: 0.075,
-            bend: 0.25,
-            // Mostly a stem (upright twigs), not a leaf spread from a stalk.
-            leaf: 0.25,
-            lush_color: [0.075, 0.2, 0.03],
+            width: 0.085,
+            bend: 0.5,
+            leaf: 0.0,
+            lush_color: [0.09, 0.22, 0.035],
             dry_color: [0.24, 0.08, 0.035],
-            wind_response: 0.35,
+            wind_response: 0.3,
             draw_distance: 36.0,
             full_density_m: 14.0,
             shadow_distance: 10.0,
-            clump_size: 0.5,
-            clump_pull: 0.35,
-            clump_fan: 0.6,
+            // Twigs fan out from each plant into a low bush.
+            clump_size: 0.6,
+            clump_pull: 0.3,
+            clump_fan: 0.95,
             clump_height: 0.35,
             clump_color: 0.08,
-            droop: 0.1,
+            droop: 0.05,
             gloss: 0.35,
-            tip_tint: [1.08, 1.08, 0.9],
-            bloom: 0.05,
-            bloom_color: [0.03, 0.035, 0.08],
-            bloom_size: 0.01,
+            tip_tint: [1.1, 1.08, 0.85],
+            bloom: 0.0,
+            bloom_color: [0.07, 0.085, 0.17],
+            bloom_size: 0.013,
+            bloom_height: 0.8,
             leaflets: 0.0,
-            stalk: 0.2,
-            leaf_rise: 0.95,
-            pinnae: 7.0,
+            stalk: 0.0,
+            leaf_rise: 0.0,
+            pinnae: 0.0,
+            alternate_leaves: 10.0,
             ..Self::forest_herbs()
         }
     }
 
-    /// Lingonberry (Vaccinium vitis-idaea): a low evergreen mat a hand high, small leathery
-    /// leaves a dark glossy green, on dry acid soil under pines; red berries in autumn.
+    /// Lingonberry (Vaccinium vitis-idaea): a low evergreen mat a hand high, short shoots
+    /// crowded with small oval leathery leaves a dark glossy green, on dry acid soil under
+    /// pines; bunches of red berries at the shoots' tips from August, many staying into
+    /// winter (Ritchie 1955, Biological Flora of the British Isles: Vaccinium vitis-idaea,
+    /// J. Ecol. 43).
     pub fn lingonberry() -> Self {
         Self {
-            blades_per_m2: 380.0,
+            blades_per_m2: 420.0,
             height: 0.15,
             height_variation: 0.3,
-            width: 0.06,
-            bend: 0.6,
+            width: 0.045,
+            bend: 0.45,
+            leaf: 0.0,
             lush_color: [0.035, 0.085, 0.022],
             dry_color: [0.075, 0.07, 0.03],
             wind_response: 0.2,
             draw_distance: 30.0,
             clump_size: 0.4,
-            clump_pull: 0.45,
+            clump_pull: 0.5,
+            clump_fan: 0.9,
             clump_height: 0.3,
-            droop: 0.15,
+            droop: 0.1,
             gloss: 0.75,
-            bloom: 0.07,
+            bloom: 0.0,
             bloom_color: [0.55, 0.03, 0.025],
             bloom_size: 0.009,
+            bloom_height: 0.85,
             leaflets: 0.0,
-            stalk: 0.15,
-            leaf_rise: 0.8,
-            pinnae: 5.0,
+            stalk: 0.0,
+            leaf_rise: 0.0,
+            pinnae: 0.0,
+            alternate_leaves: 8.0,
             ..Self::forest_herbs()
         }
     }
@@ -881,9 +904,12 @@ fn field_seed(at: DVec3, size: [f32; 2], style: &GrassStyle) -> u32 {
 }
 
 /// How a style's leaves are cut (`GpuField::kind` z, read by `grass_cut`): its pinnae pairs
-/// (ferns), or -(leaflets + stalk) for a compound leaf, or 0 for whole leaves and blades.
+/// (ferns), [`ALTERNATE_CUT`] + leaves for a shrub's twig, or -(leaflets + stalk) for a
+/// compound leaf, or 0 for whole leaves and blades.
 fn style_cut(style: &GrassStyle) -> f32 {
-    if style.pinnae > 0.0 {
+    if style.alternate_leaves > 0.0 {
+        ALTERNATE_CUT + style.alternate_leaves.clamp(2.0, 40.0)
+    } else if style.pinnae > 0.0 {
         style.pinnae
     } else if style.leaflets >= 2.5 && style.leaf > 0.0 {
         -(style.leaflets.round().min(12.0) + style.stalk.clamp(0.0, 0.8))
@@ -891,6 +917,9 @@ fn style_cut(style: &GrassStyle) -> f32 {
         0.0
     }
 }
+
+/// `GpuField::kind` z over this: a twig with `z - ALTERNATE_CUT` alternate leaves.
+const ALTERNATE_CUT: f32 = 100.0;
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
@@ -970,7 +999,12 @@ impl GpuField {
             style.bloom_color[2],
             style.bloom.clamp(0.0, 1.0),
         ];
-        self.axis_z[3] = style.bloom_length.clamp(0.0, 0.5);
+        // Seed heads' length, or (below 0) round heads' stems as a share of the plant's height.
+        self.axis_z[3] = if style.bloom_length <= 0.0 && style.bloom_height > 0.0 {
+            -style.bloom_height.clamp(0.05, 1.5)
+        } else {
+            style.bloom_length.clamp(0.0, 0.5)
+        };
         self.kind = [
             style.bloom_size.max(0.0),
             share.clamp(0.0, 1.0),

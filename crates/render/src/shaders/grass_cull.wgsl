@@ -331,9 +331,11 @@ fn grass_seed(instance: u32, shadow: bool) -> BladeSeed {
     let buried = smoothstep(0.01, 0.05, snow) * smoothstep(0.3, 0.8, f.lod.z);
     if (fract(r2.y * 7.31 + r0.z * 3.7) < buried) { return out; }
     // Flowering stems stand a little taller and straighter (BLOOM_RISE in grass.rs), above
-    // the blades around them.
+    // the blades around them; a shrub's berries hang among its leaves (`bloom_height`: the
+    // seed head length's slot below 0).
     let flower = r2.z < f.bloom.w;
-    let height = grown * select(1.0, 1.15, flower) - snow;
+    let bloom_rise = select(1.15, -f.axis_z.w, f.axis_z.w < 0.0);
+    let height = grown * select(1.0, bloom_rise, flower) - snow;
     if (height < 0.008) { return out; }
     let leaf = f.lush.w;
     // Thinned out, the survivors widen to keep the cover (leaves less: they'd turn into plates).

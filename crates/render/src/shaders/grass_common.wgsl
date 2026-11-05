@@ -20,7 +20,7 @@ struct GrassField {
     origin: vec4<f32>,  // camera-relative position of the field's -x -z corner (xyz)
     axis_x: vec4<f32>,  // field x axis (unit, world), w: size along x (m)
     axis_y: vec4<f32>,  // field up, w: size along z (m)
-    axis_z: vec4<f32>,  // field z axis, w: seed head length (fraction of the stem, 0 round heads)
+    axis_z: vec4<f32>,  // field z axis, w: seed head length (fraction of the stem, 0 round heads; below 0: round heads' stems, -share of the plant's height)
     grid: vec4<u32>,    // map points along x and z, unused, seed
     shape: vec4<f32>,   // blade height (m), height variation, root width (m), bend
     lush: vec4<f32>,    // fresh albedo (linear), w: leaf amount (0 blades .. 1 leaves)
@@ -32,7 +32,7 @@ struct GrassField {
     wear: vec4<f32>,    // worn-ground map: first point (field-local m, xz), points per m, 1 = present
     gust: vec4<f32>,    // steady wind (m/s, xyz), w: the wind's run (m) less speed x time
     bloom: vec4<f32>,   // flower heads' albedo (linear), w: share of blades flowering
-    kind: vec4<f32>,    // flower head width (m; a flowering stem's record width is its head's), this kind's blades as a share of the field's most, pinnae pairs (or -(leaflets + stalk) for a compound leaf), leaf rise (0..1)
+    kind: vec4<f32>,    // flower head width (m; a flowering stem's record width is its head's), this kind's blades as a share of the field's most, pinnae pairs (or -(leaflets + stalk) for a compound leaf, or 100 + alternate leaves for a shrub's twig), leaf rise (0..1)
 };
 // A field growing several kinds of grass has one entry for each, one after the other: the
 // same placement, distances and wind, each kind's look (`grid.z` of the first: how many). A
@@ -219,7 +219,10 @@ fn grass_vertex(s: BladeShape, vertex: u32, t: f32, tip_dir: vec3<f32>) -> Blade
     let whole = select(max(pow(sin(PI * pow(x, 0.8)), 0.7), 0.1), 1.0, f.kind.z < 0.0);
     let leaf_shape = select(select(0.1, 0.04, f.kind.z < 0.0), whole, u > stalk);
     // A blade tapers to its tip; a stick lying on the ground (no leaf) only a little.
-    let taper = mix(pow(q, 0.6), 1.0 - 0.55 * u, lying * (1.0 - leaf));
+    var taper = mix(pow(q, 0.6), 1.0 - 0.55 * u, lying * (1.0 - leaf));
+    // A shrub's twig keeps its leaves full size most of the way up, the youngest at the tip
+    // smaller (`grass_twig_cut`).
+    taper = select(taper, 1.0 - 0.5 * u * u, f.kind.z > 99.5);
     var half_width = 0.5 * s.width * mix(taper, leaf_shape, leaf);
     // A flowering stem: thin, then its head (a disc seen edge-on is still a few petals wide).
     var head = smoothstep(0.91, 0.94, u);
