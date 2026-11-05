@@ -52,6 +52,72 @@ fn pool_sizes(cores: usize) -> (usize, usize) {
     (cores.saturating_sub(2).max(1), (cores / 4).clamp(1, 4))
 }
 
+/// Threads that background work (art, bakes, nav builds) may split into across the whole
+/// process: cores − 2, like the compute pool, so the frame's own threads keep their cores.
+fn background_threads() -> usize {
+    static TOTAL: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *TOTAL.get_or_init(|| {
+        std::thread::available_parallelism()
+            .map_or(4, |n| n.get())
+            .saturating_sub(2)
+            .max(1)
+    })
+}
+
+/// Background threads leased now, by every [`BackgroundLease`] alive.
+static LEASED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// A share of the background threads, for a job that splits its work over threads of its own
+/// (`std::thread::scope` over chunks). Several such jobs at once used to each take every core:
+/// on the 4-core cloud VM 8 art threads ran beside the frame while a zone streamed in, and the
+/// physics threads waited 130 ms to be scheduled for 0.04 ms of work (16 × 16 on a 32-core
+/// PC). Leases together stay within [`background_threads`]; a job always gets at least one
+/// thread. Unreal's task graph and Unity's job system share one worker count the same way.
+#[derive(Debug)]
+pub struct BackgroundLease {
+    taken: usize,
+    threads: usize,
+}
+
+impl BackgroundLease {
+    /// Threads the job may run on (at least 1).
+    pub fn threads(&self) -> usize {
+        self.threads
+    }
+}
+
+impl Drop for BackgroundLease {
+    fn drop(&mut self) {
+        LEASED.fetch_sub(self.taken, std::sync::atomic::Ordering::AcqRel);
+    }
+}
+
+/// Lease up to `want` background threads: what's free of [`background_threads`], at least 1.
+/// Hold it while the threads run; they return when it drops.
+pub fn background_lease(want: usize) -> BackgroundLease {
+    use std::sync::atomic::Ordering;
+    let total = background_threads();
+    let want = want.max(1);
+    let mut leased = LEASED.load(Ordering::Acquire);
+    loop {
+        let taken = want.min(total.saturating_sub(leased));
+        match LEASED.compare_exchange_weak(
+            leased,
+            leased + taken,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => {
+                return BackgroundLease {
+                    taken,
+                    threads: taken.max(1),
+                };
+            }
+            Err(now) => leased = now,
+        }
+    }
+}
+
 /// Run `f(chunk_index, chunk)` over `data` split into `chunk_size` pieces on the compute pool.
 ///
 /// Called from an async worker (an [`off_frame`] build, a cell build) or from a thread with no
@@ -230,6 +296,22 @@ impl<T: Send + 'static> Drop for Pipelined<T> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn background_leases_share_the_cores_and_give_them_back() {
+        let total = background_threads();
+        let first = background_lease(usize::MAX);
+        assert!(first.threads() >= 1 && first.threads() <= total);
+        // Another job while the first holds them all: one thread of its own, no more.
+        let second = background_lease(16);
+        assert_eq!(
+            second.threads(),
+            1.max(total.saturating_sub(first.threads())).min(16)
+        );
+        drop(first);
+        drop(second);
+        let again = background_lease(total);
+        assert_eq!(again.threads(), total, "returned when the leases drop");
+    }
     use super::*;
     use std::sync::Arc;
 

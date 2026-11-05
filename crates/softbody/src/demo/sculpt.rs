@@ -906,7 +906,8 @@ fn threads() -> usize {
 }
 
 fn par_for_each_mut<T: Send>(data: &mut [T], f: impl Fn(&mut T) + Sync) {
-    let chunk = data.len().div_ceil(threads()).max(256);
+    let lease = engine_core::tasks::background_lease(threads());
+    let chunk = data.len().div_ceil(lease.threads()).max(256);
     std::thread::scope(|s| {
         for c in data.chunks_mut(chunk) {
             let f = &f;
@@ -916,7 +917,8 @@ fn par_for_each_mut<T: Send>(data: &mut [T], f: impl Fn(&mut T) + Sync) {
 }
 
 fn par_zip<A: Sync, B: Send>(a: &[A], b: &mut [B], f: impl Fn(usize, &A, &mut B) + Sync) {
-    let chunk = b.len().div_ceil(threads()).max(256);
+    let lease = engine_core::tasks::background_lease(threads());
+    let chunk = b.len().div_ceil(lease.threads()).max(256);
     std::thread::scope(|s| {
         for (k, c) in b.chunks_mut(chunk).enumerate() {
             let f = &f;
@@ -931,7 +933,8 @@ fn par_zip<A: Sync, B: Send>(a: &[A], b: &mut [B], f: impl Fn(usize, &A, &mut B)
 }
 
 fn par_map<T: Send>(n: usize, f: impl Fn(usize) -> T + Sync) -> Vec<T> {
-    let chunk = n.div_ceil(threads()).max(16);
+    let lease = engine_core::tasks::background_lease(threads());
+    let chunk = n.div_ceil(lease.threads()).max(16);
     let mut parts: Vec<Vec<T>> = Vec::new();
     std::thread::scope(|s| {
         let handles: Vec<_> = (0..n)

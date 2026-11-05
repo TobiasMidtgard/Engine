@@ -818,10 +818,13 @@ pub fn project_uv(p: Vec3, axis: usize) -> Vec2 {
 
 /// `f(0..n)` computed on all cores, in order.
 pub fn par_map<T: Send>(n: usize, f: impl Fn(usize) -> T + Sync) -> Vec<T> {
-    let threads = std::thread::available_parallelism()
-        .map(|t| t.get())
-        .unwrap_or(4)
-        .min(n.max(1));
+    let lease = engine_core::tasks::background_lease(
+        std::thread::available_parallelism()
+            .map(|t| t.get())
+            .unwrap_or(4)
+            .min(n.max(1)),
+    );
+    let threads = lease.threads();
     if threads <= 1 {
         return (0..n).map(f).collect();
     }

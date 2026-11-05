@@ -236,10 +236,13 @@ pub fn par_texels<T: Send + Copy + Default>(
     f: impl Fn(u32, u32) -> T + Sync,
 ) -> Vec<T> {
     let mut out = vec![T::default(); (w * h) as usize];
-    let threads = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(4)
-        .clamp(1, 16);
+    let lease = engine_core::tasks::background_lease(
+        std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4)
+            .clamp(1, 16),
+    );
+    let threads = lease.threads();
     let rows = (h as usize).div_ceil(threads).max(1);
     std::thread::scope(|s| {
         for (i, chunk) in out.chunks_mut(rows * w as usize).enumerate() {

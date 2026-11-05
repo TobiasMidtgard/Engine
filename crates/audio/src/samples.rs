@@ -415,10 +415,13 @@ fn load_sets(dir: &Path, feet: Feet) -> BTreeMap<String, TakeSet> {
     files.sort();
     // Decode and cut on a few threads (a minute of Vorbis takes a while in a debug build),
     // each taking the next file, the largest first, so they finish together.
-    let workers = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(2)
-        .clamp(1, 4);
+    let lease = engine_core::tasks::background_lease(
+        std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(2)
+            .clamp(1, 4),
+    );
+    let workers = lease.threads();
     let mut order: Vec<usize> = (0..files.len()).collect();
     let size = |i: usize| std::fs::metadata(&files[i].1).map(|m| m.len()).unwrap_or(0);
     order.sort_by_key(|&i| std::cmp::Reverse(size(i)));

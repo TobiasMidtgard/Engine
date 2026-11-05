@@ -206,10 +206,13 @@ pub fn hex(rgb: u32) -> Vec3 {
 // ------------------------------------------------------------------------------- baking
 
 fn par_rows<T: Send>(data: &mut [T], width: usize, f: impl Fn(usize, &mut [T]) + Sync) {
-    let threads = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(4)
-        .clamp(1, 16);
+    let lease = engine_core::tasks::background_lease(
+        std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4)
+            .clamp(1, 16),
+    );
+    let threads = lease.threads();
     let rows = data.len() / width.max(1);
     let per = rows.div_ceil(threads).max(1);
     std::thread::scope(|s| {

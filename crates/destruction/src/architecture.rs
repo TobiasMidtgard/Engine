@@ -1720,10 +1720,13 @@ fn bake_ao(parts: &mut [(DestructibleMaterial, MeshBuilder)]) {
             Vec3::new(r * a.cos(), r * a.sin(), (1.0 - u).max(0.0).sqrt())
         })
         .collect();
-    let threads = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(4)
-        .clamp(1, 16);
+    let lease = engine_core::tasks::background_lease(
+        std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4)
+            .clamp(1, 16),
+    );
+    let threads = lease.threads();
     for (_, m) in parts.iter_mut() {
         let chunk = m.vertices.len().div_ceil(threads).max(256);
         std::thread::scope(|sc| {

@@ -27,7 +27,8 @@ pub(crate) fn threads() -> usize {
 pub(crate) fn par_rows<T: Send>(data: &mut [T], width: usize, f: impl Fn(usize, &mut [T]) + Sync) {
     const ROWS: usize = 4;
     let width = width.max(1);
-    let n = threads();
+    let lease = engine_core::tasks::background_lease(threads());
+    let n = lease.threads();
     if n == 1 || data.len() <= width * ROWS {
         for (y, row) in data.chunks_mut(width).enumerate() {
             f(y, row);

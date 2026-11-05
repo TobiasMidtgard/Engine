@@ -2462,7 +2462,10 @@ fn scratch_lines(p: Vec2, mask: f32, seed: u32) -> f32 {
 /// Run `f` over the rows of a grid `w` cells wide (it gets the row index and the row's cells),
 /// on a few threads.
 fn par_rows<T: Send>(cells: &mut [T], w: usize, f: impl Fn(usize, &mut [T]) + Sync) {
-    let threads = std::thread::available_parallelism().map_or(1, |n| n.get().min(4));
+    let lease = engine_core::tasks::background_lease(
+        std::thread::available_parallelism().map_or(1, |n| n.get().min(4)),
+    );
+    let threads = lease.threads();
     let rows = cells.len() / w.max(1);
     let band = rows.div_ceil(threads).max(1);
     std::thread::scope(|sc| {
@@ -6222,10 +6225,13 @@ fn build_kit() -> Kit {
     );
     let next = AtomicUsize::new(0);
     let results: Mutex<Vec<Output>> = Mutex::new(Vec::new());
-    let threads = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(4)
-        .clamp(1, 8);
+    let lease = engine_core::tasks::background_lease(
+        std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4)
+            .clamp(1, 8),
+    );
+    let threads = lease.threads();
     std::thread::scope(|s| {
         for _ in 0..threads {
             s.spawn(|| {
