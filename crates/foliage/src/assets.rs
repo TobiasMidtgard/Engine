@@ -28,6 +28,7 @@ use crate::meshgen::textures::{
     kind_of, leaf_textures, mass_textures,
 };
 use crate::meshgen::tree::{PlantMeshes, woody};
+use crate::meshgen::wind_bones::WindSkeleton;
 use crate::species::{LeafStyle, PlantForm, PlantLibrary, PlantSpecies, srgb};
 
 /// Mesh variants per species.
@@ -93,6 +94,10 @@ pub struct VariantMeshes {
     /// over the sapling's.
     pub collision: Vec<crate::meshgen::tree::CollisionCapsule>,
     pub sapling_collision: Vec<crate::meshgen::tree::CollisionCapsule>,
+    /// The wind skeletons the swaying meshes were baked on (`EcologySettings::bone_wind`;
+    /// none when off or for plants without one): the tree's and the sapling's.
+    pub wind: Option<Arc<WindSkeleton>>,
+    pub sapling_wind: Option<Arc<WindSkeleton>>,
 }
 
 /// Everything needed to draw one species.
@@ -286,7 +291,8 @@ enum Job {
     Bark(BarkKind),
     Small(SmallKind),
     Moss,
-    Meshes(usize, Box<PlantSpecies>),
+    /// A species' variants; with `bool`, baked on their wind skeletons.
+    Meshes(usize, Box<PlantSpecies>, bool),
 }
 
 /// What a [`Job`] made.
@@ -308,11 +314,24 @@ impl Job {
             }
             Job::Small(kind) => Baked::Small(kind, kind.paint()),
             Job::Moss => Baked::Moss(paint_moss()),
-            Job::Meshes(i, sp) => {
+            Job::Meshes(i, sp, bone_wind) => {
                 let sp = *sp;
                 let seed = name_seed(&sp.name);
                 let parts = (0..VARIANTS as u64)
-                    .map(|v| build_meshes(&sp, seed ^ (v * 0x9e37_79b9)))
+                    .map(|v| {
+                        let (mut full, mut sapling) = build_meshes(&sp, seed ^ (v * 0x9e37_79b9));
+                        if !bone_wind {
+                            full.wind = None;
+                        }
+                        full.bake_wind_bones();
+                        if let Some(s) = &mut sapling {
+                            if !bone_wind {
+                                s.wind = None;
+                            }
+                            s.bake_wind_bones();
+                        }
+                        (full, sapling)
+                    })
                     .collect();
                 Baked::Meshes(i, sp, parts)
             }
@@ -380,6 +399,7 @@ pub fn ensure_species_visuals(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut images: ResMut<Assets<Image>>,
+    settings: Option<Res<crate::plant::EcologySettings>>,
 ) {
     if let Some(done) = state
         .bake
@@ -439,7 +459,11 @@ pub fn ensure_species_visuals(
             if visuals.moss.is_none() {
                 jobs.push(Job::Moss);
             }
-            jobs.extend(todo.into_iter().map(|(i, sp)| Job::Meshes(i, Box::new(sp))));
+            let bone_wind = settings.as_ref().is_none_or(|s| s.bone_wind);
+            jobs.extend(
+                todo.into_iter()
+                    .map(|(i, sp)| Job::Meshes(i, Box::new(sp), bone_wind)),
+            );
             match AsyncComputeTaskPool::try_get().filter(|_| loading.background) {
                 Some(pool) => {
                     let slot = Arc::new(Mutex::new(None));
@@ -614,10 +638,17 @@ fn build_species(
     let mut variants = Vec::with_capacity(parts.len());
     for (full, sapling) in parts {
         let mut add = |m: Option<Mesh>| m.map(|m| meshes.add(m));
-        let (sapling_wood, sapling_foliage, sapling_thin, sapling_collision) = match sapling {
-            Some(s) => (add(s.wood), add(s.foliage), s.foliage_thin, s.collision),
-            None => (None, None, Vec::new(), Vec::new()),
-        };
+        let (sapling_wood, sapling_foliage, sapling_thin, sapling_collision, sapling_wind) =
+            match sapling {
+                Some(s) => (
+                    add(s.wood),
+                    add(s.foliage),
+                    s.foliage_thin,
+                    s.collision,
+                    s.wind,
+                ),
+                None => (None, None, Vec::new(), Vec::new(), None),
+            };
         let mut add_all =
             |v: Vec<Mesh>| -> Vec<Handle<Mesh>> { v.into_iter().map(|m| meshes.add(m)).collect() };
         let foliage_thin = add_all(full.foliage_thin);
@@ -671,6 +702,8 @@ fn build_species(
             cut_height: full.cut_height,
             collision: full.collision,
             sapling_collision,
+            wind: full.wind,
+            sapling_wind,
         });
     }
 

@@ -2,6 +2,7 @@
 
 pub mod api;
 pub mod assets;
+pub mod bone_wind;
 pub mod cave;
 pub mod cover;
 pub mod demo;
@@ -63,6 +64,8 @@ impl Plugin for FoliagePlugin {
             .init_resource::<FoliageSeason>()
             .init_resource::<ecology::GrowthClock>()
             .init_resource::<assets::FoliageVisuals>()
+            .init_resource::<engine_render::PlantWindMeshes>()
+            .init_resource::<engine_render::PlantWindSpecies>()
             .init_resource::<loading::FoliageLoading>()
             .init_resource::<lod_fade::LodFades>()
             .init_resource::<visuals::GlowLights>()
@@ -244,6 +247,7 @@ impl Plugin for FoliagePlugin {
                             .pipe(engine_core::schedule::queue_when(scenery::build_scenery)),
                         scenery::cull_debris,
                         assets::ensure_species_visuals,
+                        bone_wind::register_bone_wind,
                         season::apply_season_colors,
                         season::apply_litter_color,
                         lod_fade::begin_fades,

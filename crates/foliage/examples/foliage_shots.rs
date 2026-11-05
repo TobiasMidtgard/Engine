@@ -397,6 +397,12 @@ fn main() {
             .resource_mut::<engine_foliage::EcologySettings>()
             .herb_kinds = false;
     }
+    // `FOLIAGE_BONE_WIND=0`: trees sway as one (the legacy sway), not on their wind bones.
+    if std::env::var("FOLIAGE_BONE_WIND").is_ok_and(|v| v == "0") {
+        app.world
+            .resource_mut::<engine_foliage::EcologySettings>()
+            .bone_wind = false;
+    }
     if std::env::var("FOLIAGE_FROZEN").is_ok_and(|v| v == "1") {
         app.world
             .resource_mut::<engine_foliage::EcologySettings>()
@@ -464,6 +470,21 @@ fn main() {
                 f.styles.len()
             );
         }
+    }
+    // `FOLIAGE_WIND=<m/s>`: a steady wind at 10 m (gust fronts on above 10 m/s), settled
+    // before the shots: trees on their wind bones lean, sway and show their leaves' undersides.
+    if let Some(w) = std::env::var("FOLIAGE_WIND")
+        .ok()
+        .and_then(|v| v.parse::<f32>().ok())
+    {
+        let wind = Vec3::new(w, 0.0, 0.35 * w);
+        app.world.resource_mut::<WeatherState>().wind = wind;
+        if let Some(mut field) = app.world.get_resource_mut::<engine_world::WindField>() {
+            let fronts = w > 10.0;
+            field.waves.broad.strength = if fronts { 0.55 } else { 0.0 };
+            field.waves.fine.strength = if fronts { 0.3 } else { 0.0 };
+        }
+        simulate(&mut app, 240);
     }
     let forest = demo::forest_viewpoints(FOREST);
     let cave = demo::cave_viewpoints(CAVE);

@@ -319,6 +319,10 @@ impl WindSkeleton {
     }
 }
 
+/// Pieces of a crown mesh reaching no further than this from their middle (m) ride one bone
+/// whole ([`WindSkeleton::bake`]): cards and sprays, not a far level's big clumps.
+const CARD_REACH_M: f32 = 0.5;
+
 impl WindSkeleton {
     /// Write every vertex's word ([`pack`]) into the alpha of `mesh`'s vertex colors: the bone
     /// nearest it (any level for `leaves`, the trunk, limbs and branches for wood, since twigs
@@ -335,9 +339,40 @@ impl WindSkeleton {
             grid.add_path(&[b.pivot, b.pivot + b.axis * b.length], i as u16, b.level);
         }
         let below = if leaves { 4 } else { 3 };
-        for v in &mut mesh.vertices {
+        // A leaf card (or a spray's connected leaves) rides one bone whole: its corners each
+        // finding their own nearest bone would tear it apart when those bones turn apart.
+        let pieces = leaves.then(|| {
+            let piece = connected_pieces(mesh);
+            let mut sum = vec![(Vec3::ZERO, 0u32); mesh.vertices.len()];
+            for (v, &r) in mesh.vertices.iter().zip(&piece) {
+                sum[r as usize].0 += Vec3::from(v.position);
+                sum[r as usize].1 += 1;
+            }
+            let middle: Vec<Vec3> = sum.iter().map(|&(p, n)| p / n.max(1) as f32).collect();
+            // A piece much bigger than a card (a far level's clump of crown) is no card: its
+            // vertices find their own bones, or a whole side of the crown would swing on one.
+            let mut size = vec![0.0f32; mesh.vertices.len()];
+            for (v, &r) in mesh.vertices.iter().zip(&piece) {
+                let d = (Vec3::from(v.position) - middle[r as usize]).length();
+                size[r as usize] = size[r as usize].max(d);
+            }
+            let bone: Vec<Option<u16>> = (0..sum.len())
+                .map(|r| {
+                    (sum[r].1 > 0 && size[r] <= CARD_REACH_M)
+                        .then(|| grid.nearest(middle[r], below, 4).unwrap_or(0))
+                })
+                .collect();
+            piece
+                .into_iter()
+                .map(|r| bone[r as usize])
+                .collect::<Vec<Option<u16>>>()
+        });
+        for (i, v) in mesh.vertices.iter_mut().enumerate() {
             let p = Vec3::from(v.position);
-            let bone = grid.nearest(p, below, 4).unwrap_or(0);
+            let bone = match pieces.as_ref().and_then(|b| b[i]) {
+                Some(b) => b,
+                None => grid.nearest(p, below, 4).unwrap_or(0),
+            };
             let b = &self.bones[bone as usize];
             let to = p - b.pivot;
             let along = to.dot(b.axis);
@@ -352,6 +387,41 @@ impl WindSkeleton {
             v.color[3] = pack(bone, tip, edge, underside);
         }
     }
+}
+
+/// Each vertex's piece of `mesh` (the vertices its triangles join it to, and any at the same
+/// spot), as the index of one vertex of that piece.
+fn connected_pieces(mesh: &engine_render::Mesh) -> Vec<u32> {
+    fn root(parent: &mut [u32], mut i: u32) -> u32 {
+        while parent[i as usize] != i {
+            let up = parent[parent[i as usize] as usize];
+            parent[i as usize] = up;
+            i = up;
+        }
+        i
+    }
+    let mut parent: Vec<u32> = (0..mesh.vertices.len() as u32).collect();
+    // Vertices at one spot are one (a card's triangles may each have their own corners).
+    let mut at: HashMap<[i32; 3], u32> = HashMap::new();
+    for (i, v) in mesh.vertices.iter().enumerate() {
+        let key = v.position.map(|c| (c * 1000.0).round() as i32);
+        let first = *at.entry(key).or_insert(i as u32);
+        let (a, b) = (root(&mut parent, first), root(&mut parent, i as u32));
+        if a != b {
+            parent[a.max(b) as usize] = a.min(b);
+        }
+    }
+    for t in mesh.indices.as_chunks::<3>().0 {
+        for e in [(t[0], t[1]), (t[1], t[2])] {
+            let (a, b) = (root(&mut parent, e.0), root(&mut parent, e.1));
+            if a != b {
+                parent[a.max(b) as usize] = a.min(b);
+            }
+        }
+    }
+    (0..parent.len() as u32)
+        .map(|i| root(&mut parent, i))
+        .collect()
 }
 
 /// The vertex word: bone (14 bits), tip weight 0..1 (5 bits), edge 0..1 (4 bits) and whether
@@ -378,6 +448,59 @@ pub fn unpack(word: f32) -> (u16, f32, f32, bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_leaf_card_rides_one_bone_whole() {
+        // Two sprays side by side, a card straddling the gap between them: all four corners
+        // follow the spray nearest the card's middle, never two at once.
+        let bone = |x: f32, parent| WindBone {
+            pivot: Vec3::new(x, 1.0, 0.0),
+            length: 1.0,
+            axis: Vec3::Y,
+            face: Vec3::Z,
+            parent,
+            level: if parent.is_some() { 3 } else { 0 },
+            phase: 0.0,
+            stiffness: 1.0,
+            drag_share: 1.0,
+        };
+        let s = WindSkeleton {
+            bones: vec![
+                WindBone {
+                    pivot: Vec3::new(0.0, -2.0, 0.0),
+                    length: 2.0,
+                    ..bone(0.0, None)
+                },
+                bone(-0.5, Some(0)),
+                bone(0.5, Some(0)),
+            ],
+        };
+        let v = |x: f32, y: f32| {
+            engine_render::Vertex::new(Vec3::new(x, y, 0.0), Vec3::Z, engine_core::math::Vec2::ZERO)
+        };
+        let mut m = engine_render::Mesh::new(
+            vec![v(-0.45, 1.5), v(0.3, 1.5), v(0.3, 1.9), v(-0.45, 1.9)],
+            vec![0, 1, 2, 0, 2, 3],
+        );
+        s.bake(&mut m, true);
+        let bones: Vec<u16> = m.vertices.iter().map(|v| unpack(v.color[3]).0).collect();
+        assert!(bones.iter().all(|&b| b == bones[0]), "{bones:?}");
+        assert_eq!(bones[0], 1, "the card's middle is nearer the left spray");
+        // The same card with each triangle on corners of its own.
+        let mut m = engine_render::Mesh::new(
+            vec![
+                v(-0.45, 1.5),
+                v(0.3, 1.5),
+                v(0.3, 1.9),
+                v(-0.45, 1.5),
+                v(0.3, 1.9),
+                v(-0.45, 1.9),
+            ],
+            (0..6).collect(),
+        );
+        s.bake(&mut m, true);
+        assert!(m.vertices.iter().all(|v| unpack(v.color[3]).0 == 1));
+    }
 
     #[test]
     fn the_vertex_word_survives_a_float() {

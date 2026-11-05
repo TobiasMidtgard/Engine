@@ -411,6 +411,10 @@ pub struct EcologySettings {
     /// wood anemone, broad shade herbs; `grass::herb_kind`) instead of one, and lay twigs
     /// among its fallen leaves.
     pub herb_kinds: bool,
+    /// Trees and shrubs sway on their wind skeletons (`meshgen::wind_bones`): trunk, limbs,
+    /// branches and leaf sprays each at their own frequency, sprays twisting to show their
+    /// undersides, through Rendering's `PlantWindMeshes`. Off: the whole plant sways as one.
+    pub bone_wind: bool,
 }
 
 impl Default for EcologySettings {
@@ -431,6 +435,7 @@ impl Default for EcologySettings {
             gpu_grass: true,
             gpu_ferns: true,
             herb_kinds: true,
+            bone_wind: true,
         }
     }
 }

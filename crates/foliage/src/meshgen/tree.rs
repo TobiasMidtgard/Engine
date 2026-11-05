@@ -113,6 +113,47 @@ pub const MAX_COLLISION_CAPSULES: usize = 14;
 /// Wood thinner than this (radius, meters) has no collision: branches and twigs bend aside.
 pub const COLLISION_MIN_RADIUS_M: f32 = 0.045;
 
+impl PlantMeshes {
+    /// Write each swaying vertex's wind bone word into its vertex alpha
+    /// ([`super::wind_bones::WindSkeleton::bake`]): the wood above the cut and every crown, at
+    /// every level of detail. The stump, the logs and the snag keep their plain sway weights
+    /// (they are not drawn on the skeleton). Nothing without a skeleton.
+    pub fn bake_wind_bones(&mut self) {
+        let Some(wind) = self.wind.clone() else {
+            return;
+        };
+        for m in [
+            &mut self.wood,
+            &mut self.wood_mid,
+            &mut self.wood_lod,
+            &mut self.wood_distant,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            wind.bake(m, false);
+        }
+        for m in [
+            &mut self.foliage,
+            &mut self.foliage_hero,
+            &mut self.foliage_mid,
+            &mut self.foliage_lod,
+            &mut self.foliage_distant,
+            &mut self.foliage_dead,
+            &mut self.foliage_dead_lod,
+        ]
+        .into_iter()
+        .flatten()
+        .chain(self.foliage_thin.iter_mut())
+        .chain(self.foliage_mid_thin.iter_mut())
+        .chain(self.foliage_lod_thin.iter_mut())
+        .chain(self.foliage_distant_thin.iter_mut())
+        {
+            wind.bake(m, true);
+        }
+    }
+}
+
 /// A tree's collision from its skeleton, the way SpeedTree's collision generator does it: the
 /// largest-volume branches first (the trunk, then the thickest limbs), each covered by a few
 /// capsules along the part of it thicker than [`COLLISION_MIN_RADIUS_M`], until
