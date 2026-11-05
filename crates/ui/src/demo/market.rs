@@ -288,10 +288,22 @@ pub fn spawn_market(world: &mut World, origin: DVec3) {
 /// Spawns the market around `origin` with the art from [`bake_market`].
 pub fn place_market(world: &mut World, origin: DVec3, mut tex: MarketBake) {
     let ground = world.get_resource::<Ground>().cloned().unwrap_or_default();
-    let ground_y = |p: DVec3| ground.height(p).unwrap_or(origin.y);
+    let started = std::time::Instant::now();
+    let asked = std::cell::Cell::new((0u32, 0.0f64));
+    let ground_y = |p: DVec3| {
+        let t = std::time::Instant::now();
+        let y = ground.height(p).unwrap_or(origin.y);
+        let (n, ms) = asked.get();
+        asked.set((n + 1, ms + t.elapsed().as_secs_f64() * 1000.0));
+        y
+    };
+    // The straw asks for thousands of heights over a few meters: it reads them off the
+    // lattice the paving is built on, asked once a corner.
+    let lattice = GroundLattice::new(&ground_y, origin);
+    let fine = |p: DVec3| lattice.height(p);
     let mats = Mats::new(world, &mut tex);
     let mut stalls = std::mem::take(&mut tex.stalls).into_iter();
-    square(world, &mats, origin, &ground_y);
+    square(world, &mats, origin, &fine);
     let mut fronts = Vec::new();
     for i in 0..STALLS.len() {
         let (p, yaw) = stall_place(i);
@@ -368,8 +380,69 @@ pub fn place_market(world: &mut World, origin: DVec3, mut tex: MarketBake) {
         })
         .collect();
     spots.push((cart, -0.6, Vec2::new(1.6, 1.4), 45));
-    straw(world, &mats, origin, &ground_y, &spots, &mut rng);
+    straw(world, &mats, origin, &fine, &spots, &mut rng);
     ale_corner(world, &mats, origin, &ground_y, &mut rng);
+    let (n, ms) = asked.get();
+    engine_core::log::info!(
+        "ui market: placed in {:.1} ms, {n} ground heights asked ({ms:.1} ms of it)",
+        started.elapsed().as_secs_f64() * 1000.0
+    );
+}
+
+/// Ground heights on a lattice of [`GroundLattice::CELL_M`] around the square's middle,
+/// each corner asked once and read between them bilinearly. The paving's vertices are its
+/// corners, so the straw lies on the heights the paving was built from.
+struct GroundLattice<'a> {
+    ask: &'a dyn Fn(DVec3) -> f64,
+    origin: DVec3,
+    corners: std::cell::RefCell<std::collections::HashMap<(i64, i64), f64>>,
+}
+
+impl<'a> GroundLattice<'a> {
+    /// The paving's vertex spacing ([`square`]).
+    const CELL_M: f64 = 0.5;
+
+    fn new(ask: &'a dyn Fn(DVec3) -> f64, origin: DVec3) -> Self {
+        Self {
+            ask,
+            origin,
+            corners: Default::default(),
+        }
+    }
+
+    fn height(&self, p: DVec3) -> f64 {
+        // A point on a corner (a paving vertex) reads that corner alone.
+        let snap = |f: f64| {
+            if (f - f.round()).abs() < 1e-6 {
+                f.round()
+            } else {
+                f
+            }
+        };
+        let fx = snap((p.x - self.origin.x) / Self::CELL_M);
+        let fz = snap((p.z - self.origin.z) / Self::CELL_M);
+        let (i, k) = (fx.floor(), fz.floor());
+        let (tx, tz) = (fx - i, fz - k);
+        let (i, k) = (i as i64, k as i64);
+        let mut corners = self.corners.borrow_mut();
+        let mut at = |di: i64, dk: i64| {
+            *corners.entry((i + di, k + dk)).or_insert_with(|| {
+                (self.ask)(DVec3::new(
+                    self.origin.x + (i + di) as f64 * Self::CELL_M,
+                    p.y,
+                    self.origin.z + (k + dk) as f64 * Self::CELL_M,
+                ))
+            })
+        };
+        let a = at(0, 0);
+        if tx == 0.0 && tz == 0.0 {
+            return a;
+        }
+        let (b, c, d) = (at(1, 0), at(0, 1), at(1, 1));
+        let near = a + (b - a) * tx;
+        let far = c + (d - c) * tx;
+        near + (far - near) * tz
+    }
 }
 
 /// The open side of the square, between the smith and the produce stall: a corner for a
