@@ -90,6 +90,8 @@ struct VertexOut {
     @location(9) @interpolate(flat) axis_z: vec3<f32>,
     // Its dither (`n0.w`, `dither_keeps` in lib_frame.wgsl; 0: drawn whole).
     @location(10) @interpolate(flat) dither: f32,
+    // Snow a bone plant holds here (`vertex_snow`; 0 for other meshes).
+    @location(11) snow: f32,
 };
 
 // Wind sway of a vertex (meters, camera-relative): the material's `wind_sway` times the vertex
@@ -218,8 +220,17 @@ fn standard_vertex(in: VertexIn) -> VertexOut {
     out.axis_y = vertex_axis(in, 1u);
     out.axis_z = vertex_axis(in, 2u);
     out.dither = in.n0.w;
+    out.snow = vertex_snow(in, rel);
     out.clip = frame.view_proj * vec4<f32>(rel, 1.0);
     return out;
+}
+
+// Share of the ground's snow a bone plant holds on its crown: its species' `snow_hold` (spruce
+// 1, bare birch 0.3). 0 for meshes without wind bones.
+fn vertex_snow(in: VertexIn, rel: vec3<f32>) -> f32 {
+    let entry = plant_wind_entry(in.extra.y);
+    if (entry == 0u) { return 0.0; }
+    return plant_snow_hold(entry);
 }
 
 // ---------------------------------------------------------------- surface detail
@@ -789,6 +800,8 @@ struct SurfaceIn {
     object_normal: vec3<f32>,
     axes: mat3x3<f32>,
     front: bool,
+    // Snow a bone plant holds here (`vertex_snow`).
+    snow: f32,
 };
 
 struct MaterialSample {
@@ -974,9 +987,34 @@ fn evaluate_material(si: SurfaceIn, shadows: bool) -> MaterialSample {
         let soaked = out.roughness * (1.0 - 0.2 * wet * porosity);
         out.roughness = mix(soaked, min(soaked, 0.1), wet * (1.0 - porosity));
         // Snow settles on top faces.
-        let snow_cover = saturate(ground.z * SURFACE_SNOW_SCALE_M * 10.0) * smoothstep(0.35, 0.8, n_up);
+        let fallen = saturate(ground.z * SURFACE_SNOW_SCALE_M * 10.0);
+        let snow_cover = fallen * smoothstep(0.35, 0.8, n_up);
         let snow_noise = value_noise2(tiling_pos(si.rel).xz * 1.7);
-        let snow = saturate(snow_cover * (0.75 + 0.5 * snow_noise));
+        var snow = saturate(snow_cover * (0.75 + 0.5 * snow_noise));
+        // Bone plants hold snow where it lands on them: on what faces the sky through the leaves
+        // above (the canopy map: falling snow is caught layer by layer as rain is, exp(-k L) of
+        // the leaf area above, `canopy_rain_through`; a branch also holds what lands on it, so
+        // lower whorls keep about half), on the side in view only when it isn't the underside.
+        // The geometric face decides that, not the shading normal (spray and card normals are
+        // bent outward for soft lighting, which read as speckles): a card seen from below stays
+        // green, a limb carries a white line along its top. Lumps in the plant's own space ride
+        // with its sway. Conifers hold snow in shelves on every whorl (Hedstrom and Pomeroy
+        // 1998: a spruce crown holds about 6 kg/m² per unit leaf area before it unloads).
+        if (si.snow > 0.0 && fallen > 0.0) {
+            let through = canopy_rain_through(si.rel + vec3<f32>(0.0, 0.3, 0.0));
+            let exposed = si.snow * mix(0.45, 1.0, through);
+            let lumps = value_noise3(si.local * 2.3) * 0.65 + value_noise3(si.local * 7.1) * 0.35;
+            // Cards and sprays take it on any side that isn't their underside; bark (closed
+            // meshes) only on the tops of limbs and branches, not down a trunk's sides.
+            let up = select(smoothstep(0.3, 0.75, face.y), smoothstep(-0.15, 0.4, face.y), out.thin);
+            let held = saturate((exposed * up * 2.6 - 0.35 + 0.7 * lumps) * fallen);
+            if (held > snow) {
+                snow = held;
+                // The snow's own surface faces up, whatever the leaf under it does.
+                out.normal = normalize(mix(out.normal, vec3<f32>(0.0, 1.0, 0.0), held * 0.8));
+                out.smooth_normal = normalize(mix(out.smooth_normal, vec3<f32>(0.0, 1.0, 0.0), held * 0.8));
+            }
+        }
         out.albedo = mix(out.albedo, vec3<f32>(0.9, 0.92, 0.95), snow);
         out.roughness = mix(out.roughness, 0.75, snow);
         out.subsurface = mix(out.subsurface, 0.3, snow);
@@ -986,7 +1024,7 @@ fn evaluate_material(si: SurfaceIn, shadows: bool) -> MaterialSample {
 
 fn surface_in(in: VertexOut, front: bool) -> SurfaceIn {
     return SurfaceIn(in.rel, in.normal, in.uv, in.color, in.material, in.local, in.object_normal,
-        mat3x3<f32>(in.axis_x, in.axis_y, in.axis_z), front);
+        mat3x3<f32>(in.axis_x, in.axis_y, in.axis_z), front, in.snow);
 }
 
 @fragment
@@ -1171,7 +1209,7 @@ fn fs_prepass(in: PrepassVertexOut, @builtin(front_facing) front: bool) -> Prepa
     let mat = materials[in.material];
     vt_feedback_on = vt_feedback_pixel(in.clip.xy);
     let si = SurfaceIn(in.rel, in.normal, in.uv, in.color, in.material, in.local, in.object_normal,
-        mat3x3<f32>(in.axis_x, in.axis_y, in.axis_z), front);
+        mat3x3<f32>(in.axis_x, in.axis_y, in.axis_z), front, 0.0);
     let m = evaluate_material(si, false);
     if ((mat.flags.x & 15u) == 1u && m.base.a < mat.params.w) {
         discard;
