@@ -184,6 +184,11 @@ impl Job {
         }
     }
 
+    /// Is it built, waiting to be taken ([`Job::poll`])?
+    pub(crate) fn done(&self) -> bool {
+        matches!(*self.state.lock(), State::Done(_))
+    }
+
     /// Is a shape thread building it now?
     pub(crate) fn building(&self) -> bool {
         matches!(*self.state.lock(), State::Building)

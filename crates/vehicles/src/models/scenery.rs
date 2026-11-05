@@ -299,7 +299,12 @@ fn textures(
         }
     }
     install_baker(world);
-    let preview = make(PREVIEW.min(full));
+    // A preview made on a worker for this zone's slice ([`Finished::spawn_sliced`]), else
+    // made here.
+    let stashed = world
+        .get_resource_mut::<StashedPreviews>()
+        .and_then(|mut p| p.0.remove(name));
+    let preview = stashed.unwrap_or_else(|| make(PREVIEW.min(full)));
     let mut images = world.resource_mut::<Assets<Image>>();
     let base = images.insert_keyed(&tex_key(name, "base"), preview.base);
     let normal = preview
@@ -324,6 +329,302 @@ fn textures(
         }
     }
     (base, normal, orm)
+}
+
+/// Texture previews made on a worker, by texture name, waiting for [`textures`] to take them.
+#[derive(Resource, Default)]
+struct StashedPreviews(HashMap<String, tex::Maps>);
+
+/// Where [`make_material`] asks for its texture sets: the world ([`textures`]), or a
+/// [`PreviewRecorder`] on a worker.
+trait TexSink {
+    fn textures_boxed(
+        &mut self,
+        name: &str,
+        full: u32,
+        make: Box<dyn Fn(u32) -> tex::Maps + Send>,
+    ) -> (Handle<Image>, Option<Handle<Image>>, Option<Handle<Image>>);
+}
+
+impl TexSink for World {
+    fn textures_boxed(
+        &mut self,
+        name: &str,
+        full: u32,
+        make: Box<dyn Fn(u32) -> tex::Maps + Send>,
+    ) -> (Handle<Image>, Option<Handle<Image>>, Option<Handle<Image>>) {
+        textures(self, name, full, make)
+    }
+}
+
+impl dyn TexSink + '_ {
+    /// [`TexSink::textures_boxed`] for any recipe.
+    fn textures(
+        &mut self,
+        name: &str,
+        full: u32,
+        make: impl Fn(u32) -> tex::Maps + Send + 'static,
+    ) -> (Handle<Image>, Option<Handle<Image>>, Option<Handle<Image>>) {
+        self.textures_boxed(name, full, Box::new(make))
+    }
+}
+
+/// Makes the previews a material's textures start as, without a world (the handles it gives
+/// back are stand-ins; only the previews are kept).
+#[derive(Default)]
+struct PreviewRecorder(Vec<(String, tex::Maps)>);
+
+impl TexSink for PreviewRecorder {
+    fn textures_boxed(
+        &mut self,
+        name: &str,
+        full: u32,
+        make: Box<dyn Fn(u32) -> tex::Maps + Send>,
+    ) -> (Handle<Image>, Option<Handle<Image>>, Option<Handle<Image>>) {
+        if !self.0.iter().any(|(n, _)| n == name) {
+            self.0.push((name.to_string(), make(PREVIEW.min(full))));
+        }
+        let stand_in = Handle::from_index(0);
+        (stand_in, Some(stand_in), Some(stand_in))
+    }
+}
+
+/// The texture previews `s`'s material starts with, made without the world (on a worker).
+fn preview_surface(s: Surface) -> Vec<(String, tex::Maps)> {
+    let mut rec = PreviewRecorder::default();
+    make_material(&mut rec, s);
+    rec.0
+}
+
+/// The material for `s`, its textures asked of `w`.
+fn make_material(w: &mut dyn TexSink, s: Surface) -> StandardMaterial {
+    let asphalt = |w: &mut dyn TexSink| {
+        w.textures("asphalt", HERO, |px| {
+            tex::asphalt(px, ASPHALT_TILE, None, 11)
+        })
+    };
+    let runway = |w: &mut dyn TexSink| {
+        w.textures("runway", STD, |px| {
+            tex::asphalt(px, RUNWAY_TILE, Some(RUNWAY_TILE / 256.0), 12)
+        })
+    };
+    let concrete = |w: &mut dyn TexSink| {
+        w.textures("concrete", STD, |px| tex::concrete(px, CONCRETE_TILE, 13))
+    };
+    let slabs = |w: &mut dyn TexSink| w.textures("slabs", STD, |px| tex::slabs(px, SLAB_PANEL, 14));
+    let grime = |w: &mut dyn TexSink| w.textures("grime", 512, |px| tex::grime(px, GRIME_TILE, 16));
+    match s {
+        Surface::Asphalt => {
+            let (b, n, o) = asphalt(w);
+            let mut m = tiled(pbr(b, n, o), ASPHALT_TILE);
+            m.reflectance = 0.45;
+            m
+        }
+        Surface::AsphaltPatch => {
+            let (b, n, o) = asphalt(w);
+            let mut m = tiled(pbr(b, n, o), ASPHALT_TILE);
+            m.base_color = [0.62, 0.62, 0.64, 1.0];
+            m.perceptual_roughness = 0.92;
+            m.normal_scale = 0.7;
+            m
+        }
+        Surface::Runway => {
+            let (b, n, o) = runway(w);
+            tiled(pbr(b, n, o), RUNWAY_TILE)
+        }
+        Surface::Concrete => {
+            let (b, n, o) = concrete(w);
+            tiled(pbr(b, n, o), CONCRETE_TILE)
+        }
+        Surface::Slabs => {
+            let (b, n, o) = slabs(w);
+            tiled(pbr(b, n, o), SLAB_PANEL * 2.0)
+        }
+        Surface::PaintAsphalt
+        | Surface::PaintRunway
+        | Surface::PaintSlabs
+        | Surface::PaintConcrete => {
+            // Each paint bakes over the same recipe as the surface it lies on.
+            let (tile, normal, name, make): (_, _, _, Box<dyn Fn(u32) -> tex::Maps + Send>) =
+                match s {
+                    Surface::PaintAsphalt => (
+                        ASPHALT_TILE,
+                        asphalt(w).1,
+                        "paint_asphalt",
+                        Box::new(|px| {
+                            let under = tex::asphalt_texel(ASPHALT_TILE, None, 11);
+                            tex::paint(px, ASPHALT_TILE, PAINT_WEAR, under, 15)
+                        }),
+                    ),
+                    Surface::PaintRunway => (
+                        RUNWAY_TILE,
+                        runway(w).1,
+                        "paint_runway",
+                        Box::new(|px| {
+                            let under =
+                                tex::asphalt_texel(RUNWAY_TILE, Some(RUNWAY_TILE / 256.0), 12);
+                            tex::paint(px, RUNWAY_TILE, PAINT_WEAR, under, 15)
+                        }),
+                    ),
+                    Surface::PaintSlabs => (
+                        SLAB_PANEL * 2.0,
+                        slabs(w).1,
+                        "paint_slabs",
+                        Box::new(|px| {
+                            let under = tex::slabs_texel(SLAB_PANEL, 14);
+                            tex::paint(px, SLAB_PANEL * 2.0, PAINT_WEAR, under, 15)
+                        }),
+                    ),
+                    _ => (
+                        CONCRETE_TILE,
+                        concrete(w).1,
+                        "paint_concrete",
+                        Box::new(|px| {
+                            let under = tex::concrete_texel(CONCRETE_TILE, 13);
+                            tex::paint(px, CONCRETE_TILE, PAINT_WEAR, under, 15)
+                        }),
+                    ),
+                };
+            let (b, _, o) = w.textures(name, STD, make);
+            let mut m = tiled(pbr(b, normal, o), tile);
+            m.occlusion_texture = None;
+            m.normal_scale = 0.8;
+            m.alpha_mode = AlphaMode::Mask(0.5);
+            m
+        }
+        Surface::Glyphs => {
+            let (b, _, o) = w.textures("glyphs", 2048, |px| {
+                tex::glyph_atlas((px / 16).max(2), 0.95, 17)
+            });
+            let mut m = pbr(b, None, o);
+            m.occlusion_texture = None;
+            m.alpha_mode = AlphaMode::Mask(0.5);
+            m
+        }
+        Surface::Curb => {
+            let (b, n, o) = w.textures("curb", STD, |px| tex::curb_paint(px, 4.0, 18));
+            tiled(pbr(b, n, o), 4.0)
+        }
+        Surface::Gravel => {
+            let (b, n, o) = w.textures("gravel", STD, |px| tex::gravel(px, GRAVEL_TILE, 19));
+            let mut m = tiled(pbr(b, n, o), GRAVEL_TILE);
+            m.normal_scale = 1.3;
+            m
+        }
+        Surface::Grass => {
+            let (b, n, o) = w.textures("grass", STD, |px| tex::grass(px, GRASS_TILE, 27));
+            let mut m = tiled(pbr(b, n, o), GRASS_TILE);
+            m.normal_scale = 1.2;
+            m.reflectance = 0.3;
+            m
+        }
+        Surface::Dirt => {
+            let (b, n, o) = w.textures("dirt", STD, |px| tex::dirt(px, DIRT_TILE, 20));
+            tiled(pbr(b, n, o), DIRT_TILE)
+        }
+        Surface::Galvanized => {
+            let (b, n, o) = w.textures("galvanized", 512, |px| tex::galvanized(px, METAL_TILE, 21));
+            let mut m = tiled(pbr(b, n, o), METAL_TILE);
+            m.metallic = 1.0;
+            m.double_sided = true;
+            m
+        }
+        Surface::Painted => {
+            let (b, n, o) = grime(w);
+            let mut m = tiled(pbr(b, n, o), GRIME_TILE);
+            m.normal_scale = 0.6;
+            m
+        }
+        Surface::Cladding => {
+            let (b, n, o) = w.textures("cladding", STD, |px| tex::cladding(px, 0.25, 4, 22));
+            tiled(pbr(b, n, o), CLADDING_TILE)
+        }
+        Surface::Glass => {
+            let mut m = StandardMaterial::hex(0x1b2a33).with_roughness(0.04);
+            m.base_color[3] = 0.42;
+            m.alpha_mode = AlphaMode::Blend;
+            m.reflectance = 0.6;
+            m.double_sided = true;
+            m.receives_wetness = false;
+            m
+        }
+        Surface::Rubber => StandardMaterial::hex(0x1c1c1e).with_roughness(0.85),
+        Surface::Plastic => {
+            let mut m = StandardMaterial::color(1.0, 1.0, 1.0).with_roughness(0.42);
+            m.reflectance = 0.5;
+            m
+        }
+        Surface::Fence => {
+            let (b, n, o) = w.textures("fence", 512, |px| tex::chain_link(px, FENCE_TILE));
+            let mut m = tiled(pbr(b, n, o), FENCE_TILE);
+            m.metallic = 1.0;
+            m.occlusion_texture = None;
+            m.alpha_mode = AlphaMode::Blend;
+            m.double_sided = true;
+            m
+        }
+        Surface::Grate => {
+            let (b, n, o) = w.textures("grate", STD, |px| tex::grating(px, GRATE_TILE, 26));
+            let mut m = tiled(pbr(b, n, o), GRATE_TILE);
+            m.metallic = 1.0;
+            m.double_sided = true;
+            m
+        }
+        Surface::Skid | Surface::SkidDirt => {
+            let (b, _, _) = w.textures("skid", 1024, |px| {
+                tex::skid((px / 8).max(4), px, SKID_LENGTH, 23)
+            });
+            let mut m = pbr(b, None, None);
+            m.uv_scale = [1.0, 1.0 / SKID_LENGTH];
+            m.alpha_mode = AlphaMode::Blend;
+            m.perceptual_roughness = 0.7;
+            if s == Surface::SkidDirt {
+                m.base_color = [3.5, 2.6, 1.9, 0.75];
+            }
+            m
+        }
+        Surface::Tar => {
+            let mut m = StandardMaterial::hex(0x0b0b0c).with_roughness(0.45);
+            m.base_color[3] = 0.9;
+            m.alpha_mode = AlphaMode::Blend;
+            m
+        }
+        Surface::Soot => {
+            let (b, _, _) = w.textures("soot", STD, |px| tex::soot(px, 24));
+            let mut m = pbr(b, None, None);
+            m.alpha_mode = AlphaMode::Blend;
+            m.perceptual_roughness = 0.95;
+            m
+        }
+        Surface::Signs => {
+            let (b, _, o) = w.textures("signs", HERO, |px| tex::sign_atlas(px, 25));
+            let mut m = pbr(b, None, o);
+            m.occlusion_texture = None;
+            m
+        }
+        Surface::Interior => StandardMaterial::hex(0x0c0d0e).with_roughness(0.9),
+        Surface::LensWhite => lens([1.0, 0.92, 0.78], 60_000.0),
+        Surface::LensRed => lens([1.0, 0.06, 0.03], 90_000.0),
+        Surface::LensGreen => lens([0.1, 1.0, 0.35], 50_000.0),
+        Surface::LensAmber => lens([1.0, 0.55, 0.12], 60_000.0),
+        Surface::LensBlue => lens([0.15, 0.35, 1.0], 70_000.0),
+        Surface::LensOff => {
+            let mut m = StandardMaterial::hex(0x2a0806).with_roughness(0.06);
+            m.reflectance = 0.8;
+            m
+        }
+        Surface::LensClear => {
+            let mut m = StandardMaterial::hex(0xc8ccd0).with_roughness(0.12);
+            m.metallic = 1.0;
+            m
+        }
+        Surface::Lamp => lens([1.0, 0.95, 0.86], 8_000.0),
+        Surface::Screen => {
+            let mut m = lens([0.4, 0.6, 0.95], 350.0);
+            m.base_color = [0.02, 0.025, 0.03, 1.0];
+            m
+        }
+    }
 }
 
 fn pbr(
@@ -395,248 +696,13 @@ impl<'w> Scene<'w> {
             self.materials.insert(s, h);
             return h;
         }
-        let m = self.make_material(s);
+        let m = make_material(&mut *self.world, s);
         let h = self
             .world
             .resource_mut::<Assets<StandardMaterial>>()
             .insert_keyed(&key, m);
         self.materials.insert(s, h);
         h
-    }
-
-    fn make_material(&mut self, s: Surface) -> StandardMaterial {
-        let w = &mut *self.world;
-        let asphalt = |w: &mut World| {
-            textures(w, "asphalt", HERO, |px| {
-                tex::asphalt(px, ASPHALT_TILE, None, 11)
-            })
-        };
-        let runway = |w: &mut World| {
-            textures(w, "runway", STD, |px| {
-                tex::asphalt(px, RUNWAY_TILE, Some(RUNWAY_TILE / 256.0), 12)
-            })
-        };
-        let concrete = |w: &mut World| {
-            textures(w, "concrete", STD, |px| {
-                tex::concrete(px, CONCRETE_TILE, 13)
-            })
-        };
-        let slabs = |w: &mut World| textures(w, "slabs", STD, |px| tex::slabs(px, SLAB_PANEL, 14));
-        let grime = |w: &mut World| textures(w, "grime", 512, |px| tex::grime(px, GRIME_TILE, 16));
-        match s {
-            Surface::Asphalt => {
-                let (b, n, o) = asphalt(w);
-                let mut m = tiled(pbr(b, n, o), ASPHALT_TILE);
-                m.reflectance = 0.45;
-                m
-            }
-            Surface::AsphaltPatch => {
-                let (b, n, o) = asphalt(w);
-                let mut m = tiled(pbr(b, n, o), ASPHALT_TILE);
-                m.base_color = [0.62, 0.62, 0.64, 1.0];
-                m.perceptual_roughness = 0.92;
-                m.normal_scale = 0.7;
-                m
-            }
-            Surface::Runway => {
-                let (b, n, o) = runway(w);
-                tiled(pbr(b, n, o), RUNWAY_TILE)
-            }
-            Surface::Concrete => {
-                let (b, n, o) = concrete(w);
-                tiled(pbr(b, n, o), CONCRETE_TILE)
-            }
-            Surface::Slabs => {
-                let (b, n, o) = slabs(w);
-                tiled(pbr(b, n, o), SLAB_PANEL * 2.0)
-            }
-            Surface::PaintAsphalt
-            | Surface::PaintRunway
-            | Surface::PaintSlabs
-            | Surface::PaintConcrete => {
-                // Each paint bakes over the same recipe as the surface it lies on.
-                let (tile, normal, name, make): (_, _, _, Box<dyn Fn(u32) -> tex::Maps + Send>) =
-                    match s {
-                        Surface::PaintAsphalt => (
-                            ASPHALT_TILE,
-                            asphalt(w).1,
-                            "paint_asphalt",
-                            Box::new(|px| {
-                                let under = tex::asphalt_texel(ASPHALT_TILE, None, 11);
-                                tex::paint(px, ASPHALT_TILE, PAINT_WEAR, under, 15)
-                            }),
-                        ),
-                        Surface::PaintRunway => (
-                            RUNWAY_TILE,
-                            runway(w).1,
-                            "paint_runway",
-                            Box::new(|px| {
-                                let under =
-                                    tex::asphalt_texel(RUNWAY_TILE, Some(RUNWAY_TILE / 256.0), 12);
-                                tex::paint(px, RUNWAY_TILE, PAINT_WEAR, under, 15)
-                            }),
-                        ),
-                        Surface::PaintSlabs => (
-                            SLAB_PANEL * 2.0,
-                            slabs(w).1,
-                            "paint_slabs",
-                            Box::new(|px| {
-                                let under = tex::slabs_texel(SLAB_PANEL, 14);
-                                tex::paint(px, SLAB_PANEL * 2.0, PAINT_WEAR, under, 15)
-                            }),
-                        ),
-                        _ => (
-                            CONCRETE_TILE,
-                            concrete(w).1,
-                            "paint_concrete",
-                            Box::new(|px| {
-                                let under = tex::concrete_texel(CONCRETE_TILE, 13);
-                                tex::paint(px, CONCRETE_TILE, PAINT_WEAR, under, 15)
-                            }),
-                        ),
-                    };
-                let (b, _, o) = textures(w, name, STD, make);
-                let mut m = tiled(pbr(b, normal, o), tile);
-                m.occlusion_texture = None;
-                m.normal_scale = 0.8;
-                m.alpha_mode = AlphaMode::Mask(0.5);
-                m
-            }
-            Surface::Glyphs => {
-                let (b, _, o) = textures(w, "glyphs", 2048, |px| {
-                    tex::glyph_atlas((px / 16).max(2), 0.95, 17)
-                });
-                let mut m = pbr(b, None, o);
-                m.occlusion_texture = None;
-                m.alpha_mode = AlphaMode::Mask(0.5);
-                m
-            }
-            Surface::Curb => {
-                let (b, n, o) = textures(w, "curb", STD, |px| tex::curb_paint(px, 4.0, 18));
-                tiled(pbr(b, n, o), 4.0)
-            }
-            Surface::Gravel => {
-                let (b, n, o) = textures(w, "gravel", STD, |px| tex::gravel(px, GRAVEL_TILE, 19));
-                let mut m = tiled(pbr(b, n, o), GRAVEL_TILE);
-                m.normal_scale = 1.3;
-                m
-            }
-            Surface::Grass => {
-                let (b, n, o) = textures(w, "grass", STD, |px| tex::grass(px, GRASS_TILE, 27));
-                let mut m = tiled(pbr(b, n, o), GRASS_TILE);
-                m.normal_scale = 1.2;
-                m.reflectance = 0.3;
-                m
-            }
-            Surface::Dirt => {
-                let (b, n, o) = textures(w, "dirt", STD, |px| tex::dirt(px, DIRT_TILE, 20));
-                tiled(pbr(b, n, o), DIRT_TILE)
-            }
-            Surface::Galvanized => {
-                let (b, n, o) = textures(w, "galvanized", 512, |px| {
-                    tex::galvanized(px, METAL_TILE, 21)
-                });
-                let mut m = tiled(pbr(b, n, o), METAL_TILE);
-                m.metallic = 1.0;
-                m.double_sided = true;
-                m
-            }
-            Surface::Painted => {
-                let (b, n, o) = grime(w);
-                let mut m = tiled(pbr(b, n, o), GRIME_TILE);
-                m.normal_scale = 0.6;
-                m
-            }
-            Surface::Cladding => {
-                let (b, n, o) = textures(w, "cladding", STD, |px| tex::cladding(px, 0.25, 4, 22));
-                tiled(pbr(b, n, o), CLADDING_TILE)
-            }
-            Surface::Glass => {
-                let mut m = StandardMaterial::hex(0x1b2a33).with_roughness(0.04);
-                m.base_color[3] = 0.42;
-                m.alpha_mode = AlphaMode::Blend;
-                m.reflectance = 0.6;
-                m.double_sided = true;
-                m.receives_wetness = false;
-                m
-            }
-            Surface::Rubber => StandardMaterial::hex(0x1c1c1e).with_roughness(0.85),
-            Surface::Plastic => {
-                let mut m = StandardMaterial::color(1.0, 1.0, 1.0).with_roughness(0.42);
-                m.reflectance = 0.5;
-                m
-            }
-            Surface::Fence => {
-                let (b, n, o) = textures(w, "fence", 512, |px| tex::chain_link(px, FENCE_TILE));
-                let mut m = tiled(pbr(b, n, o), FENCE_TILE);
-                m.metallic = 1.0;
-                m.occlusion_texture = None;
-                m.alpha_mode = AlphaMode::Blend;
-                m.double_sided = true;
-                m
-            }
-            Surface::Grate => {
-                let (b, n, o) = textures(w, "grate", STD, |px| tex::grating(px, GRATE_TILE, 26));
-                let mut m = tiled(pbr(b, n, o), GRATE_TILE);
-                m.metallic = 1.0;
-                m.double_sided = true;
-                m
-            }
-            Surface::Skid | Surface::SkidDirt => {
-                let (b, _, _) = textures(w, "skid", 1024, |px| {
-                    tex::skid((px / 8).max(4), px, SKID_LENGTH, 23)
-                });
-                let mut m = pbr(b, None, None);
-                m.uv_scale = [1.0, 1.0 / SKID_LENGTH];
-                m.alpha_mode = AlphaMode::Blend;
-                m.perceptual_roughness = 0.7;
-                if s == Surface::SkidDirt {
-                    m.base_color = [3.5, 2.6, 1.9, 0.75];
-                }
-                m
-            }
-            Surface::Tar => {
-                let mut m = StandardMaterial::hex(0x0b0b0c).with_roughness(0.45);
-                m.base_color[3] = 0.9;
-                m.alpha_mode = AlphaMode::Blend;
-                m
-            }
-            Surface::Soot => {
-                let (b, _, _) = textures(w, "soot", STD, |px| tex::soot(px, 24));
-                let mut m = pbr(b, None, None);
-                m.alpha_mode = AlphaMode::Blend;
-                m.perceptual_roughness = 0.95;
-                m
-            }
-            Surface::Signs => {
-                let (b, _, o) = textures(w, "signs", HERO, |px| tex::sign_atlas(px, 25));
-                let mut m = pbr(b, None, o);
-                m.occlusion_texture = None;
-                m
-            }
-            Surface::Interior => StandardMaterial::hex(0x0c0d0e).with_roughness(0.9),
-            Surface::LensWhite => lens([1.0, 0.92, 0.78], 60_000.0),
-            Surface::LensRed => lens([1.0, 0.06, 0.03], 90_000.0),
-            Surface::LensGreen => lens([0.1, 1.0, 0.35], 50_000.0),
-            Surface::LensAmber => lens([1.0, 0.55, 0.12], 60_000.0),
-            Surface::LensBlue => lens([0.15, 0.35, 1.0], 70_000.0),
-            Surface::LensOff => {
-                let mut m = StandardMaterial::hex(0x2a0806).with_roughness(0.06);
-                m.reflectance = 0.8;
-                m
-            }
-            Surface::LensClear => {
-                let mut m = StandardMaterial::hex(0xc8ccd0).with_roughness(0.12);
-                m.metallic = 1.0;
-                m
-            }
-            Surface::Lamp => lens([1.0, 0.95, 0.86], 8_000.0),
-            Surface::Screen => {
-                let mut m = lens([0.4, 0.6, 0.95], 350.0);
-                m.base_color = [0.02, 0.025, 0.03, 1.0];
-                m
-            }
-        }
     }
 
     /// Spawn `mesh` (vertices relative to the zone origin) with material `s`.
@@ -924,13 +990,29 @@ impl Finished {
             engine_core::off_frame::off_frame(
                 world,
                 format!("vehicles {zone} scenery {s:?}"),
-                || (),
-                move |world, ()| {
+                // The material's first textures (5 to 15 ms of recipe set-up each on the VM).
+                move || preview_surface(s),
+                move |world, previews| {
+                    let names: Vec<String> = previews.iter().map(|(n, _)| n.clone()).collect();
+                    world
+                        .get_resource_or_insert_with(StashedPreviews::default)
+                        .0
+                        .extend(previews);
+                    let unstash = |world: &mut World| {
+                        if let Some(mut p) = world.get_resource_mut::<StashedPreviews>() {
+                            for n in &names {
+                                p.0.remove(n);
+                            }
+                        }
+                    };
                     let Some(scene) = Scene::new(world, origin, zone) else {
+                        unstash(world);
                         return;
                     };
                     let mut scene = scene.rotated(rotation);
                     scene.add(&format!("{zone}/{s:?}"), mesh, s, casts_shadow(s));
+                    // Sets the world already had (or another surface took) are not kept.
+                    unstash(scene.world);
                     let mut t = totals.lock().unwrap();
                     t.0 += scene.triangles;
                     t.1 += scene.entities;
@@ -966,4 +1048,37 @@ pub struct BuildStats {
 #[derive(Resource, Default, Debug)]
 pub struct SceneryStats {
     pub zones: Vec<(String, BuildStats)>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Previews made on a worker are the ones the world would make, are taken by the
+    /// material that asks for them, and leave nothing stashed.
+    #[test]
+    fn worker_previews_match_and_are_taken() {
+        let made_here = |s: Surface| {
+            let mut world = World::new();
+            world.insert_resource(Assets::<Image>::default());
+            make_material(&mut world, s);
+            let images = world.resource::<Assets<Image>>();
+            let h = images.by_key(&tex_key("paint_slabs", "base")).unwrap();
+            images.get(h).unwrap().data.clone()
+        };
+        let previews = preview_surface(Surface::PaintSlabs);
+        let names: Vec<&str> = previews.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(names, ["slabs", "paint_slabs"]);
+        let worker = previews[1].1.base.data.clone();
+        assert_eq!(worker, made_here(Surface::PaintSlabs));
+
+        let mut world = World::new();
+        world.insert_resource(Assets::<Image>::default());
+        world.insert_resource(StashedPreviews(previews.into_iter().collect()));
+        make_material(&mut world, Surface::PaintSlabs);
+        assert!(world.resource::<StashedPreviews>().0.is_empty());
+        let images = world.resource::<Assets<Image>>();
+        let h = images.by_key(&tex_key("paint_slabs", "base")).unwrap();
+        assert_eq!(images.get(h).unwrap().data, worker);
+    }
 }

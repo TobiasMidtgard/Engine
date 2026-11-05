@@ -1107,7 +1107,7 @@ impl Simulation {
 
     /// How far a region reaches for static colliders: copies of the ones whose bounding
     /// sphere comes this close to its anchor.
-    fn static_reach(&self) -> f64 {
+    pub(crate) fn static_reach(&self) -> f64 {
         self.settings.region_radius_m * 1.25 + 50.0
     }
 
