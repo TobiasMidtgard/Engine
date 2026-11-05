@@ -234,10 +234,25 @@ pub fn herb_styles_on(day: f32) -> (GrassStyle, Vec<GrassStyle>) {
     (base, kinds)
 }
 
-/// The meadow's look on `day` in its winter rest ([`crate::season::winter_dormancy`]): the
-/// dead leaves bleach from straw to a weathered grey-buff, the yellow goes out of the tips,
-/// snow and rain flatten them into a matted, half-lying mat and break most seed heads off.
+/// Share of a grassland's blades standing dead on `day`. Grasses don't shed their dead
+/// leaves: unmown grassland carries last year's straw into the new season (in unburned
+/// tallgrass prairie the standing dead and litter outweigh the year's growth; Knapp &
+/// Seastedt 1986), so a spring sward is a third straw until the new growth overtops it by
+/// June. Through midsummer about a sixth of the blades are dead (older leaves die as new ones
+/// grow), rising again as the grass ripens and dies back from August.
+pub fn thatch(day: f32) -> f32 {
+    let d = day.rem_euclid(crate::season::YEAR_DAYS);
+    let spring = 1.0 - smoothstep(110.0, 165.0, d);
+    let autumn = smoothstep(215.0, 290.0, d);
+    0.16 + 0.2 * spring.max(autumn)
+}
+
+/// The meadow's look on `day`: [`thatch`]'s dead blades among the green ones, and in its
+/// winter rest ([`crate::season::winter_dormancy`]) the dead leaves bleach from straw to a
+/// weathered grey-buff, the yellow goes out of the tips, snow and rain flatten them into a
+/// matted, half-lying mat and break most seed heads off.
 pub fn winter_grass(style: &mut GrassStyle, day: f32) {
+    style.dead = thatch(day);
     let w = crate::season::winter_dormancy(day);
     if w <= 0.0 {
         return;
@@ -1608,9 +1623,16 @@ mod tests {
         winter_grass(&mut summer, july);
         assert_eq!(
             summer,
-            GrassStyle::default(),
-            "summer meadows stand as they are"
+            GrassStyle {
+                dead: thatch(july),
+                ..GrassStyle::default()
+            },
+            "summer meadows stand as they are, a sixth of their blades dead"
         );
+        // Last year's straw: most in spring before the new growth overtops it, least at
+        // midsummer, more again as the grass dies back.
+        assert!(thatch(110.0) > 0.3 && (0.12..0.2).contains(&thatch(july)));
+        assert!(thatch(300.0) > thatch(july) + 0.15);
         let mut winter = GrassStyle::default();
         winter_grass(&mut winter, january);
         assert!(winter.lying > 0.5 && winter.height < summer.height);

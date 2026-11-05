@@ -262,6 +262,10 @@ pub struct GrassStyle {
     /// Round heads only (`bloom_length` 0): over 0, the flowering stems stand this fraction
     /// of the plant's height, not above it: berries hanging among a shrub's leaves.
     pub bloom_height: f32,
+    /// Share of the blades that are dead (0..1): last year's straw standing among the green
+    /// ones. Blades only (not leaves, fronds or twigs); a meadow in spring before the new growth
+    /// overtops its thatch is a quarter or more dead, in midsummer about a tenth.
+    pub dead: f32,
 }
 
 impl Default for GrassStyle {
@@ -299,6 +303,7 @@ impl Default for GrassStyle {
             leaflets: 0.0,
             alternate_leaves: 0.0,
             bloom_height: 0.0,
+            dead: 0.0,
         }
     }
 }
@@ -1031,6 +1036,7 @@ impl GpuField {
             style.wind_response.max(0.0),
         ];
         self.lod[2] = style.lying.clamp(0.0, 1.0);
+        self.origin[3] = style.dead.clamp(0.0, 0.9);
         self.clump = [
             style.clump_size.max(0.0),
             style.clump_pull.clamp(0.0, 0.95),

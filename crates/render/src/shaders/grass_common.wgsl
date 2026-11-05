@@ -17,7 +17,7 @@
 // a little at the tips.
 
 struct GrassField {
-    origin: vec4<f32>,  // camera-relative position of the field's -x -z corner (xyz)
+    origin: vec4<f32>,  // camera-relative position of the field's -x -z corner (xyz), w: share of dead blades
     axis_x: vec4<f32>,  // field x axis (unit, world), w: size along x (m)
     axis_y: vec4<f32>,  // field up, w: size along z (m)
     axis_z: vec4<f32>,  // field z axis, w: seed head length (fraction of the stem, 0 round heads; below 0: round heads' stems, -share of the plant's height)

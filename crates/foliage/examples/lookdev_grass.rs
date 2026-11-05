@@ -85,6 +85,13 @@ fn biomes() -> Vec<Biome> {
         "bramble_sept",
         engine_foliage::grass::herb_styles_on(245.0).1[6],
     );
+    // The meadow as the forest paints it in mid-April and at midsummer: its season's
+    // colors and last year's dead blades among the green.
+    for (name, day) in [("meadow_april", 110.0), ("meadow_july", 190.0)] {
+        let mut s = GrassStyle::meadow();
+        engine_foliage::grass::winter_grass(&mut s, day);
+        add(name, s);
+    }
     add("litter", GrassStyle::leaf_litter());
     add("twigs", GrassStyle::twigs());
     // games/showcase's `meadow_grass`.

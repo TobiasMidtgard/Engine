@@ -382,7 +382,17 @@ fn grass_seed(instance: u32, shadow: bool) -> BladeSeed {
     let cc = f.look.x;
     var dryness = saturate(m.z + (r1.w - 0.5) * 0.35 + (0.5 - meadow_patch) * 0.25 + (clump.hash.y - 0.5) * cc * 1.5);
     dryness = mix(dryness, 1.0, trodden * 0.6);
+    // Last year's dead blades stand among the living ones (`origin.w` of them, grasses only:
+    // not leaves, fronds or twigs, nor a flowering stem, whose share counts from the other end
+    // of the same number): bleached straw, not a shade of green, leaning further over.
+    let dead = r2.z > 1.0 - f.origin.w && leaf < 0.5 && f.kind.z == 0.0 && !flower;
+    dryness = select(dryness, 1.0, dead);
     var albedo = mix(f.lush.rgb, f.dry.rgb, dryness) * (0.8 + 0.4 * r0.z * r1.w);
+    if (dead) {
+        let grey = dot(albedo, vec3<f32>(0.2126, 0.7152, 0.0722));
+        albedo = mix(albedo, vec3<f32>(grey * 1.2, grey * 1.12, grey * 0.95), 0.45);
+        lean = lean + 0.35;
+    }
     albedo *= 1.0 + cc * (clump.hash.x * 2.0 - 1.0);
     // A slight hue drift between patches and clumps, bluer in the lush hollows.
     albedo *= mix(vec3<f32>(0.9, 1.0, 1.08), vec3<f32>(1.08, 1.02, 0.85), clump.hash.z * 0.5 + meadow_patch * 0.5);
