@@ -196,6 +196,10 @@ struct Route {
     /// for what that view needs).
     restood: bool,
     done_frames: u32,
+    /// When the last frame was recorded, for frame times on the wall clock: headless, the
+    /// route runs on a manual clock (every frame 1/60 s of game time), so its `frame_ms`
+    /// is the wall clock's.
+    wall: Option<std::time::Instant>,
 }
 
 /// Frames the start waits at most for the ground (a wait that never ends goes on).
@@ -230,6 +234,7 @@ pub fn install(app: &mut App, which: Option<&str>) {
         settling: Some(0),
         restood: false,
         done_frames: 0,
+        wall: None,
     });
     app.add_systems(Update, run.before(camera::fly));
 }
@@ -271,7 +276,17 @@ fn run(world: &mut World) {
         return;
     }
     let dt = world.resource::<Time>().delta_secs();
-    let real_ms = world.resource::<Time>().real_delta_secs() as f64 * 1000.0;
+    let mut real_ms = world.resource::<Time>().real_delta_secs() as f64 * 1000.0;
+    let now = std::time::Instant::now();
+    let manual = matches!(
+        world.resource::<Time>().source(),
+        engine::core::time::TimeSource::Manual { .. }
+    );
+    if let Some(last) = world.resource_mut::<Route>().wall.replace(now)
+        && manual
+    {
+        real_ms = now.duration_since(last).as_secs_f64() * 1000.0;
+    }
     let (pos, altitude) = {
         let mut q = world.query::<(&Transform, &ShowcaseCamera)>();
         let Some((t, cam)) = q.iter(world).next() else {
