@@ -1047,6 +1047,8 @@ impl Renderer {
                 ),
                 // The sky occlusion map's cover pyramid (sky_occlusion.rs). The 18th.
                 layout_entry(25, all, crate::sky_occlusion::cover_binding()),
+                // The canopy map (canopy.rs). The 19th.
+                layout_entry(26, all, float_texture),
             ],
         });
         let shadow_view_layout =
@@ -1083,6 +1085,7 @@ impl Renderer {
             prepare_steps: Default::default(),
             mips: Default::default(),
             cache: Default::default(),
+            canopy: crate::canopy::CanopyMap::new(&device),
         };
 
         if shared.warm_pipelines {
@@ -2250,6 +2253,21 @@ impl Renderer {
         let mut feature_diagnostics = Diagnostics::default();
         for f in &mut self.features {
             f.prepare_frame(&self.shared, &view, &settings, &mut feature_diagnostics);
+        }
+        // The canopy map as the meshes left it this frame (other views read the main view's).
+        {
+            let canopy = self
+                .shared
+                .canopy
+                .uniform(view.origin, settings.canopy_strength);
+            let offset = std::mem::offset_of!(crate::frame::FrameUniform, canopy) as u64;
+            let bytes = bytemuck::bytes_of(&canopy);
+            self.shared
+                .queue
+                .write_buffer(&self.frame_buffer, offset, bytes);
+            self.shared
+                .queue
+                .write_buffer(&self.overlay_frame_buffer, offset, bytes);
         }
         if !extra {
             for f in &self.features {
@@ -3793,6 +3811,10 @@ fn create_frame_group(
             wgpu::BindGroupEntry {
                 binding: 25,
                 resource: view(sky_camera.cover_view()),
+            },
+            wgpu::BindGroupEntry {
+                binding: 26,
+                resource: view(shared.canopy.view()),
             },
         ],
     })

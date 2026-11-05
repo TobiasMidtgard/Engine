@@ -122,6 +122,8 @@ pub struct GpuShared {
     pub(crate) mips: crate::mipmaps::MipGenerator,
     /// Shader modules, layouts and pipelines by description (`crate::gpu_cache`).
     pub(crate) cache: crate::gpu_cache::GpuCache,
+    /// The canopy map (frame binding 26): the meshes set its crowns, the renderer binds it.
+    pub(crate) canopy: crate::canopy::CanopyMap,
 }
 
 /// See [`GpuShared::side_commands`].

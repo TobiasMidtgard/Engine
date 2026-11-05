@@ -294,7 +294,9 @@ fn cs_trace(@builtin(global_invocation_id) id: vec3<u32>) {
     }
     if (hit.instance == 0xffffffffu) {
         // The sky and the ground beyond, blurred so the sun's disc doesn't flicker in.
-        let sky = sample_env_rough(dir, 0.6);
+        // Under a canopy, seen through its leaves, which glow in what they hold back.
+        let through = canopy_ray_transmittance(origin, dir);
+        let sky = sample_env_rough(dir, 0.6) * through + canopy_leaf_radiance() * (1.0 - through);
         rays[id.x] = vec4<f32>(sky * PROBE_GI_SCALE, t_max);
         return;
     }

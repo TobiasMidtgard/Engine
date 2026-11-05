@@ -54,6 +54,10 @@
 // The sky occlusion map's cover pyramid (sky_cover.wgsl): level L's texel is the highest
 // surface (smallest depth) over a 2^(L+1)-texel block of the map and the blocks around it.
 @group(0) @binding(25) var sky_cover: texture_2d<f32>;
+// The canopy map (canopy.rs, `canopy_visibility`): the leaves of the crowns around the camera
+// from above, 1 m texels with mips: r the leaf area index, g and b its mean leaf height and mean
+// squared leaf height times it (heights in CANOPY_HEIGHT_UNIT above `frame.canopy.z`). The 19th.
+@group(0) @binding(26) var canopy_map: texture_2d<f32>;
 
 // Multiply final radiance by this before writing to the HDR target.
 fn pre_expose(c: vec3<f32>) -> vec3<f32> { return c * frame.exposure.x; }
@@ -639,6 +643,114 @@ fn sky_visibility(rel: vec3<f32>, n: vec3<f32>) -> f32 {
     return sky_map_visibility(rel, n) * min(sky_volume_factor(rel + n * 0.2), sky_volume_factor_within(rel, 0.01));
 }
 
+// ---------------------------------------------------------------- light through leaves
+// Share of the open sky that reaches camera-relative `rel` through the leaves of the crowns
+// around it (canopy.rs): 1 in the open and above the crowns, about 0.07 under a closed canopy
+// of leaf area index 4. Goudriaan's three-ring sky, as crop and forest radiation models use it:
+// rings at 15°, 45° and 75° elevation weighted 0.178, 0.514 and 0.308, each seen through
+// exp(-k L) of leaves, k = 0.5 / sin(elevation) for leaves at all angles (which includes the
+// slant), L the leaf area index over the ground under the ring's part of the canopy and above
+// the point. The ring at elevation b crosses the leaves' mean height h above the point at
+// h / tan(b) meters out: one tap at the mip as wide as that disc. Leaves below the point don't
+// count (the normal distribution of leaf height from the map's moments), so a crown's top sees
+// the sky and its inside and underside less of it. The map fades out over its outer eighth.
+const CANOPY_HEIGHT_UNIT: f32 = 64.0;
+const CANOPY_RING_SIN: vec3<f32> = vec3<f32>(0.258819, 0.707107, 0.965926);
+const CANOPY_RING_COT: vec3<f32> = vec3<f32>(3.732051, 1.0, 0.267949);
+const CANOPY_RING_WEIGHT: vec3<f32> = vec3<f32>(0.178, 0.514, 0.308);
+
+// `canopy_visibility` of the last `sky_visibility` this invocation ran (1 before any).
+var<private> canopy_last_visibility: f32 = 1.0;
+
+// What the leaves of a canopy scatter in the visible, reflected and let through together: a
+// green leaf reflects and transmits about a tenth of red and blue and a quarter of green.
+const CANOPY_LEAF_ALBEDO: vec3<f32> = vec3<f32>(0.12, 0.25, 0.07);
+
+// Radiance of the leaf layer seen from inside or under it (cd/m², not pre-exposed): its leaves
+// lit by about a quarter of the sun (the sunlit share inside a crown, through gaps and through
+// the leaves above) and of the sky. Under a canopy the light that doesn't come through from
+// the sky comes, greener and dimmer, from the leaves themselves.
+fn canopy_leaf_radiance() -> vec3<f32> {
+    let sun = frame.sun_color.rgb * saturate(frame.sun_dir.y);
+    let sky = sky_ambient(vec3<f32>(0.0, 1.0, 0.0)) * PI;
+    return CANOPY_LEAF_ALBEDO * INV_PI * (sun + sky) * 0.25;
+}
+
+// Share of the sky a ray from camera-relative `origin` along `dir` (unit) sees past the leaves
+// above it: exp(-G L / sin), G = 0.5 for leaves at all angles, L the leaf area index above the
+// origin where the ray crosses the leaves' mean height. Rays down or level with the ground,
+// and points off the map, pass. Probe GI's rays that find no mesh see the sky through it
+// (leaf cards are not in their scene when the canopy is on).
+fn canopy_ray_transmittance(origin: vec3<f32>, dir: vec3<f32>) -> f32 {
+    let c = frame.canopy;
+    if (c.w <= 0.0 || dir.y <= 0.0) { return 1.0; }
+    let p = origin.xz - c.xy;
+    let y = (origin.y - c.z) / CANOPY_HEIGHT_UNIT;
+    let around = canopy_tap(p / (2.0 * c.w) + 0.5, 64.0);
+    if (around.r < 1e-3) { return 1.0; }
+    let sin_up = max(dir.y, 0.05);
+    let h = clamp((around.g / around.r - y) * CANOPY_HEIGHT_UNIT, 0.5, 100.0);
+    let cross = p + dir.xz / sin_up * h;
+    if (max(abs(cross.x), abs(cross.y)) >= c.w) { return 1.0; }
+    let t = canopy_tap(cross / (2.0 * c.w) + 0.5, max(2.0, h * 0.25));
+    let above = t.r * canopy_share_above(t, y) * frame.canopy_params.x;
+    return exp(-0.5 / sin_up * above);
+}
+
+// Share of rain falling straight down that gets past the leaves of the crowns above
+// camera-relative `rel`: exp(-G L), G = 0.5 for leaves at all angles, L the leaf area index
+// above it (the rest is caught by the leaves, and drips later). 1 in the open, off the map and
+// with the canopy off. For precipitation's shelter test: the sky occlusion map has no leaf
+// crowns in it.
+fn canopy_rain_through(rel: vec3<f32>) -> f32 {
+    let c = frame.canopy;
+    if (c.w <= 0.0) { return 1.0; }
+    let p = rel.xz - c.xy;
+    if (max(abs(p.x), abs(p.y)) >= c.w) { return 1.0; }
+    let t = canopy_tap(p / (2.0 * c.w) + 0.5, 1.0);
+    if (t.r < 1e-3) { return 1.0; }
+    let y = (rel.y - c.z) / CANOPY_HEIGHT_UNIT;
+    return exp(-0.5 * t.r * canopy_share_above(t, y) * frame.canopy_params.x);
+}
+
+// The canopy map's leaf area index and leaf height moments averaged over a square `width`
+// meters wide around map position `uv`.
+fn canopy_tap(uv: vec2<f32>, width: f32) -> vec4<f32> {
+    let level = clamp(log2(max(width / frame.canopy_params.z, 1.0)), 0.0, frame.canopy_params.y - 1.0);
+    return textureSampleLevel(canopy_map, linear_clamp, uv, level);
+}
+
+// Share of tap `t`'s leaves above height `y` (height units): 1 - Phi((y - mean) / spread),
+// Phi by its tanh approximation.
+fn canopy_share_above(t: vec4<f32>, y: f32) -> f32 {
+    let tau = max(t.r, 1e-6);
+    let mean = t.g / tau;
+    let spread = sqrt(max(t.b / tau - mean * mean, 0.0)) + 0.5 / CANOPY_HEIGHT_UNIT;
+    let x = clamp((y - mean) / spread, -8.0, 8.0);
+    return 0.5 - 0.5 * tanh(0.7978846 * x * (1.0 + 0.044715 * x * x));
+}
+
+fn canopy_visibility(rel: vec3<f32>) -> f32 {
+    let c = frame.canopy;
+    if (c.w <= 0.0) { return 1.0; }
+    let p = rel.xz - c.xy;
+    let edge = max(abs(p.x), abs(p.y)) / c.w;
+    if (edge >= 1.0) { return 1.0; }
+    let uv = p / (2.0 * c.w) + 0.5;
+    let y = (rel.y - c.z) / CANOPY_HEIGHT_UNIT;
+    // The leaves around: none within 64 m, open sky.
+    let around = canopy_tap(uv, 64.0);
+    if (around.r < 1e-3) { return 1.0; }
+    let h = clamp((around.g / around.r - y) * CANOPY_HEIGHT_UNIT, 1.0, 100.0);
+    var vis = 0.0;
+    for (var i = 0; i < 3; i++) {
+        let t = canopy_tap(uv, 2.0 * h * CANOPY_RING_COT[i]);
+        let above = t.r * canopy_share_above(t, y) * frame.canopy_params.x;
+        vis += CANOPY_RING_WEIGHT[i] * exp(-0.5 / CANOPY_RING_SIN[i] * above);
+    }
+    return mix(vis, 1.0, saturate((edge - 0.875) * 8.0));
+}
+
 // Sky light left at `rel` by the indoor volumes: `sky_light` deep inside, rising to 1 at open
 // faces over `fade` meters; 1 outside every volume.
 fn sky_volume_factor(rel: vec3<f32>) -> f32 {
@@ -764,8 +876,18 @@ fn sky_cover_near(at: vec2<f32>, radius: f32, top: f32) -> bool {
     return textureLoad(sky_cover, block, i32(level)).r < top;
 }
 
-// Sky visibility from the top-down occlusion map alone.
+// Sky visibility from the top-down maps: the occlusion map's solid cover times the leaves of
+// the canopy map (leaf crowns are in the canopy map, not the occlusion map: their light comes
+// through). `sky_visibility` adds the indoor volumes; shaders outside the renderer (wet ground,
+// particles) and the fog read this.
 fn sky_map_visibility(rel: vec3<f32>, n: vec3<f32>) -> f32 {
+    let leaves = canopy_visibility(rel + n * 0.2);
+    canopy_last_visibility = leaves;
+    return leaves * sky_occluder_visibility(rel, n);
+}
+
+// Sky visibility from the top-down occlusion map alone (solid cover: roofs, rock, trunks).
+fn sky_occluder_visibility(rel: vec3<f32>, n: vec3<f32>) -> f32 {
     let params = frame.sky_occlusion_params;
     if (params.x < 0.5) { return 1.0; }
     let texel = params.z;
@@ -907,7 +1029,11 @@ fn fog_sky_visibility(rel: vec3<f32>) -> f32 {
     var map = 1.0;
     let at_camera = sky_camera[0].x;
     if (frame.sky_occlusion_params.x > 0.5 && at_camera < 0.99) {
-        map = max(at_camera, sky_map_visibility(rel, vec3<f32>(0.0, 1.0, 0.0)));
+        map = max(at_camera, sky_occluder_visibility(rel, vec3<f32>(0.0, 1.0, 0.0)));
+    }
+    // The leaves over either end (crowns aren't in the occlusion map).
+    if (frame.canopy.w > 0.0) {
+        map = min(map, max(canopy_visibility(vec3<f32>(0.0)), canopy_visibility(rel)));
     }
     var volumes = 1.0;
     if (frame.counts.w > 0u) {
@@ -1151,6 +1277,9 @@ fn shade_surface_sides(s: Surface, rel: vec3<f32>, sun_visibility: f32, face: ve
     }
     sky_light += fog_light;
     var irradiance = ((sky_light - fill) * sky_vis + fill) * PI;
+    // Under leaves, the light they hold back comes from them instead (the probes' rays see the
+    // same, `canopy_ray_transmittance`).
+    irradiance += canopy_leaf_radiance() * (PI * (1.0 - canopy_last_visibility));
     // Where the probes cover, their light instead: the sky through whatever openings their rays
     // find, and light bounced off everything around, on screen or not.
     let probes = probe_gi(rel, smooth_n, v);
