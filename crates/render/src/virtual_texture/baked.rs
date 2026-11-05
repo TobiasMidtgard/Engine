@@ -216,9 +216,9 @@ pub fn bake(source: &Path, out: &Path, srgb: bool) -> Result<BakeReport, String>
         .map_err(|e| e.to_string())?;
     let mut offset = HEADER_BYTES + index_bytes;
     let mut index: Vec<(u64, u32)> = Vec::with_capacity(layout.entries as usize);
-    let threads = std::thread::available_parallelism()
-        .map_or(2, |n| n.get())
-        .clamp(1, 8);
+    // Leased from the threads every module's background work shares, for the whole bake.
+    let lease = engine_core::tasks::background_lease(8);
+    let threads = lease.threads();
     let mut mean = [0u8; 4];
     for m in 0..=layout.root {
         let (lw, lh) = layout.level_size(m);

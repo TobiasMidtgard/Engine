@@ -1211,8 +1211,17 @@ impl Renderer {
             feature.resize(shared, width, height);
             (feature, started.elapsed().as_secs_f64() * 1000.0)
         };
-        let threads = std::thread::available_parallelism()
-            .map_or(1, |n| n.get())
+        // The renderer's own start has every core: no frame is drawn until it's done. Features
+        // added later (a zone streaming in) lease threads from those every module's background
+        // work shares, held until every feature has started, so they don't starve the frame.
+        let first = self.features.is_empty();
+        let lease = (!first).then(|| engine_core::tasks::background_lease(features.len()));
+        let threads = lease
+            .as_ref()
+            .map_or_else(
+                || std::thread::available_parallelism().map_or(1, |n| n.get()),
+                |l| l.threads(),
+            )
             .min(features.len());
         let started: Vec<(Box<dyn RenderFeature>, f64)> = if threads <= 1 {
             features.into_iter().map(start).collect()
