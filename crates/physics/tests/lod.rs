@@ -425,3 +425,50 @@ fn a_crate_with_no_ground_loaded_under_it_waits_for_it() {
     app.update_n(30);
     assert!((position(&app, crate_).y - y).abs() < 1e-3, "it fell on");
 }
+
+/// Far bodies settle sooner: a crate drifting on at 0.12 m/s with no gravity (as a moored boat
+/// rocks on ripples for good) sleeps 800 m off, at half rate, while its twin near the focus keeps
+/// drifting; when the focus comes over, the far crate gets the usual rule back and wakes.
+#[test]
+fn a_slowly_drifting_crate_far_away_sleeps_and_wakes_when_the_focus_comes() {
+    let mut app = app();
+    app.world.resource_mut::<Gravity>().uniform = Vec3::ZERO;
+    let drifting = |app: &mut App, x: f64| {
+        app.world
+            .spawn((
+                Transform::from_xyz(x, 2.0, 0.0),
+                RigidBody::dynamic(),
+                Collider::cuboid(Vec3::splat(0.4)),
+                Velocity {
+                    linear: Vec3::new(0.0, 0.0, 0.12),
+                    angular: Vec3::ZERO,
+                },
+            ))
+            .id()
+    };
+    let (near, far) = (drifting(&mut app, 40.0), drifting(&mut app, 800.0));
+    app.update_n(300);
+    let (n0, f0) = (position(&app, near), position(&app, far));
+    app.update_n(60);
+    let (n1, f1) = (position(&app, near), position(&app, far));
+    assert!(n1.z - n0.z > 0.05, "the near crate stopped: {n0} to {n1}");
+    assert!(
+        (f1 - f0).length() < 1e-4,
+        "the far crate kept drifting: {f0} to {f1}"
+    );
+    let s = stats(&app);
+    assert_eq!((s.awake, s.half_rate_awake), (1, 0), "{s:?}");
+    // The focus comes over: the far crate is woken (it lay still, so it settles again).
+    let focus = app
+        .world
+        .query_filtered::<Entity, With<SimulationFocus>>()
+        .single(&app.world)
+        .unwrap();
+    app.world.get_mut::<Transform>(focus).unwrap().translation = DVec3::new(800.0, 2.0, 0.0);
+    let mut awake = 0;
+    for _ in 0..30 {
+        app.update();
+        awake = awake.max(stats(&app).awake);
+    }
+    assert_eq!(awake, 2, "the far crate wasn't woken: {:?}", stats(&app));
+}

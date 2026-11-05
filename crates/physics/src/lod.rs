@@ -64,6 +64,12 @@ pub const REST: u8 = 3;
 /// A region with a body faster than this (m/s) doesn't rest: it is travelling, not settling.
 pub(crate) const REST_SPEED: f32 = 3.0;
 
+/// The tier whose bodies settle sooner ([`Simulation::settle_far`]): half rate.
+const FAR_SETTLE_TIER: u8 = 2;
+/// Regions of more bodies than this keep the usual rule out there (a big heap is the budget's
+/// to settle: waking one when it comes near cost 10-30 ms).
+const FAR_SETTLE_MAX_BODIES: usize = 256;
+
 /// A body this far below the ground's surface (meters) fell through it, and doesn't count as
 /// travelling.
 const LOST_BELOW_M: f64 = 50.0;
@@ -316,6 +322,78 @@ impl Simulation {
         }
         if asked.get() > 0 && crate::report::wanted() {
             crate::report::count("ground heights asked for tiers", asked.get());
+        }
+    }
+
+    /// Far bodies settle sooner: in a region at half rate (tier 2, past
+    /// `PhysicsSettings::half_rate_beyond_m`) that is not dormant and holds at most
+    /// [`FAR_SETTLE_MAX_BODIES`], bodies count as at rest under the budget's level 2 speed
+    /// ([`crate::budget::Load::far_sleep`]: 4x Rapier's, after 0.25 s), so what only rocks out
+    /// there (the lake's moored rowboat, 1.3 km off, settling on the ripples against its
+    /// jetty's triangles, 0.6 ms a step on the VM, round 22) sleeps and drops out of the
+    /// narrow phase. Its region keeps stepping for what travels (the motorboat beside it).
+    /// When its region comes nearer than half rate, a body gets the usual rule back and is
+    /// woken to settle by it (a floating boat bobs again). Every [`LOD_EVERY`] steps.
+    pub(crate) fn settle_far(&mut self) {
+        if !self.lod_clock.is_multiple_of(LOD_EVERY) {
+            return;
+        }
+        let far = self.load.far_sleep();
+        for r in self.regions.iter_mut().flatten() {
+            if r.tier != FAR_SETTLE_TIER
+                || r.dormant
+                || r.world.bodies.len() > FAR_SETTLE_MAX_BODIES
+            {
+                continue;
+            }
+            let raised = crate::budget::set_sleep(&mut r.world, far, |rb| {
+                rb.activation().normalized_linear_threshold < crate::budget::SLEEP_SPEED * far.0
+            });
+            for h in raised {
+                if let Some(rb) = r.world.bodies.get(h) {
+                    self.far_settling
+                        .insert(crate::convert::entity_of(rb.user_data));
+                }
+            }
+        }
+        if self.far_settling.is_empty() {
+            return;
+        }
+        let near: Vec<Entity> = self
+            .far_settling
+            .iter()
+            .copied()
+            .filter(|e| {
+                self.bodies.get(e).is_none_or(|b| {
+                    self.regions
+                        .get(b.region as usize)
+                        .and_then(|r| r.as_ref())
+                        .is_none_or(|r| r.tier < FAR_SETTLE_TIER)
+                })
+            })
+            .collect();
+        let usual = self.load.sleep();
+        for e in near {
+            self.far_settling.remove(&e);
+            let Some(b) = self.bodies.get(&e) else {
+                continue;
+            };
+            let held = self.resting.contains(&e)
+                || self.ungrounded.contains(&e)
+                || self.held_for_shapes.contains_key(&e);
+            let (rid, handle) = (b.region, b.handle);
+            let Some(Some(r)) = self.regions.get_mut(rid as usize) else {
+                continue;
+            };
+            crate::budget::set_sleep(&mut r.world, usual, |rb| {
+                crate::convert::entity_of(rb.user_data) == e
+            });
+            if !held
+                && let Some(rb) = r.world.bodies.get_mut(handle)
+                && rb.is_sleeping()
+            {
+                rb.wake_up(true);
+            }
         }
     }
 

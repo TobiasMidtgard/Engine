@@ -878,6 +878,9 @@ pub struct Simulation {
     /// Held bodies (`resting`, `ungrounded`) whose gravity is off while held, given back once
     /// they are let go (`step::hold_resting`).
     pub weightless: EntityHashSet,
+    /// Bodies of far regions told to settle sooner ([`Simulation::settle_far`]), woken and
+    /// given the usual rule back when their region comes near again.
+    pub far_settling: EntityHashSet,
     /// Bodies whose mass may have changed since the last write back (their
     /// `BodyEntry::mass_dirty` set), so it looks at these, not every body.
     pub(crate) mass_changed: Vec<Entity>,
@@ -2550,6 +2553,7 @@ impl Simulation {
         let tiers = tracing::info_span!("region tiers").entered();
         let piece = crate::report::Piece::start("upkeep: tiers");
         self.update_tiers(foci);
+        self.settle_far();
         drop((tiers, piece));
         drop(splits);
         let piece = crate::report::Piece::start("upkeep: movers");

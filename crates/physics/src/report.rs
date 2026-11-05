@@ -30,6 +30,8 @@ struct Totals {
     /// Rapier's own stages ([`STAGES`]), ms, all regions together.
     stages: [f64; STAGES.len()],
     regions: HashMap<RegionId, (f64, u32)>,
+    /// Rapier's narrow phase by region, ms.
+    narrow: HashMap<RegionId, f64>,
     /// The step's own parts outside the regions' jobs, by name, ms ([`part_ms`]).
     outside: Vec<(&'static str, f64)>,
     /// Pieces of those parts, by name: their sum and their worst step, ms ([`piece_ms`]).
@@ -103,7 +105,7 @@ const STAGES: [&str; 15] = [
 ];
 
 /// One Rapier step's stage times, read from its counters.
-pub(crate) fn rapier_stages(c: &rapier3d::counters::Counters) {
+pub(crate) fn rapier_stages(rid: RegionId, c: &rapier3d::counters::Counters) {
     let ms = [
         c.cd.broad_phase_time.time_ms(),
         c.cd.narrow_phase_time.time_ms(),
@@ -125,6 +127,7 @@ pub(crate) fn rapier_stages(c: &rapier3d::counters::Counters) {
     for (i, v) in ms.iter().enumerate() {
         t.stages[i] += v;
     }
+    *t.narrow.entry(rid).or_default() += ms[1];
 }
 
 /// `body` made a region's substep run Rapier's sweeps (CCD), for `why` (and `what` it could
@@ -348,16 +351,25 @@ pub(crate) fn step_done(world: &World, sim: &Simulation, foci: &[DVec3], started
             .contact_pairs()
             .filter(|p| p.has_any_active_contact())
             .count();
+        // (One per triangle of a mesh a body is near: a fitted jetty's 66,000 drawn triangles
+        // made 800 for one moored rowboat, round 21.)
+        let manifolds: usize = w
+            .narrow_phase
+            .contact_pairs()
+            .map(|p| p.manifolds().len())
+            .sum();
         let near = foci
             .iter()
             .map(|f| f.distance(r.anchor))
             .fold(f64::INFINITY, f64::min);
         out += &format!(
-            "\n  region {id}: {:.2} ms per step ({:.2} per run, {n} runs), tier {}{}{}, \
-             {bodies} bodies ({awake} awake, {held} of them held), {} colliders, {pairs} pairs ({touching} touching), \
-             {} joints, anchor {near:.0} m from focus",
+            "\n  region {id}: {:.2} ms per step ({:.2} per run, {n} runs; narrow phase {:.2}), tier \
+             {}{}{}, {bodies} bodies ({awake} awake, {held} of them held), {} colliders, {pairs} \
+             pairs ({touching} touching, {manifolds} manifolds), {} joints, anchor {near:.0} m \
+             from focus",
             ms / steps,
             ms / n.max(1) as f64,
+            t.narrow.get(&id).copied().unwrap_or(0.0) / steps,
             r.tier,
             if r.fine.is_some() { " fine" } else { "" },
             if r.dormant { ", dormant" } else { "" },
@@ -395,6 +407,33 @@ pub(crate) fn step_done(world: &World, sim: &Simulation, foci: &[DVec3], started
                     |c| label(world, crate::convert::entity_of(c.user_data)),
                 );
                 out += &format!(" {name} ({n})");
+            }
+        }
+        // What its narrow phase goes on: the pairs of the most manifolds, with their shapes
+        // (a hull's points or a mesh's triangles set what each manifold costs).
+        let mut heavy: Vec<_> = w
+            .narrow_phase
+            .contact_pairs()
+            .map(|p| (p.manifolds().len(), p.collider1, p.collider2))
+            .filter(|m| m.0 > 8)
+            .collect();
+        heavy.sort_by_key(|m| std::cmp::Reverse(m.0));
+        if !heavy.is_empty() {
+            let what = |h: ColliderHandle| {
+                w.colliders.get(h).map_or_else(
+                    || "?".into(),
+                    |c| {
+                        format!(
+                            "{} [{}]",
+                            label(world, crate::convert::entity_of(c.user_data)),
+                            shape_size(c.shape())
+                        )
+                    },
+                )
+            };
+            out += "; most manifolds:";
+            for (n, a, b) in heavy.into_iter().take(4) {
+                out += &format!(" {} on {} ({n})", what(a), what(b));
             }
         }
         // What keeps it stepping: its fastest awake bodies.
@@ -518,5 +557,21 @@ pub(crate) fn label(world: &World, e: Entity) -> String {
         format!("{e}")
     } else {
         format!("{e} {}", mine.join(" "))
+    }
+}
+
+/// A shape's kind and size for the report: a hull's points, a mesh's triangles, a
+/// heightfield's cells or a compound's parts.
+fn shape_size(s: &dyn rapier3d::parry::shape::Shape) -> String {
+    if let Some(h) = s.as_convex_polyhedron() {
+        format!("hull of {} points", h.points().len())
+    } else if let Some(m) = s.as_trimesh() {
+        format!("mesh of {} triangles", m.num_triangles())
+    } else if let Some(h) = s.as_heightfield() {
+        format!("heightfield {}x{}", h.nrows(), h.ncols())
+    } else if let Some(c) = s.as_compound() {
+        format!("{} parts", c.shapes().len())
+    } else {
+        format!("{:?}", s.shape_type())
     }
 }
