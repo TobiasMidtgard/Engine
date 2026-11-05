@@ -875,6 +875,11 @@ pub fn run_demos(world: &mut World) {
     }
 }
 
+/// Main-thread time a demo's jump ahead may take a frame in play, ms ([`run_ahead`]): the
+/// meadow's 50 s warm-up then takes a second or two of frames on a fast PC, out where the
+/// meadow streams in.
+const PLAY_AHEAD_MS: f64 = 3.0;
+
 /// A jump `secs` ahead, in fire steps (none for no time).
 fn ahead_of(world: &World, secs: f32) -> Option<Ahead> {
     let hz = world.resource::<FireSettings>().sim_hz.clamp(1.0, 240.0);
@@ -885,14 +890,23 @@ fn ahead_of(world: &World, secs: f32) -> Option<Ahead> {
     })
 }
 
-/// Run a demo's jump ahead: all at once in play, or behind a loading screen as many steps as
-/// fit in its frame budget (`LoadingBudget`), the rest on the next frames. A whole warm-up is
-/// a few hundred steps of the meadow's fire: over half a second in one frame on a fast PC.
+/// Run a demo's jump ahead as many steps as fit in a frame's budget, the rest on the next
+/// frames: `LoadingBudget` behind a loading screen, [`PLAY_AHEAD_MS`] in play. A whole
+/// warm-up is a few hundred steps of the meadow's fire: 0.9-1.5 s in one frame on ToiasPC
+/// (rounds 3 and 21) and 6.3 s on the session VM when the meadow streamed in. With a manual
+/// clock (tours, tests) it runs all at once, so a picture taken next shows the jumped fire.
 fn run_ahead(world: &mut World, place: Place, demo: &FireDemo, state: &mut FireDemoState) {
     let Some(mut ahead) = state.ahead.take() else {
         return;
     };
-    let budget = world.get_resource::<LoadingBudget>().map(|b| b.budget_ms);
+    let manual = matches!(
+        world.resource::<Time>().source(),
+        engine_core::time::TimeSource::Manual { .. }
+    );
+    let budget = world
+        .get_resource::<LoadingBudget>()
+        .map(|b| b.budget_ms)
+        .or((!manual).then_some(PLAY_AHEAD_MS));
     fast_forward(world, place.origin, reach(demo), &mut ahead, budget);
     if ahead.steps > 0 {
         state.ahead = Some(ahead);
@@ -961,6 +975,10 @@ fn reach(demo: &FireDemo) -> f64 {
     Vec2::from(demo.bounds).length() as f64 + CONTAIN_MARGIN_M
 }
 
+/// The schedule [`fast_forward`] runs the fire's steps with.
+#[derive(Resource)]
+struct AheadSchedule(Schedule);
+
 /// Run the fire within `radius` of `origin` alone for `ahead`'s steps, right now (fires
 /// elsewhere, such as a burning building across the valley, are left where they are): all of
 /// them, or with a `budget_ms` as many as fit in it (at least one).
@@ -973,17 +991,25 @@ fn fast_forward(
 ) {
     let hz = world.resource::<FireSettings>().sim_hz.clamp(1.0, 240.0);
     let started = std::time::Instant::now();
-    let mut schedule = Schedule::default();
-    schedule.add_systems(
-        (
-            sim::index_patches,
-            sim::handle_ignition,
-            sim::wake_fire,
-            sim::step_field,
-            sim::step_objects,
-        )
-            .chain(),
-    );
+    // Made once and kept: in play a jump runs a few steps a frame, and a schedule made anew
+    // each time set its systems up again every frame.
+    let mut schedule = world
+        .remove_resource::<AheadSchedule>()
+        .map(|s| s.0)
+        .unwrap_or_else(|| {
+            let mut schedule = Schedule::default();
+            schedule.add_systems(
+                (
+                    sim::index_patches,
+                    sim::handle_ignition,
+                    sim::wake_fire,
+                    sim::step_field,
+                    sim::step_objects,
+                )
+                    .chain(),
+            );
+            schedule
+        });
     let focus = std::mem::replace(
         &mut world.resource_mut::<FocusPoints>().points,
         vec![origin],
@@ -1016,6 +1042,7 @@ fn fast_forward(
             break;
         }
     }
+    world.insert_resource(AheadSchedule(schedule));
     if let Some(wind) = wind {
         world.insert_resource(wind);
     }
@@ -1391,6 +1418,54 @@ mod tests {
         let mut due_now = app.world.query::<(&FireDemo, &FireDemoState)>();
         assert!(!due_now.iter(&app.world).any(|(d, s)| due(d, s)));
         assert!(state(&mut app).since > s.since, "the fire is still timed");
+    }
+
+    #[test]
+    fn in_play_the_warm_up_is_spread_over_frames_and_tours_get_it_at_once() {
+        let frames_to_start = |manual: bool| {
+            let mut app = App::new();
+            if manual {
+                app.world.resource_mut::<Time>().set_source(
+                    engine_core::time::TimeSource::Manual {
+                        step_secs: 1.0 / 30.0,
+                    },
+                );
+            }
+            app.add_plugins(FirePlugin);
+            {
+                let mut commands = app.world.commands();
+                spawn_demo(&mut commands, DVec3::ZERO);
+            }
+            app.world.flush();
+            let mut demos = app.world.query::<&mut FireDemo>();
+            demos.single_mut(&mut app.world).unwrap().warmup_secs = 5.0;
+            let started = |app: &mut App| {
+                let mut q = app.world.query::<&FireDemoState>();
+                q.single(&app.world).unwrap().started
+            };
+            for _ in 0..100 {
+                if started(&mut app) {
+                    break;
+                }
+                app.update();
+            }
+            assert!(started(&mut app), "the demo lights");
+            let mut frames = 0;
+            while app.world.contains_resource::<Starting>() {
+                app.update();
+                frames += 1;
+                assert!(frames < 5000);
+            }
+            assert!(app.world.resource::<FireField>().stats.burning_m2 > 0.0);
+            frames
+        };
+        // 5 s of fire is tens of steps: more than one frame's budget in play.
+        assert!(frames_to_start(false) > 1);
+        assert_eq!(
+            frames_to_start(true),
+            0,
+            "a manual clock jumps in the lighting frame"
+        );
     }
 
     #[test]
