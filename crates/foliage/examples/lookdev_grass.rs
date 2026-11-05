@@ -79,6 +79,12 @@ fn biomes() -> Vec<Biome> {
         engine_foliage::grass::herb_styles_on(260.0).1[4],
     );
     add("heather", GrassStyle::heather());
+    // Bramble in flower at midsummer and in black berry in September.
+    add("bramble", engine_foliage::grass::herb_styles_on(190.0).1[6]);
+    add(
+        "bramble_sept",
+        engine_foliage::grass::herb_styles_on(245.0).1[6],
+    );
     add("litter", GrassStyle::leaf_litter());
     add("twigs", GrassStyle::twigs());
     // games/showcase's `meadow_grass`.

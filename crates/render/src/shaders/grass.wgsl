@@ -175,8 +175,11 @@ fn grass_cut(along: f32, across: f32, pinnae: f32) -> bool {
         let du = (along - 0.95) / 0.03;
         return along > 0.9 && du * du + across * across > 1.0;
     }
+    if (pinnae > 199.5) {
+        return grass_twig_cut(along, across, pinnae - 200.0, true);
+    }
     if (pinnae > 99.5) {
-        return grass_twig_cut(along, across, pinnae - 100.0);
+        return grass_twig_cut(along, across, pinnae - 100.0, false);
     }
     if (pinnae < 0.0) {
         return grass_leaflet_edge(along, across, pinnae) > 1.0;
@@ -197,15 +200,16 @@ fn grass_cut(along: f32, across: f32, pinnae: f32) -> bool {
     return abs(t - 0.5) * 2.0 > fill;
 }
 
-// A dwarf shrub's twig (bilberry, lingonberry): `n` leaves set alternately up a thin stem, one
+// A dwarf shrub's twig (bilberry, lingonberry) or a bramble's cane (`palmate`, each leaf three
+// leaflets): `n` leaves set alternately up a thin stem, one
 // every 1/n of its length, on the left then the right, each a small oval on a short petiole
 // angled up and out to the blade's edge, its margin finely toothed. One leaf's slot along the
 // twig is about as long as half the blade is wide (`GrassStyle::alternate_leaves`), so the ovals
 // keep their shape; up the tapering tip they get smaller, as a shoot's young leaves do.
-fn grass_twig_cut(along: f32, across: f32, n: f32) -> bool {
+fn grass_twig_cut(along: f32, across: f32, n: f32, palmate: bool) -> bool {
     let a = abs(across);
-    // The stem stays.
-    if (a < 0.07) {
+    // The stem stays (a bramble's cane is thin for its broad leaves).
+    if (a < select(0.07, 0.035, palmate)) {
         return false;
     }
     // Leaves on the right sit at even slots, on the left at odd ones: two slots apart on a side.
@@ -219,20 +223,48 @@ fn grass_twig_cut(along: f32, across: f32, n: f32) -> bool {
         let base = first - 2.0 * f32(k) + 0.1;
         let d = vec2<f32>(x - base, a - 0.05);
         let s = dot(d, axis);
-        let t = abs(d.x * axis.y - d.y * axis.x);
+        let t = d.x * axis.y - d.y * axis.x;
+        if (palmate) {
+            // A bramble's leaf: a stalk 0.3 slots long, then three leaflets from its top, the
+            // end one a slot long, the side ones splayed 40 degrees and a little shorter.
+            if (s > -0.05 && s < 0.32 && abs(t) < 0.045) {
+                return false;
+            }
+            let q = vec2<f32>(s - 0.3, t);
+            if (grass_ovate(q, 1.0)) {
+                return false;
+            }
+            let c = 0.766;
+            let sn = 0.643;
+            if (grass_ovate(vec2<f32>(q.x * c + q.y * sn, q.y * c - q.x * sn), 0.75)
+                || grass_ovate(vec2<f32>(q.x * c - q.y * sn, q.y * c + q.x * sn), 0.75)) {
+                return false;
+            }
+            continue;
+        }
         // Ovate: widest a little below the middle, coming to a blunt point.
         let f = s / 1.2;
         if (f > 0.08 && f < 1.0) {
-            let half = 0.3 * pow(sin(PI * pow(f, 0.85)), 0.8) - 0.02 * abs(sin(f * 40.0));
-            if (t < half) {
+            if (grass_ovate(vec2<f32>(s, t), 1.2)) {
                 return false;
             }
-        } else if (f > -0.05 && f <= 0.08 && t < 0.05) {
+        } else if (f > -0.05 && f <= 0.08 && abs(t) < 0.05) {
             // The leaf's short stalk.
             return false;
         }
     }
     return true;
+}
+
+// Whether `q` (along a leaf's midrib from its base, across it) lies in an ovate leaf `len`
+// long: widest a little below the middle, coming to a blunt point, its margin finely toothed.
+fn grass_ovate(q: vec2<f32>, len: f32) -> bool {
+    let f = q.x / len;
+    if (f <= 0.04 || f >= 1.0) {
+        return false;
+    }
+    let half = len * (0.25 * pow(sin(PI * pow(f, 0.85)), 0.8) - 0.017 * abs(sin(f * 40.0)));
+    return abs(q.y) < half;
 }
 
 // A compound leaf of leaflets radiating from its stalk's top, `code` = -(leaflets + stalk)

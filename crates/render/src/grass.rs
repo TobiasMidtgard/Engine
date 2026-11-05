@@ -256,7 +256,8 @@ pub struct GrassStyle {
     /// Leaves set alternately up a woody twig, one every 1/`alternate_leaves` of its length,
     /// on the left then the right (0 = none): small ovals on short petioles, angled up and
     /// out, cut out of the blade (`width` about 2 x a leaf's length), the stem staying. A
-    /// dwarf shrub's shoot: about `height` / (`width` / 2), 10 a bilberry's.
+    /// dwarf shrub's shoot: about `height` / (`width` / 2), 10 a bilberry's. With `leaflets`
+    /// 3 or more, each leaf is three leaflets spread from its stalk (a bramble's cane).
     pub alternate_leaves: f32,
     /// Round heads only (`bloom_length` 0): over 0, the flowering stems stand this fraction
     /// of the plant's height, not above it: berries hanging among a shrub's leaves.
@@ -525,6 +526,51 @@ impl GrassStyle {
             bloom_size: 0.011,
             bloom_length: 0.35,
             leaf_rise: 0.0,
+            ..Self::forest_herbs()
+        }
+    }
+
+    /// Bramble (Rubus fruticosus agg.): arching canes knee to thigh high in tangled patches
+    /// meters across, in broadleaf woods' lighter shade and gaps on fresh, moderately rich soil;
+    /// leaves alternate up the cane, each of three to five toothed ovate leaflets, dark green and
+    /// semi-evergreen; white to pale pink flowers in June and July, then berries red to black
+    /// in August and September (Taylor 2005, Biological Flora of the British Isles: Rubus
+    /// fruticosus L. agg., J. Ecol. 93; https://en.wikipedia.org/wiki/Rubus_fruticosus). A kind
+    /// of the forest floor's herbs; flowers and berries come with the season
+    /// (`engine_foliage::grass::herb_styles_on`).
+    pub fn bramble() -> Self {
+        Self {
+            blades_per_m2: 180.0,
+            height: 0.8,
+            height_variation: 0.35,
+            width: 0.26,
+            bend: 0.9,
+            leaf: 0.0,
+            lush_color: [0.03, 0.07, 0.018],
+            dry_color: [0.15, 0.07, 0.035],
+            dryness: 0.1,
+            wind_response: 0.2,
+            draw_distance: 45.0,
+            full_density_m: 18.0,
+            shadow_distance: 12.0,
+            // Canes arch out every way from each stool and lean over.
+            clump_size: 0.9,
+            clump_pull: 0.55,
+            clump_fan: 1.0,
+            clump_height: 0.45,
+            clump_color: 0.1,
+            droop: 0.35,
+            gloss: 0.4,
+            tip_tint: [1.2, 1.15, 0.85],
+            bloom: 0.0,
+            bloom_color: [0.62, 0.55, 0.56],
+            bloom_size: 0.026,
+            bloom_height: 0.85,
+            leaflets: 3.0,
+            stalk: 0.0,
+            leaf_rise: 0.0,
+            pinnae: 0.0,
+            alternate_leaves: 6.0,
             ..Self::forest_herbs()
         }
     }
@@ -908,7 +954,12 @@ fn field_seed(at: DVec3, size: [f32; 2], style: &GrassStyle) -> u32 {
 /// compound leaf, or 0 for whole leaves and blades.
 fn style_cut(style: &GrassStyle) -> f32 {
     if style.alternate_leaves > 0.0 {
-        ALTERNATE_CUT + style.alternate_leaves.clamp(2.0, 40.0)
+        let base = if style.leaflets >= 2.5 {
+            PALMATE_CUT
+        } else {
+            ALTERNATE_CUT
+        };
+        base + style.alternate_leaves.clamp(2.0, 40.0)
     } else if style.pinnae > 0.0 {
         style.pinnae
     } else if style.leaflets >= 2.5 && style.leaf > 0.0 {
@@ -920,6 +971,8 @@ fn style_cut(style: &GrassStyle) -> f32 {
 
 /// `GpuField::kind` z over this: a twig with `z - ALTERNATE_CUT` alternate leaves.
 const ALTERNATE_CUT: f32 = 100.0;
+/// ... and over this, `z - PALMATE_CUT` alternate leaves of three leaflets each.
+const PALMATE_CUT: f32 = 200.0;
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]

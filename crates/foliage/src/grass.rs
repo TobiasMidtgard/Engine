@@ -135,7 +135,8 @@ pub struct FloorMaps {
 }
 
 /// The forest floor's kinds of herb, in the order [`FloorMaps::herb_kinds`] names them:
-/// broad-leaved shade herbs, wood sorrel, sweet woodruff and wood anemone.
+/// broad-leaved shade herbs, wood sorrel, sweet woodruff and wood anemone, the dwarf shrubs
+/// (bilberry, lingonberry, heather) and bramble.
 pub fn herb_styles() -> (GrassStyle, Vec<GrassStyle>) {
     (
         GrassStyle::forest_herbs(),
@@ -146,6 +147,7 @@ pub fn herb_styles() -> (GrassStyle, Vec<GrassStyle>) {
             GrassStyle::bilberry(),
             GrassStyle::lingonberry(),
             GrassStyle::heather(),
+            GrassStyle::bramble(),
         ],
     )
 }
@@ -207,6 +209,18 @@ pub fn herb_styles_on(day: f32) -> (GrassStyle, Vec<GrassStyle>) {
         l.bloom = 0.09 * ripe[1];
         l.lush_color = mix3(l.lush_color, [0.03, 0.06, 0.02], winter);
         l.dry_color = mix3(l.dry_color, [0.045, 0.06, 0.025], winter);
+    }
+    if let Some(r) = kinds.get_mut(BRAMBLE_KIND as usize - 1) {
+        // White flowers in June and July, then berries red going black; semi-evergreen, the
+        // leaves darkening and many falling in a hard winter.
+        let [flowers, berries, black] = crate::season::bramble(day);
+        let berry = mix3([0.32, 0.025, 0.03], [0.025, 0.018, 0.03], black);
+        let share = flowers / (flowers + berries).max(1e-3);
+        r.bloom = 0.25 * flowers + 0.2 * berries;
+        r.bloom_color = mix3(berry, r.bloom_color, share);
+        r.bloom_size *= 0.55 + 0.45 * share;
+        r.lush_color = mix3(r.lush_color, [0.04, 0.045, 0.02], 0.7 * winter);
+        r.alternate_leaves *= 1.0 - 0.35 * winter;
     }
     if let Some(h) = kinds.get_mut(k + 2) {
         let fresh = crate::meadow::heather_blooming(day);
@@ -288,6 +302,28 @@ pub fn anemone_season(day: f32) -> f32 {
 
 /// The first of the dwarf shrubs among [`herb_styles`]' kinds (bilberry, lingonberry, heather).
 pub const DWARF_SHRUB_KIND: u8 = 4;
+/// Bramble among [`herb_styles`]' kinds.
+pub const BRAMBLE_KIND: u8 = 7;
+
+/// How much bramble wants a spot of floor, 0..1, from the canopy over it (`canopy`, the
+/// broadleaved part `broad`), the soil's `water` and `nutrients` and the needles painted on
+/// it. Bramble thickets fill broadleaf woods' lighter shade, and the gaps, clearings and
+/// felled ground in them, where it spreads fast once the canopy opens; on fresh, moderately
+/// rich soil (Ellenberg light 6, moisture 5-6, nitrogen 6). In deep shade it lingers as weak
+/// sterile canes; it shuns waterlogged ground and the acid floor under conifers (Taylor 2005,
+/// Biological Flora of the British Isles: Rubus fruticosus L. agg., J. Ecol. 93; Rodwell
+/// 1991, British Plant Communities 1, W8 and W10 woodlands; Harmer 1999 on bramble after
+/// felling in lowland broadleaf woods).
+pub fn bramble_want(canopy: f32, broad: f32, water: f32, nutrients: f32, needles: f32) -> f32 {
+    // Broadleaved share of what shades the spot; an opening counts as the wood around it.
+    let share = if canopy > 0.1 { broad / canopy } else { 1.0 };
+    (1.0 - 0.75 * smoothstep(0.7, 1.3, canopy))
+        * smoothstep(0.35, 0.75, share)
+        * smoothstep(0.18, 0.32, water)
+        * (1.0 - smoothstep(0.6, 0.78, water))
+        * (0.5 + 0.5 * smoothstep(0.25, 0.6, nutrients))
+        * (1.0 - 0.8 * needles)
+}
 
 /// How much each dwarf shrub (bilberry, lingonberry, heather) wants a spot of floor, 0..1, from
 /// the canopy over it (`canopy`, the needle-leaved part of it `conifer`), the soil's `water`
@@ -328,6 +364,12 @@ pub fn floor_maps(
     let n = (rx * rz) as usize;
     let (canopy, broad) = canopy_maps(region, resolution, crowns);
     let fall = leaf_fall_map(region, resolution, crowns);
+    // Woodland within about 8 m: a gap or clearing among trees, not open meadow.
+    let wooded = spread(
+        &canopy,
+        resolution,
+        (8.0 / step.x.min(step.y)).round() as i64,
+    );
     let bare = bare_mask(region, resolution, covers, true);
     // Leaves blow onto the cleared trail too: only logs, rocks and trunks keep them off.
     let covered = bare_mask(region, resolution, covers, false);
@@ -400,6 +442,25 @@ pub fn floor_maps(
                     * (1.0 - hostile).max(0.0);
                 (i as u8, if d < 0.12 { 0.0 } else { d.min(1.0) })
             };
+            // Bramble in thickets several meters across where it wants the ground.
+            let thicket = fbm2(x * 0.08, z * 0.08, region.seed ^ 0x7b1e, 3, 2.0, 0.5);
+            let bramble_d = if blocked || bare[k] || on_trail {
+                0.0
+            } else {
+                let nutrients = if inside { soil.sample(world)[1] } else { 0.4 };
+                let d = bramble_want(canopy[k], broad[k], water, nutrients, needles)
+                    * smoothstep(0.03, 0.12, wooded[k])
+                    * smoothstep(-0.15, 0.2, thicket)
+                    * (1.0 - 0.4 * grass.get(k).copied().unwrap_or(0.0))
+                    * (1.0 - hostile).max(0.0)
+                    * 2.5;
+                if d < 0.25 { 0.0 } else { d.min(1.0) }
+            };
+            let (shrub, shrub_d) = if bramble_d > shrub_d.max(herb_d) {
+                (BRAMBLE_KIND - DWARF_SHRUB_KIND, bramble_d)
+            } else {
+                (shrub, shrub_d)
+            };
             let herb = herb_d.max(shrub_d);
             let thirst = ((0.4 - water) / 0.3).clamp(0.0, 1.0);
             // Each herb's colonies, some meters across.
@@ -458,6 +519,30 @@ pub fn floor_maps(
         shrubs,
         litter_kinds,
     }
+}
+
+/// `map` averaged over a square `r` cells out each way (a separable box blur, clamped at the
+/// edges): how much of something lies around each point.
+fn spread(map: &[f32], resolution: [u32; 2], r: i64) -> Vec<f32> {
+    let [rx, rz] = [resolution[0] as i64, resolution[1] as i64];
+    let pass = |src: &[f32], horizontal: bool| -> Vec<f32> {
+        let mut out = vec![0.0f32; src.len()];
+        for j in 0..rz {
+            for i in 0..rx {
+                let (mut sum, mut n) = (0.0f32, 0.0f32);
+                for d in -r..=r {
+                    let (a, b) = if horizontal { (i + d, j) } else { (i, j + d) };
+                    if a >= 0 && b >= 0 && a < rx && b < rz {
+                        sum += src[(b * rx + a) as usize];
+                        n += 1.0;
+                    }
+                }
+                out[(j * rx + i) as usize] = sum / n.max(1.0);
+            }
+        }
+        out
+    };
+    pass(&pass(map, true), false)
 }
 
 /// Whether `q` (meters from the region's center) lies on a trail's shoulder: beside its tread
@@ -1604,8 +1689,37 @@ mod tests {
         assert!(dwarf_shrubs(0.9, 0.0, 0.4, 0.0).iter().all(|w| *w < 0.05));
         // Their kinds follow the herbs'.
         let (_, kinds) = herb_styles();
-        assert_eq!(kinds.len(), DWARF_SHRUB_KIND as usize + 2);
+        assert_eq!(kinds.len(), DWARF_SHRUB_KIND as usize + 3);
         assert_eq!(kinds[DWARF_SHRUB_KIND as usize - 1], GrassStyle::bilberry());
+        assert_eq!(kinds[BRAMBLE_KIND as usize - 1], GrassStyle::bramble());
+    }
+
+    #[test]
+    fn bramble_takes_light_broadleaf_shade_on_fresh_soil() {
+        // Under a thin oak canopy on fresh, fairly rich soil: thickets.
+        let oaks = bramble_want(0.5, 0.5, 0.3, 0.5, 0.0);
+        assert!(oaks > 0.6, "{oaks}");
+        // Under spruce, on needles: none.
+        assert!(bramble_want(0.8, 0.0, 0.3, 0.5, 0.8) < 0.05);
+        // Deep shade: weak.
+        assert!(bramble_want(1.6, 1.6, 0.3, 0.5, 0.0) < 0.4 * oaks);
+        // A clearing in the broadleaf wood: thickets too.
+        assert!(bramble_want(0.0, 0.0, 0.3, 0.5, 0.0) > 0.6);
+        // Waterlogged: none.
+        assert!(bramble_want(0.5, 0.5, 0.85, 0.5, 0.0) < 0.05);
+        // In flower at midsummer, black berries by September, nothing in winter.
+        let mid = crate::season::bramble(crate::season::MIDSUMMER);
+        assert!(mid[0] > 0.9 && mid[1] < 0.1, "{mid:?}");
+        let sept = crate::season::bramble(245.0);
+        assert!(sept[0] < 0.05 && sept[1] > 0.9 && sept[2] > 0.9, "{sept:?}");
+        assert!(
+            crate::season::bramble(20.0)
+                .iter()
+                .take(2)
+                .all(|v| *v < 0.01)
+        );
+        let (_, kinds) = herb_styles_on(crate::season::MIDSUMMER);
+        assert!(kinds[BRAMBLE_KIND as usize - 1].bloom > 0.1);
     }
 
     #[test]
