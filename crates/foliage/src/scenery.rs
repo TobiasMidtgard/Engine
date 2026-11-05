@@ -639,55 +639,113 @@ fn jitter(rng: &mut Rng, c: [f32; 3], amount: f32) -> [f32; 3] {
     [c[0] * l * (1.0 + warm), c[1] * l, c[2] * l * (1.0 - warm)]
 }
 
+/// The humus layer as it shows at the surface: the fermentation (F, or Of) layer of a moder
+/// forest floor, last years' leaves broken into fragments, skeletonized to their veins, bleached
+/// grey or dark and matted, with needle bits, seed husks, worm casts and specks of moss over the
+/// dark humified (H) layer that hardly shows (Green, Trowbridge and Klinka 1993, Towards a
+/// taxonomic classification of humus forms, For. Sci. Monogr. 29; Ponge 2003, Humus forms in
+/// terrestrial ecosystems, Soil Biol. Biochem. 35). Bare amorphous humus is rare outside
+/// trampled ground, so the ground between the leaves still reads as forest floor up close.
 fn paint_humus(n: usize, seed: u64) -> LayerTexture {
     let tile = GroundLayer::Humus.tile_m();
     let mut p = Painter::new(n, tile);
-    let (dark, mid, light) = (srgb(0x21180f), srgb(0x33261a), srgb(0x4a3826));
+    let (dark, mid, light) = (srgb(0x1c140c), srgb(0x2e2216), srgb(0x463423));
     p.fill(|u, v| {
         let big = tile_fbm(u, v, 3, 4, seed);
         let fine = tile_fbm(u, v, 48, 3, seed ^ 1);
         let h = 0.010 * big + 0.0025 * fine;
         let t = (0.5 + 0.7 * big + 0.5 * fine).clamp(0.0, 1.0);
-        let c = mix3(mix3(dark, mid, t), light, smooth(0.2, 0.7, fine) * 0.35);
+        let c = mix3(mix3(dark, mid, t), light, smooth(0.2, 0.7, fine) * 0.3);
         (c, h, 0.93)
     });
     let mut rng = Rng::new(seed);
     let s = p.size();
-    for _ in 0..count(900.0, tile) {
+    // Crumbs of humus and worm casts.
+    for _ in 0..count(700.0, tile) {
         let (cx, cy) = (rng.f32() * s, rng.f32() * s);
-        let r = rng.range(0.0015, 0.005);
-        let base = mix3(dark, light, rng.f32());
+        let r = rng.range(0.0015, 0.004);
+        let base = mix3(dark, light, rng.f32() * 0.7);
         let c = jitter(&mut rng, base, 0.15);
         p.lump(cx, cy, r, r * 0.7, c, 0.92);
     }
-    let fragments = [0x3a2a1c, 0x4f3a25, 0x2a2018, 0x5a4630, 0x463626];
-    for _ in 0..count(160.0, tile) {
-        let (cx, cy) = (rng.f32() * s, rng.f32() * s);
-        let shape = *rng
-            .pick(&[LeafShape::Oak, LeafShape::Beech, LeafShape::Birch])
-            .unwrap();
-        let base = srgb(*rng.pick(&fragments).unwrap());
-        let c = jitter(&mut rng, base, 0.12);
-        paint_leaf(
-            &mut p,
-            cx,
-            cy,
-            rng.range(0.0, TAU),
-            rng.range(0.02, 0.055),
-            shape,
-            c,
-            0.05,
-            rng.range(0.4, 0.9),
-            0.82,
-            rng.next_u64(),
-        );
+    // Old leaves, oldest first (underneath): dark, matted and holed; then grey bleached ones
+    // and skeletons; then a few of the year's leaves still whole and brown on top.
+    let matted = [0x3a2a1c, 0x4a3624, 0x3e3226, 0x55402a];
+    let bleached = [0x5e5244, 0x544a3e, 0x685a48, 0x6e604e, 0x52463a];
+    let recent = [0x6b4a2b, 0x5a3d24, 0x7a5532, 0x8a6a3a];
+    let shapes = [
+        LeafShape::Oak,
+        LeafShape::Beech,
+        LeafShape::Birch,
+        LeafShape::Hazel,
+    ];
+    for (per_m2, colors, decay, len) in [
+        (520.0, &matted[..], (0.55, 0.95), (0.025, 0.06)),
+        (260.0, &bleached[..], (0.6, 1.0), (0.025, 0.065)),
+        (45.0, &recent[..], (0.0, 0.5), (0.04, 0.08)),
+    ] {
+        for _ in 0..count(per_m2, tile) {
+            let (cx, cy) = (rng.f32() * s, rng.f32() * s);
+            let shape = *rng.pick(&shapes).unwrap();
+            let base = srgb(*rng.pick(colors).unwrap());
+            let c = jitter(&mut rng, base, 0.12);
+            paint_leaf(
+                &mut p,
+                cx,
+                cy,
+                rng.range(0.0, TAU),
+                rng.range(len.0, len.1),
+                shape,
+                c,
+                rng.range(0.0, 0.25),
+                rng.range(decay.0, decay.1),
+                rng.range(0.75, 0.9),
+                rng.next_u64(),
+            );
+        }
     }
+    // Bits of needle, leaf stalk and grass, grey-brown.
+    for _ in 0..count(420.0, tile) {
+        let start = Vec2::new(rng.f32() * s, rng.f32() * s);
+        let len = p.px(rng.range(0.008, 0.03));
+        let pts = Painter::curve(start, rng.range(0.0, TAU), len, rng.range(-0.4, 0.4), 3);
+        let base = srgb(*rng.pick(&[0x6e5a44, 0x5a4634, 0x7e6a50]).unwrap());
+        let c = jitter(&mut rng, base, 0.15);
+        p.line(&pts, (p.px(0.0012) * 0.5).max(0.45), 0.0007, 0.8, &|_| c);
+    }
+    // Rootlets crossing the surface.
     for _ in 0..count(12.0, tile) {
         let start = Vec2::new(rng.f32() * s, rng.f32() * s);
         let len = p.px(rng.range(0.06, 0.25));
         let pts = Painter::curve(start, rng.range(0.0, TAU), len, rng.range(-2.0, 2.0), 10);
         let c = jitter(&mut rng, srgb(0x6a5038), 0.15);
         p.line(&pts, p.px(rng.range(0.0008, 0.002)), 0.0012, 0.85, &|_| c);
+    }
+    // Specks and small cushions of moss starting on the old leaves.
+    let moss = [0x3e4a1c, 0x4a5822, 0x36421a, 0x56632a];
+    for _ in 0..count(10.0, tile) {
+        let (cx, cy) = (rng.f32() * s, rng.f32() * s);
+        let c0 = srgb(*rng.pick(&moss).unwrap());
+        let spread = rng.range(0.006, 0.03);
+        for _ in 0..rng.range(6.0, 30.0) as usize {
+            let (dx, dy) = (rng.range(-1.0, 1.0), rng.range(-1.0, 1.0));
+            let r = rng.range(0.0012, 0.003);
+            let c = jitter(&mut rng, c0, 0.15);
+            p.lump(
+                cx + p.px(spread * dx),
+                cy + p.px(spread * dy),
+                r,
+                r * 0.8,
+                c,
+                0.9,
+            );
+        }
+    }
+    // Seed husks and bud scales.
+    for _ in 0..count(30.0, tile) {
+        let (cx, cy) = (rng.f32() * s, rng.f32() * s);
+        let c = jitter(&mut rng, srgb(0x7a5a34), 0.15);
+        p.stone(cx, cy, 0.003, 0.002, c, 0.6, rng.next_u64());
     }
     for _ in 0..count(6.0, tile) {
         let (cx, cy) = (rng.f32() * s, rng.f32() * s);
@@ -701,7 +759,7 @@ fn paint_humus(n: usize, seed: u64) -> LayerTexture {
         let r = rng.range(0.004, 0.012);
         p.stone(cx, cy, r, r * 0.6, c, 0.7, rng.next_u64());
     }
-    p.finish(1.6, 0.006, 0.45)
+    p.finish(1.8, 0.006, 0.45)
 }
 
 fn paint_litter(n: usize, seed: u64) -> LayerTexture {
@@ -879,14 +937,59 @@ fn paint_moss(n: usize, seed: u64) -> LayerTexture {
         let crest = smooth(-0.1, 0.6, swell + 0.5 * cushion - 0.3);
         c = mix3(c, tips, crest * 0.35 * (1.0 - dead));
         let lit = 0.8 + 0.3 * (0.5 + 0.5 * fuzz) + 0.14 * grain;
-        c = scale3(c, lit);
+        // The cushions' insides, in the shade of the fronds over them.
+        c = scale3(c, 0.72 * lit);
         c = mix3(crevice, c, 0.84 + 0.16 * seam);
         (c, h, 0.95)
     });
     let mut rng = Rng::new(seed ^ 0x33);
     let s = p.size();
+    // Feather moss fronds lying over the cushions: a wiry stem (red-brown in Pleurozium
+    // schreberi, green in Hylocomium splendens) with side branches set pinnately, longest in
+    // the middle, olive at the base and yellow-green at the growing tips, so the carpet reads
+    // as fern-like shoots, 2-6 cm, rather than felt (Smith 2004, The Moss Flora of Britain and
+    // Ireland; Ross et al. 1998 on Hylocomium's yearly "steps").
+    let stems = [0x5e4426, 0x6a4a2a, 0x4e6224];
+    let leafy = [0x4e6a22, 0x5a7426, 0x667a2a, 0x48601e];
+    let tip = srgb(0x9aa83e);
+    for _ in 0..count(1100.0, tile) {
+        let start = Vec2::new(rng.f32() * s, rng.f32() * s);
+        let angle = rng.range(0.0, TAU);
+        let len_m = rng.range(0.02, 0.055);
+        let len = p.px(len_m);
+        let pts = Painter::curve(start, angle, len, rng.range(-0.5, 0.5), 6);
+        let (stem, green) = (
+            srgb(*rng.pick(&stems).unwrap()),
+            srgb(*rng.pick(&leafy).unwrap()),
+        );
+        let (stem, green) = (jitter(&mut rng, stem, 0.12), jitter(&mut rng, green, 0.12));
+        let lift = rng.range(0.0008, 0.0016);
+        // Side branches first, so the stem lies over them.
+        let pairs = (len_m / 0.004) as usize;
+        for k in 1..pairs {
+            let t = k as f32 / pairs as f32;
+            let seg = ((t * (pts.len() - 1) as f32) as usize).min(pts.len() - 2);
+            let (a, b) = (pts[seg], pts[seg + 1]);
+            let dir = (b - a).normalize_or_zero();
+            let at = a + (b - a) * (t * (pts.len() - 1) as f32 - seg as f32);
+            let reach = len * 0.42 * (PI * t.powf(0.8)).sin().max(0.15);
+            for side in [-1.0f32, 1.0] {
+                let out = Vec2::new(-dir.y, dir.x) * side;
+                let d = (dir * 0.75 + out).normalize_or_zero();
+                let bend = rng.range(-0.3, 0.3);
+                let branch = Painter::curve(at, d.y.atan2(d.x), reach, bend, 2);
+                let tint = mix3(green, tip, 0.35 * t);
+                p.line(&branch, 0.5, lift * 0.85, 0.9, &|u: f32| {
+                    mix3(tint, tip, 0.6 * u * u)
+                });
+            }
+        }
+        p.line(&pts, 0.5, lift, 0.85, &|u: f32| {
+            mix3(stem, tip, smooth(0.8, 1.0, u))
+        });
+    }
     // Shoots: short, light strokes give the carpet its fibrous look.
-    for _ in 0..count(2600.0, tile) {
+    for _ in 0..count(1200.0, tile) {
         let start = Vec2::new(rng.f32() * s, rng.f32() * s);
         let len = p.px(rng.range(0.003, 0.007));
         let pts = Painter::curve(start, rng.range(0.0, TAU), len, rng.range(-0.8, 0.8), 2);
