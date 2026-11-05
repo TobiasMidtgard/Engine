@@ -588,7 +588,8 @@ struct Globals {
     /// camera xyz (`vs_falls` moves them by it), unused.
     falls: [f32; 4],
     /// A flood's brown plume spreading round where the falls land in a lake
-    /// (`crate::freshet::Freshet::plume_m`): radius (m), strength 0..1, unused, unused.
+    /// (`crate::freshet::Freshet::plume_m`): radius (m), strength 0..1, mouths ([`Globals::mouths`]),
+    /// and how muddy the streams run (`Freshet::mud`, the falls' froth).
     plume: [f32; 4],
     /// Flood water's absorption rgb and scattering, and scatter colour rgb (times
     /// backscatter) and roughness, as `optics_vectors` gives them.
@@ -2541,6 +2542,10 @@ impl RenderFeature for WaterFeature {
             *dst = view.relative(*foot).extend(boil_radius(*power)).to_array();
         }
         g.counts[3] = near.len().min(MAX_PLUNGES) as u32;
+        // How muddy the streams run: their falls' froth goes beige (`flood_froth`).
+        let mud = world
+            .get_resource::<crate::freshet::Freshet>()
+            .map_or(0.0, |f| f.mud);
         // A flood browns the lake round where its falls come in (`crate::freshet`).
         if let Some(f) = world.get_resource::<crate::freshet::Freshet>()
             && f.plume_mud > 0.01
@@ -2566,6 +2571,7 @@ impl RenderFeature for WaterFeature {
             g.plume = [f.plume_m, f.plume_mud, n as f32, 0.0];
             (g.flood_absorb, g.flood_scatter) = optics_vectors(&crate::freshet::flood_optics());
         }
+        g.plume[3] = mud;
         let frame_wind = engine_core::math::Vec2::new(view.wind.x, view.wind.z);
         (g.detail, g.detail2) = gpu.detail.globals(frame_wind);
         let span = tracing::info_span!("water", name = "surface").entered();
