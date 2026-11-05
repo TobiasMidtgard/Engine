@@ -91,6 +91,14 @@ fn biomes() -> Vec<Biome> {
             ..GrassStyle::meadow()
         },
     );
+    // The meadow's tall grass in early summer: seed heads standing above the blades.
+    // (`LOOKDEV_ROUND_HEADS=1`: round heads, as before seed heads had a length.)
+    let mut tall = engine_foliage::meadow::palette(&GrassStyle::meadow(), 175.0)
+        [engine_foliage::meadow::GrassKind::Tall as usize - 1];
+    if std::env::var("LOOKDEV_ROUND_HEADS").is_ok_and(|v| v == "1") {
+        tall.bloom_length = 0.0;
+    }
+    add("seedheads", tall);
     add(
         "communities",
         GrassStyle {
