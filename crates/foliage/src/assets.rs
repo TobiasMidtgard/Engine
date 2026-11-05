@@ -343,11 +343,15 @@ impl Job {
 /// and return what they made in the jobs' order.
 fn bake(jobs: Vec<Job>, spare: usize) -> Vec<Baked> {
     let next = AtomicUsize::new(0);
-    let threads = std::thread::available_parallelism()
-        .map_or(4, |c| c.get())
-        .saturating_sub(spare)
-        .min(jobs.len())
-        .max(1);
+    // Background builds share one thread budget (held while the threads run).
+    let lease = engine_core::tasks::background_lease(
+        std::thread::available_parallelism()
+            .map_or(4, |c| c.get())
+            .saturating_sub(spare)
+            .min(jobs.len())
+            .max(1),
+    );
+    let threads = lease.threads();
     let jobs = &jobs;
     let mut done: Vec<(usize, Baked)> = std::thread::scope(|scope| {
         let workers: Vec<_> = (0..threads)

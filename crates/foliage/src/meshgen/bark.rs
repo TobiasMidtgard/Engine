@@ -515,9 +515,13 @@ fn par_grid<T: Send + Copy + Default>(
     f: impl Fn(usize, usize) -> T + Sync,
 ) -> Vec<T> {
     let mut out = vec![T::default(); w * h];
-    let threads = std::thread::available_parallelism()
-        .map_or(1, |n| n.get())
-        .clamp(1, 16);
+    // Background builds share one thread budget (held while the threads run).
+    let lease = engine_core::tasks::background_lease(
+        std::thread::available_parallelism()
+            .map_or(1, |n| n.get())
+            .clamp(1, 16),
+    );
+    let threads = lease.threads();
     let rows = h.div_ceil(threads).max(1);
     std::thread::scope(|scope| {
         for (chunk_index, chunk) in out.chunks_mut(rows * w).enumerate() {

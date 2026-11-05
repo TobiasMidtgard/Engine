@@ -66,7 +66,11 @@ pub fn map_wear(wear: &dyn WearQuery, place: &FieldPlace) -> Option<GrassWear> {
     // Search: the bounds of the worn points on a coarse grid, a band of rows per core.
     let [nx, nz] = [sx, sz].map(|s| (s / SEARCH_M).ceil() as u32 + 1);
     let step = [sx / (nx - 1).max(1) as f32, sz / (nz - 1).max(1) as f32];
-    let threads = std::thread::available_parallelism().map_or(4, |c| c.get()) as u32;
+    // Background builds share one thread budget (held while the threads run).
+    let lease = engine_core::tasks::background_lease(
+        std::thread::available_parallelism().map_or(4, |c| c.get()),
+    );
+    let threads = lease.threads() as u32;
     let rows_per = nz.div_ceil(threads.max(1));
     let bands: Vec<Option<[f32; 4]>> = std::thread::scope(|scope| {
         let jobs: Vec<_> = (0..nz)
