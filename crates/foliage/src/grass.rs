@@ -150,6 +150,64 @@ pub fn herb_styles() -> (GrassStyle, Vec<GrassStyle>) {
     )
 }
 
+/// [`herb_styles`] on `day`: bilberry drops its leaves for winter and stands as bare green
+/// twigs; heather's flower spikes are fresh mauve only in late summer and dry to russet,
+/// staying on the shoots through winter, its foliage turning bronze in the cold
+/// (https://en.wikipedia.org/wiki/Calluna_vulgaris); lingonberry stays evergreen, a little
+/// darker in winter.
+pub fn herb_styles_on(day: f32) -> (GrassStyle, Vec<GrassStyle>) {
+    let (base, mut kinds) = herb_styles();
+    let winter = crate::season::winter_dormancy(day);
+    let k = DWARF_SHRUB_KIND as usize - 1;
+    if let Some(b) = kinds.get_mut(k) {
+        let bare = crate::season::bilberry_bare(day);
+        // Green twigs, whatever the season's dryness.
+        let twig = [0.05, 0.12, 0.03];
+        b.width += (0.006 - b.width) * bare;
+        b.leaf *= 1.0 - bare;
+        b.gloss = 0.35 - 0.2 * bare;
+        b.lush_color = mix3(b.lush_color, twig, bare);
+        b.dry_color = mix3(b.dry_color, twig, bare);
+        b.tip_tint = mix3(b.tip_tint, [1.0, 1.0, 1.0], bare);
+        if bare > 0.5 {
+            b.pinnae = 0.0;
+            b.bloom = 0.0;
+        }
+    }
+    if let Some(l) = kinds.get_mut(k + 1) {
+        l.lush_color = mix3(l.lush_color, [0.03, 0.06, 0.02], winter);
+        l.dry_color = mix3(l.dry_color, [0.045, 0.06, 0.025], winter);
+    }
+    if let Some(h) = kinds.get_mut(k + 2) {
+        let fresh = crate::meadow::heather_blooming(day);
+        h.bloom_color = mix3([0.085, 0.045, 0.03], h.bloom_color, fresh);
+        h.lush_color = mix3(h.lush_color, [0.045, 0.045, 0.025], winter);
+        h.dry_color = mix3(h.dry_color, [0.06, 0.045, 0.032], winter);
+    }
+    (base, kinds)
+}
+
+/// The meadow's look on `day` in its winter rest ([`crate::season::winter_dormancy`]): the
+/// dead leaves bleach from straw to a weathered grey-buff, the yellow goes out of the tips,
+/// snow and rain flatten them into a matted, half-lying mat and break most seed heads off.
+pub fn winter_grass(style: &mut GrassStyle, day: f32) {
+    let w = crate::season::winter_dormancy(day);
+    if w <= 0.0 {
+        return;
+    }
+    style.lying = style.lying.max(0.55 * w);
+    style.height *= 1.0 - 0.15 * w;
+    style.dry_color = mix3(style.dry_color, [0.21, 0.175, 0.12], w);
+    style.lush_color = mix3(style.lush_color, [0.07, 0.08, 0.04], 0.6 * w);
+    style.tip_tint = mix3(style.tip_tint, [1.12, 1.08, 1.0], w);
+    style.gloss *= 1.0 - 0.6 * w;
+    style.bloom *= 1.0 - 0.75 * w;
+}
+
+fn mix3(a: [f32; 3], b: [f32; 3], t: f32) -> [f32; 3] {
+    [0, 1, 2].map(|i| a[i] + (b[i] - a[i]) * t)
+}
+
 /// Which herb takes a spot of forest floor, from how closed the `canopy` is over it, how much
 /// of that is broadleaved (`broad`), the soil's `water`, the needles painted on it and its
 /// colonies (`patch`: one noise per kind, about -1..1). The ground flora of European woods
@@ -867,6 +925,8 @@ struct FloorKinds {
     /// Which herb grows where on the forest floor (the herbs' field's `kinds`), and where
     /// twigs lie among the fallen leaves (the litter's).
     herb_kinds: Vec<u8>,
+    /// The herbs' looks on the build's day ([`herb_styles_on`]).
+    herb_styles: Vec<GrassStyle>,
     litter_kinds: Vec<u8>,
 }
 
@@ -1257,10 +1317,16 @@ pub fn sync_region_grass(
                 }
             }
             let kinds = grass_kinds(&region, &soil, center, res, &crowns);
-            let kind_styles = styles
+            // The meadow's kinds come from its summer look; winter then mats and bleaches
+            // them all, and the meadow's own blades with them.
+            let mut kind_styles = styles
                 .iter()
                 .find(|(l, _)| *l == FloorLayer::Grass)
                 .map_or_else(Vec::new, |(_, s)| crate::meadow::palette(s, day));
+            for s in &mut kind_styles {
+                winter_grass(s, day);
+            }
+            let herb_styles = herb_styles_on(day).1;
             let heights = ground.map(|g| heights(g.as_ref(), center, &region, res));
             let floor_heights = heights
                 .as_ref()
@@ -1278,7 +1344,10 @@ pub fn sync_region_grass(
             let mut floor = floor.map(|f| [Some(f.herbs), Some(f.litter)]);
             let layers = styles
                 .into_iter()
-                .filter_map(|(layer, style)| {
+                .filter_map(|(layer, mut style)| {
+                    if layer == FloorLayer::Grass {
+                        winter_grass(&mut style, day);
+                    }
                     let (d, w) = match layer {
                         FloorLayer::Grass => maps.take()?,
                         FloorLayer::Herbs => floor.as_mut()?[0].take()?,
@@ -1294,6 +1363,7 @@ pub fn sync_region_grass(
                     kinds,
                     kind_styles,
                     herb_kinds,
+                    herb_styles,
                     litter_kinds,
                 },
                 heights,
@@ -1312,7 +1382,7 @@ fn layer_kinds(layer: FloorLayer, built: &FloorKinds) -> (Vec<u8>, Vec<GrassStyl
     match layer {
         FloorLayer::Grass => (built.kinds.clone(), built.kind_styles.clone()),
         FloorLayer::Herbs if !built.herb_kinds.is_empty() => {
-            (built.herb_kinds.clone(), herb_styles().1)
+            (built.herb_kinds.clone(), built.herb_styles.clone())
         }
         FloorLayer::Litter if !built.litter_kinds.is_empty() => {
             (built.litter_kinds.clone(), vec![GrassStyle::twigs()])
@@ -1378,6 +1448,50 @@ fn heights(
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn winter_mats_the_meadow_strips_bilberry_and_browns_heather_flowers() {
+        let (july, january) = (190.0, 20.0);
+        let mut summer = GrassStyle::default();
+        winter_grass(&mut summer, july);
+        assert_eq!(
+            summer,
+            GrassStyle::default(),
+            "summer meadows stand as they are"
+        );
+        let mut winter = GrassStyle::default();
+        winter_grass(&mut winter, january);
+        assert!(winter.lying > 0.5 && winter.height < summer.height);
+        // Weathered buff: less yellow than summer's straw (blue closer to red).
+        let warmth = |c: [f32; 3]| c[2] / c[0];
+        assert!(warmth(winter.dry_color) > warmth(summer.dry_color) + 0.1);
+
+        let b = DWARF_SHRUB_KIND as usize - 1;
+        let (_, jul) = herb_styles_on(july);
+        let (_, jan) = herb_styles_on(january);
+        assert!(
+            jul[b].pinnae > 0.0 && jul[b].width > 0.05,
+            "bilberry in leaf in July"
+        );
+        assert!(
+            jan[b].pinnae == 0.0 && jan[b].width < 0.01,
+            "bare twigs in January"
+        );
+        assert!(
+            jan[b].dry_color[1] > jan[b].dry_color[0],
+            "the twigs stay green"
+        );
+        let (_, aug) = herb_styles_on(225.0);
+        let mauve = |c: [f32; 3]| c[2] / c[0];
+        assert!(
+            mauve(aug[b + 2].bloom_color) > 0.8,
+            "heather in flower in August"
+        );
+        assert!(
+            mauve(jan[b + 2].bloom_color) < 0.4,
+            "dead russet spikes in January"
+        );
+    }
 
     #[test]
     fn heath_shrubs_take_acid_ground_by_its_water_and_light() {
