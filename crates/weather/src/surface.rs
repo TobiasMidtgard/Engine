@@ -501,6 +501,9 @@ pub fn update_rows(
 
 /// Bands of rows the ground update takes in turn, one or a few per tick.
 const GROUND_BANDS: usize = 32;
+/// Bands one tick updates at most ([`ground_system`]): at the default 4 Hz, every tick up to
+/// 62 ms long keeps its rate.
+const MAX_BANDS_PER_TICK: usize = GROUND_BANDS / 4;
 
 /// Roofs higher than this above the ground don't keep rain off it (m).
 const ROOF_SEARCH_M: f32 = 120.0;
@@ -881,20 +884,15 @@ pub(crate) fn ground_system(
     // `rate_hz` times a second), and the roof rays run off the frame. Updating the whole
     // grid at once took tens of milliseconds and, on a busy PC, a quarter second: a hitch
     // every update, and a slide show once frames were slow enough for it to run every frame.
-    let tick = time.delta_secs();
-    let rate = params.rate_hz.max(0.1);
-    for age in &mut cache.band_age {
-        *age += tick;
-    }
-    cache.band_credit =
-        (cache.band_credit + GROUND_BANDS as f32 * rate * tick).min(GROUND_BANDS as f32);
-    cache.ray_credit = (cache.ray_credit + params.shelter_rays as f32 * rate * tick)
-        .min(params.shelter_rays as f32);
-    let bands = cache.band_credit.floor() as usize;
+    let bands = bands_due(
+        &mut cache,
+        time.delta_secs(),
+        params.rate_hz,
+        params.shelter_rays,
+    );
     if bands == 0 {
         return;
     }
-    cache.band_credit -= bands as f32;
 
     if let Some(old) = cache.align(&surface.grid) {
         seed_uncovered(&mut surface.grid, &cache, old);
@@ -940,6 +938,24 @@ pub(crate) fn ground_system(
             band * band_rows..((band + 1) * band_rows).min(height),
         );
     }
+}
+
+/// How many bands this tick of `tick` seconds updates (every band `rate_hz` times a second),
+/// with the roof rays' credit for it. At most [`MAX_BANDS_PER_TICK`]: after a slow frame the
+/// credit is the whole grid, and updating it all made the next frame slow too (102 ms on the
+/// session VM after a 1 s loading frame). The bands left wait for the next ticks; each still
+/// gets its whole age.
+fn bands_due(cache: &mut GroundCache, tick: f32, rate_hz: f32, rays: u32) -> usize {
+    let rate = rate_hz.max(0.1);
+    for age in &mut cache.band_age {
+        *age += tick;
+    }
+    cache.band_credit =
+        (cache.band_credit + GROUND_BANDS as f32 * rate * tick).min(GROUND_BANDS as f32);
+    cache.ray_credit = (cache.ray_credit + rays as f32 * rate * tick).min(rays as f32);
+    let bands = (cache.band_credit.floor() as usize).min(MAX_BANDS_PER_TICK);
+    cache.band_credit -= bands as f32;
+    bands
 }
 
 /// Mark the ground under shelters and stamp the ground patches into the cache.
@@ -1041,6 +1057,24 @@ mod tests {
             0.3,
             &WeatherSim::default(),
         );
+    }
+
+    #[test]
+    fn a_slow_frame_updates_a_quarter_of_the_grid_and_the_rest_follow() {
+        let mut cache = GroundCache::default();
+        // 60 fps at 4 Hz: two bands a tick, then and there.
+        let ticks: Vec<usize> = (0..4)
+            .map(|_| bands_due(&mut cache, 1.0 / 60.0, 4.0, 0))
+            .collect();
+        assert_eq!(ticks.iter().sum::<usize>(), 8, "{ticks:?}");
+        // A 1 s frame owes the whole grid: a quarter now, the rest over the next ticks.
+        assert_eq!(bands_due(&mut cache, 1.0, 4.0, 0), MAX_BANDS_PER_TICK);
+        let mut rest = 0;
+        for _ in 0..3 {
+            rest += bands_due(&mut cache, 0.0, 4.0, 0);
+        }
+        assert_eq!(MAX_BANDS_PER_TICK + rest, GROUND_BANDS);
+        assert_eq!(bands_due(&mut cache, 0.0, 4.0, 0), 0);
     }
 
     fn rain(mm_h: f32, t: f32) -> WeatherState {
