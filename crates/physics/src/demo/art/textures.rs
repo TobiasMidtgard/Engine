@@ -1881,27 +1881,14 @@ impl<const K: usize> Field<K> {
 // Parallel helpers
 // =============================================================================================
 
+/// Threads a texture's work splits over at most (each fan-out leases its share of them).
 fn threads() -> usize {
-    match SHARE.get() {
-        0 => std::thread::available_parallelism()
-            .map_or(4, |n| n.get())
-            .clamp(1, 16),
-        n => n,
-    }
+    std::thread::available_parallelism()
+        .map_or(4, |n| n.get())
+        .clamp(1, 16)
 }
 
-thread_local! {
-    /// The threads a texture made on this thread fans out over; 0: every core.
-    static SHARE: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-}
-
-/// Make textures on this thread fan out over at most `n` threads (an art worker's share).
-#[allow(dead_code)] // (The `art_textures` example includes this file and has no workers.)
-pub(crate) fn share_cores(n: usize) {
-    SHARE.set(n.max(1));
-}
-
-/// Run `f(first_row, chunk)` over chunks of `rows_per` rows of a row-major buffer on all cores.
+/// Run `f(first_row, chunk)` over chunks of `rows_per` rows of a row-major buffer on the cores leased.
 fn par_chunks<T: Send>(
     data: &mut [T],
     row_len: usize,
@@ -1909,8 +1896,13 @@ fn par_chunks<T: Send>(
     f: impl Fn(usize, &mut [T]) + Sync,
 ) {
     let chunks = Mutex::new(data.chunks_mut(row_len * rows_per).enumerate());
+    // A share of the background threads every module's fan-outs split between them, held while
+    // these run: with each art worker's textures on every core, 8 threads ran on the VM's 4
+    // cores as the proving ground streamed in and the frame's physics waited 130 ms for 0.04 ms
+    // of work.
+    let lease = engine_core::tasks::background_lease(threads());
     std::thread::scope(|s| {
-        for _ in 0..threads() {
+        for _ in 0..lease.threads() {
             s.spawn(|| {
                 loop {
                     let next = chunks.lock().unwrap_or_else(|e| e.into_inner()).next();

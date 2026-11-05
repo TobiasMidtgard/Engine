@@ -176,7 +176,6 @@ fn workers() -> Option<&'static Mutex<mpsc::Sender<Work>>> {
             let spawned = std::thread::Builder::new()
                 .name(format!("proving ground art {i}"))
                 .spawn(move || {
-                    textures::share_cores(worker_share());
                     loop {
                         let next = rx.lock().recv();
                         match next {
@@ -197,17 +196,6 @@ fn worker_count() -> usize {
     std::thread::available_parallelism()
         .map_or(2, |n| n.get() / 2)
         .max(1)
-}
-
-/// Threads one texture made on an art worker may fan out over: its share of all the cores but
-/// two, so the art (with the other workers) leaves the frame's thread and the render thread a
-/// core each. Each worker's texture took every core, 8 busy threads on the VM's 4 cores and
-/// 16 x 16 on a 32-core PC, and the frame's own work as the yard streamed in (a station's
-/// colliders, 7.7 ms on the CPU) took 29 ms of wall time. Elsewhere (a screenshot waiting for
-/// the art, no workers), textures use every core.
-fn worker_share() -> usize {
-    let cores = std::thread::available_parallelism().map_or(4, |n| n.get());
-    (cores.saturating_sub(2) / worker_count()).clamp(1, 16)
 }
 
 /// Run `make` on a worker, or here (`Err`) where there are none.
