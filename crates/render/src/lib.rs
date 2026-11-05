@@ -64,6 +64,7 @@
 
 mod aerial;
 mod atmosphere;
+mod canopy;
 pub mod cloud_shadows;
 pub mod components;
 pub mod depth_of_field;

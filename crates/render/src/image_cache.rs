@@ -332,6 +332,9 @@ struct CachedImage {
     pending: [Option<Encoding>; VIEW_SLOTS],
     /// Mean linear color of the pixels as uploaded (RGBA8 images), which outlives a release.
     mean: Option<[f32; 3]>,
+    /// Share of its pixels an alpha test at 0.5 keeps (RGBA8 images), which
+    /// outlives a release: how much of a leaf card is leaf.
+    coverage: Option<f32>,
 }
 
 impl CachedImage {
@@ -443,6 +446,14 @@ impl ImageCache {
     pub fn mean_color(&self, images: &Assets<Image>, handle: Handle<Image>) -> Option<[f32; 3]> {
         let index = images.canonical(handle).index();
         self.lock().images.get(&index).and_then(|c| c.mean)
+    }
+
+    /// Share of `handle`'s pixels an alpha test at 0.5 keeps, known once it was
+    /// uploaded while its pixels were there; `None` before, and for other formats than RGBA8.
+    /// The canopy map counts a leaf card's leaf area by it (`crate::canopy`).
+    pub fn alpha_coverage(&self, images: &Assets<Image>, handle: Handle<Image>) -> Option<f32> {
+        let index = images.canonical(handle).index();
+        self.lock().images.get(&index).and_then(|c| c.coverage)
     }
 
     /// The texture of `handle` for a slot that reads it as `usage`, uploading it when it is not
@@ -586,6 +597,7 @@ impl ImageCache {
             views: Default::default(),
             pending: [None; VIEW_SLOTS],
             mean: mean_color(image),
+            coverage: alpha_coverage(image),
         });
         cached.views[slot] = Some(uploaded.clone());
         cached.pending[slot] = encoding;
@@ -1244,6 +1256,22 @@ fn mean_color(image: &Image) -> Option<[f32; 3]> {
     Some(sum.map(|s| (s / n) as f32))
 }
 
+/// Share of an RGBA8 image's pixels (about 4096 of them, evenly spread) with alpha at least
+/// 0.5.
+fn alpha_coverage(image: &Image) -> Option<f32> {
+    if image.format != PixelFormat::Rgba8 || image.data.len() < 4 {
+        return None;
+    }
+    let pixels = image.data.len() / 4;
+    let step = (pixels / 4096).max(1);
+    let (mut kept, mut n) = (0u32, 0u32);
+    for p in image.data.as_chunks::<4>().0.iter().step_by(step) {
+        kept += (p[3] >= 128) as u32;
+        n += 1;
+    }
+    Some(kept as f32 / n as f32)
+}
+
 pub(crate) fn upload_image(
     gpu: &GpuShared,
     image: &Image,
@@ -1378,6 +1406,17 @@ mod tests {
         assert!((mean[0] - 0.25).abs() < 0.01 && mean[2] == 0.0, "{mean:?}");
         let linear = mean_color(&Image::new(8, 8, data, false)).expect("RGBA8");
         assert!((linear[1] - 94.0 / 255.0).abs() < 0.01, "{linear:?}");
+    }
+
+    #[test]
+    fn alpha_coverage_counts_the_pixels_an_alpha_test_keeps() {
+        // A 4x4 card, a quarter of it leaf.
+        let mut data = Vec::new();
+        for i in 0..16 {
+            data.extend_from_slice(&[0, 255, 0, if i % 4 == 0 { 255 } else { 0 }]);
+        }
+        let image = Image::new(4, 4, data, true);
+        assert_eq!(alpha_coverage(&image), Some(0.25));
     }
 
     #[test]

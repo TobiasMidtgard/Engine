@@ -338,6 +338,8 @@ struct Look<'a> {
     shared: &'a GpuShared,
     default_material: &'a StandardMaterial,
     anchor: DVec3,
+    /// Leaf crowns are in the canopy map (`RenderSettings::canopy`): the rays see them there.
+    canopy: bool,
 }
 
 /// What the instance gather reads; only change ticks while nothing changed.
@@ -1113,6 +1115,14 @@ impl ProbeGi {
         if material.unlit || matches!(material.alpha_mode, AlphaMode::Blend) {
             return Read::Entry(entry, false);
         }
+        // Swaying leaf cards: as solid triangles they made a roof of the crowns (and cost every
+        // ray through them); the rays see the canopy map's leaves instead.
+        if look.canopy
+            && matches!(material.alpha_mode, AlphaMode::Mask(_))
+            && material.wind_sway > 0.0
+        {
+            return Read::Entry(entry, false);
+        }
         let key = handle.index();
         let version = entry.mesh_version;
         let Some(local) = self.local_bounds(meshes, handle) else {
@@ -1491,6 +1501,7 @@ impl ProbeGi {
                 shared,
                 default_material: &default_material,
                 anchor,
+                canopy: settings.canopy,
             };
             for &entity in &dirty {
                 membership |= self.gather_one(&look, &mut query, entity, &mut builds, &mut moved);

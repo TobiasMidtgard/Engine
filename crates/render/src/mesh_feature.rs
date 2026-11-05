@@ -193,6 +193,8 @@ struct GpuMesh {
     half_extents: Vec3,
     min_y: f32,
     height: f32,
+    /// Its triangles' area (m², mesh space): a leaf crown's card area for the canopy map.
+    area: f32,
     /// Last frame the instanced path drew it.
     last_used: u64,
     /// The frame from which static shadow images may hold it: `STILL_FRAMES` after an edit
@@ -479,6 +481,9 @@ struct MaterialFrame {
     still_opaque: bool,
     /// Sways in the wind: drawn every frame into the near cascades' shadows.
     sways: bool,
+    /// The share of its base color's texels an alpha test keeps (leaf cards: how much of a card
+    /// is leaf, for the canopy map); 1 without a base color texture.
+    coverage: f32,
     /// Its material slot and texture set this frame, once something drawn uses it.
     slot: Option<(u32, u32)>,
     /// Which impostors show it: the handle index, the material's GPU values and its images'
@@ -561,6 +566,26 @@ fn run_jobs<'env, F: FnOnce() + Send + 'env>(jobs: impl Iterator<Item = F>) {
             jobs.for_each(|job| job());
         }
     }
+}
+
+/// The area of `mesh`'s triangles (mesh space).
+fn triangle_area(mesh: &Mesh) -> f32 {
+    let p = |i: u32| {
+        mesh.vertices
+            .get(i as usize)
+            .map_or(Vec3::ZERO, |v| Vec3::from(v.position))
+    };
+    let area: f64 = mesh
+        .indices
+        .as_chunks::<3>()
+        .0
+        .iter()
+        .map(|t| {
+            let (a, b, c) = (p(t[0]), p(t[1]), p(t[2]));
+            (b - a).cross(c - a).length() as f64 * 0.5
+        })
+        .sum();
+    area as f32
 }
 
 /// Whether a caster with this camera-relative bounding sphere belongs in shadow map `map`'s
@@ -1047,6 +1072,10 @@ pub struct MeshFeature {
     lod_waiting: Vec<(u32, Handle<Mesh>)>,
     /// Each shadow map's casters and batch keys, kept between frames for their allocations.
     shadow_scratch: Vec<MapCasters>,
+    /// The canopy map's crowns this frame, kept for the allocation.
+    crowns: Vec<crate::canopy::Crown>,
+    /// Their leaf area and the ground their discs cover (m²), for `render.canopy.*`.
+    canopy_area: (f32, f32),
     /// Depth-only shadow pipeline (opaque casters).
     shadow_pipeline: Option<wgpu::RenderPipeline>,
     /// Alpha-tested shadow pipeline (masked casters).
@@ -1443,6 +1472,7 @@ impl MeshFeature {
                 half_extents: aabb.half_extents(),
                 min_y: aabb.min.y,
                 height: (aabb.max.y - aabb.min.y).max(1e-3),
+                area: triangle_area(mesh),
                 last_used: self.frame,
                 still_from: self.frame
                     + if edit {
@@ -2187,6 +2217,47 @@ impl MeshFeature {
 
     /// The opaque instances the GPU tests for occlusion (`mesh_cull.rs`) and their batches'
     /// arguments, when drawn with multi-draw: those come first in this frame's arguments.
+    /// Hand the canopy map this frame's leaf crowns (`crate::canopy`).
+    fn set_canopy_crowns(&mut self, gpu: &GpuShared, view: &ViewData) {
+        use crate::canopy::{CANOPY_HALF_EXTENT, CANOPY_TEXEL, Crown, anchor_for};
+        let anchor = anchor_for(view.origin);
+        let shift = (view.origin - anchor).as_vec3();
+        self.crowns.clear();
+        let mut area = (0.0, 0.0);
+        for item in &self.items {
+            if !(item.masked && item.sways && item.casts)
+                || !item.cast_texels.casts_at(CANOPY_TEXEL)
+            {
+                continue;
+            }
+            let Some(mesh) = self.meshes.get(&item.mesh) else {
+                continue;
+            };
+            let center = item.center + shift;
+            if center.x.abs() - item.radius > CANOPY_HALF_EXTENT
+                || center.z.abs() - item.radius > CANOPY_HALF_EXTENT
+            {
+                continue;
+            }
+            let coverage = self
+                .material_frames
+                .get(item.material as usize)
+                .map_or(crate::canopy::DEFAULT_LEAF_COVERAGE, |m| m.coverage);
+            let leaf_area = mesh.area * item.scale * item.scale * coverage;
+            if leaf_area <= 0.0 {
+                continue;
+            }
+            let half = mesh.half_extents * item.scale;
+            let radius = half.x.max(half.z);
+            self.crowns
+                .push(Crown::new(center, radius, half.y, leaf_area));
+            area.0 += leaf_area;
+            area.1 += std::f32::consts::PI * radius * radius;
+        }
+        self.canopy_area = area;
+        gpu.canopy.set_crowns(anchor, &self.crowns);
+    }
+
     fn prepare_culling(&mut self, gpu: &GpuShared, view: &ViewData, settings: &RenderSettings) {
         let (Some(culling), Some(instances)) = (&mut self.culling, &self.instances) else {
             return;
@@ -2847,6 +2918,15 @@ impl RenderFeature for MeshFeature {
                     still_opaque: material.alpha_mode == AlphaMode::Opaque
                         && material.wind_sway <= 0.0,
                     sways: material.wind_sway > 0.0,
+                    coverage: match material.alpha_mode {
+                        AlphaMode::Mask(_) => match material.base_color_texture {
+                            Some(image) => image_assets
+                                .and_then(|images| gpu.images.alpha_coverage(images, image))
+                                .unwrap_or(crate::canopy::DEFAULT_LEAF_COVERAGE),
+                            None => 1.0,
+                        },
+                        _ => 1.0,
+                    },
                     slot: None,
                     impostor_key,
                 };
@@ -3241,6 +3321,18 @@ impl RenderFeature for MeshFeature {
             });
         }
         Self::batch(&self.keys, first as u32, &mut self.transparent);
+        steps.step("meshes: canopy");
+        // Light through leaf canopies (`crate::canopy`): every swaying leaf crown that casts,
+        // once (at the level of the coarse maps, `ShadowTexelRange`), as an ellipsoid of its
+        // cards' leaf area. The main view's crowns; other views read its map.
+        let canopy_leaves = settings.canopy;
+        if !view.extra_view {
+            if canopy_leaves {
+                self.set_canopy_crowns(gpu, view);
+            } else {
+                gpu.canopy.clear();
+            }
+        }
         steps.step("meshes: shadow lists");
         // Shadows: opaque casters batch by mesh (depth only); masked casters by texture set
         // and mesh (alpha tested). Each map draws casters at the level of detail its texels
@@ -3319,6 +3411,10 @@ impl RenderFeature for MeshFeature {
                     let item = &items[n as usize];
                     // A caster with a stand-in for other maps (`ShadowTexelRange`).
                     if !item.cast_texels.casts_at(texel) {
+                        continue;
+                    }
+                    // Leaf crowns are in the canopy map: their light comes through them.
+                    if c == SKY_OCCLUSION_VIEW && canopy_leaves && item.masked && item.sways {
                         continue;
                     }
                     let can_rest = !(item.sways && sway_moves);
@@ -3637,6 +3733,13 @@ impl RenderFeature for MeshFeature {
         {
             self.last_report = Some(std::time::Instant::now());
             tracing::info!("mesh triangles\n{}", self.triangle_report(shadows));
+            tracing::info!(
+                "canopy: {} crowns, leaf area {:.0} m² over {:.0} m² of crown discs (leaf area index {:.1})",
+                self.crowns.len(),
+                self.canopy_area.0,
+                self.canopy_area.1,
+                self.canopy_area.0 / self.canopy_area.1.max(1e-3)
+            );
         }
         {
             let d = &mut *diagnostics;
@@ -3649,6 +3752,13 @@ impl RenderFeature for MeshFeature {
             );
             // Slots the serial pass took (cluster path and first uploads).
             d.set("render.meshes.serial_slots", self.deferred.len() as f64);
+            // The canopy map's crowns, and their leaf area over the ground their discs cover
+            // (a crown's mean leaf area index).
+            d.set("render.canopy.crowns", self.crowns.len() as f64);
+            d.set(
+                "render.canopy.crown_lai",
+                (self.canopy_area.0 / self.canopy_area.1.max(1e-3)) as f64,
+            );
             // Sun cascade casters drawn this frame: the moving ones, and the still ones of the
             // static images drawn again.
             let (mut instances, mut triangles) = (0u64, 0u64);
@@ -3722,6 +3832,10 @@ impl RenderFeature for MeshFeature {
     }
 
     fn compute(&mut self, encoder: &mut wgpu::CommandEncoder, ctx: &FrameContext) {
+        // The canopy map, when its crowns changed (the main view sets them).
+        if !ctx.view.extra_view {
+            ctx.gpu.canopy.encode(ctx.gpu, encoder);
+        }
         // First: every pass after it (shadows, prepass, the view, bakes) draws the posed
         // vertices.
         let meshes = &self.meshes;
