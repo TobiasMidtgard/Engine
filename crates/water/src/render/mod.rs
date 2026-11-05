@@ -1562,14 +1562,17 @@ impl WaterFeature {
         state: &WaterState,
         view: &ViewData,
         plunges: &[(DVec3, Vec2, f32)],
+        creeks: Option<&crate::flow::Falls>,
     ) -> [f32; 4] {
         // The falls as the flow step last worked them out (a few times a second while the
-        // water moves), built once for every view and frame until they change.
+        // water moves), built once for every view and frame until they change; and the
+        // creeks' pour-overs (`crate::creek_stones::PourOver`), laid with their ribbons.
         let key: Vec<usize> = state
             .flows
             .iter()
             .filter(|sim| sim.visible)
             .map(|sim| sim.falls() as *const crate::flow::Falls as usize)
+            .chain(creeks.map(|f| f as *const crate::flow::Falls as usize))
             .collect();
         let stale = gpu.fall_key != key
             || gpu
@@ -1587,8 +1590,9 @@ impl WaterFeature {
                 .flows
                 .iter()
                 .filter(|sim| sim.visible)
-                .flat_map(|sim| {
-                    let falls = sim.falls();
+                .map(|sim| sim.falls())
+                .chain(creeks)
+                .flat_map(|falls| {
                     falls.lips.iter().zip(&falls.paths).zip(&falls.sides).map(
                         |((lip, path), sides)| {
                             (lip.top.distance(view.origin), lip, path.as_slice(), *sides)
@@ -2643,7 +2647,17 @@ impl RenderFeature for WaterFeature {
         ];
         drop(span);
         let span = tracing::info_span!("water", name = "falls upload").entered();
-        g.falls = Self::upload_falls(gpu, shared, &state, view, &plunges);
+        let creek_falls = world
+            .get_resource::<crate::creeks::CreekRibbons>()
+            .map(|r| r.falls.clone());
+        g.falls = Self::upload_falls(
+            gpu,
+            shared,
+            &state,
+            view,
+            &plunges,
+            creek_falls.as_deref().filter(|f| !f.lips.is_empty()),
+        );
         drop(span);
         let span = tracing::info_span!("water", name = "uniform").entered();
         uniform.g = g;

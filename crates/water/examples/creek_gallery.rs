@@ -8,7 +8,8 @@
 //! `views` is a comma-separated subset of: creek_bank, creek_brook, creek_main, creek_mid,
 //! creek_valley. `GALLERY_NO_CREEKS=1` leaves the creeks out (the dry channels, to compare);
 //! `GALLERY_NO_SIM=1` draws the creek nearest the camera as a ribbon too, not simulated;
-//! `GALLERY_NO_STONES=1` leaves the creeks' stones out;
+//! `GALLERY_NO_STONES=1` leaves the creeks' stones out; `GALLERY_NO_POURS=1` the water pouring
+//! off their steps;
 //! `GALLERY_FRAMES=n` draws n frames a view (for `ENGINE_PROFILE=1`).
 
 use std::sync::Arc;
@@ -82,6 +83,40 @@ fn views(m: &Meadow) -> Vec<(&'static str, DVec3, DVec3)> {
     let (p, d, w) = on_reach(m, 1, 5, 0.5);
     let eye = ground(p + d * 7.0 + side(d) * (0.5 * w as f64 + 2.0)) + DVec3::Y * 1.7;
     out.push(("creek_brook", eye, p - d * 3.0));
+    // Low on the brook's bank a few steps down, looking up at the water pouring off them.
+    let (p, d, w) = on_reach(m, 1, 5, 0.5);
+    let eye = ground(p + d * 5.0 + side(d) * (0.5 * w as f64 + 1.2)) + DVec3::Y * 1.2;
+    out.push(("creek_steps", eye, ground(p - d * 2.0)));
+    // Close in front of the pour-over with the biggest drop within 150 m, looking up at it.
+    {
+        let h = |x: f64, z: f64| m.height(x as f32, z as f32) as f64;
+        let mut best: Option<engine_water::creek_stones::PourOver> = None;
+        for reach in &m.reaches {
+            let laid = engine_water::creek_stones::lay_reach_stones(
+                &reach.points,
+                &h,
+                engine_water::creek_stones::reach_seed(reach),
+            );
+            for q in laid.pours {
+                if q.lip.top.distance(p) < 150.0
+                    && best
+                        .as_ref()
+                        .is_none_or(|b| q.lip.drop * q.lip.q > b.lip.drop * b.lip.q)
+                {
+                    best = Some(q);
+                }
+            }
+        }
+        if let Some(q) = best {
+            eprintln!(
+                "pour: drop {:.2} m, q {:.3} m2/s, speed {:.2}",
+                q.lip.drop, q.lip.q, q.lip.speed
+            );
+            let d = DVec3::new(q.lip.dir.x as f64, 0.0, q.lip.dir.y as f64);
+            let eye = q.lip.top + d * 4.5 + side(d) * 1.4 + DVec3::Y * 0.9;
+            out.push(("creek_pour", eye, q.lip.top - DVec3::Y * 0.2));
+        }
+    }
     // The main stream from its bank.
     let (p, d, w) = on_reach(m, 3, 6, 0.4);
     let eye = ground(p - d * 10.0 + side(d) * (0.5 * w as f64 + 4.0)) + DVec3::Y * 2.2;
@@ -190,10 +225,14 @@ fn main() {
                 break;
             }
         }
+        if std::env::var_os("GALLERY_NO_POURS").is_some() {
+            app.world.resource_mut::<CreekRibbons>().falls = Default::default();
+        }
         app.update_n(frames);
         eprintln!(
-            "{key}: {} stone props within 30 m",
-            app.world.resource::<CreekStones>().props_near(eye, 30.0)
+            "{key}: {} stone props within 30 m, {} pour-overs",
+            app.world.resource::<CreekStones>().props_near(eye, 30.0),
+            app.world.resource::<CreekRibbons>().falls.lips.len()
         );
         if let Some(d) = app.world.get_resource::<RenderDisabled>() {
             eprintln!("no GPU: {}", d.0);
