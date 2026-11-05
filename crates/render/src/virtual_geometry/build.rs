@@ -592,12 +592,15 @@ fn simplify_group(
     ))
 }
 
-/// `f` over `items` on up to four threads, results in order.
+/// `f` over `items` on up to four threads (leased from the threads every module's background
+/// work shares), results in order.
 pub(super) fn parallel_map<T: Sync, R: Send>(items: &[T], f: impl Fn(&T) -> R + Sync) -> Vec<R> {
-    let threads = std::thread::available_parallelism()
-        .map_or(1, |n| n.get())
-        .clamp(1, 4);
-    if threads == 1 || items.len() < 16 {
+    if items.len() < 16 {
+        return items.iter().map(&f).collect();
+    }
+    let lease = engine_core::tasks::background_lease(4);
+    let threads = lease.threads();
+    if threads == 1 {
         return items.iter().map(&f).collect();
     }
     let chunk = items.len().div_ceil(threads);

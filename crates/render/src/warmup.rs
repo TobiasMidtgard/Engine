@@ -37,7 +37,9 @@ pub(crate) struct Warmup<K, T = wgpu::RenderPipeline> {
 }
 
 impl<K: Copy + Eq + Hash + Send + 'static, T: Send + 'static> Warmup<K, T> {
-    /// Start compiling `jobs`, in order, on `threads` workers named `name`.
+    /// Start compiling `jobs`, in order, on up to `threads` workers named `name`: as many as
+    /// a background lease grants (`engine_core::tasks::background_lease`, shared with every
+    /// module's background work), held until the last worker finishes.
     pub fn start(name: &str, jobs: Vec<(K, Build<T>)>, threads: usize) -> Self {
         let mut results = HashMap::new();
         let queue: VecDeque<Job<K, T>> = jobs
@@ -48,13 +50,18 @@ impl<K: Copy + Eq + Hash + Send + 'static, T: Send + 'static> Warmup<K, T> {
                 Job { key, build, done }
             })
             .collect();
-        let workers = threads.clamp(1, queue.len().max(1));
+        let lease = Arc::new(engine_core::tasks::background_lease(
+            threads.clamp(1, queue.len().max(1)),
+        ));
+        let workers = lease.threads();
         let queue = Arc::new(Mutex::new(queue));
         for _ in 0..workers {
             let queue = queue.clone();
+            let lease = lease.clone();
             let spawned = std::thread::Builder::new()
                 .name(name.into())
                 .spawn(move || {
+                    let _lease = lease;
                     loop {
                         let job = queue.lock().ok().and_then(|mut q| q.pop_front());
                         let Some(job) = job else { break };

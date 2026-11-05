@@ -531,13 +531,30 @@ fn main() {
     {
         app.world.resource_mut::<FoliageSeason>().day_of_year = day;
         simulate(&mut app, 30);
+        // Until the floor's maps are rebuilt for the day (off the frame, on the async pool).
+        for _ in 0..2000 {
+            let mut building = app
+                .world
+                .query_filtered::<(), With<engine_foliage::grass::GrassBuild>>();
+            if building.iter(&app.world).next().is_none() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            simulate(&mut app, 1);
+        }
         let mut q = app.world.query::<(
             &engine_render::GrassField,
             Option<&engine_foliage::grass::FloorLayer>,
         )>();
         for (f, layer) in q.iter(&app.world) {
+            let mut kinds = [0usize; 8];
+            for (k, d) in f.kinds.iter().zip(&f.density) {
+                if *d > 0.0 {
+                    kinds[(*k as usize).min(7)] += 1;
+                }
+            }
             println!(
-                "day {day}: {layer:?} lying {} height {}",
+                "day {day}: {layer:?} lying {} height {} kinds {kinds:?}",
                 f.style.lying, f.style.height
             );
         }
@@ -884,6 +901,7 @@ fn main() {
     take(&mut app, "06_spring", &by_name("forest_spring"));
     take(&mut app, "07_burn_scar", &by_name("forest_burn_scar"));
     take(&mut app, "08_dry_ridge", &by_name("forest_dry_ridge"));
+    take(&mut app, "09_bilberry", &by_name("forest_bilberry"));
 
     // The same clearing through the year: fresh leaves, autumn color, leaf fall, bare winter.
     for (file, day, view) in [

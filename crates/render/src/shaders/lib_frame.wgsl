@@ -440,6 +440,55 @@ fn contact_shadow(rel: vec3<f32>, n: vec3<f32>) -> f32 {
     return shadow;
 }
 
+// Sun shadows past the cascades' reach, marched through the prepass depth toward the sun
+// (Bend Studio's screen-space shadows from Days Gone: bendstudio.com/blog/inside-bend-screen-
+// space-shadows). The far shadow map holds only big casters, so without this the trees, rocks and
+// houses past `shadow_splits[3]` lose their shadow and get it back with a pop as the camera
+// nears. Returns 0 where something nearer the camera blocks the ray; fades in over the
+// cascades' last tenth, where `shadow_factor` hands over to the far map. The march is 6 % of
+// the distance (12-60 m) times `RenderSettings::distant_shadows`; 1 when that is 0.
+const DISTANT_SHADOW_STEPS: i32 = 16;
+
+fn distant_shadow(rel: vec3<f32>, n: vec3<f32>) -> f32 {
+    let scale = frame.distant_shadows.x;
+    if (scale <= 0.0 || frame.sun_color.w < 0.5) { return 1.0; }
+    let dist = length(rel);
+    let reach = frame.shadow_splits[3];
+    let fade = smoothstep(reach * 0.9, reach, dist);
+    if (fade <= 0.0) { return 1.0; }
+    let pixel = pixel_of(rel);
+    if (!in_prepass(rel, vec2<i32>(floor(pixel)))) { return 1.0; }
+    let l = frame.sun_dir.xyz;
+    let march = clamp(dist * 0.06, 12.0, 60.0) * scale;
+    let noise = frame_noise(pixel.yx + 31.0);
+    let start = rel + n * (0.1 + dist * 0.002);
+    let size = vec2<i32>(textureDimensions(prepass_depth));
+    // Casters are assumed this thick behind their front face: a trunk seen from the side
+    // shouldn't throw a shadow as long as the view ray behind it.
+    let thickness = clamp(march * 0.3, 3.0, 18.0);
+    var lit = 1.0;
+    for (var i = 0; i < DISTANT_SHADOW_STEPS; i++) {
+        // Steps bunch up near the receiver, where small casters (a rock, a bush) are.
+        let t = (f32(i) + noise) / f32(DISTANT_SHADOW_STEPS);
+        let q = start + l * (march * t * t);
+        let clip = frame.view_proj * vec4<f32>(q, 1.0);
+        if (clip.w <= 0.0) { break; }
+        let uv = clip.xy / clip.w * vec2<f32>(0.5, -0.5) + 0.5;
+        if (any(uv <= vec2(0.0)) || any(uv >= vec2(1.0))) { break; }
+        let px = vec2<i32>(uv * frame.viewport.xy);
+        let z = textureLoad(prepass_depth, clamp(px, vec2<i32>(0), size - 1), 0);
+        if (z <= 0.0) { continue; }
+        let ray = view_depth(q);
+        let diff = ray - scene_linear_depth(uv, z);
+        let bias = 0.05 + ray * 0.0005;
+        if (diff > bias && diff < thickness) {
+            lit = 0.0;
+            break;
+        }
+    }
+    return mix(1.0, lit, fade);
+}
+
 // ---------------------------------------------------------------- cloud shadows
 // Share of the sunlight (0..1) the clouds let through to camera-relative `rel`: multiply
 // sunlight by it, with the shadow maps and `sun_transmittance`. `shade_surface`,
@@ -1183,7 +1232,8 @@ fn shade_surface_sides(s: Surface, rel: vec3<f32>, sun_visibility: f32, face: ve
     if (thin && dot(sun_light, sun_light) > 0.0 && (n_dot_l > 0.0 || (translucent && sides.y > 0.0))) {
         // Shadowed as seen from the sheet's sunlit side, so the sheet doesn't shadow itself.
         let lit_side = select(-face, face, sides.x > 0.0);
-        let shadow = shadow_factor(rel, lit_side) * sun_visibility;
+        var shadow = shadow_factor(rel, lit_side) * sun_visibility;
+        if (shadow > 0.0) { shadow *= distant_shadow(rel, lit_side); }
         if (shadow > 0.0 && n_dot_l > 0.0) {
             // Diffuse light follows the shading normal, whichever way the sheet faces: foliage
             // bends its normals so a crown or a tuft of cards shades as one rounded volume.
@@ -1208,7 +1258,7 @@ fn shade_surface_sides(s: Surface, rel: vec3<f32>, sun_visibility: f32, face: ve
     } else if (!thin && dot(sun_light, sun_light) > 0.0) {
         var shadow = shadow_factor(rel, n) * sun_visibility;
         if (shadow > 0.0 && n_dot_l_raw > 0.0) {
-            shadow *= contact_shadow(rel, n);
+            shadow *= contact_shadow(rel, n) * distant_shadow(rel, n);
         }
         let h = normalize(l + v);
         let n_dot_h = saturate(dot(n, h));

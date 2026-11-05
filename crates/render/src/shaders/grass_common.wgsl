@@ -139,7 +139,8 @@ fn grass_vertex(s: BladeShape, vertex: u32, t: f32, tip_dir: vec3<f32>) -> Blade
     let root = s.root;
     let height = s.height;
     let d = length(root);
-    let leaf = f.lush.w;
+    // A herb's flowering stem rises straight to its head, not spread like its leaves.
+    let leaf = select(f.lush.w, 0.0, s.flower > 0.5);
     let lying = f.lod.z;
     // Cubic Bezier: rising straight from the root, arching over toward the tip, which droops
     // under its weight the further the blade leans.

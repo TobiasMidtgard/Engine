@@ -367,9 +367,16 @@ pub struct RenderSettings {
     pub canopy: bool,
     /// Leaf area seen by the canopy, times this (1 = the leaf area of the crowns' cards).
     pub canopy_strength: f32,
+    /// Sun shadows past the cascades' reach from the depth buffer (`distant_shadow` in
+    /// lib_frame.wgsl): houses, trees and rocks there aren't in the far shadow map (big casters
+    /// only), so without this they lose their shadows past `shadow_distance`. Scales how far
+    /// each pixel marches toward the sun (1 = 6 % of its distance, 12-60 m); 0 = off.
+    /// `ENGINE_DISTANT_SHADOWS=on|off`.
+    pub distant_shadows: f32,
     /// Cloud shadows: when a module draws the cloud shadow map (the weather's clouds; see
     /// `cloud_shadows`), the sunlight on every surface and in the fog is shaded by it. Off: the
-    /// map is not drawn and nothing is shaded by clouds.
+    /// map is not drawn and nothing is shaded by clouds. `ENGINE_CLOUD_SHADOWS=on|off` overrides
+    /// it (two runs' clouds drift apart, so before/after pictures of the ground compare without).
     pub cloud_shadows: bool,
     /// How many EV darker than "average gray" very dark scenes are shown (0 = a moonlit night
     /// is exposed like noon; 2.5 = night looks like night). Ramps in below EV100 ≈ 5.
@@ -564,6 +571,7 @@ impl Default for RenderSettings {
             sky_occlusion_size: 512,
             canopy: true,
             canopy_strength: 1.0,
+            distant_shadows: 1.0,
             cloud_shadows: true,
             night_exposure_bias: 2.5,
             interior_exposure_bias: 1.25,
@@ -618,6 +626,14 @@ pub(crate) fn effective(world: &World) -> RenderSettings {
     if let Some(on) = switch_from_env("ENGINE_CANOPY", &CANOPY) {
         s.canopy = on;
     }
+    static DISTANT: std::sync::OnceLock<Option<bool>> = std::sync::OnceLock::new();
+    if let Some(on) = switch_from_env("ENGINE_DISTANT_SHADOWS", &DISTANT) {
+        s.distant_shadows = if on { s.distant_shadows.max(1.0) } else { 0.0 };
+    }
+    static CLOUD_SHADOWS: std::sync::OnceLock<Option<bool>> = std::sync::OnceLock::new();
+    if let Some(on) = switch_from_env("ENGINE_CLOUD_SHADOWS", &CLOUD_SHADOWS) {
+        s.cloud_shadows = on;
+    }
     static MIRROR: std::sync::OnceLock<Option<bool>> = std::sync::OnceLock::new();
     if let Some(on) = switch_from_env("ENGINE_MIRROR_SHARES_LIGHTING", &MIRROR) {
         s.mirror_shares_lighting = on;
@@ -668,8 +684,9 @@ pub(crate) fn effective(world: &World) -> RenderSettings {
 /// game): `ENGINE_PROBE_GI` (`RenderSettings::probe_gi`), `ENGINE_MIRROR_SHARES_LIGHTING`
 /// (`RenderSettings::mirror_shares_lighting`), `ENGINE_AERIAL_TABLE`
 /// (`RenderSettings::aerial_table`), `ENGINE_MESH_OCCLUSION`
-/// (`RenderSettings::mesh_occlusion_culling`), `ENGINE_CANOPY` (`RenderSettings::canopy`).
-/// Read once.
+/// (`RenderSettings::mesh_occlusion_culling`), `ENGINE_CANOPY` (`RenderSettings::canopy`),
+/// `ENGINE_DISTANT_SHADOWS` (`RenderSettings::distant_shadows`), `ENGINE_CLOUD_SHADOWS`
+/// (`RenderSettings::cloud_shadows`). Read once.
 fn switch_from_env(name: &str, cell: &'static std::sync::OnceLock<Option<bool>>) -> Option<bool> {
     *cell.get_or_init(
         || match std::env::var(name).ok()?.to_ascii_lowercase().as_str() {
@@ -725,6 +742,9 @@ impl RenderSettings {
         s.probe_gi &= quality.allows(1.0);
         s.gi_budget_ms = self.gi_budget_ms * effects.max(1.0);
         s.ambient_occlusion &= quality.allows(0.5);
+        if !quality.allows(0.5) {
+            s.distant_shadows = 0.0;
+        }
         s.max_point_lights =
             ((self.max_point_lights as f32 * effects.clamp(0.25, 1.0)) as u32).max(8);
         s
@@ -752,6 +772,7 @@ impl RenderSettings {
         };
         Self {
             contact_shadow_length: 0.0,
+            distant_shadows: 0.0,
             shadow_filter_taps: (self.shadow_filter_taps / 2).max(4),
             mesh_lod_pixels: self.mesh_lod_pixels * far,
             cluster_error_px: self.cluster_error_px * far,
