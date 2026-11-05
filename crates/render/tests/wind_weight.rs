@@ -1,7 +1,7 @@
 //! Per-vertex wind weight: on a swaying material (`StandardMaterial::wind_sway`) the vertex
 //! color's alpha scales the sway (0 = still, 1 = full), and is not taken as opacity. Meshes
-//! without vertex colors sway fully, as before. Needs a GPU or lavapipe; passes with a note
-//! when neither is available.
+//! without vertex colors sway fully, as before. Swaying meshes give way to `GrassBender`s by the
+//! same weight. Needs a GPU or lavapipe; passes with a note when neither is available.
 
 use engine_core::prelude::*;
 use engine_render::prelude::*;
@@ -13,8 +13,14 @@ const W: u32 = 160;
 const H: u32 = 160;
 
 /// A 6 m post in a strong wind (15 m/s along +x), seen from the side, with `sway` meters of
-/// wind sway and every vertex's alpha set to `alpha` (`None`: the mesh's default colors).
-fn render_post(name: &str, sway: f32, alpha: Option<f32>) -> Option<RgbaImage> {
+/// wind sway and every vertex's alpha set to `alpha` (`None`: the mesh's default colors), and a
+/// `GrassBender` of half a meter at `bender`.
+fn render_post(
+    name: &str,
+    sway: f32,
+    alpha: Option<f32>,
+    bender: Option<DVec3>,
+) -> Option<RgbaImage> {
     engine_core::log::init("error");
     let mut app = App::new();
     app.world.resource_mut::<EngineConfig>().headless = true;
@@ -65,6 +71,9 @@ fn render_post(name: &str, sway: f32, alpha: Option<f32>) -> Option<RgbaImage> {
         Transform::from_xyz(0.0, 3.0, 0.0),
         MeshRenderer::new(handle, material),
     ));
+    if let Some(at) = bender {
+        w.spawn((Transform::from_translation(at), GrassBender { radius: 0.5 }));
+    }
     app.update_n(3);
     if let Some(d) = app.world.get_resource::<RenderDisabled>() {
         eprintln!("skipping: no GPU ({})", d.0);
@@ -93,11 +102,11 @@ fn mean_column(cols: &[u32]) -> f32 {
 
 #[test]
 fn vertex_alpha_scales_wind_sway() {
-    let Some(still) = render_post("still", 0.0, None) else {
+    let Some(still) = render_post("still", 0.0, None, None) else {
         return;
     };
-    let swaying = render_post("full", 1.5, None).expect("gpu");
-    let weightless = render_post("weight0", 1.5, Some(0.0)).expect("gpu");
+    let swaying = render_post("full", 1.5, None, None).expect("gpu");
+    let weightless = render_post("weight0", 1.5, Some(0.0), None).expect("gpu");
     let (c_still, c_sway, c_zero) = (
         red_columns_at_top(&still),
         red_columns_at_top(&swaying),
@@ -127,5 +136,41 @@ fn vertex_alpha_scales_wind_sway() {
         c_zero.len(),
         c_still.len(),
         "a weight of 0 made the post see-through"
+    );
+}
+
+/// A bender (a character's body brushing past) beside the post's top, downwind, pushes the top
+/// back upwind, away from it; one over a post of wind weight 0 leaves it be.
+#[test]
+fn swaying_meshes_give_way_to_benders() {
+    let at = DVec3::new(0.45, 5.7, 0.0);
+    let Some(swaying) = render_post("bend_none", 1.5, None, None) else {
+        return;
+    };
+    let pushed = render_post("bend_pushed", 1.5, None, Some(at)).expect("gpu");
+    let weightless = render_post("bend_weight0", 1.5, Some(0.0), Some(at)).expect("gpu");
+    let still = render_post("bend_still", 1.5, Some(0.0), None).expect("gpu");
+    let (c_sway, c_pushed, c_zero, c_still) = (
+        red_columns_at_top(&swaying),
+        red_columns_at_top(&pushed),
+        red_columns_at_top(&weightless),
+        red_columns_at_top(&still),
+    );
+    eprintln!(
+        "top of the post: swaying {:.1}, pushed by a bender {:.1}, weight 0 by a bender {:.1}, \
+         weight 0 alone {:.1}",
+        mean_column(&c_sway),
+        mean_column(&c_pushed),
+        mean_column(&c_zero),
+        mean_column(&c_still)
+    );
+    assert!(!c_pushed.is_empty(), "the post's top is not in view");
+    assert!(
+        mean_column(&c_pushed) < mean_column(&c_sway) - 2.0,
+        "the post's top didn't give way to the bender"
+    );
+    assert!(
+        (mean_column(&c_zero) - mean_column(&c_still)).abs() < 0.5,
+        "a post of wind weight 0 gave way to the bender"
     );
 }

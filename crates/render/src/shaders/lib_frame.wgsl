@@ -235,6 +235,17 @@ fn wind_offset(rel: vec3<f32>, height01: f32, sway: f32) -> vec3<f32> {
     return dir * strength * (gust + flutter) + vec3(0.0, -0.1, 0.0) * strength * gust;
 }
 
+// How a swaying vertex at camera-relative `rel` gives way to the frame's benders
+// (`frame.benders`, see `bender_push`).
+fn bender_offset(rel: vec3<f32>, height01: f32, weight: f32) -> vec3<f32> {
+    var o = vec3<f32>(0.0);
+    let n = min(u32(frame.shading.y), 16u);
+    for (var i = 0u; i < n; i++) {
+        o += bender_push(rel, frame.benders[i], height01, weight);
+    }
+    return bender_limit(o);
+}
+
 // ---------------------------------------------------------------- shadows
 const SHADOW_BLOCKER_TAPS: i32 = 8;
 const GOLDEN_ANGLE: f32 = 2.39996323;
