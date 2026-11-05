@@ -48,7 +48,7 @@ pub const OLD_OAK: [f32; 3] = [-21.0, 50.0, 2.5];
 pub const OLD_OAK_YEARS: f32 = 24.0;
 /// A windthrow gap beside the trail: last winter a storm threw down the old trees here (x, z,
 /// radius, downwind direction in degrees from +X toward +Z).
-pub const WINDTHROW: [f32; 4] = [6.0, 36.0, 11.0, 200.0];
+pub const WINDTHROW: [f32; 4] = [6.0, 36.0, 12.0, 35.0];
 /// Dry ridge (x, z, radius).
 pub const RIDGE: [f32; 3] = [-55.0, -40.0, 26.0];
 /// Height of the pond's water above the ground, meters (its shore sinks to meet it).
@@ -173,10 +173,10 @@ pub fn forest_viewpoints(center: DVec3) -> Vec<Viewpoint> {
             center,
             (
                 "forest_windthrow",
-                "Where a storm threw down the old trees: trunks lying one way, sun on the floor",
+                "Where a storm threw down the old trees: root plates torn up, trunks lying one way",
             ),
-            [16.0, 1.7, 20.0],
-            [5.0, 1.0, 36.0],
+            [-7.0, 2.6, 29.0],
+            [3.0, 0.8, 38.0],
             10.0,
         ),
         view(
@@ -225,10 +225,13 @@ pub fn forest_viewpoints(center: DVec3) -> Vec<Viewpoint> {
         ),
         view(
             center,
-            ("forest_dry_ridge", "Pines win on the dry, rocky ridge"),
-            [-51.5, 1.9, -16.0],
-            [-57.0, 2.0, -42.0],
-            16.0,
+            (
+                "forest_dry_ridge",
+                "Pines and heather on the dry, rocky ridge",
+            ),
+            [-49.0, 1.9, -27.0],
+            [-56.0, 1.2, -50.0],
+            10.5,
         ),
     ]
 }

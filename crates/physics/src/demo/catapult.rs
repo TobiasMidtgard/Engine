@@ -208,7 +208,7 @@ pub(super) fn catapult(y: &mut Yard, base: DVec3) {
             y.wood,
         );
     }
-    let frame = y.parts("catapult_frame", [Mat::Timber, Mat::Dark], || {
+    let frame = y.parts("catapult_frame", [Mat::Timber, Mat::Dark], move || {
         let f = art::frame();
         [f.timber, f.iron]
     });
@@ -232,7 +232,7 @@ pub(super) fn catapult(y: &mut Yard, base: DVec3) {
         surface: y.wood,
         ..Default::default()
     };
-    let parts = y.parts("catapult_arm", [Mat::Timber, Mat::Dark], || {
+    let parts = y.parts("catapult_arm", [Mat::Timber, Mat::Dark], move || {
         let a = art::arm();
         [a.timber, a.iron]
     });
@@ -262,9 +262,11 @@ pub(super) fn catapult(y: &mut Yard, base: DVec3) {
     let c = Collider::sphere(BALL)
         .with_surface(y.concrete)
         .with_density(2700.0);
-    let parts = y.parts(&format!("catapult_ball/{BALL:.3}"), [Mat::Granite], || {
-        [art::ball(BALL)]
-    });
+    let parts = y.parts(
+        &format!("catapult_ball/{BALL:.3}"),
+        [Mat::Granite],
+        move || [art::ball(BALL)],
+    );
     let ball = y.body(ball_at, Quat::IDENTITY, c, parts);
     y.name(ball, "Catapult ball");
 

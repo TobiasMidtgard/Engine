@@ -305,7 +305,7 @@ pub(super) fn pool_table(y: &mut Yard, base: DVec3) {
             Mat::Steel,
             Mat::Lacquer(0xf2ede0),
         ],
-        || {
+        move || {
             let t = art::table(&boxes(), &pockets(), BED, HALF);
             [t.cloth, t.wood, t.pockets, t.steel, t.inlay]
         },
@@ -315,7 +315,7 @@ pub(super) fn pool_table(y: &mut Yard, base: DVec3) {
         let parts = y.parts(
             &format!("pool_ball/{number}"),
             [Mat::Lacquer(0xffffff)],
-            || [art::ball(BALL, number)],
+            move || [art::ball(BALL, number)],
         );
         let c = Collider::sphere(BALL)
             .with_surface(phenolic)

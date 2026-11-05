@@ -97,6 +97,20 @@ impl FoliageLoading {
         0.1 * self.last_frame_ms.min(5000.0)
     }
 
+    /// How many new plants, or new scenery trees, get their parts in one frame. In play the
+    /// count is capped as well as the time: the time budget grows with slow frames, and each
+    /// one's parts cost several times the measured work again when their spawns apply and
+    /// the renderer resolves them, so a slow frame would make the next one slower still.
+    /// Behind a loading screen, loading in the frame, or in a headless render (frames of
+    /// seconds), only time counts.
+    pub(crate) fn fresh_cap(&self, screen: Option<&LoadingBudget>) -> u32 {
+        if self.background && screen.is_none() && self.last_frame_ms < HEADLESS_FRAME_MS {
+            FRESH_PER_FRAME
+        } else {
+            u32::MAX
+        }
+    }
+
     /// How long a frame spends giving new plants and trees their parts: a third of the
     /// budget (their spawns apply as commands after).
     pub(crate) fn fresh_budget(&self, screen: Option<&LoadingBudget>) -> std::time::Duration {
@@ -118,6 +132,13 @@ impl FoliageLoading {
         self.regions_building
     }
 }
+
+/// New plants (or scenery trees) given their parts per frame in play: 48 trees spawn about 150
+/// part entities.
+pub(crate) const FRESH_PER_FRAME: u32 = 48;
+
+/// Frames slower than this are a headless render's, not a player's.
+const HEADLESS_FRAME_MS: f32 = 3000.0;
 
 /// Notes how long each frame takes on the wall clock (for [`FoliageLoading`]'s budgets).
 pub(crate) fn measure_frames(
@@ -150,5 +171,24 @@ mod tests {
                 .frame_budget_ms(None)
                 .is_infinite()
         );
+    }
+
+    #[test]
+    fn in_play_a_slow_frame_does_not_let_the_next_spawn_more_trees() {
+        let mut l = FoliageLoading {
+            last_frame_ms: 16.0,
+            ..Default::default()
+        };
+        assert_eq!(l.fresh_cap(None), FRESH_PER_FRAME);
+        // A hitch of a second: the time budget grows, the count does not.
+        l.last_frame_ms = 1000.0;
+        assert_eq!(l.fresh_cap(None), FRESH_PER_FRAME);
+        // A headless render, a loading screen, or loading in the frame: time only.
+        l.last_frame_ms = 20_000.0;
+        assert_eq!(l.fresh_cap(None), u32::MAX);
+        l.last_frame_ms = 16.0;
+        let screen = LoadingBudget { budget_ms: 50.0 };
+        assert_eq!(l.fresh_cap(Some(&screen)), u32::MAX);
+        assert_eq!(FoliageLoading::in_frame().fresh_cap(None), u32::MAX);
     }
 }

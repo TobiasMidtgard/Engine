@@ -70,3 +70,74 @@ fn in_play_many_new_bodies_are_built_over_a_few_frames() {
     }
     panic!("only {} of {BODIES} were built", built(&mut play));
 }
+
+fn skeleton() -> engine_world::animation::SkeletonPose {
+    use engine_world::animation::{BonePose, SkeletonPose};
+    let at = |translation: Vec3| BonePose {
+        translation,
+        ..BonePose::default()
+    };
+    SkeletonPose {
+        names: std::sync::Arc::from(vec!["pelvis".to_string(), "head".to_string()]),
+        parents: std::sync::Arc::from(vec![None, Some(0)]),
+        bones: vec![at(Vec3::new(0.0, 1.0, 0.0)), at(Vec3::new(0.0, 1.6, 0.0))],
+    }
+}
+
+fn groom_app(manual: bool) -> (App, Entity) {
+    let mut app = App::new();
+    app.add_plugins((engine_world::WorldPlugin, SoftBodyPlugin));
+    if manual {
+        app.world
+            .resource_mut::<Time>()
+            .set_source(TimeSource::Manual {
+                step_secs: 1.0 / 60.0,
+            });
+    }
+    app.world.resource_mut::<FixedTime>().set_hz(60.0);
+    let person = app.world.spawn((Transform::default(), skeleton())).id();
+    let hair = app
+        .world
+        .spawn((
+            Transform::default(),
+            engine_softbody::HairGroom::long_hair("head", engine_softbody::HairStyle::default()),
+            ChildOf(person),
+        ))
+        .id();
+    (app, hair)
+}
+
+#[test]
+fn in_play_a_groom_is_built_on_a_worker() {
+    let (mut manual, hair) = groom_app(true);
+    manual.update();
+    assert!(
+        manual.world.get::<SoftBodySim>(hair).is_some(),
+        "a manual clock builds the groom on the frame"
+    );
+
+    let (mut play, hair) = groom_app(false);
+    play.update();
+    assert!(
+        play.world.get::<SoftBodySim>(hair).is_none()
+            && play
+                .world
+                .resource::<engine_softbody::systems::GroomBuilds>()
+                .busy(),
+        "in play the groom is handed to a worker, not built on the frame"
+    );
+    for _ in 0..600 {
+        if play.world.get::<SoftBodySim>(hair).is_some() {
+            assert!(
+                !play
+                    .world
+                    .resource::<engine_softbody::systems::GroomBuilds>()
+                    .busy()
+            );
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(17));
+        play.update();
+    }
+    panic!("the groom was never built");
+}

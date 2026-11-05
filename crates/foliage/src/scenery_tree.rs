@@ -128,6 +128,7 @@ pub fn sync_scenery_trees(
     // Timed from the first new one: the pass over the old ones isn't loading work.
     let mut started: Option<std::time::Instant> = None;
     let fresh_budget = loading.fresh_budget(screen.as_deref());
+    let fresh_cap = loading.fresh_cap(screen.as_deref());
     let (mut fresh_seen, mut out_of_time, mut skipped) = (0u32, false, false);
     // Near woods trees planted while the camera moves on (a new cell coming into range) fade
     // in rather than appear; after a cut they are part of the new view.
@@ -142,7 +143,8 @@ pub fn sync_scenery_trees(
             }
             let since = *started.get_or_insert_with(std::time::Instant::now);
             fresh_seen += 1;
-            out_of_time = fresh_seen.is_multiple_of(16) && since.elapsed() > fresh_budget;
+            out_of_time = fresh_seen >= fresh_cap
+                || (fresh_seen.is_multiple_of(16) && since.elapsed() > fresh_budget);
         }
         // Not propagated yet: its world transform still says the origin.
         if fresh && global.is_added() {

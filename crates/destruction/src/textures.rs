@@ -496,9 +496,12 @@ fn horizon_steps(radius: f32) -> Vec<f32> {
 /// Run `f(row_index, row)` over the rows of `data` (`width` items each) on all cores.
 fn par_rows<T: Send>(data: &mut [T], width: usize, f: impl Fn(usize, &mut [T]) + Sync) {
     let rows = data.len() / width.max(1);
-    let threads = std::thread::available_parallelism()
-        .map_or(1, |n| n.get())
-        .min(rows);
+    let lease = engine_core::tasks::background_lease(
+        std::thread::available_parallelism()
+            .map_or(1, |n| n.get())
+            .min(rows),
+    );
+    let threads = lease.threads();
     if threads <= 1 {
         for (r, row) in data.chunks_mut(width).enumerate() {
             f(r, row);

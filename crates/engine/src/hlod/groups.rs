@@ -22,6 +22,9 @@ use std::time::Instant;
 use super::*;
 use engine_world::StreamedCells;
 
+/// A finished merge and its reach from the group's frame, meters.
+type Merged = (Mesh, f64);
+
 /// A group of cells whose proxies merge, and its merged proxy.
 #[derive(Default)]
 pub(super) struct Group {
@@ -37,7 +40,7 @@ pub(super) struct Group {
     pub radius: f64,
     pub mesh: Option<Handle<Mesh>>,
     pub triangles: usize,
-    building: Option<Mutex<Receiver<Option<Mesh>>>>,
+    building: Option<Mutex<Receiver<Option<Merged>>>>,
     pub entity: Option<Entity>,
     /// Showing (or fading in); when the fade began.
     pub showing: bool,
@@ -235,25 +238,9 @@ fn build(world: &mut World, g: usize, configs: &[ProxyConfig], settings: &HlodSe
         .fold(DVec3::ZERO, |a, b| a + b)
         / placed.len().max(1) as f64;
     let frame = Transform::from_translation(center);
-    let radius = {
-        let assets = world.resource::<Assets<Mesh>>();
-        placed
-            .iter()
-            .map(|(f, m)| {
-                let reach = assets.get(*m).map_or(0.0, |mesh| {
-                    let b = mesh.aabb();
-                    f64::from(b.min.abs().max(b.max.abs()).length())
-                });
-                f.translation.distance(center) + reach
-            })
-            .fold(1.0, f64::max)
-    };
-    {
-        let mut proxies = world.resource_mut::<Proxies>();
-        let group = &mut proxies.groups.list[g];
-        group.frame = frame;
-        group.radius = radius;
-    }
+    // Its reach is measured on the worker, from the merge (walking every member's vertices
+    // here was part of the frame's cost).
+    world.resource_mut::<Proxies>().groups.list[g].frame = frame;
     let disk =
         versioned(world, g, configs).map(|(key, version)| cache_path(settings, &key, version));
     // The members' meshes go to the worker, which takes the merge from disk when it is kept
@@ -261,6 +248,7 @@ fn build(world: &mut World, g: usize, configs: &[ProxyConfig], settings: &HlodSe
     // them on the frame was 82-166 ms on the session VM as the route started.
     let inverse = frame.rotation.inverse();
     let kept = disk.as_ref().is_some_and(|p| p.exists());
+    let copying = tracing::info_span!("hlod: copy group members").entered();
     let parts: Vec<(Mesh, Mat4)> = if kept {
         Vec::new()
     } else {
@@ -278,6 +266,7 @@ fn build(world: &mut World, g: usize, configs: &[ProxyConfig], settings: &HlodSe
             })
             .collect()
     };
+    drop(copying);
     let budget = settings.group_triangles;
     let label = format!("{} cells", members.len());
     let (tx, rx) = mpsc::channel();
@@ -287,7 +276,7 @@ fn build(world: &mut World, g: usize, configs: &[ProxyConfig], settings: &HlodSe
             if let Some(path) = &disk
                 && let Ok(mesh) = read_mesh(path)
             {
-                let _ = tx.send(Some(mesh));
+                let _ = tx.send(Some(with_reach(mesh)));
                 return;
             }
             let t = Instant::now();
@@ -327,7 +316,7 @@ fn build(world: &mut World, g: usize, configs: &[ProxyConfig], settings: &HlodSe
             {
                 engine_core::log::warn!("hlod: can't keep a group at {}: {e}", path.display());
             }
-            let _ = tx.send(mesh);
+            let _ = tx.send(mesh.map(with_reach));
         });
     if spawned.is_ok() {
         world.resource_mut::<Proxies>().groups.list[g].building = Some(Mutex::new(rx));
@@ -351,16 +340,24 @@ fn collect(world: &mut World, g: usize, _settings: &HlodSettings) {
         }
     };
     world.resource_mut::<Proxies>().groups.list[g].building = None;
-    if let Some(mesh) = polled {
-        store(world, g, mesh);
+    if let Some((mesh, radius)) = polled {
+        store(world, g, mesh, radius);
     }
 }
 
-fn store(world: &mut World, g: usize, mesh: Mesh) {
+/// A merge with its reach from the group's frame (the members' middle), meters.
+fn with_reach(mesh: Mesh) -> Merged {
+    let b = mesh.aabb();
+    let reach = f64::from(b.min.abs().max(b.max.abs()).length()).max(1.0);
+    (mesh, reach)
+}
+
+fn store(world: &mut World, g: usize, mesh: Mesh, radius: f64) {
     let triangles = mesh.indices.len() / 3;
     let handle = world.resource_mut::<Assets<Mesh>>().add(mesh);
     let group = &mut world.resource_mut::<Proxies>().groups.list[g];
     group.mesh = Some(handle);
+    group.radius = radius;
     group.triangles = triangles;
 }
 

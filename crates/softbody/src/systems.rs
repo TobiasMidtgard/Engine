@@ -26,7 +26,9 @@ use crate::field::{BAKE_REACH, FieldCache};
 use crate::rope::{BridgePlank, SoftLoad};
 use crate::settings::SoftBodyConfig;
 use crate::solver::{ColliderImpulse, Sim, WaterSurface};
-use crate::{Cloth, HairGroom, Rope, RopeBridge, SoftVolume, cloth, hair, rope, sway, volume};
+use crate::{
+    Cloth, HairEmitter, HairGroom, Rope, RopeBridge, SoftVolume, cloth, hair, rope, sway, volume,
+};
 
 /// A frame turning further than this in one step (radians) has been teleported, not turned.
 const TELEPORT_TURN: f32 = 0.8;
@@ -745,6 +747,27 @@ type Unbuilt = (Without<SoftBodySim>, Without<SoftBodyFailed>);
 /// How long one frame may spend building new bodies under a real clock (at least one is built).
 pub const BUILD_BUDGET_MS: f32 = 3.0;
 
+/// A groom built on a worker: its entity, the spec it was built from, and the result.
+type BuiltGroom = (Entity, HairGroom, Result<SoftBodySim, String>);
+
+/// Hair grooms building on the async pool under a real clock: one groom (the dog's 5200-guide
+/// coat) took 112 ms on the frame on the cloud VM. Results are taken at the next frames.
+#[derive(Resource, Default)]
+pub struct GroomBuilds {
+    building: std::collections::HashSet<Entity>,
+    channel: Option<(
+        std::sync::mpsc::Sender<BuiltGroom>,
+        std::sync::Mutex<std::sync::mpsc::Receiver<BuiltGroom>>,
+    )>,
+}
+
+impl GroomBuilds {
+    /// Whether any groom is building on a worker.
+    pub fn busy(&self) -> bool {
+        !self.building.is_empty()
+    }
+}
+
 /// Build simulations for new specs (after transforms propagate, so they start in place).
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub fn build_bodies(
@@ -761,7 +784,23 @@ pub fn build_bodies(
     meshes: Option<Res<engine_assets::Assets<engine_render::Mesh>>>,
     skins: Option<Res<hair::MeshSkins>>,
     time: Res<Time>,
+    mut groom_builds: ResMut<GroomBuilds>,
 ) {
+    // Grooms built on a worker since the last frame (still unbuilt, with the same spec).
+    let done: Vec<BuiltGroom> = groom_builds
+        .channel
+        .as_ref()
+        .and_then(|(_, rx)| rx.lock().ok().map(|rx| rx.try_iter().collect()))
+        .unwrap_or_default();
+    // Reported this frame: still unbuilt until the commands apply, so not handed out again.
+    let mut just_built = Vec::new();
+    for (e, built_from, result) in done {
+        groom_builds.building.remove(&e);
+        if grooms.get(e).is_ok_and(|(_, spec)| *spec == built_from) {
+            report(&mut commands, e, "HairGroom", result);
+            just_built.push(e);
+        }
+    }
     // Under a real clock a frame builds bodies until `BUILD_BUDGET_MS` have passed (at least
     // one); the rest stay unbuilt and build on the next frames. A zone arriving with dozens of
     // cloths, bridges and grooms built them all on one frame (up to 135 ms on the cloud VM).
@@ -788,6 +827,7 @@ pub fn build_bodies(
         if over() {
             return;
         }
+        let _span = tracing::info_span!("softbody: build cloth").entered();
         report(
             &mut commands,
             e,
@@ -805,6 +845,7 @@ pub fn build_bodies(
         if over() {
             return;
         }
+        let _span = tracing::info_span!("softbody: build rope").entered();
         let resolve = |other: Entity| all_transforms.get(other).ok().copied();
         report(
             &mut commands,
@@ -817,6 +858,7 @@ pub fn build_bodies(
         if over() {
             return;
         }
+        let _span = tracing::info_span!("softbody: build bridge").entered();
         let material = match &spec.plank_material {
             Some(key) => engine_render::MaterialRef::Asset(key.clone()),
             None => engine_render::MaterialRef::Inline(
@@ -882,6 +924,7 @@ pub fn build_bodies(
         if over() {
             return;
         }
+        let _span = tracing::info_span!("softbody: build volume").entered();
         report(&mut commands, e, "SoftVolume", volume::build(spec, t));
     }
     let meshes = meshes.as_deref();
@@ -890,9 +933,50 @@ pub fn build_bodies(
         if skeleton.is_some_and(|s| s.2.bones.is_empty()) || spec.waiting_for_mesh(meshes) {
             continue; // the pose isn't evaluated (or the body mesh isn't built) yet
         }
+        if groom_builds.building.contains(&e) || just_built.contains(&e) {
+            continue;
+        }
+        if !manual && let Some(pool) = engine_core::tasks::AsyncComputeTaskPool::try_get() {
+            // In play on a worker, from copies of what it reads: the pose, the meshes its
+            // surface emitters grow from and their skins.
+            let _span = tracing::info_span!("softbody: hand hair to a worker").entered();
+            let skeleton = skeleton.map(|(owner, t, pose)| (owner, *t, pose.clone()));
+            let mut own_meshes = engine_assets::Assets::<engine_render::Mesh>::default();
+            let mut own_skins = hair::MeshSkins::default();
+            for emitter in &spec.emitters {
+                if let HairEmitter::Surface { mesh, .. } = emitter {
+                    if let Some(m) =
+                        meshes.and_then(|a| a.loaded_by_key(mesh).and_then(|h| a.get(h)))
+                    {
+                        own_meshes.insert_keyed(mesh, m.clone());
+                    }
+                    if let Some(skin) = skins.as_ref().and_then(|s| s.0.get(mesh)) {
+                        own_skins.0.insert(mesh.clone(), skin.clone());
+                    }
+                }
+            }
+            let tx = groom_builds
+                .channel
+                .get_or_insert_with(|| {
+                    let (tx, rx) = std::sync::mpsc::channel();
+                    (tx, std::sync::Mutex::new(rx))
+                })
+                .0
+                .clone();
+            let spec = spec.clone();
+            groom_builds.building.insert(e);
+            pool.spawn(async move {
+                let skeleton = skeleton.as_ref().map(|(owner, t, pose)| (*owner, t, pose));
+                let result = hair::build(&spec, skeleton, Some(&own_meshes), Some(&own_skins));
+                let _ = tx.send((e, spec, result));
+            })
+            .detach();
+            continue;
+        }
         if over() {
             return;
         }
+        let _span = tracing::info_span!("softbody: build hair").entered();
         report(
             &mut commands,
             e,

@@ -613,9 +613,12 @@ fn run_jobs(jobs: Vec<Job>) -> Vec<Made> {
     let slots: Vec<Mutex<Option<Job>>> = jobs.into_iter().map(|j| Mutex::new(Some(j))).collect();
     let next = AtomicUsize::new(0);
     let out = Mutex::new(Vec::new());
-    let threads = std::thread::available_parallelism()
-        .map_or(4, |t| t.get())
-        .clamp(1, n.max(1));
+    let lease = engine_core::tasks::background_lease(
+        std::thread::available_parallelism()
+            .map_or(4, |t| t.get())
+            .clamp(1, n.max(1)),
+    );
+    let threads = lease.threads();
     std::thread::scope(|s| {
         for _ in 0..threads {
             s.spawn(|| {

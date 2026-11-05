@@ -17,9 +17,12 @@ use engine_render::{Mesh, Vertex};
 
 /// Run `f(i)` for `i` in `0..n` on all cores; results in order.
 pub fn par_map<T: Send>(n: usize, f: impl Fn(usize) -> T + Sync) -> Vec<T> {
-    let threads = std::thread::available_parallelism()
-        .map_or(4, |n| n.get())
-        .clamp(1, 16);
+    let lease = engine_core::tasks::background_lease(
+        std::thread::available_parallelism()
+            .map_or(4, |n| n.get())
+            .clamp(1, 16),
+    );
+    let threads = lease.threads();
     let chunk = n.div_ceil(threads).max(1);
     let f = &f;
     std::thread::scope(|s| {

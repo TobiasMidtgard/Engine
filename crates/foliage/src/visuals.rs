@@ -349,6 +349,7 @@ pub fn sync_plant_visuals(
     // Timed from the first new one: the pass over the old ones isn't loading work.
     let mut started: Option<std::time::Instant> = None;
     let fresh_budget = loading.fresh_budget(screen.as_deref());
+    let fresh_cap = loading.fresh_cap(screen.as_deref());
     let (mut fresh_seen, mut out_of_time, mut skipped) = (0u32, false, false);
     for (entity, plant, mut transform, visual, fungi, base, region) in &mut plants {
         let fresh = visual.is_none();
@@ -360,7 +361,8 @@ pub fn sync_plant_visuals(
             }
             let since = *started.get_or_insert_with(std::time::Instant::now);
             fresh_seen += 1;
-            out_of_time = fresh_seen.is_multiple_of(16) && since.elapsed() > fresh_budget;
+            out_of_time = fresh_seen >= fresh_cap
+                || (fresh_seen.is_multiple_of(16) && since.elapsed() > fresh_budget);
         }
         if !full_pass && !fresh && !plant.is_changed() {
             continue;

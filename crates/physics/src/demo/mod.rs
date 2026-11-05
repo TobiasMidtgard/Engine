@@ -79,6 +79,15 @@ pub fn building(world: &mut World) -> bool {
             .any(|g| g.unbuilt.contains(&true))
 }
 
+/// How many stations stand on the proving grounds (built at least once).
+pub fn stations_built(world: &mut World) -> usize {
+    world
+        .query::<&ProvingGround>()
+        .iter(world)
+        .map(|g| g.unbuilt.iter().filter(|u| !**u).count())
+        .sum()
+}
+
 /// Build the stations still waiting their turn and wait for the textures and dummies being
 /// made on workers (before a screenshot, or to start the yard all at once).
 pub fn finish_building(world: &mut World) {
@@ -509,21 +518,11 @@ impl Yard<'_> {
         e
     }
 
-    /// `N` meshes cached under `key` (built by `make` the first time), each with its material.
+    /// `N` meshes cached under `key`, each with its material. The first time, `make` builds
+    /// them on a worker and they are drawn once they arrive (`art::parts_later`): made on the
+    /// frame, a station's new meshes were up to 25 ms of it (the barrel run's ramp and pit),
+    /// 114 ms for the yard, as the yard streamed in at the village.
     fn parts<const N: usize>(
-        &mut self,
-        key: &str,
-        mats: [Mat; N],
-        make: impl FnOnce() -> [Mesh; N],
-    ) -> Parts {
-        if !self.render {
-            return Parts::new();
-        }
-        art::parts(self.world, key, mats, make)
-    }
-
-    /// [`Yard::parts`] made on a worker, drawn once they arrive (`art::parts_later`).
-    fn parts_later<const N: usize>(
         &mut self,
         key: &str,
         mats: [Mat; N],
@@ -601,7 +600,7 @@ impl Yard<'_> {
             .with_surface(self.wood)
             .with_density(density);
         let key = format!("crate/{:.3}x{:.3}x{:.3}/{seed}", half.x, half.y, half.z);
-        let parts = self.parts(&key, [Mat::CrateWood(seed as u8), Mat::Dark], || {
+        let parts = self.parts(&key, [Mat::CrateWood(seed as u8), Mat::Dark], move || {
             let m = props::crate_box(half, seed);
             [m.wood, m.metal]
         });
@@ -613,9 +612,11 @@ impl Yard<'_> {
         let c = Collider::sphere(radius)
             .with_surface(self.rubber)
             .with_density(density);
-        let parts = self.parts(&format!("ball/{radius:.3}"), [Mat::Rubber(color)], || {
-            [props::playground_ball(radius)]
-        });
+        let parts = self.parts(
+            &format!("ball/{radius:.3}"),
+            [Mat::Rubber(color)],
+            move || [props::playground_ball(radius)],
+        );
         self.body(local, Quat::IDENTITY, c, parts)
     }
 
@@ -677,7 +678,7 @@ impl Yard<'_> {
             Name::new(name.to_string()),
         ));
         let height = desc.height;
-        let parts = self.parts_later(
+        let parts = self.parts(
             &format!("dummy/standing/{height:.2}/{shirt:06x}"),
             [Mat::Vinyl, Mat::Steel],
             move || {
@@ -756,7 +757,7 @@ fn build(world: &mut World, origin: DVec3) {
         );
     }
     let size = YARD_SIZE.map(|v| v as f32);
-    let slab = y.parts("yard", [Mat::Slab, Mat::Concrete, Mat::Hazard], || {
+    let slab = y.parts("yard", [Mat::Slab, Mat::Concrete, Mat::Hazard], move || {
         let m = structures::yard(size, 0.5, curb_h, curb_t);
         [m.slab, m.curb, m.hazard]
     });
@@ -791,8 +792,16 @@ fn build(world: &mut World, origin: DVec3) {
     }
 }
 
-/// Build up to `n` stations not built yet, on every proving ground.
-fn build_unbuilt(world: &mut World, n: usize) {
+/// Does time step by hand (tours, tests, screenshots)?
+fn manual_clock(world: &World) -> bool {
+    matches!(
+        world.resource::<Time>().source(),
+        engine_core::time::TimeSource::Manual { .. }
+    )
+}
+
+/// Build up to `n` stations not built yet, on every proving ground. Were any built?
+fn build_unbuilt(world: &mut World, n: usize) -> bool {
     let todo: Vec<(Entity, Station)> = world
         .query::<(Entity, &ProvingGround)>()
         .iter(world)
@@ -804,9 +813,11 @@ fn build_unbuilt(world: &mut World, n: usize) {
                 .map(move |s| (e, s))
         })
         .collect();
+    let any = !todo.is_empty();
     for (ground, station) in todo {
         build_station(world, ground, station);
     }
+    any
 }
 
 /// Where the site office stands (yard-local, its floor's middle): on the yard's east side
@@ -816,14 +827,14 @@ const OFFICE_AT: DVec3 = DVec3::new(31.0, 0.0, -4.0);
 /// What makes the yard a working test site: the painted walkway inside the curb (`inner`, its
 /// inner face's half extents), a floodlight mast at each corner and the site office.
 fn site(y: &mut Yard, inner: [f32; 2]) {
-    let paint = y.parts("yard_walkway", [Mat::LinePaint], || {
+    let paint = y.parts("yard_walkway", [Mat::LinePaint], move || {
         [art::site::walkway(inner)]
     });
     y.scenery(DVec3::ZERO, Quat::IDENTITY, paint);
     let mast = y.parts(
         "yard_mast",
         [Mat::Galvanized, Mat::Dark, Mat::Glass],
-        || {
+        move || {
             let m = art::site::mast();
             [m.steel, m.dark, m.glass]
         },
@@ -846,7 +857,7 @@ fn site(y: &mut Yard, inner: [f32; 2]) {
     let office = y.parts(
         "yard_office",
         [Mat::Drum(0x3d5a73), Mat::Dark, Mat::Glass],
-        || {
+        move || {
             let o = art::site::office();
             [o.paint, o.dark, o.glass]
         },
@@ -980,6 +991,9 @@ pub(crate) struct StationWork {
     /// Stations to pause (nobody near looks their way) and to let go again.
     pause: Vec<(Entity, Station)>,
     resume: Vec<(Entity, Station)>,
+    /// The frame a station was last built in, under a real clock: one a frame
+    /// ([`replay_stations`]).
+    built_frame: Option<u64>,
 }
 
 /// Follow a [`WorldShift`] (a floating-origin move, a re-homing, a trip to another body):
@@ -1136,7 +1150,22 @@ pub(crate) struct StationReplays;
 /// the next station waiting its turn and apply finished settles.
 pub(crate) fn replay_stations(world: &mut World) {
     settle::finish(world);
-    build_unbuilt(world, 1);
+    // One station a step with a manual clock (tours, tests, screenshots: the same every run).
+    // With a real clock, one a frame: a slow frame (a zone arriving, the yard streaming in at
+    // the village) is followed by several catch-up steps, and building a station each made
+    // one frame of 18 (206 ms on the route, VM; a station is 1-38 ms of new bodies, colliders
+    // and meshes). The rest wait for the next frames.
+    let manual = manual_clock(world);
+    let may_build = {
+        let frame = world.resource::<Time>().frame_count();
+        let mut work = world.resource_mut::<StationWork>();
+        let may = manual || work.built_frame != Some(frame);
+        if may && !manual {
+            work.built_frame = Some(frame);
+        }
+        may
+    };
+    let built_one = may_build && build_unbuilt(world, 1);
     let (due, rest, unsettled, pause, resume) = {
         let mut work = world.resource_mut::<StationWork>();
         (
@@ -1162,7 +1191,10 @@ pub(crate) fn replay_stations(world: &mut World) {
     // them waking together (someone walking in, the tour arriving) stepped 1,492 new bodies
     // at once, 48 ms on the RTX 5080 PC. The rest wait their turn, a step each.
     let mut due = due.into_iter();
-    if let Some((e, station)) = due.next() {
+    if may_build
+        && (manual || !built_one)
+        && let Some((e, station)) = due.next()
+    {
         build_station(world, e, station);
     }
     let mut waiting: Vec<(Entity, Station)> = Vec::new();
@@ -1362,10 +1394,14 @@ fn pile(y: &mut Yard, center: DVec3) {
     ] {
         y.block(center + DVec3::new(dx, 0.8, dz), Vec3::new(hx, 0.8, hz));
     }
-    let bin = y.parts("pile_bin", [Mat::Concrete, Mat::Yellow, Mat::Steel], || {
-        let b = structures::pile_bin(Vec2::new(4.0, 4.0), 0.3, 1.6);
-        [b.concrete, b.painted, b.steel]
-    });
+    let bin = y.parts(
+        "pile_bin",
+        [Mat::Concrete, Mat::Yellow, Mat::Steel],
+        move || {
+            let b = structures::pile_bin(Vec2::new(4.0, 4.0), 0.3, 1.6);
+            [b.concrete, b.painted, b.steel]
+        },
+    );
     y.scenery(center, Quat::IDENTITY, bin);
     let mut rng = Rng(0x5eed_1234);
     for i in 0..250 {
@@ -1399,9 +1435,11 @@ fn pile(y: &mut Yard, center: DVec3) {
                     ..Default::default()
                 };
                 let color = DRUM_COLORS[i % 3];
-                let parts = y.parts(&format!("drum/{color:06x}"), [Mat::Drum(color)], || {
-                    [props::steel_drum(0.3, 0.42)]
-                });
+                let parts = y.parts(
+                    &format!("drum/{color:06x}"),
+                    [Mat::Drum(color)],
+                    move || [props::steel_drum(0.3, 0.42)],
+                );
                 y.body(at, rotation, c, parts);
             }
             _ => {
@@ -1446,7 +1484,7 @@ fn dominoes(y: &mut Yard, start: DVec3) {
         let parts = y.parts(
             &format!("domino/{}{}{}", pips.0, pips.1, ivory as u8),
             [Mat::Domino],
-            || [props::domino(half, pips, ivory)],
+            move || [props::domino(half, pips, ivory)],
         );
         let e = y.body(*p + DVec3::Y * 0.5, rotation, c, parts);
         if i == 0 {
@@ -1462,7 +1500,7 @@ fn dominoes(y: &mut Yard, start: DVec3) {
 fn ragdoll(y: &mut Yard, feet: DVec3, shirt: u32, push: Vec3) -> Entity {
     let l = dummy::RagdollLayout::HYBRID_III_50TH;
     // Each part's vinyl and steel meshes, in `RagdollMeshes::all` order.
-    let meshes = y.parts_later::<22>(
+    let meshes = y.parts::<22>(
         &format!("dummy/ragdoll/{shirt:06x}"),
         [[Mat::Vinyl, Mat::Steel]; 11].concat().try_into().unwrap(),
         move || {
@@ -1577,7 +1615,7 @@ fn ragdoll_stairs(y: &mut Yard, foot: DVec3) {
         DVec3::new(foot.x, top * 0.5, landing),
         Vec3::new(width * 0.5, top as f32 * 0.5, deep * 0.5),
     );
-    let flight = y.parts("stairs", [Mat::Concrete, Mat::Yellow], || {
+    let flight = y.parts("stairs", [Mat::Concrete, Mat::Yellow], move || {
         let s = structures::stairs(rise as f32, run as f32, steps, width, deep);
         [s.concrete, s.steel]
     });
@@ -1602,10 +1640,14 @@ fn wrecking_ball(y: &mut Yard, base: DVec3) {
         y.block(base + DVec3::new(0.0, 3.9, dz), Vec3::new(0.25, 3.9, 0.25));
     }
     y.block(pivot + DVec3::Y * 0.3, Vec3::new(0.25, 0.25, 2.65));
-    let gantry = y.parts("gantry", [Mat::Yellow, Mat::Steel, Mat::Concrete], || {
-        let g = structures::gantry(7.6, 4.8);
-        [g.painted, g.steel, g.concrete]
-    });
+    let gantry = y.parts(
+        "gantry",
+        [Mat::Yellow, Mat::Steel, Mat::Concrete],
+        move || {
+            let g = structures::gantry(7.6, 4.8);
+            [g.painted, g.steel, g.concrete]
+        },
+    );
     y.scenery(base, Quat::IDENTITY, gantry);
 
     let angle = 70f32.to_radians();
@@ -1619,7 +1661,7 @@ fn wrecking_ball(y: &mut Yard, base: DVec3) {
         let center = pivot + down * (link * (i as f64 + 0.5));
         // The last segment's bottom links are the ball's shackle.
         let end = i == links - 1;
-        let chain = y.parts(&format!("chain/{end}"), [Mat::Steel], || {
+        let chain = y.parts(&format!("chain/{end}"), [Mat::Steel], move || {
             [if end {
                 props::chain_end_segment(link as f32, wire)
             } else {
@@ -1637,7 +1679,7 @@ fn wrecking_ball(y: &mut Yard, base: DVec3) {
     }
     let radius = 0.8;
     let center = pivot + down * (link * links as f64 + radius as f64);
-    let parts = y.parts("wrecking_ball", [Mat::Steel], || {
+    let parts = y.parts("wrecking_ball", [Mat::Steel], move || {
         [props::wrecking_ball(radius)]
     });
     let ball = y.steel_ball(center, radius, parts);
@@ -1668,7 +1710,7 @@ fn wrecking_ball(y: &mut Yard, base: DVec3) {
 fn seesaw(y: &mut Yard, base: DVec3) {
     let stand_half = Vec3::new(0.3, 0.4, 0.6);
     let stand = y.block(base + DVec3::new(0.0, 0.4, 0.0), stand_half);
-    let parts = y.parts("seesaw_stand", [Mat::Dark, Mat::Steel], || {
+    let parts = y.parts("seesaw_stand", [Mat::Dark, Mat::Steel], move || {
         let s = structures::seesaw_stand(stand_half);
         [s.painted, s.steel]
     });
@@ -1680,7 +1722,7 @@ fn seesaw(y: &mut Yard, base: DVec3) {
     let parts = y.parts(
         "seesaw_plank",
         [Mat::Timber, Mat::Dark, Mat::Steel, Mat::Rubber(0x1e1e20)],
-        || {
+        move || {
             let p = structures::seesaw_plank(half);
             [p.timber, p.painted, p.steel, p.rubber]
         },
@@ -1712,7 +1754,7 @@ fn seesaw(y: &mut Yard, base: DVec3) {
         col.density = 120.0;
     }
     y.name(c, "Catapulted crate");
-    let parts = y.parts("steel_ball/0.6", [Mat::Steel], || [props::ball(0.6)]);
+    let parts = y.parts("steel_ball/0.6", [Mat::Steel], move || [props::ball(0.6)]);
     let ball = y.steel_ball(base + DVec3::new(3.5, 9.0, 0.0), 0.6, parts);
     y.name(ball, "Seesaw ball");
 }
@@ -1728,10 +1770,14 @@ fn paddle_wheel(y: &mut Yard, center: DVec3) {
         y.block(center + DVec3::new(dx, 0.7, dz), Vec3::new(hx, 0.7, hz));
     }
     let axle = 2.0;
-    let bin = y.parts("paddle_bin", [Mat::Concrete, Mat::Dark, Mat::Steel], || {
-        let b = structures::paddle_bin(Vec2::new(3.0, 2.5), 0.3, 1.4, axle);
-        [b.concrete, b.painted, b.steel]
-    });
+    let bin = y.parts(
+        "paddle_bin",
+        [Mat::Concrete, Mat::Dark, Mat::Steel],
+        move || {
+            let b = structures::paddle_bin(Vec2::new(3.0, 2.5), 0.3, 1.4, axle);
+            [b.concrete, b.painted, b.steel]
+        },
+    );
     y.scenery(center, Quat::IDENTITY, bin);
     let hub_at = center + DVec3::new(0.0, axle as f64, 0.0);
     let wheel = y.spawn((
@@ -1740,7 +1786,7 @@ fn paddle_wheel(y: &mut Yard, center: DVec3) {
         Velocity::default(),
         Name::new("Paddle wheel"),
     ));
-    let hub = y.parts("paddle_hub", [Mat::Yellow, Mat::Steel], || {
+    let hub = y.parts("paddle_hub", [Mat::Yellow, Mat::Steel], move || {
         let h = structures::paddle_hub(0.3, 2.7);
         [h.painted, h.steel]
     });
@@ -1773,7 +1819,7 @@ fn paddle_wheel(y: &mut Yard, center: DVec3) {
         let blade = y.parts(
             "paddle_blade",
             [Mat::Timber, Mat::Yellow, Mat::Steel],
-            || {
+            move || {
                 let b = structures::paddle_blade(half, reach);
                 [b.timber, b.painted, b.steel]
             },
@@ -1837,7 +1883,7 @@ fn bridge(y: &mut Yard, center: DVec3) {
         let parts = y.parts(
             &format!("bridge_tower/{side}"),
             [Mat::Timber, Mat::Steel, Mat::Concrete],
-            || {
+            move || {
                 let t = structures::bridge_tower(tower_half, side);
                 [t.timber, t.steel, t.concrete]
             },
@@ -1911,7 +1957,7 @@ fn bridge(y: &mut Yard, center: DVec3) {
         let parts = y.parts(
             &format!("bridge_plank/{k}"),
             [Mat::Timber, Mat::Steel, Mat::Rope],
-            || {
+            move || {
                 let p = structures::bridge_plank(half, k);
                 [p.timber, p.steel, p.rope]
             },
@@ -1980,10 +2026,14 @@ fn turntable(y: &mut Yard, center: DVec3) {
         },
         Name::new("Turntable"),
     ));
-    let parts = y.parts("turntable", [Mat::Diamond, Mat::Yellow, Mat::Steel], || {
-        let t = structures::turntable(4.0, 0.3);
-        [t.deck, t.painted, t.steel]
-    });
+    let parts = y.parts(
+        "turntable",
+        [Mat::Diamond, Mat::Yellow, Mat::Steel],
+        move || {
+            let t = structures::turntable(4.0, 0.3);
+            [t.deck, t.painted, t.steel]
+        },
+    );
     y.dress(table, parts);
     y.mannequin(
         center + DVec3::new(1.2, 0.3, 0.0),
@@ -2064,7 +2114,7 @@ fn pendulum_wave(y: &mut Yard, base: DVec3) {
     let frame = y.parts(
         "wave_frame",
         [Mat::Yellow, Mat::Steel, Mat::Concrete],
-        || {
+        move || {
             let f = pend::wave_frame(height, half_span, splay, WAVE_BOBS, first_x, pitch);
             [f.painted, f.steel, f.concrete]
         },
@@ -2093,7 +2143,7 @@ fn pendulum_wave(y: &mut Yard, base: DVec3) {
         let parts = y.parts(
             &format!("wave_bob/{k}"),
             [Mat::Lacquer(color), Mat::Dark],
-            || {
+            move || {
                 let b = pend::bob(WAVE_BOB_RADIUS, length, Vec3::X, WAVE_WIRE_SPREAD);
                 [b.ball, b.wire]
             },
@@ -2126,7 +2176,7 @@ fn newtons_cradle(y: &mut Yard, base: DVec3) {
     use art::pendulums as pend;
     let plinth = Vec3::new(1.0, 0.5, 0.6);
     let block = y.block(base + DVec3::Y * plinth.y as f64, plinth);
-    let stone = y.parts("cradle_plinth", [Mat::Concrete], || {
+    let stone = y.parts("cradle_plinth", [Mat::Concrete], move || {
         let mut b = MeshBuilder::new();
         b.rounded_box(plinth, 0.03, 2);
         [b.build()]
@@ -2139,7 +2189,7 @@ fn newtons_cradle(y: &mut Yard, base: DVec3) {
     let frame = y.parts(
         "cradle_frame",
         [Mat::Lacquer(0x15161a), Mat::Chrome],
-        || {
+        move || {
             let c = pend::cradle(half_x, half_z, bar_z, pivot_y);
             [c.base, c.chrome]
         },
@@ -2167,7 +2217,7 @@ fn newtons_cradle(y: &mut Yard, base: DVec3) {
         let angle = if i == 0 { -0.6f32 } else { 0.0 };
         let turn = Quat::from_rotation_z(angle);
         let center = pivot + (turn * Vec3::new(0.0, -CRADLE_LENGTH, 0.0)).as_dvec3();
-        let parts = y.parts("cradle_ball", [Mat::Chrome, Mat::Dark], || {
+        let parts = y.parts("cradle_ball", [Mat::Chrome, Mat::Dark], move || {
             let b = pend::bob(CRADLE_BALL, CRADLE_LENGTH, Vec3::Z, bar_z);
             [b.ball, b.wire]
         });
@@ -2280,7 +2330,7 @@ fn barrel_run(y: &mut Yard, base: DVec3) {
         Mat::Rubber(0xffffff),
         Mat::Yellow,
     ];
-    let parts = y.parts("barrel_run", mats, || {
+    let parts = y.parts("barrel_run", mats, move || {
         let r = run::barrel_run();
         [
             r.asphalt,
@@ -2305,9 +2355,11 @@ fn barrel_run(y: &mut Yard, base: DVec3) {
             density: 400.0,
             ..Default::default()
         };
-        let parts = y.parts(&format!("drum/{color:06x}"), [Mat::Drum(color)], || {
-            [props::steel_drum(radius, half_height)]
-        });
+        let parts = y.parts(
+            &format!("drum/{color:06x}"),
+            [Mat::Drum(color)],
+            move || [props::steel_drum(radius, half_height)],
+        );
         let at = base + run::barrel_start(lane, radius).as_dvec3();
         let lying = Quat::from_rotation_x(std::f32::consts::FRAC_PI_2);
         let drum = y.body(at, lying, c, parts);
@@ -2373,7 +2425,7 @@ fn rockfall(y: &mut Yard, base: DVec3) {
     let art = y.parts(
         "rockfall_chute",
         [Mat::Steel, Mat::Yellow, Mat::Dark],
-        || {
+        move || {
             let mut b: [MeshBuilder; 3] = Default::default();
             for (at, rotation, half, mat) in chute_plates().0 {
                 let m = Mat4::from_rotation_translation(rotation, at);
@@ -2415,7 +2467,7 @@ fn rockfall(y: &mut Yard, base: DVec3) {
             density: 2600.0,
             ..Default::default()
         };
-        let parts = y.parts(&format!("rock/{shape}"), [Mat::Granite], || {
+        let parts = y.parts(&format!("rock/{shape}"), [Mat::Granite], move || {
             [props::rock(
                 &props::rock_points(shape),
                 ROCK_TINTS[shape as usize],

@@ -20,7 +20,6 @@ use std::collections::{BTreeMap, HashMap};
 use std::ffi::{CStr, c_char, c_int};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering};
-use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use mlua::{Lua, ffi};
@@ -69,7 +68,6 @@ pub(crate) struct Clock {
     /// Script time since the last sample (nanoseconds): the next sample's weight.
     pending_ns: AtomicU64,
     phase: AtomicU8,
-    stop: AtomicBool,
 }
 
 impl Clock {
@@ -303,7 +301,9 @@ pub(crate) fn after_engine_call(lua: &Lua, label: &str) {
 pub(crate) struct Profiler {
     clock: Arc<Clock>,
     dog: Watchdog,
-    timer: Option<JoinHandle<()>>,
+    /// The timer thread and its own stop flag (each recording's timer has its own, so a timer
+    /// still winding down never runs on into the next recording).
+    timer: Option<(std::thread::Thread, Arc<AtomicBool>)>,
 }
 
 impl Drop for Profiler {
@@ -348,20 +348,23 @@ impl Profiler {
                 ..Default::default()
             };
         }
-        self.clock.stop.store(false, Ordering::Relaxed);
+        let stop = Arc::new(AtomicBool::new(false));
         self.clock.pending_ns.store(0, Ordering::Relaxed);
         self.clock.due.store(false, Ordering::Relaxed);
-        let (clock, dog) = (self.clock.clone(), self.dog.clone());
+        let (clock, dog, stopped) = (self.clock.clone(), self.dog.clone(), stop.clone());
         let period = Duration::from_secs_f64(1.0 / hz as f64);
         let spawned = std::thread::Builder::new()
             .name("script-profiler".into())
             .spawn(move || {
                 let mut last = Instant::now();
-                while !clock.stop.load(Ordering::Relaxed) {
+                while !stopped.load(Ordering::Relaxed) {
                     // Parked rather than asleep, so `halt` wakes it at once: on Windows a
                     // sleep lasts a timer tick (1-16 ms), and stopping the 9 VMs' profilers
                     // one after another held a frame 12.7 ms.
                     std::thread::park_timeout(period);
+                    if stopped.load(Ordering::Relaxed) {
+                        break;
+                    }
                     let now = Instant::now();
                     let dt = (now - last).as_nanos() as u64;
                     last = now;
@@ -377,19 +380,21 @@ impl Profiler {
         match spawned {
             Ok(handle) => {
                 RECORDING.fetch_add(1, Ordering::Relaxed);
-                self.timer = Some(handle);
+                self.timer = Some((handle.thread().clone(), stop));
             }
             Err(err) => tracing::warn!(target: "script", "the script profiler can't start: {err}"),
         }
     }
 
     fn halt(&mut self) -> bool {
-        let Some(timer) = self.timer.take() else {
+        let Some((timer, stop)) = self.timer.take() else {
             return false;
         };
-        self.clock.stop.store(true, Ordering::Relaxed);
-        timer.thread().unpark();
-        let _ = timer.join();
+        // Told to stop and woken, but not waited for: joining each VM's timer thread one
+        // after another held the script zone's frame up to 27 ms on the busy cloud VM, waiting
+        // for the threads to be scheduled. It stops at its next wake, before charging anything.
+        stop.store(true, Ordering::Relaxed);
+        timer.unpark();
         self.clock.due.store(false, Ordering::Relaxed);
         RECORDING.fetch_sub(1, Ordering::Relaxed);
         true

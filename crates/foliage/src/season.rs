@@ -148,6 +148,23 @@ pub fn grass_dryness(day: f32) -> f32 {
     0.8 * greening.max(browning)
 }
 
+/// How deep in its winter rest the field layer is on a day, 0 (growing) .. 1 (dormant): from
+/// November's frosts the meadow's dead leaves bleach to a weathered buff and lie matted under
+/// snow and rain until new growth hides them in April (dormant cool-season grassland; e.g.
+/// Grime, Hodgson & Hunt, "Comparative Plant Ecology", on winter-dormant meadow grasses).
+pub fn winter_dormancy(day: f32) -> f32 {
+    let d = day.rem_euclid(YEAR_DAYS);
+    smoothstep(305.0, 340.0, d).max(1.0 - smoothstep(70.0, 105.0, d))
+}
+
+/// How bare bilberry is on a day, 0 (in leaf) .. 1 (bare): it is deciduous, its leaves redden
+/// in September and fall in October, leaving the green, angled twigs through winter until new
+/// leaves open in May (https://en.wikipedia.org/wiki/Vaccinium_myrtillus).
+pub fn bilberry_bare(day: f32) -> f32 {
+    let d = day.rem_euclid(YEAR_DAYS);
+    smoothstep(288.0, 308.0, d).max(1.0 - smoothstep(112.0, 132.0, d))
+}
+
 /// How far the forest's ferns have collapsed on a day, 0 (standing) .. 1 (lying flat): bracken
 /// browns through October, its dead fronds fall over in November's frosts and lie flattened
 /// on the floor through winter, until the new fronds unfurl in May (Marrs & Watt 2006,

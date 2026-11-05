@@ -154,7 +154,17 @@ fn jet_spread(lip: &crate::flow::Lip, drop: f32) -> f32 {
     let h0 = lip.speed * lip.speed / (2.0 * 9.81);
     let phi = 1.07 * lip.turbulence;
     let turbulent = 2.0 * phi * h0.sqrt() * ((h0 + drop.max(0.0)).sqrt() - h0.sqrt());
-    turbulent + 0.12 * (drop - 0.5 * lip.break_up()).max(0.0)
+    let spread = turbulent + 0.12 * (drop - 0.5 * lip.break_up()).max(0.0);
+    spread.min(spray_reach(lip))
+}
+
+/// How far to each side of its core the spray round the jet over `lip` stays dense enough to
+/// see, meters: it grows with the root of the flow (the drops thrown off a jet spread at the
+/// same angle whatever its size, but a thread of a few litres a second throws off too few to
+/// veil anything past half a meter: a storm's threads down a cliff read as thin white lines,
+/// not cones of haze). A creek's pour or a river's falls never reach it.
+fn spray_reach(lip: &crate::flow::Lip) -> f32 {
+    3.0 * (lip.q * lip.width).max(0.0).sqrt()
 }
 
 /// The curtain of water over `lip` as triangles down its `path` (see
@@ -1589,7 +1599,7 @@ impl WaterFeature {
         state: &WaterState,
         view: &ViewData,
         plunges: &[(DVec3, Vec2, f32)],
-        creeks: Option<&crate::flow::Falls>,
+        extra: &[&crate::flow::Falls],
     ) -> [f32; 4] {
         // The falls as the flow step last worked them out (a few times a second while the
         // water moves), built once for every view and frame until they change; and the
@@ -1599,7 +1609,11 @@ impl WaterFeature {
             .iter()
             .filter(|sim| sim.visible)
             .map(|sim| sim.falls() as *const crate::flow::Falls as usize)
-            .chain(creeks.map(|f| f as *const crate::flow::Falls as usize))
+            .chain(
+                extra
+                    .iter()
+                    .map(|f| *f as *const crate::flow::Falls as usize),
+            )
             .collect();
         let stale = gpu.fall_key != key
             || gpu
@@ -1618,7 +1632,7 @@ impl WaterFeature {
                 .iter()
                 .filter(|sim| sim.visible)
                 .map(|sim| sim.falls())
-                .chain(creeks)
+                .chain(extra.iter().copied())
                 .flat_map(|falls| {
                     falls.lips.iter().zip(&falls.paths).zip(&falls.sides).map(
                         |((lip, path), sides)| {
@@ -2739,14 +2753,16 @@ impl RenderFeature for WaterFeature {
         let creek_falls = world
             .get_resource::<crate::creeks::CreekRibbons>()
             .map(|r| r.falls.clone());
-        g.falls = Self::upload_falls(
-            gpu,
-            shared,
-            &state,
-            view,
-            &plunges,
-            creek_falls.as_deref().filter(|f| !f.lips.is_empty()),
-        );
+        // Threads of storm water down the cliffs (`crate::runoff`).
+        let storm_falls = world
+            .get_resource::<crate::runoff::StormRunoff>()
+            .map(|r| r.falls.clone());
+        let extra: Vec<&crate::flow::Falls> = [creek_falls.as_deref(), storm_falls.as_deref()]
+            .into_iter()
+            .flatten()
+            .filter(|f| !f.lips.is_empty())
+            .collect();
+        g.falls = Self::upload_falls(gpu, shared, &state, view, &plunges, &extra);
         drop(span);
         let span = tracing::info_span!("water", name = "uniform").entered();
         uniform.g = g;
@@ -3051,6 +3067,37 @@ mod tests {
             assert!((ring_radius(i, s0, alpha) - r).abs() < 1e-6 * r.max(1.0));
         }
         assert!(ring_radius(MAX_RINGS as f64, s0, alpha) > OCEAN_REACH);
+    }
+
+    #[test]
+    fn a_storm_thread_stays_a_thin_line_and_a_river_still_spreads() {
+        let thread = crate::flow::Lip {
+            top: DVec3::ZERO,
+            dir: Vec2::X,
+            speed: 0.8,
+            q: 0.08,
+            drop: 30.0,
+            width: 0.3,
+            launch: 0.0,
+            turbulence: 0.1,
+        };
+        // A few litres a second down a 30 m cliff: its spray stays within half a meter of it.
+        assert!(
+            jet_spread(&thread, 30.0) < 0.5,
+            "{}",
+            jet_spread(&thread, 30.0)
+        );
+        // A river's falls spread as before, meters wide by its foot.
+        let river = crate::flow::Lip {
+            q: 1.0,
+            width: 12.0,
+            speed: 2.0,
+            ..thread
+        };
+        let h0: f32 = 4.0 / (2.0 * 9.81);
+        let free = 2.0 * 1.07 * 0.1 * h0.sqrt() * ((h0 + 30.0f32).sqrt() - h0.sqrt())
+            + 0.12 * (30.0 - 0.5 * river.break_up()).max(0.0);
+        assert!((jet_spread(&river, 30.0) - free).abs() < 1e-5 && free > 2.0);
     }
 
     #[test]

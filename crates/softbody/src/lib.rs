@@ -52,6 +52,7 @@ impl Plugin for SoftBodyPlugin {
         app.init_resource::<SoftBodyConfig>()
             .init_resource::<systems::ColliderWorld>()
             .init_resource::<systems::LoadList>()
+            .init_resource::<systems::GroomBuilds>()
             .init_resource::<systems::SlowestBody>()
             .init_resource::<systems::BesidePhysics>()
             .init_resource::<systems::SurfaceMove>()

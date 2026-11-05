@@ -55,10 +55,13 @@ pub fn bake(
 ) -> TextureSet {
     let n = size.max(4) as usize;
     let mut samples = vec![Surface::new(Vec3::ZERO, 1.0); n * n];
-    let threads = std::thread::available_parallelism()
-        .map(|t| t.get())
-        .unwrap_or(4)
-        .min(16);
+    let lease = engine_core::tasks::background_lease(
+        std::thread::available_parallelism()
+            .map(|t| t.get())
+            .unwrap_or(4)
+            .min(16),
+    );
+    let threads = lease.threads();
     let rows_per = n.div_ceil(threads);
     std::thread::scope(|s| {
         for (chunk_i, chunk) in samples.chunks_mut(rows_per * n).enumerate() {

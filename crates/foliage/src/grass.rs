@@ -126,6 +126,9 @@ pub struct FloorMaps {
     /// Which herb grows at each point (`GrassField::kinds` of the herbs' field, looks from
     /// [`herb_styles`]).
     pub herb_kinds: Vec<u8>,
+    /// How thick the dwarf shrubs grow where they won the herbs' layer (0 elsewhere): the
+    /// meadow grass thins under them.
+    pub shrubs: Vec<f32>,
     /// What lies at each point of the litter: 0 fallen leaves, 1 twigs among them
     /// ([`GrassStyle::twigs`]).
     pub litter_kinds: Vec<u8>,
@@ -140,8 +143,69 @@ pub fn herb_styles() -> (GrassStyle, Vec<GrassStyle>) {
             GrassStyle::wood_sorrel(),
             GrassStyle::woodruff(),
             GrassStyle::wood_anemone(),
+            GrassStyle::bilberry(),
+            GrassStyle::lingonberry(),
+            GrassStyle::heather(),
         ],
     )
+}
+
+/// [`herb_styles`] on `day`: bilberry drops its leaves for winter and stands as bare green
+/// twigs; heather's flower spikes are fresh mauve only in late summer and dry to russet,
+/// staying on the shoots through winter, its foliage turning bronze in the cold
+/// (https://en.wikipedia.org/wiki/Calluna_vulgaris); lingonberry stays evergreen, a little
+/// darker in winter.
+pub fn herb_styles_on(day: f32) -> (GrassStyle, Vec<GrassStyle>) {
+    let (base, mut kinds) = herb_styles();
+    let winter = crate::season::winter_dormancy(day);
+    let k = DWARF_SHRUB_KIND as usize - 1;
+    if let Some(b) = kinds.get_mut(k) {
+        let bare = crate::season::bilberry_bare(day);
+        // Green twigs, whatever the season's dryness.
+        let twig = [0.05, 0.12, 0.03];
+        b.width += (0.006 - b.width) * bare;
+        b.leaf *= 1.0 - bare;
+        b.gloss = 0.35 - 0.2 * bare;
+        b.lush_color = mix3(b.lush_color, twig, bare);
+        b.dry_color = mix3(b.dry_color, twig, bare);
+        b.tip_tint = mix3(b.tip_tint, [1.0, 1.0, 1.0], bare);
+        if bare > 0.5 {
+            b.pinnae = 0.0;
+            b.bloom = 0.0;
+        }
+    }
+    if let Some(l) = kinds.get_mut(k + 1) {
+        l.lush_color = mix3(l.lush_color, [0.03, 0.06, 0.02], winter);
+        l.dry_color = mix3(l.dry_color, [0.045, 0.06, 0.025], winter);
+    }
+    if let Some(h) = kinds.get_mut(k + 2) {
+        let fresh = crate::meadow::heather_blooming(day);
+        h.bloom_color = mix3([0.085, 0.045, 0.03], h.bloom_color, fresh);
+        h.lush_color = mix3(h.lush_color, [0.045, 0.045, 0.025], winter);
+        h.dry_color = mix3(h.dry_color, [0.06, 0.045, 0.032], winter);
+    }
+    (base, kinds)
+}
+
+/// The meadow's look on `day` in its winter rest ([`crate::season::winter_dormancy`]): the
+/// dead leaves bleach from straw to a weathered grey-buff, the yellow goes out of the tips,
+/// snow and rain flatten them into a matted, half-lying mat and break most seed heads off.
+pub fn winter_grass(style: &mut GrassStyle, day: f32) {
+    let w = crate::season::winter_dormancy(day);
+    if w <= 0.0 {
+        return;
+    }
+    style.lying = style.lying.max(0.55 * w);
+    style.height *= 1.0 - 0.15 * w;
+    style.dry_color = mix3(style.dry_color, [0.21, 0.175, 0.12], w);
+    style.lush_color = mix3(style.lush_color, [0.07, 0.08, 0.04], 0.6 * w);
+    style.tip_tint = mix3(style.tip_tint, [1.12, 1.08, 1.0], w);
+    style.gloss *= 1.0 - 0.6 * w;
+    style.bloom *= 1.0 - 0.75 * w;
+}
+
+fn mix3(a: [f32; 3], b: [f32; 3], t: f32) -> [f32; 3] {
+    [0, 1, 2].map(|i| a[i] + (b[i] - a[i]) * t)
 }
 
 /// Which herb takes a spot of forest floor, from how closed the `canopy` is over it, how much
@@ -168,6 +232,26 @@ pub fn herb_kind(canopy: f32, broad: f32, water: f32, needles: f32, patch: [f32;
         }
     }
     best.0
+}
+
+/// The first of the dwarf shrubs among [`herb_styles`]' kinds (bilberry, lingonberry, heather).
+pub const DWARF_SHRUB_KIND: u8 = 4;
+
+/// How much each dwarf shrub (bilberry, lingonberry, heather) wants a spot of floor, 0..1, from
+/// the canopy over it (`canopy`, the needle-leaved part of it `conifer`), the soil's `water`
+/// and the needles painted on it. The heath shrubs of acid soils (Ellenberg reaction values
+/// 1-2; the boreal and Atlantic forest floors of Kielland-Lund 1981 and Rodwell's British Plant
+/// Communities W18 and H9): bilberry carpets moist acid floors under spruce and pine where some
+/// light comes through, lingonberry the drier ones under pine, heather open dry ground (pine
+/// heath, ridges, burnt ground) and gives way as the canopy closes.
+pub fn dwarf_shrubs(canopy: f32, conifer: f32, water: f32, needles: f32) -> [f32; 3] {
+    let acid = smoothstep(0.1, 0.5, conifer).max(needles);
+    let dry = 1.0 - smoothstep(0.2, 0.42, water);
+    [
+        acid * smoothstep(0.18, 0.32, water) * (1.0 - smoothstep(0.85, 1.4, canopy)),
+        acid * dry * smoothstep(0.05, 0.3, canopy) * 0.9,
+        (1.0 - smoothstep(0.25, 0.65, canopy)) * dry * (0.4 + 0.6 * acid),
+    ]
 }
 
 /// Herbs' and fallen leaves' maps over the same grid as [`grass_maps`], from the crowns
@@ -197,6 +281,7 @@ pub fn floor_maps(
     let mut herbs = (Vec::with_capacity(n), Vec::with_capacity(n));
     let mut litter = (Vec::with_capacity(n), Vec::with_capacity(n));
     let mut herb_kinds = Vec::with_capacity(n);
+    let mut shrubs = Vec::with_capacity(n);
     let mut litter_kinds = Vec::with_capacity(n);
     for j in 0..rz {
         for i in 0..rx {
@@ -227,7 +312,7 @@ pub fn floor_maps(
             // Herbs spread in colonies a few meters across, under a closing canopy, thicker
             // where the soil stays moist.
             let colony = fbm2(x * 0.22, z * 0.22, region.seed ^ 0x4e8b, 3, 2.0, 0.5);
-            let herb = if blocked || bare[k] {
+            let herb_d = if blocked || bare[k] {
                 0.0
             } else {
                 let d = smoothstep(0.2, 0.8, canopy[k])
@@ -238,11 +323,36 @@ pub fn floor_maps(
                     * (1.0 - 0.5 * needles);
                 if d < 0.08 { 0.0 } else { d.min(1.0) }
             };
+            // Dwarf shrubs carpet acid ground in sweeps tens of meters across, thinning where
+            // grass has the ground; they win the spot where they want it more than the herbs.
+            let shrub_w = dwarf_shrubs(canopy[k], (canopy[k] - broad[k]).max(0.0), water, needles);
+            let sweep = fbm2(x * 0.06, z * 0.06, region.seed ^ 0x5d1b, 3, 2.0, 0.5);
+            let shrub_patch = [0x55u64, 0x56, 0x57]
+                .map(|salt| fbm2(x * 0.07, z * 0.07, region.seed ^ (salt << 8), 2, 2.0, 0.5));
+            let (shrub, shrub_d) = if blocked || bare[k] || on_trail {
+                (0, 0.0)
+            } else {
+                let (i, w) = shrub_w
+                    .iter()
+                    .zip(shrub_patch)
+                    .map(|(w, n)| w * (1.0 + 0.8 * n))
+                    .enumerate()
+                    .fold((0, f32::MIN), |b, (i, w)| if w > b.1 { (i, w) } else { b });
+                let d = w.min(1.0)
+                    * smoothstep(-0.45, 0.05, sweep)
+                    * (1.0 - 0.3 * grass.get(k).copied().unwrap_or(0.0))
+                    * (1.0 - hostile).max(0.0);
+                (i as u8, if d < 0.12 { 0.0 } else { d.min(1.0) })
+            };
+            let herb = herb_d.max(shrub_d);
             let thirst = ((0.4 - water) / 0.3).clamp(0.0, 1.0);
             // Each herb's colonies, some meters across.
             let patch = [0x51u64, 0x52, 0x53, 0x54]
                 .map(|salt| fbm2(x * 0.09, z * 0.09, region.seed ^ (salt << 8), 2, 2.0, 0.5));
-            herb_kinds.push(if herb > 0.0 {
+            shrubs.push(if shrub_d > herb_d { shrub_d } else { 0.0 });
+            herb_kinds.push(if shrub_d > herb_d {
+                DWARF_SHRUB_KIND + shrub
+            } else if herb > 0.0 {
                 herb_kind(canopy[k], broad[k], water, needles, patch)
             } else {
                 0
@@ -289,6 +399,7 @@ pub fn floor_maps(
         herbs,
         litter,
         herb_kinds,
+        shrubs,
         litter_kinds,
     }
 }
@@ -814,6 +925,8 @@ struct FloorKinds {
     /// Which herb grows where on the forest floor (the herbs' field's `kinds`), and where
     /// twigs lie among the fallen leaves (the litter's).
     herb_kinds: Vec<u8>,
+    /// The herbs' looks on the build's day ([`herb_styles_on`]).
+    herb_styles: Vec<GrassStyle>,
     litter_kinds: Vec<u8>,
 }
 
@@ -1180,7 +1293,8 @@ pub fn sync_region_grass(
         let region = region.clone();
         let soil = state.sim.soil.clone();
         let build = spawn_build(move || {
-            let (density, mut dryness) = grass_maps(&region, &soil, center, res, &grass, &covers);
+            let (mut density, mut dryness) =
+                grass_maps(&region, &soil, center, res, &grass, &covers);
             // Fern crowns grow as their own floor layer: fronds drawn on the GPU, not a mesh
             // and an entity each (`visuals` draws none for ferns where a region has it).
             let mut ferns =
@@ -1196,11 +1310,23 @@ pub fn sync_region_grass(
                     &region, &soil, center, res, &density, &crowns, &covers, &grids, season_dry,
                 )
             });
+            // Heath shrubs crowd the grass out where they carpet the ground.
+            if let Some(f) = &floor {
+                for (d, s) in density.iter_mut().zip(&f.shrubs) {
+                    *d *= 1.0 - 0.75 * s;
+                }
+            }
             let kinds = grass_kinds(&region, &soil, center, res, &crowns);
-            let kind_styles = styles
+            // The meadow's kinds come from its summer look; winter then mats and bleaches
+            // them all, and the meadow's own blades with them.
+            let mut kind_styles = styles
                 .iter()
                 .find(|(l, _)| *l == FloorLayer::Grass)
                 .map_or_else(Vec::new, |(_, s)| crate::meadow::palette(s, day));
+            for s in &mut kind_styles {
+                winter_grass(s, day);
+            }
+            let herb_styles = herb_styles_on(day).1;
             let heights = ground.map(|g| heights(g.as_ref(), center, &region, res));
             let floor_heights = heights
                 .as_ref()
@@ -1218,7 +1344,10 @@ pub fn sync_region_grass(
             let mut floor = floor.map(|f| [Some(f.herbs), Some(f.litter)]);
             let layers = styles
                 .into_iter()
-                .filter_map(|(layer, style)| {
+                .filter_map(|(layer, mut style)| {
+                    if layer == FloorLayer::Grass {
+                        winter_grass(&mut style, day);
+                    }
                     let (d, w) = match layer {
                         FloorLayer::Grass => maps.take()?,
                         FloorLayer::Herbs => floor.as_mut()?[0].take()?,
@@ -1234,6 +1363,7 @@ pub fn sync_region_grass(
                     kinds,
                     kind_styles,
                     herb_kinds,
+                    herb_styles,
                     litter_kinds,
                 },
                 heights,
@@ -1252,7 +1382,7 @@ fn layer_kinds(layer: FloorLayer, built: &FloorKinds) -> (Vec<u8>, Vec<GrassStyl
     match layer {
         FloorLayer::Grass => (built.kinds.clone(), built.kind_styles.clone()),
         FloorLayer::Herbs if !built.herb_kinds.is_empty() => {
-            (built.herb_kinds.clone(), herb_styles().1)
+            (built.herb_kinds.clone(), built.herb_styles.clone())
         }
         FloorLayer::Litter if !built.litter_kinds.is_empty() => {
             (built.litter_kinds.clone(), vec![GrassStyle::twigs()])
@@ -1318,6 +1448,71 @@ fn heights(
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn winter_mats_the_meadow_strips_bilberry_and_browns_heather_flowers() {
+        let (july, january) = (190.0, 20.0);
+        let mut summer = GrassStyle::default();
+        winter_grass(&mut summer, july);
+        assert_eq!(
+            summer,
+            GrassStyle::default(),
+            "summer meadows stand as they are"
+        );
+        let mut winter = GrassStyle::default();
+        winter_grass(&mut winter, january);
+        assert!(winter.lying > 0.5 && winter.height < summer.height);
+        // Weathered buff: less yellow than summer's straw (blue closer to red).
+        let warmth = |c: [f32; 3]| c[2] / c[0];
+        assert!(warmth(winter.dry_color) > warmth(summer.dry_color) + 0.1);
+
+        let b = DWARF_SHRUB_KIND as usize - 1;
+        let (_, jul) = herb_styles_on(july);
+        let (_, jan) = herb_styles_on(january);
+        assert!(
+            jul[b].pinnae > 0.0 && jul[b].width > 0.05,
+            "bilberry in leaf in July"
+        );
+        assert!(
+            jan[b].pinnae == 0.0 && jan[b].width < 0.01,
+            "bare twigs in January"
+        );
+        assert!(
+            jan[b].dry_color[1] > jan[b].dry_color[0],
+            "the twigs stay green"
+        );
+        let (_, aug) = herb_styles_on(225.0);
+        let mauve = |c: [f32; 3]| c[2] / c[0];
+        assert!(
+            mauve(aug[b + 2].bloom_color) > 0.8,
+            "heather in flower in August"
+        );
+        assert!(
+            mauve(jan[b + 2].bloom_color) < 0.4,
+            "dead russet spikes in January"
+        );
+    }
+
+    #[test]
+    fn heath_shrubs_take_acid_ground_by_its_water_and_light() {
+        let best = |w: [f32; 3]| (0..3).max_by(|&a, &b| w[a].total_cmp(&w[b])).unwrap();
+        // Moist floor under spruce with some light: bilberry.
+        let spruce = dwarf_shrubs(0.7, 0.7, 0.3, 0.6);
+        assert_eq!(best(spruce), 0);
+        assert!(spruce[0] > 0.5);
+        // Dry floor under pines: lingonberry.
+        assert_eq!(best(dwarf_shrubs(0.6, 0.6, 0.15, 0.6)), 1);
+        // Open dry ridge: heather.
+        let ridge = dwarf_shrubs(0.1, 0.1, 0.12, 0.3);
+        assert_eq!(best(ridge), 2);
+        assert!(ridge[2] > 0.5);
+        // Under broadleaves on rich moist soil, none of them.
+        assert!(dwarf_shrubs(0.9, 0.0, 0.4, 0.0).iter().all(|w| *w < 0.05));
+        // Their kinds follow the herbs'.
+        let (_, kinds) = herb_styles();
+        assert_eq!(kinds.len(), DWARF_SHRUB_KIND as usize + 2);
+        assert_eq!(kinds[DWARF_SHRUB_KIND as usize - 1], GrassStyle::bilberry());
+    }
 
     #[test]
     fn a_trails_shoulder_is_beside_its_tread_only() {
