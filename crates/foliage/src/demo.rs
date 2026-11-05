@@ -225,10 +225,13 @@ pub fn forest_viewpoints(center: DVec3) -> Vec<Viewpoint> {
         ),
         view(
             center,
-            ("forest_dry_ridge", "Pines win on the dry, rocky ridge"),
-            [-51.5, 1.9, -16.0],
-            [-57.0, 2.0, -42.0],
-            16.0,
+            (
+                "forest_dry_ridge",
+                "Pines and heather on the dry, rocky ridge",
+            ),
+            [-49.0, 1.9, -27.0],
+            [-56.0, 1.2, -50.0],
+            10.5,
         ),
     ]
 }

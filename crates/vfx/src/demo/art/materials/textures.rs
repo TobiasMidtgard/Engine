@@ -287,7 +287,8 @@ where
 /// Fill `out` (rows of `w` texels) with `f(x, y)` on all cores.
 pub fn par_fill<T: Send>(out: &mut [T], w: usize, f: impl Fn(usize, usize) -> T + Sync) {
     let h = out.len() / w.max(1);
-    let threads = threads();
+    let lease = engine_core::tasks::background_lease(threads());
+    let threads = lease.threads();
     let rows = (h / (threads * 6)).max(1);
     let fill = |y0: usize, chunk: &mut [T]| {
         for (r, row) in chunk.chunks_mut(w).enumerate() {
@@ -327,7 +328,8 @@ fn threads() -> usize {
 
 /// Run `f(row)` over each row of `w` values on all cores.
 fn par_rows(data: &mut [f32], w: usize, f: impl Fn(&mut [f32]) + Sync) {
-    let threads = threads();
+    let lease = engine_core::tasks::background_lease(threads());
+    let threads = lease.threads();
     let h = data.len() / w;
     let rows = (h / (threads * 4)).max(1);
     let chunks = std::sync::Mutex::new(data.chunks_mut(rows * w));

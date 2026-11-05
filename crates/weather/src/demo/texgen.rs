@@ -53,7 +53,10 @@ pub fn par_pixels<T: Send + Copy + Default>(
     f: impl Fn(u32, u32) -> T + Sync,
 ) -> Vec<T> {
     let mut out = vec![T::default(); (w * h) as usize];
-    let threads = std::thread::available_parallelism().map_or(4, |n| n.get());
+    let lease = engine_core::tasks::background_lease(
+        std::thread::available_parallelism().map_or(4, |n| n.get()),
+    );
+    let threads = lease.threads();
     let chunks = (threads * 4).max(1);
     let rows = (h as usize).div_ceil(chunks).max(1);
     let row_len = w as usize;

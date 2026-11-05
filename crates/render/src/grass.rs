@@ -402,6 +402,110 @@ impl GrassStyle {
         }
     }
 
+    /// Bilberry (Vaccinium myrtillus): a knee-high carpet of bright green, angular twigs, each
+    /// with a few pairs of small oval leaves, under spruce and pine on acid soil where some
+    /// light gets through; blue-black berries in late summer, reddening when dry or in autumn.
+    /// A dwarf shrub of the forest floor's herbs.
+    pub fn bilberry() -> Self {
+        Self {
+            blades_per_m2: 480.0,
+            height: 0.38,
+            height_variation: 0.35,
+            width: 0.075,
+            bend: 0.25,
+            // Mostly a stem (upright twigs), not a leaf spread from a stalk.
+            leaf: 0.25,
+            lush_color: [0.075, 0.2, 0.03],
+            dry_color: [0.24, 0.08, 0.035],
+            wind_response: 0.35,
+            draw_distance: 36.0,
+            full_density_m: 14.0,
+            shadow_distance: 10.0,
+            clump_size: 0.5,
+            clump_pull: 0.35,
+            clump_fan: 0.6,
+            clump_height: 0.35,
+            clump_color: 0.08,
+            droop: 0.1,
+            gloss: 0.35,
+            tip_tint: [1.08, 1.08, 0.9],
+            bloom: 0.05,
+            bloom_color: [0.03, 0.035, 0.08],
+            bloom_size: 0.01,
+            leaflets: 0.0,
+            stalk: 0.2,
+            leaf_rise: 0.95,
+            pinnae: 7.0,
+            ..Self::forest_herbs()
+        }
+    }
+
+    /// Lingonberry (Vaccinium vitis-idaea): a low evergreen mat a hand high, small leathery
+    /// leaves a dark glossy green, on dry acid soil under pines; red berries in autumn.
+    pub fn lingonberry() -> Self {
+        Self {
+            blades_per_m2: 380.0,
+            height: 0.15,
+            height_variation: 0.3,
+            width: 0.06,
+            bend: 0.6,
+            lush_color: [0.035, 0.085, 0.022],
+            dry_color: [0.075, 0.07, 0.03],
+            wind_response: 0.2,
+            draw_distance: 30.0,
+            clump_size: 0.4,
+            clump_pull: 0.45,
+            clump_height: 0.3,
+            droop: 0.15,
+            gloss: 0.75,
+            bloom: 0.07,
+            bloom_color: [0.55, 0.03, 0.025],
+            bloom_size: 0.009,
+            leaflets: 0.0,
+            stalk: 0.15,
+            leaf_rise: 0.8,
+            pinnae: 5.0,
+            ..Self::forest_herbs()
+        }
+    }
+
+    /// Heather (Calluna vulgaris): bushy dwarf shrubs knee high on open, dry, poor acid ground
+    /// (pine heath, ridges, moors): wiry dark olive shoots in tight domes, each tipped with a
+    /// spike of small purple flowers in late summer.
+    pub fn heather() -> Self {
+        Self {
+            blades_per_m2: 1100.0,
+            height: 0.32,
+            height_variation: 0.2,
+            width: 0.012,
+            bend: 0.75,
+            lush_color: [0.04, 0.065, 0.025],
+            // Old, drought-browned shoots go grey-brown, not straw.
+            dry_color: [0.09, 0.075, 0.05],
+            dryness: 0.1,
+            wind_response: 0.3,
+            draw_distance: 45.0,
+            full_density_m: 16.0,
+            shadow_distance: 12.0,
+            clump_size: 0.5,
+            clump_pull: 0.75,
+            clump_fan: 1.0,
+            clump_height: 0.55,
+            clump_color: 0.1,
+            droop: 0.05,
+            gloss: 0.15,
+            tip_tint: [1.1, 1.0, 1.05],
+            leaf: 0.0,
+            stalk: 0.0,
+            bloom: 0.12,
+            bloom_color: [0.16, 0.07, 0.14],
+            bloom_size: 0.011,
+            bloom_length: 0.35,
+            leaf_rise: 0.0,
+            ..Self::forest_herbs()
+        }
+    }
+
     /// Woodland ferns (male and lady fern): crowns of fronds a meter long, each a stalk
     /// rising from the crown into a lance-shaped blade cut into pinnae, arching out and over;
     /// rust brown when dry (autumn), and still in all but a gale.
@@ -1557,12 +1661,22 @@ impl RenderFeature for GrassFeature {
                 .map(|s| s.blades_per_m2.max(0.0))
                 .fold(0.0f32, f32::max);
             let per_m2 = (most_per_m2 * scale).clamp(0.0, MAX_BLADES_PER_M2);
-            let far = style.draw_distance.max(1.0);
+            // The field reaches as far as its farthest-seen kind (heather on a heath carries
+            // further than the herbs it shares a field with).
+            let far = field
+                .palette()
+                .map(|s| s.draw_distance)
+                .fold(style.draw_distance, f32::max)
+                .max(1.0);
             if per_m2 <= 0.0 || field.size[0] <= 0.0 || field.size[1] <= 0.0 {
                 continue;
             }
-            let full = if style.full_density_m > 0.0 {
-                style.full_density_m.min(far)
+            let full_m = field
+                .palette()
+                .map(|s| s.full_density_m)
+                .fold(style.full_density_m, f32::max);
+            let full = if full_m > 0.0 {
+                full_m.min(far)
             } else {
                 full_density_distance(far)
             };

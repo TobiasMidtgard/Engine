@@ -453,7 +453,13 @@ fn main() {
                 "{out}/field_{n}_{layer:?}_{:.0}_{:.0}.pgm",
                 at.translation.x, at.translation.z
             );
-            let _ = std::fs::write(name, pgm);
+            let _ = std::fs::write(&name, pgm);
+            // And which kind grows where (the kind's index as its grey level).
+            if f.kinds.len() == f.density.len() {
+                let mut pgm = format!("P5 {w} {h} 255\n").into_bytes();
+                pgm.extend(f.kinds.iter().copied());
+                let _ = std::fs::write(name.replace(".pgm", "_kinds.pgm"), pgm);
+            }
             let on = f.density.iter().filter(|d| **d > 0.0).count();
             let mut kinds = [0usize; 16];
             for k in &f.kinds {
@@ -579,6 +585,7 @@ fn main() {
             };
             let eye = DVec3::new(v[0], ground(v[0], v[2]) + v[1], v[2]);
             let at = DVec3::new(v[3], ground(v[3], v[5]) + v[4], v[5]);
+            println!("look {n}: eye {eye:.2} at {at:.2}");
             shot(&mut app, &out, &format!("99_look_{n}"), eye, at, 10.0);
         }
     }

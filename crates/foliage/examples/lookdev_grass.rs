@@ -64,6 +64,9 @@ fn biomes() -> Vec<Biome> {
     add("woodruff", GrassStyle::woodruff());
     add("anemone", GrassStyle::wood_anemone());
     add("ferns", GrassStyle::fern());
+    add("bilberry", GrassStyle::bilberry());
+    add("lingonberry", GrassStyle::lingonberry());
+    add("heather", GrassStyle::heather());
     add("litter", GrassStyle::leaf_litter());
     add("twigs", GrassStyle::twigs());
     // games/showcase's `meadow_grass`.

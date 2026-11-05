@@ -525,10 +525,13 @@ impl Welded {
                 )
             })
             .collect();
-        let threads = std::thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(4)
-            .min(nz);
+        let lease = engine_core::tasks::background_lease(
+            std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(4)
+                .min(nz),
+        );
+        let threads = lease.threads();
         let per = nz.div_ceil(threads);
         std::thread::scope(|s| {
             for (slab, out) in dist.chunks_mut(per * nx * ny).enumerate() {

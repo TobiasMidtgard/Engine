@@ -204,6 +204,11 @@ lighting (8K only for a visible backdrop). JPG or PNG for color, HDR or EXR only
   (Softbody measured an 806 ms stall). Turning that ticking off can deadlock when every worker
   waits. Flatten the work into one scope opened from a system, or give leaf work that never
   waits a small pool of its own. Slow one-off builds go on `AsyncComputeTaskPool`.
+- A background job that splits over threads of its own (`std::thread::scope` over rows or
+  chunks) takes its count from `engine_core::tasks::background_lease(want).threads()` and
+  holds the lease while they run, never from `available_parallelism` alone. Jobs that each
+  took every core oversubscribed the machine while zones streamed: on the 4-core cloud VM a
+  130 ms physics step was 0.04 ms of work waiting for a core. Leases share cores − 2.
 - Let systems run side by side. A profile in round 19 had ~90% of the frame running one
   system at a time: the executor only overlaps systems whose data doesn't clash, and most
   clash. `ENGINE_PROFILE=1` prints "one system at a time / no system / several at once"

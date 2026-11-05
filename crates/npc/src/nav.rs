@@ -322,11 +322,14 @@ impl<'a> NavCtx<'a> {
             .iter()
             .map(|k| self.grid.ground_ready.remove(k))
             .collect();
-        let threads = std::thread::available_parallelism()
-            .map_or(1, |n| n.get())
-            .saturating_sub(1)
-            .clamp(1, 16)
-            .min(missing.len());
+        let lease = engine_core::tasks::background_lease(
+            std::thread::available_parallelism()
+                .map_or(1, |n| n.get())
+                .saturating_sub(1)
+                .clamp(1, 16)
+                .min(missing.len()),
+        );
+        let threads = lease.threads();
         let built: Vec<Chunk> = if threads <= 1 {
             let mut scratch = std::mem::take(&mut self.grid.scratch);
             let built = missing

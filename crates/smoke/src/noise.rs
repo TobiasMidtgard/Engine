@@ -107,11 +107,14 @@ fn texel(uvw: Vec3) -> [u8; 4] {
 pub fn detail_noise(size: u32) -> Vec<[u8; 4]> {
     let slice = (size * size) as usize;
     let mut out = vec![[0u8; 4]; slice * size as usize];
-    let threads = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(4)
-        .min(size as usize)
-        .max(1);
+    let lease = engine_core::tasks::background_lease(
+        std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4)
+            .min(size as usize)
+            .max(1),
+    );
+    let threads = lease.threads();
     let per = (size as usize).div_ceil(threads);
     std::thread::scope(|scope| {
         for (chunk, slices) in out.chunks_mut(slice * per).enumerate() {
