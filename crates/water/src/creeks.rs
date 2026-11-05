@@ -707,6 +707,10 @@ pub fn lay_ribbons_swollen(
             // The water pouring off the steps near the camera, in the simulated stretch too: its
             // grid is too coarse to see a brook's steps as drops (`FlowSim::lips`), and its bed
             // is carved to the same steps.
+            // Where they land inside the simulated stretch the pool boils white (`plunge_boil`):
+            // the ribbon draws its own white at each step's foot, the simulation's grid can't
+            // (too coarse to see the jump). One boil per step, where its strips land.
+            let mut boils: Vec<(i64, DVec3, Vec3, f32, f32)> = Vec::new();
             for pour in reach_stones.map_or(&[][..], |r| &r.pours[..]) {
                 if horizontal(pour.lip.top, camera) as f64 > POURS_M + REBUILD_M {
                     continue;
@@ -722,10 +726,32 @@ pub fn lay_ribbons_swollen(
                     lip.speed *= (critical / pour.critical).clamp(1.0, 4.0);
                     lip.q = q;
                 }
+                if let (Some((from, to)), Some(foot)) = (skip, pour.path.last())
+                    && (from..=to).contains(&pour.along)
+                {
+                    let key = (pour.along * 2.0).round() as i64;
+                    let w = lip.width.max(0.01);
+                    let power = 1000.0 * 9.81 * lip.q * lip.width * lip.drop;
+                    match boils.iter_mut().find(|b| b.0 == key) {
+                        Some(b) => {
+                            b.1 += foot.pos * w as f64;
+                            b.2 += foot.vel * w;
+                            b.3 += power;
+                            b.4 += w;
+                        }
+                        None => boils.push((key, foot.pos * w as f64, foot.vel * w, power, w)),
+                    }
+                }
                 laid.falls.lips.push(lip);
                 laid.falls.paths.push(pour.path.clone());
                 laid.falls.sides.push(pour.sides);
             }
+            laid.falls
+                .plunges
+                .extend(boils.into_iter().map(|(_, p, v, power, w)| {
+                    let v = v / w;
+                    (p / w as f64, Vec2::new(v.x, v.z), power)
+                }));
         }
     }
     laid

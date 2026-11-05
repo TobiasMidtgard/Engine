@@ -452,7 +452,9 @@ pub struct Falls {
     pub lips: Vec<Lip>,
     /// Each lip's path down ([`FlowSim::fall_path`], [`FALL_POINTS`] segments).
     pub paths: Vec<Vec<FallPoint>>,
-    /// Where they land ([`FlowSim::plunges`]).
+    /// Where they land ([`FlowSim::plunges`]): position, the way the water carries on, and
+    /// the power falling (W). A creek's ribbons ([`crate::creeks::CreekRibbons`]) hold only
+    /// their steps inside the simulated stretch here, which boil but throw no spray.
     pub plunges: Vec<(DVec3, Vec2, f32)>,
     /// Per lip, whether the sheet carries on past its left and right ends (-across, +across:
     /// another lip along the same brink), so only a fall's outer edges fray.

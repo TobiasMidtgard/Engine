@@ -36,8 +36,8 @@ pub const SHADER: &str = include_str!("water.wgsl");
 /// Bodies drawn at once (the nearest ones).
 pub const MAX_BODIES: usize = 16;
 const MAX_SHOWERS: usize = 4;
-/// Most plunge pools boiling under falls (nearest first).
-const MAX_PLUNGES: usize = 8;
+/// Most plunge pools boiling under falls and creek steps (nearest first).
+const MAX_PLUNGES: usize = 16;
 /// Most stream mouths a flood's plume spreads from.
 const MAX_MOUTHS: usize = 4;
 /// A stream bringing this much in (m³/s) spreads a plume of the full radius.
@@ -359,6 +359,16 @@ fn smoothstep(e0: f32, e1: f32, x: f32) -> f32 {
 /// falling 20 m).
 fn boil_radius(power: f32) -> f32 {
     (0.8 + 1.0 * (power / 9810.0).max(0.0).sqrt()).min(12.0)
+}
+
+/// Creek steps boil only this near the camera, meters (they are small).
+const CREEK_BOIL_REACH: f64 = 120.0;
+
+/// Radius of the white boil under a creek's step of `power` watts, meters: a step pool's
+/// hydraulic jump, about the width of the sheet pouring in (a few hundred watts for a
+/// meadow creek over a 30 cm step: ~0.5 m), up to a meter and a bit.
+fn step_boil_radius(power: f32) -> f32 {
+    (0.3 + 0.12 * (power / 100.0).max(0.0).sqrt()).clamp(0.3, 1.2)
 }
 
 /// The cloud of spray where a fall of `power` watts lands at `foot` (world; `rel` relative
@@ -2532,14 +2542,27 @@ impl RenderFeature for WaterFeature {
             .filter(|sim| sim.visible)
             .flat_map(|sim| sim.falls().plunges.iter().copied())
             .collect();
+        // And under the creeks' steps inside their simulated stretch (`crate::creeks`): a
+        // smaller boil, given as a negative radius so it never spreads a flood's plume.
+        let creek_boils = world
+            .get_resource::<crate::creeks::CreekRibbons>()
+            .map(|r| r.falls.clone());
         let mut near: Vec<_> = plunges
             .iter()
-            .map(|(foot, _, power)| (foot.distance(view.origin), *foot, *power))
+            .map(|(foot, _, power)| (*foot, boil_radius(*power)))
+            .chain(
+                creek_boils
+                    .iter()
+                    .flat_map(|f| f.plunges.iter())
+                    .filter(|(foot, ..)| foot.distance(view.origin) < CREEK_BOIL_REACH)
+                    .map(|(foot, _, power)| (*foot, -step_boil_radius(*power))),
+            )
+            .map(|(foot, r)| (foot.distance(view.origin), foot, r))
             .filter(|(d, ..)| *d < PLUNGE_REACH)
             .collect();
         near.sort_by(|a, b| a.0.total_cmp(&b.0));
-        for (dst, (_, foot, power)) in g.plunges.iter_mut().zip(&near) {
-            *dst = view.relative(*foot).extend(boil_radius(*power)).to_array();
+        for (dst, (_, foot, radius)) in g.plunges.iter_mut().zip(&near) {
+            *dst = view.relative(*foot).extend(*radius).to_array();
         }
         g.counts[3] = near.len().min(MAX_PLUNGES) as u32;
         // How muddy the streams run: their falls' froth goes beige (`flood_froth`).
@@ -2995,13 +3018,13 @@ mod tests {
 
     #[test]
     fn uniform_layout_matches_the_shader() {
-        // WGSL: Globals 10 vec4 + 4 showers + 8 plunges + the mirror's matrix and 2 vec4 +
+        // WGSL: Globals 10 vec4 + 4 showers + 16 plunges + the mirror's matrix and 2 vec4 +
         // the shelter mask's + the swash's 2 + the waterline's 2 + the trail's + the falls';
         // GpuBody 11 vec4
         // + 24 waves of 2 vec4.
         assert_eq!(
             std::mem::size_of::<Globals>(),
-            (10 + 4 + 8 + 4 + 2 + 1 + 2 + 2 + 1 + 1 + 3 + MAX_MOUTHS) * 16
+            (10 + 4 + MAX_PLUNGES + 4 + 2 + 1 + 2 + 2 + 1 + 1 + 3 + MAX_MOUTHS) * 16
         );
         assert_eq!(std::mem::size_of::<GpuBody>(), (11 + MAX_WAVES * 2) * 16);
         assert_eq!(
