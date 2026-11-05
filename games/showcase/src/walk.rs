@@ -94,6 +94,8 @@ pub struct Walk {
     marker: Option<Entity>,
     /// Real seconds on the start screen (the camera's drift).
     clock: f32,
+    /// Real seconds since the start screen opened (after the loading screen).
+    open_secs: f32,
 }
 
 /// The walk's systems and APIs; `start_screen` opens the start screen at once (the exe), else
@@ -200,6 +202,9 @@ fn run(world: &mut World, mut seen: Local<MessageCursor<UiEvent>>) {
                     walk.stage = Stage::Free;
                 }
             }
+            if walk.shown {
+                walk.open_secs += world.resource::<Time>().real_delta_secs();
+            }
             if walk.drift {
                 walk.clock += world.resource::<Time>().real_delta_secs().min(0.1);
                 drift(world, walk.clock);
@@ -220,6 +225,25 @@ fn run(world: &mut World, mut seen: Local<MessageCursor<UiEvent>>) {
             }
         }
         Stage::Free => {}
+    }
+    world.insert_resource(walk);
+}
+
+/// Real seconds the start screen has been up (its camera drifting round the valley; 0 while
+/// the loading screen is still up), or None once it is closed (or never opened).
+pub fn start_screen_secs(world: &World) -> Option<f32> {
+    world
+        .get_resource::<Walk>()
+        .filter(|w| w.stage == Stage::Menu)
+        .map(|w| w.open_secs)
+}
+
+/// Close the start screen as its "Fly freely" button does.
+pub fn fly_freely(world: &mut World) {
+    let mut walk = world.remove_resource::<Walk>().expect("installed");
+    if walk.stage == Stage::Menu {
+        screens::hide(world, "walk_menu", false);
+        walk.stage = Stage::Free;
     }
     world.insert_resource(walk);
 }
