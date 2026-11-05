@@ -1,0 +1,519 @@
+//! Spells in a headless world with a small physics stand-in (spheres for bodies, a flat
+//! ground): bolts hit and burn, frost freezes, fire on chill makes steam, chains hop, fields
+//! tick, spells meet, force throws, blink moves.
+
+use std::sync::{Arc, RwLock};
+
+use engine_core::prelude::*;
+use engine_core::registry::call_api;
+use engine_core::time::TimeSource;
+use engine_magic::*;
+use engine_world::physics::{
+    ApplyImpulse, BodyKind, ColliderShape, Hit, PhysicsQueries, PhysicsQuery, QueryFilter,
+    RigidBody,
+};
+use engine_world::{DamageEvent, IgniteRequest, WorldPlugin};
+use serde_json::json;
+
+/// Bodies as spheres (center, radius), and the ground at y = 0.
+#[derive(Default)]
+struct Scene {
+    bodies: RwLock<Vec<(Entity, DVec3, f32)>>,
+    ground: RwLock<Option<Entity>>,
+}
+
+impl Scene {
+    fn sweep(
+        &self,
+        origin: DVec3,
+        dir: Vec3,
+        max: f32,
+        r: f32,
+        filter: &QueryFilter,
+    ) -> Option<Hit> {
+        let mut best: Option<Hit> = None;
+        let d = dir.as_dvec3();
+        for &(e, c, radius) in self.bodies.read().unwrap().iter() {
+            if filter.exclude.contains(&e) {
+                continue;
+            }
+            let rr = (radius + r) as f64;
+            let oc = origin - c;
+            let b = oc.dot(d);
+            let cc = oc.length_squared() - rr * rr;
+            let disc = b * b - cc;
+            if disc < 0.0 {
+                continue;
+            }
+            let t = -b - disc.sqrt();
+            let t = if t < 0.0 && cc < 0.0 { 0.0 } else { t };
+            if t < 0.0 || t > max as f64 {
+                continue;
+            }
+            if best.as_ref().is_none_or(|h| (t as f32) < h.distance) {
+                let p = origin + d * t;
+                best = Some(Hit {
+                    entity: e,
+                    point: p,
+                    normal: (p - c).as_vec3().normalize_or(Vec3::Y),
+                    distance: t as f32,
+                    surface: Default::default(),
+                });
+            }
+        }
+        if let Some(g) = *self.ground.read().unwrap()
+            && dir.y < -1e-4
+        {
+            let t = ((origin.y - r as f64) / -(dir.y as f64)).max(0.0);
+            if t <= max as f64 && best.as_ref().is_none_or(|h| (t as f32) < h.distance) {
+                let p = origin + d * t - DVec3::Y * r as f64;
+                best = Some(Hit {
+                    entity: g,
+                    point: DVec3::new(p.x, 0.0, p.z),
+                    normal: Vec3::Y,
+                    distance: t as f32,
+                    surface: Default::default(),
+                });
+            }
+        }
+        best
+    }
+}
+
+struct Stand(Arc<Scene>);
+
+impl PhysicsQuery for Stand {
+    fn raycast(&self, origin: DVec3, dir: Vec3, max: f32, filter: &QueryFilter) -> Option<Hit> {
+        self.0.sweep(origin, dir, max, 0.0, filter)
+    }
+    fn shapecast(
+        &self,
+        shape: &ColliderShape,
+        origin: DVec3,
+        _: Quat,
+        dir: Vec3,
+        max: f32,
+        filter: &QueryFilter,
+    ) -> Option<Hit> {
+        let r = match shape {
+            ColliderShape::Sphere { radius } => *radius,
+            _ => 0.2,
+        };
+        self.0.sweep(origin, dir, max, r, filter)
+    }
+    fn overlap(&self, _: &ColliderShape, _: DVec3, _: Quat, _: &QueryFilter, _: &mut Vec<Entity>) {}
+    fn closest_point(&self, _: DVec3, _: f32, _: &QueryFilter) -> Option<Hit> {
+        None
+    }
+}
+
+/// A body the stand-in physics sees, as a sphere this high above its feet.
+#[derive(Component)]
+struct Body(f32);
+
+#[derive(Resource, Default)]
+struct Seen {
+    hits: Vec<SpellHit>,
+    met: Vec<SpellsMet>,
+    damage: Vec<DamageEvent>,
+    impulses: Vec<ApplyImpulse>,
+    ignites: usize,
+}
+
+fn snapshot(scene: Res<SceneRes>, q: Query<(Entity, &GlobalTransform, &Body)>) {
+    let mut b = scene.0.bodies.write().unwrap();
+    b.clear();
+    for (e, g, body) in &q {
+        b.push((e, g.translation() + DVec3::Y * 1.0, body.0));
+    }
+}
+
+#[derive(Resource)]
+struct SceneRes(Arc<Scene>);
+
+fn collect(
+    mut seen: ResMut<Seen>,
+    mut hits: MessageReader<SpellHit>,
+    mut met: MessageReader<SpellsMet>,
+    mut damage: MessageReader<DamageEvent>,
+    mut impulses: MessageReader<ApplyImpulse>,
+    mut ignites: MessageReader<IgniteRequest>,
+) {
+    seen.hits.extend(hits.read().cloned());
+    seen.met.extend(met.read().copied());
+    seen.damage.extend(damage.read().cloned());
+    seen.impulses.extend(impulses.read().copied());
+    seen.ignites += ignites.read().count();
+}
+
+fn app() -> App {
+    let mut app = App::new();
+    app.world
+        .resource_mut::<Time>()
+        .set_source(TimeSource::Manual {
+            step_secs: 1.0 / 60.0,
+        });
+    app.add_plugins((WorldPlugin, MagicPlugin));
+    let scene = Arc::new(Scene::default());
+    app.world
+        .insert_resource(PhysicsQueries(Arc::new(Stand(scene.clone()))));
+    let ground = app.world.spawn(Name::new("Ground")).id();
+    *scene.ground.write().unwrap() = Some(ground);
+    app.world.insert_resource(SceneRes(scene));
+    app.world.init_resource::<Seen>();
+    app.add_systems(FixedUpdate, snapshot.in_set(SimSet::Physics));
+    app.add_systems(FixedUpdate, collect.after(MagicSet::Flush));
+    for (_, schedule) in app.world.resource_mut::<Schedules>().iter_mut() {
+        schedule.set_executor(engine_core::ecs::schedule::SingleThreadedExecutor::new());
+    }
+    app
+}
+
+fn mage(app: &mut App, at: DVec3, mastery: Mastery) -> Entity {
+    app.world
+        .spawn((
+            Name::new("Mage"),
+            Transform::from_translation(at),
+            MagicCaster {
+                mana_regen: 0.0,
+                ..MagicCaster::new(40.0, mastery)
+            },
+            Vitality::new(100.0),
+        ))
+        .id()
+}
+
+fn dummy(app: &mut App, at: DVec3) -> Entity {
+    app.world
+        .spawn((
+            Name::new("Dummy"),
+            Transform::from_translation(at),
+            Vitality {
+                revive_secs: 0.0,
+                ..Vitality::new(500.0)
+            },
+            Body(0.5),
+        ))
+        .id()
+}
+
+fn run(app: &mut App, secs: f32) {
+    for _ in 0..(secs * 60.0).round() as usize {
+        app.update();
+    }
+}
+
+fn cast(app: &mut App, caster: Entity, design: SpellDesign, aim: Aim) {
+    app.world.write_message(CastRequest {
+        caster,
+        spell: SpellChoice::Design(design),
+        aim,
+        charge: 0.0,
+    });
+}
+
+fn hits_on(app: &App, e: Entity) -> Vec<SpellHit> {
+    app.world
+        .resource::<Seen>()
+        .hits
+        .iter()
+        .filter(|h| h.target == Some(e))
+        .cloned()
+        .collect()
+}
+
+#[test]
+fn a_fire_bolt_hits_a_dummy_and_burns_it() {
+    let mut app = app();
+    let me = mage(&mut app, DVec3::ZERO, Mastery::Ascended1);
+    let d = dummy(&mut app, DVec3::new(0.0, 0.0, -12.0));
+    run(&mut app, 0.1);
+    cast(
+        &mut app,
+        me,
+        SpellDesign::new(&["fire"], CastType::Bolt),
+        Aim::Entity(d),
+    );
+    run(&mut app, 2.0);
+    let hits = hits_on(&app, d);
+    assert!(!hits.is_empty(), "the bolt hits");
+    assert!(hits[0].damage > 0.0);
+    let health = app.world.get::<Vitality>(d).unwrap().health;
+    assert!(health < 500.0, "{health}");
+    let a = app.world.get::<Afflictions>(d).expect("afflicted");
+    assert!(a.has(Status::Burning) || a.has_aura(Element::Fire));
+    let seen = app.world.resource::<Seen>();
+    assert_eq!(
+        seen.ignites, 0,
+        "a hit on a body that won't burn lights no ground under it"
+    );
+    assert!(seen.damage.iter().any(|x| x.target == d));
+    // The caster paid for it.
+    let c = app.world.get::<MagicCaster>(me).unwrap();
+    assert!(c.mana < c.max_mana);
+    // A bolt into the ground asks the world to catch fire there.
+    cast(
+        &mut app,
+        me,
+        SpellDesign::new(&["fire"], CastType::Bolt),
+        Aim::Point(DVec3::new(5.0, 0.0, -8.0)),
+    );
+    run(&mut app, 2.0);
+    assert!(
+        app.world.resource::<Seen>().ignites > 0,
+        "fire on the ground asks the world to ignite"
+    );
+}
+
+#[test]
+fn frost_five_times_freezes() {
+    let mut app = app();
+    let me = mage(&mut app, DVec3::ZERO, Mastery::Ascended1);
+    let d = dummy(&mut app, DVec3::new(0.0, 0.0, -10.0));
+    run(&mut app, 0.1);
+    for _ in 0..5 {
+        cast(
+            &mut app,
+            me,
+            SpellDesign::new(&["frost"], CastType::Bolt),
+            Aim::Entity(d),
+        );
+        run(&mut app, 0.8);
+    }
+    let a = app.world.get::<Afflictions>(d).expect("afflicted");
+    assert!(
+        a.has(Status::Frozen),
+        "chill {} frozen {}",
+        a.chill,
+        a.frozen
+    );
+    let scale = app
+        .world
+        .get::<LocalTimeScale>(d)
+        .expect("frozen bodies run slow");
+    assert!(scale.factor < 0.05);
+    // A status look rides on it.
+    let mut q = app.world.query::<&runtime::FollowLook>();
+    assert!(
+        q.iter(&app.world)
+            .any(|f| f.owner == d && f.status == Status::Frozen)
+    );
+}
+
+#[test]
+fn fire_on_a_chilled_dummy_makes_steam() {
+    let mut app = app();
+    let me = mage(&mut app, DVec3::ZERO, Mastery::Ascended1);
+    let d = dummy(&mut app, DVec3::new(0.0, 0.0, -10.0));
+    run(&mut app, 0.1);
+    cast(
+        &mut app,
+        me,
+        SpellDesign::new(&["frost"], CastType::Bolt),
+        Aim::Entity(d),
+    );
+    run(&mut app, 0.8);
+    cast(
+        &mut app,
+        me,
+        SpellDesign::new(&["fire"], CastType::Bolt),
+        Aim::Entity(d),
+    );
+    run(&mut app, 0.8);
+    let hits = hits_on(&app, d);
+    assert!(
+        hits.iter().any(|h| h.reaction == Some("steam")),
+        "{:?}",
+        hits.iter().map(|h| h.reaction).collect::<Vec<_>>()
+    );
+    // A steam cloud stays.
+    let mut q = app.world.query::<&runtime::Field>();
+    assert!(
+        q.iter(&app.world)
+            .any(|f| f.cast.spell.weave.key == "steam")
+    );
+}
+
+#[test]
+fn a_split_volley_shares_its_energy() {
+    let single = SpellDesign::new(&["fire"], CastType::Bolt);
+    let volley = single.clone().with(Modifier::Split { count: 5 });
+    let ctx = CastContext::new(Mastery::Master, Power::default());
+    let one = compile(&single, ctx).unwrap();
+    let five = compile(&volley, ctx).unwrap();
+    let total = five.payload.damage * five.carrier.count as f32;
+    assert_eq!(five.carrier.count, 5);
+    assert!(
+        total > one.payload.damage && total < one.payload.damage * 1.5,
+        "{total} vs {}",
+        one.payload.damage
+    );
+}
+
+#[test]
+fn a_chain_hops_to_three_dummies() {
+    let mut app = app();
+    let me = mage(&mut app, DVec3::ZERO, Mastery::Ascended1);
+    let ds: Vec<Entity> = (0..4)
+        .map(|i| dummy(&mut app, DVec3::new(i as f64 * 4.0, 0.0, -10.0)))
+        .collect();
+    run(&mut app, 0.1);
+    cast(
+        &mut app,
+        me,
+        SpellDesign::new(&["storm"], CastType::Chain),
+        Aim::Entity(ds[0]),
+    );
+    run(&mut app, 1.5);
+    let hit = ds.iter().filter(|d| !hits_on(&app, **d).is_empty()).count();
+    assert!(hit >= 3, "{hit} dummies hit");
+}
+
+#[test]
+fn an_aura_ticks_on_what_stands_in_it() {
+    let mut app = app();
+    let me = mage(&mut app, DVec3::ZERO, Mastery::Ascended1);
+    let d = dummy(&mut app, DVec3::new(1.5, 0.0, 0.0));
+    run(&mut app, 0.1);
+    cast(
+        &mut app,
+        me,
+        SpellDesign::new(&["frost"], CastType::Aura),
+        Aim::Direction(Vec3::NEG_Z),
+    );
+    run(&mut app, 3.0);
+    let n = hits_on(&app, d).len();
+    assert!(n >= 4, "{n} ticks");
+    // Its own caster is spared.
+    assert!(hits_on(&app, me).is_empty());
+}
+
+#[test]
+fn a_fire_bolt_through_a_frost_wall_bursts_into_steam() {
+    let mut app = app();
+    let me = mage(&mut app, DVec3::ZERO, Mastery::Ascended1);
+    let d = dummy(&mut app, DVec3::new(0.0, 0.0, -20.0));
+    run(&mut app, 0.1);
+    cast(
+        &mut app,
+        me,
+        SpellDesign::new(&["frost"], CastType::Wall),
+        Aim::Point(DVec3::new(0.0, 0.0, -9.0)),
+    );
+    run(&mut app, 1.2);
+    cast(
+        &mut app,
+        me,
+        SpellDesign::new(&["fire"], CastType::Bolt),
+        Aim::Entity(d),
+    );
+    run(&mut app, 1.5);
+    let met = &app.world.resource::<Seen>().met;
+    assert!(met.iter().any(|m| m.recipe == "steam"), "{met:?}");
+    // The wall turned to steam.
+    let mut q = app.world.query::<&runtime::Field>();
+    assert!(
+        q.iter(&app.world)
+            .any(|f| f.cast.spell.weave.key == "steam" && f.wall.is_some())
+    );
+}
+
+#[test]
+fn force_throws_a_crate_away() {
+    let mut app = app();
+    let me = mage(&mut app, DVec3::ZERO, Mastery::Ascended1);
+    let crate_e = app
+        .world
+        .spawn((
+            Name::new("Crate"),
+            Transform::from_translation(DVec3::new(0.0, 0.0, -8.0)),
+            RigidBody {
+                kind: BodyKind::Dynamic,
+                mass_kg: Some(30.0),
+                ..Default::default()
+            },
+            Body(0.5),
+        ))
+        .id();
+    run(&mut app, 0.1);
+    cast(
+        &mut app,
+        me,
+        SpellDesign::new(&["push"], CastType::Bolt),
+        Aim::Entity(crate_e),
+    );
+    run(&mut app, 1.0);
+    let imp = app
+        .world
+        .resource::<Seen>()
+        .impulses
+        .iter()
+        .find(|i| i.entity == crate_e)
+        .copied()
+        .expect("an impulse on the crate");
+    assert!(imp.impulse.z < -10.0, "{:?}", imp.impulse);
+}
+
+#[test]
+fn blink_moves_the_caster() {
+    let mut app = app();
+    let me = mage(&mut app, DVec3::ZERO, Mastery::Ascended1);
+    run(&mut app, 0.1);
+    cast(
+        &mut app,
+        me,
+        SpellDesign::new(&["blink"], CastType::OnSelf),
+        Aim::Direction(Vec3::NEG_Z),
+    );
+    run(&mut app, 1.0);
+    let p = app.world.get::<Transform>(me).unwrap().translation;
+    assert!(p.z < -2.5, "{p}");
+}
+
+#[test]
+fn the_api_crafts_combines_and_casts() {
+    let mut app = app();
+    let me = mage(&mut app, DVec3::ZERO, Mastery::Ascended1);
+    let d = dummy(&mut app, DVec3::new(0.0, 0.0, -10.0));
+    let w = call_api(
+        &mut app.world,
+        "magic.combine",
+        json!({"effects": ["frost", "fire"]}),
+    )
+    .unwrap();
+    assert_eq!(w["name"], "Steam");
+    let c = call_api(
+        &mut app.world,
+        "magic.craft",
+        json!({"design": {"effects": ["fire"], "cast": "bolt", "modifiers": [
+            {"kind": "split", "count": 5}, {"kind": "seek"}, {"kind": "blast", "radius_m": 3.0},
+            {"kind": "linger", "secs": 8.0, "radius_m": 2.0}]}, "mastery": "master"}),
+    )
+    .unwrap();
+    assert_eq!(c["spell"]["complexity"], 11, "{c}");
+    let refused = call_api(
+        &mut app.world,
+        "magic.craft",
+        json!({"design": {"effects": ["fire"], "cast": "bolt", "modifiers": [{"kind": "split", "count": 5}]}, "mastery": "novice"}),
+    )
+    .unwrap();
+    assert_eq!(refused["ok"], false);
+    run(&mut app, 0.1);
+    call_api(
+        &mut app.world,
+        "magic.cast",
+        json!({"caster": {"id": me.to_bits()}, "effects": ["storm"], "cast": "bolt", "target": {"id": d.to_bits()}}),
+    )
+    .unwrap();
+    run(&mut app, 1.0);
+    assert!(!hits_on(&app, d).is_empty());
+    let info = call_api(
+        &mut app.world,
+        "magic.caster",
+        json!({"entity": {"id": me.to_bits()}}),
+    )
+    .unwrap();
+    assert!(
+        info["caster"]["mana"].as_f64().unwrap() < info["caster"]["max_mana"].as_f64().unwrap()
+    );
+}

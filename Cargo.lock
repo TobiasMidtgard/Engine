@@ -1499,6 +1499,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "engine_magic"
+version = "0.1.0"
+dependencies = [
+ "bevy_ecs",
+ "engine_core",
+ "engine_input",
+ "engine_render",
+ "engine_world",
+ "serde",
+ "serde_json",
+ "tracing",
+]
+
+[[package]]
 name = "engine_movement"
 version = "0.1.0"
 dependencies = [
@@ -4528,6 +4542,7 @@ dependencies = [
  "engine_destruction",
  "engine_fire",
  "engine_foliage",
+ "engine_magic",
  "engine_movement",
  "engine_npc",
  "engine_physics",

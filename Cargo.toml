@@ -41,6 +41,7 @@ engine_space = { path = "crates/space" }
 engine_destruction = { path = "crates/destruction" }
 engine_character = { path = "crates/character" }
 engine_script = { path = "crates/script" }
+engine_magic = { path = "crates/magic" }
 
 # --- ECS / core ---
 bevy_ecs = { version = "0.20", default-features = false, features = ["std", "multi_threaded", "async_executor", "serialize", "debug", "trace"] }

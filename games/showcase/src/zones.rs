@@ -77,6 +77,13 @@ pub const ZONES: &[Zone] = &[
         module: "vfx",
     },
     Zone {
+        key: "spells",
+        name: "Weaving hall (spells: mastery, elements, combinations, forms, force)",
+        center: DVec3::new(48.0, 0.0, -250.0),
+        radius: 32.0,
+        module: "magic",
+    },
+    Zone {
         key: "script",
         name: "Script courtyard (Luau scripts, hot reload)",
         center: DVec3::new(70.0, 0.0, -105.0),
@@ -741,6 +748,7 @@ pub fn spawn_cell(
             );
         }
         ("magic", 0) => engine_vfx::demo::spawn_demo(commands, z.center),
+        ("spells", 0) => engine_magic::demo::spawn_demo(commands, z.center),
         ("script", 0) => engine_script::demo::spawn_demo(commands, z.center),
         ("gallery2d", 0) => ph::gallery2d(commands, lib, z),
         ("forest", 0) => engine_foliage::demo::spawn_demo(commands, z.center),
@@ -1531,6 +1539,15 @@ pub fn demo_views(z: &Zone) -> Vec<View> {
         "magic" => engine_vfx::demo::VIEWS
             .iter()
             .map(|v| View::new(v.key, v.name, v.eye, v.target, v.hour).warmup(v.warmup))
+            .collect(),
+        // Each stop runs its program from the start (`magic.demo`), then lets it play.
+        "spells" => engine_magic::demo::VIEWS
+            .iter()
+            .map(|v| {
+                View::new(v.key, v.name, v.eye, v.target, v.hour)
+                    .warmup(v.warmup)
+                    .on_arrive("magic.demo", &format!(r#"{{"program": "{}"}}"#, v.key))
+            })
             .collect(),
         "script" => engine_script::demo::VIEWS
             .iter()
