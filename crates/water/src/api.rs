@@ -190,6 +190,27 @@ pub fn register(app: &mut App) {
         },
     )
     .register_api(
+        "water.flood",
+        "Hold the streams in flood (or let them follow the rain again): `swell` times their usual \
+         flow (1 .. 8; past ~3 they leave their banks), `mud` 0 clear .. 1 brown, `plume_m` the \
+         brown water's reach into the lake (m). `{\"off\": true}` lets the rain drive them.",
+        r#"{"swell": 6, "mud": 0.9, "plume_m": 60}"#,
+        |world, args| {
+            if args.get("off").and_then(|v| v.as_bool()).unwrap_or(false) {
+                world.insert_resource(crate::freshet::Freshet::default());
+                return Ok(json!({ "ok": true, "held": false }));
+            }
+            let swell = f32_arg(&args, "swell", 6.0);
+            let mud = f32_arg(&args, "mud", 0.9);
+            let mut f = crate::freshet::Freshet::held(swell, mud);
+            f.plume_m = f32_arg(&args, "plume_m", 0.0).clamp(0.0, crate::freshet::MOST_PLUME_M);
+            f.plume_mud = f32_arg(&args, "plume_mud", f.mud).clamp(0.0, 1.0);
+            let out = json!({ "ok": true, "swell": f.swell, "mud": f.mud, "plume_m": f.plume_m });
+            world.insert_resource(f);
+            Ok(out)
+        },
+    )
+    .register_api(
         "water.calm",
         "Remove every ripple, wake and splash (the surface keeps its wind waves).",
         "{}",

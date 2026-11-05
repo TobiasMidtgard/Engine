@@ -32,8 +32,10 @@ use crate::puddles::rain_rate;
 pub const LAG_S: f32 = 240.0;
 /// Quickflow (mm/h of rain over the catchment) that doubles a stream's base flow.
 const DOUBLING_MM_H: f32 = 5.0;
-/// Most a stream swells to, times its base flow.
-pub const MOST_SWELL: f32 = 4.0;
+/// Most a stream swells to, times its base flow: a flash flood. Small steep catchments peak
+/// at tens of times their base flow in a cloudburst; past about three times the creeks and
+/// the showcase stream leave their channels and run over the ground beside them.
+pub const MOST_SWELL: f32 = 8.0;
 /// Seconds of dry weather for the loose fines to build up again.
 const RECHARGE_S: f32 = 1800.0;
 /// How fast the risen water washes the loose fines out, per second per unit of swell above 1.

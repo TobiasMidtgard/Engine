@@ -192,7 +192,9 @@ fn foam_tint(look: WaterLook) -> vec3<f32> {
 
 // The same for the falls, from how muddy the streams run (`crate::freshet`, `plume.w`).
 fn flood_froth() -> vec3<f32> {
-    return mix(vec3<f32>(1.0), vec3<f32>(0.75, 0.52, 0.29), 0.6 * saturate(water.g.plume.w));
+    // Light beige, not brown: a flood's falls are still mostly air and spray, the most
+    // brightly lit white in the scene (a dim tan curtain read as a weaker fall, not a bigger one).
+    return mix(vec3<f32>(1.0), vec3<f32>(0.92, 0.8, 0.64), 0.6 * saturate(water.g.plume.w));
 }
 
 fn flow_look() -> WaterLook {

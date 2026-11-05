@@ -323,6 +323,22 @@ fn water_view(v: &engine_water::demo::DemoView) -> View {
     }
 }
 
+/// Eye and target (relative to the lake zone's middle) looking at the waterfall from across
+/// its plunge pool, far enough back for the stream above the cliff and the lake beside it.
+fn falls_camera(z: &Zone) -> Option<([f64; 3], [f64; 3])> {
+    let land = crate::landscape::shared();
+    let st = land.streams.first()?;
+    let (top, bottom) = st.falls()?;
+    let (lip, foot) = (st.path[top], st.path[bottom]);
+    let downstream = (foot - lip).normalize_or(DVec2::Y);
+    let side = DVec2::new(-downstream.y, downstream.x);
+    let eye = foot + downstream * 48.0 + side * 16.0;
+    let ground = land.height(eye.x, eye.y).max(crate::landscape::LAKE_LEVEL);
+    let eye = DVec3::new(eye.x, ground + 7.0, eye.y) - z.center;
+    let target = DVec3::new(lip.x, 0.5 * (st.bed[top] + st.bed[bottom]) + 2.0, lip.y) - z.center;
+    Some((eye.to_array(), target.to_array()))
+}
+
 /// Where Physics' float test floats: out on the deep water south-east of the lake's middle,
 /// clear of the jetty and the dinghy's lane on the west side.
 fn float_test(lake: &Zone) -> DVec3 {
@@ -1244,6 +1260,45 @@ pub fn demo_views(z: &Zone) -> Vec<View> {
                 )
                 .warmup(8.0),
             );
+            // The stream and its falls in a storm, from across the plunge pool: first as the
+            // rain sets in (the stream still at its usual flow), then in flash flood
+            // (`water.flood`): six times the water, brown with silt, up its banks above the
+            // cliff, a thick brown curtain and the flood's plume spreading into the lake.
+            if let Some((eye, target)) = falls_camera(z) {
+                let storm = r#"{"preset": "storm", "transition_s": 0}"#;
+                let calm = r#"{"preset": "partly_cloudy", "transition_s": 0}"#;
+                views.push(
+                    View::new(
+                        "lake_storm",
+                        "The waterfall as a storm sets in, the stream still at its usual flow",
+                        eye,
+                        target,
+                        15.0,
+                    )
+                    .warmup(20.0)
+                    .quick_warmup()
+                    .on_arrive("weather.set", storm)
+                    .on_arrive("water.flood", r#"{"off": true}"#)
+                    .on_leave("weather.set", calm),
+                );
+                views.push(
+                    View::new(
+                        "lake_flood",
+                        "The waterfall in flash flood: six times the water, a brown \
+                         curtain and the flood spreading into the lake",
+                        eye,
+                        target,
+                        15.0,
+                    )
+                    // Long enough for the flood to run the stream's length to the falls.
+                    .warmup(150.0)
+                    .quick_warmup()
+                    .on_arrive("weather.set", storm)
+                    .on_arrive("water.flood", r#"{"swell": 6, "mud": 0.9, "plume_m": 70}"#)
+                    .on_leave("water.flood", r#"{"off": true}"#)
+                    .on_leave("weather.set", calm),
+                );
+            }
             views
         }
         "water" => engine_water::demo::VIEWS.iter().map(water_view).collect(),
