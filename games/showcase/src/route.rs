@@ -8,6 +8,8 @@
 //! heights on the way up, to catch a black screen high up, and on the first frames of the
 //! route, to catch the ground changing as it settles (item 1). Without `--exe` the route waits
 //! at the plaza for the ground in view before it starts, as the exe's loading screen does.
+//! Zones stream in and out by distance as in the exe (`build::ZONE_LOAD_M`), not all at
+//! once as in a tour.
 //!
 //! `--route up` flies only the climb to orbit, with pictures at more heights (item 30).
 //!
@@ -176,7 +178,7 @@ struct Row {
 }
 
 #[derive(Resource)]
-struct Route {
+pub(crate) struct Route {
     legs: &'static [Leg],
     out_dir: String,
     /// Frames since the route started.
