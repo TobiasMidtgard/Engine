@@ -1190,7 +1190,8 @@ fn the_showcase_courtyard_builds_and_plays_its_ritual() {
     let mut commands = Commands::new(&mut commands_queue, &app.world);
     crate::demo::spawn_demo(&mut commands, DVec3::new(70.0, 0.0, -105.0));
     commands_queue.apply(&mut app.world);
-    app.update_n(5);
+    // The swarm arrives 40 wisps a frame (courtyard.luau's WISPS_A_FRAME).
+    app.update_n(12);
     assert!(errors(&mut app).is_empty(), "{:?}", errors(&mut app));
     let lanterns = eval(&mut app, "#world.find_all('Lantern ')");
     assert_eq!(lanterns, json!(12));

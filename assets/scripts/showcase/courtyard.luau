@@ -217,6 +217,9 @@ local function wisp(i: number): any
 	}
 end
 
+-- Wisps spawned a frame while the swarm builds.
+local WISPS_A_FRAME = 40
+
 function Courtyard:build()
 	for _, lamp in self.lanterns or {} do
 		lamp.post:despawn()
@@ -241,10 +244,22 @@ function Courtyard:build()
 	for k = 1, #RINGS do
 		table.insert(self.rings, self.orrery:find(`Ring {k}`))
 	end
+	-- The swarm arrives over a few frames, a few dozen at a time: all 320 on the start's frame
+	-- held it about 50 ms. A newer build stops an older one still on its way.
 	self.wisps = {}
-	for i = 1, p.wisps do
-		table.insert(self.wisps, self:spawn(wisp(i)))
-	end
+	self.building = (self.building or 0) + 1
+	local this, wisps = self.building, self.wisps
+	task.spawn(function()
+		for i = 1, p.wisps do
+			if self.building ~= this then
+				return
+			end
+			table.insert(wisps, self:spawn(wisp(i)))
+			if i % WISPS_A_FRAME == 0 then
+				task.wait()
+			end
+		end
+	end)
 end
 
 -- The lantern wave and the orrery are only seen from the courtyard: beyond 80 m from the
