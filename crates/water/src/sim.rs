@@ -42,6 +42,9 @@ fn typical_depth(body: &WaterBody, center: DVec3, ground: &Ground) -> f32 {
     }
 }
 
+/// Steps a lake's flood rise is laid out in, m.
+const LAKE_RISE_STEP_M: f32 = 0.05;
+
 /// Mirror `WaterBody` components into the simulation and advance their waves.
 #[allow(clippy::too_many_arguments)]
 pub fn sync_bodies_system(
@@ -63,7 +66,9 @@ pub fn sync_bodies_system(
     mut changes: MessageReader<engine_world::TerrainChanged>,
     focus: Res<FocusPoints>,
     range: Res<SimulationRange>,
+    freshet: Option<Res<crate::freshet::Freshet>>,
 ) {
+    let lake_rise = freshet.map_or(0.0, |f| f.lake_rise_m);
     let dt = time.delta_secs();
     let mut state = shared.0.write();
     state.ground = ground.clone();
@@ -73,10 +78,15 @@ pub fn sync_bodies_system(
     for (entity, gt, local, parent, body) in &bodies {
         // A root's own transform is its place even on its first step, before transforms have
         // propagated: flow regions made that step fill from the lakes they spill from.
-        let (center, rotation) = match parent {
+        let (mut center, rotation) = match parent {
             None => (local.translation, local.rotation),
             Some(_) => (gt.translation(), gt.rotation()),
         };
+        // Lakes the streams run into rise in a flood (`Freshet::lake_rise_m`), in 5 cm steps:
+        // each step lays the shallows and the streams' reservoirs out again.
+        if matches!(body.bed, WaterBed::Ground) {
+            center.y += (lake_rise / LAKE_RISE_STEP_M).round() as f64 * LAKE_RISE_STEP_M as f64;
+        }
         let yaw = rotation.to_euler(EulerRot::YXZ).0;
         entity.hash(&mut hasher);
         for v in [center.x, center.y, center.z, yaw as f64] {
@@ -223,8 +233,10 @@ impl BedJobs {
 }
 
 /// Same place (a world shift moves both alike), within rounding.
+/// The same place for a bed grid: across and turned alike. Up and down doesn't count: a lake
+/// rising in a flood reads its depths off the same ground ([`BodyState::depth_at`]).
 fn same_place(a: (DVec3, f32), b: (DVec3, f32)) -> bool {
-    a.0.distance(b.0) < 1e-3 && (a.1 - b.1).abs() < 1e-5
+    DVec2::new(a.0.x - b.0.x, a.0.z - b.0.z).length() < 1e-3 && (a.1 - b.1).abs() < 1e-5
 }
 
 fn install_bed(state: &mut WaterState, ask: BedAsk, grid: BedCache) {

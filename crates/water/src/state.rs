@@ -101,8 +101,12 @@ impl BodyState {
                 depth_m * t * t * (3.0 - 2.0 * t)
             }
             WaterBed::Ground => {
-                if let Some(rel) = self.bed.as_ref().and_then(|b| b.grid.at(local)) {
-                    return Some(-rel);
+                // The grid holds the ground over the surface it was read for: a lake risen
+                // since (a flood, `Freshet::lake_rise_m`) stands that much deeper on it.
+                if let Some(b) = self.bed.as_ref()
+                    && let Some(rel) = b.grid.at(local)
+                {
+                    return Some((self.center.y - b.center.y) as f32 - rel);
                 }
                 let probe = DVec3::new(p.x, self.center.y + 0.05, p.z);
                 match ground.height(probe) {

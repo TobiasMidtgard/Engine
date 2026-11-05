@@ -46,6 +46,16 @@ const PLUME_SPREAD_M_S: f32 = 0.3;
 pub const MOST_PLUME_M: f32 = 90.0;
 /// Seconds for a plume to clear once no more brown water comes in.
 const PLUME_CLEAR_S: f32 = 900.0;
+/// Head of water over a lake's outlet at the streams' usual flow, m.
+pub const OUTLET_HEAD_M: f32 = 0.5;
+/// How long a lake takes to rise to (or fall back from) its flood level, seconds of game time.
+pub const LAKE_LAG_S: f32 = 900.0;
+
+/// Where a lake settles, m above its usual level, with its streams at `swell` times their flow.
+pub fn lake_rise_at(swell: f32) -> f32 {
+    OUTLET_HEAD_M * (swell.max(1.0).powf(2.0 / 3.0) - 1.0)
+}
+
 /// The swell or mud has to move this much before the streams are updated.
 const STEP: f32 = 0.02;
 
@@ -70,6 +80,11 @@ pub struct Freshet {
     /// here like the rest).
     pub plume_m: f32,
     pub plume_mud: f32,
+    /// How far the lakes the streams run into have risen, m. A lake drains over its outlet as
+    /// a weir (Q ∝ h^1.5), so it settles where the head over the outlet has grown as Q^(2/3):
+    /// [`OUTLET_HEAD_M`] × (swell^(2/3) − 1), a little over a meter at six times the flow,
+    /// reached over [`LAKE_LAG_S`] (a lake's store is far bigger than a stream's).
+    pub lake_rise_m: f32,
 }
 
 impl Default for Freshet {
@@ -83,6 +98,7 @@ impl Default for Freshet {
             held: false,
             plume_m: 0.0,
             plume_mud: 0.0,
+            lake_rise_m: 0.0,
         }
     }
 }
@@ -90,10 +106,12 @@ impl Default for Freshet {
 impl Freshet {
     /// A flood held at `swell` and `mud` (for galleries and tests).
     pub fn held(swell: f32, mud: f32) -> Self {
+        let swell = swell.clamp(1.0, MOST_SWELL);
         Self {
-            swell: swell.clamp(1.0, MOST_SWELL),
+            swell,
             mud: mud.clamp(0.0, 1.0),
             held: true,
+            lake_rise_m: lake_rise_at(swell),
             ..Default::default()
         }
     }
@@ -131,6 +149,9 @@ impl Freshet {
         self.fines = (self.fines + (recharge - washout) * dt).clamp(0.0, 1.0);
         // C ∝ Q^2 from what is ready: brown within a doubling of the flow.
         self.mud = (self.fines * (rise * 0.8).powi(2)).min(1.0);
+        // The lakes fill toward the level their outlets carry this flow at.
+        let target = lake_rise_at(self.swell);
+        self.lake_rise_m += (target - self.lake_rise_m) * (1.0 - (-dt / LAKE_LAG_S).exp());
         // The plume: pushed out by the brown water coming in (faster the more of it), browner
         // toward what comes in, and fading slowly once it stops; spent, it shrinks away.
         self.plume_m =
@@ -169,7 +190,12 @@ pub fn freshet_system(
         }
     };
     // Unchanged (dry and drained): leave it be, so nothing downstream sees a change.
-    if rain <= 0.0 && freshet.store_mm < 1e-4 && freshet.fines >= 1.0 && freshet.plume_m < 0.01 {
+    if rain <= 0.0
+        && freshet.store_mm < 1e-4
+        && freshet.fines >= 1.0
+        && freshet.plume_m < 0.01
+        && freshet.lake_rise_m < 0.005
+    {
         return;
     }
     freshet.step(rain, dt);
@@ -301,6 +327,33 @@ mod tests {
         );
         // Then clears away.
         assert!(f.plume_m < plume_after.0 * 0.5, "{}", f.plume_m);
+    }
+
+    #[test]
+    fn a_lake_rises_slowly_in_a_flood_and_falls_back() {
+        // A little over a meter at six times the flow, as an outlet weir carries it.
+        assert!(
+            (lake_rise_at(6.0) - 1.15).abs() < 0.03,
+            "{}",
+            lake_rise_at(6.0)
+        );
+        assert_eq!(lake_rise_at(1.0), 0.0);
+        assert_eq!(Freshet::held(6.0, 0.9).lake_rise_m, lake_rise_at(6.0));
+        let mut f = Freshet::default();
+        for _ in 0..1200 {
+            f.step(30.0, 1.0);
+        }
+        // Twenty minutes of a cloudburst: risen, but slower than the streams.
+        let risen = f.lake_rise_m;
+        assert!(
+            risen > 0.2 && risen < lake_rise_at(f.swell),
+            "{risen} {}",
+            f.swell
+        );
+        for _ in 0..7200 {
+            f.step(0.0, 1.0);
+        }
+        assert!(f.lake_rise_m < 0.02, "{}", f.lake_rise_m);
     }
 
     #[test]
