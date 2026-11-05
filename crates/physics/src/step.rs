@@ -336,15 +336,23 @@ pub(crate) fn physics_sync(world: &mut World, mut q: Local<Option<StepQueries>>)
     let (mut off_frame, mut held_near) = (0usize, 0usize);
     if settings.static_meshes_off_frame {
         let mut movers: Option<Vec<crate::shape_jobs::Mover>> = None;
+        // Light statics placed here this sync, and their points.
+        let (mut light, mut light_points) = (0usize, 0usize);
         wanted.retain(|(e, desc, pose)| {
             // A changed collider's earlier job is dropped either way.
             sim.pending_statics.remove(e);
-            if !crate::shape_jobs::heavy(&desc.shape) {
-                return true;
-            }
             let found = owning_body(world, *e);
             if found.is_some_and(|(b, k)| k != BodyKind::Static && sim.bodies.contains_key(&b)) {
                 return true;
+            }
+            let heavy = crate::shape_jobs::heavy(&desc.shape);
+            if !heavy {
+                // (Most syncs: a few, all here.)
+                light += 1;
+                light_points += shape_points(&desc.shape);
+                if light <= INLINE_STATICS && light_points <= INLINE_POINTS {
+                    return true;
+                }
             }
             let (lo, hi) = crate::shape_jobs::world_bounds(
                 &desc.shape,
@@ -358,6 +366,11 @@ pub(crate) fn physics_sync(world: &mut World, mut q: Local<Option<StepQueries>>)
             let movers = movers.get_or_insert_with(|| crate::shape_jobs::movers(&sim));
             let replacing = sim.colliders.get(e).is_some_and(|c| c.body.is_none());
             let near = crate::shape_jobs::near(movers, lo, hi);
+            // A light one past this sync's share waits its turn in the queue, unless something
+            // moving is near it: built and placed here, it holds nothing up.
+            if !heavy && near {
+                return true;
+            }
             // (Its points are shared, not copied: copies took 24-48 ms for a zone's 54-89
             // meshes on the VM.)
             let Some(job) = crate::shape_jobs::Job::spawn(desc.shape.clone(), pose.scale, near)
@@ -2655,18 +2668,39 @@ fn place_pending_statics(world: &World, sim: &mut Simulation) -> (usize, f64, f6
     }
     let started = Instant::now();
     let mut waited = std::time::Duration::ZERO;
+    let looked = crate::report::Piece::start("sync: queued statics looked over");
     let movers = crate::shape_jobs::movers(sim);
     let mut ready: Vec<(Entity, Option<SharedShape>, bool)> = Vec::new();
     let mut hold: Vec<Entity> = Vec::new();
+    // Where the regions are, for the copies each static will make (`place_static`).
+    let (anchors, reach): (Vec<DVec3>, f64) = (
+        sim.live_regions().map(|(_, r)| r.anchor).collect(),
+        sim.static_reach(),
+    );
+    let copies_of = |lo: DVec3, hi: DVec3| {
+        let (center, radius) = ((lo + hi) * 0.5, (hi - lo).length() * 0.5);
+        anchors
+            .iter()
+            .filter(|a| a.distance(center) <= radius + reach)
+            .count()
+            .max(1)
+    };
     let Simulation {
         pending_statics,
         colliders,
         ..
     } = sim;
+    // Built ones taken this step: past [`COPIES_PER_STEP`] the rest wait their turn (still
+    // counted ready, not waiting), unless something moving is near them.
+    let mut copies = 0usize;
     for (e, p) in pending_statics.iter_mut() {
+        if copies >= COPIES_PER_STEP && p.job.done() && !movers.iter().any(|m| m.near(p.lo, p.hi)) {
+            continue;
+        }
         p.waited += 1;
         if let Some(shape) = p.job.poll() {
             ready.push((*e, shape, false));
+            copies += copies_of(p.lo, p.hi);
             continue;
         }
         let close: Vec<Entity> = movers
@@ -2738,7 +2772,11 @@ fn place_pending_statics(world: &World, sim: &mut Simulation) -> (usize, f64, f6
     for (e, velocity) in let_go {
         sim.wake(e, velocity);
     }
+    drop(looked);
     ready.sort_by_key(|r| r.0);
+    let placing = crate::report::Piece::start("sync: queued statics placed");
+    let placing_started = Instant::now();
+    let copies_before: usize = sim.live_regions().map(|(_, r)| r.statics.len()).sum();
     let (mut placed, mut finished) = (0usize, 0usize);
     for (e, shape, forced) in ready {
         let Some(p) = sim.pending_statics.remove(&e) else {
@@ -2783,6 +2821,19 @@ fn place_pending_statics(world: &World, sim: &mut Simulation) -> (usize, f64, f6
         }
         placed += 1;
         finished += usize::from(forced);
+    }
+    drop(placing);
+    let placing_ms = placing_started.elapsed().as_secs_f64() * 1000.0;
+    if placing_ms > 3.0 && crate::report::wanted() {
+        engine_core::log::info!(
+            "physics: placing {placed} queued statics took {placing_ms:.1} ms ({} copies into \
+             {} regions)",
+            sim.live_regions()
+                .map(|(_, r)| r.statics.len())
+                .sum::<usize>()
+                - copies_before,
+            sim.live_regions().count()
+        );
     }
     if crate::report::wanted() {
         if placed > 0 {
@@ -2867,6 +2918,20 @@ fn spread<R: Send>(
         .map(|r| r.into_inner().expect("every index was worked"))
         .collect()
 }
+
+/// Light static colliders (not [`crate::shape_jobs::heavy`]) one sync builds and places on
+/// the spot, and their points at most; the rest are built on the shape threads and placed
+/// [`COPIES_PER_STEP`] a step, unless something moving is near them. A zone streaming in
+/// brought 300-900 small statics in one sync, each copied into every region within reach:
+/// 10-31 ms of a step on the VM loops (round 20).
+const INLINE_STATICS: usize = 128;
+const INLINE_POINTS: usize = 4096;
+/// Region copies of built statics placed from the queue a step ([`place_pending_statics`]),
+/// counted before they are made; those with something moving near them are placed anyway.
+/// Copies are what placing costs (a static goes into every region within reach, 1-17 of them
+/// on the loops): about 4 us each on the VM, so 106 statics of 1664 copies took 6.5 ms of CPU
+/// where 128 of 991 took 3.4 ms (round 20). 640 is about 2.5 ms.
+const COPIES_PER_STEP: usize = 640;
 
 /// Points a batch of new shapes must hold before [`build_shapes`] spreads it over threads.
 const BUILD_SPREAD_POINTS: usize = 4096;
