@@ -214,13 +214,43 @@ pub fn spawn_demo(commands: &mut Commands, origin: DVec3) {
             "ui market textures",
             move || market::bake_market_over(ground, origin),
             move |world, textures| {
-                let Some(origin) = world.get::<Transform>(demo).map(|t| t.translation) else {
+                let at = move |world: &World| world.get::<Transform>(demo).map(|t| t.translation);
+                let Some(origin) = at(world) else {
                     return;
                 };
-                market::place_market(world, origin, textures);
-                // Over Old Brannoc's stall, the middle one, in view of the tour's UI stops.
-                let (stall, _) = market::stall_place(2);
-                crate::hud::spawn_world_markers(world, origin, stall + DVec3::Y * 3.4);
+                // One frame each: the square, stalls and props; the stock and straw; the ale
+                // corner and the markers (110 ms in one frame on the session VM).
+                let rest = market::place_market_first(world, origin, textures);
+                engine_core::off_frame::off_frame(
+                    world,
+                    "ui market stock",
+                    || (),
+                    move |world, ()| {
+                        let Some(origin) = at(world) else {
+                            return;
+                        };
+                        let stock = rest.stock(world, origin);
+                        engine_core::off_frame::off_frame(
+                            world,
+                            "ui market ale corner",
+                            || (),
+                            move |world, ()| {
+                                let Some(origin) = at(world) else {
+                                    return;
+                                };
+                                stock.corner(world, origin);
+                                // Over Old Brannoc's stall, the middle one, in view of the
+                                // tour's UI stops.
+                                let (stall, _) = market::stall_place(2);
+                                crate::hud::spawn_world_markers(
+                                    world,
+                                    origin,
+                                    stall + DVec3::Y * 3.4,
+                                );
+                            },
+                        );
+                    },
+                );
             },
         );
     });
