@@ -5851,3 +5851,46 @@ fn in_play_many_new_scripts_start_over_a_few_frames() {
     assert_eq!(instances(&app), 40, "the rest started at the next frames");
     assert!(errors(&mut app).is_empty(), "{:?}", errors(&mut app));
 }
+
+#[test]
+fn in_play_the_actor_vms_are_made_on_a_worker_and_parallel_scripts_wait_for_them() {
+    let folder = Folder::new();
+    folder.write("mote.luau", SWARM);
+    let mut app = app_with_vms(&folder.0, 3);
+    // The real clock, as in play.
+    app.world
+        .resource_mut::<Time>()
+        .set_source(TimeSource::Realtime);
+    let motes: Vec<Entity> = (0..12)
+        .map(|i| {
+            let e = spawn_script(&mut app, &format!("Mote {i}"), "mote");
+            app.world.get_mut::<Script>(e).unwrap().props =
+                json!({ "seed": i, "leader": format!("Mote {}", (i + 1) % 12) });
+            e
+        })
+        .collect();
+    app.update();
+    let placed = |app: &App| {
+        motes
+            .iter()
+            .filter(|&&e| app.world.get::<ScriptActor>(e).is_some())
+            .count()
+    };
+    assert_eq!(placed(&app), 0, "the first frame doesn't wait for the VMs");
+    assert!(app.world.resource::<ScriptRuntime>().actors.is_empty());
+    for _ in 0..2_000 {
+        if placed(&app) == motes.len() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        app.update();
+    }
+    assert_eq!(placed(&app), motes.len(), "every mote went to an actor VM");
+    app.update_n(5);
+    let used: std::collections::BTreeSet<u32> = motes
+        .iter()
+        .filter_map(|&e| app.world.get::<ScriptActor>(e).map(|a| a.0))
+        .collect();
+    assert_eq!(used.len(), 3, "every actor VM gets motes");
+    assert!(errors(&mut app).is_empty(), "{:?}", errors(&mut app));
+}

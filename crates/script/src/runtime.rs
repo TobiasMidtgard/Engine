@@ -276,6 +276,16 @@ struct Task {
 }
 
 /// The scripting VM and everything running in it. A resource; see the crate docs.
+/// Where a new `parallel_update` script runs ([`ScriptRuntime::pick_actor`]).
+enum Pick {
+    /// On this actor VM.
+    Actor(u32),
+    /// On the main VM (no actor VMs).
+    Main,
+    /// Nowhere yet: the actor VMs are being made.
+    Wait,
+}
+
 #[derive(Resource)]
 pub struct ScriptRuntime {
     pub(crate) lua: Lua,
@@ -300,6 +310,8 @@ pub struct ScriptRuntime {
     peers: u32,
     /// The actor VMs (the main VM's; made when the first `parallel_update` script starts).
     pub(crate) actors: Vec<ScriptRuntime>,
+    /// In play, the actor VMs being made on a worker; `parallel_update` scripts wait for them.
+    actors_making: Option<std::sync::Mutex<std::sync::mpsc::Receiver<Vec<ScriptRuntime>>>>,
     /// A finished `parallel_update` coroutine, reused for the next call.
     spare: Option<Thread>,
     /// `parallel_update` calls that called `task.synchronize()`: they go on after the parallel
@@ -494,6 +506,7 @@ impl ScriptRuntime {
             role,
             peers,
             actors: Vec::new(),
+            actors_making: None,
             spare: None,
             synced: Vec::new(),
             held: None,
@@ -1172,46 +1185,89 @@ impl ScriptRuntime {
         }
     }
 
+    /// Make `n` actor VMs (fewer if one fails to start).
+    fn make_actors(
+        api: &ApiRegistry,
+        root: &Path,
+        settings: &ScriptSettings,
+        n: usize,
+    ) -> Vec<ScriptRuntime> {
+        let mut actors = Vec::new();
+        for k in 1..=n as u32 {
+            match Self::vm(api, root.to_path_buf(), settings, (k, n as u32)) {
+                Ok(vm) => actors.push(vm),
+                Err(err) => {
+                    tracing::warn!(target: "script", "actor VM {k} could not start: {err}");
+                    break;
+                }
+            }
+        }
+        actors
+    }
+
     /// The actor VM to run a new `parallel_update` script on (making the actor VMs the first
     /// time): the one with the fewest instances. `planned` counts those handed out this frame.
+    ///
+    /// In play the actor VMs are made on a worker (three of them took 140 ms on the frame on
+    /// the session VM, as the script zone streamed in) and the script waits for them
+    /// ([`Pick::Wait`]); with a manual clock (tests, tours) they are made at once.
     fn pick_actor(
         &mut self,
         world: &World,
         settings: &ScriptSettings,
         planned: &mut Vec<usize>,
-    ) -> Option<u32> {
+    ) -> Pick {
         if self.role != 0 {
-            return None;
+            return Pick::Main;
         }
         if self.actors.is_empty() {
-            let n = Self::actor_count(settings);
-            if n == 0 {
-                return None;
-            }
-            let api = world
-                .get_resource::<ApiRegistry>()
-                .cloned()
-                .unwrap_or_default();
-            let root = self.root();
-            for k in 1..=n as u32 {
-                match Self::vm(&api, root.clone(), settings, (k, n as u32)) {
-                    Ok(vm) => self.actors.push(vm),
-                    Err(err) => {
-                        tracing::warn!(target: "script", "actor VM {k} could not start: {err}");
-                        break;
-                    }
+            if let Some(making) = &self.actors_making {
+                let got = making.lock().unwrap_or_else(|e| e.into_inner()).try_recv();
+                match got {
+                    Ok(made) => self.actors = made,
+                    Err(std::sync::mpsc::TryRecvError::Empty) => return Pick::Wait,
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {}
                 }
+                self.actors_making = None;
+            } else {
+                let n = Self::actor_count(settings);
+                if n == 0 {
+                    return Pick::Main;
+                }
+                let api = world
+                    .get_resource::<ApiRegistry>()
+                    .cloned()
+                    .unwrap_or_default();
+                let root = self.root();
+                let in_play = !matches!(
+                    world.resource::<Time>().source(),
+                    engine_core::time::TimeSource::Manual { .. }
+                );
+                if in_play && let Some(pool) = engine_core::tasks::AsyncComputeTaskPool::try_get() {
+                    let (tx, rx) = std::sync::mpsc::channel();
+                    let settings = settings.clone();
+                    pool.spawn(async move {
+                        let _ = tx.send(Self::make_actors(&api, &root, &settings, n));
+                    })
+                    .detach();
+                    self.actors_making = Some(std::sync::Mutex::new(rx));
+                    return Pick::Wait;
+                }
+                self.actors = Self::make_actors(&api, &root, settings, n);
             }
             if self.actors.is_empty() {
-                return None;
+                return Pick::Main;
             }
             tracing::info!(target: "script", "{} actor VMs run parallel_update", self.actors.len());
         }
         planned.resize(self.actors.len(), 0);
-        let k =
-            (0..self.actors.len()).min_by_key(|&k| self.actors[k].instances.len() + planned[k])?;
+        let Some(k) =
+            (0..self.actors.len()).min_by_key(|&k| self.actors[k].instances.len() + planned[k])
+        else {
+            return Pick::Main;
+        };
         planned[k] += 1;
-        Some(k as u32 + 1)
+        Pick::Actor(k as u32 + 1)
     }
 
     /// The VM (0: main) that runs the script on an entity with this [`ScriptActor`].
@@ -1361,10 +1417,16 @@ impl ScriptRuntime {
                 && !placed
                 && !self.instances.contains_key(&e)
                 && self.hooks_of(&path).is_some_and(|h| h.parallel_update)
-                && let Some(k) = self.pick_actor(world, settings, &mut planned)
             {
-                world.entity_mut(e).insert(ScriptActor(k));
-                continue;
+                match self.pick_actor(world, settings, &mut planned) {
+                    Pick::Actor(k) => {
+                        world.entity_mut(e).insert(ScriptActor(k));
+                        continue;
+                    }
+                    // Still new next frame, when the actor VMs may be made.
+                    Pick::Wait => continue,
+                    Pick::Main => {}
+                }
             }
             match self.instances.get(&e) {
                 Some(i) if i.path == path => {
