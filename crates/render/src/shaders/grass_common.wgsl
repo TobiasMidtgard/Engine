@@ -32,7 +32,7 @@ struct GrassField {
     wear: vec4<f32>,    // worn-ground map: first point (field-local m, xz), points per m, 1 = present
     gust: vec4<f32>,    // steady wind (m/s, xyz), w: the wind's run (m) less speed x time
     bloom: vec4<f32>,   // flower heads' albedo (linear), w: share of blades flowering
-    kind: vec4<f32>,    // flower head width (m; a flowering stem's record width is its head's), this kind's blades as a share of the field's most, pinnae pairs, leaf rise (0..1)
+    kind: vec4<f32>,    // flower head width (m; a flowering stem's record width is its head's), this kind's blades as a share of the field's most, pinnae pairs (or -(leaflets + stalk) for a compound leaf), leaf rise (0..1)
 };
 // A field growing several kinds of grass has one entry for each, one after the other: the
 // same placement, distances and wind, each kind's look (`grid.z` of the first: how many). A
@@ -199,7 +199,9 @@ fn grass_vertex(s: BladeShape, vertex: u32, t: f32, tip_dir: vec3<f32>) -> Blade
     // A leaf: a thin stalk, then an ovate blade, widest a little before its middle.
     let stalk = f.tip.w;
     let x = saturate((u - stalk) / max(1.0 - stalk, 0.05));
-    let leaf_shape = select(0.1, max(pow(sin(PI * pow(x, 0.8)), 0.7), 0.1), u > stalk);
+    // A compound leaf's blade is drawn whole, its leaflets cut out of it (`grass_cut`).
+    let whole = select(max(pow(sin(PI * pow(x, 0.8)), 0.7), 0.1), 1.0, f.kind.z < 0.0);
+    let leaf_shape = select(select(0.1, 0.04, f.kind.z < 0.0), whole, u > stalk);
     var half_width = 0.5 * s.width * mix(pow(q, 0.6), leaf_shape, leaf);
     // A flowering stem: thin, then its head (a disc seen edge-on is still a few petals wide).
     let head = smoothstep(0.91, 0.94, u);

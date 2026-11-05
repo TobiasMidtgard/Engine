@@ -477,7 +477,8 @@ fn grass_snow_depth(f: GrassField, rel: vec3<f32>) -> f32 {
 @group(2) @binding(2) var<uniform> grass_cull: vec4<u32>;
 
 const GRASS_SCREEN_GROUPS: u32 = 7u;
-// The screen's draw of fronds cut into pinnae (ferns), drawn by pipelines that discard.
+// The screen's draw of leaves cut into pinnae or leaflets (ferns, sorrel), drawn by pipelines
+// that discard.
 const GRASS_CUT_GROUP: u32 = 6u;
 const GRASS_SHADOW_SEGMENTS: u32 = 2u;
 
@@ -524,7 +525,7 @@ fn cs_cull(@builtin(workgroup_id) group: vec3<u32>, @builtin(local_invocation_in
         if (!grass_in_view(frame.view_proj, center, radius)) { return; }
         let tip = grass_tip(seed, frame.time.x, tiling);
         let prev = grass_tip(seed, frame.time.x - frame.time.z, tiling);
-        let cut = grass_fields[seed.field].kind.z > 0.0;
+        let cut = grass_fields[seed.field].kind.z != 0.0;
         let g = select(segments - 1u, GRASS_CUT_GROUP, cut);
         grass_emit(g, grass_pack(grass_shape(seed, tip, prev, segments)));
         return;

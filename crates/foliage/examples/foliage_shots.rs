@@ -391,6 +391,12 @@ fn main() {
             .resource_mut::<engine_foliage::EcologySettings>()
             .gpu_ferns = false;
     }
+    // `FOLIAGE_HERB_KINDS=0`: one kind of forest floor herb (as before round 32).
+    if std::env::var("FOLIAGE_HERB_KINDS").is_ok_and(|v| v == "0") {
+        app.world
+            .resource_mut::<engine_foliage::EcologySettings>()
+            .herb_kinds = false;
+    }
     if std::env::var("FOLIAGE_FROZEN").is_ok_and(|v| v == "1") {
         app.world
             .resource_mut::<engine_foliage::EcologySettings>()
@@ -502,6 +508,67 @@ fn main() {
             let back = DVec3::new(near.x - at.x, 0.0, near.z - at.z).normalize_or(DVec3::X);
             let eye = at + back * 5.0 + DVec3::Y * 1.6;
             shot(&mut app, &out, "03_ferns", eye, at + DVec3::Y * 0.3, 10.5);
+        }
+    }
+    if wanted("04_floor") {
+        // The forest floor where its herbs grow thickest within 40 m of the trail's viewpoint
+        // (5 m cells), from 4 m off, looking down across it as one walks (ref3_forest_floor).
+        let near = by_name("forest_trail").eye;
+        let mut best: Option<(f32, DVec3)> = None;
+        let mut q = app.world.query::<(
+            &engine_render::GrassField,
+            &engine_foliage::grass::FloorLayer,
+            &GlobalTransform,
+        )>();
+        for (f, layer, t) in q.iter(&app.world) {
+            if *layer != engine_foliage::grass::FloorLayer::Herbs || f.density.is_empty() {
+                continue;
+            }
+            let [rx, rz] = f.resolution;
+            let step = [f.size[0] / (rx - 1) as f32, f.size[1] / (rz - 1) as f32];
+            let corner =
+                t.translation() - DVec3::new(f.size[0] as f64, 0.0, f.size[1] as f64) * 0.5;
+            let mut cells: std::collections::BTreeMap<(i64, i64), (f32, u32)> = Default::default();
+            for j in 0..rz {
+                for i in 0..rx {
+                    let p = corner
+                        + DVec3::new(
+                            (i as f32 * step[0]) as f64,
+                            0.0,
+                            (j as f32 * step[1]) as f64,
+                        );
+                    if DVec2::new(p.x - near.x, p.z - near.z).length() > 40.0 {
+                        continue;
+                    }
+                    let c = cells
+                        .entry(((p.x / 5.0).floor() as i64, (p.z / 5.0).floor() as i64))
+                        .or_default();
+                    c.0 += f.density[(j * rx + i) as usize];
+                    c.1 += 1;
+                }
+            }
+            for ((cx, cz), (sum, n)) in cells {
+                let mean = sum / n.max(1) as f32;
+                if best.is_none_or(|(b, _)| mean > b) {
+                    let at = DVec3::new(
+                        cx as f64 * 5.0 + 2.5,
+                        t.translation().y,
+                        cz as f64 * 5.0 + 2.5,
+                    );
+                    best = Some((mean, at));
+                }
+            }
+        }
+        if let Some((_, at)) = best {
+            let ground = app
+                .world
+                .get_resource::<engine_world::Ground>()
+                .and_then(|g| g.height(at))
+                .unwrap_or(at.y);
+            let at = DVec3::new(at.x, ground, at.z);
+            let back = DVec3::new(near.x - at.x, 0.0, near.z - at.z).normalize_or(DVec3::X);
+            let eye = at + back * 4.0 + DVec3::Y * 1.5;
+            shot(&mut app, &out, "04_floor", eye, at + DVec3::Y * 0.1, 10.5);
         }
     }
     if wanted("11_switch") {
