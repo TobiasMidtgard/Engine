@@ -74,6 +74,7 @@ struct Frame {
     gust_offset: vec4<f32>,        // the camera's gust coordinates (m from the gust origin, world xz): now xy, last frame zw
     canopy: vec4<f32>,             // the canopy map (canopy.rs): its center relative to the camera (x, z; m), its reference height relative to the camera (m), half its width (m; 0 = off)
     canopy_params: vec4<f32>,      // leaf area scale (RenderSettings::canopy_strength), mip levels, texel (m), unused
+    distant_shadows: vec4<f32>,    // screen-space sun shadows past the cascades: march length scale (0 = off), unused x3
 };
 
 // An indoor space (`SkyLightVolume`): sky light comes in only through its open faces.

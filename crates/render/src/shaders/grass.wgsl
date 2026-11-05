@@ -36,7 +36,8 @@ fn vs_main(@builtin(instance_index) instance: u32, @builtin(vertex_index) vertex
     out.gloss = b.gloss;
     out.shade = b.shade;
     out.glow = b.glow;
-    out.pinnae = grass_fields[s.field].kind.z;
+    // (A flowering stem is a plain stem and its head, not cut into leaflets.)
+    out.pinnae = select(grass_fields[s.field].kind.z, 0.0, s.flower > 0.5);
     return out;
 }
 
@@ -141,7 +142,8 @@ fn vs_prepass(@builtin(instance_index) instance: u32, @builtin(vertex_index) ver
     out.motion_now = motion_clip(b.rel);
     out.motion_prev = prev_motion_clip(static_prev_rel(p.rel));
     out.cut = vec2<f32>(b.along, b.across);
-    out.pinnae = grass_fields[s.field].kind.z;
+    // (A flowering stem is a plain stem and its head, not cut into leaflets.)
+    out.pinnae = select(grass_fields[s.field].kind.z, 0.0, s.flower > 0.5);
     return out;
 }
 

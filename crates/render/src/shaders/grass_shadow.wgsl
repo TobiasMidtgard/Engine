@@ -18,7 +18,7 @@ fn vs_shadow(@builtin(instance_index) instance: u32, @builtin(vertex_index) vert
     // A compound leaf is drawn whole and its leaflets cut out of it on screen only (a discard
     // would cost the cascades their early depth test): its shadow is a smaller whole leaf,
     // about as much shade as the leaflets give.
-    if (grass_fields[s.field].kind.z < 0.0) {
+    if (grass_fields[s.field].kind.z < 0.0 && s.flower < 0.5) {
         s.width *= 0.6;
     }
     let b = grass_vertex(s, vertex & 15u, shadow_view.time.x, s.tip);

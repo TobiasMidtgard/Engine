@@ -141,6 +141,9 @@ pub struct FrameUniform {
     pub canopy: [f32; 4],
     /// Leaf area scale (`RenderSettings::canopy_strength`), mip levels, texel (m), unused.
     pub canopy_params: [f32; 4],
+    /// Screen-space sun shadows past the cascades (`distant_shadow` in lib_frame.wgsl): march
+    /// length scale (`RenderSettings::distant_shadows`, 0 = off), unused x3.
+    pub distant_shadows: [f32; 4],
 }
 
 /// Most [`crate::GrassBender`]s that push grass and swaying plants aside (nearest the camera).
@@ -1218,6 +1221,7 @@ pub fn frame_uniform(world: &World, v: &ViewData) -> FrameUniform {
         gust_offset: v.gust_offset(),
         canopy: [0.0; 4],
         canopy_params: [0.0; 4],
+        distant_shadows: [settings.distant_shadows.max(0.0), 0.0, 0.0, 0.0],
     }
 }
 
@@ -1334,7 +1338,7 @@ mod tests {
         // sky (vec4), surface weather (2 vec4), cloud shadows (mat4 + 2 vec4), the air (5 vec4),
         // the window (vec4), probe GI (3 vec4), the clip plane (vec4), the aerial table (vec4),
         // shading knobs (vec4), benders, plant wind (2 vec4, 2 gust waves, vec4), the canopy (2
-        // vec4).
+        // vec4), distant shadows (vec4).
         assert_eq!(
             std::mem::size_of::<FrameUniform>(),
             7 * 64
@@ -1364,6 +1368,7 @@ mod tests {
                 + 2 * 64
                 + 16
                 + 2 * 16
+                + 16
         );
         assert_eq!(std::mem::size_of::<GpuSkyVolume>(), 80);
         assert_eq!(std::mem::size_of::<GpuPointLight>(), 32);

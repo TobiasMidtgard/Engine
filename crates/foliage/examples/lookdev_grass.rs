@@ -63,6 +63,11 @@ fn biomes() -> Vec<Biome> {
     add("sorrel", GrassStyle::wood_sorrel());
     add("woodruff", GrassStyle::woodruff());
     add("anemone", GrassStyle::wood_anemone());
+    // In flower in mid-April (engine_foliage::grass::herb_styles_on).
+    add(
+        "anemone_april",
+        engine_foliage::grass::herb_styles_on(110.0).1[2],
+    );
     add("ferns", GrassStyle::fern());
     add("bilberry", GrassStyle::bilberry());
     add("lingonberry", GrassStyle::lingonberry());

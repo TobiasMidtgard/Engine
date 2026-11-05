@@ -181,6 +181,29 @@ pub fn bilberry_red(day: f32) -> f32 {
     smoothstep(245.0, 275.0, d) * (1.0 - smoothstep(305.0, 320.0, d))
 }
 
+/// The spring flowering of the forest floor's herbs on a day, 0..1 each: wood anemone
+/// carpets the floor white from late March into early May, before the canopy closes; wood
+/// sorrel flowers through April and May; woodruff's starry white heads open in May and June
+/// (Shirreffs 1985, "Biological Flora of the British Isles: *Anemone nemorosa*", J. Ecol. 73;
+/// Packham 1978 on *Oxalis acetosella*, J. Ecol. 66).
+pub fn herbs_flowering(day: f32) -> [f32; 3] {
+    let d = day.rem_euclid(YEAR_DAYS);
+    let window = |a: f32, b: f32, c: f32, e: f32| smoothstep(a, b, d) * (1.0 - smoothstep(c, e, d));
+    [
+        window(95.0, 110.0, 140.0, 155.0),
+        window(120.0, 135.0, 160.0, 175.0),
+        window(80.0, 95.0, 125.0, 140.0),
+    ]
+}
+
+/// How far wood anemone has gone to ground on a day, 0 (in leaf) .. 1 (dormant): a spring
+/// ephemeral, its leaves yellow and wither in June once the canopy shades it, and it rests as
+/// rhizomes until the leaves come up again in March (Shirreffs 1985).
+pub fn anemone_dormant(day: f32) -> f32 {
+    let d = day.rem_euclid(YEAR_DAYS);
+    smoothstep(165.0, 190.0, d).max(1.0 - smoothstep(62.0, 80.0, d))
+}
+
 /// How far the forest's ferns have collapsed on a day, 0 (standing) .. 1 (lying flat): bracken
 /// browns through October, its dead fronds fall over in November's frosts and lie flattened
 /// on the floor through winter, until the new fronds unfurl in May (Marrs & Watt 2006,
