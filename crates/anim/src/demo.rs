@@ -23,7 +23,6 @@
 //! background; until then, or if they haven't been fetched, generated bodies stand in.
 //! Everything else is generated from code.
 
-use std::collections::HashSet;
 use std::f32::consts::PI;
 
 use engine_assets::{AssetServer, Assets};
@@ -1648,12 +1647,15 @@ fn concept_car_scene(world: &mut World) -> Option<engine_assets::Handle<GltfScen
 
 /// Spawn every exhibit around `origin`. Returns the main characters.
 pub fn spawn_demo_world(world: &mut World, origin: DVec3) -> DemoEntities {
-    let before: HashSet<Entity> = world.query::<Entity>().iter(world).collect();
+    // What the paddock spawns is what is spawned after this tick: no set of every entity
+    // in the world (the showcase's tens of thousands) to tell them apart.
+    let since = world.increment_change_tick();
     let entities = build_paddock(world, origin);
     let parts = world
-        .query::<Entity>()
+        .query::<(Entity, bevy_ecs::query::SpawnDetails)>()
         .iter(world)
-        .filter(|e| !before.contains(e))
+        .filter(|(_, spawned)| spawned.is_spawned_after(since))
+        .map(|(e, _)| e)
         .collect();
     world.spawn(Paddock {
         origin,
@@ -3277,6 +3279,34 @@ fn demo_script_system(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A paddock records only what it spawned (its parts, which a restart takes down), and
+    /// none of what was in the world before or came after.
+    #[test]
+    fn a_paddock_records_only_what_it_spawned() {
+        let mut app = App::new();
+        app.add_plugins((engine_world::WorldPlugin, crate::AnimationPlugin));
+        let world = &mut app.world;
+        let others: Vec<Entity> = (0..50)
+            .map(|_| world.spawn(Transform::default()).id())
+            .collect();
+        spawn_demo_world(world, DVec3::ZERO);
+        let after = world.spawn(Transform::default()).id();
+        let paddock = world.query::<&Paddock>().single(world).unwrap().clone();
+        assert!(
+            paddock.parts.len() > 20,
+            "only {} parts",
+            paddock.parts.len()
+        );
+        assert!(
+            paddock
+                .parts
+                .iter()
+                .all(|e| !others.contains(e) && *e != after)
+        );
+        let named = |e: &Entity| world.get::<Name>(*e).is_some();
+        assert!(paddock.parts.iter().any(named), "its people are among them");
+    }
 
     #[test]
     fn paths_loop_smoothly() {
