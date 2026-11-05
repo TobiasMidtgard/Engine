@@ -181,17 +181,19 @@ pub fn bilberry_red(day: f32) -> f32 {
     smoothstep(245.0, 275.0, d) * (1.0 - smoothstep(305.0, 320.0, d))
 }
 
-/// Bramble on a day: how much it is in flower and how many of its berries are on the canes,
-/// and how ripe (black) those are, 0..1 each. White to pale pink flowers from June through
+/// Bramble on a day: how much it is in flower, how many of its berries are on the canes, how
+/// ripe (black) those are, and how far its leaves have gone wine red, 0..1 each. White to pale pink flowers from June through
 /// July; the berries set green, redden and ripen black from August into September, the last
-/// rotting on the canes in October (Taylor 2005, Biological Flora of the British Isles: Rubus
+/// rotting on the canes in October; from October many leaves go purple-red and stay on the
+/// canes so through the winter (Taylor 2005, Biological Flora of the British Isles: Rubus
 /// fruticosus L. agg., J. Ecol. 93).
-pub fn bramble(day: f32) -> [f32; 3] {
+pub fn bramble(day: f32) -> [f32; 4] {
     let d = day.rem_euclid(YEAR_DAYS);
     let flowers = smoothstep(158.0, 172.0, d) * (1.0 - smoothstep(205.0, 222.0, d));
     let berries = smoothstep(208.0, 225.0, d) * (1.0 - smoothstep(270.0, 292.0, d));
     let black = smoothstep(222.0, 240.0, d);
-    [flowers, berries, black]
+    let red = smoothstep(272.0, 310.0, d).max(1.0 - smoothstep(60.0, 110.0, d));
+    [flowers, berries, black, red]
 }
 
 /// How many of bilberry's and lingonberry's berries are ripe on a day, 0..1 each. Bilberries

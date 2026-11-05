@@ -213,13 +213,16 @@ pub fn herb_styles_on(day: f32) -> (GrassStyle, Vec<GrassStyle>) {
     if let Some(r) = kinds.get_mut(BRAMBLE_KIND as usize - 1) {
         // White flowers in June and July, then berries red going black; semi-evergreen, the
         // leaves darkening and many falling in a hard winter.
-        let [flowers, berries, black] = crate::season::bramble(day);
+        let [flowers, berries, black, red] = crate::season::bramble(day);
         let berry = mix3([0.32, 0.025, 0.03], [0.025, 0.018, 0.03], black);
         let share = flowers / (flowers + berries).max(1e-3);
-        r.bloom = 0.25 * flowers + 0.2 * berries;
+        r.bloom = 0.15 * flowers + 0.2 * berries;
         r.bloom_color = mix3(berry, r.bloom_color, share);
         r.bloom_size *= 0.55 + 0.45 * share;
         r.lush_color = mix3(r.lush_color, [0.04, 0.045, 0.02], 0.7 * winter);
+        // Wine red in patches from October, some canes staying green.
+        r.lush_color = mix3(r.lush_color, [0.085, 0.02, 0.03], 0.55 * red);
+        r.clump_color += 0.3 * red;
         r.alternate_leaves *= 1.0 - 0.35 * winter;
     }
     if let Some(h) = kinds.get_mut(k + 2) {
@@ -1712,6 +1715,7 @@ mod tests {
         assert!(mid[0] > 0.9 && mid[1] < 0.1, "{mid:?}");
         let sept = crate::season::bramble(245.0);
         assert!(sept[0] < 0.05 && sept[1] > 0.9 && sept[2] > 0.9, "{sept:?}");
+        assert!(sept[3] < 0.05 && crate::season::bramble(320.0)[3] > 0.9);
         assert!(
             crate::season::bramble(20.0)
                 .iter()
