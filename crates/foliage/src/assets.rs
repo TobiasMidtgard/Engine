@@ -27,7 +27,7 @@ use crate::meshgen::textures::{
     ALPHA_CUTOFF, HERO_ATLAS_SIZE, LeafKind, MASS_ATLAS_SIZE, atlas_seed, hero_leaf_textures,
     kind_of, leaf_textures, mass_textures,
 };
-use crate::meshgen::tree::{PlantMeshes, woody};
+use crate::meshgen::tree::{PlantMeshes, crown_tone, woody};
 use crate::meshgen::wind_bones::WindSkeleton;
 use crate::species::{LeafStyle, PlantForm, PlantLibrary, PlantSpecies, srgb};
 
@@ -320,6 +320,13 @@ impl Job {
                 let parts = (0..VARIANTS as u64)
                     .map(|v| {
                         let (mut full, mut sapling) = build_meshes(&sp, seed ^ (v * 0x9e37_79b9));
+                        if sp.is_woody() {
+                            let tone = crown_tone(&sp, v as usize);
+                            full.tone_leaves(tone);
+                            if let Some(s) = &mut sapling {
+                                s.tone_leaves(tone);
+                            }
+                        }
                         if !bone_wind {
                             full.wind = None;
                         }
@@ -784,7 +791,7 @@ fn build_species(
         m
     };
     let mix = |a: [f32; 3], b: [f32; 3], t: f32| [0, 1, 2].map(|i| a[i] + (b[i] - a[i]) * t);
-    let tint_colors = [0.0, 0.35, 0.7].map(|t| mix(sp.leaf_color, sp.accent_color, t));
+    let tint_colors = [0.0, 0.45, 0.9].map(|t| mix(sp.leaf_color, sp.accent_color, t));
     let leaves = tint_colors.map(|c| materials.add(leaf_material(c)));
     let leaves_hero = texture.and_then(|t| t.hero).map(|(color, normal)| {
         tint_colors.map(|c| {

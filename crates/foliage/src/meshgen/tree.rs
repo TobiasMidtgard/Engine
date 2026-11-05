@@ -114,6 +114,33 @@ pub const MAX_COLLISION_CAPSULES: usize = 14;
 pub const COLLISION_MIN_RADIUS_M: f32 = 0.045;
 
 impl PlantMeshes {
+    /// Multiply the living leaves' vertex colors (every level of detail, not the withered
+    /// ones) by `k`: one variant's [`crown_tone`].
+    pub fn tone_leaves(&mut self, k: Vec3) {
+        for m in [
+            &mut self.foliage,
+            &mut self.foliage_hero,
+            &mut self.foliage_mid,
+            &mut self.foliage_lod,
+            &mut self.foliage_distant,
+        ]
+        .into_iter()
+        .flatten()
+        .chain(self.foliage_thin.iter_mut())
+        .chain(self.foliage_mid_thin.iter_mut())
+        .chain(self.foliage_lod_thin.iter_mut())
+        .chain(self.foliage_distant_thin.iter_mut())
+        {
+            for v in &mut m.vertices {
+                for (c, k) in v.color.iter_mut().zip(k.to_array()) {
+                    *c *= k;
+                }
+            }
+        }
+    }
+}
+
+impl PlantMeshes {
     /// Write each swaying vertex's wind bone word into its vertex alpha
     /// ([`super::wind_bones::WindSkeleton::bake`]): the wood above the cut and every crown, at
     /// every level of detail. The stump, the logs and the snag keep their plain sway weights
@@ -396,7 +423,9 @@ impl Shading {
         let n = (cn * (1.0 - self.clump_weight) + kn * self.clump_weight + Vec3::Y * self.up)
             .normalize_or(Vec3::Y);
         let crown_ao = self.deep + (1.0 - self.deep) * smoothstep(0.15, 1.0, self.crown.depth(p));
-        let clump_ao = 0.8 + 0.2 * smoothstep(0.0, 1.0, rel.length());
+        // A clump's inner leaves sit in their neighbours' shade: lit outer lobes over dark
+        // pockets, not an evenly lit blob (regional-looks.md, trait 2; Bruneton & Neyret 2012).
+        let clump_ao = 0.62 + 0.38 * smoothstep(0.0, 1.0, rel.length());
         // Leaves facing the ground see less sky.
         let under = 1.0 + 0.2 * n.y.min(0.0);
         (n, crown_ao * clump_ao * under)
@@ -1848,6 +1877,32 @@ fn hero_crown(
     Some(b.finish())
 }
 
+/// How each mesh variant's leaves differ from its species' mean color: (brightness,
+/// saturation, warmth). Trees of one species standing side by side differ visibly in leaf
+/// greenness: leaf chlorophyll varies between individuals by tens of percent, vigorous trees
+/// carry dark, rich crowns and stressed ones (drought, poor roots, nutrient shortage) paler,
+/// yellower ones (chlorosis) [Richardson, Duigan & Berlyn 2002; Sims & Gamon 2002]. In
+/// photographs of mixed stands it is the tree-to-tree step that breaks a canopy into
+/// individual crowns (engine-design/foliage/regional-looks.md, trait 5). On top of the
+/// material tints (genes.hue, toward the accent color), so a species shows 12 shades.
+pub const CROWN_TONES: [(f32, f32, f32); 4] = [
+    (1.0, 1.0, 0.0),
+    (0.7, 1.15, -0.05),
+    (1.28, 0.78, 0.14),
+    (0.85, 0.95, 0.06),
+];
+
+/// The vertex color factor of variant `variant`'s leaves ([`CROWN_TONES`]).
+pub fn crown_tone(sp: &PlantSpecies, variant: usize) -> Vec3 {
+    let (value, saturation, warm) = CROWN_TONES[variant % CROWN_TONES.len()];
+    let c = Vec3::from(sp.leaf_color).max(Vec3::splat(0.004));
+    let lum = c.dot(Vec3::new(0.2126, 0.7152, 0.0722));
+    let toned = (Vec3::splat(lum) + (c - Vec3::splat(lum)) * saturation)
+        * Vec3::new(1.0 + warm, 1.0 + 0.25 * warm, 1.0 - 1.5 * warm)
+        * value;
+    (toned / c).clamp(Vec3::splat(0.3), Vec3::splat(2.0))
+}
+
 fn leaf_tint(sp: &PlantSpecies, rng: &mut Rng) -> Vec3 {
     let leaf = Vec3::from(sp.leaf_color).max(Vec3::splat(0.01));
     let accent = Vec3::from(sp.accent_color);
@@ -2983,6 +3038,35 @@ fn shrub(sp: &PlantSpecies, seed: u64) -> PlantMeshes {
 mod tests {
     use super::*;
     use crate::species::PlantLibrary;
+
+    /// The four variants of a species show four clearly different greens: the darkest and the
+    /// palest a third apart in brightness, the pale one yellower, every one still green.
+    #[test]
+    fn crown_tones_set_trees_apart() {
+        let lib = PlantLibrary::default();
+        for name in ["oak", "beech", "birch", "spruce"] {
+            let sp = lib.get(lib.id(name).unwrap());
+            let leaf = Vec3::from(sp.leaf_color);
+            let toned: Vec<Vec3> = (0..4).map(|v| leaf * crown_tone(sp, v)).collect();
+            let lum = |c: Vec3| c.dot(Vec3::new(0.2126, 0.7152, 0.0722));
+            let (dark, pale) = (lum(toned[1]), lum(toned[2]));
+            assert!(pale > 1.5 * dark, "{name}: dark {dark} pale {pale}");
+            assert!(
+                toned[2].x / toned[2].y > toned[1].x / toned[1].y,
+                "{name}: the pale one is yellower"
+            );
+            for c in &toned {
+                assert!(c.y > c.x && c.y > c.z, "{name}: still green {c}");
+            }
+        }
+        let mut m = woody(lib.get(lib.id("oak").unwrap()), 3, false);
+        let before = m.foliage.as_ref().unwrap().vertices[0].color;
+        m.tone_leaves(Vec3::new(0.5, 0.5, 0.5));
+        let after = m.foliage.as_ref().unwrap().vertices[0].color;
+        assert_eq!(after[0], before[0] * 0.5);
+        // The alpha (wind weight or bone word) is untouched.
+        assert_eq!(after[3], before[3]);
+    }
 
     /// Far trees (100-350 m) cost a few thousand triangles at most: the trunk reaches the
     /// ground (no stump with it) and a spruce's limbs stay under its shelves.
