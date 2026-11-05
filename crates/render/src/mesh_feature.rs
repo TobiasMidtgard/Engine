@@ -26,9 +26,10 @@
 //! glTF files) flip their triangles' winding; they are drawn with clockwise-front pipelines so
 //! back-face culling keeps the outside, as glTF requires.
 //!
-//! Dense opaque meshes (at least `RenderSettings::virtual_geometry_min_triangles`) are drawn
+//! Dense opaque and alpha-masked meshes (at least
+//! `RenderSettings::virtual_geometry_min_triangles`), still or swaying in the wind, are drawn
 //! as clusters by [`ClusterRenderer`] once their cluster hierarchy is built, with the same
-//! materials, texture sets and shading (see [`crate::virtual_geometry`]).
+//! materials, texture sets, wind and shading (see [`crate::virtual_geometry`]).
 //!
 //! Virtual textures: a slot whose image is over `RenderSettings::virtual_texture_threshold`, or
 //! was registered with [`crate::VirtualTextures`], is streamed tile by tile through the cache
@@ -481,10 +482,13 @@ struct MaterialFrame {
     masked: bool,
     double_sided: bool,
     glows: bool,
-    /// Opaque and without wind sway: may take the cluster path.
-    still_opaque: bool,
+    /// Opaque: may take the cluster path (so may masked ones), still or swaying (its culling
+    /// bounds then grow by how far the wind can move it).
+    opaque: bool,
     /// Sways in the wind: drawn every frame into the near cascades' shadows.
     sways: bool,
+    /// `StandardMaterial::wind_sway` (m at the top of its mesh).
+    wind_sway: f32,
     /// The share of its base color's texels an alpha test keeps (leaf cards: how much of a card
     /// is leaf, for the canopy map); 1 without a base color texture.
     coverage: f32,
@@ -628,15 +632,61 @@ fn static_redraw(view: &ViewData, map: usize) -> bool {
     }
 }
 
-/// Whether a slot may take the cluster path (virtual geometry). Not while it dithers out
-/// (`DitherFade`): the instanced path draws the dither.
-fn cluster_candidate(hot: &Hot, mesh: &MeshFrame, mat: &MaterialFrame) -> bool {
+/// Whether a slot may take the cluster path (virtual geometry): opaque or alpha-masked, still
+/// or swaying. Not while it dithers out (`DitherFade`): the instanced path draws the dither.
+/// Not a leaf crown that casts while the canopy map is on (`canopy`): its crown is taken from
+/// the instanced casters and it stays out of the sky occlusion map.
+fn cluster_candidate(hot: &Hot, mesh: &MeshFrame, mat: &MaterialFrame, canopy: bool) -> bool {
+    let crown = mat.masked && mat.sways && hot.flags & mesh_scene::CASTS != 0;
     hot.flags & (mesh_scene::INSTANCED_ONLY | mesh_scene::SHADOW_ONLY) == 0
         && hot.dither == 0.0
-        && mat.still_opaque
+        && (mat.opaque || mat.masked)
+        && !(canopy && crown)
         && mesh.exists
         && (mesh.dense || hot.flags & mesh_scene::DISPLACED != 0)
 }
+
+/// How far the wind and the benders may move a clustered instance's points (m, world), as
+/// `ClusterInstance::reach` and `height_reach`: a bone plant's reach (`PlantWindTable`), or the
+/// legacy sway's largest offset at the top of its mesh in this frame's wind (`plant_sway` in
+/// lib_types.wgsl, with the strongest gust front), plus the benders' largest push when one is
+/// near. `rest` is its camera-relative rest sphere (center, radius).
+fn cluster_wind_reach(
+    view: &ViewData,
+    mesh: &MeshFrame,
+    mat: &MaterialFrame,
+    scale: f32,
+    rest: (Vec3, f32),
+) -> (f32, f32) {
+    let (reach, height_reach) = if mesh.wind != 0 {
+        (mesh.wind_reach * scale, 0.0)
+    } else if mat.wind_sway > 0.0 {
+        let wind = view.plant_wind.wind;
+        let gusts = &view.plant_wind.gusts;
+        // Both fronts at their crest: `GustWaves` strengths (broad_a.w, fine_a.w).
+        let front = gusts[0][3].max(0.0) + gusts[2][3].max(0.0);
+        let strength = (wind.w.max(0.0) * (1.0 + front) / 10.0).min(1.5);
+        // |dir + (0, -0.1, 0)| <= 1.005; the slow sway and the flutter at most
+        // 1 + 0.15 (1 + front). A little over, for rounding.
+        let motion = 1.0 + 0.15 * (1.0 + front);
+        (0.0, 1.01 * mat.wind_sway * strength * motion)
+    } else {
+        return (0.0, 0.0);
+    };
+    // Benders (`bender_push`): only points within a bender's radius and reach across move,
+    // by at most `BENDER_MAX_PUSH` in all.
+    let (center, radius) = (rest.0, rest.1 + reach + height_reach);
+    let pushed = view.benders.iter().any(|b| {
+        let d = Vec2::new(center.x - b[0], center.z - b[2]).length();
+        d <= radius + b[3] + BENDER_REACH_M
+    });
+    let bend = if pushed { BENDER_MAX_PUSH_M } else { 0.0 };
+    (reach + bend, height_reach)
+}
+
+/// `BENDER_REACH` and `BENDER_MAX_PUSH` in lib_types.wgsl (m).
+const BENDER_REACH_M: f32 = 0.3;
+const BENDER_MAX_PUSH_M: f32 = 1.5;
 
 /// The view and settings as the cull sees them.
 #[derive(Clone, Copy)]
@@ -2247,7 +2297,7 @@ impl MeshFeature {
             i.draw_shadow(pass, impostors);
         }
         if let Some(clusters) = clusters {
-            clusters.draw_shadow(pass, view);
+            clusters.draw_shadow(pass, view, |set| self.texture_group(set));
         }
     }
 
@@ -3085,9 +3135,9 @@ impl RenderFeature for MeshFeature {
                     double_sided: material.double_sided,
                     glows: material.emissive_strength > 0.0
                         && material.emissive.iter().any(|&c| c > 0.0),
-                    still_opaque: material.alpha_mode == AlphaMode::Opaque
-                        && material.wind_sway <= 0.0,
+                    opaque: material.alpha_mode == AlphaMode::Opaque,
                     sways: material.wind_sway > 0.0,
+                    wind_sway: material.wind_sway.max(0.0),
                     coverage: match material.alpha_mode {
                         AlphaMode::Mask(_) => match material.base_color_texture {
                             Some(image) => image_assets
@@ -3110,6 +3160,7 @@ impl RenderFeature for MeshFeature {
         // 1. Which slots the serial pass looks at first: cluster candidates and meshes not
         //    uploaded yet (a quick parallel scan; the cull comes after the serial pass).
         let clusters_on = settings.virtual_geometry && self.clusters.is_some();
+        let canopy = settings.canopy;
         let mut deferred = std::mem::take(&mut self.deferred);
         // A later view of the frame takes the first one's list: slots uploaded since are
         // `checked` and pass through the serial pass to the cull.
@@ -3132,7 +3183,7 @@ impl RenderFeature for MeshFeature {
                             continue;
                         }
                         let mat = &material_frames[h.material as usize];
-                        if !mesh.ready || (clusters_on && cluster_candidate(h, mesh, mat)) {
+                        if !mesh.ready || (clusters_on && cluster_candidate(h, mesh, mat, canopy)) {
                             out.deferred.push((base + k) as u32);
                         }
                     }
@@ -3167,7 +3218,7 @@ impl RenderFeature for MeshFeature {
             let raw = hot.mesh as usize;
             let mat = self.material_frames[hot.material as usize];
             let mesh = self.mesh_frames[raw];
-            if clusters_on && cluster_candidate(&hot, &mesh, &mat) {
+            if clusters_on && cluster_candidate(&hot, &mesh, &mat, canopy) {
                 let cold = &scene.cold[s];
                 let mesh_handle = Handle::<Mesh>::from_index(mesh.index);
                 let material = material_assets
@@ -3265,14 +3316,27 @@ impl RenderFeature for MeshFeature {
                         None => self.material_slot(gpu, mat.index as u64, material, &sources),
                     };
                     if let Some(clusters) = &mut self.clusters {
+                        let model = cold.transform.matrix_relative_to(view.origin);
+                        // Its rest sphere, camera-relative (unknown: everywhere).
+                        let rest = clusters
+                            .bounds(cluster_key)
+                            .map_or((Vec3::ZERO, f32::INFINITY), |b| {
+                                (model.transform_point3(b.center), b.radius * hot.scale)
+                            });
+                        let (reach, height_reach) =
+                            cluster_wind_reach(view, &mesh, &mat, hot.scale, rest);
                         clusters.push_instance(ClusterInstance {
                             mesh: cluster_key,
-                            model: cold.transform.matrix_relative_to(view.origin),
+                            model,
                             prev_model: cold.previous_at(frame).matrix_relative_to(prev_origin),
                             material: material_slot,
                             textures,
                             double_sided: material.double_sided,
                             casts_shadows: shadows && hot.flags & mesh_scene::CASTS != 0,
+                            masked: mat.masked,
+                            plant_wind: mesh.wind,
+                            reach,
+                            height_reach,
                         });
                     }
                     continue;

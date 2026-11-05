@@ -30,10 +30,17 @@
 //!
 //! Automatic: a [`MeshRenderer`](crate::MeshRenderer) whose mesh has at least
 //! `RenderSettings::virtual_geometry_min_triangles` triangles (50 000 by default) and whose
-//! material is opaque and not wind-animated is drawn as clusters once its build has finished.
+//! material is opaque or alpha-masked is drawn as clusters once its build has finished (masked
+//! ones cut out by their base color's alpha in the prepass, the scene and the shadow maps, as
+//! instances are; a casting leaf crown stays instanced while the canopy map is on, which takes
+//! its crown from the instanced casters). Swaying meshes too
+//! (a `wind_sway` material, or a bone plant in `PlantWindMeshes`): their clusters move with
+//! the same vertex wind as instances, the level of detail is picked at rest, and culling grows
+//! each cluster's sphere by how far the wind and benders can move it (bone plants by their
+//! reach, the legacy sway by its largest offset at the cluster's height in this frame's wind).
 //! Until then it is drawn by the regular instanced path, so nothing pops in or disappears.
-//! Smaller meshes (props, debris, fragments), alpha-masked and transparent materials stay on
-//! the instanced path, and so does any entity with the
+//! Smaller meshes (props, debris, fragments) and transparent materials stay on the instanced
+//! path, and so does any entity with the
 //! [`NoVirtualGeometry`](crate::NoVirtualGeometry) marker. `RenderSettings::virtual_geometry =
 //! false` turns the cluster path off.
 //!
@@ -181,6 +188,11 @@ pub struct ClusterDag {
     pub bounds: Sphere,
     /// Triangles of the original mesh (after dropping degenerate ones).
     pub source_triangles: u32,
+    /// The lowest and highest y of the source mesh's vertices, every one counted (as
+    /// `Mesh::aabb`, unreferenced ones too): where the wind's height weight runs from 0 to 1
+    /// (`vertex_height01` in mesh.wgsl), so a swaying mesh sways the same as clusters and as
+    /// instances, and with the parts it shares bounds with (`PlantMeshes::share_bounds`).
+    pub height_range: [f32; 2],
 }
 
 impl ClusterDag {

@@ -28,7 +28,7 @@ struct CullView {
     eye: vec4<f32>,               // camera-relative eye, w = 1 perspective / 0 orthographic
     forward: vec4<f32>,           // view direction, w = 1 to cull clusters facing away
     lod: vec4<f32>,               // pixels per meter (at 1 m when perspective), threshold (px), nearest distance (m), smallest instance radius drawn (m)
-    slots: vec4<u32>,             // first draw slot, 1 = one slot for all buckets, entries per slot, 1 = enabled
+    slots: vec4<u32>,             // first draw slot, shadow buckets (0: the camera, a slot per camera bucket), entries per slot, 1 = enabled
 };
 
 struct CullParams {
@@ -252,7 +252,7 @@ fn cs_clusters(
     if (own > threshold || parent <= threshold) { return; }
 
     let center = to_view(inst, cluster.bounds.xyz);
-    let radius = cluster.bounds.w * inst.lod.x;
+    let radius = cluster_cull_radius(inst, cluster);
     if (!in_view(view, center, radius)) { return; }
     if (view.forward.w > 0.5 && (inst.extra.y & INSTANCE_CONE_CULL) != 0u && cluster.cone.w > 0.0) {
         // A stretched instance turns its normals further from the axis: sin grows by at most
@@ -273,7 +273,9 @@ fn cs_clusters(
         }
     }
 
-    let bucket = select(inst.mesh.z, 0u, view.slots.y != 0u);
+    // The camera's bucket (texture set, sidedness), or a shadow view's (0: opaque, depth only;
+    // k: masked texture set k - 1, alpha-tested).
+    let bucket = select(inst.mesh.z, inst.mesh.w, view.slots.y != 0u);
     let slot = view.slots.x + bucket;
     let index = atomicAdd(&draws.slots[slot].instance_count, 1u);
     if (index >= view.slots.z) { return; }  // the list is full (counted in cs_finish)
@@ -290,7 +292,7 @@ fn cs_finish(@builtin(global_invocation_id) id: vec3<u32>) {
         let s = cull.views[k].slots;
         // A view that is off owns no slot (its slot fields are all zero).
         if (s.w == 0u) { continue; }
-        let n = select(cull.counts.w, 1u, s.y != 0u);
+        let n = select(cull.counts.w, s.y, s.y != 0u);
         if (slot >= s.x && slot < s.x + n) { v = k; }
     }
     let capacity = cull.views[v].slots.z;
@@ -324,13 +326,13 @@ fn cs_cluster_late(
     let inst = instances[entry.x];
     let cluster = clusters[entry.y];
     let center = to_view(inst, cluster.bounds.xyz);
-    let radius = cluster.bounds.w * inst.lod.x;
+    let radius = cluster_cull_radius(inst, cluster);
     if (vg_occluded(cull.current, center, radius)) {
         atomicAdd(&draws.occluded, 1u);
         return;
     }
     let view = cull.views[0];
-    let bucket = select(inst.mesh.z, 0u, view.slots.y != 0u);
+    let bucket = inst.mesh.z;
     let slot = cull.hzb.w + bucket;
     let index = atomicAdd(&draws.slots[slot].instance_count, 1u);
     if (index >= view.slots.z) { return; }  // the list is full (counted in cs_cluster_late_finish)

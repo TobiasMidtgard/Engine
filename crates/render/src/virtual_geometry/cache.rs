@@ -22,7 +22,7 @@ use crate::mesh::{Mesh, Vertex};
 
 /// Changes whenever the builder (clustering, simplification, tessellation) makes different
 /// output for the same input, so old cache files are never used for new builds.
-pub const BUILDER_VERSION: u32 = 1;
+pub const BUILDER_VERSION: u32 = 2;
 
 const MAGIC: [u8; 8] = *b"ENGVGC\0\x01";
 
@@ -236,6 +236,7 @@ fn encode(dag: &ClusterDag) -> Vec<u8> {
     }
     words.extend(sphere_words(dag.bounds));
     words.push(dag.source_triangles);
+    words.extend(dag.height_range.map(f32::to_bits));
     let payload =
         miniz_oxide::deflate::compress_to_vec(&shuffle(bytemuck::cast_slice(&words), 4), 1);
 
@@ -269,7 +270,7 @@ fn decode(bytes: &[u8]) -> Option<ClusterDag> {
         .map(|c| u32::from_le_bytes(*c))
         .collect();
     let [version, nv, ni, nc, nl, nw] = [0, 1, 2, 3, 4, 5].map(|i| header[i] as usize);
-    if version != BUILDER_VERSION as usize || nw != nv * 12 + ni + nc * CLUSTER_WORDS + nl * 4 + 5 {
+    if version != BUILDER_VERSION as usize || nw != nv * 12 + ni + nc * CLUSTER_WORDS + nl * 4 + 7 {
         return None;
     }
     let checksum = u64::from_le_bytes(bytes[32..40].try_into().ok()?);
@@ -331,6 +332,7 @@ fn decode(bytes: &[u8]) -> Option<ClusterDag> {
         levels,
         bounds: sphere_of(&rest[..4]),
         source_triangles: rest[4],
+        height_range: [f(rest[5]), f(rest[6])],
     })
 }
 
@@ -357,6 +359,7 @@ mod tests {
         assert_eq!(a.levels, b.levels);
         assert_eq!(a.bounds, b.bounds);
         assert_eq!(a.source_triangles, b.source_triangles);
+        assert_eq!(a.height_range, b.height_range);
     }
 
     #[test]

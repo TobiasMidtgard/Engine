@@ -221,6 +221,18 @@ pub struct ClusterInstance {
     pub textures: u32,
     pub double_sided: bool,
     pub casts_shadows: bool,
+    /// Alpha-masked (`AlphaMode::Mask`): its shadow is cut out by its base color's alpha with
+    /// its texture set, as the prepass and scene pass cut it.
+    pub masked: bool,
+    /// A bone plant's entry + 1 in the plant wind table (0: none; `plant_wind_entry` in
+    /// lib_wind.wgsl).
+    pub plant_wind: u32,
+    /// How far wind and benders may move any point of it (m, world): a bone plant's reach.
+    /// Culling grows every cluster's sphere by this (its level of detail is picked at rest).
+    pub reach: f32,
+    /// How far the legacy sway (`StandardMaterial::wind_sway`) may move a point at the top of
+    /// its mesh (m, world); a point at height share `h` moves at most this times `h²`.
+    pub height_reach: f32,
 }
 
 /// What the cluster path drew. Clusters and triangles are counted on the GPU and read back,
@@ -239,6 +251,8 @@ pub struct ClusterStats {
     pub overflow: u32,
     /// Indirect draws issued this frame.
     pub draw_calls: u32,
+    /// Of `instances`, those swaying in the wind (bounds grown by their reach).
+    pub swaying: u32,
 }
 
 /// What a build turns into clusters: a mesh, or a base mesh to tessellate and displace first.
@@ -563,6 +577,13 @@ pub struct ClusterRenderer {
     scene_layout: wgpu::PipelineLayout,
     features: ShaderFeatures,
     shadow: wgpu::RenderPipeline,
+    /// The alpha-tested shadow pipeline (masked casters), created the first frame one casts.
+    shadow_masked: Option<wgpu::RenderPipeline>,
+    shadow_shader: wgpu::ShaderModule,
+    shadow_masked_layout: wgpu::PipelineLayout,
+    /// Texture sets of the masked casters: shadow bucket `k + 1` draws set `k` alpha-tested,
+    /// bucket 0 every opaque caster depth only. Each shadow view has a slot per bucket.
+    shadow_buckets: Vec<u32>,
 
     vertices: Pool,
     indices: Pool,
@@ -611,7 +632,8 @@ pub struct ClusterRenderer {
     gpu_instances: Vec<GpuInstance>,
     /// Camera buckets (double-sided, texture set); bucket i draws slot i.
     buckets: Vec<(bool, u32)>,
-    /// Draw slot per shadow view (cascades, then the sky occlusion map), when it is on.
+    /// First draw slot per shadow view (cascades, then the sky occlusion map), when it is on:
+    /// one slot per shadow bucket.
     shadow_slots: [Option<u32>; VIEWS - 1],
     /// Something to cull and draw this frame.
     active: bool,
@@ -687,6 +709,47 @@ fn scene_pipelines(
         [render_pipeline(false, false), render_pipeline(true, false)],
         [render_pipeline(false, true), render_pipeline(true, true)],
     )
+}
+
+/// The alpha-tested cluster shadow pipeline (masked casters), with the shadow shader's
+/// optional parts in `features`.
+fn shadow_masked_pipeline(
+    gpu: &GpuShared,
+    shader: &wgpu::ShaderModule,
+    layout: &wgpu::PipelineLayout,
+    features: ShaderFeatures,
+) -> wgpu::RenderPipeline {
+    let constants = features.shadow_constants();
+    let compilation = wgpu::PipelineCompilationOptions {
+        constants: &constants,
+        ..Default::default()
+    };
+    gpu.device
+        .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("cluster shadow masked"),
+            layout: Some(layout),
+            vertex: wgpu::VertexState {
+                module: shader,
+                entry_point: Some("vs_cluster_shadow_masked"),
+                compilation_options: compilation.clone(),
+                buffers: &[],
+            },
+            primitive: wgpu::PrimitiveState {
+                cull_mode: None,
+                unclipped_depth: gpu.features.contains(wgpu::Features::DEPTH_CLIP_CONTROL),
+                ..Default::default()
+            },
+            depth_stencil: Some(gpu.shadow_depth_state()),
+            multisample: Default::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: shader,
+                entry_point: Some("fs_shadow_masked"),
+                compilation_options: compilation,
+                targets: &[],
+            }),
+            multiview_mask: None,
+            cache: None,
+        })
 }
 
 impl ClusterRenderer {
@@ -806,6 +869,16 @@ impl ClusterRenderer {
         });
 
         let shadow_shader = gpu.shader("cluster shadow", &shadow_source.1, false);
+        let shadow_masked_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("cluster shadow masked"),
+            bind_group_layouts: &[
+                Some(&gpu.shadow_view_layout),
+                Some(material_layout),
+                Some(texture_layout),
+                Some(&draw_layout),
+            ],
+            immediate_size: 0,
+        });
         let shadow_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("cluster shadow"),
             bind_group_layouts: &[
@@ -886,6 +959,10 @@ impl ClusterRenderer {
             scene_layout,
             features,
             shadow,
+            shadow_masked: None,
+            shadow_shader,
+            shadow_masked_layout,
+            shadow_buckets: Vec::new(),
             vertices: Pool::new(device, "cluster vertices", 48, 4096),
             indices: Pool::new(device, "cluster indices", 4, 16384),
             clusters: Pool::new(device, "clusters", 96, 256),
@@ -950,6 +1027,7 @@ impl ClusterRenderer {
     pub fn set_shader_features(&mut self, features: ShaderFeatures) {
         self.features = features;
         self.scene = None;
+        self.shadow_masked = None;
     }
 
     pub fn begin_frame(&mut self, gpu: &GpuShared) {
@@ -1203,8 +1281,10 @@ impl ClusterRenderer {
         self.active = false;
         self.gpu_instances.clear();
         self.buckets.clear();
+        self.shadow_buckets.clear();
         self.shadow_slots = [None; VIEWS - 1];
         self.stats.instances = 0;
+        self.stats.swaying = 0;
         self.stats.draw_calls = 0;
         if self.pending.len() > MAX_INSTANCES {
             tracing::warn!(
@@ -1245,6 +1325,18 @@ impl ClusterRenderer {
                 self.buckets.push(key);
                 self.buckets.len() as u32 - 1
             });
+            // Masked casters' shadows by texture set (bucket 0: depth only).
+            let shadow_bucket = if inst.masked && inst.casts_shadows {
+                match self.shadow_buckets.iter().position(|&t| t == inst.textures) {
+                    Some(k) => k as u32 + 1,
+                    None => {
+                        self.shadow_buckets.push(inst.textures);
+                        self.shadow_buckets.len() as u32
+                    }
+                }
+            } else {
+                0
+            };
             let model = inst.model;
             let axes = [model.x_axis, model.y_axis, model.z_axis].map(|a| a.truncate());
             let lengths = axes.map(Vec3::length);
@@ -1267,8 +1359,13 @@ impl ClusterRenderer {
             if Mat3::from_mat4(model).determinant() < 0.0 {
                 flags |= INSTANCE_MIRRORED;
             }
-            if !inst.double_sided && stretch < 4.0 {
+            let sways = inst.reach > 0.0 || inst.height_reach > 0.0;
+            // A swaying surface turns: its normal cones no longer hold.
+            if !inst.double_sided && stretch < 4.0 && !sways {
                 flags |= INSTANCE_CONE_CULL;
+            }
+            if sways {
+                self.stats.swaying += 1;
             }
             let views = 1 + if inst.casts_shadows {
                 flags |= INSTANCE_CASTS_SHADOWS;
@@ -1283,10 +1380,25 @@ impl ClusterRenderer {
                 m: base.m,
                 n: base.n,
                 prev: base.prev,
-                extra: [inst.material, flags, base.extra[2], base.extra[3]],
-                sphere: [center.x, center.y, center.z, dag.bounds.radius * scale],
-                mesh: [dag.levels.0 as u32, dag.levels.1 as u32, bucket, 0],
-                lod: [scale, stretch.min(4.0), 0.0, 0.0],
+                extra: [
+                    inst.material,
+                    flags | inst.plant_wind.min(0xffff) << 16,
+                    base.extra[2],
+                    base.extra[3],
+                ],
+                sphere: [
+                    center.x,
+                    center.y,
+                    center.z,
+                    dag.bounds.radius * scale + inst.reach + inst.height_reach,
+                ],
+                mesh: [
+                    dag.levels.0 as u32,
+                    dag.levels.1 as u32,
+                    bucket,
+                    shadow_bucket,
+                ],
+                lod: [scale, stretch.min(4.0), inst.reach, inst.height_reach],
             });
             entries += dag.clusters.1;
             chunks += dag.chunks as u64 * views;
@@ -1304,10 +1416,11 @@ impl ClusterRenderer {
         // Draw slots: the camera's buckets, then one per shadow view that is on, then the
         // camera's buckets again for the clusters occlusion culling draws late.
         let mut slots = self.buckets.len() as u32;
+        let shadow_buckets = 1 + self.shadow_buckets.len() as u32;
         for (v, on) in shadow_views.iter().enumerate() {
             if *on {
                 self.shadow_slots[v] = Some(slots);
-                slots += 1;
+                slots += shadow_buckets;
             }
         }
         self.late = settings.virtual_geometry_occlusion;
@@ -1443,7 +1556,7 @@ impl ClusterRenderer {
             };
             cull.planes = ortho_planes(&view_proj, near);
             cull.lod = [texels_per_meter, shadow_threshold, 1.0, min_radius];
-            cull.slots = [slot, 1, per_slot, 1];
+            cull.slots = [slot, shadow_buckets, per_slot, 1];
         }
         // Occlusion: the HZB holds last frame's depth when the camera didn't cut.
         self.frame_view = (view.view_proj, view.origin);
@@ -1549,10 +1662,18 @@ impl ClusterRenderer {
                 self.features,
             ));
         }
+        if self.shadow_masked.is_none() && !self.shadow_buckets.is_empty() {
+            self.shadow_masked = Some(shadow_masked_pipeline(
+                gpu,
+                &self.shadow_shader,
+                &self.shadow_masked_layout,
+                self.features,
+            ));
+        }
         self.active = true;
-        // Prepass and scene per bucket, one per shadow view.
-        self.stats.draw_calls =
-            (2 + self.late as u32 * 2) * self.buckets.len() as u32 + shadow_count as u32;
+        // Prepass and scene per bucket, one per shadow view and shadow bucket.
+        self.stats.draw_calls = (2 + self.late as u32 * 2) * self.buckets.len() as u32
+            + shadow_count as u32 * shadow_buckets;
     }
 
     /// Cull every view and fill the draw slots (the mesh feature's compute).
@@ -1753,8 +1874,14 @@ impl ClusterRenderer {
 
     /// Draw the clusters of shadow cascade `cascade`, of the sky occlusion map when it is
     /// `SKY_OCCLUSION_VIEW`, or of the far shadow map when it is [`FAR_SHADOW_CLUSTERS`] (group 1
-    /// bound).
-    pub fn draw_shadow(&self, pass: &mut wgpu::RenderPass<'_>, cascade: usize) {
+    /// bound): opaque ones depth only, masked ones alpha-tested with their texture set
+    /// (`textures` gives its bind group).
+    pub fn draw_shadow<'a>(
+        &'a self,
+        pass: &mut wgpu::RenderPass<'_>,
+        cascade: usize,
+        textures: impl Fn(u32) -> Option<&'a wgpu::BindGroup>,
+    ) {
         let Some(group) = self.draw_group.as_ref().filter(|_| self.active) else {
             return;
         };
@@ -1764,6 +1891,19 @@ impl ClusterRenderer {
         pass.set_pipeline(&self.shadow);
         pass.set_bind_group(3, group, &[]);
         pass.draw_indirect(&self.draws, HEADER_BYTES + ARGS_BYTES * *slot as u64);
+        let Some(masked) = &self.shadow_masked else {
+            return;
+        };
+        for (k, &set) in self.shadow_buckets.iter().enumerate() {
+            let Some(t) = textures(set) else {
+                continue;
+            };
+            pass.set_pipeline(masked);
+            pass.set_bind_group(2, t, &[]);
+            pass.set_bind_group(3, group, &[]);
+            let at = *slot as u64 + 1 + k as u64;
+            pass.draw_indirect(&self.draws, HEADER_BYTES + ARGS_BYTES * at);
+        }
     }
 
     /// Whether anything is drawn as clusters this frame.
@@ -1818,6 +1958,7 @@ impl ClusterRenderer {
             "stats": self.stats,
             "pool_bytes": pool_bytes,
             "buckets": self.buckets.len(),
+            "shadow_buckets": self.shadow_buckets.len(),
             "builds": self.builds,
             "occlusion": {
                 "on": self.late,
@@ -1945,12 +2086,17 @@ fn upload(
     pools[1].write(queue, starts[1], bytemuck::cast_slice(&dag.indices));
     pools[2].write(queue, starts[2], bytemuck::cast_slice(&gpu_clusters));
     pools[3].write(queue, starts[3], bytemuck::cast_slice(&gpu_levels));
-    let (min_y, max_y) = dag
-        .vertices
-        .iter()
-        .fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), v| {
-            (lo.min(v.position[1]), hi.max(v.position[1]))
-        });
+    // The source mesh's height (its unreferenced vertices too, as the instanced path's
+    // bounds), so wind weights by height match; the clusters' own when unknown.
+    let (min_y, max_y) = match dag.height_range {
+        [lo, hi] if hi > lo => (lo, hi),
+        _ => dag
+            .vertices
+            .iter()
+            .fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), v| {
+                (lo.min(v.position[1]), hi.max(v.position[1]))
+            }),
+    };
     Some(GpuDag {
         vertices: (starts[0], lens[0]),
         indices: (starts[1], lens[1]),

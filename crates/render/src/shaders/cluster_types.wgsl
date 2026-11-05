@@ -11,10 +11,11 @@ struct ClusterInstance {
     p0: vec4<f32>,      // last frame's model matrix rows, relative to last frame's camera
     p1: vec4<f32>,
     p2: vec4<f32>,
-    extra: vec4<u32>,   // material index, flags (INSTANCE_*), mesh min y (f32 bits), mesh height (f32 bits)
-    sphere: vec4<f32>,  // camera-relative sphere around all its clusters and error spheres (m)
-    mesh: vec4<u32>,    // first level, level count, bucket (texture set and sidedness) in the camera view, unused
-    lod: vec4<f32>,     // largest axis scale (errors and radii grow by it), normal cone stretch (1: rotation and uniform scale), unused, unused
+    extra: vec4<u32>,   // material index, flags (INSTANCE_*) | plant wind entry << 16, mesh min y (f32 bits), mesh height (f32 bits)
+    sphere: vec4<f32>,  // camera-relative sphere around all its clusters and error spheres, grown by its reach (m)
+    mesh: vec4<u32>,    // first level, level count, bucket (texture set and sidedness) in the camera view, shadow bucket (0: opaque, k: masked texture set k - 1)
+    lod: vec4<f32>,     // largest axis scale (errors and radii grow by it), normal cone stretch (1: rotation and uniform scale),
+                        // reach: how far wind and benders move any point (m), height reach: how far the legacy sway moves its top (m)
 };
 
 // The transform mirrors the mesh: two corners of every triangle are swapped so front faces stay
@@ -38,3 +39,17 @@ struct Cluster {
 // Vertices drawn per visible cluster: three per triangle of a full cluster (the corners of
 // missing triangles collapse to a point and draw nothing).
 const CLUSTER_VERTEX_COUNT: u32 = 384u;
+
+// The sphere a cluster's triangles stay in while it sways (camera-relative center, radius): its
+// rest sphere grown by the instance's reach, and by the legacy sway's reach at the height share
+// of the sphere's top (the sway grows with the square of height, `plant_sway` in lib_types).
+// Culling (frustum, occlusion, shadow views) uses it; the level of detail is picked at rest.
+fn cluster_cull_radius(inst: ClusterInstance, cluster: Cluster) -> f32 {
+    var radius = cluster.bounds.w * inst.lod.x + inst.lod.z;
+    if (inst.lod.w > 0.0) {
+        let h = saturate((cluster.bounds.y + cluster.bounds.w - bitcast<f32>(inst.extra.z))
+            / max(bitcast<f32>(inst.extra.w), 1e-3));
+        radius += inst.lod.w * h * h;
+    }
+    return radius;
+}

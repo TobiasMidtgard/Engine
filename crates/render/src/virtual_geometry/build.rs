@@ -177,7 +177,12 @@ pub fn build(mesh: &Mesh) -> ClusterDag {
         }
     }
 
-    finish(p, work)
+    let mut dag = finish(p, work);
+    let aabb = mesh.aabb();
+    if aabb.min.y <= aabb.max.y {
+        dag.height_range = [aabb.min.y, aabb.max.y];
+    }
+    dag
 }
 
 /// Pack the clusters, compute their bounds and normal cones, and index the levels.
@@ -732,6 +737,25 @@ mod tests {
         assert!(
             root_tris <= 512,
             "the coarsest cut still has {root_tris} triangles"
+        );
+    }
+
+    #[test]
+    fn the_height_range_counts_every_vertex_of_the_source() {
+        // Foliage pads a plant's parts to shared bounds with vertices no triangle uses; the
+        // wind's height weight runs over that range on both paths.
+        let mut mesh = rock(3);
+        let aabb = mesh.aabb();
+        mesh.vertices.push(Vertex::new(
+            Vec3::Y * 10.0,
+            Vec3::Y,
+            engine_core::math::Vec2::ZERO,
+        ));
+        let dag = build(&mesh);
+        assert_eq!(dag.height_range, [aabb.min.y, 10.0]);
+        assert!(
+            dag.vertices.iter().all(|v| v.position[1] < 10.0),
+            "the padding vertex is not drawn"
         );
     }
 
