@@ -135,7 +135,7 @@ fn difference(a: &RgbaImage, b: &RgbaImage) -> (f32, f32) {
 
 /// Mean red minus green over the pixels where `a` and `b` differ (the boxes).
 fn redness(img: &RgbaImage, plain: &RgbaImage) -> f32 {
-    let (mut sum, mut n) = (0.0, 0.0);
+    let (mut sum, mut n) = (0.0f32, 0.0f32);
     for (p, q) in img.pixels().zip(plain.pixels()) {
         if (0..3).any(|c| p[c].abs_diff(q[c]) > 8) {
             sum += p[0] as f32 - p[1] as f32;
