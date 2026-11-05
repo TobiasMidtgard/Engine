@@ -38,6 +38,12 @@ pub const MOST_SWELL: f32 = 4.0;
 const RECHARGE_S: f32 = 1800.0;
 /// How fast the risen water washes the loose fines out, per second per unit of swell above 1.
 const WASHOUT_PER_S: f32 = 1.0 / 300.0;
+/// How fast the brown water spreads into a lake per unit of mud and swell, m/s.
+const PLUME_SPREAD_M_S: f32 = 0.3;
+/// Widest a plume spreads, meters.
+pub const MOST_PLUME_M: f32 = 90.0;
+/// Seconds for a plume to clear once no more brown water comes in.
+const PLUME_CLEAR_S: f32 = 900.0;
 /// The swell or mud has to move this much before the streams are updated.
 const STEP: f32 = 0.02;
 
@@ -56,6 +62,12 @@ pub struct Freshet {
     pub forced_mm_h: Option<f32>,
     /// Held where it is (a gallery's flood): [`freshet_system`] leaves it be.
     pub held: bool,
+    /// How far the brown water has spread into a lake round where the falls come in,
+    /// meters, and how brown it still is there (0..1): a plume builds while the flood runs
+    /// in and lingers long after (fine clay settles out of still water over hours; compressed
+    /// here like the rest).
+    pub plume_m: f32,
+    pub plume_mud: f32,
 }
 
 impl Default for Freshet {
@@ -67,6 +79,8 @@ impl Default for Freshet {
             fines: 1.0,
             forced_mm_h: None,
             held: false,
+            plume_m: 0.0,
+            plume_mud: 0.0,
         }
     }
 }
@@ -88,11 +102,15 @@ impl Freshet {
         ((self.swell - 1.0) / 2.0).clamp(0.0, 1.0)
     }
 
-    /// `GALLERY_FLOOD=swell,mud` (say `2.5,0.8`), for the galleries' rain shots.
+    /// `GALLERY_FLOOD=swell,mud[,plume m[,plume mud]]` (say `2.5,0.8,40`), for the galleries'
+    /// rain shots.
     pub fn from_env() -> Option<Self> {
         let v = std::env::var("GALLERY_FLOOD").ok()?;
         let mut it = v.split(',').map(|x| x.trim().parse::<f32>().ok());
-        Some(Self::held(it.next()??, it.next().flatten().unwrap_or(0.0)))
+        let mut f = Self::held(it.next()??, it.next().flatten().unwrap_or(0.0));
+        f.plume_m = it.next().flatten().unwrap_or(0.0).clamp(0.0, MOST_PLUME_M);
+        f.plume_mud = it.next().flatten().unwrap_or(f.mud).clamp(0.0, 1.0);
+        Some(f)
     }
 
     /// Step `dt` seconds with `rain_mm_h` falling.
@@ -111,6 +129,18 @@ impl Freshet {
         self.fines = (self.fines + (recharge - washout) * dt).clamp(0.0, 1.0);
         // C ∝ Q^2 from what is ready: brown within a doubling of the flow.
         self.mud = (self.fines * (rise * 0.8).powi(2)).min(1.0);
+        // The plume: pushed out by the brown water coming in (faster the more of it), browner
+        // toward what comes in, and fading slowly once it stops; spent, it shrinks away.
+        self.plume_m =
+            (self.plume_m + PLUME_SPREAD_M_S * self.mud * self.swell * dt).min(MOST_PLUME_M);
+        if self.mud > self.plume_mud {
+            self.plume_mud += (self.mud - self.plume_mud) * (dt / 60.0).min(1.0);
+        } else {
+            self.plume_mud *= (-dt / PLUME_CLEAR_S).exp();
+        }
+        if self.plume_mud < 0.02 {
+            self.plume_m *= (-dt / 120.0).exp();
+        }
     }
 }
 
@@ -137,7 +167,7 @@ pub fn freshet_system(
         }
     };
     // Unchanged (dry and drained): leave it be, so nothing downstream sees a change.
-    if rain <= 0.0 && freshet.store_mm < 1e-4 && freshet.fines >= 1.0 {
+    if rain <= 0.0 && freshet.store_mm < 1e-4 && freshet.fines >= 1.0 && freshet.plume_m < 0.01 {
         return;
     }
     freshet.step(rain, dt);
@@ -238,10 +268,14 @@ mod tests {
         // Twenty minutes of heavy rain, then dry.
         let (mut peak_swell, mut peak_mud) = ((0.0f32, 0usize), (0.0f32, 0usize));
         let mut swells = Vec::new();
+        let mut plume_after = (0.0, 0.0);
         for t in 0..3600 {
             let rain = if t < 1200 { 10.0 } else { 0.0 };
             f.step(rain, dt);
             swells.push(f.swell);
+            if t == 1500 {
+                plume_after = (f.plume_m, f.plume_mud);
+            }
             if f.swell > peak_swell.0 {
                 peak_swell = (f.swell, t);
             }
@@ -258,6 +292,13 @@ mod tests {
         assert!(peak_mud.1 < peak_swell.1, "{peak_mud:?} {peak_swell:?}");
         // And it all drains away again.
         assert!(f.swell < 1.05, "{}", f.swell);
+        // The lake's plume grew while the brown water came in, and lingers after the rain.
+        assert!(
+            plume_after.0 > 40.0 && plume_after.1 > 0.1,
+            "{plume_after:?}"
+        );
+        // Then clears away.
+        assert!(f.plume_m < plume_after.0 * 0.5, "{}", f.plume_m);
     }
 
     #[test]
