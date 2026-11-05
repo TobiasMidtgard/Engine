@@ -599,12 +599,14 @@ pub fn spawn_demo(commands: &mut Commands, center: DVec3) {
     ));
     spawn_rocks(commands, center, rocks);
     spawn_garden(commands, local(center, GARDEN[0], GARDEN[1]));
-    // Midsummer, holding still.
+    // 24 years old, holding still, in leaf or bare with the season.
     commands.spawn((
         Name::new("old oak"),
         Transform::from_translation(local(center, OLD_OAK[0], OLD_OAK[1]) - DVec3::Y * 0.05)
             .with_rotation(Quat::from_rotation_y(2.4)),
-        crate::growth::GrowingPlant::new("oak", 3).aged(OLD_OAK_YEARS * 365.0 + 200.0),
+        crate::growth::GrowingPlant::new("oak", 3)
+            .aged(OLD_OAK_YEARS * 365.0 + 200.0)
+            .on_calendar(),
     ));
     // Leaf litter, needles, moss, ash and packed earth under the trees.
     commands.spawn((

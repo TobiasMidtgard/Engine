@@ -464,6 +464,10 @@ pub struct GrowingPlant {
     /// Mesh detail near the camera: 1 full. Further off it is drawn at a share of this
     /// ([`DETAIL_BANDS`]); a tree drops to its light version.
     pub detail: f32,
+    /// A held plant (`days_per_second` 0) keeps its age in years but shows the season's day
+    /// ([`crate::season::FoliageSeason`]): an old oak stands bare in winter and turns in autumn
+    /// with the woods around it, on the wood of its latest spring.
+    pub calendar: bool,
 }
 
 impl Default for GrowingPlant {
@@ -476,6 +480,7 @@ impl Default for GrowingPlant {
             days_per_second: 0.0,
             repeat: false,
             detail: 1.0,
+            calendar: false,
         }
     }
 }
@@ -491,6 +496,12 @@ impl GrowingPlant {
 
     pub fn aged(mut self, days: f32) -> Self {
         self.age_days = days;
+        self
+    }
+
+    /// Show the season's day ([`GrowingPlant::calendar`]).
+    pub fn on_calendar(mut self) -> Self {
+        self.calendar = true;
         self
     }
 
@@ -515,6 +526,24 @@ impl GrowingPlant {
         g.validate()?;
         Ok(g)
     }
+}
+
+/// Days in a growth year (a tree's springs come `YEAR` days apart).
+const YEAR_DAYS: f32 = 365.0;
+
+/// The age that shows calendar `day` on the wood a plant of `age` days has: the same latest
+/// spring flush (day `flush` of a year), so its branches stay as they are and only its leaves
+/// follow the season. Days before the flush belong to the next year's winter.
+pub fn calendar_age(age: f32, day: f32, flush: f32) -> f32 {
+    let year = (age / YEAR_DAYS).floor();
+    let grown = if age - year * YEAR_DAYS >= flush {
+        year
+    } else {
+        year - 1.0
+    };
+    let day = day.rem_euclid(YEAR_DAYS);
+    let into = if day >= flush { grown } else { grown + 1.0 };
+    (into * YEAR_DAYS + day).max(0.0)
 }
 
 /// Parts a growing plant is drawn in: stems, leaves, petals, fruit, and leaf sprays.
@@ -668,6 +697,7 @@ pub fn grow_plants(
     cams: Query<(&engine_render::Camera, &GlobalTransform)>,
     mut renderers: Query<&mut MeshRenderer>,
     mut developing: Local<DevelopingPlants>,
+    season: Option<Res<crate::season::FoliageSeason>>,
 ) {
     if plants.is_empty() {
         developing.clear();
@@ -814,6 +844,19 @@ pub fn grow_plants(
             put(&mut state, parts, age, &mut meshes, &mut renderers);
             state.building = None;
         }
+        if plant.calendar
+            && plant.days_per_second == 0.0
+            && let Some(season) = &season
+        {
+            let flush = match state.graph.nodes.get(&state.graph.root) {
+                Some(Node::Tree(t)) => t.flush_day,
+                _ => 0.0,
+            };
+            let age = calendar_age(plant.age_days, season.day_of_year, flush);
+            if age != plant.age_days {
+                plant.age_days = age;
+            }
+        }
         let age = plant.age_days;
         let distance = camera.map_or(0.0, |c| c.distance(at.translation()));
         let band = detail_band(distance, state.band);
@@ -893,6 +936,30 @@ fn put(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_held_tree_follows_the_calendar_on_the_same_wood() {
+        let summer = 24.0 * 365.0 + 200.0;
+        let winter = calendar_age(summer, 20.0, 110.0);
+        assert_eq!(winter, 25.0 * 365.0 + 20.0, "January after the 24th spring");
+        assert_eq!(calendar_age(winter, 200.0, 110.0), summer, "and back");
+        assert_eq!(calendar_age(summer, 345.0, 110.0), 24.0 * 365.0 + 345.0);
+        assert_eq!(calendar_age(winter, 126.0, 110.0), 24.0 * 365.0 + 126.0);
+        // The oak bare in January, in leaf in July.
+        let mut g = oak();
+        if let Some(Node::Tree(t)) = g.nodes.get_mut("tree") {
+            t.years = 6;
+        }
+        let sk = Skeleton::develop(&g, 3);
+        let leaves = |t: f32| sk.census(t).get("leaf").copied().unwrap_or(0);
+        let july = 5.0 * 365.0 + 200.0;
+        assert!(leaves(july) > 100, "{} leaves in July", leaves(july));
+        assert_eq!(
+            leaves(calendar_age(july, 20.0, 110.0)),
+            0,
+            "bare in January"
+        );
+    }
 
     #[test]
     fn a_plant_changes_detail_band_with_a_margin() {
