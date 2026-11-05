@@ -194,7 +194,7 @@ fn foam_tint(look: WaterLook) -> vec3<f32> {
 fn flood_froth() -> vec3<f32> {
     // Light beige, not brown: a flood's falls are still mostly air and spray, the most
     // brightly lit white in the scene (a dim tan curtain read as a weaker fall, not a bigger one).
-    return mix(vec3<f32>(1.0), vec3<f32>(0.92, 0.8, 0.64), 0.6 * saturate(water.g.plume.w));
+    return mix(vec3<f32>(1.0), vec3<f32>(0.92, 0.8, 0.64), 0.4 * saturate(water.g.plume.w));
 }
 
 fn flow_look() -> WaterLook {
@@ -2188,15 +2188,18 @@ fn fall_shell(in: FallOut) -> vec4<f32> {
     let t0 = time_s() - tau;
     let fine = saturate(1.5 - footprint(in.rel).across * 40.0);
     let body = saturate(q * 6.0 + 0.2);
+    // A heavy flow (a flood over the brink, past a metre and a half per meter of lip) throws a
+    // spray envelope as dense as its body: white water through, not a veil round it.
+    let heavy = fall_heavy(q);
     // Clumps stretch as the water speeds up: the pattern rides with it (time since the lip).
     let clumps = fbm2(vec2<f32>(u * 1.9, t0 * 4.2), 4) / 0.9375;
     let drops = value_noise2(vec2<f32>(u * 21.0 + 4.1, t0 * 27.0));
     // Fine spray hangs thickest low down, where the clumps have shed most of it.
-    let haze = 0.05 + 0.3 * frac * frac;
+    let haze = 0.05 + 0.3 * frac * frac + 0.3 * heavy;
     var alpha = smoothstep(0.42, 0.78, clumps) * 0.7 + haze * smoothstep(0.2, 0.6, clumps);
     alpha = max(alpha, fine * 0.35 * smoothstep(0.6, 0.95, drops) * smoothstep(0.3, 0.6, clumps));
     let n_dot_v = abs(dot(in.normal, v));
-    alpha *= broken * body * mix(1.5, 0.75, n_dot_v);
+    alpha *= broken * body * mix(1.5, 0.75, n_dot_v) * (1.0 + 0.8 * heavy);
     // Frayed at the sides, ragged where the fall ends.
     alpha *= 1.0 - smoothstep(0.3, 1.0, fall_side(in.look.z, in.edge, in.rel, u) + (clumps - 0.5) * 0.6);
     // Soft against the rock behind and the pool below.
@@ -2204,12 +2207,18 @@ fn fall_shell(in: FallOut) -> vec4<f32> {
     let pix = vec2<i32>(clamp(in.clip.xy, vec2<f32>(0.0), size - 1.0));
     let z_scene = linear_depth(textureLoad(scene_depth, pix, 0));
     alpha *= saturate((z_scene - max(view_depth(in.rel), 1e-3)) / 0.6);
-    alpha = min(alpha, 0.92);
+    alpha = min(alpha, mix(0.92, 0.97, heavy));
     if (alpha < 0.004) { discard; }
     var n = in.normal;
     if (dot(n, v) < 0.0) { n = -n; }
-    let color = apply_fog(froth_light(in.rel, n, v) * (0.75 + 0.35 * clumps), in.rel);
+    let color = apply_fog(froth_light(in.rel, n, v) * (0.75 + 0.35 * clumps + 0.2 * heavy), in.rel);
     return vec4<f32>(color * alpha, alpha);
+}
+
+// How heavy a curtain's flow is, 0 at a river's usual 0.6 m²/s per meter of lip or less, 1 at
+// a flood's 1.8 (`crate::freshet`): the more water, the denser and whiter it falls.
+fn fall_heavy(q: f32) -> f32 {
+    return smoothstep(0.6, 1.8, q);
 }
 
 @fragment
@@ -2288,8 +2297,10 @@ fn fs_falls(in: FallOut) -> @location(0) vec4<f32> {
     // past L_b = 6 q^0.32, yet its body stays dense; games draw it as an opaque, masked
     // white sheet, waterfall-research.md). Thin threads were all the showcase falls showed.
     let whitens = max(smoothstep(0.15, 0.8, max(in.jet.y, 0.0) / max(in.jet.x, 0.1)), rough * smoothstep(0.08, 0.35, tau));
+    let heavy = fall_heavy(in.look.x);
     let core = body * whitens * (1.0 - rock * 0.45)
-        * (1.0 - smoothstep(0.3, 0.85, edge_x + (s - 0.5) * 0.3)) * mix(0.7, 1.0, tongue)
+        * (1.0 - smoothstep(0.3 + 0.35 * heavy, 0.85 + 0.1 * heavy, edge_x + (s - 0.5) * 0.3))
+        * mix(mix(0.7, 1.0, tongue), 1.0, heavy)
         * (1.0 - smoothstep(0.08, 0.3, -tau * in.look.w));
     alpha = max(alpha, core * smoothstep(0.12, 0.45, s * 0.7 + packets * 0.3) * 0.95);
     // ...and white with air.
@@ -2361,7 +2372,7 @@ fn fs_falls(in: FallOut) -> @location(0) vec4<f32> {
     let glint = pre_expose(spec * sun * shadow) * (0.3 + 0.7 * s);
 
     // Denser froth is whiter; thin threads let a little of the water's own color through.
-    var color = mix(glass, froth * (0.7 + 0.45 * s), aerated) + glint;
+    var color = mix(glass, froth * (0.7 + 0.45 * s + 0.25 * heavy), aerated) + glint;
     // Over the lip the tongue is unbroken: `glass` already lets what's behind show through.
     alpha = mix(max(alpha, body * keep), alpha, aerated);
     color = apply_fog(color, in.rel);
