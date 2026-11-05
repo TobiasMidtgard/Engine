@@ -255,15 +255,18 @@ fn sway_rest(texel: f32) -> f32 {
     }
 }
 
-/// The benders of a shadow map of `texel` meters (the rest of its `ShadowViewUniform` zero):
-/// the scene's, where swaying leaves move; none where they rest in one pose, which a static
-/// image holds.
-fn shadow_bend(uniform: &crate::frame::FrameUniform, texel: f32) -> ShadowViewUniform {
+/// What swaying casters in a shadow map of `texel` meters move by (the rest of its
+/// `ShadowViewUniform` zero): the scene's plant wind and gust fronts, and its benders where
+/// swaying leaves move (none where they rest in one pose, which a static image holds).
+fn shadow_plants(uniform: &crate::frame::FrameUniform, texel: f32) -> ShadowViewUniform {
     let mut u = ShadowViewUniform::zeroed();
     if crate::shadows::sway_moves(texel) {
         u.bend[0] = uniform.shading[1];
         u.benders = uniform.benders;
     }
+    u.plant_wind = uniform.plant_wind;
+    u.gusts = uniform.gusts;
+    u.gust_offset = uniform.gust_offset;
     u
 }
 
@@ -2034,7 +2037,7 @@ impl Renderer {
                     wind: [view.wind.x, view.wind.y, view.wind.z, 0.0],
                     time: [view.time, view.real_time, view.delta, sway_rest(texel)],
                     camera_frac: uniform.camera_world_frac,
-                    ..shadow_bend(&uniform, texel)
+                    ..shadow_plants(&uniform, texel)
                 };
                 queue.write_buffer(&self.shadow.view_buffers[i], 0, bytemuck::bytes_of(&u));
             }
@@ -2050,7 +2053,7 @@ impl Renderer {
                     sway_rest(view.far_shadow.texel()),
                 ],
                 camera_frac: uniform.camera_world_frac,
-                ..shadow_bend(&uniform, view.far_shadow.texel())
+                ..shadow_plants(&uniform, view.far_shadow.texel())
             };
             queue.write_buffer(
                 &self.shadow.view_buffers[FAR_SHADOW_VIEW],
@@ -2065,7 +2068,7 @@ impl Renderer {
                 wind: [view.wind.x, view.wind.y, view.wind.z, 0.0],
                 time: [view.time, view.real_time, view.delta, sway_rest(texel)],
                 camera_frac: uniform.camera_world_frac,
-                ..shadow_bend(&uniform, texel)
+                ..shadow_plants(&uniform, texel)
             };
             queue.write_buffer(
                 &self.shadow.view_buffers[SKY_OCCLUSION_VIEW],

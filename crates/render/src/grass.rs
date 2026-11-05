@@ -660,7 +660,6 @@ fn cut_source() -> String {
 
 fn cull_source() -> String {
     [
-        engine_world::gusts::GUST_WAVES_WGSL,
         include_str!("shaders/grass_common.wgsl"),
         include_str!("shaders/grass_cull.wgsl"),
     ]

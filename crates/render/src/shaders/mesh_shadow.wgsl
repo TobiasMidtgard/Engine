@@ -12,6 +12,9 @@ struct ShadowView {
     camera_frac: vec4<f32>,  // camera position modulo 4096 (tiling coordinates)
     bend: vec4<f32>,         // x: benders set (none where swaying rests, time.w 1)
     benders: array<vec4<f32>, 16>, // as Frame.benders (camera-relative center xyz, radius)
+    plant_wind: vec4<f32>,   // as Frame.plant_wind
+    gusts: GustWaves,        // as Frame.gusts
+    gust_offset: vec4<f32>,  // as Frame.gust_offset
 };
 
 // Must match `struct Material` in mesh.wgsl and `GpuMaterial` in material.rs.
@@ -47,18 +50,10 @@ struct VertexIn {
 };
 
 fn shadow_wind(rel: vec3<f32>, height01: f32, sway: f32) -> vec3<f32> {
-    let w = shadow_view.wind.xyz;
-    let speed = length(w);
-    let p = rel + shadow_view.camera_frac.xyz;
-    let t = shadow_view.time.x;
-    let phase = dot(p.xz, vec2(0.13, 0.17));
-    var gust = 0.6 + 0.4 * sin(t * 0.7 + phase * 0.3) * sin(t * 1.9 + phase);
-    // At rest (maps too coarse to show the motion, `shadows::sway_moves`): the mean lean, the
-    // same every frame, so a static image drawn again matches the one before.
-    if (shadow_view.time.w > 0.5) { gust = 0.6; }
-    let dir = select(vec3(1.0, 0.0, 0.0), w / max(speed, 1e-3), speed > 0.01);
-    let strength = sway * height01 * height01 * min(speed / 10.0, 1.5);
-    return dir * strength * gust;
+    // At rest (maps too coarse to show the motion, `shadows::sway_moves`): one pose that
+    // doesn't change with time, so a static image drawn again matches the one before.
+    let rest = shadow_view.time.w > 0.5;
+    return plant_sway(rel.xz + shadow_view.gust_offset.xy, height01, sway, shadow_view.plant_wind, shadow_view.gusts, shadow_view.time.x, rest);
 }
 
 fn shadow_clip(in: VertexIn) -> vec4<f32> {
