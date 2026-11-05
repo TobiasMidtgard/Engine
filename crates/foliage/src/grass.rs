@@ -160,6 +160,13 @@ pub fn herb_styles_on(day: f32) -> (GrassStyle, Vec<GrassStyle>) {
     let winter = crate::season::winter_dormancy(day);
     let k = DWARF_SHRUB_KIND as usize - 1;
     if let Some(b) = kinds.get_mut(k) {
+        // Crimson in autumn, then bare.
+        let red = crate::season::bilberry_red(day);
+        // Wine red where moist, orange-brown where dry, clumps varying (not one crimson).
+        b.lush_color = mix3(b.lush_color, [0.17, 0.035, 0.03], red);
+        b.dry_color = mix3(b.dry_color, [0.17, 0.07, 0.03], red);
+        b.clump_color += 0.2 * red;
+        b.tip_tint = mix3(b.tip_tint, [1.0, 1.0, 1.0], red);
         let bare = crate::season::bilberry_bare(day);
         // Green twigs, whatever the season's dryness.
         let twig = [0.05, 0.12, 0.03];
@@ -1136,6 +1143,8 @@ pub fn sync_region_grass(
     }
     let relief = std::mem::take(&mut *relief_due);
     let season_dry = grass_dryness(season.day_of_year);
+    // Bracken browns earlier and further than the meadow.
+    let fern_dry = season_dry.max(crate::season::bracken_brown(season.day_of_year));
     let day = season.day_of_year;
     for (region_e, region, state, linked, floor, build) in &regions {
         let styles = if settings.gpu_grass {
@@ -1297,8 +1306,7 @@ pub fn sync_region_grass(
                 grass_maps(&region, &soil, center, res, &grass, &covers);
             // Fern crowns grow as their own floor layer: fronds drawn on the GPU, not a mesh
             // and an entity each (`visuals` draws none for ferns where a region has it).
-            let mut ferns =
-                ferns_layer.then(|| fern_maps(&region, res, &ferns, &covers, season_dry));
+            let mut ferns = ferns_layer.then(|| fern_maps(&region, res, &ferns, &covers, fern_dry));
             // Autumn browns the meadow and winter leaves it straw, wherever it grows.
             for d in &mut dryness {
                 *d += (1.0 - *d) * season_dry;
@@ -1450,7 +1458,7 @@ fn heights(
 mod tests {
 
     #[test]
-    fn winter_mats_the_meadow_strips_bilberry_and_browns_heather_flowers() {
+    fn seasons_redden_then_strip_bilberry_mat_the_meadow_and_brown_heather() {
         let (july, january) = (190.0, 20.0);
         let mut summer = GrassStyle::default();
         winter_grass(&mut summer, july);
@@ -1480,6 +1488,18 @@ mod tests {
         assert!(
             jan[b].dry_color[1] > jan[b].dry_color[0],
             "the twigs stay green"
+        );
+        let (_, oct) = herb_styles_on(285.0);
+        let c = oct[b].lush_color;
+        assert!(
+            c[0] > 3.0 * c[1] && oct[b].pinnae > 0.0,
+            "crimson leaves in October"
+        );
+        assert!(crate::season::bracken_brown(285.0) > 0.6);
+        assert_eq!(
+            crate::season::bracken_brown(190.0),
+            0.0,
+            "bracken green in July"
         );
         let (_, aug) = herb_styles_on(225.0);
         let mauve = |c: [f32; 3]| c[2] / c[0];

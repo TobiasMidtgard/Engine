@@ -403,8 +403,12 @@ fn yard_parts() -> Vec<kit::Part> {
             bridges(commands, c);
             swing(commands, c + DVec3::new(15.0, 0.0, 4.0));
         }),
-        ("softbody yard jelly and clay", |commands, c| {
+        // One heavy prop a frame: two together held a frame 60-75 ms in a release build on
+        // the cloud VM.
+        ("softbody yard jelly", |commands, c| {
             jelly_and_wrecking_ball(commands, c + DVec3::new(0.5, 0.0, -1.0));
+        }),
+        ("softbody yard clay", |commands, c| {
             clay_press(commands, c + DVec3::new(6.5, 0.0, 2.5));
         }),
         ("softbody yard mannequins", |commands, c| {
@@ -425,8 +429,10 @@ fn yard_parts() -> Vec<kit::Part> {
                 graphite(),
             );
         }),
-        ("softbody yard dog and statue", |commands, c| {
+        ("softbody yard dog", |commands, c| {
             dog(commands, c + DVec3::new(-8.0, 0.0, -4.0));
+        }),
+        ("softbody yard statue", |commands, c| {
             statue::spawn_unveiling(
                 commands,
                 c + DVec3::new(-14.0, 0.0, -4.0),
