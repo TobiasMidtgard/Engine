@@ -609,6 +609,7 @@ struct Globals {
     /// plume's middle rel camera xyz (carried a little way out into the lake), its share of
     /// the plume's radius. `plume[2]` counts them.
     mouths: [[f32; 4]; MAX_MOUTHS],
+    plunge_dirs: [[f32; 4]; MAX_PLUNGES],
 }
 
 #[repr(C)]
@@ -2549,20 +2550,28 @@ impl RenderFeature for WaterFeature {
             .map(|r| r.falls.clone());
         let mut near: Vec<_> = plunges
             .iter()
-            .map(|(foot, _, power)| (*foot, boil_radius(*power)))
+            .map(|(foot, away, power)| (*foot, *away, boil_radius(*power)))
             .chain(
                 creek_boils
                     .iter()
                     .flat_map(|f| f.plunges.iter())
                     .filter(|(foot, ..)| foot.distance(view.origin) < CREEK_BOIL_REACH)
-                    .map(|(foot, _, power)| (*foot, -step_boil_radius(*power))),
+                    .map(|(foot, away, power)| (*foot, *away, -step_boil_radius(*power))),
             )
-            .map(|(foot, r)| (foot.distance(view.origin), foot, r))
+            .map(|(foot, away, r)| (foot.distance(view.origin), foot, away, r))
             .filter(|(d, ..)| *d < PLUNGE_REACH)
             .collect();
         near.sort_by(|a, b| a.0.total_cmp(&b.0));
-        for (dst, (_, foot, radius)) in g.plunges.iter_mut().zip(&near) {
+        for ((dst, dir), (_, foot, away, radius)) in g
+            .plunges
+            .iter_mut()
+            .zip(g.plunge_dirs.iter_mut())
+            .zip(&near)
+        {
             *dst = view.relative(*foot).extend(*radius).to_array();
+            // The way the water runs on from where it lands, and how fast it lands.
+            let way = away.normalize_or_zero();
+            *dir = [way.x, way.y, away.length(), 0.0];
         }
         g.counts[3] = near.len().min(MAX_PLUNGES) as u32;
         // How muddy the streams run: their falls' froth goes beige (`flood_froth`).
@@ -3024,7 +3033,7 @@ mod tests {
         // + 24 waves of 2 vec4.
         assert_eq!(
             std::mem::size_of::<Globals>(),
-            (10 + 4 + MAX_PLUNGES + 4 + 2 + 1 + 2 + 2 + 1 + 1 + 3 + MAX_MOUTHS) * 16
+            (10 + 4 + MAX_PLUNGES + 4 + 2 + 1 + 2 + 2 + 1 + 1 + 3 + MAX_MOUTHS + MAX_PLUNGES) * 16
         );
         assert_eq!(std::mem::size_of::<GpuBody>(), (11 + MAX_WAVES * 2) * 16);
         assert_eq!(
