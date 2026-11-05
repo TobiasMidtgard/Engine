@@ -555,6 +555,15 @@ pub struct TexHandles {
 
 /// Register a texture set under `fire/<name>/…` once (generating it with `make` the first
 /// time) and return its handles.
+/// Whether `images` holds the texture set `name` ([`register_set`]'s keys).
+pub(crate) fn has_set(images: &Assets<Image>, name: &str) -> bool {
+    ["albedo", "normal", "orm"].iter().all(|part| {
+        images
+            .loaded_by_key(&format!("fire/{name}/{part}"))
+            .is_some()
+    })
+}
+
 pub fn register_set(
     images: &mut Assets<Image>,
     name: &str,
@@ -619,12 +628,12 @@ pub struct PropMaterials {
 const PROP_TEX: u32 = 1024;
 
 /// The props' texture sets by name.
-const PROP_SETS: [&str; 7] = [
+pub(crate) const PROP_SETS: [&str; 7] = [
     "bark", "leaves", "planks", "metal", "straw", "granite", "firewood",
 ];
 
 /// Make one of [`PROP_SETS`] (a second or so each, on as many threads as there are cores).
-fn make_set(name: &str) -> TexSet {
+pub(crate) fn make_set(name: &str) -> TexSet {
     match name {
         "bark" => textures::bark(PROP_TEX, 0xB4C),
         "leaves" => textures::leaves(PROP_TEX, 0x1EAF),
@@ -688,7 +697,7 @@ pub(crate) fn textures_pending() -> bool {
 }
 
 /// A set [`prefetch_textures`] has made, taken out of its store.
-fn take_prefetched(name: &str) -> Option<TexSet> {
+pub(crate) fn take_prefetched(name: &str) -> Option<TexSet> {
     let mut sets = PREFETCH
         .get()?
         .sets
