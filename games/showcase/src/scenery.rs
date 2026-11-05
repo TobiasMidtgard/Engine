@@ -2502,6 +2502,10 @@ const HERO_OUT: f32 = 46.0;
 
 /// Time (s) a frame may spend spawning hero stones.
 const HERO_BUDGET_S: f32 = 0.003;
+/// Stones one run spawns or despawns at most (after the first wall): queuing them is quick,
+/// but the commands that add them to the world are not (37 ms in one frame on the session
+/// VM arriving at the paddock), so they are counted too.
+const HERO_STONES_PER_RUN: usize = 400;
 
 /// Hidden closer than this to the camera, m (where something finer stands in).
 #[derive(Component, Debug, Clone, Copy)]
@@ -2580,15 +2584,18 @@ pub fn stream_wall_heroes(
     // Walls spawn their stones until this run's budget is spent; the rest go next frame, so
     // arriving among many walls (the first frame, a jump) never stalls a frame for long.
     let started = std::time::Instant::now();
+    let mut queued = 0usize;
     for (e, t, mut w) in &mut walls {
         let d2 = (t.translation() - eye).length_squared();
         // As `update_lods` decides the merged rocks' `HideWithin`.
         let show = d2 < (HERO_IN as f64).powi(2);
         if restream && w.stones.is_empty() && d2 < (HERO_SPAWN as f64).powi(2) {
-            if started.elapsed().as_secs_f32() > HERO_BUDGET_S {
+            let over = queued > 0 && queued + w.placed.len() > HERO_STONES_PER_RUN;
+            if over || started.elapsed().as_secs_f32() > HERO_BUDGET_S {
                 *timer = 0.0;
                 continue;
             }
+            queued += w.placed.len();
             let mut spawned = Vec::with_capacity(w.placed.len());
             for p in w.placed.iter() {
                 let (mesh, displacement) = &palette.stones
@@ -2612,10 +2619,16 @@ pub fn stream_wall_heroes(
             continue;
         }
         if restream && !w.stones.is_empty() && d2 > (HERO_OUT as f64).powi(2) {
-            for s in w.stones.drain(..) {
-                commands.entity(s).despawn();
+            if queued > 0 && queued + w.stones.len() > HERO_STONES_PER_RUN {
+                // Next frame; hidden meanwhile, below.
+                *timer = 0.0;
+            } else {
+                queued += w.stones.len();
+                for s in w.stones.drain(..) {
+                    commands.entity(s).despawn();
+                }
+                continue;
             }
-            continue;
         }
         if show != w.shown && !w.stones.is_empty() {
             for &s in &w.stones {
@@ -2793,6 +2806,43 @@ pub fn pilot_interacts(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hero_stones_arrive_a_few_hundred_a_frame() {
+        use engine::core::ecs::system::RunSystemOnce;
+        let mut world = World::new();
+        world.insert_resource(Time::default());
+        world.insert_resource(WallPalette {
+            stones: vec![(Handle::from_index(0), Displacement::default())],
+            shades: vec![Handle::from_index(0)],
+        });
+        world.spawn((
+            Camera {
+                active: true,
+                ..Default::default()
+            },
+            GlobalTransform::default(),
+        ));
+        let stone = crate::walls::Placed {
+            center: Vec3::ZERO,
+            ax: [Vec3::X, Vec3::Y, Vec3::Z],
+            size: Vec3::splat(0.3),
+            class: 0,
+            variant: 0,
+            shade: 0,
+        };
+        let placed: Arc<[crate::walls::Placed]> = vec![stone; 300].into();
+        for _ in 0..3 {
+            world.spawn((GlobalTransform::default(), WallHeroes::new(placed.clone())));
+        }
+        let mut counts = Vec::new();
+        for _ in 0..4 {
+            world.run_system_once(stream_wall_heroes).expect("runs");
+            counts.push(world.query::<&HeroStone>().iter(&world).count());
+        }
+        // The first wall's 300 alone (a second would make 600), then one a frame.
+        assert_eq!(counts, [300, 600, 900, 900]);
+    }
 
     #[test]
     fn a_level_of_detail_change_fades_instead_of_popping() {
