@@ -339,12 +339,13 @@ impl Job {
     }
 }
 
-/// Run the jobs on every core, each thread taking the next job when it is done, and return
-/// what they made in the jobs' order.
-fn bake(jobs: Vec<Job>) -> Vec<Baked> {
+/// Run the jobs on all but `spare` cores, each thread taking the next job when it is done,
+/// and return what they made in the jobs' order.
+fn bake(jobs: Vec<Job>, spare: usize) -> Vec<Baked> {
     let next = AtomicUsize::new(0);
     let threads = std::thread::available_parallelism()
         .map_or(4, |c| c.get())
+        .saturating_sub(spare)
         .min(jobs.len())
         .max(1);
     let jobs = &jobs;
@@ -468,8 +469,13 @@ pub fn ensure_species_visuals(
                 Some(pool) => {
                     let slot = Arc::new(Mutex::new(None));
                     let out = slot.clone();
+                    // In play the bake runs beside the frame: leave it two cores, or a bake on
+                    // every core can starve the main and render threads (the lead's real-clock
+                    // flight on a 4-core VM logged a spruce upload, 0.0 ms of work on its own,
+                    // "taking" 155 ms beside a 1 s frame). Behind a loading screen take them all.
+                    let spare = if screen.is_some() { 0 } else { 2 };
                     pool.spawn(async move {
-                        let baked = bake(jobs);
+                        let baked = bake(jobs, spare);
                         if let Ok(mut s) = out.lock() {
                             *s = Some(baked);
                         }
@@ -477,7 +483,7 @@ pub fn ensure_species_visuals(
                     .detach();
                     state.bake = Some(slot);
                 }
-                None => state.ready.extend(bake(jobs)),
+                None => state.ready.extend(bake(jobs, 0)),
             }
         }
     }

@@ -20,7 +20,7 @@ use engine_render::{
     Billboard, MaterialRef, Mesh, MeshRef, MeshRenderer, Sprite, SpriteAlpha, SpriteAtlas,
 };
 use engine_world::physics::{
-    BodyKind, Collider, ColliderShape, PhysicsBackend, RigidBody, Velocity,
+    BodyKind, Collider, ColliderShape, CollisionLayers, PhysicsBackend, RigidBody, Velocity,
 };
 use engine_world::{
     ContactKind, Env, GroundContact, GroundSample, NoiseEvent, SimulationRange, SurfaceMaterials,
@@ -479,6 +479,116 @@ fn box_corners(h: Vec3) -> Vec<Vec3> {
     v
 }
 
+/// The collision layer of a body cut from voxel rock until that rock's colliders are rebuilt
+/// ([`LeavingRock`]): voxel chunk colliders don't collide with it.
+pub const LEAVING_ROCK: u32 = 1 << 30;
+/// Margin around a piece cut from rock (m) whose voxel chunks must be rebuilt before it meets
+/// rock again: a voxel or two past its own reach.
+const LEAVE_MARGIN_M: f64 = 0.5;
+/// Fixed steps a piece cut from rock waits after the chunks around it are rebuilt: the new
+/// collider is inserted with the frame's commands, and physics may take a few steps to build a
+/// remeshed chunk's triangles and swap them in (it keeps the old shape six steps at most).
+pub const LEAVE_CLEAN_STEPS: u32 = 8;
+/// Fixed steps a piece cut from rock waits at most, however long the remeshing takes (half a
+/// second). Remeshed on the bake threads, the fortress's rock took longer than that for two
+/// pieces in five on the 4-core VM, so collapsed and blasted chunks are remeshed on the frame
+/// ([`crate::voxel::VoxelState::urge_dirty`]): in the destruction demo every piece goes after
+/// 8-11 steps.
+pub const LEAVE_MAX_STEPS: u32 = 30;
+/// Below this speed (m/s) a piece cut from rock is a cave-in's boulder, breaking off at rest:
+/// it is held still until the rock is rebuilt. Faster ones (a blast's rubble) fly out of it.
+const HOLD_BELOW_MPS: f32 = 1.0;
+
+/// A physics body cut from voxel rock (a cave-in's boulder, a blast's rubble) whose rock is
+/// not rebuilt yet. It is cut where the rock was, and until the chunks around it are remeshed,
+/// and physics has their new triangles, the old ones still fill its place: every boulder
+/// started up to 0.6 m deep inside them, each meeting 300-860 triangles (Rapier makes a
+/// contact manifold per triangle under a body's bounds), and the cliff collapses stalled
+/// physics 7-17 ms a step (round 22 of the Physics thread, VM loops) while the rock was
+/// pushed out of its own hole.
+///
+/// A boulder breaking off at rest is held still (a kinematic body, which meets no fixed
+/// collider) until then: let fall through the old rock instead, it sank as deep into the rock
+/// under it before that was rebuilt. Rubble thrown out of a crater skips voxel rock
+/// ([`LEAVING_ROCK`]) on its way out, like the built-in solver's [`RockContact::Leaving`].
+/// [`release_from_rock_system`] lets either go [`LEAVE_CLEAN_STEPS`] steps after every chunk
+/// within [`LEAVE_MARGIN_M`] of where it started has a mesh without its rock in, or after
+/// [`LEAVE_MAX_STEPS`]. In the destruction demo (three runs each on the VM) the deepest piece
+/// in rock went from 0.5-1.05 m to 0.4 m, and steps over 8 ms from 31-41 to 4-22.
+#[derive(Component, Debug, Clone)]
+pub struct LeavingRock {
+    /// World bounds it started in, with the margin.
+    pub lo: DVec3,
+    pub hi: DVec3,
+    /// Fixed steps since it was cut, and since the chunks around it were rebuilt
+    /// ([`Self::waits`] empty).
+    pub age: u32,
+    pub clean: u32,
+    /// The meshes of the chunks around it that show its rock gone: (volume, chunk,
+    /// [`VoxelState::mesh_wait`]), noted the first step. Later cuts nearby don't keep it.
+    pub waits: Option<Vec<(Entity, usize, u32)>>,
+    /// Held still: the velocity it is let go with. `None`: it skips rock.
+    pub held: Option<Velocity>,
+}
+
+impl LeavingRock {
+    /// The layers of a piece leaving rock: a member of [`LEAVING_ROCK`] only, colliding with
+    /// everything that collides with it.
+    pub const LAYERS: CollisionLayers = CollisionLayers {
+        member: LEAVING_ROCK,
+        collides_with: u32::MAX,
+    };
+}
+
+/// Let pieces cut from voxel rock ([`LeavingRock`]) go once the rock around them is rebuilt:
+/// held ones become dynamic, the others get the usual collision layers back.
+pub fn release_from_rock_system(
+    mut commands: Commands,
+    volumes: Query<(Entity, &GlobalTransform, &VoxelState)>,
+    mut leaving: Query<(
+        Entity,
+        &mut LeavingRock,
+        Option<&mut Collider>,
+        Option<&mut RigidBody>,
+    )>,
+) {
+    for (e, mut l, collider, body) in &mut leaving {
+        l.age += 1;
+        let (lo, hi) = (l.lo, l.hi);
+        let waits = l.waits.get_or_insert_with(|| {
+            let mut waits = Vec::new();
+            for (v, gt, state) in &volumes {
+                for ci in crate::sync::chunks_in(state, gt, lo, hi) {
+                    if let Some(seq) = state.mesh_wait(ci) {
+                        waits.push((v, ci, seq));
+                    }
+                }
+            }
+            waits
+        });
+        waits.retain(|(v, ci, seq)| volumes.get(*v).is_ok_and(|(.., s)| !s.meshed(*ci, *seq)));
+        l.clean = if waits.is_empty() { l.clean + 1 } else { 0 };
+        if l.clean < LEAVE_CLEAN_STEPS && l.age < LEAVE_MAX_STEPS {
+            continue;
+        }
+        match l.held {
+            Some(v) => {
+                // (A piece handed to the sinking animation has no body any more.)
+                if let Some(mut b) = body {
+                    b.kind = BodyKind::Dynamic;
+                    commands.entity(e).insert(v);
+                }
+            }
+            None => {
+                if let Some(mut c) = collider {
+                    c.layers = CollisionLayers::default();
+                }
+            }
+        }
+        commands.entity(e).remove::<LeavingRock>();
+    }
+}
+
 /// Spawn everything in [`PendingDebris`].
 #[allow(clippy::too_many_arguments)]
 pub fn spawn_debris_system(
@@ -661,9 +771,19 @@ pub fn spawn_debris_system(
             });
         }
         if !chip && solid {
+            let velocity = Velocity {
+                linear: item.velocity,
+                angular: item.angular,
+            };
+            let held = item.from_rock && item.velocity.length() < HOLD_BELOW_MPS;
+            let skips = item.from_rock && !held;
             e.insert((
                 RigidBody {
-                    kind: BodyKind::Dynamic,
+                    kind: if held {
+                        BodyKind::Kinematic
+                    } else {
+                        BodyKind::Dynamic
+                    },
                     mass_kg: Some(item.mass_kg),
                     linear_damping: 0.02,
                     angular_damping: 0.1,
@@ -675,13 +795,26 @@ pub fn spawn_debris_system(
                     },
                     surface,
                     density: props.density,
+                    layers: if skips {
+                        LeavingRock::LAYERS
+                    } else {
+                        CollisionLayers::default()
+                    },
                     ..Collider::default()
                 },
-                Velocity {
-                    linear: item.velocity,
-                    angular: item.angular,
-                },
+                if held { Velocity::default() } else { velocity },
             ));
+            if item.from_rock {
+                let r = item.half_extents.length() as f64 + LEAVE_MARGIN_M;
+                e.insert(LeavingRock {
+                    lo: item.position - DVec3::splat(r),
+                    hi: item.position + DVec3::splat(r),
+                    age: 0,
+                    clean: 0,
+                    waits: None,
+                    held: held.then_some(velocity),
+                });
+            }
         } else {
             // Chips touch the ground at a few corners; chunks at their hull's extreme points.
             let points = if chip {

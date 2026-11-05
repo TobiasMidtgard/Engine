@@ -1159,6 +1159,8 @@ fn blast(
         if removed <= 0.0 {
             continue;
         }
+        // Its rubble starts in the crater: the crater's collider first.
+        state.urge_dirty();
         ctx.stats.voxels_removed_m3 += removed;
         let gt = *gt;
         // Rubble flying out of the crater.

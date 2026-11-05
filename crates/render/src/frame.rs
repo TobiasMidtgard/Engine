@@ -135,6 +135,12 @@ pub struct FrameUniform {
     /// this frame (xy) and last frame's camera last frame (zw). A camera-relative point's are
     /// `rel.xz + gust_offset.xy`.
     pub gust_offset: [f32; 4],
+    /// The canopy map ([`crate::canopy`]): its center relative to the camera (x, z; m), its
+    /// reference height relative to the camera (m), half its width (m; 0 = off). Filled by the
+    /// renderer once the meshes have set its crowns.
+    pub canopy: [f32; 4],
+    /// Leaf area scale (`RenderSettings::canopy_strength`), mip levels, texel (m), unused.
+    pub canopy_params: [f32; 4],
 }
 
 /// Most [`crate::GrassBender`]s that push grass and swaying plants aside (nearest the camera).
@@ -1210,6 +1216,8 @@ pub fn frame_uniform(world: &World, v: &ViewData) -> FrameUniform {
         gusts: v.plant_wind.gusts,
         gusts_prev: v.plant_wind.gusts_prev,
         gust_offset: v.gust_offset(),
+        canopy: [0.0; 4],
+        canopy_params: [0.0; 4],
     }
 }
 
@@ -1325,7 +1333,8 @@ mod tests {
         // screen-space block (mat4 + 4 vec4), volumetric fog (vec4), far shadow (mat4 + vec4),
         // sky (vec4), surface weather (2 vec4), cloud shadows (mat4 + 2 vec4), the air (5 vec4),
         // the window (vec4), probe GI (3 vec4), the clip plane (vec4), the aerial table (vec4),
-        // shading knobs (vec4), benders.
+        // shading knobs (vec4), benders, plant wind (2 vec4, 2 gust waves, vec4), the canopy (2
+        // vec4).
         assert_eq!(
             std::mem::size_of::<FrameUniform>(),
             7 * 64
@@ -1354,6 +1363,7 @@ mod tests {
                 + 2 * 16
                 + 2 * 64
                 + 16
+                + 2 * 16
         );
         assert_eq!(std::mem::size_of::<GpuSkyVolume>(), 80);
         assert_eq!(std::mem::size_of::<GpuPointLight>(), 32);

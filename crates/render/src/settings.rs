@@ -359,6 +359,14 @@ pub struct RenderSettings {
     /// Width of the area it covers, meters (resolution is `sky_occlusion_size`²).
     pub sky_occlusion_extent: f32,
     pub sky_occlusion_size: u32,
+    /// Light through leaf canopies (`crate::canopy`): swaying leaf crowns go into a top-down map
+    /// of leaf area out to 512 m instead of the sky occlusion map, and the sky light under and
+    /// inside them is what passes through their leaves (three rings of sky, Goudriaan's crop
+    /// canopy model) rather than all or nothing. Needs `sky_occlusion`. `ENGINE_CANOPY=on|off`
+    /// overrides it in any game.
+    pub canopy: bool,
+    /// Leaf area seen by the canopy, times this (1 = the leaf area of the crowns' cards).
+    pub canopy_strength: f32,
     /// Cloud shadows: when a module draws the cloud shadow map (the weather's clouds; see
     /// `cloud_shadows`), the sunlight on every surface and in the fog is shaded by it. Off: the
     /// map is not drawn and nothing is shaded by clouds.
@@ -554,6 +562,8 @@ impl Default for RenderSettings {
             sky_occlusion: true,
             sky_occlusion_extent: 256.0,
             sky_occlusion_size: 512,
+            canopy: true,
+            canopy_strength: 1.0,
             cloud_shadows: true,
             night_exposure_bias: 2.5,
             interior_exposure_bias: 1.25,
@@ -603,6 +613,10 @@ pub(crate) fn effective(world: &World) -> RenderSettings {
     static PROBE_GI: std::sync::OnceLock<Option<bool>> = std::sync::OnceLock::new();
     if let Some(on) = switch_from_env("ENGINE_PROBE_GI", &PROBE_GI) {
         s.probe_gi = on;
+    }
+    static CANOPY: std::sync::OnceLock<Option<bool>> = std::sync::OnceLock::new();
+    if let Some(on) = switch_from_env("ENGINE_CANOPY", &CANOPY) {
+        s.canopy = on;
     }
     static MIRROR: std::sync::OnceLock<Option<bool>> = std::sync::OnceLock::new();
     if let Some(on) = switch_from_env("ENGINE_MIRROR_SHARES_LIGHTING", &MIRROR) {
@@ -654,7 +668,8 @@ pub(crate) fn effective(world: &World) -> RenderSettings {
 /// game): `ENGINE_PROBE_GI` (`RenderSettings::probe_gi`), `ENGINE_MIRROR_SHARES_LIGHTING`
 /// (`RenderSettings::mirror_shares_lighting`), `ENGINE_AERIAL_TABLE`
 /// (`RenderSettings::aerial_table`), `ENGINE_MESH_OCCLUSION`
-/// (`RenderSettings::mesh_occlusion_culling`). Read once.
+/// (`RenderSettings::mesh_occlusion_culling`), `ENGINE_CANOPY` (`RenderSettings::canopy`).
+/// Read once.
 fn switch_from_env(name: &str, cell: &'static std::sync::OnceLock<Option<bool>>) -> Option<bool> {
     *cell.get_or_init(
         || match std::env::var(name).ok()?.to_ascii_lowercase().as_str() {

@@ -32,6 +32,14 @@ fn render(lods: Lods, shot: &str) -> Option<(u64, Vec<u8>)> {
     }
     app.add_plugins(RenderPlugin);
     {
+        // The final image's dither seeds on real time (`post.wgsl`), so pictures compared
+        // across runs take real time in whole seconds: the same dither however many frames
+        // each run needed.
+        let mut time = app.world.resource_mut::<Time>();
+        time.set_max_delta(1.0);
+        time.set_source(engine_core::time::TimeSource::Manual { step_secs: 1.0 });
+    }
+    {
         let mut s = app.world.resource_mut::<RenderSettings>();
         s.anti_aliasing = AntiAliasing::None;
         s.film_grain = 0.0;
