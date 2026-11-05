@@ -218,17 +218,29 @@ type BuildItem<'a> = (
 #[derive(Resource)]
 pub(crate) struct FighterImagesIn;
 
+/// Species whose meshes and textures a worker is making ([`build_stand_ins`]).
+#[derive(Resource, Default)]
+pub(crate) struct AnimalArtWarming(Vec<Species>);
+
 /// Spawn the parts of new stand-ins. The fighters' shared kit takes a second or more to make
-/// the first time, so it is built on a worker ([`engine_core::off_frame`]) and humanoid
-/// stand-ins get their parts once it is in.
+/// the first time, and so does each species' art (3.4 s in one frame on the session VM when
+/// the paddock's animals arrived), so both are built on a worker ([`engine_core::off_frame`])
+/// and stand-ins get their parts once theirs is in.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn build_stand_ins(
     mut commands: Commands,
     q: Query<BuildItem, Without<StandInState>>,
     mut art: ArtAssets,
     mut warming: Local<bool>,
     images_in: Option<Res<FighterImagesIn>>,
+    mut animals_warming: Local<Vec<Species>>,
+    animals_in: Option<Res<AnimalArtWarming>>,
     time: Res<Time>,
 ) {
+    // A species whose job has put its art in is no longer warming (and one whose art was
+    // released since is made again).
+    let still: &[Species] = animals_in.as_ref().map_or(&[], |w| &w.0);
+    animals_warming.retain(|s| still.contains(s));
     use crate::art::fighter;
     use engine_core::time::TimeSource;
     // Until this world's kit job has put its images in, humanoids wait (the job may have
@@ -269,6 +281,17 @@ pub(crate) fn build_stand_ins(
         if animal.is_none() && !kit_ready {
             continue;
         }
+        // With a manual clock (tests) the art is made on the spot, as the fighters' paint is.
+        if let Some(species) = animal.map(|a| a.species)
+            && budgeted
+            && !crate::art::animals::species_ready(species, &art)
+        {
+            if !animals_warming.contains(&species) {
+                animals_warming.push(species);
+                warm_species(&mut commands, species);
+            }
+            continue;
+        }
         if budgeted && start.elapsed().as_secs_f64() > 0.004 {
             break;
         }
@@ -291,6 +314,32 @@ pub(crate) fn build_stand_ins(
         }
         commands.entity(e).insert(StandInState::default());
     }
+}
+
+/// Make `species`' art on a worker, then put it in the stores ([`AnimalArtWarming`] says
+/// which species are on the way).
+fn warm_species(commands: &mut Commands, species: Species) {
+    use crate::art::animals;
+    commands.queue(move |world: &mut World| {
+        world
+            .get_resource_or_init::<AnimalArtWarming>()
+            .0
+            .push(species);
+    });
+    engine_core::off_frame::OffFrameCommands::off_frame(
+        commands,
+        "npc animal art",
+        move || animals::make_species(species),
+        move |world, made| {
+            let mut state = bevy_ecs::system::SystemState::<ArtAssets>::new(world);
+            if let Ok(mut art) = state.get_mut(world) {
+                animals::add_species(made, &mut art);
+            }
+            if let Some(mut w) = world.get_resource_mut::<AnimalArtWarming>() {
+                w.0.retain(|s| *s != species);
+            }
+        },
+    );
 }
 
 /// A part's pose relative to its owner.

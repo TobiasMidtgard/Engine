@@ -565,15 +565,27 @@ fn material(species: Species, skin: Skin, art: &mut ArtAssets) -> Option<Materia
 
 /// Generate a species' meshes and textures (in parallel) unless they already exist.
 fn ensure_species(species: Species, art: &mut ArtAssets) {
+    if !species_ready(species, art) {
+        add_species(make_species(species), art);
+    }
+}
+
+/// The species' meshes and textures are in the stores (made by [`make_species`] and put in by
+/// [`add_species`], or on the spot by [`pieces`]).
+pub fn species_ready(species: Species, art: &ArtAssets) -> bool {
     let probe = format!("npc/{}", mesh_key(species, Piece::Body, false, false));
-    if art
-        .meshes
+    art.meshes
         .as_ref()
         .is_some_and(|m| m.loaded_by_key(&probe).is_some())
-    {
-        return;
-    }
-    let made = run_jobs(species_jobs(species));
+}
+
+/// Make everything a species needs (world-free: a worker can run it; seconds the first time).
+pub fn make_species(species: Species) -> Vec<Made> {
+    run_jobs(species_jobs(species))
+}
+
+/// Put what [`make_species`] made into the stores (what is there already stays).
+pub fn add_species(made: Vec<Made>, art: &mut ArtAssets) {
     for m in made {
         match m {
             Made::Mesh(key, mesh) => {
