@@ -444,6 +444,17 @@ impl FireField {
         )
     }
 
+    /// Tiles not made yet under the square `reach` meters round `p` (what an ignition or a
+    /// splash there would have to make first: a ground and water query per cell).
+    pub fn tiles_missing(&self, p: DVec3, reach: f32) -> usize {
+        let (lo, _) = Self::split(self.cell_coord(p - DVec3::splat(reach as f64)));
+        let (hi, _) = Self::split(self.cell_coord(p + DVec3::splat(reach as f64)));
+        (lo.y..=hi.y)
+            .flat_map(|y| (lo.x..=hi.x).map(move |x| IVec2::new(x, y)))
+            .filter(|k| !self.map.contains_key(k))
+            .count()
+    }
+
     /// Tile key and local cell of global cell coordinates.
     pub fn split(c: IVec2) -> (IVec2, IVec2) {
         let key = IVec2::new(c.x.div_euclid(TILE), c.y.div_euclid(TILE));

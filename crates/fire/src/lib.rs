@@ -334,6 +334,49 @@ mod tests {
     }
 
     #[test]
+    fn in_play_a_long_line_of_fire_makes_its_tiles_a_few_a_step() {
+        use engine_core::ecs::system::RunSystemOnce;
+        // The real clock, as in play.
+        let mut app = App::new();
+        app.add_plugins(FirePlugin);
+        // A 100 m line, as the meadow demo lights: tiles every 16 m along it.
+        for i in 0..=100 {
+            app.world
+                .resource_mut::<FireCommands>()
+                .0
+                .push(FireCommand::Ignite {
+                    at: DVec3::new(i as f64, 0.0, 3.0),
+                    radius: 0.8,
+                    temperature_c: 900.0,
+                });
+        }
+        let tiles = |app: &App| app.world.resource::<FireField>().tiles.len();
+        let mut steps = 0;
+        let mut most = 0;
+        while !app.world.resource::<FireCommands>().0.is_empty() || steps == 0 {
+            let before = tiles(&app);
+            app.world.run_system_once(sim::handle_ignition).unwrap();
+            most = most.max(tiles(&app) - before);
+            steps += 1;
+            assert!(steps < 100, "the line never finished");
+        }
+        assert!(
+            most <= sim::IGNITION_TILES_PER_STEP + 2,
+            "{most} tiles in one step"
+        );
+        assert!(steps > 2, "spread over {steps} steps");
+        // Every point along the line caught.
+        let field = app.world.resource::<FireField>();
+        for i in 0..=100 {
+            let c = field.cell_at(DVec3::new(i as f64, 0.0, 3.0));
+            assert!(
+                c.is_some_and(|c| c.is_burning()),
+                "{i} m along didn't catch"
+            );
+        }
+    }
+
+    #[test]
     fn ignite_request_starts_a_spreading_fire_that_writes_heat_smoke_and_scorch() {
         let mut app = app();
         app.world.write_message(IgniteRequest {
