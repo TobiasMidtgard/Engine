@@ -46,6 +46,8 @@ const SMOOTH: f64 = 0.15;
 pub(crate) const SLEEP_SPEED: f32 = 0.05;
 /// Rapier's default time a body must rest before it sleeps, seconds.
 pub(crate) const SLEEP_AFTER: f32 = 0.5;
+/// Per level: the resting speed's multiple and the time to rest before sleeping, seconds.
+const SLEEP_LEVELS: [(f32, f32); 4] = [(1.0, SLEEP_AFTER), (2.0, 0.35), (4.0, 0.25), (8.0, 0.15)];
 /// Rapier's default resting spin, rad/s.
 const SLEEP_SPIN: f32 = 0.5;
 
@@ -107,8 +109,15 @@ impl Load {
 
     /// The resting speed's multiple and the time to rest before sleeping, seconds.
     pub(crate) fn sleep(&self) -> (f32, f32) {
-        [(1.0, SLEEP_AFTER), (2.0, 0.35), (4.0, 0.25), (8.0, 0.15)]
-            [self.level.min(MAX_LEVEL) as usize]
+        SLEEP_LEVELS[self.level.min(MAX_LEVEL) as usize]
+    }
+
+    /// The resting speed's multiple and time to rest in a half-rate region
+    /// ([`crate::sim::Simulation::settle_far`]): level 2's, or this level's if it asks more.
+    pub(crate) fn far_sleep(&self) -> (f32, f32) {
+        let (scale, after) = self.sleep();
+        let (far, far_after) = SLEEP_LEVELS[2];
+        (scale.max(far), after.min(far_after))
     }
 
     /// The level-of-detail distances at this level, as a share of the settings'.
@@ -119,7 +128,16 @@ impl Load {
 
 /// Make the bodies of `world` that may sleep settle as soon as `load` asks (and back).
 pub(crate) fn apply_sleep(world: &mut rapier3d::prelude::PhysicsWorld, load: &Load) {
-    let (scale, after) = load.sleep();
+    set_sleep(world, load.sleep(), |_| true);
+}
+
+/// Give the bodies of `world` that may sleep, and that `which` picks, the resting speed's
+/// multiple and the time to rest `(scale, after)`; the handles of those changed.
+pub(crate) fn set_sleep(
+    world: &mut rapier3d::prelude::PhysicsWorld,
+    (scale, after): (f32, f32),
+    which: impl Fn(&rapier3d::prelude::RigidBody) -> bool,
+) -> Vec<rapier3d::prelude::RigidBodyHandle> {
     let speed = SLEEP_SPEED * scale;
     // Look before touching: a body taken mutably counts as changed by the user, which Rapier
     // then re-checks at the next step.
@@ -132,10 +150,11 @@ pub(crate) fn apply_sleep(world: &mut rapier3d::prelude::PhysicsWorld, load: &Lo
             !rb.is_fixed()
                 && a.normalized_linear_threshold >= 0.0
                 && a.normalized_linear_threshold != speed
+                && which(rb)
         })
         .map(|(h, _)| h)
         .collect();
-    for h in due {
+    for &h in &due {
         if let Some(rb) = world.bodies.get_mut(h) {
             let a = rb.activation_mut();
             a.normalized_linear_threshold = speed;
@@ -143,6 +162,7 @@ pub(crate) fn apply_sleep(world: &mut rapier3d::prelude::PhysicsWorld, load: &Lo
             a.time_until_sleep = after;
         }
     }
+    due
 }
 
 #[cfg(test)]
