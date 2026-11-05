@@ -10,7 +10,8 @@
 //! russet), `marsh` (tall, upright, dark), `alien` (a low-gravity world's violet grass under a
 //! paler sky), `path` (a footpath worn through the meadow: `GrassWear`), `snow` (the meadow
 //! under 12 cm of fresh snow), `herbs` and `litter` (a forest floor's shade herbs and fallen
-//! leaves on humus; `herbs_close` and `litter_close` from knee height), `field` (the showcase's
+//! leaves on humus; `herbs_close` and `litter_close` from knee height), `ferns` (woodland ferns,
+//! fronds cut into pinnae; `ferns_close`), `field` (the showcase's
 //! meadow: drawn out to 120 m, shadows to 22 m, standing in it and looking out over it),
 //! `communities` (a 300 m meadow growing `engine_foliage::meadow`'s kinds of grass, painted
 //! from a made-up site: a wet hollow and creek, a footpath, a wood's edge along one side, a
@@ -59,6 +60,10 @@ fn biomes() -> Vec<Biome> {
     add("path", GrassStyle::meadow());
     add("snow", GrassStyle::meadow());
     add("herbs", GrassStyle::forest_herbs());
+    add("sorrel", GrassStyle::wood_sorrel());
+    add("woodruff", GrassStyle::woodruff());
+    add("anemone", GrassStyle::wood_anemone());
+    add("ferns", GrassStyle::fern());
     add("litter", GrassStyle::leaf_litter());
     // games/showcase's `meadow_grass`.
     add(
@@ -68,6 +73,18 @@ fn biomes() -> Vec<Biome> {
             height_variation: 0.55,
             lush_color: [0.09, 0.18, 0.042],
             dry_color: [0.24, 0.21, 0.085],
+            draw_distance: 120.0,
+            shadow_distance: 22.0,
+            ..GrassStyle::meadow()
+        },
+    );
+    // Tall summer grass on a hillside (the reference video's valley view): flat ground up to
+    // x = -20 m from the field's middle, then a 32 degree slope rising toward +x.
+    add(
+        "hillside",
+        GrassStyle {
+            height: 0.55,
+            height_variation: 0.5,
             draw_distance: 120.0,
             shadow_distance: 22.0,
             ..GrassStyle::meadow()
@@ -149,6 +166,30 @@ fn field(style: GrassStyle, size: f32) -> GrassField {
             let density = (0.75 + 0.35 * n).clamp(0.15, 1.0);
             let dryness = (style.dryness + 0.25 * (-n)).clamp(0.0, 1.0);
             (0.0, density, dryness)
+        })
+        .with_style(style)
+}
+
+/// The hillside's slope (rise per meter) and where it starts (meters from the field's middle).
+const HILL_SLOPE: f32 = 0.625;
+const HILL_FOOT: f32 = -20.0;
+
+/// The hillside's ground height at `x` meters from the field's middle.
+fn hill_height(x: f32) -> f32 {
+    (x - HILL_FOOT).max(0.0) * HILL_SLOPE
+}
+
+/// The `hillside` field: [`field`]'s patches over [`hill_height`].
+fn hillside(style: GrassStyle) -> GrassField {
+    let size = 160.0;
+    let points = size as u32 + 1;
+    GrassField::flat(size, size)
+        .sample([points, points], |x, z| {
+            let n =
+                engine_core::math::noise::fbm2(x as f64 * 0.045, z as f64 * 0.045, 11, 3, 2.0, 0.5);
+            let density = (0.8 + 0.3 * n).clamp(0.3, 1.0);
+            let dryness = (style.dryness + 0.25 * (-n)).clamp(0.0, 1.0);
+            (hill_height(x), density, dryness)
         })
         .with_style(style)
 }
@@ -375,22 +416,57 @@ fn main() {
         } else {
             b.style.ground_color()
         };
-        app.world.spawn((
-            Transform::from_translation(at),
-            MeshRenderer::new(
-                Shape::Plane {
-                    size: [400.0, 400.0],
-                    subdivisions: 1,
-                },
-                StandardMaterial::color(r, g, bl).with_roughness(0.95),
-            ),
-        ));
+        if b.name == "hillside" {
+            // The flat foot and the slope, as two planes meeting at the foot.
+            let ground = StandardMaterial::color(r, g, bl).with_roughness(0.95);
+            let foot = HILL_FOOT as f64;
+            app.world.spawn((
+                Transform::from_translation(at + DVec3::new(foot - 100.0, 0.0, 0.0)),
+                MeshRenderer::new(
+                    Shape::Plane {
+                        size: [200.0, 400.0],
+                        subdivisions: 1,
+                    },
+                    ground,
+                ),
+            ));
+            let angle = HILL_SLOPE.atan();
+            let length = 200.0f32;
+            let mid = DVec3::new(
+                foot + 0.5 * (length * angle.cos()) as f64,
+                0.5 * (length * angle.sin()) as f64,
+                0.0,
+            );
+            app.world.spawn((
+                Transform::from_translation(at + mid).with_rotation(Quat::from_rotation_z(angle)),
+                MeshRenderer::new(
+                    Shape::Plane {
+                        size: [length, 400.0],
+                        subdivisions: 1,
+                    },
+                    ground,
+                ),
+            ));
+        } else {
+            app.world.spawn((
+                Transform::from_translation(at),
+                MeshRenderer::new(
+                    Shape::Plane {
+                        size: [400.0, 400.0],
+                        subdivisions: 1,
+                    },
+                    StandardMaterial::color(r, g, bl).with_roughness(0.95),
+                ),
+            ));
+        }
         let grass = app
             .world
             .spawn((
                 Transform::from_translation(at),
                 if b.name == "communities" {
                     communities(b.style)
+                } else if b.name == "hillside" {
+                    hillside(b.style)
                 } else {
                     field(b.style, if b.name == "field" { 300.0 } else { 160.0 })
                 },
@@ -619,6 +695,34 @@ fn main() {
                     "communities_rise",
                     eye,
                     c(150.0, 0.0, 200.0),
+                    side_sun,
+                );
+            }
+        } else if b.name == "hillside" {
+            let on_hill =
+                |x: f64, y: f64, z: f64| o + DVec3::new(x, hill_height(x as f32) as f64 + y, z);
+            if wanted("hillside") {
+                // Standing on the slope, looking along it: the hill rising on the left, the
+                // foot below on the right (the reference video's valley view).
+                let eye = on_hill(30.0, 1.65, -60.0);
+                shot(
+                    &mut app,
+                    &out,
+                    "hillside",
+                    eye,
+                    on_hill(24.0, -2.5, -42.0),
+                    side_sun,
+                );
+            }
+            if wanted("hillside_up") {
+                // From the foot, looking up the hill: the long blades lie toward you.
+                let eye = on_hill(-24.0, 1.2, 0.0);
+                shot(
+                    &mut app,
+                    &out,
+                    "hillside_up",
+                    eye,
+                    on_hill(-4.0, 0.0, -3.0),
                     side_sun,
                 );
             }

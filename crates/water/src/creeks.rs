@@ -34,8 +34,9 @@ use engine_core::tasks::AsyncComputeTaskPool;
 use engine_world::WorldShift;
 use engine_world::terrain::{CreekPoint, CreekQuery, CreekReach, Creeks};
 
-use crate::creek_stones::{CreekStones, ReachStones, STONES_M, StoneKey, around_stones};
+use crate::creek_stones::{CreekStones, POURS_M, ReachStones, STONES_M, StoneKey, around_stones};
 use crate::demo::valley::StreamStone;
+use crate::flow::Falls;
 
 /// Creeks a demo or a level adds beside the terrain's own: a creek provider in its entity's
 /// space (the entity's translation is added to everything it reports).
@@ -77,10 +78,17 @@ pub struct CreekRibbons {
     cuts_laid: Vec<Cut>,
     /// The stones' version the ribbons were last laid with ([`CreekStones::version`]).
     stones_laid: u64,
+    /// The water pouring off the steps near the camera, as the waterfalls' renderer draws it
+    /// ([`crate::creek_stones::PourOver`]); a new `Arc` whenever the ribbons are rebuilt.
+    pub falls: Arc<Falls>,
+    /// The swell the ribbons were last laid with ([`crate::freshet::Freshet::swell`]).
+    swell_laid: f32,
 }
 
 /// Reaches are asked for within this distance of the camera (X and Z), meters.
 const QUERY_M: f64 = 3000.0;
+/// The ribbons are laid again when the rain has swollen or the creeks fallen by this share.
+const SWELL_STEP: f32 = 0.1;
 /// The ribbons are rebuilt when the camera has moved this far, meters.
 const REBUILD_M: f64 = 48.0;
 /// How often the camera's move is checked, seconds.
@@ -121,28 +129,34 @@ pub fn step_spacing(slope: f32) -> (f32, f32) {
     (widths, smoothstep(0.02, 0.035, s))
 }
 
+/// Share of a step's length that is its pool; the rest, at its end, is the step's face, a
+/// short steep chute down the boulders of its lip (step-pool steps are near vertical: the
+/// water mostly pours off the lip into the pool below, see [`crate::creek_stones`]).
+pub const STEP_POOL: f32 = 0.9;
+
 /// The surface of one step, `f` 0 at the foot of the step above (in its pool) .. 1 at this
 /// step's foot: (drop below the reach's even line, as a share of the step's drop S·L; depth
-/// factor). The pool runs gently over 80% of it, the chute takes the rest; the deviations
-/// average to zero over the step. The pool is deepest just below the step above (its scour
-/// hole), the chute shallow and fast.
+/// factor). The pool runs gently over [`STEP_POOL`] of it, the face takes the rest; the
+/// deviations average to zero over the step. The pool is deepest just below the step above
+/// (its scour hole), the chute shallow and fast.
 pub fn step_profile(f: f32) -> (f32, f32) {
-    const POOL: f32 = 0.8;
-    // Drop below the start of the step: 20% of the step's drop over the pool, the rest in
-    // the chute (eased in and out).
+    const POOL: f32 = STEP_POOL;
+    // Drop below the start of the step: 16% of the step's drop over the pool, the rest down
+    // the face (eased in and out).
     let drop = if f < POOL {
-        0.2 * f
+        0.16 * f / POOL
     } else {
         let t = smoothstep(POOL, 1.0, f);
         0.16 + 0.84 * t
     };
-    // The even line drops f; the step's surface stands above it by f − drop, which averages
-    // 0.32 over the step.
-    let above = f - drop - 0.32;
+    // The even line drops f; the step's surface stands above it by f − drop, less that
+    // difference's mean over the step (0.5 − (0.08 P + 0.58 (1 − P))).
+    let mean = 0.5 - (0.08 * POOL + 0.58 * (1.0 - POOL));
+    let above = f - drop - mean;
     let depth = if f < POOL {
         1.0 + 0.8 * (1.0 - f / POOL)
     } else {
-        1.0 - 0.6 * smoothstep(POOL, 0.9, f)
+        1.0 - 0.6 * smoothstep(POOL, POOL + 0.5 * (1.0 - POOL), f)
     };
     (above, depth)
 }
@@ -373,7 +387,11 @@ fn white_water(st: &Station, amount: f32, distance: f32) -> f32 {
     let froude = speed / (9.81 * depth).sqrt();
     let strength = amount * smoothstep(1.0, 2.5, froude);
     let f = st.phase.fract();
-    let local = (1.0 - smoothstep(0.0, 0.35, f)) + 0.5 * smoothstep(0.85, 1.0, f);
+    // The boil right under the pour is short (a few tenths of a meter on a brook's step); its
+    // froth trails on down the pool, thinning.
+    let local = (1.0 - smoothstep(0.0, 0.12, f))
+        + 0.4 * (1.0 - smoothstep(0.08, 0.45, f))
+        + 0.5 * smoothstep(STEP_POOL + 0.03, 1.0, f);
     strength * lerp(local, 0.2, smoothstep(80.0, 160.0, distance))
 }
 
@@ -560,6 +578,7 @@ pub struct Laid {
     vertices: Vec<CreekVertex>,
     indices: Vec<u32>,
     reaches: usize,
+    falls: Falls,
 }
 
 /// A creek provider and where its space sits in the world.
@@ -623,6 +642,20 @@ pub fn lay_ribbons_cut(
     cuts: &[Cut],
     stones: &HashMap<StoneKey, Arc<ReachStones>>,
 ) -> Laid {
+    lay_ribbons_swollen(providers, camera, cuts, stones, 1.0)
+}
+
+/// [`lay_ribbons_cut`] with every creek carrying `swell` times its usual flow (rain,
+/// [`crate::freshet`]): deeper (depth about Q^0.4, Leopold and Maddock's hydraulic geometry;
+/// the current takes the rest), and steps that pour at the usual flow skimming once the
+/// critical depth passes their threshold.
+pub fn lay_ribbons_swollen(
+    providers: &[Provider],
+    camera: DVec3,
+    cuts: &[Cut],
+    stones: &HashMap<StoneKey, Arc<ReachStones>>,
+    swell: f32,
+) -> Laid {
     let _span = tracing::info_span!("water", name = "creek ribbons").entered();
     let anchor = (camera / 16.0).round() * 16.0;
     let mut laid = Laid {
@@ -630,6 +663,7 @@ pub fn lay_ribbons_cut(
         vertices: Vec::new(),
         indices: Vec::new(),
         reaches: 0,
+        falls: Falls::default(),
     };
     let mut reaches: Vec<CreekReach> = Vec::new();
     for (provider, offset) in providers {
@@ -644,24 +678,50 @@ pub fn lay_ribbons_cut(
                 .iter()
                 .find(|c| c.provider == key && c.reach == reach.id)
                 .map(|c| (c.from_m, c.to_m));
+            let deeper = swell.powf(0.4);
             let points = reach
                 .points
                 .into_iter()
                 .map(|p| CreekPoint {
                     at: p.at + *offset,
+                    flow_m3_s: p.flow_m3_s * swell,
+                    depth_m: p.depth_m * deeper,
                     ..p
                 })
                 .collect();
+            let reach_stones = stones.get(&(key, reach.id)).map(|s| &**s);
             if lay_ribbon_around(
                 points,
                 camera,
                 anchor,
                 skip,
-                stones.get(&(key, reach.id)).map(|s| &**s),
+                reach_stones,
                 &mut laid.vertices,
                 &mut laid.indices,
             ) {
                 laid.reaches += 1;
+            }
+            // The water pouring off the steps near the camera, in the simulated stretch too: its
+            // grid is too coarse to see a brook's steps as drops (`FlowSim::lips`), and its bed
+            // is carved to the same steps.
+            for pour in reach_stones.map_or(&[][..], |r| &r.pours[..]) {
+                if horizontal(pour.lip.top, camera) as f64 > POURS_M + REBUILD_M {
+                    continue;
+                }
+                let q = pour.lip.q * swell;
+                let critical = (q * q / 9.81).cbrt();
+                if critical > pour.skims_at {
+                    continue;
+                }
+                let mut lip = pour.lip;
+                if swell != 1.0 {
+                    // More water over the lip, thrown out faster (its path is kept).
+                    lip.speed *= (critical / pour.critical).clamp(1.0, 4.0);
+                    lip.q = q;
+                }
+                laid.falls.lips.push(lip);
+                laid.falls.paths.push(pour.path.clone());
+                laid.falls.sides.push(pour.sides);
             }
         }
     }
@@ -684,6 +744,7 @@ impl CreekRibbons {
         self.vertices = laid.vertices;
         self.indices = laid.indices;
         self.reaches = laid.reaches;
+        self.falls = Arc::new(laid.falls);
         self.version += 1;
     }
 }
@@ -706,7 +767,9 @@ pub fn creek_ribbons_system(
     mut shifts: MessageReader<WorldShift>,
     mut ribbons: ResMut<CreekRibbons>,
     stones: Res<CreekStones>,
+    freshet: Option<Res<crate::freshet::Freshet>>,
 ) {
+    let swell = freshet.map_or(1.0, |f| f.swell);
     let shifted = shifts.read().copied().reduce(|a, next| a.then(&next));
     if let Some(s) = shifted {
         // Drawn where they were until laid again in the new frame, below; one being laid in
@@ -739,9 +802,11 @@ pub fn creek_ribbons_system(
         && keys == ribbons.providers
         && ribbons.cuts == ribbons.cuts_laid
         && stones.version == ribbons.stones_laid
+        && (swell - ribbons.swell_laid).abs() < SWELL_STEP * swell
     {
         return;
     }
+    ribbons.swell_laid = swell;
     ribbons.built_at = Some(camera);
     ribbons.providers = keys;
     ribbons.cuts_laid = ribbons.cuts.clone();
@@ -750,12 +815,12 @@ pub fn creek_ribbons_system(
     let stones = stones.all();
     match AsyncComputeTaskPool::try_get() {
         Some(pool) => {
-            ribbons.job = Some(
-                pool.spawn(async move { lay_ribbons_cut(&providers, camera, &cuts, &stones) }),
-            );
+            ribbons.job = Some(pool.spawn(async move {
+                lay_ribbons_swollen(&providers, camera, &cuts, &stones, swell)
+            }));
         }
         None => {
-            let laid = lay_ribbons_cut(&providers, camera, &cuts, &stones);
+            let laid = lay_ribbons_swollen(&providers, camera, &cuts, &stones, swell);
             ribbons.install(laid);
         }
     }

@@ -242,10 +242,11 @@ fn spawn(
             format!("audio walker {name}"),
             move || {
                 let images = textures::Textures::bake(&missing);
-                // Meshes don't depend on the texture handles, so stand-ins do here.
-                let meshes: HashMap<String, Mesh> = build(&textures::Textures::default())
+                // Meshes don't depend on the texture handles, so stand-ins do here. Skin
+                // weights are worked out here too (16-29 ms a walker on the main thread).
+                let meshes: HashMap<String, Made> = build(&textures::Textures::default())
                     .iter()
-                    .map(|p| (p.key.clone(), (p.mesh)()))
+                    .map(|p| (p.key.clone(), Made::new((p.mesh)(), &p.skin)))
                     .collect();
                 (images, meshes)
             },
@@ -261,34 +262,71 @@ fn spawn(
     });
 }
 
-/// Spawn `parts` under the walker `root`, their meshes from `made` (built on a worker) where
-/// they aren't registered yet.
-fn attach(world: &mut World, root: Entity, parts: Vec<Part>, mut made: HashMap<String, Mesh>) {
+/// A part's mesh built on a worker, with its skin weights when it blends toward neighbours.
+/// (vertex, weight toward each of the first two neighbours).
+type Weights = Arc<Vec<(u32, [f32; 2])>>;
+
+struct Made {
+    mesh: Mesh,
+    /// The walker's own copy to deform, its rest vertices and weights; None when nothing
+    /// moves with a neighbour.
+    skin: Option<(Mesh, Arc<Vec<Vertex>>, Weights)>,
+}
+
+impl Made {
+    fn new(mesh: Mesh, skin: &[Blend]) -> Self {
+        let skin = (!skin.is_empty())
+            .then(|| skin_weights(&mesh, skin))
+            .filter(|w| !w.is_empty())
+            .map(|w| (mesh.clone(), Arc::new(mesh.vertices.clone()), Arc::new(w)));
+        Self { mesh, skin }
+    }
+}
+
+/// (vertex, weight toward each of the first two neighbours) for every vertex of `mesh` that
+/// moves with them.
+fn skin_weights(mesh: &Mesh, skin: &[Blend]) -> Vec<(u32, [f32; 2])> {
+    mesh.vertices
+        .iter()
+        .enumerate()
+        .filter_map(|(i, v)| {
+            let mut w = [0.0; 2];
+            for (j, b) in skin.iter().take(2).enumerate() {
+                w[j] = (b.weight)(Vec3::from(v.position)).clamp(0.0, 1.0);
+            }
+            (w[0] > 1e-3 || w[1] > 1e-3).then_some((i as u32, w))
+        })
+        .collect()
+}
+
+/// Spawn `parts` under the walker `root`, their meshes and skin weights from `made` (built on
+/// a worker) where given.
+fn attach(world: &mut World, root: Entity, parts: Vec<Part>, mut made: HashMap<String, Made>) {
     let mut built: Vec<(Option<Handle<Mesh>>, Option<Skin>)> = Vec::with_capacity(parts.len());
     match world.get_resource_mut::<Assets<Mesh>>() {
         Some(mut meshes) => {
             for p in &parts {
-                let h = meshes.get_or_insert_keyed(&p.key, || {
-                    made.remove(&p.key).unwrap_or_else(|| (p.mesh)())
-                });
+                let pre = made.remove(&p.key);
+                let (pre_mesh, pre_skin) = match pre {
+                    Some(m) => (Some(m.mesh), Some(m.skin)),
+                    None => (None, None),
+                };
+                let h =
+                    meshes.get_or_insert_keyed(&p.key, || pre_mesh.unwrap_or_else(|| (p.mesh)()));
                 let skin = (!p.skin.is_empty()).then_some(()).and_then(|()| {
-                    let rest = meshes.get(h)?.clone();
-                    let weights: Vec<(u32, [f32; 2])> = rest
-                        .vertices
-                        .iter()
-                        .enumerate()
-                        .filter_map(|(i, v)| {
-                            let mut w = [0.0; 2];
-                            for (j, b) in p.skin.iter().take(2).enumerate() {
-                                w[j] = (b.weight)(Vec3::from(v.position)).clamp(0.0, 1.0);
+                    let (mesh, rest, weights) = match pre_skin {
+                        // The worker built the same mesh from the same recipe.
+                        Some(made) => made?,
+                        None => {
+                            let mesh = meshes.get(h)?.clone();
+                            let w = skin_weights(&mesh, &p.skin);
+                            if w.is_empty() {
+                                return None;
                             }
-                            (w[0] > 1e-3 || w[1] > 1e-3).then_some((i as u32, w))
-                        })
-                        .collect();
-                    if weights.is_empty() {
-                        return None;
-                    }
-                    let rest_vertices = Arc::new(rest.vertices.clone());
+                            let rest = Arc::new(mesh.vertices.clone());
+                            (mesh, rest, Arc::new(w))
+                        }
+                    };
                     Some(Skin {
                         bones: p
                             .skin
@@ -296,9 +334,9 @@ fn attach(world: &mut World, root: Entity, parts: Vec<Part>, mut made: HashMap<S
                             .take(2)
                             .map(|b| (b.bone as u8, b.child))
                             .collect(),
-                        mesh: meshes.add(rest),
-                        rest: rest_vertices,
-                        weights: Arc::new(weights),
+                        mesh: meshes.add(mesh),
+                        rest,
+                        weights,
                         last: Vec::new(),
                     })
                 });
@@ -485,6 +523,41 @@ mod tests {
     use engine_world::ContactKind;
 
     /// Every mesh of every walker builds with finite vertices and in-range indices.
+    /// Skin weights and the walker's deforming copies are made with the meshes on the worker;
+    /// a second walker (meshes cached) gets the same skins.
+    #[test]
+    fn walkers_get_their_skins_from_the_worker() {
+        let mut world = World::new();
+        world.insert_resource(Assets::<Mesh>::default());
+        world.insert_resource(Assets::<engine_render::Image>::default());
+        let w = TrailWalker::new(DVec3::ZERO, 0.0, ContactKind::Paw, 70.0, 1.4);
+        let mut counts = Vec::new();
+        for _ in 0..2 {
+            let mut c = world.commands();
+            dog(&mut c, w.clone());
+            world.flush();
+            let skins: Vec<usize> = world
+                .query::<&Skin>()
+                .iter(&world)
+                .map(|s| s.weights.len())
+                .collect();
+            counts.push(skins);
+        }
+        assert!(!counts[0].is_empty(), "the dog has skinned parts");
+        assert!(counts[0].iter().all(|&n| n > 0));
+        assert_eq!(counts[1].len(), 2 * counts[0].len());
+        let skinned: Vec<_> = world
+            .query::<&Skin>()
+            .iter(&world)
+            .map(|s| s.mesh)
+            .collect();
+        let meshes = world.resource::<Assets<Mesh>>();
+        assert!(
+            skinned.iter().all(|h| meshes.get(*h).is_some()),
+            "each copy is in"
+        );
+    }
+
     #[test]
     fn every_part_builds_a_sound_mesh() {
         let tex = textures::Textures::default();

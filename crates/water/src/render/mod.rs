@@ -1562,14 +1562,17 @@ impl WaterFeature {
         state: &WaterState,
         view: &ViewData,
         plunges: &[(DVec3, Vec2, f32)],
+        creeks: Option<&crate::flow::Falls>,
     ) -> [f32; 4] {
         // The falls as the flow step last worked them out (a few times a second while the
-        // water moves), built once for every view and frame until they change.
+        // water moves), built once for every view and frame until they change; and the
+        // creeks' pour-overs (`crate::creek_stones::PourOver`), laid with their ribbons.
         let key: Vec<usize> = state
             .flows
             .iter()
             .filter(|sim| sim.visible)
             .map(|sim| sim.falls() as *const crate::flow::Falls as usize)
+            .chain(creeks.map(|f| f as *const crate::flow::Falls as usize))
             .collect();
         let stale = gpu.fall_key != key
             || gpu
@@ -1587,8 +1590,9 @@ impl WaterFeature {
                 .flows
                 .iter()
                 .filter(|sim| sim.visible)
-                .flat_map(|sim| {
-                    let falls = sim.falls();
+                .map(|sim| sim.falls())
+                .chain(creeks)
+                .flat_map(|falls| {
                     falls.lips.iter().zip(&falls.paths).zip(&falls.sides).map(
                         |((lip, path), sides)| {
                             (lip.top.distance(view.origin), lip, path.as_slice(), *sides)
@@ -1891,7 +1895,13 @@ impl WaterFeature {
         );
     }
 
-    fn upload_flows(gpu: &mut Gpu, shared: &GpuShared, state: &WaterState, view: &ViewData) {
+    fn upload_flows(
+        gpu: &mut Gpu,
+        shared: &GpuShared,
+        state: &WaterState,
+        view: &ViewData,
+        spate: f32,
+    ) {
         let device = &shared.device;
         gpu.flows.retain(|f| {
             state.flows.iter().any(|s| {
@@ -1980,7 +1990,7 @@ impl WaterFeature {
                     sim.optics.foam,
                     sim.optics.caustics,
                     sim.optics.refraction,
-                    0.0,
+                    spate,
                 ],
             };
             shared
@@ -2062,14 +2072,19 @@ impl WaterFeature {
         }
         c.drawn = true;
         let o = view.relative(c.anchor);
-        let optics = WaterOptics::stream();
+        // Clear stream water, browned by a rain's mud (`crate::freshet`).
+        let (mud, spate) = world
+            .get_resource::<crate::freshet::Freshet>()
+            .map_or((0.0, 0.0), |f| (f.mud, f.spate()));
+        let optics =
+            crate::freshet::muddy(&WaterOptics::stream(), &crate::freshet::flood_optics(), mud);
         let (absorb, scatter) = optics_vectors(&optics);
         let u = FlowUniform {
             origin: [o.x, o.y, o.z, 1.0],
             dims: [0.0, 0.0, 1.0, 0.0],
             absorb,
             scatter,
-            look: [optics.foam, optics.caustics, optics.refraction, 0.0],
+            look: [optics.foam, optics.caustics, optics.refraction, spate],
         };
         shared
             .queue
@@ -2643,7 +2658,17 @@ impl RenderFeature for WaterFeature {
         ];
         drop(span);
         let span = tracing::info_span!("water", name = "falls upload").entered();
-        g.falls = Self::upload_falls(gpu, shared, &state, view, &plunges);
+        let creek_falls = world
+            .get_resource::<crate::creeks::CreekRibbons>()
+            .map(|r| r.falls.clone());
+        g.falls = Self::upload_falls(
+            gpu,
+            shared,
+            &state,
+            view,
+            &plunges,
+            creek_falls.as_deref().filter(|f| !f.lips.is_empty()),
+        );
         drop(span);
         let span = tracing::info_span!("water", name = "uniform").entered();
         uniform.g = g;
@@ -2660,7 +2685,10 @@ impl RenderFeature for WaterFeature {
         }
         drop(span);
         let span = tracing::info_span!("water", name = "flow upload").entered();
-        Self::upload_flows(gpu, shared, &state, view);
+        let spate = world
+            .get_resource::<crate::freshet::Freshet>()
+            .map_or(0.0, |f| f.spate());
+        Self::upload_flows(gpu, shared, &state, view, spate);
         let creek_triangles = Self::upload_creeks(gpu, shared, world, view);
         drop(span);
 

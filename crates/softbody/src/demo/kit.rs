@@ -464,13 +464,39 @@ pub(super) fn claim_bake(world: &mut World) -> Option<std::sync::Arc<()>> {
     Some(token)
 }
 
-fn place_at(world: &mut World, anchor: Entity, place: impl FnOnce(&mut Commands, DVec3)) {
+/// Runs `place` at the anchor's position now; false (and nothing placed) once it is gone.
+fn place_at(world: &mut World, anchor: Entity, place: impl FnOnce(&mut Commands, DVec3)) -> bool {
     let Some(at) = world.get::<Transform>(anchor).map(|t| t.translation) else {
-        return;
+        return false;
     };
     let mut queue = bevy_ecs::world::CommandQueue::default();
     place(&mut Commands::new(&mut queue, world), at);
     queue.apply(world);
+    true
+}
+
+/// One batch of a place spread over frames: its name (for the slow-apply log) and what it
+/// spawns around the anchor.
+pub type Part = (&'static str, fn(&mut Commands, DVec3));
+
+/// Places `parts` one per off-frame apply, in order, each at the anchor's position when it
+/// runs, so a big scene is not spawned in one frame. Jobs belong to the scope current now (a
+/// streamed cell stays loading until the last part is in); stops once the anchor is gone.
+pub fn place_parts(world: &mut World, anchor: Entity, mut parts: Vec<Part>) {
+    if parts.is_empty() {
+        return;
+    }
+    let (name, part) = parts.remove(0);
+    engine_core::off_frame::off_frame(
+        world,
+        name,
+        || (),
+        move |world: &mut World, ()| {
+            if place_at(world, anchor, part) {
+                place_parts(world, anchor, parts);
+            }
+        },
+    );
 }
 
 /// Register `mesh` under `key` (once) when the world has a renderer.
@@ -741,6 +767,8 @@ mod tests {
             super::super::spawn_demo(&mut commands, DVec3::new(0.0, 0.0, 500.0));
         }
         app.world.flush();
+        // Its batches are queued a frame apart; nothing to bake, so they all land.
+        engine_core::off_frame::finish(&mut app.world, None);
         assert_eq!(solids(&mut app.world), 2 * n);
         assert_eq!(app.world.resource::<Assets<StandardMaterial>>().len(), made);
     }

@@ -240,12 +240,27 @@ pub fn plan_stretch(
         region.cells[0] as f64 * region.cell_m as f64,
         region.cells[1] as f64 * region.cell_m as f64,
     );
+    // The stones in the channel. Not the boulders along the banks: half up the bank, mostly
+    // out of the water, a film the grid spread over their tops poured off their edges as
+    // falls; the water runs round them under their mesh just as well.
+    let off_line = |p: DVec2| {
+        course
+            .windows(2)
+            .map(|w| {
+                let a = DVec2::new(w[0].at.x, w[0].at.z);
+                let ab = DVec2::new(w[1].at.x, w[1].at.z) - a;
+                let t = ((p - a).dot(ab) / ab.length_squared().max(1e-9)).clamp(0.0, 1.0);
+                (a + ab * t).distance(p)
+            })
+            .fold(f64::MAX, f64::min)
+    };
     region.rocks = stones
         .iter()
         .filter(|s| {
             let d = DVec2::new(s.at.x - corner.x, s.at.z - corner.z);
             d.x >= 0.0 && d.y >= 0.0 && d.x <= size.x && d.y <= size.y
         })
+        .filter(|s| off_line(DVec2::new(s.at.x, s.at.z)) < (0.42 * width) as f64)
         .map(|s| s.rock(corner))
         .collect();
     Some(StretchPlan { corner, region })

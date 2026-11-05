@@ -567,7 +567,11 @@ impl FlowSim {
         self.open_edges = region.open_edges;
         self.friction = region.friction;
         self.loss = region.loss_m_s;
-        self.sources.clone_from(&region.sources);
+        if self.sources != region.sources {
+            // A spring swelled or dried (rain, `crate::freshet`): the water will move again.
+            self.sources.clone_from(&region.sources);
+            self.unsettle();
+        }
         self.optics = region.optics;
         self.visible = region.visible;
     }

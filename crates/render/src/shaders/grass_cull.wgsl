@@ -113,6 +113,22 @@ fn grass_map_at(f: GrassField, p: vec2<f32>) -> vec4<f32> {
     return mix(mix(a, b, t.x), mix(c, d, t.x), t.y);
 }
 
+// The ground's rise per meter along the field's x and z at field-local `p`: the slope of the
+// map cell `p` lies in (the height map's derivative, as `grass_map_at` interpolates it).
+fn grass_slope_at(f: GrassField, p: vec2<f32>) -> vec2<f32> {
+    let size = vec2<f32>(f.axis_x.w, f.axis_y.w);
+    let res = vec2<i32>(f.grid.xy);
+    let cell = size / vec2<f32>(res - 1);
+    let g = clamp(p / size, vec2<f32>(0.0), vec2<f32>(1.0)) * vec2<f32>(res - 1);
+    let i = min(vec2<i32>(floor(g)), res - 2);
+    let t = g - vec2<f32>(i);
+    let a = textureLoad(grass_map, i, 0).x;
+    let b = textureLoad(grass_map, i + vec2<i32>(1, 0), 0).x;
+    let c = textureLoad(grass_map, i + vec2<i32>(0, 1), 0).x;
+    let d = textureLoad(grass_map, i + vec2<i32>(1, 1), 0).x;
+    return vec2<f32>(mix(b - a, d - c, t.y), mix(c - a, d - b, t.x)) / cell;
+}
+
 // How worn the ground is at field-local `p` (meters), 0 untouched .. 1 bare, bilinear.
 fn grass_wear_at(f: GrassField, p: vec2<f32>) -> f32 {
     if (f.wear.w < 0.5) { return 0.0; }
@@ -336,8 +352,24 @@ fn grass_seed(instance: u32, shadow: bool) -> BladeSeed {
     let fanned = face2 + (normalize(fan) - face2) * f.clump.z;
     face2 = select(face2, normalize(fanned), dot(fanned, fanned) > 1e-6);
     let facing = f.axis_x.xyz * face2.x + f.axis_z.xyz * face2.y;
-    let lean = f.shape.w * (0.2 + 0.8 * r1.z) * mix(1.0, 0.55 + 1.1 * clump.dist, f.clump.z)
+    var lean = f.shape.w * (0.2 + 0.8 * r1.z) * mix(1.0, 0.55 + 1.1 * clump.dist, f.clump.z)
         * select(1.0, 0.4, flower);
+    // On a slope the blades still grow up (gravitropism), but long ones flop over downhill,
+    // where there is room and open sky, and winters of snow creep comb them that way: a
+    // steep meadow lies combed down the hill. Short turf, leaves and flowering stems hardly.
+    var leaning = facing;
+    let rise = grass_slope_at(f, local);
+    let steep = length(rise);
+    if (steep > 0.12) {
+        let down2 = -rise / steep;
+        let long = smoothstep(0.12, 0.6, height) * (1.0 - 0.7 * leaf) * select(1.0, 0.35, flower);
+        let comb = smoothstep(0.12, 0.7, steep) * long * (0.6 + 0.4 * r2.w);
+        // Most blades turn to face down the hill; each keeps a little of its own way.
+        let turned = normalize(face2 + (down2 - face2) * (0.75 * comb) + vec2<f32>(1e-4, 0.0));
+        face2 = select(face2, turned, comb > 0.01);
+        leaning = f.axis_x.xyz * face2.x + f.axis_z.xyz * face2.y;
+        lean = lean + comb * 1.1;
+    }
 
     // Color: fresh to dry by the map, the clump and per blade.
     let cc = f.look.x;
@@ -351,7 +383,7 @@ fn grass_seed(instance: u32, shadow: bool) -> BladeSeed {
     out.root = root;
     out.face2 = face2;
     out.height = height;
-    out.lean = normalize(up + facing * lean);
+    out.lean = normalize(up + leaning * lean);
     out.phase = fract(clump.hash.w + 0.2 * r0.w);
     out.ripple = r0.w;
     out.rise = r1.z;
@@ -444,7 +476,10 @@ fn grass_snow_depth(f: GrassField, rel: vec3<f32>) -> f32 {
 // This field's jobs: first, count.
 @group(2) @binding(2) var<uniform> grass_cull: vec4<u32>;
 
-const GRASS_SCREEN_GROUPS: u32 = 6u;
+const GRASS_SCREEN_GROUPS: u32 = 7u;
+// The screen's draw of leaves cut into pinnae or leaflets (ferns, sorrel), drawn by pipelines
+// that discard.
+const GRASS_CUT_GROUP: u32 = 6u;
 const GRASS_SHADOW_SEGMENTS: u32 = 2u;
 
 // Whether a sphere (camera-relative center, radius) is inside the sides of the view `m`
@@ -490,7 +525,9 @@ fn cs_cull(@builtin(workgroup_id) group: vec3<u32>, @builtin(local_invocation_in
         if (!grass_in_view(frame.view_proj, center, radius)) { return; }
         let tip = grass_tip(seed, frame.time.x, tiling);
         let prev = grass_tip(seed, frame.time.x - frame.time.z, tiling);
-        grass_emit(segments - 1u, grass_pack(grass_shape(seed, tip, prev, segments)));
+        let cut = grass_fields[seed.field].kind.z != 0.0;
+        let g = select(segments - 1u, GRASS_CUT_GROUP, cut);
+        grass_emit(g, grass_pack(grass_shape(seed, tip, prev, segments)));
         return;
     }
     let shadow_segments = min(segments, GRASS_SHADOW_SEGMENTS);

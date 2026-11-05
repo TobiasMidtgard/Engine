@@ -324,23 +324,43 @@ pub fn spawn_market(world: &mut World, origin: DVec3) {
     place_market(world, origin, bake_market());
 }
 
-/// Spawns the market around `origin` with the art from [`bake_market`].
-pub fn place_market(world: &mut World, origin: DVec3, mut tex: MarketBake) {
+/// Spawns the market around `origin` with the art from [`bake_market`], all at once.
+pub fn place_market(world: &mut World, origin: DVec3, tex: MarketBake) {
+    place_market_first(world, origin, tex)
+        .stock(world, origin)
+        .corner(world, origin);
+}
+
+/// What [`place_market_first`] leaves to place: the stock between the stalls and the straw
+/// ([`MarketRest::stock`]), then the ale corner ([`MarketStock::corner`]). Each is a frame's
+/// work of its own when the demo places them one job after another (`demo::spawn_demo`);
+/// positions are taken from the origin each is given, so a world shift between them is fine.
+pub struct MarketRest {
+    mats: Mats,
+    /// The paving's heights above the origin (from the bake), for the straw.
+    paving: Option<Vec<f64>>,
+}
+
+/// The ale corner, left to place after the stock ([`MarketRest::stock`]).
+pub struct MarketStock {
+    mats: Mats,
+    rng: Rng,
+}
+
+/// The ground under the market, asked at `p` (the origin's height where there is none).
+fn ground_at(world: &World, origin: DVec3) -> impl Fn(DVec3) -> f64 + use<> {
     let ground = world.get_resource::<Ground>().cloned().unwrap_or_default();
+    move |p: DVec3| ground.height(p).unwrap_or(origin.y)
+}
+
+/// The square, the stalls, the mast, lamps and the larger props.
+pub fn place_market_first(world: &mut World, origin: DVec3, mut tex: MarketBake) -> MarketRest {
     let started = std::time::Instant::now();
-    let asked = std::cell::Cell::new((0u32, 0.0f64));
-    let ground_y = |p: DVec3| {
-        let t = std::time::Instant::now();
-        let y = ground.height(p).unwrap_or(origin.y);
-        let (n, ms) = asked.get();
-        asked.set((n + 1, ms + t.elapsed().as_secs_f64() * 1000.0));
-        y
-    };
-    // The straw asks for thousands of heights over a few meters: it reads them off the
-    // lattice the paving is built on, asked once a corner.
+    let ground_y = ground_at(world, origin);
+    let paving = tex.paving.take();
     let lattice = GroundLattice::new(&ground_y, origin);
-    if let Some(heights) = tex.paving.take() {
-        lattice.fill_paving(&heights, origin.y);
+    if let Some(heights) = &paving {
+        lattice.fill_paving(heights, origin.y);
     }
     let fine = |p: DVec3| lattice.height(p);
     let mats = Mats::new(world, &mut tex);
@@ -385,7 +405,7 @@ pub fn place_market(world: &mut World, origin: DVec3, mut tex: MarketBake) {
         DVec3::new(table.x, ground_y(table), table.z),
         0.0,
     );
-    let cart = origin + DVec3::new(10.5, 0.0, -3.5);
+    let cart = origin + CART;
     handcart(
         world,
         &mats,
@@ -403,32 +423,68 @@ pub fn place_market(world: &mut World, origin: DVec3, mut tex: MarketBake) {
         let p = origin + DVec3::new(x, 0.0, z);
         bench(world, &mats, DVec3::new(p.x, ground_y(p), p.z), yaw);
     }
-    // Stock waiting to be shelved, between the stalls.
-    let mut rng = Rng::new(77);
-    for i in 0..STALLS.len() - 1 {
-        let (a, _) = stall_place(i);
-        let (b, _) = stall_place(i + 1);
-        let mid = (a + b) * 0.5 * 0.97;
-        let p = origin + mid;
-        clutter(world, &mats, DVec3::new(p.x, ground_y(p), p.z), &mut rng);
-    }
-    // Straw dropped where stock is carried: in front of every stall and round the handcart.
-    let mut spots: Vec<(DVec3, f32, Vec2, u32)> = (0..STALLS.len())
-        .map(|i| {
-            let (p, yaw) = stall_place(i);
-            // Centred a little in front of the counter.
-            let front = DVec3::new(yaw.sin() as f64, 0.0, yaw.cos() as f64);
-            (origin + p + front * 1.0, yaw, Vec2::new(2.6, 1.6), 60)
-        })
-        .collect();
-    spots.push((cart, -0.6, Vec2::new(1.6, 1.4), 45));
-    straw(world, &mats, origin, &fine, &spots, &mut rng);
-    ale_corner(world, &mats, origin, &ground_y, &mut rng);
-    let (n, ms) = asked.get();
-    engine_core::log::info!(
-        "ui market: placed in {:.1} ms, {n} ground heights asked ({ms:.1} ms of it)",
+    engine_core::log::debug!(
+        "ui market: square, stalls and props placed in {:.1} ms",
         started.elapsed().as_secs_f64() * 1000.0
     );
+    MarketRest { mats, paving }
+}
+
+/// Where the handcart stands, from the market's middle.
+const CART: DVec3 = DVec3::new(10.5, 0.0, -3.5);
+
+impl MarketRest {
+    /// Stock waiting to be shelved between the stalls, and the straw dropped where it is
+    /// carried.
+    pub fn stock(self, world: &mut World, origin: DVec3) -> MarketStock {
+        let started = std::time::Instant::now();
+        let ground_y = ground_at(world, origin);
+        // The straw asks for thousands of heights over a few meters: it reads them off the
+        // lattice the paving is built on (asked on the worker with the textures).
+        let lattice = GroundLattice::new(&ground_y, origin);
+        if let Some(heights) = &self.paving {
+            lattice.fill_paving(heights, origin.y);
+        }
+        let fine = |p: DVec3| lattice.height(p);
+        let mats = self.mats;
+        let mut rng = Rng::new(77);
+        for i in 0..STALLS.len() - 1 {
+            let (a, _) = stall_place(i);
+            let (b, _) = stall_place(i + 1);
+            let mid = (a + b) * 0.5 * 0.97;
+            let p = origin + mid;
+            clutter(world, &mats, DVec3::new(p.x, ground_y(p), p.z), &mut rng);
+        }
+        // In front of every stall and round the handcart.
+        let mut spots: Vec<(DVec3, f32, Vec2, u32)> = (0..STALLS.len())
+            .map(|i| {
+                let (p, yaw) = stall_place(i);
+                // Centred a little in front of the counter.
+                let front = DVec3::new(yaw.sin() as f64, 0.0, yaw.cos() as f64);
+                (origin + p + front * 1.0, yaw, Vec2::new(2.6, 1.6), 60)
+            })
+            .collect();
+        spots.push((origin + CART, -0.6, Vec2::new(1.6, 1.4), 45));
+        straw(world, &mats, origin, &fine, &spots, &mut rng);
+        engine_core::log::debug!(
+            "ui market: stock and straw placed in {:.1} ms",
+            started.elapsed().as_secs_f64() * 1000.0
+        );
+        MarketStock { mats, rng }
+    }
+}
+
+impl MarketStock {
+    /// The ale corner.
+    pub fn corner(mut self, world: &mut World, origin: DVec3) {
+        let started = std::time::Instant::now();
+        let ground_y = ground_at(world, origin);
+        ale_corner(world, &self.mats, origin, &ground_y, &mut self.rng);
+        engine_core::log::debug!(
+            "ui market: ale corner placed in {:.1} ms",
+            started.elapsed().as_secs_f64() * 1000.0
+        );
+    }
 }
 
 /// Ground heights on a lattice of [`GroundLattice::CELL_M`] around the square's middle,
