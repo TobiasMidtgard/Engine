@@ -2500,7 +2500,7 @@ fn substep(
         let piece = crate::report::Piece::start("substeps: after Rapier");
         if crate::report::wanted() {
             let c = &r.world.physics_pipeline.counters;
-            crate::report::rapier_stages(c);
+            crate::report::rapier_stages(p.rid, c);
             if cpu_ms > 3.0 {
                 engine_core::log::info!(
                     "physics: a Rapier step took {:.1} ms ({cpu_ms:.1} on the CPU; {} bodies, \
@@ -2517,6 +2517,10 @@ fn substep(
                     c.stages.solver_time.time_ms(),
                     c.stages.user_changes.time_ms(),
                     c.cd.final_broad_phase_time.time_ms()
+                );
+                engine_core::log::info!(
+                    "physics: its heaviest pairs: {}",
+                    crate::report::heavy_pairs(&r.world, 4)
                 );
             }
         }
