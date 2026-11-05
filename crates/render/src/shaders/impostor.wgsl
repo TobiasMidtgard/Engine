@@ -104,8 +104,82 @@ fn rows_unapply(m0: vec4<f32>, m1: vec4<f32>, m2: vec4<f32>, v: vec3<f32>) -> ve
     return t / max(s2, 1e-12);
 }
 
+// An instance's model rows and normal matrix columns.
+struct ImpostorPose {
+    m0: vec4<f32>,
+    m1: vec4<f32>,
+    m2: vec4<f32>,
+    n0: vec3<f32>,
+    n1: vec3<f32>,
+    n2: vec3<f32>,
+};
+
+// A bone plant's impostor (wind table `entry`, lib_wind.wgsl) tilted about its trunk's root so
+// its top moves by the trunk's lean (`plant_lean`), this frame's or last frame's (`prev`), as
+// the mesh's does: whole hillsides of far trees bow in a storm. The pose's normal columns turn
+// with it (the turn is a rotation).
+fn impostor_leaned(pose: ImpostorPose, entry: u32, prev: bool) -> ImpostorPose {
+    let mesh = plant_mesh(entry);
+    let sp = plant_species(mesh.y);
+    let header = plant_wind_words[0];
+    let root_words = plant_word(header.z + 2u * mesh.x);
+    let root = root_words.xyz;
+    let height = max(root_words.w, 1e-3);
+    var air = PlantAir(frame.plant_wind, frame.gusts, vec2<f32>(pose.m0.w, pose.m2.w) + frame.gust_offset.xy,
+        vec2<f32>(0.0), false, 0u, 1.0);
+    if (prev) {
+        air = PlantAir(frame.plant_wind_prev, frame.gusts_prev, vec2<f32>(pose.m0.w, pose.m2.w) + frame.gust_offset.zw,
+            vec2<f32>(0.0), true, 0u, 1.0);
+    }
+    let dir = plant_wind_dir(pose.n0, pose.n1, pose.n2, air.wind);
+    let lean = plant_lean(sp, air, dir, height, plant_hash(air.root_at));
+    let amount = length(lean);
+    if (amount < 1e-4) { return pose; }
+    let k = normalize(cross(vec3<f32>(0.0, 1.0, 0.0), vec3<f32>(lean.x, 0.0, lean.y)));
+    let angle = atan2(amount, height);
+    let turn = mat3x3<f32>(
+        plant_turn(vec3<f32>(1.0, 0.0, 0.0), k, angle),
+        plant_turn(vec3<f32>(0.0, 1.0, 0.0), k, angle),
+        plant_turn(vec3<f32>(0.0, 0.0, 1.0), k, angle),
+    );
+    // Model: M (root + R (p - root)): linear part L R, offset L root + t - L R root.
+    let linear = mat3x3<f32>(
+        vec3<f32>(pose.m0.x, pose.m1.x, pose.m2.x),
+        vec3<f32>(pose.m0.y, pose.m1.y, pose.m2.y),
+        vec3<f32>(pose.m0.z, pose.m1.z, pose.m2.z),
+    );
+    let turned = linear * turn;
+    let offset = vec3<f32>(pose.m0.w, pose.m1.w, pose.m2.w) + linear * root - turned * root;
+    let normals = mat3x3<f32>(pose.n0, pose.n1, pose.n2) * turn;
+    var out: ImpostorPose;
+    out.m0 = vec4<f32>(turned[0].x, turned[1].x, turned[2].x, offset.x);
+    out.m1 = vec4<f32>(turned[0].y, turned[1].y, turned[2].y, offset.y);
+    out.m2 = vec4<f32>(turned[0].z, turned[1].z, turned[2].z, offset.z);
+    out.n0 = normals[0];
+    out.n1 = normals[1];
+    out.n2 = normals[2];
+    return out;
+}
+
 @vertex
-fn vs_impostor(in: ImpostorIn, @builtin(vertex_index) v: u32) -> ImpostorOut {
+fn vs_impostor(input: ImpostorIn, @builtin(vertex_index) v: u32) -> ImpostorOut {
+    var in = input;
+    // Bits 0-15 the layer, 16-31 a bone plant's wind table entry.
+    let entry = plant_wind_entry(in.extra.y);
+    in.extra.y = in.extra.y & 0xffffu;
+    if (entry != 0u) {
+        let now = impostor_leaned(ImpostorPose(in.m0, in.m1, in.m2, in.n0.xyz, in.n1.xyz, in.n2.xyz), entry, false);
+        let last = impostor_leaned(ImpostorPose(in.p0, in.p1, in.p2, in.n0.xyz, in.n1.xyz, in.n2.xyz), entry, true);
+        in.m0 = now.m0;
+        in.m1 = now.m1;
+        in.m2 = now.m2;
+        in.n0 = vec4<f32>(now.n0, in.n0.w);
+        in.n1 = vec4<f32>(now.n1, in.n1.w);
+        in.n2 = vec4<f32>(now.n2, in.n2.w);
+        in.p0 = last.m0;
+        in.p1 = last.m1;
+        in.p2 = last.m2;
+    }
     let sphere = impostors[in.extra.y].center_radius;
     let center = rows_apply(in.m0, in.m1, in.m2, vec4<f32>(sphere.xyz, 1.0));
     let scale = length(vec3<f32>(in.m0.x, in.m1.x, in.m2.x));

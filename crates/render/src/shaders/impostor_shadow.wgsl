@@ -39,7 +39,9 @@ fn shadow_rows_unapply(m0: vec4<f32>, m1: vec4<f32>, m2: vec4<f32>, v: vec3<f32>
 
 @vertex
 fn vs_impostor_shadow(in: ShadowIn, @builtin(vertex_index) v: u32) -> ShadowOut {
-    let sphere = impostors[in.extra.y].center_radius;
+    // Bits 0-15 the layer (16-31: a bone plant's wind entry; far shadow maps keep its rest pose).
+    let layer = in.extra.y & 0xffffu;
+    let sphere = impostors[layer].center_radius;
     let center = vec3<f32>(
         dot(in.m0, vec4<f32>(sphere.xyz, 1.0)),
         dot(in.m1, vec4<f32>(sphere.xyz, 1.0)),
@@ -61,7 +63,7 @@ fn vs_impostor_shadow(in: ShadowIn, @builtin(vertex_index) v: u32) -> ShadowOut 
     out.clip = vp * vec4<f32>(center + offset, 1.0);
     out.plane = shadow_rows_unapply(in.m0, in.m1, in.m2, offset);
     out.toward = normalize(shadow_rows_unapply(in.m0, in.m1, in.m2, to_light));
-    out.layer = in.extra.y;
+    out.layer = layer;
     out.rel = center + offset;
     out.to_light = to_light * (radius / sphere.w);
     return out;
