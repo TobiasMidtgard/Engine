@@ -441,17 +441,26 @@ pub fn resolve_mesh_renderers(
     mut materials: ResMut<Assets<StandardMaterial>>,
     query: UnresolvedRenderers,
 ) {
+    // A streamed zone or a batch of trees brings thousands of renderers in one frame, most
+    // sharing a few shapes and materials: look each distinct value up once (its key is a
+    // formatted string, the expensive part), and hand every insert over in one batch command,
+    // which moves the entities between archetypes in runs instead of one command each.
+    let mut shapes = ValueMemo::<Shape, Mesh>::default();
+    let mut inline = ValueMemo::<StandardMaterial, StandardMaterial>::default();
+    let mut resolved_now = Vec::new();
     for (entity, renderer, existing) in &query {
         let mesh = match &renderer.mesh {
             MeshRef::Handle(h) => Some(*h),
-            MeshRef::Shape(shape) => {
-                Some(meshes.get_or_insert_keyed(&shape.key(), || shape.mesh()))
-            }
+            MeshRef::Shape(shape) => Some(shapes.get(shape, || {
+                meshes.get_or_insert_keyed(&shape.key(), || shape.mesh())
+            })),
             MeshRef::Asset(key) => keyed_handle(server.as_deref(), &mut meshes, key),
         };
         let material = match &renderer.material {
             MaterialRef::Handle(h) => Some(*h),
-            MaterialRef::Inline(m) => Some(materials.get_or_insert_keyed(&m.key(), || *m)),
+            MaterialRef::Inline(m) => {
+                Some(inline.get(m, || materials.get_or_insert_keyed(&m.key(), || *m)))
+            }
             MaterialRef::Asset(key) => keyed_handle(server.as_deref(), &mut materials, key),
         };
         let (Some(mesh), Some(material)) = (mesh, material) else {
@@ -459,8 +468,40 @@ pub fn resolve_mesh_renderers(
         };
         let resolved = ResolvedMesh { mesh, material };
         if existing != Some(&resolved) {
-            commands.entity(entity).insert(resolved);
+            resolved_now.push((entity, resolved));
         }
+    }
+    if !resolved_now.is_empty() {
+        // An entity despawned before the commands apply is skipped (with a warning).
+        commands.try_insert_batch(resolved_now);
+    }
+}
+
+/// The handles of the last few distinct values looked up (shapes, inline materials), for
+/// [`resolve_mesh_renderers`]: a linear search by value, since a batch has few distinct ones.
+struct ValueMemo<V, A: engine_assets::Asset> {
+    seen: Vec<(V, Handle<A>)>,
+}
+
+impl<V, A: engine_assets::Asset> Default for ValueMemo<V, A> {
+    fn default() -> Self {
+        Self { seen: Vec::new() }
+    }
+}
+
+impl<V: PartialEq + Copy, A: engine_assets::Asset> ValueMemo<V, A> {
+    /// Values beyond this many distinct ones are looked up every time.
+    const MOST: usize = 32;
+
+    fn get(&mut self, value: &V, look_up: impl FnOnce() -> Handle<A>) -> Handle<A> {
+        if let Some((_, h)) = self.seen.iter().find(|(v, _)| v == value) {
+            return *h;
+        }
+        let h = look_up();
+        if self.seen.len() < Self::MOST {
+            self.seen.push((*value, h));
+        }
+        h
     }
 }
 
@@ -630,6 +671,62 @@ mod tests {
         let rb = *app.world.get::<ResolvedMesh>(b).unwrap();
         assert_eq!(ra, rb);
         assert_eq!(app.world.resource::<Assets<Mesh>>().len(), 1);
+    }
+
+    /// A streamed zone's batch: thousands of renderers sharing a few inline shapes and
+    /// materials all resolve in the frame they arrive, to one asset per distinct value.
+    #[test]
+    fn a_large_batch_resolves_at_once_to_shared_assets() {
+        let mut app = App::new();
+        app.add_plugins(RenderPlugin);
+        let materials_before = app.world.resource::<Assets<StandardMaterial>>().len();
+        let shapes = [
+            Shape::Cuboid { size: [1.0; 3] },
+            Shape::Sphere {
+                radius: 0.5,
+                segments: 12,
+            },
+            Shape::Cylinder {
+                radius: 0.3,
+                height: 2.0,
+                segments: 10,
+            },
+        ];
+        let mats = [
+            StandardMaterial::hex(0x6b4f2a),
+            StandardMaterial::hex(0x2f5d2a).with_roughness(0.8),
+        ];
+        let batch: Vec<_> = (0..20_000usize)
+            .map(|i| {
+                (
+                    Transform::from_xyz(i as f64, 0.0, 0.0),
+                    MeshRenderer::new(shapes[i % 3], mats[i % 2]),
+                )
+            })
+            .collect();
+        let ids: Vec<Entity> = app.world.spawn_batch(batch).collect();
+        let start = std::time::Instant::now();
+        app.world.run_schedule(Extract);
+        eprintln!(
+            "resolved {} renderers in {:.1} ms",
+            ids.len(),
+            start.elapsed().as_secs_f64() * 1000.0
+        );
+        let first = *app.world.get::<ResolvedMesh>(ids[0]).unwrap();
+        for (i, &e) in ids.iter().enumerate() {
+            let r = app
+                .world
+                .get::<ResolvedMesh>(e)
+                .expect("resolved this frame");
+            if i % 6 == 0 {
+                assert_eq!(*r, first);
+            }
+        }
+        assert_eq!(app.world.resource::<Assets<Mesh>>().len(), 3);
+        assert_eq!(
+            app.world.resource::<Assets<StandardMaterial>>().len() - materials_before,
+            2
+        );
     }
 
     pub(crate) fn temp_dir(name: &str) -> std::path::PathBuf {
