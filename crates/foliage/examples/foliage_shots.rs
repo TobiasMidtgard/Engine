@@ -442,8 +442,18 @@ fn main() {
         let mut q = app.world.query::<(
             &engine_render::GrassField,
             Option<&engine_foliage::grass::FloorLayer>,
+            &Transform,
         )>();
-        for (f, layer) in q.iter(&app.world) {
+        for (n, (f, layer, at)) in q.iter(&app.world).enumerate() {
+            // Each field's density as a grey map (north up), named by its layer and center.
+            let [w, h] = f.resolution;
+            let mut pgm = format!("P5 {w} {h} 255\n").into_bytes();
+            pgm.extend(f.density.iter().map(|d| (d.clamp(0.0, 1.0) * 255.0) as u8));
+            let name = format!(
+                "{out}/field_{n}_{layer:?}_{:.0}_{:.0}.pgm",
+                at.translation.x, at.translation.z
+            );
+            let _ = std::fs::write(name, pgm);
             let on = f.density.iter().filter(|d| **d > 0.0).count();
             let mut kinds = [0usize; 16];
             for k in &f.kinds {
@@ -496,6 +506,19 @@ fn main() {
     let by_name = |name: &str| *forest.iter().find(|v| v.name == name).expect("viewpoint");
     take(&mut app, "01_forest", &by_name("forest_overview"));
     take(&mut app, "02_trail", &by_name("forest_trail"));
+    if wanted("02_trail_inner") {
+        // Along the trail where it runs inside the old forest (between its 4th and 6th points),
+        // at walking height: the floor beside the tread and the leaves blown onto it.
+        let ground = |x: f64, z: f64| {
+            app.world
+                .get_resource::<engine_world::Ground>()
+                .and_then(|g| g.height(DVec3::new(x, 0.0, z)))
+                .unwrap_or(0.0)
+        };
+        let eye = DVec3::new(30.4, ground(30.4, 24.0) + 1.7, 24.0);
+        let at = DVec3::new(12.0, ground(12.0, 17.5) + 0.4, 17.5);
+        shot(&mut app, &out, "02_trail_inner", eye, at, 10.5);
+    }
     take(&mut app, "03_clearing", &by_name("forest_clearing"));
     take(&mut app, "03_old_oak", &by_name("forest_old_oak"));
     if wanted("03_ferns") {

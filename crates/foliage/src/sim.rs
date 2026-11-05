@@ -191,13 +191,8 @@ impl Soil {
                     soil.blocked[i] = true;
                 }
                 let (lx, lz) = (wx - center.x, wz - center.z);
-                if region.round {
-                    let edge = 1.0 + 0.12 * patch(0xed6e, 0.05) as f64;
-                    let ex = lx / region.half_extents[0].max(0.1) as f64;
-                    let ez = lz / region.half_extents[1].max(0.1) as f64;
-                    if ex * ex + ez * ez > edge * edge {
-                        soil.blocked[i] = true;
-                    }
+                if past_round_edge(region, center, wx, wz) {
+                    soil.blocked[i] = true;
                 }
                 for c in &region.keep_clear {
                     if (lx - c[0] as f64).hypot(lz - c[1] as f64) < c[2] as f64 {
@@ -1027,4 +1022,17 @@ fn poisson(rng: &mut Rng, mean: f32) -> u32 {
         }
         k += 1;
     }
+}
+
+/// Whether world point (`wx`, `wz`) lies past a round region's ragged edge (nothing roots
+/// there; [`EcologyRegion::round`]). Never for a rectangular region.
+pub fn past_round_edge(region: &EcologyRegion, center: DVec3, wx: f64, wz: f64) -> bool {
+    if !region.round {
+        return false;
+    }
+    let n = engine_core::math::noise::fbm2(wx * 0.05, wz * 0.05, region.seed ^ 0xed6e, 3, 2.0, 0.5);
+    let edge = 1.0 + 0.12 * n as f64;
+    let ex = (wx - center.x) / region.half_extents[0].max(0.1) as f64;
+    let ez = (wz - center.z) / region.half_extents[1].max(0.1) as f64;
+    ex * ex + ez * ez > edge * edge
 }
