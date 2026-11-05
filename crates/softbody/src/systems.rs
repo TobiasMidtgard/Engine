@@ -2,6 +2,7 @@
 //! events, step every body (in parallel) and send the results back to the world.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Instant;
 
 use engine_core::ecs::entity::EntityHashMap;
@@ -1034,6 +1035,9 @@ struct StepContext<'a, 'w, 's> {
     scales: &'a Query<'w, 's, &'static LocalTimeScale>,
     loads: &'a [(DVec3, f32, Option<Entity>)],
     range: SimulationRange,
+    /// Under a real clock, how long (µs) this step's bodies have spent settling so far; a
+    /// manual clock (tests, tours) settles by count alone.
+    settled_us: Option<&'a AtomicU32>,
 }
 
 type TransformQuery<'w, 's> = Query<
@@ -1058,6 +1062,13 @@ const SLOW_STEP_MS: f64 = 50.0;
 /// Most settling (prewarm) a body does a frame, in particle substeps: about 3 ms on the PC.
 /// Counted rather than timed, so a body settles the same way on every machine.
 const PREWARM_WORK: usize = 30_000;
+/// In play, a body stops settling for the frame once it has settled this long (ms) ...
+const PREWARM_BODY_MS: f32 = 2.0;
+/// ... or once all the bodies of one step have settled this long between them (µs): the
+/// count above is particles times substeps and misses collisions, so a cape on a mannequin
+/// settled 90 ms in one frame on the session VM, and fifteen bodies loaded together 232 ms
+/// (yard arrival, 2026-11-05).
+const PREWARM_STEP_US: u32 = 4_000;
 /// A body whose particles all move slower than this (m/s) ...
 pub(crate) const SLEEP_SPEED: f32 = 0.01;
 /// ... for this many steps in a row, with nothing near it moving, goes to sleep: it isn't
@@ -1171,6 +1182,8 @@ pub fn step_beside_physics(
     if !config.enabled {
         return;
     }
+    let manual = matches!(time.source(), engine_core::time::TimeSource::Manual { .. });
+    let settled = AtomicU32::new(0);
     let ctx = StepContext {
         time: &time,
         config: &config,
@@ -1180,6 +1193,7 @@ pub fn step_beside_physics(
         scales: &scales,
         loads: &loads.0,
         range: range.map_or_else(SimulationRange::default, |r| *r),
+        settled_us: (!manual).then_some(&settled),
     };
     let start = Instant::now();
     let took = step_all(bodies.iter_mut().filter(|(_, b)| b.overlaps), &ctx);
@@ -1249,6 +1263,8 @@ pub fn step_bodies(
         }
         return;
     }
+    let manual = matches!(time.source(), engine_core::time::TimeSource::Manual { .. });
+    let settled = AtomicU32::new(0);
     let ctx = StepContext {
         time: &time,
         config: &config,
@@ -1261,6 +1277,7 @@ pub fn step_bodies(
         scales: &scales,
         loads: &loads.0,
         range: range.map_or_else(SimulationRange::default, |r| *r),
+        settled_us: (!manual).then_some(&settled),
     };
     let start = Instant::now();
     let took = step_all(bodies.iter_mut().filter(|(_, b)| !b.overlaps), &ctx);
@@ -1701,9 +1718,26 @@ fn step_one(entity: Entity, body: &mut SoftBodySim, ctx: &StepContext) {
     b.sim.step(if swap { 1.0 / 60.0 } else { dt }, &local);
     let impulses = b.sim.collider_impulses.clone();
     let pulls = b.sim.frame_impulses.clone();
-    let runs = fits.max(least).min(b.pending_prewarm);
-    for _ in u32::from(swap)..runs {
+    let most = fits.max(least).min(b.pending_prewarm);
+    let mut runs = u32::from(swap);
+    let settling = Instant::now();
+    while runs < most {
+        // In play, past the steps it must take, stop when this body or this step's bodies
+        // have settled long enough for the frame; the rest waits for the next.
+        if runs >= least
+            && let Some(spent) = ctx.settled_us
+            && (settling.elapsed().as_secs_f32() * 1000.0 >= PREWARM_BODY_MS
+                || spent.load(Ordering::Relaxed) >= PREWARM_STEP_US)
+        {
+            break;
+        }
+        let one = Instant::now();
         b.sim.step(1.0 / 60.0, &local);
+        if let Some(spent) = ctx.settled_us {
+            let us = u32::try_from(one.elapsed().as_micros()).unwrap_or(u32::MAX);
+            spent.fetch_add(us, Ordering::Relaxed);
+        }
+        runs += 1;
     }
     b.pending_prewarm -= runs;
     b.parts.solve_ms = solving.elapsed().as_secs_f32() * 1000.0;
