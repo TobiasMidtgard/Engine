@@ -43,6 +43,7 @@ impl Plugin for SmokePlugin {
             .unwrap_or_default();
         app.insert_resource(settings)
             .init_resource::<SmokeDomains>()
+            .init_resource::<sim::VolumesMaking>()
             .init_resource::<SmokeTunnels>()
             .init_resource::<SmokeCommands>()
             .init_resource::<sim::SmokeClock>()
@@ -350,6 +351,57 @@ mod tests {
         // worker is done, not after a set number of updates.
         app.world.resource_mut::<SmokeSettings>().background = false;
         app
+    }
+
+    #[test]
+    fn in_play_a_volume_is_made_on_a_worker_and_smoke_waits_for_it() {
+        // A real clock, as in play (the default App has the off-frame workers).
+        let mut app = App::new();
+        app.add_plugins(SmokePlugin);
+        app.world.resource_mut::<SmokeSettings>().background = false;
+        let e = app
+            .world
+            .spawn((
+                Transform::from_translation(DVec3::new(0.0, 0.0, 0.0)),
+                SmokeVolume {
+                    size: [40.0, 16.0, 40.0],
+                    cell_m: 0.5,
+                },
+            ))
+            .id();
+        let owned = |app: &App| {
+            app.world
+                .resource::<SmokeDomains>()
+                .list
+                .iter()
+                .filter(|d| d.owner == Some(e))
+                .count()
+        };
+        let mut waited = false;
+        for _ in 0..2_000 {
+            // Smoke released in the box meanwhile gets no stray volume of its own.
+            emit(&mut app, DVec3::new(1.0, 2.0, 1.0), 0.1);
+            app.update();
+            if owned(&app) > 0 {
+                break;
+            }
+            waited = true;
+            assert!(app.world.resource::<SmokeDomains>().list.is_empty());
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        assert_eq!(owned(&app), 1, "the volume arrived");
+        assert_eq!(app.world.resource::<SmokeDomains>().list.len(), 1);
+        assert!(waited, "it was made off the frame");
+        // Then smoke released there goes into it.
+        for _ in 0..500 {
+            emit(&mut app, DVec3::new(1.0, 2.0, 1.0), 0.1);
+            app.update();
+            if app.world.resource::<SmokeDomains>().mass_kg() > 0.0 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        assert!(app.world.resource::<SmokeDomains>().mass_kg() > 0.0);
     }
 
     fn emit(app: &mut App, at: DVec3, kg: f32) {
