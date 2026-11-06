@@ -28,40 +28,83 @@ use crate::settings::PhysicsSettings;
 use crate::sim::{BodyWrite, ContactFilter, MaterialCache, RegionId, Simulation};
 use crate::{FineSteps, PhysicsStats, SharedSimulation};
 use engine_core::ecs::entity::EntityHashMap;
+use engine_core::transform::TransformInterpolation;
+use engine_world::physics::PhysicsQueries;
+
+/// Where entities are and what they hang from: read from the world (the demos, the report) or
+/// through a plain system's queries ([`SyncView`], [`WriteBack`]).
+pub(crate) trait Poses {
+    fn transform(&self, e: Entity) -> Option<Transform>;
+    fn parent(&self, e: Entity) -> Option<Entity>;
+}
+
+impl Poses for World {
+    fn transform(&self, e: Entity) -> Option<Transform> {
+        self.get::<Transform>(e).copied()
+    }
+    fn parent(&self, e: Entity) -> Option<Entity> {
+        self.get::<ChildOf>(e).map(|p| p.parent())
+    }
+}
 
 /// World pose (translation, rotation, scale) of `e`, composing `Transform`s up the hierarchy.
 /// `GlobalTransform` is only updated in `PostUpdate`, so the step computes poses itself.
-pub(crate) fn world_pose(world: &World, e: Entity) -> Option<Transform> {
-    let t = *world.get::<Transform>(e)?;
-    match world.get::<ChildOf>(e) {
-        Some(p) => Some(world_pose(world, p.parent())?.mul_transform(&t)),
+pub(crate) fn world_pose(world: &impl Poses, e: Entity) -> Option<Transform> {
+    let t = world.transform(e)?;
+    match world.parent(e) {
+        Some(p) => Some(world_pose(world, p)?.mul_transform(&t)),
         None => Some(t),
     }
 }
 
+/// What [`physics_sync`] reads of the entities it is told about, as queries: a plain system
+/// rather than an exclusive one, so the fixed step's other work runs beside it (an exclusive
+/// system waits for an idle pool first, engine-perf/fixed-step-chain.md). All reads.
+#[derive(SystemParam)]
+pub(crate) struct SyncView<'w, 's> {
+    transforms: Query<'w, 's, &'static Transform>,
+    parents: Query<'w, 's, &'static ChildOf>,
+    children: Query<'w, 's, &'static Children>,
+    bodies: Query<'w, 's, &'static RigidBody>,
+    colliders: Query<'w, 's, &'static Collider>,
+    joints: Query<'w, 's, (&'static Joint, Option<&'static crate::BreakTorque>)>,
+    controllers: Query<'w, 's, (&'static CharacterController, Has<CharacterState>)>,
+    forced: Query<'w, 's, (), With<ExternalForce>>,
+    velocities: Query<'w, 's, &'static Velocity>,
+}
+
+impl Poses for SyncView<'_, '_> {
+    fn transform(&self, e: Entity) -> Option<Transform> {
+        self.transforms.get(e).ok().copied()
+    }
+    fn parent(&self, e: Entity) -> Option<Entity> {
+        self.parents.get(e).ok().map(|p| p.parent())
+    }
+}
+
 /// The nearest entity at or above `e` (including `e`) with a `RigidBody`.
-fn owning_body(world: &World, e: Entity) -> Option<(Entity, BodyKind)> {
+fn owning_body(view: &SyncView, e: Entity) -> Option<(Entity, BodyKind)> {
     let mut cur = e;
     loop {
-        if let Some(rb) = world.get::<RigidBody>(cur) {
+        if let Ok(rb) = view.bodies.get(cur) {
             return Some((cur, rb.kind));
         }
-        cur = world.get::<ChildOf>(cur)?.parent();
+        cur = view.parent(cur)?;
     }
 }
 
 /// `e` and its descendants that carry a `Collider` and belong to `body` (stopping at
 /// descendants that are bodies themselves).
-fn colliders_of(world: &World, body: Entity, out: &mut Vec<Entity>) {
+fn colliders_of(view: &SyncView, body: Entity, out: &mut Vec<Entity>) {
     let mut stack = vec![body];
     while let Some(e) = stack.pop() {
-        if e != body && world.get::<RigidBody>(e).is_some() {
+        if e != body && view.bodies.contains(e) {
             continue;
         }
-        if world.get::<Collider>(e).is_some() {
+        if view.colliders.contains(e) {
             out.push(e);
         }
-        if let Some(children) = world.get::<Children>(e) {
+        if let Ok(children) = view.children.get(e) {
             stack.extend(children.iter());
         }
     }
@@ -95,21 +138,18 @@ pub(crate) fn note_removals(
     pending.0.extend(forces.read());
 }
 
-/// Cached ECS queries for [`physics_step`].
+/// What changed since the last sync, for [`physics_sync`].
 #[allow(clippy::type_complexity)]
-pub(crate) struct StepQueries {
-    removed: SystemState<Removed<'static, 'static>>,
-    inbox: SystemState<(
-        MessageReader<'static, 'static, ApplyImpulse>,
-        MessageReader<'static, 'static, WorldImpulse>,
-    )>,
-    changed_bodies: QueryState<Entity, Changed<RigidBody>>,
-    changed_colliders:
-        QueryState<Entity, (With<Collider>, Or<(Changed<Collider>, Changed<ChildOf>)>)>,
-    moved_colliders: QueryState<Entity, (With<Collider>, Changed<Transform>)>,
-    changed_joints: QueryState<Entity, Changed<Joint>>,
-    changed_characters: QueryState<Entity, Changed<CharacterController>>,
-    body_inputs: QueryState<
+#[derive(SystemParam)]
+pub(crate) struct SyncChanges<'w, 's> {
+    bodies: Query<'w, 's, Entity, Changed<RigidBody>>,
+    colliders: Query<'w, 's, Entity, (With<Collider>, Or<(Changed<Collider>, Changed<ChildOf>)>)>,
+    moved_colliders: Query<'w, 's, Entity, (With<Collider>, Changed<Transform>)>,
+    joints: Query<'w, 's, Entity, Changed<Joint>>,
+    characters: Query<'w, 's, Entity, Changed<CharacterController>>,
+    body_inputs: Query<
+        'w,
+        's,
         (
             Entity,
             &'static Transform,
@@ -125,9 +165,11 @@ pub(crate) struct StepQueries {
             )>,
         ),
     >,
-    time_scaled: QueryState<(Entity, &'static LocalTimeScale), With<RigidBody>>,
-    fine: QueryState<(Entity, &'static FineSteps), With<RigidBody>>,
-    character_inputs: QueryState<
+    time_scaled: Query<'w, 's, (Entity, &'static LocalTimeScale), With<RigidBody>>,
+    fine: Query<'w, 's, (Entity, &'static FineSteps), With<RigidBody>>,
+    character_inputs: Query<
+        'w,
+        's,
         (
             Entity,
             &'static Transform,
@@ -138,22 +180,17 @@ pub(crate) struct StepQueries {
     >,
 }
 
-impl FromWorld for StepQueries {
-    fn from_world(world: &mut World) -> Self {
-        Self {
-            removed: SystemState::new(world),
-            inbox: SystemState::new(world),
-            changed_bodies: world.query_filtered(),
-            changed_colliders: world.query_filtered(),
-            moved_colliders: world.query_filtered(),
-            changed_joints: world.query_filtered(),
-            changed_characters: world.query_filtered(),
-            body_inputs: world.query_filtered(),
-            time_scaled: world.query_filtered(),
-            fine: world.query_filtered(),
-            character_inputs: world.query_filtered(),
-        }
-    }
+/// The resources [`physics_sync`] reads.
+#[derive(SystemParam)]
+pub(crate) struct SyncEnv<'w> {
+    settings: Res<'w, PhysicsSettings>,
+    materials: Res<'w, SurfaceMaterials>,
+    range: Option<Res<'w, SimulationRange>>,
+    ground: Option<Res<'w, engine_world::Ground>>,
+    gravity: Res<'w, Gravity>,
+    foci: Option<Res<'w, FocusPoints>>,
+    water: Option<Res<'w, Water>>,
+    time: Res<'w, Time>,
 }
 
 /// What the three parts of the physics step hand each other: [`physics_sync`] reads the
@@ -178,20 +215,29 @@ pub(crate) struct StepCarry {
     deferred: bool,
 }
 
-/// The physics step, first part (`FixedUpdate`, `SimSet::Physics`, exclusive): read what
-/// gameplay changed (bodies, colliders, joints, characters, poses, velocities, forces,
-/// impulses) into the simulation.
-pub(crate) fn physics_sync(world: &mut World, mut q: Local<Option<StepQueries>>) {
-    // The last step first, if it is somehow still beside the frame or was never kicked.
-    if step_pending_in(world) {
-        finish_step(world);
-    }
+/// The physics step, first part (`FixedUpdate`, `SimSet::Physics`): read what gameplay
+/// changed (bodies, colliders, joints, characters, poses, velocities, forces, impulses) into
+/// the simulation. A plain system, reading through queries: round 29 on the RTX 5080 PC had
+/// it exclusive, 0.68 ms alone in the fortress's 7.75 ms step, after waiting for an idle pool.
+/// `PhysicsQueries` is taken for writing only so that nothing querying physics runs beside it
+/// and waits on the simulation's lock.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn physics_sync(
+    shared: Res<SharedSimulation>,
+    _readers: ResMut<PhysicsQueries>,
+    env: SyncEnv,
+    view: SyncView,
+    changes: SyncChanges,
+    (mut pending, removed): (ResMut<PendingRemovals>, Removed),
+    (mut impulses, mut blasts): (MessageReader<ApplyImpulse>, MessageReader<WorldImpulse>),
+    (mut carry, mut flight): (ResMut<StepCarry>, ResMut<InFlight>),
+) {
+    // A step still beside the frame or never kicked: `First` finishes those
+    // (`finish_step`), so only a schedule run without `First` gets here with one. Step it
+    // now; this step's write back writes both (as two substeps would be).
+    let leftover = finish_unwritten(&shared, &mut carry, &mut flight);
     let started = Instant::now();
-    if q.is_none() {
-        *q = Some(StepQueries::from_world(world));
-    }
-    let q = q.as_mut().unwrap();
-    let shared = world.resource::<SharedSimulation>().0.clone();
+    let shared = shared.0.clone();
     // (Queries from other threads hold it for reading.)
     let lock = tracing::info_span!("simulation lock").entered();
     let mut sim = shared.write();
@@ -199,7 +245,7 @@ pub(crate) fn physics_sync(world: &mut World, mut q: Local<Option<StepQueries>>)
     let sync = tracing::info_span!("sync from world").entered();
 
     // ---------------------------------------------------------------- settings & environment
-    let mut settings = world.resource::<PhysicsSettings>().clone();
+    let mut settings = env.settings.clone();
     if let Some(on) = overlap_override() {
         settings.overlap_frame = on;
     }
@@ -212,10 +258,9 @@ pub(crate) fn physics_sync(world: &mut World, mut q: Local<Option<StepQueries>>)
             settings.apply_to(&mut r.world.integration_parameters);
         }
     }
-    let materials_changed =
-        world.is_resource_changed::<SurfaceMaterials>() || sim.materials.0.is_empty();
+    let materials_changed = env.materials.is_changed() || sim.materials.0.is_empty();
     if materials_changed {
-        let table = world.resource::<SurfaceMaterials>();
+        let table = &env.materials;
         sim.materials = MaterialCache(
             table
                 .materials
@@ -225,24 +270,23 @@ pub(crate) fn physics_sync(world: &mut World, mut q: Local<Option<StepQueries>>)
         );
         sim.refresh_materials();
     }
-    sim.range = world.get_resource::<SimulationRange>().copied();
-    sim.ground = world.get_resource::<engine_world::Ground>().cloned();
-    let gravity = world.resource::<Gravity>().clone();
-    let foci = world
-        .get_resource::<FocusPoints>()
+    sim.range = env.range.as_deref().copied();
+    sim.ground = env.ground.as_deref().cloned();
+    let gravity = env.gravity.clone();
+    let foci = env
+        .foci
+        .as_ref()
         .map(|f| f.points.clone())
         .unwrap_or_default();
-    let water = world.get_resource::<Water>().cloned();
-    let dt = world.resource::<Time>().delta_secs();
+    let water = env.water.as_deref().cloned();
+    let dt = env.time.delta_secs();
 
     // ---------------------------------------------------------------- removals
     let _part = tracing::info_span!("sync removals").entered();
     let _piece = crate::report::Piece::start("sync: removals");
-    let mut gone: Vec<Entity> = std::mem::take(&mut world.resource_mut::<PendingRemovals>().0);
+    let mut gone: Vec<Entity> = std::mem::take(&mut pending.0);
     {
-        let Ok((mut rb, mut co, mut jo, mut ch, mut fo)) = q.removed.get_mut(world) else {
-            unreachable!("removal readers always validate")
-        };
+        let (mut rb, mut co, mut jo, mut ch, mut fo) = removed;
         gone.extend(rb.read());
         gone.extend(co.read());
         gone.extend(jo.read());
@@ -252,24 +296,24 @@ pub(crate) fn physics_sync(world: &mut World, mut q: Local<Option<StepQueries>>)
     let mut dirty_colliders: Vec<Entity> = Vec::new();
     let mut removed: Vec<Entity> = Vec::new();
     for e in gone {
-        if world.get::<RigidBody>(e).is_none() {
+        if !view.bodies.contains(e) {
             dirty_colliders.extend(sim.forget_body(e));
         }
-        if world.get::<Collider>(e).is_none() && sim.colliders.contains_key(&e) {
+        if !view.colliders.contains(e) && sim.colliders.contains_key(&e) {
             removed.push(e);
         }
-        if world.get::<Collider>(e).is_none() {
+        if !view.colliders.contains(e) {
             sim.pending_statics.remove(&e);
         }
-        if world.get::<Joint>(e).is_none() && sim.joints.contains_key(&e) {
+        if !view.joints.contains(e) && sim.joints.contains_key(&e) {
             sim.remove_joint(e);
         }
-        if world.get::<CharacterController>(e).is_none() && sim.characters.contains_key(&e) {
+        if !view.controllers.contains(e) && sim.characters.contains_key(&e) {
             sim.remove_character(e);
         }
         // A removed `ExternalForce` stops pushing (it kept its last force before).
         let unforced = (Vec3::ZERO, Vec3::ZERO, None);
-        if world.get::<ExternalForce>(e).is_none()
+        if !view.forced.contains(e)
             && let Some(entry) = sim.bodies.get_mut(&e)
             && entry.external != unforced
         {
@@ -284,27 +328,26 @@ pub(crate) fn physics_sync(world: &mut World, mut q: Local<Option<StepQueries>>)
     // ---------------------------------------------------------------- bodies
     let _part = tracing::info_span!("sync bodies").entered();
     let _piece = crate::report::Piece::start("sync: bodies");
-    let changed: Vec<Entity> = q.changed_bodies.iter(world).collect();
-    let mut inserts: Vec<Entity> = Vec::new();
-    for e in changed {
-        let desc = world.get::<RigidBody>(e).unwrap().clone();
+    let mut inserts: Vec<Entity> = leftover;
+    for e in changes.bodies.iter() {
+        let desc = view.bodies.get(e).unwrap().clone();
         let existing = sim.bodies.get(&e).map(|b| b.kind);
         if desc.kind == BodyKind::Static {
             if existing.is_some() {
                 dirty_colliders.extend(sim.remove_body(e));
             }
-            colliders_of(world, e, &mut dirty_colliders);
+            colliders_of(&view, e, &mut dirty_colliders);
             continue;
         }
         if existing == Some(desc.kind) {
             sim.update_body_params(e, &desc);
             continue;
         }
-        let Some(pose) = world_pose(world, e) else {
+        let Some(pose) = world_pose(&view, e) else {
             continue;
         };
-        let velocity = world.get::<Velocity>(e).copied().unwrap_or_default();
-        let parent = world.get::<ChildOf>(e).map(|p| p.parent());
+        let velocity = view.velocities.get(e).ok().copied().unwrap_or_default();
+        let parent = view.parent(e);
         dirty_colliders.extend(sim.remove_body(e));
         sim.create_body(
             e,
@@ -313,7 +356,7 @@ pub(crate) fn physics_sync(world: &mut World, mut q: Local<Option<StepQueries>>)
             velocity,
             parent,
         );
-        colliders_of(world, e, &mut dirty_colliders);
+        colliders_of(&view, e, &mut dirty_colliders);
         inserts.push(e);
     }
 
@@ -323,14 +366,14 @@ pub(crate) fn physics_sync(world: &mut World, mut q: Local<Option<StepQueries>>)
     let _piece = crate::report::Piece::start("sync: colliders");
     let colliders_started = Instant::now();
     let mut moved_statics = 0usize;
-    dirty_colliders.extend(q.changed_colliders.iter(world));
-    for e in q.moved_colliders.iter(world) {
+    dirty_colliders.extend(changes.colliders.iter());
+    for e in changes.moved_colliders.iter() {
         match sim.colliders.get(&e) {
             // Our own writes to a body's Transform move its colliders already.
             Some(c) if c.body == Some(e) => {}
             Some(c) if c.body.is_none() => {
                 // A world shift moves the cached pose along with the entity: nothing to do.
-                if let Some(p) = world_pose(world, e)
+                if let Some(p) = world_pose(&view, e)
                     && (c.world_pose.0.distance(p.translation) > 1e-6
                         || !c.world_pose.1.abs_diff_eq(p.rotation, 1e-6))
                 {
@@ -348,10 +391,9 @@ pub(crate) fn physics_sync(world: &mut World, mut q: Local<Option<StepQueries>>)
     let dirty_ms = colliders_started.elapsed().as_secs_f64() * 1000.0;
     // Read in place, not copied: a copy of a big mesh (and freeing it after) cost 10-50 ms of
     // a sync on the VM while zones were loading, about as much as building it.
-    let read: &World = world;
     let mut wanted: Vec<(Entity, &Collider, Transform)> = dirty_colliders
         .into_iter()
-        .filter_map(|e| Some((e, read.get::<Collider>(e)?, world_pose(read, e)?)))
+        .filter_map(|e| Some((e, view.colliders.get(e).ok()?, world_pose(&view, e)?)))
         .collect();
     let read_ms = colliders_started.elapsed().as_secs_f64() * 1000.0 - dirty_ms;
     // Big static meshes go off the frame unless something moving is near them already
@@ -364,7 +406,7 @@ pub(crate) fn physics_sync(world: &mut World, mut q: Local<Option<StepQueries>>)
         wanted.retain(|(e, desc, pose)| {
             // A changed collider's earlier job is dropped either way.
             sim.pending_statics.remove(e);
-            let found = owning_body(world, *e);
+            let found = owning_body(&view, *e);
             if found.is_some_and(|(b, k)| k != BodyKind::Static && sim.bodies.contains_key(&b)) {
                 return true;
             }
@@ -439,11 +481,11 @@ pub(crate) fn physics_sync(world: &mut World, mut q: Local<Option<StepQueries>>)
             );
             continue;
         };
-        let found = owning_body(world, e);
+        let found = owning_body(&view, e);
         let owner = found.filter(|(b, k)| *k != BodyKind::Static && sim.bodies.contains_key(b));
         match owner {
             Some((body, _)) => {
-                let body_pose = world_pose(world, body).unwrap_or_default();
+                let body_pose = world_pose(&view, body).unwrap_or_default();
                 let inv = body_pose.rotation.inverse();
                 let local = Pose::from_parts(
                     inv * (pose.translation - body_pose.translation).as_vec3(),
@@ -466,7 +508,7 @@ pub(crate) fn physics_sync(world: &mut World, mut q: Local<Option<StepQueries>>)
         }
     }
     let statics_ms = placed_started.elapsed().as_secs_f64() * 1000.0;
-    let (pending_placed, waited_ms, pending_ms) = place_pending_statics(world, &mut sim);
+    let (pending_placed, waited_ms, pending_ms) = place_pending_statics(&view, &mut sim);
     sim.tidy_rebuilt_contacts();
     let total_ms = colliders_started.elapsed().as_secs_f64() * 1000.0;
     if total_ms > 5.0 && crate::report::wanted() {
@@ -485,15 +527,16 @@ pub(crate) fn physics_sync(world: &mut World, mut q: Local<Option<StepQueries>>)
     // ---------------------------------------------------------------- joints
     let _part = tracing::info_span!("sync joints and characters").entered();
     let _piece = crate::report::Piece::start("sync: joints and characters");
-    for e in q.changed_joints.iter(world).collect::<Vec<_>>() {
-        let desc = world.get::<Joint>(e).unwrap().clone();
+    for e in changes.joints.iter() {
+        let (desc, break_torque) = view.joints.get(e).unwrap();
+        let desc = desc.clone();
         // A world shift moves world anchors in the cache too.
         if sim.joints.get(&e).is_some_and(|j| j.desc == desc) {
             continue;
         }
         sim.remove_joint(e);
         let mut entry = crate::sim::JointEntry::new(desc);
-        entry.break_torque = world.get::<crate::BreakTorque>(e).map(|b| b.0);
+        entry.break_torque = break_torque.map(|b| b.0);
         sim.joints.insert(e, entry);
     }
     if !sim.regroup.is_empty() {
@@ -510,7 +553,7 @@ pub(crate) fn physics_sync(world: &mut World, mut q: Local<Option<StepQueries>>)
     {
         sim.budget_clock = 0;
         let g = sim.joint_graph();
-        let lookup = |x: Entity| world_pose(world, x).map(|t| (t.translation, t.rotation));
+        let lookup = |x: Entity| world_pose(&view, x).map(|t| (t.translation, t.rotation));
         sim.budget_articulations(&g, &foci, &lookup);
         graph = Some(g);
     }
@@ -530,7 +573,7 @@ pub(crate) fn physics_sync(world: &mut World, mut q: Local<Option<StepQueries>>)
         None => sim.joint_graph(),
     };
     for e in waiting {
-        let lookup = |x: Entity| world_pose(world, x).map(|t| (t.translation, t.rotation));
+        let lookup = |x: Entity| world_pose(&view, x).map(|t| (t.translation, t.rotation));
         sim.create_joint(e, &lookup, &graph);
     }
     if !sim.rehang.is_empty() {
@@ -539,17 +582,18 @@ pub(crate) fn physics_sync(world: &mut World, mut q: Local<Option<StepQueries>>)
     }
 
     // ---------------------------------------------------------------- characters
-    for e in q.changed_characters.iter(world).collect::<Vec<_>>() {
-        let desc = *world.get::<CharacterController>(e).unwrap();
-        let at = world_pose(world, e)
+    for e in changes.characters.iter() {
+        let (desc, has_state) = view.controllers.get(e).unwrap();
+        let desc = *desc;
+        let at = world_pose(&view, e)
             .map(|t| t.translation)
             .unwrap_or_default();
         sim.create_character(e, &desc, at);
-        if world.get::<CharacterState>(e).is_none() {
+        if !has_state {
             inserts.push(e);
         }
     }
-    for (e, t, mv, local) in q.character_inputs.iter(world) {
+    for (e, t, mv, local) in changes.character_inputs.iter() {
         let Some(c) = sim.characters.get_mut(&e) else {
             continue;
         };
@@ -557,8 +601,7 @@ pub(crate) fn physics_sync(world: &mut World, mut q: Local<Option<StepQueries>>)
         c.desired = mv.map(|m| m.velocity).unwrap_or_default();
         c.world_dt = dt;
         c.dt = if let Some(l) = local {
-            let t = world.resource::<Time>();
-            t.delta_for(Some(l))
+            env.time.delta_for(Some(l))
         } else {
             dt
         };
@@ -577,12 +620,8 @@ pub(crate) fn physics_sync(world: &mut World, mut q: Local<Option<StepQueries>>)
     // ---------------------------------------------------------------- gameplay inputs
     let _part = tracing::info_span!("sync inputs").entered();
     let _piece = crate::report::Piece::start("sync: inputs");
-    let inputs: Vec<(Entity, Transform, Option<Velocity>, Option<ExternalForce>)> = q
-        .body_inputs
-        .iter(world)
-        .map(|(e, t, v, f)| (e, *t, v.copied(), f.copied()))
-        .collect();
-    for (e, t, v, f) in inputs {
+    for (e, t, v, f) in changes.body_inputs.iter() {
+        let (t, v, f) = (*t, v.copied(), f.copied());
         let Some(entry) = sim.bodies.get(&e) else {
             continue;
         };
@@ -598,7 +637,7 @@ pub(crate) fn physics_sync(world: &mut World, mut q: Local<Option<StepQueries>>)
             .map(|f| (f.force, f.torque, f.at))
             .filter(|f| *f != entry.external);
         if teleported {
-            let pose = world_pose(world, e).unwrap_or(t);
+            let pose = world_pose(&view, e).unwrap_or(t);
             let by_velocity = match new_velocity {
                 Some(v) => v.linear != Vec3::ZERO || v.angular != Vec3::ZERO,
                 None => entry.kinematic_by_velocity,
@@ -636,17 +675,17 @@ pub(crate) fn physics_sync(world: &mut World, mut q: Local<Option<StepQueries>>)
         }
     }
     {
-        let time = world.resource::<Time>().clone();
+        let time = &env.time;
         for entry in sim.bodies.values_mut() {
             entry.time_factor = 1.0;
             entry.fine = None;
         }
-        for (e, f) in q.fine.iter(world) {
+        for (e, f) in changes.fine.iter() {
             if let Some(entry) = sim.bodies.get_mut(&e) {
                 entry.fine = Some(f.substep_secs.max(1e-4));
             }
         }
-        for (e, l) in q.time_scaled.iter(world) {
+        for (e, l) in changes.time_scaled.iter() {
             if let Some(entry) = sim.bodies.get_mut(&e)
                 && dt > 0.0
             {
@@ -656,9 +695,6 @@ pub(crate) fn physics_sync(world: &mut World, mut q: Local<Option<StepQueries>>)
     }
     // Impulses and blasts.
     {
-        let Ok((mut impulses, mut blasts)) = q.inbox.get_mut(world) else {
-            unreachable!("message readers always validate")
-        };
         let impulses: Vec<ApplyImpulse> = impulses.read().copied().collect();
         let blasts: Vec<WorldImpulse> = blasts.read().copied().collect();
         for i in impulses {
@@ -701,7 +737,6 @@ pub(crate) fn physics_sync(world: &mut World, mut q: Local<Option<StepQueries>>)
     if crate::report::wanted() {
         crate::report::part_ms("sync", started.elapsed().as_secs_f64() * 1000.0);
     }
-    let mut carry = world.resource_mut::<StepCarry>();
     *carry = StepCarry {
         started: Some(started),
         work_ms: started.elapsed().as_secs_f64() * 1000.0,
@@ -806,46 +841,76 @@ pub(crate) fn step_pending(carry: Res<StepCarry>, flight: Res<InFlight>) -> bool
     carry.deferred || flight.0.is_some()
 }
 
-fn step_pending_in(world: &World) -> bool {
-    world.resource::<StepCarry>().deferred
-        || world
-            .get_resource::<InFlight>()
-            .is_some_and(|f| f.0.is_some())
-}
-
-/// `First` (after time and messages, queued when [`step_pending`]) and the start of
-/// [`physics_sync`]: wait for the step beside the frame, or step one that was synced but
-/// never kicked, and write it back. The first frame after
-/// a step then draws it, and the fixed step's gameplay sees it as it would have inside the
-/// step.
-pub(crate) fn finish_step(world: &mut World) {
-    let flight = world
-        .get_resource_mut::<InFlight>()
-        .and_then(|mut f| f.0.take());
-    if let Some(h) = flight {
+/// Joins the step beside the frame, or steps one synced but never kicked, into `carry`:
+/// `None` when there was neither, else how long the join waited (ms, when there was one).
+fn complete(
+    shared: &SharedSimulation,
+    carry: &mut StepCarry,
+    flight: &mut InFlight,
+) -> Option<Option<f64>> {
+    if let Some(h) = flight.0.take() {
         let waited = Instant::now();
         let joined = {
             let _span = tracing::info_span!("wait for physics step").entered();
             h.join()
         };
-        let wait_ms = waited.elapsed().as_secs_f64() * 1000.0;
         match joined {
-            Ok(carry) => *world.resource_mut::<StepCarry>() = carry,
+            Ok(c) => *carry = c,
             Err(panic) => std::panic::resume_unwind(panic),
         }
-        if let Some(mut d) = world.get_resource_mut::<Diagnostics>() {
-            d.set("physics.wait_ms", wait_ms);
-        }
-    } else if world.resource::<StepCarry>().deferred {
-        let shared = world.resource::<SharedSimulation>().0.clone();
-        let mut carry = std::mem::take(&mut *world.resource_mut::<StepCarry>());
-        simulate(shared.write(), &mut carry);
+        Some(Some(waited.elapsed().as_secs_f64() * 1000.0))
+    } else if carry.deferred {
+        simulate(shared.0.write(), carry);
         carry.deferred = false;
-        *world.resource_mut::<StepCarry>() = carry;
+        Some(None)
     } else {
-        return;
+        None
     }
-    physics_write_back(world);
+}
+
+/// For [`physics_sync`]: a step [`complete`]d there is stepped but never written back on its
+/// own; its new bodies go with the next step's.
+fn finish_unwritten(
+    shared: &SharedSimulation,
+    carry: &mut StepCarry,
+    flight: &mut InFlight,
+) -> Vec<Entity> {
+    complete(shared, carry, flight);
+    if carry.started.is_none() {
+        return Vec::new();
+    }
+    std::mem::take(carry).inserts
+}
+
+/// `First` (after time and messages, queued when [`step_pending`]): wait for the step beside
+/// the frame, or step one that was synced but never kicked, and write it back. The first frame
+/// after a step then draws it, and the fixed step's gameplay sees it as it would have inside
+/// the step.
+pub(crate) fn finish_step(world: &mut World) {
+    let shared = world.resource::<SharedSimulation>().clone();
+    let mut flight = std::mem::take(&mut *world.resource_mut::<InFlight>());
+    let mut carry = std::mem::take(&mut *world.resource_mut::<StepCarry>());
+    let done = complete(&shared, &mut carry, &mut flight);
+    *world.resource_mut::<StepCarry>() = carry;
+    let Some(waited) = done else {
+        return;
+    };
+    if let Some(wait_ms) = waited
+        && let Some(mut d) = world.get_resource_mut::<Diagnostics>()
+    {
+        d.set("physics.wait_ms", wait_ms);
+    }
+    if !world.contains_resource::<WriteBackState>() {
+        let state = WriteBackState(SystemState::new(world));
+        world.insert_resource(state);
+    }
+    world.resource_scope(|world, mut state: Mut<WriteBackState>| {
+        // (Its resources are the step's own: always there once the plugin is in.)
+        if let Ok(mut p) = state.0.get_mut(world) {
+            write_back(&mut p);
+        }
+        state.0.apply(world);
+    });
 }
 
 /// Rapier's part of the step, under the simulation's lock: region upkeep, the substeps,
@@ -1228,17 +1293,66 @@ fn simulate(mut sim: parking_lot::RwLockWriteGuard<'_, Simulation>, carry: &mut 
     carry.work_ms += simulating.elapsed().as_secs_f64() * 1000.0;
 }
 
+/// What [`physics_write_back`] writes: poses, velocities and character states in place;
+/// components added or taken off (interpolation, masses, companions of new bodies, broken
+/// joints) as commands, applied at the fixed step's next sync point.
+#[derive(SystemParam)]
+pub(crate) struct WriteBack<'w, 's> {
+    shared: Res<'w, SharedSimulation>,
+    /// (Taken for writing so that nothing querying physics waits beside it on the lock.)
+    _readers: ResMut<'w, PhysicsQueries>,
+    carry: ResMut<'w, StepCarry>,
+    transforms: Query<'w, 's, &'static mut Transform>,
+    parents: Query<'w, 's, &'static ChildOf>,
+    velocities: Query<'w, 's, &'static mut Velocity>,
+    states: Query<'w, 's, &'static mut CharacterState>,
+    masses: Query<'w, 's, &'static mut MassProperties>,
+    kinds: Query<
+        'w,
+        's,
+        (
+            Has<RigidBody>,
+            Has<TransformInterpolation>,
+            Has<CharacterController>,
+        ),
+    >,
+    contacts: MessageWriter<'w, ContactEvent>,
+    noises: MessageWriter<'w, NoiseEvent>,
+    grounds: MessageWriter<'w, GroundContact>,
+    diagnostics: Option<ResMut<'w, Diagnostics>>,
+    stats: ResMut<'w, PhysicsStats>,
+    commands: Commands<'w, 's>,
+}
+
+impl Poses for WriteBack<'_, '_> {
+    fn transform(&self, e: Entity) -> Option<Transform> {
+        self.transforms.get(e).ok().copied()
+    }
+    fn parent(&self, e: Entity) -> Option<Entity> {
+        self.parents.get(e).ok().map(|p| p.parent())
+    }
+}
+
 /// The physics step, last part (`FixedUpdate`, `SimSet::Physics`, after
-/// [`physics_simulate`], exclusive): write poses, velocities, masses and character states
-/// back, send contact messages and stats.
-pub(crate) fn physics_write_back(world: &mut World) {
+/// [`physics_simulate`]): write poses, velocities, masses and character states back, send
+/// contact messages and stats. A plain system (it was exclusive: every step waited for an
+/// idle pool, even the steps whose write back waits for the next frame, `overlap_frame`).
+pub(crate) fn physics_write_back(mut p: WriteBack) {
+    write_back(&mut p);
+}
+
+/// [`WriteBack`] for [`finish_step`], which has the world: made once.
+#[derive(Resource)]
+pub(crate) struct WriteBackState(SystemState<WriteBack<'static, 'static>>);
+
+fn write_back(p: &mut WriteBack) {
     // Rapier's part is still to run, beside the frame ([`kick_step`]).
-    if world.resource::<StepCarry>().deferred {
+    if p.carry.deferred {
         return;
     }
     let write_back = tracing::info_span!("write back").entered();
     let writing = Instant::now();
-    let carry = std::mem::take(&mut *world.resource_mut::<StepCarry>());
+    let carry = std::mem::take(&mut *p.carry);
     let Some(started) = carry.started else {
         return;
     };
@@ -1252,7 +1366,7 @@ pub(crate) fn physics_write_back(world: &mut World) {
         work_ms,
         ..
     } = carry;
-    let shared = world.resource::<SharedSimulation>().0.clone();
+    let shared = p.shared.0.clone();
     let mut sim = shared.write();
 
     // ---------------------------------------------------------------- write back
@@ -1262,7 +1376,7 @@ pub(crate) fn physics_write_back(world: &mut World) {
     let mut smoothed: Vec<(Entity, bool)> = Vec::new();
     for w in &writes {
         let parent = sim.bodies.get(&w.entity).and_then(|b| b.parent);
-        let local = match parent.and_then(|p| world_pose(world, p)) {
+        let local = match parent.and_then(|pa| world_pose(p, pa)) {
             Some(pp) => {
                 let inv = pp.rotation.inverse();
                 (
@@ -1273,11 +1387,11 @@ pub(crate) fn physics_write_back(world: &mut World) {
             }
             None => (w.translation, w.rotation),
         };
-        if let Some(mut t) = world.get_mut::<Transform>(w.entity) {
+        if let Ok(mut t) = p.transforms.get_mut(w.entity) {
             t.translation = local.0;
             t.rotation = local.1;
         }
-        if let Some(mut v) = world.get_mut::<Velocity>(w.entity) {
+        if let Ok(mut v) = p.velocities.get_mut(w.entity) {
             *v = w.velocity;
         }
         if let Some(entry) = sim.bodies.get_mut(&w.entity) {
@@ -1292,14 +1406,15 @@ pub(crate) fn physics_write_back(world: &mut World) {
     // frame (`propagate_transforms_system`), a still one only when it is written. Asleep, a
     // body is drawn where it was last written, as it would be anyway.
     for (e, asleep) in smoothed {
-        let Ok(mut ent) = world.get_entity_mut(e) else {
+        let Ok((_, has, _)) = p.kinds.get(e) else {
             continue;
         };
-        let has = ent.contains::<TransformInterpolation>();
         if asleep && has {
-            ent.remove::<TransformInterpolation>();
+            p.commands.entity(e).try_remove::<TransformInterpolation>();
         } else if !asleep && !has {
-            ent.insert(TransformInterpolation::default());
+            p.commands
+                .entity(e)
+                .try_insert(TransformInterpolation::default());
         }
     }
     // Mass properties.
@@ -1328,8 +1443,34 @@ pub(crate) fn physics_write_back(world: &mut World) {
         })
         .collect();
     for (e, m) in masses {
-        if let Ok(mut ent) = world.get_entity_mut(e) {
-            ent.insert(m);
+        if let Ok(mut had) = p.masses.get_mut(e) {
+            *had = m;
+        } else if p.kinds.contains(e) {
+            p.commands.entity(e).try_insert(m);
+        }
+    }
+    // Missing companion components on new bodies.
+    // (Before the characters' states: commands apply in order, and a new character's first
+    // state is the one written below.)
+    for e in inserts {
+        let Ok((body, interpolated, character)) = p.kinds.get(e) else {
+            continue;
+        };
+        if body {
+            if !p.velocities.contains(e) {
+                p.commands.entity(e).try_insert(Velocity::default());
+            }
+            if !interpolated && !p.parents.contains(e) {
+                p.commands
+                    .entity(e)
+                    .try_insert(TransformInterpolation::default());
+                if let Some(b) = sim.bodies.get_mut(&e) {
+                    b.interpolated = true;
+                }
+            }
+        }
+        if character && !p.states.contains(e) {
+            p.commands.entity(e).try_insert(CharacterState::default());
         }
     }
     // Characters.
@@ -1343,47 +1484,29 @@ pub(crate) fn physics_write_back(world: &mut World) {
             Some((*e, region.global(p), c.state))
         })
         .collect();
-    for (e, p, state) in char_writes {
-        if let Some(mut t) = world.get_mut::<Transform>(e) {
-            t.translation = p;
+    for (e, at, state) in char_writes {
+        if let Ok(mut t) = p.transforms.get_mut(e) {
+            t.translation = at;
         }
-        if let Ok(mut ent) = world.get_entity_mut(e) {
-            ent.insert(state);
+        if let Ok(mut had) = p.states.get_mut(e) {
+            *had = state;
+        } else if p.kinds.contains(e) {
+            p.commands.entity(e).try_insert(state);
         }
         if let Some(c) = sim.characters.get_mut(&e) {
-            c.written = Some(p);
-        }
-    }
-    // Missing companion components on new bodies.
-    for e in inserts {
-        let Ok(mut ent) = world.get_entity_mut(e) else {
-            continue;
-        };
-        if ent.contains::<RigidBody>() {
-            if !ent.contains::<Velocity>() {
-                ent.insert(Velocity::default());
-            }
-            if !ent.contains::<TransformInterpolation>() && !ent.contains::<ChildOf>() {
-                ent.insert(TransformInterpolation::default());
-                if let Some(b) = sim.bodies.get_mut(&e) {
-                    b.interpolated = true;
-                }
-            }
-        }
-        if ent.contains::<CharacterController>() && !ent.contains::<CharacterState>() {
-            ent.insert(CharacterState::default());
+            c.written = Some(at);
         }
     }
     // Broken joints.
     for e in std::mem::take(&mut sim.broken_joints) {
         sim.joints.remove(&e);
-        let is_body = world.get::<RigidBody>(e).is_some();
-        if let Ok(mut ent) = world.get_entity_mut(e) {
-            if is_body {
-                ent.remove::<Joint>();
-            } else {
-                ent.despawn();
-            }
+        let Ok((is_body, ..)) = p.kinds.get(e) else {
+            continue;
+        };
+        if is_body {
+            p.commands.entity(e).try_remove::<Joint>();
+        } else {
+            p.commands.entity(e).try_despawn();
         }
     }
 
@@ -1394,22 +1517,20 @@ pub(crate) fn physics_write_back(world: &mut World) {
         .at(foci.first().copied().unwrap_or_default())
         .length()
         .max(0.1);
-    for c in contacts {
-        world.write_message(c);
-    }
+    p.contacts.write_batch(contacts);
     if settings.impact_events {
         for i in impacts {
             let dv = i.event.impulse / i.mass.max(1e-3);
             if dv < settings.impact_min_speed {
                 continue;
             }
-            world.write_message(NoiseEvent {
+            p.noises.write(NoiseEvent {
                 position: i.event.point,
                 radius: (dv * 6.0).clamp(4.0, 80.0),
                 source: Some(i.body),
             });
             if i.other_static {
-                world.write_message(GroundContact {
+                p.grounds.write(GroundContact {
                     position: i.event.point,
                     normal: i.normal,
                     size: i.size,
@@ -1428,7 +1549,11 @@ pub(crate) fn physics_write_back(world: &mut World) {
     let _stats = tracing::info_span!("stats").entered();
     if report {
         crate::report::part_ms("write back", writing.elapsed().as_secs_f64() * 1000.0);
-        crate::report::step_done(world, &sim, &foci, started);
+        // (The report names entities from the world: at the next sync point.)
+        let (shared, foci) = (shared.clone(), foci.clone());
+        p.commands.queue(move |world: &mut World| {
+            crate::report::step_done(world, &shared.read(), &foci, started);
+        });
     }
     // ---------------------------------------------------------------- stats
     // The step's own work, not its span: round 21c on the RTX 5080 PC, the span (with the
@@ -1446,7 +1571,7 @@ pub(crate) fn physics_write_back(world: &mut World) {
     }
     let stats = PhysicsStats::from_sim(&sim, step_ms, substeps);
     drop(sim);
-    if let Some(mut d) = world.get_resource_mut::<Diagnostics>() {
+    if let Some(d) = p.diagnostics.as_mut() {
         d.set("physics.bodies", stats.bodies as f64);
         d.set("physics.awake", stats.awake as f64);
         d.set("physics.regions", stats.regions as f64);
@@ -1456,7 +1581,7 @@ pub(crate) fn physics_write_back(world: &mut World) {
         d.set("physics.articulated", stats.articulated as f64);
         d.set("physics.static_copies", stats.static_copies as f64);
     }
-    world.insert_resource(stats);
+    *p.stats = stats;
 }
 
 fn apply_impulse(sim: &mut Simulation, i: &ApplyImpulse) {
@@ -2865,7 +2990,7 @@ fn run_substeps(mut jobs: Vec<Job>, shared: &SubstepShared) -> Vec<SubstepOut> {
 /// waited too long, and hold what is near the others until they are there
 /// ([`crate::shape_jobs`]). Returns how many were placed, the time (ms) spent waiting for or
 /// finishing jobs, and the whole time (ms).
-fn place_pending_statics(world: &World, sim: &mut Simulation) -> (usize, f64, f64) {
+fn place_pending_statics(view: &SyncView, sim: &mut Simulation) -> (usize, f64, f64) {
     if sim.pending_statics.is_empty() && sim.held_for_shapes.is_empty() {
         return (0, 0.0, 0.0);
     }
@@ -2985,15 +3110,16 @@ fn place_pending_statics(world: &World, sim: &mut Simulation) -> (usize, f64, f6
         let Some(p) = sim.pending_statics.remove(&e) else {
             continue;
         };
-        let Some(pose) = world_pose(world, e) else {
+        let Some(pose) = world_pose(view, e) else {
             continue;
         };
         // Rescaled while it was built: build it again at the new scale.
         let shape = if pose.scale == p.scale {
             shape
         } else {
-            world
-                .get::<Collider>(e)
+            view.colliders
+                .get(e)
+                .ok()
                 .and_then(|c| convert::shape_cached(&c.shape, pose.scale))
         };
         let Some(shape) = shape else {
@@ -3002,10 +3128,10 @@ fn place_pending_statics(world: &World, sim: &mut Simulation) -> (usize, f64, f6
             );
             continue;
         };
-        let found = owning_body(world, e);
+        let found = owning_body(view, e);
         match found.filter(|(b, k)| *k != BodyKind::Static && sim.bodies.contains_key(b)) {
             Some((body, _)) => {
-                let body_pose = world_pose(world, body).unwrap_or_default();
+                let body_pose = world_pose(view, body).unwrap_or_default();
                 let inv = body_pose.rotation.inverse();
                 let local = Pose::from_parts(
                     inv * (pose.translation - body_pose.translation).as_vec3(),

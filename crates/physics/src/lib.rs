@@ -180,15 +180,18 @@ impl Plugin for PhysicsPlugin {
                     .after(engine_core::off_frame::apply_off_frame_system),
             )
             .add_systems(Extract, step::kick_step)
-            // Reading the world and writing it back take the whole world; Rapier's part
-            // between them touches only the simulation, so `SimSet::DuringPhysics` runs
-            // beside it. It starts once the world is read (as Unreal's TG_DuringPhysics
-            // starts once the physics step is kicked off): begun first, it would hold the
-            // read back, and Rapier would run after it, alone.
+            // Reading the world and writing it back are plain systems (queries, and commands
+            // for what they add or take off), so the fixed step's other work runs beside
+            // them where it touches none of theirs. `SimSet::DuringPhysics` (water, fire,
+            // smoke and cloth fields) starts beside the read too: it touches nothing the read
+            // does, and the read was the only physics work left inside the fixed step once
+            // Rapier's part ran beside the frame (`overlap_frame`); before, the fields waited
+            // for it (0.68 ms a step at the fortress on the RTX 5080 PC, round 29). Rapier's
+            // part touches only the simulation, so the fields run beside it as well.
             .add_systems(
                 FixedUpdate,
                 (
-                    step::physics_sync.before(SimSet::DuringPhysics),
+                    step::physics_sync,
                     step::physics_simulate,
                     step::physics_write_back,
                 )
