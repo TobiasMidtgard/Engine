@@ -33,8 +33,11 @@ pub const SIZE: [f32; 2] = [1.4, 2.4];
 /// end.
 pub const DUMMY_M: [(usize, f64); 3] = [(WARDEN, 5.5), (0, 4.6), (2, 5.0)];
 pub const CRATE_M: f64 = 1.6;
-/// The ends' life: they close before the next period opens a new pair.
-pub const DURATION: f32 = 0.75;
+/// The ends' life (20 s x this): they close before the next period opens a new pair.
+pub const DURATION: f32 = 0.7;
+/// When the program starts in its period, s: the smoke the hall's last program left settles
+/// before the first end opens.
+pub const START: f32 = 1.2;
 
 /// A lane's hand (on its plinth, facing down the hall).
 fn hand(lane: usize) -> DVec3 {
@@ -96,7 +99,7 @@ fn portal() -> SpellDesign {
 /// The program's lanes.
 pub(super) fn lanes() -> Vec<Lane> {
     let cast = |at: f32, design: SpellDesign, aim: AimAt| Cast {
-        at,
+        at: at + START,
         design: Some(design),
         aim,
     };

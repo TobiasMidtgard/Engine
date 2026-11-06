@@ -2311,7 +2311,8 @@ fn the_portal_hall_opens_its_pair_and_sends_bolts_through() {
     for e in props {
         app.world.entity_mut(e).insert(Body(0.45));
     }
-    run(&mut app, 1.8);
+    // The program starts 1.2 s into its period (the last program's smoke settles first).
+    run(&mut app, 3.0);
     let e = ends(&mut app);
     assert_eq!(e.len(), 2, "the warden's pair");
     assert!(e.iter().all(|(_, g, _)| g.exit.is_some()));
