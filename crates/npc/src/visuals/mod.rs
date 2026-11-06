@@ -222,6 +222,10 @@ pub(crate) struct FighterImagesIn;
 #[derive(Resource, Default)]
 pub(crate) struct AnimalArtWarming(Vec<Species>);
 
+/// Keys of fighter art (a team's paint, a face) a worker is making ([`build_stand_ins`]).
+#[derive(Resource, Default)]
+pub(crate) struct FighterArtWarming(Vec<String>);
+
 /// Spawn the parts of new stand-ins. The fighters' shared kit takes a second or more to make
 /// the first time, and so does each species' art (3.4 s in one frame on the session VM when
 /// the paddock's animals arrived), so both are built on a worker ([`engine_core::off_frame`])
@@ -235,12 +239,16 @@ pub(crate) fn build_stand_ins(
     images_in: Option<Res<FighterImagesIn>>,
     mut animals_warming: Local<Vec<Species>>,
     animals_in: Option<Res<AnimalArtWarming>>,
+    mut fighters_warming: Local<Vec<String>>,
+    fighters_in: Option<Res<FighterArtWarming>>,
     time: Res<Time>,
 ) {
     // A species whose job has put its art in is no longer warming (and one whose art was
     // released since is made again).
     let still: &[Species] = animals_in.as_ref().map_or(&[], |w| &w.0);
     animals_warming.retain(|s| still.contains(s));
+    let still: &[String] = fighters_in.as_ref().map_or(&[], |w| &w.0);
+    fighters_warming.retain(|k| still.contains(k));
     use crate::art::fighter;
     use engine_core::time::TimeSource;
     // Until this world's kit job has put its images in, humanoids wait (the job may have
@@ -296,6 +304,17 @@ pub(crate) fn build_stand_ins(
             break;
         }
         let medic = npc.is_some_and(|n| n.role == NpcRole::Medic);
+        // A fighter whose look (a team's paint, a face) isn't made yet waits for a worker to
+        // make it: 10-26 ms a texture set and up to 15 ms a mesh, 10-74 ms frames at the
+        // fortress (VM) when they were made here.
+        if animal.is_none() && budgeted {
+            let mut plan = crate::art::Plan::new(&art);
+            humanoid::parts(stand_in, weapon, faction, skills, medic, &mut plan);
+            if !plan.jobs.is_empty() {
+                warm_fighter(&mut commands, plan, &mut fighters_warming);
+                continue;
+            }
+        }
         let parts = match animal.map(|a| a.species) {
             None => humanoid::parts(stand_in, weapon, faction, skills, medic, &mut art),
             Some(species) => animal::parts(stand_in, animal, species, &mut art),
@@ -314,6 +333,42 @@ pub(crate) fn build_stand_ins(
         }
         commands.entity(e).insert(StandInState::default());
     }
+}
+
+/// Make what a fighter's look still needs on a worker, the pieces no other job is making
+/// already, then put them in the stores ([`FighterArtWarming`] says which are on the way).
+fn warm_fighter(commands: &mut Commands, plan: crate::art::Plan, warming: &mut Vec<String>) {
+    use crate::art::animals;
+    let (keys, jobs): (Vec<String>, Vec<animals::Job>) = plan
+        .into_jobs()
+        .into_iter()
+        .filter(|(k, _)| !warming.contains(k))
+        .unzip();
+    if jobs.is_empty() {
+        return;
+    }
+    warming.extend(keys.iter().cloned());
+    let queued = keys.clone();
+    commands.queue(move |world: &mut World| {
+        world
+            .get_resource_or_init::<FighterArtWarming>()
+            .0
+            .extend(queued);
+    });
+    engine_core::off_frame::OffFrameCommands::off_frame(
+        commands,
+        "npc fighter art",
+        move || animals::run_jobs(jobs),
+        move |world, made| {
+            let mut state = bevy_ecs::system::SystemState::<ArtAssets>::new(world);
+            if let Ok(mut art) = state.get_mut(world) {
+                animals::add_species(made, &mut art);
+            }
+            if let Some(mut w) = world.get_resource_mut::<FighterArtWarming>() {
+                w.0.retain(|k| !keys.contains(k));
+            }
+        },
+    );
 }
 
 /// Make `species`' art on a worker, then put it in the stores ([`AnimalArtWarming`] says

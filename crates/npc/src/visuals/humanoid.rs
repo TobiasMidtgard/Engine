@@ -31,7 +31,7 @@ use crate::agent::{
     AlertLevel, AttackPhase, Defense, IncomingAttack, NpcAction, NpcBrain, NpcCombat, NpcVitals,
     NpcWeapon, WeaponStyle,
 };
-use crate::art::ArtAssets;
+use crate::art::ArtStore;
 use crate::art::fighter::{FACE_SHAPES, Piece, WEARS, basis, kit, rig, weapons};
 use crate::combat::{Downed, Lie};
 use crate::faction::Faction;
@@ -302,7 +302,7 @@ pub(super) fn parts(
     faction: Option<&Faction>,
     skills: Option<&NpcSkills>,
     medic: bool,
-    art: &mut ArtAssets,
+    art: &mut impl ArtStore,
 ) -> Vec<(Part, MeshRenderer, Vec3)> {
     let kind = Kind::of(&weapon.copied().unwrap_or_default());
     let team_hex = stand_in.color.unwrap_or_else(|| faction_color(faction));
@@ -314,7 +314,7 @@ pub(super) fn parts(
         base_color: [1.0; 4],
         ..Default::default()
     };
-    let Some(MaterialRef::Inline(atlas)) = art.material("fighter/atlas", base, || kit.atlas())
+    let Some(MaterialRef::Inline(atlas)) = art.material("fighter/atlas", base, move || kit.atlas())
     else {
         return plain_parts(kind, team_hex);
     };
@@ -428,18 +428,18 @@ pub(super) fn parts(
     for (part, piece) in list {
         let skin = linear(skin_hex);
         let mesh = match piece {
-            Piece::Face => art.mesh(&format!("fighter/face{shape}/{skin_hex:06x}"), || {
+            Piece::Face => art.mesh(&format!("fighter/face{shape}/{skin_hex:06x}"), move || {
                 kit.face(shape, skin)
             }),
-            Piece::Jaw => art.mesh(&format!("fighter/jaw{shape}/{skin_hex:06x}"), || {
+            Piece::Jaw => art.mesh(&format!("fighter/jaw{shape}/{skin_hex:06x}"), move || {
                 kit.jaw(shape, skin)
             }),
-            Piece::Lids => art.mesh(&format!("fighter/lids{shape}/{skin_hex:06x}"), || {
+            Piece::Lids => art.mesh(&format!("fighter/lids{shape}/{skin_hex:06x}"), move || {
                 kit.lids(shape, skin)
             }),
             Piece::Eye => {
                 let key = format!("fighter/eye/{:06x}{:06x}", iris_hex[0], iris_hex[1]);
-                art.mesh(&key, || kit.eye(iris_hex.map(linear)))
+                art.mesh(&key, move || kit.eye(iris_hex.map(linear)))
             }
             _ => {
                 // Keyed by the colors it takes.
@@ -452,7 +452,7 @@ pub(super) fn parts(
                         key += &format!("/{hex:06x}");
                     }
                 }
-                art.mesh(&key, || kit.mesh(piece, team, cloth))
+                art.mesh(&key, move || kit.mesh(piece, team, cloth))
             }
         };
         let Some(mesh) = mesh else {
@@ -467,7 +467,8 @@ pub(super) fn parts(
         out.push((part, r, Vec3::ONE));
         if let Some(plates) = paint_of(part, hue_of(team_hex)).filter(|_| kit.painted(piece)) {
             let key = format!("fighter/{}/paint", piece.name());
-            let Some(mesh) = art.mesh(&key, || kit.paint_mesh(piece).unwrap_or_default()) else {
+            let Some(mesh) = art.mesh(&key, move || kit.paint_mesh(piece).unwrap_or_default())
+            else {
                 return plain_parts(kind, team_hex);
             };
             out.push((plates, MeshRenderer::new(mesh, paint), Vec3::ONE));
@@ -487,13 +488,14 @@ pub(super) fn parts(
 }
 
 /// The painted plates' material: the paint texture at a wear level in the team color.
-fn paint_material(art: &mut ArtAssets, wear: usize, team_hex: u32) -> Option<StandardMaterial> {
+fn paint_material(art: &mut impl ArtStore, wear: usize, team_hex: u32) -> Option<StandardMaterial> {
     let kit = kit();
     let team = linear(team_hex);
     let key = format!("fighter/paint{wear}/{team_hex:06x}");
-    let (albedo, ..) = art.textures(&key, || kit.paint_albedo(wear, team))?;
-    let (_, normal, orm) =
-        art.textures(&format!("fighter/paint{wear}"), || kit.paint_maps(wear))?;
+    let (albedo, ..) = art.textures(&key, move || kit.paint_albedo(wear, team))?;
+    let (_, normal, orm) = art.textures(&format!("fighter/paint{wear}"), move || {
+        kit.paint_maps(wear)
+    })?;
     Some(StandardMaterial {
         base_color: [1.0; 4],
         base_color_texture: Some(albedo),

@@ -606,9 +606,11 @@ pub enum Made {
     Tex(String, TextureSet),
 }
 
-type Job = Box<dyn FnOnce() -> Vec<Made> + Send>;
+/// Art a worker makes: what it made, keyed as the stores keep it.
+pub type Job = Box<dyn FnOnce() -> Vec<Made> + Send>;
 
-fn run_jobs(jobs: Vec<Job>) -> Vec<Made> {
+/// Run `jobs` side by side on background threads.
+pub fn run_jobs(jobs: Vec<Job>) -> Vec<Made> {
     let n = jobs.len();
     let slots: Vec<Mutex<Option<Job>>> = jobs.into_iter().map(|j| Mutex::new(Some(j))).collect();
     let next = AtomicUsize::new(0);
