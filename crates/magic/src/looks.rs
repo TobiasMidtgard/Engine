@@ -129,6 +129,50 @@ pub struct LookLibrary {
     pub vfx_reads_contracts: Option<bool>,
     /// Stand-ins this module defined, for the Particles thread to replace.
     pub stand_ins: Vec<String>,
+    /// Whether the particles module has its own effect for each of the dead's looks.
+    dead_looks: HashMap<String, bool>,
+}
+
+/// Looks of the dead (round-6-plan.md "Asks"): grave dust where they rise, ash where a thrall
+/// collapses, bones where a skeleton falls apart.
+pub const DEAD_LOOKS: [&str; 3] = ["raise", "ash", "bones"];
+
+/// The dead's bursts play as stone (gravel and dust) until the particles module has its own
+/// `spell.raise.impact`, `spell.ash.impact` and `spell.bones.impact`: a borrow by colour would
+/// spray a grey spark.
+pub fn own_or_stone(world: &mut World, mut looks: Vec<LookCmd>) -> Vec<LookCmd> {
+    for l in looks.iter_mut() {
+        let LookCmd::Burst { look, .. } = l else {
+            continue;
+        };
+        if !DEAD_LOOKS.contains(&look.as_str()) {
+            continue;
+        }
+        if !world.contains_resource::<LookLibrary>() {
+            world.init_resource::<LookLibrary>();
+        }
+        let known = world
+            .resource::<LookLibrary>()
+            .dead_looks
+            .get(look.as_str())
+            .copied();
+        let own = match known {
+            Some(o) => o,
+            None => {
+                let name = look_name(look, Role::Impact);
+                let o = call_api(world, "vfx.describe", json!({ "effect": name })).is_ok();
+                world
+                    .resource_mut::<LookLibrary>()
+                    .dead_looks
+                    .insert(look.clone(), o);
+                o
+            }
+        };
+        if !own {
+            *look = "stone".into();
+        }
+    }
+    looks
 }
 
 /// Which existing effects a look borrows from.

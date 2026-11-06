@@ -17,6 +17,7 @@
 //! | `spells_shaping` | stone that is really there: a wall bolts burst on, pillars lifting a dummy and a crate stack, a stone grip, steps, a frost wall beside a stone one |
 //! | `spells_player` | the player's spell bar over the shoulder: charge, place, chain, channel, with the HUD hotbar and mana ([`player`]) |
 //! | `spells_summon` | summons and tethers: a stone golem and a lava golem walking to dummies and punching them, frost and storm elementals shooting, a wisp healing a wounded mage, a tether hauling a dummy in, then one snapping |
+//! | `spells_dead` | the dead rise: three necromancers raise skeleton warriors, a frost skeletal mage and a fallen student as a thrall against three students' golem, fire elemental and fire bolts |
 //!
 //! The mages wear hooded robes coloured by mastery (the character contract's `Appearance`).
 //!
@@ -41,6 +42,7 @@ use crate::runtime::{BeamCast, ChainArc, Field, Missile, Rainfall};
 use crate::schools::Mastery;
 use crate::status::Afflictions;
 use crate::summon::{Minion, Rubble};
+use crate::undead::Thrall;
 use art::*;
 
 /// A viewpoint on the hall: eye and target relative to the zone's center, the hour, the
@@ -145,6 +147,17 @@ pub const VIEWS: &[DemoView] = &[
         warmup: 6.0,
     },
     DemoView {
+        key: "spells_dead",
+        name: "The dead rise: skeletons, a skeletal mage and a raised student against a golem and a fire elemental",
+        // From the far end of the floor, looking back at the clash: the skeletons running in
+        // from the right, the golem and the elemental meeting them, the plinths beyond.
+        eye: [1.5, 3.4, -10.5],
+        target: [1.0, 1.0, 3.0],
+        hour: 16.6,
+        // Skeletons up and running, the first blows and bolts landing.
+        warmup: 5.0,
+    },
+    DemoView {
         key: "spells_summon",
         name: "Summons and tethers: golems, elementals, a wisp, a chain haul and a snap",
         // From the east end, three-quarters onto the lava golem: its dummy stands beside it,
@@ -174,10 +187,11 @@ pub enum Program {
     Shaping,
     Player,
     Summon,
+    Dead,
 }
 
 impl Program {
-    pub const ALL: [Program; 11] = [
+    pub const ALL: [Program; 12] = [
         Program::Mastery,
         Program::Elements,
         Program::Combos,
@@ -189,6 +203,7 @@ impl Program {
         Program::Shaping,
         Program::Player,
         Program::Summon,
+        Program::Dead,
     ];
 
     pub fn key(self) -> &'static str {
@@ -204,6 +219,7 @@ impl Program {
             Program::Shaping => "spells_shaping",
             Program::Player => "spells_player",
             Program::Summon => "spells_summon",
+            Program::Dead => "spells_dead",
         }
     }
 
@@ -228,6 +244,8 @@ impl Program {
             Program::Player => player::PERIOD,
             // Summons last 10.8 s: each period they fall as rubble and rise again.
             Program::Summon => 12.0,
+            // The dead last 9.6 s: the bones and the ash are gone before the next rising.
+            Program::Dead => 13.0,
         }
     }
 
@@ -247,6 +265,10 @@ enum AimAt {
     Focus,
     /// The ground this far down the lane (z, from the hall's center).
     Lane(f64),
+    /// The ground at (x, z) from the hall's center.
+    Floor(f64, f64),
+    /// The nearest creature of another side, else the lane's focus.
+    Foe,
 }
 
 /// One cast in a lane's period.
@@ -589,6 +611,94 @@ fn lanes(program: Program, cycle: u64) -> Vec<Lane> {
                 )]),
             ]
         }
+        Program::Dead => {
+            let cast = |at: f32, design: SpellDesign, aim: AimAt| Cast {
+                at,
+                design: Some(design),
+                aim,
+            };
+            // Students in green and blue against necromancers (in black, setup_program).
+            // Of a level with each other, so neither army sweeps the floor at once.
+            let living = |mastery: Mastery, casts: Vec<Cast>| Lane {
+                mastery,
+                level: 60.0,
+                known: None,
+                casts,
+            };
+            let necro = |casts: Vec<Cast>| Lane {
+                mastery: Mastery::Master,
+                level: 60.0,
+                known: None,
+                casts,
+            };
+            let summon = |fx: &[&str], name: &str| {
+                d(fx, CastType::Summon)
+                    .with(Modifier::Duration { factor: 0.16 })
+                    .named(name)
+            };
+            let skeleton = || summon(&["raise"], "Raise skeleton");
+            // Safeguarded: it bursts on the skeletons, never on the golem beside them.
+            let bolt = || {
+                d(&["fire"], CastType::Bolt)
+                    .with(Modifier::Safeguard)
+                    .named("Fire bolt")
+            };
+            vec![
+                living(
+                    Mastery::Adept,
+                    vec![cast(
+                        0.1,
+                        summon(&["stone"], "Stone golem"),
+                        AimAt::Floor(-7.5, 1.5),
+                    )],
+                ),
+                living(
+                    Mastery::Apprentice,
+                    vec![cast(
+                        0.2,
+                        summon(&["fire"], "Fire elemental"),
+                        AimAt::Floor(-5.0, 4.5),
+                    )],
+                ),
+                // Fire bolts into whatever the dead raise.
+                living(
+                    Mastery::Adept,
+                    [2.6, 4.4, 6.2, 8.0]
+                        .into_iter()
+                        .map(|at| cast(at, bolt(), AimAt::Foe))
+                        .collect(),
+                ),
+                // Three skeleton warriors each at once, and more climbing out mid-fight to
+                // take the place of the fallen (a Master keeps six).
+                necro(vec![
+                    cast(0.2, skeleton(), AimAt::Floor(2.5, 2.5)),
+                    cast(0.8, skeleton(), AimAt::Floor(4.0, 0.5)),
+                    cast(1.4, skeleton(), AimAt::Floor(5.0, 3.0)),
+                    cast(4.6, skeleton(), AimAt::Floor(1.5, 1.0)),
+                    cast(6.6, skeleton(), AimAt::Floor(2.0, 3.5)),
+                ]),
+                necro(vec![
+                    cast(0.2, skeleton(), AimAt::Floor(6.5, -0.5)),
+                    cast(0.8, skeleton(), AimAt::Floor(7.5, 2.0)),
+                    cast(1.4, skeleton(), AimAt::Floor(9.0, 0.0)),
+                    cast(5.4, skeleton(), AimAt::Floor(4.0, -0.5)),
+                    cast(7.4, skeleton(), AimAt::Floor(5.5, 1.5)),
+                ]),
+                // A frost skeletal mage, then the fallen student stands for the dead.
+                necro(vec![
+                    cast(
+                        0.2,
+                        summon(&["raise", "frost"], "Skeletal mage"),
+                        AimAt::Floor(10.0, 5.5),
+                    ),
+                    cast(
+                        1.4,
+                        skeleton().named("Raise the fallen"),
+                        AimAt::Floor(FALLEN[0], FALLEN[1]),
+                    ),
+                ]),
+            ]
+        }
         // The hall's mages watch while the weaver works its spell bar (player::script_weaver).
         Program::Player => (0..LANES.len())
             .map(|_| Lane {
@@ -634,6 +744,41 @@ impl Hall {
             events: Vec::new(),
         }
     }
+}
+
+/// The necromancers' side in `spells_dead` (the students keep [`duel::STUDENTS`]).
+pub const NECROMANCERS: u32 = 3;
+/// Where the fallen student lies in `spells_dead`, in front of the last lane (x, z).
+pub const FALLEN: [f64; 2] = [12.5, 2.5];
+
+/// The fallen student of `spells_dead`: a body on the floor (down, limp), a fire bolt in its
+/// grimoire for when it is raised against its classmates.
+pub fn spawn_fallen(commands: &mut Commands, origin: DVec3) -> Entity {
+    let at = origin + DVec3::new(FALLEN[0], FLOOR, FALLEN[1]);
+    let e = spawn_mage(commands, at, 207, Mastery::Adept);
+    commands.entity(e).insert((
+        Name::new("Fallen student"),
+        Transform::from_translation(at).with_rotation(Quat::from_rotation_y(-0.9)),
+        MagicCaster {
+            learns: false,
+            side: duel::STUDENTS,
+            seed: 3107,
+            grimoire: vec![KnownSpell {
+                design: d(&["fire"], CastType::Bolt).named("Fire bolt"),
+                growth: None,
+            }],
+            ..MagicCaster::new(34.0, Mastery::Adept)
+        },
+        mage_look(7, Mastery::Adept, None),
+        Vitality {
+            health: 0.0,
+            revive_secs: 0.0,
+            ..Vitality::new(300.0)
+        },
+        Ragdoll { weight: 1.0 },
+        ProgramProp,
+    ));
+    e
 }
 
 /// Lay out the hall at `origin` (the zone's center).
@@ -756,7 +901,11 @@ fn setup_program(
                 duel::Duelist,
                 Ragdoll,
             )>();
-            c.side = duel::STUDENTS;
+            c.side = if program == Program::Dead && m.lane >= 3 {
+                NECROMANCERS
+            } else {
+                duel::STUDENTS
+            };
             if program == Program::Duel {
                 commands.entity(e).insert(duel::student(&mut c, m.lane));
             } else {
@@ -772,7 +921,12 @@ fn setup_program(
             });
         }
         let side = (program == Program::Duel).then_some([0.1, 0.35, 0.9]);
-        let want = mage_look(m.lane, l.mastery, side);
+        let necromancer = program == Program::Dead && m.lane >= 3;
+        let want = if necromancer {
+            necromancer_look(m.lane)
+        } else {
+            mage_look(m.lane, l.mastery, side)
+        };
         match look {
             Some(mut a) if *a != want => *a = want,
             Some(_) => {}
@@ -789,7 +943,11 @@ fn setup_program(
         c.mana_regen = 1.0e5;
         c.grimoire = l.known.clone().into_iter().collect();
         c.selected = 0;
-        let robe = robe_color(l.mastery);
+        let robe = if necromancer {
+            NECRO_ROBE
+        } else {
+            robe_color(l.mastery)
+        };
         for child in children.iter() {
             if let Ok(mut r) = stand_ins.get_mut(child)
                 && let engine_render::MaterialRef::Inline(mat) = &mut r.material
@@ -807,7 +965,7 @@ fn setup_program(
         }
         // The duel's floor is clear of them, and the summons' far end too (its camera stands
         // there).
-        tf.translation = if matches!(program, Program::Duel | Program::Summon) {
+        tf.translation = if matches!(program, Program::Duel | Program::Summon | Program::Dead) {
             t.home - DVec3::Y * 40.0
         } else {
             t.home
@@ -887,6 +1045,9 @@ fn setup_program(
                 });
         }
     }
+    if program == Program::Dead {
+        spawn_fallen(&mut commands, origin);
+    }
     if program == Program::Force {
         for (i, x) in LANES.iter().enumerate() {
             let base = origin + DVec3::new(*x, FLOOR, 0.0);
@@ -961,6 +1122,11 @@ fn run_hall(
     mages: Query<(Entity, &HallMage, &MagicCaster)>,
     targets: Query<(Entity, &HallTarget, Has<ProgramProp>)>,
     cams: Query<(&Camera, &GlobalTransform)>,
+    (mage_at, creatures, thralls): (
+        Query<&GlobalTransform, With<HallMage>>,
+        Query<(Entity, &Minion, &GlobalTransform)>,
+        Query<(Entity, &Thrall, &GlobalTransform)>,
+    ),
     mut casts: MessageWriter<CastRequest>,
 ) {
     let Some(mut hall) = hall else {
@@ -983,7 +1149,11 @@ fn run_hall(
     if hall.program == Program::Force && hall.cycle != cycle && hall.cycle % 2 == 0 {
         hall.reset_props = true;
     }
-    if matches!(hall.program, Program::Shaping | Program::Summon) && hall.cycle != cycle {
+    if matches!(
+        hall.program,
+        Program::Shaping | Program::Summon | Program::Dead
+    ) && hall.cycle != cycle
+    {
         hall.reset_props = true;
     }
     let plan = lanes(hall.program, cycle);
@@ -1011,6 +1181,28 @@ fn run_hall(
                         hall.origin + DVec3::new(LANES[m.lane], FLOOR, DUMMY_Z),
                     )),
                 AimAt::Lane(z) => Aim::Point(hall.origin + DVec3::new(LANES[m.lane], FLOOR, z)),
+                AimAt::Floor(x, z) => Aim::Point(hall.origin + DVec3::new(x, FLOOR, z)),
+                AimAt::Foe => {
+                    let me = mage_at
+                        .get(e)
+                        .map(|g| g.translation())
+                        .unwrap_or(hall.origin);
+                    creatures
+                        .iter()
+                        .filter(|(_, mn, _)| mn.cast.side != caster.side)
+                        .map(|(c, _, g)| (c, g.translation()))
+                        .chain(
+                            thralls
+                                .iter()
+                                .filter(|(_, t, _)| t.cast.side != caster.side)
+                                .map(|(c, _, g)| (c, g.translation())),
+                        )
+                        .min_by(|a, b| a.1.distance(me).total_cmp(&b.1.distance(me)))
+                        .map(|(c, _)| Aim::Entity(c))
+                        .unwrap_or(Aim::Point(
+                            hall.origin + DVec3::new(LANES[m.lane], FLOOR, DUMMY_Z),
+                        ))
+                }
             };
             let spell = match &c.design {
                 Some(d) => SpellChoice::Design(d.clone()),
@@ -1106,7 +1298,7 @@ pub fn build(app: &mut App) {
         "magic.demo",
         "Run a Weaving hall program: spells_mastery, spells_elements, spells_combos, \
          spells_forms, spells_meet, spells_force, spells_dark, spells_duel, spells_shaping, \
-         spells_player or spells_summon. \
+         spells_player, spells_summon or spells_dead. \
          With no program, lists them.",
         r#"{"program": "spells_combos"}"#,
         |world, args| {

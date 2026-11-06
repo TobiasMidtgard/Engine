@@ -54,12 +54,36 @@ pub enum MinionKind {
     Elemental,
     /// A healing light (Vitalism).
     Wisp,
+    /// Bones dug out of the ground that run in with a blade (Necromancy's raise skeleton).
+    Skeleton,
+    /// A skeleton that keeps its distance and shoots bolts of its element (Diablo IV's
+    /// skeletal mage).
+    SkeletalMage,
+}
+
+impl MinionKind {
+    /// Walks on two legs (posed by [`step_feet`] and two-bone IK).
+    pub fn walks(self) -> bool {
+        matches!(self, Self::Golem | Self::Skeleton | Self::SkeletalMage)
+    }
+
+    pub fn skeletal(self) -> bool {
+        matches!(self, Self::Skeleton | Self::SkeletalMage)
+    }
 }
 
 /// The creature a summon spell makes, or None (it casts as an area, as before).
 pub fn kind_of(spell: &Spell) -> Option<MinionKind> {
     if spell.payload.stone_m > 0.0 {
+        // With raise, the bone golem.
         Some(MinionKind::Golem)
+    } else if spell.payload.raise > 0.0 {
+        // On a fallen body the raise makes a thrall instead (undead.rs).
+        Some(if spell.element().is_some() {
+            MinionKind::SkeletalMage
+        } else {
+            MinionKind::Skeleton
+        })
     } else if spell.element().is_some() {
         Some(MinionKind::Elemental)
     } else if spell.payload.heal > 0.0 {
@@ -69,9 +93,23 @@ pub fn kind_of(spell: &Spell) -> Option<MinionKind> {
     }
 }
 
-/// How many of each kind a caster keeps: Skyrim's Twin Souls from Master up.
-pub fn limit(mastery: Mastery) -> usize {
-    if mastery >= Mastery::Master { 2 } else { 1 }
+/// How many of a kind a caster keeps: one of each, two from Master up (Skyrim's Twin Souls);
+/// skeletons by the handful, more with skill, as Diablo II's Raise Skeleton keeps 1 to 8.
+pub fn limit(kind: MinionKind, mastery: Mastery) -> usize {
+    if kind.skeletal() {
+        match mastery {
+            Mastery::Novice => 1,
+            Mastery::Apprentice => 2,
+            Mastery::Adept => 3,
+            Mastery::Expert => 4,
+            Mastery::Master => 6,
+            _ => 8,
+        }
+    } else if mastery >= Mastery::Master {
+        2
+    } else {
+        1
+    }
 }
 
 // ------------------------------------------------------------------------------- numbers
@@ -123,6 +161,54 @@ const STEP_H: f32 = 0.28;
 const STEP_FAR: f32 = 0.35;
 const STEP_SETTLE: f32 = 0.14;
 const LEAD_SECS: f32 = 0.32;
+
+/// A walker's build and stride at size 1, m and s: hip height and half-width, leg bones,
+/// ankle height; a step's time, lift, how far a foot may stray (walking, standing) and how far
+/// the stride leads the body; walk speed, turn rate; climbing out of the floor.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Gait {
+    pub hip_y: f32,
+    pub hip_x: f32,
+    pub thigh: f32,
+    pub shin: f32,
+    pub ankle_y: f32,
+    pub step_secs: f32,
+    pub step_h: f32,
+    pub step_far: f32,
+    pub settle: f32,
+    pub lead: f32,
+    pub walk: f32,
+    pub turn: f32,
+    pub rise_secs: f32,
+    pub rise_depth: f32,
+}
+
+/// The golem: heavy, slow, hunched.
+pub const GOLEM_GAIT: Gait = Gait {
+    hip_y: HIP_Y,
+    hip_x: HIP_X,
+    thigh: THIGH,
+    shin: SHIN,
+    ankle_y: ANKLE_Y,
+    step_secs: STEP_SECS,
+    step_h: STEP_H,
+    step_far: STEP_FAR,
+    settle: STEP_SETTLE,
+    lead: LEAD_SECS,
+    walk: WALK,
+    turn: TURN,
+    rise_secs: RISE_SECS,
+    rise_depth: 2.9,
+};
+
+/// A walker's gait.
+pub fn gait_of(kind: MinionKind) -> &'static Gait {
+    if kind.skeletal() {
+        &crate::undead::SKELETON_GAIT
+    } else {
+        &GOLEM_GAIT
+    }
+}
 
 /// The golem's pieces, in order.
 pub const GOLEM_PARTS: usize = 20;
@@ -183,7 +269,11 @@ pub enum Act {
     Slam {
         t: f32,
     },
-    /// Gathering a bolt (elementals).
+    /// A skeleton's blade: cocked over the shoulder, cut down across the body.
+    Slash {
+        t: f32,
+    },
+    /// Gathering a bolt (elementals, skeletal mages).
     Shoot {
         t: f32,
     },
@@ -279,6 +369,8 @@ pub struct NewMinion {
     /// The ground where it stands (or under where it floats).
     pub at: DVec3,
     pub facing: Vec3,
+    /// What the cast was aimed at (a raise stands that body up when it is down).
+    pub on: Option<Entity>,
 }
 
 fn smooth(t: f32) -> f32 {
@@ -391,7 +483,7 @@ pub fn stance(act: Act, feet: [Vec3; 2], stepping: Option<(usize, f32)>, dip: f3
                 *f = f.lerp(over, raise).lerp(down, smash);
             }
         }
-        Act::Ready | Act::Shoot { .. } => {}
+        Act::Ready | Act::Shoot { .. } | Act::Slash { .. } => {}
     }
     st
 }
@@ -462,6 +554,7 @@ pub fn pose_golem(st: &Stance, ankles: [Vec3; 2], k: f32) -> [(Vec3, Quat); GOLE
 /// foot has strayed too far from under its hip, only while the other foot is down.
 #[allow(clippy::too_many_arguments)]
 pub fn step_feet(
+    gait: &Gait,
     feet: &mut [Foot; 2],
     pos: DVec3,
     yaw: f32,
@@ -472,7 +565,7 @@ pub fn step_feet(
     ground: impl Fn(DVec3) -> DVec3,
 ) -> Vec<DVec3> {
     let mut landed = Vec::new();
-    let secs = STEP_SECS * k.sqrt();
+    let secs = gait.step_secs * k.sqrt();
     for f in feet.iter_mut() {
         if let Some(t) = f.t {
             let t = t + dt / secs;
@@ -489,13 +582,13 @@ pub fn step_feet(
         return landed;
     }
     let rot = Quat::from_rotation_y(yaw);
-    let lead = vel * LEAD_SECS;
+    let lead = vel * gait.lead;
     let moving = vel.length() > 0.15;
     let ideal = |i: usize| {
         let side = if i == 0 { -1.0 } else { 1.0 };
-        pos + (rot * Vec3::new(side * HIP_X * k, 0.0, 0.0) + lead).as_dvec3()
+        pos + (rot * Vec3::new(side * gait.hip_x * k, 0.0, 0.0) + lead).as_dvec3()
     };
-    let far = if moving { STEP_FAR } else { STEP_SETTLE } * k;
+    let far = if moving { gait.step_far } else { gait.settle } * k;
     let err = |i: usize| {
         let d = ideal(i) - feet[i].at;
         DVec3::new(d.x, 0.0, d.z).length() as f32
@@ -536,7 +629,10 @@ pub fn attacks(kind: MinionKind, spell: &Spell, k: f32) -> (Arc<Spell>, Option<A
             blow(ForceDir::Away, 225.0, 0.8),
             Some(blow(ForceDir::Up, 170.0, 1.0)),
         ),
-        MinionKind::Elemental => {
+        // A bone blade's cut: quick, light, a little push. One skeleton is weak (Diablo IV's
+        // minions take about 30% of their master's strength); a pack is not.
+        MinionKind::Skeleton => (blow(ForceDir::Away, 90.0, 0.3), None),
+        MinionKind::Elemental | MinionKind::SkeletalMage => {
             let keys: Vec<&str> = spell.weave.elements.iter().map(|e| e.key()).collect();
             let bolt = compile(
                 &SpellDesign::new(&keys, CastType::Bolt),
@@ -614,9 +710,12 @@ pub fn body_material(element: Option<Element>) -> StandardMaterial {
     }
 }
 
-/// The glow of a minion's heart and eyes: the weave's colour, or amber for plain stone.
+/// The glow of a minion's heart and eyes: the weave's colour, amber for plain stone, the
+/// grave's violet for the raised.
 pub fn glow_color(spell: &Spell) -> [f32; 3] {
-    if spell.weave.elements.is_empty() && spell.payload.heal <= 0.0 {
+    if spell.payload.raise > 0.0 && spell.weave.elements.is_empty() {
+        crate::undead::GRAVE_LIGHT
+    } else if spell.weave.elements.is_empty() && spell.payload.heal <= 0.0 {
         [1.0, 0.58, 0.18]
     } else {
         spell.weave.color
@@ -638,21 +737,30 @@ pub fn spawn_minion(commands: &mut Commands, m: NewMinion, looks: &mut Vec<LookC
     let color = glow_color(&spell);
     let element = spell.element();
     let life = spell.carrier.duration.max(1.0);
+    let bone = spell.payload.raise > 0.0;
     let (pos, health) = match m.kind {
-        MinionKind::Golem => (m.at, 400.0 * k),
+        // A bone golem is lighter than a stone one (round-6-plan.md: 300).
+        MinionKind::Golem => (m.at, if bone { 300.0 } else { 400.0 } * k),
         MinionKind::Elemental => (m.at + DVec3::Y * HOVER_M as f64, 150.0 * k),
         MinionKind::Wisp => (m.at + DVec3::Y * 2.0, 0.0),
+        // Weak alone (Diablo II's skeletons die to a few blows), strong in numbers.
+        MinionKind::Skeleton => (m.at, 60.0 * k),
+        MinionKind::SkeletalMage => (m.at, 45.0 * k),
     };
-    let start = match m.kind {
-        // It climbs out of the floor: it starts below it.
-        MinionKind::Golem => pos - DVec3::Y * (2.9 * k) as f64,
-        _ => pos,
+    // A walker climbs out of the floor: it starts below it.
+    let start = if m.kind.walks() {
+        pos - DVec3::Y * (gait_of(m.kind).rise_depth * k) as f64
+    } else {
+        pos
     };
     let rot = Quat::from_rotation_y(yaw);
     let name = match m.kind {
+        MinionKind::Golem if bone => "Bone golem",
         MinionKind::Golem => "Summoned golem",
         MinionKind::Elemental => "Summoned elemental",
         MinionKind::Wisp => "Summoned wisp",
+        MinionKind::Skeleton => "Skeleton warrior",
+        MinionKind::SkeletalMage => "Skeletal mage",
     };
     let root = commands
         .spawn((
@@ -662,7 +770,11 @@ pub fn spawn_minion(commands: &mut Commands, m: NewMinion, looks: &mut Vec<LookC
                 learns: false,
                 side: m.cast.side,
                 seed,
-                hand: Vec3::ZERO,
+                hand: if m.kind == MinionKind::SkeletalMage {
+                    crate::undead::mage_hand(k)
+                } else {
+                    Vec3::ZERO
+                },
                 mana: 0.0,
                 max_mana: 0.0,
                 mana_regen: 0.0,
@@ -691,7 +803,11 @@ pub fn spawn_minion(commands: &mut Commands, m: NewMinion, looks: &mut Vec<LookC
     };
     match m.kind {
         MinionKind::Golem => {
-            let mat = body_material(element);
+            let mat = if bone {
+                crate::undead::bone_material()
+            } else {
+                body_material(element)
+            };
             for (i, s) in GOLEM_SIZES.iter().enumerate() {
                 let size = Vec3::from_array(*s) * k;
                 part(
@@ -764,6 +880,19 @@ pub fn spawn_minion(commands: &mut Commands, m: NewMinion, looks: &mut Vec<LookC
                 power_j: spell.power.energy_j as f32 * 0.2,
             });
         }
+        MinionKind::Skeleton | MinionKind::SkeletalMage => {
+            let mage = m.kind == MinionKind::SkeletalMage;
+            for (i, size, r) in crate::undead::skeleton_parts(k, color, mage) {
+                part(commands, i, size, r);
+            }
+            // The grave's light in its eyes, faint on the floor.
+            commands.entity(root).insert(PointLight {
+                color,
+                intensity_lm: if mage { 700.0 } else { 250.0 },
+                range: 4.0,
+                radius: 0.1,
+            });
+        }
         MinionKind::Wisp => {
             part(commands, 0, Vec3::ZERO, glow(0.22, color, 120.0));
             for i in 0..3 {
@@ -777,20 +906,28 @@ pub fn spawn_minion(commands: &mut Commands, m: NewMinion, looks: &mut Vec<LookC
             });
         }
     }
-    // Gravel bursts out where it rises; an elemental or wisp flares into being.
+    // Gravel bursts out where it rises (grave dust for the dead); an elemental or wisp
+    // flares into being.
     looks.push(LookCmd::Burst {
         at: m.at,
         up: Vec3::Y,
-        look: if m.kind == MinionKind::Golem {
+        look: if bone || m.kind.skeletal() {
+            "raise".into()
+        } else if m.kind == MinionKind::Golem {
             "stone".into()
         } else {
             spell.weave.key.clone()
         },
         role: Role::Impact,
         scale: 1.2 * k,
-        color: spell.weave.color,
+        color: if bone || m.kind.skeletal() {
+            crate::undead::GRAVE_DUST
+        } else {
+            spell.weave.color
+        },
     });
-    let side = |s: f32| pos + (rot * Vec3::new(s * HIP_X * k, 0.0, 0.0)).as_dvec3();
+    let hip_x = gait_of(m.kind).hip_x;
+    let side = |s: f32| pos + (rot * Vec3::new(s * hip_x * k, 0.0, 0.0)).as_dvec3();
     commands.entity(root).insert(Minion {
         kind: m.kind,
         cast: m.cast,
@@ -805,7 +942,7 @@ pub fn spawn_minion(commands: &mut Commands, m: NewMinion, looks: &mut Vec<LookC
         target: None,
         look_in: 0.0,
         cooldown: 0.0,
-        act: if m.kind == MinionKind::Golem {
+        act: if m.kind.walks() {
             Act::Rise { t: 0.0 }
         } else {
             Act::Ready
@@ -850,6 +987,8 @@ struct Seen {
     at: DVec3,
     hurt: f32,
     friend: bool,
+    /// Another summoned or raised creature.
+    creature: bool,
 }
 
 /// Minions live: the oldest of a kind past its summoner's limit falls; each picks a foe (or a
@@ -869,6 +1008,7 @@ pub fn run_minions(
         Option<&Statuses>,
     )>,
     bodies: Query<(Entity, &GlobalTransform, &Vitality, Allegiance)>,
+    creatures: Query<(), Or<(With<Minion>, With<crate::undead::Thrall>)>>,
     anchors: Query<&GlobalTransform>,
     mut parts: Query<(&MinionPart, &mut Transform), Without<Minion>>,
     mut hits: ResMut<HitQueue>,
@@ -891,11 +1031,16 @@ pub fn run_minions(
             .iter()
             .filter(|b| b.0 == a.0 && b.1 == a.1)
             .count();
-        if a.0.is_some() && younger >= limit(a.4) {
+        if a.0.is_some() && younger >= limit(a.1, a.4) {
             retire.push(a.3);
         }
     }
     let g = gravity.at(DVec3::ZERO).length();
+    let crowd: Vec<(Entity, DVec3, f32)> = minions
+        .iter()
+        .filter(|(_, m, ..)| m.kind.walks() && !matches!(m.act, Act::Rise { .. }))
+        .map(|(e, m, ..)| (e, m.pos, body_radius(m.kind, m.size)))
+        .collect();
     for (e, mut m, mut tf, vit, local, statuses) in &mut minions {
         let dt = time.delta_for(local);
         m.age += dt;
@@ -932,6 +1077,7 @@ pub fn run_minions(
                         1.0 - v.health / v.max.max(1e-3)
                     },
                     friend: m.cast.friend(b, al.caster, al.faction, factions.as_deref()),
+                    creature: creatures.contains(b),
                 });
             m.target = match m.kind {
                 MinionKind::Wisp => seen
@@ -939,13 +1085,15 @@ pub fn run_minions(
                     .max_by(|a, b| a.hurt.total_cmp(&b.hurt))
                     .map(|s| s.e),
                 _ => {
-                    let reach = if m.kind == MinionKind::Golem {
-                        AGGRO_M
-                    } else {
-                        SHOOT_M
-                    };
+                    // Creatures fight creatures first (minions engage minions); a caster or a
+                    // dummy only when no enemy creature is in reach.
+                    let reach = if m.kind.walks() { AGGRO_M } else { SHOOT_M };
                     seen.filter(|s| !s.friend && s.hurt >= 0.0 && near(s.at, reach) && leash(s.at))
-                        .min_by(|a, b| a.at.distance(m.pos).total_cmp(&b.at.distance(m.pos)))
+                        .min_by(|a, b| {
+                            (!a.creature, a.at.distance(m.pos))
+                                .partial_cmp(&(!b.creature, b.at.distance(m.pos)))
+                                .unwrap_or(std::cmp::Ordering::Equal)
+                        })
                         .map(|s| s.e)
                 }
             };
@@ -963,23 +1111,36 @@ pub fn run_minions(
 
         let exclude = QueryFilter::excluding(e);
         match m.kind {
-            MinionKind::Golem => {
+            MinionKind::Golem | MinionKind::Skeleton | MinionKind::SkeletalMage => {
+                let gait = gait_of(m.kind);
+                let skeletal = m.kind.skeletal();
+                let mage = m.kind == MinionKind::SkeletalMage;
                 let mut act = m.act;
                 let mut rising = None;
                 match &mut act {
                     Act::Rise { t } => {
                         *t += dt;
                         rising = Some(*t);
-                        if *t >= RISE_SECS {
+                        if *t >= gait.rise_secs {
                             act = Act::Ready;
-                            commands.entity(e).insert(golem_collider(k));
+                            if skeletal {
+                                commands
+                                    .entity(e)
+                                    .insert(crate::undead::skeleton_collider(k));
+                            } else {
+                                commands.entity(e).insert(golem_collider(k));
+                            }
                             queue.looks.push(LookCmd::Burst {
                                 at: m.pos,
                                 up: Vec3::Y,
-                                look: "stone".into(),
+                                look: if skeletal { "raise" } else { "stone" }.into(),
                                 role: Role::Impact,
-                                scale: 0.9 * k,
-                                color: m.cast.spell.weave.color,
+                                scale: if skeletal { 0.6 } else { 0.9 } * k,
+                                color: if skeletal {
+                                    crate::undead::GRAVE_DUST
+                                } else {
+                                    m.cast.spell.weave.color
+                                },
                             });
                         }
                     }
@@ -1080,15 +1241,94 @@ pub fn run_minions(
                             m.cooldown = 0.7;
                         }
                     }
-                    Act::Ready | Act::Shoot { .. } => {}
+                    Act::Slash { t } => {
+                        let before = *t;
+                        *t += dt;
+                        if before < crate::undead::SLASH_HIT
+                            && *t >= crate::undead::SLASH_HIT
+                            && let Some((te, tp)) = target
+                            && flat_distance(tp, m.pos) <= (crate::undead::reach(k) + 0.6) as f64
+                        {
+                            let at = tp + DVec3::Y * 1.0;
+                            hits.0.push(PendingHit {
+                                cast: minion_cast(&m, e, &m.attack, 1.0),
+                                target: Some(te),
+                                point: at,
+                                normal: -fwd,
+                                dir: fwd,
+                                multi: false,
+                                impact: true,
+                                reacts: true,
+                                expire: false,
+                            });
+                            queue.looks.push(LookCmd::Burst {
+                                at,
+                                up: -fwd,
+                                look: "raise".into(),
+                                role: Role::Impact,
+                                scale: 0.35 * k,
+                                color: crate::undead::GRAVE_DUST,
+                            });
+                        }
+                        if *t >= crate::undead::SLASH_SECS {
+                            act = Act::Ready;
+                            m.cooldown = crate::undead::SLASH_REST;
+                        }
+                    }
+                    Act::Shoot { t } => {
+                        // A skeletal mage: the bolt gathers in its outheld hand, then flies.
+                        *t += dt;
+                        if *t >= GATHER_SECS {
+                            if let Some((te, tp)) = target {
+                                let hand = tf.translation
+                                    + (tf.rotation * crate::undead::mage_hand(k)).as_dvec3();
+                                let aim = tp + DVec3::Y * 1.0;
+                                let face = (aim - hand).as_vec3().normalize_or(fwd);
+                                let info = minion_cast(&m, e, &m.attack, 0.5);
+                                release(
+                                    &info,
+                                    hand,
+                                    m.pos,
+                                    face,
+                                    aim,
+                                    Some(te),
+                                    g,
+                                    &queries,
+                                    &mut queue,
+                                    &mut hits,
+                                );
+                            }
+                            queue.looks.push(LookCmd::EndCharge { caster: e });
+                            act = Act::Ready;
+                            m.cooldown = crate::undead::MAGE_EVERY - GATHER_SECS;
+                        }
+                    }
+                    Act::Ready => {}
                 }
                 // Where to go: to the foe, else beside its summoner.
                 let mut speed = 0.0;
                 if act == Act::Ready && rising.is_none() {
+                    let stop = match m.kind {
+                        MinionKind::Golem => reach_of(k),
+                        MinionKind::Skeleton => crate::undead::reach(k),
+                        _ => crate::undead::MAGE_KEEP_M,
+                    };
+                    // A crowd of bones waits around its master, not on one spot.
+                    let idle = Vec3::new(
+                        (1.6 + 1.6 * roll(m.cast.seed as u64, 7)) * m.flank,
+                        0.0,
+                        1.0 + 2.2 * roll(m.cast.seed as u64, 8),
+                    );
                     let goal = match (target, owner) {
-                        (Some((_, tp)), _) => Some((tp, reach_of(k))),
+                        (Some((_, tp)), _) => Some((tp, stop)),
                         (None, Some((op, orot))) => Some((
-                            op + (orot * Vec3::new(1.6 * m.flank, 0.0, 1.6)).as_dvec3(),
+                            op + (orot
+                                * if skeletal {
+                                    idle
+                                } else {
+                                    Vec3::new(1.6 * m.flank, 0.0, 1.6)
+                                })
+                            .as_dvec3(),
                             1.0,
                         )),
                         _ => None,
@@ -1101,25 +1341,39 @@ pub fn run_minions(
                             let want = yaw_of(flat / dist);
                             let diff = wrap(want - m.yaw);
                             if !held {
-                                m.yaw += diff.clamp(-TURN * dt, TURN * dt);
+                                m.yaw += diff.clamp(-gait.turn * dt, gait.turn * dt);
                             }
-                            if dist > stop {
-                                speed =
-                                    WALK * k * diff.cos().max(0.0) * ((dist - stop) / 0.6).min(1.0);
-                            } else if target.is_some()
+                            // A mage shoots from wherever it stands within a bolt's range.
+                            let in_reach = if mage { dist <= SHOOT_M } else { dist <= stop };
+                            if target.is_some()
+                                && in_reach
                                 && diff.abs() < 0.4
                                 && m.cooldown <= 0.0
                                 && !held
                             {
                                 m.attacks += 1;
-                                act = if m.attacks % 3 == 0 {
-                                    Act::Slam { t: 0.0 }
-                                } else {
-                                    Act::Punch {
+                                act = match m.kind {
+                                    MinionKind::Golem if m.attacks % 3 == 0 => Act::Slam { t: 0.0 },
+                                    MinionKind::Golem => Act::Punch {
                                         t: 0.0,
                                         right: m.attacks % 2 == 1,
+                                    },
+                                    MinionKind::Skeleton => Act::Slash { t: 0.0 },
+                                    _ => {
+                                        queue.looks.push(LookCmd::Charge {
+                                            caster: e,
+                                            look: m.cast.spell.weave.key.clone(),
+                                            secs: GATHER_SECS,
+                                            scale: 0.4 * k,
+                                        });
+                                        Act::Shoot { t: 0.0 }
                                     }
                                 };
+                            } else if dist > stop {
+                                speed = gait.walk
+                                    * k
+                                    * diff.cos().max(0.0)
+                                    * ((dist - stop) / 0.6).min(1.0);
                             }
                         }
                     }
@@ -1131,7 +1385,29 @@ pub fn run_minions(
                 let want = fwd * speed;
                 let blend = (5.0 * dt).min(1.0);
                 m.vel = m.vel.lerp(want, blend);
-                let step = (m.vel * dt).as_dvec3();
+                // Walkers keep out of each other: a pack spreads around its foe.
+                let mut shove = DVec3::ZERO;
+                if rising.is_none() && !held {
+                    let r = body_radius(m.kind, k) as f64;
+                    for (o, op, or) in &crowd {
+                        if *o == e {
+                            continue;
+                        }
+                        let d = flat(m.pos - *op);
+                        let gap = r + *or as f64 - d.length();
+                        if gap > 0.0 {
+                            let away = if d.length() > 1e-3 {
+                                d.normalize()
+                            } else if e < *o {
+                                DVec3::X
+                            } else {
+                                DVec3::NEG_X
+                            };
+                            shove += away * gap;
+                        }
+                    }
+                }
+                let step = (m.vel * dt).as_dvec3() + shove * (6.0 * dt).min(1.0) as f64;
                 if step.length_squared() > 1e-10 {
                     let next = m.pos + step;
                     m.pos = ground_below(&queries, next + DVec3::Y * 0.5, &exclude);
@@ -1145,18 +1421,22 @@ pub fn run_minions(
                     for (i, f) in feet.iter_mut().enumerate() {
                         let side = if i == 0 { -1.0 } else { 1.0 };
                         *f = Foot::planted(
-                            pos + (rot * Vec3::new(side * HIP_X * k, 0.0, 0.0)).as_dvec3(),
+                            pos + (rot * Vec3::new(side * gait.hip_x * k, 0.0, 0.0)).as_dvec3(),
                         );
                     }
                     Vec::new()
                 } else {
-                    step_feet(&mut feet, pos, yaw, vel, k, dt, held, |p| {
+                    step_feet(gait, &mut feet, pos, yaw, vel, k, dt, held, |p| {
                         ground_below(&queries, p + DVec3::Y * 0.5, &exclude)
                     })
                 };
                 m.feet = feet;
                 m.dip = (m.dip - dt * 0.4).max(0.0);
                 for at in landed {
+                    if skeletal {
+                        m.dip = 0.015;
+                        continue;
+                    }
                     m.dip = 0.05;
                     queue.looks.push(LookCmd::Burst {
                         at,
@@ -1168,44 +1448,58 @@ pub fn run_minions(
                     });
                 }
                 let rise = rising.map_or(0.0, |t| {
-                    (2.9 * k) * (1.0 - crate::stone::climb(t, RISE_SECS))
+                    (gait.rise_depth * k) * (1.0 - crate::stone::climb(t, gait.rise_secs))
                 });
                 tf.translation = m.pos - DVec3::Y * rise as f64;
                 tf.rotation = Quat::from_rotation_y(m.yaw);
                 let inv = tf.rotation.inverse();
-                let lift = STEP_H * k;
-                let ankles = m.feet.map(|f| {
-                    if rising.is_some() {
-                        Vec3::ZERO
-                    } else {
-                        inv * (f.now(lift) - m.pos).as_vec3() + Vec3::Y * ANKLE_Y * k
-                    }
-                });
+                let lift = gait.step_h * k;
+                let rest = [
+                    Vec3::new(-gait.hip_x * k, gait.ankle_y * k, 0.0),
+                    Vec3::new(gait.hip_x * k, gait.ankle_y * k, 0.0),
+                ];
                 let ankles = if rising.is_some() {
-                    [
-                        Vec3::new(-HIP_X * k, ANKLE_Y * k, 0.0),
-                        Vec3::new(HIP_X * k, ANKLE_Y * k, 0.0),
-                    ]
+                    rest
                 } else {
-                    ankles
+                    m.feet
+                        .map(|f| inv * (f.now(lift) - m.pos).as_vec3() + Vec3::Y * gait.ankle_y * k)
                 };
                 let stepping = m
                     .feet
                     .iter()
                     .enumerate()
                     .find_map(|(i, f)| f.t.map(|t| (i, t)));
-                let st = stance(m.act, ankles.map(|a| a / k), stepping, m.dip);
-                let pose = pose_golem(&st, ankles, k);
-                for &p in &m.parts {
-                    if let Ok((part, mut ptf)) = parts.get_mut(p) {
-                        let (at, rot) = pose[part.index];
-                        ptf.translation = at.as_dvec3();
-                        ptf.rotation = rot;
-                        ptf.scale = if EYE.contains(&part.index) {
-                            Vec3::splat(st.eyes.max(0.001))
-                        } else {
-                            Vec3::ONE
-                        };
+                if skeletal {
+                    let st = crate::undead::skeleton_stance(
+                        m.act,
+                        ankles.map(|a| a / k),
+                        stepping,
+                        m.dip,
+                        mage,
+                    );
+                    let pose = crate::undead::pose_skeleton(&st, ankles, k);
+                    for &p in &m.parts {
+                        if let Ok((part, mut ptf)) = parts.get_mut(p) {
+                            let (at, rot, scale) = pose[part.index];
+                            ptf.translation = at.as_dvec3();
+                            ptf.rotation = rot;
+                            ptf.scale = scale;
+                        }
+                    }
+                } else {
+                    let st = stance(m.act, ankles.map(|a| a / k), stepping, m.dip);
+                    let pose = pose_golem(&st, ankles, k);
+                    for &p in &m.parts {
+                        if let Ok((part, mut ptf)) = parts.get_mut(p) {
+                            let (at, rot) = pose[part.index];
+                            ptf.translation = at.as_dvec3();
+                            ptf.rotation = rot;
+                            ptf.scale = if EYE.contains(&part.index) {
+                                Vec3::splat(st.eyes.max(0.001))
+                            } else {
+                                Vec3::ONE
+                            };
+                        }
                     }
                 }
             }
@@ -1386,6 +1680,11 @@ pub fn reach_of(k: f32) -> f32 {
     1.45 * k + 0.35
 }
 
+/// How much room a walker keeps from another walker, m.
+pub fn body_radius(kind: MinionKind, k: f32) -> f32 {
+    if kind.skeletal() { 0.34 * k } else { 0.75 * k }
+}
+
 /// An elemental's shards ring its core on tilted orbits, faster while it gathers a bolt; a
 /// wisp's motes circle it.
 fn pose_shell(
@@ -1426,8 +1725,9 @@ fn pose_shell(
     }
 }
 
-/// A minion's end: a golem's and an elemental's rocks come apart and tumble, its glow goes
-/// out; a golem woven with an element bursts in it (the lava golem's explosion).
+/// A minion's end: a golem's and an elemental's rocks come apart and tumble, a skeleton's
+/// bones clatter to the floor, its glow goes out; a golem woven with an element bursts in it
+/// (the lava golem's explosion).
 fn fall(
     e: Entity,
     m: &Minion,
@@ -1437,12 +1737,13 @@ fn fall(
     queue: &mut MagicQueue,
 ) {
     let spell = &m.cast.spell;
+    let skeletal = m.kind.skeletal();
     let center = tf.translation
         + DVec3::Y
-            * if m.kind == MinionKind::Golem {
-                1.5 * m.size
-            } else {
-                0.0
+            * match m.kind {
+                MinionKind::Golem => 1.5 * m.size,
+                MinionKind::Skeleton | MinionKind::SkeletalMage => 1.0 * m.size,
+                _ => 0.0,
             } as f64;
     for &p in &m.parts {
         let Ok((part, ptf)) = parts.get(p) else {
@@ -1457,45 +1758,58 @@ fn fall(
         let out = Vec3::new(out.x, 0.0, out.z).normalize_or(Vec3::X);
         let r = |s: u64| roll(m.cast.seed as u64 ^ p.to_bits(), s) - 0.5;
         let volume = part.size.x * part.size.y * part.size.z;
+        // Bones are light and come apart loosely: they clatter down rather than tumble out.
+        let (mass, kick, half) = if skeletal {
+            ((volume * 900.0).clamp(0.4, 8.0), 0.5, part.size * 0.5)
+        } else {
+            ((volume * 1200.0).clamp(15.0, 600.0), 1.0, part.size * 0.4)
+        };
         commands.entity(p).remove::<ChildOf>().insert((
             Transform::from_translation(at).with_rotation(rot),
             Collider {
                 shape: ColliderShape::Cuboid {
-                    half_extents: part.size * 0.4,
+                    half_extents: half.max(Vec3::splat(0.012)),
                 },
                 density: 2600.0,
                 ..Default::default()
             },
             RigidBody {
                 kind: BodyKind::Dynamic,
-                mass_kg: Some((volume * 1200.0).clamp(15.0, 600.0)),
+                mass_kg: Some(mass),
                 linear_damping: 0.05,
                 angular_damping: 0.2,
                 ..Default::default()
             },
             Velocity {
-                linear: out * (1.2 + r(1)) + Vec3::Y * (1.0 + r(2)),
-                angular: Vec3::new(r(3), r(4), r(5)) * 4.0,
+                linear: (out * (1.2 + r(1)) + Vec3::Y * (1.0 + r(2))) * kick,
+                angular: Vec3::new(r(3), r(4), r(5)) * 4.0 / kick,
             },
             Rubble {
                 age: 0.0,
-                life: RUBBLE_SECS + r(6),
+                life: if skeletal { 3.0 } else { RUBBLE_SECS } + r(6),
             },
         ));
     }
+    let bone = skeletal || spell.payload.raise > 0.0;
     queue.looks.push(LookCmd::Burst {
         at: center,
         up: Vec3::Y,
-        look: if m.kind == MinionKind::Golem {
+        look: if bone {
+            "bones".into()
+        } else if m.kind == MinionKind::Golem {
             "stone".into()
         } else {
             spell.weave.key.clone()
         },
         role: Role::Impact,
-        scale: 1.4 * m.size,
-        color: spell.weave.color,
+        scale: if skeletal { 0.8 } else { 1.4 } * m.size,
+        color: if bone {
+            crate::undead::GRAVE_DUST
+        } else {
+            spell.weave.color
+        },
     });
-    if m.kind == MinionKind::Golem && !spell.weave.elements.is_empty() {
+    if m.kind == MinionKind::Golem && !spell.weave.elements.is_empty() && !bone {
         // It bursts in its element as it falls.
         queue.spawns.push(Spawn::Field(
             field(
@@ -1583,8 +1897,19 @@ mod tests {
         assert_eq!(kind_of(&spell(&["frost"])), Some(MinionKind::Elemental));
         assert_eq!(kind_of(&spell(&["heal"])), Some(MinionKind::Wisp));
         assert_eq!(kind_of(&spell(&["push"])), None);
-        assert_eq!(limit(Mastery::Adept), 1);
-        assert_eq!(limit(Mastery::Master), 2);
+        assert_eq!(kind_of(&spell(&["raise"])), Some(MinionKind::Skeleton));
+        assert_eq!(
+            kind_of(&spell(&["raise", "frost"])),
+            Some(MinionKind::SkeletalMage)
+        );
+        assert_eq!(
+            kind_of(&spell(&["raise", "stone"])),
+            Some(MinionKind::Golem)
+        );
+        assert_eq!(limit(MinionKind::Golem, Mastery::Adept), 1);
+        assert_eq!(limit(MinionKind::Golem, Mastery::Master), 2);
+        assert_eq!(limit(MinionKind::Skeleton, Mastery::Adept), 3);
+        assert_eq!(limit(MinionKind::Skeleton, Mastery::Ascended1), 8);
     }
 
     #[test]
@@ -1626,7 +1951,7 @@ mod tests {
         for _ in 0..240 {
             pos += (vel * dt).as_dvec3();
             let before = feet;
-            let l = step_feet(&mut feet, pos, 0.0, vel, 1.0, dt, false, |p| {
+            let l = step_feet(&GOLEM_GAIT, &mut feet, pos, 0.0, vel, 1.0, dt, false, |p| {
                 DVec3::new(p.x, 0.0, p.z)
             });
             assert!(

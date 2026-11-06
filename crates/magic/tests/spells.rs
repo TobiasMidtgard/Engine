@@ -1184,3 +1184,248 @@ fn the_summon_hall_raises_every_creature_in_its_first_period() {
         assert_eq!(t.as_deref(), Some("Practice dummy 4"));
     }
 }
+
+fn raise() -> SpellDesign {
+    SpellDesign::new(&["raise"], CastType::Summon)
+        .with(Modifier::Duration { factor: 0.15 })
+        .named("Raise skeleton")
+}
+
+fn named(app: &mut App, name: &str) -> Vec<Entity> {
+    let mut q = app.world.query::<(Entity, &Name)>();
+    q.iter(&app.world)
+        .filter(|(_, n)| n.as_str() == name)
+        .map(|(e, _)| e)
+        .collect()
+}
+
+#[test]
+fn skeletons_climb_out_by_the_handful_and_cut_a_dummy() {
+    let mut app = app();
+    let me = mage(&mut app, DVec3::new(0.0, 0.0, 6.0), Mastery::Adept);
+    let d = dummy(&mut app, DVec3::new(0.0, 0.0, -4.0));
+    run(&mut app, 0.1);
+    for x in [-2.0, 0.0, 2.0, 4.0] {
+        cast(&mut app, me, raise(), Aim::Point(DVec3::new(x, 0.0, 0.0)));
+        run(&mut app, 0.8);
+    }
+    // An Adept keeps three (Diablo II's skill-scaled count): the first crumbled into bones
+    // when the fourth climbed out.
+    let found = minions(&mut app);
+    assert_eq!(
+        found.len(),
+        3,
+        "{:?}",
+        found.iter().map(|f| f.1.kind).collect::<Vec<_>>()
+    );
+    for (_, m) in &found {
+        assert_eq!(m.kind, summon::MinionKind::Skeleton);
+        assert_eq!(m.parts.len(), undead::SKELETON_PARTS);
+    }
+    assert!(rubble(&mut app) >= 20, "bones: {}", rubble(&mut app));
+    run(&mut app, 4.0);
+    // They ran to the dummy and cut it, never their raiser.
+    let ids: Vec<Entity> = found.iter().map(|f| f.0).collect();
+    let seen = app.world.resource::<Seen>();
+    let blows: Vec<_> = seen
+        .damage
+        .iter()
+        .filter(|x| x.source.is_some_and(|s| ids.contains(&s)))
+        .collect();
+    assert!(blows.len() >= 3, "{} cuts", blows.len());
+    assert!(blows.iter().all(|b| b.target == d && b.amount > 0.0));
+    // Around it, not stacked on one spot.
+    let at: Vec<DVec3> = ids
+        .iter()
+        .map(|e| app.world.get::<Transform>(*e).unwrap().translation)
+        .collect();
+    for (i, a) in at.iter().enumerate() {
+        assert!(
+            a.distance(DVec3::new(0.0, 0.0, -4.0)) < 2.2,
+            "near the dummy: {a}"
+        );
+        assert!(a.y.abs() < 0.05, "on the floor: {a}");
+        for b in &at[i + 1..] {
+            assert!(a.distance(*b) > 0.4, "{a} and {b} overlap");
+        }
+    }
+}
+
+#[test]
+fn a_raise_on_a_fallen_body_stands_it_up_to_fight_and_it_falls_to_ash() {
+    let mut app = app();
+    let me = mage(&mut app, DVec3::new(0.0, 0.0, 6.0), Mastery::Adept);
+    // A fire mage of another side, fallen, and a dummy beyond.
+    let body = app
+        .world
+        .spawn((
+            Name::new("Fallen"),
+            Transform::from_xyz(1.0, 0.0, 0.0),
+            MagicCaster {
+                learns: false,
+                side: 2,
+                grimoire: vec![KnownSpell {
+                    design: SpellDesign::new(&["fire"], CastType::Bolt),
+                    growth: None,
+                }],
+                ..MagicCaster::new(30.0, Mastery::Adept)
+            },
+            Vitality {
+                health: 0.0,
+                ..Vitality::new(200.0)
+            },
+            engine_world::animation::Ragdoll { weight: 1.0 },
+        ))
+        .id();
+    let d = dummy(&mut app, DVec3::new(0.5, 0.0, -8.0));
+    run(&mut app, 0.1);
+    cast(
+        &mut app,
+        me,
+        raise().named("Raise the fallen"),
+        Aim::Point(DVec3::new(0.0, 0.0, 0.5)),
+    );
+    run(&mut app, 1.0);
+    // It stands for its raiser at 60% health, and no skeleton came instead.
+    let v = *app.world.get::<Vitality>(body).unwrap();
+    assert!((v.health - 120.0).abs() < 1.0, "{}", v.health);
+    let side = app.world.get::<MagicCaster>(me).unwrap().side;
+    assert_eq!(app.world.get::<MagicCaster>(body).unwrap().side, side);
+    assert!(app.world.get::<undead::Thrall>(body).is_some());
+    assert_eq!(
+        app.world
+            .get::<engine_world::animation::Ragdoll>(body)
+            .map(|r| r.weight),
+        Some(0.0)
+    );
+    assert!(minions(&mut app).is_empty());
+    run(&mut app, 4.0);
+    // It cast its own fire bolt at the dummy.
+    let shots: Vec<_> = hits_on(&app, d)
+        .into_iter()
+        .filter(|h| h.caster == Some(body))
+        .collect();
+    assert!(!shots.is_empty(), "the thrall never cast");
+    assert!(shots[0].spell.element() == Some(Element::Fire));
+    assert!(hits_on(&app, me).is_empty(), "it spared its raiser");
+    // Killed again, it collapses into ash.
+    app.world.get_mut::<Vitality>(body).unwrap().health = 0.0;
+    run(&mut app, 0.2);
+    assert!(app.world.get_entity(body).is_err(), "the body is gone");
+    assert_eq!(named(&mut app, "Ash heap").len(), 1);
+}
+
+#[test]
+fn creatures_of_two_sides_fight_each_other() {
+    let mut app = app();
+    let a = mage(&mut app, DVec3::new(-6.0, 0.0, 8.0), Mastery::Adept);
+    let b = mage(&mut app, DVec3::new(6.0, 0.0, 8.0), Mastery::Master);
+    app.world.get_mut::<MagicCaster>(a).unwrap().side = 1;
+    app.world.get_mut::<MagicCaster>(b).unwrap().side = 2;
+    run(&mut app, 0.1);
+    let golem = SpellDesign::new(&["stone"], CastType::Summon).named("Stone golem");
+    cast(&mut app, a, golem, Aim::Point(DVec3::new(-1.5, 0.0, 0.0)));
+    for x in [1.5, 2.5] {
+        cast(&mut app, b, raise(), Aim::Point(DVec3::new(x, 0.0, 0.5)));
+        run(&mut app, 0.7);
+    }
+    run(&mut app, 6.0);
+    let found = minions(&mut app);
+    let kind = |e: Entity| found.iter().find(|f| f.0 == e).map(|f| f.1.kind);
+    let seen = app.world.resource::<Seen>();
+    let golem_blows = seen
+        .damage
+        .iter()
+        .filter(|x| x.source.and_then(kind) == Some(summon::MinionKind::Golem))
+        .count();
+    let cuts_on_golem = seen
+        .damage
+        .iter()
+        .filter(|x| {
+            x.source.and_then(kind) == Some(summon::MinionKind::Skeleton)
+                && kind(x.target) == Some(summon::MinionKind::Golem)
+        })
+        .count();
+    assert!(golem_blows > 0, "the golem never struck");
+    assert!(cuts_on_golem > 0, "no skeleton cut the golem");
+    // The golem only ever struck the dead, which were all raised beside it.
+    assert!(seen.damage.iter().all(|x| x.target != a && x.target != b));
+}
+
+#[test]
+fn the_dead_hall_raises_two_armies_that_meet() {
+    let mut app = app();
+    {
+        let mut commands = app.world.commands();
+        demo::spawn_demo(&mut commands, DVec3::ZERO);
+    }
+    app.world.flush();
+    app.update();
+    {
+        let mut hall = app.world.resource_mut::<demo::Hall>();
+        hall.program = demo::Program::Dead;
+        hall.restart = true;
+    }
+    run(&mut app, 3.0);
+    let found = minions(&mut app);
+    let count = |k: summon::MinionKind| found.iter().filter(|(_, m)| m.kind == k).count();
+    assert_eq!(count(summon::MinionKind::Skeleton), 6, "lanes 3 and 4");
+    assert_eq!(count(summon::MinionKind::SkeletalMage), 1, "lane 5");
+    assert_eq!(count(summon::MinionKind::Golem), 1, "lane 0");
+    assert_eq!(count(summon::MinionKind::Elemental), 1, "lane 1");
+    // The fallen student stands for the necromancers.
+    let fallen = named(&mut app, "Fallen student");
+    assert_eq!(fallen.len(), 1);
+    assert!(app.world.get::<undead::Thrall>(fallen[0]).is_some());
+    assert_eq!(
+        app.world.get::<MagicCaster>(fallen[0]).unwrap().side,
+        demo::NECROMANCERS
+    );
+    // Bodies for the stand-in physics (the engine's are their colliders).
+    for (e, _) in &found {
+        app.world.entity_mut(*e).insert(Body(0.9));
+    }
+    app.world.entity_mut(fallen[0]).insert(Body(0.9));
+    run(&mut app, 5.0);
+    // The armies met: the dead struck the living's creatures, and were struck by them.
+    let living: Vec<Entity> = found
+        .iter()
+        .filter(|f| f.1.cast.side != demo::NECROMANCERS)
+        .map(|f| f.0)
+        .collect();
+    let dead: Vec<Entity> = found
+        .iter()
+        .filter(|f| f.1.cast.side == demo::NECROMANCERS)
+        .map(|f| f.0)
+        .chain(fallen.iter().copied())
+        .collect();
+    let mages: Vec<Entity> = {
+        let mut q = app.world.query::<(Entity, &demo::art::HallMage)>();
+        q.iter(&app.world)
+            .filter(|(_, m)| m.lane == 2)
+            .map(|(e, _)| e)
+            .collect()
+    };
+    let seen = app.world.resource::<Seen>();
+    let on = |from: &[Entity], to: &[Entity]| {
+        seen.damage
+            .iter()
+            .filter(|x| x.source.is_some_and(|s| from.contains(&s)) && to.contains(&x.target))
+            .count()
+    };
+    let struck_by_dead = on(&dead, &living);
+    assert!(
+        struck_by_dead > 0,
+        "the dead never reached the living's creatures"
+    );
+    assert!(
+        on(&living, &dead) > 0,
+        "the living's creatures never struck the dead"
+    );
+    let bolts = seen
+        .hits
+        .iter()
+        .filter(|h| h.caster == Some(mages[0]) && h.target.is_some_and(|t| dead.contains(&t)))
+        .count();
+    assert!(bolts > 0, "lane 2's fire bolts never found the dead");
+}

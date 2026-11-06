@@ -102,6 +102,19 @@ pub fn robe_color(m: Mastery) -> [f32; 3] {
     }
 }
 
+/// A necromancer's robe: near black.
+pub const NECRO_ROBE: [f32; 3] = [0.035, 0.03, 0.04];
+
+/// A necromancer's look: a black robe and hood, a violet collar.
+pub fn necromancer_look(lane: usize) -> Appearance {
+    let mut a = mage_look(lane, Mastery::Master, None);
+    a.outfit.top_color = NECRO_ROBE;
+    a.outfit.bottom_color = NECRO_ROBE.map(|c| c * 0.8);
+    a.outfit.accent = [0.45, 0.2, 0.75];
+    a.outfit.accent_on = "collar".into();
+    a
+}
+
 /// A mage's look: hood, a long-sleeved shirt over a long skirt in the mastery's colour (a
 /// robe, from the character contract's garments), a gold collar from Expert up, or a side's
 /// armband in the duel. Faces vary by lane, the same every run.

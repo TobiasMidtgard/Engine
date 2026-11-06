@@ -111,6 +111,9 @@ pub struct Payload {
     pub stone_m: f32,
     /// Seconds the stone stands before it sinks (a wall's stone goes with the wall).
     pub stone_secs: f32,
+    /// Raises the dead (1: it does; undead.rs): a summon of it makes a thrall of a fallen body,
+    /// or a skeleton.
+    pub raise: f32,
     /// The weave's reaction (a woven spell's bonus, clouds, chains).
     #[serde(skip)]
     pub reaction: Reaction,
@@ -512,6 +515,11 @@ fn compile_inner(
         },
         stone_secs: if has(&|k| matches!(k, EffectKind::Stone)) {
             12.0 * duration_k
+        } else {
+            0.0
+        },
+        raise: if has(&|k| matches!(k, EffectKind::Raise)) {
+            1.0
         } else {
             0.0
         },

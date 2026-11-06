@@ -6,7 +6,7 @@
 //! |---|---|
 //! | [`dials`] | the seven domains and fourteen poles every effect is made of |
 //! | [`schools`] | elements, statuses, classes and subclasses, mastery tiers, power |
-//! | [`effects`] | the 22 effects |
+//! | [`effects`] | the 24 effects |
 //! | [`design`] | `SpellDesign`: effects + cast type + modifiers + stages, as JSON |
 //! | [`combine`] | the combination table and the systemic fallback |
 //! | [`compile`] | from a design and a caster to the numbers a spell flies with |
@@ -19,6 +19,7 @@
 //! | [`stone`] | Shaping: stone walls, pillars, steps and grips that are physics bodies |
 //! | [`summon`] | summoned golems, elementals and wisps that walk or float, fight and fall |
 //! | [`tether`] | tethers: a link to one body that works each tick and snaps when stretched |
+//! | [`undead`] | raise dead: thralls from fallen bodies, skeleton warriors and mages from the ground |
 //! | [`looks`] | how spells look, through the particles module's API |
 //! | [`player`] | the player's spell bar: keys 1-8, camera aim, charge, channel, place, HUD |
 //! | [`api`] | `magic.*` |
@@ -47,6 +48,7 @@ pub mod status;
 pub mod stone;
 pub mod summon;
 pub mod tether;
+pub mod undead;
 pub mod walls;
 
 use engine_core::prelude::*;
@@ -150,7 +152,9 @@ impl Plugin for MagicPlugin {
                     )
                         .chain(),
                     meet::meet_spells,
+                    undead::raise_dead,
                     summon::run_minions,
+                    undead::run_thralls,
                 )
                     .chain()
                     .in_set(MagicSet::Carriers),

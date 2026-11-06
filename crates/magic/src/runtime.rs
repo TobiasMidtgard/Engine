@@ -264,6 +264,8 @@ pub struct MagicQueue {
     pub solids: Vec<(Entity, Vec3)>,
     /// Summoned creatures to put into the world (summon.rs).
     pub minions: Vec<crate::summon::NewMinion>,
+    /// Raises, for a fallen body near their aim first (undead.rs), else bones from the ground.
+    pub raises: Vec<crate::summon::NewMinion>,
 }
 
 /// Bodies spells look for: anything with health, a skeleton or a character controller.
@@ -634,12 +636,19 @@ pub fn release(
         && let Some(kind) = crate::summon::kind_of(spell)
     {
         let spot = crate::summon::place(body, aim_point, c.range);
-        queue.minions.push(crate::summon::NewMinion {
+        let nm = crate::summon::NewMinion {
             kind,
             cast: info.clone(),
             at: ground_below(queries, spot, &exclude),
             facing: flat,
-        });
+            on: target,
+        };
+        // A raise looks for a fallen body there first (undead.rs).
+        if spell.payload.raise > 0.0 {
+            queue.raises.push(nm);
+        } else {
+            queue.minions.push(nm);
+        }
         return;
     }
     // Stone cast on an area (or on the caster) is a pillar rising under it: it lifts what
@@ -2235,6 +2244,7 @@ pub fn flush(
                     t.translation = to;
                 }
             }
+            let looks = crate::looks::own_or_stone(world, looks);
             crate::looks::write_contracts(world, &looks);
             crate::looks::apply(world, looks);
         });

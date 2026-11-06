@@ -50,6 +50,9 @@ pub enum EffectKind {
     /// Rough stone rises from the ground (Shaping): a wall, a pillar or a step, solid to
     /// everything (stone.rs).
     Stone,
+    /// The dead rise and serve: a fallen body stands as a thrall, or bones climb out of the
+    /// ground (undead.rs).
+    Raise,
 }
 
 /// One entry of the effect catalog.
@@ -88,6 +91,7 @@ impl EffectDef {
             EffectKind::Calm => Dials::pole(Pole::Veil, 0.4) + Dials::pole(Pole::Grow, 0.2),
             EffectKind::Drain => Dials::pole(Pole::Wither, 0.7) + Dials::pole(Pole::Near, 0.7),
             EffectKind::Stone => Dials::pole(Pole::Form, 1.0) + Dials::pole(Pole::Push, 0.2),
+            EffectKind::Raise => Dials::pole(Pole::Wither, 0.8) + Dials::pole(Pole::Form, 0.4),
         }
     }
 
@@ -275,6 +279,13 @@ pub const EFFECTS: &[EffectDef] = &[
         Subclass::Necromancy,
         EffectKind::Drain,
         "Pulls the victim's life into the caster.",
+    ),
+    def(
+        "raise",
+        "Raise dead",
+        Subclass::Necromancy,
+        EffectKind::Raise,
+        "The dead rise and serve: a fallen body stands for you, or bones climb out of the ground.",
     ),
     // Pactbinding: chains and dark passage.
     def(
