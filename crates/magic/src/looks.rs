@@ -1,5 +1,7 @@
-//! How spells look, until the engine has a spell-visual contract (round-1-plan.md, "Contracts
-//! to ask the lead for").
+//! How spells look. Every look command is written twice: into the engine's spell contracts
+//! (`engine_world::magic`: a `SpellLook` on each carrier, `SpellCue`s for one-shots, see
+//! [`write_contracts`]), which vfx and audio read, and, until vfx says it draws from those
+//! (its `vfx.spell_contracts` API answers), as the stand-in particle calls below.
 //!
 //! Like Unreal's GameplayCues (research-architecture.md), the simulation never draws: it
 //! queues [`LookCmd`]s, and this module turns them into particle effects through the
@@ -18,6 +20,7 @@ use engine_core::math::{DVec3, Vec3};
 use engine_core::prelude::*;
 use engine_core::registry::call_api;
 use engine_render::{AlphaMode, MaterialRef, MeshRef, MeshRenderer, Shape, StandardMaterial};
+use engine_world::magic::{SpellCue, SpellLook, SpellLookDrawer, SpellMark, SpellRole};
 use serde_json::{Value, json};
 
 use crate::schools::Status;
@@ -41,6 +44,8 @@ pub enum Role {
     Status,
     /// A cast that failed.
     Fizzle,
+    /// Standing along a wall, one per piece (about 1.5 m of wall).
+    Wall,
 }
 
 impl Role {
@@ -54,6 +59,7 @@ impl Role {
             Role::Charge => "charge",
             Role::Status => "status",
             Role::Fizzle => "fizzle",
+            Role::Wall => "wall",
         }
     }
 }
@@ -68,6 +74,8 @@ pub enum LookCmd {
         role: Role,
         scale: f32,
         color: [f32; 3],
+        /// The spell's energy, J (0 for statuses).
+        power_j: f32,
     },
     /// A one-shot look at a point.
     Burst {
@@ -116,6 +124,9 @@ pub struct LookLibrary {
     charges: HashMap<Entity, Entity>,
     /// The particles module isn't there (headless tests): looks are skipped.
     pub no_particles: bool,
+    /// vfx draws spells from the contracts itself (`vfx.spell_contracts`), so the stand-ins
+    /// stay off: asked once, on the first look.
+    pub vfx_reads_contracts: Option<bool>,
     /// Stand-ins this module defined, for the Particles thread to replace.
     pub stand_ins: Vec<String>,
 }
@@ -143,6 +154,24 @@ fn family(look: &str) -> Family {
         "steam" | "plague" | "wither" | "doom" | "nightfeed" | "shadow" | "blight" | "blood"
         | "night_terror" | "ghost_step" | "mind" | "dread" | "rot" | "bleeding" => Family::Mist,
         _ => Family::Arcane,
+    }
+}
+
+/// The families a wall's body is made by ([`crate::walls`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WallFamily {
+    Fire,
+    Frost,
+    Storm,
+    Other,
+}
+
+pub fn family_of(look: &str) -> WallFamily {
+    match family(look) {
+        Family::Fire => WallFamily::Fire,
+        Family::Frost => WallFamily::Frost,
+        Family::Storm => WallFamily::Storm,
+        _ => WallFamily::Other,
     }
 }
 
@@ -190,6 +219,12 @@ fn bases(look: &str, role: Role) -> &'static [&'static str] {
             Frost => &["spell.heal_aura", "water.mist"],
             Storm => &["spell.heal_aura", "magic.orb"],
             Mist => &["water.mist", "spell.heal_aura"],
+            _ => &["spell.heal_aura"],
+        },
+        Role::Wall => match fam {
+            Fire => &["fire.torch"],
+            Frost | Mist => &["water.mist"],
+            Storm => &["magic.orb"],
             _ => &["spell.heal_aura"],
         },
         Role::Charge => &["spell.charge"],
@@ -457,6 +492,31 @@ pub fn apply(world: &mut World, looks: Vec<LookCmd>) {
         world.resource_mut::<LookLibrary>().no_particles = true;
         return;
     }
+    // Once vfx draws `SpellLook`s and `SpellCue`s (written by `write_contracts`), every look
+    // here would draw twice: the stand-ins go quiet. It says so with the engine's
+    // `SpellLookDrawer` or, before that, its `vfx.spell_contracts` API.
+    if world.contains_resource::<SpellLookDrawer>() {
+        return;
+    }
+    let reads = match world.resource::<LookLibrary>().vfx_reads_contracts {
+        Some(r) => r,
+        None => {
+            let r = call_api(world, "vfx.spell_contracts", json!({})).is_ok_and(|v| {
+                v.get("looks").and_then(Value::as_bool) == Some(true)
+                    && v.get("cues").and_then(Value::as_bool) == Some(true)
+            });
+            if r {
+                tracing::info!(
+                    "magic: vfx draws spells from SpellLook and SpellCue; stand-ins off"
+                );
+            }
+            world.resource_mut::<LookLibrary>().vfx_reads_contracts = Some(r);
+            r
+        }
+    };
+    if reads {
+        return;
+    }
     for cmd in looks {
         match cmd {
             LookCmd::Attach {
@@ -465,6 +525,7 @@ pub fn apply(world: &mut World, looks: Vec<LookCmd>) {
                 role,
                 scale,
                 color,
+                ..
             } => {
                 if world.get_entity(entity).is_err() {
                     continue;
@@ -612,6 +673,155 @@ fn older_mark(kind: &str) -> Option<&'static str> {
         "blood" | "rot" => Some("wet"),
         "burn" => Some("scorch"),
         _ => None,
+    }
+}
+
+/// The engine's spell role for a carrier's look.
+pub fn spell_role(role: Role) -> SpellRole {
+    match role {
+        Role::Bolt => SpellRole::Bolt,
+        Role::Wall => SpellRole::Wall,
+        Role::Aura => SpellRole::Aura,
+        Role::Charge => SpellRole::Charge,
+        Role::Status => SpellRole::Status,
+        Role::Field | Role::Impact | Role::Cone | Role::Fizzle => SpellRole::Field,
+    }
+}
+
+/// The engine's mark for a mark kind (the newer kinds included).
+pub fn spell_mark(kind: &str) -> SpellMark {
+    match kind {
+        "frost" => SpellMark::Frost,
+        "wet" => SpellMark::Wet,
+        "blood" => SpellMark::Blood,
+        "rot" => SpellMark::Rot,
+        "void" => SpellMark::Void,
+        "burn" => SpellMark::Burn,
+        _ => SpellMark::Scorch,
+    }
+}
+
+/// What a look command means in the engine's spell contracts (`engine_world::magic`): a
+/// [`SpellLook`] put on or taken off an entity, or a one-shot [`SpellCue`]. The flush writes
+/// both beside the stand-ins, so vfx and audio can draw and sound spells from the contracts
+/// alone.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Contract {
+    Put(Entity, SpellLook),
+    Take(Entity),
+    Cue(SpellCue),
+}
+
+pub fn contract(cmd: &LookCmd) -> Option<Contract> {
+    Some(match cmd {
+        LookCmd::Attach {
+            entity,
+            look,
+            role,
+            scale,
+            color,
+            power_j,
+        } => Contract::Put(
+            *entity,
+            SpellLook {
+                look: look.clone(),
+                role: spell_role(*role),
+                scale: *scale,
+                color: *color,
+                power_j: *power_j,
+            },
+        ),
+        LookCmd::Stop { entity } => Contract::Take(*entity),
+        LookCmd::Charge {
+            caster,
+            look,
+            scale,
+            ..
+        } => Contract::Put(
+            *caster,
+            SpellLook {
+                look: look.clone(),
+                role: SpellRole::Charge,
+                scale: *scale,
+                ..Default::default()
+            },
+        ),
+        LookCmd::EndCharge { caster } => Contract::Take(*caster),
+        LookCmd::Burst {
+            at,
+            up,
+            look,
+            role,
+            scale,
+            color,
+        } => Contract::Cue(match role {
+            Role::Cone => SpellCue::Cone {
+                at: *at,
+                dir: *up,
+                look: look.clone(),
+                range_m: scale * 4.0,
+            },
+            Role::Fizzle => SpellCue::Fizzle {
+                at: *at,
+                look: look.clone(),
+            },
+            _ => SpellCue::Impact {
+                at: *at,
+                normal: *up,
+                look: look.clone(),
+                scale: *scale,
+                color: *color,
+            },
+        }),
+        LookCmd::Beam {
+            from,
+            to,
+            look,
+            width,
+            secs,
+            ..
+        } => Contract::Cue(SpellCue::Beam {
+            from: *from,
+            to: *to,
+            look: look.clone(),
+            width_m: *width,
+            secs: *secs,
+        }),
+        LookCmd::Mark {
+            at,
+            normal,
+            kind,
+            radius,
+        } => Contract::Cue(SpellCue::Mark {
+            at: *at,
+            normal: *normal,
+            kind: spell_mark(kind),
+            radius_m: *radius,
+        }),
+        LookCmd::RemoveCasting { .. } => return None,
+    })
+}
+
+/// Put the step's looks into the contracts: [`SpellLook`] on carriers, [`SpellCue`]s out.
+pub fn write_contracts(world: &mut World, looks: &[LookCmd]) {
+    let can_cue = world.contains_resource::<Messages<SpellCue>>();
+    for l in looks {
+        match contract(l) {
+            Some(Contract::Put(e, look)) => {
+                if let Ok(mut em) = world.get_entity_mut(e) {
+                    em.insert(look);
+                }
+            }
+            Some(Contract::Take(e)) => {
+                if let Ok(mut em) = world.get_entity_mut(e) {
+                    em.remove::<SpellLook>();
+                }
+            }
+            Some(Contract::Cue(c)) if can_cue => {
+                world.write_message(c);
+            }
+            _ => {}
+        }
     }
 }
 

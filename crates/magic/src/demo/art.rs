@@ -10,6 +10,7 @@ use engine_core::registry::call_api;
 use engine_render::{MaterialPreset, MaterialRef, MeshRef, MeshRenderer, Shape, StandardMaterial};
 use engine_world::Readouts;
 use engine_world::animation::BodyRequest;
+use engine_world::character::{Appearance, Outfit};
 use engine_world::physics::{BodyKind, Collider, ColliderShape, RigidBody};
 use serde_json::json;
 
@@ -90,13 +91,52 @@ fn solid(
 /// Robes by tier: plain wool for the novice to deep ascended violet.
 pub fn robe_color(m: Mastery) -> [f32; 3] {
     match m {
-        Mastery::Novice => [0.42, 0.36, 0.28],
-        Mastery::Apprentice => [0.22, 0.3, 0.42],
-        Mastery::Adept => [0.16, 0.32, 0.2],
-        Mastery::Expert => [0.45, 0.12, 0.1],
-        Mastery::Master => [0.12, 0.1, 0.32],
-        _ => [0.32, 0.08, 0.42],
+        // Undyed wool, then woad blue, verdigris green, madder crimson, violet, and the
+        // Ascended's bleached white: the ladder reads from the clothes.
+        Mastery::Novice => [0.42, 0.36, 0.27],
+        Mastery::Apprentice => [0.07, 0.13, 0.36],
+        Mastery::Adept => [0.06, 0.24, 0.12],
+        Mastery::Expert => [0.42, 0.04, 0.04],
+        Mastery::Master => [0.17, 0.05, 0.32],
+        _ => [0.78, 0.76, 0.7],
     }
+}
+
+/// A mage's look: hood, a long-sleeved shirt over a long skirt in the mastery's colour (a
+/// robe, from the character contract's garments), a gold collar from Expert up, or a side's
+/// armband in the duel. Faces vary by lane, the same every run.
+pub fn mage_look(lane: usize, mastery: Mastery, side: Option<[f32; 3]>) -> Appearance {
+    let robe = robe_color(mastery);
+    let k = lane as u64 % 100;
+    let mut a = Appearance {
+        seed: 4100 + k * 37,
+        sex: if k % 3 == 1 { 0.1 } else { 0.9 },
+        age: 22.0
+            + ((k * 13) % 9) as f32 * 5.0
+            + if mastery >= Mastery::Master {
+                18.0
+            } else {
+                0.0
+            },
+        headgear: "hood".into(),
+        ..Default::default()
+    };
+    a.outfit = Outfit {
+        top: "shirt".into(),
+        top_color: robe,
+        bottom: "skirt".into(),
+        bottom_color: robe.map(|c| c * 0.82),
+        accent: side.unwrap_or([0.75, 0.52, 0.14]),
+        accent_on: if side.is_some() {
+            "armband_l"
+        } else if mastery >= Mastery::Expert {
+            "collar"
+        } else {
+            "none"
+        }
+        .into(),
+    };
+    a
 }
 
 /// The hall's stonework.
@@ -436,6 +476,7 @@ pub fn spawn_mage(commands: &mut Commands, at: DVec3, lane: usize, mastery: Mast
             },
             Vitality::new(300.0),
             BodyRequest::human(77 + lane as u64 * 13),
+            mage_look(lane, mastery, None),
             HallMage { lane },
         ))
         .id();

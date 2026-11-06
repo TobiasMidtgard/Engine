@@ -16,8 +16,8 @@ use engine_world::physics::{
     QueryFilter, RigidBody,
 };
 use engine_world::{
-    Combustible, DamageEvent, Gravity, Ground, IgniteRequest, NoiseEvent, SmokeEmission,
-    WorldImpulse,
+    Combustible, DamageEvent, Died, Faction, Factions, FreezeRequest, Gravity, Ground, GrowthPulse,
+    IgniteRequest, MindEffect, MindKind, NoiseEvent, SmokeEmission, WorldImpulse,
 };
 
 use crate::caster::{MagicCaster, Vitality};
@@ -59,6 +59,9 @@ pub struct HitWriters<'w> {
     smoke: MessageWriter<'w, SmokeEmission>,
     noise: MessageWriter<'w, NoiseEvent>,
     hit: MessageWriter<'w, SpellHit>,
+    freeze: MessageWriter<'w, FreezeRequest>,
+    growth: MessageWriter<'w, GrowthPulse>,
+    mind: MessageWriter<'w, MindEffect>,
 }
 
 /// What the hits may read about a body.
@@ -68,6 +71,7 @@ type BodyInfo<'a> = (
     Option<&'a RigidBody>,
     Has<Combustible>,
     Has<CharacterController>,
+    Option<&'a Faction>,
 );
 
 /// A spell made by a reaction or by two spells meeting: an area of the recipe's ingredients
@@ -92,6 +96,19 @@ pub fn reaction_spell(
     Some(Arc::new(s))
 }
 
+/// How much a spell speeds plants up (> 0, life) or withers them (< 0, blight) where it lands.
+pub fn growth_of(spell: &Spell, scale: f32) -> f32 {
+    let p = &spell.payload;
+    let k = scale.clamp(0.3, 2.0);
+    if spell.element() == Some(Element::Blight) {
+        -k
+    } else if p.heal > 0.0 && !p.harmful() {
+        k
+    } else {
+        0.0
+    }
+}
+
 /// Apply this step's hits.
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub fn apply_hits(
@@ -108,6 +125,7 @@ pub fn apply_hits(
     colliders: Query<&Collider>,
     mut fresh: Local<HashMap<Entity, Afflictions>>,
     mut dealt: Local<HashMap<Entity, f32>>,
+    factions: Option<Res<Factions>>,
 ) {
     let list = std::mem::take(&mut queue_in.0);
     if list.is_empty() {
@@ -131,16 +149,15 @@ pub fn apply_hits(
         }
         let target = h.target;
         let creature = target.is_some_and(|t| creatures.contains(t));
-        let (t_pos, t_caster, t_body, combustible, character) = target
+        let (t_pos, t_caster, t_body, combustible, character, t_faction) = target
             .and_then(|t| info.get(t).ok())
-            .map(|(g, c, b, comb, ch)| (g.map(|g| g.translation()), c, b, comb, ch))
-            .unwrap_or((None, None, None, false, false));
+            .map(|(g, c, b, comb, ch, f)| (g.map(|g| g.translation()), c, b, comb, ch, f))
+            .unwrap_or((None, None, None, false, false, None));
         // Who a spell may touch: filters and safeguard.
         if let Some(t) = target
             && creature
         {
-            let friend =
-                Some(t) == h.cast.caster || t_caster.is_some_and(|c| c.side == h.cast.side);
+            let friend = h.cast.friend(t, t_caster, t_faction, factions.as_deref());
             let skip = match spell.filter {
                 TargetFilter::Enemies => friend,
                 TargetFilter::Allies => !friend,
@@ -169,6 +186,7 @@ pub fn apply_hits(
             if base_damage > 0.0 {
                 aff.source = h.cast.caster;
             }
+            let before = (aff.dread, aff.calmed, aff.veiled);
             if let Some(el) = spell.element()
                 && !p.statuses.is_empty()
                 && aff.gate(el, h.multi)
@@ -232,6 +250,23 @@ pub fn apply_hits(
             }
             if p.fear_secs > 0.0 && base_damage <= 0.0 {
                 aff.dread = aff.dread.max(p.fear_secs);
+            }
+            // Minds are NPC AI's: it makes the terrified flee, the calmed stand down and the
+            // veiled unseen. Sent when one starts or grows, not on every tick of an aura.
+            for (kind, was, now) in [
+                (MindKind::Fear, before.0, aff.dread),
+                (MindKind::Calm, before.1, aff.calmed),
+                (MindKind::Veil, before.2, aff.veiled),
+            ] {
+                if now > was + 0.5 {
+                    let secs = now;
+                    out.mind.write(MindEffect {
+                        target: t,
+                        kind,
+                        secs,
+                        source: h.cast.caster,
+                    });
+                }
             }
         }
 
@@ -381,15 +416,36 @@ pub fn apply_hits(
                     up: h.normal,
                     look: spell.weave.key.clone(),
                     role: Role::Impact,
-                    // A rain or split volley lands many at once: each burst smaller, so a
-                    // master's barrage reads as many blasts, not one wall of fire.
-                    scale: (spell.carrier.radius / 0.16 * 0.8 * scale.sqrt()
+                    // It grows slower than the bolt, so a master's blast reads as bigger, not
+                    // as a sky full of fire; a rain or split volley lands many at once, each
+                    // burst smaller still.
+                    scale: ((spell.carrier.radius / 0.16).powf(0.6) * 0.8 * scale.sqrt()
                         / if h.multi { 1.6 } else { 1.0 })
-                    .clamp(0.3, 3.2),
+                    .clamp(0.3, 2.2),
                     color: spell.weave.color,
                 });
             }
             if ground_hit {
+                // Frost freezes water where it lands (an ice floe under a frost bolt), life
+                // greens the plants around and blight withers them.
+                if spell.element() == Some(Element::Frost) {
+                    out.freeze.write(FreezeRequest {
+                        center: h.point,
+                        radius_m: blast_r.clamp(0.8, 8.0),
+                        secs: 20.0 * scale.max(0.5),
+                        source: h.cast.caster,
+                    });
+                }
+                let growth = growth_of(&spell, scale);
+                if growth != 0.0 {
+                    out.growth.write(GrowthPulse {
+                        center: h.point,
+                        radius_m: blast_r.clamp(1.0, 10.0),
+                        amount: growth,
+                        secs: 6.0,
+                        source: h.cast.caster,
+                    });
+                }
                 // The dark marks and the lightning fern came with the Particles round of
                 // 2026-11-05; looks::apply falls back to the older kind where they're missing.
                 let kind = match spell.element() {
@@ -464,6 +520,7 @@ pub fn apply_hits(
                 spell: s,
                 caster: h.cast.caster,
                 side: h.cast.side,
+                faction: h.cast.faction,
                 depth: MAX_STAGE_DEPTH,
                 scale: 1.0,
                 seed: h.cast.seed.wrapping_add(977),
@@ -631,6 +688,7 @@ fn fire_stage(
         spell: stage.clone(),
         caster: h.cast.caster,
         side: h.cast.side,
+        faction: h.cast.faction,
         depth: h.cast.depth + 1,
         scale: h.cast.scale,
         seed: h.cast.seed.wrapping_mul(31).wrapping_add(7),
@@ -655,12 +713,24 @@ fn fire_stage(
 
 /// Health from any module's damage: practice dummies and casters take sword blows as well as
 /// spells.
-pub fn take_damage(mut events: MessageReader<DamageEvent>, mut vitals: Query<&mut Vitality>) {
+pub fn take_damage(
+    mut events: MessageReader<DamageEvent>,
+    mut vitals: Query<&mut Vitality>,
+    mut died: MessageWriter<Died>,
+) {
     for d in events.read() {
         if let Ok(mut v) = vitals.get_mut(d.target)
             && !v.down()
         {
             v.health = (v.health - d.amount.max(0.0)).max(0.0);
+            if v.down() {
+                died.write(Died {
+                    entity: d.target,
+                    killer: d.source,
+                    cause: d.kind,
+                    point: d.point,
+                });
+            }
         }
     }
 }

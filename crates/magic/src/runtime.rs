@@ -24,7 +24,10 @@ use engine_world::animation::SkeletonPose;
 use engine_world::physics::{
     BodyKind, CharacterController, ColliderShape, PhysicsQueries, QueryFilter, RigidBody,
 };
-use engine_world::{AttackEvent, AttackKind, Gravity, NoiseEvent, ProjectileTrace, WorldShift};
+use engine_world::{
+    AttackEvent, AttackKind, Faction, Factions, FreezeRequest, Gravity, GrowthPulse, NoiseEvent,
+    ProjectileTrace, WorldShift,
+};
 
 use crate::caster::{
     Aim, CastOutcome, CastRequest, Casting, MagicCaster, SpellCast, SpellChoice, Vitality,
@@ -55,6 +58,9 @@ pub struct CastInfo {
     pub caster: Option<Entity>,
     /// The caster's side (safeguard and filters spare it).
     pub side: u32,
+    /// The caster's faction, when it has one: friend and foe then follow the engine's
+    /// `Factions` (NPCs, animals and the player), else magic's own sides.
+    pub faction: Option<Faction>,
     /// Stage depth: 0 for the cast itself.
     pub depth: u8,
     /// Strength multiplier (forks and echoes are weaker).
@@ -62,6 +68,34 @@ pub struct CastInfo {
     pub seed: u32,
     /// Made by an element reaction or spells meeting: never sets off another reaction.
     pub reaction: bool,
+}
+
+impl CastInfo {
+    /// Is `other` on this cast's side? Its caster always is; two bodies with factions are
+    /// friends unless `Factions` says the cast's faction would attack the other's; otherwise
+    /// magic's own sides decide.
+    pub fn friend(
+        &self,
+        other: Entity,
+        caster: Option<&MagicCaster>,
+        faction: Option<&Faction>,
+        factions: Option<&Factions>,
+    ) -> bool {
+        if Some(other) == self.caster {
+            return true;
+        }
+        if let (Some(a), Some(&b)) = (self.faction, faction) {
+            return factions.map_or(a == b, |f| !f.hostile(a, b));
+        }
+        caster.is_some_and(|c| c.side == self.side)
+    }
+}
+
+/// Whose side a body is on: magic's own side and the engine's faction.
+#[derive(bevy_ecs::query::QueryData)]
+pub struct Allegiance {
+    pub caster: Option<&'static MagicCaster>,
+    pub faction: Option<&'static Faction>,
 }
 
 /// A circling orb.
@@ -214,6 +248,10 @@ pub struct MagicQueue {
     pub afflict: Vec<(Entity, Afflictions)>,
     /// Set (Some) or remove (None) a `LocalTimeScale`.
     pub time_scales: Vec<(Entity, Option<LocalTimeScale>)>,
+    /// Wall pieces' new bodies (a wall that changed with a spell meeting it).
+    pub wall_bodies: Vec<crate::walls::NewBody>,
+    /// Bodies' first `Statuses` (the engine's view of their afflictions).
+    pub statuses: Vec<(Entity, engine_world::Statuses)>,
 }
 
 /// Bodies spells look for: anything with health, a skeleton or a character controller.
@@ -358,6 +396,7 @@ pub fn advance_casts(
         &GlobalTransform,
         Option<&LocalTimeScale>,
         Option<&mut Vitality>,
+        Option<&Faction>,
     )>,
     targets: Query<&GlobalTransform>,
     queries: Res<PhysicsQueries>,
@@ -368,7 +407,7 @@ pub fn advance_casts(
     mut gains: MessageWriter<crate::caster::MasteryGained>,
     mut counter: Local<u64>,
 ) {
-    for (e, mut caster, mut casting, t, local, vitality) in &mut casters {
+    for (e, mut caster, mut casting, t, local, vitality, faction) in &mut casters {
         let dt = time.delta_for(local);
         if let Some(echo) = casting.echo_in.as_mut() {
             *echo -= dt;
@@ -424,7 +463,7 @@ pub fn advance_casts(
                 queue.looks.push(LookCmd::Burst {
                     at: hand,
                     up: Vec3::Y,
-                    look: "fizzle".into(),
+                    look: spell.weave.key.clone(),
                     role: Role::Fizzle,
                     scale: 0.6,
                     color: spell.weave.color,
@@ -445,6 +484,7 @@ pub fn advance_casts(
                         spell: spell.clone(),
                         caster: None,
                         side: u32::MAX,
+                        faction: None,
                         depth: 0,
                         scale: 0.6,
                         seed: seed as u32,
@@ -486,6 +526,7 @@ pub fn advance_casts(
             spell: spell.clone(),
             caster: Some(e),
             side: caster.side,
+            faction: faction.copied(),
             depth: 0,
             scale: if echo { 0.7 } else { 1.0 },
             seed: seed as u32,
@@ -800,20 +841,14 @@ pub fn fly_missiles(
     gravity: Res<Gravity>,
     queries: Res<PhysicsQueries>,
     mut missiles: Query<(Entity, &mut Missile, &mut SpellPos)>,
-    creatures: Query<
-        (
-            Entity,
-            &GlobalTransform,
-            Option<&MagicCaster>,
-            Option<&Vitality>,
-        ),
-        CreatureFilter,
-    >,
+    creatures: Query<(Entity, &GlobalTransform, Allegiance, Option<&Vitality>), CreatureFilter>,
     anchors: Query<&GlobalTransform>,
     mut hits: ResMut<HitQueue>,
     mut queue: ResMut<MagicQueue>,
     mut traces: MessageWriter<ProjectileTrace>,
+    factions: Option<Res<Factions>>,
 ) {
+    let factions = factions.as_deref();
     let dt = time.delta_secs();
     if dt <= 0.0 {
         return;
@@ -858,8 +893,13 @@ pub fn fly_missiles(
             m.hits.retain(|(_, cd)| *cd > 0.0);
             for (other, gt, other_caster, v) in &creatures {
                 if Some(other) == m.cast.caster
-                    || other_caster
-                        .is_some_and(|oc| oc.side == m.cast.side && spell.payload.harmful())
+                    || (spell.payload.harmful()
+                        && m.cast.friend(
+                            other,
+                            other_caster.caster,
+                            other_caster.faction,
+                            factions,
+                        ))
                     || v.is_some_and(|v| v.down())
                     || m.hits.iter().any(|(h, _)| *h == other)
                 {
@@ -900,8 +940,7 @@ pub fn fly_missiles(
                 creatures
                     .iter()
                     .filter(|(o, _, oc, v)| {
-                        Some(*o) != m.cast.caster
-                            && !oc.is_some_and(|oc| oc.side == m.cast.side)
+                        !m.cast.friend(*o, oc.caster, oc.faction, factions)
                             && !v.is_some_and(|v| v.down())
                     })
                     .filter_map(|(o, gt, _, _)| {
@@ -1111,21 +1150,15 @@ pub fn tick_fields(
     time: Res<Time>,
     queries: Res<PhysicsQueries>,
     mut fields: Query<(Entity, &mut Field, &mut SpellPos)>,
-    creatures: Query<
-        (
-            Entity,
-            &GlobalTransform,
-            Option<&MagicCaster>,
-            Option<&Vitality>,
-        ),
-        CreatureFilter,
-    >,
+    creatures: Query<(Entity, &GlobalTransform, Allegiance, Option<&Vitality>), CreatureFilter>,
     props: Query<(Entity, &GlobalTransform, &RigidBody), Without<Vitality>>,
     anchors: Query<&GlobalTransform>,
     mut hits: ResMut<HitQueue>,
     mut queue: ResMut<MagicQueue>,
     mut scratch: Local<Vec<Entity>>,
+    factions: Option<Res<Factions>>,
 ) {
+    let factions = factions.as_deref();
     let dt = time.delta_secs();
     if dt <= 0.0 {
         return;
@@ -1163,7 +1196,7 @@ pub fn tick_fields(
             if v.is_some_and(|v| v.down()) {
                 continue;
             }
-            let ours = Some(o) == f.cast.caster || oc.is_some_and(|oc| oc.side == f.cast.side);
+            let ours = f.cast.friend(o, oc.caster, oc.faction, factions);
             if harmful && (Some(o) == f.cast.caster || (ours && spell.safeguard)) {
                 continue;
             }
@@ -1229,7 +1262,8 @@ pub fn tick_fields(
                     up: Vec3::Y,
                     look: look.clone(),
                     role: Role::Impact,
-                    scale: (f.radius / 2.0).clamp(0.2, 30.0),
+                    // Grows slower than the area, like a bolt's blast (hits.rs).
+                    scale: (f.radius / 2.0).powf(0.7).clamp(0.2, 2.5),
                     color: spell.weave.color,
                 });
             }
@@ -1416,7 +1450,7 @@ pub fn tick_chains(
         (
             Entity,
             &GlobalTransform,
-            Option<&MagicCaster>,
+            Allegiance,
             Option<&Vitality>,
             Option<&Afflictions>,
         ),
@@ -1424,7 +1458,9 @@ pub fn tick_chains(
     >,
     mut hits: ResMut<HitQueue>,
     mut queue: ResMut<MagicQueue>,
+    factions: Option<Res<Factions>>,
 ) {
+    let factions = factions.as_deref();
     let dt = time.delta_secs();
     for (e, mut ch) in &mut chains {
         ch.next_in -= dt;
@@ -1444,7 +1480,7 @@ pub fn tick_chains(
                 Some(*o) != ch.cast.caster
                     && !ch.hit.contains(o)
                     && !v.is_some_and(|v| v.down())
-                    && !(spell.safeguard && oc.is_some_and(|oc| oc.side == ch.cast.side))
+                    && !(spell.safeguard && ch.cast.friend(*o, oc.caster, oc.faction, factions))
             })
             .filter_map(|(o, gt, _, _, aff)| {
                 let d = (gt.translation() + DVec3::Y - ch.at).length() as f32;
@@ -1648,7 +1684,22 @@ pub fn follow_looks(
 pub struct LookPiece {
     pub owner: Entity,
     pub look: String,
+    pub color: [f32; 3],
     pub fading: Option<f32>,
+    /// The piece before it along the wall (storm arcs leap to it).
+    pub prev: Option<Entity>,
+    /// The wall's direction and this piece's share of its length, m.
+    pub along: Vec3,
+    pub width: f32,
+}
+
+/// How big a wall piece's particle look is: a fire curtain stands tall.
+fn wall_look_scale(look: &str) -> f32 {
+    if crate::walls::stuff(look) == crate::walls::Stuff::Coals {
+        1.7
+    } else {
+        1.0
+    }
 }
 
 /// Keep wall pieces in step with their wall.
@@ -1671,12 +1722,14 @@ pub fn tend_pieces(
             Ok(f) if f.spent.is_none() => {
                 if f.cast.spell.weave.key != p.look {
                     p.look = f.cast.spell.weave.key.clone();
+                    p.color = f.cast.spell.weave.color;
                     queue.looks.push(LookCmd::Attach {
                         entity: e,
                         look: p.look.clone(),
-                        role: Role::Field,
-                        scale: 0.55,
-                        color: f.cast.spell.weave.color,
+                        role: Role::Wall,
+                        scale: wall_look_scale(&p.look),
+                        color: p.color,
+                        power_j: f.cast.spell.power.energy_j as f32,
                     });
                 }
             }
@@ -1696,6 +1749,8 @@ pub fn flush(
     mut commands: Commands,
     mut queue: ResMut<MagicQueue>,
     mut starts: ResMut<CastStarts>,
+    mut freezes: MessageWriter<FreezeRequest>,
+    mut growth: MessageWriter<GrowthPulse>,
 ) {
     for (e, casting) in starts.0.drain(..) {
         if let Ok(mut ec) = commands.get_entity(e) {
@@ -1738,6 +1793,7 @@ pub fn flush(
                     scale: (m.cast.spell.carrier.radius / 0.16 * m.cast.scale.sqrt())
                         .clamp(0.2, 30.0),
                     color: m.cast.spell.weave.color,
+                    power_j: m.cast.spell.power.energy_j as f32 * m.cast.scale,
                 });
                 ec.insert(m);
             }
@@ -1752,15 +1808,53 @@ pub fn flush(
                     };
                     let look = f.cast.spell.weave.key.clone();
                     let color = f.cast.spell.weave.color;
-                    looks.push(LookCmd::Attach {
-                        entity: id,
-                        look: look.clone(),
-                        role,
-                        scale: (f.radius / 2.0).clamp(0.2, 30.0),
-                        color,
-                    });
+                    let power_j = f.cast.spell.power.energy_j as f32 * f.cast.scale;
+                    // A lasting frost field or wall freezes the water under it for as long
+                    // as it stands and a while after; life and blight fields work on plants
+                    // (auras and waves move on, so they leave the ground alone).
+                    let still = f.follow.is_none() && f.wave.is_none();
+                    let freeze = (still && f.cast.spell.element() == Some(Element::Frost))
+                        .then_some(f.duration + 10.0);
+                    let grow = crate::hits::growth_of(&f.cast.spell, f.cast.scale);
+                    if still && grow != 0.0 {
+                        growth.write(GrowthPulse {
+                            center: pos,
+                            radius_m: f.radius.max(1.0),
+                            amount: grow,
+                            secs: f.duration.max(2.0),
+                            source: f.cast.caster,
+                        });
+                    }
                     if let Some((along, half)) = f.wall {
-                        pieces.push((id, pos, along, half, look, color));
+                        // A wall shows only along its pieces.
+                        pieces.push(NewWall {
+                            owner: id,
+                            at: pos,
+                            along,
+                            half,
+                            look,
+                            color,
+                            power_j,
+                            freeze,
+                            source: f.cast.caster,
+                        });
+                    } else {
+                        if let Some(secs) = freeze {
+                            freezes.write(FreezeRequest {
+                                center: pos,
+                                radius_m: f.radius.max(1.0),
+                                secs,
+                                source: f.cast.caster,
+                            });
+                        }
+                        looks.push(LookCmd::Attach {
+                            entity: id,
+                            look: look.clone(),
+                            role,
+                            scale: (f.radius / 2.0).clamp(0.2, 30.0),
+                            color,
+                            power_j,
+                        });
                     }
                 }
                 ec.insert(f);
@@ -1782,6 +1876,7 @@ pub fn flush(
                     role: Role::Status,
                     scale: 1.0,
                     color: crate::looks::status_color(s),
+                    power_j: 0.0,
                 });
                 if s == Status::Frozen {
                     ec.insert(crate::looks::ice_shell());
@@ -1790,11 +1885,32 @@ pub fn flush(
             }
         }
     }
-    for (owner, at, along, half, look, color) in pieces {
+    for NewWall {
+        owner,
+        at,
+        along,
+        half,
+        look,
+        color,
+        power_j,
+        freeze,
+        source,
+    } in pieces
+    {
         let n = ((2.0 * half / 1.5).ceil() as i32).clamp(2, 12);
+        let width = 2.0 * half / n as f32;
+        let mut prev = None;
         for k in 0..=n {
             let x = -half + 2.0 * half * k as f32 / n as f32;
             let p = at + (along * x).as_dvec3();
+            if let Some(secs) = freeze {
+                freezes.write(FreezeRequest {
+                    center: p,
+                    radius_m: width * 0.8,
+                    secs,
+                    source,
+                });
+            }
             let id = commands
                 .spawn((
                     Name::new("Spell wall piece"),
@@ -1802,18 +1918,39 @@ pub fn flush(
                     LookPiece {
                         owner,
                         look: look.clone(),
+                        color,
                         fading: None,
+                        prev,
+                        along,
+                        width,
                     },
                 ))
                 .id();
+            prev = Some(id);
             looks.push(LookCmd::Attach {
                 entity: id,
                 look: look.clone(),
-                role: Role::Field,
-                scale: 0.55,
+                role: Role::Wall,
+                scale: wall_look_scale(&look),
                 color,
+                power_j,
             });
+            crate::walls::spawn_body(
+                &mut commands,
+                crate::walls::NewBody {
+                    piece: id,
+                    look: look.clone(),
+                    color,
+                    along,
+                    width,
+                    // From where it stands, never from entity ids.
+                    seed: p.x.to_bits() ^ p.z.to_bits().rotate_left(17) ^ k as u64,
+                },
+            );
         }
+    }
+    for b in std::mem::take(&mut queue.wall_bodies) {
+        crate::walls::spawn_body(&mut commands, b);
     }
     for e in queue.despawn.drain(..) {
         if let Ok(mut ec) = commands.get_entity(e) {
@@ -1823,6 +1960,11 @@ pub fn flush(
     for (e, a) in queue.afflict.drain(..) {
         if let Ok(mut ec) = commands.get_entity(e) {
             ec.try_insert_if_new(a);
+        }
+    }
+    for (e, st) in queue.statuses.drain(..) {
+        if let Ok(mut ec) = commands.get_entity(e) {
+            ec.try_insert(st);
         }
     }
     for (e, scale) in queue.time_scales.drain(..) {
@@ -1845,9 +1987,24 @@ pub fn flush(
                     t.translation = to;
                 }
             }
+            crate::looks::write_contracts(world, &looks);
             crate::looks::apply(world, looks);
         });
     }
+}
+
+/// A wall to stand up along its pieces (from the flush).
+struct NewWall {
+    owner: Entity,
+    at: DVec3,
+    along: Vec3,
+    half: f32,
+    look: String,
+    color: [f32; 3],
+    power_j: f32,
+    /// Seconds to freeze the water under it (frost walls).
+    freeze: Option<f32>,
+    source: Option<Entity>,
 }
 
 /// Copy carriers' positions into their `Transform`s for drawing.
@@ -1939,5 +2096,51 @@ mod tests {
         assert!((mean - 0.5).abs() < 0.02);
         assert_eq!(roll(7, 3), roll(7, 3));
         assert_ne!(roll(7, 3), roll(8, 3));
+    }
+
+    #[test]
+    fn factions_decide_friends_when_both_have_one() {
+        use crate::compile::{CastContext, compile};
+        use crate::design::SpellDesign;
+        use crate::schools::{Mastery, Power};
+        let spell = compile(
+            &SpellDesign::new(&["fire"], CastType::Bolt),
+            CastContext::new(Mastery::Adept, Power::default()),
+        )
+        .expect("compiles");
+        let mut world = World::new();
+        let (me, other) = (world.spawn_empty().id(), world.spawn_empty().id());
+        let cast = |faction| CastInfo {
+            spell: spell.clone(),
+            caster: Some(me),
+            side: 1,
+            faction,
+            depth: 0,
+            scale: 1.0,
+            seed: 0,
+            reaction: false,
+        };
+        let same_side = MagicCaster {
+            side: 1,
+            ..MagicCaster::new(10.0, Mastery::Adept)
+        };
+        let factions = engine_world::faction::default_factions();
+        // No factions: magic's sides.
+        assert!(cast(None).friend(other, Some(&same_side), None, Some(&factions)));
+        assert!(!cast(None).friend(other, None, None, Some(&factions)));
+        assert!(
+            cast(None).friend(me, None, None, None),
+            "its caster always is"
+        );
+        // Both have one: the engine's relations win over magic's sides.
+        let enemy = cast(Some(Faction::ENEMY));
+        assert!(!enemy.friend(
+            other,
+            Some(&same_side),
+            Some(&Faction::PLAYER),
+            Some(&factions)
+        ));
+        assert!(enemy.friend(other, None, Some(&Faction::PREY), Some(&factions)));
+        assert!(enemy.friend(other, None, Some(&Faction::ENEMY), None));
     }
 }

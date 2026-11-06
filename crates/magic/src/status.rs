@@ -17,7 +17,7 @@
 
 use engine_core::math::DVec3;
 use engine_core::prelude::*;
-use engine_world::{DamageEvent, DamageKind};
+use engine_world::{DamageEvent, DamageKind, Statuses};
 use serde::Serialize;
 
 use crate::combine::{Recipe, recipe_for};
@@ -406,11 +406,42 @@ impl Afflictions {
     }
 }
 
-/// Run statuses: damage over time, time scales, and the looks that follow each status.
+/// A damage over time's strength for the engine's view, 0..1 (10 a second is full).
+fn dot_level(d: &Dot) -> f32 {
+    if d.active() {
+        (d.dps / 10.0).clamp(0.2, 1.0)
+    } else {
+        0.0
+    }
+}
+
+impl Afflictions {
+    /// What other modules see of this body's afflictions (`engine_world::Statuses`).
+    pub fn statuses(&self) -> Statuses {
+        Statuses {
+            burning: dot_level(&self.burning),
+            chill: self.chill.clamp(0.0, 255.0) as u8,
+            frozen: self.frozen > 0.0,
+            shocked: self.shocked > 0.0,
+            bleeding: dot_level(&self.bleeding),
+            rot: dot_level(&self.rot),
+            // Three seconds of terror is full fright.
+            dread: (self.dread / 3.0).clamp(0.0, 1.0),
+        }
+    }
+}
+
+/// Run statuses: damage over time, time scales, the looks that follow each status, and the
+/// engine's `Statuses` for other modules.
 #[allow(clippy::type_complexity)]
 pub fn tick_afflictions(
     time: Res<Time>,
-    mut bodies: Query<(Entity, &mut Afflictions, &GlobalTransform)>,
+    mut bodies: Query<(
+        Entity,
+        &mut Afflictions,
+        &GlobalTransform,
+        Option<&mut Statuses>,
+    )>,
     mut queue: ResMut<MagicQueue>,
     mut damage: MessageWriter<DamageEvent>,
 ) {
@@ -418,7 +449,7 @@ pub fn tick_afflictions(
     if dt <= 0.0 {
         return;
     }
-    for (e, mut a, gt) in &mut bodies {
+    for (e, mut a, gt, shown_to_others) in &mut bodies {
         let p = gt.translation();
         if let Some(last) = a.last_pos {
             let d = p - last;
@@ -470,6 +501,13 @@ pub fn tick_afflictions(
             } else if !on && shown {
                 a.shown &= !bit(s);
             }
+        }
+        let now = a.statuses();
+        match shown_to_others {
+            Some(mut st) => {
+                st.set_if_neq(now);
+            }
+            None => queue.statuses.push((e, now)),
         }
     }
 }

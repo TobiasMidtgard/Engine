@@ -12,7 +12,10 @@ use engine_world::physics::{
     ApplyImpulse, BodyKind, ColliderShape, Hit, PhysicsQueries, PhysicsQuery, QueryFilter,
     RigidBody,
 };
-use engine_world::{DamageEvent, IgniteRequest, WorldPlugin};
+use engine_world::{
+    DamageEvent, Died, FreezeRequest, IgniteRequest, SpellCue, SpellLook, SpellMark, SpellRole,
+    Statuses, WorldPlugin,
+};
 use serde_json::json;
 
 /// Bodies as spheres (center, radius), and the ground at y = 0.
@@ -118,6 +121,9 @@ struct Seen {
     damage: Vec<DamageEvent>,
     impulses: Vec<ApplyImpulse>,
     ignites: usize,
+    cues: Vec<SpellCue>,
+    freezes: Vec<FreezeRequest>,
+    died: Vec<Died>,
 }
 
 fn snapshot(scene: Res<SceneRes>, q: Query<(Entity, &GlobalTransform, &Body)>) {
@@ -131,6 +137,7 @@ fn snapshot(scene: Res<SceneRes>, q: Query<(Entity, &GlobalTransform, &Body)>) {
 #[derive(Resource)]
 struct SceneRes(Arc<Scene>);
 
+#[allow(clippy::too_many_arguments)]
 fn collect(
     mut seen: ResMut<Seen>,
     mut hits: MessageReader<SpellHit>,
@@ -138,7 +145,13 @@ fn collect(
     mut damage: MessageReader<DamageEvent>,
     mut impulses: MessageReader<ApplyImpulse>,
     mut ignites: MessageReader<IgniteRequest>,
+    mut cues: MessageReader<SpellCue>,
+    mut freezes: MessageReader<FreezeRequest>,
+    mut died: MessageReader<Died>,
 ) {
+    seen.cues.extend(cues.read().cloned());
+    seen.freezes.extend(freezes.read().copied());
+    seen.died.extend(died.read().copied());
     seen.hits.extend(hits.read().cloned());
     seen.met.extend(met.read().copied());
     seen.damage.extend(damage.read().cloned());
@@ -265,6 +278,92 @@ fn a_fire_bolt_hits_a_dummy_and_burns_it() {
     );
 }
 
+/// The spell looks on the world's entities, by role.
+fn looks_with(app: &mut App, role: SpellRole) -> Vec<(Entity, SpellLook)> {
+    let mut q = app.world.query::<(Entity, &SpellLook)>();
+    q.iter(&app.world)
+        .filter(|(_, l)| l.role == role)
+        .map(|(e, l)| (e, l.clone()))
+        .collect()
+}
+
+#[test]
+fn spells_speak_the_engine_contracts() {
+    let mut app = app();
+    let me = mage(&mut app, DVec3::ZERO, Mastery::Ascended1);
+    let d = app
+        .world
+        .spawn((
+            Name::new("Frail dummy"),
+            Transform::from_translation(DVec3::new(0.0, 0.0, -12.0)),
+            Vitality::new(5.0),
+            Body(0.5),
+        ))
+        .id();
+    run(&mut app, 0.1);
+    cast(
+        &mut app,
+        me,
+        SpellDesign::new(&["fire"], CastType::Bolt),
+        Aim::Entity(d),
+    );
+    // Gathering in the hand, then a bolt in flight that carries its look.
+    app.update();
+    app.update();
+    assert!(
+        looks_with(&mut app, SpellRole::Charge)
+            .iter()
+            .any(|(e, l)| *e == me && l.look == "fire")
+    );
+    let mut flying = None;
+    for _ in 0..90 {
+        app.update();
+        if let Some(b) = looks_with(&mut app, SpellRole::Bolt).pop() {
+            flying = Some(b);
+            break;
+        }
+    }
+    let (bolt, look) = flying.expect("the bolt carries a SpellLook");
+    assert_eq!(look.look, "fire");
+    assert!(look.power_j > 1.0e3 && look.scale > 0.0);
+    run(&mut app, 2.0);
+    assert!(
+        app.world.get::<SpellLook>(bolt).is_none(),
+        "a spent bolt's look comes off"
+    );
+    assert!(looks_with(&mut app, SpellRole::Charge).is_empty());
+    let seen = app.world.resource::<Seen>();
+    assert!(
+        seen.cues
+            .iter()
+            .any(|c| matches!(c, SpellCue::Impact { look, .. } if look == "fire")),
+        "an impact cue"
+    );
+    // It went down once, and the world was told who did it.
+    let deaths: Vec<_> = seen.died.iter().filter(|x| x.entity == d).collect();
+    assert_eq!(deaths.len(), 1);
+    assert_eq!(deaths[0].killer, Some(me));
+    // Its afflictions are on it for everyone else.
+    assert!(app.world.get::<Statuses>(d).is_some());
+    // Frost on the ground asks the water to freeze and leaves a frost mark.
+    cast(
+        &mut app,
+        me,
+        SpellDesign::new(&["frost"], CastType::Bolt),
+        Aim::Point(DVec3::new(4.0, 0.0, -9.0)),
+    );
+    run(&mut app, 2.0);
+    let seen = app.world.resource::<Seen>();
+    assert!(!seen.freezes.is_empty(), "frost asks water to freeze");
+    assert!(seen.cues.iter().any(|c| matches!(
+        c,
+        SpellCue::Mark {
+            kind: SpellMark::Frost,
+            ..
+        }
+    )));
+}
+
 #[test]
 fn frost_five_times_freezes() {
     let mut app = app();
@@ -292,6 +391,8 @@ fn frost_five_times_freezes() {
         .get::<LocalTimeScale>(d)
         .expect("frozen bodies run slow");
     assert!(scale.factor < 0.05);
+    // Everyone else sees it frozen.
+    assert!(app.world.get::<Statuses>(d).is_some_and(|s| s.frozen));
     // A status look rides on it.
     let mut q = app.world.query::<&runtime::FollowLook>();
     assert!(

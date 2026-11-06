@@ -39,6 +39,7 @@ pub mod meet;
 pub mod runtime;
 pub mod schools;
 pub mod status;
+pub mod walls;
 
 use engine_core::prelude::*;
 use engine_world::WorldShiftSet;
@@ -135,6 +136,7 @@ impl Plugin for MagicPlugin {
                     status::tick_afflictions,
                     runtime::follow_looks,
                     runtime::tend_pieces,
+                    walls::rise_walls,
                 )
                     .chain()
                     .in_set(MagicSet::Hits),

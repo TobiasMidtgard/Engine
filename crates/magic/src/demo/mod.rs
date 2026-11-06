@@ -13,19 +13,26 @@
 //! | `spells_meet` | spells that meet: bolts through walls of other elements |
 //! | `spells_force` | force vectors: push, pull, lift, slam, thunderclap, shardstorm |
 //! | `spells_dark` | the dark subclasses: blood, rot clouds, shadow orbs, a draining beam, plague, doom |
+//! | `spells_duel` | six Adept students against three Ascended masters, chasing reactions ([`duel`]) |
+//!
+//! The mages wear hooded robes coloured by mastery (the character contract's `Appearance`).
 //!
 //! The mages only cast while a camera is within 160 m, so the hall costs nothing elsewhere.
 
 pub mod art;
+pub mod duel;
 
 use engine_core::prelude::*;
 use engine_render::{Camera, MeshRenderer};
 use engine_world::Readouts;
+use engine_world::animation::Ragdoll;
+use engine_world::character::Appearance;
 use serde_json::{Value, json};
 
 use crate::caster::{Aim, CastRequest, KnownSpell, MagicCaster, SpellChoice, Vitality};
 use crate::design::{CastType, Modifier, SpellDesign, Trigger};
 use crate::growth::Growth;
+use crate::hits::SpellHit;
 use crate::runtime::{BeamCast, ChainArc, Field, Missile, Rainfall};
 use crate::schools::Mastery;
 use crate::status::Afflictions;
@@ -66,7 +73,8 @@ pub const VIEWS: &[DemoView] = &[
         name: "Woven elements: Steam, Plasma, Tempest, Plague, Nightfeed, Wither",
         eye: [-19.0, 5.0, 8.0],
         target: [2.0, 1.2, -6.0],
-        hour: 17.9,
+        // Afternoon: a low golden sun turned the steam cloud orange.
+        hour: 15.5,
         warmup: 2.2,
     },
     DemoView {
@@ -101,6 +109,14 @@ pub const VIEWS: &[DemoView] = &[
         hour: 17.7,
         warmup: 3.0,
     },
+    DemoView {
+        key: "spells_duel",
+        name: "A duel: six students against three masters, each chasing reactions",
+        eye: [17.0, 6.5, -17.0],
+        target: [-3.0, 1.4, 3.0],
+        hour: 17.6,
+        warmup: 6.0,
+    },
 ];
 
 /// What the hall is running.
@@ -115,10 +131,11 @@ pub enum Program {
     Meet,
     Force,
     Dark,
+    Duel,
 }
 
 impl Program {
-    pub const ALL: [Program; 7] = [
+    pub const ALL: [Program; 8] = [
         Program::Mastery,
         Program::Elements,
         Program::Combos,
@@ -126,6 +143,7 @@ impl Program {
         Program::Meet,
         Program::Force,
         Program::Dark,
+        Program::Duel,
     ];
 
     pub fn key(self) -> &'static str {
@@ -137,6 +155,7 @@ impl Program {
             Program::Meet => "spells_meet",
             Program::Force => "spells_force",
             Program::Dark => "spells_dark",
+            Program::Duel => "spells_duel",
         }
     }
 
@@ -154,6 +173,7 @@ impl Program {
             Program::Meet => 6.0,
             Program::Force => 5.0,
             Program::Dark => 3.5,
+            Program::Duel => 60.0,
         }
     }
 
@@ -387,6 +407,15 @@ fn lanes(program: Program, cycle: u64) -> Vec<Lane> {
             .map(lane)
             .collect()
         }
+        // The duel's students cast by their own judgement (duel::run_duel), not on a clock.
+        Program::Duel => (0..LANES.len())
+            .map(|_| Lane {
+                mastery: Mastery::Adept,
+                level: 34.0,
+                known: None,
+                casts: Vec::new(),
+            })
+            .collect(),
     }
 }
 
@@ -407,6 +436,8 @@ pub struct Hall {
     pub cycle: u64,
     /// Put the force program's crates and dummies back (every other period).
     pub reset_props: bool,
+    /// The duel's last few reactions, shatters and downs, for the readout.
+    pub events: Vec<String>,
 }
 
 impl Hall {
@@ -420,6 +451,7 @@ impl Hall {
             near: true,
             cycle: 0,
             reset_props: false,
+            events: Vec::new(),
         }
     }
 }
@@ -450,7 +482,18 @@ pub fn spawn_demo(commands: &mut Commands, origin: DVec3) {
 fn setup_program(
     mut commands: Commands,
     hall: Option<ResMut<Hall>>,
-    mut mages: Query<(&HallMage, &mut MagicCaster, &Children)>,
+    mut mages: Query<
+        (
+            Entity,
+            &HallMage,
+            &mut MagicCaster,
+            &Children,
+            &mut Transform,
+            Option<&mut Appearance>,
+        ),
+        Without<HallTarget>,
+    >,
+    props: Query<Entity, (With<ProgramProp>, Without<HallTarget>)>,
     mut stand_ins: Query<&mut MeshRenderer, With<StandIn>>,
     mut targets: Query<(
         Entity,
@@ -486,6 +529,10 @@ fn setup_program(
             commands.entity(e).despawn();
         }
     }
+    // The duel's masters.
+    for e in &props {
+        commands.entity(e).despawn();
+    }
     if restart {
         for e in &carriers {
             commands.entity(e).despawn();
@@ -496,8 +543,36 @@ fn setup_program(
     }
     let program = hall.program;
     let plan = lanes(program, 0);
-    for (m, mut c, children) in &mut mages {
+    for (e, m, mut c, children, mut tf, look) in &mut mages {
         let Some(l) = plan.get(m.lane) else { continue };
+        if restart {
+            // Back on the plinth (a duel's blinks move them), whole and unafflicted.
+            if let Some(home) = duel::student_home(origin, m) {
+                tf.translation = home;
+            }
+            commands.entity(e).remove::<(
+                Afflictions,
+                engine_world::Statuses,
+                LocalTimeScale,
+                duel::Duelist,
+                Ragdoll,
+            )>();
+            c.side = duel::STUDENTS;
+            if program == Program::Duel {
+                commands.entity(e).insert(duel::student(&mut c, m.lane));
+            } else {
+                commands.entity(e).insert(Vitality::new(300.0));
+            }
+        }
+        let side = (program == Program::Duel).then_some([0.1, 0.35, 0.9]);
+        let want = mage_look(m.lane, l.mastery, side);
+        match look {
+            Some(mut a) if *a != want => *a = want,
+            Some(_) => {}
+            None => {
+                commands.entity(e).insert(want);
+            }
+        }
         let fresh = MagicCaster::new(l.level, l.mastery);
         c.level = l.level;
         c.skills = fresh.skills;
@@ -517,17 +592,28 @@ fn setup_program(
             }
         }
     }
-    // The far dummies stand back up, unhurt and unafflicted.
+    // The far dummies stand back up, unhurt and unafflicted; the duel's floor is clear of
+    // them (stored under the hall, where no seeking bolt looks).
     for (e, t, mut tf, v, prop) in &mut targets {
         if prop || !restart {
             continue;
         }
-        tf.translation = t.home;
+        tf.translation = if program == Program::Duel {
+            t.home - DVec3::Y * 40.0
+        } else {
+            t.home
+        };
         if let Some(mut v) = v {
             v.health = v.max;
             v.down_secs = 0.0;
         }
-        commands.entity(e).remove::<(Afflictions, LocalTimeScale)>();
+        commands
+            .entity(e)
+            .remove::<(Afflictions, engine_world::Statuses, LocalTimeScale)>();
+    }
+    if restart && program == Program::Duel {
+        hall.events.clear();
+        duel::setup_duel(&mut commands, origin);
     }
     if program == Program::Force {
         for (i, x) in LANES.iter().enumerate() {
@@ -689,18 +775,56 @@ fn show_readout(hall: Option<Res<Hall>>, readouts: Option<ResMut<Readouts>>) {
     }
 }
 
+/// The duel's readout: who stands, and the reactions worth naming.
+fn duel_readout(
+    hall: Option<ResMut<Hall>>,
+    q: Query<(&duel::Duelist, &Vitality)>,
+    mut hits: MessageReader<SpellHit>,
+) {
+    let Some(mut hall) = hall else {
+        hits.clear();
+        return;
+    };
+    if hall.program != Program::Duel {
+        hits.clear();
+        return;
+    }
+    let mut n = (0, 0, 0, 0);
+    for (d, v) in &q {
+        let up = usize::from(!v.down());
+        if d.team == duel::STUDENTS {
+            n.0 += up;
+            n.1 += 1;
+        } else {
+            n.2 += up;
+            n.3 += 1;
+        }
+    }
+    duel::duel_lines(&mut hall, n, &mut hits);
+}
+
 pub fn build(app: &mut App) {
     app.add_systems(
         FixedUpdate,
-        run_hall
+        (run_hall, duel::run_duel)
             .in_set(SimSet::Gameplay)
             .before(crate::MagicSet::Cast),
     )
-    .add_systems(Update, (setup_program, hide_stand_ins, show_readout))
+    .add_systems(
+        Update,
+        (
+            setup_program,
+            hide_stand_ins,
+            duel::limp_when_down,
+            duel_readout.before(show_readout),
+            show_readout,
+        ),
+    )
     .register_api(
         "magic.demo",
         "Run a Weaving hall program: spells_mastery, spells_elements, spells_combos, \
-         spells_forms, spells_meet, spells_force or spells_dark. With no program, lists them.",
+         spells_forms, spells_meet, spells_force, spells_dark or spells_duel. With no program, \
+         lists them.",
         r#"{"program": "spells_combos"}"#,
         |world, args| {
             let list: Vec<Value> = Program::ALL

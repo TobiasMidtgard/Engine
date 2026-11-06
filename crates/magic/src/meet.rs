@@ -95,6 +95,7 @@ pub fn meet_spells(
                 spell: s,
                 caster: cast.caster,
                 side: cast.side,
+                faction: cast.faction,
                 depth: MAX_STAGE_DEPTH,
                 scale: 1.0,
                 seed: cast.seed.wrapping_add(4243),
@@ -119,6 +120,7 @@ pub fn meet_spells(
                     role: Role::Field,
                     scale: (f.radius / 2.0).clamp(0.2, 30.0),
                     color: r.color,
+                    power_j: f.cast.spell.power.energy_j as f32,
                 });
             }
             f.met_at = f.age;
