@@ -36,9 +36,14 @@ impl ArtAssets<'_> {
     /// The mesh stored under `key`, built by `make` the first time.
     pub fn mesh(&mut self, key: &str, make: impl FnOnce() -> Mesh) -> Option<MeshRef> {
         let meshes = self.meshes.as_mut()?;
-        Some(MeshRef::Handle(
-            meshes.get_or_insert_keyed(&format!("npc/{key}"), make),
-        ))
+        Some(MeshRef::Handle(meshes.get_or_insert_keyed(
+            &format!("npc/{key}"),
+            || {
+                // Made on the spot: a trace names what a frame spent building.
+                let _span = tracing::info_span!("npc art: make mesh", key).entered();
+                make()
+            },
+        )))
     }
 
     /// A textured material: `base` with the three maps baked by `make` (once per `key`).
@@ -80,7 +85,10 @@ impl ArtAssets<'_> {
         ) {
             return Some((a, n, o));
         }
-        let set = make();
+        let set = {
+            let _span = tracing::info_span!("npc art: make textures", key).entered();
+            make()
+        };
         Some((
             images.insert_keyed(&names[0], set.albedo),
             images.insert_keyed(&names[1], set.normal),
