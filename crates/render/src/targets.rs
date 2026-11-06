@@ -51,6 +51,9 @@ pub struct Targets {
     pub height: u32,
     /// The output image's size (`ldr`): the window, which the scene may cover only part of.
     pub window: UVec2,
+    /// Size of the anti-aliased image: the scene's, or the camera's viewport when temporal
+    /// anti-aliasing also upscales (`upscaled`).
+    pub output: UVec2,
     /// Scene color, pre-exposed linear HDR.
     pub hdr: Tex,
     /// Reverse-Z depth.
@@ -64,9 +67,12 @@ pub struct Targets {
     /// Raw ambient occlusion (noisy), then the blurred result shading reads.
     pub ao_raw: Tex,
     pub ao: Tex,
-    /// Temporal anti-aliasing history, ping-ponged every frame. Without TAA, the finished HDR
-    /// image is kept here for screen-space reflections.
+    /// Temporal anti-aliasing history (`output` size), ping-ponged every frame. Without TAA, the
+    /// finished HDR image is kept here for screen-space reflections.
     pub history: [Tex; 2],
+    /// Temporal upscaling's result at the viewport's size, which bloom and tonemapping read in
+    /// place of `hdr` (None at native resolution).
+    pub upscaled: Option<Tex>,
     /// Screen-space reflections: radiance (not pre-exposed), coverage.
     pub ssr: Tex,
     /// World reflections at half resolution (probe_gi.wgsl `cs_reflect`): radiance (not
@@ -93,12 +99,15 @@ impl Targets {
         formats: &Formats,
         width: u32,
         height: u32,
+        output: UVec2,
         window: UVec2,
     ) -> Self {
         use wgpu::TextureUsages as U;
         let width = width.max(1);
         let height = height.max(1);
         let window = window.max(UVec2::ONE);
+        let output = output.max(UVec2::ONE);
+        let upscale = output != UVec2::new(width, height);
         let hdr = Tex::new(
             device,
             "hdr",
@@ -141,8 +150,8 @@ impl Targets {
             Tex::new(
                 device,
                 &format!("taa history {i}"),
-                width,
-                height,
+                output.x,
+                output.y,
                 formats.hdr,
                 U::RENDER_ATTACHMENT | U::TEXTURE_BINDING | U::COPY_SRC | U::COPY_DST,
             )
@@ -186,9 +195,20 @@ impl Targets {
             // Extra views' pictures are copied in (`ViewTarget::Window`).
             U::RENDER_ATTACHMENT | U::TEXTURE_BINDING | U::COPY_SRC | U::COPY_DST,
         );
-        let levels = bloom_levels(width, height);
+        let upscaled = upscale.then(|| {
+            Tex::new(
+                device,
+                "upscaled",
+                output.x,
+                output.y,
+                formats.hdr,
+                U::TEXTURE_BINDING | U::COPY_DST,
+            )
+        });
+        // Bloom reads the post-processing input (`post`).
+        let levels = bloom_levels(output.x, output.y);
         let mut bloom = Vec::with_capacity(levels);
-        let (mut w, mut h) = (width, height);
+        let (mut w, mut h) = (output.x, output.y);
         for i in 0..levels {
             w = (w / 2).max(1);
             h = (h / 2).max(1);
@@ -205,6 +225,7 @@ impl Targets {
             width,
             height,
             window,
+            output,
             hdr,
             depth,
             prepass_normal,
@@ -213,6 +234,7 @@ impl Targets {
             ao_raw,
             ao,
             history,
+            upscaled,
             ssr,
             world_reflection,
             gi_raw,
@@ -224,6 +246,13 @@ impl Targets {
             ldr,
             bloom,
         }
+    }
+}
+
+impl Targets {
+    /// The image bloom and tonemapping read: the upscaled one, or the scene's.
+    pub fn post(&self) -> &Tex {
+        self.upscaled.as_ref().unwrap_or(&self.hdr)
     }
 }
 

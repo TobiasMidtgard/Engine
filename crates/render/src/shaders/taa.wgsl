@@ -11,6 +11,14 @@
 // don't blow it open, while filtering and blending stay linear so small bright things (the
 // sun's disk, a lamp's core) keep their energy and still bloom.
 //
+// Temporal upscaling (the scene smaller than the history, as Unreal's TAAU and AMD's FSR 2):
+// each output pixel reconstructs this frame's value from the scene pixels around it twice, with
+// a filter one scene pixel wide (smooth, for when there is no history) and one output pixel wide
+// (sharp). The sharp filter's total weight says how close this frame's samples landed to the
+// pixel's center, and the pixel takes that much of this frame: over the jitter sequence every
+// output pixel gathers samples from all over its area and converges to full resolution. At the
+// same size both filters are the plain TAA filter and the weight is about 1.
+//
 // Thin transparent things (snowflakes, rain, sparks) write no depth or motion and are outliers
 // in their neighborhood, so the clipped history would erase them: where the reactive mask
 // (taa_reactive.wgsl) marks them, the resolve keeps most of this frame's own pixel.
@@ -120,15 +128,22 @@ fn clip_to_box(history: vec3<f32>, lo: vec3<f32>, hi: vec3<f32>) -> vec3<f32> {
 
 @fragment
 fn fs_taa(in: FullscreenOut) -> @location(0) vec4<f32> {
+    // Scene (input) and output sizes, and output pixels per scene pixel.
     let size = vec2<i32>(textureDimensions(current_tex));
     let sizef = vec2<f32>(size);
-    let px = vec2<i32>(floor(in.position.xy));
-    let uv = (vec2<f32>(px) + 0.5) / sizef;
+    let out_size = vec2<f32>(textureDimensions(history_tex));
+    let ratio = out_size / sizef;
+    let uv = floor(in.position.xy) / out_size + 0.5 / out_size;
+    // This pixel's center in scene pixels, and the scene pixel it lies in.
+    let at = uv * sizef;
+    let px = clamp(vec2<i32>(floor(at)), vec2<i32>(0), size - 1);
     let jitter = frame.jitter.zw;
 
-    // Neighborhood: reconstruction filter, color statistics and the nearest surface.
-    var filtered = vec3<f32>(0.0);
-    var filter_weight = 0.0;
+    // Neighborhood: reconstruction filters, color statistics and the nearest surface.
+    var wide = vec3<f32>(0.0);
+    var wide_weight = 0.0;
+    var sharp = vec3<f32>(0.0);
+    var sharp_weight = 0.0;
     var m1 = vec3<f32>(0.0);
     var m2 = vec3<f32>(0.0);
     var nearest = px;
@@ -139,10 +154,14 @@ fn fs_taa(in: FullscreenOut) -> @location(0) vec4<f32> {
             let q = clamp(px + o, vec2<i32>(0), size - 1);
             let c = load_current(q, size);
             // The sample in pixel q was taken at q's center minus the jitter.
-            let d = vec2<f32>(o) - jitter;
+            let d = vec2<f32>(px + o) + 0.5 - jitter - at;
             let w = exp(-2.29 * dot(d, d));
-            filtered += c * w;
-            filter_weight += w;
+            wide += c * w;
+            wide_weight += w;
+            let ds = d * ratio;
+            let ws = exp(-2.29 * dot(ds, ds));
+            sharp += c * ws;
+            sharp_weight += ws;
             let ycc = rgb_to_ycocg(compress(c));
             m1 += ycc;
             m2 += ycc * ycc;
@@ -153,20 +172,25 @@ fn fs_taa(in: FullscreenOut) -> @location(0) vec4<f32> {
             }
         }
     }
-    filtered /= filter_weight;
+    wide /= wide_weight;
+    // How much of a sample this frame put on this output pixel (about 1 at native size).
+    let confidence = saturate(sharp_weight);
+    var filtered = mix(wide, sharp / max(sharp_weight, 1e-6), confidence);
     let mask = saturate(taa.params.w * textureLoad(reactive_tex, px, 0).r);
     let center = load_current(px, size);
+    // The history's alpha: how many frames' worth of samples it holds (see below).
     if (taa.params.x < 0.5) {
-        return vec4<f32>(mix(filtered, center, mask), 1.0);
+        return vec4<f32>(mix(wide, center, mask), 1.0);
     }
     let motion = pixel_motion(nearest, size);
     let history_uv = uv - motion;
     if (any(history_uv < vec2<f32>(0.0)) || any(history_uv > vec2<f32>(1.0))) {
-        return vec4<f32>(mix(filtered, center, mask), 1.0);
+        return vec4<f32>(mix(wide, center, mask), 1.0);
     }
+    let held = textureSampleLevel(history_tex, linear_clamp, history_uv, 0.0).a;
     let mean = m1 / 9.0;
     let sigma = sqrt(max(m2 / 9.0 - mean * mean, vec3<f32>(0.0)));
-    let history = rgb_to_ycocg(compress(sample_history(history_uv, sizef)));
+    let history = rgb_to_ycocg(compress(sample_history(history_uv, out_size)));
     // A thin transparent thing that stays put (a wire fence) is in the history already, and TAA
     // smooths it as anything else; one that moved since (a falling flake) isn't: the history
     // there holds what is behind it.
@@ -184,15 +208,24 @@ fn fs_taa(in: FullscreenOut) -> @location(0) vec4<f32> {
     let current = rgb_to_ycocg(compress(filtered));
     let lo = min(mean - gamma * sigma, current);
     let hi = max(mean + gamma * sigma, current);
-    let clipped = decompress(ycocg_to_rgb(clip_to_box(history, lo, hi)));
+    // When upscaling, this frame's box describes the scene pixels around this output pixel only
+    // as well as its samples landed near it: clip in proportion, or each output pixel would be
+    // pulled toward a different frame's box and a still image would keep a fine dither.
+    let clipped = decompress(ycocg_to_rgb(mix(history, clip_to_box(history, lo, hi), confidence)));
 
-    // Accumulate quickly after a reset, then keep a tenth of the current frame. Fast motion
-    // keeps a little more of the current frame so moving things stay sharp.
+    // Each pixel averages its samples: the history holds `held` frames' worth (its alpha) and
+    // this frame adds `confidence` (1 at native size), so after a reset the frames are averaged
+    // evenly, then the newest keeps a tenth. Fast motion keeps a little more of the current
+    // frame so moving things stay sharp. When upscaling, the samples that landed near this
+    // pixel over the whole jitter sequence are averaged alike, wherever they fell in it.
     let frames = taa.params.y;
-    let speed = length(motion * sizef);
-    var alpha = max(1.0 / (frames + 1.0), taa.params.z);
-    alpha = mix(alpha, max(alpha, 0.25), saturate(speed / 32.0));
+    let speed = length(motion * out_size);
+    let newest = mix(taa.params.z, max(taa.params.z, 0.25), saturate(speed / 32.0));
+    // Upscaling puts a sample near each pixel only every ratio² frames: keep as many frames.
+    let kept = clamp(held, 0.0, min(frames, (1.0 / newest - 1.0) * ratio.x * ratio.y));
+    var alpha = confidence / max(kept + confidence, 1e-4);
     alpha = max(alpha, 0.85 * reactive);
     let result = mix(clipped, filtered, alpha);
-    return vec4<f32>(max(result, vec3<f32>(0.0)), 1.0);
+    let weight = min(kept + confidence, 1.0 / max(alpha, 1e-4));
+    return vec4<f32>(max(result, vec3<f32>(0.0)), weight);
 }

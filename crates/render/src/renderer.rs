@@ -501,6 +501,7 @@ impl ViewState {
             width,
             height,
             UVec2::new(width, height),
+            UVec2::new(width, height),
         );
         laps.lap("targets");
         let frame_uniform_buffer = |label: &str| {
@@ -1268,7 +1269,7 @@ impl Renderer {
 
     /// Size the targets for a scene of `scene` pixels in a window of `window` pixels (`extra`:
     /// an extra view's, `window` its picture's size; the window and the features keep theirs).
-    fn resize(&mut self, scene: UVec2, window: UVec2, extra: bool) {
+    fn resize(&mut self, scene: UVec2, output: UVec2, window: UVec2, extra: bool) {
         let (width, height) = (scene.x.max(1), scene.y.max(1));
         if !extra
             && let Some(s) = &mut self.surface
@@ -1281,6 +1282,7 @@ impl Renderer {
             &self.shared.formats,
             width,
             height,
+            output,
             window,
         );
         self.post = create_post(
@@ -1805,15 +1807,35 @@ impl Renderer {
         } else {
             crate::frame::camera_viewport(world, window)
         };
-        // At a render scale under 1 the scene renders smaller and the tonemap upscales it.
+        // A pixel-perfect camera renders without temporal anti-aliasing: no jitter to blur its
+        // texels, nothing between them to smooth.
+        let anti_aliasing = if crate::frame::active_camera_is_pixel_perfect(world) {
+            AntiAliasing::None
+        } else {
+            settings.anti_aliasing
+        };
+        let taa = anti_aliasing == AntiAliasing::Taa;
+        // At a render scale under 1 the scene renders smaller. Temporal anti-aliasing then
+        // rebuilds it at the viewport's size from the jittered frames (temporal upscaling);
+        // without it, or under motion blur (which works on the scene's image), the tonemap
+        // stretches it.
         let scene_size = (viewport_size.as_vec2() * settings.render_scale.clamp(0.25, 2.0))
             .round()
             .as_uvec2()
             .max(UVec2::ONE);
+        let upscale = taa
+            && !is_extra
+            && settings.temporal_upscaling
+            && scene_size.cmplt(viewport_size).any()
+            && scene_size.cmple(viewport_size).all()
+            && !crate::frame::active_camera(world)
+                .is_some_and(|(e, _, _)| world.get::<crate::MotionBlur>(e).is_some());
+        let output = if upscale { viewport_size } else { scene_size };
         if scene_size != UVec2::new(self.targets.width, self.targets.height)
+            || output != self.targets.output
             || window != self.targets.window
         {
-            self.resize(scene_size, window, is_extra);
+            self.resize(scene_size, output, window, is_extra);
         }
         if !is_extra && let Some(s) = &mut self.surface {
             s.set_vsync(&self.shared.device, settings.vsync);
@@ -1827,20 +1849,13 @@ impl Renderer {
 
         // View & uniforms.
         cpu.step("view");
-        // A pixel-perfect camera renders without temporal anti-aliasing: no jitter to blur its
-        // texels, nothing between them to smooth.
-        let anti_aliasing = if crate::frame::active_camera_is_pixel_perfect(world) {
-            AntiAliasing::None
-        } else {
-            settings.anti_aliasing
-        };
-        let taa = anti_aliasing == AntiAliasing::Taa;
         if anti_aliasing != self.prev_aa {
             self.effects.reset_history();
             self.prev_aa = anti_aliasing;
         }
         let jitter = if taa {
-            crate::effects::jitter(self.frame_index)
+            let ratio = self.targets.output.x as f32 / self.targets.width as f32;
+            crate::effects::jitter_upscaled(self.frame_index, ratio)
         } else {
             Vec2::ZERO
         };
@@ -3280,7 +3295,9 @@ impl Renderer {
             Tonemapper::Neutral => 5.0,
         };
         let levels = self.targets.bloom.len().max(1) as f32;
-        let upscaled = view.viewport_size != UVec2::new(view.width, view.height);
+        // Stretched by the tonemap (temporal upscaling already rebuilt the viewport's size).
+        let post = self.targets.post();
+        let upscaled = view.viewport_size != UVec2::new(post.width, post.height);
         let u = PostUniform {
             params: [
                 tonemapper,
@@ -3320,7 +3337,7 @@ impl Renderer {
             .write_buffer(&self.post.params, 0, bytemuck::bytes_of(&u));
         // The first bloom downsample reads the scene and limits each pixel's brightness.
         if let Some(first) = self.post.bloom_params.first() {
-            let src = &self.targets.hdr;
+            let src = self.targets.post();
             let b = BloomUniform {
                 params: [
                     1.0 / src.width as f32,
@@ -4068,7 +4085,7 @@ fn create_post(
     };
     for i in 0..levels {
         let src = if i == 0 {
-            &targets.hdr
+            targets.post()
         } else {
             &targets.bloom[i - 1]
         };
@@ -4099,7 +4116,7 @@ fn create_post(
         entries: &[
             wgpu::BindGroupEntry {
                 binding: 0,
-                resource: wgpu::BindingResource::TextureView(&targets.hdr.view),
+                resource: wgpu::BindingResource::TextureView(&targets.post().view),
             },
             wgpu::BindGroupEntry {
                 binding: 1,

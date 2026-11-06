@@ -27,8 +27,52 @@ const SSR_CHAIN_LEVELS: u32 = 6;
 
 /// Sub-pixel jitter (pixels, in −0.5..0.5) for frame `index`: the Halton (2, 3) sequence.
 pub fn jitter(index: u64) -> Vec2 {
-    let i = (index % JITTER_SAMPLES) + 1;
-    Vec2::new(halton(i, 2) - 0.5, halton(i, 3) - 0.5)
+    jitter_upscaled(index, 1.0)
+}
+
+/// Jitter sequence length when temporal anti-aliasing upscales by `ratio` (output pixels per
+/// scene pixel, per axis): each output pixel should see about as many samples as at native
+/// resolution, so the sequence grows with the area ratio (AMD FSR 2: 8 · ratio²), to a power of
+/// two for the Sobol sequence.
+pub fn jitter_samples(ratio: f32) -> u64 {
+    if ratio <= 1.0 {
+        return JITTER_SAMPLES;
+    }
+    ((JITTER_SAMPLES as f32 * ratio * ratio).ceil() as u64)
+        .next_power_of_two()
+        .clamp(JITTER_SAMPLES, 64)
+}
+
+/// [`jitter`] for a scene upscaled by `ratio` (scene pixels). Upscaling uses the first two
+/// dimensions of the Sobol sequence: over each power-of-two run they put the same number of
+/// samples in every half, quarter, … of the pixel in both directions at once, so the output
+/// pixels inside one scene pixel each gather an even spread of samples. (Halton (2, 3) favors
+/// different horizontal offsets in the top and bottom halves, which leaves every other output
+/// row of thin vertical detail shifted.)
+pub fn jitter_upscaled(index: u64, ratio: f32) -> Vec2 {
+    let n = jitter_samples(ratio);
+    let i = index % n;
+    if ratio <= 1.0 {
+        return Vec2::new(halton(i + 1, 2) - 0.5, halton(i + 1, 3) - 0.5);
+    }
+    let i = i as u32;
+    let half_cell = 0.5 / n as f32;
+    let unit = |bits: u32| (bits as f64 / 4_294_967_296.0) as f32 + half_cell - 0.5;
+    Vec2::new(unit(i.reverse_bits()), unit(sobol_second(i)))
+}
+
+/// The second dimension of the Sobol sequence, as a 32-bit fraction.
+fn sobol_second(mut i: u32) -> u32 {
+    let mut v = 1u32 << 31;
+    let mut r = 0;
+    while i != 0 {
+        if i & 1 != 0 {
+            r ^= v;
+        }
+        i >>= 1;
+        v ^= v >> 1;
+    }
+    r
 }
 
 /// Element `i` of the Halton low-discrepancy sequence in `base` (0..1).
@@ -613,7 +657,8 @@ impl ScreenEffects {
     }
 
     /// Record the TAA resolve of `targets.hdr` into the history and copy the result back into
-    /// `targets.hdr`. `history_valid` is false after a camera cut.
+    /// `targets.hdr`, or into `targets.upscaled` when the history is larger (temporal
+    /// upscaling). `history_valid` is false after a camera cut.
     /// Mark where the transparent phase just drew something thin, from the scene before it
     /// (`targets.color_copy`) and after (`targets.hdr`), for `encode_taa`.
     pub fn encode_reactive(&self, encoder: &mut wgpu::CommandEncoder, targets: &Targets) {
@@ -657,12 +702,13 @@ impl ScreenEffects {
             pass.set_bind_group(1, &self.taa_groups[self.current], &[]);
             pass.draw(0..3, 0..1);
         }
+        let dst = targets.post();
         encoder.copy_texture_to_texture(
             out.texture.as_image_copy(),
-            targets.hdr.texture.as_image_copy(),
+            dst.texture.as_image_copy(),
             wgpu::Extent3d {
-                width: targets.width,
-                height: targets.height,
+                width: dst.width,
+                height: dst.height,
                 depth_or_array_layers: 1,
             },
         );
@@ -834,6 +880,36 @@ pub const CUT_STEP_M: f64 = 5.0;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn upscaling_spreads_the_jitter_evenly_over_the_output_pixels() {
+        assert_eq!(jitter_samples(1.0), JITTER_SAMPLES);
+        assert_eq!(jitter_samples(0.5), JITTER_SAMPLES);
+        assert_eq!(jitter_samples(1.25), 16);
+        assert_eq!(jitter_samples(1.5), 32);
+        assert_eq!(jitter_samples(2.0), 32);
+        assert_eq!(jitter_upscaled(3, 1.0), jitter(3));
+        // At twice the size, each quarter of the scene pixel (one output pixel) gets a quarter
+        // of the samples, centered in it.
+        let mut sums = [Vec2::ZERO; 4];
+        let mut counts = [0; 4];
+        for i in 0..32 {
+            let j = jitter_upscaled(i, 2.0);
+            assert!(j.abs().max_element() < 0.5, "{j}");
+            let q = usize::from(j.x >= 0.0) + 2 * usize::from(j.y >= 0.0);
+            counts[q] += 1;
+            sums[q] += j;
+        }
+        assert_eq!(counts, [8; 4]);
+        for (q, sum) in sums.iter().enumerate() {
+            let center = Vec2::new(
+                if q & 1 == 1 { 0.25 } else { -0.25 },
+                if q & 2 == 2 { 0.25 } else { -0.25 },
+            );
+            let mean = *sum / 8.0;
+            assert!((mean - center).length() < 0.02, "quarter {q}: {mean}");
+        }
+    }
 
     #[test]
     fn jitter_covers_the_pixel_evenly() {

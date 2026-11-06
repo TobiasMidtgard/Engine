@@ -180,9 +180,13 @@ pub struct RenderSettings {
     /// Present with vsync.
     pub vsync: bool,
     /// Internal resolution relative to the camera's viewport (the window without a
-    /// [`Viewport`](crate::Viewport)), upscaled to it with sharpening: 0.5 renders a quarter of
+    /// [`Viewport`](crate::Viewport)), upscaled to it (`temporal_upscaling`): 0.5 renders a quarter of
     /// the pixels. 0.25..2; the game's [`Scalability::render_scale`] multiplies it.
     pub render_scale: f32,
+    /// Under a `render_scale` below 1 with temporal anti-aliasing, rebuild the viewport's full
+    /// resolution from the jittered frames (temporal upscaling, as Unreal's TAAU and AMD's
+    /// FSR 2) instead of stretching the smaller image.
+    pub temporal_upscaling: bool,
     /// Shadows are drawn up to this distance from the camera, meters.
     pub shadow_distance: f32,
     /// Shadow map resolution per cascade and of the far shadow map (applied at startup).
@@ -511,6 +515,7 @@ impl Default for RenderSettings {
         Self {
             vsync: true,
             render_scale: 1.0,
+            temporal_upscaling: true,
             shadow_distance: 350.0,
             shadow_map_size: 2048,
             far_shadow_distance: 8000.0,

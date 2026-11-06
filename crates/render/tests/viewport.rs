@@ -175,3 +175,110 @@ fn a_lower_render_scale_upscales_to_the_viewport() {
     eprintln!("half resolution vs. full: mean difference {diff:.2} of 255");
     assert!(diff < 4.0, "the upscaled image differs by {diff:.2} of 255");
 }
+
+/// A fence of thin slats (one and a half pixels wide at full resolution, three quarters at half)
+/// seen through temporal anti-aliasing after `frames` frames: the shot's pixels.
+fn fence(scale: f32, upscaling: bool, frames: usize, shot: &str) -> Option<image::RgbImage> {
+    engine_core::log::init("error");
+    let mut app = App::new();
+    app.world.resource_mut::<EngineConfig>().headless = true;
+    {
+        let mut w = app.world.resource_mut::<Window>();
+        w.width = 320;
+        w.height = 180;
+    }
+    app.add_plugins(RenderPlugin);
+    {
+        let mut s = app.world.resource_mut::<RenderSettings>();
+        s.anti_aliasing = AntiAliasing::Taa;
+        s.film_grain = 0.0;
+        s.sharpness = 0.0;
+        s.render_scale = scale;
+        s.temporal_upscaling = upscaling;
+    }
+    let w = &mut app.world;
+    w.spawn((
+        Camera {
+            exposure: Exposure::Manual { ev100: 14.0 },
+            ..Camera::perspective(60.0)
+        },
+        Transform::from_xyz(0.0, 1.0, 4.0).looking_at(DVec3::new(0.0, 1.0, 0.0), Vec3::Y),
+    ));
+    w.spawn((
+        DirectionalLight::default(),
+        Transform::default().looking_at(DVec3::new(0.4, -0.8, -0.45), Vec3::Y),
+    ));
+    w.spawn((
+        Transform::from_xyz(0.0, 1.0, -0.5),
+        MeshRenderer::new(
+            Shape::Cuboid {
+                size: [8.0, 4.0, 0.1],
+            },
+            StandardMaterial::color(0.08, 0.1, 0.12),
+        ),
+    ));
+    for i in -25..=25 {
+        w.spawn((
+            Transform::from_xyz(i as f64 * 0.07, 1.0, 0.0),
+            MeshRenderer::new(
+                Shape::Cuboid {
+                    size: [0.022, 1.6, 0.02],
+                },
+                StandardMaterial::color(0.9, 0.85, 0.7),
+            ),
+        ));
+    }
+    app.update_n(frames);
+    if let Some(d) = app.world.get_resource::<RenderDisabled>() {
+        eprintln!("skipping: no GPU ({})", d.0);
+        return None;
+    }
+    let dir = std::env::temp_dir().join("engine-viewport");
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join(shot);
+    capture_now(&mut app.world, &path).expect("screenshot");
+    if let Ok(out) = std::env::var("ENGINE_SHOTS") {
+        let _ = std::fs::copy(&path, std::path::Path::new(&out).join(shot));
+    }
+    Some(image::open(&path).expect("read the shot").to_rgb8())
+}
+
+/// Mean difference (of 255) between two shots' pixels.
+fn mean_difference(a: &image::RgbImage, b: &image::RgbImage) -> f64 {
+    a.as_raw()
+        .iter()
+        .zip(b.as_raw())
+        .map(|(x, y)| x.abs_diff(*y) as u64)
+        .sum::<u64>() as f64
+        / a.as_raw().len() as f64
+}
+
+/// Temporal upscaling rebuilds detail finer than the scene's pixels from the jittered frames: at
+/// half resolution, a fence of slats under a scene pixel wide comes out much closer to the
+/// full-resolution image than the stretched half-resolution one.
+#[test]
+fn temporal_upscaling_rebuilds_detail_finer_than_the_scene_pixels() {
+    let Some(full) = fence(1.0, true, 48, "taau_full.png") else {
+        return;
+    };
+    let Some(stretched) = fence(0.5, false, 48, "taau_stretched.png") else {
+        return;
+    };
+    let Some(upscaled) = fence(0.5, true, 48, "taau_upscaled.png") else {
+        return;
+    };
+    assert_eq!(
+        upscaled.dimensions(),
+        (320, 180),
+        "the shot covers the window"
+    );
+    let (s, u) = (
+        mean_difference(&full, &stretched),
+        mean_difference(&full, &upscaled),
+    );
+    eprintln!("vs. full resolution: stretched {s:.2}, temporally upscaled {u:.2} of 255");
+    assert!(
+        u < s * 0.8,
+        "temporal upscaling ({u:.2}) is no closer to full resolution than stretching ({s:.2})"
+    );
+}
