@@ -185,6 +185,8 @@ pub enum LeafStyle {
     /// Feather-palm fronds (coconut palm): the tree is built as a palm, a bare ringed stem
     /// under a crown of long arching fronds, rather than a branching broadleaf.
     Palm,
+    /// Five-lobed palmate leaves on long stalks (maple).
+    Palmate,
 }
 
 /// How the bark is colored along the trunk.
@@ -1784,7 +1786,7 @@ fn regional_trees() -> Vec<PlantSpecies> {
                 gnarl: 0.35,
                 leaf_size_m: 1.3,
                 leaf_density: 1.15,
-                leaf: LeafStyle::Lobed,
+                leaf: LeafStyle::Palmate,
                 bark: BarkStyle::Plain,
                 forks: 0,
             },

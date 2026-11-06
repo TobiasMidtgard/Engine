@@ -62,6 +62,9 @@ pub enum LeafKind {
     /// cells are the frond's base (bare midrib at the foot, leaflets lengthening), its middle
     /// and its tip (leaflets shortening to the end); the cluster cell is another middle.
     Palm,
+    /// Palmate leaves: five pointed, coarsely toothed lobes spreading from the top of a long
+    /// petiole, each with its own main vein, round sinuses between them (sugar maple).
+    Palmate,
 }
 
 /// The texture kind a species' leaf style is painted as.
@@ -79,6 +82,7 @@ pub fn kind_of(style: crate::species::LeafStyle) -> LeafKind {
         LeafStyle::Pinnate => LeafKind::Pinnate,
         LeafStyle::SoftNeedles => LeafKind::SoftNeedles,
         LeafStyle::Palm => LeafKind::Palm,
+        LeafStyle::Palmate => LeafKind::Palmate,
     }
 }
 
@@ -909,6 +913,39 @@ const RACHIS: [f32; 3] = [0.5, 0.31, 0.26];
 
 fn broad_style(kind: LeafKind) -> BroadStyle {
     match kind {
+        LeafKind::Palmate => BroadStyle {
+            // Sugar maple: the shape is painted lobe by lobe (`palmate_leaf`); these are the
+            // lobes' outline and the leaf's size, a little wider than long, on a long stalk.
+            shape: LeafShape {
+                a: 0.7,
+                b: 0.8,
+                tip: 0.55,
+                teeth: 1.6,
+                tooth_depth: 0.28,
+                fine_teeth: 0.0,
+                crenate: 0.0,
+                teeth_from: 0.35,
+                teeth_at_veins: false,
+                lobes: 0.0,
+                lobe_depth: 0.0,
+                auricle: 0.0,
+                veins: 4.0,
+                vein_sweep: 0.25,
+                vein_curve: 1.3,
+                fold: 0.15,
+                blister: 0.3,
+            },
+            length: (0.13, 0.18),
+            aspect: 1.05,
+            petiole: 0.55,
+            stalk: [0.45, 0.33, 0.24],
+            stalk_width: (0.004, 0.003),
+            green: [0.76, 0.9, 0.72],
+            under_share: 0.14,
+            underside: PALE_UNDERSIDE,
+            turn: 0.15,
+            tilt: 0.5,
+        },
         LeafKind::Lobed => BroadStyle {
             shape: LeafShape {
                 a: 0.95,
@@ -1269,6 +1306,7 @@ fn broad_spray(cv: &mut Canvas, kind: LeafKind, rng: &mut Rng) {
 fn paint_leaf(cv: &mut Canvas, kind: LeafKind, l: &Blade) {
     match kind {
         LeafKind::Pinnate => pinnate_leaf(cv, l),
+        LeafKind::Palmate => palmate_leaf(cv, l),
         LeafKind::Broad
         | LeafKind::Small
         | LeafKind::Lobed
@@ -1351,6 +1389,73 @@ fn pinnate_leaf(cv: &mut Canvas, l: &Blade) {
     cv.stem_path(&rachis, w, w * 0.45, RACHIS);
 }
 
+/// A palmate leaf (sugar maple) in the frame of `l`: from the top of the stalk at `l.base`,
+/// a middle lobe along `l.dir` the leaf's whole `l.length`, two side lobes spreading at about
+/// 50° and two small basal ones nearly sideways, each a pointed, coarsely toothed blade with
+/// its own main vein (palmate venation); a rounded heart joins them, leaving round sinuses
+/// between the lobes. The lobes share `l`'s color, face and tilt, each a little different.
+fn palmate_leaf(cv: &mut Canvas, l: &Blade) {
+    let mut rng = Rng::new(l.seed ^ 0x3a91);
+    let spread = l.width / l.length;
+    let lobe = |rng: &mut Rng, angle: f32, length: f32| {
+        let lum = rng.range(0.95, 1.05);
+        Blade {
+            shape: l.shape,
+            base: l.base,
+            dir: rot(l.dir, angle),
+            length: l.length * length,
+            width: l.length * length * rng.range(0.5, 0.58),
+            color: [l.color[0] * lum, l.color[1] * lum, l.color[2] * lum],
+            under: l.under,
+            tilt: l.tilt + Vec2::new(rng.range(-0.15, 0.15), rng.range(-0.15, 0.15)),
+            phase: rng.range(0.0, 1.0),
+            spots: if rng.chance(0.2) {
+                l.spots
+            } else {
+                [(0.0, 0.0, 0.0); 2]
+            },
+            seed: rng.next_u64(),
+        }
+    };
+    let side = 0.82 * spread.clamp(0.8, 1.2) + rng.range(-0.06, 0.06);
+    // Basal lobes first (under), then the side lobes, the heart, and the middle lobe on top.
+    let mut blades = vec![
+        lobe(&mut rng, -1.75, 0.4),
+        lobe(&mut rng, 1.75, 0.4),
+        lobe(&mut rng, -side, 0.78),
+        lobe(&mut rng, side, 0.78),
+    ];
+    const HEART: LeafShape = LeafShape {
+        a: 0.5,
+        b: 0.6,
+        tip: 0.0,
+        teeth: 0.0,
+        tooth_depth: 0.0,
+        fine_teeth: 0.0,
+        crenate: 0.0,
+        teeth_from: 0.1,
+        teeth_at_veins: false,
+        lobes: 0.0,
+        lobe_depth: 0.0,
+        auricle: 0.0,
+        veins: 0.0,
+        vein_sweep: 0.0,
+        vein_curve: 1.0,
+        fold: 0.1,
+        blister: 0.2,
+    };
+    let mut heart = lobe(&mut rng, 0.0, 0.42);
+    heart.shape = HEART;
+    heart.base = l.base - l.dir * l.length * 0.06;
+    heart.width = l.length * 0.62;
+    blades.push(heart);
+    let lean = rng.range(-0.06, 0.06);
+    blades.push(lobe(&mut rng, lean, 1.0));
+    for b in &blades {
+        cv.blade(b);
+    }
+}
+
 /// A zigzag shoot (beech): it turns a little at every node, alternately one way and the other,
 /// while bending by `bend` overall. The nodes are its points.
 fn zigzag(start: Vec2, dir: Vec2, length: f32, bend: f32, segs: usize, zig: f32) -> Vec<Vec2> {
@@ -1429,8 +1534,9 @@ fn one_spray_layout(kind: LeafKind, rng: &mut Rng) -> (Vec<Blade>, Twigs) {
     let mut leaves = Vec::new();
     let mut twigs: Twigs = Vec::new();
     match kind {
-        LeafKind::Lobed => {
-            // Oak: a twig that forks into shoots; leaves crowd at every shoot tip.
+        LeafKind::Lobed | LeafKind::Palmate => {
+            // Oak: a twig that forks into shoots; leaves crowd at every shoot tip. (Maple's
+            // long-stalked leaves crowd the same way.)
             let main = shoot(
                 base,
                 rot(up, rng.range(-0.15, 0.15)),
@@ -1713,7 +1819,7 @@ fn broad_cluster(cv: &mut Canvas, kind: LeafKind, rng: &mut Rng) {
     let st = broad_style(kind);
     // Long stalks show between the rosettes' leaves (aspen's petioles, rowan's leaf stalks).
     let stalks = match kind {
-        LeafKind::Round | LeafKind::Pinnate => true,
+        LeafKind::Round | LeafKind::Pinnate | LeafKind::Palmate => true,
         LeafKind::Broad
         | LeafKind::Small
         | LeafKind::Lobed
@@ -1750,7 +1856,7 @@ fn broad_cluster_layout(kind: LeafKind, rng: &mut Rng) -> Vec<Blade> {
     // outer rosettes sit from the middle.
     let (rosettes, per, middle, size, reach) = match kind {
         LeafKind::Small => (7, 6, 0, 1.1, (0.16, 0.24)),
-        LeafKind::Broad | LeafKind::Lobed => (5, 6, 1, 0.95, (0.16, 0.24)),
+        LeafKind::Broad | LeafKind::Lobed | LeafKind::Palmate => (5, 6, 1, 0.95, (0.16, 0.24)),
         // Beech: smaller leaves in more, flatter rosettes.
         LeafKind::Oval => (6, 6, 1, 1.0, (0.16, 0.24)),
         // Aspen: long petioles spread each rosette wide.
@@ -2257,7 +2363,8 @@ fn paint_cell(kind: LeafKind, cell: usize, size: u32, seed: u64, min_needle_px: 
         | LeafKind::Lobed
         | LeafKind::Oval
         | LeafKind::Round
-        | LeafKind::Pinnate => {
+        | LeafKind::Pinnate
+        | LeafKind::Palmate => {
             if cell == CLUSTER_CELL {
                 broad_cluster(&mut cv, kind, &mut rng);
             } else {
@@ -2467,7 +2574,8 @@ pub fn spray_layout(kind: LeafKind, cell: usize, seed: u64) -> Option<SprayLayou
         | LeafKind::Lobed
         | LeafKind::Oval
         | LeafKind::Round
-        | LeafKind::Pinnate => {}
+        | LeafKind::Pinnate
+        | LeafKind::Palmate => {}
         LeafKind::LongNeedles
         | LeafKind::ShortNeedles
         | LeafKind::SoftNeedles
@@ -2592,7 +2700,7 @@ pub fn hero_leaf_textures(kind: LeafKind, size: u32, seed: u64) -> LeafTextures 
                         // Running on into the compound leaf's stalk (see `pinnate_leaf`).
                         LeafKind::Pinnate => (length * 0.024, length * 0.019),
                         // Long and thin.
-                        LeafKind::Round => (0.014, 0.011),
+                        LeafKind::Round | LeafKind::Palmate => (0.014, 0.011),
                         LeafKind::Broad
                         | LeafKind::Small
                         | LeafKind::Lobed
@@ -2744,7 +2852,7 @@ fn mass_cell(kind: LeafKind, cell: usize, cs: u32, seed: u64, min_px: f32) -> Ca
         blurred[yy * s + xx][3]
     };
     let leaf = match kind {
-        LeafKind::Lobed => 0.07,
+        LeafKind::Lobed | LeafKind::Palmate => 0.07,
         LeafKind::Broad => 0.06,
         LeafKind::Oval => 0.055,
         LeafKind::Round => 0.05,
@@ -2872,6 +2980,7 @@ mod tests {
             LeafKind::SoftNeedles,
             LeafKind::Frond,
             LeafKind::Palm,
+            LeafKind::Palmate,
         ] {
             let img = leaf_texture(kind, 128, 7);
             assert!(img.is_valid(), "{kind:?}");
@@ -3018,6 +3127,7 @@ mod tests {
             LeafStyle::Pinnate,
             LeafStyle::SoftNeedles,
             LeafStyle::Palm,
+            LeafStyle::Palmate,
         ];
         let kinds: std::collections::HashSet<_> = styles.iter().map(|s| kind_of(*s)).collect();
         assert_eq!(kinds.len(), styles.len());

@@ -106,6 +106,7 @@ fn save_textures(out: &str) {
         ("rowan", LeafKind::Pinnate),
         ("larch", LeafKind::SoftNeedles),
         ("palm", LeafKind::Palm),
+        ("maple", LeafKind::Palmate),
     ] {
         let started = std::time::Instant::now();
         let t = leaf_textures(kind, 1024, 0x1eaf);
