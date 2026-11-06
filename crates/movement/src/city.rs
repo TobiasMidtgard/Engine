@@ -15,6 +15,13 @@
 //!   from a gallows frame on the little square to swing on.
 //! - **A zip line** from the bell tower's top over the street to the square.
 //! - **Low starts**: crates, a cart and a well to vault and climb from.
+//! - **Acrobatics** ([`elements`]): cast-iron lamp posts down the street to climb and leap
+//!   between (perched on their lanterns), a balcony railing, a beam across the alley, a
+//!   tightrope between the warehouse and the chandlery and rope rails on the bridge, washing
+//!   lines and swinging bars across the street, the bakery's striped awning to bounce off and
+//!   a hay cart to drop into, a granite crag with cracks, crimps and jugs, an icefall for
+//!   the picks, a culvert to crawl through, and an oak with branches to hunt from (a
+//!   lookout stands under it: attack from the branch drops onto it, [`crate::takedown`]).
 //!
 //! Collision is the exact boxes of [`pieces`] ([`Piece::collides`]); [`crate::look::city`]
 //! draws them and the dressing (windows, shutters, roofs, cobbles).

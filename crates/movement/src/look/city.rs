@@ -1,10 +1,14 @@
 //! How the climbing quarter ([`crate::city`]) looks: lime-plastered houses in three washes
 //! with stone string courses, sills and cornices, tall windows with painted shutters (a few
 //! lit), zinc roof caps, chimneys with pots, a belfry, timber beams, crates and a cart, a
-//! plank bridge with rope rails across the street, laundry across the alley, and cobbles.
+//! plank bridge across the street, cobbles, and the acrobatics: lathe-turned iron lamp posts
+//! with lit lanterns, a wrought balcony, swinging bars, a striped awning, a heaped hay cart,
+//! a sculpted granite crag (holds drawn where [`crate::face`] finds them, some chalked), an
+//! icefall of columns and icicles, a culvert and an oak in leaf. (Ropes, washing lines and
+//! branches that give under the body are [`super::lines`].)
 //!
 //! Every box a character touches is drawn on [`city::pieces`]' boxes exactly; the windows,
-//! shutters, rails and laundry sit a few millimeters proud or in the air, where nobody stands.
+//! shutters and rails sit a few millimeters proud or in the air, where nobody stands.
 
 use std::collections::HashMap;
 
