@@ -1024,6 +1024,9 @@ fn a_frost_elemental_shoots_foes_and_spares_friends() {
     let e = found[0].0;
     let at = app.world.get::<Transform>(e).unwrap().translation;
     assert!(at.y > 1.4, "it floats: {at}");
+    // It floated out toward the dummy to fight it from about 7 m.
+    let gap = (at - DVec3::new(0.0, at.y, -6.0)).length();
+    assert!((5.0..9.5).contains(&gap), "{gap} m from the dummy at {at}");
     let shots: Vec<_> = hits_on(&app, d)
         .into_iter()
         .filter(|h| h.caster == Some(e))
@@ -1127,4 +1130,40 @@ fn a_tether_with_nothing_to_hold_fizzles_and_one_held_to_the_end_lands() {
     assert!(tethers(&mut app).is_empty(), "over after 4 s");
     let hits = hits_on(&app, d);
     assert!(hits.len() >= 12, "{}", hits.len());
+}
+
+#[test]
+fn the_summon_hall_raises_every_creature_in_its_first_period() {
+    let mut app = app();
+    {
+        let mut commands = app.world.commands();
+        demo::spawn_demo(&mut commands, DVec3::ZERO);
+    }
+    app.world.flush();
+    app.update();
+    {
+        let mut hall = app.world.resource_mut::<demo::Hall>();
+        hall.program = demo::Program::Summon;
+        hall.restart = true;
+    }
+    run(&mut app, 5.6);
+    let found = minions(&mut app);
+    let count = |k: summon::MinionKind| found.iter().filter(|(_, m)| m.kind == k).count();
+    assert_eq!(count(summon::MinionKind::Golem), 2);
+    assert_eq!(count(summon::MinionKind::Elemental), 2);
+    assert_eq!(count(summon::MinionKind::Wisp), 1, "the first lane's wisp");
+    // The elementals floated out to the lava golem's dummy, at (3, 0, -5), and fight it there.
+    for (e, m) in &found {
+        if m.kind != summon::MinionKind::Elemental {
+            continue;
+        }
+        let at = app.world.get::<Transform>(*e).unwrap().translation;
+        let gap = (at - DVec3::new(3.0, at.y, -5.0)).length();
+        assert!(gap < 8.0, "{gap} m off the dummy, at {at}");
+        let t = m
+            .target
+            .and_then(|t| app.world.get::<Name>(t))
+            .map(|n| n.to_string());
+        assert_eq!(t.as_deref(), Some("Practice dummy 4"));
+    }
 }

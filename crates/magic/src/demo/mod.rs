@@ -147,9 +147,11 @@ pub const VIEWS: &[DemoView] = &[
     DemoView {
         key: "spells_summon",
         name: "Summons and tethers: golems, elementals, a wisp, a chain haul and a snap",
-        // From the dais's east end, past the elementals by the plinths, down to the golems.
-        eye: [11.0, 5.2, 15.0],
-        target: [-2.0, 1.4, -3.0],
+        // From the east end, three-quarters onto the lava golem: its dummy stands beside it,
+        // not in front, the stone golem behind, the elementals hovering in at the left and
+        // the chain haul and the dais beyond.
+        eye: [9.5, 3.0, -8.0],
+        target: [0.0, 1.6, -1.5],
         hour: 16.6,
         // Both golems at their dummies mid-punch, the elementals firing, the chain hauling.
         warmup: 5.6,
@@ -548,12 +550,23 @@ fn lanes(program: Program, cycle: u64) -> Vec<Lane> {
             };
             vec![
                 // A wisp for the wounded mage of the first lane.
-                casts(vec![cast(0.0, summon(&["heal"], "Wisp"), AimAt::Lane(7.0))]),
-                casts(vec![cast(
-                    0.0,
-                    summon(&["frost"], "Frost elemental"),
-                    AimAt::Lane(6.0),
-                )]),
+                // (Its lane fires no stagger, and a cast at 0.0 waits a whole period.)
+                casts(vec![cast(0.1, summon(&["heal"], "Wisp"), AimAt::Lane(7.0))]),
+                // A chain haul drags the dummy in; then a storm tether holds it until a push
+                // throws it past the break.
+                casts(vec![
+                    cast(
+                        2.0,
+                        d(&["pull"], CastType::Tether).named("Chain haul"),
+                        AimAt::Focus,
+                    ),
+                    cast(
+                        7.2,
+                        d(&["storm"], CastType::Tether).named("Storm tether"),
+                        AimAt::Focus,
+                    ),
+                    cast(8.6, d(&["push"], CastType::Bolt), AimAt::Focus),
+                ]),
                 casts(vec![cast(
                     0.0,
                     summon(&["stone"], "Stone golem"),
@@ -566,24 +579,14 @@ fn lanes(program: Program, cycle: u64) -> Vec<Lane> {
                 )]),
                 casts(vec![cast(
                     0.0,
+                    summon(&["frost"], "Frost elemental"),
+                    AimAt::Lane(6.0),
+                )]),
+                casts(vec![cast(
+                    0.0,
                     summon(&["storm"], "Storm elemental"),
                     AimAt::Lane(6.0),
                 )]),
-                // A chain haul drags the dummy in; then a storm tether holds it until a push
-                // throws it past the break.
-                casts(vec![
-                    cast(
-                        0.3,
-                        d(&["pull"], CastType::Tether).named("Chain haul"),
-                        AimAt::Focus,
-                    ),
-                    cast(
-                        5.6,
-                        d(&["storm"], CastType::Tether).named("Storm tether"),
-                        AimAt::Focus,
-                    ),
-                    cast(7.0, d(&["push"], CastType::Bolt), AimAt::Focus),
-                ]),
             ]
         }
         // The hall's mages watch while the weaver works its spell bar (player::script_weaver).
@@ -801,7 +804,9 @@ fn setup_program(
         if prop || !restart {
             continue;
         }
-        tf.translation = if program == Program::Duel {
+        // The duel's floor is clear of them, and the summons' far end too (its camera stands
+        // there).
+        tf.translation = if matches!(program, Program::Duel | Program::Summon) {
             t.home - DVec3::Y * 40.0
         } else {
             t.home
@@ -859,34 +864,26 @@ fn setup_program(
         commands.entity(grip).insert(ProgramProp);
     }
     if program == Program::Summon {
-        // Loose dummies for the golems to knock about and the tethers to haul; standing ones
-        // within the elementals' reach.
-        for (lane, z, dynamic) in [
-            (1, -3.0, false),
-            (2, -5.0, true),
-            (3, -5.0, true),
-            (4, -3.0, false),
-            (5, -2.0, true),
-        ] {
+        // Loose dummies for the golems to knock about and the tethers to haul. The
+        // elementals float out to the nearest, the lava golem's, so frost and lightning meet
+        // its fire there.
+        for (lane, z) in [(1, -2.0), (2, -5.0), (3, -5.0)] {
             let dummy = spawn_dummy(
                 &mut commands,
                 origin + DVec3::new(LANES[lane], FLOOR, z),
                 lane,
                 true,
-                dynamic,
+                true,
             );
-            commands.entity(dummy).insert(ProgramProp);
-            if dynamic {
-                // Upright as a person keeps upright when shoved.
-                commands
-                    .entity(dummy)
-                    .insert(engine_world::physics::RigidBody {
-                        kind: engine_world::physics::BodyKind::Dynamic,
-                        mass_kg: Some(45.0),
-                        lock_rotation: [true, false, true],
-                        ..Default::default()
-                    });
-            }
+            // Upright as a person keeps upright when shoved.
+            commands
+                .entity(dummy)
+                .insert(engine_world::physics::RigidBody {
+                    kind: engine_world::physics::BodyKind::Dynamic,
+                    mass_kg: Some(45.0),
+                    lock_rotation: [true, false, true],
+                    ..Default::default()
+                });
         }
     }
     if program == Program::Force {

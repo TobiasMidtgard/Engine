@@ -88,6 +88,10 @@ pub const LEASH_M: f32 = 25.0;
 /// An elemental's and a wisp's reach, m.
 pub const SHOOT_M: f32 = 20.0;
 pub const HOVER_M: f32 = 1.9;
+/// An elemental fights from this far off its foe, and strays at most this far from its
+/// summoner, m.
+pub const ENGAGE_M: f32 = 5.5;
+pub const GUARD_M: f32 = 12.0;
 /// A punch: wind-up, the moment it lands, and the whole swing, s.
 pub const PUNCH_SECS: f32 = 1.1;
 pub const PUNCH_HIT: f32 = 0.52;
@@ -156,7 +160,7 @@ const GOLEM_SIZES: [[f32; 3]; 17] = [
 ];
 
 /// Shards around an elemental's core.
-pub const SHARDS: usize = 7;
+pub const SHARDS: usize = 9;
 
 // ------------------------------------------------------------------------------- state
 
@@ -707,10 +711,10 @@ pub fn spawn_minion(commands: &mut Commands, m: NewMinion, looks: &mut Vec<LookC
             });
         }
         MinionKind::Elemental => {
-            part(commands, 0, Vec3::ZERO, glow(0.3 * k, color, 30.0));
+            part(commands, 0, Vec3::ZERO, glow(0.2 * k, color, 22.0));
             let mat = body_material(element);
             for i in 0..SHARDS {
-                let s = 0.2 + 0.18 * roll(seed, 40 + i as u64);
+                let s = 0.13 + 0.12 * roll(seed, 40 + i as u64);
                 let size = Vec3::new(s, s * 1.6, s) * k;
                 part(
                     commands,
@@ -739,13 +743,14 @@ pub fn spawn_minion(commands: &mut Commands, m: NewMinion, looks: &mut Vec<LookC
                 entity: root,
                 look: spell.weave.key.clone(),
                 role: Role::Aura,
-                scale: 0.45 * k,
+                // Particles' auras are sized for a 1.3 m body at scale 1, as this one is.
+                scale: k,
                 color: spell.weave.color,
                 power_j: spell.power.energy_j as f32 * 0.2,
             });
         }
         MinionKind::Wisp => {
-            part(commands, 0, Vec3::ZERO, glow(0.11, color, 90.0));
+            part(commands, 0, Vec3::ZERO, glow(0.16, color, 120.0));
             for i in 0..3 {
                 part(commands, 1 + i, Vec3::ZERO, glow(0.03, color, 60.0));
             }
@@ -1190,11 +1195,29 @@ pub fn run_minions(
                 }
             }
             MinionKind::Elemental => {
-                // Keep to its summoner's flank; face and shoot the nearest foe.
-                let goal = owner
-                    .map(|(op, orot)| {
-                        op + (orot * Vec3::new(2.4 * m.flank, 0.0, 0.6)).as_dvec3()
-                            + DVec3::Y * HOVER_M as f64
+                // Keep to its summoner's flank; with a foe in sight, drift out to fight it
+                // from a bolt's comfortable range, never far from its summoner.
+                let spot = match (target, owner) {
+                    (Some((_, tp)), Some((op, _))) => {
+                        let back = flat(op - tp).normalize_or(DVec3::Z);
+                        let side = DVec3::new(-back.z, 0.0, back.x);
+                        let stand = tp + back * ENGAGE_M as f64;
+                        let out = flat(stand - op);
+                        let stand = if out.length() > GUARD_M as f64 {
+                            op + out.normalize() * GUARD_M as f64
+                        } else {
+                            stand
+                        };
+                        Some(stand + side * (1.5 * m.flank) as f64)
+                    }
+                    (None, Some((op, orot))) => {
+                        Some(op + (orot * Vec3::new(2.4 * m.flank, 0.0, 0.6)).as_dvec3())
+                    }
+                    _ => None,
+                };
+                let goal = spot
+                    .map(|p| {
+                        ground_below(&queries, p + DVec3::Y, &exclude) + DVec3::Y * HOVER_M as f64
                     })
                     .unwrap_or(m.pos);
                 let pull = 1.0 - (-2.0 * dt).exp();
@@ -1332,6 +1355,10 @@ fn minion_cast(m: &Minion, e: Entity, spell: &Arc<Spell>, scale: f32) -> CastInf
         seed: m.cast.seed.wrapping_add(m.attacks * 7919),
         ..m.cast.clone()
     }
+}
+
+fn flat(d: DVec3) -> DVec3 {
+    DVec3::new(d.x, 0.0, d.z)
 }
 
 fn flat_distance(a: DVec3, b: DVec3) -> f64 {

@@ -172,6 +172,21 @@ pub fn tick_tether(
             }
             filter.exclude.push(h.entity);
         }
+        // A faint crackle along the line until the next tick (Particles draws it over the
+        // meshes; "chain" for a chain).
+        queue.looks.push(LookCmd::Beam {
+            from,
+            to,
+            look: if draws_as_chain(&spell.weave.ingredients) {
+                "chain"
+            } else {
+                "tether"
+            }
+            .into(),
+            color: spell.weave.color,
+            width: 0.04,
+            secs: spell.carrier.tick.max(0.05) + 0.05,
+        });
         // Sparks where it bites, every other tick.
         if link.ticks % 2 == 1 {
             queue.looks.push(LookCmd::Burst {
