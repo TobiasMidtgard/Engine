@@ -549,7 +549,7 @@ fn lanes(program: Program, cycle: u64) -> Vec<Lane> {
                     .named(name)
             };
             vec![
-                // A wisp for the wounded mage of the first lane.
+                // A wisp: it flies to the wounded mage of the third lane.
                 // (Its lane fires no stagger, and a cast at 0.0 waits a whole period.)
                 casts(vec![cast(0.1, summon(&["heal"], "Wisp"), AimAt::Lane(7.0))]),
                 // A chain haul drags the dummy in; then a storm tether holds it until a push
@@ -763,8 +763,9 @@ fn setup_program(
                 commands.entity(e).insert(Vitality::new(300.0));
             }
         }
-        // The summon program's first mage starts each period hurt, for its wisp to heal.
-        if program == Program::Summon && m.lane == 0 {
+        // The stone golem's summoner starts each period hurt, for the first lane's wisp to fly
+        // over and heal (in the camera's view, where its own lane is far off).
+        if program == Program::Summon && m.lane == 2 {
             commands.entity(e).insert(Vitality {
                 health: 105.0,
                 ..Vitality::new(300.0)

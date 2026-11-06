@@ -87,7 +87,7 @@ pub const AGGRO_M: f32 = 18.0;
 pub const LEASH_M: f32 = 25.0;
 /// An elemental's and a wisp's reach, m.
 pub const SHOOT_M: f32 = 20.0;
-pub const HOVER_M: f32 = 1.9;
+pub const HOVER_M: f32 = 2.2;
 /// An elemental fights from this far off its foe, and strays at most this far from its
 /// summoner, m.
 pub const ENGAGE_M: f32 = 5.5;
@@ -160,7 +160,10 @@ const GOLEM_SIZES: [[f32; 3]; 17] = [
 ];
 
 /// Shards around an elemental's core.
-pub const SHARDS: usize = 9;
+pub const SHARDS: usize = 11;
+/// An elemental's shell, m across its shard orbit (times its size): about an atronach's
+/// presence, so it reads as a creature beside a 2.5 m golem rather than a spark.
+pub const SHELL_M: f32 = 1.8;
 
 // ------------------------------------------------------------------------------- state
 
@@ -597,8 +600,8 @@ pub fn body_material(element: Option<Element>) -> StandardMaterial {
     match element {
         None => rock,
         Some(Element::Fire) => rock
-            .with_tint(0.3, 0.26, 0.24)
-            .with_emissive([1.0, 0.3, 0.05], 0.35),
+            .with_tint(0.16, 0.13, 0.12)
+            .with_emissive([1.0, 0.3, 0.05], 1.6),
         Some(Element::Frost) => rock
             .with_tint(0.78, 0.88, 0.98)
             .with_roughness(0.35)
@@ -709,12 +712,24 @@ pub fn spawn_minion(commands: &mut Commands, m: NewMinion, looks: &mut Vec<LookC
                 range: 6.0,
                 radius: 0.2,
             });
+            // A golem woven with an element wears it: its element's aura rides its chest, so
+            // flames lick a lava golem and frost smokes off a frost one.
+            if element.is_some() {
+                looks.push(LookCmd::Attach {
+                    entity: parts[TORSO],
+                    look: spell.weave.key.clone(),
+                    role: Role::Aura,
+                    scale: 1.3 * k,
+                    color: spell.weave.color,
+                    power_j: spell.power.energy_j as f32 * 0.2,
+                });
+            }
         }
         MinionKind::Elemental => {
-            part(commands, 0, Vec3::ZERO, glow(0.2 * k, color, 22.0));
+            part(commands, 0, Vec3::ZERO, glow(0.3 * k, color, 30.0));
             let mat = body_material(element);
             for i in 0..SHARDS {
-                let s = 0.13 + 0.12 * roll(seed, 40 + i as u64);
+                let s = 0.19 + 0.17 * roll(seed, 40 + i as u64);
                 let size = Vec3::new(s, s * 1.6, s) * k;
                 part(
                     commands,
@@ -726,12 +741,12 @@ pub fn spawn_minion(commands: &mut Commands, m: NewMinion, looks: &mut Vec<LookC
             commands.entity(root).insert((
                 PointLight {
                     color,
-                    intensity_lm: 2500.0,
-                    range: 8.0,
-                    radius: 0.3,
+                    intensity_lm: 4000.0,
+                    range: 10.0,
+                    radius: 0.4,
                 },
                 Collider {
-                    shape: ColliderShape::Sphere { radius: 0.55 * k },
+                    shape: ColliderShape::Sphere { radius: 0.8 * k },
                     ..Default::default()
                 },
                 RigidBody {
@@ -743,20 +758,20 @@ pub fn spawn_minion(commands: &mut Commands, m: NewMinion, looks: &mut Vec<LookC
                 entity: root,
                 look: spell.weave.key.clone(),
                 role: Role::Aura,
-                // Particles' auras are sized for a 1.3 m body at scale 1, as this one is.
-                scale: k,
+                // Particles' auras are sized for a 1.3 m body at scale 1.
+                scale: SHELL_M / 1.3 * k,
                 color: spell.weave.color,
                 power_j: spell.power.energy_j as f32 * 0.2,
             });
         }
         MinionKind::Wisp => {
-            part(commands, 0, Vec3::ZERO, glow(0.16, color, 120.0));
+            part(commands, 0, Vec3::ZERO, glow(0.22, color, 120.0));
             for i in 0..3 {
-                part(commands, 1 + i, Vec3::ZERO, glow(0.03, color, 60.0));
+                part(commands, 1 + i, Vec3::ZERO, glow(0.05, color, 70.0));
             }
             commands.entity(root).insert(PointLight {
                 color,
-                intensity_lm: 700.0,
+                intensity_lm: 1400.0,
                 range: 5.0,
                 radius: 0.1,
             });
@@ -1389,9 +1404,9 @@ fn pose_shell(
         }
         let i = (part.index - 1) as f32;
         let (n, r) = if m.kind == MinionKind::Wisp {
-            (3.0, 0.24)
+            (3.0, 0.36)
         } else {
-            (SHARDS as f32, 0.62 * k * (1.0 - 0.25 * gather))
+            (SHARDS as f32, 0.5 * SHELL_M * k * (1.0 - 0.25 * gather))
         };
         let a = m.spin
             * if (i as usize).is_multiple_of(2) {
@@ -1403,7 +1418,7 @@ fn pose_shell(
         let tilt = 0.5 * (i * 1.7).sin();
         let at = Vec3::new(
             a.cos() * r,
-            (a * 1.3 + i).sin() * 0.22 * k + tilt * a.sin() * r,
+            (a * 1.3 + i).sin() * 0.3 * k + tilt * a.sin() * r,
             a.sin() * r,
         );
         tf.translation = at.as_dvec3();

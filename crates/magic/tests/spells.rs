@@ -1152,6 +1152,23 @@ fn the_summon_hall_raises_every_creature_in_its_first_period() {
     assert_eq!(count(summon::MinionKind::Golem), 2);
     assert_eq!(count(summon::MinionKind::Elemental), 2);
     assert_eq!(count(summon::MinionKind::Wisp), 1, "the first lane's wisp");
+    // It flew over to the stone golem's wounded summoner and healed it.
+    let mut mages = app
+        .world
+        .query::<(&demo::art::HallMage, &Vitality, &GlobalTransform)>();
+    let (health, at) = mages
+        .iter(&app.world)
+        .find(|(m, ..)| m.lane == 2)
+        .map(|(_, v, g)| (v.health, g.translation()))
+        .unwrap();
+    assert!(health > 140.0, "healed from 105: {health}");
+    let wisp = found
+        .iter()
+        .find(|(_, m)| m.kind == summon::MinionKind::Wisp)
+        .unwrap()
+        .0;
+    let w = app.world.get::<Transform>(wisp).unwrap().translation;
+    assert!((w - at).length() < 4.0, "the wisp at {w}, the mage at {at}");
     // The elementals floated out to the lava golem's dummy, at (3, 0, -5), and fight it there.
     for (e, m) in &found {
         if m.kind != summon::MinionKind::Elemental {
