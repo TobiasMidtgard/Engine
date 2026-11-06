@@ -16,6 +16,7 @@ use crate::trail::{RibbonStyle, Trail};
 
 mod casting;
 mod elements;
+mod stone;
 mod weaves;
 
 fn em(name: &str) -> EmitterDesc {
@@ -379,6 +380,7 @@ pub fn all() -> Vec<EffectDesc> {
     let named = elements::aliases(&v);
     v.extend(named);
     v.extend(elements::all());
+    v.extend(stone::all());
     let woven = weaves::all(&v);
     v.extend(woven);
     let cast = casting::all(&v);
