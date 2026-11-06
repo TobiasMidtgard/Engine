@@ -13,7 +13,7 @@
 //! 150 m, and a wood of 12,000 scenery trees from a hill (with and without the distant level). Name shots after the directory to render
 //! only those (`lineup`, `lineup_near`, `lineup_mid`, `lineup_lod`, `lineup_distant`, `roots`, `crown_front`,
 //! `leaves_close`, `crown_back`, `conifers`, `lineup_stands` (the stands' other eight trees), `pine_crown`, `birch_hazel`, `grove`,
-//! `grove_far`, `savanna`, `savanna_side`, `savanna_high`, `prairie`, `rainforest`, `rainforest_below`, `beach`, `beach_crown`, `beach_stem`, `canada`, `canada_close`, `norway`, `norway_close`, `valley`, `valley_far`, `far_woods`, `far_woods_off`), `textures`
+//! `grove_far`, `savanna`, `savanna_side`, `savanna_high`, `prairie`, `rainforest`, `rainforest_below`, `beach`, `beach_crown`, `beach_stem`, `beach_under`, `canada`, `canada_close`, `norway`, `norway_close`, `valley`, `valley_far`, `far_woods`, `far_woods_off`), `textures`
 //! to save the leaf atlases, their normal maps, three of their mip levels and the mass atlases far
 //! crowns draw with instead, or `stats` to print triangle counts.
 
@@ -105,6 +105,7 @@ fn save_textures(out: &str) {
         ("aspen", LeafKind::Round),
         ("rowan", LeafKind::Pinnate),
         ("larch", LeafKind::SoftNeedles),
+        ("palm", LeafKind::Palm),
     ] {
         let started = std::time::Instant::now();
         let t = leaf_textures(kind, 1024, 0x1eaf);
@@ -914,6 +915,18 @@ fn main() {
             "beach_stem",
             palms.first().copied().unwrap_or(beach) + DVec3::new(3.6, 1.3, 2.6),
             palms.first().copied().unwrap_or(beach) + DVec3::new(0.0, 1.6, 0.0),
+            Vec3::new(-0.5, 0.6, 0.6),
+        );
+    }
+    if wanted("beach_under") {
+        // Straight up under a crown: the frond bases and the coconuts among them.
+        let foot = palms.first().copied().unwrap_or(beach);
+        shot(
+            &mut app,
+            &out,
+            "beach_under",
+            foot + DVec3::new(6.0, 1.6, 4.0),
+            foot + DVec3::new(0.0, 14.0, 0.0),
             Vec3::new(-0.5, 0.6, 0.6),
         );
     }
