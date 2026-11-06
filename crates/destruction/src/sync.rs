@@ -410,18 +410,21 @@ fn mesh_chunk(
     let layers = mesh_chunk_layers(state, look, [cx, cy, cz]);
     let empty = layers.iter().all(|(_, m)| m.is_empty());
     let collider = (physics && !empty).then(|| {
-        let mut vertices = Vec::new();
-        let mut indices = Vec::new();
-        for (_, m) in &layers {
-            let base = vertices.len() as u32;
-            vertices.extend(m.vertices.iter().map(|v| Vec3::from(v.position)));
-            indices.extend(
-                m.indices
-                    .as_chunks::<3>()
-                    .0
-                    .iter()
-                    .map(|t| [base + t[0], base + t[1], base + t[2]]),
-            );
+        // Its own coarser mesh, not the drawn one (`voxel::collision_chunk`); a sliver too
+        // thin for its blocks keeps the drawn one.
+        let (mut vertices, mut indices) = crate::voxel::collision_chunk(state, [cx, cy, cz]);
+        if indices.is_empty() {
+            for (_, m) in &layers {
+                let base = vertices.len() as u32;
+                vertices.extend(m.vertices.iter().map(|v| Vec3::from(v.position)));
+                indices.extend(
+                    m.indices
+                        .as_chunks::<3>()
+                        .0
+                        .iter()
+                        .map(|t| [base + t[0], base + t[1], base + t[2]]),
+                );
+            }
         }
         Collider {
             shape: ColliderShape::TriMesh {

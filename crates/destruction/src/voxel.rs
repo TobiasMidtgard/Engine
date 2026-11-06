@@ -1822,6 +1822,139 @@ pub fn mesh_chunk_layers(
     mesh_region_layers(state, look, lo, hi, Vec3::ZERO)
 }
 
+/// Coarsest cell a chunk's collision mesh uses, meters: rock collides at half a meter or
+/// finer, so a 0.25 m volume collides on every second sample.
+pub const COLLISION_CELL: f32 = 0.5;
+
+/// Samples per collision cell along each axis for `state` (1 keeps its own resolution).
+pub fn collision_step(state: &VoxelState) -> i64 {
+    ((COLLISION_CELL / state.size.max(1e-3)).round() as i64).max(1)
+}
+
+/// The collision mesh of one chunk: surface nets over the density averaged on blocks of
+/// [`collision_step`] samples, without the render mesh's relief, colors or layers. The
+/// render mesh of a 0.25 m chunk is 860-1250 triangles, and a debris hull resting on it got a
+/// contact manifold per triangle it touched (400-620 a pair, 20-25 ms narrow-phase steps at
+/// the fortress); simple collision apart from the drawn mesh is what Unreal ("simple
+/// collision"), Unity (mesh collider proxies) and Chaos's geometry collections do. Seams
+/// match between chunks: a chunk's blocks start on its own sample boundaries.
+pub fn collision_chunk(state: &VoxelState, chunk: [usize; 3]) -> (Vec<Vec3>, Vec<[u32; 3]>) {
+    let (lo, hi) = chunk_bounds(state, chunk);
+    collision_region(state, lo, hi, collision_step(state))
+}
+
+fn collision_region(
+    state: &VoxelState,
+    lo: [i64; 3],
+    hi: [i64; 3],
+    step: i64,
+) -> (Vec<Vec3>, Vec<[u32; 3]>) {
+    let n = (step * step * step) as f32;
+    // A block's density: the mean of its samples, so the surface stays where the fine one is.
+    let f = |p: [i64; 3]| -> f32 {
+        let mut sum = 0.0;
+        for k in 0..step {
+            for j in 0..step {
+                for i in 0..step {
+                    sum += state.sample(p[0] * step + i, p[1] * step + j, p[2] * step + k) as f32;
+                }
+            }
+        }
+        sum / n - 127.5
+    };
+    let (clo, chi) = (
+        lo.map(|v| v.div_euclid(step)),
+        hi.map(|v| v.div_euclid(step) + (v.rem_euclid(step) != 0) as i64),
+    );
+    let floor_anchored = state.anchored[2];
+    let cell = state.size * step as f32;
+    let half = state.size * step as f32 * 0.5;
+    let mut vertices: Vec<Vec3> = Vec::new();
+    let mut triangles: Vec<[u32; 3]> = Vec::new();
+    let mut field: HashMap<[i64; 3], f32> = HashMap::new();
+    let mut cache: HashMap<[i64; 3], Option<u32>> = HashMap::new();
+    let mut value = |p: [i64; 3]| *field.entry(p).or_insert_with(|| f(p));
+    let mut make_vertex = |c: [i64; 3],
+                           vertices: &mut Vec<Vec3>,
+                           value: &mut dyn FnMut([i64; 3]) -> f32|
+     -> Option<u32> {
+        if let Some(v) = cache.get(&c) {
+            return *v;
+        }
+        let vals: [f32; 8] = CORNERS.map(|o| value([c[0] + o[0], c[1] + o[1], c[2] + o[2]]));
+        let mut sum = Vec3::ZERO;
+        let mut count = 0.0;
+        for (a, b) in EDGES {
+            let (fa, fb) = (vals[a], vals[b]);
+            if (fa >= 0.0) != (fb >= 0.0) {
+                let t = fa / (fa - fb);
+                let pa = Vec3::from(CORNERS[a].map(|v| v as f32));
+                let pb = Vec3::from(CORNERS[b].map(|v| v as f32));
+                sum += pa + (pb - pa) * t;
+                count += 1.0;
+            }
+        }
+        let id = (count > 0.0).then(|| {
+            let local = sum / count;
+            let corner = Vec3::new(c[0] as f32, c[1] as f32, c[2] as f32);
+            vertices.push(state.origin + (corner + local) * cell + Vec3::splat(half));
+            vertices.len() as u32 - 1
+        });
+        cache.insert(c, id);
+        id
+    };
+    for axis in 0..3 {
+        let (b, c) = ((axis + 1) % 3, (axis + 2) % 3);
+        for z in clo[2]..chi[2] {
+            for y in clo[1]..chi[1] {
+                for x in clo[0]..chi[0] {
+                    let p0 = [x, y, z];
+                    if floor_anchored && axis != 1 && y < 0 {
+                        continue;
+                    }
+                    let mut p1 = p0;
+                    p1[axis] += 1;
+                    let (f0, f1) = (value(p0), value(p1));
+                    if (f0 >= 0.0) == (f1 >= 0.0) {
+                        continue;
+                    }
+                    let mut cubes = [p0; 4];
+                    cubes[1][b] -= 1;
+                    cubes[2][b] -= 1;
+                    cubes[2][c] -= 1;
+                    cubes[3][c] -= 1;
+                    let mut ids = [0u32; 4];
+                    let mut ok = true;
+                    for (k, cube) in cubes.iter().enumerate() {
+                        match make_vertex(*cube, &mut vertices, &mut value) {
+                            Some(id) => ids[k] = id,
+                            None => ok = false,
+                        }
+                    }
+                    if !ok {
+                        continue;
+                    }
+                    // Wound as the render mesh: facing out of the rock.
+                    if f0 < 0.0 {
+                        ids.reverse();
+                    }
+                    let pos = |id: u32| vertices[id as usize];
+                    if pos(ids[0]).distance_squared(pos(ids[2]))
+                        <= pos(ids[1]).distance_squared(pos(ids[3]))
+                    {
+                        triangles.push([ids[0], ids[1], ids[2]]);
+                        triangles.push([ids[0], ids[2], ids[3]]);
+                    } else {
+                        triangles.push([ids[0], ids[1], ids[3]]);
+                        triangles.push([ids[1], ids[2], ids[3]]);
+                    }
+                }
+            }
+        }
+    }
+    (vertices, triangles)
+}
+
 fn chunk_bounds(state: &VoxelState, chunk: [usize; 3]) -> ([i64; 3], [i64; 3]) {
     let mut lo = [0i64; 3];
     let mut hi = [0i64; 3];
@@ -2093,6 +2226,64 @@ mod tests {
         assert!(
             striped.is_empty(),
             "rock under soil on a slope at {striped:?}"
+        );
+    }
+
+    #[test]
+    fn rock_collides_on_a_coarser_mesh_that_follows_the_drawn_one() {
+        let v = VoxelVolume::hill(34.0, 8.0, 30.0, 0.25).with_seed(23);
+        let s = VoxelState::new(&v, &mats());
+        let look = VoxelLook::new(&v, &mats());
+        assert_eq!(collision_step(&s), 2);
+        let (mut drawn, mut coarse) = (0usize, 0usize);
+        // Drawn vertices on a 0.5 m grid, to find the nearest one.
+        let mut grid: HashMap<[i32; 3], Vec<Vec3>> = HashMap::new();
+        let cell = |p: Vec3| (p / 0.5).floor().as_ivec3().to_array();
+        let mut coarse_verts = Vec::new();
+        for ci in 0..s.chunk_dirty.len() {
+            let c = [
+                ci % s.chunks[0],
+                (ci / s.chunks[0]) % s.chunks[1],
+                ci / (s.chunks[0] * s.chunks[1]),
+            ];
+            for (_, m) in mesh_chunk_layers(&s, &look, c) {
+                drawn += m.indices.len() / 3;
+                for v in &m.vertices {
+                    let p = Vec3::from(v.position);
+                    grid.entry(cell(p)).or_default().push(p);
+                }
+            }
+            let (verts, tris) = collision_chunk(&s, c);
+            coarse += tris.len();
+            coarse_verts.extend(verts);
+        }
+        assert!(
+            coarse * 3 < drawn,
+            "{coarse} collision triangles for {drawn} drawn"
+        );
+        // The chunks' meshes join without seams: together they are the whole volume's mesh.
+        let hi = s.dims.map(|d| d as i64);
+        let (_, whole) = collision_region(&s, [-1, -1, -1], hi, 2);
+        assert_eq!(coarse, whole.len());
+        // And they follow the drawn surface (its relief included) to within 0.3 m.
+        let mut worst = 0.0f32;
+        for p in &coarse_verts {
+            let [x, y, z] = cell(*p);
+            let mut near = f32::INFINITY;
+            for dz in -1..=1 {
+                for dy in -1..=1 {
+                    for dx in -1..=1 {
+                        for q in grid.get(&[x + dx, y + dy, z + dz]).into_iter().flatten() {
+                            near = near.min(q.distance(*p));
+                        }
+                    }
+                }
+            }
+            worst = worst.max(near);
+        }
+        assert!(
+            worst < 0.3,
+            "a collision vertex {worst} m from the drawn surface"
         );
     }
 
