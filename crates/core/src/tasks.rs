@@ -138,19 +138,7 @@ pub fn par_chunks_mut<T: Send>(
         return;
     }
     let f = &f;
-    let on_async = std::thread::current()
-        .name()
-        .is_none_or(|n| n.starts_with("async"));
-    // From the frame's threads the chunks go to the leaf pool, not the compute pool: a thread
-    // waiting in a compute-pool scope runs other queued tasks meanwhile, whole systems among
-    // them, so a loop of a millisecond's work held its system up for another system's run
-    // (softbody's 24 resting bodies took 7-10 ms, fire's kernels 2.8 ms a frame at the
-    // fortress, VM). Waiting on the leaf pool runs only other loops' chunks, which never wait
-    // on anything but their own chunks.
-    let pool: Option<&TaskPool> = match on_async.then(AsyncComputeTaskPool::try_get).flatten() {
-        Some(pool) => Some(pool),
-        None => ComputeTaskPool::try_get().map(|_| leaf_pool()),
-    };
+    let pool = split_pool();
     // Without pools (a plain unit test, a tool), the chunks run one after another.
     let Some(pool) = pool else {
         for (i, chunk) in data.chunks_mut(chunk_size).enumerate() {
@@ -165,6 +153,28 @@ pub fn par_chunks_mut<T: Send>(
     });
 }
 
+/// The pool [`par_chunks_mut`] splits on for the calling thread, if any.
+fn split_pool() -> Option<&'static TaskPool> {
+    let on_async = std::thread::current()
+        .name()
+        .is_none_or(|n| n.starts_with("async"));
+    // From the frame's threads the chunks go to the leaf pool, not the compute pool: a thread
+    // waiting in a compute-pool scope runs other queued tasks meanwhile, whole systems among
+    // them, so a loop of a millisecond's work held its system up for another system's run
+    // (softbody's 24 resting bodies took 7-10 ms, fire's kernels 2.8 ms a frame at the
+    // fortress, VM). Waiting on the leaf pool runs only other loops' chunks, which never wait
+    // on anything but their own chunks.
+    // Background callers split on a leaf pool of their own for the same reason: an async
+    // worker waiting in an async-pool scope ran whole zone builds meanwhile (foliage's region
+    // step waited 0.9-2.5 s on chunks of a millisecond, VM).
+    if on_async {
+        AsyncComputeTaskPool::try_get().map(|_| background_leaf_pool())
+    } else {
+        None
+    }
+    .or_else(|| ComputeTaskPool::try_get().map(|_| leaf_pool()))
+}
+
 /// Threads for data-parallel loops called from the frame's threads ([`par_chunks_mut`]): as
 /// many as the compute pool. Their tasks are pieces of a loop that never wait on anything
 /// but nested pieces, so a thread waiting in a scope here only helps other loops along.
@@ -176,6 +186,19 @@ pub fn leaf_pool() -> &'static TaskPool {
         TaskPoolBuilder::new()
             .num_threads(pool_sizes(cores).0)
             .thread_name("leaf".into())
+            .build()
+    })
+}
+
+/// [`leaf_pool`] for background callers (async workers, unnamed module threads): as many
+/// threads as the async pool, named "async leaf" so their own nested loops stay here.
+pub fn background_leaf_pool() -> &'static TaskPool {
+    static POOL: std::sync::OnceLock<TaskPool> = std::sync::OnceLock::new();
+    POOL.get_or_init(|| {
+        let cores = std::thread::available_parallelism().map_or(4, |n| n.get());
+        TaskPoolBuilder::new()
+            .num_threads(pool_sizes(cores).1)
+            .thread_name("async leaf".into())
             .build()
     })
 }
@@ -365,6 +388,34 @@ mod tests {
         }
     }
     #[test]
+    fn a_loop_on_an_async_worker_splits_on_the_background_leaf_pool() {
+        init_task_pools();
+        // On a worker for sure (block_on doesn't run the pool's tasks on this thread).
+        let job = AsyncComputeTaskPool::get().spawn(async {
+            let caller = std::thread::current().name().map(str::to_owned);
+            let routed = split_pool().is_some_and(|p| std::ptr::eq(p, background_leaf_pool()));
+            let mut seen: Vec<Option<String>> = vec![None; 32];
+            par_chunks_mut(&mut seen, 1, |_, s| {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+                s[0] = std::thread::current().name().map(str::to_owned);
+            });
+            (caller, routed, seen)
+        });
+        let (caller, routed, seen) = bevy_tasks::block_on(job);
+        let caller = caller.unwrap_or_default();
+        assert!(caller.starts_with("async"), "ran on {caller}");
+        assert!(routed, "a worker's loop splits on the background leaf pool");
+        // Only the waiting worker itself and the leaf threads take chunks: never another
+        // async worker, which might be in the middle of a long build.
+        for name in seen.into_iter().flatten() {
+            assert!(
+                name == caller || name.starts_with("async leaf"),
+                "chunk ran on {name}"
+            );
+        }
+    }
+
+    #[test]
     fn a_loop_on_a_system_thread_waits_without_running_other_queued_tasks() {
         init_task_pools();
         let pool = ComputeTaskPool::get();
@@ -374,7 +425,11 @@ mod tests {
             s.spawn(async {
                 let t0 = std::time::Instant::now();
                 let mut data = vec![0u32; 64];
-                par_chunks_mut(&mut data, 2, |i, c| c.fill(i as u32));
+                par_chunks_mut(&mut data, 2, |i, c| {
+                    // Long enough for other threads to steal chunks, as in a real loop.
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                    c.fill(i as u32);
+                });
                 assert_eq!(data[63], 31);
                 *loop_ms.lock().unwrap() = Some(t0.elapsed().as_millis());
             });
