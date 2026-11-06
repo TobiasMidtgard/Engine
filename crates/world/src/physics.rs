@@ -620,6 +620,45 @@ pub trait PhysicsQuery: Send + Sync + 'static {
     /// Closest point on any collider within `max_distance` of `point` (cloth/particle
     /// collision). `distance` is negative when `point` is inside.
     fn closest_point(&self, point: DVec3, max_distance: f32, filter: &QueryFilter) -> Option<Hit>;
+    /// The first hit along each of `rays`, each with `filters[ray.filter]`: `out` is cleared
+    /// and gets one answer a ray, in order. The batch reads the world once and a backend may
+    /// spread it over threads, so many short sight lines cost less than one call each. A ray
+    /// whose filter index is out of range misses. The default asks [`Self::raycast`] for each.
+    fn raycast_many(&self, rays: &[RayQuery], filters: &[QueryFilter], out: &mut Vec<Option<Hit>>) {
+        out.clear();
+        out.extend(rays.iter().map(|r| {
+            let f = filters.get(r.filter as usize)?;
+            self.raycast(r.origin, r.dir, r.max_distance, f)
+        }));
+    }
+}
+
+/// One ray of a batch ([`PhysicsQuery::raycast_many`]).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RayQuery {
+    pub origin: DVec3,
+    /// Normalized.
+    pub dir: Vec3,
+    pub max_distance: f32,
+    /// Which of the batch's filters it uses.
+    pub filter: u16,
+}
+
+impl RayQuery {
+    /// A ray from `from` toward `to`, stopping `short` before it (a sight line that shouldn't
+    /// hit what it looks at). `None` when the two are closer than 1 mm.
+    pub fn between(from: DVec3, to: DVec3, short: f64, filter: u16) -> Option<Self> {
+        let len = from.distance(to);
+        if len < 1e-3 {
+            return None;
+        }
+        Some(Self {
+            origin: from,
+            dir: ((to - from) / len).as_vec3(),
+            max_distance: (len - short).max(0.0) as f32,
+            filter,
+        })
+    }
 }
 
 /// The active physics queries. Defaults to an empty world (every query misses) until a

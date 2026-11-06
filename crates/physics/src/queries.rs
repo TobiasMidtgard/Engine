@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use engine_core::math::{DVec3, Quat, Vec3};
 use engine_core::prelude::*;
-use engine_world::physics::{ColliderShape, Hit, PhysicsQuery, QueryFilter};
+use engine_world::physics::{ColliderShape, Hit, PhysicsQuery, QueryFilter, RayQuery};
 use parking_lot::RwLock;
 use rapier3d::parry::query::ShapeCastOptions;
 use rapier3d::prelude::{
@@ -68,6 +68,42 @@ fn regions_near<'a>(
     })
 }
 
+/// Rays a leaf-pool task of [`RapierQueries::raycast_many`] answers: a sight line costs a few
+/// µs, so a chunk is worth handing over.
+const RAYS_A_CHUNK: usize = 16;
+
+/// The first hit along a ray, across every region it passes through.
+fn cast_ray(
+    sim: &Simulation,
+    origin: DVec3,
+    dir: Vec3,
+    max_distance: f32,
+    filter: &QueryFilter,
+) -> Option<Hit> {
+    let dir = dir.try_normalize()?;
+    let pred = |_: ColliderHandle, c: &RapierCollider| accepts(filter, c);
+    let mut best: Option<Hit> = None;
+    for region in regions_near(sim, origin, dir, max_distance, 0.0) {
+        let ray = Ray::new(region.local(origin), dir);
+        let max = best.map_or(max_distance, |b| b.distance);
+        if let Some((h, i)) =
+            region
+                .world
+                .cast_ray_and_get_normal(&ray, max, true, RFilter::new().predicate(&pred))
+        {
+            let c = &region.world.colliders[h];
+            best = Some(hit(
+                region,
+                c,
+                ray.point_at(i.time_of_impact),
+                i.normal,
+                i.time_of_impact,
+            ));
+        }
+    }
+    best
+}
+
 impl PhysicsQuery for RapierQueries {
     fn raycast(
         &self,
@@ -76,30 +112,28 @@ impl PhysicsQuery for RapierQueries {
         max_distance: f32,
         filter: &QueryFilter,
     ) -> Option<Hit> {
-        let sim = self.sim();
-        let dir = dir.try_normalize()?;
-        let pred = |_: ColliderHandle, c: &RapierCollider| accepts(filter, c);
-        let mut best: Option<Hit> = None;
-        for region in regions_near(&sim, origin, dir, max_distance, 0.0) {
-            let ray = Ray::new(region.local(origin), dir);
-            let max = best.map_or(max_distance, |b| b.distance);
-            if let Some((h, i)) = region.world.cast_ray_and_get_normal(
-                &ray,
-                max,
-                true,
-                RFilter::new().predicate(&pred),
-            ) {
-                let c = &region.world.colliders[h];
-                best = Some(hit(
-                    region,
-                    c,
-                    ray.point_at(i.time_of_impact),
-                    i.normal,
-                    i.time_of_impact,
-                ));
-            }
+        cast_ray(&self.sim(), origin, dir, max_distance, filter)
+    }
+
+    /// One read lock for the batch, the rays split over the leaf pool
+    /// (`engine_core::tasks::par_chunks_mut`; in order on the calling thread when the batch
+    /// is small or there is no pool). Each answer is what [`Self::raycast`] gives.
+    fn raycast_many(&self, rays: &[RayQuery], filters: &[QueryFilter], out: &mut Vec<Option<Hit>>) {
+        out.clear();
+        out.resize(rays.len(), None);
+        if rays.is_empty() {
+            return;
         }
-        best
+        let sim = self.sim();
+        let sim: &Simulation = &sim;
+        engine_core::tasks::par_chunks_mut(out, RAYS_A_CHUNK, |i, chunk| {
+            let first = i * RAYS_A_CHUNK;
+            for (o, r) in chunk.iter_mut().zip(&rays[first..]) {
+                *o = filters
+                    .get(r.filter as usize)
+                    .and_then(|f| cast_ray(sim, r.origin, r.dir, r.max_distance, f));
+            }
+        });
     }
 
     fn shapecast(
