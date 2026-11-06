@@ -46,7 +46,10 @@ pub const DENSITY: f32 = 550.0;
 pub const RAIL_PEG: (f32, f32) = (2_500.0, 450.0);
 pub const POST_PEG: (f32, f32) = (12_000.0, 2_500.0);
 pub const FOOTING: (f32, f32) = (15_000.0, 3_000.0);
-pub const DECK_PEG: (f32, f32) = (9_000.0, 2_000.0);
+/// The deck's pegs bend at 900 N·m, so on three posts the deck's corner over the lost one
+/// breaks them: at 2,000 the deck stood on three posts in some joint orders, and from about
+/// 1,200 up it could (`the_catapult_throws_its_ball_and_brings_down_the_watchtower`).
+pub const DECK_PEG: (f32, f32) = (9_000.0, 900.0);
 pub const RAILING_PEG: (f32, f32) = (3_000.0, 500.0);
 
 /// The tower's turn about the vertical: a corner toward -X, where the catapult stands.
