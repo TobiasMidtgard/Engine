@@ -624,6 +624,62 @@ fn map_shades(view: &ViewData, map: usize, center: Vec3, radius: f32) -> bool {
     }
 }
 
+/// Whether a leaf crown's sphere is where `set_canopy_crowns` takes crowns.
+fn in_canopy(p: &CullParams<'_>, center: Vec3, radius: f32, hot: &Hot) -> bool {
+    use crate::canopy::{CANOPY_HALF_EXTENT, CANOPY_TEXEL};
+    let c = center + p.canopy_shift;
+    hot.cast_texels.casts_at(CANOPY_TEXEL)
+        && c.x.abs() - radius <= CANOPY_HALF_EXTENT
+        && c.z.abs() - radius <= CANOPY_HALF_EXTENT
+}
+
+/// The size of a texel of shadow map `map`, meters.
+fn map_texel(view: &ViewData, map: usize) -> f32 {
+    match map {
+        SKY_OCCLUSION_VIEW => view.sky_occlusion.extent / view.sky_occlusion.map_size.max(1) as f32,
+        FAR_SHADOW_MAP => view.far_shadow.texel(),
+        c => 2.0 * view.cascades.half_extent[c] / view.cascades.map_size.max(1) as f32,
+    }
+}
+
+/// The smallest caster (diameter, in texels of `map`) the shadow lists keep in that map.
+fn map_min_caster(map: usize, min_caster_texels: f32, min_pixels: f32) -> f32 {
+    if map < MAX_CASCADES {
+        min_caster_texels
+    } else {
+        // The far and sky maps: under two texels a caster is a speck no filter keeps (pebbles
+        // and cones in the half-meter sky map).
+        min_pixels.max(2.0)
+    }
+}
+
+/// Whether the shadow lists could take a caster with this camera-relative bounding sphere into
+/// any of this frame's maps: inside one (as a still or a moving caster), wide enough for its
+/// texels and in its `ShadowTexelRange`. The lists' own test per map stays the exact one.
+fn caster_in_some_map(
+    view: &ViewData,
+    center: Vec3,
+    radius: f32,
+    range: crate::ShadowTexelRange,
+    min_caster_texels: f32,
+    min_pixels: f32,
+) -> bool {
+    let cascades = if view.sun_shadows {
+        (view.cascades.count as usize).min(MAX_CASCADES)
+    } else {
+        0
+    };
+    (0..cascades)
+        .chain(view.sky_occlusion.enabled.then_some(SKY_OCCLUSION_VIEW))
+        .chain((view.sun_shadows && view.far_shadow.enabled).then_some(FAR_SHADOW_MAP))
+        .any(|c| {
+            let texel = map_texel(view, c);
+            range.casts_at(texel)
+                && 2.0 * radius >= map_min_caster(c, min_caster_texels, min_pixels) * texel
+                && (map_holds(view, c, center, radius) || map_shades(view, c, center, radius))
+        })
+}
+
 /// Whether shadow map `map`'s static image is drawn again this frame.
 fn static_redraw(view: &ViewData, map: usize) -> bool {
     match map {
@@ -704,6 +760,10 @@ struct CullParams<'a> {
     lod_fades: bool,
     /// This frame (low 32 bits).
     frame: u32,
+    /// `RenderSettings::shadow_caster_min_texels` (at least `min_pixels`).
+    min_caster_texels: f32,
+    /// From camera-relative to the canopy map's anchor (`set_canopy_crowns`).
+    canopy_shift: Vec3,
 }
 
 struct Cull<'a> {
@@ -766,6 +826,21 @@ impl Cull<'_> {
         };
         let casts =
             self.p.shadows && hot.flags & mesh_scene::CASTS != 0 && !mat.blend && dither_casts;
+        // Out of view, it is an item only if some shadow map takes it (the shadow lists test
+        // the same per map): with every zone loaded, most casters out of view are small and
+        // past the cascades, and making items of them cost more than the lists.
+        // Leaf crowns near the camera also go into the canopy map (`set_canopy_crowns`).
+        let casts = casts
+            && (visible
+                || (mat.masked && mat.sways && in_canopy(&self.p, center, radius, hot))
+                || caster_in_some_map(
+                    self.p.view,
+                    center,
+                    radius,
+                    hot.cast_texels,
+                    self.p.min_caster_texels,
+                    self.p.min_pixels,
+                ));
         if !visible && !casts {
             self.unseen(hot);
             return None;
@@ -1804,6 +1879,10 @@ impl MeshFeature {
             shadows: view.sun_shadows || view.sky_occlusion.enabled,
             lod_fades: !view.extra_view && view.history_valid,
             frame: self.frame as u32,
+            min_caster_texels: settings
+                .shadow_caster_min_texels
+                .max(settings.min_object_pixels.max(0.0)),
+            canopy_shift: (view.origin - crate::canopy::anchor_for(view.origin)).as_vec3(),
         };
         let threads = gather_threads(self.scene.hot.len());
         let mut chunks = std::mem::take(&mut self.gather_scratch);
@@ -3628,13 +3707,7 @@ impl RenderFeature for MeshFeature {
             let image_frame = self.image_frame;
             let fill = |c: usize, out: &mut MapCasters| {
                 out.clear();
-                let texel = match c {
-                    SKY_OCCLUSION_VIEW => {
-                        view.sky_occlusion.extent / view.sky_occlusion.map_size.max(1) as f32
-                    }
-                    FAR_SHADOW_MAP => view.far_shadow.texel(),
-                    _ => 2.0 * view.cascades.half_extent[c] / view.cascades.map_size.max(1) as f32,
-                };
+                let texel = map_texel(view, c);
                 let redraw = static_redraw(view, c);
                 // Casters still since this frame are in the image when it is drawn again; the
                 // main view's other frames, those that turned still since it last took casters
@@ -3680,13 +3753,7 @@ impl RenderFeature for MeshFeature {
                     };
                     // Casters narrower than a few of a cascade's texels make no shadow its
                     // filter keeps (`RenderSettings::shadow_caster_min_texels`).
-                    let min_size = if c < MAX_CASCADES {
-                        min_caster_texels
-                    } else {
-                        // The far and sky maps: under two texels a caster is a speck no filter
-                        // keeps (pebbles and cones in the half-meter sky map).
-                        min_pixels.max(2.0)
-                    };
+                    let min_size = map_min_caster(c, min_caster_texels, min_pixels);
                     if !inside || 2.0 * item.radius < min_size * texel {
                         continue;
                     }
