@@ -9,6 +9,8 @@
 //! other. Everything sinks out of sight after its lifetime and a budget caps how much debris
 //! exists at once.
 
+use std::collections::HashMap;
+
 use bevy_tasks::{Task, block_on, poll_once};
 
 use engine_assets::{Assets, Handle};
@@ -22,6 +24,7 @@ use engine_world::physics::{
 };
 use engine_world::{
     ContactKind, Env, GroundContact, GroundSample, NoiseEvent, SimulationRange, SurfaceMaterials,
+    WorldShift,
 };
 
 use crate::assets::DestructionAssets;
@@ -1245,6 +1248,81 @@ const SLEEP_SECS: f32 = 0.3;
 /// Seconds in contact after which a piece that is only rocking or creeping settles anyway.
 const SETTLE_SECS: f32 = 2.5;
 
+/// Size of the cells ground samples are shared in, meters (a piece reads the ground along the
+/// tangent plane of its cell's sample, as it did along its own last sample's).
+const GROUND_CELL_M: f64 = 0.5;
+/// How long shared ground samples are kept, seconds (terrain streams in finer as you come
+/// closer; a world shift or a new ground clears them at once).
+const GROUND_CELL_SECS: f32 = 10.0;
+
+/// Ground samples shared by the pieces over the same spot. The landscape's ground (roads,
+/// streams, noise, a four-sample normal) was most of the debris step in the showcase.
+#[derive(Default)]
+pub struct GroundCells {
+    cells: HashMap<(i64, i64), Option<GroundSample>>,
+    age: f32,
+}
+
+impl GroundCells {
+    /// The cell `p` is in, and where in it the ground is sampled (its center, at `p`'s height).
+    fn cell(p: DVec3) -> ((i64, i64), DVec3) {
+        let c = (
+            (p.x / GROUND_CELL_M).floor() as i64,
+            (p.z / GROUND_CELL_M).floor() as i64,
+        );
+        let at = DVec3::new(
+            (c.0 as f64 + 0.5) * GROUND_CELL_M,
+            p.y,
+            (c.1 as f64 + 0.5) * GROUND_CELL_M,
+        );
+        (c, at)
+    }
+
+    /// The cell's sample, if taken (`Some(None)`: no ground there).
+    fn get(&self, c: (i64, i64)) -> Option<Option<GroundSample>> {
+        self.cells.get(&c).copied()
+    }
+
+    fn clear(&mut self) {
+        self.cells.clear();
+        self.age = 0.0;
+    }
+}
+
+/// Size of the cells gravity is shared in for one step, meters: across a cell gravity turns by
+/// about its size over the planet's radius (5 millionths of a radian on Earth).
+const GRAVITY_CELL_M: f64 = 32.0;
+
+/// Gravity and up for the cells the moving pieces are in, this step. Gravity sums every body
+/// of the solar system, which per piece was most of the step's integration.
+#[derive(Default)]
+pub struct GravityCells {
+    cells: HashMap<(i64, i64, i64), (Vec3, Vec3)>,
+}
+
+impl GravityCells {
+    fn key(p: DVec3) -> (i64, i64, i64) {
+        let c = (p / GRAVITY_CELL_M).floor();
+        (c.x as i64, c.y as i64, c.z as i64)
+    }
+
+    fn fill(&mut self, env: &Env, p: DVec3) {
+        let k = Self::key(p);
+        self.cells.entry(k).or_insert_with(|| {
+            let c = (DVec3::new(k.0 as f64, k.1 as f64, k.2 as f64) + 0.5) * GRAVITY_CELL_M;
+            (env.gravity(c), env.up(c))
+        });
+    }
+
+    /// Gravity and up at `p`: its cell's, or `p`'s own when its cell wasn't filled.
+    fn at(&self, env: &Env, p: DVec3) -> (Vec3, Vec3) {
+        self.cells
+            .get(&Self::key(p))
+            .copied()
+            .unwrap_or_else(|| (env.gravity(p), env.up(p)))
+    }
+}
+
 /// Pieces per parallel batch of the debris step.
 const DEBRIS_BATCH: usize = 24;
 
@@ -1263,6 +1341,9 @@ pub fn simulate_debris_system(
     mut landings: ResMut<DebrisLandings>,
     range: Option<Res<SimulationRange>>,
     mut rubble: Local<Rubble>,
+    mut grounds: Local<GroundCells>,
+    mut fields: Local<GravityCells>,
+    mut shifts: MessageReader<WorldShift>,
 ) {
     let dt = time.delta_secs();
     if dt <= 0.0 {
@@ -1301,8 +1382,13 @@ pub fn simulate_debris_system(
     );
     // Chunks at rest are what the rest land on.
     rubble.clear();
+    fields.cells.clear();
     for (entity, pose, body, debris) in &q {
         let t = &pose.now;
+        // Gravity where the moving pieces are, once per cell rather than once per piece.
+        if !body.asleep || body.sinking {
+            fields.fill(&env, t.translation);
+        }
         if !body.asleep
             || body.sinking
             || debris.chip
@@ -1326,6 +1412,15 @@ pub fn simulate_debris_system(
         ));
     }
     rubble.seal();
+    // Ground samples are kept a while: the world moved, the ground changed, or it's time.
+    let shifted = shifts.read().count() > 0;
+    grounds.age += dt;
+    if shifted || env.ground_query.is_changed() || grounds.age > GROUND_CELL_SECS {
+        grounds.clear();
+    }
+    let fresh_grounds = std::sync::Mutex::new(Vec::new());
+    let ground_cells = &*grounds;
+    let fields = &*fields;
     let rubble = &*rubble;
     // Pieces step in parallel (each reads only the rubble and rock as they were at the start of
     // the step); their landings are written afterwards.
@@ -1356,7 +1451,7 @@ pub fn simulate_debris_system(
             }
             let (t, body) = (&mut pose.now, &mut *body);
             if body.sinking {
-                t.translation -= env.up(t.translation).as_dvec3() * (0.35 * dt) as f64;
+                t.translation -= fields.at(&env, t.translation).1.as_dvec3() * (0.35 * dt) as f64;
                 return;
             }
             if body.asleep {
@@ -1365,8 +1460,7 @@ pub fn simulate_debris_system(
                 body.awake_secs = 0.0;
                 body.on = None;
             }
-            let g = env.gravity(t.translation);
-            let up = env.up(t.translation);
+            let (g, up) = fields.at(&env, t.translation);
             body.velocity += g * dt;
             // Air drag on its broadest face: light flakes and chips slow down hard and land near
             // where they broke off instead of sailing across the yard.
@@ -1397,11 +1491,25 @@ pub fn simulate_debris_system(
                     (at, g)
                 }
                 _ => {
-                    let Some(g) = env.ground(p) else {
+                    // Shared by every piece over the same spot (a collapse drops hundreds on a
+                    // few square meters): sampled at the cell's center, once.
+                    let (cell, at) = GroundCells::cell(p);
+                    let sample = match ground_cells.get(cell) {
+                        Some(g) => g,
+                        None => {
+                            let g = env.ground(at);
+                            fresh_grounds
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .push((cell, g));
+                            g
+                        }
+                    };
+                    let Some(g) = sample else {
                         return;
                     };
-                    body.ground = Some((p, g));
-                    (p, g)
+                    body.ground = Some((at, g));
+                    (at, g)
                 }
             };
             let n = ground.normal.normalize_or(up);
@@ -1670,6 +1778,12 @@ pub fn simulate_debris_system(
     noises.sort_by_key(|n| n.source);
     landings.contacts.extend(ground_contacts);
     landings.noises.extend(noises);
+    for (cell, g) in fresh_grounds
+        .into_inner()
+        .unwrap_or_else(|e| e.into_inner())
+    {
+        grounds.cells.insert(cell, g);
+    }
 }
 
 /// Age debris, enforce the budget, sink and remove expired pieces, and animate dust.
