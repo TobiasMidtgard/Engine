@@ -171,12 +171,18 @@ pub(crate) struct StepCarry {
     inserts: Vec<Entity>,
     substeps: u32,
     report: bool,
+    /// Synced, with Rapier's part left for [`kick_step`] (`PhysicsSettings::overlap_frame`).
+    deferred: bool,
 }
 
 /// The physics step, first part (`FixedUpdate`, `SimSet::Physics`, exclusive): read what
 /// gameplay changed (bodies, colliders, joints, characters, poses, velocities, forces,
 /// impulses) into the simulation.
 pub(crate) fn physics_sync(world: &mut World, mut q: Local<Option<StepQueries>>) {
+    // The last step first, if it is somehow still beside the frame or was never kicked.
+    if step_pending_in(world) {
+        finish_step(world);
+    }
     let started = Instant::now();
     if q.is_none() {
         *q = Some(StepQueries::from_world(world));
@@ -190,7 +196,10 @@ pub(crate) fn physics_sync(world: &mut World, mut q: Local<Option<StepQueries>>)
     let sync = tracing::info_span!("sync from world").entered();
 
     // ---------------------------------------------------------------- settings & environment
-    let settings = world.resource::<PhysicsSettings>().clone();
+    let mut settings = world.resource::<PhysicsSettings>().clone();
+    if let Some(on) = overlap_override() {
+        settings.overlap_frame = on;
+    }
     if settings != sim.settings {
         if settings.articulated_joints != sim.settings.articulated_joints {
             sim.unmake_joints();
@@ -686,6 +695,7 @@ pub(crate) fn physics_sync(world: &mut World, mut q: Local<Option<StepQueries>>)
         inserts,
         substeps: 0,
         report: false,
+        deferred: false,
     };
 }
 
@@ -696,6 +706,7 @@ pub(crate) fn physics_sync(world: &mut World, mut q: Local<Option<StepQueries>>)
 /// ([`region_pool`]).
 pub(crate) fn physics_simulate(
     shared: Res<SharedSimulation>,
+    fixed: Res<FixedTime>,
     mut carry: ResMut<StepCarry>,
     #[cfg(test)] probe: Option<Res<tests::Beside>>,
 ) {
@@ -703,12 +714,124 @@ pub(crate) fn physics_simulate(
     if let Some(p) = probe {
         p.meet(&p.simulating, &p.during);
     }
-    let lock = tracing::info_span!("simulation lock").entered();
-    let mut sim = shared.0.write();
-    drop(lock);
     if carry.started.is_none() {
         return;
     }
+    // Overlapping the frame: the frame's last step is kicked after the frame's own work
+    // ([`kick_step`]) and finished at the start of the next frame ([`finish_step`]). One
+    // with another step after it in this frame runs here, so that step's gameplay sees it.
+    let last = fixed.current_step() + 1 >= fixed.steps_this_frame();
+    if carry.settings.overlap_frame && last {
+        carry.deferred = true;
+        return;
+    }
+    let lock = tracing::info_span!("simulation lock").entered();
+    let sim = shared.0.write();
+    drop(lock);
+    simulate(sim, &mut carry);
+}
+
+/// `ENGINE_PHYSICS_OVERLAP=0` or `1` overrides [`PhysicsSettings::overlap_frame`], to compare
+/// the two in one build.
+fn overlap_override() -> Option<bool> {
+    static OVERRIDE: std::sync::OnceLock<Option<bool>> = std::sync::OnceLock::new();
+    *OVERRIDE.get_or_init(
+        || match std::env::var("ENGINE_PHYSICS_OVERLAP").as_deref() {
+            Ok("1" | "true" | "on") => Some(true),
+            Ok("0" | "false" | "off") => Some(false),
+            _ => None,
+        },
+    )
+}
+
+/// Rapier's step running beside the frame (`PhysicsSettings::overlap_frame`): kicked by
+/// [`kick_step`], finished by [`finish_step`].
+#[derive(Resource, Default)]
+pub(crate) struct InFlight(Option<std::thread::JoinHandle<StepCarry>>);
+
+/// `Extract`, first: with the frame's own work done (gameplay, cameras, transforms, debug
+/// drawing, every query that `Update` and `PostUpdate` make), start the step that
+/// [`physics_simulate`] left on its own thread, so it runs beside `Extract`, `Render` and
+/// `Last` (as PhysX's `simulate` returns at once and `fetchResults` collects the step, and as
+/// Chaos steps on its physics thread). It holds the simulation for writing: a query made
+/// meanwhile waits for it (`wait for physics step` in a trace).
+pub(crate) fn kick_step(
+    shared: Res<SharedSimulation>,
+    mut carry: ResMut<StepCarry>,
+    mut flight: ResMut<InFlight>,
+) {
+    if !carry.deferred || flight.0.is_some() {
+        return;
+    }
+    let shared = shared.0.clone();
+    let mut taken = std::mem::take(&mut *carry);
+    let spawned = std::thread::Builder::new()
+        .name("physics step".into())
+        .spawn(move || {
+            let _span = tracing::info_span!("physics step beside the frame").entered();
+            simulate(shared.write(), &mut taken);
+            taken.deferred = false;
+            taken
+        });
+    match spawned {
+        Ok(h) => flight.0 = Some(h),
+        // (No thread to be had: the step is finished in the next frame instead.)
+        // (The carry went with the closure: the bodies hold still for this step.)
+        Err(e) => tracing::warn!("physics: no thread for the step beside the frame: {e}"),
+    }
+}
+
+/// Whether [`finish_step`] has a step to finish.
+pub(crate) fn step_pending(carry: Res<StepCarry>, flight: Res<InFlight>) -> bool {
+    carry.deferred || flight.0.is_some()
+}
+
+fn step_pending_in(world: &World) -> bool {
+    world.resource::<StepCarry>().deferred
+        || world
+            .get_resource::<InFlight>()
+            .is_some_and(|f| f.0.is_some())
+}
+
+/// `First` (after time and messages, queued when [`step_pending`]) and the start of
+/// [`physics_sync`]: wait for the step beside the frame, or step one that was synced but
+/// never kicked, and write it back. The first frame after
+/// a step then draws it, and the fixed step's gameplay sees it as it would have inside the
+/// step.
+pub(crate) fn finish_step(world: &mut World) {
+    let flight = world
+        .get_resource_mut::<InFlight>()
+        .and_then(|mut f| f.0.take());
+    if let Some(h) = flight {
+        let waited = Instant::now();
+        let joined = {
+            let _span = tracing::info_span!("wait for physics step").entered();
+            h.join()
+        };
+        let wait_ms = waited.elapsed().as_secs_f64() * 1000.0;
+        match joined {
+            Ok(carry) => *world.resource_mut::<StepCarry>() = carry,
+            Err(panic) => std::panic::resume_unwind(panic),
+        }
+        if let Some(mut d) = world.get_resource_mut::<Diagnostics>() {
+            d.set("physics.wait_ms", wait_ms);
+        }
+    } else if world.resource::<StepCarry>().deferred {
+        let shared = world.resource::<SharedSimulation>().0.clone();
+        let mut carry = std::mem::take(&mut *world.resource_mut::<StepCarry>());
+        simulate(shared.write(), &mut carry);
+        carry.deferred = false;
+        *world.resource_mut::<StepCarry>() = carry;
+    } else {
+        return;
+    }
+    physics_write_back(world);
+}
+
+/// Rapier's part of the step, under the simulation's lock: region upkeep, the substeps,
+/// characters and bounds. Inline in [`physics_simulate`], or on [`kick_step`]'s thread while
+/// the frame draws.
+fn simulate(mut sim: parking_lot::RwLockWriteGuard<'_, Simulation>, carry: &mut StepCarry) {
     let simulating = Instant::now();
     let (settings, gravity, foci, dt) = (
         carry.settings.clone(),
@@ -1089,6 +1212,10 @@ pub(crate) fn physics_simulate(
 /// [`physics_simulate`], exclusive): write poses, velocities, masses and character states
 /// back, send contact messages and stats.
 pub(crate) fn physics_write_back(world: &mut World) {
+    // Rapier's part is still to run, beside the frame ([`kick_step`]).
+    if world.resource::<StepCarry>().deferred {
+        return;
+    }
     let write_back = tracing::info_span!("write back").entered();
     let writing = Instant::now();
     let carry = std::mem::take(&mut *world.resource_mut::<StepCarry>());
@@ -1111,6 +1238,8 @@ pub(crate) fn physics_write_back(world: &mut World) {
     // ---------------------------------------------------------------- write back
     collect_writes(&mut sim);
     let writes = std::mem::take(&mut sim.writes);
+    // Bodies whose drawing the step smooths, and whether they fell asleep.
+    let mut smoothed: Vec<(Entity, bool)> = Vec::new();
     for w in &writes {
         let parent = sim.bodies.get(&w.entity).and_then(|b| b.parent);
         let local = match parent.and_then(|p| world_pose(world, p)) {
@@ -1134,6 +1263,23 @@ pub(crate) fn physics_write_back(world: &mut World) {
         if let Some(entry) = sim.bodies.get_mut(&w.entity) {
             entry.written = Some(local);
             entry.written_velocity = Some(w.velocity);
+            if entry.interpolated {
+                smoothed.push((w.entity, w.asleep));
+            }
+        }
+    }
+    // Drawn between steps only while awake: an interpolated transform is recomputed every
+    // frame (`propagate_transforms_system`), a still one only when it is written. Asleep, a
+    // body is drawn where it was last written, as it would be anyway.
+    for (e, asleep) in smoothed {
+        let Ok(mut ent) = world.get_entity_mut(e) else {
+            continue;
+        };
+        let has = ent.contains::<TransformInterpolation>();
+        if asleep && has {
+            ent.remove::<TransformInterpolation>();
+        } else if !asleep && !has {
+            ent.insert(TransformInterpolation::default());
         }
     }
     // Mass properties.
@@ -1199,6 +1345,9 @@ pub(crate) fn physics_write_back(world: &mut World) {
             }
             if !ent.contains::<TransformInterpolation>() && !ent.contains::<ChildOf>() {
                 ent.insert(TransformInterpolation::default());
+                if let Some(b) = sim.bodies.get_mut(&e) {
+                    b.interpolated = true;
+                }
             }
         }
         if ent.contains::<CharacterController>() && !ent.contains::<CharacterState>() {
@@ -3104,6 +3253,7 @@ fn collect_writes(sim: &mut Simulation) {
             translation: region.global(translation),
             rotation,
             velocity,
+            asleep: sleeping,
         });
     }
     sim.write_next = awake_now;
@@ -3161,5 +3311,118 @@ pub(crate) mod tests {
         app.world.run_schedule(FixedUpdate);
         let met = app.world.resource::<Beside>().met.load(Ordering::SeqCst);
         assert_eq!(met, 2, "the simulation ran alone");
+    }
+
+    /// Where gameplay sees a body at each fixed step.
+    #[derive(Resource, Default)]
+    struct Track(Vec<(Entity, Vec<DVec3>)>);
+
+    fn track(mut seen: ResMut<Track>, q: Query<&Transform>) {
+        for (e, path) in &mut seen.0 {
+            path.push(q.get(*e).unwrap().translation);
+        }
+    }
+
+    /// A tumbling pile, frames at 120 Hz and the fixed step at 60, with Rapier's step inside
+    /// the fixed step or beside the frame.
+    fn pile(overlap: bool, frame_hz: f64) -> (App, Vec<Entity>) {
+        use engine_world::physics::{Collider, RigidBody, Velocity};
+        let mut app = App::new();
+        app.add_plugins(engine_world::WorldPlugin);
+        app.add_plugins(crate::PhysicsPlugin);
+        app.world
+            .resource_mut::<Time>()
+            .set_source(TimeSource::Manual {
+                step_secs: 1.0 / frame_hz,
+            });
+        app.world.resource_mut::<FixedTime>().set_hz(60.0);
+        app.world
+            .resource_mut::<crate::PhysicsSettings>()
+            .overlap_frame = overlap;
+        app.world.spawn((
+            Transform::from_translation(DVec3::NEG_Y * 0.5),
+            RigidBody::fixed(),
+            Collider::cuboid(Vec3::new(20.0, 0.5, 20.0)),
+        ));
+        let mut bodies = Vec::new();
+        for i in 0..12 {
+            let at = DVec3::new(
+                (i % 3) as f64 * 0.45,
+                0.6 + i as f64 * 0.7,
+                (i % 2) as f64 * 0.3,
+            );
+            let rot = Quat::from_rotation_z(i as f32 * 0.4);
+            bodies.push(
+                app.world
+                    .spawn((
+                        Transform::from_translation(at).with_rotation(rot),
+                        RigidBody::dynamic(),
+                        Collider::cuboid(Vec3::splat(0.2)),
+                        Velocity {
+                            linear: Vec3::new(1.5, 0.0, -0.5),
+                            angular: Vec3::new(0.0, 2.0, 1.0),
+                        },
+                    ))
+                    .id(),
+            );
+        }
+        app.insert_resource(Track(bodies.iter().map(|e| (*e, Vec::new())).collect()));
+        app.add_systems(FixedUpdate, track.in_set(SimSet::Gameplay));
+        (app, bodies)
+    }
+
+    /// With `overlap_frame`, Rapier's step runs on its own thread after the frame's own
+    /// work, and gameplay in the fixed step sees the same bodies, step for step, as when it
+    /// runs inside the fixed step: at 120 frames a second, and at 30 with two steps a frame.
+    /// Asleep, bodies stop being drawn between steps.
+    #[test]
+    fn the_step_beside_the_frame_moves_bodies_as_the_step_inside_it() {
+        beside_matches_inside(120.0, 480);
+        beside_matches_inside(30.0, 120);
+    }
+
+    fn beside_matches_inside(frame_hz: f64, frames: usize) {
+        let (mut inside, bodies) = pile(false, frame_hz);
+        let (mut beside, _) = pile(true, frame_hz);
+        let mut kicked = 0;
+        for _ in 0..frames {
+            inside.update();
+            beside.update();
+            kicked += beside.world.resource::<super::InFlight>().0.is_some() as usize;
+            assert!(inside.world.resource::<super::InFlight>().0.is_none());
+        }
+        assert!(
+            kicked >= frames / 2 - 10,
+            "the step ran beside {kicked} frames of {frames}"
+        );
+        // Drawn from where the last step left the bodies, also after two steps in a frame.
+        for e in &bodies {
+            if let (Some(i), Some(t)) = (
+                beside.world.get::<TransformInterpolation>(*e),
+                inside.world.get::<TransformInterpolation>(*e),
+            ) {
+                assert_eq!(i.previous.is_some(), t.previous.is_some());
+            }
+        }
+        let a = &inside.world.resource::<Track>().0;
+        let b = &beside.world.resource::<Track>().0;
+        let steps = a[0].1.len();
+        assert!(steps >= 230, "{steps} fixed steps");
+        assert_eq!(steps, b[0].1.len());
+        let mut moved = 0.0f64;
+        for ((_, pa), (_, pb)) in a.iter().zip(b) {
+            for (k, (p, q)) in pa.iter().zip(pb).enumerate() {
+                assert!(p.distance(*q) < 1e-3, "step {k}: {p} inside, {q} beside");
+            }
+            moved += pa[0].distance(*pa.last().unwrap());
+        }
+        assert!(moved > 3.0, "the pile hardly moved ({moved} m)");
+        // Settled by now: asleep, they are drawn where they are written.
+        for e in &bodies {
+            assert!(
+                beside.world.get::<TransformInterpolation>(*e).is_none(),
+                "an asleep body is still interpolated"
+            );
+        }
     }
 }

@@ -19,6 +19,19 @@ use crate::sim::{Region, Simulation};
 /// any system or thread; it sees the state after the last physics step.
 pub struct RapierQueries(pub Arc<RwLock<Simulation>>);
 
+impl RapierQueries {
+    /// The simulation for reading. While Rapier's step runs beside the frame
+    /// (`PhysicsSettings::overlap_frame`: `Extract`, `Render`, `Last`) a query waits for it,
+    /// which a trace shows as `query waits for physics step`.
+    fn sim(&self) -> parking_lot::RwLockReadGuard<'_, Simulation> {
+        if let Some(sim) = self.0.try_read() {
+            return sim;
+        }
+        let _span = tracing::info_span!("query waits for physics step").entered();
+        self.0.read()
+    }
+}
+
 fn accepts(filter: &QueryFilter, c: &RapierCollider) -> bool {
     let e = convert::entity_of(c.user_data);
     (filter.layers == 0 || c.collision_groups().memberships.bits() & filter.layers != 0)
@@ -63,7 +76,7 @@ impl PhysicsQuery for RapierQueries {
         max_distance: f32,
         filter: &QueryFilter,
     ) -> Option<Hit> {
-        let sim = self.0.read();
+        let sim = self.sim();
         let dir = dir.try_normalize()?;
         let pred = |_: ColliderHandle, c: &RapierCollider| accepts(filter, c);
         let mut best: Option<Hit> = None;
@@ -100,7 +113,7 @@ impl PhysicsQuery for RapierQueries {
     ) -> Option<Hit> {
         let s = convert::shape(shape, Vec3::ONE)?;
         let dir = dir.try_normalize()?;
-        let sim = self.0.read();
+        let sim = self.sim();
         let pad = s.compute_local_aabb().half_extents().length() as f64;
         let pred = |_: ColliderHandle, c: &RapierCollider| accepts(filter, c);
         // Exact for capsules against boxes, which Parry's GJK can miss by decimeters.
@@ -151,7 +164,7 @@ impl PhysicsQuery for RapierQueries {
         let Some(s) = convert::shape(shape, Vec3::ONE) else {
             return;
         };
-        let sim = self.0.read();
+        let sim = self.sim();
         let pad = s.compute_local_aabb().half_extents().length() as f64;
         let pred = |_: ColliderHandle, c: &RapierCollider| accepts(filter, c);
         let start = out.len();
@@ -171,7 +184,7 @@ impl PhysicsQuery for RapierQueries {
     }
 
     fn closest_point(&self, point: DVec3, max_distance: f32, filter: &QueryFilter) -> Option<Hit> {
-        let sim = self.0.read();
+        let sim = self.sim();
         let pred = |_: ColliderHandle, c: &RapierCollider| accepts(filter, c);
         let mut best: Option<Hit> = None;
         for region in regions_near(&sim, point, Vec3::X, 0.0, max_distance as f64) {

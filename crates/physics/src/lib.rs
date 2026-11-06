@@ -168,6 +168,18 @@ impl Plugin for PhysicsPlugin {
                  step time (ms), substeps.",
             )
             .init_resource::<step::StepCarry>()
+            .init_resource::<step::InFlight>()
+            // `PhysicsSettings::overlap_frame`: Rapier's step runs beside Extract, Render and
+            // Last, and is collected at the start of the next frame (or by the next sync, when
+            // two fixed steps fall in one frame).
+            // (Queued only when a step is pending, so no frame waits for an idle pool.)
+            .add_systems(
+                First,
+                step::step_pending
+                    .pipe(engine_core::schedule::queue_when(step::finish_step))
+                    .after(engine_core::off_frame::apply_off_frame_system),
+            )
+            .add_systems(Extract, step::kick_step)
             // Reading the world and writing it back take the whole world; Rapier's part
             // between them touches only the simulation, so `SimSet::DuringPhysics` runs
             // beside it. It starts once the world is read (as Unreal's TG_DuringPhysics

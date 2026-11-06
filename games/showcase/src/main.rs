@@ -124,6 +124,12 @@ fn main() {
             planet::ground_near_planets.run_if(resource_exists::<planet::UsePlanet>),
         );
     register_apis(&mut app);
+    // Rapier's step runs beside Extract, Render and Last instead of inside the fixed step
+    // (engine_physics `PhysicsSettings::overlap_frame`; ENGINE_PHYSICS_OVERLAP=0 turns it off
+    // to compare in one build).
+    app.world
+        .resource_mut::<engine_physics::PhysicsSettings>()
+        .overlap_frame = true;
 
     let args: Vec<String> = std::env::args().collect();
     if !args.iter().any(|a| a == "--no-planet") {

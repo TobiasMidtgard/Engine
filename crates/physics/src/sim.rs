@@ -615,6 +615,9 @@ pub struct BodyEntry {
     pub dry: Option<(DVec3, u8)>,
     /// The longest substep it asks for (`FineSteps`), seconds.
     pub fine: Option<f32>,
+    /// Given its `TransformInterpolation` by the step, which takes it off while the body
+    /// sleeps (`step::physics_write_back`).
+    pub interpolated: bool,
 }
 
 /// A collider: attached to a body, or static (copied into every region it can touch).
@@ -748,6 +751,8 @@ pub struct BodyWrite {
     pub translation: DVec3,
     pub rotation: Quat,
     pub velocity: Velocity,
+    /// Asleep after this step.
+    pub asleep: bool,
 }
 
 /// A contact that started with a real impact (for footsteps, dents, noise).
@@ -1204,6 +1209,7 @@ impl Simulation {
                 reach: 0.0,
                 dry: None,
                 fine: None,
+                interpolated: false,
             },
         );
         self.mass_changed.push(entity);
