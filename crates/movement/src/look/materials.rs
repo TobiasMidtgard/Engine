@@ -1173,8 +1173,12 @@ mod tests {
             texture_size: 16,
         };
         generate(&mut lib);
-        // (Window glass is plain: smooth, untextured.)
-        for name in ALL.iter().filter(|n| ![GLASS, GLASS_LIT].contains(n)) {
+        // (Window and lantern glass are plain: smooth, untextured; so are the oak's leaves,
+        // whose clusters carry their own shading.)
+        for name in ALL
+            .iter()
+            .filter(|n| ![GLASS, GLASS_LIT, LANTERN, LEAVES].contains(n))
+        {
             let h = materials
                 .by_key(&format!("movement/{}", key(name)))
                 .unwrap_or_else(|| panic!("{name} missing"));

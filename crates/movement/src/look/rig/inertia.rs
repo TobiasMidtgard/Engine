@@ -140,8 +140,6 @@ pub(crate) struct Inertia {
     of: [f32; NF],
     ofv: [f32; NF],
     halflife: f32,
-    /// Raw pose last frame (for its velocity).
-    raw: Option<Channels>,
     pending: bool,
 }
 
@@ -162,10 +160,11 @@ impl Inertia {
             if let Some((out, out_vel)) = self.last {
                 // Velocity of the new state's pose: from its last raw frame if it had one (a
                 // switch of state rarely jumps the raw pose's motion much), else none.
-                let raw_vel = self.raw.map(|r| velocity(&r, &raw, dt));
+                // (The new pose's own velocity isn't known yet: its first frame is the jump
+                // being hidden. The offset carries the old motion on and eases out of it.)
                 for i in 0..NV {
                     self.ov[i] = out.v[i] - raw.v[i];
-                    self.ovv[i] = out_vel.v[i] - raw_vel.map_or(Vec3::ZERO, |r| r.v[i]);
+                    self.ovv[i] = out_vel.v[i];
                 }
                 for i in 0..NQ {
                     self.oq[i] = log(out.q[i] * raw.q[i].inverse());
@@ -223,7 +222,6 @@ impl Inertia {
             None => zero(),
         };
         self.last = Some((out, vel));
-        self.raw = Some(raw);
     }
 }
 
