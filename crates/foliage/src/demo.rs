@@ -30,6 +30,7 @@ use crate::cave::CaveChamber;
 use crate::felling::fell_tree;
 use crate::plant::{Disturbance, EcologyRegion, Plant, PlantStage, RegionHistory, ResourceSource};
 use crate::scenery::{PlacedRock, Pool, random_rock, rock_cluster, spawn_rocks};
+use crate::scenery_tree::SceneryTree;
 use crate::species::PlantLibrary;
 
 /// Forest clear-cut, local to the zone center (x, z, radius).
@@ -576,6 +577,115 @@ pub fn forest_rocks() -> Vec<PlacedRock> {
     out
 }
 
+/// On a round region: plant its edge's shrub belt once the ground under it is there
+/// ([`plant_edge_belts`]), then the marker goes.
+#[derive(Component, Debug, Clone, Copy, Default)]
+pub struct EdgeBelt;
+
+/// Shrubs planted every this many meters along a wood's edge (two to a spot in a thicket).
+const BELT_SPACING_M: f64 = 3.2;
+
+/// A round region's edge belt ([`EdgeBelt`]): hazel thickets with goat willow among them in
+/// front of the edge trees, from just past the ragged edge to about 5 m out into the meadow,
+/// with gaps between the thickets. A natural wood's edge grades from a herb fringe through a
+/// belt of 1-7 m shrubs (hazel on higher ground, hawthorn, blackthorn, guelder rose, elder) to
+/// the low-crowned edge trees, 10-30 m in all (bio-austria and naturschutzbund edge guides;
+/// engine-design/foliage-research.md R62). They are scenery trees: outside the simulation, so
+/// they don't change what grows in the wood.
+pub fn plant_edge_belts(
+    mut commands: Commands,
+    library: Option<Res<PlantLibrary>>,
+    ground: Option<Res<engine_world::Ground>>,
+    belts: Query<(Entity, &Transform, &EcologyRegion), With<EdgeBelt>>,
+) {
+    let Some(library) = library else { return };
+    for (entity, t, region) in &belts {
+        let center = t.translation;
+        // Wait for the ground to load (or there is none: flat at the region's height).
+        let height = |x: f64, z: f64| -> Option<f64> {
+            match &ground {
+                Some(g) => g.height(DVec3::new(x, center.y + 1_000.0, z)),
+                None => Some(center.y),
+            }
+        };
+        if height(center.x, center.z).is_none() {
+            continue;
+        }
+        commands.entity(entity).remove::<EdgeBelt>();
+        if !region.round {
+            continue;
+        }
+        let (Some(hazel), Some(willow)) = (library.id("hazel"), library.id("goat willow")) else {
+            continue;
+        };
+        let mut rng = engine_core::math::Rng::new(region.seed ^ 0xed6e_be17);
+        let half = region.half_extents[0].max(region.half_extents[1]) as f64;
+        let steps = (std::f64::consts::TAU * half / BELT_SPACING_M) as usize;
+        for k in 0..steps {
+            let a = (k as f64 + rng.range(-0.3, 0.3) as f64) / steps as f64 * std::f64::consts::TAU;
+            let dir = DVec2::new(a.cos(), a.sin());
+            // Out from the middle to the ragged edge.
+            let mut r = half * 0.6;
+            while r < half * 1.5
+                && crate::sim::edge_distance(
+                    region,
+                    center,
+                    center.x + dir.x * r,
+                    center.z + dir.y * r,
+                ) > 0.0
+            {
+                r += 0.5;
+            }
+            let p = DVec2::new(center.x, center.z) + dir * r;
+            // Thickets with gaps between them.
+            let thicket = engine_core::math::noise::fbm2(
+                p.x * 0.05,
+                p.y * 0.05,
+                region.seed ^ 0x7e1c,
+                2,
+                2.0,
+                0.5,
+            );
+            if thicket < -0.15 {
+                continue;
+            }
+            // Not across the trail where it leaves the wood.
+            let local = Vec2::new((p.x - center.x) as f32, (p.y - center.z) as f32);
+            if region
+                .corridors
+                .iter()
+                .chain(&region.keep_clear)
+                .any(|c| local.distance(Vec2::new(c[0], c[1])) < c[2] + 3.0)
+            {
+                continue;
+            }
+            let count = if thicket > 0.2 { 2 } else { 1 };
+            for _ in 0..count {
+                let out = rng.range(0.6, 4.5) as f64;
+                let side = DVec2::new(-dir.y, dir.x) * rng.range(-1.4, 1.4) as f64;
+                let q = p + dir * out + side;
+                let Some(y) = height(q.x, q.y) else { continue };
+                let willow_here = rng.chance(0.22);
+                let mut tree = SceneryTree {
+                    species: if willow_here { willow } else { hazel },
+                    size: if willow_here {
+                        rng.range(0.35, 0.7)
+                    } else {
+                        rng.range(0.55, 1.0)
+                    },
+                    genes: crate::plant::Genes::random(&mut rng),
+                };
+                tree.genes.lean *= 0.5;
+                commands.spawn((
+                    Name::new("edge shrub"),
+                    Transform::from_translation(DVec3::new(q.x, y, q.y)),
+                    tree,
+                ));
+            }
+        }
+    }
+}
+
 /// Keep-clear circles under the rocks big enough to keep plants off them.
 fn rock_footprints(rocks: &[PlacedRock]) -> Vec<[f32; 3]> {
     rocks
@@ -591,7 +701,7 @@ pub fn spawn_demo(commands: &mut Commands, center: DVec3) {
     let mut region = forest_region();
     // Nothing grows through a rock.
     region.keep_clear.extend(rock_footprints(&rocks));
-    commands.spawn((Transform::from_translation(center), region));
+    commands.spawn((Transform::from_translation(center), region, EdgeBelt));
     for (at, source) in forest_sources() {
         commands.spawn((
             Transform::from_translation(local(center, at.x, at.y)),

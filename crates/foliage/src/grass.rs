@@ -505,6 +505,11 @@ pub fn dwarf_shrubs(canopy: f32, conifer: f32, water: f32, needles: f32) -> [f32
     ]
 }
 
+/// How far a round wood's edge bramble belt reaches out into the meadow and in under the
+/// edge trees, meters ([`floor_maps`]).
+const EDGE_BELT_OUT_M: f32 = 4.0;
+const EDGE_BELT_IN_M: f32 = 5.0;
+
 /// Herbs' and fallen leaves' maps over the same grid as [`grass_maps`], from the crowns
 /// overhead, the soil and the grass's own `grass` density, and which herb grows where.
 #[allow(clippy::too_many_arguments)]
@@ -619,6 +624,25 @@ pub fn floor_maps(
                     * 2.5;
                 if d < 0.25 { 0.0 } else { d.min(1.0) }
             };
+            // The wood's edge: bramble's pre-mantle in mounds along it, from a few meters out
+            // in the meadow to a few in under the edge trees (Austrian and Swiss edge guides
+            // give a fringe and shrub belt 5-20 m deep in front of the trees; bramble fills the
+            // step from the herb fringe into the shrubs). Gaps between the mounds, wider where
+            // the soil is dry.
+            let edge_m = crate::sim::edge_distance(region, center, world.x, world.z) as f32;
+            let past_edge_here = crate::sim::past_round_edge(region, center, world.x, world.z);
+            let mound = fbm2(x * 0.16, z * 0.16, region.seed ^ 0xb1e7, 3, 2.0, 0.5);
+            let belt_d = if (blocked && !past_edge_here) || bare[k] || on_trail || !region.round {
+                0.0
+            } else {
+                let d = smoothstep(-EDGE_BELT_OUT_M, -EDGE_BELT_OUT_M + 2.0, edge_m)
+                    * (1.0 - smoothstep(EDGE_BELT_IN_M - 2.0, EDGE_BELT_IN_M, edge_m))
+                    * smoothstep(-0.25, 0.15, mound)
+                    * (0.5 + 0.5 * smoothstep(0.15, 0.35, water))
+                    * 1.6;
+                if d < 0.25 { 0.0 } else { d.min(1.0) }
+            };
+            let bramble_d = bramble_d.max(belt_d);
             let (shrub, shrub_d) = if bramble_d > shrub_d.max(herb_d) {
                 (BRAMBLE_KIND - DWARF_SHRUB_KIND, bramble_d)
             } else {

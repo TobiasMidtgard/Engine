@@ -225,6 +225,7 @@ impl Plugin for FoliagePlugin {
                 (
                     (felling::stream_tree_colliders, felling::sync_tree_colliders).chain(),
                     solids::stream_scenery_tree_solids,
+                    demo::plant_edge_belts,
                     season::follow_weather_calendar,
                     (grass::sync_region_grass, grass_wear::wear_grass).chain(),
                     (walkers::bend_grass_for_walkers, walkers::leave_grass_wakes).chain(),
