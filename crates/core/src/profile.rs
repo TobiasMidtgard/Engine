@@ -279,8 +279,10 @@ impl<S> Filter<S> for ProfileFilter {
     }
 }
 
-/// The key a span's time is filed under, kept in the span's extensions.
-struct Key(String);
+/// The key a span's time is filed under, kept in the span's extensions, and the span's other
+/// fields as a JSON object for the trace's `args` (so a trace says which body or chunk a span
+/// was for).
+struct Key(String, Option<Box<str>>);
 
 struct NameVisitor(Option<String>);
 
@@ -294,6 +296,38 @@ impl Visit for NameVisitor {
         if field.name() == "name" {
             self.0 = Some(format!("{value:?}"));
         }
+    }
+}
+
+#[derive(Default)]
+struct ArgsVisitor(serde_json::Map<String, serde_json::Value>);
+
+impl ArgsVisitor {
+    fn put(&mut self, field: &Field, value: serde_json::Value) {
+        if field.name() != "name" {
+            self.0.insert(field.name().to_string(), value);
+        }
+    }
+}
+
+impl Visit for ArgsVisitor {
+    fn record_str(&mut self, field: &Field, value: &str) {
+        self.put(field, value.into());
+    }
+    fn record_u64(&mut self, field: &Field, value: u64) {
+        self.put(field, value.into());
+    }
+    fn record_i64(&mut self, field: &Field, value: i64) {
+        self.put(field, value.into());
+    }
+    fn record_f64(&mut self, field: &Field, value: f64) {
+        self.put(field, value.into());
+    }
+    fn record_bool(&mut self, field: &Field, value: bool) {
+        self.put(field, value.into());
+    }
+    fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+        self.put(field, format!("{value:?}").into());
     }
 }
 
@@ -323,8 +357,19 @@ where
                 _ => short_name(&name),
             }
         };
+        // Fields besides `name`, kept for the trace (engine spans only: bevy's carry none).
+        let args = (!meta.target().starts_with("bevy_ecs")
+            && meta.fields().iter().any(|f| f.name() != "name"))
+        .then(|| {
+            let mut visitor = ArgsVisitor::default();
+            attrs.record(&mut visitor);
+            visitor.0
+        })
+        .filter(|map| !map.is_empty())
+        .and_then(|map| serde_json::to_string(&map).ok());
         if let Some(span) = ctx.span(id) {
-            span.extensions_mut().insert(Key(key));
+            span.extensions_mut()
+                .insert(Key(key, args.map(String::into_boxed_str)));
         }
     }
 
@@ -332,7 +377,7 @@ where
         if let Some(span) = ctx.span(id) {
             let now = Instant::now();
             let mut ext = span.extensions_mut();
-            if let Some(Key(key)) = ext.get_mut::<Key>() {
+            if let Some(Key(key, _)) = ext.get_mut::<Key>() {
                 let key = key.clone();
                 if is_system(&key) {
                     system_moved(&key, true, now);
@@ -347,7 +392,7 @@ where
             return;
         };
         let mut ext = span.extensions_mut();
-        let Some(Key(key)) = ext.get_mut::<Key>() else {
+        let Some(Key(key, args)) = ext.get_mut::<Key>() else {
             return;
         };
         // This thread's own entry: one span stored per span (as before) was overwritten when
@@ -378,7 +423,7 @@ where
         stat.calls += 1;
         stat.max = stat.max.max(elapsed);
         drop(totals);
-        trace::span(key, start, elapsed);
+        trace::span(key, args.as_deref(), start, elapsed);
     }
 }
 
@@ -426,6 +471,8 @@ mod trace {
 
     struct Event {
         name: String,
+        /// The span's other fields as a JSON object ([`super::Args`]).
+        args: Option<Box<str>>,
         thread: u32,
         start: Instant,
         dur: Duration,
@@ -492,12 +539,13 @@ mod trace {
         NUMBER.with(|n| *n)
     }
 
-    pub(super) fn span(key: &str, start: Instant, dur: Duration) {
+    pub(super) fn span(key: &str, args: Option<&str>, start: Instant, dur: Duration) {
         if !RECORDING.load(Ordering::Relaxed) {
             return;
         }
         let event = Event {
             name: key.to_string(),
+            args: args.map(Into::into),
             thread: thread_number(),
             start,
             dur,
@@ -609,12 +657,16 @@ mod trace {
             sep(&mut out)?;
             write!(
                 out,
-                "{{\"ph\":\"X\",\"cat\":\"{cat}\",\"name\":{},\"pid\":1,\"tid\":{},\"ts\":{:.1},\"dur\":{:.1}}}",
+                "{{\"ph\":\"X\",\"cat\":\"{cat}\",\"name\":{},\"pid\":1,\"tid\":{},\"ts\":{:.1},\"dur\":{:.1}",
                 serde_json::to_string(name).unwrap_or_default(),
                 e.thread,
                 us(e.start),
                 e.dur.as_secs_f64() * 1e6
             )?;
+            match &e.args {
+                Some(args) => write!(out, ",\"args\":{args}}}")?,
+                None => write!(out, "}}")?,
+            }
         }
         write!(out, "]}}")?;
         out.flush()
@@ -624,7 +676,7 @@ mod trace {
     pub(super) fn write_for_test(
         path: &std::path::Path,
         frame_ends: Vec<Instant>,
-        events: Vec<(String, u32, Instant, Duration)>,
+        events: Vec<(String, Option<&str>, u32, Instant, Duration)>,
         names: &[String],
     ) -> std::io::Result<()> {
         let capture = Capture {
@@ -633,8 +685,9 @@ mod trace {
             frame_ends,
             events: events
                 .into_iter()
-                .map(|(name, thread, start, dur)| Event {
+                .map(|(name, args, thread, start, dur)| Event {
                     name,
+                    args: args.map(Into::into),
                     thread,
                     start,
                     dur,
@@ -1687,10 +1740,11 @@ mod tests {
         let t0 = Instant::now();
         let ms = Duration::from_millis;
         let events = vec![
-            ("schedule Update".to_string(), 1, t0, ms(10)),
-            ("game::move_\"it\"".to_string(), 2, t0 + ms(1), ms(3)),
+            ("schedule Update".to_string(), None, 1, t0, ms(10)),
+            ("game::move_\"it\"".to_string(), None, 2, t0 + ms(1), ms(3)),
             (
                 format!("{INNER}engine_render: submit"),
+                Some(r#"{"kind":"Cloth","particles":256}"#),
                 2,
                 t0 + ms(2),
                 ms(1),
@@ -1719,6 +1773,10 @@ mod tests {
         assert!((spans[1]["dur"].as_f64().unwrap() - 3000.0).abs() < 1.0);
         assert_eq!(spans[2]["cat"], "span");
         assert_eq!(spans[2]["name"], "engine_render: submit");
+        // A span's fields come along as its args.
+        assert_eq!(spans[2]["args"]["kind"], "Cloth");
+        assert_eq!(spans[2]["args"]["particles"], 256);
+        assert!(spans[1].get("args").is_none());
         std::fs::remove_dir_all(&dir).ok();
     }
 }
