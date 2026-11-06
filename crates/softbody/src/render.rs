@@ -1280,6 +1280,7 @@ impl RenderFeature for SoftBodyFeature {
             .max(settings.min_object_pixels);
         let min_sky_texels = settings.min_object_pixels.max(2.0);
         let mut seen: Vec<Seen> = Vec::new();
+        let see = tracing::info_span!("softbody: see").entered();
         for (entity, body) in query.iter(world) {
             if body.sim.is_empty() || body.drawn_elsewhere {
                 continue;
@@ -1339,6 +1340,16 @@ impl RenderFeature for SoftBodyFeature {
                 std::cmp::Ordering::Equal
             })
         });
+        drop(see);
+        // How many bodies are built and why: a body only a shadow map sees costs as much to
+        // build as one on screen.
+        let building = tracing::info_span!(
+            "softbody: build",
+            bodies = seen.len(),
+            hair = seen.iter().filter(|s| s.body.strands.is_some()).count(),
+            shadow_only = seen.iter().filter(|s| !s.in_view).count()
+        )
+        .entered();
 
         // Build the bodies on the compute pool, a run of them per task, then join the runs
         // in draw order.
@@ -1349,21 +1360,25 @@ impl RenderFeature for SoftBodyFeature {
             .iter()
             .map(|s| self.kept.remove(&s.entity).unwrap_or_default())
             .collect();
-        let build =
-            |seen: &[Seen], kept: &mut [KeptMesh], (geo, built): &mut (Geometry, Vec<Built>)| {
-                geo.clear();
-                built.clear();
-                for (s, kept) in seen.iter().zip(kept) {
-                    kept.seen = frame;
-                    let range = geo.add_body_reusing(s.body, s.base, alpha, s.px, Some(kept));
-                    let hair = s.body.strands.as_ref().and_then(|_| {
-                        let density = (s.px / HAIR_FULL_DENSITY_PX * thin).clamp(0.06, 1.0);
-                        let detail = (s.px / (HAIR_FULL_DENSITY_PX * 0.5)).clamp(0.25, 1.0);
-                        geo.add_hair(s.body, s.base, alpha, density, detail)
-                    });
-                    built.push(Built { range, hair });
-                }
-            };
+        let build = |seen: &[Seen],
+                     kept: &mut [KeptMesh],
+                     (geo, built): &mut (Geometry, Vec<Built>)| {
+            geo.clear();
+            built.clear();
+            for (s, kept) in seen.iter().zip(kept) {
+                kept.seen = frame;
+                let range = geo.add_body_reusing(s.body, s.base, alpha, s.px, Some(kept));
+                let hair = s.body.strands.as_ref().and_then(|_| {
+                    let _span =
+                        tracing::info_span!("softbody: build hair", px = s.px, in_view = s.in_view)
+                            .entered();
+                    let density = (s.px / HAIR_FULL_DENSITY_PX * thin).clamp(0.06, 1.0);
+                    let detail = (s.px / (HAIR_FULL_DENSITY_PX * 0.5)).clamp(0.25, 1.0);
+                    geo.add_hair(s.body, s.base, alpha, density, detail)
+                });
+                built.push(Built { range, hair });
+            }
+        };
         // On softbody's own small pool: this runs inside the renderer's shared prepares, a
         // task of the compute pool, and a scope opened there waits by running other whole
         // features' prepares (crate::solver::leaf_pool), which held it 5-9 ms on the cloud VM
@@ -1457,7 +1472,9 @@ impl RenderFeature for SoftBodyFeature {
             + self.draws.transparent.len()
             + self.draws.hair.iter().filter(|h| h.in_view).count())
             as u32;
+        drop(building);
         if let Some(cloths) = self.cloths.as_mut() {
+            let _span = tracing::info_span!("softbody: cloths").entered();
             cloths.prepare(world, gpu, view, &mut geo.materials, out);
             for d in cloths.draws.iter().filter(|d| d.in_view) {
                 self.stats.triangles += (d.indices.len() / 3) as u64;
@@ -1466,6 +1483,7 @@ impl RenderFeature for SoftBodyFeature {
         }
 
         // Upload.
+        let _upload = tracing::info_span!("softbody: upload").entered();
         let (device, queue) = (&gpu.device, &gpu.queue);
         g.vertices
             .write(device, queue, bytemuck::cast_slice(&geo.vertices));
