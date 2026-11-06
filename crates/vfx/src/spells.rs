@@ -197,22 +197,29 @@ pub fn draw_spell_looks(
             stop(&mut commands, &mut effects, e, d);
         }
         let effect = ParticleEffect::new(name.clone()).with_scale(scale);
-        let on = if look.role == SpellRole::Charge {
-            commands
-                .spawn((
-                    Name::new("Spell charge"),
-                    Transform::from_translation(HAND.as_dvec3()),
-                    effect,
-                    ChildOf(e),
-                ))
-                .id()
-        } else {
-            commands.entity(e).insert(effect);
-            e
-        };
+        let charge = look.role == SpellRole::Charge;
+        // Magic may despawn a look the same frame it changes it (a bolt landing, a charge
+        // released): then there is nothing to draw, so the command quietly does nothing.
         commands
             .entity(e)
-            .insert(DrawnSpellLook { effect: name, on });
+            .queue_silenced(move |mut carrier: EntityWorldMut| {
+                let on = if charge {
+                    let parent = carrier.id();
+                    carrier.world_scope(|w| {
+                        w.spawn((
+                            Name::new("Spell charge"),
+                            Transform::from_translation(HAND.as_dvec3()),
+                            effect,
+                            ChildOf(parent),
+                        ))
+                        .id()
+                    })
+                } else {
+                    carrier.insert(effect);
+                    carrier.id()
+                };
+                carrier.insert(DrawnSpellLook { effect: name, on });
+            });
     }
 }
 
@@ -408,6 +415,43 @@ mod tests {
         let r = call_api(&mut app.world, "vfx.spell_contracts", serde_json::json!({})).unwrap();
         assert_eq!(r["looks"], true);
         assert_eq!(r["cues"], true);
+    }
+
+    /// Magic may despawn a look in the same frame it appears (a bolt landing on its first
+    /// frame, a charge released at once): drawing it must not crash the game.
+    #[test]
+    fn a_look_despawned_the_frame_it_appears_is_skipped() {
+        fn land_at_once(mut commands: Commands, new: Query<Entity, Added<SpellLook>>) {
+            for e in &new {
+                commands.entity(e).despawn();
+            }
+        }
+        let mut app = app();
+        app.add_systems(
+            Update,
+            land_at_once.before_ignore_deferred(draw_spell_looks),
+        );
+        let caster = app
+            .world
+            .spawn((
+                Transform::default(),
+                look("fire", SpellRole::Charge, 1.0, [1.0, 0.5, 0.2]),
+            ))
+            .id();
+        app.world.spawn((
+            Transform::default(),
+            look("frost", SpellRole::Bolt, 1.0, [0.5, 0.8, 1.0]),
+        ));
+        app.update();
+        app.update();
+        assert!(app.world.get_entity(caster).is_err());
+        assert_eq!(
+            app.world
+                .query::<&ParticleEffect>()
+                .iter(&app.world)
+                .count(),
+            0
+        );
     }
 
     #[test]

@@ -21,7 +21,6 @@ use super::*;
 pub(super) fn aliases(existing: &[EffectDesc]) -> Vec<EffectDesc> {
     let pairs = [
         ("spell.fireball", "spell.fire.bolt"),
-        ("spell.fireball_impact", "spell.fire.impact"),
         ("spell.frost_bolt", "spell.frost.bolt"),
         ("spell.frost_impact", "spell.frost.impact"),
     ];
@@ -41,6 +40,7 @@ pub(super) fn aliases(existing: &[EffectDesc]) -> Vec<EffectDesc> {
 
 pub(super) fn all() -> Vec<EffectDesc> {
     vec![
+        fire_impact(),
         fire_area(),
         frost_area(),
         storm_bolt(),
@@ -405,6 +405,136 @@ fn storm_bolt() -> EffectDesc {
                     additive: 1.0,
                     soft: 0.0,
                     ..em("sparks")
+                },
+            ],
+        )
+    }
+}
+
+/// A fire spell landing, sized for the magic system: at scale 1 the blast is about 1.5 m across
+/// its radius (the burst, the shock ring and the scorch), and the smoke stays low, rolling out
+/// over the ground and thinning before it climbs past head height, so a big Ascended blast
+/// reads as big without blotting out the hall. (`spell.fireball_impact` keeps the old,
+/// towering explosion for scripted set pieces.)
+fn fire_impact() -> EffectDesc {
+    EffectDesc {
+        light: light([1.0, 0.55, 0.25], 30_000.0, 9.0, 0.2, 0.6),
+        mark: mark(MarkKind::Scorch, 0.9, 120.0, 8.0),
+        ..effect(
+            "spell.fire.impact",
+            "A fire spell landing: a white-hot flash, a tight ball of flame bursting and curling \
+             up, a low shock ring, bouncing sparks, embers, and smoke rolling out low over the \
+             ground.",
+            Some(0.12),
+            vec![
+                EmitterDesc {
+                    bursts: once(1),
+                    speed: [0.0, 0.0],
+                    lifetime: [0.18, 0.18],
+                    size: [1.6, 1.6],
+                    size_over_life: c(&[(0.0, 0.6), (1.0, 1.6)]),
+                    color: g(&[(0.0, [1.0, 0.92, 0.75, 1.0]), (1.0, [1.0, 0.45, 0.1, 0.0])]),
+                    emissive: 45_000.0,
+                    additive: 1.0,
+                    soft: 0.0,
+                    ..em("flash")
+                },
+                EmitterDesc {
+                    bursts: once(10),
+                    shape: EmitShape::Sphere {
+                        radius: 0.2,
+                        surface: false,
+                    },
+                    speed: [1.8, 3.8],
+                    drag: 5.0,
+                    acceleration: [0.0, 2.0, 0.0],
+                    turbulence: 2.5,
+                    lifetime: [0.6, 1.0],
+                    size: [0.55, 0.85],
+                    size_over_life: c(&[(0.0, 0.4), (0.25, 1.0), (1.0, 1.3)]),
+                    rotation_deg: [-180.0, 180.0],
+                    spin_deg: [-40.0, 40.0],
+                    sprite: Sprite::Fireball,
+                    lit: 1.0,
+                    color: fade([1.0, 0.45, 0.12], 1.0, 0.03, 0.6),
+                    emissive: 18_000.0,
+                    additive: 0.0,
+                    soft: 0.6,
+                    ..em("fire")
+                },
+                EmitterDesc {
+                    lifetime: [0.3, 0.7],
+                    stretch: 0.03,
+                    emissive: 30_000.0,
+                    drag: 1.5,
+                    ..sparks("sparks", 70, [3.0, 7.0])
+                },
+                EmitterDesc {
+                    bursts: once(1),
+                    offset: [0.0, 0.05, 0.0],
+                    speed: [0.0, 0.0],
+                    lifetime: [0.35, 0.35],
+                    size: [0.6, 0.6],
+                    size_over_life: c(&[(0.0, 0.5), (1.0, 5.0)]),
+                    rotation_deg: [0.0, 0.0],
+                    sprite: Sprite::Ring,
+                    facing: Facing::Horizontal,
+                    color: g(&[(0.0, [1.0, 0.6, 0.25, 0.9]), (1.0, [1.0, 0.3, 0.05, 0.0])]),
+                    emissive: 15_000.0,
+                    additive: 1.0,
+                    soft: 0.0,
+                    ..em("shockwave")
+                },
+                // Smoke rolls outwards over the ground and barely rises: light grey, thin, gone
+                // in two seconds.
+                EmitterDesc {
+                    delay: 0.1,
+                    bursts: once(9),
+                    shape: EmitShape::Hemisphere { radius: 0.4 },
+                    speed: [0.8, 1.6],
+                    drag: 2.5,
+                    acceleration: [0.0, 0.25, 0.0],
+                    lifetime: [1.4, 2.2],
+                    size: [0.6, 0.9],
+                    size_over_life: c(&[(0.0, 0.6), (1.0, 2.0)]),
+                    color: smoke_colors(0.26, 0.35),
+                    ..smoke("smoke", 0.26, 0.35)
+                },
+                EmitterDesc {
+                    bursts: once(20),
+                    shape: EmitShape::Sphere {
+                        radius: 0.3,
+                        surface: false,
+                    },
+                    speed: [0.8, 2.4],
+                    gravity: 0.1,
+                    acceleration: [0.0, 0.8, 0.0],
+                    drag: 1.5,
+                    turbulence: 2.5,
+                    lifetime: [0.8, 1.8],
+                    size: [0.025, 0.05],
+                    color: g(&[
+                        (0.0, [1.0, 0.6, 0.2, 1.0]),
+                        (0.7, [1.0, 0.35, 0.05, 0.9]),
+                        (1.0, [0.8, 0.1, 0.0, 0.0]),
+                    ]),
+                    emissive: 30_000.0,
+                    additive: 1.0,
+                    ..em("embers")
+                },
+                EmitterDesc {
+                    bursts: once(6),
+                    shape: EmitShape::Sphere {
+                        radius: 0.3,
+                        surface: false,
+                    },
+                    speed: [0.2, 0.6],
+                    acceleration: [0.0, 1.0, 0.0],
+                    drag: 1.0,
+                    lifetime: [0.5, 0.9],
+                    size: [0.8, 1.2],
+                    size_over_life: c(&[(0.0, 0.6), (1.0, 1.4)]),
+                    ..haze("haze", 0.8)
                 },
             ],
         )
