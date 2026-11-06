@@ -1353,7 +1353,18 @@ fn pick_spot(
             ground,
             obscurance: Some(obscurance),
         };
-        let seen = |p: DVec3| sight.clear(eye, p + DVec3::Y * BODY_SEEN, &ignore);
+        // The sight line to each block of 2×2 cells (1 m) and metre of height is asked once,
+        // from the first cell searched in it: the search weighs thousands of cells, and a
+        // line for each was nine tenths of its time (25 ms for a 41 m flank at the arena,
+        // VM). Game AI Pro 3's tactical navmesh paths likewise weigh exposure per polygon.
+        let mut seen_blocks =
+            bevy_platform::collections::HashMap::<(i64, i64, i64), bool>::default();
+        let mut seen = |p: DVec3| {
+            let block = (p.x.floor() as i64, p.z.floor() as i64, p.y.floor() as i64);
+            *seen_blocks
+                .entry(block)
+                .or_insert_with(|| sight.clear(eye, p + DVec3::Y * BODY_SEEN, &ignore))
+        };
         let mut ctx = grid.ctx(world, ground, water);
         let mut cost = |p: DVec3| {
             let h = heat.sample(p + DVec3::Y * 0.5);
