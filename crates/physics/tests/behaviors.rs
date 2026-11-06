@@ -12,7 +12,7 @@ use engine_physics::{PhysicsPlugin, PhysicsSettings, PhysicsStats};
 use engine_world::physics::{
     BodyKind, CharacterController, CharacterMove, CharacterState, Collider, ColliderShape,
     CollisionLayers, ContactEvent, ContactPhase, ExternalForce, Joint, JointKind, PhysicsQueries,
-    QueryFilter, RigidBody, Velocity,
+    QueryFilter, RayQuery, RigidBody, Velocity,
 };
 use engine_world::{
     Gravity, GroundContact, NoiseEvent, Water, WaterQuery, WaterSample, WorldImpulse, WorldPlugin,
@@ -938,6 +938,50 @@ fn layers_decide_what_collides_and_what_queries_see() {
             .is_none(),
         "layer-2 ray should ignore the floor"
     );
+}
+
+/// A batch of rays answers as one `raycast` each would, filters and all, across a batch big
+/// enough to be split over threads.
+#[test]
+fn a_batch_of_rays_answers_like_single_rays() {
+    let mut app = app();
+    ground(&mut app, DVec3::ZERO, 20.0);
+    let boxes: Vec<Entity> = (0..12)
+        .map(|i| cube(&mut app, DVec3::new(i as f64 * 1.5 - 9.0, 0.5, 0.0), 0.5))
+        .collect();
+    app.update_n(3);
+    let q = app.world.resource::<PhysicsQueries>().clone();
+    let filters = [
+        QueryFilter::default(),
+        QueryFilter::excluding(boxes[3]),
+        QueryFilter {
+            layers: 0b100,
+            ..Default::default()
+        },
+    ];
+    let mut rays = Vec::new();
+    for i in 0..300 {
+        let x = (i % 30) as f64 * 0.7 - 10.0;
+        let from = DVec3::new(x, 4.0, -3.0 + (i / 30) as f64 * 0.6);
+        let to = DVec3::new(x * 0.9, 0.2, 0.0);
+        rays.extend(RayQuery::between(from, to, 0.05, (i % 3) as u16));
+    }
+    // (And one whose filter is past the end: it misses.)
+    rays.push(RayQuery {
+        filter: 9,
+        ..rays[0]
+    });
+    let mut out = Vec::new();
+    q.raycast_many(&rays, &filters, &mut out);
+    assert_eq!(out.len(), rays.len());
+    let mut hits = 0;
+    for (r, got) in rays.iter().zip(&out).take(300) {
+        let one = q.raycast(r.origin, r.dir, r.max_distance, &filters[r.filter as usize]);
+        assert_eq!(*got, one, "{r:?}");
+        hits += usize::from(one.is_some());
+    }
+    assert!(hits > 100, "most rays hit the boxes or the floor: {hits}");
+    assert_eq!(out[300], None);
 }
 
 // ---------------------------------------------------------------- time, forces, water, blasts
