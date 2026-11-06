@@ -125,7 +125,9 @@ pub const VIEWS: &[DemoView] = &[
         eye: [4.0, 6.5, 19.0],
         target: [0.0, 1.8, -4.0],
         hour: 16.9,
-        warmup: 2.5,
+        // Pillars at the top of their climb, every step up, a fire bolt just bursting on
+        // each stone wall.
+        warmup: 3.1,
     },
 ];
 
@@ -454,23 +456,23 @@ fn lanes(program: Program, cycle: u64) -> Vec<Lane> {
                 // Fire bolts burst on a stone wall's face.
                 casts(vec![
                     cast(0.0, wall("stone").named("Stone wall"), AimAt::Lane(-4.0)),
-                    cast(1.0, fire(), AimAt::Focus),
-                    cast(1.7, fire(), AimAt::Focus),
+                    cast(1.4, fire(), AimAt::Focus),
+                    cast(2.2, fire(), AimAt::Focus),
                 ]),
                 // Light and stone: a fire bolt goes through the frost wall (as steam) and
                 // bursts on the stone one behind it.
                 casts(vec![
                     cast(0.0, wall("frost"), AimAt::Lane(-2.5)),
                     cast(0.5, wall("stone").named("Stone wall"), AimAt::Lane(-6.5)),
-                    cast(1.3, fire(), AimAt::Focus),
+                    cast(2.0, fire(), AimAt::Focus),
                 ]),
                 // A pillar under a crate stack, broad enough to carry all three.
                 casts(vec![cast(0.0, pillar(1.3), AimAt::Lane(-5.0))]),
                 // Steps where stone bolts strike the floor, far first so no bolt meets a step.
                 casts(vec![
                     cast(0.0, step.clone(), AimAt::Lane(-7.5)),
-                    cast(0.5, step.clone(), AimAt::Lane(-4.5)),
-                    cast(1.0, step, AimAt::Lane(-1.5)),
+                    cast(0.4, step.clone(), AimAt::Lane(-4.5)),
+                    cast(0.8, step, AimAt::Lane(-1.5)),
                 ]),
                 // A pillar lifting a dummy.
                 casts(vec![cast(0.0, pillar(1.0), AimAt::Lane(-5.0))]),
@@ -615,6 +617,15 @@ fn setup_program(
         for e in &carriers {
             commands.entity(e).despawn();
         }
+        // A fresh floor: the last program's scorch, frost and blood marks go (vfx's marks;
+        // without vfx the call just fails).
+        commands.queue(move |world: &mut World| {
+            let _ = engine_core::registry::call_api(
+                world,
+                "vfx.clear_marks",
+                json!({"center": [origin.x, origin.y, origin.z - 3.0], "radius_m": 26.0}),
+            );
+        });
         hall.t = 0.0;
         hall.cycle = 0;
         hall.labels = vec![String::new(); LANES.len()];
