@@ -453,6 +453,14 @@ struct MeshFrame {
 }
 
 impl MeshFrame {
+    /// What the classify reads of it ([`cluster_candidate`], loaded, uploaded), as bits.
+    fn class(&self) -> u8 {
+        0x80 | (self.version != 0) as u8
+            | if self.ready { MESH_READY } else { 0 }
+            | (self.exists as u8) << 2
+            | (self.dense as u8) << 3
+    }
+
     /// Take bounds and levels from its upload.
     fn set_uploaded(&mut self, gpu_mesh: &GpuMesh, building_levels: bool, skinned: bool) {
         let coarsest = gpu_mesh.coarsest_triangles();
@@ -500,6 +508,65 @@ struct MaterialFrame {
     /// baked before would show the white stand-in for good). `None` while the material
     /// itself is still loading: nothing is baked of it.
     impostor_key: Option<u64>,
+}
+
+impl MaterialFrame {
+    /// What the classify reads of it ([`cluster_candidate`]), as bits.
+    fn class(&self) -> u8 {
+        0x80 | self.opaque as u8 | (self.masked as u8) << 1 | (self.sways as u8) << 2
+    }
+}
+
+/// A material's buffer slot and texture set, as [`MeshFeature::material_slot`] made them.
+#[derive(Clone, Copy)]
+struct MaterialSlot {
+    slot: u32,
+    textures: u32,
+    /// `MaterialFrame::impostor_key` when made (its values and its images' versions; `None`:
+    /// made again whenever asked).
+    key: Option<u64>,
+    /// What of its texture set its material values hold: the bound image flags and virtual
+    /// texture ids (another material sharing the set may have rebuilt it since).
+    bound: [u32; 3],
+    /// The frame it was last made or found still right, and last used.
+    checked: u64,
+    used: u64,
+}
+
+/// Every this many frames a kept material slot is made again anyway (staggered by handle),
+/// keeping its images' cache entries in use and catching what its key doesn't show.
+const MATERIAL_RECHECK_FRAMES: u64 = 64;
+/// Material slots unused this long are freed: well before their texture set may be
+/// (`EVICT_AFTER_FRAMES`, less the check's period), whose id may then go to other images.
+const MATERIAL_EVICT_FRAMES: u64 = 300;
+
+/// Note `class` as handle `i`'s latest in `seen`, telling whether it differs from before.
+fn note_class(seen: &mut Vec<u8>, i: usize, class: u8) -> ClassChange {
+    if i >= seen.len() {
+        seen.resize(i + 1, 0);
+    }
+    match std::mem::replace(&mut seen[i], class) {
+        // New (its slots are new too, and checked as written) or as it was.
+        0 => ClassChange::None,
+        old if old == class => ClassChange::None,
+        // Only uploaded since: of its slots, only those in the list may leave it.
+        old if old | MESH_READY == class => ClassChange::Ready,
+        _ => ClassChange::Other,
+    }
+}
+
+/// [`MeshFrame::class`]'s bit for an uploaded mesh.
+const MESH_READY: u8 = 2;
+
+/// How a mesh's or material's part in the classify changed since it last looked.
+#[derive(Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
+enum ClassChange {
+    #[default]
+    None,
+    /// A mesh was uploaded, nothing else: the slots in the list are checked again.
+    Ready,
+    /// Anything else: every slot is.
+    Other,
 }
 
 /// One thread's share of the cull.
@@ -1403,6 +1470,19 @@ pub struct MeshFeature {
     tables: Option<(u64, usize)>,
     /// The frame and cluster path setting `deferred` was classified for.
     classified: Option<(u64, bool)>,
+    /// What decides a slot's path, as the classify last saw it, by mesh and material handle
+    /// index ([`MeshFrame::class`], [`MaterialFrame::class`]), and the canopy setting: the
+    /// classify scans every slot again only when one of them changed,
+    /// else it looks at the slots the sync rewrote.
+    mesh_class: Vec<u8>,
+    material_class: Vec<u8>,
+    class_changed: ClassChange,
+    /// Meshes whose part changed otherwise (not only uploaded) since the classify looked.
+    class_meshes: Vec<u32>,
+    class_canopy: bool,
+    /// Bits by slot: in `deferred`; and the slots the classify checks again (scratch).
+    deferred_bits: Vec<u64>,
+    recheck_bits: Vec<u64>,
     opaque: Vec<Batch>,
     transparent: Vec<Batch>,
     /// The moving casters drawn into each shadow map every frame (`draw_shadow`): the
@@ -1437,10 +1517,14 @@ pub struct MeshFeature {
     /// when drawn as its impostor).
     layout: Vec<u32>,
     material_data: Vec<GpuMaterial>,
-    /// Material handle index → (material buffer slot, texture set id), rebuilt every frame.
-    /// Material slot key (the handle index, or a displaced variant: see `displaced_material`)
-    /// → (material buffer slot, texture set id), rebuilt every frame.
-    material_index: FastMap<u64, (u32, u32)>,
+    /// Material slot key (the handle index, or a displaced variant) → its material buffer
+    /// slot and texture set, kept from frame to frame while the material and its images stay
+    /// as they were (`MaterialSlot`).
+    material_index: FastMap<u64, MaterialSlot>,
+    /// Material buffer slots no material holds any more.
+    free_material_slots: Vec<u32>,
+    /// `RenderSettings::material_texture_size` the slots were made with.
+    material_preset_size: u32,
     /// Dense meshes drawn as clusters (virtual geometry).
     clusters: Option<ClusterRenderer>,
     /// Meshes drawn as clusters this frame.
@@ -2008,7 +2092,9 @@ impl MeshFeature {
                     let material = material_assets
                         .and_then(|m| m.get(handle))
                         .unwrap_or(default_material);
-                    let slot = self.material_slot(gpu, handle.index() as u64, material, sources);
+                    let key = self.material_frames[index].impostor_key;
+                    let slot =
+                        self.material_slot(gpu, handle.index() as u64, material, sources, key);
                     self.material_frames[index].slot = Some(slot);
                     slot
                 }
@@ -2063,9 +2149,33 @@ impl MeshFeature {
         handle: u64,
         material: &StandardMaterial,
         sources: &TextureSources,
+        key: Option<u64>,
     ) -> (u32, u32) {
-        if let Some(v) = self.material_index.get(&handle) {
-            return *v;
+        let frame = self.frame;
+        if let Some(kept) = self.material_index.get_mut(&handle) {
+            kept.used = frame;
+            if kept.checked == frame {
+                return (kept.slot, kept.textures);
+            }
+            // Still right: the same values and images, all of them bound as they were (none
+            // still loading), and not due for its periodic check.
+            let vt_generation = self.vt.as_ref().map_or(0, |v| v.bind_generation());
+            let due = (frame + handle).is_multiple_of(MATERIAL_RECHECK_FRAMES);
+            if key.is_some()
+                && kept.key == key
+                && !due
+                && let Some(Some(set)) = self.texture_sets.get_mut(kept.textures as usize)
+                && set.vt_generation == vt_generation
+                && set.complete()
+                && {
+                    let (low, high) = set.virtual_ids();
+                    [set.flags(), low, high] == kept.bound
+                }
+            {
+                set.last_used = frame;
+                kept.checked = frame;
+                return (kept.slot, kept.textures);
+            }
         }
         let textures = self.texture_set_for(gpu, material, sources);
         let mut gpu_material = material.to_gpu();
@@ -2086,9 +2196,25 @@ impl MeshFeature {
             // Rare (an image finishing its load): every static image is drawn again.
             self.static_dirty = [true; SHADOW_MAPS];
         }
-        let slot = self.material_data.len() as u32;
-        self.material_data.push(gpu_material);
-        self.material_index.insert(handle, (slot, textures));
+        let slot = match self.material_index.get(&handle) {
+            Some(kept) => kept.slot,
+            None => self.free_material_slots.pop().unwrap_or_else(|| {
+                self.material_data.push(gpu_material);
+                self.material_data.len() as u32 - 1
+            }),
+        };
+        self.material_data[slot as usize] = gpu_material;
+        self.material_index.insert(
+            handle,
+            MaterialSlot {
+                slot,
+                textures,
+                key,
+                bound: [bound, vt_low, vt_high],
+                checked: frame,
+                used: frame,
+            },
+        );
         (slot, textures)
     }
 
@@ -3056,12 +3182,15 @@ impl RenderFeature for MeshFeature {
         let Some(mut skin_query) = self.skin_query.take() else {
             // Made in `prepare_serial`.
             self.scene = scene;
+            // The classify didn't see what the sync rewrote: all of it next time.
+            self.classified = None;
             return;
         };
         let world_ref: &World = world;
         let Some(mesh_assets) = world_ref.get_resource::<Assets<Mesh>>() else {
             self.scene = scene;
             self.skin_query = Some(skin_query);
+            self.classified = None;
             return;
         };
         if mesh_assets.removals() != self.mesh_removals {
@@ -3080,9 +3209,23 @@ impl RenderFeature for MeshFeature {
 
         self.items.clear();
         if new_tables {
-            // Material slots stay for the frame's later views (their tables keep them).
-            self.material_data.clear();
-            self.material_index.clear();
+            // Material slots stay from frame to frame (`material_slot` checks them), all made
+            // again when preset maps change size; unused ones are freed now and then.
+            if self.material_preset_size != preset_size {
+                self.material_preset_size = preset_size;
+                self.material_data.clear();
+                self.material_index.clear();
+                self.free_material_slots.clear();
+            } else if frame.is_multiple_of(MATERIAL_RECHECK_FRAMES) {
+                let free = &mut self.free_material_slots;
+                self.material_index.retain(|_, m| {
+                    let keep = m.used + MATERIAL_EVICT_FRAMES >= frame;
+                    if !keep {
+                        free.push(m.slot);
+                    }
+                    keep
+                });
+            }
         }
         let mut culled = 0u32;
         let shadows = view.sun_shadows || view.sky_occlusion.enabled;
@@ -3185,6 +3328,11 @@ impl RenderFeature for MeshFeature {
                 if i >= self.mesh_frames.len() {
                     self.mesh_frames.resize(i + 1, MeshFrame::default());
                 }
+                match note_class(&mut self.mesh_class, i, entry.class()) {
+                    // Its slots are checked again (`MeshScene::slots_of_mesh`).
+                    ClassChange::Other => self.class_meshes.push(raw),
+                    change => self.class_changed = self.class_changed.max(change),
+                }
                 self.mesh_frames[i] = entry;
             }
             steps.step("meshes: gather materials");
@@ -3209,7 +3357,7 @@ impl RenderFeature for MeshFeature {
                 if i >= self.material_frames.len() {
                     self.material_frames.resize(i + 1, MaterialFrame::default());
                 }
-                self.material_frames[i] = MaterialFrame {
+                let entry = MaterialFrame {
                     index: handle.index(),
                     blend: material.alpha_mode == AlphaMode::Blend,
                     masked: matches!(material.alpha_mode, AlphaMode::Mask(_)),
@@ -3231,13 +3379,20 @@ impl RenderFeature for MeshFeature {
                     slot: None,
                     impostor_key,
                 };
+                let change = note_class(&mut self.material_class, i, entry.class());
+                // A material has no `Ready` change.
+                if change != ClassChange::None {
+                    self.class_changed = ClassChange::Other;
+                }
+                self.material_frames[i] = entry;
             }
             self.tables = Some((frame, min_triangles));
-            // The scene may have changed under the list.
-            self.classified = None;
+            // Tables built again within a frame (a setting changed): classified again in full.
+            if self.classified.is_some_and(|(f, _)| f == frame) {
+                self.classified = None;
+            }
         }
 
-        steps.step("meshes: classify");
         // 1. Which slots the serial pass looks at first: cluster candidates and meshes not
         //    uploaded yet (a quick parallel scan; the cull comes after the serial pass).
         let clusters_on = settings.virtual_geometry && self.clusters.is_some();
@@ -3245,7 +3400,111 @@ impl RenderFeature for MeshFeature {
         let mut deferred = std::mem::take(&mut self.deferred);
         // A later view of the frame takes the first one's list: slots uploaded since are
         // `checked` and pass through the serial pass to the cull.
-        if self.classified != Some((frame, clusters_on)) {
+        // Steady state: only the slots the sync wrote in full can have changed paths (dropped
+        // slots renumber the last one), unless a mesh's or material's part in it did.
+        let incremental = self
+            .classified
+            .is_some_and(|(f, on)| f != frame && on == clusters_on)
+            && self.class_changed != ClassChange::Other
+            && self.class_canopy == canopy;
+        steps.step(
+            if incremental || self.classified == Some((frame, clusters_on)) {
+                "meshes: classify"
+            } else {
+                "meshes: classify all"
+            },
+        );
+        let (mesh_frames, material_frames) = (&self.mesh_frames, &self.material_frames);
+        let qualifies = |h: &Hot| {
+            if h.flags & mesh_scene::VISIBLE == 0 {
+                return false;
+            }
+            let mesh = &mesh_frames[h.mesh as usize];
+            if mesh.version == 0 {
+                return false;
+            }
+            let mat = &material_frames[h.material as usize];
+            !mesh.ready || (clusters_on && cluster_candidate(h, mesh, mat, canopy))
+        };
+        if incremental && self.classified != Some((frame, clusters_on)) {
+            // The sync's events in order, on bits by slot: in the list, and to check again.
+            let (bits, recheck) = (&mut self.deferred_bits, &mut self.recheck_bits);
+            recheck.clear();
+            let ready = self.class_changed == ClassChange::Ready;
+            if ready {
+                recheck.extend_from_slice(bits);
+            }
+            let get = |v: &[u64], s: u32| {
+                v.get(s as usize / 64)
+                    .is_some_and(|w| w >> (s % 64) & 1 != 0)
+            };
+            let set = |v: &mut Vec<u64>, s: u32, on: bool| {
+                let word = s as usize / 64;
+                if word >= v.len() {
+                    v.resize(word + 1, 0);
+                }
+                let bit = 1u64 << (s % 64);
+                if on { v[word] |= bit } else { v[word] &= !bit }
+            };
+            for event in &scene.events {
+                match *event {
+                    mesh_scene::SlotEvent::Written(s) => set(recheck, s, true),
+                    mesh_scene::SlotEvent::Dropped(s, last) => {
+                        let (was, check) = (get(bits, last), get(recheck, last));
+                        set(bits, last, false);
+                        set(recheck, last, false);
+                        if s != last {
+                            set(bits, s, was);
+                            set(recheck, s, check);
+                        }
+                    }
+                }
+            }
+            for &mesh in &self.class_meshes {
+                for &s in scene.slots_of_mesh(mesh) {
+                    set(recheck, s, true);
+                }
+            }
+            let len = scene.hot.len();
+            bits.resize(len.div_ceil(64), 0);
+            if !len.is_multiple_of(64) {
+                bits[len / 64] &= (1u64 << (len % 64)) - 1;
+            }
+            for (w, &word) in recheck.iter().enumerate() {
+                let mut word = word;
+                while word != 0 {
+                    let s = (w * 64) as u32 + word.trailing_zeros();
+                    word &= word - 1;
+                    if (s as usize) < len {
+                        let now = qualifies(&scene.hot[s as usize]);
+                        set(bits, s, now);
+                    }
+                }
+            }
+            if !scene.events.is_empty() || !self.class_meshes.is_empty() || ready {
+                // In slot order, as the full scan makes it.
+                deferred.clear();
+                for (w, &word) in bits.iter().enumerate() {
+                    let mut word = word;
+                    while word != 0 {
+                        deferred.push((w * 64) as u32 + word.trailing_zeros());
+                        word &= word - 1;
+                    }
+                }
+            }
+            // The same list the full scan makes.
+            debug_assert!(
+                scene
+                    .hot
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, h)| qualifies(h))
+                    .map(|(s, _)| s as u32)
+                    .eq(deferred.iter().copied()),
+                "incremental classify differs from a full scan"
+            );
+            self.classified = Some((frame, clusters_on));
+        } else if self.classified != Some((frame, clusters_on)) {
             let threads = gather_threads(scene.hot.len());
             let mut chunks = std::mem::take(&mut self.gather_scratch);
             chunks.resize_with(threads, Default::default);
@@ -3253,18 +3512,10 @@ impl RenderFeature for MeshFeature {
                 out.deferred.clear();
             }
             {
-                let (mesh_frames, material_frames) = (&self.mesh_frames, &self.material_frames);
+                let qualifies = &qualifies;
                 let classify = |base: usize, hot: &[Hot], out: &mut GatherChunk| {
                     for (k, h) in hot.iter().enumerate() {
-                        if h.flags & mesh_scene::VISIBLE == 0 {
-                            continue;
-                        }
-                        let mesh = &mesh_frames[h.mesh as usize];
-                        if mesh.version == 0 {
-                            continue;
-                        }
-                        let mat = &material_frames[h.material as usize];
-                        if !mesh.ready || (clusters_on && cluster_candidate(h, mesh, mat, canopy)) {
+                        if qualifies(h) {
                             out.deferred.push((base + k) as u32);
                         }
                     }
@@ -3286,7 +3537,15 @@ impl RenderFeature for MeshFeature {
             }
             self.gather_scratch = chunks;
             self.classified = Some((frame, clusters_on));
+            self.deferred_bits.clear();
+            self.deferred_bits.resize(scene.hot.len().div_ceil(64), 0);
+            for &s in &deferred {
+                self.deferred_bits[s as usize / 64] |= 1 << (s % 64);
+            }
         }
+        self.class_changed = ClassChange::None;
+        self.class_meshes.clear();
+        self.class_canopy = canopy;
         self.cluster_slots.clear();
         self.cluster_slots.resize(scene.hot.len().div_ceil(64), 0);
 
@@ -3387,14 +3646,23 @@ impl RenderFeature for MeshFeature {
                     let (material_slot, textures) = match displacement {
                         Some(d) => {
                             let strength = d.normal_map_strength.clamp(0.0, 1.0);
+                            // Made again each frame: the key shows the material, not all of
+                            // the displacement.
                             self.material_slot(
                                 gpu,
                                 mat.index as u64 | (strength.to_bits() as u64) << 32 | 1 << 63,
                                 &d.adjust_material(material),
                                 &sources,
+                                None,
                             )
                         }
-                        None => self.material_slot(gpu, mat.index as u64, material, &sources),
+                        None => self.material_slot(
+                            gpu,
+                            mat.index as u64,
+                            material,
+                            &sources,
+                            mat.impostor_key,
+                        ),
                     };
                     if let Some(clusters) = &mut self.clusters {
                         let model = cold.transform.matrix_relative_to(view.origin);
@@ -3480,7 +3748,8 @@ impl RenderFeature for MeshFeature {
                 let material = material_assets
                     .and_then(|m| m.get(handle))
                     .unwrap_or(&default_material);
-                let slot = self.material_slot(gpu, handle.index() as u64, material, &sources);
+                let key = self.material_frames[i].impostor_key;
+                let slot = self.material_slot(gpu, handle.index() as u64, material, &sources, key);
                 self.material_frames[i].slot = Some(slot);
             }
         }

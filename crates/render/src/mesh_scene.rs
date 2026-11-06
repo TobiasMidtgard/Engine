@@ -232,6 +232,10 @@ pub(crate) struct MeshScene {
     slot_of: Vec<(Entity, u32)>,
     /// Slots using each mesh and material handle index.
     mesh_users: Vec<u32>,
+    /// The slots of each mesh handle index (`Hot::mesh`), and each slot's place in its
+    /// mesh's list.
+    mesh_slots: Vec<Vec<u32>>,
+    slot_place: Vec<u32>,
     material_users: Vec<u32>,
     query: Option<QueryState<SceneQuery>>,
     /// The same, only for the entities changed since the last sync.
@@ -250,6 +254,19 @@ pub(crate) struct MeshScene {
     /// Slots rewritten or dropped by the latest sync, as they were before (static shadow
     /// images that hold them must be drawn again).
     pub changes: Vec<SlotChange>,
+    /// What the latest sync did to slot numbers, in order: slots written in full (added, or
+    /// their mesh, material, flags, fade or rows changed; not those that only moved), whose
+    /// path may have changed, and slots dropped (the last slot moving into the gap).
+    pub events: Vec<SlotEvent>,
+}
+
+/// One of [`MeshScene::events`].
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum SlotEvent {
+    Written(u32),
+    /// Slot `0` dropped; the slot that was last, `1`, now has its number (`1 == 0`: it was
+    /// the last).
+    Dropped(u32, u32),
 }
 
 /// A slot as it was before the latest sync rewrote or dropped it.
@@ -289,6 +306,7 @@ impl MeshScene {
         self.dirty = 0;
         self.unchanged = 0;
         self.changes.clear();
+        self.events.clear();
         if self.query.is_none() {
             // `None` while a component of the query was never registered.
             self.query = world.try_query::<SceneQuery>();
@@ -393,6 +411,16 @@ impl MeshScene {
 
     /// Drop slot `s` (its entity draws no more): the last slot moves into the gap.
     fn drop_slot(&mut self, s: usize) {
+        self.events
+            .push(SlotEvent::Dropped(s as u32, self.hot.len() as u32 - 1));
+        self.unlist(s);
+        let last = self.hot.len() - 1;
+        if s != last {
+            // The last slot takes number `s`: so in its mesh's list.
+            let (mesh, place) = (self.hot[last].mesh as usize, self.slot_place[last] as usize);
+            self.mesh_slots[mesh][place] = s as u32;
+        }
+        self.slot_place.swap_remove(s);
         self.release(s);
         self.note_change(s);
         let entity = self.cold[s].entity;
@@ -575,6 +603,7 @@ impl MeshScene {
                 self.cold.push(cold);
                 self.rows.push(None);
                 self.seen.push(frame);
+                self.slot_place.push(u32::MAX);
                 self.hot.push(Hot {
                     center: DVec3::ZERO,
                     radius: 0.0,
@@ -595,6 +624,17 @@ impl MeshScene {
         };
         self.dirty += 1;
         self.rows[s] = rows;
+        if self.slot_place[s] == u32::MAX || self.hot[s].mesh != resolved.mesh.index() {
+            if self.slot_place[s] != u32::MAX {
+                self.unlist(s);
+            }
+            let mesh = resolved.mesh.index() as usize;
+            if mesh >= self.mesh_slots.len() {
+                self.mesh_slots.resize_with(mesh + 1, Vec::new);
+            }
+            self.slot_place[s] = self.mesh_slots[mesh].len() as u32;
+            self.mesh_slots[mesh].push(s as u32);
+        }
         let mirrored = transform.0.matrix3.determinant() < 0.0;
         self.hot[s] = Hot {
             scale: max_scale(&transform),
@@ -616,6 +656,7 @@ impl MeshScene {
         };
         count(&mut self.mesh_users, resolved.mesh.index(), 1);
         count(&mut self.material_users, resolved.material.index(), 1);
+        self.events.push(SlotEvent::Written(s as u32));
     }
 
     /// Remember slot `s` as it is, before it is rewritten or dropped (if it was ever placed).
@@ -628,6 +669,24 @@ impl MeshScene {
                 still_from: self.cold[s].still_from(),
             });
         }
+    }
+
+    /// Take slot `s` out of its mesh's list.
+    fn unlist(&mut self, s: usize) {
+        let (mesh, place) = (self.hot[s].mesh as usize, self.slot_place[s] as usize);
+        let list = &mut self.mesh_slots[mesh];
+        list.swap_remove(place);
+        if let Some(&moved) = list.get(place) {
+            self.slot_place[moved as usize] = place as u32;
+        }
+        self.slot_place[s] = u32::MAX;
+    }
+
+    /// The slots drawing mesh handle index `mesh` (`Hot::mesh`).
+    pub fn slots_of_mesh(&self, mesh: u32) -> &[u32] {
+        self.mesh_slots
+            .get(mesh as usize)
+            .map_or(&[], Vec::as_slice)
     }
 
     /// A slot stops using its mesh and material (before it is rewritten or dropped; every
@@ -698,6 +757,16 @@ mod tests {
                 },
             ))
             .id()
+    }
+
+    /// Each slot is in its mesh's list, at its place, and nothing else is.
+    fn assert_mesh_lists(scene: &MeshScene) {
+        for (s, hot) in scene.hot.iter().enumerate() {
+            let place = scene.slot_place[s] as usize;
+            assert_eq!(scene.slots_of_mesh(hot.mesh).get(place), Some(&(s as u32)));
+        }
+        let listed: usize = scene.mesh_slots.iter().map(Vec::len).sum();
+        assert_eq!(listed, scene.hot.len());
     }
 
     fn slot(scene: &MeshScene, entity: Entity) -> usize {
@@ -908,6 +977,7 @@ mod tests {
         scene.sync(&world, 1);
         assert_eq!(scene.meshes_used().collect::<Vec<_>>(), [0, 1]);
         assert_eq!(scene.materials_used().collect::<Vec<_>>(), [7]);
+        assert_mesh_lists(&scene);
 
         // The first slot goes; the last moves into it and keeps its own data.
         world.despawn(entities[0]);
@@ -915,6 +985,7 @@ mod tests {
         scene.sync(&world, 2);
         assert_eq!(scene.hot.len(), 2);
         assert_eq!(scene.meshes_used().collect::<Vec<_>>(), [1]);
+        assert_mesh_lists(&scene);
         for &e in &[entities[1], entities[3]] {
             let s = slot(&scene, e);
             let x = world.get::<GlobalTransform>(e).unwrap().0.translation.x;
@@ -928,11 +999,23 @@ mod tests {
         assert_eq!((scene.hot.len(), scene.dirty), (3, 1));
         assert_eq!(scene.cold[slot(&scene, c)].transform.0.translation.x, 9.0);
         assert_eq!(scene.meshes_used().collect::<Vec<_>>(), [1, 3]);
+        assert_mesh_lists(&scene);
 
         // A changed mesh moves its use.
         world.get_mut::<ResolvedMesh>(c).unwrap().mesh = Handle::from_index(1);
         scene.sync(&world, 4);
         assert_eq!(scene.meshes_used().collect::<Vec<_>>(), [1]);
+        assert_mesh_lists(&scene);
+        assert_eq!(scene.slots_of_mesh(1).len(), 3);
+        assert!(scene.slots_of_mesh(3).is_empty());
+
+        // Dropping slots of one mesh renumbers another's: its list follows.
+        let d = spawn(&mut world, 10.0, 5, 7);
+        scene.sync(&world, 5);
+        world.despawn(entities[1]);
+        scene.sync(&world, 6);
+        assert_mesh_lists(&scene);
+        assert_eq!(scene.slots_of_mesh(5), [slot(&scene, d) as u32]);
     }
 
     #[test]
