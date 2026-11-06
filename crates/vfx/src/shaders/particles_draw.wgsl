@@ -832,23 +832,31 @@ fn void_orb(c: vec2<f32>, seed: f32) -> vec2<f32> {
     return vec2<f32>(dark, corona + halo);
 }
 
-// A wobbling blob of thick liquid (blood, ichor, ooze): glossy, a bright highlight and a rim
-// mirroring the sky, its middle lit from within. x: shade, y: alpha, z: highlight.
+// A wobbling blob of thick liquid (blood, ichor, ooze), shaded like a liquid ball rather than
+// a lit solid: a dark body (thick liquid swallows light), the light refracted through it
+// gathering in a bright crescent on the side away from the key light, a slow churn inside,
+// one hard pin-point highlight and a sky-mirroring rim. x: shade, y: alpha, z: highlight.
 fn goo(c: vec2<f32>, seed: f32, age: f32) -> vec3<f32> {
     let time = (frame.time.x % 3600.0) + seed * 41.0;
     let ang = atan2(c.y, c.x);
     let wobble = 0.08 * sin(ang * 3.0 + time * 5.0 + seed * 20.0) + 0.05 * sin(ang * 5.0 - time * 7.0);
-    let r = length(c) / (0.82 + wobble);
-    let a = smoothstep(1.0, 0.86, r);
+    let q = c / (0.82 + wobble);
+    let r = length(q);
+    let a = smoothstep(1.0, 0.9, r);
     let z = sqrt(saturate(1.0 - r * r));
-    let n = vec3<f32>(c / (0.82 + wobble), z);
+    let n = vec3<f32>(q, z);
     let l = normalize(vec3<f32>(-0.45, 0.6, 0.65));
+    // Light passing through gathers opposite the key light, just inside the far rim.
+    let cp = q + l.xy * 0.5;
+    let caustic = exp(-dot(cp, cp) * 5.0) * smoothstep(0.98, 0.6, r);
+    // Churning inside: slow dark and light swirls.
+    let swirl = fbm2(vec2<f32>(ang * 1.5 + time * 0.4, r * 2.5 - time * 0.7) + seed * 7.0, 3);
+    let body = mix(0.12, 0.42, z) * (0.6 + 0.8 * swirl);
+    let shade = body + caustic * 1.6;
     let h = normalize(l + vec3<f32>(0.0, 0.0, 1.0));
-    let spec = pow(saturate(dot(n, h)), 60.0) * 3.0;
-    // Darker toward the rim (thicker liquid seen edge-on), with a fresnel rim of sky.
-    let shade = mix(0.35, 1.0, z);
-    let fres = pow(1.0 - z, 4.0);
-    return vec3<f32>(shade, a, spec + fres * 0.6);
+    let spec = pow(saturate(dot(n, h)), 220.0) * 6.0 + pow(saturate(dot(n, h)), 30.0) * 0.25;
+    let fres = pow(1.0 - z, 3.0);
+    return vec3<f32>(shade, a, spec + fres * 0.8);
 }
 
 // A bubble rising out of an ooze: a thin skin with a highlight and a bright rim, that bursts

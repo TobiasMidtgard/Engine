@@ -13,6 +13,7 @@ pub mod library;
 pub mod marks;
 pub mod marks_feature;
 pub mod shift;
+pub mod spells;
 pub mod trail;
 
 use engine_assets::AssetAppExt;
@@ -92,6 +93,10 @@ impl Plugin for VfxPlugin {
 
         // Every engine's nozzles get a flame (owners hide their stand-in plumes).
         engine_world::locomotion::draws_exhausts(app, "vfx");
+        // Spells are drawn from the magic contracts (magic silences its stand-ins).
+        app.add_message::<engine_world::SpellCue>()
+            .init_resource::<spells::SpellLooks>();
+        engine_world::draws_spell_looks(app, "vfx");
 
         app.insert_resource(EffectLibrary::with_builtins())
             .init_resource::<VfxSettings>()
@@ -140,6 +145,8 @@ impl Plugin for VfxPlugin {
                     exhaust::follow_exhausts,
                     marks::age_marks,
                     tick_lifetimes,
+                    spells::draw_spell_looks,
+                    spells::play_spell_cues,
                     (
                         demo::run_casters,
                         demo::run_projectiles,
@@ -384,6 +391,13 @@ fn register_apis(app: &mut App) {
             marks.add(mark);
             Ok(json!({ "marks": marks.len() }))
         },
+    )
+    .register_api(
+        "vfx.spell_contracts",
+        "Whether this particles module draws spells from the magic contracts (SpellLook, \
+         SpellCue); spell modules silence their own stand-ins when it does.",
+        "{}",
+        |_, _| Ok(spells::contracts_answer()),
     )
     .register_api(
         "vfx.stats",

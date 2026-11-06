@@ -137,6 +137,8 @@ neither holds them up nor lets them sink.
 |---|---|
 | Spells | `spell.fireball`, `spell.fireball_impact`, `spell.frost_bolt`, `spell.frost_impact`, `spell.arcane_portal`, `spell.portal_gate`, `spell.heal_aura`, `spell.charge`, `spell.lightning_hit`, `spell.starburst`, `magic.orb` |
 | Elements | `spell.<element>.<role>` for the magic system's six elements (`fire`, `frost`, `storm`, `blood`, `blight`, `shadow`) and roles `bolt` (loops on a moving entity), `impact` (one shot, scale = blast radius / 2 m, leaves the element's mark) and `field` (a looping ground patch, scale = radius / 2 m). The clean elements glow; the dark ones are matter and absence: glossy blood, poison ooze with fumes, balls and wisps of darkness rimmed with violet light. |
+| Weaves | The magic module's authored weaves, each with the same roles as an element: clean `steam` (fire + frost: scalding white billows, wet ground), `plasma` (fire + storm: violet fire shot through with arcs), `tempest` (frost + storm: lightning in a whirl of snow) and `aether` (all three: a lilac star with sparkles of every color); dark `plague` (blood + blight, with flies), `nightfeed` (blood + shadow: blood drunk into darkness), `wither` (blight + shadow, with falling ash) and `doom` (all three). Each is built from its ingredients' own layers, thinned and turned toward the weave's color, plus a signature layer, so both ingredients stay recognisable. |
+| Casting | For every element and weave: `spell.<look>.charge` (motes converging on a swelling heart of the element in the hand; loops), `spell.<look>.cone` (one gout of a breath along the effect's up axis), `spell.<look>.wall` (the air round one ~1.5 m wall piece: flame curtain, chill fog, crackle, blood mist, miasma, a veil of darkness), `spell.<look>.fizzle` (a failed cast). `spell.status.<status>` plays on a body while it suffers: `burning`, `chilled`, `frozen`, `shocked`, `bleeding`, `rot`, `dread`, each kept to its own part of the body. |
 | Water | `water.splash`, `water.splash_small`, `water.fountain`, `water.column`, `water.bow_spray`, `water.mist` |
 | Impacts | `impact.<surface>` for every surface material (dirt, rock, concrete, wood, sand, grass, leaves, snow, mud, water, flesh, ice, glass, metal, default), `impact.sparks`, `impulse.dust`, `explosion.large` |
 | Footsteps | `step.dirt`, `step.sand`, `step.snow`, `step.mud`, `step.puddle`, `step.water`, `step.leaves`, `step.default` |
@@ -227,6 +229,16 @@ Reads: `WindField`, `Gravity`, `Ground`, `Water`, `SurfaceLayers` (puddles, snow
 `SurfaceMaterials`, `Exhausts` and `EngineState`, `TimeDilation`/`LocalTimeScale`, and the
 messages above. Inserts `ExhaustEffects` (`draws_exhausts`), so owners hide their stand-in
 plumes.
+
+Spells ([`spells`]): draws `engine_world::magic` and inserts `SpellLookDrawer`
+(`draws_spell_looks`), so magic silences its JSON stand-ins (`vfx.spell_contracts` answers the
+same). A `SpellLook` on a carrier plays `spell.<look>.<role>` on it while the component lasts
+(`spell.status.<look>` for statuses, a `Charge` on a child at the hand); `SpellCue` Impact,
+Cone, Beam, Fizzle and Mark play their moments (a cue impact leaves no mark of its own, since
+magic sends a Mark cue for ground hits). A look without art of its own borrows the nearest
+element's effect recolored to its color and defines it once under its own name; aura and wall
+fall back to field. `Statuses` is not drawn on its own: magic's status entities carry the
+looks.
 Writes: rendering only (plus the point lights of effects). The showcase demo writes
 `GroundContact` and `WorldImpulse` like a game would.
 

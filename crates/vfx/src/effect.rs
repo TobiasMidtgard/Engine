@@ -85,6 +85,35 @@ impl Gradient {
     pub fn bake<const N: usize>(&self) -> [[f32; 4]; N] {
         std::array::from_fn(|i| self.sample(i as f32 / (N - 1).max(1) as f32))
     }
+
+    /// Every key's color turned `amount` (0..1) of the way to `target`'s hue (see
+    /// [`recolor_toward`]); alpha is kept.
+    pub fn recolor(&mut self, target: [f32; 3], amount: f32) {
+        for (_, c) in &mut self.0 {
+            let [r, g, b] = recolor_toward([c[0], c[1], c[2]], target, amount);
+            *c = [r, g, b, c[3]];
+        }
+    }
+}
+
+/// `c` turned `amount` (0..1) of the way to `target`'s hue at `c`'s own brightness, keeping a
+/// little of a white-hot core where `c` is nearly white (so a recolored fireball keeps its
+/// hot heart). Used to weave elements together and to tint a look for a weave the library has
+/// no effect of its own for.
+pub fn recolor_toward(c: [f32; 3], target: [f32; 3], amount: f32) -> [f32; 3] {
+    let max = c[0].max(c[1]).max(c[2]);
+    if max <= 1e-6 || amount <= 0.0 {
+        return c;
+    }
+    let min = c[0].min(c[1]).min(c[2]);
+    let sat = (max - min) / max;
+    let tmax = target[0].max(target[1]).max(target[2]).max(1e-3);
+    let keep = (1.0 - sat).powi(2) * 0.5;
+    let a = amount.clamp(0.0, 1.0);
+    std::array::from_fn(|i| {
+        let to = target[i] / tmax * max * (1.0 - keep) + max * keep;
+        c[i] + (to - c[i]) * a
+    })
 }
 
 /// A number over a particle's life (0 = born, 1 = dies), as `[t, value]` keys.
@@ -998,6 +1027,20 @@ impl Default for EffectDesc {
 }
 
 impl EffectDesc {
+    /// Every color in the effect (layers, light, trail) turned `amount` of the way to
+    /// `target`'s hue (see [`recolor_toward`]).
+    pub fn recolor(&mut self, target: [f32; 3], amount: f32) {
+        for e in &mut self.emitters {
+            e.color.recolor(target, amount);
+        }
+        if let Some(l) = self.light.as_mut() {
+            l.color = recolor_toward(l.color, target, amount);
+        }
+        if let Some(t) = self.trail.as_mut() {
+            t.color.recolor(target, amount);
+        }
+    }
+
     /// Check every layer. Returns a sentence saying what to fix.
     pub fn validate(&self) -> Result<(), String> {
         if self.name.trim().is_empty() {

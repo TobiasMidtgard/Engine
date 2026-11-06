@@ -65,12 +65,12 @@ const STORM_HOT: [f32; 3] = [0.88, 0.93, 1.0];
 /// Blood as it looks: a deep red that only shows red where light passes through it.
 const BLOOD: [f32; 3] = [0.3, 0.012, 0.01];
 const BLOOD_GLOW: [f32; 3] = [1.0, 0.07, 0.04];
-const BLIGHT: [f32; 3] = [0.32, 0.42, 0.06];
-const BLIGHT_GLOW: [f32; 3] = [0.55, 1.0, 0.12];
+const BLIGHT: [f32; 3] = [0.17, 0.4, 0.05];
+const BLIGHT_GLOW: [f32; 3] = [0.38, 1.0, 0.16];
 const SHADOW: [f32; 3] = [0.55, 0.22, 1.0];
 
 /// A soft round glow lying on the ground under an area, turning slowly.
-fn ground_glow(rgb: [f32; 3], size: f32, alpha: f32, emissive: f32) -> EmitterDesc {
+pub(super) fn ground_glow(rgb: [f32; 3], size: f32, alpha: f32, emissive: f32) -> EmitterDesc {
     let [r, gg, b] = rgb;
     EmitterDesc {
         rate: 2.0,
@@ -518,7 +518,7 @@ fn storm_area() -> EffectDesc {
                     sprite: Sprite::Arc,
                     facing: Facing::Horizontal,
                     color: g(&[(0.0, [0.9, 0.95, 1.0, 1.0]), (1.0, [0.5, 0.6, 1.0, 0.0])]),
-                    emissive: 45_000.0,
+                    emissive: 70_000.0,
                     additive: 1.0,
                     soft: 0.0,
                     wind: 0.0,
@@ -526,17 +526,17 @@ fn storm_area() -> EffectDesc {
                 },
                 // Arcs leaping up out of the field, so it crackles above the ground too.
                 EmitterDesc {
-                    rate: 16.0,
+                    rate: 26.0,
                     shape: EmitShape::Disc { radius: 1.45 },
-                    offset: [0.0, 0.9, 0.0],
+                    offset: [0.0, 1.1, 0.0],
                     speed: [0.0, 0.0],
                     lifetime: [0.1, 0.18],
-                    size: [1.6, 2.4],
+                    size: [2.0, 3.0],
                     rotation_deg: [60.0, 120.0],
                     local_space: true,
                     sprite: Sprite::Arc,
                     color: g(&[(0.0, [0.9, 0.95, 1.0, 1.0]), (1.0, [0.5, 0.6, 1.0, 0.0])]),
-                    emissive: 45_000.0,
+                    emissive: 70_000.0,
                     additive: 1.0,
                     soft: 0.0,
                     wind: 0.0,
@@ -565,8 +565,29 @@ fn storm_area() -> EffectDesc {
                     lifetime: [0.2, 0.5],
                     ..sparks("sparks", 6, [1.5, 4.0])
                 },
-                rune_circle(STORM, 4.35, 4000.0),
-                ground_glow(STORM, 4.93, 0.2, 3500.0),
+                // The charged air: a pale blue glow standing over the field, flickering with
+                // the arcs, so it reads as a column of storm by day and not only at night.
+                EmitterDesc {
+                    rate: 10.0,
+                    shape: EmitShape::Disc { radius: 0.9 },
+                    offset: [0.0, 1.0, 0.0],
+                    speed: [0.0, 0.0],
+                    local_space: true,
+                    lifetime: [0.3, 0.6],
+                    size: [2.4, 3.4],
+                    color: g(&[
+                        (0.0, [0.6, 0.72, 1.0, 0.0]),
+                        (0.2, [0.6, 0.72, 1.0, 0.3]),
+                        (1.0, [0.5, 0.6, 1.0, 0.0]),
+                    ]),
+                    emissive: 9000.0,
+                    additive: 1.0,
+                    soft: 0.3,
+                    wind: 0.0,
+                    ..em("charged air")
+                },
+                rune_circle(STORM, 4.35, 9000.0),
+                ground_glow(STORM, 4.93, 0.35, 9000.0),
             ],
         )
     }
@@ -626,8 +647,8 @@ fn blood_bolt() -> EffectDesc {
                     speed: [0.0, 0.0],
                     local_space: true,
                     lifetime: [0.5, 0.5],
-                    size: [0.7, 0.7],
-                    color: fade(BLOOD_GLOW, 0.5, 0.3, 0.7),
+                    size: [0.34, 0.34],
+                    color: fade(BLOOD_GLOW, 0.35, 0.3, 0.7),
                     emissive: 1500.0,
                     additive: 1.0,
                     soft: 0.0,
@@ -776,14 +797,14 @@ fn blood_area() -> EffectDesc {
                     drag: 0.8,
                     local_space: true,
                     lifetime: [1.0, 1.4],
-                    size: [0.035, 0.06],
+                    size: [0.04, 0.07],
                     size_over_life: c(&[(0.0, 0.6), (0.3, 1.0), (1.0, 0.6)]),
                     sprite: Sprite::Droplet,
                     facing: Facing::Velocity,
-                    stretch: 0.05,
+                    stretch: 0.06,
                     lit: 1.0,
                     color: fade(BLOOD, 1.0, 0.15, 0.85),
-                    emissive: 700.0,
+                    emissive: 1200.0,
                     soft: 0.0,
                     wind: 0.0,
                     ..em("streams")
@@ -813,8 +834,8 @@ fn blood_area() -> EffectDesc {
                     speed: [0.0, 0.0],
                     local_space: true,
                     lifetime: [0.6, 0.6],
-                    size: [1.1, 1.1],
-                    color: fade(BLOOD_GLOW, 0.45, 0.3, 0.7),
+                    size: [0.5, 0.5],
+                    color: fade(BLOOD_GLOW, 0.35, 0.3, 0.7),
                     emissive: 1500.0,
                     additive: 1.0,
                     soft: 0.0,
@@ -895,10 +916,7 @@ fn blight_bolt() -> EffectDesc {
                     size: [0.04, 0.08],
                     sprite: Sprite::Goo,
                     lit: 1.0,
-                    color: g(&[
-                        (0.0, [0.32, 0.42, 0.06, 1.0]),
-                        (1.0, [0.32, 0.42, 0.06, 1.0]),
-                    ]),
+                    color: g(&[(0.0, [0.17, 0.4, 0.05, 1.0]), (1.0, [0.17, 0.4, 0.05, 1.0])]),
                     emissive: 600.0,
                     soft: 0.0,
                     ..em("drips")
@@ -916,14 +934,14 @@ fn blight_bolt() -> EffectDesc {
                     size: [0.4, 0.6],
                     size_over_life: c(&[(0.0, 0.6), (1.0, 2.2)]),
                     color: g(&[
-                        (0.0, [0.45, 0.6, 0.12, 0.0]),
-                        (0.1, [0.45, 0.6, 0.12, 0.45]),
-                        (0.5, [0.38, 0.48, 0.12, 0.3]),
-                        (1.0, [0.32, 0.38, 0.12, 0.0]),
+                        (0.0, [0.26, 0.52, 0.1, 0.0]),
+                        (0.1, [0.26, 0.52, 0.1, 0.45]),
+                        (0.5, [0.2, 0.38, 0.08, 0.3]),
+                        (1.0, [0.16, 0.26, 0.07, 0.0]),
                     ]),
                     emissive: 30.0,
                     erode: 0.8,
-                    erode_glow: 2500.0,
+                    erode_glow: 600.0,
                     ..smoke("fumes", 0.45, 0.4)
                 },
             ],
@@ -948,7 +966,10 @@ fn blight_impact() -> EffectDesc {
                     lifetime: [0.2, 0.2],
                     size: [2.0, 2.0],
                     size_over_life: c(&[(0.0, 0.5), (1.0, 1.3)]),
-                    color: g(&[(0.0, [0.6, 1.0, 0.2, 0.9]), (1.0, [0.3, 0.6, 0.05, 0.0])]),
+                    color: g(&[
+                        (0.0, [0.45, 1.0, 0.25, 0.9]),
+                        (1.0, [0.15, 0.55, 0.05, 0.0]),
+                    ]),
                     emissive: 9000.0,
                     additive: 1.0,
                     soft: 0.0,
@@ -965,10 +986,7 @@ fn blight_impact() -> EffectDesc {
                     size: [0.05, 0.12],
                     sprite: Sprite::Goo,
                     lit: 1.0,
-                    color: g(&[
-                        (0.0, [0.32, 0.42, 0.06, 1.0]),
-                        (1.0, [0.32, 0.42, 0.06, 1.0]),
-                    ]),
+                    color: g(&[(0.0, [0.17, 0.4, 0.05, 1.0]), (1.0, [0.17, 0.4, 0.05, 1.0])]),
                     emissive: 700.0,
                     soft: 0.0,
                     duration: Some(0.1),
@@ -983,7 +1001,10 @@ fn blight_impact() -> EffectDesc {
                     size: [0.08, 0.18],
                     sprite: Sprite::Bubble,
                     lit: 1.0,
-                    color: g(&[(0.0, [0.45, 0.6, 0.1, 0.9]), (1.0, [0.45, 0.6, 0.1, 0.9])]),
+                    color: g(&[
+                        (0.0, [0.25, 0.55, 0.08, 0.9]),
+                        (1.0, [0.25, 0.55, 0.08, 0.9]),
+                    ]),
                     emissive: 500.0,
                     soft: 0.0,
                     wind: 0.0,
@@ -1000,14 +1021,14 @@ fn blight_impact() -> EffectDesc {
                     size: [0.8, 1.2],
                     size_over_life: c(&[(0.0, 0.6), (1.0, 2.0)]),
                     color: g(&[
-                        (0.0, [0.45, 0.6, 0.12, 0.0]),
-                        (0.1, [0.45, 0.6, 0.12, 0.5]),
-                        (0.6, [0.38, 0.48, 0.12, 0.35]),
-                        (1.0, [0.32, 0.38, 0.12, 0.0]),
+                        (0.0, [0.26, 0.52, 0.1, 0.0]),
+                        (0.1, [0.26, 0.52, 0.1, 0.5]),
+                        (0.6, [0.2, 0.38, 0.08, 0.35]),
+                        (1.0, [0.16, 0.26, 0.07, 0.0]),
                     ]),
                     emissive: 30.0,
                     erode: 0.8,
-                    erode_glow: 2500.0,
+                    erode_glow: 600.0,
                     ..smoke("cloud", 0.45, 0.5)
                 },
             ],
@@ -1036,7 +1057,10 @@ fn blight_area() -> EffectDesc {
                     size: [0.14, 0.34],
                     sprite: Sprite::Bubble,
                     lit: 1.0,
-                    color: g(&[(0.0, [0.45, 0.6, 0.1, 0.9]), (1.0, [0.45, 0.6, 0.1, 0.9])]),
+                    color: g(&[
+                        (0.0, [0.25, 0.55, 0.08, 0.9]),
+                        (1.0, [0.25, 0.55, 0.08, 0.9]),
+                    ]),
                     emissive: 500.0,
                     soft: 0.0,
                     wind: 0.0,
@@ -1052,16 +1076,16 @@ fn blight_area() -> EffectDesc {
                     size: [1.0, 1.5],
                     size_over_life: c(&[(0.0, 0.6), (1.0, 1.6)]),
                     color: g(&[
-                        (0.0, [0.45, 0.6, 0.12, 0.0]),
-                        (0.2, [0.45, 0.6, 0.12, 0.38]),
-                        (0.7, [0.38, 0.48, 0.12, 0.28]),
-                        (1.0, [0.32, 0.38, 0.12, 0.0]),
+                        (0.0, [0.16, 0.3, 0.07, 0.0]),
+                        (0.2, [0.16, 0.3, 0.07, 0.45]),
+                        (0.7, [0.13, 0.22, 0.06, 0.35]),
+                        (1.0, [0.1, 0.16, 0.05, 0.0]),
                     ]),
                     emissive: 30.0,
                     wind: 0.3,
                     erode: 0.7,
-                    erode_glow: 1500.0,
-                    ..smoke("miasma", 0.45, 0.4)
+                    erode_glow: 600.0,
+                    ..smoke("miasma", 0.3, 0.5)
                 },
                 EmitterDesc {
                     rate: 37.8,
@@ -1079,7 +1103,7 @@ fn blight_area() -> EffectDesc {
                     soft: 0.0,
                     ..em("spores")
                 },
-                ground_glow(BLIGHT_GLOW, 4.64, 0.25, 1800.0),
+                ground_glow(BLIGHT_GLOW, 4.64, 0.22, 1500.0),
             ],
         )
     }

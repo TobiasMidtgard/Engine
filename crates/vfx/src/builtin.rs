@@ -14,7 +14,9 @@ use crate::effect::*;
 use crate::marks::{MarkDesc, MarkKind};
 use crate::trail::{RibbonStyle, Trail};
 
+mod casting;
 mod elements;
+mod weaves;
 
 fn em(name: &str) -> EmitterDesc {
     EmitterDesc {
@@ -377,6 +379,10 @@ pub fn all() -> Vec<EffectDesc> {
     let named = elements::aliases(&v);
     v.extend(named);
     v.extend(elements::all());
+    let woven = weaves::all(&v);
+    v.extend(woven);
+    let cast = casting::all(&v);
+    v.extend(cast);
     v
 }
 

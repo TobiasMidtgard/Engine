@@ -52,6 +52,9 @@ pub struct ParticleEffect {
     pub despawn_when_done: bool,
     /// Random seed (0 = pick one).
     pub seed: u32,
+    /// Leave the effect's mark where it starts (off when the caller places marks itself, as
+    /// spell cues do).
+    pub leave_mark: bool,
 }
 
 impl Default for ParticleEffect {
@@ -64,6 +67,7 @@ impl Default for ParticleEffect {
             intensity: 1.0,
             despawn_when_done: false,
             seed: 0,
+            leave_mark: true,
         }
     }
 }
@@ -802,7 +806,9 @@ pub fn tick_effects(
             {
                 commands.entity(entity).insert(trail.clone());
             }
-            if let (Some(mark), Some(marks)) = (&inst.desc.mark, marks.as_deref_mut()) {
+            if let (Some(mark), Some(marks), true) =
+                (&inst.desc.mark, marks.as_deref_mut(), effect.leave_mark)
+            {
                 marks.add(Mark::from_effect(mark, pos, inst.rot, inst.scale));
             }
         } else {
