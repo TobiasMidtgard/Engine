@@ -579,6 +579,22 @@ impl<'a> NavCtx<'a> {
         extra_cost: &mut dyn FnMut(DVec3) -> f32,
         out: &mut Vec<DVec3>,
     ) -> PathStatus {
+        self.find_path_within(from, to, extra_cost, out, usize::MAX)
+    }
+
+    /// [`find_path`](Self::find_path), giving up after `max_cells` cells searched with a
+    /// partial path toward the goal, as Detour's node pool (`dtNavMeshQuery::init`'s
+    /// `maxNodes`) and Unreal's `MaxSearchNodes` (2048 polygons) bound a search. For probes
+    /// that only ask whether a spot is near to walk to: an unreachable spot otherwise searches
+    /// the whole window (up to 34 ms on the cloud VM for one tactical pick at the fortress).
+    pub fn find_path_within(
+        &mut self,
+        from: DVec3,
+        to: DVec3,
+        extra_cost: &mut dyn FnMut(DVec3) -> f32,
+        out: &mut Vec<DVec3>,
+        max_cells: usize,
+    ) -> PathStatus {
         let _span = tracing::info_span!("find path").entered();
         out.clear();
         let s = self.grid.settings;
@@ -667,6 +683,7 @@ impl<'a> NavCtx<'a> {
         });
         let mut best = (heuristic(si), si);
         let mut reached = false;
+        let mut searched = 0usize;
         const N8: [(i32, i32); 8] = [
             (1, 0),
             (-1, 0),
@@ -689,6 +706,10 @@ impl<'a> NavCtx<'a> {
             }
             if i == gi {
                 reached = true;
+                break;
+            }
+            searched += 1;
+            if searched >= max_cells {
                 break;
             }
             let (x, z) = ((i as i32) % win.w, (i as i32) / win.w);
@@ -1393,6 +1414,30 @@ mod tests {
         assert_eq!(status, PathStatus::Partial);
         let end = *path.last().unwrap();
         assert!(end.x > -5.0 && end.x < -4.0, "{end}");
+    }
+
+    #[test]
+    fn a_capped_search_gives_up_with_a_partial_path_toward_the_goal() {
+        let world = TacticalWorld::from_obstacles(Vec::new(), &Ground::default());
+        let mut grid = NavGrid::default();
+        let ground = Ground::default();
+        let water = Water(Arc::new(Lake));
+        let mut ctx = grid.ctx(&world, &ground, &water);
+        // Across the lake's south end: the walk goes round it, so it needs a search.
+        let (from, to) = (DVec3::new(-10.0, 0.0, -15.0), DVec3::new(10.0, 0.0, -15.0));
+        let mut path = Vec::new();
+        assert_eq!(
+            ctx.find_path_within(from, to, &mut |_| 0.0, &mut path, usize::MAX),
+            PathStatus::Complete
+        );
+        let status = ctx.find_path_within(from, to, &mut |_| 0.0, &mut path, 10);
+        assert_eq!(status, PathStatus::Partial);
+        let end = *path.last().unwrap();
+        assert!(end.distance(to) < from.distance(to), "{end}");
+        // The middle of the lake can't be reached; a capped probe stops early all the same.
+        let mid = DVec3::new(0.0, 0.0, 0.0);
+        let status = ctx.find_path_within(from, mid, &mut |_| 0.0, &mut path, 200);
+        assert_eq!(status, PathStatus::Partial);
     }
 
     /// Wear 1 within half a meter of a polyline, fading out by 1.2 m.

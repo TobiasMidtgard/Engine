@@ -123,6 +123,11 @@ impl PositionWeights {
 /// from us).
 pub const SMOKE_HIDES: f32 = 0.25;
 
+/// Most cells a pick's path search may look at for one spot (about 1,500 m² of half-meter
+/// cells): a spot farther round than that is a long detour, which the travel weight already
+/// scores down, and an unreachable one would search the whole window.
+const PROBE_CELLS: usize = 6000;
+
 /// What the NPC knows when picking a spot.
 #[derive(Debug, Clone)]
 pub struct PositionQuery {
@@ -394,7 +399,9 @@ pub fn choose_position(
             path.clear();
             return Some(*spot);
         }
-        let status = ctx.nav.find_path(q.from, spot.position, &mut |_| 0.0, path);
+        let status =
+            ctx.nav
+                .find_path_within(q.from, spot.position, &mut |_| 0.0, path, PROBE_CELLS);
         let end_ok = path.last().is_some_and(|e| e.distance(spot.position) < 1.5);
         if status == PathStatus::Complete || end_ok {
             return Some(*spot);
