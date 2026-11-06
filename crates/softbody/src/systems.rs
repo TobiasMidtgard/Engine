@@ -1590,7 +1590,10 @@ fn step_one(entity: Entity, body: &mut SoftBodySim, ctx: &StepContext) {
     }
     // A far flag in the wind sways instead of being stepped: frozen it would read as broken,
     // stepped it costs as much as near. It learns how while still stepped (see `sway`).
-    let sway_from = 2.0 * ctx.config.lod_distance * if b.far.is_some() { 0.9 } else { 1.0 };
+    // From the LOD distance itself (45 m at Ultra): the loop is its own flapping, recorded at
+    // the full step, so it looks as stepped did; from twice it, the lake stop's five banners
+    // 63-79 m off were stepped every other step at 0.35-0.7 ms each.
+    let sway_from = ctx.config.lod_distance * if b.far.is_some() { 0.9 } else { 1.0 };
     if dist > sway_from && b.steps > 0 {
         let wind = ctx.env.wind(b.center) * b.settings.wind_scale;
         if !sway::can_sway(b, wind) {
