@@ -107,6 +107,10 @@ pub struct DebrisBody {
     /// Seconds in contact since it last woke: one that keeps rocking long after landing is put
     /// to sleep anyway.
     pub awake_secs: f32,
+    /// The box around `points` (local, unscaled), worked out once by [`DebrisBody::new`]: the
+    /// step asked for it several times per piece, and the rubble rebuild for every resting
+    /// piece every step. `None` without points.
+    pub hull_box: Option<(Vec3, Vec3)>,
 }
 
 /// Where the built-in solver holds a [`DebrisBody`]: its own copy of the pose, stepped without
@@ -173,13 +177,9 @@ pub fn place_debris_system(
 impl DebrisBody {
     /// Area of its broadest side (m²), from the box around its contact points.
     pub fn broad_area(&self) -> f32 {
-        let (lo, hi) = self.points.iter().fold(
-            (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN)),
-            |(lo, hi), p| (lo.min(*p), hi.max(*p)),
-        );
-        if lo.x > hi.x {
+        let Some((lo, hi)) = self.hull_box else {
             return 0.0;
-        }
+        };
         let e = hi - lo;
         let (big, small) = (e.max_element(), e.min_element());
         big * (e.x + e.y + e.z - big - small)
@@ -226,6 +226,9 @@ impl DebrisBody {
             h.x * h.x + h.z * h.z,
             h.x * h.x + h.y * h.y,
         ) * (m / 3.0);
+        let hull_box = points.iter().fold(None, |b: Option<(Vec3, Vec3)>, p| {
+            Some(b.map_or((*p, *p), |(lo, hi)| (lo.min(*p), hi.max(*p))))
+        });
         Self {
             velocity: Vec3::ZERO,
             angular: Vec3::ZERO,
@@ -242,7 +245,15 @@ impl DebrisBody {
             on: None,
             ground: None,
             awake_secs: 0.0,
+            hull_box,
         }
+    }
+
+    /// [`hull_box`](Self::hull_box) under a (diagonal) scale.
+    pub fn scaled_box(&self, scale: Vec3) -> Option<(Vec3, Vec3)> {
+        let (lo, hi) = self.hull_box?;
+        let (a, b) = (lo * scale, hi * scale);
+        Some((a.min(b), a.max(b)))
     }
 
     /// Push the body (wakes it).
@@ -1398,10 +1409,7 @@ pub fn simulate_debris_system(
             continue;
         }
         // Its box: the bounds of its contact points (its hull's extremes).
-        let Some((lo, hi)) = body.points.iter().fold(None, |b: Option<(Vec3, Vec3)>, p| {
-            let p = *p * t.scale;
-            Some(b.map_or((p, p), |(lo, hi)| (lo.min(p), hi.max(p))))
-        }) else {
+        let Some((lo, hi)) = body.scaled_box(t.scale) else {
             continue;
         };
         rubble.add(Support::new(
@@ -1539,10 +1547,9 @@ pub fn simulate_debris_system(
                 && center.distance(from) >= LEAVE_M as f64
             {
                 let inside = |local: Vec3| in_rock(&rock, center + (rot * local).as_dvec3());
-                let (lo, hi) = body.points.iter().fold(
-                    (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN)),
-                    |(lo, hi), p| (lo.min(*p * scale), hi.max(*p * scale)),
-                );
+                let (lo, hi) = body
+                    .scaled_box(scale)
+                    .unwrap_or((Vec3::splat(f32::MAX), Vec3::splat(f32::MIN)));
                 let steps =
                     (((hi - lo).max_element() / LEAVE_LATTICE_M).ceil() as usize).clamp(1, 8);
                 let clear = !body.points.is_empty()
@@ -1644,11 +1651,9 @@ pub fn simulate_debris_system(
             } else {
                 rubble.candidates(center, reach, entity)
             };
-            if !piles.is_empty() {
-                let (lo, hi) = body.points.iter().fold(
-                    (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN)),
-                    |(lo, hi), p| (lo.min(*p * scale), hi.max(*p * scale)),
-                );
+            if !piles.is_empty()
+                && let Some((lo, hi)) = body.scaled_box(scale)
+            {
                 let mut best = 0.0f32;
                 let steps = if debris.chip { 1 } else { LATTICE };
                 for (i, j, k) in box_lattice(steps) {
