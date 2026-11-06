@@ -72,6 +72,7 @@ type Removed<'w, 's> = (
     RemovedComponents<'w, 's, Collider>,
     RemovedComponents<'w, 's, Joint>,
     RemovedComponents<'w, 's, CharacterController>,
+    RemovedComponents<'w, 's, ExternalForce>,
 );
 
 /// Entities whose physics components were removed, noted every frame (`Last`) so removals in
@@ -85,11 +86,13 @@ pub(crate) fn note_removals(
     mut colliders: RemovedComponents<Collider>,
     mut joints: RemovedComponents<Joint>,
     mut characters: RemovedComponents<CharacterController>,
+    mut forces: RemovedComponents<ExternalForce>,
 ) {
     pending.0.extend(bodies.read());
     pending.0.extend(colliders.read());
     pending.0.extend(joints.read());
     pending.0.extend(characters.read());
+    pending.0.extend(forces.read());
 }
 
 /// Cached ECS queries for [`physics_step`].
@@ -237,13 +240,14 @@ pub(crate) fn physics_sync(world: &mut World, mut q: Local<Option<StepQueries>>)
     let _piece = crate::report::Piece::start("sync: removals");
     let mut gone: Vec<Entity> = std::mem::take(&mut world.resource_mut::<PendingRemovals>().0);
     {
-        let Ok((mut rb, mut co, mut jo, mut ch)) = q.removed.get_mut(world) else {
+        let Ok((mut rb, mut co, mut jo, mut ch, mut fo)) = q.removed.get_mut(world) else {
             unreachable!("removal readers always validate")
         };
         gone.extend(rb.read());
         gone.extend(co.read());
         gone.extend(jo.read());
         gone.extend(ch.read());
+        gone.extend(fo.read());
     }
     let mut dirty_colliders: Vec<Entity> = Vec::new();
     let mut removed: Vec<Entity> = Vec::new();
@@ -262,6 +266,16 @@ pub(crate) fn physics_sync(world: &mut World, mut q: Local<Option<StepQueries>>)
         }
         if world.get::<CharacterController>(e).is_none() && sim.characters.contains_key(&e) {
             sim.remove_character(e);
+        }
+        // A removed `ExternalForce` stops pushing (it kept its last force before).
+        let unforced = (Vec3::ZERO, Vec3::ZERO, None);
+        if world.get::<ExternalForce>(e).is_none()
+            && let Some(entry) = sim.bodies.get_mut(&e)
+            && entry.external != unforced
+        {
+            entry.external = unforced;
+            entry.forces_set = true;
+            sim.forced.insert(e);
         }
     }
     sim.remove_colliders(&removed);
