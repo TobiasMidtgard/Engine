@@ -12,7 +12,7 @@ use engine_world::{
 };
 
 use crate::embers::{Ember, Embers};
-use crate::field::{FireField, FuelSource, StepInput, TILE};
+use crate::field::{FireField, FuelAnswer, FuelSource, StepInput, TILE};
 use crate::fuel::{CellFuel, FuelPatch, PlacedPatch};
 use crate::objects::{
     Burning, Charring, ContainedFire, FlameShape, ObjectEnv, radiant_flux, step_object,
@@ -171,6 +171,9 @@ pub struct WorldFuel<'a> {
     pub materials: &'a SurfaceMaterials,
     pub patches: &'a [PlacedPatch],
     pub ground_fuel: bool,
+    /// Answer [`FuelSource::fuel_later`] on the async pool (in play; a manual clock or a
+    /// test asks at once, so its steps stay the same on every run).
+    pub later: bool,
 }
 
 impl FuelSource for WorldFuel<'_> {
@@ -181,21 +184,7 @@ impl FuelSource for WorldFuel<'_> {
     fn fuel_many(&mut self, points: &[DVec3], out: &mut Vec<(CellFuel, f64)>) {
         let start = out.len();
         out.resize(start + points.len(), (CellFuel::NONE, 0.0));
-        // Only the patches that reach these points (a tile's square) are tested per point.
-        let (lo, hi) = points.iter().fold(
-            (DVec2::splat(f64::INFINITY), DVec2::splat(f64::NEG_INFINITY)),
-            |(lo, hi), p| (lo.min(DVec2::new(p.x, p.z)), hi.max(DVec2::new(p.x, p.z))),
-        );
-        let near: Vec<PlacedPatch> = self
-            .patches
-            .iter()
-            .filter(|pp| {
-                let c = DVec2::new(pp.center.x, pp.center.z);
-                let r = pp.radius() as f64;
-                c.x + r >= lo.x && c.x - r <= hi.x && c.y + r >= lo.y && c.y - r <= hi.y
-            })
-            .copied()
-            .collect();
+        let near = self.patches_near(points);
         let this = WorldFuel {
             patches: &near,
             ..*self
@@ -207,9 +196,57 @@ impl FuelSource for WorldFuel<'_> {
             }
         });
     }
+
+    fn fuel_later(&mut self, points: Vec<DVec3>) -> Option<FuelAnswer> {
+        if !self.later {
+            return None;
+        }
+        let pool = engine_core::tasks::AsyncComputeTaskPool::try_get()?;
+        let (ground, water, materials) = (
+            self.ground.clone(),
+            self.water.clone(),
+            self.materials.clone(),
+        );
+        let patches = self.patches_near(&points);
+        let ground_fuel = self.ground_fuel;
+        let answer = FuelAnswer::default();
+        let slot = answer.clone();
+        pool.spawn(async move {
+            let mut fuel = WorldFuel {
+                ground: &ground,
+                water: &water,
+                materials: &materials,
+                patches: &patches,
+                ground_fuel,
+                later: false,
+            };
+            let mut found = Vec::with_capacity(points.len());
+            fuel.fuel_many(&points, &mut found);
+            let _ = slot.set(found);
+        })
+        .detach();
+        Some(answer)
+    }
 }
 
 impl WorldFuel<'_> {
+    /// Only the patches that reach `points` (a tile's square), so each point tests a few.
+    fn patches_near(&self, points: &[DVec3]) -> Vec<PlacedPatch> {
+        let (lo, hi) = points.iter().fold(
+            (DVec2::splat(f64::INFINITY), DVec2::splat(f64::NEG_INFINITY)),
+            |(lo, hi), p| (lo.min(DVec2::new(p.x, p.z)), hi.max(DVec2::new(p.x, p.z))),
+        );
+        self.patches
+            .iter()
+            .filter(|pp| {
+                let c = DVec2::new(pp.center.x, pp.center.z);
+                let r = pp.radius() as f64;
+                c.x + r >= lo.x && c.x - r <= hi.x && c.y + r >= lo.y && c.y - r <= hi.y
+            })
+            .copied()
+            .collect()
+    }
+
     fn fuel_of(&self, p: DVec3) -> (CellFuel, f64) {
         let Some(g) = self.ground.sample(p) else {
             return (CellFuel::NONE, p.y);
@@ -320,6 +357,7 @@ pub fn index_patches(
         materials: &materials,
         patches: &patches.list,
         ground_fuel: settings.ground_fuel,
+        later: false,
     };
     let contains = |p: DVec3| touched.iter().any(|t| t.contains(p));
     field.refuel(min, max, &contains, &mut fuel);
@@ -371,6 +409,7 @@ pub fn handle_ignition(
         materials: &materials,
         patches: &patches.list,
         ground_fuel: settings.ground_fuel,
+        later: false,
     };
     // In play, the commands that need new tiles are spread over steps, a few tiles a step
     // ([`IGNITION_TILES_PER_STEP`]): the meadow demo's line of fire made all its tiles at
@@ -582,6 +621,8 @@ pub fn step_field(
         materials: &materials,
         patches: &patches.list,
         ground_fuel: settings.ground_fuel,
+        // In play, the ground of tiles the fire walks into is asked off the frame.
+        later: !matches!(time.source(), engine_core::time::TimeSource::Manual { .. }),
     };
     field.step(&input, &mut fuel);
     if field.steps.is_multiple_of(200) {
@@ -716,6 +757,7 @@ pub fn step_objects(
             materials: &materials,
             patches: &patches.list,
             ground_fuel: settings.ground_fuel,
+            later: false,
         };
         for (p, r, w) in deposits {
             field.add_external(p, r, w, &mut fuel);
@@ -1333,6 +1375,7 @@ mod tests {
             materials: &materials,
             patches: &patches,
             ground_fuel: true,
+            later: false,
         };
         // The default ground is grass everywhere…
         assert!(fuel.fuel_at(DVec3::new(0.0, 5.0, 0.0)).0.burns());

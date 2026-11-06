@@ -1111,6 +1111,7 @@ fn reset(world: &mut World, demo_entity: Entity, place: Place, demo: &FireDemo) 
             materials: world.resource::<SurfaceMaterials>(),
             patches: &world.resource::<FirePatches>().list,
             ground_fuel: settings.ground_fuel,
+            later: false,
         };
         let inside = |p: DVec3| {
             let d = place.local(DVec3::new(p.x, place.origin.y, p.z));

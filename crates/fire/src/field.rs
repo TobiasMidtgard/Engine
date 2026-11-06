@@ -407,7 +407,17 @@ pub struct FireField {
     unfueled: Vec<(IVec2, Vec<u16>)>,
     /// Set while [`Self::add_external`] visits its disc, so the tiles it heats are marked.
     marking_heat: bool,
+    /// Tiles the fire walks into whose ground the world is answering off the frame
+    /// ([`FuelSource::fuel_later`]): key, answer, and the step it was asked. Made at the first
+    /// step after the answer lands.
+    growing: Vec<(IVec2, FuelAnswer, u64)>,
 }
+
+/// A tile's `(fuel, ground height)` per cell, filled off the frame once the world answers.
+pub type FuelAnswer = std::sync::Arc<std::sync::OnceLock<Vec<(CellFuel, f64)>>>;
+
+/// Steps after which an answer that never came is asked again (its job died).
+const GROW_GIVE_UP_STEPS: u64 = 600;
 
 /// Where the fuel for a new cell comes from: `(fuel, ground height)` at a world X/Z (the `y`
 /// of the point is a height hint).
@@ -419,6 +429,14 @@ pub trait FuelSource {
     /// cells.
     fn fuel_many(&mut self, points: &[DVec3], out: &mut Vec<(CellFuel, f64)>) {
         out.extend(points.iter().map(|p| self.fuel_at(*p)));
+    }
+
+    /// [`fuel_many`](Self::fuel_many) off the frame, for a tile the fire walks into: the
+    /// answer lands in the returned slot later. `None` (the default) means ask now. A new
+    /// tile's thousand ground queries took 25-70 ms in one step at the showcase's fortress
+    /// (VM), where the ground's paint is dear to ask.
+    fn fuel_later(&mut self, _points: Vec<DVec3>) -> Option<FuelAnswer> {
+        None
     }
 }
 
@@ -445,6 +463,7 @@ impl FireField {
             incoming: Vec::new(),
             unfueled: Vec::new(),
             marking_heat: false,
+            growing: Vec::new(),
         }
     }
 
@@ -525,6 +544,14 @@ impl FireField {
         if self.tiles.len() >= self.max_tiles {
             return None;
         }
+        let points = self.tile_points(key, hint_y);
+        let mut found = Vec::with_capacity(TILE_CELLS);
+        fuel.fuel_many(&points, &mut found);
+        Some(self.insert_tile(key, found))
+    }
+
+    /// The world points a new tile asks its fuel at, cell centers at height `hint_y`.
+    fn tile_points(&self, key: IVec2, hint_y: f64) -> Vec<DVec3> {
         let origin = self.tile_origin(key);
         let cell = self.cell_m as f64;
         let mut points = Vec::with_capacity(TILE_CELLS);
@@ -537,8 +564,11 @@ impl FireField {
                 ));
             }
         }
-        let mut found = Vec::with_capacity(TILE_CELLS);
-        fuel.fuel_many(&points, &mut found);
+        points
+    }
+
+    /// Make tile `key` from its cells' `(fuel, ground height)` in [`Self::tile_points`] order.
+    fn insert_tile(&mut self, key: IVec2, found: Vec<(CellFuel, f64)>) -> usize {
         let base_y = found.iter().map(|(_, h)| *h).fold(f64::INFINITY, f64::min);
         let base_y = if base_y.is_finite() { base_y } else { 0.0 };
         let cells = found
@@ -562,7 +592,7 @@ impl FireField {
             heated: false,
         });
         self.map.insert(key, i);
-        Some(i)
+        i
     }
 
     /// Refill intact (not burning) cells inside `contains` from `fuel`, e.g. after a fuel
@@ -907,6 +937,7 @@ impl FireField {
         // Burning tiles bring their neighbors into existence so the fire can walk into them,
         // a few a step (`new_tiles_per_step`); those left out are asked for again next step.
         let grow_span = tracing::info_span!("fire grow").entered();
+        self.land_grown();
         let mut grow = Vec::new();
         for t in &self.tiles {
             if t.burning == 0 && !t.heated {
@@ -942,6 +973,18 @@ impl FireField {
             }
             if self.new_tiles_left == 0 {
                 break;
+            }
+            if self.growing.iter().any(|(g, _, _)| *g == k) {
+                continue;
+            }
+            // Off the frame when the world can answer there, a few tiles at a time.
+            if self.growing.len() < 4 * self.new_tiles_per_step.max(1)
+                && self.tiles.len() + self.growing.len() < self.max_tiles
+                && let Some(answer) = fuel.fuel_later(self.tile_points(k, hint_y))
+            {
+                self.new_tiles_left -= 1;
+                self.growing.push((k, answer, self.steps));
+                continue;
             }
             if let Some(i) = self.budgeted_tile(k, hint_y, fuel) {
                 self.tiles[i].active = true;
@@ -1152,6 +1195,8 @@ impl FireField {
     /// New cells the old field didn't cover get their fuel from the world at the next
     /// [`FireField::step`], when the world answers in the new frame.
     pub fn shift(&mut self, s: &WorldShift, focus: Option<DVec3>) {
+        // Answers asked in the old frame would land at the old heights: ask again.
+        self.growing.clear();
         if s.is_translation_only() {
             self.origin += DVec2::new(s.translation.x, s.translation.z);
             for t in &mut self.tiles {
@@ -1346,6 +1391,27 @@ impl FireField {
             }
         }
         self.unfueled.extend(owed);
+    }
+
+    /// Make the tiles whose off-frame answers have landed, in the order they were asked.
+    fn land_grown(&mut self) {
+        let steps = self.steps;
+        for (key, answer, asked) in std::mem::take(&mut self.growing) {
+            if self.map.contains_key(&key) {
+                continue;
+            }
+            match answer.get() {
+                Some(found) if self.tiles.len() < self.max_tiles => {
+                    let i = self.insert_tile(key, found.clone());
+                    self.tiles[i].active = true;
+                }
+                Some(_) => {}
+                None if steps.saturating_sub(asked) < GROW_GIVE_UP_STEPS => {
+                    self.growing.push((key, answer, asked));
+                }
+                None => {}
+            }
+        }
     }
 
     /// [`ensure_tile`](Self::ensure_tile) within the step's tile budget: a tile the budget
@@ -2154,6 +2220,69 @@ mod tests {
             field.cell_at(far).is_some(),
             "the wanted tile comes first next step"
         );
+    }
+
+    /// Grass that answers new tiles later, through slots the test fills.
+    struct LaterGrass {
+        asked_now: usize,
+        slots: Vec<(Vec<DVec3>, FuelAnswer)>,
+    }
+
+    impl FuelSource for LaterGrass {
+        fn fuel_at(&mut self, p: DVec3) -> (CellFuel, f64) {
+            self.asked_now += 1;
+            grass(p)
+        }
+
+        fn fuel_later(&mut self, points: Vec<DVec3>) -> Option<FuelAnswer> {
+            let answer = FuelAnswer::default();
+            self.slots.push((points, answer.clone()));
+            Some(answer)
+        }
+    }
+
+    #[test]
+    fn tiles_a_fire_walks_into_are_made_once_the_world_answers() {
+        let mut field = FireField::new(0.5);
+        let mut fuel = LaterGrass {
+            asked_now: 0,
+            slots: Vec::new(),
+        };
+        let wind = |_p: DVec3| Vec3::ZERO;
+        let wet = |_p: DVec3| 0.0;
+        let step = StepInput {
+            dt: 0.05,
+            ambient_c: 20.0,
+            rain_mm_h: 0.0,
+            humidity: 0.3,
+            wind: &wind,
+            wetness: &wet,
+            params: SpreadParams::default(),
+            near: None,
+        };
+        field.ignite(DVec3::splat(1.0), 1.0, &mut fuel);
+        assert_eq!(field.tiles.len(), 1);
+        for _ in 0..3 {
+            fuel.asked_now = 0;
+            field.step(&step, &mut fuel);
+            assert_eq!(fuel.asked_now, 0, "no ground asked on the frame");
+        }
+        // Two tiles a step were asked for, none made before an answer.
+        assert_eq!(field.tiles.len(), 1);
+        let asked: Vec<IVec2> = field.growing.iter().map(|(k, _, _)| *k).collect();
+        // (The first step only counts the flames.)
+        assert_eq!(asked.len(), 4, "asked {asked:?}");
+        // The world answers the first two: they are made at the next step.
+        for (points, answer) in fuel.slots.drain(..2) {
+            let found = points.iter().map(|p| grass(*p)).collect();
+            answer.set(found).unwrap();
+        }
+        field.step(&step, &mut fuel);
+        assert_eq!(field.tiles.len(), 3);
+        assert!(field.tile_index(asked[0]).is_some() && field.tile_index(asked[1]).is_some());
+        // A world shift drops the answers asked in the old frame.
+        field.shift(&WorldShift::translate(DVec3::new(64.0, 0.0, 0.0)), None);
+        assert!(field.growing.is_empty());
     }
 
     #[test]
