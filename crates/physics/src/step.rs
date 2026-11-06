@@ -3536,6 +3536,45 @@ pub(crate) mod tests {
         beside_matches_inside(30.0, 120);
     }
 
+    /// Bodies fall and tumble the same at 60 frames a second (one step a frame) as at 20
+    /// (three steps a frame), with the step beside the frame and inside it: no step advances
+    /// the world by the frame's time or twice.
+    #[test]
+    fn three_steps_a_frame_move_bodies_as_one_step_a_frame() {
+        let run = |overlap: bool, frame_hz: f64, frames: usize| {
+            let (mut app, _) = pile(overlap, frame_hz);
+            app.world
+                .resource_mut::<crate::PhysicsSettings>()
+                .overlap_min_ms = 0.0;
+            for _ in 0..frames {
+                app.update();
+            }
+            std::mem::take(&mut app.world.resource_mut::<Track>().0)
+        };
+        let one = run(false, 60.0, 120);
+        for (overlap, label) in [(false, "inside"), (true, "beside")] {
+            let three = run(overlap, 20.0, 40);
+            let steps = one[0].1.len().min(three[0].1.len());
+            assert!(steps >= 110, "{steps} fixed steps");
+            assert!(
+                one[0].1.len().abs_diff(three[0].1.len()) <= 3,
+                "{} steps at 60 Hz, {} at 20 Hz ({label})",
+                one[0].1.len(),
+                three[0].1.len()
+            );
+            for ((_, pa), (_, pb)) in one.iter().zip(&three) {
+                for k in 0..steps {
+                    assert!(
+                        pa[k].distance(pb[k]) < 1e-3,
+                        "step {k} ({label}): {} at one step a frame, {} at three",
+                        pa[k],
+                        pb[k]
+                    );
+                }
+            }
+        }
+    }
+
     /// With `overlap_frame` but steps quicker than `overlap_min_ms`, no step goes to a
     /// thread, and gameplay sees the bodies just as with the step inside the fixed step.
     #[test]
