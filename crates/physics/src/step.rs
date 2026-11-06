@@ -2694,7 +2694,7 @@ fn substep(
                 );
                 engine_core::log::info!(
                     "physics: its heaviest pairs: {}",
-                    crate::report::heavy_pairs(&r.world, 4)
+                    crate::report::heavy_pairs(&r.world, r.anchor, 4)
                 );
             }
         }

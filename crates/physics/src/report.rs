@@ -584,7 +584,11 @@ pub(crate) fn shape_size(s: &dyn rapier3d::parry::shape::Shape) -> String {
 
 /// The `n` contact pairs of `world` with the most manifolds, by entity and shape, with their
 /// contacts and deepest penetration (for a slow step's log line, off the frame: no names).
-pub(crate) fn heavy_pairs(world: &rapier3d::prelude::PhysicsWorld, n: usize) -> String {
+pub(crate) fn heavy_pairs(
+    world: &rapier3d::prelude::PhysicsWorld,
+    anchor: DVec3,
+    n: usize,
+) -> String {
     let mut heavy: Vec<_> = world
         .narrow_phase
         .contact_pairs()
@@ -610,10 +614,24 @@ pub(crate) fn heavy_pairs(world: &rapier3d::prelude::PhysicsWorld, n: usize) -> 
         world.colliders.get(h).map_or_else(
             || "?".into(),
             |c| {
+                // Body type and world position, so a pair with no name can be found in a zone.
+                let kind =
+                    c.parent()
+                        .and_then(|b| world.bodies.get(b))
+                        .map_or("static", |b| match b.body_type() {
+                            rapier3d::prelude::RigidBodyType::Dynamic => "dynamic",
+                            rapier3d::prelude::RigidBodyType::Fixed => "fixed",
+                            _ => "kinematic",
+                        });
+                let t = c.position().translation;
+                let at = anchor + DVec3::new(f64::from(t.x), f64::from(t.y), f64::from(t.z));
                 format!(
-                    "{} [{}]",
+                    "{} [{}, {kind}, at {:.0} {:.0} {:.0}]",
                     crate::convert::entity_of(c.user_data),
-                    shape_size(c.shape())
+                    shape_size(c.shape()),
+                    at.x,
+                    at.y,
+                    at.z
                 )
             },
         )
