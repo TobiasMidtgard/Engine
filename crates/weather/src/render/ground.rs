@@ -4,7 +4,7 @@
 use bytemuck::{Pod, Zeroable};
 use engine_core::prelude::*;
 use engine_render::{
-    FrameContext, GpuShared, RenderFeature, RenderPhase, RenderSettings, ViewData, wgpu,
+    FrameContext, GpuShared, PrepareOut, RenderFeature, RenderPhase, RenderSettings, ViewData, wgpu,
 };
 use engine_world::{PrecipitationKind, SurfaceLayers, WeatherState};
 use serde_json::json;
@@ -184,12 +184,20 @@ impl RenderFeature for GroundFeature {
         self.since_upload = f32::INFINITY;
     }
 
-    fn prepare(
+    // Shared: it only reads resources, so packing and uploading the cover and height maps
+    // (1.7-2.2 ms on the cloud VM when due) runs beside the other features' prepares instead
+    // of on the main thread alone (render-perf/shared-prepare.md).
+    fn prepares_shared(&self) -> bool {
+        true
+    }
+
+    fn prepare_shared(
         &mut self,
-        world: &mut World,
+        world: &World,
         gpu: &GpuShared,
         view: &ViewData,
         _settings: &RenderSettings,
+        _out: &mut PrepareOut,
     ) {
         let settings = world
             .get_resource::<GroundEffectSettings>()

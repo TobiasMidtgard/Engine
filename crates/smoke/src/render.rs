@@ -8,7 +8,8 @@ use engine_core::math::{DVec3, UVec3, Vec3};
 use engine_core::prelude::*;
 use engine_render::wgpu;
 use engine_render::{
-    FeatureStats, FrameContext, GpuShared, RenderFeature, RenderPhase, RenderSettings, ViewData,
+    FeatureStats, FrameContext, GpuShared, PrepareOut, RenderFeature, RenderPhase, RenderSettings,
+    ViewData,
 };
 
 use crate::domain::Domain;
@@ -578,12 +579,20 @@ impl RenderFeature for SmokeFeature {
         }
     }
 
-    fn prepare(
+    // Shared: it only reads resources, so it packs and uploads a changed domain (4-6 ms on
+    // the cloud VM in a third of the fortress's frames) beside the other features' prepares
+    // instead of on the main thread alone (render-perf/shared-prepare.md).
+    fn prepares_shared(&self) -> bool {
+        true
+    }
+
+    fn prepare_shared(
         &mut self,
-        world: &mut World,
+        world: &World,
         gpu: &GpuShared,
         view: &ViewData,
         _settings: &RenderSettings,
+        out: &mut PrepareOut,
     ) {
         self.stats = FeatureStats::default();
         self.order.clear();
@@ -736,10 +745,8 @@ impl RenderFeature for SmokeFeature {
             .count();
         self.stats.instances = drawn as u32;
         self.stats.draw_calls = (drawn + shaded) as u32;
-        if let Some(mut d) = world.get_resource_mut::<Diagnostics>() {
-            d.set("smoke.drawn", drawn as f64);
-            d.set("smoke.shadows", shaded as f64);
-        }
+        out.set("smoke.drawn", drawn as f64);
+        out.set("smoke.shadows", shaded as f64);
     }
 
     fn compute(&mut self, encoder: &mut wgpu::CommandEncoder, ctx: &FrameContext) {
