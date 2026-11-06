@@ -137,6 +137,18 @@ fn wind_moves_the_blades() {
     };
     let diff = |wind: Vec3, name: &str| {
         let mut app = meadow_app_with(wind, |s| s.debug_view = DebugView::Normals);
+        // A fixed 0.15 s of world time a frame (1.5 s between the two captures), however
+        // slow the frames are: the frame clock advances only as far as the fixed steps do, so
+        // a software rasterizer's second-long frames would each be cut to the step cap, and
+        // the wall clock made the gust phase at each capture a matter of luck.
+        let step = 0.15;
+        app.world
+            .resource_mut::<Time>()
+            .set_source(engine_core::time::TimeSource::Manual { step_secs: step });
+        let hz = app.world.resource::<FixedTime>().hz();
+        app.world
+            .resource_mut::<FixedTime>()
+            .set_max_steps((step * hz).ceil() as u32 + 1);
         let a = render(&mut app, &format!("{name}_a"), 6)?;
         let b = render(&mut app, &format!("{name}_b"), 10)?;
         let (mut sum, mut n) = (0.0, 0.0);
