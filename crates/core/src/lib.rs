@@ -18,6 +18,7 @@
 //! Games normally import everything through `engine::prelude::*` rather than this crate.
 
 pub mod app;
+pub mod beside;
 pub mod config;
 pub mod diagnostics;
 pub mod log;
