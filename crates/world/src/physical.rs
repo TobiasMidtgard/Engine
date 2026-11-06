@@ -38,7 +38,9 @@ impl Gravity {
     /// Acceleration at `p`, m/s².
     pub fn at(&self, p: DVec3) -> Vec3 {
         let mut a = self.uniform.as_dvec3();
-        for b in &self.bodies {
+        // Massless bodies (stations, markers the space module keeps beside the planets) pull
+        // nothing: skipped before their distance (every debris piece asked this a step).
+        for b in self.bodies.iter().filter(|b| b.mu != 0.0) {
             let d = b.center - p;
             let r = d.length();
             if r < 1e-6 {
