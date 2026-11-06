@@ -118,7 +118,15 @@ pub struct NavGrid {
     ground_jobs: HashMap<(i32, i32), GroundJob>,
     /// Ground heights worked out off the main thread, waiting for their chunk to be built.
     ground_ready: HashMap<(i32, i32), Vec<f64>>,
+    /// Chunks a look wanted but left for [`warm_nav`] to work out first
+    /// ([`NavCtx::ensure_around_within`]).
+    ground_wanted: Vec<(i32, i32)>,
+    /// Set once [`warm_nav`] runs with an async pool: only then do looks leave chunks to it.
+    warming: bool,
 }
+
+/// Most wanted chunks remembered for [`warm_nav`].
+const MAX_WANTED: usize = 32;
 
 /// A chunk's ground heights (its cells and margin, row by row), once worked out.
 type GroundJob = Arc<Mutex<Option<Vec<f64>>>>;
@@ -340,15 +348,66 @@ impl<'a> NavCtx<'a> {
     pub fn ensure_around(&mut self, points: impl IntoIterator<Item = DVec3>, radius: f64) {
         let mut keys = Vec::new();
         for p in points {
-            let (x0, z0) = self.cell_of(p - DVec3::new(radius, 0.0, radius));
-            let (x1, z1) = self.cell_of(p + DVec3::new(radius, 0.0, radius));
-            for kz in z0.div_euclid(CHUNK)..=z1.div_euclid(CHUNK) {
-                for kx in x0.div_euclid(CHUNK)..=x1.div_euclid(CHUNK) {
-                    keys.push((kx, kz));
-                }
-            }
+            self.chunks_around(p, radius, &mut keys);
         }
         self.ensure_chunks(&keys);
+    }
+
+    /// [`ensure_around`](Self::ensure_around), but of the chunks whose ground hasn't been
+    /// sampled yet only the first `cold` (in `points` order) are built now; the rest are left
+    /// to [`warm_nav`], which samples their ground off the main thread first (once it runs
+    /// with an async pool; until then all are built now). Chunks whose
+    /// ground is ready are cheap and always built. A look at the fortress built eight chunks
+    /// at once, 66 ms in one step (VM, 2026-11-06).
+    pub fn ensure_around_within(
+        &mut self,
+        points: impl IntoIterator<Item = DVec3>,
+        radius: f64,
+        cold: usize,
+    ) {
+        let mut keys = Vec::new();
+        for p in points {
+            self.chunks_around(p, radius, &mut keys);
+        }
+        let mut now = Vec::with_capacity(keys.len());
+        // Without warm_nav sampling ground on a pool (tests, tools), nothing is gained by
+        // waiting.
+        let mut cold_left = if self.grid.warming { cold } else { usize::MAX };
+        for key in keys {
+            if self.grid.chunks.contains_key(&key) || now.contains(&key) {
+                continue;
+            }
+            if self.grid.ground_ready.contains_key(&key) {
+                now.push(key);
+            } else if cold_left > 0 {
+                cold_left -= 1;
+                now.push(key);
+            } else if !self.grid.ground_wanted.contains(&key)
+                && self.grid.ground_wanted.len() < MAX_WANTED
+            {
+                self.grid.ground_wanted.push(key);
+            }
+        }
+        self.ensure_chunks(&now);
+    }
+
+    /// Whether every chunk within `radius` meters of `p` is built (so asking there builds
+    /// nothing).
+    pub fn built_around(&self, p: DVec3, radius: f64) -> bool {
+        let mut keys = Vec::new();
+        self.chunks_around(p, radius, &mut keys);
+        keys.iter().all(|k| self.grid.chunks.contains_key(k))
+    }
+
+    /// The chunks within `radius` meters of `p` (a square), into `keys`.
+    fn chunks_around(&self, p: DVec3, radius: f64, keys: &mut Vec<(i32, i32)>) {
+        let (x0, z0) = self.cell_of(p - DVec3::new(radius, 0.0, radius));
+        let (x1, z1) = self.cell_of(p + DVec3::new(radius, 0.0, radius));
+        for kz in z0.div_euclid(CHUNK)..=z1.div_euclid(CHUNK) {
+            for kx in x0.div_euclid(CHUNK)..=x1.div_euclid(CHUNK) {
+                keys.push((kx, kz));
+            }
+        }
     }
 
     /// Build every chunk in `keys` that isn't built yet. Several at once are built on their own
@@ -1153,6 +1212,7 @@ pub(crate) fn warm_nav(
         }
     }
     let pool = AsyncComputeTaskPool::try_get();
+    grid.warming = pool.is_some();
     let mut ctx = grid.ctx(&world, &ground, &water);
     // Finish one chunk whose ground is ready (its obstacles and clearance are quick), one
     // an awake NPC is near: ground kept from chunks an obstacle change dropped elsewhere
@@ -1170,7 +1230,19 @@ pub(crate) fn warm_nav(
             dx * dx + dz * dz <= WARM_CHUNKS * WARM_CHUNKS
         })
     };
-    if let Some(&key) = ctx.grid.ground_ready.keys().find(|k| near_one(k)) {
+    // Chunks a look left for later are done once their ground is in, and leave the list.
+    let wanted_keys = std::mem::take(&mut ctx.grid.ground_wanted);
+    ctx.grid.ground_wanted = wanted_keys
+        .into_iter()
+        .filter(|k| !ctx.grid.chunks.contains_key(k))
+        .collect();
+    let ready = ctx
+        .grid
+        .ground_wanted
+        .iter()
+        .copied()
+        .find(|k| ctx.grid.ground_ready.contains_key(k));
+    if let Some(key) = ready.or_else(|| ctx.grid.ground_ready.keys().copied().find(near_one)) {
         if ctx.grid.chunks.contains_key(&key) {
             ctx.grid.ground_ready.remove(&key);
         } else {
@@ -1186,6 +1258,12 @@ pub(crate) fn warm_nav(
         return;
     }
     let mut wanted: Vec<(i32, (i32, i32))> = Vec::new();
+    // What a look asked for first, then the ground round awake NPCs, nearest first.
+    for &key in &ctx.grid.ground_wanted {
+        if !ctx.grid.ground_jobs.contains_key(&key) && !ctx.grid.ground_ready.contains_key(&key) {
+            wanted.push((-1, key));
+        }
+    }
     for t in &agents {
         let (x, z) = ctx.cell_of(t.translation);
         let (kx, kz) = (x.div_euclid(CHUNK), z.div_euclid(CHUNK));
@@ -1265,6 +1343,36 @@ mod tests {
             p = q;
         }
         len
+    }
+
+    #[test]
+    fn a_look_builds_one_unsampled_chunk_and_leaves_the_rest_for_warming() {
+        let (ground, water) = (Ground::default(), Water::default());
+        let world = TacticalWorld::from_obstacles(Vec::new(), &ground);
+        let mut grid = NavGrid {
+            warming: true,
+            ..NavGrid::default()
+        };
+        let mut ctx = grid.ctx(&world, &ground, &water);
+        // Four spots in the middles of four chunks along x.
+        let size = CHUNK as f64 * ctx.grid.settings.cell as f64;
+        let spots = [0.5, 3.5, 6.5, 9.5].map(|k| DVec3::new(k * size, 0.0, 0.5 * size));
+        ctx.ensure_around_within(spots, 0.1, 1);
+        assert_eq!(ctx.grid.chunks.len(), 1, "one chunk sampled on the frame");
+        assert_eq!(
+            ctx.grid.ground_wanted.len(),
+            3,
+            "the rest asked of warm_nav"
+        );
+        assert!(ctx.built_around(spots[0], 0.1) && !ctx.built_around(spots[1], 0.1));
+        // Ground worked out off the frame makes a chunk cheap: the next look builds it.
+        let key = ctx.grid.ground_wanted[0];
+        let margin = (ctx.grid.settings.agent_radius / ctx.grid.settings.cell).ceil() as i32;
+        let side = (CHUNK + 2 * margin) as usize;
+        ctx.grid.ground_ready.insert(key, vec![0.0; side * side]);
+        ctx.ensure_around_within(spots, 0.1, 0);
+        assert_eq!(ctx.grid.chunks.len(), 2);
+        assert!(ctx.grid.chunks.contains_key(&key));
     }
 
     #[test]

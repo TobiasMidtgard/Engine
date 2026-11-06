@@ -174,6 +174,10 @@ pub struct TacticsCtx<'a, 'b> {
     pub heat: &'a HeatField,
 }
 
+/// Chunks of ground nobody has sampled yet that one [`choose_position`] look builds; the rest
+/// wait for `warm_nav` (one such chunk costs ~10-15 ms on the VM).
+const COLD_CHUNKS_PER_LOOK: usize = 1;
+
 /// Pick the best reachable spot. Writes the path to it into `path` (so the caller can follow
 /// it without searching again). `scored` receives the top candidates for debugging.
 pub fn choose_position(
@@ -259,13 +263,25 @@ pub fn choose_position(
     }
 
     // The ground under every spot, worked out at once (snapping each below would build its
-    // chunk alone, one after another), with the snap's reach around it.
-    ctx.nav.ensure_around(raw.iter().map(|r| r.0), 1.5);
+    // chunk alone, one after another), with the snap's reach around it. Where we stand and
+    // where we're going always; of ground nobody has sampled yet only a chunk or two a look,
+    // the rest is sampled off the main thread and its spots weighed on a later look.
+    ctx.nav.ensure_around(
+        raw.iter()
+            .filter(|r| matches!(r.1, "hold" | "keep"))
+            .map(|r| r.0),
+        1.5,
+    );
+    ctx.nav
+        .ensure_around_within(raw.iter().map(|r| r.0), 1.5, COLD_CHUNKS_PER_LOOK);
     let mut spots: Vec<Spot> = Vec::with_capacity(raw.len());
     let target_eye = q.target_pos + DVec3::Y * 1.6;
     let target_chest = q.target_pos + DVec3::Y * 1.2;
     let ignore = [q.me, q.target];
     for (p, reason, cover_height) in raw {
+        if !ctx.nav.built_around(p, 1.5) {
+            continue;
+        }
         // Snap onto the walkable surface.
         let probe = DVec3::new(p.x, p.y + 1.0, p.z);
         let (h, ok) = ctx.nav.sample(probe);
