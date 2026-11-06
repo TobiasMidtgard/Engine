@@ -405,7 +405,7 @@ const CLIPS: &[Clip] = &[
             t if t < 1.0 => go(1.0, 0.0).jump(),
             _ => Pad::default(),
         },
-        camera: |t| (yaw_toward(1.0, -0.25), 0.25 + 0.1 * (t / 9.0), 9.0, 0.0),
+        camera: |t| (yaw_toward(1.0, -0.25), 0.2 + 0.1 * (t / 9.0), 6.0, 0.0),
         before: false,
     },
     Clip {
@@ -449,7 +449,7 @@ const CLIPS: &[Clip] = &[
             (_, Some(_)) => go(1.0, 0.0).calm(),
             _ => Pad::default(),
         },
-        camera: |_| (yaw_toward(0.0, -1.0), 0.12, 8.5, 0.0),
+        camera: |_| (yaw_toward(0.0, -1.0), 0.08, 5.0, 0.0),
         before: false,
     },
     Clip {
@@ -467,9 +467,9 @@ const CLIPS: &[Clip] = &[
         },
         camera: |t| {
             (
-                yaw_toward(-1.0, 0.4),
-                0.15 + 0.25 * (t / 10.0).min(1.0),
-                7.0,
+                yaw_toward(-1.0, 0.85),
+                0.05 + 0.2 * (t / 10.0).min(1.0),
+                4.2,
                 0.0,
             )
         },
@@ -490,9 +490,9 @@ const CLIPS: &[Clip] = &[
         },
         camera: |t| {
             (
-                yaw_toward(-1.0, -0.4),
-                0.15 + 0.25 * (t / 10.0).min(1.0),
-                7.0,
+                yaw_toward(-1.0, -0.85),
+                0.05 + 0.2 * (t / 10.0).min(1.0),
+                4.2,
                 0.0,
             )
         },
@@ -572,7 +572,7 @@ const CLIPS: &[Clip] = &[
                 on
             }
         },
-        camera: |_| (yaw_toward(1.0, 0.1), 0.1, 8.0, 0.0),
+        camera: |_| (yaw_toward(1.0, 0.1), 0.05, 4.5, 0.0),
         before: false,
     },
     Clip {
@@ -582,7 +582,7 @@ const CLIPS: &[Clip] = &[
         facing: [-0.3, 0.954],
         secs: 3.5,
         script: |_, _, _| go(-0.3, 0.954).calm(),
-        camera: |_| (yaw_toward(1.0, 0.1), 0.1, 8.0, 0.0),
+        camera: |_| (yaw_toward(1.0, 0.1), 0.05, 4.5, 0.0),
         before: false,
     },
     Clip {
@@ -712,6 +712,13 @@ fn build_app() -> (App, Entity) {
         .set_source(TimeSource::Manual { step_secs: DT });
     app.world.resource_mut::<FixedTime>().set_hz(60.0);
     app.world.insert_resource(RenderDisabled("settling".into()));
+    // No grapple reticle over the runner in the films.
+    if let Some(mut r) = app
+        .world
+        .get_resource_mut::<engine_movement::reticle::GrappleReticle>()
+    {
+        r.enabled = false;
+    }
     {
         let mut fog = app.world.resource_mut::<FogSettings>();
         fog.density = 0.0012;
