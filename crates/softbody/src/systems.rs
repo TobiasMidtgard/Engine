@@ -1340,6 +1340,16 @@ fn step_all<'b>(
     let mut order: Vec<(Entity, Mut<SoftBodySim>)> = bodies.collect();
     order.sort_by(|(_, a), (_, b)| b.step_ms.total_cmp(&a.step_ms));
     let timed = |e: Entity, body: &mut SoftBodySim, ctx: &StepContext| {
+        // Costly bodies get a span naming their kind and size, so a trace says which body
+        // holds the step (cheap ones would only add noise).
+        let _span = (body.step_ms >= POOL_BODY_MS).then(|| {
+            tracing::info_span!(
+                "softbody: step body",
+                kind = ?body.kind,
+                particles = body.particle_count()
+            )
+            .entered()
+        });
         let t = Instant::now();
         step_one(e, body, ctx);
         (e, t.elapsed().as_secs_f64() * 1000.0)
