@@ -13,7 +13,7 @@
 //! 150 m, and a wood of 12,000 scenery trees from a hill (with and without the distant level). Name shots after the directory to render
 //! only those (`lineup`, `lineup_near`, `lineup_mid`, `lineup_lod`, `lineup_distant`, `roots`, `crown_front`,
 //! `leaves_close`, `crown_back`, `conifers`, `lineup_stands` (the stands' other eight trees), `pine_crown`, `birch_hazel`, `grove`,
-//! `grove_far`, `savanna`, `savanna_side`, `savanna_high`, `prairie`, `rainforest`, `rainforest_below`, `beach`, `beach_crown`, `beach_stem`, `canada`, `canada_close`, `valley`, `valley_far`, `far_woods`, `far_woods_off`), `textures`
+//! `grove_far`, `savanna`, `savanna_side`, `savanna_high`, `prairie`, `rainforest`, `rainforest_below`, `beach`, `beach_crown`, `beach_stem`, `canada`, `canada_close`, `norway`, `norway_close`, `valley`, `valley_far`, `far_woods`, `far_woods_off`), `textures`
 //! to save the leaf atlases, their normal maps, three of their mip levels and the mass atlases far
 //! crowns draw with instead, or `stats` to print triangle counts.
 
@@ -569,6 +569,78 @@ fn main() {
             }
         }
     }
+    // A Norwegian fjord shore 600 m off the other diagonal: dark spruce and pine up the slope
+    // with birches turned gold among them and along the water, a strip of autumn meadow on the
+    // shore (shot with Canada's October day).
+    let norway = DVec3::new(-600.0, 0.0, 600.0);
+    if only_sp
+        .as_deref()
+        .is_none_or(|o| o == "birch" || o == "spruce" || o == "pine" || o == "rowan")
+    {
+        app.world.spawn((
+            Transform::from_translation(norway + DVec3::new(0.0, 0.03, -100.0)),
+            MeshRenderer::new(
+                Shape::Plane {
+                    size: [300.0, 200.0],
+                    subdivisions: 1,
+                },
+                StandardMaterial::hex(0x4b4a30).with_roughness(0.95),
+            ),
+        ));
+        app.world.spawn((
+            Transform::from_translation(norway + DVec3::new(0.0, 0.08, 60.0)),
+            MeshRenderer::new(
+                Shape::Plane {
+                    size: [300.0, 120.0],
+                    subdivisions: 1,
+                },
+                StandardMaterial::hex(0x1a2e36).with_roughness(0.05),
+            ),
+        ));
+        app.world.spawn((
+            Transform::from_translation(norway + DVec3::new(0.0, 0.0, -4.0)),
+            grass(
+                GrassStyle {
+                    dryness: 0.55,
+                    draw_distance: 150.0,
+                    shadow_distance: 22.0,
+                    ..GrassStyle::meadow()
+                },
+                120.0,
+            ),
+        ));
+        let mut rng = Rng::new(71);
+        for i in 0..40 {
+            for j in 0..10 {
+                let p = norway
+                    + DVec3::new(
+                        (i as f64 - 19.5) * 3.6 + rng.range(-1.4, 1.4) as f64,
+                        0.0,
+                        -10.0 - j as f64 * 3.8 + rng.range(-1.4, 1.4) as f64,
+                    );
+                // Birches crowd the shore, conifers the slope behind.
+                let r = rng.range(0.0, 1.0);
+                let birch_share = if j < 3 { 0.6 } else { 0.25 };
+                let name = if r < birch_share {
+                    "birch"
+                } else if r < birch_share + 0.04 {
+                    "rowan"
+                } else if r < birch_share + 0.16 {
+                    "pine"
+                } else {
+                    "spruce"
+                };
+                let g = Genes {
+                    variant: rng.range_i32(0, 4) as u8,
+                    hue: rng.range(-1.0, 1.0),
+                    height: rng.range(0.8, 1.15),
+                    crown: rng.range(0.85, 1.15),
+                    ..Default::default()
+                };
+                spawn_plant(&mut app.world, name, p, rng.range(0.75, 1.0), Some(g)).unwrap();
+            }
+        }
+    }
     app.world.flush();
     app.update();
     // Wait for every species' meshes (built off the frame), so the first shot isn't empty.
@@ -845,7 +917,7 @@ fn main() {
             Vec3::new(-0.5, 0.6, 0.6),
         );
     }
-    if wanted("canada") || wanted("canada_close") {
+    if wanted("canada") || wanted("canada_close") || wanted("norway") || wanted("norway_close") {
         // Early October: the maples have turned and few leaves are down yet.
         app.world
             .resource_mut::<engine_foliage::FoliageSeason>()
@@ -872,6 +944,28 @@ fn main() {
             canada + DVec3::new(10.0, 1.7, 18.0),
             canada + DVec3::new(-2.0, 8.0, -12.0),
             Vec3::new(-0.45, 0.35, 0.8),
+        );
+    }
+    if wanted("norway") {
+        // Across the fjord, low morning sun from the side.
+        shot(
+            &mut app,
+            &out,
+            "norway",
+            norway + DVec3::new(-15.0, 2.0, 95.0),
+            norway + DVec3::new(5.0, 9.0, -10.0),
+            Vec3::new(0.7, 0.3, 0.5),
+        );
+    }
+    if wanted("norway_close") {
+        // From the shore meadow, among the first birches.
+        shot(
+            &mut app,
+            &out,
+            "norway_close",
+            norway + DVec3::new(8.0, 1.7, 16.0),
+            norway + DVec3::new(-4.0, 7.0, -14.0),
+            Vec3::new(0.7, 0.3, 0.5),
         );
     }
     if wanted("grove_far") {
