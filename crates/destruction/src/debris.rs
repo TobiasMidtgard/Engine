@@ -9,8 +9,6 @@
 //! other. Everything sinks out of sight after its lifetime and a budget caps how much debris
 //! exists at once.
 
-use std::collections::{HashMap, HashSet};
-
 use bevy_tasks::{Task, block_on, poll_once};
 
 use engine_assets::{Assets, Handle};
@@ -959,7 +957,7 @@ const SUPPORT_CELL_M: f64 = 1.0;
 const MAX_CONTACTS: usize = 64;
 /// Steps along each edge of the lattice a falling chunk's box is sampled at against resting
 /// chunks (a chip just uses its corners).
-const LATTICE: usize = 4;
+const LATTICE: usize = 3;
 
 /// Points of an `n`-step lattice (0..=n on each axis) on the surface of a box.
 fn box_lattice(n: usize) -> impl Iterator<Item = (f32, f32, f32)> {
@@ -979,12 +977,32 @@ struct Support {
     /// World to box space.
     inv: Quat,
     half: Vec3,
+    /// Half the size of its world-axis bounding box.
+    extent: Vec3,
 }
 
 impl Support {
+    fn new(entity: Entity, center: DVec3, rotation: Quat, half: Vec3) -> Self {
+        let m = engine_core::math::Mat3::from_quat(rotation);
+        let extent = m.x_axis.abs() * half.x + m.y_axis.abs() * half.y + m.z_axis.abs() * half.z;
+        Self {
+            entity,
+            center,
+            inv: rotation.inverse(),
+            half,
+            extent,
+        }
+    }
+
     /// World height of the box's top straight above or below `p` (`p.y` ignored), if the
     /// vertical line through `p` goes through it.
     fn top_at(&self, p: DVec3) -> Option<f64> {
+        // Outside its bounding box across: the line misses it (most lattice points do).
+        if (p.x - self.center.x).abs() > self.extent.x as f64
+            || (p.z - self.center.z).abs() > self.extent.z as f64
+        {
+            return None;
+        }
         let o = self.inv
             * Vec3::new(
                 (p.x - self.center.x) as f32,
@@ -1008,12 +1026,22 @@ impl Support {
     }
 }
 
-/// Resting chunks, bucketed by where they lie.
+/// Hash buckets of the resting chunks' cells (a power of two).
+const RUBBLE_SLOTS: usize = 4096;
+
+/// Resting chunks, bucketed by where they lie. Kept from step to step for its allocations and
+/// rebuilt each step in linear time: (cell, chunk) pairs counting-sorted into hash slots, not a
+/// map of lists (an allocation per cell) or a sort of every pair (most of the step's setup).
 #[derive(Default)]
-struct Rubble {
+pub struct Rubble {
     supports: Vec<Support>,
-    cells: HashMap<(i64, i64), Vec<usize>>,
-    entities: HashSet<Entity>,
+    /// (cell, chunk) pairs as added.
+    added: Vec<((i64, i64), u32)>,
+    /// Where each slot's pairs start in `cells`; one more entry than there are slots.
+    starts: Vec<u32>,
+    /// The pairs, grouped by slot.
+    cells: Vec<((i64, i64), u32)>,
+    entities: Vec<Entity>,
 }
 
 impl Rubble {
@@ -1024,20 +1052,69 @@ impl Rubble {
         )
     }
 
+    fn slot(c: (i64, i64)) -> usize {
+        let h = (c.0 as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)
+            ^ (c.1 as u64).wrapping_mul(0xC2B2_AE3D_27D4_EB4F);
+        (h >> (64 - RUBBLE_SLOTS.trailing_zeros())) as usize
+    }
+
+    fn clear(&mut self) {
+        self.supports.clear();
+        self.added.clear();
+        self.cells.clear();
+        self.entities.clear();
+    }
+
     fn add(&mut self, s: Support) {
-        let r = s.half.length() as f64;
-        let (lo, hi) = (
-            Self::cell(s.center - DVec3::splat(r)),
-            Self::cell(s.center + DVec3::splat(r)),
-        );
-        let k = self.supports.len();
+        let e = s.extent.as_dvec3();
+        let (lo, hi) = (Self::cell(s.center - e), Self::cell(s.center + e));
+        let k = self.supports.len() as u32;
         for x in lo.0..=hi.0 {
             for z in lo.1..=hi.1 {
-                self.cells.entry((x, z)).or_default().push(k);
+                self.added.push(((x, z), k));
             }
         }
-        self.entities.insert(s.entity);
+        self.entities.push(s.entity);
         self.supports.push(s);
+    }
+
+    /// Group the pairs by slot and sort the entities for lookups, once every chunk is in.
+    fn seal(&mut self) {
+        self.starts.clear();
+        self.starts.resize(RUBBLE_SLOTS + 1, 0);
+        for (c, _) in &self.added {
+            self.starts[Self::slot(*c) + 1] += 1;
+        }
+        for i in 0..RUBBLE_SLOTS {
+            self.starts[i + 1] += self.starts[i];
+        }
+        self.cells.clear();
+        self.cells.resize(self.added.len(), ((0, 0), 0));
+        // Filled from each slot's end down, so `starts` ends up at each slot's start again.
+        let mut ends = std::mem::take(&mut self.starts);
+        for i in 0..RUBBLE_SLOTS {
+            ends[i] = ends[i + 1];
+        }
+        for &(c, k) in self.added.iter().rev() {
+            let slot = Self::slot(c);
+            ends[slot] -= 1;
+            self.cells[ends[slot] as usize] = (c, k);
+        }
+        self.starts = ends;
+        self.entities.sort_unstable();
+    }
+
+    /// The chunks in cell `c`.
+    fn bucket(&self, c: (i64, i64)) -> impl Iterator<Item = usize> + '_ {
+        let slot = Self::slot(c);
+        let range = match (self.starts.get(slot), self.starts.get(slot + 1)) {
+            (Some(&a), Some(&b)) => a as usize..b as usize,
+            _ => 0..0,
+        };
+        self.cells[range]
+            .iter()
+            .filter(move |(k, _)| *k == c)
+            .map(|(_, i)| *i as usize)
     }
 
     /// The resting chunks in the buckets within `r` of `p`, each once, other than `skip`.
@@ -1048,16 +1125,17 @@ impl Rubble {
         );
         let mut ids: Vec<usize> = (lo.0..=hi.0)
             .flat_map(|x| (lo.1..=hi.1).map(move |z| (x, z)))
-            .filter_map(|c| self.cells.get(&c))
-            .flatten()
-            .copied()
+            .flat_map(|c| self.bucket(c))
             .filter(|&k| {
-                // Close enough across, and with its top no lower than the bottom of `p ± r`.
+                // Bounding boxes overlapping, `p ± r` against the chunk's (its top no lower than
+                // the bottom of `p ± r`, as only a chunk under a point holds it up).
                 let s = &self.supports[k];
-                let size = s.half.length() as f64;
+                let e = s.extent.as_dvec3();
                 s.entity != skip
-                    && (s.center.x - p.x).hypot(s.center.z - p.z) <= r + size
-                    && s.center.y + size >= p.y - r
+                    && (s.center.x - p.x).abs() <= r + e.x
+                    && (s.center.z - p.z).abs() <= r + e.z
+                    && s.center.y + e.y >= p.y - r
+                    && s.center.y - e.y <= p.y + r
             })
             .collect();
         ids.sort_unstable();
@@ -1070,7 +1148,10 @@ impl Rubble {
     fn top_among(&self, ids: &[usize], p: DVec3) -> Option<(f64, Entity)> {
         ids.iter()
             .map(|&k| &self.supports[k])
+            // A top no higher than `p` doesn't hold it up (only a positive depth is a contact).
+            .filter(|s| s.center.y + s.extent.y as f64 > p.y)
             .filter_map(|s| s.top_at(p).map(|h| (h, s.entity)))
+            .filter(|(h, _)| *h > p.y)
             .filter(|(h, _)| *h - p.y <= SUPPORT_REACH_M as f64)
             .max_by(|a, b| a.0.total_cmp(&b.0))
     }
@@ -1084,11 +1165,11 @@ impl Rubble {
             Self::cell(p - DVec3::splat(r)),
             Self::cell(p + DVec3::splat(r)),
         );
-        (lo.0..=hi.0).any(|x| (lo.1..=hi.1).any(|z| self.cells.contains_key(&(x, z))))
+        (lo.0..=hi.0).any(|x| (lo.1..=hi.1).any(|z| self.bucket((x, z)).next().is_some()))
     }
 
     fn contains(&self, e: Entity) -> bool {
-        self.entities.contains(&e)
+        self.entities.binary_search(&e).is_ok()
     }
 }
 
@@ -1153,8 +1234,19 @@ const AIR_DRAG: f32 = 0.9;
 /// is high above the ground).
 const GROUND_REUSE_M: f64 = 0.3;
 
+/// Below this speed (m/s) and spin (rad/s) for [`SLEEP_SECS`] in contact, a piece is asleep.
+/// Most of the pieces the step still had in contact were below the old 0.12 m/s and 0.3 rad/s,
+/// waiting out the old half second (bench, 2026-11-06); Bullet sleeps a body under 0.8 m/s and
+/// 1 rad/s held for 2 s, PhysX under an energy threshold held for 0.4 s.
+const SLEEP_MPS: f32 = 0.2;
+const SLEEP_RADPS: f32 = 0.5;
+const SLEEP_SECS: f32 = 0.3;
+
 /// Seconds in contact after which a piece that is only rocking or creeping settles anyway.
-const SETTLE_SECS: f32 = 6.0;
+const SETTLE_SECS: f32 = 2.5;
+
+/// Pieces per parallel batch of the debris step.
+const DEBRIS_BATCH: usize = 24;
 
 /// The built-in debris solver: gravity, ground and voxel rock contacts with friction and
 /// restitution, sleep. Runs in `FixedUpdate` (`SimSet::Physics`), so it slows down with time
@@ -1170,6 +1262,7 @@ pub fn simulate_debris_system(
     walls_changed: Query<(&GlobalTransform, &WallState), Changed<WallState>>,
     mut landings: ResMut<DebrisLandings>,
     range: Option<Res<SimulationRange>>,
+    mut rubble: Local<Rubble>,
 ) {
     let dt = time.delta_secs();
     if dt <= 0.0 {
@@ -1207,7 +1300,7 @@ pub fn simulate_debris_system(
             .map(|f| f.bounds(0.5)),
     );
     // Chunks at rest are what the rest land on.
-    let mut rubble = Rubble::default();
+    rubble.clear();
     for (entity, pose, body, debris) in &q {
         let t = &pose.now;
         if !body.asleep
@@ -1225,19 +1318,24 @@ pub fn simulate_debris_system(
         }) else {
             continue;
         };
-        rubble.add(Support {
+        rubble.add(Support::new(
             entity,
-            center: t.translation + (t.rotation * ((lo + hi) * 0.5)).as_dvec3(),
-            inv: t.rotation.inverse(),
-            half: (hi - lo) * 0.5,
-        });
+            t.translation + (t.rotation * ((lo + hi) * 0.5)).as_dvec3(),
+            t.rotation,
+            (hi - lo) * 0.5,
+        ));
     }
+    rubble.seal();
+    let rubble = &*rubble;
     // Pieces step in parallel (each reads only the rubble and rock as they were at the start of
     // the step); their landings are written afterwards.
     let hits = std::sync::Mutex::new((Vec::new(), Vec::new()));
     drop(setup);
     let _step = tracing::info_span!("debris step").entered();
+    // Small batches: the pieces still moving were spawned together and sit side by side in the
+    // table, so one batch per thread (the default) handed nearly all of them to one thread.
     q.par_iter_mut()
+        .batching_strategy(bevy_ecs::batching::BatchingStrategy::fixed(DEBRIS_BATCH))
         .for_each(|(entity, mut pose, mut body, mut debris)| {
             let t = &pose.now;
             if !body.sinking && rests(t.translation) {
@@ -1549,9 +1647,9 @@ pub fn simulate_debris_system(
                 body.velocity.length_squared(),
                 body.angular.length_squared(),
             );
-            if v2 < 0.12 * 0.12 && w2 < 0.3 * 0.3 {
+            if v2 < SLEEP_MPS * SLEEP_MPS && w2 < SLEEP_RADPS * SLEEP_RADPS {
                 body.still += dt;
-                if body.still > 0.5 {
+                if body.still > SLEEP_SECS {
                     body.asleep = true;
                     body.velocity = Vec3::ZERO;
                     body.angular = Vec3::ZERO;
@@ -1741,5 +1839,36 @@ mod tests {
         let b = DebrisBody::new(10.0, Vec3::new(0.5, 0.2, 0.1), box_corners(Vec3::ONE), 0.6);
         assert!(b.inv_inertia.min_element() > 0.0);
         assert!((b.inv_mass - 0.1).abs() < 1e-6);
+    }
+
+    #[test]
+    fn rubble_finds_the_chunk_under_a_point() {
+        let mut rubble = Rubble::default();
+        // Chunks across many cells (and slots), one tilted, then a fresh build reusing it all.
+        for round in 0..2 {
+            rubble.clear();
+            for i in 0..200u32 {
+                let at = DVec3::new(i as f64 * 1.7 - 150.0, 0.5, (i % 13) as f64 * 2.3 - 15.0);
+                let tilt = Quat::from_rotation_y(0.3 * i as f32);
+                rubble.add(Support::new(
+                    Entity::from_raw_u32(i + 1).unwrap(),
+                    at,
+                    tilt,
+                    Vec3::new(0.6, 0.5, 0.4),
+                ));
+            }
+            rubble.seal();
+            let k = 77;
+            let at = DVec3::new(k as f64 * 1.7 - 150.0, 0.5, (k % 13) as f64 * 2.3 - 15.0);
+            let entity = Entity::from_raw_u32(k + 1).unwrap();
+            assert!(rubble.contains(entity), "round {round}");
+            assert!(rubble.near(at, 0.1));
+            let ids = rubble.candidates(at + DVec3::Y * 0.4, 0.5, Entity::PLACEHOLDER);
+            let (top, on) = rubble.top_among(&ids, at + DVec3::Y * 0.4).unwrap();
+            assert_eq!(on, entity);
+            assert!((top - 1.0).abs() < 1e-3, "top {top}");
+            // Far from every chunk: nothing.
+            assert!(!rubble.near(DVec3::new(0.0, 0.0, 500.0), 1.0));
+        }
     }
 }
