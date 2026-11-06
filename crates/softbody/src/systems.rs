@@ -1175,6 +1175,18 @@ struct LiveFrames<'a, 'w, 's> {
 
 /// A step slower than this logs which body held it up, ms.
 const SLOW_STEP_MS: f64 = 50.0;
+
+/// [`SLOW_STEP_MS`], or `ENGINE_SOFTBODY_SLOW_MS` to name the slowest body of shorter steps
+/// when profiling a stop.
+fn slow_step_ms() -> f64 {
+    static MS: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
+    *MS.get_or_init(|| {
+        std::env::var("ENGINE_SOFTBODY_SLOW_MS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(SLOW_STEP_MS)
+    })
+}
 /// Most settling (prewarm) a body does a frame, in particle substeps: about 3 ms on the PC.
 /// Counted rather than timed, so a body settles the same way on every machine.
 const PREWARM_WORK: usize = 30_000;
@@ -1333,22 +1345,43 @@ fn step_all<'b>(
         step_one(e, body, ctx);
         (e, t.elapsed().as_secs_f64() * 1000.0)
     };
+    // Only bodies that took real work last step go to the pool; the rest (resting, frozen,
+    // far) step here first. A thread waiting in a compute-pool scope runs other systems'
+    // tasks meanwhile: at the fortress 24 bodies with under 1 ms of work between them held
+    // the step 7-10 ms (VM) that way. With one costly body or none there is nothing to
+    // spread, so no scope at all.
+    // (A big body that stepped last time counts as costly too: it may have just woken.)
+    let costly = |b: &SoftBodySim| {
+        b.step_ms >= POOL_BODY_MS || (!b.frozen && !b.asleep() && b.particle_count() >= 256)
+    };
+    order.sort_by(|(_, a), (_, b)| {
+        costly(b)
+            .cmp(&costly(a))
+            .then(b.step_ms.total_cmp(&a.step_ms))
+    });
+    let heavy = order.iter().take_while(|(_, b)| costly(b)).count();
+    let (busy, light) = order.split_at_mut(heavy);
+    let mut took: Vec<(Entity, f64)> = light
+        .iter_mut()
+        .map(|(e, body)| timed(*e, body, ctx))
+        .collect();
     match ComputeTaskPool::try_get() {
-        Some(pool) if order.len() > 1 && pool.thread_num() > 1 => {
+        Some(pool) if busy.len() > 1 && pool.thread_num() > 1 => {
             let timed = &timed;
-            pool.scope(|scope| {
-                for (e, body) in &mut order {
+            took.extend(pool.scope(|scope| {
+                for (e, body) in busy.iter_mut() {
                     let e = *e;
                     scope.spawn(async move { timed(e, body, ctx) });
                 }
-            })
+            }));
         }
-        _ => order
-            .iter_mut()
-            .map(|(e, body)| timed(*e, body, ctx))
-            .collect(),
+        _ => took.extend(busy.iter_mut().map(|(e, body)| timed(*e, body, ctx))),
     }
+    took
 }
+
+/// A body whose last step took this long (ms) or more steps on the pool ([`step_all`]).
+const POOL_BODY_MS: f32 = 0.5;
 
 /// Step the soft bodies that ride the physics step (in parallel), after it, and write the
 /// diagnostics of all of them.
@@ -1413,7 +1446,7 @@ pub fn step_bodies(
     diagnostics.set("softbody.env_ms", env_ms);
     let asleep = bodies.iter().filter(|(_, b)| b.asleep()).count();
     diagnostics.set("softbody.asleep", asleep as f64);
-    if wall > SLOW_STEP_MS
+    if wall > slow_step_ms()
         && let Some((e, ms)) = slowest
     {
         let name = names
