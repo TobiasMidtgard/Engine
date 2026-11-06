@@ -973,11 +973,42 @@ fn par_fill<T: Send>(out: &mut [T], f: impl Fn(usize) -> T + Send + Sync) {
             *item = f(chunk * CHUNK + k);
         }
     };
-    if engine_core::tasks::ComputeTaskPool::try_get().is_some() {
+    if out.len() <= CHUNK {
+        fill(0, out);
+        return;
+    }
+    let on_worker = std::thread::current()
+        .name()
+        .is_none_or(|n| n.starts_with("async"));
+    if on_worker && engine_core::tasks::AsyncComputeTaskPool::try_get().is_some() {
+        // A region step runs on the async pool. Split there, its thread would run whole
+        // loading builds while it waits for its own chunks: one step took 2.5 s on a worker in
+        // the lead's fortress trace (memory: nested-scope-stalls). The leaf pool's tasks never
+        // wait, so a waiting thread only runs other chunks.
+        let fill = &fill;
+        leaf_pool().scope(|scope| {
+            for (i, chunk) in out.chunks_mut(CHUNK).enumerate() {
+                scope.spawn(async move { fill(i, chunk) });
+            }
+        });
+    } else if engine_core::tasks::ComputeTaskPool::try_get().is_some() {
         engine_core::tasks::par_chunks_mut(out, CHUNK, fill);
     } else {
         fill(0, out);
     }
+}
+
+/// Threads for the light and seeding passes of region steps run on workers (softbody's
+/// `leaf_pool` pattern): its tasks are plain loops that never wait on others.
+fn leaf_pool() -> &'static engine_core::tasks::TaskPool {
+    static POOL: std::sync::OnceLock<engine_core::tasks::TaskPool> = std::sync::OnceLock::new();
+    POOL.get_or_init(|| {
+        let threads = std::thread::available_parallelism().map_or(2, |n| n.get());
+        engine_core::tasks::TaskPoolBuilder::new()
+            .num_threads((threads / 2).max(2))
+            .thread_name("foliage-sim".into())
+            .build()
+    })
 }
 
 fn horizontal(a: DVec3, b: DVec3) -> f32 {
@@ -1143,5 +1174,54 @@ mod edge_tests {
         };
         assert_eq!(edge_distance(&rect, c, 25.0, 0.0), 5.0);
         assert_eq!(edge_distance(&rect, c, 0.0, -8.0), 2.0);
+    }
+}
+
+#[cfg(test)]
+mod pool_tests {
+    use super::par_fill;
+    use engine_core::tasks::AsyncComputeTaskPool;
+
+    /// A pass split on a worker isn't held up by whole loading builds queued on the same
+    /// pool. Timing on a shared machine: run by hand
+    /// (`cargo test -p engine_foliage --release -- --ignored par_fill_on_a_busy_worker`).
+    #[test]
+    #[ignore]
+    fn par_fill_on_a_busy_worker() {
+        engine_core::tasks::init_task_pools();
+        let pool = AsyncComputeTaskPool::get();
+        let spin = |ms: u64| {
+            let end = std::time::Instant::now() + std::time::Duration::from_millis(ms);
+            while std::time::Instant::now() < end {
+                std::hint::spin_loop();
+            }
+        };
+        // Loading builds queued while the step runs: more 300 ms jobs than the pool has
+        // threads.
+        let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+        let builds = pool.thread_num() * 3;
+        let (tx, rx) = std::sync::mpsc::channel();
+        pool.spawn(async move {
+            let pool = AsyncComputeTaskPool::get();
+            for _ in 0..builds {
+                let tx = done_tx.clone();
+                pool.spawn(async move {
+                    spin(300);
+                    let _ = tx.send(());
+                })
+                .detach();
+            }
+            let start = std::time::Instant::now();
+            let mut out = vec![0.0f32; 64 * 256];
+            par_fill(&mut out, |i| (i as f32).sqrt());
+            let _ = tx.send(start.elapsed().as_secs_f32() * 1000.0);
+        })
+        .detach();
+        let ms = rx.recv().unwrap();
+        for _ in 0..builds {
+            done_rx.recv().unwrap();
+        }
+        println!("par_fill on a busy worker: {ms:.1} ms");
+        assert!(ms < 150.0, "{ms:.1} ms");
     }
 }
