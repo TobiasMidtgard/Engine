@@ -299,7 +299,42 @@ impl IslandManager {
         handle: RigidBodyHandle,
         bodies: &mut RigidBodySet,
     ) {
-        self.bump_active_set_epoch();
+        // Engine patch 2: bump the active-set epoch only when this body's place in the active
+        // set can have changed (its type, enabled or sleeping state, dominance, colliders, island
+        // or slot), not for every modified body. The epoch keys the solver contact graph's full
+        // rebuild, which walks every contact pair of the world: a force, velocity or kinematic
+        // target set on an awake body each step otherwise rebuilt it every step (PATCHES.md).
+        let state = |rb: &crate::dynamics::RigidBody| {
+            (
+                rb.body_type,
+                rb.is_enabled(),
+                rb.is_sleeping(),
+                rb.ids.active_island_id,
+                rb.ids.active_set_id,
+            )
+        };
+        let Some(before) = bodies.get(handle).map(|rb| {
+            let moved = rb.changes.intersects(
+                RigidBodyChanges::TYPE
+                    | RigidBodyChanges::SLEEP
+                    | RigidBodyChanges::ENABLED_OR_DISABLED
+                    | RigidBodyChanges::DOMINANCE
+                    | RigidBodyChanges::COLLIDERS,
+            );
+            (state(rb), moved)
+        }) else {
+            self.bump_active_set_epoch();
+            return;
+        };
+        let epoch = self.active_set_epoch;
+        self.rigid_body_updated_inner(handle, bodies);
+        let after = bodies.get(handle).map(state);
+        if self.active_set_epoch == epoch && (before.1 || after != Some(before.0)) {
+            self.bump_active_set_epoch();
+        }
+    }
+
+    fn rigid_body_updated_inner(&mut self, handle: RigidBodyHandle, bodies: &mut RigidBodySet) {
         let Some(rb) = bodies.get_mut(handle) else {
             return;
         };
