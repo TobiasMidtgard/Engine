@@ -45,6 +45,7 @@ pub fn has_open_form(sp: &PlantSpecies) -> bool {
     matches!(sp.form, PlantForm::Broadleaf | PlantForm::Conifer)
         && sp.shape.crown_base > 0.25
         && sp.shape.forks < 2
+        && sp.shape.leaf != LeafStyle::Palm
 }
 
 /// `sp` grown in the open: its crown down to about a tenth of its height (live crown ratio
@@ -296,7 +297,7 @@ fn paint_leaves(style: LeafStyle) -> PaintedLeaves {
         };
     }
     let t = leaf_textures(kind, LEAF_ATLAS_SIZE, seed);
-    let hero = (!kind.is_needles()).then(|| {
+    let hero = (!kind.is_needles() && kind != LeafKind::Palm).then(|| {
         let h = hero_leaf_textures(kind, HERO_ATLAS_SIZE, seed);
         (h.color, h.normal)
     });
@@ -803,7 +804,14 @@ fn build_species(
         // Thin leaves let sunlight through (they glow yellow-green against the sun); needles
         // are thicker. Both are matte enough that a grazing sun doesn't turn them white.
         let mut m = StandardMaterial::color(color[0], color[1], color[2])
-            .with_roughness(if needles { 0.82 } else { 0.86 })
+            .with_roughness(if needles {
+                0.82
+            } else if sp.shape.leaf == LeafStyle::Palm {
+                // Palm leaflets are waxy and catch the sun.
+                0.62
+            } else {
+                0.86
+            })
             .with_subsurface(if needles { 0.3 } else { 0.65 })
             .with_wind_sway(sp.wind_sway_m);
         // Leaves reflect less than the default dielectric (F0 ≈ 0.03).

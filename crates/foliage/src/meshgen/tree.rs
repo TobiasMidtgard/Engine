@@ -778,6 +778,7 @@ impl Crowns {
 /// used while a tree is small.
 pub fn woody(sp: &PlantSpecies, seed: u64, sapling: bool) -> PlantMeshes {
     let mut m = match sp.form {
+        _ if sp.shape.leaf == LeafStyle::Palm => palm(sp, seed, sapling),
         PlantForm::Conifer => conifer(sp, seed, sapling),
         PlantForm::Shrub => shrub(sp, seed),
         _ => broadleaf(sp, seed, sapling),
@@ -2680,6 +2681,136 @@ fn broadleaf(sp: &PlantSpecies, seed: u64, sapling: bool) -> PlantMeshes {
     assemble(sp, seed, &path, &radius, cr, shading, h, cut, sapling)
 }
 
+/// A palm (coconut): one unbranched stem, swollen at its foot and bowed by the wind, slender
+/// and even all the way up, under a crown of long feather fronds. The fronds rise from the
+/// top of the stem in a spiral, the young ones near upright, the mature ones arching out and
+/// over, the oldest hanging, yellowing, against the stem. Each frond is a midrib (a level 1
+/// branch the wind bends) carrying a run of cards painted as stretches of a frond
+/// ([`LeafKind::Palm`]): its foot, its middles and its tip, folded down along the midrib into
+/// the V a palm leaf hangs in. `crown_radius_m` is the frond length.
+fn palm(sp: &PlantSpecies, seed: u64, sapling: bool) -> PlantMeshes {
+    let mut rng = Rng::new(seed);
+    let h = sp.max_height_m;
+    let cut = cut_height(sp);
+    let frond_len = sp.crown_radius_m * if sapling { 0.75 } else { 1.0 };
+    // The crown's top is the tree's height: the stem ends a little over half a frond under it.
+    let top = (h - frond_len * 0.55).max(h * 0.25);
+    let (mut path, mut radius) = trunk(sp, &mut rng, top, cut, false);
+    // Bowed: leaning out of the foot, curving back toward upright higher up, as coconut palms
+    // on a shore grow toward the light and the sea.
+    let lean = if sapling {
+        0.02
+    } else {
+        rng.range(0.04, 0.2) * (1.0 + sp.shape.gnarl)
+    } * top;
+    let az = rng.range(0.0, std::f32::consts::TAU);
+    let lean_dir = Vec3::new(az.cos(), 0.0, az.sin());
+    let r0 = sp.trunk_radius_m;
+    for (p, r) in path.iter_mut().zip(radius.iter_mut()) {
+        let t = (p.y / top).clamp(0.0, 1.0);
+        let off = lean * (1.0 - (1.0 - t) * (1.0 - t));
+        *p = Vec3::new(lean_dir.x * off, p.y, lean_dir.z * off);
+        // Nearly even: a bulb at the foot, a slight waist, thickening again under the crown.
+        *r = r0
+            * (0.82
+                + 0.5 * (-p.y / 0.9).exp()
+                + 0.12 * smoothstep(0.75, 1.0, t)
+                + 0.03 * (p.y * 1.7 + seed as f32).sin());
+    }
+    let crown_at = *path.last().unwrap();
+    let n = if sapling {
+        9
+    } else {
+        rng.range_i32(22, 30) as usize
+    };
+    let crown = Crown {
+        center: crown_at + Vec3::Y * frond_len * 0.05,
+        radii: Vec3::new(frond_len * 0.85, frond_len * 0.5, frond_len * 0.85),
+        cone: false,
+        lobes: Lobes::random(&mut rng, 6, 0.05),
+    };
+    let mut cr = Crowns::new(crown, frond_len * 0.25);
+    cr.branches.push(Branch {
+        path: path.clone(),
+        radius: radius.clone(),
+        level: 0,
+    });
+    let base_tint = leaf_tint(sp, &mut rng);
+    for i in 0..n {
+        // Oldest (lowest, hanging) first; the youngest stand up out of the middle.
+        let age = 1.0 - i as f32 / (n - 1) as f32;
+        let elev = (20.0 + 100.0 * age.powf(0.6) + rng.range(-8.0, 8.0)).to_radians();
+        let faz = i as f32 * 2.399_963 + rng.range(-0.2, 0.2);
+        let out = Vec3::new(faz.cos(), 0.0, faz.sin());
+        let dir = (out * elev.sin() + Vec3::Y * elev.cos()).normalize();
+        let len = frond_len * rng.range(0.85, 1.05) * if age > 0.9 { 0.85 } else { 1.0 };
+        // Its own weight arches it over: little for the young upright ones, most for the
+        // spreading ones, whose tips end up hanging.
+        let sag = 0.08 + 0.3 * elev.sin() * (1.0 - 0.3 * age);
+        let start = crown_at + out * r0 * 0.7 - Vec3::Y * frond_len * 0.04 * age;
+        let rachis = grow(start, dir, len, 8, |f, _| {
+            Vec3::NEG_Y * sag * (0.4 + f) + jitter(&mut rng, 0.015)
+        });
+        let rachis_r = taper(8, 0.044, 0.008);
+        // Old fronds yellow before they drop; the youngest are fresh and a little paler.
+        let tint = if age > 0.88 {
+            base_tint * Vec3::new(1.35, 1.12, 0.55)
+        } else if age < 0.15 {
+            base_tint * Vec3::new(1.05, 1.1, 0.95)
+        } else {
+            base_tint * rng.range(0.92, 1.06)
+        };
+        let (mid, _, _) = point_at(&rachis, &rachis_r, 0.55);
+        let clump = cr.clump(mid - Vec3::Y * len * 0.25, len * 0.45);
+        // A bare stalk at its foot, then four stretches of leaflets: foot, two middles, tip.
+        let stops = [0.1f32, 0.33, 0.56, 0.78, 1.0];
+        let cells = [0usize, 1, CLUSTER_CELL, 3];
+        let twist = rng.range(-0.25, 0.25);
+        for k in 0..4 {
+            let (a, _, _) = point_at(&rachis, &rachis_r, stops[k]);
+            let (b, _, _) = point_at(&rachis, &rachis_r, stops[k + 1]);
+            let chord = b - a;
+            let d = chord.normalize_or(dir);
+            let up = (Vec3::Y - d * d.y).normalize_or(out);
+            let face = rotate(up, d, twist + rng.range(-0.12, 0.12));
+            cr.cards.push(Card {
+                base: a,
+                dir: d,
+                face,
+                width: len * rng.range(0.33, 0.37) * if k == 3 { 0.85 } else { 1.0 },
+                length: chord.length() * 1.1,
+                tint: tint * rng.range(0.94, 1.06),
+                cell: cells[k],
+                mirror: rng.chance(0.5),
+                droop: 0.04,
+                // The leaflets hang from the midrib in a V, deeper on the spreading fronds.
+                fold: rng.range(0.42, 0.55) * (0.6 + 0.4 * elev.sin()),
+                clump,
+                far: k % 2 == 0 || i % 2 == 0,
+                centered: false,
+            });
+        }
+        cr.branches.push(Branch {
+            path: rachis,
+            radius: rachis_r,
+            level: 1,
+        });
+    }
+    // The fronds are a few big, open leaves rather than a mass of twigs: lit mostly by their
+    // own frond, little darkened inside the crown.
+    assemble(
+        sp,
+        seed,
+        &path,
+        &radius,
+        cr,
+        (0.6, 0.35, 0.7),
+        h,
+        cut,
+        sapling,
+    )
+}
+
 /// Pine- or spruce-like tree: straight trunk, whorls of branches, needle sprays.
 fn conifer(sp: &PlantSpecies, seed: u64, sapling: bool) -> PlantMeshes {
     let mut rng = Rng::new(seed);
@@ -3301,6 +3432,38 @@ mod tests {
 
     /// Far trees (100-350 m) cost a few thousand triangles at most: the trunk reaches the
     /// ground (no stump with it) and a spruce's limbs stay under its shelves.
+    #[test]
+    fn a_palm_is_a_bare_stem_under_a_crown_of_fronds() {
+        let lib = PlantLibrary::default();
+        let sp = lib.get(lib.id("coconut palm").unwrap());
+        for seed in 0..3 {
+            let m = woody(sp, seed, false);
+            // The leaves' own extent (the mesh bounds are shared with the stem, through two
+            // degenerate vertices under the foot).
+            let verts = &m.foliage.as_ref().unwrap().vertices;
+            let (lo, hi) = verts.iter().filter(|v| v.position[1] > -0.5).fold(
+                (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN)),
+                |(lo, hi), v| {
+                    let p = Vec3::from(v.position);
+                    (lo.min(p), hi.max(p))
+                },
+            );
+            // No leaves down the stem: the lowest, hanging fronds stay in the top half.
+            assert!(lo.y > sp.max_height_m * 0.5, "{seed}: {lo} {hi}");
+            // The crown spreads about two frond lengths across.
+            let across = (hi.x - lo.x).max(hi.z - lo.z);
+            assert!(
+                across > sp.crown_radius_m * 1.3 && across < sp.crown_radius_m * 2.6,
+                "{seed}: {across}"
+            );
+            assert!(m.height > sp.max_height_m * 0.85 && m.height < sp.max_height_m * 1.15);
+            // A crown of separate fronds the wind bends one by one.
+            let bones = m.wind.as_ref().unwrap();
+            assert!(bones.bones.len() > 20, "{seed}: {}", bones.bones.len());
+            assert!(m.foliage_hero.is_none());
+        }
+    }
+
     #[test]
     fn far_trees_stay_light() {
         let lib = PlantLibrary::default();

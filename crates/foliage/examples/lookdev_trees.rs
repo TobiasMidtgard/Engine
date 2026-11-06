@@ -13,7 +13,7 @@
 //! 150 m, and a wood of 12,000 scenery trees from a hill (with and without the distant level). Name shots after the directory to render
 //! only those (`lineup`, `lineup_near`, `lineup_mid`, `lineup_lod`, `lineup_distant`, `roots`, `crown_front`,
 //! `leaves_close`, `crown_back`, `conifers`, `lineup_stands` (the stands' other eight trees), `pine_crown`, `birch_hazel`, `grove`,
-//! `grove_far`, `savanna`, `savanna_side`, `savanna_high`, `prairie`, `rainforest`, `rainforest_below`, `valley`, `valley_far`, `far_woods`, `far_woods_off`), `textures`
+//! `grove_far`, `savanna`, `savanna_side`, `savanna_high`, `prairie`, `rainforest`, `rainforest_below`, `beach`, `beach_crown`, `canada`, `canada_close`, `valley`, `valley_far`, `far_woods`, `far_woods_off`), `textures`
 //! to save the leaf atlases, their normal maps, three of their mip levels and the mass atlases far
 //! crowns draw with instead, or `stats` to print triangle counts.
 
@@ -437,6 +437,98 @@ fn main() {
             .unwrap();
         }
     }
+    // A tropical shore 600 m ahead: coconut palms leaning out over the sand toward the sea.
+    let beach = DVec3::new(0.0, 0.0, -600.0);
+    if only_sp.as_deref().is_none_or(|o| o == "coconut palm") {
+        app.world.spawn((
+            Transform::from_translation(beach + DVec3::new(-60.0, 0.03, 0.0)),
+            MeshRenderer::new(
+                Shape::Plane {
+                    size: [160.0, 400.0],
+                    subdivisions: 1,
+                },
+                StandardMaterial::hex(0xcdb98e).with_roughness(0.95),
+            ),
+        ));
+        app.world.spawn((
+            Transform::from_translation(beach + DVec3::new(120.0, 0.0, 0.0)),
+            MeshRenderer::new(
+                Shape::Plane {
+                    size: [200.0, 400.0],
+                    subdivisions: 1,
+                },
+                StandardMaterial::hex(0x2b7f86).with_roughness(0.08),
+            ),
+        ));
+        let mut rng = Rng::new(41);
+        for k in 0..9 {
+            let g = Genes {
+                variant: k as u8 % 4,
+                height: rng.range(0.8, 1.15),
+                ..Default::default()
+            };
+            let p = beach
+                + DVec3::new(
+                    rng.range(-14.0, 4.0) as f64,
+                    0.0,
+                    (k as f64 - 4.0) * 11.0 + rng.range(-3.0, 3.0) as f64,
+                );
+            spawn_plant(&mut app.world, "coconut palm", p, 1.0, Some(g)).unwrap();
+        }
+    }
+    // A Canadian Shield lake shore 600 m off diagonally: a wall of black spruce spires with
+    // sugar maples in front, shot in October.
+    let canada = DVec3::new(600.0, 0.0, 600.0);
+    if only_sp
+        .as_deref()
+        .is_none_or(|o| o == "black spruce" || o == "sugar maple")
+    {
+        app.world.spawn((
+            Transform::from_translation(canada + DVec3::new(0.0, 0.03, -100.0)),
+            MeshRenderer::new(
+                Shape::Plane {
+                    size: [300.0, 200.0],
+                    subdivisions: 1,
+                },
+                StandardMaterial::hex(0x4a4a2c).with_roughness(0.95),
+            ),
+        ));
+        app.world.spawn((
+            Transform::from_translation(canada + DVec3::new(0.0, 0.08, 60.0)),
+            MeshRenderer::new(
+                Shape::Plane {
+                    size: [300.0, 120.0],
+                    subdivisions: 1,
+                },
+                StandardMaterial::hex(0x1d3440).with_roughness(0.05),
+            ),
+        ));
+        let mut rng = Rng::new(57);
+        for i in 0..44 {
+            for j in 0..10 {
+                let p = canada
+                    + DVec3::new(
+                        (i as f64 - 21.5) * 3.2 + rng.range(-1.2, 1.2) as f64,
+                        0.0,
+                        -8.0 - j as f64 * 3.4 + rng.range(-1.2, 1.2) as f64,
+                    );
+                // Maples crowd the shore's warm, better-drained strip, spruce the rest.
+                let maple = j < 4 && rng.chance(0.18);
+                if maple && (i + j) % 2 == 1 {
+                    continue;
+                }
+                let g = Genes {
+                    variant: rng.range_i32(0, 4) as u8,
+                    hue: rng.range(-1.0, 1.0),
+                    height: rng.range(0.75, 1.15),
+                    crown: rng.range(0.85, 1.15),
+                    ..Default::default()
+                };
+                let name = if maple { "sugar maple" } else { "black spruce" };
+                spawn_plant(&mut app.world, name, p, rng.range(0.75, 1.0), Some(g)).unwrap();
+            }
+        }
+    }
     app.world.flush();
     app.update();
     // Wait for every species' meshes (built off the frame), so the first shot isn't empty.
@@ -678,6 +770,57 @@ fn main() {
             rainforest + DVec3::new(-12.0, 1.7, 26.0),
             rainforest + DVec3::new(-20.0, 18.0, 10.0),
             Vec3::new(-0.5, 0.75, 0.4),
+        );
+    }
+    if wanted("beach") {
+        // Along the shore with the late sun behind the palms: fronds against the sky.
+        shot(
+            &mut app,
+            &out,
+            "beach",
+            beach + DVec3::new(-30.0, 1.7, 55.0),
+            beach + DVec3::new(-2.0, 12.0, 0.0),
+            Vec3::new(0.6, 0.35, -0.7),
+        );
+    }
+    if wanted("beach_crown") {
+        // Up into a crown from under it, sun from the side.
+        shot(
+            &mut app,
+            &out,
+            "beach_crown",
+            beach + DVec3::new(-20.0, 1.6, 16.0),
+            beach + DVec3::new(-6.0, 17.0, 0.0),
+            Vec3::new(-0.5, 0.6, 0.6),
+        );
+    }
+    if wanted("canada") || wanted("canada_close") {
+        // Early October: the maples have turned and few leaves are down yet.
+        app.world
+            .resource_mut::<engine_foliage::FoliageSeason>()
+            .day_of_year = 279.0;
+        app.update_n(60);
+    }
+    if wanted("canada") {
+        // Across the lake from the far shore, morning sun from behind the camera's left.
+        shot(
+            &mut app,
+            &out,
+            "canada",
+            canada + DVec3::new(-15.0, 2.0, 95.0),
+            canada + DVec3::new(5.0, 9.0, -10.0),
+            Vec3::new(-0.45, 0.35, 0.8),
+        );
+    }
+    if wanted("canada_close") {
+        // From the shore itself, a few meters off the first trees.
+        shot(
+            &mut app,
+            &out,
+            "canada_close",
+            canada + DVec3::new(10.0, 1.7, 18.0),
+            canada + DVec3::new(-2.0, 8.0, -12.0),
+            Vec3::new(-0.45, 0.35, 0.8),
         );
     }
     if wanted("grove_far") {

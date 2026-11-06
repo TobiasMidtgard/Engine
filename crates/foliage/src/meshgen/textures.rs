@@ -57,6 +57,11 @@ pub enum LeafKind {
     /// Soft short needles in rosettes on spur shoots along drooping twigs, single needles on
     /// the young shoots (larch).
     SoftNeedles,
+    /// A stretch of a palm frond: a stout midrib up the middle with long, narrow, stiff
+    /// leaflets close-set along both sides, reaching forward (coconut palm). The three spray
+    /// cells are the frond's base (bare midrib at the foot, leaflets lengthening), its middle
+    /// and its tip (leaflets shortening to the end); the cluster cell is another middle.
+    Palm,
 }
 
 /// The texture kind a species' leaf style is painted as.
@@ -73,6 +78,7 @@ pub fn kind_of(style: crate::species::LeafStyle) -> LeafKind {
         LeafStyle::Round => LeafKind::Round,
         LeafStyle::Pinnate => LeafKind::Pinnate,
         LeafStyle::SoftNeedles => LeafKind::SoftNeedles,
+        LeafStyle::Palm => LeafKind::Palm,
     }
 }
 
@@ -1077,7 +1083,8 @@ fn broad_style(kind: LeafKind) -> BroadStyle {
         | LeafKind::LongNeedles
         | LeafKind::ShortNeedles
         | LeafKind::SoftNeedles
-        | LeafKind::Frond => BroadStyle {
+        | LeafKind::Frond
+        | LeafKind::Palm => BroadStyle {
             shape: LeafShape {
                 a: 0.42,
                 b: 0.62,
@@ -1270,7 +1277,8 @@ fn paint_leaf(cv: &mut Canvas, kind: LeafKind, l: &Blade) {
         | LeafKind::LongNeedles
         | LeafKind::ShortNeedles
         | LeafKind::SoftNeedles
-        | LeafKind::Frond => cv.blade(l),
+        | LeafKind::Frond
+        | LeafKind::Palm => cv.blade(l),
     }
 }
 
@@ -1654,7 +1662,8 @@ fn one_spray_layout(kind: LeafKind, rng: &mut Rng) -> (Vec<Blade>, Twigs) {
         LeafKind::LongNeedles
         | LeafKind::ShortNeedles
         | LeafKind::SoftNeedles
-        | LeafKind::Frond => {}
+        | LeafKind::Frond
+        | LeafKind::Palm => {}
         LeafKind::Broad => {
             // Hazel: arching shoots with leaves alternating in two flat rows.
             let main = shoot(
@@ -1712,7 +1721,8 @@ fn broad_cluster(cv: &mut Canvas, kind: LeafKind, rng: &mut Rng) {
         | LeafKind::LongNeedles
         | LeafKind::ShortNeedles
         | LeafKind::SoftNeedles
-        | LeafKind::Frond => false,
+        | LeafKind::Frond
+        | LeafKind::Palm => false,
     };
     if stalks {
         for l in &leaves {
@@ -1751,7 +1761,8 @@ fn broad_cluster_layout(kind: LeafKind, rng: &mut Rng) -> Vec<Blade> {
         LeafKind::LongNeedles
         | LeafKind::ShortNeedles
         | LeafKind::SoftNeedles
-        | LeafKind::Frond => {
+        | LeafKind::Frond
+        | LeafKind::Palm => {
             return leaves;
         }
     };
@@ -2270,6 +2281,7 @@ fn paint_cell(kind: LeafKind, cell: usize, size: u32, seed: u64, min_needle_px: 
                 larch_spray(&mut cv, &mut rng);
             }
         }
+        LeafKind::Palm => palm_segment(&mut cv, &mut rng, cell),
         LeafKind::Frond => {
             let base = Vec2::new(0.5, 0.99);
             // Rachis up the middle, pinnae on both sides shrinking toward the tip.
@@ -2307,6 +2319,113 @@ fn paint_cell(kind: LeafKind, cell: usize, size: u32, seed: u64, min_needle_px: 
         }
     }
     cv
+}
+
+/// Palm leaflets: linear, widest just above the base, tapering to a long point, untoothed,
+/// with one strong midrib and a sharp fold along it.
+const PALM_LEAFLET: LeafShape = LeafShape {
+    a: 0.12,
+    b: 0.55,
+    tip: 0.75,
+    teeth: 0.0,
+    tooth_depth: 0.0,
+    fine_teeth: 0.0,
+    crenate: 0.0,
+    teeth_from: 0.1,
+    teeth_at_veins: false,
+    lobes: 0.0,
+    lobe_depth: 0.0,
+    auricle: 0.0,
+    veins: 0.0,
+    vein_sweep: 0.0,
+    vein_curve: 1.0,
+    fold: 0.45,
+    blister: 0.0,
+};
+
+/// Palm frond midrib: pale yellow-green.
+const PALM_RACHIS: [f32; 3] = [0.78, 0.8, 0.52];
+
+/// One stretch of a palm frond ([`LeafKind::Palm`]): the midrib from the bottom of the cell to
+/// its top with leaflets close-set along both sides, each leaving it at 35-55° forward and
+/// running out toward the cell's side. Cell 0 is the frond's foot, cell 3 its tip; the others
+/// are middles. Now and then a leaflet is missing or torn short (wind-ragged fronds), and the
+/// odd one is yellowing at its tip.
+fn palm_segment(cv: &mut Canvas, rng: &mut Rng, cell: usize) {
+    let (foot, tip) = (cell == 0, cell == 3);
+    let rachis = shoot(
+        Vec2::new(0.5, 1.0),
+        rot(Vec2::NEG_Y, rng.range(-0.03, 0.03)),
+        if tip { 0.92 } else { 1.0 },
+        rng.range(-0.06, 0.06),
+        8,
+    );
+    // The midrib's own width tapers along the frond: wide at the foot, thin at the tip.
+    let (w0, w1) = match (foot, tip) {
+        (true, _) => (0.05, 0.034),
+        (_, true) => (0.022, 0.006),
+        _ => (0.034, 0.022),
+    };
+    let per_side = 30;
+    let mut blades = Vec::new();
+    for k in 0..per_side {
+        for side in [-1.0f32, 1.0] {
+            let t = (k as f32 + rng.range(0.0, 0.7) + if side > 0.0 { 0.0 } else { 0.35 })
+                / per_side as f32;
+            if foot && t < 0.18 {
+                continue;
+            }
+            let t = t.min(0.995);
+            let (p, d) = along(&rachis, t);
+            // Leaflets lengthen out of the foot and shorten toward the tip.
+            let mut len = if foot {
+                0.3 + 0.32 * smoothstep(0.18, 0.75, t)
+            } else if tip {
+                0.6 * (1.0 - t).powf(0.7) + 0.06
+            } else {
+                0.62
+            } * rng.range(0.88, 1.08);
+            if rng.chance(0.05) {
+                continue;
+            }
+            if rng.chance(0.07) {
+                len *= rng.range(0.35, 0.7);
+            }
+            let a = side * rng.range(0.62, 0.95);
+            let dir = rot(d, a);
+            let lum = rng.range(0.86, 1.08);
+            let warm = rng.range(-0.03, 0.06);
+            let base = [0.74, 0.86, 0.6];
+            blades.push(Blade {
+                shape: PALM_LEAFLET,
+                base: p + dir * w0 * 0.3,
+                dir,
+                length: len,
+                width: len * rng.range(0.05, 0.065),
+                color: [
+                    base[0] * lum * (1.0 + warm),
+                    base[1] * lum,
+                    base[2] * lum * (1.0 - warm * 2.0),
+                ],
+                under: rng.chance(0.25),
+                tilt: Vec2::new(rng.range(-0.3, 0.3), rng.range(-0.3, 0.3)),
+                phase: rng.range(0.0, 1.0),
+                spots: if rng.chance(0.12) {
+                    [
+                        (rng.range(0.8, 0.95), 0.0, rng.range(0.5, 0.9)),
+                        (0.0, 0.0, 0.0),
+                    ]
+                } else {
+                    [(0.0, 0.0, 0.0); 2]
+                },
+                seed: rng.next_u64(),
+            });
+        }
+    }
+    for b in &blades {
+        cv.blade(b);
+    }
+    cv.stem_path(&rachis, w0, w1, PALM_RACHIS);
 }
 
 fn cell_rng(seed: u64, cell: usize) -> Rng {
@@ -2352,7 +2471,8 @@ pub fn spray_layout(kind: LeafKind, cell: usize, seed: u64) -> Option<SprayLayou
         LeafKind::LongNeedles
         | LeafKind::ShortNeedles
         | LeafKind::SoftNeedles
-        | LeafKind::Frond => {
+        | LeafKind::Frond
+        | LeafKind::Palm => {
             return None;
         }
     }
@@ -2480,7 +2600,8 @@ pub fn hero_leaf_textures(kind: LeafKind, size: u32, seed: u64) -> LeafTextures 
                         | LeafKind::LongNeedles
                         | LeafKind::ShortNeedles
                         | LeafKind::SoftNeedles
-                        | LeafKind::Frond => (0.02, 0.015),
+                        | LeafKind::Frond
+                        | LeafKind::Palm => (0.02, 0.015),
                     };
                     cv.stem(
                         Vec2::new(0.5, HERO_PETIOLE_Y),
@@ -2631,7 +2752,7 @@ fn mass_cell(kind: LeafKind, cell: usize, cs: u32, seed: u64, min_px: f32) -> Ca
         // The leaflets.
         LeafKind::Pinnate => 0.04,
         LeafKind::LongNeedles => 0.035,
-        LeafKind::ShortNeedles | LeafKind::SoftNeedles | LeafKind::Frond => 0.03,
+        LeafKind::ShortNeedles | LeafKind::SoftNeedles | LeafKind::Frond | LeafKind::Palm => 0.03,
     } * cs as f32;
     let edge = (0.04 * cs as f32).max(1.0);
     let cell_seed = seed ^ (cell as u64).wrapping_mul(0x51ed_270b) ^ 0x3a55;
@@ -2750,6 +2871,7 @@ mod tests {
             LeafKind::ShortNeedles,
             LeafKind::SoftNeedles,
             LeafKind::Frond,
+            LeafKind::Palm,
         ] {
             let img = leaf_texture(kind, 128, 7);
             assert!(img.is_valid(), "{kind:?}");
@@ -2895,6 +3017,7 @@ mod tests {
             LeafStyle::Round,
             LeafStyle::Pinnate,
             LeafStyle::SoftNeedles,
+            LeafStyle::Palm,
         ];
         let kinds: std::collections::HashSet<_> = styles.iter().map(|s| kind_of(*s)).collect();
         assert_eq!(kinds.len(), styles.len());
