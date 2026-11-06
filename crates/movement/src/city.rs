@@ -433,7 +433,7 @@ fn acrobatics(out: &mut Vec<Piece>) {
     // The culvert: two walls and a slab over the tunnel.
     let ([x0, x1], [_, z1], [t0, t1], th) = CULVERT;
     // (The south side on piers, open between them: the crawl can be watched from the square.)
-    for x in [x0, (x0 + x1) * 0.5 - 0.2, x1 - 0.4] {
+    for x in [x0, x1 - 0.4] {
         out.push(Piece::new(
             [x, 0.0, t0 - 0.4],
             [x + 0.4, th, t0],

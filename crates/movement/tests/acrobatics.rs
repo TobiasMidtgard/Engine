@@ -127,11 +127,34 @@ fn a_low_roof_is_crawled_under_and_stood_up_from() {
         Vec3::new(4.0, 1.0, 4.0),
     );
     let c = character(&mut app, DVec3::new(0.0, 0.9, 0.0));
+    // A camera following from behind, level.
+    let cam = app
+        .world
+        .spawn((
+            engine_render::Camera::default(),
+            Transform::from_xyz(3.0, 2.0, 0.0),
+            {
+                let mut pc = engine_movement::camera::PilotCamera::default();
+                pc.target = Some(c);
+                pc.yaw = std::f32::consts::FRAC_PI_2;
+                pc.shoulder = 0.0;
+                pc.pitch = 0.0;
+                pc
+            },
+        ))
+        .id();
     intent(&mut app, c, |i| i.direction = -Vec3::X);
     run_until(&mut app, 3.0, |w| {
         w.get::<Transform>(c).unwrap().translation.x < -3.0
     });
     assert!(mover(&app, c).crawl.is_some(), "crawling under the slab");
+    // The camera drops under the roof with the crawler, not into the stone.
+    let eye = pos(&app, cam);
+    assert!(
+        eye.y < 0.85 && eye.x > pos(&app, c).x,
+        "eye {eye:?} at {:?}",
+        pos(&app, c)
+    );
     run_until(&mut app, 6.0, |w| {
         w.get::<Transform>(c).unwrap().translation.x < -7.5
     });

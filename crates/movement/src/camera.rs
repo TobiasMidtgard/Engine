@@ -210,12 +210,25 @@ pub(crate) fn follow_pilots(
             rig.pivot += (gap - along) * k as f64 + along * kv as f64;
         }
 
-        // Boom: pull in in front of anything behind the character, ease back out.
         let mut filter = QueryFilter::excluding(target);
         if let Some(e) = lock.and_then(|l| l.target) {
             filter.exclude.push(e);
         }
         let probe = ColliderShape::Sphere { radius: 0.25 };
+        // Under a low roof (a crouch under a beam, a crawl through a culvert) the pivot drops
+        // at once to below it: else it sits in the roof and the boom sees only stone.
+        // (A ray less the probe's radius and a margin, so the boom's probe clears the roof: the
+        // same with every physics backend.)
+        let head_room = queries
+            .0
+            .raycast(pos, up, pc.height + 0.35, &filter)
+            .map_or(pc.height, |h| (h.distance - 0.35).clamp(0.0, pc.height));
+        let lift = (rig.pivot - pos).dot(up.as_dvec3());
+        if lift > head_room as f64 {
+            rig.pivot -= up.as_dvec3() * (lift - head_room as f64);
+        }
+
+        // Boom: pull in in front of anything behind the character, ease back out.
         let room = queries
             .0
             .shapecast(
