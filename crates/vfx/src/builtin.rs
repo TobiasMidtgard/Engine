@@ -16,9 +16,11 @@ use crate::trail::{RibbonStyle, Trail};
 
 mod casting;
 pub use casting::FIRE_JET_REACH;
+pub use space::{BLINK, PORTAL};
 pub use stone::STEP_CUE_SCALE;
 mod auras;
 mod elements;
+mod space;
 mod stone;
 mod undead;
 mod weaves;
@@ -386,6 +388,7 @@ pub fn all() -> Vec<EffectDesc> {
     v.extend(elements::all());
     v.extend(stone::all());
     v.extend(undead::all());
+    v.extend(space::all());
     v.extend(auras::all());
     let woven = weaves::all(&v);
     v.extend(woven);

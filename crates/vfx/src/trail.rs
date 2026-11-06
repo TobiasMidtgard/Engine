@@ -102,6 +102,9 @@ pub struct Beam {
     pub style: RibbonStyle,
     /// Hide the beam without removing it.
     pub visible: bool,
+    /// Seconds over which the beam fades away from its start toward its target, gone at the
+    /// end (a blink's smear of light); 0 keeps it whole.
+    pub wipe_secs: f32,
 }
 
 impl Default for Beam {
@@ -116,6 +119,7 @@ impl Default for Beam {
             branches: 3,
             style: RibbonStyle::Lightning,
             visible: true,
+            wipe_secs: 0.0,
         }
     }
 }
@@ -151,6 +155,8 @@ struct BeamRun {
     paths: Vec<Vec<DVec3>>,
     timer: f32,
     seed: u64,
+    /// Seconds since the beam appeared.
+    age: f32,
 }
 
 /// Ribbon state for every trail and beam (managed by the plugin).
@@ -222,11 +228,17 @@ impl Ribbons {
                     let along = j as f32 / n as f32;
                     // Branches taper to nothing.
                     let taper = if i == 0 { 1.0 } else { 1.0 - along };
-                    let e = beam.emissive * k;
+                    let (shown, glow) = wipe(beam.wipe_secs, run.age, along);
+                    let e = beam.emissive * k * shown * glow;
                     points.push(RibbonPoint {
                         pos: *p,
-                        width: beam.width * w * taper.max(0.05),
-                        color: [beam.color[0] * e, beam.color[1] * e, beam.color[2] * e, 1.0],
+                        width: beam.width * w * taper.max(0.05) * (0.35 + 0.65 * shown),
+                        color: [
+                            beam.color[0] * e,
+                            beam.color[1] * e,
+                            beam.color[2] * e,
+                            shown,
+                        ],
                         along,
                     });
                 }
@@ -234,6 +246,20 @@ impl Ribbons {
             }
         }
     }
+}
+
+/// How much of a wiping beam is left `along` it (0 start .. 1 target) at `age` s, and how
+/// bright it burns there: the fade sweeps from the start to the target over `secs`, and the
+/// beam burns brighter toward the target, where it is headed. `(1, 1)` when `secs` is 0.
+pub fn wipe(secs: f32, age: f32, along: f32) -> (f32, f32) {
+    if secs <= 0.0 {
+        return (1.0, 1.0);
+    }
+    const SOFT: f32 = 0.3;
+    let t = (age / secs).clamp(0.0, 1.0);
+    let front = -SOFT + (1.0 + 2.0 * SOFT) * t;
+    let x = ((along - (front - SOFT)) / (2.0 * SOFT)).clamp(0.0, 1.0);
+    (x * x * (3.0 - 2.0 * x), 0.55 + 0.75 * along)
 }
 
 /// Record trail points and age them; orphan trails of despawned entities.
@@ -329,7 +355,9 @@ pub fn update_beams(
         let (stored, run) = entry;
         let moved = stored.target != beam.target;
         *stored = beam.clone();
-        run.timer -= time.delta_for(local);
+        let dt = time.delta_for(local);
+        run.age += dt;
+        run.timer -= dt;
         if run.timer <= 0.0 || moved || run.paths.is_empty() {
             run.timer = 1.0 / beam.flicker_hz.max(0.5);
             run.seed = run.seed.wrapping_add(1);
@@ -470,6 +498,24 @@ mod tests {
             .resource_mut::<Time>()
             .set_source(engine_core::time::TimeSource::Manual { step_secs: 0.1 });
         app
+    }
+
+    #[test]
+    fn a_wiping_beam_fades_from_its_start_and_is_gone_at_the_end() {
+        assert_eq!(wipe(0.0, 5.0, 0.0), (1.0, 1.0), "no wipe keeps it whole");
+        let shown = |age: f32, along: f32| wipe(0.35, age, along).0;
+        assert!(
+            shown(0.0, 0.0) > 0.99 && shown(0.0, 1.0) > 0.99,
+            "whole at first"
+        );
+        let mid = 0.175;
+        assert!(shown(mid, 0.1) < 0.3, "the start has gone by halfway");
+        assert!(shown(mid, 0.9) > 0.7, "the far end still shows");
+        assert!(shown(0.35, 1.0) < 1e-3, "all gone at the end");
+        assert!(
+            wipe(0.35, 0.0, 1.0).1 > wipe(0.35, 0.0, 0.0).1,
+            "brighter toward the target"
+        );
     }
 
     #[test]

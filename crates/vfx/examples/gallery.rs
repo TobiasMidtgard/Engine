@@ -107,6 +107,16 @@ fn main() {
         .into_iter()
         .filter(|n| only.is_empty() || only.iter().any(|o| n.starts_with(o.as_str())))
         .collect();
+    // Spell cues as magic sends them, captured `secs` after they go off.
+    let cues: Vec<(&str, f32)> = [
+        ("cue.blink", 0.1),
+        ("cue.blink_late", 0.25),
+        ("cue.recall", 0.3),
+        ("cue.portal_teal", 0.12),
+    ]
+    .into_iter()
+    .filter(|(n, _)| only.is_empty() || only.iter().any(|o| n.starts_with(o.as_str())))
+    .collect();
     // (label, sun lux, sun elevation in degrees, EV100)
     let lights = [("day", 90_000.0, 40.0f32, 14.5), ("dusk", 300.0, 2.0, 5.5)];
     for (label, lux, elevation, ev) in lights {
@@ -156,6 +166,22 @@ fn main() {
                 app.update();
             }
         }
+        for (name, secs) in &cues {
+            *app.world.get_mut::<Transform>(camera).unwrap() =
+                Transform::from_xyz(0.0, 1.7, 5.5).looking_at(DVec3::new(0.0, 0.9, 0.0), Vec3::Y);
+            send_cues(&mut app.world, name);
+            for _ in 0..(secs / STEP as f32).round().max(1.0) as u32 {
+                app.update();
+            }
+            let path = out.join(format!("{label}_{name}.png"));
+            match capture_now(&mut app.world, &path) {
+                Ok(_) => println!("{}", path.display()),
+                Err(e) => eprintln!("{name}: {e}"),
+            }
+            for _ in 0..60 {
+                app.update();
+            }
+        }
         for name in &names {
             let desc = app
                 .world
@@ -185,9 +211,14 @@ fn main() {
             };
             // Jets pour sideways from the left, the way a held fire beam leaves the hand.
             let jet = name.ends_with(".jet");
+            // A portal end stands upright, its face turned toward the camera.
+            let portal = name.starts_with("spell.portal.impact");
             let transform = if jet {
                 Transform::from_xyz(-3.2, 1.2, 0.0)
                     .with_rotation(Quat::from_rotation_arc(Vec3::Y, Vec3::X))
+            } else if portal {
+                Transform::from_xyz(0.0, 1.2, 0.0)
+                    .with_rotation(Quat::from_rotation_arc(Vec3::Y, PORTAL_FACE.normalize()))
             } else {
                 Transform::from_translation(pos)
             };
@@ -208,6 +239,10 @@ fn main() {
             };
             let secs = if wide {
                 0.9
+            } else if portal || name.starts_with("spell.blink.impact") {
+                0.12
+            } else if name.starts_with("spell.portal.fizzle") {
+                0.3
             } else if jet {
                 0.45
             } else if desc.is_one_shot() {
@@ -230,5 +265,56 @@ fn main() {
                 app.update();
             }
         }
+    }
+}
+
+/// Which way a portal end faces in the gallery: toward the camera, turned a little.
+const PORTAL_FACE: Vec3 = Vec3::new(0.45, 0.0, 1.0);
+
+/// Send the spell cues a `cue.*` gallery entry stands for.
+fn send_cues(world: &mut World, name: &str) {
+    use engine_world::magic::SpellCue;
+    let chest = 1.3;
+    let (a, b) = (DVec3::new(-2.6, chest, 0.3), DVec3::new(2.4, chest, -0.4));
+    let impact = |at: DVec3, color: [f32; 3]| SpellCue::Impact {
+        at,
+        normal: Vec3::Y,
+        look: "blink".into(),
+        scale: 1.0,
+        color,
+    };
+    let blink = [0.55, 0.62, 1.0];
+    match name {
+        "cue.blink" | "cue.blink_late" => {
+            world.write_message(SpellCue::Beam {
+                from: a,
+                to: b,
+                look: "blink".into(),
+                width_m: 0.2,
+                secs: 0.35,
+            });
+            world.write_message(impact(a, blink));
+            world.write_message(impact(b, blink));
+        }
+        "cue.recall" => {
+            world.write_message(SpellCue::Beam {
+                from: b,
+                to: a,
+                look: "recall".into(),
+                width_m: 0.07,
+                secs: 0.75,
+            });
+            world.write_message(impact(a, blink));
+        }
+        "cue.portal_teal" => {
+            world.write_message(SpellCue::Impact {
+                at: DVec3::new(0.0, 1.2, 0.0),
+                normal: PORTAL_FACE.normalize(),
+                look: "portal".into(),
+                scale: 1.3,
+                color: [0.1, 0.95, 0.82],
+            });
+        }
+        _ => {}
     }
 }

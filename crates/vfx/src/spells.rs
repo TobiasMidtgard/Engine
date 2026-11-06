@@ -301,10 +301,95 @@ pub fn mark_kind(m: SpellMark) -> MarkKind {
 
 /// The color a cue's look is tinted to when it borrows (cues carry no color but Impact's).
 fn look_color(look: &str) -> [f32; 3] {
-    ELEMENTS
-        .iter()
-        .find(|(n, _)| *n == look)
-        .map_or([0.8, 0.8, 1.0], |(_, c)| *c)
+    match look {
+        "portal" => crate::builtin::PORTAL,
+        "blink" | "recall" => crate::builtin::BLINK,
+        _ => ELEMENTS
+            .iter()
+            .find(|(n, _)| *n == look)
+            .map_or([0.8, 0.8, 1.0], |(_, c)| *c),
+    }
+}
+
+/// Looks whose impacts take the cue's own color: each end of a portal pair has its own rim
+/// color (violet and teal, or a woven element's pair), and a blink takes its caster's.
+fn tints_to_cue(look: &str) -> bool {
+    matches!(look, "portal" | "blink" | "recall")
+}
+
+/// `name` recolored to `color`, defined once under `name@rgb` (color quantized to 16 steps a
+/// channel, so a handful of copies at most). Falls back to `name` itself.
+pub fn tinted(library: &mut EffectLibrary, name: &str, color: [f32; 3]) -> String {
+    let q = color.map(|c| (c.clamp(0.0, 1.0) * 15.0).round() as u8);
+    let key = format!("{name}@{:x}{:x}{:x}", q[0], q[1], q[2]);
+    if library.contains(&key) {
+        return key;
+    }
+    let Some(base) = library.get(name) else {
+        return name.to_string();
+    };
+    let mut desc = (**base).clone();
+    desc.recolor(q.map(|c| c as f32 / 15.0), 1.0);
+    desc.name = key.clone();
+    match library.insert(desc) {
+        Ok(()) => key,
+        Err(e) => {
+            tracing::warn!("vfx: tinted {key} refused: {e}");
+            name.to_string()
+        }
+    }
+}
+
+/// A blink's (or recall's) streak: a straight smear of light from `from` to `to` that fades
+/// away from its start over `secs`, with glitter left hanging along it. Recall's thread is
+/// thinner and dimmer.
+fn blink_streak(
+    commands: &mut Commands,
+    library: &EffectLibrary,
+    from: DVec3,
+    to: DVec3,
+    width_m: f32,
+    secs: f32,
+    recall: bool,
+) {
+    let secs = secs.max(0.05);
+    commands.spawn((
+        Transform::from_translation(from),
+        Beam {
+            target: to,
+            width: width_m.clamp(0.02, 0.6),
+            color: crate::builtin::BLINK,
+            emissive: if recall { 45_000.0 } else { 70_000.0 },
+            style: RibbonStyle::Energy,
+            jaggedness: 0.0,
+            branches: 0,
+            flicker_hz: 0.5,
+            wipe_secs: secs,
+            ..Default::default()
+        },
+        VfxLifetime(secs),
+    ));
+    const GLITTER: &str = "spell.blink.trail";
+    let d = (to - from).as_vec3();
+    let len = d.length();
+    if len < 0.3 || !library.contains(GLITTER) {
+        return;
+    }
+    // One glitter piece per metre or so, along the streak (every other metre for recall).
+    let step = if recall { 2.0 } else { 1.0 };
+    let pieces = (len / step).ceil().clamp(1.0, 16.0) as usize;
+    let dir = d / len;
+    let piece = len / pieces as f32;
+    for k in 0..pieces {
+        let mid = from + (dir * piece * (k as f32 + 0.5)).as_dvec3();
+        spawn_effect_at(
+            commands,
+            GLITTER,
+            mid,
+            dir,
+            piece.min(1.0) * if recall { 0.7 } else { 1.0 },
+        );
+    }
 }
 
 /// Play one-shot spell moments.
@@ -331,7 +416,18 @@ pub fn play_spell_cues(
                     spawn_effect_at(&mut commands, "spell.stone.step", *at, *normal, s);
                     continue;
                 }
+                // Recall bursts like a blink until it has its own.
+                let look = if look == "recall" && !library.contains("spell.recall.impact") {
+                    "blink"
+                } else {
+                    look.as_str()
+                };
                 if let Some(name) = looks.resolve(&mut library, look, "impact", *color) {
+                    let name = if tints_to_cue(look) {
+                        tinted(&mut library, &name, *color)
+                    } else {
+                        name
+                    };
                     // Magic sends its own Mark cue for ground hits; a hit on a body leaves none.
                     let rotation = Quat::from_rotation_arc(Vec3::Y, normal.normalize_or(Vec3::Y));
                     commands.spawn((
@@ -377,6 +473,11 @@ pub fn play_spell_cues(
                         let scale = (len / crate::builtin::FIRE_JET_REACH).clamp(0.3, 4.0);
                         spawn_effect_at(&mut commands, &name, *from, d / len, scale);
                     }
+                    continue;
+                }
+                if matches!(look.as_str(), "blink" | "recall") {
+                    let recall = look == "recall";
+                    blink_streak(&mut commands, &library, *from, *to, *width_m, *secs, recall);
                     continue;
                 }
                 let (style, color) = beam_style(look, look_color(look));
@@ -658,6 +759,87 @@ mod tests {
                 ("spell.stone.impact".to_string(), 1.7),
                 ("spell.stone.step".to_string(), 1.0)
             ]
+        );
+    }
+
+    #[test]
+    fn each_portal_end_bursts_in_its_own_color() {
+        let mut app = app();
+        let violet = [0.62, 0.3, 1.0];
+        let teal = [0.1, 0.95, 0.82];
+        for color in [violet, teal, teal] {
+            app.world.write_message(SpellCue::Impact {
+                at: DVec3::ZERO,
+                normal: Vec3::Z,
+                look: "portal".into(),
+                scale: 1.3,
+                color,
+            });
+        }
+        app.update();
+        let mut names: Vec<String> = app
+            .world
+            .query::<&ParticleEffect>()
+            .iter(&app.world)
+            .map(|f| f.effect.clone())
+            .collect();
+        names.sort();
+        names.dedup();
+        assert_eq!(names.len(), 2, "one tinted copy per color: {names:?}");
+        let lib = app.world.resource::<EffectLibrary>();
+        let teal_end = names
+            .iter()
+            .map(|n| lib.get(n).unwrap())
+            .find(|d| d.light.as_ref().unwrap().color[1] > 0.5)
+            .expect("a teal end");
+        assert!(teal_end.name.starts_with("spell.portal.impact@"));
+    }
+
+    #[test]
+    fn a_blink_smears_a_straight_wiping_streak_with_glitter_and_bursts() {
+        let mut app = app();
+        let from = DVec3::new(0.0, 1.3, 0.0);
+        let to = from + DVec3::X * 6.0;
+        app.world.write_message(SpellCue::Beam {
+            from,
+            to,
+            look: "blink".into(),
+            width_m: 0.2,
+            secs: 0.35,
+        });
+        app.world.write_message(SpellCue::Impact {
+            at: to,
+            normal: Vec3::Y,
+            look: "recall".into(),
+            scale: 1.0,
+            color: [0.55, 0.62, 1.0],
+        });
+        app.update();
+        let beams: Vec<Beam> = app
+            .world
+            .query::<&Beam>()
+            .iter(&app.world)
+            .cloned()
+            .collect();
+        assert_eq!(beams.len(), 1);
+        let b = &beams[0];
+        assert_eq!((b.jaggedness, b.branches), (0.0, 0));
+        assert_eq!(b.style, RibbonStyle::Energy);
+        assert!((b.wipe_secs - 0.35).abs() < 1e-6, "gone as it ends");
+        let names: Vec<String> = app
+            .world
+            .query::<&ParticleEffect>()
+            .iter(&app.world)
+            .map(|f| f.effect.clone())
+            .collect();
+        assert_eq!(
+            names.iter().filter(|n| *n == "spell.blink.trail").count(),
+            6,
+            "glitter every metre"
+        );
+        assert!(
+            names.iter().any(|n| n.starts_with("spell.blink.impact")),
+            "recall bursts like a blink: {names:?}"
         );
     }
 
