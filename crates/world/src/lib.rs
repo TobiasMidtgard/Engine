@@ -41,10 +41,12 @@ pub mod character;
 pub mod cover;
 pub mod environment;
 pub mod events;
+pub mod faction;
 pub mod grid;
 pub mod gusts;
 pub mod interact;
 pub mod locomotion;
+pub mod magic;
 pub mod physical;
 pub mod physics;
 pub mod scalability;
@@ -60,6 +62,7 @@ pub use character::{
 pub use cover::{CoverCell, CoverKind, GroundCover};
 pub use environment::*;
 pub use events::*;
+pub use faction::{Faction, Factions, Squad};
 pub use grid::{Blend, Grid2, Grid3};
 pub use gusts::{GUST_WAVES_WGSL, GustWave, GustWaves};
 pub use interact::{Interact, InteractTarget, Interactable, Interactor, Readouts, Using};
@@ -67,6 +70,7 @@ pub use locomotion::{
     ClimbLine, Climbable, EngineKind, EngineState, Exhaust, ExhaustEffects, ExhaustKind, Exhausts,
     LocomotionMode, LocomotionState, MoveIntent, VehicleControls, WheelContact, WheelContacts,
 };
+pub use magic::{SpellCue, SpellLook, SpellMark, SpellRole, Statuses};
 pub use physical::*;
 pub use scalability::{QualityPreset, Scalability};
 pub use shift::{FollowsWorldShift, SurfaceMoved, WorldShift, WorldShiftAppExt, WorldShiftSet};
@@ -323,6 +327,11 @@ impl Plugin for WorldPlugin {
             .add_message::<WaterDisturbance>()
             .add_message::<AttackEvent>()
             .add_message::<LightningStrike>()
+            .add_message::<FreezeRequest>()
+            .add_message::<GrowthPulse>()
+            .add_message::<MindEffect>()
+            .add_message::<Died>()
+            .add_message::<SpellCue>()
             .register_component::<SimulationFocus>(
                 "Detailed simulation (fields, LOD) follows this entity. Put it on the player.",
             )

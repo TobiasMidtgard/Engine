@@ -120,6 +120,60 @@ pub struct IgniteRequest {
     pub source: Option<Entity>,
 }
 
+/// Freeze open water into walkable ice around `center` for `secs` (a negative `secs`
+/// thaws it now). Water implements it; spells and cold snaps send it.
+#[derive(Message, Debug, Clone, Copy)]
+pub struct FreezeRequest {
+    pub center: DVec3,
+    pub radius_m: f32,
+    pub secs: f32,
+    pub source: Option<Entity>,
+}
+
+/// Speed plants up (`amount` > 0) or wither them (< 0) within `radius_m` over `secs`.
+/// Foliage implements it; spells (life, blight) and NPCs (a druid) send it.
+#[derive(Message, Debug, Clone, Copy)]
+pub struct GrowthPulse {
+    pub center: DVec3,
+    pub radius_m: f32,
+    pub amount: f32,
+    pub secs: f32,
+    pub source: Option<Entity>,
+}
+
+/// What a [`MindEffect`] does to a mind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+pub enum MindKind {
+    /// Flee from the source.
+    #[default]
+    Fear,
+    /// Drop aggression.
+    Calm,
+    /// Unseen by perception.
+    Veil,
+}
+
+/// Act on a mind for `secs`. NPC AI implements it; spells send it.
+#[derive(Message, Debug, Clone, Copy)]
+pub struct MindEffect {
+    pub target: Entity,
+    pub kind: MindKind,
+    pub secs: f32,
+    pub source: Option<Entity>,
+}
+
+/// A body's health reached zero. Written once by whichever module owns that body's health
+/// (NPC AI, magic, the player controller, destruction for breakables); read by anyone who
+/// reacts to deaths (kill feeds, squadmates, on-kill spells, death sounds). `DamageEvent`
+/// carries damage and never says a body died.
+#[derive(Message, Debug, Clone, Copy)]
+pub struct Died {
+    pub entity: Entity,
+    pub killer: Option<Entity>,
+    pub cause: DamageKind,
+    pub point: DVec3,
+}
+
 /// Damage dealt to an entity. Health, destruction and AI all read this.
 #[derive(Message, Debug, Clone)]
 pub struct DamageEvent {

@@ -642,6 +642,45 @@ impl FollowsWorldShift for TerrainEdit {
     }
 }
 
+impl FollowsWorldShift for FreezeRequest {
+    fn follow(&mut self, s: &WorldShift) {
+        self.center = s.point(self.center);
+    }
+}
+
+impl FollowsWorldShift for GrowthPulse {
+    fn follow(&mut self, s: &WorldShift) {
+        self.center = s.point(self.center);
+    }
+}
+
+impl FollowsWorldShift for Died {
+    fn follow(&mut self, s: &WorldShift) {
+        self.point = s.point(self.point);
+    }
+}
+
+impl FollowsWorldShift for crate::magic::SpellCue {
+    fn follow(&mut self, s: &WorldShift) {
+        use crate::magic::SpellCue;
+        match self {
+            SpellCue::Impact { at, normal, .. } | SpellCue::Mark { at, normal, .. } => {
+                *at = s.point(*at);
+                *normal = s.direction(*normal);
+            }
+            SpellCue::Cone { at, dir, .. } => {
+                *at = s.point(*at);
+                *dir = s.direction(*dir);
+            }
+            SpellCue::Beam { from, to, .. } => {
+                *from = s.point(*from);
+                *to = s.point(*to);
+            }
+            SpellCue::Fizzle { at, .. } => *at = s.point(*at),
+        }
+    }
+}
+
 impl FollowsWorldShift for TerrainChanged {
     fn follow(&mut self, s: &WorldShift) {
         self.center = s.point(self.center);
@@ -663,7 +702,11 @@ pub(crate) fn register_messages(app: &mut App) {
         .shift_messages::<ApplyImpulse>()
         .shift_messages::<ContactEvent>()
         .shift_messages::<TerrainEdit>()
-        .shift_messages::<TerrainChanged>();
+        .shift_messages::<TerrainChanged>()
+        .shift_messages::<FreezeRequest>()
+        .shift_messages::<GrowthPulse>()
+        .shift_messages::<Died>()
+        .shift_messages::<crate::magic::SpellCue>();
 }
 
 #[cfg(test)]
