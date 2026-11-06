@@ -515,11 +515,20 @@ pub fn run_frame(world: &mut World) {
     };
     let started = std::time::Instant::now();
     for i in 0..steps {
-        time::enter_fixed_step(world, i);
+        // A step the budget will end on is told so as it begins (`FixedTime::is_last_step`),
+        // and the loop keeps to that.
+        let elapsed = budget.map(|_| started.elapsed().as_secs_f64());
+        let last = world.resource::<FixedTime>().plan_last(i, elapsed);
+        time::enter_fixed_step(world, i, last);
+        let step_started = std::time::Instant::now();
         world.run_schedule(FixedPreUpdate);
         world.run_schedule(FixedUpdate);
         world.run_schedule(FixedPostUpdate);
-        if i + 1 < steps && budget.is_some_and(|b| started.elapsed() >= b) {
+        if budget.is_some() && !last {
+            let secs = step_started.elapsed().as_secs_f64();
+            world.resource_mut::<FixedTime>().observe_step_cost(secs);
+        }
+        if i + 1 < steps && (last || budget.is_some_and(|b| started.elapsed() >= b)) {
             world.resource_mut::<FixedTime>().stop_early(i + 1);
             break;
         }

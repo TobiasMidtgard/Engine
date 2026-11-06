@@ -206,6 +206,8 @@ pub struct FixedTime {
     budget_secs: f64,
     steps: u32,
     current_step: u32,
+    last_step: bool,
+    step_cost_secs: f64,
     world_step: f64,
     alpha: f32,
     tick: u64,
@@ -226,6 +228,8 @@ impl Default for FixedTime {
                 .map_or(1.0 / 30.0, |ms| (ms / 1000.0).max(0.0)),
             steps: 0,
             current_step: 0,
+            last_step: false,
+            step_cost_secs: 0.0,
             world_step: 1.0 / 60.0,
             alpha: 0.0,
             tick: 0,
@@ -272,6 +276,32 @@ impl FixedTime {
     /// Index of the step currently running this frame.
     pub fn current_step(&self) -> u32 {
         self.current_step
+    }
+
+    /// Whether the step running now is this frame's last: the last one due, or the last the
+    /// [step budget](Self::step_budget_secs) allows, as the frame loop decides when the step
+    /// begins (the time spent so far plus what a step has cost lately would reach the
+    /// budget). The loop stops after a step it calls last, so a system can hand work to run
+    /// beside the rest of the frame (`PhysicsSettings::overlap_frame`) without a later step
+    /// in this frame needing it first.
+    pub fn is_last_step(&self) -> bool {
+        self.last_step
+    }
+
+    /// Whether step `index` of this frame will be its last, `elapsed` real seconds into the
+    /// frame's steps (`None` when the budget doesn't apply).
+    pub(crate) fn plan_last(&self, index: u32, elapsed: Option<f64>) -> bool {
+        index + 1 >= self.steps
+            || elapsed.is_some_and(|e| e + self.step_cost_secs >= self.budget_secs)
+    }
+
+    /// What a step that wasn't the frame's last took (real seconds), for [`Self::plan_last`].
+    pub(crate) fn observe_step_cost(&mut self, secs: f64) {
+        self.step_cost_secs = if self.step_cost_secs == 0.0 {
+            secs
+        } else {
+            self.step_cost_secs + (secs - self.step_cost_secs) * 0.25
+        };
     }
 
     /// Cap on steps per frame (protects against the "spiral of death" after a long hitch).
@@ -538,10 +568,11 @@ pub fn time_system(
 }
 
 /// Switch [`Time`] into fixed-step context. Called by the frame loop.
-pub(crate) fn enter_fixed_step(world: &mut World, index: u32) {
+pub(crate) fn enter_fixed_step(world: &mut World, index: u32, last: bool) {
     let (real, world_step) = {
         let mut fixed = world.resource_mut::<FixedTime>();
         fixed.current_step = index;
+        fixed.last_step = last;
         fixed.tick += 1;
         (fixed.step_real_secs(), fixed.world_step)
     };
@@ -665,6 +696,57 @@ mod tests {
         // All but that step and what is left toward the next: about 0.18 s the world lost.
         let lost = fixed.dropped_secs();
         assert!((0.15..0.2).contains(&lost), "dropped {lost} s");
+    }
+
+    #[test]
+    fn the_step_the_budget_ends_on_knows_it_is_last() {
+        #[derive(Resource, Default)]
+        struct Lasts(Vec<bool>);
+        let mut app = App::new();
+        app.world
+            .resource_mut::<FixedTime>()
+            .set_step_budget_secs(0.0);
+        app.init_resource::<Lasts>()
+            .add_systems(FixedUpdate, |f: Res<FixedTime>, mut l: ResMut<Lasts>| {
+                l.0.push(f.is_last_step())
+            });
+        app.update();
+        app.world.resource_mut::<Lasts>().0.clear();
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        app.update();
+        // Several steps were due, but the budget allows one: it is the frame's last.
+        assert_eq!(app.world.resource::<Lasts>().0, vec![true]);
+    }
+
+    #[test]
+    fn a_step_is_planned_last_when_its_usual_cost_would_reach_the_budget() {
+        let mut fixed = FixedTime::default();
+        fixed.set_step_budget_secs(0.030);
+        fixed.steps = 5;
+        // Nothing measured yet: only the last one due.
+        assert!(!fixed.plan_last(0, Some(0.0)));
+        assert!(fixed.plan_last(4, None));
+        fixed.observe_step_cost(0.010);
+        assert!(!fixed.plan_last(1, Some(0.010)));
+        assert!(fixed.plan_last(2, Some(0.020)));
+        // Manual clocks (no budget): only the last one due.
+        assert!(!fixed.plan_last(2, None));
+    }
+
+    #[test]
+    fn with_a_manual_clock_only_the_last_due_step_is_last() {
+        #[derive(Resource, Default)]
+        struct Lasts(Vec<bool>);
+        let mut app = manual_app(0.1);
+        app.init_resource::<Lasts>()
+            .add_systems(FixedUpdate, |f: Res<FixedTime>, mut l: ResMut<Lasts>| {
+                l.0.push(f.is_last_step())
+            });
+        app.update();
+        let lasts = &app.world.resource::<Lasts>().0;
+        assert_eq!(lasts.len(), 6);
+        assert_eq!(lasts.iter().filter(|l| **l).count(), 1);
+        assert!(lasts[5]);
     }
 
     #[test]
