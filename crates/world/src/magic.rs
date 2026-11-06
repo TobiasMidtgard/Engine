@@ -124,3 +124,22 @@ pub struct Statuses {
     /// Dread (fear), 0..1.
     pub dread: f32,
 }
+
+/// Present while a module draws and sounds spells from [`SpellLook`], [`SpellCue`] and
+/// [`Statuses`] (see [`draws_spell_looks`]); magic then stops its own stand-ins, so nothing is
+/// drawn twice. Check for it when systems run, not in `Plugin::build`, since the drawing plugin
+/// may be added later.
+#[derive(Resource, Debug, Clone, Serialize, Deserialize)]
+pub struct SpellLookDrawer {
+    pub drawn_by: String,
+}
+
+/// Call from an effects plugin's `build` once it draws [`SpellLook`], [`SpellCue`] and
+/// [`Statuses`].
+pub fn draws_spell_looks(app: &mut App, name: &str) {
+    if app.world.get_resource::<SpellLookDrawer>().is_none() {
+        app.insert_resource(SpellLookDrawer {
+            drawn_by: name.to_string(),
+        });
+    }
+}

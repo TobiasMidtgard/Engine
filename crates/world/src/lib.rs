@@ -70,7 +70,9 @@ pub use locomotion::{
     ClimbLine, Climbable, EngineKind, EngineState, Exhaust, ExhaustEffects, ExhaustKind, Exhausts,
     LocomotionMode, LocomotionState, MoveIntent, VehicleControls, WheelContact, WheelContacts,
 };
-pub use magic::{SpellCue, SpellLook, SpellMark, SpellRole, Statuses};
+pub use magic::{
+    SpellCue, SpellLook, SpellLookDrawer, SpellMark, SpellRole, Statuses, draws_spell_looks,
+};
 pub use physical::*;
 pub use scalability::{QualityPreset, Scalability};
 pub use shift::{FollowsWorldShift, SurfaceMoved, WorldShift, WorldShiftAppExt, WorldShiftSet};
