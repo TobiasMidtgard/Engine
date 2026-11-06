@@ -51,6 +51,8 @@ pub const SHADER_DEBRIS_COMMON: &str = include_str!("shaders/debris_common.wgsl"
 pub const SHADER_DEBRIS: &str = include_str!("shaders/debris.wgsl");
 /// Debris in the shadow cascades (`vs_debris_shadow`).
 pub const SHADER_DEBRIS_SHADOW: &str = include_str!("shaders/debris_shadow.wgsl");
+/// Smoke and dust in the shadow cascades (`vs_particle_shadow`, stochastic coverage).
+pub const SHADER_PARTICLE_SHADOW: &str = include_str!("shaders/particles_shadow.wgsl");
 /// Simulation kernels (`cs_update`, `cs_spawn`).
 pub const SHADER_SIM: &str = include_str!("shaders/particles_sim.wgsl");
 /// Particle sprites (`vs_particle`, `fs_particle`).
@@ -90,6 +92,23 @@ struct GpuSortJob {
 const DEBRIS_SHADOW_CASCADES: usize = 2;
 /// Farthest debris casts shadows from, meters.
 const DEBRIS_SHADOW_DISTANCE: f32 = 60.0;
+/// Nearest shadow cascades smoke and dust cast into.
+const PARTICLE_SHADOW_CASCADES: usize = 3;
+/// Farthest smoke and dust cast shadows from, meters.
+const PARTICLE_SHADOW_DISTANCE: f32 = 120.0;
+/// Most particle slots drawn into each shadow cascade per frame (nearest layers first), which
+/// bounds the fill a big smoke cloud can cost.
+const PARTICLE_SHADOW_SLOTS: u32 = 120_000;
+
+/// Whether a layer's particles cast stochastic shadows: lit, alpha-blended smoke and dust
+/// (not glows, flames, sparks, haze or water, which let the light through or give it off).
+fn casts_particle_shadow(e: &GpuEmitter) -> bool {
+    let sprite = e.spin_look[2];
+    let matter = sprite == Sprite::Smoke.code()
+        || sprite == Sprite::Dust.code()
+        || sprite == Sprite::Billow.code();
+    matter && e.shade[1] > 0.5 && e.shade[2] < 0.5 && e.look[3] > 0.0
+}
 
 const PARTICLE_BYTES: u64 = std::mem::size_of::<GpuParticle>() as u64;
 const INITIAL_SLOTS: u32 = 1 << 16;
@@ -123,6 +142,7 @@ struct Gpu {
     debris: wgpu::RenderPipeline,
     debris_prepass: wgpu::RenderPipeline,
     debris_shadow: wgpu::RenderPipeline,
+    particle_shadow: wgpu::RenderPipeline,
     sim_layout: wgpu::BindGroupLayout,
     sort_layout: wgpu::BindGroupLayout,
     draw_layout: wgpu::BindGroupLayout,
@@ -172,6 +192,8 @@ pub struct ParticleFeature {
     debris_draws: Vec<(u32, u32)>,
     /// Debris layers near enough to cast shadows: first slot, slot count.
     debris_shadows: Vec<(u32, u32)>,
+    /// Smoke and dust layers that cast shadows, nearest first: distance, first slot, slot count.
+    particle_shadows: Vec<(f32, u32, u32)>,
     /// Most sub-emitter events this frame (bounds the `cs_sub_spawn` dispatch).
     sub_events: u32,
     ribbon_vertices: Vec<RibbonVertex>,
@@ -554,6 +576,38 @@ impl RenderFeature for ParticleFeature {
             multiview_mask: None,
             cache: None,
         });
+        // Smoke and dust: stochastic coverage into the cascades (shares the debris buffers).
+        let particle_shadow_shader = gpu.shader(
+            "vfx particle shadow",
+            &debris_shader(SHADER_PARTICLE_SHADOW),
+            false,
+        );
+        let particle_shadow = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("vfx particle shadow"),
+            layout: Some(&debris_shadow_layout),
+            vertex: wgpu::VertexState {
+                module: &particle_shadow_shader,
+                entry_point: Some("vs_particle_shadow"),
+                compilation_options: Default::default(),
+                buffers: &[],
+            },
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleStrip,
+                cull_mode: None,
+                unclipped_depth: gpu.features.contains(wgpu::Features::DEPTH_CLIP_CONTROL),
+                ..Default::default()
+            },
+            depth_stencil: Some(gpu.shadow_depth_state()),
+            multisample: Default::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &particle_shadow_shader,
+                entry_point: Some("fs_particle_shadow"),
+                compilation_options: Default::default(),
+                targets: &[],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
         let piece_vertices = debris::pieces();
         let pieces = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("vfx debris pieces"),
@@ -588,6 +642,7 @@ impl RenderFeature for ParticleFeature {
             debris,
             debris_prepass,
             debris_shadow,
+            particle_shadow,
             sim_layout,
             sort_layout,
             draw_layout,
@@ -770,6 +825,7 @@ impl RenderFeature for ParticleFeature {
         self.sort_jobs.clear();
         self.debris_draws.clear();
         self.debris_shadows.clear();
+        self.particle_shadows.clear();
         self.skipped = 0;
         self.sub_events = 0;
         let max_draw = settings.draw_distance.max(1.0);
@@ -868,6 +924,14 @@ impl RenderFeature for ParticleFeature {
             if solid && rel.length() - reach < DEBRIS_SHADOW_DISTANCE {
                 self.debris_shadows.push((base, len));
             }
+            // Off-screen smoke still shadows what is on screen, so no frustum test here.
+            if !solid
+                && settings.particle_shadows
+                && casts_particle_shadow(&e)
+                && rel.length() - reach < PARTICLE_SHADOW_DISTANCE
+            {
+                self.particle_shadows.push((rel.length(), base, len));
+            }
             if rel.length() - reach > max_draw || !view.frustum.intersects_sphere(rel, reach) {
                 self.stats.culled += 1;
                 continue;
@@ -891,6 +955,7 @@ impl RenderFeature for ParticleFeature {
         }
         // Far to near, so nearer effects blend over farther ones.
         self.draws.sort_by(|a, b| b.0.total_cmp(&a.0));
+        self.particle_shadows.sort_by(|a, b| a.0.total_cmp(&b.0));
         self.cleared.clear();
         self.cleared
             .extend(frame.cleared.iter().filter(|r| r.end() <= g.slots).copied());
@@ -1156,8 +1221,28 @@ impl RenderFeature for ParticleFeature {
     }
 
     fn draw_shadow(&self, pass: &mut wgpu::RenderPass<'_>, cascade: usize, _ctx: &FrameContext) {
-        if let (true, Some(g)) = (cascade < DEBRIS_SHADOW_CASCADES, &self.gpu) {
+        let Some(g) = &self.gpu else {
+            return;
+        };
+        if cascade < DEBRIS_SHADOW_CASCADES {
             self.draw_debris(pass, &g.debris_shadow, &self.debris_shadows);
+        }
+        if let (true, false, Some(group)) = (
+            cascade < PARTICLE_SHADOW_CASCADES,
+            self.particle_shadows.is_empty(),
+            &g.debris_group,
+        ) {
+            pass.set_pipeline(&g.particle_shadow);
+            pass.set_bind_group(1, group, &[]);
+            let mut budget = PARTICLE_SHADOW_SLOTS;
+            for &(_, base, len) in &self.particle_shadows {
+                let n = len.min(budget);
+                if n == 0 {
+                    break;
+                }
+                pass.draw(0..4, base..base + n);
+                budget -= n;
+            }
         }
     }
 
@@ -1215,6 +1300,7 @@ impl ParticleFeature {
         self.sort_jobs.clear();
         self.debris_draws.clear();
         self.debris_shadows.clear();
+        self.particle_shadows.clear();
     }
 
     fn fill_stats(&mut self) {
@@ -1276,6 +1362,8 @@ mod tests {
         // Shadow passes have their own group 0, so no frame bindings.
         let shadow = engine_render::compose_shader(&debris_shader(SHADER_DEBRIS_SHADOW), false);
         engine_render::validate_wgsl("debris_shadow", &shadow).unwrap();
+        let smoke = engine_render::compose_shader(&debris_shader(SHADER_PARTICLE_SHADOW), false);
+        engine_render::validate_wgsl("particles_shadow", &smoke).unwrap();
         let sort = engine_render::compose_shader(&format!("{SHADER_COMMON}\n{SHADER_SORT}"), false);
         engine_render::validate_wgsl("particles_sort", &sort).unwrap();
     }

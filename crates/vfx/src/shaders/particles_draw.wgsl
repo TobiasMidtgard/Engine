@@ -400,13 +400,26 @@ fn foam(c: vec2<f32>, r: f32, seed: f32, age: f32, pixels: f32) -> f32 {
 }
 
 // ---------------------------------------------------------------- sprites
-// Directional shading for a puff: a sphere normal roughened by the puff's noise, lit from the
-// sun's side. Averages about 1, so the overall light (sun, sky, lights) stays as computed.
+// Directional shading for a puff, as a ball of scattering medium (the cloud shader's model,
+// clouds.wgsl; engine-design/particles-lighting-research.md §4.3): sunlight reaching a point
+// fades with the depth of puff between it and the sun (Beer-Lambert), and a few octaves of
+// weaker extinction stand in for light scattered many times, so the shadow side stays soft
+// rather than black. Seen against the sun its thin rim lights up (a silver lining). The
+// puff's noise roughens the ball. Averages about 1, so the overall light (sun, sky, lights)
+// stays as computed.
 fn volume_shade(c: vec2<f32>, wobble: vec2<f32>, sun: vec3<f32>) -> f32 {
+    let k = length(sun);
+    if (k < 1e-3) { return 1.0; }
+    let l = sun / k;
+    let p = vec3<f32>(c + wobble * 0.6, 0.0);
+    let b = dot(p, l);
+    // Depth of puff toward the sun from the sprite's middle plane, in puff radii (0..2).
+    let depth = max(-b + sqrt(max(b * b - dot(p, p) + 1.0, 0.0)), 0.0);
+    let through = exp(-1.6 * depth) + 0.5 * exp(-0.5 * depth) + 0.25 * exp(-0.2 * depth);
+    let lit = 0.5 + 0.9 * (through / 1.75);
     let z = sqrt(max(1.0 - dot(c, c), 0.0));
-    let n = normalize(vec3<f32>(c + wobble, z * 0.8 + 0.2));
-    let ndl = dot(n, sun);
-    return 1.0 + 0.45 * ndl - 0.1 * length(sun);
+    let rim = sq(1.0 - z) * saturate(-l.z) * 0.5;
+    return mix(1.0, lit + rim, k);
 }
 
 // Temperature shading for flames: cool edges deepen and redden, hot cores whiten. Keeps the hue

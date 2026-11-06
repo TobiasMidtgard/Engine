@@ -1077,7 +1077,7 @@ fn blight_bolt() -> EffectDesc {
                     ]),
                     emissive: 30.0,
                     erode: 0.8,
-                    erode_glow: 600.0,
+                    erode_glow: 250.0,
                     ..smoke("fumes", 0.45, 0.4)
                 },
             ],
@@ -1164,7 +1164,7 @@ fn blight_impact() -> EffectDesc {
                     ]),
                     emissive: 30.0,
                     erode: 0.8,
-                    erode_glow: 600.0,
+                    erode_glow: 250.0,
                     ..smoke("cloud", 0.45, 0.5)
                 },
             ],
@@ -1220,7 +1220,7 @@ fn blight_area() -> EffectDesc {
                     emissive: 30.0,
                     wind: 0.3,
                     erode: 0.7,
-                    erode_glow: 600.0,
+                    erode_glow: 250.0,
                     ..smoke("miasma", 0.3, 0.5)
                 },
                 EmitterDesc {
