@@ -18,6 +18,7 @@
 //! | [`meet`] | spells that meet |
 //! | [`stone`] | Shaping: stone walls, pillars, steps and grips that are physics bodies |
 //! | [`looks`] | how spells look, through the particles module's API |
+//! | [`player`] | the player's spell bar: keys 1-8, camera aim, charge, channel, place, HUD |
 //! | [`api`] | `magic.*` |
 //! | [`demo`] | the Weaving hall |
 //!
@@ -37,6 +38,7 @@ pub mod growth;
 pub mod hits;
 pub mod looks;
 pub mod meet;
+pub mod player;
 pub mod runtime;
 pub mod schools;
 pub mod status;
@@ -87,10 +89,15 @@ impl Plugin for MagicPlugin {
             .init_resource::<runtime::MagicQueue>()
             .init_resource::<runtime::CastStarts>()
             .init_resource::<looks::LookLibrary>()
+            .init_resource::<player::PlayerMagic>()
             .register_component::<MagicCaster>(
                 "Someone who can cast: mana, level (power), skill per subclass, corruption, \
                  grimoire (spells with growth paths), selected spell, side, hand position. \
                  magic.caster reads and sets it.",
+            )
+            .register_component::<player::SpellBar>(
+                "The player's spell bar: the grimoire spell on each of eight slots (keys 1-8), \
+                 each slot's cooldown and its total.",
             )
             .register_component::<Vitality>(
                 "Health for things only magic keeps health for (practice dummies, blood-price \
@@ -107,11 +114,24 @@ impl Plugin for MagicPlugin {
                 FixedUpdate,
                 (
                     runtime::regen_mana,
+                    player::drive_spell_bars,
                     runtime::begin_casts,
                     runtime::advance_casts,
+                    player::flash_refused,
                 )
                     .chain()
                     .in_set(MagicSet::Cast),
+            )
+            .add_systems(Startup, player::bind_actions)
+            .add_systems(
+                Update,
+                (
+                    player::equip_player,
+                    player::read_spell_keys,
+                    player::show_place_rings,
+                    player::write_hud,
+                )
+                    .chain(),
             )
             .add_systems(
                 FixedUpdate,

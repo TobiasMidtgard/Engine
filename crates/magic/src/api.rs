@@ -230,6 +230,7 @@ pub fn register(app: &mut App) {
                 spell,
                 aim,
                 charge,
+                gathered: false,
             });
             Ok(json!({ "queued": true }))
         },

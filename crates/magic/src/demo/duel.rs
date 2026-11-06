@@ -704,6 +704,7 @@ pub fn run_duel(
             spell: SpellChoice::Design(spell),
             aim,
             charge: 0.0,
+            gathered: false,
         });
     }
 }

@@ -15,6 +15,7 @@
 //! | `spells_dark` | the dark subclasses: blood, rot clouds, shadow orbs, a draining beam, plague, doom |
 //! | `spells_duel` | six Adept students against three Ascended masters, chasing reactions and moving between casts ([`duel`]) |
 //! | `spells_shaping` | stone that is really there: a wall bolts burst on, pillars lifting a dummy and a crate stack, a stone grip, steps, a frost wall beside a stone one |
+//! | `spells_player` | the player's spell bar over the shoulder: charge, place, chain, channel, with the HUD hotbar and mana ([`player`]) |
 //!
 //! The mages wear hooded robes coloured by mastery (the character contract's `Appearance`).
 //!
@@ -22,6 +23,7 @@
 
 pub mod art;
 pub mod duel;
+pub mod player;
 
 use engine_core::prelude::*;
 use engine_render::{Camera, MeshRenderer};
@@ -129,6 +131,17 @@ pub const VIEWS: &[DemoView] = &[
         // each stone wall.
         warmup: 3.1,
     },
+    DemoView {
+        key: "spells_player",
+        name: "The player's spell bar: charge, place, chain, channel, with the HUD",
+        // Over the weaver's right shoulder, the crosshair on the dummy its fireball is for.
+        eye: [1.6, 2.2, 7.3],
+        target: [-3.0, 1.4, -11.0],
+        hour: 16.9,
+        // The flame jet held on the dummy, a pillar standing, a frost wall up, two slots
+        // cooling and the mana bar draining.
+        warmup: 6.0,
+    },
 ];
 
 /// What the hall is running.
@@ -145,10 +158,11 @@ pub enum Program {
     Dark,
     Duel,
     Shaping,
+    Player,
 }
 
 impl Program {
-    pub const ALL: [Program; 9] = [
+    pub const ALL: [Program; 10] = [
         Program::Mastery,
         Program::Elements,
         Program::Combos,
@@ -158,6 +172,7 @@ impl Program {
         Program::Dark,
         Program::Duel,
         Program::Shaping,
+        Program::Player,
     ];
 
     pub fn key(self) -> &'static str {
@@ -171,6 +186,7 @@ impl Program {
             Program::Dark => "spells_dark",
             Program::Duel => "spells_duel",
             Program::Shaping => "spells_shaping",
+            Program::Player => "spells_player",
         }
     }
 
@@ -192,6 +208,7 @@ impl Program {
             // Every stone is down again before the next period (pillars: 1.8 s up, 4.5 s
             // standing, 1.2 s down), so the props reset onto bare floor.
             Program::Shaping => 7.0,
+            Program::Player => player::PERIOD,
         }
     }
 
@@ -496,6 +513,13 @@ fn lanes(program: Program, cycle: u64) -> Vec<Lane> {
                 casts: Vec::new(),
             })
             .collect(),
+        // The hall's mages watch while the weaver works its spell bar (player::script_weaver).
+        Program::Player => (0..LANES.len())
+            .map(|_| Lane {
+                casts: Vec::new(),
+                ..lane(SpellDesign::default())
+            })
+            .collect(),
     }
 }
 
@@ -617,13 +641,20 @@ fn setup_program(
         for e in &carriers {
             commands.entity(e).despawn();
         }
-        // A fresh floor: the last program's scorch, frost and blood marks go (vfx's marks;
-        // without vfx the call just fails).
+        // A fresh floor: the last program's scorch, frost and blood marks go (vfx's marks), and
+        // its ground fires and glowing coals go out. No water, so the floor stays dry for the
+        // next program's fire. Without vfx or fire the calls just fail.
         commands.queue(move |world: &mut World| {
+            let center = [origin.x, origin.y, origin.z - 3.0];
             let _ = engine_core::registry::call_api(
                 world,
                 "vfx.clear_marks",
-                json!({"center": [origin.x, origin.y, origin.z - 3.0], "radius_m": 26.0}),
+                json!({"center": center, "radius_m": 26.0}),
+            );
+            let _ = engine_core::registry::call_api(
+                world,
+                "fire.extinguish",
+                json!({"at": center, "radius": 26.0, "water_kg_m2": 0.0}),
             );
         });
         hall.t = 0.0;
@@ -894,6 +925,7 @@ fn run_hall(
                 spell,
                 aim,
                 charge: 0.0,
+                gathered: false,
             });
         }
     }
@@ -939,7 +971,11 @@ fn duel_readout(
 pub fn build(app: &mut App) {
     app.add_systems(
         FixedUpdate,
-        (run_hall, (duel::duel_footwork, duel::run_duel).chain())
+        (
+            run_hall,
+            (duel::duel_footwork, duel::run_duel).chain(),
+            player::script_weaver,
+        )
             .in_set(SimSet::Gameplay)
             .before(crate::MagicSet::Cast),
     )
@@ -947,6 +983,8 @@ pub fn build(app: &mut App) {
         Update,
         (
             setup_program,
+            player::keep_weaver,
+            player::weaver_quest,
             hide_stand_ins,
             duel::limp_when_down,
             duel_readout.before(show_readout),
@@ -956,7 +994,8 @@ pub fn build(app: &mut App) {
     .register_api(
         "magic.demo",
         "Run a Weaving hall program: spells_mastery, spells_elements, spells_combos, \
-         spells_forms, spells_meet, spells_force, spells_dark, spells_duel or spells_shaping. \
+         spells_forms, spells_meet, spells_force, spells_dark, spells_duel, spells_shaping or \
+         spells_player. \
          With no program, lists them.",
         r#"{"program": "spells_combos"}"#,
         |world, args| {

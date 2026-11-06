@@ -302,6 +302,9 @@ pub struct CastRequest {
     pub aim: Aim,
     /// Charge 0..1 (spells with a Charge modifier); a held button would raise it.
     pub charge: f32,
+    /// The charge was already gathered (a held key on the spell bar): release after the
+    /// spell's plain cast time, not again for the charge.
+    pub gathered: bool,
 }
 
 /// A subclass reached a new mastery tier.

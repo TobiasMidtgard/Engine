@@ -176,6 +176,8 @@ pub struct BeamCast {
     pub next_tick: f32,
     pub end: DVec3,
     pub drawn: bool,
+    /// The age its look lasts until; a channel held past it draws again.
+    pub drawn_until: f32,
 }
 
 /// Lightning (or blood, or plague) jumping from body to body.
@@ -354,7 +356,11 @@ pub fn begin_casts(
             });
             continue;
         }
-        let release_at = spell.cast_secs * (1.0 + spell.charge_secs * r.charge.clamp(0.0, 1.0));
+        let release_at = if r.gathered {
+            spell.cast_secs.min(0.15)
+        } else {
+            spell.cast_secs * (1.0 + spell.charge_secs * r.charge.clamp(0.0, 1.0))
+        };
         attacks.write(AttackEvent {
             attacker: r.caster,
             target: match r.aim {
@@ -721,6 +727,7 @@ pub fn release(
                     next_tick: 0.0,
                     end: aim_point,
                     drawn: false,
+                    drawn_until: 0.0,
                 },
                 hand,
             ));
@@ -1468,15 +1475,24 @@ pub fn tick_beams(
         b.end = hit
             .map(|h| h.point)
             .unwrap_or(from + (dir * spell.carrier.range).as_dvec3());
-        if !b.drawn {
+        // Drawn once for its whole duration; a channel held past that (the spell bar keeps
+        // extending it) draws again every half second, from where the hand is now.
+        let held_on = b.duration > b.drawn_until + 0.1 && b.age + 0.05 >= b.drawn_until;
+        if !b.drawn || held_on {
+            let secs = if b.drawn {
+                0.5
+            } else {
+                (b.duration - b.age).max(0.1)
+            };
             b.drawn = true;
+            b.drawn_until = b.age + secs;
             queue.looks.push(LookCmd::Beam {
                 from,
                 to: b.end,
                 look: spell.weave.key.clone(),
                 color: spell.weave.color,
                 width: (spell.carrier.radius * 1.5).max(0.08),
-                secs: (b.duration - b.age).max(0.1),
+                secs,
             });
         }
         b.next_tick -= dt;

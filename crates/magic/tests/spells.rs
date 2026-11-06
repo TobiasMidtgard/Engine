@@ -222,6 +222,7 @@ fn cast(app: &mut App, caster: Entity, design: SpellDesign, aim: Aim) {
         spell: SpellChoice::Design(design),
         aim,
         charge: 0.0,
+        gathered: false,
     });
 }
 
@@ -768,4 +769,166 @@ fn a_status_look_grows_with_the_status() {
     let big = runtime::status_scale(Status::Burning, &high);
     assert!(small < 0.65 && (big - 1.2).abs() < 1e-4, "{small} {big}");
     assert_eq!(runtime::status_scale(Status::Frozen, &high), 1.0);
+}
+
+/// A weaver with the starter spell bar, driven by script (as a film or an AI would).
+fn weaver(app: &mut App, at: DVec3) -> Entity {
+    let mut c = MagicCaster {
+        mana_regen: 0.0,
+        ..MagicCaster::new(40.0, Mastery::Adept)
+    };
+    for (d, g) in engine_magic::player::starter_spells() {
+        c = c.learn(d, g);
+    }
+    app.world
+        .spawn((
+            Name::new("Weaver"),
+            Transform::from_translation(at),
+            c,
+            Vitality::new(100.0),
+            engine_magic::player::SpellBar::default(),
+            engine_magic::player::CastInput::default(),
+            engine_magic::player::ScriptedInput,
+        ))
+        .id()
+}
+
+fn aim_input(
+    app: &mut App,
+    who: Entity,
+    from: DVec3,
+    at: DVec3,
+    f: impl FnOnce(&mut engine_magic::player::CastInput),
+) {
+    let mut input = app
+        .world
+        .get_mut::<engine_magic::player::CastInput>(who)
+        .unwrap();
+    input.ray = Some((from, (at - from).as_vec3().normalize()));
+    f(&mut input);
+}
+
+#[test]
+fn the_spell_bar_charges_on_hold_and_pays_only_on_release() {
+    use engine_magic::player::SpellBar;
+    let mut app = app();
+    let me = weaver(&mut app, DVec3::ZERO);
+    let d = dummy(&mut app, DVec3::new(0.0, 0.0, -14.0));
+    run(&mut app, 0.1);
+    let eye = DVec3::new(0.5, 2.0, 3.0);
+    let target = DVec3::new(0.0, 1.0, -14.0);
+    let full = app.world.get::<MagicCaster>(me).unwrap().mana;
+    // Hold the fireball (slot 1): nothing is paid or cast while it charges.
+    aim_input(&mut app, me, eye, target, |i| i.press(0));
+    run(&mut app, 1.3);
+    assert_eq!(app.world.get::<MagicCaster>(me).unwrap().mana, full);
+    let bar = app.world.get::<SpellBar>(me).unwrap();
+    assert!(bar.held.is_some(), "still held");
+    assert_eq!(bar.cooldown[0], 0.0);
+    // The camera's sweep finds the dummy under the crosshair.
+    let p = bar.aim_point.expect("aimed");
+    assert!(p.z < -12.0 && p.z > -14.5, "{p:?}");
+    // Let go: it flies at full charge, costs mana and the slot cools down.
+    aim_input(&mut app, me, eye, target, |i| i.release(0));
+    run(&mut app, 2.0);
+    let c = app.world.get::<MagicCaster>(me).unwrap();
+    assert!(c.mana < full, "paid on release");
+    let bar = app.world.get::<SpellBar>(me).unwrap();
+    assert!(bar.held.is_none());
+    assert!(bar.cooldown_total[0] > 0.3, "{:?}", bar.cooldown_total);
+    let hits = hits_on(&app, d);
+    assert!(
+        !hits.is_empty(),
+        "the charged fireball lands where the crosshair was"
+    );
+    // A slot pressed while cooling down flashes and casts nothing.
+    let spent = app.world.get::<MagicCaster>(me).unwrap().mana;
+    let mut bar = app.world.get_mut::<SpellBar>(me).unwrap();
+    bar.cooldown[3] = 5.0;
+    aim_input(&mut app, me, eye, target, |i| i.press(3));
+    run(&mut app, 0.05);
+    assert!(
+        app.world.get::<SpellBar>(me).unwrap().flash[3] > 0.0,
+        "it flashes"
+    );
+    aim_input(&mut app, me, eye, target, |i| i.release(3));
+    run(&mut app, 0.5);
+    assert_eq!(app.world.get::<MagicCaster>(me).unwrap().mana, spent);
+}
+
+#[test]
+fn a_channelled_beam_lasts_while_the_key_is_held() {
+    use engine_magic::runtime::BeamCast;
+    let mut app = app();
+    let me = weaver(&mut app, DVec3::ZERO);
+    dummy(&mut app, DVec3::new(0.0, 0.0, -10.0));
+    run(&mut app, 0.1);
+    let eye = DVec3::new(0.5, 2.0, 3.0);
+    let target = DVec3::new(0.0, 1.0, -10.0);
+    let beams = |app: &mut App| app.world.query::<&BeamCast>().iter(&app.world).count();
+    // Slot 6 is the flame jet.
+    aim_input(&mut app, me, eye, target, |i| i.press(5));
+    run(&mut app, 1.0);
+    assert_eq!(beams(&mut app), 1, "the jet is out");
+    let natural = app
+        .world
+        .query::<&BeamCast>()
+        .iter(&app.world)
+        .next()
+        .unwrap()
+        .duration;
+    run(&mut app, natural + 1.5);
+    assert_eq!(beams(&mut app), 1, "held past its own {natural} s");
+    let before = app.world.get::<MagicCaster>(me).unwrap().mana;
+    run(&mut app, 0.5);
+    assert!(
+        app.world.get::<MagicCaster>(me).unwrap().mana < before,
+        "a channel drains mana"
+    );
+    // Its look is drawn again while held, so it doesn't vanish at its own duration.
+    let drawn = app
+        .world
+        .resource::<Seen>()
+        .cues
+        .iter()
+        .filter(|c| matches!(c, SpellCue::Beam { .. }))
+        .count();
+    assert!(drawn >= 3, "beam drawn {drawn} times");
+    aim_input(&mut app, me, eye, target, |i| i.release(5));
+    run(&mut app, 0.6);
+    assert_eq!(beams(&mut app), 0, "let go, it ends");
+}
+
+#[test]
+fn a_press_while_the_hands_are_busy_waits_for_them() {
+    use engine_magic::player::SpellBar;
+    let mut app = app();
+    let me = weaver(&mut app, DVec3::ZERO);
+    dummy(&mut app, DVec3::new(0.0, 0.0, -10.0));
+    run(&mut app, 0.1);
+    let eye = DVec3::new(0.5, 2.0, 3.0);
+    let target = DVec3::new(0.0, 1.0, -10.0);
+    // Chain lightning (slot 4), then the stone grip (slot 7) near the end of the lightning's
+    // gathering: the grip goes as soon as the lightning leaves.
+    aim_input(&mut app, me, eye, target, |i| i.press(3));
+    run(&mut app, 0.05);
+    aim_input(&mut app, me, eye, target, |i| i.release(3));
+    run(&mut app, 0.3);
+    aim_input(&mut app, me, eye, target, |i| i.press(6));
+    run(&mut app, 0.05);
+    aim_input(&mut app, me, eye, target, |i| i.release(6));
+    assert!(
+        app.world.get::<Casting>(me).is_some(),
+        "the lightning gathers"
+    );
+    let bar = app.world.get::<SpellBar>(me).unwrap();
+    assert!(bar.buffered.is_some(), "the grip waits");
+    assert_eq!(bar.cooldown_total[6], 0.0);
+    run(&mut app, 1.0);
+    let bar = app.world.get::<SpellBar>(me).unwrap();
+    assert!(
+        bar.cooldown_total[6] > 0.0,
+        "the grip went after the lightning"
+    );
+    assert_eq!(bar.flash[6], 0.0, "and never flashed");
 }
