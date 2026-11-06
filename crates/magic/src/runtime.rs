@@ -266,6 +266,8 @@ pub struct MagicQueue {
     pub minions: Vec<crate::summon::NewMinion>,
     /// Raises, for a fallen body near their aim first (undead.rs), else bones from the ground.
     pub raises: Vec<crate::summon::NewMinion>,
+    /// Domes and ward wall panels to put up (wards.rs).
+    pub barriers: Vec<crate::wards::NewBarrier>,
 }
 
 /// Bodies spells look for: anything with health, a skeleton or a character controller.
@@ -670,6 +672,14 @@ pub fn release(
             .push(pillar(spell, at, flat, info.seed as u64, info.scale));
         return;
     }
+    // A ward cast as an area is a dome, as a wall a row of panels (wards.rs); one that also
+    // heals still heals inside it.
+    if spell.payload.ward > 0.0 && matches!(spell.cast, CastType::Area | CastType::Wall) {
+        crate::wards::raise(info, aim_point, flat, queries, &exclude, queue);
+        if spell.payload.heal <= 0.0 {
+            return;
+        }
+    }
     match spell.cast {
         CastType::Bolt | CastType::Lob => {
             let n = c.count.max(1);
@@ -960,6 +970,10 @@ pub fn fly_missiles(
     mut queue: ResMut<MagicQueue>,
     mut traces: MessageWriter<ProjectileTrace>,
     factions: Option<Res<Factions>>,
+    (mut barriers, mut struck): (
+        Query<(Entity, &mut crate::wards::Barrier)>,
+        MessageWriter<crate::wards::WardStruck>,
+    ),
 ) {
     let factions = factions.as_deref();
     let dt = time.delta_secs();
@@ -1132,6 +1146,44 @@ pub fn fly_missiles(
             len,
             &filter,
         );
+        // A ward against it in the way first: it bursts on the ward's face (wards.rs).
+        let reach = hit.map_or(len, |h| h.distance);
+        if let Some((be, t, n)) =
+            crate::wards::barrier_in_way(barriers.iter(), &m.cast, from, dir, reach, factions)
+            && let Ok((_, mut b)) = barriers.get_mut(be)
+        {
+            let at = from + (dir * t).as_dvec3();
+            let (taken, share, broke) =
+                b.strike(spell.payload.damage * m.cast.scale, spell.element());
+            struck.write(crate::wards::WardStruck {
+                ward: be,
+                barrier: true,
+                point: at,
+                dir,
+                taken,
+                share,
+                broke,
+            });
+            queue.looks.push(LookCmd::Burst {
+                at,
+                up: n,
+                look: spell.weave.key.clone(),
+                role: Role::Impact,
+                scale: (c.radius / 0.16).clamp(0.5, 2.5),
+                color: spell.weave.color,
+            });
+            traces.write(ProjectileTrace {
+                from,
+                to: at,
+                radius: c.radius * 2.0,
+                speed: m.vel.length(),
+                shooter: m.cast.caster,
+            });
+            sp.pos = at;
+            sp.up = dir;
+            spend(&mut m, e, &mut queue);
+            continue;
+        }
         let to = hit
             .map(|h| from + (dir * h.distance).as_dvec3())
             .unwrap_or(from + step.as_dvec3());
@@ -1491,7 +1543,13 @@ pub fn tick_beams(
     bodies: Query<&RigidBody>,
     mut hits: ResMut<HitQueue>,
     mut queue: ResMut<MagicQueue>,
+    (mut barriers, mut struck, factions): (
+        Query<(Entity, &mut crate::wards::Barrier)>,
+        MessageWriter<crate::wards::WardStruck>,
+        Option<Res<Factions>>,
+    ),
 ) {
+    let factions = factions.as_deref();
     let dt = time.delta_secs();
     for (e, mut b, mut sp) in &mut beams {
         b.age += dt;
@@ -1593,9 +1651,22 @@ pub fn tick_beams(
             .map(QueryFilter::excluding)
             .unwrap_or_default();
         let hit = queries.raycast(from, dir, spell.carrier.range, &filter);
-        b.end = hit
-            .map(|h| h.point)
-            .unwrap_or(from + (dir * spell.carrier.range).as_dvec3());
+        // A ward against it in the way stops it at its face and drains on every tick.
+        let ward = crate::wards::barrier_in_way(
+            barriers.iter(),
+            &b.cast,
+            from,
+            dir,
+            hit.map_or(spell.carrier.range, |h| h.distance),
+            factions,
+        );
+        let hit = if ward.is_some() { None } else { hit };
+        b.end = match ward {
+            Some((_, t, _)) => from + (dir * t).as_dvec3(),
+            None => hit
+                .map(|h| h.point)
+                .unwrap_or(from + (dir * spell.carrier.range).as_dvec3()),
+        };
         // Drawn once for its whole duration; a channel held past that (the spell bar keeps
         // extending it) draws again every half second, from where the hand is now.
         let held_on = b.duration > b.drawn_until + 0.1 && b.age + 0.05 >= b.drawn_until;
@@ -1619,6 +1690,21 @@ pub fn tick_beams(
         b.next_tick -= dt;
         if b.next_tick <= 0.0 {
             b.next_tick += spell.carrier.tick.max(0.05);
+            if let Some((be, _, _)) = ward
+                && let Ok((_, mut w)) = barriers.get_mut(be)
+            {
+                let (taken, share, broke) =
+                    w.strike(spell.payload.damage * b.cast.scale, spell.element());
+                struck.write(crate::wards::WardStruck {
+                    ward: be,
+                    barrier: true,
+                    point: b.end,
+                    dir,
+                    taken,
+                    share,
+                    broke,
+                });
+            }
             if let Some(h) = hit {
                 hits.0.push(PendingHit {
                     cast: b.cast.clone(),

@@ -92,6 +92,9 @@ pub struct Payload {
     pub heal: f32,
     /// Shield that absorbs this much damage.
     pub ward: f32,
+    /// The element a ward is woven with (wards.rs): it soaks that element, takes double from its
+    /// opposite and pays back close blows. A ward's element types it rather than hurting.
+    pub ward_element: Option<Element>,
     /// Time scale factor and seconds.
     pub time: Option<(f32, f32)>,
     /// Blink distance, m.
@@ -396,9 +399,12 @@ fn compile_inner(
         1.0
     };
     let base = ctx.power.damage() * cast.strength() * strength;
-    let harm = defs
-        .iter()
-        .any(|d| matches!(d.kind, EffectKind::Harm { .. } | EffectKind::Drain));
+    // A ward woven with an element is a ward of that element, not a blow (wards.rs).
+    let warding = defs.iter().any(|d| matches!(d.kind, EffectKind::Ward));
+    let harm = !warding
+        && defs
+            .iter()
+            .any(|d| matches!(d.kind, EffectKind::Harm { .. } | EffectKind::Drain));
     let damage = if harm {
         base * if dark { 1.5 } else { 1.0 }
             * if unstable { 1.25 } else { 1.0 }
@@ -466,10 +472,11 @@ fn compile_inner(
         } else {
             0.0
         },
-        ward: if has(&|k| matches!(k, EffectKind::Ward)) {
-            base * 2.0
+        ward: if warding { base * 2.0 } else { 0.0 },
+        ward_element: if warding {
+            w.elements.first().copied()
         } else {
-            0.0
+            None
         },
         time,
         blink_m: if has(&|k| matches!(k, EffectKind::Blink { .. })) {
@@ -499,7 +506,7 @@ fn compile_inner(
         } else {
             0.0
         },
-        ignite_c: if fire {
+        ignite_c: if fire && !warding {
             (500.0 + 300.0 * size).min(1400.0)
         } else {
             0.0

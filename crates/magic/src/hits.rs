@@ -62,6 +62,7 @@ pub struct HitWriters<'w> {
     freeze: MessageWriter<'w, FreezeRequest>,
     growth: MessageWriter<'w, GrowthPulse>,
     mind: MessageWriter<'w, MindEffect>,
+    ward: MessageWriter<'w, crate::wards::WardStruck>,
 }
 
 /// What the hits may read about a body.
@@ -187,7 +188,10 @@ pub fn apply_hits(
                 aff.source = h.cast.caster;
             }
             let before = (aff.dread, aff.calmed, aff.veiled);
+            // A warded body's ward takes the blow, and with it the element (wards.rs).
+            let warded = aff.ward > 0.0 && base_damage > 0.0;
             if let Some(el) = spell.element()
+                && !warded
                 && !p.statuses.is_empty()
                 && aff.gate(el, h.multi)
             {
@@ -238,9 +242,11 @@ pub fn apply_hits(
             if p.time.is_some() {
                 aff.tempo = p.time.map(|(f, s)| (f, s * scale.max(0.5)));
             }
-            if p.ward > 0.0 {
-                aff.ward = aff.ward.max(p.ward * scale);
-                aff.ward_secs = 12.0;
+            // A shell comes from a single hit (a ward on yourself, a touch, a bolt); a ward cast
+            // as an area or a wall stands on its own (wards.rs), and a field's ticks don't
+            // shell what stands in it.
+            if p.ward > 0.0 && !h.multi {
+                aff.raise_ward(p.ward * scale, p.ward_element);
             }
             if p.veil_secs > 0.0 {
                 aff.veiled = aff.veiled.max(p.veil_secs);
@@ -307,10 +313,57 @@ pub fn apply_hits(
             && touches_life
             && damage > 0.0
         {
-            damage = match affs.get_mut(t) {
-                Ok(mut a) => a.absorb(damage),
-                Err(_) => fresh.entry(t).or_default().absorb(damage),
+            let aff: &mut Afflictions = match affs.get_mut(t) {
+                Ok(a) => a.into_inner(),
+                Err(_) => fresh.entry(t).or_default(),
             };
+            let had = aff.ward;
+            let ward_element = aff.ward_element;
+            let (left, taken) = aff.absorb_hit(damage, spell.element());
+            damage = left;
+            if had > 0.0 {
+                let full = aff.ward_full.max(1e-3);
+                out.ward.write(crate::wards::WardStruck {
+                    ward: t,
+                    barrier: false,
+                    point: h.point,
+                    dir: h.dir,
+                    taken,
+                    share: taken / full,
+                    broke: aff.ward <= 0.0,
+                });
+                // An elemental ward answers a blow from close by: fire burns, frost chills
+                // toward a freeze, storm shocks.
+                if let Some(el) = ward_element
+                    && let Some(att) = h.cast.caster
+                    && att != t
+                    && h.cast.depth == 0
+                    && let (Some(tp), Ok(ai)) = (t_pos, info.get(att))
+                    && let Some(ap) = ai.0.map(|g| g.translation())
+                    && ap.distance(tp) <= crate::wards::PAYBACK_M as f64
+                {
+                    staged.push(PendingHit {
+                        cast: CastInfo {
+                            spell: crate::wards::payback_spell(el),
+                            caster: Some(t),
+                            side: t_caster.map_or(h.cast.side.wrapping_add(1), |c| c.side),
+                            faction: t_faction.copied(),
+                            depth: 1,
+                            scale: 0.5,
+                            seed: h.cast.seed.wrapping_mul(31).wrapping_add(7),
+                            reaction: true,
+                        },
+                        target: Some(att),
+                        point: ap + DVec3::Y * 1.1,
+                        normal: -h.dir,
+                        dir: -h.dir,
+                        multi: false,
+                        impact: false,
+                        reacts: false,
+                        expire: false,
+                    });
+                }
+            }
         }
         let force = p.force.map(|(dir, imp)| {
             let caster_pos = h

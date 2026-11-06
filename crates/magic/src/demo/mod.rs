@@ -18,6 +18,7 @@
 //! | `spells_player` | the player's spell bar over the shoulder: charge, place, chain, channel, with the HUD hotbar and mana ([`player`]) |
 //! | `spells_summon` | summons and tethers: a stone golem and a lava golem walking to dummies and punching them, frost and storm elementals shooting, a wisp healing a wounded mage, a tether hauling a dummy in, then one snapping |
 //! | `spells_dead` | the dead rise: three necromancers raise skeleton warriors, a storm skeletal mage and a fallen student as a thrall against three students' golem, fire elemental and fire bolts |
+//! | `spells_ward` | wards you can see: a warden's dome over three students stops a fire barrage until it shatters, a frost shell takes fire double, a storm shell shocks the skeletons that strike it, then a ward wall goes up ([`crate::wards`]) |
 //! | `spells_craft` | the Spellcrafter at the altar: an Expert builds a returning frost glaive to 8 of 8, seek is refused, the crystal casts each change at a dummy, then it goes on key 3 and is cast from the bar ([`craft`]) |
 //!
 //! The mages wear hooded robes coloured by mastery (the character contract's `Appearance`).
@@ -184,6 +185,18 @@ pub const VIEWS: &[DemoView] = &[
         // The glaive at 8 of 8, seek just refused in red, the crystal's glaives in flight.
         warmup: 10.9,
     },
+    DemoView {
+        key: "spells_ward",
+        name: "Wards: a dome over three students under a fire barrage, frost and storm shells, then a ward wall",
+        // From the hall floor in front of the altar: the fire students' line of fire on the
+        // left, the dome over the three students filling the right, its near face where the
+        // bolts burst, then the ward wall slanting across beside the altar.
+        eye: [2.5, 4.0, -1.5],
+        target: [-4.5, 2.2, 9.0],
+        hour: 16.6,
+        // The dome cracked once, flares on its face, a skeleton at a shell.
+        warmup: 4.6,
+    },
 ];
 
 /// What the hall is running.
@@ -204,10 +217,11 @@ pub enum Program {
     Summon,
     Dead,
     Craft,
+    Ward,
 }
 
 impl Program {
-    pub const ALL: [Program; 13] = [
+    pub const ALL: [Program; 14] = [
         Program::Mastery,
         Program::Elements,
         Program::Combos,
@@ -221,6 +235,7 @@ impl Program {
         Program::Summon,
         Program::Dead,
         Program::Craft,
+        Program::Ward,
     ];
 
     pub fn key(self) -> &'static str {
@@ -238,6 +253,7 @@ impl Program {
             Program::Summon => "spells_summon",
             Program::Dead => "spells_dead",
             Program::Craft => "spells_craft",
+            Program::Ward => "spells_ward",
         }
     }
 
@@ -265,6 +281,9 @@ impl Program {
             // The dead last 9.6 s: the bones and the ash are gone before the next rising.
             Program::Dead => 13.0,
             Program::Craft => craft::PERIOD,
+            // The dome stands about 6 s under the barrage, the wall goes up after it, and both
+            // are gone before the next period's dome.
+            Program::Ward => 15.0,
         }
     }
 
@@ -288,6 +307,8 @@ enum AimAt {
     Floor(f64, f64),
     /// The nearest creature of another side, else the lane's focus.
     Foe,
+    /// The hall mage on that lane.
+    Mage(usize),
 }
 
 /// One cast in a lane's period.
@@ -711,6 +732,106 @@ fn lanes(program: Program, cycle: u64) -> Vec<Lane> {
                 ]),
             ]
         }
+        Program::Ward => {
+            let cast = |at: f32, design: SpellDesign, aim: AimAt| Cast {
+                at,
+                design: Some(design),
+                aim,
+            };
+            // As in spells_dead: everyone Ascended (no fizzles) at one level, students on the
+            // left plinths, necromancers on the right.
+            let lane_of = |casts: Vec<Cast>| Lane {
+                mastery: Mastery::Ascended1,
+                level: 60.0,
+                known: None,
+                casts,
+            };
+            let shell = |fx: &[&str], name: &str| d(fx, CastType::OnSelf).named(name);
+            let fire_bolt = || {
+                d(&["fire"], CastType::Bolt)
+                    .with(Modifier::Seek)
+                    .with(Modifier::Safeguard)
+                    .named("Fire bolt")
+            };
+            // Fire at the students: on the dome while it stands, then on the wall.
+            let barrage = |from: f32, every: f32, at_lane: usize| -> Vec<Cast> {
+                (0..)
+                    .map(|i| from + i as f32 * every)
+                    .take_while(|&at| at < WARD_BARRAGE_END)
+                    .map(|at| cast(at, fire_bolt(), AimAt::Mage(at_lane)))
+                    .collect()
+            };
+            vec![
+                // A frost shell: the barrage's fire costs it double, so it breaks first.
+                lane_of(vec![
+                    cast(0.4, shell(&["ward", "frost"], "Frost ward"), AimAt::Focus),
+                    cast(
+                        4.5,
+                        d(&["frost"], CastType::Bolt).named("Frost bolt"),
+                        AimAt::Foe,
+                    ),
+                    cast(
+                        9.5,
+                        d(&["frost"], CastType::Bolt).named("Frost bolt"),
+                        AimAt::Foe,
+                    ),
+                ]),
+                // The warden: a dome over the three of them, then a ward wall once it falls.
+                lane_of(vec![
+                    cast(
+                        0.1,
+                        d(&["ward"], CastType::Area)
+                            .with(Modifier::Size { factor: 1.6 })
+                            .named("Ward dome"),
+                        AimAt::Floor(WARD_DOME[0], WARD_DOME[1]),
+                    ),
+                    cast(
+                        WARD_WALL_AT,
+                        // Three panels, the length of the dais' depth.
+                        d(&["ward"], CastType::Wall)
+                            .with(Modifier::Size { factor: 0.53 })
+                            .named("Ward wall"),
+                        AimAt::Floor(WARD_WALL[0], WARD_WALL[1]),
+                    ),
+                ]),
+                // A storm shell, nearest the dead: what strikes it is shocked.
+                lane_of(vec![
+                    cast(0.6, shell(&["ward", "storm"], "Storm ward"), AimAt::Focus),
+                    cast(
+                        5.5,
+                        d(&["storm"], CastType::Bolt).named("Storm bolt"),
+                        AimAt::Foe,
+                    ),
+                ]),
+                // Two fire students (level 42: bolts about 0.4 of a level-60 one), so the dome
+                // takes a dozen flares before it shatters, around 7 s.
+                Lane {
+                    level: 42.0,
+                    ..lane_of(barrage(1.0, 0.9, 1))
+                },
+                Lane {
+                    level: 42.0,
+                    ..lane_of(barrage(1.45, 0.9, 0))
+                },
+                // Skeletons that walk through the dome and strike the shells.
+                lane_of(vec![
+                    cast(
+                        0.3,
+                        d(&["raise"], CastType::Summon)
+                            .with(Modifier::Duration { factor: 0.2 })
+                            .named("Raise skeleton"),
+                        AimAt::Floor(1.0, 6.5),
+                    ),
+                    cast(
+                        0.9,
+                        d(&["raise"], CastType::Summon)
+                            .with(Modifier::Duration { factor: 0.2 })
+                            .named("Raise skeleton"),
+                        AimAt::Floor(1.5, 9.0),
+                    ),
+                ]),
+            ]
+        }
         // The hall's mages watch while the weaver works its spell bar (player::script_weaver)
         // or the Spellcrafter (craft::script_crafter).
         Program::Player | Program::Craft => (0..LANES.len())
@@ -765,9 +886,22 @@ pub const NECROMANCERS: u32 = 3;
 /// More than 3 m from every plain raise of lanes 3 and 4, so only lane 5 raises it.
 pub const FALLEN: [f64; 2] = [7.5, 4.5];
 
+/// `spells_ward`: the dome over the students' plinths (x, z), the ward wall the warden raises
+/// once it falls, when, and when the necromancers' barrage stops.
+pub const WARD_DOME: [f64; 2] = [-9.0, 9.0];
+/// On the dais between the storm student and the altar (which stands at x 0).
+pub const WARD_WALL: [f64; 2] = [-1.3, 10.0];
+pub const WARD_WALL_AT: f32 = 8.2;
+pub const WARD_BARRAGE_END: f32 = 13.0;
+
+/// Programs with two armies: students on the left plinths, necromancers on the right.
+fn two_sides(program: Program) -> bool {
+    matches!(program, Program::Dead | Program::Ward)
+}
+
 /// The robes `spells_dead`'s students wear (green, blue, green), whatever they cast as.
 fn dead_robe(program: Program, lane: usize) -> Option<Mastery> {
-    (program == Program::Dead && lane < 3).then_some(if lane == 1 {
+    (two_sides(program) && lane < 3).then_some(if lane == 1 {
         Mastery::Apprentice
     } else {
         Mastery::Adept
@@ -873,6 +1007,10 @@ fn setup_program(
     let restart = hall.restart;
     hall.restart = false;
     hall.reset_props = false;
+    // Every period of spells_ward starts with no ward standing.
+    if !restart && hall.program == Program::Ward {
+        commands.queue(crate::wards::clear);
+    }
     let origin = hall.origin;
     // Fresh props: the force program's crates and loose dummies.
     for (e, _, _, _, prop) in &targets {
@@ -891,6 +1029,7 @@ fn setup_program(
         // A fresh floor: the last program's scorch, frost and blood marks go (vfx's marks), and
         // its ground fires and glowing coals go out. No water, so the floor stays dry for the
         // next program's fire. Without vfx or fire the calls just fail.
+        commands.queue(crate::wards::clear);
         commands.queue(move |world: &mut World| {
             let center = [origin.x, origin.y, origin.z - 3.0];
             let _ = engine_core::registry::call_api(
@@ -930,7 +1069,7 @@ fn setup_program(
                 duel::Duelist,
                 Ragdoll,
             )>();
-            c.side = if program == Program::Dead && m.lane >= 3 {
+            c.side = if two_sides(program) && m.lane >= 3 {
                 NECROMANCERS
             } else {
                 duel::STUDENTS
@@ -950,7 +1089,7 @@ fn setup_program(
             });
         }
         let side = (program == Program::Duel).then_some([0.1, 0.35, 0.9]);
-        let necromancer = program == Program::Dead && m.lane >= 3;
+        let necromancer = two_sides(program) && m.lane >= 3;
         let robe_tier = dead_robe(program, m.lane).unwrap_or(l.mastery);
         let want = if necromancer {
             necromancer_look(m.lane)
@@ -995,7 +1134,10 @@ fn setup_program(
         }
         // The duel's floor is clear of them, and the summons' far end too (its camera stands
         // there).
-        tf.translation = if matches!(program, Program::Duel | Program::Summon | Program::Dead) {
+        tf.translation = if matches!(
+            program,
+            Program::Duel | Program::Summon | Program::Dead | Program::Ward
+        ) {
             t.home - DVec3::Y * 40.0
         } else {
             t.home
@@ -1181,7 +1323,7 @@ fn run_hall(
     }
     if matches!(
         hall.program,
-        Program::Shaping | Program::Summon | Program::Dead
+        Program::Shaping | Program::Summon | Program::Dead | Program::Ward
     ) && hall.cycle != cycle
     {
         hall.reset_props = true;
@@ -1212,6 +1354,13 @@ fn run_hall(
                     )),
                 AimAt::Lane(z) => Aim::Point(hall.origin + DVec3::new(LANES[m.lane], FLOOR, z)),
                 AimAt::Floor(x, z) => Aim::Point(hall.origin + DVec3::new(x, FLOOR, z)),
+                AimAt::Mage(lane) => mages
+                    .iter()
+                    .find(|(_, m, _)| m.lane == lane)
+                    .map(|(e, _, _)| Aim::Entity(e))
+                    .unwrap_or(Aim::Point(
+                        hall.origin + DVec3::new(LANES[lane], FLOOR, MAGE_Z),
+                    )),
                 AimAt::Foe => {
                     let me = mage_at
                         .get(e)

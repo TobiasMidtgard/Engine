@@ -124,6 +124,7 @@ struct Seen {
     cues: Vec<SpellCue>,
     freezes: Vec<FreezeRequest>,
     died: Vec<Died>,
+    wards: Vec<wards::WardStruck>,
 }
 
 fn snapshot(scene: Res<SceneRes>, q: Query<(Entity, &GlobalTransform, &Body)>) {
@@ -148,7 +149,9 @@ fn collect(
     mut cues: MessageReader<SpellCue>,
     mut freezes: MessageReader<FreezeRequest>,
     mut died: MessageReader<Died>,
+    mut struck: MessageReader<wards::WardStruck>,
 ) {
+    seen.wards.extend(struck.read().copied());
     seen.cues.extend(cues.read().cloned());
     seen.freezes.extend(freezes.read().copied());
     seen.died.extend(died.read().copied());
@@ -1578,4 +1581,311 @@ fn the_dead_hall_raises_two_armies_that_meet() {
         .filter(|h| h.caster == Some(mages[0]) && h.target.is_some_and(|t| dead.contains(&t)))
         .count();
     assert!(bolts > 0, "lane 2's fire bolts never found the dead");
+}
+
+fn barriers(app: &mut App) -> Vec<(Entity, wards::Barrier)> {
+    let mut q = app.world.query::<(Entity, &wards::Barrier)>();
+    let mut v: Vec<_> = q.iter(&app.world).map(|(e, b)| (e, b.clone())).collect();
+    v.sort_by_key(|(e, _)| *e);
+    v
+}
+
+fn ward_of(app: &App, e: Entity) -> (f32, f32) {
+    app.world
+        .get::<status::Afflictions>(e)
+        .map_or((0.0, 0.0), |a| (a.ward, a.ward_lock))
+}
+
+fn shells(app: &mut App) -> usize {
+    let mut q = app.world.query::<&wards::WardShell>();
+    q.iter(&app.world).count()
+}
+
+#[test]
+fn a_frost_shell_soaks_frost_breaks_under_fire_and_locks_out() {
+    let mut app = app();
+    let me = mage(&mut app, DVec3::new(0.0, 0.0, 0.0), Mastery::Expert);
+    let foe = mage(&mut app, DVec3::new(0.0, 0.0, 14.0), Mastery::Expert);
+    app.world.get_mut::<MagicCaster>(foe).unwrap().side = 1;
+    app.world.entity_mut(me).insert(Body(0.5));
+    app.world.entity_mut(foe).insert(Body(0.5));
+    cast(
+        &mut app,
+        me,
+        SpellDesign::new(&["ward", "frost"], CastType::OnSelf),
+        Aim::Direction(Vec3::Y),
+    );
+    run(&mut app, 1.0);
+    let (pool, _) = ward_of(&app, me);
+    assert!(pool > 0.0, "the shell is up");
+    assert_eq!(shells(&mut app), 1);
+    let health = app.world.get::<Vitality>(me).unwrap().health;
+    // Frost on a frost ward: soaked, no chill, no harm.
+    cast(
+        &mut app,
+        foe,
+        SpellDesign::new(&["frost"], CastType::Bolt),
+        Aim::Entity(me),
+    );
+    run(&mut app, 1.2);
+    assert_eq!(ward_of(&app, me).0, pool, "frost soaked");
+    assert_eq!(app.world.get::<Vitality>(me).unwrap().health, health);
+    let aff = app.world.get::<status::Afflictions>(me).unwrap();
+    assert_eq!(aff.chill, 0.0, "the ward took the frost");
+    let seen = &app.world.resource::<Seen>().wards;
+    assert!(
+        seen.iter().any(|w| w.ward == me && w.taken == 0.0),
+        "the soak still flares"
+    );
+    // Fire costs it double. A deep pool first, so one bolt's cost can be read...
+    let fire_bolt = |app: &mut App| {
+        cast(
+            app,
+            foe,
+            SpellDesign::new(&["fire"], CastType::Bolt),
+            Aim::Entity(me),
+        );
+        run(app, 1.2);
+    };
+    let deepen = |app: &mut App, pool: f32| {
+        let mut aff = app.world.get_mut::<status::Afflictions>(me).unwrap();
+        aff.ward = pool;
+        aff.ward_full = pool;
+        aff.ward_secs = wards::SHELL_SECS;
+    };
+    deepen(&mut app, 1.0e4);
+    fire_bolt(&mut app);
+    let fire_cost = 1.0e4 - ward_of(&app, me).0;
+    assert!(fire_cost > 0.0);
+    // ...then a thin one: the next bolt breaks it.
+    deepen(&mut app, 1.0);
+    fire_bolt(&mut app);
+    let (left, lock) = ward_of(&app, me);
+    assert_eq!(left, 0.0, "fire broke the frost ward");
+    assert!(lock > 0.0, "a broken ward locks out");
+    let seen = &app.world.resource::<Seen>().wards;
+    assert!(seen.iter().any(|w| w.ward == me && w.broke));
+    run(&mut app, wards::FADE_SECS + 0.2);
+    assert_eq!(shells(&mut app), 0, "the shell shattered");
+    // Raised again at once: the lock holds it off.
+    cast(
+        &mut app,
+        me,
+        SpellDesign::new(&["ward", "frost"], CastType::OnSelf),
+        Aim::Direction(Vec3::Y),
+    );
+    run(&mut app, 0.8);
+    assert_eq!(ward_of(&app, me).0, 0.0);
+    // A plain ward takes the same bolt at its face value: half the frost ward's cost.
+    run(&mut app, wards::LOCK_SECS);
+    cast(
+        &mut app,
+        me,
+        SpellDesign::new(&["ward"], CastType::OnSelf),
+        Aim::Direction(Vec3::Y),
+    );
+    run(&mut app, 0.8);
+    assert!(ward_of(&app, me).0 > 0.0, "up again once the lock ran out");
+    deepen(&mut app, 1.0e4);
+    fire_bolt(&mut app);
+    let plain_cost = 1.0e4 - ward_of(&app, me).0;
+    assert!(
+        (fire_cost / plain_cost - 2.0).abs() < 0.05,
+        "{fire_cost} vs {plain_cost}"
+    );
+}
+
+#[test]
+fn a_dome_stops_enemy_bolts_lets_friends_through_and_shatters() {
+    let mut app = app();
+    let warden = mage(&mut app, DVec3::new(0.0, 0.0, 0.0), Mastery::Expert);
+    let friend = mage(&mut app, DVec3::new(3.0, 0.0, 16.0), Mastery::Expert);
+    let foe = mage(&mut app, DVec3::new(-3.0, 0.0, 16.0), Mastery::Expert);
+    app.world.get_mut::<MagicCaster>(foe).unwrap().side = 1;
+    for e in [warden, friend, foe] {
+        app.world.entity_mut(e).insert(Body(0.5));
+    }
+    let inside = dummy(&mut app, DVec3::new(1.5, 0.0, -1.0));
+    cast(
+        &mut app,
+        warden,
+        SpellDesign::new(&["ward"], CastType::Area),
+        Aim::Point(DVec3::ZERO),
+    );
+    run(&mut app, 0.6);
+    let domes = barriers(&mut app);
+    assert_eq!(domes.len(), 1);
+    let (dome, b) = domes[0].clone();
+    assert!(matches!(b.kind, wards::BarrierKind::Dome { .. }));
+    // The foe's bolt bursts on the dome's face; the warden is untouched.
+    cast(
+        &mut app,
+        foe,
+        SpellDesign::new(&["fire"], CastType::Bolt),
+        Aim::Entity(warden),
+    );
+    run(&mut app, 1.2);
+    assert!(hits_on(&app, warden).is_empty(), "the dome took it");
+    let w = app.world.get::<wards::Barrier>(dome).unwrap();
+    assert!(w.pool < w.full);
+    // The friend's bolt flies through to the dummy inside.
+    cast(
+        &mut app,
+        friend,
+        SpellDesign::new(&["fire"], CastType::Bolt),
+        Aim::Entity(inside),
+    );
+    run(&mut app, 1.2);
+    assert_eq!(hits_on(&app, inside).len(), 1, "friends' spells pass");
+    // Bolts until it breaks; then they reach the warden.
+    let mut volleys = 0;
+    while app.world.get::<wards::Barrier>(dome).is_some() && volleys < 40 {
+        cast(
+            &mut app,
+            foe,
+            SpellDesign::new(&["fire"], CastType::Bolt),
+            Aim::Entity(warden),
+        );
+        run(&mut app, 0.6);
+        volleys += 1;
+    }
+    assert!(app.world.get::<wards::Barrier>(dome).is_none(), "it broke");
+    assert!(
+        app.world
+            .resource::<Seen>()
+            .wards
+            .iter()
+            .any(|w| w.ward == dome && w.broke)
+    );
+    cast(
+        &mut app,
+        foe,
+        SpellDesign::new(&["fire"], CastType::Bolt),
+        Aim::Entity(warden),
+    );
+    run(&mut app, 1.2);
+    assert!(!hits_on(&app, warden).is_empty(), "nothing in the way now");
+}
+
+#[test]
+fn a_ward_wall_stands_in_panels_that_break_one_at_a_time() {
+    let mut app = app();
+    let warden = mage(&mut app, DVec3::new(0.0, 0.0, 0.0), Mastery::Expert);
+    let foe = mage(&mut app, DVec3::new(0.0, 0.0, 16.0), Mastery::Expert);
+    app.world.get_mut::<MagicCaster>(foe).unwrap().side = 1;
+    for e in [warden, foe] {
+        app.world.entity_mut(e).insert(Body(0.5));
+    }
+    cast(
+        &mut app,
+        warden,
+        SpellDesign::new(&["ward"], CastType::Wall),
+        Aim::Point(DVec3::new(0.0, 0.0, 6.0)),
+    );
+    run(&mut app, 0.6);
+    let panels = barriers(&mut app);
+    assert!(panels.len() >= 4, "{}", panels.len());
+    for _ in 0..30 {
+        if barriers(&mut app).len() < panels.len() {
+            break;
+        }
+        cast(
+            &mut app,
+            foe,
+            SpellDesign::new(&["fire"], CastType::Bolt),
+            Aim::Entity(warden),
+        );
+        run(&mut app, 0.6);
+    }
+    let left = barriers(&mut app);
+    assert_eq!(left.len(), panels.len() - 1, "one panel broke");
+    assert!(
+        left.iter().all(|(_, b)| b.pool == b.full),
+        "the rest are whole"
+    );
+}
+
+#[test]
+fn a_storm_ward_shocks_whoever_strikes_it_from_close() {
+    let mut app = app();
+    let me = mage(&mut app, DVec3::new(0.0, 0.0, 0.0), Mastery::Expert);
+    let foe = mage(&mut app, DVec3::new(0.0, 0.0, 1.8), Mastery::Expert);
+    app.world.get_mut::<MagicCaster>(foe).unwrap().side = 1;
+    for e in [me, foe] {
+        app.world.entity_mut(e).insert(Body(0.5));
+    }
+    cast(
+        &mut app,
+        me,
+        SpellDesign::new(&["ward", "storm"], CastType::OnSelf),
+        Aim::Direction(Vec3::Y),
+    );
+    run(&mut app, 1.0);
+    assert!(ward_of(&app, me).0 > 0.0);
+    cast(
+        &mut app,
+        foe,
+        SpellDesign::new(&["fire"], CastType::Touch),
+        Aim::Entity(me),
+    );
+    run(&mut app, 1.0);
+    let back = hits_on(&app, foe);
+    assert!(
+        back.iter()
+            .any(|h| h.caster == Some(me) && h.spell.element() == Some(schools::Element::Storm)),
+        "the ward answered with lightning: {back:?}"
+    );
+}
+
+#[test]
+fn the_ward_hall_holds_a_dome_until_it_shatters_then_raises_a_wall() {
+    let mut app = app();
+    {
+        let mut commands = app.world.commands();
+        demo::spawn_demo(&mut commands, DVec3::ZERO);
+    }
+    app.world.flush();
+    app.update();
+    {
+        let mut hall = app.world.resource_mut::<demo::Hall>();
+        hall.program = demo::Program::Ward;
+        hall.restart = true;
+    }
+    run(&mut app, 3.0);
+    let up = barriers(&mut app);
+    assert_eq!(up.len(), 1, "the warden's dome");
+    let (dome, b) = up[0].clone();
+    assert!(b.pool < b.full, "the barrage is landing on it");
+    let mut broke_at = None;
+    let mut t = 3.0;
+    while t < demo::WARD_WALL_AT {
+        run(&mut app, 0.25);
+        t += 0.25;
+        if broke_at.is_none() && app.world.get::<wards::Barrier>(dome).is_none() {
+            broke_at = Some(t);
+        }
+    }
+    let broke_at = broke_at.expect("the dome broke before the wall goes up");
+    assert!(broke_at > 4.0, "it held a while: {broke_at}");
+    run(&mut app, 1.0);
+    let panels = barriers(&mut app);
+    assert_eq!(panels.len(), 3, "the ward wall's three panels");
+    // All of them within the dais' depth (z 7.5 to 12.5), across the line of fire. (The
+    // stand-in physics has no dais; in the hall they stand on its top.)
+    for (_, b) in &panels {
+        let wards::BarrierKind::Panel { at, .. } = b.kind else {
+            panic!("a panel");
+        };
+        assert!((7.5..12.5).contains(&at.z), "{at}");
+    }
+    // Both shells went up.
+    let shelled = {
+        let mut q = app
+            .world
+            .query::<(&demo::art::HallMage, &status::Afflictions)>();
+        q.iter(&app.world)
+            .filter(|(m, a)| m.lane != 1 && a.ward_full > 0.0)
+            .count()
+    };
+    assert_eq!(shelled, 2, "frost and storm shells");
 }

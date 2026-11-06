@@ -52,6 +52,7 @@ pub mod summon;
 pub mod tether;
 pub mod undead;
 pub mod walls;
+pub mod wards;
 
 use engine_core::prelude::*;
 use engine_world::WorldShiftSet;
@@ -99,6 +100,8 @@ impl Plugin for MagicPlugin {
             .init_resource::<looks::LookLibrary>()
             .init_resource::<player::PlayerMagic>()
             .init_resource::<crafter::Crafter>()
+            .init_resource::<wards::WardMeshes>()
+            .add_message::<wards::WardStruck>()
             .add_message::<engine_world::interact::Interact>()
             .register_component::<MagicCaster>(
                 "Someone who can cast: mana, level (power), skill per subclass, corruption, \
@@ -174,6 +177,7 @@ impl Plugin for MagicPlugin {
                     hits::take_damage,
                     hits::recover,
                     status::tick_afflictions,
+                    wards::tend_wards,
                     runtime::follow_looks,
                     runtime::tend_pieces,
                     walls::rise_walls,
@@ -196,6 +200,7 @@ impl Plugin for MagicPlugin {
             );
         api::register(app);
         crafter::register(app);
+        wards::register(app);
         demo::build(app);
     }
 }

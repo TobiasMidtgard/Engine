@@ -103,6 +103,14 @@ pub struct Afflictions {
     /// Damage a ward will still absorb.
     pub ward: f32,
     pub ward_secs: f32,
+    /// The ward's pool when it went up (its cracks show the share left).
+    pub ward_full: f32,
+    /// The element the ward is woven with (it soaks it, takes double from its opposite).
+    pub ward_element: Option<Element>,
+    /// Seconds before a broken ward may go up again.
+    pub ward_lock: f32,
+    /// Damage took the last of the ward this step: its shell shatters (wards.rs clears it).
+    pub ward_broke: bool,
     /// Haste or slow: time factor and seconds left.
     pub tempo: Option<(f32, f32)>,
     /// Seconds left unseen.
@@ -329,12 +337,43 @@ impl Afflictions {
 
     /// Damage left after the ward takes its share.
     pub fn absorb(&mut self, damage: f32) -> f32 {
+        self.absorb_hit(damage, None).0
+    }
+
+    /// A hit of `damage` of `element` meets the ward: the damage that gets through and the
+    /// pool it cost. A ward soaks its own element and takes double from its opposite
+    /// (`wards::ward_cost`); a hit that takes the last of it breaks it, and what the pool could
+    /// not cover goes through.
+    pub fn absorb_hit(&mut self, damage: f32, element: Option<Element>) -> (f32, f32) {
         if self.ward <= 0.0 || damage <= 0.0 {
-            return damage;
+            return (damage, 0.0);
         }
-        let taken = self.ward.min(damage);
-        self.ward -= taken;
-        damage - taken
+        let cost = crate::wards::ward_cost(damage, element, self.ward_element);
+        if cost < self.ward {
+            self.ward -= cost;
+            return (0.0, cost);
+        }
+        let covered = self.ward / cost;
+        let taken = self.ward;
+        self.ward = 0.0;
+        self.ward_secs = 0.0;
+        self.ward_broke = true;
+        self.ward_lock = crate::wards::LOCK_SECS;
+        (damage * (1.0 - covered), taken)
+    }
+
+    /// Put up a ward of `pool` woven with `element`, unless a broken one still locks it out.
+    pub fn raise_ward(&mut self, pool: f32, element: Option<Element>) -> bool {
+        if self.ward_lock > 0.0 || pool <= 0.0 {
+            return false;
+        }
+        if pool >= self.ward || element != self.ward_element {
+            self.ward = pool;
+            self.ward_full = pool;
+            self.ward_element = element;
+        }
+        self.ward_secs = crate::wards::SHELL_SECS;
+        true
     }
 
     /// The time scale the statuses put on the body: frozen almost still, shocked stunned,
@@ -380,6 +419,7 @@ impl Afflictions {
                 self.ward = 0.0;
             }
         }
+        self.ward_lock = (self.ward_lock - dt).max(0.0);
         if let Some((f, s)) = self.tempo {
             self.tempo = (s - dt > 0.0).then_some((f, s - dt));
         }
