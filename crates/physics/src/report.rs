@@ -594,16 +594,23 @@ pub(crate) fn heavy_pairs(
         .contact_pairs()
         .map(|p| {
             let contacts: usize = p.manifolds().iter().map(|m| m.points.len()).sum();
+            // The deepest contact, with the sub-shapes it is between (a compound's part or a
+            // mesh's triangle, by index) and its world normal (from the first collider).
             let deepest = p
                 .manifolds()
                 .iter()
-                .flat_map(|m| m.points.iter())
-                .map(|c| -c.dist)
-                .fold(0.0f32, f32::max);
+                .flat_map(|m| m.points.iter().map(move |c| (-c.dist, m)))
+                .fold(
+                    (0.0f32, None),
+                    |best, (d, m)| {
+                        if d > best.0 { (d, Some(m)) } else { best }
+                    },
+                );
             (
                 p.manifolds().len(),
                 contacts,
-                deepest,
+                deepest.0,
+                deepest.1.map(|m| (m.subshape1, m.subshape2, m.data.normal)),
                 p.collider1,
                 p.collider2,
             )
@@ -639,9 +646,15 @@ pub(crate) fn heavy_pairs(
     heavy
         .into_iter()
         .take(n)
-        .map(|(m, k, d, a, b)| {
+        .map(|(m, k, d, deep, a, b)| {
+            let deepest = deep.map_or_else(String::new, |(s1, s2, n)| {
+                format!(
+                    ", parts {s1} and {s2}, normal {:.2} {:.2} {:.2}",
+                    n.x, n.y, n.z
+                )
+            });
             format!(
-                "{} on {} ({m} manifolds, {k} contacts, {d:.2} m deep)",
+                "{} on {} ({m} manifolds, {k} contacts, {d:.2} m deep{deepest})",
                 what(a),
                 what(b)
             )
