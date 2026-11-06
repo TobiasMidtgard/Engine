@@ -164,6 +164,35 @@ fn held(m: &Mover) -> String {
     s.join(" ")
 }
 
+/// Hanging from a band: shimmy along it to the nearest window column (the climbing route up
+/// the face), then climb.
+fn climb_column(m: &Mover, p: DVec3) -> Pad {
+    let Some(h) = m.hang else {
+        return Pad::default();
+    };
+    let n = h.normal;
+    let along = Vec3::new(-n.z, 0.0, n.x);
+    // The window columns of the face hung from, by its outward normal.
+    let near = city::BUILDINGS
+        .iter()
+        .flat_map(|b| {
+            (0..4).flat_map(move |f| city::windows(b, f).into_iter().map(move |w| (b, f, w)))
+        })
+        .filter(|(_, _, (_, wn))| wn.dot(n) > 0.9)
+        .map(|(b, f, (at, _))| match f {
+            0 | 1 => DVec3::new(if f == 0 { b.x[0] } else { b.x[1] }, p.y, at),
+            _ => DVec3::new(at, p.y, if f == 2 { b.z[0] } else { b.z[1] }),
+        })
+        .min_by(|a, b| (*a - p).length().total_cmp(&(*b - p).length()));
+    let off = near.map_or(0.0, |c| (c - p).as_vec3().dot(along));
+    if off.abs() > 0.15 {
+        let s = along * off.signum();
+        go(s.x, s.z).calm()
+    } else {
+        go(-n.x, -n.z).calm()
+    }
+}
+
 /// The next lamp along the street from `x` (its foot, from the quarter's origin).
 fn next_lamp(x: f64) -> Option<(f64, f64)> {
     city::LAMPS.into_iter().find(|&(lx, _)| lx > x + 1.0)
@@ -591,9 +620,10 @@ const CLIPS: &[Clip] = &[
         name: "fall_catch",
         start: [9.5, 14.0, 3.6],
         facing: [0.0, -1.0],
-        secs: 3.4,
+        secs: 6.0,
         script: |t, m, p| match t {
-            _ if m.hang.is_some() => Pad::default(),
+            // Caught: climb back up the face to the roof.
+            _ if m.hang.is_some() => climb_column(m, p),
             _ if m.grounded && t < 2.5 => go(0.0, -0.15).calm(),
             _ if p.y > 12.2 => Pad::default(),
             // Off the edge: back toward the face, reaching for it.
@@ -611,8 +641,11 @@ const CLIPS: &[Clip] = &[
         name: "wall_kicks",
         start: [-1.55, 0.0, 6.5],
         facing: [1.0, 0.0],
-        secs: 3.4,
-        script: |_, m, _| match m.runup {
+        secs: 6.0,
+        script: |_, m, p| match m.runup {
+            // Caught a band: climb on up to the roof, and stop there.
+            None if m.hang.is_some() => climb_column(m, p),
+            None if p.y > 8.0 && m.mode != engine_world::LocomotionMode::Air => Pad::default(),
             Some(r) if r.secs > 0.12 => go(-r.normal.x, 0.0).jump(),
             Some(r) => go(-r.normal.x, 0.0),
             // In the air: toward the wall it is flying at (the hands reach for a band on it).
@@ -641,7 +674,7 @@ const CLIPS: &[Clip] = &[
                 Pad::default()
             }
         },
-        camera: |_| (yaw_toward(-1.0, 0.6), 0.2, 5.5, 0.0),
+        camera: |_| (yaw_toward(0.0, 1.0), 0.0, 4.5, 0.0),
         before: false,
     },
 ];

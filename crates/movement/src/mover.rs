@@ -463,6 +463,9 @@ pub struct Mover {
     /// Since the last kick off a wall, s, and run-ups chained since touching the ground.
     #[serde(skip)]
     pub(crate) kick_secs: f32,
+    /// Which way the last kick sent the body (toward the next wall), unit.
+    #[serde(skip)]
+    pub(crate) kick_dir: Vec3,
     #[serde(skip)]
     pub(crate) runup_chain: u8,
     /// Crawling on hands and knees (a low tunnel), its speed, m/s.
@@ -570,6 +573,7 @@ impl Default for Mover {
             crouch_buffer: 0.0,
             wall_slide: 0.0,
             kick_secs: 99.0,
+            kick_dir: Vec3::ZERO,
             runup_chain: 0,
             crawl: None,
             takedown: None,

@@ -191,3 +191,27 @@ fn wall_kicks_climb_an_alley_wall_to_wall() {
     );
     assert!(peak > 4.5, "climbed the alley: {peak:.2}");
 }
+
+#[test]
+fn sliding_down_a_wall_catches_the_band_going_past() {
+    let mut app = app();
+    floor(&mut app);
+    // A wall (face at x = 0, toward −X) with a band 0.3 deep at 7 m.
+    block(
+        &mut app,
+        DVec3::new(3.0, 7.0, 0.0),
+        Vec3::new(6.0, 14.0, 10.0),
+    );
+    block(
+        &mut app,
+        DVec3::new(-0.15, 6.875, 0.0),
+        Vec3::new(0.3, 0.25, 10.0),
+    );
+    // Against it just above the band, facing it, dropping from rest.
+    let c = character(&mut app, DVec3::new(-0.66, 7.4, 0.0));
+    app.world.get_mut::<Mover>(c).unwrap().facing = Vec3::X;
+    run_until(&mut app, 1.5, |w| w.get::<Mover>(c).unwrap().hang.is_some());
+    let m = mover(&app, c);
+    let h = m.hang.expect("caught the band");
+    assert!((h.top.y - 7.0).abs() < 0.05, "{h:?}");
+}

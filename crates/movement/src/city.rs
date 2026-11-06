@@ -345,8 +345,8 @@ pub const CRAG: ([f64; 2], [f64; 2], f64) = ([-34.0, -32.0], [-16.0, -9.0], 9.0)
 /// The frozen waterfall north of it: ice to climb with picks, its face toward the square.
 pub const ICEFALL: ([f64; 2], [f64; 2], f64) = ([-34.0, -32.0], [8.0, 15.0], 10.0);
 
-/// The culvert: a stone mound with a tunnel through it along X to crawl through (x span,
-/// z span of the mound, the tunnel's z span and height).
+/// The culvert: a stone mound with a tunnel through it along X to crawl through, its south
+/// side on piers (x span, z span of the mound, the tunnel's z span and height).
 pub const CULVERT: ([f64; 2], [f64; 2], [f64; 2], f64) =
     ([-31.5, -28.5], [-8.0, -5.0], [-7.0, -6.0], 0.8);
 /// The mound's height, m.
@@ -431,10 +431,21 @@ fn acrobatics(out: &mut Vec<Piece>) {
     let ([x0, x1], [z0, z1], h) = ICEFALL;
     out.push(Piece::new([x0, 0.0, z0], [x1, h, z1], Kind::Ice));
     // The culvert: two walls and a slab over the tunnel.
-    let ([x0, x1], [z0, z1], [t0, t1], th) = CULVERT;
-    out.push(Piece::new([x0, 0.0, z0], [x1, th, t0], Kind::Stone));
+    let ([x0, x1], [_, z1], [t0, t1], th) = CULVERT;
+    // (The south side on piers, open between them: the crawl can be watched from the square.)
+    for x in [x0, (x0 + x1) * 0.5 - 0.2, x1 - 0.4] {
+        out.push(Piece::new(
+            [x, 0.0, t0 - 0.4],
+            [x + 0.4, th, t0],
+            Kind::Stone,
+        ));
+    }
     out.push(Piece::new([x0, 0.0, t1], [x1, th, z1], Kind::Stone));
-    out.push(Piece::new([x0, th, z0], [x1, CULVERT_TOP, z1], Kind::Stone));
+    out.push(Piece::new(
+        [x0, th, t0 - 0.4],
+        [x1, CULVERT_TOP, z1],
+        Kind::Stone,
+    ));
     // The oak's lower trunk (the rest of the tree is drawn, not collided with).
     let [x, _, z] = OAK;
     let half = OAK_TRUNK_WIDTH * 0.5;

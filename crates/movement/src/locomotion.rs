@@ -2341,7 +2341,10 @@ fn fall_catch(
     } else {
         &[right, -right, -m.facing]
     };
+    // (Just kicked off a wall: the one it flew at is in front, whatever the facing.)
+    let kicked = (m.kick_secs < 1.5).then_some(m.kick_dir);
     std::iter::once(m.facing)
+        .chain(kicked)
         .chain(around.iter().copied())
         .find_map(|dir| find_hang_within(p, b, probe, v, dir, reach))
 }
@@ -2814,8 +2817,8 @@ fn run_up(
             // Kick back off it (Titanfall's wall kick), toward a wall behind to run up next.
             m.jump_buffer = 0.0;
             m.kick_secs = 0.0;
-            // Turned round in the kick to face where it goes (the next wall).
-            m.facing = r.normal;
+            // Turned round in the kick toward where it goes (the next wall).
+            m.kick_dir = r.normal;
             out.trigger(b.entity, "wall_jump");
             out.impact(b.entity, ImpactKind::Kick, b.pos, r.normal, r.speed);
             return r.normal * p.wall_jump_push + up * p.jump_speed(p.wall_jump_height, b.g);
