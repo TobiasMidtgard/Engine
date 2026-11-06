@@ -1155,7 +1155,8 @@ impl Animator {
 
         // A discrete switch of state blends out of where the body was, keeping its motion.
         let key = state_key(input);
-        if key != self.key {
+        // (Into a vault its own blend carries the body over the top with the hand planted.)
+        if key != self.key && input.vault.is_none() {
             let was_air = self.key & KEY_GROUNDED == 0;
             let landing = was_air && key & KEY_GROUNDED != 0;
             let settling = matches!(input.mode, LocomotionMode::Idle) || input.trav.is_some();
@@ -1166,8 +1167,8 @@ impl Animator {
             } else {
                 0.12
             });
-            self.key = key;
         }
+        self.key = key;
         let on_foot = input.grounded
             && matches!(
                 input.mode,
@@ -1179,7 +1180,11 @@ impl Animator {
             );
         let locked = Locked {
             feet: on_foot,
-            hands: input.ladder.is_some() || matches!(input.trav, Some(TravAnim::Face { .. })),
+            // (Hands planted on something: a rung, a hold, a vault's top, a ledge.)
+            hands: input.ladder.is_some()
+                || input.vault.is_some()
+                || input.ledge.is_some()
+                || matches!(input.trav, Some(TravAnim::Face { .. })),
         };
         self.inertia.apply(&mut pose, locked, dt);
 

@@ -383,6 +383,8 @@ pub fn rock_holds(e: &Element, up: Vec3) -> Vec<Hold> {
     let mut out = Vec::with_capacity((cols * rows) as usize);
     // Two cracks running up the face: every row has a hold on them.
     let crack_x = [w * (0.25 + 0.1 * next()), w * (0.65 + 0.1 * next())];
+    // Columns that lost their hold in the row below (never two gaps running up a column).
+    let mut gap = vec![false; cols as usize + 1];
     for r in 0..=rows {
         for c in 0..=cols {
             let x = c as f32 * step + (next() - 0.5) * 0.22;
@@ -391,7 +393,9 @@ pub fn rock_holds(e: &Element, up: Vec3) -> Vec<Hold> {
                 continue;
             }
             // Thin out: the face isn't a ladder.
-            if next() < 0.18 {
+            let thin = next() < 0.18 && !gap[c as usize];
+            gap[c as usize] = thin;
+            if thin {
                 continue;
             }
             let kind = match next() {
