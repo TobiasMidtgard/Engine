@@ -24,6 +24,7 @@ use engine_core::prelude::*;
 use engine_world::physics::{Collider, RigidBody};
 
 use crate::climbrope::ClimbRope;
+use crate::traverse::{ElementKind, TraversalElement};
 use crate::zipline::Zipline;
 
 /// The name on every box of the quarter.
@@ -56,6 +57,16 @@ pub enum Kind {
     Zinc,
     /// Beams, posts, crates, the cart, the bridge's planks.
     Timber,
+    /// Lamp posts and the balcony's railing (black cast iron).
+    Iron,
+    /// The crag: weathered granite.
+    Rock,
+    /// The frozen waterfall.
+    Ice,
+    /// The climbing oak's trunk.
+    Bark,
+    /// The hay on the cart.
+    Hay,
 }
 
 /// A box of the quarter: center (from the quarter's origin) and full size, m.
@@ -271,7 +282,7 @@ pub fn pieces() -> Vec<Piece> {
         ([14.3, 1.2, -2.5], [15.3, 2.2, -1.5]),
         ([-12.5, 0.0, 1.6], [-11.3, 1.2, 2.8]),
         // The cart's bed (the look adds wheels and shafts).
-        ([-19.5, 0.6, -2.7], [-16.5, 1.3, -1.3]),
+        ([-19.5, 0.6, -1.7], [-16.5, 1.3, -0.3]),
     ] {
         out.push(Piece::new(min, max, Kind::Timber));
     }
@@ -279,6 +290,312 @@ pub fn pieces() -> Vec<Piece> {
         [-31.0, 0.0, 5.0],
         [-29.0, 0.9, 7.0],
         Kind::Stone,
+    ));
+    acrobatics(&mut out);
+    out
+}
+
+/// The lamp posts along the street, zig-zagging across it 3.5 m apart (lamp post to lamp
+/// post): each one's foot (x, z).
+pub const LAMPS: [(f64, f64); 6] = [
+    (-12.5, -1.7),
+    (-9.0, 1.7),
+    (-5.5, -1.7),
+    (-2.0, 1.7),
+    (1.5, -1.7),
+    (5.0, 1.7),
+];
+/// A lamp post's shaft (to the lantern's foot) and its lantern, m.
+pub const LAMP_SHAFT: f64 = 4.0;
+pub const LAMP_HEAD: f64 = 0.5;
+pub const LAMP_WIDTH: f64 = 0.14;
+pub const LANTERN_WIDTH: f64 = 0.38;
+
+/// The guild hall's balcony over the street: its slab and the railing's top rail (x span,
+/// z, height).
+pub const BALCONY: ([f64; 2], f64, f64) = ([-9.0, -3.0], -1.85, 8.0);
+
+/// The tightrope from the townhouse's roof over the street to the bell tower's roof.
+pub const TIGHTROPE: ([f64; 3], [f64; 3], f32) = ([8.6, 14.3, 3.6], [8.6, 14.3, -6.5], 0.3);
+
+/// Swing bars across the east end of the street from wall to wall, 2 m apart along it (their
+/// x), at this height: swing from bar to bar down the street.
+pub const BARS_X: [f64; 3] = [16.4, 18.4, 20.4];
+pub const BAR_Y: f64 = 4.35;
+/// The bars' ends, in the chandlery's and the warehouse's bands' faces (z).
+pub const BAR_Z: [f64; 2] = [-2.7, 2.7];
+
+/// The awning over the bakery's door: its top edge on the wall and its low front edge (x,
+/// y, z corners), and up out of the cloth.
+pub const AWNING: ([f64; 3], [f64; 3]) = ([-20.0, 3.0, 3.0], [-15.0, 2.4, 1.6]);
+
+/// The hay on the cart: its top's center and size.
+pub const HAY: ([f64; 3], f64) = ([-18.0, 1.9, -1.0], 2.8);
+
+/// The crag west of the square (x, z footprint, height): granite to climb by its cracks and
+/// holds, its face toward the square (+X).
+pub const CRAG: ([f64; 2], [f64; 2], f64) = ([-34.0, -32.0], [-16.0, -9.0], 9.0);
+/// The frozen waterfall north of it: ice to climb with picks, its face toward the square.
+pub const ICEFALL: ([f64; 2], [f64; 2], f64) = ([-34.0, -32.0], [8.0, 15.0], 10.0);
+
+/// The culvert: a stone mound with a tunnel through it along X to crawl through (x span,
+/// z span of the mound, the tunnel's z span and height).
+pub const CULVERT: ([f64; 2], [f64; 2], [f64; 2], f64) =
+    ([-31.5, -28.5], [-8.0, -5.0], [-7.0, -6.0], 0.8);
+/// The mound's height, m.
+pub const CULVERT_TOP: f64 = 2.2;
+
+/// The climbing oak: its foot, the lower trunk's height (climbed like a pole, to a fork to
+/// crouch in) and the upper fork.
+pub const OAK: [f64; 3] = [-27.0, 0.0, 11.0];
+pub const OAK_TRUNK: f64 = 4.5;
+pub const OAK_TRUNK_WIDTH: f64 = 0.55;
+pub const OAK_UPPER_FORK: [f64; 3] = [-26.55, 6.5, 11.4];
+/// The oak's branches: from, to (the tip), thickness at the root. The walkable ones, then the
+/// low one to swing from.
+pub const OAK_BRANCHES: [([f64; 3], [f64; 3], f32); 3] = [
+    // North, over the lane: a prey's path below its tip.
+    ([-27.0, 4.6, 11.3], [-27.0, 4.9, 15.6], 0.24),
+    // West, to the frozen waterfall (its tip a leap from the ice).
+    ([-27.3, 4.6, 11.0], [-30.9, 4.3, 11.0], 0.24),
+    // From the upper fork east, to the bakery's band at 7 m.
+    ([-26.4, 6.55, 11.4], [-23.1, 7.0, 11.4], 0.2),
+];
+/// Where the lookout stands, under the north branch's tip (x, y, z of the feet).
+pub const LOOKOUT: [f64; 3] = [-27.0, 0.0, 16.4];
+pub const OAK_LOW_BRANCH: ([f64; 3], [f64; 3]) = ([-27.0, 3.0, 10.6], [-27.0, 3.15, 7.4]);
+
+/// The beam across the alley at the second floor's bands.
+pub const ALLEY_BEAM: ([f64; 3], [f64; 3], f64) = ([-2.0, 7.0, 9.5], [2.0, 7.0, 9.5], 0.25);
+
+/// The washing lines across the alley (height, z), sagging this much: hang and go hand over
+/// hand.
+pub const LAUNDRY: [(f64, f64); 3] = [(5.9, 5.0), (9.3, 8.0), (6.1, 11.0)];
+pub const LAUNDRY_SAG: f32 = 0.35;
+
+/// The rope rails along the plank bridge (their x), at this height, sagging this much.
+pub const BRIDGE_ROPES_X: [f64; 2] = [-7.15, -5.85];
+pub const BRIDGE_ROPE_Y: f64 = 11.45;
+pub const BRIDGE_ROPE_Z: [f64; 2] = [-3.3, 3.3];
+
+/// The acrobatics' boxes: lamp posts, the balcony, the alley beam, the bar frame, the hay
+/// cart, the crag, the icefall, the culvert, the oak's trunk and the tightrope's stakes.
+fn acrobatics(out: &mut Vec<Piece>) {
+    let half = LAMP_WIDTH * 0.5;
+    for (x, z) in LAMPS {
+        out.push(Piece::new(
+            [x - half, 0.0, z - half],
+            [x + half, LAMP_SHAFT + LAMP_HEAD, z + half],
+            Kind::Iron,
+        ));
+        // (The shaft's collider runs up through the lantern to its top, the perch: the
+        // lantern has none of its own, so a climber comes up past it onto the top.)
+    }
+    // The balcony: a stone slab on the band at 7 m and an iron railing round its front.
+    let ([x0, x1], rz, ry) = BALCONY;
+    out.push(Piece::new([x0, 6.8, -3.0], [x1, 7.0, -1.8], Kind::Stone));
+    out.push(Piece::new(
+        [x0, ry - 0.06, rz - 0.04],
+        [x1, ry, rz + 0.04],
+        Kind::Iron,
+    ));
+    for x in [x0 + 0.05, (x0 + x1) * 0.5, x1 - 0.05] {
+        out.push(Piece::new(
+            [x - 0.03, 7.0, rz - 0.03],
+            [x + 0.03, ry - 0.06, rz + 0.03],
+            Kind::Iron,
+        ));
+    }
+    let (a, b, w) = ALLEY_BEAM;
+    out.push(Piece::new(
+        [a[0], a[1] - 0.2, a[2] - w * 0.5],
+        [b[0], b[1], b[2] + w * 0.5],
+        Kind::Timber,
+    ));
+    // Hay heaped on the cart's bed.
+    let (top, size) = HAY;
+    out.push(Piece::new(
+        [top[0] - size * 0.5, 1.3, top[2] - 0.6],
+        [top[0] + size * 0.5, top[1], top[2] + 0.6],
+        Kind::Hay,
+    ));
+    let ([x0, x1], [z0, z1], h) = CRAG;
+    out.push(Piece::new([x0, 0.0, z0], [x1, h, z1], Kind::Rock));
+    let ([x0, x1], [z0, z1], h) = ICEFALL;
+    out.push(Piece::new([x0, 0.0, z0], [x1, h, z1], Kind::Ice));
+    // The culvert: two walls and a slab over the tunnel.
+    let ([x0, x1], [z0, z1], [t0, t1], th) = CULVERT;
+    out.push(Piece::new([x0, 0.0, z0], [x1, th, t0], Kind::Stone));
+    out.push(Piece::new([x0, 0.0, t1], [x1, th, z1], Kind::Stone));
+    out.push(Piece::new([x0, th, z0], [x1, CULVERT_TOP, z1], Kind::Stone));
+    // The oak's lower trunk (the rest of the tree is drawn, not collided with).
+    let [x, _, z] = OAK;
+    let half = OAK_TRUNK_WIDTH * 0.5;
+    out.push(Piece::new(
+        [x - half, 0.0, z - half],
+        [x + half, OAK_TRUNK, z + half],
+        Kind::Bark,
+    ));
+    // Stakes either side of each end the tightrope is tied off to (clear of the way on).
+    let (a, b, _) = TIGHTROPE;
+    for (p, dz) in [(a, 0.2), (b, -0.2)] {
+        for dx in [-0.5, 0.5] {
+            out.push(Piece::new(
+                [p[0] + dx - 0.06, 14.0, p[2] + dz - 0.06],
+                [p[0] + dx + 0.06, p[1] + 0.15, p[2] + dz + 0.06],
+                Kind::Timber,
+            ));
+        }
+    }
+}
+
+fn v3(p: [f64; 3]) -> Vec3 {
+    DVec3::from_array(p).as_vec3()
+}
+
+/// The quarter's traversal markup (from its origin): lamp heads to leap between, their
+/// shafts, the balcony's rail, the alley beam, the tightrope, the bridge's rope rails, the
+/// washing lines, the bars, the awning, the hay, the crag, the icefall and the oak.
+pub fn elements() -> Vec<(&'static str, TraversalElement)> {
+    use ElementKind as K;
+    let mut out = Vec::new();
+    for (x, z) in LAMPS {
+        out.push((
+            "Lamp post",
+            TraversalElement::line(
+                K::PoleV,
+                v3([x, 0.0, z]),
+                v3([x, LAMP_SHAFT, z]),
+                LAMP_WIDTH as f32,
+            ),
+        ));
+        out.push((
+            "Lamp head",
+            TraversalElement::perch(v3([x, LAMP_SHAFT + LAMP_HEAD, z]), LANTERN_WIDTH as f32),
+        ));
+    }
+    let ([x0, x1], rz, ry) = BALCONY;
+    out.push((
+        "Balcony railing",
+        TraversalElement::line(
+            K::Rail,
+            v3([x0 + 0.1, ry, rz]),
+            v3([x1 - 0.1, ry, rz]),
+            0.07,
+        ),
+    ));
+    let (a, b, w) = ALLEY_BEAM;
+    out.push((
+        "Alley beam",
+        TraversalElement::line(K::Beam, v3(a), v3(b), w as f32),
+    ));
+    let (a, b, sag) = TIGHTROPE;
+    out.push((
+        "Tightrope",
+        TraversalElement::line(K::Tightrope, v3(a), v3(b), 0.03).with_sag(sag),
+    ));
+    for x in BRIDGE_ROPES_X {
+        out.push((
+            "Bridge rope",
+            TraversalElement::line(
+                K::Tightrope,
+                v3([x, BRIDGE_ROPE_Y, BRIDGE_ROPE_Z[0]]),
+                v3([x, BRIDGE_ROPE_Y, BRIDGE_ROPE_Z[1]]),
+                0.036,
+            )
+            .with_sag(0.18),
+        ));
+    }
+    for (y, z) in LAUNDRY {
+        out.push((
+            "Washing line",
+            TraversalElement::line(K::Clothesline, v3([-2.0, y, z]), v3([2.0, y, z]), 0.012)
+                .with_sag(LAUNDRY_SAG),
+        ));
+    }
+    for x in BARS_X {
+        out.push((
+            "Swing bar",
+            TraversalElement::line(
+                K::PoleH,
+                v3([x, BAR_Y, BAR_Z[0]]),
+                v3([x, BAR_Y, BAR_Z[1]]),
+                0.05,
+            ),
+        ));
+    }
+    let (a, b) = AWNING;
+    out.push((
+        "Awning",
+        TraversalElement::face(
+            K::Awning,
+            v3(a),
+            v3(b),
+            Vec3::new(0.0, 1.4, -0.6).normalize(),
+            0,
+        ),
+    ));
+    let (top, size) = HAY;
+    out.push((
+        "Hay cart",
+        TraversalElement {
+            kind: K::Haystack,
+            a: v3(top),
+            b: v3(top),
+            width: size as f32,
+            ..Default::default()
+        },
+    ));
+    let ([_, x1], [z0, z1], h) = CRAG;
+    out.push((
+        "Crag",
+        TraversalElement::face(
+            K::Rock,
+            v3([x1, 0.3, z0 + 0.4]),
+            v3([x1, h, z1 - 0.4]),
+            Vec3::X,
+            7,
+        ),
+    ));
+    let ([_, x1], [z0, z1], h) = ICEFALL;
+    out.push((
+        "Icefall",
+        TraversalElement::face(
+            K::Ice,
+            v3([x1, 0.3, z0 + 0.4]),
+            v3([x1, h, z1 - 0.4]),
+            Vec3::X,
+            11,
+        ),
+    ));
+    let [x, _, z] = OAK;
+    out.push((
+        "Oak trunk",
+        TraversalElement::line(
+            K::PoleV,
+            v3(OAK),
+            v3([x, OAK_TRUNK, z]),
+            OAK_TRUNK_WIDTH as f32,
+        ),
+    ));
+    out.push((
+        "Oak fork",
+        TraversalElement::perch(v3([x, OAK_TRUNK + 0.05, z]), 0.6),
+    ));
+    out.push((
+        "Oak upper fork",
+        TraversalElement::perch(v3(OAK_UPPER_FORK) + Vec3::Y * 0.05, 0.45),
+    ));
+    for (a, b, w) in OAK_BRANCHES {
+        out.push((
+            "Oak branch",
+            TraversalElement::line(K::Branch, v3(a), v3(b), w),
+        ));
+    }
+    let (a, b) = OAK_LOW_BRANCH;
+    out.push((
+        "Oak low branch",
+        TraversalElement::line(K::PoleH, v3(a), v3(b), 0.12),
     ));
     out
 }
@@ -419,6 +736,28 @@ pub fn spawn_city(commands: &mut Commands, demo_origin: DVec3) {
             exit_hop: 1.5,
         },
     ));
+    for (name, element) in elements() {
+        commands.spawn((
+            Name::new(name),
+            Transform::from_translation(origin),
+            element,
+        ));
+    }
+    // A lookout on the lane under the oak's north branch, facing away from the tree: prey
+    // for a takedown from the branch.
+    let [x, _, z] = LOOKOUT;
+    crate::demo::spawn_character(
+        commands,
+        "Lookout",
+        origin + DVec3::new(x, 1.0, z),
+        Vec3::Z,
+        crate::look::fighter::Style::Grunt,
+        crate::profile::MovementProfile::human(),
+        crate::combat::Fighter {
+            auto_dash_strike: false,
+            ..crate::combat::Fighter::new(2, 25.0)
+        },
+    );
     crate::look::city::dress_city(commands, origin);
 }
 

@@ -826,6 +826,8 @@ pub(crate) fn register(app: &mut App) {
             crate::look::zipline::drop_orphan_cables,
             crate::look::climbrope::draw_climb_ropes,
             crate::look::climbrope::drop_orphan_climb_ropes,
+            crate::look::lines::draw_lines,
+            crate::look::lines::drop_orphan_lines,
         )
             .chain(),
     );
@@ -2241,7 +2243,13 @@ fn animate_puppets(
     mut bones: Query<&mut Transform, (With<PuppetPart>, Without<Puppet>)>,
     queries: Res<PhysicsQueries>,
     mut filter: Local<QueryFilter>,
+    mut impacts: MessageReader<crate::impact::Impact>,
 ) {
+    for hit in impacts.read() {
+        if let Ok((_, mut p, ..)) = puppets.get_mut(hit.entity) {
+            p.anim.impact(hit.strength(), hit.hitstop());
+        }
+    }
     for (entity, mut p, t, m, cc, cs, f, params, local) in &mut puppets {
         let defeated = cs.is_some_and(|c| c.defeated);
         if p.was_defeated && !defeated {
@@ -2392,5 +2400,13 @@ fn anim_input(
         fighter: f.is_some(),
         effort: params.map_or(0.2, |p| p.get("effort")),
         ground: [None; 2],
+        trav: crate::traverse::anim(m, &inv, feet, cc.height),
+        rope: m.rope.map(|r| {
+            let down = (inv * r.dir).normalize_or(Vec3::NEG_Y);
+            let grip = Vec3::Y * (cc.height * 0.5)
+                - down * (cc.height * crate::zipline::GRIP_ABOVE)
+                + Vec3::NEG_Z * crate::climbrope::ROPE_AHEAD;
+            (grip, down)
+        }),
     }
 }

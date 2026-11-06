@@ -2,27 +2,37 @@
 
 pub mod afterimage;
 mod api;
+pub mod balance;
+pub mod bar;
 pub mod camera;
 pub mod city;
 pub mod climbrope;
 pub mod combat;
 pub mod demo;
+pub mod face;
 mod fallback;
 pub mod fx;
 pub mod grapple;
+pub mod impact;
 pub mod ladder;
 pub mod lockon;
 mod locomotion;
 pub mod look;
 pub mod mover;
+pub mod perch;
 pub mod platform;
 pub mod play;
 pub mod player;
+pub mod pole;
 pub mod profile;
 pub mod reticle;
 mod shift;
+mod soft;
 mod swim;
+pub mod takedown;
+pub mod target;
 pub mod tempo;
+pub mod traverse;
 pub mod vault;
 pub mod zipline;
 
@@ -36,6 +46,7 @@ pub use combat::{
     AttackPhase, AttackState, CombatLog, CombatRecord, CombatState, Fighter, Outcome,
 };
 pub use fx::{CameraFx, SlowMotionFx};
+pub use impact::{Impact, ImpactKind};
 pub use lockon::LockOn;
 pub use look::effects::{EffectSettings, Effects};
 pub use mover::{
@@ -49,6 +60,7 @@ pub use tempo::{
     CINEMATIC_KEY, Cinematic, FOCUS_KEY, Perceiver, PerceptionStatus, SlowMoPulse, Tempo,
     TimePerception,
 };
+pub use traverse::{ElementKind, TraversalElement};
 pub use zipline::Zipline;
 
 /// Everything a game needs to use movement, in one import.
@@ -86,6 +98,7 @@ impl Plugin for MovementPlugin {
             .init_resource::<Play>()
             .init_resource::<reticle::GrappleAim>()
             .init_resource::<reticle::GrappleReticle>()
+            .add_message::<Impact>()
             .register_component::<LockOn>(
                 "Lock-on for the player: the enemy locked onto (lock_on action), lock range and \
                  break range (m), widest pick angle from the view (deg).",
@@ -140,6 +153,11 @@ impl Plugin for MovementPlugin {
                  into it to catch it, climb it (forward up, back down, crouch slides), swing on \
                  it (the stick pumps) and let go with jump. The hands stop `top_clear` m under the anchor.",
             )
+            .register_component::<TraversalElement>(
+                "Traversal markup on a level piece: kind (Perch, PoleV, PoleH, Beam, Rail, \
+                 Tightrope, Clothesline, Branch, Rock, Ice, Awning, Haystack), points a and b \
+                 (m, the entity's frame), width (m), normal, sag (m), hold seed.",
+            )
             .register_resource::<TimePerception>(
                 "Reflex slow motion (min scale, blend in, linger, threat radius) and cinematic \
                  slow-motion beats on hits, kills and enemy attacks.",
@@ -177,6 +195,7 @@ impl Plugin for MovementPlugin {
                     )
                         .in_set(MovementSet::Intent),
                     (
+                        takedown::begin_takedowns,
                         combat::begin_attacks,
                         locomotion::step_movers,
                         combat::resolve_attacks,

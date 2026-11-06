@@ -4,16 +4,19 @@
 //!   tinted edges; while the perceiver dashes, radial speed lines. Drawn by a small overlay
 //!   [`RenderFeature`] onto the final image.
 //! * [`CameraFx`] (component on a camera): FOV kick when sprinting or dashing, a narrower
-//!   view in focus, a roll into the wall while wall-running.
+//!   view in focus, a roll into the wall while wall-running, and the followed character's
+//!   [`Impact`]s: trauma shake (rotation only, shake = trauma²), a landing dip on a spring and
+//!   a kick of the field of view on launches.
 
 use bytemuck::{Pod, Zeroable};
-use engine_core::math::{Quat, damp};
+use engine_core::math::{Quat, Vec3, damp};
 use engine_core::prelude::*;
 use engine_render::{
     Camera, FrameContext, GpuShared, Projection, RenderFeature, RenderSettings, ViewData, wgpu,
 };
 use engine_world::LocomotionMode;
 
+use crate::impact::{Impact, shake_noise, spring};
 use crate::mover::Mover;
 use crate::player::PlayerControlled;
 use crate::tempo::{FOCUS_KEY, Perceiver};
@@ -287,9 +290,29 @@ pub struct CameraFx {
     pub wallrun_roll_deg: f32,
     /// How quickly effects follow, 1/s.
     pub response: f32,
+    /// Scales the impact shake, dip and kick (0 turns them off: motion comfort).
+    pub impact_scale: f32,
+    /// Largest shake, degrees (at trauma 1).
+    pub shake_deg: f32,
     /// Current FOV offset and roll (written each frame).
     pub fov_offset_deg: f32,
     pub roll_deg: f32,
+    /// Impact trauma, 0..1 (decays at 1.4/s).
+    pub trauma: f32,
+    /// The shake and dip applied this frame (camera-local rotation, world offset).
+    #[serde(skip)]
+    pub shake: Quat,
+    #[serde(skip)]
+    pub dip: Vec3,
+    /// The landing dip spring (m, m/s) and the FOV kick (degrees) decaying.
+    #[serde(skip)]
+    pub dip_x: f32,
+    #[serde(skip)]
+    pub dip_v: f32,
+    #[serde(skip)]
+    pub kick: f32,
+    #[serde(skip)]
+    pub secs: f32,
 }
 
 impl Default for CameraFx {
@@ -302,8 +325,17 @@ impl Default for CameraFx {
             focus_fov_deg: -8.0,
             wallrun_roll_deg: 7.0,
             response: 8.0,
+            impact_scale: 1.0,
+            shake_deg: 3.5,
             fov_offset_deg: 0.0,
             roll_deg: 0.0,
+            trauma: 0.0,
+            shake: Quat::IDENTITY,
+            dip: Vec3::ZERO,
+            dip_x: 0.0,
+            dip_v: 0.0,
+            kick: 0.0,
+            secs: 0.0,
         }
     }
 }
@@ -314,9 +346,11 @@ pub(crate) fn camera_fx(
     dilation: Res<TimeDilation>,
     movers: Query<&Mover>,
     perceiver: Query<Entity, (With<Perceiver>, With<Mover>)>,
+    mut impacts: MessageReader<Impact>,
     mut cams: Query<(&mut CameraFx, &mut Camera, &mut Transform)>,
 ) {
     let dt = time.real_delta_secs();
+    let hits: Vec<Impact> = impacts.read().copied().collect();
     let focus = if dilation.is_active(FOCUS_KEY) {
         (1.0 - dilation.factor()).clamp(0.0, 1.0)
     } else {
@@ -329,10 +363,21 @@ pub(crate) fn camera_fx(
         if fx.base_fov_deg <= 0.0 {
             fx.base_fov_deg = *fov_y_deg;
         }
-        let mover = fx
-            .target
-            .or_else(|| perceiver.iter().next())
-            .and_then(|e| movers.get(e).ok());
+        let followed = fx.target.or_else(|| perceiver.iter().next());
+        let mover = followed.and_then(|e| movers.get(e).ok());
+        // Impacts of the character followed: trauma, a dip of the view, a kick of the FOV.
+        let k = fx.impact_scale.max(0.0);
+        for hit in hits.iter().filter(|h| Some(h.entity) == followed) {
+            fx.trauma = (fx.trauma + hit.trauma() * k).min(1.0);
+            fx.dip_v -= hit.dip() * 18.0 * k;
+            fx.kick += hit.fov_kick() * k;
+        }
+        fx.secs += dt;
+        fx.trauma = (fx.trauma - 1.4 * dt).max(0.0);
+        let (mut x, mut v) = (fx.dip_x, fx.dip_v);
+        spring(&mut x, &mut v, 18.0, 0.6, dt.min(1.0 / 30.0));
+        (fx.dip_x, fx.dip_v) = (x.clamp(-0.4, 0.2), v);
+        fx.kick *= 1.0 - (dt * 4.0).min(1.0);
         let (want_fov, want_roll) = match mover {
             Some(m) => (
                 match m.mode {
@@ -348,13 +393,30 @@ pub(crate) fn camera_fx(
             None => (fx.focus_fov_deg * focus, 0.0),
         };
         fx.fov_offset_deg = damp(fx.fov_offset_deg, want_fov, fx.response, dt);
-        *fov_y_deg = (fx.base_fov_deg + fx.fov_offset_deg).clamp(10.0, 150.0);
+        *fov_y_deg = (fx.base_fov_deg + fx.fov_offset_deg + fx.kick).clamp(10.0, 150.0);
+        // Take last frame's shake off, roll, put this frame's on (a camera that sets its own
+        // pose each frame applies last frame's shake itself: see `follow_pilots`).
+        transform.rotation *= fx.shake.inverse();
+        transform.translation -= fx.dip.as_dvec3();
         let roll = damp(fx.roll_deg, want_roll, fx.response, dt);
         let delta = (roll - fx.roll_deg).to_radians();
         if delta.abs() > 1e-6 {
             transform.rotation *= Quat::from_rotation_z(delta);
         }
         fx.roll_deg = roll;
+        let shake = fx.trauma * fx.trauma * fx.shake_deg.to_radians();
+        let t = fx.secs;
+        fx.shake = if shake > 1e-5 {
+            Quat::from_rotation_y(shake * shake_noise(t, 1.0))
+                * Quat::from_rotation_x(shake * shake_noise(t, 2.0))
+                * Quat::from_rotation_z(shake * 0.6 * shake_noise(t, 3.0))
+        } else {
+            Quat::IDENTITY
+        };
+        let up = mover.map_or(Vec3::Y, |m| m.up);
+        fx.dip = up * fx.dip_x;
+        transform.rotation *= fx.shake;
+        transform.translation += fx.dip.as_dvec3();
     }
 }
 

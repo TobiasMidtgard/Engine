@@ -25,6 +25,7 @@ pub mod climbrope;
 pub mod course;
 pub mod effects;
 pub mod fighter;
+pub mod lines;
 pub mod materials;
 pub mod meshgen;
 pub mod rig;
@@ -87,6 +88,7 @@ pub const LIBRARY: &[Generator] = &[
     rope::generate,
     zipline::generate,
     city::generate,
+    lines::generate,
     climbrope::generate,
     crate::lockon::generate,
 ];

@@ -241,10 +241,13 @@ pub(crate) fn follow_pilots(
             eye.y = g + 0.3;
         }
 
-        transform.translation = eye;
-        // Keep the roll camera cues add on top (they apply their change each frame).
+        // Keep the roll, shake and dip camera cues add on top (they apply their change each
+        // frame).
         let roll = fx.map_or(0.0, |f| f.roll_deg.to_radians());
-        transform.rotation = rotation * Quat::from_rotation_z(roll);
+        let shake = fx.map_or(Quat::IDENTITY, |f| f.shake);
+        let dip = fx.map_or(Vec3::ZERO, |f| f.dip);
+        transform.translation = eye + dip.as_dvec3();
+        transform.rotation = rotation * Quat::from_rotation_z(roll) * shake;
         pc.state = Some(rig);
     }
 }
