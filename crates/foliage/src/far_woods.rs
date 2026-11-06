@@ -138,7 +138,7 @@ impl FarTree {
     }
 
     /// Needle trees: their cards stand as the tall spray cells, a spire on top.
-    fn conifer(self) -> bool {
+    pub(crate) fn conifer(self) -> bool {
         matches!(self, FarTree::Spruce | FarTree::Pine | FarTree::Larch)
     }
 
@@ -169,11 +169,32 @@ pub(crate) struct FarCard {
     pub width: f32,
     pub yaw: f32,
     pub shade: f32,
+    /// Where the crown starts, as a share of the height: the tree's own, lower on a wood's
+    /// rim (open-grown trees keep their low branches).
+    pub base: f32,
+    /// A hem plant: a shrub or young tree on the open ground along a wood's edge.
+    pub hem: bool,
 }
 
 /// Cover lattice step, meters: closer card spacings read the cover from a lattice this fine
 /// (bilinear), so a cell asks the terrain a few hundred times rather than once per tree.
 const COVER_STEP_M: f32 = 16.0;
+
+/// Woods' edges grade into the open (R66): on open ground next to a wood (within about a
+/// lattice step of a node this dense) shrubs and young trees stand as a hem, the wood's
+/// rim trees keep their crowns down to the ground, as along real woods' edges (the
+/// forest mantle and fringe: shrubs and pioneers between the closed canopy and meadow).
+const HEM_WOODS: (f32, f32) = (0.35, 0.65);
+/// How much a wood's own thinness counts against a hem (1: none where as dense as beside).
+const HEM_THIN: f32 = 0.6;
+/// Most of the open candidates beside a wood that grow a hem plant.
+const HEM_SHARE: f32 = 0.7;
+/// A hem plant's height, as a share of its tree's.
+const HEM_HEIGHT: (f32, f32) = (0.22, 0.5);
+/// Rim trees: inside a wood this dense, with open ground this near (least density within a
+/// step), and their crowns start at this share of their own crown base.
+const RIM_OPEN: f32 = 0.3;
+const RIM_BASE: f32 = 0.3;
 
 /// The cards of one cell: candidates every `spacing` meters (jittered), each kept with the
 /// wood's density there and a conifer by its conifer share. `cover` answers for a world X/Z
@@ -201,25 +222,67 @@ pub(crate) fn cell_cards(
     // Density and stand mix (weighted by density) at a cell-local X/Z.
     type Woods = (f32, StandMix);
     let weigh = |(d, m): Woods| (d, StandMix(m.normalized().0.map(|w| w * d)));
+    // The lattice reaches a node past the cell on each side, so a wood just over the border
+    // still has its hem and rim here.
     let lattice: Option<(usize, Vec<Woods>)> = (spacing < COVER_STEP_M).then(|| {
-        let n = (cell_m / COVER_STEP_M).ceil() as usize + 1;
+        let n = (cell_m / COVER_STEP_M).ceil() as usize + 3;
         let values = (0..n * n)
             .map(|k| {
                 let c = cover(at(
-                    (k % n) as f32 * COVER_STEP_M,
-                    (k / n) as f32 * COVER_STEP_M,
+                    ((k % n) as f32 - 1.0) * COVER_STEP_M,
+                    ((k / n) as f32 - 1.0) * COVER_STEP_M,
                 ));
                 c.map_or((0.0, StandMix::default()), weigh)
             })
             .collect();
         (n, values)
     });
+    // Per node: the most and least density within a step (diagonals too).
+    let reach: Option<Vec<(f32, f32)>> = lattice.as_ref().map(|(n, v)| {
+        let n = *n as i64;
+        let d = |i: i64, j: i64| v[(j.clamp(0, n - 1) * n + i.clamp(0, n - 1)) as usize].0;
+        (0..n * n)
+            .map(|k| {
+                let (i, j) = (k % n, k / n);
+                let mut most_least = (0.0f32, 1.0f32);
+                for dj in -1..=1 {
+                    for di in -1..=1 {
+                        let w = d(i + di, j + dj);
+                        most_least = (most_least.0.max(w), most_least.1.min(w));
+                    }
+                }
+                most_least
+            })
+            .collect()
+    });
+    // Bilinear lookup at a cell-local X/Z: the lattice cell and where in it.
+    let node = |n: usize, x: f32, z: f32| {
+        let (fx, fz) = (x / COVER_STEP_M + 1.0, z / COVER_STEP_M + 1.0);
+        let (ix, iz) = ((fx as usize).min(n - 2), (fz as usize).min(n - 2));
+        (ix, iz, fx - ix as f32, fz - iz as f32)
+    };
+    let edge_at = |x: f32, z: f32| -> (f32, f32) {
+        match (&lattice, &reach) {
+            (Some((n, _)), Some(r)) => {
+                let (ix, iz, tx, tz) = node(*n, x, z);
+                let g = |i: usize, j: usize| r[j * n + i];
+                let lerp = |a: (f32, f32), b: (f32, f32), t: f32| {
+                    (a.0 + (b.0 - a.0) * t, a.1 + (b.1 - a.1) * t)
+                };
+                lerp(
+                    lerp(g(ix, iz), g(ix + 1, iz), tx),
+                    lerp(g(ix, iz + 1), g(ix + 1, iz + 1), tx),
+                    tz,
+                )
+            }
+            // Far out (no lattice) a card stands for a clump: no hems.
+            _ => (0.0, 1.0),
+        }
+    };
     let woods_at = |x: f32, z: f32| -> Woods {
         match &lattice {
             Some((n, v)) => {
-                let (fx, fz) = (x / COVER_STEP_M, z / COVER_STEP_M);
-                let (ix, iz) = ((fx as usize).min(n - 2), (fz as usize).min(n - 2));
-                let (tx, tz) = (fx - ix as f32, fz - iz as f32);
+                let (ix, iz, tx, tz) = node(*n, x, z);
                 let g = |i: usize, j: usize| v[j * n + i];
                 let lerp = |a: Woods, b: Woods, t: f32| {
                     (
@@ -250,33 +313,79 @@ pub(crate) fn cell_cards(
                 continue;
             }
             let (density, mix) = woods_at(x, z);
-            if h(2) >= density.clamp(0.0, 1.0) {
-                continue;
-            }
+            let (most, least) = edge_at(x, z);
             let flat = at(x, z);
-            if keep_out(flat) {
+            // The hem's chance at a cover density: open ground (or a thin wood's floor) beside
+            // denser woods; the less wooded it is itself, the likelier.
+            let hem_chance = |d: f32| {
+                let beside = engine_core::math::smoothstep(HEM_WOODS.0, HEM_WOODS.1, most);
+                let open = (1.0 - HEM_THIN * d / most.max(1e-3)).clamp(0.0, 1.0);
+                HEM_SHARE * beside * open
+            };
+            // Without a lattice the cover is read here, once.
+            let (wood, hem) = if lattice.is_none() {
+                (h(2) < density.clamp(0.0, 1.0), false)
+            } else if h(2) >= density && h(8) >= hem_chance(0.0) {
+                // Neither a tree nor (even on bare ground) a hem plant: skip the cover read.
+                continue;
+            } else {
+                // The lattice blurs a river, or a lake's edge, narrower than its step: woods on
+                // both banks would plant trees in the water (playtest 3, #24). A tree stands only
+                // where the cover itself has woods here (none in water), a hem plant where it
+                // has any cover at all (open grass or a wood's floor, not a road, field or water).
+                let Some((here, _)) = cover(flat) else {
+                    continue;
+                };
+                let wood = h(2) < density && h(2) < here;
+                (wood, !wood && h(8) < hem_chance(here))
+            };
+            if !wood && !hem {
                 continue;
             }
-            // The lattice blurs a river, or a lake's edge, narrower than its step: woods on both
-            // banks would plant trees in the water (playtest 3, #24). A tree it keeps stands
-            // only where the cover itself has woods (none in water).
-            if lattice.is_some() && cover(flat).is_none_or(|(d, _)| h(2) >= d) {
+            if keep_out(flat) {
                 continue;
             }
             let Some(y) = ground(flat) else {
                 continue;
             };
-            let tree = crate::stands::pick(&mix, flat.x, flat.z, h(4), h(3));
-            let ((lo, hi), _, wide) = tree.shape();
+            // Along a wood's edge pioneers (birch, alder) take half the conifers' places.
+            let mut tree = crate::stands::pick(&mix, flat.x, flat.z, h(4), h(3));
+            if hem && tree.conifer() && h(9) < 0.5 {
+                tree = if h(10) < 0.6 {
+                    FarTree::Birch
+                } else {
+                    FarTree::Alder
+                };
+            }
+            let ((lo, hi), base, wide) = tree.shape();
             let height = lo + (hi - lo) * h(5);
-            cards.push(FarCard {
-                tree,
-                foot: Vec3::new(x, (y - origin.y) as f32, z),
-                height,
-                width: (height * wide).max(spacing * 1.4),
-                yaw: h(6) * std::f32::consts::PI,
-                shade: 0.62 + 0.22 * h(7),
-            });
+            let card = if hem {
+                let height = height * (HEM_HEIGHT.0 + (HEM_HEIGHT.1 - HEM_HEIGHT.0) * h(11));
+                FarCard {
+                    tree,
+                    foot: Vec3::new(x, (y - origin.y) as f32, z),
+                    height,
+                    // Bushy and low: a hem plant is about as wide as tall.
+                    width: (height * (wide + 0.45)).max(2.5),
+                    yaw: h(6) * std::f32::consts::PI,
+                    shade: 0.66 + 0.22 * h(7),
+                    base: 0.05,
+                    hem: true,
+                }
+            } else {
+                let rim = least < RIM_OPEN;
+                FarCard {
+                    tree,
+                    foot: Vec3::new(x, (y - origin.y) as f32, z),
+                    height,
+                    width: (height * wide * if rim { 1.2 } else { 1.0 }).max(spacing * 1.4),
+                    yaw: h(6) * std::f32::consts::PI,
+                    shade: 0.62 + 0.22 * h(7),
+                    base: if rim { base * RIM_BASE } else { base },
+                    hem: false,
+                }
+            };
+            cards.push(card);
         }
     }
     cards
@@ -287,7 +396,7 @@ pub(crate) fn cell_meshes(cards: &[FarCard]) -> Vec<(FarTree, Mesh)> {
     let mut builders: HashMap<FarTree, MeshBuilder> = HashMap::new();
     for c in cards {
         let b = builders.entry(c.tree).or_default();
-        let ((_, _), base, _) = c.tree.shape();
+        let base = c.base;
         let kind = c.tree.kind();
         let conifer = c.tree.conifer();
         // Conifers stand as the tall spray cells, broad crowns as the round cluster.
@@ -1082,6 +1191,50 @@ mod tests {
     }
 
     #[test]
+    fn a_woods_edge_grades_through_a_hem_into_the_meadow() {
+        // A closed broadleaf wood west of x = 64, meadow (a stray tree's worth of cover) east,
+        // and a road (no cover) from x = 100.
+        let land = |p: DVec3| match p.x {
+            x if x < 64.0 => Some((1.0, StandMix::from_conifer(0.0))),
+            x if x < 100.0 => Some((0.03, StandMix::from_conifer(0.0))),
+            _ => None,
+        };
+        let flat = |_: DVec3| Some(0.0);
+        let cards = cell_cards(DVec3::ZERO, 128.0, 6.0, 9, &land, &flat, &|_| false);
+        let hems: Vec<_> = cards.iter().filter(|c| c.hem).collect();
+        // Hem plants stand on the meadow next to the wood, low and bushy, none on the road.
+        assert!(hems.len() >= 12, "{} hem plants", hems.len());
+        let xs: Vec<_> = hems.iter().map(|c| c.foot.x as i32).collect();
+        assert!(
+            hems.iter().all(|c| (44.0..100.0).contains(&c.foot.x)),
+            "{xs:?}"
+        );
+        assert!(
+            hems.iter()
+                .all(|c| c.height < 12.0 && c.width >= 0.6 * c.height)
+        );
+        let far_out = hems.iter().filter(|c| c.foot.x > 90.0).count();
+        assert!(far_out * 4 < hems.len(), "{far_out} of {}", hems.len());
+        // The wood's rim keeps its crowns low; its heart does not.
+        let (rim, heart): (Vec<&FarCard>, Vec<&FarCard>) = cards
+            .iter()
+            .filter(|c| !c.hem)
+            .partition(|c| c.foot.x > 50.0);
+        let own = |c: &FarCard| c.tree.shape().1;
+        assert!(rim.iter().filter(|c| c.base < own(c) * 0.5).count() * 2 > rim.len());
+        assert!(
+            heart
+                .iter()
+                .filter(|c| c.foot.x < 30.0)
+                .all(|c| c.base == own(c))
+        );
+        // Open grass far from any wood grows no hem.
+        let meadow = |_: DVec3| Some((0.03, StandMix::from_conifer(0.0)));
+        let open = cell_cards(DVec3::ZERO, 128.0, 6.0, 9, &meadow, &flat, &|_| false);
+        assert!(open.iter().all(|c| !c.hem));
+    }
+
+    #[test]
     fn a_clump_card_keeps_a_crowns_proportions() {
         // Far out a card stands for a clump: 60 m wide, on 20 m trees.
         let card = FarCard {
@@ -1091,6 +1244,8 @@ mod tests {
             width: 60.0,
             yaw: 0.3,
             shade: 0.8,
+            base: 0.3,
+            hem: false,
         };
         let meshes = cell_meshes(&[card]);
         let ys = meshes[0].1.vertices.iter().map(|v| v.position[1]);

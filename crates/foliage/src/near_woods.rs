@@ -285,7 +285,18 @@ pub fn stream_near_woods(
             ))
             .id();
         for (n, card) in cards.iter().enumerate() {
-            let Some(species) = library.id(card.tree.species()) else {
+            // Genes from where the tree stands, so a replanted cell grows the same wood.
+            let mut rng = Rng::new(seed ^ (n as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15));
+            let genes = Genes::random(&mut rng);
+            let mut size = rng.range(0.7, 1.0);
+            let name = if card.hem {
+                let (name, s) = hem_plant(card, &mut rng);
+                size = s;
+                name
+            } else {
+                card.tree.species()
+            };
+            let Some(species) = library.id(name) else {
                 continue;
             };
             // Chopped by the player (now a plant or a stump of its own).
@@ -295,10 +306,6 @@ pub fn stream_near_woods(
             {
                 continue;
             }
-            // Genes from where the tree stands, so a replanted cell grows the same wood.
-            let mut rng = Rng::new(seed ^ (n as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15));
-            let genes = Genes::random(&mut rng);
-            let size = rng.range(0.7, 1.0);
             commands.spawn((
                 Transform::from_translation(card.foot.as_dvec3())
                     .with_rotation(Quat::from_rotation_y(card.yaw * 2.0)),
@@ -312,6 +319,21 @@ pub fn stream_near_woods(
             ));
         }
         state.cells.insert(key, e);
+    }
+}
+
+/// What grows in a wood's hem (R66), and how grown: hazel and goat willow thickets, rowan,
+/// juniper where the wood is a conifer one, and young trees of the wood's own kind.
+fn hem_plant(card: &FarCard, rng: &mut Rng) -> (&'static str, f32) {
+    let roll = rng.range(0.0, 1.0);
+    let shrub = rng.range(0.6, 1.0);
+    let young = rng.range(0.3, 0.5);
+    match roll {
+        r if r < 0.3 => ("hazel", shrub),
+        r if r < 0.48 => ("goat willow", shrub),
+        r if r < 0.6 => ("rowan", young + 0.15),
+        r if r < 0.72 && card.tree.conifer() => ("juniper", shrub),
+        _ => (card.tree.species(), young),
     }
 }
 
