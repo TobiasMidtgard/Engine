@@ -742,6 +742,51 @@ pub(crate) struct ProfileWindow {
     report: HashMap<String, Stat>,
     snapshot_started: Instant,
     snapshot_frames: u64,
+    /// The clocks when the window started: see [`ClockMark`].
+    clock: Option<ClockMark>,
+}
+
+/// Where the clocks stood at the start of a report window, so the report can say how far the
+/// world moved against real time and how much fixed-step time was dropped.
+#[derive(Clone, Copy)]
+struct ClockMark {
+    real: f64,
+    world: f64,
+    dropped: f64,
+    tick: u64,
+}
+
+impl ClockMark {
+    fn read(time: &crate::time::Time, fixed: &crate::time::FixedTime) -> Self {
+        Self {
+            real: time.real_elapsed_secs_f64(),
+            world: time.elapsed_secs_f64(),
+            dropped: fixed.dropped_secs(),
+            tick: fixed.tick(),
+        }
+    }
+}
+
+/// One report line on the clocks between two marks: world seconds per real second, fixed
+/// steps per frame, the real seconds of steps the step budget dropped, and the step cost.
+fn format_clock(
+    from: ClockMark,
+    to: ClockMark,
+    frames: u64,
+    fixed: &crate::time::FixedTime,
+) -> String {
+    let real = (to.real - from.real).max(1e-9);
+    format!(
+        "clock: world {:.2} s per real s, {:.2} fixed steps a frame at {:.0} Hz, {:.2} s of \
+         steps dropped in {:.1} s (step cost {:.1} ms, budget {:.1} ms)\n",
+        (to.world - from.world) / real,
+        (to.tick - from.tick) as f64 / frames.max(1) as f64,
+        fixed.hz(),
+        to.dropped - from.dropped,
+        real,
+        fixed.step_cost_secs() * 1000.0,
+        fixed.step_budget_secs() * 1000.0,
+    )
 }
 
 impl Default for ProfileWindow {
@@ -755,6 +800,7 @@ impl Default for ProfileWindow {
             report: HashMap::new(),
             snapshot_started: now,
             snapshot_frames: 0,
+            clock: None,
         }
     }
 }
@@ -765,8 +811,15 @@ pub(crate) fn profile_report_system(
     mut window: ResMut<ProfileWindow>,
     mut snapshot: ResMut<ProfileSnapshot>,
     order: Option<Res<ScheduleOrder>>,
+    clocks: Option<(Res<crate::time::Time>, Res<crate::time::FixedTime>)>,
 ) {
     let now = Instant::now();
+    let mark = clocks
+        .as_ref()
+        .map(|(time, fixed)| ClockMark::read(time, fixed));
+    if window.clock.is_none() {
+        window.clock = mark;
+    }
     let frame = now - window.last_frame;
     window.last_frame = now;
     window.frames += 1;
@@ -790,6 +843,9 @@ pub(crate) fn profile_report_system(
         return;
     }
     let mut report = format_report(&window.report, window.frames, wall, window.frame_max);
+    if let (Some(from), Some(to), Some((_, fixed))) = (window.clock, mark, clocks.as_ref()) {
+        report.push_str(&format_clock(from, to, window.frames, fixed));
+    }
     if let Some(order) = order {
         report.push_str(&format_floors(&ordering_floors(
             &order,
@@ -801,7 +857,10 @@ pub(crate) fn profile_report_system(
     if let Err(e) = std::fs::write("engine-profile.txt", &report) {
         crate::log::warn!("could not write engine-profile.txt: {e}");
     }
-    *window = ProfileWindow::default();
+    *window = ProfileWindow {
+        clock: mark,
+        ..ProfileWindow::default()
+    };
 }
 
 fn make_snapshot(stats: &HashMap<String, Stat>, frames: u64, wall: Duration) -> ProfileSnapshot {
@@ -1603,6 +1662,27 @@ mod tests {
         assert_eq!(snap.schedules, vec![("Update".to_string(), 30.0)]);
         assert_eq!(snap.systems[0], ("game::slow".to_string(), 20.0));
         assert_eq!(snap.systems.len(), 2);
+    }
+
+    #[test]
+    fn report_says_how_far_the_world_trailed_real_time() {
+        let fixed = crate::time::FixedTime::default();
+        let from = ClockMark {
+            real: 10.0,
+            world: 9.0,
+            dropped: 1.0,
+            tick: 600,
+        };
+        let to = ClockMark {
+            real: 15.0,
+            world: 12.5,
+            dropped: 2.5,
+            tick: 810,
+        };
+        let line = format_clock(from, to, 150, &fixed);
+        assert!(line.starts_with("clock: world 0.70 s per real s"), "{line}");
+        assert!(line.contains("1.40 fixed steps a frame"), "{line}");
+        assert!(line.contains("1.50 s of steps dropped in 5.0 s"), "{line}");
     }
 
     #[test]

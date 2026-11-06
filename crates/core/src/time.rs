@@ -340,6 +340,12 @@ impl FixedTime {
         self.dropped_secs
     }
 
+    /// What one fixed step costs in real seconds (a running average), the estimate the step
+    /// budget plans with.
+    pub fn step_cost_secs(&self) -> f64 {
+        self.step_cost_secs
+    }
+
     /// The frame loop ran only `ran` of this frame's steps: drop the rest and the backlog.
     pub(crate) fn stop_early(&mut self, ran: u32) {
         if ran >= self.steps {
