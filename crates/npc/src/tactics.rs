@@ -306,58 +306,14 @@ pub fn choose_position(
     drop(snap_span);
     let _score_span = tracing::info_span!("choose position: score").entered();
     let (sight, heat) = (&ctx.sight, ctx.heat);
-    let weigh = |p: DVec3, reason: &'static str, cover_height: Option<CoverHeight>| -> Spot {
+    // Everything but the sight lines: cheap, worked out for every spot.
+    let cheap = |p: DVec3| -> f32 {
         let mut s = 0.0f32;
         let flat = |a: DVec3, b: DVec3| DVec2::new(a.x - b.x, a.z - b.z).length() as f32;
         let d = flat(p, q.target_pos);
         if w.range > 0.0 {
             let e = ((d - q.ideal_range) / q.ideal_range.max(1.0)).clamp(-2.0, 2.0);
             s -= w.range * e * e;
-        }
-        let low_cover = cover_height == Some(CoverHeight::Low);
-        let crouch = p + DVec3::Y * 0.95;
-        let stand = p + DVec3::Y * 1.5;
-        // Solid cover stops bullets; thick smoke only hides you (worth a bit less).
-        let solid = !sight.clear(target_eye, crouch, &ignore);
-        let concealed = !solid && sight.haze(target_eye, crouch) < SMOKE_HIDES;
-        if solid {
-            s += w.cover;
-        } else if concealed {
-            s += w.cover * 0.7;
-        }
-        let covered = solid || concealed;
-        if w.can_shoot > 0.0 {
-            let mut shoot = sight.visibility(stand, target_chest, &ignore) > SMOKE_HIDES;
-            if !shoot && reason == "cover" {
-                // Lean out around a tall edge.
-                let side = Vec3::new(
-                    (q.target_pos.z - p.z) as f32,
-                    0.0,
-                    -(q.target_pos.x - p.x) as f32,
-                )
-                .normalize_or_zero();
-                for sgn in [-1.0f32, 1.0] {
-                    if sight.visibility(
-                        stand + (side * 0.8 * sgn).as_dvec3(),
-                        target_chest,
-                        &ignore,
-                    ) > SMOKE_HIDES
-                    {
-                        shoot = true;
-                        break;
-                    }
-                }
-            }
-            if shoot {
-                s += w.can_shoot;
-            }
-        }
-        if w.exposure > 0.0 {
-            for &t in &q.other_threats {
-                if sight.visibility(t + DVec3::Y * 1.6, crouch, &ignore) > SMOKE_HIDES {
-                    s -= w.exposure;
-                }
-            }
         }
         let dir_from_target = Vec3::new(
             (p.x - q.target_pos.x) as f32,
@@ -414,25 +370,110 @@ pub fn choose_position(
         {
             s += w.stay;
         }
-        Spot {
-            position: p,
-            score: s,
-            reason,
-            covered,
-            low_cover,
-        }
+        s
     };
-    let mut spots: Vec<Option<Spot>> = vec![None; snapped.len()];
-    let per = snapped.len().div_ceil(16).max(1);
-    engine_core::tasks::par_chunks_mut(&mut spots, per, |piece, chunk| {
-        for (k, spot) in chunk.iter_mut().enumerate() {
-            let (p, reason, cover_height) = snapped[piece * per + k];
-            *spot = Some(weigh(p, reason, cover_height));
+    // The sight lines (cover from the target, a shot at it, exposure to other threats): a
+    // physics ray and a terrain walk each, about 450 a look at the fortress (VM), most of its
+    // 12 ms. What they add to a spot's score, and whether it is covered.
+    let sighted = |p: DVec3, reason: &'static str| -> (f32, bool) {
+        let mut s = 0.0f32;
+        let crouch = p + DVec3::Y * 0.95;
+        let stand = p + DVec3::Y * 1.5;
+        // Solid cover stops bullets; thick smoke only hides you (worth a bit less).
+        let solid = !sight.clear(target_eye, crouch, &ignore);
+        let concealed = !solid && sight.haze(target_eye, crouch) < SMOKE_HIDES;
+        if solid {
+            s += w.cover;
+        } else if concealed {
+            s += w.cover * 0.7;
         }
-    });
-    let mut spots: Vec<Spot> = spots.into_iter().flatten().collect();
+        let covered = solid || concealed;
+        if w.can_shoot > 0.0 {
+            let mut shoot = sight.visibility(stand, target_chest, &ignore) > SMOKE_HIDES;
+            if !shoot && reason == "cover" {
+                // Lean out around a tall edge.
+                let side = Vec3::new(
+                    (q.target_pos.z - p.z) as f32,
+                    0.0,
+                    -(q.target_pos.x - p.x) as f32,
+                )
+                .normalize_or_zero();
+                for sgn in [-1.0f32, 1.0] {
+                    if sight.visibility(
+                        stand + (side * 0.8 * sgn).as_dvec3(),
+                        target_chest,
+                        &ignore,
+                    ) > SMOKE_HIDES
+                    {
+                        shoot = true;
+                        break;
+                    }
+                }
+            }
+            if shoot {
+                s += w.can_shoot;
+            }
+        }
+        if w.exposure > 0.0 {
+            for &t in &q.other_threats {
+                if sight.visibility(t + DVec3::Y * 1.6, crouch, &ignore) > SMOKE_HIDES {
+                    s -= w.exposure;
+                }
+            }
+        }
+        (s, covered)
+    };
+    // Sight lines add at most this much: spots whose cheap score plus it can't reach the
+    // sixth best weighed so far are never weighed (best first, branch and bound). The six
+    // best (`scored`) and their order come out as if every spot were weighed.
+    let most = w.cover.max(0.0) + w.can_shoot.max(0.0);
+    let mut order: Vec<(f32, usize)> = snapped
+        .iter()
+        .enumerate()
+        .map(|(i, &(p, ..))| (cheap(p), i))
+        .collect();
+    order.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
+    const KEEP: usize = 6;
+    // Spots weighed side by side on the leaf pool, a batch at a time.
+    const BATCH: usize = 16;
+    let mut weighed: Vec<(Spot, usize)> = Vec::with_capacity(order.len());
+    let mut kept: Vec<f32> = Vec::with_capacity(order.len());
+    let mut next = 0;
+    while next < order.len() {
+        if kept.len() >= KEEP {
+            kept.sort_by(|a, b| b.total_cmp(a));
+            if order[next].0 + most < kept[KEEP - 1] {
+                break;
+            }
+        }
+        let batch = &order[next..(next + BATCH).min(order.len())];
+        let mut out: Vec<Option<Spot>> = vec![None; batch.len()];
+        engine_core::tasks::par_chunks_mut(&mut out, 1, |i, one| {
+            let Some(slot) = one.first_mut() else {
+                return;
+            };
+            let (base, idx) = batch[i];
+            let (p, reason, cover_height) = snapped[idx];
+            let (seen, covered) = sighted(p, reason);
+            *slot = Some(Spot {
+                position: p,
+                score: base + seen,
+                reason,
+                covered,
+                low_cover: cover_height == Some(CoverHeight::Low),
+            });
+        });
+        for (spot, &(_, idx)) in out.into_iter().zip(batch) {
+            if let Some(spot) = spot {
+                kept.push(spot.score);
+                weighed.push((spot, idx));
+            }
+        }
+        next += batch.len();
+    }
+    weighed.sort_by(|a, b| b.0.score.total_cmp(&a.0.score).then(a.1.cmp(&b.1)));
+    let spots: Vec<Spot> = weighed.into_iter().map(|(s, _)| s).collect();
     drop(_score_span);
-    spots.sort_by(|a, b| b.score.total_cmp(&a.score));
     scored.extend(spots.iter().take(6).copied());
     // Take the best one we can actually walk to.
     let _paths_span = tracing::info_span!("choose position: paths").entered();
