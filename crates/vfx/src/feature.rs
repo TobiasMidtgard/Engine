@@ -414,6 +414,9 @@ impl RenderFeature for ParticleFeature {
                 sheet_texture(5),
                 sheet_texture(6),
                 sheet_texture(7),
+                sheet_texture(8),
+                sheet_texture(9),
+                sheet_texture(10),
             ],
         });
         let sheet_info = device.create_buffer(&wgpu::BufferDescriptor {

@@ -1,5 +1,5 @@
-//! Baked smoke flipbooks: simulated smoke rendered offline under six lights, drawn by the smoke
-//! and dust sprites in place of their procedural noise.
+//! Baked smoke flipbooks: simulated smoke rendered offline under six lights, drawn by the smoke,
+//! dust and fireball sprites in place of their procedural noise.
 //!
 //! Each sheet is a grid of frames of one puff over its life, made by `scripts/vfx-bake.py` (a
 //! small stable-fluids smoke simulation, Stam 1999, with vorticity confinement and billow detail)
@@ -23,11 +23,12 @@ use engine_render::Image;
 /// Where the sheets live under the asset root.
 pub const SHEET_DIR: &str = "fetched/vfx/flipbooks";
 
-/// The sheets and the sprite each one draws: smoke (kind 0) and dust (kind 1).
-pub const SHEETS: [(&str, u32); KINDS] = [("smoke_puff", 2), ("dust_burst", 9)];
+/// The sheets and the sprite each one draws: smoke (kind 0), dust (kind 1) and the burning
+/// billow of fireballs and explosions (kind 2, whose emission channel carries its glow).
+pub const SHEETS: [(&str, u32); KINDS] = [("smoke_puff", 2), ("dust_burst", 9), ("billow", 18)];
 
 /// Number of sheet kinds.
-pub const KINDS: usize = 2;
+pub const KINDS: usize = 3;
 
 /// Maps per sheet: lightmaps A, lightmaps B, motion.
 pub const MAPS: usize = 3;

@@ -1,7 +1,7 @@
 # Owner: Particles and magic effects. Baked smoke flipbooks for engine_vfx (crates/vfx/src/sheets.rs):
 # a small smoke simulation rendered under six lights per frame, made by scripts/vfx-bake.py.
 # Format and rules: AGENTS.md, "Art and large files". Fetch with `cargo run -p fetch-assets -- vfx`.
-# Without these files the smoke and dust sprites stay procedural.
+# Without these files the smoke, dust and fireball sprites stay procedural.
 
 # Smoke puff rising and billowing (64 frames, 8 x 8 grid of 256 px): lit from the right, top and back; alpha.
 [[file]]
@@ -64,5 +64,37 @@ source = "https://github.com/TobiasMidtgard/Engine/blob/main/scripts/vfx-bake.py
 path = "vfx/flipbooks/dust_burst.json"
 url = "mirror"
 sha256 = "db6566ff93c67469f2700fb1111dfde7885e9f911b3a486603af64efd1686f1a"
+license = "MIT OR Apache-2.0"
+source = "https://github.com/TobiasMidtgard/Engine/blob/main/scripts/vfx-bake.py"
+
+# Rolling fireball (64 frames, 8 x 8 grid of 256 px): a hot ball that rises, rolls and cools to soot; lit from the right, top and back; alpha.
+[[file]]
+path = "vfx/flipbooks/billow_a.png"
+url = "mirror"
+sha256 = "6b6fd1e76bb22a29d75580cfc970a6230a447de99439a4ddd094635503f7a088"
+license = "MIT OR Apache-2.0"
+source = "https://github.com/TobiasMidtgard/Engine/blob/main/scripts/vfx-bake.py"
+
+# Rolling fireball (64 frames, 8 x 8 grid of 256 px): lit from the left, bottom and front; emission (the burning gas's glow).
+[[file]]
+path = "vfx/flipbooks/billow_b.png"
+url = "mirror"
+sha256 = "2fe7d4190f6c92700300cccd02fc717990207418c4c82b08b38f911be1018776"
+license = "MIT OR Apache-2.0"
+source = "https://github.com/TobiasMidtgard/Engine/blob/main/scripts/vfx-bake.py"
+
+# Rolling fireball (64 frames, 8 x 8 grid of 256 px): motion vectors for frame blending.
+[[file]]
+path = "vfx/flipbooks/billow_mv.png"
+url = "mirror"
+sha256 = "4242767be089a880a5a0dcfe88708ac430df02f705de7e9a844b7a7da18f3ecb"
+license = "MIT OR Apache-2.0"
+source = "https://github.com/TobiasMidtgard/Engine/blob/main/scripts/vfx-bake.py"
+
+# Rolling fireball (64 frames, 8 x 8 grid of 256 px): grid, frames and the bake's settings.
+[[file]]
+path = "vfx/flipbooks/billow.json"
+url = "mirror"
+sha256 = "c000c8c8ce7dbe8f12a5ed6aa23e9781b9f210f0b60cd6f64937e20537631e02"
 license = "MIT OR Apache-2.0"
 source = "https://github.com/TobiasMidtgard/Engine/blob/main/scripts/vfx-bake.py"

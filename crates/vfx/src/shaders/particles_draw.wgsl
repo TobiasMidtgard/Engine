@@ -14,14 +14,14 @@
 @group(1) @binding(3) var scene_color: texture_2d<f32>; // HDR, pre-exposed (heat haze)
 @group(1) @binding(4) var<storage, read> order: array<u32>;
 
-// Baked flipbooks (`sheets.rs`): smoke (kind 0) and dust (kind 1). Unloaded kinds bind a 1x1
-// stand-in and flag 0.
+// Baked flipbooks (`sheets.rs`): smoke (kind 0), dust (kind 1) and the fireball's burning
+// billow (kind 2). Unloaded kinds bind a 1x1 stand-in and flag 0.
 struct SheetInfo {
     // Per kind: frames across, frames down, frames used, flags (0 none, 1 lightmaps, 2 with
     // motion vectors).
-    kinds: array<vec4<f32>, 2>,
+    kinds: array<vec4<f32>, 3>,
     // Per kind: pixels per frame (x, y), lightmap gain (z), unused (w).
-    cells: array<vec4<f32>, 2>,
+    cells: array<vec4<f32>, 3>,
 };
 @group(2) @binding(0) var<uniform> sheet_info: SheetInfo;
 @group(2) @binding(1) var sheet_sampler: sampler;
@@ -31,6 +31,9 @@ struct SheetInfo {
 @group(2) @binding(5) var dust_a: texture_2d<f32>;
 @group(2) @binding(6) var dust_b: texture_2d<f32>;
 @group(2) @binding(7) var dust_mv: texture_2d<f32>;
+@group(2) @binding(8) var billow_a: texture_2d<f32>;
+@group(2) @binding(9) var billow_b: texture_2d<f32>;
+@group(2) @binding(10) var billow_mv: texture_2d<f32>;
 
 struct VsOut {
     @builtin(position) position: vec4<f32>,
@@ -80,7 +83,7 @@ fn vs_particle(@builtin(vertex_index) vi: u32, @builtin(instance_index) instance
     let facing = u32(e.spin_look.w);
     // A baked puff rises up its frame, so it only leans a little either way.
     var rot = p.rot;
-    if (sheet_kind(u32(e.spin_look.z)) < 2u) {
+    if (sheet_kind(u32(e.spin_look.z)) < 3u) {
         rot = sin(p.rot) * 0.3;
     }
     let cr = cos(rot);
@@ -424,11 +427,13 @@ fn foam(c: vec2<f32>, r: f32, seed: f32, age: f32, pixels: f32) -> f32 {
 }
 
 // ---------------------------------------------------------------- baked sheets
-// The sheet kind a sprite draws from (0 smoke, 1 dust), or 2 when it has no loaded sheet.
+// The sheet kind a sprite draws from (0 smoke, 1 dust, 2 billow), or 3 when it has no loaded
+// sheet.
 fn sheet_kind(sprite: u32) -> u32 {
     if (sprite == 2u && sheet_info.kinds[0].w >= 1.0) { return 0u; }
     if (sprite == 9u && sheet_info.kinds[1].w >= 1.0) { return 1u; }
-    return 2u;
+    if (sprite == 18u && sheet_info.kinds[2].w >= 1.0) { return 2u; }
+    return 3u;
 }
 
 // One map of a sheet (0 lightmaps A, 1 lightmaps B, 2 motion) at sheet UV `uv`. Sampled at an
@@ -439,9 +444,14 @@ fn sheet_map(kind: u32, map: u32, uv: vec2<f32>, lod: f32) -> vec4<f32> {
         if (map == 1u) { return textureSampleLevel(smoke_b, sheet_sampler, uv, lod); }
         return textureSampleLevel(smoke_mv, sheet_sampler, uv, lod);
     }
-    if (map == 0u) { return textureSampleLevel(dust_a, sheet_sampler, uv, lod); }
-    if (map == 1u) { return textureSampleLevel(dust_b, sheet_sampler, uv, lod); }
-    return textureSampleLevel(dust_mv, sheet_sampler, uv, lod);
+    if (kind == 1u) {
+        if (map == 0u) { return textureSampleLevel(dust_a, sheet_sampler, uv, lod); }
+        if (map == 1u) { return textureSampleLevel(dust_b, sheet_sampler, uv, lod); }
+        return textureSampleLevel(dust_mv, sheet_sampler, uv, lod);
+    }
+    if (map == 0u) { return textureSampleLevel(billow_a, sheet_sampler, uv, lod); }
+    if (map == 1u) { return textureSampleLevel(billow_b, sheet_sampler, uv, lod); }
+    return textureSampleLevel(billow_mv, sheet_sampler, uv, lod);
 }
 
 // Sheet UV of point `uv` (0..1 in the frame, v down) of frame `i`, kept inside the frame.
@@ -865,6 +875,21 @@ fn fireball(in: VsOut, c: vec2<f32>) -> vec4<f32> {
     return vec4<f32>(light / max(alpha, 1e-4), alpha);
 }
 
+// A fireball from the baked billow sheet: the simulated ball rolling up and out, glowing where
+// its gas is still hot (the sheet's emission, heat x density) and turning to soot lit by the
+// scene, six-way, as it cools over the sheet's frames. Its first frames, while the gas is still
+// being lit, are skipped: a fireball is born hot. It lingers over its hot frames, and the
+// embers in its folds keep glowing while the rest has turned to soot.
+fn sheet_fireball(in: VsOut) -> vec4<f32> {
+    let k = sheet_sample(2u, in.uv, 0.06 + 0.94 * pow(saturate(in.age), 1.15), in.pixels, in.seed);
+    let alpha = k.a.a;
+    if (alpha <= 0.002) { return vec4<f32>(0.0); }
+    let heat = saturate(pow(k.b.a / max(alpha, 0.08), 0.85) * 1.7);
+    let glow = heat_color(in.radiance, heat * 0.85) * (2.2 * heat * heat * heat * smoothstep(0.15, 0.5, heat));
+    let soot = in.glint * 0.06 * six_way(2u, k, in.sun);
+    return vec4<f32>(glow + soot, alpha);
+}
+
 // A portal: the world behind it swirled into a vortex that sinks into the portal's color and
 // darkens toward its eye, glowing arms turning inward and a burning rim. `jx` and `jy` are how
 // the sprite coordinates change per pixel across and down the screen, to turn a shift within
@@ -1115,9 +1140,15 @@ fn fs_particle(in: VsOut) -> @location(0) vec4<f32> {
             rgb = mix(rgb, vec3<f32>(dot(rgb, vec3<f32>(0.3, 0.5, 0.2))), saturate((e - 1.0) * 2.0) * 0.7) * (0.4 + e);
         }
         case 18u: { // fireball: a burning, cooling volume of gas
-            let f = fireball(in, c);
-            rgb = f.rgb;
-            a = f.a;
+            if (sheet_kind(18u) == 2u) {
+                let f = sheet_fireball(in);
+                rgb = f.rgb;
+                a = f.a;
+            } else {
+                let f = fireball(in, c);
+                rgb = f.rgb;
+                a = f.a;
+            }
         }
         case 17u: { // blaze: a whole fire from its base (uv.y 0) up
             let b = blaze(c, in.uv.y, in.seed);
