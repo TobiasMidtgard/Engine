@@ -2898,6 +2898,9 @@ pub enum DebrisKind {
     Reeds,
     /// A small stone (spawned as a [`Rock`]).
     Pebble,
+    /// A tree's lateral root showing above the ground, running out from its trunk: across the
+    /// trail where boots and rain have worn the soil off it, a short way elsewhere.
+    Root,
 }
 
 /// Where one piece of debris goes (local to its cover).
@@ -2911,7 +2914,7 @@ pub struct DebrisSpot {
 }
 
 /// Most pieces of each kind one cover scatters.
-const DEBRIS_CAP: [(DebrisKind, usize); 7] = [
+const DEBRIS_CAP: [(DebrisKind, usize); 8] = [
     (DebrisKind::Twig, 1400),
     (DebrisKind::Branch, 220),
     (DebrisKind::PineCone, 700),
@@ -2919,6 +2922,7 @@ const DEBRIS_CAP: [(DebrisKind, usize); 7] = [
     (DebrisKind::Leaves, 800),
     (DebrisKind::Reeds, 60),
     (DebrisKind::Pebble, 1300),
+    (DebrisKind::Root, 600),
 ];
 
 /// Variants of each debris mesh.
@@ -2927,6 +2931,11 @@ const BRANCH_VARIANTS: u32 = 3;
 const CONE_VARIANTS: u32 = 2;
 const LEAF_VARIANTS: u32 = 3;
 const REED_VARIANTS: u32 = 3;
+/// Root meshes: lengths at scale 1, meters (each piece picks the one nearest the length it
+/// wants at the scale its trunk sets).
+const ROOT_LENGTHS: [f32; 7] = [0.9, 1.4, 2.0, 2.7, 3.5, 4.4, 5.4];
+/// A root mesh's radius where it leaves the trunk, at scale 1, meters.
+const ROOT_RADIUS_M: f32 = 0.11;
 
 /// Decide where debris lies on a cover: twigs, branches and cones or leaf clumps under each
 /// tree (by its kind), pebbles here and there (more on dry ground, along the trail and on
@@ -2964,6 +2973,7 @@ pub fn scatter_debris(cover: &GroundCover, inputs: &CoverInputs) -> Vec<DebrisSp
         if cover.trail.len() >= 2 {
             let d = polyline_distance(p, &cover.trail) / cover.trail_half_width.max(0.1);
             let pass = match kind {
+                DebrisKind::Root => 1.0,
                 DebrisKind::Twig | DebrisKind::Pebble => 0.15,
                 DebrisKind::PineCone | DebrisKind::SpruceCone => 0.1,
                 _ => 0.0,
@@ -2984,10 +2994,12 @@ pub fn scatter_debris(cover: &GroundCover, inputs: &CoverInputs) -> Vec<DebrisSp
         {
             return false;
         }
-        !inputs
-            .trees
-            .iter()
-            .any(|t| (p - t.pos).length() < t.trunk + 0.12)
+        // A root starts at its own trunk (and is placed by [`exposed_roots`]).
+        kind == DebrisKind::Root
+            || !inputs
+                .trees
+                .iter()
+                .any(|t| (p - t.pos).length() < t.trunk + 0.12)
     };
     let mut push = |kind: DebrisKind, p: Vec2, rng: &mut Rng, out: &mut Vec<DebrisSpot>| {
         let cap = DEBRIS_CAP
@@ -3006,6 +3018,7 @@ pub fn scatter_debris(cover: &GroundCover, inputs: &CoverInputs) -> Vec<DebrisSp
             DebrisKind::Leaves => LEAF_VARIANTS,
             DebrisKind::Reeds => REED_VARIANTS,
             DebrisKind::Pebble => ROCK_SHAPES,
+            DebrisKind::Root => ROOT_LENGTHS.len() as u32,
         };
         out.push(DebrisSpot {
             kind,
@@ -3082,6 +3095,13 @@ pub fn scatter_debris(cover: &GroundCover, inputs: &CoverInputs) -> Vec<DebrisSp
                 push(DebrisKind::Leaves, p, &mut rng, &mut out);
             }
         }
+        for r in exposed_roots(cover, inputs, &mut rng) {
+            let before = out.len();
+            push(DebrisKind::Root, r.pos, &mut rng, &mut out);
+            if let Some(placed) = out.get_mut(before) {
+                *placed = r;
+            }
+        }
         // Reeds and shore pebbles around ponds.
         for pool in cover.pools.iter().filter(|p| !p.mineral) {
             let c = Vec2::from(pool.center);
@@ -3140,6 +3160,177 @@ pub fn scatter_debris(cover: &GroundCover, inputs: &CoverInputs) -> Vec<DebrisSp
     out
 }
 
+/// Lateral roots showing at the surface. A tree's structural roots run out radially in the top
+/// 20-30 cm of soil, thick for the first meter or two (the zone of rapid taper) and thin past
+/// it (Coutts 1983; Gilman, University of Florida woody plants, root growth and depth). Along
+/// a trail, trampling and runoff strip the soil off them, so those within a few meters of the
+/// tread lie bare across it, worn pale on top (Pelfini and Santilli 2006, exposed roots along
+/// hiking trails in the Italian Alps); elsewhere only the first meter or so of the biggest
+/// trees' roots shows, where they flare from the trunk.
+fn exposed_roots(cover: &GroundCover, inputs: &CoverInputs, rng: &mut Rng) -> Vec<DebrisSpot> {
+    let mut out = Vec::new();
+    let half = cover.trail_half_width.max(0.1);
+    let trail = (cover.trail.len() >= 2).then_some(&cover.trail);
+    // The nearest point of the trail's center line, and how far it is.
+    let nearest = |p: Vec2, line: &[[f32; 2]]| {
+        let mut best = (f32::INFINITY, p);
+        for w in line.windows(2) {
+            let (a, b) = (Vec2::from(w[0]), Vec2::from(w[1]));
+            let ab = b - a;
+            let t = ((p - a).dot(ab) / ab.length_squared().max(1e-6)).clamp(0.0, 1.0);
+            let q = a + ab * t;
+            let d = q.distance(p);
+            if d < best.0 {
+                best = (d, q);
+            }
+        }
+        best
+    };
+    for t in inputs.trees.iter().filter(|t| !t.shrub && t.trunk >= 0.09) {
+        // Scale: the root's thickness follows its trunk's (two fifths of its radius).
+        let scale = (t.trunk * 0.4 / ROOT_RADIUS_M).clamp(0.6, 1.5);
+        let mut root = |dir: Vec2, length: f32, rng: &mut Rng| {
+            let dir = dir.normalize_or_zero();
+            if dir == Vec2::ZERO || length < 0.4 {
+                return;
+            }
+            let at = length / scale;
+            let variant = ROOT_LENGTHS
+                .iter()
+                .enumerate()
+                .min_by(|a, b| (a.1 - at).abs().total_cmp(&(b.1 - at).abs()))
+                .map_or(0, |v| v.0);
+            let s = (length / ROOT_LENGTHS[variant]).clamp(0.5, 1.8);
+            out.push(DebrisSpot {
+                kind: DebrisKind::Root,
+                variant: variant as u32,
+                pos: t.pos + dir * t.trunk * 0.7,
+                // The mesh runs along +X; a turn by yaw takes +X to (cos, -sin).
+                yaw: (-dir.y).atan2(dir.x) + rng.range(-0.04, 0.04),
+                scale: s,
+            });
+        };
+        let toward = trail.map(|line| nearest(t.pos, line));
+        match toward {
+            Some((d, q)) if d < half + 2.5 + 10.0 * t.trunk => {
+                // Bared across the tread: two to four roots fanning toward it, reaching past
+                // its far edge (or dying out short of it when the tree stands well back).
+                let to = (q - t.pos).normalize_or_zero();
+                let n = rng.range_i32(2, 5);
+                for k in 0..n {
+                    let fan = (k as f32 - (n - 1) as f32 * 0.5) * rng.range(0.35, 0.6);
+                    let dir = Vec2::from_angle(fan).rotate(to);
+                    let reach = (d + half * rng.range(0.4, 1.1)) / dir.dot(to).max(0.4);
+                    root(dir, reach.min(6.0) - t.trunk * 0.7, rng);
+                }
+                // And the flare on its other sides.
+                for _ in 0..rng.range_i32(1, 3) {
+                    let a = rng.range(0.0, TAU);
+                    root(Vec2::from_angle(a), rng.range(0.7, 1.4) * scale, rng);
+                }
+            }
+            _ if t.trunk >= 0.2 && t.shed > 0.3 => {
+                for _ in 0..rng.range_i32(0, 3) {
+                    let a = rng.range(0.0, TAU);
+                    root(Vec2::from_angle(a), rng.range(0.6, 1.2) * scale, rng);
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// A lateral root lying along +X from the trunk's side (x = 0) for `len` meters: thick where it
+/// leaves the trunk and tapering fast, arching out of the soil and back into it, with a rootlet
+/// or two. Mostly buried: what shows is its upper side, bark dark brown in the soil's shade and
+/// worn grey-brown on top where boots rub it.
+pub fn root_mesh(seed: u64, len: f32) -> Mesh {
+    let mut rng = Rng::new(seed);
+    let mut b = MeshBuilder::new();
+    let r0 = ROOT_RADIUS_M;
+    let n = ((len * 8.0).ceil() as usize).max(8);
+    let (wob, rise, bulge) = (rng.next_u64(), rng.next_u64(), rng.next_u64());
+    // Thick for its first meter, then a long thin tail (the zone of rapid taper).
+    let radius = |t: f32, x: f32| {
+        let lump = 1.0
+            + 0.18 * perlin2(x as f64 * 3.0, 0.5, bulge) as f32
+            + 0.08 * perlin2(x as f64 * 11.0, 2.5, bulge) as f32;
+        r0 * (0.28 + 0.72 * (-1.6 * t).exp()) * lump
+    };
+    let mut path = Vec::with_capacity(n + 1);
+    let mut radii = Vec::with_capacity(n + 1);
+    let step = len / n as f32;
+    let (mut p, mut heading) = (Vec2::ZERO, rng.range(-0.15, 0.15));
+    for i in 0..=n {
+        let t = i as f32 / n as f32;
+        let x = p.x;
+        let r = radius(t, x);
+        // How far it stands out of the soil: arches out and dives back under, so the bare
+        // stretches run a meter or so (and where it leaves the trunk it starts under the
+        // flare), its end buried.
+        let e = smoothstep(-0.1, 0.3, perlin2(x as f64 * 1.3, 1.5, rise) as f32);
+        let out = (-0.15 + 0.85 * e) * smoothstep(0.0, 0.15, x) * (1.0 - smoothstep(0.7, 1.0, t));
+        let y = r * (2.0 * out - 1.0);
+        path.push(Vec3::new(p.x - 0.08, y, p.y));
+        radii.push(r);
+        // It winds: its heading wanders around the straight line out from the trunk.
+        let want = 0.55 * perlin2(x as f64 * 0.9, 3.5, wob) as f32
+            + 0.25 * perlin2(x as f64 * 2.7, 7.5, wob) as f32;
+        heading += (want - heading) * 0.5;
+        p += Vec2::new(heading.cos(), heading.sin()) * step;
+    }
+    let barks = [0x3a2e24, 0x43362a, 0x30271e];
+    let bark = srgb(*rng.pick(&barks).unwrap());
+    let worn = srgb(0x6e604f);
+    let knot = rng.next_u64();
+    let color = move |i: usize, around: f32| {
+        let k = perlin2(i as f64 * 0.9, around as f64 * 4.0, knot) as f32 * 0.35
+            + perlin2(i as f64 * 0.21, 0.5, knot ^ 0x5) as f32 * 0.25;
+        lin4(bark, 1.0 + k)
+    };
+    b.tube(&path, &radii, 9, 1.0, &color, None, None);
+    for _ in 0..rng.range_i32(1, 4) {
+        let k = rng.range_i32(2, (n as i32 - 2).max(3)) as usize;
+        let side = if rng.chance(0.5) { 1.0 } else { -1.0 };
+        let a = rng.range(0.5, 1.1) * side;
+        let dir = Vec3::new(a.cos(), 0.0, a.sin());
+        let l = rng.range(0.3, 0.9).min(len * 0.5);
+        let r1 = radii[k] * 0.5;
+        let m = 5;
+        let (lp, lr): (Vec<Vec3>, Vec<f32>) = (0..=m)
+            .map(|i| {
+                let t = i as f32 / m as f32;
+                let p = path[k] + dir * l * t - Vec3::Y * r1 * (0.3 + 1.2 * t * t);
+                (p, r1 * (1.0 - 0.75 * t))
+            })
+            .unzip();
+        b.tube(&lp, &lr, 5, 1.0, &color, None, None);
+    }
+    // The top worn pale and smooth in patches where it stands proud, the sides stained with
+    // soil down where they meet the ground.
+    let soil = srgb(0x2a2219);
+    let wseed = rng.next_u64();
+    for v in &mut b.vertices {
+        let top = smoothstep(0.5, 0.95, v.normal[1]);
+        let proud = smoothstep(0.0, 0.5 * r0, v.position[1]);
+        let patch = smoothstep(
+            -0.1,
+            0.4,
+            perlin2(v.position[0] as f64 * 2.2, 0.0, wseed) as f32,
+        );
+        let f = (top * patch * proud * 0.6).clamp(0.0, 0.6);
+        for (c, w) in v.color.iter_mut().zip(worn) {
+            *c += (w - *c) * f;
+        }
+        let low = 1.0 - smoothstep(-0.2 * r0, 0.35 * r0, v.position[1]);
+        for (c, d) in v.color.iter_mut().zip(soil) {
+            *c += (d - *c) * low * 0.6;
+        }
+    }
+    b.finish()
+}
+
 /// Shared meshes and materials of scattered debris and reeds.
 #[derive(Resource, Clone)]
 pub struct SceneryAssets {
@@ -3149,6 +3340,7 @@ pub struct SceneryAssets {
     pub spruce_cones: Vec<Handle<Mesh>>,
     pub leaf_clumps: Vec<Handle<Mesh>>,
     pub reeds: Vec<Handle<Mesh>>,
+    pub roots: Vec<Handle<Mesh>>,
     pub bark: Handle<StandardMaterial>,
     pub cones: Handle<StandardMaterial>,
     pub leaves: Handle<StandardMaterial>,
@@ -3174,6 +3366,9 @@ fn scenery_assets(world: &mut World) -> Option<SceneryAssets> {
     let spruce_cones = add_all(CONE_VARIANTS, &|s| cone_mesh(true, s));
     let leaf_clumps = add_all(LEAF_VARIANTS, &leaf_clump_mesh);
     let reeds = add_all(REED_VARIANTS, &reed_mesh);
+    let roots = (0..ROOT_LENGTHS.len())
+        .map(|i| meshes.add(root_mesh(0x2007 + i as u64 * 104_729, ROOT_LENGTHS[i])))
+        .collect();
     let mut materials = world.get_resource_mut::<Assets<StandardMaterial>>()?;
     let bark = materials.add(StandardMaterial::color(1.0, 1.0, 1.0).with_roughness(0.9));
     let cones = materials.add(StandardMaterial::color(1.0, 1.0, 1.0).with_roughness(0.78));
@@ -3199,6 +3394,7 @@ fn scenery_assets(world: &mut World) -> Option<SceneryAssets> {
         spruce_cones,
         leaf_clumps,
         reeds,
+        roots,
         bark,
         cones,
         leaves,
@@ -3711,6 +3907,7 @@ impl PlacedDebris {
                         (assets.leaf_clumps[v], assets.leaves, false, 30.0)
                     }
                     DebrisKind::Reeds => (assets.reeds[v], assets.reed, true, 90.0),
+                    DebrisKind::Root => (assets.roots[v], assets.bark, true, 60.0),
                 };
                 let mut renderer = MeshRenderer::new(mesh, material);
                 renderer.cast_shadows = shadows;
@@ -5392,6 +5589,30 @@ mod tests {
             "leaves away from broadleaves"
         );
         assert!(spots.iter().any(|s| s.kind == DebrisKind::Reeds));
+        // Roots run out from trunks, and some lie bare across the trail.
+        let roots: Vec<_> = spots
+            .iter()
+            .filter(|s| s.kind == DebrisKind::Root)
+            .collect();
+        assert!(!roots.is_empty());
+        for r in &roots {
+            assert!(
+                inputs
+                    .trees
+                    .iter()
+                    .any(|t| t.pos.distance(r.pos) <= t.trunk),
+                "{r:?} not at a trunk"
+            );
+        }
+        let crosses = roots.iter().filter(|r| {
+            let dir = Vec2::new(r.yaw.cos(), -r.yaw.sin());
+            let len = ROOT_LENGTHS[r.variant as usize] * r.scale;
+            (0..=20).any(|k| {
+                let p = r.pos + dir * len * k as f32 / 20.0;
+                polyline_distance(p, &cover.trail) < cover.trail_half_width * 0.5
+            })
+        });
+        assert!(crosses.count() >= 2, "no roots across the trail");
     }
 
     #[test]
