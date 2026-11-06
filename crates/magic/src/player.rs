@@ -346,12 +346,17 @@ pub fn equip_player(
     }
 }
 
-/// The keys and the camera into [`CastInput`] (every frame, so no press is missed).
+/// The keys and the camera into [`CastInput`] (every frame, so no press is missed). A
+/// character without its controller (the pilot parked when play mode ends, while the number
+/// keys jump the free camera around) hears nothing.
 #[allow(clippy::type_complexity)]
 pub fn read_spell_keys(
     actions: Option<Res<ActionState>>,
     cameras: Query<(&Camera, &GlobalTransform)>,
-    mut players: Query<&mut CastInput, (With<SpellBar>, Without<ScriptedInput>)>,
+    mut players: Query<
+        (&mut CastInput, Has<CharacterController>),
+        (With<SpellBar>, Without<ScriptedInput>),
+    >,
 ) {
     let Some(actions) = actions else {
         return;
@@ -361,7 +366,13 @@ pub fn read_spell_keys(
         .filter(|(c, _)| c.active)
         .max_by_key(|(c, _)| c.order)
         .map(|(_, t)| (t.translation(), (t.rotation() * Vec3::NEG_Z).normalize()));
-    for mut input in &mut players {
+    for (mut input, playing) in &mut players {
+        if !playing {
+            if *input != CastInput::default() {
+                *input = CastInput::default();
+            }
+            continue;
+        }
         for i in 0..SLOTS {
             let a = action_name(i);
             input.down[i] = actions.pressed(&a);
