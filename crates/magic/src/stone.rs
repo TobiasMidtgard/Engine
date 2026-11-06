@@ -3,18 +3,18 @@
 //! step where a bolt lands. Each is a kinematic physics body (the engine_world physics
 //! contract), so bolts burst on it, crates and people stand on it, and a rising pillar lifts
 //! whatever is on top. Stone comes up heavier than light (a wall in 0.35 s with a small
-//! overshoot and a puff of dust; a pillar slowly enough to ride), stands for the spell's time or
+//! overshoot and a burst of gravel; a pillar slowly enough to ride), stands for the spell's time or
 //! its wall's, and grinds back down. A stone grip is a ring of rocks around a body's feet that
 //! holds it (`Statuses::rooted`) until it wears off or fire cracks it.
 
 use engine_core::math::{DVec3, Quat, Vec3};
 use engine_core::prelude::*;
 use engine_render::{MaterialPreset, MaterialRef, MeshRef, MeshRenderer, Shape, StandardMaterial};
-use engine_world::SmokeEmission;
 use engine_world::physics::{
     BodyKind, CharacterController, Collider, ColliderShape, PhysicsQueries, QueryFilter, RigidBody,
 };
 
+use crate::looks::{LookCmd, Role};
 use crate::runtime::{LookPiece, MagicQueue, roll};
 use crate::status::Afflictions;
 
@@ -44,8 +44,16 @@ impl StoneKind {
     pub fn rise_secs(self, height: f32) -> f32 {
         match self {
             StoneKind::Wall | StoneKind::Block => RISE_SECS,
-            StoneKind::Pillar => (0.6 + 0.3 * height).clamp(1.0, 2.4),
+            StoneKind::Pillar => (0.8 + 0.35 * height).clamp(1.2, 3.2),
             StoneKind::Grip => 0.25,
+        }
+    }
+
+    /// How much of its height stands above the ground `age` s into a rise of `secs`.
+    pub fn risen(self, age: f32, secs: f32) -> f32 {
+        match self {
+            StoneKind::Pillar => climb(age, secs),
+            _ => rise(age, secs),
         }
     }
 }
@@ -74,6 +82,8 @@ pub struct StoneBody {
     /// The ground under it: the stone's base when it stands.
     pub base: DVec3,
     pub height: f32,
+    /// Width, height, depth, m.
+    pub size: Vec3,
     pub rise_secs: f32,
     pub age: f32,
     pub life: f32,
@@ -102,13 +112,28 @@ pub fn rise(age: f32, secs: f32) -> f32 {
     }
 }
 
-/// The size of the stone a spell raises: `stone_m` is its height, `width` a wall piece's.
+/// A climb from rest to rest, for a pillar: what stands on it is lifted, not kicked. A heave's
+/// first instant would hit a crate at 7 m/s and throw it; this one's speed and its slowing
+/// (π²·h/2T² at the ends) stay under gravity's.
+pub fn climb(age: f32, secs: f32) -> f32 {
+    let t = (age / secs.max(1e-3)).clamp(0.0, 1.0);
+    0.5 - 0.5 * (std::f32::consts::PI * t).cos()
+}
+
+/// The size of the stone a spell raises: `stone_m` is its height, `width` a wall piece's (or a
+/// pillar's girth; 0 for the girth its height gives).
 pub fn stone_size(kind: StoneKind, stone_m: f32, width: f32) -> Vec3 {
     match kind {
-        StoneKind::Wall => Vec3::new(width * 1.08, stone_m, 0.75),
-        // A pillar stands a third taller than a wall and as thick as a man is tall.
+        // Each block overlaps its neighbours by a third, so the wall reads as one rampart
+        // of rough rock, not a row of boulders.
+        StoneKind::Wall => Vec3::new(width * 1.35, stone_m, 0.9),
+        // A pillar stands a third taller than a wall and about as thick as a man is tall.
         StoneKind::Pillar => {
-            let d = (0.6 + 0.25 * stone_m).clamp(1.0, 2.2);
+            let d = if width > 0.0 {
+                width
+            } else {
+                (0.6 + 0.25 * stone_m).clamp(1.0, 2.2)
+            };
             Vec3::new(d, stone_m * 1.35, d)
         }
         StoneKind::Block => Vec3::new(1.2, (stone_m * 0.45).clamp(0.5, 1.3), 1.2),
@@ -128,9 +153,18 @@ pub fn spawn_stone(commands: &mut Commands, s: NewStone) -> Entity {
         * Quat::from_rotation_x(close);
     let size = s.size;
     let material = StandardMaterial::preset(MaterialPreset::Rock).with_triplanar_world();
+    // The rock mesh is centered on its origin: it starts with its top at the ground. A pillar
+    // still has to find the solid ground under loose bodies, so it waits deep down, with no
+    // collider yet: a box appearing inside a crate stack would burst it apart.
+    let grounded = s.kind != StoneKind::Pillar;
+    let start = if grounded {
+        s.at - DVec3::Y * (size.y * 0.5) as f64
+    } else {
+        s.at - DVec3::Y * (size.y * 1.5 + 3.0) as f64
+    };
     let mut ec = commands.spawn((
         Name::new("Spell stone"),
-        Transform::from_translation(s.at - DVec3::Y * size.y as f64).with_rotation(rest),
+        Transform::from_translation(start).with_rotation(rest),
         MeshRenderer::new(
             MeshRef::Shape(Shape::Rock {
                 size: size.to_array(),
@@ -144,35 +178,37 @@ pub fn spawn_stone(commands: &mut Commands, s: NewStone) -> Entity {
             owner: s.owner,
             base: s.at,
             height: size.y,
+            size,
             rise_secs: s.kind.rise_secs(size.y),
             age: 0.0,
             life: s.life,
             sink: None,
             dusted: false,
-            grounded: s.kind != StoneKind::Pillar,
+            grounded,
         },
     ));
-    if s.kind != StoneKind::Grip {
-        ec.insert((
-            // A box a little inside the rock, so what hits it meets the rock's face.
-            Collider {
-                shape: ColliderShape::Compound(vec![(
-                    Vec3::new(0.0, size.y * 0.5, 0.0),
-                    Quat::IDENTITY,
-                    ColliderShape::Cuboid {
-                        half_extents: Vec3::new(size.x * 0.46, size.y * 0.5, size.z * 0.44),
-                    },
-                )]),
-                density: 2600.0,
-                ..Default::default()
-            },
-            RigidBody {
-                kind: BodyKind::Kinematic,
-                ..Default::default()
-            },
-        ));
+    if grounded && s.kind != StoneKind::Grip {
+        ec.insert(solid(size));
     }
     ec.id()
+}
+
+/// A stone's physics: a kinematic box a little inside the rock, so what hits it meets the
+/// rock's face.
+pub fn solid(size: Vec3) -> (Collider, RigidBody) {
+    (
+        Collider {
+            shape: ColliderShape::Cuboid {
+                half_extents: Vec3::new(size.x * 0.46, size.y * 0.5, size.z * 0.44),
+            },
+            density: 2600.0,
+            ..Default::default()
+        },
+        RigidBody {
+            kind: BodyKind::Kinematic,
+            ..Default::default()
+        },
+    )
 }
 
 /// The rocks of a stone grip around feet at `at`, leaning in (from the hit that roots).
@@ -227,7 +263,6 @@ pub fn raise_stone(
         Option<&ChildOf>,
     )>,
     mut queue: ResMut<MagicQueue>,
-    mut dust: MessageWriter<SmokeEmission>,
 ) {
     let dt = time.delta_secs();
     // A body that moves on its own (or a part of one): stone rises under it.
@@ -254,19 +289,31 @@ pub fn raise_stone(
             {
                 s.base = g;
             }
+            // Solid from where it really starts (the flush inserts it this same step).
+            queue.solids.push((e, s.size));
         }
         s.age += dt;
         if !s.dusted {
-            // Dust and grit thrown up where it breaks the ground.
+            // Gravel and a low skirt of dust where it breaks the ground (the particles
+            // module's stone impact). A smoke emission per block hid the whole wall in a
+            // cloud; a step shows its bolt's impact instead.
             s.dusted = true;
-            dust.write(SmokeEmission {
-                position: s.base + DVec3::Y * 0.3,
-                velocity: Vec3::Y * 1.4,
-                radius: (s.height * 0.4).clamp(0.6, 2.0),
-                mass_kg: 0.05 * s.height,
-                temperature_c: 25.0,
-                darkness: 0.3,
-            });
+            let scale = match s.kind {
+                StoneKind::Wall => 0.55,
+                StoneKind::Pillar => (s.height / 4.0).clamp(0.6, 1.4),
+                StoneKind::Grip => 0.3,
+                StoneKind::Block => 0.0,
+            };
+            if scale > 0.0 {
+                queue.looks.push(LookCmd::Burst {
+                    at: s.base + DVec3::Y * 0.1,
+                    up: Vec3::Y,
+                    look: "stone".into(),
+                    role: Role::Impact,
+                    scale,
+                    color: crate::combine::STONE_COLOR,
+                });
+            }
         }
         let ended = match (s.kind, s.owner) {
             // A grip holds while its body is rooted (fire cracks it early).
@@ -284,7 +331,7 @@ pub fn raise_stone(
         } else {
             SINK_SECS
         };
-        let mut up = rise(s.age, s.rise_secs);
+        let mut up = s.kind.risen(s.age, s.rise_secs);
         if let Some(t) = s.sink.as_mut() {
             *t += dt;
             let k = (*t / sink_secs).min(1.0);
@@ -293,7 +340,8 @@ pub fn raise_stone(
                 queue.despawn.push(e);
             }
         }
-        tf.translation = s.base - DVec3::Y * (s.height * (1.0 - up)) as f64;
+        // Its center: half its height under the ground when sunk, half over it when standing.
+        tf.translation = s.base + DVec3::Y * (s.height * (up - 0.5)) as f64;
     }
 }
 
@@ -314,13 +362,17 @@ mod tests {
 
     #[test]
     fn a_pillar_climbs_gently_enough_to_ride() {
-        // Its ease-out decelerates slower than gravity, so a body on top stays on it.
+        // It starts and stops at rest and never slows faster than gravity, so a body on top
+        // rides it up instead of being thrown.
         for stone_m in [1.2, 2.1, 3.3, 5.0] {
             let h = stone_size(StoneKind::Pillar, stone_m, 0.0).y * 1.4;
             let secs = StoneKind::Pillar.rise_secs(h);
-            let up = 0.7 * secs;
-            let decel = 2.0 * OVERSHOOT * h / (up * up);
-            assert!(decel < 9.81, "{stone_m} m: {decel} m/s²");
+            let decel = std::f32::consts::PI.powi(2) * h / (2.0 * secs * secs);
+            assert!(decel < 9.81 * 0.8, "{stone_m} m: {decel} m/s²");
+            let dt = 0.001;
+            let v0 = h * StoneKind::Pillar.risen(dt, secs) / dt;
+            assert!(v0 < 0.1, "starts at rest: {v0} m/s");
+            assert_eq!(StoneKind::Pillar.risen(secs, secs), 1.0);
         }
     }
 

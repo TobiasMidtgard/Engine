@@ -255,6 +255,8 @@ pub struct MagicQueue {
     pub statuses: Vec<(Entity, engine_world::Statuses)>,
     /// Stone to raise (Shaping: pillars, steps, grips; walls raise theirs in the flush).
     pub stones: Vec<crate::stone::NewStone>,
+    /// Stones that found their ground and become solid now (pillars), with their size.
+    pub solids: Vec<(Entity, Vec3)>,
 }
 
 /// Bodies spells look for: anything with health, a skeleton or a character controller.
@@ -856,14 +858,16 @@ pub fn release(
     }
 }
 
-/// The pillar a stone spell raises at `at`: a third taller with lift, as the list's Pillar.
+/// The pillar a stone spell raises at `at`: taller still with lift, as the list's Pillar.
 pub fn pillar(spell: &Spell, at: DVec3, facing: Vec3, seed: u64, scale: f32) -> NewStone {
     use crate::stone::{StoneKind, stone_size};
     let lifted = spell
         .payload
         .force
         .is_some_and(|(d, _)| d == crate::effects::ForceDir::Up);
-    let mut size = stone_size(StoneKind::Pillar, spell.payload.stone_m, 0.0);
+    // As wide as the area's heart: Size makes a broader column, not a taller one.
+    let girth = (spell.carrier.radius * 0.45).clamp(1.0, 3.0);
+    let mut size = stone_size(StoneKind::Pillar, spell.payload.stone_m, girth);
     size.y *= if lifted { 1.4 } else { 1.0 } * scale.clamp(0.6, 1.5);
     NewStone {
         kind: StoneKind::Pillar,
@@ -1694,12 +1698,13 @@ pub fn follow_looks(
         &mut FollowLook,
         &mut SpellPos,
         Option<&mut MeshRenderer>,
+        Option<&mut engine_world::SpellLook>,
     )>,
     owners: Query<(&GlobalTransform, Option<&Afflictions>)>,
     mut queue: ResMut<MagicQueue>,
 ) {
     let dt = time.delta_secs();
-    for (e, mut f, mut sp, mesh) in &mut looks {
+    for (e, mut f, mut sp, mesh, look) in &mut looks {
         if let Some(t) = f.fading.as_mut() {
             *t += dt;
             if *t > 1.5 {
@@ -1731,6 +1736,14 @@ pub fn follow_looks(
             }
             continue;
         }
+        // The look's scale follows how bad the status is (vfx restyles on a changed scale):
+        // a lick of flame for a short burn, a blaze for a long one.
+        if let (Some(mut look), Some((_, Some(a)))) = (look, owner) {
+            let want = status_scale(f.status, &a.statuses());
+            if (look.scale - want).abs() > 0.05 {
+                look.scale = want;
+            }
+        }
         if f.status == Status::Shocked {
             f.next_arc -= dt;
             if f.next_arc <= 0.0 {
@@ -1749,6 +1762,22 @@ pub fn follow_looks(
             }
         }
     }
+}
+
+/// A status look's size from the engine's view of the status: 0.5 at its least, 1.2 at full
+/// (burning, bleeding, rot and dread by level; chill by stacks toward the freeze at 5; frozen
+/// and shocked stay 1).
+pub fn status_scale(status: Status, st: &engine_world::Statuses) -> f32 {
+    let level = match status {
+        Status::Burning => st.burning,
+        Status::Bleeding => st.bleeding,
+        Status::Rot => st.rot,
+        Status::Dread => st.dread,
+        Status::Chilled => st.chill as f32 / 5.0,
+        // On or off: the look's own size.
+        Status::Frozen | Status::Shocked => return 1.0,
+    };
+    0.5 + 0.7 * level.clamp(0.0, 1.0)
 }
 
 /// A look standing along a wall, going out with it (and changing with it when spells meet).
@@ -2047,6 +2076,11 @@ pub fn flush(
     }
     for s in std::mem::take(&mut queue.stones) {
         crate::stone::spawn_stone(&mut commands, s);
+    }
+    for (e, size) in queue.solids.drain(..) {
+        if let Ok(mut ec) = commands.get_entity(e) {
+            ec.try_insert(crate::stone::solid(size));
+        }
     }
     for b in std::mem::take(&mut queue.wall_bodies) {
         crate::walls::spawn_body(&mut commands, b);

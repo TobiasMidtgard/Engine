@@ -619,11 +619,12 @@ fn the_api_crafts_combines_and_casts() {
     );
 }
 
-/// The stones standing in the world: kind, base and how high their foot stands now.
+/// The stones standing in the world: kind, base and how high their foot stands now (the rock
+/// is centered on its transform).
 fn stones(app: &mut App) -> Vec<(Entity, stone::StoneBody, f64)> {
     let mut q = app.world.query::<(Entity, &stone::StoneBody, &Transform)>();
     q.iter(&app.world)
-        .map(|(e, s, t)| (e, s.clone(), t.translation.y))
+        .map(|(e, s, t)| (e, s.clone(), t.translation.y - s.height as f64 / 2.0))
         .collect()
 }
 
@@ -734,7 +735,11 @@ fn a_pillar_rises_under_a_loose_body_and_lifts_it_instead_of_a_field() {
         .filter(|(_, s, _)| s.kind == stone::StoneKind::Pillar)
         .collect();
     assert_eq!(pillars.len(), 1);
-    let (_, p, y) = &pillars[0];
+    let (pe, p, y) = &pillars[0];
+    assert!(
+        app.world.get::<Collider>(*pe).is_some(),
+        "solid once grounded"
+    );
     assert!(
         p.base.y.abs() < 0.05,
         "on the floor, not on the crate: {}",
@@ -747,4 +752,20 @@ fn a_pillar_rises_under_a_loose_body_and_lifts_it_instead_of_a_field() {
     assert!(!seen.impulses.iter().any(|i| i.entity == crate_));
     let mut fields = app.world.query::<&engine_magic::runtime::Field>();
     assert_eq!(fields.iter(&app.world).count(), 0);
+}
+
+#[test]
+fn a_status_look_grows_with_the_status() {
+    let low = Statuses {
+        burning: 0.1,
+        ..Default::default()
+    };
+    let high = Statuses {
+        burning: 1.0,
+        ..Default::default()
+    };
+    let small = runtime::status_scale(Status::Burning, &low);
+    let big = runtime::status_scale(Status::Burning, &high);
+    assert!(small < 0.65 && (big - 1.2).abs() < 1e-4, "{small} {big}");
+    assert_eq!(runtime::status_scale(Status::Frozen, &high), 1.0);
 }

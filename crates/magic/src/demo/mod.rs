@@ -121,8 +121,9 @@ pub const VIEWS: &[DemoView] = &[
     DemoView {
         key: "spells_shaping",
         name: "Shaping: a stone wall, pillars that lift, a stone grip, steps, frost beside stone",
-        eye: [21.0, 6.5, 7.0],
-        target: [-2.0, 2.0, -4.5],
+        // From behind the dais, down the lanes, so no lane hides another.
+        eye: [4.0, 6.5, 19.0],
+        target: [0.0, 1.8, -4.0],
         hour: 16.9,
         warmup: 2.5,
     },
@@ -439,9 +440,12 @@ fn lanes(program: Program, cycle: u64) -> Vec<Lane> {
                     .with(Modifier::Size { factor: 0.55 })
                     .with(Modifier::Duration { factor: 0.6 })
             };
-            let pillar = d(&["lift", "stone"], CastType::Area)
-                .with(Modifier::Duration { factor: 0.375 })
-                .named("Pillar");
+            let pillar = |size: f32| {
+                d(&["lift", "stone"], CastType::Area)
+                    .with(Modifier::Duration { factor: 0.375 })
+                    .with(Modifier::Size { factor: size })
+                    .named("Pillar")
+            };
             let step = d(&["stone"], CastType::Bolt)
                 .with(Modifier::Duration { factor: 0.45 })
                 .named("Stone block");
@@ -460,17 +464,17 @@ fn lanes(program: Program, cycle: u64) -> Vec<Lane> {
                     cast(0.5, wall("stone").named("Stone wall"), AimAt::Lane(-6.5)),
                     cast(1.3, fire(), AimAt::Focus),
                 ]),
-                // A pillar under a crate stack.
-                casts(vec![cast(0.0, pillar.clone(), AimAt::Lane(-5.0))]),
-                // Steps where stone bolts strike the floor.
+                // A pillar under a crate stack, broad enough to carry all three.
+                casts(vec![cast(0.0, pillar(1.3), AimAt::Lane(-5.0))]),
+                // Steps where stone bolts strike the floor, far first so no bolt meets a step.
                 casts(vec![
-                    cast(0.0, step.clone(), AimAt::Lane(-1.5)),
+                    cast(0.0, step.clone(), AimAt::Lane(-7.5)),
                     cast(0.5, step.clone(), AimAt::Lane(-4.5)),
-                    cast(1.0, step, AimAt::Lane(-7.5)),
+                    cast(1.0, step, AimAt::Lane(-1.5)),
                 ]),
                 // A pillar lifting a dummy.
-                casts(vec![cast(0.0, pillar, AimAt::Lane(-5.0))]),
-                // A stone grip on the far dummy, cracked early by fire.
+                casts(vec![cast(0.0, pillar(1.0), AimAt::Lane(-5.0))]),
+                // A stone grip on a near dummy, cracked early by fire.
                 casts(vec![
                     cast(
                         0.0,
@@ -703,13 +707,32 @@ fn setup_program(
                 false,
             );
         }
-        spawn_dummy(
+        let rider = spawn_dummy(
             &mut commands,
             origin + DVec3::new(LANES[4], FLOOR, -5.0),
             4,
             false,
             true,
         );
+        // It keeps upright on the ride, as a person would (a capsule on its round end
+        // toppled off the top).
+        commands
+            .entity(rider)
+            .insert(engine_world::physics::RigidBody {
+                kind: engine_world::physics::BodyKind::Dynamic,
+                mass_kg: Some(45.0),
+                lock_rotation: [true, false, true],
+                ..Default::default()
+            });
+        // Lane 5: a standing dummy near the camera for the grip (the far one is small).
+        let grip = spawn_dummy(
+            &mut commands,
+            origin + DVec3::new(LANES[5], FLOOR, -3.5),
+            5,
+            true,
+            false,
+        );
+        commands.entity(grip).insert(ProgramProp);
     }
     if program == Program::Force {
         for (i, x) in LANES.iter().enumerate() {
