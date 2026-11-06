@@ -295,7 +295,7 @@ impl FixedTime {
             || elapsed.is_some_and(|e| e + self.step_cost_secs >= self.budget_secs)
     }
 
-    /// What a step that wasn't the frame's last took (real seconds), for [`Self::plan_last`].
+    /// What a step took (real seconds), for [`Self::plan_last`].
     pub(crate) fn observe_step_cost(&mut self, secs: f64) {
         self.step_cost_secs = if self.step_cost_secs == 0.0 {
             secs
@@ -731,6 +731,15 @@ mod tests {
         assert!(fixed.plan_last(2, Some(0.020)));
         // Manual clocks (no budget): only the last one due.
         assert!(!fixed.plan_last(2, None));
+        // After a stall (a 40 ms step) the first step is planned last, and as steps get
+        // cheap again the estimate follows them back down: more than one step a frame.
+        fixed.observe_step_cost(0.040);
+        assert!(fixed.plan_last(0, Some(0.0)));
+        for _ in 0..20 {
+            fixed.observe_step_cost(0.005);
+        }
+        assert!(!fixed.plan_last(0, Some(0.0)));
+        assert!(!fixed.plan_last(1, Some(0.006)));
     }
 
     #[test]

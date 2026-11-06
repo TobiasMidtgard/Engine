@@ -524,7 +524,10 @@ pub fn run_frame(world: &mut World) {
         world.run_schedule(FixedPreUpdate);
         world.run_schedule(FixedUpdate);
         world.run_schedule(FixedPostUpdate);
-        if budget.is_some() && !last {
+        // Every step's cost, the last ones too: a step that is always last (one costly
+        // step after a load stall) would otherwise never update the estimate, and every
+        // later frame would plan one step.
+        if budget.is_some() {
             let secs = step_started.elapsed().as_secs_f64();
             world.resource_mut::<FixedTime>().observe_step_cost(secs);
         }
