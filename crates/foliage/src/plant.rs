@@ -425,6 +425,10 @@ pub struct EcologySettings {
     /// branches and leaf sprays each at their own frequency, sprays twisting to show their
     /// undersides, through Rendering's `PlantWindMeshes`. Off: the whole plant sways as one.
     pub bone_wind: bool,
+    /// Fixed ticks between gathering a region's ecology step and writing it back (at least
+    /// 1): time for the step to finish on its worker so the frame doesn't wait for it. The
+    /// same in every run, so the forest grows the same whatever the thread timing.
+    pub step_write_back_ticks: u32,
 }
 
 impl Default for EcologySettings {
@@ -446,6 +450,7 @@ impl Default for EcologySettings {
             gpu_ferns: true,
             herb_kinds: true,
             bone_wind: true,
+            step_write_back_ticks: crate::ecology::WRITE_BACK_TICKS,
         }
     }
 }

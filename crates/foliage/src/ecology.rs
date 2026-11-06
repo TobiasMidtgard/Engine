@@ -108,11 +108,22 @@ impl SoilEdit {
     }
 }
 
-/// A region step running on a worker: gathered at one fixed tick and written back at the
-/// next, always the next, so the forest grows the same on every run whatever the thread
-/// timing (Unity's "schedule early, complete at a fixed point").
+/// Fixed ticks between gathering a region step and writing it back by default
+/// (`EcologySettings::step_write_back_ticks`): half a second at 60 Hz,
+/// time for a long step to finish on its worker. A catch-up step on coming back to a region
+/// took 240-310 ms; written back at the next tick, the frame waited for it that long (lead's
+/// 120 fps profile, 2026-11-05).
+pub const WRITE_BACK_TICKS: u32 = 30;
+
+/// A region step running on a worker: gathered at one fixed tick and written back
+/// `EcologySettings::step_write_back_ticks` later, always then (waiting only if it is still running), so the
+/// forest grows the same on every run whatever the thread timing (Unity's "schedule early,
+/// complete at a fixed point"). Without a worker pool the step runs at once and still lands
+/// then.
 struct StepInFlight {
     done: Arc<StepSlot>,
+    /// Ticks since the gather.
+    ticks: u32,
     /// The region's center when gathered (the step's frame).
     center: DVec3,
     years: f32,
@@ -1356,6 +1367,11 @@ pub fn ecology_step(world: &mut World) {
     let mut q = world.query::<(Entity, &mut RegionState)>();
     for (e, mut state) in q.iter_mut(world) {
         if let Some(years) = state.due.take() {
+            if state.step.is_some() {
+                // Its last step hasn't landed: the years wait for the next one.
+                state.accum_years += years;
+                continue;
+            }
             due.push((e, years));
         }
     }
@@ -1483,6 +1499,7 @@ pub fn ecology_step(world: &mut World) {
         }
         state.step = Some(StepInFlight {
             done,
+            ticks: 0,
             center: state.center,
             years: dt,
             catch_up,
@@ -1514,10 +1531,21 @@ fn finish_steps(world: &mut World) {
         .cloned()
         .unwrap_or_default();
     let mut waited_ms = 0.0;
+    let write_back = world
+        .get_resource::<EcologySettings>()
+        .map_or(WRITE_BACK_TICKS, |s| s.step_write_back_ticks)
+        .max(1);
     for region_entity in running {
         let Some(mut state) = world.entity_mut(region_entity).take::<RegionState>() else {
             continue;
         };
+        if let Some(step) = &mut state.step {
+            step.ticks += 1;
+            if step.ticks < write_back {
+                world.entity_mut(region_entity).insert(state);
+                continue;
+            }
+        }
         let Some(step) = state.step.take() else {
             world.entity_mut(region_entity).insert(state);
             continue;
@@ -1796,6 +1824,11 @@ mod tests {
         app.add_plugins(crate::FoliagePlugin);
         app.world.insert_resource(loading);
         app.world.resource_mut::<EcologySettings>().paused = true;
+        // Steps land at the next tick (the tests below count on it; see
+        // `steps_written_back_later_grow_the_same_forest` for the default).
+        app.world
+            .resource_mut::<EcologySettings>()
+            .step_write_back_ticks = 1;
         // Steady wind: gusts follow the clock, and the two loading modes take a different
         // number of frames to build the region.
         app.world.resource_mut::<WeatherState>().gustiness = 0.0;
@@ -1847,6 +1880,40 @@ mod tests {
         let worker = grow(crate::FoliageLoading::default());
         assert!(in_tick.len() > 100, "{} plants", in_tick.len());
         assert_eq!(in_tick, worker);
+    }
+
+    /// With the default write-back delay a step lands that many ticks after its gather, on a
+    /// worker or not, and the two grow the same forest: a slow step never stalls a frame, and
+    /// thread timing still changes nothing.
+    #[test]
+    fn steps_written_back_later_grow_the_same_forest() {
+        engine_core::tasks::init_task_pools();
+        let grow = |loading: crate::FoliageLoading| {
+            let (mut app, region) = live_forest(loading);
+            app.world
+                .resource_mut::<EcologySettings>()
+                .step_write_back_ticks = WRITE_BACK_TICKS;
+            app.world
+                .get_mut::<RegionState>(region)
+                .unwrap()
+                .accum_years = 0.25;
+            tick_ecology(&mut app.world);
+            for t in 1..WRITE_BACK_TICKS {
+                assert!(
+                    app.world.get::<RegionState>(region).unwrap().stepping(),
+                    "landed early, tick {t}"
+                );
+                tick_ecology(&mut app.world);
+            }
+            assert!(app.world.get::<RegionState>(region).unwrap().stats.years == 0.0);
+            tick_ecology(&mut app.world);
+            assert!(app.world.get::<RegionState>(region).unwrap().stats.years > 0.0);
+            forest_of(&mut app)
+        };
+        assert_eq!(
+            grow(crate::FoliageLoading::in_frame()),
+            grow(crate::FoliageLoading::default())
+        );
     }
 
     #[test]
@@ -2065,6 +2132,9 @@ mod tests {
         app.add_plugins(engine_world::WorldPlugin);
         app.add_plugins(crate::FoliagePlugin);
         app.world.insert_resource(crate::FoliageLoading::in_frame());
+        app.world
+            .resource_mut::<EcologySettings>()
+            .step_write_back_ticks = 1;
         let region = app.world.spawn((Transform::default(), forest())).id();
         let focus = app
             .world
@@ -2199,6 +2269,9 @@ mod tests {
         app.add_plugins(engine_world::WorldPlugin);
         app.add_plugins(crate::FoliagePlugin);
         app.world.resource_mut::<EcologySettings>().years_per_second = 1.0;
+        app.world
+            .resource_mut::<EcologySettings>()
+            .step_write_back_ticks = 1;
         app.world.spawn((
             Transform::default(),
             EcologyRegion {
