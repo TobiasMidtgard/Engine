@@ -375,7 +375,12 @@ pub fn choose_position(
     // The sight lines (cover from the target, a shot at it, exposure to other threats): a
     // physics ray and a terrain walk each, about 450 a look at the fortress (VM), most of its
     // 12 ms. What they add to a spot's score, and whether it is covered.
-    let sighted = |p: DVec3, reason: &'static str| -> (f32, bool) {
+    //
+    // `floor` is what the sight lines must add for the spot to reach the sixth best weighed
+    // so far (−∞ until six are weighed): once the lines left can't get it there, the rest
+    // are skipped and the spot's best possible score is returned instead. It stays under the
+    // sixth best, so the six best and their scores are exactly those of weighing every line.
+    let sighted = |p: DVec3, reason: &'static str, floor: f32| -> (f32, bool) {
         let mut s = 0.0f32;
         let crouch = p + DVec3::Y * 0.95;
         let stand = p + DVec3::Y * 1.5;
@@ -388,6 +393,10 @@ pub fn choose_position(
             s += w.cover * 0.7;
         }
         let covered = solid || concealed;
+        // The shot lines add at most `can_shoot`, the exposure lines only take away.
+        if s + w.can_shoot.max(0.0) < floor {
+            return (s + w.can_shoot.max(0.0), covered);
+        }
         if w.can_shoot > 0.0 {
             let mut shoot = sight.visibility(stand, target_chest, &ignore) > SMOKE_HIDES;
             if !shoot && reason == "cover" {
@@ -416,6 +425,9 @@ pub fn choose_position(
         }
         if w.exposure > 0.0 {
             for &t in &q.other_threats {
+                if s < floor {
+                    break;
+                }
                 if sight.visibility(t + DVec3::Y * 1.6, crouch, &ignore) > SMOKE_HIDES {
                     s -= w.exposure;
                 }
@@ -434,8 +446,10 @@ pub fn choose_position(
         .collect();
     order.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
     const KEEP: usize = 6;
-    // Spots weighed side by side on the leaf pool, a batch at a time.
-    const BATCH: usize = 16;
+    // Spots weighed side by side on the leaf pool, a batch at a time. Smaller batches let
+    // the bound stop sooner: at the arena (VM, 4 cores) the pool ran them about one at a
+    // time anyway (a look weighed ~45 spots of ~28 µs in 1.6 ms).
+    const BATCH: usize = 8;
     let mut weighed: Vec<(Spot, usize)> = Vec::with_capacity(order.len());
     let mut kept: Vec<f32> = Vec::with_capacity(order.len());
     let mut next = 0;
@@ -446,6 +460,11 @@ pub fn choose_position(
                 break;
             }
         }
+        let sixth = if kept.len() >= KEEP {
+            kept[KEEP - 1]
+        } else {
+            f32::NEG_INFINITY
+        };
         let batch = &order[next..(next + BATCH).min(order.len())];
         let mut out: Vec<Option<Spot>> = vec![None; batch.len()];
         engine_core::tasks::par_chunks_mut(&mut out, 1, |i, one| {
@@ -454,7 +473,12 @@ pub fn choose_position(
             };
             let (base, idx) = batch[i];
             let (p, reason, cover_height) = snapped[idx];
-            let (seen, covered) = sighted(p, reason);
+            let floor = if weigh_every_line() {
+                f32::NEG_INFINITY
+            } else {
+                sixth - base
+            };
+            let (seen, covered) = sighted(p, reason, floor);
             *slot = Some(Spot {
                 position: p,
                 score: base + seen,
@@ -492,6 +516,24 @@ pub fn choose_position(
     }
     path.clear();
     None
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Tests turn the sight-line bound off to check it changes nothing.
+    static WEIGH_EVERY_LINE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Whether [`choose_position`] weighs every sight line of every spot it weighs (tests only).
+fn weigh_every_line() -> bool {
+    #[cfg(test)]
+    {
+        WEIGH_EVERY_LINE.with(|w| w.get())
+    }
+    #[cfg(not(test))]
+    {
+        false
+    }
 }
 
 #[cfg(test)]
@@ -610,5 +652,70 @@ mod tests {
         let dumb = behind(0.05);
         assert!(smart > 0.6, "smart flank value {smart}");
         assert!(dumb < 0.3, "dumb flank value {dumb}");
+    }
+
+    #[test]
+    fn skipping_sight_lines_keeps_the_six_best() {
+        // A yard of walls and crates, the enemy and two more threats around it: the bound
+        // that skips lines must leave the six best spots and their scores exactly as they
+        // are with every line weighed.
+        let mut obstacles = Vec::new();
+        for i in 0..16u32 {
+            let a = i as f64 * 0.9;
+            let r = 4.0 + (i % 5) as f64 * 2.5;
+            let tall = i % 3 == 0;
+            obstacles.push(Obstacle::new(
+                e(10 + i),
+                DVec3::new(a.cos() * r, if tall { 1.1 } else { 0.5 }, a.sin() * r),
+                Quat::from_rotation_y(a as f32),
+                ObstacleShape::Box {
+                    half: Vec3::new(1.5, if tall { 1.1 } else { 0.5 }, 0.3),
+                },
+            ));
+        }
+        let world = TacticalWorld::from_obstacles(obstacles, &Ground::default());
+        let (ground, water) = (Ground::default(), Water::default());
+        let heat = HeatField::default();
+        for (action, logic) in [
+            (NpcAction::TakeCover, 1.0),
+            (NpcAction::Engage, 0.8),
+            (NpcAction::Flank, 1.0),
+            (NpcAction::Engage, 0.1),
+        ] {
+            let pick = |every: bool| {
+                WEIGH_EVERY_LINE.with(|w| w.set(every));
+                let mut grid = NavGrid::default();
+                let mut nav = grid.ctx(&world, &ground, &water);
+                let mut ctx = TacticsCtx {
+                    sight: Sight {
+                        world: &world,
+                        physics: None,
+                        ground: &ground,
+                        obscurance: None,
+                    },
+                    nav: &mut nav,
+                    heat: &heat,
+                };
+                let mut q = query(
+                    action,
+                    logic,
+                    DVec3::new(-2.0, 0.0, -10.0),
+                    DVec3::new(3.0, 0.0, 14.0),
+                    Vec3::NEG_Z,
+                );
+                q.other_threats = vec![DVec3::new(-16.0, 0.0, 6.0), DVec3::new(15.0, 0.0, 2.0)];
+                let (mut path, mut scored) = (Vec::new(), Vec::new());
+                let spot = choose_position(&mut ctx, &q, &mut path, &mut scored);
+                WEIGH_EVERY_LINE.with(|w| w.set(false));
+                let six: Vec<_> = scored
+                    .iter()
+                    .map(|s| (s.position, s.score, s.covered))
+                    .collect();
+                (spot.map(|s| s.position), six)
+            };
+            let (bounded, every) = (pick(false), pick(true));
+            assert_eq!(bounded.1.len(), 6, "{action:?}");
+            assert_eq!(bounded, every, "{action:?} logic {logic}");
+        }
     }
 }
