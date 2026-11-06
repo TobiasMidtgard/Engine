@@ -490,7 +490,7 @@ pub fn advance_casts(
         };
         if !echo {
             // Pay first: a fizzle still costs half.
-            let fizzled = roll(seed, 1) < spell.fizzle;
+            let fizzled = !caster.steady && roll(seed, 1) < spell.fizzle;
             let pay = if fizzled { 0.5 } else { 1.0 };
             caster.mana = (caster.mana - spell.cost.mana * pay).max(0.0);
             if spell.cost.health > 0.0
@@ -525,7 +525,7 @@ pub fn advance_casts(
                 queue.despawn_casting(e);
                 continue;
             }
-            if roll(seed, 2) < spell.backfire {
+            if !caster.steady && roll(seed, 2) < spell.backfire {
                 // It goes off in the caster's hands.
                 hits.0.push(PendingHit {
                     cast: CastInfo {

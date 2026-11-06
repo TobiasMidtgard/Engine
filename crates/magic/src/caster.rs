@@ -85,6 +85,9 @@ pub struct MagicCaster {
     pub hand: Vec3,
     /// Gains skill from casting.
     pub learns: bool,
+    /// Never fizzles or backfires: a focus that shows a spell as it flies (the Spellcrafter's
+    /// crystal), whatever the chances its readout gives.
+    pub steady: bool,
     /// Seeds the fizzle and backfire rolls.
     pub seed: u64,
 }
@@ -105,6 +108,7 @@ impl Default for MagicCaster {
             side: 0,
             hand: Vec3::new(0.25, 1.35, -0.45),
             learns: true,
+            steady: false,
             seed: 1,
         }
     }

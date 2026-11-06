@@ -857,6 +857,126 @@ fn the_spell_bar_charges_on_hold_and_pays_only_on_release() {
 }
 
 #[test]
+fn the_altar_previews_a_crafted_spell_and_the_bar_casts_it() {
+    use engine_magic::crafter::{self, Altar, Crafter};
+    use engine_magic::player::SpellBar;
+    let mut app = app();
+    let me = weaver(&mut app, DVec3::new(-1.0, 0.0, 1.0));
+    {
+        // An Expert everywhere: a budget of 8.
+        let mut c = app.world.get_mut::<MagicCaster>(me).unwrap();
+        let grimoire = std::mem::take(&mut c.grimoire);
+        *c = MagicCaster {
+            grimoire,
+            mana_regen: 0.0,
+            ..MagicCaster::new(60.0, Mastery::Expert)
+        };
+    }
+    let stand = DVec3::new(0.0, 0.0, -9.0);
+    let d = dummy(&mut app, stand - DVec3::Y * 40.0);
+    let altar = app
+        .world
+        .spawn((
+            Name::new("Altar"),
+            Transform::default(),
+            Altar {
+                dummy: Some(d),
+                stand,
+            },
+            crafter::crystal_caster(Vec3::new(0.0, 1.4, 0.0)),
+        ))
+        .id();
+    run(&mut app, 0.1);
+    let full = app.world.get::<MagicCaster>(me).unwrap().mana;
+    crafter::request_open(&mut app.world, me, Some(altar));
+    run(&mut app, 0.05);
+    assert!(app.world.resource::<Crafter>().open);
+    let at = app.world.get::<Transform>(d).unwrap().translation;
+    assert!(
+        at.distance(stand) < 0.01,
+        "the dummy stands while the altar is in use: {at:?}"
+    );
+    for a in [
+        "effect:frost",
+        "effect:fire",
+        "step:modifiers",
+        "mod:boomerang",
+        "mod:pierce",
+        "mod:stacking",
+        "mod:safeguard",
+        "mod:split",
+        "mod:speed",
+    ] {
+        crafter::press(&mut app.world, a);
+    }
+    crafter::press(&mut app.world, "mod:seek");
+    {
+        let c = app.world.resource::<Crafter>();
+        assert_eq!(c.design.complexity(), 8);
+        assert!(c.note.as_ref().is_some_and(|n| !n.ok), "seek is refused");
+    }
+    // The crystal casts it at the dummy: the glaives pass through it and come back through it.
+    // (The first cast waits out the opening pause; the middle glaive flies its full range
+    // before it turns.)
+    run(&mut app, crafter::FIRST_PREVIEW + 4.0);
+    assert!(app.world.resource::<Crafter>().previews >= 1);
+    let hits: Vec<SpellHit> = hits_on(&app, d)
+        .into_iter()
+        .filter(|h| h.caster == Some(altar))
+        .collect();
+    assert!(hits.len() >= 2, "out and back: {}", hits.len());
+    assert!(
+        hits.iter()
+            .all(|h| h.spell.element() == Some(Element::Frost))
+    );
+    assert_eq!(
+        app.world.get::<MagicCaster>(me).unwrap().mana,
+        full,
+        "the preview is free"
+    );
+    // Learn it, put it on key 3, close: the dummy goes back under the floor.
+    crafter::press(&mut app.world, "learn");
+    crafter::press(&mut app.world, "key:3");
+    let g = app.world.get::<SpellBar>(me).unwrap().slots[2].expect("on key 3");
+    assert_eq!(
+        app.world.get::<MagicCaster>(me).unwrap().grimoire[g]
+            .design
+            .name,
+        "Frost glaives"
+    );
+    crafter::press(&mut app.world, "close");
+    run(&mut app, 0.05);
+    assert!(!app.world.resource::<Crafter>().open);
+    let at = app.world.get::<Transform>(d).unwrap().translation;
+    assert!(
+        at.distance(stand) < 0.01,
+        "it stays while the weaver is at the altar"
+    );
+    // Key 3 casts it.
+    let eye = DVec3::new(-0.5, 2.0, 4.0);
+    aim_input(&mut app, me, eye, DVec3::new(0.0, 1.0, -9.0), |i| {
+        i.press(2)
+    });
+    run(&mut app, 0.05);
+    aim_input(&mut app, me, eye, DVec3::new(0.0, 1.0, -9.0), |i| {
+        i.release(2)
+    });
+    run(&mut app, 2.5);
+    assert!(
+        app.world.get::<MagicCaster>(me).unwrap().mana < full,
+        "paid"
+    );
+    assert!(
+        hits_on(&app, d).iter().any(|h| h.caster == Some(me)),
+        "the weaver's glaives land"
+    );
+    // Walking off puts the dummy back under the floor.
+    app.world.get_mut::<Transform>(me).unwrap().translation = DVec3::new(20.0, 0.0, 20.0);
+    run(&mut app, 0.1);
+    assert!(app.world.get::<Transform>(d).unwrap().translation.y < -30.0);
+}
+
+#[test]
 fn a_channelled_beam_lasts_while_the_key_is_held() {
     use engine_magic::runtime::BeamCast;
     let mut app = app();

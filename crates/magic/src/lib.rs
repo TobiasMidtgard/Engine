@@ -22,6 +22,7 @@
 //! | [`undead`] | raise dead: thralls from fallen bodies, skeleton warriors and mages from the ground |
 //! | [`looks`] | how spells look, through the particles module's API |
 //! | [`player`] | the player's spell bar: keys 1-8, camera aim, charge, channel, place, HUD |
+//! | [`crafter`] | the Spellcrafter: an altar where you build a spell in four steps, see its cost, watch it fly at a dummy and put it on a key |
 //! | [`api`] | `magic.*` |
 //! | [`demo`] | the Weaving hall |
 //!
@@ -33,6 +34,7 @@ pub mod api;
 pub mod caster;
 pub mod combine;
 pub mod compile;
+pub mod crafter;
 pub mod demo;
 pub mod design;
 pub mod dials;
@@ -96,6 +98,8 @@ impl Plugin for MagicPlugin {
             .init_resource::<runtime::CastStarts>()
             .init_resource::<looks::LookLibrary>()
             .init_resource::<player::PlayerMagic>()
+            .init_resource::<crafter::Crafter>()
+            .add_message::<engine_world::interact::Interact>()
             .register_component::<MagicCaster>(
                 "Someone who can cast: mana, level (power), skill per subclass, corruption, \
                  grimoire (spells with growth paths), selected spell, side, hand position. \
@@ -135,11 +139,15 @@ impl Plugin for MagicPlugin {
                     player::equip_player,
                     player::read_spell_keys,
                     player::show_place_rings,
+                    crafter::open_at_altars,
+                    crafter::run_crafter,
+                    crafter::tend_altars,
                     player::write_hud,
                     tether::draw_tethers,
                 )
                     .chain(),
             )
+            .add_systems(Last, crafter::free_cursor)
             .add_systems(
                 FixedUpdate,
                 (
@@ -187,6 +195,7 @@ impl Plugin for MagicPlugin {
                     .before(runtime::sync_transforms),
             );
         api::register(app);
+        crafter::register(app);
         demo::build(app);
     }
 }

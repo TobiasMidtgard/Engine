@@ -18,12 +18,14 @@
 //! | `spells_player` | the player's spell bar over the shoulder: charge, place, chain, channel, with the HUD hotbar and mana ([`player`]) |
 //! | `spells_summon` | summons and tethers: a stone golem and a lava golem walking to dummies and punching them, frost and storm elementals shooting, a wisp healing a wounded mage, a tether hauling a dummy in, then one snapping |
 //! | `spells_dead` | the dead rise: three necromancers raise skeleton warriors, a storm skeletal mage and a fallen student as a thrall against three students' golem, fire elemental and fire bolts |
+//! | `spells_craft` | the Spellcrafter at the altar: an Expert builds a returning frost glaive to 8 of 8, seek is refused, the crystal casts each change at a dummy, then it goes on key 3 and is cast from the bar ([`craft`]) |
 //!
 //! The mages wear hooded robes coloured by mastery (the character contract's `Appearance`).
 //!
 //! The mages only cast while a camera is within 160 m, so the hall costs nothing elsewhere.
 
 pub mod art;
+pub mod craft;
 pub mod duel;
 pub mod player;
 
@@ -170,6 +172,18 @@ pub const VIEWS: &[DemoView] = &[
         // Both golems at their dummies mid-punch, the elementals firing, the chain hauling.
         warmup: 5.6,
     },
+    DemoView {
+        key: "spells_craft",
+        name: "The Spellcrafter: a returning frost glaive built to an Expert's budget, cast at a dummy and put on key 3",
+        // Behind the altar's right, the screen on the left: the weaver at the altar's back
+        // left just past the screen's edge, the crystal in the middle, the dummy 9 m down the
+        // hall on the right.
+        eye: [2.2, 2.9, 14.2],
+        target: [-3.4, 1.0, 3.9],
+        hour: 16.9,
+        // The glaive at 8 of 8, seek just refused in red, the crystal's glaives in flight.
+        warmup: 10.9,
+    },
 ];
 
 /// What the hall is running.
@@ -189,10 +203,11 @@ pub enum Program {
     Player,
     Summon,
     Dead,
+    Craft,
 }
 
 impl Program {
-    pub const ALL: [Program; 12] = [
+    pub const ALL: [Program; 13] = [
         Program::Mastery,
         Program::Elements,
         Program::Combos,
@@ -205,6 +220,7 @@ impl Program {
         Program::Player,
         Program::Summon,
         Program::Dead,
+        Program::Craft,
     ];
 
     pub fn key(self) -> &'static str {
@@ -221,6 +237,7 @@ impl Program {
             Program::Player => "spells_player",
             Program::Summon => "spells_summon",
             Program::Dead => "spells_dead",
+            Program::Craft => "spells_craft",
         }
     }
 
@@ -247,6 +264,7 @@ impl Program {
             Program::Summon => 12.0,
             // The dead last 9.6 s: the bones and the ash are gone before the next rising.
             Program::Dead => 13.0,
+            Program::Craft => craft::PERIOD,
         }
     }
 
@@ -693,8 +711,9 @@ fn lanes(program: Program, cycle: u64) -> Vec<Lane> {
                 ]),
             ]
         }
-        // The hall's mages watch while the weaver works its spell bar (player::script_weaver).
-        Program::Player => (0..LANES.len())
+        // The hall's mages watch while the weaver works its spell bar (player::script_weaver)
+        // or the Spellcrafter (craft::script_crafter).
+        Program::Player | Program::Craft => (0..LANES.len())
             .map(|_| Lane {
                 casts: Vec::new(),
                 ..lane(SpellDesign::default())
@@ -803,6 +822,7 @@ pub fn spawn_demo(commands: &mut Commands, origin: DVec3) {
             false,
         );
     }
+    spawn_altar(commands, origin);
     commands.insert_resource(Hall::new(origin));
 }
 
@@ -897,6 +917,11 @@ fn setup_program(
             if let Some(home) = duel::student_home(origin, m) {
                 tf.translation = home;
                 tf.rotation = Quat::IDENTITY;
+            }
+            // At the altar the mage on the plinth beside it steps aside along the dais, out of
+            // the over-the-shoulder view.
+            if program == Program::Craft && m.lane == 3 {
+                tf.translation = origin + DVec3::new(LANES[3] + 2.8, DAIS_TOP, MAGE_Z);
             }
             commands.entity(e).remove::<(
                 Afflictions,
@@ -1287,6 +1312,7 @@ pub fn build(app: &mut App) {
             run_hall,
             (duel::duel_footwork, duel::run_duel).chain(),
             player::script_weaver,
+            craft::script_crafter.after(run_hall),
         )
             .in_set(SimSet::Gameplay)
             .before(crate::MagicSet::Cast),
@@ -1307,7 +1333,7 @@ pub fn build(app: &mut App) {
         "magic.demo",
         "Run a Weaving hall program: spells_mastery, spells_elements, spells_combos, \
          spells_forms, spells_meet, spells_force, spells_dark, spells_duel, spells_shaping, \
-         spells_player, spells_summon or spells_dead. \
+         spells_player, spells_summon, spells_dead or spells_craft. \
          With no program, lists them.",
         r#"{"program": "spells_combos"}"#,
         |world, args| {

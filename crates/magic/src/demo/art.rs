@@ -27,6 +27,14 @@ pub const PLINTH_TOP: f64 = 0.85;
 pub const DUMMY_Z: f64 = -11.0;
 /// Top of the terrace floor.
 pub const FLOOR: f64 = 0.2;
+/// Top of the marble dais the plinths stand on.
+pub const DAIS_TOP: f64 = 0.55;
+/// The Spellcrafter's altar: on the dais between the middle plinths, facing down the hall.
+pub const ALTAR: [f64; 3] = [0.0, DAIS_TOP, MAGE_Z];
+/// Where the altar's practice dummy stands while the altar is in use, 9 m in front of it.
+pub const ALTAR_DUMMY: [f64; 3] = [0.0, FLOOR, MAGE_Z - 9.0];
+/// The altar's crystal, above its top, in the altar's frame.
+pub const CRYSTAL: [f32; 3] = [0.0, 1.38, -0.04];
 
 /// A mage of the hall, by lane.
 #[derive(Component, Debug, Clone, Copy)]
@@ -289,6 +297,157 @@ pub fn spawn_terrace(commands: &mut Commands, origin: DVec3) {
             );
         }
     });
+}
+
+/// The Spellcrafter's altar (round-7-plan.md): a dark stone pedestal with a bronze ring on its
+/// top and a crystal floating over it that glows in the color of the spell being woven, and a
+/// practice dummy that rises 9 m in front of it while someone weaves there. Press E at its
+/// back ("Weave a spell").
+pub fn spawn_altar(commands: &mut Commands, origin: DVec3) -> Entity {
+    use crate::crafter::{Altar, AltarGlow, crystal_caster};
+    use engine_render::PointLight;
+    use engine_world::interact::Interactable;
+    let at = origin + DVec3::from_array(ALTAR);
+    let stand = origin + DVec3::from_array(ALTAR_DUMMY);
+    let dummy = spawn_dummy(commands, stand - DVec3::Y * 40.0, 0, false, false);
+    commands
+        .entity(dummy)
+        .insert(Name::new("Altar's practice dummy"))
+        .remove::<HallTarget>();
+    let stone = mat(MaterialPreset::Rock)
+        .with_tint(0.2, 0.19, 0.22)
+        .with_roughness(0.7);
+    let altar = commands
+        .spawn((
+            Name::new("Spellcrafter's altar"),
+            Transform::from_translation(at),
+            Altar {
+                dummy: Some(dummy),
+                stand,
+            },
+            crystal_caster(Vec3::from_array(CRYSTAL)),
+            Interactable::new("Weave a spell")
+                .reach(2.2)
+                .at(Vec3::new(0.0, 1.0, 0.55)),
+            Collider {
+                shape: ColliderShape::Compound(vec![(
+                    Vec3::new(0.0, 0.535, 0.0),
+                    Quat::IDENTITY,
+                    ColliderShape::Cuboid {
+                        half_extents: Vec3::new(0.58, 0.535, 0.38),
+                    },
+                )]),
+                ..Default::default()
+            },
+        ))
+        .id();
+    let piece = |commands: &mut Commands, name: &str, y: f64, shape: Shape, m: StandardMaterial| {
+        commands.spawn((
+            Name::new(name.to_string()),
+            Transform::from_xyz(0.0, y, 0.0),
+            part(shape, m),
+            ChildOf(altar),
+        ));
+    };
+    let block = |size: [f32; 3]| Shape::RoundedCuboid {
+        size,
+        radius: 0.035,
+        segments: 0,
+    };
+    piece(
+        commands,
+        "Altar foot",
+        0.07,
+        block([1.2, 0.14, 0.82]),
+        stone,
+    );
+    piece(
+        commands,
+        "Altar body",
+        0.54,
+        block([0.9, 0.82, 0.56]),
+        stone,
+    );
+    piece(
+        commands,
+        "Altar top",
+        1.01,
+        block([1.16, 0.12, 0.76]),
+        stone,
+    );
+    let bronze = StandardMaterial::default()
+        .with_tint(0.55, 0.38, 0.18)
+        .with_metallic(1.0)
+        .with_roughness(0.35);
+    commands.spawn((
+        Name::new("Altar ring"),
+        Transform::from_xyz(0.0, 1.08, -0.04),
+        part(
+            Shape::Torus {
+                radius: 0.24,
+                tube: 0.022,
+                segments: 40,
+            },
+            bronze,
+        ),
+        ChildOf(altar),
+    ));
+    // A band of bronze runes round the body.
+    piece(
+        commands,
+        "Altar band",
+        0.78,
+        block([0.93, 0.05, 0.59]),
+        bronze,
+    );
+    // The crystal: two six-sided cones, point up and point down.
+    let glow = crate::crafter::IDLE_GLOW;
+    let crystal = StandardMaterial::default()
+        .with_tint(glow[0] * 0.3, glow[1] * 0.3, glow[2] * 0.3)
+        .with_roughness(0.15)
+        .with_emissive(glow, 6.0);
+    let c = Vec3::from_array(CRYSTAL).as_dvec3();
+    for (up, h) in [(true, 0.3f32), (false, 0.18)] {
+        let rot = if up {
+            Quat::IDENTITY
+        } else {
+            Quat::from_rotation_x(std::f32::consts::PI)
+        };
+        let dy = if up { h * 0.5 } else { -h * 0.5 } as f64;
+        commands.spawn((
+            Name::new("Altar crystal"),
+            Transform::from_translation(c + DVec3::Y * dy).with_rotation(rot),
+            part(
+                Shape::Cone {
+                    radius: 0.11,
+                    height: h,
+                    segments: 6,
+                },
+                crystal,
+            ),
+            AltarGlow {
+                altar,
+                strength: 6.0,
+            },
+            ChildOf(altar),
+        ));
+    }
+    commands.spawn((
+        Name::new("Altar light"),
+        Transform::from_translation(c + DVec3::Y * 0.1),
+        PointLight {
+            color: glow,
+            intensity_lm: 700.0,
+            range: 7.0,
+            radius: 0.1,
+        },
+        AltarGlow {
+            altar,
+            strength: 700.0,
+        },
+        ChildOf(altar),
+    ));
+    altar
 }
 
 /// A straw practice dummy on a post: takes spells, burns, and stands up again.

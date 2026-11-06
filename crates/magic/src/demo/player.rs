@@ -23,10 +23,11 @@ pub const STAND: [f64; 3] = [0.0, FLOOR, 4.0];
 /// Seconds the script takes before it starts over.
 pub const PERIOD: f32 = 12.0;
 
-/// The scripted weaver and its clock.
+/// The scripted weaver, its clock, and the program it is scripted for.
 #[derive(Component, Debug, Clone, Copy, Default)]
 pub struct Weaver {
     pub t: f32,
+    pub program: Program,
 }
 
 /// One step of the script: at `at` s, press (or release) `slot`, aiming at `target`.
@@ -106,13 +107,22 @@ pub fn weaver_caster() -> MagicCaster {
     caster
 }
 
-/// Spawn the weaver with the starter bar and a HUD bar.
-pub fn spawn_weaver(commands: &mut Commands, origin: DVec3) -> Entity {
-    let caster = weaver_caster();
+/// Spawn the weaver with the starter bar and a HUD bar: an Adept on the floor for the spell
+/// bar, an Expert at the altar for the Spellcrafter.
+pub fn spawn_weaver(commands: &mut Commands, origin: DVec3, program: Program) -> Entity {
+    let (caster, stand, name) = if program == Program::Craft {
+        (
+            super::craft::weaver_caster(),
+            super::craft::STAND,
+            "Weaver (Spellcrafter)",
+        )
+    } else {
+        (weaver_caster(), STAND, "Weaver (spell bar)")
+    };
     commands
         .spawn((
-            Name::new("Weaver (spell bar)"),
-            Transform::from_translation(origin + DVec3::from_array(STAND)),
+            Name::new(name),
+            Transform::from_translation(origin + DVec3::from_array(stand)),
             caster,
             Vitality::new(300.0),
             BodyRequest::human(4242),
@@ -121,7 +131,7 @@ pub fn spawn_weaver(commands: &mut Commands, origin: DVec3) -> Entity {
             CastInput::default(),
             ScriptedInput,
             HudBar,
-            Weaver::default(),
+            Weaver { t: 0.0, program },
         ))
         .id()
 }
@@ -129,49 +139,73 @@ pub fn spawn_weaver(commands: &mut Commands, origin: DVec3) -> Entity {
 /// Spawn or remove the weaver as the program comes and goes, and show the HUD with it.
 pub fn keep_weaver(
     hall: Option<Res<Hall>>,
-    weavers: Query<Entity, With<Weaver>>,
-    mut shown: Local<bool>,
+    weavers: Query<(Entity, &Weaver)>,
+    mut shown: Local<Option<Program>>,
     mut commands: Commands,
 ) {
     let Some(hall) = hall else {
         return;
     };
-    let want = hall.program == Program::Player;
-    let have = !weavers.is_empty();
-    if want && !have {
-        spawn_weaver(&mut commands, hall.origin);
-    }
-    if !want {
-        for e in &weavers {
+    let program = hall.program;
+    let want = matches!(program, Program::Player | Program::Craft);
+    let mut have = false;
+    for (e, w) in &weavers {
+        if want && w.program == program {
+            have = true;
+        } else {
             commands.entity(e).despawn();
         }
     }
-    if want != *shown {
-        *shown = want;
+    if want && !have {
+        spawn_weaver(&mut commands, hall.origin, program);
+    }
+    let show = want.then_some(program);
+    if show != *shown {
+        *shown = show;
         commands.queue(move |world: &mut World| {
             let call = |world: &mut World, api: &str, args: serde_json::Value| {
                 let _ = engine_core::registry::call_api(world, api, args);
             };
-            if !want {
+            let Some(program) = show else {
                 call(world, "ui.hide", json!({"screen": "hud", "instant": true}));
                 return;
-            }
+            };
+            let craft = program == Program::Craft;
+            let caster = if craft {
+                super::craft::weaver_caster()
+            } else {
+                weaver_caster()
+            };
             // The hotbar takes its slot count from the data when the HUD is built, so the
             // bar goes in first.
-            let mut values = hud_data(&SpellBar::default(), &weaver_caster());
+            let mut values = hud_data(&SpellBar::default(), &caster);
             if let Some(v) = values.as_object_mut() {
                 for (k, x) in [
                     ("player.name", json!("Weaver")),
-                    ("player.level", json!(40)),
+                    ("player.level", json!(caster.level)),
                     ("player.health", json!(300)),
                     ("player.health_max", json!(300)),
                     ("player.shield", json!(0)),
                     ("player.shield_max", json!(0)),
                     ("player.speed", json!(0)),
-                    ("quest.title", json!("The spell bar")),
-                    ("quest.step", json!("Cast each spell once")),
+                    (
+                        "quest.title",
+                        json!(if craft {
+                            "The Spellcrafter"
+                        } else {
+                            "The spell bar"
+                        }),
+                    ),
+                    (
+                        "quest.step",
+                        json!(if craft {
+                            "Weave a returning frost glaive"
+                        } else {
+                            "Cast each spell once"
+                        }),
+                    ),
                     ("quest.progress", json!(0)),
-                    ("quest.progress_max", json!(SLOTS)),
+                    ("quest.progress_max", json!(if craft { 8 } else { SLOTS })),
                 ] {
                     v.insert(k.into(), x);
                 }
@@ -191,21 +225,33 @@ pub fn keep_weaver(
 }
 
 /// The HUD's quest line counts the spells cast so far this round of the script.
+/// At the altar it counts the spell's complexity against the budget of 8.
 pub fn weaver_quest(
     hall: Option<Res<Hall>>,
     weavers: Query<&Weaver>,
+    crafter: Option<Res<crate::crafter::Crafter>>,
     mut last: Local<Option<usize>>,
     mut commands: Commands,
 ) {
-    if hall.is_none_or(|h| h.program != Program::Player) {
+    let Some(program) = hall
+        .map(|h| h.program)
+        .filter(|p| matches!(p, Program::Player | Program::Craft))
+    else {
         *last = None;
         return;
-    }
-    let Some(w) = weavers.iter().next() else {
+    };
+    let Some(w) = weavers.iter().find(|w| w.program == program) else {
         return;
     };
-    let t = w.t - (w.t / PERIOD).floor() * PERIOD;
-    let n = SCRIPT.iter().filter(|b| !b.press && b.at <= t).count();
+    let n = if program == Program::Craft {
+        match crafter.filter(|c| c.open) {
+            Some(c) => c.design.complexity() as usize,
+            None => last.unwrap_or(0),
+        }
+    } else {
+        let t = w.t - (w.t / PERIOD).floor() * PERIOD;
+        SCRIPT.iter().filter(|b| !b.press && b.at <= t).count()
+    };
     if *last == Some(n) {
         return;
     }
