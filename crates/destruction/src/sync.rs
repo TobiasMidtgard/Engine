@@ -543,6 +543,7 @@ pub fn rebuild_voxels_system(
         count += 1;
         // Meshes made on the bake threads, swapped in as they come.
         let mut done = Vec::new();
+        let land = tracing::info_span!("destruction", name = "voxels: land").entered();
         if let Some(list) = jobs.pending.get_mut(&e) {
             list.retain_mut(|job| match block_on(poll_once(&mut job.task)) {
                 Some(made) => {
@@ -554,6 +555,7 @@ pub fn rebuild_voxels_system(
                 None => true,
             });
         }
+        drop(land);
         let busy: HashSet<usize> = jobs
             .pending
             .get(&e)
@@ -597,8 +599,19 @@ pub fn rebuild_voxels_system(
                 .into_iter()
                 .map(|ci| (ci, state.start_mesh(ci)))
                 .collect();
-            for job in urgent {
-                done.push(mesh_chunk(&state, &look, job, physics));
+            // Side by side on the leaf pool: six chunks one after another were 10 ms of the
+            // frame on the VM whenever the fortress's cannons hit rock.
+            if !urgent.is_empty() {
+                let _span = tracing::info_span!("destruction", name = "voxels: mesh on the frame")
+                    .entered();
+                let mut made: Vec<Option<ChunkMesh>> = urgent.iter().map(|_| None).collect();
+                let (snap, look) = (&*state, &look);
+                engine_core::tasks::par_chunks_mut(&mut made, 1, |i, slot| {
+                    if let Some(out) = slot.first_mut() {
+                        *out = Some(mesh_chunk(snap, look, urgent[i], physics));
+                    }
+                });
+                done.extend(made.into_iter().flatten());
             }
             if at_once.is_some() {
                 done.extend(
@@ -608,7 +621,9 @@ pub fn rebuild_voxels_system(
                 );
             } else if !dirty.is_empty() {
                 // One copy of the voxels for all of this frame's jobs (a hill's is about 1 MB).
+                let copy = tracing::info_span!("destruction", name = "voxels: snapshot").entered();
                 let snapshot = Arc::new(state.mesh_snapshot());
+                drop(copy);
                 let look = Arc::new(look);
                 let list = jobs.pending.entry(e).or_default();
                 for group in dirty.chunks(VOXEL_BULK_CHUNKS) {
@@ -627,6 +642,8 @@ pub fn rebuild_voxels_system(
                 }
             }
         }
+        let _apply = (!done.is_empty())
+            .then(|| tracing::info_span!("destruction", name = "voxels: apply").entered());
         for made in done {
             rebuilt += 1;
             apply_chunk(
