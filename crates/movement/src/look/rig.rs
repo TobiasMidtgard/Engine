@@ -22,6 +22,12 @@ use super::fighter::Style;
 use crate::combat::AttackPhase;
 use crate::ladder::{RUNG, RUNG_AHEAD};
 
+mod inertia;
+mod trav;
+
+use inertia::{Inertia, Locked};
+pub use trav::TravAnim;
+
 /// Height of the ankle joint above the sole, m.
 pub const ANKLE_HEIGHT: f32 = 0.085;
 /// Hip joint to knee, m.
@@ -722,6 +728,12 @@ pub struct AnimInput {
     pub effort: f32,
     /// The ground under each foot (left, right), if probed: see [`FootGround`].
     pub ground: [Option<FootGround>; 2],
+    /// On a traversal element (perch, pole, bar, line, rock or ice face, crawling, rolling):
+    /// see [`TravAnim`].
+    pub trav: Option<TravAnim>,
+    /// On a rope: where the hands hold it and the way it runs from them down to the body
+    /// (character space, unit): the body hangs along it, not upright.
+    pub rope: Option<(Vec3, Vec3)>,
 }
 
 /// The ground under one foot, in character space (the capsule's bottom at y = 0, facing −Z).
@@ -779,6 +791,8 @@ impl Default for AnimInput {
             fighter: true,
             effort: 0.2,
             ground: [None; 2],
+            trav: None,
+            rope: None,
         }
     }
 }
@@ -979,6 +993,8 @@ struct Weights {
     vault: f32,
     /// Swimming.
     swim: f32,
+    /// On a traversal element.
+    trav: f32,
     dash: f32,
     attack: f32,
     block: f32,
@@ -1033,6 +1049,20 @@ pub struct Animator {
     feet: FootPlacement,
     /// Stroke cycle while swimming, 0..1 (the right hand enters the water at 0).
     stroke: f32,
+    /// The traversal state last shown, and its own animation state.
+    trav: Option<TravAnim>,
+    trav_state: trav::State,
+    /// Blends discrete state switches (see [`inertia`]).
+    inertia: Inertia,
+    /// The state the pose was last in (what a switch is measured against).
+    key: u32,
+    /// Body-only freeze left after a heavy impact, s.
+    hitstop: f32,
+    /// The pose shown last (held through a hitstop).
+    shown: Option<Pose>,
+    /// Landing compression: the pelvis spring's offset (m) and velocity.
+    squash: f32,
+    squash_v: f32,
 }
 
 impl Animator {
@@ -1075,7 +1105,22 @@ impl Animator {
             last: None,
             feet: FootPlacement::default(),
             stroke: 0.0,
+            trav: None,
+            trav_state: trav::State::default(),
+            inertia: Inertia::default(),
+            key: 0,
+            hitstop: 0.0,
+            shown: None,
+            squash: 0.0,
+            squash_v: 0.0,
         }
+    }
+
+    /// A felt contact (see [`crate::impact`]): freezes the body for `hitstop` seconds and
+    /// pushes `strength` (0..1) of compression into the pelvis spring.
+    pub fn impact(&mut self, strength: f32, hitstop: f32) {
+        self.hitstop = self.hitstop.max(hitstop.clamp(0.0, 0.12));
+        self.squash_v -= 2.6 * strength.clamp(0.0, 1.0);
     }
 
     /// Forget blends and events (after a teleport or a revive).
@@ -1086,6 +1131,13 @@ impl Animator {
     /// Advances the animation by `input.dt` own seconds and returns the pose.
     pub fn update(&mut self, input: &AnimInput) -> Pose {
         let dt = input.dt.clamp(0.0, 0.1);
+        // A hitstop holds the body where the impact caught it (the character still moves).
+        if self.hitstop > 0.0 {
+            self.hitstop -= dt;
+            if let Some(shown) = self.shown {
+                return shown;
+            }
+        }
         self.secs += dt;
         self.track_events(input, dt);
         self.ease_weights(input, dt);
@@ -1100,6 +1152,47 @@ impl Animator {
         let arms = self.arm_pose(input, &body);
         let mut pose = body;
         pose.blend(&arms, 1.0, Channels::Arms);
+
+        // A discrete switch of state blends out of where the body was, keeping its motion.
+        let key = state_key(input);
+        if key != self.key {
+            let was_air = self.key & KEY_GROUNDED == 0;
+            let landing = was_air && key & KEY_GROUNDED != 0;
+            let settling = matches!(input.mode, LocomotionMode::Idle) || input.trav.is_some();
+            self.inertia.switch(if landing {
+                0.07
+            } else if settling {
+                0.2
+            } else {
+                0.12
+            });
+            self.key = key;
+        }
+        let on_foot = input.grounded
+            && matches!(
+                input.mode,
+                LocomotionMode::Idle
+                    | LocomotionMode::Walk
+                    | LocomotionMode::Run
+                    | LocomotionMode::Sprint
+                    | LocomotionMode::Crouch
+            );
+        let locked = Locked {
+            feet: on_foot,
+            hands: input.ladder.is_some() || matches!(input.trav, Some(TravAnim::Face { .. })),
+        };
+        self.inertia.apply(&mut pose, locked, dt);
+
+        // Landing and catch compression: the pelvis on an underdamped spring (a dip, a small
+        // rebound), the chest pitching with it.
+        crate::impact::spring(&mut self.squash, &mut self.squash_v, 19.0, 0.5, dt);
+        self.squash = self.squash.clamp(-0.4, 0.08);
+        if self.squash.abs() > 1e-4 {
+            pose.pelvis.y += self.squash;
+            pose.pivot.y += self.squash;
+            pose.spine = pitch(-self.squash * 1.6) * pose.spine;
+            pose.head = pitch(self.squash * 0.8) * pose.head;
+        }
 
         // Smooth what can jump (cut selection, mode switches); strikes stay sharp.
         let striking = input.attack.is_some_and(|a| a.phase == AttackPhase::Strike);
@@ -1125,6 +1218,7 @@ impl Animator {
         }
         self.last = Some(pose);
         self.place_feet(input, &mut pose, dt);
+        self.shown = Some(pose);
         pose
     }
 
@@ -1194,6 +1288,10 @@ impl Animator {
     }
 
     fn track_events(&mut self, input: &AnimInput, dt: f32) {
+        if input.trav.is_some() {
+            self.trav = input.trav;
+        }
+        self.trav_state.track(input.trav.as_ref(), input, dt);
         let horizontal = Vec3::new(input.velocity.x, 0.0, input.velocity.z);
         let speed = horizontal.length();
         self.speed += (speed - self.speed) * approach(dt, 9.0);
@@ -1355,12 +1453,13 @@ impl Animator {
         ease(&mut w.mantle, on(mode == M::Mantle && ledge), 16.0);
         ease(
             &mut w.hang,
-            on(mode == M::Climb && input.ladder.is_none()),
+            on(mode == M::Climb && input.ladder.is_none() && input.trav.is_none()),
             14.0,
         );
         ease(&mut w.ladder, on(input.ladder.is_some()), 10.0);
         ease(&mut w.vault, on(input.vault.is_some()), 18.0);
         ease(&mut w.swim, on(mode == M::Swim), 6.0);
+        ease(&mut w.trav, on(input.trav.is_some()), 14.0);
         ease(&mut w.aim, on(input.grapple.is_some()), 22.0);
         let reeling = input.grapple.is_some_and(|(_, bit)| bit) && mode == M::Air;
         ease(&mut w.reel, on(reeling), 10.0);
@@ -1451,6 +1550,14 @@ impl Animator {
             && let Some(l) = self.ladder
         {
             p.blend(&ladder_body(l), w.ladder, Channels::Body);
+            // On a rope the body hangs along it from the hands (research: up = grip to the
+            // center of mass), turning about the grip as it swings.
+            if let Some((grip, down)) = input.rope {
+                let tilt = Quat::from_rotation_arc(Vec3::NEG_Y, down.normalize_or(Vec3::NEG_Y));
+                let k = smooth(0.3, 1.0, w.ladder);
+                p.body = slerp(Quat::IDENTITY, tilt, k) * p.body;
+                p.pivot = p.pivot.lerp(grip, k);
+            }
         }
         if w.swim > 1e-3 {
             p.blend(
@@ -1461,6 +1568,11 @@ impl Animator {
         }
         if w.dash > 1e-3 {
             p.blend(&dash(input.dash_strike), w.dash, Channels::Body);
+        }
+        if w.trav > 1e-3
+            && let Some(t) = self.trav
+        {
+            p.blend(&trav::body(&t, &self.trav_state), w.trav, Channels::Body);
         }
         // Attacks: step into the cut and turn the shoulders with it.
         if w.attack > 1e-3
@@ -1626,6 +1738,12 @@ impl Animator {
         if w.dash > 1e-3 {
             p.blend(&to_ground(dash_arms()), w.dash, Channels::Arms);
         }
+        if w.trav > 1e-3
+            && let Some(t) = self.trav
+        {
+            let a = trav::arms(&t, &self.trav_state, body, p);
+            p.blend(&a, w.trav, Channels::Arms);
+        }
         if w.block > 1e-3 {
             p.blend(&to_ground(block_arms()), w.block, Channels::Arms);
         }
@@ -1689,6 +1807,25 @@ impl Animator {
         }
         p
     }
+}
+
+/// The state bit for "on the ground" in [`state_key`].
+const KEY_GROUNDED: u32 = 1 << 13;
+
+/// Which discrete state the input is in: a change starts an inertialized switch.
+fn state_key(input: &AnimInput) -> u32 {
+    let b = |x: bool, bit: u32| if x { 1 << bit } else { 0 };
+    let mode = input.mode as u32 & 0xF;
+    let trav = input.trav.map_or(0, |t| t.kind() as u32 + 1) & 0xF;
+    mode | b(input.ladder.is_some(), 4)
+        | b(input.zip.is_some(), 5)
+        | b(input.vault.is_some(), 6)
+        | b(input.ledge.is_some(), 7)
+        | trav << 8
+        | b(input.rope.is_some(), 12)
+        | if input.grounded { KEY_GROUNDED } else { 0 }
+        | b(input.defeated, 14)
+        | b(input.grapple.is_some(), 15)
 }
 
 /// Cut speed profile: a fast, accelerating sweep that brakes into the follow-through.

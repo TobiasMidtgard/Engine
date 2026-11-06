@@ -43,6 +43,7 @@ struct Pad {
     crouch: bool,
     /// Sprint held (a player runs a parkour line with it held).
     sprint: bool,
+    attack: bool,
 }
 
 fn go(x: f32, z: f32) -> Pad {
@@ -60,6 +61,10 @@ impl Pad {
     }
     fn crouch(mut self) -> Self {
         self.crouch = true;
+        self
+    }
+    fn attack(mut self) -> Self {
+        self.attack = true;
         self
     }
     /// Without sprint (on a rope: the stick climbs instead of swinging).
@@ -100,12 +105,74 @@ fn air_control(t: f32, _: &Mover, _: DVec3) -> Pad {
     match t {
         t if t < 1.1 => go(1.0, 0.0),
         t if t < 1.3 => go(1.0, 0.0).jump(),
-        t if t < 1.5 => go(0.0, -1.0).jump(),
+        t if t < 1.65 => go(0.0, -1.0).jump(),
         t if t < 3.3 => go(1.0, 0.0),
         t if t < 3.5 => go(1.0, 0.0).jump(),
         t if t < 4.5 => go(-1.0, 0.0).jump(),
         _ => Pad::default(),
     }
+}
+
+/// What the pilot holds or stands on, for the dry run's log.
+fn held(m: &Mover) -> String {
+    let mut s = Vec::new();
+    if m.hang.is_some() {
+        s.push("hang".to_string());
+    }
+    if m.rope.is_some() {
+        s.push("rope".into());
+    }
+    if m.zip.is_some() {
+        s.push("zip".into());
+    }
+    if let Some(l) = m.leap {
+        s.push(format!("leap {:?}", l.aim));
+    }
+    if m.perch.is_some() {
+        s.push("perch".into());
+    }
+    if let Some(h) = m.pole {
+        s.push(format!("pole s={:.2} spin={:.1}", h.s, h.spin));
+    }
+    if let Some(h) = m.bar {
+        s.push(format!("bar ang={:.2} rate={:.1}", h.angle, h.rate));
+    }
+    if let Some(w) = m.line {
+        s.push(format!(
+            "line s={:.2} v={:.1} lean={:.2} load={:.2}",
+            w.s, w.speed, w.lean, w.load
+        ));
+    }
+    if let Some(r) = m.roll {
+        s.push(format!("roll t={:.2}", r.t()));
+    }
+    if m.recover.0 > 0.0 {
+        s.push(format!("recover {:.2}", m.recover.0));
+    }
+    if let Some(c) = m.crawl {
+        s.push(format!("crawl {c:.1}"));
+    }
+    if let Some(r) = m.runup {
+        s.push(format!("runup {:.2}", r.secs));
+    }
+    if let Some(td) = m.takedown {
+        s.push(format!("takedown t={:.2}", td.t()));
+    }
+    if let Some(f) = m.face {
+        s.push(format!("face moving={:?}", f.moving.map(|l| l.limb)));
+    }
+    s.join(" ")
+}
+
+/// The next lamp along the street from `x` (its foot, from the quarter's origin).
+fn next_lamp(x: f64) -> Option<(f64, f64)> {
+    city::LAMPS.into_iter().find(|&(lx, _)| lx > x + 1.0)
+}
+
+/// The stick toward `to` (x, z) from `p`.
+fn toward(p: DVec3, to: (f64, f64)) -> Pad {
+    let d = Vec3::new((to.0 - p.x) as f32, 0.0, (to.1 - p.z) as f32).normalize_or(Vec3::X);
+    go(d.x, d.z)
 }
 
 /// The x of the ledge held.
@@ -116,20 +183,22 @@ fn held_x(m: &Mover) -> Option<f64> {
 const CLIPS: &[Clip] = &[
     Clip {
         name: "air_control_before",
-        start: [-24.0, 0.0, 0.8],
+        start: [-24.0, 0.0, 1.0],
         facing: [1.0, 0.0],
         secs: 5.5,
         script: air_control,
-        camera: |_| (yaw_toward(0.55, 1.0), 0.15, 9.0, 0.0),
+        // From high above and behind the runner, so the swerve reads as a curve.
+        camera: |_| (yaw_toward(1.0, 0.0), -1.05, 9.0, 0.0),
         before: true,
     },
     Clip {
         name: "air_control_after",
-        start: [-24.0, 0.0, 0.8],
+        start: [-24.0, 0.0, 1.0],
         facing: [1.0, 0.0],
         secs: 5.5,
         script: air_control,
-        camera: |_| (yaw_toward(0.55, 1.0), 0.15, 9.0, 0.0),
+        // From high above and behind the runner, so the swerve reads as a curve.
+        camera: |_| (yaw_toward(1.0, 0.0), -1.05, 9.0, 0.0),
         before: false,
     },
     Clip {
@@ -289,6 +358,285 @@ const CLIPS: &[Clip] = &[
         camera: |_| behind([0.938, 0.346], 0.05, 7.0),
         before: false,
     },
+    Clip {
+        // Run at the first lamp post, leap onto its shaft, climb to the lantern and crouch on
+        // it, then lamp post to lamp post down the street.
+        name: "lamp_posts",
+        start: [-16.5, 0.0, -1.7],
+        facing: [1.0, 0.0],
+        secs: 9.0,
+        script: |t, m, p| match t {
+            _ if m.leap.is_some() => Pad::default(),
+            _ if m.pole.is_some() => go(1.0, 0.0).calm(),
+            _ if m.perch.is_some() => match (m.perch.unwrap().secs, next_lamp(p.x)) {
+                (s, Some(l)) if s > 0.35 => toward(p, l).jump(),
+                _ => Pad::default(),
+            },
+            _ if p.x < -15.2 && t < 1.0 => go(1.0, 0.0),
+            t if t < 1.0 => go(1.0, 0.0).jump(),
+            _ => Pad::default(),
+        },
+        camera: |t| (yaw_toward(1.0, -0.25), 0.25 + 0.1 * (t / 9.0), 9.0, 0.0),
+        before: false,
+    },
+    Clip {
+        // From the townhouse's roof onto the tightrope and over the street to the bell
+        // tower, balancing.
+        name: "tightrope",
+        start: [8.6, 14.0, 6.0],
+        facing: [0.0, -1.0],
+        secs: 9.0,
+        script: |_, m, p| {
+            if m.line.is_some() || p.z > 3.0 {
+                go(0.0, -1.0).calm()
+            } else {
+                Pad::default()
+            }
+        },
+        camera: |t| (yaw_toward(-1.0, -0.6), 0.12, 7.0 - 0.2 * t, 0.0),
+        before: false,
+    },
+    Clip {
+        // Up the crates to the bars, swinging from bar to bar across the street, and off
+        // the last into the warehouse's band.
+        name: "bars",
+        start: [14.8, 2.2, -2.0],
+        facing: [1.0, 0.0],
+        secs: 9.5,
+        script: |t, m, _| match (t, m.bar) {
+            (t, None) if t < 0.5 => Pad::default(),
+            (t, None) if t < 0.8 => go(1.0, 0.3).jump(),
+            // Off the last bar at the top of a swing: out onto the street.
+            (_, Some(h)) if h.at.x - city::OFFSET[0] > 20.0 => {
+                if h.secs > 1.2 && h.rate > 0.8 && h.angle > 0.25 {
+                    go(1.0, 0.0).calm().jump()
+                } else {
+                    go(1.0, 0.0).calm()
+                }
+            }
+            (_, Some(h)) if h.secs > 0.6 && h.rate > 0.8 && h.angle > 0.15 => {
+                go(1.0, 0.0).calm().jump()
+            }
+            (_, Some(_)) => go(1.0, 0.0).calm(),
+            _ => Pad::default(),
+        },
+        camera: |_| (yaw_toward(0.0, -1.0), 0.12, 8.5, 0.0),
+        before: false,
+    },
+    Clip {
+        // Up the crag by its holds and over the top.
+        name: "rock_climb",
+        start: [-30.6, 0.0, -12.5],
+        facing: [-1.0, 0.0],
+        secs: 12.0,
+        script: |_, m, p| {
+            if p.y > 9.2 && m.face.is_none() {
+                Pad::default()
+            } else {
+                go(-1.0, 0.0).calm()
+            }
+        },
+        camera: |t| {
+            (
+                yaw_toward(-1.0, 0.4),
+                0.15 + 0.25 * (t / 10.0).min(1.0),
+                7.0,
+                0.0,
+            )
+        },
+        before: false,
+    },
+    Clip {
+        // Up the frozen waterfall with the picks.
+        name: "ice_climb",
+        start: [-30.6, 0.0, 11.5],
+        facing: [-1.0, 0.0],
+        secs: 12.0,
+        script: |_, m, p| {
+            if p.y > 10.2 && m.face.is_none() {
+                Pad::default()
+            } else {
+                go(-1.0, 0.0).calm()
+            }
+        },
+        camera: |t| {
+            (
+                yaw_toward(-1.0, -0.4),
+                0.15 + 0.25 * (t / 10.0).min(1.0),
+                7.0,
+                0.0,
+            )
+        },
+        before: false,
+    },
+    Clip {
+        // Up the oak's trunk into the fork, and out along its north branch over the lane,
+        // crouched at its tip.
+        name: "oak",
+        start: [-24.0, 0.0, 11.0],
+        facing: [-1.0, 0.0],
+        secs: 9.0,
+        script: |t, m, p| match t {
+            _ if m.pole.is_some() => go(-1.0, 0.0).calm(),
+            _ if m.perch.is_some() && t > 1.0 => go(0.0, 1.0).calm(),
+            _ if m.line.is_some() && p.z < 14.6 => go(0.0, 1.0).calm(),
+            _ if m.line.is_some() => Pad::default(),
+            t if t < 0.4 => go(-1.0, 0.0),
+            t if t < 0.75 => go(-1.0, 0.0).jump(),
+            _ => Pad::default(),
+        },
+        camera: |t| (yaw_toward(-0.4, 1.0), 0.2 + 0.1 * (t / 9.0), 8.0, 0.0),
+        before: false,
+    },
+    Clip {
+        // On the guild hall's balcony: up onto its railing, along it, and across the street
+        // down onto a lamp.
+        name: "railing",
+        start: [-8.0, 7.0, -2.3],
+        facing: [0.0, 1.0],
+        secs: 7.0,
+        script: |t, m, p| match t {
+            _ if m.perch.is_some() => Pad::default(),
+            _ if m.line.is_some() && p.x < -4.4 => go(1.0, 0.0).calm(),
+            // Across the street and down onto the lamp on the far side.
+            _ if m.line.is_some() || m.leap.is_some() => toward(p, (-2.0, 1.7)).jump(),
+            t if t < 0.3 => Pad::default(),
+            t if t < 0.5 => go(0.0, 1.0).calm().jump(),
+            _ => Pad::default(),
+        },
+        camera: |_| (yaw_toward(0.3, -1.0), 0.15, 7.0, 0.0),
+        before: false,
+    },
+    Clip {
+        // Out along the oak's north branch to its tip over the lane, and down onto the
+        // lookout below.
+        name: "oak_hunt",
+        start: [-24.0, 0.0, 11.0],
+        facing: [-1.0, 0.0],
+        secs: 8.5,
+        script: |t, m, p| match t {
+            _ if m.takedown.is_some() => Pad::default(),
+            _ if m.pole.is_some() => go(-1.0, 0.0).calm(),
+            _ if m.perch.is_some() && t > 1.0 => go(0.0, 1.0).calm(),
+            _ if m.line.is_some() && p.z < 14.4 => go(0.0, 1.0).calm(),
+            _ if m.line.is_some() && m.line.unwrap().speed.abs() < 0.2 => Pad::default().attack(),
+            _ if m.line.is_some() => Pad::default(),
+            t if t < 0.4 => go(-1.0, 0.0),
+            t if t < 0.75 => go(-1.0, 0.0).jump(),
+            _ => Pad::default(),
+        },
+        camera: |t| (yaw_toward(-1.0, 0.5), 0.15 + 0.1 * (t / 8.0), 7.5, 0.0),
+        before: false,
+    },
+    Clip {
+        // Off the inn's roof (7 m) with crouch tapped just before the ground: a roll that
+        // keeps the run going.
+        name: "landing_roll",
+        start: [-21.5, 7.0, -6.0],
+        facing: [-0.3, 0.954],
+        secs: 3.5,
+        script: |_, m, p| {
+            let on = go(-0.3, 0.954).calm();
+            if !m.grounded && p.y < 2.8 && p.y > 1.2 {
+                on.crouch()
+            } else {
+                on
+            }
+        },
+        camera: |_| (yaw_toward(1.0, 0.1), 0.1, 8.0, 0.0),
+        before: false,
+    },
+    Clip {
+        // The same drop without the roll: a hard landing, down on a knee.
+        name: "landing_hard",
+        start: [-21.5, 7.0, -6.0],
+        facing: [-0.3, 0.954],
+        secs: 3.5,
+        script: |_, _, _| go(-0.3, 0.954).calm(),
+        camera: |_| (yaw_toward(1.0, 0.1), 0.1, 8.0, 0.0),
+        before: false,
+    },
+    Clip {
+        // A leap of faith off the inn's roof into the hay cart.
+        name: "hay_leap",
+        start: [-18.0, 7.0, -6.0],
+        facing: [0.0, 1.0],
+        secs: 3.5,
+        script: |t, _, p| match t {
+            _ if p.z > -3.4 || t > 1.6 => Pad::default(),
+            _ if p.z > -3.9 => go(0.0, 0.5).calm().jump(),
+            _ => go(0.0, 0.5).calm(),
+        },
+        camera: |_| (yaw_toward(1.0, 0.0), 0.15, 9.0, 0.0),
+        before: false,
+    },
+    Clip {
+        // A sprint off the inn's roof across the street onto the bakery's awning: bounced up
+        // its front, the hands catch the band.
+        name: "awning",
+        start: [-18.0, 7.0, -8.0],
+        facing: [0.0, 1.0],
+        secs: 3.5,
+        script: |t, _, p| match t {
+            _ if p.z > -4.4 || t > 1.0 => Pad::default(),
+            _ if p.z > -5.0 => go(0.0, 1.0).jump(),
+            _ => go(0.0, 1.0),
+        },
+        camera: |_| (yaw_toward(1.0, 0.0), 0.15, 10.0, 0.0),
+        before: false,
+    },
+    Clip {
+        // Off the townhouse's roof (14 m), stepping back to the face on the way down with
+        // grab (sprint) held: the hands catch a band going by.
+        name: "fall_catch",
+        start: [9.5, 14.0, 3.6],
+        facing: [0.0, -1.0],
+        secs: 4.5,
+        script: |t, m, p| match t {
+            _ if m.hang.is_some() => Pad::default(),
+            _ if m.grounded && t < 2.5 => go(0.0, -0.15).calm(),
+            _ if p.y > 12.2 => Pad::default(),
+            // Off the edge: back toward the face, reaching for it.
+            _ => Pad {
+                sprint: true,
+                ..go(0.0, 0.6)
+            },
+        },
+        camera: |_| (yaw_toward(1.0, -0.3), 0.0, 9.0, 0.0),
+        before: false,
+    },
+    Clip {
+        // Across the alley: up the townhouse's wall, kicked off it to the bakery's, up that,
+        // kicked back.
+        name: "wall_kicks",
+        start: [-1.55, 0.0, 6.5],
+        facing: [1.0, 0.0],
+        secs: 4.5,
+        script: |_, m, _| match m.runup {
+            Some(r) if r.secs > 0.12 => go(-r.normal.x, 0.0).jump(),
+            Some(r) => go(-r.normal.x, 0.0),
+            None if m.mode == engine_world::LocomotionMode::Air => Pad::default(),
+            None => go(1.0, 0.0),
+        },
+        camera: |_| (yaw_toward(0.0, 1.0), 0.25, 8.0, 0.0),
+        before: false,
+    },
+    Clip {
+        // Through the culvert on hands and knees.
+        name: "crawl",
+        start: [-26.5, 0.0, -6.5],
+        facing: [-1.0, 0.0],
+        secs: 6.0,
+        script: |_, _, p| {
+            if p.x > -33.0 {
+                go(-1.0, 0.0).calm()
+            } else {
+                Pad::default()
+            }
+        },
+        camera: |_| (yaw_toward(-1.0, 0.6), 0.2, 5.5, 0.0),
+        before: false,
+    },
 ];
 
 /// The movement before this pass: world gravity rising and falling, the same height for a
@@ -444,6 +792,7 @@ fn film(clip: &Clip, out: &Path) -> Result<PathBuf, String> {
                 ("jump", pad.jump),
                 ("crouch", pad.crouch),
                 ("sprint", pad.sprint),
+                ("attack", pad.attack),
             ] {
                 if on {
                     a.press(name);
@@ -458,13 +807,11 @@ fn film(clip: &Clip, out: &Path) -> Result<PathBuf, String> {
                 let m = app.world.get::<Mover>(pilot).unwrap();
                 let p = app.world.get::<Transform>(pilot).unwrap().translation - origin;
                 println!(
-                    "  {t:5.2} {:?} {:.1} m/s v {:.1?} hang={} rope={} zip={} ({:.2}, {:.2}, {:.2})",
+                    "  {t:5.2} {:?} {:.1} m/s v {:.1?} {} ({:.2}, {:.2}, {:.2})",
                     m.mode,
                     m.horizontal_speed(),
                     m.velocity,
-                    m.hang.is_some(),
-                    m.rope.is_some(),
-                    m.zip.is_some(),
+                    held(m),
                     p.x,
                     p.y,
                     p.z
@@ -472,8 +819,15 @@ fn film(clip: &Clip, out: &Path) -> Result<PathBuf, String> {
             }
             continue;
         }
-        // Draw every third step: 20 frames a second.
-        let draw = step % 3 == 0;
+        // Draw every third step: 20 frames a second (or, for a still, only the steps at the
+        // times asked for).
+        let still: Option<Vec<f32>> = std::env::var("FILM_STILLS")
+            .ok()
+            .map(|v| v.split(',').filter_map(|x| x.parse().ok()).collect());
+        let draw = match &still {
+            Some(times) => times.iter().any(|&at| (t - at).abs() < DT as f32 * 0.5),
+            None => step % 3 == 0,
+        };
         if !draw {
             app.world
                 .insert_resource(RenderDisabled("between frames".into()));

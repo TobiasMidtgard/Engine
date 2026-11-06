@@ -30,6 +30,14 @@
 //! | `cloth`, `cloth_indigo`, `cloth_crimson`, `cloth_black` | woven cotton | 0.25 |
 //! | `lacquer`, `lacquer_black` | vermilion (or black) lacquer over wood, worn to the undercoat | 1 |
 //! | `paper`, `paper_lit` | washi paper (`paper_lit` glows warm, for lanterns) | 0.5 |
+//! | `cast_iron` | black-painted cast iron, rubbed brown at the edges | 1 |
+//! | `crag_granite` | weathered rock: bedding, fractures, lichen, rain streaks | 3 |
+//! | `glacier_ice` | blue ice: trapped bubbles, refrozen runnels, frost (V must run up) | 2 |
+//! | `oak_bark` | furrowed oak bark, ridges along V | 1 |
+//! | `oak_leaves` | leaves (plain, two-sided, swaying in the wind) | – |
+//! | `hay` | loose straw | 0.5 |
+//! | `awning_canvas` | striped canvas, faded and stained (stripes along V) | 1 |
+//! | `lantern_glass` | a lit lantern pane | – |
 
 use engine_assets::Handle;
 use engine_core::math::{Vec2, Vec3};
@@ -77,6 +85,14 @@ pub const ZINC: &str = "zinc";
 pub const SHUTTER: [&str; 3] = ["shutter_teal", "shutter_oxblood", "shutter_sage"];
 pub const GLASS: &str = "window_glass";
 pub const GLASS_LIT: &str = "window_glass_lit";
+pub const IRON: &str = "cast_iron";
+pub const ROCK: &str = "crag_granite";
+pub const ICE: &str = "glacier_ice";
+pub const BARK: &str = "oak_bark";
+pub const LEAVES: &str = "oak_leaves";
+pub const HAY: &str = "hay";
+pub const AWNING: &str = "awning_canvas";
+pub const LANTERN: &str = "lantern_glass";
 
 /// Every material this module registers.
 pub const ALL: &[&str] = &[
@@ -121,6 +137,14 @@ pub const ALL: &[&str] = &[
     SHUTTER[2],
     GLASS,
     GLASS_LIT,
+    IRON,
+    ROCK,
+    ICE,
+    BARK,
+    LEAVES,
+    HAY,
+    AWNING,
+    LANTERN,
 ];
 
 /// Size of one `concrete_panel` tile, meters (U across a panel, V up the wall).
@@ -293,6 +317,37 @@ pub fn generate(lib: &mut Library) {
     {
         put(lib, name, wood_set.material(tint * 1.6, [1.0, 1.0]));
     }
+    put(lib, IRON, steel.material(hex(0x23211f), [1.0, 1.0]));
+    let rock_set = Baked::add(lib, bake(full, 3.0, 1.4, crag));
+    put(lib, ROCK, rock_set.material(Vec3::ONE, [3.0, 3.0]));
+    let ice_set = Baked::add(lib, bake(full, 2.0, 1.0, ice));
+    let mut ice_m = ice_set.material(Vec3::ONE, [2.0, 2.0]);
+    ice_m.subsurface = 0.7;
+    ice_m.reflectance = 0.6;
+    put(lib, ICE, ice_m);
+    let bark_set = Baked::add(lib, bake(full, 1.0, 1.6, bark));
+    put(lib, BARK, bark_set.material(Vec3::ONE, [1.0, 1.0]));
+    let mut leaves = StandardMaterial::hex(0x4f6b2c).with_roughness(0.62);
+    leaves.subsurface = 0.55;
+    leaves.double_sided = true;
+    leaves.wind_sway = 1.0;
+    put(lib, LEAVES, leaves);
+    let hay_set = Baked::add(lib, bake(half, 0.5, 1.2, hay));
+    let mut hay_m = hay_set.material(Vec3::ONE, [0.5, 0.5]);
+    hay_m.subsurface = 0.3;
+    put(lib, HAY, hay_m);
+    let awning_set = Baked::add(lib, bake(half, 1.0, 1.0, awning));
+    let mut awning_m = awning_set.material(Vec3::ONE, [1.0, 1.0]);
+    awning_m.subsurface = 0.5;
+    awning_m.double_sided = true;
+    put(lib, AWNING, awning_m);
+    put(
+        lib,
+        LANTERN,
+        StandardMaterial::hex(0x3a2a1a)
+            .with_roughness(0.15)
+            .with_emissive([1.0, 0.66, 0.32], 260.0),
+    );
     put(
         lib,
         GLASS,
@@ -394,6 +449,138 @@ fn zinc(uv: Vec2) -> Surface {
         roughness: (0.45 + 0.3 * bloom + 0.1 * run).clamp(0.3, 0.9),
         metallic: 0.65 - 0.3 * bloom,
         ao: 1.0 - 0.3 * seam,
+    }
+}
+
+/// Weathered granite (3 m tile): bedding planes along U, fractures, a lichen crust, rain
+/// streaks and dark water stains.
+fn crag(uv: Vec2) -> Surface {
+    let warp = fbm(uv * 2.0, 2, 3, 0.5, 401) * 0.08;
+    let bed = (uv.y * 7.0 + warp * 7.0).fract();
+    let ledge = smoothstep(0.92, 1.0, bed) * smoothstep(0.2, 0.5, fbm(uv * 3.0, 3, 3, 0.5, 402));
+    let (c1, c2, cid) = worley(Vec2::new(uv.x * 4.0, uv.y * 6.0), 4, 403);
+    let crack = smoothstep(0.05, 0.0, c2 - c1);
+    let block = 0.85 + 0.3 * cid;
+    let lumps = fbm(uv * 9.0, 9, 5, 0.55, 404);
+    let speck = fbm(uv * 300.0, 300, 2, 0.5, 405);
+    let lichen = smoothstep(0.25, 0.55, fbm(uv * 7.0, 7, 4, 0.55, 406));
+    let pale = smoothstep(0.45, 0.65, fbm(uv * 13.0, 13, 3, 0.5, 410));
+    let streak = smoothstep(
+        0.2,
+        0.7,
+        fbm(Vec2::new(uv.x * 22.0, uv.y * 1.5), 22, 3, 0.5, 407),
+    );
+    let base = hex(0x8b867c) * block * (0.9 + 0.12 * lumps) * (0.9 + 0.12 * speck);
+    let mut albedo = base * (1.0 - 0.28 * streak) * (1.0 - 0.6 * crack) * (1.0 - 0.35 * ledge);
+    albedo = mix3(albedo, hex(0x9a9a6a), lichen * 0.45);
+    albedo = mix3(albedo, hex(0xc8c4b4), lichen * pale * 0.5);
+    Surface {
+        albedo,
+        height: 0.03 * lumps - 0.025 * crack - 0.02 * ledge + 0.002 * speck,
+        roughness: (0.86 + 0.08 * speck - 0.15 * streak).clamp(0.55, 1.0),
+        metallic: 0.0,
+        ao: 1.0 - 0.6 * crack - 0.35 * ledge,
+    }
+}
+
+/// Glacier ice (2 m tile): blue-white, runnels of refrozen meltwater down V, bubbles, frost
+/// in the hollows.
+fn ice(uv: Vec2) -> Surface {
+    let runnel = fbm(Vec2::new(uv.x * 9.0, uv.y * 1.0), 9, 4, 0.55, 421);
+    let ripple = fbm(Vec2::new(uv.x * 30.0, uv.y * 6.0), 30, 3, 0.5, 422);
+    let (b1, _, bid) = worley(uv * 40.0, 40, 423);
+    let bubble = if bid < 0.3 {
+        smoothstep(0.25, 0.05, b1)
+    } else {
+        0.0
+    };
+    let frost = smoothstep(0.1, 0.5, -runnel) * (0.6 + 0.4 * fbm(uv * 120.0, 120, 2, 0.5, 424));
+    let deep = hex(0x6fa8c8);
+    let clear = hex(0xbfdbe8);
+    let mut albedo = mix3(deep, clear, 0.5 + 0.5 * runnel);
+    albedo = mix3(
+        albedo,
+        Vec3::splat(0.95),
+        (frost * 0.7 + bubble * 0.5).min(1.0),
+    );
+    Surface {
+        albedo,
+        height: 0.02 * runnel + 0.003 * ripple - 0.001 * bubble,
+        roughness: (0.08 + 0.55 * frost + 0.05 * ripple.abs()).clamp(0.04, 0.8),
+        metallic: 0.0,
+        ao: 1.0 - 0.15 * frost,
+    }
+}
+
+/// Oak bark (1 m tile): deep furrows along V between flat-topped ridges, broken across, moss
+/// in the furrows.
+fn bark(uv: Vec2) -> Surface {
+    let warp = fbm(Vec2::new(uv.x * 3.0, uv.y * 2.0), 3, 3, 0.5, 431) * 0.35;
+    let ridge = ridged(Vec2::new(uv.x * 9.0 + warp * 9.0, uv.y * 2.0), 9, 3, 432);
+    let plates = (uv.y * 9.0 + fbm(uv * 9.0, 9, 2, 0.5, 433) * 0.6).fract();
+    let breaks = smoothstep(0.08, 0.0, plates.min(1.0 - plates));
+    let ridge = ridge * (1.0 - 0.6 * breaks);
+    let furrow = 1.0 - smoothstep(0.35, 0.75, ridge);
+    let grain = fbm(Vec2::new(uv.x * 80.0, uv.y * 20.0), 80, 2, 0.5, 434);
+    let moss = smoothstep(0.1, 0.5, fbm(uv * 5.0, 5, 3, 0.5, 435)) * furrow;
+    let mut albedo = hex(0x6b5d4f) * (0.75 + 0.35 * ridge) * (0.92 + 0.08 * grain);
+    albedo = mix3(albedo, hex(0x2e2a24), furrow * 0.6);
+    albedo = mix3(albedo, hex(0x4d5a2a), moss * 0.6);
+    Surface {
+        albedo,
+        height: 0.018 * ridge + 0.001 * grain,
+        roughness: (0.88 + 0.08 * grain).clamp(0.6, 1.0),
+        metallic: 0.0,
+        ao: 1.0 - 0.6 * furrow,
+    }
+}
+
+/// Loose hay (0.5 m tile): straws every way, pale gold to dusty green-grey.
+fn hay(uv: Vec2) -> Surface {
+    let mut h = 0.0f32;
+    let mut tone = 0.0f32;
+    for (k, angle) in [0.3f32, 1.2, 2.1, 2.7].into_iter().enumerate() {
+        let (s, c) = angle.sin_cos();
+        let r = Vec2::new(uv.x * c - uv.y * s, uv.x * s + uv.y * c);
+        let seed = 441 + k as u32 * 7;
+        let straw = fbm_a(Vec2::new(r.x * 4.0, r.y * 90.0), (4, 90), 2, seed);
+        let w = smoothstep(0.1, 0.6, straw);
+        if w > h {
+            h = w;
+            tone = rand2((r.y * 90.0) as i32, k as i32, seed + 1);
+        }
+    }
+    let dust = fbm(uv * 6.0, 6, 3, 0.5, 449);
+    let albedo =
+        mix3(hex(0xd9b66a), hex(0x9a9466), tone * 0.6) * (0.55 + 0.45 * h) * (0.9 + 0.1 * dust);
+    Surface {
+        albedo,
+        height: 0.004 * h,
+        roughness: 0.8,
+        metallic: 0.0,
+        ao: 0.5 + 0.5 * h,
+    }
+}
+
+/// Awning canvas (1 m tile): cream and red stripes 25 cm wide along V, the weave, sun fade
+/// and rain stains.
+fn awning(uv: Vec2) -> Surface {
+    let stripe = (uv.x * 4.0).fract() < 0.5;
+    let weave = cloth(uv * 4.0);
+    let fade = fbm(uv * 2.0, 2, 3, 0.5, 451);
+    let stain = smoothstep(
+        0.3,
+        0.7,
+        fbm(Vec2::new(uv.x * 3.0, uv.y * 8.0), 3, 3, 0.5, 452),
+    );
+    let color = if stripe { hex(0x9c2a22) } else { hex(0xe8dcc0) };
+    let albedo = color * (weave.albedo / 0.82) * (1.0 + 0.08 * fade) * (1.0 - 0.18 * stain);
+    Surface {
+        albedo,
+        height: weave.height,
+        roughness: 0.85,
+        metallic: 0.0,
+        ao: weave.ao,
     }
 }
 

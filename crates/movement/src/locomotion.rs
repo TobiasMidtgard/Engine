@@ -27,15 +27,18 @@ use engine_world::{
 
 use crate::climbrope::{self, ClimbRope};
 use crate::grapple;
+use crate::impact::{Impact, ImpactKind};
 use crate::ladder;
 use crate::mover::{
-    Corner, Dash, DashRequest, Hang, Mantle, Mover, RunUp, WallContact, flat, move_towards,
+    Corner, Dash, DashRequest, Hang, Mantle, Mover, Roll, RunUp, WallContact, flat, move_towards,
 };
 use crate::platform::{self, Deck, Pin};
 use crate::profile::MovementProfile;
 use crate::swim::{self, InWater};
+use crate::traverse::{Element, ElementKind, Elements, nearest_on_segment};
 use crate::vault;
 use crate::zipline::{self, Cable, Zipline};
+use crate::{balance, bar, face, perch, pole, target, traverse};
 
 /// Walls are surfaces whose normal is within this of horizontal (|n·up| below it).
 const WALL_MAX_UP: f32 = 0.35;
@@ -80,7 +83,14 @@ const HOP_ACROSS: f32 = 3.5;
 /// Walking off an edge with crouch held catches it when the drop is deeper than this, m.
 const DROP_HANG_MIN: f32 = 1.5;
 /// Running up a wall: longest, s, and the fastest rise, m/s.
-const RUNUP_SECS: f32 = 0.7;
+const RUNUP_SECS: f32 = 1.0;
+/// After a run up a wall ran out, sliding down it this long, s, no faster than
+/// [`WALL_SLIDE_SPEED`], m/s.
+const WALL_SLIDE_SECS: f32 = 0.6;
+const WALL_SLIDE_SPEED: f32 = 3.0;
+/// Kicked off a wall, a wall met within this long is run up too, s, up to this many in a row.
+const RUNUP_CHAIN_SECS: f32 = 0.7;
+const RUNUP_CHAIN_MAX: u8 = 3;
 const RUNUP_RISE: f32 = 6.0;
 /// Speed into the wall a run-up needs, m/s.
 const RUNUP_MIN_SPEED: f32 = 4.0;
@@ -88,6 +98,16 @@ const RUNUP_MIN_SPEED: f32 = 4.0;
 const RUNUP_MAX_LEAN: f32 = 0.1;
 /// Falling, ledges this far below the hands are caught too, m.
 const LEDGE_MAGNET: f32 = 0.6;
+/// How far out from the body a long fall with grab held reaches for a ledge going by, m.
+const FALL_CATCH_REACH: f32 = 0.95;
+/// Falling this fast or slower, a ledge passing the hands is caught on its own; up to
+/// [`FALL_CATCH_MAX`] with grab held, m/s.
+/// (Under 2.1 g: falls of about 3.8 m and 8.8 m.)
+pub const FALL_CATCH_AUTO: f32 = 12.5;
+pub const FALL_CATCH_MAX: f32 = 19.0;
+/// Slower than this (a step off an edge, a hop down) and nothing behind or beside is
+/// caught: a long fall is what the catch is for, m/s.
+pub const FALL_CATCH_MIN: f32 = 9.0;
 /// How far past the body a wall can be and still be run up, m: a sill or a band at the hips
 /// holds the body this far off the face.
 const RUNUP_REACH: f32 = 0.6;
@@ -101,6 +121,7 @@ pub(crate) struct Outputs<'w> {
     contacts: MessageWriter<'w, GroundContact>,
     noise: MessageWriter<'w, NoiseEvent>,
     water: MessageWriter<'w, WaterDisturbance>,
+    impacts: MessageWriter<'w, Impact>,
 }
 
 impl Outputs<'_> {
@@ -113,6 +134,24 @@ impl Outputs<'_> {
 
     pub(crate) fn contact(&mut self, contact: GroundContact) {
         self.contacts.write(contact);
+    }
+
+    /// A felt contact (see [`crate::impact`]).
+    pub(crate) fn impact(
+        &mut self,
+        entity: Entity,
+        kind: ImpactKind,
+        point: DVec3,
+        normal: Vec3,
+        speed: f32,
+    ) {
+        self.impacts.write(Impact {
+            entity,
+            kind,
+            point,
+            normal,
+            speed,
+        });
     }
 
     pub(crate) fn noise(&mut self, entity: Entity, position: DVec3, radius: f32) {
@@ -183,6 +222,7 @@ pub(crate) struct Probe<'a> {
     lines: &'a Lines<'a, 'a>,
     ropes: &'a Ropes<'a, 'a>,
     ladders: &'a Ladders<'a, 'a>,
+    elements: &'a Elements<'a, 'a>,
     /// The surface rungs ring as when a ladder has no collider to say.
     metal: Option<SurfaceId>,
     /// The character's seconds per world second (bodies move in world time).
@@ -249,6 +289,34 @@ impl Probe<'_> {
         })
     }
 
+    /// Every traversal element (see [`crate::traverse`]), in world space.
+    pub(crate) fn elements(&self) -> impl Iterator<Item = Element> + '_ {
+        self.elements
+            .iter()
+            .map(|(e, el, t, g, parented)| el.in_world(e, &element_pose(t, g, parented)))
+    }
+
+    /// Traversal elements within `r` meters of `at` (by their nearest point).
+    pub(crate) fn elements_near(&self, at: DVec3, r: f32) -> impl Iterator<Item = Element> + '_ {
+        self.elements().filter(move |e| {
+            let near = if e.kind.is_face() || e.kind == ElementKind::Awning {
+                // A patch: by its corners' box, loosely.
+                let lo = e.a.min(e.b) - DVec3::splat(r as f64);
+                let hi = e.a.max(e.b) + DVec3::splat(r as f64);
+                return at.cmpge(lo).all() && at.cmple(hi).all();
+            } else {
+                nearest_on_segment(e.a, e.b, at).0
+            };
+            (near - at).length() <= r as f64
+        })
+    }
+
+    /// The traversal element on `entity`, in world space.
+    pub(crate) fn element(&self, entity: Entity) -> Option<Element> {
+        let (e, el, t, g, parented) = self.elements.get(entity).ok()?;
+        Some(el.in_world(e, &element_pose(t, g, parented)))
+    }
+
     /// The climb line of the ladder `ladder`, in world space.
     pub(crate) fn climb_line(&self, ladder: Entity) -> Option<ClimbLine> {
         let (_, c, t, g, _, parented) = self.ladders.get(ladder).ok()?;
@@ -286,6 +354,12 @@ impl Probe<'_> {
         let (t, _) = body_pose(self.bodies, entity)?;
         Some(Pin::new(entity, &t, point, dir))
     }
+}
+
+/// Where a traversal element's entity is: its own `Transform` without a parent (up to date
+/// within the fixed steps of a frame), else its `GlobalTransform`.
+fn element_pose(t: &Transform, g: &GlobalTransform, parented: bool) -> Transform {
+    if parented { g.to_transform() } else { *t }
 }
 
 /// A ladder's climb line in world space. A ladder without a parent goes by its `Transform`
@@ -352,6 +426,7 @@ pub(crate) fn step_movers(
     lines: Lines,
     ropes: Ropes,
     ladders: Ladders,
+    elements: Elements,
     materials: Res<SurfaceMaterials>,
     mut q: Query<(
         Entity,
@@ -426,6 +501,7 @@ pub(crate) fn step_movers(
             lines: &lines,
             ropes: &ropes,
             ladders: &ladders,
+            elements: &elements,
             metal,
             rate,
         };
@@ -474,8 +550,8 @@ pub(crate) fn step_movers(
         });
         let wall_up = m.runup.map(|r| -r.normal);
         let face = m
-            .hang
-            .map(|h| -h.normal)
+            .trav_face
+            .or(m.hang.map(|h| -h.normal))
             .or(wall_up)
             .or(roped)
             .or(ladder)
@@ -694,7 +770,7 @@ fn step_one(
         (state.grounded || floor.is_some()) && ground_normal.dot(up) >= max_slope_cos && !leaving;
     let landed = grounded && !m.grounded && m.air_secs > 0.05;
     if landed {
-        land(m, p, b, out);
+        land(m, p, b, probe, intent.crouch, out);
     }
     m.grounded = grounded;
     m.ground_normal = if grounded { ground_normal } else { up };
@@ -790,7 +866,29 @@ fn step_one(
         m.fall_speed = m.fall_speed.max(-v.dot(up));
     }
 
+    // Landing tiers, wall run-up chains and the wall slide.
+    m.crouch_buffer = if crouch_pressed && !grounded {
+        ROLL_WINDOW
+    } else {
+        (m.crouch_buffer - dt).max(0.0)
+    };
+    m.kick_secs += dt;
+    m.wall_slide = (m.wall_slide - dt).max(0.0);
+    m.recover.0 = (m.recover.0 - dt).max(0.0);
+    if grounded {
+        m.runup_chain = 0;
+    } else {
+        m.roll = None;
+        m.crawl = None;
+    }
+
+    m.trav_face = None;
+    m.elem_cooldown = (m.elem_cooldown - dt).max(0.0);
+    if m.elem_cooldown <= 0.0 && (grounded || m.on_element()) {
+        m.elem_last = None;
+    }
     if m.disabled {
+        m.leave_elements();
         m.dash = None;
         m.mantle = None;
         m.hang = None;
@@ -956,6 +1054,80 @@ fn step_one(
             );
         }
         m.hang = None;
+    }
+
+    // ---- traversal elements held: a perch, a pole, a bar, a line, a rock or ice face
+    let tin = traverse::Input {
+        wish,
+        look: intent.look,
+        jump_pressed,
+        crouch: intent.crouch,
+        crouch_pressed,
+        sprint: intent.sprint,
+        knocked,
+    };
+    if m.perch.is_some() {
+        return perch::step(m, p, b, probe, &tin, v, dt, out);
+    }
+    if m.pole.is_some() {
+        return pole::step(m, p, b, probe, &tin, v, grounded, dt, out);
+    }
+    if m.bar.is_some() {
+        return bar::step(m, p, b, probe, &tin, v, dt, out);
+    }
+    if m.line.is_some() {
+        return balance::step(m, p, b, probe, &tin, v, dt, out);
+    }
+    if m.face.is_some() {
+        return face::step(m, p, b, probe, &tin, v, grounded, dt, out);
+    }
+    // ---- a targeted leap in flight (a double jump or the ground ends it)
+    if m.leap.is_some() {
+        if grounded || (jump_pressed && m.air_jumps_left > 0) {
+            m.leap = None;
+        } else {
+            let blocked = state
+                .wall_normal
+                .is_some_and(|n| n.dot(up).abs() < 0.7 && n.dot(v) < -1.0);
+            if let Some(v) = target::fly(m, p, b, probe, v, blocked, dt, out) {
+                return v;
+            }
+        }
+    }
+    // ---- dropping onto an enemy below
+    if m.takedown.is_some()
+        && let Some(v) = crate::takedown::step(m, p, b, v, dt, out)
+    {
+        return v;
+    }
+    let free = m.dash.is_none()
+        && m.mantle.is_none()
+        && m.vault.is_none()
+        && m.hang.is_none()
+        && m.zip.is_none()
+        && m.ladder.is_none()
+        && m.runup.is_none()
+        && m.rope.is_none()
+        && m.grapple.is_none();
+    // ---- in the air: falling onto a perch or a line, hands passing a bar or a pole, a face
+    if free && !grounded && p.ledge_grab {
+        let caught = crate::soft::capture(m, b, probe, v, out)
+            .or_else(|| perch::capture(m, b, probe, v, out))
+            .or_else(|| balance::capture(m, b, probe, v, wish, false, out))
+            .or_else(|| bar::capture(m, b, probe, v, out))
+            .or_else(|| pole::capture(m, b, probe, v, out))
+            .or_else(|| face::capture(m, p, b, probe, v, wish, false, out));
+        if let Some(v) = caught {
+            return v;
+        }
+    }
+    // ---- on the ground: walking onto a line from its end, or into a climbable face
+    if free && grounded && p.ledge_grab && m.jump_buffer <= 0.0 {
+        let on = balance::capture(m, b, probe, v, wish, true, out)
+            .or_else(|| face::capture(m, p, b, probe, v, wish, true, out));
+        if let Some(v) = on {
+            return v;
+        }
     }
 
     // ---- rope: climbing or swinging on one, or catching one in reach
@@ -1142,6 +1314,57 @@ fn step_one(
         if m.mode == LocomotionMode::WallRun {
             m.wall = None;
         }
+        // ---- rolling out of a hard landing (a jump late in it springs out of it)
+        if let Some(mut r) = m.roll {
+            r.secs += dt;
+            let late = r.secs > Roll::SECS * 0.5;
+            if r.secs >= Roll::SECS || (late && m.jump_buffer > 0.0) {
+                m.roll = None;
+                if r.secs >= Roll::SECS {
+                    m.set_mode(LocomotionMode::Run);
+                    return on_ground(r.dir * r.speed * 0.8, up, ground_normal);
+                }
+            } else {
+                // A little steering along the roll.
+                if wish.length() > 0.3 {
+                    r.dir = turn_towards(r.dir, wish.normalize(), 1.5 * dt);
+                }
+                m.roll = Some(r);
+                m.set_mode(LocomotionMode::Crouch);
+                let speed = r.speed * (1.0 - 0.3 * r.t());
+                return on_ground(r.dir * speed, up, ground_normal);
+            }
+        }
+        // ---- crawling through a gap too low to crouch in (a culvert, under a cart)
+        let gap = crawl_gap(p, b, probe, wish);
+        if m.crawl.is_some() || gap {
+            let feet = b.feet();
+            let roof = probe
+                .ray(feet + (up * 0.3).as_dvec3(), up, p.crouch_height - 0.25)
+                .is_some();
+            if roof || gap {
+                let vh = wish * CRAWL_SPEED;
+                if m.crawl.is_none() {
+                    out.trigger(b.entity, "crawl");
+                }
+                m.crawl = Some(vh.length());
+                m.jump_buffer = 0.0;
+                m.set_mode(LocomotionMode::Crouch);
+                return on_ground(vh, up, ground_normal);
+            }
+            m.crawl = None;
+        }
+        // ---- getting up from a hard landing: no jump until the knees have taken it
+        if m.recover.0 > 0.15 {
+            m.jump_buffer = 0.0;
+        }
+        // ---- a jump meant for an element in the stick's way: a leap onto it
+        if m.jump_buffer > 0.0
+            && wish.length() > 0.3
+            && let Some(l) = target::pick(m, p, b, probe, v, target::Want::ground(wish, intent))
+        {
+            return target::launch(m, b, l, out);
+        }
         // ---- jump (also out of a slide: the slide-hop keeps all momentum)
         if m.jump_buffer > 0.0 {
             m.jump_buffer = 0.0;
@@ -1227,6 +1450,13 @@ fn step_one(
     }
     m.wall = None;
 
+    if m.jump_buffer > 0.0
+        && m.coyote > 0.0
+        && wish.length() > 0.3
+        && let Some(l) = target::pick(m, p, b, probe, v, target::Want::ground(wish, intent))
+    {
+        return target::launch(m, b, l, out);
+    }
     if m.jump_buffer > 0.0 && m.coyote > 0.0 {
         // Coyote jump: just ran off a ledge.
         m.jump_buffer = 0.0;
@@ -1275,12 +1505,34 @@ fn step_one(
         let lift = v.dot(up).clamp(0.0, 3.0).max(p.wallrun_lift);
         return along + up * lift - wall.normal * WALL_STICK;
     }
+    // Kicked off one wall into the next: up that one too (Titanfall's wall-kick chains).
+    if p.ledge_grab
+        && m.kick_secs < RUNUP_CHAIN_SECS
+        && m.runup_chain < RUNUP_CHAIN_MAX
+        && let Some(r) = chain_run_up(m, b, probe, v)
+    {
+        m.runup_chain += 1;
+        m.runup = Some(r);
+        m.kick_secs = 99.0;
+        m.set_mode(LocomotionMode::Climb);
+        m.mode_secs = 0.0;
+        out.trigger(b.entity, "wall_runup");
+        out.impact(b.entity, ImpactKind::Kick, b.pos, r.normal, r.speed);
+        return up * r.speed - r.normal * 0.5;
+    }
     // Too slow along the wall to run on it, or straight at it: catch its top.
     if p.ledge_grab
         && !vault_ahead
         && m.grab_cooldown <= 0.0
-        && let Some(h) = find_hang(p, b, probe, v, wish)
+        && let Some(h) =
+            find_hang(p, b, probe, v, wish).or_else(|| fall_catch(m, p, b, probe, v, intent.sprint))
     {
+        let falling = -v.dot(up);
+        if falling > 4.0 {
+            // Caught on the way down: the arms take the fall with a jolt.
+            out.trigger(b.entity, "fall_catch");
+            out.impact(b.entity, ImpactKind::Catch, h.top, h.normal, falling);
+        }
         m.hang = Some(h);
         m.set_mode(LocomotionMode::Climb);
         m.air_jumps_left = p.air_jumps;
@@ -1291,7 +1543,15 @@ fn step_one(
 
     let vh = air_steer(m, p, flat(v, up), wish, dt);
     let vv = v.dot(up);
-    let vv = (vv - air_gravity(m, p, vv, intent.jump, b.g) * dt).max(-p.max_fall_speed);
+    let mut vv = (vv - air_gravity(m, p, vv, intent.jump, b.g) * dt).max(-p.max_fall_speed);
+    // Sliding down the face a run-up ran out on: the hands and feet drag on it.
+    if m.wall_slide > 0.0 {
+        if chest_wall_within(b, probe, m.facing, b.radius + 0.3).is_some() {
+            vv = vv.max(-WALL_SLIDE_SPEED);
+        } else {
+            m.wall_slide = 0.0;
+        }
+    }
     m.set_mode(LocomotionMode::Air);
     vh + up * vv
 }
@@ -1415,18 +1675,37 @@ fn start_dash(
     out.noise(b.entity, b.pos, 12.0);
 }
 
-fn land(m: &mut Mover, p: &MovementProfile, b: &Body, out: &mut Outputs) {
+/// Landing speeds (falling, m/s): above [`HARD_LAND`] a landing jars (a roll takes it, else
+/// a stagger); above [`ROLL_MAX`] not even a roll does. Under the pilot's falling gravity
+/// (2.1 g) these are drops of about 3.8 m and 12 m.
+pub const HARD_LAND: f32 = 12.5;
+pub const ROLL_MAX: f32 = 22.0;
+/// Crouch pressed this long before touching down rolls, s.
+pub const ROLL_WINDOW: f32 = 0.2;
+/// A roll keeps this much of the speed along the ground.
+const ROLL_KEEP: f32 = 0.7;
+
+#[allow(clippy::too_many_arguments)]
+fn land(
+    m: &mut Mover,
+    p: &MovementProfile,
+    b: &Body,
+    probe: &Probe,
+    crouch: bool,
+    out: &mut Outputs,
+) {
     let impact = m.fall_speed;
     if m.air_secs > 0.2 {
         out.trigger(b.entity, "land");
     }
+    let up = b.up;
     let feet = b.feet();
-    let right = m.facing.cross(b.up).as_dvec3() * 0.12;
+    let right = m.facing.cross(up).as_dvec3() * 0.12;
     let yaw = GroundContact::yaw_of(m.facing);
     for side in [-1.0, 1.0] {
         out.contacts.write(GroundContact {
             position: feet + right * side,
-            normal: b.up,
+            normal: up,
             size: [0.11, 0.28],
             yaw,
             // A hard landing presses in deeper: weight × (1 + v / 4 m/s).
@@ -1438,6 +1717,43 @@ fn land(m: &mut Mover, p: &MovementProfile, b: &Body, out: &mut Outputs) {
         });
     }
     out.noise(b.entity, feet, 4.0 + impact * 1.5);
+    // Into hay (or anything soft): it takes the fall, whatever the height.
+    let soft = probe.elements_near(feet, 2.0).any(|e| {
+        e.kind == ElementKind::Haystack
+            && flat((feet - e.a).as_vec3(), up).length() < e.width * 0.5 + 0.2
+            && ((feet - e.a).dot(up.as_dvec3()) as f32).abs() < 0.5
+    });
+    if soft {
+        out.trigger(b.entity, "hay");
+        out.impact(b.entity, ImpactKind::Hay, feet, up, impact);
+        return;
+    }
+    let vh = flat(m.velocity, up);
+    let rolled = impact > HARD_LAND && impact <= ROLL_MAX && (m.crouch_buffer > 0.0 || crouch);
+    if rolled {
+        // Tuck and roll: the fall turns into speed along the ground (Mirror's Edge's roll).
+        let dir = vh.try_normalize().unwrap_or(m.facing);
+        m.roll = Some(Roll {
+            dir,
+            speed: (vh.length() * ROLL_KEEP).max(3.5),
+            secs: 0.0,
+        });
+        m.crouch_buffer = 0.0;
+        out.trigger(b.entity, "roll");
+        out.impact(b.entity, ImpactKind::Roll, feet, up, impact * 0.6);
+        return;
+    }
+    if impact > HARD_LAND {
+        // A stagger: down on one knee, longer the harder.
+        let secs = (0.35 + (impact - HARD_LAND) * 0.06).min(0.9);
+        m.recover = (secs, secs);
+        out.trigger(b.entity, "hard_land");
+        out.impact(b.entity, ImpactKind::HardLand, feet, up, impact);
+        return;
+    }
+    if m.air_secs > 0.2 || impact > 3.0 {
+        out.impact(b.entity, ImpactKind::Land, feet, up, impact);
+    }
 }
 
 fn on_ground(v: Vec3, up: Vec3, n: Vec3) -> Vec3 {
@@ -1469,8 +1785,17 @@ fn ground_move(
     } else {
         p.run_speed
     } * m.wade;
-    let target = wish * base;
+    // Staggering up from a hard landing: slow at first, back to speed as it ends.
+    let stagger = if m.recover.1 > 0.0 {
+        1.0 - 0.75 * (m.recover.0 / m.recover.1)
+    } else {
+        1.0
+    };
+    let target = wish * base * stagger;
     let mut vh = flat(v, up);
+    if m.recover.0 > 0.0 {
+        vh = vh.clamp_length_max(base * stagger + 0.5);
+    }
     if let Some(lunge) = m.influence.lunge {
         vh = flat(lunge, up);
     } else if vh.length() > base + 0.1 && target.length() > 0.01 && vh.dot(target) > 0.0 {
@@ -1960,6 +2285,18 @@ fn find_hop(b: &Body, probe: &Probe, top: DVec3, normal: Vec3, hop: Hop) -> Opti
 /// A ledge too high to climb onto directly, in reach of the hands: near the top of a jump or
 /// falling, moving or pushing toward the wall.
 fn find_hang(p: &MovementProfile, b: &Body, probe: &Probe, v: Vec3, wish: Vec3) -> Option<Hang> {
+    find_hang_within(p, b, probe, v, wish, b.radius + 0.45)
+}
+
+/// [`find_hang`] with the wall up to `reach` m from the body's axis.
+fn find_hang_within(
+    p: &MovementProfile,
+    b: &Body,
+    probe: &Probe,
+    v: Vec3,
+    wish: Vec3,
+    reach: f32,
+) -> Option<Hang> {
     let up = b.up;
     if v.dot(up) > 1.5 {
         return None;
@@ -1969,7 +2306,7 @@ fn find_hang(p: &MovementProfile, b: &Body, probe: &Probe, v: Vec3, wish: Vec3) 
         .try_normalize()
         .filter(|_| wish.length() > 0.3)
         .or_else(|| vh.try_normalize().filter(|_| vh.length() > 0.5))?;
-    let (face, normal, wall) = chest_wall(b, probe, dir)?;
+    let (face, normal, wall) = chest_wall_within(b, probe, dir, reach)?;
     let low = p.mantle_max_height.min(p.ledge_grab_max_height);
     // Falling, a ledge passing the hands is caught too (the ledge magnet: Assassin's Creed
     // catches what the hands go by).
@@ -1980,6 +2317,31 @@ fn find_hang(p: &MovementProfile, b: &Body, probe: &Probe, v: Vec3, wish: Vec3) 
     };
     let top = ledge_top(b, probe, face, normal, low, p.ledge_grab_max_height)?;
     Some(Hang::new(top, normal, probe.pin(wall, top, normal)))
+}
+
+/// Falling past a ledge on any side catches it (Assassin's Creed's catch on a long fall):
+/// on its own up to [`FALL_CATCH_AUTO`], with grab (the parkour button: sprint) held up to
+/// [`FALL_CATCH_MAX`].
+fn fall_catch(
+    m: &Mover,
+    p: &MovementProfile,
+    b: &Body,
+    probe: &Probe,
+    v: Vec3,
+    grab: bool,
+) -> Option<Hang> {
+    let up = b.up;
+    let falling = -v.dot(up);
+    if falling < FALL_CATCH_MIN || falling > FALL_CATCH_MAX || (falling > FALL_CATCH_AUTO && !grab)
+    {
+        return None;
+    }
+    // With grab held the arms reach out for it (a lunge at the wall going by).
+    let reach = b.radius + if grab { FALL_CATCH_REACH } else { 0.45 };
+    let right = m.facing.cross(up);
+    [m.facing, right, -right, -m.facing]
+        .into_iter()
+        .find_map(|dir| find_hang_within(p, b, probe, v, dir, reach))
 }
 
 /// Velocity toward the hanging position under `top` (sideways is left free).
@@ -2331,9 +2693,62 @@ fn start_run_up(b: &Body, probe: &Probe, v: Vec3, wish: Vec3) -> Option<RunUp> {
     probe
         .ray(head, dir, b.radius + 0.6)
         .filter(|h| h.normal.dot(up).abs() <= RUNUP_MAX_LEAN)?;
+    // A wall, not a post: as wide as the shoulders (a lamp post or a trunk is caught and
+    // climbed instead).
+    let side = up.cross(dir).normalize_or_zero() * 0.4;
+    for s in [side, -side] {
+        probe.ray(chest + s.as_dvec3(), dir, hit.distance + 0.3)?;
+    }
     Some(RunUp {
         normal,
         speed: (speed * 0.7).min(RUNUP_RISE),
+        secs: 0.0,
+    })
+}
+
+/// Crawling: the capsule's height (a ball), m, and the speed on hands and knees, m/s.
+pub const CRAWL_HEIGHT: f32 = 0.7;
+pub const CRAWL_SPEED: f32 = 1.3;
+
+/// The stick into a gap too low to crouch through but high enough to crawl: something at a
+/// crouching head's height just ahead, clear below it.
+fn crawl_gap(p: &MovementProfile, b: &Body, probe: &Probe, wish: Vec3) -> bool {
+    let Some(dir) = wish.try_normalize().filter(|_| wish.length() > 0.3) else {
+        return false;
+    };
+    let up = b.up;
+    let feet = b.feet();
+    let head = feet + (up * (p.crouch_height - 0.12)).as_dvec3();
+    let knees = feet + (up * 0.35).as_dvec3();
+    let low_roof = probe
+        .ray(head, dir, b.radius + 0.5)
+        .is_some_and(|h| h.normal.dot(up).abs() < 0.7 || h.normal.dot(up) < -0.5);
+    let open_below = probe.ray(knees, dir, b.radius + 0.9).is_none();
+    // And a roof over the gap, not just a ledge sticking out at head height.
+    let roofed = probe
+        .ray(
+            knees + (dir * (b.radius + 0.6)).as_dvec3(),
+            up,
+            p.crouch_height,
+        )
+        .is_some();
+    low_roof && open_below && roofed
+}
+
+/// A wall the body flies head-on into just after a wall kick: run up it too, a little less
+/// far each time.
+fn chain_run_up(m: &Mover, b: &Body, probe: &Probe, v: Vec3) -> Option<RunUp> {
+    let up = b.up;
+    let vh = flat(v, up);
+    let dir = vh.try_normalize()?;
+    let (_, normal, _) = chest_wall_within(b, probe, dir, b.radius + RUNUP_REACH)?;
+    if normal.dot(dir) > -0.7 {
+        return None;
+    }
+    let speed = RUNUP_RISE * 0.85f32.powi(m.runup_chain as i32 + 1);
+    Some(RunUp {
+        normal,
+        speed,
         secs: 0.0,
     })
 }
@@ -2375,7 +2790,8 @@ fn run_up(
     }
     // Catch a ledge near the top of the run (the highest it reaches), the hands sweeping
     // down past it as the run fades.
-    let rise = r.speed * (1.0 - 0.75 * (r.secs / RUNUP_SECS).clamp(0.0, 1.0));
+    // Slowing as it goes, faster and faster (Mirror's Edge's wall climb): (1 − t/T)^1.5.
+    let rise = r.speed * (1.0 - (r.secs / RUNUP_SECS).clamp(0.0, 1.0)).powf(1.5);
     let fading = rise < 3.0 || r.secs + dt >= RUNUP_SECS;
     if fading && let Some(h) = find_hang(p, b, probe, into - up * 2.0, into) {
         m.runup = None;
@@ -2392,13 +2808,16 @@ fn run_up(
         m.grab_cooldown = 0.15;
         m.set_mode(LocomotionMode::Air);
         if jump_pressed {
-            // Kick back off it (Titanfall's wall kick).
+            // Kick back off it (Titanfall's wall kick), toward a wall behind to run up next.
             m.jump_buffer = 0.0;
+            m.kick_secs = 0.0;
             out.trigger(b.entity, "wall_jump");
+            out.impact(b.entity, ImpactKind::Kick, b.pos, r.normal, r.speed);
             return r.normal * p.wall_jump_push + up * p.jump_speed(p.wall_jump_height, b.g);
         }
-        // Off the top of the run: fall away from the wall.
-        return r.normal * 1.5 + up * v.dot(up).max(0.0) * 0.3;
+        // The run ran out: slide down the face, hands on it, then fall.
+        m.wall_slide = WALL_SLIDE_SECS;
+        return r.normal * 0.3 + up * v.dot(up).max(0.0) * 0.3;
     }
     m.runup = Some(r);
     m.set_mode(LocomotionMode::Climb);
@@ -2468,35 +2887,52 @@ fn resize_capsule(
     if p.crouch_height <= 0.0 || p.crouch_height >= m.stand_height {
         return;
     }
-    let want = m.mode == LocomotionMode::Slide || (crouch && m.grounded);
+    let crawl = CRAWL_HEIGHT.max(cc.radius * 2.0);
+    let want = if m.crawl.is_some() {
+        crawl
+    } else if m.mode == LocomotionMode::Slide || m.roll.is_some() || (crouch && m.grounded) {
+        p.crouch_height
+    } else {
+        m.stand_height
+    };
     let upd = b.up.as_dvec3();
-    if want && !m.crouched {
-        let dh = m.stand_height - p.crouch_height;
-        cc.height = p.crouch_height;
-        if m.grounded {
-            transform.translation -= upd * (dh as f64 * 0.5);
-        }
-        m.crouched = true;
-    } else if !want && m.crouched {
-        let dh = m.stand_height - cc.height;
-        // Stand only with head room.
-        if probe
-            .ray(b.pos, b.up, cc.height * 0.5 + dh + 0.02)
-            .is_none()
-        {
-            cc.height = m.stand_height;
-            if m.grounded {
-                transform.translation += upd * (dh as f64 * 0.5);
-            }
-            m.crouched = false;
+    let have = cc.height;
+    if (want - have).abs() < 1e-3 {
+        if want >= m.stand_height - 1e-3 {
             m.low_ceiling = false;
-        } else {
-            m.low_ceiling = true;
-            if m.grounded {
-                m.set_mode(LocomotionMode::Crouch);
-            }
         }
+        return;
     }
+    // Growing only with head room: else as tall as the room allows (crawling → crouching).
+    let grow_to = |to: f32| {
+        to <= have
+            || probe
+                .ray(b.pos, b.up, have * 0.5 + (to - have) + 0.02)
+                .is_none()
+    };
+    let to = if grow_to(want) {
+        want
+    } else if want > p.crouch_height && have < p.crouch_height && grow_to(p.crouch_height) {
+        p.crouch_height
+    } else {
+        have
+    };
+    if to > have && to < want {
+        m.low_ceiling = true;
+    }
+    if (to - have).abs() < 1e-3 {
+        m.low_ceiling = want > have;
+        if m.low_ceiling && m.grounded && m.crawl.is_none() {
+            m.set_mode(LocomotionMode::Crouch);
+        }
+        return;
+    }
+    cc.height = to;
+    if m.grounded {
+        transform.translation += upd * ((to - have) as f64 * 0.5);
+    }
+    m.crouched = to < m.stand_height - 1e-3;
+    m.low_ceiling = to < want;
 }
 
 /// Footsteps, slide scrapes and wall-run steps (when no animation module emits them).

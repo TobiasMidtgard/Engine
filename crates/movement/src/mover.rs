@@ -338,6 +338,24 @@ pub struct Mover {
     pub runup: Option<RunUp>,
     /// On a hanging rope.
     pub rope: Option<RopeHold>,
+    /// Flying a targeted leap to a traversal element (see [`crate::target`]).
+    #[serde(skip)]
+    pub leap: Option<crate::target::Leap>,
+    /// Crouched on a perch (see [`crate::perch`]).
+    #[serde(skip)]
+    pub perch: Option<crate::perch::Perch>,
+    /// On an upright pole (see [`crate::pole`]).
+    #[serde(skip)]
+    pub pole: Option<crate::pole::PoleHold>,
+    /// Hanging from a bar or a washing line (see [`crate::bar`]).
+    #[serde(skip)]
+    pub bar: Option<crate::bar::BarHold>,
+    /// Balancing along a beam, railing, tightrope or branch (see [`crate::balance`]).
+    #[serde(skip)]
+    pub line: Option<crate::balance::LineWalk>,
+    /// Climbing a rock or ice face (see [`crate::face`]).
+    #[serde(skip)]
+    pub face: Option<crate::face::FaceClimb>,
     /// The capsule is shrunk (crouching or sliding).
     pub crouched: bool,
     /// Remaining dodge invulnerability, s (own time).
@@ -419,6 +437,57 @@ pub struct Mover {
     pub(crate) low_ceiling: bool,
     #[serde(skip)]
     pub(crate) influence: Influence,
+    /// The element jumped at last (a target choice keeps to it: see [`crate::target`]).
+    #[serde(skip)]
+    pub(crate) target_last: Option<Entity>,
+    /// The element just left: not caught again until this runs out, s.
+    #[serde(skip)]
+    pub(crate) elem_last: Option<Entity>,
+    #[serde(skip)]
+    pub(crate) elem_cooldown: f32,
+    /// The way an element held turns the body this step (a pole's side, a bar's front).
+    #[serde(skip)]
+    pub(crate) trav_face: Option<Vec3>,
+    /// Rolling out of a hard landing (see [`Roll`]).
+    #[serde(skip)]
+    pub roll: Option<Roll>,
+    /// Getting up from a hard landing: seconds left, and how long it lasts in all.
+    #[serde(skip)]
+    pub recover: (f32, f32),
+    /// Crouch pressed this recently in the air, s left (a roll on landing).
+    #[serde(skip)]
+    pub(crate) crouch_buffer: f32,
+    /// Sliding down a wall after a run up it ran out, s left.
+    #[serde(skip)]
+    pub(crate) wall_slide: f32,
+    /// Since the last kick off a wall, s, and run-ups chained since touching the ground.
+    #[serde(skip)]
+    pub(crate) kick_secs: f32,
+    #[serde(skip)]
+    pub(crate) runup_chain: u8,
+    /// Crawling on hands and knees (a low tunnel), its speed, m/s.
+    #[serde(skip)]
+    pub crawl: Option<f32>,
+    /// Dropping onto an enemy below (see [`crate::takedown`]).
+    #[serde(skip)]
+    pub takedown: Option<crate::takedown::Takedown>,
+}
+
+/// A landing roll: along `dir` at `speed` (slowing), for [`Roll::SECS`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Roll {
+    pub dir: Vec3,
+    pub speed: f32,
+    pub secs: f32,
+}
+
+impl Roll {
+    pub const SECS: f32 = 0.6;
+
+    /// 0..1 through the roll.
+    pub fn t(&self) -> f32 {
+        (self.secs / Self::SECS).clamp(0.0, 1.0)
+    }
 }
 
 impl Default for Mover {
@@ -444,6 +513,12 @@ impl Default for Mover {
             vault: None,
             runup: None,
             rope: None,
+            leap: None,
+            perch: None,
+            pole: None,
+            bar: None,
+            line: None,
+            face: None,
             crouched: false,
             evade_secs: 0.0,
             disabled: false,
@@ -486,6 +561,18 @@ impl Default for Mover {
                 lunge: None,
                 face: None,
             },
+            target_last: None,
+            elem_last: None,
+            elem_cooldown: 0.0,
+            trav_face: None,
+            roll: None,
+            recover: (0.0, 0.0),
+            crouch_buffer: 0.0,
+            wall_slide: 0.0,
+            kick_secs: 99.0,
+            runup_chain: 0,
+            crawl: None,
+            takedown: None,
         }
     }
 }
@@ -524,6 +611,25 @@ impl Mover {
         }
     }
 
+    /// On any traversal element (perch, pole, bar, line, face) or leaping to one.
+    pub fn on_element(&self) -> bool {
+        self.perch.is_some()
+            || self.pole.is_some()
+            || self.bar.is_some()
+            || self.line.is_some()
+            || self.face.is_some()
+    }
+
+    /// Let go of every traversal element (and any leap to one).
+    pub(crate) fn leave_elements(&mut self) {
+        self.leap = None;
+        self.perch = None;
+        self.pole = None;
+        self.bar = None;
+        self.line = None;
+        self.face = None;
+    }
+
     /// Seconds until the grapple can fire again (0 = ready).
     pub fn grapple_cooldown(&self) -> f32 {
         self.grapple_cooldown
@@ -532,6 +638,10 @@ impl Mover {
     /// Teleport bookkeeping: clear velocity and any dash, mantle, vault, ledge hang, grapple,
     /// zip line, ladder or wall-run.
     pub fn reset_motion(&mut self) {
+        self.roll = None;
+        self.recover = (0.0, 0.0);
+        self.crawl = None;
+        self.takedown = None;
         self.velocity = Vec3::ZERO;
         self.knockback = Vec3::ZERO;
         self.dash = None;
@@ -551,6 +661,7 @@ impl Mover {
         self.rope = None;
         self.rope_cooldown = 0.0;
         self.rope_last = None;
+        self.leave_elements();
         self.wall = None;
         self.last_wall = None;
         self.pending_dash = None;
