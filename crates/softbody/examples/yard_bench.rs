@@ -238,6 +238,36 @@ fn main() {
         geo.vertices.len(),
         geo.points.len()
     );
+    // Resting bodies keep their mesh from frame to frame (`KeptMesh`), as the prepare does.
+    let mut kept: Vec<engine_softbody::render::KeptMesh> =
+        bodies.iter().map(|_| Default::default()).collect();
+    let mut frame = |geo: &mut Geometry| {
+        geo.clear();
+        for (b, k) in bodies.iter().zip(&mut kept) {
+            let base = (b.sim.origin - yard).as_vec3();
+            geo.add_body_reusing(b, base, 0.5, px(b), Some(k));
+        }
+    };
+    let t = Instant::now();
+    for _ in 0..10 {
+        geo.clear();
+        for b in &bodies {
+            geo.add_body(b, (b.sim.origin - yard).as_vec3(), 0.5, px(b));
+        }
+    }
+    let fresh = t.elapsed().as_secs_f64() * 100.0;
+    frame(&mut geo);
+    let t = Instant::now();
+    for _ in 0..10 {
+        frame(&mut geo);
+    }
+    println!(
+        "render geometry without hair: {fresh:.2} ms per frame built, {:.2} with resting \
+         bodies kept ({} of {} resting)",
+        t.elapsed().as_secs_f64() * 100.0,
+        bodies.iter().filter(|b| b.frozen).count(),
+        bodies.len(),
+    );
     // The same split over the compute pool the way the render prepare does it.
     let pool = engine_core::tasks::ComputeTaskPool::get();
     let run = bodies.len().div_ceil(pool.thread_num().max(1) * 2).max(1);

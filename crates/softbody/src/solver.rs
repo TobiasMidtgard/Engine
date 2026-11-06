@@ -1255,7 +1255,7 @@ impl Flow {
 /// on the compute pool that could be a whole other body, holding this body's step up until
 /// that one's step ends too (steps of 200 ms on 32 threads); here it is only another piece.
 /// Pieces never wait on anything, so the pool can't deadlock.
-fn leaf_pool() -> &'static TaskPool {
+pub(crate) fn leaf_pool() -> &'static TaskPool {
     static POOL: std::sync::OnceLock<TaskPool> = std::sync::OnceLock::new();
     POOL.get_or_init(|| {
         let threads = std::thread::available_parallelism().map_or(2, |n| n.get());

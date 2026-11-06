@@ -14,6 +14,7 @@
 //! Hair and fur use their own strand drawing here until the shared strand renderer (owned by
 //! Rendering and lighting) exists; [`Geometry::add_hair`] produces exactly the buffers it needs.
 
+use std::collections::HashMap;
 use std::f32::consts::{PI, TAU};
 use std::ops::Range;
 
@@ -55,6 +56,9 @@ const BEAD_LAT: usize = 8;
 const BEAD_FULL_PX: f32 = 12.0;
 /// Cloth cells larger than this on screen (pixels) are drawn subdivided along curved edges.
 const REFINE_CELL_PX: f32 = 6.0;
+/// Hair and fur smaller than this on screen (bounding radius, pixels) cast no shadow: fur 0.6 m
+/// across stops at about 45 m at 1440p.
+const HAIR_SHADOW_PX: f32 = 16.0;
 
 /// One surface vertex. Must match `VertexIn` in `surface.wgsl` and `shadow.wgsl`.
 #[repr(C)]
@@ -203,6 +207,61 @@ pub struct Geometry {
     edge_mid: Vec<u32>,
 }
 
+/// A resting body's mesh as [`Geometry::add_body_reusing`] last built it (vertices relative to
+/// the camera at `base`, indices from 0), and what it was built from.
+#[derive(Debug, Default)]
+pub struct KeptMesh {
+    key: Option<u64>,
+    base: Vec3,
+    pos: Vec<Vec3>,
+    vertices: Vec<SoftVertex>,
+    indices: Vec<u32>,
+    /// The frame it was last drawn in, to drop meshes of bodies gone or out of every view.
+    pub seen: u64,
+}
+
+impl KeptMesh {
+    /// Only a body that isn't stepped stays as it is; hair rides its bones even then.
+    fn can_keep(body: &SoftBodySim) -> bool {
+        body.frozen && body.strands.is_none() && body.sim.step_start == body.sim.pos
+    }
+
+    /// What else the mesh depends on: its detail on screen (cloth refinement, bead facets)
+    /// and what a step, a hit or a fire changes (steps, topology, holes, wetness, char, glow).
+    fn key(body: &SoftBodySim, refine: bool, px_per_m: f32) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        refine.hash(&mut h);
+        for tube in &body.tubes {
+            if let Some(beads) = &tube.beads {
+                // As `add_beads` picks its rings and sides.
+                let full_lon = if beads.facets > 0 {
+                    beads.facets.clamp(3, 24) as usize
+                } else {
+                    14
+                };
+                let detail = (beads.radius * px_per_m / BEAD_FULL_PX).clamp(0.0, 1.0);
+                ((BEAD_LAT as f32 * detail).round() as usize).hash(&mut h);
+                ((full_lon as f32 * detail).round() as usize).hash(&mut h);
+            }
+        }
+        body.steps.hash(&mut h);
+        body.topology_version.hash(&mut h);
+        let sum = |v: &[f32]| v.iter().sum::<f32>().to_bits();
+        sum(&body.wet).hash(&mut h);
+        if let Some(c) = &body.cloth {
+            c.holes.len().hash(&mut h);
+            sum(&c.char).hash(&mut h);
+            sum(&c.glow).hash(&mut h);
+        }
+        h.finish()
+    }
+
+    fn holds(&self, body: &SoftBodySim, key: u64) -> bool {
+        self.key == Some(key) && Self::can_keep(body) && self.pos == body.sim.pos
+    }
+}
+
 /// The midpoint of a PN-triangle edge: the cubic through both ends that leaves each end
 /// along its tangent plane, sampled halfway. Bending is capped at an eighth of the edge so
 /// noisy normals can't raise bumps. The normal is the plain average of the ends: the
@@ -306,6 +365,22 @@ impl Geometry {
     /// along curved edges; beads get fewer facets as they shrink. Returns its index range
     /// (empty for bodies with nothing to draw).
     pub fn add_body(&mut self, body: &SoftBodySim, base: Vec3, alpha: f32, px: f32) -> Range<u32> {
+        self.add_body_reusing(body, base, alpha, px, None)
+    }
+
+    /// [`add_body`](Self::add_body), keeping the mesh of a body that rests (frozen, not
+    /// stepped) in `kept` and copying it from there while the body stays as it was: a far
+    /// curtain or flag that only a shadow map or the sky occlusion map sees is rebuilt once,
+    /// not every frame. Normals, tension, PN-refinement and rope tubes and beads are what it
+    /// skips; the copy moves the vertices with the camera and renames their material.
+    pub fn add_body_reusing(
+        &mut self,
+        body: &SoftBodySim,
+        base: Vec3,
+        alpha: f32,
+        px: f32,
+        kept: Option<&mut KeptMesh>,
+    ) -> Range<u32> {
         let start = self.indices.len() as u32;
         if !Self::has_mesh(body) {
             return start..start;
@@ -327,17 +402,50 @@ impl Geometry {
             gpu_material.params[3] = 1.0;
         }
         self.materials.push(gpu_material);
-        self.interpolate(body, base, alpha);
         let px_per_m = px / body.radius.max(0.01);
+        let refine = body
+            .cloth
+            .as_ref()
+            .is_some_and(|c| px_per_m * c.cell > REFINE_CELL_PX);
+        let first_vertex = self.vertices.len() as u32;
+        let key = kept.as_ref().map(|_| KeptMesh::key(body, refine, px_per_m));
+        if let (Some(kept), Some(key)) = (kept.as_deref(), key)
+            && kept.holds(body, key)
+        {
+            let delta = base - kept.base;
+            self.vertices
+                .extend(kept.vertices.iter().map(|v| SoftVertex {
+                    position: (Vec3::from(v.position) + delta).to_array(),
+                    material,
+                    ..*v
+                }));
+            self.indices
+                .extend(kept.indices.iter().map(|i| i + first_vertex));
+            return start..self.indices.len() as u32;
+        }
+        self.interpolate(body, base, alpha);
         if let Some(surface) = &body.surface {
-            let refine = body
-                .cloth
-                .as_ref()
-                .is_some_and(|c| px_per_m * c.cell > REFINE_CELL_PX);
             self.add_surface(body, surface, material, refine);
         }
         for tube in &body.tubes {
             self.add_tube(tube, material, mean_wet, px_per_m);
+        }
+        if let (Some(kept), Some(key)) = (kept, key) {
+            kept.key = None;
+            if KeptMesh::can_keep(body) {
+                kept.vertices.clear();
+                kept.vertices
+                    .extend_from_slice(&self.vertices[first_vertex as usize..]);
+                kept.indices.clear();
+                kept.indices.extend(
+                    self.indices[start as usize..]
+                        .iter()
+                        .map(|i| i - first_vertex),
+                );
+                kept.pos.clone_from(&body.sim.pos);
+                kept.base = base;
+                kept.key = Some(key);
+            }
         }
         start..self.indices.len() as u32
     }
@@ -974,8 +1082,12 @@ fn pipeline(gpu: &GpuShared, s: PipelineSpec) -> wgpu::RenderPipeline {
 pub struct SoftBodyFeature {
     gpu: Option<Gpu>,
     cloths: Option<GpuCloths>,
-    query: Option<QueryState<&'static SoftBodySim>>,
+    query: Option<QueryState<(Entity, &'static SoftBodySim)>>,
     geometry: Geometry,
+    /// Resting bodies' meshes, rebuilt only when they change (see [`KeptMesh`]).
+    kept: HashMap<Entity, KeptMesh>,
+    /// Frames prepared, for dropping kept meshes no view has seen for a while.
+    frame: u64,
     /// Per task: the geometry of a run of bodies, and each body's draws within it.
     parts: Vec<(Geometry, Vec<Built>)>,
     draws: Draws,
@@ -1122,7 +1234,7 @@ impl RenderFeature for SoftBodyFeature {
         _settings: &RenderSettings,
     ) {
         if self.query.is_none() {
-            self.query = Some(world.query::<&SoftBodySim>());
+            self.query = Some(world.query::<(Entity, &SoftBodySim)>());
         }
         if let Some(cloths) = self.cloths.as_mut() {
             cloths.prepare_serial(world, gpu);
@@ -1134,7 +1246,7 @@ impl RenderFeature for SoftBodyFeature {
         world: &World,
         gpu: &GpuShared,
         view: &ViewData,
-        _settings: &RenderSettings,
+        settings: &RenderSettings,
         out: &mut PrepareOut,
     ) {
         let Some(g) = self.gpu.as_mut() else {
@@ -1154,6 +1266,7 @@ impl RenderFeature for SoftBodyFeature {
 
         // Which bodies the camera or a shadow map can see.
         struct Seen<'a> {
+            entity: Entity,
             body: &'a SoftBodySim,
             base: Vec3,
             dist: f32,
@@ -1162,8 +1275,12 @@ impl RenderFeature for SoftBodyFeature {
             /// Bit per cascade, bit MAX_CASCADES for the sky occlusion map.
             mask: u8,
         }
+        let min_caster_texels = settings
+            .shadow_caster_min_texels
+            .max(settings.min_object_pixels);
+        let min_sky_texels = settings.min_object_pixels.max(2.0);
         let mut seen: Vec<Seen> = Vec::new();
-        for body in query.iter(world) {
+        for (entity, body) in query.iter(world) {
             if body.sim.is_empty() || body.drawn_elsewhere {
                 continue;
             }
@@ -1172,15 +1289,30 @@ impl RenderFeature for SoftBodyFeature {
             let dist = center.length();
             let px = view.projected_radius_px(radius, dist);
             let in_view = view.frustum.intersects_sphere(center, radius) && px > 0.3;
+            // A map leaves out casters narrower than a few of its texels, whose shadow its
+            // filter wouldn't keep, as it does the renderer's meshes
+            // (`RenderSettings::shadow_caster_min_texels`). Hair and fur cast only while big
+            // on screen: their own shadow is a fringe of centimetres on the body growing them
+            // (which casts its own), and a groom costs as much to build far off as near (the
+            // dog's fur in the fortress's and the plaza's far cascades, 90-480 m away).
             let mut mask = 0u8;
-            for c in 0..view.cascades.count as usize {
-                if view.cascades.sphere_in_cascade(c, center, radius) {
-                    mask |= 1 << c;
+            let size = 2.0 * radius;
+            if body.strands.is_none() || px >= HAIR_SHADOW_PX {
+                let cascades = &view.cascades;
+                for c in 0..cascades.count as usize {
+                    let texel = 2.0 * cascades.half_extent[c] / cascades.map_size.max(1) as f32;
+                    if size >= min_caster_texels * texel
+                        && cascades.sphere_in_cascade(c, center, radius)
+                    {
+                        mask |= 1 << c;
+                    }
                 }
             }
+            let sky = &view.sky_occlusion;
             if body.strands.is_none()
-                && view.sky_occlusion.enabled
-                && view.sky_occlusion.contains_sphere(center, radius)
+                && sky.enabled
+                && size >= min_sky_texels * sky.extent / sky.map_size.max(1) as f32
+                && sky.contains_sphere(center, radius)
             {
                 mask |= 1 << SKY_OCCLUSION_VIEW;
             }
@@ -1189,6 +1321,7 @@ impl RenderFeature for SoftBodyFeature {
                 continue;
             }
             seen.push(Seen {
+                entity,
                 body,
                 base: (body.sim.origin - view.origin).as_vec3(),
                 dist,
@@ -1209,21 +1342,34 @@ impl RenderFeature for SoftBodyFeature {
 
         // Build the bodies on the compute pool, a run of them per task, then join the runs
         // in draw order.
-        let build = |seen: &[Seen], (geo, built): &mut (Geometry, Vec<Built>)| {
-            geo.clear();
-            built.clear();
-            for s in seen {
-                let range = geo.add_body(s.body, s.base, alpha, s.px);
-                let hair = s.body.strands.as_ref().and_then(|_| {
-                    let density = (s.px / HAIR_FULL_DENSITY_PX * thin).clamp(0.06, 1.0);
-                    let detail = (s.px / (HAIR_FULL_DENSITY_PX * 0.5)).clamp(0.25, 1.0);
-                    geo.add_hair(s.body, s.base, alpha, density, detail)
-                });
-                built.push(Built { range, hair });
-            }
-        };
-        let pool = engine_core::tasks::ComputeTaskPool::try_get();
-        let tasks = pool.map_or(1, |p| p.thread_num().max(1));
+        // Each body's kept mesh, taken out of the map for the build and put back after.
+        self.frame += 1;
+        let frame = self.frame;
+        let mut kept: Vec<KeptMesh> = seen
+            .iter()
+            .map(|s| self.kept.remove(&s.entity).unwrap_or_default())
+            .collect();
+        let build =
+            |seen: &[Seen], kept: &mut [KeptMesh], (geo, built): &mut (Geometry, Vec<Built>)| {
+                geo.clear();
+                built.clear();
+                for (s, kept) in seen.iter().zip(kept) {
+                    kept.seen = frame;
+                    let range = geo.add_body_reusing(s.body, s.base, alpha, s.px, Some(kept));
+                    let hair = s.body.strands.as_ref().and_then(|_| {
+                        let density = (s.px / HAIR_FULL_DENSITY_PX * thin).clamp(0.06, 1.0);
+                        let detail = (s.px / (HAIR_FULL_DENSITY_PX * 0.5)).clamp(0.25, 1.0);
+                        geo.add_hair(s.body, s.base, alpha, density, detail)
+                    });
+                    built.push(Built { range, hair });
+                }
+            };
+        // On softbody's own small pool: this runs inside the renderer's shared prepares, a
+        // task of the compute pool, and a scope opened there waits by running other whole
+        // features' prepares (crate::solver::leaf_pool), which held it 5-9 ms on the cloud VM
+        // for 1.5-4 ms of building.
+        let pool = crate::solver::leaf_pool();
+        let tasks = pool.thread_num().max(1);
         let run = seen.len().div_ceil(tasks * 2).max(1);
         let runs = seen.len().div_ceil(run);
         if self.parts.len() < runs {
@@ -1238,21 +1384,30 @@ impl RenderFeature for SoftBodyFeature {
                 (material, hole) = (material + m, hole + h);
             }
         }
-        match pool {
-            Some(pool) if runs > 1 => {
-                pool.scope(|scope| {
-                    for (chunk, part) in seen.chunks(run).zip(parts.iter_mut()) {
-                        let build = &build;
-                        scope.spawn(async move { build(chunk, part) });
-                    }
-                });
-            }
-            _ => {
-                for (chunk, part) in seen.chunks(run).zip(parts.iter_mut()) {
-                    build(chunk, part);
+        if runs > 1 {
+            pool.scope(|scope| {
+                for ((chunk, kept), part) in seen
+                    .chunks(run)
+                    .zip(kept.chunks_mut(run))
+                    .zip(parts.iter_mut())
+                {
+                    let build = &build;
+                    scope.spawn(async move { build(chunk, kept, part) });
                 }
+            });
+        } else {
+            for ((chunk, kept), part) in seen
+                .chunks(run)
+                .zip(kept.chunks_mut(run))
+                .zip(parts.iter_mut())
+            {
+                build(chunk, kept, part);
             }
         }
+        // Keep a mesh a few seconds out of every view (a shadow cascade's edge, a turn of the
+        // camera), not for bodies long gone.
+        self.kept.retain(|_, k| frame - k.seen < 600);
+        self.kept.extend(seen.iter().map(|s| s.entity).zip(kept));
 
         let geo = &mut self.geometry;
         let mut built = Vec::with_capacity(seen.len());
@@ -1530,6 +1685,46 @@ mod tests {
             false,
         )
         .unwrap()
+    }
+
+    #[test]
+    fn a_resting_body_reuses_its_mesh_until_it_changes() {
+        let mut body = flat_cloth();
+        body.frozen = true;
+        let px = 200.0;
+        let mut kept = KeptMesh::default();
+        // Built once and kept, then copied: the same as building anew, also once the camera
+        // moved (the vertices follow it) and behind another body (new material and indices).
+        let mut first = Geometry::default();
+        first.add_body_reusing(&body, Vec3::ZERO, 1.0, px, Some(&mut kept));
+        assert!(kept.key.is_some());
+        let base = Vec3::new(3.0, -1.0, 2.0);
+        let other = flat_cloth();
+        let (mut fresh, mut copied) = (Geometry::default(), Geometry::default());
+        for geo in [&mut fresh, &mut copied] {
+            geo.add_body(&other, Vec3::ZERO, 1.0, px);
+        }
+        let a = fresh.add_body(&body, base, 1.0, px);
+        let b = copied.add_body_reusing(&body, base, 1.0, px, Some(&mut kept));
+        assert_eq!(a, b);
+        assert_eq!(fresh.indices, copied.indices);
+        assert_eq!(fresh.vertices.len(), copied.vertices.len());
+        for (f, c) in fresh.vertices.iter().zip(&copied.vertices) {
+            assert!(Vec3::from(f.position).distance(Vec3::from(c.position)) < 1e-5);
+            assert_eq!((f.normal, f.uv, f.material), (c.normal, c.uv, c.material));
+        }
+        // Moved (or stepped, or woken) it is built anew.
+        body.sim.pos[0].y += 0.5;
+        body.sim.step_start[0] = body.sim.pos[0];
+        let mut moved = Geometry::default();
+        moved.add_body_reusing(&body, Vec3::ZERO, 1.0, px, Some(&mut kept));
+        let mut want = Geometry::default();
+        want.add_body(&body, Vec3::ZERO, 1.0, px);
+        assert_eq!(moved.vertices, want.vertices);
+        body.frozen = false;
+        let mut awake = Geometry::default();
+        awake.add_body_reusing(&body, Vec3::ZERO, 1.0, px, Some(&mut kept));
+        assert!(kept.key.is_none());
     }
 
     #[test]
