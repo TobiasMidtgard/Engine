@@ -13,7 +13,7 @@
 //! 150 m, and a wood of 12,000 scenery trees from a hill (with and without the distant level). Name shots after the directory to render
 //! only those (`lineup`, `lineup_near`, `lineup_mid`, `lineup_lod`, `lineup_distant`, `roots`, `crown_front`,
 //! `leaves_close`, `crown_back`, `conifers`, `lineup_stands` (the stands' other eight trees), `pine_crown`, `birch_hazel`, `grove`,
-//! `grove_far`, `savanna`, `savanna_side`, `savanna_high`, `valley`, `valley_far`, `far_woods`, `far_woods_off`), `textures`
+//! `grove_far`, `savanna`, `savanna_side`, `savanna_high`, `prairie`, `valley`, `valley_far`, `far_woods`, `far_woods_off`), `textures`
 //! to save the leaf atlases, their normal maps, three of their mip levels and the mass atlases far
 //! crowns draw with instead, or `stats` to print triangle counts.
 
@@ -64,8 +64,9 @@ fn shot(app: &mut App, out: &str, name: &str, eye: DVec3, target: DVec3, to_sun:
     aim(&mut app.world, eye, target);
     set_sun(&mut app.world, to_sun);
     // Let auto exposure settle, and every plant pick its level of detail for the new view
-    // (they all do every eighth frame).
-    app.update_n(9);
+    // (they all do every eighth frame) and finish fading into it: after a jump of hundreds of
+    // meters, nine frames still showed the far level's big cards.
+    app.update_n(32);
     let path = format!("{out}/{name}.png");
     app.world
         .resource_mut::<Screenshots>()
@@ -342,6 +343,38 @@ fn main() {
             .unwrap();
         }
     }
+    // An oak savanna 600 m behind: bur oaks spread far apart on prairie grass.
+    let prairie = DVec3::new(0.0, 0.0, 600.0);
+    if only_sp.as_deref().is_none_or(|o| o == "bur oak") {
+        app.world.spawn((
+            Transform::from_translation(prairie + DVec3::Y * 0.03),
+            MeshRenderer::new(
+                Shape::Plane {
+                    size: [500.0, 500.0],
+                    subdivisions: 1,
+                },
+                StandardMaterial::hex(0x7d7f45).with_roughness(0.95),
+            ),
+        ));
+        for (k, (dx, dz)) in [(0.0, 0.0), (-48.0, -40.0), (52.0, -75.0), (-15.0, -130.0)]
+            .into_iter()
+            .enumerate()
+        {
+            let g = Genes {
+                variant: k as u8 % 4,
+                height: [1.0, 0.92, 1.05, 0.95][k],
+                ..Default::default()
+            };
+            spawn_plant(
+                &mut app.world,
+                "bur oak",
+                prairie + DVec3::new(dx, 0.0, dz),
+                1.0,
+                Some(g),
+            )
+            .unwrap();
+        }
+    }
     app.world.flush();
     app.update();
     // Wait for every species' meshes (built off the frame), so the first shot isn't empty.
@@ -550,6 +583,17 @@ fn main() {
             savanna + DVec3::new(0.0, 6.0, 30.0),
             savanna + DVec3::new(0.0, 4.5, 0.0),
             Vec3::new(-0.7, 0.45, 0.3),
+        );
+    }
+    if wanted("prairie") {
+        // Bur oaks in the evening sun from behind the camera's right.
+        shot(
+            &mut app,
+            &out,
+            "prairie",
+            prairie + DVec3::new(8.0, 2.0, 32.0),
+            prairie + DVec3::new(-5.0, 9.0, -20.0),
+            Vec3::new(0.55, 0.22, 0.8),
         );
     }
     if wanted("grove_far") {

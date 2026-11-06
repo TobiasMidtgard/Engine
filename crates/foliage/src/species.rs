@@ -1454,54 +1454,108 @@ fn stand_trees() -> Vec<PlantSpecies> {
 /// the trees above are.
 fn regional_trees() -> Vec<PlantSpecies> {
     let t = Tolerance::new;
-    vec![PlantSpecies {
-        // Umbrella thorn (Vachellia tortilis) of the East African savanna: a short trunk
-        // forking into a few leaders under a flat, layered top far wider than the tree is
-        // tall, grey-green and see-through with its tiny bipinnate leaves; grey-black
-        // fissured bark (SANBI; 5-20 m, crowns 8-13 m across). Its leaves (pinnae of tiny
-        // leaflets in tufts along the twigs) draw with the larch's soft-needle tufts, the
-        // nearest in texture, until it has an atlas of its own.
-        name: "umbrella thorn".into(),
-        form: PlantForm::Broadleaf,
-        layer: Layer::Canopy,
-        max_height_m: 7.5,
-        crown_radius_m: 5.2,
-        trunk_radius_m: 0.2,
-        years_to_mature: 30.0,
-        lifespan_years: 200.0,
-        canopy_density: 0.9,
-        water: t(-0.05, 0.05, 0.55, 0.85),
-        light: t(0.4, 0.7, 1.0, 1.01),
-        nutrients: t(-0.2, 0.0, 1.0, 1.01),
-        temperature_c: t(2.0, 16.0, 38.0, 48.0),
-        uptake: 0.4,
-        seeds_per_year: 6.0,
-        seed_range_m: 30.0,
-        wind_dispersal: 0.0,
-        establishment: 0.05,
-        min_spacing_m: 6.0,
-        resprouts: true,
-        bark_color: srgb(0x4a4440),
-        leaf_color: srgb(0x5a6340),
-        accent_color: srgb(0x6e7448),
-        wind_sway_m: 0.18,
-        shape: PlantShape {
-            crown_base: 0.66,
-            branches: 16,
-            angle_low_deg: 82.0,
-            angle_high_deg: 72.0,
-            tip_bend: 0.05,
-            gnarl: 0.45,
-            leaf_size_m: 1.1,
-            leaf_density: 1.6,
-            leaf: LeafStyle::SoftNeedles,
-            bark: BarkStyle::Scaly,
-            forks: 3,
+    vec![
+        PlantSpecies {
+            // Umbrella thorn (Vachellia tortilis) of the East African savanna: a short trunk
+            // forking into a few leaders under a flat, layered top far wider than the tree is
+            // tall, grey-green and see-through with its tiny bipinnate leaves; grey-black
+            // fissured bark (SANBI; 5-20 m, crowns 8-13 m across). Its leaves (pinnae of tiny
+            // leaflets in tufts along the twigs) draw with the larch's soft-needle tufts, the
+            // nearest in texture, until it has an atlas of its own.
+            name: "umbrella thorn".into(),
+            form: PlantForm::Broadleaf,
+            layer: Layer::Canopy,
+            max_height_m: 7.5,
+            crown_radius_m: 5.2,
+            trunk_radius_m: 0.2,
+            years_to_mature: 30.0,
+            lifespan_years: 200.0,
+            canopy_density: 0.9,
+            water: t(-0.05, 0.05, 0.55, 0.85),
+            light: t(0.4, 0.7, 1.0, 1.01),
+            nutrients: t(-0.2, 0.0, 1.0, 1.01),
+            temperature_c: t(2.0, 16.0, 38.0, 48.0),
+            uptake: 0.4,
+            seeds_per_year: 6.0,
+            seed_range_m: 30.0,
+            wind_dispersal: 0.0,
+            establishment: 0.05,
+            min_spacing_m: 6.0,
+            resprouts: true,
+            bark_color: srgb(0x4a4440),
+            leaf_color: srgb(0x5a6340),
+            accent_color: srgb(0x6e7448),
+            wind_sway_m: 0.18,
+            shape: PlantShape {
+                crown_base: 0.66,
+                branches: 16,
+                angle_low_deg: 82.0,
+                angle_high_deg: 72.0,
+                tip_bend: 0.05,
+                gnarl: 0.45,
+                leaf_size_m: 1.1,
+                leaf_density: 1.6,
+                leaf: LeafStyle::SoftNeedles,
+                bark: BarkStyle::Scaly,
+                forks: 3,
+            },
+            fuel_kg: 120.0,
+            toughness: 60.0,
+            ..Default::default()
         },
-        fuel_kg: 120.0,
-        toughness: 60.0,
-        ..Default::default()
-    }]
+        PlantSpecies {
+            // Bur oak (Quercus macrocarpa) of the Midwest oak savannas: open-grown, a short
+            // massive trunk and huge crooked limbs held out level, the "candelabra" crown wider
+            // than the tree is tall; deeply ridged corky bark, glossy dark leaves (USDA Silvics:
+            // 20-30 m, crowns as wide; 10-15 trees a hectare on savanna).
+            name: "bur oak".into(),
+            form: PlantForm::Broadleaf,
+            layer: Layer::Canopy,
+            max_height_m: 14.0,
+            crown_radius_m: 9.0,
+            trunk_radius_m: 0.6,
+            years_to_mature: 60.0,
+            lifespan_years: 400.0,
+            canopy_density: 1.0,
+            water: t(0.0, 0.2, 0.7, 0.95),
+            light: t(0.2, 0.55, 1.0, 1.01),
+            nutrients: t(0.0, 0.25, 1.0, 1.01),
+            temperature_c: t(-42.0, -8.0, 32.0, 42.0),
+            uptake: 1.0,
+            seeds_per_year: 5.0,
+            seed_range_m: 8.0,
+            wind_dispersal: 0.0,
+            establishment: 0.2,
+            min_spacing_m: 6.0,
+            resprouts: true,
+            bark_color: srgb(0x5d564e),
+            leaf_color: srgb(0x3f5826),
+            accent_color: srgb(0x52662f),
+            wind_sway_m: 0.18,
+            seasons: Some(Seasons {
+                leaf_out_day: 128.0,
+                turn_day: 275.0,
+                bare_day: 315.0,
+                autumn_color: srgb(0x8c6a2e),
+            }),
+            shape: PlantShape {
+                crown_base: 0.36,
+                branches: 11,
+                angle_low_deg: 88.0,
+                angle_high_deg: 62.0,
+                tip_bend: 0.1,
+                gnarl: 1.0,
+                leaf_size_m: 1.25,
+                leaf_density: 1.0,
+                leaf: LeafStyle::Lobed,
+                bark: BarkStyle::Plain,
+                forks: 4,
+            },
+            fuel_kg: 1400.0,
+            toughness: 180.0,
+            ..Default::default()
+        },
+    ]
 }
 
 #[cfg(test)]
