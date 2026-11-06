@@ -203,8 +203,13 @@ impl RenderFeature for GroundFeature {
             .get_resource::<GroundEffectSettings>()
             .copied()
             .unwrap_or_default();
-        self.time += view.delta.max(0.0) as f64;
-        self.since_upload += view.delta.max(1.0 / 240.0);
+        // An extra view (the lake's mirror, drawn first) reuses what the main view uploaded:
+        // it advanced the clock and repacked the maps a second time each frame (1.5 ms on the
+        // cloud VM at the lake, and ripples ran twice as fast with a mirror on screen).
+        if !view.extra_view {
+            self.time += view.delta.max(0.0) as f64;
+            self.since_upload += view.delta.max(1.0 / 240.0);
+        }
         let (Some(surface), Some(g)) = (world.get_resource::<SurfaceLayers>(), &mut self.gpu)
         else {
             self.active = false;
@@ -220,7 +225,7 @@ impl RenderFeature for GroundFeature {
             .unwrap_or(0.04)
             .max(1e-3);
         let grid = &surface.grid;
-        if self.since_upload >= UPLOAD_INTERVAL_S || self.bytes.is_empty() {
+        if (self.since_upload >= UPLOAD_INTERVAL_S && !view.extra_view) || self.bytes.is_empty() {
             self.since_upload = 0.0;
             let mut any = false;
             self.bytes.clear();
