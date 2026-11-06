@@ -170,7 +170,7 @@ pub enum GroundLayer {
 pub const LAYER_COUNT: usize = 9;
 
 /// Texels per side of each ground layer texture (512: 9 layers × 2 textures ≈ 25 MB with mips).
-pub const LAYER_SIZE: usize = 512;
+pub const LAYER_SIZE: usize = 1024;
 
 impl GroundLayer {
     pub const ALL: [GroundLayer; LAYER_COUNT] = [
@@ -765,18 +765,45 @@ fn paint_humus(n: usize, seed: u64) -> LayerTexture {
 fn paint_litter(n: usize, seed: u64) -> LayerTexture {
     let tile = GroundLayer::Litter.tile_m();
     let mut p = Painter::new(n, tile);
-    let soil = srgb(0x1f170f);
+    let soil = srgb(0x2a2016);
     p.fill(|u, v| {
         let big = tile_fbm(u, v, 3, 3, seed);
         (scale3(soil, 0.8 + 0.3 * big), 0.006 * big, 0.92)
     });
     let mut rng = Rng::new(seed ^ 0x11);
     let s = p.size();
-    let oak = [0x6b4a2b, 0x7a5532, 0x5a3d24, 0x8a6236, 0x4a3422, 0x93683a];
-    let birch = [0x9a7a3a, 0x8a6a30, 0xa88a48, 0x7a6232, 0xb09048];
-    let hazel = [0x7a5a30, 0x6a4e2e, 0x86602f, 0x5e4630];
-    let old = [0x5e554a, 0x4a4036, 0x3e3328];
-    for _ in 0..count(1050.0, tile) {
+    // A broadleaf floor is a mat several leaves deep: last year's leaves underneath, grey-brown
+    // and skeletonised, this year's on top, tan to russet, the odd yellow birch leaf (Hobbie
+    // 2015 on litter decay; beech and oak floors in Commons photos from the Chiltern and
+    // Bohemian woods). Soil shows only in small gaps, so the floor reads as one warm brown from
+    // a distance instead of bright flecks on black.
+    let under = [0x3e3328, 0x4a3c2e, 0x463626, 0x524232, 0x3a2e24];
+    for _ in 0..count(700.0, tile) {
+        let (cx, cy) = (rng.f32() * s, rng.f32() * s);
+        let base = srgb(*rng.pick(&under).unwrap());
+        let c = jitter(&mut rng, base, 0.1);
+        let shape = *rng
+            .pick(&[LeafShape::Oak, LeafShape::Beech, LeafShape::Hazel])
+            .unwrap();
+        paint_leaf(
+            &mut p,
+            cx,
+            cy,
+            rng.range(0.0, TAU),
+            rng.range(0.05, 0.1),
+            shape,
+            c,
+            rng.range(0.0, 0.3),
+            rng.range(0.4, 0.85),
+            0.85,
+            rng.next_u64(),
+        );
+    }
+    let oak = [0x6b4a2b, 0x7a5532, 0x5a3d24, 0x82603a, 0x4a3422, 0x8a6438];
+    let birch = [0x8a6e3a, 0x7e6434, 0x947a46, 0x6e5a32, 0xa08244];
+    let hazel = [0x7a5a30, 0x6a4e2e, 0x80602f, 0x5e4630];
+    let old = [0x5a5048, 0x4a4036, 0x625446];
+    for _ in 0..count(1150.0, tile) {
         let (cx, cy) = (rng.f32() * s, rng.f32() * s);
         let k = rng.f32();
         let (shape, len, hex) = if k < 0.5 {
@@ -1009,29 +1036,53 @@ fn paint_moss(n: usize, seed: u64) -> LayerTexture {
 fn paint_earth(n: usize, seed: u64) -> LayerTexture {
     let tile = GroundLayer::Earth.tile_m();
     let mut p = Painter::new(n, tile);
-    let (dark, base, light) = (srgb(0x33271c), srgb(0x524030), srgb(0x7a684f));
+    // A woodland path: packed loam, grey where feet have scuffed the sand out of it and dark
+    // where humus washes in, made of crumbs and grit rather than a smooth plaster, with
+    // stones of every size sitting in it, most of them sunk and dirt-coated, and gathered
+    // where rain has carried the fines away (Bryan 2000 on soil erodibility; Marion & Leung
+    // 2001 on trail surfaces: compacted soil, exposed rock and roots, "muddiness"). Reference:
+    // Commons photos of footpaths in Nordmarka (Oslo), the Bohemian Forest and Algonquin.
+    let (dark, base, sand) = (srgb(0x2c2219), srgb(0x473829), srgb(0x6a6152));
     p.fill(|u, v| {
         let big = tile_fbm(u, v, 3, 4, seed);
         let mid = tile_fbm(u, v, 16, 3, seed ^ 6);
         let grit = tile_fbm(u, v, 128, 2, seed ^ 1);
+        // Crumbs and clods about 2.5 cm across: the soil's aggregates, each its own shade.
+        let (c1, c2, cid) = tile_cells(u, v, 96, seed ^ 8);
+        let crumb = (1.0 - (c1 / 0.85).powi(2)).max(0.0);
+        let seam = smooth(0.0, 0.18, c2 - c1);
         let (f1, f2, _) = tile_cells(u, v, 9, seed ^ 2);
         // Hairline cracks only where it has dried out.
         let dry = smooth(0.1, 0.5, tile_fbm(u, v, 3, 2, seed ^ 5));
         let crack = (1.0 - smooth(0.0, 0.03, f2 - f1)) * dry;
-        let h = 0.005 * big + 0.0014 * mid + 0.0005 * grit - 0.0012 * crack - 0.0004 * f1;
-        let mut c = mix3(dark, base, smooth(-0.6, 0.3, big + 0.3 * mid));
+        // Scuffed, sandy patches and dark organic ones.
+        let scuff = smooth(0.05, 0.55, tile_fbm(u, v, 6, 3, seed ^ 9) + 0.25 * mid);
+        let organic = smooth(0.1, 0.6, -tile_fbm(u, v, 5, 3, seed ^ 10) - 0.2 * big);
+        let h = 0.005 * big + 0.0014 * mid + 0.0005 * grit + 0.0016 * crumb * seam
+            - 0.0012 * crack
+            - 0.0004 * f1;
+        let mut c = mix3(dark, base, smooth(-0.7, 0.4, big + 0.3 * mid));
+        // Sand lies in the seams between the crumbs, so scuffed ground greys from below.
         c = mix3(
             c,
-            light,
-            smooth(0.05, 0.7, big + 0.4 * mid) * 0.45 * (0.4 + 0.6 * dry),
+            sand,
+            scuff * (0.25 + 0.5 * (1.0 - seam)) * (0.6 + 0.4 * dry),
         );
+        c = mix3(c, dark, organic * 0.6);
+        let shade = 0.84 + 0.3 * unit(cid, 3);
+        let warm = 0.06 * (unit(cid, 4) - 0.5);
+        c = [c[0] * (1.0 + warm), c[1], c[2] * (1.0 - warm)];
         // Damp, darker patches where the ground stays in shade.
         let damp = smooth(0.15, 0.55, tile_fbm(u, v, 5, 3, seed ^ 7) - 0.3 * big);
         c = scale3(
             c,
-            (1.0 + 0.14 * grit) * (1.0 - 0.3 * crack) * (1.0 - 0.28 * damp),
+            shade
+                * (0.82 + 0.18 * seam)
+                * (1.0 + 0.16 * grit)
+                * (1.0 - 0.3 * crack)
+                * (1.0 - 0.28 * damp),
         );
-        (c, h, 0.84 - 0.06 * (1.0 - dry) - 0.12 * damp)
+        (c, h, 0.86 - 0.06 * (1.0 - dry) - 0.12 * damp + 0.05 * scuff)
     });
     let mut rng = Rng::new(seed ^ 0x44);
     let s = p.size();
@@ -1073,8 +1124,9 @@ fn paint_earth(n: usize, seed: u64) -> LayerTexture {
             t.r -= 0.08 * depth;
         });
     }
-    let leaf_bits = [0x4a3a28, 0x5a4630, 0x3a2e22, 0x6a5232];
-    for _ in 0..count(30.0, tile) {
+    // Torn leaf bits and needles trodden in.
+    let leaf_bits = [0x4a3a28, 0x5a4630, 0x3a2e22, 0x6a5232, 0x5e4a2e];
+    for _ in 0..count(70.0, tile) {
         let (cx, cy) = (rng.f32() * s, rng.f32() * s);
         let base = srgb(*rng.pick(&leaf_bits).unwrap());
         let c = jitter(&mut rng, base, 0.1);
@@ -1083,41 +1135,51 @@ fn paint_earth(n: usize, seed: u64) -> LayerTexture {
             cx,
             cy,
             rng.range(0.0, TAU),
-            rng.range(0.03, 0.07),
+            rng.range(0.02, 0.06),
             LeafShape::Oak,
             c,
             0.0,
-            rng.range(0.3, 0.8),
+            rng.range(0.4, 0.9),
             0.8,
             rng.next_u64(),
         );
     }
+    for _ in 0..count(160.0, tile) {
+        let start = Vec2::new(rng.f32() * s, rng.f32() * s);
+        let len = p.px(rng.range(0.012, 0.05));
+        let pts = Painter::curve(start, rng.range(0.0, TAU), len, rng.range(-0.3, 0.3), 3);
+        let c = jitter(&mut rng, srgb(0x6a4a2c), 0.15);
+        p.line(&pts, 0.45, 0.0006, 0.75, &|_| c);
+    }
+    for _ in 0..count(3.0, tile) {
+        let (cx, cy) = (rng.f32() * s, rng.f32() * s);
+        let bark = jitter(&mut rng, srgb(0x4a3e32), 0.2);
+        let (len, width) = (rng.range(0.06, 0.2), rng.range(0.003, 0.006));
+        p.twig(&mut rng, cx, cy, len, width, bark);
+    }
+    // Stones, mostly sunk and coated in dirt, crowded where the fines have washed out.
     let gravel = [
-        0x8a8478, 0x6e6a62, 0x9a8a72, 0x5a5650, 0x7e705e, 0xa8a090, 0x4e4a44,
+        0x7a766c, 0x6a665e, 0x8a7c66, 0x5a5650, 0x74685a, 0x8e8a80, 0x4e4a44, 0x6a5a48,
     ];
-    // Grit and gravel trodden into the surface, a few bigger stones.
-    for _ in 0..count(1400.0, tile) {
-        let (cx, cy) = (rng.f32() * s, rng.f32() * s);
-        let r = rng.range(0.001, 0.0028);
-        let base = scale3(srgb(*rng.pick(&gravel).unwrap()), 0.7);
-        let c = jitter(&mut rng, base, 0.15);
-        p.lump(cx, cy, r, r * 0.5, c, 0.6);
-    }
-    for _ in 0..count(260.0, tile) {
-        let (cx, cy) = (rng.f32() * s, rng.f32() * s);
-        let r = rng.range(0.003, 0.008);
-        let base = srgb(*rng.pick(&gravel).unwrap());
-        let c = jitter(&mut rng, base, 0.12);
-        p.stone(cx, cy, r, r * 0.5, c, rng.range(0.45, 0.7), rng.next_u64());
-    }
-    for _ in 0..count(28.0, tile) {
-        let (cx, cy) = (rng.f32() * s, rng.f32() * s);
-        let r = rng.range(0.01, 0.032);
-        let base = scale3(srgb(*rng.pick(&gravel).unwrap()), 0.85);
-        let c = jitter(&mut rng, base, 0.1);
-        p.stone(cx, cy, r, r * 0.4, c, 0.6, rng.next_u64());
-    }
-    p.finish(2.2, 0.005, 0.6)
+    let soil = mix3(base, sand, 0.4);
+    let washed = |u: f32, v: f32| smooth(-0.15, 0.45, tile_fbm(u, v, 4, 3, seed ^ 21));
+    let place = |p: &mut Painter, rng: &mut Rng, per_m2: f32, r: (f32, f32), lift: f32| {
+        for _ in 0..count(per_m2, tile) {
+            let (cx, cy) = (rng.f32() * s, rng.f32() * s);
+            if !rng.chance(0.2 + 0.8 * washed(cx / s, cy / s)) {
+                continue;
+            }
+            // Many small stones, few big ones.
+            let r = r.0 * (r.1 / r.0).powf(rng.f32().powi(2));
+            let hex = *rng.pick(&gravel).unwrap();
+            let rock = jitter(rng, srgb(hex), 0.12);
+            let c = mix3(rock, soil, rng.range(0.15, 0.5));
+            p.stone(cx, cy, r, r * lift, c, rng.range(0.5, 0.75), rng.next_u64());
+        }
+    };
+    place(&mut p, &mut rng, 800.0, (0.004, 0.016), 0.35);
+    place(&mut p, &mut rng, 50.0, (0.016, 0.05), 0.3);
+    p.finish(2.4, 0.005, 0.65)
 }
 
 fn paint_ash(n: usize, seed: u64) -> LayerTexture {
@@ -3990,7 +4052,7 @@ pub const SCENERY_SHADER: &str = r#"
 @group(1) @binding(2) var layer_sampler: sampler;
 
 struct Cover {
-    offset: vec4<f32>,               // camera-relative origin xyz
+    offset: vec4<f32>,               // camera-relative origin xyz, w parallax depth (m)
     layers: array<vec4<u32>, 2>,     // texture layer of each weight slot
     inv_tile: array<vec4<f32>, 2>,   // 1 / tile size (m) of each slot
     params: vec4<f32>,               // height influence, blend depth, normal strength, litter season
@@ -4063,9 +4125,15 @@ fn rot2(a: f32) -> mat2x2<f32> {
     return mat2x2<f32>(c, s, -s, c);
 }
 
+// Footprints shrunk to 0.6: a mip bias of -0.74, so the ground keeps its pebbles and leaf
+// edges a few meters further out, and temporal anti-aliasing settles the extra shimmer.
+// NVIDIA's DLSS guide asks for log2(render / display width) - 1 under temporal resolves (-1 at
+// native); this is a little milder.
+const GROUND_LOD_SCALE: f32 = 0.6;
+
 fn fetch(layer: u32, uv: vec2<f32>, dx: vec2<f32>, dy: vec2<f32>) -> Mat {
-    let a = textureSampleGrad(layer_albedo, layer_sampler, uv, i32(layer), dx, dy);
-    let t = textureSampleGrad(layer_normal, layer_sampler, uv, i32(layer), dx, dy);
+    let a = textureSampleGrad(layer_albedo, layer_sampler, uv, i32(layer), dx * GROUND_LOD_SCALE, dy * GROUND_LOD_SCALE);
+    let t = textureSampleGrad(layer_normal, layer_sampler, uv, i32(layer), dx * GROUND_LOD_SCALE, dy * GROUND_LOD_SCALE);
     var m: Mat;
     m.albedo = a.rgb;
     m.height = a.a;
@@ -4107,6 +4175,61 @@ fn sample_layer(layer: u32, p: vec2<f32>, inv_tile: f32, dpx: vec2<f32>, dpy: ve
         }
     }
     return m;
+}
+
+// A layer's height alone (0 low .. 1 high), sampled as `sample_layer` samples it.
+fn layer_height(layer: u32, p: vec2<f32>, inv_tile: f32, dpx: vec2<f32>, dpy: vec2<f32>, mixer: f32) -> f32 {
+    let r1 = rot2(f32(layer) * 2.3999);
+    let r2 = rot2(f32(layer) * 2.3999 + 1.9);
+    let s2 = inv_tile * 0.79;
+    var h = 0.0;
+    if (mixer < 0.99) {
+        h = textureSampleGrad(layer_albedo, layer_sampler, r1 * p * inv_tile, i32(layer), r1 * dpx * inv_tile, r1 * dpy * inv_tile).a;
+    }
+    if (mixer > 0.01) {
+        let b = textureSampleGrad(layer_albedo, layer_sampler, r2 * p * s2 + vec2(0.37, 0.71), i32(layer), r2 * dpx * s2, r2 * dpy * s2).a;
+        h = select(mix(h, b, mixer), b, mixer >= 0.99);
+    }
+    return h;
+}
+
+// Parallax occlusion: march the view ray down through the heaviest layer's relief (its
+// height map, `depth` meters from top to bottom) and return where it first meets the
+// surface, so near stones and leaves stand up and hide what lies behind them (Tatarchuk 2006,
+// "Dynamic parallax occlusion mapping with approximate soft shadows", I3D; the steep-angle
+// step count follows her Figure 4). Fades out by 14 m, where a pixel covers more than the
+// relief moves.
+fn ground_parallax(p: vec2<f32>, rel: vec3<f32>, geo_n: vec3<f32>, layer: u32, inv_tile: f32, dpx: vec2<f32>, dpy: vec2<f32>, mixer: f32) -> vec2<f32> {
+    let dist = length(rel);
+    let depth = cover.offset.w * (1.0 - smoothstep(8.0, 14.0, dist));
+    if (depth <= 0.0005) {
+        return p;
+    }
+    let ray = rel / max(dist, 1e-4);
+    let down = max(-dot(ray, geo_n), 0.2);
+    // Meters across the ground per meter down, along the ray.
+    let slide = (ray.xz + geo_n.xz * down) / down;
+    let steps = mix(14.0, 6.0, down);
+    let n = u32(steps);
+    let step_d = 1.0 / f32(n);
+    var prev_depth = 0.0;
+    var prev_gap = -1.0;
+    var d = 0.0;
+    for (var i = 0u; i <= n; i++) {
+        let q = p + slide * (d * depth);
+        let surf = 1.0 - layer_height(layer, q, inv_tile, dpx, dpy, mixer);
+        let gap = d - surf;
+        if (gap >= 0.0) {
+            // Between the last step above the surface and this one below it.
+            let t = select(prev_gap / (prev_gap - gap), 0.0, i == 0u);
+            let hit = mix(prev_depth, d, t);
+            return p + slide * (hit * depth);
+        }
+        prev_depth = d;
+        prev_gap = gap;
+        d += step_d;
+    }
+    return p + slide * depth;
 }
 
 fn slot_layer(i: u32) -> u32 {
@@ -4220,12 +4343,20 @@ fn surface_prepass(s: Surface, rel: vec3<f32>) -> PrepassOutput {
 }
 
 fn ground_surface(in: GroundOut) -> Surface {
-    let p = in.local.xz;
-    let dpx = dpdx(p);
-    let dpy = dpdy(p);
+    let flat_p = in.local.xz;
+    let dpx = dpdx(flat_p);
+    let dpy = dpdy(flat_p);
     let wp = tiling_pos(in.rel);
     let mixer = smoothstep(0.36, 0.64, value_noise2(wp.xz * 0.21 + vec2(3.1, 7.7)));
     var w = array<f32, 8>(in.w0.x, in.w0.y, in.w0.z, in.w0.w, in.w1.x, in.w1.y, in.w1.z, in.w1.w);
+    // The relief follows the layer with the most weight here.
+    var top = 0u;
+    for (var i = 1u; i < 8u; i++) {
+        if (w[i] > w[top]) {
+            top = i;
+        }
+    }
+    let p = ground_parallax(flat_p, in.rel, normalize(in.normal), slot_layer(top), slot_inv_tile(top), dpx, dpy, mixer);
     var mats: array<Mat, 8>;
     var score: array<f32, 8>;
     var best = -10.0;
@@ -4687,6 +4818,9 @@ impl SceneryFeature {
         let litter = world
             .get_resource::<crate::FoliageSeason>()
             .map_or(0.0, |s| crate::season::litter_season(s.day_of_year));
+        let parallax = world
+            .get_resource::<crate::EcologySettings>()
+            .map_or(0.0, |s| s.ground_parallax_m.max(0.0));
         let mut q = world.query::<(Entity, &GroundSurface, &GlobalTransform)>();
         for (e, surface, t) in q.iter(world) {
             let offset = (t.translation() - view.origin).as_vec3();
@@ -4747,7 +4881,7 @@ impl SceneryFeature {
                 c.offset = offset;
                 c.seen = frame;
                 let mut u = Vec::with_capacity(96);
-                push_f32s(&mut u, &[offset.x, offset.y, offset.z, 0.0]);
+                push_f32s(&mut u, &[offset.x, offset.y, offset.z, parallax]);
                 for s in c.slots {
                     u.extend_from_slice(&(s as u32).to_le_bytes());
                 }

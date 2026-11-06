@@ -451,6 +451,10 @@ pub struct EcologySettings {
     /// runs). Waiting held a frame 270-480 ms while zones loaded (lead's fortress traces,
     /// 2026-11-06: the step sat behind loading builds on a full pool).
     pub step_late_ticks: u32,
+    /// Depth of the forest floor's relief drawn by parallax, meters (0: flat, as before round
+    /// 76). Within about 14 m the ground's texture is marched along the view ray, so stones,
+    /// leaves and crumbs stand up and hide what lies behind them instead of being painted flat.
+    pub ground_parallax_m: f32,
 }
 
 impl Default for EcologySettings {
@@ -474,6 +478,7 @@ impl Default for EcologySettings {
             bone_wind: true,
             step_write_back_ticks: crate::ecology::WRITE_BACK_TICKS,
             step_late_ticks: crate::ecology::LATE_STEP_TICKS,
+            ground_parallax_m: 0.025,
         }
     }
 }
