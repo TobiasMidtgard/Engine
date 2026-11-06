@@ -104,8 +104,9 @@ pub enum SpellCue {
 }
 
 /// What a body is suffering, written by magic each tick; read-only for everyone else (vfx:
-/// flames, frost crust, sparks; anim: a frozen body holds its pose, a shocked one twitches,
-/// dread cowers; NPC AI: a burning NPC runs, a frightened one flees; audio: sizzle, crackle).
+/// flames, frost crust, sparks; anim: a frozen body holds its pose, a shocked one twitches, a
+/// rooted one keeps its feet planted, dread cowers; NPC AI: a burning NPC runs, a frightened
+/// one flees, a rooted one can't move off; audio: sizzle, crackle).
 /// Magic also slows frozen and shocked bodies through `LocalTimeScale`. Objects burning in the
 /// fire simulation use `Combustible`'s burn state, not this.
 #[derive(Component, Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
@@ -123,6 +124,8 @@ pub struct Statuses {
     pub rot: f32,
     /// Dread (fear), 0..1.
     pub dread: f32,
+    /// Held fast (a stone grip on the feet): anim keeps the feet planted, AI can't move off.
+    pub rooted: bool,
 }
 
 /// Present while a module draws and sounds spells from [`SpellLook`], [`SpellCue`] and

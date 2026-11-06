@@ -427,6 +427,7 @@ impl Afflictions {
             rot: dot_level(&self.rot),
             // Three seconds of terror is full fright.
             dread: (self.dread / 3.0).clamp(0.0, 1.0),
+            rooted: false,
         }
     }
 }
