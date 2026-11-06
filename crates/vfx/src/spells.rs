@@ -183,20 +183,24 @@ pub fn draw_spell_looks(
         let Some(name) = looks.resolve(&mut library, &look.look, role, look.color) else {
             continue;
         };
-        let scale = look.scale.clamp(0.05, 30.0);
+        let (scale, rate, intensity) = sizing(look);
         if let Some(d) = was {
             if d.effect == name
                 && let Ok(mut fx) = effects.get_mut(d.on)
             {
-                if fx.scale != scale {
+                if fx.scale != scale || fx.rate != rate || fx.intensity != intensity {
                     fx.scale = scale;
+                    fx.rate = rate;
+                    fx.intensity = intensity;
                 }
                 fx.playing = true;
                 continue;
             }
             stop(&mut commands, &mut effects, e, d);
         }
-        let effect = ParticleEffect::new(name.clone()).with_scale(scale);
+        let mut effect = ParticleEffect::new(name.clone()).with_scale(scale);
+        effect.rate = rate;
+        effect.intensity = intensity;
         let charge = look.role == SpellRole::Charge;
         // Magic may despawn a look the same frame it changes it (a bolt landing, a charge
         // released): then there is nothing to draw, so the command quietly does nothing.
@@ -220,6 +224,19 @@ pub fn draw_spell_looks(
                 };
                 carrier.insert(DrawnSpellLook { effect: name, on });
             });
+    }
+}
+
+/// Size, density and glow for a look. A status look hugs the body whatever its strength, so
+/// magic's scale (0.5 + 0.7 x the status level: 0.5 faint .. 1.2 full) becomes how thick and
+/// bright it is, not how big: a faint burn is a few flames licking the clothes, a full one
+/// wraps the body.
+fn sizing(look: &SpellLook) -> (f32, f32, f32) {
+    if look.role == SpellRole::Status {
+        let level = ((look.scale - 0.5) / 0.7).clamp(0.0, 1.0);
+        (1.0, 0.25 + 0.75 * level, 0.6 + 0.4 * level)
+    } else {
+        (look.scale.clamp(0.05, 30.0), 1.0, 1.0)
     }
 }
 
@@ -452,6 +469,26 @@ mod tests {
                 .count(),
             0
         );
+    }
+
+    #[test]
+    fn a_status_hugs_the_body_and_thickens_with_its_level() {
+        let mut app = app();
+        let burn = app
+            .world
+            .spawn((
+                Transform::default(),
+                look("burning", SpellRole::Status, 0.5, [1.0, 0.5, 0.2]),
+            ))
+            .id();
+        app.update();
+        let fx = app.world.get::<ParticleEffect>(burn).unwrap().clone();
+        assert_eq!(fx.scale, 1.0, "a status keeps to the body's size");
+        assert!(fx.rate < 0.3, "a faint burn is thin: {}", fx.rate);
+        app.world.get_mut::<SpellLook>(burn).unwrap().scale = 1.2;
+        app.update();
+        let fx = app.world.get::<ParticleEffect>(burn).unwrap();
+        assert_eq!((fx.scale, fx.rate, fx.intensity), (1.0, 1.0, 1.0));
     }
 
     #[test]

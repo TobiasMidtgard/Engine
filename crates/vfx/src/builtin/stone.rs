@@ -32,7 +32,7 @@ fn stone_bolt() -> EffectDesc {
                 speed: [0.0, 0.05],
                 local_space: true,
                 lifetime: [0.45, 0.6],
-                size: [0.18, 0.28],
+                size: [0.26, 0.38],
                 size_over_life: c(&[(0.0, 0.7), (0.15, 1.0), (0.85, 1.0), (1.0, 0.6)]),
                 rotation_deg: [-180.0, 180.0],
                 spin_deg: [-420.0, 420.0],
@@ -69,7 +69,7 @@ fn stone_bolt() -> EffectDesc {
                 lifetime: [0.6, 1.0],
                 size: [0.14, 0.22],
                 bursts: Vec::new(),
-                ..dust_puff("dust", 0, DUST, 0.22, [0.05, 0.3], [0.14, 0.22])
+                ..dust_puff("dust", 0, DUST, 0.35, [0.05, 0.3], [0.14, 0.22])
             },
         ],
     )

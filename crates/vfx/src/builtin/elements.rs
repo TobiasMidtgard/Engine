@@ -449,17 +449,23 @@ fn fire_impact() -> EffectDesc {
                     drag: 5.0,
                     acceleration: [0.0, 2.0, 0.0],
                     turbulence: 2.5,
-                    lifetime: [0.6, 1.0],
+                    // Glowing plasma puffs, not the fireball sprite: its soot read as black
+                    // lumps by day.
+                    lifetime: [0.4, 0.7],
                     size: [0.55, 0.85],
                     size_over_life: c(&[(0.0, 0.4), (0.25, 1.0), (1.0, 1.3)]),
                     rotation_deg: [-180.0, 180.0],
                     spin_deg: [-40.0, 40.0],
-                    sprite: Sprite::Fireball,
-                    lit: 1.0,
-                    color: fade([1.0, 0.45, 0.12], 1.0, 0.03, 0.6),
-                    emissive: 18_000.0,
-                    additive: 0.0,
-                    soft: 0.6,
+                    sprite: Sprite::Plasma,
+                    lit: 0.0,
+                    color: g(&[
+                        (0.0, [1.0, 0.85, 0.55, 1.0]),
+                        (0.3, [1.0, 0.5, 0.15, 0.9]),
+                        (1.0, [0.8, 0.2, 0.03, 0.0]),
+                    ]),
+                    emissive: 16_000.0,
+                    additive: 1.0,
+                    soft: 0.4,
                     ..em("fire")
                 },
                 EmitterDesc {
@@ -497,8 +503,8 @@ fn fire_impact() -> EffectDesc {
                     lifetime: [1.4, 2.2],
                     size: [0.6, 0.9],
                     size_over_life: c(&[(0.0, 0.6), (1.0, 2.0)]),
-                    color: smoke_colors(0.26, 0.35),
-                    ..smoke("smoke", 0.26, 0.35)
+                    color: smoke_colors(0.45, 0.28),
+                    ..smoke("smoke", 0.45, 0.28)
                 },
                 EmitterDesc {
                     bursts: once(20),

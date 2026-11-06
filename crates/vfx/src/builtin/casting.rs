@@ -1206,9 +1206,9 @@ fn statuses() -> Vec<EffectDesc> {
                     size: [0.4, 0.65],
                     size_over_life: c(&[(0.0, 0.5), (1.0, 1.8)]),
                     sprite: Sprite::Dust,
-                    color: fade([0.85, 0.93, 1.0], 0.3, 0.2, 0.6),
+                    color: fade([0.85, 0.93, 1.0], 0.45, 0.2, 0.6),
                     emissive: 80.0,
-                    ..smoke("fog", 0.88, 0.3)
+                    ..smoke("fog", 0.88, 0.45)
                 },
                 EmitterDesc {
                     rate: 40.0,
@@ -1268,26 +1268,26 @@ fn statuses() -> Vec<EffectDesc> {
             None,
             vec![
                 EmitterDesc {
-                    rate: 6.0,
+                    rate: 9.0,
                     shape: shoulders,
                     offset: shoulders_at,
                     speed: [0.05, 0.15],
                     orbit_speed: 0.8,
                     lifetime: [1.2, 1.8],
-                    size: [0.3, 0.45],
+                    size: [0.35, 0.5],
                     sprite: Sprite::Dust,
-                    color: fade([0.45, 0.02, 0.02], 0.35, 0.2, 0.5),
+                    color: fade([0.4, 0.015, 0.015], 0.6, 0.2, 0.5),
                     emissive: 40.0,
                     ..smoke("mist", 0.3, 0.35)
                 },
                 EmitterDesc {
-                    rate: 14.0,
+                    rate: 24.0,
                     bursts: Vec::new(),
                     shape: legs_to_chest,
                     offset: [0.0, 0.2, 0.0],
                     speed: [0.0, 0.3],
                     lifetime: [0.8, 1.2],
-                    size: [0.025, 0.045],
+                    size: [0.035, 0.065],
                     emissive: 40.0,
                     color: g(&[(0.0, [0.3, 0.01, 0.01, 1.0]), (1.0, [0.3, 0.01, 0.01, 0.9])]),
                     ..droplets(
@@ -1320,9 +1320,9 @@ fn statuses() -> Vec<EffectDesc> {
                         (0.2, [0.26, 0.52, 0.1, 0.45]),
                         (1.0, [0.16, 0.26, 0.07, 0.0]),
                     ]),
-                    emissive: 40.0,
-                    erode: 0.7,
-                    erode_glow: 600.0,
+                    emissive: 15.0,
+                    erode: 0.5,
+                    erode_glow: 0.0,
                     ..smoke("shroud", 0.3, 0.45)
                 },
                 EmitterDesc {
