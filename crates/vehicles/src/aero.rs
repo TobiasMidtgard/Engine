@@ -293,7 +293,7 @@ pub fn aero_surfaces_system(
         &mut VehicleTelemetry,
     )>,
 ) {
-    q.par_iter_mut()
+    q.iter_mut()
         .for_each(|(mut aircraft, controls, mut forces, mut tel)| {
             let f = forces.frame;
             let dt = f.dt;
@@ -445,7 +445,7 @@ pub fn propulsion_system(
         &mut VehicleTelemetry,
     )>,
 ) {
-    q.par_iter_mut()
+    q.iter_mut()
         .for_each(|(mut prop, controls, mut forces, mut tel)| {
             let f = forces.frame;
             let dt = f.dt;

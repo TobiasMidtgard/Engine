@@ -225,7 +225,7 @@ pub fn autopilot_system(
         weather: &weather,
         wind: &wind,
     };
-    q.par_iter_mut().for_each(
+    q.iter_mut().for_each(
         |(mut ap, mut controls, forces, tel, wheels, aircraft, ship, body)| {
             let f = forces.frame;
             let dt = f.dt;

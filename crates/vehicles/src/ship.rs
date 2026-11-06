@@ -269,7 +269,7 @@ pub fn spacecraft_system(
         Without<crate::cruise::Cruise>,
     >,
 ) {
-    q.par_iter_mut()
+    q.iter_mut()
         .for_each(|(mut ship, controls, mut forces, mut tel)| {
             let ship = &mut *ship;
             let f = forces.frame;
@@ -451,7 +451,7 @@ const STEFAN_BOLTZMANN: f32 = 5.670_374e-8;
 
 /// Heat and cool every heat shield.
 pub fn heating_system(mut q: Query<(&mut HeatShield, &VehicleForces, &mut VehicleTelemetry)>) {
-    q.par_iter_mut().for_each(|(mut shield, forces, mut tel)| {
+    q.iter_mut().for_each(|(mut shield, forces, mut tel)| {
         let f = forces.frame;
         let dt = f.dt;
         let air = f.airspeed_vector();

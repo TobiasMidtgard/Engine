@@ -307,7 +307,7 @@ pub fn prepare_frames(
         &mut VehicleForces,
     )>,
 ) {
-    q.par_iter_mut()
+    q.iter_mut()
         .for_each(|(vehicle, t, vel, mass_props, body, local, mut forces)| {
             let (mass, com_local, inertia) = match mass_props {
                 Some(m) if m.mass_kg > 0.0 => (
@@ -346,7 +346,7 @@ pub fn prepare_frames(
 
 /// Drag, downforce and rotational damping from [`AeroBody`].
 pub fn aero_body_system(mut q: Query<(&AeroBody, &mut VehicleForces)>) {
-    q.par_iter_mut().for_each(|(aero, mut forces)| {
+    q.iter_mut().for_each(|(aero, mut forces)| {
         let f = forces.frame;
         if f.air.density <= 0.0 {
             return;
@@ -401,7 +401,7 @@ pub fn telemetry_system(
     gravity: Res<Gravity>,
     mut q: Query<(&VehicleForces, &mut VehicleTelemetry)>,
 ) {
-    q.par_iter_mut().for_each(|(forces, mut tel)| {
+    q.iter_mut().for_each(|(forces, mut tel)| {
         let f = forces.frame;
         let dt = f.dt.max(1e-6);
         let up = gravity.up_at(f.com);

@@ -250,43 +250,49 @@ pub fn buoyancy_system(
     // Each float reads the water for its own step only: a guard held across the parallel
     // loop would deadlock when the waiting thread picks up another module's task that takes
     // the water's lock (AGENTS.md, "Performance rules").
-    floats
-        .par_iter_mut()
-        .for_each(|(entity, mut transform, b, mut fl, tether, local)| {
-            let dt = time.delta_for(local);
-            if dt <= 0.0 {
-                return;
-            }
-            let pos = transform.translation;
-            let reach = b.half_extents.length() as f64;
-            let mut resting = fl.resting;
-            let rests = crate::rests(&range, &focus, pos, reach, &mut resting);
-            if resting != fl.resting {
-                fl.resting = resting;
-            }
-            if rests {
-                return;
-            }
-            let state = shared.0.read();
-            let (p, q, hit) = step_float(
-                &state,
-                &gravity,
-                &blasts,
-                entity,
-                b,
-                &mut fl,
-                tether,
-                pos,
-                transform.rotation,
-                dt,
-            );
-            drop(state);
-            transform.translation = p;
-            transform.rotation = q;
-            if let Some(hit) = hit {
-                hits.lock().unwrap().push(hit);
-            }
-        });
+    // A few floats a piece on the leaf pool (`par_chunks_mut`): a compute-pool scope's waiting
+    // thread ran whole other systems (6 ms worst at the fortress, VM).
+    let mut items: Vec<_> = floats.iter_mut().map(Some).collect();
+    engine_core::tasks::par_chunks_mut(&mut items, 1, |_, one| {
+        let Some((entity, mut transform, b, mut fl, tether, local)) =
+            one.first_mut().and_then(Option::take)
+        else {
+            return;
+        };
+        let dt = time.delta_for(local);
+        if dt <= 0.0 {
+            return;
+        }
+        let pos = transform.translation;
+        let reach = b.half_extents.length() as f64;
+        let mut resting = fl.resting;
+        let rests = crate::rests(&range, &focus, pos, reach, &mut resting);
+        if resting != fl.resting {
+            fl.resting = resting;
+        }
+        if rests {
+            return;
+        }
+        let state = shared.0.read();
+        let (p, q, hit) = step_float(
+            &state,
+            &gravity,
+            &blasts,
+            entity,
+            b,
+            &mut fl,
+            tether,
+            pos,
+            transform.rotation,
+            dt,
+        );
+        drop(state);
+        transform.translation = p;
+        transform.rotation = q;
+        if let Some(hit) = hit {
+            hits.lock().unwrap().push(hit);
+        }
+    });
     let hits = hits.into_inner().unwrap();
     if !hits.is_empty() {
         let mut state = shared.0.write();

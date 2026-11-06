@@ -368,431 +368,434 @@ pub fn wheels_system(
 ) {
     let use_ground = settings.use_ground_query && gravity.bodies.is_empty();
     let substeps = settings.wheel_substeps.clamp(1, 32);
-    q.par_iter_mut().for_each(
-        |(entity, mut wheels, mut drivetrain, controls, mut forces, mut tel)| {
-            let wheels = &mut *wheels;
-            let n = wheels.wheels.len().min(MAX_WHEELS);
-            let frame = forces.frame;
-            let dt = frame.dt;
-            if n == 0 || dt <= 0.0 {
-                return;
-            }
-            let up = frame.up();
-            let down = -up;
-            let filter = QueryFilter::excluding(entity);
-            let forward_speed = frame.linear.dot(frame.forward());
-            let wheelbase = wheels.wheelbase();
+    // One vehicle a piece on the leaf pool (`par_chunks_mut`): a compute-pool scope's waiting
+    // thread ran whole other systems (4.3 ms worst at the fortress for a few vehicles, VM).
+    let mut items: Vec<_> = q.iter_mut().map(Some).collect();
+    engine_core::tasks::par_chunks_mut(&mut items, 1, |_, one| {
+        let Some((entity, mut wheels, mut drivetrain, controls, mut forces, mut tel)) =
+            one.first_mut().and_then(Option::take)
+        else {
+            return;
+        };
+        let wheels = &mut *wheels;
+        let n = wheels.wheels.len().min(MAX_WHEELS);
+        let frame = forces.frame;
+        let dt = frame.dt;
+        if n == 0 || dt <= 0.0 {
+            return;
+        }
+        let up = frame.up();
+        let down = -up;
+        let filter = QueryFilter::excluding(entity);
+        let forward_speed = frame.linear.dot(frame.forward());
+        let wheelbase = wheels.wheelbase();
 
-            // ---- steering (keep in step with `Wheels::steer_lock`)
-            let speed_factor =
-                1.0 - (1.0 - wheels.steer_at_speed) * (forward_speed.abs() / 40.0).min(1.0);
-            let mut center_target = [0.0f32; MAX_WHEELS];
-            for (i, w) in wheels.wheels.iter().take(n).enumerate() {
-                let input = match w.steer {
-                    SteerInput::None => 0.0,
-                    SteerInput::Steer => controls.steer,
-                    SteerInput::Yaw => controls.yaw,
-                }
-                .clamp(-1.0, 1.0);
-                let mut lock = w.max_steer_deg.to_radians() * speed_factor;
-                // Don't steer past the slip angle the tire can use (steering limit assist).
-                if wheels.assists.steering_limit > 0.0 && forward_speed.abs() > 8.0 {
-                    let (_, a_peak) = w.state.peaks.unwrap_or_else(|| w.tire.peaks());
-                    let yaw_lock =
-                        (wheelbase * 1.5 / forward_speed.abs().max(1.0)).atan() + a_peak * 1.2;
-                    let limited = lock.abs().min(yaw_lock.max(a_peak));
-                    lock = lock.signum()
-                        * (lock.abs() + (limited - lock.abs()) * wheels.assists.steering_limit);
-                }
-                center_target[i] = input * lock;
+        // ---- steering (keep in step with `Wheels::steer_lock`)
+        let speed_factor =
+            1.0 - (1.0 - wheels.steer_at_speed) * (forward_speed.abs() / 40.0).min(1.0);
+        let mut center_target = [0.0f32; MAX_WHEELS];
+        for (i, w) in wheels.wheels.iter().take(n).enumerate() {
+            let input = match w.steer {
+                SteerInput::None => 0.0,
+                SteerInput::Steer => controls.steer,
+                SteerInput::Yaw => controls.yaw,
             }
-            let max_step = wheels.steer_rate * dt;
-            let ackermann = wheels.ackermann;
-            for (i, w) in wheels.wheels.iter_mut().take(n).enumerate() {
-                if w.steer == SteerInput::None {
-                    w.state.steer = 0.0;
-                    continue;
-                }
-                let target = ackermann_angle(center_target[i], w.mount.x, wheelbase, ackermann);
-                let delta = (target - w.state.steer).clamp(-max_step, max_step);
-                w.state.steer += delta;
+            .clamp(-1.0, 1.0);
+            let mut lock = w.max_steer_deg.to_radians() * speed_factor;
+            // Don't steer past the slip angle the tire can use (steering limit assist).
+            if wheels.assists.steering_limit > 0.0 && forward_speed.abs() > 8.0 {
+                let (_, a_peak) = w.state.peaks.unwrap_or_else(|| w.tire.peaks());
+                let yaw_lock =
+                    (wheelbase * 1.5 / forward_speed.abs().max(1.0)).atan() + a_peak * 1.2;
+                let limited = lock.abs().min(yaw_lock.max(a_peak));
+                lock = lock.signum()
+                    * (lock.abs() + (limited - lock.abs()) * wheels.assists.steering_limit);
             }
+            center_target[i] = input * lock;
+        }
+        let max_step = wheels.steer_rate * dt;
+        let ackermann = wheels.ackermann;
+        for (i, w) in wheels.wheels.iter_mut().take(n).enumerate() {
+            if w.steer == SteerInput::None {
+                w.state.steer = 0.0;
+                continue;
+            }
+            let target = ackermann_angle(center_target[i], w.mount.x, wheelbase, ackermann);
+            let delta = (target - w.state.steer).clamp(-max_step, max_step);
+            w.state.steer += delta;
+        }
 
-            // ---- suspension
-            let mut spring = [0.0f32; MAX_WHEELS];
-            let mut hits: [Option<GroundHit>; MAX_WHEELS] = Default::default();
-            for (i, w) in wheels.wheels.iter_mut().take(n).enumerate() {
-                let mount = frame.to_world(w.mount);
-                let s = &w.suspension;
-                let max = s.travel_m + w.radius;
-                let hit = cast_down(
-                    &queries,
-                    use_ground.then_some(&*ground),
-                    mount,
-                    down,
-                    max,
-                    &filter,
-                );
-                let st = &mut w.state;
-                if st.peaks.is_none() {
-                    st.peaks = Some(w.tire.peaks());
-                }
-                match &hit {
-                    Some(h) => {
-                        let spring_length = (h.distance - w.radius).clamp(0.0, s.travel_m);
-                        let compression = s.travel_m - spring_length;
-                        let speed = if st.grounded {
-                            (compression - st.compression) / dt
-                        } else {
-                            0.0
-                        };
-                        let damping = if speed > 0.0 {
-                            s.bump_damping
-                        } else {
-                            s.rebound_damping
-                        };
-                        // Bump stop: past full compression the tire itself squashes, hard.
-                        let bottomed = (w.radius - h.distance).max(0.0);
-                        spring[i] = (s.stiffness * compression
-                            + damping * speed
-                            + bottomed * s.stiffness * 20.0)
-                            .max(0.0);
-                        st.grounded = true;
-                        st.spring_length = spring_length;
-                        st.compression = compression;
-                        st.compression_speed = speed;
-                        st.contact_point = h.point;
-                        st.contact_normal = h.normal;
-                        st.contact_entity = h.entity;
-                        st.surface = Some(h.surface);
-                    }
-                    None => {
-                        st.grounded = false;
-                        st.spring_length = s.travel_m;
-                        st.compression = 0.0;
-                        st.compression_speed = 0.0;
-                        st.contact_entity = None;
-                        st.surface = None;
-                        st.load_n = 0.0;
-                    }
-                }
-                hits[i] = hit;
-            }
-            for bar in &wheels.anti_roll {
-                let (l, r) = (bar.left, bar.right);
-                if l >= n || r >= n {
-                    continue;
-                }
-                let (wl, wr) = (&wheels.wheels[l].state, &wheels.wheels[r].state);
-                if !(wl.grounded && wr.grounded) {
-                    continue;
-                }
-                let f = bar.stiffness * (wl.compression - wr.compression);
-                spring[l] = (spring[l] + f).max(0.0);
-                spring[r] = (spring[r] - f).max(0.0);
-            }
-
-            // ---- pedals and gears
-            let (mut throttle, mut brake) = (
-                controls.throttle.clamp(0.0, 1.0),
-                controls.brake.clamp(0.0, 1.0),
+        // ---- suspension
+        let mut spring = [0.0f32; MAX_WHEELS];
+        let mut hits: [Option<GroundHit>; MAX_WHEELS] = Default::default();
+        for (i, w) in wheels.wheels.iter_mut().take(n).enumerate() {
+            let mount = frame.to_world(w.mount);
+            let s = &w.suspension;
+            let max = s.travel_m + w.radius;
+            let hit = cast_down(
+                &queries,
+                use_ground.then_some(&*ground),
+                mount,
+                down,
+                max,
+                &filter,
             );
-            let mut omega = [0.0f32; MAX_WHEELS];
+            let st = &mut w.state;
+            if st.peaks.is_none() {
+                st.peaks = Some(w.tire.peaks());
+            }
+            match &hit {
+                Some(h) => {
+                    let spring_length = (h.distance - w.radius).clamp(0.0, s.travel_m);
+                    let compression = s.travel_m - spring_length;
+                    let speed = if st.grounded {
+                        (compression - st.compression) / dt
+                    } else {
+                        0.0
+                    };
+                    let damping = if speed > 0.0 {
+                        s.bump_damping
+                    } else {
+                        s.rebound_damping
+                    };
+                    // Bump stop: past full compression the tire itself squashes, hard.
+                    let bottomed = (w.radius - h.distance).max(0.0);
+                    spring[i] = (s.stiffness * compression
+                        + damping * speed
+                        + bottomed * s.stiffness * 20.0)
+                        .max(0.0);
+                    st.grounded = true;
+                    st.spring_length = spring_length;
+                    st.compression = compression;
+                    st.compression_speed = speed;
+                    st.contact_point = h.point;
+                    st.contact_normal = h.normal;
+                    st.contact_entity = h.entity;
+                    st.surface = Some(h.surface);
+                }
+                None => {
+                    st.grounded = false;
+                    st.spring_length = s.travel_m;
+                    st.compression = 0.0;
+                    st.compression_speed = 0.0;
+                    st.contact_entity = None;
+                    st.surface = None;
+                    st.load_n = 0.0;
+                }
+            }
+            hits[i] = hit;
+        }
+        for bar in &wheels.anti_roll {
+            let (l, r) = (bar.left, bar.right);
+            if l >= n || r >= n {
+                continue;
+            }
+            let (wl, wr) = (&wheels.wheels[l].state, &wheels.wheels[r].state);
+            if !(wl.grounded && wr.grounded) {
+                continue;
+            }
+            let f = bar.stiffness * (wl.compression - wr.compression);
+            spring[l] = (spring[l] + f).max(0.0);
+            spring[r] = (spring[r] - f).max(0.0);
+        }
+
+        // ---- pedals and gears
+        let (mut throttle, mut brake) = (
+            controls.throttle.clamp(0.0, 1.0),
+            controls.brake.clamp(0.0, 1.0),
+        );
+        let mut omega = [0.0f32; MAX_WHEELS];
+        for (i, w) in wheels.wheels.iter().take(n).enumerate() {
+            omega[i] = w.state.spin;
+        }
+        if let Some(d) = drivetrain.as_deref_mut() {
+            // Shift on road speed, not on a wheel spinning in the mud: a spinning wheel
+            // would upshift, bog down and downshift again.
+            let mut radius = [0.0f32; MAX_WHEELS];
             for (i, w) in wheels.wheels.iter().take(n).enumerate() {
-                omega[i] = w.state.spin;
+                radius[i] = w.radius;
+            }
+            let r = d.driven_speed(&radius[..n]).max(0.05);
+            let road = forward_speed / r;
+            let spin = d.driven_speed(&omega[..n]);
+            let driven = if spin.abs() > road.abs() * 1.15 + 2.0 {
+                road * 1.15 + 2.0 * road.signum()
+            } else {
+                spin
+            };
+            (throttle, brake) = d.select_gear(throttle, brake, forward_speed, driven, dt);
+        }
+        // ---- stability control: no power while the tail is out
+        if wheels.assists.stability_deg > 0.0 && forward_speed > 5.0 {
+            let v_local = frame.rotation.inverse() * frame.linear;
+            let beta = v_local.x.atan2(-v_local.z).abs().to_degrees();
+            let over = (beta - wheels.assists.stability_deg) / 6.0;
+            if over > 0.0 {
+                throttle *= (1.0 - over).clamp(0.0, 1.0);
+            }
+        }
+        let handbrake = if controls.handbrake { 1.0 } else { 0.0 };
+        let total_load: f32 = spring[..n].iter().sum::<f32>().max(1.0);
+
+        // ---- contact kinematics
+        struct Patch {
+            fwd: Vec3,
+            right: Vec3,
+            vx: f32,
+            vy: f32,
+            load: f32,
+            grip: f32,
+            rolling: f32,
+            mu: f32,
+        }
+        let mut patches: [Option<Patch>; MAX_WHEELS] = Default::default();
+        for (i, w) in wheels.wheels.iter_mut().take(n).enumerate() {
+            let Some(h) = &hits[i] else { continue };
+            let nrm = h.normal;
+            let wheel_fwd = frame.rotation * (Quat::from_rotation_y(-w.state.steer) * Vec3::NEG_Z);
+            let fwd = (wheel_fwd - nrm * wheel_fwd.dot(nrm)).normalize_or_zero();
+            if fwd == Vec3::ZERO {
+                continue;
+            }
+            let right = fwd.cross(nrm);
+            let v = frame.point_velocity(h.point);
+            let material = materials.get(h.surface);
+            let cell = surface_layers.sample(h.point);
+            let vx = v.dot(fwd);
+            let vy = v.dot(right);
+            let grip = surface_grip(material, &cell, w.tire.surface_sensitivity, vx.abs());
+            let rolling = w.tire.rolling_resistance + sinkage_resistance(material, &cell);
+            let load = spring[i] * up.dot(nrm).max(0.2);
+            w.state.load_n = load;
+            w.state.ground_speed = (vx * vx + vy * vy).sqrt();
+            patches[i] = Some(Patch {
+                fwd,
+                right,
+                vx,
+                vy,
+                load,
+                grip,
+                rolling,
+                mu: w.tire.mu_at_load(load) * grip,
+            });
+        }
+
+        // ---- substeps: drivetrain + wheel spin + tire forces
+        let h = dt / substeps as f32;
+        let mut fx_sum = [0.0f32; MAX_WHEELS];
+        let mut fy_sum = [0.0f32; MAX_WHEELS];
+        let mut used_max = [0.0f32; MAX_WHEELS];
+        let mut esc = [0.0f32; MAX_WHEELS];
+        // ---- stability control: brake the outside front wheel while the tail swings
+        // out, turning the nose back toward the direction of travel (as a car's ESC
+        // does). Off with the handbrake pulled: that slide is wanted.
+        if wheels.assists.stability_deg > 0.0 && forward_speed > 8.0 && handbrake == 0.0 {
+            let v_local = frame.rotation.inverse() * frame.linear;
+            // Body slip angle: + = moving to the right of where the nose points.
+            let beta = v_local.x.atan2(-v_local.z);
+            let yaw_rate = frame.angular.dot(up); // + = turning left
+            let start = (wheels.assists.stability_deg * 0.5).to_radians();
+            // The tail is out when the car moves to the outside of the way it turns.
+            let tail_out = beta * yaw_rate > 0.0;
+            let over = ((beta.abs() - start) / start.max(1e-3)).clamp(0.0, 1.0);
+            if tail_out && over > 0.0 {
+                // The outside of a left turn is the right side (+x).
+                let outside = yaw_rate.signum();
+                let front = wheels
+                    .wheels
+                    .iter()
+                    .take(n)
+                    .map(|w| w.mount.z)
+                    .fold(f32::MAX, f32::min);
+                for (i, w) in wheels.wheels.iter().take(n).enumerate() {
+                    let is_front = (w.mount.z - front).abs() < 0.3;
+                    if is_front && w.mount.x * outside > 0.05 {
+                        esc[i] = 0.6 * over;
+                    }
+                }
+            }
+        }
+        let mut brake_torque = [0.0f32; MAX_WHEELS];
+        for (i, w) in wheels.wheels.iter().take(n).enumerate() {
+            let mut b = brake.max(esc[i]) * w.brake_nm;
+            // ABS: back off when the wheel slips past the tire's peak.
+            if wheels.assists.abs
+                && let Some(p) = &patches[i]
+                && p.vx.abs() > 3.0
+            {
+                let (k_peak, _) = w.state.peaks.unwrap_or((0.1, 0.1));
+                let kappa = (w.state.spin * w.radius - p.vx) / p.vx.abs();
+                if kappa * p.vx.signum() < -k_peak * 1.2 {
+                    b *= 0.25;
+                }
+            }
+            brake_torque[i] = b + handbrake * w.handbrake_nm;
+        }
+        for _ in 0..substeps {
+            let mut drive = [0.0f32; MAX_WHEELS];
+            let mut inertia = [0.0f32; MAX_WHEELS];
+            let mut slope = [0.0f32; MAX_WHEELS];
+            for (i, w) in wheels.wheels.iter().take(n).enumerate() {
+                inertia[i] = w.inertia.max(0.05);
+                if let Some(p) = &patches[i] {
+                    let v_ref = p.vx.abs().max(V_LOW);
+                    let kappa = (omega[i] * w.radius - p.vx) / v_ref;
+                    let alpha = p.vy.atan2(p.vx.abs().max(V_LOW));
+                    let peaks = w.state.peaks.unwrap_or((0.1, 0.1));
+                    let eps = 0.01;
+                    let f1 = w
+                        .tire
+                        .forces(kappa + eps, alpha, p.load, p.grip, peaks)
+                        .longitudinal;
+                    let f0 = w
+                        .tire
+                        .forces(kappa - eps, alpha, p.load, p.grip, peaks)
+                        .longitudinal;
+                    slope[i] = ((f1 - f0) / (2.0 * eps)).max(0.0);
+                    // Inertia the drivetrain feels: a gripping tire resists spinning up.
+                    inertia[i] += h * w.radius * w.radius * slope[i] / v_ref;
+                }
             }
             if let Some(d) = drivetrain.as_deref_mut() {
-                // Shift on road speed, not on a wheel spinning in the mud: a spinning wheel
-                // would upshift, bog down and downshift again.
-                let mut radius = [0.0f32; MAX_WHEELS];
-                for (i, w) in wheels.wheels.iter().take(n).enumerate() {
-                    radius[i] = w.radius;
-                }
-                let r = d.driven_speed(&radius[..n]).max(0.05);
-                let road = forward_speed / r;
-                let spin = d.driven_speed(&omega[..n]);
-                let driven = if spin.abs() > road.abs() * 1.15 + 2.0 {
-                    road * 1.15 + 2.0 * road.signum()
-                } else {
-                    spin
-                };
-                (throttle, brake) = d.select_gear(throttle, brake, forward_speed, driven, dt);
-            }
-            // ---- stability control: no power while the tail is out
-            if wheels.assists.stability_deg > 0.0 && forward_speed > 5.0 {
-                let v_local = frame.rotation.inverse() * frame.linear;
-                let beta = v_local.x.atan2(-v_local.z).abs().to_degrees();
-                let over = (beta - wheels.assists.stability_deg) / 6.0;
-                if over > 0.0 {
-                    throttle *= (1.0 - over).clamp(0.0, 1.0);
-                }
-            }
-            let handbrake = if controls.handbrake { 1.0 } else { 0.0 };
-            let total_load: f32 = spring[..n].iter().sum::<f32>().max(1.0);
-
-            // ---- contact kinematics
-            struct Patch {
-                fwd: Vec3,
-                right: Vec3,
-                vx: f32,
-                vy: f32,
-                load: f32,
-                grip: f32,
-                rolling: f32,
-                mu: f32,
-            }
-            let mut patches: [Option<Patch>; MAX_WHEELS] = Default::default();
-            for (i, w) in wheels.wheels.iter_mut().take(n).enumerate() {
-                let Some(h) = &hits[i] else { continue };
-                let nrm = h.normal;
-                let wheel_fwd =
-                    frame.rotation * (Quat::from_rotation_y(-w.state.steer) * Vec3::NEG_Z);
-                let fwd = (wheel_fwd - nrm * wheel_fwd.dot(nrm)).normalize_or_zero();
-                if fwd == Vec3::ZERO {
-                    continue;
-                }
-                let right = fwd.cross(nrm);
-                let v = frame.point_velocity(h.point);
-                let material = materials.get(h.surface);
-                let cell = surface_layers.sample(h.point);
-                let vx = v.dot(fwd);
-                let vy = v.dot(right);
-                let grip = surface_grip(material, &cell, w.tire.surface_sensitivity, vx.abs());
-                let rolling = w.tire.rolling_resistance + sinkage_resistance(material, &cell);
-                let load = spring[i] * up.dot(nrm).max(0.2);
-                w.state.load_n = load;
-                w.state.ground_speed = (vx * vx + vy * vy).sqrt();
-                patches[i] = Some(Patch {
-                    fwd,
-                    right,
-                    vx,
-                    vy,
-                    load,
-                    grip,
-                    rolling,
-                    mu: w.tire.mu_at_load(load) * grip,
-                });
-            }
-
-            // ---- substeps: drivetrain + wheel spin + tire forces
-            let h = dt / substeps as f32;
-            let mut fx_sum = [0.0f32; MAX_WHEELS];
-            let mut fy_sum = [0.0f32; MAX_WHEELS];
-            let mut used_max = [0.0f32; MAX_WHEELS];
-            let mut esc = [0.0f32; MAX_WHEELS];
-            // ---- stability control: brake the outside front wheel while the tail swings
-            // out, turning the nose back toward the direction of travel (as a car's ESC
-            // does). Off with the handbrake pulled: that slide is wanted.
-            if wheels.assists.stability_deg > 0.0 && forward_speed > 8.0 && handbrake == 0.0 {
-                let v_local = frame.rotation.inverse() * frame.linear;
-                // Body slip angle: + = moving to the right of where the nose points.
-                let beta = v_local.x.atan2(-v_local.z);
-                let yaw_rate = frame.angular.dot(up); // + = turning left
-                let start = (wheels.assists.stability_deg * 0.5).to_radians();
-                // The tail is out when the car moves to the outside of the way it turns.
-                let tail_out = beta * yaw_rate > 0.0;
-                let over = ((beta.abs() - start) / start.max(1e-3)).clamp(0.0, 1.0);
-                if tail_out && over > 0.0 {
-                    // The outside of a left turn is the right side (+x).
-                    let outside = yaw_rate.signum();
-                    let front = wheels
-                        .wheels
-                        .iter()
-                        .take(n)
-                        .map(|w| w.mount.z)
-                        .fold(f32::MAX, f32::min);
-                    for (i, w) in wheels.wheels.iter().take(n).enumerate() {
-                        let is_front = (w.mount.z - front).abs() < 0.3;
-                        if is_front && w.mount.x * outside > 0.05 {
-                            esc[i] = 0.6 * over;
+                // Traction control: no more drive torque than the driven tires can turn
+                // into thrust (what's left after cornering, by the friction circle),
+                // and less as soon as a wheel slips past the peak.
+                let limit = wheels.assists.traction_control.then(|| {
+                    let mut sum = 0.0;
+                    let mut over: f32 = 0.0;
+                    for a in &d.axles {
+                        for i in [a.left, a.right] {
+                            let (Some(Some(p)), Some(w)) = (patches.get(i), wheels.wheels.get(i))
+                            else {
+                                continue;
+                            };
+                            let full = p.mu * p.load;
+                            let lat = w.state.lateral_force.abs().min(full);
+                            let left = (full * full - lat * lat).sqrt().max(full * 0.15);
+                            sum += left * w.radius;
+                            let k_target = 0.8 * w.state.peaks.map_or(0.12, |pk| pk.0);
+                            let kappa = (omega[i] * w.radius - p.vx) / p.vx.abs().max(V_LOW);
+                            over = over.max((kappa - k_target) / k_target);
                         }
                     }
-                }
+                    sum * 0.95 * (1.0 - over).clamp(0.25, 1.0)
+                });
+                d.substep(
+                    throttle,
+                    &omega[..n],
+                    &inertia[..n],
+                    h,
+                    limit,
+                    &mut drive[..n],
+                );
             }
-            let mut brake_torque = [0.0f32; MAX_WHEELS];
             for (i, w) in wheels.wheels.iter().take(n).enumerate() {
-                let mut b = brake.max(esc[i]) * w.brake_nm;
-                // ABS: back off when the wheel slips past the tire's peak.
-                if wheels.assists.abs
-                    && let Some(p) = &patches[i]
-                    && p.vx.abs() > 3.0
-                {
-                    let (k_peak, _) = w.state.peaks.unwrap_or((0.1, 0.1));
-                    let kappa = (w.state.spin * w.radius - p.vx) / p.vx.abs();
-                    if kappa * p.vx.signum() < -k_peak * 1.2 {
-                        b *= 0.25;
-                    }
-                }
-                brake_torque[i] = b + handbrake * w.handbrake_nm;
-            }
-            for _ in 0..substeps {
-                let mut drive = [0.0f32; MAX_WHEELS];
-                let mut inertia = [0.0f32; MAX_WHEELS];
-                let mut slope = [0.0f32; MAX_WHEELS];
-                for (i, w) in wheels.wheels.iter().take(n).enumerate() {
-                    inertia[i] = w.inertia.max(0.05);
-                    if let Some(p) = &patches[i] {
+                let r = w.radius;
+                let i_w = w.inertia.max(0.05);
+                match &patches[i] {
+                    Some(p) => {
                         let v_ref = p.vx.abs().max(V_LOW);
-                        let kappa = (omega[i] * w.radius - p.vx) / v_ref;
                         let alpha = p.vy.atan2(p.vx.abs().max(V_LOW));
                         let peaks = w.state.peaks.unwrap_or((0.1, 0.1));
-                        let eps = 0.01;
-                        let f1 = w
-                            .tire
-                            .forces(kappa + eps, alpha, p.load, p.grip, peaks)
-                            .longitudinal;
-                        let f0 = w
-                            .tire
-                            .forces(kappa - eps, alpha, p.load, p.grip, peaks)
-                            .longitudinal;
-                        slope[i] = ((f1 - f0) / (2.0 * eps)).max(0.0);
-                        // Inertia the drivetrain feels: a gripping tire resists spinning up.
-                        inertia[i] += h * w.radius * w.radius * slope[i] / v_ref;
+                        let kappa = (omega[i] * r - p.vx) / v_ref;
+                        let f = w.tire.forces(kappa, alpha, p.load, p.grip, peaks);
+                        // Implicit in the tire's stiffness: stable for any substep.
+                        let denom = 1.0 + h * r * r * slope[i] / (i_w * v_ref);
+                        let free = omega[i] + h * (drive[i] - f.longitudinal * r) / (i_w * denom);
+                        let friction = brake_torque[i] + p.rolling * p.load * r;
+                        let stop = friction * h / (i_w * denom);
+                        omega[i] = if free.abs() <= stop {
+                            0.0
+                        } else {
+                            free - free.signum() * stop
+                        };
+                        let kappa = (omega[i] * r - p.vx) / v_ref;
+                        let f = w.tire.forces(kappa, alpha, p.load, p.grip, peaks);
+                        fx_sum[i] += f.longitudinal;
+                        fy_sum[i] += f.lateral;
+                        used_max[i] = used_max[i].max(f.grip_used);
                     }
-                }
-                if let Some(d) = drivetrain.as_deref_mut() {
-                    // Traction control: no more drive torque than the driven tires can turn
-                    // into thrust (what's left after cornering, by the friction circle),
-                    // and less as soon as a wheel slips past the peak.
-                    let limit = wheels.assists.traction_control.then(|| {
-                        let mut sum = 0.0;
-                        let mut over: f32 = 0.0;
-                        for a in &d.axles {
-                            for i in [a.left, a.right] {
-                                let (Some(Some(p)), Some(w)) =
-                                    (patches.get(i), wheels.wheels.get(i))
-                                else {
-                                    continue;
-                                };
-                                let full = p.mu * p.load;
-                                let lat = w.state.lateral_force.abs().min(full);
-                                let left = (full * full - lat * lat).sqrt().max(full * 0.15);
-                                sum += left * w.radius;
-                                let k_target = 0.8 * w.state.peaks.map_or(0.12, |pk| pk.0);
-                                let kappa = (omega[i] * w.radius - p.vx) / p.vx.abs().max(V_LOW);
-                                over = over.max((kappa - k_target) / k_target);
-                            }
-                        }
-                        sum * 0.95 * (1.0 - over).clamp(0.25, 1.0)
-                    });
-                    d.substep(
-                        throttle,
-                        &omega[..n],
-                        &inertia[..n],
-                        h,
-                        limit,
-                        &mut drive[..n],
-                    );
-                }
-                for (i, w) in wheels.wheels.iter().take(n).enumerate() {
-                    let r = w.radius;
-                    let i_w = w.inertia.max(0.05);
-                    match &patches[i] {
-                        Some(p) => {
-                            let v_ref = p.vx.abs().max(V_LOW);
-                            let alpha = p.vy.atan2(p.vx.abs().max(V_LOW));
-                            let peaks = w.state.peaks.unwrap_or((0.1, 0.1));
-                            let kappa = (omega[i] * r - p.vx) / v_ref;
-                            let f = w.tire.forces(kappa, alpha, p.load, p.grip, peaks);
-                            // Implicit in the tire's stiffness: stable for any substep.
-                            let denom = 1.0 + h * r * r * slope[i] / (i_w * v_ref);
-                            let free =
-                                omega[i] + h * (drive[i] - f.longitudinal * r) / (i_w * denom);
-                            let friction = brake_torque[i] + p.rolling * p.load * r;
-                            let stop = friction * h / (i_w * denom);
-                            omega[i] = if free.abs() <= stop {
-                                0.0
-                            } else {
-                                free - free.signum() * stop
-                            };
-                            let kappa = (omega[i] * r - p.vx) / v_ref;
-                            let f = w.tire.forces(kappa, alpha, p.load, p.grip, peaks);
-                            fx_sum[i] += f.longitudinal;
-                            fy_sum[i] += f.lateral;
-                            used_max[i] = used_max[i].max(f.grip_used);
-                        }
-                        None => {
-                            // In the air: driven wheels spin up, brakes stop them, bearings
-                            // slowly slow them down.
-                            let free = omega[i] + h * drive[i] / i_w;
-                            let stop = (brake_torque[i] + 2.0) * h / i_w;
-                            omega[i] = if free.abs() <= stop {
-                                0.0
-                            } else {
-                                free - free.signum() * stop
-                            };
-                        }
+                    None => {
+                        // In the air: driven wheels spin up, brakes stop them, bearings
+                        // slowly slow them down.
+                        let free = omega[i] + h * drive[i] / i_w;
+                        let stop = (brake_torque[i] + 2.0) * h / i_w;
+                        omega[i] = if free.abs() <= stop {
+                            0.0
+                        } else {
+                            free - free.signum() * stop
+                        };
                     }
                 }
             }
+        }
 
-            // ---- forces on the body
-            let inv = 1.0 / substeps as f32;
-            let locked_count = (0..n)
-                .filter(|&i| patches[i].is_some() && omega[i] == 0.0 && brake_torque[i] > 0.0)
-                .count()
-                .max(1) as f32;
-            let mut grounded = 0;
-            let mut skidding = false;
-            for (i, w) in wheels.wheels.iter_mut().take(n).enumerate() {
-                let st = &mut w.state;
-                st.spin = omega[i];
-                st.angle = (st.angle + omega[i] * dt).rem_euclid(std::f32::consts::TAU * 64.0);
-                let Some(p) = &patches[i] else {
-                    st.longitudinal_force = 0.0;
-                    st.lateral_force = 0.0;
-                    st.slip_ratio = 0.0;
-                    st.slip_angle = 0.0;
-                    st.grip_used = 0.0;
-                    st.skidding = false;
-                    st.reaction = Vec3::ZERO;
-                    continue;
-                };
-                grounded += 1;
-                let mut fx = fx_sum[i] * inv;
-                let mut fy = fy_sum[i] * inv;
-                // Static friction at walking pace: hold the car still on slopes and stop
-                // the last creep, which slip-based forces alone can't (they need slip to
-                // push). Each tire cancels its share of the sliding velocity and of the
-                // pull of gravity along the ground; braked wheels hold the whole car.
-                let still = 1.0 - smoothstep(0.3, 2.5, st.ground_speed);
-                if still > 0.0 {
-                    let share = p.load / total_load;
-                    let m_eff = frame.mass * share;
-                    let cap = p.mu * p.load;
-                    let g_y = frame.gravity.dot(p.right) * frame.mass * share;
-                    let stick_y = (-m_eff * p.vy / dt * 0.5 - g_y).clamp(-cap, cap);
-                    fy += (stick_y - fy) * still;
-                    let locked = omega[i] == 0.0 && brake_torque[i] > 0.0;
-                    if locked {
-                        let g_x = frame.gravity.dot(p.fwd) * frame.mass / locked_count;
-                        let stick_x = (-m_eff * p.vx / dt * 0.5 - g_x).clamp(-cap, cap);
-                        fx += (stick_x - fx) * still;
-                    }
+        // ---- forces on the body
+        let inv = 1.0 / substeps as f32;
+        let locked_count = (0..n)
+            .filter(|&i| patches[i].is_some() && omega[i] == 0.0 && brake_torque[i] > 0.0)
+            .count()
+            .max(1) as f32;
+        let mut grounded = 0;
+        let mut skidding = false;
+        for (i, w) in wheels.wheels.iter_mut().take(n).enumerate() {
+            let st = &mut w.state;
+            st.spin = omega[i];
+            st.angle = (st.angle + omega[i] * dt).rem_euclid(std::f32::consts::TAU * 64.0);
+            let Some(p) = &patches[i] else {
+                st.longitudinal_force = 0.0;
+                st.lateral_force = 0.0;
+                st.slip_ratio = 0.0;
+                st.slip_angle = 0.0;
+                st.grip_used = 0.0;
+                st.skidding = false;
+                st.reaction = Vec3::ZERO;
+                continue;
+            };
+            grounded += 1;
+            let mut fx = fx_sum[i] * inv;
+            let mut fy = fy_sum[i] * inv;
+            // Static friction at walking pace: hold the car still on slopes and stop
+            // the last creep, which slip-based forces alone can't (they need slip to
+            // push). Each tire cancels its share of the sliding velocity and of the
+            // pull of gravity along the ground; braked wheels hold the whole car.
+            let still = 1.0 - smoothstep(0.3, 2.5, st.ground_speed);
+            if still > 0.0 {
+                let share = p.load / total_load;
+                let m_eff = frame.mass * share;
+                let cap = p.mu * p.load;
+                let g_y = frame.gravity.dot(p.right) * frame.mass * share;
+                let stick_y = (-m_eff * p.vy / dt * 0.5 - g_y).clamp(-cap, cap);
+                fy += (stick_y - fy) * still;
+                let locked = omega[i] == 0.0 && brake_torque[i] > 0.0;
+                if locked {
+                    let g_x = frame.gravity.dot(p.fwd) * frame.mass / locked_count;
+                    let stick_x = (-m_eff * p.vx / dt * 0.5 - g_x).clamp(-cap, cap);
+                    fx += (stick_x - fx) * still;
                 }
-                st.longitudinal_force = fx;
-                st.lateral_force = fy;
-                st.slip_ratio = (omega[i] * w.radius - p.vx) / p.vx.abs().max(V_LOW);
-                st.slip_angle = p.vy.atan2(p.vx.abs().max(V_LOW));
-                st.grip_used = used_max[i];
-                st.skidding = used_max[i] > 1.15 && st.ground_speed > 2.0;
-                skidding |= st.skidding;
-                let tire = p.fwd * fx + p.right * fy;
-                let total = up * spring[i] + tire;
-                let at = st.contact_point + (up * w.tire_force_height).as_dvec3();
-                forces.add_at(total, at);
-                st.reaction = -total;
-                st.since_track_m += st.ground_speed * dt;
             }
-            tel.wheels_grounded = grounded;
-            tel.skidding = skidding;
-            if let Some(d) = drivetrain.as_deref() {
-                tel.rpm = d.state.rpm;
-                tel.gear = d.state.gear;
-                tel.throttle = d.state.throttle;
-            }
-        },
-    );
+            st.longitudinal_force = fx;
+            st.lateral_force = fy;
+            st.slip_ratio = (omega[i] * w.radius - p.vx) / p.vx.abs().max(V_LOW);
+            st.slip_angle = p.vy.atan2(p.vx.abs().max(V_LOW));
+            st.grip_used = used_max[i];
+            st.skidding = used_max[i] > 1.15 && st.ground_speed > 2.0;
+            skidding |= st.skidding;
+            let tire = p.fwd * fx + p.right * fy;
+            let total = up * spring[i] + tire;
+            let at = st.contact_point + (up * w.tire_force_height).as_dvec3();
+            forces.add_at(total, at);
+            st.reaction = -total;
+            st.since_track_m += st.ground_speed * dt;
+        }
+        tel.wheels_grounded = grounded;
+        tel.skidding = skidding;
+        if let Some(d) = drivetrain.as_deref() {
+            tel.rpm = d.state.rpm;
+            tel.gear = d.state.gear;
+            tel.throttle = d.state.throttle;
+        }
+    });
 }
 
 #[cfg(test)]
