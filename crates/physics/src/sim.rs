@@ -843,6 +843,9 @@ fn pair_key(a: Entity, b: Entity) -> (Entity, Entity) {
 /// Everything the backend knows. Shared (behind a lock) with [`crate::queries`].
 #[derive(Default)]
 pub struct Simulation {
+    /// How long Rapier's part of the last step took (`physics_simulate`), ms: a step quicker
+    /// than [`PhysicsSettings::overlap_min_ms`] isn't run beside the frame.
+    pub last_simulate_ms: f64,
     pub regions: Vec<Option<Region>>,
     pub bodies: EntityHashMap<BodyEntry>,
     pub colliders: EntityHashMap<ColliderEntry>,

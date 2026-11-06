@@ -104,6 +104,11 @@ pub struct PhysicsSettings {
     /// later at 120 FPS. Bodies are drawn between steps (`TransformInterpolation`). Off by
     /// default: headless apps and tests step inside the fixed step.
     pub overlap_frame: bool,
+    /// With [`Self::overlap_frame`], a step whose Rapier part took less than this last time
+    /// (ms) runs inside the fixed step instead: handing it to a thread and joining it costs
+    /// more than that (a thread start and wake-up, 0.05-0.2 ms on a PC; on the 4-core cloud
+    /// VM `First` waited 2.6 ms a frame at the arena for a 0.04 ms step). 0 = always beside.
+    pub overlap_min_ms: f32,
 }
 
 impl Default for PhysicsSettings {
@@ -132,6 +137,7 @@ impl Default for PhysicsSettings {
             articulate_within_m: 20.0,
             static_meshes_off_frame: true,
             overlap_frame: false,
+            overlap_min_ms: 0.25,
         }
     }
 }

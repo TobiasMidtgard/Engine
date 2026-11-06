@@ -776,7 +776,12 @@ pub(crate) fn physics_simulate(
     // "Last" includes the step the frame's step budget ends on, so a frame cut short by the
     // budget still overlaps its final step.
     let last = fixed.is_last_step();
-    if carry.settings.overlap_frame && last {
+    // A step quicker than handing it to a thread and joining it runs here: at the arena
+    // (VM) Rapier's part took 0.04 ms and `First` waited 2.6 ms a frame for its thread.
+    if carry.settings.overlap_frame
+        && last
+        && shared.0.read().last_simulate_ms >= carry.settings.overlap_min_ms as f64
+    {
         carry.deferred = true;
         return;
     }
@@ -1280,6 +1285,7 @@ fn simulate(mut sim: parking_lot::RwLockWriteGuard<'_, Simulation>, carry: &mut 
     }
     drop(finish);
     sim.recheck_contacts();
+    sim.last_simulate_ms = simulating.elapsed().as_secs_f64() * 1000.0;
     drop(sim);
     if report {
         let ms = |d: std::time::Duration| d.as_secs_f64() * 1000.0;
@@ -3482,9 +3488,12 @@ pub(crate) mod tests {
                 step_secs: 1.0 / frame_hz,
             });
         app.world.resource_mut::<FixedTime>().set_hz(60.0);
-        app.world
-            .resource_mut::<crate::PhysicsSettings>()
-            .overlap_frame = overlap;
+        {
+            let mut settings = app.world.resource_mut::<crate::PhysicsSettings>();
+            settings.overlap_frame = overlap;
+            // (These scenes step in microseconds: keep them beside the frame.)
+            settings.overlap_min_ms = 0.0;
+        }
         app.world.spawn((
             Transform::from_translation(DVec3::NEG_Y * 0.5),
             RigidBody::fixed(),
@@ -3525,6 +3534,32 @@ pub(crate) mod tests {
     fn the_step_beside_the_frame_moves_bodies_as_the_step_inside_it() {
         beside_matches_inside(120.0, 480);
         beside_matches_inside(30.0, 120);
+    }
+
+    /// With `overlap_frame` but steps quicker than `overlap_min_ms`, no step goes to a
+    /// thread, and gameplay sees the bodies just as with the step inside the fixed step.
+    #[test]
+    fn a_step_quicker_than_its_thread_hand_off_runs_inside() {
+        let (mut inside, _) = pile(false, 120.0);
+        let (mut quick, _) = pile(true, 120.0);
+        quick
+            .world
+            .resource_mut::<crate::PhysicsSettings>()
+            .overlap_min_ms = 1000.0;
+        for _ in 0..240 {
+            inside.update();
+            quick.update();
+            assert!(quick.world.resource::<super::InFlight>().0.is_none());
+        }
+        let a = &inside.world.resource::<Track>().0;
+        let b = &quick.world.resource::<Track>().0;
+        assert!(a[0].1.len() >= 100, "{} fixed steps", a[0].1.len());
+        assert_eq!(a[0].1.len(), b[0].1.len());
+        for ((_, pa), (_, pb)) in a.iter().zip(b) {
+            for (k, (p, q)) in pa.iter().zip(pb).enumerate() {
+                assert!(p.distance(*q) < 1e-3, "step {k}: {p} inside, {q} quick");
+            }
+        }
     }
 
     fn beside_matches_inside(frame_hz: f64, frames: usize) {
