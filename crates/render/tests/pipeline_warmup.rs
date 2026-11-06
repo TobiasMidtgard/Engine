@@ -61,8 +61,12 @@ fn materials_first_seen_later_draw_alike_without_a_compile() {
     let mut shots = Vec::new();
     let mut compile_ms = Vec::new();
     let mut presets_compiled = Vec::new();
-    for warmup in [PipelineWarmup::Off, PipelineWarmup::Always] {
+    // Warmed first: waiting for its workers decides how many frames it draws, and the cold run
+    // then draws as many, so both pictures have the same scene time and history.
+    let mut frames_before = 0;
+    for warmup in [PipelineWarmup::Always, PipelineWarmup::Off] {
         let mut app = app(warmup);
+        let mut frames = 1;
         app.update();
         if let Some(d) = app.world.get_resource::<RenderDisabled>() {
             eprintln!("no GPU ({}), skipping", d.0);
@@ -79,6 +83,7 @@ fn materials_first_seen_later_draw_alike_without_a_compile() {
                 std::thread::sleep(std::time::Duration::from_millis(300));
             }
             app.update();
+            frames += 1;
         }
         // Under load (every test at once) the workers can need longer: wait for them, a whole
         // jitter cycle at a time, so the temporal anti-aliasing sees the same jitter phase.
@@ -87,10 +92,17 @@ fn materials_first_seen_later_draw_alike_without_a_compile() {
             std::thread::sleep(std::time::Duration::from_millis(500));
             for _ in 0..engine_render::effects::JITTER_SAMPLES {
                 app.update();
+                frames += 1;
             }
         }
         if warmup == PipelineWarmup::Always {
             assert_eq!(warming(&app), 0.0);
+            frames_before = frames;
+        } else {
+            while frames < frames_before {
+                app.update();
+                frames += 1;
+            }
         }
         // A blended, double-sided material: two variants the scene hasn't drawn with.
         let mesh = app
@@ -135,6 +147,10 @@ fn materials_first_seen_later_draw_alike_without_a_compile() {
                 .into_raw(),
         );
     }
+    // Back to cold, warmed.
+    shots.reverse();
+    compile_ms.reverse();
+    presets_compiled.reverse();
     let (a, b) = (&shots[0], &shots[1]);
     assert_eq!(a.len(), b.len());
     let max = a
