@@ -248,6 +248,15 @@ impl Marks {
         self.marks.clear();
     }
 
+    /// Wipe the marks whose centers lie within `radius` meters of `center` (a demo hall's
+    /// floor between programs); returns how many went.
+    pub fn clear_within(&mut self, center: DVec3, radius: f64) -> usize {
+        let before = self.marks.len();
+        self.marks
+            .retain(|m| m.position.distance_squared(center) > radius * radius);
+        before - self.marks.len()
+    }
+
     /// Age every mark by `dt` seconds and forget the ones that have faded.
     pub fn tick(&mut self, dt: f32) {
         for m in &mut self.marks {
@@ -273,6 +282,33 @@ pub(crate) fn age_marks(time: Res<Time>, mut marks: ResMut<Marks>) {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn clear_within_wipes_only_the_disc() {
+        let mut marks = Marks::default();
+        let n = Vec3::Y;
+        marks.add(Mark::round(
+            MarkKind::Blood,
+            DVec3::new(1.0, 0.0, 0.0),
+            n,
+            0.5,
+        ));
+        marks.add(Mark::round(
+            MarkKind::Rot,
+            DVec3::new(0.0, 0.0, -20.0),
+            n,
+            0.5,
+        ));
+        marks.add(Mark::round(
+            MarkKind::Scorch,
+            DVec3::new(40.0, 0.0, 0.0),
+            n,
+            0.5,
+        ));
+        assert_eq!(marks.clear_within(DVec3::ZERO, 25.0), 2);
+        assert_eq!(marks.len(), 1);
+    }
+
     use super::*;
 
     fn mark(age: f32, x: f64) -> Mark {

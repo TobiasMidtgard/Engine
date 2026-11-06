@@ -400,6 +400,30 @@ fn register_apis(app: &mut App) {
         |_, _| Ok(spells::contracts_answer()),
     )
     .register_api(
+        "vfx.clear_marks",
+        "Wipe the ground and wall marks (scorches, blood, frost, rot) whose centers lie within \
+         radius_m of center (world meters); answers how many went. A demo clears its floor \
+         between programs this way.",
+        r#"{"center": [0.0, 0.0, 0.0], "radius_m": 25.0}"#,
+        |world, args| {
+            let c = args
+                .get("center")
+                .and_then(Value::as_array)
+                .filter(|a| a.len() == 3)
+                .and_then(|a| a.iter().map(Value::as_f64).collect::<Option<Vec<f64>>>())
+                .ok_or("center must be [x, y, z]")?;
+            let radius = args
+                .get("radius_m")
+                .and_then(Value::as_f64)
+                .filter(|r| *r >= 0.0)
+                .ok_or("radius_m must be a number >= 0")?;
+            let cleared = world
+                .resource_mut::<Marks>()
+                .clear_within(DVec3::new(c[0], c[1], c[2]), radius);
+            Ok(serde_json::json!({ "cleared": cleared }))
+        },
+    )
+    .register_api(
         "vfx.stats",
         "Particle system counters: playing and fading effects, emitters, particles spawned \
          this frame, pool use, starved emitters, ribbons, and effects asked for but missing.",
@@ -553,6 +577,24 @@ mod tests {
         let r = call_api(&mut app.world, "vfx.mark", json!({"clear": true})).unwrap();
         assert_eq!(r["cleared"], 1);
         assert!(app.world.resource::<Marks>().is_empty());
+
+        for x in [2, 60] {
+            call_api(
+                &mut app.world,
+                "vfx.mark",
+                json!({"kind": "scorch", "position": [x, 0, 0]}),
+            )
+            .unwrap();
+        }
+        let r = call_api(
+            &mut app.world,
+            "vfx.clear_marks",
+            json!({"center": [0, 0, 0], "radius_m": 25}),
+        )
+        .unwrap();
+        assert_eq!(r["cleared"], 1, "only the mark inside the disc goes");
+        assert_eq!(app.world.resource::<Marks>().len(), 1);
+        assert!(call_api(&mut app.world, "vfx.clear_marks", json!({"radius_m": 5})).is_err());
     }
 
     #[test]
