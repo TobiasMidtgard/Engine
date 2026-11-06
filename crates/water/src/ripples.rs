@@ -21,7 +21,6 @@
 //! textures each frame.
 
 use engine_core::math::{DVec2, DVec3, Vec2, Vec3, smoothstep};
-use engine_core::tasks::ComputeTaskPool;
 use engine_world::WorldShift;
 use std::sync::Arc;
 
@@ -719,7 +718,10 @@ fn par_tile_rows<C: Send>(
         return;
     }
     let rows = rows.enumerate().filter(|(ty, _)| work[*ty] > 0);
-    let threads = ComputeTaskPool::get().thread_num().max(1);
+    // On the leaf pool (`split_pool`), not in a compute-pool scope, whose waiting thread runs
+    // whole other systems meanwhile: "ripples: step" was 11 ms a frame at the lake (VM).
+    let pool = engine_core::tasks::split_pool();
+    let threads = pool.map_or(1, |p| p.thread_num().max(1));
     if total * TILE * TILE < SERIAL_CELLS || threads == 1 {
         for (ty, row) in rows {
             f(ty, row);
@@ -738,7 +740,8 @@ fn par_tile_rows<C: Send>(
         groups.last_mut().unwrap().push((ty, row));
     }
     let f = &f;
-    ComputeTaskPool::get().scope(|scope| {
+    let Some(pool) = pool else { return };
+    pool.scope(|scope| {
         for group in groups {
             scope.spawn(async move {
                 for (ty, row) in group {

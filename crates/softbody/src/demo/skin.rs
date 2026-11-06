@@ -15,7 +15,6 @@ use std::thread::JoinHandle;
 
 use engine_assets::{Assets, Handle};
 use engine_core::prelude::*;
-use engine_core::tasks::ComputeTaskPool;
 use engine_core::time::FixedTime;
 use engine_render::{GpuSkin, MaterialRef, Mesh, MeshRenderer, SkinBone, SkinWeights, Vertex};
 use engine_world::animation::{BonePose, SkeletonPose};
@@ -465,15 +464,14 @@ pub fn skin(
     bone_transforms(&template.bind, pose, bones);
     let bones = &bones[..];
     const CHUNK: usize = 4096;
-    match ComputeTaskPool::try_get() {
-        Some(pool) if out.len() > 2 * CHUNK => {
-            pool.scope(|s| {
-                for (k, chunk) in out.chunks_mut(CHUNK).enumerate() {
-                    s.spawn(async move { skin_range(template, bones, k * CHUNK, chunk) });
-                }
-            });
-        }
-        _ => skin_range(template, bones, 0, out),
+    // On the leaf pool (`par_chunks_mut`): a compute-pool scope's waiting thread runs whole
+    // other systems meanwhile (skin_bodies up to 45 ms in a frame at the lake, VM).
+    if out.len() > 2 * CHUNK {
+        engine_core::tasks::par_chunks_mut(out, CHUNK, |k, chunk| {
+            skin_range(template, bones, k * CHUNK, chunk)
+        });
+    } else {
+        skin_range(template, bones, 0, out);
     }
 }
 

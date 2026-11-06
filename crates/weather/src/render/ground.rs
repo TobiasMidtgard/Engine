@@ -279,6 +279,7 @@ impl RenderFeature for GroundFeature {
             let width = grid.width.max(1) as usize;
             let rows = rows_per_piece(grid.height as usize);
             let any = std::sync::atomic::AtomicBool::new(false);
+            let pack = tracing::info_span!("weather", name = "ground cover: pack").entered();
             self.packed.clear();
             self.packed.resize(grid.data.len() * 4, 0);
             engine_core::tasks::par_chunks_mut(&mut self.packed, width * rows * 4, |i, out| {
@@ -302,6 +303,7 @@ impl RenderFeature for GroundFeature {
                     any.store(true, std::sync::atomic::Ordering::Relaxed);
                 }
             });
+            drop(pack);
             let any = any.into_inner();
             self.active = any;
             if any {
@@ -335,6 +337,8 @@ impl RenderFeature for GroundFeature {
                     size,
                 };
                 if self.uploaded.as_ref().is_none_or(|u| u.heights != key) {
+                    let _span =
+                        tracing::info_span!("weather", name = "ground cover: heights").entered();
                     self.height_ref = height_ref;
                     self.heights_known = cache.is_some();
                     self.height_bytes.clear();
@@ -357,6 +361,7 @@ impl RenderFeature for GroundFeature {
                     write_grid(gpu, &g.heights, &self.height_bytes, size);
                 }
                 // The cover again only when it changed (dry ground, a settled snowfield).
+                let _span = tracing::info_span!("weather", name = "ground cover: write").entered();
                 let cover_same = self.uploaded.is_some() && self.bytes == self.packed;
                 std::mem::swap(&mut self.bytes, &mut self.packed);
                 if !cover_same {

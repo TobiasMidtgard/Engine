@@ -12,7 +12,6 @@
 
 use engine_core::math::{DVec2, DVec3, Vec2, Vec3};
 use engine_core::prelude::*;
-use engine_core::tasks::ComputeTaskPool;
 use engine_world::WorldShift;
 
 use crate::body::WaterOptics;
@@ -1349,7 +1348,8 @@ fn bands(nx: usize, nz: usize) -> usize {
     } else {
         // Several bands a thread: the water lies in a few of them (a river down a region
         // mostly dry), and one band a thread left the others idle while the wet one ran.
-        (ComputeTaskPool::get().thread_num() * BANDS_PER_THREAD).clamp(1, nz)
+        let threads = engine_core::tasks::split_pool().map_or(1, |p| p.thread_num());
+        (threads * BANDS_PER_THREAD).clamp(1, nz)
     }
 }
 
@@ -1365,14 +1365,17 @@ const COURANT: f32 = 0.5;
 /// Run `f(band, item)` for each band of rows, one task each.
 fn par_bands<C: Send>(items: impl Iterator<Item = C>, f: impl Fn(usize, C) + Send + Sync) {
     let items: Vec<C> = items.collect();
-    if items.len() <= 1 {
+    // On the leaf pool (`split_pool`): a compute-pool scope's waiting thread runs whole other
+    // systems meanwhile.
+    let pool = engine_core::tasks::split_pool().filter(|_| items.len() > 1);
+    let Some(pool) = pool else {
         for (band, item) in items.into_iter().enumerate() {
             f(band, item);
         }
         return;
-    }
+    };
     let f = &f;
-    ComputeTaskPool::get().scope(|scope| {
+    pool.scope(|scope| {
         for (band, item) in items.into_iter().enumerate() {
             scope.spawn(async move { f(band, item) });
         }

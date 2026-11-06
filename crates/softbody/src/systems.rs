@@ -7,7 +7,6 @@ use std::time::Instant;
 
 use engine_core::ecs::entity::EntityHashMap;
 use engine_core::prelude::*;
-use engine_core::tasks::ComputeTaskPool;
 use engine_world::animation::SkeletonPose;
 use engine_world::physics::{
     ApplyImpulse, BodyKind, CharacterController, CharacterState, Collider, ColliderShape,
@@ -1365,7 +1364,11 @@ fn step_all<'b>(
         .iter_mut()
         .map(|(e, body)| timed(*e, body, ctx))
         .collect();
-    match ComputeTaskPool::try_get() {
+    // On the leaf pool, not in a compute-pool scope: a thread waiting in that scope runs whole
+    // other systems meanwhile, and step_beside_physics showed 10-59 ms a step at the lake
+    // (VM) for bodies a fraction of that (engine_core::tasks, nested scopes).
+    let pool = engine_core::tasks::split_pool();
+    match pool {
         Some(pool) if busy.len() > 1 && pool.thread_num() > 1 => {
             let timed = &timed;
             took.extend(pool.scope(|scope| {
