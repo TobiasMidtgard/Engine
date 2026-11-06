@@ -491,12 +491,16 @@ pub(crate) fn physics_sync(world: &mut World, mut q: Local<Option<StepQueries>>)
         sim.budget_articulations(&g, &foci, &lookup);
         graph = Some(g);
     }
-    let waiting: Vec<Entity> = sim
+    let mut waiting: Vec<Entity> = sim
         .joints
         .iter()
         .filter(|(_, j)| j.created.is_none())
         .map(|(e, _)| *e)
         .collect();
+    // In entity order, not the hash map's: the order joints reach Rapier is the order it solves
+    // them in, and a hash order moves with every id (five resources added elsewhere shifted
+    // them all and kept the proving ground's watchtower standing).
+    waiting.sort_unstable();
     let graph = match graph {
         Some(g) => g,
         None if waiting.is_empty() => Default::default(),

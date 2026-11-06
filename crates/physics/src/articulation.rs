@@ -44,8 +44,10 @@ pub(crate) fn close_masses(masses: impl IntoIterator<Item = f32>) -> bool {
 }
 
 /// Dry friction in the joints of a free-floating group (a ragdoll, a loose chain), as a
-/// fraction of the load its limb's weight puts on it (see [`friction_of`]).
-const JOINT_FRICTION: f32 = 0.1;
+/// fraction of the load its limb's weight puts on it (see [`friction_of`]). (0.1 let one
+/// ragdoll of `ragdolls_knocked_over_every_which_way_fall_asleep` on constraint joints creep
+/// along the ground for good once its joints reached Rapier in spawn order.)
+const JOINT_FRICTION: f32 = 0.12;
 
 /// Shortest lever [`friction_of`] weighs a link's friction torque with, meters (a link centered on
 /// its joint still has some size).
