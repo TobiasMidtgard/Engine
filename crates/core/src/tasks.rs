@@ -153,8 +153,10 @@ pub fn par_chunks_mut<T: Send>(
     });
 }
 
-/// The pool [`par_chunks_mut`] splits on for the calling thread, if any.
-fn split_pool() -> Option<&'static TaskPool> {
+/// The pool [`par_chunks_mut`] splits on for the calling thread, if any: open a scope here
+/// (never on `ComputeTaskPool` from a system) for parallel work that isn't a slice, such as
+/// whole bodies or groups of rows. `None` without pools (a plain unit test): run in order.
+pub fn split_pool() -> Option<&'static TaskPool> {
     let on_async = std::thread::current()
         .name()
         .is_none_or(|n| n.starts_with("async"));
