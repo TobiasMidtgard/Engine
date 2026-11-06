@@ -13,7 +13,7 @@
 //! 150 m, and a wood of 12,000 scenery trees from a hill (with and without the distant level). Name shots after the directory to render
 //! only those (`lineup`, `lineup_near`, `lineup_mid`, `lineup_lod`, `lineup_distant`, `roots`, `crown_front`,
 //! `leaves_close`, `crown_back`, `conifers`, `lineup_stands` (the stands' other eight trees), `pine_crown`, `birch_hazel`, `grove`,
-//! `grove_far`, `savanna`, `savanna_side`, `savanna_high`, `prairie`, `valley`, `valley_far`, `far_woods`, `far_woods_off`), `textures`
+//! `grove_far`, `savanna`, `savanna_side`, `savanna_high`, `prairie`, `rainforest`, `rainforest_below`, `valley`, `valley_far`, `far_woods`, `far_woods_off`), `textures`
 //! to save the leaf atlases, their normal maps, three of their mip levels and the mass atlases far
 //! crowns draw with instead, or `stats` to print triangle counts.
 
@@ -375,6 +375,68 @@ fn main() {
             .unwrap();
         }
     }
+    // A patch of rainforest 600 m to the other side: meranti emergents over a closed canopy.
+    let rainforest = DVec3::new(-600.0, 0.0, 0.0);
+    if only_sp
+        .as_deref()
+        .is_none_or(|o| o == "meranti" || o == "tropical canopy")
+    {
+        app.world.spawn((
+            Transform::from_translation(rainforest + DVec3::Y * 0.03),
+            MeshRenderer::new(
+                Shape::Plane {
+                    size: [300.0, 300.0],
+                    subdivisions: 1,
+                },
+                StandardMaterial::hex(0x2c3a1c).with_roughness(0.95),
+            ),
+        ));
+        let mut rng = Rng::new(23);
+        for i in 0..14 {
+            for j in 0..14 {
+                let p = rainforest
+                    + DVec3::new(
+                        (i as f64 - 6.5) * 9.0 + rng.range(-2.5, 2.5) as f64,
+                        0.0,
+                        (j as f64 - 6.5) * 9.0 + rng.range(-2.5, 2.5) as f64,
+                    );
+                let g = Genes {
+                    variant: rng.range_i32(0, 4) as u8,
+                    hue: rng.range(-1.0, 1.0),
+                    height: rng.range(0.8, 1.1),
+                    crown: rng.range(0.85, 1.2),
+                    ..Default::default()
+                };
+                let size = rng.range(0.8, 1.0);
+                spawn_plant(&mut app.world, "tropical canopy", p, size, Some(g)).unwrap();
+            }
+        }
+        for (k, (dx, dz)) in [
+            (-20.0, 10.0),
+            (25.0, -15.0),
+            (-35.0, -40.0),
+            (10.0, -50.0),
+            (40.0, 30.0),
+            (-50.0, 45.0),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let g = Genes {
+                variant: k as u8 % 4,
+                height: [1.15, 1.3, 1.1, 1.25, 1.15, 1.35][k],
+                ..Default::default()
+            };
+            spawn_plant(
+                &mut app.world,
+                "meranti",
+                rainforest + DVec3::new(dx, 0.0, dz),
+                1.0,
+                Some(g),
+            )
+            .unwrap();
+        }
+    }
     app.world.flush();
     app.update();
     // Wait for every species' meshes (built off the frame), so the first shot isn't empty.
@@ -594,6 +656,28 @@ fn main() {
             prairie + DVec3::new(8.0, 2.0, 32.0),
             prairie + DVec3::new(-5.0, 9.0, -20.0),
             Vec3::new(0.55, 0.22, 0.8),
+        );
+    }
+    if wanted("rainforest") {
+        // Over the canopy from a ridge, the emergents standing out of it.
+        shot(
+            &mut app,
+            &out,
+            "rainforest",
+            rainforest + DVec3::new(40.0, 95.0, 130.0),
+            rainforest + DVec3::new(0.0, 20.0, -10.0),
+            Vec3::new(-0.5, 0.55, 0.4),
+        );
+    }
+    if wanted("rainforest_below") {
+        // A meranti's straight pale trunk from the forest floor.
+        shot(
+            &mut app,
+            &out,
+            "rainforest_below",
+            rainforest + DVec3::new(-12.0, 1.7, 26.0),
+            rainforest + DVec3::new(-20.0, 18.0, 10.0),
+            Vec3::new(-0.5, 0.75, 0.4),
         );
     }
     if wanted("grove_far") {
