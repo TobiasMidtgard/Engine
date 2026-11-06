@@ -445,6 +445,12 @@ pub struct EcologySettings {
     /// 1): time for the step to finish on its worker so the frame doesn't wait for it. The
     /// same in every run, so the forest grows the same whatever the thread timing.
     pub step_write_back_ticks: u32,
+    /// Further ticks a step its worker hasn't finished by then may take, landing at the first
+    /// tick it is done, before the tick waits for it. 0: always land at the write-back tick,
+    /// waiting if need be, so thread timing never changes the forest (tests, reproducible
+    /// runs). Waiting held a frame 270-480 ms while zones loaded (lead's fortress traces,
+    /// 2026-11-06: the step sat behind loading builds on a full pool).
+    pub step_late_ticks: u32,
 }
 
 impl Default for EcologySettings {
@@ -467,6 +473,7 @@ impl Default for EcologySettings {
             herb_kinds: true,
             bone_wind: true,
             step_write_back_ticks: crate::ecology::WRITE_BACK_TICKS,
+            step_late_ticks: crate::ecology::LATE_STEP_TICKS,
         }
     }
 }

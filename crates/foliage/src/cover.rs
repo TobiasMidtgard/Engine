@@ -367,6 +367,14 @@ fn cells_of(cover: &GroundCover, min: DVec2, max: DVec2) -> (IVec2, IVec2) {
 /// it changed, and a still forest none.
 pub const CELLS_PER_FRAME: usize = 4096;
 
+/// Milliseconds a frame spends painting at most. The cell budget alone let a frame take up to
+/// 7.3 ms (2.2 ms on average) while zones loaded on the VM (lead's fortress trace,
+/// 2026-11-06): cells over many overlapping fields cost several times the average.
+pub const PAINT_MS: f32 = 0.75;
+
+/// Cells painted between checks of the time limit.
+pub const PAINT_CHUNK_CELLS: usize = 512;
+
 struct PaintedField {
     entity: Entity,
     min: DVec2,
@@ -384,6 +392,9 @@ pub struct CoverPainted {
     pending: std::collections::VecDeque<(DVec2, DVec2)>,
     /// Cells painted per frame at most.
     pub budget: usize,
+    /// Milliseconds a frame's painting may take (`None`: the cell budget alone). Checked
+    /// between chunks of [`PAINT_CHUNK_CELLS`].
+    pub max_ms: Option<f32>,
     /// Cells painted since the start (a diagnostic: it should stand still while nothing
     /// changes).
     pub cells_painted: u64,
@@ -395,6 +406,7 @@ impl Default for CoverPainted {
             fields: Vec::new(),
             pending: Default::default(),
             budget: CELLS_PER_FRAME,
+            max_ms: Some(PAINT_MS),
             cells_painted: 0,
         }
     }
@@ -536,7 +548,12 @@ pub fn paint_ground_cover(
     // budget; a rectangle too big for what's left is painted a few rows at a time.
     let mut left = painted.budget.max(1);
     let mut near: Vec<FieldView<'_>> = Vec::with_capacity(views.len());
+    let start = std::time::Instant::now();
+    let max_ms = painted.max_ms;
     while left > 0 {
+        if max_ms.is_some_and(|ms| start.elapsed().as_secs_f32() * 1000.0 > ms) {
+            break;
+        }
         let Some((a, b)) = painted.pending.pop_front() else {
             break;
         };
@@ -550,7 +567,12 @@ pub fn paint_ground_cover(
         if w == 0 || h == 0 {
             continue;
         }
-        let rows = (left / w).max(1).min(h);
+        let chunk = if max_ms.is_some() {
+            left.min(PAINT_CHUNK_CELLS)
+        } else {
+            left
+        };
+        let rows = (chunk / w).max(1).min(h);
         let cut = IVec2::new(max.x, min.y + rows as i32);
         // Only the fields reaching the rectangle (every cell samples each one it's given).
         let (lo, hi) = (origin_of(&cover, min, cell), origin_of(&cover, cut, cell));
@@ -604,7 +626,11 @@ mod tests {
         let mut app = App::new();
         app.world.init_resource::<FocusPoints>();
         app.world.init_resource::<GroundCover>();
-        app.world.init_resource::<CoverPainted>();
+        // The cell budget alone, so a debug build settles in as many frames as a release one.
+        app.world.insert_resource(CoverPainted {
+            max_ms: None,
+            ..Default::default()
+        });
         app.add_systems(Update, paint_ground_cover);
         app
     }
@@ -783,6 +809,7 @@ mod bench {
         app.world.init_resource::<GroundCover>();
         app.world.insert_resource(CoverPainted {
             budget: usize::MAX,
+            max_ms: None,
             ..Default::default()
         });
         app.add_systems(Update, paint_ground_cover);

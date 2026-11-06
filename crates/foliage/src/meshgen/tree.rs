@@ -345,6 +345,84 @@ struct Crown {
     center: Vec3,
     radii: Vec3,
     cone: bool,
+    /// Bulges and dents in an ellipsoid crown's outline.
+    lobes: Lobes,
+}
+
+/// Most lobes a crown's outline carries.
+const MAX_LOBES: usize = 10;
+
+/// A lobe reaches this far from its axis (cosine of the angle, about 56°).
+const LOBE_COS: f32 = 0.55;
+
+/// How far a broadleaf crown's lobes move its outline, as a share of the radius, plus this
+/// times the species' gnarl (oak 0.7: about ±0.55; beech 0.2: ±0.37).
+const LOBE_STRENGTH: f32 = 0.3;
+const LOBE_GNARL: f32 = 0.35;
+
+/// A shell twig longer than this sways as a branch of its own (meters).
+const LONG_TWIG_M: f32 = 1.2;
+
+/// How much darker leaves deep in a bay between lobes are.
+const LOBE_BAY_SHADE: f32 = 0.35;
+
+/// Sky holes through a broadleaf crown (fewest, most).
+const SKY_HOLES: (i32, i32) = (3, 6);
+
+/// Chance that a branch outgrows the crown (plus a tenth of the species' gnarl).
+const STRAY_BRANCH: f32 = 0.07;
+
+/// Bulges and dents in a broadleaf crown's outline. A real crown is not an even ball: each main
+/// limb carries its own mass of leaves, a lobe, with shallow bays and sky between them, and the
+/// outline is the union of the lobes (Livny et al. 2011, "Texture-lobes for tree modelling";
+/// space colonization grows the same, Runions et al. 2007; regional-looks.md trait 10).
+#[derive(Clone, Copy)]
+struct Lobes {
+    /// Direction (from the crown's center, in units of its radii) and how far the outline moves
+    /// out (above 0) or in (below 0) along it, as a share of the radius.
+    axes: [Vec4; MAX_LOBES],
+    n: usize,
+}
+
+impl Lobes {
+    const NONE: Lobes = Lobes {
+        axes: [Vec4::ZERO; MAX_LOBES],
+        n: 0,
+    };
+
+    /// `n` lobes spread over the crown's sides and top, each moving the outline by up to
+    /// `strength` of the radius (dents a little shallower than bulges).
+    fn random(rng: &mut Rng, n: usize, strength: f32) -> Lobes {
+        let mut l = Lobes::NONE;
+        l.n = n.min(MAX_LOBES);
+        let az0 = rng.range(0.0, std::f32::consts::TAU);
+        for i in 0..l.n {
+            let az = az0 + i as f32 * 2.399_963 + rng.range(-0.4, 0.4);
+            // Bulges stay off the crown's top, so the tree keeps its height; dents may sit
+            // anywhere.
+            let bulge = i % 2 == 0;
+            let y = rng.range(-0.35, if bulge { 0.5 } else { 0.85 });
+            let r = (1.0 - y * y).sqrt();
+            let d = Vec3::new(r * az.cos(), y, r * az.sin());
+            // Alternate bulges and dents so no crown comes out all bulge or all dent.
+            let a = if bulge {
+                rng.range(0.45, 1.0)
+            } else {
+                -rng.range(0.6, 1.0)
+            };
+            l.axes[i] = d.extend(a * strength);
+        }
+        l
+    }
+
+    /// How far the outline lies toward the unit direction `v`, as a multiple of the radius.
+    fn scale(&self, v: Vec3) -> f32 {
+        let mut s = 1.0;
+        for a in &self.axes[..self.n] {
+            s += a.w * smoothstep(LOBE_COS, 1.0, v.dot(a.truncate()));
+        }
+        s.clamp(0.5, 1.45)
+    }
 }
 
 impl Crown {
@@ -366,14 +444,30 @@ impl Crown {
             let r = (self.radii.x * (1.0 - rel).powf(0.9)).max(0.3);
             Vec2::new(p.x - self.center.x, p.z - self.center.z).length() / r
         } else {
-            ((p - self.center) / self.radii).length()
+            let q = (p - self.center) / self.radii;
+            q.length() / self.lobes.scale(q.normalize_or(Vec3::Y))
         }
     }
 
-    /// Distance from `p` along `d` to the surface of the ellipsoid (p inside).
+    /// Distance from `p` along `d` to the crown's outline (p inside), lobes included.
     fn reach(&self, p: Vec3, d: Vec3) -> Option<f32> {
-        let q = (p - self.center) / self.radii;
-        let e = d / self.radii;
+        let mut t = self.reach_scaled(p, d, 1.0)?;
+        if self.lobes.n == 0 {
+            return Some(t);
+        }
+        // The lobed outline, found by refitting the ellipsoid to the scale where it is hit.
+        for _ in 0..3 {
+            let q = (p + d * t - self.center) / self.radii;
+            t = self.reach_scaled(p, d, self.lobes.scale(q.normalize_or(Vec3::Y)))?;
+        }
+        Some(t)
+    }
+
+    /// Distance from `p` along `d` to the surface of the ellipsoid scaled by `k` (p inside).
+    fn reach_scaled(&self, p: Vec3, d: Vec3, k: f32) -> Option<f32> {
+        let radii = self.radii * k;
+        let q = (p - self.center) / radii;
+        let e = d / radii;
         let a = e.dot(e);
         let b = q.dot(e);
         let c = q.dot(q) - 1.0;
@@ -428,7 +522,16 @@ impl Shading {
         let clump_ao = 0.62 + 0.38 * smoothstep(0.0, 1.0, rel.length());
         // Leaves facing the ground see less sky.
         let under = 1.0 + 0.2 * n.y.min(0.0);
-        (n, crown_ao * clump_ao * under)
+        // Leaves in a bay between lobes sit back in the crown, shaded by the lobes round
+        // them: the lobes read as lit masses with dark bays between (trait 2).
+        let bay = if self.crown.lobes.n > 0 && !self.crown.cone {
+            let q = (p - self.crown.center) / self.crown.radii;
+            let s = self.crown.lobes.scale(q.normalize_or(Vec3::Y));
+            1.0 - LOBE_BAY_SHADE * smoothstep(1.1, 0.6, s)
+        } else {
+            1.0
+        };
+        (n, crown_ao * clump_ao * under * bay)
     }
 }
 
@@ -447,6 +550,9 @@ struct Crowns {
     grid: (u32, u32),
     /// Where twigs can grow from to fill the crown's shell.
     anchors: Vec<Anchor>,
+    /// Gaps where the sky shows through the crown: a direction from its center (in units of
+    /// its radii) and the cosine of the gap's half-angle.
+    holes: Vec<(Vec3, f32)>,
 }
 
 impl Crowns {
@@ -460,7 +566,21 @@ impl Crowns {
             far_share: 0.3,
             grid: (3, 3),
             anchors: Vec::new(),
+            holes: Vec::new(),
         }
+    }
+
+    /// Whether the unit direction `v` from the crown's center (in units of its radii) looks
+    /// out through one of its sky holes.
+    fn in_hole(&self, v: Vec3) -> bool {
+        self.holes.iter().any(|&(h, cos)| v.dot(h) > cos)
+    }
+
+    /// Whether `p` lies in the outer part of a sky hole, where leaves are left out.
+    fn in_hole_at(&self, p: Vec3) -> bool {
+        let c = self.crown;
+        let q = (p - c.center) / c.radii;
+        q.length() > 0.3 && self.in_hole(q.normalize_or(Vec3::Y))
     }
 
     fn clump(&mut self, center: Vec3, radius: f32) -> usize {
@@ -512,7 +632,10 @@ impl Crowns {
             } else {
                 rng.range(0.74, 0.98)
             };
-            let p0 = c.center + v * c.radii * depth;
+            if self.in_hole(v) && rng.chance(0.9) {
+                continue;
+            }
+            let p0 = c.center + v * c.radii * depth * c.lobes.scale(v);
             // The leaves sit on the nearest clump, so the crown is the lumpy union of its
             // branches' clumps (with gaps where no branch reaches) rather than a smooth ball.
             let Some((ki, k)) = self
@@ -592,7 +715,9 @@ impl Crowns {
             self.branches.push(Branch {
                 path: twig,
                 radius: vec![r0, r0 * 0.75, r0 * 0.5, 0.004],
-                level: 3,
+                // A long reach out to a lobe is a branch of its own in the wind, not a twig
+                // riding the limb it grows from (its leaves would swing about a far pivot).
+                level: if len > LONG_TWIG_M { 2 } else { 3 },
             });
         }
     }
@@ -2259,6 +2384,14 @@ fn broadleaf(sp: &PlantSpecies, seed: u64, sapling: bool) -> PlantMeshes {
     let (path, radius) = trunk(sp, &mut rng, top, cut, !sapling);
     let crown_base_y = h * if sapling { 0.35 } else { sh.crown_base };
     let apex = *path.last().unwrap();
+    // Gnarled oaks break into deep lobes; smooth-limbed beech and birch into shallower ones.
+    let lobing = if sapling {
+        0.1
+    } else {
+        LOBE_STRENGTH + LOBE_GNARL * sh.gnarl
+    };
+    let n_lobes = rng.range_i32(6, 10) as usize;
+    let lobes = Lobes::random(&mut rng, n_lobes, lobing);
     let crown = Crown {
         center: Vec3::new(apex.x * 0.6, (crown_base_y + h) * 0.5, apex.z * 0.6),
         radii: Vec3::new(
@@ -2267,10 +2400,22 @@ fn broadleaf(sp: &PlantSpecies, seed: u64, sapling: bool) -> PlantMeshes {
             sp.crown_radius_m,
         ),
         cone: false,
+        lobes,
     };
     let leaf = sh.leaf_size_m * if sapling { 0.7 } else { 1.0 };
     let density = sh.leaf_density.max(0.1);
     let mut cr = Crowns::new(crown, leaf);
+    // Sky holes through the sides and shoulders of the crown, between its lobes.
+    if !sapling {
+        for _ in 0..rng.range_i32(SKY_HOLES.0, SKY_HOLES.1 + 1) {
+            let az = rng.range(0.0, std::f32::consts::TAU);
+            let y = rng.range(-0.2, 0.65);
+            let r = (1.0 - y * y).sqrt();
+            let half = rng.range(18.0f32, 30.0).to_radians();
+            cr.holes
+                .push((Vec3::new(r * az.cos(), y, r * az.sin()), half.cos()));
+        }
+    }
     cr.branches.push(Branch {
         path: path.clone(),
         radius: radius.clone(),
@@ -2328,7 +2473,13 @@ fn broadleaf(sp: &PlantSpecies, seed: u64, sapling: bool) -> PlantMeshes {
                     .min(length * (1.05 - s) + 1.2)
                     .clamp(0.8, sp.crown_radius_m * 0.85)
                     * rng.range(0.7, 0.95);
-                let segs = 4;
+                // Now and then a branch outgrows the rest and sticks out of the crown, with
+                // leaves only toward its end: the ragged edge of a crown against the sky.
+                let stray = rng.chance(STRAY_BRANCH + 0.1 * sh.gnarl);
+                let l2 = if stray { l2 * rng.range(1.35, 1.7) } else { l2 };
+                // Its wind bone follows it in shorter pieces, so the leaves out at its end find
+                // it rather than a neighbour.
+                let segs = if stray { 7 } else { 4 };
                 let branch = grow(p, d2, l2, segs, |f, _| {
                     let sag = if weeping { -0.16 * f } else { 0.0 };
                     Vec3::Y * (sh.tip_bend * 0.1 + sag) + jitter(&mut rng, wobble * 0.8)
@@ -2357,7 +2508,9 @@ fn broadleaf(sp: &PlantSpecies, seed: u64, sapling: bool) -> PlantMeshes {
                     let l3 = leaf * rng.range(0.45, 0.8);
                     let twig = grow(q, d3, l3, 2, |_, _| jitter(&mut rng, 0.12));
                     let deep = crown.depth(q) < 0.45 && rng.chance(0.6);
-                    if !deep {
+                    // A stray branch is bare where it passes through the crown's own leaves.
+                    let bare = (stray && s3 < 0.55) || (cr.in_hole_at(q) && rng.chance(0.85));
+                    if !deep && !bare {
                         let per = if rng.chance(0.5 * density) { 2 } else { 1 };
                         for c in 0..per {
                             let (cp, cd, _) = point_at(&twig, &[0.0; 3], 0.15 + 0.5 * c as f32);
@@ -2490,18 +2643,21 @@ fn conifer(sp: &PlantSpecies, seed: u64, sapling: bool) -> PlantMeshes {
             center: Vec3::new(0.0, (y0 + h) * 0.5 + 0.3, 0.0),
             radii: Vec3::new(sp.crown_radius_m, (h - y0) * 0.5 + 0.5, sp.crown_radius_m),
             cone: false,
+            lobes: Lobes::NONE,
         }
     } else if pine {
         Crown {
             center: Vec3::new(0.0, (y0 + h) * 0.5, 0.0),
             radii: Vec3::new(sp.crown_radius_m, (h - y0) * 0.5 + 0.4, sp.crown_radius_m),
             cone: false,
+            lobes: Lobes::NONE,
         }
     } else {
         Crown {
             center: Vec3::new(0.0, (y0 + h) * 0.5, 0.0),
             radii: Vec3::new(sp.crown_radius_m, (h - y0) * 0.5, sp.crown_radius_m),
             cone: true,
+            lobes: Lobes::NONE,
         }
     };
     let mut cr = Crowns::new(crown, leaf);
@@ -2910,6 +3066,7 @@ fn shrub(sp: &PlantSpecies, seed: u64) -> PlantMeshes {
         center: Vec3::new(0.0, h * 0.55, 0.0),
         radii: Vec3::new(sp.crown_radius_m, h * 0.5, sp.crown_radius_m),
         cone: false,
+        lobes: Lobes::NONE,
     };
     let leaf = sh.leaf_size_m;
     let density = sh.leaf_density.max(0.1);

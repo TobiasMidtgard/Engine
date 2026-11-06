@@ -116,11 +116,16 @@ impl SoilEdit {
 /// 120 fps profile, 2026-11-05).
 pub const WRITE_BACK_TICKS: u32 = 30;
 
+/// Ticks past the write-back tick a late step may take by default
+/// (`EcologySettings::step_late_ticks`): ten seconds at 60 Hz.
+pub const LATE_STEP_TICKS: u32 = 600;
+
 /// A region step running on a worker: gathered at one fixed tick and written back
-/// `EcologySettings::step_write_back_ticks` later, always then (waiting only if it is still running), so the
-/// forest grows the same on every run whatever the thread timing (Unity's "schedule early,
-/// complete at a fixed point"). Without a worker pool the step runs at once and still lands
-/// then.
+/// `EcologySettings::step_write_back_ticks` later, so the forest grows the same on every run
+/// whatever the thread timing (Unity's "schedule early, complete at a fixed point"). A step
+/// its worker hasn't finished by then lands at the first tick it has (a busy pool while zones
+/// load), waited for only past `EcologySettings::step_late_ticks`. Without a worker pool the step runs at
+/// once and still lands at the write-back tick.
 struct StepInFlight {
     done: Arc<StepSlot>,
     /// Ticks since the gather.
@@ -149,6 +154,14 @@ impl StepSlot {
             *slot = Some(r);
         }
         self.ready.notify_all();
+    }
+
+    /// Whether the worker has put its result (or panicked) yet.
+    fn is_ready(&self) -> bool {
+        self.result
+            .lock()
+            .map(|slot| slot.is_some())
+            .unwrap_or(true)
     }
 
     /// The result, waiting for the worker if it isn't done (it re-raises a panic of the
@@ -1382,6 +1395,7 @@ pub fn ecology_step(world: &mut World) {
     if due.is_empty() {
         return;
     }
+    let _span = tracing::info_span!(target: "engine_foliage", "ecology gather").entered();
 
     let library = Arc::new(
         world
@@ -1450,6 +1464,7 @@ pub fn ecology_step(world: &mut World) {
             let Some(center) = world.get::<RegionState>(region_entity).map(|s| s.center) else {
                 continue;
             };
+            let _span = tracing::info_span!(target: "engine_foliage", "ecology env").entered();
             EnvSnapshot::around(world, &region, center)
         };
         let Some(mut state) = world.get_mut::<RegionState>(region_entity) else {
@@ -1515,6 +1530,13 @@ pub fn ecology_step(world: &mut World) {
     }
 }
 
+/// Whether a step `ticks` after its gather lands this tick: at the write-back tick if its
+/// worker is done (or waited for when `late_ticks` is 0), else at the first tick it is done,
+/// or `late_ticks` after the write-back tick at the latest.
+fn lands_now(ticks: u32, write_back: u32, late_ticks: u32, ready: impl FnOnce() -> bool) -> bool {
+    ticks >= write_back && (ticks >= write_back + late_ticks || ready())
+}
+
 /// Write back the region steps gathered last tick, waiting for any still running (normally
 /// done long since: they had the rest of a frame).
 fn finish_steps(world: &mut World) {
@@ -1536,17 +1558,22 @@ fn finish_steps(world: &mut World) {
         .cloned()
         .unwrap_or_default();
     let mut waited_ms = 0.0;
-    let write_back = world
+    let (write_back, late_ticks) = world
         .get_resource::<EcologySettings>()
-        .map_or(WRITE_BACK_TICKS, |s| s.step_write_back_ticks)
-        .max(1);
+        .map_or((WRITE_BACK_TICKS, LATE_STEP_TICKS), |s| {
+            (s.step_write_back_ticks.max(1), s.step_late_ticks)
+        });
     for region_entity in running {
         let Some(mut state) = world.entity_mut(region_entity).take::<RegionState>() else {
             continue;
         };
         if let Some(step) = &mut state.step {
             step.ticks += 1;
-            if step.ticks < write_back {
+            // A worker that hasn't got to the step yet (the pool busy with a zone's loading
+            // builds) is waited for over ticks, not in one: blocking here held a frame for
+            // 480 ms in the lead's fortress trace. Only a step still out after
+            // `step_late_ticks` more is waited for.
+            if !lands_now(step.ticks, write_back, late_ticks, || step.done.is_ready()) {
                 world.entity_mut(region_entity).insert(state);
                 continue;
             }
@@ -1561,6 +1588,7 @@ fn finish_steps(world: &mut World) {
             step.done.wait()
         };
         waited_ms += waited;
+        let _span = tracing::info_span!(target: "engine_foliage", "ecology write back").entered();
         if let Some(s) = &step.shift {
             done.follow(s, step.center);
         }
@@ -1834,6 +1862,8 @@ mod tests {
         app.world
             .resource_mut::<EcologySettings>()
             .step_write_back_ticks = 1;
+        // Thread timing must not change the forest: a late step is waited for.
+        app.world.resource_mut::<EcologySettings>().step_late_ticks = 0;
         // Steady wind: gusts follow the clock, and the two loading modes take a different
         // number of frames to build the region.
         app.world.resource_mut::<WeatherState>().gustiness = 0.0;
@@ -1862,6 +1892,22 @@ mod tests {
             .collect();
         plants.sort();
         plants
+    }
+
+    #[test]
+    fn a_late_step_lands_when_done_not_by_holding_the_tick() {
+        // Not yet due, whatever the worker.
+        assert!(!lands_now(29, 30, 600, || true));
+        // Due and done.
+        assert!(lands_now(30, 30, 600, || true));
+        // Due, still running: the tick goes on.
+        assert!(!lands_now(30, 30, 600, || false));
+        assert!(!lands_now(629, 30, 600, || false));
+        // Done some ticks later: lands then.
+        assert!(lands_now(45, 30, 600, || true));
+        // Past the limit, or with none: waited for.
+        assert!(lands_now(630, 30, 600, || false));
+        assert!(lands_now(30, 30, 0, || false));
     }
 
     #[test]
