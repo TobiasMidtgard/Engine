@@ -53,6 +53,151 @@ pub struct RegionGrass(pub Entity);
 #[derive(Component, Debug, Clone, Copy)]
 pub struct GrassOf(pub Entity);
 
+/// On a region's field: where its last rebuild changed it, so the ground-cover painter
+/// repaints only there (and the field isn't touched at all when a rebuild changed nothing).
+#[derive(Component, Debug, Clone, PartialEq)]
+pub struct GrassEdit {
+    /// Everything changed (a new field, size, resolution or style).
+    pub all: bool,
+    /// Rectangles of map points `[x0, z0, x1, z1)` (ends exclusive) whose density, dryness or
+    /// kind changed: runs of [`EDIT_TILE`]-point tiles along each row of tiles. Empty when only
+    /// the heights did, or changes too small to repaint for.
+    pub points: Vec<[u32; 4]>,
+    /// The maps as the ground cover was last painted from them, tile by tile, so small changes
+    /// add up until they count.
+    painted: CoverBaseline,
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+struct CoverBaseline {
+    density: Vec<f32>,
+    dryness: Vec<f32>,
+    kinds: Vec<u8>,
+}
+
+impl Default for GrassEdit {
+    fn default() -> Self {
+        Self {
+            all: true,
+            points: Vec::new(),
+            painted: CoverBaseline::default(),
+        }
+    }
+}
+
+impl GrassEdit {
+    /// A new field's: painted whole, the next rebuild's changes counted from its maps.
+    fn new_field(field: &GrassField) -> Self {
+        Self {
+            painted: CoverBaseline {
+                density: field.density.clone(),
+                dryness: field.dryness.clone(),
+                kinds: field.kinds.clone(),
+            },
+            ..Default::default()
+        }
+    }
+}
+
+/// Map points along a side of the tiles a [`GrassEdit`] counts changes in. A living forest
+/// changes a few hundred points scattered over a region every rebuild (plants grow, die and
+/// sprout, logs fall and rot), so one rectangle around them all would be the whole field.
+pub const EDIT_TILE: u32 = 4;
+
+/// How far density or dryness may drift from what the ground cover was painted from before
+/// its tile is repainted: the cover is a coarse reading of the grass (footsteps, cover for
+/// AI, snow), and growth moves crown shade a little every rebuild.
+const EDIT_EPSILON: f32 = 0.1;
+
+/// The tiles where `(density, dryness, kinds)` drifted from `painted` on a grid of
+/// `resolution` points, as [`GrassEdit::points`]; those tiles of `painted` take the new
+/// values. `None` (and `painted` the new maps) where the maps don't line up.
+fn changed_points(
+    resolution: [u32; 2],
+    painted: &mut CoverBaseline,
+    new: (&[f32], &[f32], &[u8]),
+) -> Option<Vec<[u32; 4]>> {
+    let n = (resolution[0] * resolution[1]) as usize;
+    let old = (
+        &painted.density[..],
+        &painted.dryness[..],
+        &painted.kinds[..],
+    );
+    let fits = |m: (&[f32], &[f32], &[u8])| {
+        [m.0.len(), m.1.len(), m.2.len()]
+            .iter()
+            .all(|&l| l == n || l == 0)
+    };
+    if old.0.len() != new.0.len()
+        || old.1.len() != new.1.len()
+        || old.2.len() != new.2.len()
+        || !fits(new)
+    {
+        *painted = CoverBaseline {
+            density: new.0.to_vec(),
+            dryness: new.1.to_vec(),
+            kinds: new.2.to_vec(),
+        };
+        return None;
+    }
+    let w = resolution[0].max(1) as usize;
+    let [tx, tz] = resolution.map(|r| r.div_ceil(EDIT_TILE).max(1) as usize);
+    let mut tiles = vec![false; tx * tz];
+    let mut mark = |i: usize| {
+        let (x, z) = (i % w / EDIT_TILE as usize, i / w / EDIT_TILE as usize);
+        tiles[z * tx + x] = true;
+    };
+    for (i, (a, b)) in old.0.iter().zip(new.0).enumerate() {
+        if (a - b).abs() > EDIT_EPSILON {
+            mark(i);
+        }
+    }
+    for (i, (a, b)) in old.1.iter().zip(new.1).enumerate() {
+        if (a - b).abs() > EDIT_EPSILON {
+            mark(i);
+        }
+    }
+    for (i, (a, b)) in old.2.iter().zip(new.2).enumerate() {
+        if a != b {
+            mark(i);
+        }
+    }
+    let t = EDIT_TILE;
+    let mut runs = Vec::new();
+    for z in 0..tz {
+        let mut x = 0;
+        while x < tx {
+            if !tiles[z * tx + x] {
+                x += 1;
+                continue;
+            }
+            let first = x;
+            while x < tx && tiles[z * tx + x] {
+                x += 1;
+            }
+            let (z0, z1) = (z as u32 * t, ((z as u32 + 1) * t).min(resolution[1]));
+            let (x0, x1) = (first as u32 * t, (x as u32 * t).min(resolution[0]));
+            runs.push([x0, z0, x1, z1]);
+        }
+    }
+    // The cover is painted again from the new values where it is repainted.
+    for &[x0, z0, x1, z1] in &runs {
+        for z in z0..z1 {
+            let r = (z * resolution[0]) as usize;
+            let (a, b) = (r + x0 as usize, r + x1 as usize);
+            for (dst, src) in [(&mut painted.density, new.0), (&mut painted.dryness, new.1)] {
+                if !src.is_empty() {
+                    dst[a..b].copy_from_slice(&src[a..b]);
+                }
+            }
+            if !new.2.is_empty() {
+                painted.kinds[a..b].copy_from_slice(&new.2[a..b]);
+            }
+        }
+    }
+    Some(runs)
+}
+
 /// What a region's GPU field draws: its meadow grass, or a layer of a forest's floor.
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum FloorLayer {
@@ -1143,7 +1288,12 @@ pub fn sync_region_grass(
         Option<&RegionFloor>,
         Option<&GrassBuild>,
     )>,
-    mut fields: Query<(&mut GrassField, &mut Transform, &GrassOf)>,
+    mut fields: Query<(
+        &mut GrassField,
+        &mut Transform,
+        &GrassOf,
+        Option<&mut GrassEdit>,
+    )>,
     plants: Query<(&Plant, &Transform, &InRegion), Without<GrassField>>,
     logs: Query<(&FelledLog, &Transform), (With<LogPlaced>, Without<GrassField>)>,
     rocks: Query<&Transform, (With<Rock>, Without<GrassField>)>,
@@ -1170,7 +1320,7 @@ pub fn sync_region_grass(
         let grass_heights = || {
             linked
                 .and_then(|g| fields.get(g.0).ok())
-                .map(|(f, _, _)| f.heights.clone())
+                .map(|(f, ..)| f.heights.clone())
         };
         let known_heights = built.heights.clone().or_else(grass_heights);
         let known_floor = built.floor_heights.clone().or_else(grass_heights);
@@ -1192,22 +1342,47 @@ pub fn sync_region_grass(
                 Some(_) => floor.ferns,
             };
             match existing.and_then(|e| fields.get_mut(e).ok()) {
-                Some((mut field, mut t, _)) => {
+                Some((mut field, mut t, _, edit)) => {
                     let heights = match slot {
                         None => &built.heights,
                         Some(_) => &built.floor_heights,
                     };
-                    if let Some(h) = heights {
-                        field.heights = h.clone();
-                    }
-                    field.size = built.size;
-                    field.resolution = built.resolution;
-                    field.density = density;
-                    field.dryness = dryness;
-                    field.style = style;
                     let (kinds, styles) = layer_kinds(layer, &built.floor_kinds);
-                    field.kinds = kinds;
-                    field.styles = styles;
+                    // A rebuild that changed nothing leaves the field alone (its GPU maps and
+                    // ground cover stay as they are); one that changed a little says where.
+                    let reshaped = field.size != built.size
+                        || field.resolution != built.resolution
+                        || field.style != style
+                        || field.styles != styles;
+                    let new_heights = heights.as_ref().filter(|h| **h != field.heights);
+                    let exact = field.density == density
+                        && field.dryness == dryness
+                        && field.kinds == kinds;
+                    if reshaped || !exact || new_heights.is_some() {
+                        if let Some(mut edit) = edit {
+                            if reshaped {
+                                // Repainted whole: the baseline starts again from these maps.
+                                edit.painted = CoverBaseline::default();
+                            }
+                            let points = changed_points(
+                                built.resolution,
+                                &mut edit.painted,
+                                (&density, &dryness, &kinds),
+                            );
+                            edit.all = reshaped || points.is_none();
+                            edit.points = points.unwrap_or_default();
+                        }
+                        if let Some(h) = new_heights {
+                            field.heights = h.clone();
+                        }
+                        field.size = built.size;
+                        field.resolution = built.resolution;
+                        field.density = density;
+                        field.dryness = dryness;
+                        field.style = style;
+                        field.kinds = kinds;
+                        field.styles = styles;
+                    }
                     if t.translation != field_at.translation {
                         *t = field_at;
                     }
@@ -1238,7 +1413,13 @@ pub fn sync_region_grass(
                         styles,
                     };
                     let e = commands
-                        .spawn((field_at, field, GrassOf(region_e), layer))
+                        .spawn((
+                            field_at,
+                            GrassEdit::new_field(&field),
+                            field,
+                            GrassOf(region_e),
+                            layer,
+                        ))
                         .id();
                     match slot {
                         None => {
@@ -1444,7 +1625,7 @@ pub fn sync_region_grass(
         }));
         let existing = linked.and_then(|g| fields.get(g.0).ok());
         let need_heights =
-            relief || existing.is_none_or(|(f, _, _)| f.heights.is_empty() || f.resolution != res);
+            relief || existing.is_none_or(|(f, ..)| f.heights.is_empty() || f.resolution != res);
         let shades = shades_floor(&styles);
         let herb_kinds_on = settings.herb_kinds;
         let ferns_layer = styles.iter().any(|(l, _)| *l == FloorLayer::Ferns);
@@ -1959,6 +2140,63 @@ mod tests {
             assert!((0.1..0.8).contains(&share), "{layer:?} covers {share}");
             assert_eq!(f.heights.len(), f.density.len());
         }
+    }
+
+    /// The ground cover is painted once and then only where the grass changes: not at all
+    /// while the forest stands still (its maps are rebuilt every few seconds all the same), and
+    /// only the tiles its growth changed while it grows (it used to repaint whole fields every
+    /// rebuild, 650 cells a frame here).
+    #[test]
+    fn the_ground_cover_is_repainted_only_where_the_grass_changed() {
+        let mut app = app();
+        let region = app
+            .world
+            .spawn((Transform::default(), crate::demo::forest_region()))
+            .id();
+        // Until the forest has grown in (its history runs as a catch-up, a step at a time).
+        let start = std::time::Instant::now();
+        loop {
+            app.update_n(30);
+            let state = app.world.get::<RegionState>(region);
+            let grown = state
+                .is_some_and(|s| s.catch_up.is_none() && !s.stepping() && s.pending_years == 0.0);
+            if grown || start.elapsed().as_secs() > 120 {
+                break;
+            }
+        }
+        settle(&mut app);
+        let painted = |app: &App| {
+            app.world
+                .resource::<crate::cover::CoverPainted>()
+                .cells_painted
+        };
+        // Two rebuild rounds of real time; cells painted a frame.
+        let run = |app: &mut App| {
+            let (cells, frames) = (painted(app), app.world.resource::<Time>().frame_count());
+            let start = std::time::Instant::now();
+            while start.elapsed().as_secs_f32() < 2.5 * REBUILD_SECS {
+                app.update();
+                std::thread::sleep(std::time::Duration::from_millis(4));
+            }
+            settle(app);
+            let frames = app.world.resource::<Time>().frame_count() - frames;
+            (painted(app) - cells) as f32 / frames.max(1) as f32
+        };
+        app.world.resource_mut::<EcologySettings>().paused = true;
+        while app
+            .world
+            .get::<RegionState>(region)
+            .is_some_and(|s| s.stepping())
+        {
+            app.update();
+        }
+        // A floor layer may still take the forest floor's surface as it lands; then nothing.
+        let still = (0..4).map(|_| run(&mut app)).find(|c| *c == 0.0);
+        app.world.resource_mut::<EcologySettings>().paused = false;
+        let growing = run(&mut app);
+        println!("ground cover: {still:?} cells a frame still, {growing:.0} growing");
+        assert_eq!(still, Some(0.0), "a still forest kept repainting its cover");
+        assert!(growing < 150.0, "{growing} cells a frame");
     }
 
     #[test]

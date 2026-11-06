@@ -6,15 +6,16 @@
 //!
 //! The grid follows the primary focus in steps of [`STEP_M`]: [`Grid2::recenter`] keeps what
 //! it already knew and only the strips that came into it are painted. A field that is added,
-//! changed or removed repaints its own rectangle. Painting a strip of 32 x 320 cells costs
-//! well under a millisecond.
+//! changed or removed repaints its own rectangle, or only the part of it a rebuild changed
+//! ([`GrassEdit`]) or a path wore ([`GrassWear`]'s rectangle). Painting a strip of 32 x 320
+//! cells costs well under a millisecond.
 
 use engine_core::math::{DVec2, DVec3, IVec2};
 use engine_core::prelude::*;
 use engine_render::{GrassField, GrassStyle, GrassWear};
 use engine_world::{CoverCell, CoverKind, FocusPoints, GroundCover};
 
-use crate::grass::FloorLayer;
+use crate::grass::{FloorLayer, GrassEdit};
 use crate::meadow::GrassKind;
 
 /// Width of the grid, meters: past grass's 150 m reach, so terrain can shade the meadow where
@@ -79,6 +80,7 @@ fn meadow_kind(i: u8) -> Option<GrassKind> {
 }
 
 /// One field as the painter reads it: its maps and where it lies.
+#[derive(Clone, Copy)]
 struct FieldView<'a> {
     field: &'a GrassField,
     wear: Option<&'a GrassWear>,
@@ -236,6 +238,41 @@ impl<'a> FieldView<'a> {
     }
 }
 
+/// World X/Z bounds of the field-local rectangle `[lo, hi]` (meters from the field's center
+/// along its x and z).
+fn world_box(at: &GlobalTransform, lo: DVec2, hi: DVec2) -> (DVec2, DVec2) {
+    let (mut min, mut max) = (DVec2::splat(f64::INFINITY), DVec2::splat(f64::NEG_INFINITY));
+    for (x, z) in [(lo.x, lo.y), (hi.x, lo.y), (lo.x, hi.y), (hi.x, hi.y)] {
+        let c = at.0.transform_point3(DVec3::new(x, 0.0, z));
+        min = min.min(DVec2::new(c.x, c.z));
+        max = max.max(DVec2::new(c.x, c.z));
+    }
+    (min, max)
+}
+
+/// The field-local rectangle of map points `[x0, z0, x1, z1)`, a point's spacing wider all
+/// round (bilinear reads reach the neighbours).
+fn points_box(field: &GrassField, p: [u32; 4]) -> (DVec2, DVec2) {
+    let [rx, rz] = field.resolution.map(|r| r.max(2));
+    let size = DVec2::new(field.size[0] as f64, field.size[1] as f64);
+    let step = size / DVec2::new((rx - 1) as f64, (rz - 1) as f64);
+    let lo = DVec2::new(p[0] as f64 - 1.0, p[1] as f64 - 1.0) * step - size * 0.5;
+    let hi = DVec2::new(p[2] as f64, p[3] as f64) * step - size * 0.5;
+    (lo, hi)
+}
+
+/// The field-local rectangle a wear map covers.
+fn wear_box(field: &GrassField, w: &GrassWear) -> (DVec2, DVec2) {
+    let half = DVec2::new(field.size[0] as f64, field.size[1] as f64) * 0.5;
+    let lo = DVec2::new(w.origin[0] as f64, w.origin[1] as f64) - half;
+    let span = DVec2::new(
+        w.resolution[0].saturating_sub(1) as f64,
+        w.resolution[1].saturating_sub(1) as f64,
+    ) * w.cell as f64;
+    let pad = DVec2::splat(w.cell as f64);
+    (lo - pad, lo + span + pad)
+}
+
 /// The cover of one cell from four samples a quarter cell in from its corners: the kind most
 /// of the ground has, the next most mixed in, and the averages.
 fn paint_cell(fields: &[FieldView<'_>], center: DVec2, y: f64, cell: f64) -> CoverCell {
@@ -305,6 +342,11 @@ fn paint_rect(cover: &mut GroundCover, fields: &[FieldView<'_>], y: f64, min: IV
     }
 }
 
+/// World X/Z of cell corner `c`.
+fn origin_of(cover: &GroundCover, c: IVec2, cell: f64) -> DVec2 {
+    cover.grid.origin + c.as_dvec2() * cell
+}
+
 /// The grid's cells covering world X/Z `[min, max]`.
 fn cells_of(cover: &GroundCover, min: DVec2, max: DVec2) -> (IVec2, IVec2) {
     let g = &cover.grid;
@@ -320,19 +362,31 @@ fn cells_of(cover: &GroundCover, min: DVec2, max: DVec2) -> (IVec2, IVec2) {
 }
 
 /// Cells painted per frame at most: a 320 m grid fills in about 25 frames and a 32 m step's
-/// strips in three to five, at about half a millisecond a frame.
+/// strips in three to five, at about a millisecond a frame in the showcase (VM profiles,
+/// 2026-11-05). Painting runs only on those frames: a field's rebuild repaints just the tiles
+/// it changed, and a still forest none.
 pub const CELLS_PER_FRAME: usize = 4096;
+
+struct PaintedField {
+    entity: Entity,
+    min: DVec2,
+    max: DVec2,
+    wear: Option<(DVec2, DVec2)>,
+}
 
 /// What the painter remembers between frames.
 #[derive(Resource)]
 pub struct CoverPainted {
-    /// Field rectangles painted last time (world X/Z), to repaint where a removed or moved
-    /// field was.
-    fields: Vec<(Entity, DVec2, DVec2)>,
+    /// Fields painted last time: their rectangles (world X/Z), to repaint where a removed or
+    /// moved field was, and their wear maps' (field-local), to repaint where a path was.
+    fields: Vec<PaintedField>,
     /// Rectangles still to paint (world X/Z, so they stay put when the grid moves).
     pending: std::collections::VecDeque<(DVec2, DVec2)>,
     /// Cells painted per frame at most.
     pub budget: usize,
+    /// Cells painted since the start (a diagnostic: it should stand still while nothing
+    /// changes).
+    pub cells_painted: u64,
 }
 
 impl Default for CoverPainted {
@@ -341,6 +395,7 @@ impl Default for CoverPainted {
             fields: Vec::new(),
             pending: Default::default(),
             budget: CELLS_PER_FRAME,
+            cells_painted: 0,
         }
     }
 }
@@ -361,6 +416,7 @@ type CoverFields<'w, 's> = Query<
         Ref<'static, GlobalTransform>,
         Option<Ref<'static, GrassWear>>,
         Option<&'static FloorLayer>,
+        Option<Ref<'static, GrassEdit>>,
     ),
 >;
 
@@ -375,7 +431,7 @@ pub fn paint_ground_cover(
     let here = DVec2::new(at.x, at.z);
     let views: Vec<FieldView<'_>> = fields
         .iter()
-        .map(|(_, f, t, w, l)| {
+        .map(|(_, f, t, w, l, _)| {
             FieldView::new(
                 f.into_inner(),
                 t.into_inner(),
@@ -415,22 +471,53 @@ pub fn paint_ground_cover(
             dirty.push((IVec2::ZERO, IVec2::new(w, (-dy).min(h))));
         }
     }
-    // Fields that came, changed or moved repaint where they are now and where they were.
+    // Fields that came or moved repaint where they are now and where they were; a field a
+    // rebuild changed repaints what it changed, and a wear map where it was and is.
     let mut now = Vec::with_capacity(views.len());
-    for ((e, f, t, w, _), v) in fields.iter().zip(&views) {
-        now.push((e, v.min, v.max));
-        let before = painted.fields.iter().find(|(pe, _, _)| *pe == e);
-        let changed = f.is_changed() || t.is_changed() || w.is_some_and(|w| w.is_changed());
-        if (changed || before.is_none()) && !whole {
+    for ((entity, f, t, w, _, edit), v) in fields.iter().zip(&views) {
+        let wear = w.as_ref().map(|w| wear_box(&f, w));
+        now.push(PaintedField {
+            entity,
+            min: v.min,
+            max: v.max,
+            wear,
+        });
+        if whole {
+            continue;
+        }
+        let before = painted.fields.iter().find(|p| p.entity == entity);
+        let moved = before.is_none_or(|b| (b.min, b.max) != (v.min, v.max));
+        if moved || t.is_changed() {
             dirty.push(cells_of(&cover, v.min, v.max));
-            if let Some(&(_, a, b)) = before.filter(|(_, a, b)| (*a, *b) != (v.min, v.max)) {
+            if let Some(b) = before.filter(|_| moved) {
+                dirty.push(cells_of(&cover, b.min, b.max));
+            }
+            continue;
+        }
+        if f.is_changed() {
+            // Only where the rebuild that changed it says, when it was the last to.
+            match edit.filter(|e| e.last_changed() == f.last_changed() && !e.all) {
+                Some(e) => {
+                    for &p in &e.points {
+                        let (lo, hi) = points_box(&f, p);
+                        let (a, b) = world_box(&t, lo, hi);
+                        dirty.push(cells_of(&cover, a, b));
+                    }
+                }
+                None => dirty.push(cells_of(&cover, v.min, v.max)),
+            }
+        }
+        let was = before.and_then(|b| b.wear);
+        if w.as_ref().is_some_and(|w| w.is_changed()) || was != wear {
+            for (lo, hi) in [was, wear].into_iter().flatten() {
+                let (a, b) = world_box(&t, lo, hi);
                 dirty.push(cells_of(&cover, a, b));
             }
         }
     }
-    for &(e, a, b) in &painted.fields {
-        if !whole && !now.iter().any(|(ne, _, _)| *ne == e) {
-            dirty.push(cells_of(&cover, a, b));
+    for p in &painted.fields {
+        if !whole && !now.iter().any(|n| n.entity == p.entity) {
+            dirty.push(cells_of(&cover, p.min, p.max));
         }
     }
     painted.fields = now;
@@ -439,12 +526,16 @@ pub fn paint_ground_cover(
         if min.x < max.x && min.y < max.y {
             let a = origin + min.as_dvec2() * cell;
             let b = origin + max.as_dvec2() * cell;
-            painted.pending.push_back((a, b));
+            // Layers of one region share their rectangle: paint it once.
+            if !painted.pending.contains(&(a, b)) {
+                painted.pending.push_back((a, b));
+            }
         }
     }
     // Paint what's waiting, nearest the focus first being the strips just come in, up to the
     // budget; a rectangle too big for what's left is painted a few rows at a time.
     let mut left = painted.budget.max(1);
+    let mut near: Vec<FieldView<'_>> = Vec::with_capacity(views.len());
     while left > 0 {
         let Some((a, b)) = painted.pending.pop_front() else {
             break;
@@ -461,8 +552,17 @@ pub fn paint_ground_cover(
         }
         let rows = (left / w).max(1).min(h);
         let cut = IVec2::new(max.x, min.y + rows as i32);
-        paint_rect(&mut cover, &views, at.y, min, cut);
+        // Only the fields reaching the rectangle (every cell samples each one it's given).
+        let (lo, hi) = (origin_of(&cover, min, cell), origin_of(&cover, cut, cell));
+        near.clear();
+        near.extend(
+            views.iter().filter(|v| {
+                v.max.x >= lo.x && v.min.x <= hi.x && v.max.y >= lo.y && v.min.y <= hi.y
+            }),
+        );
+        paint_rect(&mut cover, &near, at.y, min, cut);
         left = left.saturating_sub(rows * w);
+        painted.cells_painted += (rows * w) as u64;
         if rows < h {
             let origin = cover.grid.origin;
             let rest = origin + DVec2::new(min.x as f64, cut.y as f64) * cell;
@@ -587,6 +687,60 @@ mod tests {
         );
     }
 
+    /// A rebuild that changed a few tiles repaints those (and a margin), not the whole field;
+    /// a path worn away repaints where it was.
+    #[test]
+    fn edits_and_wear_repaint_only_where_they_were() {
+        let mut app = app();
+        let (t, g, f) = meadow_field(DVec3::ZERO, 60.0);
+        let wear = GrassWear {
+            origin: [16.0, 0.0],
+            cell: 0.5,
+            resolution: [9, 9],
+            wear: vec![1.0; 81],
+        };
+        let e = app
+            .world
+            .spawn((t, g, f, wear, FloorLayer::Grass, GrassEdit::default()))
+            .id();
+        settle(&mut app);
+        let painted = |app: &App| app.world.resource::<CoverPainted>().cells_painted;
+        let at = DVec3::new(-20.0, 0.0, -20.0);
+        let was = app.world.resource::<GroundCover>().cell(at).unwrap();
+        assert!(was.density > 0.5, "{was:?}");
+        // Bare around local point (10, 10): map points 8..12 along each side.
+        let before = painted(&app);
+        {
+            let mut field = app.world.get_mut::<GrassField>(e).unwrap();
+            let [rx, _] = field.resolution;
+            for z in 8..12 {
+                for x in 8..12 {
+                    field.density[(z * rx + x) as usize] = 0.0;
+                }
+            }
+        }
+        {
+            let mut edit = app.world.get_mut::<GrassEdit>(e).unwrap();
+            edit.all = false;
+            edit.points = vec![[8, 8, 12, 12]];
+        }
+        settle(&mut app);
+        let now = app.world.resource::<GroundCover>().cell(at).unwrap();
+        assert!(now.density < 0.1, "{now:?}");
+        let tile = painted(&app) - before;
+        assert!((16..=64).contains(&tile), "{tile} cells for a 4 m tile");
+        // The worn patch grows over again: only where it was is painted.
+        let before = painted(&app);
+        app.world.entity_mut(e).remove::<GrassWear>();
+        settle(&mut app);
+        let worn = painted(&app) - before;
+        assert!((16..=64).contains(&worn), "{worn} cells for a 4 m patch");
+        // Nothing changed: nothing painted.
+        let before = painted(&app);
+        app.update_n(5);
+        assert_eq!(painted(&app), before);
+    }
+
     #[test]
     fn a_worn_path_is_turf_then_bare() {
         let mut app = app();
@@ -648,6 +802,20 @@ mod bench {
                 crate::grass::FloorLayer::Grass,
             ));
         }
+        // A forest's worth of floor layers: 36 regions of 40 m, four layers each.
+        for i in 0..36 {
+            for layer in 0..4 {
+                let field = GrassField::flat(40.0, 40.0)
+                    .sample([41, 41], |_, _| (0.0, 0.3 + 0.1 * layer as f32, 0.2))
+                    .with_style(style);
+                let t = Transform::from_xyz(
+                    (i % 6) as f64 * 45.0 - 120.0,
+                    0.0,
+                    (i / 6) as f64 * 45.0 - 120.0,
+                );
+                app.world.spawn((t, GlobalTransform::from(t), field));
+            }
+        }
         let started = std::time::Instant::now();
         app.update();
         let full = started.elapsed();
@@ -656,8 +824,24 @@ mod bench {
         app.update();
         let step = started.elapsed();
         let cells = (COVER_SIZE_M / COVER_CELL_M).powi(2);
+        // At the frame budget: the whole grid again, a budget of cells a frame.
+        app.world.resource_mut::<CoverPainted>().budget = CELLS_PER_FRAME;
+        app.world.resource_mut::<FocusPoints>().points = vec![DVec3::new(4000.0, 0.0, 0.0)];
+        app.update();
+        app.world.resource_mut::<FocusPoints>().points = vec![DVec3::ZERO];
+        let started = std::time::Instant::now();
+        let mut frames = 0;
+        loop {
+            app.update();
+            frames += 1;
+            if app.world.resource::<CoverPainted>().is_settled() {
+                break;
+            }
+        }
+        let budget = started.elapsed() / frames;
+        println!("at {CELLS_PER_FRAME} cells a frame: {budget:?} a frame for {frames} frames");
         println!(
-            "ground cover over 3 fields: {cells} cells in {full:?} ({:.0} ns a cell); a 40 m step {step:?}",
+            "ground cover over 147 fields: {cells} cells in {full:?} ({:.0} ns a cell); a 40 m step {step:?}",
             full.as_nanos() as f32 / cells
         );
     }

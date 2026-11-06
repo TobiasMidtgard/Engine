@@ -44,7 +44,8 @@ pub struct RegionState {
     pub stats: RegionStats,
     /// A catch-up under way, one coarse step a frame: steps left and years each.
     pub catch_up: Option<(u32, f32)>,
-    /// The step gathered last fixed tick, running on a worker; written back at the next.
+    /// The step gathered on an earlier fixed tick, running on a worker; written back
+    /// [`EcologySettings::step_write_back_ticks`] ticks after it was gathered.
     step: Option<StepInFlight>,
     /// Due this tick with this many years ([`advance_regions`]); 0 for a catch-up's next step.
     due: Option<f32>,
