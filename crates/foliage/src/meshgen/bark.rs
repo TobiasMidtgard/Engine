@@ -78,18 +78,26 @@ pub enum BarkKind {
     Spruce,
     /// Smooth, slightly glossy grey-brown bark with pale lenticels (hazel and other shrubs).
     Hazel,
+    /// Smooth silver-grey bark that never cracks, mottled, with pale lichen patches, green
+    /// algae and fine creases around the trunk (beech).
+    Beech,
+    /// Smooth, powdery cream- to greenish-grey bark with dark lenticels and black diamond
+    /// scars where lower branches were shed (aspen).
+    Aspen,
     /// Mushroom stems: pale, fibrous, silky.
     Stem,
 }
 
 impl BarkKind {
     /// Every kind.
-    pub const ALL: [BarkKind; 6] = [
+    pub const ALL: [BarkKind; 8] = [
         BarkKind::Oak,
         BarkKind::Birch,
         BarkKind::Pine,
         BarkKind::Spruce,
         BarkKind::Hazel,
+        BarkKind::Beech,
+        BarkKind::Aspen,
         BarkKind::Stem,
     ];
 
@@ -102,6 +110,8 @@ impl BarkKind {
             (_, BarkStyle::Birch) => BarkKind::Birch,
             (_, BarkStyle::Pine | BarkStyle::Scaly) => BarkKind::Pine,
             (_, BarkStyle::Smooth) => BarkKind::Hazel,
+            (_, BarkStyle::Beech) => BarkKind::Beech,
+            (_, BarkStyle::Aspen) => BarkKind::Aspen,
             (PlantForm::Conifer, _) => BarkKind::Spruce,
             (PlantForm::Shrub, _) => BarkKind::Hazel,
             _ => BarkKind::Oak,
@@ -114,7 +124,7 @@ impl BarkKind {
         match self {
             BarkKind::Oak | BarkKind::Pine => [2048, 2048, 512],
             BarkKind::Birch | BarkKind::Spruce => [2048, 1024, 512],
-            BarkKind::Hazel => [1024, 1024, 512],
+            BarkKind::Hazel | BarkKind::Beech | BarkKind::Aspen => [1024, 1024, 512],
             BarkKind::Stem => [512, 512, 256],
         }
     }
@@ -128,6 +138,8 @@ impl BarkKind {
             BarkKind::Pine => srgb(0x8a5a3c),
             BarkKind::Spruce => srgb(0x5b4a3e),
             BarkKind::Hazel => srgb(0x7a6553),
+            BarkKind::Beech => srgb(0x77746c),
+            BarkKind::Aspen => srgb(0x93948a),
             BarkKind::Stem => return None,
         })
     }
@@ -151,7 +163,7 @@ impl BarkKind {
             BarkKind::Pine => 1.0,
             BarkKind::Spruce => 0.9,
             BarkKind::Birch => 0.8,
-            BarkKind::Hazel => 0.7,
+            BarkKind::Hazel | BarkKind::Beech | BarkKind::Aspen => 0.7,
             BarkKind::Stem => 0.6,
         }
     }
@@ -164,7 +176,7 @@ impl BarkKind {
             BarkKind::Oak | BarkKind::Pine => (0.5, 0.03),
             BarkKind::Spruce => (0.4, 0.025),
             BarkKind::Birch => (0.3, 0.025),
-            BarkKind::Hazel => (0.3, 0.015),
+            BarkKind::Hazel | BarkKind::Beech | BarkKind::Aspen => (0.3, 0.015),
             BarkKind::Stem => (0.2, 0.01),
         }
     }
@@ -268,7 +280,8 @@ fn relief(kind: BarkKind) -> Relief {
         BarkKind::Pine => r(0.012, 0.012, 0.5, 0.8),
         BarkKind::Spruce => r(0.006, 0.0035, 0.45, 0.6),
         BarkKind::Birch => r(0.004, 0.0012, 0.3, 0.45),
-        BarkKind::Hazel => r(0.003, 0.0006, 0.2, 0.35),
+        BarkKind::Hazel | BarkKind::Beech => r(0.003, 0.0006, 0.2, 0.35),
+        BarkKind::Aspen => r(0.004, 0.0008, 0.3, 0.4),
         BarkKind::Stem => r(0.003, 0.0006, 0.15, 0.3),
     }
 }
@@ -876,6 +889,8 @@ fn paint_bark(kind: BarkKind, t: &Tile, x: f32, y: f32) -> Texel {
         BarkKind::Pine => pine(t, x, y),
         BarkKind::Spruce => spruce(t, x, y),
         BarkKind::Hazel => hazel(t, x, y),
+        BarkKind::Beech => beech(t, x, y),
+        BarkKind::Aspen => aspen(t, x, y),
         BarkKind::Stem => stem(t, x, y),
     }
 }
@@ -1240,6 +1255,148 @@ fn hazel(t: &Tile, x: f32, y: f32) -> Texel {
     }
 }
 
+/// Beech: thin bark that grows by stretching and never cracks, so it stays smooth and
+/// silver-grey for centuries; mottled lighter and darker, with crustose lichen in pale,
+/// sharp-edged patches, green algae (Desmococcus) in soft ones, fine creases around the
+/// trunk and small dark lenticels (Packham et al. 2012, Biological Flora of the British
+/// Isles: Fagus sylvatica).
+fn beech(t: &Tile, x: f32, y: f32) -> Texel {
+    let s = t.seed;
+    let (u, v) = (x / t.wm, y / t.hm);
+    let low = fbm(u, v, 2, 2, 4, 0.55, s + 1);
+    let mut c = srgb3(0x8a8882).lerp(srgb3(0xa4a29a), 0.5 + 0.5 * low);
+    let mottle = smoothstep(0.05, 0.55, fbm(u, v, 4, 5, 4, 0.55, s + 2));
+    c = c.lerp(srgb3(0x6c6b65), mottle * 0.5);
+    let algae = smoothstep(0.3, 0.7, fbm(u, v, 3, 4, 3, 0.5, s + 3));
+    c = c.lerp(srgb3(0x67704e), algae * 0.3);
+    let lichen_n = fbm(u, v, 6, 6, 4, 0.6, s + 4);
+    let lichen = smoothstep(0.4, 0.44, lichen_n);
+    let rim = smoothstep(0.35, 0.4, lichen_n) * (1.0 - lichen);
+    c = c.lerp(srgb3(0xd0cfc6), lichen * 0.8);
+    c *= 1.0 - 0.25 * rim;
+    // "Eyebrows": the dark chevrons a shed branch leaves on beech, arched over its scar.
+    let cells = per_tile((2, 3));
+    let cs = Vec2::new(t.wm / cells.0 as f32, t.hm / cells.1 as f32);
+    let (gx, gy) = ((x / cs.x).floor() as i32, (y / cs.y).floor() as i32);
+    let mut brow: f32 = 0.0;
+    for dy in -1..=1 {
+        for dx in -1..=1 {
+            let (cx, cy) = (gx + dx, gy + dy);
+            let h = hash2(cx.rem_euclid(cells.0), cy.rem_euclid(cells.1), s + 9);
+            if rnd(h, 3) > 0.22 {
+                continue;
+            }
+            let c0 = Vec2::new(
+                (cx as f32 + 0.2 + 0.6 * rnd(h, 1)) * cs.x,
+                (cy as f32 + 0.2 + 0.6 * rnd(h, 2)) * cs.y,
+            );
+            let half = 0.06 + 0.1 * rnd(h, 4);
+            let d = Vec2::new(x, y) - c0;
+            if d.x.abs() > half {
+                continue;
+            }
+            // Image y runs down the trunk: the arms fall away from the peak at c0.
+            let arm = d.y - 0.35 * d.x.abs() * (0.6 + 0.8 * rnd(h, 5));
+            let thick = 0.004 + 0.005 * rnd(h, 6);
+            let fade = 1.0 - smoothstep(0.6 * half, half, d.x.abs());
+            brow = brow.max((1.0 - smoothstep(0.5 * thick, thick, arm.abs())) * fade);
+        }
+    }
+    c = c.lerp(srgb3(0x3a3833), brow * 0.75);
+    // Creases around the trunk: zero lines of noise stretched around it, here and there.
+    let crease_n = tile_noise(u, v, 3, 70, s + 5);
+    let crease = (1.0 - smoothstep(0.0, 0.1, crease_n.abs()))
+        * smoothstep(-0.1, 0.5, fbm(u, v, 2, 3, 2, 0.5, s + 6));
+    c *= 1.0 - 0.18 * crease;
+    let (dot, _, _) = dashes(
+        x,
+        y,
+        t,
+        (20, 40),
+        &|_| 0.35,
+        (0.0008, 0.002),
+        (0.0005, 0.0009),
+        s + 7,
+    );
+    let dot = 1.0 - smoothstep(-0.0002, 0.0002, dot);
+    c = c.lerp(srgb3(0x48443e), dot * 0.6);
+    c *= 0.96 + 0.08 * speckle(u, v, s + 8).clamp(-0.5, 0.5);
+    Texel {
+        h: 0.00008 * low + 0.00015 * lichen - 0.00012 * crease - 0.0001 * dot - 0.0002 * brow,
+        albedo: c,
+        rough: 0.5 + 0.25 * lichen + 0.1 * algae,
+        ao: 1.0,
+    }
+}
+
+/// Aspen: smooth, powdery bark, cream- to greenish-grey (it photosynthesises), with dark
+/// horizontal lenticels and black diamond-shaped scars where lower branches were shed (USDA
+/// FEIS, Populus tremuloides; Worrell 1995 for P. tremula).
+fn aspen(t: &Tile, x: f32, y: f32) -> Texel {
+    let s = t.seed;
+    let (u, v) = (x / t.wm, y / t.hm);
+    let low = fbm(u, v, 2, 2, 4, 0.5, s + 1);
+    let mut c = srgb3(0xa4a893).lerp(srgb3(0xbdbfad), 0.5 + 0.5 * low);
+    let powder = smoothstep(0.2, 0.7, fbm(u, v, 4, 6, 3, 0.5, s + 2));
+    c = c.lerp(srgb3(0xcfcec3), powder * 0.4);
+    let green = smoothstep(0.1, 0.6, fbm(u, v, 3, 3, 3, 0.5, s + 3));
+    c = c.lerp(srgb3(0x939d78), green * 0.35);
+    let (len, _, lid) = dashes(
+        x,
+        y,
+        t,
+        (24, 48),
+        &|_| 0.55,
+        (0.004, 0.016),
+        (0.0012, 0.0026),
+        s + 4,
+    );
+    let lent = 1.0 - smoothstep(-0.0002, 0.0002, len);
+    c = c.lerp(
+        srgb3(0x2c2925).lerp(srgb3(0x4a463f), rnd(lid, 9)),
+        lent * 0.9,
+    );
+    // Branch scars: black diamonds 6-18 cm across, wider than tall, scattered (the "eyes" an
+    // aspen stem is known by).
+    let cells = per_tile((3, 5));
+    let cs = Vec2::new(t.wm / cells.0 as f32, t.hm / cells.1 as f32);
+    let (gx, gy) = ((x / cs.x).floor() as i32, (y / cs.y).floor() as i32);
+    let (mut scar, mut rim): (f32, f32) = (0.0, 0.0);
+    for dy in -1..=1 {
+        for dx in -1..=1 {
+            let (cx, cy) = (gx + dx, gy + dy);
+            let h = hash2(cx.rem_euclid(cells.0), cy.rem_euclid(cells.1), s + 5);
+            if rnd(h, 3) > 0.55 {
+                continue;
+            }
+            let c0 = Vec2::new(
+                (cx as f32 + rnd(h, 1)) * cs.x,
+                (cy as f32 + rnd(h, 2)) * cs.y,
+            );
+            let big = rnd(h, 6);
+            let (hw, hh) = (
+                0.012 + 0.08 * big * rnd(h, 4).max(0.4),
+                0.008 + 0.04 * big * rnd(h, 5).max(0.4),
+            );
+            let d = Vec2::new(x, y) - c0;
+            let wob = 0.12 * fbm(u, v, 30, 30, 2, 0.5, s + 6);
+            let k = d.x.abs() / hw + d.y.abs() / hh + wob;
+            let inside = 1.0 - smoothstep(0.9, 1.0, k);
+            scar = scar.max(inside);
+            // The callus round a scar stands a little proud.
+            rim = rim.max((1.0 - smoothstep(1.0, 1.25, k)) * (1.0 - inside));
+        }
+    }
+    c = c.lerp(srgb3(0x1c1916), scar * 0.95);
+    c *= 0.96 + 0.08 * speckle(u, v, s + 7).clamp(-0.5, 0.5);
+    Texel {
+        h: 0.00008 * low - 0.0002 * lent - 0.0008 * scar + 0.0002 * rim,
+        albedo: c,
+        rough: (0.72 + 0.1 * powder).max(0.88 * scar),
+        ao: 1.0,
+    }
+}
+
 /// Mushroom stems: off-white silky fibrils running along the stem, a few darker flecks.
 fn stem(t: &Tile, x: f32, y: f32) -> Texel {
     let s = t.seed;
@@ -1329,6 +1486,14 @@ fn wood_params(kind: BarkKind) -> WoodParams {
         ),
         BarkKind::Hazel => w(
             16.0, 0xdcc8a4, 0xd2bb94, 0.0, 0.26, 0.15, 0.94, 0x9a6a48, 0x7a6552, 2,
+        ),
+        // Beech: pale pinkish-buff, no distinct heartwood, broad rays (flecks); thin grey bark.
+        BarkKind::Beech => w(
+            40.0, 0xe2c7a6, 0xd9ba96, 0.0, 0.28, 0.45, 0.975, 0x9c6e4c, 0x8a877e, 3,
+        ),
+        // Aspen: creamy white soft wood, faint rings; thin pale bark.
+        BarkKind::Aspen => w(
+            30.0, 0xe8dcc2, 0xdfcfb2, 0.0, 0.2, 0.05, 0.97, 0x9a7a52, 0xa7a99a, 3,
         ),
         BarkKind::Stem => w(
             6.0, 0xe8e2d6, 0xe8e2d6, 0.0, 0.05, 0.0, 0.97, 0xe0dacd, 0xe8e2d6, 0,

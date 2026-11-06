@@ -1,4 +1,5 @@
-//! Bark and wood look-development: close-ups of oak, birch, pine, spruce and hazel trunks, a
+//! Bark and wood look-development: close-ups of oak, birch, pine, spruce, hazel, beech and aspen
+//! trunks, a
 //! fresh stump and a felled log, rendered headless into PNGs.
 //!
 //! ```sh
@@ -6,7 +7,8 @@
 //! cargo run -p engine_foliage --example lookdev_bark --release -- --dump /tmp/lookdev_bark/textures
 //! ```
 //!
-//! `shots` picks shots by name (`oak`, `birch`, `pine`, `spruce`, `hazel`, `stump`, `log`,
+//! `shots` picks shots by name (`oak`, `birch`, `pine`, `spruce`, `hazel`, `beech`, `aspen`,
+//! `stump`, `log`,
 //! `old_logs` for logs that have lain for years, `log_ends` for their butts and broken tops,
 //! `fungi` for bracket fungi on snags, stumps and old logs, `stumps` for stumps fresh,
 //! silvered and rotting, `row`, `close` for arm's-length oak, birch and pine); `--dump` saves
@@ -200,6 +202,8 @@ fn main() {
         ("pine", 24.0, 2),
         ("spruce", 36.0, 1),
         ("hazel", 48.0, 0),
+        ("beech", 60.0, 1),
+        ("aspen", 72.0, 0),
     ];
     for (name, x, v) in row {
         spawn_plant(
@@ -214,6 +218,18 @@ fn main() {
     let felled_at = DVec3::new(0.0, 0.0, -24.0);
     let to_fell = spawn_plant(&mut app.world, "oak", felled_at, 0.9, Some(genes(2))).unwrap();
     app.update();
+    // The species' meshes and bark build on workers: draw nothing until they are in.
+    for _ in 0..2400 {
+        simulate(&mut app, 1);
+        if app
+            .world
+            .resource::<engine_foliage::FoliageLoading>()
+            .is_ready()
+        {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
 
     // Fell the second oak along +X and let it settle; age it until its twigs have rotted off.
     fell_tree(&mut app.world, to_fell, Vec3::X);
@@ -336,6 +352,24 @@ fn main() {
             "05_hazel",
             trunk_eye(48.0, 2.4, 1.1),
             DVec3::new(48.0, 0.8, 0.0),
+        );
+    }
+    if want("beech") {
+        shot(
+            &mut app,
+            &out,
+            "06_beech",
+            trunk_eye(60.0, 2.4, 1.4),
+            DVec3::new(60.0, 1.2, 0.0),
+        );
+    }
+    if want("aspen") {
+        shot(
+            &mut app,
+            &out,
+            "07_aspen",
+            trunk_eye(72.0, 2.2, 1.3),
+            DVec3::new(72.0, 1.1, 0.0),
         );
     }
     if want("stump") {

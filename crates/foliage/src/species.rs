@@ -198,6 +198,12 @@ pub enum BarkStyle {
     Smooth,
     /// Scaly plates, reddish-brown where they flake, the same color all the way up (larch).
     Scaly,
+    /// Smooth silver-grey, mottled with lichen and algae ([`Smooth`](Self::Smooth) with a
+    /// beech's own texture).
+    Beech,
+    /// Smooth pale cream- to greenish-grey with black diamond branch scars, rough and dark at
+    /// the foot of old stems.
+    Aspen,
 }
 
 /// The shape knobs of the mesh generator (per species; each plant also varies by its genes and
@@ -1124,7 +1130,7 @@ fn stand_trees() -> Vec<PlantSpecies> {
                 leaf_size_m: 0.9,
                 leaf_density: 0.9,
                 leaf: LeafStyle::Round,
-                bark: BarkStyle::Smooth,
+                bark: BarkStyle::Aspen,
             },
             fuel_kg: 280.0,
             toughness: 70.0,
@@ -1269,7 +1275,7 @@ fn stand_trees() -> Vec<PlantSpecies> {
                 leaf_size_m: 1.35,
                 leaf_density: 1.0,
                 leaf: LeafStyle::Oval,
-                bark: BarkStyle::Smooth,
+                bark: BarkStyle::Beech,
             },
             fuel_kg: 950.0,
             toughness: 150.0,

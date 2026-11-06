@@ -1469,11 +1469,18 @@ fn bark_color(sp: &PlantSpecies, y: f32, h: f32, ring: usize, around: f32, seed:
             let moss = Vec3::new(0.06, 0.09, 0.025);
             base.lerp(moss, (1.0 - (y / 0.9).min(1.0)).powi(2) * 0.6) * (0.8 + 0.3 * n)
         }
-        BarkStyle::Smooth => {
+        BarkStyle::Smooth | BarkStyle::Beech => {
             // Thin bark barely changes up the stem; green algae climb a little way from the
             // foot.
             let algae = Vec3::new(0.07, 0.09, 0.04);
             base.lerp(algae, (1.0 - (y / 1.4).min(1.0)).powi(2) * 0.45) * (0.9 + 0.15 * n)
+        }
+        BarkStyle::Aspen => {
+            // Old aspens turn dark grey and furrowed at the foot, a meter or two up.
+            let dark = Vec3::new(0.06, 0.055, 0.05);
+            let reach = (h / 16.0).clamp(0.15, 1.0) * (2.0 + 1.2 * n);
+            let foot = 1.0 - smoothstep(0.3 * reach, reach, y);
+            base.lerp(dark, foot * 0.9) * (0.92 + 0.12 * n)
         }
         BarkStyle::Scaly => {
             // Grayer and darker plates at the foot, the reddish scales above.
@@ -1495,7 +1502,8 @@ fn bark_weathering(style: BarkStyle, y: f32, around: f32, seed: u64) -> Vec3 {
         BarkStyle::Pine => (0.4, 0.3, 0.05),
         BarkStyle::Birch => (0.3, 0.15, 0.0),
         // Beech and rowan bark carries algae and crustose lichen in big patches.
-        BarkStyle::Smooth => (0.55, 0.35, 0.06),
+        BarkStyle::Smooth | BarkStyle::Beech => (0.55, 0.35, 0.06),
+        BarkStyle::Aspen => (0.3, 0.2, 0.04),
         BarkStyle::Scaly => (0.35, 0.25, 0.04),
     };
     let patch = 0.65 * bark::periodic_noise(around * 3.0, y * 0.8, 3, 1 << 12, seed ^ 0x1c4e)
