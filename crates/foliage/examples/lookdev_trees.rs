@@ -23,7 +23,7 @@ use engine_foliage::{
     EcologySettings, FoliagePlugin, Genes, PlantLibrary, SceneryTree, spawn_plant,
 };
 use engine_render::prelude::*;
-use engine_render::{Exposure, Screenshots};
+use engine_render::{Exposure, GrassField, GrassStyle, Screenshots};
 use engine_world::WeatherState;
 
 const STEP: f64 = 1.0 / 30.0;
@@ -40,6 +40,21 @@ const STAND_LINEUP: [(&str, f64); 8] = [
     ("juniper", 34.0),
 ];
 const STAND_LINEUP_Z: f64 = 200.0;
+
+/// A grass field `size` meters across in patches: thicker and fresher in hollows, thinner
+/// and drier on rises (as lookdev_grass's).
+fn grass(style: GrassStyle, size: f32) -> GrassField {
+    let points = size as u32 + 1;
+    GrassField::flat(size, size)
+        .sample([points, points], |x, z| {
+            let n =
+                engine_core::math::noise::fbm2(x as f64 * 0.045, z as f64 * 0.045, 11, 3, 2.0, 0.5);
+            let density = (0.75 + 0.35 * n).clamp(0.15, 1.0);
+            let dryness = (style.dryness + 0.25 * (-n)).clamp(0.0, 1.0);
+            (0.0, density, dryness)
+        })
+        .with_style(style)
+}
 
 /// Point the sun so it shines along `-to_sun` (`to_sun` points from the ground to the sun).
 fn set_sun(world: &mut World, to_sun: Vec3) {
@@ -324,6 +339,18 @@ fn main() {
                 StandardMaterial::hex(0x9c8758).with_roughness(0.95),
             ),
         ));
+        // Dry-season tussock grass, tawny, round the trees.
+        app.world.spawn((
+            Transform::from_translation(savanna),
+            grass(
+                GrassStyle {
+                    draw_distance: 150.0,
+                    shadow_distance: 22.0,
+                    ..GrassStyle::savanna()
+                },
+                220.0,
+            ),
+        ));
         for (k, (dx, dz)) in [(0.0, 0.0), (-26.0, -34.0), (31.0, -58.0), (-70.0, -95.0)]
             .into_iter()
             .enumerate()
@@ -355,6 +382,17 @@ fn main() {
                 },
                 StandardMaterial::hex(0x7d7f45).with_roughness(0.95),
             ),
+        ));
+        // Tallgrass prairie in late summer: tall, going gold.
+        let mut prairie_grass = GrassStyle::savanna();
+        prairie_grass.height = 1.0;
+        prairie_grass.dryness = 0.35;
+        prairie_grass.lush_color = [0.12, 0.15, 0.05];
+        prairie_grass.draw_distance = 150.0;
+        prairie_grass.shadow_distance = 22.0;
+        app.world.spawn((
+            Transform::from_translation(prairie),
+            grass(prairie_grass, 220.0),
         ));
         for (k, (dx, dz)) in [(0.0, 0.0), (-48.0, -40.0), (52.0, -75.0), (-15.0, -130.0)]
             .into_iter()
