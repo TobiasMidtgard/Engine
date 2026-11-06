@@ -174,7 +174,10 @@ fn main() {
                 "explosion.",
             ]
             .iter()
-            .any(|p| name.starts_with(p));
+            .any(|p| name.starts_with(p))
+                || ["spell.raise.", "spell.ash.", "spell.bones."]
+                    .iter()
+                    .any(|p| name.starts_with(p));
             let pos = if grounded {
                 DVec3::ZERO
             } else {
