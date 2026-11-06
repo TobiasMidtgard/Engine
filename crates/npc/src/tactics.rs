@@ -233,6 +233,7 @@ pub fn choose_position(
         }
     }
     // High ground near the enemy.
+    let _high_span = tracing::info_span!("choose position: high ground").entered();
     if w.height > 0.0 {
         let step = 2.0f64;
         let r = (q.ideal_range as f64 + 6.0).min(28.0);
@@ -261,11 +262,13 @@ pub fn choose_position(
         }
         let _ = found;
     }
+    drop(_high_span);
 
     // The ground under every spot, worked out at once (snapping each below would build its
     // chunk alone, one after another), with the snap's reach around it. Where we stand and
     // where we're going always; of ground nobody has sampled yet only a chunk or two a look,
     // the rest is sampled off the main thread and its spots weighed on a later look.
+    let ground_span = tracing::info_span!("choose position: ground").entered();
     ctx.nav.ensure_around(
         raw.iter()
             .filter(|r| matches!(r.1, "hold" | "keep"))
@@ -274,7 +277,13 @@ pub fn choose_position(
     );
     ctx.nav
         .ensure_around_within(raw.iter().map(|r| r.0), 1.5, COLD_CHUNKS_PER_LOOK);
-    let mut spots: Vec<Spot> = Vec::with_capacity(raw.len());
+    drop(ground_span);
+    // Snap every spot onto the walkable surface (the nav grid, so one after another), then
+    // weigh them side by side on the leaf pool: each spot's sight lines are a physics ray and
+    // a terrain walk, two to five of them (a look took 14 ms at the fortress on the VM).
+    let snap_span = tracing::info_span!("choose position: snap").entered();
+    let mut snapped: Vec<(DVec3, &'static str, Option<CoverHeight>)> =
+        Vec::with_capacity(raw.len());
     let target_eye = q.target_pos + DVec3::Y * 1.6;
     let target_chest = q.target_pos + DVec3::Y * 1.2;
     let ignore = [q.me, q.target];
@@ -292,6 +301,12 @@ pub fn choose_position(
         } else {
             continue;
         };
+        snapped.push((p, reason, cover_height));
+    }
+    drop(snap_span);
+    let _score_span = tracing::info_span!("choose position: score").entered();
+    let (sight, heat) = (&ctx.sight, ctx.heat);
+    let weigh = |p: DVec3, reason: &'static str, cover_height: Option<CoverHeight>| -> Spot {
         let mut s = 0.0f32;
         let flat = |a: DVec3, b: DVec3| DVec2::new(a.x - b.x, a.z - b.z).length() as f32;
         let d = flat(p, q.target_pos);
@@ -303,8 +318,8 @@ pub fn choose_position(
         let crouch = p + DVec3::Y * 0.95;
         let stand = p + DVec3::Y * 1.5;
         // Solid cover stops bullets; thick smoke only hides you (worth a bit less).
-        let solid = !ctx.sight.clear(target_eye, crouch, &ignore);
-        let concealed = !solid && ctx.sight.haze(target_eye, crouch) < SMOKE_HIDES;
+        let solid = !sight.clear(target_eye, crouch, &ignore);
+        let concealed = !solid && sight.haze(target_eye, crouch) < SMOKE_HIDES;
         if solid {
             s += w.cover;
         } else if concealed {
@@ -312,7 +327,7 @@ pub fn choose_position(
         }
         let covered = solid || concealed;
         if w.can_shoot > 0.0 {
-            let mut shoot = ctx.sight.visibility(stand, target_chest, &ignore) > SMOKE_HIDES;
+            let mut shoot = sight.visibility(stand, target_chest, &ignore) > SMOKE_HIDES;
             if !shoot && reason == "cover" {
                 // Lean out around a tall edge.
                 let side = Vec3::new(
@@ -322,7 +337,7 @@ pub fn choose_position(
                 )
                 .normalize_or_zero();
                 for sgn in [-1.0f32, 1.0] {
-                    if ctx.sight.visibility(
+                    if sight.visibility(
                         stand + (side * 0.8 * sgn).as_dvec3(),
                         target_chest,
                         &ignore,
@@ -339,7 +354,7 @@ pub fn choose_position(
         }
         if w.exposure > 0.0 {
             for &t in &q.other_threats {
-                if ctx.sight.visibility(t + DVec3::Y * 1.6, crouch, &ignore) > SMOKE_HIDES {
+                if sight.visibility(t + DVec3::Y * 1.6, crouch, &ignore) > SMOKE_HIDES {
                     s -= w.exposure;
                 }
             }
@@ -385,7 +400,7 @@ pub fn choose_position(
         if w.regroup > 0.0 && nearest_ally.is_finite() {
             s += w.regroup * (1.0 - (nearest_ally / 15.0).min(1.0));
         }
-        let heat = ctx.heat.sample(p + DVec3::Y * 0.5);
+        let heat = heat.sample(p + DVec3::Y * 0.5);
         if heat > 25.0 {
             s -= w.hazard * 3.0 * (heat / 100.0).min(2.0);
         }
@@ -399,17 +414,28 @@ pub fn choose_position(
         {
             s += w.stay;
         }
-        spots.push(Spot {
+        Spot {
             position: p,
             score: s,
             reason,
             covered,
             low_cover,
-        });
-    }
+        }
+    };
+    let mut spots: Vec<Option<Spot>> = vec![None; snapped.len()];
+    let per = snapped.len().div_ceil(16).max(1);
+    engine_core::tasks::par_chunks_mut(&mut spots, per, |piece, chunk| {
+        for (k, spot) in chunk.iter_mut().enumerate() {
+            let (p, reason, cover_height) = snapped[piece * per + k];
+            *spot = Some(weigh(p, reason, cover_height));
+        }
+    });
+    let mut spots: Vec<Spot> = spots.into_iter().flatten().collect();
+    drop(_score_span);
     spots.sort_by(|a, b| b.score.total_cmp(&a.score));
     scored.extend(spots.iter().take(6).copied());
     // Take the best one we can actually walk to.
+    let _paths_span = tracing::info_span!("choose position: paths").entered();
     for spot in spots.iter().take(4) {
         if spot.position.distance(q.from) < 0.6 {
             path.clear();
