@@ -264,6 +264,9 @@ pub fn beam_style(look: &str, color: [f32; 3]) -> (RibbonStyle, [f32; 3]) {
     match look {
         "storm" | "tempest" | "plasma" | "aether" | "blood_lightning" | "dark_thunder"
         | "acid_storm" | "thunderclap" => (RibbonStyle::Lightning, color),
+        // A tether's crackle: magic draws the rope or chain itself; this is the energy
+        // crawling along it (a thin, faint, flickering lightning ribbon).
+        "tether" | "chain" => (RibbonStyle::Lightning, color),
         "shadow" | "blood" | "blight" | "plague" | "nightfeed" | "wither" | "doom" | "steam" => {
             (RibbonStyle::Smoke, color)
         }
@@ -321,6 +324,13 @@ pub fn play_spell_cues(
                 scale,
                 color,
             } => {
+                // A golem's footfall (stone at a small scale) puffs dust along the floor
+                // rather than spraying gravel.
+                if look == "stone" && *scale < 0.6 && library.contains("spell.stone.step") {
+                    let s = (scale / crate::builtin::STEP_CUE_SCALE).clamp(0.4, 2.4);
+                    spawn_effect_at(&mut commands, "spell.stone.step", *at, *normal, s);
+                    continue;
+                }
                 if let Some(name) = looks.resolve(&mut library, look, "impact", *color) {
                     // Magic sends its own Mark cue for ground hits; a hit on a body leaves none.
                     let rotation = Quat::from_rotation_arc(Vec3::Y, normal.normalize_or(Vec3::Y));
@@ -370,8 +380,11 @@ pub fn play_spell_cues(
                     continue;
                 }
                 let (style, color) = beam_style(look, look_color(look));
+                let tether = matches!(look.as_str(), "tether" | "chain");
                 let emissive = if style == RibbonStyle::Smoke {
                     2000.0
+                } else if tether {
+                    25_000.0
                 } else {
                     80_000.0
                 };
@@ -379,7 +392,11 @@ pub fn play_spell_cues(
                     Transform::from_translation(*from),
                     Beam {
                         target: *to,
-                        width: width_m.max(0.01),
+                        width: if tether {
+                            width_m.clamp(0.01, 0.05)
+                        } else {
+                            width_m.max(0.01)
+                        },
                         color,
                         emissive,
                         style,
@@ -613,6 +630,35 @@ mod tests {
         let lib = app.world.resource::<EffectLibrary>();
         let borrowed = lib.get("spell.hellfire.field").expect("defined once");
         assert!(borrowed.description.contains("spell.blight.field"));
+    }
+
+    #[test]
+    fn a_golem_footfall_puffs_dust_and_a_slam_still_shatters() {
+        let mut app = app();
+        for scale in [0.25, 1.7] {
+            app.world.write_message(SpellCue::Impact {
+                at: DVec3::ZERO,
+                normal: Vec3::Y,
+                look: "stone".into(),
+                scale,
+                color: [0.42, 0.38, 0.33],
+            });
+        }
+        app.update();
+        let mut fx: Vec<(String, f32)> = app
+            .world
+            .query::<&ParticleEffect>()
+            .iter(&app.world)
+            .map(|f| (f.effect.clone(), f.scale))
+            .collect();
+        fx.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(
+            fx,
+            vec![
+                ("spell.stone.impact".to_string(), 1.7),
+                ("spell.stone.step".to_string(), 1.0)
+            ]
+        );
     }
 
     #[test]

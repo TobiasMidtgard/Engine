@@ -16,6 +16,8 @@ use crate::trail::{RibbonStyle, Trail};
 
 mod casting;
 pub use casting::FIRE_JET_REACH;
+pub use stone::STEP_CUE_SCALE;
+mod auras;
 mod elements;
 mod stone;
 mod weaves;
@@ -382,6 +384,7 @@ pub fn all() -> Vec<EffectDesc> {
     v.extend(named);
     v.extend(elements::all());
     v.extend(stone::all());
+    v.extend(auras::all());
     let woven = weaves::all(&v);
     v.extend(woven);
     let cast = casting::all(&v);

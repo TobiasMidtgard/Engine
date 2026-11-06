@@ -11,7 +11,7 @@ const STONE: [f32; 3] = [0.42, 0.38, 0.33];
 const DUST: [f32; 3] = [0.5, 0.46, 0.4];
 
 pub(super) fn all() -> Vec<EffectDesc> {
-    vec![stone_bolt(), stone_impact()]
+    vec![stone_bolt(), stone_impact(), stone_step()]
 }
 
 /// A tumbling fist of rock: a few lumps grinding round each other, shedding grit and a thin
@@ -116,6 +116,47 @@ fn stone_impact() -> EffectDesc {
     }
 }
 
+/// What `spell.stone.step` is designed for: the scale magic sends with a golem's footfall.
+pub const STEP_CUE_SCALE: f32 = 0.25;
+
+/// A heavy stone foot coming down: a ring of dust pushed out flat along the floor, a low puff
+/// that hangs, and a pinch of grit. No spray, no mark.
+fn stone_step() -> EffectDesc {
+    effect(
+        "spell.stone.step",
+        "A heavy stone footfall: a ring of dust pushed out flat along the floor, a low puff \
+         hanging over it and a pinch of grit. Scale 1 is a golem's foot (cue scale 0.25).",
+        Some(0.1),
+        vec![
+            EmitterDesc {
+                shape: EmitShape::Ring {
+                    radius: 0.35,
+                    thickness: 0.1,
+                },
+                offset: [0.0, 0.08, 0.0],
+                velocity: [0.0, 0.15, 0.0],
+                drag: 3.5,
+                lifetime: [0.9, 1.5],
+                sprite: Sprite::Dust,
+                ..dust_puff("ring", 14, DUST, 0.45, [2.0, 3.2], [0.35, 0.5])
+            },
+            EmitterDesc {
+                shape: EmitShape::Disc { radius: 0.3 },
+                offset: [0.0, 0.1, 0.0],
+                velocity: [0.0, 0.25, 0.0],
+                lifetime: [1.2, 2.0],
+                sprite: Sprite::Dust,
+                ..dust_puff("puff", 4, DUST, 0.35, [0.3, 0.8], [0.5, 0.7])
+            },
+            EmitterDesc {
+                shape: EmitShape::Hemisphere { radius: 0.25 },
+                size: [0.02, 0.04],
+                ..chips("grit", 8, STONE, [0.8, 1.8])
+            },
+        ],
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -123,7 +164,7 @@ mod tests {
     #[test]
     fn stone_has_a_bolt_and_an_impact_and_never_glows() {
         let all = all();
-        for name in ["spell.stone.bolt", "spell.stone.impact"] {
+        for name in ["spell.stone.bolt", "spell.stone.impact", "spell.stone.step"] {
             let e = all.iter().find(|e| e.name == name).expect(name);
             assert!(e.light.is_none(), "{name}: stone casts no light");
             assert!(
