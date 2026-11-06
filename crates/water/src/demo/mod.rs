@@ -1043,18 +1043,20 @@ pub fn spawn_demo_with(commands: &mut Commands, origin: DVec3, options: DemoOpti
     let jdir = polar(JETTY_ANGLE, 1.0);
     let jside = Vec2::new(-jdir.y, jdir.x);
     let shore = shore_radius(JETTY_ANGLE);
-    let deck = LAKE_LEVEL + 0.5;
     let jetty_len = JETTY_LEN;
     with_demo_jetty(origin, |jetty| spawn_jetty(commands, jetty));
     let jetty_end = jdir * (shore + 1.0 - jetty_len);
 
-    // A rowboat moored at the end of the jetty.
+    // A rowboat moored at the end of the jetty, its painter on the cleat on its side (the
+    // jetty's -z, which is `jside`). Tied to the middle line inside the deck, the rope pulled
+    // the bow sideways into the deck's edge, 0.27 m deep at worst (Physics, 11-06).
     let row_at = jetty_end + jside * 2.6;
+    let cleat = with_demo_jetty(origin, |j| j.point(f64::from(j.length) - 0.6, -0.82));
     spawn_rowboat(
         commands,
         at(row_at.x, LAKE_LEVEL, row_at.y),
         -JETTY_ANGLE + PI * 0.5,
-        at(jetty_end.x, deck, jetty_end.y),
+        cleat + DVec3::Y * 0.08,
     );
 
     // A motorboat doing laps of a stadium across the middle, clear of the swimming area and
@@ -1485,6 +1487,21 @@ pub fn demo_system(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_rowboat_ties_to_the_cleat_on_its_own_side() {
+        let jdir = Vec2::new(JETTY_ANGLE.cos(), JETTY_ANGLE.sin());
+        let jside = Vec2::new(-jdir.y, jdir.x);
+        let end = jdir * (shore_radius(JETTY_ANGLE) + 1.0 - JETTY_LEN);
+        let boat = end + jside * 2.6;
+        let reach = |across: f64| {
+            let c = with_demo_jetty(DVec3::ZERO, |j| j.point(f64::from(j.length) - 0.6, across));
+            Vec2::new(c.x as f32, c.z as f32).distance(boat)
+        };
+        // The near cleat is within the 2.8 m painter; the far one is across the deck.
+        assert!(reach(-0.82) < 2.0, "near cleat {} m away", reach(-0.82));
+        assert!(reach(0.82) > 3.0, "far cleat {} m away", reach(0.82));
+    }
 
     #[test]
     fn the_tarn_holds_water_and_spills_through_its_outlet() {
