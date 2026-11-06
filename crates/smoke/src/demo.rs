@@ -476,9 +476,15 @@ pub fn run_demos(world: &mut World) {
                 state.started = true;
                 state.rounds = 1;
                 pop_grenades(world, entity);
-                state.warming = demo.warmup_secs.max(0.0);
-                state.since = demo.warmup_secs;
-                warm_up(world, &mut state.warming);
+                if in_play(world) {
+                    // No warm-up on the frame in play: the first round starts from its
+                    // beginning and the smoke builds up as it steps.
+                    state.since = 0.0;
+                } else {
+                    state.warming = demo.warmup_secs.max(0.0);
+                    state.since = demo.warmup_secs;
+                    warm_up(world, &mut state.warming);
+                }
             }
             world.entity_mut(entity).insert(state);
             continue;
@@ -536,7 +542,11 @@ pub fn run_demos(world: &mut World) {
 /// hundred steps of the range's air: about 0.3 s in one frame on a fast PC.
 fn warm_up(world: &mut World, warming: &mut f32) {
     let Some(budget) = world.get_resource::<LoadingBudget>().map(|b| b.budget_ms) else {
-        sim::fast_forward(world, *warming);
+        // In play (the loading screen went before the warm-up was through), what is left is
+        // dropped rather than stepped on the frame.
+        if !in_play(world) {
+            sim::fast_forward(world, *warming);
+        }
         *warming = 0.0;
         return;
     };
@@ -554,6 +564,23 @@ fn warm_up(world: &mut World, warming: &mut f32) {
     if *warming <= 1e-4 {
         *warming = 0.0;
     }
+}
+
+/// Playing, with no loading screen up, in a game that keeps costly work off the frame
+/// (`EngineConfig::off_frame`): a warm-up here fast-forwards every smoke volume on the frame,
+/// and at the fortress the range's 15.5 s took one 9.4 s frame (VM). Headless runs still warm
+/// up at once.
+/// A manual clock (tours, tests) warms up at once too, so a picture taken next shows the
+/// smoke, as fire's `run_ahead` does.
+fn in_play(world: &World) -> bool {
+    let manual = world
+        .get_resource::<Time>()
+        .is_some_and(|t| matches!(t.source(), engine_core::time::TimeSource::Manual { .. }));
+    !manual
+        && world.get_resource::<LoadingBudget>().is_none()
+        && world
+            .get_resource::<engine_core::config::EngineConfig>()
+            .is_some_and(|c| c.off_frame())
 }
 
 /// Clear the smoke and bullet tunnels in the volume around `middle` (the demo's).
@@ -701,6 +728,47 @@ mod tests {
     use crate::sim::{SmokeDomains, SmokeTunnels, SmokeVolume};
     use crate::{SmokePlugin, SmokeSettings};
     use serde_json::json;
+
+    /// In play (a window, no loading screen) the first round starts from its beginning: its
+    /// warm-up would step every smoke volume on one frame (9.4 s at the fortress, VM).
+    #[test]
+    fn in_play_the_range_starts_cold_instead_of_warming_up_on_the_frame() {
+        engine_core::tasks::init_task_pools();
+        let mut app = App::new();
+        app.world
+            .resource_mut::<Time>()
+            .set_source(engine_core::time::TimeSource::Manual {
+                step_secs: 1.0 / 20.0,
+            });
+        app.add_plugins(SmokePlugin);
+        assert!(
+            app.world
+                .resource::<engine_core::config::EngineConfig>()
+                .off_frame()
+        );
+        let origin = DVec3::new(100.0, 0.0, 50.0);
+        {
+            let mut commands = app.world.commands();
+            spawn_demo(&mut commands, origin);
+        }
+        app.world.flush();
+        let mut volumes = app.world.query::<&mut SmokeVolume>();
+        for mut v in volumes.iter_mut(&mut app.world) {
+            v.cell_m = 1.0;
+        }
+        // The volume is made on the manual clock; the demo starts on the real one, as in play.
+        app.update_n(2);
+        let mut q = app.world.query::<&SmokeDemoState>();
+        assert!(!q.single(&app.world).unwrap().started);
+        app.world
+            .resource_mut::<Time>()
+            .set_source(engine_core::time::TimeSource::Realtime);
+        app.update_n(2);
+        let state = *q.single(&app.world).unwrap();
+        assert!(state.started);
+        assert_eq!(state.warming, 0.0);
+        assert!(state.since < 1.0, "{}", state.since);
+    }
 
     #[test]
     fn the_range_fills_with_smoke_that_bullets_cut_and_fans_push() {
