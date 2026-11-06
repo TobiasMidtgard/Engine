@@ -1458,7 +1458,9 @@ fn regional_trees() -> Vec<PlantSpecies> {
         // Umbrella thorn (Vachellia tortilis) of the East African savanna: a short trunk
         // forking into a few leaders under a flat, layered top far wider than the tree is
         // tall, grey-green and see-through with its tiny bipinnate leaves; grey-black
-        // fissured bark (SANBI; 5-20 m, crowns 8-13 m across).
+        // fissured bark (SANBI; 5-20 m, crowns 8-13 m across). Its leaves (pinnae of tiny
+        // leaflets in tufts along the twigs) draw with the larch's soft-needle tufts, the
+        // nearest in texture, until it has an atlas of its own.
         name: "umbrella thorn".into(),
         form: PlantForm::Broadleaf,
         layer: Layer::Canopy,
@@ -1492,7 +1494,7 @@ fn regional_trees() -> Vec<PlantSpecies> {
             gnarl: 0.45,
             leaf_size_m: 1.1,
             leaf_density: 1.6,
-            leaf: LeafStyle::Pinnate,
+            leaf: LeafStyle::SoftNeedles,
             bark: BarkStyle::Scaly,
             forks: 3,
         },
