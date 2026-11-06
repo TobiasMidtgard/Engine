@@ -1534,6 +1534,7 @@ name = "engine_npc"
 version = "0.1.0"
 dependencies = [
  "bevy_ecs",
+ "bevy_platform",
  "engine_assets",
  "engine_core",
  "engine_render",

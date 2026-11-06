@@ -314,7 +314,59 @@ pub struct TacticalWorld {
     /// Ground heights on a [`GROUND_CELL`] grid for the coarse terrain check in line of sight:
     /// a fight asks thousands per step, and a planet's ground is slow to ask. Emptied when
     /// the ground or the frame changes.
-    ground_heights: Mutex<HashMap<(i64, i64, i64), Option<f64>>>,
+    ground_heights: Mutex<GroundHeights>,
+}
+
+/// Ground heights at [`GROUND_CELL`] grid corners, by (x, z, 32 m height band). Hashed with
+/// foldhash: a sight line looks up 4 corners for each of up to 47 points.
+type GroundHeights = bevy_platform::collections::HashMap<(i64, i64, i64), Option<f64>>;
+
+/// The four corner heights of the last grid cell a walk blended in: points along a sight line
+/// are 3 m apart or less and cells 2 m, so neighbours often share a cell.
+struct LastCell {
+    key: (i64, i64, i64),
+    corners: Option<[f64; 4]>,
+}
+
+/// The ground's height at `p` blended from its cell's corners (asked from `ground` once and
+/// remembered in `cache`); `None` when a corner has no ground. See
+/// [`TacticalWorld::cached_ground_height`].
+fn blended_height(
+    cache: &mut GroundHeights,
+    last: &mut Option<LastCell>,
+    ground: &Ground,
+    p: DVec3,
+) -> Option<f64> {
+    let (gx, gz) = (p.x / GROUND_CELL, p.z / GROUND_CELL);
+    let (x0, z0) = (gx.floor(), gz.floor());
+    let (fx, fz) = (gx - x0, gz - z0);
+    let band = (p.y / 32.0).floor() as i64;
+    let key = (x0 as i64, z0 as i64, band);
+    let corners = match last {
+        Some(cell) if cell.key == key => cell.corners,
+        _ => {
+            if cache.len() > 1 << 20 {
+                cache.clear();
+            }
+            let mut corner = |dx: i64, dz: i64| -> Option<f64> {
+                let at = (key.0 + dx, key.1 + dz, band);
+                *cache.entry(at).or_insert_with(|| {
+                    ground.height(DVec3::new(
+                        at.0 as f64 * GROUND_CELL,
+                        band as f64 * 32.0 + 16.0,
+                        at.1 as f64 * GROUND_CELL,
+                    ))
+                })
+            };
+            let corners = (|| Some([corner(0, 0)?, corner(1, 0)?, corner(0, 1)?, corner(1, 1)?]))();
+            *last = Some(LastCell { key, corners });
+            corners
+        }
+    };
+    let [h00, h10, h01, h11] = corners?;
+    let near = h00 + (h10 - h00) * fx;
+    let far = h01 + (h11 - h01) * fx;
+    Some(near + (far - near) * fz)
 }
 
 fn hash_key(x: f64, z: f64) -> (i64, i64) {
@@ -418,30 +470,33 @@ impl TacticalWorld {
     /// blended from the heights at the corners of its [`GROUND_CELL`] grid cell, which are
     /// asked once and remembered. For coarse checks; `None` when a corner has no ground.
     pub fn cached_ground_height(&self, ground: &Ground, p: DVec3) -> Option<f64> {
-        let (gx, gz) = (p.x / GROUND_CELL, p.z / GROUND_CELL);
-        let (x0, z0) = (gx.floor(), gz.floor());
-        let (fx, fz) = (gx - x0, gz - z0);
-        let band = (p.y / 32.0).floor() as i64;
         let Ok(mut cache) = self.ground_heights.lock() else {
             return ground.height(p);
         };
-        if cache.len() > 1 << 20 {
-            cache.clear();
-        }
-        let mut corner = |dx: i64, dz: i64| -> Option<f64> {
-            let key = (x0 as i64 + dx, z0 as i64 + dz, band);
-            *cache.entry(key).or_insert_with(|| {
-                ground.height(DVec3::new(
-                    key.0 as f64 * GROUND_CELL,
-                    band as f64 * 32.0 + 16.0,
-                    key.1 as f64 * GROUND_CELL,
-                ))
-            })
+        blended_height(&mut cache, &mut None, ground, p)
+    }
+
+    /// Does the ground rise above the segment `from`–`to` at any of the `steps - 1` evenly
+    /// spaced points between them ([`Self::cached_ground_height`] at each, 50 m above the
+    /// point, more than 5 cm over it)? The coarse terrain check of a sight line: one lock
+    /// for the whole walk instead of one a point (a cover search weighs a few hundred lines,
+    /// several at once on the leaf pool), and points in the same cell share its corners.
+    pub fn ground_blocks(&self, ground: &Ground, from: DVec3, to: DVec3, steps: usize) -> bool {
+        let lifted = |k: usize| {
+            let p = from.lerp(to, k as f64 / steps as f64);
+            (p, DVec3::new(p.x, p.y + 50.0, p.z))
         };
-        let (h00, h10, h01, h11) = (corner(0, 0)?, corner(1, 0)?, corner(0, 1)?, corner(1, 1)?);
-        let near = h00 + (h10 - h00) * fx;
-        let far = h01 + (h11 - h01) * fx;
-        Some(near + (far - near) * fz)
+        let Ok(mut cache) = self.ground_heights.lock() else {
+            return (1..steps).any(|k| {
+                let (p, up) = lifted(k);
+                ground.height(up).is_some_and(|h| h > p.y + 0.05)
+            });
+        };
+        let mut last = None;
+        (1..steps).any(|k| {
+            let (p, up) = lifted(k);
+            blended_height(&mut cache, &mut last, ground, up).is_some_and(|h| h > p.y + 0.05)
+        })
     }
 
     /// Forget the cached ground heights (the ground changed).
@@ -974,16 +1029,7 @@ impl Sight<'_> {
         // Coarse terrain check.
         if len > 6.0 {
             let steps = ((len / 3.0) as usize).clamp(2, 48);
-            for k in 1..steps {
-                let p = from.lerp(to, k as f64 / steps as f64);
-                if let Some(h) = self
-                    .world
-                    .cached_ground_height(self.ground, DVec3::new(p.x, p.y + 50.0, p.z))
-                    && h > p.y + 0.05
-                {
-                    return false;
-                }
-            }
+            return !self.world.ground_blocks(self.ground, from, to, steps);
         }
         true
     }
