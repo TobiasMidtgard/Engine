@@ -450,18 +450,23 @@ pub fn propagate_transforms_system(
 ) {
     let alpha = fixed.alpha();
     let span = tracing::info_span!("propagate: roots").entered();
-    roots
-        .p0()
-        .par_iter_mut()
-        .for_each(|(entity, t, interp, mut global, kids)| {
+    // Moved roots in up to 16 pieces on the leaf pool (`par_chunks_mut`), not in a par_iter's
+    // compute-pool scope, whose waiting thread runs whole other systems (this system showed
+    // 6 ms worst frames at the fortress for ~1 ms of work, VM).
+    let mut moved_roots = roots.p0();
+    let mut items: Vec<_> = moved_roots.iter_mut().collect();
+    let per = items.len().div_ceil(16).max(1);
+    crate::tasks::par_chunks_mut(&mut items, per, |_, chunk| {
+        for (entity, t, interp, global, kids) in chunk.iter_mut() {
+            let (entity, t, interp, kids) = (*entity, *t, *interp, *kids);
             let local = interp.map_or(*t, |i| i.visual(t, alpha));
             let new = GlobalTransform::from(local);
             // A world transform written with its Transform (as attachments and teleports do)
             // is already right, but its children still have to follow.
             let written = global.is_changed();
-            let moved = *global != new;
+            let moved = **global != new;
             if moved {
-                *global = new;
+                **global = new;
             }
             if (moved || written)
                 && kids.is_some()
@@ -469,7 +474,8 @@ pub fn propagate_transforms_system(
             {
                 changed.push((entity, new));
             }
-        });
+        }
+    });
 
     drop(span);
     let span = tracing::info_span!("propagate: find moved children").entered();
