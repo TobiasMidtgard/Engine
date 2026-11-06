@@ -1357,7 +1357,64 @@ fn zigzag(start: Vec2, dir: Vec2, length: f32, bend: f32, segs: usize, zig: f32)
 }
 
 /// Where the leaves and twigs of a broadleaf spray go (see [`broad_spray`]).
+/// A broadleaf card's spray: a branchlet of two shoots (a leading one and a side one), each a
+/// [`one_spray_layout`] at about 0.6 size. Leaves drawn one spray to a card came out
+/// twice their real size (an oak leaf 17-24 cm, a beech leaf 17-22 cm, against 7-14 and 5-10
+/// cm in the field), which made crowns read as a few big flat blobs; compound leaves (rowan,
+/// ash) are big for real and keep one spray.
 fn broad_spray_layout(kind: LeafKind, rng: &mut Rng) -> (Vec<Blade>, Twigs) {
+    if kind == LeafKind::Pinnate {
+        return one_spray_layout(kind, rng);
+    }
+    let base = Vec2::new(0.5, 0.995);
+    let up = Vec2::NEG_Y;
+    let main = shoot(
+        base,
+        rot(up, rng.range(-0.08, 0.08)),
+        rng.range(0.34, 0.4),
+        rng.range(-0.2, 0.2),
+        4,
+    );
+    let (fork, lead_dir) = along(&main, 1.0);
+    let mut twigs: Twigs = vec![(main.clone(), 0.016)];
+    let mut leaves = Vec::new();
+    // The side shoot first (painted under the leading one), then the leader.
+    let side = if rng.chance(0.5) { 1.0 } else { -1.0 };
+    let sprays = [
+        (
+            along(&main, rng.range(0.5, 0.7)),
+            side * rng.range(0.55, 0.8),
+            0.55,
+        ),
+        (
+            (fork, rot(lead_dir, -side * 0.15)),
+            rng.range(-0.12, 0.12),
+            0.62,
+        ),
+    ];
+    for ((at, d), turn, k) in sprays {
+        let (blades, sub) = one_spray_layout(kind, rng);
+        let dir = rot(d, turn);
+        // `one_spray_layout` grows from `base` toward `up`: turn that onto `dir` at `at`.
+        let a = up.y.atan2(up.x);
+        let b = dir.y.atan2(dir.x);
+        let place = |q: Vec2| at + rot(q - base, b - a) * k;
+        for mut l in blades {
+            l.base = place(l.base);
+            l.dir = rot(l.dir, b - a);
+            l.length *= k;
+            l.width *= k;
+            leaves.push(l);
+        }
+        for (path, w) in sub {
+            twigs.push((path.into_iter().map(place).collect(), w * (0.4 + 0.6 * k)));
+        }
+    }
+    (leaves, twigs)
+}
+
+/// One shoot of a broadleaf spray filling its card: the twig and its leaves.
+fn one_spray_layout(kind: LeafKind, rng: &mut Rng) -> (Vec<Blade>, Twigs) {
     let st = broad_style(kind);
     let base = Vec2::new(0.5, 0.995);
     let up = Vec2::NEG_Y;
