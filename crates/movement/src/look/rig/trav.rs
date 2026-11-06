@@ -15,6 +15,81 @@ use super::{
     v3,
 };
 
+/// A leap about to arrive on an element: what reaches for it, where (character space) and in
+/// how many seconds.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Reach {
+    pub at: Vec3,
+    pub secs_left: f32,
+    /// The hands reach (a bar, a pole, a rock or ice face); else the feet (a perch, a line,
+    /// an awning or hay).
+    pub hands: bool,
+}
+
+/// How far into the reach the body is, 0..1: from about 0.45 s before arrival (research: the
+/// hands lead a catch, the legs reach for a landing).
+pub(crate) fn reach_weight(r: &Reach) -> f32 {
+    1.0 - smooth(0.06, 0.45, r.secs_left)
+}
+
+/// Reaching for what a leap flies to: the arms up and out at the grip (the hands no farther
+/// than the arms reach from the shoulders), the body stretched and the legs trailing; or the
+/// legs out and down at the landing, the arms spread for balance.
+pub(crate) fn reach(pose: &mut Pose, r: &Reach, k: f32) {
+    if k <= 1e-3 {
+        return;
+    }
+    let mut p = *pose;
+    if r.hands {
+        let shoulder = |x: f32| v3(x, 1.45, 0.0);
+        let hand = |x: f32| {
+            let s = shoulder(x);
+            let to = r.at + v3(x * 1.1, 0.0, 0.0) - s;
+            s + to.clamp_length_max(0.6)
+        };
+        p.hand_l = Xf::new(hand(-0.18), left_hand(Vec3::Y, Vec3::NEG_Z));
+        p.curl_l = 0.35;
+        p.sword = sword(hand(0.18), v3(0.3, -0.8, 0.4), Vec3::X);
+        p.elbow = [v3(-0.8, -0.2, 0.4), v3(0.8, -0.2, 0.4)];
+        p.free_r = 0.0;
+        p.grip_l = 0.0;
+        p.follow_l = 0.0;
+        // Stretched toward it, legs trailing a little, looking at it.
+        p.spine = pitch(-0.12) * p.spine;
+        p.chest = pitch(-0.1) * p.chest;
+        p.head = pitch(-0.3);
+        p.ankle = [v3(-0.11, A + 0.1, 0.22), v3(0.12, A + 0.22, 0.3)];
+        p.foot = [pitch(0.6), pitch(0.7)];
+        p.knee = [v3(-0.1, 0.0, -1.0), v3(0.1, 0.0, -1.0)];
+    } else {
+        // The feet reach down for it (no farther than the legs reach from the hips), knees
+        // soft to take the landing.
+        let foot = |x: f32| {
+            let hip = v3(x, 0.92, 0.0);
+            let to = r.at + v3(x, A, 0.0) - hip;
+            hip + to.clamp_length_max(0.82)
+        };
+        p.ankle = [foot(-0.1), foot(0.1) + v3(0.0, 0.06, -0.08)];
+        p.foot = [pitch(0.25); 2];
+        p.knee = [v3(-0.25, 0.0, -1.0), v3(0.25, 0.0, -1.0)];
+        p.spine = pitch(0.12) * p.spine;
+        p.head = pitch(0.25);
+        p.hand_l = Xf::new(v3(-0.62, 1.3, -0.1), left_hand(Vec3::NEG_Y, Vec3::NEG_X));
+        p.curl_l = 0.25;
+        p.sword = sword(
+            v3(0.62, 1.28, -0.1),
+            v3(0.6, -0.5, -0.4),
+            v3(0.0, -1.0, 0.0),
+        );
+        p.elbow = [v3(-0.2, -1.0, 0.2), v3(0.2, -1.0, 0.2)];
+        p.free_r = 0.0;
+        p.grip_l = 0.0;
+        p.follow_l = 0.0;
+    }
+    pose.blend(&p, k, Channels::Body);
+    pose.blend(&p, k, Channels::Arms);
+}
+
 /// What the body does on a traversal element, as the animation sees it (character space).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum TravAnim {
@@ -43,6 +118,9 @@ pub enum TravAnim {
         feet: [Vec3; 2],
         moving: Option<(u8, f32)>,
         ice: bool,
+        /// Where the climber looks: the hold the moving limb heads for, else between the
+        /// hands.
+        goal: Vec3,
     },
     /// Crawling on hands and knees at `speed` m/s.
     Crawl { speed: f32 },
@@ -80,6 +158,10 @@ pub(crate) struct State {
     legs: f32,
     legs_v: f32,
     secs: f32,
+    /// On a face: the pelvis following its target on a critically damped spring (research:
+    /// fluent climbing is a low-jerk hip path; the body pulls up after the hand lands), and
+    /// its velocity; `None` until a face is climbed.
+    pelvis: Option<(Vec3, Vec3)>,
 }
 
 impl State {
@@ -87,8 +169,12 @@ impl State {
         self.secs += dt;
         let Some(t) = t else {
             self.legs *= 1.0 - (6.0 * dt).min(1.0);
+            self.pelvis = None;
             return;
         };
+        if !matches!(t, TravAnim::Face { .. }) {
+            self.pelvis = None;
+        }
         match *t {
             TravAnim::Balance {
                 speed,
@@ -124,6 +210,21 @@ impl State {
                 let _ = swing;
                 self.cycle = (self.cycle + along * dt / 0.5).rem_euclid(1.0);
             }
+            TravAnim::Face {
+                hands,
+                feet,
+                moving,
+                ice,
+                ..
+            } => {
+                let want = face_pelvis(hands, feet, moving, ice);
+                let (mut x, mut v) = self.pelvis.unwrap_or((want, Vec3::ZERO));
+                // ω ≈ 13/s: the pull trails a hand's move by about 0.1 s.
+                let w = 13.0;
+                v += (-(w * w) * (x - want) - 2.0 * w * v) * dt;
+                x += v * dt;
+                self.pelvis = Some((x, v));
+            }
             _ => {}
         }
     }
@@ -147,7 +248,8 @@ pub(crate) fn body(t: &TravAnim, s: &State) -> Pose {
             feet,
             moving,
             ice,
-        } => face(hands, feet, moving, ice),
+            goal,
+        } => face(hands, feet, moving, ice, goal, s),
         TravAnim::Crawl { speed } => crawl(speed, s),
         TravAnim::Roll { t } => roll(t),
         TravAnim::Takedown { t } => takedown(t),
@@ -231,8 +333,8 @@ pub(crate) fn arms(t: &TravAnim, s: &State, body: &Pose, cur: Pose) -> Pose {
                 Some((m, u)) if m == i => (u * PI).sin(),
                 _ => 0.0,
             };
-            let hl = hands[0] + v3(0.0, 0.0, 0.12 * lift(0));
-            let hr = hands[1] + v3(0.0, 0.0, 0.12 * lift(1));
+            let hl = hands[0] + v3(0.0, 0.0, 0.15 * lift(0));
+            let hr = hands[1] + v3(0.0, 0.0, 0.15 * lift(1));
             p.hand_l = Xf::new(
                 hl,
                 if ice {
@@ -266,13 +368,22 @@ pub(crate) fn arms(t: &TravAnim, s: &State, body: &Pose, cur: Pose) -> Pose {
             p.elbow = [v3(-0.4, 0.0, 0.6), v3(0.4, 0.0, 0.6)];
         }
         TravAnim::Roll { t } => {
-            // Tucked: hands to the shins.
-            let k = (t * PI).sin();
-            p.hand_l = Xf::new(v3(-0.18, 0.75, -0.3), Quat::IDENTITY);
-            p.curl_l = 0.8;
-            p.sword = sword(v3(0.18, 0.78, -0.3), v3(0.2, 0.4, 1.0), Vec3::NEG_Y);
+            // The hands plant on the ground ahead first (taking the fall), then tuck to the
+            // shins as the body goes over.
+            let plant = 1.0 - smooth(0.12, 0.32, t);
+            let ground = |x: f32| v3(x, 0.1, -0.55);
+            let tuck = |x: f32| v3(x, 0.75, -0.3);
+            p.hand_l = Xf::new(
+                tuck(-0.18).lerp(ground(-0.22), plant),
+                Quat::IDENTITY.slerp(left_hand(Vec3::NEG_Y, Vec3::NEG_Z), plant),
+            );
+            p.curl_l = lerp(0.8, 0.2, plant);
+            p.sword = sword(
+                tuck(0.18).lerp(ground(0.22), plant),
+                v3(0.2, 0.4, 1.0).lerp(v3(0.3, 0.1, 1.0), plant),
+                Vec3::NEG_Y,
+            );
             p.elbow = [v3(-1.0, -0.2, 0.2), v3(1.0, -0.2, 0.2)];
-            let _ = k;
         }
         TravAnim::Takedown { t } => {
             // Sword raised high, then driven down at the strike.
@@ -379,10 +490,10 @@ fn balance(lean: f32, speed: f32, narrow: f32, s: &State) -> Pose {
     p
 }
 
-fn face(hands: [Vec3; 2], feet: [Vec3; 2], moving: Option<(u8, f32)>, ice: bool) -> Pose {
-    let mut p = Pose::BIND;
-    // Pelvis between the feet and the hands, held off the wall (research: α ≈ 0.4, 0.2 m
-    // off the wall plane); it shifts toward the supports while a limb is on the move.
+/// Where the pelvis wants to be on a face: between the feet and the hands, held off the wall
+/// (research: α ≈ 0.4, 0.2 m off the wall plane), shifting over the supports while a limb is
+/// on the move (away from a moving hand, up as a foot steps).
+fn face_pelvis(hands: [Vec3; 2], feet: [Vec3; 2], moving: Option<(u8, f32)>, ice: bool) -> Vec3 {
     let fm = (feet[0] + feet[1]) * 0.5;
     let hm = (hands[0] + hands[1]) * 0.5;
     let mut pel = fm + (hm - fm) * 0.42;
@@ -390,28 +501,50 @@ fn face(hands: [Vec3; 2], feet: [Vec3; 2], moving: Option<(u8, f32)>, ice: bool)
     pel.z = wall + if ice { 0.32 } else { 0.24 };
     if let Some((m, u)) = moving {
         let away = match m {
-            0 => v3(0.06, -0.02, 0.0),
-            1 => v3(-0.06, -0.02, 0.0),
-            _ => v3(0.0, 0.04, 0.0),
+            0 => v3(0.09, -0.03, 0.02),
+            1 => v3(-0.09, -0.03, 0.02),
+            _ => v3(0.0, 0.05, 0.03),
         };
         pel += away * (u * PI).sin();
     }
-    p.pelvis = pel;
-    p.pelvis_rot = pitch(-0.1);
+    pel
+}
+
+fn face(
+    hands: [Vec3; 2],
+    feet: [Vec3; 2],
+    moving: Option<(u8, f32)>,
+    ice: bool,
+    goal: Vec3,
+    s: &State,
+) -> Pose {
+    let mut p = Pose::BIND;
+    let want = face_pelvis(hands, feet, moving, ice);
+    p.pelvis = s.pelvis.map_or(want, |(x, _)| x);
+    // Hips swing toward the side bearing the weight.
+    let hm = (hands[0] + hands[1]) * 0.5;
+    let side = ((p.pelvis.x - hm.x) * 1.5).clamp(-0.25, 0.25);
+    p.pelvis_rot = pitch(-0.1) * rz(-side);
     let lift = |i: u8| match moving {
         Some((m, u)) if m == i => (u * PI).sin(),
         _ => 0.0,
     };
     p.ankle = [
-        feet[0] + v3(0.0, 0.08 * lift(2), 0.1 + 0.1 * lift(2)),
-        feet[1] + v3(0.0, 0.08 * lift(3), 0.1 + 0.1 * lift(3)),
+        feet[0] + v3(0.0, 0.1 * lift(2), 0.1 + 0.12 * lift(2)),
+        feet[1] + v3(0.0, 0.1 * lift(3), 0.1 + 0.12 * lift(3)),
     ];
     p.foot = [pitch(if ice { -0.1 } else { 0.2 }); 2];
-    p.knee = [v3(-0.6, 0.2, -1.0), v3(0.6, 0.2, -1.0)];
-    p.spine = pitch(-0.05);
+    // Frog legs: knees out to the sides, the hips close to the wall.
+    p.knee = [v3(-0.85, 0.2, -0.6), v3(0.85, 0.2, -0.6)];
+    p.spine = pitch(-0.05) * rz(side * 0.6);
     p.chest = pitch(-0.12);
-    // Look up at the next hold.
-    p.head = pitch(-0.5);
+    // Eyes on the next hold.
+    let head = v3(p.pelvis.x, p.pelvis.y + 0.7, p.pelvis.z);
+    let d = goal - head;
+    let yaw = (-d.x).atan2(0.45).clamp(-0.7, 0.7);
+    let up = d.y.atan2(0.45).clamp(-0.6, 0.9);
+    p.neck = pitch(-0.25 * up);
+    p.head = ry(yaw) * pitch(-0.75 * up);
     p
 }
 

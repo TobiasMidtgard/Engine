@@ -26,7 +26,7 @@ mod inertia;
 mod trav;
 
 use inertia::{Inertia, Locked};
-pub use trav::TravAnim;
+pub use trav::{Reach, TravAnim};
 
 /// Height of the ankle joint above the sole, m.
 pub const ANKLE_HEIGHT: f32 = 0.085;
@@ -734,6 +734,8 @@ pub struct AnimInput {
     /// On a rope: where the hands hold it and the way it runs from them down to the body
     /// (character space, unit): the body hangs along it, not upright.
     pub rope: Option<(Vec3, Vec3)>,
+    /// A leap about to arrive on an element: see [`Reach`].
+    pub reach: Option<Reach>,
 }
 
 /// The ground under one foot, in character space (the capsule's bottom at y = 0, facing −Z).
@@ -793,6 +795,7 @@ impl Default for AnimInput {
             ground: [None; 2],
             trav: None,
             rope: None,
+            reach: None,
         }
     }
 }
@@ -1063,6 +1066,65 @@ pub struct Animator {
     /// Landing compression: the pelvis spring's offset (m) and velocity.
     squash: f32,
     squash_v: f32,
+    /// Hanging from a ledge: the body's swing about the hands after a catch (rad, legs out
+    /// from the wall when positive) and its rate; the feet scrabbling for the wall (s left).
+    catch: Catch,
+}
+
+/// The body's swing about the hands after catching a ledge (research: the center of mass about
+/// 1 m under the grip swings at about 0.5 Hz; the wall stops the legs coming back in, the feet
+/// slap it and scrabble for a hold).
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+struct Catch {
+    hanging: bool,
+    swing: f32,
+    rate: f32,
+    scrabble: f32,
+}
+
+/// The hang's pendulum: natural frequency (rad/s, g / 1 m) and damping ratio.
+const CATCH_W: f32 = 3.2;
+const CATCH_DAMP: f32 = 0.14;
+/// How long the feet scrabble for the wall after a catch, s, and how fast, Hz.
+const SCRABBLE_SECS: f32 = 0.7;
+const SCRABBLE_HZ: f32 = 3.6;
+
+impl Catch {
+    /// Follow the hang: a new one swings out by the speed it was caught at (`before`, the
+    /// velocity just before, character space: the wall is toward −Z).
+    fn track(&mut self, hanging: bool, before: Vec3, dt: f32) {
+        if hanging && !self.hanging {
+            let falling = (-before.y).max(0.0);
+            let into = (-before.z).max(0.0);
+            self.rate = (0.22 * falling + 0.4 * into).min(2.4);
+            self.swing = self.swing.max(0.0);
+            self.scrabble = if falling + into > 1.5 {
+                SCRABBLE_SECS
+            } else {
+                0.0
+            };
+        }
+        self.hanging = hanging;
+        if !hanging {
+            self.swing *= 1.0 - approach(dt, 8.0);
+            self.rate = 0.0;
+            self.scrabble = 0.0;
+            return;
+        }
+        let a = -CATCH_W * CATCH_W * self.swing - 2.0 * CATCH_DAMP * CATCH_W * self.rate;
+        self.rate += a * dt;
+        self.swing += self.rate * dt;
+        // The wall: the legs coming back in stop against it (the feet slap it and scrabble).
+        if self.swing < 0.0 {
+            if self.rate < -0.6 {
+                self.scrabble = self.scrabble.max(SCRABBLE_SECS * 0.6);
+            }
+            self.swing = 0.0;
+            self.rate = -self.rate * 0.25;
+        }
+        self.swing = self.swing.min(0.6);
+        self.scrabble = (self.scrabble - dt).max(0.0);
+    }
 }
 
 impl Animator {
@@ -1113,6 +1175,7 @@ impl Animator {
             shown: None,
             squash: 0.0,
             squash_v: 0.0,
+            catch: Catch::default(),
         }
     }
 
@@ -1152,6 +1215,11 @@ impl Animator {
         let arms = self.arm_pose(input, &body);
         let mut pose = body;
         pose.blend(&arms, 1.0, Channels::Arms);
+        if let Some(r) = &input.reach
+            && !input.grounded
+        {
+            trav::reach(&mut pose, r, trav::reach_weight(r));
+        }
 
         // A discrete switch of state blends out of where the body was, keeping its motion.
         let key = state_key(input);
@@ -1324,6 +1392,12 @@ impl Animator {
             self.swing_rate = 0.0;
         }
         self.zip_on = input.zip.is_some();
+        // A ledge caught swings the body about the hands.
+        let hanging = input.mode == LocomotionMode::Climb
+            && input.ledge.is_some()
+            && input.ladder.is_none()
+            && input.trav.is_none();
+        self.catch.track(hanging, self.prev_velocity, dt);
         // Body lean from acceleration (m/s² → radians, capped).
         if dt > 0.0 {
             let acc = (input.velocity - self.prev_velocity) / dt;
@@ -1539,7 +1613,11 @@ impl Animator {
             && let Some((top, _)) = self.ledge
         {
             let sway = (self.shimmy * TAU).sin() * smooth(0.1, 0.8, input.velocity.x.abs());
-            p.blend(&hang(top, sway), w.hang, Channels::Body);
+            p.blend(
+                &hang(top, sway, self.catch, self.secs),
+                w.hang,
+                Channels::Body,
+            );
         }
         if w.reel > 1e-3
             && let Some(hook) = self.hook
@@ -2156,7 +2234,7 @@ fn vault_body(top: f32) -> Pose {
 /// Hanging from a ledge whose top is at `top` (character space): the body below the hands,
 /// legs loose with the toes against the wall, looking up at the edge. `sway` (−1..1) swings
 /// the hips side to side while shimmying.
-fn hang(top: Vec3, sway: f32) -> Pose {
+fn hang(top: Vec3, sway: f32, catch: Catch, secs: f32) -> Pose {
     let mut p = Pose::BIND;
     let wall = top.z.min(-0.2);
     p.pelvis = v3(sway * 0.04, top.y - 0.87, wall + 0.24);
@@ -2165,22 +2243,38 @@ fn hang(top: Vec3, sway: f32) -> Pose {
     p.chest = pitch(-0.1);
     p.neck = pitch(-0.1);
     p.head = pitch(-0.3);
-    let ankle = p.pelvis.y - 0.8;
+    // Braced (AC's hang): knees bent, the soles flat on the wall under the hips, one foot a
+    // little higher. Swung out from the wall the legs hang loose instead, trailing the swing.
+    let out = smooth(0.03, 0.3, catch.swing);
+    let brace = 1.0 - out;
+    let ankle = p.pelvis.y - lerp(0.8, 0.6, brace);
+    // Scrabbling: the feet alternately kick for the wall, fading out.
+    let fade = catch.scrabble / SCRABBLE_SECS;
+    let kick = |phase: f32| (secs * SCRABBLE_HZ * TAU + phase).sin().max(0.0) * 0.13 * fade;
+    let trail = (-catch.rate * 0.1).clamp(-0.1, 0.12);
     p.ankle = [
         v3(
             -0.11 + sway * 0.03,
-            ankle + 0.02 + sway.max(0.0) * 0.05,
-            wall + 0.14,
+            ankle + 0.02 + sway.max(0.0) * 0.05 + kick(0.0) + trail,
+            wall + lerp(0.14, 0.09, brace) + kick(0.0) * 0.4,
         ),
         v3(
             0.12 + sway * 0.03,
-            ankle + 0.08 + (-sway).max(0.0) * 0.05,
-            wall + 0.12,
+            ankle + 0.08 + 0.1 * brace + (-sway).max(0.0) * 0.05 + kick(PI) + trail,
+            wall + lerp(0.12, 0.09, brace) + kick(PI) * 0.4,
         ),
     ];
-    p.foot = [pitch(0.55), pitch(0.45)];
-    p.knee = [v3(-0.1, 0.1, -1.0), v3(0.1, 0.1, -1.0)];
-    p.body = rz(-sway * 0.04);
+    p.foot = [
+        pitch(lerp(0.55, -0.15, brace)),
+        pitch(lerp(0.45, -0.2, brace)),
+    ];
+    p.knee = [
+        v3(-lerp(0.1, 0.35, brace), 0.1, -1.0),
+        v3(lerp(0.1, 0.35, brace), 0.1, -1.0),
+    ];
+    // The whole body swings about the hands (legs out from the wall), the hips lagging.
+    p.pelvis_rot = pitch(-0.2 * out) * p.pelvis_rot;
+    p.body = rx(-catch.swing) * rz(-sway * 0.04);
     p.pivot = top - v3(0.0, 0.05, 0.0);
     p
 }
@@ -3157,6 +3251,108 @@ mod tests {
             }
             assert!(planted >= 3, "{planted} over {top}");
         }
+    }
+
+    #[test]
+    fn a_caught_ledge_swings_the_legs_out_then_braces_the_feet_on_the_wall() {
+        let top = v3(0.0, 2.1, -0.39);
+        let mut anim = Animator::new(Style::Pilot);
+        // Falling at 6 m/s toward the wall, then hanging.
+        let fall = AnimInput {
+            mode: LocomotionMode::Air,
+            grounded: false,
+            velocity: v3(0.0, -6.0, -1.5),
+            ..Default::default()
+        };
+        run(&mut anim, fall, 0.3);
+        let hang = AnimInput {
+            mode: LocomotionMode::Climb,
+            grounded: false,
+            ledge: Some((top, false)),
+            velocity: Vec3::ZERO,
+            ..Default::default()
+        };
+        let feet_z = |pose: &Pose| {
+            let b = solve(pose);
+            (b[Bone::FootL.index()].pos.z + b[Bone::FootR.index()].pos.z) * 0.5
+        };
+        let mut farthest = f32::MIN;
+        for _ in 0..30 {
+            let pose = anim.update(&hang);
+            farthest = farthest.max(feet_z(&pose));
+        }
+        let settled = run(&mut anim, hang, 3.0);
+        let braced = feet_z(&settled);
+        assert!(
+            farthest > braced + 0.15,
+            "the legs swing out from the wall: {farthest} vs braced {braced}"
+        );
+        // Braced: the feet up against the wall, knees bent.
+        assert!(braced < top.z + 0.3, "feet on the wall: {braced}");
+        let b = solve(&settled);
+        let knee = b[Bone::ShinL.index()].pos;
+        assert!(
+            knee.y > b[Bone::FootL.index()].pos.y + 0.25,
+            "knees bent: {knee}"
+        );
+    }
+
+    #[test]
+    fn a_leap_reaches_its_hands_for_the_bar_before_it_arrives() {
+        let mut anim = Animator::new(Style::Pilot);
+        let bar = v3(0.0, 2.0, -0.3);
+        let mut input = AnimInput {
+            mode: LocomotionMode::Air,
+            grounded: false,
+            velocity: v3(0.0, 1.0, -5.0),
+            reach: Some(Reach {
+                at: bar,
+                secs_left: 1.0,
+                hands: true,
+            }),
+            ..Default::default()
+        };
+        let far = run(&mut anim, input, 0.3);
+        let hand = |pose: &Pose| pose.hand_l.pos;
+        assert!(hand(&far).distance(bar) > 0.5, "not yet: {}", hand(&far));
+        input.reach = Some(Reach {
+            at: bar,
+            secs_left: 0.05,
+            hands: true,
+        });
+        let near = run(&mut anim, input, 0.25);
+        assert!(
+            hand(&near).distance(bar) < 0.25,
+            "reaching: {}",
+            hand(&near)
+        );
+    }
+
+    #[test]
+    fn a_climber_on_a_face_looks_at_the_hold_its_hand_moves_to() {
+        let mut anim = Animator::new(Style::Pilot);
+        let hands = [v3(-0.25, 1.9, -0.3), v3(0.25, 1.9, -0.3)];
+        let feet = [v3(-0.2, 0.4, -0.3), v3(0.2, 0.4, -0.3)];
+        let at = |goal: Vec3| AnimInput {
+            mode: LocomotionMode::Climb,
+            grounded: false,
+            trav: Some(TravAnim::Face {
+                hands,
+                feet,
+                moving: Some((0, 0.5)),
+                ice: false,
+                goal,
+            }),
+            ..Default::default()
+        };
+        let head_dir = |pose: &Pose| {
+            let b = solve(pose);
+            b[Bone::Head.index()].rot * Vec3::NEG_Z
+        };
+        let left = head_dir(&run(&mut anim, at(v3(-0.7, 2.3, -0.3)), 0.6));
+        let right = head_dir(&run(&mut anim, at(v3(0.7, 2.3, -0.3)), 0.6));
+        assert!(left.x < right.x - 0.3, "turns to the hold: {left} {right}");
+        assert!(left.y > 0.1, "looks up at it: {left}");
     }
 
     #[test]

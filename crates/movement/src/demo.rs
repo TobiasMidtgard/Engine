@@ -2401,6 +2401,24 @@ fn anim_input(
         effort: params.map_or(0.2, |p| p.get("effort")),
         ground: [None; 2],
         trav: crate::traverse::anim(m, &inv, feet, cc.height),
+        reach: m.leap.map(|l| {
+            use crate::target::Aim;
+            let half = cc.height * 0.5;
+            let up = m.up.as_dvec3();
+            let (at, hands) = match l.aim {
+                Aim::Pole { .. } | Aim::Bar { .. } => (
+                    l.to + up * (cc.height * crate::zipline::GRIP_ABOVE) as f64,
+                    true,
+                ),
+                Aim::Face => (l.to + up * 0.75, true),
+                Aim::Perch | Aim::Line { .. } | Aim::Soft => (l.to - up * half as f64, false),
+            };
+            rig::Reach {
+                at: inv * (at - feet).as_vec3(),
+                secs_left: (l.total - l.secs).max(0.0),
+                hands,
+            }
+        }),
         rope: m.rope.map(|r| {
             let down = (inv * r.dir).normalize_or(Vec3::NEG_Y);
             let grip = Vec3::Y * (cc.height * 0.5)

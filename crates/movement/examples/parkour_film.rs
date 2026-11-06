@@ -779,7 +779,11 @@ fn film(clip: &Clip, out: &Path) -> Result<PathBuf, String> {
         old_settings(&mut p);
     }
     let set_camera = |world: &mut World, t: f32| {
-        let (yaw, pitch, boom, shoulder) = (clip.camera)(t);
+        let (mut yaw, pitch, mut boom, shoulder) = (clip.camera)(t);
+        // Close-ups of the poses: FILM_BOOM (m) and FILM_YAW (rad, added) override the clip's.
+        let env = |k: &str| std::env::var(k).ok().and_then(|v| v.parse::<f32>().ok());
+        boom = env("FILM_BOOM").unwrap_or(boom);
+        yaw += env("FILM_YAW").unwrap_or(0.0);
         let mut q = world.query::<&mut PilotCamera>();
         for mut pc in q.iter_mut(world) {
             pc.yaw = yaw;

@@ -313,11 +313,19 @@ pub(crate) fn anim(
     }
     if let Some(f) = m.face {
         let (hands, feet_at) = f.contacts();
+        // Where the eyes go: the hold the moving limb is heading for, else between the hands.
+        let goal = f
+            .moving
+            .map_or((hands[0] + hands[1]) * 0.5, |mv| match mv.limb {
+                0..=3 => mv.to[0],
+                _ => (mv.to[0] + mv.to[1]) * 0.5,
+            });
         return Some(TravAnim::Face {
             hands: hands.map(local),
             feet: feet_at.map(local),
             moving: f.moving.map(|mv| (mv.limb.min(3), mv.t)),
             ice: f.ice,
+            goal: local(goal),
         });
     }
     if let Some(r) = m.roll {
