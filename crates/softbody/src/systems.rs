@@ -1569,9 +1569,12 @@ fn rests(
     let resting = resting
         || (b.sim.params.self_collide > 0.0 && dist > far)
         || (b.strands.is_some() && dist > far_strands);
-    // One still settling keeps going wherever it is, a budget a frame, so it is ready when
-    // it is first seen up close.
-    (resting || dist > config.freeze_distance) && b.pending_prewarm == 0
+    // One still settling keeps going, a budget a frame, so it is ready when it is first seen
+    // up close; past the freeze distance it waits until the focus comes nearer. The lake's
+    // dinghy sail (re)built with its zone settled 610 m from the fortress for 11-15 ms a frame
+    // (VM), and the yard's unveiling sheet 550 m off the same way.
+    (resting || dist > config.freeze_distance)
+        && (b.pending_prewarm == 0 || dist > config.freeze_distance)
 }
 
 fn step_one(entity: Entity, body: &mut SoftBodySim, ctx: &StepContext) {

@@ -92,3 +92,51 @@ fn in_play_bodies_that_arrive_together_settle_over_a_few_frames() {
     }
     panic!("not all settled: {:?}", pending(&mut play));
 }
+
+#[derive(Resource)]
+struct Camera(DVec3);
+
+#[test]
+fn a_body_built_past_the_freeze_distance_settles_once_the_focus_comes_nearer() {
+    let mut app = App::new();
+    app.add_plugins((engine_world::WorldPlugin, SoftBodyPlugin));
+    app.world.resource_mut::<FixedTime>().set_hz(60.0);
+    // A zone loaded far off: the camera is 600 m away (the freeze distance is 400 m).
+    app.insert_resource(Camera(DVec3::new(600.0, 1.7, 0.0)));
+    app.add_systems(
+        PreUpdate,
+        |cam: Res<Camera>, mut focus: ResMut<engine_world::FocusPoints>| {
+            focus.points.clear();
+            focus.points.push(cam.0);
+        },
+    );
+    app.world.spawn((
+        Transform::from_xyz(0.0, 3.0, 0.0),
+        Cloth {
+            size: [1.0, 1.0],
+            resolution: [10, 10],
+            pins: ClothPins::TopEdge { every: 1 },
+            sim: SimSettings {
+                prewarm_secs: 1.0,
+                ..SimSettings::default()
+            },
+            ..Cloth::default()
+        },
+    ));
+    for _ in 0..40 {
+        std::thread::sleep(std::time::Duration::from_millis(17));
+        app.update();
+    }
+    let far = pending(&mut app);
+    assert_eq!(far, [60], "it waits to settle out there");
+    // The camera comes to 200 m: it settles before it is seen up close.
+    app.world.resource_mut::<Camera>().0 = DVec3::new(200.0, 1.7, 0.0);
+    for _ in 0..200 {
+        if pending(&mut app) == [0] {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(17));
+        app.update();
+    }
+    panic!("not settled: {:?}", pending(&mut app));
+}
