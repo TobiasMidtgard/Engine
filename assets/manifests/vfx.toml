@@ -1,0 +1,68 @@
+# Owner: Particles and magic effects. Baked smoke flipbooks for engine_vfx (crates/vfx/src/sheets.rs):
+# a small smoke simulation rendered under six lights per frame, made by scripts/vfx-bake.py.
+# Format and rules: AGENTS.md, "Art and large files". Fetch with `cargo run -p fetch-assets -- vfx`.
+# Without these files the smoke and dust sprites stay procedural.
+
+# Smoke puff rising and billowing (64 frames, 8 x 8 grid of 256 px): lit from the right, top and back; alpha.
+[[file]]
+path = "vfx/flipbooks/smoke_puff_a.png"
+url = "mirror"
+sha256 = "1bf89c3cf8d9572f2d2afc0bd8eeb42c3e5b75d8e01b687208804780d530eb77"
+license = "MIT OR Apache-2.0"
+source = "https://github.com/TobiasMidtgard/Engine/blob/main/scripts/vfx-bake.py"
+
+# Smoke puff rising and billowing (64 frames, 8 x 8 grid of 256 px): lit from the left, bottom and front; emission.
+[[file]]
+path = "vfx/flipbooks/smoke_puff_b.png"
+url = "mirror"
+sha256 = "c8c5c37ccb4c30e9aaca38219d900b16eebe9bb118ca3b6d93e87b6fbde371f6"
+license = "MIT OR Apache-2.0"
+source = "https://github.com/TobiasMidtgard/Engine/blob/main/scripts/vfx-bake.py"
+
+# Smoke puff rising and billowing (64 frames, 8 x 8 grid of 256 px): motion vectors for frame blending.
+[[file]]
+path = "vfx/flipbooks/smoke_puff_mv.png"
+url = "mirror"
+sha256 = "99a9e58641d1f7958c28358ee87c52ebef6c226c6ac8c806b56f132e7aee95cc"
+license = "MIT OR Apache-2.0"
+source = "https://github.com/TobiasMidtgard/Engine/blob/main/scripts/vfx-bake.py"
+
+# Smoke puff rising and billowing (64 frames, 8 x 8 grid of 256 px): grid, frames and the bake's settings.
+[[file]]
+path = "vfx/flipbooks/smoke_puff.json"
+url = "mirror"
+sha256 = "6c06f29c87120dd9e0552c416ce3e9985a1925b3c348727093ac53d4e12aad14"
+license = "MIT OR Apache-2.0"
+source = "https://github.com/TobiasMidtgard/Engine/blob/main/scripts/vfx-bake.py"
+
+# Dust puff bursting out and hanging (64 frames, 8 x 8 grid of 256 px): lit from the right, top and back; alpha.
+[[file]]
+path = "vfx/flipbooks/dust_burst_a.png"
+url = "mirror"
+sha256 = "a9555435b5c1432fa4429cd4ad4e82713d26389c8bdaa5a21ce19af2713a1556"
+license = "MIT OR Apache-2.0"
+source = "https://github.com/TobiasMidtgard/Engine/blob/main/scripts/vfx-bake.py"
+
+# Dust puff bursting out and hanging (64 frames, 8 x 8 grid of 256 px): lit from the left, bottom and front; emission.
+[[file]]
+path = "vfx/flipbooks/dust_burst_b.png"
+url = "mirror"
+sha256 = "a635d02a659b45bd4125578ef4b4769a0e256b5c832b6de50d60112801bf2737"
+license = "MIT OR Apache-2.0"
+source = "https://github.com/TobiasMidtgard/Engine/blob/main/scripts/vfx-bake.py"
+
+# Dust puff bursting out and hanging (64 frames, 8 x 8 grid of 256 px): motion vectors for frame blending.
+[[file]]
+path = "vfx/flipbooks/dust_burst_mv.png"
+url = "mirror"
+sha256 = "7da224de8e3280a54338552a36b94a61a7a5c5c05f18df488826cb1dd6c13f5c"
+license = "MIT OR Apache-2.0"
+source = "https://github.com/TobiasMidtgard/Engine/blob/main/scripts/vfx-bake.py"
+
+# Dust puff bursting out and hanging (64 frames, 8 x 8 grid of 256 px): grid, frames and the bake's settings.
+[[file]]
+path = "vfx/flipbooks/dust_burst.json"
+url = "mirror"
+sha256 = "db6566ff93c67469f2700fb1111dfde7885e9f911b3a486603af64efd1686f1a"
+license = "MIT OR Apache-2.0"
+source = "https://github.com/TobiasMidtgard/Engine/blob/main/scripts/vfx-bake.py"

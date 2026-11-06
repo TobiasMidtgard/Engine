@@ -12,6 +12,7 @@ pub mod gpu;
 pub mod library;
 pub mod marks;
 pub mod marks_feature;
+pub mod sheets;
 pub mod shift;
 pub mod spells;
 pub mod trail;

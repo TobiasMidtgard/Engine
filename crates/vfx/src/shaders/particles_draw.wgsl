@@ -3,7 +3,8 @@
 //
 // One instance per pool slot (triangle strip of 4 vertices), in the order `cs_sort` left in
 // `order` (far to near within each layer); dead slots collapse to nothing.
-// Sprites are procedural, so there are no textures to load. Output is premultiplied:
+// Sprites are procedural, except smoke and dust when their baked sheets are loaded (group 2,
+// see `sheets.rs`). Output is premultiplied:
 // `additive` 0 blends like a normal transparent surface, 1 only adds light.
 // ============================================================================
 
@@ -12,6 +13,24 @@
 @group(1) @binding(2) var scene_depth: texture_depth_2d;
 @group(1) @binding(3) var scene_color: texture_2d<f32>; // HDR, pre-exposed (heat haze)
 @group(1) @binding(4) var<storage, read> order: array<u32>;
+
+// Baked flipbooks (`sheets.rs`): smoke (kind 0) and dust (kind 1). Unloaded kinds bind a 1x1
+// stand-in and flag 0.
+struct SheetInfo {
+    // Per kind: frames across, frames down, frames used, flags (0 none, 1 lightmaps, 2 with
+    // motion vectors).
+    kinds: array<vec4<f32>, 2>,
+    // Per kind: pixels per frame (x, y), lightmap gain (z), unused (w).
+    cells: array<vec4<f32>, 2>,
+};
+@group(2) @binding(0) var<uniform> sheet_info: SheetInfo;
+@group(2) @binding(1) var sheet_sampler: sampler;
+@group(2) @binding(2) var smoke_a: texture_2d<f32>;
+@group(2) @binding(3) var smoke_b: texture_2d<f32>;
+@group(2) @binding(4) var smoke_mv: texture_2d<f32>;
+@group(2) @binding(5) var dust_a: texture_2d<f32>;
+@group(2) @binding(6) var dust_b: texture_2d<f32>;
+@group(2) @binding(7) var dust_mv: texture_2d<f32>;
 
 struct VsOut {
     @builtin(position) position: vec4<f32>,
@@ -59,8 +78,13 @@ fn vs_particle(@builtin(vertex_index) vi: u32, @builtin(instance_index) instance
     let rel = particle_rel(p, e);
     let corner = vec2<f32>(f32(vi & 1u), f32(vi >> 1u)) * 2.0 - 1.0;
     let facing = u32(e.spin_look.w);
-    let cr = cos(p.rot);
-    let sr = sin(p.rot);
+    // A baked puff rises up its frame, so it only leans a little either way.
+    var rot = p.rot;
+    if (sheet_kind(u32(e.spin_look.z)) < 2u) {
+        rot = sin(p.rot) * 0.3;
+    }
+    let cr = cos(rot);
+    let sr = sin(rot);
     var right: vec3<f32>;
     var up: vec3<f32>;
     var center = rel;
@@ -397,6 +421,93 @@ fn foam(c: vec2<f32>, r: f32, seed: f32, age: f32, pixels: f32) -> f32 {
     // far foam reads as a pale film on the water rather than a white patch.
     let lace = mix(0.28 * (0.6 + 0.8 * vary), walls, smoothstep(40.0, 160.0, pixels));
     return saturate((lace + fill) * keep) * smoothstep(1.0, 0.45, r);
+}
+
+// ---------------------------------------------------------------- baked sheets
+// The sheet kind a sprite draws from (0 smoke, 1 dust), or 2 when it has no loaded sheet.
+fn sheet_kind(sprite: u32) -> u32 {
+    if (sprite == 2u && sheet_info.kinds[0].w >= 1.0) { return 0u; }
+    if (sprite == 9u && sheet_info.kinds[1].w >= 1.0) { return 1u; }
+    return 2u;
+}
+
+// One map of a sheet (0 lightmaps A, 1 lightmaps B, 2 motion) at sheet UV `uv`. Sampled at an
+// explicit level (legal in any control flow; the level follows the sprite's size on screen).
+fn sheet_map(kind: u32, map: u32, uv: vec2<f32>, lod: f32) -> vec4<f32> {
+    if (kind == 0u) {
+        if (map == 0u) { return textureSampleLevel(smoke_a, sheet_sampler, uv, lod); }
+        if (map == 1u) { return textureSampleLevel(smoke_b, sheet_sampler, uv, lod); }
+        return textureSampleLevel(smoke_mv, sheet_sampler, uv, lod);
+    }
+    if (map == 0u) { return textureSampleLevel(dust_a, sheet_sampler, uv, lod); }
+    if (map == 1u) { return textureSampleLevel(dust_b, sheet_sampler, uv, lod); }
+    return textureSampleLevel(dust_mv, sheet_sampler, uv, lod);
+}
+
+// Sheet UV of point `uv` (0..1 in the frame, v down) of frame `i`, kept inside the frame.
+fn sheet_cell(i: u32, grid: vec2<f32>, uv: vec2<f32>) -> vec2<f32> {
+    let cols = u32(grid.x);
+    let cell = vec2<f32>(f32(i % cols), f32(i / cols));
+    return (cell + clamp(uv, vec2<f32>(0.003), vec2<f32>(0.997))) / grid;
+}
+
+struct SheetSample {
+    a: vec4<f32>, // lit from the right, top, back; alpha
+    b: vec4<f32>, // lit from the left, bottom, front; emission
+};
+
+// A sprite's look from its sheet at `age` (0..1 of its life): the two frames around it,
+// each pushed along its motion vectors toward the in-between moment so they blend without
+// ghosting. Half the puffs are mirrored left to right (their side lightmaps swap with them).
+fn sheet_sample(kind: u32, sprite_uv: vec2<f32>, age: f32, pixels: f32, seed: f32) -> SheetSample {
+    let info = sheet_info.kinds[kind];
+    let grid = info.xy;
+    let frames = max(info.z, 1.0);
+    let mirror = fract(seed * 7.31) > 0.5;
+    var uv = vec2<f32>(sprite_uv.x, 1.0 - sprite_uv.y);
+    if (mirror) { uv.x = 1.0 - uv.x; }
+    let lod = clamp(log2(sheet_info.cells[kind].x / max(pixels, 1.0)), 0.0, 4.0);
+    let f = saturate(age) * (frames - 1.0);
+    let i0 = u32(f);
+    let i1 = min(i0 + 1u, u32(frames) - 1u);
+    let blend = f - f32(i0);
+    var uv0 = uv;
+    var uv1 = uv;
+    if (info.w >= 2.0) {
+        // Motion is stored as 0.5 + 8 x (frame UV moved by the next frame).
+        let m0 = (sheet_map(kind, 2u, sheet_cell(i0, grid, uv), lod).xy - 0.5) * 0.125;
+        let m1 = (sheet_map(kind, 2u, sheet_cell(i1, grid, uv), lod).xy - 0.5) * 0.125;
+        uv0 = uv - m0 * blend;
+        uv1 = uv + m1 * (1.0 - blend);
+    }
+    var s: SheetSample;
+    s.a = mix(sheet_map(kind, 0u, sheet_cell(i0, grid, uv0), lod), sheet_map(kind, 0u, sheet_cell(i1, grid, uv1), lod), blend);
+    s.b = mix(sheet_map(kind, 1u, sheet_cell(i0, grid, uv0), lod), sheet_map(kind, 1u, sheet_cell(i1, grid, uv1), lod), blend);
+    if (mirror) {
+        let right = s.a.r;
+        s.a.r = s.b.r;
+        s.b.r = right;
+    }
+    return s;
+}
+
+// Six-way lighting (Unity VFX Graph; Battlefront II): the sun in sprite space weighs the
+// lightmap baked from each side by the square of its share, so the puff shows its own
+// self-shadowing from wherever the sun stands; the sky lights it mostly from above. Scaled to
+// average about 1 over the puff, so the particle's light (sun, sky, lights) stays as computed.
+fn six_way(kind: u32, s: SheetSample, sun: vec3<f32>) -> f32 {
+    let gain = sheet_info.cells[kind].z;
+    let mean = (s.a.r + s.a.g + s.a.b + s.b.r + s.b.g + s.b.b) / 6.0;
+    let sky = mean * 0.55 + s.a.g * 0.45;
+    let k = length(sun);
+    if (k < 1e-3) { return sky * gain; }
+    let l = sun / k;
+    let w = l * l;
+    let x = select(s.b.r, s.a.r, l.x > 0.0);
+    let y = select(s.b.g, s.a.g, l.y > 0.0);
+    let z = select(s.a.b, s.b.b, l.z > 0.0);
+    let direct = w.x * x + w.y * y + w.z * z;
+    return mix(sky, direct, saturate(k) * 0.75) * gain;
 }
 
 // ---------------------------------------------------------------- sprites
@@ -900,13 +1011,19 @@ fn fs_particle(in: VsOut) -> @location(0) vec4<f32> {
             rgb = mix(deep, rgb * 2.0, exp(-c.x * c.x * 40.0));
         }
         case 2u: { // smoke: a billowing puff, brighter on its sun side
-            let q = c * 1.7 + vec2<f32>(in.seed * 37.0, in.seed * 11.0) + vec2<f32>(0.0, in.age * 0.6);
-            let n = fbm2(q, 3);
-            let base = smoothstep(1.0, 0.15, r);
-            a = saturate((base * (0.55 + n * 1.1) - 0.2) * 1.4);
-            let wobble = vec2<f32>(fbm2(q + vec2<f32>(5.2, 1.3), 2), fbm2(q + vec2<f32>(1.7, 9.2), 2)) - 0.5;
-            // Denser centers read a little darker, wispy edges brighter (fake self-shadowing).
-            rgb *= mix(1.15, 0.8, saturate(a)) * volume_shade(c, wobble * 0.9, in.sun);
+            if (sheet_kind(2u) == 0u) {
+                let k = sheet_sample(0u, in.uv, in.age, in.pixels, in.seed);
+                a = k.a.a;
+                rgb *= six_way(0u, k, in.sun);
+            } else {
+                let q = c * 1.7 + vec2<f32>(in.seed * 37.0, in.seed * 11.0) + vec2<f32>(0.0, in.age * 0.6);
+                let n = fbm2(q, 3);
+                let base = smoothstep(1.0, 0.15, r);
+                a = saturate((base * (0.55 + n * 1.1) - 0.2) * 1.4);
+                let wobble = vec2<f32>(fbm2(q + vec2<f32>(5.2, 1.3), 2), fbm2(q + vec2<f32>(1.7, 9.2), 2)) - 0.5;
+                // Denser centers read a little darker, wispy edges brighter (fake self-shadowing).
+                rgb *= mix(1.15, 0.8, saturate(a)) * volume_shade(c, wobble * 0.9, in.sun);
+            }
         }
         case 3u: { // flame: a licking tongue, round at the root and drawn up to a flickering point
             let s = in.seed * 23.0;
@@ -956,10 +1073,16 @@ fn fs_particle(in: VsOut) -> @location(0) vec4<f32> {
             rgb *= 0.65 + 0.5 * saturate(c.x * 0.4 + c.y * 0.5 + 0.5) * (0.7 + in.seed * 0.6);
         }
         case 9u: { // dust: a soft cloud
-            let n = value_noise2(c * 2.5 + in.seed * 31.0);
-            let base = smoothstep(1.0, 0.0, r);
-            a = base * base * (0.5 + 0.5 * n);
-            rgb *= volume_shade(c, vec2<f32>(n - 0.5) * 0.6, in.sun);
+            if (sheet_kind(9u) == 1u) {
+                let k = sheet_sample(1u, in.uv, in.age, in.pixels, in.seed);
+                a = k.a.a;
+                rgb *= six_way(1u, k, in.sun);
+            } else {
+                let n = value_noise2(c * 2.5 + in.seed * 31.0);
+                let base = smoothstep(1.0, 0.0, r);
+                a = base * base * (0.5 + 0.5 * n);
+                rgb *= volume_shade(c, vec2<f32>(n - 0.5) * 0.6, in.sun);
+            }
         }
         case 10u: { // heat haze: bends the scene behind it, adds nothing of its own
             return haze(in, c, r);

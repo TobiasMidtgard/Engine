@@ -15,6 +15,7 @@ use crate::marks::{MarkDesc, MarkKind};
 use crate::trail::{RibbonStyle, Trail};
 
 mod casting;
+pub use casting::FIRE_JET_REACH;
 mod elements;
 mod stone;
 mod weaves;

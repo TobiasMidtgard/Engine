@@ -21,13 +21,18 @@
 //!
 //! A frame rendered twice (a screenshot right after the scheduled render) is simulated once.
 
+use std::sync::Arc;
+
 use bevy_ecs::prelude::*;
 use bytemuck::Zeroable;
+use engine_assets::Assets;
 use engine_core::math::{DVec3, Mat3, Vec3};
+use engine_render::image_cache::TextureUse;
 use engine_render::wgpu;
+use engine_render::wgpu::util::DeviceExt;
 use engine_render::{
-    FeatureStats, FrameContext, GpuShared, GrowBuffer, PrepareOut, RenderFeature, RenderPhase,
-    RenderSettings, ViewData,
+    FeatureStats, FrameContext, GpuShared, GrowBuffer, Image, ImageTexture, PrepareOut,
+    RenderFeature, RenderPhase, RenderSettings, ViewData,
 };
 
 use crate::debris;
@@ -37,6 +42,7 @@ use crate::gpu::{
     CHUNK, GpuEmitter, GpuParticle, GpuSim, GpuSpawn, GpuSubEvent, GpuUpdate, NO_CURSOR,
     RibbonVertex,
 };
+use crate::sheets;
 use crate::shift::PendingShift;
 use crate::trail::{Ribbons, build_ribbon};
 
@@ -168,12 +174,22 @@ struct Gpu {
     debris_group: Option<wgpu::BindGroup>,
     /// View size the bind groups' scene copies were made for.
     bound_size: (u32, u32),
+    /// Baked smoke sheets (group 2 of the draw pipelines, see [`sheets`]).
+    sheet_layout: wgpu::BindGroupLayout,
+    sheet_info: wgpu::Buffer,
+    /// A 1x1 stand-in bound where a sheet's map is not loaded.
+    sheet_dummy: wgpu::TextureView,
+    sheet_group: Option<wgpu::BindGroup>,
+    /// `ImageTexture::id` of every bound map (0 for the stand-in).
+    sheet_bound: [u64; sheets::KINDS * sheets::MAPS],
 }
 
 /// Draws particles, trails and beams. Added by [`crate::VfxPlugin`].
 #[derive(Default)]
 pub struct ParticleFeature {
     gpu: Option<Gpu>,
+    /// Baked smoke and dust sheets, asked for on the first prepare.
+    sheets: sheets::SheetHandles,
     /// Most particle slots one storage binding can hold on this device.
     device_slots: u32,
     emitters: Vec<GpuEmitter>,
@@ -362,6 +378,73 @@ impl RenderFeature for ParticleFeature {
             ],
         });
 
+        let both = wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT;
+        let sheet_texture = |binding| wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                view_dimension: wgpu::TextureViewDimension::D2,
+                multisampled: false,
+            },
+            count: None,
+        };
+        let sheet_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("vfx sheets"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: both,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                sheet_texture(2),
+                sheet_texture(3),
+                sheet_texture(4),
+                sheet_texture(5),
+                sheet_texture(6),
+                sheet_texture(7),
+            ],
+        });
+        let sheet_info = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("vfx sheet info"),
+            size: std::mem::size_of::<GpuSheetInfo>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let sheet_dummy = gpu
+            .device
+            .create_texture_with_data(
+                &gpu.queue,
+                &wgpu::TextureDescriptor {
+                    label: Some("vfx sheet stand-in"),
+                    size: wgpu::Extent3d {
+                        width: 1,
+                        height: 1,
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: wgpu::TextureFormat::Rgba8Unorm,
+                    usage: wgpu::TextureUsages::TEXTURE_BINDING,
+                    view_formats: &[],
+                },
+                wgpu::util::TextureDataOrder::LayerMajor,
+                &[128, 128, 128, 0],
+            )
+            .create_view(&Default::default());
+
         let sim_shader = gpu.shader("vfx sim", &particle_shader(SHADER_SIM), true);
         let sim_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("vfx sim"),
@@ -419,7 +502,11 @@ impl RenderFeature for ParticleFeature {
         let draw_shader = gpu.shader("vfx particles", &particle_shader(SHADER_DRAW), true);
         let draw_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("vfx particles"),
-            bind_group_layouts: &[Some(&gpu.frame_layout), Some(&draw_layout)],
+            bind_group_layouts: &[
+                Some(&gpu.frame_layout),
+                Some(&draw_layout),
+                Some(&sheet_layout),
+            ],
             immediate_size: 0,
         });
         let draw = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -692,6 +779,11 @@ impl RenderFeature for ParticleFeature {
             draw_group: None,
             debris_group: None,
             bound_size: (0, 0),
+            sheet_layout,
+            sheet_info,
+            sheet_dummy,
+            sheet_group: None,
+            sheet_bound: [u64::MAX; sheets::KINDS * sheets::MAPS],
         });
     }
 
@@ -719,6 +811,7 @@ impl RenderFeature for ParticleFeature {
         if self.gpu.is_none() {
             return;
         }
+        self.sheets.request(world);
         let frame = world.get_resource::<ParticleFrame>().map(|f| f.frame);
         if frame.is_some() && frame != self.last_frame {
             self.reanchor = world
@@ -740,6 +833,7 @@ impl RenderFeature for ParticleFeature {
         let Some(g) = self.gpu.as_mut() else {
             return;
         };
+        bind_sheets(g, &self.sheets, world, gpu);
         let settings = world
             .get_resource::<VfxSettings>()
             .cloned()
@@ -1249,9 +1343,14 @@ impl RenderFeature for ParticleFeature {
         if phase != RenderPhase::Transparent {
             return;
         }
-        if let (false, Some(group)) = (self.particle_shadows.is_empty(), &g.draw_group) {
+        if let (false, Some(group), Some(sheet_group)) = (
+            self.particle_shadows.is_empty(),
+            &g.draw_group,
+            &g.sheet_group,
+        ) {
             pass.set_pipeline(&g.smoke_shadow);
             pass.set_bind_group(1, group, &[]);
+            pass.set_bind_group(2, sheet_group, &[]);
             let mut budget = PARTICLE_SHADOW_SLOTS;
             for &(_, base, len) in &self.particle_shadows {
                 let n = len.min(budget);
@@ -1267,9 +1366,12 @@ impl RenderFeature for ParticleFeature {
             pass.set_vertex_buffer(0, g.ribbons.buffer.slice(..));
             pass.draw(0..self.ribbon_count, 0..1);
         }
-        if let (false, Some(group)) = (self.draws.is_empty(), &g.draw_group) {
+        if let (false, Some(group), Some(sheet_group)) =
+            (self.draws.is_empty(), &g.draw_group, &g.sheet_group)
+        {
             pass.set_pipeline(&g.draw);
             pass.set_bind_group(1, group, &[]);
+            pass.set_bind_group(2, sheet_group, &[]);
             for &(_, base, len) in &self.draws {
                 pass.draw(0..4, base..base + len);
             }
@@ -1298,6 +1400,83 @@ impl RenderFeature for ParticleFeature {
             "skipped_emitters": self.skipped,
         })
     }
+}
+
+/// [`sheets`]' uniform: per kind, the grid, frames and flags, then pixels per frame and gain.
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct GpuSheetInfo {
+    kinds: [[f32; 4]; sheets::KINDS],
+    cells: [[f32; 4]; sheets::KINDS],
+}
+
+/// Average lit fraction the baker's lightmaps leave over a puff; the shader divides it out so
+/// sheet smoke is about as bright as the light computed for it.
+const SHEET_MEAN_LIGHT: f32 = 0.4;
+
+/// Bind the loaded sheets' maps (the renderer's shared copies, asked for every frame as its
+/// cache requires) and the stand-in for the rest; rebuild the group when any map changes.
+fn bind_sheets(g: &mut Gpu, sheets: &sheets::SheetHandles, world: &World, gpu: &GpuShared) {
+    let images = world.get_resource::<Assets<Image>>();
+    let mut maps: [Option<Arc<ImageTexture>>; sheets::KINDS * sheets::MAPS] = Default::default();
+    let mut info = GpuSheetInfo::zeroed();
+    for (kind, sheet) in sheets.kinds.iter().enumerate() {
+        let (Some((handles, meta)), Some(images)) = (sheet, images) else {
+            continue;
+        };
+        for (m, handle) in handles.iter().enumerate() {
+            if let Some(handle) = handle {
+                maps[kind * sheets::MAPS + m] =
+                    gpu.image_texture_for(images, *handle, TextureUse::Linear);
+            }
+        }
+        let [a, b, mv] = [0, 1, 2].map(|m| maps[kind * sheets::MAPS + m].as_ref());
+        let (Some(a), Some(_)) = (a, b) else {
+            continue;
+        };
+        let flags = if mv.is_some() { 2.0 } else { 1.0 };
+        info.kinds[kind] = [
+            meta.grid[0] as f32,
+            meta.grid[1] as f32,
+            meta.frames as f32,
+            flags,
+        ];
+        info.cells[kind] = [
+            a.width as f32 / meta.grid[0] as f32,
+            a.height as f32 / meta.grid[1] as f32,
+            1.0 / SHEET_MEAN_LIGHT,
+            0.0,
+        ];
+    }
+    let ids = std::array::from_fn(|i| maps[i].as_ref().map_or(0, |t| t.id));
+    if g.sheet_group.is_some() && ids == g.sheet_bound {
+        return;
+    }
+    gpu.queue
+        .write_buffer(&g.sheet_info, 0, bytemuck::bytes_of(&info));
+    let view = |i: usize| maps[i].as_ref().map_or(&g.sheet_dummy, |t| &t.view);
+    let mut entries = vec![
+        wgpu::BindGroupEntry {
+            binding: 0,
+            resource: g.sheet_info.as_entire_binding(),
+        },
+        wgpu::BindGroupEntry {
+            binding: 1,
+            resource: wgpu::BindingResource::Sampler(&gpu.linear_clamp),
+        },
+    ];
+    for i in 0..sheets::KINDS * sheets::MAPS {
+        entries.push(wgpu::BindGroupEntry {
+            binding: 2 + i as u32,
+            resource: wgpu::BindingResource::TextureView(view(i)),
+        });
+    }
+    g.sheet_group = Some(gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("vfx sheets"),
+        layout: &g.sheet_layout,
+        entries: &entries,
+    }));
+    g.sheet_bound = ids;
 }
 
 impl ParticleFeature {

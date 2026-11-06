@@ -15,8 +15,19 @@ use engine_render::prelude::*;
 use engine_render::{RenderDisabled, capture_now};
 use engine_vfx::prelude::*;
 
+/// Default capture size; `VFX_GALLERY_SIZE=1280x720` overrides it.
 const W: u32 = 640;
 const H: u32 = 360;
+
+fn size() -> (u32, u32) {
+    std::env::var("VFX_GALLERY_SIZE")
+        .ok()
+        .and_then(|s| {
+            let (w, h) = s.split_once('x')?;
+            Some((w.trim().parse().ok()?, h.trim().parse().ok()?))
+        })
+        .unwrap_or((W, H))
+}
 const STEP: f64 = 1.0 / 20.0;
 
 #[derive(Component)]
@@ -40,9 +51,10 @@ fn main() {
     let mut app = App::new();
     app.world.resource_mut::<EngineConfig>().headless = true;
     {
+        let (width, height) = size();
         let mut w = app.world.resource_mut::<Window>();
-        w.width = W;
-        w.height = H;
+        w.width = width;
+        w.height = height;
     }
     app.world
         .resource_mut::<Time>()

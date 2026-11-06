@@ -57,6 +57,7 @@ pub(super) fn all(existing: &[EffectDesc]) -> Vec<EffectDesc> {
         blight_charge(&converge),
         shadow_charge(&converge),
         fire_cone(),
+        fire_jet(),
         frost_cone(),
         storm_cone(),
         blood_cone(),
@@ -468,6 +469,116 @@ fn fire_cone() -> EffectDesc {
             },
         ],
     )
+}
+
+/// Reach of `spell.fire.jet` at scale 1, meters (the beam cue scales it to its length).
+pub const FIRE_JET_REACH: f32 = 8.0;
+
+fn fire_jet() -> EffectDesc {
+    // Half a second of a channelled stream (the beam cue comes again every 0.5 s while the
+    // spell is held, and the copies overlap into one steady jet). Flames leave the hand in a
+    // tight cone fast enough to reach the end, swelling into a widening, rolling cone as they
+    // slow; a white-hot core near the hand, heat shimmer around it, embers and a little smoke.
+    let reach = FIRE_JET_REACH;
+    let life = 0.55;
+    let stream = |name: &str, rate: f32, angle: f32| EmitterDesc {
+        rate,
+        duration: Some(0.5),
+        shape: EmitShape::Cone {
+            angle_deg: angle,
+            radius: 0.06,
+        },
+        // Fast enough to reach the end in a lifetime even with the drag.
+        speed: [reach / life * 1.25, reach / life * 1.45],
+        drag: 1.2,
+        ..em(name)
+    };
+    EffectDesc {
+        light: light([1.0, 0.55, 0.2], 14_000.0, 10.0, 0.5, 0.25),
+        ..effect(
+            "spell.fire.jet",
+            "A channelled jet of flame from the hand: a white-hot core flaring into a widening              cone of rolling fire, heat shimmer, embers and a thin trail of smoke. Scale = reach              / 8 m.",
+            Some(0.5),
+            vec![
+                EmitterDesc {
+                    lifetime: [life * 0.8, life],
+                    size: [0.22, 0.32],
+                    size_over_life: c(&[(0.0, 0.35), (0.35, 1.4), (1.0, 3.2)]),
+                    rotation_deg: [0.0, 360.0],
+                    spin_deg: [-120.0, 120.0],
+                    sprite: Sprite::Fireball,
+                    color: flame_colors(),
+                    emissive: 15_000.0,
+                    additive: 1.0,
+                    soft: 0.2,
+                    turbulence: 3.0,
+                    turbulence_scale: 0.8,
+                    ..stream("flames", 90.0, 6.0)
+                },
+                EmitterDesc {
+                    lifetime: [0.12, 0.2],
+                    size: [0.12, 0.18],
+                    size_over_life: c(&[(0.0, 0.6), (1.0, 1.6)]),
+                    sprite: Sprite::Plasma,
+                    facing: Facing::Velocity,
+                    stretch: 0.025,
+                    color: g(&[
+                        (0.0, [1.0, 0.9, 0.7, 0.0]),
+                        (0.15, [1.0, 0.85, 0.6, 0.9]),
+                        (1.0, [1.0, 0.5, 0.15, 0.0]),
+                    ]),
+                    emissive: 30_000.0,
+                    additive: 1.0,
+                    soft: 0.0,
+                    ..stream("core", 70.0, 2.5)
+                },
+                EmitterDesc {
+                    lifetime: [life * 0.9, life * 1.2],
+                    size: [0.4, 0.6],
+                    size_over_life: c(&[(0.0, 0.5), (1.0, 2.4)]),
+                    ..EmitterDesc {
+                        rate: 22.0,
+                        duration: Some(0.5),
+                        shape: EmitShape::Cone {
+                            angle_deg: 7.0,
+                            radius: 0.1,
+                        },
+                        speed: [reach / life * 0.9, reach / life * 1.2],
+                        drag: 1.2,
+                        ..haze("shimmer", 0.8)
+                    }
+                },
+                EmitterDesc {
+                    lifetime: [0.4, 0.8],
+                    size: [0.012, 0.025],
+                    sprite: Sprite::Spark,
+                    facing: Facing::Velocity,
+                    stretch: 0.03,
+                    color: spark_colors(),
+                    emissive: 22_000.0,
+                    additive: 1.0,
+                    soft: 0.0,
+                    gravity: 0.3,
+                    ..stream("embers", 40.0, 10.0)
+                },
+                EmitterDesc {
+                    lifetime: [0.9, 1.4],
+                    size: [0.3, 0.45],
+                    delay: 0.1,
+                    acceleration: [0.0, 0.0, 0.0],
+                    speed: [reach / life * 0.7, reach / life * 0.9],
+                    drag: 2.5,
+                    shape: EmitShape::Cone {
+                        angle_deg: 9.0,
+                        radius: 0.1,
+                    },
+                    rate: 5.0,
+                    duration: Some(0.4),
+                    ..smoke("smoke", 0.25, 0.18)
+                },
+            ],
+        )
+    }
 }
 
 fn frost_cone() -> EffectDesc {

@@ -271,6 +271,18 @@ pub fn beam_style(look: &str, color: [f32; 3]) -> (RibbonStyle, [f32; 3]) {
     }
 }
 
+/// The flame-jet effect a beam of `look` pours instead of a ribbon: `spell.<look>.jet` when the
+/// library has one, else `spell.fire.jet` for fire looks.
+pub fn flame_jet(library: &EffectLibrary, look: &str) -> Option<String> {
+    let own = format!("spell.{look}.jet");
+    if library.contains(&own) {
+        return Some(own);
+    }
+    matches!(look, "fire" | "flame" | "inferno" | "flame_jet")
+        .then(|| "spell.fire.jet".to_string())
+        .filter(|n| library.contains(n))
+}
+
 /// The mark kind a cue asks for.
 pub fn mark_kind(m: SpellMark) -> MarkKind {
     match m {
@@ -347,6 +359,16 @@ pub fn play_spell_cues(
                 width_m,
                 secs,
             } => {
+                // Fire looks pour a jet of flame along the beam instead of a ribbon.
+                if let Some(name) = flame_jet(&library, look) {
+                    let d = (*to - *from).as_vec3();
+                    let len = d.length();
+                    if len > 0.05 {
+                        let scale = (len / crate::builtin::FIRE_JET_REACH).clamp(0.3, 4.0);
+                        spawn_effect_at(&mut commands, &name, *from, d / len, scale);
+                    }
+                    continue;
+                }
                 let (style, color) = beam_style(look, look_color(look));
                 let emissive = if style == RibbonStyle::Smoke {
                     2000.0
@@ -591,6 +613,32 @@ mod tests {
         let lib = app.world.resource::<EffectLibrary>();
         let borrowed = lib.get("spell.hellfire.field").expect("defined once");
         assert!(borrowed.description.contains("spell.blight.field"));
+    }
+
+    #[test]
+    fn a_fire_beam_pours_a_flame_jet_along_its_length() {
+        let mut app = app();
+        let from = DVec3::new(0.0, 1.5, 0.0);
+        app.world.write_message(SpellCue::Beam {
+            from,
+            to: from + DVec3::Z * 16.0,
+            look: "fire".into(),
+            width_m: 0.3,
+            secs: 0.5,
+        });
+        app.update();
+        let jets: Vec<(f32, Vec3)> = app
+            .world
+            .query::<(&ParticleEffect, &Transform)>()
+            .iter(&app.world)
+            .filter(|(f, _)| f.effect == "spell.fire.jet")
+            .map(|(f, t)| (f.scale, t.rotation * Vec3::Y))
+            .collect();
+        assert_eq!(jets.len(), 1, "one jet, no ribbon");
+        assert_eq!(app.world.query::<&Beam>().iter(&app.world).count(), 0);
+        // Twice the jet's own reach, pointing down the beam.
+        assert!((jets[0].0 - 2.0).abs() < 1e-3, "{jets:?}");
+        assert!(jets[0].1.dot(Vec3::Z) > 0.999, "{jets:?}");
     }
 
     #[test]
