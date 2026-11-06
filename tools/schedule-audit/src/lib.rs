@@ -98,11 +98,9 @@ mod tests {
         ("FixedPreUpdate", 0, &[]),
         (
             "FixedUpdate",
-            19,
-            &[
-                "engine_physics::physics_sync",
-                "engine_physics::physics_write_back",
-            ],
+            // (20: the physics write back's commands, since it stopped being exclusive.)
+            20,
+            &[],
         ),
         (
             "Last",
@@ -160,7 +158,8 @@ mod tests {
     /// Most systems writing `Transform` in the fixed step. Two writers of one component only
     /// run side by side when their queries can't meet (`With`/`Without`), which this count can't
     /// see, so it is a ceiling to bring down, not a list.
-    const FIXED_TRANSFORM_WRITERS_MAX: usize = 44;
+    /// (45: `engine_physics::physics_write_back`, a plain system since PR #665, counts now.)
+    const FIXED_TRANSFORM_WRITERS_MAX: usize = 45;
 
     fn fix(what: &str, extra: &BTreeSet<&str>, gone: &BTreeSet<&str>) -> String {
         format!(
