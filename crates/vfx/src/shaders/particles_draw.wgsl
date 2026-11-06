@@ -13,6 +13,8 @@
 @group(1) @binding(2) var scene_depth: texture_depth_2d;
 @group(1) @binding(3) var scene_color: texture_2d<f32>; // HDR, pre-exposed (heat haze)
 @group(1) @binding(4) var<storage, read> order: array<u32>;
+// The origin the particles were stepped for minus this view's (a portal's or a mirror's view).
+@group(1) @binding(5) var<uniform> view_shift: vec4<f32>;
 
 // Baked flipbooks (`sheets.rs`): smoke (kind 0), dust (kind 1) and the fireball's burning
 // billow (kind 2). Unloaded kinds bind a 1x1 stand-in and flag 0.
@@ -78,7 +80,7 @@ fn vs_particle(@builtin(vertex_index) vi: u32, @builtin(instance_index) instance
     let size = p.size * sample_size(e, t) * e.look.z;
     if (col.a <= 0.002 || size <= 0.0) { return hidden(); }
 
-    let rel = particle_rel(p, e);
+    let rel = particle_rel(p, e) + view_shift.xyz;
     let corner = vec2<f32>(f32(vi & 1u), f32(vi >> 1u)) * 2.0 - 1.0;
     let facing = u32(e.spin_look.w);
     // A baked puff rises up its frame, so it only leans a little either way.
@@ -1292,7 +1294,7 @@ fn vs_smoke_shadow(@builtin(vertex_index) vi: u32, @builtin(instance_index) slot
     c[(axis + 2u) % 3u] = uv.y;
     let along = mix(-r, reach, c.z * 0.5 + 0.5);
     let width = r + max(along, 0.0) * SMOKE_SHADOW_SPREAD;
-    let center = particle_rel(p, e);
+    let center = particle_rel(p, e) + view_shift.xyz;
     let pos = center + d * along + (bx * c.x + by * c.y) * width * 1.6;
     out.position = frame.view_proj * vec4<f32>(pos, 1.0);
     out.center = center;

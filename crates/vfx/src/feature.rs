@@ -163,6 +163,9 @@ struct Gpu {
     /// A count, then this frame's [`GpuSortJob`]s.
     sort_jobs: GrowBuffer,
     sim: wgpu::Buffer,
+    /// What the view being drawn adds to the particles' camera-relative positions: the origin
+    /// the simulation ran against minus this view's (zero in the main view).
+    view_shift: wgpu::Buffer,
     /// Sub-emitter events: a count, then the events (cleared each frame).
     events: wgpu::Buffer,
     /// Spawn cursors of layers fed by sub-emitters (kept from frame to frame).
@@ -216,6 +219,9 @@ pub struct ParticleFeature {
     reanchor: Option<engine_world::WorldShift>,
     /// Run the simulation in this frame's `compute` (false when re-rendering a frame).
     simulate: bool,
+    /// Sort again in `compute` without stepping: a view whose eye is not the one the frame
+    /// was stepped for (a portal's or a mirror's).
+    resort: bool,
     soft: bool,
     /// Some emitter this frame draws heat haze or a portal (needs the scene color copy).
     haze: bool,
@@ -226,6 +232,21 @@ pub struct ParticleFeature {
 }
 
 impl ParticleFeature {
+    /// Sort every visible layer's ring far to near from the view's eye.
+    fn sort_pass(encoder: &mut wgpu::CommandEncoder, g: &Gpu, jobs: u32) {
+        let (true, Some(group)) = (jobs > 0, &g.sort_group) else {
+            return;
+        };
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("vfx sort"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(&g.sort);
+        pass.set_bind_group(0, group, &[]);
+        let (x, y) = dispatch_size(jobs);
+        pass.dispatch_workgroups(x, y, 1);
+    }
+
     /// Particle slots the GPU buffer holds now.
     pub fn slots(&self) -> u32 {
         self.gpu.as_ref().map_or(0, |g| g.slots)
@@ -242,6 +263,27 @@ fn storage(
         visibility,
         ty: wgpu::BindingType::Buffer {
             ty: wgpu::BufferBindingType::Storage { read_only },
+            has_dynamic_offset: false,
+            min_binding_size: None,
+        },
+        count: None,
+    }
+}
+
+fn write_view_shift(gpu: &GpuShared, g: &Gpu, shift: Vec3) {
+    gpu.queue.write_buffer(
+        &g.view_shift,
+        0,
+        bytemuck::cast_slice(&shift.extend(0.0).to_array()),
+    );
+}
+
+fn uniform(binding: u32, visibility: wgpu::ShaderStages) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility,
+        ty: wgpu::BindingType::Buffer {
+            ty: wgpu::BufferBindingType::Uniform,
             has_dynamic_offset: false,
             min_binding_size: None,
         },
@@ -375,6 +417,7 @@ impl RenderFeature for ParticleFeature {
                     count: None,
                 },
                 storage(4, true, wgpu::ShaderStages::VERTEX),
+                uniform(5, wgpu::ShaderStages::VERTEX),
             ],
         });
 
@@ -475,6 +518,7 @@ impl RenderFeature for ParticleFeature {
                 storage(1, true, compute),
                 storage(2, true, compute),
                 storage(3, false, compute),
+                uniform(4, compute),
             ],
         });
         let sort_shader = gpu.shader(
@@ -630,6 +674,7 @@ impl RenderFeature for ParticleFeature {
                 storage(0, true, wgpu::ShaderStages::VERTEX),
                 storage(1, true, wgpu::ShaderStages::VERTEX),
                 storage(2, true, wgpu::ShaderStages::VERTEX),
+                uniform(3, wgpu::ShaderStages::VERTEX),
             ],
         });
         let debris_scene_shader = gpu.shader("vfx debris", &debris_shader(SHADER_DEBRIS), true);
@@ -769,6 +814,12 @@ impl RenderFeature for ParticleFeature {
                 usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             }),
+            view_shift: device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("vfx view shift"),
+                size: 16,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }),
             events,
             cursors,
             ribbons: GrowBuffer::new(
@@ -806,7 +857,7 @@ impl RenderFeature for ParticleFeature {
         &mut self,
         world: &mut World,
         _gpu: &GpuShared,
-        _view: &ViewData,
+        view: &ViewData,
         _settings: &RenderSettings,
     ) {
         // The only write: take a re-anchor the world left for the particles (read in
@@ -816,7 +867,8 @@ impl RenderFeature for ParticleFeature {
         }
         self.sheets.request(world);
         let frame = world.get_resource::<ParticleFrame>().map(|f| f.frame);
-        if frame.is_some() && frame != self.last_frame {
+        // Extra views (portals, mirrors) draw before the main view, which steps the frame.
+        if !view.extra_view && frame.is_some() && frame != self.last_frame {
             self.reanchor = world
                 .get_resource_mut::<PendingShift>()
                 .and_then(|mut p| p.0.take());
@@ -833,6 +885,7 @@ impl RenderFeature for ParticleFeature {
     ) {
         self.stats = FeatureStats::default();
         self.simulate = false;
+        self.resort = false;
         let Some(g) = self.gpu.as_mut() else {
             return;
         };
@@ -848,7 +901,6 @@ impl RenderFeature for ParticleFeature {
         }
         self.soft = settings.soft_particles;
         self.scene_collision = settings.scene_collision;
-        self.haze = false;
 
         // Ribbons follow the camera every time the frame is drawn.
         self.ribbon_vertices.clear();
@@ -877,13 +929,34 @@ impl RenderFeature for ParticleFeature {
             self.clear_draws();
             return;
         };
-        if self.last_frame == Some(frame_number) {
-            // Drawn again in the same frame (a screenshot): show the same particles.
+        // Drawn again in the same frame (a screenshot), or an extra view (a portal's or a
+        // mirror's, drawn before the main view steps the frame): show the particles as the
+        // last step left them, seen from this view's eye. They are kept relative to the eye
+        // the step ran for, so this view adds the difference.
+        if self.last_frame == Some(frame_number) || view.extra_view {
+            let Some(mut sim_origin) = self.last_origin else {
+                self.clear_draws();
+                return;
+            };
+            if view.extra_view
+                && self.last_frame != Some(frame_number)
+                && let Some(s) = world
+                    .get_resource::<PendingShift>()
+                    .and_then(|p| p.0.as_ref())
+            {
+                // The step to come re-anchors the world: the last eye moves with it.
+                sim_origin = s.point(sim_origin);
+            }
+            let shift = (sim_origin - view.origin).as_vec3();
+            self.resort = shift != Vec3::ZERO;
+            write_view_shift(gpu, g, shift);
             self.fill_stats();
             return;
         }
         self.last_frame = Some(frame_number);
         self.simulate = true;
+        self.haze = false;
+        write_view_shift(gpu, g, Vec3::ZERO);
         // If the world re-anchored since the last step, the last camera origin moves with it
         // and the particles turn and pick up the old frame's motion.
         let reanchor = self.reanchor.take();
@@ -1225,6 +1298,10 @@ impl RenderFeature for ParticleFeature {
                         binding: 4,
                         resource: g.order.as_entire_binding(),
                     },
+                    wgpu::BindGroupEntry {
+                        binding: 5,
+                        resource: g.view_shift.as_entire_binding(),
+                    },
                 ],
             }));
         }
@@ -1249,6 +1326,10 @@ impl RenderFeature for ParticleFeature {
                         binding: 3,
                         resource: g.order.as_entire_binding(),
                     },
+                    wgpu::BindGroupEntry {
+                        binding: 4,
+                        resource: g.view_shift.as_entire_binding(),
+                    },
                 ],
             }));
         }
@@ -1269,10 +1350,18 @@ impl RenderFeature for ParticleFeature {
                         binding: 2,
                         resource: g.pieces.as_entire_binding(),
                     },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: g.view_shift.as_entire_binding(),
+                    },
                 ],
             }));
         }
         if !self.simulate {
+            // Another view of a frame already stepped: sort for this view's eye.
+            if self.resort {
+                Self::sort_pass(encoder, g, self.sort_jobs.len() as u32);
+            }
             return;
         }
         for r in &self.cleared {
@@ -1311,16 +1400,7 @@ impl RenderFeature for ParticleFeature {
             let (x, y) = dispatch_size(jobs);
             pass.dispatch_workgroups(x, y, 1);
         }
-        if let (false, Some(group)) = (self.sort_jobs.is_empty(), &g.sort_group) {
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("vfx sort"),
-                timestamp_writes: None,
-            });
-            pass.set_pipeline(&g.sort);
-            pass.set_bind_group(0, group, &[]);
-            let (x, y) = dispatch_size(self.sort_jobs.len() as u32);
-            pass.dispatch_workgroups(x, y, 1);
-        }
+        Self::sort_pass(encoder, g, self.sort_jobs.len() as u32);
     }
 
     fn draw_prepass(&self, pass: &mut wgpu::RenderPass<'_>, _ctx: &FrameContext) {

@@ -18,6 +18,8 @@ const DEBRIS_VERTICES: u32 = 60u;
 @group(1) @binding(0) var<storage, read> particles: array<Particle>;
 @group(1) @binding(1) var<storage, read> emitters: array<Emitter>;
 @group(1) @binding(2) var<storage, read> pieces: array<DebrisVertex>;
+// The origin the particles were stepped for minus this view's (a portal's or a mirror's view).
+@group(1) @binding(3) var<uniform> view_shift: vec4<f32>;
 
 struct Piece {
     alive: bool,
@@ -80,8 +82,8 @@ fn debris_piece(slot: u32, vertex: u32) -> Piece {
         center += e.plane.xyz * lift;
         prev_center += e.plane.xyz * lift;
     }
-    out.rel = center + quat_rotate(q, local);
-    out.prev_rel = prev_center + quat_rotate(q_prev, local);
+    out.rel = center + view_shift.xyz + quat_rotate(q, local);
+    out.prev_rel = prev_center + view_shift.xyz + quat_rotate(q_prev, local);
     out.normal = quat_rotate(q, v.normal.xyz);
     // No two pieces quite the same shade.
     out.color = vec4<f32>(col.rgb * mix(0.72, 1.12, debris_hash(p.seed, 8.0)), col.a);

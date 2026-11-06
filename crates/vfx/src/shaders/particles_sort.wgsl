@@ -29,6 +29,8 @@ const SORT_THREADS: u32 = 256u;
 @group(0) @binding(1) var<storage, read> emitters: array<Emitter>;
 @group(0) @binding(2) var<storage, read> jobs: SortJobs;
 @group(0) @binding(3) var<storage, read_write> order: array<u32>;
+// The origin the particles were stepped for minus the eye they are sorted for.
+@group(0) @binding(4) var<uniform> view_shift: vec4<f32>;
 
 var<workgroup> keys: array<u32, 2048>;
 var<workgroup> job_count: u32;
@@ -39,7 +41,7 @@ fn sort_key(job: SortJob, i: u32) -> u32 {
     let p = particles[job.first + i];
     var q = 1u;
     if (p.age < p.life) {
-        let d = length(particle_rel(p, emitters[p.emitter]));
+        let d = length(particle_rel(p, emitters[p.emitter]) + view_shift.xyz);
         q = 2u + u32(saturate((d - job.near) / max(job.far - job.near, 1e-3)) * 65533.0);
     }
     return (q << 16u) | i;

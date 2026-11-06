@@ -185,6 +185,49 @@ fn glowing_particles_appear_where_the_emitter_is_even_far_from_the_origin() {
     }
 }
 
+/// A portal's or a mirror's view draws before the main view each frame. The particles must
+/// still show where they are in the main view, not moved by the gap between the two eyes.
+#[test]
+fn particles_stay_put_in_the_main_view_while_another_view_draws_first() {
+    let mut app = app(DVec3::ZERO, 400.0);
+    let picture = app
+        .world
+        .resource_mut::<engine_assets::Assets<Image>>()
+        .add(Image::render_target(UVec2::new(96, 96)));
+    app.world.spawn((
+        Camera::perspective(70.0).with_exposure(Exposure::Manual { ev100: 8.0 }),
+        Transform::from_xyz(-7.0, 3.0, 9.0).looking_at(TARGET, Vec3::Y),
+        ExtraView::image(picture, UVec2::new(96, 96)),
+    ));
+    let Some(before) = shot(&mut app, "vfx_extra_view_before.png") else {
+        return;
+    };
+    app.world
+        .resource_mut::<EffectLibrary>()
+        .insert(glow_cloud())
+        .unwrap();
+    app.world.spawn((
+        Transform::from_translation(TARGET),
+        ParticleEffect::new("test.glow"),
+    ));
+    let after = shot(&mut app, "vfx_extra_view_after.png").unwrap();
+    let center = project(TARGET);
+    let (b, a) = (luma(&before, center, 3), luma(&after, center, 3));
+    assert!(
+        a > b + 60.0,
+        "the cloud shows where it is: center luma {b} -> {a}"
+    );
+    // Where the gap between the eyes would have moved it, nothing changed.
+    let moved = project(TARGET + (DVec3::new(-7.0, 3.0, 9.0) - EYE));
+    if moved.0 < W && moved.1 < H {
+        let (b, a) = (luma(&before, moved, 3), luma(&after, moved, 3));
+        assert!(
+            (a - b).abs() < 6.0,
+            "not moved by the other eye: luma {b} -> {a}"
+        );
+    }
+}
+
 #[test]
 fn a_spell_lights_the_ground_around_it() {
     let mut app = app(DVec3::ZERO, 200.0);
