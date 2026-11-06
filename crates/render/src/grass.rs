@@ -266,6 +266,13 @@ pub struct GrassStyle {
     /// ones. Blades only (not leaves, fronds or twigs); a meadow in spring before the new growth
     /// overtops its thatch is a quarter or more dead, in midsummer about a tenth.
     pub dead: f32,
+    /// Seed heads only (`bloom_length` over 0): over 0, the head is a raceme of flowers set
+    /// alternately up its length, one every 1/`florets` of it, drawn cut apart near the camera
+    /// (fireweed, loosestrife, lupin): nodding buds at the top, open flowers below them and
+    /// thin seed pods angled up at the bottom, as a raceme opens from its base upward. A
+    /// flower's slot is about as long as half the head is wide (`bloom_size`), so about the
+    /// head's length / (`bloom_size` / 2): 12 a fireweed's.
+    pub florets: f32,
 }
 
 impl Default for GrassStyle {
@@ -304,6 +311,7 @@ impl Default for GrassStyle {
             alternate_leaves: 0.0,
             bloom_height: 0.0,
             dead: 0.0,
+            florets: 0.0,
         }
     }
 }
@@ -974,6 +982,17 @@ fn style_cut(style: &GrassStyle) -> f32 {
     }
 }
 
+/// A style's raceme flowers (`GrassStyle::florets`), whole, 0 for a plain seed head or
+/// round flower heads: `GpuField::bloom` w's whole part (the share of flowering stems is its
+/// fraction).
+fn raceme_florets(style: &GrassStyle) -> f32 {
+    if style.bloom_length > 0.0 && style.florets >= 1.0 {
+        style.florets.round().clamp(4.0, 40.0)
+    } else {
+        0.0
+    }
+}
+
 /// `GpuField::kind` z over this: a twig with `z - ALTERNATE_CUT` alternate leaves.
 const ALTERNATE_CUT: f32 = 100.0;
 /// ... and over this, `z - PALMATE_CUT` alternate leaves of three leaflets each.
@@ -1056,7 +1075,8 @@ impl GpuField {
             style.bloom_color[0],
             style.bloom_color[1],
             style.bloom_color[2],
-            style.bloom.clamp(0.0, 1.0),
+            // The share of flowering stems, plus (whole) the raceme's flowers.
+            style.bloom.clamp(0.0, 0.999) + raceme_florets(style),
         ];
         // Seed heads' length, or (below 0) round heads' stems as a share of the plant's height.
         self.axis_z[3] = if style.bloom_length <= 0.0 && style.bloom_height > 0.0 {
@@ -1773,7 +1793,10 @@ impl RenderFeature for GrassFeature {
             } else {
                 full_density_distance(far)
             };
-            let cut_mode = if field.palette().any(|s| style_cut(s) != 0.0) {
+            let cut_mode = if field
+                .palette()
+                .any(|s| style_cut(s) != 0.0 || (s.bloom > 0.0 && raceme_florets(s) > 0.0))
+            {
                 MODE_CUT
             } else {
                 0

@@ -333,7 +333,7 @@ fn grass_seed(instance: u32, shadow: bool) -> BladeSeed {
     // Flowering stems stand a little taller and straighter (BLOOM_RISE in grass.rs), above
     // the blades around them; a shrub's berries hang among its leaves (`bloom_height`: the
     // seed head length's slot below 0).
-    let flower = r2.z < f.bloom.w;
+    let flower = r2.z < fract(f.bloom.w);
     let bloom_rise = select(1.15, -f.axis_z.w, f.axis_z.w < 0.0);
     let height = grown * select(1.0, bloom_rise, flower) - snow;
     if (height < 0.008) { return out; }
@@ -542,7 +542,9 @@ fn cs_cull(@builtin(workgroup_id) group: vec3<u32>, @builtin(local_invocation_in
         if (!grass_in_view(frame.view_proj, center, radius)) { return; }
         let tip = grass_tip(seed, frame.time.x, tiling);
         let prev = grass_tip(seed, frame.time.x - frame.time.z, tiling);
-        let cut = grass_fields[seed.field].kind.z != 0.0;
+        // (A raceme's flowering stems too: its flowers are cut apart near the camera.)
+        let cut = grass_fields[seed.field].kind.z != 0.0
+            || (seed.flower > 0.5 && grass_fields[seed.field].bloom.w >= 1.0);
         let g = select(segments - 1u, GRASS_CUT_GROUP, cut);
         grass_emit(g, grass_pack(grass_shape(seed, tip, prev, segments)));
         return;

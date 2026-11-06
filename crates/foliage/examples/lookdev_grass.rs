@@ -11,7 +11,8 @@
 //! paler sky), `path` (a footpath worn through the meadow: `GrassWear`), `snow` (the meadow
 //! under 12 cm of fresh snow), `herbs` and `litter` (a forest floor's shade herbs and fallen
 //! leaves on humus; `herbs_close` and `litter_close` from knee height), `ferns` (woodland ferns,
-//! fronds cut into pinnae; `ferns_close`), `field` (the showcase's
+//! fronds cut into pinnae; `ferns_close`), `fireweed` (a stand in flower; `fireweed_close`),
+//! `field` (the showcase's
 //! meadow: drawn out to 120 m, shadows to 22 m, standing in it and looking out over it),
 //! `communities` (a 300 m meadow growing `engine_foliage::meadow`'s kinds of grass, painted
 //! from a made-up site: a wet hollow and creek, a footpath, a wood's edge along one side, a
@@ -127,6 +128,16 @@ fn biomes() -> Vec<Biome> {
         tall.bloom_length = 0.0;
     }
     add("seedheads", tall);
+    // A fireweed stand in late July, as on a burn: its racemes in flower (more of its stems
+    // flowering than the meadow's scattered patches).
+    let mut fireweed = engine_foliage::meadow::palette(&GrassStyle::meadow(), 205.0)
+        [engine_foliage::meadow::GrassKind::Fireweed as usize - 1];
+    fireweed.bloom = 0.4;
+    // (`LOOKDEV_SOLID_RACEMES=1`: each raceme one solid spike, as before it had flowers.)
+    if std::env::var("LOOKDEV_SOLID_RACEMES").is_ok_and(|v| v == "1") {
+        fireweed.florets = 0.0;
+    }
+    add("fireweed", fireweed);
     add(
         "communities",
         GrassStyle {
@@ -798,6 +809,18 @@ fn main() {
                     &close,
                     eye,
                     eye + DVec3::new(2.0, -0.5, -2.2),
+                    sun,
+                );
+            }
+            // A raceme's flowers at chest height, a couple of meters off.
+            if b.name == "fireweed" && wanted(&close) {
+                let eye = o + DVec3::new(-10.0, 1.3, 10.0);
+                shot(
+                    &mut app,
+                    &out,
+                    &close,
+                    eye,
+                    eye + DVec3::new(2.0, -0.35, -2.2),
                     sun,
                 );
             }

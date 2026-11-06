@@ -36,7 +36,7 @@ fn vs_main(@builtin(instance_index) instance: u32, @builtin(vertex_index) vertex
     out.gloss = b.gloss;
     out.shade = b.shade;
     out.glow = b.glow;
-    out.pinnae = grass_flower_cut(grass_fields[s.field].kind.z, s.flower);
+    out.pinnae = grass_blade_cut(grass_fields[s.field], s);
     return out;
 }
 
@@ -58,7 +58,31 @@ fn grass_surface(in: GrassOut, front: bool) -> Surface {
     // soaks it up (Lagarde, "Water drop 2b", 2013: non-porous surfaces keep their albedo).
     // A fern's frond: the rachis paler and yellower, each leaflet's midvein a pale line with
     // the blade either side of it darker toward its edges (where it is thinnest and curls).
-    if (in.pinnae > 0.0) {
+    if (in.pinnae > 299.5) {
+        // A raceme (`grass_raceme`): the open flowers its head's colour, paler at their middle
+        // (the white style and stamens) and darker at the petals' foot; the pods dark red, the
+        // buds dark purple, the axis and stalks reddish.
+        let r = grass_raceme(in.along, in.across, in.pinnae);
+        // Each flower, pod and bud its own: a little lighter or darker, bluer or redder.
+        let own = mix(vec3<f32>(0.86, 0.9, 1.08), vec3<f32>(1.1, 1.0, 0.9), r.w);
+        if (r.y > 3.5) {
+            // The stem below the head keeps its own colour.
+        } else if (r.y < 0.5) {
+            s.albedo *= vec3<f32>(0.5, 0.36, 0.28);
+        } else if (r.y < 1.5) {
+            // Young pods: purplish green, reddening as they ripen.
+            s.albedo = mix(s.albedo * grass_raceme_tone(0.0), vec3<f32>(0.1, 0.05, 0.035), 0.7) * own;
+        } else if (r.y < 2.5) {
+            // Petals: darker at their foot and toward their rims, the style and stamens a small
+            // pale eye.
+            s.albedo *= mix(0.72, 1.05, smoothstep(0.1, 0.55, r.z)) * mix(1.0, 0.85, smoothstep(0.75, 1.0, r.z));
+            s.albedo *= own;
+            s.albedo = mix(s.albedo, vec3<f32>(0.6, 0.5, 0.55), (1.0 - smoothstep(0.04, 0.1, r.z)) * 0.45);
+            s.subsurface = 0.8;
+        } else {
+            s.albedo *= grass_raceme_tone(1.0) * own;
+        }
+    } else if (in.pinnae > 0.0) {
         let a = abs(in.across);
         let t = fract(in.along * in.pinnae - a * 0.55 + 0.25);
         let edge = abs(t - 0.5) * 2.0 / max(0.7 * (1.0 - 0.75 * a * a), 0.05);
@@ -141,7 +165,7 @@ fn vs_prepass(@builtin(instance_index) instance: u32, @builtin(vertex_index) ver
     out.motion_now = motion_clip(b.rel);
     out.motion_prev = prev_motion_clip(static_prev_rel(p.rel));
     out.cut = vec2<f32>(b.along, b.across);
-    out.pinnae = grass_flower_cut(grass_fields[s.field].kind.z, s.flower);
+    out.pinnae = grass_blade_cut(grass_fields[s.field], s);
     return out;
 }
 
@@ -164,11 +188,88 @@ fn grass_flower_cut(cut: f32, flower: f32) -> f32 {
     return select(0.0, BERRY_CUT, cut > 99.5);
 }
 
+// ... and a raceme near the camera cut into its flowers, pods and buds (`grass_raceme_code`).
+fn grass_blade_cut(f: GrassField, s: BladeShape) -> f32 {
+    let raceme = grass_raceme_code(f, s);
+    return select(grass_flower_cut(f.kind.z, s.flower), raceme, raceme > 0.0);
+}
+
+// Where (`along`, `across`) lies on a raceme (`code` from `grass_raceme_code`): x 1 inside it
+// (0: cut away), y what it is (0 the axis, 1 a seed pod, 2 an open flower, 3 a bud, 4 the stem
+// below the head), z how far out from a flower's middle to its petals' edge (0..1), w that
+// flower's, pod's or bud's own random number (0..1). The head's flowers sit
+// alternately left and right, one every 1/florets of its length; each slot is about as long as
+// half the head is wide (`GrassStyle::florets`), so distances are in slots along and
+// half-widths across. A raceme opens from its foot upward, so seed pods lengthen below the open
+// flowers while buds still nod above them, as on fireweed through midsummer.
+fn grass_raceme(along: f32, across: f32, code: f32) -> vec4<f32> {
+    let n = floor(code - 300.0);
+    let head = code - 300.0 - n;
+    let h = (along - (1.0 - head)) / head;
+    let a = abs(across);
+    // Below the head (y 4): the stem, which the blade flares out from over the last 2% of its
+    // length into the head's foot (`grass_vertex`), so there only the stem's width is kept.
+    if (h < 0.0) {
+        let flare = saturate(1.0 + h * head / 0.02);
+        return vec4<f32>(select(0.0, 1.0, a * mix(0.12, 0.85, flare) <= 0.12), 4.0, 0.0, 0.5);
+    }
+    let x = h * n;
+    // The flowering axis runs up the middle to the buds.
+    var hit = vec4<f32>(select(0.0, 1.0, a < 0.08 && h < 0.92), 0.0, 1.0, 0.5);
+    let k0 = floor(x);
+    for (var j = -2; j <= 1; j++) {
+        let k = k0 + f32(j);
+        if (k < 0.0 || k >= n) {
+            continue;
+        }
+        // Left at even slots, right at odd ones; each with its own slight twist.
+        let side = select(-1.0, 1.0, (k - 2.0 * floor(k * 0.5)) < 0.5);
+        let hk = (k + 0.5) / n;
+        let twist = fract(sin(k * 12.9898 + n) * 43758.5453);
+        if (hk < 0.2) {
+            // A seed pod: thin, 2.4 slots long, angled up and out from its slot's foot.
+            let dir = normalize(vec2<f32>(2.2, 0.8 + 0.25 * twist));
+            let d = vec2<f32>(x - (k + 0.15), across * side);
+            let s = clamp(dot(d, dir), 0.0, 2.4);
+            let off = length(d - dir * s);
+            if (off < 0.13 * (1.0 - 0.35 * s / 2.4)) {
+                return vec4<f32>(1.0, 1.0, 0.0, twist);
+            }
+        } else if (hk < 0.8) {
+            // An open flower: four broad petals round its middle, facing out, its slot's half
+            // of the head; the lowest just past their best, a little smaller.
+            let c = vec2<f32>(k + 0.5, side * (0.3 + 0.1 * twist));
+            let d = vec2<f32>(x - c.x, across - c.y);
+            let r = length(d);
+            let petals = 0.7 + 0.3 * abs(cos(2.0 * atan2(d.y, d.x) + twist * 3.0));
+            let size = 0.82 * mix(0.8, 1.0, smoothstep(0.2, 0.32, hk));
+            if (r < size * petals) {
+                return vec4<f32>(1.0, 2.0, r / (size * petals), twist);
+            }
+            // Its short stalk from the axis.
+            if (abs(d.y) < c.y * side * 1.0 && abs(d.x + d.y * side * 0.4) < 0.07) {
+                hit = vec4<f32>(1.0, 0.0, 1.0, 0.5);
+            }
+        } else {
+            // A bud: a nodding spindle close to the axis, smaller toward the tip.
+            let w = 0.5 * (1.0 - 0.6 * smoothstep(0.8, 1.0, hk));
+            let d = vec2<f32>((x - (k + 0.5)) / 0.75, (across - side * 0.22 * w) / w);
+            if (dot(d, d) < 1.0) {
+                return vec4<f32>(1.0, 3.0, 0.0, twist);
+            }
+        }
+    }
+    return hit;
+}
+
 // A fern's frond cut into pinnae (the cut pipelines only: a discard anywhere in a shader costs
 // every fragment its early depth test, so whole blades never pay for it). `pinnae` pairs of
 // leaflets down the frond, each sweeping toward the tip and narrowing to its own point,
 // either side of the rachis, which always stays.
 fn grass_cut(along: f32, across: f32, pinnae: f32) -> bool {
+    if (pinnae > 299.5) {
+        return grass_raceme(along, across, pinnae).x < 0.5;
+    }
     if (pinnae == BERRY_CUT) {
         // A berry on its thin stalk: the head (widest at 0.95 up the stem) cut to a round
         // dot, not the diamond its two rows make.

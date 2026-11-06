@@ -340,13 +340,16 @@ pub fn palette(meadow: &GrassStyle, day_of_year: f32) -> Vec<GrassStyle> {
                 bend: 0.25,
                 ..tall
             },
-            0.14,
-            [0.42, 0.1, 0.28],
-            0.03,
+            0.18,
+            [0.42, 0.075, 0.25],
+            0.042,
         ),
     );
-    // Fireweed flowers up a tall spike.
-    kinds[Fireweed as usize - 1].bloom_length = 0.22;
+    // Fireweed flowers up a tall raceme, a dozen flowers a side view shows (about 30 cm long
+    // and 5 cm across): seed pods below, open flowers, buds at the top.
+    let fireweed = &mut kinds[Fireweed as usize - 1];
+    fireweed.bloom_length = 0.22;
+    fireweed.florets = 14.0;
     kinds
 }
 

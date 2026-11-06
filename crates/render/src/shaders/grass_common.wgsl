@@ -31,7 +31,7 @@ struct GrassField {
     tip: vec4<f32>,     // tip tint (rgb, x the blade's color), w: a leaf's stalk (fraction of its length)
     wear: vec4<f32>,    // worn-ground map: first point (field-local m, xz), points per m, 1 = present
     gust: vec4<f32>,    // steady wind (m/s, xyz), w: the wind's run (m) less speed x time
-    bloom: vec4<f32>,   // flower heads' albedo (linear), w: share of blades flowering
+    bloom: vec4<f32>,   // flower heads' albedo (linear), w: share of blades flowering (fraction) + a raceme's flowers (whole)
     kind: vec4<f32>,    // flower head width (m; a flowering stem's record width is its head's), this kind's blades as a share of the field's most, pinnae pairs (or -(leaflets + stalk) for a compound leaf, or 100 + alternate leaves for a shrub's twig), leaf rise (0..1)
 };
 // A field growing several kinds of grass has one entry for each, one after the other: the
@@ -128,6 +128,28 @@ fn grass_unpack(r: GrassRecord) -> BladeShape {
 }
 
 
+// Out to here a raceme's flowers are cut apart (`grass_raceme`); further out a flower is a pixel
+// or less and the head is drawn whole, its buds, flowers and pods still coloured in bands.
+const RACEME_CUT_M: f32 = 28.0;
+
+// A flowering stem's raceme code (`GrassStyle::florets`, read by `grass_raceme`): 300 + its
+// flowers + the head's length (a fraction of the stem), or 0 if it is drawn whole: too far
+// off, too few rows to shape it, or not a raceme.
+fn grass_raceme_code(f: GrassField, s: BladeShape) -> f32 {
+    let florets = floor(f.bloom.w);
+    let near = s.flower > 0.5 && florets > 0.5 && f.axis_z.w > 0.0 && s.segments >= 4u
+        && length(s.root) < RACEME_CUT_M;
+    return select(0.0, 300.0 + florets + min(f.axis_z.w, 0.5), near);
+}
+
+// A raceme's colour at `h` up its head (0..1), as a share of its open flowers' colour: thin
+// seed pods, dark red, at the bottom; the open flowers; nodding buds, deeper purple, at the top.
+fn grass_raceme_tone(h: f32) -> vec3<f32> {
+    let pods = vec3<f32>(0.45, 0.3, 0.28);
+    let buds = vec3<f32>(0.62, 0.4, 0.55);
+    return mix(mix(pods, vec3<f32>(1.0), smoothstep(0.14, 0.26, h)), buds, smoothstep(0.74, 0.86, h));
+}
+
 // Vertex `vertex` of a blade at time `t`, its tip along `tip_dir` at that time. Two vertices a
 // row, then the tip.
 fn grass_vertex(s: BladeShape, vertex: u32, t: f32, tip_dir: vec3<f32>) -> Blade {
@@ -198,6 +220,14 @@ fn grass_vertex(s: BladeShape, vertex: u32, t: f32, tip_dir: vec3<f32>) -> Blade
         u = select(u, 0.6 * (1.0 - head_length), row > 0.5 && row < first - 0.5);
         u = select(u, 0.0, row < 0.5);
     }
+    // A raceme cut apart (`grass_raceme`): the stem straight up to just under the head, then
+    // the head's rows from its base, the tip above its last one, so the pods at its foot get
+    // their full width.
+    let raceme = grass_raceme_code(f, s) > 0.0;
+    if (raceme) {
+        u = select(1.0 - head_length - 0.02, 0.0, row < 0.5);
+        u = select(u, 1.0 - head_length * (1.0 - (row - 2.0) / (last - 1.0)), row > 1.5);
+    }
     if (vertex >= 2u * segments) {
         u = 1.0;
         sgn = 0.0;
@@ -231,6 +261,12 @@ fn grass_vertex(s: BladeShape, vertex: u32, t: f32, tip_dir: vec3<f32>) -> Blade
         let a = saturate((u - (1.0 - head_length)) / head_length);
         head = smoothstep(0.0, 0.12, a);
         half_width = 0.5 * s.width * max(pow(sin(PI * pow(a, 0.75)), 0.7), 0.06);
+        if (raceme) {
+            // Full width from its foot (the pods spread there), narrowing over the buds.
+            head = select(0.0, 1.0, u >= 1.0 - head_length - 1e-4);
+            let full = mix(0.85, 1.0, smoothstep(0.0, 0.3, a)) * (1.0 - 0.65 * smoothstep(0.55, 1.0, a));
+            half_width = 0.5 * s.width * select(0.12, full, head > 0.5);
+        }
     } else if (flower) {
         half_width = mix(0.05 * s.width, 0.5 * s.width, head);
     }
@@ -275,7 +311,13 @@ fn grass_vertex(s: BladeShape, vertex: u32, t: f32, tip_dir: vec3<f32>) -> Blade
     // Color: tips tinted, snow caught on the blades (most on their arched upper parts).
     var albedo = mix(s.albedo, s.albedo * f.tip.rgb, u * u);
     if (flower) {
-        albedo = mix(albedo, f.bloom.rgb, head);
+        // A raceme drawn whole is coloured in bands (cut apart, `grass_surface` colours each
+        // flower, pod and bud).
+        var bloom = f.bloom.rgb;
+        if (spike && f.bloom.w >= 1.0 && !raceme) {
+            bloom *= grass_raceme_tone(saturate((u - (1.0 - head_length)) / head_length));
+        }
+        albedo = mix(albedo, bloom, head);
     }
     albedo = mix(albedo, vec3<f32>(0.82, 0.85, 0.88), s.snowed * (0.25 + 0.45 * u));
     // Darker low down, as the shade (`out.shade`) is darker there.
