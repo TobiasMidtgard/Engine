@@ -1082,3 +1082,90 @@ fn fs_particle(in: VsOut) -> @location(0) vec4<f32> {
     let opaque = 1.0 - in.additive;
     return vec4<f32>(rgb * a + burn + in.inscatter * (a * opaque), a * opaque);
 }
+
+// ---------------------------------------------------------------- smoke shadows
+// Smoke and dust darken what lies behind them from the sun: each puff draws the box around
+// its shadow's path (a soft cylinder from the puff away from the sun, widening with distance
+// as a penumbra does) and, for every scene pixel inside it, works out how deep the pixel sits
+// in that cylinder and multiplies the scene by the light the puff lets through. Overlapping
+// puffs multiply, so the shadow is the product of their transmittances, smooth at any
+// distance (no shadow-map texels, no dither). Drawn before the particles themselves.
+
+struct SmokeShadowOut {
+    @builtin(position) position: vec4<f32>,
+    @location(0) @interpolate(flat) center: vec3<f32>,  // camera-relative
+    @location(1) @interpolate(flat) radius: f32,
+    @location(2) @interpolate(flat) strength: f32,      // the puff's opacity x sunlight
+    @location(3) @interpolate(flat) reach: f32,         // how far the shadow runs, m
+};
+
+const SMOKE_SHADOW_SPREAD: f32 = 0.015; // penumbra growth per meter from the puff (the sun is 0.0093 rad wide)
+
+@vertex
+fn vs_smoke_shadow(@builtin(vertex_index) vi: u32, @builtin(instance_index) slot: u32) -> SmokeShadowOut {
+    var out: SmokeShadowOut;
+    out.position = vec4<f32>(2.0, 2.0, 2.0, 1.0);
+    let p = particles[slot];
+    if (p.age >= p.life) { return out; }
+    let e = emitters[p.emitter];
+    let t = p.age / p.life;
+    let alpha = sample_color(e, t).a * e.look.w;
+    let size = p.size * sample_size(e, t) * e.look.z;
+    let sun_up = frame.sun_dir.y;
+    let daylight = saturate(sun_up * 6.0);
+    if (alpha <= 0.01 || size <= 0.0 || daylight <= 0.0) { return out; }
+
+    let l = frame.sun_dir.xyz;
+    let d = -l;
+    let helper = select(vec3<f32>(0.0, 1.0, 0.0), vec3<f32>(1.0, 0.0, 0.0), abs(d.y) > 0.9);
+    let bx = normalize(cross(helper, d));
+    let by = cross(d, bx);
+    let r = size * 0.45;
+    // Far enough to reach the ground from a puff a few meters up, longer as the sun sinks.
+    let reach = clamp(10.0 / max(sun_up, 0.15), 10.0, 60.0);
+
+    // A box: face vi / 6 (axis, sign), two triangles over the other two axes, wound outward.
+    let face = vi / 6u;
+    let k = vi % 6u;
+    let axis = face / 2u;
+    let sign = f32(face % 2u) * 2.0 - 1.0;
+    var uv = vec2<f32>(f32(k == 1u || k == 2u || k == 4u), f32(k == 2u || k == 4u || k == 5u));
+    if (sign < 0.0) { uv = vec2<f32>(uv.y, uv.x); }
+    uv = uv * 2.0 - 1.0;
+    var c = vec3<f32>(0.0);
+    c[axis] = sign;
+    c[(axis + 1u) % 3u] = uv.x;
+    c[(axis + 2u) % 3u] = uv.y;
+    let along = mix(-r, reach, c.z * 0.5 + 0.5);
+    let width = r + max(along, 0.0) * SMOKE_SHADOW_SPREAD;
+    let center = particle_rel(p, e);
+    let pos = center + d * along + (bx * c.x + by * c.y) * width * 1.6;
+    out.position = frame.view_proj * vec4<f32>(pos, 1.0);
+    out.center = center;
+    out.radius = r;
+    out.strength = alpha * daylight;
+    out.reach = reach;
+    return out;
+}
+
+@fragment
+fn fs_smoke_shadow(in: SmokeShadowOut) -> @location(0) vec4<f32> {
+    let pixel = vec2<i32>(in.position.xy);
+    let z = textureLoad(scene_depth, pixel, 0);
+    if (z <= 0.0) { discard; }  // sky
+    let uv = in.position.xy / frame.viewport.xy;
+    let rel = (frame.inv_view * vec4<f32>(view_position(uv, z), 0.0)).xyz;
+    let d = -frame.sun_dir.xyz;
+    let v = rel - in.center;
+    let along = dot(v, d);
+    let width = in.radius + max(along, 0.0) * SMOKE_SHADOW_SPREAD;
+    let off = length(v - d * along) / width;
+    // The light lost spreads over the widening penumbra, so the shadow pales with distance.
+    let spread = sq(in.radius / width);
+    let begin = smoothstep(-0.5, 0.5, along / in.radius);
+    let end = 1.0 - smoothstep(0.7, 1.0, along / in.reach);
+    let shade = in.strength * exp(-2.2 * off * off) * spread * begin * end;
+    if (shade < 0.003) { discard; }
+    // Only sunlight is lost; sky and bounce light still reach the ground under smoke.
+    return vec4<f32>(vec3<f32>(1.0 - 0.7 * shade), 1.0);
+}
