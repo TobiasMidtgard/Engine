@@ -1033,6 +1033,37 @@ fn total_of_parts(sums: &HashMap<Label, f32>) -> f32 {
         .sum()
 }
 
+/// A piece of work that may stall a frame (a build started, an upload, a texture set made):
+/// a trace span named `name` while it runs, and a warning naming it when it took longer than
+/// [`HITCH_MS`], so a hitch in a player's log says what it was.
+pub(crate) struct HitchStep {
+    name: &'static str,
+    started: std::time::Instant,
+    _span: tracing::span::EnteredSpan,
+}
+
+/// Work on the frame's path longer than this is logged ([`HitchStep`]).
+pub(crate) const HITCH_MS: f32 = 16.0;
+
+impl HitchStep {
+    pub fn new(name: &'static str) -> Self {
+        Self {
+            name,
+            started: std::time::Instant::now(),
+            _span: tracing::info_span!(target: "engine_render", "render_step", name).entered(),
+        }
+    }
+}
+
+impl Drop for HitchStep {
+    fn drop(&mut self) {
+        let ms = self.started.elapsed().as_secs_f32() * 1000.0;
+        if ms > HITCH_MS {
+            tracing::warn!("render hitch: {} took {ms:.1} ms", self.name);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

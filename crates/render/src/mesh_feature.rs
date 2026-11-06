@@ -2191,7 +2191,10 @@ impl MeshFeature {
                 return (kept.slot, kept.textures);
             }
         }
-        let textures = self.texture_set_for(gpu, material, sources);
+        let textures = {
+            let _span = crate::perf::HitchStep::new("materials: texture set");
+            self.texture_set_for(gpu, material, sources)
+        };
         let mut gpu_material = material.to_gpu();
         // Only claim the slots that have a real image bound (others may still load).
         let set = self
@@ -3163,7 +3166,9 @@ impl RenderFeature for MeshFeature {
         // Virtual textures: feedback in, tiles loaded and uploaded, tables written. Texture
         // sets are rebuilt when the cache's bindings changed.
         if let Some(vt) = &mut self.vt {
+            let span = crate::perf::HitchStep::new("virtual textures: begin frame");
             vt.begin_frame(gpu, settings);
+            drop(span);
             let generation = vt.bind_generation();
             if world.contains_resource::<VirtualTextureStats>() {
                 let stats = vt.stats().clone();
@@ -3619,6 +3624,8 @@ impl RenderFeature for MeshFeature {
                         let ready = match (&cluster_path, &mut self.clusters) {
                             (Some((cluster_key, displaced)), Some(clusters)) => {
                                 clusters.ready(*cluster_key, mesh.version, small, || {
+                                    let _span =
+                                        crate::perf::HitchStep::new("clusters: start a build");
                                     let mesh = mesh_assets.get(mesh_handle)?.clone();
                                     let displacement = match displaced {
                                         None => None,

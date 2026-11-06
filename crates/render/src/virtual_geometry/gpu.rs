@@ -1043,7 +1043,10 @@ impl ClusterRenderer {
                 continue;
             }
             let b = self.running.swap_remove(i);
-            let result = b.handle.join();
+            let result = {
+                let _span = crate::perf::HitchStep::new("clusters: join a build");
+                b.handle.join()
+            };
             let Some(entry) = self.meshes.get_mut(&b.mesh) else {
                 continue;
             };
@@ -1066,6 +1069,7 @@ impl ClusterRenderer {
                     }
                     self.builds.source_triangles += dag.source_triangles as u64;
                     self.builds.cache_bytes_written += cache_bytes;
+                    let _span = crate::perf::HitchStep::new("clusters: upload a build");
                     let uploaded = upload(
                         gpu,
                         [

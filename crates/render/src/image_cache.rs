@@ -563,7 +563,11 @@ impl ImageCache {
         ) {
             return None;
         }
-        let Some((texture, view)) = upload_image(gpu, image, srgb, aliasable) else {
+        let uploaded = {
+            let _span = crate::perf::HitchStep::new("images: upload");
+            upload_image(gpu, image, srgb, aliasable)
+        };
+        let Some((texture, view)) = uploaded else {
             inner.failed.insert((index, slot), version);
             return None;
         };
