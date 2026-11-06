@@ -904,7 +904,10 @@ pub fn ripple_system(
         drop(state);
         // Each part of a rebuild under its own span, for the PC profiles.
         let part = tracing::info_span!("water", name = "ripples: depths").entered();
+        let near = tracing::info_span!("water", name = "ripples: depths: grid").entered();
         still.read(at, &bodies, &ground, f.y, DVec2::new(f.x, f.z));
+        drop(near);
+        let far = tracing::info_span!("water", name = "ripples: depths: coarse").entered();
         coarse.read(
             &mut field,
             book.layout,
@@ -913,6 +916,7 @@ pub fn ripple_system(
             f.y,
             DVec2::new(f.x, f.z),
         );
+        drop(far);
         drop(part);
         // The whole pass (streams, speeds and drift over every cell) runs when the grid moved,
         // every 2 s over streams, and once the lakes' depths under where it stands are all in.

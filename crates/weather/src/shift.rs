@@ -54,6 +54,7 @@ pub(crate) fn shift_system(
             for c in &mut cache.cells.data {
                 c.height += t.y as f32;
             }
+            cache.heights_changed();
             // Roof lookups in flight were measured in the old frame.
             cache.epoch += 1;
         } else {

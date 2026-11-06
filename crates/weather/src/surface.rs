@@ -170,7 +170,15 @@ pub struct GroundCache {
     job: Option<LookupJob>,
     /// Cells covered by a [`WeatherShelter`] this update.
     sheltered: Vec<bool>,
+    /// Changes whenever a cell's ground height may have (a lookup came in, the grid moved or
+    /// was laid out again): the renderer packs and uploads the 512² heights only then, not at
+    /// every cover upload (each took 2-36 ms of a prepare thread four times a second at the
+    /// fortress, VM). Unique across caches; 0 for one that never had heights.
+    pub heights_rev: u64,
 }
+
+/// Source of [`GroundCache::heights_rev`] values.
+static HEIGHTS_REV: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 impl Default for GroundCache {
     fn default() -> Self {
@@ -187,11 +195,17 @@ impl Default for GroundCache {
             epoch: 0,
             job: None,
             sheltered: Vec::new(),
+            heights_rev: 0,
         }
     }
 }
 
 impl GroundCache {
+    /// Mark the heights changed ([`GroundCache::heights_rev`]).
+    pub(crate) fn heights_changed(&mut self) {
+        self.heights_rev = HEIGHTS_REV.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
     /// 1 open sky .. 0 covered (a roof or a [`WeatherShelter`]) for cell `index`; ground not
     /// looked at yet counts as open.
     pub fn exposure(&self, index: usize) -> f32 {
@@ -220,12 +234,14 @@ impl GroundCache {
             self.cursor = 0;
             self.complete = false;
             self.epoch += 1;
+            self.heights_changed();
         } else if self.cells.origin != surface.origin {
             let old = self.cells.origin;
             shift_to(&mut self.cells, surface.origin);
             self.cursor = 0;
             self.complete = false;
             self.epoch += 1;
+            self.heights_changed();
             self.sheltered.resize(self.cells.len(), false);
             return Some(old);
         }
@@ -586,8 +602,15 @@ fn look_at(cache: &mut GroundCache, look: &LookUp, indices: &[usize], sim: &Weat
 
 /// Store looked-up facts and recompute the dips their new heights touch.
 fn write_facts(cache: &mut GroundCache, found: &[(usize, CellInfo)], sim: &WeatherSim) {
+    let mut moved = false;
     for &(index, info) in found {
+        let old = &cache.cells.data[index];
+        // The slow sweep looks at known cells again and nearly always finds the same ground.
+        moved |= old.known != info.known || old.height.to_bits() != info.height.to_bits();
         cache.cells.data[index] = info;
+    }
+    if moved {
+        cache.heights_changed();
     }
     let indices: Vec<usize> = found.iter().map(|&(index, _)| index).collect();
     update_dips(cache, &indices, sim);
@@ -894,9 +917,13 @@ pub(crate) fn ground_system(
         return;
     }
 
+    // Each part under its own span, for the profiles (12 ms frames at the fortress, VM).
+    let part = tracing::info_span!("weather", name = "ground: align").entered();
     if let Some(old) = cache.align(&surface.grid) {
         seed_uncovered(&mut surface.grid, &cache, old);
     }
+    drop(part);
+    let part = tracing::info_span!("weather", name = "ground: lookups").entered();
     // Roof raycasts run off the frame, a batch at a time.
     finish_lookups(&mut cache, &sim);
     if cache.job.is_none() {
@@ -914,12 +941,16 @@ pub(crate) fn ground_system(
             spawn_lookups(&mut cache, look, picked);
         }
     }
+    drop(part);
+    let part = tracing::info_span!("weather", name = "ground: stamp").entered();
     stamp(
         &mut cache,
         shelters.iter().map(|(gt, s)| (gt.translation(), s)),
         patches.iter().map(|(gt, p)| (gt.translation(), p)),
         &sim,
     );
+    drop(part);
+    let _part = tracing::info_span!("weather", name = "ground: rows").entered();
     let height = surface.grid.height as usize;
     let band_rows = height.div_ceil(GROUND_BANDS);
     for _ in 0..bands {

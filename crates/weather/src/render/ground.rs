@@ -54,6 +54,53 @@ pub struct GroundFeature {
     heights_known: bool,
     since_upload: f32,
     time: f64,
+    /// The cover packed this upload, compared with what `bytes` holds.
+    packed: Vec<u8>,
+    /// What the textures hold, while they hold it.
+    uploaded: Option<Uploaded>,
+}
+
+/// What the ground heights texture was packed for.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct HeightsKey {
+    /// The cache's [`GroundCache::heights_rev`]; `None` for no cache laid out like the cover.
+    rev: Option<u64>,
+    /// Bits of the height the heights are relative to.
+    height_ref: u64,
+    size: (u32, u32),
+}
+
+/// What the cover and heights textures were last written with.
+struct Uploaded {
+    heights: HeightsKey,
+}
+
+/// Rows of the cover packed per leaf-pool piece (about 16 pieces).
+fn rows_per_piece(height: usize) -> usize {
+    height.div_ceil(16).max(1)
+}
+
+/// Write a whole grid texture of 4-byte texels.
+fn write_grid(gpu: &GpuShared, texture: &wgpu::Texture, bytes: &[u8], size: (u32, u32)) {
+    gpu.queue.write_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        bytes,
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(size.0 * 4),
+            rows_per_image: Some(size.1),
+        },
+        wgpu::Extent3d {
+            width: size.0,
+            height: size.1,
+            depth_or_array_layers: 1,
+        },
+    );
 }
 
 fn cover_texture(device: &wgpu::Device, w: u32, h: u32) -> (wgpu::Texture, wgpu::TextureView) {
@@ -227,19 +274,35 @@ impl RenderFeature for GroundFeature {
         let grid = &surface.grid;
         if (self.since_upload >= UPLOAD_INTERVAL_S && !view.extra_view) || self.bytes.is_empty() {
             self.since_upload = 0.0;
-            let mut any = false;
-            self.bytes.clear();
-            self.bytes.reserve(grid.data.len() * 4);
-            for c in &grid.data {
-                let px = [
-                    unorm(c.wetness),
-                    unorm(c.puddle_m / max_puddle),
-                    unorm(c.snow_m / SNOW_SCALE_M),
-                    unorm(c.scorch),
-                ];
-                any |= px[0] > 2 || px[1] > 0 || px[2] > 0;
-                self.bytes.extend_from_slice(&px);
-            }
+            // Packed on the leaf pool a band of rows a piece: the 512² grid packed in a loop
+            // took 2-36 ms of a prepare thread four times a second at the fortress (VM).
+            let width = grid.width.max(1) as usize;
+            let rows = rows_per_piece(grid.height as usize);
+            let any = std::sync::atomic::AtomicBool::new(false);
+            self.packed.clear();
+            self.packed.resize(grid.data.len() * 4, 0);
+            engine_core::tasks::par_chunks_mut(&mut self.packed, width * rows * 4, |i, out| {
+                let first = i * width * rows;
+                let mut seen = false;
+                for (px, c) in out
+                    .as_chunks_mut::<4>()
+                    .0
+                    .iter_mut()
+                    .zip(&grid.data[first..])
+                {
+                    *px = [
+                        unorm(c.wetness),
+                        unorm(c.puddle_m / max_puddle),
+                        unorm(c.snow_m / SNOW_SCALE_M),
+                        unorm(c.scorch),
+                    ];
+                    seen |= px[0] > 2 || px[1] > 0 || px[2] > 0;
+                }
+                if seen {
+                    any.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
+            });
+            let any = any.into_inner();
             self.active = any;
             if any {
                 let size = (grid.width, grid.height);
@@ -257,60 +320,54 @@ impl RenderFeature for GroundFeature {
                     g.heights = t;
                     g.heights_view = v;
                     g.cover_size = size;
+                    self.uploaded = None;
                 }
-                // Ground heights from the weather's ground cache, laid out like the cover.
-                self.height_ref = view.origin.y.round();
-                self.height_bytes.clear();
+                // Ground heights from the weather's ground cache, laid out like the cover:
+                // packed and uploaded again only when they changed (a lookup came in, the
+                // grid or the view's origin moved), not at every cover upload.
+                let height_ref = view.origin.y.round();
                 let cache = world
                     .get_resource::<GroundCache>()
                     .filter(|c| c.cells.origin == grid.origin && c.cells.len() == grid.data.len());
-                self.heights_known = cache.is_some();
-                for i in 0..grid.data.len() {
-                    let h = cache
-                        .map(|c| c.cells.data[i])
-                        .filter(|c| c.known)
-                        .map(|c| (c.height as f64 - self.height_ref) as f32)
-                        .unwrap_or(UNKNOWN_HEIGHT);
-                    self.height_bytes.extend_from_slice(&h.to_le_bytes());
+                let key = HeightsKey {
+                    rev: cache.map(|c| c.heights_rev),
+                    height_ref: height_ref.to_bits(),
+                    size,
+                };
+                if self.uploaded.as_ref().is_none_or(|u| u.heights != key) {
+                    self.height_ref = height_ref;
+                    self.heights_known = cache.is_some();
+                    self.height_bytes.clear();
+                    self.height_bytes.resize(grid.data.len() * 4, 0);
+                    engine_core::tasks::par_chunks_mut(
+                        &mut self.height_bytes,
+                        width * rows * 4,
+                        |i, out| {
+                            let first = i * width * rows;
+                            for (k, px) in out.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+                                let h = cache
+                                    .map(|c| c.cells.data[first + k])
+                                    .filter(|c| c.known)
+                                    .map(|c| (c.height as f64 - height_ref) as f32)
+                                    .unwrap_or(UNKNOWN_HEIGHT);
+                                *px = h.to_le_bytes();
+                            }
+                        },
+                    );
+                    write_grid(gpu, &g.heights, &self.height_bytes, size);
                 }
-                gpu.queue.write_texture(
-                    wgpu::TexelCopyTextureInfo {
-                        texture: &g.heights,
-                        mip_level: 0,
-                        origin: wgpu::Origin3d::ZERO,
-                        aspect: wgpu::TextureAspect::All,
-                    },
-                    &self.height_bytes,
-                    wgpu::TexelCopyBufferLayout {
-                        offset: 0,
-                        bytes_per_row: Some(size.0 * 4),
-                        rows_per_image: Some(size.1),
-                    },
-                    wgpu::Extent3d {
-                        width: size.0,
-                        height: size.1,
-                        depth_or_array_layers: 1,
-                    },
-                );
-                gpu.queue.write_texture(
-                    wgpu::TexelCopyTextureInfo {
-                        texture: &g.cover,
-                        mip_level: 0,
-                        origin: wgpu::Origin3d::ZERO,
-                        aspect: wgpu::TextureAspect::All,
-                    },
-                    &self.bytes,
-                    wgpu::TexelCopyBufferLayout {
-                        offset: 0,
-                        bytes_per_row: Some(size.0 * 4),
-                        rows_per_image: Some(size.1),
-                    },
-                    wgpu::Extent3d {
-                        width: size.0,
-                        height: size.1,
-                        depth_or_array_layers: 1,
-                    },
-                );
+                // The cover again only when it changed (dry ground, a settled snowfield).
+                let cover_same = self.uploaded.is_some() && self.bytes == self.packed;
+                std::mem::swap(&mut self.bytes, &mut self.packed);
+                if !cover_same {
+                    write_grid(gpu, &g.cover, &self.bytes, size);
+                }
+                self.uploaded = Some(Uploaded { heights: key });
+            } else {
+                // Nothing to show: the textures are left as they were, written again in full
+                // once there is.
+                std::mem::swap(&mut self.bytes, &mut self.packed);
+                self.uploaded = None;
             }
         }
         if !self.active {
