@@ -2741,7 +2741,8 @@ fn chain_run_up(m: &Mover, b: &Body, probe: &Probe, v: Vec3) -> Option<RunUp> {
     let up = b.up;
     let vh = flat(v, up);
     let dir = vh.try_normalize()?;
-    let (_, normal, _) = chest_wall_within(b, probe, dir, b.radius + RUNUP_REACH)?;
+    // (Only once the foot can plant on it: from further out the flight carries on to it.)
+    let (_, normal, _) = chest_wall_within(b, probe, dir, b.radius + 0.3)?;
     if normal.dot(dir) > -0.7 {
         return None;
     }

@@ -561,7 +561,7 @@ const CLIPS: &[Clip] = &[
         name: "hay_leap",
         start: [-18.0, 7.0, -6.0],
         facing: [0.0, 1.0],
-        secs: 3.5,
+        secs: 2.8,
         script: |t, _, p| match t {
             _ if p.z > -3.4 || t > 1.6 => Pad::default(),
             _ if p.z > -3.9 => go(0.0, 0.5).calm().jump(),
@@ -576,7 +576,7 @@ const CLIPS: &[Clip] = &[
         name: "awning",
         start: [-18.0, 7.0, -8.0],
         facing: [0.0, 1.0],
-        secs: 3.5,
+        secs: 3.0,
         script: |t, _, p| match t {
             _ if p.z > -4.4 || t > 1.0 => Pad::default(),
             _ if p.z > -5.0 => go(0.0, 1.0).jump(),
@@ -591,7 +591,7 @@ const CLIPS: &[Clip] = &[
         name: "fall_catch",
         start: [9.5, 14.0, 3.6],
         facing: [0.0, -1.0],
-        secs: 4.5,
+        secs: 3.4,
         script: |t, m, p| match t {
             _ if m.hang.is_some() => Pad::default(),
             _ if m.grounded && t < 2.5 => go(0.0, -0.15).calm(),
@@ -611,7 +611,7 @@ const CLIPS: &[Clip] = &[
         name: "wall_kicks",
         start: [-1.55, 0.0, 6.5],
         facing: [1.0, 0.0],
-        secs: 4.5,
+        secs: 4.2,
         script: |_, m, _| match m.runup {
             Some(r) if r.secs > 0.12 => go(-r.normal.x, 0.0).jump(),
             Some(r) => go(-r.normal.x, 0.0),
@@ -626,7 +626,7 @@ const CLIPS: &[Clip] = &[
         name: "crawl",
         start: [-26.5, 0.0, -6.5],
         facing: [-1.0, 0.0],
-        secs: 6.0,
+        secs: 4.4,
         script: |_, _, p| {
             if p.x > -33.0 {
                 go(-1.0, 0.0).calm()
