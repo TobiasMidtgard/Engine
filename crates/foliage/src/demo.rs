@@ -585,6 +585,9 @@ pub struct EdgeBelt;
 /// Shrubs planted every this many meters along a wood's edge (two to a spot in a thicket).
 const BELT_SPACING_M: f64 = 3.2;
 
+/// Stride of the search out to a wood's ragged edge, meters.
+const EDGE_STRIDE_M: f64 = 4.0;
+
 /// A round region's edge belt ([`EdgeBelt`]): hazel thickets with goat willow among them in
 /// front of the edge trees, from just past the ragged edge to about 5 m out into the meadow,
 /// with gaps between the thickets. A natural wood's edge grades from a herb fringe through a
@@ -624,17 +627,29 @@ pub fn plant_edge_belts(
         for k in 0..steps {
             let a = (k as f64 + rng.range(-0.3, 0.3) as f64) / steps as f64 * std::f64::consts::TAU;
             let dir = DVec2::new(a.cos(), a.sin());
-            // Out from the middle to the ragged edge.
-            let mut r = half * 0.6;
-            while r < half * 1.5
-                && crate::sim::edge_distance(
+            // Out from the middle to the ragged edge: 4 m strides to the first one past it,
+            // then halving back to within 0.25 m (in 0.5 m steps all the way it took 12.7 ms
+            // of one frame on the VM as the forest zone loaded).
+            let inside = |r: f64| {
+                crate::sim::edge_distance(
                     region,
                     center,
                     center.x + dir.x * r,
                     center.z + dir.y * r,
                 ) > 0.0
-            {
-                r += 0.5;
+            };
+            let mut r = half * 0.6;
+            while r < half * 1.5 && inside(r) {
+                r += EDGE_STRIDE_M;
+            }
+            let mut lo = (r - EDGE_STRIDE_M).max(half * 0.6);
+            while r - lo > 0.25 {
+                let mid = 0.5 * (lo + r);
+                if inside(mid) {
+                    lo = mid;
+                } else {
+                    r = mid;
+                }
             }
             let p = DVec2::new(center.x, center.z) + dir * r;
             // Thickets with gaps between them.

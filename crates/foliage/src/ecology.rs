@@ -1167,14 +1167,16 @@ pub fn scorch_small_plants(
         return;
     }
     *timer = 0.25;
-    plants.par_iter_mut().for_each(|(mut plant, t)| {
+    // A plain loop: a parallel one opens a compute-pool scope whose thread can run another
+    // whole system while it waits (memory: nested-scope-stalls).
+    for (mut plant, t) in &mut plants {
         if !plant.stage.is_alive() || library.get(plant.species).is_woody() {
-            return;
+            continue;
         }
         if heat.sample(t.translation + DVec3::Y * 0.2) > 250.0 {
             plant.stage = PlantStage::Burnt { years: 0.0 };
         }
-    });
+    }
 }
 
 /// When a region goes (its zone unloaded), its plants and logs go with it, so a zone loaded
@@ -1297,14 +1299,18 @@ pub fn grow_plants(
     };
     let focus = focus.as_deref().cloned().unwrap_or_default();
     let range = range.as_deref();
-    plants.par_iter_mut().for_each(|(mut plant, region)| {
+    // A plain loop (a few arithmetic steps a plant): run in parallel it opened a compute-pool
+    // scope every quarter second, and the thread waiting in it ran other systems meanwhile, so
+    // the profile charged grow_plants with up to 800 ms a frame at the fortress (VM census,
+    // 2026-11-06; memory: nested-scope-stalls).
+    for (mut plant, region) in &mut plants {
         if !plant.stage.is_alive() {
-            return;
+            continue;
         }
         let region = region.and_then(|r| r.0).and_then(|r| regions.get(r).ok());
         let resting = region.is_some_and(|(r, s)| region_resting(range, &focus, r, s.center));
         if resting && !resting_turn {
-            return;
+            continue;
         }
         let years = if resting { resting_dt } else { dt };
         let scale = region.map(|(r, _)| r.time_scale.max(0.0)).unwrap_or(1.0);
@@ -1317,7 +1323,7 @@ pub fn grow_plants(
         } else {
             *plant.bypass_change_detection() = next;
         }
-    });
+    }
 }
 
 /// Count each region's simulated years and mark the ones due a step (a plain system, so the
