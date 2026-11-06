@@ -187,6 +187,17 @@ impl Time {
     }
 
     /// Advance the frame clock by `real_delta` seconds with effective `scale`.
+    /// The fixed loop dropped `real_secs` of steps this frame (the step budget or the step
+    /// cap): the world clock drops them too, so what advances per frame (animation, waves,
+    /// particles, anything on [`Time::delta_secs`] outside the fixed step) slows with the
+    /// simulation instead of running ahead of it. Unity clamps `Time.deltaTime` with
+    /// `maximumDeltaTime` the same way. [`Time::real_delta_secs`] is untouched.
+    pub(crate) fn drop_world(&mut self, real_secs: f64) {
+        let world = (real_secs * self.scale).clamp(0.0, self.delta.max(0.0));
+        self.delta -= world;
+        self.elapsed -= world;
+    }
+
     fn advance(&mut self, real_delta: f64, dilation: f64) {
         self.real_delta = real_delta;
         self.real_elapsed += real_delta;
@@ -564,7 +575,9 @@ pub fn time_system(
     let scale = time.scale;
     // A user pause stops the fixed loop entirely; dilation only shrinks each step.
     let fixed_real = if time.is_paused() { 0.0 } else { real_delta };
+    let dropped = fixed.dropped_secs;
     fixed.accumulate(fixed_real, scale);
+    time.drop_world(fixed.dropped_secs - dropped);
 }
 
 /// Switch [`Time`] into fixed-step context. Called by the frame loop.
@@ -696,6 +709,45 @@ mod tests {
         // All but that step and what is left toward the next: about 0.18 s the world lost.
         let lost = fixed.dropped_secs();
         assert!((0.15..0.2).contains(&lost), "dropped {lost} s");
+    }
+
+    #[test]
+    fn the_frame_clock_drops_what_the_steps_drop() {
+        // Steps cut by the budget: the world clock of the frame (what animation, waves and
+        // particles advance by) loses the same time, so they keep pace with the simulation.
+        let mut app = App::new();
+        app.world
+            .resource_mut::<FixedTime>()
+            .set_step_budget_secs(0.0);
+        #[derive(Resource, Default)]
+        struct Seen(f64);
+        app.init_resource::<Seen>().add_systems(
+            Update,
+            |time: Res<Time>, mut seen: ResMut<Seen>| {
+                seen.0 = time.delta_secs_f64();
+            },
+        );
+        app.update();
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        app.update();
+        let lost = app.world.resource::<FixedTime>().dropped_secs();
+        assert!(lost > 0.15, "dropped {lost} s");
+        let time = app.world.resource::<Time>();
+        let behind = time.real_elapsed_secs_f64() - time.elapsed_secs_f64();
+        assert!(
+            (behind - lost).abs() < 1e-9,
+            "world {behind} s behind, {lost} s dropped"
+        );
+        // One step ran (and under one is left toward the next): Update saw about that much.
+        let seen = app.world.resource::<Seen>().0;
+        assert!(seen < 2.0 / 60.0 + 1e-6, "Update advanced {seen} s");
+        // The cap on steps a frame drops the same way, manual clocks included.
+        let mut app = manual_app(0.5);
+        app.update();
+        let lost = app.world.resource::<FixedTime>().dropped_secs();
+        let time = app.world.resource::<Time>();
+        assert!(lost > 0.05, "dropped {lost} s");
+        assert!((time.real_elapsed_secs_f64() - time.elapsed_secs_f64() - lost).abs() < 1e-9);
     }
 
     #[test]

@@ -513,6 +513,7 @@ pub fn run_frame(world: &mut World) {
         let budget = realtime.then(|| std::time::Duration::from_secs_f64(fixed.step_budget_secs()));
         (fixed.steps_this_frame(), budget)
     };
+    let dropped = world.resource::<FixedTime>().dropped_secs();
     let started = std::time::Instant::now();
     for i in 0..steps {
         // A step the budget will end on is told so as it begins (`FixedTime::is_last_step`),
@@ -537,6 +538,12 @@ pub fn run_frame(world: &mut World) {
         }
     }
     time::exit_fixed_steps(world);
+    // Steps the budget cut are world time the simulation didn't get: the frame's clock loses
+    // them too, so per-frame motion keeps pace with the steps (time::Time::drop_world).
+    let cut = world.resource::<FixedTime>().dropped_secs() - dropped;
+    if cut > 0.0 {
+        world.resource_mut::<Time>().drop_world(cut);
+    }
 
     world.run_schedule(Update);
     world.run_schedule(PostUpdate);
