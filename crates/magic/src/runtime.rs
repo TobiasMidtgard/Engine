@@ -1106,6 +1106,22 @@ pub fn fly_missiles(
             .unwrap_or_default();
         filter.exclude.extend(m.hits.iter().map(|(h, _)| *h));
         let from = sp.pos;
+        // A spell that spares its own side flies through them (a student's bolt past the golem
+        // fighting beside the skeleton it is aimed at), rather than bursting harmlessly.
+        if spell.payload.harmful()
+            && (spell.safeguard || spell.filter == crate::design::TargetFilter::Enemies)
+        {
+            filter.exclude.extend(
+                creatures
+                    .iter()
+                    .filter(|(o, gt, oc, _)| {
+                        Some(*o) != m.cast.caster
+                            && gt.translation().distance(from) < len as f64 + 4.0
+                            && m.cast.friend(*o, oc.caster, oc.faction, factions)
+                    })
+                    .map(|(o, ..)| o),
+            );
+        }
         let hit = queries.shapecast(
             &ColliderShape::Sphere {
                 radius: c.radius.max(0.05),

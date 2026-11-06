@@ -1036,6 +1036,12 @@ pub fn run_minions(
         }
     }
     let g = gravity.at(DVec3::ZERO).length();
+    // The ground under a minion is the floor, never another minion: a step or a hover onto
+    // a neighbour's collider would climb it.
+    let ground = QueryFilter {
+        exclude: minions.iter().map(|(e, ..)| e).collect(),
+        ..Default::default()
+    };
     let crowd: Vec<(Entity, DVec3, f32)> = minions
         .iter()
         .filter(|(_, m, ..)| m.kind.walks() && !matches!(m.act, Act::Rise { .. }))
@@ -1109,7 +1115,7 @@ pub fn run_minions(
         m.cooldown -= dt;
         let fwd = Quat::from_rotation_y(m.yaw) * Vec3::NEG_Z;
 
-        let exclude = QueryFilter::excluding(e);
+        let exclude = &ground;
         match m.kind {
             MinionKind::Golem | MinionKind::Skeleton | MinionKind::SkeletalMage => {
                 let gait = gait_of(m.kind);
@@ -1182,11 +1188,8 @@ pub fn run_minions(
                         let before = *t;
                         *t += dt;
                         if before < SLAM_HIT && *t >= SLAM_HIT {
-                            let at = ground_below(
-                                &queries,
-                                m.pos + (fwd * 1.3 * k).as_dvec3(),
-                                &exclude,
-                            );
+                            let at =
+                                ground_below(&queries, m.pos + (fwd * 1.3 * k).as_dvec3(), exclude);
                             queue.looks.push(LookCmd::Burst {
                                 at,
                                 up: Vec3::Y,
@@ -1410,7 +1413,7 @@ pub fn run_minions(
                 let step = (m.vel * dt).as_dvec3() + shove * (6.0 * dt).min(1.0) as f64;
                 if step.length_squared() > 1e-10 {
                     let next = m.pos + step;
-                    m.pos = ground_below(&queries, next + DVec3::Y * 0.5, &exclude);
+                    m.pos = ground_below(&queries, next + DVec3::Y * 0.5, exclude);
                 }
                 m.act = act;
                 // Feet, then the body over them.
@@ -1427,7 +1430,7 @@ pub fn run_minions(
                     Vec::new()
                 } else {
                     step_feet(gait, &mut feet, pos, yaw, vel, k, dt, held, |p| {
-                        ground_below(&queries, p + DVec3::Y * 0.5, &exclude)
+                        ground_below(&queries, p + DVec3::Y * 0.5, exclude)
                     })
                 };
                 m.feet = feet;
@@ -1526,7 +1529,7 @@ pub fn run_minions(
                 };
                 let goal = spot
                     .map(|p| {
-                        ground_below(&queries, p + DVec3::Y, &exclude) + DVec3::Y * HOVER_M as f64
+                        ground_below(&queries, p + DVec3::Y, exclude) + DVec3::Y * HOVER_M as f64
                     })
                     .unwrap_or(m.pos);
                 let pull = 1.0 - (-2.0 * dt).exp();
@@ -1792,7 +1795,8 @@ fn fall(
     }
     let bone = skeletal || spell.payload.raise > 0.0;
     queue.looks.push(LookCmd::Burst {
-        at: center,
+        // Particles' bone splinters fly from about 0.7 m over the floor point they are given.
+        at: if bone { tf.translation } else { center },
         up: Vec3::Y,
         look: if bone {
             "bones".into()

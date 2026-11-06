@@ -149,10 +149,11 @@ pub const VIEWS: &[DemoView] = &[
     DemoView {
         key: "spells_dead",
         name: "The dead rise: skeletons, a skeletal mage and a raised student against a golem and a fire elemental",
-        // From the far end of the floor, looking back at the clash: the skeletons running in
-        // from the right, the golem and the elemental meeting them, the plinths beyond.
-        eye: [1.5, 3.4, -10.5],
-        target: [1.0, 1.0, 3.0],
+        // From the far end of the floor, looking back at the clash: the dead coming in from
+        // the left (the necromancers' plinths), the golem and the elemental meeting them from
+        // the right, the raised student at the left edge, the plinths beyond.
+        eye: [1.5, 3.6, -7.0],
+        target: [1.5, 0.7, 4.0],
         hour: 16.6,
         // Skeletons up and running, the first blows and bolts landing.
         warmup: 5.0,
@@ -617,16 +618,11 @@ fn lanes(program: Program, cycle: u64) -> Vec<Lane> {
                 design: Some(design),
                 aim,
             };
-            // Students in green and blue against necromancers (in black, setup_program).
-            // Of a level with each other, so neither army sweeps the floor at once.
-            let living = |mastery: Mastery, casts: Vec<Cast>| Lane {
-                mastery,
-                level: 60.0,
-                known: None,
-                casts,
-            };
-            let necro = |casts: Vec<Cast>| Lane {
-                mastery: Mastery::Master,
+            // Every lane casts as an Ascended (no fizzles to spoil the show) and at one level,
+            // so neither army sweeps the floor at once; the robes say who is who (students in
+            // green and blue, necromancers in black: `dead_robe`).
+            let lane_of = |casts: Vec<Cast>| Lane {
+                mastery: Mastery::Ascended1,
                 level: 60.0,
                 known: None,
                 casts,
@@ -637,59 +633,55 @@ fn lanes(program: Program, cycle: u64) -> Vec<Lane> {
                     .named(name)
             };
             let skeleton = || summon(&["raise"], "Raise skeleton");
-            // Safeguarded: it bursts on the skeletons, never on the golem beside them.
+            // Seeking, to find a running skeleton; safeguarded, to fly past the golem beside
+            // it and never burst on it.
             let bolt = || {
                 d(&["fire"], CastType::Bolt)
+                    .with(Modifier::Seek)
                     .with(Modifier::Safeguard)
                     .named("Fire bolt")
             };
+            // The battle keeps to the middle of the floor, 12 m across, in the camera's view.
             vec![
-                living(
-                    Mastery::Adept,
-                    vec![cast(
-                        0.1,
-                        summon(&["stone"], "Stone golem"),
-                        AimAt::Floor(-7.5, 1.5),
-                    )],
-                ),
-                living(
-                    Mastery::Apprentice,
-                    vec![cast(
-                        0.2,
-                        summon(&["fire"], "Fire elemental"),
-                        AimAt::Floor(-5.0, 4.5),
-                    )],
-                ),
+                lane_of(vec![cast(
+                    0.1,
+                    summon(&["stone"], "Stone golem"),
+                    AimAt::Floor(-4.5, 1.5),
+                )]),
+                lane_of(vec![cast(
+                    0.2,
+                    summon(&["fire"], "Fire elemental"),
+                    AimAt::Floor(-3.5, 4.5),
+                )]),
                 // Fire bolts into whatever the dead raise.
-                living(
-                    Mastery::Adept,
+                lane_of(
                     [2.6, 4.4, 6.2, 8.0]
                         .into_iter()
                         .map(|at| cast(at, bolt(), AimAt::Foe))
                         .collect(),
                 ),
                 // Three skeleton warriors each at once, and more climbing out mid-fight to
-                // take the place of the fallen (a Master keeps six).
-                necro(vec![
+                // take the place of the fallen.
+                lane_of(vec![
                     cast(0.2, skeleton(), AimAt::Floor(2.5, 2.5)),
-                    cast(0.8, skeleton(), AimAt::Floor(4.0, 0.5)),
-                    cast(1.4, skeleton(), AimAt::Floor(5.0, 3.0)),
+                    cast(0.8, skeleton(), AimAt::Floor(3.5, 0.5)),
+                    cast(1.4, skeleton(), AimAt::Floor(4.0, 3.0)),
                     cast(4.6, skeleton(), AimAt::Floor(1.5, 1.0)),
                     cast(6.6, skeleton(), AimAt::Floor(2.0, 3.5)),
                 ]),
-                necro(vec![
-                    cast(0.2, skeleton(), AimAt::Floor(6.5, -0.5)),
-                    cast(0.8, skeleton(), AimAt::Floor(7.5, 2.0)),
-                    cast(1.4, skeleton(), AimAt::Floor(9.0, 0.0)),
-                    cast(5.4, skeleton(), AimAt::Floor(4.0, -0.5)),
-                    cast(7.4, skeleton(), AimAt::Floor(5.5, 1.5)),
+                lane_of(vec![
+                    cast(0.2, skeleton(), AimAt::Floor(6.0, 0.0)),
+                    cast(0.8, skeleton(), AimAt::Floor(5.5, 1.5)),
+                    cast(1.4, skeleton(), AimAt::Floor(4.5, 0.5)),
+                    cast(5.4, skeleton(), AimAt::Floor(3.5, 0.0)),
+                    cast(7.4, skeleton(), AimAt::Floor(5.0, 1.5)),
                 ]),
                 // A frost skeletal mage, then the fallen student stands for the dead.
-                necro(vec![
+                lane_of(vec![
                     cast(
                         0.2,
                         summon(&["raise", "frost"], "Skeletal mage"),
-                        AimAt::Floor(10.0, 5.5),
+                        AimAt::Floor(8.5, 6.5),
                     ),
                     cast(
                         1.4,
@@ -749,7 +741,17 @@ impl Hall {
 /// The necromancers' side in `spells_dead` (the students keep [`duel::STUDENTS`]).
 pub const NECROMANCERS: u32 = 3;
 /// Where the fallen student lies in `spells_dead`, in front of the last lane (x, z).
-pub const FALLEN: [f64; 2] = [12.5, 2.5];
+/// More than 3 m from every plain raise of lanes 3 and 4, so only lane 5 raises it.
+pub const FALLEN: [f64; 2] = [7.5, 4.5];
+
+/// The robes `spells_dead`'s students wear (green, blue, green), whatever they cast as.
+fn dead_robe(program: Program, lane: usize) -> Option<Mastery> {
+    (program == Program::Dead && lane < 3).then_some(if lane == 1 {
+        Mastery::Apprentice
+    } else {
+        Mastery::Adept
+    })
+}
 
 /// The fallen student of `spells_dead`: a body on the floor (down, limp), a fire bolt in its
 /// grimoire for when it is raised against its classmates.
@@ -922,10 +924,11 @@ fn setup_program(
         }
         let side = (program == Program::Duel).then_some([0.1, 0.35, 0.9]);
         let necromancer = program == Program::Dead && m.lane >= 3;
+        let robe_tier = dead_robe(program, m.lane).unwrap_or(l.mastery);
         let want = if necromancer {
             necromancer_look(m.lane)
         } else {
-            mage_look(m.lane, l.mastery, side)
+            mage_look(m.lane, robe_tier, side)
         };
         match look {
             Some(mut a) if *a != want => *a = want,
@@ -946,7 +949,7 @@ fn setup_program(
         let robe = if necromancer {
             NECRO_ROBE
         } else {
-            robe_color(l.mastery)
+            robe_color(robe_tier)
         };
         for child in children.iter() {
             if let Ok(mut r) = stand_ins.get_mut(child)
@@ -1189,7 +1192,11 @@ fn run_hall(
                         .unwrap_or(hall.origin);
                     creatures
                         .iter()
-                        .filter(|(_, mn, _)| mn.cast.side != caster.side)
+                        // Not one still climbing out of the floor (it is under it).
+                        .filter(|(_, mn, _)| {
+                            mn.cast.side != caster.side
+                                && !matches!(mn.act, crate::summon::Act::Rise { .. })
+                        })
                         .map(|(c, _, g)| (c, g.translation()))
                         .chain(
                             thralls
@@ -1338,6 +1345,28 @@ mod tests {
                         let s = c.compile(&design, 0.0);
                         assert!(s.is_ok(), "{p:?} cycle {cycle} lane {i}: {:?}", s.err());
                     }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn only_the_last_lane_raises_the_fallen_student() {
+        // A plain raise within 3 m of a body down raises it (undead::CORPSE_M): every other
+        // lane's skeletons must climb out farther off.
+        for (i, l) in lanes(Program::Dead, 0).iter().enumerate() {
+            for c in &l.casts {
+                let plain = c
+                    .design
+                    .as_ref()
+                    .is_some_and(|d| d.effects == ["raise"] && d.cast == CastType::Summon);
+                let AimAt::Floor(x, z) = c.aim else { continue };
+                let far = ((x - FALLEN[0]).powi(2) + (z - FALLEN[1]).powi(2)).sqrt();
+                if plain && i != 5 {
+                    assert!(
+                        far > crate::undead::CORPSE_M as f64 + 0.5,
+                        "lane {i}: {far}"
+                    );
                 }
             }
         }

@@ -17,7 +17,7 @@ use std::f32::consts::PI;
 use engine_core::math::{DVec3, Quat, Vec3};
 use engine_core::prelude::*;
 use engine_render::{MaterialRef, MeshRef, MeshRenderer, Shape, StandardMaterial};
-use engine_world::animation::Ragdoll;
+use engine_world::animation::{Ragdoll, SkeletonPose};
 use engine_world::physics::{BodyKind, Collider, ColliderShape, RigidBody};
 use engine_world::{Faction, Factions};
 
@@ -158,8 +158,8 @@ pub fn skeleton_parts(k: f32, color: [f32; 3], mage: bool) -> Vec<(usize, Vec3, 
             Vec3::splat(0.06) * k,
             piece(
                 Shape::Cylinder {
-                    radius: 0.032 * k,
-                    height: 0.06 * k,
+                    radius: 0.04 * k,
+                    height: 0.07 * k,
                     segments: 8,
                 },
                 bone,
@@ -174,7 +174,7 @@ pub fn skeleton_parts(k: f32, color: [f32; 3], mage: bool) -> Vec<(usize, Vec3, 
             piece(
                 Shape::Torus {
                     radius: r * k,
-                    tube: 0.017 * k,
+                    tube: 0.022 * k,
                     segments: 20,
                 },
                 bone,
@@ -189,7 +189,7 @@ pub fn skeleton_parts(k: f32, color: [f32; 3], mage: bool) -> Vec<(usize, Vec3, 
     out.push((
         COLLAR,
         Vec3::new(0.05, 0.42, 0.05) * k,
-        piece(capsule(0.022, 0.42), bone),
+        piece(capsule(0.028, 0.42), bone),
     ));
     out.push((
         SKULL,
@@ -208,18 +208,18 @@ pub fn skeleton_parts(k: f32, color: [f32; 3], mage: bool) -> Vec<(usize, Vec3, 
         piece(cuboid(0.1, 0.04, 0.09), bone),
     ));
     for i in EYES {
-        out.push((i, Vec3::ZERO, glow(0.024 * k, color, 80.0)));
+        out.push((i, Vec3::ZERO, glow(0.026 * k, color, 90.0)));
     }
     for leg in LEG {
         out.push((
             leg,
             Vec3::new(0.07, SKELETON_GAIT.thigh, 0.07) * k,
-            piece(capsule(0.034, SKELETON_GAIT.thigh), bone),
+            piece(capsule(0.045, SKELETON_GAIT.thigh), bone),
         ));
         out.push((
             leg + 1,
             Vec3::new(0.06, SKELETON_GAIT.shin, 0.06) * k,
-            piece(capsule(0.028, SKELETON_GAIT.shin), bone),
+            piece(capsule(0.038, SKELETON_GAIT.shin), bone),
         ));
         out.push((
             leg + 2,
@@ -231,12 +231,12 @@ pub fn skeleton_parts(k: f32, color: [f32; 3], mage: bool) -> Vec<(usize, Vec3, 
         out.push((
             arm,
             Vec3::new(0.05, UPPER, 0.05) * k,
-            piece(capsule(0.026, UPPER), bone),
+            piece(capsule(0.036, UPPER), bone),
         ));
         out.push((
             arm + 1,
             Vec3::new(0.045, FORE, 0.045) * k,
-            piece(capsule(0.022, FORE), bone),
+            piece(capsule(0.03, FORE), bone),
         ));
         out.push((
             arm + 2,
@@ -450,8 +450,9 @@ pub fn pose_skeleton(st: &Stance, ankles: [Vec3; 2], k: f32) -> Vec<(Vec3, Quat,
         let fore = (wrist - elbow).normalize_or(Vec3::NEG_Y);
         let turn = Quat::from_rotation_arc(Vec3::Y, fore);
         out[ARM[i] + 2] = (wrist + fore * 0.05 * k, turn, Vec3::ONE);
+        // Points of light set a little proud of the face, where the sockets would be.
         out[EYES[i]] = (
-            head + r_head * Vec3::new(side * 0.038, 0.005, -0.088) * k,
+            head + r_head * Vec3::new(side * 0.038, 0.012, -0.1) * k,
             r_head,
             Vec3::splat(st.eyes.max(0.001)),
         );
@@ -482,6 +483,19 @@ pub struct Thrall {
     pub cooldown: f32,
     pub target: Option<Entity>,
 }
+
+/// A violet glow in a thrall's eye, kept on its head by [`run_thralls`].
+#[derive(Component, Debug, Clone, Copy)]
+pub struct ThrallEye {
+    pub owner: Entity,
+    /// -1 left, +1 right.
+    pub side: f32,
+}
+
+/// Where a standing body's eye is from its head bone (root axes), and the height over its feet
+/// above which the head counts as up (a get-up is over), m.
+const EYE_FROM_HEAD: Vec3 = Vec3::new(0.033, 0.075, -0.095);
+const HEAD_UP_M: f64 = 1.35;
 
 /// How many thralls a caster keeps: one, two from Master up (Twin Souls).
 pub fn thrall_limit(mastery: Mastery) -> usize {
@@ -543,6 +557,7 @@ pub fn raise_dead(
             queue.minions.push(nm);
             continue;
         };
+        tracing::debug!("magic: a raise stands {body:?} up as a thrall");
         let Ok((e, g, mut v, caster)) = bodies.get_mut(body) else {
             continue;
         };
@@ -598,12 +613,13 @@ pub fn raise_dead(
                 target: None,
             },
         ));
+        // Its eyes follow its head (run_thralls), lit once it stands.
         for side in [-1.0, 1.0] {
             commands.spawn((
                 Name::new("Thrall eye"),
-                Transform::from_xyz(side * 0.034, 1.63, -0.1),
+                Transform::from_translation(g.translation()).with_scale(Vec3::ZERO),
                 glow(0.022, GRAVE_LIGHT, 90.0),
-                ChildOf(e),
+                ThrallEye { owner: e, side },
             ));
         }
         let at = g.translation();
@@ -650,17 +666,47 @@ pub fn run_thralls(
     )>,
     bodies: Query<(Entity, &GlobalTransform, &Vitality, Allegiance)>,
     creatures: Query<(), Or<(With<Minion>, With<Thrall>)>>,
+    poses: Query<&SkeletonPose>,
+    mut eyes: Query<(Entity, &ThrallEye, &mut Transform), Without<Thrall>>,
     mut casts: MessageWriter<CastRequest>,
     mut queue: ResMut<MagicQueue>,
     mut commands: Commands,
 ) {
     let dt = time.delta_secs();
+    // Eyes on their thrall's head while it stands, out while it gets up; gone with it.
+    for (eye, te, mut etf) in &mut eyes {
+        let Ok((_, _, _, g, ..)) = thralls.get(te.owner) else {
+            commands.entity(eye).despawn();
+            continue;
+        };
+        let head = poses
+            .get(te.owner)
+            .ok()
+            .and_then(|p| p.bone_world(g, p.index_of("head")?));
+        let (at, up) = match head {
+            Some((h, _)) => (h, h.y - g.translation().y > HEAD_UP_M),
+            // No animated body: a man's eye height.
+            None => (g.translation() + DVec3::Y * 1.555, true),
+        };
+        let off = Vec3::new(te.side * EYE_FROM_HEAD.x, EYE_FROM_HEAD.y, EYE_FROM_HEAD.z);
+        etf.translation = at + (g.rotation() * off).as_dvec3();
+        etf.scale = Vec3::splat(if up { 1.0 } else { 0.0 });
+    }
     for (e, mut t, mut tf, g, v, c) in &mut thralls {
         t.age += dt;
         t.cooldown -= dt;
         let at = g.translation();
         if v.down() || t.age >= t.life {
             collapse(e, at, &mut queue, &mut commands);
+            continue;
+        }
+        // Still getting up off the floor (anim's get-up): it neither turns nor casts.
+        let head = poses
+            .get(e)
+            .ok()
+            .and_then(|p| p.bone_world(g, p.index_of("head")?));
+        if head.is_some_and(|(h, _)| h.y - at.y < HEAD_UP_M) {
+            t.cooldown = t.cooldown.max(0.6);
             continue;
         }
         let foe = bodies
@@ -707,12 +753,13 @@ pub fn run_thralls(
 
 /// A thrall's end: it falls into a heap of ash, which settles and sinks.
 fn collapse(e: Entity, at: DVec3, queue: &mut MagicQueue, commands: &mut Commands) {
+    // Particles' ash pours down from about 0.9 m over the floor point it is given.
     queue.looks.push(LookCmd::Burst {
-        at: at + DVec3::Y * 0.8,
+        at,
         up: Vec3::Y,
         look: "ash".into(),
         role: Role::Impact,
-        scale: 1.3,
+        scale: 1.0,
         color: [0.3, 0.29, 0.3],
     });
     queue.looks.push(LookCmd::Burst {
