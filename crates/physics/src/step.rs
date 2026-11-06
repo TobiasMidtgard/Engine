@@ -738,7 +738,9 @@ pub(crate) fn physics_simulate(
     // Overlapping the frame: the frame's last step is kicked after the frame's own work
     // ([`kick_step`]) and finished at the start of the next frame ([`finish_step`]). One
     // with another step after it in this frame runs here, so that step's gameplay sees it.
-    let last = fixed.current_step() + 1 >= fixed.steps_this_frame();
+    // "Last" includes the step the frame's step budget ends on, so a frame cut short by the
+    // budget still overlaps its final step.
+    let last = fixed.is_last_step();
     if carry.settings.overlap_frame && last {
         carry.deferred = true;
         return;
