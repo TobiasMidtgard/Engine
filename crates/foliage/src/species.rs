@@ -229,6 +229,10 @@ pub struct PlantShape {
     pub leaf_density: f32,
     pub leaf: LeafStyle,
     pub bark: BarkStyle,
+    /// Broadleaves: the trunk splits into this many leaders (0 or 1: one trunk to the top),
+    /// at half the crown base, each rising to the crown and carrying its own limbs, as a
+    /// savanna acacia's does under its flat top.
+    pub forks: u32,
 }
 
 impl Default for PlantShape {
@@ -244,6 +248,7 @@ impl Default for PlantShape {
             leaf_density: 1.0,
             leaf: LeafStyle::Broad,
             bark: BarkStyle::Plain,
+            forks: 0,
         }
     }
 }
@@ -564,6 +569,7 @@ pub fn builtin_species() -> Vec<PlantSpecies> {
                 leaf_density: 1.0,
                 leaf: LeafStyle::Lobed,
                 bark: BarkStyle::Plain,
+                forks: 0,
             },
             fuel_kg: 900.0,
             toughness: 140.0,
@@ -611,6 +617,7 @@ pub fn builtin_species() -> Vec<PlantSpecies> {
                 leaf_density: 1.0,
                 leaf: LeafStyle::Small,
                 bark: BarkStyle::Birch,
+                forks: 0,
             },
             fuel_kg: 250.0,
             toughness: 70.0,
@@ -651,6 +658,7 @@ pub fn builtin_species() -> Vec<PlantSpecies> {
                 leaf_density: 1.0,
                 leaf: LeafStyle::LongNeedles,
                 bark: BarkStyle::Pine,
+                forks: 0,
             },
             fuel_kg: 700.0,
             ignition_c: 260.0,
@@ -692,6 +700,7 @@ pub fn builtin_species() -> Vec<PlantSpecies> {
                 leaf_density: 1.0,
                 leaf: LeafStyle::ShortNeedles,
                 bark: BarkStyle::Plain,
+                forks: 0,
             },
             fuel_kg: 650.0,
             ignition_c: 260.0,
@@ -740,6 +749,7 @@ pub fn builtin_species() -> Vec<PlantSpecies> {
                 leaf_density: 1.0,
                 leaf: LeafStyle::Broad,
                 bark: BarkStyle::Plain,
+                forks: 0,
             },
             fuel_kg: 60.0,
             toughness: 25.0,
@@ -786,6 +796,7 @@ pub fn builtin_species() -> Vec<PlantSpecies> {
                 leaf_density: 1.0,
                 leaf: LeafStyle::Frond,
                 bark: BarkStyle::Plain,
+                forks: 0,
             },
             fuel_kg: 2.0,
             ignition_c: 280.0,
@@ -826,6 +837,7 @@ pub fn builtin_species() -> Vec<PlantSpecies> {
                 leaf_density: 1.0,
                 leaf: LeafStyle::Broad,
                 bark: BarkStyle::Plain,
+                forks: 0,
             },
             fuel_kg: 0.6,
             ignition_c: 250.0,
@@ -873,6 +885,7 @@ pub fn builtin_species() -> Vec<PlantSpecies> {
                 leaf_density: 1.0,
                 leaf: LeafStyle::Broad,
                 bark: BarkStyle::Plain,
+                forks: 0,
             },
             fuel_kg: 0.3,
             ignition_c: 250.0,
@@ -920,6 +933,7 @@ pub fn builtin_species() -> Vec<PlantSpecies> {
                 leaf_density: 1.0,
                 leaf: LeafStyle::Broad,
                 bark: BarkStyle::Plain,
+                forks: 0,
             },
             fuel_kg: 0.2,
             ignition_c: 260.0,
@@ -967,6 +981,7 @@ pub fn builtin_species() -> Vec<PlantSpecies> {
                 leaf_density: 1.0,
                 leaf: LeafStyle::Broad,
                 bark: BarkStyle::Plain,
+                forks: 0,
             },
             fuel_kg: 0.2,
             ignition_c: 320.0,
@@ -1014,6 +1029,7 @@ pub fn builtin_species() -> Vec<PlantSpecies> {
                 leaf_density: 1.0,
                 leaf: LeafStyle::Broad,
                 bark: BarkStyle::Plain,
+                forks: 0,
             },
             fuel_kg: 6.0,
             ignition_c: 320.0,
@@ -1023,6 +1039,7 @@ pub fn builtin_species() -> Vec<PlantSpecies> {
     ];
     // (Appended, so the ids above stay as they were.)
     all.extend(stand_trees());
+    all.extend(regional_trees());
     crate::wind::fill(&mut all);
     all
 }
@@ -1080,6 +1097,7 @@ fn stand_trees() -> Vec<PlantSpecies> {
                 leaf_density: 0.9,
                 leaf: LeafStyle::Small,
                 bark: BarkStyle::Birch,
+                forks: 0,
             },
             fuel_kg: 90.0,
             toughness: 45.0,
@@ -1131,6 +1149,7 @@ fn stand_trees() -> Vec<PlantSpecies> {
                 leaf_density: 0.9,
                 leaf: LeafStyle::Round,
                 bark: BarkStyle::Aspen,
+                forks: 0,
             },
             fuel_kg: 280.0,
             toughness: 70.0,
@@ -1180,6 +1199,7 @@ fn stand_trees() -> Vec<PlantSpecies> {
                 leaf_density: 0.8,
                 leaf: LeafStyle::Pinnate,
                 bark: BarkStyle::Smooth,
+                forks: 0,
             },
             fuel_kg: 80.0,
             toughness: 40.0,
@@ -1228,6 +1248,7 @@ fn stand_trees() -> Vec<PlantSpecies> {
                 leaf_density: 1.0,
                 leaf: LeafStyle::Round,
                 bark: BarkStyle::Plain,
+                forks: 0,
             },
             fuel_kg: 300.0,
             toughness: 80.0,
@@ -1276,6 +1297,7 @@ fn stand_trees() -> Vec<PlantSpecies> {
                 leaf_density: 1.0,
                 leaf: LeafStyle::Oval,
                 bark: BarkStyle::Beech,
+                forks: 0,
             },
             fuel_kg: 950.0,
             toughness: 150.0,
@@ -1324,6 +1346,7 @@ fn stand_trees() -> Vec<PlantSpecies> {
                 leaf_density: 0.9,
                 leaf: LeafStyle::SoftNeedles,
                 bark: BarkStyle::Scaly,
+                forks: 0,
             },
             fuel_kg: 600.0,
             ignition_c: 270.0,
@@ -1373,6 +1396,7 @@ fn stand_trees() -> Vec<PlantSpecies> {
                 leaf_density: 1.0,
                 leaf: LeafStyle::Oval,
                 bark: BarkStyle::Plain,
+                forks: 0,
             },
             fuel_kg: 70.0,
             toughness: 30.0,
@@ -1415,6 +1439,7 @@ fn stand_trees() -> Vec<PlantSpecies> {
                 leaf_density: 1.1,
                 leaf: LeafStyle::ShortNeedles,
                 bark: BarkStyle::Scaly,
+                forks: 0,
             },
             fuel_kg: 40.0,
             ignition_c: 250.0,
@@ -1422,6 +1447,59 @@ fn stand_trees() -> Vec<PlantSpecies> {
             ..Default::default()
         },
     ]
+}
+
+/// Skyline trees of other regions (engine-design/foliage/regional-looks.md): the trees a
+/// scenic photo of the region is recognized by. Heights about two thirds of the real ones, as
+/// the trees above are.
+fn regional_trees() -> Vec<PlantSpecies> {
+    let t = Tolerance::new;
+    vec![PlantSpecies {
+        // Umbrella thorn (Vachellia tortilis) of the East African savanna: a short trunk
+        // forking into a few leaders under a flat, layered top far wider than the tree is
+        // tall, grey-green and see-through with its tiny bipinnate leaves; grey-black
+        // fissured bark (SANBI; 5-20 m, crowns 8-13 m across).
+        name: "umbrella thorn".into(),
+        form: PlantForm::Broadleaf,
+        layer: Layer::Canopy,
+        max_height_m: 7.5,
+        crown_radius_m: 5.2,
+        trunk_radius_m: 0.2,
+        years_to_mature: 30.0,
+        lifespan_years: 200.0,
+        canopy_density: 0.9,
+        water: t(-0.05, 0.05, 0.55, 0.85),
+        light: t(0.4, 0.7, 1.0, 1.01),
+        nutrients: t(-0.2, 0.0, 1.0, 1.01),
+        temperature_c: t(2.0, 16.0, 38.0, 48.0),
+        uptake: 0.4,
+        seeds_per_year: 6.0,
+        seed_range_m: 30.0,
+        wind_dispersal: 0.0,
+        establishment: 0.05,
+        min_spacing_m: 6.0,
+        resprouts: true,
+        bark_color: srgb(0x4a4440),
+        leaf_color: srgb(0x5a6340),
+        accent_color: srgb(0x6e7448),
+        wind_sway_m: 0.18,
+        shape: PlantShape {
+            crown_base: 0.66,
+            branches: 16,
+            angle_low_deg: 82.0,
+            angle_high_deg: 72.0,
+            tip_bend: 0.05,
+            gnarl: 0.45,
+            leaf_size_m: 1.1,
+            leaf_density: 1.6,
+            leaf: LeafStyle::Pinnate,
+            bark: BarkStyle::Scaly,
+            forks: 3,
+        },
+        fuel_kg: 120.0,
+        toughness: 60.0,
+        ..Default::default()
+    }]
 }
 
 #[cfg(test)]

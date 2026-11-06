@@ -13,7 +13,7 @@
 //! 150 m, and a wood of 12,000 scenery trees from a hill (with and without the distant level). Name shots after the directory to render
 //! only those (`lineup`, `lineup_near`, `lineup_mid`, `lineup_lod`, `lineup_distant`, `roots`, `crown_front`,
 //! `leaves_close`, `crown_back`, `conifers`, `lineup_stands` (the stands' other eight trees), `pine_crown`, `birch_hazel`, `grove`,
-//! `grove_far`, `valley`, `valley_far`, `far_woods`, `far_woods_off`), `textures`
+//! `grove_far`, `savanna`, `savanna_side`, `savanna_high`, `valley`, `valley_far`, `far_woods`, `far_woods_off`), `textures`
 //! to save the leaf atlases, their normal maps, three of their mip levels and the mass atlases far
 //! crowns draw with instead, or `stats` to print triangle counts.
 
@@ -310,8 +310,52 @@ fn main() {
         spawn_plant(&mut app.world, name, p, size, Some(g)).unwrap();
         placed.push(p);
     }
+    // A patch of dry savanna 600 m off to the side: umbrella thorns on tawny grass.
+    let savanna = DVec3::new(600.0, 0.0, 0.0);
+    if only_sp.as_deref().is_none_or(|o| o == "umbrella thorn") {
+        app.world.spawn((
+            Transform::from_translation(savanna + DVec3::Y * 0.03),
+            MeshRenderer::new(
+                Shape::Plane {
+                    size: [400.0, 400.0],
+                    subdivisions: 1,
+                },
+                StandardMaterial::hex(0x9c8758).with_roughness(0.95),
+            ),
+        ));
+        for (k, (dx, dz)) in [(0.0, 0.0), (-26.0, -34.0), (31.0, -58.0), (-70.0, -95.0)]
+            .into_iter()
+            .enumerate()
+        {
+            let g = Genes {
+                variant: k as u8 % 4,
+                height: [1.0, 0.9, 1.1, 0.95][k],
+                ..Default::default()
+            };
+            spawn_plant(
+                &mut app.world,
+                "umbrella thorn",
+                savanna + DVec3::new(dx, 0.0, dz),
+                1.0,
+                Some(g),
+            )
+            .unwrap();
+        }
+    }
     app.world.flush();
     app.update();
+    // Wait for every species' meshes (built off the frame), so the first shot isn't empty.
+    for _ in 0..2400 {
+        app.update();
+        if app
+            .world
+            .resource::<engine_foliage::FoliageLoading>()
+            .is_ready()
+        {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
 
     // Late-morning sun from behind the camera's left.
     let front_sun = Vec3::new(-0.45, 0.62, 0.65);
@@ -472,6 +516,40 @@ fn main() {
             grove + DVec3::new(6.0, 3.0, 40.0 + 16.0),
             grove + DVec3::new(0.0, 7.0, 0.0),
             Vec3::new(-0.6, 0.5, 0.35),
+        );
+    }
+    if wanted("savanna") {
+        // The acacia against a low sun, as savanna photos are taken: the flat top and forked
+        // trunk read as a silhouette.
+        shot(
+            &mut app,
+            &out,
+            "savanna",
+            savanna + DVec3::new(4.0, 2.2, 26.0),
+            savanna + DVec3::new(-6.0, 6.0, -20.0),
+            Vec3::new(0.3, 0.16, -0.94),
+        );
+    }
+    if wanted("savanna_side") {
+        // The same trees side-lit from a little higher.
+        shot(
+            &mut app,
+            &out,
+            "savanna_side",
+            savanna + DVec3::new(14.0, 3.0, 24.0),
+            savanna + DVec3::new(-4.0, 5.0, -10.0),
+            Vec3::new(-0.7, 0.45, 0.3),
+        );
+    }
+    if wanted("savanna_high") {
+        // From crown height, side-lit: the flat top's underside and the leaders under it.
+        shot(
+            &mut app,
+            &out,
+            "savanna_high",
+            savanna + DVec3::new(0.0, 6.0, 30.0),
+            savanna + DVec3::new(0.0, 4.5, 0.0),
+            Vec3::new(-0.7, 0.45, 0.3),
         );
     }
     if wanted("grove_far") {

@@ -2380,13 +2380,57 @@ fn broadleaf(sp: &PlantSpecies, seed: u64, sapling: bool) -> PlantMeshes {
     let cut = cut_height(sp);
     // Birches: hanging twigs and sprays.
     let weeping = sh.tip_bend < -0.2;
-    let top = h * if sapling { 0.96 } else { 0.84 };
-    let (path, radius) = trunk(sp, &mut rng, top, cut, !sapling);
     let crown_base_y = h * if sapling { 0.35 } else { sh.crown_base };
-    let apex = *path.last().unwrap();
+    // A forked tree's trunk ends at half its crown base, where its leaders part.
+    let forks = if sapling || sh.forks < 2 {
+        0
+    } else {
+        sh.forks as usize
+    };
+    let fork_y = crown_base_y * 0.5;
+    let top = if forks > 0 {
+        fork_y
+    } else {
+        h * if sapling { 0.96 } else { 0.84 }
+    };
+    let (path, mut radius) = trunk(sp, &mut rng, top, cut, !sapling);
+    if forks > 0 {
+        // Still thick where it parts: taper as a whole tree's trunk would at that height.
+        for (r, p) in radius.iter_mut().zip(&path) {
+            let t = p.y / (h * 0.84);
+            *r = sp.trunk_radius_m * (0.1 + 0.9 * (1.0 - t).powf(1.15))
+                + sp.trunk_radius_m * 0.5 * (-p.y / 0.45).exp();
+        }
+    }
+    // The leaders: rising outward from the fork, spread round, to just under the top.
+    let leaders: Vec<(Vec<Vec3>, Vec<f32>, f32)> = (0..forks)
+        .map(|i| {
+            let base = *path.last().unwrap();
+            let az = (i as f32 + rng.range(-0.2, 0.2)) / forks as f32 * std::f32::consts::TAU;
+            let lean = rng.range(24.0f32, 38.0).to_radians();
+            let dir = Vec3::new(lean.sin() * az.cos(), lean.cos(), lean.sin() * az.sin());
+            let end_y = h * rng.range(0.8, 0.9);
+            let length = (end_y - base.y) / lean.cos();
+            let wobble = 0.08 * (0.3 + sh.gnarl);
+            let leader = grow(base, dir, length, 8, |f, _| {
+                // Leaning out further as they near the top, toward the flat crown.
+                Vec3::new(az.cos(), 0.0, az.sin()) * 0.05 * f + jitter(&mut rng, wobble)
+            });
+            let r0 = radius.last().copied().unwrap_or(0.1) * 0.78;
+            (leader, taper(8, r0, r0 * 0.35), az)
+        })
+        .collect();
+    let apex = if leaders.is_empty() {
+        *path.last().unwrap()
+    } else {
+        leaders.iter().map(|l| *l.0.last().unwrap()).sum::<Vec3>() / leaders.len() as f32
+    };
     // Gnarled oaks break into deep lobes; smooth-limbed beech and birch into shallower ones.
+    // A forked tree's flat top keeps its level skyline: shallow lobes.
     let lobing = if sapling {
         0.1
+    } else if forks > 0 {
+        0.4 * (LOBE_STRENGTH + LOBE_GNARL * sh.gnarl)
     } else {
         LOBE_STRENGTH + LOBE_GNARL * sh.gnarl
     };
@@ -2421,6 +2465,13 @@ fn broadleaf(sp: &PlantSpecies, seed: u64, sapling: bool) -> PlantMeshes {
         radius: radius.clone(),
         level: 0,
     });
+    for (leader, leader_r, _) in &leaders {
+        cr.branches.push(Branch {
+            path: leader.clone(),
+            radius: leader_r.clone(),
+            level: 1,
+        });
+    }
     let nb = if sapling { 5 } else { sh.branches.max(3) };
     for k in 0..nb {
         let frac = if sapling {
@@ -2429,14 +2480,29 @@ fn broadleaf(sp: &PlantSpecies, seed: u64, sapling: bool) -> PlantMeshes {
             sh.crown_base
                 + (0.97 - sh.crown_base) * ((k as f32 + rng.range(0.15, 0.85)) / nb as f32)
         };
-        let s_trunk = (frac * h / top).min(0.98);
-        let (attach, _, r_t) = point_at(&path, &radius, s_trunk);
+        // On a forked tree each limb grows from a leader, out to its own side.
+        let (attach, r_t, leader_az) = match leaders.get(k as usize % leaders.len().max(1)) {
+            Some((leader, leader_r, leader_az)) => {
+                let (y0, y1) = (leader[0].y, leader.last().unwrap().y);
+                let s = ((frac * h - y0) / (y1 - y0)).clamp(0.25, 0.97);
+                let (attach, _, r_t) = point_at(leader, leader_r, s);
+                (attach, r_t, Some(*leader_az))
+            }
+            None => {
+                let s_trunk = (frac * h / top).min(0.98);
+                let (attach, _, r_t) = point_at(&path, &radius, s_trunk);
+                (attach, r_t, None)
+            }
+        };
         let rel = ((frac - sh.crown_base) / (1.0 - sh.crown_base)).clamp(0.0, 1.0);
         let angle = (sh.angle_low_deg
             + (sh.angle_high_deg - sh.angle_low_deg) * rel
             + rng.range(-8.0, 8.0))
         .to_radians();
-        let az = k as f32 * 2.399_963 + rng.range(-0.35, 0.35);
+        let az = match leader_az {
+            Some(a) => a + rng.range(-1.2, 1.2),
+            None => k as f32 * 2.399_963 + rng.range(-0.35, 0.35),
+        };
         let dir = Vec3::new(angle.sin() * az.cos(), angle.cos(), angle.sin() * az.sin());
         let length = crown
             .reach(attach, dir)

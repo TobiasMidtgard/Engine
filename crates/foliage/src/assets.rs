@@ -39,8 +39,12 @@ pub const OPEN_VARIANTS: usize = 2;
 
 /// Whether `sp` grows a different crown in the open: a tree whose forest-grown crown starts
 /// above a quarter of its height (in a closed stand it sheds its shaded lower branches).
+/// Forked savanna trees keep their high flat top in the open (browsers and fire keep it
+/// there), so they have none.
 pub fn has_open_form(sp: &PlantSpecies) -> bool {
-    matches!(sp.form, PlantForm::Broadleaf | PlantForm::Conifer) && sp.shape.crown_base > 0.25
+    matches!(sp.form, PlantForm::Broadleaf | PlantForm::Conifer)
+        && sp.shape.crown_base > 0.25
+        && sp.shape.forks < 2
 }
 
 /// `sp` grown in the open: its crown down to about a tenth of its height (live crown ratio
