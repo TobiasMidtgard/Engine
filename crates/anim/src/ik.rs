@@ -289,17 +289,38 @@ impl GroundProbe<'_> {
     /// Highest surface under `p` that is at most `above` meters above it (so feet can step up
     /// onto things) and at most `below` meters below it.
     pub fn probe(&self, p: DVec3, above: f32, below: f32) -> Option<GroundHit> {
-        self.find(p, above, below, false)
+        self.find(p, above, below, false, None)
+    }
+
+    /// [`probe`](Self::probe) for a point that moves little from one call to the next (a
+    /// foot): the terrain's answer is kept in `memo` and, while the point stays within
+    /// [`GroundMemo::REACH`], extended along its plane instead of asked again. Physics and
+    /// [`IkSurface`]s are still asked every time, since they move.
+    pub fn probe_near(
+        &self,
+        p: DVec3,
+        above: f32,
+        below: f32,
+        memo: &mut GroundMemo,
+    ) -> Option<GroundHit> {
+        self.find(p, above, below, false, Some(memo))
     }
 
     /// Only the height of [`probe`](Self::probe), for walkers that follow the ground: the
     /// terrain answers it without its normal and surface lookups (on the showcase's painted
     /// ground those were most of a probe's cost). Equal to `probe(..)?.height`.
     pub fn height(&self, p: DVec3, above: f32, below: f32) -> Option<f64> {
-        self.find(p, above, below, true).map(|h| h.height)
+        self.find(p, above, below, true, None).map(|h| h.height)
     }
 
-    fn find(&self, p: DVec3, above: f32, below: f32, height_only: bool) -> Option<GroundHit> {
+    fn find(
+        &self,
+        p: DVec3,
+        above: f32,
+        below: f32,
+        height_only: bool,
+        memo: Option<&mut GroundMemo>,
+    ) -> Option<GroundHit> {
         let top = p.y + above as f64;
         let bottom = p.y - below as f64;
         let mut best: Option<GroundHit> = None;
@@ -320,12 +341,21 @@ impl GroundProbe<'_> {
                     surface: SurfaceId::default(),
                 });
             }
-        } else if let Some(s) = self.ground.sample(at) {
-            consider(GroundHit {
-                height: s.height,
-                normal: s.normal,
-                surface: s.surface,
-            });
+        } else {
+            let ask = || {
+                self.ground.sample(at).map(|s| GroundHit {
+                    height: s.height,
+                    normal: s.normal,
+                    surface: s.surface,
+                })
+            };
+            let terrain = match memo {
+                Some(m) => m.answer(at, ask),
+                None => ask(),
+            };
+            if let Some(h) = terrain {
+                consider(h);
+            }
         }
         if let Some(phys) = self.physics {
             // Ragdoll parts aren't ground: a body's own limbs would lift its feet.
@@ -469,6 +499,50 @@ pub struct FootIk {
     pub ahead: Vec3,
 }
 
+/// The terrain's answer under one foot from an earlier frame (see
+/// [`GroundProbe::probe_near`]). On the showcase's painted ground a terrain sample (three
+/// heights and the paint's surface) was most of foot IK's cost, asked for every foot of
+/// every character each frame, while a standing foot asks about the same spot.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct GroundMemo {
+    /// Where the terrain was asked (x, top of the probe, z), world.
+    at: Option<DVec3>,
+    hit: Option<GroundHit>,
+}
+
+impl GroundMemo {
+    /// How far (meters, along the ground) a probe may move from where the terrain was asked
+    /// and still use its answer, extended along the ground's plane there.
+    pub const REACH: f64 = 0.1;
+    /// How far the probe's top may move up or down (a cave's floor and roof are meters apart).
+    pub const RISE: f64 = 0.3;
+
+    /// The terrain's answer at `at`: the kept one extended along its plane while `at` is
+    /// near where it was asked, else `ask()`'s (kept for next time).
+    fn answer(&mut self, at: DVec3, ask: impl FnOnce() -> Option<GroundHit>) -> Option<GroundHit> {
+        if let Some(was) = self.at {
+            let d = at - was;
+            if d.x * d.x + d.z * d.z <= Self::REACH * Self::REACH && d.y.abs() <= Self::RISE {
+                return self.hit.map(|h| {
+                    let n = h.normal.as_dvec3();
+                    let rise = if n.y > 0.2 {
+                        -(n.x * d.x + n.z * d.z) / n.y
+                    } else {
+                        0.0
+                    };
+                    GroundHit {
+                        height: h.height + rise,
+                        ..h
+                    }
+                });
+            }
+        }
+        let hit = ask();
+        *self = Self { at: Some(at), hit };
+        hit
+    }
+}
+
 /// Where a planted foot is held (world space), and how strongly.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct FootLock {
@@ -485,6 +559,8 @@ pub struct FootLock {
     pub blend: f32,
     /// Where the animation had the ankle last frame (world), for its speed over the ground.
     pub last: Option<DVec3>,
+    /// The terrain under this foot, kept between frames.
+    pub ground: GroundMemo,
 }
 
 impl Default for FootIk {
@@ -655,6 +731,8 @@ pub(crate) fn foot_ik_system(
     // scope ran whole other systems on its waiting thread (lead, perf week).
     let mut items: Vec<_> = q.iter_mut().map(Some).collect();
     let per = items.len().div_ceil(16).max(1);
+    // New ground (an edit dug or built, terrains came or went): no foot keeps its old answer.
+    let new_ground = ground.is_changed();
     engine_core::tasks::par_chunks_mut(&mut items, per, |_, chunk| {
         for slot in chunk {
             let Some((entity, mut animator, mut ik, gt)) = slot.take() else {
@@ -664,6 +742,11 @@ pub(crate) fn foot_ik_system(
             (|| {
                 if !ik.enabled || ik.weight <= 0.0 || ik.legs.is_empty() || !animator.posed() {
                     return;
+                }
+                if new_ground {
+                    for l in &mut ik.locks {
+                        l.ground = GroundMemo::default();
+                    }
                 }
                 if animator.fresh() {
                     // Planted feet were left where the body stood when it came to rest.
@@ -743,10 +826,11 @@ pub fn solve_feet(
         // Lift the animation gives this foot above the character's ground plane.
         let lift = (ankle.dot(up_model) - ik.foot_height).max(0.0);
         let world = to_world(gt, ankle);
-        let hit = probe.probe(
+        let hit = probe.probe_near(
             world,
             ik.max_step_up + lift * scale,
             ik.max_step_down + lift * scale,
+            &mut ik.locks[n].ground,
         );
         let offset = match hit {
             Some(h) => {
@@ -1160,6 +1244,53 @@ mod tests {
             );
         }
         assert!(low.height.abs() < 1e-6);
+    }
+
+    #[test]
+    fn a_foot_near_where_it_asked_reuses_the_terrain_along_its_plane() {
+        // A 1-in-10 slope rising along +x that counts its samples.
+        struct Slope(std::sync::atomic::AtomicUsize);
+        impl engine_world::GroundQuery for Slope {
+            fn sample(&self, p: DVec3) -> Option<engine_world::GroundSample> {
+                self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                Some(engine_world::GroundSample {
+                    height: 0.1 * p.x,
+                    normal: Vec3::new(-0.1, 1.0, 0.0).normalize(),
+                    surface: SurfaceId(2),
+                })
+            }
+        }
+        let slope = std::sync::Arc::new(Slope(Default::default()));
+        let ground = Ground(slope.clone());
+        let probe = GroundProbe {
+            ground: &ground,
+            physics: None,
+            surfaces: &[],
+            exclude: None,
+        };
+        let asked = || slope.0.load(std::sync::atomic::Ordering::Relaxed);
+        let mut memo = GroundMemo::default();
+        let first = probe.probe_near(DVec3::new(1.0, 0.1, 0.0), 0.5, 0.5, &mut memo);
+        assert!((first.unwrap().height - 0.1).abs() < 1e-9);
+        assert_eq!(asked(), 1);
+        // A few centimeters on (a standing foot's sway, a walking foot's frame): the same
+        // answer carried up the slope, without asking.
+        let near = probe.probe_near(DVec3::new(1.06, 0.12, 0.03), 0.5, 0.5, &mut memo);
+        assert!((near.unwrap().height - 0.106).abs() < 1e-6, "{near:?}");
+        assert_eq!(near.unwrap().surface, SurfaceId(2));
+        assert_eq!(asked(), 1);
+        // Farther than the reach, or the probe's top far above: asked again.
+        probe.probe_near(DVec3::new(1.3, 0.13, 0.0), 0.5, 0.5, &mut memo);
+        assert_eq!(asked(), 2);
+        probe.probe_near(DVec3::new(1.3, 1.5, 0.0), 0.5, 2.0, &mut memo);
+        assert_eq!(asked(), 3);
+        // Range limits still apply to a kept answer: too far below the foot is no ground.
+        assert!(
+            probe
+                .probe_near(DVec3::new(1.3, 1.5, 0.0), 0.5, 0.2, &mut memo)
+                .is_none()
+        );
+        assert_eq!(asked(), 3);
     }
 
     #[test]

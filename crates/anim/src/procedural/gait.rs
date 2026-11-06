@@ -14,7 +14,7 @@ use engine_world::physics::PhysicsQueries;
 use engine_world::{ContactKind, Ground, SurfaceId, WorldShift};
 
 use crate::animator::{Animator, PoseEdit};
-use crate::ik::{GroundProbe, IkSurfaces, to_model, to_world, two_bone};
+use crate::ik::{GroundMemo, GroundProbe, IkSurfaces, to_model, to_world, two_bone};
 use crate::xform::{rotation_between, smoothing};
 
 /// How a leg's bones are solved.
@@ -215,6 +215,8 @@ pub(crate) struct FootState {
     normal: Vec3,
     surface: SurfaceId,
     swing: f32,
+    /// The terrain where the swinging foot will land, kept between frames.
+    ground: GroundMemo,
 }
 
 /// A foot that just touched down.
@@ -332,6 +334,7 @@ pub(crate) fn gait_system(
     // scope ran whole other systems on its waiting thread (lead, perf week).
     let mut items: Vec<_> = q.iter_mut().map(Some).collect();
     let per = items.len().div_ceil(16).max(1);
+    let new_ground = ground.is_changed();
     engine_core::tasks::par_chunks_mut(&mut items, per, |_, chunk| {
         for slot in chunk {
             let Some((entity, mut animator, mut gait, mut params, gt)) = slot.take() else {
@@ -341,6 +344,11 @@ pub(crate) fn gait_system(
             (|| {
                 if !gait.enabled || gait.legs.is_empty() || !animator.posed() {
                     return;
+                }
+                if new_ground {
+                    for f in &mut gait.rt.feet {
+                        f.ground = GroundMemo::default();
+                    }
                 }
                 if animator.fresh() {
                     gait.rt.restart();
@@ -479,6 +487,7 @@ pub fn step_gait(
                     normal: hit.map_or(Vec3::Y, |h| h.normal),
                     surface: hit.map_or(SurfaceId::DEFAULT, |h| h.surface),
                     swing: 0.0,
+                    ground: GroundMemo::default(),
                 }
             })
             .collect();
@@ -547,7 +556,7 @@ pub fn step_gait(
             let remaining = (1.0 - s) * swing_secs;
             let lead = rt.velocity.as_dvec3() * (remaining + stance_secs * 0.5) as f64;
             let mut landing = neutral_world + DVec3::new(lead.x, 0.0, lead.z);
-            if let Some(h) = probe.probe(landing, 0.6, 1.0) {
+            if let Some(h) = probe.probe_near(landing, 0.6, 1.0, &mut foot.ground) {
                 landing.y = h.height + (gait.legs[i].sole * scale) as f64;
                 foot.normal = h.normal;
                 foot.surface = h.surface;
