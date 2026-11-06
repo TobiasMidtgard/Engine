@@ -97,8 +97,14 @@ pub struct Payload {
     pub ward_element: Option<Element>,
     /// Time scale factor and seconds.
     pub time: Option<(f32, f32)>,
-    /// Blink distance, m.
+    /// Blink distance, m (space.rs: to the aim point, never further).
     pub blink_m: f32,
+    /// Seconds a portal's ends stay open (0: not a portal; space.rs).
+    pub portal_secs: f32,
+    /// A portal end's width and height, m.
+    pub portal_m: [f32; 2],
+    /// Seconds of its path a recall rewinds (0: not a recall; space.rs).
+    pub recall_secs: f32,
     pub veil_secs: f32,
     pub fear_secs: f32,
     pub calm_secs: f32,
@@ -481,6 +487,21 @@ fn compile_inner(
         time,
         blink_m: if has(&|k| matches!(k, EffectKind::Blink { .. })) {
             (8.0 * size.sqrt() * range_k).clamp(3.0, 60.0)
+        } else {
+            0.0
+        },
+        portal_secs: if has(&|k| matches!(k, EffectKind::Portal)) {
+            (20.0 * duration_k).clamp(2.0, 120.0)
+        } else {
+            0.0
+        },
+        portal_m: {
+            // Size scales the opening, within reason: a door for a crate up to a gate for a cart.
+            let k = size_k.sqrt().clamp(0.7, 2.0);
+            [1.4 * k, 2.4 * k]
+        },
+        recall_secs: if has(&|k| matches!(k, EffectKind::Recall)) {
+            (3.0 * duration_k).clamp(1.0, 6.0)
         } else {
             0.0
         },

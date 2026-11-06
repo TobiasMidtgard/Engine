@@ -6,7 +6,7 @@
 //! |---|---|
 //! | [`dials`] | the seven domains and fourteen poles every effect is made of |
 //! | [`schools`] | elements, statuses, classes and subclasses, mastery tiers, power |
-//! | [`effects`] | the 24 effects |
+//! | [`effects`] | the 26 effects |
 //! | [`design`] | `SpellDesign`: effects + cast type + modifiers + stages, as JSON |
 //! | [`combine`] | the combination table and the systemic fallback |
 //! | [`compile`] | from a design and a caster to the numbers a spell flies with |
@@ -19,6 +19,8 @@
 //! | [`stone`] | Shaping: stone walls, pillars, steps and grips that are physics bodies |
 //! | [`summon`] | summoned golems, elementals and wisps that walk or float, fight and fall |
 //! | [`tether`] | tethers: a link to one body that works each tick and snaps when stretched |
+//! | [`space`] | portals you see through and pass through, blink to the aim point, recall along your path |
+//! | [`wards`] | wards you can see: shells, domes and ward walls that crack and shatter |
 //! | [`undead`] | raise dead: thralls from fallen bodies, skeleton warriors and mages from the ground |
 //! | [`looks`] | how spells look, through the particles module's API |
 //! | [`player`] | the player's spell bar: keys 1-8, camera aim, charge, channel, place, HUD |
@@ -46,6 +48,7 @@ pub mod meet;
 pub mod player;
 pub mod runtime;
 pub mod schools;
+pub mod space;
 pub mod status;
 pub mod stone;
 pub mod summon;
@@ -101,6 +104,7 @@ impl Plugin for MagicPlugin {
             .init_resource::<player::PlayerMagic>()
             .init_resource::<crafter::Crafter>()
             .init_resource::<wards::WardMeshes>()
+            .init_resource::<space::GateMeshes>()
             .add_message::<wards::WardStruck>()
             .add_message::<engine_world::interact::Interact>()
             .register_component::<MagicCaster>(
@@ -131,6 +135,8 @@ impl Plugin for MagicPlugin {
                     runtime::begin_casts,
                     runtime::advance_casts,
                     player::flash_refused,
+                    space::travel,
+                    space::pass_gates,
                 )
                     .chain()
                     .in_set(MagicSet::Cast),
@@ -178,6 +184,7 @@ impl Plugin for MagicPlugin {
                     hits::recover,
                     status::tick_afflictions,
                     wards::tend_wards,
+                    space::tend_gates,
                     runtime::follow_looks,
                     runtime::tend_pieces,
                     walls::rise_walls,
@@ -201,6 +208,7 @@ impl Plugin for MagicPlugin {
         api::register(app);
         crafter::register(app);
         wards::register(app);
+        space::register(app);
         demo::build(app);
     }
 }

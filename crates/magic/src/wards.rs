@@ -863,9 +863,16 @@ pub struct Paint<'a> {
     owned: &'a mut HashMap<Entity, Handle<StandardMaterial>>,
 }
 
-impl Paint<'_> {
+impl<'a> Paint<'a> {
+    pub fn new(
+        materials: Option<&'a mut Assets<StandardMaterial>>,
+        owned: &'a mut HashMap<Entity, Handle<StandardMaterial>>,
+    ) -> Self {
+        Self { materials, owned }
+    }
+
     /// Set `e`'s glow (stepped, see [`glow_step`]), writing only when the step changes.
-    fn glow(&mut self, e: Entity, r: &mut Mut<MeshRenderer>, color: [f32; 3], strength: f32) {
+    pub fn glow(&mut self, e: Entity, r: &mut Mut<MeshRenderer>, color: [f32; 3], strength: f32) {
         let strength = glow_step(strength);
         let Some(materials) = self.materials.as_deref_mut() else {
             // No renderer (tests): the inline material carries it.

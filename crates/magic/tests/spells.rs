@@ -1889,3 +1889,457 @@ fn the_ward_hall_holds_a_dome_until_it_shatters_then_raises_a_wall() {
     };
     assert_eq!(shelled, 2, "frost and storm shells");
 }
+
+// ------------------------------------------------------------------------------- space
+
+/// The portal ends now: (entity, gate, transform).
+fn ends(app: &mut App) -> Vec<(Entity, space::Gate, Transform)> {
+    let mut q = app.world.query::<(Entity, &space::Gate, &Transform)>();
+    let mut v: Vec<_> = q
+        .iter(&app.world)
+        .map(|(e, g, t)| (e, g.clone(), *t))
+        .collect();
+    v.sort_by_key(|(_, g, _)| g.end);
+    v
+}
+
+fn portal(secs: f32) -> SpellDesign {
+    SpellDesign::new(&["portal"], CastType::Area).with(Modifier::Duration {
+        factor: secs / 20.0,
+    })
+}
+
+/// A mage at the origin opens a pair: its near end at `a`, its far end at `b` (on the ground).
+fn open_pair(app: &mut App, me: Entity, a: DVec3, b: DVec3) -> (Entity, Entity) {
+    cast(app, me, portal(20.0), Aim::Point(a));
+    run(app, 1.5);
+    cast(app, me, portal(20.0), Aim::Point(b));
+    run(app, 1.5);
+    let e = ends(app);
+    assert_eq!(e.len(), 2, "two ends");
+    assert!(
+        e.iter().all(|(_, g, _)| g.open() && g.exit.is_some()),
+        "linked and open"
+    );
+    (e[0].0, e[1].0)
+}
+
+/// Bodies the test moves by their velocity (the stand-in physics moves nothing).
+fn drift(time: Res<Time>, mut q: Query<(&mut Transform, &engine_world::physics::Velocity)>) {
+    for (mut t, v) in &mut q {
+        t.translation += (v.linear * time.delta_secs()).as_dvec3();
+    }
+}
+
+#[test]
+fn a_portal_opens_one_end_then_the_other_and_they_face_on_through() {
+    let mut app = app();
+    let me = mage(&mut app, DVec3::ZERO, Mastery::Ascended1);
+    run(&mut app, 0.1);
+    cast(
+        &mut app,
+        me,
+        portal(20.0),
+        Aim::Point(DVec3::new(0.0, 0.0, -5.0)),
+    );
+    run(&mut app, 1.5);
+    let e = ends(&mut app);
+    assert_eq!(e.len(), 1);
+    let (near, g, t) = e[0].clone();
+    assert!(g.exit.is_none(), "alone until its other end opens");
+    // Standing on the ground, facing the caster.
+    assert!((t.translation.y - 1.2).abs() < 0.05, "{}", t.translation);
+    assert!((t.rotation * Vec3::Z).dot(Vec3::Z) > 0.99);
+    cast(
+        &mut app,
+        me,
+        portal(20.0),
+        Aim::Point(DVec3::new(10.0, 0.0, -5.0)),
+    );
+    run(&mut app, 1.5);
+    let e = ends(&mut app);
+    assert_eq!(e.len(), 2);
+    let (far, g2, t2) = e[1].clone();
+    assert_eq!(g2.exit, Some(near));
+    assert_eq!(e[0].1.exit, Some(far));
+    // The far end faces away from the caster.
+    let away = Vec3::new(10.0, 0.0, -5.0).normalize();
+    assert!((t2.rotation * Vec3::Z).dot(away) > 0.99);
+    // The renderer draws the view through each.
+    let p = app
+        .world
+        .get::<engine_render::Portal>(near)
+        .expect("a view");
+    assert_eq!(p.exit, Some(far));
+    let api = call_api(&mut app.world, "magic.portals", json!({})).unwrap();
+    assert_eq!(api["ends"].as_array().unwrap().len(), 2, "{api}");
+}
+
+#[test]
+fn a_bolt_into_one_end_hits_a_dummy_beyond_the_other() {
+    let mut app = app();
+    let me = mage(&mut app, DVec3::ZERO, Mastery::Ascended1);
+    run(&mut app, 0.1);
+    open_pair(
+        &mut app,
+        me,
+        DVec3::new(0.0, 0.0, -6.0),
+        DVec3::new(10.0, 0.0, -5.0),
+    );
+    // Beyond the far end, on its axis; nothing on the way to it but the door.
+    let away = DVec3::new(10.0, 0.0, -5.0).normalize();
+    let d = dummy(&mut app, DVec3::new(10.0, 0.0, -5.0) + away * 6.0);
+    // And one straight behind the near end, which must not be hit.
+    let behind = dummy(&mut app, DVec3::new(0.0, 0.0, -12.0));
+    cast(
+        &mut app,
+        me,
+        SpellDesign::new(&["fire"], CastType::Bolt),
+        Aim::Point(DVec3::new(0.0, 1.1, -6.0)),
+    );
+    run(&mut app, 2.0);
+    assert!(
+        !hits_on(&app, d).is_empty(),
+        "the bolt came out of the far end"
+    );
+    assert!(
+        hits_on(&app, behind).is_empty(),
+        "nothing goes past the near end"
+    );
+}
+
+#[test]
+fn a_beam_bends_through_a_pair() {
+    let mut app = app();
+    let me = mage(&mut app, DVec3::ZERO, Mastery::Ascended1);
+    run(&mut app, 0.1);
+    open_pair(
+        &mut app,
+        me,
+        DVec3::new(0.0, 0.0, -6.0),
+        DVec3::new(10.0, 0.0, -5.0),
+    );
+    let away = DVec3::new(10.0, 0.0, -5.0).normalize();
+    let d = dummy(&mut app, DVec3::new(10.0, 0.0, -5.0) + away * 5.0);
+    cast(
+        &mut app,
+        me,
+        SpellDesign::new(&["storm"], CastType::Beam),
+        Aim::Point(DVec3::new(0.0, 1.1, -6.0)),
+    );
+    run(&mut app, 1.2);
+    let beam_end = {
+        let mut q = app.world.query::<&runtime::BeamCast>();
+        q.iter(&app.world).next().map(|b| b.end).expect("a beam")
+    };
+    assert!(
+        beam_end.distance(DVec3::new(10.0, 1.0, -5.0) + away * 5.0) < 1.0,
+        "its end is on the dummy beyond the far end: {beam_end}"
+    );
+    run(&mut app, 2.0);
+    assert!(hits_on(&app, d).len() >= 3, "it ticks on it");
+}
+
+#[test]
+fn a_shoved_body_comes_out_turned_and_does_not_go_straight_back() {
+    let mut app = app();
+    app.add_systems(FixedUpdate, drift.in_set(SimSet::Physics));
+    let me = mage(&mut app, DVec3::ZERO, Mastery::Ascended1);
+    run(&mut app, 0.1);
+    let (_, far) = open_pair(
+        &mut app,
+        me,
+        DVec3::new(0.0, 0.0, -6.0),
+        DVec3::new(10.0, 0.0, -5.0),
+    );
+    let crate_e = app
+        .world
+        .spawn((
+            Name::new("Crate"),
+            Transform::from_translation(DVec3::new(0.0, 0.4, -4.0)),
+            RigidBody {
+                kind: BodyKind::Dynamic,
+                ..Default::default()
+            },
+            engine_world::physics::Velocity {
+                linear: Vec3::new(0.0, 0.0, -4.0),
+                angular: Vec3::ZERO,
+            },
+        ))
+        .id();
+    run(&mut app, 1.0);
+    let away = Vec3::new(10.0, 0.0, -5.0).normalize();
+    let t = *app.world.get::<Transform>(crate_e).unwrap();
+    let v = *app
+        .world
+        .get::<engine_world::physics::Velocity>(crate_e)
+        .unwrap();
+    let far_at = app.world.get::<Transform>(far).unwrap().translation;
+    assert!(
+        t.translation.distance(far_at) < 4.0,
+        "it came out of the far end: {}",
+        t.translation
+    );
+    assert!(
+        (v.linear.normalize().dot(away) - 1.0).abs() < 1e-3
+            && (v.linear.length() - 4.0).abs() < 1e-3,
+        "its velocity turned with the pair: {}",
+        v.linear
+    );
+    assert!(
+        (t.rotation * Vec3::NEG_Z).dot(away) > 0.99,
+        "and so did its facing"
+    );
+    run(&mut app, 2.0);
+    let p = app.world.get::<Transform>(crate_e).unwrap().translation;
+    assert!(
+        (p - far_at).dot(away.as_dvec3()) > 6.0,
+        "it went on out of the far end: {p}"
+    );
+}
+
+#[test]
+fn an_end_alone_lets_nothing_through() {
+    let mut app = app();
+    let me = mage(&mut app, DVec3::ZERO, Mastery::Ascended1);
+    run(&mut app, 0.1);
+    cast(
+        &mut app,
+        me,
+        portal(20.0),
+        Aim::Point(DVec3::new(0.0, 0.0, -6.0)),
+    );
+    run(&mut app, 1.5);
+    let behind = dummy(&mut app, DVec3::new(0.0, 0.0, -12.0));
+    cast(
+        &mut app,
+        me,
+        SpellDesign::new(&["fire"], CastType::Bolt),
+        Aim::Point(DVec3::new(0.0, 1.1, -12.0)),
+    );
+    run(&mut app, 2.0);
+    assert!(hits_on(&app, behind).is_empty(), "the membrane stopped it");
+    let seen = app.world.resource::<Seen>();
+    assert!(
+        seen.hits
+            .iter()
+            .any(|h| h.target.is_none() && (h.point.z + 6.0).abs() < 0.5),
+        "it burst on the membrane"
+    );
+}
+
+#[test]
+fn a_pair_closes_when_its_time_is_up_and_when_a_third_end_opens() {
+    let mut app = app();
+    let me = mage(&mut app, DVec3::ZERO, Mastery::Ascended1);
+    run(&mut app, 0.1);
+    let (a, b) = open_pair(
+        &mut app,
+        me,
+        DVec3::new(0.0, 0.0, -6.0),
+        DVec3::new(10.0, 0.0, -5.0),
+    );
+    // A third end: the old pair closes, the new end waits alone.
+    cast(
+        &mut app,
+        me,
+        portal(20.0),
+        Aim::Point(DVec3::new(-6.0, 0.0, -6.0)),
+    );
+    run(&mut app, 1.5);
+    let e = ends(&mut app);
+    assert_eq!(e.len(), 1, "only the new end");
+    assert!(e[0].0 != a && e[0].0 != b && e[0].1.exit.is_none());
+    // A short-lived pair closes on its own.
+    let mut app = self::app();
+    let me = mage(&mut app, DVec3::ZERO, Mastery::Ascended1);
+    run(&mut app, 0.1);
+    cast(
+        &mut app,
+        me,
+        portal(3.0),
+        Aim::Point(DVec3::new(0.0, 0.0, -6.0)),
+    );
+    run(&mut app, 1.0);
+    cast(
+        &mut app,
+        me,
+        portal(3.0),
+        Aim::Point(DVec3::new(8.0, 0.0, -6.0)),
+    );
+    run(&mut app, 1.0);
+    assert_eq!(ends(&mut app).len(), 2);
+    run(&mut app, 3.0);
+    assert!(ends(&mut app).is_empty(), "both ends closed");
+}
+
+#[test]
+fn a_blink_stops_short_of_a_wall_and_steps_onto_a_ledge_it_aims_at() {
+    let mut app = app();
+    let me = mage(&mut app, DVec3::ZERO, Mastery::Ascended1);
+    // A wall: a big boulder 4.5 m ahead.
+    app.world.spawn((
+        Name::new("Boulder"),
+        Transform::from_translation(DVec3::new(0.0, 0.0, -6.0)),
+        Body(1.5),
+    ));
+    run(&mut app, 0.1);
+    cast(
+        &mut app,
+        me,
+        SpellDesign::new(&["blink"], CastType::OnSelf),
+        Aim::Point(DVec3::new(0.0, 0.0, -10.0)),
+    );
+    run(&mut app, 1.0);
+    let p = app.world.get::<Transform>(me).unwrap().translation;
+    assert!(p.z < -2.5 && p.z > -4.5, "short of the boulder: {p}");
+    assert!(p.y.abs() < 0.05, "on the ground: {p}");
+
+    // A ledge: a low rock whose top is 2.4 m up, aimed at.
+    let mut app = self::app();
+    let me = mage(&mut app, DVec3::ZERO, Mastery::Ascended1);
+    app.world.spawn((
+        Name::new("Ledge"),
+        Transform::from_translation(DVec3::new(0.0, -0.2, -6.0)),
+        Body(1.6),
+    ));
+    run(&mut app, 0.1);
+    cast(
+        &mut app,
+        me,
+        SpellDesign::new(&["blink"], CastType::OnSelf),
+        Aim::Point(DVec3::new(0.0, 2.4, -6.0)),
+    );
+    run(&mut app, 0.05);
+    let api = call_api(&mut app.world, "magic.portals", json!({})).unwrap();
+    run(&mut app, 1.0);
+    let p = app.world.get::<Transform>(me).unwrap().translation;
+    assert!(
+        p.y > 2.0 && (p.z + 6.0).abs() < 0.6,
+        "on top of it: {p} ({api})"
+    );
+}
+
+#[test]
+fn a_recall_rewinds_three_seconds_of_its_path_and_gives_back_its_health() {
+    let mut app = app();
+    let me = mage(&mut app, DVec3::ZERO, Mastery::Ascended1);
+    run(&mut app, 0.5);
+    cast(
+        &mut app,
+        me,
+        SpellDesign::new(&["blink"], CastType::OnSelf),
+        Aim::Point(DVec3::new(0.0, 0.0, -6.0)),
+    );
+    run(&mut app, 1.0);
+    let there = app.world.get::<Transform>(me).unwrap().translation;
+    assert!(there.z < -4.0, "{there}");
+    app.world.get_mut::<Vitality>(me).unwrap().health = 40.0;
+    run(&mut app, 0.5);
+    cast(
+        &mut app,
+        me,
+        SpellDesign::new(&["recall"], CastType::OnSelf),
+        Aim::Direction(Vec3::NEG_Z),
+    );
+    let mut steps = 0;
+    while app.world.get::<space::Rewinding>(me).is_none() {
+        run(&mut app, 1.0 / 60.0);
+        steps += 1;
+        assert!(steps < 120, "it rewinds");
+    }
+    run(&mut app, 0.6);
+    let back = app.world.get::<Transform>(me).unwrap().translation;
+    assert!(
+        back.distance(DVec3::ZERO) < 0.3,
+        "back where it was: {back}"
+    );
+    let v = app.world.get::<Vitality>(me).unwrap();
+    assert!(v.health > 99.0, "its health back: {}", v.health);
+    assert!(app.world.get::<space::Rewinding>(me).is_none());
+}
+
+#[test]
+fn nothing_touches_a_body_rewinding() {
+    let mut app = app();
+    let me = mage(&mut app, DVec3::ZERO, Mastery::Ascended1);
+    let d = dummy(&mut app, DVec3::new(0.0, 0.0, -12.0));
+    app.world.entity_mut(d).insert(space::Rewinding {
+        path: vec![
+            (DVec3::new(0.0, 0.0, -12.0), Quat::IDENTITY),
+            (DVec3::new(0.0, 0.0, -12.0), Quat::IDENTITY),
+        ],
+        t: 0.0,
+        secs: 30.0,
+        health: None,
+    });
+    run(&mut app, 0.1);
+    cast(
+        &mut app,
+        me,
+        SpellDesign::new(&["fire"], CastType::Bolt),
+        Aim::Entity(d),
+    );
+    run(&mut app, 2.0);
+    assert!(hits_on(&app, d).is_empty());
+    assert_eq!(app.world.get::<Vitality>(d).unwrap().health, 500.0);
+}
+
+#[test]
+fn the_portal_hall_opens_its_pair_and_sends_bolts_through() {
+    let mut app = app();
+    {
+        let mut commands = app.world.commands();
+        demo::spawn_demo(&mut commands, DVec3::ZERO);
+    }
+    app.world.flush();
+    app.update();
+    {
+        let mut hall = app.world.resource_mut::<demo::Hall>();
+        hall.program = demo::Program::Portal;
+        hall.restart = true;
+    }
+    run(&mut app, 0.2);
+    // The stand-in physics sees only bodies it is told of: the program's dummies.
+    let props: Vec<Entity> = {
+        let mut q = app
+            .world
+            .query_filtered::<Entity, (With<demo::art::HallTarget>, With<demo::art::ProgramProp>)>(
+            );
+        q.iter(&app.world).collect()
+    };
+    for e in props {
+        app.world.entity_mut(e).insert(Body(0.45));
+    }
+    run(&mut app, 1.8);
+    let e = ends(&mut app);
+    assert_eq!(e.len(), 2, "the warden's pair");
+    assert!(e.iter().all(|(_, g, _)| g.exit.is_some()));
+    // Where the hall's layout says (the stand-in ground is at 0, the hall floor at 0.2).
+    let (near, far) = demo::portal::frames();
+    for ((_, _, t), f) in e.iter().zip([near, far]) {
+        let flat = |p: DVec3| DVec3::new(p.x, 0.0, p.z);
+        assert!(
+            flat(t.translation).distance(flat(f.at)) < 0.1,
+            "{}",
+            t.translation
+        );
+        assert!((t.rotation.as_dquat() * DVec3::Z).dot(f.rot * DVec3::Z) > 0.999);
+    }
+    run(&mut app, 4.0);
+    // The warden's bolts land on the dummy beyond the far end.
+    let [x, z] = demo::portal::exit_spot(demo::portal::WARDEN, demo::portal::DUMMY_M[0].1);
+    let target = {
+        let mut q = app
+            .world
+            .query::<(Entity, &Transform, &demo::art::HallTarget)>();
+        q.iter(&app.world)
+            .filter(|(_, t, _)| {
+                DVec3::new(t.translation.x - x, 0.0, t.translation.z - z).length() < 0.3
+            })
+            .map(|(e, _, _)| e)
+            .next()
+            .expect("the warden's dummy")
+    };
+    assert!(!hits_on(&app, target).is_empty(), "bolts through the door");
+}

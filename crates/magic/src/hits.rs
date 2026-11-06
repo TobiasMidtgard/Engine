@@ -126,7 +126,10 @@ pub fn apply_hits(
     colliders: Query<&Collider>,
     mut fresh: Local<HashMap<Entity, Afflictions>>,
     mut dealt: Local<HashMap<Entity, f32>>,
-    factions: Option<Res<Factions>>,
+    (factions, rewinding): (
+        Option<Res<Factions>>,
+        Query<(), With<crate::space::Rewinding>>,
+    ),
 ) {
     let list = std::mem::take(&mut queue_in.0);
     if list.is_empty() {
@@ -149,6 +152,10 @@ pub fn apply_hits(
             continue;
         }
         let target = h.target;
+        // Nothing touches a body rewinding along its path (a recall), but its own spells.
+        if target.is_some_and(|t| rewinding.contains(t) && Some(t) != h.cast.caster) {
+            continue;
+        }
         let creature = target.is_some_and(|t| creatures.contains(t));
         let (t_pos, t_caster, t_body, combustible, character, t_faction) = target
             .and_then(|t| info.get(t).ok())
@@ -713,30 +720,6 @@ pub fn apply_hits(
                     color: Element::Blood.color(),
                     width: 0.06,
                     secs: 0.3,
-                });
-            }
-        }
-
-        // ---- blink: the caster steps along the cast
-        if p.blink_m > 0.0
-            && let Some(c) = h.cast.caster
-            && let Some(from) = info.get(c).ok().and_then(|i| i.0).map(|g| g.translation())
-        {
-            let flat = Vec3::new(h.dir.x, 0.0, h.dir.z).normalize_or(Vec3::NEG_Z);
-            let reach = queries
-                .raycast(from + DVec3::Y, flat, p.blink_m, &QueryFilter::excluding(c))
-                .map(|r| (r.distance - 0.6).max(0.0))
-                .unwrap_or(p.blink_m);
-            let to = from + (flat * reach).as_dvec3();
-            queue.moves.push((c, to));
-            for at in [from, to] {
-                queue.looks.push(LookCmd::Burst {
-                    at: at + DVec3::Y,
-                    up: Vec3::Y,
-                    look: spell.weave.key.clone(),
-                    role: Role::Impact,
-                    scale: 0.9,
-                    color: spell.weave.color,
                 });
             }
         }

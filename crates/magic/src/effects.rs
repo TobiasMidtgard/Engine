@@ -35,8 +35,12 @@ pub enum EffectKind {
     Ward,
     /// The target's time runs faster (factor > 1) or slower (< 1).
     TimeScale { factor: f32 },
-    /// Short teleport of the caster along the cast.
+    /// Short teleport of the caster to where it aims (space.rs).
     Blink { dark: bool },
+    /// A door through space: one end where it aims, the next cast its other end (space.rs).
+    Portal,
+    /// The caster slides back along the last seconds of its path (space.rs).
+    Recall,
     /// Unseen: perception skips the target.
     Veil,
     /// Light that reveals and blinds.
@@ -85,6 +89,8 @@ impl EffectDef {
                 }
             }
             EffectKind::Blink { .. } => Dials::pole(Pole::Far, 1.0),
+            EffectKind::Portal => Dials::pole(Pole::Far, 1.0) + Dials::pole(Pole::Form, 0.4),
+            EffectKind::Recall => Dials::pole(Pole::Far, 0.6) + Dials::pole(Pole::Slow, 0.6),
             EffectKind::Veil => Dials::pole(Pole::Veil, 1.0),
             EffectKind::Light => Dials::pole(Pole::Heat, 0.3) + Dials::pole(Pole::Reveal, 0.8),
             EffectKind::Fear => Dials::pole(Pole::Reveal, 0.4) + Dials::pole(Pole::Cold, 0.2),
@@ -248,7 +254,21 @@ pub const EFFECTS: &[EffectDef] = &[
         "Blink",
         Subclass::Shaping,
         EffectKind::Blink { dark: false },
-        "Step through space to a point in sight.",
+        "Step through space to a point in sight, onto a ledge if you aim at one.",
+    ),
+    def(
+        "portal",
+        "Portal",
+        Subclass::Shaping,
+        EffectKind::Portal,
+        "Open a door through space: one end where you aim, the next cast its other end.",
+    ),
+    def(
+        "recall",
+        "Recall",
+        Subclass::Shaping,
+        EffectKind::Recall,
+        "Slide back along the path you took in the last three seconds, whole again.",
     ),
     // Vitalism: healing and wards.
     def(

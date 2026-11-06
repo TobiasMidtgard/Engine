@@ -19,6 +19,7 @@
 //! | `spells_summon` | summons and tethers: a stone golem and a lava golem walking to dummies and punching them, frost and storm elementals shooting, a wisp healing a wounded mage, a tether hauling a dummy in, then one snapping |
 //! | `spells_dead` | the dead rise: three necromancers raise skeleton warriors, a storm skeletal mage and a fallen student as a thrall against three students' golem, fire elemental and fire bolts |
 //! | `spells_ward` | wards you can see: a warden's dome over three students stops a fire barrage until it shatters, a frost shell takes fire double, a storm shell shocks the skeletons that strike it, then a ward wall goes up ([`crate::wards`]) |
+//! | `spells_portal` | doors through space: a warden opens a portal on the floor and its other end down the hall, fires bolts through it into a dummy beyond, a storm beam bends through it, a push shoves a crate through, and a mage blinks off the dais twice and recalls back along its path ([`portal`], [`crate::space`]) |
 //! | `spells_craft` | the Spellcrafter at the altar: an Expert builds a returning frost glaive to 8 of 8, seek is refused, the crystal casts each change at a dummy, then it goes on key 3 and is cast from the bar ([`craft`]) |
 //!
 //! The mages wear hooded robes coloured by mastery (the character contract's `Appearance`).
@@ -29,6 +30,7 @@ pub mod art;
 pub mod craft;
 pub mod duel;
 pub mod player;
+pub mod portal;
 
 use engine_core::prelude::*;
 use engine_render::{Camera, MeshRenderer};
@@ -197,6 +199,18 @@ pub const VIEWS: &[DemoView] = &[
         // The dome cracked once, flares on its face, a skeleton at a shell.
         warmup: 4.6,
     },
+    DemoView {
+        key: "spells_portal",
+        name: "Portals: bolts, a beam and a crate through a door in space; a blink and a recall",
+        // From the front of the dais just beside the warden's line of fire, 8 m from the near
+        // end and nearly on its axis: through it the dummy its bolts strike beyond the far end;
+        // the far end from behind down the hall, the blinker's path between the two.
+        eye: [-9.9, 2.9, 8.6],
+        target: [-1.5, 1.1, -1.5],
+        hour: 16.6,
+        // A bolt in flight out of the far end, the blinker mid-path.
+        warmup: 3.0,
+    },
 ];
 
 /// What the hall is running.
@@ -218,10 +232,11 @@ pub enum Program {
     Dead,
     Craft,
     Ward,
+    Portal,
 }
 
 impl Program {
-    pub const ALL: [Program; 14] = [
+    pub const ALL: [Program; 15] = [
         Program::Mastery,
         Program::Elements,
         Program::Combos,
@@ -236,6 +251,7 @@ impl Program {
         Program::Dead,
         Program::Craft,
         Program::Ward,
+        Program::Portal,
     ];
 
     pub fn key(self) -> &'static str {
@@ -254,6 +270,7 @@ impl Program {
             Program::Dead => "spells_dead",
             Program::Craft => "spells_craft",
             Program::Ward => "spells_ward",
+            Program::Portal => "spells_portal",
         }
     }
 
@@ -284,6 +301,8 @@ impl Program {
             // The dome stands about 6 s under the barrage, the wall goes up after it, and both
             // are gone before the next period's dome.
             Program::Ward => 15.0,
+            // The pair stands 15 s and is gone before the next period opens another.
+            Program::Portal => 16.0,
         }
     }
 
@@ -309,6 +328,8 @@ enum AimAt {
     Foe,
     /// The hall mage on that lane.
     Mage(usize),
+    /// A point (x, y, z) from the hall's center.
+    At(f64, f64, f64),
 }
 
 /// One cast in a lane's period.
@@ -832,6 +853,7 @@ fn lanes(program: Program, cycle: u64) -> Vec<Lane> {
                 ]),
             ]
         }
+        Program::Portal => portal::lanes(),
         // The hall's mages watch while the weaver works its spell bar (player::script_weaver)
         // or the Spellcrafter (craft::script_crafter).
         Program::Player | Program::Craft => (0..LANES.len())
@@ -1030,6 +1052,7 @@ fn setup_program(
         // its ground fires and glowing coals go out. No water, so the floor stays dry for the
         // next program's fire. Without vfx or fire the calls just fail.
         commands.queue(crate::wards::clear);
+        commands.queue(crate::space::clear);
         commands.queue(move |world: &mut World| {
             let center = [origin.x, origin.y, origin.z - 3.0];
             let _ = engine_core::registry::call_api(
@@ -1051,6 +1074,16 @@ fn setup_program(
     let plan = lanes(program, 0);
     for (e, m, mut c, children, mut tf, look) in &mut mages {
         let Some(l) = plan.get(m.lane) else { continue };
+        // The blinker starts every period of spells_portal on its plinth, whatever its recall
+        // left.
+        if !restart
+            && program == Program::Portal
+            && m.lane == portal::BLINKER
+            && let Some(home) = duel::student_home(origin, m)
+        {
+            tf.translation = home;
+            tf.rotation = Quat::IDENTITY;
+        }
         if restart {
             // Back on the plinth (a duel's blinks move them), whole and unafflicted.
             if let Some(home) = duel::student_home(origin, m) {
@@ -1136,7 +1169,7 @@ fn setup_program(
         // there).
         tf.translation = if matches!(
             program,
-            Program::Duel | Program::Summon | Program::Dead | Program::Ward
+            Program::Duel | Program::Summon | Program::Dead | Program::Ward | Program::Portal
         ) {
             t.home - DVec3::Y * 40.0
         } else {
@@ -1219,6 +1252,9 @@ fn setup_program(
     }
     if program == Program::Dead {
         spawn_fallen(&mut commands, origin);
+    }
+    if program == Program::Portal {
+        portal::spawn_props(&mut commands, origin);
     }
     if program == Program::Force {
         for (i, x) in LANES.iter().enumerate() {
@@ -1323,7 +1359,7 @@ fn run_hall(
     }
     if matches!(
         hall.program,
-        Program::Shaping | Program::Summon | Program::Dead | Program::Ward
+        Program::Shaping | Program::Summon | Program::Dead | Program::Ward | Program::Portal
     ) && hall.cycle != cycle
     {
         hall.reset_props = true;
@@ -1354,6 +1390,7 @@ fn run_hall(
                     )),
                 AimAt::Lane(z) => Aim::Point(hall.origin + DVec3::new(LANES[m.lane], FLOOR, z)),
                 AimAt::Floor(x, z) => Aim::Point(hall.origin + DVec3::new(x, FLOOR, z)),
+                AimAt::At(x, y, z) => Aim::Point(hall.origin + DVec3::new(x, y, z)),
                 AimAt::Mage(lane) => mages
                     .iter()
                     .find(|(_, m, _)| m.lane == lane)

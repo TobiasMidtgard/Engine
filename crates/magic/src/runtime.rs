@@ -268,6 +268,12 @@ pub struct MagicQueue {
     pub raises: Vec<crate::summon::NewMinion>,
     /// Domes and ward wall panels to put up (wards.rs).
     pub barriers: Vec<crate::wards::NewBarrier>,
+    /// Portal ends to open (space.rs).
+    pub gates: Vec<crate::space::NewGate>,
+    /// Portal ends something just went through (they flare).
+    pub gate_pulses: Vec<Entity>,
+    /// Blinks and recalls to start (space.rs).
+    pub travels: Vec<crate::space::Travel>,
 }
 
 /// Bodies spells look for: anything with health, a skeleton or a character controller.
@@ -477,8 +483,10 @@ pub fn advance_casts(
         let seed = caster.seed ^ counter.wrapping_mul(0x2545_f491_4f6c_dd1d);
         // Aim: a direction from the hand.
         let aim_point = match casting.aim {
+            // (A blink aimed only by a direction goes as far as it can.)
             Aim::Direction(d) => {
-                hand + (d.normalize_or(Vec3::NEG_Z) * spell.carrier.range.max(1.0)).as_dvec3()
+                let reach = spell.carrier.range.max(spell.payload.blink_m).max(1.0);
+                hand + (d.normalize_or(Vec3::NEG_Z) * reach).as_dvec3()
             }
             Aim::Point(p) => p,
             Aim::Entity(target) => targets
@@ -671,6 +679,72 @@ pub fn release(
             .stones
             .push(pillar(spell, at, flat, info.seed as u64, info.scale));
         return;
+    }
+    // Space (space.rs): a portal end opens where it aims; a blink slides its caster there (a
+    // stage's blink to where the stage went off); a recall rewinds its caster's path. Whatever
+    // else the spell does still goes on.
+    let p = &spell.payload;
+    if p.portal_secs > 0.0 {
+        let reach = if c.range > 0.0 { c.range } else { 30.0 };
+        let at = ground_below(
+            queries,
+            crate::space::within(body, aim_point, reach),
+            &exclude,
+        );
+        let back = body - at;
+        queue.gates.push(crate::space::NewGate {
+            cast: info.clone(),
+            at,
+            to_caster: Vec3::new(back.x as f32, 0.0, back.z as f32).normalize_or(-flat),
+        });
+        return;
+    }
+    if let Some(me) = info.caster
+        && (p.blink_m > 0.0 || p.recall_secs > 0.0)
+    {
+        let look = spell.weave.key.clone();
+        let color = |plain: [f32; 3]| {
+            if spell.weave.elements.is_empty() {
+                plain
+            } else {
+                spell.weave.color
+            }
+        };
+        if p.recall_secs > 0.0 {
+            let color = color(crate::space::RECALL_COLOR);
+            queue.travels.push(crate::space::Travel::Recall {
+                body: me,
+                secs: p.recall_secs,
+                look,
+                color,
+            });
+        } else {
+            let color = color(crate::space::BLINK_COLOR);
+            let to = if info.depth > 0 {
+                ground_below(queries, body, &exclude)
+            } else {
+                crate::space::blink_target(queries, body, aim_point, forward, p.blink_m, &exclude)
+            };
+            queue.travels.push(crate::space::Travel::Blink {
+                body: me,
+                to,
+                look,
+                color,
+            });
+        }
+        let more = p.damage > 0.0
+            || p.force.is_some()
+            || p.heal > 0.0
+            || p.ward > 0.0
+            || p.time.is_some()
+            || p.veil_secs > 0.0
+            || p.fear_secs > 0.0
+            || p.calm_secs > 0.0
+            || p.light_lm > 0.0
+            || p.stone_m > 0.0;
+        if !more {
+            return;
+        }
     }
     // A ward cast as an area is a dome, as a wall a row of panels (wards.rs); one that also
     // heals still heals inside it.
@@ -970,9 +1044,10 @@ pub fn fly_missiles(
     mut queue: ResMut<MagicQueue>,
     mut traces: MessageWriter<ProjectileTrace>,
     factions: Option<Res<Factions>>,
-    (mut barriers, mut struck): (
+    (mut barriers, mut struck, gates): (
         Query<(Entity, &mut crate::wards::Barrier)>,
         MessageWriter<crate::wards::WardStruck>,
+        Query<(Entity, &crate::space::Gate, &Transform)>,
     ),
 ) {
     let factions = factions.as_deref();
@@ -980,6 +1055,7 @@ pub fn fly_missiles(
     if dt <= 0.0 {
         return;
     }
+    let doors = crate::space::doors(gates.iter());
     for (e, mut m, mut sp) in &mut missiles {
         if let Some(t) = m.spent.as_mut() {
             *t += dt;
@@ -1146,8 +1222,23 @@ pub fn fly_missiles(
             len,
             &filter,
         );
-        // A ward against it in the way first: it bursts on the ward's face (wards.rs).
+        // A portal end in the way first (space.rs): through a linked one it flies on out of
+        // the other end; an end alone stops it.
         let reach = hit.map_or(len, |h| h.distance);
+        let gate = (!doors.is_empty())
+            .then(|| {
+                let skip: Vec<Entity> = m.hits.iter().map(|(h, _)| *h).collect();
+                crate::space::first_crossing(
+                    &doors,
+                    from,
+                    from + (dir * reach).as_dvec3(),
+                    c.radius * 0.5,
+                    &skip,
+                )
+            })
+            .flatten();
+        let reach = gate.map_or(reach, |(_, t)| reach * t as f32);
+        // A ward against it in the way first: it bursts on the ward's face (wards.rs).
         if let Some((be, t, n)) =
             crate::wards::barrier_in_way(barriers.iter(), &m.cast, from, dir, reach, factions)
             && let Ok((_, mut b)) = barriers.get_mut(be)
@@ -1181,6 +1272,56 @@ pub fn fly_missiles(
             });
             sp.pos = at;
             sp.up = dir;
+            spend(&mut m, e, &mut queue);
+            continue;
+        }
+        if let Some((i, _)) = gate {
+            let door = doors[i];
+            let at = from + (dir * reach).as_dvec3();
+            traces.write(ProjectileTrace {
+                from,
+                to: at,
+                radius: c.radius * 2.0,
+                speed: m.vel.length(),
+                shooter: m.cast.caster,
+            });
+            sp.pos = at;
+            sp.up = dir;
+            match door.carry() {
+                Some(map) => {
+                    // A new missile comes out of the other end (its trail starts there), and
+                    // never goes back into either end.
+                    let (exit, frame) = door.exit.unwrap();
+                    let out = crate::space::carry_point(&map, at)
+                        + (frame.normal() * (c.radius + 0.05)).as_dvec3();
+                    let mut through = m.clone();
+                    through.vel = crate::space::capped(crate::space::carry_vector(&map, m.vel));
+                    through.traveled += reach;
+                    through.target = None;
+                    through.hits.push((door.entity, 99.0));
+                    through.hits.push((exit, 99.0));
+                    queue.spawns.push(Spawn::Missile(through, out));
+                    crate::space::passage_looks(
+                        &mut queue,
+                        &door,
+                        (c.radius / 0.16).clamp(0.5, 1.5),
+                    );
+                }
+                None => {
+                    hits.0.push(PendingHit {
+                        cast: m.cast.clone(),
+                        target: None,
+                        point: at,
+                        normal: door.frame.normal(),
+                        dir,
+                        multi: false,
+                        impact: true,
+                        reacts: false,
+                        expire: false,
+                    });
+                    queue.gate_pulses.push(door.entity);
+                }
+            }
             spend(&mut m, e, &mut queue);
             continue;
         }
@@ -1543,14 +1684,20 @@ pub fn tick_beams(
     bodies: Query<&RigidBody>,
     mut hits: ResMut<HitQueue>,
     mut queue: ResMut<MagicQueue>,
-    (mut barriers, mut struck, factions): (
+    (mut barriers, mut struck, factions, gates): (
         Query<(Entity, &mut crate::wards::Barrier)>,
         MessageWriter<crate::wards::WardStruck>,
         Option<Res<Factions>>,
+        Query<(Entity, &crate::space::Gate, &Transform)>,
     ),
 ) {
     let factions = factions.as_deref();
     let dt = time.delta_secs();
+    let doors = if beams.is_empty() {
+        Vec::new()
+    } else {
+        crate::space::doors(gates.iter())
+    };
     for (e, mut b, mut sp) in &mut beams {
         b.age += dt;
         if b.age < 0.0 {
@@ -1650,22 +1797,56 @@ pub fn tick_beams(
             .caster
             .map(QueryFilter::excluding)
             .unwrap_or_default();
-        let hit = queries.raycast(from, dir, spell.carrier.range, &filter);
-        // A ward against it in the way stops it at its face and drains on every tick.
-        let ward = crate::wards::barrier_in_way(
-            barriers.iter(),
-            &b.cast,
-            from,
-            dir,
-            hit.map_or(spell.carrier.range, |h| h.distance),
-            factions,
-        );
-        let hit = if ward.is_some() { None } else { hit };
-        b.end = match ward {
-            Some((_, t, _)) => from + (dir * t).as_dvec3(),
-            None => hit
+        // Its way: from the hand until it hits something, a ward or a portal end; through a
+        // linked end it bends on out of the other one for the rest of its range (Portal 2's
+        // laser); an end alone stops it.
+        let mut start = from;
+        let mut dir = dir;
+        let mut range = spell.carrier.range;
+        let mut bent: Option<(DVec3, DVec3)> = None;
+        let (hit, ward, stop) = loop {
+            let hit = queries.raycast(start, dir, range, &filter);
+            let reach = hit.map_or(range, |h| h.distance);
+            let gate = (!doors.is_empty() && bent.is_none())
+                .then(|| {
+                    crate::space::first_crossing(
+                        &doors,
+                        start,
+                        start + (dir * reach).as_dvec3(),
+                        0.0,
+                        &[],
+                    )
+                })
+                .flatten();
+            let reach = gate.map_or(reach, |(_, t)| reach * t as f32);
+            // A ward against it in the way stops it at its face and drains on every tick.
+            let ward =
+                crate::wards::barrier_in_way(barriers.iter(), &b.cast, start, dir, reach, factions);
+            if let Some((i, _)) = gate
+                && ward.is_none()
+            {
+                let door = doors[i];
+                let at = start + (dir * reach).as_dvec3();
+                let Some(map) = door.carry() else {
+                    break (None, None, Some(at));
+                };
+                let out = crate::space::carry_point(&map, at);
+                bent = Some((at, out));
+                start = out;
+                dir = crate::space::carry_vector(&map, dir).normalize_or(dir);
+                range = (range - reach).max(0.0);
+                crate::space::pulse_through(&mut queue, &door);
+                continue;
+            }
+            let hit = if ward.is_some() { None } else { hit };
+            break (hit, ward, None);
+        };
+        b.end = match (ward, stop) {
+            (Some((_, t, _)), _) => start + (dir * t).as_dvec3(),
+            (None, Some(at)) => at,
+            _ => hit
                 .map(|h| h.point)
-                .unwrap_or(from + (dir * spell.carrier.range).as_dvec3()),
+                .unwrap_or(start + (dir * range).as_dvec3()),
         };
         // Drawn once for its whole duration; a channel held past that (the spell bar keeps
         // extending it) draws again every half second, from where the hand is now.
@@ -1678,14 +1859,20 @@ pub fn tick_beams(
             };
             b.drawn = true;
             b.drawn_until = b.age + secs;
-            queue.looks.push(LookCmd::Beam {
-                from,
-                to: b.end,
-                look: spell.weave.key.clone(),
-                color: spell.weave.color,
-                width: (spell.carrier.radius * 1.5).max(0.08),
-                secs,
-            });
+            let pieces = match bent {
+                Some((into, out)) => vec![(from, into), (out, b.end)],
+                None => vec![(from, b.end)],
+            };
+            for (a, z) in pieces {
+                queue.looks.push(LookCmd::Beam {
+                    from: a,
+                    to: z,
+                    look: spell.weave.key.clone(),
+                    color: spell.weave.color,
+                    width: (spell.carrier.radius * 1.5).max(0.08),
+                    secs,
+                });
+            }
         }
         b.next_tick -= dt;
         if b.next_tick <= 0.0 {
