@@ -315,11 +315,11 @@ fn fs_mark_cover(in: MarkVs) -> @location(0) vec4<f32> {
             s.roughness = 0.12;
         } else {
             let k = mark_rot(m, p);
-            cover = k.y * (1.0 - mark_age01(m) * 0.6);
+            cover = k.y * 0.7 * (1.0 - mark_age01(m) * 0.6);
             s.albedo = vec3<f32>(0.055, 0.075, 0.012);
             s.roughness = 0.2;
             let fresh = saturate(1.0 - m.life.x / max(m.extra.x, 1e-3)) * step(1e-3, m.extra.x);
-            glow = vec3<f32>(0.45, 1.0, 0.15) * 120.0 * fresh * k.y;
+            glow = vec3<f32>(0.45, 1.0, 0.15) * 25.0 * fresh * k.y;
         }
         cover *= hit.show;
         if (cover <= 0.002) { discard; }
