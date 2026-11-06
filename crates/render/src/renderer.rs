@@ -1906,6 +1906,7 @@ impl Renderer {
             );
         }
         let mut uniform = frame_uniform(world, &view);
+        uniform.sky[3] = crate::frame::texture_mip_bias(taa, settings.render_scale);
         uniform.shadow_params[3] = borrowed
             .as_ref()
             .map_or(self.shadow.size, |b| b.shadow_size) as f32;
@@ -1925,19 +1926,12 @@ impl Renderer {
                 world.get::<crate::MotionBlur>(e).copied(),
             )
         });
-        cpu.step("surface weather");
-        let surface_resized = match &borrowed {
-            Some(b) => {
-                (uniform.surface_map, uniform.surface_open) = b.surface_params(view.origin);
-                false
-            }
-            None => {
-                let resized = self.surface_weather.prepare(world, &self.shared, real_dt);
-                (uniform.surface_map, uniform.surface_open) =
-                    self.surface_weather.frame_params(view.origin);
-                resized
-            }
-        };
+        // The ground's weather map: a mirror borrows the main view's; the main view uploads
+        // its own beside the shared prepares below.
+        let mut surface_resized = false;
+        if let Some(b) = &borrowed {
+            (uniform.surface_map, uniform.surface_open) = b.surface_params(view.origin);
+        }
         // Screen-space reflections and bounce light need the previous frame's image of the same
         // view.
         cpu.step("uniforms and lights");
@@ -1984,12 +1978,21 @@ impl Renderer {
                 uniform: &mut uniform,
                 last_ms: self.gi_ms,
             }),
+            borrowed.is_none().then_some(crate::prepare::SurfaceJob {
+                map: &mut self.surface_weather,
+                real_dt,
+                resized: &mut surface_resized,
+            }),
             world,
             &self.shared,
             &view,
             &settings,
         );
         cpu.step("prepare results");
+        if borrowed.is_none() {
+            (uniform.surface_map, uniform.surface_open) =
+                self.surface_weather.frame_params(view.origin);
+        }
         let gi_atlas_moved = gi_done.atlas_moved;
         self.apply_shared_prepares(world, &mut cpu, (!is_extra).then_some(gi_done.ms));
         let queue = &self.shared.queue;

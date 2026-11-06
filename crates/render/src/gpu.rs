@@ -3,6 +3,7 @@
 //! Backend selection: `WGPU_BACKEND=vulkan|metal|dx12|gl` overrides the default (all native
 //! backends, best adapter first). Headless machines without a GPU can install a software
 //! Vulkan driver (lavapipe: `apt install mesa-vulkan-drivers`) and render screenshots.
+//! `WGPU_BACKEND=noop` gets a device that executes nothing, to time the CPU side alone.
 
 use std::fmt;
 use std::sync::Arc;
@@ -96,6 +97,22 @@ pub fn create(
     Err(last_error)
 }
 
+/// The noop device stands in for a discrete GPU with the limits of the machine's real (or
+/// software) Vulkan adapter: its default, maximally permissive limits overflow wgpu's own
+/// fixed-size tables.
+fn noop_options() -> wgpu::NoopBackendOptions {
+    let mut real = wgpu::InstanceDescriptor::new_without_display_handle();
+    real.backends = wgpu::Backends::PRIMARY;
+    let limits = pollster::block_on(
+        wgpu::Instance::new(real).request_adapter(&wgpu::RequestAdapterOptions::default()),
+    )
+    .map_or_else(|_| wgpu::Limits::default(), |a| a.limits());
+    let mut options = wgpu::NoopBackendOptions::enabled();
+    options.limits = Some(limits);
+    options.device_type = Some(wgpu::DeviceType::DiscreteGpu);
+    options
+}
+
 fn try_create(
     window: Option<Arc<dyn WindowHandleSource>>,
     backends: wgpu::Backends,
@@ -110,6 +127,11 @@ fn try_create(
         None => wgpu::InstanceDescriptor::new_without_display_handle(),
     };
     desc.backends = backends;
+    // `WGPU_BACKEND=noop`: a device that runs nothing (wgpu's noop backend), for timing the
+    // renderer's CPU side where the only GPU is a software one that would swamp it.
+    if backends == wgpu::Backends::NOOP {
+        desc.backend_options.noop = noop_options();
+    }
     desc.flags = wgpu::InstanceFlags::from_build_config().with_env();
     let instance = wgpu::Instance::new(desc);
 

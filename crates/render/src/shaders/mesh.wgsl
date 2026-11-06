@@ -434,7 +434,14 @@ fn slot_virtual(mat: Material, slot: u32) -> u32 {
     return (word >> ((slot & 3u) * 8u)) & 255u;
 }
 
-fn slot_sample(mat: Material, slot: u32, uv: vec2<f32>, d1: vec2<f32>, d2: vec2<f32>) -> vec4<f32> {
+// The frame's texture mip bias (`frame.sky.w`, log2 levels: `frame::texture_mip_bias`):
+// gradients scaled by 2^bias pick a level `bias` finer (or coarser), so under temporal
+// anti-aliasing, whose jittered frames resolve detail finer than one frame's pixel, textures
+// read a little sharper instead of a level blurrier than the output can show.
+fn slot_sample(mat: Material, slot: u32, uv: vec2<f32>, d1_in: vec2<f32>, d2_in: vec2<f32>) -> vec4<f32> {
+    let bias = exp2(frame.sky.w);
+    let d1 = d1_in * bias;
+    let d2 = d2_in * bias;
     if (VT_ENABLED) {
         let vt = slot_virtual(mat, slot);
         if (vt != 0u) {

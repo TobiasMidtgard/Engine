@@ -73,7 +73,8 @@ pub struct FrameUniform {
     pub far_shadow_params: [f32; 4],
     /// Sky: the flat cloud layer on (1/0, `RenderSettings::sky_cloud_layer`), night (0 day ..
     /// 1 night: stars and the night sky's floor; see [`sky_night`]), the stand-in moon's glow
-    /// opposite a sun below the horizon (0..1), unused.
+    /// opposite a sun below the horizon (0..1); w: the texture mip bias (log2 levels, set by
+    /// the renderer, see [`texture_mip_bias`]).
     pub sky: [f32; 4],
     /// The ground's weather map (`surface_weather`, set by the renderer): its minimum corner
     /// relative to the camera (x, z, m) and its size along x and z (m; 0 = no map).
@@ -569,6 +570,24 @@ pub fn estimate_scene_luminance(sun_dir: Vec3, sun_camera: Vec3, ambient: f32) -
 
 fn luminance(c: Vec3) -> f32 {
     c.dot(Vec3::new(0.2126, 0.7152, 0.0722))
+}
+
+/// Texture mip bias under temporal anti-aliasing at native resolution (log2 levels): Unreal's
+/// automatic view mip bias offset (`r.ViewTextureMipBias.Offset`, -0.3).
+pub const TAA_MIP_BIAS: f32 = -0.3;
+
+/// The frame's texture mip bias (log2 levels; negative reads finer levels), `FrameUniform::sky`
+/// w, which material textures sample with (`slot_sample` in mesh.wgsl). Temporal
+/// anti-aliasing's jittered frames resolve detail finer than one frame's pixel footprint, so
+/// with it textures read [`TAA_MIP_BIAS`] sharper, and a scene rendered smaller than its output
+/// (`render_scale` under 1, upscaled) reads at the output's density: log2 of the scale more,
+/// down to -2 (Unreal's `MaterialTextureMipBias`, NVIDIA's and AMD's upscaler guides). Without
+/// it a single frame's samples would alias, so the bias is 0.
+pub fn texture_mip_bias(taa: bool, render_scale: f32) -> f32 {
+    if !taa {
+        return 0.0;
+    }
+    (TAA_MIP_BIAS + render_scale.clamp(0.25, 2.0).log2().min(0.0)).max(-2.0)
 }
 
 /// How much it is night for the sky (stars and the night sky's floor): 0 by day .. 1 at night,
@@ -1236,6 +1255,17 @@ pub fn gpu_benders(benders: &[[f32; 4]]) -> [[f32; 4]; MAX_BENDERS] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn textures_sample_sharper_only_under_temporal_anti_aliasing() {
+        assert_eq!(texture_mip_bias(false, 1.0), 0.0);
+        assert_eq!(texture_mip_bias(false, 0.5), 0.0);
+        assert!((texture_mip_bias(true, 1.0) - TAA_MIP_BIAS).abs() < 1e-6);
+        // Supersampled: no extra bias. Upscaled from half: one level more. Never past -2.
+        assert!((texture_mip_bias(true, 2.0) - TAA_MIP_BIAS).abs() < 1e-6);
+        assert!((texture_mip_bias(true, 0.5) - (TAA_MIP_BIAS - 1.0)).abs() < 1e-6);
+        assert_eq!(texture_mip_bias(true, 0.25), -2.0);
+    }
 
     #[test]
     fn an_opening_packs_to_the_centimeter() {

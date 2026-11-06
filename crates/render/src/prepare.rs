@@ -4,7 +4,8 @@
 //!
 //! 1. `prepare_serial` of each feature that prepares shared, in feature order, with the world
 //!    borrowed mutably (queries made, resources inserted);
-//! 2. all their `prepare_shared`s at once, plus the probe GI's gather, with the world borrowed
+//! 2. all their `prepare_shared`s at once, plus the probe GI's gather and the ground's weather
+//!    map upload, with the world borrowed
 //!    shared: the longest (by last frame's time) on the calling thread, the rest on the
 //!    renderer's own small pool, longest first (Graham's longest-processing-time order);
 //! 3. what each left in its [`PrepareOut`], applied in feature order;
@@ -70,6 +71,15 @@ pub(crate) struct GiJob<'a> {
     pub last_ms: f32,
 }
 
+/// The ground's weather map upload (`surface_weather`), run beside the features' shared
+/// prepares (main view only): encoding a changed grid takes a few milliseconds.
+pub(crate) struct SurfaceJob<'a> {
+    pub map: &'a mut crate::surface_weather::SurfaceWeatherMap,
+    pub real_dt: f32,
+    /// Set to whether the map's texture was recreated.
+    pub resized: &'a mut bool,
+}
+
 /// What [`run`] did with the probe GI.
 #[derive(Default, Clone, Copy)]
 pub(crate) struct GiDone {
@@ -88,6 +98,7 @@ pub(crate) fn run(
     outs: &mut [PrepareOut],
     last_ms: &mut [f32],
     gi: Option<GiJob<'_>>,
+    surface: Option<SurfaceJob<'_>>,
     world: &World,
     gpu: &GpuShared,
     view: &ViewData,
@@ -136,6 +147,26 @@ pub(crate) fn run(
                             .entered();
                     done.atlas_moved = gi.extract(world, gpu, view, settings, uniform);
                     done.ms = started.elapsed().as_secs_f32() * 1000.0;
+                }),
+            ));
+        }
+        if let Some(SurfaceJob {
+            map,
+            real_dt,
+            resized,
+        }) = surface
+        {
+            // Usually nothing to do (the grid changed or not); last in line.
+            jobs.push((
+                0.0,
+                Box::new(move || {
+                    let _span = tracing::info_span!(
+                        target: "engine_render",
+                        "render_step",
+                        name = "surface weather"
+                    )
+                    .entered();
+                    *resized = map.prepare(world, gpu, real_dt);
                 }),
             ));
         }

@@ -12,7 +12,7 @@ engine_world.workspace = true
 bevy_ecs.workspace = true
 # Fast hash maps for per-object work each frame.
 bevy_platform.workspace = true
-wgpu.workspace = true
+wgpu = { workspace = true, features = ["noop"] }
 bytemuck.workspace = true
 pollster.workspace = true
 image.workspace = true
