@@ -17,7 +17,7 @@
 //! | `spells_shaping` | stone that is really there: a wall bolts burst on, pillars lifting a dummy and a crate stack, a stone grip, steps, a frost wall beside a stone one |
 //! | `spells_player` | the player's spell bar over the shoulder: charge, place, chain, channel, with the HUD hotbar and mana ([`player`]) |
 //! | `spells_summon` | summons and tethers: a stone golem and a lava golem walking to dummies and punching them, frost and storm elementals shooting, a wisp healing a wounded mage, a tether hauling a dummy in, then one snapping |
-//! | `spells_dead` | the dead rise: three necromancers raise skeleton warriors, a frost skeletal mage and a fallen student as a thrall against three students' golem, fire elemental and fire bolts |
+//! | `spells_dead` | the dead rise: three necromancers raise skeleton warriors, a storm skeletal mage and a fallen student as a thrall against three students' golem, fire elemental and fire bolts |
 //!
 //! The mages wear hooded robes coloured by mastery (the character contract's `Appearance`).
 //!
@@ -676,11 +676,13 @@ fn lanes(program: Program, cycle: u64) -> Vec<Lane> {
                     cast(5.4, skeleton(), AimAt::Floor(3.5, 0.0)),
                     cast(7.4, skeleton(), AimAt::Floor(5.0, 1.5)),
                 ]),
-                // A frost skeletal mage, then the fallen student stands for the dead.
+                // A storm skeletal mage (a frost one would steam the fire elemental into a cloud
+                // that hides the fight, and freeze the golem to shatter it in a few blows), then
+                // the fallen student stands for the dead.
                 lane_of(vec![
                     cast(
                         0.2,
-                        summon(&["raise", "frost"], "Skeletal mage"),
+                        summon(&["raise", "storm"], "Skeletal mage"),
                         AimAt::Floor(8.5, 6.5),
                     ),
                     cast(

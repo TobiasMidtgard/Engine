@@ -1011,6 +1011,7 @@ pub fn run_minions(
     creatures: Query<(), Or<(With<Minion>, With<crate::undead::Thrall>)>>,
     anchors: Query<&GlobalTransform>,
     mut parts: Query<(&MinionPart, &mut Transform), Without<Minion>>,
+    rubble: Query<Entity, With<Rubble>>,
     mut hits: ResMut<HitQueue>,
     mut queue: ResMut<MagicQueue>,
     mut commands: Commands,
@@ -1036,10 +1037,15 @@ pub fn run_minions(
         }
     }
     let g = gravity.at(DVec3::ZERO).length();
-    // The ground under a minion is the floor, never another minion: a step or a hover onto
-    // a neighbour's collider would climb it.
+    // The ground under a minion is the floor, never another minion or the loose rocks and
+    // bones of a fallen one: a step onto a neighbour's collider would climb it, and a step
+    // onto a tumbling rock would stand on it and shove it into the air.
     let ground = QueryFilter {
-        exclude: minions.iter().map(|(e, ..)| e).collect(),
+        exclude: minions
+            .iter()
+            .map(|(e, ..)| e)
+            .chain(rubble.iter())
+            .collect(),
         ..Default::default()
     };
     let crowd: Vec<(Entity, DVec3, f32)> = minions

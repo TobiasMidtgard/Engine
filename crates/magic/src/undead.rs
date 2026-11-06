@@ -66,7 +66,7 @@ pub const CORPSE_M: f32 = 3.0;
 pub const THRALL_HEALTH: f32 = 0.6;
 pub const THRALL_EVERY: f32 = 2.2;
 /// The violet of the dead's eyes.
-pub const GRAVE_LIGHT: [f32; 3] = [0.62, 0.3, 1.0];
+pub const GRAVE_LIGHT: [f32; 3] = crate::combine::RAISE_COLOR;
 /// Grave dust and ash, grey-brown.
 pub const GRAVE_DUST: [f32; 3] = [0.45, 0.42, 0.38];
 

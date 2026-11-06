@@ -1252,6 +1252,36 @@ fn skeletons_climb_out_by_the_handful_and_cut_a_dummy() {
 }
 
 #[test]
+fn a_skeleton_walks_through_a_fallen_rock_not_onto_it() {
+    let mut app = app();
+    let me = mage(&mut app, DVec3::new(0.0, 0.0, 6.0), Mastery::Adept);
+    dummy(&mut app, DVec3::new(0.0, 0.0, -6.0));
+    // A fallen golem's rock lies across the way, its top 1.6 m up.
+    app.world.spawn((
+        Name::new("Rock"),
+        Transform::from_translation(DVec3::new(0.0, 0.0, -1.5)),
+        Body(0.6),
+        summon::Rubble {
+            age: 0.0,
+            life: 60.0,
+        },
+    ));
+    run(&mut app, 0.1);
+    cast(&mut app, me, raise(), Aim::Point(DVec3::new(0.0, 0.0, 1.5)));
+    let mut top = 0.0f64;
+    let mut nearest = f64::MAX;
+    for _ in 0..50 {
+        run(&mut app, 0.1);
+        for (_, m) in minions(&mut app) {
+            top = top.max(m.pos.y);
+            nearest = nearest.min(m.pos.distance(DVec3::new(0.0, 0.0, -6.0)));
+        }
+    }
+    assert!(nearest < 2.0, "it reached the dummy: {nearest}");
+    assert!(top < 0.05, "it climbed onto the rock: {top}");
+}
+
+#[test]
 fn a_raise_on_a_fallen_body_stands_it_up_to_fight_and_it_falls_to_ash() {
     let mut app = app();
     let me = mage(&mut app, DVec3::new(0.0, 0.0, 6.0), Mastery::Adept);

@@ -526,6 +526,10 @@ pub fn weave(keys: &[String]) -> Option<Weave> {
             _ => name,
         };
         ("stone".to_string(), name, STONE_COLOR)
+    } else if ingredients.iter().any(|k| k == "raise") && elements.is_empty() {
+        // Raising the dead is dark: it looks like shadow, in the grave's violet, not like the
+        // green of the Life domain its dials sit in (a bone blade's cut would puff green).
+        ("shadow".to_string(), name, RAISE_COLOR)
     } else {
         (key, name, color)
     };
@@ -545,6 +549,9 @@ pub fn weave(keys: &[String]) -> Option<Weave> {
 
 /// Raised stone's color (a grey-brown granite), linear RGB.
 pub const STONE_COLOR: [f32; 3] = [0.42, 0.38, 0.33];
+
+/// The raised dead's color: the violet of the grave light in their eyes, linear RGB.
+pub const RAISE_COLOR: [f32; 3] = [0.62, 0.3, 1.0];
 
 /// The look key of an effect without an element: its strongest domain.
 fn look_of_dials(dials: &Dials) -> String {
@@ -675,6 +682,15 @@ mod tests {
         // Fire and frost fight: unstable. Fire and push agree: stable.
         assert!(weave(&keys(&["fire", "frost"])).unwrap().unstable > 0.9);
         assert_eq!(weave(&keys(&["fire", "lift"])).unwrap().unstable, 0.0);
+    }
+
+    #[test]
+    fn the_raised_dead_look_like_shadow_until_an_element_colors_them() {
+        let w = weave(&keys(&["raise"])).unwrap();
+        assert_eq!((w.key.as_str(), w.color), ("shadow", RAISE_COLOR));
+        assert!(w.dark);
+        assert_eq!(weave(&keys(&["raise", "storm"])).unwrap().key, "storm");
+        assert_eq!(weave(&keys(&["raise", "stone"])).unwrap().key, "stone");
     }
 
     #[test]
