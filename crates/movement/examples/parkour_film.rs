@@ -611,11 +611,18 @@ const CLIPS: &[Clip] = &[
         name: "wall_kicks",
         start: [-1.55, 0.0, 6.5],
         facing: [1.0, 0.0],
-        secs: 4.2,
+        secs: 3.4,
         script: |_, m, _| match m.runup {
             Some(r) if r.secs > 0.12 => go(-r.normal.x, 0.0).jump(),
             Some(r) => go(-r.normal.x, 0.0),
-            None if m.mode == engine_world::LocomotionMode::Air => Pad::default(),
+            // In the air: toward the wall it is flying at (the hands reach for a band on it).
+            None if m.mode == engine_world::LocomotionMode::Air => {
+                if m.velocity.x.abs() > 1.0 {
+                    go(m.velocity.x.signum(), 0.0).calm()
+                } else {
+                    Pad::default()
+                }
+            }
             None => go(1.0, 0.0),
         },
         camera: |_| (yaw_toward(0.0, 1.0), 0.25, 8.0, 0.0),

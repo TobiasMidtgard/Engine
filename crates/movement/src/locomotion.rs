@@ -105,8 +105,8 @@ const FALL_CATCH_REACH: f32 = 0.95;
 /// (Under 2.1 g: falls of about 3.8 m and 8.8 m.)
 pub const FALL_CATCH_AUTO: f32 = 12.5;
 pub const FALL_CATCH_MAX: f32 = 19.0;
-/// Slower than this (a step off an edge, a hop down) and nothing behind or beside is
-/// caught: a long fall is what the catch is for, m/s.
+/// Slower than this (a step off an edge, a hop down) only a ledge in front is caught, nothing
+/// behind or beside: a long fall is what the catch all round is for, m/s.
 pub const FALL_CATCH_MIN: f32 = 9.0;
 /// How far past the body a wall can be and still be run up, m: a sill or a band at the hips
 /// holds the body this far off the face.
@@ -2328,15 +2328,21 @@ fn fall_catch(
 ) -> Option<Hang> {
     let up = b.up;
     let falling = -v.dot(up);
-    if falling < FALL_CATCH_MIN || falling > FALL_CATCH_MAX || (falling > FALL_CATCH_AUTO && !grab)
-    {
+    if falling < 1.0 || falling > FALL_CATCH_MAX || (falling > FALL_CATCH_AUTO && !grab) {
         return None;
     }
     // With grab held the arms reach out for it (a lunge at the wall going by).
     let reach = b.radius + if grab { FALL_CATCH_REACH } else { 0.45 };
     let right = m.facing.cross(up);
-    [m.facing, right, -right, -m.facing]
-        .into_iter()
+    // The wall in front (just hit, sliding down it) at any speed; beside and behind only on a
+    // real fall (not a step off an edge).
+    let around: &[Vec3] = if falling < FALL_CATCH_MIN {
+        &[]
+    } else {
+        &[right, -right, -m.facing]
+    };
+    std::iter::once(m.facing)
+        .chain(around.iter().copied())
         .find_map(|dir| find_hang_within(p, b, probe, v, dir, reach))
 }
 
@@ -2808,6 +2814,8 @@ fn run_up(
             // Kick back off it (Titanfall's wall kick), toward a wall behind to run up next.
             m.jump_buffer = 0.0;
             m.kick_secs = 0.0;
+            // Turned round in the kick to face where it goes (the next wall).
+            m.facing = r.normal;
             out.trigger(b.entity, "wall_jump");
             out.impact(b.entity, ImpactKind::Kick, b.pos, r.normal, r.speed);
             return r.normal * p.wall_jump_push + up * p.jump_speed(p.wall_jump_height, b.g);
