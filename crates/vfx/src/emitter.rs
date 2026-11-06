@@ -35,7 +35,7 @@ use crate::trail::Trail;
 /// commands.spawn((Transform::from_translation(hit), ParticleEffect::once("impact.sparks")));
 /// ```
 #[derive(Component, Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[require(Transform)]
+#[require(Transform, EffectPose)]
 #[serde(default)]
 pub struct ParticleEffect {
     /// Effect name in the library (`"spell.fireball"`). Changing it restarts the effect.
@@ -103,6 +103,26 @@ impl ParticleEffect {
     pub fn with_intensity(mut self, intensity: f32) -> Self {
         self.intensity = intensity;
         self
+    }
+}
+
+/// Where an effect's entity is this frame, copied from its `GlobalTransform` by
+/// [`read_effect_poses`]. [`tick_effects`] reads this instead, so it reads no `GlobalTransform`
+/// and runs beside the systems that write one after propagation (the animation module's
+/// attachments, knockdowns and bows).
+#[derive(Component, Debug, Clone, Copy, Default, PartialEq)]
+pub struct EffectPose {
+    pub pos: DVec3,
+    pub rot: Quat,
+}
+
+/// Copy each effect entity's world pose into its [`EffectPose`] (a few microseconds).
+pub fn read_effect_poses(mut q: Query<(&GlobalTransform, &mut EffectPose), With<ParticleEffect>>) {
+    for (gt, mut pose) in &mut q {
+        pose.set_if_neq(EffectPose {
+            pos: gt.translation(),
+            rot: gt.rotation(),
+        });
     }
 }
 
@@ -348,6 +368,11 @@ struct EmitterRun {
     last_emit: Option<f32>,
     baked: Box<GpuEmitter>,
     runs: Vec<SpawnRun>,
+    /// From the definition, worked out once (they cost name lookups): the layers feeding this
+    /// one, the layers its hit, death and trail sub-emitters feed, and its reach at scale 1.
+    feeders: Box<[usize]>,
+    sub_layers: [Option<usize>; 3],
+    reach: f32,
 }
 
 struct Instance {
@@ -388,6 +413,12 @@ struct Instance {
     /// are looked up again even if it stays put (asking the terrain is not cheap).
     env_at: Option<DVec3>,
     env_timer: f32,
+    /// Seconds until the wind is asked again.
+    wind_timer: f32,
+    /// Stepped in this frame's parallel pass.
+    due: bool,
+    /// [`VfxRuntime::tick`] when its entity was last seen.
+    seen: u64,
 }
 
 /// Runtime state of every playing effect (managed by the plugin).
@@ -399,6 +430,8 @@ pub struct VfxRuntime {
     pool: ParticlePool,
     next_seed: u32,
     missing: HashSet<String>,
+    /// Frames ticked, to tell which instances' entities were seen this frame.
+    tick: u64,
     pub stats: VfxStats,
 }
 
@@ -433,6 +466,8 @@ const PREWARM_STEP: f32 = 1.0 / 20.0;
 /// seconds, and how far (meters at scale 1) it may move before it does so at once.
 const ENV_REFRESH_SECS: f32 = 1.0;
 const ENV_REFRESH_M: f64 = 0.5;
+/// How often an effect asks the wind, seconds.
+const WIND_REFRESH_SECS: f32 = 0.1;
 /// Particles that would outlive a stopped effect by more than this (magic circles, mist)
 /// fade out over this many seconds instead.
 const STOP_FADE_SECS: f32 = 1.0;
@@ -476,17 +511,23 @@ impl Instance {
             resting: false,
             env_at: None,
             env_timer: 0.0,
+            wind_timer: 0.0,
+            due: false,
+            seen: 0,
         };
         inst.rebake();
         inst
     }
 
     fn rebake(&mut self) {
-        self.emitters = self
-            .desc
+        let desc = &self.desc;
+        let layer =
+            |sub: &Option<crate::effect::SubEmit>| sub.as_ref().and_then(|s| desc.layer(&s.layer));
+        self.emitters = desc
             .emitters
             .iter()
-            .map(|e| EmitterRun {
+            .enumerate()
+            .map(|(i, e)| EmitterRun {
                 range: None,
                 cursor: None,
                 head: 0,
@@ -495,6 +536,9 @@ impl Instance {
                 last_emit: None,
                 baked: Box::new(GpuEmitter::bake(e, self.scale)),
                 runs: Vec::new(),
+                feeders: desc.feeders(i).map(|(j, ..)| j).collect(),
+                sub_layers: [layer(&e.on_hit), layer(&e.on_death), layer(&e.trailing)],
+                reach: desc.layer_reach(i),
             })
             .collect();
     }
@@ -597,11 +641,12 @@ impl Instance {
         }
         // Layers fed by sub-emitters get particles for as long as their feeders have any.
         for i in 0..self.emitters.len() {
-            let fed = self.emitters[i].range.is_some()
-                && self
-                    .desc
-                    .feeders(i)
-                    .any(|(j, ..)| !self.emitters[j].runs.is_empty() || self.has_particles(j));
+            let run = &self.emitters[i];
+            let fed = run.range.is_some()
+                && run
+                    .feeders
+                    .iter()
+                    .any(|&j| !self.emitters[j].runs.is_empty() || self.has_particles(j));
             if fed {
                 self.emitters[i].last_emit = Some(a1);
             }
@@ -667,9 +712,18 @@ impl Instance {
             Some(_) => 0.0,
             None => 1.0,
         };
-        let n =
-            engine_core::math::noise::perlin2(self.age as f64 * 11.0, self.seed as f64 * 0.37, 7);
-        let flicker = (1.0 + light.flicker * n * 1.4).max(0.0);
+        // The noise is not cheap (an eighth of this system's time in a busy scene): only for
+        // lights that flicker.
+        let flicker = if light.flicker > 0.0 {
+            let n = engine_core::math::noise::perlin2(
+                self.age as f64 * 11.0,
+                self.seed as f64 * 0.37,
+                7,
+            );
+            (1.0 + light.flicker * n * 1.4).max(0.0)
+        } else {
+            1.0
+        };
         fade * flicker * self.intensity.max(0.0)
     }
 }
@@ -719,14 +773,21 @@ type EffectQuery<'w, 's> = Query<
     (
         Entity,
         &'static ParticleEffect,
-        &'static GlobalTransform,
+        &'static EffectPose,
         Option<&'static LocalTimeScale>,
         Has<Trail>,
     ),
     Without<VfxLight>,
 >;
 
+/// Effects per task in [`tick_effects`]' parallel passes.
+const EFFECTS_PER_TASK: usize = 48;
+
 /// Advance every playing effect, schedule spawns and build the [`ParticleFrame`].
+///
+/// Bookkeeping (new, restarted and finished effects, the particle pool, lights) runs in order;
+/// stepping the effects (world lookups and spawn scheduling) and writing the frame's emitters
+/// run on the leaf pool, a few dozen effects a task.
 #[allow(clippy::too_many_arguments)]
 pub fn tick_effects(
     mut commands: Commands,
@@ -743,17 +804,18 @@ pub fn tick_effects(
     range: Option<Res<SimulationRange>>,
 ) {
     let runtime = &mut *runtime;
+    let frame = &mut *frame;
     let limit = settings.max_particles.max(1024);
     let rate_scale = settings.spawn_scale.max(0.0);
     frame.frame = time.frame_count();
     frame.emitters.clear();
     frame.cleared.clear();
     let mut stats = VfxStats::default();
-    let mut seen: HashSet<Entity> = HashSet::with_capacity(runtime.instances.len());
+    runtime.tick += 1;
+    let tick = runtime.tick;
 
     let span = tracing::info_span!("vfx: effects").entered();
-    for (entity, effect, gt, local, has_trail) in &effects {
-        seen.insert(entity);
+    for (entity, effect, pose, local, has_trail) in &effects {
         let Some((desc, version)) = library.get_versioned(&effect.effect) else {
             if runtime.missing.insert(effect.effect.clone()) {
                 engine_core::log::warn!(
@@ -774,6 +836,7 @@ pub fn tick_effects(
             .instances
             .entry(entity)
             .or_insert_with(|| Instance::new(entity, effect, desc.clone(), version, seed));
+        inst.seen = tick;
         // Changes that need a restart.
         if inst.name != effect.effect || inst.version != version {
             inst.name = effect.effect.clone();
@@ -798,8 +861,8 @@ pub fn tick_effects(
         inst.local = local.copied();
 
         let dt = time.delta_for(local);
-        let pos = gt.translation();
-        inst.rot = gt.rotation();
+        let pos = pose.pos;
+        inst.rot = pose.rot;
         if !inst.started {
             inst.pos = pos;
             inst.prev_pos = pos;
@@ -850,18 +913,7 @@ pub fn tick_effects(
             stats.resting += 1;
             continue;
         }
-        inst.wind = env.wind(pos);
-        inst.env_timer -= dt;
-        let moved = inst.env_at.map_or(f64::INFINITY, |p| p.distance(pos));
-        if inst.env_timer <= 0.0 || moved > ENV_REFRESH_M * inst.scale.max(0.1) as f64 {
-            inst.env_at = Some(pos);
-            // Spread over frames so effects started together don't all look up at once.
-            inst.env_timer = ENV_REFRESH_SECS * (0.75 + 0.5 * (inst.seed % 1024) as f32 / 1024.0);
-            inst.gravity = env.gravity(pos);
-            inst.air_density = env.air(pos).density;
-            inst.plane = collision_plane(&env, pos);
-        }
-        tick_instance(
+        begin_tick(
             inst,
             dt,
             &mut runtime.pool,
@@ -877,9 +929,9 @@ pub fn tick_effects(
     // Effects whose entity is gone (or lost its ParticleEffect) stop emitting and fade out.
     let gone: Vec<Entity> = runtime
         .instances
-        .keys()
-        .filter(|e| !seen.contains(e))
-        .copied()
+        .iter()
+        .filter(|(_, inst)| inst.seen != tick)
+        .map(|(e, _)| *e)
         .collect();
     for e in gone {
         if let Some(mut inst) = runtime.instances.remove(&e) {
@@ -891,7 +943,7 @@ pub fn tick_effects(
     for inst in &mut runtime.orphans {
         let dt = time.delta_for(inst.local.as_ref());
         inst.prev_pos = inst.pos;
-        tick_instance(
+        begin_tick(
             inst,
             dt,
             &mut runtime.pool,
@@ -903,6 +955,31 @@ pub fn tick_effects(
     }
 
     drop(span);
+    let span = tracing::info_span!("vfx: step").entered();
+    // Step every effect due this frame: world lookups and spawn scheduling, side by side.
+    let mut due: Vec<&mut Instance> = runtime
+        .instances
+        .values_mut()
+        .chain(runtime.orphans.iter_mut())
+        .filter(|i| i.due)
+        .collect();
+    let env = &env;
+    engine_core::tasks::par_chunks_mut(&mut due, EFFECTS_PER_TASK, |_, chunk| {
+        for inst in chunk.iter_mut() {
+            inst.due = false;
+            if inst.finished {
+                continue;
+            }
+            if inst.entity.is_some() {
+                inst.look_around(env);
+            }
+            let (from, to) = (inst.prev_pos, inst.pos);
+            inst.step(inst.frame_dt, from, to, 0.0, rate_scale);
+        }
+    });
+    drop(due);
+
+    drop(span);
     let _span = tracing::info_span!("vfx: lights and frame").entered();
     // Lights, finished effects and the GPU frame.
     let mut finished_entities = Vec::new();
@@ -911,6 +988,9 @@ pub fn tick_effects(
         .values_mut()
         .chain(runtime.orphans.iter_mut())
     {
+        for run in &inst.emitters {
+            stats.spawned_this_frame += run.runs.iter().map(|r| r.count).sum::<u32>();
+        }
         update_light(&mut commands, inst, &mut lights);
         if inst.finished {
             continue;
@@ -971,7 +1051,30 @@ fn collision_plane(env: &Env, pos: DVec3) -> Option<(DVec3, Vec3)> {
     }
 }
 
+/// A whole frame's step for one effect, in order (tests).
+#[cfg(test)]
 fn tick_instance(
+    inst: &mut Instance,
+    dt: f32,
+    pool: &mut ParticlePool,
+    limit: u32,
+    rate_scale: f32,
+    cleared: &mut Vec<crate::emitter::PoolRange>,
+    stats: &mut VfxStats,
+) {
+    begin_tick(inst, dt, pool, limit, rate_scale, cleared, stats);
+    if std::mem::take(&mut inst.due) {
+        let (from, to) = (inst.prev_pos, inst.pos);
+        inst.step(dt, from, to, 0.0, rate_scale);
+    }
+    for run in &inst.emitters {
+        stats.spawned_this_frame += run.runs.iter().map(|r| r.count).sum::<u32>();
+    }
+}
+
+/// The in-order part of a frame's step: clear last frame's spawns and, for an effect starting
+/// now, take its room in the pool and prewarm it. The step itself follows on the leaf pool.
+fn begin_tick(
     inst: &mut Instance,
     dt: f32,
     pool: &mut ParticlePool,
@@ -987,6 +1090,7 @@ fn tick_instance(
     if inst.finished {
         return;
     }
+    inst.due = true;
     if !inst.started {
         inst.started = true;
         // Room in the pool for every layer.
@@ -996,7 +1100,7 @@ fn tick_instance(
             let cap = inst
                 .desc
                 .layer_capacity_at_scale(i, rate_mul.max(0.01), inst.scale);
-            let fed = inst.desc.is_fed(i);
+            let fed = !run.feeders.is_empty();
             let cursor = if fed { pool.alloc_cursor() } else { None };
             match pool.alloc(cap, limit) {
                 Some(r) if cursor.is_some() || !fed => {
@@ -1027,30 +1131,65 @@ fn tick_instance(
             }
         }
     }
-    let (from, to) = (inst.prev_pos, inst.pos);
-    inst.step(dt, from, to, 0.0, rate_scale);
-    for run in &inst.emitters {
-        stats.spawned_this_frame += run.runs.iter().map(|r| r.count).sum::<u32>();
+}
+
+impl Instance {
+    /// Wind every frame; gravity, air and the ground below now and then (asking the terrain
+    /// is not cheap), spread over frames so effects started together don't all ask at once.
+    fn look_around(&mut self, env: &Env) {
+        let pos = self.pos;
+        // Gusts change over a second or so: the wind is asked about ten times a second.
+        self.wind_timer -= self.frame_dt;
+        if self.wind_timer <= 0.0 {
+            self.wind = env.wind(pos);
+            self.wind_timer = WIND_REFRESH_SECS * (0.75 + 0.5 * (self.seed % 512) as f32 / 512.0);
+        }
+        self.env_timer -= self.frame_dt;
+        let moved = self.env_at.map_or(f64::INFINITY, |p| p.distance(pos));
+        if self.env_timer <= 0.0 || moved > ENV_REFRESH_M * self.scale.max(0.1) as f64 {
+            self.env_at = Some(pos);
+            self.env_timer = ENV_REFRESH_SECS * (0.75 + 0.5 * (self.seed % 1024) as f32 / 1024.0);
+            self.gravity = env.gravity(pos);
+            self.air_density = env.air(pos).density;
+            self.plane = collision_plane(env, pos);
+        }
     }
 }
 
+/// Append `inst`'s live emitters to the frame's table `out`.
 fn push_frame_emitters(inst: &Instance, out: &mut Vec<FrameEmitter>) {
-    // Where each live layer lands in the frame's table, for the sub-emitters feeding them.
-    let mut at = vec![0u32; inst.emitters.len()];
+    // Where each live layer lands in the frame's table, for the sub-emitters feeding them
+    // (on the stack for the usual handful of layers).
+    let layers = inst.emitters.len();
+    let mut small = [0u32; 32];
+    let mut big = Vec::new();
+    let at: &mut [u32] = if layers <= small.len() {
+        &mut small[..layers]
+    } else {
+        big.resize(layers, 0);
+        &mut big
+    };
     for (k, (i, _)) in inst.live_emitters().enumerate() {
         at[i] = (out.len() + k + 1) as u32;
     }
-    let target = |sub: &Option<crate::effect::SubEmit>| {
-        sub.as_ref()
-            .and_then(|s| inst.desc.layer(&s.layer))
-            .map_or(0, |j| at[j])
-    };
     for (i, run) in inst.live_emitters() {
         let desc = &inst.desc.emitters[i];
-        let mut gpu = *run.baked;
-        gpu.sub_target[0] = target(&desc.on_hit);
-        gpu.sub_target[1] = target(&desc.on_death);
-        gpu.sub_target[2] = target(&desc.trailing);
+        // Built in place in the table: the GPU block is a few hundred bytes, and copies of it
+        // were most of this loop's time.
+        out.push(FrameEmitter {
+            gpu: *run.baked,
+            origin: inst.pos,
+            prev_origin: inst.prev_pos,
+            plane: inst.plane,
+            range: run.range.expect("live emitters have a range"),
+            runs: run.runs.clone(),
+            cursor: run.cursor,
+            reach: run.reach * inst.scale.max(0.01) + inst.vel.length() * desc.max_lifetime(),
+        });
+        let gpu = &mut out.last_mut().expect("just pushed").gpu;
+        for (slot, layer) in gpu.sub_target.iter_mut().zip(run.sub_layers) {
+            *slot = layer.map_or(0, |j| at[j]);
+        }
         gpu.origin[3] = inst.frame_dt;
         let r = inst.rot;
         gpu.rot = [r.x, r.y, r.z, r.w];
@@ -1065,18 +1204,6 @@ fn push_frame_emitters(inst: &Instance, out: &mut Vec<FrameEmitter>) {
         gpu.shade[0] = desc.emissive.max(0.0) * inst.intensity.max(0.0);
         gpu.look[2] = 1.0;
         gpu.look[3] = inst.stop_fade(i);
-        let reach = inst.desc.layer_reach(i) * inst.scale.max(0.01)
-            + inst.vel.length() * desc.max_lifetime();
-        out.push(FrameEmitter {
-            gpu,
-            origin: inst.pos,
-            prev_origin: inst.prev_pos,
-            plane: inst.plane,
-            range: run.range.expect("live emitters have a range"),
-            runs: run.runs.clone(),
-            cursor: run.cursor,
-            reach,
-        });
     }
 }
 

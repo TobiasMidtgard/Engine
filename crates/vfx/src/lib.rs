@@ -32,7 +32,7 @@ pub use effect::{
     Burst, Collide, Curve, Debris, EffectDesc, EffectLight, EmitShape, EmitterDesc, Facing,
     Gradient, MAX_SUB_COUNT, Sprite, SubEmit,
 };
-pub use emitter::{ParticleEffect, VfxLight, VfxRuntime, VfxSettings, VfxStats};
+pub use emitter::{EffectPose, ParticleEffect, VfxLight, VfxRuntime, VfxSettings, VfxStats};
 pub use events::{VfxReactions, spawn_effect_at};
 pub use exhaust::{ExhaustNozzle, exhaust_effect};
 pub use feature::ParticleFeature;
@@ -164,6 +164,7 @@ impl Plugin for VfxPlugin {
             .add_systems(
                 PostUpdate,
                 (
+                    emitter::read_effect_poses.before(emitter::tick_effects),
                     emitter::tick_effects,
                     emitter::place_lights.after(emitter::tick_effects),
                     trail::update_trails,

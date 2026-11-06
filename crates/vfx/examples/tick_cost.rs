@@ -6,6 +6,7 @@
 //!
 //! ```sh
 //! cargo run -p engine_vfx --release --example tick_cost
+//! VFX_TICK_NEAR=8 cargo run -p engine_vfx --release --example tick_cost   # 8 more in reach
 //! ```
 
 use std::sync::Arc;
@@ -34,12 +35,22 @@ fn main() {
         Transform::from_translation(near + DVec3::new(6.0, 1.7, 12.0)),
         engine_world::SimulationFocus::default(),
     ));
+    let busy: usize = std::env::var("VFX_TICK_NEAR")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
     app.add_systems(Startup, move |mut commands: Commands| {
         engine_vfx::demo::spawn_demo(&mut commands, near);
         for k in 0..7 {
             let a = k as f64 * std::f64::consts::TAU / 7.0;
             let far = near + DVec3::new(a.cos(), 0.0, a.sin()) * (400.0 + 150.0 * k as f64);
             engine_vfx::demo::spawn_demo(&mut commands, far);
+        }
+        // `VFX_TICK_NEAR=n`: n more courts within reach, all playing (a busy battle).
+        for k in 0..busy {
+            let a = k as f64 * std::f64::consts::TAU / busy.max(1) as f64;
+            let at = near + DVec3::new(a.cos(), 0.0, a.sin()) * 90.0;
+            engine_vfx::demo::spawn_demo(&mut commands, at);
         }
     });
     app.update_n(WARMUP);
