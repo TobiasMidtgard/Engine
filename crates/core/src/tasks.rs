@@ -141,9 +141,15 @@ pub fn par_chunks_mut<T: Send>(
     let on_async = std::thread::current()
         .name()
         .is_none_or(|n| n.starts_with("async"));
+    // From the frame's threads the chunks go to the leaf pool, not the compute pool: a thread
+    // waiting in a compute-pool scope runs other queued tasks meanwhile, whole systems among
+    // them, so a loop of a millisecond's work held its system up for another system's run
+    // (softbody's 24 resting bodies took 7-10 ms, fire's kernels 2.8 ms a frame at the
+    // fortress, VM). Waiting on the leaf pool runs only other loops' chunks, which never wait
+    // on anything but their own chunks.
     let pool: Option<&TaskPool> = match on_async.then(AsyncComputeTaskPool::try_get).flatten() {
         Some(pool) => Some(pool),
-        None => ComputeTaskPool::try_get().map(|p| &**p),
+        None => ComputeTaskPool::try_get().map(|_| leaf_pool()),
     };
     // Without pools (a plain unit test, a tool), the chunks run one after another.
     let Some(pool) = pool else {
@@ -157,6 +163,21 @@ pub fn par_chunks_mut<T: Send>(
             scope.spawn(async move { f(i, chunk) });
         }
     });
+}
+
+/// Threads for data-parallel loops called from the frame's threads ([`par_chunks_mut`]): as
+/// many as the compute pool. Their tasks are pieces of a loop that never wait on anything
+/// but nested pieces, so a thread waiting in a scope here only helps other loops along.
+/// Unreal's task graph keeps short "leaf" work apart from tasks that wait the same way.
+pub fn leaf_pool() -> &'static TaskPool {
+    static POOL: std::sync::OnceLock<TaskPool> = std::sync::OnceLock::new();
+    POOL.get_or_init(|| {
+        let cores = std::thread::available_parallelism().map_or(4, |n| n.get());
+        TaskPoolBuilder::new()
+            .num_threads(pool_sizes(cores).0)
+            .thread_name("leaf".into())
+            .build()
+    })
 }
 
 /// Run the calling thread above normal priority, so a pipeline thread (the renderer) isn't
@@ -343,6 +364,28 @@ mod tests {
             }
         }
     }
+    #[test]
+    fn a_loop_on_a_system_thread_waits_without_running_other_queued_tasks() {
+        init_task_pools();
+        let pool = ComputeTaskPool::get();
+        let loop_ms = std::sync::Mutex::new(None);
+        pool.scope(|s| {
+            // The loop starts first; long "systems" queue behind it on the compute pool.
+            s.spawn(async {
+                let t0 = std::time::Instant::now();
+                let mut data = vec![0u32; 64];
+                par_chunks_mut(&mut data, 2, |i, c| c.fill(i as u32));
+                assert_eq!(data[63], 31);
+                *loop_ms.lock().unwrap() = Some(t0.elapsed().as_millis());
+            });
+            for _ in 0..pool.thread_num() * 2 + 2 {
+                s.spawn(async { std::thread::sleep(std::time::Duration::from_millis(300)) });
+            }
+        });
+        let ms = loop_ms.into_inner().unwrap().expect("the loop ran");
+        assert!(ms < 150, "the loop waited {ms} ms behind other tasks");
+    }
+
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[test]
