@@ -13,7 +13,8 @@
 //! | `spells_meet` | spells that meet: bolts through walls of other elements |
 //! | `spells_force` | force vectors: push, pull, lift, slam, thunderclap, shardstorm |
 //! | `spells_dark` | the dark subclasses: blood, rot clouds, shadow orbs, a draining beam, plague, doom |
-//! | `spells_duel` | six Adept students against three Ascended masters, chasing reactions ([`duel`]) |
+//! | `spells_duel` | six Adept students against three Ascended masters, chasing reactions and moving between casts ([`duel`]) |
+//! | `spells_shaping` | stone that is really there: a wall bolts burst on, pillars lifting a dummy and a crate stack, a stone grip, steps, a frost wall beside a stone one |
 //!
 //! The mages wear hooded robes coloured by mastery (the character contract's `Appearance`).
 //!
@@ -117,6 +118,14 @@ pub const VIEWS: &[DemoView] = &[
         hour: 17.6,
         warmup: 6.0,
     },
+    DemoView {
+        key: "spells_shaping",
+        name: "Shaping: a stone wall, pillars that lift, a stone grip, steps, frost beside stone",
+        eye: [21.0, 6.5, 7.0],
+        target: [-2.0, 2.0, -4.5],
+        hour: 16.9,
+        warmup: 2.5,
+    },
 ];
 
 /// What the hall is running.
@@ -132,10 +141,11 @@ pub enum Program {
     Force,
     Dark,
     Duel,
+    Shaping,
 }
 
 impl Program {
-    pub const ALL: [Program; 8] = [
+    pub const ALL: [Program; 9] = [
         Program::Mastery,
         Program::Elements,
         Program::Combos,
@@ -144,6 +154,7 @@ impl Program {
         Program::Force,
         Program::Dark,
         Program::Duel,
+        Program::Shaping,
     ];
 
     pub fn key(self) -> &'static str {
@@ -156,6 +167,7 @@ impl Program {
             Program::Force => "spells_force",
             Program::Dark => "spells_dark",
             Program::Duel => "spells_duel",
+            Program::Shaping => "spells_shaping",
         }
     }
 
@@ -174,6 +186,9 @@ impl Program {
             Program::Force => 5.0,
             Program::Dark => 3.5,
             Program::Duel => 60.0,
+            // Every stone is down again before the next period (pillars: 1.8 s up, 4.5 s
+            // standing, 1.2 s down), so the props reset onto bare floor.
+            Program::Shaping => 7.0,
         }
     }
 
@@ -407,6 +422,65 @@ fn lanes(program: Program, cycle: u64) -> Vec<Lane> {
             .map(lane)
             .collect()
         }
+        Program::Shaping => {
+            let cast = |at: f32, design: SpellDesign, aim: AimAt| Cast {
+                at,
+                design: Some(design),
+                aim,
+            };
+            let casts = |casts: Vec<Cast>| Lane {
+                casts,
+                ..lane(SpellDesign::default())
+            };
+            // Walls a lane wide and down before the next period; pillars and steps likewise.
+            // A lane's casts are at least a cast time (0.32 s) apart, or the later is refused.
+            let wall = |e: &str| {
+                d(&[e], CastType::Wall)
+                    .with(Modifier::Size { factor: 0.55 })
+                    .with(Modifier::Duration { factor: 0.6 })
+            };
+            let pillar = d(&["lift", "stone"], CastType::Area)
+                .with(Modifier::Duration { factor: 0.375 })
+                .named("Pillar");
+            let step = d(&["stone"], CastType::Bolt)
+                .with(Modifier::Duration { factor: 0.45 })
+                .named("Stone block");
+            let fire = || d(&["fire"], CastType::Bolt);
+            vec![
+                // Fire bolts burst on a stone wall's face.
+                casts(vec![
+                    cast(0.0, wall("stone").named("Stone wall"), AimAt::Lane(-4.0)),
+                    cast(1.0, fire(), AimAt::Focus),
+                    cast(1.7, fire(), AimAt::Focus),
+                ]),
+                // Light and stone: a fire bolt goes through the frost wall (as steam) and
+                // bursts on the stone one behind it.
+                casts(vec![
+                    cast(0.0, wall("frost"), AimAt::Lane(-2.5)),
+                    cast(0.5, wall("stone").named("Stone wall"), AimAt::Lane(-6.5)),
+                    cast(1.3, fire(), AimAt::Focus),
+                ]),
+                // A pillar under a crate stack.
+                casts(vec![cast(0.0, pillar.clone(), AimAt::Lane(-5.0))]),
+                // Steps where stone bolts strike the floor.
+                casts(vec![
+                    cast(0.0, step.clone(), AimAt::Lane(-1.5)),
+                    cast(0.5, step.clone(), AimAt::Lane(-4.5)),
+                    cast(1.0, step, AimAt::Lane(-7.5)),
+                ]),
+                // A pillar lifting a dummy.
+                casts(vec![cast(0.0, pillar, AimAt::Lane(-5.0))]),
+                // A stone grip on the far dummy, cracked early by fire.
+                casts(vec![
+                    cast(
+                        0.0,
+                        d(&["stone"], CastType::Bolt).named("Stone grip"),
+                        AimAt::Focus,
+                    ),
+                    cast(3.4, fire(), AimAt::Focus),
+                ]),
+            ]
+        }
         // The duel's students cast by their own judgement (duel::run_duel), not on a clock.
         Program::Duel => (0..LANES.len())
             .map(|_| Lane {
@@ -549,6 +623,7 @@ fn setup_program(
             // Back on the plinth (a duel's blinks move them), whole and unafflicted.
             if let Some(home) = duel::student_home(origin, m) {
                 tf.translation = home;
+                tf.rotation = Quat::IDENTITY;
             }
             commands.entity(e).remove::<(
                 Afflictions,
@@ -614,6 +689,27 @@ fn setup_program(
     if restart && program == Program::Duel {
         hall.events.clear();
         duel::setup_duel(&mut commands, origin);
+    }
+    if program == Program::Shaping {
+        // Lane 2: a crate stack on the pillar's spot; lane 4: a dummy on its own.
+        let c = origin + DVec3::new(LANES[2], FLOOR, -5.0);
+        for (k, off) in [(-0.4, 0.0), (0.4, 0.0), (0.0, 0.0)].iter().enumerate() {
+            let y = if k == 2 { 1.15 } else { 0.38 };
+            spawn_crate(
+                &mut commands,
+                c + DVec3::new(off.0, y, off.1),
+                2,
+                k == 2,
+                false,
+            );
+        }
+        spawn_dummy(
+            &mut commands,
+            origin + DVec3::new(LANES[4], FLOOR, -5.0),
+            4,
+            false,
+            true,
+        );
     }
     if program == Program::Force {
         for (i, x) in LANES.iter().enumerate() {
@@ -711,6 +807,9 @@ fn run_hall(
     if hall.program == Program::Force && hall.cycle != cycle && hall.cycle % 2 == 0 {
         hall.reset_props = true;
     }
+    if hall.program == Program::Shaping && hall.cycle != cycle {
+        hall.reset_props = true;
+    }
     let plan = lanes(hall.program, cycle);
     for (e, m, caster) in &mages {
         let Some(l) = plan.get(m.lane) else { continue };
@@ -806,7 +905,7 @@ fn duel_readout(
 pub fn build(app: &mut App) {
     app.add_systems(
         FixedUpdate,
-        (run_hall, duel::run_duel)
+        (run_hall, (duel::duel_footwork, duel::run_duel).chain())
             .in_set(SimSet::Gameplay)
             .before(crate::MagicSet::Cast),
     )
@@ -823,8 +922,8 @@ pub fn build(app: &mut App) {
     .register_api(
         "magic.demo",
         "Run a Weaving hall program: spells_mastery, spells_elements, spells_combos, \
-         spells_forms, spells_meet, spells_force, spells_dark or spells_duel. With no program, \
-         lists them.",
+         spells_forms, spells_meet, spells_force, spells_dark, spells_duel or spells_shaping. \
+         With no program, lists them.",
         r#"{"program": "spells_combos"}"#,
         |world, args| {
             let list: Vec<Value> = Program::ALL

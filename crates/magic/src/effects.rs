@@ -47,6 +47,9 @@ pub enum EffectKind {
     Calm,
     /// Life leaves the target and comes to the caster.
     Drain,
+    /// Rough stone rises from the ground (Shaping): a wall, a pillar or a step, solid to
+    /// everything (stone.rs).
+    Stone,
 }
 
 /// One entry of the effect catalog.
@@ -84,6 +87,7 @@ impl EffectDef {
             EffectKind::Fear => Dials::pole(Pole::Reveal, 0.4) + Dials::pole(Pole::Cold, 0.2),
             EffectKind::Calm => Dials::pole(Pole::Veil, 0.4) + Dials::pole(Pole::Grow, 0.2),
             EffectKind::Drain => Dials::pole(Pole::Wither, 0.7) + Dials::pole(Pole::Near, 0.7),
+            EffectKind::Stone => Dials::pole(Pole::Form, 1.0) + Dials::pole(Pole::Push, 0.2),
         }
     }
 
@@ -227,6 +231,13 @@ pub const EFFECTS: &[EffectDef] = &[
             strength: 1.2,
         },
         "A force vector down: pin to the ground, crush.",
+    ),
+    def(
+        "stone",
+        "Stone",
+        Subclass::Shaping,
+        EffectKind::Stone,
+        "Rough stone rises from the ground: a wall, a pillar or a step that stops what hits it.",
     ),
     def(
         "blink",

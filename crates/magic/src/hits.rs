@@ -248,6 +248,37 @@ pub fn apply_hits(
             if p.calm_secs > 0.0 {
                 aff.calmed = aff.calmed.max(p.calm_secs);
             }
+            // Fire cracks a stone grip (and stone closes again only after it is gone).
+            if aff.rooted > 0.0 && spell.element() == Some(Element::Fire) && base_damage > 0.0 {
+                aff.rooted = aff.rooted.min(0.2);
+                if let Some(tp) = t_pos {
+                    queue.looks.push(LookCmd::Burst {
+                        at: tp + DVec3::Y * 0.3,
+                        up: Vec3::Y,
+                        look: "stone".into(),
+                        role: Role::Impact,
+                        scale: 0.9,
+                        color: crate::combine::STONE_COLOR,
+                    });
+                }
+            } else if p.stone_m > 0.0 && creature && h.impact && !h.multi {
+                // Stone closes around the feet: a stone grip roots the body for a few seconds.
+                let secs = (p.stone_secs * 0.35).clamp(2.0, 8.0) * scale.clamp(0.5, 1.5);
+                if aff.rooted <= 0.0
+                    && let Some(tp) = t_pos
+                {
+                    let feet = crate::runtime::ground_below(
+                        &queries,
+                        tp + DVec3::Y * 0.5,
+                        &QueryFilter::excluding(t),
+                    );
+                    let seed = h.cast.seed as u64 ^ feet.x.to_bits() ^ (feet.z.to_bits() << 7);
+                    queue
+                        .stones
+                        .extend(crate::stone::grip_stones(feet, t, secs + 1.0, seed));
+                }
+                aff.rooted = aff.rooted.max(secs);
+            }
             if p.fear_secs > 0.0 && base_damage <= 0.0 {
                 aff.dread = aff.dread.max(p.fear_secs);
             }
@@ -423,6 +454,26 @@ pub fn apply_hits(
                         / if h.multi { 1.6 } else { 1.0 })
                     .clamp(0.3, 2.2),
                     color: spell.weave.color,
+                });
+            }
+            // A stone bolt raises a step where it strikes the ground (never under a loose
+            // body: rising inside a crate would throw it).
+            if p.stone_m > 0.0
+                && ground_hit
+                && !h.multi
+                && matches!(spell.cast, CastType::Bolt | CastType::Lob)
+                && h.normal.y > 0.6
+                && t_body.is_none_or(|b| b.kind != BodyKind::Dynamic)
+            {
+                use crate::stone::{NewStone, StoneKind, stone_size};
+                queue.stones.push(NewStone {
+                    kind: StoneKind::Block,
+                    at: h.point,
+                    along: Vec3::new(h.dir.x, 0.0, h.dir.z).normalize_or(Vec3::X),
+                    size: stone_size(StoneKind::Block, p.stone_m, 0.0),
+                    owner: None,
+                    life: p.stone_secs.max(4.0),
+                    seed: h.cast.seed as u64 ^ h.point.x.to_bits() ^ (h.point.z.to_bits() << 9),
                 });
             }
             if ground_hit {

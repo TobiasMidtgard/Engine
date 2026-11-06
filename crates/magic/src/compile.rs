@@ -107,6 +107,10 @@ pub struct Payload {
     pub lifesteal: f32,
     /// Knocks out instead of killing.
     pub subdue: bool,
+    /// Height of the stone it raises, m (0: none): a wall piece, a pillar, a step (stone.rs).
+    pub stone_m: f32,
+    /// Seconds the stone stands before it sinks (a wall's stone goes with the wall).
+    pub stone_secs: f32,
     /// The weave's reaction (a woven spell's bonus, clouds, chains).
     #[serde(skip)]
     pub reaction: Reaction,
@@ -488,6 +492,18 @@ fn compile_inner(
         },
         lifesteal: lifesteal.min(1.0),
         subdue: design.has(|m| matches!(m, Modifier::Subdue)),
+        // Head-high (2.2 m) for an Adept, near 3 m for a master, more with more power; Size
+        // changes a wall's length or a pillar's girth, not how high the stone stands.
+        stone_m: if has(&|k| matches!(k, EffectKind::Stone)) {
+            (1.9 + 0.6 * size).clamp(1.2, 5.0)
+        } else {
+            0.0
+        },
+        stone_secs: if has(&|k| matches!(k, EffectKind::Stone)) {
+            12.0 * duration_k
+        } else {
+            0.0
+        },
         reaction,
     };
 

@@ -16,6 +16,7 @@
 //! | [`hits`] | what happens where a spell lands |
 //! | [`status`] | element gauges, reactions, statuses |
 //! | [`meet`] | spells that meet |
+//! | [`stone`] | Shaping: stone walls, pillars, steps and grips that are physics bodies |
 //! | [`looks`] | how spells look, through the particles module's API |
 //! | [`api`] | `magic.*` |
 //! | [`demo`] | the Weaving hall |
@@ -39,6 +40,7 @@ pub mod meet;
 pub mod runtime;
 pub mod schools;
 pub mod status;
+pub mod stone;
 pub mod walls;
 
 use engine_core::prelude::*;
@@ -137,6 +139,7 @@ impl Plugin for MagicPlugin {
                     runtime::follow_looks,
                     runtime::tend_pieces,
                     walls::rise_walls,
+                    stone::raise_stone,
                 )
                     .chain()
                     .in_set(MagicSet::Hits),

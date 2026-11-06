@@ -9,8 +9,8 @@ use engine_core::registry::call_api;
 use engine_core::time::TimeSource;
 use engine_magic::*;
 use engine_world::physics::{
-    ApplyImpulse, BodyKind, ColliderShape, Hit, PhysicsQueries, PhysicsQuery, QueryFilter,
-    RigidBody,
+    ApplyImpulse, BodyKind, Collider, ColliderShape, Hit, PhysicsQueries, PhysicsQuery,
+    QueryFilter, RigidBody,
 };
 use engine_world::{
     DamageEvent, Died, FreezeRequest, IgniteRequest, SpellCue, SpellLook, SpellMark, SpellRole,
@@ -617,4 +617,134 @@ fn the_api_crafts_combines_and_casts() {
     assert!(
         info["caster"]["mana"].as_f64().unwrap() < info["caster"]["max_mana"].as_f64().unwrap()
     );
+}
+
+/// The stones standing in the world: kind, base and how high their foot stands now.
+fn stones(app: &mut App) -> Vec<(Entity, stone::StoneBody, f64)> {
+    let mut q = app.world.query::<(Entity, &stone::StoneBody, &Transform)>();
+    q.iter(&app.world)
+        .map(|(e, s, t)| (e, s.clone(), t.translation.y))
+        .collect()
+}
+
+#[test]
+fn a_stone_wall_stands_as_solid_blocks_and_sinks_with_its_wall() {
+    let mut app = app();
+    let me = mage(&mut app, DVec3::ZERO, Mastery::Ascended1);
+    run(&mut app, 0.1);
+    cast(
+        &mut app,
+        me,
+        SpellDesign::new(&["stone"], CastType::Wall).with(Modifier::Duration { factor: 0.4 }),
+        Aim::Point(DVec3::new(0.0, 0.0, -8.0)),
+    );
+    run(&mut app, 1.2);
+    let wall = stones(&mut app);
+    assert!(wall.len() >= 3, "a block per piece: {}", wall.len());
+    for (e, s, y) in &wall {
+        assert_eq!(s.kind, stone::StoneKind::Wall);
+        assert!(s.height > 2.0, "head-high: {}", s.height);
+        assert!(y.abs() < 0.05, "stood up out of the ground: {y}");
+        let body = app.world.get::<RigidBody>(*e).expect("a physics body");
+        assert_eq!(body.kind, BodyKind::Kinematic);
+        assert!(app.world.get::<Collider>(*e).is_some(), "solid");
+    }
+    // The rock is the look: no particle wall on its pieces.
+    assert!(looks_with(&mut app, SpellRole::Wall).is_empty());
+    // The wall lasts 3.2 s; its stones sink with it and are gone.
+    run(&mut app, 6.0);
+    assert!(stones(&mut app).is_empty());
+}
+
+#[test]
+fn a_stone_bolt_raises_a_step_and_grips_a_body_until_fire_cracks_it() {
+    let mut app = app();
+    let me = mage(&mut app, DVec3::ZERO, Mastery::Ascended1);
+    let d = dummy(&mut app, DVec3::new(0.0, 0.0, -10.0));
+    run(&mut app, 0.1);
+    // Into the floor: a step.
+    cast(
+        &mut app,
+        me,
+        SpellDesign::new(&["stone"], CastType::Bolt),
+        Aim::Point(DVec3::new(4.0, 0.0, -6.0)),
+    );
+    run(&mut app, 1.5);
+    let steps: Vec<_> = stones(&mut app)
+        .into_iter()
+        .filter(|(_, s, _)| s.kind == stone::StoneKind::Block)
+        .collect();
+    assert_eq!(steps.len(), 1);
+    assert!((steps[0].1.base - DVec3::new(4.0, 0.0, -6.0)).length() < 0.8);
+    // Into the dummy: stone closes around its feet and roots it.
+    cast(
+        &mut app,
+        me,
+        SpellDesign::new(&["stone"], CastType::Bolt),
+        Aim::Entity(d),
+    );
+    run(&mut app, 1.5);
+    assert!(app.world.get::<Statuses>(d).is_some_and(|s| s.rooted));
+    let grips = stones(&mut app)
+        .into_iter()
+        .filter(|(_, s, _)| s.kind == stone::StoneKind::Grip)
+        .count();
+    assert_eq!(grips, 4, "four rocks around the feet");
+    // Fire cracks it early.
+    cast(
+        &mut app,
+        me,
+        SpellDesign::new(&["fire"], CastType::Bolt),
+        Aim::Entity(d),
+    );
+    run(&mut app, 1.5);
+    assert!(app.world.get::<Statuses>(d).is_some_and(|s| !s.rooted));
+    run(&mut app, 1.0);
+    assert!(
+        !stones(&mut app)
+            .iter()
+            .any(|(_, s, _)| s.kind == stone::StoneKind::Grip),
+        "the grip's rocks sank"
+    );
+}
+
+#[test]
+fn a_pillar_rises_under_a_loose_body_and_lifts_it_instead_of_a_field() {
+    let mut app = app();
+    let me = mage(&mut app, DVec3::ZERO, Mastery::Ascended1);
+    let crate_ = app
+        .world
+        .spawn((
+            Name::new("Crate"),
+            Transform::from_translation(DVec3::new(0.0, 0.0, -9.0)),
+            RigidBody::dynamic(),
+            Body(0.5),
+        ))
+        .id();
+    run(&mut app, 0.1);
+    cast(
+        &mut app,
+        me,
+        SpellDesign::new(&["lift", "stone"], CastType::Area),
+        Aim::Point(DVec3::new(0.0, 0.0, -9.0)),
+    );
+    run(&mut app, 3.0);
+    let pillars: Vec<_> = stones(&mut app)
+        .into_iter()
+        .filter(|(_, s, _)| s.kind == stone::StoneKind::Pillar)
+        .collect();
+    assert_eq!(pillars.len(), 1);
+    let (_, p, y) = &pillars[0];
+    assert!(
+        p.base.y.abs() < 0.05,
+        "on the floor, not on the crate: {}",
+        p.base
+    );
+    assert!((3.0..=6.5).contains(&p.height), "{}", p.height);
+    assert!(y.abs() < 0.05, "risen: {y}");
+    // The stone does the lifting: no lifting field pushing the crate.
+    let seen = app.world.resource::<Seen>();
+    assert!(!seen.impulses.iter().any(|i| i.entity == crate_));
+    let mut fields = app.world.query::<&engine_magic::runtime::Field>();
+    assert_eq!(fields.iter(&app.world).count(), 0);
 }

@@ -20,7 +20,7 @@ use std::sync::Arc;
 use engine_core::math::{DVec3, Quat, Vec3};
 use engine_core::prelude::*;
 use engine_render::MeshRenderer;
-use engine_world::animation::SkeletonPose;
+use engine_world::animation::{AnimationTrigger, SkeletonPose};
 use engine_world::physics::{
     BodyKind, CharacterController, ColliderShape, PhysicsQueries, QueryFilter, RigidBody,
 };
@@ -37,6 +37,7 @@ use crate::design::CastType;
 use crate::looks::{LookCmd, Role};
 use crate::schools::{Element, Status};
 use crate::status::Afflictions;
+use crate::stone::NewStone;
 
 /// Stages nest at most this deep (Noita's limit): a blast's linger fires, the linger's own
 /// stages don't.
@@ -252,6 +253,8 @@ pub struct MagicQueue {
     pub wall_bodies: Vec<crate::walls::NewBody>,
     /// Bodies' first `Statuses` (the engine's view of their afflictions).
     pub statuses: Vec<(Entity, engine_world::Statuses)>,
+    /// Stone to raise (Shaping: pillars, steps, grips; walls raise theirs in the flush).
+    pub stones: Vec<crate::stone::NewStone>,
 }
 
 /// Bodies spells look for: anything with health, a skeleton or a character controller.
@@ -308,6 +311,7 @@ pub fn regen_mana(time: Res<Time>, mut q: Query<(&mut MagicCaster, Option<&Local
 }
 
 /// Start the casts asked for: compile, telegraph, and begin gathering.
+#[allow(clippy::too_many_arguments)]
 pub fn begin_casts(
     mut requests: MessageReader<CastRequest>,
     casters: Query<(&MagicCaster, &GlobalTransform, Has<Casting>)>,
@@ -316,6 +320,7 @@ pub fn begin_casts(
     mut casts: MessageWriter<SpellCast>,
     mut started: Query<&mut Casting>,
     mut commands_out: ResMut<CastStarts>,
+    mut anim: MessageWriter<AnimationTrigger>,
 ) {
     for r in requests.read() {
         let Ok((caster, t, busy)) = casters.get(r.caster) else {
@@ -364,6 +369,12 @@ pub fn begin_casts(
             secs: release_at,
             scale: (0.4 + 0.25 * spell.power.size()).min(2.0),
         });
+        // The body's part: a throw, a two-handed heave, or a held channel (the animation
+        // module plays them once it has them; until then they do nothing).
+        anim.write(AnimationTrigger {
+            entity: r.caster,
+            name: cast_gesture(spell.cast).into(),
+        });
         let casting = Casting {
             spell,
             aim: r.aim,
@@ -376,6 +387,28 @@ pub fn begin_casts(
         } else {
             commands_out.0.push((r.caster, casting));
         }
+    }
+}
+
+/// The animation trigger for casting a spell of this form: `cast_one_hand` (thrown: bolts,
+/// lobs, chains, touches, blinks), `cast_two_hand` (heaved: areas, walls, waves, rain, cones,
+/// runes, pillars) or `channel` (held: beams, auras, orbits).
+pub fn cast_gesture(cast: CastType) -> &'static str {
+    match cast {
+        CastType::Bolt
+        | CastType::Lob
+        | CastType::Chain
+        | CastType::Touch
+        | CastType::Imbue
+        | CastType::OnSelf => "cast_one_hand",
+        CastType::Beam | CastType::Aura | CastType::Orbit | CastType::Tether => "channel",
+        CastType::Area
+        | CastType::Wall
+        | CastType::Wave
+        | CastType::Rain
+        | CastType::Cone
+        | CastType::Rune
+        | CastType::Summon => "cast_two_hand",
     }
 }
 
@@ -582,6 +615,25 @@ pub fn release(
     let dir = to_aim.normalize_or(forward);
     let flat = Vec3::new(dir.x, 0.0, dir.z).normalize_or(Vec3::NEG_Z);
     let exclude = info.caster.map(QueryFilter::excluding).unwrap_or_default();
+    // Stone cast on an area (or on the caster) is a pillar rising under it: it lifts what
+    // stands there by pushing it, so it takes the place of the field and of any lift.
+    if spell.payload.stone_m > 0.0
+        && matches!(
+            spell.cast,
+            CastType::Area | CastType::Summon | CastType::Rune | CastType::OnSelf
+        )
+    {
+        let under = if spell.cast == CastType::OnSelf {
+            body
+        } else {
+            aim_point
+        };
+        let at = ground_below(queries, under, &exclude);
+        queue
+            .stones
+            .push(pillar(spell, at, flat, info.seed as u64, info.scale));
+        return;
+    }
     match spell.cast {
         CastType::Bolt | CastType::Lob => {
             let n = c.count.max(1);
@@ -801,6 +853,26 @@ pub fn release(
                 .spawns
                 .push(Spawn::Field(field(info, kind, c.radius, c.duration), at));
         }
+    }
+}
+
+/// The pillar a stone spell raises at `at`: a third taller with lift, as the list's Pillar.
+pub fn pillar(spell: &Spell, at: DVec3, facing: Vec3, seed: u64, scale: f32) -> NewStone {
+    use crate::stone::{StoneKind, stone_size};
+    let lifted = spell
+        .payload
+        .force
+        .is_some_and(|(d, _)| d == crate::effects::ForceDir::Up);
+    let mut size = stone_size(StoneKind::Pillar, spell.payload.stone_m, 0.0);
+    size.y *= if lifted { 1.4 } else { 1.0 } * scale.clamp(0.6, 1.5);
+    NewStone {
+        kind: StoneKind::Pillar,
+        at,
+        along: facing,
+        size,
+        owner: None,
+        life: spell.payload.stone_secs.max(4.0),
+        seed,
     }
 }
 
@@ -1691,6 +1763,8 @@ pub struct LookPiece {
     /// The wall's direction and this piece's share of its length, m.
     pub along: Vec3,
     pub width: f32,
+    /// Its wall is stone: the rock is the look, so no particle look is attached.
+    pub stone: bool,
 }
 
 /// How big a wall piece's particle look is: a fire curtain stands tall.
@@ -1720,7 +1794,7 @@ pub fn tend_pieces(
         }
         match fields.get(p.owner) {
             Ok(f) if f.spent.is_none() => {
-                if f.cast.spell.weave.key != p.look {
+                if f.cast.spell.weave.key != p.look && !p.stone {
                     p.look = f.cast.spell.weave.key.clone();
                     p.color = f.cast.spell.weave.color;
                     queue.looks.push(LookCmd::Attach {
@@ -1827,6 +1901,7 @@ pub fn flush(
                     }
                     if let Some((along, half)) = f.wall {
                         // A wall shows only along its pieces.
+                        let pay = &f.cast.spell.payload;
                         pieces.push(NewWall {
                             owner: id,
                             at: pos,
@@ -1837,6 +1912,7 @@ pub fn flush(
                             power_j,
                             freeze,
                             source: f.cast.caster,
+                            stone: (pay.stone_m > 0.0).then_some(pay.stone_m),
                         });
                     } else {
                         if let Some(secs) = freeze {
@@ -1895,6 +1971,7 @@ pub fn flush(
         power_j,
         freeze,
         source,
+        stone,
     } in pieces
     {
         let n = ((2.0 * half / 1.5).ceil() as i32).clamp(2, 12);
@@ -1923,10 +2000,30 @@ pub fn flush(
                         prev,
                         along,
                         width,
+                        stone: stone.is_some(),
                     },
                 ))
                 .id();
             prev = Some(id);
+            // From where it stands, never from entity ids.
+            let seed = p.x.to_bits() ^ p.z.to_bits().rotate_left(17) ^ k as u64;
+            if let Some(stone_m) = stone {
+                // A block of rough stone per piece: real, solid, and gone with its piece.
+                use crate::stone::{StoneKind, stone_size};
+                crate::stone::spawn_stone(
+                    &mut commands,
+                    NewStone {
+                        kind: StoneKind::Wall,
+                        at: p,
+                        along,
+                        size: stone_size(StoneKind::Wall, stone_m, width),
+                        owner: Some(id),
+                        life: f32::INFINITY,
+                        seed,
+                    },
+                );
+                continue;
+            }
             looks.push(LookCmd::Attach {
                 entity: id,
                 look: look.clone(),
@@ -1943,11 +2040,13 @@ pub fn flush(
                     color,
                     along,
                     width,
-                    // From where it stands, never from entity ids.
-                    seed: p.x.to_bits() ^ p.z.to_bits().rotate_left(17) ^ k as u64,
+                    seed,
                 },
             );
         }
+    }
+    for s in std::mem::take(&mut queue.stones) {
+        crate::stone::spawn_stone(&mut commands, s);
     }
     for b in std::mem::take(&mut queue.wall_bodies) {
         crate::walls::spawn_body(&mut commands, b);
@@ -2005,6 +2104,8 @@ struct NewWall {
     /// Seconds to freeze the water under it (frost walls).
     freeze: Option<f32>,
     source: Option<Entity>,
+    /// Height of its stone blocks, m (a stone wall).
+    stone: Option<f32>,
 }
 
 /// Copy carriers' positions into their `Transform`s for drawing.
@@ -2027,6 +2128,7 @@ pub fn follow_world_shift(
         Query<&mut ChainArc>,
         Query<&mut Rainfall>,
         Query<&mut Afflictions>,
+        Query<&mut crate::stone::StoneBody>,
     )>,
 ) {
     let Some(s) = shifts.read().copied().reduce(|a, b| a.then(&b)) else {
@@ -2064,6 +2166,9 @@ pub fn follow_world_shift(
     }
     for mut a in &mut q.p6() {
         a.last_pos = a.last_pos.map(|p| s.point(p));
+    }
+    for mut st in &mut q.p7() {
+        st.base = s.point(st.base);
     }
 }
 

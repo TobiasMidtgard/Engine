@@ -517,6 +517,18 @@ pub fn weave(keys: &[String]) -> Option<Weave> {
     } else {
         systemic(&ingredients, &dials, &elements)
     };
+    // Raised stone looks like stone (dust, grit, flung rock), whatever else is woven in,
+    // unless an element colors it; with lift it is the Pillar of the Shaping list.
+    let (key, name, color) = if ingredients.iter().any(|k| k == "stone") && elements.is_empty() {
+        let lifted = ingredients.iter().any(|k| k == "lift");
+        let name = match (lifted, defs.len()) {
+            (true, 2) => "Pillar".to_string(),
+            _ => name,
+        };
+        ("stone".to_string(), name, STONE_COLOR)
+    } else {
+        (key, name, color)
+    };
     Some(Weave {
         key,
         name,
@@ -530,6 +542,9 @@ pub fn weave(keys: &[String]) -> Option<Weave> {
         color,
     })
 }
+
+/// Raised stone's color (a grey-brown granite), linear RGB.
+pub const STONE_COLOR: [f32; 3] = [0.42, 0.38, 0.33];
 
 /// The look key of an effect without an element: its strongest domain.
 fn look_of_dials(dials: &Dials) -> String {

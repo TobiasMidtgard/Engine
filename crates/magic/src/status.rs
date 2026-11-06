@@ -109,6 +109,8 @@ pub struct Afflictions {
     pub veiled: f32,
     /// Seconds left calmed.
     pub calmed: f32,
+    /// Seconds left held by a stone grip (fire cracks it early).
+    pub rooted: f32,
     /// Who last hurt it (damage over time is theirs).
     #[serde(skip)]
     pub source: Option<Entity>,
@@ -371,6 +373,7 @@ impl Afflictions {
         self.dread = (self.dread - dt).max(0.0);
         self.veiled = (self.veiled - dt).max(0.0);
         self.calmed = (self.calmed - dt).max(0.0);
+        self.rooted = (self.rooted - dt).max(0.0);
         if self.ward_secs > 0.0 {
             self.ward_secs -= dt;
             if self.ward_secs <= 0.0 {
@@ -427,7 +430,7 @@ impl Afflictions {
             rot: dot_level(&self.rot),
             // Three seconds of terror is full fright.
             dread: (self.dread / 3.0).clamp(0.0, 1.0),
-            rooted: false,
+            rooted: self.rooted > 0.0,
         }
     }
 }
