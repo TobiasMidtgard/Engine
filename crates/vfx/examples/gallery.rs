@@ -8,7 +8,7 @@
 //! Effects with a trail fly in a circle so the trail shows; one-shot effects are captured
 //! shortly after they start, loops once they have settled. Needs a GPU or lavapipe.
 
-use engine_core::math::{DVec3, Vec3};
+use engine_core::math::{DVec3, Quat, Vec3};
 use engine_core::prelude::*;
 use engine_core::time::TimeSource;
 use engine_render::prelude::*;
@@ -180,9 +180,17 @@ fn main() {
             } else {
                 DVec3::new(0.0, 1.0, 0.0)
             };
+            // Jets pour sideways from the left, the way a held fire beam leaves the hand.
+            let jet = name.ends_with(".jet");
+            let transform = if jet {
+                Transform::from_xyz(-3.2, 1.2, 0.0)
+                    .with_rotation(Quat::from_rotation_arc(Vec3::Y, Vec3::X))
+            } else {
+                Transform::from_translation(pos)
+            };
             let mut e = app.world.spawn((
-                Transform::from_translation(pos),
-                ParticleEffect::new(name.clone()),
+                transform,
+                ParticleEffect::new(name.clone()).with_scale(if jet { 0.8 } else { 1.0 }),
             ));
             if desc.trail.is_some() {
                 e.insert(Circling);
@@ -197,6 +205,8 @@ fn main() {
             };
             let secs = if wide {
                 0.9
+            } else if jet {
+                0.45
             } else if desc.is_one_shot() {
                 (desc.total_secs().unwrap_or(1.0) * 0.2).clamp(0.15, 0.6)
             } else {

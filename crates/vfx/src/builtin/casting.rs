@@ -502,22 +502,22 @@ fn fire_jet() -> EffectDesc {
             vec![
                 EmitterDesc {
                     lifetime: [life * 0.8, life],
-                    size: [0.22, 0.32],
-                    size_over_life: c(&[(0.0, 0.35), (0.35, 1.4), (1.0, 3.2)]),
+                    size: [0.4, 0.55],
+                    size_over_life: c(&[(0.0, 0.45), (0.3, 1.5), (1.0, 4.0)]),
                     rotation_deg: [0.0, 360.0],
                     spin_deg: [-120.0, 120.0],
                     sprite: Sprite::Fireball,
                     color: flame_colors(),
-                    emissive: 15_000.0,
+                    emissive: 24_000.0,
                     additive: 1.0,
                     soft: 0.2,
                     turbulence: 3.0,
                     turbulence_scale: 0.8,
-                    ..stream("flames", 90.0, 6.0)
+                    ..stream("flames", 150.0, 7.0)
                 },
                 EmitterDesc {
                     lifetime: [0.12, 0.2],
-                    size: [0.12, 0.18],
+                    size: [0.22, 0.32],
                     size_over_life: c(&[(0.0, 0.6), (1.0, 1.6)]),
                     sprite: Sprite::Plasma,
                     facing: Facing::Velocity,
@@ -530,7 +530,7 @@ fn fire_jet() -> EffectDesc {
                     emissive: 30_000.0,
                     additive: 1.0,
                     soft: 0.0,
-                    ..stream("core", 70.0, 2.5)
+                    ..stream("core", 110.0, 2.5)
                 },
                 EmitterDesc {
                     lifetime: [life * 0.9, life * 1.2],
