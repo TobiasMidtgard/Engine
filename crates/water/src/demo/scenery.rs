@@ -6,7 +6,7 @@ use engine_assets::Assets;
 use engine_core::math::{DVec2, Mat4};
 use engine_core::prelude::*;
 use engine_render::{Mesh, MeshRenderer, StandardMaterial};
-use engine_world::physics::{Fit, FitCollider};
+use engine_world::physics::{Collider, ColliderShape, RigidBody};
 
 use super::props::{self, Part};
 use crate::boat::Boat;
@@ -225,6 +225,71 @@ pub fn spawn_jetty(commands: &mut Commands, jetty: &Jetty) -> Entity {
     )
 }
 
+/// The jetty's collision in its own frame (+x out, y up from the deck top): the deck and its
+/// stringers as one slab, round piles each side every [`BAY`] reaching 4 m down, the cleats,
+/// and the swim ladder's rails, treads and handrails at the end.
+pub(crate) fn jetty_collider(length: f32) -> Collider {
+    let slots = (length / SLOT).ceil();
+    let deck = slots * SLOT;
+    let mut shapes = vec![(
+        Vec3::new(deck * 0.5, -0.1225, 0.0),
+        Quat::IDENTITY,
+        ColliderShape::Cuboid {
+            half_extents: Vec3::new(deck * 0.5, 0.1225, 1.0),
+        },
+    )];
+    let bays = (length / BAY).floor() as u32;
+    let (pile_top, pile_bottom) = (0.25f32, -4.0f32);
+    for k in 0..=bays {
+        let along = (k as f32 * BAY).min(length - 0.15).max(0.15);
+        for across in [-POST_ACROSS, POST_ACROSS] {
+            shapes.push((
+                Vec3::new(along, (pile_top + pile_bottom) * 0.5, across),
+                Quat::IDENTITY,
+                ColliderShape::Cylinder {
+                    radius: 0.11,
+                    half_height: (pile_top - pile_bottom) * 0.5,
+                },
+            ));
+        }
+    }
+    let cuboid = |at: Vec3, half: Vec3| {
+        (
+            at,
+            Quat::IDENTITY,
+            ColliderShape::Cuboid { half_extents: half },
+        )
+    };
+    for across in [-0.82f32, 0.82] {
+        shapes.push(cuboid(
+            Vec3::new(length - 0.6, 0.04, across),
+            Vec3::new(0.12, 0.04, 0.04),
+        ));
+    }
+    // The ladder (`props::ladder`): rails at x + 0.06 and z ± 0.25 from 1.5 m down to 0.55 m
+    // up, bending back over the deck to x - 0.36; treads every 0.28 m.
+    let (lx, lz) = (length + 0.06, 0.45);
+    for z in [lz - 0.25, lz + 0.25] {
+        shapes.push(cuboid(
+            Vec3::new(lx, -0.475, z),
+            Vec3::new(0.021, 1.025, 0.021),
+        ));
+        shapes.push(cuboid(
+            Vec3::new(lx - 0.21, 0.55, z),
+            Vec3::new(0.231, 0.021, 0.021),
+        ));
+    }
+    let mut y = -1.4f32;
+    while y < 0.0 {
+        shapes.push(cuboid(Vec3::new(lx, y, lz), Vec3::new(0.04, 0.012, 0.25)));
+        y += 0.28;
+    }
+    Collider {
+        shape: ColliderShape::Compound(shapes),
+        ..Collider::default()
+    }
+}
+
 /// A jetty from its shore end, turn, length and its made `parts` ([`spawn_jetty`]).
 pub(crate) fn spawn_jetty_made(
     commands: &mut Commands,
@@ -242,9 +307,11 @@ pub(crate) fn spawn_jetty_made(
                 min: [-0.3, -POST_ACROSS],
                 max: [length, POST_ACROSS],
             },
-            // Solid as drawn (deck, piles, cleats, ladder): physics fits the triangles once
-            // the merged parts' meshes are in.
-            FitCollider::new(Fit::Mesh),
+            // Simple collision apart from the drawn mesh (Unreal's simple collision): the
+            // drawn jetty is 8,682 triangles, and a moored boat's 16 hull parts rubbing on
+            // them kept 430-600 contact manifolds and 25 ms narrow-phase steps (VM).
+            RigidBody::fixed(),
+            jetty_collider(length),
         ))
         .id();
     add_parts(commands, e, parts);
@@ -345,4 +412,32 @@ pub fn spawn_buoy(commands: &mut Commands, at: DVec3, anchor: DVec3, seed: u64) 
         .id();
     add_parts(commands, e, super::art::buoy(seed));
     e
+}
+
+#[cfg(test)]
+mod jetty_tests {
+    use super::*;
+
+    #[test]
+    fn the_jetty_collides_as_a_deck_slab_on_piles() {
+        let c = jetty_collider(13.0);
+        let ColliderShape::Compound(shapes) = &c.shape else {
+            panic!("a compound");
+        };
+        // The deck: its top at the board tops (y = 0), the whole length and width.
+        let (at, _, deck) = &shapes[0];
+        let ColliderShape::Cuboid { half_extents: h } = deck else {
+            panic!("a deck slab");
+        };
+        assert!((at.y + h.y).abs() < 1e-4);
+        assert!(at.x - h.x <= 0.0 && at.x + h.x >= 13.0 && h.z >= 1.0);
+        // Two piles every 2.2 m, standing above the deck like the drawn ones.
+        let piles: Vec<_> = shapes
+            .iter()
+            .filter(|s| matches!(s.2, ColliderShape::Cylinder { .. }))
+            .collect();
+        assert_eq!(piles.len(), 2 * ((13.0 / BAY).floor() as usize + 1));
+        // Dozens of convex parts, not thousands of triangles.
+        assert!(shapes.len() < 40, "{}", shapes.len());
+    }
 }
