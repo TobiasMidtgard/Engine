@@ -2137,3 +2137,65 @@ fn a_pile_sleeps_wakes_and_sleeps_again_with_the_search_cap() {
     assert!(moved, "the ball never reached the pile");
     settle(&mut app, "the struck pile");
 }
+
+/// A force pushed on one awake body every step no longer forces Rapier's whole-world
+/// contact-graph rebuild (third_party/rapier3d/PATCHES.md, 2). The contacts it reuses must
+/// still carry the push down a row of boxes, hold them on the ground, follow a box that turns
+/// kinematic and back, and let the row sleep once its `ExternalForce` is removed.
+#[test]
+fn a_pushed_row_keeps_its_contacts_when_bodies_change_without_leaving_the_active_set() {
+    let mut app = app();
+    ground(&mut app, DVec3::ZERO, 30.0);
+    let row: Vec<Entity> = (0..8)
+        .map(|i| cube(&mut app, DVec3::new(i as f64 * 0.52, 0.25, 0.0), 0.25))
+        .collect();
+    for _ in 0..60 {
+        app.update();
+    }
+    let start: Vec<DVec3> = row.iter().map(|&e| pos(&app, e)).collect();
+    app.world.entity_mut(row[0]).insert(ExternalForce {
+        // Well over the row's friction (eight 125 kg boxes).
+        force: Vec3::new(7_000.0, 0.0, 0.0),
+        ..Default::default()
+    });
+    for frame in 0..240 {
+        app.update();
+        // Halfway, the middle box turns kinematic for a moment: a real change of the active
+        // set, which must still rebuild the graph.
+        if frame == 100 || frame == 110 {
+            let kind = if frame == 100 {
+                BodyKind::Kinematic
+            } else {
+                BodyKind::Dynamic
+            };
+            app.world.get_mut::<RigidBody>(row[4]).unwrap().kind = kind;
+        }
+        for &e in &row {
+            let y = pos(&app, e).y;
+            assert!(y > 0.15, "frame {frame}: a box sank to {y:.2} m");
+        }
+    }
+    let back = pos(&app, row[0]).x - start[0].x;
+    let front = pos(&app, row[7]).x - start[7].x;
+    assert!(
+        front > 1.0,
+        "the push reached the front box only {front:.2} m (the pushed box moved {back:.2} m)"
+    );
+    for w in row.windows(2) {
+        let gap = pos(&app, w[1]).x - pos(&app, w[0]).x;
+        assert!(gap > 0.4, "two boxes overlap: {gap:.2} m apart");
+    }
+    // Taking the force away stops the push.
+    app.world.entity_mut(row[0]).remove::<ExternalForce>();
+    for _ in 0..(30 * 60) {
+        app.update();
+        if row.iter().all(|&e| asleep(&app, e)) {
+            return;
+        }
+    }
+    let awake = row.iter().filter(|&&e| !asleep(&app, e)).count();
+    panic!(
+        "{awake} of {} boxes still awake 30 s after the push",
+        row.len()
+    );
+}
