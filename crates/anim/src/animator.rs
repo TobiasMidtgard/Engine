@@ -622,100 +622,124 @@ pub(crate) fn evaluate_animators(
     mut q: EvalQuery,
 ) {
     let frame = time.frame_count();
-    q.par_iter_mut().for_each(
-        |(entity, mut animator, settings, params, local, transform, gt, ragdoll)| {
-            let defaults = AnimatorSettings::default();
-            let settings = settings.unwrap_or(&defaults);
-            let mut dt = if settings.paused {
-                0.0
-            } else {
-                time.delta_for(local) * settings.speed
+    // A few items a piece on the leaf pool (`par_chunks_mut`): a par_iter's compute-pool
+    // scope ran whole other systems on its waiting thread (lead, perf week).
+    let mut items: Vec<_> = q.iter_mut().map(Some).collect();
+    let per = items.len().div_ceil(16).max(1);
+    engine_core::tasks::par_chunks_mut(&mut items, per, |_, chunk| {
+        for slot in chunk {
+            let Some((entity, mut animator, settings, params, local, transform, gt, ragdoll)) =
+                slot.take()
+            else {
+                continue;
             };
-            // Beyond the simulation range: keep the last pose and take a fresh one every few
-            // seconds. A body in its ragdoll follows physics, so it never rests.
-            let was_resting = animator.resting;
-            if let Some(gt) = gt {
-                let p = gt.translation();
-                let limp = ragdoll.is_some_and(|r| r.weight > 0.0);
-                animator.resting = !limp
-                    && if was_resting {
-                        !range.is_active(&focus, p)
-                    } else {
-                        range.is_resting(&focus, p)
-                    };
-            }
-            if animator.resting {
-                if !was_resting {
-                    // Spread the poses of a crowd that comes to rest together over the cycle.
-                    animator.rest_secs = (entity.to_bits() % 97) as f32 / 97.0 * REST_POSE_SECS;
+            #[allow(clippy::redundant_closure_call)]
+            (|| {
+                let defaults = AnimatorSettings::default();
+                let settings = settings.unwrap_or(&defaults);
+                let mut dt = if settings.paused {
+                    0.0
+                } else {
+                    time.delta_for(local) * settings.speed
+                };
+                // Beyond the simulation range: keep the last pose and take a fresh one every few
+                // seconds. A body in its ragdoll follows physics, so it never rests.
+                let was_resting = animator.resting;
+                if let Some(gt) = gt {
+                    let p = gt.translation();
+                    let limp = ragdoll.is_some_and(|r| r.weight > 0.0);
+                    animator.resting = !limp
+                        && if was_resting {
+                            !range.is_active(&focus, p)
+                        } else {
+                            range.is_resting(&focus, p)
+                        };
                 }
-                animator.rest_secs += dt;
-                if animator.rest_secs < REST_POSE_SECS {
-                    animator.posed = false;
-                    animator.fresh = false;
-                    animator.keep();
-                    return;
+                if animator.resting {
+                    if !was_resting {
+                        // Spread the poses of a crowd that comes to rest together over the cycle.
+                        animator.rest_secs = (entity.to_bits() % 97) as f32 / 97.0 * REST_POSE_SECS;
+                    }
+                    animator.rest_secs += dt;
+                    if animator.rest_secs < REST_POSE_SECS {
+                        animator.posed = false;
+                        animator.fresh = false;
+                        animator.keep();
+                        return;
+                    }
+                    dt = std::mem::take(&mut animator.rest_secs);
+                } else {
+                    dt += std::mem::take(&mut animator.rest_secs);
                 }
-                dt = std::mem::take(&mut animator.rest_secs);
-            } else {
-                dt += std::mem::take(&mut animator.rest_secs);
-            }
-            animator.fresh = !animator.posed;
-            animator.posed = true;
-            // Far away: update at a quarter rate (accumulating time so speed is unchanged).
-            if !animator.fresh
-                && settings.lod_distance > 0.0
-                && let Some(gt) = gt
-                && !focus.points.is_empty()
-                && focus.distance(gt.translation()) > settings.lod_distance as f64
-            {
-                animator.lod_skipped += dt;
-                if !(frame + entity.to_bits()).is_multiple_of(4) {
-                    animator.hold();
-                    return;
+                animator.fresh = !animator.posed;
+                animator.posed = true;
+                // Far away: update at a quarter rate (accumulating time so speed is unchanged).
+                if !animator.fresh
+                    && settings.lod_distance > 0.0
+                    && let Some(gt) = gt
+                    && !focus.points.is_empty()
+                    && focus.distance(gt.translation()) > settings.lod_distance as f64
+                {
+                    animator.lod_skipped += dt;
+                    if !(frame + entity.to_bits()).is_multiple_of(4) {
+                        animator.hold();
+                        return;
+                    }
+                    dt = std::mem::take(&mut animator.lod_skipped);
+                } else {
+                    dt += std::mem::take(&mut animator.lod_skipped);
                 }
-                dt = std::mem::take(&mut animator.lod_skipped);
-            } else {
-                dt += std::mem::take(&mut animator.lod_skipped);
-            }
-            animator.evaluate(params, dt);
-            if animator.fresh {
-                animator.dt = animator.dt.min(WAKE_DT);
-            }
-            if settings.root_motion
-                && let Some(mut t) = transform
-            {
-                let d = animator.root_delta;
-                let horizontal = Vec3::new(d.x, 0.0, d.z);
-                let world = t.rotation * (horizontal * t.scale);
-                t.translation += world.as_dvec3();
-                // Play in place: the root keeps only its vertical motion.
-                let skeleton = animator.skeleton.clone();
-                if let Some(root) = skeleton.index_of("root") {
-                    let rest = skeleton.rest[root].t;
-                    let r = &mut animator.local[root];
-                    r.t.x = rest.x;
-                    r.t.z = rest.z;
+                animator.evaluate(params, dt);
+                if animator.fresh {
+                    animator.dt = animator.dt.min(WAKE_DT);
                 }
-            }
-        },
-    );
+                if settings.root_motion
+                    && let Some(mut t) = transform
+                {
+                    let d = animator.root_delta;
+                    let horizontal = Vec3::new(d.x, 0.0, d.z);
+                    let world = t.rotation * (horizontal * t.scale);
+                    t.translation += world.as_dvec3();
+                    // Play in place: the root keeps only its vertical motion.
+                    let skeleton = animator.skeleton.clone();
+                    if let Some(root) = skeleton.index_of("root") {
+                        let rest = skeleton.rest[root].t;
+                        let r = &mut animator.local[root];
+                        r.t.x = rest.x;
+                        r.t.z = rest.z;
+                    }
+                }
+            })();
+        }
+    });
 }
 
 /// Publish the final pose: model space, the `SkeletonPose` contract component.
 pub(crate) fn publish_pose(mut q: Query<(&mut Animator, &mut SkeletonPose)>) {
-    q.par_iter_mut().for_each(|(mut animator, mut pose)| {
-        if !animator.posed {
-            return;
+    // A few items a piece on the leaf pool (`par_chunks_mut`): a par_iter's compute-pool
+    // scope ran whole other systems on its waiting thread (lead, perf week).
+    let mut items: Vec<_> = q.iter_mut().map(Some).collect();
+    let per = items.len().div_ceil(16).max(1);
+    engine_core::tasks::par_chunks_mut(&mut items, per, |_, chunk| {
+        for slot in chunk {
+            let Some((mut animator, mut pose)) = slot.take() else {
+                continue;
+            };
+            #[allow(clippy::redundant_closure_call)]
+            (|| {
+                if !animator.posed {
+                    return;
+                }
+                animator.refresh_model();
+                if pose.names.len() != animator.skeleton.len() {
+                    pose.names = animator.skeleton.names.clone();
+                    pose.parents = animator.skeleton.parents.clone();
+                }
+                pose.bones.clear();
+                pose.bones
+                    .extend(animator.model.iter().map(|m| m.to_bone_pose()));
+            })();
         }
-        animator.refresh_model();
-        if pose.names.len() != animator.skeleton.len() {
-            pose.names = animator.skeleton.names.clone();
-            pose.parents = animator.skeleton.parents.clone();
-        }
-        pose.bones.clear();
-        pose.bones
-            .extend(animator.model.iter().map(|m| m.to_bone_pose()));
     });
 }
 

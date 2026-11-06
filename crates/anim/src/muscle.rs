@@ -244,71 +244,82 @@ pub(crate) fn muscle_system(
         &GlobalTransform,
     )>,
 ) {
-    q.par_iter_mut()
-        .for_each(|(animator, mut rig, mut morphs, params, gt)| {
-            if !rig.enabled || !animator.posed() {
-                return;
-            }
-            if animator.fresh() {
-                // The body moved while it rested: that isn't a shove to jiggle from.
-                rig.last_origin = None;
-            }
-            let dt = animator.dt;
-            let origin = gt.translation();
-            let shift = rig
-                .last_origin
-                .map_or(Vec3::ZERO, |o| (origin - o).as_vec3());
-            rig.last_origin = Some(origin);
-            let rig = &mut *rig;
-            rig.state.resize(rig.muscles.len(), MuscleState::default());
-            for (m, s) in rig.muscles.iter().zip(rig.state.iter_mut()) {
-                if !s.resolved {
-                    s.bulge = morphs.index_of(&m.bulge);
-                    s.sway = m.sway.as_deref().and_then(|n| morphs.index_of(n));
-                    s.bone = animator.skeleton.index_of(&m.bone);
-                    s.resolved = true;
+    // A few items a piece on the leaf pool (`par_chunks_mut`): a par_iter's compute-pool
+    // scope ran whole other systems on its waiting thread (lead, perf week).
+    let mut items: Vec<_> = q.iter_mut().map(Some).collect();
+    let per = items.len().div_ceil(16).max(1);
+    engine_core::tasks::par_chunks_mut(&mut items, per, |_, chunk| {
+        for slot in chunk {
+            let Some((animator, mut rig, mut morphs, params, gt)) = slot.take() else {
+                continue;
+            };
+            #[allow(clippy::redundant_closure_call)]
+            (|| {
+                if !rig.enabled || !animator.posed() {
+                    return;
                 }
-                let target = muscle_target(m, animator, params, rig.boost);
-                let tau = if target > s.activation {
-                    m.rise_secs
-                } else {
-                    m.fall_secs
-                };
-                s.activation += (target - s.activation) * smoothing(dt, tau);
-                // Jiggle: a damped spring pushed by the bone's acceleration.
-                if let Some(b) = s.bone
-                    && dt > 0.0
-                {
-                    // Bone position relative to the entity, in world orientation; last frame's
-                    // is shifted by how far the entity moved, so this measures world motion.
-                    let p = (to_world(gt, animator.model[b].t) - origin).as_vec3();
-                    let vel = s.prev_pos.map(|prev| (p - (prev - shift)) / dt);
-                    let acc = match (vel, s.prev_vel) {
-                        (Some(v), Some(pv)) => (v - pv) / dt,
-                        _ => Vec3::ZERO,
-                    };
-                    s.prev_pos = Some(p);
-                    s.prev_vel = vel;
-                    let w = std::f32::consts::TAU * m.jiggle_hz;
-                    let push = (acc.y + 0.3 * (acc.x + acc.z)).clamp(-200.0, 200.0) * 0.004;
-                    // Semi-implicit Euler in small steps for stability.
-                    let steps = ((dt * 240.0).ceil() as usize).clamp(1, 8);
-                    let h = dt / steps as f32;
-                    for _ in 0..steps {
-                        let a = -w * w * s.x - 2.0 * m.jiggle_damping * w * s.v - push * w;
-                        s.v += a * h;
-                        s.x += s.v * h;
+                if animator.fresh() {
+                    // The body moved while it rested: that isn't a shove to jiggle from.
+                    rig.last_origin = None;
+                }
+                let dt = animator.dt;
+                let origin = gt.translation();
+                let shift = rig
+                    .last_origin
+                    .map_or(Vec3::ZERO, |o| (origin - o).as_vec3());
+                rig.last_origin = Some(origin);
+                let rig = &mut *rig;
+                rig.state.resize(rig.muscles.len(), MuscleState::default());
+                for (m, s) in rig.muscles.iter().zip(rig.state.iter_mut()) {
+                    if !s.resolved {
+                        s.bulge = morphs.index_of(&m.bulge);
+                        s.sway = m.sway.as_deref().and_then(|n| morphs.index_of(n));
+                        s.bone = animator.skeleton.index_of(&m.bone);
+                        s.resolved = true;
                     }
-                    s.x = s.x.clamp(-1.0, 1.0);
+                    let target = muscle_target(m, animator, params, rig.boost);
+                    let tau = if target > s.activation {
+                        m.rise_secs
+                    } else {
+                        m.fall_secs
+                    };
+                    s.activation += (target - s.activation) * smoothing(dt, tau);
+                    // Jiggle: a damped spring pushed by the bone's acceleration.
+                    if let Some(b) = s.bone
+                        && dt > 0.0
+                    {
+                        // Bone position relative to the entity, in world orientation; last frame's
+                        // is shifted by how far the entity moved, so this measures world motion.
+                        let p = (to_world(gt, animator.model[b].t) - origin).as_vec3();
+                        let vel = s.prev_pos.map(|prev| (p - (prev - shift)) / dt);
+                        let acc = match (vel, s.prev_vel) {
+                            (Some(v), Some(pv)) => (v - pv) / dt,
+                            _ => Vec3::ZERO,
+                        };
+                        s.prev_pos = Some(p);
+                        s.prev_vel = vel;
+                        let w = std::f32::consts::TAU * m.jiggle_hz;
+                        let push = (acc.y + 0.3 * (acc.x + acc.z)).clamp(-200.0, 200.0) * 0.004;
+                        // Semi-implicit Euler in small steps for stability.
+                        let steps = ((dt * 240.0).ceil() as usize).clamp(1, 8);
+                        let h = dt / steps as f32;
+                        for _ in 0..steps {
+                            let a = -w * w * s.x - 2.0 * m.jiggle_damping * w * s.v - push * w;
+                            s.v += a * h;
+                            s.x += s.v * h;
+                        }
+                        s.x = s.x.clamp(-1.0, 1.0);
+                    }
+                    if let Some(i) = s.bulge {
+                        morphs.weights[i] = s.activation * rig.strength;
+                    }
+                    if let Some(i) = s.sway {
+                        morphs.weights[i] = s.x * rig.jiggle * (1.0 - 0.75 * s.activation);
+                    }
                 }
-                if let Some(i) = s.bulge {
-                    morphs.weights[i] = s.activation * rig.strength;
-                }
-                if let Some(i) = s.sway {
-                    morphs.weights[i] = s.x * rig.jiggle * (1.0 - 0.75 * s.activation);
-                }
-            }
-        });
+            })();
+        }
+    });
 }
 
 #[cfg(test)]

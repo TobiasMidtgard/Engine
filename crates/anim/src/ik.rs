@@ -651,25 +651,36 @@ pub(crate) fn foot_ik_system(
     surfaces: Res<IkSurfaces>,
     mut q: Query<(Entity, &mut Animator, &mut FootIk, &GlobalTransform)>,
 ) {
-    q.par_iter_mut()
-        .for_each(|(entity, mut animator, mut ik, gt)| {
-            if !ik.enabled || ik.weight <= 0.0 || ik.legs.is_empty() || !animator.posed() {
-                return;
-            }
-            if animator.fresh() {
-                // Planted feet were left where the body stood when it came to rest.
-                ik.locks.clear();
-                ik.last_body = None;
-            }
-            let probe = GroundProbe {
-                ground: &ground,
-                physics: physics.as_deref(),
-                surfaces: &surfaces.0,
-                exclude: Some(entity),
+    // A few items a piece on the leaf pool (`par_chunks_mut`): a par_iter's compute-pool
+    // scope ran whole other systems on its waiting thread (lead, perf week).
+    let mut items: Vec<_> = q.iter_mut().map(Some).collect();
+    let per = items.len().div_ceil(16).max(1);
+    engine_core::tasks::par_chunks_mut(&mut items, per, |_, chunk| {
+        for slot in chunk {
+            let Some((entity, mut animator, mut ik, gt)) = slot.take() else {
+                continue;
             };
-            let dt = animator.dt;
-            solve_feet(&mut animator, &mut ik, gt, &probe, dt);
-        });
+            #[allow(clippy::redundant_closure_call)]
+            (|| {
+                if !ik.enabled || ik.weight <= 0.0 || ik.legs.is_empty() || !animator.posed() {
+                    return;
+                }
+                if animator.fresh() {
+                    // Planted feet were left where the body stood when it came to rest.
+                    ik.locks.clear();
+                    ik.last_body = None;
+                }
+                let probe = GroundProbe {
+                    ground: &ground,
+                    physics: physics.as_deref(),
+                    surfaces: &surfaces.0,
+                    exclude: Some(entity),
+                };
+                let dt = animator.dt;
+                solve_feet(&mut animator, &mut ik, gt, &probe, dt);
+            })();
+        }
+    });
 }
 
 /// Foot placement for one character (also usable directly by custom rigs).

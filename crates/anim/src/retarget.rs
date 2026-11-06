@@ -894,28 +894,39 @@ pub(crate) fn retarget_poses(
         Option<&crate::grip::HeldItems>,
     )>,
 ) {
-    q.par_iter_mut()
-        .for_each(|(animator, mut retarget, grip, held)| {
-            if !animator.posed() {
-                return;
-            }
-            let r = &mut *retarget;
-            r.hold(held);
-            let mut closure = r.retargeter.hand_closure(animator, grip);
-            // A hand holding something is closed on it.
-            for (c, wrap) in closure.iter_mut().zip(&r.wraps) {
-                if wrap.is_some() {
-                    *c = 1.0;
+    // A few items a piece on the leaf pool (`par_chunks_mut`): a par_iter's compute-pool
+    // scope ran whole other systems on its waiting thread (lead, perf week).
+    let mut items: Vec<_> = q.iter_mut().map(Some).collect();
+    let per = items.len().div_ceil(16).max(1);
+    engine_core::tasks::par_chunks_mut(&mut items, per, |_, chunk| {
+        for slot in chunk {
+            let Some((animator, mut retarget, grip, held)) = slot.take() else {
+                continue;
+            };
+            #[allow(clippy::redundant_closure_call)]
+            (|| {
+                if !animator.posed() {
+                    return;
                 }
-            }
-            let wraps: Vec<Option<&[f32]>> = r
-                .wraps
-                .iter()
-                .map(|w| w.as_ref().map(|(_, _, a)| a.as_slice()))
-                .collect();
-            r.retargeter
-                .apply_holding(&animator.model, &closure, &wraps, &mut r.model);
-        });
+                let r = &mut *retarget;
+                r.hold(held);
+                let mut closure = r.retargeter.hand_closure(animator, grip);
+                // A hand holding something is closed on it.
+                for (c, wrap) in closure.iter_mut().zip(&r.wraps) {
+                    if wrap.is_some() {
+                        *c = 1.0;
+                    }
+                }
+                let wraps: Vec<Option<&[f32]>> = r
+                    .wraps
+                    .iter()
+                    .map(|w| w.as_ref().map(|(_, _, a)| a.as_slice()))
+                    .collect();
+                r.retargeter
+                    .apply_holding(&animator.model, &closure, &wraps, &mut r.model);
+            })();
+        }
+    });
 }
 
 #[cfg(test)]

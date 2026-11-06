@@ -320,74 +320,88 @@ pub(crate) fn update_skin_poses(
     let Some(meshes) = meshes else {
         return;
     };
-    q.par_iter_mut()
-        .for_each(|(animator, renderer, mut pose, morphs, retarget)| {
-            // A resting character keeps the skin it has.
-            if !animator.posed() {
-                return;
-            }
-            let Some(handle) = renderer.mesh else {
-                return;
+    // A few items a piece on the leaf pool (`par_chunks_mut`): a par_iter's compute-pool
+    // scope ran whole other systems on its waiting thread (lead, perf week).
+    let mut items: Vec<_> = q.iter_mut().map(Some).collect();
+    let per = items.len().div_ceil(16).max(1);
+    engine_core::tasks::par_chunks_mut(&mut items, per, |_, chunk| {
+        for slot in chunk {
+            let Some((animator, renderer, mut pose, morphs, retarget)) = slot.take() else {
+                continue;
             };
-            let Some(mesh) = meshes.get(handle) else {
-                return;
-            };
-            let version = meshes.version(handle);
-            // A retargeted mesh's joints name the target skeleton first, then logic bones.
-            let target = retarget.map(|r| &r.retargeter.target);
-            let resolved_for_target = pose
-                .map
-                .first()
-                .is_some_and(|m| matches!(m, Some(JointSource::Target(_))) == target.is_some());
-            if pose.map_version != version
-                || pose.map.len() != mesh.joints.len()
-                || !resolved_for_target
-            {
-                pose.map = mesh
-                    .joints
-                    .iter()
-                    .map(|j| {
-                        target
-                            .and_then(|t| t.index_of(j))
-                            .map(|i| JointSource::Target(i as u16))
-                            .or_else(|| {
-                                animator
-                                    .skeleton
-                                    .index_of(j)
-                                    .map(|i| JointSource::Logic(i as u16))
-                            })
-                    })
-                    .collect();
-                pose.map_version = version;
-            }
-            let pose = &mut *pose;
-            pose.joints.clear();
-            for (j, bone) in pose.map.iter().enumerate() {
-                let x = match bone {
-                    Some(JointSource::Logic(b)) => animator.model.get(*b as usize),
-                    Some(JointSource::Target(b)) => retarget.and_then(|r| r.model.get(*b as usize)),
-                    None => None,
-                };
-                let m = match x {
-                    Some(x) => {
-                        x.to_mat4() * mesh.inverse_bind.get(j).copied().unwrap_or(Mat4::IDENTITY)
-                    }
-                    None => Mat4::IDENTITY,
-                };
-                pose.joints.push([
-                    m.row(0).to_array(),
-                    m.row(1).to_array(),
-                    m.row(2).to_array(),
-                ]);
-            }
-            pose.morph_weights.clear();
-            pose.morph_weights.resize(mesh.morph_targets.len(), 0.0);
-            if let Some(m) = morphs {
-                for (w, v) in pose.morph_weights.iter_mut().zip(&m.weights) {
-                    *w = *v;
+            #[allow(clippy::redundant_closure_call)]
+            (|| {
+                // A resting character keeps the skin it has.
+                if !animator.posed() {
+                    return;
                 }
-            }
-        });
+                let Some(handle) = renderer.mesh else {
+                    return;
+                };
+                let Some(mesh) = meshes.get(handle) else {
+                    return;
+                };
+                let version = meshes.version(handle);
+                // A retargeted mesh's joints name the target skeleton first, then logic bones.
+                let target = retarget.map(|r| &r.retargeter.target);
+                let resolved_for_target = pose
+                    .map
+                    .first()
+                    .is_some_and(|m| matches!(m, Some(JointSource::Target(_))) == target.is_some());
+                if pose.map_version != version
+                    || pose.map.len() != mesh.joints.len()
+                    || !resolved_for_target
+                {
+                    pose.map = mesh
+                        .joints
+                        .iter()
+                        .map(|j| {
+                            target
+                                .and_then(|t| t.index_of(j))
+                                .map(|i| JointSource::Target(i as u16))
+                                .or_else(|| {
+                                    animator
+                                        .skeleton
+                                        .index_of(j)
+                                        .map(|i| JointSource::Logic(i as u16))
+                                })
+                        })
+                        .collect();
+                    pose.map_version = version;
+                }
+                let pose = &mut *pose;
+                pose.joints.clear();
+                for (j, bone) in pose.map.iter().enumerate() {
+                    let x = match bone {
+                        Some(JointSource::Logic(b)) => animator.model.get(*b as usize),
+                        Some(JointSource::Target(b)) => {
+                            retarget.and_then(|r| r.model.get(*b as usize))
+                        }
+                        None => None,
+                    };
+                    let m = match x {
+                        Some(x) => {
+                            x.to_mat4()
+                                * mesh.inverse_bind.get(j).copied().unwrap_or(Mat4::IDENTITY)
+                        }
+                        None => Mat4::IDENTITY,
+                    };
+                    pose.joints.push([
+                        m.row(0).to_array(),
+                        m.row(1).to_array(),
+                        m.row(2).to_array(),
+                    ]);
+                }
+                pose.morph_weights.clear();
+                pose.morph_weights.resize(mesh.morph_targets.len(), 0.0);
+                if let Some(m) = morphs {
+                    for (w, v) in pose.morph_weights.iter_mut().zip(&m.weights) {
+                        *w = *v;
+                    }
+                }
+            })();
+        }
+    });
 }
 
 /// Deform a mesh on the CPU exactly like the GPU skin pass (morphs, then joints). Used by

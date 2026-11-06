@@ -216,43 +216,54 @@ pub(crate) fn warp_system(
         Option<&mut AnimationParams>,
     )>,
 ) {
-    q.par_iter_mut()
-        .for_each(|(mut animator, mut warp, ik, params)| {
-            let Some(mut params) = params else {
-                return;
+    // A few items a piece on the leaf pool (`par_chunks_mut`): a par_iter's compute-pool
+    // scope ran whole other systems on its waiting thread (lead, perf week).
+    let mut items: Vec<_> = q.iter_mut().map(Some).collect();
+    let per = items.len().div_ceil(16).max(1);
+    engine_core::tasks::par_chunks_mut(&mut items, per, |_, chunk| {
+        for slot in chunk {
+            let Some((mut animator, mut warp, ik, params)) = slot.take() else {
+                continue;
             };
-            let max = if warp.enabled { warp.max_angle } else { 0.0 };
-            if params.get("warp_max") != max {
-                params.set("warp_max", max);
-            }
-            if !animator.posed() {
-                return;
-            }
-            let (share, stride_speed) = animator
-                .graph()
-                .and_then(|g| g.motion())
-                .map_or((0.0, 0.0), |p| (1.0 - p.fallback, p.stride_speed()));
-            let (speed, heading) = (params.get("speed"), params.get("heading"));
-            let dt = animator.dt;
-            warp.track(speed, heading, share, stride_speed, dt);
-            if !warp.active() {
-                return;
-            }
-            let skeleton = animator.skeleton.clone();
-            let legs: Vec<_> = ik
-                .legs
-                .iter()
-                .filter_map(|l| {
-                    Some((
-                        skeleton.index_of(&l.upper)?,
-                        skeleton.index_of(&l.lower)?,
-                        skeleton.index_of(&l.foot)?,
-                        l.knee_direction,
-                    ))
-                })
-                .collect();
-            animator.refresh_model();
-            let mut pose = animator.edit();
-            warp.apply(&mut pose, heading, &legs, dt);
-        });
+            #[allow(clippy::redundant_closure_call)]
+            (|| {
+                let Some(mut params) = params else {
+                    return;
+                };
+                let max = if warp.enabled { warp.max_angle } else { 0.0 };
+                if params.get("warp_max") != max {
+                    params.set("warp_max", max);
+                }
+                if !animator.posed() {
+                    return;
+                }
+                let (share, stride_speed) = animator
+                    .graph()
+                    .and_then(|g| g.motion())
+                    .map_or((0.0, 0.0), |p| (1.0 - p.fallback, p.stride_speed()));
+                let (speed, heading) = (params.get("speed"), params.get("heading"));
+                let dt = animator.dt;
+                warp.track(speed, heading, share, stride_speed, dt);
+                if !warp.active() {
+                    return;
+                }
+                let skeleton = animator.skeleton.clone();
+                let legs: Vec<_> = ik
+                    .legs
+                    .iter()
+                    .filter_map(|l| {
+                        Some((
+                            skeleton.index_of(&l.upper)?,
+                            skeleton.index_of(&l.lower)?,
+                            skeleton.index_of(&l.foot)?,
+                            l.knee_direction,
+                        ))
+                    })
+                    .collect();
+                animator.refresh_model();
+                let mut pose = animator.edit();
+                warp.apply(&mut pose, heading, &legs, dt);
+            })();
+        }
+    });
 }

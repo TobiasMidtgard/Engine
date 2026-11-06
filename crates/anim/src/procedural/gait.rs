@@ -328,22 +328,33 @@ pub(crate) fn gait_system(
         &GlobalTransform,
     )>,
 ) {
-    q.par_iter_mut()
-        .for_each(|(entity, mut animator, mut gait, mut params, gt)| {
-            if !gait.enabled || gait.legs.is_empty() || !animator.posed() {
-                return;
-            }
-            if animator.fresh() {
-                gait.rt.restart();
-            }
-            let probe = GroundProbe {
-                ground: &ground,
-                physics: physics.as_deref(),
-                surfaces: &surfaces.0,
-                exclude: Some(entity),
+    // A few items a piece on the leaf pool (`par_chunks_mut`): a par_iter's compute-pool
+    // scope ran whole other systems on its waiting thread (lead, perf week).
+    let mut items: Vec<_> = q.iter_mut().map(Some).collect();
+    let per = items.len().div_ceil(16).max(1);
+    engine_core::tasks::par_chunks_mut(&mut items, per, |_, chunk| {
+        for slot in chunk {
+            let Some((entity, mut animator, mut gait, mut params, gt)) = slot.take() else {
+                continue;
             };
-            step_gait(&mut animator, &mut gait, &mut params, gt, &probe);
-        });
+            #[allow(clippy::redundant_closure_call)]
+            (|| {
+                if !gait.enabled || gait.legs.is_empty() || !animator.posed() {
+                    return;
+                }
+                if animator.fresh() {
+                    gait.rt.restart();
+                }
+                let probe = GroundProbe {
+                    ground: &ground,
+                    physics: physics.as_deref(),
+                    surfaces: &surfaces.0,
+                    exclude: Some(entity),
+                };
+                step_gait(&mut animator, &mut gait, &mut params, gt, &probe);
+            })();
+        }
+    });
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
