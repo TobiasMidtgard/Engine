@@ -37,6 +37,8 @@ pub const TILE: i32 = 32;
 pub const TILE_CELLS: usize = (TILE * TILE) as usize;
 /// Kernel reach in cells (heat travels up to this many cells from a burning cell).
 pub const REACH: i32 = 4;
+/// Wind change (m/s) after which a tile's spread kernel is rebuilt.
+const KERNEL_WIND_STEP: f32 = 0.25;
 const KERNEL_W: i32 = 2 * REACH + 1;
 const KERNEL_LEN: usize = (KERNEL_W * KERNEL_W) as usize;
 const PADDED: i32 = TILE + 2 * REACH;
@@ -317,6 +319,8 @@ pub struct Tile {
     pub serial: u64,
     /// Kernel used for this tile in the last step (depends on the local wind).
     kernel: Vec<f32>,
+    /// The wind, slope and constants `kernel` was built for.
+    kernel_for: Option<(Vec2, Vec2, SpreadParams)>,
     /// The ground's slope under the tile ([`ground_slope`]), worked out once its cells' ground
     /// heights are set; `None` after they change.
     slope: Option<Vec2>,
@@ -553,6 +557,7 @@ impl FireField {
             steps: 0,
             serial: next_serial(),
             kernel: vec![0.0; KERNEL_LEN],
+            kernel_for: None,
             slope: None,
             heated: false,
         });
@@ -643,6 +648,7 @@ impl FireField {
                 tile.version += 1;
                 tile.active = true;
                 tile.slope = None;
+                tile.kernel_for = None;
             }
         }
         changed
@@ -973,24 +979,31 @@ impl FireField {
         let cell = self.cell_m;
         let field_origin = self.origin;
         {
-            let process = &process;
-            engine_core::tasks::par_chunks_mut(&mut self.tiles, 8, |chunk_index, chunk| {
-                for (k, t) in chunk.iter_mut().enumerate() {
-                    if !process[chunk_index * 8 + k] {
-                        continue;
-                    }
+            // Only the tiles that run, and each rebuilt only once the wind has moved on: the
+            // pool's chunks went over every tile, and a thread waiting in a compute scope runs
+            // other systems' tasks meanwhile (2.8 ms a frame at the fortress, VM).
+            let mut running: Vec<&mut Tile> = self
+                .tiles
+                .iter_mut()
+                .zip(&process)
+                .filter_map(|(t, &p)| p.then_some(t))
+                .collect();
+            let params = input.params;
+            engine_core::tasks::par_chunks_mut(&mut running, 16, |_, chunk| {
+                for t in chunk.iter_mut() {
                     let half = TILE as f64 * cell as f64 * 0.5;
                     let c = tile_origin(field_origin, cell, t.key) + DVec2::splat(half);
                     let w = (input.wind)(DVec3::new(c.x, t.base_y + 2.0, c.y));
+                    let wind = Vec2::new(w.x, w.z);
                     // The ground under a tile only changes when its cells are refuelled.
                     let slope = *t.slope.get_or_insert_with(|| ground_slope(&t.cells, cell));
-                    build_kernel(
-                        &mut t.kernel,
-                        Vec2::new(w.x, w.z),
-                        slope,
-                        cell,
-                        &input.params,
-                    );
+                    let same = t.kernel_for.is_some_and(|(w0, s0, p0)| {
+                        w0.distance(wind) < KERNEL_WIND_STEP && s0 == slope && p0 == params
+                    });
+                    if !same {
+                        build_kernel(&mut t.kernel, wind, slope, cell, &params);
+                        t.kernel_for = Some((wind, slope, params));
+                    }
                 }
             });
         }
@@ -1265,6 +1278,7 @@ impl FireField {
                 steps: 0,
                 serial: next_serial(),
                 kernel: vec![0.0; KERNEL_LEN],
+                kernel_for: None,
                 slope: None,
                 heated: false,
             });
@@ -1323,6 +1337,7 @@ impl FireField {
             tile.active = true;
             tile.version += 1;
             tile.slope = None;
+            tile.kernel_for = None;
             if !rest.is_empty() {
                 self.unfueled.push((key, rest));
             }
