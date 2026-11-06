@@ -297,6 +297,11 @@ pub struct TacticalWorld {
     cover_hash: HashMap<(i64, i64), Vec<u32>>,
     /// Bumped on every rebuild, update and world shift (navigation caches compare it).
     pub generation: u64,
+    /// Bumped whenever the ground may have changed ([`Self::forget_ground`]): navigation
+    /// keeps the ground under chunks an obstacle change drops only while this holds.
+    pub ground_generation: u64,
+    /// What each recent ground generation changed: the XZ box, or `None` for everywhere.
+    ground_changes: VecDeque<(u64, Option<(DVec2, DVec2)>)>,
     fingerprint: u64,
     /// Rebuild from the colliders on the next step even if they look unchanged.
     rebuild: bool,
@@ -345,7 +350,7 @@ impl TacticalWorld {
         ground: &Ground,
     ) {
         if !regions.is_empty() {
-            self.forget_ground();
+            self.forget_ground_in(regions);
         }
         let mut dirty: Vec<(DVec2, DVec2)> = regions.to_vec();
         let footprint = |o: &Obstacle| (DVec2::new(o.min.x, o.min.z), DVec2::new(o.max.x, o.max.z));
@@ -441,6 +446,25 @@ impl TacticalWorld {
 
     /// Forget the cached ground heights (the ground changed).
     pub fn forget_ground(&mut self) {
+        self.ground_changed(None);
+    }
+
+    /// Forget the cached ground heights where the ground changed (terrain edits).
+    pub fn forget_ground_in(&mut self, regions: &[(DVec2, DVec2)]) {
+        let touched = regions
+            .iter()
+            .copied()
+            .reduce(|(a0, a1), (b0, b1)| (a0.min(b0), a1.max(b1)));
+        self.ground_changed(touched);
+    }
+
+    fn ground_changed(&mut self, region: Option<(DVec2, DVec2)>) {
+        self.ground_generation += 1;
+        if self.ground_changes.len() == CHANGE_LOG {
+            self.ground_changes.pop_front();
+        }
+        self.ground_changes
+            .push_back((self.ground_generation, region));
         if let Ok(cache) = self.ground_heights.get_mut() {
             cache.clear();
         }
@@ -465,6 +489,27 @@ impl TacticalWorld {
             return None;
         }
         let recent = self.changes.iter().filter(move |c| c.0 > generation);
+        if recent.clone().any(|c| c.1.is_none()) {
+            return None;
+        }
+        Some(recent.filter_map(|c| c.1))
+    }
+
+    /// The XZ boxes where the ground changed since `ground_generation`, or `None` if that
+    /// isn't known (a rebuild, a change everywhere, or too long ago).
+    pub fn ground_changes_since(
+        &self,
+        ground_generation: u64,
+    ) -> Option<impl Iterator<Item = (DVec2, DVec2)> + '_> {
+        let now = self.ground_generation;
+        let first = self.ground_changes.front().map_or(now + 1, |c| c.0);
+        if ground_generation > now || (ground_generation < now && first > ground_generation + 1) {
+            return None;
+        }
+        let recent = self
+            .ground_changes
+            .iter()
+            .filter(move |c| c.0 > ground_generation);
         if recent.clone().any(|c| c.1.is_none()) {
             return None;
         }
@@ -1234,6 +1279,7 @@ pub(crate) fn rebuild_world_model(
             model.rebuild = true; // the world shifted while it built: start again
         } else {
             built.generation = model.generation + 1;
+            built.ground_generation = model.ground_generation + 1;
             built.epoch = model.epoch;
             *model = built;
             regions = std::mem::take(&mut pending.regions);
@@ -1269,8 +1315,10 @@ pub(crate) fn rebuild_world_model(
             };
             return;
         }
+        let ground_generation = model.ground_generation + 1;
         *model = TacticalWorld::from_obstacles(obstacles, &ground);
         model.generation = generation;
+        model.ground_generation = ground_generation;
         model.epoch = epoch;
         return;
     }

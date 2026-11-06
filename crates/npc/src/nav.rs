@@ -97,6 +97,10 @@ struct Chunk {
     /// Height above `base` per cell.
     h: Vec<f32>,
     walk: Vec<bool>,
+    /// The ground under the chunk and its margin, as `build_chunk` sampled it: kept so a
+    /// chunk dropped for an obstacle change rebuilds without asking the ground again (the
+    /// slow part on real terrain).
+    ground: Vec<f64>,
 }
 
 /// The lazily built navigation grid. Use [`NavGrid::ctx`] to query it.
@@ -105,6 +109,8 @@ pub struct NavGrid {
     pub settings: NavSettings,
     chunks: ChunkMap,
     generation: u64,
+    /// [`TacticalWorld::ground_generation`] when the kept ground was sampled.
+    ground_generation: u64,
     /// Chunks built since startup (diagnostics).
     pub chunks_built: u64,
     scratch: Vec<u32>,
@@ -155,6 +161,40 @@ impl NavGrid {
         ground: &'a Ground,
         water: &'a Water,
     ) -> NavCtx<'a> {
+        if self.ground_generation != world.ground_generation {
+            // Ground sampled ahead or kept where the ground changed is stale.
+            let s = self.settings;
+            let side = CHUNK as f64 * s.cell as f64;
+            let pad = (s.agent_radius + 2.0 * s.cell) as f64;
+            match world.ground_changes_since(self.ground_generation) {
+                Some(changes) => {
+                    let boxes: Vec<(DVec2, DVec2)> = changes
+                        .map(|(min, max)| (min - DVec2::splat(pad), max + DVec2::splat(pad)))
+                        .collect();
+                    let hit = |&(kx, kz): &(i32, i32)| {
+                        let (x0, z0) = (kx as f64 * side, kz as f64 * side);
+                        boxes.iter().any(|(min, max)| {
+                            !(x0 > max.x || x0 + side < min.x || z0 > max.y || z0 + side < min.y)
+                        })
+                    };
+                    self.ground_jobs.retain(|k, _| !hit(k));
+                    self.ground_ready.retain(|k, _| !hit(k));
+                    for (k, chunk) in self.chunks.iter_mut() {
+                        if hit(k) {
+                            chunk.ground = Vec::new();
+                        }
+                    }
+                }
+                None => {
+                    self.ground_jobs.clear();
+                    self.ground_ready.clear();
+                    for chunk in self.chunks.values_mut() {
+                        chunk.ground = Vec::new();
+                    }
+                }
+            }
+            self.ground_generation = world.ground_generation;
+        }
         if self.generation != world.generation {
             // Drop only the chunks near what changed, when the world model knows.
             match world.changes_since(self.generation) {
@@ -162,12 +202,21 @@ impl NavGrid {
                     let s = self.settings;
                     let pad = (s.agent_radius + 2.0 * s.cell) as f64;
                     let side = CHUNK as f64 * s.cell as f64;
+                    let mut dropped = Vec::new();
                     for (min, max) in changes {
                         let (min, max) = (min - DVec2::splat(pad), max + DVec2::splat(pad));
-                        self.chunks.retain(|&(kx, kz), _| {
+                        dropped.extend(self.chunks.keys().copied().filter(|&(kx, kz)| {
                             let (x0, z0) = (kx as f64 * side, kz as f64 * side);
-                            x0 > max.x || x0 + side < min.x || z0 > max.y || z0 + side < min.y
-                        });
+                            !(x0 > max.x || x0 + side < min.x || z0 > max.y || z0 + side < min.y)
+                        }));
+                    }
+                    // The ground under them hasn't changed: their rebuild starts from it.
+                    for key in dropped {
+                        if let Some(chunk) = self.chunks.remove(&key)
+                            && !chunk.ground.is_empty()
+                        {
+                            self.ground_ready.insert(key, chunk.ground);
+                        }
                     }
                 }
                 None => {
@@ -380,16 +429,28 @@ impl<'a> NavCtx<'a> {
         let margin = (s.agent_radius / s.cell).ceil() as i32;
         let side = CHUNK + 2 * margin;
         let (cx0, cz0) = (key.0 * CHUNK - margin, key.1 * CHUNK - margin);
-        let mut heights = vec![0.0f64; (side * side) as usize];
-        let mut wet = vec![false; (side * side) as usize];
+        let n = (side * side) as usize;
+        let ground = match below {
+            Some(g) if g.len() == n => g,
+            _ => {
+                let _span = tracing::info_span!("nav chunk: ground").entered();
+                let mut g = Vec::with_capacity(n);
+                for lz in 0..side {
+                    for lx in 0..side {
+                        let (x, z) = self.cell_center(cx0 + lx, cz0 + lz);
+                        g.push(ground_height(self.ground, x, z));
+                    }
+                }
+                g
+            }
+        };
+        let mut heights = vec![0.0f64; n];
+        let mut wet = vec![false; n];
         for lz in 0..side {
             for lx in 0..side {
                 let (x, z) = self.cell_center(cx0 + lx, cz0 + lz);
                 let i = (lz * side + lx) as usize;
-                let g = match &below {
-                    Some(g) => g[i],
-                    None => ground_height(self.ground, x, z),
-                };
+                let g = ground[i];
                 let h = self
                     .world
                     .stacked_height_over(x, z, g, s.agent_height, scratch);
@@ -404,6 +465,7 @@ impl<'a> NavCtx<'a> {
             base,
             h: vec![0.0; (CHUNK * CHUNK) as usize],
             walk: vec![true; (CHUNK * CHUNK) as usize],
+            ground: Vec::new(),
         };
         let r2 = (s.agent_radius / s.cell).powi(2) + 0.01;
         let mut near = Vec::new();
@@ -438,6 +500,7 @@ impl<'a> NavCtx<'a> {
                 chunk.walk[o] = ok;
             }
         }
+        chunk.ground = ground;
         chunk
     }
 
@@ -1091,8 +1154,23 @@ pub(crate) fn warm_nav(
     }
     let pool = AsyncComputeTaskPool::try_get();
     let mut ctx = grid.ctx(&world, &ground, &water);
-    // Finish one chunk whose ground is ready (its obstacles and clearance are quick).
-    if let Some(&key) = ctx.grid.ground_ready.keys().next() {
+    // Finish one chunk whose ground is ready (its obstacles and clearance are quick), one
+    // an awake NPC is near: ground kept from chunks an obstacle change dropped elsewhere
+    // waits until something needs it.
+    let homes: Vec<(i32, i32)> = agents
+        .iter()
+        .map(|t| {
+            let (x, z) = ctx.cell_of(t.translation);
+            (x.div_euclid(CHUNK), z.div_euclid(CHUNK))
+        })
+        .collect();
+    let near_one = |key: &(i32, i32)| {
+        homes.iter().any(|h| {
+            let (dx, dz) = (key.0 - h.0, key.1 - h.1);
+            dx * dx + dz * dz <= WARM_CHUNKS * WARM_CHUNKS
+        })
+    };
+    if let Some(&key) = ctx.grid.ground_ready.keys().find(|k| near_one(k)) {
         if ctx.grid.chunks.contains_key(&key) {
             ctx.grid.ground_ready.remove(&key);
         } else {
@@ -1187,6 +1265,66 @@ mod tests {
             p = q;
         }
         len
+    }
+
+    #[test]
+    fn a_chunk_an_obstacle_change_drops_rebuilds_from_its_kept_ground() {
+        let ground = Ground::default();
+        let water = Water::default();
+        let w = |i| {
+            wall(
+                i,
+                DVec3::new(4.0, 1.0, 4.0),
+                Vec3::new(1.5, 1.0, 0.3),
+                Quat::IDENTITY,
+            )
+        };
+        let mut world = TacticalWorld::from_obstacles(vec![w(1)], &ground);
+        let mut grid = NavGrid::default();
+        let p = DVec3::new(4.0, 0.0, 6.0);
+        let before = grid.ctx(&world, &ground, &water).sample(p);
+        // The wall moves: the chunk is dropped, its ground kept for the rebuild.
+        let moved = wall(
+            1,
+            DVec3::new(4.0, 1.0, 6.0),
+            Vec3::new(1.5, 1.0, 0.3),
+            Quat::IDENTITY,
+        );
+        let replaced = [Entity::from_raw_u32(1).unwrap()].into_iter().collect();
+        world.update(&replaced, vec![moved], &[], &ground);
+        let mut ctx = grid.ctx(&world, &ground, &water);
+        assert!(ctx.grid.chunks.is_empty());
+        assert_eq!(ctx.grid.ground_ready.len(), 1);
+        let after = ctx.sample(p);
+        assert_ne!(before, after, "the moved wall now stands there");
+        assert!(ctx.grid.ground_ready.is_empty(), "used by the rebuild");
+        // A change to the ground far off keeps what is kept here.
+        let far = (DVec2::new(200.0, 200.0), DVec2::new(208.0, 208.0));
+        world.update(
+            &std::collections::HashSet::new(),
+            Vec::new(),
+            &[far],
+            &ground,
+        );
+        world.update(&replaced, vec![w(1)], &[], &ground);
+        let mut ctx = grid.ctx(&world, &ground, &water);
+        assert_eq!(
+            ctx.grid.ground_ready.len(),
+            1,
+            "kept: the ground changed elsewhere"
+        );
+        let _ = ctx.sample(p);
+        // A change to the ground itself keeps nothing.
+        let region = (DVec2::new(0.0, 0.0), DVec2::new(8.0, 8.0));
+        world.update(
+            &std::collections::HashSet::new(),
+            Vec::new(),
+            &[region],
+            &ground,
+        );
+        let ctx = grid.ctx(&world, &ground, &water);
+        assert!(ctx.grid.chunks.is_empty());
+        assert!(ctx.grid.ground_ready.is_empty());
     }
 
     #[test]
