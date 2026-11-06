@@ -30,6 +30,7 @@ mod census;
 mod film;
 mod forest;
 mod garden;
+mod ground_cache;
 mod landscape;
 mod loops;
 mod meshgen;
@@ -115,6 +116,11 @@ fn main() {
         )
         .add_systems(Update, forest::install)
         .add_systems(Update, paint_cache::track_eye.after(camera::fly))
+        // The ground near the focus from baked tiles, once the terrain has installed it.
+        .add_systems(
+            PostUpdate,
+            ground_cache::update.after(UpdateSet::AfterPropagate),
+        )
         .add_systems(Update, scenery::stream_near_solids)
         .add_systems(
             Update,

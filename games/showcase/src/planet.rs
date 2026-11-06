@@ -348,9 +348,104 @@ pub fn paint(land: &Landscape, x: f64, z: f64) -> OverlayPaint {
     OverlayPaint::layer(layer(cover), 1.0).tinted(color.to_array(), TINT)
 }
 
+/// The game's ground at the valley (the planet, its overlay and the landscape's surfaces),
+/// for tests: (the world's ground, the landscape's own).
+#[cfg(test)]
+pub fn ground_for_tests() -> (Arc<dyn engine::world::GroundQuery>, Arc<LandscapeGround>) {
+    let land = crate::landscape::shared().clone();
+    let mut table = engine::world::SurfaceMaterials::default();
+    let surfaces = Arc::new(LandscapeGround::new(land.clone(), &mut table));
+    let pad = FlatPad {
+        mountains: 0.9,
+        mountain_distance_m: 30_000.0,
+        heading_deg: HEADING_DEG,
+        ..FlatPad::default()
+    };
+    let height = land.clone();
+    let earth = PlanetTerrain::earthlike(LANDSCAPE_SEED)
+        .with_radius(PLANET_RADIUS)
+        .with_pad(pad)
+        .with_overlay(OVERLAY_RADIUS, OVERLAY_BLEND, move |x, z| {
+            height.height(x, z)
+        })
+        .with_overlay_paint({
+            let cache = crate::paint_cache::PaintCache::new(land.clone(), paint);
+            move |x, z| Some(cache.paint(x, z))
+        })
+        .with_ground_surface(surfaces.clone());
+    let mut app = App::new();
+    app.add_plugins(engine::world::WorldPlugin)
+        .add_plugins(engine_terrain::TerrainPlugin);
+    app.world.spawn((earth.home_transform(pad), earth));
+    app.world.spawn((
+        Transform::from_xyz(-300.0, 12.0, 190.0),
+        engine::world::SimulationFocus::default(),
+    ));
+    app.update_n(2);
+    let ground = app.world.resource::<engine::world::Ground>().clone();
+    (ground.0, surfaces)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Where a ground sample's time goes at the fortress, on the planet as the game builds it
+    /// (`cargo test -p showcase --release ground_sample_cost -- --ignored --nocapture`).
+    #[test]
+    #[ignore]
+    fn ground_sample_cost() {
+        use engine::world::GroundQuery;
+        let (ground, surfaces) = ground_for_tests();
+        let land = crate::landscape::shared().clone();
+        let points: Vec<DVec3> = (0..2000)
+            .map(|i| {
+                let a = i as f64 * 0.731;
+                DVec3::new(
+                    -300.0 + 40.0 * a.cos() * (i % 37) as f64 / 37.0,
+                    12.0,
+                    190.0 + 40.0 * a.sin() * (i % 41) as f64 / 41.0,
+                )
+            })
+            .collect();
+        let time = |name: &str, f: &dyn Fn(DVec3) -> f64| {
+            let mut sum = 0.0;
+            for p in &points[..50] {
+                sum += f(*p);
+            }
+            let t = std::time::Instant::now();
+            for p in &points {
+                sum += f(*p);
+            }
+            let us = t.elapsed().as_secs_f64() * 1e6 / points.len() as f64;
+            println!("{name:40} {us:8.2} µs ({sum:.0})");
+        };
+        time("Ground::sample (planet, the game's)", &|p| {
+            ground.sample(p).unwrap().height
+        });
+        time("Ground::height (planet)", &|p| ground.height(p).unwrap());
+        let tiled = crate::ground_cache::TiledGround::baked_for_tests(
+            ground.clone(),
+            DVec3::new(-300.0, 12.0, 190.0),
+            64.0,
+        );
+        time("TiledGround::sample (baked)", &|p| {
+            tiled.sample(p).unwrap().height
+        });
+        time("TiledGround::height (baked)", &|p| tiled.height(p).unwrap());
+        time("LandscapeGround::sample", &|p| {
+            surfaces.sample(p).unwrap().height
+        });
+        time("Landscape::height", &|p| land.height(p.x, p.z));
+        time("Landscape::normal (4 taps)", &|p| {
+            land.normal(p.x, p.z, 0.5).y as f64
+        });
+        time("Landscape::cover", &|p| {
+            let h = land.height(p.x, p.z);
+            let n = land.normal(p.x, p.z, 0.5);
+            land.cover(p.x, p.z, h, n) as usize as f64
+        });
+    }
 
     #[test]
     fn every_cover_has_a_terrain_layer() {
