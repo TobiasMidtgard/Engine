@@ -273,6 +273,9 @@ pub enum CoverHeight {
     High,
 }
 
+/// Obstacles a leaf-pool piece of [`TacticalWorld::cover_of`] makes the cover of.
+const COVER_CHUNK: usize = 16;
+
 /// A spot next to an obstacle where an NPC can hide from threats on the obstacle's far side.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct CoverPoint {
@@ -423,7 +426,10 @@ impl TacticalWorld {
         self.per_entity.extend(entity_fingerprints(&fresh));
         kept.extend(fresh);
         self.obstacles = kept;
-        self.index();
+        {
+            let _span = tracing::info_span!("world model update: index").entered();
+            self.index();
+        }
 
         // Cover: keep the points of obstacles far from every change, make the rest afresh.
         let reach = DVec2::splat(COVER_REACH);
@@ -450,13 +456,11 @@ impl TacticalWorld {
             c.obstacle = i;
             !affected[i as usize]
         });
-        let mut points = Vec::new();
-        for (oi, hit) in affected.iter().enumerate() {
-            if *hit {
-                self.cover_for(oi, ground, &mut points, &mut cover);
-            }
-        }
+        let affected: Vec<usize> = (0..affected.len()).filter(|&i| affected[i]).collect();
+        let made = self.cover_of(&affected, ground);
+        cover.extend(made);
         self.cover = cover;
+        let _span = tracing::info_span!("world model update: index cover").entered();
         self.index_cover();
         self.fingerprint = fingerprint(&self.obstacles);
         self.generation += 1;
@@ -777,13 +781,32 @@ impl TacticalWorld {
     }
 
     fn generate_cover(&mut self, ground: &Ground) {
-        let mut cover = Vec::new();
-        let mut points = Vec::new();
-        for oi in 0..self.obstacles.len() {
-            self.cover_for(oi, ground, &mut points, &mut cover);
-        }
-        self.cover = cover;
+        let all: Vec<usize> = (0..self.obstacles.len()).collect();
+        self.cover = self.cover_of(&all, ground);
         self.index_cover();
+    }
+
+    /// The cover points of obstacles `which`, in that order ([`Self::cover_for`] each). Side
+    /// by side on the leaf pool, [`COVER_CHUNK`] obstacles a piece: each point asks the
+    /// ground twice and the obstacles around it, and a change near many obstacles (a zone's
+    /// colliders arriving) made them all on one thread (one update 30 ms at the arena, VM).
+    fn cover_of(&self, which: &[usize], ground: &Ground) -> Vec<CoverPoint> {
+        let _span =
+            tracing::info_span!("world model update: cover", obstacles = which.len()).entered();
+        let mut made: Vec<Vec<CoverPoint>> = (0..which.len().div_ceil(COVER_CHUNK))
+            .map(|_| Vec::new())
+            .collect();
+        engine_core::tasks::par_chunks_mut(&mut made, 1, |piece, out| {
+            let Some(out) = out.first_mut() else {
+                return;
+            };
+            let mut points = Vec::new();
+            let start = piece * COVER_CHUNK;
+            for &oi in &which[start..(start + COVER_CHUNK).min(which.len())] {
+                self.cover_for(oi, ground, &mut points, out);
+            }
+        });
+        made.concat()
     }
 
     /// Add the cover points along obstacle `oi` to `out` (`points` is scratch).
