@@ -100,6 +100,10 @@ impl PlantStage {
     }
 }
 
+/// Light at the foot of a tree's crown ([`Plant::low_light`]) above which its lower branches
+/// live: it grows an open-grown crown.
+pub const OPEN_GROWN_LIGHT: f32 = 0.5;
+
 /// A living (or dead, or chopped) plant. Put it on an entity with a `Transform` at the base of
 /// the plant; the foliage module grows it, spreads its seeds, draws it and reacts to chopping
 /// and fire. Spawn plants with [`crate::spawn_plant`] or the `foliage.plant` API.
@@ -121,6 +125,10 @@ pub struct Plant {
     pub genes: Genes,
     /// Chop damage taken so far (see `PlantSpecies::toughness`).
     pub chop_damage: f32,
+    /// 0..1: light reaching the foot of its crown (a third of the way up), slow to come back
+    /// once lost: a tree whose lower branches had light keeps them, one shaded by its
+    /// neighbors sheds them and does not grow them again ([`Plant::open_grown`]).
+    pub low_light: f32,
 }
 
 impl Default for Plant {
@@ -135,6 +143,7 @@ impl Default for Plant {
             stage: PlantStage::Alive,
             genes: Genes::default(),
             chop_damage: 0.0,
+            low_light: 1.0,
         }
     }
 }
@@ -157,6 +166,13 @@ impl Plant {
     /// Current crown radius, meters.
     pub fn crown_radius(&self, species: &crate::species::PlantSpecies) -> f32 {
         species.crown_radius_m * self.size.max(0.05) * self.genes.crown
+    }
+
+    /// Grown in the open (at a forest's edge, in a clearing, alone in a field): its crown
+    /// reaches far down the trunk, as an open-grown tree's does (live crown ratio 0.6-1.0
+    /// against 0.2-0.6 in a closed stand), not a forest tree's high crown on a bare bole.
+    pub fn open_grown(&self) -> bool {
+        self.low_light > OPEN_GROWN_LIGHT
     }
 
     /// Mature enough to make seeds.

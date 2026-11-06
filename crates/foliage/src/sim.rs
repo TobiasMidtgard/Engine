@@ -110,6 +110,8 @@ pub struct SimLog {
     pub genes: Genes,
     /// Thrown roots and all (its root plate stands up at the butt).
     pub uprooted: bool,
+    /// Grown in the open ([`crate::Plant::open_grown`]): its log keeps the low crown's limbs.
+    pub open: bool,
 }
 
 /// A resource source in the step's terms (world position + effect).
@@ -532,6 +534,33 @@ impl RegionSim {
         }
     }
 
+    /// Light (0..1) reaching the foot of tree `i`'s crown (`h` up, its crown `crown` meters in
+    /// radius) from the side: dimmed by every neighbor taller than that whose crown overlaps
+    /// its own (a closed stand's crowns touch, so their lower branches die in the shade), let
+    /// in at a region's edge from the open sky beyond it ([`EDGE_SIDE_LIGHT`]; Harper et al.
+    /// 2005, Conservation Biology 19: edge effects on canopy cover reach 5-20 m into a
+    /// temperate forest). It shapes the crown only (growth reads [`RegionSim::light_at`]).
+    fn crown_foot_light(&self, ctx: &StepContext, p: DVec3, h: f32, crown: f32, i: u32) -> f32 {
+        let mut shade = 0.0f32;
+        let reach = self.crown_reach[Layer::Canopy.index()] + crown;
+        self.by_layer[Layer::Canopy.index()].for_each_near(p, reach, |j| {
+            if j == i {
+                return;
+            }
+            let c = &self.cached[j as usize];
+            if !c.alive || c.height < h {
+                return;
+            }
+            let x = horizontal(self.positions[j as usize], p) / (c.crown + crown).max(0.1);
+            if x < 1.0 {
+                shade += density_of(ctx, j, self) * (1.0 - x);
+            }
+        });
+        let side = EDGE_SIDE_LIGHT
+            * (-(edge_distance(ctx.region, ctx.center, p.x, p.z) as f32) / EDGE_LIGHT_M).exp();
+        ctx.region.sky_light * (1.0 - (1.0 - (-2.0 * shade).exp()) * (1.0 - side))
+    }
+
     /// Light (0..1) reaching height `h` at `p`, skipping plant `skip`.
     fn light_at(&self, ctx: &StepContext, p: DVec3, h: f32, skip: Option<u32>) -> f32 {
         let mut shade = 0.0f32;
@@ -661,14 +690,25 @@ impl RegionSim {
             par_fill(&mut levels, |i| {
                 let c = &this.cached[i];
                 (plants[i].plant.stage == PlantStage::Alive).then(|| {
-                    this.levels_at(
+                    let (levels, share) = this.levels_at(
                         ctx,
                         plants[i].pos,
                         c.height,
                         c.root,
                         c.layer,
                         Some(i as u32),
-                    )
+                    );
+                    // A tree's light at the foot of its crown: whether its lower branches live.
+                    let low = (c.layer == Layer::Canopy && c.height > 3.0).then(|| {
+                        this.crown_foot_light(
+                            ctx,
+                            plants[i].pos,
+                            c.height * LOW_CROWN,
+                            c.crown,
+                            i as u32,
+                        )
+                    });
+                    (levels, share, low)
                 })
             });
         }
@@ -681,8 +721,14 @@ impl RegionSim {
             match plants[i].plant.stage {
                 PlantStage::Alive => {
                     let cached = self.cached[i];
-                    let (levels, share) = levels[i].expect("alive plants have levels");
+                    let (levels, share, low) = levels[i].expect("alive plants have levels");
                     let p = &mut plants[i].plant;
+                    if let Some(low) = low {
+                        // Shade kills lower branches within a few years; a branch once shed
+                        // grows back only slowly, as shoots from the trunk.
+                        let rate = if low < p.low_light { 0.6 } else { 0.04 };
+                        p.low_light += (low - p.low_light) * (1.0 - (-rate * dt).exp());
+                    }
                     let (suit, mut need) = sp.suitability(&levels, &p.genes);
                     if share < 0.8 && matches!(need, Need::Water | Need::Nutrients | Need::Minerals)
                     {
@@ -749,6 +795,7 @@ impl RegionSim {
                                 rot_years: 8.0 + 10.0 * size,
                                 genes: plants[i].plant.genes,
                                 uprooted: false,
+                                open: plants[i].plant.open_grown(),
                             });
                         }
                     }
@@ -1027,6 +1074,29 @@ fn poisson(rng: &mut Rng, mean: f32) -> u32 {
     }
 }
 
+/// The foot of a tree's live crown when grown in the open, as a share of its height: where
+/// [`Plant::low_light`] is measured.
+const LOW_CROWN: f32 = 0.3;
+
+/// Share of the open sky that reaches under the canopy right at a region's edge, from the side
+/// ([`RegionSim::crown_foot_light`]), falling off over [`EDGE_LIGHT_M`] into it.
+const EDGE_SIDE_LIGHT: f32 = 0.85;
+const EDGE_LIGHT_M: f32 = 9.0;
+
+/// About how far world point (`wx`, `wz`) lies inside the region's edge, meters (below 0 past
+/// it): a round region's ragged ellipse ([`past_round_edge`]) or a rectangle's sides.
+pub fn edge_distance(region: &EcologyRegion, center: DVec3, wx: f64, wz: f64) -> f64 {
+    let [hx, hz] = region.half_extents.map(|h| h.max(0.1) as f64);
+    let (dx, dz) = (wx - center.x, wz - center.z);
+    if !region.round {
+        return (hx - dx.abs()).min(hz - dz.abs());
+    }
+    let n = engine_core::math::noise::fbm2(wx * 0.05, wz * 0.05, region.seed ^ 0xed6e, 3, 2.0, 0.5);
+    let edge = 1.0 + 0.12 * n as f64;
+    let r = ((dx / hx).powi(2) + (dz / hz).powi(2)).sqrt();
+    (edge - r) * hx.min(hz)
+}
+
 /// Whether world point (`wx`, `wz`) lies past a round region's ragged edge (nothing roots
 /// there; [`EcologyRegion::round`]). Never for a rectangular region.
 pub fn past_round_edge(region: &EcologyRegion, center: DVec3, wx: f64, wz: f64) -> bool {
@@ -1038,4 +1108,40 @@ pub fn past_round_edge(region: &EcologyRegion, center: DVec3, wx: f64, wz: f64) 
     let ex = (wx - center.x) / region.half_extents[0].max(0.1) as f64;
     let ez = (wz - center.z) / region.half_extents[1].max(0.1) as f64;
     ex * ex + ez * ez > edge * edge
+}
+
+#[cfg(test)]
+mod edge_tests {
+    use super::*;
+
+    #[test]
+    fn edge_distance_is_zero_on_the_ragged_edge_and_grows_inward() {
+        let region = EcologyRegion {
+            half_extents: [80.0, 80.0],
+            round: true,
+            ..Default::default()
+        };
+        let c = DVec3::ZERO;
+        assert!(edge_distance(&region, c, 0.0, 0.0) > 60.0);
+        for k in 0..16 {
+            let a = k as f64 * 0.39;
+            let (s, co) = a.sin_cos();
+            // Walk out until past the edge: there the distance has just crossed zero.
+            let mut r = 0.0;
+            while !past_round_edge(&region, c, r * co, r * s) {
+                r += 0.25;
+            }
+            let d = edge_distance(&region, c, r * co, r * s);
+            assert!(d <= 0.0 && d > -1.0, "{k}: {d}");
+            // (About: the ragged edge is a noise field, so it is not exactly 20 m in.)
+            assert!(edge_distance(&region, c, (r - 20.0) * co, (r - 20.0) * s) > 10.0);
+        }
+        let rect = EcologyRegion {
+            half_extents: [30.0, 10.0],
+            round: false,
+            ..Default::default()
+        };
+        assert_eq!(edge_distance(&rect, c, 25.0, 0.0), 5.0);
+        assert_eq!(edge_distance(&rect, c, 0.0, -8.0), 2.0);
+    }
 }

@@ -43,6 +43,8 @@ pub struct LogPose {
     pub yaw: f32,
     pub genes: Genes,
     pub charred: bool,
+    /// The tree grew in the open ([`crate::Plant::open_grown`]): the log of its low crown.
+    pub open: bool,
 }
 
 /// A tree falling after its last chop: the part above the cut swings down around a hinge on
@@ -322,6 +324,7 @@ pub fn fell_tree(world: &mut World, entity: Entity, dir: Vec3) -> Option<Entity>
         yaw,
         genes: plant.genes,
         charred,
+        open: plant.open_grown(),
     };
     let falling = FallingTree {
         species: plant.species,
@@ -1236,6 +1239,7 @@ mod tests {
                     ..Default::default()
                 },
                 charred: false,
+                open: false,
             };
             let fresh = log_rest_transform(None, DVec3::ZERO, &pose, 0.8, sp, 0.0, 0.0);
             let old = log_rest_transform(None, DVec3::ZERO, &pose, 0.8, sp, 6.0, 0.4);

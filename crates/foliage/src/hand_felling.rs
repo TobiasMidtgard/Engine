@@ -251,7 +251,7 @@ fn as_plant(world: &mut World, target: Entity) -> Option<Entity> {
         .get_resource_or_insert_with(ChoppedSpots::default)
         .spots
         .push(foot);
-    let mut plant = Plant::new(tree.species, tree.size, tree.genes);
+    let mut plant = tree.plant();
     if let Some(library) = world.get_resource::<PlantLibrary>() {
         plant.age_years = plant.size * library.get(tree.species).years_to_mature;
     }

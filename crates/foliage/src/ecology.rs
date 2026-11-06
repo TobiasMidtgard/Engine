@@ -1042,6 +1042,7 @@ fn disturb(
                         rot_years: 8.0 + 10.0 * p.plant.size,
                         genes: p.plant.genes,
                         uprooted: false,
+                        open: p.plant.open_grown(),
                     });
                 } else if sim.rng.chance(0.7) {
                     // Crushed by the logging.
@@ -1080,6 +1081,7 @@ fn disturb(
                         rot_years: 15.0 + 20.0 * p.plant.size,
                         genes: p.plant.genes,
                         uprooted,
+                        open: p.plant.open_grown(),
                     });
                     if uprooted {
                         p.removed = true;
@@ -1197,6 +1199,7 @@ pub fn spawn_log(world: &mut World, log: &SimLog) -> Entity {
                 yaw: log.yaw,
                 genes: log.genes,
                 charred: false,
+                open: log.open,
             },
         ))
         .id()
@@ -1428,6 +1431,7 @@ pub fn ecology_step(world: &mut World) {
                 rot_years: log.rot_years,
                 genes: pose.genes,
                 uprooted: log.uprooted,
+                open: pose.open,
             });
         }
     }
@@ -2042,6 +2046,7 @@ mod tests {
             rot_years: 10.0,
             genes: Genes::default(),
             uprooted: false,
+            open: false,
         };
         // Falling toward +Z, the trunk reaches across the clearing at (0, 5).
         assert!(blocks_keep_clear(
@@ -2079,6 +2084,7 @@ mod tests {
             rot_years: 10.0,
             genes: Genes::default(),
             uprooted: false,
+            open: false,
         };
         // One lies along +X from the origin; the new one came down across it.
         let lying = [log(0.0, 0.0, 0.0)];

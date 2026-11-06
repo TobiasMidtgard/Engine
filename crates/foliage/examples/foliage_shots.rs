@@ -595,6 +595,32 @@ fn main() {
         let at = DVec3::new(12.0, ground(12.0, 17.5) + 0.4, 17.5);
         shot(&mut app, &out, "02_trail_inner", eye, at, 10.5);
     }
+    // The forest's edge seen from the meadow outside it, standing 40 m off and from 110 m
+    // out: its shrub belt and low-crowned edge trees, or a wall of bare trunks.
+    for (file, eye, at) in [
+        (
+            "01_edge",
+            DVec3::new(-34.0, 1.7, -122.0),
+            DVec3::new(-8.0, 5.5, -72.0),
+        ),
+        (
+            "01_edge_far",
+            DVec3::new(-60.0, 3.0, -190.0),
+            DVec3::new(-10.0, 9.0, -70.0),
+        ),
+    ] {
+        if wanted(file) {
+            let ground = |x: f64, z: f64| {
+                app.world
+                    .get_resource::<engine_world::Ground>()
+                    .and_then(|g| g.height(DVec3::new(x, 0.0, z)))
+                    .unwrap_or(0.0)
+            };
+            let eye = eye + DVec3::Y * ground(eye.x, eye.z);
+            let at = at + DVec3::Y * ground(at.x, at.z);
+            shot(&mut app, &out, file, eye, at, 10.5);
+        }
+    }
     take(&mut app, "03_clearing", &by_name("forest_clearing"));
     // `FOLIAGE_LOOK=x,y,z,tx,ty,tz[;...]`: shots `99_look_<n>` from those eyes (heights above
     // the ground) toward those targets, at 10 h.

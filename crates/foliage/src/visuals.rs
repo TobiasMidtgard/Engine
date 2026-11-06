@@ -15,7 +15,7 @@ use engine_assets::{Assets, Handle};
 use engine_core::prelude::*;
 use engine_render::{Camera, Mesh, MeshRenderer, PointLight, StandardMaterial};
 
-use crate::assets::{FoliageVisuals, GLOW_LEVELS, SpeciesVisual, TINTS, VARIANTS};
+use crate::assets::{FoliageVisuals, GLOW_LEVELS, SpeciesVisual, TINTS};
 use crate::ecology::InRegion;
 use crate::felling::{FallingTree, LOG_BARE_YEARS, LOG_GREEN_YEARS, LogPose};
 use crate::grass::RegionGrass;
@@ -107,7 +107,7 @@ pub fn desired_parts(
     settings: &EcologySettings,
     day: f32,
 ) -> [Part; 3] {
-    let v = &vis.variants[plant.genes.variant as usize % VARIANTS];
+    let v = vis.variant_of(plant);
     let tint = tint_of(plant);
     let pair = |m: &Option<Handle<Mesh>>, mat: Handle<StandardMaterial>| m.map(|m| (m, mat));
     let height = plant.height(sp).max(0.1);
@@ -262,7 +262,7 @@ pub fn desired_fungi(plant: &Plant, vis: &SpeciesVisual, distance: f32) -> Part 
     if distance > FUNGI_DISTANCE_M || plant.size < 0.22 {
         return None;
     }
-    let v = &vis.variants[plant.genes.variant as usize % VARIANTS];
+    let v = vis.variant_of(plant);
     let mesh = match plant.stage {
         PlantStage::Stump { years } if years >= FUNGI_YEARS + 1.0 => v.stump_fungi,
         // The snag mesh shows once the twigs have dropped.
@@ -637,7 +637,7 @@ pub fn desired_log_parts(
     settings: &EcologySettings,
     day: f32,
 ) -> [Part; 4] {
-    let v = &vis.variants[pose.genes.variant as usize % VARIANTS];
+    let v = vis.variant(&pose.genes, pose.open);
     let tint = (((pose.genes.hue + 1.0) * 0.5 * TINTS as f32) as usize).min(TINTS - 1);
     let lod = distance > settings.tree_lod_distance_m * (0.5 + size) && v.wood_lod.is_some();
     let mid = distance > settings.tree_mid_distance_m * (0.5 + size) && v.wood_mid.is_some();
@@ -944,6 +944,7 @@ pub fn pulse_glow(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::assets::VARIANTS;
 
     #[test]
     fn crowns_thin_step_by_step_as_leaves_fall() {

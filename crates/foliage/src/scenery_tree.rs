@@ -58,7 +58,11 @@ impl SceneryTree {
 
     /// The plant it would be: grown to `size`, alive.
     pub(crate) fn plant(&self) -> Plant {
-        Plant::new(self.species, self.size, self.genes)
+        // Scenery trees keep their forest-grown crowns (they stand in groves and lines).
+        Plant {
+            low_light: 0.0,
+            ..Plant::new(self.species, self.size, self.genes)
+        }
     }
 }
 

@@ -260,6 +260,7 @@ fn main() {
                 yaw: 0.06 * i as f32,
                 genes: genes(i as u8),
                 charred: false,
+                open: false,
             },
         ));
     }

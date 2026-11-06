@@ -33,6 +33,25 @@ use crate::species::{LeafStyle, PlantForm, PlantLibrary, PlantSpecies, srgb};
 
 /// Mesh variants per species.
 pub const VARIANTS: usize = 4;
+/// More variants of a tree with an open-grown form ([`has_open_form`]), after the
+/// [`VARIANTS`]: the same trees grown in the open ([`crate::Plant::open_grown`]).
+pub const OPEN_VARIANTS: usize = 2;
+
+/// Whether `sp` grows a different crown in the open: a tree whose forest-grown crown starts
+/// above a quarter of its height (in a closed stand it sheds its shaded lower branches).
+pub fn has_open_form(sp: &PlantSpecies) -> bool {
+    matches!(sp.form, PlantForm::Broadleaf | PlantForm::Conifer) && sp.shape.crown_base > 0.25
+}
+
+/// `sp` grown in the open: its crown down to about a tenth of its height (live crown ratio
+/// 0.6-1.0 for open-grown Scots pine against 0.2-0.6 in stands, LFE Brandenburg's study of
+/// solitary pines; branches to the ground on open-grown spruce) and a little wider.
+pub fn open_form(sp: &PlantSpecies) -> PlantSpecies {
+    let mut open = sp.clone();
+    open.shape.crown_base = (sp.shape.crown_base * 0.3).min(0.15);
+    open.crown_radius_m *= 1.15;
+    open
+}
 /// Brightness steps of glowing materials.
 pub const GLOW_LEVELS: usize = 8;
 /// Color variants (genes.hue) of leaf and glow materials.
@@ -130,6 +149,25 @@ pub struct SpeciesVisual {
     pub moss: Handle<StandardMaterial>,
     /// `glow[tint][level]` for glowing species.
     pub glow: Vec<[Handle<StandardMaterial>; GLOW_LEVELS]>,
+}
+
+impl SpeciesVisual {
+    /// The meshes a plant with `genes` draws: its open-grown form's ([`OPEN_VARIANTS`]) if it
+    /// grew in the open and the species has one.
+    pub fn variant(&self, genes: &crate::plant::Genes, open: bool) -> &VariantMeshes {
+        let v = genes.variant as usize % VARIANTS;
+        let i = if open && self.variants.len() >= VARIANTS + OPEN_VARIANTS {
+            VARIANTS + v % OPEN_VARIANTS
+        } else {
+            v
+        };
+        &self.variants[i]
+    }
+
+    /// [`SpeciesVisual::variant`] for `plant`.
+    pub fn variant_of(&self, plant: &crate::Plant) -> &VariantMeshes {
+        self.variant(&plant.genes, plant.open_grown())
+    }
 }
 
 /// The library of built species visuals.
@@ -317,11 +355,21 @@ impl Job {
             Job::Meshes(i, sp, bone_wind) => {
                 let sp = *sp;
                 let seed = name_seed(&sp.name);
-                let parts = (0..VARIANTS as u64)
+                let open = has_open_form(&sp).then(|| open_form(&sp));
+                let count = VARIANTS + if open.is_some() { OPEN_VARIANTS } else { 0 };
+                let parts = (0..count as u64)
                     .map(|v| {
-                        let (mut full, mut sapling) = build_meshes(&sp, seed ^ (v * 0x9e37_79b9));
+                        // An open-grown variant is the same tree as the forest one it shares a
+                        // seed with, grown in the open.
+                        let base = v % VARIANTS as u64;
+                        let form = match &open {
+                            Some(open) if v >= VARIANTS as u64 => open,
+                            _ => &sp,
+                        };
+                        let (mut full, mut sapling) =
+                            build_meshes(form, seed ^ (base * 0x9e37_79b9));
                         if sp.is_woody() {
-                            let tone = crown_tone(&sp, v as usize);
+                            let tone = crown_tone(&sp, base as usize);
                             full.tone_leaves(tone);
                             if let Some(s) = &mut sapling {
                                 s.tone_leaves(tone);
@@ -991,4 +1039,25 @@ fn bark_materials(sp: &PlantSpecies, images: Option<BarkImages>) -> [StandardMat
     let mut rigid = bark;
     rigid.wind_sway = 0.0;
     [bark, rigid, dead, burnt]
+}
+
+#[cfg(test)]
+mod open_form_tests {
+    use super::*;
+
+    #[test]
+    fn forest_trees_have_an_open_grown_form_with_a_low_crown() {
+        let lib = PlantLibrary::default();
+        for name in ["oak", "birch", "beech", "pine", "aspen"] {
+            let sp = lib.get(lib.id(name).unwrap());
+            assert!(has_open_form(sp), "{name}");
+            let open = open_form(sp);
+            assert!(open.shape.crown_base <= 0.15, "{name}");
+            assert!(open.crown_radius_m > sp.crown_radius_m, "{name}");
+        }
+        // Spruce keeps its branches to the ground anyway; shrubs and herbs have no such form.
+        for name in ["spruce", "hazel", "fern"] {
+            assert!(!has_open_form(lib.get(lib.id(name).unwrap())), "{name}");
+        }
+    }
 }

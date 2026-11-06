@@ -10,7 +10,7 @@
 //! hundred round the action. Ecology plants use the same shapes ([`crate::felling`]).
 //! Research: engine-design/foliage-research.md, section 7.
 
-use crate::assets::{FoliageVisuals, VARIANTS};
+use crate::assets::FoliageVisuals;
 use crate::meshgen::tree::CollisionCapsule;
 use crate::plant::{EcologySettings, Plant};
 use crate::scenery_tree::SceneryTree;
@@ -48,7 +48,7 @@ pub fn plant_shape(
         return None;
     }
     let vis = visuals.get(plant.species)?;
-    let v = &vis.variants[plant.genes.variant as usize % VARIANTS];
+    let v = vis.variant_of(plant);
     let capsules = if plant.size < SAPLING_SIZE && v.sapling_wood.is_some() {
         &v.sapling_collision
     } else {
