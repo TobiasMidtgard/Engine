@@ -167,7 +167,7 @@ struct Params {
 #[derive(Default)]
 pub(crate) struct Skins {
     pipeline: Option<(wgpu::ComputePipeline, wgpu::BindGroupLayout)>,
-    pub skins: std::collections::HashMap<u32, Skin>,
+    pub skins: bevy_platform::collections::HashMap<u32, Skin>,
     /// Dispatches this frame.
     pub skinned: u32,
 }

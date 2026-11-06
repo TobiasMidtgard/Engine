@@ -198,7 +198,7 @@ pub struct PlantWindMesh {
 /// The plant meshes that move on wind bones, by mesh. Any other mesh keeps the legacy sway.
 #[derive(Resource, Debug, Clone, Default)]
 pub struct PlantWindMeshes {
-    meshes: HashMap<u32, PlantWindMesh>,
+    meshes: bevy_platform::collections::HashMap<u32, PlantWindMesh>,
     version: u64,
 }
 
@@ -282,7 +282,7 @@ pub(crate) struct PlantWindTable {
     /// The version of [`PlantWindMeshes`] it was built from (`None`: never built).
     version: Option<u64>,
     /// Mesh slot index → table entry + 1, and how far its points move at most (m).
-    entries: HashMap<u32, (u32, f32)>,
+    entries: bevy_platform::collections::HashMap<u32, (u32, f32)>,
     /// The species slots it was laid out for.
     species: usize,
     pub(crate) words: Vec<[f32; 4]>,

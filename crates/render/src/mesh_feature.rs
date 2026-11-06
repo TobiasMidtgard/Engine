@@ -41,6 +41,7 @@ use std::collections::{HashMap, HashSet};
 
 /// The per-object maps of `prepare`, with a fast hash (the standard one dominated it).
 type FastMap<K, V> = bevy_platform::collections::HashMap<K, V>;
+type FastSet<K> = bevy_platform::collections::HashSet<K>;
 
 /// A skinned mesh's GPU state is dropped after this many frames without its entity.
 const SKIN_EVICT_FRAMES: u64 = 600;
@@ -1277,7 +1278,7 @@ pub struct MeshFeature {
     /// What each drawn entity keeps between frames (bounds, transforms, normal matrix).
     scene: MeshScene,
     /// Levels of detail being built, by mesh index.
-    lod_jobs: HashMap<u32, LodJob>,
+    lod_jobs: FastMap<u32, LodJob>,
     /// Meshes waiting for a free worker to build their levels.
     lod_waiting: Vec<(u32, Handle<Mesh>)>,
     /// Each shadow map's casters and batch keys, kept between frames for their allocations.
@@ -1368,7 +1369,7 @@ pub struct MeshFeature {
     /// Dense meshes drawn as clusters (virtual geometry).
     clusters: Option<ClusterRenderer>,
     /// Meshes drawn as clusters this frame.
-    clustered: HashSet<u32>,
+    clustered: FastSet<u32>,
     /// Meshes uploaded since the diagnostics were last published.
     uploads: u32,
     /// Of those, edits of meshes already on the GPU.
@@ -1377,10 +1378,10 @@ pub struct MeshFeature {
     /// while) and needed again.
     reuploads: u32,
     /// The meshes uploaded since their asset was made, to count `reuploads`.
-    uploaded_before: HashSet<u32>,
+    uploaded_before: FastSet<u32>,
     /// Meshes that can't go on the GPU (no triangles, or larger than a buffer), by the version
     /// found so: not tried (or counted as uploads) again until they change.
-    unusable: HashMap<u32, u64>,
+    unusable: FastMap<u32, u64>,
     /// This frame's mesh and material lookups, by the handle indices entities name.
     mesh_frames: Vec<MeshFrame>,
     material_frames: Vec<MaterialFrame>,
@@ -3107,6 +3108,7 @@ impl RenderFeature for MeshFeature {
                 }
                 self.mesh_frames[i] = entry;
             }
+            steps.step("meshes: gather materials");
             for raw in scene.materials_used() {
                 let handle = Handle::from_index(raw);
                 let handle = material_assets.map_or(handle, |m| m.canonical(handle));
