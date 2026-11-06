@@ -238,7 +238,7 @@ fn fs_mark_shade(in: MarkVs) -> @location(0) vec4<f32> {
             // Blood soaks in: deep red where it lies, browning as it dries.
             let k = mark_splat(m, p);
             let dried = mark_age01(m);
-            ratio = mix(vec3<f32>(1.0), mix(vec3<f32>(0.25, 0.02, 0.015), vec3<f32>(0.22, 0.08, 0.05), dried), k);
+            ratio = mix(vec3<f32>(1.0), mix(vec3<f32>(0.11, 0.012, 0.01), vec3<f32>(0.13, 0.05, 0.03), dried), k);
         }
         case MARK_ROT: {
             let k = mark_rot(m, p);

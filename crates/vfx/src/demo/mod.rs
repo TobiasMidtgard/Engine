@@ -57,9 +57,9 @@ pub const VIEWS: &[DemoView] = &[
     DemoView {
         key: "magic_elements",
         name: "The six elements: fire, frost, storm, blood, blight and shadow",
-        eye: [3.6, 3.4, -0.8],
-        target: [11.6, 0.7, -10.2],
-        hour: 18.35,
+        eye: [11.6, 3.1, -19.6],
+        target: [11.6, 0.6, -8.4],
+        hour: 17.6,
         warmup: 3.0,
     },
     DemoView {
@@ -294,15 +294,15 @@ mod layout {
     /// The element gallery in the north-east: a field of each element with its bolt circling
     /// over it, clean elements in the front row, dark ones behind.
     pub const ELEMENTS: [(&str, (f64, f64)); 6] = [
-        ("fire", (7.5, -7.5)),
-        ("frost", (11.5, -7.5)),
-        ("storm", (15.5, -7.5)),
-        ("blood", (7.5, -12.0)),
-        ("blight", (11.5, -12.0)),
-        ("shadow", (15.5, -12.0)),
+        ("fire", (6.8, -6.6)),
+        ("frost", (11.6, -6.6)),
+        ("storm", (15.9, -5.6)),
+        ("blood", (6.8, -11.6)),
+        ("blight", (11.6, -11.6)),
+        ("shadow", (15.9, -11.0)),
     ];
     /// Scale of the gallery's fields (radius / 2 m).
-    pub const FIELD_SCALE: f32 = 0.75;
+    pub const FIELD_SCALE: f32 = 0.95;
 }
 
 /// The parts of the court floor left unpaved because a prop stands there.
