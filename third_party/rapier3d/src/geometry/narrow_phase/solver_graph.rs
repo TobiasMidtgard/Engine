@@ -49,6 +49,56 @@ impl NarrowPhase {
         }
     }
 
+    /// Engine patch 3: the edges a rebuild of the solver contact graph can find in it or put in
+    /// it, ascending: the pairs it holds (to take out those that left) and every pair of an
+    /// awake body's colliders (a manifold qualifies only with an awake dynamic body). Only valid
+    /// while no edge index moved since the graph was built. `None` when that is a big share of
+    /// all pairs anyway, and the full walk is no slower.
+    fn sparse_rebuild_edges(
+        &self,
+        islands: &IslandManager,
+        bodies: &RigidBodySet,
+    ) -> Option<Vec<u32>> {
+        let num_edges = self.contact_graph.graph.edges.len();
+        let limit = num_edges / 4;
+        let mut edges: Vec<u32> = Vec::new();
+        for (_, refs) in self.solver_contact_graph.buckets() {
+            edges.extend(refs.iter().map(|c| c.edge));
+        }
+        edges.extend(self.solver_contact_graph.generic().iter().map(|c| c.edge));
+        if edges.len() > limit {
+            return None;
+        }
+        for handle in islands.active_bodies() {
+            let Some(rb) = bodies.get(handle) else {
+                continue;
+            };
+            for collider in rb.colliders() {
+                let Some(gid) = self.graph_indices.get(collider.0) else {
+                    continue;
+                };
+                if !InteractionGraph::<ColliderHandle, ContactPair>::is_graph_index_valid(
+                    gid.contact_graph_index,
+                ) {
+                    continue;
+                }
+                edges.extend(
+                    self.contact_graph
+                        .graph
+                        .edges(gid.contact_graph_index)
+                        .map(|e| e.id().index() as u32),
+                );
+            }
+            if edges.len() > limit {
+                return None;
+            }
+        }
+        edges.sort_unstable();
+        edges.dedup();
+        edges.retain(|&e| (e as usize) < num_edges);
+        Some(edges)
+    }
+
     /// Rebuilds [`Self::body_qualify_info`], the dense per-body table resolving
     /// `(is-dynamic-awake, solver-body index)` without fetching `RigidBody` structs. Low bit:
     /// `is_dynamic`; high 32: `active_set_id` (or frontier slot); `u64::MAX` = missing/fixed/kinematic.
@@ -138,6 +188,13 @@ impl NarrowPhase {
         let full_rebuild = !self.solver_graph_valid
             || epoch != self.solver_graph_epoch
             || mb_epoch != self.solver_graph_mb_epoch;
+        // Engine patch 3: while no edge index moved since the last rebuild, a rebuild only has
+        // to visit the pairs the graph holds now and the pairs of awake bodies (PATCHES.md).
+        let sparse_edges = (full_rebuild
+            && self.solver_graph_edges_stable
+            && mb_epoch == self.solver_graph_mb_epoch)
+            .then(|| self.sparse_rebuild_edges(islands, bodies))
+            .flatten();
 
         // The body qualification table stays exact while the active set is unchanged: every
         // membership change bumps the island epoch or clears `solver_graph_valid` (both folded
@@ -158,125 +215,13 @@ impl NarrowPhase {
             // Buckets are cleared, so every stored `graph_pos` is stale: reconcile in "fresh" mode
             // (insert the qualified, reset the rest, never trust a prior position). Large parallel scenes
             // rebuild with two rayon passes (count -> prefix-sum -> scatter): a serial walk on every epoch bump would dwarf the collection stage.
-            let num_edges = self.contact_graph.graph.edges.len();
-
-            #[cfg(feature = "parallel")]
-            {
-                use crate::dynamics::solver::solver_contact_graph::NUM_BUCKETS_WITH_GENERIC;
-                use rayon::prelude::*;
-
-                // Small enough that mid-size scenes (10-20k edges) split across every
-                // worker, large enough that the per-chunk bucket-count vectors stay cheap.
-                const CHUNK: usize = 1024;
-                let num_chunks = num_edges.div_ceil(CHUNK);
-
-                let edges_ptr_sync = crate::utils::SyncPtr(edges_ptr);
-                let edges_ptr_sync = &edges_ptr_sync;
-
-                // Pass 1: per-chunk per-bucket counts (read-only).
-                let counts: Vec<Vec<u32>> = (0..num_chunks)
-                    .into_par_iter()
-                    .map(|c| {
-                        let mut counts = alloc::vec![0u32; NUM_BUCKETS_WITH_GENERIC];
-                        for edge in (c * CHUNK)..((c + 1) * CHUNK).min(num_edges) {
-                            let hint = hints.get(edge).copied().unwrap_or(0);
-                            // SAFETY: each edge read by exactly one chunk.
-                            unsafe {
-                                Self::for_each_desired_manifold(
-                                    edges_ptr_sync.0,
-                                    bqi,
-                                    hint,
-                                    edge as u32,
-                                    has_multibodies,
-                                    multibody_joints,
-                                    |_, desired| {
-                                        if let Some((bucket, _, _)) = desired {
-                                            counts[bucket as usize] += 1;
-                                        }
-                                    },
-                                )
-                            };
-                        }
-                        counts
-                    })
-                    .collect();
-
-                // Serial prefix sums: per-(chunk, bucket) write bases + final lens.
-                let mut lens = alloc::vec![0u32; NUM_BUCKETS_WITH_GENERIC];
-                let mut bases: Vec<Vec<u32>> = Vec::with_capacity(num_chunks);
-                for c in &counts {
-                    let mut base = alloc::vec![0u32; NUM_BUCKETS_WITH_GENERIC];
-                    for ((base, len), count) in base.iter_mut().zip(lens.iter_mut()).zip(c.iter()) {
-                        *base = *len;
-                        *len += *count;
-                    }
-                    bases.push(base);
-                }
-
-                let bucket_ptrs: Vec<crate::utils::SyncPtr<ContactRef>> = graph
-                    .resize_for_bulk_rebuild(&lens)
-                    .into_iter()
-                    .map(crate::utils::SyncPtr)
-                    .collect();
-                let bucket_ptrs = &bucket_ptrs;
-
-                // Pass 2: scatter the refs at their exact offsets and stamp the manifolds
-                // (graph_pos, solver-body ids, color); layout identical to the serial walk's.
-                bases
-                    .into_par_iter()
-                    .enumerate()
-                    .for_each(|(c, mut cursors)| {
-                        for edge in (c * CHUNK)..((c + 1) * CHUNK).min(num_edges) {
-                            let hint = hints.get(edge).copied().unwrap_or(0);
-                            // SAFETY: each edge (and thus each manifold and each
-                            //         precomputed bucket range) is written by exactly
-                            //         one chunk.
-                            unsafe {
-                                let pair: *mut ContactPair =
-                                    &mut (*edges_ptr_sync.0.add(edge)).weight;
-                                let sm = (*pair).solver_manifolds_mut();
-                                let sm_ptr = sm.as_mut_ptr();
-                                Self::for_each_desired_manifold(
-                                    edges_ptr_sync.0,
-                                    bqi,
-                                    hint,
-                                    edge as u32,
-                                    has_multibodies,
-                                    multibody_joints,
-                                    |ordinal, desired| {
-                                        let mdata: *mut ContactManifoldData =
-                                            &mut (*sm_ptr.add(ordinal as usize)).data;
-                                        match desired {
-                                            Some((bucket, solver_body_ids, color)) => {
-                                                let local = cursors[bucket as usize];
-                                                cursors[bucket as usize] += 1;
-                                                *bucket_ptrs[bucket as usize].add(local as usize) =
-                                                    ContactRef {
-                                                        edge: edge as u32,
-                                                        manifold: ordinal,
-                                                    };
-                                                (*mdata).graph_pos = GraphPos::new(bucket, local);
-                                                (*mdata).solver_body_ids = solver_body_ids;
-                                                (*mdata).solver_color = color;
-                                            }
-                                            None => {
-                                                (*mdata).graph_pos = GraphPos::NONE;
-                                            }
-                                        }
-                                    },
-                                );
-                            }
-                        }
-                    });
-            }
-
-            #[cfg(not(feature = "parallel"))]
-            {
+            if let Some(sparse) = sparse_edges.as_deref() {
+                // Engine patch 3: the serial walk over the edges that can be in the graph,
+                // ascending, so the buckets are laid out as a full walk lays them out.
                 graph.clear();
-                for edge in 0..num_edges as u32 {
+                for &edge in sparse {
                     let hint = hints.get(edge as usize).copied().unwrap_or(0);
-                    // SAFETY: single-threaded; each edge visited once; `reconcile_pair`
-                    //         never aliases a live reference across a graph mutation.
+                    // SAFETY: as the serial walk below.
                     unsafe {
                         Self::reconcile_pair(
                             graph,
@@ -290,8 +235,143 @@ impl NarrowPhase {
                         )
                     };
                 }
+            } else {
+                let num_edges = self.contact_graph.graph.edges.len();
+
+                #[cfg(feature = "parallel")]
+                {
+                    use crate::dynamics::solver::solver_contact_graph::NUM_BUCKETS_WITH_GENERIC;
+                    use rayon::prelude::*;
+
+                    // Small enough that mid-size scenes (10-20k edges) split across every
+                    // worker, large enough that the per-chunk bucket-count vectors stay cheap.
+                    const CHUNK: usize = 1024;
+                    let num_chunks = num_edges.div_ceil(CHUNK);
+
+                    let edges_ptr_sync = crate::utils::SyncPtr(edges_ptr);
+                    let edges_ptr_sync = &edges_ptr_sync;
+
+                    // Pass 1: per-chunk per-bucket counts (read-only).
+                    let counts: Vec<Vec<u32>> = (0..num_chunks)
+                        .into_par_iter()
+                        .map(|c| {
+                            let mut counts = alloc::vec![0u32; NUM_BUCKETS_WITH_GENERIC];
+                            for edge in (c * CHUNK)..((c + 1) * CHUNK).min(num_edges) {
+                                let hint = hints.get(edge).copied().unwrap_or(0);
+                                // SAFETY: each edge read by exactly one chunk.
+                                unsafe {
+                                    Self::for_each_desired_manifold(
+                                        edges_ptr_sync.0,
+                                        bqi,
+                                        hint,
+                                        edge as u32,
+                                        has_multibodies,
+                                        multibody_joints,
+                                        |_, desired| {
+                                            if let Some((bucket, _, _)) = desired {
+                                                counts[bucket as usize] += 1;
+                                            }
+                                        },
+                                    )
+                                };
+                            }
+                            counts
+                        })
+                        .collect();
+
+                    // Serial prefix sums: per-(chunk, bucket) write bases + final lens.
+                    let mut lens = alloc::vec![0u32; NUM_BUCKETS_WITH_GENERIC];
+                    let mut bases: Vec<Vec<u32>> = Vec::with_capacity(num_chunks);
+                    for c in &counts {
+                        let mut base = alloc::vec![0u32; NUM_BUCKETS_WITH_GENERIC];
+                        for ((base, len), count) in base.iter_mut().zip(lens.iter_mut()).zip(c.iter()) {
+                            *base = *len;
+                            *len += *count;
+                        }
+                        bases.push(base);
+                    }
+
+                    let bucket_ptrs: Vec<crate::utils::SyncPtr<ContactRef>> = graph
+                        .resize_for_bulk_rebuild(&lens)
+                        .into_iter()
+                        .map(crate::utils::SyncPtr)
+                        .collect();
+                    let bucket_ptrs = &bucket_ptrs;
+
+                    // Pass 2: scatter the refs at their exact offsets and stamp the manifolds
+                    // (graph_pos, solver-body ids, color); layout identical to the serial walk's.
+                    bases
+                        .into_par_iter()
+                        .enumerate()
+                        .for_each(|(c, mut cursors)| {
+                            for edge in (c * CHUNK)..((c + 1) * CHUNK).min(num_edges) {
+                                let hint = hints.get(edge).copied().unwrap_or(0);
+                                // SAFETY: each edge (and thus each manifold and each
+                                //         precomputed bucket range) is written by exactly
+                                //         one chunk.
+                                unsafe {
+                                    let pair: *mut ContactPair =
+                                        &mut (*edges_ptr_sync.0.add(edge)).weight;
+                                    let sm = (*pair).solver_manifolds_mut();
+                                    let sm_ptr = sm.as_mut_ptr();
+                                    Self::for_each_desired_manifold(
+                                        edges_ptr_sync.0,
+                                        bqi,
+                                        hint,
+                                        edge as u32,
+                                        has_multibodies,
+                                        multibody_joints,
+                                        |ordinal, desired| {
+                                            let mdata: *mut ContactManifoldData =
+                                                &mut (*sm_ptr.add(ordinal as usize)).data;
+                                            match desired {
+                                                Some((bucket, solver_body_ids, color)) => {
+                                                    let local = cursors[bucket as usize];
+                                                    cursors[bucket as usize] += 1;
+                                                    *bucket_ptrs[bucket as usize].add(local as usize) =
+                                                        ContactRef {
+                                                            edge: edge as u32,
+                                                            manifold: ordinal,
+                                                        };
+                                                    (*mdata).graph_pos = GraphPos::new(bucket, local);
+                                                    (*mdata).solver_body_ids = solver_body_ids;
+                                                    (*mdata).solver_color = color;
+                                                }
+                                                None => {
+                                                    (*mdata).graph_pos = GraphPos::NONE;
+                                                }
+                                            }
+                                        },
+                                    );
+                                }
+                            }
+                        });
+                }
+
+                #[cfg(not(feature = "parallel"))]
+                {
+                    graph.clear();
+                    for edge in 0..num_edges as u32 {
+                        let hint = hints.get(edge as usize).copied().unwrap_or(0);
+                        // SAFETY: single-threaded; each edge visited once; `reconcile_pair`
+                        //         never aliases a live reference across a graph mutation.
+                        unsafe {
+                            Self::reconcile_pair(
+                                graph,
+                                edges_ptr,
+                                bqi,
+                                hint,
+                                edge,
+                                true,
+                                has_multibodies,
+                                multibody_joints,
+                            )
+                        };
+                    }
+                }
             }
             self.solver_graph_epoch = epoch;
+            self.solver_graph_edges_stable = true;
             self.solver_graph_mb_epoch = mb_epoch;
             self.solver_graph_valid = true;
             // `solver_graph_dirty` is intentionally NOT cleared: the force-event reconcile

@@ -123,8 +123,8 @@ impl SolverContactGraph {
 
     /// Clears every bucket (used when the graph must be rebuilt from scratch,
     /// e.g. after an island epoch change). The parallel build rebuilds through
-    /// [`Self::resize_for_bulk_rebuild`] instead, which clears as it resizes.
-    #[cfg(not(feature = "parallel"))]
+    /// [`Self::resize_for_bulk_rebuild`] instead, which clears as it resizes (engine patch 3:
+    /// except a sparse rebuild, which walks few pairs serially in any build).
     pub(crate) fn clear(&mut self) {
         if self.buckets.is_empty() {
             self.buckets.resize_with(NUM_BUCKETS + 1, Vec::new);
