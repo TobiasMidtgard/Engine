@@ -62,3 +62,33 @@ folder and the `exclude` line, and run `cargo update -p rapier3d`.
 - **Drop it when**: upstream bumps the epoch only on membership changes. (Round 27 tried this
   alone and measured little; with today's pile of 43,000 pairs it is the larger part of the
   collection stage.)
+
+## 3. Rebuild the solver contact graph over the awake pairs only (`src/geometry/narrow_phase/solver_graph.rs`)
+
+- **What**: when the solver contact graph must be rebuilt (an epoch bump: a body fell asleep,
+  woke or changed type; a body falling asleep; a composite pair rebuilding its manifolds) and no
+  contact-graph edge index has moved since the last rebuild, `maintain_solver_contact_graph`
+  walks only the pairs the graph holds now and the pairs of the awake bodies' colliders
+  (`NarrowPhase::sparse_rebuild_edges`), in ascending order, instead of every pair of the world.
+  `NarrowPhase::solver_graph_edges_stable` says whether edge indices held still: collider node
+  removal (which swap-removes edges) and degenerate bookkeeping clear it, every rebuild sets it.
+  When those pairs are over a quarter of all pairs, or edges moved, or the multibody topology
+  changed, it walks everything as before. `SolverContactGraph::clear` is now in parallel builds
+  too.
+- **Why**: a manifold can only be solver-active with an awake dynamic body
+  (`qualify_manifold_bqi`), and every manifold outside the graph already has no graph position,
+  so the pairs between sleeping or static bodies, most of a big settled world, need no visit.
+  After patch 2 the proving ground's pile still rebuilt on about 8% of substeps (bodies falling
+  asleep and waking, composite pairs), each over 43,000-49,000 pairs.
+- **Gain**: proving ground bench (`pg_bench 900`, VM, release): 3.84-4.59 ms a step stock,
+  3.54-3.93 with patch 2, 2.39-2.44 with patches 2 and 3. In a debug run of 3,000 steps, 2,488
+  rebuilds went sparse (about 590 pairs each instead of about 48,000) and 713 stayed full.
+  Showcase physics stop (VM, as in 2): Rapier's whole step 3.12 -> 1.4-2.1 ms, its constraint
+  collection 1.71 -> 0.12-0.18; the physics step's own work (sync, upkeep, plans, substeps,
+  characters, write back) 9.1 ms stock -> 6.3 with patch 2 -> 4.3 with both.
+- **Cost**: the layout is the full walk's (ascending pairs, so a parallel and a serial build
+  still agree). Rapier's debug validator (`debug_validate_solver_graph`, every step in debug
+  builds) found nothing over that 3,000-step debug run of the proving ground or the engine's
+  physics tests.
+- **Drop it when**: upstream rebuilds only the awake part of the graph (or stops rebuilding on
+  sleep and wake).

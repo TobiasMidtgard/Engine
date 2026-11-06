@@ -373,6 +373,11 @@ pub struct NarrowPhase {
     /// A mismatch means bodies may have joined/left a multibody (manifolds can switch
     /// between color buckets and the generic list), forcing a full rebuild.
     solver_graph_mb_epoch: u32,
+    /// Engine patch 3: no contact-graph edge index has moved since the solver contact graph was
+    /// last rebuilt (no collider node removal), so its `ContactRef`s still name the right
+    /// pairs and a rebuild may visit only those and the awake bodies' pairs.
+    #[cfg_attr(feature = "serde-serialize", serde(skip))]
+    solver_graph_edges_stable: bool,
     /// Workspace: edge indices fully updated this step (`OUTCOME_FULL`): possible bucket
     /// membership change. Consumed by the incremental maintenance in
     /// [`Self::maintain_solver_contact_graph`] and the force-event list reconciliation.
@@ -444,6 +449,7 @@ impl NarrowPhase {
             solver_graph_valid: false,
             solver_graph_epoch: 0,
             solver_graph_mb_epoch: 0,
+            solver_graph_edges_stable: false,
             solver_graph_dirty: Vec::new(),
             force_event_pairs: Vec::new(),
             force_event_pos: Vec::new(),
