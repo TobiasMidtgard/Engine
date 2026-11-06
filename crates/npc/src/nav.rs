@@ -26,6 +26,9 @@ use crate::world_model::TacticalWorld;
 
 /// Cells per chunk side.
 const CHUNK: i32 = 32;
+/// Chunks of ground nobody has sampled yet that one path search builds (the start's and the
+/// goal's first); the rest wait for `warm_nav`.
+const PATH_COLD_CHUNKS: usize = 2;
 
 /// How much cheaper a well-worn path (wear 1) is to walk than untouched ground.
 pub const WORN_DISCOUNT: f32 = 0.5;
@@ -369,6 +372,13 @@ impl<'a> NavCtx<'a> {
         for p in points {
             self.chunks_around(p, radius, &mut keys);
         }
+        self.ensure_keys_within(keys, cold);
+    }
+
+    /// Build the chunks `keys` whose ground is ready, and of the rest the first `cold`; the
+    /// others go to [`NavGrid::ground_wanted`] for [`warm_nav`] (see
+    /// [`ensure_around_within`](Self::ensure_around_within)).
+    fn ensure_keys_within(&mut self, keys: Vec<(i32, i32)>, cold: usize) {
         let mut now = Vec::with_capacity(keys.len());
         // Without warm_nav sampling ground on a pool (tests, tools), nothing is gained by
         // waiting.
@@ -662,14 +672,21 @@ impl<'a> NavCtx<'a> {
         let mut walk = vec![false; (w * d) as usize];
         let (kx0, kx1) = (x0.div_euclid(CHUNK), (x0 + w - 1).div_euclid(CHUNK));
         let (kz0, kz1) = (z0.div_euclid(CHUNK), (z0 + d - 1).div_euclid(CHUNK));
-        let keys: Vec<(i32, i32)> = (kz0..=kz1)
-            .flat_map(|kz| (kx0..=kx1).map(move |kx| (kx, kz)))
-            .collect();
-        self.ensure_chunks(&keys);
+        // The start's chunk first, then the goal's: of ground nobody has sampled yet a search
+        // builds only those (`PATH_COLD_CHUNKS`) and leaves the rest to `warm_nav`, as a look
+        // does. Until it is built, ground there isn't walkable to the search: the path stops
+        // short (partial) and is planned again. A path at the fortress built five chunks at
+        // once, 15-22 ms each (VM).
+        let key = |c: (i32, i32)| (c.0.div_euclid(CHUNK), c.1.div_euclid(CHUNK));
+        let mut keys: Vec<(i32, i32)> = vec![key(a), key(b)];
+        keys.extend((kz0..=kz1).flat_map(|kz| (kx0..=kx1).map(move |kx| (kx, kz))));
+        self.ensure_keys_within(keys, PATH_COLD_CHUNKS);
         // Copy chunk by chunk: one map lookup per chunk, not per cell.
         for kz in kz0..=kz1 {
             for kx in kx0..=kx1 {
-                let chunk = &self.grid.chunks[&(kx, kz)];
+                let Some(chunk) = self.grid.chunks.get(&(kx, kz)) else {
+                    continue;
+                };
                 let (cx, cz) = (kx * CHUNK, kz * CHUNK);
                 for z in cz.max(z0)..(cz + CHUNK).min(z0 + d) {
                     for x in cx.max(x0)..(cx + CHUNK).min(x0 + w) {
@@ -981,6 +998,25 @@ impl<'a> NavCtx<'a> {
         let (dx, dz) = (b.0 - a.0, b.1 - a.1);
         let n = dx.abs().max(dz.abs()) * 2;
         if n > s.max_window {
+            return None;
+        }
+        // The chunks along the line: the start's and the goal's are built now, of the others
+        // only those whose ground is ready; a line over ground not worked out yet isn't
+        // walked (the search after it stops short there, see `window`).
+        let key = |c: (i32, i32)| (c.0.div_euclid(CHUNK), c.1.div_euclid(CHUNK));
+        let mut keys = vec![key(a), key(b)];
+        for k in 0..=n.max(1) {
+            let t = k as f32 / n.max(1) as f32;
+            let x = (a.0 as f32 + 0.5 + dx as f32 * t).floor() as i32;
+            let z = (a.1 as f32 + 0.5 + dz as f32 * t).floor() as i32;
+            for c in [(x - 1, z - 1), (x + 1, z + 1)] {
+                if keys.last() != Some(&key(c)) {
+                    keys.push(key(c));
+                }
+            }
+        }
+        self.ensure_keys_within(keys.clone(), PATH_COLD_CHUNKS);
+        if keys.iter().any(|k| !self.grid.chunks.contains_key(k)) {
             return None;
         }
         let (h0, ok) = self.cell(a.0, a.1);
@@ -1373,6 +1409,55 @@ mod tests {
         ctx.ensure_around_within(spots, 0.1, 0);
         assert_eq!(ctx.grid.chunks.len(), 2);
         assert!(ctx.grid.chunks.contains_key(&key));
+    }
+
+    #[test]
+    fn a_far_path_builds_its_ends_and_leaves_the_ground_between_for_warming() {
+        let (ground, water) = (Ground::default(), Water::default());
+        let world = TacticalWorld::from_obstacles(Vec::new(), &ground);
+        let mut grid = NavGrid {
+            warming: true,
+            ..NavGrid::default()
+        };
+        let mut ctx = grid.ctx(&world, &ground, &water);
+        // Three chunks apart along x (within a search's window), on open ground nobody has
+        // sampled.
+        let size = CHUNK as f64 * ctx.grid.settings.cell as f64;
+        let (from, to) = (
+            DVec3::new(0.5 * size, 0.0, 0.5 * size),
+            DVec3::new(3.5 * size, 0.0, 0.5 * size),
+        );
+        let mut path = Vec::new();
+        let status = ctx.find_path(from, to, &mut |_| 0.0, &mut path);
+        assert_eq!(status, PathStatus::Partial, "{path:?}");
+        assert!(ctx.built_around(from, 0.1) && ctx.built_around(to, 0.1));
+        assert!(
+            ctx.grid.chunks.len() <= 2 * PATH_COLD_CHUNKS,
+            "{} chunks built on the frame",
+            ctx.grid.chunks.len()
+        );
+        assert!(
+            !ctx.grid.ground_wanted.is_empty(),
+            "the rest asked of warm_nav"
+        );
+        // Once the ground between is worked out, the same trip is a straight walk.
+        let margin = (ctx.grid.settings.agent_radius / ctx.grid.settings.cell).ceil() as i32;
+        let side = (CHUNK + 2 * margin) as usize;
+        for key in std::mem::take(&mut ctx.grid.ground_wanted) {
+            ctx.grid.ground_ready.insert(key, vec![0.0; side * side]);
+        }
+        for _ in 0..4 {
+            if ctx.find_path(from, to, &mut |_| 0.0, &mut path) == PathStatus::Complete {
+                break;
+            }
+            for key in std::mem::take(&mut ctx.grid.ground_wanted) {
+                ctx.grid.ground_ready.insert(key, vec![0.0; side * side]);
+            }
+        }
+        assert_eq!(
+            ctx.find_path(from, to, &mut |_| 0.0, &mut path),
+            PathStatus::Complete
+        );
     }
 
     #[test]
