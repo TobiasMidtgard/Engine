@@ -152,7 +152,7 @@ fn wall_kicks_climb_an_alley_wall_to_wall() {
             Vec3::new(4.0, 12.0, 10.0),
         );
     }
-    let c = character(&mut app, DVec3::new(-1.0, 0.9, 0.0));
+    let c = character(&mut app, DVec3::new(-1.4, 0.9, 0.0));
     run(&mut app, 0.1);
     let mut peak = 0.0f64;
     for _ in 0..240 {
@@ -167,7 +167,11 @@ fn wall_kicks_climb_an_alley_wall_to_wall() {
                 None
             }
             Some(r) => Some(-r.normal),
-            None if !m.grounded => None,
+            None if !m.grounded => {
+                // In the air: hands off (the next wall's run-up comes on its own).
+                intent(&mut app, c, |i| *i = MoveIntent::default());
+                None
+            }
             None => Some(Vec3::X),
         };
         if let Some(d) = dir {

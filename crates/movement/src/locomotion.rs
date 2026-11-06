@@ -91,7 +91,7 @@ const WALL_SLIDE_SPEED: f32 = 3.0;
 /// Kicked off a wall, a wall met within this long is run up too, s, up to this many in a row.
 const RUNUP_CHAIN_SECS: f32 = 0.7;
 const RUNUP_CHAIN_MAX: u8 = 3;
-const RUNUP_RISE: f32 = 6.0;
+const RUNUP_RISE: f32 = 7.0;
 /// Speed into the wall a run-up needs, m/s.
 const RUNUP_MIN_SPEED: f32 = 4.0;
 /// Walls run up lean no more than this (the up part of their normal): about 6°.
@@ -2120,13 +2120,9 @@ fn ledge_top(
     Some(face + upd * (on - face).dot(upd))
 }
 
-/// The wall in front of the chest along `dir`, if it is a wall (not a slope or a character):
-/// where it was hit, its horizontal normal and its body.
-fn chest_wall(b: &Body, probe: &Probe, dir: Vec3) -> Option<(DVec3, Vec3, Entity)> {
-    chest_wall_within(b, probe, dir, b.radius + 0.45)
-}
-
-/// [`chest_wall`] within `reach` meters of the body's axis.
+/// The wall in front of the chest along `dir` within `reach` meters of the body's axis, if
+/// it is a wall (not a slope or a character): where it was hit, its horizontal normal and its
+/// body.
 fn chest_wall_within(
     b: &Body,
     probe: &Probe,
@@ -2701,7 +2697,7 @@ fn start_run_up(b: &Body, probe: &Probe, v: Vec3, wish: Vec3) -> Option<RunUp> {
     }
     Some(RunUp {
         normal,
-        speed: (speed * 0.7).min(RUNUP_RISE),
+        speed: (speed * 0.85).min(RUNUP_RISE),
         secs: 0.0,
     })
 }
@@ -2793,7 +2789,7 @@ fn run_up(
     // down past it as the run fades.
     // Slowing as it goes, faster and faster (Mirror's Edge's wall climb): (1 − t/T)^1.5.
     let rise = r.speed * (1.0 - (r.secs / RUNUP_SECS).clamp(0.0, 1.0)).powf(1.5);
-    let fading = rise < 3.0 || r.secs + dt >= RUNUP_SECS;
+    let fading = rise < 2.0 || r.secs + dt >= RUNUP_SECS;
     if fading && let Some(h) = find_hang(p, b, probe, into - up * 2.0, into) {
         m.runup = None;
         m.hang = Some(h);

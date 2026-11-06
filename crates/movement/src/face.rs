@@ -246,6 +246,7 @@ pub(crate) fn catch(
 }
 
 /// In the air near a face, or walking into one, catches it.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn capture(
     m: &mut Mover,
     p: &MovementProfile,
@@ -403,13 +404,15 @@ pub(crate) fn step(
     let hm = (f.hands[0] + f.hands[1]) * 0.5;
     let (origin, ..) = e.face_frame(up);
     let hands_y = (hm - origin).as_vec3().dot(fu);
-    if f.moving.is_none() && dir.dot(fu) > 0.5 && hands_y > height - 0.55 {
-        if let Some(v) = crate::locomotion::step_off_rope(m, p, b, probe, -n, out) {
-            m.face = None;
-            m.elem_last = Some(f.element);
-            m.elem_cooldown = 0.5;
-            return v;
-        }
+    if f.moving.is_none()
+        && dir.dot(fu) > 0.5
+        && hands_y > height - 0.55
+        && let Some(v) = crate::locomotion::step_off_rope(m, p, b, probe, -n, out)
+    {
+        m.face = None;
+        m.elem_last = Some(f.element);
+        m.elem_cooldown = 0.5;
+        return v;
     }
     // At the bottom, climbing down: step off.
     let fm = (f.feet[0] + f.feet[1]) * 0.5;
