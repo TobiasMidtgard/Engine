@@ -97,11 +97,30 @@ pub enum PipelineWarmup {
 
 impl PipelineWarmup {
     pub fn on(self, headless: bool) -> bool {
-        match self {
+        match Self::from_env().unwrap_or(self) {
             Self::Off => false,
             Self::Windowed => !headless,
             Self::Always => true,
         }
+    }
+
+    /// `ENGINE_PIPELINE_WARMUP=off|windowed|always`, when set, overrides the setting: a
+    /// headless profile run warms its pipelines as a windowed game does, so its frames show
+    /// what a player's would.
+    fn from_env() -> Option<Self> {
+        static MODE: std::sync::OnceLock<Option<PipelineWarmup>> = std::sync::OnceLock::new();
+        *MODE.get_or_init(|| {
+            match std::env::var("ENGINE_PIPELINE_WARMUP")
+                .ok()?
+                .to_ascii_lowercase()
+                .as_str()
+            {
+                "off" | "0" => Some(Self::Off),
+                "windowed" => Some(Self::Windowed),
+                "always" | "on" | "1" => Some(Self::Always),
+                _ => None,
+            }
+        })
     }
 }
 

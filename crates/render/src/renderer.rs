@@ -1450,7 +1450,14 @@ impl Renderer {
         self.shared.images.compress(&self.shared);
         // Uploads: a byte budget in play, a time budget behind a loading screen.
         let loading = world.get_resource::<engine_world::LoadingBudget>().copied();
+        // `ENGINE_UPLOAD_BUDGET=on`: a headless profile run uploads as a windowed game does.
+        static BUDGET_ENV: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        let budget_env = *BUDGET_ENV.get_or_init(|| {
+            std::env::var("ENGINE_UPLOAD_BUDGET")
+                .is_ok_and(|v| matches!(v.to_ascii_lowercase().as_str(), "on" | "1" | "always"))
+        });
         let budgeted = settings.upload_budget_headless
+            || budget_env
             || !world
                 .get_resource::<EngineConfig>()
                 .is_some_and(|c| c.headless);
