@@ -731,9 +731,11 @@ mod tests {
         assert!(fixed.plan_last(2, Some(0.020)));
         // Manual clocks (no budget): only the last one due.
         assert!(!fixed.plan_last(2, None));
-        // After a stall (a 40 ms step) the first step is planned last, and as steps get
+        // After a stall (40 ms steps) the first step is planned last, and as steps get
         // cheap again the estimate follows them back down: more than one step a frame.
-        fixed.observe_step_cost(0.040);
+        for _ in 0..8 {
+            fixed.observe_step_cost(0.040);
+        }
         assert!(fixed.plan_last(0, Some(0.0)));
         for _ in 0..20 {
             fixed.observe_step_cost(0.005);
