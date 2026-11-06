@@ -251,12 +251,34 @@ pub fn shore_wetness_system(
             }
         }
     }
-    let off_frame = !config.headless;
+    let off_frame = config.off_frame();
     let phase = cache.phase;
     cache.phase = (phase + 1) % STRIDE;
     note_runup(&mut cache, &state.ripples, origin, cell, (width, height));
 
     let focus_xz = DVec2::new(focus.x, focus.z);
+    // Only water within reach of the focus can wet a cell this visits: the rest stays out of
+    // the per-cell tests (each lake and stream turns the point into its own frame). At a stop
+    // with no water near, those tests over every visited cell were this system's whole cost
+    // (0.56 ms a step at the fortress on the VM; lead, perf week).
+    let wets = REACH_M + (BANK_M + SPRAY_MAX_M) as f64 + 1.0 + cell;
+    let within = |c: DVec3, r: f64| (DVec2::new(c.x, c.z) - focus_xz).length() <= wets + r;
+    let lakes: Vec<_> = lakes
+        .into_iter()
+        .filter(|(b, _)| within(b.center, f64::from(b.body.extent.bounding_radius())))
+        .collect();
+    let flows: Vec<_> = state
+        .flows
+        .iter()
+        .filter(|f| {
+            let size = DVec2::new(f.nx as f64, f.nz as f64) * f.cell as f64;
+            within(f.world(size * 0.5, 0.0), size.length() * 0.5)
+        })
+        .collect();
+    let plunges: Vec<_> = plunges
+        .into_iter()
+        .filter(|(foot, _)| within(*foot, 0.0))
+        .collect();
     let c0 = ((focus_xz - origin) / cell).floor();
     let reach = (REACH_M / cell).ceil() as i64;
     let rows = (c0.y as i64 - reach).max(0)..=(c0.y as i64 + reach).min(height as i64 - 1);
@@ -266,7 +288,8 @@ pub fn shore_wetness_system(
     let mut budget = SAMPLES_PER_UPDATE;
     let started = std::time::Instant::now();
     let mut writes: Vec<(usize, f32)> = Vec::new();
-    for j in rows.filter(|j| *j as usize % STRIDE == phase) {
+    let nothing_near = lakes.is_empty() && flows.is_empty() && plunges.is_empty();
+    for j in rows.filter(|j| !nothing_near && *j as usize % STRIDE == phase) {
         let j = j as usize;
         for i in cols.clone() {
             let i = i as usize;
@@ -277,10 +300,7 @@ pub fn shore_wetness_system(
             let p = DVec3::new(xz.x, focus.y + 50.0, xz.y);
             // Only cells water could reach: inside a lake, beside a stream, near a fall.
             let near_lake = lakes.iter().any(|(b, _)| b.contains(p));
-            let near_flow = state
-                .flows
-                .iter()
-                .any(|f| beside(f, p, BANK_M as f64 + 1.0));
+            let near_flow = flows.iter().any(|f| beside(f, p, BANK_M as f64 + 1.0));
             let near_fall = plunges
                 .iter()
                 .any(|(foot, _)| (DVec2::new(foot.x, foot.z) - xz).length() < SPRAY_MAX_M as f64);
@@ -341,8 +361,7 @@ pub fn shore_wetness_system(
                 target = target.max(spray_wetness(d, *power));
             }
             target = target.max(swashed.unwrap_or(0.0));
-            for f in state
-                .flows
+            for f in flows
                 .iter()
                 .filter(|f| beside(f, ground_p, BANK_M as f64 + 1.0))
             {

@@ -204,6 +204,10 @@ lighting (8K only for a visible backdrop). JPG or PNG for color, HDR or EXR only
   (Softbody measured an 806 ms stall). Turning that ticking off can deadlock when every worker
   waits. Flatten the work into one scope opened from a system, or give leaf work that never
   waits a small pool of its own. Slow one-off builds go on `AsyncComputeTaskPool`.
+- Work a game spreads off the frame but headless tests want at once (reads handed to a
+  worker, builds over several steps) checks `EngineConfig::off_frame()`, not `!headless`:
+  `ENGINE_OFF_FRAME=always` makes a headless profile run do it the game's way, so its
+  numbers are the game's (the VM traces showed Water's on-frame reads, 4.6 ms a rebuild).
 - A background job that splits over threads of its own (`std::thread::scope` over rows or
   chunks) takes its count from `engine_core::tasks::background_lease(want).threads()` and
   holds the lease while they run, never from `available_parallelism` alone. Jobs that each

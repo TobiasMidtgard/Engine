@@ -21,6 +21,21 @@ pub struct EngineConfig {
     pub seed: u64,
 }
 
+impl EngineConfig {
+    /// Whether work a game spreads off the frame (reads handed to workers, builds over several
+    /// steps) does so. With a window it does; headless runs (tests, tools, screenshots) do it at
+    /// once and deterministically, unless `ENGINE_OFF_FRAME=always` asks for the game's way,
+    /// so a headless profile costs what the game costs.
+    pub fn off_frame(&self) -> bool {
+        !self.headless || off_frame_forced()
+    }
+}
+
+fn off_frame_forced() -> bool {
+    static FORCED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *FORCED.get_or_init(|| std::env::var("ENGINE_OFF_FRAME").is_ok_and(|v| v == "always"))
+}
+
 impl Default for EngineConfig {
     fn default() -> Self {
         Self {

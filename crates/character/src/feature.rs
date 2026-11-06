@@ -1405,7 +1405,7 @@ impl RenderFeature for CharacterFeature {
         // it is asked for.
         let off_frame = world
             .get_resource::<engine_core::config::EngineConfig>()
-            .is_some_and(|c| !c.headless);
+            .is_some_and(|c| c.off_frame());
         let Some(query) = self.query.as_mut() else {
             return;
         };

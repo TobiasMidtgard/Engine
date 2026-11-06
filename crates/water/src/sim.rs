@@ -173,7 +173,7 @@ pub fn sync_bodies_system(
     // Headless runs (tests, tours) read the lakes near a focus there and then, so they see
     // the same water; lakes far off are read on workers as in a game (`flow_system`).
     let (now, later): (Vec<BedAsk>, Vec<BedAsk>) = builds.into_iter().partition(|b| {
-        config.headless
+        !config.off_frame()
             && (focus.points.is_empty()
                 || range.is_active_sphere(&focus, b.center, b.half as f64 * 1.5))
     });
@@ -804,10 +804,11 @@ pub fn ripple_system(
     config: Res<EngineConfig>,
 ) {
     let dt = time.delta_secs();
-    swash.off_frame = !config.headless;
-    still.spread_first = !config.headless;
-    still.off_frame = !config.headless;
-    coarse.depths.off_frame = !config.headless;
+    let off_frame = config.off_frame();
+    swash.off_frame = off_frame;
+    still.spread_first = off_frame;
+    still.off_frame = off_frame;
+    coarse.depths.off_frame = off_frame;
     let mut state = shared.0.write();
     let dims = (
         settings.ripple_cells.clamp(16, 1024),
@@ -1194,7 +1195,7 @@ pub fn flow_system(
                     // area coming into view on a climb, kilometers below) settles on a worker
                     // as in a game, and a headless profile run sees the frames a player would
                     // (it held one frame for seconds).
-                    if config.headless && within_reach(&range, &focus, origin, region) {
+                    if !config.off_frame() && within_reach(&range, &focus, origin, region) {
                         builds.push(job);
                         continue;
                     }
