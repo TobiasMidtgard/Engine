@@ -1029,7 +1029,8 @@ impl Cull<'_> {
             impostor_size,
             fade,
             dither: hot.dither,
-            since: if mesh.skinned || hot.dither != 0.0 {
+            // Only the shadow lists read it: no other item reads its `Cold` (far in memory).
+            since: if !casts || mesh.skinned || hot.dither != 0.0 {
                 u64::MAX
             } else {
                 cold.still_from().max(mesh.still_from)
@@ -1629,6 +1630,11 @@ const PARALLEL_GATHER: usize = 4096;
 /// finds it (`MeshFeature::finish_items`).
 const MATERIAL_KEEP_FRAMES: u64 = 2;
 
+/// Jobs per thread of the shadow lists (each map's casters in ranges).
+const SHADOW_JOBS_PER_THREAD: usize = 2;
+/// Jobs per thread of the cull (`MeshFeature::cull`), so the threads share its work evenly.
+const CULL_JOBS_PER_THREAD: usize = 4;
+
 /// Threads for a pass over `slots` scene slots.
 fn gather_threads(slots: usize) -> usize {
     if slots >= PARALLEL_GATHER {
@@ -1968,10 +1974,17 @@ impl MeshFeature {
                 .max(settings.min_object_pixels.max(0.0)),
             canopy_shift: (view.origin - crate::canopy::anchor_for(view.origin)).as_vec3(),
         };
+        // More jobs than threads: slots differ in cost (a zone near the camera makes many
+        // items), so equal shares of slots would leave the threads waiting on the costliest.
         let threads = gather_threads(self.scene.hot.len());
+        let jobs = if threads > 1 {
+            threads * CULL_JOBS_PER_THREAD
+        } else {
+            1
+        };
         let mut chunks = std::mem::take(&mut self.gather_scratch);
-        chunks.resize_with(threads, Default::default);
-        // Cleared here: a chunk gets no job when there are fewer slots than threads.
+        chunks.resize_with(jobs, Default::default);
+        // Cleared here: a chunk gets no job when there are fewer slots than jobs.
         for out in &mut chunks {
             out.items.clear();
             out.culled = 0;
@@ -1994,15 +2007,16 @@ impl MeshFeature {
                     if h.flags & mesh_scene::VISIBLE == 0 {
                         continue;
                     }
-                    let mesh = &mesh_frames[h.mesh as usize];
-                    if mesh.version == 0 || !mesh.ready {
-                        continue;
-                    }
+                    // The cluster path's slots first: a bit test, before the mesh's entry.
                     let slot = base + k;
                     if clustered
                         .get(slot / 64)
                         .is_some_and(|w| w >> (slot % 64) & 1 != 0)
                     {
+                        continue;
+                    }
+                    let mesh = &mesh_frames[h.mesh as usize];
+                    if mesh.version == 0 || !mesh.ready {
                         continue;
                     }
                     let mat = &material_frames[h.material as usize];
@@ -2019,7 +2033,7 @@ impl MeshFeature {
                 }
             };
             let scene = &mut self.scene;
-            let per = scene.hot.len().div_ceil(threads).max(1);
+            let per = scene.hot.len().div_ceil(jobs).max(1);
             let gather = &gather;
             let parts = scene
                 .hot
@@ -3507,7 +3521,10 @@ impl RenderFeature for MeshFeature {
         } else if self.classified != Some((frame, clusters_on)) {
             let threads = gather_threads(scene.hot.len());
             let mut chunks = std::mem::take(&mut self.gather_scratch);
-            chunks.resize_with(threads, Default::default);
+            // At least one per thread; the cull's further chunks (and their item buffers)
+            // stay for it, left empty here.
+            let kept = chunks.len().max(threads);
+            chunks.resize_with(kept, Default::default);
             for out in &mut chunks {
                 out.deferred.clear();
             }
@@ -3762,6 +3779,7 @@ impl RenderFeature for MeshFeature {
         if !self.cull_later {
             steps.step("meshes: cull");
             culled += self.cull(view, settings);
+            steps.step("meshes: finish items");
             culled += self.finish_items(gpu, Some((material_assets, &sources, &default_material)));
         }
         // Meshes now drawn only as clusters don't need their instanced copy.
@@ -3808,6 +3826,7 @@ impl RenderFeature for MeshFeature {
             // The cull `prepare` left for the render thread: the main thread only synced.
             steps.step("meshes: cull");
             self.culled += self.cull(view, settings);
+            steps.step("meshes: finish items");
             self.culled += self.finish_items(gpu, None);
         }
         let frame = self.frame;
@@ -3969,12 +3988,21 @@ impl RenderFeature for MeshFeature {
                 .chain((view.sun_shadows && view.far_shadow.enabled).then_some(FAR_SHADOW_MAP));
             // Each map's casters on its own thread, then their instances in map order.
             let maps: Vec<usize> = maps.collect();
+            // Each map's casters in `parts` ranges, so every thread gets work (the maps alone
+            // are fewer than the threads, and differ in cost), merged in order below.
+            let parts = if self.casters.len() >= PARALLEL_CASTERS && !maps.is_empty() {
+                (gather_threads(PARALLEL_GATHER) * SHADOW_JOBS_PER_THREAD)
+                    .div_ceil(maps.len())
+                    .max(1)
+            } else {
+                1
+            };
             let mut lists = std::mem::take(&mut self.shadow_scratch);
-            lists.resize_with(maps.len(), Default::default);
+            lists.resize_with(maps.len() * parts, Default::default);
             let (items, casters, meshes) = (&self.items, &self.casters, &self.meshes);
             let material_data = &self.material_data;
             let image_frame = self.image_frame;
-            let fill = |c: usize, out: &mut MapCasters| {
+            let fill = |c: usize, casters: &[u32], out: &mut MapCasters| {
                 out.clear();
                 let texel = map_texel(view, c);
                 let redraw = static_redraw(view, c);
@@ -4056,13 +4084,39 @@ impl RenderFeature for MeshFeature {
                 }
             };
             let fill = &fill;
-            let jobs = maps.iter().zip(lists.iter_mut());
-            if casters.len() >= PARALLEL_CASTERS {
-                run_jobs(jobs.map(|(&c, list)| move || fill(c, list)));
+            let per = casters.len().div_ceil(parts).max(1);
+            let jobs = lists
+                .chunks_mut(parts)
+                .zip(&maps)
+                .flat_map(|(map_lists, &c)| {
+                    map_lists
+                        .iter_mut()
+                        .enumerate()
+                        .map(move |(k, list)| (c, casters.get(k * per..).unwrap_or(&[]), list))
+                })
+                .map(|(c, range, list)| (c, &range[..range.len().min(per)], list));
+            if parts > 1 || casters.len() >= PARALLEL_CASTERS {
+                run_jobs(jobs.map(|(c, range, list)| move || fill(c, range, list)));
             } else {
-                jobs.for_each(|(&c, list)| fill(c, list));
+                jobs.for_each(|(c, range, list)| fill(c, range, list));
             }
-            for (&c, lists) in maps.iter().zip(&lists) {
+            // A map's ranges, in caster order, into its first.
+            if parts > 1 {
+                for map_lists in lists.chunks_mut(parts) {
+                    let (first, rest) = map_lists.split_at_mut(1);
+                    for part in rest.iter() {
+                        for (to, from) in [
+                            (&mut first[0].moving, &part.moving),
+                            (&mut first[0].still, &part.still),
+                        ] {
+                            to.picked.extend_from_slice(&from.picked);
+                            to.keys.extend_from_slice(&from.keys);
+                            to.impostors.extend_from_slice(&from.impostors);
+                        }
+                    }
+                }
+            }
+            for (&c, lists) in maps.iter().zip(lists.iter().step_by(parts)) {
                 for (list, still) in [(&lists.moving, false), (&lists.still, true)] {
                     let first = self.layout.len();
                     self.layout.extend_from_slice(&list.picked);
