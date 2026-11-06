@@ -1483,7 +1483,14 @@ impl RenderFeature for SoftBodyFeature {
         }
 
         // Upload.
-        let _upload = tracing::info_span!("softbody: upload").entered();
+        let _upload = tracing::info_span!(
+            "softbody: upload",
+            vertex_kb = std::mem::size_of_val(geo.vertices.as_slice()) / 1024,
+            index_kb = std::mem::size_of_val(geo.indices.as_slice()) / 1024,
+            point_kb = std::mem::size_of_val(geo.points.as_slice()) / 1024,
+            guide_kb = std::mem::size_of_val(geo.guides.as_slice()) / 1024
+        )
+        .entered();
         let (device, queue) = (&gpu.device, &gpu.queue);
         g.vertices
             .write(device, queue, bytemuck::cast_slice(&geo.vertices));
