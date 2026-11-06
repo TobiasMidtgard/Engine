@@ -1420,13 +1420,18 @@ impl ScriptRuntime {
             world.resource::<Time>().source(),
             engine_core::time::TimeSource::Manual { .. }
         );
-        let over = || budgeted && started.elapsed().as_secs_f64() * 1000.0 > START_BUDGET_MS;
+        // At least one starts every frame, however late the frame began (a busy machine can
+        // preempt this thread past the budget before the first): otherwise none might start.
+        let mut made = 0usize;
+        let over = |made: usize| {
+            budgeted && made > 0 && started.elapsed().as_secs_f64() * 1000.0 > START_BUDGET_MS
+        };
         for (e, script, tick, placed) in seen {
             let Some(script) = script else { continue };
             let path = normalize(&script.path);
             // A new one waits for a later frame once the budget is spent, before its file is
             // even loaded (loading and compiling a script was the frame's cost).
-            if !self.instances.contains_key(&e) && over() {
+            if !self.instances.contains_key(&e) && over(made) {
                 continue;
             }
             // A new `parallel_update` script goes to an actor VM (unless placed already).
@@ -1459,13 +1464,15 @@ impl ScriptRuntime {
                     }
                 }
                 // Waits for a later frame: it is still new (or changed) then.
-                _ if over() => {}
+                _ if over(made) => {}
                 Some(_) => {
+                    made += 1;
                     let _span = tracing::info_span!("scripts: restart").entered();
                     self.destroy_instance(e, settings);
                     self.create_instance(e, &script, tick, settings);
                 }
                 None => {
+                    made += 1;
                     let _span = tracing::info_span!("scripts: create").entered();
                     let t = Instant::now();
                     self.create_instance(e, &script, tick, settings);
