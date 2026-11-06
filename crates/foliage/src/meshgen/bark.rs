@@ -86,11 +86,14 @@ pub enum BarkKind {
     Aspen,
     /// Mushroom stems: pale, fibrous, silky.
     Stem,
+    /// A palm's stem: grey, ringed close all the way up with the scars of shed fronds, with
+    /// fine vertical cracks between (coconut palm).
+    Palm,
 }
 
 impl BarkKind {
     /// Every kind.
-    pub const ALL: [BarkKind; 8] = [
+    pub const ALL: [BarkKind; 9] = [
         BarkKind::Oak,
         BarkKind::Birch,
         BarkKind::Pine,
@@ -99,6 +102,7 @@ impl BarkKind {
         BarkKind::Beech,
         BarkKind::Aspen,
         BarkKind::Stem,
+        BarkKind::Palm,
     ];
 
     /// The bark that suits a species, from its form and bark style. `None` for plants without
@@ -112,6 +116,7 @@ impl BarkKind {
             (_, BarkStyle::Smooth) => BarkKind::Hazel,
             (_, BarkStyle::Beech) => BarkKind::Beech,
             (_, BarkStyle::Aspen) => BarkKind::Aspen,
+            (_, BarkStyle::Palm) => BarkKind::Palm,
             (PlantForm::Conifer, _) => BarkKind::Spruce,
             (PlantForm::Shrub, _) => BarkKind::Hazel,
             _ => BarkKind::Oak,
@@ -125,6 +130,8 @@ impl BarkKind {
             BarkKind::Oak | BarkKind::Pine => [2048, 2048, 512],
             BarkKind::Birch | BarkKind::Spruce => [2048, 1024, 512],
             BarkKind::Hazel | BarkKind::Beech | BarkKind::Aspen => [1024, 1024, 512],
+            // Its rings are coarse relief (9 cm apart): a half-size normal map holds them.
+            BarkKind::Palm => [1024, 512, 256],
             BarkKind::Stem => [512, 512, 256],
         }
     }
@@ -140,6 +147,7 @@ impl BarkKind {
             BarkKind::Hazel => srgb(0x7a6553),
             BarkKind::Beech => srgb(0x77746c),
             BarkKind::Aspen => srgb(0x93948a),
+            BarkKind::Palm => srgb(0x8a8276),
             BarkKind::Stem => return None,
         })
     }
@@ -164,6 +172,7 @@ impl BarkKind {
             BarkKind::Spruce => 0.9,
             BarkKind::Birch => 0.8,
             BarkKind::Hazel | BarkKind::Beech | BarkKind::Aspen => 0.7,
+            BarkKind::Palm => 0.9,
             BarkKind::Stem => 0.6,
         }
     }
@@ -177,6 +186,7 @@ impl BarkKind {
             BarkKind::Spruce => (0.4, 0.025),
             BarkKind::Birch => (0.3, 0.025),
             BarkKind::Hazel | BarkKind::Beech | BarkKind::Aspen => (0.3, 0.015),
+            BarkKind::Palm => (0.35, 0.02),
             BarkKind::Stem => (0.2, 0.01),
         }
     }
@@ -282,6 +292,7 @@ fn relief(kind: BarkKind) -> Relief {
         BarkKind::Birch => r(0.004, 0.0012, 0.3, 0.45),
         BarkKind::Hazel | BarkKind::Beech => r(0.003, 0.0006, 0.2, 0.35),
         BarkKind::Aspen => r(0.004, 0.0008, 0.3, 0.4),
+        BarkKind::Palm => r(0.008, 0.0025, 0.45, 0.55),
         BarkKind::Stem => r(0.003, 0.0006, 0.15, 0.3),
     }
 }
@@ -891,6 +902,7 @@ fn paint_bark(kind: BarkKind, t: &Tile, x: f32, y: f32) -> Texel {
         BarkKind::Hazel => hazel(t, x, y),
         BarkKind::Beech => beech(t, x, y),
         BarkKind::Aspen => aspen(t, x, y),
+        BarkKind::Palm => palm(t, x, y),
         BarkKind::Stem => stem(t, x, y),
     }
 }
@@ -1397,6 +1409,44 @@ fn aspen(t: &Tile, x: f32, y: f32) -> Texel {
     }
 }
 
+/// Palm stem (coconut): grey to grey-brown, ringed close all the way up by the scars where
+/// fronds were shed, each a low rounded band with a dark crease under it, wavy and broken in
+/// places; fine vertical cracks between the rings, pale lichen and darker weathering in
+/// patches (Chan & Elevitch 2006, Cocos nucifera, Species Profiles for Pacific Island
+/// Agroforestry).
+fn palm(t: &Tile, x: f32, y: f32) -> Texel {
+    let s = t.seed;
+    let (u, v) = (x / t.wm, y / t.hm);
+    let low = fbm(u, v, 2, 2, 4, 0.5, s + 1);
+    let mut c = srgb3(0x7f786c).lerp(srgb3(0x9c9486), 0.5 + 0.5 * low);
+    let brown = smoothstep(0.1, 0.6, fbm(u, v, 3, 4, 3, 0.5, s + 2));
+    c = c.lerp(srgb3(0x7a6a58), brown * 0.4);
+    // Rings: 12 to the tile (about 9 cm apart), each wandering a little up and down round
+    // the stem.
+    let phase = v * 12.0 + 0.35 * fbm(u, v, 4, 2, 3, 0.5, s + 3);
+    let f = phase - phase.floor();
+    let band = smoothstep(0.0, 0.2, f) * (1.0 - smoothstep(0.55, 0.85, f));
+    let broken = smoothstep(-0.35, 0.15, fbm(u, v, 9, 12, 2, 0.5, s + 4));
+    let crease = (1.0 - smoothstep(0.0, 0.06, (f - 0.92).abs())) * broken;
+    c *= 0.92 + 0.12 * band;
+    c = c.lerp(srgb3(0x3a342c), crease * 0.7);
+    // Fine vertical cracks: zero lines of noise stretched along the stem, short.
+    let crack_n = tile_noise(u, v, 60, 6, s + 5);
+    let crack = (1.0 - smoothstep(0.0, 0.05, crack_n.abs()))
+        * smoothstep(0.0, 0.5, fbm(u, v, 6, 10, 2, 0.5, s + 6));
+    c *= 1.0 - 0.3 * crack;
+    let lichen_n = fbm(u, v, 5, 6, 4, 0.6, s + 7);
+    let lichen = smoothstep(0.42, 0.47, lichen_n);
+    c = c.lerp(srgb3(0xc4c2b8), lichen * 0.6);
+    c *= 0.96 + 0.08 * speckle(u, v, s + 8).clamp(-0.5, 0.5);
+    Texel {
+        h: 0.0012 * band - 0.0016 * crease - 0.0005 * crack + 0.0001 * lichen,
+        albedo: c,
+        rough: 0.85 - 0.1 * band + 0.05 * lichen,
+        ao: 1.0 - 0.2 * crease,
+    }
+}
+
 /// Mushroom stems: off-white silky fibrils running along the stem, a few darker flecks.
 fn stem(t: &Tile, x: f32, y: f32) -> Texel {
     let s = t.seed;
@@ -1497,6 +1547,10 @@ fn wood_params(kind: BarkKind) -> WoodParams {
         ),
         BarkKind::Stem => w(
             6.0, 0xe8e2d6, 0xe8e2d6, 0.0, 0.05, 0.0, 0.97, 0xe0dacd, 0xe8e2d6, 0,
+        ),
+        // Palm: no growth rings (a monocot), a fibrous buff face, darker toward the rind.
+        BarkKind::Palm => w(
+            3.0, 0xcdb48c, 0xb89a72, 0.0, 0.08, 0.0, 0.93, 0x8a6e50, 0x8a8276, 1,
         ),
     }
 }

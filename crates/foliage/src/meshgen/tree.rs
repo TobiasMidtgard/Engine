@@ -1595,6 +1595,11 @@ fn bark_color(sp: &PlantSpecies, y: f32, h: f32, ring: usize, around: f32, seed:
             let moss = Vec3::new(0.06, 0.09, 0.025);
             base.lerp(moss, (1.0 - (y / 0.9).min(1.0)).powi(2) * 0.6) * (0.8 + 0.3 * n)
         }
+        BarkStyle::Palm => {
+            // Darker and browner at the foot, where sand and rain splash it.
+            let foot = base * Vec3::new(0.7, 0.66, 0.6);
+            foot.lerp(base, smoothstep(0.0, 1.5, y)) * (0.92 + 0.12 * n)
+        }
         BarkStyle::Smooth | BarkStyle::Beech => {
             // Thin bark barely changes up the stem; green algae climb a little way from the
             // foot.
@@ -1630,6 +1635,7 @@ fn bark_weathering(style: BarkStyle, y: f32, around: f32, seed: u64) -> Vec3 {
         // Beech and rowan bark carries algae and crustose lichen in big patches.
         BarkStyle::Smooth | BarkStyle::Beech => (0.55, 0.35, 0.06),
         BarkStyle::Aspen => (0.3, 0.2, 0.04),
+        BarkStyle::Palm => (0.25, 0.3, 0.1),
         BarkStyle::Scaly => (0.35, 0.25, 0.04),
     };
     let patch = 0.65 * bark::periodic_noise(around * 3.0, y * 0.8, 3, 1 << 12, seed ^ 0x1c4e)
@@ -2106,7 +2112,8 @@ fn assemble(
         let color = |i: usize, a: f32| bark_color(sp, path[i].y, h, i, a, seed);
         let cap = |r: f32| cut_color(rim, r);
         b.tube(path, rad, TRUNK_SIDES, 0.5, &color, None, Some(&cap));
-        if sp.trunk_radius_m > 0.12 {
+        // A palm stands on a bulb of thin fibrous roots, with no flares.
+        if sp.trunk_radius_m > 0.12 && sp.shape.leaf != LeafStyle::Palm {
             // Root flares: broad, low ridges that leave the flared foot and sink into the
             // ground. Their round sections are mostly buried and stay thick until they are
             // under the ground, so they read as rounded buttresses rather than pointed fins.

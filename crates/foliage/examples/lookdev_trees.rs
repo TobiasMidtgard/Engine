@@ -13,7 +13,7 @@
 //! 150 m, and a wood of 12,000 scenery trees from a hill (with and without the distant level). Name shots after the directory to render
 //! only those (`lineup`, `lineup_near`, `lineup_mid`, `lineup_lod`, `lineup_distant`, `roots`, `crown_front`,
 //! `leaves_close`, `crown_back`, `conifers`, `lineup_stands` (the stands' other eight trees), `pine_crown`, `birch_hazel`, `grove`,
-//! `grove_far`, `savanna`, `savanna_side`, `savanna_high`, `prairie`, `rainforest`, `rainforest_below`, `beach`, `beach_crown`, `canada`, `canada_close`, `valley`, `valley_far`, `far_woods`, `far_woods_off`), `textures`
+//! `grove_far`, `savanna`, `savanna_side`, `savanna_high`, `prairie`, `rainforest`, `rainforest_below`, `beach`, `beach_crown`, `beach_stem`, `canada`, `canada_close`, `valley`, `valley_far`, `far_woods`, `far_woods_off`), `textures`
 //! to save the leaf atlases, their normal maps, three of their mip levels and the mass atlases far
 //! crowns draw with instead, or `stats` to print triangle counts.
 
@@ -439,6 +439,7 @@ fn main() {
     }
     // A tropical shore 600 m ahead: coconut palms leaning out over the sand toward the sea.
     let beach = DVec3::new(0.0, 0.0, -600.0);
+    let mut palms = Vec::new();
     if only_sp.as_deref().is_none_or(|o| o == "coconut palm") {
         app.world.spawn((
             Transform::from_translation(beach + DVec3::new(-60.0, 0.03, 0.0)),
@@ -474,6 +475,7 @@ fn main() {
                     (k as f64 - 4.0) * 11.0 + rng.range(-3.0, 3.0) as f64,
                 );
             spawn_plant(&mut app.world, "coconut palm", p, 1.0, Some(g)).unwrap();
+            palms.push(p);
         }
     }
     // A Canadian Shield lake shore 600 m off diagonally: a wall of black spruce spires with
@@ -791,6 +793,17 @@ fn main() {
             "beach_crown",
             beach + DVec3::new(-20.0, 1.6, 16.0),
             beach + DVec3::new(-6.0, 17.0, 0.0),
+            Vec3::new(-0.5, 0.6, 0.6),
+        );
+    }
+    if wanted("beach_stem") {
+        // A stem up close: the rings of shed fronds, the swollen foot in the sand.
+        shot(
+            &mut app,
+            &out,
+            "beach_stem",
+            palms.first().copied().unwrap_or(beach) + DVec3::new(3.6, 1.3, 2.6),
+            palms.first().copied().unwrap_or(beach) + DVec3::new(0.0, 1.6, 0.0),
             Vec3::new(-0.5, 0.6, 0.6),
         );
     }

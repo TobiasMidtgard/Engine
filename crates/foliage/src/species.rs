@@ -207,6 +207,8 @@ pub enum BarkStyle {
     /// Smooth pale cream- to greenish-grey with black diamond branch scars, rough and dark at
     /// the foot of old stems.
     Aspen,
+    /// A palm's stem: grey, ringed close all the way up with frond scars.
+    Palm,
 }
 
 /// The shape knobs of the mesh generator (per species; each plant also varies by its genes and
@@ -1688,7 +1690,7 @@ fn regional_trees() -> Vec<PlantSpecies> {
                 leaf_size_m: 1.3,
                 leaf_density: 1.0,
                 leaf: LeafStyle::Palm,
-                bark: BarkStyle::Smooth,
+                bark: BarkStyle::Palm,
                 forks: 0,
             },
             fuel_kg: 400.0,
