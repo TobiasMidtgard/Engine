@@ -95,6 +95,15 @@ pub struct PhysicsSettings {
     /// is ready or the step something moving comes near it (`crate::shape_jobs`). Off = every
     /// shape is built in the step that finds it, as before.
     pub static_meshes_off_frame: bool,
+    /// Step Rapier beside the frame's drawing instead of inside its fixed step, as PhysX's
+    /// `simulate` and `fetchResults` and Unreal's async physics do (`crate::overlap`): the
+    /// fixed step reads the world into the simulation, the step runs on its own thread from
+    /// the end of `PostUpdate` while the frame extracts, draws and ends, and its results are
+    /// written back at the start of the next frame, before anything reads them. Gameplay in
+    /// `FixedUpdate` sees the last step's results as before; what is drawn is half a step
+    /// later at 120 FPS. Bodies are drawn between steps (`TransformInterpolation`). Off by
+    /// default: headless apps and tests step inside the fixed step.
+    pub overlap_frame: bool,
 }
 
 impl Default for PhysicsSettings {
@@ -122,6 +131,7 @@ impl Default for PhysicsSettings {
             max_articulated: 4,
             articulate_within_m: 20.0,
             static_meshes_off_frame: true,
+            overlap_frame: false,
         }
     }
 }
