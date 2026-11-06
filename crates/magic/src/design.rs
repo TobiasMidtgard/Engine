@@ -120,10 +120,10 @@ impl CastType {
         )
     }
 
-    /// The engine runs it this round. Imbue (needs the combat module's weapons), Tether and
-    /// Summon (needs a body contract) are still data only and cast as the nearest form.
+    /// The engine runs it. Imbue (it needs the combat module's weapons) is still data only and
+    /// casts as a touch.
     pub fn runs(self) -> bool {
-        !matches!(self, CastType::Imbue | CastType::Tether | CastType::Summon)
+        !matches!(self, CastType::Imbue)
     }
 
     /// Base mana of a spell of this form at the caster's own power.
@@ -162,6 +162,7 @@ impl CastType {
             CastType::Aura => 0.3,
             CastType::Rune => 1.2,
             CastType::Orbit => 0.5,
+            CastType::Tether => 0.4,
             CastType::Chain => 0.75,
             CastType::Rain => 0.45,
             _ => 1.0,

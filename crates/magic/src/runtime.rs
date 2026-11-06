@@ -7,9 +7,10 @@
 //! |---|---|---|
 //! | [`Missile`] | bolt, lob, orbit, rain drops, forks | a sphere swept along each step's path |
 //! | [`Field`] | area, aura, wall, wave, rune, cone, linger, blast | an overlap on its tick |
-//! | [`BeamCast`] | beam (and tether) | a ray each tick |
+//! | [`BeamCast`] | beam, and tether (which holds one body: tether.rs) | a ray each tick |
 //! | [`ChainArc`] | chain, and chain modifiers and reactions | the nearest creature not yet hit |
 //! | instant | touch, self | at release |
+//! | [`crate::summon::Minion`] | summon | its own eyes: the nearest foe, or the most hurt ally |
 //!
 //! Every system here only reads the world and writes its own components; what it finds goes
 //! into the [`HitQueue`] (applied in `hits.rs`), and what must be spawned or shown goes into the
@@ -178,6 +179,8 @@ pub struct BeamCast {
     pub drawn: bool,
     /// The age its look lasts until; a channel held past it draws again.
     pub drawn_until: f32,
+    /// A tether's hold on its body (tether.rs): set on its first tick.
+    pub tether: Option<crate::tether::TetherLink>,
 }
 
 /// Lightning (or blood, or plague) jumping from body to body.
@@ -259,6 +262,8 @@ pub struct MagicQueue {
     pub stones: Vec<crate::stone::NewStone>,
     /// Stones that found their ground and become solid now (pillars), with their size.
     pub solids: Vec<(Entity, Vec3)>,
+    /// Summoned creatures to put into the world (summon.rs).
+    pub minions: Vec<crate::summon::NewMinion>,
 }
 
 /// Bodies spells look for: anything with health, a skeleton or a character controller.
@@ -623,6 +628,20 @@ pub fn release(
     let dir = to_aim.normalize_or(forward);
     let flat = Vec3::new(dir.x, 0.0, dir.z).normalize_or(Vec3::NEG_Z);
     let exclude = info.caster.map(QueryFilter::excluding).unwrap_or_default();
+    // A summon stands where the caster points, within its range: a golem, an elemental or a
+    // wisp, by its weave (summon.rs). A weave that makes no creature casts as an area.
+    if spell.cast == CastType::Summon
+        && let Some(kind) = crate::summon::kind_of(spell)
+    {
+        let spot = crate::summon::place(body, aim_point, c.range);
+        queue.minions.push(crate::summon::NewMinion {
+            kind,
+            cast: info.clone(),
+            at: ground_below(queries, spot, &exclude),
+            facing: flat,
+        });
+        return;
+    }
     // Stone cast on an area (or on the caster) is a pillar rising under it: it lifts what
     // stands there by pushing it, so it takes the place of the field and of any lift.
     if spell.payload.stone_m > 0.0
@@ -714,7 +733,8 @@ pub fn release(
                 ));
             }
         }
-        CastType::Beam => {
+        // A tether is a beam that links to its body on its first tick (tether.rs).
+        CastType::Beam | CastType::Tether => {
             queue.spawns.push(Spawn::Beam(
                 BeamCast {
                     cast: info.clone(),
@@ -728,6 +748,7 @@ pub fn release(
                     end: aim_point,
                     drawn: false,
                     drawn_until: 0.0,
+                    tether: None,
                 },
                 hand,
             ));
@@ -851,9 +872,9 @@ pub fn release(
                 at,
             ));
         }
-        CastType::Area | CastType::Summon | CastType::Tether => {
+        CastType::Area | CastType::Summon => {
             let at = ground_below(queries, aim_point, &exclude);
-            let kind = if c.duration > 0.0 {
+            let kind = if c.duration > 0.0 && spell.cast == CastType::Area {
                 FieldKind::Lasting
             } else {
                 FieldKind::Burst
@@ -1434,12 +1455,15 @@ pub fn tick_fields(
 
 /// Hold beams on their aim and hit what they touch each tick.
 #[allow(clippy::type_complexity)]
+#[allow(clippy::too_many_arguments)]
 pub fn tick_beams(
     time: Res<Time>,
     queries: Res<PhysicsQueries>,
     mut beams: Query<(Entity, &mut BeamCast, &mut SpellPos)>,
     casters: Query<(&GlobalTransform, &MagicCaster)>,
     anchors: Query<&GlobalTransform>,
+    creatures: Query<(), CreatureFilter>,
+    bodies: Query<&RigidBody>,
     mut hits: ResMut<HitQueue>,
     mut queue: ResMut<MagicQueue>,
 ) {
@@ -1457,6 +1481,78 @@ pub fn tick_beams(
             .map(|(g, c)| hand_of(g, c))
             .unwrap_or(sp.pos);
         sp.pos = from;
+        if spell.cast == CastType::Tether {
+            // It links to its body on its first tick: something alive or loose, never the
+            // floor. With nothing there it fizzles.
+            if b.tether.is_none() {
+                let (aimed, point) = match b.aim {
+                    Aim::Entity(t) => match anchors.get(t) {
+                        // A body out of reach can't be linked (it would snap at once).
+                        Ok(g) => {
+                            let at = g.translation() + DVec3::Y * 1.1;
+                            let near = at.distance(from) <= spell.carrier.range as f64;
+                            (near.then_some(t), at)
+                        }
+                        Err(_) => (None, b.end),
+                    },
+                    Aim::Point(p) => (None, p),
+                    Aim::Direction(d) => (None, from + (d * spell.carrier.range).as_dvec3()),
+                };
+                let exclude = b
+                    .cast
+                    .caster
+                    .map(QueryFilter::excluding)
+                    .unwrap_or_default();
+                let linked = crate::tether::link_target(
+                    &queries,
+                    from,
+                    point,
+                    aimed,
+                    spell.carrier.range,
+                    &exclude,
+                    |x| {
+                        creatures.contains(x)
+                            || bodies.get(x).is_ok_and(|r| r.kind == BodyKind::Dynamic)
+                    },
+                );
+                match linked {
+                    Some(t) => {
+                        b.tether = Some(crate::tether::TetherLink::new(t, spell.carrier.range));
+                        b.aim = Aim::Entity(t);
+                    }
+                    None => {
+                        queue.looks.push(LookCmd::Burst {
+                            at: point,
+                            up: Vec3::Y,
+                            look: spell.weave.key.clone(),
+                            role: Role::Fizzle,
+                            scale: 0.5,
+                            color: spell.weave.color,
+                        });
+                        queue.despawn.push(e);
+                        continue;
+                    }
+                }
+            }
+            let to = b
+                .tether
+                .and_then(|l| anchors.get(l.target).ok())
+                .map(|g| g.translation() + DVec3::Y * 1.1);
+            let over = crate::tether::tick_tether(
+                &mut b,
+                from,
+                to,
+                dt,
+                &queries,
+                |x| creatures.contains(x),
+                &mut hits,
+                &mut queue,
+            );
+            if over {
+                queue.despawn.push(e);
+            }
+            continue;
+        }
         let aim = match b.aim {
             Aim::Entity(t) => anchors
                 .get(t)
@@ -2092,6 +2188,9 @@ pub fn flush(
     }
     for s in std::mem::take(&mut queue.stones) {
         crate::stone::spawn_stone(&mut commands, s);
+    }
+    for m in std::mem::take(&mut queue.minions) {
+        crate::summon::spawn_minion(&mut commands, m, &mut looks);
     }
     for (e, size) in queue.solids.drain(..) {
         if let Ok(mut ec) = commands.get_entity(e) {

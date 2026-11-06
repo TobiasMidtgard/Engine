@@ -478,7 +478,10 @@ pub fn drive_spell_bars(
                             let end = b.age + CHANNEL_GRACE_SECS;
                             if going {
                                 b.duration = b.duration.max(end);
-                                if let Some(p) = target {
+                                // A tether stays on its body; a beam follows the crosshair.
+                                if let Some(p) = target
+                                    && b.cast.spell.cast != CastType::Tether
+                                {
                                     b.aim = Aim::Point(p);
                                 }
                             } else {

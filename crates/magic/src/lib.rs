@@ -17,6 +17,8 @@
 //! | [`status`] | element gauges, reactions, statuses |
 //! | [`meet`] | spells that meet |
 //! | [`stone`] | Shaping: stone walls, pillars, steps and grips that are physics bodies |
+//! | [`summon`] | summoned golems, elementals and wisps that walk or float, fight and fall |
+//! | [`tether`] | tethers: a link to one body that works each tick and snaps when stretched |
 //! | [`looks`] | how spells look, through the particles module's API |
 //! | [`player`] | the player's spell bar: keys 1-8, camera aim, charge, channel, place, HUD |
 //! | [`api`] | `magic.*` |
@@ -43,6 +45,8 @@ pub mod runtime;
 pub mod schools;
 pub mod status;
 pub mod stone;
+pub mod summon;
+pub mod tether;
 pub mod walls;
 
 use engine_core::prelude::*;
@@ -130,6 +134,7 @@ impl Plugin for MagicPlugin {
                     player::read_spell_keys,
                     player::show_place_rings,
                     player::write_hud,
+                    tether::draw_tethers,
                 )
                     .chain(),
             )
@@ -145,6 +150,7 @@ impl Plugin for MagicPlugin {
                     )
                         .chain(),
                     meet::meet_spells,
+                    summon::run_minions,
                 )
                     .chain()
                     .in_set(MagicSet::Carriers),
@@ -160,6 +166,7 @@ impl Plugin for MagicPlugin {
                     runtime::tend_pieces,
                     walls::rise_walls,
                     stone::raise_stone,
+                    summon::settle_rubble,
                 )
                     .chain()
                     .in_set(MagicSet::Hits),
@@ -171,7 +178,7 @@ impl Plugin for MagicPlugin {
             )
             .add_systems(
                 PostUpdate,
-                runtime::follow_world_shift
+                (runtime::follow_world_shift, summon::follow_world_shift)
                     .in_set(WorldShiftSet::Apply)
                     .before(runtime::sync_transforms),
             );

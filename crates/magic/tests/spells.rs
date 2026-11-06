@@ -932,3 +932,199 @@ fn a_press_while_the_hands_are_busy_waits_for_them() {
     );
     assert_eq!(bar.flash[6], 0.0, "and never flashed");
 }
+
+fn minions(app: &mut App) -> Vec<(Entity, summon::Minion)> {
+    let mut q = app.world.query::<(Entity, &summon::Minion)>();
+    q.iter(&app.world).map(|(e, m)| (e, m.clone())).collect()
+}
+
+fn rubble(app: &mut App) -> usize {
+    let mut q = app.world.query::<&summon::Rubble>();
+    q.iter(&app.world).count()
+}
+
+#[test]
+fn a_summoned_golem_rises_walks_to_a_dummy_and_punches_it() {
+    let mut app = app();
+    let me = mage(&mut app, DVec3::new(0.0, 0.0, 6.0), Mastery::Adept);
+    let d = dummy(&mut app, DVec3::new(0.0, 0.0, -4.0));
+    run(&mut app, 0.1);
+    let golem = SpellDesign::new(&["stone"], CastType::Summon)
+        .with(Modifier::Duration { factor: 0.15 })
+        .named("Stone golem");
+    cast(&mut app, me, golem, Aim::Point(DVec3::ZERO));
+    run(&mut app, 1.0);
+    // Out of the floor it comes.
+    let found = minions(&mut app);
+    assert_eq!(found.len(), 1);
+    let (g, m) = found[0].clone();
+    assert_eq!(m.kind, summon::MinionKind::Golem);
+    assert!(app.world.get::<Transform>(g).unwrap().translation.y < -0.5);
+    assert_eq!(m.parts.len(), summon::GOLEM_PARTS);
+    run(&mut app, 6.0);
+    // It walked to the dummy and hit it, and never its summoner.
+    let at = app.world.get::<Transform>(g).unwrap().translation;
+    assert!(at.z < -1.0, "it walked: {at}");
+    assert!(at.y.abs() < 0.05, "it stands on the floor: {at}");
+    let seen = app.world.resource::<Seen>();
+    let blows: Vec<_> = seen.damage.iter().filter(|x| x.source == Some(g)).collect();
+    assert!(!blows.is_empty(), "no punch landed");
+    assert!(blows.iter().all(|b| b.target == d));
+    assert!(
+        blows
+            .iter()
+            .all(|b| b.amount > 0.0 && b.impulse.length() > 0.0)
+    );
+    // Nine seconds (0.15 of a minute) after it came it falls apart into rubble.
+    run(&mut app, 3.5);
+    assert!(minions(&mut app).is_empty());
+    assert!(rubble(&mut app) >= 15, "{}", rubble(&mut app));
+}
+
+#[test]
+fn a_second_summon_of_a_kind_replaces_the_first() {
+    let mut app = app();
+    let me = mage(&mut app, DVec3::new(0.0, 0.0, 6.0), Mastery::Adept);
+    run(&mut app, 0.1);
+    let golem = SpellDesign::new(&["stone"], CastType::Summon);
+    cast(
+        &mut app,
+        me,
+        golem.clone(),
+        Aim::Point(DVec3::new(-2.0, 0.0, 0.0)),
+    );
+    run(&mut app, 1.5);
+    let first = minions(&mut app)[0].0;
+    cast(&mut app, me, golem, Aim::Point(DVec3::new(2.0, 0.0, 0.0)));
+    run(&mut app, 1.5);
+    let now = minions(&mut app);
+    assert_eq!(now.len(), 1, "an Adept keeps one golem");
+    assert_ne!(now[0].0, first);
+    assert!(rubble(&mut app) > 0, "the first fell apart");
+}
+
+#[test]
+fn a_frost_elemental_shoots_foes_and_spares_friends() {
+    let mut app = app();
+    let me = mage(&mut app, DVec3::new(0.0, 0.0, 6.0), Mastery::Adept);
+    let friend = mage(&mut app, DVec3::new(-3.0, 0.0, 5.0), Mastery::Adept);
+    app.world.entity_mut(friend).insert(Body(0.5));
+    let d = dummy(&mut app, DVec3::new(0.0, 0.0, -6.0));
+    run(&mut app, 0.1);
+    cast(
+        &mut app,
+        me,
+        SpellDesign::new(&["frost"], CastType::Summon),
+        Aim::Point(DVec3::new(2.0, 0.0, 4.0)),
+    );
+    run(&mut app, 6.0);
+    let found = minions(&mut app);
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].1.kind, summon::MinionKind::Elemental);
+    let e = found[0].0;
+    let at = app.world.get::<Transform>(e).unwrap().translation;
+    assert!(at.y > 1.4, "it floats: {at}");
+    let shots: Vec<_> = hits_on(&app, d)
+        .into_iter()
+        .filter(|h| h.caster == Some(e))
+        .collect();
+    assert!(shots.len() >= 2, "{} shots", shots.len());
+    assert!(
+        shots
+            .iter()
+            .all(|h| h.spell.element() == Some(Element::Frost))
+    );
+    assert!(hits_on(&app, friend).is_empty());
+    assert!(hits_on(&app, me).is_empty());
+}
+
+#[test]
+fn a_wisp_heals_its_wounded_summoner() {
+    let mut app = app();
+    let me = mage(&mut app, DVec3::new(0.0, 0.0, 6.0), Mastery::Adept);
+    run(&mut app, 0.1);
+    app.world.get_mut::<Vitality>(me).unwrap().health = 30.0;
+    cast(
+        &mut app,
+        me,
+        SpellDesign::new(&["heal"], CastType::Summon),
+        Aim::Point(DVec3::new(1.0, 0.0, 3.0)),
+    );
+    run(&mut app, 5.0);
+    let found = minions(&mut app);
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].1.kind, summon::MinionKind::Wisp);
+    let health = app.world.get::<Vitality>(me).unwrap().health;
+    assert!(health > 70.0, "{health}");
+}
+
+fn tethers(app: &mut App) -> Vec<tether::TetherLink> {
+    let mut q = app.world.query::<&runtime::BeamCast>();
+    q.iter(&app.world).filter_map(|b| b.tether).collect()
+}
+
+#[test]
+fn a_tether_ticks_on_its_body_and_snaps_when_it_is_thrown_past_the_break() {
+    let mut app = app();
+    let me = mage(&mut app, DVec3::ZERO, Mastery::Adept);
+    let d = dummy(&mut app, DVec3::new(0.0, 0.0, -8.0));
+    let other = dummy(&mut app, DVec3::new(3.0, 0.0, -4.0));
+    run(&mut app, 0.1);
+    cast(
+        &mut app,
+        me,
+        SpellDesign::new(&["storm"], CastType::Tether),
+        Aim::Entity(d),
+    );
+    run(&mut app, 1.8);
+    let links = tethers(&mut app);
+    assert_eq!(links.len(), 1);
+    assert_eq!(links[0].target, d);
+    assert!(links[0].strain < 0.3, "slack at 8 m: {}", links[0].strain);
+    let ticks = hits_on(&app, d).len();
+    assert!(ticks >= 4, "{ticks} ticks");
+    // Something walking across the line is hit too.
+    app.world.get_mut::<Transform>(other).unwrap().translation = DVec3::new(0.0, 0.0, -4.0);
+    run(&mut app, 0.6);
+    assert!(!hits_on(&app, other).is_empty(), "the crossing body");
+    // Thrown past 1.3 times its range, it snaps and stops.
+    app.world.get_mut::<Transform>(d).unwrap().translation = DVec3::new(0.0, 0.0, -30.0);
+    run(&mut app, 0.2);
+    assert!(tethers(&mut app).is_empty(), "it snapped");
+    let after = hits_on(&app, d).len();
+    run(&mut app, 1.0);
+    assert_eq!(hits_on(&app, d).len(), after);
+}
+
+#[test]
+fn a_tether_with_nothing_to_hold_fizzles_and_one_held_to_the_end_lands() {
+    let mut app = app();
+    let me = mage(&mut app, DVec3::ZERO, Mastery::Adept);
+    let d = dummy(&mut app, DVec3::new(0.0, 0.0, -6.0));
+    run(&mut app, 0.1);
+    // Aimed at empty floor off to the side: nothing to link.
+    cast(
+        &mut app,
+        me,
+        SpellDesign::new(&["frost"], CastType::Tether),
+        Aim::Point(DVec3::new(9.0, 0.0, 2.0)),
+    );
+    run(&mut app, 1.0);
+    assert!(tethers(&mut app).is_empty());
+    assert!(hits_on(&app, d).is_empty());
+    // On the dummy for its whole time: ticks, then one landing hit.
+    cast(
+        &mut app,
+        me,
+        SpellDesign::new(&["frost"], CastType::Tether),
+        Aim::Entity(d),
+    );
+    run(&mut app, 2.5);
+    // Its frost builds up on the body as it holds.
+    let st = app.world.get::<Statuses>(d).copied().unwrap_or_default();
+    assert!(st.frozen || st.chill >= 2, "{st:?}");
+    run(&mut app, 3.0);
+    assert!(tethers(&mut app).is_empty(), "over after 4 s");
+    let hits = hits_on(&app, d);
+    assert!(hits.len() >= 12, "{}", hits.len());
+}

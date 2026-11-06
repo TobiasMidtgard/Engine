@@ -16,6 +16,7 @@
 //! | `spells_duel` | six Adept students against three Ascended masters, chasing reactions and moving between casts ([`duel`]) |
 //! | `spells_shaping` | stone that is really there: a wall bolts burst on, pillars lifting a dummy and a crate stack, a stone grip, steps, a frost wall beside a stone one |
 //! | `spells_player` | the player's spell bar over the shoulder: charge, place, chain, channel, with the HUD hotbar and mana ([`player`]) |
+//! | `spells_summon` | summons and tethers: a stone golem and a lava golem walking to dummies and punching them, frost and storm elementals shooting, a wisp healing a wounded mage, a tether hauling a dummy in, then one snapping |
 //!
 //! The mages wear hooded robes coloured by mastery (the character contract's `Appearance`).
 //!
@@ -39,6 +40,7 @@ use crate::hits::SpellHit;
 use crate::runtime::{BeamCast, ChainArc, Field, Missile, Rainfall};
 use crate::schools::Mastery;
 use crate::status::Afflictions;
+use crate::summon::{Minion, Rubble};
 use art::*;
 
 /// A viewpoint on the hall: eye and target relative to the zone's center, the hour, the
@@ -142,6 +144,16 @@ pub const VIEWS: &[DemoView] = &[
         // cooling and the mana bar draining.
         warmup: 6.0,
     },
+    DemoView {
+        key: "spells_summon",
+        name: "Summons and tethers: golems, elementals, a wisp, a chain haul and a snap",
+        // From the dais's east end, past the elementals by the plinths, down to the golems.
+        eye: [11.0, 5.2, 15.0],
+        target: [-2.0, 1.4, -3.0],
+        hour: 16.6,
+        // Both golems at their dummies mid-punch, the elementals firing, the chain hauling.
+        warmup: 5.6,
+    },
 ];
 
 /// What the hall is running.
@@ -159,10 +171,11 @@ pub enum Program {
     Duel,
     Shaping,
     Player,
+    Summon,
 }
 
 impl Program {
-    pub const ALL: [Program; 10] = [
+    pub const ALL: [Program; 11] = [
         Program::Mastery,
         Program::Elements,
         Program::Combos,
@@ -173,6 +186,7 @@ impl Program {
         Program::Duel,
         Program::Shaping,
         Program::Player,
+        Program::Summon,
     ];
 
     pub fn key(self) -> &'static str {
@@ -187,6 +201,7 @@ impl Program {
             Program::Duel => "spells_duel",
             Program::Shaping => "spells_shaping",
             Program::Player => "spells_player",
+            Program::Summon => "spells_summon",
         }
     }
 
@@ -209,6 +224,8 @@ impl Program {
             // standing, 1.2 s down), so the props reset onto bare floor.
             Program::Shaping => 7.0,
             Program::Player => player::PERIOD,
+            // Summons last 10.8 s: each period they fall as rubble and rise again.
+            Program::Summon => 12.0,
         }
     }
 
@@ -513,6 +530,62 @@ fn lanes(program: Program, cycle: u64) -> Vec<Lane> {
                 casts: Vec::new(),
             })
             .collect(),
+        Program::Summon => {
+            let cast = |at: f32, design: SpellDesign, aim: AimAt| Cast {
+                at,
+                design: Some(design),
+                aim,
+            };
+            let casts = |casts: Vec<Cast>| Lane {
+                casts,
+                ..lane(SpellDesign::default())
+            };
+            // Gone before the next period's rise.
+            let summon = |fx: &[&str], name: &str| {
+                d(fx, CastType::Summon)
+                    .with(Modifier::Duration { factor: 0.18 })
+                    .named(name)
+            };
+            vec![
+                // A wisp for the wounded mage of the first lane.
+                casts(vec![cast(0.0, summon(&["heal"], "Wisp"), AimAt::Lane(7.0))]),
+                casts(vec![cast(
+                    0.0,
+                    summon(&["frost"], "Frost elemental"),
+                    AimAt::Lane(6.0),
+                )]),
+                casts(vec![cast(
+                    0.0,
+                    summon(&["stone"], "Stone golem"),
+                    AimAt::Lane(0.0),
+                )]),
+                casts(vec![cast(
+                    0.0,
+                    summon(&["fire", "stone"], "Lava golem"),
+                    AimAt::Lane(0.0),
+                )]),
+                casts(vec![cast(
+                    0.0,
+                    summon(&["storm"], "Storm elemental"),
+                    AimAt::Lane(6.0),
+                )]),
+                // A chain haul drags the dummy in; then a storm tether holds it until a push
+                // throws it past the break.
+                casts(vec![
+                    cast(
+                        0.3,
+                        d(&["pull"], CastType::Tether).named("Chain haul"),
+                        AimAt::Focus,
+                    ),
+                    cast(
+                        5.6,
+                        d(&["storm"], CastType::Tether).named("Storm tether"),
+                        AimAt::Focus,
+                    ),
+                    cast(7.0, d(&["push"], CastType::Bolt), AimAt::Focus),
+                ]),
+            ]
+        }
         // The hall's mages watch while the weaver works its spell bar (player::script_weaver).
         Program::Player => (0..LANES.len())
             .map(|_| Lane {
@@ -614,6 +687,8 @@ fn setup_program(
             With<BeamCast>,
             With<ChainArc>,
             With<Rainfall>,
+            With<Minion>,
+            With<Rubble>,
         )>,
     >,
 ) {
@@ -684,6 +759,13 @@ fn setup_program(
             } else {
                 commands.entity(e).insert(Vitality::new(300.0));
             }
+        }
+        // The summon program's first mage starts each period hurt, for its wisp to heal.
+        if program == Program::Summon && m.lane == 0 {
+            commands.entity(e).insert(Vitality {
+                health: 105.0,
+                ..Vitality::new(300.0)
+            });
         }
         let side = (program == Program::Duel).then_some([0.1, 0.35, 0.9]);
         let want = mage_look(m.lane, l.mastery, side);
@@ -775,6 +857,37 @@ fn setup_program(
             false,
         );
         commands.entity(grip).insert(ProgramProp);
+    }
+    if program == Program::Summon {
+        // Loose dummies for the golems to knock about and the tethers to haul; standing ones
+        // within the elementals' reach.
+        for (lane, z, dynamic) in [
+            (1, -3.0, false),
+            (2, -5.0, true),
+            (3, -5.0, true),
+            (4, -3.0, false),
+            (5, -2.0, true),
+        ] {
+            let dummy = spawn_dummy(
+                &mut commands,
+                origin + DVec3::new(LANES[lane], FLOOR, z),
+                lane,
+                true,
+                dynamic,
+            );
+            commands.entity(dummy).insert(ProgramProp);
+            if dynamic {
+                // Upright as a person keeps upright when shoved.
+                commands
+                    .entity(dummy)
+                    .insert(engine_world::physics::RigidBody {
+                        kind: engine_world::physics::BodyKind::Dynamic,
+                        mass_kg: Some(45.0),
+                        lock_rotation: [true, false, true],
+                        ..Default::default()
+                    });
+            }
+        }
     }
     if program == Program::Force {
         for (i, x) in LANES.iter().enumerate() {
@@ -872,7 +985,7 @@ fn run_hall(
     if hall.program == Program::Force && hall.cycle != cycle && hall.cycle % 2 == 0 {
         hall.reset_props = true;
     }
-    if hall.program == Program::Shaping && hall.cycle != cycle {
+    if matches!(hall.program, Program::Shaping | Program::Summon) && hall.cycle != cycle {
         hall.reset_props = true;
     }
     let plan = lanes(hall.program, cycle);
@@ -994,8 +1107,8 @@ pub fn build(app: &mut App) {
     .register_api(
         "magic.demo",
         "Run a Weaving hall program: spells_mastery, spells_elements, spells_combos, \
-         spells_forms, spells_meet, spells_force, spells_dark, spells_duel, spells_shaping or \
-         spells_player. \
+         spells_forms, spells_meet, spells_force, spells_dark, spells_duel, spells_shaping, \
+         spells_player or spells_summon. \
          With no program, lists them.",
         r#"{"program": "spells_combos"}"#,
         |world, args| {

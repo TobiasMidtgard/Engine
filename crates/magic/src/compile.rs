@@ -139,8 +139,7 @@ pub struct Spell {
     pub weave: Weave,
     #[serde(skip)]
     pub design: SpellDesign,
-    /// The cast type that runs (Imbue casts as Touch, Tether as Beam, Summon as Area until
-    /// their modules exist).
+    /// The cast type that runs (Imbue casts as Touch until the combat module's weapons exist).
     pub cast: CastType,
     pub carrier: Carrier,
     pub payload: Payload,
@@ -254,8 +253,6 @@ fn compile_inner(
     let dark = design.is_dark();
     let cast = match design.cast {
         CastType::Imbue => CastType::Touch,
-        CastType::Tether => CastType::Beam,
-        CastType::Summon => CastType::Area,
         c => c,
     };
     let size = ctx.power.size();
@@ -297,6 +294,11 @@ fn compile_inner(
         CastType::Chain => (0.0, 20.0, 0.0, 0.0, 0.0, 0.0),
         CastType::Rain => (22.0, 30.0, 5.0 * shape, 1.0, 2.5, 0.0),
         CastType::Touch => (0.0, 2.2, 0.4, 0.0, 0.0, 0.0),
+        // A link that works every quarter second for 4 s (or while held), and snaps when
+        // stretched past 1.3 times its range (tether.rs).
+        CastType::Tether => (0.0, 14.0, 0.1 * shape, 0.0, 4.0, 0.25),
+        // A creature placed within 14 m that stays a minute (Skyrim's atronachs; summon.rs).
+        CastType::Summon => (0.0, 14.0, 1.0 * shape, 0.0, 60.0, 0.0),
         _ => (0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
     };
     let split = count_of(&|m| match m {
@@ -399,7 +401,7 @@ fn compile_inner(
             * if unstable { 1.25 } else { 1.0 }
             * spread
             * woven
-            * if cast == CastType::Beam {
+            * if matches!(cast, CastType::Beam | CastType::Tether) {
                 carrier.tick * 3.0
             } else {
                 1.0
@@ -420,6 +422,15 @@ fn compile_inner(
     let force = defs.iter().find_map(|d| match d.kind {
         EffectKind::Force { dir, strength } => Some((dir, impulse * strength)),
         _ => None,
+    });
+    // A tether pulls on every tick: a steady haul (about 2 m/s a tick on a person), not a
+    // shove each time.
+    let force = force.map(|(d, i)| {
+        if cast == CastType::Tether {
+            (d, (i * tick * 1.5).min(90.0))
+        } else {
+            (d, i)
+        }
     });
     let has = |f: &dyn Fn(&EffectKind) -> bool| defs.iter().any(|d| f(&d.kind));
     let time = defs.iter().find_map(|d| match d.kind {
