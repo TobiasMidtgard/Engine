@@ -3,13 +3,21 @@
 //! with a note when neither is available.
 
 use engine_core::prelude::*;
-use engine_foliage::{FoliageLoading, FoliagePlugin, Genes, spawn_plant};
+use engine_foliage::{FoliageLoading, FoliagePlugin, Genes, PlantLibrary, spawn_plant};
 use engine_render::prelude::*;
 use engine_render::{RenderDisabled, capture_now};
 
-fn app(width: u32, height: u32, sun_lux: f32) -> App {
+/// An app that bakes only `species` (the picture needs no others): the whole library takes a
+/// debug build well over a minute, which put CI's runner at the 120 s cap.
+fn app(width: u32, height: u32, sun_lux: f32, species: &[&str]) -> App {
     let mut app = App::new();
     app.world.resource_mut::<EngineConfig>().headless = true;
+    let mut library = PlantLibrary::default();
+    library
+        .species
+        .retain(|sp| species.contains(&sp.name.as_str()));
+    assert_eq!(library.species.len(), species.len(), "unknown species");
+    app.world.insert_resource(library);
     {
         let mut w = app.world.resource_mut::<Window>();
         w.width = width;
@@ -68,7 +76,7 @@ fn capture(app: &mut App, name: &str) -> Option<image::RgbaImage> {
 
 #[test]
 fn a_sunlit_oak_has_a_green_crown_and_a_trunk() {
-    let mut app = app(320, 180, 60_000.0);
+    let mut app = app(320, 180, 60_000.0, &["oak", "fern"]);
     spawn_plant(
         &mut app.world,
         "oak",
@@ -104,7 +112,7 @@ fn a_sunlit_oak_has_a_green_crown_and_a_trunk() {
 
 #[test]
 fn glowcaps_light_up_the_dark() {
-    let mut app = app(320, 180, 0.0);
+    let mut app = app(320, 180, 0.0, &["glowcap"]);
     {
         let mut q = app.world.query_filtered::<&mut Transform, With<Camera>>();
         for mut t in q.iter_mut(&mut app.world) {
