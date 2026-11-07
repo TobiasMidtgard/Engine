@@ -228,8 +228,8 @@ pub const VIEWS: &[DemoView] = &[
         key: "spells_shield",
         name: "Held shields: a barrage cracks and shatters one, another sends bolts back",
         // Behind and above the two battle mages, looking back at the holders' shields.
-        eye: [6.1, 3.6, -2.2],
-        target: [6.0, 1.9, 9.0],
+        eye: [6.0, 4.1, 0.2],
+        target: [6.0, 1.75, 9.0],
         hour: 16.6,
         // The barrage has cracked lane 4's shield; lane 3's second bolt is on its way back.
         warmup: 5.0,
@@ -1370,7 +1370,7 @@ fn setup_program(
 }
 
 /// Cast each lane's spells on time while a camera is near.
-#[allow(clippy::type_complexity)]
+#[allow(clippy::type_complexity, clippy::too_many_arguments)]
 fn run_hall(
     time: Res<Time>,
     hall: Option<ResMut<Hall>>,
@@ -1383,6 +1383,7 @@ fn run_hall(
         Query<(Entity, &Thrall, &GlobalTransform)>,
     ),
     mut casts: MessageWriter<CastRequest>,
+    mut commands: Commands,
 ) {
     let Some(mut hall) = hall else {
         return;
@@ -1401,6 +1402,19 @@ fn run_hall(
     let t1 = hall.t;
     let cycle = (t0 / period).floor() as u64;
     hall.cycle = (t1 / period).floor() as u64;
+    // The last program's ground fires go out at the restart, but hits still on their way to the
+    // fire module (and its coals) can light the floor again just after: douse it twice more
+    // before any program's first spell lands (1.1 s at the earliest).
+    if [0.5, 1.0].iter().any(|&at| t0 < at && t1 >= at) {
+        let center = hall.origin + DVec3::new(0.0, 0.0, -3.0);
+        commands.queue(move |world: &mut World| {
+            let _ = engine_core::registry::call_api(
+                world,
+                "fire.extinguish",
+                json!({"at": [center.x, center.y, center.z], "radius": 26.0, "water_kg_m2": 0.0}),
+            );
+        });
+    }
     if hall.program == Program::Force && hall.cycle != cycle && hall.cycle % 2 == 0 {
         hall.reset_props = true;
     }

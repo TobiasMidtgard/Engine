@@ -2873,3 +2873,43 @@ fn a_shield_on_the_spell_bar_stays_up_while_the_key_is_down() {
         "lowered when the key comes up"
     );
 }
+
+#[test]
+fn the_shield_hall_breaks_one_shield_and_sends_bolts_back_from_the_other() {
+    let mut app = app();
+    {
+        let mut commands = app.world.commands();
+        demo::spawn_demo(&mut commands, DVec3::ZERO);
+    }
+    app.world.flush();
+    app.update();
+    {
+        let mut hall = app.world.resource_mut::<demo::Hall>();
+        hall.program = demo::Program::Shield;
+        hall.restart = true;
+    }
+    let mut most = 0;
+    for _ in 0..64 {
+        run(&mut app, 0.25);
+        most = most.max(app.world.entities().len());
+    }
+    let seen = &app.world.resource::<Seen>().wards;
+    let perfect = seen.iter().filter(|w| w.perfect).count();
+    let broke = seen.iter().filter(|w| w.broke).count();
+    let soaked = seen.iter().filter(|w| w.taken == 0.0 && !w.perfect).count();
+    println!(
+        "entities at most {most}, now {}; perfect {perfect}, broke {broke}, soaked {soaked}, struck {}",
+        app.world.entities().len(),
+        seen.len()
+    );
+    for w in seen.iter().filter(|w| w.taken > 0.0) {
+        println!(
+            "ward {:?} taken {} share {} broke {}",
+            w.ward, w.taken, w.share, w.broke
+        );
+    }
+    assert_eq!(perfect, 2, "lane 3's two perfect blocks");
+    assert!(broke >= 1, "lane 4's shield broke");
+    assert!(soaked > 5, "the fire shield soaked the flame jet");
+    assert!(most < 4000, "{most}");
+}

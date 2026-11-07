@@ -32,7 +32,7 @@ pub const FOES: u32 = 2;
 /// The holders' lanes.
 pub const HOLDERS: [usize; 2] = [3, 4];
 /// Where each battle mage stands (x, z from the hall's centre), facing its holder.
-pub const FOE_AT: [[f64; 2]; 2] = [[4.6, 2.2], [7.6, 2.2]];
+pub const FOE_AT: [[f64; 2]; 2] = [[3.6, 4.0], [8.4, 4.0]];
 /// The battle mages' level and mastery: their bolts are a bit weaker than the holders'.
 pub const FOE_LEVEL: f32 = 50.0;
 pub const FOE_MASTERY: Mastery = Mastery::Ascended1;
@@ -203,7 +203,7 @@ pub fn spawn_props(commands: &mut Commands, origin: DVec3) {
                 mana_regen: 1.0e5,
                 ..MagicCaster::new(FOE_LEVEL, FOE_MASTERY)
             },
-            mage_look(110 + i, FOE_MASTERY, Some([0.85, 0.1, 0.06])),
+            foe_look(i),
             ProgramProp,
             ShieldFoe { index: i },
             Vitality {
@@ -213,6 +213,20 @@ pub fn spawn_props(commands: &mut Commands, origin: DVec3) {
         ));
     }
 }
+
+/// A battle mage's look: a deep crimson robe with a gold collar, so they read apart from the
+/// hall's mages across the floor.
+pub fn foe_look(i: usize) -> engine_world::character::Appearance {
+    let mut a = mage_look(FOE_TAG + i, Mastery::Master, None);
+    a.outfit.top_color = FOE_ROBE;
+    a.outfit.bottom_color = FOE_ROBE.map(|c| c * 0.75);
+    a.outfit.accent = [0.8, 0.58, 0.16];
+    a.outfit.accent_on = "collar".into();
+    a
+}
+
+/// The battle mages' robe.
+pub const FOE_ROBE: [f32; 3] = [0.32, 0.025, 0.03];
 
 /// Cast the battle mages' spells on the hall's clock while `spells_shield` runs.
 pub fn run_foes(

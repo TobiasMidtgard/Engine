@@ -1599,25 +1599,25 @@ pub fn tend_wards(
 
     // ---- flares where hits landed
     for s in struck.read() {
+        // A held shield's count, drawn or not: a hit holds off its regrowth.
+        if s.barrier
+            && let Ok((.., Some(mut h))) = barriers.get_mut(s.ward)
+        {
+            if s.taken > 0.0 {
+                h.since_hit = 0.0;
+            }
+            if s.perfect {
+                h.reflected += 1;
+            }
+        }
         let Some(m) = meshes.as_deref_mut() else {
             continue;
         };
         let found = if s.barrier {
-            barriers
-                .get_mut(s.ward)
-                .ok()
-                .map(|(e, b, look, _, _, held)| {
-                    if let Some(mut h) = held {
-                        if s.taken > 0.0 {
-                            h.since_hit = 0.0;
-                        }
-                        if s.perfect {
-                            h.reflected += 1;
-                        }
-                    }
-                    let (at, rot, scale) = b.kind.frame();
-                    (e, at, rot, scale, look)
-                })
+            barriers.get_mut(s.ward).ok().map(|(e, b, look, _, _, _)| {
+                let (at, rot, scale) = b.kind.frame();
+                (e, at, rot, scale, look)
+            })
         } else {
             owned.get(&s.ward).and_then(|&sh| {
                 shells.get_mut(sh).ok().map(|(e, shell, look, tf, _)| {
