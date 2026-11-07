@@ -1190,22 +1190,44 @@ impl<'a> Paint<'a> {
 
     /// Set `e`'s glow (stepped, see [`glow_step`]), writing only when the step changes.
     pub fn glow(&mut self, e: Entity, r: &mut Mut<MeshRenderer>, color: [f32; 3], strength: f32) {
+        self.glow_clear(e, r, color, strength, 1.0);
+    }
+
+    /// Set `e`'s glow and how much of it shows (`cover`, 0 to 1, in 32 steps). Ward meshes are
+    /// black under their glow, so a ring, flare or shard fading by its glow alone turns into a
+    /// dark ghost of itself before it goes; fading its cover too, it thins out to nothing.
+    pub fn glow_clear(
+        &mut self,
+        e: Entity,
+        r: &mut Mut<MeshRenderer>,
+        color: [f32; 3],
+        strength: f32,
+        cover: f32,
+    ) {
         let strength = glow_step(strength);
+        let cover = (cover.clamp(0.0, 1.0) * 32.0).round() / 32.0;
+        let same = |m: &StandardMaterial| {
+            m.emissive == color && m.emissive_strength == strength && m.base_color[3] == cover
+        };
+        let set = |m: &mut StandardMaterial| {
+            m.emissive = color;
+            m.emissive_strength = strength;
+            m.base_color[3] = cover;
+        };
         let Some(materials) = self.materials.as_deref_mut() else {
             // No renderer (tests): the inline material carries it.
             if let MaterialRef::Inline(m) = &r.material
-                && (m.emissive != color || m.emissive_strength != strength)
+                && !same(m)
                 && let MaterialRef::Inline(m) = &mut r.material
             {
-                m.emissive = color;
-                m.emissive_strength = strength;
+                set(m);
             }
             return;
         };
         let handle = match (&r.material, self.owned.get(&e)) {
             (MaterialRef::Handle(h), Some(owned)) if h == owned => *h,
             (MaterialRef::Inline(m), _) => {
-                if m.emissive == color && m.emissive_strength == strength {
+                if same(m) {
                     return;
                 }
                 let h = materials.add(*m);
@@ -1215,15 +1237,11 @@ impl<'a> Paint<'a> {
             }
             _ => return,
         };
-        if let Some(m) = materials.get(handle)
-            && m.emissive == color
-            && m.emissive_strength == strength
-        {
+        if materials.get(handle).is_some_and(same) {
             return;
         }
         if let Some(m) = materials.get_mut(handle) {
-            m.emissive = color;
-            m.emissive_strength = strength;
+            set(m);
         }
     }
 }
@@ -1259,23 +1277,29 @@ impl WardLook {
         }
     }
 
-    /// Its emission now, with `share` of its pool left at time `t`.
+    /// Its emission now, with `share` of its pool left at time `t` (it shows by [`Self::cover`]).
     fn strength(&self, share: f32, t: f32) -> f32 {
-        let (swell_secs, fade_secs) = match self.key {
-            LatticeKey::Shield { .. } => (SHIELD_SWELL, SHIELD_FADE),
-            _ => (SWELL_SECS, FADE_SECS),
-        };
-        let swell = (self.age / swell_secs).clamp(0.0, 1.0);
         // It comes in bright and settles.
         let birth = 1.0 + 1.5 * (1.0 - (self.age / 0.6).clamp(0.0, 1.0));
-        let fade = self.fading.map_or(1.0, |f| (1.0 - f / fade_secs).max(0.0));
         let flicker = if share < FLICKER_BELOW {
             let k = roll(self.seed ^ (t * 24.0) as u64, 3);
             0.35 + 0.65 * k
         } else {
             1.0
         };
-        LATTICE_GLOW * swell * birth * fade * flicker * (1.0 + self.glow)
+        LATTICE_GLOW * birth * flicker * (1.0 + self.glow)
+    }
+
+    /// How much of it shows: it thickens in as it swells and thins out as it fades (its glow
+    /// shows by this share, so it never darkens).
+    fn cover(&self) -> f32 {
+        let (swell_secs, fade_secs) = match self.key {
+            LatticeKey::Shield { .. } => (SHIELD_SWELL, SHIELD_FADE),
+            _ => (SWELL_SECS, FADE_SECS),
+        };
+        let swell = (self.age / swell_secs).clamp(0.0, 1.0);
+        let fade = self.fading.map_or(1.0, |f| (1.0 - f / fade_secs).max(0.0));
+        swell * fade
     }
 }
 
@@ -1783,7 +1807,13 @@ pub fn tend_wards(
             }
         }
         if let Some(r) = r.as_mut() {
-            paint.glow(shell_e, r, look.color, look.strength(share, t));
+            paint.glow_clear(
+                shell_e,
+                r,
+                look.color,
+                look.strength(share, t),
+                look.cover(),
+            );
         }
     }
     for b in gone {
@@ -1897,7 +1927,7 @@ pub fn tend_wards(
         }
         let strength = look.strength(share, t);
         if let Some(r) = r.as_mut() {
-            paint.glow(e, r, look.color, strength);
+            paint.glow_clear(e, r, look.color, strength, look.cover());
         }
     }
 
@@ -1910,7 +1940,7 @@ pub fn tend_wards(
         }
         let k = 1.0 - f.age / FLARE_SECS;
         if let Some(mut r) = r {
-            paint.glow(e, &mut r, f.color, f.peak * k * k);
+            paint.glow_clear(e, &mut r, f.color, f.peak * k, k);
         }
     }
 
@@ -1926,7 +1956,7 @@ pub fn tend_wards(
         tf.translation = p.at + (p.normal * (0.7 * ease)).as_dvec3();
         tf.scale = Vec3::splat(1.0 + 0.9 * ease);
         if let Some(mut r) = r {
-            paint.glow(e, &mut r, p.color, FLARE_GLOW * (1.0 - k) * (1.0 - k));
+            paint.glow_clear(e, &mut r, p.color, FLARE_GLOW * (1.0 - k), 1.0 - k);
         }
     }
 
@@ -1944,7 +1974,7 @@ pub fn tend_wards(
         let k = 1.0 - s.age / s.life;
         tf.scale *= 1.0 - 0.5 * dt;
         if let Some(mut r) = r {
-            paint.glow(e, &mut r, s.color, SHARD_GLOW * k);
+            paint.glow_clear(e, &mut r, s.color, SHARD_GLOW, k);
         }
     }
 

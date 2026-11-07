@@ -227,9 +227,9 @@ pub const VIEWS: &[DemoView] = &[
     DemoView {
         key: "spells_shield",
         name: "Held shields: a barrage cracks and shatters one, another sends bolts back",
-        // Behind and above the two battle mages, looking back at the holders' shields.
-        eye: [6.0, 4.1, 0.2],
-        target: [6.0, 1.75, 9.0],
+        // Over the two battle mages' shoulders, looking back at the holders' shields.
+        eye: [6.0, 3.3, 2.6],
+        target: [6.0, 1.8, 9.0],
         hour: 16.6,
         // The barrage has cracked lane 4's shield; lane 3's second bolt is on its way back.
         warmup: 5.0,

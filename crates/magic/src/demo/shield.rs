@@ -11,7 +11,8 @@
 //!   back and bursts on the mage who cast it, a fire bolt and then a frost bolt; then it raises
 //!   too early, and the bolt only bursts on the shield. In the second half it holds a fire
 //!   shield into a flame jet, which it soaks for nothing (white flares), then frost bolts cost it
-//!   double.
+//!   double and break it, each one paying the battle mage back with a burn (it stands within
+//!   [`crate::wards::PAYBACK_M`]).
 //!
 //! The battle mages are the program's own ([`ShieldFoe`], cast by [`run_foes`] on the hall's
 //! clock); the holders are the hall's lane mages.
@@ -31,8 +32,9 @@ pub const START: f32 = 1.2;
 pub const FOES: u32 = 2;
 /// The holders' lanes.
 pub const HOLDERS: [usize; 2] = [3, 4];
-/// Where each battle mage stands (x, z from the hall's centre), facing its holder.
-pub const FOE_AT: [[f64; 2]; 2] = [[3.6, 4.0], [8.4, 4.0]];
+/// Where each battle mage stands (x, z from the hall's centre), facing its holder: about 3 m
+/// off its shield, close enough that a fire shield pays back the frost bolts it takes.
+pub const FOE_AT: [[f64; 2]; 2] = [[3.6, 5.8], [8.4, 5.8]];
 /// The battle mages' level and mastery: their bolts are a bit weaker than the holders'.
 pub const FOE_LEVEL: f32 = 50.0;
 pub const FOE_MASTERY: Mastery = Mastery::Ascended1;
