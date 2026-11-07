@@ -177,6 +177,22 @@ pub fn split_pool() -> Option<&'static TaskPool> {
     .or_else(|| ComputeTaskPool::try_get().map(|_| leaf_pool()))
 }
 
+/// Threads for [`crate::beside::Beside`] jobs, the fixed step's answers for next step: a pool
+/// of their own, `cores / 8` threads (1-2). On the async pool they queued behind zone builds
+/// and bakes that take seconds, and the next step's [`crate::beside::Beside::take`] waited for
+/// those. `None` until the task pools are set up (tests and tools then run jobs inline).
+pub fn beside_pool() -> Option<&'static TaskPool> {
+    static POOL: std::sync::OnceLock<TaskPool> = std::sync::OnceLock::new();
+    AsyncComputeTaskPool::try_get()?;
+    Some(POOL.get_or_init(|| {
+        let cores = std::thread::available_parallelism().map_or(4, |n| n.get());
+        TaskPoolBuilder::new()
+            .num_threads((cores / 8).clamp(1, 2))
+            .thread_name("beside".into())
+            .build()
+    }))
+}
+
 /// Threads for data-parallel loops called from the frame's threads ([`par_chunks_mut`]): as
 /// many as the compute pool. Their tasks are pieces of a loop that never wait on anything
 /// but nested pieces, so a thread waiting in a scope here only helps other loops along.

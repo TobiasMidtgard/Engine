@@ -3,7 +3,7 @@
 //! The PC's frame is the main thread's chain of schedules, and the fixed step is about half of
 //! it at the busiest stops. A fixed-step system that only needs to hand its readers last step's
 //! answer splits into: take the answer of the job started last step, apply it, gather owned
-//! inputs, start the next job. The job runs on the async pool through the rest of the frame
+//! inputs, start the next job. The job runs on [`crate::tasks::beside_pool`] through the rest of the frame
 //! (Update, PostUpdate, Extract, Render, First) and the next step takes it, the way physics
 //! already steps Rapier beside the frame and Unreal's async physics ticks on its own thread.
 //!
@@ -11,7 +11,7 @@
 //! and [`Beside::take`] hands it back in the same step, so a system that starts then takes
 //! behaves exactly as it did before it had a job.
 
-use bevy_tasks::{AsyncComputeTaskPool, Task};
+use bevy_tasks::Task;
 
 type Done<T> = std::thread::Result<T>;
 
@@ -70,8 +70,8 @@ impl<T: Send + 'static> Beside<T> {
         !matches!(self.state, State::Idle)
     }
 
-    /// Start the next job, beside the frame on the async pool when `beside` (and a pool is
-    /// set up), else now on this thread. An answer not taken yet is dropped first (as is a job
+    /// Start the next job, beside the frame on [`crate::tasks::beside_pool`] when `beside` (and
+    /// the pools are set up), else now on this thread. An answer not taken yet is dropped first (as is a job
     /// still running: it finishes on its own and its answer is lost). The job owns its inputs;
     /// it never touches the World.
     pub fn start(
@@ -82,7 +82,7 @@ impl<T: Send + 'static> Beside<T> {
     ) {
         self.name = name;
         self.cancel();
-        let pool = AsyncComputeTaskPool::try_get().filter(|_| beside);
+        let pool = crate::tasks::beside_pool().filter(|_| beside);
         self.state = match pool {
             Some(pool) => State::Running(pool.spawn(async move {
                 let _span = tracing::info_span!(target: "engine_core", "beside", name).entered();
@@ -149,5 +149,36 @@ mod tests {
         job.start("boom", true, || panic!("boom"));
         let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| job.take()));
         assert!(caught.is_err());
+    }
+
+    #[test]
+    fn a_job_beside_the_frame_does_not_queue_behind_long_async_work() {
+        crate::tasks::init_task_pools();
+        // Every async thread busy with something long, as with zone builds while streaming.
+        let release = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let pool = bevy_tasks::AsyncComputeTaskPool::get();
+        for _ in 0..pool.thread_num() {
+            let release = release.clone();
+            pool.spawn(async move {
+                let t = std::time::Instant::now();
+                while !release.load(std::sync::atomic::Ordering::Relaxed)
+                    && t.elapsed().as_secs() < 20
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+            })
+            .detach();
+        }
+        let mut job = Beside::default();
+        let t = std::time::Instant::now();
+        job.start("quick", true, || 7);
+        let got = job.take();
+        let waited = t.elapsed();
+        release.store(true, std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(got, Some(7));
+        assert!(
+            waited.as_secs_f64() < 2.0,
+            "waited {waited:?} behind async work"
+        );
     }
 }
