@@ -1256,6 +1256,8 @@ struct SmokeShadowOut {
 };
 
 const SMOKE_SHADOW_SPREAD: f32 = 0.015; // penumbra growth per meter from the puff (the sun is 0.0093 rad wide)
+const SMOKE_SHADOW_KEEP: f32 = 0.16; // puffs fainter than this cast by lot (see vs_smoke_shadow)
+const SMOKE_SHADOW_BOX: f32 = 1.3;   // box half-width in shadow widths; the shadow is windowed to it
 
 @vertex
 fn vs_smoke_shadow(@builtin(vertex_index) vi: u32, @builtin(instance_index) slot: u32) -> SmokeShadowOut {
@@ -1270,6 +1272,15 @@ fn vs_smoke_shadow(@builtin(vertex_index) vi: u32, @builtin(instance_index) slot
     let sun_up = frame.sun_dir.y;
     let daylight = saturate(sun_up * 6.0);
     if (alpha <= 0.01 || size <= 0.0 || daylight <= 0.0) { return out; }
+    // Faint puffs cast by lot: one in so many draws its box at SMOKE_SHADOW_KEEP's strength,
+    // so the shadow keeps its depth on average with far fewer boxes (each costs its whole
+    // area on screen). The lot follows the particle's seed, so a puff keeps its shadow or
+    // goes without it for its life.
+    var strength = alpha * daylight;
+    if (strength < SMOKE_SHADOW_KEEP) {
+        if (fract(p.seed * 7919.37 + 0.5) * SMOKE_SHADOW_KEEP > strength) { return out; }
+        strength = SMOKE_SHADOW_KEEP;
+    }
 
     let l = frame.sun_dir.xyz;
     let d = -l;
@@ -1292,14 +1303,26 @@ fn vs_smoke_shadow(@builtin(vertex_index) vi: u32, @builtin(instance_index) slot
     c[axis] = sign;
     c[(axis + 1u) % 3u] = uv.x;
     c[(axis + 2u) % 3u] = uv.y;
-    let along = mix(-r, reach, c.z * 0.5 + 0.5);
+    // The box ends a little past where the shadow meets the ground under the effect: beyond,
+    // the path runs underground, so a long dusk shadow no longer drags a 60 m box across the
+    // screen whose every pixel the shader would weigh.
+    var len = reach;
+    let sim_center = particle_rel(p, e);
+    if (e.collide.w > 0.5) {
+        let h = max(dot(e.plane.xyz, sim_center) + e.plane.w, 0.0);
+        let down = -dot(e.plane.xyz, d);
+        if (down > 0.05) {
+            len = clamp((h + r + max(1.5, 0.3 * h)) / down, r, reach);
+        }
+    }
+    let along = mix(-r, len, c.z * 0.5 + 0.5);
     let width = r + max(along, 0.0) * SMOKE_SHADOW_SPREAD;
-    let center = particle_rel(p, e) + view_shift.xyz;
-    let pos = center + d * along + (bx * c.x + by * c.y) * width * 1.6;
+    let center = sim_center + view_shift.xyz;
+    let pos = center + d * along + (bx * c.x + by * c.y) * width * SMOKE_SHADOW_BOX;
     out.position = frame.view_proj * vec4<f32>(pos, 1.0);
     out.center = center;
     out.radius = r;
-    out.strength = alpha * daylight;
+    out.strength = strength;
     out.reach = reach;
     return out;
 }
@@ -1320,7 +1343,9 @@ fn fs_smoke_shadow(in: SmokeShadowOut) -> @location(0) vec4<f32> {
     let spread = sq(in.radius / width);
     let begin = smoothstep(-0.5, 0.5, along / in.radius);
     let end = 1.0 - smoothstep(0.7, 1.0, along / in.reach);
-    let shade = in.strength * exp(-2.2 * off * off) * spread * begin * end;
+    // Gaussian across, windowed to zero at the box's side so it has no edge.
+    let across = exp(-2.2 * off * off) * (1.0 - smoothstep(0.75, 1.0, off / SMOKE_SHADOW_BOX));
+    let shade = in.strength * across * spread * begin * end;
     if (shade < 0.003) { discard; }
     // Only sunlight is lost; sky and bounce light still reach the ground under smoke.
     return vec4<f32>(vec3<f32>(1.0 - 0.7 * shade), 1.0);

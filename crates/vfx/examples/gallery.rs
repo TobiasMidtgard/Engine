@@ -201,9 +201,15 @@ fn main() {
             ]
             .iter()
             .any(|p| name.starts_with(p))
-                || ["spell.raise.", "spell.ash.", "spell.bones."]
-                    .iter()
-                    .any(|p| name.starts_with(p));
+                || [
+                    "spell.raise.",
+                    "spell.ash.",
+                    "spell.bones.",
+                    "spell.force.impact",
+                    "spell.stone.tear",
+                ]
+                .iter()
+                .any(|p| name.starts_with(p));
             let pos = if grounded {
                 DVec3::ZERO
             } else {
@@ -226,7 +232,8 @@ fn main() {
                 transform,
                 ParticleEffect::new(name.clone()).with_scale(if jet { 0.8 } else { 1.0 }),
             ));
-            if desc.trail.is_some() {
+            // Trails, and things thrown through the air, fly in a circle so their wake shows.
+            if desc.trail.is_some() || name.starts_with("spell.force.bolt") {
                 e.insert(Circling);
             }
             let entity = e.id();

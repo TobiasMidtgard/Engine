@@ -20,6 +20,7 @@ pub use space::{BLINK, PORTAL};
 pub use stone::STEP_CUE_SCALE;
 mod auras;
 mod elements;
+mod force;
 mod space;
 mod stone;
 mod undead;
@@ -389,6 +390,7 @@ pub fn all() -> Vec<EffectDesc> {
     v.extend(stone::all());
     v.extend(undead::all());
     v.extend(space::all());
+    v.extend(force::all());
     v.extend(auras::all());
     let woven = weaves::all(&v);
     v.extend(woven);
