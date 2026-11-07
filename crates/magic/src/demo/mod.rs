@@ -239,10 +239,11 @@ pub const VIEWS: &[DemoView] = &[
     DemoView {
         key: "spells_cataclysm",
         name: "Cataclysm: a burning meteor, a swarm of five and fault lines that throw dummies",
-        // High on the dais behind lane 3, down the hall with the sky above it: the meteors
-        // come down out of it toward the camera.
-        eye: [3.0, 6.2, 18.5],
-        target: [3.0, 3.4, -10.0],
+        // From over the floor before the dais' right end, across the lanes: the meteors come
+        // down out of the sky on their slant from the right, the fault line runs across the
+        // view from the left.
+        eye: [13.0, 5.5, 9.0],
+        target: [-1.0, 5.0, -8.0],
         hour: 16.6,
         // Lane 3's meteor has struck: its crater burning, the swarm's rings pulsing far off.
         warmup: 4.6,

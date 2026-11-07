@@ -56,7 +56,7 @@ pub const CLOSE_SECS: f32 = 1.2;
 pub const MARK_COLOR: [f32; 3] = [1.0, 0.32, 0.06];
 pub const HOT_COLOR: [f32; 3] = [1.0, 0.45, 0.12];
 /// A hot rock's glow, nits (a lit mesh: ward lattices use 11 000).
-pub const HOT_GLOW: f32 = 26_000.0;
+pub const HOT_GLOW: f32 = 14_000.0;
 
 /// The blast round a meteor of `size` m across, m.
 pub fn blast_radius(size: f32) -> f32 {
@@ -238,11 +238,17 @@ pub struct Blasts(pub Vec<Blast>);
 #[derive(Resource, Debug, Default)]
 pub struct FaultHits(pub Vec<(Entity, Entity)>);
 
+/// A hot rock: a dark crust glowing `glow` nits. Not a preset: a preset fills the emissive
+/// slot with its own (black) map, and the glow would never show.
 fn hot_rock(glow: f32) -> StandardMaterial {
-    let mut m = StandardMaterial::preset(MaterialPreset::Rock).with_triplanar_world();
-    m.emissive = HOT_COLOR;
-    m.emissive_strength = glow;
-    m
+    StandardMaterial {
+        base_color: [0.11, 0.09, 0.08, 1.0],
+        perceptual_roughness: 0.9,
+        emissive: HOT_COLOR,
+        emissive_strength: glow,
+        ..Default::default()
+    }
+    .with_detail(0.9, 0.15)
 }
 
 /// Put the queued meteors and faults into the world.
@@ -382,12 +388,26 @@ fn spawn_meteor(
         fading: None,
     });
     // Its fire (or dust) trails behind it: the spell's bolt look, scaled to the rock.
+    // Its element trails behind it (fire, frost...); a plain rock burns in the air as it falls,
+    // a smaller fire and smoke (the stone bolt's tumbling lumps would hide the rock).
+    let (look, color, scale) = match spell.element() {
+        Some(_) => (
+            spell.weave.key.clone(),
+            spell.weave.color,
+            (size / 0.25).clamp(1.0, 10.0),
+        ),
+        None => (
+            Element::Fire.key().to_string(),
+            Element::Fire.color(),
+            (size / 0.45).clamp(1.0, 6.0),
+        ),
+    };
     queue.looks.push(LookCmd::Attach {
         entity: e,
-        look: spell.weave.key.clone(),
+        look,
         role: Role::Bolt,
-        scale: (size / 0.25).clamp(1.0, 10.0),
-        color: spell.weave.color,
+        scale,
+        color,
         power_j: spell.power.energy_j as f32,
     });
 }
@@ -426,6 +446,18 @@ pub fn fault_path(
         path.push(h.point);
     }
     path
+}
+
+/// The impulse per kg that brings a body's speed along `v` up to `v`'s, never past it: a body
+/// struck by several blasts at once (a swarm) is thrown once, not once for each.
+pub fn top_up(v: Vec3, vel: Option<&Velocity>) -> Vec3 {
+    let speed = v.length();
+    if speed <= 1e-4 {
+        return Vec3::ZERO;
+    }
+    let dir = v / speed;
+    let have = vel.map_or(0.0, |x| x.linear.dot(dir)).max(0.0);
+    dir * (speed - have).max(0.0)
 }
 
 /// The ground under `from` within `max` m: past creatures and loose things standing on it.
@@ -538,7 +570,7 @@ pub fn fall_meteors(
                 radius: blast_radius(m.size),
                 knock_share: 0.7,
                 knock_secs: KNOCK_SECS,
-                throw: 9.0 + 2.0 * m.size,
+                throw: 7.0 + 1.5 * m.size,
                 line: None,
                 spare: Vec::new(),
                 meteor: Some((e, m.rock, m.size)),
@@ -625,15 +657,15 @@ pub fn run_faults(
         {
             f.shook = true;
             let scale = 0.6;
-            for (k, w) in f.path.windows(2).enumerate().step_by(4) {
+            for (k, w) in f.path.windows(2).enumerate().step_by(2) {
                 let b = w[1];
                 queue.looks.push(LookCmd::Effect {
-                    name: "impulse.dust",
+                    name: "spell.stone.step",
                     at: b,
                     up: Vec3::Y,
-                    scale: 0.7,
+                    scale: 1.3,
                 });
-                if fire || frost {
+                if (fire || frost) && k % 4 == 0 {
                     queue.looks.push(LookCmd::Burst {
                         at: b + DVec3::Y * 0.1,
                         up: Vec3::Y,
@@ -642,7 +674,7 @@ pub fn run_faults(
                         scale: 0.9,
                         color: spell.weave.color,
                     });
-                } else if k % 8 == 0 {
+                } else if !(fire || frost) && k % 8 == 0 {
                     queue.looks.push(LookCmd::Effect {
                         name: "spell.stone.impact",
                         at: b,
@@ -671,9 +703,9 @@ pub fn run_faults(
             world.write(WorldImpulse {
                 center: mid,
                 radius: f.length() * 0.5 + 3.0,
-                strength: 14.0,
+                strength: 1.5,
                 energy_j: 2.0e5,
-                heat_c: if fire { 600.0 } else { 0.0 },
+                heat_c: 0.0,
                 source: f.cast.caster,
             });
             for &p in &f.pieces {
@@ -729,13 +761,15 @@ fn open_segment(
     let mid = a + (b - a) * 0.5;
     let yaw = Quat::from_rotation_arc(Vec3::Z, dir);
     // The gap: dark, a little wider in the middle of the line, glowing within with fire.
-    let width = 0.26 + 0.14 * roll(seed, 1) + 0.12 * ((i as f32 * 0.37).sin() * 0.5 + 0.5);
-    let mut gap = StandardMaterial::preset(MaterialPreset::Rock).with_triplanar_world();
-    gap.base_color = [0.035, 0.03, 0.028, 1.0];
-    gap.perceptual_roughness = 1.0;
+    let width = 0.34 + 0.18 * roll(seed, 1) + 0.16 * ((i as f32 * 0.37).sin() * 0.5 + 0.5);
+    let mut gap = StandardMaterial {
+        base_color: [0.03, 0.025, 0.022, 1.0],
+        perceptual_roughness: 1.0,
+        ..Default::default()
+    };
     if fire {
         gap.emissive = [1.0, 0.36, 0.06];
-        gap.emissive_strength = 14_000.0;
+        gap.emissive_strength = 30_000.0;
     } else if frost {
         gap.emissive = [0.55, 0.8, 1.0];
         gap.emissive_strength = 3_000.0;
@@ -776,22 +810,22 @@ fn open_segment(
         &[-1.0]
     };
     for &s in sides {
-        let w = 0.7 + 0.4 * roll(seed, 3 + s as u64);
-        let d = 0.45 + 0.3 * roll(seed, 5);
-        let h = 0.18 + 0.1 * roll(seed, 6);
+        let w = 0.8 + 0.5 * roll(seed, 3 + s as u64);
+        let d = 0.6 + 0.4 * roll(seed, 5);
+        let h = 0.2 + 0.1 * roll(seed, 6);
         let tilt = (0.22 + 0.28 * roll(seed, 7 + (s > 0.0) as u64)) * s;
         let rest =
             yaw * Quat::from_rotation_y((roll(seed, 9) - 0.5) * 0.5) * Quat::from_rotation_z(-tilt);
-        let base = mid + (side * s * (width * 0.5 + d * 0.45)).as_dvec3();
-        let mut rock = StandardMaterial::preset(MaterialPreset::Rock).with_triplanar_world();
-        if frost {
-            rock = rock.with_tint(0.78, 0.88, 1.0);
-        }
-        if fire {
-            // The broken edge glows where it faces the lava.
-            rock.emissive = [1.0, 0.3, 0.05];
-            rock.emissive_strength = 1_200.0;
-        }
+        let base = mid + (side * s * (width * 0.5 + d * 0.6)).as_dvec3();
+        let rock = StandardMaterial::preset(MaterialPreset::Rock).with_triplanar_world();
+        let rock = if frost {
+            rock.with_tint(0.78, 0.88, 1.0)
+        } else if fire {
+            // Scorched by the lava below.
+            rock.with_tint(0.38, 0.31, 0.27)
+        } else {
+            rock.with_tint(0.55, 0.5, 0.45)
+        };
         let slab = commands
             .spawn((
                 Name::new("Fault slab"),
@@ -800,7 +834,7 @@ fn open_segment(
                     mesh: MeshRef::Shape(Shape::Rock {
                         size: [d, h, w.max(len * 1.1)],
                         seed: ((seed ^ (s.to_bits() as u64)) % 100_000) as u32,
-                        detail: 2,
+                        detail: 1,
                     }),
                     material: MaterialRef::Inline(rock),
                     cast_shadows: true,
@@ -811,7 +845,7 @@ fn open_segment(
                     rest,
                     slab: true,
                     age: 0.0,
-                    lift: 0.05 + 0.12 * roll(seed, 10),
+                    lift: 0.12 + 0.18 * roll(seed, 10),
                     kick: None,
                     sink: None,
                 },
@@ -855,10 +889,14 @@ pub fn apply_blasts(
             Option<&CharacterController>,
             Option<&RigidBody>,
             Option<&Knocked>,
+            Option<&Velocity>,
         ),
         CreatureFilter,
     >,
-    loose: Query<(Entity, &GlobalTransform, &RigidBody), Without<CharacterController>>,
+    loose: Query<
+        (Entity, &GlobalTransform, &RigidBody, Option<&Velocity>),
+        Without<CharacterController>,
+    >,
     queries: Res<PhysicsQueries>,
     colliders: Query<&Collider>,
     mut hits: ResMut<HitQueue>,
@@ -898,7 +936,7 @@ pub fn apply_blasts(
             .and_then(|_| faults.iter().find(|(_, f)| f.cast.seed == b.cast.seed))
             .map(|(e, _)| e);
         // ---- creatures and anything with health
-        for (t, gt, cc, rb, knocked) in &creatures {
+        for (t, gt, cc, rb, knocked, vel) in &creatures {
             if b.spare.contains(&t) {
                 continue;
             }
@@ -948,17 +986,17 @@ pub fn apply_blasts(
                 && rb.kind == BodyKind::Dynamic
             {
                 let mass = rb.mass_kg.unwrap_or(60.0).max(1.0);
-                let v = (out_dir * 0.6 + Vec3::Y) * b.throw * k;
+                let v = (out_dir * 0.45 + Vec3::Y) * b.throw * k;
                 impulses.write(ApplyImpulse {
                     entity: t,
-                    impulse: v * mass,
+                    impulse: top_up(v, vel) * mass,
                     at: None,
                     angular: Vec3::new(out_dir.z, 0.0, -out_dir.x) * mass * 0.3 * k,
                 });
             }
         }
         // ---- loose things: crates, barrels, rubble
-        for (t, gt, rb) in &loose {
+        for (t, gt, rb, vel) in &loose {
             if rb.kind != BodyKind::Dynamic || creatures.contains(t) || b.spare.contains(&t) {
                 continue;
             }
@@ -975,10 +1013,10 @@ pub fn apply_blasts(
                 Vec3::new((p - b.at).x as f32, 0.0, (p - b.at).z as f32).normalize_or(Vec3::X);
             let mass = rb.mass_kg.unwrap_or(30.0).max(1.0);
             let v =
-                (out_dir * if b.line.is_some() { 0.3 } else { 0.9 } + Vec3::Y * 0.8) * b.throw * k;
+                (out_dir * if b.line.is_some() { 0.3 } else { 0.55 } + Vec3::Y * 0.9) * b.throw * k;
             impulses.write(ApplyImpulse {
                 entity: t,
-                impulse: v * mass,
+                impulse: top_up(v, vel) * mass,
                 at: None,
                 angular: Vec3::new(out_dir.z, 0.3, -out_dir.x) * mass * 0.5 * k,
             });
@@ -1002,13 +1040,28 @@ pub fn apply_blasts(
             reacts: false,
             expire: false,
         });
+        // On the terrain itself (not a placed floor) the ground is dug out and its fuel lit.
+        let under = queries.raycast(
+            b.at + DVec3::Y * 0.3,
+            Vec3::NEG_Y,
+            1.0,
+            &QueryFilter::default(),
+        );
+        let terrain = size > 0.0
+            && under.is_some_and(|h| {
+                colliders
+                    .get(h.entity)
+                    .is_ok_and(|c| matches!(c.shape, ColliderShape::Heightfield { .. }))
+            });
         let energy = 4.0e5 * size.max(0.3).powi(3) * b.cast.scale;
+        // The world's blast (vfx raises its dust ring from it, physics its wind, destruction
+        // breaks what is near).
         let blast = WorldImpulse {
             center: b.at,
-            radius: b.radius * 2.5,
-            strength: (18.0 + 10.0 * size).min(45.0),
+            radius: b.radius * 1.6,
+            strength: (14.0 + 8.0 * size).min(36.0),
             energy_j: energy,
-            heat_c: if fire { 900.0 } else { 0.0 },
+            heat_c: if fire && terrain { 900.0 } else { 0.0 },
             source: b.cast.caster,
         };
         if let Some(n) = blast.noise() {
@@ -1024,12 +1077,6 @@ pub fn apply_blasts(
             at: b.at,
             up: Vec3::Y,
             scale: (0.55 + 0.45 * size).clamp(0.6, 2.2),
-        });
-        queue.looks.push(LookCmd::Effect {
-            name: "impulse.dust",
-            at: b.at,
-            up: Vec3::Y,
-            scale: (0.8 + 0.6 * size).clamp(0.8, 2.5),
         });
         if fire || frost {
             queue.looks.push(LookCmd::Burst {
@@ -1068,18 +1115,6 @@ pub fn apply_blasts(
             commands.entity(m).try_despawn();
             continue;
         }
-        // On the terrain itself (not a placed floor) the ground is dug out.
-        let under = queries.raycast(
-            b.at + DVec3::Y * 0.3,
-            Vec3::NEG_Y,
-            1.0,
-            &QueryFilter::default(),
-        );
-        let terrain = under.is_some_and(|h| {
-            colliders
-                .get(h.entity)
-                .is_ok_and(|c| matches!(c.shape, ColliderShape::Heightfield { .. }))
-        });
         let cr = crater_radius(size);
         if terrain {
             edits.write(TerrainEdit {
@@ -1114,22 +1149,20 @@ fn spawn_crater(
         .entity(m)
         .try_remove::<(SpellPos, Meteor)>()
         .try_insert(
-            Transform::from_translation(b.at - DVec3::Y * (size * 0.38) as f64)
+            Transform::from_translation(b.at - DVec3::Y * (size * 0.12) as f64)
                 .with_rotation(Quat::from_rotation_y(roll(seed, 1) * TAU)),
         );
     parts.push(m);
     // The rim: broken rock heaved up and tipped outward.
-    let n = (9.0 + 5.0 * size).round() as usize;
-    let mut rim = StandardMaterial::preset(MaterialPreset::Rock).with_triplanar_world();
-    if fire {
-        rim.emissive = HOT_COLOR;
-        rim.emissive_strength = 900.0;
-    }
+    let n = (12.0 + 8.0 * size).round() as usize;
+    let rim = StandardMaterial::preset(MaterialPreset::Rock)
+        .with_triplanar_world()
+        .with_tint(0.62, 0.56, 0.5);
     for i in 0..n {
         let a = (i as f32 + 0.5 * roll(seed, 10 + i as u64)) / n as f32 * TAU;
         let out = Vec3::new(a.cos(), 0.0, a.sin());
         let r = cr * (0.85 + 0.25 * roll(seed, 40 + i as u64));
-        let s = (0.22 + 0.22 * size) * (0.7 + 0.6 * roll(seed, 70 + i as u64));
+        let s = (0.3 + 0.3 * size) * (0.75 + 0.5 * roll(seed, 70 + i as u64));
         let at = b.at + (out * r).as_dvec3() - DVec3::Y * (s * 0.3) as f64;
         let rot = Quat::from_rotation_arc(Vec3::Y, (Vec3::Y + out * 0.7).normalize())
             * Quat::from_rotation_y(roll(seed, 100 + i as u64) * TAU);
@@ -1153,14 +1186,14 @@ fn spawn_crater(
     }
     // Hot debris flung out: rocks that tumble, settle and sink away.
     let debris = (5.0 + 4.0 * size).round() as usize;
-    let hot = {
-        let mut m = hot_rock(if fire { 9_000.0 } else { 0.0 });
-        if frost {
-            m = StandardMaterial::preset(MaterialPreset::Rock)
-                .with_triplanar_world()
-                .with_tint(0.8, 0.9, 1.0);
-        }
-        m
+    let hot = if fire {
+        hot_rock(9_000.0)
+    } else if frost {
+        StandardMaterial::preset(MaterialPreset::Rock)
+            .with_triplanar_world()
+            .with_tint(0.8, 0.9, 1.0)
+    } else {
+        StandardMaterial::preset(MaterialPreset::Rock).with_triplanar_world()
     };
     for i in 0..debris {
         let a = roll(seed, 200 + i as u64) * TAU;
@@ -1357,7 +1390,7 @@ pub fn tend_cataclysm(
             let up = crate::stone::rise(p.age, 0.22);
             let kick = p.kick.map_or(0.0, |k| {
                 let t = (k / 0.35).clamp(0.0, 1.0);
-                (t * std::f32::consts::PI).sin() * 0.18
+                (t * std::f32::consts::PI).sin() * 0.3
             });
             let sink = p.sink.map_or(0.0, |s| (s / CLOSE_SECS).clamp(0.0, 1.0));
             let y = -0.3 + (0.3 + p.lift) * up * (1.0 - sink) + kick - 0.25 * sink;
