@@ -115,6 +115,15 @@ pub enum LookCmd {
         kind: &'static str,
         radius: f32,
     },
+    /// A one-shot particle effect asked for by its own name, for a moment no spell role names
+    /// (a stone tearing out of the floor). Played through `vfx.spawn` whether or not vfx reads
+    /// the contracts, and skipped when the particle module lacks it.
+    Effect {
+        name: &'static str,
+        at: DVec3,
+        up: Vec3,
+        scale: f32,
+    },
 }
 
 /// The particle names resolved so far, and the charges playing.
@@ -536,6 +545,23 @@ pub fn apply(world: &mut World, looks: Vec<LookCmd>) {
         world.resource_mut::<LookLibrary>().no_particles = true;
         return;
     }
+    // Named effects: no contract carries them, so they go to vfx directly either way.
+    for cmd in &looks {
+        if let LookCmd::Effect {
+            name,
+            at,
+            up,
+            scale,
+        } = cmd
+            && call_api(world, "vfx.describe", json!({ "effect": name })).is_ok()
+        {
+            let _ = call_api(
+                world,
+                "vfx.spawn",
+                json!({ "effect": name, "position": arr(*at), "up": up.to_array(), "scale": scale, "once": true, "duration": 8.0 }),
+            );
+        }
+    }
     // Once vfx draws `SpellLook`s and `SpellCue`s (written by `write_contracts`), every look
     // here would draw twice: the stand-ins go quiet. It says so with the engine's
     // `SpellLookDrawer` or, before that, its `vfx.spell_contracts` API.
@@ -685,7 +711,7 @@ pub fn apply(world: &mut World, looks: Vec<LookCmd>) {
                     );
                 }
             }
-            LookCmd::RemoveCasting { .. } => {}
+            LookCmd::RemoveCasting { .. } | LookCmd::Effect { .. } => {}
             LookCmd::Mark {
                 at,
                 normal,
@@ -842,7 +868,7 @@ pub fn contract(cmd: &LookCmd) -> Option<Contract> {
             kind: spell_mark(kind),
             radius_m: *radius,
         }),
-        LookCmd::RemoveCasting { .. } => return None,
+        LookCmd::RemoveCasting { .. } | LookCmd::Effect { .. } => return None,
     })
 }
 

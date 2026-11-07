@@ -462,13 +462,11 @@ fn tear_stone(
             Torn,
         ))
         .id();
-    queue.looks.push(LookCmd::Burst {
+    queue.looks.push(LookCmd::Effect {
+        name: TEAR_LOOK,
         at: ground + DVec3::Y * 0.05,
         up: Vec3::Y,
-        look: "stone".into(),
-        role: Role::Impact,
         scale: (size.x / 0.5).clamp(0.6, 1.8),
-        color: STONE_COLOR,
     });
     queue.looks.push(LookCmd::Mark {
         at: ground + DVec3::Y * 0.02,
@@ -477,6 +475,24 @@ fn tear_stone(
         radius: size.x * 0.9,
     });
     e
+}
+
+/// The particle effect of a stone tearing out of the floor (the scar is the `chip` mark).
+pub const TEAR_LOOK: &str = "spell.stone.tear";
+
+/// The look a grip's held things wear: the force ripple for a plain grip, the woven element's
+/// own otherwise (a fire grip's stone burns).
+pub fn grip_look(spell: &crate::compile::Spell) -> String {
+    match spell.weave.key.as_str() {
+        "force" | "arcane" => "force".into(),
+        k => k.into(),
+    }
+}
+
+/// The size of a thrown thing's landing burst (Particles' `spell.force.impact`: scale 1 is a
+/// thing 0.65 m in radius landing at 20 m/s).
+pub fn impact_scale(radius: f32, speed: f32) -> f32 {
+    (radius / 0.65 * (speed / 20.0).sqrt()).clamp(0.4, 2.2)
 }
 
 /// A torn stone's size for a grip of this power: half a metre for a level 50 caster, more with
@@ -623,12 +639,10 @@ pub fn grip(
                         ge,
                     );
                     if let Some(h) = h {
-                        if !matches!(spell.weave.key.as_str(), "force" | "arcane")
-                            && kind != HeldKind::Missile
-                        {
+                        if kind != HeldKind::Missile {
                             queue.looks.push(LookCmd::Attach {
                                 entity: e,
-                                look: spell.weave.key.clone(),
+                                look: grip_look(&spell),
                                 role: Role::Aura,
                                 scale: (h.radius / 0.65).clamp(0.3, 3.0),
                                 color: spell.weave.color,
@@ -672,16 +686,14 @@ pub fn grip(
                                 h.spin = spin(seed, 9, 0.7);
                                 h.slot = roll(seed, 10) * TAU;
                                 commands.entity(e).insert(Gripped { by: ge });
-                                if !matches!(spell.weave.key.as_str(), "force" | "arcane") {
-                                    queue.looks.push(LookCmd::Attach {
-                                        entity: e,
-                                        look: spell.weave.key.clone(),
-                                        role: Role::Aura,
-                                        scale: (h.radius / 0.65).clamp(0.3, 3.0),
-                                        color: spell.weave.color,
-                                        power_j: spell.power.energy_j as f32,
-                                    });
-                                }
+                                queue.looks.push(LookCmd::Attach {
+                                    entity: e,
+                                    look: grip_look(&spell),
+                                    role: Role::Aura,
+                                    scale: (h.radius / 0.65).clamp(0.3, 3.0),
+                                    color: spell.weave.color,
+                                    power_j: spell.power.energy_j as f32,
+                                });
                                 g.held.push(h);
                             }
                             None => {
@@ -1172,8 +1184,18 @@ fn throw(
                 flung: creature.then_some(v),
                 look: false,
             });
-            if !woven && !creature {
+            // A plain throw trails wind and dust; a woven one keeps its element round it
+            // (a burning stone flies burning).
+            if !woven {
                 queue.looks.push(LookCmd::Stop { entity: h.entity });
+                queue.looks.push(LookCmd::Attach {
+                    entity: h.entity,
+                    look: "force".into(),
+                    role: Role::Bolt,
+                    scale: (h.radius / 0.65).clamp(0.3, 3.0),
+                    color: spell.weave.color,
+                    power_j: spell.power.energy_j as f32,
+                });
             }
         }
     }
@@ -1296,9 +1318,9 @@ pub fn fly_hurled(
                 queue.looks.push(LookCmd::Burst {
                     at: chest,
                     up: -dir,
-                    look: "stone".into(),
+                    look: "force".into(),
                     role: Role::Impact,
-                    scale: (h.radius / 0.65).clamp(0.5, 1.6),
+                    scale: impact_scale(h.radius, speed),
                     color: STONE_COLOR,
                 });
                 if !h.burst {
@@ -1332,9 +1354,9 @@ pub fn fly_hurled(
                 queue.looks.push(LookCmd::Burst {
                     at: point,
                     up: normal,
-                    look: "stone".into(),
+                    look: "force".into(),
                     role: Role::Impact,
-                    scale: (h.radius / 0.65 * (hard / 20.0).sqrt()).clamp(0.5, 2.0),
+                    scale: impact_scale(h.radius, hard),
                     color: STONE_COLOR,
                 });
             }
@@ -1742,6 +1764,14 @@ mod tests {
             let mid = strand_point(a, b, 0.5, k, 0.3);
             assert!((mid.z + 1.5).abs() < 0.01 && mid.distance(DVec3::new(0.0, 0.0, -1.5)) > 0.08);
         }
+    }
+
+    #[test]
+    fn a_landing_burst_grows_with_size_and_speed() {
+        assert!((impact_scale(0.65, 20.0) - 1.0).abs() < 1e-5);
+        assert!(impact_scale(0.65, 38.0) > impact_scale(0.65, 20.0));
+        assert!(impact_scale(0.3, 20.0) < impact_scale(0.65, 20.0));
+        assert!(impact_scale(5.0, 38.0) <= 2.2 && impact_scale(0.05, 4.0) >= 0.4);
     }
 
     #[test]
