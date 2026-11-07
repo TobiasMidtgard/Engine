@@ -11,7 +11,7 @@
 //!   back and bursts on the mage who cast it, a fire bolt and then a frost bolt; then it raises
 //!   too early, and the bolt only bursts on the shield. In the second half it holds a fire
 //!   shield into a flame jet, which it soaks for nothing (white flares), then frost bolts cost it
-//!   double and break it, each one paying the battle mage back with a burn (it stands within
+//!   double and crack it, each one paying the battle mage back with a burn (it stands within
 //!   [`crate::wards::PAYBACK_M`]).
 //!
 //! The battle mages are the program's own ([`ShieldFoe`], cast by [`run_foes`] on the hall's
