@@ -3332,7 +3332,7 @@ pub fn root_mesh(seed: u64, len: f32) -> Mesh {
         // stretches run a meter or so (and where it leaves the trunk it starts under the
         // flare), its end buried.
         let e = smoothstep(-0.1, 0.3, perlin2(x as f64 * 1.3, 1.5, rise) as f32);
-        let out = (-0.15 + 0.85 * e) * smoothstep(0.0, 0.15, x) * (1.0 - smoothstep(0.7, 1.0, t));
+        let out = (0.1 + 0.8 * e) * smoothstep(0.0, 0.15, x) * (1.0 - smoothstep(0.45, 0.85, t));
         let y = r * (2.0 * out - 1.0);
         path.push(Vec3::new(p.x - 0.08, y, p.y));
         radii.push(r);
@@ -3342,12 +3342,16 @@ pub fn root_mesh(seed: u64, len: f32) -> Mesh {
         heading += (want - heading) * 0.5;
         p += Vec2::new(heading.cos(), heading.sin()) * step;
     }
-    let barks = [0x3a2e24, 0x43362a, 0x30271e];
+    // Grey-brown, a little lighter than the soil they cross: dark roots read as slots cut in
+    // the tread.
+    let barks = [0x5e4d3e, 0x675544, 0x54473a];
     let bark = srgb(*rng.pick(&barks).unwrap());
-    let worn = srgb(0x6e604f);
+    let worn = srgb(0x9c8c76);
     let knot = rng.next_u64();
     let color = move |i: usize, around: f32| {
-        let k = perlin2(i as f64 * 0.9, around as f64 * 4.0, knot) as f32 * 0.35
+        // Ridges of bark running along it, and darker and lighter stretches.
+        let k = perlin2(i as f64 * 0.35, around as f64 * 9.0, knot) as f32 * 0.4
+            + perlin2(i as f64 * 0.9, around as f64 * 4.0, knot ^ 0x9) as f32 * 0.2
             + perlin2(i as f64 * 0.21, 0.5, knot ^ 0x5) as f32 * 0.25;
         lin4(bark, 1.0 + k)
     };
@@ -3369,25 +3373,33 @@ pub fn root_mesh(seed: u64, len: f32) -> Mesh {
             .unzip();
         b.tube(&lp, &lr, 5, 1.0, &color, None, None);
     }
+    // Flattened, wider than tall, as roots grow where they press against stones and soil
+    // (and as a hose never is): heights scaled down, normals the other way.
+    const FLAT: f32 = 0.62;
+    for v in &mut b.vertices {
+        v.position[1] *= FLAT;
+        let n = Vec3::new(v.normal[0], v.normal[1] / FLAT, v.normal[2]).normalize_or(Vec3::Y);
+        v.normal = n.to_array();
+    }
     // The top worn pale and smooth in patches where it stands proud, the sides stained with
     // soil down where they meet the ground.
-    let soil = srgb(0x2a2219);
+    let soil = srgb(0x3a2e22);
     let wseed = rng.next_u64();
     for v in &mut b.vertices {
         let top = smoothstep(0.5, 0.95, v.normal[1]);
-        let proud = smoothstep(0.0, 0.5 * r0, v.position[1]);
+        let proud = smoothstep(0.0, 0.3 * r0, v.position[1]);
         let patch = smoothstep(
             -0.1,
             0.4,
             perlin2(v.position[0] as f64 * 2.2, 0.0, wseed) as f32,
         );
-        let f = (top * patch * proud * 0.6).clamp(0.0, 0.6);
+        let f = (top * (0.4 + 0.6 * patch) * proud * 0.8).clamp(0.0, 0.75);
         for (c, w) in v.color.iter_mut().zip(worn) {
             *c += (w - *c) * f;
         }
         let low = 1.0 - smoothstep(-0.2 * r0, 0.35 * r0, v.position[1]);
         for (c, d) in v.color.iter_mut().zip(soil) {
-            *c += (d - *c) * low * 0.6;
+            *c += (d - *c) * low * 0.4;
         }
     }
     b.finish()
