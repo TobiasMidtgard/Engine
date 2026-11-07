@@ -23,6 +23,9 @@ use engine_world::{DamageEvent, DamageKind, WorldPlugin};
 
 fn app() -> App {
     let mut app = App::new();
+    // Headless: navigation ground and the world model are built in the step that asks, not
+    // on a pool that answers whenever the machine's load allows, so every run is the same.
+    app.world.resource_mut::<EngineConfig>().headless = true;
     app.world
         .resource_mut::<Time>()
         .set_source(TimeSource::Manual {

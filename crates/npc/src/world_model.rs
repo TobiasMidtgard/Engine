@@ -1316,6 +1316,7 @@ pub(crate) fn rebuild_world_model(
     mut pending: Local<PendingBuild>,
     mut slice: Local<u32>,
     mut gathered: Local<Gathered>,
+    config: Option<Res<EngineConfig>>,
 ) {
     let mut regions: Vec<(DVec2, DVec2)> = terrain
         .read()
@@ -1364,6 +1365,7 @@ pub(crate) fn rebuild_world_model(
         let generation = model.generation + 1;
         let epoch = model.epoch;
         if obstacles.len() > settings.async_above
+            && config.is_none_or(|c| c.off_frame())
             && let Some(pool) = AsyncComputeTaskPool::try_get()
         {
             model.rebuild = false;

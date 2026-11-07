@@ -1228,6 +1228,7 @@ pub(crate) fn warm_nav(
     ground: Res<Ground>,
     water: Res<Water>,
     agents: Query<&Transform, (With<crate::agent::Npc>, Without<crate::rest::Resting>)>,
+    config: Option<Res<EngineConfig>>,
 ) {
     if ground.is_changed() {
         grid.ground_jobs.clear();
@@ -1247,7 +1248,9 @@ pub(crate) fn warm_nav(
             grid.ground_ready.insert(key, g);
         }
     }
-    let pool = AsyncComputeTaskPool::try_get();
+    // Headless runs (tests, tools) build a chunk a step on this thread: a pool's answer
+    // arrives in whichever step the machine's load allows, and the routes with it.
+    let pool = AsyncComputeTaskPool::try_get().filter(|_| config.is_none_or(|c| c.off_frame()));
     grid.warming = pool.is_some();
     let mut ctx = grid.ctx(&world, &ground, &water);
     // Finish one chunk whose ground is ready (its obstacles and clearance are quick), one
