@@ -8,7 +8,7 @@
 //! downed squad mate, the other shooters cover it. While the squad's medic kneels, they fire
 //! at whoever can see it, and its melee mates screen it.
 
-use std::collections::HashMap;
+use bevy_platform::collections::HashMap;
 
 use engine_core::prelude::*;
 use engine_world::NoiseEvent;

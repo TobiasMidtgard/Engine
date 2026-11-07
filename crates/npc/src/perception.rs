@@ -3,7 +3,8 @@
 //! close, in the center of view, in daylight, when the target moves), and what an NPC acts on
 //! lags reality by its reaction time.
 
-use std::collections::{HashMap, VecDeque};
+use bevy_platform::collections::HashMap;
+use std::collections::VecDeque;
 
 use engine_core::prelude::*;
 use engine_world::animation::AnimationParams;

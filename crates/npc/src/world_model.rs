@@ -7,7 +7,8 @@
 //! query so hills block sight too. The model rebuilds itself when static colliders appear,
 //! change, move or disappear, and when terrain is edited.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use bevy_platform::collections::{HashMap, HashSet};
+use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
 use engine_core::prelude::*;
@@ -1365,7 +1366,7 @@ pub(crate) fn rebuild_world_model(
         let generation = model.generation + 1;
         let epoch = model.epoch;
         if obstacles.len() > settings.async_above
-            && config.is_none_or(|c| c.off_frame())
+            && crate::nav::off_the_step(config.as_deref(), &time)
             && let Some(pool) = AsyncComputeTaskPool::try_get()
         {
             model.rebuild = false;
@@ -1427,7 +1428,7 @@ pub(crate) fn rebuild_world_model(
                 model
                     .per_entity
                     .keys()
-                    .filter(|e| mine(e) && !now.contains_key(e))
+                    .filter(|e| mine(e) && !now.contains_key(*e))
                     .copied(),
             )
             .collect();

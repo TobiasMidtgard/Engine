@@ -3,7 +3,7 @@
 //! NPCs with a high `learning` skill use it: feints against habitual blockers, guard raised just
 //! before a rhythmic attacker swings, swings aimed at the side a dodger rolls to.
 
-use std::collections::HashMap;
+use bevy_platform::collections::HashMap;
 
 use engine_core::prelude::*;
 

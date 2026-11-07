@@ -30,7 +30,7 @@ use crate::faction::{Faction, Squad};
 use crate::features::ExplosiveProp;
 use crate::grenade;
 use crate::learning::OpponentModels;
-use crate::nav::{NavAgent, NavGrid, PathStatus};
+use crate::nav::{NavAgent, NavGrid, PathPlan, PathSearch, PathStatus};
 use crate::perception::{Known, NpcMemory, Opening, Perceivables, Snapshot, segment_distance};
 use crate::skills::NpcSkills;
 use crate::smoke::SmokeClouds;
@@ -58,6 +58,7 @@ pub(crate) struct BrainWorld<'w, 's> {
     models: Res<'w, OpponentModels>,
     focus: Res<'w, FocusPoints>,
     time: Res<'w, Time>,
+    config: Option<Res<'w, EngineConfig>>,
     smoke: ResMut<'w, SmokeClouds>,
     grenades: ResMut<'w, grenade::Grenades>,
     props: Query<'w, 's, (Entity, &'static Transform, &'static ExplosiveProp)>,
@@ -137,6 +138,100 @@ pub(crate) struct Scratch {
     picks: u32,
     /// NPCs waking this step (see [`CROWD_WAKE`]).
     waking: u32,
+    /// The NPC being driven (whose paths [`follow`] asks for).
+    me: Option<Entity>,
+    /// Path searches beside the frame (see [`Paths`]).
+    paths: Paths,
+}
+
+/// Path searches beside the frame (engine-design/fixed-step-beside-frame.md, item 2): a
+/// search a step asks for runs on the async pool through the rest of the frame and the next
+/// step takes its answer, so a 10-17 ms search (the arena, VM) leaves the fixed step. The
+/// walker keeps the path it had (or waits) for that one step; a straight walk, most trips in
+/// open ground, is still answered at once. Tests and plain headless runs search at once, as
+/// before ([`crate::nav::off_the_step`], `NpcSettings::paths_beside`).
+#[derive(Default)]
+struct Paths {
+    /// Searches asked this step, started together at its end.
+    asked: Vec<PathAsk>,
+    /// Who waits for an answer: they don't ask again until it comes.
+    waiting: Vec<Entity>,
+    job: engine_core::beside::Beside<Vec<PathAnswer>>,
+    /// The straight-walk check's answer, before it is swapped into the walker's path.
+    out: Vec<DVec3>,
+}
+
+struct PathAsk {
+    e: Entity,
+    dest: DVec3,
+    search: PathSearch,
+    heat: engine_world::Grid2<f32>,
+}
+
+struct PathAnswer {
+    e: Entity,
+    dest: DVec3,
+    status: PathStatus,
+    path: Vec<DVec3>,
+}
+
+/// Whether paths are searched beside the frame (see [`Paths`]).
+fn paths_beside(w: &BrainWorld) -> bool {
+    static FORCED: std::sync::OnceLock<Option<bool>> = std::sync::OnceLock::new();
+    let forced = *FORCED.get_or_init(|| match std::env::var("ENGINE_NPC_PATHS").as_deref() {
+        Ok("beside") => Some(true),
+        Ok("inline") => Some(false),
+        _ => None,
+    });
+    forced
+        .or(w.settings.paths_beside)
+        .unwrap_or_else(|| crate::nav::off_the_step(w.config.as_deref(), &w.time))
+}
+
+/// What heat adds to a meter of path at `p` (a fire's cells are walled off).
+fn heat_cost(heat: &engine_world::Grid2<f32>, p: DVec3) -> f32 {
+    let h = heat.sample(p + DVec3::Y * 0.5);
+    if h > 150.0 {
+        f32::INFINITY
+    } else {
+        (h / 25.0).max(0.0)
+    }
+}
+
+/// The heat field's cells over a search window and two cells round it, so the search owns
+/// what it samples. Bilinear samples inside the window are those of the whole field (the
+/// same cells, and the same default outside it), and inline and beside both sample the copy,
+/// so the two answer alike.
+fn heat_over(
+    heat: &engine_world::Grid2<f32>,
+    (min, max): (DVec2, DVec2),
+) -> engine_world::Grid2<f32> {
+    let c = heat.cell as f64;
+    let lo = ((min - heat.origin) / c).floor() - DVec2::splat(2.0);
+    let hi = ((max - heat.origin) / c).ceil() + DVec2::splat(2.0);
+    let (x0, z0) = (lo.x as i64, lo.y as i64);
+    let (w, d) = ((hi.x - lo.x).max(1.0) as i64, (hi.y - lo.y).max(1.0) as i64);
+    let mut out = engine_world::Grid2::new(
+        heat.origin + DVec2::new(x0 as f64, z0 as f64) * c,
+        heat.cell,
+        w as u32,
+        d as u32,
+        heat.default,
+    );
+    let (fw, fh) = (heat.width as i64, heat.height as i64);
+    for z in 0..d {
+        let sz = z0 + z;
+        for x in 0..w {
+            let sx = x0 + x;
+            // The field's own rule: a cell one past its edge reads the edge, farther the default.
+            if sx < -1 || sz < -1 || sx > fw || sz > fh {
+                continue;
+            }
+            let (cx, cz) = (sx.clamp(0, fw - 1), sz.clamp(0, fh - 1));
+            out.data[(z * w + x) as usize] = heat.data[(cz * fw + cx) as usize];
+        }
+    }
+    out
 }
 
 /// About this many NPCs take their first thought in the step they wake: when more wake at
@@ -166,6 +261,22 @@ pub(crate) fn think_and_act(
     s.waking = 0;
     let world_now = w.time.elapsed_secs_f64();
     revives.expire(world_now);
+    // Last step's path searches (beside the frame).
+    if let Some(answers) = s.paths.job.take() {
+        for a in answers {
+            if let Ok((.., mut nav, _)) = q.get_mut(a.e)
+                && nav.goal == Some(a.dest)
+            {
+                nav.status = Some(a.status);
+                nav.path = a.path;
+                if a.status == PathStatus::Failed {
+                    nav.path.clear();
+                    nav.path.push(a.dest);
+                }
+            }
+        }
+    }
+    s.paths.waiting.clear();
     for (e, npc, t, _, _, vitals, _, clock, (faction, squad, downed), brain, ..) in q.iter() {
         if brain.home.is_none() && npc.active && !vitals.downed && clock.dt > 0.0 {
             s.waking += 1;
@@ -309,6 +420,7 @@ pub(crate) fn think_and_act(
                 me, pos, skills, weapon, faction, now, &mut brain, &memory, &mut nav, &mut w, s,
             );
         }
+        s.me = Some(me);
         drive(
             me,
             pos,
@@ -327,6 +439,29 @@ pub(crate) fn think_and_act(
             &mut revives,
             s,
         );
+    }
+    s.me = None;
+    if !s.paths.asked.is_empty() {
+        let asked = std::mem::take(&mut s.paths.asked);
+        let wear = w.wear.as_ref().map(|g| g.0.clone());
+        s.paths.job.start("npc paths", true, move || {
+            asked
+                .into_iter()
+                .map(|a| {
+                    let _span = tracing::info_span!("find path").entered();
+                    let mut path = Vec::new();
+                    let status =
+                        a.search
+                            .run(&mut |p| heat_cost(&a.heat, p), wear.as_deref(), &mut path);
+                    PathAnswer {
+                        e: a.e,
+                        dest: a.dest,
+                        status,
+                        path,
+                    }
+                })
+                .collect()
+        });
     }
 }
 
@@ -2072,28 +2207,58 @@ fn follow(
     let stale = nav.goal.is_none_or(|g| g.distance(dest) > 1.0)
         || (nav.path.is_empty() && flat > 0.8)
         || (nav.status == Some(PathStatus::Partial) && now - nav.planned_at > 1.5);
-    if stale && s.replans < 8 {
+    let me = s.me;
+    let waiting = me.is_some_and(|e| s.paths.waiting.contains(&e));
+    if stale && !waiting && s.replans < 8 {
         s.replans += 1;
+        let beside = me.is_some() && paths_beside(w);
         let mut ctx = w
             .nav
             .ctx(&w.world, &w.ground, &w.water)
             .worn(w.wear.as_deref());
-        let heat = &w.heat;
-        let mut cost = |p: DVec3| {
-            let h = heat.sample(p + DVec3::Y * 0.5);
-            if h > 150.0 {
-                f32::INFINITY
-            } else {
-                (h / 25.0).max(0.0)
-            }
-        };
-        let status = ctx.find_path(pos, dest, &mut cost, &mut nav.path);
-        nav.status = Some(status);
+        let heat = &w.heat.grid;
         nav.goal = Some(dest);
         nav.planned_at = now;
-        if status == PathStatus::Failed {
-            nav.path.clear();
-            nav.path.push(dest);
+        let plan = {
+            let _span = tracing::info_span!("find path: window").entered();
+            ctx.plan_path(
+                pos,
+                dest,
+                &mut |p| heat_cost(heat, p),
+                &mut s.paths.out,
+                usize::MAX,
+            )
+        };
+        let status = match plan {
+            PathPlan::Done(status) => {
+                std::mem::swap(&mut nav.path, &mut s.paths.out);
+                Some(status)
+            }
+            PathPlan::Search(search) => {
+                let heat = heat_over(heat, search.bounds());
+                if let (true, Some(e)) = (beside, me) {
+                    // Answered next step; until then it keeps the path it has.
+                    s.paths.asked.push(PathAsk {
+                        e,
+                        dest,
+                        search,
+                        heat,
+                    });
+                    s.paths.waiting.push(e);
+                    None
+                } else {
+                    let _span = tracing::info_span!("find path").entered();
+                    let wear = w.wear.as_deref().map(|g| &*g.0);
+                    Some(search.run(&mut |p| heat_cost(&heat, p), wear, &mut nav.path))
+                }
+            }
+        };
+        if let Some(status) = status {
+            nav.status = Some(status);
+            if status == PathStatus::Failed {
+                nav.path.clear();
+                nav.path.push(dest);
+            }
         }
     }
     if let Some(wp) = nav.next_waypoint(pos, 0.45) {
@@ -2346,4 +2511,36 @@ fn ranged_fire(
         &mut w.attacks,
         &mut w.triggers,
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use engine_world::Grid2;
+
+    #[test]
+    fn heat_over_a_window_samples_as_the_whole_field() {
+        let mut heat = Grid2::centered(DVec2::new(3.0, -2.0), 64.0, 1.0, 0.0f32);
+        for (i, v) in heat.data.iter_mut().enumerate() {
+            *v = ((i * 7919) % 400) as f32;
+        }
+        // Windows inside the field, over its edge and past it.
+        for (min, max) in [
+            (DVec2::new(-10.3, -7.9), DVec2::new(12.6, 9.1)),
+            (DVec2::new(20.0, -40.0), DVec2::new(45.5, -20.0)),
+            (DVec2::new(-100.0, -100.0), DVec2::new(-80.0, -70.0)),
+        ] {
+            let part = heat_over(&heat, (min, max));
+            for k in 0..997 {
+                let t = DVec2::new((k * 37 % 101) as f64 / 100.0, (k * 61 % 103) as f64 / 102.0);
+                let p = min + (max - min) * t;
+                let p = DVec3::new(p.x, 0.3, p.y);
+                assert_eq!(
+                    heat.sample(p).to_bits(),
+                    part.sample(p).to_bits(),
+                    "at {p} in {min} .. {max}"
+                );
+            }
+        }
+    }
 }
