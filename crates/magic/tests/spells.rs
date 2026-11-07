@@ -2686,3 +2686,190 @@ fn the_spell_bar_holds_a_grip_while_the_key_is_down_and_throws_on_release() {
     let p = pos(&app, crate_e);
     assert!(p.x < -2.0, "thrown where the crosshair was: {p:?}");
 }
+
+/// A warden at the origin and a foe 16 m out along +z, both with bodies.
+fn shield_duel(app: &mut App) -> (Entity, Entity) {
+    let warden = mage(app, DVec3::new(0.0, 0.0, 0.0), Mastery::Expert);
+    let foe = mage(app, DVec3::new(0.0, 0.0, 16.0), Mastery::Expert);
+    app.world.get_mut::<MagicCaster>(foe).unwrap().side = 1;
+    for e in [warden, foe] {
+        app.world.entity_mut(e).insert(Body(0.5));
+    }
+    (warden, foe)
+}
+
+fn shield() -> SpellDesign {
+    SpellDesign::new(&["ward"], CastType::Cone).named("Shield")
+}
+
+fn bolt() -> SpellDesign {
+    SpellDesign::new(&["fire"], CastType::Bolt)
+}
+
+#[test]
+fn a_held_shield_stops_bolts_at_its_face_and_turns_with_its_aim() {
+    let mut app = app();
+    let (warden, foe) = shield_duel(&mut app);
+    cast(&mut app, warden, shield(), Aim::Entity(foe));
+    run(&mut app, 0.6);
+    let held = barriers(&mut app);
+    assert_eq!(held.len(), 1);
+    let (e, b) = held[0].clone();
+    let wards::BarrierKind::Shield { at, normal, .. } = b.kind else {
+        panic!("a ward cast as a cone is a held shield: {:?}", b.kind);
+    };
+    assert!(normal.z > 0.95, "it faces the foe: {normal}");
+    assert!(
+        (at.z - wards::SHIELD_AHEAD as f64).abs() < 0.1 && at.y > 1.0,
+        "{at}"
+    );
+    // Past its first moment a bolt only bursts on its face.
+    cast(&mut app, foe, bolt(), Aim::Entity(warden));
+    run(&mut app, 1.2);
+    assert!(hits_on(&app, warden).is_empty(), "the shield took it");
+    assert!(hits_on(&app, foe).is_empty(), "and didn't send it back");
+    let b = app.world.get::<wards::Barrier>(e).unwrap();
+    assert!(b.pool < b.full);
+    let seen = &app.world.resource::<Seen>().wards;
+    assert!(
+        seen.iter()
+            .any(|w| w.ward == e && w.taken > 0.0 && !w.perfect)
+    );
+    // Turned away (aimed behind), it no longer covers the warden from the foe.
+    app.world.get_mut::<wards::HeldShield>(e).unwrap().aim =
+        Aim::Point(DVec3::new(0.0, 1.3, -20.0));
+    run(&mut app, 0.1);
+    let b = app.world.get::<wards::Barrier>(e).unwrap();
+    let wards::BarrierKind::Shield { normal, .. } = b.kind else {
+        unreachable!()
+    };
+    assert!(normal.z < -0.95, "it turned with the aim: {normal}");
+    cast(&mut app, foe, bolt(), Aim::Entity(warden));
+    run(&mut app, 1.2);
+    assert!(
+        !hits_on(&app, warden).is_empty(),
+        "from behind it gets through"
+    );
+}
+
+#[test]
+fn a_perfect_block_sends_the_bolt_back_at_whoever_cast_it() {
+    let mut app = app();
+    let (warden, foe) = shield_duel(&mut app);
+    let up = app
+        .world
+        .get::<MagicCaster>(warden)
+        .unwrap()
+        .compile(&shield(), 0.0)
+        .unwrap()
+        .cast_secs;
+    assert!(up < 0.25, "a shield comes up fast: {up}");
+    cast(&mut app, foe, bolt(), Aim::Entity(warden));
+    // Raise it so it stands just before the bolt arrives.
+    let mut raised = false;
+    for _ in 0..120 {
+        app.update();
+        let mut q = app.world.query::<(&runtime::Missile, &runtime::SpellPos)>();
+        let near = q.iter(&app.world).any(|(m, p)| {
+            m.spent.is_none() && p.pos.z - 1.1 < m.vel.length() as f64 * (up + 0.1) as f64
+        });
+        if near {
+            cast(&mut app, warden, shield(), Aim::Entity(foe));
+            raised = true;
+            break;
+        }
+    }
+    assert!(raised);
+    run(&mut app, 1.5);
+    assert!(hits_on(&app, warden).is_empty(), "blocked");
+    let back = hits_on(&app, foe);
+    assert!(!back.is_empty(), "it flew back and hit the foe");
+    assert_eq!(back[0].caster, Some(warden), "as the warden's");
+    let seen = &app.world.resource::<Seen>().wards;
+    assert!(seen.iter().any(|w| w.perfect && w.taken == 0.0));
+    let (_, b) = barriers(&mut app)[0].clone();
+    assert_eq!(b.pool, b.full, "a perfect block costs nothing");
+}
+
+#[test]
+fn a_broken_shield_staggers_its_holder_locks_it_out_and_a_held_one_regrows() {
+    let mut app = app();
+    let (warden, foe) = shield_duel(&mut app);
+    cast(
+        &mut app,
+        warden,
+        shield().with(Modifier::Duration { factor: 6.0 }),
+        Aim::Entity(foe),
+    );
+    run(&mut app, 0.6);
+    let (e, _) = barriers(&mut app)[0].clone();
+    // Two bolts, then quiet: it regrows to full.
+    for _ in 0..2 {
+        cast(&mut app, foe, bolt(), Aim::Entity(warden));
+        run(&mut app, 0.6);
+    }
+    run(&mut app, 0.6);
+    let b = app.world.get::<wards::Barrier>(e).unwrap().clone();
+    assert!(b.pool < b.full, "hit");
+    let low = b.pool;
+    run(&mut app, wards::REGROW_AFTER + 0.2);
+    let b = app.world.get::<wards::Barrier>(e).unwrap().clone();
+    assert!(
+        b.pool > low,
+        "regrowing once nothing hits it: {low} -> {}",
+        b.pool
+    );
+    run(&mut app, 1.0 / wards::REGROW_RATE);
+    let b = app.world.get::<wards::Barrier>(e).unwrap().clone();
+    assert_eq!(b.pool, b.full, "whole again");
+    // Bolts until it breaks: the warden staggers and is locked out.
+    let mut volleys = 0;
+    while app.world.get::<wards::Barrier>(e).is_some() && volleys < 30 {
+        cast(&mut app, foe, bolt(), Aim::Entity(warden));
+        run(&mut app, 0.3);
+        volleys += 1;
+    }
+    assert!(app.world.get::<wards::Barrier>(e).is_none(), "it broke");
+    let a = app.world.get::<status::Afflictions>(warden).unwrap();
+    assert!(a.ward_lock > 0.0, "locked out");
+    assert!(a.staggered > 0.0, "staggered for a moment");
+    assert!(a.time_scale() < 0.5, "slowed while it staggers");
+    // Raised again while locked out, it sputters.
+    cast(&mut app, warden, shield(), Aim::Entity(foe));
+    run(&mut app, 0.5);
+    assert!(barriers(&mut app).is_empty(), "no shield while locked out");
+    run(&mut app, wards::LOCK_SECS);
+    cast(&mut app, warden, shield(), Aim::Entity(foe));
+    run(&mut app, 0.5);
+    assert_eq!(barriers(&mut app).len(), 1, "up again after the lockout");
+}
+
+#[test]
+fn a_shield_on_the_spell_bar_stays_up_while_the_key_is_down() {
+    let mut app = app();
+    let me = weaver(&mut app, DVec3::ZERO);
+    app.world.get_mut::<MagicCaster>(me).unwrap().mana = 1.0e4;
+    run(&mut app, 0.1);
+    let eye = DVec3::new(0.5, 2.0, 3.0);
+    let target = DVec3::new(0.0, 1.0, -14.0);
+    // Key 5 is the starter Shield: held far past the spell's own 4 s.
+    aim_input(&mut app, me, eye, target, |i| i.press(4));
+    run(&mut app, 6.0);
+    let held = barriers(&mut app);
+    assert_eq!(held.len(), 1, "up while the key is down");
+    assert!(held[0].1.stands());
+    let wards::BarrierKind::Shield { normal, .. } = held[0].1.kind else {
+        panic!("{:?}", held[0].1.kind);
+    };
+    assert!(normal.z < -0.9, "turned to the crosshair: {normal}");
+    assert!(
+        app.world.get::<MagicCaster>(me).unwrap().mana < 1.0e4,
+        "it drains mana"
+    );
+    aim_input(&mut app, me, eye, target, |i| i.release(4));
+    run(&mut app, 0.6);
+    assert!(
+        barriers(&mut app).is_empty(),
+        "lowered when the key comes up"
+    );
+}

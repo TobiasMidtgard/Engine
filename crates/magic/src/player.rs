@@ -99,8 +99,11 @@ impl Hold {
         if design.has(|m| matches!(m, Modifier::Charge { .. })) {
             return Hold::Charge;
         }
-        // A grip holds what it takes while the key is down and throws it on release.
-        if design.effects.iter().any(|k| k == "grip") {
+        // A grip holds what it takes while the key is down and throws it on release; a shield
+        // (a ward cast as a cone) stays up while the key is down.
+        if design.effects.iter().any(|k| k == "grip")
+            || (design.cast == CastType::Cone && design.effects.iter().any(|k| k == "ward"))
+        {
             return Hold::Channel;
         }
         match design.cast {
@@ -269,10 +272,7 @@ pub fn starter_spells() -> Vec<(SpellDesign, Option<Growth>)> {
             d(&["storm"], CastType::Chain).named("Chain lightning"),
             None,
         ),
-        (
-            d(&["fire", "frost"], CastType::Lob).named("Steam flask"),
-            None,
-        ),
+        (d(&["ward"], CastType::Cone).named("Shield"), None),
         (d(&["fire"], CastType::Beam).named("Flame jet"), None),
         (d(&["grip"], CastType::Bolt).named("Telekinesis"), None),
         (d(&["heal"], CastType::OnSelf).named("Mend"), None),
@@ -429,6 +429,7 @@ pub fn drive_spell_bars(
     )>,
     mut beams: Query<&mut BeamCast>,
     mut grips: Query<&mut crate::kinesis::Grip>,
+    mut shields: Query<(&mut crate::wards::Barrier, &mut crate::wards::HeldShield)>,
     mut requests: MessageWriter<CastRequest>,
     mut queue: ResMut<MagicQueue>,
 ) {
@@ -507,6 +508,21 @@ pub fn drive_spell_bars(
                                 g.duration = g.duration.max(g.age + CHANNEL_GRACE_SECS);
                             } else {
                                 g.duration = g.duration.min(g.age);
+                            }
+                        }
+                        // A shield stays up while the key is down, turned with the crosshair,
+                        // and is lowered when it comes up.
+                        for (mut b, mut s) in &mut shields {
+                            if s.holder != e || !b.stands() {
+                                continue;
+                            }
+                            if let Some(p) = target {
+                                s.aim = Aim::Point(p);
+                            }
+                            if going {
+                                b.life = b.life.max(b.age + CHANNEL_GRACE_SECS);
+                            } else {
+                                b.life = b.life.min(b.age);
                             }
                         }
                         bar.held = going.then_some(held);
@@ -771,6 +787,11 @@ mod tests {
         assert_eq!(holds[1], Hold::Place, "a wall is placed");
         assert_eq!(holds[2], Hold::Place, "a pillar is placed");
         assert_eq!(holds[3], Hold::Tap, "chain lightning fires at once");
+        assert_eq!(
+            holds[4],
+            Hold::Channel,
+            "a shield stays up while the key is down"
+        );
         assert_eq!(holds[5], Hold::Channel, "a flame jet is channelled");
         assert_eq!(
             holds[6],

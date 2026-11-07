@@ -111,6 +111,8 @@ pub struct Afflictions {
     pub ward_lock: f32,
     /// Damage took the last of the ward this step: its shell shatters (wards.rs clears it).
     pub ward_broke: bool,
+    /// Seconds left staggering (a held shield broke in its hands).
+    pub staggered: f32,
     /// Haste or slow: time factor and seconds left.
     pub tempo: Option<(f32, f32)>,
     /// Seconds left unseen.
@@ -385,6 +387,9 @@ impl Afflictions {
         if self.shocked > 0.0 {
             return 0.15;
         }
+        if self.staggered > 0.0 {
+            return crate::wards::STAGGER_SCALE;
+        }
         let chill = (1.0 - 0.08 * self.chill).clamp(0.55, 1.0);
         let tempo = self.tempo.map(|(f, _)| f).unwrap_or(1.0);
         chill * tempo
@@ -420,6 +425,7 @@ impl Afflictions {
             }
         }
         self.ward_lock = (self.ward_lock - dt).max(0.0);
+        self.staggered = (self.staggered - dt).max(0.0);
         if let Some((f, s)) = self.tempo {
             self.tempo = (s - dt > 0.0).then_some((f, s - dt));
         }

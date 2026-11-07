@@ -165,6 +165,7 @@ impl Plugin for MagicPlugin {
                 FixedUpdate,
                 (
                     (
+                        wards::hold_shields,
                         runtime::fly_missiles,
                         runtime::tick_fields,
                         runtime::tick_beams,

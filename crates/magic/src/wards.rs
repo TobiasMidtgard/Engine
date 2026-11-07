@@ -19,12 +19,19 @@
 //! An element types the ward ([`ward_cost`]): it soaks hits of its own element for nothing,
 //! takes double from its opposite, and pays back whoever strikes it from close by (burn, chill,
 //! shock: [`payback_spell`]).
+//!
+//! A ward cast as a cone is a **shield you hold** (round-11-plan.md, research-shields.md): a
+//! curved panel of the same lattice before the caster, turned with its aim each step
+//! ([`hold_shields`]), stopping what comes at its face. Its pool regrows once nothing has hit it
+//! for a moment (Reinhardt's barrier); it breaks with a stagger (Skyrim's wards); and a missile
+//! that meets it in its first quarter second flies back as the holder's (Hogwarts Legacy's
+//! perfect Protego, Elden Ring's Carian Retaliation): a perfect block.
 
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 
 use engine_assets::{Assets, Handle};
-use engine_core::math::{DVec3, Quat, Vec3, Vec4};
+use engine_core::math::{DVec3, Mat3, Quat, Vec3, Vec4};
 use engine_core::prelude::*;
 use engine_render::{
     AlphaMode, MaterialRef, Mesh, MeshRef, MeshRenderer, NoMeshLod, NoVirtualGeometry, PointLight,
@@ -33,6 +40,7 @@ use engine_render::{
 use engine_world::Factions;
 use engine_world::physics::{CharacterController, PhysicsQueries, QueryFilter};
 
+use crate::caster::Aim;
 use crate::compile::{CastContext, Spell, compile};
 use crate::design::{CastType, SpellDesign};
 use crate::looks::{LookCmd, Role};
@@ -71,6 +79,40 @@ pub const FLICKER_BELOW: f32 = 0.2;
 pub const LATTICE_GLOW: f32 = 11_000.0;
 pub const FLARE_GLOW: f32 = 60_000.0;
 pub const SHARD_GLOW: f32 = 20_000.0;
+
+/// A held shield's pool against the spell's ward.
+pub const SHIELD_POOL: f32 = 3.0;
+/// A held shield's width and height (an oval), m.
+pub const SHIELD_W: f32 = 1.9;
+pub const SHIELD_H: f32 = 2.1;
+/// How far before the chest its middle is held, m.
+pub const SHIELD_AHEAD: f32 = 1.1;
+/// The radius of the sphere it is a cap of, m: its rim curls back about 0.2 m.
+pub const SHIELD_BEND: f32 = 2.2;
+/// Its cells' size (centre to corner), m.
+pub const SHIELD_CELL: f32 = 0.16;
+/// Seconds it takes to swell in, and to fade when lowered.
+pub const SHIELD_SWELL: f32 = 0.12;
+pub const SHIELD_FADE: f32 = 0.2;
+/// How far it tilts up or down with the aim, degrees.
+pub const SHIELD_PITCH_DEG: f32 = 35.0;
+/// Seconds after it stands in which a missile it meets flies back: a perfect block (Elden
+/// Ring's parries are open 0.10-0.20 s; a spell held on a key needs a little more).
+pub const PERFECT_SECS: f32 = 0.25;
+/// A blocked missile flies back at whoever cast it when they stand within this angle of the
+/// shield's facing, degrees; else at the holder's aim.
+pub const REFLECT_ASSIST_DEG: f32 = 30.0;
+/// How much faster it flies back.
+pub const REFLECT_SPEED: f32 = 1.15;
+/// A held shield regrows once nothing has hit it for this long, s (Reinhardt: 2 s) ...
+pub const REGROW_AFTER: f32 = 1.5;
+/// ... at this share of its pool a second.
+pub const REGROW_RATE: f32 = 0.2;
+/// Seconds a holder staggers when its shield breaks (Skyrim), and its time scale meanwhile.
+pub const STAGGER_SECS: f32 = 0.6;
+pub const STAGGER_SCALE: f32 = 0.35;
+/// Seconds the ring of a perfect block pulses off the face.
+pub const PULSE_SECS: f32 = 0.35;
 
 // ------------------------------------------------------------------------------- rules
 
@@ -162,6 +204,39 @@ pub enum BarrierKind {
         width: f32,
         height: f32,
     },
+    /// A shield held before someone ([`HeldShield`]): a cap of a sphere of [`SHIELD_BEND`]
+    /// seen as an oval `width` by `height`, its middle at `at`, its face toward `normal`.
+    Shield {
+        at: DVec3,
+        normal: Vec3,
+        width: f32,
+        height: f32,
+    },
+}
+
+/// A shield's turn: its face (+z) toward `normal`, its up kept as near the world's as it can.
+pub fn shield_rotation(normal: Vec3) -> Quat {
+    let n = normal.normalize_or(Vec3::Z);
+    let right = Vec3::Y.cross(n).normalize_or(Vec3::X);
+    let up = n.cross(right);
+    Quat::from_mat3(&Mat3::from_cols(right, up, n))
+}
+
+/// A point of a flat oval (x across, y up, from its middle) brought onto the shield's sphere
+/// cap, in the shield's own space: its middle at the origin, bulging toward +z, its rim curling
+/// back. The same map, inverted, decides what the shield covers ([`shield_covers`]).
+pub fn bend(x: f32, y: f32) -> Vec3 {
+    Vec3::new(x, y, SHIELD_BEND).normalize() * SHIELD_BEND - Vec3::Z * SHIELD_BEND
+}
+
+/// Does a point on the shield's sphere (from its centre, in the shield's space) lie inside its
+/// oval?
+pub fn shield_covers(q: Vec3, width: f32, height: f32) -> bool {
+    if q.z <= 1e-3 {
+        return false;
+    }
+    let (u, v) = (q.x * SHIELD_BEND / q.z, q.y * SHIELD_BEND / q.z);
+    (u / (width * 0.5)).powi(2) + (v / (height * 0.5)).powi(2) <= 1.0
 }
 
 impl BarrierKind {
@@ -173,6 +248,16 @@ impl BarrierKind {
                 let n = Vec3::new(normal.x, 0.0, normal.z).normalize_or(Vec3::Z);
                 (at, Quat::from_rotation_arc(Vec3::Z, n), Vec3::ONE)
             }
+            BarrierKind::Shield { at, normal, .. } => (at, shield_rotation(normal), Vec3::ONE),
+        }
+    }
+
+    /// Its middle, for a flash or a burst.
+    pub fn middle(&self) -> DVec3 {
+        match *self {
+            BarrierKind::Dome { at, radius } => at + DVec3::Y * (radius * 0.5) as f64,
+            BarrierKind::Panel { at, height, .. } => at + DVec3::Y * (height * 0.5) as f64,
+            BarrierKind::Shield { at, .. } => at,
         }
     }
 
@@ -220,6 +305,33 @@ impl BarrierKind {
                 let along = Vec3::Y.cross(n).normalize_or(Vec3::X);
                 (p.dot(along).abs() <= width * 0.5 && (-0.05..=height).contains(&p.y))
                     .then(|| (t, if denom > 0.0 { -n } else { n }))
+            }
+            BarrierKind::Shield {
+                at,
+                normal,
+                width,
+                height,
+            } => {
+                // Its face only: a segment entering its sphere from outside, where the oval is.
+                // What comes from behind enters the sphere round the back and gets through.
+                let rot = shield_rotation(normal);
+                let r = SHIELD_BEND;
+                let centre = at - (rot * Vec3::Z * r).as_dvec3();
+                let o = (from - centre).as_vec3();
+                if o.length_squared() <= r * r {
+                    return None;
+                }
+                let b = o.dot(dir);
+                let disc = b * b - (o.length_squared() - r * r);
+                if disc < 0.0 {
+                    return None;
+                }
+                let t = -b - disc.sqrt();
+                if !(0.0..=len).contains(&t) {
+                    return None;
+                }
+                let q = o + dir * t;
+                shield_covers(rot.inverse() * q, width, height).then(|| (t, q / r))
             }
         }
     }
@@ -272,6 +384,26 @@ pub fn barrier_in_way<'a>(
         .min_by(|a, b| a.1.total_cmp(&b.1).then(a.0.cmp(&b.0)))
 }
 
+/// A shield someone holds up: its barrier rides before them, turned with their aim
+/// ([`hold_shields`]), for as long as its `life` (the spell bar keeps extending it while the key
+/// is down; an NPC's or the hall's cast holds it for the spell's `shield_secs`).
+#[derive(Component, Debug, Clone, Copy)]
+pub struct HeldShield {
+    pub holder: Entity,
+    pub aim: Aim,
+    /// Seconds since a hit last took from its pool (it regrows after [`REGROW_AFTER`]).
+    pub since_hit: f32,
+    /// Missiles it has sent back.
+    pub reflected: u32,
+}
+
+impl HeldShield {
+    /// Is a barrier just raised, so that what it meets flies back?
+    pub fn perfect(b: &Barrier) -> bool {
+        b.age < PERFECT_SECS
+    }
+}
+
 /// A barrier to raise this step (a release queues it, [`tend_wards`] puts it up).
 #[derive(Debug, Clone)]
 pub struct NewBarrier {
@@ -280,6 +412,74 @@ pub struct NewBarrier {
     pub pool: f32,
     pub life: f32,
     pub element: Option<Element>,
+    /// A shield held toward this aim (by the cast's caster).
+    pub held: Option<Aim>,
+}
+
+/// Where a shield held by a body standing at `feet`, `height` tall, rides when aimed at
+/// `aim_point` (or along `forward`): its middle [`SHIELD_AHEAD`] before the chest and its
+/// facing, tilted at most [`SHIELD_PITCH_DEG`] up or down.
+pub fn shield_pose(
+    feet: DVec3,
+    height: f32,
+    aim_point: Option<DVec3>,
+    forward: Vec3,
+) -> (DVec3, Vec3) {
+    let chest = feet + DVec3::Y * (height * 0.72) as f64;
+    let fwd = forward.normalize_or(Vec3::NEG_Z);
+    let dir = aim_point
+        .map(|p| (p - chest).as_vec3())
+        .filter(|d| d.length_squared() > 0.25)
+        .unwrap_or(fwd)
+        .normalize_or(fwd);
+    let flat = Vec3::new(dir.x, 0.0, dir.z);
+    let along = flat.length();
+    let flat = if along > 1e-3 {
+        flat / along
+    } else {
+        Vec3::new(fwd.x, 0.0, fwd.z).normalize_or(Vec3::NEG_Z)
+    };
+    let max = SHIELD_PITCH_DEG.to_radians();
+    let pitch = dir.y.atan2(along).clamp(-max, max);
+    let n = flat * pitch.cos() + Vec3::Y * pitch.sin();
+    (chest + (n * SHIELD_AHEAD).as_dvec3(), n)
+}
+
+/// Where a missile blocked perfectly at `at` on a shield facing `face` flies back to: at whoever
+/// cast it (`caster_at`) when they stand within [`REFLECT_ASSIST_DEG`] of the facing, else at the
+/// holder's aim.
+pub fn reflect_target(face: Vec3, at: DVec3, caster_at: Option<DVec3>, aim_at: DVec3) -> DVec3 {
+    let limit = REFLECT_ASSIST_DEG.to_radians();
+    match caster_at {
+        Some(c) if (c - at).as_vec3().angle_between(face) <= limit => c,
+        _ => aim_at,
+    }
+}
+
+/// The shield a ward cast as a cone raises before its caster (round-11-plan.md).
+pub fn raise_shield(
+    info: &CastInfo,
+    feet: DVec3,
+    aim: Aim,
+    aim_point: DVec3,
+    forward: Vec3,
+    queue: &mut MagicQueue,
+) {
+    let spell = &info.spell;
+    let (at, normal) = shield_pose(feet, 1.8, Some(aim_point), forward);
+    queue.barriers.push(NewBarrier {
+        cast: info.clone(),
+        kind: BarrierKind::Shield {
+            at,
+            normal,
+            width: SHIELD_W,
+            height: SHIELD_H,
+        },
+        pool: spell.payload.ward * info.scale * SHIELD_POOL,
+        life: spell.payload.shield_secs,
+        element: spell.payload.ward_element,
+        held: Some(aim),
+    });
 }
 
 /// The barriers a ward spell cast as an area (a dome) or a wall (panels) raises.
@@ -307,6 +507,7 @@ pub fn raise(
                 pool: ward * DOME_POOL,
                 life: DOME_SECS * (c.duration / 10.0).max(1.0),
                 element,
+                held: None,
             });
         }
         CastType::Wall => {
@@ -331,6 +532,7 @@ pub fn raise(
                     pool: ward * PANEL_POOL,
                     life: c.duration.max(6.0),
                     element,
+                    held: None,
                 });
             }
         }
@@ -352,6 +554,8 @@ pub struct WardStruck {
     /// That cost's share of the full pool.
     pub share: f32,
     pub broke: bool,
+    /// A held shield sent it back (a perfect block).
+    pub perfect: bool,
 }
 
 // ------------------------------------------------------------------------------- lattice
@@ -378,6 +582,9 @@ pub struct Lattice {
     /// A flat panel's width and height: drawn with a glowing frame round it and a firmer
     /// fill, so a wall reads as panels standing side by side.
     pub frame: Option<[f32; 2]>,
+    /// A held shield's oval width and height: drawn with a glowing rim round it, bent onto
+    /// its cap ([`bend`]), and a firmer fill.
+    pub oval: Option<[f32; 2]>,
 }
 
 impl Lattice {
@@ -499,6 +706,7 @@ pub fn sphere_lattice(sub: u32) -> Lattice {
         cell_r,
         rim: false,
         frame: None,
+        oval: None,
     }
 }
 
@@ -559,6 +767,57 @@ pub fn panel_lattice(w: f32, h: f32, s: f32) -> Lattice {
         cell_r: s,
         rim: false,
         frame: Some([w, h]),
+        oval: None,
+    }
+}
+
+/// A held shield's cells: a flat oval `w` by `h` m of pointy-top hexes of size `s`, brought
+/// onto its sphere cap ([`bend`]); the cells on the rim are cut by the oval.
+pub fn shield_lattice(w: f32, h: f32, s: f32) -> Lattice {
+    let (a, b) = (w * 0.5, h * 0.5);
+    let dx = 3f32.sqrt() * s;
+    let dy = 1.5 * s;
+    let rows = (b / dy).ceil() as i32 + 1;
+    let cols = (a / dx).ceil() as i32 + 1;
+    let oval = |x: f32, y: f32| (x / a).powi(2) + (y / b).powi(2);
+    let onto = |x: f32, y: f32| {
+        let e = oval(x, y);
+        if e > 1.0 {
+            (x / e.sqrt(), y / e.sqrt())
+        } else {
+            (x, y)
+        }
+    };
+    let mut cells = Vec::new();
+    for j in -rows..=rows {
+        let y = j as f32 * dy;
+        let shift = if j.rem_euclid(2) == 1 { dx * 0.5 } else { 0.0 };
+        for i in -cols - 1..=cols + 1 {
+            let x = i as f32 * dx + shift;
+            if oval(x, y) > 1.0 {
+                continue;
+            }
+            let corners = (0..6)
+                .map(|k| {
+                    let ang = (30.0 + 60.0 * k as f32).to_radians();
+                    let (px, py) = onto(x + ang.cos() * s, y + ang.sin() * s);
+                    bend(px, py)
+                })
+                .collect();
+            cells.push(Cell {
+                center: bend(x, y),
+                normal: Vec3::new(x, y, SHIELD_BEND).normalize(),
+                corners,
+            });
+        }
+    }
+    Lattice {
+        cells,
+        flare_r: s * 3.6,
+        cell_r: s,
+        rim: false,
+        frame: None,
+        oval: Some([w, h]),
     }
 }
 
@@ -569,6 +828,8 @@ const EDGE: f32 = 0.13;
 pub const PANEL_CELL: f32 = 0.3;
 /// Width of the glowing frame round a panel, m.
 const PANEL_FRAME: f32 = 0.06;
+/// Width of the glowing rim round a held shield, m.
+const SHIELD_RIM: f32 = 0.07;
 /// Opacity of a cell's edge, of its inner rim, and of its fill.
 const EDGE_A: f32 = 0.95;
 const INNER_A: f32 = 0.22;
@@ -627,6 +888,8 @@ pub fn lattice_mesh(l: &Lattice, cracks: u8) -> Mesh {
     let mut m = Mesh::new(Vec::new(), Vec::new());
     let fill = if l.frame.is_some() {
         FILL_A * 2.0
+    } else if l.oval.is_some() {
+        FILL_A * 2.6
     } else {
         FILL_A
     };
@@ -664,6 +927,38 @@ pub fn lattice_mesh(l: &Lattice, cracks: u8) -> Mesh {
             ]);
             m.indices
                 .extend([base, base + 1, base + 2, base, base + 2, base + 3]);
+        }
+    }
+    if let Some([w, h]) = l.oval {
+        // A bright rim round the shield, fading inward, and a faint halo just outside it.
+        let (a, b) = (w * 0.5, h * 0.5);
+        let n = 96;
+        let inner = 1.0 - SHIELD_RIM / (0.5 * (a + b));
+        let outer = 1.0 + 0.5 * SHIELD_RIM / (0.5 * (a + b));
+        let at = |k: usize, f: f32| {
+            let t = k as f32 / n as f32 * std::f32::consts::TAU;
+            bend(a * t.cos() * f, b * t.sin() * f)
+        };
+        let v = |p: Vec3, a: f32| {
+            Vertex::new(
+                p,
+                (p + Vec3::Z * SHIELD_BEND).normalize(),
+                Default::default(),
+            )
+            .with_color(Vec4::new(1.0, 1.0, 1.0, a))
+        };
+        for k in 0..n {
+            for (f0, a0, f1, a1) in [(1.0, 1.0, inner, 0.3), (outer, 0.0, 1.0, 1.0)] {
+                let base = m.vertices.len() as u32;
+                m.vertices.extend([
+                    v(at(k, f0), a0),
+                    v(at(k + 1, f0), a0),
+                    v(at(k + 1, f1), a1),
+                    v(at(k, f1), a1),
+                ]);
+                m.indices
+                    .extend([base, base + 1, base + 2, base, base + 2, base + 3]);
+            }
         }
     }
     if l.rim {
@@ -743,6 +1038,11 @@ pub enum LatticeKey {
         w_cm: u32,
         h_cm: u32,
     },
+    /// A held shield, its size in cm.
+    Shield {
+        w_cm: u32,
+        h_cm: u32,
+    },
 }
 
 impl LatticeKey {
@@ -753,13 +1053,30 @@ impl LatticeKey {
             LatticeKey::Panel { w_cm, h_cm } => {
                 panel_lattice(w_cm as f32 / 100.0, h_cm as f32 / 100.0, PANEL_CELL)
             }
+            LatticeKey::Shield { w_cm, h_cm } => {
+                shield_lattice(w_cm as f32 / 100.0, h_cm as f32 / 100.0, SHIELD_CELL)
+            }
         }
     }
 
-    fn panel(width: f32, height: f32) -> Self {
-        LatticeKey::Panel {
-            w_cm: (width * 100.0).round() as u32,
-            h_cm: (height * 100.0).round() as u32,
+    /// Is it drawn in metres in its own space (a panel or a shield), rather than on a unit
+    /// sphere scaled to size?
+    fn flat(self) -> bool {
+        matches!(self, LatticeKey::Panel { .. } | LatticeKey::Shield { .. })
+    }
+
+    fn of(kind: &BarrierKind) -> Self {
+        let cm = |m: f32| (m * 100.0).round() as u32;
+        match *kind {
+            BarrierKind::Dome { .. } => LatticeKey::Dome,
+            BarrierKind::Panel { width, height, .. } => LatticeKey::Panel {
+                w_cm: cm(width),
+                h_cm: cm(height),
+            },
+            BarrierKind::Shield { width, height, .. } => LatticeKey::Shield {
+                w_cm: cm(width),
+                h_cm: cm(height),
+            },
         }
     }
 }
@@ -944,10 +1261,14 @@ impl WardLook {
 
     /// Its emission now, with `share` of its pool left at time `t`.
     fn strength(&self, share: f32, t: f32) -> f32 {
-        let swell = (self.age / SWELL_SECS).clamp(0.0, 1.0);
+        let (swell_secs, fade_secs) = match self.key {
+            LatticeKey::Shield { .. } => (SHIELD_SWELL, SHIELD_FADE),
+            _ => (SWELL_SECS, FADE_SECS),
+        };
+        let swell = (self.age / swell_secs).clamp(0.0, 1.0);
         // It comes in bright and settles.
         let birth = 1.0 + 1.5 * (1.0 - (self.age / 0.6).clamp(0.0, 1.0));
-        let fade = self.fading.map_or(1.0, |f| (1.0 - f / FADE_SECS).max(0.0));
+        let fade = self.fading.map_or(1.0, |f| (1.0 - f / fade_secs).max(0.0));
         let flicker = if share < FLICKER_BELOW {
             let k = roll(self.seed ^ (t * 24.0) as u64, 3);
             0.35 + 0.65 * k
@@ -984,6 +1305,16 @@ pub struct WardShard {
     pub age: f32,
     pub life: f32,
     pub color: [f32; 3],
+}
+
+/// The ring of a perfect block: the shield's lattice pulsing off its face, growing and fading.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct WardPulse {
+    pub age: f32,
+    pub color: [f32; 3],
+    /// Where it started and which way it flies off.
+    pub at: DVec3,
+    pub normal: Vec3,
 }
 
 /// The flash of a ward breaking.
@@ -1097,22 +1428,39 @@ pub fn tend_wards(
             &mut WardLook,
             &mut Transform,
             Option<&mut MeshRenderer>,
+            Option<&mut HeldShield>,
         ),
         Without<WardShell>,
     >,
     mut flares: Query<
         (Entity, &mut WardFlare, Option<&mut MeshRenderer>),
-        (Without<WardShell>, Without<Barrier>),
+        (Without<WardShell>, Without<Barrier>, Without<WardPulse>),
     >,
-    mut shards: Query<
-        (
-            Entity,
-            &mut WardShard,
-            &mut Transform,
-            Option<&mut MeshRenderer>,
-        ),
-        (Without<WardShell>, Without<Barrier>, Without<WardFlare>),
-    >,
+    (mut shards, mut pulses): (
+        Query<
+            (
+                Entity,
+                &mut WardShard,
+                &mut Transform,
+                Option<&mut MeshRenderer>,
+            ),
+            (
+                Without<WardShell>,
+                Without<Barrier>,
+                Without<WardFlare>,
+                Without<WardPulse>,
+            ),
+        >,
+        Query<
+            (
+                Entity,
+                &mut WardPulse,
+                &mut Transform,
+                Option<&mut MeshRenderer>,
+            ),
+            (Without<WardShell>, Without<Barrier>, Without<WardFlare>),
+        >,
+    ),
     mut flashes: Query<(Entity, &mut WardFlash, &mut PointLight)>,
     (mut materials, mut painted): (
         Option<ResMut<Assets<StandardMaterial>>>,
@@ -1129,7 +1477,8 @@ pub fn tend_wards(
             let live = shells.contains(e)
                 || barriers.contains(e)
                 || flares.contains(e)
-                || shards.contains(e);
+                || shards.contains(e)
+                || pulses.contains(e);
             if !live {
                 mats.remove(*h);
             }
@@ -1143,26 +1492,71 @@ pub fn tend_wards(
 
     // ---- raise the barriers queued this step
     for nb in std::mem::take(&mut queue.barriers) {
-        let key = match nb.kind {
-            BarrierKind::Dome { .. } => LatticeKey::Dome,
-            BarrierKind::Panel { width, height, .. } => LatticeKey::panel(width, height),
-        };
+        let key = LatticeKey::of(&nb.kind);
         let color = ward_color(nb.element);
+        let holder = nb.held.and(nb.cast.caster);
+        if let Some(holder) = holder {
+            // A broken ward still locks the holder out: it sputters.
+            if bodies
+                .get(holder)
+                .is_ok_and(|(_, a, _, _)| a.ward_lock > 0.0)
+            {
+                queue.looks.push(LookCmd::Burst {
+                    at: nb.kind.middle(),
+                    up: Vec3::Y,
+                    look: "light".into(),
+                    role: Role::Fizzle,
+                    scale: 0.6,
+                    color,
+                });
+                continue;
+            }
+            // Already holding one up: it stays up.
+            let mut kept = false;
+            for (_, mut b, _, _, _, h) in &mut barriers {
+                if let Some(mut h) = h
+                    && h.holder == holder
+                    && b.stands()
+                {
+                    b.life = b.life.max(b.age + nb.life);
+                    if let Some(aim) = nb.held {
+                        h.aim = aim;
+                    }
+                    kept = true;
+                }
+            }
+            if kept {
+                continue;
+            }
+        }
         let (at, rot, scale) = nb.kind.frame();
+        let start = match nb.kind {
+            BarrierKind::Shield { .. } => scale * 0.3,
+            _ => scale * 0.05,
+        };
         let mut e = commands.spawn((
             Name::new(match nb.kind {
                 BarrierKind::Dome { .. } => "Ward dome",
                 BarrierKind::Panel { .. } => "Ward wall panel",
+                BarrierKind::Shield { .. } => "Held shield",
             }),
             Transform::from_translation(at)
                 .with_rotation(rot)
-                .with_scale(scale * 0.05),
+                .with_scale(start),
             WardLook::new(key, color, next_seed()),
             NoVirtualGeometry,
             NoMeshLod,
         ));
         if let Some(m) = meshes.as_deref_mut() {
             e.insert(renderer(wm.whole(key, 0, m), color, 0.0));
+        }
+        if let (Some(holder), Some(aim)) = (holder, nb.held) {
+            e.insert(HeldShield {
+                holder,
+                aim,
+                since_hit: 0.0,
+                reflected: 0,
+            });
         }
         let me = e.id();
         commands.entity(me).insert(Barrier {
@@ -1209,10 +1603,21 @@ pub fn tend_wards(
             continue;
         };
         let found = if s.barrier {
-            barriers.get_mut(s.ward).ok().map(|(e, b, look, _, _)| {
-                let (at, rot, scale) = b.kind.frame();
-                (e, at, rot, scale, look)
-            })
+            barriers
+                .get_mut(s.ward)
+                .ok()
+                .map(|(e, b, look, _, _, held)| {
+                    if let Some(mut h) = held {
+                        if s.taken > 0.0 {
+                            h.since_hit = 0.0;
+                        }
+                        if s.perfect {
+                            h.reflected += 1;
+                        }
+                    }
+                    let (at, rot, scale) = b.kind.frame();
+                    (e, at, rot, scale, look)
+                })
         } else {
             owned.get(&s.ward).and_then(|&sh| {
                 shells.get_mut(sh).ok().map(|(e, shell, look, tf, _)| {
@@ -1224,28 +1629,56 @@ pub fn tend_wards(
             continue;
         };
         look.glow = (look.glow + 0.35 + 2.5 * s.share).min(1.6);
-        if look.since_flare < 0.08 && s.share < 0.05 {
+        if s.perfect {
+            // A perfect block: the whole face flashes, a ring pulses off it, and light.
+            look.glow = 2.2;
+            let normal = rot * Vec3::Z;
+            let mut p = commands.spawn((
+                Name::new("Perfect block"),
+                Transform::from_translation(at).with_rotation(rot),
+                WardPulse {
+                    age: 0.0,
+                    color: [1.0, 0.95, 0.8],
+                    at,
+                    normal,
+                },
+                NoVirtualGeometry,
+                NoMeshLod,
+            ));
+            p.insert(renderer(
+                wm.whole(look.key, 0, m),
+                [1.0, 0.95, 0.8],
+                FLARE_GLOW,
+            ));
+            flash(&mut commands, s.point, [1.0, 0.9, 0.7], 9000.0);
+        } else if look.since_flare < 0.08 && s.share < 0.05 {
             continue;
         }
         look.since_flare = 0.0;
         let local = rot.inverse() * (s.point - at).as_vec3() / scale.max(Vec3::splat(1e-3));
-        let local = match look.key {
-            LatticeKey::Panel { .. } => local,
-            _ => local.normalize_or(Vec3::Y),
-        };
         let key = look.key;
+        let local = if key.flat() {
+            local
+        } else {
+            local.normalize_or(Vec3::Y)
+        };
         let cell = wm.lattice(key).nearest(local);
         let patch = wm.patch(key, cell, m);
-        // Soaked hits (its own element) flare white-hot but small; costly ones big.
-        let peak = FLARE_GLOW * (0.7 + 6.0 * s.share).min(2.6);
+        // Soaked hits (its own element) and perfect blocks flare white-hot; costly ones big.
+        let peak = if s.perfect {
+            FLARE_GLOW * 2.6
+        } else {
+            FLARE_GLOW * (0.7 + 6.0 * s.share).min(2.6)
+        };
         let color = if s.taken <= 0.0 {
             [1.0, 1.0, 1.0]
         } else {
             look.color
         };
-        let lift = match key {
-            LatticeKey::Panel { .. } => Transform::from_xyz(0.0, 0.0, 0.012),
-            _ => Transform::from_scale(Vec3::splat(1.012)),
+        let lift = if key.flat() {
+            Transform::from_xyz(0.0, 0.0, 0.012)
+        } else {
+            Transform::from_scale(Vec3::splat(1.012))
         };
         commands.spawn((
             Name::new("Ward flare"),
@@ -1358,24 +1791,31 @@ pub fn tend_wards(
     }
 
     // ---- barriers stand, crack, fade and shatter
-    for (e, mut b, mut look, mut tf, mut r) in &mut barriers {
+    for (e, mut b, mut look, mut tf, mut r, held) in &mut barriers {
         b.age += dt;
         look.age = b.age;
         look.since_flare += dt;
         look.glow = (look.glow - dt * 3.0).max(0.0);
         let (at, rot, scale) = b.kind.frame();
-        let swell = (b.age / SWELL_SECS).clamp(0.0, 1.0);
+        let shield = matches!(b.kind, BarrierKind::Shield { .. });
+        let swell_secs = if shield { SHIELD_SWELL } else { SWELL_SECS };
+        let swell = (b.age / swell_secs).clamp(0.0, 1.0);
         let ease = 1.0 - (1.0 - swell).powi(3);
         tf.translation = at;
         tf.rotation = rot;
         tf.scale = match b.kind {
             BarrierKind::Dome { .. } => scale * (0.05 + 0.95 * ease),
             BarrierKind::Panel { .. } => Vec3::new(1.0, 0.05 + 0.95 * ease, 1.0),
+            // A lowered shield shrinks a little as it fades.
+            BarrierKind::Shield { .. } => {
+                let fade = look.fading.map_or(0.0, |f| f / SHIELD_FADE).min(1.0);
+                scale * (0.3 + 0.7 * ease) * (1.0 - 0.25 * fade)
+            }
         };
         if b.pool <= 0.0 {
             let every = match b.kind {
                 BarrierKind::Dome { .. } => 4,
-                BarrierKind::Panel { .. } => 2,
+                BarrierKind::Panel { .. } | BarrierKind::Shield { .. } => 2,
             };
             shatter(
                 &mut commands,
@@ -1388,11 +1828,23 @@ pub fn tend_wards(
                 None,
                 look.seed,
             );
-            let mid = match b.kind {
-                BarrierKind::Dome { at, radius } => at + DVec3::Y * (radius * 0.5) as f64,
-                BarrierKind::Panel { at, height, .. } => at + DVec3::Y * (height * 0.5) as f64,
-            };
+            let mid = b.kind.middle();
             flash(&mut commands, mid, look.color, 12000.0);
+            // The holder of a broken shield staggers and can't raise a ward for a while.
+            if let Some(h) = held {
+                match bodies.get_mut(h.holder) {
+                    Ok((_, mut a, _, _)) => {
+                        a.ward_lock = LOCK_SECS;
+                        a.staggered = STAGGER_SECS;
+                    }
+                    Err(_) => {
+                        let mut a = Afflictions::default();
+                        a.ward_lock = LOCK_SECS;
+                        a.staggered = STAGGER_SECS;
+                        commands.entity(h.holder).try_insert(a);
+                    }
+                }
+            }
             queue.looks.push(LookCmd::Burst {
                 at: mid,
                 up: Vec3::Y,
@@ -1407,14 +1859,21 @@ pub fn tend_wards(
         if b.age >= b.life {
             let f = look.fading.unwrap_or(0.0) + dt;
             look.fading = Some(f);
-            if f >= FADE_SECS {
+            if f >= if shield { SHIELD_FADE } else { FADE_SECS } {
                 commands.entity(e).despawn();
                 continue;
             }
         }
         let share = b.pool / b.full.max(1e-3);
         let cracks = CRACKS.iter().filter(|&&c| share < c).count() as u8;
-        if cracks > look.cracks {
+        if cracks < look.cracks {
+            // A held shield regrew past a crack: its cells knit back with a glow.
+            look.cracks = cracks;
+            look.glow = (look.glow + 0.8).min(1.6);
+            if let (Some(m), Some(r)) = (meshes.as_deref_mut(), r.as_mut()) {
+                r.mesh = MeshRef::Handle(wm.whole(look.key, cracks, m));
+            }
+        } else if cracks > look.cracks {
             let key = look.key;
             let dropped: Vec<usize> = (0..wm.lattice(key).cells.len())
                 .filter(|&i| cracked(i, cracks) && !cracked(i, look.cracks))
@@ -1455,6 +1914,22 @@ pub fn tend_wards(
         }
     }
 
+    // ---- a perfect block's ring pulses off the face
+    for (e, mut p, mut tf, r) in &mut pulses {
+        p.age += dt;
+        if p.age >= PULSE_SECS {
+            commands.entity(e).despawn();
+            continue;
+        }
+        let k = p.age / PULSE_SECS;
+        let ease = 1.0 - (1.0 - k).powi(2);
+        tf.translation = p.at + (p.normal * (0.7 * ease)).as_dvec3();
+        tf.scale = Vec3::splat(1.0 + 0.9 * ease);
+        if let Some(mut r) = r {
+            paint.glow(e, &mut r, p.color, FLARE_GLOW * (1.0 - k) * (1.0 - k));
+        }
+    }
+
     // ---- shards fly
     for (e, mut s, mut tf, r) in &mut shards {
         s.age += dt;
@@ -1484,6 +1959,50 @@ pub fn tend_wards(
     }
 }
 
+/// Keep each held shield before its holder, turned with its aim, and regrow its pool once
+/// nothing has hit it for [`REGROW_AFTER`]. Runs before the missiles fly, so they meet it where
+/// it is drawn. A holder that is gone lowers it.
+pub fn hold_shields(
+    time: Res<Time>,
+    mut shields: Query<(&mut Barrier, &mut HeldShield)>,
+    bodies: Query<(&Transform, Option<&CharacterController>)>,
+) {
+    let dt = time.delta_secs();
+    for (mut b, mut h) in &mut shields {
+        let Ok((tf, cc)) = bodies.get(h.holder) else {
+            b.life = b.life.min(b.age);
+            continue;
+        };
+        // Read the bodies' own transforms: a moving holder's global one is a step old here.
+        let aim_point = match h.aim {
+            Aim::Point(p) => Some(p),
+            Aim::Entity(t) => bodies
+                .get(t)
+                .ok()
+                .map(|(t, _)| t.translation + DVec3::Y * 1.1),
+            Aim::Direction(_) => None,
+        };
+        let forward = match h.aim {
+            Aim::Direction(d) => d,
+            _ => tf.rotation * Vec3::NEG_Z,
+        };
+        let tall = cc.map_or(1.8, |c| c.height);
+        let (at, normal) = shield_pose(tf.translation, tall, aim_point, forward);
+        if let BarrierKind::Shield { width, height, .. } = b.kind {
+            b.kind = BarrierKind::Shield {
+                at,
+                normal,
+                width,
+                height,
+            };
+        }
+        h.since_hit += dt;
+        if h.since_hit >= REGROW_AFTER && b.pool > 0.0 && b.pool < b.full {
+            b.pool = (b.pool + b.full * REGROW_RATE * dt).min(b.full);
+        }
+    }
+}
+
 /// Clear every ward from the world (a hall program starting over).
 pub fn clear(world: &mut World) {
     let mut q = world.query_filtered::<Entity, Or<(
@@ -1491,6 +2010,7 @@ pub fn clear(world: &mut World) {
         With<WardShell>,
         With<WardShard>,
         With<WardFlash>,
+        With<WardPulse>,
     )>>();
     let list: Vec<Entity> = q.iter(world).collect();
     for e in list {
@@ -1504,22 +2024,36 @@ pub fn clear(world: &mut World) {
 pub fn register(app: &mut App) {
     app.register_api(
         "magic.wards",
-        "Wards now: barriers (domes and ward wall panels: where, size, pool left of full, \
-         element, seconds left, side) and warded bodies (pool, element, seconds left, and the \
-         lockout after a break).",
+        "Wards now: barriers (domes, ward wall panels and held shields: where, size, pool left \
+         of full, element, seconds left, side; a shield's holder, facing, whether a missile \
+         meeting it now would fly back, and how many have) and warded bodies (pool, element, \
+         seconds left, and the lockout after a break).",
         "{}",
         |world, _args| {
-            let mut q = world.query::<(Entity, &Barrier)>();
+            let mut q = world.query::<(Entity, &Barrier, Option<&HeldShield>)>();
             let barriers: Vec<serde_json::Value> = q
                 .iter(world)
-                .filter(|(_, b)| b.stands())
-                .map(|(e, b)| {
+                .filter(|(_, b, _)| b.stands())
+                .map(|(e, b, held)| {
                     let (shape, at, size) = match b.kind {
                         BarrierKind::Dome { at, radius } => ("dome", at, vec![radius]),
                         BarrierKind::Panel {
                             at, width, height, ..
                         } => ("panel", at, vec![width, height]),
+                        BarrierKind::Shield {
+                            at, width, height, ..
+                        } => ("shield", at, vec![width, height]),
                     };
+                    let shield = held.map(|h| {
+                        let facing = b.kind.frame().1 * Vec3::Z;
+                        serde_json::json!({
+                            "holder": h.holder.to_bits(),
+                            "facing": [facing.x, facing.y, facing.z],
+                            "perfect_window": HeldShield::perfect(b),
+                            "reflected": h.reflected,
+                            "regrowing": h.since_hit >= REGROW_AFTER && b.pool < b.full,
+                        })
+                    });
                     serde_json::json!({
                         "id": e.to_bits(),
                         "shape": shape,
@@ -1530,6 +2064,7 @@ pub fn register(app: &mut App) {
                         "element": b.element,
                         "secs_left": (b.life - b.age).max(0.0),
                         "side": b.cast.side,
+                        "shield": shield,
                     })
                 })
                 .collect();

@@ -760,6 +760,18 @@ pub fn release(
         ));
         return;
     }
+    // A ward cast as a cone is a shield held up before the caster (wards.rs); one that also
+    // heals still heals.
+    if p.shield_secs > 0.0 {
+        let aim = match target {
+            Some(t) => Aim::Entity(t),
+            None => Aim::Point(aim_point),
+        };
+        crate::wards::raise_shield(info, body, aim, aim_point, forward, queue);
+        if p.heal <= 0.0 {
+            return;
+        }
+    }
     // A ward cast as an area is a dome, as a wall a row of panels (wards.rs); one that also
     // heals still heals inside it.
     if spell.payload.ward > 0.0 && matches!(spell.cast, CastType::Area | CastType::Wall) {
@@ -1059,7 +1071,11 @@ pub fn fly_missiles(
     mut traces: MessageWriter<ProjectileTrace>,
     factions: Option<Res<Factions>>,
     (mut barriers, mut struck, gates): (
-        Query<(Entity, &mut crate::wards::Barrier)>,
+        Query<(
+            Entity,
+            &mut crate::wards::Barrier,
+            Option<&crate::wards::HeldShield>,
+        )>,
         MessageWriter<crate::wards::WardStruck>,
         Query<(Entity, &crate::space::Gate, &Transform)>,
     ),
@@ -1253,11 +1269,78 @@ pub fn fly_missiles(
             .flatten();
         let reach = gate.map_or(reach, |(_, t)| reach * t as f32);
         // A ward against it in the way first: it bursts on the ward's face (wards.rs).
-        if let Some((be, t, n)) =
-            crate::wards::barrier_in_way(barriers.iter(), &m.cast, from, dir, reach, factions)
-            && let Ok((_, mut b)) = barriers.get_mut(be)
+        if let Some((be, t, n)) = crate::wards::barrier_in_way(
+            barriers.iter().map(|(e, b, _)| (e, b)),
+            &m.cast,
+            from,
+            dir,
+            reach,
+            factions,
+        ) && let Ok((_, mut b, held)) = barriers.get_mut(be)
         {
             let at = from + (dir * t).as_dvec3();
+            let first = m.cast.caster;
+            let first_at = first
+                .and_then(|c| anchors.get(c).ok())
+                .map(|g| g.translation() + DVec3::Y * 1.1);
+            // A shield just raised sends it back as its holder's: a perfect block.
+            if let Some(h) = held
+                && crate::wards::HeldShield::perfect(&b)
+            {
+                let face = b.kind.frame().1 * Vec3::Z;
+                let aim_at = match h.aim {
+                    Aim::Point(p) => p,
+                    Aim::Entity(t) => anchors
+                        .get(t)
+                        .map(|g| g.translation() + DVec3::Y * 1.1)
+                        .unwrap_or(at + (face * 30.0).as_dvec3()),
+                    Aim::Direction(d) => at + (d * 30.0).as_dvec3(),
+                };
+                let back_to = crate::wards::reflect_target(face, at, first_at, aim_at);
+                let out = at + (n * (c.radius + 0.05)).as_dvec3();
+                let speed = m.vel.length().max(c.speed) * crate::wards::REFLECT_SPEED;
+                let to = (back_to - out).as_vec3().normalize_or(face);
+                m.vel = if c.gravity > 0.0 {
+                    lob_velocity(out, back_to, speed, g.length() * c.gravity)
+                } else {
+                    to * speed
+                };
+                m.cast.caster = b.cast.caster;
+                m.cast.side = b.cast.side;
+                m.cast.faction = b.cast.faction;
+                m.hits.clear();
+                m.traveled = 0.0;
+                m.returning = false;
+                m.target = first.filter(|_| first_at == Some(back_to));
+                struck.write(crate::wards::WardStruck {
+                    ward: be,
+                    barrier: true,
+                    point: at,
+                    dir,
+                    taken: 0.0,
+                    share: 0.0,
+                    broke: false,
+                    perfect: true,
+                });
+                queue.looks.push(LookCmd::Burst {
+                    at,
+                    up: n,
+                    look: "light".into(),
+                    role: Role::Impact,
+                    scale: 1.4,
+                    color: [1.0, 0.92, 0.7],
+                });
+                traces.write(ProjectileTrace {
+                    from,
+                    to: at,
+                    radius: c.radius * 2.0,
+                    speed: m.vel.length(),
+                    shooter: first,
+                });
+                sp.pos = out;
+                sp.up = m.vel.normalize_or(to);
+                continue;
+            }
             let (taken, share, broke) =
                 b.strike(spell.payload.damage * m.cast.scale, spell.element());
             struck.write(crate::wards::WardStruck {
@@ -1268,7 +1351,36 @@ pub fn fly_missiles(
                 taken,
                 share,
                 broke,
+                perfect: false,
             });
+            // An elemental ward answers a caster who strikes it from close by (burn, chill,
+            // shock), as a warded body does.
+            if let Some(el) = b.element
+                && let Some(att) = first
+                && m.cast.depth == 0
+                && first_at.is_some_and(|p| p.distance(at) <= crate::wards::PAYBACK_M as f64)
+            {
+                hits.0.push(PendingHit {
+                    cast: CastInfo {
+                        spell: crate::wards::payback_spell(el),
+                        caster: b.cast.caster,
+                        side: b.cast.side,
+                        faction: b.cast.faction,
+                        depth: 1,
+                        scale: 0.5,
+                        seed: m.cast.seed.wrapping_mul(31).wrapping_add(7),
+                        reaction: true,
+                    },
+                    target: Some(att),
+                    point: first_at.unwrap_or(at),
+                    normal: -dir,
+                    dir: -dir,
+                    multi: false,
+                    impact: false,
+                    reacts: false,
+                    expire: false,
+                });
+            }
             queue.looks.push(LookCmd::Burst {
                 at,
                 up: n,
@@ -1904,6 +2016,7 @@ pub fn tick_beams(
                     taken,
                     share,
                     broke,
+                    perfect: false,
                 });
             }
             if let Some(h) = hit {

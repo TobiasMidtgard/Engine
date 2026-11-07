@@ -95,6 +95,9 @@ pub struct Payload {
     /// The element a ward is woven with (wards.rs): it soaks that element, takes double from its
     /// opposite and pays back close blows. A ward's element types it rather than hurting.
     pub ward_element: Option<Element>,
+    /// A ward cast as a cone is a shield held before the caster (wards.rs): how long an NPC's or
+    /// the hall's cast holds it up (the spell bar holds it while the key is down). 0: not one.
+    pub shield_secs: f32,
     /// Time scale factor and seconds.
     pub time: Option<(f32, f32)>,
     /// Blink distance, m (space.rs: to the aim point, never further).
@@ -500,6 +503,11 @@ fn compile_inner(
         } else {
             None
         },
+        shield_secs: if warding && cast == CastType::Cone {
+            (4.0 * duration_k).clamp(0.5, 30.0)
+        } else {
+            0.0
+        },
         time,
         blink_m: if has(&|k| matches!(k, EffectKind::Blink { .. })) {
             (8.0 * size.sqrt() * range_k).clamp(3.0, 60.0)
@@ -699,6 +707,7 @@ fn compile_inner(
     } else {
         design.name.clone()
     };
+    let shield = payload.shield_secs > 0.0;
     Spell {
         name,
         dark,
@@ -717,7 +726,10 @@ fn compile_inner(
         backfire,
         power: ctx.power,
         mastery: ctx.mastery,
-        cast_secs: ctx.mastery.cast_secs() * (1.0 + 0.04 * complexity as f32),
+        // A shield comes up in 40% of the time: a block is a reaction.
+        cast_secs: ctx.mastery.cast_secs()
+            * (1.0 + 0.04 * complexity as f32)
+            * if shield { 0.4 } else { 1.0 },
         charge_secs: mods
             .iter()
             .find_map(|m| match m {

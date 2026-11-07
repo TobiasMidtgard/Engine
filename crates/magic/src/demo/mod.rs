@@ -21,6 +21,7 @@
 //! | `spells_ward` | wards you can see: a warden's dome over three students stops a fire barrage until it shatters, a frost shell takes fire double, a storm shell shocks the skeletons that strike it, then a ward wall goes up ([`crate::wards`]) |
 //! | `spells_portal` | doors through space: a warden opens a portal on the floor and its other end down the hall, fires bolts through it into a dummy beyond, a storm beam bends through it, a push shoves a crate through, and a mage blinks off the dais twice and recalls back along its path ([`portal`], [`crate::space`]) |
 //! | `spells_kinesis` | telekinesis: a stone torn out of the floor and launched (then a burning one), a barrel and a crate lifted and thrown, a bolt caught in the air and thrown on, a loose dummy hurled down the hall, and a ring of torn stones that stops bolts and is flung at a dummy ([`kinesis`], [`crate::kinesis`]) |
+//! | `spells_shield` | shields you hold: one under a fire barrage cracks, flickers and shatters (its holder staggers), then regrows after a second; another raised just in time sends bolts back at the battle mage who cast them, then holds a fire shield into a flame jet ([`shield`], [`crate::wards`]) |
 //! | `spells_craft` | the Spellcrafter at the altar: an Expert builds a returning frost glaive to 8 of 8, seek is refused, the crystal casts each change at a dummy, then it goes on key 3 and is cast from the bar ([`craft`]) |
 //!
 //! The mages wear hooded robes coloured by mastery (the character contract's `Appearance`).
@@ -33,6 +34,7 @@ pub mod duel;
 pub mod kinesis;
 pub mod player;
 pub mod portal;
+pub mod shield;
 
 use engine_core::prelude::*;
 use engine_render::{Camera, MeshRenderer};
@@ -222,6 +224,16 @@ pub const VIEWS: &[DemoView] = &[
         hour: 16.6,
         warmup: 4.4,
     },
+    DemoView {
+        key: "spells_shield",
+        name: "Held shields: a barrage cracks and shatters one, another sends bolts back",
+        // Behind and above the two battle mages, looking back at the holders' shields.
+        eye: [6.1, 3.6, -2.2],
+        target: [6.0, 1.9, 9.0],
+        hour: 16.6,
+        // The barrage has cracked lane 4's shield; lane 3's second bolt is on its way back.
+        warmup: 5.0,
+    },
 ];
 
 /// What the hall is running.
@@ -245,10 +257,11 @@ pub enum Program {
     Ward,
     Portal,
     Kinesis,
+    Shield,
 }
 
 impl Program {
-    pub const ALL: [Program; 16] = [
+    pub const ALL: [Program; 17] = [
         Program::Mastery,
         Program::Elements,
         Program::Combos,
@@ -265,6 +278,7 @@ impl Program {
         Program::Ward,
         Program::Portal,
         Program::Kinesis,
+        Program::Shield,
     ];
 
     pub fn key(self) -> &'static str {
@@ -285,6 +299,7 @@ impl Program {
             Program::Ward => "spells_ward",
             Program::Portal => "spells_portal",
             Program::Kinesis => "spells_kinesis",
+            Program::Shield => "spells_shield",
         }
     }
 
@@ -319,6 +334,8 @@ impl Program {
             Program::Portal => 16.0,
             // The ring is flung by 15.5 s; its stones and the thrown props reset each period.
             Program::Kinesis => 16.0,
+            // Both shields are down and the battle mages stand fresh each period.
+            Program::Shield => 16.0,
         }
     }
 
@@ -871,6 +888,7 @@ fn lanes(program: Program, cycle: u64) -> Vec<Lane> {
         }
         Program::Portal => portal::lanes(),
         Program::Kinesis => kinesis::lanes(),
+        Program::Shield => shield::lanes(),
         // The hall's mages watch while the weaver works its spell bar (player::script_weaver)
         // or the Spellcrafter (craft::script_crafter).
         Program::Player | Program::Craft => (0..LANES.len())
@@ -1187,7 +1205,12 @@ fn setup_program(
         // there).
         tf.translation = if matches!(
             program,
-            Program::Duel | Program::Summon | Program::Dead | Program::Ward | Program::Portal
+            Program::Duel
+                | Program::Summon
+                | Program::Dead
+                | Program::Ward
+                | Program::Portal
+                | Program::Shield
         ) {
             t.home - DVec3::Y * 40.0
         } else {
@@ -1276,6 +1299,9 @@ fn setup_program(
     }
     if program == Program::Kinesis {
         kinesis::spawn_props(&mut commands, origin);
+    }
+    if program == Program::Shield {
+        shield::spawn_props(&mut commands, origin);
     }
     if program == Program::Force {
         for (i, x) in LANES.iter().enumerate() {
@@ -1386,6 +1412,7 @@ fn run_hall(
             | Program::Ward
             | Program::Portal
             | Program::Kinesis
+            | Program::Shield
     ) && hall.cycle != cycle
     {
         hall.reset_props = true;
@@ -1422,7 +1449,8 @@ fn run_hall(
                     .find(|(_, m, _)| m.lane == lane)
                     .map(|(e, _, _)| Aim::Entity(e))
                     .unwrap_or(Aim::Point(
-                        hall.origin + DVec3::new(LANES[lane], FLOOR, MAGE_Z),
+                        hall.origin
+                            + DVec3::new(LANES.get(lane).copied().unwrap_or(0.0), FLOOR, MAGE_Z),
                     )),
                 AimAt::Foe => {
                     let me = mage_at
@@ -1525,6 +1553,7 @@ pub fn build(app: &mut App) {
             (duel::duel_footwork, duel::run_duel).chain(),
             player::script_weaver,
             craft::script_crafter.after(run_hall),
+            shield::run_foes.after(run_hall),
         )
             .in_set(SimSet::Gameplay)
             .before(crate::MagicSet::Cast),
@@ -1545,7 +1574,8 @@ pub fn build(app: &mut App) {
         "magic.demo",
         "Run a Weaving hall program: spells_mastery, spells_elements, spells_combos, \
          spells_forms, spells_meet, spells_force, spells_dark, spells_duel, spells_shaping, \
-         spells_player, spells_summon, spells_dead or spells_craft. \
+         spells_player, spells_summon, spells_dead, spells_ward, spells_portal, \
+         spells_kinesis, spells_shield or spells_craft. \
          With no program, lists them.",
         r#"{"program": "spells_combos"}"#,
         |world, args| {

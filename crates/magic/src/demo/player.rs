@@ -52,7 +52,7 @@ const fn beat(at: f32, slot: usize, press: bool, target: [f64; 3]) -> Beat {
 const DUMMY_Y: f64 = FLOOR + 1.2;
 
 /// The script, in slot order of the starter bar (0 Fireball, 1 Frost wall, 2 Pillar, 3 Chain
-/// lightning, 4 Steam flask, 5 Flame jet, 6 Telekinesis, 7 Mend).
+/// lightning, 4 Shield, 5 Flame jet, 6 Telekinesis, 7 Mend).
 pub const SCRIPT: [Beat; 16] = [
     // Hold a fireball for a full charge, then let it go at the dummy under the crosshair.
     beat(0.0, 0, true, [LANES[2], DUMMY_Y, DUMMY_Z]),
@@ -73,9 +73,9 @@ pub const SCRIPT: [Beat; 16] = [
     // and flies at it.
     beat(7.8, 6, true, [LANES[1], DUMMY_Y, DUMMY_Z]),
     beat(7.9, 6, false, [LANES[1], DUMMY_Y, DUMMY_Z]),
-    // A steam flask lobbed at the right dummy.
-    beat(8.6, 4, true, [LANES[3], DUMMY_Y, DUMMY_Z]),
-    beat(8.7, 4, false, [LANES[3], DUMMY_Y, DUMMY_Z]),
+    // A shield held up toward the right dummy for a moment.
+    beat(8.4, 4, true, [LANES[3], DUMMY_Y, DUMMY_Z]),
+    beat(9.3, 4, false, [LANES[3], DUMMY_Y, DUMMY_Z]),
     // Mend.
     beat(9.6, 7, true, [0.0, DUMMY_Y, DUMMY_Z]),
     beat(9.7, 7, false, [0.0, DUMMY_Y, DUMMY_Z]),

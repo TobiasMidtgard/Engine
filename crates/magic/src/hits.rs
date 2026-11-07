@@ -338,6 +338,7 @@ pub fn apply_hits(
                     taken,
                     share: taken / full,
                     broke: aff.ward <= 0.0,
+                    perfect: false,
                 });
                 // An elemental ward answers a blow from close by: fire burns, frost chills
                 // toward a freeze, storm shocks.
