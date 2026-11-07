@@ -98,6 +98,22 @@ pub struct PlantMeshes {
     /// The bones the shared plant wind bends (all levels of detail share them):
     /// [`super::wind_bones`]. Trees and shrubs.
     pub wind: Option<std::sync::Arc<super::wind_bones::WindSkeleton>>,
+    /// One-sided copies of the two-sided crowns that cast their own shadows (middle, far and
+    /// distant levels and their thinned steps), for the shadow maps only
+    /// ([`PlantMeshes::make_one_sided`]).
+    pub one_sided: Vec<(CrownLevel, engine_render::Mesh)>,
+}
+
+/// Which crown mesh of a variant a [`PlantMeshes::one_sided`] copy is of.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CrownLevel {
+    Mid,
+    Far,
+    Distant,
+    /// A thinned step (index into the `_thin` list) of each.
+    MidThin(usize),
+    FarThin(usize),
+    DistantThin(usize),
 }
 
 /// A capsule of a tree's collision, from `a` to `b` in model space.
@@ -141,6 +157,31 @@ impl PlantMeshes {
 }
 
 impl PlantMeshes {
+    /// Fill [`PlantMeshes::one_sided`] from the crowns as they are now (after
+    /// [`PlantMeshes::bake_wind_bones`]: a copy keeps its vertices' wind words). The leaf-by-leaf
+    /// and near crowns cast their middle level's shadow, so need none.
+    pub fn make_one_sided(&mut self) {
+        let mut out = Vec::new();
+        let mut add = |level: CrownLevel, m: Option<&engine_render::Mesh>| {
+            if let Some(copy) = m.and_then(super::one_sided) {
+                out.push((level, copy));
+            }
+        };
+        add(CrownLevel::Mid, self.foliage_mid.as_ref());
+        add(CrownLevel::Far, self.foliage_lod.as_ref());
+        add(CrownLevel::Distant, self.foliage_distant.as_ref());
+        for (i, m) in self.foliage_mid_thin.iter().enumerate() {
+            add(CrownLevel::MidThin(i), Some(m));
+        }
+        for (i, m) in self.foliage_lod_thin.iter().enumerate() {
+            add(CrownLevel::FarThin(i), Some(m));
+        }
+        for (i, m) in self.foliage_distant_thin.iter().enumerate() {
+            add(CrownLevel::DistantThin(i), Some(m));
+        }
+        self.one_sided = out;
+    }
+
     /// Write each swaying vertex's wind bone word into its vertex alpha
     /// ([`super::wind_bones::WindSkeleton::bake`]): the wood above the cut and every crown, at
     /// every level of detail. The stump, the logs and the snag keep their plain sway weights

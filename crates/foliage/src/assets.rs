@@ -122,6 +122,9 @@ pub struct VariantMeshes {
     /// none when off or for plants without one): the tree's and the sapling's.
     pub wind: Option<Arc<WindSkeleton>>,
     pub sapling_wind: Option<Arc<WindSkeleton>>,
+    /// Two-sided crown meshes with their one-sided copies, which cast their shadows
+    /// ([`crate::meshgen::one_sided`], [`crate::shadow_standin`]).
+    pub one_sided: Vec<(Handle<Mesh>, Handle<Mesh>)>,
 }
 
 /// Everything needed to draw one species.
@@ -384,6 +387,7 @@ impl Job {
                             full.wind = None;
                         }
                         full.bake_wind_bones();
+                        full.make_one_sided();
                         if let Some(s) = &mut sapling {
                             if !bone_wind {
                                 s.wind = None;
@@ -738,8 +742,9 @@ fn build_species(
             .into_iter()
             .map(|m| m.map(|m| meshes.add(m)))
             .collect();
+        let one_sided = full.one_sided;
         let mut add = |m: Option<Mesh>| m.map(|m| meshes.add(m));
-        variants.push(VariantMeshes {
+        let mut variant = VariantMeshes {
             base: add(full.base),
             base_weathered,
             base_moss,
@@ -774,7 +779,23 @@ fn build_species(
             sapling_collision,
             wind: full.wind,
             sapling_wind,
-        });
+            one_sided: Vec::new(),
+        };
+        use crate::meshgen::tree::CrownLevel;
+        for (level, copy) in one_sided {
+            let of = match level {
+                CrownLevel::Mid => variant.foliage_mid,
+                CrownLevel::Far => variant.foliage_lod,
+                CrownLevel::Distant => variant.foliage_distant,
+                CrownLevel::MidThin(i) => variant.foliage_mid_thin.get(i).copied(),
+                CrownLevel::FarThin(i) => variant.foliage_lod_thin.get(i).copied(),
+                CrownLevel::DistantThin(i) => variant.foliage_distant_thin.get(i).copied(),
+            };
+            if let Some(of) = of {
+                variant.one_sided.push((of, meshes.add(copy)));
+            }
+        }
+        variants.push(variant);
     }
 
     let small = matches!(

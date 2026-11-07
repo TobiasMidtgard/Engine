@@ -82,14 +82,25 @@ pub fn wind_meshes(v: &VariantMeshes) -> Vec<(&Handle<Mesh>, u8, bool)> {
         (&v.foliage_distant_thin, 0, false),
         (&v.sapling_foliage_thin, 3, true),
     ];
-    single
+    let mut all: Vec<_> = single
         .into_iter()
         .filter_map(|(h, detail, sapling)| h.as_ref().map(|h| (h, detail, sapling)))
         .chain(
             thin.into_iter()
                 .flat_map(|(list, detail, sapling)| list.iter().map(move |h| (h, detail, sapling))),
         )
-        .collect()
+        .collect();
+    // The shadows' one-sided copies sway as the crowns they copy.
+    let copies: Vec<_> = v
+        .one_sided
+        .iter()
+        .filter_map(|(of, copy)| {
+            let &(_, detail, sapling) = all.iter().find(|(h, ..)| *h == of)?;
+            Some((copy, detail, sapling))
+        })
+        .collect();
+    all.extend(copies);
+    all
 }
 
 /// What [`register_bone_wind`] registered for one species: built from what, and its meshes.

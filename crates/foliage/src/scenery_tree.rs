@@ -441,6 +441,37 @@ mod tests {
         );
         assert_eq!(coarse(&app, trees[2]), None);
         assert_eq!(far_casts(&app, trees[2]), far);
+        // Crowns cast one-sided copies of their cards (each card's shadow once), never
+        // themselves: the middle level into the fine maps, the far level into the coarse ones.
+        let copy_of = |of: Option<Handle<Mesh>>| {
+            let (_, copy) = v
+                .one_sided
+                .iter()
+                .find(|(o, _)| Some(*o) == of)
+                .expect("a one-sided copy");
+            *copy
+        };
+        let crown_casts = |app: &App, t: Entity| {
+            let p = app.world.get::<SceneryTreeVisual>(t).unwrap().parts[2];
+            assert!(!app.world.get::<MeshRenderer>(p).unwrap().cast_shadows);
+            let mesh = |s: Entity| app.world.get::<MeshRenderer>(s).unwrap().mesh.clone();
+            let fine = mesh(app.world.get::<StandIn>(p).expect("a fine stand-in").0);
+            let coarse = mesh(app.world.get::<CoarseStandIn>(p).expect("a coarse one").0);
+            (fine, coarse)
+        };
+        let crown = (
+            engine_render::MeshRef::Handle(copy_of(v.foliage_mid)),
+            engine_render::MeshRef::Handle(copy_of(v.foliage_lod)),
+        );
+        for t in &trees[..3] {
+            assert_eq!(crown_casts(&app, *t), crown);
+        }
+        let store = app.world.resource::<engine_assets::Assets<Mesh>>();
+        let tris = |h: Handle<Mesh>| store.get(h).unwrap().indices.len() / 3;
+        assert_eq!(
+            tris(copy_of(v.foliage_mid)) * 2,
+            tris(v.foliage_mid.unwrap())
+        );
         // The camera walks up to the far tree: it draws in full detail within a few frames.
         app.world.get_mut::<Transform>(cam).unwrap().translation = DVec3::new(140.0, 0.0, 0.0);
         app.update_n(SLICES as usize + 1);

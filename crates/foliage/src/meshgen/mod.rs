@@ -393,6 +393,43 @@ impl MeshBuilder {
     }
 }
 
+/// `mesh` with each triangle once: of triangles over the same three corners (a two-sided
+/// card's front and back), the first, with the vertices only the dropped ones used left out.
+/// `None` when no triangle repeats. The shadow maps draw both faces of every triangle and
+/// alpha-test every pixel, so a two-sided crown cast each card's shadow twice over: twice the
+/// fill for the same shadow (a quarter of the forest trail's frame at Ultra, 2026-11-07).
+pub fn one_sided(mesh: &Mesh) -> Option<Mesh> {
+    let corner = |i: u32| {
+        mesh.vertices[i as usize]
+            .position
+            .map(|c| (c * 1.0e4).round() as i32)
+    };
+    let tris = mesh.indices.as_chunks::<3>().0;
+    let mut seen = std::collections::HashSet::with_capacity(tris.len());
+    let mut kept = Vec::with_capacity(mesh.indices.len());
+    for t in tris {
+        let mut key = [corner(t[0]), corner(t[1]), corner(t[2])];
+        key.sort_unstable();
+        if seen.insert(key) {
+            kept.extend_from_slice(t);
+        }
+    }
+    if kept.len() == mesh.indices.len() {
+        return None;
+    }
+    let mut remap = vec![u32::MAX; mesh.vertices.len()];
+    let mut vertices = Vec::with_capacity(mesh.vertices.len() / 2 + 1);
+    for i in &mut kept {
+        let slot = &mut remap[*i as usize];
+        if *slot == u32::MAX {
+            *slot = vertices.len() as u32;
+            vertices.push(mesh.vertices[*i as usize]);
+        }
+        *i = *slot;
+    }
+    Some(Mesh::new(vertices, kept))
+}
+
 /// Parallel-transport frames (tangent, normal, binormal) along a path: tubes don't twist.
 pub fn frames(path: &[Vec3]) -> Vec<(Vec3, Vec3, Vec3)> {
     let n = path.len();
@@ -427,6 +464,38 @@ pub fn rgb(c: [f32; 3], scale: f32) -> Vec4 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A two-sided card's copy keeps one face, with only its four corners; a tube has no
+    /// repeated triangle, so no copy.
+    #[test]
+    fn one_sided_keeps_one_face_of_each_card() {
+        let mut b = MeshBuilder::new();
+        let corners = [Vec3::ZERO, Vec3::X, Vec3::new(1.0, 1.0, 0.0), Vec3::Y];
+        let uvs = [Vec2::ZERO, Vec2::X, Vec2::ONE, Vec2::Y];
+        b.card(corners, uvs, Vec3::Z, [Vec4::ONE; 4]);
+        b.card(corners.map(|c| c + Vec3::Z), uvs, Vec3::Z, [Vec4::ONE; 4]);
+        let m = b.finish();
+        assert_eq!(m.indices.len(), 2 * 4 * 3);
+        let one = one_sided(&m).expect("a copy");
+        assert_eq!(one.indices.len(), 2 * 2 * 3);
+        assert_eq!(one.vertices.len(), 8);
+        assert!(
+            one.indices
+                .iter()
+                .all(|&i| (i as usize) < one.vertices.len())
+        );
+        let mut t = MeshBuilder::new();
+        t.tube(
+            &[Vec3::ZERO, Vec3::Y],
+            &[0.2, 0.1],
+            8,
+            1.0,
+            &|_, _| Vec4::ONE,
+            None,
+            None,
+        );
+        assert!(one_sided(&t.finish()).is_none());
+    }
 
     /// Front faces wind counter-clockwise: each triangle's geometric normal agrees with the
     /// vertex normals (for tubes) on the outside.

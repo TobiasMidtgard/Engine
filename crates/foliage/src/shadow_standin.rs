@@ -21,7 +21,14 @@
 //! Unreal's per-cascade caster LOD do the same. Far trees, the other way round, cast their
 //! middle level into the finest maps ([`FAR_FINE_TEXEL_M`]) through a stand-in, so a tree's
 //! shadow keeps its shape in the cascade where the view switches it between middle and far.
-//! Research: engine-design/foliage-research.md, 4.1, 4.4, 15 and round 23.
+//!
+//! Every crown casts a one-sided copy of itself ([`crate::meshgen::one_sided`]). A crown's
+//! cards are two-sided (a front and a back triangle over the same corners, each shaded from
+//! its own side); the view culls the back faces, but the shadow maps draw both faces of every
+//! triangle and alpha-test every pixel, so each card cast its shadow twice over, for nothing.
+//! So whatever casts a crown, the part itself or a stand-in, casts its copy: a middle or far
+//! crown that cast into some maps itself does that through a stand-in now.
+//! Research: engine-design/foliage-research.md, 4.1, 4.4, 15 and rounds 23 and 77.
 
 use std::collections::HashMap;
 
@@ -80,6 +87,8 @@ pub struct StandIns {
     /// leaf ones, for the fine maps.
     finer_meshes: HashMap<u32, Handle<Mesh>>,
     finer_materials: HashMap<u32, Handle<StandardMaterial>>,
+    /// Two-sided crowns to their one-sided copies: whatever casts a crown casts its copy.
+    one_sided: HashMap<u32, Handle<Mesh>>,
 }
 
 impl StandIns {
@@ -89,6 +98,9 @@ impl StandIns {
         // its shadows cast that trunk at every level, from 500 triangles instead of 6,000.
         let limbs_hidden = crate::meshgen::tree::limbs_hidden(sp);
         for v in &vis.variants {
+            for (of, copy) in &v.one_sided {
+                self.one_sided.insert(of.index(), *copy);
+            }
             let mut map = |from: Option<Handle<Mesh>>, to: Option<Handle<Mesh>>| {
                 if let (Some(from), Some(to)) = (from, to) {
                     self.meshes.insert(from.index(), to);
@@ -152,6 +164,24 @@ impl StandIns {
         }
     }
 
+    /// The one-sided copy of `mesh` if it has one, else `mesh`.
+    fn single(&self, mesh: Handle<Mesh>) -> Handle<Mesh> {
+        self.one_sided.get(&mesh.index()).copied().unwrap_or(mesh)
+    }
+
+    /// What a part drawing `mesh` with `material`, and casting into some maps itself, casts
+    /// there instead: the one-sided copy of its two-sided crown, through a stand-in.
+    pub fn own(
+        &self,
+        mesh: &MeshRef,
+        material: &MaterialRef,
+    ) -> Option<(Handle<Mesh>, Handle<StandardMaterial>)> {
+        let (MeshRef::Handle(mesh), MaterialRef::Handle(material)) = (mesh, material) else {
+            return None;
+        };
+        Some((*self.one_sided.get(&mesh.index())?, *material))
+    }
+
     /// What a part drawing `mesh` with `material` casts its shadow with, if not itself.
     pub fn get(
         &self,
@@ -161,7 +191,7 @@ impl StandIns {
         let (MeshRef::Handle(mesh), MaterialRef::Handle(material)) = (mesh, material) else {
             return None;
         };
-        let to = *self.meshes.get(&mesh.index())?;
+        let to = self.single(*self.meshes.get(&mesh.index())?);
         let material = self
             .materials
             .get(&material.index())
@@ -180,7 +210,7 @@ impl StandIns {
         let (MeshRef::Handle(mesh), MaterialRef::Handle(material)) = (mesh, material) else {
             return None;
         };
-        let to = *self.coarse_meshes.get(&mesh.index())?;
+        let to = self.single(*self.coarse_meshes.get(&mesh.index())?);
         let material = self
             .coarse_materials
             .get(&material.index())
@@ -199,7 +229,7 @@ impl StandIns {
         let (MeshRef::Handle(mesh), MaterialRef::Handle(material)) = (mesh, material) else {
             return None;
         };
-        let to = *self.finer_meshes.get(&mesh.index())?;
+        let to = self.single(*self.finer_meshes.get(&mesh.index())?);
         let material = self
             .finer_materials
             .get(&material.index())
@@ -268,15 +298,48 @@ pub fn sync_shadow_standins(
             ShadowTexelRange::default()
         };
         let own = wants && fine.is_none();
-        if r.cast_shadows != own {
-            r.cast_shadows = own;
-        }
         let own_range = match (own, finer.is_some()) {
             (true, true) => ShadowTexelRange::from_texels(FAR_FINE_TEXEL_M),
             (true, false) => fine_range,
             (false, _) => ShadowTexelRange::default(),
         };
+        // A two-sided crown casting into some maps itself casts its one-sided copy there
+        // instead, through a stand-in in whichever slot it leaves free: the fine one for a
+        // middle level (its far level casts into the coarse maps), the coarse one for a far
+        // level (its middle level casts into the finest).
+        let own_copy = own
+            .then(|| visuals.standins.own(&r.mesh, &r.material))
+            .flatten();
         let fine = fine.or(finer);
+        let (fine, coarse, fine_range, coarse_range, own, own_range) = match own_copy {
+            Some(copy) if fine.is_none() => (
+                Some(copy),
+                coarse,
+                own_range,
+                ShadowTexelRange::from_texels(COARSE_TEXEL_M),
+                false,
+                ShadowTexelRange::default(),
+            ),
+            Some(copy) if coarse.is_none() => (
+                fine,
+                Some(copy),
+                fine_range,
+                own_range,
+                false,
+                ShadowTexelRange::default(),
+            ),
+            _ => (
+                fine,
+                coarse,
+                fine_range,
+                ShadowTexelRange::from_texels(COARSE_TEXEL_M),
+                own,
+                own_range,
+            ),
+        };
+        if r.cast_shadows != own {
+            r.cast_shadows = own;
+        }
         if range.copied().unwrap_or_default() != own_range {
             if own_range == ShadowTexelRange::default() {
                 commands.entity(entity).remove::<ShadowTexelRange>();
@@ -305,7 +368,7 @@ pub fn sync_shadow_standins(
             &mut standins,
             entity,
             coarse_standin.map(|s| s.0),
-            coarse.map(|c| (c, ShadowTexelRange::from_texels(COARSE_TEXEL_M))),
+            coarse.map(|c| (c, coarse_range)),
         );
         match (coarse_id, coarse_standin) {
             (Some(id), None) => {
