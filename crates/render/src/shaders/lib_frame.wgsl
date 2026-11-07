@@ -248,6 +248,8 @@ fn bender_offset(rel: vec3<f32>, height01: f32, weight: f32) -> vec3<f32> {
 
 // ---------------------------------------------------------------- shadows
 const SHADOW_BLOCKER_TAPS: i32 = 8;
+// The fewest blocker and filter taps a pixel takes (see `cascade_visibility`).
+const SHADOW_MIN_TAPS: i32 = 4;
 const GOLDEN_ANGLE: f32 = 2.39996323;
 
 // Per-pixel noise in [0, 1) that changes every frame when temporal anti-aliasing is on (its
@@ -329,12 +331,21 @@ fn cascade_visibility(rel: vec3<f32>, n: vec3<f32>, depth: f32, noise: f32) -> f
     let tan_sun = tan(frame.sun_dir.w) * frame.effects.z;
     let min_radius = max(frame.shadow_params.z, 0.5);
 
+    // Shadow texels per screen pixel here. The taps below rotate per pixel and frame, so a disk
+    // a pixel or two across needs only a few of them a frame: the anti-aliasing's history
+    // averages the rest (the far cascades, where a texel is about a pixel; Unreal and Frostbite
+    // likewise filter their far cascades with fewer samples than the near ones).
+    let pixel_world = view_depth(rel) * 2.0 / max(abs(frame.proj[1][1]) * frame.viewport.y, 1e-6);
+    let texel_px = texel_world / max(pixel_world, 1e-6);
+
     // Blocker search over the largest penumbra a caster up to 30 m away could make.
     let search = clamp(30.0 * tan_sun / texel_world, min_radius, 16.0);
+    let search_px = search * texel_px;
+    let blocker_taps = clamp(i32(ceil(2.0 * search_px * search_px)), SHADOW_MIN_TAPS, SHADOW_BLOCKER_TAPS);
     var blocker_sum = 0.0;
     var blockers = 0.0;
-    for (var i = 0; i < SHADOW_BLOCKER_TAPS; i++) {
-        let o = vogel_disk(i, SHADOW_BLOCKER_TAPS, angle) * search * texel;
+    for (var i = 0; i < blocker_taps; i++) {
+        let o = vogel_disk(i, blocker_taps, angle) * search * texel;
         let d = textureSampleLevel(shadow_map, sky_occlusion_sampler, uv + o, cascade, 0);
         if (d < z) {
             blocker_sum += d;
@@ -348,8 +359,11 @@ fn cascade_visibility(rel: vec3<f32>, n: vec3<f32>, depth: f32, noise: f32) -> f
     let slope = sqrt(max(1.0 - n_dot_l * n_dot_l, 0.0)) / max(abs(n_dot_l), 0.2);
     let z_ref = z - radius * texel_world * min(slope, 5.0) * z_per_meter * 0.5;
 
-    // Filter taps: `RenderSettings::shadow_filter_taps` (fewer in planar reflections).
-    let taps = clamp(i32(frame.shading.x), 1, 64);
+    // Filter taps: `RenderSettings::shadow_filter_taps` (fewer in planar reflections), down to
+    // about four per pixel the filter covers (at least `SHADOW_MIN_TAPS`).
+    let filter_px = radius * texel_px;
+    let max_taps = clamp(i32(frame.shading.x), 1, 64);
+    let taps = clamp(i32(ceil(4.0 * filter_px * filter_px)), min(SHADOW_MIN_TAPS, max_taps), max_taps);
     var sum = 0.0;
     for (var i = 0; i < taps; i++) {
         let o = vogel_disk(i, taps, angle) * radius * texel;
@@ -446,8 +460,10 @@ fn contact_shadow(rel: vec3<f32>, n: vec3<f32>) -> f32 {
 // houses past `shadow_splits[3]` lose their shadow and get it back with a pop as the camera
 // nears. Returns 0 where something nearer the camera blocks the ray; fades in over the
 // cascades' last tenth, where `shadow_factor` hands over to the far map. The march is 6 % of
-// the distance (12-60 m) times `RenderSettings::distant_shadows`; 1 when that is 0.
-const DISTANT_SHADOW_STEPS: i32 = 16;
+// the distance (12-60 m) times `RenderSettings::distant_shadows`; 1 when that is 0. Eight
+// steps, offset per pixel and frame (the anti-aliasing's history fills in between): 16 cost
+// about a tenth of the ground's pixel time at the overview for no visible change.
+const DISTANT_SHADOW_STEPS: i32 = 8;
 
 fn distant_shadow(rel: vec3<f32>, n: vec3<f32>) -> f32 {
     let scale = frame.distant_shadows.x;
