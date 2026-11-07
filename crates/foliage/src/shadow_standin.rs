@@ -212,6 +212,14 @@ impl StandIns {
 /// Give parts showing a near or leaf-by-leaf mesh a shadow stand-in, and drop it again when they
 /// switch to a level that casts itself; and parts with a far level a second one casting it into
 /// the coarse maps.
+/// `FOLIAGE_TREE_SHADOWS=0` turns every plant's shadow off, for A/B runs of one binary that
+/// weigh what plant shadows cost the GPU (on the cloud VM's lavapipe, 29% of the forest trail's
+/// frame at Ultra, 2026-11-07). Read once.
+fn plant_shadows_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("FOLIAGE_TREE_SHADOWS").map_or(true, |v| v != "0"))
+}
+
 #[allow(clippy::type_complexity)]
 pub fn sync_shadow_standins(
     mut commands: Commands,
@@ -236,7 +244,7 @@ pub fn sync_shadow_standins(
     >,
 ) {
     for (entity, mut r, wants, standin, coarse_standin, range) in &mut parts {
-        let wants = wants.is_none_or(|w| w.0) && r.visible;
+        let wants = wants.is_none_or(|w| w.0) && r.visible && plant_shadows_on();
         let fine = wants
             .then(|| visuals.standins.get(&r.mesh, &r.material))
             .flatten();

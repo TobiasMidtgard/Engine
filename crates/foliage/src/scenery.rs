@@ -4818,9 +4818,21 @@ impl SceneryFeature {
         let litter = world
             .get_resource::<crate::FoliageSeason>()
             .map_or(0.0, |s| crate::season::litter_season(s.day_of_year));
-        let parallax = world
-            .get_resource::<crate::EcologySettings>()
-            .map_or(0.0, |s| s.ground_parallax_m.max(0.0));
+        // `FOLIAGE_GROUND_PARALLAX_M` overrides the setting, for A/B runs of the same binary.
+        static PARALLAX_ENV: std::sync::OnceLock<Option<f32>> = std::sync::OnceLock::new();
+        let parallax = PARALLAX_ENV
+            .get_or_init(|| {
+                std::env::var("FOLIAGE_GROUND_PARALLAX_M")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+            })
+            .or_else(|| {
+                world
+                    .get_resource::<crate::EcologySettings>()
+                    .map(|s| s.ground_parallax_m)
+            })
+            .unwrap_or(0.0)
+            .max(0.0);
         let mut q = world.query::<(Entity, &GroundSurface, &GlobalTransform)>();
         for (e, surface, t) in q.iter(world) {
             let offset = (t.translation() - view.origin).as_vec3();

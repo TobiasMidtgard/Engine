@@ -480,6 +480,33 @@ impl Default for EcologySettings {
             step_late_ticks: crate::ecology::LATE_STEP_TICKS,
             ground_parallax_m: 0.025,
         }
+        .with_ab_env()
+    }
+}
+
+impl EcologySettings {
+    /// `FOLIAGE_DISTANCES=hero=4,mid=10,lod=50,distant=200,small=60,smalllod=15` overrides
+    /// these distances (meters), for A/B runs of one binary on the PC: the game itself doesn't
+    /// set them.
+    fn with_ab_env(mut self) -> Self {
+        if let Ok(spec) = std::env::var("FOLIAGE_DISTANCES") {
+            for kv in spec.split(',') {
+                let Some((k, v)) = kv.split_once('=') else {
+                    continue;
+                };
+                let Ok(v) = v.parse::<f32>() else { continue };
+                match k {
+                    "hero" => self.tree_hero_distance_m = v,
+                    "mid" => self.tree_mid_distance_m = v,
+                    "lod" => self.tree_lod_distance_m = v,
+                    "distant" => self.tree_distant_distance_m = v,
+                    "small" => self.small_plant_distance_m = v,
+                    "smalllod" => self.small_plant_lod_distance_m = v,
+                    _ => {}
+                }
+            }
+        }
+        self
     }
 }
 
