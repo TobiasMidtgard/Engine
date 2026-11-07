@@ -5,6 +5,8 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Instant;
 
+use bevy_ecs::change_detection::Tick;
+use bevy_ecs::system::SystemChangeTick;
 use engine_core::ecs::entity::EntityHashMap;
 use engine_core::prelude::*;
 use engine_world::animation::SkeletonPose;
@@ -1249,8 +1251,10 @@ pub fn snapshot_frames(
     poses: Query<&'static SkeletonPose>,
     movers: Query<(Option<&RigidBody>, Has<CharacterController>)>,
     mut physical: Local<HashMap<Entity, bool>>,
+    (time, engine): (Res<Time>, Option<Res<EngineConfig>>),
 ) {
     let range = range.map_or_else(SimulationRange::default, |r| *r);
+    let beside = beside_frame(&config, engine.as_deref(), &time);
     let live = LiveFrames {
         transforms: &transforms,
         poses: &poses,
@@ -1281,6 +1285,7 @@ pub fn snapshot_frames(
                 FrameSource::Bone { owner, .. } => rides(owner),
                 FrameSource::Blend(blend) => rides(blend.owner),
             });
+        b.kicked = beside && b.overlaps && costly(b);
         b.snapshot.clear();
         // Only what its step reads: frames a body at rest doesn't follow (hair rides them).
         if b.overlaps && (b.strands.is_some() || !rests(b, &focus, &range, &config, 0.0)) {
@@ -1323,10 +1328,206 @@ pub fn step_beside_physics(
         settled_us: (!manual).then_some(&settled),
     };
     let start = Instant::now();
-    let took = step_all(bodies.iter_mut().filter(|(_, b)| b.overlaps), &ctx);
+    let took = step_all(
+        bodies.iter_mut().filter(|(_, b)| b.overlaps && !b.kicked),
+        &ctx,
+    );
     stats.wall = start.elapsed().as_secs_f64() * 1000.0;
     stats.busy = took.iter().map(|(_, ms)| ms).sum();
     stats.slowest = took.into_iter().max_by(|a, b| a.1.total_cmp(&b.1));
+}
+
+/// Whether heavy bodies are solved beside the frame ([`kick_heavy_bodies`]):
+/// `ENGINE_SOFTBODY_BESIDE=on|off`, else [`SoftBodyConfig::beside_frame`], else in play (a real
+/// clock, off the frame) and in headless runs that ask for the game's way
+/// (`ENGINE_OFF_FRAME=always`). Tests and plain headless runs step every body at once, so a
+/// run is the same every time.
+pub(crate) fn beside_frame(
+    config: &SoftBodyConfig,
+    engine: Option<&EngineConfig>,
+    time: &Time,
+) -> bool {
+    static FORCED: std::sync::OnceLock<Option<bool>> = std::sync::OnceLock::new();
+    let forced = *FORCED.get_or_init(
+        || match std::env::var("ENGINE_SOFTBODY_BESIDE").as_deref() {
+            Ok("on") => Some(true),
+            Ok("off") => Some(false),
+            _ => None,
+        },
+    );
+    forced.or(config.beside_frame).unwrap_or_else(|| {
+        engine.is_none_or(|c| c.off_frame())
+            && (engine.is_some_and(|c| c.headless)
+                || matches!(time.source(), engine_core::time::TimeSource::Realtime))
+    })
+}
+
+/// A heavy body's solve beside the frame: its own copy of the sim, and how it was prepared.
+struct InFlight {
+    entity: Entity,
+    sim: Sim,
+    prep: Prepared,
+    solved: Option<Solved>,
+    /// Its particles, for the trace.
+    particles: usize,
+    kind: SoftKind,
+}
+
+/// The heavy bodies' solves started at the end of the last fixed step ([`kick_heavy_bodies`]),
+/// taken at the start of this one ([`join_heavy_bodies`]), and how the last ones went.
+#[derive(Resource, Default)]
+pub struct FrameJob {
+    job: engine_core::beside::Beside<Vec<InFlight>>,
+    /// The change tick the bodies were written with as they left: one written since (cut,
+    /// grabbed, rebuilt, moved by a world shift) keeps what was done to it, and its solve is
+    /// dropped.
+    tick: Tick,
+    /// Work of the solves taken this step (ms, summed), the slowest, how long the step waited
+    /// for them (ms) and how many were dropped, for the diagnostics [`step_bodies`] writes.
+    busy: f64,
+    slowest: Option<(Entity, f64)>,
+    wait: f64,
+    dropped: usize,
+    solved: usize,
+}
+
+/// `FixedPostUpdate`, the end of the fixed step: prepare the bodies [`snapshot_frames`] marked
+/// heavy and beside the physics step (frames from its snapshot, this step's colliders and
+/// loads), then solve copies of their sims beside the frame (Update, PostUpdate, drawing, the
+/// next frame's First) on `tasks::beside_pool`, as physics steps Rapier. Readers (drawing,
+/// guides, the api) meanwhile see the sims as the last step left them, which drawing already
+/// interpolates between; [`join_heavy_bodies`] takes the solves at the start of the next step.
+/// Cloth and hair beside the frame are a step behind for drawing; a pinned root follows the
+/// bones of the step it was taken in.
+#[allow(clippy::too_many_arguments)]
+pub fn kick_heavy_bodies(
+    time: Res<Time>,
+    (config, engine): (Res<SoftBodyConfig>, Option<Res<EngineConfig>>),
+    colliders: Res<ColliderWorld>,
+    loads: Res<LoadList>,
+    env: Env,
+    scales: Query<&'static LocalTimeScale>,
+    mut bodies: Query<(Entity, &mut SoftBodySim)>,
+    range: Option<Res<SimulationRange>>,
+    mut job: ResMut<FrameJob>,
+    ticks: SystemChangeTick,
+) {
+    if !config.enabled {
+        return;
+    }
+    let ctx = StepContext {
+        time: &time,
+        config: &config,
+        colliders: &colliders,
+        env: &env,
+        live: None,
+        scales: &scales,
+        loads: &loads.0,
+        range: range.map_or_else(SimulationRange::default, |r| *r),
+        settled_us: None,
+    };
+    let mut work: Vec<(f32, InFlight)> = Vec::new();
+    for (e, mut b) in &mut bodies {
+        if !b.kicked {
+            continue;
+        }
+        let b = &mut *b;
+        let Some(prep) = prepare(e, b, &ctx) else {
+            continue;
+        };
+        let sim = b.sim.clone();
+        // Its loads are the copy's to apply.
+        b.sim.loads.clear();
+        work.push((
+            b.step_ms,
+            InFlight {
+                entity: e,
+                sim,
+                prep,
+                solved: None,
+                particles: b.particle_count(),
+                kind: b.kind,
+            },
+        ));
+    }
+    if work.is_empty() {
+        return;
+    }
+    // Longest first, so the costly ones start at once (see step_all).
+    work.sort_by(|a, b| b.0.total_cmp(&a.0));
+    let work: Vec<InFlight> = work.into_iter().map(|(_, w)| w).collect();
+    job.tick = ticks.this_run();
+    let beside = beside_frame(&config, engine.as_deref(), &time);
+    // Under a real clock settling stops for the frame by time, as on the frame; a manual
+    // clock (tests, tours) settles by count alone.
+    let timed = !matches!(time.source(), engine_core::time::TimeSource::Manual { .. });
+    job.job
+        .start("softbody solve", beside, move || solve_beside(work, timed));
+}
+
+/// Solve the bodies sent beside the frame, each its own task on the split pool when there
+/// are several; settling stops by time when `timed`.
+fn solve_beside(mut work: Vec<InFlight>, timed: bool) -> Vec<InFlight> {
+    let settled = AtomicU32::new(0);
+    let one = |w: &mut InFlight, settled: &AtomicU32| {
+        let _span = tracing::info_span!(
+            "softbody: solve beside the frame",
+            kind = ?w.kind,
+            particles = w.particles
+        )
+        .entered();
+        w.solved = Some(solve(&mut w.sim, &w.prep, timed.then_some(settled)));
+    };
+    match engine_core::tasks::split_pool() {
+        Some(pool) if work.len() > 1 && pool.thread_num() > 1 => {
+            let (one, settled) = (&one, &settled);
+            pool.scope(|scope| {
+                for w in work.iter_mut() {
+                    scope.spawn(async move { one(w, settled) });
+                }
+            });
+        }
+        _ => work.iter_mut().for_each(|w| one(w, &settled)),
+    }
+    work
+}
+
+/// `FixedPreUpdate`, the start of the fixed step, before anything moves the bodies: take the
+/// solves [`kick_heavy_bodies`] started at the end of the last one and finish those bodies'
+/// steps (sleep, tearing and fire, planks, what they send the world, which goes out this step).
+/// A body written since it left (cut, grabbed, rebuilt, moved by a world shift) keeps that
+/// and loses the step.
+pub fn join_heavy_bodies(
+    mut job: ResMut<FrameJob>,
+    mut bodies: Query<&mut SoftBodySim>,
+    colliders: Res<ColliderWorld>,
+    env: Env,
+) {
+    let job = &mut *job;
+    (job.busy, job.slowest, job.wait, job.dropped, job.solved) = (0.0, None, 0.0, 0, 0);
+    let waited = Instant::now();
+    let Some(done) = job.job.take() else {
+        return;
+    };
+    job.wait = waited.elapsed().as_secs_f64() * 1000.0;
+    for f in done {
+        let (Ok(mut b), Some(solved)) = (bodies.get_mut(f.entity), f.solved) else {
+            continue;
+        };
+        if b.last_changed() != job.tick {
+            job.dropped += 1;
+            continue;
+        }
+        let ms = f64::from(f.prep.prep_ms + solved.solve_ms);
+        job.busy += ms;
+        if job.slowest.is_none_or(|(_, s)| ms > s) {
+            job.slowest = Some((f.entity, ms));
+        }
+        job.solved += 1;
+        let b = &mut *b;
+        b.sim = f.sim;
+        finish(b, f.prep, solved, &colliders, &env);
+    }
 }
 
 /// Step `bodies`, longest first, each its own task (the pool takes them in order), so the
@@ -1360,9 +1561,6 @@ fn step_all<'b>(
     // the step 7-10 ms (VM) that way. With one costly body or none there is nothing to
     // spread, so no scope at all.
     // (A big body that stepped last time counts as costly too: it may have just woken.)
-    let costly = |b: &SoftBodySim| {
-        b.step_ms >= POOL_BODY_MS || (!b.frozen && !b.asleep() && b.particle_count() >= 256)
-    };
     order.sort_by(|(_, a), (_, b)| {
         costly(b)
             .cmp(&costly(a))
@@ -1396,6 +1594,12 @@ fn step_all<'b>(
 /// A body whose last step took this long (ms) or more steps on the pool ([`step_all`]).
 const POOL_BODY_MS: f32 = 0.5;
 
+/// Whether a body is worth a thread of its own: its last step took real work, or it is big
+/// and awake (one that stepped last time may have just woken).
+fn costly(b: &SoftBodySim) -> bool {
+    b.step_ms >= POOL_BODY_MS || (!b.frozen && !b.asleep() && b.particle_count() >= 256)
+}
+
 /// Step the soft bodies that ride the physics step (in parallel), after it, and write the
 /// diagnostics of all of them.
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
@@ -1410,10 +1614,11 @@ pub fn step_bodies(
     scales: Query<&'static LocalTimeScale>,
     mut bodies: Query<(Entity, &mut SoftBodySim)>,
     names: Query<&Name>,
-    (diagnostics, mut slowest_body, beside): (
+    (diagnostics, mut slowest_body, beside, frame_job): (
         Res<Metrics>,
         ResMut<SlowestBody>,
         Res<BesidePhysics>,
+        Res<FrameJob>,
     ),
     range: Option<Res<SimulationRange>>,
 ) {
@@ -1444,14 +1649,20 @@ pub fn step_bodies(
     let start = Instant::now();
     let took = step_all(bodies.iter_mut().filter(|(_, b)| !b.overlaps), &ctx);
     // How much work the step was against how long it took (their ratio is how many threads
-    // it kept busy), and the body that held it up longest, beside the physics step or after.
-    let wall = start.elapsed().as_secs_f64() * 1000.0 + beside.wall;
-    let busy: f64 = took.iter().map(|(_, ms)| ms).sum::<f64>() + beside.busy;
+    // it kept busy), and the body that held it up longest, beside the physics step or after,
+    // or beside the frame (whose work is off the frame but for waiting on it).
+    let wall = start.elapsed().as_secs_f64() * 1000.0 + beside.wall + frame_job.wait;
+    let busy: f64 = took.iter().map(|(_, ms)| ms).sum::<f64>() + beside.busy + frame_job.busy;
     let slowest = took
         .iter()
         .copied()
         .chain(beside.slowest)
+        .chain(frame_job.slowest)
         .max_by(|a, b| a.1.total_cmp(&b.1));
+    diagnostics.set("softbody.beside_frame_ms", frame_job.busy);
+    diagnostics.set("softbody.beside_frame_wait_ms", frame_job.wait);
+    diagnostics.set("softbody.beside_frame_bodies", frame_job.solved as f64);
+    diagnostics.set("softbody.beside_frame_dropped", frame_job.dropped as f64);
     diagnostics.set("softbody.busy_ms", busy);
     diagnostics.set("softbody.slowest_ms", slowest.map_or(0.0, |s| s.1));
     slowest_body.0 = slowest;
@@ -1591,6 +1802,45 @@ fn rests(
 }
 
 fn step_one(entity: Entity, body: &mut SoftBodySim, ctx: &StepContext) {
+    if let Some(prep) = prepare(entity, body, ctx) {
+        let solved = solve(&mut body.sim, &prep, ctx.settled_us);
+        finish(body, prep, solved, ctx.colliders, ctx.env);
+    }
+}
+
+/// What a body's step worked out on the frame before its solve: the solve's inputs and what
+/// [`finish`] needs back.
+struct Prepared {
+    /// Time it took to get here, ms.
+    prep_ms: f32,
+    dt: f32,
+    origin: DVec3,
+    /// Colliders near it, in its coordinates.
+    local: Vec<LocalCollider>,
+    /// Its first settling step stands in for the frame's own (far off).
+    swap: bool,
+    /// Settling steps it must take, and may.
+    least: u32,
+    most: u32,
+    loaded: bool,
+    rain: f32,
+    wind_here: Vec3,
+    up: Vec3,
+}
+
+/// What a body's solve gave back for [`finish`].
+struct Solved {
+    /// What it pushed on colliders and pulled frames with in the frame's step.
+    impulses: Vec<ColliderImpulse>,
+    pulls: Vec<ColliderImpulse>,
+    /// Settling steps taken.
+    runs: u32,
+    solve_ms: f32,
+}
+
+/// Everything of a body's step before its solve: level of detail, rest and sleep, frames,
+/// the world around it and the colliders near it. `None` when it isn't solved this step.
+fn prepare(entity: Entity, body: &mut SoftBodySim, ctx: &StepContext) -> Option<Prepared> {
     let started = Instant::now();
     let b = body;
     b.out = StepOutput::default();
@@ -1613,7 +1863,7 @@ fn step_one(entity: Entity, body: &mut SoftBodySim, ctx: &StepContext) {
             ride(b, ctx);
             b.step_ms = started.elapsed().as_secs_f32() * 1000.0;
         }
-        return;
+        return None;
     }
     // Waking from rest, it comes along with whatever its pins were carried to meanwhile (a
     // hoist that kept cycling), as in a teleport, instead of being dragged there in a step.
@@ -1634,7 +1884,7 @@ fn step_one(entity: Entity, body: &mut SoftBodySim, ctx: &StepContext) {
         if !b.held.1 {
             b.step_ms = 0.0;
             b.sim.step_start.clone_from(&b.sim.pos);
-            return;
+            return None;
         }
     }
     // A far flag in the wind sways instead of being stepped: frozen it would read as broken,
@@ -1651,7 +1901,7 @@ fn step_one(entity: Entity, body: &mut SoftBodySim, ctx: &StepContext) {
             if sway::sway(b, wind, dt) {
                 (b.lod_every, b.lod_wait, b.lod_debt) = (1, 0, 0.0);
                 b.step_ms = started.elapsed().as_secs_f32() * 1000.0;
-                return;
+                return None;
             }
         } else {
             sway::learn(b, wind, dt);
@@ -1680,7 +1930,7 @@ fn step_one(entity: Entity, body: &mut SoftBodySim, ctx: &StepContext) {
     if b.steps > 0 && b.lod_wait + 1 < b.lod_every.min(every) {
         b.lod_debt += dt;
         b.lod_wait += 1;
-        return;
+        return None;
     }
     dt += b.lod_debt;
     // Entering a tier, each body starts its cycle at its own phase (from where it is, so the
@@ -1742,7 +1992,7 @@ fn step_one(entity: Entity, body: &mut SoftBodySim, ctx: &StepContext) {
         } else {
             b.step_ms = 0.0;
             b.sim.step_start.clone_from(&b.sim.pos);
-            return;
+            return None;
         }
     }
 
@@ -1877,7 +2127,6 @@ fn step_one(entity: Entity, body: &mut SoftBodySim, ctx: &StepContext) {
     // built far away is settled when it's reached; near, a body too big for the budget
     // settles only as it steps (settling there shows as a fast-forward).
     let loaded = !b.sim.loads.is_empty();
-    let solving = Instant::now();
     let work = b.sim.len() * b.sim.substeps_for(1.0 / 60.0) as usize;
     let fits = (PREWARM_WORK / work.max(1)) as u32;
     let least = u32::from(dist > ctx.config.lod_distance);
@@ -1886,38 +2135,92 @@ fn step_one(entity: Entity, body: &mut SoftBodySim, ctx: &StepContext) {
     // with the others (the PC's slowest body took 16.75 ms a frame on the climb, round 22).
     // It settles in as many frames; that far off, the time it skips doesn't show.
     let swap = least > 0 && b.pending_prewarm > 0;
+    let most = fits.max(least).min(b.pending_prewarm);
+    Some(Prepared {
+        prep_ms: started.elapsed().as_secs_f32() * 1000.0,
+        dt,
+        origin,
+        local,
+        swap,
+        least,
+        most,
+        loaded,
+        rain,
+        wind_here,
+        up,
+    })
+}
+
+/// A body's solve: its step and settling steps. Touches only its `Sim`, so it can run beside
+/// the frame ([`kick_heavy_bodies`]).
+fn solve(sim: &mut Sim, prep: &Prepared, settled_us: Option<&AtomicU32>) -> Solved {
+    let solving = Instant::now();
+    let local = &prep.local;
     // What it pushed on colliders and pulled frames with in the frame's step (the settling
     // step's, when it stands in).
-    b.sim.step(if swap { 1.0 / 60.0 } else { dt }, &local);
-    let impulses = b.sim.collider_impulses.clone();
-    let pulls = b.sim.frame_impulses.clone();
-    let most = fits.max(least).min(b.pending_prewarm);
-    let mut runs = u32::from(swap);
+    sim.step(if prep.swap { 1.0 / 60.0 } else { prep.dt }, local);
+    let impulses = sim.collider_impulses.clone();
+    let pulls = sim.frame_impulses.clone();
+    let mut runs = u32::from(prep.swap);
     let settling = Instant::now();
-    while runs < most {
+    while runs < prep.most {
         // In play, past the steps it must take, stop when this body or this step's bodies
         // have settled long enough for the frame; the rest waits for the next.
-        if runs >= least
-            && let Some(spent) = ctx.settled_us
+        if runs >= prep.least
+            && let Some(spent) = settled_us
             && (settling.elapsed().as_secs_f32() * 1000.0 >= PREWARM_BODY_MS
                 || spent.load(Ordering::Relaxed) >= PREWARM_STEP_US)
         {
             break;
         }
         let one = Instant::now();
-        b.sim.step(1.0 / 60.0, &local);
-        if let Some(spent) = ctx.settled_us {
+        sim.step(1.0 / 60.0, local);
+        if let Some(spent) = settled_us {
             let us = u32::try_from(one.elapsed().as_micros()).unwrap_or(u32::MAX);
             spent.fetch_add(us, Ordering::Relaxed);
         }
         runs += 1;
     }
-    b.pending_prewarm -= runs;
-    b.parts.solve_ms = solving.elapsed().as_secs_f32() * 1000.0;
-    b.parts.prewarm_steps = runs;
     if runs > 0 {
-        b.sim.step_start.clone_from(&b.sim.pos);
+        sim.step_start.clone_from(&sim.pos);
     }
+    Solved {
+        impulses,
+        pulls,
+        runs,
+        solve_ms: solving.elapsed().as_secs_f32() * 1000.0,
+    }
+}
+
+/// Everything of a body's step after its solve: sleep, tearing and fire, bridge planks and
+/// what it sends the world. `colliders` are the ones it was prepared with.
+fn finish(
+    b: &mut SoftBodySim,
+    prep: Prepared,
+    solved: Solved,
+    colliders: &ColliderWorld,
+    env: &Env,
+) {
+    let finishing = Instant::now();
+    let Prepared {
+        dt,
+        origin,
+        local,
+        loaded,
+        rain,
+        wind_here,
+        up,
+        ..
+    } = prep;
+    let Solved {
+        impulses,
+        pulls,
+        runs,
+        solve_ms,
+    } = solved;
+    b.pending_prewarm -= runs;
+    b.parts.solve_ms = solve_ms;
+    b.parts.prewarm_steps = runs;
     b.steps += 1;
     // Still enough to sleep?
     let fastest = b
@@ -1941,7 +2244,12 @@ fn step_one(entity: Entity, body: &mut SoftBodySim, ctx: &StepContext) {
         // past the jellies 4 m off kept them stepping for good.
         && local
             .iter()
-            .all(|c| !moves_near(b, &ctx.colliders.list[c.id as usize]));
+            .all(|c| {
+                colliders
+                    .list
+                    .get(c.id as usize)
+                    .is_none_or(|w| !moves_near(b, w))
+            });
     b.calm = if quiet { b.calm + 1 } else { 0 };
     if b.asleep() {
         (b.sleep_wind, b.sleep_topology) = (wind_here, b.topology_version);
@@ -1996,7 +2304,7 @@ fn step_one(entity: Entity, body: &mut SoftBodySim, ctx: &StepContext) {
         if imp.linear == Vec3::ZERO {
             continue;
         }
-        let Some(c) = ctx.colliders.list.get(local[k].id as usize) else {
+        let Some(c) = colliders.list.get(local[k].id as usize) else {
             continue;
         };
         if let Some(target) = c.body {
@@ -2020,7 +2328,7 @@ fn step_one(entity: Entity, body: &mut SoftBodySim, ctx: &StepContext) {
     b.out.water = surface_pushes(&b.sim, origin);
     b.update_bounds();
     b.scratch_colliders = local;
-    b.step_ms = started.elapsed().as_secs_f32() * 1000.0;
+    b.step_ms = prep.prep_ms + solve_ms + finishing.elapsed().as_secs_f32() * 1000.0;
 }
 
 /// Patches of the water's surface a body's pushes are gathered into, m across.

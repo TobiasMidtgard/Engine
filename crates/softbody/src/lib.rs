@@ -55,12 +55,13 @@ impl Plugin for SoftBodyPlugin {
             .init_resource::<systems::GroomBuilds>()
             .init_resource::<systems::SlowestBody>()
             .init_resource::<systems::BesidePhysics>()
+            .init_resource::<systems::FrameJob>()
             .init_resource::<systems::SurfaceMove>()
             .init_resource::<systems::SurfaceSeen>()
             .init_resource::<systems::FrameShift>()
             .init_resource::<gpu_cloth::GpuClothShift>()
             .register_resource::<SoftBodyConfig>(
-                "Soft-body quality: enabled, lod_distance and freeze_distance (m from the focus), quality (substep multiplier).",
+                "Soft-body quality: enabled, lod_distance and freeze_distance (m from the focus), quality (substep multiplier), beside_frame (heavy bodies solved beside the frame, a step behind; null = in play only).",
             )
             .register_component::<Cloth>(
                 "Simulated cloth (flag, curtain, cape, sail): size (m), resolution, anchor (uv at the entity), panel (four corners [x, y] in local XY: top-left, top-right, bottom-right, bottom-left; m), camber (sewn-in belly, fraction of width), pins (LeftEdge, TopEdge{every}, TopCorners, Bones{rows, bones}, Points, Edges{left, top, right, bottom}), mass_per_m2 (kg/m²), stretch/shear/bend compliance (m/N), tear_ratio, pierceable, flammable, aero_drag, aero_friction, aero_lift (sails ≈ 1), sim, material. On an entity carried by a dynamic rigid body, the pins pull on that body (a sail drives its boat).",
@@ -113,7 +114,11 @@ impl Plugin for SoftBodyPlugin {
                 ),
             )
             .add_systems(PreUpdate, systems::follow_scalability)
-            .add_systems(FixedPreUpdate, systems::follow_surface_anchors)
+            .add_systems(
+                FixedPreUpdate,
+                (systems::join_heavy_bodies, systems::follow_surface_anchors).chain(),
+            )
+            .add_systems(FixedPostUpdate, systems::kick_heavy_bodies)
             .add_systems(Update, (grab::grab_and_release, grab::slip).chain())
             .add_systems(
                 PostUpdate,

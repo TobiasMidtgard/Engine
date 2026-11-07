@@ -234,6 +234,12 @@ pub struct SoftBodyConfig {
     pub freeze_distance: f32,
     /// Multiplies every body's substeps (0.5 = faster and softer, 2 = stiffer).
     pub quality: f32,
+    /// Whether heavy bodies whose frames don't ride the physics step (curtains, flags, hair
+    /// on a still skeleton) are solved beside the frame, from the end of one fixed step to the
+    /// start of the next, a step behind for drawing. `None` follows the game: beside it in
+    /// play, at once in tests and headless runs (`EngineConfig::off_frame` and a real
+    /// clock). `ENGINE_SOFTBODY_BESIDE=on|off` overrides it.
+    pub beside_frame: Option<bool>,
 }
 
 impl Default for SoftBodyConfig {
@@ -243,6 +249,7 @@ impl Default for SoftBodyConfig {
             lod_distance: 30.0,
             freeze_distance: 400.0,
             quality: 1.0,
+            beside_frame: None,
         }
     }
 }

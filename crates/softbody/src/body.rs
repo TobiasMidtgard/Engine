@@ -151,6 +151,9 @@ pub struct SoftBodySim {
     /// Steps beside the physics step (none of its frames ride it), from `snapshot`: where
     /// its frames were before it (see `systems::snapshot_frames`).
     pub(crate) overlaps: bool,
+    /// Of those, solved beside the frame, from the end of this fixed step to the start of the
+    /// next (`systems::kick_heavy_bodies`): readers see the last step's sim meanwhile.
+    pub(crate) kicked: bool,
     pub(crate) snapshot: Vec<Option<(DVec3, Quat)>>,
     /// Time its last step spent asking the world (ground, water, wind, colliders near it), ms.
     pub env_ms: f32,
@@ -256,6 +259,7 @@ impl SoftBodySim {
             parts: StepParts::default(),
             far: None,
             overlaps: false,
+            kicked: false,
             snapshot: Vec::new(),
             env_ms: 0.0,
             sleep_wind: Vec3::ZERO,
