@@ -128,6 +128,10 @@ pub struct CellInfo {
     pub dip: f32,
     /// Where small unevenness the terrain doesn't model collects water (hard ground), 0..1.
     pub spots: f32,
+    /// How fully a hollow here fills, 0.5..1 (ragged shores, see `hollow_dip`): a noise of
+    /// the cell's place, worked out with its other facts off the frame rather than for every
+    /// hollow ring a lookup touches (a few thousand noise samples a step on the frame).
+    pub shore: f32,
     /// Raycast done.
     pub known: bool,
 }
@@ -140,6 +144,7 @@ impl Default for CellInfo {
             absorbency: 0.5,
             dip: 0.0,
             spots: 0.0,
+            shore: 1.0,
             known: false,
         }
     }
@@ -551,7 +556,7 @@ pub fn refresh_cache(
 ) {
     let look = LookUp::new(ground, physics, materials, share, sim);
     let looked = pick(cache, rays);
-    look_at(cache, &look, &looked, sim);
+    look_at(cache, &look, &looked);
 }
 
 /// The cells to look at next, up to `rays` (see [`refresh_cache`]), in index order.
@@ -588,7 +593,7 @@ fn pick(cache: &mut GroundCache, rays: u32) -> Vec<usize> {
 /// recompute the dips their new heights touch. Done one cell at a time, a ground update
 /// cost a quarter second of the frame while the player moved, mostly in recomputing the
 /// same neighbors' dips dozens of times over.
-fn look_at(cache: &mut GroundCache, look: &LookUp, indices: &[usize], sim: &WeatherSim) {
+fn look_at(cache: &mut GroundCache, look: &LookUp, indices: &[usize]) {
     let mut found: Vec<(usize, CellInfo)> =
         indices.iter().map(|&i| (i, CellInfo::default())).collect();
     let at = Layout::of(&cache.cells);
@@ -597,23 +602,33 @@ fn look_at(cache: &mut GroundCache, look: &LookUp, indices: &[usize], sim: &Weat
             *info = look.facts(at, *index);
         }
     });
-    write_facts(cache, &found, sim);
+    write_facts(cache, &found);
 }
 
 /// Store looked-up facts and recompute the dips their new heights touch.
-fn write_facts(cache: &mut GroundCache, found: &[(usize, CellInfo)], sim: &WeatherSim) {
+fn write_facts(cache: &mut GroundCache, found: &[(usize, CellInfo)]) {
     let mut moved = false;
+    let mut changed = Vec::with_capacity(found.len());
     for &(index, info) in found {
         let old = &cache.cells.data[index];
-        // The slow sweep looks at known cells again and nearly always finds the same ground.
+        // The slow sweep looks at known cells again and nearly always finds the same ground:
+        // such a cell keeps its dip, and no hollow ring around it needs weighing again.
+        let same = old.known
+            && CellInfo {
+                dip: old.dip,
+                ..info
+            } == *old;
+        if same {
+            continue;
+        }
         moved |= old.known != info.known || old.height.to_bits() != info.height.to_bits();
         cache.cells.data[index] = info;
+        changed.push(index);
     }
     if moved {
         cache.heights_changed();
     }
-    let indices: Vec<usize> = found.iter().map(|&(index, _)| index).collect();
-    update_dips(cache, &indices, sim);
+    update_dips(cache, &changed);
 }
 
 /// Looked-up cells: index and facts.
@@ -652,7 +667,7 @@ fn spawn_lookups(cache: &mut GroundCache, look: LookUp, indices: Vec<usize>) {
 
 /// Take the finished lookups in, unless the grid moved since they started (their cells
 /// stay unknown and are picked again).
-fn finish_lookups(cache: &mut GroundCache, sim: &WeatherSim) {
+fn finish_lookups(cache: &mut GroundCache) {
     let Some(job) = &cache.job else { return };
     let Some(found) = job.slot.lock().ok().and_then(|mut s| s.take()) else {
         return;
@@ -660,7 +675,7 @@ fn finish_lookups(cache: &mut GroundCache, sim: &WeatherSim) {
     let epoch = job.epoch;
     cache.job = None;
     if epoch == cache.epoch {
-        write_facts(cache, &found, sim);
+        write_facts(cache, &found);
     }
 }
 
@@ -707,7 +722,7 @@ pub(crate) fn prepare(world: &mut World, radius_m: f64) {
         }
         // Tens of thousands of cells after a teleport: look at them on all cores.
         let indices: Vec<usize> = found.iter().map(|&(index, _)| index).collect();
-        look_at(cache, &look, &indices, sim);
+        look_at(cache, &look, &indices);
         stamp(
             cache,
             shelters.iter().map(|(p, s)| (*p, s)),
@@ -811,6 +826,7 @@ impl LookUp {
             absorbency,
             dip: spots,
             spots,
+            shore: shore_at(self.frame.to_pattern(xz), self.seed),
             known: true,
         }
     }
@@ -818,7 +834,7 @@ impl LookUp {
 
 /// Recompute the dips of the known cells whose hollow rings reach any of cells `changed`
 /// (their heights are new), each once, on all cores.
-fn update_dips(cache: &mut GroundCache, changed: &[usize], sim: &WeatherSim) {
+fn update_dips(cache: &mut GroundCache, changed: &[usize]) {
     let (axis, diagonal) = hollow_rings(cache.cells.cell);
     let reach = axis.max(diagonal);
     let cells = &cache.cells;
@@ -842,12 +858,18 @@ fn update_dips(cache: &mut GroundCache, changed: &[usize], sim: &WeatherSim) {
     engine_core::tasks::par_chunks_mut(&mut targets, 256, |_, chunk| {
         for (i, dip) in chunk {
             let c = IVec2::new((*i as u32 % w) as i32, (*i as u32 / w) as i32);
-            *dip = hollow_dip(cells, c, sim);
+            *dip = hollow_dip(cells, c);
         }
     });
     for (i, dip) in targets {
         cache.cells.data[i].dip = dip;
     }
+}
+
+/// Ragged shores: the water doesn't fill a hollow's rim evenly ([`CellInfo::shore`] at
+/// pattern X/Z `pattern`).
+fn shore_at(pattern: DVec2, seed: u64) -> f32 {
+    0.75 + 0.25 * perlin2(pattern.x / 1.3, pattern.y / 1.3, seed ^ 5)
 }
 
 /// Cell offsets of the two rings that find hollows: along the axes and along the diagonals.
@@ -862,7 +884,7 @@ fn hollow_rings(cell: f32) -> (i32, i32) {
 /// Where water collects in cell `c`: its spots, or a real hollow, where the ground lies lower
 /// than the ground around it (ruts, dips in a meadow, a dry stream bed). A steady slope
 /// cancels out; ground not looked at yet counts as level with the cell.
-fn hollow_dip(cells: &Grid2<CellInfo>, c: IVec2, sim: &WeatherSim) -> f32 {
+fn hollow_dip(cells: &Grid2<CellInfo>, c: IVec2) -> f32 {
     let Some(info) = cells.index(c).map(|i| cells.data[i]) else {
         return 0.0;
     };
@@ -880,10 +902,7 @@ fn hollow_dip(cells: &Grid2<CellInfo>, c: IVec2, sim: &WeatherSim) -> f32 {
     // Water doesn't stand on a hillside, even in a gully.
     let slope = (at(1, 0) - at(-1, 0)).hypot(at(0, 1) - at(0, -1)) / (2.0 * cells.cell);
     let level = 1.0 - smoothstep(0.25, 0.54, slope);
-    // Ragged shores: the water doesn't fill a hollow's rim evenly.
-    let pattern = sim.frame.to_pattern(cells.cell_center(c));
-    let shore = 0.75 + 0.25 * perlin2(pattern.x / 1.3, pattern.y / 1.3, sim.seed ^ 5);
-    let hollow = smoothstep(HOLLOW_M[0], HOLLOW_M[1], along.max(across)) * shore * level;
+    let hollow = smoothstep(HOLLOW_M[0], HOLLOW_M[1], along.max(across)) * info.shore * level;
     info.spots.max(hollow.min(1.0))
 }
 
@@ -925,7 +944,7 @@ pub(crate) fn ground_system(
     drop(part);
     let part = tracing::info_span!("weather", name = "ground: lookups").entered();
     // Roof raycasts run off the frame, a batch at a time.
-    finish_lookups(&mut cache, &sim);
+    finish_lookups(&mut cache);
     if cache.job.is_none() {
         let rays = cache.ray_credit.floor() as u32;
         cache.ray_credit -= rays as f32;
@@ -1241,6 +1260,39 @@ mod tests {
                 surface: Ground::default().sample(p)?.surface,
             })
         }
+    }
+
+    #[test]
+    fn ground_looked_at_a_batch_at_a_time_ends_as_looked_at_once() {
+        engine_core::tasks::init_task_pools();
+        let grid: Grid2<engine_world::SurfaceCell> =
+            Grid2::centered(DVec2::ZERO, 64.0, 1.0, Default::default());
+        let ground = Ground(std::sync::Arc::new(Meadow));
+        let look = |cache: &mut GroundCache, rays: u32| {
+            refresh_cache(
+                cache,
+                rays,
+                &ground,
+                None,
+                &SurfaceMaterials::default(),
+                0.3,
+                &WeatherSim::default(),
+            )
+        };
+        let mut once = GroundCache::default();
+        once.align(&grid);
+        look(&mut once, 100_000);
+        // As the game does: a batch a step, then the slow sweep over known cells (which finds
+        // the same ground and leaves those cells and their dips be).
+        let mut batches = GroundCache::default();
+        batches.align(&grid);
+        for _ in 0..200 {
+            look(&mut batches, 97);
+        }
+        assert!(batches.complete);
+        assert_eq!(once.cells.data, batches.cells.data);
+        let hollows = once.cells.data.iter().filter(|c| c.dip > c.spots).count();
+        assert!(hollows > 10, "{hollows} cells in the bowl hold water");
     }
 
     #[test]
