@@ -499,6 +499,9 @@ pub struct StillDepths {
     pub off_frame: bool,
     /// The cells being read on a worker, for the grid (`at`) they were asked for.
     job: Option<(StillKey, Task<StillRead>)>,
+    /// Counts every change to what [`StillDepths::at_cell`] answers, so a reader can skip
+    /// remaking what it built from the cells when nothing landed since.
+    changes: u64,
 }
 
 /// (grid corner, cells, cell size, `SimBook::layout`): what a [`StillDepths`] read is for.
@@ -583,6 +586,7 @@ impl StillDepths {
             self.at = Some(at);
             // (A read under way is for the old grid: dropped, it stops.)
             self.job = None;
+            self.changes += 1;
         }
         if self.off_frame
             && let Some((key, task)) = &mut self.job
@@ -599,10 +603,14 @@ impl StillDepths {
                         self.unread -= 1;
                     }
                 }
+                self.changes += 1;
             }
         }
         if self.unread == 0 {
-            self.prior.clear();
+            if !self.prior.is_empty() {
+                self.prior.clear();
+                self.changes += 1;
+            }
             return;
         }
         if (self.at == Some(at) && !self.prior.is_empty()) || self.off_frame {
@@ -659,6 +667,7 @@ impl StillDepths {
             self.depth[idx] = d;
             self.unread -= 1;
         }
+        self.changes += 1;
         if self.unread == 0 {
             self.prior.clear();
         }
@@ -685,6 +694,8 @@ impl StillDepths {
 /// start.
 pub struct CoarseStill {
     depths: StillDepths,
+    /// (`StillDepths::changes`, origin, cell) the field's coarse bed was last made from.
+    made_from: Option<(u64, DVec2, f32)>,
 }
 
 impl Default for CoarseStill {
@@ -694,6 +705,7 @@ impl Default for CoarseStill {
                 patient: true,
                 ..Default::default()
             },
+            made_from: None,
         }
     }
 }
@@ -728,6 +740,18 @@ impl CoarseStill {
         if self.depths.catching_up() && field.coarse.as_ref().is_some_and(|b| b.origin == origin) {
             return;
         }
+        // Nothing new read under the same cells: the bed made last time still holds (remaking
+        // and comparing it cost ~1 ms a step while a read was out on a worker, VM).
+        let key = (self.depths.changes, origin, cell);
+        if self.made_from == Some(key)
+            && field
+                .coarse
+                .as_ref()
+                .is_some_and(|b| b.origin == origin && b.cell == cell)
+        {
+            return;
+        }
+        self.made_from = Some(key);
         let (mut sum, mut count) = (0.0f64, 0usize);
         let mut absorb = vec![0.0; N * N];
         let mut depths = vec![0.0; N * N];
