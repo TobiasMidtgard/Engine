@@ -81,6 +81,9 @@ pub const RING_KNOCKS: u8 = 2;
 /// A thrown thing stops hitting under this speed, and after this long.
 pub const HURL_MIN_SPEED: f32 = 4.0;
 pub const HURL_SECS: f32 = 4.0;
+/// The share of its speed a thrown body keeps after striking a creature (the rest went into
+/// the blow).
+pub const STRUCK_KEEP: f32 = 0.3;
 /// Seconds a torn stone lies before it sinks away.
 pub const TORN_SECS: f32 = 14.0;
 /// Stone's colour for its dust.
@@ -1188,7 +1191,7 @@ pub fn fly_hurled(
         &mut Hurled,
         &mut Transform,
         &GlobalTransform,
-        Option<&Velocity>,
+        Option<&mut Velocity>,
         Option<&RigidBody>,
     )>,
     creatures: Query<
@@ -1213,7 +1216,7 @@ pub fn fly_hurled(
         return;
     }
     let _ = &factions;
-    for (e, mut h, mut tf, gt, vel, body) in &mut hurled {
+    for (e, mut h, mut tf, gt, mut vel, body) in &mut hurled {
         h.age += dt;
         let spell = h.cast.spell.clone();
         let mut landed: Option<(DVec3, Vec3)> = None;
@@ -1242,10 +1245,11 @@ pub fn fly_hurled(
             (at, fv)
         } else {
             let at = gt.translation() + (gt.rotation() * h.center).as_dvec3();
-            (at, vel.map_or(Vec3::ZERO, |v| v.linear))
+            (at, vel.as_ref().map_or(Vec3::ZERO, |v| v.linear))
         };
         let speed = v.length();
         let dir = v.normalize_or(Vec3::NEG_Z);
+        let mut speed_after = speed;
         // Creatures it passes take its blow, once each.
         if speed >= HURL_MIN_SPEED {
             for (c, cg, side, vit, rb) in &creatures {
@@ -1262,6 +1266,15 @@ pub fn fly_hurled(
                     continue;
                 }
                 h.hit.push(c);
+                // The blow takes most of its momentum, so a crate drops at the dummy it
+                // strikes instead of rebounding off it back up the hall.
+                if h.flung.is_none()
+                    && let Some(v) = vel.as_mut()
+                {
+                    v.linear *= STRUCK_KEEP;
+                    v.angular *= 0.5;
+                    speed_after = speed * STRUCK_KEEP;
+                }
                 let amount = blow(spell.payload.grip_damage * h.cast.scale, speed, h.mass);
                 let push = (dir * (h.mass * speed * 0.5).min(900.0)) + Vec3::Y * 40.0;
                 damage.write(DamageEvent {
@@ -1359,7 +1372,7 @@ pub fn fly_hurled(
         } else {
             h.slow = 0.0;
         }
-        h.last_speed = speed;
+        h.last_speed = speed_after;
         if h.age > HURL_SECS || h.slow > 0.3 || (h.flung.is_none() && body.is_none()) {
             if !h.burst {
                 hits.0.push(PendingHit {

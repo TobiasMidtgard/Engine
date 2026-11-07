@@ -2446,16 +2446,38 @@ fn a_grip_lifts_a_crate_to_the_hand_and_throws_it_at_a_dummy() {
     assert!(p.y > 1.0 && p.z < -1.0 && p.z > -3.5, "held at {p:?}");
     assert!(app.world.get::<kinesis::Gripped>(crate_e).is_some());
     // The time is up: it flies at the dummy and hits it by its weight and speed.
-    run(&mut app, 2.0);
-    let hit = app
-        .world
-        .resource::<Seen>()
-        .damage
-        .iter()
-        .find(|h| h.target == d && h.source == Some(me))
-        .cloned()
-        .expect("the crate hits the dummy");
+    let flat = |app: &App| {
+        let v = app
+            .world
+            .get::<engine_world::physics::Velocity>(crate_e)
+            .unwrap()
+            .linear;
+        Vec3::new(v.x, 0.0, v.z).length()
+    };
+    let mut t = 0.0;
+    let (hit, before) = loop {
+        let before = flat(&app);
+        run(&mut app, 0.05);
+        t += 0.05;
+        if let Some(h) = app
+            .world
+            .resource::<Seen>()
+            .damage
+            .iter()
+            .find(|h| h.target == d && h.source == Some(me))
+        {
+            break (h.clone(), before);
+        }
+        assert!(t < 2.0, "the crate never hit the dummy");
+    };
     assert!(hit.amount > 20.0 && hit.impulse.z < 0.0, "{hit:?}");
+    // The blow took most of its speed: it drops at the dummy rather than flying on.
+    let after = flat(&app);
+    assert!(
+        before > 20.0 && after < 0.5 * before,
+        "{before} m/s, then {after} m/s"
+    );
+    run(&mut app, 2.0);
     assert!(app.world.get::<kinesis::Gripped>(crate_e).is_none());
     assert_eq!(
         app.world.get::<RigidBody>(crate_e).unwrap().gravity_scale,
